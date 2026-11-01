@@ -13,6 +13,7 @@ import { approvalChoiceLabel, approvalOptionIsVisible } from "../../lib/approval
 import type { InteractiveApprovalOption } from "../../types";
 import ExternalPluginCallOutcome from "./ExternalPluginCallOutcome";
 import type { SubagentProgress } from "../../lib/chatSubagentActivity";
+import { ChatRunWait } from "../ChatRunWait";
 
 export interface TurnTimelineProps {
   steps: TurnStep[];
@@ -202,6 +203,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
   };
 
   const titleFor = (s: TurnStep): string => {
+    if (s.startupWait) return "";
     switch (s.kind) {
       case "tool": return activityTitles.get(s.id) || "";
       case "plan": {
@@ -342,8 +344,8 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                     {rel.type === "retry" ? t("turnLab.retryBadge") : t("turnLab.switchBadge")}
                   </span>
                 ) : null}
-                <button type="button" className={styles.head} onClick={expandable ? () => setOpen((prev) => { const n = new Set(prev); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); return n; }) : undefined} disabled={!expandable} aria-expanded={expandable ? isOpen : undefined}>
-                  {!actionTitle && !isTextStep ? <span
+                <button type="button" className={styles.head} data-startup={s.startupWait ? "1" : undefined} onClick={expandable ? () => setOpen((prev) => { const n = new Set(prev); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); return n; }) : undefined} disabled={!expandable} aria-expanded={expandable ? isOpen : undefined}>
+                  {!s.startupWait && !actionTitle && !isTextStep ? <span
                     className={styles.name}
                     data-mono={s.kind === "tool" && /^[\w.:-]+$/.test(kindLabel(s)) ? "1" : undefined}
                     title={s.kind === "tool" ? s.toolName : undefined}
@@ -352,13 +354,13 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                   </span> : null}
                   <span className={styles.title} data-action={actionTitle ? "1" : undefined}
                     data-progress={isTextStep ? "1" : undefined}
-                    title={actionTitle ? `${actionTitle} (${s.toolName})` : isTextStep ? s.text : undefined}>{titleFor(s)}</span>
+                    title={actionTitle ? `${actionTitle} (${s.toolName})` : isTextStep ? s.text : undefined}>{s.startupWait ? <ChatRunWait state={s.startupWait} /> : titleFor(s)}</span>
                   {s.kind === "tool" && s.status === "running" && s.updateCount ? (
                     <span className={styles.updates}>{t("turnLab.updates", { count: s.updateCount })}</span>
                   ) : null}
                   <span className={styles.dur}>{s.kind === "tool" ? (showDurations ? formatDuration(s.durationS) : "—") : ""}</span>
-                  <span className={styles.chip} data-st={s.kind === "prompt" && s.promptOutcome === "expired" ? "aborted" : s.status}
-                    data-external-plugin={s.kind === "tool" && s.toolName === "shoggoth_plugin_call" ? "1" : undefined}>{chipLabel(s)}</span>
+                  {!s.startupWait && <span className={styles.chip} data-st={s.kind === "prompt" && s.promptOutcome === "expired" ? "aborted" : s.status}
+                    data-external-plugin={s.kind === "tool" && s.toolName === "shoggoth_plugin_call" ? "1" : undefined}>{chipLabel(s)}</span>}
                   <span className={styles.chev} data-show={expandable ? "1" : undefined} data-open={isOpen ? "1" : undefined}><TrajChevron /></span>
                 </button>
                 {s.subagent ? <SubagentActivity key={s.subagent.key} progress={s.subagent} /> : null}

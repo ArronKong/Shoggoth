@@ -32,7 +32,7 @@ const {
 } = require(path.join(ROOT, "app", "agent-service", "client.js"));
 
 function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agent-lifecycle-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agent-lifecycle-")));
   const paths = resolveServicePaths({
     stateRoot: path.join(root, "state"),
     cacheRoot: path.join(root, "cache"),
@@ -265,7 +265,7 @@ async function testStoreIdentityUniqueness() {
 }
 
 async function testServiceResourceWiringAndRestart() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sagl-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sagl-")));
   fs.chmodSync(root, 0o700);
   const paths = resolveServicePaths({
     trustedRoot: root,

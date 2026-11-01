@@ -182,6 +182,52 @@ await TestRenderer.act(async () => renderer.root.findAllByType("button")[0].prop
 assert.deepEqual(structuredClone(legacyChoices), [{ value: "仅周一\n保留原始换行" }]);
 renderer.unmount();
 
+const customReplies = [];
+const openEntry = {
+  id: "open-choice", version: 1, requestId: "open-choice", runId: "run-open", kind: "user_input",
+  title: "需要补充信息", message: "你想吃什么？", approvalChoices: [], expiresAt: null,
+  fields: [{ id: "food", type: "choice_or_text", label: "餐品", description: "你想吃什么？",
+    required: true, secret: false, options: [{ value: "汉堡", label: "汉堡", description: "优惠餐品" },
+      { value: "炸鸡", label: "炸鸡", description: "两份" }] }],
+};
+let rejectOpen;
+const mountOpen = () => TestRenderer.act(() => { renderer = TestRenderer.create(React.createElement(ChatPromptCard, {
+  entry: openEntry, draftKey: "open-choice-draft", onRespond: (_entry, data) => {
+    customReplies.push(data); return new Promise((_resolve, reject) => { rejectOpen = reject; });
+  },
+})); });
+const openSubmit = () => renderer.root.findAllByType("button").find(button => visibleTextOf(button) === "chat.promptSubmit");
+mountOpen();
+assert.equal(openSubmit().props.disabled, true);
+assert.equal(visibleTextOf(renderer.toJSON()).split("你想吃什么？").length - 1, 1);
+TestRenderer.act(() => renderer.root.findByProps({ "aria-label": "汉堡" }).props.onChange());
+assert.equal(openSubmit().props.disabled, false);
+assert.equal(renderer.root.findByType("textarea").props.value, "");
+// Matching a suggestion while typing must not erase the field or select that radio.
+TestRenderer.act(() => renderer.root.findByType("textarea").props.onChange({ target: { value: "汉堡" } }));
+assert.equal(renderer.root.findByType("textarea").props.value, "汉堡");
+assert.equal(renderer.root.findByProps({ "aria-label": "汉堡" }).props.checked, false);
+TestRenderer.act(() => renderer.root.findByType("textarea").props.onChange({ target: { value: " \n " } }));
+assert.equal(openSubmit().props.disabled, true, "whitespace is not a custom answer");
+const customAnswer = "麦乐鸡 🍟\n请帮我查不辣的餐品";
+TestRenderer.act(() => renderer.root.findByType("textarea").props.onChange({ target: { value: customAnswer } }));
+renderer.unmount(); mountOpen();
+assert.equal(renderer.root.findByType("textarea").props.value, customAnswer, "custom drafts survive switching away and back");
+TestRenderer.act(() => { openSubmit().props.onClick(); openSubmit().props.onClick(); });
+assert.equal(customReplies.length, 1);
+assert.equal(renderer.root.findByType("textarea").props.disabled, true);
+await TestRenderer.act(async () => { rejectOpen(new Error("test retry")); });
+assert.equal(renderer.root.findByType("textarea").props.value, customAnswer);
+assert.equal(openSubmit().props.disabled, false);
+assert.deepEqual(structuredClone(customReplies[0]), { action: "submit", answers: { food: customAnswer } });
+TestRenderer.act(() => renderer.root.findByProps({ "aria-label": "炸鸡" }).props.onChange());
+assert.equal(renderer.root.findByType("textarea").props.value, "");
+assert.equal(renderer.root.findByProps({ "aria-label": "炸鸡" }).props.checked, true);
+TestRenderer.act(() => openSubmit().props.onClick());
+await TestRenderer.act(async () => { rejectOpen(new Error("test retry")); });
+assert.deepEqual(structuredClone(customReplies[1]), { action: "submit", answers: { food: "炸鸡" } });
+renderer.unmount();
+
 const confirmationMessage = "删除后其配置可能无法恢复，确定要删除吗？";
 const confirmationEntry = {
   id: "confirmation", version: 1, requestId: "confirmation-request", runId: "confirmation-run",
@@ -193,11 +239,13 @@ const confirmationEntry = {
     ] }], approvalChoices: [], expiresAt: null,
 };
 for (const kind of ["user_input", "product_confirmation"]) {
+ for (const type of ["choice", "choice_or_text"]) {
   for (const index of [0, 1]) {
     const responses = [];
     TestRenderer.act(() => {
       renderer = TestRenderer.create(React.createElement(ChatPromptCard, {
-        entry: { ...confirmationEntry, kind }, onRespond: (_entry, data) => { responses.push(data); },
+        entry: { ...confirmationEntry, kind, fields: [{ ...confirmationEntry.fields[0], type }] },
+        onRespond: (_entry, data) => { responses.push(data); },
       }));
     });
     const buttons = renderer.root.findAllByType("button");
@@ -216,6 +264,7 @@ for (const kind of ["user_input", "product_confirmation"]) {
     } }], "each action must immediately submit its exact original value once, including Cancel");
     renderer.unmount();
   }
+ }
 }
 
 let rejectConfirmation;

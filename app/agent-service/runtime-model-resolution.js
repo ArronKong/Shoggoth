@@ -13,8 +13,8 @@ function validateModelResolution(result) {
 // Only an optional requested model is accepted beside operation metadata. No
 // prompt, model turn, tool or memory text is accepted by this control call.
 // The task must settle only after its private worker/thread has been released.
-async function runBoundedModelResolution(input, task, { timeoutMs = 30_000, cleanupMs = 5_000 } = {}) {
-  if (!input || Object.keys(input).some(key => !["operationId", "signal", "model"].includes(key))
+async function runBoundedModelResolution(input, task, { timeoutMs = input.timeoutMs ?? 90_000, cleanupMs = 5_000 } = {}) {
+  if (!input || Object.keys(input).some(key => !["operationId", "signal", "model", "modelProvider"].includes(key))
     || typeof input.operationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(input.operationId)
     || (input.model !== undefined && !ref(input.model))
     || (input.signal !== undefined && !(input.signal instanceof AbortSignal))) throw fail("MODEL_RESOLUTION_INVALID");

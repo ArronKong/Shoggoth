@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import type { CustomEndpoint, CustomEndpointInput, CustomEndpointsSnapshot } from "../../types";
-import { Field, Option, Select, TextInput, TextArea } from "../../components/Field";
+import { Field, Option, Select, TextInput } from "../../components/Field";
 import Modal from "../../components/Modal";
 import { useConfirm, useToast } from "../../components/ui";
 import { ProviderSecretField } from "../keys/ProviderCredentialFields";
@@ -29,6 +29,16 @@ function IconSearch() {
 
 const slugify = (raw: string) =>
   raw.trim().replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "").toLowerCase();
+
+const API_LABELS: Record<string, string> = {
+  chat_completions: "OpenAI Chat Completions", "openai-completions": "OpenAI Chat Completions",
+  codex_responses: "OpenAI Responses API", "openai-responses": "OpenAI Responses API",
+  anthropic_messages: "Anthropic Messages", "anthropic-messages": "Anthropic Messages",
+  "openai-chatgpt-responses": "ChatGPT Responses", "google-generative-ai": "Google Gemini API",
+  "google-vertex": "Google Vertex AI", "github-copilot": "GitHub Copilot",
+  "bedrock-converse-stream": "Amazon Bedrock Converse", ollama: "Ollama",
+  "azure-openai-responses": "Azure OpenAI Responses",
+};
 
 function fetchableUrl(raw: string): boolean {
   try {
@@ -87,12 +97,6 @@ export default function EndpointModal({
   const [baseUrl, setBaseUrl] = useState(endpoint?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
   const [baseHash] = useState(form?.configRevision);
-  const [advanced, setAdvanced] = useState(endpoint?.advanced && Object.keys(endpoint.advanced).length ? JSON.stringify(endpoint.advanced, null, 2) : "");
-  const advancedDraft = useMemo(() => {
-    try { const value = advanced.trim() ? JSON.parse(advanced) : undefined;
-      return { valid: value === undefined || !!value && typeof value === "object" && !Array.isArray(value), value }; }
-    catch { return { valid: false, value: undefined }; }
-  }, [advanced]);
   const [keyEditing, setKeyEditing] = useState(false);
   const keyBeforeEdit = useRef("");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
@@ -144,10 +148,9 @@ export default function EndpointModal({
     if (form?.configurationDraft) {
       input.credentialScope = "provider";
       input.baseHash = baseHash;
-      if (advancedDraft.value) input.advanced = advancedDraft.value;
     }
-    // 仅在用户修改协议后提交 api，否则由 controller/后端保留原值。
-    if (api && (apiChanged || !editing)) input.api = api;
+    // An unchanged edit preserves the saved mode; Hermes uses an explicit empty mode for auto-detect.
+    if (apiChanged || api && !editing) input.api = api;
     return input;
   };
 
@@ -165,6 +168,7 @@ export default function EndpointModal({
       setFetchNote(null);
       try {
         const request = inputForRequest();
+        if (apiOptions.length > 0) request.api = api;
         request.name = request.name || "endpoint";
         request.model = "";
         const result = await controller.validate(request, abort.signal);
@@ -283,7 +287,6 @@ export default function EndpointModal({
   const canSave = Boolean(
     !(formalOperations && recoveryLocked) && !pendingOriginal && !saving
     && !clearing
-    && (!form?.configurationDraft || advancedDraft.valid)
     && (recoveryLocked
       ? canRetry
       : endpointName && !providerIdInvalid && baseUrl.trim() && (selected.length > 0 || form?.allowEmptyModels === true)),
@@ -439,9 +442,15 @@ export default function EndpointModal({
   };
 
   const references = mutationOutcome ? outcomeReferences(mutationOutcome) : [];
+  const apiLabel = (value: string) => value
+    ? Object.hasOwn(API_LABELS, value) ? API_LABELS[value] : value
+    : t("models.settings.endpoints.apiAuto");
+  const protocolChoices = apiOptions.includes(api) ? apiOptions : [api, ...apiOptions];
   const apiProtocolField = apiOptions.length > 0 && (
     <Field label={t("models.settings.endpoints.apiProtocol")}>
-      <Select
+      {apiOptions.length === 1 ? <p className={styles.fixedProtocol} role="note">
+        {t("models.settings.endpoints.apiFixed", { protocol: apiLabel(apiOptions[0]) })}
+      </p> : <Select
         value={api}
         disabled={recoveryLocked}
         onChange={(value) => {
@@ -449,35 +458,40 @@ export default function EndpointModal({
           setApiChanged(true);
         }}
       >
-        {apiOptions.map((option) => <Option key={option} value={option}>{option}</Option>)}
-      </Select>
+        {protocolChoices.map((option) => <Option key={option} value={option}>{apiLabel(option)}</Option>)}
+      </Select>}
     </Field>
   );
+
+  const requestClose = () => {
+    mutationEpoch.current += 1;
+    controller.release?.(saveSession.current);
+    controller.release?.(clearSession);
+    setApiKey("");
+    setRevealedKey(null);
+    onClose();
+  };
 
   return (
     <Modal
       open={open}
       title={editing ? t("models.settings.endpoints.formEdit") : t("models.settings.endpoints.formAdd")}
-      onClose={() => {
-        mutationEpoch.current += 1;
-        controller.release?.(saveSession.current);
-        controller.release?.(clearSession);
-        setApiKey("");
-        setRevealedKey(null);
-        onClose();
-      }}
+      onClose={requestClose}
       onOpenChangeComplete={onOpenChangeComplete}
       width={720}
       dismissible={!saving && !clearing}
-      footer={
-        <button className="ui-cbtn ui-cbtn--gold" disabled={!canSave} onClick={() => void doSave()}>
+      footer={<>
+        <button type="button" className="btn-secondary" disabled={saving || clearing} onClick={requestClose}>
+          {t("common.cancel")}
+        </button>
+        <button type="button" className="btn-primary" disabled={!canSave} onClick={() => void doSave()}>
           {saving
             ? t("common.saving")
             : recoveryLocked
               ? t("models.settings.endpoints.retryMutation")
               : t("common.save")}
         </button>
-      }
+      </>}
     >
       <div className={styles.modalGrid}>
         {!nameIsProviderId && (
@@ -523,11 +537,6 @@ export default function EndpointModal({
             onChange={(event) => setBaseUrl(event.target.value)}
           />
         </Field>
-        {form?.configurationDraft && <Field label={t("models.advancedProviderConfig")}
-          hint={t("models.advancedProviderConfigHint")} error={advancedDraft.valid ? undefined : t("models.validationAdvancedJson")}>
-          <TextArea value={advanced} rows={4} disabled={recoveryLocked || saving || clearing}
-            aria-label={t("models.advancedProviderConfig")} onChange={event => setAdvanced(event.target.value)} />
-        </Field>}
         <Field label={t("models.settings.endpoints.apiKey")}>
           <ProviderSecretField
             secret={{
@@ -700,7 +709,7 @@ export default function EndpointModal({
               if (event.key === "Enter") addManual();
             }}
           />
-          <button className="ui-cbtn" disabled={recoveryLocked || !manual.trim()} onClick={addManual}>
+          <button type="button" className="btn-secondary btn-md" disabled={recoveryLocked || !manual.trim()} onClick={addManual}>
             {t("models.settings.endpoints.manualAdd")}
           </button>
         </div>

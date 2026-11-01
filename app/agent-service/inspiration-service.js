@@ -43,6 +43,11 @@ class InspirationService {
       // Domain admission needs text even for an attachment-only chat turn.
       return execution.instruction || (execution.turnAttachments?.length ? "Please examine the attached files." : "");
     }
+    if (this.localAttachmentProjection) {
+      // The Coordinator supplies safe copies at the actual turn boundary.
+      // Domain preparation must not expose original media-library paths.
+      return inspirationPrompt(execution, (execution.attachments || []).map(() => null));
+    }
     if (materialize && execution.sessionKey && !execution.external) {
       return inspirationPrompt(execution, prepareChatAttachments(this.store.media,
         execution.attachments || [], execution.sessionKey).map(item => item.path));
@@ -62,6 +67,7 @@ class InspirationService {
     this.externalExecutor = options.externalExecutor || null;
     this.readinessClient = options.readinessClient || this.externalExecutor?.client || null;
     this.paths = options.paths;
+    this.localAttachmentProjection = options.localAttachmentProjection === true;
     this.now = options.now || Date.now;
     this.launched = new Set();
     this.opened = false;

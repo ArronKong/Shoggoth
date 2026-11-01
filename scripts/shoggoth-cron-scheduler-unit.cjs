@@ -340,6 +340,23 @@ test("disabled AgentProfile 的定时 occurrence 记为 skipped 并推进计划"
   ctx.close();
 });
 
+test("旧插件依赖任务保持定义与计划，但不调度；编辑移除依赖后恢复新执行", async () => {
+  const ctx = fixture();
+  const job = createEveryJob(ctx, { operationId: "create-retired-job", createdAt: tickAt(5), nextRunAt: tickAt(6),
+    prompt: "Use shoggoth_plugin_call to read the old package." });
+  const before = ctx.cronStore.getJob(job.id);
+  const scheduler = ctx.createScheduler(); await scheduler.open(); ctx.clock.value = tickAt(6); await scheduler.tick();
+  assert.equal(cronRuns(ctx, job.id).length, 0); assert.equal(ctx.executor.calls.length, 0);
+  assert.deepEqual(ctx.cronStore.getJob(job.id), before); assert.equal(ctx.timer.entries.size, 0);
+  assert.throws(() => scheduler.triggerJob({ operationId: "manual-retired-job", jobId: job.id, createdAt: ctx.clock.value }),
+    { code: "CRON_CONNECTOR_MIGRATION_REQUIRED" });
+  assert.equal(ctx.executor.calls.length, 0);
+  ctx.cronStore.updateJobDerived({ operationId: "edit-retired-job", jobId: job.id,
+    patch: { prompt: "Read the authorized connector account and summarize." }, createdAt: ctx.clock.value });
+  scheduler.triggerJob({ operationId: "manual-migrated-job", jobId: job.id, createdAt: ctx.clock.value });
+  assert.equal(ctx.executor.calls.length, 1); await scheduler.close(); ctx.close();
+});
+
 test("disabled AgentProfile 的 manual trigger 可审计跳过且 exact replay 稳定", async () => {
   const ctx = fixture();
   const job = createEveryJob(ctx, {

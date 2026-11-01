@@ -2,7 +2,6 @@
 const crypto = require("node:crypto");
 const c = require("./agent-service/chat-ui-contract");
 const { normalizeSpec } = require("./core/chat-ui-management");
-const { normalizePluginSelection } = require("./agent-service/plugin-chat-selection");
 const { createDesktopChatUiAuthority } = require("./desktop-chat-ui-authority");
 const EVENTS = "shoggoth:chat-ui:event";
 function registerDesktopChatUiIpc({ ipcMain, getMainWindow, getUiOrigin, getRegistry, host, now = Date.now }) {
@@ -207,10 +206,12 @@ function registerDesktopChatUiIpc({ ipcMain, getMainWindow, getUiOrigin, getRegi
     }
   });
   register("action", async (event, raw) => {
-    const entry = current(event, raw, ["mountId", "actionId", "actionRequestId", "draftId", "pluginSelection"]);
+    trusted(event);
+    if (raw && Object.hasOwn(raw, "pluginSelection")) throw c.uiError("UI_PLUGIN_PLATFORM_RETIRED");
+    if (raw && Object.hasOwn(raw, "connectorSelection")) throw c.uiError("UI_OPEN_CONNECTOR_RETIRED");
+    const entry = current(event, raw, ["mountId", "actionId", "actionRequestId", "draftId"]);
     for (const key of ["actionId", "actionRequestId", "draftId"]) c.id(raw[key]);
-    const pluginSelection = normalizePluginSelection(Array.isArray(raw.pluginSelection) && raw.pluginSelection.length === 0 ? undefined : raw.pluginSelection);
-    const fingerprint = c.hash({ actionId: raw.actionId, draftId: raw.draftId, ...(pluginSelection ? { pluginSelection } : {}) });
+    const fingerprint = c.hash({ actionId: raw.actionId, draftId: raw.draftId });
     const previous = entry.actions.get(raw.actionRequestId);
     if (previous) { if (previous.fingerprint !== fingerprint) throw c.uiError("UI_OPERATION_CONFLICT"); return previous.promise; }
     if (entry.readOnly || !host.entries.get(entry.mountId)?.visible || entry.activeAction) throw c.uiError("UI_HOST_REQUIRED");
@@ -220,7 +221,7 @@ function registerDesktopChatUiIpc({ ipcMain, getMainWindow, getUiOrigin, getRegi
     const promise = write(entry, async () => {
       if (locked.generation !== entry.selectionGeneration) { entry.activeAction = null; throw c.uiError("UI_STATE_CONFLICT"); }
       const spec = { leaseId: entry.leaseId, actionRequestId: raw.actionRequestId, actionId: raw.actionId,
-        stateRevision: entry.stateRevision, snapshot: locked.snapshot, ...(pluginSelection ? { pluginSelection } : {}) };
+        stateRevision: entry.stateRevision, snapshot: locked.snapshot };
       const hostProof = authority.issue(spec, () => !closed && !entry.closed && entries.get(entry.mountId) === entry
         && getMainWindow() === entry.window && host.entries.get(entry.mountId)?.visible === true);
       try {

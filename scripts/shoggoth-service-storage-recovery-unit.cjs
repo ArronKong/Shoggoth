@@ -77,6 +77,8 @@ test("真实 Hook SQLite 写满后阻止新任务，Host 只冷重启一次并�
     const controller = createProductHostController({ serviceRequest: method => call(paths, method), launchAgent: {
       async status() { return { supported: true, installed: true, loaded: true, enabled: true, needsRepair: false }; },
       async start() {
+        try { await call(paths, "service.status"); return; }
+        catch (error) { assert.equal(error.code, "SERVICE_RECOVERY_REQUIRED"); }
         restarts += 1;
         await service.stop({ notify: false });
         service = serviceFor(paths, options);
@@ -184,6 +186,8 @@ for (const method of ["writeSync", "fsyncSync"]) {
       const host = createProductHostController({ serviceRequest: method => call(paths, method), launchAgent: {
         async status() { return { supported: true, installed: true, loaded: true, enabled: true, needsRepair: false }; },
         async start() {
+          try { await call(paths, "service.status"); return; }
+          catch (error) { assert.equal(error.code, "SERVICE_RECOVERY_REQUIRED"); }
           restartCalls += 1;
           await service.stop({ notify: false });
           service = serviceFor(paths);

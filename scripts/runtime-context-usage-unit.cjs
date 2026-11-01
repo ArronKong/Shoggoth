@@ -69,6 +69,13 @@ test("Codex normalizer and adapter preserve last-window usage independently of b
   assert.equal(events.at(-1).type, "context_compacted");
   assert.equal(events.at(-1).contextUsage.usedTokens, null);
   assert.equal(compactions, 0, "observation must never trigger automatic compaction");
+  for (const id of ["compact-item-1", "compact-item-2"]) {
+    hostListener(normalizeCodexEvent({ method: "item/completed", params: { threadId: "session-1", turnId: "same-turn",
+      item: { id, type: "contextCompaction" } } }));
+    assert.equal(events.at(-1).compactionId, id, "separate cycles within one turn retain distinct identity");
+    hostListener(normalizeCodexEvent({ method: "thread/compacted", params: { threadId: "session-1", turnId: "same-turn" } }));
+    assert.deepEqual(events.at(-1).compaction, { id, status: "completed" });
+  }
   await handle.commandExecute({ sessionId: "session-1", text: "/compact" });
   assert.equal(compactions, 1, "only an explicit existing command starts compaction");
 });

@@ -4128,7 +4128,7 @@ test("send streams cumulative hooks, preserves cursor over a transient failure, 
   assert.deepEqual(seen, {
     delta: ["Hel", "Hello"],
     thinking: ["why"],
-    final: [["Hello", false, { runId: "run-1" }]],
+    final: [["Hello", false, { runId: "run-1", displayId: "native-run:run-1" }]],
     error: [],
   });
   assert.equal(backend.getSessionRows()[0].derivedTitle, "hi");
@@ -4198,7 +4198,7 @@ test("a transient status probe cannot cancel an active send before its terminal 
   assert.equal(backend._generation, generation);
   assert.deepEqual(seen, {
     delta: ["partial"],
-    final: [["partial", false, { runId: "run-1" }]],
+    final: [["partial", false, { runId: "run-1", displayId: "native-run:run-1" }]],
     error: [],
   });
 });
@@ -4254,7 +4254,7 @@ test("an accepted run reconnects after backend generation recovery instead of re
   assert.equal(calls.some((entry) => entry.request.method === "run.get"), true);
   assert.deepEqual(seen, {
     delta: ["Recovered answer"],
-    final: [["Recovered answer", false, { runId: "run-1" }]],
+    final: [["Recovered answer", false, { runId: "run-1", displayId: "native-run:run-1" }]],
     error: [],
   });
 });
@@ -4301,7 +4301,7 @@ test("an accepted run can finish while backend write readiness is still recoveri
   await sending;
 
   assert.equal(status.connected, false);
-  assert.deepEqual(seen.final, [["Completed while recovering", false, { runId: "run-1" }]]);
+  assert.deepEqual(seen.final, [["Completed while recovering", false, { runId: "run-1", displayId: "native-run:run-1" }]]);
   assert.deepEqual(seen.error, []);
 });
 
@@ -4346,7 +4346,7 @@ test("transient subscribe loss reconciles the accepted run before resuming its s
   assert.equal(runGets, 1);
   assert.equal(subscribeCalls, 3);
   assert.deepEqual(cursors, [0, 1, 1]);
-  assert.deepEqual(seen.final, [["Durable answer", false, { runId: "run-1" }]]);
+  assert.deepEqual(seen.final, [["Durable answer", false, { runId: "run-1", displayId: "native-run:run-1" }]]);
   assert.deepEqual(seen.error, []);
 });
 
@@ -4437,7 +4437,7 @@ test("a completed run found during reconciliation replaces partial text with dur
     error: (value) => seen.error.push(value),
   });
 
-  assert.deepEqual(seen.final, [["Complete durable answer", false, { runId: "run-1" }]]);
+  assert.deepEqual(seen.final, [["Complete durable answer", false, { runId: "run-1", displayId: "native-run:run-1" }]]);
   assert.deepEqual(seen.error, []);
 });
 
@@ -4491,7 +4491,7 @@ test("a stream reset forces completed text to come from durable run history", as
     error: (value) => seen.error.push(value),
   });
 
-  assert.deepEqual(seen.final, [["prefix + lost suffix", false, { runId: "run-1" }]]);
+  assert.deepEqual(seen.final, [["prefix + lost suffix", false, { runId: "run-1", displayId: "native-run:run-1" }]]);
   assert.deepEqual(seen.error, []);
 });
 
@@ -4526,7 +4526,7 @@ test("terminal reconciliation selects durable history from the exact completed r
     error: (value) => seen.error.push(value),
   });
 
-  assert.deepEqual(seen.final, [["old run answer", false, { runId: "run-1" }]]);
+  assert.deepEqual(seen.final, [["old run answer", false, { runId: "run-1", displayId: "native-run:run-1" }]]);
   assert.deepEqual(seen.error, []);
 });
 
@@ -4800,7 +4800,7 @@ test("a Service restart still settles a returned completed terminal exactly once
   await sending;
 
   assert.equal(status.connected, false);
-  assert.deepEqual(seen.final, [["from returned page", false, { runId: "run-1" }]]);
+  assert.deepEqual(seen.final, [["from returned page", false, { runId: "run-1", displayId: "native-run:run-1" }]]);
   assert.deepEqual(seen.error, []);
   assert.equal(calls.some((entry) => entry.request.method === "chat.history"), false);
 });
@@ -4848,7 +4848,7 @@ test("a completed terminal remains final when generation changes during history 
   await sending;
 
   assert.equal(status.connected, false);
-  assert.deepEqual(seen.final, [["durable summary", false, { runId: "run-1" }]]);
+  assert.deepEqual(seen.final, [["durable summary", false, { runId: "run-1", displayId: "native-run:run-1" }]]);
   assert.deepEqual(seen.error, []);
 });
 
@@ -5449,6 +5449,7 @@ test("native execution status clears queue UI while unknown lifecycle noise stay
     final: () => {},
   });
   assert.deepEqual(statuses, [
+    { kind: "starting", text: "starting", stage: "preparing" },
     { kind: "running", text: "running" },
     { kind: "compacting", text: "compacting" },
     { kind: "compacted", text: "compacted" },
@@ -5473,6 +5474,9 @@ test("retry status and terminal rate limits reach chat hooks and clear active wa
   ]);
   assert.equal(state.settled, false);
   assert.equal(backend._activeBySession.has(SESSION_A), true);
+  backend._emitRunStatus(context.hooks, state, "retrying", { reason: "RUNTIME_UPSTREAM_UNAVAILABLE", message: "private provider trace" });
+  assert.deepEqual(statuses.at(-1), { kind: "retrying", text: "retrying", reason: "RUNTIME_UPSTREAM_UNAVAILABLE" });
+  assert.equal(JSON.stringify(statuses).includes("private provider trace"), false);
   const terminal = event(4, "terminal", { status: "failed", errorCode: "RUNTIME_RATE_LIMITED" });
   assert.equal(await backend._consumeEvent(context, state, terminal), true);
   await backend._consumeEvent(context, state, terminal);
@@ -5502,10 +5506,11 @@ test("queued ack and stream reset expose the durable reason and elapsed start be
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "queue test", null, {
     status: status => statuses.push(status), final: () => {},
   });
-  assert.equal(statuses[0].kind, "queued");
-  assert.equal(statuses[0].reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
-  assert.deepEqual(statuses[1], { kind: "queued", text: "queued", reason: "BACKEND_ACTIVE_LIMIT", queuedAt: 123 });
-  assert.deepEqual(statuses.slice(2).map(status => status.kind), ["starting", "running"]);
+  assert.deepEqual(statuses[0], { kind: "starting", text: "starting", stage: "preparing" });
+  assert.equal(statuses[1].kind, "queued");
+  assert.equal(statuses[1].reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
+  assert.deepEqual(statuses[2], { kind: "queued", text: "queued", reason: "BACKEND_ACTIVE_LIMIT", queuedAt: 123 });
+  assert.deepEqual(statuses.slice(3).map(status => status.kind), ["starting", "running"]);
 });
 
 test("STREAM_RESET consumes its snapshot without duplicating live events and terminal history can fill missing text", async () => {
@@ -5529,7 +5534,7 @@ test("STREAM_RESET consumes its snapshot without duplicating live events and ter
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
     final: (...args) => finals.push(args),
   });
-  assert.deepEqual(finals, [["Recovered answer", false, { runId: "run-1" }]]);
+  assert.deepEqual(finals, [["Recovered answer", false, { runId: "run-1", displayId: "native-run:run-1" }]]);
 });
 
 test("approval and MCP input responses use active run/request and value only for one question", async () => {
@@ -5791,6 +5796,46 @@ test("public runtime failures reach both live chat and canonical history", async
   }
 });
 
+test("real failure detail is identical in live errors, history and terminal snapshot recovery", async () => {
+  const code = "ANTIGRAVITY_REGION_UNSUPPORTED";
+  const failure = { message: "User location is not supported for the API use.", httpStatus: 400, upstreamCode: "FAILED_PRECONDITION" };
+  const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+  const item = transcriptHistoryItem({ id: "terminal-error", runId: "run-1", kind: "error", occurredAt: 200, seq: 1, contextExcluded: false,
+    content: { transcriptType: "terminal", status: "failed", errorCode: code, failure, resultSummary: null } });
+  const { backend } = await readyBackend(request => {
+    assert.equal(request.method, "chat.history");
+    return page("messages", [item]);
+  });
+  const errors = [];
+  const context = () => ({ key: `agent:shoggoth-default:${SESSION_A}`, sessionKey: SESSION_A,
+    run: run(), hooks: { error: value => errors.push(value) }, poll: { cancelled: false }, generation: backend._generation });
+  const state = () => ({ text: "", reasoning: "", settled: false, lastStatus: "running" });
+  await backend._consumeEvent(context(), state(), event(1, "terminal", { status: "failed", errorCode: code, failure }));
+  await backend._settleTerminal(context(), state(), run("failed", { errorCode: code }));
+  const history = await backend.getHistory(`agent:shoggoth-default:${SESSION_A}`);
+  assert.equal(errors.length, 2);
+  assert.equal(errors[0], errors[1]);
+  assert.match(errors[0], /上游原因：User location is not supported for the API use\./u);
+  assert.match(errors[0], /HTTP 400 · FAILED_PRECONDITION/u);
+  assert.ok(!errors[0].includes("检查登录"));
+  assert.equal(history.messages[0].content[0].text, `错误：${errors[0]}`);
+});
+
+test("unknown provider causes are shown without invented login advice, and canceled turns stay non-errors", async () => {
+  const { backend } = await readyBackend(() => { throw new Error("no history needed"); });
+  const errors = [], finals = [];
+  const context = { key: `agent:shoggoth-default:${SESSION_A}`, sessionKey: SESSION_A,
+    run: run(), hooks: { error: value => errors.push(value), final: (...args) => finals.push(args) },
+    poll: { cancelled: false }, generation: backend._generation };
+  const failure = { message: "Project verification is required. token=secret123" };
+  await backend._settleTerminal(context, { settled: false }, run("failed", { errorCode: "ANTIGRAVITY_TURN_FAILED" }), { failure });
+  assert.match(errors[0], /Project verification is required/u);
+  assert.ok(!/secret123|检查登录|未提供/u.test(errors[0]));
+  await backend._settleTerminal(context, { text: "partial", settled: false }, run("canceled"), { failure });
+  assert.equal(errors.length, 1);
+  assert.equal(finals[0][2].stopReason, "aborted");
+});
+
 test("Runtime 启动阶段错误显示可操作信息而不是通用失败", async () => {
   const { backend } = await readyBackend(() => { throw new Error("unexpected request"); });
   const expected = new Map([
@@ -5799,6 +5844,7 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
     ["CODEX_NATIVE_AUTH_READ_FAILED", "暂时无法读取本机 Codex 登录状态，请稍后重试"],
     ["CODEX_RUNTIME_CLEANUP_INCOMPLETE", "Codex 登录检查进程未能完成清理，请重启 Shoggoth 后台服务后重试"],
     ["RUNTIME_PERMISSION_REQUIRED", "当前权限不允许 Agent 执行所需操作，请检查会话的工作区和权限设置后重试"],
+    ["RUNTIME_WORKSPACE_UNAVAILABLE", "会话工作目录不存在或不可访问；请恢复该目录或使用默认工作区新建会话，本次任务未发送"],
     ["RUNTIME_APPROVAL_UNAVAILABLE", "Antigravity 的非交互模式无法弹出原生工具授权，本次操作已被拒绝；请检查权限设置，调整后可在当前会话重新发送"],
     ["RUNTIME_QUOTA_EXHAUSTED", "当前账号额度已用尽，本次请求已停止，不会继续排队。请等待额度恢复、补充额度或更换账号后重试"],
     ["RUNTIME_SPENDING_LIMIT_REACHED", "当前账号已达到消费上限，本次请求已停止，不会继续排队。请检查服务商的消费上限设置，恢复后重试"],
@@ -6040,7 +6086,7 @@ test("a running CURSOR_GAP snapshot restores inFlight status for send observers"
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
     status: (value) => statuses.push(value),
   }, { signal: controller.signal });
-  assert.deepEqual(statuses, [{ kind: "running", text: "running" }]);
+  assert.deepEqual(statuses, [{ kind: "starting", text: "starting", stage: "preparing" }, { kind: "running", text: "running" }]);
 });
 
 test("watchSession treats queued as controllable and keeps polling until its terminal event", async () => {

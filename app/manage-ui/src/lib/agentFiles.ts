@@ -6,10 +6,10 @@ const FILE_ORDER: Record<string, number> = {
   "MEMORY.MD": 5,
 };
 
-// Hide the tool catalog in profile/settings surfaces; the runtime still uses it.
+// Hide internal rule files in profile/settings surfaces; the runtime still uses them.
 // Keep profile documents in settings order, with generated memory always last.
 export function visibleAgentFiles<T extends { name: string }>(files: readonly T[] | undefined): T[] {
   return (files || [])
-    .filter((file) => file.name.toUpperCase() !== "TOOLS.MD")
+    .filter((file) => !["TOOLS.MD", "DAILY_REVIEW.MD"].includes(file.name.toUpperCase()))
     .sort((left, right) => (FILE_ORDER[left.name.toUpperCase()] ?? 4) - (FILE_ORDER[right.name.toUpperCase()] ?? 4));
 }

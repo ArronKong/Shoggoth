@@ -38,6 +38,8 @@ const { OpenCodeRuntimeAdapter } = require("./opencode-runtime-adapter");
 const { DeepSeekHarnessRuntimePool } = require("./deepseek-harness-runtime-pool");
 const { DeepSeekHarnessRuntimeAdapter } = require("./deepseek-harness-runtime-adapter");
 const { RuntimeAdapterRegistry } = require("./runtime-adapter-registry");
+const runtimeExtensionStatusProtocol = require("./runtime-extension-status-protocol");
+const { createRuntimeExtensionStatusController } = require("./runtime-extension-status-controller");
 const { runtimeBinding, validRuntimeAccountId } = require("./runtime-adapter");
 const { RuntimeMcpGateIssuer } = require("./runtime-mcp-gate");
 const { ensureBuiltinCliAgentProfiles } = require("./builtin-cli-profiles");
@@ -104,6 +106,7 @@ const { WebService } = require("./web-service");
 const { WebSettings } = require("./web-settings");
 const webSettingsProtocol = require("./web-settings-protocol");
 const { HeartbeatDocumentStore } = require("./heartbeat-document");
+const { DailyReviewDocumentStore } = require("./daily-review-document");
 const { ProactiveService } = require("./proactive-service");
 const { ProactiveScheduler } = require("./proactive-scheduler");
 const { InspirationReminderService } = require("./inspiration-reminder-service");
@@ -143,68 +146,30 @@ const { ConversationDefinitionService } = require("./conversation-definition-ser
 const { ContextSnapshotStore } = require("./context-snapshot-store");
 const { ContextCompiler } = require("./context-compiler");
 const { NativeSkillStore } = require("./native-skill-store");
+const { LarkCliConnectorController } = require("./lark-cli-connector-controller");
+const { LARK_CLI_METHODS, validateLarkCliParams, validateLarkCliResult, larkCliPublicError } = require("../core/lark-cli-contract");
+const { OfficialSkillConnectorController } = require("./official-skill-connector-controller");
+const { OFFICIAL_SKILL_METHODS, validateOfficialSkillParams, validateOfficialSkillResult, officialSkillPublicError } = require("../core/official-skill-connector-dto");
 const { NativeMcpStore } = require("./native-mcp-store");
 const { NativeMcpClientManager } = require("./native-mcp-client-manager");
-const { PluginStore } = require("./plugin-store");
-const { PluginPackageInstaller } = require("./plugin-package-installer");
-const { BundledPluginCatalog, bundledRoot } = require("../core/bundled-plugin-catalog");
-const { FirstPartyPluginSync, firstPartyPluginRoot } = require("./first-party-plugin-sync");
-const { PluginComponentCatalog } = require("./plugin-component-catalog");
-const { PluginComponentResolver } = require("./plugin-component-resolver");
-const { PluginSkillFacade } = require("./plugin-skill-facade");
-const { PluginToolCatalogRegistry } = require("./plugin-tool-catalog-registry");
-const { CapabilityDispatcher } = require("./capability-dispatcher");
-const { PluginServiceController, PLUGIN_SERVICE_METHODS } = require("./plugin-service-controller");
-const { PluginAuthoringService } = require("./plugin-authoring-service");
-const { PluginPackageDeclarations } = require("./plugin-package-declarations");
-const { PluginSecretStore } = require("./plugin-secret-store");
-const { PluginQuickSetup } = require("./plugin-quick-setup");
-const { PluginDataScopeLeaseManager } = require("./plugin-data-scope-lease");
-const { PluginMcpConnectionPool } = require("./plugin-mcp-connection-pool");
-const { PluginCredentialVault } = require("./plugin-credential-vault");
-const { PluginOAuthProviderRegistry } = require("./plugin-oauth-provider-registry");
-const { PluginOAuthConnectionController } = require("./plugin-oauth-connection-controller");
-const { PluginOutlookGraphConnectionController } =
-  require("./plugin-outlook-graph-connection-controller");
-const { isGraphSidecar, TRANSPORT: GRAPH_SIDECAR_TRANSPORT } =
-  require("./plugin-microsoft-graph-sidecar");
-const { OutlookCalendarGraphController, loadOutlookCalendarConfig } =
-  require("./outlook-calendar-graph");
-const { PluginBearerConnectionController } = require("./plugin-bearer-connection-controller");
-const { GogGmailRuntime, EMAIL: GMAIL_EMAIL } = require("./plugin-gogcli-gmail-runtime");
-const { GogGmailConnectionController } = require("./plugin-gogcli-gmail-controller");
-const { SOURCE_IDENTITY: GMAIL_SOURCE, TRANSPORT: GMAIL_TRANSPORT } =
-  require("./plugin-gogcli-gmail-sidecar");
-const { loadPluginOAuthProviders } = require("./plugin-oauth-config");
-const { loadZoomRegistration, configureZoomRegistration } = require("./plugin-zoom-registration");
-const { loadDropboxRegistration, configureDropboxRegistration } =
-  require("./plugin-dropbox-registration");
-const { SERVER: DROPBOX_MCP_SERVER } = require("./plugin-dropbox-oauth");
-const { LovableRegistrationController } = require("./plugin-lovable-registration");
-const { HiggsfieldRegistrationController } = require("./plugin-higgsfield-registration");
-const { SERVER: HIGGSFIELD_MCP_SERVER } = require("./plugin-higgsfield-official-overlay");
-const { SlackRegistrationController } = require("./plugin-slack-registration");
-const { reservedEndpointKind, principalMatchesRegistration } =
-  require("./plugin-reserved-official-endpoints");
-const { getGraphRegistrationStatus, configureGraphRegistration } =
-  require("./plugin-graph-registration");
-const { PluginDependencyRegistry } = require("./plugin-dependency-registry");
-const { PluginDependencyController } = require("./plugin-dependency-controller");
-const { PluginDataRollback } = require("./plugin-data-rollback");
-const { PluginRollbackController } = require("./plugin-rollback-controller");
-const { PluginConnectionController } = require("./plugin-connection-controller");
-const { PluginConnectionAuth } = require("./plugin-connection-auth");
-const { PluginMcpConnectionManager } = require("./plugin-mcp-connection-manager");
-const { PluginMcpConsent } = require("./plugin-mcp-consent");
-const { PluginCatalogRestorer } = require("./plugin-catalog-restorer");
-const { PluginRuntimeToolService } = require("./plugin-runtime-tool-service");
-const { ExternalPluginLeaseManager } = require("./external-plugin-lease");
-const { ExternalPluginToolService } = require("./external-plugin-tool-service");
-const { ExternalPluginProvenance } = require("./external-plugin-provenance");
-const { ExternalPluginSelectionDispatch } = require("./external-plugin-selection-dispatch");
-const { ExternalPluginApprovalBroker } = require("./external-plugin-approval-broker");
-const { authorizeAdapter: authorizeExternalPluginAdapter } = require("./external-plugin-adapter-auth");
-const { PluginAppController } = require("./plugin-app-controller");
+const { markLegacyPluginPlatformRetired } = require("./connector-platform-retirement");
+const { McpConnectorController, mcpConnectorSubjectId } = require("./mcp-connector-controller");
+const { McpConnectorSecrets } = require("./mcp-connector-secrets");
+const { McpRegistryClient } = require("./mcp-registry-client");
+const { McpPackageLauncher } = require("./mcp-package-launcher");
+const { McpOAuthClient } = require("./mcp-oauth-client");
+const { markOpenConnectorRetired } = require("./open-connector-retirement");
+const { McpExternalApprovalBroker } = require("./mcp-external-approval-broker");
+const { McpExternalToolService } = require("./mcp-external-tool-service");
+const { AppleDeviceController } = require("./apple-device-controller");
+const { AppleDeviceApprovalBroker } = require("./apple-device-approval-broker");
+const { APPLE_DEVICE_METHODS, APPLE_DEVICE_PUBLIC_MESSAGES,
+  validateAppleDeviceParams, validateAppleDeviceResult } = require("../core/apple-device-contract");
+const { TOOL_DEFINITIONS: APPLE_DEVICE_TOOL_DEFINITIONS } = require("./apple-device-tools");
+const { CONNECTOR_METHODS } = require("../core/connector-dto");
+const { validateConnectorParams } = require("../core/connector-dto");
+const { connectorPublicError } = require("../core/connector-errors");
+const { authorizeAdapter: authorizeExternalHostAdapter } = require("./external-host-pairing");
 const { SystemHostController } = require("./system-host-controller");
 const { ComputerUseController } = require("./computer-use-controller");
 const { BrowserUseController } = require("./browser-use-controller");
@@ -228,8 +193,6 @@ const {
   validateUsageSeries,
 } = require("./token-usage-protocol");
 const { WorkRunCoordinator, createWorkRunCoordinator } = require("./work-run-coordinator");
-const { createCodexSecurityServiceController, CODEX_SECURITY_STATUS_METHOD,
-  CODEX_SECURITY_PUBLIC_MESSAGES } = require("./codex-security-service-controller");
 const { ProductMcpApprovalPolicy } = require("./product-mcp-approval-policy");
 const { NativeKanbanStore } = require("./native-kanban-store");
 const { KanbanRunService } = require("./kanban-run-service");
@@ -333,9 +296,10 @@ const INSPIRATION_SERVICE_METHOD_SET = new Set(INSPIRATION_SERVICE_METHODS);
 const DOMAIN_SERVICE_METHOD_SET = new Set(DOMAIN_SERVICE_METHODS);
 const PROFILE_SERVICE_METHOD_SET = new Set(PROFILE_SERVICE_METHODS);
 const RUNTIME_ACCOUNT_SERVICE_METHOD_SET = new Set(RUNTIME_ACCOUNT_SERVICE_METHODS);
-const PLUGIN_SERVICE_METHOD_SET = new Set(PLUGIN_SERVICE_METHODS);
+const CONNECTOR_SERVICE_METHOD_SET = new Set(CONNECTOR_METHODS);
 // Calls that stay open while the user answers a Service-raised card in chat.
-const USER_WAIT_TOOL_NAMES = new Set(["browser_session_wait_for_user", "plugin_secret_request", "workspace_execute"]);
+const USER_WAIT_TOOL_NAMES = new Set(["browser_session_wait_for_user", "workspace_execute",
+  ...APPLE_DEVICE_TOOL_DEFINITIONS.map(tool => tool.name)]);
 const AGENT_LIFECYCLE_METHOD_SET = new Set(AGENT_LIFECYCLE_METHODS);
 const AGENT_HARNESS_METHOD_SET = new Set(AGENT_HARNESS_METHODS);
 const DOMAIN_RUNTIME_FATAL_REASON = "runtime_fatal";
@@ -343,121 +307,15 @@ const MCP_SERVICE_METHODS = new Set([
   "group.adapter.register", "group.adapter.unregister", "group.adapter.call",
   "mcp.runtime.bridge.open", "mcp.runtime.gate.consume", "mcp.auth.challenge", "mcp.auth.exchange",
   "mcp.federation.open", "mcp.profile.get", "mcp.tool.call",
-  "mcp.group.exposure",
+  "mcp.group.exposure", "mcp.external.tool", "mcp.external.cancel", "mcp.external.model.bind", "mcp.external.model.release",
+  "connector.external.open", "connector.external.tool", "connector.external.cancel",
+  "connector.external.skill.search", "connector.external.skill.read", "connector.external.skill.file.read",
+  "connector.external.selection.bind", "connector.external.selection.finish",
   "plugin.external.open", "plugin.external.search", "plugin.external.skill.read",
   "plugin.external.skill.file.read", "plugin.external.resource.read",
   "plugin.external.call", "plugin.external.cancel",
   "plugin.external.selection.bind", "plugin.external.selection.finish",
 ]);
-const PLUGIN_PUBLIC_MESSAGES = Object.freeze({
-  PLUGIN_REQUEST_INVALID: "插件管理参数无效",
-  PLUGIN_RESPONSE_TOO_LARGE: "插件管理响应超出容量上限",
-  EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE: "外部插件调用记录不可用",
-  EXTERNAL_PLUGIN_SELECTION_INVALID: "插件选择派发已失效或结果尚待核实",
-  EXTERNAL_PLUGIN_SELECTION_CONFLICT: "同一操作的插件选择已变化，不能重复派发",
-  EXTERNAL_PLUGIN_SELECTION_BUSY: "待处理的插件选择过多，请稍后重试",
-  EXTERNAL_PLUGIN_SELECTION_UNAVAILABLE: "外部插件选择派发不可用",
-  EXTERNAL_PLUGIN_SELECTION_STORE_INVALID: "外部插件选择记录无法验证",
-  PLUGIN_SELECTION_INVALID: "插件选择参数无效",
-  PLUGIN_SELECTION_STALE: "所选插件已变化，请重新选择",
-  PLUGIN_SELECTION_UNAVAILABLE: "所选插件尚无可用能力，请查看插件设置",
-  CAPABILITY_FORBIDDEN: "插件调用已拒绝或授权失效",
-  GRANT_REVOKED: "插件工具授权已撤销",
-  MCP_TOOL_CAPACITY: "逐次审批参数超过完整展示上限",
-  REVISION_CONFLICT: "插件目录或安装版本已变化，请重新读取",
-  PACKAGE_CHANGED: "插件与预览不一致，请重新预览",
-  PACKAGE_INVALID: "插件包无效",
-  PACKAGE_PATH_INVALID: "插件包路径不安全",
-  GIT_SOURCE_INVALID: "Git 来源必须是安全 HTTPS 地址、完整提交 SHA 和包内子目录",
-  GIT_REMOTE_CANCELLED: "远程 Git 获取已取消",
-  GIT_REMOTE_FAILED: "无法获取指定 Git 提交",
-  GIT_REMOTE_TIMEOUT: "远程 Git 获取超时",
-  GIT_REMOTE_TOO_LARGE: "远程 Git 仓库超过容量上限",
-  GIT_REMOTE_LOG_LIMIT: "远程 Git 输出超过容量上限",
-  GIT_REMOTE_LIMIT: "远程 Git 获取并发已达上限",
-  GIT_REMOTE_EXIT_UNKNOWN: "远程 Git 进程退出未确认，已停止清理",
-  PLUGIN_OPERATION_INVALID: "插件操作参数无效",
-  PLUGIN_OPERATION_FAILED: "此前插件操作已失败，请新建操作",
-  PLUGIN_OPERATION_OUTCOME_UNKNOWN: "恢复前的操作结果待核对，不能自动重试",
-  PLUGIN_INSTALLATION_INVALID: "插件安装不存在",
-  PLUGIN_BINDING_INVALID: "插件 Skill 绑定无效",
-  PLUGIN_GRANT_INVALID: "插件工具授权无效",
-  PLUGIN_COMPONENT_INACTIVE: "插件安装尚未启用",
-  PLUGIN_COMPONENT_REVISION_CHANGED: "插件组件已变化，请重新读取",
-  ACTIVATION_DEFERRED: "插件连接仍被使用，等待释放后重试",
-  PLUGIN_UPDATE_REQUIRES_DISABLE: "更新前必须先停用能力包并排空旧连接",
-  PLUGIN_UNINSTALL_REQUIRES_DISABLE: "卸载前必须先停用能力包并排空旧连接",
-  LEGACY_SOURCE_OVERLAP: "导入来源不能与插件存储目录重叠",
-  MCP_APP_AUTHORITY_INVALID: "交互界面不属于当前会话或授权",
-  MCP_APP_AUTHORITY_REVOKED: "交互界面授权已失效",
-  MCP_APP_RESOURCE_FORBIDDEN: "工具未提供可用的交互界面",
-  MCP_APP_RESOURCE_INVALID: "交互界面资源无效",
-  MCP_APP_SESSION_EXPIRED: "交互界面会话已过期",
-  MCP_APP_TRANSPORT_INVALID: "交互界面来源无效",
-  MCP_APP_LIMIT: "交互界面超过容量限制",
-  MCP_APP_UNSUPPORTED: "连接未提供交互界面支持",
-  MCP_APP_SEED_UNAVAILABLE: "交互界面原始结果已不可用，请查看文本结果",
-  PLUGIN_CONNECTION_CLOSE_FAILED: "插件连接退出未确认，停用未完成",
-  PLUGIN_SERVICE_FAILED: "插件管理操作失败",
-  MCP_SERVER_EXITED: "MCP 连接已关闭",
-  MCP_SERVER_RESPONSE_INVALID: "MCP 服务响应无效",
-  MCP_SERVER_RESPONSE_TOO_LARGE: "MCP 服务响应超过容量上限",
-  PLUGIN_CONSENT_EXPIRED: "授权确认已过期，请重试",
-  PLUGIN_CONSENT_BUSY: "待确认授权过多，请稍后重试",
-  PLUGIN_OAUTH_PROVIDER_UNSUPPORTED: "此 HTTP 服务尚未配置受信认证信息",
-  PLUGIN_BEARER_PROVIDER_UNSUPPORTED: "仅受信内置 GitHub 或 Cloudflare MCP 支持令牌连接",
-  PLUGIN_CONNECTION_LIMIT: "待连接的插件账号过多，请稍后重试",
-  PLUGIN_OAUTH_CONFIG_INVALID: "插件认证服务配置无效",
-  DROPBOX_REGISTRATION_INVALID: "Dropbox 客户端登记无效或已存在",
-  GRAPH_REGISTRATION_INVALID: "Microsoft Graph 客户端 ID 无效",
-  GRAPH_REGISTRATION_CONFLICT: "Microsoft Graph 客户端或共享账号已存在，不能覆盖",
-  GMAIL_RUNTIME_UNAVAILABLE: "固定版本 gog 运行文件不可用",
-  GMAIL_REGISTRATION_INVALID: "Gmail Desktop OAuth 客户端文件无效",
-  GMAIL_REGISTRATION_CONFLICT: "Gmail 客户端已登记，不能覆盖",
-  GMAIL_CAPABILITIES_INVALID: "Gmail 权限设置无效",
-  GMAIL_AUTH_INVALID: "Gmail 账号地址无效",
-  GMAIL_AUTH_FAILED: "Gmail 登录或账号验证未成功",
-  GMAIL_AUTH_CANCELED: "Gmail 登录已取消",
-  GMAIL_AUTH_CONFLICT: "另一项 Gmail 登录正在进行",
-  GMAIL_AUTH_RECOVERY_REQUIRED: "本机 Gmail 凭据状态待人工核验，完成清理前不能继续连接",
-  GMAIL_AUTH_FLOW_NOT_FOUND: "Gmail 登录流程已失效",
-  FIGMA_DESKTOP_IDENTITY_UNVERIFIED: "无法验证 Figma 桌面 MCP 监听进程，请确认官方 Figma 桌面版已启动并启用本地 MCP",
-  LOVABLE_REGISTRATION_INVALID: "Lovable 本机回调端口无效",
-  LOVABLE_REGISTRATION_CONFLICT: "Lovable 客户端或旧账号绑定已存在，不能覆盖",
-  LOVABLE_REGISTRATION_BUSY: "Lovable 客户端登记正在进行，请稍后查询状态",
-  LOVABLE_REGISTRATION_NEEDS_VERIFICATION: "Lovable 远端登记结果不确定，请先人工核对再继续",
-  HIGGSFIELD_REGISTRATION_INVALID: "Higgsfield 本机回调端口无效",
-  HIGGSFIELD_REGISTRATION_CONFLICT: "Higgsfield 客户端或旧账号绑定已存在，不能覆盖",
-  HIGGSFIELD_REGISTRATION_BUSY: "Higgsfield 客户端登记正在进行，请稍后查询状态",
-  HIGGSFIELD_REGISTRATION_NEEDS_VERIFICATION: "Higgsfield 远端登记结果不确定，请先人工核对再继续",
-  SLACK_REGISTRATION_INVALID: "Slack 内部应用登记无效",
-  SLACK_REGISTRATION_CONFLICT: "Slack 客户端或旧账号绑定已存在，不能覆盖",
-  OUTLOOK_CALENDAR_CONFIG_INVALID: "Microsoft Graph 私有客户端配置无效",
-  PLUGIN_OAUTH_FLOW_NOT_FOUND: "账号连接流程已失效，请重新连接",
-  CONNECTION_AUTH_REQUIRED: "此连接需要完成账号认证",
-  CONNECTION_IDENTITY_CHANGED: "连接身份已变化，请重新连接",
-  TOOL_CONTRACT_CHANGED: "工具合同已变化，请重新发现工具",
-  DEPENDENCY_PREPARATION_REQUIRED: "启动命令需要固定版本的依赖准备",
-  DEPENDENCY_MISSING: "插件启动文件不可用",
-  DEPENDENCY_REQUIRES_DISABLE: "准备或撤销依赖前，请先停用能力包",
-  DEPENDENCY_CHANGED: "解释器或依赖登记已变化，请重新准备",
-  DEPENDENCY_EXECUTABLE_INVALID: "所选解释器不可用或路径不安全",
-  DEPENDENCY_INTERPRETER_UNSUPPORTED: "仅支持固定 Node 或 Python 解释器运行包内脚本",
-  DEPENDENCY_ARGUMENTS_UNSUPPORTED: "此组件启动参数不支持固定解释器准备",
-  DEPENDENCY_ENV_UNSUPPORTED: "此组件环境变量不支持固定解释器准备",
-  DEPENDENCY_PROBE_FAILED: "解释器版本检查未通过",
-  DEPENDENCY_REGISTRY_INVALID: "插件依赖登记无法验证",
-  DEPENDENCY_REGISTRY_LIMIT: "插件依赖登记已达容量上限",
-  DEPENDENCY_CONFIRMATION_REQUIRED: "准备依赖需要原生确认",
-  DEPENDENCY_INTERPRETER_NOT_FOUND: "未找到可用的 Node.js 或 Python，请先安装后重试",
-  PLUGIN_SECRET_REQUIRED: "插件凭据尚未配置",
-  PLUGIN_SECRET_INVALID: "插件凭据名称无效",
-  PLUGIN_SECRET_VALUE_INVALID: "凭据需为 8 个字符以上的单行文本，且不超过 16 KiB",
-  PLUGIN_SECRET_REJECTED: "插件的 MCP 服务拒绝了已保存的凭据（401/403）。请让用户更新凭据（plugin_secret_request 或插件页），不要用同一个值重试",
-  PLUGIN_SECRET_NOT_DECLARED: "插件没有声明这个凭据",
-  FIRST_PARTY_PLUGIN_NOT_FOUND: "Shoggoth 内置插件不存在",
-});
-
 function recoverStalePersistentWriterLeases(paths) {
   for (const lockBasename of PERSISTENT_WRITER_LOCK_BASENAMES) {
     const lease = acquirePrivateWriterLease({
@@ -473,6 +331,7 @@ const MCP_PUBLIC_ERROR_CODES = new Set([
   "MCP_AUTH_FAILED",
   "MCP_AUTH_REQUEST_INVALID",
   "MCP_SESSION_INVALID",
+  "PLUGIN_PLATFORM_RETIRED",
   "EXTERNAL_PLUGIN_LEASE_INVALID", "EXTERNAL_PLUGIN_LEASE_BUSY",
   "EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE",
   "EXTERNAL_PLUGIN_SELECTION_INVALID", "EXTERNAL_PLUGIN_SELECTION_CONFLICT",
@@ -856,7 +715,7 @@ function stableJsonForSecretScan(value, maxBytes = MAX_SECRET_SCAN_BYTES) {
   return { serialized, parsed };
 }
 
-function stableJsonContainsMatchedString(value, matches) {
+function stableJsonContainsMatchedString(value, matches, scanKeys = true) {
   const stack = [value];
   let visited = 0;
   while (stack.length > 0) {
@@ -867,7 +726,7 @@ function stableJsonContainsMatchedString(value, matches) {
       if (matches(current)) return true;
     } else if (current && typeof current === "object") {
       for (const [key, child] of Object.entries(current)) {
-        if (matches(key)) return true;
+        if (scanKeys && matches(key)) return true;
         stack.push(child);
       }
     }
@@ -909,6 +768,11 @@ function createAgentService(options) {
   const nativeMemorySharingConfig = new NativeMemorySharingConfig({ paths, featureReady: options.memorySharingFeatureReady !== false });
   const startupGate = new RuntimeStartupGate({ getConfig: getNativeRuntimeConfig });
   const poolCapacityOptions = {
+    canRetireChangedHost(binding, host, runId) {
+      return lifecycleState === "started" && runtimeAccountActivityKnown(binding)
+        && runtimeManager.isBindingActiveExceptCurrent?.(binding) === false
+        && workRunCoordinator.isRuntimeHostIdle?.(binding, host, runId) === true;
+    },
     resolveMaxHosts: () => {
       const config = getNativeRuntimeConfig();
       return config.flags.runtimeAdmissionV1 ? Math.min(128, config.maxActive + 16) : 16;
@@ -971,6 +835,59 @@ function createAgentService(options) {
     cryptoBroker: mcpCryptoBroker,
     fs: options.secretFs,
   });
+  const temporarySecrets = options.temporarySecrets || new (require("./temporary-secret-store").TemporarySecretStore)({
+    paths, cryptoBroker: mcpCryptoBroker, now: options.now,
+    getKnownSecrets: scope => {
+      if (!nativeMcpStoreOpened || typeof secretStore.sensitiveValues !== "function") return [];
+      const refs = nativeMcpStore.list().servers.filter(server => nativeMcpStore.isAvailable(server.id, scope.profileId))
+        .map(server => nativeMcpStore.getPrivate(server.id)?.secretRef).filter(Boolean);
+      return secretStore.sensitiveValues(refs);
+    },
+    onError: code => runtimeTelemetry.record("secret.expiry.failed", { code }),
+  });
+  const secretMedia = options.secretMedia || new (require("./secret-media-mediator").SecretMediaMediator)({
+    paths, secrets: temporarySecrets,
+    binary: options.secretMediaBinary || path.join(options.packaged && (options.resourcesPath || process.resourcesPath)
+      ? (options.resourcesPath || process.resourcesPath) : path.join(repoRoot, ".vendor"), "local-media", "shoggoth-secret-media"),
+  });
+  const secretExecution = options.secretExecution || new (require("./secret-execution-broker").SecretExecutionBroker)({
+    paths, cryptoBroker: mcpCryptoBroker, secrets: temporarySecrets, media: secretMedia, now: options.now,
+    onDisplay: ({ scope, receiptId, callId }) => eventBuffer.append("chat.secret.result", {
+      profileId: scope.profileId, sessionKey: scope.sessionId, receiptId, callId }),
+    onError: code => runtimeTelemetry.record("secret.result.processing_failed", { code }),
+    beforeRevoke: (scope, reference) => browserUseController.closeForSecret?.(scope, reference),
+  });
+  const modelSecretProjection = new (require("./model-secret-projection").ModelSecretProjection)({
+    secrets: temporarySecrets, media: secretMedia,
+  });
+  const modelSecretGateway = options.modelSecretGateway
+    || new (require("./model-secret-gateway").ModelSecretGateway)({ projection: modelSecretProjection,
+      provenance: new (require("./model-secret-provenance").ModelSecretProvenance)({ paths, secrets: temporarySecrets }),
+      request: options.modelSecretRequest, env: options.parentEnv || process.env });
+  const chatSecretService = new (require("./chat-secret-service").ChatSecretService)({
+    secrets: temporarySecrets, execution: secretExecution, getOwner: getModelProjectionOwner,
+  });
+  const externalModelProjection = new (require("./external-model-projection").ExternalModelProjection)({
+    paths, gateway: modelSecretGateway, getOwner: getModelProjectionOwner,
+    assertHostCurrent: () => { if (lifecycleState !== "started" || maintenanceQuiesced) throw serviceError("SERVICE_UNAVAILABLE", "模型输入通道不可用"); },
+  });
+  function revokeConnectorProfileAccess() {
+    if (nativeMcpStoreOpened) nativeMcpStore.pruneDisabledProfiles(productStore.listAgentProfiles().map(p => p.id));
+  }
+  async function connectorSubjects() {
+    const items = productStore.listAgentProfiles().map(profile => ({ profileId: profile.id, backendId: "shoggoth",
+      agentId: profile.agentId || profile.id, label: profile.name, enabled: profile.enabled === true }));
+    const unavailableBackends = [];
+    for (const backendId of ["openclaw", "hermes"]) {
+      try {
+        const response = await federationHostClient.request("agent.list", { backendId });
+        if (!Array.isArray(response.agents) || response.agents.length > 500) throw new Error();
+        for (const agent of response.agents) items.push({ profileId: mcpConnectorSubjectId(backendId, agent.id),
+          backendId, agentId: agent.id, label: agent.name || agent.id, enabled: agent.enabled !== false });
+      } catch { unavailableBackends.push(backendId); }
+    }
+    return { items, unavailableBackends };
+  }
   // Only the authenticated file-token IPC path may mint these private request
   // brands. A renderer, plugin manifest or Backend command cannot create one.
   let externalProviderWriterVerifier = null;
@@ -1015,107 +932,6 @@ function createAgentService(options) {
   productStore.setSensitiveValueMatcherSessionFactory(
     (action) => secretStore.withPlaintextMatcher(action),
   );
-  // Plugins are part of every new installation and share the current Service
-  // root. Storage preflight rejects incompatible data before any writer opens.
-  const pluginStore = options.pluginStore || new PluginStore({ paths, now: options.now });
-  const bundledPluginCatalog = options.bundledPluginCatalog || new BundledPluginCatalog(
-    bundledRoot({ packaged: options.packaged === true, resourcesPath: options.resourcesPath }),
-  );
-  const pluginPackageInstaller = pluginStore
-    ? (options.pluginPackageInstaller || new PluginPackageInstaller({ store: pluginStore,
-      bundledCatalog: bundledPluginCatalog, firstPartyRoot: options.firstPartyPluginRoot
-        || firstPartyPluginRoot({ packaged: options.packaged === true, resourcesPath: options.resourcesPath }) })) : null;
-  const pluginToolCatalogRegistry = pluginStore
-    ? (options.pluginToolCatalogRegistry || new PluginToolCatalogRegistry()) : null;
-  const pluginPackageDeclarations = pluginStore
-    ? new PluginPackageDeclarations({ packagesDir: pluginStore.paths.pluginPackagesDir }) : null;
-  // Test doubles of the encrypted store may omit write methods; plugin
-  // credentials are then unavailable instead of blocking Service startup.
-  const pluginSecretStore = pluginStore && ["get", "put", "delete", "getCredentialRevision"]
-    .every(method => typeof secretStore?.[method] === "function")
-    ? new PluginSecretStore({ secretStore, declarations: pluginPackageDeclarations }) : null;
-  const pluginComponentCatalog = pluginStore
-    ? (options.pluginComponentCatalog || new PluginComponentCatalog({ store: pluginStore,
-      toolCatalogRegistry: pluginToolCatalogRegistry, secrets: pluginSecretStore })) : null;
-  const pluginComponentResolver = pluginStore
-    ? (options.pluginComponentResolver || new PluginComponentResolver({ store: pluginStore })) : null;
-  const pluginServiceController = pluginStore
-    ? (options.pluginServiceController || new PluginServiceController({ store: pluginStore,
-      installer: pluginPackageInstaller, catalog: pluginComponentCatalog,
-      bundledCatalog: bundledPluginCatalog,
-      resolver: pluginComponentResolver, productStore,
-      toolCatalogRegistry: pluginToolCatalogRegistry,
-      getConsent: () => pluginMcpConsent,
-      prepareSelectionCatalog: selection => pluginCatalogRestorer.prepareSelection(selection),
-      getAppController: () => pluginAppController,
-      getOAuthController: () => pluginOAuthController,
-      getGraphController: () => pluginGraphConnectionController,
-      getBearerController: () => pluginBearerController,
-      getDependencyController: () => pluginDependencyController,
-      getRollbackController: () => pluginRollbackController,
-      getConnectionController: () => pluginConnectionController,
-      getExternalSelectionDispatch: () => externalPluginSelectionDispatch,
-      getQuickSetup: () => pluginQuickSetup,
-      getFirstPartySync: () => firstPartyPluginSync,
-      drainInstallation: (installationId) => pluginMcpConnectionPool.drainInstallation(
-        installationId),
-      resumeInstallation: (installationId) => pluginMcpConnectionPool.resumeInstallation(
-        installationId),
-    })) : null;
-  const pluginAuthoringService = pluginServiceController ? new PluginAuthoringService({
-    root: path.join(paths.stateDir, "plugin-authoring"), trustedRoot: paths.trustedRoot,
-    controller: pluginServiceController, store: pluginStore, catalog: pluginComponentCatalog,
-  }) : null;
-  // The Service may hold encrypted OAuth records, but account activation
-  // stays closed until a trusted verifier is supplied. No fixture token is
-  // accepted merely because it was written to the private credential store.
-  const zoomRegistration = pluginStore ? loadZoomRegistration(paths) : null;
-  const dropboxRegistration = pluginStore ? loadDropboxRegistration(paths) : null;
-  const lovableRegistration = pluginStore ? new LovableRegistrationController({
-    paths, store: pluginStore,
-    fetchImpl: options.pluginLovableRegistrationFetch || globalThis.fetch,
-    mcpFetchImpl: options.pluginLovableMcpFetch || globalThis.fetch,
-  }) : null;
-  const higgsfieldRegistration = pluginStore ? new HiggsfieldRegistrationController({
-    paths, store: pluginStore,
-    fetchImpl: options.pluginHiggsfieldRegistrationFetch || globalThis.fetch,
-  }) : null;
-  const slackRegistration = pluginStore ? new SlackRegistrationController({
-    paths, store: pluginStore,
-  }) : null;
-  const zoomClientId = options.pluginZoomRegisteredClientId ?? zoomRegistration?.clientId ?? null;
-  const dropboxClientId = dropboxRegistration?.clientId ?? null;
-  const pluginOAuthProviders = pluginStore ? new PluginOAuthProviderRegistry({
-    providers: options.pluginOAuthProviders ?? [
-      ...loadPluginOAuthProviders(paths, { registeredZoomClientId: zoomClientId }),
-      ...(zoomRegistration ? [zoomRegistration.provider] : []),
-      ...(dropboxRegistration ? [dropboxRegistration.provider] : []),
-      ...(lovableRegistration?.provider() ? [lovableRegistration.provider()] : []),
-      ...(higgsfieldRegistration?.provider() ? [higgsfieldRegistration.provider()] : []),
-      ...(slackRegistration?.provider() ? [slackRegistration.provider()] : []),
-    ],
-    fetchImpl: options.pluginOAuthFetch || globalThis.fetch,
-    registeredZoomClientId: zoomClientId,
-    registeredDropboxClientId: dropboxClientId,
-    registeredSlackClientId: slackRegistration?.startupRegistration?.clientId ?? null,
-    registeredHiggsfieldClientId: higgsfieldRegistration?.startupRegistration?.clientId ?? null,
-    secretStore,
-  }) : null;
-  const pluginCredentialVault = pluginStore
-    ? (options.pluginCredentialVault || new PluginCredentialVault({
-      store: pluginStore, secretStore,
-      verifyPrincipal: options.pluginPrincipalVerifier || (input => pluginOAuthProviders.verifyPrincipal(input)),
-      refreshTokens: options.pluginRefreshTokens || (input => pluginOAuthProviders.refreshTokens(input)),
-      invalidateToolCatalog: (connectionId) => pluginToolCatalogRegistry.invalidate(connectionId),
-      now: options.now,
-    })) : null;
-  const pluginConnectionAuth = pluginStore
-    ? (options.pluginConnectionAuth || new PluginConnectionAuth({
-      getConnection: (connectionId) => pluginStore.getConnection(connectionId),
-      readCredential: (connectionId) => pluginCredentialVault.readCredential(connectionId),
-      refreshCredential: (context) => pluginCredentialVault.refreshCredential(context),
-      now: options.now,
-    })) : null;
   const runtimeAccountLookup = (runtimeAccountId) => (
     productStore.getRuntimeAccount(runtimeAccountId)
   );
@@ -1149,6 +965,7 @@ function createAgentService(options) {
   });
   const runtimePool = options.runtimePool || new CodexRuntimePool({
     paths,
+    canRetireChangedHost: poolCapacityOptions.canRetireChangedHost,
     canRetireStaleHost: (binding, host, runId) => lifecycleState === "started"
       && workRunCoordinator.isRuntimeHostIdle?.(binding, host, runId) === true,
     nativeAuth: new NativeCodexAuth({
@@ -1178,9 +995,10 @@ function createAgentService(options) {
   });
   const groupRuntimeMcpFactory = input => runtimeMcpGateIssuer.createMcpServer(input);
   const codexRuntimeAdapter = options.codexRuntimeAdapter
-    || new CodexRuntimeAdapter({ runtimePool });
+    || new CodexRuntimeAdapter({ runtimePool, secretGateway: modelSecretGateway });
   const grokBuildRuntimePool = options.grokBuildRuntimePool || new GrokBuildRuntimePool({
       ...poolCapacityOptions,
+    secretGateway: modelSecretGateway,
     paths,
     runtimeAccountLookup,
     binaryPath: options.grokBuildBinaryPath,
@@ -1224,7 +1042,7 @@ function createAgentService(options) {
     randomUUID: options.randomUUID,
   });
   const piRuntimeAdapter = options.piRuntimeAdapter
-    || new PiRuntimeAdapter({ runtimePool: piRuntimePool });
+    || new PiRuntimeAdapter({ runtimePool: piRuntimePool, secretGateway: modelSecretGateway });
   const claudeCodeRuntimePool = options.claudeCodeRuntimePool || new ClaudeCodeRuntimePool({
       ...poolCapacityOptions,
     paths,
@@ -1242,6 +1060,10 @@ function createAgentService(options) {
   const openCodeRuntimePool = options.openCodeRuntimePool || new OpenCodeRuntimePool({
     ...poolCapacityOptions,
     paths,
+    secretGateway: modelSecretGateway,
+    modelProjectionPluginPath: options.packaged && (options.resourcesPath || process.resourcesPath)
+      ? path.join(options.resourcesPath || process.resourcesPath, "opencode", "shoggoth-secret-projection.mjs")
+      : path.join(repoRoot, "resources", "opencode", "shoggoth-secret-projection.mjs"),
     runtimeAccountLookup,
     binaryPath: options.openCodeBinaryPath,
     parentEnv: options.parentEnv,
@@ -1264,6 +1086,7 @@ function createAgentService(options) {
       runtimeAccountLookup,
       binaryPath: options.deepSeekHarnessBinaryPath,
       bridgePath: deepSeekHarnessBridgePath,
+      secretGateway: modelSecretGateway,
       parentEnv: options.parentEnv,
       homedir: options.runtimeStorageHomedir,
       mcpGateIssuer: runtimeMcpGateIssuer,
@@ -1273,7 +1096,19 @@ function createAgentService(options) {
   const deepSeekHarnessRuntimeAdapter = options.deepSeekHarnessRuntimeAdapter
     || new DeepSeekHarnessRuntimeAdapter({ runtimePool: deepSeekHarnessRuntimePool });
   const extensionCatalog = new (require("./runtime-extension-manifest").RuntimeExtensionCatalog)(paths);
-  const runtimeExtensions = options.runtimeManager ? [] : extensionCatalog.read().filter(entry => entry.enabled);
+  const runtimeExtensions = [];
+  const extensionRuntimeAdapters = new Map();
+  function recordExtensionIsolation(diagnostic) {
+    // Only fixed codes/scopes and an already validated runtime id cross the
+    // diagnostic boundary. Filesystem/crypto errors may contain private paths.
+    runtimeTelemetry.record("runtime.preflight.failed", {
+      source: diagnostic.scope === "package" ? diagnostic.runtime : "extension-catalog",
+      stage: diagnostic.scope === "package" ? "extension_package" : "extension_catalog",
+      reason: diagnostic.code, outcome: "isolated",
+    });
+  }
+  const runtimeExtensionSnapshot = options.runtimeManager ? { entries: [], diagnostics: [] } : extensionCatalog.loadEnabled();
+  for (const diagnostic of runtimeExtensionSnapshot.diagnostics) recordExtensionIsolation(diagnostic);
   const idleRuntimePools = new Map([
     ["grok-build", grokBuildRuntimePool], ["antigravity", antigravityRuntimePool],
     ["pi", piRuntimePool], ["claude-code", claudeCodeRuntimePool],
@@ -1306,6 +1141,8 @@ function createAgentService(options) {
       idleTimeoutMs: options.runtimeIdleTimeoutMs,
       onProtocolViolation: event => runtimeTelemetry.record("runtime.handle.violation", {
         source: event.runtime, reason: event.code, stage: event.type }),
+      onCapabilityDifference: event => runtimeTelemetry.record("runtime.capability.difference", {
+        source: event.runtime, reason: event.capability, stage: event.current ? "supported" : "unsupported" }),
       isIdle(binding) {
         if (idleRuntimePools.has(binding.runtime)) {
           try {
@@ -1315,6 +1152,8 @@ function createAgentService(options) {
               && require("./runtime-pool-capacity").isPoolBindingIdle(idleRuntimePools.get(binding.runtime), binding);
           } catch { return false; }
         }
+        if (binding.runtime.startsWith("ext-")
+          && extensionRuntimeAdapters.get(binding.runtime)?.isBindingIdle?.(binding) !== true) return false;
         if (lifecycleState !== "started" || activeRuntimeRequests > 0) return false;
         const admission = runtimeAccountAdmission.read(binding.runtimeAccountId);
         if (admission.active > 0 || admission.mutationActive
@@ -1340,12 +1179,31 @@ function createAgentService(options) {
       registry.register("opencode", openCodeRuntimeAdapter);
     }
     registry.register("deepseek-harness", deepSeekHarnessRuntimeAdapter);
-    for (const entry of runtimeExtensions) {
-      const manifest = require("./runtime-extension-manifest").verifyManifest(entry.envelope, entry.trustedKey);
-      registry.register(manifest.runtime, new (require("./runtime-extension-adapter").RuntimeExtensionAdapter)({
-        manifest, paths, verify: () => require("./runtime-extension-manifest").verifyManifest(entry.envelope, entry.trustedKey),
-        getToken: reference => secretStore.get(reference),
-      }));
+    for (const { entry, manifest } of runtimeExtensionSnapshot.entries) {
+      try {
+        const adapter = new (require("./runtime-extension-adapter").RuntimeExtensionAdapter)({
+          manifest, paths, verify: () => require("./runtime-extension-manifest").verifyManifest(entry.envelope, entry.trustedKey),
+          getToken: reference => secretStore.get(reference),
+          mcpGateIssuer: runtimeMcpGateIssuer,
+          onDiagnostic: input => runtimeTelemetry.record("runtime.stage", input),
+          resolveMaxHosts: poolCapacityOptions.resolveMaxHosts,
+          canRetireChangedHost: poolCapacityOptions.canRetireChangedHost,
+          getAccountGeneration: accountId => runtimeAccountAdmission.read(accountId).generation,
+          expectedManifestIdentity: crypto.createHash("sha256")
+            .update(JSON.stringify([entry.envelope, entry.trustedKey])).digest("hex"),
+          getManifestIdentity: () => {
+            try {
+              const current = extensionCatalog.read({ verifyEnabled: false })
+                .find(candidate => candidate.envelope.manifest.runtime === manifest.runtime);
+              if (!current?.enabled) throw serviceError("RUNTIME_EXTENSION_UNTRUSTED", "Runtime extension is unavailable");
+              return crypto.createHash("sha256").update(JSON.stringify([current.envelope, current.trustedKey])).digest("hex");
+            } catch { throw serviceError("RUNTIME_EXTENSION_UNTRUSTED", "Runtime extension is unavailable"); }
+          },
+        });
+        registry.register(manifest.runtime, adapter);
+        extensionRuntimeAdapters.set(manifest.runtime, adapter);
+        runtimeExtensions.push(entry);
+      } catch { recordExtensionIsolation({ scope: "package", runtime: manifest.runtime, code: "RUNTIME_EXTENSION_UNTRUSTED" }); }
     }
     return registry;
   })();
@@ -1530,6 +1388,7 @@ function createAgentService(options) {
           }
           return runtimeManager.get(binding.runtimeProfileId);
         },
+        peek(binding, options) { return runtimeManager.peek?.(binding, options) ?? null; },
         stop(binding) {
           if (typeof runtimeManager.stop !== "function") {
             throw serviceError("PROFILE_SERVICE_CLOSED", "RuntimePool targeted stop is unavailable");
@@ -1655,8 +1514,13 @@ function createAgentService(options) {
   const assertSecretSafe = options.assertSecretSafe || ((value, context) => {
     const stable = stableJsonForSecretScan(value, ["contextContent", "fullText"].includes(context?.kind)
       ? 8 * 1024 * 1024 : MAX_SECRET_SCAN_BYTES);
+    // TranscriptStore already validated its exact metadata schema and has
+    // always supplied content:{} here. Preserve that existing boundary; scan
+    // every dynamic string value, without interpreting fixed field names or
+    // JSON booleans as passwords. All other consumers retain the full scan.
+    const metadataOnly = context?.kind === "validatedTranscriptMetadata";
     const safe = secretStore.withPlaintextMatcher((matches) => (
-      !matches(stable.serialized) && !stableJsonContainsMatchedString(stable.parsed, matches)
+      (metadataOnly || !matches(stable.serialized)) && !stableJsonContainsMatchedString(stable.parsed, matches, !metadataOnly)
     ));
     if (safe !== true) {
       throw serviceError("RUN_EVENT_SECRET_REJECTED", "Run event 含敏感信息");
@@ -1698,6 +1562,14 @@ function createAgentService(options) {
       candidateStore: memoryCandidateStore, now: options.now, randomUUID: options.randomUUID,
       remoteProviderResources: options.memoryRemoteProviderResources || { secretStore,
         resolveOwner: packet => memoryProviderOwnerRpc.resolveOwner(packet) },
+      projectEmbeddingInput: require("./secret-embedding-projection").createSecretEmbeddingProjection({
+        secrets: temporarySecrets, media: secretMedia, getSession: id => {
+          let session;
+          try { session = chatSessionStore.getSession(id); }
+          catch (error) { if (error?.code !== "CHAT_SESSION_INVALID") throw error; }
+          return session || chatSessionStore.listSessions().find(item => item.id === id);
+        },
+      }),
       projectProviderMetadata: (profileId, config) => memoryProviderOwnerRpc
         ? memoryProviderOwnerRpc.projectProviderMetadata(profileId, config) : config,
       // Read-only shared roster: memory checks call this thousands of times per turn.
@@ -1805,269 +1677,7 @@ function createAgentService(options) {
     toolRegistry,
     paths,
   });
-  const pluginCapabilityDispatcher = pluginStore
-    ? (options.pluginCapabilityDispatcher || new CapabilityDispatcher({
-      store: pluginStore, permissionEngine,
-      resolveToolContract: (records) => pluginToolCatalogRegistry.resolve(records),
-      // Recheck the actual account-bound registration before issuing a ticket
-      // and at final send; OAuth scopes never come from tool annotations.
-      slackScopes: principal => officialRegistrationCurrent("slack", principal)
-        ? [...slackRegistration.startupRegistration.provider.scopes] : null,
-      now: options.now,
-    })) : null;
-  const officialRegistrationCurrent = (kind, principalIdentity) => {
-    const registration = kind === "slack" ? slackRegistration
-      : kind === "dropbox" ? dropboxRegistration
-        : kind === "higgsfield" ? higgsfieldRegistration : lovableRegistration;
-    const endpoint = kind === "slack" ? "https://mcp.slack.com/mcp"
-      : kind === "dropbox" ? DROPBOX_MCP_SERVER
-        : kind === "higgsfield" ? HIGGSFIELD_MCP_SERVER : "https://mcp.lovable.dev";
-    try {
-      return registration?.assertCurrent() === true
-        && principalMatchesRegistration(pluginOAuthProviders.forEndpoint(new URL(endpoint).href),
-          principalIdentity);
-    } catch { return false; }
-  };
-  const gmailRuntime = pluginStore ? (options.pluginGmailRuntime || new GogGmailRuntime({
-    paths, packaged: options.packaged === true, resourcesPath: options.resourcesPath,
-    repoRoot, run: options.pluginGogRun,
-  })) : null;
-  const assertSpecialConnection = (connectionId, toolName = null) => {
-    const connection = pluginStore.getConnection(connectionId);
-    const installation = connection && pluginStore.getInstallation(connection.installationId);
-    const reserved = reservedEndpointKind(connection?.endpointIdentity);
-    if (reserved && installation?.sourceIdentity !== `bundled:${reserved}`) {
-      throw serviceError("CONNECTION_IDENTITY_CHANGED", "官方 MCP 端点的来源身份已变化");
-    }
-    if (installation?.sourceIdentity === "bundled:lovable"
-      && !officialRegistrationCurrent("lovable", connection.principalIdentity)) {
-      throw serviceError("CONNECTION_IDENTITY_CHANGED", "Lovable 客户端登记已变化");
-    }
-    if (installation?.sourceIdentity === "bundled:higgsfield"
-      && (!officialRegistrationCurrent("higgsfield", connection.principalIdentity)
-        || toolName !== null)) {
-      throw serviceError("CAPABILITY_FORBIDDEN", "Higgsfield 工具尚未通过真实合同与计费验收");
-    }
-    if (installation?.sourceIdentity === "bundled:slack"
-      && !officialRegistrationCurrent("slack", connection.principalIdentity)) {
-      throw serviceError("CONNECTION_IDENTITY_CHANGED", "Slack 客户端登记已变化");
-    }
-    if (installation?.sourceIdentity === "bundled:dropbox"
-      && !officialRegistrationCurrent("dropbox", connection.principalIdentity)) {
-      throw serviceError("CONNECTION_IDENTITY_CHANGED", "Dropbox 客户端登记已变化");
-    }
-    if (installation?.sourceIdentity === GMAIL_SOURCE) {
-      const email = connection?.principalIdentity?.startsWith("gmail:")
-        ? connection.principalIdentity.slice(6) : null;
-      if (!connection.endpointIdentity?.startsWith(`${GMAIL_TRANSPORT}:`)
-        || !email || !GMAIL_EMAIL.test(email) || !gmailRuntime?.configured()
-        || toolName !== null && !gmailRuntime.allowedTools().has(toolName)) {
-        throw serviceError("CAPABILITY_FORBIDDEN", "Gmail 连接或工具权限已变化");
-      }
-    }
-  };
-  const pluginMcpConnectionPool = pluginStore
-    ? (options.pluginMcpConnectionPool || new PluginMcpConnectionPool({
-      leaseManager: new PluginDataScopeLeaseManager({ paths }),
-      authorizeEgress: (request) => {
-        assertSpecialConnection(request.connectionId, request.toolName);
-        return pluginCapabilityDispatcher.authorizeEgress(request);
-      },
-      onToolsChanged: ({ connectionId }) => pluginToolCatalogRegistry.invalidate(connectionId),
-      onConnectionInvalidated: ({ connectionId }) =>
-        pluginToolCatalogRegistry.invalidate(connectionId),
-      canAcquire: ({ installationId, releaseDigest }) => {
-        const installation = pluginStore.getInstallation(installationId);
-        return installation?.desiredState === "enabled"
-          && installation.releaseDigest === releaseDigest
-          && (installation.sourceIdentity !== "bundled:lovable"
-            || lovableRegistration?.assertCurrent() === true)
-          && (installation.sourceIdentity !== "bundled:higgsfield"
-            || higgsfieldRegistration?.assertCurrent() === true)
-          && (installation.sourceIdentity !== "bundled:slack"
-            || slackRegistration?.assertCurrent() === true)
-          && (installation.sourceIdentity !== "bundled:dropbox"
-            || dropboxRegistration?.assertCurrent() === true)
-          && !pluginStore.hasPendingInstallationDisable(installationId);
-      },
-    })) : null;
-  let outlookCalendarGraphConfig = options.outlookCalendarGraphConfig;
-  if (pluginStore && outlookCalendarGraphConfig === undefined) {
-    try {
-      const loaded = loadOutlookCalendarConfig(paths);
-      outlookCalendarGraphConfig = loaded === null ? null
-        : { version: 1, clientId: loaded.clientId };
-    }
-    catch (error) {
-      if (error?.code !== "OUTLOOK_CALENDAR_CONFIG_INVALID") throw error;
-      // Optional Graph configuration must fail closed for the component,
-      // without making unrelated native Agents unable to start.
-      console.error("[agent-service] Outlook Graph configuration unavailable");
-      outlookCalendarGraphConfig = null;
-    }
-  }
-  const outlookCalendarGraph = pluginStore ? new OutlookCalendarGraphController({
-    paths, secretStore, productStore,
-    fetchImpl: options.outlookCalendarGraphFetch || globalThis.fetch,
-    config: outlookCalendarGraphConfig,
-    now: options.now,
-  }) : null;
-  const pluginMcpConnectionManager = pluginStore ? new PluginMcpConnectionManager({
-    store: pluginStore, resolver: pluginComponentResolver, pool: pluginMcpConnectionPool,
-    auth: pluginConnectionAuth, allowLoopback: options.pluginAllowLoopback === true,
-    graphCalendar: outlookCalendarGraph,
-    lovableRegistration: principal => officialRegistrationCurrent("lovable", principal),
-    higgsfieldRegistration: principal => officialRegistrationCurrent("higgsfield", principal),
-    slackRegistration: principal => officialRegistrationCurrent("slack", principal),
-    dropboxRegistration: principal => officialRegistrationCurrent("dropbox", principal),
-    // Scopes come from the Service-owned registration whose digest is bound to
-    // this authenticated principal, never from a model or remote tool metadata.
-    slackScopes: principal => officialRegistrationCurrent("slack", principal)
-      ? [...slackRegistration.startupRegistration.provider.scopes] : null,
-    lovableFetchImpl: options.pluginLovableMcpFetch || globalThis.fetch,
-    slackFetchImpl: options.pluginSlackMcpFetch || globalThis.fetch,
-    figmaFetchImpl: options.pluginFigmaDesktopFetch || globalThis.fetch,
-    gmailRuntime,
-    authorizeEgress: request => pluginCapabilityDispatcher.authorizeEgress(request),
-    secrets: pluginSecretStore,
-  }) : null;
-  const pluginGmailController = pluginStore ? new GogGmailConnectionController({
-    store: pluginStore, productStore, manager: pluginMcpConnectionManager,
-    runtime: gmailRuntime, now: options.now,
-  }) : null;
-  const pluginDependencyController = pluginStore ? new PluginDependencyController({
-    store: pluginStore, registry: new PluginDependencyRegistry({ store: pluginStore, resolver: pluginComponentResolver }),
-    drainInstallation: id => pluginMcpConnectionPool.drainInstallation(id),
-    resumeInstallation: id => pluginMcpConnectionPool.resumeInstallation(id), now: options.now,
-  }) : null;
-  const pluginRollbackController = pluginStore ? new PluginRollbackController({
-    store: pluginStore, rollback: new PluginDataRollback({ store: pluginStore,
-      drainInstallation: id => pluginMcpConnectionPool.drainInstallation(id) }),
-    resumeInstallation: id => pluginMcpConnectionPool.resumeInstallation(id), now: options.now,
-  }) : null;
-  const pluginMcpConsent = pluginStore ? new PluginMcpConsent({ store: pluginStore,
-    productStore, manager: pluginMcpConnectionManager, registry: pluginToolCatalogRegistry,
-    now: options.now,
-  }) : null;
-  const pluginQuickSetup = pluginStore && pluginSecretStore ? new PluginQuickSetup({ store: pluginStore, productStore,
-    manager: pluginMcpConnectionManager, consent: pluginMcpConsent, toolCatalog: pluginToolCatalogRegistry,
-    dependencies: new PluginDependencyRegistry({ store: pluginStore, resolver: pluginComponentResolver }),
-    secrets: pluginSecretStore, declarations: pluginPackageDeclarations,
-    setInstallationState: params => pluginServiceController.handle("plugins.installations.set", params),
-    ...(options.pluginInterpreterCandidates ? { candidates: options.pluginInterpreterCandidates } : {}),
-    now: options.now,
-  }) : null;
-  // plugin_status reports the same setup steps as plugin_setup_get.
-  if (pluginAuthoringService) pluginAuthoringService.quickSetup = pluginQuickSetup;
-  let firstPartySyncDone = Promise.resolve(null);
-  const firstPartyPluginSync = pluginServiceController && pluginPackageInstaller?.firstPartyRoot
-    ? new FirstPartyPluginSync({ root: pluginPackageInstaller.firstPartyRoot, installer: pluginPackageInstaller,
-      store: pluginStore, setInstallationState: params => pluginServiceController.handle("plugins.installations.set", params) })
-    : null;
-  const pluginCatalogRestorer = pluginStore ? new PluginCatalogRestorer({
-    store: pluginStore, productStore, consent: pluginMcpConsent,
-    registry: pluginToolCatalogRegistry, now: options.now,
-    onFailure: ({ code }) => console.error("[agent-service] plugin tool restore unavailable:", code),
-  }) : null;
-  const pluginOAuthController = pluginStore ? new PluginOAuthConnectionController({
-    store: pluginStore, productStore, manager: pluginMcpConnectionManager,
-    providers: pluginOAuthProviders, vault: pluginCredentialVault, now: options.now,
-  }) : null;
-  const pluginGraphConnectionController = pluginStore ? new PluginOutlookGraphConnectionController({
-    store: pluginStore, productStore, manager: pluginMcpConnectionManager,
-    calendar: outlookCalendarGraph, now: options.now,
-  }) : null;
-  const pluginBearerController = pluginStore ? new PluginBearerConnectionController({
-    store: pluginStore, productStore, manager: pluginMcpConnectionManager,
-    vault: pluginCredentialVault,
-    verifyBearer: options.pluginGitHubBearerVerifier || (token =>
-      require("./plugin-github-bearer-verifier").verifyGitHubBearer(token,
-        { fetchImpl: options.pluginGitHubFetch || globalThis.fetch })),
-    verifyCloudflare: options.pluginCloudflareBearerVerifier || (token =>
-      require("./plugin-cloudflare-bearer-verifier").verifyCloudflareBearer(token,
-        { fetchImpl: options.pluginCloudflareFetch || globalThis.fetch })),
-    now: options.now,
-  }) : null;
-  const pluginConnectionController = pluginStore ? new PluginConnectionController({
-    store: pluginStore, productStore, now: options.now,
-    credentialDispositionForConnection: ({ connection, installation }) => {
-      const packageId = installation.sourceIdentity?.startsWith("bundled:")
-        ? installation.sourceIdentity.slice("bundled:".length) : null;
-      if (packageId === "gmail"
-        && connection.endpointIdentity?.startsWith(`${GMAIL_TRANSPORT}:`)) {
-        return "retained_encrypted_shared";
-      }
-      if (!isGraphSidecar(packageId)
-        || !connection.endpointIdentity?.startsWith(`${GRAPH_SIDECAR_TRANSPORT}:`)) return null;
-      return outlookCalendarGraph.hasStoredAccount() ? "retained_encrypted_shared" : "none";
-    },
-    drainConnection: id => pluginMcpConnectionPool.drainConnection(id),
-    cancelStaleOAuth: async bindings => {
-      await pluginOAuthController.cancelStaleForBindings(bindings);
-      await pluginGraphConnectionController.cancelStaleForBindings(bindings);
-    },
-    invalidateConnection: connectionId => {
-      pluginToolCatalogRegistry.invalidate(connectionId);
-      pluginAppController.revoke({ connectionId });
-    },
-  }) : null;
   let hookToolExecution = null;
-  const pluginRuntimeToolService = pluginStore ? new PluginRuntimeToolService({
-    store: pluginStore, productStore, permissionEngine, getRun: id => workDispatcher.getRun(id),
-    toolCatalogRegistry: pluginToolCatalogRegistry,
-    capabilityDispatcher: pluginCapabilityDispatcher,
-    hookToolExecution: () => hookToolExecution,
-    acquireConnection: records => pluginMcpConnectionManager.acquire(records),
-    requestApproval: input => workRunCoordinator.requestPluginToolApproval(input),
-    requestElicitation: input => workRunCoordinator.requestPluginMcpElicitation(input),
-    recordAppCall: input => pluginAppController.recordCall(input),
-  }) : null;
-  const authorizeExternalPluginIdentity = async (backendId, token, identity) => {
-      if (!authorizeExternalPluginAdapter(paths, backendId, token)) return false;
-      try {
-        const agent = options.externalPluginAgentVerifier
-          ? await options.externalPluginAgentVerifier(identity)
-          : (await federationHostClient.request("agent.get", {
-            backendId, agentId: identity.agentId })).agent;
-        return agent?.id === identity.agentId && agent?.backendId === backendId;
-      } catch { return false; }
-  };
-  const externalPluginSelectionDispatch = pluginStore ? new ExternalPluginSelectionDispatch({
-    paths, store: pluginStore, toolCatalogRegistry: pluginToolCatalogRegistry,
-    authorizeAdapter: authorizeExternalPluginIdentity, now: options.now,
-    onRevokeExecution: identity => externalPluginToolService.cancelExecution(identity),
-  }) : null;
-  const externalPluginLeaseManager = pluginStore ? new ExternalPluginLeaseManager({
-    authorizeAdapter: authorizeExternalPluginIdentity,
-    now: options.now,
-    randomBytes: options.externalPluginLeaseRandomBytes,
-  }) : null;
-  const externalPluginProvenance = pluginStore ? new ExternalPluginProvenance({
-    paths, store: pluginStore, now: options.now,
-  }) : null;
-  const externalPluginApprovalBroker = pluginStore ? new ExternalPluginApprovalBroker({
-    now: options.now,
-  }) : null;
-  const externalPluginToolService = pluginStore ? new ExternalPluginToolService({
-    store: pluginStore, resolver: pluginComponentResolver,
-    toolCatalogRegistry: pluginToolCatalogRegistry,
-    capabilityDispatcher: pluginCapabilityDispatcher,
-    acquireConnection: records => pluginMcpConnectionManager.acquire(records),
-    leaseManager: externalPluginLeaseManager,
-    selectionDispatch: externalPluginSelectionDispatch,
-    provenance: externalPluginProvenance,
-    approvalBroker: externalPluginApprovalBroker,
-    getNativeSkillStore: () => nativeSkillStore,
-  }) : null;
-  const pluginAppController = pluginStore ? new PluginAppController({
-    store: pluginStore, productStore, getRun: id => workDispatcher.getRun(id),
-    getConversation: run => {
-      const key = workRunCoordinator.getRunSessionKey(run);
-      const session = key && chatSessionStore.getSession(key);
-      return session ? { id: key, profileId: session.profileId } : null;
-    }, manager: pluginMcpConnectionManager, catalog: pluginToolCatalogRegistry,
-    dispatcher: pluginCapabilityDispatcher, permissionEngine, now: options.now,
-  }) : null;
   const productMcpApprovalPolicy = options.productMcpApprovalPolicy
     || new ProductMcpApprovalPolicy({ toolRegistry, permissionEngine, productStore });
   const serviceResourcesPath = options.resourcesPath || process.resourcesPath;
@@ -2082,10 +1692,10 @@ function createAgentService(options) {
     profileExists: (profileId) => productStore.getAgentProfile(profileId) !== null,
     now: options.now,
   });
-  const baseSkillStore = pluginComponentResolver
-    ? new PluginSkillFacade({ nativeStore: nativeSkillStore,
-      resolver: pluginComponentResolver,
-      toolCatalogRegistry: pluginToolCatalogRegistry }) : nativeSkillStore;
+  const baseSkillStore = nativeSkillStore;
+  const larkCliConnectorController = new LarkCliConnectorController({
+    paths, skillStore: nativeSkillStore, ...options.larkCliOptions,
+  });
   const runtimeSkillStore = new LearnedSkillFacade({ base: baseSkillStore, store: learningStore,
     sources: { assertRefs: (...args) => learningSources.assertRefs(...args) },
     getRun: runId => productStore.getWorkRun(runId) });
@@ -2094,20 +1704,116 @@ function createAgentService(options) {
     fs: options.nativeMcpFs,
     now: options.now,
   });
+  const mcpConnectorSecrets = new McpConnectorSecrets({ secretStore });
+  secretStore.setClassificationProvider?.(ref => {
+    if (!nativeMcpStoreOpened) return null;
+    const id = ref.startsWith("mcp-connector:") ? ref.slice(14) : null;
+    return id ? require("./credential-classification").classificationFor(nativeMcpStore.getPrivate(id)) : null;
+  });
+  const mcpPackageLauncher = new McpPackageLauncher({ env: options.parentEnv });
+  const mcpRegistryClient = options.mcpRegistryClient || new McpRegistryClient({ packageLauncher: mcpPackageLauncher });
   const nativeMcpClientManager = options.nativeMcpClientManager || new NativeMcpClientManager({
     store: nativeMcpStore,
     spawn: options.nativeMcpSpawn,
     env: options.parentEnv,
+    secrets: mcpConnectorSecrets,
+    packageLauncher: mcpPackageLauncher,
   });
-  const pluginHooks = pluginStore && pluginComponentResolver ? new (require("./plugin-hook-registry").PluginHookRegistry)({ store: pluginStore, resolver: pluginComponentResolver, now: options.now }) : null;
+  const mcpOAuthClient = options.mcpOAuthClient || new McpOAuthClient({ store: nativeMcpStore,
+    secrets: mcpConnectorSecrets, callbackPort: options.mcpOAuthCallbackPort,
+    onChange: event => mcpConnectorController.authorizationChanged(event).catch(() => {}) });
+  nativeMcpClientManager.setOAuth?.(mcpOAuthClient);
+  const mcpConnectorController = options.mcpConnectorController || new McpConnectorController({
+    store: nativeMcpStore, secrets: mcpConnectorSecrets, manager: nativeMcpClientManager,
+    registry: mcpRegistryClient, packageLauncher: mcpPackageLauncher, oauth: mcpOAuthClient, paths,
+    getSubjects: connectorSubjects, getOwner: getMcpRequestOwner,
+    waitForSetupOwner: async owner => {
+      if (owner.backendId && owner.backendId !== "shoggoth") {
+        const generation = mcpConnectorController.agentSetup.generation;
+        while (!mcpConnectorController.closed && generation === mcpConnectorController.agentSetup.generation) {
+          const result = await federationHostClient.request("mcp.connection.status", {
+            backendId: owner.backendId, agentId: owner.agentId, sessionId: owner.sessionKey,
+          });
+          if (result.idle) return true;
+          await new Promise(resolve => { const timer = setTimeout(resolve, 1000); timer.unref?.(); });
+        }
+        return false;
+      }
+      if (!owner.runId) return false;
+      const source = await workRunCoordinator.waitForTerminal(owner.runId);
+      return source.status === "completed";
+    },
+    chatUiStore: { upsertConnectionRequest: (...args) => chatUiStore.upsertConnectionRequest(...args) },
+    assertSecretSafe: value => { if (secretStore.withPlaintextMatcher(matches => matches(value)) !== false) throw serviceError("MCP_TOOL_SECRET_REJECTED", "MCP data contains a secret"); },
+    onComplete: async ({ owner, server, idempotencyKey }) => {
+      if (owner.backendId && owner.backendId !== "shoggoth") {
+        const receipt = await federationHostClient.request("mcp.connection.ack", { backendId: owner.backendId,
+          agentId: owner.agentId, sessionId: owner.sessionKey, requestId: idempotencyKey });
+        if (receipt.status !== "accepted") throw serviceError("MCP_REQUEST_ACK_UNKNOWN", "The original acknowledgement needs verification; it will not be resent");
+        return receipt;
+      }
+      return workRunCoordinator.send({ operationId: idempotencyKey, sessionKey: owner.sessionKey,
+        prompt: "[Connection request completed] The requested MCP connector is ready. Re-check available connectors and continue the original request." });
+    },
+    now: options.now,
+  });
+  const officialSkillConnectorController = new OfficialSkillConnectorController({
+    paths, skillStore: nativeSkillStore, mcpController: mcpConnectorController, env: options.parentEnv,
+    assertSecretSafe: value => { if (secretStore.withPlaintextMatcher(matches => matches(value)) !== false) throw serviceError("MCP_TOOL_SECRET_REJECTED", "Official connector data contains a secret"); },
+    ...options.officialSkillOptions,
+  });
+  let mcpExternalToolService = null, mcpExternalApprovalBroker = null;
+  const appleDeviceApprovalBroker = new AppleDeviceApprovalBroker({
+    assertSecretSafe: value => { if (secretStore.withPlaintextMatcher(matches => matches(value)) !== false) throw serviceError("MCP_TOOL_SECRET_REJECTED", "Device approval contains a secret"); },
+  });
+  const appleDeviceController = options.appleDeviceController || new AppleDeviceController({ paths,
+    host: federationHostClient, getSubjects: connectorSubjects,
+    requestApproval: input => {
+      if (input.identity.backendId !== "shoggoth") return appleDeviceApprovalBroker.request(input);
+      return workRunCoordinator.requestToolApproval({
+        runId: input.identity.runId, profileId: input.identity.profileId,
+        toolName: input.name, packageName: input.name.startsWith("apple_calendar_") ? "Apple 日历" : "Apple 提醒事项",
+        purpose: "device", reason: input.reason,
+        arguments: input.reviewOnly ? { target: input.reviewOnly, arguments: input.arguments } : input.arguments,
+        signal: input.signal, assertCurrent: input.assertCurrent,
+      });
+    },
+  });
+  // Native device calls use the normal native approval card. External device
+  // calls share the existing inbox, retaining the exact external conversation.
+  mcpConnectorController.getApprovals = () => ({
+    list: () => ({ items: [...appleDeviceApprovalBroker.list().items,
+      ...(mcpExternalApprovalBroker?.list().items || [])].slice(0, 128), generation: lifecycleGeneration }),
+    resolve: params => {
+      if (params.requestId.startsWith("apple-device-")) return appleDeviceApprovalBroker.resolve(params);
+      if (!mcpExternalApprovalBroker) throw serviceError("MCP_EXTERNAL_APPROVAL_INVALID", "审批已失效");
+      return mcpExternalApprovalBroker.resolve(params);
+    },
+  });
+  function getMcpRequestOwner(input) {
+    if (input.backendId && input.backendId !== "shoggoth") return federationHostClient.request("mcp.connection.owner", {
+      backendId: input.backendId, agentId: input.agentId, sessionId: input.sessionKey,
+    }).then(value => value.owner);
+    const session = chatSessionStore.getSession(input.sessionKey);
+    const profile = productStore.getAgentProfile(input.agentId)
+      || productStore.listAgentProfiles().find(p => p.agentId === input.agentId);
+    if (!session || !profile || profile.enabled !== true || session.profileId !== profile.id) throw serviceError("MCP_REQUEST_ACCESS_DENIED", "Connection request owner is unavailable");
+    return { profileId: profile.id, transcriptSessionId: session.id, sessionKey: session.sessionKey,
+      agentId: profile.agentId || profile.id, backendId: "shoggoth" };
+  }
+  function getModelProjectionOwner(input) {
+    if (!input.backendId || input.backendId === "shoggoth") return getMcpRequestOwner(input);
+    return federationHostClient.request("model.projection.owner", {
+      backendId: input.backendId, agentId: input.agentId, sessionId: input.sessionKey,
+    }).then(value => value.owner);
+  }
   const hookStore = options.hookStore || new HookStore({ paths, now: options.now });
-  hookStore.pluginHooks = pluginHooks;
   const hookProcessHost = options.hookProcessHost || new HookProcessHost({ store: hookStore,
     cacheDir: paths.hookEphemeralDir || path.join(paths.cacheDir, "hooks"),
     pythonExecutable: options.hookPythonExecutable });
   const hookRunner = options.hookRunner || new HookRunner({ store: hookStore, processHost: hookProcessHost, now: options.now });
   const hookWorkspaceWriters = new HookWorkspaceWriters();
-  const hookService = options.hookService || new HookService({ store: hookStore, runner: hookRunner, processHost: hookProcessHost, pluginHooks,
+  const hookService = options.hookService || new HookService({ store: hookStore, runner: hookRunner, processHost: hookProcessHost,
     productStore, getRun: id => workDispatcher.getRun(id), toolRegistry, permissionEngine,
     isMemorySharingQuery: (run, tool, payload) => tool?.scope === "product" && tool.name === "memory_search"
       && payload?.arguments?.memoryScope !== "own" && memoryEngine?.sharing?.policy({ profileId: run.profileId,
@@ -2155,7 +1861,7 @@ function createAgentService(options) {
         }
         return found;
       }
-      if (scope === "plugin_mcp") return pluginRuntimeToolService?.hookToolTargets(actor.run, matcher) || [];
+      if (scope === "connector") return []; // Historical scope; the OpenConnector executor is retired.
       if (scope === "runtime_builtin") return (hookService.capabilities(actor.profile, actor.run).scopes.runtime_builtin.guard.toolNames || [])
         .filter(matches).map(name => ({ name }));
       return [];
@@ -2241,6 +1947,8 @@ function createAgentService(options) {
     paths, memoryEngine });
   memoryEngine.setSemanticSearchService?.(nativeMemorySemanticService);
   const contextCompiler = options.contextCompiler || new ContextCompiler({
+    projectText: (input, text) => require("../core/chat-secret-fallback").projectTextOrOriginal(temporarySecrets, { profileId: input.profile.id,
+      sessionId: workRunCoordinator?.getRunSessionKey(input.run) || input.transcriptSessionId || `${input.run.source}:${input.run.sourceId}` }, text),
     definitionStore: agentDefinitionStore,
     memoryEngine,
     semanticSearch: nativeMemorySemanticService,
@@ -2344,7 +2052,6 @@ function createAgentService(options) {
         }
         await computerUseController?.closeForProfile(profile.id);
         await browserUseController.closeForProfile(profile.id);
-        pluginStore?.assertProfilePurgeReady(profile.id);
       },
       listPublishedArtifacts() {
         // A custom artifact location is external to the App-owned cleanup scope.
@@ -2355,7 +2062,7 @@ function createAgentService(options) {
       purgeProfile(profile) {
         // Drop all cross-store references before the Product snapshot. Replays
         // are idempotent, and shared Inspiration notes/accounts remain intact.
-        pluginStore?.purgeProfileBindings(profile.id);
+        revokeConnectorProfileAccess(profile.id);
         learningStore.purgeProfile(profile.id);
         for (const store of retentionStores) store.purgeProfile(profile.id);
         productStore.purgeArchivedProfile(profile.id);
@@ -2433,8 +2140,9 @@ function createAgentService(options) {
           chatUiController.profileChanged(payload.profileId);
           eventBuffer.append("agent.profile.changed", { ...payload, backendId: payload.backendId });
         },
-        ...(pluginStore ? { revokePluginProfile: (profileId) =>
-          pluginStore.revokeProfileBindings(profileId) } : {}),
+        revokeSharedProfileAccess: profileId => {
+          revokeConnectorProfileAccess(profileId);
+        },
         now: options.now,
       })
       : unavailableAgentLifecycleServiceController);
@@ -2579,7 +2287,7 @@ function createAgentService(options) {
   };
   const handleRunTerminal = (run, payload) => {
     queueMemoryConsolidation(run, payload);
-    if (shoggothMemory && run) void shoggothMemory.finishActiveMemoryRun(run).catch(() => {});
+    if (shoggothMemory && run) void shoggothMemory.finishActiveMemoryRun(run, payload?.status ?? run.status).catch(() => {});
     if (!shoggothMemory && payload?.status === "completed" && ["chat", "inspiration"].includes(run?.source)
       && !isNativeFederationChatRun(run)) {
       // A completed direct user conversation triggers background consolidation
@@ -2631,14 +2339,21 @@ function createAgentService(options) {
     },
     ...(options.runtimeSupportDiscover ? { discover: options.runtimeSupportDiscover } : {}),
   });
+  const runtimeExtensionStatusController = createRuntimeExtensionStatusController({
+    productStore, extensionCatalog, extensionRuntimeAdapters, runtimeManager,
+  });
   const createDefaultWorkRunCoordinator = () => createWorkRunCoordinator({
+    temporarySecrets,
+    secretMedia,
     ...(shoggothMemory ? { beforeMemoryCompaction: input => shoggothMemory.flushBeforeCompaction(input) } : {}),
     hookService, hookWorkspaceWriters,
-    pluginRuntimeToolService,
-    pluginStore,
-    pluginToolCatalogRegistry,
-    preparePluginSelection: pluginCatalogRestorer
-      ? selection => pluginCatalogRestorer.prepareSelection(selection) : null,
+    hostMemoryCommands: shoggothMemory ? new (require("./host-memory-commands").HostMemoryCommands)({
+      memory: shoggothMemory,
+      conversation: new ConversationMemoryService({ memoryEngine, memoryStore, transcriptStore, chatSessionStore,
+        getRunSessionKey: run => run.source === "chat" ? run.sourceId : null,
+        memoryProvenanceService }),
+    }) : null,
+    mcpConnectorController,
     dispatcher: workDispatcher,
     productStore,
     usageStore: tokenUsageStore,
@@ -2659,14 +2374,23 @@ function createAgentService(options) {
       productStore.getAgentRuntimeBinding(session.profileId, session.runtimeBindingId), profile,
       session.modelOverride ?? profile.defaultModel) : {},
     runExecutionStore,
-    captureExecutionProviderRoute: (profile, modelRef) => captureExecutionProviderRoute({
-      productStore, secretStore, profile, modelRef,
+    resolveMemoryTextRoute: require("./memory-text-route").createMemoryTextRouteResolver({
+      productStore, chatSessionStore,
+      getConfigProjection: () => nativeMemoryConfig.initialized ? nativeMemoryConfig.read()
+        : { revision: 0, config: options.memoryCoreConfig || {} },
+      captureProviderRoute: (profile, model) => captureExecutionProviderRoute({ productStore, secretStore, profile, modelRef: model }),
+      assertProviderRoute: route => assertExecutionProviderRouteCurrent(route, { productStore, secretStore }),
+    }),
+    captureExecutionProviderRoute: (profile, modelRef, providerRef) => captureExecutionProviderRoute({
+      productStore, secretStore, profile, modelRef, providerRef,
     }),
     assertExecutionProviderRouteCurrent: (contract) => assertExecutionProviderRouteCurrent(contract, {
       productStore, secretStore,
     }),
     resolveRunSession: (run) => inspirationStore.executionForRun(run.id),
     assertProactiveRunCurrent: run => proactiveService.assertRunCurrent(run),
+    submitProactiveResponse: (run, response) => proactiveService.respond(run, response),
+    proactiveModelUsage: (run, measured) => proactiveService.modelUsage(run, measured),
     productMcpApprovalPolicy,
     onRunInteraction: handleRunInteraction,
     onRunTerminal: handleRunTerminal,
@@ -2744,6 +2468,10 @@ function createAgentService(options) {
     chatSessionStore,
     transcriptStore,
     coordinator,
+    revokeSessionSecrets: async session => {
+      const scope = { profileId: session.profileId, sessionId: session.sessionKey };
+      for (const item of temporarySecrets.list(scope)) await secretExecution.revokeReference(scope, item.reference);
+    },
     memoryCommands: shoggothMemory?.activeMemoryCommands,
     getInspirationService: () => inspirationService,
     getProactiveSessionOrigin: sessionKey => proactiveStore.sessionOrigin(sessionKey),
@@ -2794,13 +2522,6 @@ function createAgentService(options) {
       revision: event.revision, reason: event.reason,
     });
   });
-  const createDefaultCodexSecurityServiceController = () => pluginStore
-    && workRunCoordinator instanceof WorkRunCoordinator
-    ? createCodexSecurityServiceController({ store: pluginStore, resolver: pluginComponentResolver,
-      bundledCatalog: bundledPluginCatalog, productStore, dispatcher: workDispatcher,
-      capabilityIssuer: workRunCoordinator.hostCapabilityIssuer, runtimeAccountAdmission,
-      accountAuthManager, getCoordinator: () => workRunCoordinator }) : null;
-  let codexSecurityServiceController = createDefaultCodexSecurityServiceController();
   if (shoggothMemory) {
     shoggothMemory.sharing.onRevoked = runId => {
       chatUiController.reconcileSources(); return workRunCoordinator.stopBorrowedMemoryRun?.(runId);
@@ -2858,16 +2579,24 @@ function createAgentService(options) {
   shoggothMemory?.attach({ conversationRecall: conversationRecallService, checkpointStore: conversationCheckpointStore,
     getConfigProjection: () => nativeMemoryConfig.initialized
       ? nativeMemoryConfig.read() : { revision: 0, config: options.memoryCoreConfig || {} },
-    resolveModelContext: input => workRunCoordinator.resolveMemoryModelContext(input),
-    prepareModelContext: input => workRunCoordinator.prepareMemoryModelContext(input),
+    resolveModelContext: input => {
+      try { return workRunCoordinator.resolveMemoryModelContext(input, "memory_text"); }
+      catch (error) {
+        // Local-only still permits the native eligibility/strong-trigger path.
+        // Any deep recall reaches prepareModelContext and remains disabled.
+        if (error?.code === "MEMORY_TEXT_MODEL_DISABLED") return null;
+        throw error;
+      }
+    },
+    prepareModelContext: input => workRunCoordinator.prepareMemoryModelContext(input, "memory_text"),
     complete: ({ profileId, prompt, model, modelSelection, execution, sessionKey, timeoutMs, signal, assertCurrent, onText }) => {
-      return workRunCoordinator.generateMemoryImportText({ profileId, prompt,
+      return workRunCoordinator.generateMemoryText({ profileId, prompt,
         operationId: `shoggoth-memory-${crypto.randomUUID()}`, maxOutputBytes: 64 * 1024,
         ...(model ? { model } : {}), ...(sessionKey ? { sessionKey } : {}),
         ...(modelSelection ? { modelSelection } : {}),
         ...(execution ? { execution } : {}),
         ...(onText ? { onText } : {}),
-        timeoutMs: Math.min(timeoutMs || 180_000, 15 * 60_000), ...(signal ? { signal } : {}),
+        timeoutMs: Math.min(timeoutMs || 600_000, 60 * 60_000), ...(signal ? { signal } : {}),
         ...(assertCurrent ? { assertCurrent } : {}) });
     } });
   memoryEngine.recallPolicy?.setOnChange?.((profileId) => {
@@ -2904,6 +2633,7 @@ function createAgentService(options) {
     getCoordinator: () => workRunCoordinator,
   });
   const inspirationService = new InspirationService({
+    localAttachmentProjection: true,
     store: inspirationStore, productStore, chatSessionStore, transcriptStore, paths,
     dispatcher: workDispatcher, getCoordinator: () => workRunCoordinator,
     executor: domainWorkRunExecutor, now: options.now,
@@ -2914,7 +2644,7 @@ function createAgentService(options) {
   const inspirationReminders = new InspirationReminderService({ inspirationStore, inspirationService,
     proactiveStore, now: options.now });
   const proactiveVerifier = new (require("./proactive-runtime-verifier").ProactiveRuntimeVerifier)({ store: proactiveStore,
-    productStore, codexAdapter: codexRuntimeAdapter, now: options.now });
+    productStore, codexAdapter: codexRuntimeAdapter, runtimeManager, now: options.now });
   let proactiveCliFacts = { at: -Infinity, rows: [] };
   const proactiveProfileAvailable = profile => {
     if (options.proactiveProfileAvailable) return options.proactiveProfileAvailable(profile);
@@ -2939,8 +2669,9 @@ function createAgentService(options) {
   const webSettings = new WebSettings({ paths, secretStore });
   const webService = options.webService || new WebService({ settings: webSettings });
   const heartbeatDocuments = new HeartbeatDocumentStore({ paths, productStore });
+  const dailyReviewDocuments = new DailyReviewDocumentStore({ paths, productStore });
   const proactiveService = new ProactiveService({ store: proactiveStore, productStore, dispatcher: workDispatcher,
-    heartbeatDocuments, webService,
+    heartbeatDocuments, dailyReviewDocuments, webService,
     executor: domainWorkRunExecutor, getCoordinator: () => workRunCoordinator, reminders: inspirationReminders,
     delivery: noticeDelivery, usageStore: tokenUsageStore, now: options.now, randomUUID: options.randomUUID,
     reviewTimeoutMs: options.proactiveReviewTimeoutMs,
@@ -3152,9 +2883,6 @@ function createAgentService(options) {
   let mcpAuthFailureGeneration = null;
   let mcpAuthMigration = null;
   let storeOpened = false;
-  let pluginStoreOpened = false;
-  let externalPluginProvenanceOpened = false;
-  let externalPluginSelectionDispatchOpened = false;
   let tokenUsageStoreOpened = false;
   let secretStoreOpened = false;
   let mcpCryptoBrokerOpened = false;
@@ -3163,7 +2891,6 @@ function createAgentService(options) {
   let providerServiceOpened = false;
   let accountAuthStateOpened = false;
   let accountAuthManagerOpened = false;
-  let codexSecurityServiceControllerOpened = false;
   let runtimeSessionOwnershipStoreOpened = false;
   let runtimeAccountServiceControllerOpened = false;
   let profileServiceControllerOpened = false;
@@ -3285,6 +3012,22 @@ function createAgentService(options) {
       };
     }
     const controller = new McpProductToolController({
+      secretExecution,
+      getSecretScope: async (authority, scope) => {
+        scope?.assertCurrent();
+        if (authority.federationClient) {
+          if (!scope?.mcpSubject?.profileId || !scope?.mcpIdentity?.sessionId) throw serviceError("SECRET_REFERENCE_FORBIDDEN", "凭据调用身份不可用");
+          const identity = scope.mcpIdentity;
+          const owner = await getMcpRequestOwner({ backendId: identity.backendId, agentId: identity.agentId, sessionKey: identity.sessionId });
+          scope.assertCurrent();
+          if (owner?.profileId !== scope.mcpSubject.profileId) throw serviceError("SECRET_REFERENCE_FORBIDDEN", "凭据调用身份不可用");
+          return { profileId: owner.profileId, sessionId: owner.sessionKey };
+        }
+        const run = workDispatcher.getRun(scope?.runId);
+        const sessionId = run && (workRunCoordinator.getRunSessionKey(run) || run.sourceId);
+        if (!run || run.profileId !== authority.profileId || !sessionId) throw serviceError("SECRET_REFERENCE_FORBIDDEN", "凭据调用不属于当前会话");
+        return { profileId: authority.profileId, sessionId };
+      },
       workspaceExecutionService,
       getExecutionContract: runId => workRunCoordinator.runExecutionContracts.get(runId),
       onNativeGroupToolExposure: ({ profileId, runId, name }) => {
@@ -3298,6 +3041,45 @@ function createAgentService(options) {
         } });
       },
       hookService, hookToolExecution,
+      mcpConnectorController,
+      appleDeviceController,
+      getAppleDeviceCaller: (authority, scope) => {
+        scope.assertCurrent();
+        if (authority.federationClient) {
+          if (!scope.mcpIdentity || !scope.mcpSubject) throw serviceError("APPLE_DEVICE_IDENTITY_REQUIRED", "设备调用缺少可信会话");
+          const identity = scope.mcpIdentity;
+          return { profileId: scope.mcpSubject.profileId, identity: {
+            backendId: identity.backendId, agentId: identity.agentId, sessionId: identity.sessionId,
+            profileId: scope.mcpSubject.profileId, runId: scope.mcpSubject.runId, callId: authority.callId,
+          } };
+        }
+        const run = workDispatcher.getRun(scope.runId), profile = productStore.getAgentProfile(authority.profileId);
+        if (!run || run.profileId !== authority.profileId || !profile?.enabled) throw serviceError("APPLE_DEVICE_IDENTITY_REQUIRED", "设备调用所属执行已失效");
+        const sessionId = workRunCoordinator.getRunSessionKey(run) || run.sourceId;
+        return { profileId: authority.profileId, identity: { backendId: "shoggoth", agentId: profile.agentId || profile.id,
+          sessionId, profileId: authority.profileId, runId: run.id, callId: authority.callId } };
+      },
+      getMcpRequestOwner: async (authority, scope) => {
+        if (authority.federationClient) {
+          if (!scope?.mcpIdentity || !scope?.mcpSubject) throw serviceError("MCP_REQUEST_ACCESS_DENIED", "Connection request has no trusted external owner");
+          const identity = scope.mcpIdentity;
+          const owner = await getMcpRequestOwner({ backendId: identity.backendId, agentId: identity.agentId, sessionKey: identity.sessionId });
+          if (owner.profileId !== scope.mcpSubject.profileId) throw serviceError("MCP_REQUEST_ACCESS_DENIED", "Connection request identity mismatch");
+          return { ...owner, runId: scope.mcpSubject.runId };
+        }
+        const run = workDispatcher.getRun(scope?.runId);
+        if (!run || run.profileId !== authority.profileId) throw serviceError("MCP_REQUEST_ACCESS_DENIED", "Connection request owner is unavailable");
+        if (run.source !== "chat" || isGroupChatRun(run)) throw serviceError("MCP_REQUEST_PRIVATE_CHAT_REQUIRED", "请在私聊中完成连接器连接或凭据填写。");
+        const session = chatSessionStore.getSession(run.sourceId);
+        return { ...getMcpRequestOwner({ agentId: authority.profileId, sessionKey: session?.sessionKey }), runId: run.id };
+      },
+      resolveMcpSubject: (authority, scope) => {
+        if (authority.federationClient) {
+          if (!scope?.mcpSubject) throw serviceError("MCP_CONNECTOR_ACCESS_DENIED", "A per-agent federation identity is required");
+          return scope.mcpSubject;
+        }
+        return { profileId: authority.profileId, runId: scope?.runId || null };
+      },
       productStore,
       domainController: nativeDomainServiceController,
       agentLifecycleService: agentLifecycleServiceController,
@@ -3315,19 +3097,6 @@ function createAgentService(options) {
       skillStore: runtimeSkillStore,
       nativeMcpStore,
       nativeMcpClientManager,
-      pluginRuntimeToolService,
-      pluginAuthoringService,
-      pluginQuickSetup,
-      requestPluginSecretInput: async ({ run, scope, card, signal }) => {
-        const result = await workRunCoordinator.requestProductUserInput({ runId: run.id,
-          profileId: run.profileId, signal, assertCurrent: scope.assertCurrent,
-          params: { message: card.message, requestedSchema: { type: "object", properties: {
-            [card.field.id]: { type: "string", title: card.field.title,
-              description: card.field.description, format: "password" },
-          }, required: [card.field.id] } } });
-        return result?.action === "accept" && typeof result.content?.[card.field.id] === "string"
-          ? result.content[card.field.id] : null;
-      },
       conversationMemoryService: new ConversationMemoryService({
         memoryEngine, memoryStore, transcriptStore, chatSessionStore,
         memoryProvenanceService,
@@ -3352,7 +3121,8 @@ function createAgentService(options) {
         productStore, cronStore: nativeCronStore, kanbanStore: nativeKanbanStore,
         inspirationStore, inspirationService, chatSessionStore, usageStore: tokenUsageStore,
         runtimeAccountController: runtimeAccountServiceController,
-        nativeSkillStore, skillStore: runtimeSkillStore, nativeMcpStore, pluginStore, bundledPluginCatalog, agentDefinitionStore,
+        nativeSkillStore, skillStore: runtimeSkillStore, nativeMcpStore, agentDefinitionStore,
+        getConnectorStatus: () => ({ state: nativeMcpStoreOpened ? "ready" : "unavailable", version: "mcp" }),
         federationClient: federationHostClient, computerUseController, browserUseController,
         productToolCount: toolRegistry.mcpDefinitions().length,
         getSettings: () => browserConfigStore.read(),
@@ -3606,7 +3376,9 @@ function createAgentService(options) {
         socket.destroy();
         return;
       }
-      if (close && !socket.destroyed) socket.end();
+      // A one-shot RPC has no further input authority once its reply drains.
+      // Release both halves even if a Python peer is still waiting for EOF.
+      if (close && !socket.destroyed) socket.end(() => socket.destroy());
     });
   }
 
@@ -3813,6 +3585,7 @@ function createAgentService(options) {
       MCP_AUTH_FAILED: "mcp_auth_failed",
       MCP_AUTH_REQUEST_INVALID: "mcp_auth_request_invalid",
       MCP_SESSION_INVALID: "mcp_session_invalid",
+      PLUGIN_PLATFORM_RETIRED: "旧插件平台已退役，请在连接器中重新连接并授权账号",
       EXTERNAL_PLUGIN_LEASE_INVALID: "external_plugin_lease_invalid",
       EXTERNAL_PLUGIN_LEASE_BUSY: "external_plugin_lease_busy",
       EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE: "external_plugin_audit_unavailable",
@@ -3933,6 +3706,20 @@ function createAgentService(options) {
     return result;
   }
 
+  function ensureExternalMcpTools() {
+    if (!mcpExternalToolService) {
+      mcpExternalApprovalBroker = new McpExternalApprovalBroker({ generation: lifecycleGeneration,
+        assertSecretSafe: value => { if (secretStore.withPlaintextMatcher(matches => matches(value)) !== false) throw serviceError("MCP_TOOL_SECRET_REJECTED", "MCP approval data contains secrets"); } });
+      mcpExternalToolService = new McpExternalToolService({ paths, connector: mcpConnectorController,
+        toolController: mcpProductToolController, approvalBroker: mcpExternalApprovalBroker,
+        getPermissionProfile: () => productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID),
+        getSubjects: connectorSubjects, getNativeSkillStore: () => nativeSkillStore, hookService,
+        assertHostCurrent: () => { if (lifecycleState !== "started" || maintenanceQuiesced) throw serviceError("MCP_EXTERNAL_CALL_CANCELLED", "Service admission is closed"); },
+        assertSecretSafe: value => { if (secretStore.withPlaintextMatcher(matches => matches(value)) !== false) throw serviceError("MCP_TOOL_SECRET_REJECTED", "MCP arguments contain a secret"); },
+      });
+    }
+    return mcpExternalToolService;
+  }
   async function handleMcpRequest(socket, request) {
     const id = request.id;
     if (!exactObject(request, ["id", "version", "method", "params"])) {
@@ -3965,69 +3752,19 @@ function createAgentService(options) {
       } else if (["group.adapter.register", "group.adapter.unregister", "group.adapter.call"].includes(request.method)) {
         if (lifecycleState !== "started" || maintenanceQuiesced) throw serviceError("SERVICE_UNAVAILABLE", "群工具通道不可用");
         result = await groupAdapterChannel.handle(request.method, request.params);
-      } else if (["plugin.external.selection.bind", "plugin.external.selection.finish"].includes(request.method)) {
-        if (lifecycleState !== "started" || !externalPluginSelectionDispatchOpened) {
-          throw serviceError("EXTERNAL_PLUGIN_SELECTION_UNAVAILABLE", "external_plugin_selection_unavailable");
-        }
-        if (!exactObject(request.params, ["credentialToken", "envelope", "identity"])) {
-          throw serviceError("MCP_AUTH_REQUEST_INVALID", "mcp_auth_request_invalid");
-        }
-        result = await externalPluginSelectionDispatch[
-          request.method === "plugin.external.selection.bind" ? "bind" : "finish"](request.params);
+      } else if (["mcp.external.model.bind", "mcp.external.model.release"].includes(request.method)) {
+        result = await externalModelProjection.handle(request.method, request.params);
+      } else if (["mcp.external.tool", "mcp.external.cancel"].includes(request.method)) {
+        if (lifecycleState !== "started" || maintenanceQuiesced) throw serviceError("MCP_CONNECTORS_UNAVAILABLE", "MCP connector admission is closed");
+        const controller = new AbortController(); const onDisconnect = () => controller.abort();
+        socket.once("end", onDisconnect); socket.once("close", onDisconnect);
+        activeRuntimeRequests += 1;
+        try { result = await ensureExternalMcpTools().handle(request.method, request.params, { signal: controller.signal }); }
+        finally { activeRuntimeRequests -= 1; socket.off("end", onDisconnect); socket.off("close", onDisconnect); }
+      } else if (request.method.startsWith("connector.external.")) {
+        throw serviceError("OPEN_CONNECTOR_RETIRED", "OpenConnector has been retired; use MCP connectors");
       } else if (request.method.startsWith("plugin.external.")) {
-        if (lifecycleState !== "started" || !externalPluginToolService) {
-          throw serviceError("SERVICE_UNAVAILABLE", "service_unavailable");
-        }
-        const params = request.params;
-        const fields = request.method === "plugin.external.open"
-          ? ["credentialToken", "identity", ...(params && Object.hasOwn(params, "selectionEnvelope") ? ["selectionEnvelope"] : [])]
-          : request.method === "plugin.external.search"
-            ? ["token", "identity", "query", "cursor", "limit", "revision"]
-            : request.method === "plugin.external.skill.read"
-              ? ["token", "identity", "skillId", "cursor"]
-              : request.method === "plugin.external.skill.file.read"
-                || request.method === "plugin.external.resource.read"
-                ? ["token", "identity", "skillId", "relativePath", "cursor"]
-              : request.method === "plugin.external.call"
-                ? ["token", "identity", "serverId", "toolName", "arguments"]
-                : ["token", "identity"];
-        if (!exactObject(params, fields)
-          && !(request.method === "plugin.external.search"
-            && exactObject(params, ["token", "identity", "query", "cursor", "limit"]))) {
-          throw serviceError("MCP_AUTH_REQUEST_INVALID", "mcp_auth_request_invalid");
-        }
-        if (request.method === "plugin.external.open") result = await externalPluginToolService.open(params);
-        else if (request.method === "plugin.external.search") result = await externalPluginToolService.search(params);
-        else if (request.method === "plugin.external.skill.read") result = await externalPluginToolService.readSkill(params);
-        else if (request.method === "plugin.external.skill.file.read") result = await externalPluginToolService.readSkillFile(params);
-        else if (request.method === "plugin.external.resource.read") {
-          result = await externalPluginToolService.readPluginResource(params);
-        }
-        else if (request.method === "plugin.external.call") {
-          let finished = false;
-          let disconnected = false;
-          // The one-shot socket uses allowHalfOpen. Once a complete JSONL frame
-          // is parsed, acceptSocket marks it terminal and its generic `end`
-          // handler intentionally leaves the readable half alone. A vanished
-          // adapter can therefore emit `end` without `close` until this call
-          // finishes. Treat either event as cancellation for this long call.
-          const onDisconnect = () => {
-            if (!finished && !disconnected) {
-              disconnected = true;
-              try { externalPluginToolService.cancel(params); } catch { /* Already settled or revoked. */ }
-            }
-          };
-          socket.once("end", onDisconnect);
-          socket.once("close", onDisconnect);
-          if (socket.readableEnded || socket.destroyed) onDisconnect();
-          try { result = await externalPluginToolService.call(params); }
-          finally {
-            finished = true;
-            socket.off("end", onDisconnect);
-            socket.off("close", onDisconnect);
-          }
-        }
-        else { externalPluginToolService.cancel(params); result = { canceled: true }; }
+        throw serviceError("PLUGIN_PLATFORM_RETIRED", "旧插件平台已退役，请在连接器中重新连接并授权账号");
       } else if (request.method === "mcp.auth.challenge") {
         const manager = await ensureMcpSessionManager();
         result = manager.issueChallenge(request.params);
@@ -4129,17 +3866,22 @@ function createAgentService(options) {
       if (handler?.close) handler.close();
       revokeActiveSession();
     };
-    const askBridgeUser = (method, params) => {
+    const askBridgeUser = (method, params, requestOptions = {}) => {
       if (method !== "elicitation/create" || closed || socket.destroyed) {
         return Promise.reject(serviceError("MCP_SESSION_INVALID", "mcp_session_invalid"));
       }
-      // Same deadline the Runtime-forwarded path had (MCP_CLIENT_REQUEST_TIMEOUT_MS).
+      // Human input follows the bridge lifecycle, including explicit cancellation.
       const controller = new AbortController();
       promptControllers.add(controller);
-      const timer = setTimeout(() => controller.abort(), MCP_CLIENT_REQUEST_TIMEOUT_MS);
-      timer.unref?.();
-      return workRunCoordinator.requestBridgeElicitation({ runtimeProfileId, runtimeAccountId,
-        runId: gateAuthority.executionRunId, params, signal: controller.signal })
+      const timer = MCP_CLIENT_REQUEST_TIMEOUT_MS === null ? null
+        : setTimeout(() => controller.abort(), MCP_CLIENT_REQUEST_TIMEOUT_MS);
+      timer?.unref?.();
+      return Promise.resolve().then(() => {
+        gateAuthority.assertExecutionCurrent?.();
+        return workRunCoordinator.requestBridgeElicitation({ runtimeProfileId, runtimeAccountId,
+          runId: gateAuthority.executionRunId, params, signal: requestOptions.signal
+            ? AbortSignal.any([controller.signal, requestOptions.signal]) : controller.signal });
+      }).then(result => { gateAuthority.assertExecutionCurrent?.(); return result; })
         .finally(() => { clearTimeout(timer); promptControllers.delete(controller); });
     };
 
@@ -4157,7 +3899,7 @@ function createAgentService(options) {
         activeToken = refreshed.token;
         return refreshed;
       };
-      const requestBridgeService = async (_paths, serviceRequest) => {
+      const requestBridgeService = async (_paths, serviceRequest, requestOptions = {}) => {
         if (maintenanceQuiesced || closed || socket.destroyed || lifecycleGeneration !== generation
           || !mcpAuthGenerationIsActive(generation) || manager !== mcpSessionManager
           || !exactObject(serviceRequest, ["version", "method", "params"])
@@ -4167,6 +3909,8 @@ function createAgentService(options) {
           || serviceRequest.params.runtimeAccountId !== runtimeAccountId) {
           throw serviceError("MCP_SESSION_INVALID", "mcp_session_invalid");
         }
+        if (serviceRequest.method === "mcp.tool.call") gateAuthority.assertExecutionCurrent?.();
+        if (requestOptions.signal?.aborted) throw serviceError("HOST_CAPABILITY_REVOKED", "执行权限租约已失效");
         if (serviceRequest.method === "mcp.tool.call"
           && !workRunCoordinator.hasActiveRuntimeWork?.(runtimeProfileId, runtimeAccountId, gateAuthority.executionRunId)) {
           throw serviceError("MCP_SESSION_INVALID", "mcp_session_invalid");
@@ -4174,11 +3918,18 @@ function createAgentService(options) {
         if (serviceRequest.method === "mcp.tool.call" && USER_WAIT_TOOL_NAMES.has(serviceRequest.params.name)) {
           const controller = new AbortController();
           promptControllers.add(controller);
-          try { return await executeAuthorizedMcpRequest(serviceRequest.method, serviceRequest.params,
-            gateAuthority.executionRunId, controller.signal); }
+          try {
+            const result = await executeAuthorizedMcpRequest(serviceRequest.method, serviceRequest.params,
+              gateAuthority.executionRunId, requestOptions.signal
+                ? AbortSignal.any([controller.signal, requestOptions.signal]) : controller.signal);
+            gateAuthority.assertExecutionCurrent?.(); return result;
+          }
           finally { promptControllers.delete(controller); }
         }
-        return executeAuthorizedMcpRequest(serviceRequest.method, serviceRequest.params, gateAuthority.executionRunId);
+        const result = await executeAuthorizedMcpRequest(serviceRequest.method, serviceRequest.params,
+          gateAuthority.executionRunId, requestOptions.signal);
+        if (serviceRequest.method === "mcp.tool.call") gateAuthority.assertExecutionCurrent?.();
+        return result;
       };
       handler = createMcpStdioHandler({
         reportGroupExposure: true,
@@ -4196,6 +3947,10 @@ function createAgentService(options) {
       });
       bridgeSockets.set(socket, { close: closeBridge });
       sockets.delete(socket);
+      // This server allows half-open sockets so ordinary RPC replies can drain.
+      // A bridge EOF also ends its input/approval authority: waiting for close
+      // would deadlock while runMcpStdioSession drains the abandoned prompt.
+      socket.once("end", closeBridge);
       socket.once("close", closeBridge);
       await writeMcpBridgeAck(socket);
       if (closed || socket.destroyed || lifecycleGeneration !== generation) {
@@ -4353,6 +4108,15 @@ function createAgentService(options) {
         const params = validateNativeMemoryConfigParams(request.method, request.params);
         result = validateNativeMemoryConfigResult(request.method, request.method === "memory.config.context"
           ? { owner: shoggothMemory ? "shoggoth-memory-core" : "legacy",
+            textModelRoutes: productStore.listAgentProfiles().filter(profile => profile.enabled && profile.backendId === "shoggoth")
+              .flatMap(profile => productStore.getAgentRuntimeBindings(profile.id).bindings.filter(binding => binding.enabled).map(binding => {
+                const selected = productStore.resolveAgentRuntimeProfile(profile.id, binding.id);
+                const account = productStore.getRuntimeAccount(selected.runtimeAccountId);
+                return { profileId: profile.id, bindingId: binding.id, name: profile.name,
+                  runtime: selected.runtime, accountName: account?.name || selected.runtimeAccountId,
+                  defaultModel: selected.defaultModel ?? null,
+                  supported: selected.runtime === "codex" || runtimeManager.canGenerateModelOnly?.(selected.runtime) === true };
+              })),
             agents: productStore.listAgentProfiles().filter(profile => profile.enabled && profile.backendId === "shoggoth")
               .map(profile => ({ profileId: profile.id, agentId: profile.agentId, name: profile.name })) }
           : request.method === "memory.config.apply" ? await applyNativeMemoryProjection(params) : nativeMemoryConfig.read());
@@ -4412,7 +4176,7 @@ function createAgentService(options) {
         serviceVersion,
         startedAt,
         instanceNonce,
-        productSchemaVersion: paths.productSchemaVersion || productStore.schemaVersion || 15,
+        productSchemaVersion: paths.productSchemaVersion || productStore.schemaVersion || 16,
         maintenanceQuiesced,
         domainAvailability: domainAvailabilitySnapshot(),
         pendingCommandsLocked: typeof pendingCommandInbox.isLocked === "function"
@@ -4485,320 +4249,54 @@ function createAgentService(options) {
       result = eventBuffer.page(afterSeq, id);
     } else if (request.method === "plugins.external.calls.list") {
       try {
-        if (!exactObject(request, [...baseFields, "params"])
-          || (!exactObject(request.params, ["backendId", "cursor", "limit"])
-            && !exactObject(request.params, ["backendId", "agentId", "sessionId",
-              "toolCallId", "cursor", "limit"]))) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "插件调用记录查询参数无效");
-        }
-        result = externalPluginProvenance.list(request.params);
-      } catch (error) {
-        const code = error?.code === "PLUGIN_REQUEST_INVALID"
-          ? "PLUGIN_REQUEST_INVALID" : "EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (typeof request.method === "string"
-      && request.method.startsWith("plugins.external.approvals.")) {
+        if (!exactObject(request, [...baseFields, "params"])) throw serviceError("PLUGIN_REQUEST_INVALID", "旧记录查询无效");
+        result = require("./legacy-plugin-history").readLegacyPluginCalls(paths, request.params);
+      } catch (error) { errorResponse(socket, id, error?.code === "PLUGIN_REQUEST_INVALID" ? "PLUGIN_REQUEST_INVALID"
+        : "EXTERNAL_PLUGIN_AUDIT_UNAVAILABLE", "旧插件历史记录暂不可读；原始数据已保留"); return; }
+    } else if (typeof request.method === "string" && (request.method.startsWith("plugins.") || request.method.startsWith("plugin."))) {
+      errorResponse(socket, id, "PLUGIN_PLATFORM_RETIRED", "旧插件平台已退役，请在连接器中重新连接并授权账号");
+      return;
+    } else if (OFFICIAL_SKILL_METHODS.includes(request.method)) {
       try {
-        if (!externalPluginApprovalBroker || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "外部插件审批请求无效");
-        }
-        if (request.method === "plugins.external.approvals.list"
-          && exactObject(request.params, ["backendId", "cursor", "limit"])) {
-          result = externalPluginApprovalBroker.list(request.params);
-        } else if (request.method === "plugins.external.approvals.prepare"
-          && exactObject(request.params, ["requestId", "operationId", "decision"])) {
-          result = externalPluginApprovalBroker.prepare(request.params);
-        } else if (request.method === "plugins.external.approvals.commit"
-          && exactObject(request.params, ["challenge", "approved"])) {
-          result = externalPluginApprovalBroker.commit(request.params);
-        } else throw serviceError("PLUGIN_REQUEST_INVALID", "外部插件审批请求无效");
+        if (!exactObject(request, [...baseFields, "params"])) throw serviceError("OFFICIAL_SKILL_INVALID_ARGUMENT", "官方连接器请求无效");
+        const params = validateOfficialSkillParams(request.method, request.params);
+        result = validateOfficialSkillResult(request.method, await officialSkillConnectorController.handle(request.method, params));
       } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
+        const safe = officialSkillPublicError(error);
+        errorResponse(socket, id, safe.code, safe.message); return;
       }
-    } else if (request.method === "plugins.zoom.registration.status") {
+    } else if (LARK_CLI_METHODS.includes(request.method)) {
       try {
-        if (!pluginStore || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, [])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Zoom 配置状态请求无效");
-        }
-        const configured = loadZoomRegistration(paths) !== null;
-        result = { configured, restartRequired: configured && zoomRegistration === null };
+        if (!exactObject(request, [...baseFields, "params"])) throw serviceError("LARK_CLI_INVALID_ARGUMENT", "飞书连接器请求无效");
+        const params = validateLarkCliParams(request.method, request.params);
+        result = validateLarkCliResult(request.method, await larkCliConnectorController.handle(request.method, params));
       } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
+        const safe = larkCliPublicError(error);
+        errorResponse(socket, id, safe.code, safe.message); return;
       }
-    } else if (request.method === "plugins.zoom.registration.configure") {
+    } else if (APPLE_DEVICE_METHODS.includes(request.method)) {
       try {
-        if (!exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Zoom 配置请求 envelope 无效");
-        }
-        result = await configureZoomRegistration(paths, secretStore, request.params);
+        if (!exactObject(request, [...baseFields, "params"])) throw serviceError("APPLE_DEVICE_INVALID_ARGUMENT", "设备连接请求无效");
+        let params;
+        try { params = validateAppleDeviceParams(request.method, request.params); }
+        catch { throw serviceError("APPLE_DEVICE_INVALID_ARGUMENT", "设备连接参数无效"); }
+        result = validateAppleDeviceResult(request.method, await appleDeviceController.handle(request.method, params));
       } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
+        const code = Object.hasOwn(APPLE_DEVICE_PUBLIC_MESSAGES, error?.code || "") ? error.code : "APPLE_DEVICE_UNAVAILABLE";
+        errorResponse(socket, id, code, APPLE_DEVICE_PUBLIC_MESSAGES[code]); return;
       }
-    } else if (request.method === "plugins.dropbox.registration.status") {
+    } else if (CONNECTOR_SERVICE_METHOD_SET.has(request.method)) {
       try {
-        if (!pluginStore || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, [])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Dropbox 配置状态请求无效");
-        }
-        const configured = loadDropboxRegistration(paths) !== null;
-        result = { configured, restartRequired: configured && dropboxRegistration === null };
+        if (!exactObject(request, [...baseFields, "params"])) throw serviceError("CONNECTOR_REQUEST_INVALID", "连接器请求无效");
+        try { validateConnectorParams(request.method, request.params); } catch { throw serviceError("CONNECTOR_REQUEST_INVALID", "连接器参数无效"); }
+        result = await mcpConnectorController.handle(request.method, request.params);
       } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
+        const publicError = connectorPublicError(error);
+        errorResponse(socket, id, publicError.code, publicError.message);
         return;
       }
-    } else if (request.method === "plugins.dropbox.registration.configure") {
-      try {
-        if (!exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Dropbox 配置请求 envelope 无效");
-        }
-        result = await configureDropboxRegistration(paths, secretStore, request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.gmail.registration.status") {
-      try {
-        if (!gmailRuntime || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, [])) throw serviceError("PLUGIN_REQUEST_INVALID", "Gmail 状态请求无效");
-        result = gmailRuntime.status();
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "GMAIL_REGISTRATION_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.gmail.registration.configure") {
-      try {
-        if (!gmailRuntime || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, ["credentialsPath"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Gmail 客户端导入请求无效");
-        }
-        result = await gmailRuntime.configure(request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "GMAIL_REGISTRATION_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.gmail.capabilities.status") {
-      try {
-        if (!gmailRuntime || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, [])) throw serviceError("PLUGIN_REQUEST_INVALID", "Gmail 权限状态请求无效");
-        result = gmailRuntime.capabilities();
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "GMAIL_CAPABILITIES_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.gmail.capabilities.configure") {
-      try {
-        if (!gmailRuntime || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Gmail 权限设置请求无效");
-        }
-        result = gmailRuntime.configureCapabilities(request.params);
-        for (const connection of pluginStore.listConnections()) {
-          if (connection.endpointIdentity?.startsWith(`${GMAIL_TRANSPORT}:`)) {
-            pluginToolCatalogRegistry.invalidate(connection.connectionId);
-            void pluginMcpConnectionPool.drainConnection(connection.connectionId).catch(() => {});
-          }
-        }
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "GMAIL_CAPABILITIES_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (["plugins.gmail.auth.start", "plugins.gmail.auth.status",
-      "plugins.gmail.auth.cancel", "plugins.gmail.auth.pending",
-      "plugins.gmail.auth.reconcile"].includes(request.method)) {
-      try {
-        if (!pluginGmailController || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Gmail 账号连接请求无效");
-        }
-        result = request.method === "plugins.gmail.auth.start"
-          ? pluginGmailController.start(request.params)
-          : request.method === "plugins.gmail.auth.cancel"
-            ? pluginGmailController.cancel(request.params)
-            : request.method === "plugins.gmail.auth.pending"
-              ? { pending: pluginGmailController.pendingAuthorization(request.params) }
-            : request.method === "plugins.gmail.auth.reconcile"
-              ? await pluginGmailController.reconcile(request.params)
-              : pluginGmailController.status(request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "GMAIL_AUTH_FAILED";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.graph.registration.status") {
-      try {
-        if (!pluginStore || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, [])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Graph 配置状态请求无效");
-        }
-        result = getGraphRegistrationStatus(paths, outlookCalendarGraph);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.graph.registration.configure") {
-      try {
-        if (!pluginStore || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Graph 配置请求 envelope 无效");
-        }
-        result = configureGraphRegistration(paths, outlookCalendarGraph, request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.lovable.registration.status") {
-      try {
-        if (!lovableRegistration || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, [])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Lovable 配置状态请求无效");
-        }
-        result = lovableRegistration.status();
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.lovable.registration.configure") {
-      try {
-        if (!lovableRegistration || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Lovable 配置请求无效");
-        }
-        result = await lovableRegistration.configure(request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "CONNECTION_AUTH_REQUIRED";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.lovable.registration.reconcile") {
-      try {
-        if (!lovableRegistration || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Lovable 待核对登记请求无效");
-        }
-        result = lovableRegistration.reconcile(request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "LOVABLE_REGISTRATION_NEEDS_VERIFICATION";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.higgsfield.registration.status") {
-      try {
-        if (!higgsfieldRegistration || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, [])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Higgsfield 配置状态请求无效");
-        }
-        result = higgsfieldRegistration.status();
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.higgsfield.registration.configure") {
-      try {
-        if (!higgsfieldRegistration || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Higgsfield 配置请求无效");
-        }
-        result = await higgsfieldRegistration.configure(request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "CONNECTION_AUTH_REQUIRED";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.higgsfield.registration.reconcile") {
-      try {
-        if (!higgsfieldRegistration || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Higgsfield 待核对登记请求无效");
-        }
-        result = higgsfieldRegistration.reconcile(request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "HIGGSFIELD_REGISTRATION_NEEDS_VERIFICATION";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.slack.registration.status") {
-      try {
-        if (!slackRegistration || !exactObject(request, [...baseFields, "params"])
-          || !exactObject(request.params, [])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Slack 配置状态请求无效");
-        }
-        result = slackRegistration.status();
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === "plugins.slack.registration.configure") {
-      try {
-        if (!slackRegistration || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "Slack 配置请求无效");
-        }
-        result = slackRegistration.configure(request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_REQUEST_INVALID";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (request.method === CODEX_SECURITY_STATUS_METHOD) {
-      try {
-        if (!codexSecurityServiceController || !exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("CODEX_SECURITY_SERVICE_INVALID", "Codex Security 只读请求无效");
-        }
-        result = await codexSecurityServiceController.status(request.params);
-      } catch (error) {
-        const code = Object.hasOwn(CODEX_SECURITY_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "CODEX_SECURITY_SERVICE_UNAVAILABLE";
-        errorResponse(socket, id, code, CODEX_SECURITY_PUBLIC_MESSAGES[code]);
-        return;
-      }
-    } else if (PLUGIN_SERVICE_METHOD_SET.has(request.method)) {
-      if (!pluginServiceController) {
-        errorResponse(socket, id, "PLUGIN_UNAVAILABLE", "插件管理服务不可用");
-        return;
-      }
-      try {
-        if (!exactObject(request, [...baseFields, "params"])) {
-          throw serviceError("PLUGIN_REQUEST_INVALID", "插件管理请求 envelope 无效");
-        }
-        result = await pluginServiceController.handle(request.method, request.params);
-      } catch (error) {
-        const code = Object.hasOwn(PLUGIN_PUBLIC_MESSAGES, error?.code)
-          ? error.code : "PLUGIN_SERVICE_FAILED";
-        errorResponse(socket, id, code, PLUGIN_PUBLIC_MESSAGES[code]);
-        return;
-      }
+    } else if (typeof request.method === "string" && request.method.startsWith("connector.")) {
+      errorResponse(socket, id, "OPEN_CONNECTOR_RETIRED", "OpenConnector has been retired; use MCP connectors"); return;
     } else if (["provider.endpoints.list", "provider.endpoints.save", "provider.endpoints.delete", "provider.endpoints.discover"].includes(request.method)) {
       const fields = request.method === "provider.endpoints.list" ? ["profileId"]
         : request.method === "provider.endpoints.delete" ? ["profileId", "id"] : ["profileId", "endpoint"];
@@ -4865,6 +4363,22 @@ function createAgentService(options) {
       if (!validateAuthResult(request.method, result)) {
         errorResponse(socket, id, "AUTH_RESPONSE_INVALID", "账户认证响应无效");
         return;
+      }
+    } else if (request.method === runtimeExtensionStatusProtocol.METHOD) {
+      try {
+        if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("INVALID_PARAMS", "Invalid status request");
+        runtimeExtensionStatusProtocol.validateParams(request.params);
+        result = runtimeExtensionStatusController.read();
+      } catch { errorResponse(socket, id, "RUNTIME_EXTENSION_STATUS_INVALID", "Runtime extension status is unavailable"); return; }
+    } else if (require("./chat-secret-service").METHODS.includes(request.method)) {
+      try {
+        if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("SECRET_INPUT_INVALID", "Invalid envelope");
+        result = await chatSecretService.handle(request.method, request.params);
+      } catch (error) {
+        const messages = require("../core/chat-secret-contract").SECRET_MESSAGES;
+        const code = Object.hasOwn(messages, error?.code) ? error.code : "SECRET_PROCESSING_UNAVAILABLE";
+        writeResponse(socket, { id: id ?? null, ok: false, error: { code, message: messages[code],
+          ...(code === "SECRET_INPUT_REVIEW_REQUIRED" ? { ranges: error.ranges } : {}) } }); return;
       }
     } else if (request.method === "runtime.observability.get") {
       if (!exactObject(request, ["id", "token", "version", "method", "params"]) || !exactObject(request.params, [])) {
@@ -5368,7 +4882,6 @@ function createAgentService(options) {
     runtimeMcpGateIssuer,
     accountAuthStateStore,
     accountAuthManager,
-    get codexSecurityServiceController() { return codexSecurityServiceController; },
     profileServiceController,
     agentLifecycleServiceController,
     agentArchiveRetention,
@@ -5387,39 +4900,14 @@ function createAgentService(options) {
     nativeSkillStore,
     runtimeSkillStore,
     nativeMcpStore,
-    pluginStore,
-    pluginPackageInstaller,
-    pluginComponentCatalog,
-    pluginComponentResolver,
-    pluginServiceController,
-    pluginMcpConsent,
-    pluginCatalogRestorer,
-    pluginAppController,
-    pluginOAuthController,
-    pluginGraphConnectionController,
-    outlookCalendarGraph,
-    pluginBearerController,
-    pluginGmailController,
-    gmailRuntime,
-    pluginDependencyController,
-    pluginRollbackController,
-    pluginConnectionController,
-    pluginRuntimeToolService,
-    externalPluginToolService,
-    externalPluginSelectionDispatch,
-    externalPluginProvenance,
-    externalPluginApprovalBroker,
-    pluginMcpConnectionManager,
-    pluginCredentialVault,
-    pluginConnectionAuth,
-    pluginToolCatalogRegistry,
-    pluginCapabilityDispatcher,
-    pluginMcpConnectionPool,
-    pluginQuickSetup,
-    pluginSecretStore,
-    firstPartyPluginSync,
-    // The report of the first-party sync this start ran in the background.
-    firstPartyPluginSyncDone: () => firstPartySyncDone,
+    mcpConnectorController,
+    larkCliConnectorController,
+    officialSkillConnectorController,
+    appleDeviceController,
+    appleDeviceApprovalBroker,
+    get mcpExternalToolService() { return mcpExternalToolService; },
+    get connectorRuntime() { return null; },
+    get connectorController() { return null; },
     nativeMcpClientManager,
     systemHostController,
     computerUseController,
@@ -5485,13 +4973,13 @@ function createAgentService(options) {
       // 注入的底层实现同步重入 stop，也一定能等待并 fence 这一代启动。
       const currentStart = Promise.resolve().then(async () => {
         let acquiredLock;
+        let connectorRetirementError = null;
         try {
           assertStartGeneration(generation);
           if (defaultCoordinatorRetired && !options.workRunCoordinator) {
             workRunCoordinator = createDefaultWorkRunCoordinator();
             chatUiController.coordinator = workRunCoordinator;
             defaultCoordinatorRetired = false;
-            codexSecurityServiceController = createDefaultCodexSecurityServiceController();
           }
           if (defaultControllerRetired && !options.chatServiceController) {
             chatServiceController = createDefaultChatServiceController(workRunCoordinator);
@@ -5543,6 +5031,11 @@ function createAgentService(options) {
           if (staleSocketStat) fs.unlinkSync(paths.socketPath);
           if (!options.productStore && !options.chatSessionStore) recoverStalePersistentWriterLeases(paths);
           assertStartGeneration(generation);
+          // The one-time cutover snapshot must precede every Store and recovery
+          // writer. Failure isolates Connectors; ordinary Service startup remains
+          // available, and the old platform is never instantiated.
+          try { markLegacyPluginPlatformRetired(paths, { activeServiceLock: ownedLockIdentity }); }
+          catch (error) { connectorRetirementError = connectorPublicError(error).code; }
           // 单实例锁取得后才打开 Store，确保整个产品状态只有 Service 这一位 writer。
           runtimeMcpGateIssuerOpened = true;
           await runtimeMcpGateIssuer.open();
@@ -5552,6 +5045,9 @@ function createAgentService(options) {
           assertStartGeneration(generation);
           secretStoreOpened = true;
           await secretStore.open();
+          // Temporary projection failure does not close history/result services.
+          try { await temporarySecrets.open(); await secretExecution.open(); modelSecretGateway.reset(); externalModelProjection.reset(); }
+          catch (error) { runtimeTelemetry.record("secret.startup.unavailable", { code: error?.code || "SECRET_PROCESSING_UNAVAILABLE" }); }
           assertStartGeneration(generation);
           storeOpened = true;
           productStore.open();
@@ -5567,62 +5063,9 @@ function createAgentService(options) {
           }
           catch (error) { console.error(`[agent-service] learning store unavailable: ${error?.code || "UNKNOWN"}`); }
           automationWorkRunStore.open();
-          if (pluginStore) {
-            pluginStoreOpened = true;
-            pluginStore.open();
-            // This database is a derived audit view, not product authority.
-            // Keep native chat and plugin management available if it cannot
-            // open; external tool egress will fail closed at audit begin().
-            try {
-              externalPluginProvenance.open();
-              externalPluginProvenanceOpened = true;
-            } catch {
-              console.error("[agent-service] external plugin audit isolated: unavailable");
-            }
-            // Selection receipts are a separate Host-dispatch authority. A
-            // damaged database must close that feature without hiding native
-            // chat or reviving a selected operation after Service restart.
-            try {
-              externalPluginSelectionDispatch.open();
-              externalPluginSelectionDispatchOpened = true;
-            } catch {
-              console.error("[agent-service] external plugin selection isolated: unavailable");
-            }
-            // A crash can leave ProductStore disabled while the separate
-            // plugin transaction has not yet run. Fence it before IPC opens.
-            for (const profile of productStore.listAgentProfiles()) {
-              if (!profile.enabled) pluginStore.revokeProfileBindings(profile.id);
-            }
-            // OAuth may have committed a new Microsoft identity just before a
-            // crash, leaving old plugin Connections marked ready in the Store.
-            // Demote them before any tool-catalog restoration or IPC opens.
-            await pluginGraphConnectionController.reconcileStoredAccount();
-            pluginMcpConnectionPool.open();
-            // The tool catalog is process-local. Restore only this internal,
-            // fixed-contract Graph tool after checking a current global
-            // Binding and allowed Grant in PluginStore. The encrypted OAuth
-            // record alone never publishes a callable tool after restart.
-            const graphProfile = productStore.listAgentProfiles().find(profile => profile.enabled);
-            if (graphProfile) {
-              for (const binding of pluginStore.listGlobalBindings()) {
-                const installation = pluginStore.getInstallation(binding.installationId);
-                const graphPackageId = installation?.sourceIdentity?.startsWith("bundled:")
-                  ? installation.sourceIdentity.slice("bundled:".length) : null;
-                if (!binding.enabled || !isGraphSidecar(graphPackageId)
-                  || installation.desiredState !== "enabled"
-                  || pluginStore.getGrantCountsForBinding(binding.bindingId).allow < 1) continue;
-                try {
-                  await pluginMcpConsent.discover({ profileId: graphProfile.id,
-                    bindingId: binding.bindingId });
-                } catch (error) {
-                  // A stale Connection, changed package or missing credential
-                  // stays unavailable; regular Service startup still succeeds.
-                  console.error("[agent-service] Microsoft Graph tool restore unavailable:", error.code || "UNKNOWN");
-                }
-                assertStartGeneration(generation);
-              }
-            }
-          }
+          // OpenConnector state is retained byte-for-byte; no old store or sidecar is opened.
+          try { markOpenConnectorRetired(paths); }
+          catch (error) { console.error(`[agent-service] OpenConnector retirement receipt unavailable: ${error?.code || "UNKNOWN"}`); }
           for (const entry of runtimeExtensions) {
             const runtime = entry.envelope.manifest.runtime, id = `extension-${runtime}`;
             if (!productStore.getRuntimeAccount(id)) productStore.putRuntimeAccount({ id, runtime,
@@ -5679,8 +5122,14 @@ function createAgentService(options) {
           await nativeSkillStore.open(
             productStore.listAgentProfiles().map((profile) => profile.id),
           );
+          larkCliConnectorController.open();
           nativeMcpStoreOpened = true;
           nativeMcpStore.open();
+          nativeMcpClientManager.open?.(); mcpOAuthClient.open?.();
+          mcpConnectorController.open();
+          officialSkillConnectorController.open();
+          appleDeviceApprovalBroker.open(generation);
+          appleDeviceController.open();
           browserUseControllerOpened = true;
           await browserUseController.open();
           if (computerUseController) {
@@ -5894,7 +5343,8 @@ function createAgentService(options) {
             if (["kanban", "cron", "inspiration"].includes(run.source)) continue;
             if (run.source === "chat" && run.status === "starting") continue;
             if (run.source === "chat" && options.workRunCoordinator === undefined
-              && recoverableCommandRuns.has(run.id) && runExecutionStore.has?.(run) === true) continue;
+              && recoverableCommandRuns.has(run.id)
+              && (runExecutionStore.has?.(run) === true || workRunCoordinator.hasHostMemoryTransaction?.(run) === true)) continue;
             const recovered = workDispatcher.recoverActiveRunAfterServiceRestart(run.id);
             publishFederationTerminal(recovered, {
               status: recovered.status,
@@ -5940,12 +5390,9 @@ function createAgentService(options) {
           workRunCoordinatorOpened = true;
           await workRunCoordinator.open();
           if (!chatUiController.storageError) await chatUiController.recoverOperations();
-          if (codexSecurityServiceController) {
-            codexSecurityServiceControllerOpened = true;
-            codexSecurityServiceController.open();
-          }
           workRunCoordinator.recoverCronChatSessions?.();
           workRunCoordinatorReady = true;
+          mcpConnectorController.agentSetup.changed();
           inspirationService.open();
           await proactiveService.open();
           // Resume only user-opted-in profiles. open() independently repeats
@@ -5981,19 +5428,6 @@ function createAgentService(options) {
           assertStartGeneration(generation);
           lifecycleState = "started";
           stallMonitor.start();
-          // First-party plugins sync before catalog restore so an update's drain
-          // never competes with restored connections. Failures are logged per
-          // package and never block startup; restore waits at most 5 seconds.
-          firstPartySyncDone = firstPartyPluginSync ? firstPartyPluginSync.sync().then(report => {
-            if (report.failed.length) console.error("[agent-service] first-party plugins not synced:", JSON.stringify(report.failed));
-            return report;
-          }, error => {
-            console.error("[agent-service] first-party plugin sync failed:", error?.code || error?.message);
-            return null;
-          }) : Promise.resolve(null);
-          void Promise.race([firstPartySyncDone, new Promise(resolve => setTimeout(resolve, 5_000).unref?.())]).then(() => {
-            if (lifecycleState === "started" && lifecycleGeneration === generation) pluginCatalogRestorer?.start();
-          });
           // Model validation and indexing run off the launch/admission path.
           void nativeMemorySemanticService.start().catch(() => {});
           memoryCandidateAbortController = new AbortController();
@@ -6083,7 +5517,6 @@ function createAgentService(options) {
       if (lifecycleState === "stopping" || lifecycleState === "stop_failed") return stopping;
       const ownsInstance = server !== null || lockFd !== null
         || ownedSocketIdentity !== null || ownedLockIdentity !== null || storeOpened
-        || pluginStoreOpened || externalPluginProvenanceOpened || externalPluginSelectionDispatchOpened
         || bridgeSockets.size > 0
         || secretStoreOpened || externalProviderCredentialRpcOpened || externalProviderWriterVerifier || memoryProviderOwnerRpc?.opened
         || mcpCryptoBrokerOpened || mcpSessionManager
@@ -6136,6 +5569,46 @@ function createAgentService(options) {
     stallMonitor.stop();
     chatUiController.stopLifecycle();
     const errors = [];
+    // Admission is already fenced by stop(). Revoke long-lived MCP channels
+    // before awaiting any owned Connector shutdown or unrelated cleanup.
+    for (const [socket, bridge] of bridgeSockets) {
+      try { bridge.close(); } catch (error) { errors.push(error); }
+      try { socket.destroy(); } catch (error) { errors.push(error); }
+    }
+    bridgeSockets.clear();
+    const activeServer = server;
+    server = null;
+    let closePromise = Promise.resolve();
+    if (activeServer) {
+      closePromise = new Promise((resolve) => {
+        try {
+          activeServer.close((error) => {
+            if (error) errors.push(error);
+            resolve();
+          });
+        } catch (error) {
+          errors.push(error);
+          resolve();
+        }
+      });
+    }
+    // MCP bridges have already been revoked before asynchronous cleanup.
+    // Connections without a dispatched request have nothing to drain and must
+    // not hold shutdown open until their frame timer expires.
+    for (const socket of sockets) {
+      if (inFlightSockets.has(socket)) continue;
+      try { socket.destroy(); } catch (error) { errors.push(error); }
+    }
+    mcpExternalToolService?.close(); mcpExternalToolService = null; mcpExternalApprovalBroker = null;
+    larkCliConnectorController.stopAdmission();
+    officialSkillConnectorController.stopAdmission();
+    try { await officialSkillConnectorController.close(); } catch (error) { errors.push(error); }
+    try { await larkCliConnectorController.close(); } catch (error) { errors.push(error); }
+    appleDeviceApprovalBroker.close();
+    appleDeviceController.stopAdmission();
+    try { await appleDeviceController.close(); } catch (error) { errors.push(error); }
+    mcpConnectorController.stopAdmission();
+    try { await mcpConnectorController.close(); } catch (error) { errors.push(error); }
     // Withdraw catalog admission now; join its actual tail after the memory
     // engine's provider shutdown, and before closing the credential store.
     memoryProviderOwnerGeneration = null;
@@ -6148,7 +5621,6 @@ function createAgentService(options) {
     groupNativeToolPreparation.stop();
     if (proactiveServiceOpened) { proactiveServiceOpened = false; try { await proactiveService.close(); } catch (error) { errors.push(error); } }
     try { await proactiveScheduler.waitForIdle(); } catch (error) { errors.push(error); }
-    pluginCatalogRestorer?.stop();
     if (memoryCandidateBacklogTimer) clearTimeout(memoryCandidateBacklogTimer);
     memoryCandidateBacklogTimer = null;
     for (const timer of memoryConsolidationTimers.values()) clearTimeout(timer);
@@ -6174,35 +5646,6 @@ function createAgentService(options) {
     externalProviderWriterVerifier = null;
     if (retiredWriterVerifier) {
       try { await retiredWriterVerifier.close(); } catch (error) { errors.push(error); }
-    }
-    const activeServer = server;
-    server = null;
-    let closePromise = Promise.resolve();
-    if (activeServer) {
-      closePromise = new Promise((resolve) => {
-        try {
-          activeServer.close((error) => {
-            if (error) errors.push(error);
-            resolve();
-          });
-        } catch (error) {
-          errors.push(error);
-          resolve();
-        }
-      });
-    }
-    // MCP bridge 是长连接，不进入普通 one-request drain。先撤销其内存 session
-    // 并断开 socket，避免 server.close 等到 MCP client 自行 EOF。
-    for (const [socket, bridge] of bridgeSockets) {
-      try { bridge.close(); } catch (error) { errors.push(error); }
-      try { socket.destroy(); } catch (error) { errors.push(error); }
-    }
-    bridgeSockets.clear();
-    // Connections without a dispatched request have nothing to drain and must
-    // not hold shutdown open until their frame timer expires.
-    for (const socket of sockets) {
-      if (inFlightSockets.has(socket)) continue;
-      try { socket.destroy(); } catch (error) { errors.push(error); }
     }
     // Stop accepting first, then give already-dispatched requests one bounded
     // drain window to flush their single JSONL response. Idle/blocked clients
@@ -6254,10 +5697,6 @@ function createAgentService(options) {
       agentLifecycleServiceControllerOpened = false;
       try { await agentLifecycleServiceController.close(); } catch (error) { errors.push(error); }
     }
-    if (codexSecurityServiceControllerOpened) {
-      codexSecurityServiceControllerOpened = false;
-      try { codexSecurityServiceController.close(); } catch (error) { errors.push(error); }
-    }
     if (accountAuthManagerOpened) {
       accountAuthManagerOpened = false;
       try { await accountAuthManager.close(); } catch (error) { errors.push(error); }
@@ -6292,6 +5731,10 @@ function createAgentService(options) {
     mcpAuthInitAttempt = null;
     mcpAuthFailureGeneration = null;
     if (mcpCryptoBrokerOpened) {
+      externalModelProjection.close();
+      try { await modelSecretGateway.close(); } catch (error) { errors.push(error); }
+      try { await secretExecution.close(); } catch (error) { errors.push(error); }
+      try { await temporarySecrets.close(); } catch (error) { errors.push(error); }
       mcpCryptoBrokerOpened = false;
       try { await mcpCryptoBroker.close(); } catch (error) { errors.push(error); }
     }
@@ -6402,28 +5845,6 @@ function createAgentService(options) {
       nativeKanbanStoreOpened = false;
       try { await nativeKanbanStore.close(); } catch (error) { errors.push(error); }
     }
-    if (pluginMcpConnectionPool) {
-      try { await pluginPackageInstaller?.remoteGitFetcher?.close(); } catch (error) { errors.push(error); }
-      pluginDependencyController?.clear();
-      pluginRollbackController?.clear();
-      pluginConnectionController?.clear();
-      pluginBearerController?.clear();
-      try { await pluginOAuthController?.close(); } catch (error) { errors.push(error); }
-      pluginGraphConnectionController?.clear();
-      pluginGmailController?.close();
-      try { await outlookCalendarGraph?.close(); } catch (error) { errors.push(error); }
-      pluginMcpConsent?.clear();
-      pluginAppController?.clear();
-      pluginRuntimeToolService?.clear();
-      externalPluginToolService?.clear();
-      externalPluginApprovalBroker?.clear();
-      pluginMcpConnectionManager?.clear();
-      try { await pluginMcpConnectionPool.close(); } catch (error) { errors.push(error); }
-    }
-    if (pluginCapabilityDispatcher) {
-      try { pluginCapabilityDispatcher.clear(); } catch (error) { errors.push(error); }
-      try { pluginToolCatalogRegistry.clear(); } catch (error) { errors.push(error); }
-    }
     if (permissionEngineOpened) {
       permissionEngineOpened = false;
       try { await permissionEngine.close(); } catch (error) {
@@ -6447,18 +5868,6 @@ function createAgentService(options) {
       computerUseControllerOpened = false;
       try { await computerUseController.close(); } catch (error) { errors.push(error); }
     }
-    if (pluginStoreOpened) {
-      if (externalPluginSelectionDispatchOpened) {
-        externalPluginSelectionDispatchOpened = false;
-        try { externalPluginSelectionDispatch.close(); } catch (error) { errors.push(error); }
-      }
-      if (externalPluginProvenanceOpened) {
-        externalPluginProvenanceOpened = false;
-        try { externalPluginProvenance.close(); } catch (error) { errors.push(error); }
-      }
-      pluginStoreOpened = false;
-      try { pluginStore.close(); } catch (error) { errors.push(error); }
-    }
     if (storeOpened) {
       if (tokenUsageStoreOpened) {
         tokenUsageStoreOpened = false;
@@ -6470,6 +5879,10 @@ function createAgentService(options) {
     }
     try { await webSettings.close(); } catch (error) { errors.push(error); }
     if (secretStoreOpened) {
+      externalModelProjection.close();
+      try { await modelSecretGateway.close(); } catch (error) { errors.push(error); }
+      try { await secretExecution.close(); } catch (error) { errors.push(error); }
+      try { await temporarySecrets.close(); } catch (error) { errors.push(error); }
       secretStoreOpened = false;
       try { await secretStore.close(); } catch (error) { errors.push(error); }
     }

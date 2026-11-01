@@ -1,11 +1,12 @@
 "use strict";
 // Shoggoth asks OpenCode / Grok Build to run their own compaction at the
-// admission budget or advisory working target; Antigravity renews only after
+// effective admission budget; Antigravity renews only after
 // a complete checkpoint and bounded tail are prepared.
 // Real Product/Chat/Transcript stores and Coordinator; only the CLI is a fixture.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { waitUntil } = require("./shoggoth-work-run-coordinator-unit.cjs");
 const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
@@ -15,7 +16,7 @@ const { nativeCompaction, selfManagedCompaction, runtimeContextCapabilities,
 const WINDOW = 100_000;
 
 async function openRuntime(runtime, decorate = () => {}) {
-  const f = await openHandoffFixture();
+  const f = await openHandoffFixture(runtime === "codex" ? { catalogs: { codex: ["fixture-model"] } } : {});
   const config = f.service.nativeRuntimeConfig.read();
   f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
     flags: { ...config.flags, runtimeContextLifecycleV1: true } });
@@ -30,9 +31,10 @@ async function openRuntime(runtime, decorate = () => {}) {
   // fixture transport cannot provide; it is unrelated to the compaction route.
   coordinator.beforeMemoryCompaction = null;
   const manager = coordinator.runtimeManager, acquire = manager.acquire.bind(manager);
+  const decorated = new WeakSet();
   manager.acquire = async (binding, options) => {
     const handle = await acquire(binding, options);
-    if (binding.runtime === runtime && !handle.decorated) { handle.decorated = true; decorate(handle); }
+    if (binding.runtime === runtime && !decorated.has(handle)) { decorated.add(handle); decorate(handle); }
     return handle;
   };
   const session = f.service.chatSessionStore.createSession({ operationId: `create-${crypto.randomUUID()}`,
@@ -61,12 +63,13 @@ const compactionRuns = coordinator => coordinator.dispatcher.listRuns({ source: 
 const compactedMarkers = (f, session) => f.service.transcriptStore.listEvents(session.profileId, session.id)
   .filter(event => event.content?.transcriptType === "context.native.compacted");
 
-test("compaction modes: OpenCode and Codex by command, Grok Build and Pi by turn, Antigravity self-managed", () => {
+test("compaction modes: OpenCode and Codex by command, Grok Build, Pi and DeepSeek by turn, Antigravity self-managed", () => {
   assert.deepEqual(nativeCompaction("opencode"), { mode: "command", automatic: true });
   assert.deepEqual(nativeCompaction("codex"), { mode: "command", automatic: true });
   assert.deepEqual(nativeCompaction("grok-build"), { mode: "turn", automatic: true });
   assert.deepEqual(nativeCompaction("pi"), { mode: "turn", automatic: false });
-  for (const runtime of ["antigravity", "claude-code", "deepseek-harness", "constructor", "__proto__"]) {
+  assert.deepEqual(nativeCompaction("deepseek-harness"), { mode: "turn", automatic: false });
+  for (const runtime of ["antigravity", "claude-code", "constructor", "__proto__"]) {
     assert.equal(nativeCompaction(runtime), null, runtime);
   }
   assert.equal(selfManagedCompaction("antigravity"), true);
@@ -78,6 +81,65 @@ test("compaction modes: OpenCode and Codex by command, Grok Build and Pi by turn
   assert.equal(runtimeContextCapabilities("antigravity")["context.compact.native"], false);
   assert.equal(runtimeContextCapabilities("antigravity")["context.compact.auto"], true);
 });
+
+for (const terminal of ["completed", "failed"]) {
+  test(`Codex: the 380000-token budget waits for its own compaction turn to be ${terminal}`, async () => {
+    let commands = 0;
+    const { f, coordinator, session } = await openRuntime("codex", handle => {
+      handle.host.threadCompactStart = async () => { commands++; return {}; };
+    });
+    try {
+      coordinator.getRuntimeModelContextWindow = () => 475000;
+      coordinator.getRuntimeModelContextLimits = () => ({ inputTokens: 380000 });
+      const first = await f.send(session.sessionKey, `budget-${terminal}-first`);
+      assert.equal(first.status, "running", first.errorCode);
+      const native = first.runtimeSessionRef.sessionId;
+      const host = f.transport.hosts.get("codex");
+      const usage = usedTokens => host.emit({ known: true, type: "context_usage", threadId: native,
+        contextUsage: { runtimeSessionId: native, usedTokens, contextWindow: 475000,
+          quality: "exact", source: "runtime_event", observedAt: Date.now() } });
+      usage(380000);
+      await f.complete(first);
+      const ack = await coordinator.send({ sessionKey: session.sessionKey,
+        operationId: `budget-${terminal}-next`, prompt: "Continue the work" });
+      await waitUntil(() => commands === 1, 5000, "required native compaction");
+      assert.equal(coordinator.getRuntimeContext(f.service.chatSessionStore.getSession(session.sessionKey))
+        .productContext.budget.triggerTokens, 380000);
+      const compact = compactionRuns(coordinator)[0];
+      assert.equal(coordinator.getRun(ack.run.id).status, "queued");
+      assert.equal(coordinator.runQueueStates.get(ack.run.id)?.reason, "CONTEXT_COMPACTING",
+        "native maintenance explains the wait instead of claiming another chat is queued");
+      usage(50000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(coordinator.getRun(compact.id).status, "running", "a new meter cannot finish required compaction");
+      assert.equal(host.turnStartCalls, 1, "the queued input has not reached the CLI");
+      const turnId = `compact-budget-${terminal}`;
+      host.emit(normalizeCodexEvent({ method: "item/completed", params: { threadId: native, turnId,
+        item: { id: "budget-compact-item", type: "contextCompaction" } } }));
+      host.emit(normalizeCodexEvent({ method: "turn/completed", params: { threadId: native,
+        turn: { id: "other-budget-turn", status: "completed" } } }));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(coordinator.getRun(ack.run.id).status, "queued", "a compact item or unrelated turn cannot release input");
+      host.emit(normalizeCodexEvent({ method: "turn/completed", params: { threadId: native,
+        turn: { id: turnId, status: terminal } } }));
+      await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 5000, "post-compaction admission");
+      const run = coordinator.getRun(ack.run.id);
+      assert.equal(run.status, terminal === "completed" ? "running" : "failed", run.errorCode);
+      assert.equal(commands, 1);
+      assert.equal(host.turnStartCalls, terminal === "completed" ? 2 : 1, "input starts once only after a successful matching turn");
+      if (terminal === "completed") {
+        assert.equal(compactedMarkers(f, session).length, 1, "native event and command completion share one boundary");
+        host.emit(normalizeCodexEvent({ method: "thread/compacted", params: { threadId: native, turnId } }));
+        assert.equal(compactedMarkers(f, session).length, 1, "a repeated native cycle cannot add another notice");
+        await f.complete(run);
+      }
+      else {
+        assert.match(run.errorCode, /^RUNTIME_COMPACTION_/u);
+        assert.equal(compactedMarkers(f, session).length, 0, "an item receipt without a successful terminal cannot claim completion");
+      }
+    } finally { await f.close(); }
+  });
+}
 
 test("OpenCode: the waiting input runs once after one native compaction command", async () => {
   let commands = 0;
@@ -100,7 +162,7 @@ test("OpenCode: the waiting input runs once after one native compaction command"
     const [compact] = compactionRuns(coordinator);
     assert.equal(compact.status, "completed");
     assert.equal(compact.resultSummary, "Conversation context compacted.");
-    assert.ok(compactedMarkers(f, current).length >= 1, "the command records its compaction boundary");
+    assert.equal(compactedMarkers(f, current).length, 1, "the command records one compaction boundary");
     await f.complete(run);
     // The boundary keeps later estimates low: no second compaction.
     const later = await sendNext(coordinator, session.sessionKey, "opencode-later");
@@ -169,6 +231,37 @@ test("Grok Build: /compact runs as one native command turn and its compacted not
   } finally { await f.close(); }
 });
 
+for (const historical of [false, true]) test(`DeepSeek manual compact ${historical ? "rejects historical sources before dispatch" : "uses one native command turn"}`, async () => {
+  let commands = 0;
+  const fixture = await openRuntime("deepseek-harness", handle => {
+    handle.capabilities = require("../app/agent-service/deepseek-harness-runtime-adapter").DEEPSEEK_HARNESS_CAPABILITIES;
+    handle.commandExecute = async ({ text }) => { commands++; return { kind: "send", text, warning: null }; };
+  });
+  const { f, coordinator, session } = fixture;
+  try {
+    const first = await f.send(session.sessionKey, `deepseek-seed-${historical}`);
+    await f.complete(first);
+    if (historical) coordinator.conversationCheckpointStore.hasHistoricalSource = () => true;
+    const compact = await f.send(session.sessionKey, `deepseek-manual-${historical}`, "/compact");
+    const host = f.transport.hosts.get("deepseek-harness");
+    if (historical) {
+      assert.equal(compact.status, "failed");
+      assert.equal(compact.errorCode, "CONTEXT_COMPACTION_REQUIRED");
+      assert.equal(commands, 0, "unsafe history cannot enter the CLI command path");
+      assert.equal(host.turnStartCalls, 1, "only the preceding ordinary turn was sent");
+    } else {
+      assert.equal(compact.status, "running");
+      assert.equal(commands, 1);
+      assert.equal(host.lastTurnStartParams.prompt, "/compact");
+      host.emit({ known: true, type: "context_compacted", threadId: compact.runtimeSessionRef.sessionId,
+        turnId: compact.runtimeTurnRef.turnId, contextUsage: unknownRuntimeContextUsage(compact.runtimeSessionRef.sessionId) });
+      await f.complete(compact, "Compacted native history.");
+      const current = f.service.chatSessionStore.getSession(session.sessionKey);
+      assert.equal(compactedMarkers(f, current).length, 1);
+    }
+  } finally { await f.close(); }
+});
+
 test("Antigravity: the planning budget does not refuse input; the CLI compacts internally", async () => {
   const fixture = await openRuntime("antigravity");
   const { f, coordinator, session } = fixture;
@@ -181,12 +274,36 @@ test("Antigravity: the planning budget does not refuse input; the CLI compacts i
   } finally { await f.close(); }
 });
 
-async function workingHistory(f, coordinator, session, prefix) {
+async function workingHistory(f, coordinator, session, prefix, inputTokens = 128000) {
   coordinator.getRuntimeModelContextWindow = () => 1000000;
-  await f.complete(await f.send(session.sessionKey, `${prefix}-first`));
+  coordinator.getRuntimeModelContextLimits = () => ({ inputTokens });
+  const first = await f.send(session.sessionKey, `${prefix}-first`);
+  assert.equal(first.status, "running", first.errorCode);
+  await f.complete(first);
   for (let n = 0; n < 14; n++) f.service.transcriptStore.appendEvent({ profileId: session.profileId, sessionId: session.id,
     id: `${prefix}-old-${n}`, kind: n % 2 ? "assistant" : "user", content: { text: `SOURCE_${n} ${"ordinary words ".repeat(3400)}` } });
   return f.service.chatSessionStore.getSession(session.sessionKey);
+}
+
+for (const runtime of ["codex", "opencode", "grok-build", "antigravity"]) {
+  test(`${runtime}: history above 160K stays on its native session below the effective request limit`, async () => {
+    const { f, coordinator, session } = await openRuntime(runtime);
+    try {
+      const old = await workingHistory(f, coordinator, session, `fitting-${runtime}`, 380000);
+      const run = await sendNext(coordinator, session.sessionKey, `fitting-${runtime}-next`);
+      assert.equal(run.status, "running", run.errorCode);
+      const contract = f.transport.acquisitions.at(-1).options.executionContract;
+      assert.ok(contract.contextRequest.estimatedTokens > 160000);
+      assert.equal(contract.contextRequest.limitTokens, 380000);
+      assert.equal(contract.contextRequest.exceedsBudget, false);
+      assert.equal(compactionRuns(coordinator).length, 0);
+      assert.equal(f.service.transcriptStore.listEvents(session.profileId, session.id)
+        .filter(event => event.content?.transcriptType === "context.maintenance").length, 0,
+      "a fitting request cannot start maintenance that then silently falls back");
+      assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).runtimeSessionId, old.runtimeSessionId);
+      await f.complete(run);
+    } finally { await f.close(); }
+  });
 }
 
 function authorizedSummary(f, coordinator, failAt = Infinity) {
@@ -258,7 +375,7 @@ for (const behavior of ["success", "unavailable", "failure", "later-failure"]) {
 
 for (const runtime of ["opencode", "grok-build"]) {
   for (const outcome of ["success", "failure", "unknown", "timeout", "unsupported"]) {
-    test(`${runtime} advisory working target: ${outcome} never replays maintenance or input`, async () => {
+    test(`${runtime} effective input limit: ${outcome} never replays maintenance or input`, async () => {
       let commands = 0;
       const fixture = await openRuntime(runtime, handle => {
         handle.capabilities = { "context.compact.native": outcome !== "unsupported" };
@@ -290,21 +407,25 @@ for (const runtime of ["opencode", "grok-build"]) {
           await waitUntil(() => compactionRuns(coordinator)[0]?.status === "running", 5000, "native turn compact");
           const compact = compactionRuns(coordinator)[0];
           f.transport.hosts.get(runtime).emit({ known: true, type: "context_compacted", threadId: compact.runtimeSessionRef.sessionId,
-            turnId: compact.runtimeTurnRef.turnId });
+            turnId: compact.runtimeTurnRef.turnId, contextUsage: unknownRuntimeContextUsage(compact.runtimeSessionRef.sessionId) });
           await f.complete(compact);
         }
-        await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 10000, "advisory input admission");
+        await waitUntil(() => ["running", "failed"].includes(coordinator.getRun(ack.run.id).status), 10000, "budget-bound input admission");
         const run = coordinator.getRun(ack.run.id);
-        assert.equal(run.status, "running", run.errorCode);
+        assert.equal(run.status, outcome === "success" ? "running" : "failed", run.errorCode);
+        if (outcome !== "success") {
+          assert.match(run.errorCode, /^RUNTIME_COMPACTION_/u);
+          assert.equal(run.runtimeTurnRef, null, "an uncompleted required compact cannot release the input");
+        }
         assert.equal(commands, outcome === "unsupported" ? 0 : 1);
         assert.equal(compactionRuns(coordinator).length, 1);
         const host = f.transport.hosts.get(runtime);
-        assert.equal(host.threads.flatMap(thread => thread.turns).filter(turn => turn.items.some(item => item.clientId === `${runtime}-${outcome}-next`)).length, 1);
-        await f.complete(run);
+        assert.equal(host.threads.flatMap(thread => thread.turns).filter(turn => turn.items.some(item => item.clientId === `${runtime}-${outcome}-next`)).length, outcome === "success" ? 1 : 0);
+        if (outcome === "success") await f.complete(run);
         const later = await sendNext(coordinator, session.sessionKey, `${runtime}-${outcome}-later`);
-        assert.equal(later.status, "running", later.errorCode);
+        assert.equal(later.status, outcome === "success" ? "running" : "failed", later.errorCode);
         assert.equal(commands, outcome === "unsupported" ? 0 : 1);
-        await f.complete(later);
+        if (outcome === "success") await f.complete(later);
       } finally { await f.close(); }
     });
   }
@@ -453,6 +574,7 @@ for (const complete of [true, false]) {
     const { f, coordinator, session } = await openRuntime("antigravity");
     try {
       coordinator.getRuntimeModelContextWindow = () => 1000000;
+      coordinator.getRuntimeModelContextLimits = () => ({ inputTokens: 128000 });
       await f.complete(await f.send(session.sessionKey, `large-first-${complete}`));
       const old = f.service.chatSessionStore.getSession(session.sessionKey);
       const original = `SOURCE_BIG ${"ordinary words ".repeat(45000)}`;

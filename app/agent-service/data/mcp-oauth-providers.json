@@ -1,0 +1,15 @@
+[
+  {
+    "id": "shoggoth-github",
+    "registryName": "io.github.github/github-mcp-server",
+    "serverUrl": "https://api.githubcopilot.com/mcp/",
+    "clientId": "Iv23liggYIvEK3Fvs4Pz",
+    "issuer": "https://github.com/login/oauth",
+    "metadataUrl": "https://github.com/.well-known/oauth-authorization-server/login/oauth",
+    "deviceAuthorizationEndpoint": "https://github.com/login/device/code",
+    "tokenEndpoint": "https://github.com/login/oauth/access_token",
+    "verificationUri": "https://github.com/login/device",
+    "installationUrl": "https://github.com/apps/shoggoth-desktop/installations/new",
+    "scope": "offline_access"
+  }
+]

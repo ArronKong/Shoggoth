@@ -7,7 +7,7 @@ const { setImmediate: nextTick } = require("node:timers/promises");
 const { openDatabase, transaction } = require("./inspiration-database");
 const { ensurePrivateDirectoryTree, serviceError, validatePrivateFileStat } = require("./security");
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const SCHEMA = `
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE sessions (
@@ -17,7 +17,7 @@ CREATE TABLE sessions (
 );
 CREATE TABLE events (
   id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
-  event_id TEXT NOT NULL, seq INTEGER NOT NULL, run_id TEXT NOT NULL,
+  event_id TEXT NOT NULL, seq INTEGER NOT NULL, run_id TEXT,
   kind TEXT NOT NULL, occurred_at INTEGER NOT NULL, content_hash TEXT NOT NULL,
   search_text TEXT NOT NULL, search_terms TEXT NOT NULL, UNIQUE(session_id, event_id)
 );

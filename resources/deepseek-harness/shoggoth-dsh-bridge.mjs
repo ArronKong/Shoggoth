@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
+import { installModelSecretProjection } from "./shoggoth-dsh-secret-projection.mjs";
 
 export const name = "shoggoth-runtime-bridge";
 export const inject = [
@@ -24,6 +25,12 @@ const PROTOCOL = "shoggoth-dsh-runtime";
 const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const MAX_TEXT_BYTES = 8 * 1024 * 1024;
+// Private bridge-to-Host field only. The Host redacts before any publication.
+function protocolFailure(error) {
+  return typeof error?.message === "string" && Buffer.byteLength(error.message) <= 64 * 1024
+    ? { message: error.message, ...(Number.isInteger(error.status) ? { httpStatus: error.status } : {}),
+      ...(typeof error.code === "string" ? { upstreamCode: error.code } : {}) } : null;
+}
 const WRITE_TOOL_PATTERN = /(?:write|edit|replace|patch|notebook|delete|move|rename|mkdir)/iu;
 const SHELL_TOOL_PATTERN = /(?:bash|pwsh|shell|terminal|exec|command)/iu;
 const AUTH_ENV_KEYS = [
@@ -179,6 +186,9 @@ export class BridgeRuntime {
   }
 
   start() {
+    if (process.env.SHOGGOTH_DSH_SECRET_PROJECTION) {
+      this.modelProjectionReady = installModelSecretProjection(this.ctx, process.env.SHOGGOTH_DSH_SECRET_PROJECTION);
+    }
     if (this.workspaceExecution) {
       // Pre-execute avoids showing a native approval that we will decline. The
       // registry-owned monotonic guard also denies after other pre-execute
@@ -198,6 +208,7 @@ export class BridgeRuntime {
 
   async waitUntilReady() {
     await this.ctx.get("loader")?.await();
+    await this.modelProjectionReady?.();
     if (this.closed) return;
     this.ready = true;
     await this.write({ type: "ready", protocol: PROTOCOL, protocolVersion: PROTOCOL_VERSION,
@@ -341,7 +352,8 @@ export class BridgeRuntime {
 
   async generateModelOnly(params) {
     if (!safeString(params.operationId, 256) || !safeString(params.prompt, 128 * 1024)
-      || Object.keys(params).some(key => !["operationId", "prompt", "model", "streamText", "settings"].includes(key))
+      || Object.keys(params).some(key => !["operationId", "prompt", "model", "streamText", "settings", "secretSessionId"].includes(key))
+      || params.secretSessionId !== undefined && !safeString(params.secretSessionId, 512)
       || (params.streamText !== undefined && typeof params.streamText !== "boolean")
       || params.settings !== undefined && (!plain(params.settings)
         || Object.keys(params.settings).some(key => key !== "reasoningEffort")
@@ -355,7 +367,7 @@ export class BridgeRuntime {
     const controller = new AbortController();
     this.modelRequests.set(params.operationId, controller);
     let text = "", usage = null, finished = false;
-    const timer = setTimeout(() => controller.abort(), 170_000);
+    const timer = setTimeout(() => controller.abort(), 60 * 60_000);
     try {
       let call = { ...selection, maxTokens: 4096 }, prepared;
       if (params.settings) {
@@ -373,10 +385,14 @@ export class BridgeRuntime {
       // Direct LLM call: no Agent, MCP, tool registry, workspace or permission
       // preset is attached. Even a returned tool call cannot execute anything.
       const request = { ...call,
+        ...(params.secretSessionId ? { sessionId: params.secretSessionId } : {}),
         messages: [userMessage(params.operationId, params.prompt, { kind: "plugin", plugin: name })],
-        system: "Produce a factual conversation checkpoint from supplied data.", tools: [],
+        system: "Complete the supplied text task using only the provided data. Tools and external actions are unavailable. Return only the requested output.", tools: [],
         purpose: "compaction", signal: controller.signal };
       for await (const chunk of prepared ? prepared.stream(request) : this.ctx.llm.stream(request)) {
+        if (chunk.type === "finish" && chunk.reason?.failure?.code === "SECRET_MODEL_PROJECTION_UNAVAILABLE") {
+          throw bridgeError("SECRET_MODEL_PROJECTION_UNAVAILABLE", "SECRET_MODEL_PROJECTION_UNAVAILABLE");
+        }
         if (chunk.type === "text-delta") text += chunk.text;
         if (Buffer.byteLength(text) > 32 * 1024) throw bridgeError("MODEL_ONLY_OUTPUT_INVALID", "Model output too large");
         if (chunk.type === "text-delta" && params.streamText === true) {
@@ -471,19 +487,24 @@ export class BridgeRuntime {
   }
 
   setupAgent(agentCtx, developerInstructions) {
-    if (!agentCtx.systemPrompt || typeof agentCtx.systemPrompt.section !== "function") {
+    if (!agentCtx.systemPrompt || typeof agentCtx.systemPrompt.section !== "function"
+      || typeof agentCtx.systemPrompt.variable !== "function") {
       throw bridgeError(
         "DEEPSEEK_HARNESS_API_INCOMPATIBLE",
         "DeepSeek system prompt API is unavailable",
       );
     }
     let turnInstructions = "";
+    // DSH expands section templates, but never scans a substituted value again.
+    // Host rules and credential references are literal text, not DSH variables.
+    agentCtx.systemPrompt.variable("shoggoth_developer_instructions", () =>
+      [developerInstructions, turnInstructions].filter(Boolean).join("\n\n"));
     agentCtx.systemPrompt.section({
       name: "shoggoth:developer-instructions",
       order: 0,
       // DSH permits one complete prompt and rejects duplicate registrations.
       // Evaluate the current turn inside that one section on every assembly.
-      text: () => [developerInstructions, turnInstructions].filter(Boolean).join("\n\n"),
+      text: "{{shoggoth_developer_instructions}}",
       complete: true,
     });
     return (text) => { turnInstructions = text; };
@@ -742,7 +763,7 @@ export class BridgeRuntime {
       remoteSessionId: params.remoteSessionId, sessionId: params.sessionId,
       turnId: params.turnId, operationId: params.operationId,
       agent: record.agent, toolCalls: new Map(), accepting: true, buffered: [],
-      settled: false, commandTurn: true, abortController: new AbortController(),
+      settled: false, commandTurn: true, commandName: name, abortController: new AbortController(),
     };
     this.activeTurns.set(params.remoteSessionId, active);
     const publish = (event) => {
@@ -764,13 +785,17 @@ export class BridgeRuntime {
         await record.agent.whenIdle();
         await this.ctx.sessions.flush(record.agent.session);
         status = execution.result.kind === "error" ? "failed" : "completed";
+        // A native lifecycle event precedes the persistence checkpoint. Only
+        // expose its replacement receipt after this command has saved it.
+        if (status === "completed" && active.pendingCompacted) publish(active.pendingCompacted);
         publish({ type: "text", itemId: `deepseek-harness-command-${params.turnId}`, text: execution.result.text || `/${name} completed.`, phase: "final_answer", delivery: "local" });
       } catch (error) {
         status = active.abortController.signal.aborted ? "interrupted" : "failed";
         publish({ type: "text", itemId: `deepseek-harness-command-${params.turnId}`, text: error.message || "Command failed", phase: "final_answer", delivery: "local" });
       } finally {
         if (active.abortController.signal.aborted) status = "interrupted";
-        publish({ type: "complete", status });
+        publish({ type: "complete", status,
+          ...(name === "compact" && status === "failed" ? { errorCode: "RUNTIME_COMPACTION_FAILED" } : {}) });
         active.settled = true;
         if (!active.accepting && this.activeTurns.get(active.remoteSessionId) === active) this.activeTurns.delete(active.remoteSessionId);
       }
@@ -854,6 +879,10 @@ export class BridgeRuntime {
     }
     for (const item of mapped) {
       if (active.commandTurn && item.type === "complete") continue;
+      if (active.commandTurn && item.type === "context_compacted") {
+        active.pendingCompacted = item;
+        continue;
+      }
       if (active.accepting) active.buffered.push(item);
       else void this.write({ type: "event", event: item }).catch((error) => this.fatal(error));
     }
@@ -871,6 +900,46 @@ export class BridgeRuntime {
       sessionId: active.sessionId,
       turnId: active.turnId,
     };
+    if (event.type === "command/run" && active.commandTurn && active.commandName === "compact"
+      && event.data?.name === "compact" && safeString(event.data.commandId, 256)) {
+      active.nativeCommandId = event.data.commandId;
+      return [];
+    }
+    if (event.type.startsWith("compaction/")) {
+      const data = event.data;
+      if (!safeString(data?.compactionId, 256)) return [];
+      if (event.type === "compaction/start") {
+        // Manual events must belong to this exact command; ordinary turns may
+        // carry the CLI's own automatic compaction without a source command.
+        if (active.commandTurn && (active.commandName !== "compact"
+          || !active.nativeCommandId || data.sourceCommandId !== active.nativeCommandId)) return [];
+        active.nativeCompaction = { id: data.compactionId, sourceCommandId: data.sourceCommandId,
+          turn: data.turn, summarized: false };
+        return [{ ...base, method: "deepseek-harness/compaction_start", type: "status", status: "compacting" }];
+      }
+      const current = active.nativeCompaction;
+      if (!current || current.id !== data.compactionId || current.sourceCommandId !== data.sourceCommandId) return [];
+      if (event.type === "compaction/summary") {
+        current.summarized = Array.isArray(data.summary)
+          && data.summary.some(block => block?.type === "text" && typeof block.text === "string" && block.text.trim())
+          && Array.isArray(data.shadowedSeqs) && data.shadowedSeqs.length > 0;
+        return [];
+      }
+      if (event.type !== "compaction/end" || current.turn !== data.turn) return [];
+      active.nativeCompaction = null;
+      // No command text or summary text proves a replacement. A matching
+      // successful native transaction does; failed/partial attempts stay failed.
+      if (data.error !== undefined || !current.summarized) return [];
+      let usedTokens = null;
+      try {
+        const measure = this.ctx.get("tokenMeter")?.measure(active.agent.session);
+        if (Number.isSafeInteger(measure?.totalTokens) && measure.totalTokens >= 0) usedTokens = measure.totalTokens;
+      } catch { /* Metering is optional; the transaction remains authoritative. */ }
+      return [{ ...base, method: "deepseek-harness/compaction_end", type: "context_compacted", contextUsage: {
+        runtimeSessionId: active.sessionId, usedTokens, contextWindow: null,
+        quality: usedTokens === null ? "unknown" : "estimated", source: "session_stats", observedAt: Date.now(),
+      } }];
+    }
     if (event.type === "assistant/chunk") {
       const chunk = event.data?.chunk;
       const itemId = `deepseek-harness-message-${active.turnId}-${event.data?.step || 0}`;
@@ -959,12 +1028,13 @@ export class BridgeRuntime {
     }
     if (event.type === "turn/end") {
       const status = turnStatus(event.data?.reason);
+      const error = event.data?.reason?.error;
       return [{
         ...base,
         method: "deepseek-harness/turn_end",
         type: "complete",
         status,
-        ...(status === "failed" ? { errorCode: turnErrorCode(event.data?.reason?.error) } : {}),
+        ...(status === "failed" ? { errorCode: turnErrorCode(error), failure: protocolFailure(error) } : {}),
       }];
     }
     return [];
@@ -1004,6 +1074,7 @@ export class BridgeRuntime {
       turnId: active.turnId,
       status: "failed",
       errorCode: turnErrorCode(error),
+      failure: protocolFailure(error),
     };
     if (active.accepting) active.buffered.push(event);
     else await this.write({ type: "event", event });

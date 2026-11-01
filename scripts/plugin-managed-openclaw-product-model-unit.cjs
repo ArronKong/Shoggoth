@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createManagedOpenClawProductHost } = require("../app/managed-openclaw-product-host");
 const { credentialOwner } = require("../app/managed-openclaw-provider-credential");
+const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-protocol-version");
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const scope = (operationId = "model-one", recovery = false) => ({ operationId, requestDigest: "d".repeat(64), safeSpec: { kind: "create", providerKey: "fixture", target: { modelId: "local" } }, recovery });
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
@@ -92,7 +93,8 @@ test("partial/extra/truthy resume receipts keep endpoint closed for exact recove
     await assert.rejects(lease.finish({ ...scope(), outcome: "blocked" }), { code: "MANAGED_HOST_MODEL_RESUME_UNVERIFIED" });
     assert.equal(f.host.getStatus().state, "needs_verification"); assert.equal(f.host.getEndpoint(), null);
     assert.throws(() => f.api.acquireModelLease(scope("foreign", true)), { code: "MANAGED_HOST_MODEL_APPLY_UNAVAILABLE" });
-    assert.equal(await f.api.assertModelLease(await f.api.acquireModelLease(scope("model-one", true)), scope()), true);
+    assert.throws(() => f.api.acquireModelLease(scope("model-one", true)), { code: "MANAGED_HOST_MODEL_TERMINAL_RECOVERY_REQUIRED" });
+    assert.equal(f.counts().acquires, 1, "a terminal outcome requires observation rather than another apply lease");
   }
 });
 test("a resume claim without physical running status never restores readiness", async t => {
@@ -138,9 +140,9 @@ test("verified exact paused abandonment releases its borrow without reopening th
   assert.equal(f.counts().finishes, 0);
 });
 
-test("old terminal handle cannot withdraw an in-flight recovery of the same original operation", async t => {
-  const f = await activate(t, { finishReceipt: { paused: false } }), old = await f.api.acquireModelLease(scope());
-  await assert.rejects(old.finish({ ...scope(), outcome: "applied" }), { code: "MANAGED_HOST_MODEL_RESUME_UNVERIFIED" });
+test("old abandoned handle cannot withdraw an in-flight recovery of the same original operation", async t => {
+  const f = await activate(t), old = await f.api.acquireModelLease(scope());
+  assert.equal(await old.abandon(), true);
   const current = await f.api.acquireModelLease(scope("model-one", true)); const before = f.counts().withdrawn;
   await assert.rejects(old.modelRpc("config.patch", {}), { code: "MANAGED_HOST_MODEL_LEASE_RETIRED" });
   assert.equal(f.counts().withdrawn, before); assert.equal(f.host.getStatus().state, "activating");
@@ -151,7 +153,7 @@ function ownerPermit(owner) {
   return { version: 1, owner: { ownerId: "synthetic-service-owner", capability: "c".repeat(64) },
     scope: { backendId: "openclaw", providerKey: "fixture", baseUrl: "https://model.example.test/v1", api: "openai-completions",
       operationId: owner.operationId, requestDigest: owner.requestDigest },
-    service: { instanceNonce: "d".repeat(48), pid: 23456, startedAt: Date.now() - 10000, protocolVersion: 11 }, writer: owner };
+    service: { instanceNonce: "d".repeat(48), pid: 23456, startedAt: Date.now() - 10000, protocolVersion: SERVICE_PROTOCOL_VERSION }, writer: owner };
 }
 test("private opaque owner checker is synchronous and exact; cloning or owned stop cannot retain the original current epoch", async t => {
   const f = await activate(t), owner = f.api.captureModelOwner();

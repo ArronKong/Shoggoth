@@ -6,8 +6,6 @@ import type { NativeSkillPage, UnifiedSkill } from "../types";
 import {
   ApiError,
   getSkillUsage,
-  installSkill,
-  listAgents,
   listSkills,
   listSkillsPage,
   previewSkill,
@@ -19,14 +17,12 @@ import { usePageCache } from "../lib/usePageCache";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import BackendTabs from "../components/BackendTabs";
 import FilterTabs from "../components/FilterTabs";
-import SearchCapsule from "../components/SearchCapsule";
 import { useBackendCatalog, useBackendState } from "../lib/backends";
 import { useStickyState } from "../lib/useStickyState";
-import { Field, Option, Select, Switch, TextArea, TextInput } from "../components/Field";
+import { Field, Switch, TextArea, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
 import { toSanitizedMarkdownHtml } from "../lib/markdown";
 import { skillIdentity } from "../lib/skillIdentity";
-import StandaloneMcpRepair from "./StandaloneMcpRepair";
 const SelfImprovementPanel = lazy(() => import("./SelfImprovementPanel"));
 
 const EMPTY_USAGE = {
@@ -35,21 +31,7 @@ const EMPTY_USAGE = {
   usageSupported: false,
   scanLimit: undefined as number | undefined,
 };
-const SKILLS_PER_PAGE = 100;
-
-function boundedSkillQuery(input: string): string {
-  const encoder = new TextEncoder();
-  let output = "";
-  let bytes = 0;
-  for (const character of input) {
-    if (/[\x00-\x1f\x7f]/u.test(character)) continue;
-    const size = encoder.encode(character).length;
-    if (bytes + size > 256) break;
-    output += character;
-    bytes += size;
-  }
-  return output;
-}
+const SKILLS_PER_BATCH = 100;
 
 function parseEnv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -71,16 +53,18 @@ export default function SkillsPage() {
   const backendName = activeBackendDescriptor?.name || backend;
   // 「只看启用」的原生 checkbox 换成三态筛选胶囊（全部/已启用/已停用）。
   const [status, setStatus] = useStickyState<"" | "on" | "off">("skills.status", "");
-  const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [nativeReload, setNativeReload] = useState(0);
+  const [nativeRetry, setNativeRetry] = useState(0);
   const nativeRevision = useRef<string | null>(null);
-  const [nativePageState, setNativePageState] = useState<{ key: string; page: NativeSkillPage } | null>(null);
+  const [nativePageState, setNativePageState] = useState<{
+    key: string; page: NativeSkillPage; skills: UnifiedSkill[];
+  } | null>(null);
   const [nativeErrorState, setNativeErrorState] = useState<{ key: string; error: string } | null>(null);
   const skillMainRef = useRef<HTMLDivElement>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
   const skillDetailRef = useRef<HTMLElement>(null);
   const detailOpenerRef = useRef<HTMLButtonElement | null>(null);
-  const focusFirstSkillAfterPage = useRef(false);
   const [busy, setBusy] = useState<string | null>(null);
 
   // 保存完整安装身份，刷新后重新解析当前快照；同名版本与不同 Agent 不共享选中态。
@@ -88,7 +72,6 @@ export default function SkillsPage() {
   const [apiKey, setApiKey] = useState("");
   const [envText, setEnvText] = useState("");
   const [saving, setSaving] = useState(false);
-  const [selectedAgent, setSelectedAgent] = useState("");
   const [preview, setPreview] = useState<{ key: string; content: string } | null>(null);
   const previewRequestId = useRef(0);
   const [packageBusy, setPackageBusy] = useState(false);
@@ -97,19 +80,11 @@ export default function SkillsPage() {
   const confirm = useConfirm();
   const { t } = useTranslation();
 
-  const { data: nativeAgentsData, refresh: refreshAgents } = usePageCache(
-    `skills:agents:${backend}`,
-    () => isNativeSkills ? listAgents(backend) : Promise.resolve([]),
-  );
-  const nativeAgents = nativeAgentsData ?? [];
-  const activeAgent = isNativeSkills
-    ? (nativeAgents.some((agent) => agent.id === selectedAgent) ? selectedAgent : nativeAgents[0]?.id)
-    : undefined;
   useEffect(() => {
     if (!isNativeSkills || typeof window === "undefined") return;
     const changed = (event: Event) => {
       const detail = (event as CustomEvent<{ backendId?: string; agentId?: string }>).detail;
-      if (detail?.backendId !== backend || detail.agentId !== activeAgent) return;
+      if (detail?.backendId !== backend) return;
       setSelectedIdentity(null);
       nativeRevision.current = null;
       setPage(0);
@@ -117,45 +92,50 @@ export default function SkillsPage() {
     };
     window.addEventListener("shoggoth:skills-changed", changed);
     return () => window.removeEventListener("shoggoth:skills-changed", changed);
-  }, [activeAgent, backend, isNativeSkills]);
-  useEffect(() => {
-    if (isNativeSkills && activeAgent && activeAgent !== selectedAgent) setSelectedAgent(activeAgent);
-  }, [activeAgent, isNativeSkills, selectedAgent]);
+  }, [backend, isNativeSkills]);
 
   const { data: skillsData, loading: externalLoading, error: externalError,
     refresh: refreshExternal } = usePageCache(
-    `skills:${backend}:${activeAgent || "default"}`,
-    () => isNativeSkills ? Promise.resolve([]) : listSkills(backend, activeAgent),
+    `skills:${backend}:default`,
+    () => isNativeSkills ? Promise.resolve([]) : listSkills(backend),
   );
-  const nativeKey = JSON.stringify([backend, activeAgent, query, status, page, nativeReload]);
+  const nativeKey = JSON.stringify([backend, status, nativeReload]);
+  const nativeRequestKey = JSON.stringify([nativeKey, page, nativeRetry]);
   useEffect(() => {
-    if (!isNativeSkills || !activeAgent) return;
+    if (!isNativeSkills) return;
     let current = true;
     setNativeErrorState(null);
-    void listSkillsPage(backend, activeAgent, { query, status, pageIndex: page,
-      limit: SKILLS_PER_PAGE, expectedRevision: page === 0 ? null : nativeRevision.current })
+    void listSkillsPage(backend, undefined, { query: "", status, pageIndex: page,
+      limit: SKILLS_PER_BATCH, expectedRevision: page === 0 ? null : nativeRevision.current })
       .then((value) => {
         if (!current) return;
         nativeRevision.current = value.queryRevision;
-        setNativePageState({ key: nativeKey, page: value });
+        setNativePageState(previous => {
+          const accumulated = page > 0 && previous?.key === nativeKey ? previous.skills : [];
+          const merged = new Map(accumulated.map(skill => [skillIdentity(skill), skill]));
+          for (const skill of value.skills) merged.set(skillIdentity(skill), skill);
+          return { key: nativeKey, page: value, skills: [...merged.values()] };
+        });
       })
       .catch((error) => {
         if (!current) return;
         if (error instanceof ApiError && error.status === 409 && page > 0) {
           nativeRevision.current = null;
+          setSelectedIdentity(null);
           setPage(0);
           setNativeReload(value => value + 1);
           return;
         }
-        setNativeErrorState({ key: nativeKey,
+        setNativeErrorState({ key: nativeRequestKey,
           error: error instanceof Error ? error.message : String(error) });
       });
     return () => { current = false; };
-  }, [activeAgent, backend, isNativeSkills, nativeKey, page, query, status]);
-  const nativePage = nativePageState?.key === nativeKey ? nativePageState.page : null;
-  const skills = isNativeSkills ? nativePage?.skills ?? [] : skillsData ?? [];
-  const nativeError = nativeErrorState?.key === nativeKey ? nativeErrorState.error : null;
-  const loading = isNativeSkills ? Boolean(activeAgent) && !nativePage && !nativeError : externalLoading;
+  }, [backend, isNativeSkills, nativeKey, nativeRequestKey, page, status]);
+  const nativeSnapshot = nativePageState?.key === nativeKey ? nativePageState : null;
+  const nativePage = nativeSnapshot?.page;
+  const skills = isNativeSkills ? nativeSnapshot?.skills ?? [] : skillsData ?? [];
+  const nativeError = nativeErrorState?.key === nativeRequestKey ? nativeErrorState.error : null;
+  const loading = isNativeSkills ? nativePage?.pageIndex !== page && !nativeError : externalLoading;
   const error = isNativeSkills ? nativeError : externalError;
   const refresh = async () => {
     if (isNativeSkills) {
@@ -173,15 +153,15 @@ export default function SkillsPage() {
   const usageLoaded = isNativeSkills || usageData != null;
   // 导航栏刷新要连「agent 使用次数」叠加层一起重拉——本页默认按使用次数排序，
   // 只刷 skills:${backend} 会让整页看起来毫无反应（R371）。
-  useRegisterPageRefresh("/skills", () => Promise.all([refresh(), refreshUsage(), refreshAgents()]));
+  useRegisterPageRefresh("/skills", () => Promise.all([refresh(), refreshUsage()]));
   useRegisterPageLoading("/skills", loading);
   const { usage, usageByAgent, usageSupported, scanLimit } = useMemo(() => {
     if (isNativeSkills) {
       const counts = new Map<string, number>();
       const byAgent = new Map<string, Map<string, number>>();
-      for (const skill of nativePage?.skills ?? []) {
-        counts.set(skill.name, skill.usageCount ?? 0);
-        byAgent.set(skill.name, new Map(Object.entries(skill.usageAgents ?? {})));
+      for (const skill of skills) {
+        counts.set(skillIdentity(skill), skill.usageCount ?? 0);
+        byAgent.set(skillIdentity(skill), new Map(Object.entries(skill.usageAgents ?? {})));
       }
       return { usage: counts, usageByAgent: byAgent,
         usageSupported: nativePage?.usageSupported ?? false, scanLimit: undefined };
@@ -201,7 +181,7 @@ export default function SkillsPage() {
       byAgent.set(name, agentMap);
     }
     return { usage: total, usageByAgent: byAgent, usageSupported: true, scanLimit: row.scanLimit };
-  }, [usageData, backend, isNativeSkills, nativePage]);
+  }, [usageData, backend, isNativeSkills, nativePage, skills]);
 
   const totalCount = isNativeSkills ? nativePage?.total ?? 0 : skills.length;
   const enabledCount = isNativeSkills ? nativePage?.enabledCount ?? 0
@@ -216,41 +196,37 @@ export default function SkillsPage() {
   // usage 到位前全是 0，等价于字母序——叠加层到达后自动重排。
   const shown = useMemo(() => {
     if (isNativeSkills) return skills;
-    const q = query.trim().toLowerCase();
     const res = skills.filter((s) => {
       if (status === "on" && !s.enabled) return false;
       if (status === "off" && s.enabled) return false;
-      if (!q) return true;
-      return (
-        s.name.toLowerCase().includes(q) ||
-        (s.description || "").toLowerCase().includes(q) ||
-        (s.category || "").toLowerCase().includes(q)
-      );
+      return true;
     });
     return res.sort((a, b) => {
       const d = (usage.get(b.name) || 0) - (usage.get(a.name) || 0);
       if (d) return d;
       return a.name.localeCompare(b.name);
     });
-  }, [skills, status, query, usage, isNativeSkills]);
+  }, [skills, status, usage, isNativeSkills]);
   const matchedCount = isNativeSkills ? nativePage?.matchCount ?? 0 : shown.length;
-  const pageCount = isNativeSkills ? nativePage?.pageCount ?? 1
-    : Math.max(1, Math.ceil(shown.length / SKILLS_PER_PAGE));
-  const currentPage = isNativeSkills ? page : Math.min(page, pageCount - 1);
-  const pageSkills = isNativeSkills ? shown : shown.slice(currentPage * SKILLS_PER_PAGE,
-    (currentPage + 1) * SKILLS_PER_PAGE);
+  const visibleSkills = isNativeSkills ? shown : shown.slice(0, (page + 1) * SKILLS_PER_BATCH);
+  const hasMore = isNativeSkills
+    ? Boolean(nativePage && nativePage.pageIndex + 1 < nativePage.pageCount)
+    : visibleSkills.length < shown.length;
   useEffect(() => {
-    if (!focusFirstSkillAfterPage.current || loading) return;
-    focusFirstSkillAfterPage.current = false;
-    skillMainRef.current?.scrollTo({ top: 0 });
-    skillMainRef.current?.querySelector<HTMLButtonElement>(".skill-card-open")
-      ?.focus({ preventScroll: true });
-  }, [currentPage, loading, nativePage]);
-  const changePage = (next: number) => {
-    focusFirstSkillAfterPage.current = true;
-    setSelectedIdentity(null);
-    setPage(next);
-  };
+    const target = loadMoreRef.current;
+    if (!target || !hasMore || loading || error || typeof IntersectionObserver === "undefined") return;
+    let requested = false;
+    // The viewport observer also respects both scroll containers: the grid on
+    // desktop and the whole page in narrow windows.
+    const observer = new IntersectionObserver(entries => {
+      if (requested || !entries.some(entry => entry.isIntersecting)) return;
+      requested = true;
+      observer.disconnect();
+      setPage(value => value + 1);
+    }, { rootMargin: "200px 0px" });
+    observer.observe(target);
+    return () => { requested = true; observer.disconnect(); };
+  }, [hasMore, loading, error, visibleSkills.length, backend, status]);
 
   const selected = useMemo(
     () => (selectedIdentity ? skills.find((s) => skillIdentity(s) === selectedIdentity) || null : null),
@@ -258,23 +234,15 @@ export default function SkillsPage() {
   );
   const learnedSelection = useMemo(() => selected?.source === "learned" && selected.id && selected.contentHash
     ? { id: selected.id, versionHash: selected.contentHash } : null, [selected]);
-  const previewKey = isNativeSkills && activeAgent && selected && selected.source !== "learned"
-    ? JSON.stringify([
-        backend,
-        activeAgent || "",
-        selected.id || "",
-        selected.name,
-        selected.source || "user",
-        selected.version || "",
-      ])
-    : null;
+  const previewKey = isNativeSkills && selected && selected.source !== "learned"
+    ? skillIdentity(selected) : null;
 
   useEffect(() => {
     const requestId = ++previewRequestId.current;
     setPreview(null);
     if (!previewKey || !selected) return;
 
-    void previewSkill(backend, selected, activeAgent)
+    void previewSkill(backend, selected, selected.agentId)
       .then((value) => {
         if (previewRequestId.current === requestId) {
           setPreview({ key: previewKey, content: value.content });
@@ -289,17 +257,17 @@ export default function SkillsPage() {
     return () => {
       if (previewRequestId.current === requestId) previewRequestId.current += 1;
     };
-  }, [activeAgent, backend, previewKey, selected, toast]);
+  }, [backend, previewKey, selected, toast]);
 
   const toggle = async (s: UnifiedSkill, enabled: boolean) => {
     setBusy(skillIdentity(s));
     try {
       if (s.source === "learned") {
-        if (!activeAgent) throw new Error(t("skills.errorPrefix", { msg: "Agent unavailable" }));
-        await selfImprovement(backend, activeAgent, "change", { skillId: s.id,
+        if (!s.agentId) throw new Error(t("skills.errorPrefix", { msg: "Agent unavailable" }));
+        await selfImprovement(backend, s.agentId, "change", { skillId: s.id,
           expectedRevision: s.learnedRevision, action: enabled ? "restore" : "archive" });
         window.dispatchEvent(new CustomEvent("shoggoth:skills-changed", {
-          detail: { backendId: backend, agentId: activeAgent },
+          detail: { backendId: backend, agentId: s.agentId },
         }));
       } else await updateSkill(backend, s.name, {
         enabled,
@@ -308,7 +276,7 @@ export default function SkillsPage() {
         version: s.version,
         expectedRevision: isNativeSkills && s.source === "user"
           ? s.registryVersion : s.profileRevision,
-      }, activeAgent);
+      }, s.agentId);
       toast.success(
         enabled
           ? t("skills.enabledToast", { name: s.title || s.name })
@@ -346,19 +314,6 @@ export default function SkillsPage() {
     detail?.querySelector<HTMLButtonElement>(".skill-detail-x")?.focus({ preventScroll: true });
   }, [selectedIdentity]);
 
-  const installNative = async () => {
-    setPackageBusy(true);
-    try {
-      const result = await installSkill(backend, activeAgent);
-      if (!result.canceled) {
-        toast.success(t("skills.installedToast"));
-        await refresh();
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : String(error));
-    } finally { setPackageBusy(false); }
-  };
-
   const uninstallNative = async () => {
     if (!selected || selected.source !== "user") return;
     const accepted = await confirm({
@@ -378,10 +333,10 @@ export default function SkillsPage() {
           source: selected.source,
           version: selected.version,
           expectedRevision: selected.registryVersion,
-        }, activeAgent);
+        }, selected.agentId);
         uninstallRevision = disabled.registryVersion;
       }
-      await uninstallSkill(backend, { ...selected, registryVersion: uninstallRevision }, activeAgent);
+      await uninstallSkill(backend, { ...selected, registryVersion: uninstallRevision }, selected.agentId);
       setSelectedIdentity(null);
       toast.success(t("skills.uninstalledToast", { name: selected.name }));
       await refresh();
@@ -426,36 +381,16 @@ export default function SkillsPage() {
 
   return (
     <div className="page management-page skills-page">
-      {/* 统计进副标题、搜索进页头右槽——与 CLI/Cron 页同一份页头结构（规范 §2）。 */}
       <PageHead
         title={t("skills.pageTitle")}
         subtitle={subtitle}
-        actions={
-          <SearchCapsule
-            value={query}
-            onChange={(value) => { focusFirstSkillAfterPage.current = false;
-              setQuery(boundedSkillQuery(value)); setPage(0); setSelectedIdentity(null); }}
-            placeholder={t("skills.searchPlaceholder")}
-          />
-        }
       />
       <div className="ui-toolbar">
-        <BackendTabs value={backend} onChange={(value) => { focusFirstSkillAfterPage.current = false;
+        <BackendTabs value={backend} onChange={(value) => {
           setBackend(value); setPage(0); setSelectedIdentity(null); }} surface="skills" />
-        {isNativeSkills && nativeAgents.length > 0 && (
-          <Select value={activeAgent || ""} onChange={(value) => { focusFirstSkillAfterPage.current = false;
-            setSelectedAgent(value); setPage(0); setSelectedIdentity(null); }}>
-            {nativeAgents.map((agent) => <Option key={agent.id} value={agent.id}>{agent.name}</Option>)}
-          </Select>
-        )}
-        {isNativeSkills && (
-          <button className="btn-primary" onClick={installNative} disabled={packageBusy || !activeAgent}>
-            {packageBusy ? t("common.loading") : t("skills.install")}
-          </button>
-        )}
         <FilterTabs
           value={status}
-          onChange={(v) => { focusFirstSkillAfterPage.current = false;
+          onChange={(v) => {
             setStatus(v as "" | "on" | "off"); setPage(0); setSelectedIdentity(null); }}
           ariaLabel={t("skills.filterAria")}
           items={[
@@ -466,13 +401,11 @@ export default function SkillsPage() {
         />
       </div>
 
-      {isNativeSkills && activeAgent && <StandaloneMcpRepair key={activeAgent} agentId={activeAgent} />}
-      {isNativeSkills && activeAgent && <Suspense fallback={null}>
-        <SelfImprovementPanel key={`${backend}:${activeAgent}`} backend={backend} agentId={activeAgent}
-          skillSelection={learnedSelection} onSelectionClosed={closeDetail} onSkillsChanged={() => void refresh()} />
-      </Suspense>}
-
-      {error && <div className="error">{t("skills.errorPrefix", { msg: error })}</div>}
+      {error && <div className="error">{t("skills.errorPrefix", { msg: error })}
+        {isNativeSkills && <button className="btn-secondary" onClick={() => setNativeRetry(value => value + 1)}>
+          {t("skills.retryLoad")}
+        </button>}
+      </div>}
       {!loading && !error && totalCount === 0 && (
         <p className="muted">{t("skills.empty")}</p>
       )}
@@ -484,11 +417,11 @@ export default function SkillsPage() {
           详情展开吃掉 401px 后网格自己减列（与 CLI 同一套规则，别加 split 类）。 */}
       <div className="skill-body">
         <div className="skill-main-content" ref={skillMainRef}>
-          {!loading && shown.length > 0 && (
+          {visibleSkills.length > 0 && (
             <div className="skill-grid">
-              {pageSkills.map((s) => {
-                const used = usage.get(s.name) || 0;
+              {visibleSkills.map((s) => {
                 const identity = skillIdentity(s);
+                const used = usage.get(isNativeSkills ? identity : s.name) || 0;
                 const isSel = selectedIdentity === identity;
                 const usageBadge = usageSupported && (used > 0
                   ? <span className="skill-badge skill-badge-used">{t("skills.usedTimes", { count: used })}</span>
@@ -515,10 +448,13 @@ export default function SkillsPage() {
                         {t("skills.globalScope")}</span>}
                       {s.source !== "learned" && usageBadge}
                     </div>
-                    {s.source === "learned" && <div className="skill-card-tags">
-                      <span className="skill-badge">{t("skills.learnedSource")}</span>
-                      <span className="skill-badge">v{s.contentHash?.slice(0, 12) || s.version}</span>
-                      {usageBadge}
+                    {isNativeSkills && s.source !== "user" && <div className="skill-card-tags">
+                      <span className="skill-badge" title={s.agentId}>{s.agentName || s.agentId}</span>
+                      {s.source === "learned" && <>
+                        <span className="skill-badge">{t("skills.learnedSource")}</span>
+                        <span className="skill-badge">v{s.contentHash?.slice(0, 12) || s.version}</span>
+                        {usageBadge}
+                      </>}
                     </div>}
                     {/* 开关放第二行右下角：跟徽章挤在标题行会把技能名压到 ~110px 全是省略号。 */}
                     <div className="skill-card-foot">
@@ -537,22 +473,18 @@ export default function SkillsPage() {
               })}
             </div>
           )}
-          {!loading && pageCount > 1 && (
-            <nav className="skill-pagination" aria-label={t("skills.paginationAria")}>
-              <button className="btn-secondary" type="button"
-                disabled={currentPage === 0} onClick={() => changePage(currentPage - 1)}>
-                {t("skills.previousPage")}
-              </button>
-              <span aria-live="polite">{t("skills.pageStatus", {
-                page: currentPage + 1, pages: pageCount, total: matchedCount,
-              })}</span>
-              <button className="btn-secondary" type="button"
-                disabled={currentPage >= pageCount - 1} onClick={() => changePage(currentPage + 1)}>
-                {t("skills.nextPage")}
-              </button>
-            </nav>
+          {(hasMore || loading) && (
+            <div className="skill-load-more" ref={loadMoreRef} role="status" aria-live="polite">
+              {loading ? t("common.loading") : t("skills.scrollToLoad")}
+            </div>
           )}
         </div>
+
+        {isNativeSkills && learnedSelection && selected?.agentId && <Suspense fallback={null}>
+          <SelfImprovementPanel key={`${backend}:${selected.agentId}`} backend={backend} agentId={selected.agentId}
+            detailOnly skillSelection={learnedSelection} onSelectionClosed={closeDetail}
+            onSkillsChanged={() => void refresh()} />
+        </Suspense>}
 
         {selected && selected.source !== "learned" && (
           <aside className="skill-detail" ref={skillDetailRef}>
@@ -570,6 +502,7 @@ export default function SkillsPage() {
               </h3>
               <div className="skill-detail-meta">
                 {backendName}
+                {isNativeSkills && selected.source !== "user" ? ` · ${selected.agentName || selected.agentId}` : ""}
                 {selected.version ? ` · v${selected.version}` : ""}
                 {isNativeSkills && selected.globalEnabled ? ` · ${t("skills.globalScope")}` : ""}
                 {selected.source ? ` · ${selected.source}` : ""}
@@ -598,7 +531,7 @@ export default function SkillsPage() {
                 <p className="skill-sec-desc">{t("common.loading")}</p>
               </section>
             ) : usageSupported ? (() => {
-              const agents = usageByAgent.get(selected.name);
+              const agents = usageByAgent.get(isNativeSkills ? skillIdentity(selected) : selected.name);
               const rows = agents ? [...agents.entries()].sort((a, b) => b[1] - a[1]) : [];
               const total = rows.reduce((n, [, c]) => n + c, 0);
               const max = rows.length ? rows[0][1] : 0;

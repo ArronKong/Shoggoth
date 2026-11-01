@@ -254,6 +254,101 @@ test("运行中原始 journal 丢失或等长篡改时不再读取缓存事件",
   } finally { value.cleanup(); }
 });
 
+test("ctime-only journal and manifest changes require a read-only replay before cached reads resume", async () => {
+  const value = fixture();
+  try {
+    const writer = value.create(); writer.open();
+    append(writer, { id: "metadata-source", text: "synthetic metadata fixture" });
+    for (const readOnly of [false, true]) {
+      const store = readOnly ? new TranscriptStore({ paths: value.paths, readOnly: true }) : writer;
+      if (readOnly) store.openReadOnly();
+      const snapshot = store.getIndexSnapshot("profile-1", "session-1");
+      const changes = []; store.subscribeChanges(change => changes.push(change));
+      store._repairPartialTail = () => { throw new Error("metadata verification must not repair files"); };
+      for (const name of ["events.jsonl", "manifest.json"]) {
+        const file = path.join(value.paths.agentsDir, "profile-1", "transcripts", "session-1", name);
+        const before = fs.statSync(file), bytes = fs.readFileSync(file);
+        await new Promise(resolve => setTimeout(resolve, 15));
+        fs.chmodSync(file, before.mode & 0o777);
+        const changed = fs.statSync(file);
+        assert.equal(changed.ino, before.ino); assert.equal(changed.mtimeMs, before.mtimeMs);
+        assert.notEqual(changed.ctimeMs, before.ctimeMs);
+        assert.equal(store.listEvents("profile-1", "session-1")[0].content.text, "synthetic metadata fixture");
+        if (!readOnly) store.ensureSession({ profileId: "profile-1", sessionId: "session-1" });
+        assert.deepEqual(store.getIndexSnapshot("profile-1", "session-1"), snapshot);
+        assert.deepEqual(fs.readFileSync(file), bytes);
+        assert.equal(fs.statSync(file).ctimeMs, changed.ctimeMs, "verification must not write or chmod");
+      }
+      assert.deepEqual(changes, []);
+      if (readOnly) store.close();
+    }
+    writer.close();
+  } finally { value.cleanup(); }
+});
+
+test("a valid same-length journal rewrite with restored mtime is still rejected after ctime changes", async () => {
+  const value = fixture();
+  try {
+    const store = value.create(); store.open();
+    append(store, { id: "rewritten-source", text: "alpha" });
+    const log = path.join(value.paths.agentsDir, "profile-1", "transcripts", "session-1", "events.jsonl");
+    fs.utimesSync(log, 1000, 1000);
+    store.close(); store.open();
+    const snapshot = store.getIndexSnapshot("profile-1", "session-1"), before = fs.statSync(log);
+    const original = fs.readFileSync(log, "utf8"), record = JSON.parse(original);
+    record.payload.content.text = "bravo"; record.checksum = checksumRecord(record);
+    const rewritten = `${stableJson(record)}\n`;
+    assert.equal(Buffer.byteLength(rewritten), Buffer.byteLength(original));
+    await new Promise(resolve => setTimeout(resolve, 15));
+    fs.writeFileSync(log, rewritten, { mode: 0o600 }); fs.utimesSync(log, 1000, 1000);
+    const after = fs.statSync(log);
+    assert.equal(after.ino, before.ino); assert.equal(after.size, before.size); assert.equal(after.mtimeMs, before.mtimeMs);
+    assert.notEqual(after.ctimeMs, before.ctimeMs);
+    const fresh = new TranscriptStore({ paths: value.paths, readOnly: true }); fresh.openReadOnly();
+    assert.equal(fresh.listEvents("profile-1", "session-1")[0].content.text, "bravo", "rewrite remains internally valid");
+    assert.notEqual(fresh.getIndexSnapshot("profile-1", "session-1").sourceIdentity, snapshot.sourceIdentity); fresh.close();
+    assert.throws(() => store.listEvents("profile-1", "session-1"), { code: "TRANSCRIPT_SOURCE_CHANGED" });
+    assert.throws(() => append(store, { id: "after-rewrite", text: "must not append" }), { code: "TRANSCRIPT_SOURCE_CHANGED" });
+    store.close();
+  } finally { value.cleanup(); }
+});
+
+test("chat history and Runtime state both remain readable after transcript metadata changes", async () => {
+  const { createChatServiceController } = require("../app/agent-service/chat-service-controller");
+  const { createSessionRuntimeController } = require("../app/agent-service/session-runtime-controller");
+  const { readContextTransfer } = require("../app/agent-service/context-transfer");
+  const value = fixture(); let chat;
+  try {
+    const store = value.create(); store.open();
+    append(store, { id: "chat-metadata", text: "synthetic chat history", runId: null });
+    const binding = { id: "11111111-1111-4111-8111-111111111111", runtime: "pi" };
+    const profile = { id: "profile-1", defaultModel: null, permissionPolicy: {} };
+    const session = { profileId: profile.id, id: "session-1", sessionKey: "22222222-2222-4222-8222-222222222222",
+      runtimeBindingId: binding.id, revision: 1, runtimeSessionId: null, status: "draft", permissionMode: null };
+    const productStore = { listAgentProfiles: () => [], getAgentProfile: () => profile,
+      getAgentRuntimeBindings: () => ({ bindings: [binding] }) };
+    const chatSessionStore = { listSessions: () => [session], getSession: () => session, getBinding: () => null,
+      listPendingRemoteOperations: () => [], createSession: () => { throw new Error("must not create a session"); } };
+    const coordinator = { listRuns: () => [], getRun: () => null,
+      send: () => { throw new Error("must not send"); }, subscribeRun: () => { throw new Error("must not subscribe"); },
+      getRuntimeContext: () => ({ contextUsage: null, transfer: readContextTransfer(store, session) }) };
+    chat = createChatServiceController({ paths: value.paths, productStore, chatSessionStore, coordinator,
+      transcriptStore: store, cursorSecret: Buffer.alloc(32, 1) });
+    const runtime = createSessionRuntimeController({ productStore, chatSessionStore, coordinator,
+      getNativeRuntimeConfig: () => ({ flags: { runtimeConversationHandoff: true } }) });
+    await chat.open();
+    const historyParams = { sessionKey: session.sessionKey, cursor: null, limit: 1 };
+    const runtimeParams = { profileId: profile.id, sessionKey: session.sessionKey };
+    const beforeHistory = await chat.handle("chat.history", historyParams, "history-before");
+    const beforeRuntime = await runtime.handle("chat.session.runtime.state", runtimeParams);
+    const log = path.join(value.paths.agentsDir, profile.id, "transcripts", session.id, "events.jsonl");
+    await new Promise(resolve => setTimeout(resolve, 15)); fs.chmodSync(log, 0o600);
+    assert.deepEqual(await chat.handle("chat.history", historyParams, "history-after"), beforeHistory);
+    assert.deepEqual(await runtime.handle("chat.session.runtime.state", runtimeParams), beforeRuntime);
+    store.close();
+  } finally { await chat?.close(); value.cleanup(); }
+});
+
 test("contextExcluded 是 journal mutation，过滤后下一次读取不可见", () => {
   const value = fixture();
   try {

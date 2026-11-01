@@ -24,9 +24,11 @@ const { AppManagementHost } = require("./app-management-host");
 
 const MAX_OPERATIONS = 1024;
 const PUBLIC_ERROR_CODES = new Set([
+  ...Object.keys(require("./core/apple-device-contract").APPLE_DEVICE_PUBLIC_MESSAGES),
   ...FEDERATION_RUN_ERROR_CODES,
   "APP_HOST_INVALID_REQUEST", "APP_HOST_UNAVAILABLE", "BACKEND_UNAVAILABLE",
   "AGENT_NOT_FOUND", "AGENT_OPERATION_FAILED", "AGENT_RUN_TIMEOUT",
+  "MCP_CONNECTION_HOST_UNAVAILABLE", "MCP_CONNECTION_OWNER_UNCONFIRMED", "MCP_CONNECTION_ACK_UNKNOWN", "MCP_CONNECTION_ACK_CAPACITY",
   "FEDERATION_OPERATION_CONFLICT", "FEDERATION_RESPONSE_INVALID",
   "FEDERATION_TASK_NOT_FOUND", "FEDERATION_TASK_STATE_CONFLICT",
   "FEDERATION_COMMIT_UNCERTAIN", "APP_MANAGE_RESOURCE_CHANGED", "APP_MANAGE_OUTCOME_UNKNOWN", "APP_MANAGE_CAPACITY", "APP_MANAGE_OPERATION_UNSUPPORTED", "APP_STATE_CURSOR_INVALID", "APP_STATE_CURSOR_EXPIRED", "APP_STATE_RESPONSE_TOO_LARGE",
@@ -193,7 +195,8 @@ function operationFingerprint(method, params) {
   return crypto.createHash("sha256").update(JSON.stringify([method, params])).digest("hex");
 }
 
-async function terminalRun(backend, agentId, prompt, timeoutMs) {
+async function terminalRun(backend, agentId, prompt, timeoutMs, signal) {
+  if (signal?.aborted) throw hostError("AGENT_OPERATION_FAILED");
   const sessionKey = await backend.createSession(agentId);
   if (typeof sessionKey !== "string" || !sessionKey) throw hostError("AGENT_OPERATION_FAILED");
   return new Promise((resolve, reject) => {
@@ -202,9 +205,19 @@ async function terminalRun(backend, agentId, prompt, timeoutMs) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       if (error) reject(error); else resolve({ sessionKey, text: text(output ?? "", 32 * 1024, true) || "" });
     };
-    const timer = setTimeout(() => finish(hostError("AGENT_RUN_TIMEOUT")), timeoutMs);
+    const onAbort = () => {
+      void Promise.resolve().then(() => backend.abortChat(sessionKey)).catch(() => {});
+      finish(hostError("AGENT_OPERATION_FAILED"));
+    };
+    const timer = timeoutMs > 0 ? setTimeout(() => {
+      void Promise.resolve().then(() => backend.abortChat(sessionKey)).catch(() => {});
+      finish(hostError("AGENT_RUN_TIMEOUT"));
+    }, timeoutMs) : null;
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
     const hooks = {
       final: (output, errored) => finish(errored ? hostError(federationRunErrorCode(output)) : null, output),
       error: (error) => finish(hostError(federationRunErrorCode(error))),
@@ -240,6 +253,7 @@ function createFederationHostServer(options = {}) {
   const groupToolCapability = options.groupToolCapability || (() => false);
   const sockets = new Set();
   const operations = new Map();
+  const appleDeviceOperations = new Map();
   let server = null;
   let token = null;
   let socketIdentity = null;
@@ -283,9 +297,42 @@ function createFederationHostServer(options = {}) {
     throw hostError("FEDERATION_RESPONSE_INVALID");
   };
 
+  let mcpConnectionHost = null;
+  const mcpConnections = () => {
+    if (!mcpConnectionHost) {
+      if (!paths.stateDir) throw hostError("MCP_CONNECTION_HOST_UNAVAILABLE");
+      const { McpConnectionHost } = require("./mcp-connection-host");
+      mcpConnectionHost = new McpConnectionHost({ paths, origin: options.mcpConnectionOrigin, now: options.now,
+        resolveSession: async params => {
+          const { backend } = await requireBackend(params.backendId);
+          await getAgent(backend, params.backendId, params.agentId);
+          if (typeof backend.resolveMcpConnectionSession !== "function") return null;
+          return backend.resolveMcpConnectionSession({ agentId: params.agentId, sessionId: params.sessionId });
+        },
+      });
+    }
+    return mcpConnectionHost;
+  };
   const appManagement = new AppManagementHost({ paths, now: options.now });
   const appStateReader = new AppStateHostReader({ registry, getStatuses: statuses, now: options.now });
-  const perform = async (method, params) => {
+  const perform = async (method, params, context = {}) => {
+    if (method === "apple.device.invoke") {
+      if (typeof options.appleDeviceHost?.invoke !== "function") throw hostError("APPLE_DEVICE_UNAVAILABLE");
+      return options.appleDeviceHost.invoke(params, context);
+    }
+    if (method === "mcp.connection.owner") return mcpConnections().owner(params);
+    if (method === "model.projection.owner") {
+      const { backend } = await requireBackend(params.backendId);
+      await getAgent(backend, params.backendId, params.agentId);
+      const session = await backend.resolveModelProjectionSession({ agentId: params.agentId, sessionId: params.sessionId });
+      if (!session || typeof session.sessionKey !== "string" || !session.sessionKey.startsWith(`agent:${params.agentId}:`)
+        || session.sessionKey.length > 512 || /[\u0000-\u001f\u007f]/u.test(session.sessionKey)) throw hostError("MODEL_PROJECTION_OWNER_UNCONFIRMED");
+      return { owner: { backendId: params.backendId, agentId: params.agentId, sessionKey: session.sessionKey,
+        profileId: require("./core/mcp-connector-identity").mcpConnectorSubjectId(params.backendId, params.agentId),
+        transcriptSessionId: `mcp-external-${crypto.createHash("sha256").update(JSON.stringify([params.backendId, params.agentId, session.sessionKey])).digest("hex").slice(0, 48)}` } };
+    }
+    if (method === "mcp.connection.status") return mcpConnections().status(params);
+    if (method === "mcp.connection.ack") return mcpConnections().ack(params);
     if (method === "chat.ui.click.verify") return options.verifyChatUiClick?.(params) || { approved: false };
     if (method === "app.state.read") return appStateReader.read(params);
     if (method === "notification.context") return { focused: options.getNotificationContext?.().focused === true };
@@ -410,8 +457,8 @@ function createFederationHostServer(options = {}) {
     if (method === "agent.run") {
       const terminal = delegateRun
         ? await delegateRun({ backend, backendId: params.backendId, agentId: params.agentId,
-          prompt: params.prompt, timeoutMs: params.timeoutMs, operationId: params.operationId })
-        : await terminalRun(backend, params.agentId, params.prompt, params.timeoutMs);
+          prompt: params.prompt, timeoutMs: params.timeoutMs, operationId: params.operationId, signal: context.signal })
+        : await terminalRun(backend, params.agentId, params.prompt, params.timeoutMs, context.signal);
       return {
         backendId: params.backendId,
         agentId: params.agentId,
@@ -422,7 +469,22 @@ function createFederationHostServer(options = {}) {
     throw hostError("APP_HOST_INVALID_REQUEST");
   };
 
-  const route = async (method, params) => {
+  const route = async (method, params, context = {}) => {
+    // The generic operation cache evicts settled operations. Device writes use
+    // their own no-eviction cache; reads and management carry operationId=null.
+    if (method === "apple.device.invoke") {
+      if (params.operationId === null) return perform(method, params, context);
+      const key = params.operationId, fingerprint = operationFingerprint(method, params);
+      const old = appleDeviceOperations.get(key);
+      if (old) {
+        if (old.fingerprint !== fingerprint) throw hostError("APPLE_DEVICE_CONFLICT");
+        return old.promise;
+      }
+      if (appleDeviceOperations.size >= 4096) throw hostError("APPLE_DEVICE_UNAVAILABLE");
+      const record = { fingerprint, promise: Promise.resolve().then(() => perform(method, params, context)) };
+      appleDeviceOperations.set(key, record);
+      return record.promise;
+    }
     if (!Object.prototype.hasOwnProperty.call(params, "operationId")) return perform(method, params);
     const key = EXTERNAL_EXECUTION_METHODS.includes(method) ? `${method}:${params.operationId}` : params.operationId;
     const fingerprint = operationFingerprint(method, params);
@@ -441,7 +503,7 @@ function createFederationHostServer(options = {}) {
       operations.delete(settled[0]);
     }
     const record = { fingerprint, settled: false, stopConfirmed: false, promise: null };
-    record.promise = Promise.resolve().then(() => perform(method, params))
+    record.promise = Promise.resolve().then(() => perform(method, params, method === "agent.run" ? context : {}))
       .then(result => {
         record.stopConfirmed = groupStop && result?.groupStopped === true
           && validateFederationResult(method, result, params);
@@ -463,6 +525,8 @@ function createFederationHostServer(options = {}) {
 
   const onConnection = (socket) => {
     sockets.add(socket);
+    const invocation = new AbortController();
+    socket.once("close", () => invocation.abort());
     let buffered = Buffer.alloc(0);
     let handled = false;
     socket.on("data", (chunk) => {
@@ -486,7 +550,7 @@ function createFederationHostServer(options = {}) {
         write(socket, { id, ok: false, error: { code: "APP_HOST_INVALID_REQUEST" } });
         return;
       }
-      Promise.resolve(route(request.method, request.params)).then((result) => {
+      Promise.resolve(route(request.method, request.params, { signal: invocation.signal })).then((result) => {
         if (!validateFederationResult(request.method, result, request.params)) throw hostError("FEDERATION_RESPONSE_INVALID");
         write(socket, { id, ok: true, result });
       }).catch((error) => {
@@ -542,6 +606,7 @@ function createFederationHostServer(options = {}) {
       const active = server;
       server = null;
       if (active) await new Promise((resolve) => active.close(() => resolve()));
+      await mcpConnectionHost?.close(); mcpConnectionHost = null;
       for (const [target, identity] of [
         [paths.federationSocketPath, socketIdentity], [paths.federationTokenPath, tokenIdentity],
       ]) {

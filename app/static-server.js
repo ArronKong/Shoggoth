@@ -35,8 +35,6 @@ const { ModelChangeError } = require("./core/model-change-validation");
 const { ModelChangeJournalError } = require("./core/model-change-journal");
 const { HermesCatalogUnavailableError } = require("./core/hermes-backend");
 const { WorkAdmissionError } = require("./core/work-admission-gate");
-const { PluginInstallSelection } = require("./core/plugin-install-selection");
-const { BundledPluginCatalog, bundledRoot } = require("./core/bundled-plugin-catalog");
 const { createNativeRuntimeConfigController } = require("./core/native-runtime-config-controller");
 const { createNativeMemoryConfigController } = require("./core/native-memory-config-controller");
 const { NATIVE_MEMORY_CONFIG_PUBLIC_MESSAGES } = require("./agent-service/native-memory-config-protocol");
@@ -44,14 +42,6 @@ const { createNativeMemorySharingConfigController } = require("./core/native-mem
 const { NATIVE_MEMORY_SHARING_PUBLIC_MESSAGES } = require("./agent-service/native-memory-sharing-protocol");
 const memoryProviderOwnerProtocol = require("./agent-service/memory-provider-owner-protocol.cjs");
 const { MESSAGES: MEMORY_COMMAND_PUBLIC_MESSAGES } = require("./agent-service/active-memory-command-protocol");
-const { IDENTITY_SCOPE: ZOOM_IDENTITY_SCOPE, MEETING_SCOPES: ZOOM_MEETING_SCOPES,
-  validZoomClientSecret } = require("./agent-service/plugin-zoom-oauth");
-const { SCOPES: DROPBOX_SCOPES, CLIENT_ID: DROPBOX_CLIENT_ID,
-  validDropboxClientSecret } = require("./agent-service/plugin-dropbox-oauth");
-const { FROZEN_SOURCE_CLIENT_ID: FROZEN_SLACK_CLIENT_ID } =
-  require("./agent-service/plugin-slack-registration");
-const { slackAccessProfile } = require("./agent-service/plugin-slack-access-policy");
-const { CAPABILITIES: GRAPH_CAPABILITIES } = require("./agent-service/plugin-microsoft-graph-capabilities");
 const { NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES } = require("./agent-service/native-runtime-config-protocol");
 const { AGENT_BINDING_PUBLIC_MESSAGES, validateAgentBindingParams } = require("./agent-service/agent-runtime-binding-protocol");
 const { SESSION_RUNTIME_PUBLIC_MESSAGES, validateSessionRuntimeParams } = require("./agent-service/session-runtime-protocol");
@@ -69,16 +59,8 @@ const {
   normalizeSessionBoardGrantSpec,
 } = require("./core/session-board-projection");
 
-const { validateCodexSecurityStatusInput, validateCodexSecurityPublicStatus } =
-  require("./core/plugin-codex-security-status-dto");
-const { parsePluginSelectionReadinessQuery } = require("./core/plugin-selection-readiness-dto");
-
 const WS_CLOSE_GRACE_MS = 100;
 const CLI_EXECUTION_LIMIT = 2;
-const GRAPH_REGISTRATION_SCOPES = Object.freeze(["Calendars.Read",
-  ...Object.values(GRAPH_CAPABILITIES).map(capability => capability.scope),
-  "User.Read", "offline_access"]);
-
 /**
  * REST 数据面统一从 active 集合取后端。最后的 Map 回退只服务不实现
  * BackendRegistry 接口的轻量测试桩；生产 registry 必须经过 disabled gate。
@@ -87,15 +69,6 @@ function getActiveBackend(registry, backendId) {
   if (typeof registry?.getBackend === "function") return registry.getBackend(backendId);
   if (typeof registry?._activeGet === "function") return registry._activeGet(backendId);
   return registry?.backends?.get(backendId) || null;
-}
-
-/**
- * Plugins belong to the native Service, which OpenClaw/Hermes also use, so its
- * plugin routes stay reachable while a disconnect hides the native Agents.
- */
-function getPluginServiceBackend(registry) {
-  if (typeof registry?.getServiceBackend === "function") return registry.getServiceBackend("shoggoth");
-  return getActiveBackend(registry, "shoggoth");
 }
 
 function hasAgentScopedSkills(backend) {
@@ -503,6 +476,7 @@ function hasShoggothMutationOrigin(req) {
 
 const SHOGGOTH_PROFILE_PUBLIC_CODES = new Set([
   "RUNTIME_INCOMPATIBLE",
+  "RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED",
   "PROFILE_AUTH_REQUIRED",
   "PROFILE_MODEL_NOT_AVAILABLE",
   "PROFILE_MODEL_CATALOG_UNAVAILABLE",
@@ -970,22 +944,6 @@ async function resolveResourceBackend(registry, kind, id) {
 //   GET    /__api/usage?backend=&range=          daily token/cost series (fast)
 //   GET    /__api/usage/breakdown?backend=&range= by-model/by-agent rankings (slow)
 //   GET    /__api/skills?backend=                 skill list (per-backend tab, read-only)
-//   GET    /__api/plugins?backend=&cursor=&limit=&catalogRevision=  bounded read-only catalog
-//   POST   /__api/plugins/preview             trusted host picker, no package code execution
-//   POST   /__api/plugins/install             one-shot selected source + digest/revision fence
-//   GET    /__api/plugins/operations?operationId=  durable operation receipt
-//   POST   /__api/plugins/state               candidate installation desired state
-//   GET/POST /__api/plugins/skill-bindings     candidate Agent Skill selection
-//   GET    /__api/plugins/mcp-status         sanitized candidate connection/Grant counts
-//   GET    /__api/plugins/external-calls     bounded external plugin execution receipts
-//   GET/POST /__api/plugins/external-approvals   pending calls and native-confirmed decision
-//   GET    /__api/plugins/mcp-tools          current catalog and saved Grant status
-//   GET/POST /__api/plugins/setup            setup state / one-confirmation enable (native confirm)
-//   GET/POST /__api/plugins/secrets          declared credential names / set or clear (native confirm)
-//   GET  /__api/plugins/first-party           first-party plugins shipped in the App and their state
-//   POST /__api/plugins/first-party-install   reinstall an uninstalled first-party plugin (native confirm)
-//   POST   /__api/plugins/mcp-grants/revoke  revision-fenced permission narrowing
-//   POST   /__api/plugins/mcp-grants/revoke-all  emergency binding-wide revocation
 //   GET    /__api/skills/usage                    per-backend: which skills agents actually loaded (registry merge)
 //   GET    /__api/tasks/federated?project=        unified project board across backends
 //   POST   /__api/tasks/federated                 create, routed by composite Agent id
@@ -1049,8 +1007,6 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     nativeMemoryConfigController,
     nativeMemorySharingConfigController,
     avatarPool,
-    pluginInstallSelection,
-    bundledPluginCatalog,
   } = deps;
   const method = req.method || "GET";
   let rawPath = pathname;
@@ -1069,6 +1025,127 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       try { return decodeURIComponent(s); } catch { return s; }
     });
   try {
+    if (segs[0] === "chat" && segs[1] === "secrets" && segs.length === 3) {
+      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+      if (segs[2] === "result") return sendJson(res, 403, { code: "DESKTOP_BRIDGE_REQUIRED", error: "仅桌面应用可读取原始操作结果" });
+      if (segs[2] === "decide") return sendJson(res, 403, { code: "DESKTOP_BRIDGE_REQUIRED", error: "请在桌面应用中确认这次发送" });
+      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { code: "SECRET_REFERENCE_FORBIDDEN", error: "Forbidden" });
+      const messages = require("./core/chat-secret-contract").SECRET_MESSAGES;
+      try {
+        if (!["prepare", "list", "revoke", "result", "results", "capabilities", "disclosures"].includes(segs[2])) throw Object.assign(new Error(), { code: "SECRET_INPUT_INVALID" });
+        const input = await readJsonBody(req);
+        return sendJson(res, 200, await registry.chatSecretRequest(segs[2], input));
+      } catch (error) {
+        const code = Object.hasOwn(messages, error?.code) ? error.code : "SECRET_PROCESSING_UNAVAILABLE";
+        return sendJson(res, 400, { code, error: messages[code], ...(error?.ranges ? { details: { ranges: error.ranges } } : {}) });
+      }
+    }
+    if (segs[0] === "connectors") {
+      if (segs.length === 3 && segs[1] === "official") {
+        const methods = { status: ["GET", "connector.official.status"], install: ["POST", "connector.official.install"],
+          remove: ["POST", "connector.official.remove"], account: ["POST", "connector.official.account"] };
+        if (!Object.hasOwn(methods, segs[2])) return sendJson(res, 404, { error: "not found" });
+        const route = methods[segs[2]];
+        if (method !== route[0]) return sendJson(res, 405, { error: "method not allowed" });
+        if (method === "POST" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { code: "OFFICIAL_SKILL_ACCESS_DENIED", error: "Forbidden" });
+        const backend = registry.getServiceBackend?.("shoggoth");
+        if (typeof backend?.connectorRequest !== "function") return sendJson(res, 503, { code: "OFFICIAL_SKILL_UNAVAILABLE", error: "Official connectors are unavailable" });
+        const { validateOfficialSkillParams, validateOfficialSkillResult, officialSkillPublicError } = require("./core/official-skill-connector-dto");
+        let input;
+        try {
+          if ([...requestUrl.searchParams.keys()].length) throw new Error();
+          if (method === "GET" && (req.headers["transfer-encoding"] || req.headers["content-length"] && req.headers["content-length"] !== "0")) throw new Error();
+          input = validateOfficialSkillParams(route[1], method === "GET" ? {} : await readJsonBody(req));
+        } catch { return sendJson(res, 400, { code: "OFFICIAL_SKILL_INVALID_ARGUMENT", error: "Invalid official connector parameters" }); }
+        try { return sendJson(res, 200, validateOfficialSkillResult(route[1], await backend.connectorRequest(route[1], input))); }
+        catch (error) {
+          const safe = officialSkillPublicError(error);
+          const status = /CONFLICT|BUSY/.test(safe.code) ? 409 : /ACCESS_DENIED/.test(safe.code) ? 403 : /INVALID/.test(safe.code) ? 400 : 503;
+          return sendJson(res, status, { code: safe.code, error: safe.message });
+        }
+      }
+      if (segs.length >= 3 && segs.length <= 4 && segs[1] === "lark") {
+        const methods = { status: ["GET", "connector.lark.status"], install: ["POST", "connector.lark.install"], remove: ["POST", "connector.lark.remove"],
+          "setup.status": ["GET", "connector.lark.setup.status"], "setup.start": ["POST", "connector.lark.setup.start"], "setup.cancel": ["POST", "connector.lark.setup.cancel"] };
+        const action = segs.slice(2).join(".");
+        if (!Object.hasOwn(methods, action)) return sendJson(res, 404, { error: "not found" });
+        const route = methods[action];
+        if (method !== route[0]) return sendJson(res, 405, { error: "method not allowed" });
+        if (method === "POST" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { code: "LARK_CLI_ACCESS_DENIED", error: "Forbidden" });
+        const backend = registry.getServiceBackend?.("shoggoth");
+        if (typeof backend?.connectorRequest !== "function") return sendJson(res, 503, { code: "LARK_CLI_UNAVAILABLE", error: "Lark connector management is unavailable" });
+        const { validateLarkCliParams, validateLarkCliResult, larkCliPublicError } = require("./core/lark-cli-contract");
+        let input;
+        try {
+          if ([...requestUrl.searchParams.keys()].length) throw new Error();
+          if (method === "GET" && (req.headers["transfer-encoding"] || req.headers["content-length"] && req.headers["content-length"] !== "0")) throw new Error();
+          input = validateLarkCliParams(route[1], method === "GET" ? {} : await readJsonBody(req));
+        } catch { return sendJson(res, 400, { code: "LARK_CLI_INVALID_ARGUMENT", error: "Invalid Lark connector parameters" }); }
+        try { return sendJson(res, 200, validateLarkCliResult(route[1], await backend.connectorRequest(route[1], input))); }
+        catch (error) {
+          const safe = larkCliPublicError(error);
+          const status = /CONFLICT|BUSY/.test(safe.code) ? 409 : /ACCESS_DENIED/.test(safe.code) ? 403 : /INVALID/.test(safe.code) ? 400 : 503;
+          return sendJson(res, status, { code: safe.code, error: safe.message });
+        }
+      }
+      if (segs.length === 3 && segs[1] === "apple") {
+        const methods = { status: ["GET", "connector.apple.status"], connect: ["POST", "connector.apple.connect"],
+          policy: ["POST", "connector.apple.policy.set"], settings: ["POST", "connector.apple.settings.open"] };
+        const route = methods[segs[2]];
+        if (!Object.hasOwn(methods, segs[2])) return sendJson(res, 404, { error: "not found" });
+        if (method !== route[0]) return sendJson(res, 405, { error: "method not allowed" });
+        if (method === "POST" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { code: "APPLE_DEVICE_ACCESS_DENIED", error: "Forbidden" });
+        const backend = registry.getServiceBackend?.("shoggoth");
+        if (typeof backend?.connectorRequest !== "function") return sendJson(res, 503, { code: "APPLE_DEVICE_UNAVAILABLE", error: "Device connector management is unavailable" });
+        const { validateAppleDeviceParams, validateAppleDeviceResult, APPLE_DEVICE_PUBLIC_MESSAGES } = require("./core/apple-device-contract");
+        let input;
+        try {
+          if (method === "GET") {
+            if (req.headers["transfer-encoding"] || req.headers["content-length"] && req.headers["content-length"] !== "0"
+              || [...requestUrl.searchParams.keys()].length) throw new Error();
+            input = {};
+          } else input = await readJsonBody(req);
+          input = validateAppleDeviceParams(route[1], input);
+        } catch { return sendJson(res, 400, { code: "APPLE_DEVICE_INVALID_ARGUMENT", error: "Invalid device connector parameters" }); }
+        try { return sendJson(res, 200, validateAppleDeviceResult(route[1], await backend.connectorRequest(route[1], input))); }
+        catch (error) {
+          const code = Object.hasOwn(APPLE_DEVICE_PUBLIC_MESSAGES, error?.code || "") ? error.code : "APPLE_DEVICE_UNAVAILABLE";
+          const status = /CONFLICT|UNCERTAIN/.test(code) ? 409 : /ACCESS_DENIED/.test(code) ? 403 : /INVALID/.test(code) ? 400 : 503;
+          return sendJson(res, status, { code, error: APPLE_DEVICE_PUBLIC_MESSAGES[code] });
+        }
+      }
+      if (segs.length !== 3 || segs[1] !== "mcp") return sendJson(res, 410, { code: "OPEN_CONNECTOR_RETIRED", error: "OpenConnector has been retired; use MCP connectors", legacyDataPreserved: true });
+      const reads = { registry: "connector.mcp.registry.list", list: "connector.mcp.list", tools: "connector.mcp.tools.list", subjects: "connector.mcp.agents.list",
+        "oauth-info": "connector.mcp.oauth.info", "signin-status": "connector.mcp.signin.get", approvals: "connector.mcp.approvals.list", requests: "connector.mcp.requests.list" };
+      const writes = { add: "connector.mcp.add", import: "connector.mcp.import", verify: "connector.mcp.verify", rebind: "connector.mcp.rebind",
+        signin: "connector.mcp.signin.start", "signin-cancel": "connector.mcp.signin.cancel", credentials: "connector.mcp.credentials.update",
+        "approval-resolve": "connector.mcp.approvals.resolve", agents: "connector.mcp.agents.set", update: "connector.mcp.update", remove: "connector.mcp.remove", "request-complete": "connector.mcp.request.complete" };
+      if (!["GET", "POST"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+      const serviceMethod = (method === "GET" ? reads : writes)[segs[2]];
+      if (!serviceMethod) return sendJson(res, 404, { error: "not found" });
+      if (method === "POST" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { code: "MCP_CONNECTOR_ACCESS_DENIED", error: "Forbidden" });
+      const backend = registry.getServiceBackend?.("shoggoth");
+      if (typeof backend?.connectorRequest !== "function") return sendJson(res, 503, { code: "MCP_CONNECTORS_UNAVAILABLE", error: "MCP connector management is unavailable" });
+      const { validateConnectorParams } = require("./core/connector-dto");
+      const { connectorPublicError } = require("./core/connector-errors");
+      let input;
+      try {
+        if (method === "GET") {
+          if (req.headers["transfer-encoding"] || req.headers["content-length"] && req.headers["content-length"] !== "0") throw new Error();
+          const params = requestUrl.searchParams;
+          if ([...params.keys()].some(key => params.getAll(key).length !== 1)) throw new Error();
+          input = Object.fromEntries(params);
+        } else input = await readJsonBody(req);
+        input = validateConnectorParams(serviceMethod, input);
+      } catch { return sendJson(res, 400, { code: "CONNECTOR_REQUEST_INVALID", error: "Invalid MCP connector parameters" }); }
+      try { return sendJson(res, 200, await backend.connectorRequest(serviceMethod, input)); }
+      catch (error) {
+        const safe = connectorPublicError(error);
+        const status = /(?:INVALID|UNSUPPORTED|REQUIRED)$/.test(safe.code) ? 400
+          : /(?:CONFLICT|UNCERTAIN|UNKNOWN)$/.test(safe.code) ? 409 : /ACCESS_DENIED/.test(safe.code) ? 403 : /NOT_FOUND/.test(safe.code) ? 404 : 503;
+        return sendJson(res, status, { code: safe.code, error: safe.message });
+      }
+    }
     if (segs[0] === "inspirations") {
       try {
         const id = requestUrl?.searchParams.get("id") || "";
@@ -1199,7 +1276,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         }
         if (segs.length === 2 && segs[1] === "messages" && method === "GET") return sendJson(res, 200,
           await registry.listGroupChatMessages(id, { afterSeq: seqParam("afterSeq"), beforeSeq: seqParam("beforeSeq"),
-            limit: Number(requestUrl?.searchParams.get("limit") || 50) }));
+            limit: Number(requestUrl?.searchParams.get("limit") || 50),
+            ...(requestUrl?.searchParams.has("afterRevision") ? { afterRevision: Number(requestUrl.searchParams.get("afterRevision")) } : {}) }));
         if (segs.length === 3 && segs[1] === "messages" && segs[2] === "lookup" && method === "GET") {
           return sendJson(res, 200, await registry.lookupGroupChatSend(id, {
             clientMessageId: requestUrl?.searchParams.get("clientMessageId") || "",
@@ -1409,6 +1487,32 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           return sendJson(res, 409, {
             error: "Shoggoth ChatGPT binding failed",
             code: safeShoggothProfileCode(error, "SHOGGOTH_CHATGPT_BIND_FAILED"),
+          });
+        }
+      }
+      if (segs.length === 3 && segs[1] === "providers" && segs[2] === "bind-endpoint"
+        && method === "POST") {
+        if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        try {
+          const body = await readJsonBody(req);
+          return sendJson(res, 200, await productHost.bindEndpoint(body));
+        } catch (error) {
+          return sendJson(res, 409, {
+            error: "Shoggoth endpoint binding failed",
+            code: safeShoggothProfileCode(error, "SHOGGOTH_ENDPOINT_BIND_FAILED"),
+          });
+        }
+      }
+      if (segs.length === 3 && segs[1] === "providers" && segs[2] === "remove"
+        && method === "POST") {
+        if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        try {
+          const body = await readJsonBody(req);
+          return sendJson(res, 200, await productHost.removeProvider(body));
+        } catch (error) {
+          return sendJson(res, 409, {
+            error: "Shoggoth provider removal failed",
+            code: safeShoggothProfileCode(error, "SHOGGOTH_PROVIDER_REMOVE_FAILED"),
           });
         }
       }
@@ -2464,1064 +2568,6 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       return sendJson(res, 200, { series: await registry.getUsageSeries(backendId, range || "all") });
     }
-    if (segs[0] === "plugins" && segs.length === 2
-      && segs[1] === "operations") {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const params = requestUrl?.searchParams;
-      const operationId = params?.get("operationId");
-      if (!params || [...params.keys()].some((key) => key !== "operationId"
-        || params.getAll(key).length !== 1)
-        || typeof operationId !== "string"
-        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(operationId)) {
-        return sendJson(res, 400, { error: "invalid operationId" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      return sendJson(res, 200, await backend.getPluginOperation(operationId));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "state") {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      const body = await readJsonBody(req);
-      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== 4
-        || !["installationId", "desiredState", "expectedRevision", "operationId"]
-          .every((key) => Object.hasOwn(body, key))
-        || typeof body.installationId !== "string" || !id.test(body.installationId)
-        || !["enabled", "disabled"].includes(body.desiredState)
-        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
-        || typeof body.operationId !== "string" || !id.test(body.operationId)) {
-        return sendJson(res, 400, { error: "invalid plugin state request" });
-      }
-      return sendJson(res, 200, await backend.setPluginInstallationState(body));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "skill-bindings") {
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-      if (method === "GET") {
-        const params = requestUrl?.searchParams;
-        const agentId = params?.get("agentId");
-        if (!params || [...params.keys()].some((key) => key !== "agentId"
-          || params.getAll(key).length !== 1)
-          || typeof agentId !== "string" || !id.test(agentId)) {
-          return sendJson(res, 400, { error: "invalid plugin Agent" });
-        }
-        return sendJson(res, 200, await backend.getPluginSkillBindings(agentId));
-      }
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== 6
-        || !["agentId", "installationId", "componentId", "enabled",
-          "expectedRevision", "operationId"].every((key) => Object.hasOwn(body, key))
-        || typeof body.agentId !== "string" || !id.test(body.agentId)
-        || typeof body.installationId !== "string" || !id.test(body.installationId)
-        || typeof body.componentId !== "string" || !/^[a-f0-9]{64}$/u.test(body.componentId)
-        || typeof body.enabled !== "boolean"
-        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0
-        || typeof body.operationId !== "string" || !id.test(body.operationId)) {
-        return sendJson(res, 400, { error: "invalid plugin Skill binding request" });
-      }
-      return sendJson(res, 200, await backend.setPluginSkillBinding(body));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "mcp-status") {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      const params = requestUrl?.searchParams;
-      const agentId = params?.get("agentId");
-      const installationId = params?.get("installationId");
-      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-      if (!params || [...params.keys()].some((key) =>
-        !["agentId", "installationId"].includes(key)
-          || params.getAll(key).length !== 1)
-        || typeof agentId !== "string" || !id.test(agentId)
-        || typeof installationId !== "string" || !id.test(installationId)) {
-        return sendJson(res, 400, { error: "invalid plugin MCP status query" });
-      }
-      return sendJson(res, 200, await backend.getPluginMcpStatus(agentId, installationId));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external-calls") {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      const params = requestUrl?.searchParams;
-      const keys = ["backendId", "agentId", "sessionId", "toolCallId",
-        "limit", "cursorCreatedAt", "cursorCallId"];
-      if (!params || [...params.keys()].some(key => !keys.includes(key) || params.getAll(key).length !== 1)) {
-        return sendJson(res, 400, { error: "Invalid plugin call history query" });
-      }
-      const backendId = params.get("backendId") || "all", limit = Number(params.get("limit") || "10");
-      const agentId = params.get("agentId"), sessionId = params.get("sessionId");
-      const toolCallId = params.get("toolCallId");
-      const scoped = agentId !== null || sessionId !== null || toolCallId !== null;
-      const opaque = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
-      const rawTime = params.get("cursorCreatedAt"), rawCallId = params.get("cursorCallId");
-      const cursor = rawTime === null && rawCallId === null ? null
-        : rawTime !== null && rawCallId !== null && /^[0-9]{1,16}$/u.test(rawTime)
-          && Number.isSafeInteger(Number(rawTime)) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(rawCallId)
-          ? { createdAt: Number(rawTime), callId: rawCallId } : undefined;
-      if (!["all", "openclaw", "hermes"].includes(backendId)
-        || !Number.isSafeInteger(limit) || limit < 1 || limit > 20 || cursor === undefined
-        || (scoped && (backendId === "all"
-          || ![agentId, sessionId, toolCallId].every(value =>
-            typeof value === "string" && opaque.test(value))
-          || Buffer.byteLength(agentId, "utf8") > 128
-          || Buffer.byteLength(sessionId, "utf8") > 256
-          || Buffer.byteLength(toolCallId, "utf8") > 256))) {
-        return sendJson(res, 400, { error: "Invalid plugin call history query" });
-      }
-      return sendJson(res, 200, await backend.getPluginExternalCalls({
-        backendId: backendId === "all" ? null : backendId,
-        agentId, sessionId, toolCallId, cursor, limit }));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external-approvals") {
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      if (method === "GET") {
-        const params = requestUrl?.searchParams;
-        const keys = ["backendId", "limit", "cursorOffset", "cursorRevision"];
-        if (!params || [...params.keys()].some(key => !keys.includes(key)
-          || params.getAll(key).length !== 1)) {
-          return sendJson(res, 400, { error: "Invalid external approval query" });
-        }
-        const backendId = params.get("backendId") || "all";
-        const rawLimit = params.get("limit") || "2";
-        const rawOffset = params.get("cursorOffset"), rawRevision = params.get("cursorRevision");
-        const cursor = rawOffset === null && rawRevision === null ? null
-          : rawOffset !== null && rawRevision !== null && /^[0-9]{1,3}$/u.test(rawOffset)
-            && /^[0-9]{1,12}$/u.test(rawRevision)
-            ? { offset: Number(rawOffset), revision: Number(rawRevision) } : undefined;
-        if (!["all", "openclaw", "hermes"].includes(backendId)
-          || !/^[1-2]$/u.test(rawLimit) || cursor === undefined) {
-          return sendJson(res, 400, { error: "Invalid external approval query" });
-        }
-        return sendJson(res, 200, await backend.getExternalPluginApprovals({
-          backendId: backendId === "all" ? null : backendId, cursor,
-          limit: Number(rawLimit) }));
-      }
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-      if (!body || Object.getPrototypeOf(body) !== Object.prototype
-        || Object.keys(body).length !== 3
-        || !["requestId", "operationId", "decision"].every(key => Object.hasOwn(body, key))
-        || !id.test(body.requestId) || !id.test(body.operationId)
-        || !["once", "deny"].includes(body.decision)) {
-        return sendJson(res, 400, { error: "Invalid external approval response" });
-      }
-      const prepared = await backend.prepareExternalPluginApproval(body);
-      if (prepared.completed) return sendJson(res, 200, {
-        approved: prepared.approved, requestId: body.requestId });
-      let approved = false;
-      try {
-        if (body.decision === "once") {
-          if (typeof hostOps?.confirmPluginCapability !== "function") {
-            return sendJson(res, 501, { error: "Native confirmation unavailable" });
-          }
-          approved = await hostOps.confirmPluginCapability(prepared.summary) === true;
-        }
-      } finally {
-        if (!approved) await backend.commitExternalPluginApproval({
-          challenge: prepared.challenge, approved: false });
-      }
-      if (!approved) return sendJson(res, 200, { approved: false, requestId: body.requestId });
-      return sendJson(res, 200, await backend.commitExternalPluginApproval({
-        challenge: prepared.challenge, approved: true }));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "mcp-tools") {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      const params = requestUrl?.searchParams;
-      const agentId = params?.get("agentId");
-      const bindingId = params?.get("bindingId");
-      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-      if (!params || [...params.keys()].some((key) =>
-        !["agentId", "bindingId"].includes(key)
-          || params.getAll(key).length !== 1)
-        || typeof agentId !== "string" || !id.test(agentId)
-        || typeof bindingId !== "string" || !id.test(bindingId)) {
-        return sendJson(res, 400, { error: "invalid plugin MCP tools query" });
-      }
-      return sendJson(res, 200, await backend.getPluginMcpTools(agentId, bindingId));
-    }
-    if (segs[0] === "plugins" && segs.length === 3
-      && segs[1] === "mcp-grants" && segs[2] === "revoke") {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      const body = await readJsonBody(req);
-      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-      const toolId = /^plugin:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[a-f0-9]{64}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}:[a-f0-9]{64}$/u;
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== 5
-        || !["agentId", "bindingId", "toolIdentity", "expectedRevision",
-          "operationId"].every((key) => Object.hasOwn(body, key))
-        || typeof body.agentId !== "string" || !id.test(body.agentId)
-        || typeof body.bindingId !== "string" || !id.test(body.bindingId)
-        || typeof body.toolIdentity !== "string" || !toolId.test(body.toolIdentity)
-        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
-        || typeof body.operationId !== "string" || !id.test(body.operationId)) {
-        return sendJson(res, 400, { error: "invalid plugin MCP grant revocation" });
-      }
-      return sendJson(res, 200, await backend.revokePluginMcpGrant(body));
-    }
-    if (segs[0] === "plugins" && segs.length === 3
-      && segs[1] === "mcp-grants" && segs[2] === "revoke-all") {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      const body = await readJsonBody(req);
-      const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== 4
-        || !["agentId", "bindingId", "expectedRevision", "operationId"]
-          .every((key) => Object.hasOwn(body, key))
-        || typeof body.agentId !== "string" || !id.test(body.agentId)
-        || typeof body.bindingId !== "string" || !id.test(body.bindingId)
-        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
-        || typeof body.operationId !== "string" || !id.test(body.operationId)) {
-        return sendJson(res, 400, { error: "invalid plugin MCP bulk revocation" });
-      }
-      return sendJson(res, 200, await backend.revokeAllPluginMcpGrants(body));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && ["disconnect", "disconnect-operation"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req), id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-      const fields = segs[1] === "disconnect" ? ["agentId", "bindingId", "expectedRevision", "operationId"] : ["agentId", "operationId"];
-      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== fields.length
-        || !fields.every(key => Object.hasOwn(body, key)) || typeof body.agentId !== "string" || !id.test(body.agentId)
-        || typeof body.operationId !== "string" || !id.test(body.operationId)
-        || (segs[1] === "disconnect" && (typeof body.bindingId !== "string" || !id.test(body.bindingId)
-          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1))) {
-        return sendJson(res, 400, { error: "Invalid plugin disconnect request" });
-      }
-      const backend = registry.route(body.agentId);
-      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
-      if (segs[1] === "disconnect-operation") return sendJson(res, 200,
-        await backend.getPluginDisconnectOperation(body.agentId, body.operationId));
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const prepared = await backend.preparePluginDisconnect(body);
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally { if (!approved) await backend.commitPluginDisconnect({ challenge: prepared.challenge, approved: false }); }
-      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
-      return sendJson(res, 200, await backend.commitPluginDisconnect({ challenge: prepared.challenge, approved: true }));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "account-select") {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req), id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-      const fields = ["agentId", "bindingId", "connectionId", "expectedRevision", "operationId"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
-        || !["agentId", "bindingId", "connectionId", "operationId"].every(key =>
-          typeof body[key] === "string" && id.test(body[key]))
-        || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1) {
-        return sendJson(res, 400, { error: "Invalid plugin account selection" });
-      }
-      const backend = registry.route(body.agentId);
-      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const prepared = await backend.preparePluginAccountSelection(body);
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally { if (!approved) await backend.commitPluginAccountSelection({
-        challenge: prepared.challenge, approved: false }); }
-      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
-      return sendJson(res, 200, await backend.commitPluginAccountSelection({
-        challenge: prepared.challenge, approved: true }));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && ["rollback-list", "rollback-change", "rollback-operation"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const common = ["action", "installationId", "expectedRevision", "operationId"];
-      const fields = segs[1] === "rollback-list" ? ["installationId"]
-        : segs[1] === "rollback-operation" ? ["installationId", "operationId"]
-          : body?.action === "code" ? [...common, "targetDigest"]
-            : body?.action === "restore" ? [...common, "snapshotId", "snapshotDigest"] : common;
-      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== fields.length
-        || !fields.every(key => Object.hasOwn(body, key))) return sendJson(res, 400, { error: "Invalid rollback request" });
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      if (segs[1] === "rollback-list") return sendJson(res, 200, await backend.listPluginRollback(body));
-      if (segs[1] === "rollback-operation") return sendJson(res, 200, await backend.getPluginRollbackOperation(body));
-      if (typeof hostOps?.confirmPluginCapability !== "function") return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      const prepared = await backend.preparePluginRollback(body);
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally { if (!approved) await backend.commitPluginRollback({ challenge: prepared.challenge, approved: false }); }
-      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
-      return sendJson(res, 200, await backend.commitPluginRollback({ challenge: prepared.challenge, approved: true }));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && ["dependency-status", "dependency-change", "dependency-operation"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const fields = segs[1] === "dependency-operation" ? ["operationId"] : segs[1] === "dependency-status" ? ["installationId", "componentId"]
-        : ["action", "installationId", "componentId", "expectedRevision", "operationId"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "Invalid plugin dependency request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      if (segs[1] === "dependency-operation") return sendJson(res, 200, await backend.getPluginDependencyOperation(body.operationId));
-      if (segs[1] === "dependency-status") return sendJson(res, 200, await backend.getPluginDependencyStatus(body));
-      if (!["prepare", "revoke"].includes(body.action)) return sendJson(res, 400, { error: "Invalid dependency action" });
-      if (typeof hostOps?.selectPluginDependency !== "function" || typeof hostOps.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native dependency preparation unavailable" });
-      }
-      const executablePath = body.action === "prepare" ? await hostOps.selectPluginDependency() : null;
-      if (body.action === "prepare" && executablePath === null) return sendJson(res, 200, { canceled: true, receipt: null });
-      const prepared = await backend.previewPluginDependency({ ...body, ...(body.action === "prepare" ? { executablePath } : {}) });
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally { if (!approved) await backend.commitPluginDependency({ challenge: prepared.challenge, approved: false }); }
-      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
-      return sendJson(res, 200, await backend.commitPluginDependency({ challenge: prepared.challenge, approved: true }));
-    }
-    if (segs[0] === "plugins" && segs.length === 2
-      && ["zoom-registration-status", "zoom-registration-configure"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const statusOnly = segs[1] === "zoom-registration-status";
-      const fields = statusOnly ? [] : ["clientId", "clientSecret", "redirectPort", "scopes"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "Invalid Zoom registration request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend || typeof backend.getPluginZoomRegistrationStatus !== "function"
-        || (!statusOnly && typeof backend.configurePluginZoomRegistration !== "function")) {
-        return sendJson(res, 503, { error: "Zoom registration unavailable" });
-      }
-      if (statusOnly) return sendJson(res, 200, await backend.getPluginZoomRegistrationStatus());
-      if (typeof body.clientId !== "string" || !/^[A-Za-z0-9._-]{10,128}$/u.test(body.clientId)
-        || body.clientId.startsWith("ZOOM_") || !validZoomClientSecret(body.clientSecret)
-        || !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
-        || body.redirectPort > 65535 || !Array.isArray(body.scopes)
-        || body.scopes.length < 2 || body.scopes.length > ZOOM_MEETING_SCOPES.length + 1
-        || !body.scopes.includes(ZOOM_IDENTITY_SCOPE)
-        || !body.scopes.some(scope => ZOOM_MEETING_SCOPES.includes(scope))
-        || body.scopes.some(scope => ![ZOOM_IDENTITY_SCOPE, ...ZOOM_MEETING_SCOPES].includes(scope))
-        || new Set(body.scopes).size !== body.scopes.length) {
-        return sendJson(res, 400, { error: "Invalid Zoom registration request" });
-      }
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const current = await backend.getPluginZoomRegistrationStatus();
-      if (current.configured) return sendJson(res, 409, { error: "Zoom client already configured",
-        code: "ZOOM_ALREADY_CONFIGURED" });
-      const approved = await hostOps.confirmPluginCapability({ action: "zoom-registration",
-        provider: "Zoom Meetings", clientId: body.clientId,
-        redirectUrl: `http://127.0.0.1:${body.redirectPort}/oauth/callback`,
-        scopes: body.scopes }) === true;
-      if (!approved) return sendJson(res, 200,
-        { configured: false, restartRequired: false });
-      const result = await backend.configurePluginZoomRegistration(body);
-      return sendJson(res, 200, { configured: result.configured,
-        restartRequired: result.restartRequired });
-    }
-    if (segs[0] === "plugins" && segs.length === 2
-      && ["dropbox-registration-status", "dropbox-registration-configure"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const statusOnly = segs[1] === "dropbox-registration-status";
-      const fields = statusOnly ? [] : ["clientId", "clientSecret", "redirectPort"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "Invalid Dropbox registration request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend || typeof backend.getPluginDropboxRegistrationStatus !== "function"
-        || (!statusOnly && typeof backend.configurePluginDropboxRegistration !== "function")) {
-        return sendJson(res, 503, { error: "Dropbox registration unavailable" });
-      }
-      if (statusOnly) return sendJson(res, 200, await backend.getPluginDropboxRegistrationStatus());
-      if (typeof body.clientId !== "string" || !DROPBOX_CLIENT_ID.test(body.clientId)
-        || !validDropboxClientSecret(body.clientSecret)
-        || !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
-        || body.redirectPort > 65535) {
-        return sendJson(res, 400, { error: "Invalid Dropbox registration request" });
-      }
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const current = await backend.getPluginDropboxRegistrationStatus();
-      if (current.configured) return sendJson(res, 409, { error: "Dropbox client already configured",
-        code: "DROPBOX_ALREADY_CONFIGURED" });
-      const approved = await hostOps.confirmPluginCapability({ action: "dropbox-registration",
-        provider: "Dropbox", clientId: body.clientId,
-        redirectUrl: `http://127.0.0.1:${body.redirectPort}/oauth/callback`,
-        scopes: [...DROPBOX_SCOPES] }) === true;
-      if (!approved) return sendJson(res, 200,
-        { configured: false, restartRequired: false });
-      const result = await backend.configurePluginDropboxRegistration(body);
-      return sendJson(res, 200, { configured: result.configured,
-        restartRequired: result.restartRequired });
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "codex-security-status") {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      let input;
-      try { input = validateCodexSecurityStatusInput(await readJsonBody(req)); }
-      catch { return sendJson(res, 400, { error: "Invalid Codex Security status request" }); }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend || typeof backend.getCodexSecurityStatus !== "function") {
-        return sendJson(res, 503, { error: "Codex Security status unavailable" });
-      }
-      try { return sendJson(res, 200, validateCodexSecurityPublicStatus(await backend.getCodexSecurityStatus(input))); }
-      catch { return sendJson(res, 503, { error: "Codex Security status unavailable" }); }
-    }
-    if (segs[0] === "plugins" && segs.length === 2
-      && ["gmail-registration-status", "gmail-registration-configure",
-        "gmail-capabilities-status", "gmail-capabilities-configure",
-        "gmail-auth-start", "gmail-auth-status", "gmail-auth-cancel",
-        "gmail-auth-recovery-status", "gmail-auth-reconcile"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const route = segs[1];
-      const authContext = ["agentId", "installationId", "componentId", "expectedRevision"];
-      const fields = route === "gmail-auth-recovery-status" ? authContext
-        : route === "gmail-auth-reconcile" ? [...authContext, "email"]
-        : route.endsWith("-status") && route !== "gmail-auth-status"
-        || route === "gmail-registration-configure" ? []
-        : route === "gmail-capabilities-configure"
-          ? ["expectedRevision", "writeEnabled", "sendEnabled"]
-          : route === "gmail-auth-start"
-            ? ["agentId", "installationId", "componentId", "expectedRevision", "operationId", "email"]
-            : ["agentId", "flowId"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length
-        || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "Invalid Gmail request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      if (route === "gmail-registration-status") {
-        return sendJson(res, 200, await backend.getPluginGmailRegistrationStatus());
-      }
-      if (route === "gmail-registration-configure") {
-        if (typeof hostOps?.selectPluginGmailCredentials !== "function"
-          || typeof hostOps?.confirmPluginCapability !== "function") {
-          return sendJson(res, 501, { error: "Native Gmail client import unavailable" });
-        }
-        const credentialsPath = await hostOps.selectPluginGmailCredentials();
-        if (credentialsPath === null) return sendJson(res, 200,
-          { canceled: true, ...await backend.getPluginGmailRegistrationStatus() });
-        if (typeof credentialsPath !== "string") return sendJson(res, 400, { error: "Invalid Gmail client path" });
-        const approved = await hostOps.confirmPluginCapability({ action: "gmail-registration",
-          path: credentialsPath }) === true;
-        if (!approved) return sendJson(res, 200,
-          { canceled: true, ...await backend.getPluginGmailRegistrationStatus() });
-        return sendJson(res, 200, { canceled: false,
-          ...await backend.configurePluginGmailRegistration(credentialsPath) });
-      }
-      if (route === "gmail-capabilities-status") {
-        return sendJson(res, 200, await backend.getPluginGmailCapabilitiesStatus());
-      }
-      if (route === "gmail-capabilities-configure") {
-        if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
-          || typeof body.writeEnabled !== "boolean" || typeof body.sendEnabled !== "boolean"
-          || body.sendEnabled && !body.writeEnabled) {
-          return sendJson(res, 400, { error: "Invalid Gmail capabilities" });
-        }
-        if (typeof hostOps?.confirmPluginCapability !== "function") {
-          return sendJson(res, 501, { error: "Native Gmail confirmation unavailable" });
-        }
-        const approved = await hostOps.confirmPluginCapability({ action: "gmail-capabilities",
-          writeEnabled: body.writeEnabled, sendEnabled: body.sendEnabled }) === true;
-        if (!approved) return sendJson(res, 200,
-          { canceled: true, ...await backend.getPluginGmailCapabilitiesStatus() });
-        return sendJson(res, 200, { canceled: false,
-          ...await backend.configurePluginGmailCapabilities(body) });
-      }
-      if (route === "gmail-auth-recovery-status" || route === "gmail-auth-reconcile") {
-        const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-        if (!["agentId", "installationId"].every(key =>
-          typeof body[key] === "string" && id.test(body[key]))
-          || typeof body.componentId !== "string" || !/^[a-f0-9]{64}$/u.test(body.componentId)
-          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
-          || route === "gmail-auth-reconcile" && (typeof body.email !== "string"
-            || !/^[^\s@\x00-\x1f]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,63}$/u.test(body.email))) {
-          return sendJson(res, 400, { error: "Invalid Gmail recovery request" });
-        }
-        const input = { profileId: body.agentId, installationId: body.installationId,
-          componentId: body.componentId, expectedRevision: body.expectedRevision };
-        if (route === "gmail-auth-recovery-status") {
-          return sendJson(res, 200, await backend.getPluginGmailAuthRecoveryStatus(input));
-        }
-        if (typeof hostOps?.confirmPluginCapability !== "function") {
-          return sendJson(res, 501, { error: "Native Gmail recovery confirmation unavailable" });
-        }
-        const approved = await hostOps.confirmPluginCapability({ action: "gmail-auth-reconcile",
-          email: body.email }) === true;
-        if (!approved) return sendJson(res, 200, { canceled: true, recovered: false });
-        return sendJson(res, 200, { canceled: false,
-          ...await backend.reconcilePluginGmailAuth({ ...input, email: body.email }) });
-      }
-      if (route === "gmail-auth-start") {
-        const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
-        if (!["agentId", "installationId", "operationId"].every(key =>
-          typeof body[key] === "string" && id.test(body[key]))
-          || typeof body.componentId !== "string" || !/^[a-f0-9]{64}$/u.test(body.componentId)
-          || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 1
-          || typeof body.email !== "string" || !/^[^\s@\x00-\x1f]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,63}$/u.test(body.email)) {
-          return sendJson(res, 400, { error: "Invalid Gmail account" });
-        }
-        if (typeof hostOps?.confirmPluginCapability !== "function") {
-          return sendJson(res, 501, { error: "Native Gmail confirmation unavailable" });
-        }
-        const approved = await hostOps.confirmPluginCapability({ action: "gmail-auth",
-          email: body.email, scopes: ["gmail"] }) === true;
-        if (!approved) return sendJson(res, 200, { canceled: true, flow: null });
-        return sendJson(res, 200, await backend.startPluginGmailAuth({
-          profileId: body.agentId, installationId: body.installationId,
-          componentId: body.componentId, expectedRevision: body.expectedRevision,
-          operationId: body.operationId, email: body.email,
-        }));
-      }
-      if (typeof body.agentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(body.agentId)
-        || typeof body.flowId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(body.flowId)) {
-        return sendJson(res, 400, { error: "Invalid Gmail flow" });
-      }
-      const input = { profileId: body.agentId, flowId: body.flowId };
-      return sendJson(res, 200, await (route === "gmail-auth-cancel"
-        ? backend.cancelPluginGmailAuth(input) : backend.getPluginGmailAuth(input)));
-    }
-    if (segs[0] === "plugins" && segs.length === 2
-      && ["graph-registration-status", "graph-registration-configure"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const statusOnly = segs[1] === "graph-registration-status";
-      const fields = statusOnly ? [] : ["clientId"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "Invalid Graph registration request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend || typeof backend.getPluginGraphRegistrationStatus !== "function"
-        || (!statusOnly && typeof backend.configurePluginGraphRegistration !== "function")) {
-        return sendJson(res, 503, { error: "Graph registration unavailable" });
-      }
-      if (statusOnly) return sendJson(res, 200, await backend.getPluginGraphRegistrationStatus());
-      if (typeof body.clientId !== "string"
-        || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(body.clientId)) {
-        return sendJson(res, 400, { error: "Invalid Graph client ID", code: "GRAPH_REGISTRATION_INVALID" });
-      }
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const current = await backend.getPluginGraphRegistrationStatus();
-      if (current.configured) return sendJson(res, 409, { error: "Graph client already configured",
-        code: "GRAPH_REGISTRATION_CONFLICT" });
-      const approved = await hostOps.confirmPluginCapability({ action: "graph-registration",
-        provider: "Microsoft Graph", clientId: body.clientId,
-        redirectUrl: "http://localhost", scopes: GRAPH_REGISTRATION_SCOPES }) === true;
-      if (!approved) return sendJson(res, 200,
-        { canceled: true, configured: false, restartRequired: false });
-      const result = await backend.configurePluginGraphRegistration(body);
-      return sendJson(res, 200, { canceled: false, configured: result.configured,
-        restartRequired: result.restartRequired });
-    }
-    if (segs[0] === "plugins" && segs.length === 2
-      && ["lovable-registration-status", "lovable-registration-configure",
-        "lovable-registration-reconcile"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const statusOnly = segs[1] === "lovable-registration-status";
-      const reconcile = segs[1] === "lovable-registration-reconcile";
-      const fields = statusOnly ? [] : reconcile ? ["reviewedRemoteOutcome"] : ["redirectPort"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "Invalid Lovable registration request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend || typeof backend.getPluginLovableRegistrationStatus !== "function"
-        || (!statusOnly && typeof backend[reconcile
-          ? "reconcilePluginLovableRegistration" : "configurePluginLovableRegistration"] !== "function")) {
-        return sendJson(res, 503, { error: "Lovable registration unavailable" });
-      }
-      if (statusOnly) return sendJson(res, 200, await backend.getPluginLovableRegistrationStatus());
-      if (reconcile ? body.reviewedRemoteOutcome !== true
-        : !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
-          || body.redirectPort > 65535) {
-        return sendJson(res, 400, { error: "Invalid Lovable callback port",
-          code: "LOVABLE_REGISTRATION_INVALID" });
-      }
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const current = await backend.getPluginLovableRegistrationStatus();
-      if (reconcile) {
-        if (!current.needsVerification) return sendJson(res, 409,
-          { error: "No uncertain Lovable registration to reconcile",
-            code: "LOVABLE_REGISTRATION_CONFLICT" });
-        const approved = await hostOps.confirmPluginCapability({
-          action: "lovable-registration-reconcile", provider: "Lovable official MCP",
-          registrationEndpoint: "https://lovable.dev/oauth/register" }) === true;
-        if (!approved) return sendJson(res, 200, { canceled: true, ...current });
-        const result = await backend.reconcilePluginLovableRegistration(body);
-        return sendJson(res, 200, { canceled: false, ...result });
-      }
-      if (current.configured) return sendJson(res, 409, { error: "Lovable client already registered",
-        code: "LOVABLE_REGISTRATION_CONFLICT" });
-      if (current.needsVerification) return sendJson(res, 409,
-        { error: "Prior Lovable registration needs verification",
-          code: "LOVABLE_REGISTRATION_NEEDS_VERIFICATION" });
-      const redirectUrl = `http://127.0.0.1:${body.redirectPort}/oauth/callback`;
-      const approved = await hostOps.confirmPluginCapability({ action: "lovable-registration",
-        provider: "Lovable official MCP", redirectUrl, scopes: ["workspaces:read"],
-        registrationEndpoint: "https://lovable.dev/oauth/register" }) === true;
-      if (!approved) return sendJson(res, 200, { canceled: true, ...current });
-      const result = await backend.configurePluginLovableRegistration(body);
-      return sendJson(res, 200, { canceled: false, ...result });
-    }
-    if (segs[0] === "plugins" && segs.length === 2
-      && ["higgsfield-registration-status", "higgsfield-registration-configure",
-        "higgsfield-registration-reconcile"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const statusOnly = segs[1] === "higgsfield-registration-status";
-      const reconcile = segs[1] === "higgsfield-registration-reconcile";
-      const fields = statusOnly ? [] : reconcile ? ["reviewedRemoteOutcome"] : ["redirectPort"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "Invalid Higgsfield registration request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend || typeof backend.getPluginHiggsfieldRegistrationStatus !== "function"
-        || (!statusOnly && typeof backend[reconcile
-          ? "reconcilePluginHiggsfieldRegistration" : "configurePluginHiggsfieldRegistration"] !== "function")) {
-        return sendJson(res, 503, { error: "Higgsfield registration unavailable" });
-      }
-      if (statusOnly) return sendJson(res, 200, await backend.getPluginHiggsfieldRegistrationStatus());
-      if (reconcile ? body.reviewedRemoteOutcome !== true
-        : !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
-          || body.redirectPort > 65535) {
-        return sendJson(res, 400, { error: "Invalid Higgsfield callback port",
-          code: "HIGGSFIELD_REGISTRATION_INVALID" });
-      }
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const current = await backend.getPluginHiggsfieldRegistrationStatus();
-      if (reconcile) {
-        if (!current.needsVerification) return sendJson(res, 409,
-          { error: "No uncertain Higgsfield registration to reconcile",
-            code: "HIGGSFIELD_REGISTRATION_CONFLICT" });
-        const approved = await hostOps.confirmPluginCapability({
-          action: "higgsfield-registration-reconcile", provider: "Higgsfield official MCP",
-          registrationEndpoint: "https://clerk.higgsfield.ai/oauth/register" }) === true;
-        if (!approved) return sendJson(res, 200, { canceled: true, ...current });
-        const result = await backend.reconcilePluginHiggsfieldRegistration(body);
-        return sendJson(res, 200, { canceled: false, ...result });
-      }
-      if (current.configured) return sendJson(res, 409, { error: "Higgsfield client already registered",
-        code: "HIGGSFIELD_REGISTRATION_CONFLICT" });
-      if (current.needsVerification) return sendJson(res, 409,
-        { error: "Prior Higgsfield registration needs verification",
-          code: "HIGGSFIELD_REGISTRATION_NEEDS_VERIFICATION" });
-      const redirectUrl = `http://127.0.0.1:${body.redirectPort}/oauth/callback`;
-      const approved = await hostOps.confirmPluginCapability({ action: "higgsfield-registration",
-        provider: "Higgsfield official MCP", redirectUrl, scopes: ["openid", "email", "offline_access"],
-        registrationEndpoint: "https://clerk.higgsfield.ai/oauth/register" }) === true;
-      if (!approved) return sendJson(res, 200, { canceled: true, ...current });
-      const result = await backend.configurePluginHiggsfieldRegistration(body);
-      return sendJson(res, 200, { canceled: false, ...result });
-    }
-    if (segs[0] === "plugins" && segs.length === 2
-      && ["slack-registration-status", "slack-registration-configure"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const statusOnly = segs[1] === "slack-registration-status";
-      const fields = statusOnly ? [] : ["clientId", "redirectPort", "scopes"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length
-        || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "Invalid Slack registration request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend || typeof backend.getPluginSlackRegistrationStatus !== "function"
-        || (!statusOnly && typeof backend.configurePluginSlackRegistration !== "function")) {
-        return sendJson(res, 503, { error: "Slack registration unavailable" });
-      }
-      if (statusOnly) return sendJson(res, 200, await backend.getPluginSlackRegistrationStatus());
-      const accessProfile = slackAccessProfile(body.scopes);
-      if (typeof body.clientId !== "string"
-        || !/^[0-9]{3,20}\.[0-9]{3,20}$/u.test(body.clientId)
-        || body.clientId === FROZEN_SLACK_CLIENT_ID
-        || !Number.isSafeInteger(body.redirectPort) || body.redirectPort < 1024
-        || body.redirectPort > 65535
-        || accessProfile === null) {
-        return sendJson(res, 400, { error: "Invalid Slack client or scope",
-          code: "SLACK_REGISTRATION_INVALID" });
-      }
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const current = await backend.getPluginSlackRegistrationStatus();
-      if (current.configured) return sendJson(res, 409,
-        { error: "Slack client already configured", code: "SLACK_REGISTRATION_CONFLICT" });
-      const approved = await hostOps.confirmPluginCapability({ action: "slack-registration",
-        provider: "Slack official MCP", clientId: body.clientId,
-        redirectUrl: `http://localhost:${body.redirectPort}/oauth/callback`,
-        scopes: [...accessProfile.scopes] }) === true;
-      if (!approved) return sendJson(res, 200,
-        { canceled: true, configured: false, restartRequired: false });
-      const result = await backend.configurePluginSlackRegistration({ ...body, scopes: [...accessProfile.scopes] });
-      return sendJson(res, 200, { canceled: false, ...result });
-    }
-    // One-confirmation enable and `${secret:NAME}` credentials. GET reads names and
-    // readiness only; a credential value is accepted on POST and never returned.
-    if (segs[0] === "plugins" && segs.length === 2 && ["setup", "secrets"].includes(segs[1])) {
-      const kind = segs[1];
-      if (method === "GET") {
-        const params = requestUrl?.searchParams;
-        const agentId = params?.get("agentId");
-        const installationId = params?.get("installationId");
-        if (!params || [...params.keys()].some(key => !["agentId", "installationId"].includes(key)
-          || params.getAll(key).length !== 1) || typeof agentId !== "string" || agentId.length > 256
-          || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(installationId || "")) {
-          return sendJson(res, 400, { error: "Invalid plugin setup query" });
-        }
-        const backend = registry.route(agentId);
-        if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
-        return sendJson(res, 200, kind === "setup" ? await backend.getPluginSetup({ agentId, installationId })
-          : await backend.getPluginSecrets({ agentId, installationId }));
-      }
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const fields = kind === "setup" ? ["agentId", "installationId", "expectedRevision"]
-        : ["agentId", "installationId", "name", "value"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
-        || typeof body.agentId !== "string" || body.agentId.length > 256
-        || (kind === "secrets" && body.value !== null && (typeof body.value !== "string" || !body.value
-          || Buffer.byteLength(body.value, "utf8") > 16_384))) {
-        return sendJson(res, 400, { error: "Invalid plugin setup request" });
-      }
-      const backend = registry.route(body.agentId);
-      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const { value, ...request } = body;
-      const prepared = kind === "setup" ? await backend.preparePluginSetup(request)
-        : await backend.preparePluginSecret({ ...request, clear: value === null });
-      const commit = approved => kind === "setup"
-        ? backend.commitPluginSetup({ challenge: prepared.challenge, approved })
-        : backend.commitPluginSecret({ challenge: prepared.challenge, approved, value: approved ? value : null });
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally { if (!approved) await commit(false); }
-      if (!approved) return sendJson(res, 200, { canceled: true, result: null });
-      return sendJson(res, 200, await commit(true));
-    }
-    // First-party plugins shipped in the App: list them, and reinstall one the
-    // user uninstalled. The confirmation names the Service's own metadata.
-    if (segs[0] === "plugins" && segs.length === 2 && ["first-party", "first-party-install"].includes(segs[1])) {
-      const backend = getPluginServiceBackend(registry);
-      if (!backend?.listFirstPartyPlugins) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      if (segs[1] === "first-party") {
-        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-        return sendJson(res, 200, await backend.listFirstPartyPlugins());
-      }
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      if (!exactJsonObject(body, ["packageId"]) || typeof body.packageId !== "string"
-        || !/^[a-z0-9][a-z0-9-]{0,63}$/u.test(body.packageId)) {
-        return sendJson(res, 400, { error: "Invalid first-party plugin" });
-      }
-      const item = (await backend.listFirstPartyPlugins()).items.find(entry => entry.packageId === body.packageId);
-      if (!item) return sendJson(res, 404, { error: "First-party plugin not found" });
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      if (await hostOps.confirmPluginCapability({ action: "plugin-first-party-install", package: item.name,
-        version: item.version || "" }) !== true) return sendJson(res, 200, { canceled: true, installation: null });
-      return sendJson(res, 200, { canceled: false, ...await backend.installFirstPartyPlugin(body.packageId) });
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "bearer-connect") {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const fields = ["agentId", "installationId", "componentId", "expectedRevision", "operationId", "accessToken"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
-        || typeof body.agentId !== "string" || body.agentId.length > 256
-        || typeof body.accessToken !== "string" || !body.accessToken
-        || Buffer.byteLength(body.accessToken, "utf8") > 16_384) {
-        return sendJson(res, 400, { error: "Invalid plugin token connection request" });
-      }
-      const backend = registry.route(body.agentId);
-      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native confirmation unavailable" });
-      }
-      const { accessToken, ...request } = body;
-      const prepared = await backend.preparePluginBearer(request);
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally { if (!approved) await backend.commitPluginBearer({
-        challenge: prepared.challenge, approved: false, accessToken: null }); }
-      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
-      return sendJson(res, 200, await backend.commitPluginBearer({
-        challenge: prepared.challenge, approved: true, accessToken }));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && ["oauth-connect", "oauth-status", "oauth-cancel"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const fields = segs[1] === "oauth-connect"
-        ? ["agentId", "installationId", "componentId", "expectedRevision", "operationId"] : ["agentId", "flowId"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
-        || typeof body.agentId !== "string" || body.agentId.length > 256) {
-        return sendJson(res, 400, { error: "Invalid plugin OAuth request" });
-      }
-      const backend = registry.route(body.agentId);
-      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
-      if (segs[1] !== "oauth-connect") return sendJson(res, 200, segs[1] === "oauth-status"
-        ? await backend.getPluginOAuthStatus(body.agentId, body.flowId)
-        : await backend.cancelPluginOAuth(body.agentId, body.flowId));
-      if (typeof hostOps?.confirmPluginCapability !== "function" || typeof hostOps.openExternal !== "function") {
-        return sendJson(res, 501, { error: "Native authorization unavailable" });
-      }
-      const prepared = await backend.preparePluginOAuth(body);
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally { if (!approved) await backend.commitPluginOAuth({ challenge: prepared.challenge, approved: false }); }
-      if (!approved) return sendJson(res, 200, { canceled: true, flow: null });
-      const result = await backend.commitPluginOAuth({ challenge: prepared.challenge, approved: true });
-      try { if (await hostOps.openExternal(result.flow.authorizationUrl) === false) throw new Error("Authorization browser unavailable"); }
-      catch {
-        await backend.cancelPluginOAuth(body.agentId, result.flow.flowId);
-        throw Object.assign(new Error("Unable to open authorization browser"), { code: "PLUGIN_OAUTH_BROWSER_FAILED" });
-      }
-      // Browser code never handles the authorization URL, state, code or token.
-      return sendJson(res, 200, { canceled: false, flow: { flowId: result.flow.flowId,
-        status: result.flow.status, expiresAt: result.flow.expiresAt } });
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "app-open") {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 3
-        || !["backendId", "sessionKey", "callId"].every(key => typeof body[key] === "string")
-        || body.backendId.length > 128 || body.sessionKey.length > 512
-        || !/^runtime-[a-f0-9]{64}$/u.test(body.callId)) return sendJson(res, 400, { error: "Invalid App reference" });
-      const backend = getActiveBackend(registry, body.backendId);
-      if (!backend) return sendJson(res, 404, { error: "Backend unavailable" });
-      if (typeof hostOps?.openPluginApp !== "function" || typeof hostOps.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native App window unavailable" });
-      }
-      const prepared = await backend.preparePluginApp(body.sessionKey, body.callId);
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally { if (!approved) await backend.commitPluginApp({ challenge: prepared.challenge, approved: false }); }
-      if (!approved) return sendJson(res, 200, { opened: false });
-      const hostOrigin = new URL(req.headers.origin).origin;
-      const result = await hostOps.openPluginApp({
-        create: ({ sandboxOrigin, sourceId }) => backend.commitPluginApp({ challenge: prepared.challenge,
-          approved: true, hostOrigin, sandboxOrigin, sourceId }),
-        readChunk: (transport, index) => backend.readPluginAppChunk(transport, index),
-        message: (transport, message) => backend.messagePluginApp(transport, message),
-        close: transport => backend.closePluginApp(transport),
-      });
-      return sendJson(res, 200, { opened: result.opened === true });
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external") {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const query = new URL(req.url, "http://127.0.0.1").searchParams;
-      if ([...query.keys()].some(key => !["backend", "cursor", "catalogRevision", "agentId"].includes(key))) {
-        return sendJson(res, 400, { error: "invalid external plugin query" });
-      }
-      const backend = query.get("backend");
-      if (!backend) {
-        if (query.size) return sendJson(res, 400, { error: "backend required" });
-        return sendJson(res, 200, { backends: await registry.listExternalPluginCatalogs() });
-      }
-      const input = Object.fromEntries([...query].filter(([key]) => key !== "backend"));
-      try { return sendJson(res, 200, await registry.getExternalPluginCatalog(backend, input)); }
-      catch (error) { return sendJson(res, error.code === "PLUGIN_EXTERNAL_CATALOG_CHANGED" ? 409 : 400,
-        { error: "External plugin catalog changed or query invalid", code: error.code }); }
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && ["uninstall-preview", "uninstall"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const fields = segs[1] === "uninstall" ? ["installationId", "expectedRevision", "operationId"]
-        : ["installationId", "expectedRevision"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))) {
-        return sendJson(res, 400, { error: "invalid plugin uninstall request" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      return sendJson(res, 200, segs[1] === "uninstall" ? await backend.uninstallPlugin(body)
-        : await backend.previewPluginUninstall(body));
-    }
-    if (segs[0] === "plugins" && segs.length === 2 && ["mcp-consent", "mcp-discover"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
-      const body = await readJsonBody(req);
-      const fields = segs[1] === "mcp-discover" ? ["agentId", "bindingId"]
-        : body?.action === "connect" ? ["action", "agentId", "installationId", "componentId", "expectedRevision", "operationId"]
-          : ["action", "agentId", "bindingId", "toolIdentity", "contractDigest", "catalogRevision", "approvalMode", "expectedRevision", "operationId"];
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key))
-        || typeof body.agentId !== "string" || body.agentId.length > 256) {
-        return sendJson(res, 400, { error: "invalid plugin consent request" });
-      }
-      const backend = registry.route(body.agentId);
-      if (!backend) return sendJson(res, 404, { error: "Agent unavailable" });
-      if (segs[1] === "mcp-discover") {
-        return sendJson(res, 200, await backend.discoverPluginMcpTools(body.agentId, body.bindingId));
-      }
-      if (typeof hostOps?.confirmPluginCapability !== "function") {
-        return sendJson(res, 501, { error: "Native plugin confirmation unavailable" });
-      }
-      const prepared = await backend.preparePluginMcpConsent(body);
-      let approved = false;
-      try { approved = await hostOps.confirmPluginCapability(prepared.summary) === true; }
-      finally {
-        // Keep the challenge out of browser DTOs, including cancellation/errors.
-        if (!approved) await backend.commitPluginMcpConsent({ challenge: prepared.challenge, approved: false });
-      }
-      if (!approved) return sendJson(res, 200, { canceled: true, receipt: null });
-      return sendJson(res, 200, await backend.commitPluginMcpConsent({ challenge: prepared.challenge, approved: true }));
-    }
-    if (segs[0] === "plugins" && segs[1] === "bundled" && segs.length === 2) {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const backend = getPluginServiceBackend(registry);
-      if (!backend?.listBundledPlugins) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      return sendJson(res, 200, await backend.listBundledPlugins());
-    }
-    if (segs[0] === "plugins" && segs[1] === "bundled" && segs.length === 3) {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      const detail = bundledPluginCatalog?.detail(segs[2]);
-      return detail ? sendJson(res, 200, { detail })
-        : sendJson(res, 404, { error: "Bundled plugin not found" });
-    }
-    if (segs[0] === "plugins" && segs[1] === "bundled-icon" && segs.length === 3) {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      let icon;
-      try { icon = bundledPluginCatalog?.readIcon(segs[2]); }
-      catch { return sendJson(res, 409, { error: "Bundled plugin icon changed" }); }
-      if (!icon) return sendJson(res, 404, { error: "Bundled plugin icon unavailable" });
-      res.writeHead(200, { "Content-Type": icon.mimeType, "Content-Length": icon.bytes.length,
-        "X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=3600",
-        "Cross-Origin-Resource-Policy": "same-origin", "Referrer-Policy": "no-referrer",
-        "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:" });
-      return res.end(icon.bytes);
-    }
-    if (segs[0] === "plugins" && segs.length === 2
-      && ["preview", "git-preview", "bundled-preview", "install"].includes(segs[1])) {
-      if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
-      if (!hasShoggothMutationOrigin(req)) {
-        return sendJson(res, 403, { error: "Forbidden" });
-      }
-      const backend = getPluginServiceBackend(registry);
-      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
-      const body = await readJsonBody(req);
-      if (segs[1] === "bundled-preview") {
-        if (!exactJsonObject(body, ["packageId"])
-          || typeof body.packageId !== "string"
-          || !/^[a-z0-9][a-z0-9-]{0,63}$/u.test(body.packageId)
-          || !bundledPluginCatalog?.get(body.packageId)) {
-          return sendJson(res, 400, { error: "Invalid bundled plugin" });
-        }
-        const source = { kind: "bundled", packageId: body.packageId };
-        const preview = await backend.previewPluginInstall(source);
-        return sendJson(res, 200, { canceled: false, preview,
-          selectionHandle: preview.installable ? pluginInstallSelection.create(source, preview) : null });
-      }
-      if (segs[1] === "git-preview") {
-        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 3
-          || !["repositoryUrl", "commit", "subdir"].every(key => Object.hasOwn(body, key))
-          || typeof body.repositoryUrl !== "string" || body.repositoryUrl.length > 2048
-          || typeof body.commit !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(body.commit)
-          || (body.subdir !== null && (typeof body.subdir !== "string" || body.subdir.length > 512))) {
-          return sendJson(res, 400, { error: "Invalid fixed Git source" });
-        }
-        let url;
-        try { url = new URL(body.repositoryUrl); } catch { return sendJson(res, 400, { error: "Invalid repository URL" }); }
-        if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash
-          || (body.subdir !== null && body.subdir !== "." && (!body.subdir || body.subdir.startsWith("-")
-            || body.subdir.includes("\\") || body.subdir.split("/").some(part => !part || part === "." || part === "..")))) {
-          return sendJson(res, 400, { error: "Invalid repository URL or subdirectory" });
-        }
-        if (typeof hostOps?.confirmPluginCapability !== "function") return sendJson(res, 501, { error: "Native confirmation unavailable" });
-        if (await hostOps.confirmPluginCapability({ action: "remote-git", repositoryUrl: url.href,
-          commit: body.commit, subdir: body.subdir }) !== true) return sendJson(res, 200, { canceled: true });
-        const source = { kind: "remote-git", repositoryUrl: url.href, commit: body.commit, subdir: body.subdir };
-        const preview = await backend.previewPluginInstall(source);
-        return sendJson(res, 200, { canceled: false, preview,
-          selectionHandle: preview.installable ? pluginInstallSelection.create(source, preview) : null });
-      }
-      if (segs[1] === "preview") {
-        if (!body || typeof body !== "object" || Array.isArray(body)
-          || Object.keys(body).length !== 0) {
-          return sendJson(res, 400, { error: "invalid plugin preview request" });
-        }
-        if (typeof hostOps?.selectPluginPackage !== "function") {
-          return sendJson(res, 501, { error: "Plugin package picker unavailable" });
-        }
-        const selected = await hostOps.selectPluginPackage();
-        if (!selected) return sendJson(res, 200, { canceled: true });
-        const source = typeof selected === "string" ? { kind: "directory", path: selected } : selected;
-        const preview = await backend.previewPluginInstall(source);
-        const selectionHandle = preview.installable
-          ? pluginInstallSelection.create(source, preview) : null;
-        return sendJson(res, 200, { canceled: false, preview, selectionHandle });
-      }
-      if (!body || typeof body !== "object" || Array.isArray(body)
-        || Object.keys(body).length !== 4
-        || !["selectionHandle", "previewDigest", "operationId", "expectedRevision"]
-          .every((key) => Object.hasOwn(body, key))
-        || typeof body.operationId !== "string"
-        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(body.operationId)) {
-        return sendJson(res, 400, { error: "invalid plugin install request" });
-      }
-      let source;
-      try {
-        source = pluginInstallSelection.claim(body.selectionHandle,
-          body.previewDigest, body.expectedRevision);
-      } catch {
-        return sendJson(res, 409, { error: "Plugin selection expired",
-          code: "PLUGIN_SELECTION_INVALID" });
-      }
-      return sendJson(res, 200, await backend.installPlugin({ source,
-        previewDigest: body.previewDigest, operationId: body.operationId,
-        expectedRevision: body.expectedRevision }));
-    }
     if (segs[0] === "plugins" && segs.length >= 3 && segs[1] === "host-runtime") {
       const invalid = () => sendJson(res, 400, { error: "invalid managed Host request", code: "MANAGED_HOST_OPERATION_INVALID" });
       if (!["openclaw", "hermes"].includes(segs[2]) || requestUrl.search !== "") return invalid();
@@ -3553,49 +2599,43 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           { error: "managed Host action unavailable", code });
       }
     }
-    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "selection-readiness") {
+    if (segs[0] === "plugins" && segs.length === 2 && segs[1] === "external-calls") {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      let query;
-      try {
-        if (req.headers["transfer-encoding"] || (req.headers["content-length"] && req.headers["content-length"] !== "0")) {
-          throw new TypeError("read-only query cannot contain a body");
-        }
-        query = parsePluginSelectionReadinessQuery(requestUrl?.searchParams);
-      } catch { return sendJson(res, 400, { error: "Invalid plugin selection readiness query" }); }
-      let supported = false;
-      if (["shoggoth", "openclaw", "hermes"].includes(query.backendId)) {
-        const backend = getActiveBackend(registry, query.backendId);
-        if (typeof backend?.getPluginSelectionReadiness === "function") {
-          try { supported = await backend.getPluginSelectionReadiness(query.input) === true; }
-          catch { /* An unavailable authenticated Host stays unsupported. */ }
-        }
-      }
-      return sendJson(res, 200, { version: 1, supported });
-    }
-    if (segs[0] === "plugins" && segs.length === 1) {
-      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const backend = (typeof registry?.getServiceBackend === "function" ? registry.getServiceBackend("shoggoth") : getActiveBackend(registry, "shoggoth"));
+      if (!backend) return sendJson(res, 503, { error: "Shoggoth unavailable" });
       const params = requestUrl?.searchParams;
-      const allowed = new Set(["backend", "cursor", "limit", "catalogRevision"]);
-      if (!params || [...params.keys()].some((key) => !allowed.has(key)
-        || params.getAll(key).length !== 1)) {
-        return sendJson(res, 400, { error: "invalid plugin query" });
+      const keys = ["backendId", "agentId", "sessionId", "toolCallId",
+        "limit", "cursorCreatedAt", "cursorCallId"];
+      if (!params || [...params.keys()].some(key => !keys.includes(key) || params.getAll(key).length !== 1)) {
+        return sendJson(res, 400, { error: "Invalid plugin call history query" });
       }
-      const backendId = params.get("backend") ?? "shoggoth";
-      const cursorText = params.get("cursor") ?? "0";
-      const limitText = params.get("limit") ?? "20";
-      const catalogRevision = params.get("catalogRevision");
-      if (!/^[a-z][a-z0-9-]{0,63}$/u.test(backendId)
-        || !/^(?:0|[1-9][0-9]*)$/u.test(cursorText)
-        || !/^[1-9][0-9]*$/u.test(limitText)
-        || !Number.isSafeInteger(Number(cursorText))
-        || Number(limitText) > 20
-        || (catalogRevision !== null && !/^[a-f0-9]{64}$/u.test(catalogRevision))
-        || (Number(cursorText) === 0 ? catalogRevision !== null : catalogRevision === null)) {
-        return sendJson(res, 400, { error: "invalid plugin query" });
+      const backendId = params.get("backendId") || "all", limit = Number(params.get("limit") || "10");
+      const agentId = params.get("agentId"), sessionId = params.get("sessionId");
+      const toolCallId = params.get("toolCallId");
+      const scoped = agentId !== null || sessionId !== null || toolCallId !== null;
+      const opaque = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+      const rawTime = params.get("cursorCreatedAt"), rawCallId = params.get("cursorCallId");
+      const cursor = rawTime === null && rawCallId === null ? null
+        : rawTime !== null && rawCallId !== null && /^[0-9]{1,16}$/u.test(rawTime)
+          && Number.isSafeInteger(Number(rawTime)) && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(rawCallId)
+          ? { createdAt: Number(rawTime), callId: rawCallId } : undefined;
+      if (!["all", "openclaw", "hermes"].includes(backendId)
+        || !Number.isSafeInteger(limit) || limit < 1 || limit > 20 || cursor === undefined
+        || (scoped && (backendId === "all"
+          || ![agentId, sessionId, toolCallId].every(value =>
+            typeof value === "string" && opaque.test(value))
+          || Buffer.byteLength(agentId, "utf8") > 128
+          || Buffer.byteLength(sessionId, "utf8") > 256
+          || Buffer.byteLength(toolCallId, "utf8") > 256))) {
+        return sendJson(res, 400, { error: "Invalid plugin call history query" });
       }
-      return sendJson(res, 200, { page: await registry.getPluginCapabilitiesPage(
-        backendId, { cursor: Number(cursorText), limit: Number(limitText), catalogRevision },
-      ) });
+      return sendJson(res, 200, await backend.getPluginExternalCalls({
+        backendId: backendId === "all" ? null : backendId,
+        agentId, sessionId, toolCallId, cursor, limit }));
+    }
+    if (segs[0] === "plugins") {
+      return sendJson(res, 410, { error: "The plugin platform has retired. Reconnect and grant accounts in Connectors.",
+        code: "PLUGIN_PLATFORM_RETIRED", uiTarget: "/connectors", legacyDataPreserved: true });
     }
     // Disabled standalone Native MCP registrations stay visible after a
     // machine restore. Browser projection omits old absolute paths and args;
@@ -3725,7 +2765,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (method === "GET") {
         const backend = getActiveBackend(registry, backendId);
         const agentId = url.searchParams.get("agentId") || undefined;
-        if (hasAgentScopedSkills(backend) && !agentId) {
+        if (hasAgentScopedSkills(backend) && !agentId && !url.searchParams.has("paged")) {
           return sendJson(res, 400, { error: "missing agentId", code: "SKILL_AGENT_ID_REQUIRED" });
         }
         if (url.searchParams.has("paged")) {
@@ -4910,41 +3950,6 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     }
     // 参数/路径边界错误保持客户端 400；请求体溢出用 413，其余运行时故障保持 500。
     const trusted = trustedApiError(err);
-    const pluginStatus = segs[0] === "plugins" && method === "POST"
-      ? ({ REVISION_CONFLICT: 409, PACKAGE_CHANGED: 409,
-        ACTIVATION_DEFERRED: 409, PLUGIN_CONNECTION_CLOSE_FAILED: 409,
-        PLUGIN_UPDATE_REQUIRES_DISABLE: 409,
-        PLUGIN_UNINSTALL_REQUIRES_DISABLE: 409, PLUGIN_UNINSTALL_IN_FLIGHT: 409,
-        PLUGIN_CONSENT_EXPIRED: 409, TOOL_CONTRACT_CHANGED: 409,
-        CONNECTION_IDENTITY_CHANGED: 409, CONNECTION_AUTH_REQUIRED: 409,
-        DEPENDENCY_MISSING: 409, DEPENDENCY_PREPARATION_REQUIRED: 409,
-        DEPENDENCY_REQUIRES_DISABLE: 409, DEPENDENCY_CHANGED: 409,
-        DEPENDENCY_EXECUTABLE_INVALID: 400, DEPENDENCY_ARGUMENTS_UNSUPPORTED: 400,
-        DEPENDENCY_ENV_UNSUPPORTED: 400, DEPENDENCY_INTERPRETER_UNSUPPORTED: 400,
-        DEPENDENCY_PROBE_FAILED: 409, DEPENDENCY_REGISTRY_INVALID: 409,
-        DEPENDENCY_CONFIRMATION_REQUIRED: 403, DEPENDENCY_REGISTRY_LIMIT: 429,
-        PLUGIN_OAUTH_PROVIDER_UNSUPPORTED: 409, PLUGIN_OAUTH_FLOW_NOT_FOUND: 404,
-        PLUGIN_OAUTH_BROWSER_FAILED: 503, PLUGIN_OPERATION_OUTCOME_UNKNOWN: 409,
-        FIGMA_DESKTOP_IDENTITY_UNVERIFIED: 409,
-        GIT_SOURCE_INVALID: 400, GIT_REMOTE_CANCELLED: 409, GIT_REMOTE_FAILED: 409,
-        GIT_REMOTE_TIMEOUT: 504, GIT_REMOTE_TOO_LARGE: 413, GIT_REMOTE_LOG_LIMIT: 413,
-        GIT_REMOTE_LIMIT: 429, GIT_REMOTE_EXIT_UNKNOWN: 503,
-        LEGACY_SOURCE_OVERLAP: 400, MCP_APP_AUTHORITY_INVALID: 409,
-        MCP_APP_AUTHORITY_REVOKED: 409, MCP_APP_SESSION_EXPIRED: 409,
-        MCP_APP_RESOURCE_FORBIDDEN: 409, MCP_APP_RESOURCE_INVALID: 409,
-        MCP_APP_LIMIT: 409, MCP_APP_UNSUPPORTED: 409,
-        PLUGIN_COMPONENT_REVISION_CHANGED: 409, PLUGIN_COMPONENT_INACTIVE: 409,
-        GRAPH_REGISTRATION_INVALID: 400, GRAPH_REGISTRATION_CONFLICT: 409,
-        GMAIL_AUTH_INVALID: 400, GMAIL_AUTH_FLOW_NOT_FOUND: 404,
-        GMAIL_AUTH_CONFLICT: 409, GMAIL_AUTH_RECOVERY_REQUIRED: 409,
-        LOVABLE_REGISTRATION_INVALID: 400, LOVABLE_REGISTRATION_CONFLICT: 409,
-        LOVABLE_REGISTRATION_BUSY: 409, LOVABLE_REGISTRATION_NEEDS_VERIFICATION: 409,
-        SLACK_REGISTRATION_INVALID: 409, SLACK_REGISTRATION_CONFLICT: 409,
-        OUTLOOK_CALENDAR_CONFIG_INVALID: 409,
-        PLUGIN_REQUEST_INVALID: 400, PLUGIN_OPERATION_INVALID: 400,
-        PLUGIN_BINDING_INVALID: 400, PLUGIN_GRANT_INVALID: 400,
-        PLUGIN_INSTALLATION_INVALID: 404 })[err?.code]
-      : null;
     const modelChangeError = err instanceof ModelChangeError || err instanceof ModelChangeJournalError;
     const admissionError = err instanceof WorkAdmissionError
       && err.code === "gateway_draining"
@@ -4955,7 +3960,6 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     const status =
       modelChangeStatus ||
       (admissionError ? 409 : null) ||
-      pluginStatus ||
       trusted?.status ||
       (err instanceof ModelValidationError || isInvalidAgentIdError(err)
         ? 400
@@ -4973,7 +3977,6 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         ...(safeDetails && Object.keys(safeDetails).length > 0 ? { details: safeDetails } : {}),
       } : {}),
       ...(trusted ? { code: trusted.code } : {}),
-      ...(pluginStatus ? { code: err.code } : {}),
       ...(admissionError ? { code: err.code } : {}),
     });
   }
@@ -5101,8 +4104,6 @@ function startStaticServer(
     assetsMigrated = true;
   }
   const cliExecutionGate = createCliExecutionGate();
-  const pluginInstallSelection = new PluginInstallSelection();
-  const bundledPluginCatalog = new BundledPluginCatalog(bundledRoot({ packaged, resourcesPath }));
   const attachmentRevealer = typeof hostOps?.reveal === "function"
     ? createChatAttachmentRevealer((file) => hostOps.reveal(file)) : null;
   const apiDeps = {
@@ -5118,8 +4119,6 @@ function startStaticServer(
     workAdmissionGate,
     cliExecutionGate,
     avatarPool,
-    pluginInstallSelection,
-    bundledPluginCatalog,
     nativeRuntimeConfigController: configStore && typeof configStore.writeNativeRuntimeConfig === "function"
       ? createNativeRuntimeConfigController({ configStore, registry }) : null,
     nativeMemoryConfigController: configStore && typeof configStore.writeNativeMemoryConfig === "function"

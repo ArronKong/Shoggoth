@@ -108,6 +108,13 @@ async function run() {
     assert.match(state.calls[0].prompt, /Group notice: 验证群聊/u);
     assert.match(state.calls[0].prompt, /user: 大家好/u);
     assert.deepEqual((await history(groupId)).map((message) => message.author.kind), ["user", "member"]);
+    const currentHistory = await history(groupId);
+    const updatedHistory = await api("GET", `/messages?id=${groupId}&afterSeq=${currentHistory.at(-1).seq}&afterRevision=0&limit=50`);
+    assert.equal(updatedHistory.status, 200);
+    assert.deepEqual(updatedHistory.body.messages, []);
+    assert.deepEqual(updatedHistory.body.updates.map(message => message.id), currentHistory.map(message => message.id));
+    assert.ok(updatedHistory.body.revision > 0);
+    assert.equal((await api("GET", `/messages?id=${groupId}&afterRevision=-1`)).body.code, "GROUP_CHAT_INVALID");
 
     // 同 clientMessageId 重传只入库一次；内容不同的重传是冲突。
     state.calls.length = 0;
@@ -403,10 +410,13 @@ async function runNative() {
   const settled = async (groupId, label) => {
     for (let attempt = 0; ; attempt++) {
       if (quiet(await f.ipc("group.get", { groupId }))) return;
-      assert.ok(attempt < 300, label);
+      if (attempt >= 300) assert.fail(`${label}: ${JSON.stringify({ group: await f.ipc("group.get", { groupId }),
+        runs: f.service.productStore.listWorkRuns().map(({ id, status, errorCode }) => ({ id, status, errorCode })),
+        errors: (await f.inspect()).errors })}`);
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   };
+  let primaryFailure;
   try {
     const profiles = f.service.productStore.listAgentProfiles().filter((profile) => profile.enabled).slice(0, 2);
     const members = profiles.map((profile) => ({ backendId: "shoggoth", agentId: profile.agentId }));
@@ -486,8 +496,23 @@ async function runNative() {
     }
     assert.equal(f.service.workDispatcher.getRun(missed.id).errorCode, "SKILL_NOT_FOUND");
     assert.equal((await f.ipc("service.status", {})).healthy, true, "the service is not poisoned by a skill selection error");
-    // 图片与附件走真实的私聊附件通道：每位成员的内部会话各有一个路径，内容相同，且没有成倍占用磁盘。
-    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=", "base64");
+    // A local decoder failure continues this same input with its original
+    // attachment. The following valid image still uses the real local decoder.
+    const invalid = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=", "base64");
+    const brokenPicture = { id: crypto.randomUUID(), name: "broken.png", mimeType: "image/png", size: invalid.length };
+    await f.ipc("inspiration.media.write", { attachment: brokenPicture, offset: 0, content: invalid.toString("base64") });
+    const pictureInput = { operationId: "attachment-decode-failure", sessionKey: skillChat.session.sessionKey,
+      prompt: "检查附件", attachments: [brokenPicture], createdAt: Date.now() };
+    const originalPicture = await f.ipc("chat.send", pictureInput);
+    const originalRun = await f.service.workRunCoordinator.waitForTerminal(originalPicture.run.id);
+    assert.equal(originalRun.status, "completed"); assert.equal(originalRun.errorCode, null);
+    assert.deepEqual(fs.readFileSync(path.join(f.paths.stateDir, "chat-attachments", skillChat.session.sessionKey,
+      brokenPicture.id, "broken.png")), invalid, "the ordinary attachment transport receives the original bytes");
+    assert.equal((await f.ipc("chat.send", pictureInput)).run.id, originalRun.id, "retry retains the completed operation");
+    assert.equal(f.service.productStore.listWorkRuns().filter(run => run.idempotencyKey === "shoggoth:chat-send:attachment-decode-failure").length, 1);
+    assert.equal((await f.ipc("service.status", {})).healthy, true);
+    // Original user bytes remain shared. Each session gets its own safe model copy.
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABKklEQVR4nO3RMQ0AAAjAMPybBhk9WBUs2Wyo0QHfNQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYAeU6UsysMvN4wAAAABJRU5ErkJggg==", "base64");
     const picture = { id: crypto.randomUUID(), name: "界面 截图.png", mimeType: "image/png", size: png.length };
     await f.ipc("inspiration.media.write", { attachment: picture, offset: 0, content: png.toString("base64") });
     const missing = { ...picture, id: crypto.randomUUID() };
@@ -508,14 +533,24 @@ async function runNative() {
         .filter((item) => item.kind === "user").at(-1);
       assert.deepEqual(event.content.attachments.map(({ id, name, mimeType, size }) => ({ id, name, mimeType, size })), [picture],
         "the member's own session records the attachment like a direct chat does");
-      const saved = path.join(f.service.groupChatStore.paths.stateDir, "chat-attachments", session.sessionKey, picture.id, picture.name);
-      assert.ok(fs.readFileSync(saved).equals(png), "the member can read the picture at its own session path");
-      savedPaths.push(saved);
+      const source = f.service.inspirationStore.media.materialize(picture);
+      assert.ok(fs.readFileSync(source).equals(png), "the original user attachment stays intact");
+      const safe = f.service.mcpProductToolController.secretExecution.media.read(
+        { profileId: session.profileId, sessionId: session.sessionKey }, picture);
+      assert.equal(safe.secretProjection, 1); assert.equal(safe.mimeType, "image/png");
+      assert.notEqual(safe.path, source); assert.ok(fs.readFileSync(safe.path).length > 0);
+      savedPaths.push(safe.path);
     }
     assert.equal(new Set(savedPaths).size, 2);
     console.log("PASS group chat native: hidden per-group sessions, group-turn runs one after another, final answer from transcript, plain-text input, member models, dollar amounts, attachments through the direct-chat channel");
+  } catch (error) {
+    primaryFailure = error; throw error;
   } finally {
-    await f.close();
+    try { await f.close(); }
+    catch (cleanupError) {
+      if (primaryFailure) throw new AggregateError([primaryFailure, cleanupError], "Native group assertion and cleanup both failed");
+      throw cleanupError;
+    }
   }
 }
 

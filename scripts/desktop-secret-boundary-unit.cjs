@@ -26,7 +26,7 @@ async function testHttpBoundary() {
     },
   };
   const server = await startStaticServer(0, {
-    registry: { backends: new Map([["hermes", backend]]) },
+    registry: { backends: new Map([["hermes", backend]]), chatSecretRequest() { calls.push(["chat-result"]); throw Error("HTTP must not read private results"); } },
   });
   try {
     const headers = { Origin: server.url, "Content-Type": "application/json" };
@@ -48,6 +48,14 @@ async function testHttpBoundary() {
     assert.equal(result.body?.code, "DESKTOP_BRIDGE_REQUIRED");
     assert.equal(result.text.includes("secret-env-http-canary"), false);
     assert.deepEqual(calls, [], "HTTP 管理面不得触发任何明文读取");
+    result = await request(server.url, "/__api/chat/secrets/result", { method: "POST", headers,
+      body: JSON.stringify({ sessionKey: "agent:a:one", receiptId: "a".repeat(64) }) });
+    assert.equal(result.status, 403); assert.equal(result.body.code, "DESKTOP_BRIDGE_REQUIRED");
+    assert.deepEqual(calls, []);
+    result = await request(server.url, "/__api/chat/secrets/decide", { method: "POST", headers,
+      body: JSON.stringify({ sessionKey: "agent:a:one", disclosureId: "a".repeat(64), choice: "original" }) });
+    assert.equal(result.status, 403); assert.equal(result.body.code, "DESKTOP_BRIDGE_REQUIRED");
+    assert.deepEqual(calls, []);
   } finally {
     await server.close();
   }
@@ -90,17 +98,30 @@ async function testTrustedIpcBoundary() {
   const dispose = registerDesktopSecretIpc({
     ipcMain,
     getMainWindow: () => window,
-    getRegistry: () => ({ backends: new Map([["hermes", backend]]) }),
+    getRegistry: () => ({ backends: new Map([["hermes", backend]]),
+      async chatSecretRequest(action, input) {
+        assert.equal(action, "result"); assert.equal(input.sessionKey, "agent:a:one");
+        calls.push(["chat-result"]); return { status: "completed", result: { value: "local-fixture-only" } };
+      } }),
   });
   assert.deepEqual([...handlers.keys()].sort(), [
+    "shoggoth:secret:chat-decision",
+    "shoggoth:secret:chat-result",
     "shoggoth:secret:reveal-env",
     "shoggoth:secret:reveal-model-provider",
+    "shoggoth:secret:speech-request",
+    "shoggoth:secret:speech-status",
   ]);
 
   const modelHandler = handlers.get("shoggoth:secret:reveal-model-provider");
   const envHandler = handlers.get("shoggoth:secret:reveal-env");
   const trustedEvent = { sender: webContents, senderFrame: mainFrame };
   const untrustedEvent = { sender: { id: 99 }, senderFrame: {} };
+  const resultHandler = handlers.get("shoggoth:secret:chat-result");
+  const resultRequest = { sessionKey: "agent:a:one", receiptId: "a".repeat(64) };
+  for (const event of [untrustedEvent, { sender: webContents, senderFrame: {} }]) {
+    assert.equal((await resultHandler(event, resultRequest)).error.code, "PRIVILEGED_RENDERER_REQUIRED");
+  }
 
   assert.deepEqual(await modelHandler(untrustedEvent, {
     backend: "hermes", providerKey: "openai",
@@ -138,10 +159,20 @@ async function testTrustedIpcBoundary() {
     error: { code: "SECRET_BACKEND_UNAVAILABLE", message: "目标后端不可用" },
   });
 
+  assert.deepEqual(await resultHandler(trustedEvent, resultRequest), {
+    ok: true, value: { status: "completed", result: { value: "local-fixture-only" } },
+  });
+  const beforeInvalid = calls.length;
+  assert.equal((await resultHandler(trustedEvent, { ...resultRequest, unexpected: true })).error.code, "INVALID_SECRET_REQUEST");
+  assert.equal(calls.length, beforeInvalid);
   dispose();
   assert.deepEqual(removed.sort(), [
+    "shoggoth:secret:chat-decision",
+    "shoggoth:secret:chat-result",
     "shoggoth:secret:reveal-env",
     "shoggoth:secret:reveal-model-provider",
+    "shoggoth:secret:speech-request",
+    "shoggoth:secret:speech-status",
   ]);
   assert.equal(handlers.size, 0);
 }

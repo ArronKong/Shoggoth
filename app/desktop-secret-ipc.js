@@ -3,6 +3,10 @@
 const CHANNELS = Object.freeze({
   modelProvider: "shoggoth:secret:reveal-model-provider",
   env: "shoggoth:secret:reveal-env",
+  chatResult: "shoggoth:secret:chat-result",
+  chatDecision: "shoggoth:secret:chat-decision",
+  speechStatus: "shoggoth:secret:speech-status",
+  speechRequest: "shoggoth:secret:speech-request",
 });
 const BACKEND_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const PROVIDER_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -83,16 +87,33 @@ function projectEnvSecret(value) {
 }
 
 function registerDesktopSecretIpc(options = {}) {
-  const { ipcMain, getMainWindow, getRegistry } = options;
+  const { ipcMain, getMainWindow, getRegistry, localSpeech } = options;
   if (!ipcMain || typeof ipcMain.handle !== "function"
     || typeof ipcMain.removeHandler !== "function"
     || typeof getMainWindow !== "function" || typeof getRegistry !== "function") {
     throw new TypeError("registerDesktopSecretIpc 需要 IPC 与宿主依赖");
   }
 
-  const authorize = (event) => trustedRenderer(event, getMainWindow)
+  let disposed = false;
+  const authorize = (event) => !disposed && trustedRenderer(event, getMainWindow)
     ? null
     : failure("PRIVILEGED_RENDERER_REQUIRED", "仅桌面应用可读取凭据");
+  let speechPending = null;
+  for (const [channel, request] of [[CHANNELS.speechStatus, false], [CHANNELS.speechRequest, true]]) {
+    ipcMain.handle(channel, async event => {
+      const denied = authorize(event); if (denied) return denied;
+      try {
+        if (typeof localSpeech !== "function") throw Error("unavailable");
+        const window = getMainWindow();
+        const pending = request ? (speechPending ||= Promise.resolve().then(() => localSpeech(true)).finally(() => { speechPending = null; })) : localSpeech(false);
+        const value = await pending;
+        if (disposed || !trustedRenderer(event, getMainWindow) || getMainWindow() !== window
+          || !ownDataObject(value) || typeof value.authorized !== "boolean" || typeof value.onDevice !== "boolean"
+          || !["authorized", "denied", "restricted", "not-determined", "unavailable"].includes(value.status)) throw Error("invalid status");
+        return { ok: true, value: { authorized: value.authorized, onDevice: value.onDevice, status: value.status } };
+      } catch { return failure("SECRET_MEDIA_SPEECH_UNAVAILABLE", "暂时无法在这台设备上识别语音，附件尚未发送"); }
+    });
+  }
 
   ipcMain.handle(CHANNELS.modelProvider, async (event, raw) => {
     const denied = authorize(event);
@@ -137,12 +158,49 @@ function registerDesktopSecretIpc(options = {}) {
     }
   });
 
-  let disposed = false;
+  ipcMain.handle(CHANNELS.chatResult, async (event, raw) => {
+    const denied = authorize(event);
+    if (denied) return denied;
+    if (!ownDataObject(raw) || Object.keys(raw).length !== 2
+      || !safeText(data(raw, "sessionKey"), 1024) || !data(raw, "sessionKey")
+      || !/^[a-f0-9]{64}$/u.test(data(raw, "receiptId") || "")) {
+      return failure("INVALID_SECRET_REQUEST", "结果读取参数无效");
+    }
+    try {
+      const value = await getRegistry().chatSecretRequest("result", raw);
+      if (!ownDataObject(value) || !["completed", "unknown", "dispatching"].includes(value.status)
+        || !Object.hasOwn(value, "result") || Buffer.byteLength(JSON.stringify(value)) > 8 * 1024 * 1024) {
+        throw new TypeError("invalid local result");
+      }
+      return { ok: true, value: { status: value.status, result: value.result } };
+    } catch {
+      return failure("SECRET_REVEAL_FAILED", "无法读取本地操作结果");
+    }
+  });
+
+  ipcMain.handle(CHANNELS.chatDecision, async (event, raw) => {
+    const denied = authorize(event);
+    if (denied) return denied;
+    if (!ownDataObject(raw) || Object.keys(raw).sort().join(",") !== "choice,disclosureId,sessionKey"
+      || !safeText(data(raw, "sessionKey"), 1024) || !data(raw, "sessionKey")
+      || !/^[a-f0-9]{64}$/u.test(data(raw, "disclosureId") || "")
+      || !["original", "retry", "cancel"].includes(data(raw, "choice"))) {
+      return failure("INVALID_SECRET_REQUEST", "发送确认无效");
+    }
+    // Compatibility for a renderer from before silent fallback. A stale click
+    // cannot dispatch or retry anything, and never opens a confirmation dialog.
+    return failure("SECRET_DISCLOSURE_EXPIRED", "这次发送已结束或确认已过期，请查看对话的最新状态");
+  });
+
   return () => {
     if (disposed) return;
     disposed = true;
     ipcMain.removeHandler(CHANNELS.modelProvider);
     ipcMain.removeHandler(CHANNELS.env);
+    ipcMain.removeHandler(CHANNELS.chatResult);
+    ipcMain.removeHandler(CHANNELS.chatDecision);
+    ipcMain.removeHandler(CHANNELS.speechStatus);
+    ipcMain.removeHandler(CHANNELS.speechRequest);
   };
 }
 

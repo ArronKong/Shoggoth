@@ -21,7 +21,7 @@ class CodexJsonlRpcClient {
     }
     this.child = child;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
-    this.serverRequestTimeoutMs = options.serverRequestTimeoutMs ?? 30_000;
+    this.serverRequestTimeoutMs = options.serverRequestTimeoutMs === undefined ? 30_000 : options.serverRequestTimeoutMs;
     this.writeTimeoutMs = options.writeTimeoutMs ?? 5_000;
     this.maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
     this.maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_STDERR_BYTES;

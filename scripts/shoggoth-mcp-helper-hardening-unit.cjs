@@ -25,12 +25,14 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
-test("MCP helper 人工确认等待覆盖完整 server-request 窗口", () => {
+test("MCP helper 人工确认默认无总截止，上游有限工具窗口仍有效", () => {
   assert.equal(MCP_CLIENT_REQUEST_TIMEOUT_MS, DEFAULT_SERVER_REQUEST_TIMEOUT_MS);
-  assert.ok(MCP_CLIENT_REQUEST_TIMEOUT_MS > 30 * 60_000);
+  assert.equal(MCP_CLIENT_REQUEST_TIMEOUT_MS, null);
+  assert.ok(Number.isSafeInteger(DEFAULT_MCP_TOOL_TIMEOUT_MS) && DEFAULT_MCP_TOOL_TIMEOUT_MS > 0);
+  assert.ok(DEFAULT_MCP_TOOL_TIMEOUT_MS <= 2_147_000_000);
 });
 
-test("Browser handoff Service wait covers user input; normal calls keep the short deadline and Codex binding", async () => {
+test("Browser handoff and ordinary tools retain approval lifecycle waits and Codex binding", async () => {
   const calls = [], bound = [];
   const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x11), bindRuntimeCalls: true,
     requestService: async (_paths, request, options) => {
@@ -51,9 +53,8 @@ test("Browser handoff Service wait covers user input; normal calls keep the shor
       assert.equal(result.result.isError, false, JSON.stringify(result));
     }
     assert.deepEqual(bound, ["browser_session_wait_for_user", "browser_status"]);
-    assert.equal(calls[1].timeoutMs, 45_000);
-    assert.equal(calls[0].timeoutMs, DEFAULT_SERVER_REQUEST_TIMEOUT_MS + calls[1].timeoutMs);
-    assert.ok(calls[0].timeoutMs > 30 * 60_000);
+    assert.equal(calls[0].timeoutMs, null);
+    assert.equal(calls[1].timeoutMs, null);
   } finally { handler.close(); }
 });
 
@@ -83,20 +84,20 @@ test("a large product result returns a preview and product_result_read restores 
 });
 
 test("workspace commands keep their execution and approval lifecycle across the Service RPC", async () => {
-  let deadline;
+  let deadline, commandArguments;
   const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x11),
-    requestService: async (_paths, _request, options) => { deadline = options.timeoutMs; return { exitCode: 7, stdout: "", stderr: "failed" }; } });
+    requestService: async (_paths, request, options) => { deadline = options.timeoutMs; commandArguments = request.params.arguments; return { exitCode: 7, stdout: "", stderr: "failed" }; } });
   try {
     await handler(initialize(1));
     const result = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call",
       params: { name: "workspace_execute", arguments: { command: "exit 7", timeoutMs: 1800000 } } });
-    assert.equal(deadline, DEFAULT_MCP_TOOL_TIMEOUT_MS);
-    assert.ok(deadline > 1800000 + DEFAULT_SERVER_REQUEST_TIMEOUT_MS);
+    assert.equal(deadline, null);
+    assert.deepEqual(commandArguments, { command: "exit 7", timeoutMs: 1800000 });
     assert.equal(result.result.isError, true); assert.equal(result.result.structuredContent.exitCode, 7);
   } finally { handler.close(); }
 });
 
-test("plugin Service calls cover consecutive thirty-minute approval and execution windows", async () => {
+test("MCP Service calls follow approval and execution lifecycle without a total deadline", async () => {
   let deadline;
   const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x11),
     requestService: async (_paths, _request, options) => { deadline = options.timeoutMs; return { content: [], isError: false }; } });
@@ -106,7 +107,7 @@ test("plugin Service calls cover consecutive thirty-minute approval and executio
       name: "mcp_server_call", arguments: { serverId: "fixture", toolName: "echo", arguments: {} },
     } });
     assert.equal(result.result.isError, false, JSON.stringify(result));
-    assert.equal(deadline, 2 * DEFAULT_SERVER_REQUEST_TIMEOUT_MS + 45_000);
+    assert.equal(deadline, null);
   } finally { handler.close(); }
 });
 
@@ -391,7 +392,9 @@ test("request_user_input 只接受严格 questions 输入并通过 MCP elicitati
   assert.equal(outbound[0].method, "elicitation/create");
   assert.equal(outbound[0].params.requestedSchema.type, "object");
   assert.deepEqual(outbound[0].params.requestedSchema.required, ["choice"]);
-  assert.deepEqual(outbound[0].params.requestedSchema.properties.choice.enum, ["Alpha", "Beta"]);
+  assert.equal(outbound[0].params.requestedSchema.properties.choice.enum, undefined,
+    "free answers must be valid against the actual MCP string schema");
+  assert.match(outbound[0].params.requestedSchema.properties.choice.description, /^Shoggoth input choices v1\n/u);
   assert.deepEqual(response.result.structuredContent, {
     answers: { choice: { answers: ["Beta"] } },
   });
@@ -416,6 +419,50 @@ test("request_user_input 只接受严格 questions 输入并通过 MCP elicitati
   }, { requestClient: async () => ({ action: "cancel" }) });
   assert.deepEqual(cancelled.result.structuredContent, { answers: {} });
   handler.close();
+});
+
+test("补充问题通过标准 MCP 文本 schema 接收自定义与纯文本答案，并保留确认选项边界", async () => {
+  const { ElicitRequestFormParamsSchema } = require("@modelcontextprotocol/core");
+  const { normalizeInteractiveRequestV1, validateInteractiveResponseV1 } = require("../app/core/shoggoth-interaction-contract");
+  const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x31),
+    requestService: async () => assert.fail("input must not call a product write") });
+  await handler(initialize(1, { capabilities: { elicitation: {} } }));
+  const choices = [{ label: "汉堡", description: "套餐" }, { label: "炸鸡", description: "两份" }];
+  try {
+    for (const options of [choices, [], undefined]) {
+      const answer = "想吃麦乐鸡 🍟\n请查询不辣的餐品";
+      const question = { header: "餐品", id: "food", question: "你想吃什么？", ...(options ? { options } : {}) };
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+        name: "request_user_input", arguments: { questions: [question] },
+      } }, { requestClient: async (method, params) => {
+        assert.equal(method, "elicitation/create");
+        const parsed = ElicitRequestFormParamsSchema.parse(params);
+        assert.deepEqual(parsed, params, "the actual MCP validator must preserve the suggestions description");
+        const request = normalizeInteractiveRequestV1({ runId: "input-run", eventType: "prompt",
+          payload: { ...parsed, requestId: "input-request", method: "mcpServer/elicitation/request",
+            serverName: "shoggoth", kind: "mcp_elicitation", mode: "form" } });
+        assert.equal(request.fields[0].type, options?.length ? "choice_or_text" : "text");
+        const submitted = validateInteractiveResponseV1(request, { action: "submit", answers: { food: answer } });
+        return { action: "accept", content: submitted.answers };
+      } });
+      assert.equal(response.result.isError, false);
+      assert.deepEqual(response.result.structuredContent, { answers: { food: { answers: [answer] } } });
+    }
+    for (const answer of ["", " \n ", "x".repeat(16 * 1024 + 1), "bad\0text", "\ud800"]) {
+      const response = await handler({ jsonrpc: "2.0", id: 3, method: "tools/call", params: {
+        name: "request_user_input", arguments: { questions: [{ header: "餐品", id: "food", question: "想吃什么？", options: choices }] },
+      } }, { requestClient: async () => ({ action: "accept", content: { food: answer } }) });
+      assert.equal(response.result.isError, true, "malformed free text must be rejected");
+    }
+    const closed = await handler({ jsonrpc: "2.0", id: 4, method: "tools/call", params: {
+      name: "request_user_input", arguments: { questions: [{ header: "确认", id: "confirm_product_action", question: "继续？", options: choices }] },
+    } }, { requestClient: async (_method, params) => {
+      assert.deepEqual(params.requestedSchema.properties.confirm_product_action.enum, ["汉堡", "炸鸡"]);
+      assert.doesNotMatch(params.requestedSchema.properties.confirm_product_action.description, /^Shoggoth input choices v1\n/u);
+      return { action: "accept", content: { confirm_product_action: "custom answer" } };
+    } });
+    assert.equal(closed.result.isError, true);
+  } finally { handler.close(); }
 });
 
 test("零参数工具兼容 MCP 省略 arguments，有参数工具仍严格拒绝", async () => {
@@ -1397,7 +1444,7 @@ test("Browser success does not infer failure from nested content or nonboolean f
   }
 });
 
-test("Non-Browser business isError fields do not change MCP call success", async () => {
+test("Unrelated business isError fields do not change MCP call success", async () => {
   for (const name of ["usage_get", "browser_status"]) {
     const businessResult = { isError: true, status: "failed", failedJobs: 1 };
     const handler = await initializedHandler({ requestService: async () => businessResult });
@@ -1408,6 +1455,22 @@ test("Non-Browser business isError fields do not change MCP call success", async
       assert.equal(response.result.isError, false);
       assert.deepEqual(response.result.structuredContent, businessResult);
       assert.deepEqual(JSON.parse(response.result.content[0].text), businessResult);
+    } finally { handler.close(); }
+  }
+});
+
+test("retired Connector Action tools cannot dispatch, regardless of fabricated success or failure outcomes", async () => {
+  for (const [phase, outcome, isError] of [["not_sent", null, true], ["outcome_unknown", null, true],
+    ["result_confirmed", "failed", true], ["result_confirmed", "success", false]]) {
+    const businessResult = { phase, outcome, isError, retryAllowed: false, result: { failedJobs: 1 } };
+    let calls = 0;
+    const handler = await initializedHandler({ requestService: async () => { calls++; return businessResult; } });
+    try {
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {
+        name: "connector_execute_action", arguments: { actionId: "github.create_issue", connectionId: "account-one", input: { title: "fixture" } },
+      } });
+      assert.deepEqual(response, { jsonrpc: "2.0", id: 2, error: { code: -32602, message: "Invalid params" } });
+      assert.equal(calls, 0, "retired tools have no Service authority or outcome to replay");
     } finally { handler.close(); }
   }
 });

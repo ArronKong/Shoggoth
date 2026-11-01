@@ -60,9 +60,11 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
   useEffect(() => { void refresh(); return cancelRead; }, [refresh, cancelRead]);
 
   // `quiet`: an automatic choice fails silently; the menu still offers every model.
-  const select = async (model: string, bindingId: string, permissionMode: string | null, { quiet = false } = {}) => {
+  const select = async (model: string, bindingId: string, permissionMode: string | null,
+    { quiet = false, modelProviderRef }: { quiet?: boolean; modelProviderRef?: string } = {}) => {
     if (!sessionKey || !data || !connected || selecting.current || state.error) return false;
-    const choice = data.models.find(item => item.id === model && item.bindingId === bindingId);
+    const choice = data.models.find(item => item.id === model && item.bindingId === bindingId
+      && item.modelProviderRef === modelProviderRef);
     if (!choice || (!data.selection.canSwitch && bindingId !== data.selection.bindingId)) return false;
     const candidate = data.selection.candidates.find(item => item.bindingId === bindingId);
     selecting.current = true; setPending(true); cancelRead();
@@ -73,7 +75,7 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
       || candidate?.adjustments.permissionMode !== permissionMode;
     try {
       const selection = await selectSessionRuntimeModel(backend, agentId, sessionKey,
-        { model, bindingId, revision: data.selection.revision, acceptAdjustments });
+        { model, bindingId, revision: data.selection.revision, acceptAdjustments, ...(modelProviderRef ? { modelProviderRef } : {}) });
       if (!mounted.current || currentKey.current !== key) return false;
       setState({ key, data: { ...data, selection,
         capabilities: data.runtimes.find(group => group.runtime === choice.runtime)?.capabilities || data.capabilities } });

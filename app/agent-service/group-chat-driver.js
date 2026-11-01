@@ -243,8 +243,10 @@ class GroupChatDriver {
   #release(opportunityId, reason) {
     const current = this.store.getOpportunity(opportunityId);
     if (!current || current.state !== "running" || !current.floor || current.released) return;
-    const text = reason === "working" ? redactGrantTokens(this.drafts?.draftFor(opportunityId) ?? null) : null;
-    const result = this.store.releaseTurn({ opportunityId, reason, fence: this.fence, text: validText(text) ? text : null });
+    const replyMessages = reason === "working" ? this.drafts?.messagesFor?.(opportunityId) ?? [] : [];
+    const text = reason === "working" ? redactGrantTokens(replyMessages.length ? replyMessages.map(item => item.text).join("\n\n")
+      : this.drafts?.draftFor(opportunityId) ?? null) : null;
+    const result = this.store.releaseTurn({ opportunityId, reason, fence: this.fence, text: validText(text) ? text : null, replyMessages });
     this.#cancelTimer(`idle:${opportunityId}`);
     this.#cancelTimer(`release:${opportunityId}`);
     if (result.changed) { this.onChanged(result.groupId); this.wake(result.groupId); }
@@ -254,6 +256,11 @@ class GroupChatDriver {
   onActivity(opportunityId, activity) {
     if (this.fence === null || !activity) return;
     const current = this.store.getOpportunity(opportunityId);
+    if (current && activity.groupId === current.groupId && activity.memberId === current.memberId
+      && activity.opportunityId === current.id && activity.runId === current.runId && activity.textMessages?.length) {
+      const published = this.store.syncTurnMessages({ opportunityId, fence: this.fence, runId: current.runId, messages: activity.textMessages });
+      if (published.changed) this.onChanged(current.groupId);
+    }
     if (!current || current.state !== "running" || !current.floor || current.released) return;
     this.#armInactivity(current);
     const starts = [activity.tool, ...(activity.recentTools ?? [])].filter(Boolean).map(tool => tool.startedAt)
@@ -374,7 +381,9 @@ class GroupChatDriver {
     }
     let responseMetadata = null;
     try { responseMetadata = this.executor.responseMetadata?.(run) ?? null; } catch {}
-    void this.#publishTurn(opportunity, { status: run.status, text, errorCode: run.errorCode ?? null, responseMetadata })
+    let replyMessages = null;
+    try { replyMessages = this.executor.replyMessages?.(run) ?? null; } catch {}
+    void this.#publishTurn(opportunity, { status: run.status, text, errorCode: run.errorCode ?? null, responseMetadata, replyMessages })
       .catch((error) => this.onError(error));
   }
 
@@ -525,6 +534,7 @@ class GroupChatDriver {
   }
 
   #complete(opportunityId, outcome) {
+    outcome = { ...outcome, replyMessages: outcome.replyMessages ?? this.drafts?.messagesFor?.(opportunityId) ?? [] };
     this.drafts?.forget(opportunityId);
     this.#clearTimers(opportunityId);
     const result = this.store.completeTurn({ opportunityId, fence: this.fence, ...outcome });

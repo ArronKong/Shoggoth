@@ -18,7 +18,16 @@ jobs:
           npm ci --ignore-scripts
           node node_modules/electron/install.js
       - name: Headless Hooks source, real Service and Electron ASAR boundaries
+        env:
+          SHOGGOTH_CONNECTOR_HOOK_RUNTIME: source
         run: npm run test:hooks
+      - name: Native CLI identity and bilingual capability UI
+        run: |
+          npm --prefix app/manage-ui ci --ignore-scripts
+          node --test scripts/runtime-executable-identity-unit.cjs
+          node scripts/runtime-compatibility-ui-regression.mjs
+      - name: MCP connector storage, transport and OAuth fixtures
+        run: npm run test:mcp-connectors
       - name: Static UI ASAR disk-write failure regressions
         run: node --test scripts/static-ui-assets-regression.cjs scripts/system-issue-unit.cjs
       - name: Borrowed-memory Hook isolation in the real macOS sandbox
@@ -48,6 +57,10 @@ jobs:
         run: |
           npm --prefix app/manage-ui exec -- tsc --noEmit --project app/manage-ui/tsconfig.json
           npm run build:manage
+      - name: MCP connector contracts and retained plugin history
+        run: |
+          npm run test:mcp-connectors
+          npm run test:mcp-connectors:history
       - name: Third-party license completeness and consistency
         run: |
           npm run fetch:codex
@@ -65,6 +78,7 @@ jobs:
           node scripts/adhoc-sign-unit.cjs
           node scripts/release-package-checks-unit.cjs
           node scripts/notarize-unit.cjs
+          node --test scripts/undici-security-regression.cjs
           node scripts/shoggoth-memory-sharing-unit.cjs
           node scripts/shoggoth-memory-trust-unit.cjs
           node --test scripts/shoggoth-memory-consolidation-unit.cjs
@@ -101,8 +115,8 @@ jobs:
           node scripts/computer-use-settings-ui-unit.mjs
       - name: Dependency vulnerability audit
         run: |
-          npm audit --audit-level=moderate
-          npm --prefix app/manage-ui audit --audit-level=moderate
+          node --test scripts/dependency-audit-policy-unit.cjs
+          npm run audit:release
       - name: Product help and Browser Use regressions
         run: |
           node --test scripts/shoggoth-browser-use-controller-unit.cjs
@@ -112,6 +126,12 @@ jobs:
           node scripts/browser-use-settings-ui-unit.mjs
           node scripts/browser-use-service-unit.cjs
           node scripts/shoggoth-mcp-helper-hardening-unit.cjs
+      - name: Native CLI capability and upgrade contracts
+        run: |
+          node --test scripts/runtime-capability-evidence-unit.cjs scripts/runtime-executable-identity-unit.cjs scripts/runtime-pool-upgrade-unit.cjs scripts/runtime-compatibility-unit.cjs scripts/runtime-support-unit.cjs
+          node --test scripts/grok-build-runtime-adapter-unit.cjs scripts/opencode-runtime-unit.cjs
+          node scripts/codex-app-server-smoke.cjs
+          node scripts/shoggoth-profile-service-unit.cjs
       - name: Native Agent Computer Use and Browser Use path
         run: |
           node scripts/shoggoth-runtime-adapter-contract.cjs

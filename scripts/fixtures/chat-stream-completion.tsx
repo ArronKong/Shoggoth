@@ -8,8 +8,8 @@ import i18n from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
 
-declare const __STREAM_FIXTURE__: { key: string; note: string; answer: string; frames: any[]; expectedTexts: string[]; terminal: string };
-const { key, note, frames, expectedTexts, terminal } = __STREAM_FIXTURE__;
+declare const __STREAM_FIXTURE__: { key: string; note: string; answer: string; frames: any[]; expectedTexts: string[]; terminal: string; historyFirst: boolean };
+const { key, note, frames, expectedTexts, terminal, historyFirst } = __STREAM_FIXTURE__;
 const state = window as any;
 const now = Date.now();
 const sessions = [{ key, agentId: "shoggoth-default", agentName: "Shoggoth", backendId: "shoggoth", updatedAt: now }];
@@ -19,7 +19,8 @@ const canonical = [user,
   { id: "note-1", role: "assistant", content: [{ type: "text", text: expectedTexts[0], activity: true, segmentId: "note-1" }], timestamp: now + 1 },
   { id: "tool-1", role: "assistant", content: [{ type: "toolCall", toolCallId: "tool-1", name: "web_search", arguments: {} }], timestamp: now + 2 },
   { id: "tool-result-1", role: "toolResult", toolCallId: "tool-1", content: [{ type: "text", text: "Found sources" }], timestamp: now + 302 },
-  ...expectedTexts.slice(1).map((text, index) => ({ id: `answer-${index}`, role: "assistant", content: text, timestamp: now + 303 + index })),
+  ...expectedTexts.slice(1).map((text, index) => ({ id: `answer-${index}`, role: "assistant", content: text, timestamp: now + 303 + index,
+    shoggoth: { nativeUiVersion: 1, runId: "run-fixture", displayId: "native-run:run-fixture" } })),
 ];
 const terminalFrame = frames.find((value) => ["final", "error", "aborted"].includes(value.payload.state));
 localStorage.clear();
@@ -54,7 +55,10 @@ class FixtureSocket {
       : request.method === "chat.history" ? { messages: state.completed ? canonical : history,
         ...(request.params?.page ? { hasMore: false, nextCursor: null, sourceId: key } : {}) } : {};
     if (request.method === "chat.history" && state.completed) state.historyReloaded = true;
-    setTimeout(() => this.emit({ type: "res", id: request.id, ok: true, payload }), state.completed ? 80 : 0);
+    setTimeout(() => {
+      this.emit({ type: "res", id: request.id, ok: true, payload });
+      if (request.method === "chat.history" && state.completed) state.historyDelivered = true;
+    }, state.completed ? 80 : 0);
   }
   close() { this.readyState = 3; }
 }
@@ -63,6 +67,7 @@ state.fetch = async (url: unknown) => {
   const pathname = String(url);
   const payload = pathname.includes("/__api/status") ? { backends: [{ id: "shoggoth", connected: true }] }
     : pathname.includes("/__api/backends") ? { backends: [] }
+    : pathname.includes("/__api/connectors/mcp/requests") ? { items: [] }
     : pathname.includes("runtime-models") ? { selection: { bindingId: "fixture-binding", runtime: "codex", model: null, canSwitch: false, candidates: [] }, capabilities: { attachments: {}, slash: false, steer: false }, models: [], runtimes: [] }
     : pathname.includes("/archive") ? { archive: { supported: true, segments: [] } } : {};
   return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
@@ -84,6 +89,7 @@ const wait = async (predicate: () => unknown, label: string) => {
 };
 const bubbles = () => Array.from(document.querySelectorAll<HTMLElement>(".chat-thread .is-assistant .chat-bubble:not(.is-error)"));
 const snapshot = () => ({
+  errors: Array.from(document.querySelectorAll(".chat-bubble.is-error")).map(node => node.textContent),
   bubbles: bubbles().map((node) => { const r = node.getBoundingClientRect(); return {
     text: node.textContent?.replace(/●/g, "").trim(), top: r.top, height: r.height,
     className: node.className,
@@ -129,6 +135,16 @@ state.startFixture = async () => {
 };
 state.finishFixture = async () => {
   state.completed = true;
+  if (historyFirst && terminal === "final") {
+    // A persisted completed snapshot can reach the client before the final
+    // observer frame. Exercise that real terminal-observation route first.
+    state.socket.emit({ type: "event", event: "sessions.changed", payload: {
+      sessionKey: key, runId: "run-fixture", phase: "end",
+      session: { status: "completed", hasActiveRun: false, lastRunId: "run-fixture" },
+    } });
+    await wait(() => state.historyDelivered, "canonical final arrives before the observer final");
+    await frame(); await frame();
+  }
   if (terminal === "final") state.socket.emit(terminalFrame);
   else {
     const stop = document.querySelector<HTMLButtonElement>(".chat-stop");
@@ -164,6 +180,8 @@ state.finishFixture = async () => {
     await wait(() => state.copied === expected, "single bubble copy");
   }
   if (terminal !== "final") check(state.abortCalled, "the actual Stop button invokes chat.abort");
+  if (terminal !== "final") check(samples.every(sample => sample.errors.length === 0),
+    "a deliberate Stop must never paint a red error bubble, including before history refresh");
   return { bubbleCount: expectedTexts.length, heightShift, flowShift, positionShift, preTerminalScroll: state.preTerminalScroll, historyReloaded: true, perBubbleCopy: true,
     ...(terminal !== "final" ? { stopButton: true } : {}) };
 };

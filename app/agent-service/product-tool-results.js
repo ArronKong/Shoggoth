@@ -20,6 +20,9 @@ const REF_PATTERN = /^res-[0-9a-f]{24}$/u;
 // and images (browser/computer), host UI state, user answers, command exits, or
 // group protocol references used by later calls.
 function keepsWholeResult(toolName) {
+  // Device reads are bounded by their contract and must not create a helper
+  // cache that remains readable after the device policy is revoked.
+  if (/^apple_(?:calendar|reminders)_/u.test(toolName)) return true;
   return toolName === "browser_tool_call" || toolName === "request_user_input" || toolName === "workspace_execute"
     || toolName.startsWith("computer_") || toolName.startsWith("group_")
     || ["render_ui", "update_ui", "get_ui_state"].includes(toolName);

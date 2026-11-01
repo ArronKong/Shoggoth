@@ -968,7 +968,7 @@ async function testBinaryVersionProbeIsStrictBoundedAndSanitized() {
   assert.deepEqual(calls[0].options.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(calls[0].options.windowsHide, true);
 
-  for (const version of [CODEX_VERSION, "0.160.0", "0.161.0-alpha.2", "0.160.0+build.1"]) {
+  for (const version of [CODEX_VERSION, "0.160.0", "0.161.0-alpha.2", "0.160.0+build.1", "0.159.1", "0.159.2-alpha.1", "nightly", "2.0.0"]) {
     const result = await probeCodexBinaryVersion("/safe/system-codex", {
       installationKind: "system",
       env: safeEnv,
@@ -976,7 +976,7 @@ async function testBinaryVersionProbeIsStrictBoundedAndSanitized() {
     });
     assert.deepEqual(result, { version });
   }
-  for (const version of ["0.159.1", "0.159.2-alpha.1", "0.153", "99999999999999999.0.0", "invalid-output"]) {
+  for (const version of ["", "bad output", "label\u001b[0m", "x".repeat(129)]) {
     await assert.rejects(probeCodexBinaryVersion("/safe/system-codex", {
       installationKind: "system",
       env: safeEnv,
@@ -1943,7 +1943,7 @@ async function testPoolSingleFlightIsolationAndCircuitBreaker() {
   const first = pool.get("profile-a");
   const second = pool.get("profile-a");
   const isolated = pool.get("profile-b");
-  await delay(0);
+  await waitFor(() => starts.length === 2, 1000, "both identities captured before host initialization");
   assert.deepEqual(starts.sort(), ["profile-a", "profile-b"]);
   release();
   assert.equal(await first, await second);
@@ -2047,7 +2047,7 @@ async function testPoolStopInterruptsInitializeAndGatesReplacement() {
     }),
   });
   const starting = pool.get("stopping");
-  await delay(0);
+  await waitFor(() => typeof rejectInitialize === "function", 1000, "initialization started after identity capture");
   const stopping = pool.stop("stopping");
   await Promise.race([stopGate, delay(50).then(() => assert.fail("host.stop was not called while initialize was pending"))]);
   await assert.rejects(pool.get("stopping"), (error) => error.code === "CODEX_POOL_STOPPING");

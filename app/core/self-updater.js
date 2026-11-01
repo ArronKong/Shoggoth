@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const LOG_TAIL_MAX = 8 * 1024; // 状态里只留输出尾部，够定位失败原因即可
-const HARD_TIMEOUT_MS = 30 * 60 * 1000; // 兜底杀挂死的更新进程（npm/git 卡网络）
+const HARD_TIMEOUT_MS = 90 * 60 * 1000; // 兜底杀挂死的更新进程（npm/git 卡网络）
 
 // 0 号信号只做存在性/权限检查，不投递。除 ESRCH（确定没了）外一律当活着：
 // EPERM 说明 pid 被别人的进程占着（多半是 pid 复用），宁可拒绝新一轮更新，

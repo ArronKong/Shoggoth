@@ -471,13 +471,12 @@ test("外部 Runtime MCP gate 不能自报伪造 Service 路径或在校验前�
   } finally { value.cleanup(); }
 });
 
-test("外部 Runtime MCP gate 拒绝跨 profile/account、过期、宽权限与错误 parent", () => {
+test("外部 Runtime MCP gate 在本地拒绝跨 profile/account、过期与宽权限", () => {
   const variants = [
     { argvProfile: "runtime-other" },
     { argvAccount: "runtime-other-account" },
     { gate: { expiresAt: 9_999 } },
     { mode: 0o644 },
-    { parent: { executable: "/tmp/fake-grok" } },
   ];
   for (const variant of variants) {
     const value = runtimeMcpGateFixture(variant);
@@ -488,6 +487,43 @@ test("外部 Runtime MCP gate 拒绝跨 profile/account、过期、宽权限与�
         `--shoggoth-runtime-account=${variant.argvAccount || "runtime-grok-account"}`,
       ], value.env, value.runtime));
     } finally { value.cleanup(); }
+  }
+});
+
+test("错误 parent 由可信 Service 拒绝，MCP 不得在消费前分派", async () => {
+  const value = runtimeMcpGateFixture();
+  const { RuntimeMcpGateIssuer } = require("../app/agent-service/runtime-mcp-gate");
+  const executable = fs.realpathSync(process.execPath);
+  let parentExecutable = executable;
+  const issuer = new RuntimeMcpGateIssuer({
+    paths: resolveServicePaths({ homeDir: path.join(value.root, "gate-home") }),
+    mcpHelperLaunch: { command: executable, argsPrefix: [path.join(ROOT, "main.js")] },
+    bootstrapPath: path.join(ROOT, "main.js"),
+    now: () => 10_000,
+    getProcessIdentity: () => "fixture-parent-start",
+    getProcessLink: () => ({ ppid: process.pid, executable: parentExecutable, command: "fixture cli" }),
+  }).open();
+  let attempts = 0;
+  let dispatched = false;
+  try {
+    const ticket = issuer.reserveMcpServer({ runtimeProfileId: "runtime-grok",
+      runtimeAccountId: "runtime-grok-account", parentExecutable: executable });
+    issuer.bindMcpServer({ reservationId: ticket.reservationId, parentPid: 9527 });
+    const env = Object.fromEntries(ticket.env.map(({ name, value }) => [name, value]));
+    parentExecutable = "/tmp/fake-grok";
+    const argv = ["--shoggoth-internal-role=mcp", "--shoggoth-runtime-profile=runtime-grok",
+      "--shoggoth-runtime-account=runtime-grok-account"];
+    assert.equal(bootstrap.resolveRole(argv, env, value.runtime), "mcp");
+    await assert.rejects(bootstrap.main(argv, env, { ...value.runtime,
+      openRuntimeMcpBridge(context) { attempts += 1; return issuer.consume(context); },
+    }, { runtimeMcpRelay() { dispatched = true; } }), { code: "BOOTSTRAP_ROLE_REJECTED" });
+    assert.equal(attempts, 1);
+    assert.equal(dispatched, false);
+    assert.equal(fs.existsSync(env.SHOGGOTH_RUNTIME_MCP_GATE_FILE), true,
+      "a rejected consume must not claim the one-shot ticket was consumed");
+  } finally {
+    issuer.close();
+    value.cleanup();
   }
 });
 
@@ -810,7 +846,10 @@ async function waitFor(check, timeoutMs = 3000) {
   throw new Error("等待条件超时");
 }
 
-async function waitForHealthyService(paths, timeoutMs = 3000) {
+// Health is a startup precondition, with the same bounded 45s envelope as the
+// production LaunchAgent. Cold module loading can consume the old 3s budget.
+// Stop, IPC, lock and bridge deadlines below keep their independent limits.
+async function waitForHealthyService(paths, timeoutMs = 45_000) {
   let status = null;
   await waitFor(async () => {
     if (!fs.existsSync(paths.socketPath) || !fs.existsSync(paths.tokenPath)) return false;
@@ -1101,7 +1140,7 @@ test("Service start 将 lock acquisition 纳入清理边界且失败不残留 ow
 });
 
 test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认 profile 不回归", async () => {
-  assert.equal(PROTOCOL_VERSION, 13);
+  assert.equal(PROTOCOL_VERSION, 27);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-store-lifecycle-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   for (let restart = 0; restart < 2; restart += 1) {
@@ -1114,10 +1153,8 @@ test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认
       });
       assert.equal(hello.serviceVersion, "store-lifecycle");
       assert.equal(hello.protocolVersion, PROTOCOL_VERSION);
-      await assert.rejects(
-        requestService(paths, {
-          method: "service.hello", token, version: 4,
-        }),
+      for (const version of [4, PROTOCOL_VERSION - 1]) await assert.rejects(
+        requestService(paths, { method: "service.hello", token, version }),
         (error) => error.code === "PROTOCOL_VERSION_MISMATCH",
       );
       const status = await requestService(paths, {
@@ -1206,6 +1243,7 @@ test("Service 拥有 SecretStore/Provider bridge，按 secret→product→provid
     open() { order.push("secret.open"); },
     get() { assert.fail("empty plugin catalog must not read credentials"); },
     putIfRevision() { assert.fail("empty plugin catalog must not write credentials"); },
+    put() { assert.fail("lifecycle-only MCP adapter must not write credentials"); },
     getCredentialRevision() { assert.fail("empty plugin catalog must not inspect credentials"); },
     getCredentialFingerprint() { assert.fail("empty plugin catalog must not inspect credential fingerprints"); },
     listMetadata() { return secretMetadata.map((entry) => ({ ...entry })); },
@@ -2812,6 +2850,10 @@ test("SIGTERM/SIGINT 清理失败采用确定非零退出且不产生 unhandled 
       },
     });
     try {
+      // This case measures signal cleanup failure, after the already-started
+      // local E5 worker finishes setup. Its loading/close overlap has its own
+      // bounded worker lifecycle; do not charge cold model loading to 500ms.
+      await service.nativeMemorySemanticService.embedding.initializing?.catch(() => {});
       signalEmitter.emit(signal);
       await waitFor(() => exitCodes.length === 1, 500);
       assert.deepEqual(exitCodes, [1]);
@@ -2981,7 +3023,12 @@ test("Runtime MCP bridge 同 socket 升级、内部续期不泄露且 close/stop
     const profileResponse = await first.nextFrame();
     assert.equal(profileResponse.id, 4);
     assert.equal(profileResponse.result.isError, false);
-    assert.equal(profileResponse.result.structuredContent.runtimeProfileId, runtimeProfileId);
+    // A bridge federation token proves the Profile, not a conversation.
+    // Without a private delivery binding, the model gets only the completed
+    // no-replay notice; token renewal and revocation remain independently tested.
+    assert.deepEqual(profileResponse.result.structuredContent,
+      require("../app/agent-service/secret-execution-broker").completedNotice);
+    assert.equal(Object.hasOwn(profileResponse.result.structuredContent, "runtimeProfileId"), false);
     assert.equal(issuedTokens.length, 2, "首个 tool call 应在 Service 内部安全续期");
     assert.notEqual(issuedTokens[0], issuedTokens[1]);
     assert.deepEqual(revokedSessions, [{ runtimeProfileId, runtimeAccountId, token: issuedTokens[0] }],
@@ -3005,11 +3052,31 @@ test("Runtime MCP bridge 同 socket 升级、内部续期不泄露且 close/stop
     await second.send(bridgeRequest("b"));
     assert.deepEqual(await second.nextFrame(), { ok: true, result: { bridged: true } });
     const secondToken = issuedTokens.at(-1);
+    assert.equal(service.connectorRuntime, null, "OpenConnector sidecar is retired");
+    const runtime = service.nativeMcpClientManager;
+    assert.ok(runtime);
+    const originalClose = runtime.close;
+    const connectorRelease = deferred();
+    let connectorClosing = false;
+    runtime.close = async function () {
+      connectorClosing = true;
+      await connectorRelease.promise;
+      return originalClose.call(this);
+    };
     const stopping = service.stop({ notify: false });
+    // Bound the bridge socket, which must bypass the 1s ordinary drain.
+    // Other owned services (including a cold E5 worker) finish afterwards.
     const stoppedInTime = await Promise.race([
-      stopping.then(() => true),
+      second.waitClosed().then(() => true),
       new Promise((resolve) => setTimeout(() => resolve(false), 80)),
     ]);
+    try {
+      assert.equal(stoppedInTime, true, "bridge 长连接不得等待 MCP 客户端清理或进入普通 one-request drain");
+      await waitFor(() => connectorClosing);
+    } finally {
+      connectorRelease.resolve();
+      runtime.close = originalClose;
+    }
     await stopping;
     await second.waitClosed();
     assert.equal(stoppedInTime, true, "bridge 长连接不得进入普通 one-request drain");
@@ -3090,18 +3157,32 @@ test("未认证空闲连接不能阻塞 Service stop", async () => {
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   const service = createAgentService({ paths, version: "test", frameTimeoutMs: 1000 });
   await service.start();
+  // Settle the already-started model process before the independent 80ms
+  // socket deadline; this test does not time cold worker initialization.
+  await service.nativeMemorySemanticService.embedding.initializing?.catch(() => {});
   const idle = net.createConnection(paths.socketPath);
   await new Promise((resolve, reject) => {
     idle.once("connect", resolve);
     idle.once("error", reject);
   });
+  // Observe the accepted socket itself; later store/model cleanup is separate.
+  idle.resume();
+  const idleClosed = new Promise((resolve) => idle.once("close", () => resolve(true)));
+  const controller = service.mcpConnectorController, originalClose = controller.close;
+  const releaseConnector = deferred();
+  let connectorClosing = false;
+  controller.close = async function () { connectorClosing = true; await releaseConnector.promise; return originalClose.call(this); };
   const stopPromise = service.stop();
-  const stoppedInTime = await Promise.race([
-    stopPromise.then(() => true),
-    new Promise((resolve) => setTimeout(() => resolve(false), 80)),
-  ]);
-  idle.destroy();
-  await stopPromise;
+  let stoppedInTime;
+  try {
+    stoppedInTime = await Promise.race([
+      idleClosed,
+      new Promise((resolve) => setTimeout(() => resolve(false), 80)),
+    ]);
+    assert.equal(connectorClosing, true, "the delayed connector cleanup is actually in progress");
+  } finally {
+    releaseConnector.resolve(); controller.close = originalClose; idle.destroy(); await stopPromise;
+  }
   assert.equal(stoppedInTime, true, "stop 必须先断开 accepted sockets 再等待 server.close");
 });
 
@@ -3156,6 +3237,11 @@ test("stop 对永不回调的 server.close 有界并继续清理 lock", async ()
     paths,
     version: "test",
     closeTimeoutMs: 30,
+    // This 30ms fault case excludes unrelated cold model loading. Real E5
+    // startup/close remains covered by the packaged Service persistence probe.
+    nativeMemorySemanticService: {
+      async start() {}, async close() {}, invalidateProfile() {}, scheduleMemory() {},
+    },
     onServerReady(server) {
       runtimeServer = server;
       const realClose = server.close.bind(server);
@@ -3258,7 +3344,12 @@ test("首帧与半帧都有服务端有界 timer，EOF 非空 tail 明确拒绝"
 test("events.subscribe 仅缺省 afterSeq 才从 0 开始，非法 cursor 返回 INVALID_PARAMS", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-cursor-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
-  const service = createAgentService({ paths, version: "test" });
+  const ring = createEventBuffer(MAX_FRAME_BYTES), requested = [];
+  let defaultPage;
+  const service = createAgentService({ paths, version: "test", eventBuffer: {
+    append: (...args) => ring.append(...args),
+    page(afterSeq, id) { requested.push(afterSeq); defaultPage = ring.page(afterSeq, id); return defaultPage; },
+  } });
   await service.start();
   try {
     const token = readClientToken(paths);
@@ -3274,11 +3365,18 @@ test("events.subscribe 仅缺省 afterSeq 才从 0 开始，非法 cursor 返回
       method: "events.subscribe", token, version: PROTOCOL_VERSION, params: {},
     });
     assert.match(omitted.streamId, /^[0-9a-f-]{36}$/u);
-    assert.deepEqual(omitted, {
-      streamId: omitted.streamId,
-      events: [], cursor: 0, nextCursor: 0, hasMore: false,
-      oldestSeq: 1, baseSeq: 0, latestSeq: 0, gap: null, snapshot: null,
-    });
+    assert.deepEqual(requested, [0], "invalid cursors never reach the ring; omission maps to exactly zero");
+    assert.deepEqual(omitted, defaultPage, "the complete real ring page survives IPC");
+    assert.equal(omitted.baseSeq, 0);
+    assert.equal(omitted.oldestSeq, 1);
+    assert.equal(omitted.gap, null);
+    assert.equal(omitted.snapshot, null);
+    assert.equal(omitted.hasMore, false);
+    assert.equal(omitted.cursor, omitted.latestSeq);
+    assert.equal(omitted.nextCursor, omitted.cursor);
+    assert.deepEqual(omitted.events.map(event => event.seq),
+      Array.from({ length: omitted.latestSeq }, (_, index) => index + 1),
+      "startup telemetry remains present; no event is dropped or invented");
   } finally {
     await service.stop();
   }
@@ -3441,7 +3539,7 @@ test("events.subscribe 按完整 JSONL 字节预算分页且每页可由 client 
     for (let index = 0; index < 24; index += 1) {
       expected.push(service.appendEvent("fixture.page", { index, text: "x".repeat(4096) }).seq);
     }
-    const received = [];
+    const received = [], fixtureReceived = [];
     let afterSeq = 0;
     let pages = 0;
     while (true) {
@@ -3459,12 +3557,15 @@ test("events.subscribe 按完整 JSONL 字节预算分页且每页可由 client 
       assert.equal(page.nextCursor, page.cursor);
       assert.equal(typeof page.hasMore, "boolean");
       received.push(...page.events.map((event) => event.seq));
+      fixtureReceived.push(...page.events.filter(event => event.type === "fixture.page").map(event => event.seq));
       afterSeq = page.nextCursor;
       if (!page.hasMore) break;
       assert.equal(pages < 20, true, "分页 cursor 必须前进");
     }
     assert.equal(pages > 1, true, "事件必须被 64KiB JSONL 预算切成多页");
-    assert.deepEqual(received, expected);
+    assert.deepEqual(fixtureReceived, expected, "all 24 business fixtures retain order across pages");
+    assert.deepEqual(received, Array.from({ length: afterSeq }, (_, index) => index + 1),
+      "all events, including startup telemetry, remain contiguous without loss or duplication");
   } finally {
     await service.stop();
   }
@@ -3644,14 +3745,17 @@ test("并发启动竞态只能有一个 Service 获得 lock，另一方认证探
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   const first = createAgentService({ paths, version: "test", lockProbeTimeoutMs: 1_500 });
   const second = createAgentService({ paths, version: "test", lockProbeTimeoutMs: 1_500 });
-  const settled = await Promise.allSettled([first.start(), second.start()]);
-  const successes = settled.filter((item) => item.status === "fulfilled");
-  const failures = settled.filter((item) => item.status === "rejected");
-  assert.equal(successes.length, 1);
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0].reason.code, "SERVICE_ALREADY_RUNNING");
-  await first.stop().catch(() => {});
-  await second.stop().catch(() => {});
+  try {
+    const settled = await Promise.allSettled([first.start(), second.start()]);
+    const successes = settled.filter((item) => item.status === "fulfilled");
+    const failures = settled.filter((item) => item.status === "rejected");
+    assert.equal(successes.length, 1);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].reason.code, "SERVICE_ALREADY_RUNNING");
+  } finally {
+    await first.stop().catch(() => {});
+    await second.stop().catch(() => {});
+  }
 });
 
 test("真实 Service 被 SIGSTOP 时第二实例 fail closed 且不改写 IPC", async () => {
@@ -3764,9 +3868,21 @@ test("cacheDir 中间 symlink 在创建 runtimeDir 前拒绝且 victim 零污染
     trustedRoot: root,
   });
   const service = createAgentService({ paths, version: "test" });
-  await assert.rejects(service.start(), (error) => error.code === "UNSAFE_SYMLINK");
+  // Startup and cleanup independently reject the same unsafe cache parent.
+  // Keep both failures rather than discarding cleanup's fail-closed result.
+  await assert.rejects(service.start(), (error) => {
+    assert.equal(error instanceof AggregateError, true);
+    assert.equal(error.code, "SERVICE_START_FAILED");
+    assert.deepEqual(error.errors.map((item) => item.code), ["UNSAFE_SYMLINK", "UNSAFE_SYMLINK"]);
+    return true;
+  });
   assert.deepEqual(fs.readdirSync(victim), ["marker"]);
-  await service.stop({ notify: false });
+  await assert.rejects(service.stop({ notify: false }), (error) => {
+    assert.equal(error.code, "SERVICE_STOP_FAILED");
+    assert.deepEqual(error.errors.map((item) => item.code), ["UNSAFE_SYMLINK"]);
+    return true;
+  });
+  assert.deepEqual(fs.readdirSync(victim), ["marker"]);
 });
 
 test("Service 拒绝 token/lock hardlink 且不改写链接目标", async () => {
@@ -4162,6 +4278,47 @@ test("LaunchAgent 迁移旧 Background 调度并保持后续启动幂等", async
   calls.length = 0;
   await controller.start();
   assert.deepEqual(launchMutations(calls), []);
+});
+
+test("更新交接立即替换不兼容旧 Service 并给新版本保留启动预算", async () => {
+  for (const stale of ["version", "protocol", "protocol-error"]) {
+    let virtualNow = 0;
+    let phase = "initial";
+    let replacementAt = null;
+    let fixture;
+    fixture = launchFixture({
+      healthNow: () => virtualNow,
+      healthDelay: async (delayMs) => { virtualNow += delayMs; },
+      onBootstrap() {
+        if (phase !== "initial") { replacementAt = virtualNow; phase = "replacement"; }
+      },
+      async healthProbe() {
+        if (phase === "old" && stale === "protocol-error") {
+          throw Object.assign(new Error("incompatible old protocol"), { code: "PROTOCOL_VERSION_MISMATCH" });
+        }
+        return {
+          healthy: phase !== "replacement" || virtualNow - replacementAt >= 10_000,
+          protocolVersion: phase === "old" && stale === "protocol" ? PROTOCOL_VERSION - 1 : PROTOCOL_VERSION,
+          serviceVersion: phase === "old" && stale === "version" ? "previous-app-version" : fixture.serviceVersion,
+        };
+      },
+    });
+    try {
+      await fixture.controller.start();
+      phase = "old";
+      fixture.calls.length = 0;
+      await fixture.controller.start();
+      assert.equal(replacementAt, 0, `${stale}: an incompatible generation cannot become the current version by waiting`);
+      assert.equal(virtualNow, 10_000, `${stale}: cold startup keeps the original 45-second budget`);
+      assert.deepEqual(launchMutations(fixture.calls).map(args => args[0]),
+        ["disable", "bootout", "enable", "bootstrap"], `${stale}: recover exactly once`);
+      fixture.calls.length = 0;
+      await fixture.controller.start();
+      assert.deepEqual(launchMutations(fixture.calls), [], "the verified new Service is reused");
+    } finally {
+      fs.rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
 });
 
 test("LaunchAgent 同一次 start 等待慢 Service 成功且不触发二次 bootstrap", async () => {
@@ -5027,6 +5184,40 @@ test("plist XML 转义且 plist/status symlink 被拒绝", async () => {
     await assert.rejects(fixture.controller.install(), (error) => error.code === "UNSAFE_SYMLINK");
     assert.equal(fs.readFileSync(victim, "utf8"), "safe");
   }
+});
+
+test("MCP 清理挂起时未认证空闲连接不能阻塞 Service stop", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-stop-idle-"));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
+  const service = createAgentService({ paths, version: "test", frameTimeoutMs: 1000 });
+  await service.start();
+  // Settle the already-started model process before the independent 80ms
+  // socket deadline; this test does not time cold worker initialization.
+  await service.nativeMemorySemanticService.embedding.initializing?.catch(() => {});
+  const idle = net.createConnection(paths.socketPath);
+  await new Promise((resolve, reject) => {
+    idle.once("connect", resolve);
+    idle.once("error", reject);
+  });
+  // Observe the accepted socket itself; later store/model cleanup is separate.
+  idle.resume();
+  const idleClosed = new Promise((resolve) => idle.once("close", () => resolve(true)));
+  const controller = service.mcpConnectorController, originalClose = controller.close;
+  const releaseConnector = deferred();
+  let connectorClosing = false;
+  controller.close = async function () { connectorClosing = true; await releaseConnector.promise; return originalClose.call(this); };
+  const stopPromise = service.stop();
+  let stoppedInTime;
+  try {
+    stoppedInTime = await Promise.race([
+      idleClosed,
+      new Promise((resolve) => setTimeout(() => resolve(false), 80)),
+    ]);
+    assert.equal(connectorClosing, true, "the delayed connector cleanup is actually in progress");
+  } finally {
+    releaseConnector.resolve(); controller.close = originalClose; idle.destroy(); await stopPromise;
+  }
+  assert.equal(stoppedInTime, true, "stop 必须先断开 accepted sockets 再等待 server.close");
 });
 
 (async () => {

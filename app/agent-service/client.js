@@ -12,6 +12,7 @@ const {
   validatePrivateFileStat,
 } = require("./security");
 
+const { executionTimeoutMs, isExecutionTimeoutMs } = require("../execution-timeout");
 const DEFAULT_TIMEOUT_MS = 2000;
 const PROACTIVE_VERIFY_TIMEOUT_MS = 120_000;
 const CLIENT_MAX_RESPONSE_BYTES = 64 * 1024;
@@ -70,8 +71,9 @@ function requestService(paths, request, options = {}) {
   // metadata endpoints before replying; it does not submit a model turn.
   const runtimeVerification = request.method === "proactive.runtime.verify";
   const permissionRequest = request.method === "computer.permissions.request";
-  const timeoutMs = options.timeoutMs ?? (migration ? 65_000 : runtimeVerification ? PROACTIVE_VERIFY_TIMEOUT_MS
+  const timeoutMs = executionTimeoutMs(options.timeoutMs, migration ? 65_000 : runtimeVerification ? PROACTIVE_VERIFY_TIMEOUT_MS
     : permissionRequest ? 30_000 : authRead ? 20_000 : DEFAULT_TIMEOUT_MS);
+  if (!isExecutionTimeoutMs(timeoutMs)) return Promise.reject(serviceError("REQUEST_TIMEOUT_INVALID", "Invalid request timeout"));
   const payload = {
     ...request,
     id: request.id || randomUUID(),
@@ -98,7 +100,7 @@ function requestService(paths, request, options = {}) {
       error.serviceRequestDiagnostic = Object.freeze({ phase, timeoutMs,
         elapsedMs: Math.max(0, Math.round(performance.now() - started)), responseBytes: buffered.length });
       finish(error);
-    }, timeoutMs);
+    }, timeoutMs === null ? 30_000 : timeoutMs);
     options.signal?.addEventListener("abort", onAbort, { once: true });
     if (options.signal?.aborted) { onAbort(); return; }
 
@@ -109,6 +111,7 @@ function requestService(paths, request, options = {}) {
         return;
       }
       phase = "response";
+      if (timeoutMs === null) clearTimeout(timer);
       socket.write(`${JSON.stringify(payload)}\n`);
     });
     socket.on("data", (chunk) => {

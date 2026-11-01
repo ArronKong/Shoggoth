@@ -9,6 +9,19 @@ const { planConversationCompaction } = require("../app/agent-service/conversatio
 const { readContextTransfer, recordContextTransfer } = require("../app/agent-service/context-transfer");
 
 const budget = window => conversationContextBudget(window);
+// These three admission/checkpoint fixtures assume a small fixed policy. Keep
+// that input explicit as the real product tool catalog grows; full production
+// schema accounting remains exercised by the dedicated test below.
+function boundedBudgetFixture() {
+  const f = contextFixture(), registry = f.compiler.toolRegistry;
+  const tools = registry.list().filter(tool => tool.definition.name === "profile_get");
+  assert.equal(tools.length, 1);
+  f.compiler.toolRegistry = Object.assign(Object.create(Object.getPrototypeOf(registry)), registry, {
+    list: () => tools, developerSummary: () => "Use profile_get to inspect the fixture Agent directory.",
+  });
+  return f;
+}
+
 function compile(f, window, extra = {}) {
   return f.compiler.compile({ profile: f.profile, run: f.run, transcriptSessionId: f.transcriptSessionId,
     contextLifecycleV1: true, transcriptTokenBudget: budget(window).triggerTokens,
@@ -162,7 +175,7 @@ test("one oversized record is summarized in durable ordered fragments and never 
 });
 
 test("mandatory input is distinct from high native occupancy and an already compacted native meter controls admission", () => {
-  const f = contextFixture();
+  const f = boundedBudgetFixture();
   try {
     f.append({ id: "old", kind: "assistant", content: { text: "huge history ".repeat(50000) } });
     f.append({ id: "current", kind: "user", content: { text: "continue", operationId: "current" } });
@@ -178,7 +191,7 @@ test("mandatory input is distinct from high native occupancy and an already comp
 });
 
 test("confirmed native compaction without a meter estimates only subsequent history", () => {
-  const f = contextFixture();
+  const f = boundedBudgetFixture();
   try {
     f.append({ id: "old", kind: "assistant", content: { text: "old history ".repeat(50000) } });
     f.append({ id: "native-compact", kind: "status", contextExcluded: true,
@@ -189,7 +202,27 @@ test("confirmed native compaction without a meter estimates only subsequent hist
     const compacted = compile(f, 64000, { ...common, nativeSessionId: "native-1" });
     assert.equal(compacted.report.request.exceedsBudget, false);
     assert.ok(compacted.report.request.estimatedTokens < 16000);
+    const oldMeter = compile(f, 64000, { ...common, nativeSessionId: "native-1",
+      nativeUsage: { usedTokens: 60000, observedAt: 499 } });
+    assert.equal(oldMeter.report.request.exceedsBudget, false, "a meter before the compaction boundary is obsolete");
     assert.equal(compile(f, 64000, { ...common, nativeSessionId: "different-native" }).report.request.exceedsBudget, true);
+  } finally { f.cleanup(); }
+});
+
+test("a native estimate excludes retired sessions and other accounts even when their native IDs collide", () => {
+  const f = boundedBudgetFixture();
+  try {
+    f.profile.runtimeAccountId = "current-account";
+    const ref = { runtime: "codex", runtimeProfileId: "fixture-profile", runtimeAccountId: "old-account", sessionId: "current-native" };
+    for (let n = 0; n < 12; n++) f.append({ id: `retired-${n}`, kind: "assistant", runtimeRef: ref,
+      content: { text: "retired history ".repeat(3000) } });
+    f.append({ id: "recent", kind: "assistant", runtimeRef: { ...ref, runtimeAccountId: "current-account" },
+      content: { text: "current detail" } });
+    f.append({ id: "current", kind: "user", content: { text: "continue", operationId: "current" } });
+    const result = compile(f, 64000, { freshSession: false, transcriptTokenBudget: undefined,
+      nativeUsage: null, nativeSessionId: "current-native" });
+    assert.equal(result.report.request.exceedsBudget, false);
+    assert.ok(result.report.request.estimatedTokens < 16000);
   } finally { f.cleanup(); }
 });
 
@@ -239,7 +272,7 @@ test("handoff receipts survive restart without claiming a pre-commit or unknown 
 });
 
 test("growing a window can select an earlier checkpoint without duplicate or missing coverage", () => {
-  const f = contextFixture(), checkpoints = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts });
+  const f = boundedBudgetFixture(), checkpoints = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts });
   checkpoints.open(); f.compiler.checkpointStore = checkpoints;
   try {
     for (let n = 0; n < 14; n++) f.append({ id: `fact-${n}`, kind: n % 2 ? "assistant" : "user",
@@ -263,7 +296,7 @@ test("growing a window can select an earlier checkpoint without duplicate or mis
   } finally { checkpoints.close(); f.cleanup(); }
 });
 
-test("native tool originals survive display truncation but secrets never enter the content object", () => {
+test("native conversation originals survive display truncation without applying memory secret policy", () => {
   const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
   const output = "native full output ".repeat(12000) + "END_OF_NATIVE_TOOL";
   const event = normalizeCodexEvent({ method: "item/completed", params: { threadId: "thread", turnId: "turn",
@@ -271,8 +304,10 @@ test("native tool originals survive display truncation but secrets never enter t
   assert.equal(event.contextTool.output, output);
   assert.ok(event.tool.output.length < output.length);
   const { contextToolContent } = require("../app/agent-service/context-tool-content");
-  assert.deepEqual(contextToolContent({ output: "registered-private-value" }, ["registered-private-value"]), {});
-  assert.deepEqual(contextToolContent({ output: "sk-" + "a".repeat(32) }), {});
+  for (const original of ["registered-private-value", "sk-" + "a".repeat(32), "验证码 123456"]) {
+    assert.deepEqual(contextToolContent({ output: original }, ["registered-private-value"]),
+      { contextTool: { output: original } });
+  }
 });
 
 test("missing and corrupted originals stop a new projection; excluded bodies are never read", () => {

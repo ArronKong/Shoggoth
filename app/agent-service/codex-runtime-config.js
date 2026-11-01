@@ -9,6 +9,7 @@ const { atomicWritePrivateFile } = require("./private-file");
 const { DEFAULT_MCP_TOOL_TIMEOUT_SEC } = require("./interactive-timeouts");
 const { CODEX_MCP_STARTUP_TIMEOUT_SEC } = require("./codex-startup-timeouts");
 const { validRuntimeAccountId } = require("./runtime-adapter");
+const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 
 const PROVIDER_ENV_PATTERN = /^SHOGGOTH_PROVIDER_[A-F0-9]{16}_API_KEY$/;
 const OPENAI_API_KEY_ENV = "OPENAI_API_KEY";
@@ -80,6 +81,29 @@ function providerConfigAlias(provider) {
 
 function runtimeProviderBaseUrl(provider) {
   return provider.kind === "openai-api-key" ? OPENAI_RESPONSES_BASE_URL : provider.baseUrl;
+}
+
+// Config table of one extra source. Custom kinds use the same keys the
+// process-default custom provider writes; Bedrock is Codex's built-in
+// provider and only takes its AWS location.
+function extraProviderTable(provider) {
+  if (provider.kind === "amazon-bedrock") {
+    const entries = [["region", tomlString(provider.awsRegion)]];
+    if (provider.awsProfile !== null) entries.push(["profile", tomlString(provider.awsProfile)]);
+    return { table: "model_providers.amazon-bedrock.aws", entries };
+  }
+  const entries = [
+    ["name", tomlString(provider.name)],
+    ["base_url", tomlString(runtimeProviderBaseUrl(provider))],
+    ["wire_api", '"responses"'],
+  ];
+  if (provider.credentialEnv !== null) entries.push(["env_key", tomlString(provider.credentialEnv)]);
+  if (provider.kind === "openai-api-key") entries.push(["requires_openai_auth", "false"]);
+  if (provider.headers !== null && Object.keys(provider.headers).length > 0) {
+    entries.push(["http_headers", `{ ${Object.entries(provider.headers)
+      .map(([name, value]) => `${tomlString(name)} = ${tomlString(value)}`).join(", ")} }`]);
+  }
+  return { table: `model_providers.${providerConfigAlias(provider)}`, entries };
 }
 
 function normalizeMcpHelperLaunch(value) {
@@ -192,6 +216,10 @@ function managedConfigFor(runtimeConfig, mcp = null, importedPreferences = []) {
     );
     if (provider.awsProfile !== null) lines.push(`profile = ${tomlString(provider.awsProfile)}`);
   }
+  for (const extra of runtimeConfig?.extraProviders || []) {
+    const { table, entries } = extraProviderTable(extra);
+    lines.push("", `[${table}]`, ...entries.map(([key, value]) => `${key} = ${value}`));
+  }
   if (mcp !== null) {
     appendMcpServer(lines, mcp.runtimeProfileId, mcp.runtimeAccountId, mcp.launch);
   }
@@ -201,6 +229,10 @@ function managedConfigFor(runtimeConfig, mcp = null, importedPreferences = []) {
 
 function configOverridesFor(runtimeConfig, mcp = null) {
   const normalized = validateRuntimeConfig(runtimeConfig);
+  const nativeCodex = mcp?.runtimeAccountId === NATIVE_CODEX_RUNTIME_ACCOUNT_ID;
+  if (nativeCodex && normalized !== null) {
+    throw runtimeError("CODEX_RUNTIME_CONFIG_INVALID", "Native Codex uses its own model provider configuration");
+  }
   const provider = normalized?.provider || null;
   const custom = provider ? CUSTOM_PROVIDER_KINDS.has(provider.kind) : false;
   const alias = custom ? providerConfigAlias(provider) : null;
@@ -219,7 +251,7 @@ function configOverridesFor(runtimeConfig, mcp = null) {
     "memories.use_memories=false",
     "memories.disable_on_external_context=false",
   ];
-  if (provider === null || provider.kind === "chatgpt") {
+  if (!nativeCodex && (provider === null || provider.kind === "chatgpt")) {
     overrides.push(
       'forced_login_method="chatgpt"',
       'model_provider="openai"',
@@ -252,6 +284,10 @@ function configOverridesFor(runtimeConfig, mcp = null) {
     if (provider.awsProfile !== null) {
       overrides.push(`model_providers.amazon-bedrock.aws.profile=${tomlString(provider.awsProfile)}`);
     }
+  }
+  for (const extra of normalized?.extraProviders || []) {
+    const { table, entries } = extraProviderTable(extra);
+    overrides.push(...entries.map(([key, value]) => `${table}.${key}=${value}`));
   }
   if (mcp !== null) {
     const launch = normalizeMcpHelperLaunch(mcp.launch);
@@ -473,54 +509,79 @@ function assertPresetRuntime(provider, credentialEnv) {
   }
 }
 
+function validateRuntimeProvider(input) {
+  if (!exactPlainObject(input, [
+    "id", "kind", "name", "baseUrl", "model", "headers", "awsRegion", "awsProfile",
+    "credentialEnv",
+  ])) {
+    throw new Error("invalid runtime config");
+  }
+  const provider = validateModelProvider({
+    id: input.id,
+    kind: input.kind,
+    name: input.name,
+    baseUrl: input.baseUrl,
+    model: input.model,
+    credentialRef: null,
+    headers: input.headers,
+    awsRegion: input.awsRegion,
+    awsProfile: input.awsProfile,
+    validationStatus: "unverified",
+  });
+  if (input.credentialEnv !== null
+    && (typeof input.credentialEnv !== "string"
+      || (input.kind === "openai-api-key"
+        ? input.credentialEnv !== OPENAI_API_KEY_ENV
+        : !PROVIDER_ENV_PATTERN.test(input.credentialEnv)))) {
+    throw new Error("invalid credential env");
+  }
+  if (!CUSTOM_PROVIDER_KINDS.has(provider.kind)
+    && provider.kind !== "openai-api-key"
+    && input.credentialEnv !== null) {
+    throw new Error("authority provider cannot use custom credential env");
+  }
+  assertPresetRuntime(provider, input.credentialEnv);
+  return {
+    id: provider.id,
+    kind: provider.kind,
+    name: provider.name,
+    baseUrl: provider.baseUrl,
+    model: provider.model,
+    headers: provider.headers,
+    awsRegion: provider.awsRegion,
+    awsProfile: provider.awsProfile,
+    credentialEnv: input.credentialEnv,
+  };
+}
+
+// `extraProviders` are the other model sources declared next to the process
+// default (`provider`, null = ChatGPT): presets, custom Responses endpoints
+// and at most one Bedrock. A native thread selects one through its own
+// `model_provider`; the process default never changes.
 function validateRuntimeConfig(input) {
   if (input === null) return null;
   try {
-    if (!exactPlainObject(input, ["provider"]) || input.provider === null
-      || !exactPlainObject(input.provider, [
-        "id", "kind", "name", "baseUrl", "model", "headers", "awsRegion", "awsProfile",
-        "credentialEnv",
-      ])) {
+    const hasExtra = Object.hasOwn(input || {}, "extraProviders");
+    if (!exactPlainObject(input, hasExtra ? ["provider", "extraProviders"] : ["provider"])
+      || (input.provider === null && !hasExtra)) {
       throw new Error("invalid runtime config");
     }
-    const provider = validateModelProvider({
-      id: input.provider.id,
-      kind: input.provider.kind,
-      name: input.provider.name,
-      baseUrl: input.provider.baseUrl,
-      model: input.provider.model,
-      credentialRef: null,
-      headers: input.provider.headers,
-      awsRegion: input.provider.awsRegion,
-      awsProfile: input.provider.awsProfile,
-      validationStatus: "unverified",
-    });
-    if (input.provider.credentialEnv !== null
-      && (typeof input.provider.credentialEnv !== "string"
-        || (input.provider.kind === "openai-api-key"
-          ? input.provider.credentialEnv !== OPENAI_API_KEY_ENV
-          : !PROVIDER_ENV_PATTERN.test(input.provider.credentialEnv)))) {
-      throw new Error("invalid credential env");
+    const provider = input.provider === null ? null : validateRuntimeProvider(input.provider);
+    if (!hasExtra) return { provider };
+    if (!Array.isArray(input.extraProviders) || input.extraProviders.length > 64) {
+      throw new Error("invalid extra providers");
     }
-    if (!CUSTOM_PROVIDER_KINDS.has(provider.kind)
-      && provider.kind !== "openai-api-key"
-      && input.provider.credentialEnv !== null) {
-      throw new Error("authority provider cannot use custom credential env");
+    const extraProviders = input.extraProviders.map(validateRuntimeProvider);
+    const aliases = extraProviders.map(providerConfigAlias);
+    if (extraProviders.some((entry) => (!CUSTOM_PROVIDER_KINDS.has(entry.kind) && entry.kind !== "amazon-bedrock")
+      || entry.id === provider?.id)
+      // Bedrock has one built-in config table; OpenAI keys share OPENAI_API_KEY.
+      || ["amazon-bedrock", "openai-api-key"].some((kind) => extraProviders
+        .filter((entry) => entry.kind === kind).length + (provider?.kind === kind ? 1 : 0) > 1)
+      || new Set(aliases).size !== aliases.length) {
+      throw new Error("invalid extra providers");
     }
-    assertPresetRuntime(provider, input.provider.credentialEnv);
-    return {
-      provider: {
-        id: provider.id,
-        kind: provider.kind,
-        name: provider.name,
-        baseUrl: provider.baseUrl,
-        model: provider.model,
-        headers: provider.headers,
-        awsRegion: provider.awsRegion,
-        awsProfile: provider.awsProfile,
-        credentialEnv: input.provider.credentialEnv,
-      },
-    };
+    return { provider, extraProviders };
   } catch {
     throw runtimeError("CODEX_RUNTIME_CONFIG_INVALID", "Codex runtime config is invalid");
   }

@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.244",
+      "version": "0.8.262",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.244",
-      "purl": "pkg:generic/shoggoth@0.8.244",
+      "bom-ref": "pkg:generic/shoggoth@0.8.262",
+      "purl": "pkg:generic/shoggoth@0.8.262",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -62,86 +62,6 @@
         {
           "name": "shoggoth:update-policy",
           "value": "release-only; runtime self-update disabled"
-        }
-      ]
-    },
-    {
-      "type": "application",
-      "name": "gogcli",
-      "version": "0.42.0",
-      "bom-ref": "pkg:generic/gogcli@0.42.0?platform=darwin-arm64",
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "39c0db09b1dcfbe12662d9de58c69d67d6520a77cafdc34e28dad0120f57bf19"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "purl": "pkg:generic/gogcli@0.42.0?platform=darwin-arm64",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://github.com/openclaw/gogcli/releases/download/v0.42.0/gogcli_0.42.0_darwin_arm64.tar.gz"
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:role",
-          "value": "google-workspace-local-runtime"
-        },
-        {
-          "name": "shoggoth:target-arch",
-          "value": "darwin-arm64"
-        },
-        {
-          "name": "shoggoth:archive-sha256",
-          "value": "6a92b35473ed057c55677c2ba7d5af8e154d1bad23fa35e74994bc2f3bce4672"
-        }
-      ]
-    },
-    {
-      "type": "application",
-      "name": "gogcli",
-      "version": "0.42.0",
-      "bom-ref": "pkg:generic/gogcli@0.42.0?platform=darwin-x64",
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "5a5cbdabafda5eb7ccb8ff24eb4c54fc20f954aa40181cbdb769a7f7290f05bb"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "purl": "pkg:generic/gogcli@0.42.0?platform=darwin-x64",
-      "externalReferences": [
-        {
-          "type": "distribution",
-          "url": "https://github.com/openclaw/gogcli/releases/download/v0.42.0/gogcli_0.42.0_darwin_amd64.tar.gz"
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:role",
-          "value": "google-workspace-local-runtime"
-        },
-        {
-          "name": "shoggoth:target-arch",
-          "value": "darwin-x64"
-        },
-        {
-          "name": "shoggoth:archive-sha256",
-          "value": "f28d7f64fb85d726e4757261a02879f35968ad7096fe00761cd9eda8e9f6d2dd"
         }
       ]
     },
@@ -1653,6 +1573,36 @@
     },
     {
       "type": "library",
+      "name": "@isaacs/nonrecursive-glob-match",
+      "version": "1.0.3",
+      "bom-ref": "pkg:npm/%40isaacs/nonrecursive-glob-match@1.0.3",
+      "purl": "pkg:npm/%40isaacs/nonrecursive-glob-match@1.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "488ee4c8a1eae175c3468cf0fabf4695166489ad59905ae92d6f7caf6202d81a6bf18905184ddfbe3ce6c421b4c7bf00fbeebd1e60cdac3bd23180599871a928"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BlueOak-1.0.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "development-or-other-platform"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "@malept/cross-spawn-promise",
       "version": "2.0.0",
       "bom-ref": "pkg:npm/%40malept/cross-spawn-promise@2.0.0",
@@ -1733,7 +1683,7 @@
       "properties": [
         {
           "name": "shoggoth:role",
-          "value": "plugin-mcp-client"
+          "value": "standalone-mcp-client"
         },
         {
           "name": "shoggoth:dependency-scopes",
@@ -6502,13 +6452,13 @@
     {
       "type": "library",
       "name": "fast-uri",
-      "version": "3.1.8",
-      "bom-ref": "pkg:npm/fast-uri@3.1.8",
-      "purl": "pkg:npm/fast-uri@3.1.8",
+      "version": "3.1.9",
+      "bom-ref": "pkg:npm/fast-uri@3.1.9",
+      "purl": "pkg:npm/fast-uri@3.1.9",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "19932d6544cd4693952040a85f02cd652e7150613e99535b4c1f21ffb4708764c559c05088fcd3832662d39045f543192a42c9bfc5c14494e553bce0f3e65f32"
+          "content": "852ff45addd86b4e37a0a5ecd2c231acca4a4084d784c2c8ad500a2978b8828cc60bdbfb6115959d7219ce334f4ced3633d05dc4b096a8ad7245780dce257225"
         }
       ],
       "licenses": [
@@ -6581,7 +6531,7 @@
       "properties": [
         {
           "name": "shoggoth:role",
-          "value": "inspiration-archive;plugin-git-archive"
+          "value": "inspiration-archive;independent-skill-archive"
         },
         {
           "name": "shoggoth:dependency-scopes",
@@ -7046,13 +6996,13 @@
     {
       "type": "library",
       "name": "glob",
-      "version": "13.0.6",
-      "bom-ref": "pkg:npm/glob@13.0.6",
-      "purl": "pkg:npm/glob@13.0.6",
+      "version": "14.0.3",
+      "bom-ref": "pkg:npm/glob@14.0.3",
+      "purl": "pkg:npm/glob@14.0.3",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "5a3972ae89669bcb83a66fe8806c976576f567e09ad81f0d6c9c2a0558346b12bd19b05ea12ef2195eaf8d79d87469ba5f9de27a112ec716f288aa7c42637857"
+          "content": "035be32300b7aa9742b28e39230d76ee09e9eec3e1aa063c9544210eb02b22cf866e67da6953c5ba8cb2ed6c8b4fd10f642459ee3eda2ddc1485098759eb04a3"
         }
       ],
       "licenses": [
@@ -8906,13 +8856,13 @@
     {
       "type": "library",
       "name": "lru-cache",
-      "version": "11.5.2",
-      "bom-ref": "pkg:npm/lru-cache@11.5.2",
-      "purl": "pkg:npm/lru-cache@11.5.2",
+      "version": "11.5.3",
+      "bom-ref": "pkg:npm/lru-cache@11.5.3",
+      "purl": "pkg:npm/lru-cache@11.5.3",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "e297ccd457f4c79d28d2d4306f9b9cc3f4733720f4fd824c13a215712b5a959b8c5b176ddec47786e4ad4edc73e0f526bd97d182ebc37a36acbd0da489f475d6"
+          "content": "53837c160ce65b173c935547f0aafa950835f14ec58ef6f2eb05c75515ff659ec8c166d1320ad16cfd16adbe6ae4d5629ebca9e1241a9a91ca76fb5e708b7152"
         }
       ],
       "licenses": [
@@ -9326,13 +9276,13 @@
     {
       "type": "library",
       "name": "minimatch",
-      "version": "10.2.6",
-      "bom-ref": "pkg:npm/minimatch@10.2.6",
-      "purl": "pkg:npm/minimatch@10.2.6",
+      "version": "11.0.3",
+      "bom-ref": "pkg:npm/minimatch@11.0.3",
+      "purl": "pkg:npm/minimatch@11.0.3",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "be92d012cf952c2af59d4d015d2d3b99a628170943007d209e042ebadb71230bad0c510c1ead9b957fbcbe98310dd2b72753f08c22627a9efb3a2b536782e5d4"
+          "content": "8a7cbfe343c41a4349439fcfbfacf79e6e856d101bcb7d86799463094264d969cd0db80f49371d23e0c3bcbaac801743e1c0f9b0cb4c85ea8f3e77a10826bc37"
         }
       ],
       "licenses": [
@@ -9393,36 +9343,6 @@
         {
           "alg": "SHA-512",
           "content": "ee8d70100d91c8c3fb22eec635b6bdbdcd11596180089382641257d862568a9d22915fb070eb2056e63db84f023e2c908641854a586e4a464f6af37bbb573617"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "ISC"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "desktop"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "minimatch",
-      "version": "9.0.9",
-      "bom-ref": "pkg:npm/minimatch@9.0.9",
-      "purl": "pkg:npm/minimatch@9.0.9",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "381c0137d00be1daa61139694b6cdab31faf4de59c956ce46e57d993b2930398f78de38e373fed4429d9a26532bcd83cdf02f966ff52b3a1cc2570202fc47662"
         }
       ],
       "licenses": [
@@ -9993,6 +9913,34 @@
     },
     {
       "type": "library",
+      "name": "opencc-js",
+      "version": "1.4.2",
+      "bom-ref": "pkg:npm/opencc-js@1.4.2",
+      "purl": "pkg:npm/opencc-js@1.4.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "11d72ca607513a208264333e8d947a3daebbd315be116d9085cb4f050f2046383a96bc78207125fb6b3e92de62ce4fd393155181d5ae16068691a11d2147dd6b"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT AND Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "desktop"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "p-cancelable",
       "version": "2.1.1",
       "bom-ref": "pkg:npm/p-cancelable@2.1.1",
@@ -10114,13 +10062,13 @@
     {
       "type": "library",
       "name": "path-scurry",
-      "version": "2.0.2",
-      "bom-ref": "pkg:npm/path-scurry@2.0.2",
-      "purl": "pkg:npm/path-scurry@2.0.2",
+      "version": "3.0.0",
+      "bom-ref": "pkg:npm/path-scurry@3.0.0",
+      "purl": "pkg:npm/path-scurry@3.0.0",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "dcefe2555b0900fb0e9e9c1621e0fe77acffecf9aa029c9078f52d0a77636ad8fff48e4bca51efb79aa5b856814f7239877af57a37d1d39e9cf850aff8d9cd5e"
+          "content": "d694db42a1f5c08c0c8bf7a5790e657854d30a4cc5b0f7205cd8f0380f181865bf5b8fe41d3dddb2c13b67a347fb3baa34b3b3381d2e683eb5ca5edc01c56182"
         }
       ],
       "licenses": [
@@ -12690,13 +12638,13 @@
     {
       "type": "library",
       "name": "undici",
-      "version": "6.28.1",
-      "bom-ref": "pkg:npm/undici@6.28.1",
-      "purl": "pkg:npm/undici@6.28.1",
+      "version": "6.29.1",
+      "bom-ref": "pkg:npm/undici@6.29.1",
+      "purl": "pkg:npm/undici@6.29.1",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "cd6a5d4d50f9e07e3c088c9b2f4ad6437ba4a5bf5ddb7c0cede1f946d7dd99e3fbd1c587363b5fa3b3f8bd95fee42a0370ee772783eee6e5e9ee535f8dce8344"
+          "content": "12f46552dfd0a8012f5dd41e44c6147f0390b1fce90f3b7292b1b6a3018413fac1381a18bfdb85dfd673b0d0e1e254c51e14ebd973998ca91882e783d7666618"
         }
       ],
       "licenses": [
@@ -12720,13 +12668,13 @@
     {
       "type": "library",
       "name": "undici",
-      "version": "7.29.1",
-      "bom-ref": "pkg:npm/undici@7.29.1",
-      "purl": "pkg:npm/undici@7.29.1",
+      "version": "7.30.1",
+      "bom-ref": "pkg:npm/undici@7.30.1",
+      "purl": "pkg:npm/undici@7.30.1",
       "hashes": [
         {
           "alg": "SHA-512",
-          "content": "45838d5b631e69f81896454e2982a403f020ec1997aa021609af2dd66d09731ad083da48f6512a46100eaee38109b02884e6bf824085fa23e2f61ae0bd3ceee9"
+          "content": "d372ab31b8c814359047944d3eb4b0ddb775af5d89a7215097dff2c6351b26daa48e6965a82e65163661eae8deb8908aafc10e42f456f3bd8ecbf6b3fa72d8c6"
         }
       ],
       "licenses": [
@@ -12738,12 +12686,16 @@
       ],
       "properties": [
         {
+          "name": "shoggoth:role",
+          "value": "mcp-http-proxy"
+        },
+        {
           "name": "shoggoth:dependency-scopes",
           "value": "desktop"
         },
         {
           "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
+          "value": "macos-production-input"
         }
       ]
     },
@@ -13541,25 +13493,6 @@
     },
     {
       "type": "library",
-      "name": "gogcli Gmail MCP runtime",
-      "version": "v0.42.0 (commit 792107a); arm64 and x64 release binaries pinned by SHA-256 in build/gog-runtime-manifest.json",
-      "bom-ref": "source:gogcli Gmail MCP runtime",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:local-files",
-          "value": "app/agent-service/plugin-gogcli-gmail-runtime.js,build/gog-runtime-manifest.json,scripts/fetch-gog-runtime.mjs"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "name": "Hermes Agent model settings",
       "version": "180291162ff4df0d42b5dc4fecd08005cf7cebf9 (locally available upstream reference)",
       "bom-ref": "source:Hermes Agent model settings",
@@ -13574,6 +13507,25 @@
         {
           "name": "shoggoth:local-files",
           "value": "app/manage-ui/src/pages/agents/AgentModelSettings.module.css,app/manage-ui/src/pages/agents/useAgentModelSettings.ts,app/manage-ui/src/pages/agents/AgentModelCards.tsx,app/manage-ui/src/pages/keys/OAuthProvidersCard.tsx"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Hermes managed model projection integration",
+      "version": "c7c2df1a536d62b45fda8907bb1898981721794d; exact input and patched file hashes in managed-v4/manifest.json",
+      "bom-ref": "source:Hermes managed model projection integration",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": "resources/external-plugin-host-patches/hermes/managed-v4"
         }
       ]
     },
@@ -13708,6 +13660,25 @@
     },
     {
       "type": "library",
+      "name": "OpenClaw managed model projection patch",
+      "version": "2026.9.9; exact original and patched file hashes in openclaw-2026.9.9-managed.json",
+      "bom-ref": "source:OpenClaw managed model projection patch",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": "resources/external-plugin-host-patches/openclaw/2026.9.9-managed-v3"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "OpenClaw memory core and bundled source dependencies",
       "version": "c10679395819ede78bb073f979f95c157e165bfa; per-file SHA-256 in build/shoggoth-memory/manifest.json",
       "bom-ref": "source:OpenClaw memory core and bundled source dependencies",
@@ -13780,6 +13751,23 @@
     },
     {
       "type": "library",
+      "name": "Undici bundled in the memory core",
+      "version": "8.12.2; official npm archive integrity and per-file SHA-256 in build/shoggoth-memory/manifest.json",
+      "bom-ref": "source:Undici bundled in the memory core",
+      "licenses": [
+        {
+          "expression": "MIT AND ISC"
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:local-files",
+          "value": "build/shoggoth-memory/dependencies/undici"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "zsh (Codex bundled shell)",
       "version": "binary reports 5.9.0.3-test; 5.9 upstream license reference",
       "bom-ref": "source:zsh (Codex bundled shell)",
@@ -13800,11 +13788,9 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.244",
+      "ref": "pkg:generic/shoggoth@0.8.262",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
-        "pkg:generic/gogcli@0.42.0?platform=darwin-arm64",
-        "pkg:generic/gogcli@0.42.0?platform=darwin-x64",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
         "pkg:generic/openai-codex@0.159.2?platform=darwin-arm64",
         "pkg:generic/openai-codex@0.159.2?platform=darwin-x64",
@@ -13855,6 +13841,7 @@
         "pkg:npm/%40floating-ui/utils@0.2.11",
         "pkg:npm/%40huggingface/tokenizers@0.2.0",
         "pkg:npm/%40isaacs/fs-minipass@4.0.1",
+        "pkg:npm/%40isaacs/nonrecursive-glob-match@1.0.3",
         "pkg:npm/%40malept/cross-spawn-promise@2.0.0",
         "pkg:npm/%40malept/flatpak-bundler@0.4.0",
         "pkg:npm/%40modelcontextprotocol/client@2.3.1",
@@ -14015,7 +14002,7 @@
         "pkg:npm/eventsource@3.0.7",
         "pkg:npm/exponential-backoff@3.1.3",
         "pkg:npm/fast-deep-equal@3.1.3",
-        "pkg:npm/fast-uri@3.1.8",
+        "pkg:npm/fast-uri@3.1.9",
         "pkg:npm/fdir@6.5.0",
         "pkg:npm/fflate@0.8.3",
         "pkg:npm/filelist@1.0.6",
@@ -14033,7 +14020,7 @@
         "pkg:npm/get-intrinsic@1.3.0",
         "pkg:npm/get-proto@1.0.1",
         "pkg:npm/get-stream@5.2.0",
-        "pkg:npm/glob@13.0.6",
+        "pkg:npm/glob@14.0.3",
         "pkg:npm/glob@7.2.3",
         "pkg:npm/global-agent@3.0.0",
         "pkg:npm/globalthis@1.0.4",
@@ -14095,7 +14082,7 @@
         "pkg:npm/lodash@4.18.1",
         "pkg:npm/loose-envify@1.4.0",
         "pkg:npm/lowercase-keys@2.0.0",
-        "pkg:npm/lru-cache@11.5.2",
+        "pkg:npm/lru-cache@11.5.3",
         "pkg:npm/lru-cache@6.0.0",
         "pkg:npm/luxon@3.7.2",
         "pkg:npm/markdown-it-task-lists@2.1.1",
@@ -14109,10 +14096,9 @@
         "pkg:npm/mime@2.6.0",
         "pkg:npm/mimic-response@1.0.1",
         "pkg:npm/mimic-response@3.1.0",
-        "pkg:npm/minimatch@10.2.6",
+        "pkg:npm/minimatch@11.0.3",
         "pkg:npm/minimatch@3.1.5",
         "pkg:npm/minimatch@5.1.9",
-        "pkg:npm/minimatch@9.0.9",
         "pkg:npm/minimist@1.2.8",
         "pkg:npm/minipass@7.1.3",
         "pkg:npm/minizlib@3.1.0",
@@ -14131,11 +14117,12 @@
         "pkg:npm/once@1.4.0",
         "pkg:npm/onnxruntime-common@1.22.0",
         "pkg:npm/onnxruntime-node@1.22.0",
+        "pkg:npm/opencc-js@1.4.2",
         "pkg:npm/p-cancelable@2.1.1",
         "pkg:npm/p-limit@3.1.0",
         "pkg:npm/path-is-absolute@1.0.1",
         "pkg:npm/path-key@3.1.1",
-        "pkg:npm/path-scurry@2.0.2",
+        "pkg:npm/path-scurry@3.0.0",
         "pkg:npm/pe-library@0.4.1",
         "pkg:npm/pend@1.2.0",
         "pkg:npm/picocolors@1.1.1",
@@ -14221,8 +14208,8 @@
         "pkg:npm/uc.micro@2.1.0",
         "pkg:npm/undici-types@6.21.0",
         "pkg:npm/undici-types@7.18.2",
-        "pkg:npm/undici@6.28.1",
-        "pkg:npm/undici@7.29.1",
+        "pkg:npm/undici@6.29.1",
+        "pkg:npm/undici@7.30.1",
         "pkg:npm/universalify@0.1.2",
         "pkg:npm/universalify@2.0.1",
         "pkg:npm/unzipper@0.12.5",
@@ -14252,6 +14239,7 @@
         "source:Codex native voice libraries",
         "source:Courier Prime",
         "source:Hermes Agent model settings",
+        "source:Hermes managed model projection integration",
         "source:LiquidGlass",
         "source:Lobe Icons provider logos",
         "source:Lucide / Feather icons",
@@ -14259,10 +14247,11 @@
         "source:Multilingual E5-small bundled embedding model",
         "source:OpenAI Codex",
         "source:OpenClaw Control UI",
+        "source:OpenClaw managed model projection patch",
         "source:OpenClaw memory core and bundled source dependencies",
         "source:PCRE2 (ripgrep embedded library)",
         "source:Source Han Serif CN",
-        "source:gogcli Gmail MCP runtime",
+        "source:Undici bundled in the memory core",
         "source:ripgrep (Codex bundled program)",
         "source:zsh (Codex bundled shell)"
       ]

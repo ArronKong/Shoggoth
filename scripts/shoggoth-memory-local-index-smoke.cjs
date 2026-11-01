@@ -140,6 +140,8 @@ async function fixture(directory) {
 function sameGeneration(value) {
   const { index } = value, owner = index.searchOwner, executor = index.embeddingExecutor;
   assert.equal(owner.provider, executor.provider); assert.equal(owner.providerRuntime, executor.providerRuntime);
+  assert.equal(owner.resolveEmbeddingTimeout("query"), 15 * 60_000);
+  assert.equal(executor.resolveEmbeddingTimeout("batch"), 30 * 60_000);
   assert.equal(owner.provider.id, "local"); assert.equal(owner.provider.model, index.model);
   assert.equal(owner.acquireLocalService, index.acquireLocalService);
   assert.equal(owner.providerKey, index.providerIdentities[0].providerKey);

@@ -1,0 +1,11 @@
+{
+  "agentVersion": "1.0.69",
+  "protocolVersion": 1,
+  "binarySha256": "dd266c886003e3b6d485e274ad47cb149709b2e0e7960bb3ab7ddc611cb0f3c6",
+  "capturedAt": "2026-10-23T15:01:52.120Z",
+  "promptCount": 0,
+  "frames": [
+    { "jsonrpc": "2.0", "id": "skills-reload", "result": { "result": { "reloaded": 1 } } },
+    { "jsonrpc": "2.0", "id": "workflows-reload", "result": { "result": { "reloaded": 1 } } }
+  ]
+}

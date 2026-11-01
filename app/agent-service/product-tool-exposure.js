@@ -38,7 +38,7 @@ const RESIDENT_PRODUCT_TOOLS = Object.freeze(new Set([
 const ENTRY_TOOL_DEFINITIONS = Object.freeze([
   Object.freeze({
     name: PRODUCT_TOOL_SEARCH,
-    description: "Find Shoggoth product tools that are not loaded directly. Search by keyword or domain, for example kanban, cron, inspiration, plugin, mcp, hook, heartbeat, federation, group, computer or notification; an empty query lists every tool name by domain. Each match returns its exact name, full description (including its workflow and rules) and input schema. Call a match with product_tool_call.",
+    description: "Find Shoggoth product tools that are not loaded directly. Search by keyword or domain, for example kanban, cron, inspiration, connector, mcp, hook, heartbeat, federation, group, computer or notification; an empty query lists every tool name by domain. Each match returns its exact name, full description (including its workflow and rules) and input schema. Call a match with product_tool_call.",
     inputSchema: Object.freeze({ type: "object", additionalProperties: false, required: ["query"], properties: Object.freeze({
       query: Object.freeze({ type: "string", maxLength: 200 }),
       limit: Object.freeze({ type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS }),

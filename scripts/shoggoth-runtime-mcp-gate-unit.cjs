@@ -21,8 +21,12 @@ fs.writeFileSync(helper, "helper\n", { mode: 0o700 });
 fs.writeFileSync(grok, "grok\n", { mode: 0o700 });
 fs.writeFileSync(acpServer, "server\n", { mode: 0o700 });
 fs.writeFileSync(harness, "harness\n", { mode: 0o700 });
-// pid -> { ppid, executable } as observed by the Service for harness-child tickets.
-const processLinks = new Map();
+// Process fields are observed by the trusted Service, never the sandbox relay.
+const processLinks = new Map([
+  [9527, { ppid: 1, executable: fs.realpathSync(grok), command: `${grok} agent --no-leader stdio` }],
+  [9600, { ppid: 1, executable: fs.realpathSync(acpServer), command: acpServer }],
+]);
+let parentIdentity = "stable-parent-9527";
 let ancestorIdentity = "stable-ancestor-9600";
 fs.mkdirSync(path.dirname(bootstrap), { recursive: true });
 fs.writeFileSync(bootstrap, "bootstrap\n", { mode: 0o600 });
@@ -48,7 +52,7 @@ const issuer = new RuntimeMcpGateIssuer({
   bootstrapPath: bootstrap,
   now: () => clockNow,
   randomBytes: () => Buffer.alloc(32, ++nonceByte),
-  getProcessIdentity: (pid) => pid === 9527 ? "stable-parent-9527" : pid === 9600 ? ancestorIdentity : "",
+  getProcessIdentity: (pid) => pid === 9527 ? parentIdentity : pid === 9600 ? ancestorIdentity : "",
   getProcessLink: (pid) => processLinks.get(pid) || { ppid: 0, executable: "" },
   setTimeout(callback) { timerCallback = callback; return { unref() {} }; },
   clearTimeout() {},
@@ -116,7 +120,7 @@ try {
     ppid: 9527,
     now: () => 10_001,
     userInfo: () => ({ homedir: root }),
-    parent: { executable: fs.realpathSync(grok), command: `${grok} agent --no-leader stdio` },
+    get parent() { throw new Error("sandbox process inspection is unavailable"); },
   }), "mcp");
   assert.equal(fs.existsSync(gatePath), true, "bootstrap validation must remain read-only");
   const expectedBridge = Object.freeze({
@@ -130,7 +134,7 @@ try {
     ppid: 9527,
     now: () => 10_001,
     userInfo: () => ({ homedir: root }),
-    parent: { executable: fs.realpathSync(grok), command: `${grok} agent --no-leader stdio` },
+    get parent() { throw new Error("sandbox process inspection is unavailable"); },
     openRuntimeMcpBridge: async (context) => {
       assert.equal(context.runtimeProfileId, "runtime-grok");
       assert.equal(context.runtimeAccountId, runtimeAccountId);
@@ -172,8 +176,63 @@ try {
     ppid: 9527,
     now: () => 10_001,
     userInfo: () => ({ homedir: root }),
-    parent: { executable: fs.realpathSync(grok), command: `${grok} agent --no-leader stdio` },
+    get parent() { throw new Error("sandbox process inspection is unavailable"); },
   }), "Runtime gate must require ELECTRON_RUN_AS_NODE=1");
+
+  const directGuard = issuer.createMcpServer({ runtimeProfileId: "runtime-grok", runtimeAccountId,
+    parentPid: 9527, parentExecutable: grok });
+  const directEnv = Object.fromEntries(directGuard.env.map(({ name, value }) => [name, value]));
+  const directInput = { runtimeProfileId: "runtime-grok", runtimeAccountId,
+    gatePath: directEnv.SHOGGOTH_RUNTIME_MCP_GATE_FILE,
+    nonce: directEnv.SHOGGOTH_RUNTIME_MCP_GATE_NONCE, parentPid: 9527 };
+  const sandboxRuntime = { ppid: 9527, now: () => 10_001, userInfo: () => ({ homedir: root }) };
+  assert.throws(() => resolveRole(directGuard.args, directEnv, { ...sandboxRuntime, ppid: 9528 }),
+    "bootstrap must reject a forged direct parent PID before opening the bridge");
+  assert.throws(() => issuer.consume({ ...directInput, parentPid: 9528 }),
+    "Service must reject a forged parent PID");
+  const directLink = processLinks.get(9527);
+  for (const badLink of [undefined, { ...directLink, executable: harness }, { ...directLink, command: "" }]) {
+    processLinks.set(9527, badLink);
+    assert.throws(() => issuer.consume(directInput), "Service must inspect the pinned parent executable and command");
+    assert.throws(() => issuer.createMcpServer({ runtimeProfileId: "runtime-grok", runtimeAccountId,
+      parentPid: 9527, parentExecutable: grok }), "bind must reject an unverified parent");
+  }
+  processLinks.set(9527, directLink);
+  parentIdentity = "recycled-parent-9527";
+  assert.throws(() => issuer.consume(directInput), "Service must reject a recycled direct parent PID");
+  parentIdentity = "stable-parent-9527";
+  const readProcessLink = issuer.getProcessLink;
+  issuer.getProcessLink = (pid) => {
+    const link = readProcessLink(pid);
+    if (pid === 9527) parentIdentity = "changed-during-process-inspection";
+    return link;
+  };
+  assert.throws(() => issuer.consume(directInput), "consume must recheck PID start identity after reading the link");
+  parentIdentity = "stable-parent-9527";
+  assert.throws(() => issuer.createMcpServer({ runtimeProfileId: "runtime-grok", runtimeAccountId,
+    parentPid: 9527, parentExecutable: grok }), "bind must recheck PID identity after reading the link");
+  issuer.getProcessLink = readProcessLink;
+  parentIdentity = "stable-parent-9527";
+  const originalGate = fs.readFileSync(directInput.gatePath, "utf8");
+  const tamperedGate = { ...JSON.parse(originalGate), parentExecutable: harness };
+  fs.writeFileSync(directInput.gatePath, JSON.stringify(tamperedGate));
+  assert.throws(() => issuer.consume(directInput), "Service must reject a same-inode gate rewrite");
+  fs.writeFileSync(directInput.gatePath, originalGate);
+  for (const badEnv of [{ ...directEnv, SHOGGOTH_RUNTIME_MCP_GATE_NONCE: "00".repeat(32) },
+    { ...directEnv, SHOGGOTH_RUNTIME_MCP_GATE_FILE: path.join(root, path.basename(directInput.gatePath)) }]) {
+    assert.throws(() => resolveRole(directGuard.args, badEnv, sandboxRuntime),
+      "bootstrap must reject wrong nonce and noncanonical gate paths");
+  }
+  fs.chmodSync(directInput.gatePath, 0o644);
+  assert.throws(() => resolveRole(directGuard.args, directEnv, sandboxRuntime), "bootstrap must reject unsafe modes");
+  assert.throws(() => issuer.consume(directInput), "Service must also reject unsafe modes");
+  fs.chmodSync(directInput.gatePath, 0o600);
+  const forgedPath = path.join(path.dirname(directInput.gatePath), `mcp-${"00".repeat(32)}.gate`);
+  fs.writeFileSync(forgedPath, originalGate, { mode: 0o600 });
+  assert.throws(() => issuer.consume({ ...directInput, gatePath: forgedPath }),
+    "a copied private gate is not a Service-issued authority");
+  fs.unlinkSync(forgedPath);
+  assert.deepEqual(issuer.consume(directInput), { consumed: true });
 
   const expiring = issuer.createMcpServer({
     runtimeProfileId: "runtime-grok",
@@ -241,15 +300,11 @@ try {
   assert.equal(v3Gate.parentExecutable, fs.realpathSync(harness));
   assert.equal(v3Gate.ancestorExecutable, fs.realpathSync(acpServer));
   assert.equal(resolveRole(v3.created.args, v3.env, harnessRuntime()), "mcp");
-  assert.throws(() => resolveRole(v3.created.args, v3.env, harnessRuntime({
-    parent: { executable: fs.realpathSync(harness), command: harness, ppid: 9601 },
-  })), "a harness under a different runtime process must be rejected");
-  assert.throws(() => resolveRole(v3.created.args, v3.env, harnessRuntime({
-    parent: { executable: fs.realpathSync(grok), command: grok, ppid: 9600 },
-  })), "only the pinned harness executable may launch the helper");
-  assert.throws(() => resolveRole(v3.created.args, v3.env, harnessRuntime({
-    ancestor: { executable: fs.realpathSync(grok) },
-  })), "the ancestor must be the bound ACP server executable");
+  const sandboxHarnessRuntime = harnessRuntime();
+  for (const field of ["parent", "ancestor"]) Object.defineProperty(sandboxHarnessRuntime, field, {
+    get() { throw new Error("sandbox process inspection is unavailable"); },
+  });
+  assert.equal(resolveRole(v3.created.args, v3.env, sandboxHarnessRuntime), "mcp");
   const consumeV3 = (ticket, parentPid = 9700) => issuer.consume({
     runtimeProfileId: "runtime-antigravity",
     runtimeAccountId,
@@ -257,11 +312,19 @@ try {
     nonce: ticket.env.SHOGGOTH_RUNTIME_MCP_GATE_NONCE,
     parentPid,
   });
-  processLinks.set(9700, { ppid: 9601, executable: fs.realpathSync(harness) });
+  processLinks.set(9700, { ppid: 9601, executable: fs.realpathSync(harness), command: harness });
   assert.throws(() => consumeV3(v3), "Service must reject a harness under another process");
-  processLinks.set(9700, { ppid: 9600, executable: fs.realpathSync(grok) });
+  processLinks.set(9700, { ppid: 9600, executable: fs.realpathSync(grok), command: grok });
   assert.throws(() => consumeV3(v3), "Service must reject a non-harness parent");
-  processLinks.set(9700, { ppid: 9600, executable: fs.realpathSync(harness) });
+  processLinks.set(9700, { ppid: 9600, executable: fs.realpathSync(harness), command: harness });
+  processLinks.set(9600, { ppid: 1, executable: fs.realpathSync(grok), command: grok });
+  assert.throws(() => consumeV3(v3), "Service must reject a replaced ancestor executable");
+  processLinks.set(9600, { ppid: 1, executable: fs.realpathSync(acpServer), command: "" });
+  assert.throws(() => consumeV3(v3), "Service must reject an unavailable ancestor command");
+  processLinks.set(9600, { ppid: 1, executable: fs.realpathSync(acpServer), command: acpServer });
+  processLinks.set(9700, { ppid: 9600, executable: fs.realpathSync(harness), command: "" });
+  assert.throws(() => consumeV3(v3), "Service must reject an unavailable harness command");
+  processLinks.set(9700, { ppid: 9600, executable: fs.realpathSync(harness), command: harness });
   ancestorIdentity = "restarted-ancestor";
   assert.throws(() => consumeV3(v3), "Service must reject a recycled ancestor PID");
   ancestorIdentity = "stable-ancestor-9600";

@@ -8,6 +8,7 @@ const {
   captureExecutionProviderRoute, assertExecutionProviderRouteCurrent,
   validateFrozenExecutionProviderRoute,
 } = require("./execution-provider-route");
+const { sourceProviders, supportsSessionProviders } = require("./codex-session-provider");
 
 const AWS_CREDENTIAL_CHAIN_ENV_KEYS = Object.freeze([
   "AWS_ACCESS_KEY_ID",
@@ -146,10 +147,17 @@ class ProviderRuntimeBridge {
         productStore: this.productStore, secretStore: this.secretStore, profile,
       });
     }
-    const assertCurrent = () => assertExecutionProviderRouteCurrent(executionProviderRoute, {
+    const assertRouteCurrent = () => assertExecutionProviderRouteCurrent(executionProviderRoute, {
       productStore: this.productStore, secretStore: this.secretStore,
     });
-    assertCurrent();
+    assertRouteCurrent();
+    // The host's own RuntimeAccount decides; a Profile may also bind native Codex.
+    if (supportsSessionProviders({ runtime: "codex", runtimeAccountId })
+      && typeof this.productStore.listModelProviders === "function") {
+      return this.#prepareSessionProviderRuntime({ runtimeProfileId, runtimeAccountId,
+        profileId: executionProviderRoute.providerFence.profileId, executionProviderRoute, assertRouteCurrent });
+    }
+    const assertCurrent = assertRouteCurrent;
     const route = executionProviderRoute.provider;
     if (route.providerRef === null) {
       const configured = this.configWriter.overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig: null });
@@ -217,6 +225,92 @@ class ProviderRuntimeBridge {
     } finally {
       plaintext = null;
     }
+  }
+
+  // The built-in Codex Harness: the process default is always ChatGPT, so its
+  // sign-in and live catalog stay visible, and every other source of the
+  // Profile (presets, custom endpoints) is declared next to it; each native
+  // thread names its own provider. The host stays current only while that
+  // whole source set and its credentials are.
+  #sessionProviderSet(profileId) {
+    const profile = this.productStore.getAgentProfile(profileId);
+    if (!profile?.enabled) throw bridgeError("EXECUTION_CONTRACT_STALE", "Runtime profile changed");
+    const sources = sourceProviders(this.productStore, profile);
+    const identity = (provider) => [provider.id, this.productStore.getModelProviderRevision?.(provider.id) ?? null,
+      provider.credentialRef, provider.credentialRef === null ? null
+        : this.secretStore.getCredentialRevision?.(provider.credentialRef) ?? null];
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify(sources.map(identity))).digest("hex");
+    return { sources, fingerprint };
+  }
+
+  async #providerSecret(provider, assertCurrent) {
+    const metadata = this.secretStore.listMetadata().find((entry) => entry.credentialRef === provider.credentialRef);
+    if (!metadata) throw bridgeError("credentials_missing", "credentials_missing");
+    if (metadata.kind !== provider.kind) throw bridgeError("credentials_mismatch", "credentials_mismatch");
+    assertCurrent();
+    const plaintext = await this.secretStore.get(provider.credentialRef);
+    assertCurrent();
+    if (typeof plaintext !== "string" || plaintext.length === 0) {
+      throw bridgeError("credentials_missing", "credentials_missing");
+    }
+    return plaintext;
+  }
+
+  async #prepareSessionProviderRuntime({ runtimeProfileId, runtimeAccountId, profileId, executionProviderRoute,
+    assertRouteCurrent }) {
+    const initial = this.#sessionProviderSet(profileId);
+    const assertCurrent = () => {
+      assertRouteCurrent();
+      if (this.#sessionProviderSet(profileId).fingerprint !== initial.fingerprint) {
+        throw bridgeError("EXECUTION_CONTRACT_STALE", "Model providers changed");
+      }
+    };
+    const runtimeEntry = (provider, credentialEnv) => ({
+      id: provider.id, kind: provider.kind, name: provider.name, baseUrl: provider.baseUrl, model: provider.model ?? null,
+      headers: provider.headers, awsRegion: provider.awsRegion, awsProfile: provider.awsProfile, credentialEnv,
+    });
+    const routeRef = executionProviderRoute.provider.providerRef;
+    const spawnEnv = {};
+    const registeredSecrets = [];
+    const extraProviders = [];
+    for (const provider of initial.sources) {
+      try {
+        if (provider.kind === "openai-api-key" && provider.credentialRef === null) {
+          throw bridgeError("credentials_missing", "credentials_missing");
+        }
+        let credentialEnv = null;
+        if (provider.credentialRef !== null) {
+          credentialEnv = providerCredentialEnvName(provider);
+          spawnEnv[credentialEnv] = await this.#providerSecret(provider, assertCurrent);
+        }
+        if (provider.kind === "amazon-bedrock") {
+          const aws = bedrockSpawnEnvironment(this.parentEnv, provider);
+          Object.assign(spawnEnv, aws.spawnEnv);
+          registeredSecrets.push(...aws.registeredSecrets);
+        }
+        extraProviders.push(runtimeEntry(provider, credentialEnv));
+      } catch (error) {
+        // One source's broken credential must not take ChatGPT and the other
+        // sources down; only a run that uses it fails, here or on its thread.
+        if (provider.id === routeRef || error?.code === "EXECUTION_CONTRACT_STALE") throw error;
+      }
+    }
+    for (const [key, value] of Object.entries(spawnEnv)) {
+      if (/_API_KEY$/u.test(key) && !registeredSecrets.includes(value)) registeredSecrets.push(value);
+    }
+    // ChatGPT alone needs no overlay beyond the managed defaults.
+    const runtimeConfig = extraProviders.length > 0 ? { provider: null, extraProviders } : null;
+    const configured = this.configWriter.overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig });
+    assertCurrent();
+    return Object.freeze({
+      spawnEnv: Object.freeze(spawnEnv),
+      registeredSecrets: Object.freeze(registeredSecrets),
+      runtimeConfig,
+      configArgs: configured.args || Object.freeze([]),
+      mcpBootstrap: configured.mcpBootstrap ?? null,
+      assertCurrent,
+      executionProviderRoute,
+    });
   }
 }
 

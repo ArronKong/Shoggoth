@@ -5,7 +5,7 @@ import { type ClipboardEvent, type KeyboardEvent, type MouseEvent, lazy, Suspens
 import { useTranslation } from "react-i18next";
 import AgentAvatar from "../components/AgentAvatar";
 import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
-import GroupChatMarkdown from "./GroupChatMarkdown";
+import GroupChatMarkdown, { groupAttachmentsOutsideMarkdown } from "./GroupChatMarkdown";
 import FusionLoader from "../components/FusionLoader";
 import { useConfirm, usePrompt, useToast } from "../components/ui";
 import {
@@ -30,9 +30,9 @@ import GroupChatReference from "./GroupChatReference";
 import GroupChatJournalRecovery from "./GroupChatJournalRecovery";
 import GroupChatSearch from "./GroupChatSearch";
 import { appendGroupReference } from "../lib/groupReferenceExcerpt";
-import GroupChatActivity, { boundGroupActivity } from "./GroupChatActivity";
+import { boundGroupActivity } from "./GroupChatActivity";
 import type { GroupChatMember, GroupChatMessage, GroupChatView, InspirationAttachment } from "../types";
-import { groupReplyBody } from "../lib/groupReply";
+import { groupReplyBody, groupReplyBubbles } from "../lib/groupReply";
 import { formatChatTime } from "../lib/chatTime";
 import { orderGroupTimeline } from "../lib/groupTimeline";
 import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconTrash, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
@@ -155,6 +155,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const fileInputRef = useRef<HTMLInputElement>(null);
   const respondOps = useRef(new Map<string, { input: string; id: string }>());
   const lastSeqRef = useRef(0);
+  const messageRevisionRef = useRef(cached?.messageRevision ?? 0);
+  const messageUpdatesSupportedRef = useRef(cached?.view.group.messageRevision !== undefined);
   const historyReadyRef = useRef(!!cached);
   const generationRef = useRef(0);
   const currentGroupRef = useRef(groupId);
@@ -191,15 +193,25 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
 
   const membersById = useMemo(() => new Map((view?.members ?? []).map((member) => [member.id, member])), [view]);
   const activeMembers = useMemo(() => (view?.members ?? []).filter((member) => member.state === "active"), [view]);
+  const messageAttachments = useMemo(() => new Map(messages.map(message => [message.id,
+    message.author.kind === "member" && message.attachments?.length
+      ? groupAttachmentsOutsideMarkdown(groupReplyBody(message), message.attachments) : message.attachments ?? []])), [messages]);
   const unavailableMembers = activeMembers.filter(member => member.card?.availability === "offline");
 
-  const append = useCallback((incoming: GroupChatMessage[]) => {
+  const append = useCallback((incoming: GroupChatMessage[], updatesOnly = false) => {
     if (incoming.length === 0) return;
     // 分页游标在 React 批处理 state updater 前同步推进。
     for (const message of incoming) lastSeqRef.current = Math.max(lastSeqRef.current, message.seq);
     setMessages((prev) => {
-      const known = new Set(prev.map((message) => message.seq));
-      const merged = [...prev, ...incoming.filter((message) => !known.has(message.seq))].sort((a, b) => a.seq - b.seq);
+      const known = new Map(prev.map(message => [message.seq, message]));
+      for (const message of incoming) {
+        const prior = known.get(message.seq);
+        if (updatesOnly && !prior && message.seq < (prev[0]?.seq ?? 0)) continue;
+        if (!prior || message.id === prior.id && message.groupId === prior.groupId && message.createdAt === prior.createdAt
+          && message.author.kind === prior.author.kind && (message.author.kind !== "member" || prior.author.kind === "member" && message.author.memberId === prior.author.memberId)
+          && (message.revision ?? 0) > (prior.revision ?? 0)) known.set(message.seq, message);
+      }
+      const merged = [...known.values()].sort((a, b) => a.seq - b.seq);
       lastSeqRef.current = merged.at(-1)?.seq ?? lastSeqRef.current;
       return merged;
     });
@@ -217,7 +229,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
 
   useLayoutEffect(() => {
     if (view?.group.id === groupId && historyReadyRef.current && lastSyncAt !== null) {
-      cache?.put({ view, messages, hasOlder, lastSyncAt });
+      cache?.put({ view, messages, hasOlder, lastSyncAt, messageRevision: messageRevisionRef.current });
     }
   }, [cache, groupId, view, messages, hasOlder, lastSyncAt]);
 
@@ -247,6 +259,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     setFiles([]);
     setLightbox(null);
     lastSeqRef.current = cached?.messages.at(-1)?.seq ?? 0;
+    messageRevisionRef.current = cached?.messageRevision ?? 0;
+    messageUpdatesSupportedRef.current = cached?.view.group.messageRevision !== undefined;
     observedOwnerRef.current = cached?.view.ownerScope ?? null;
     ownerScopeRef.current = cached?.view.ownerScope ?? null;
     stickToBottomRef.current = true;
@@ -255,14 +269,21 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         const mutationRevision = mutationRevisionRef.current;
         const initialHistory = !historyReadyRef.current;
         const [detail, page] = await Promise.all([getGroupChat(groupId), listGroupChatMessages(groupId,
-          initialHistory ? { limit: PAGE } : { afterSeq: lastSeqRef.current, limit: 200 })]);
+          initialHistory ? { limit: PAGE } : { afterSeq: lastSeqRef.current, limit: 200,
+            ...(messageUpdatesSupportedRef.current ? { afterRevision: messageRevisionRef.current } : {}) })]);
         if (mutationRevision !== mutationRevisionRef.current) throw new Error("GROUP_PANEL_READ_INVALIDATED");
         if (detail?.group?.id !== groupId || !Array.isArray(page?.messages) || typeof page.hasMore !== "boolean"
           || page.messages.some(message => message?.groupId !== groupId || !Number.isSafeInteger(message.seq) || message.seq <= 0)) {
           throw new Error("Invalid group chat response");
         }
+        if (page.updates !== undefined && (!Array.isArray(page.updates) || page.updates.some(message => message?.groupId !== groupId
+          || !Number.isSafeInteger(message.seq) || message.seq <= 0 || !Number.isSafeInteger(message.revision) || message.revision! <= 0))
+          || page.revision !== undefined && (!Number.isSafeInteger(page.revision) || page.revision < 0)
+          || page.hasMoreUpdates !== undefined && typeof page.hasMoreUpdates !== "boolean") throw new Error("Invalid group message updates");
         const nextSeq = page.messages.reduce((last, message) => Math.max(last, message.seq), lastSeqRef.current);
         if (!initialHistory && page.hasMore && nextSeq <= lastSeqRef.current) throw new Error("Invalid group chat response");
+        if (!initialHistory && page.hasMoreUpdates && (page.revision ?? 0) <= messageRevisionRef.current
+          && nextSeq <= lastSeqRef.current) throw new Error("Invalid group message updates");
         return { detail, page, initialHistory };
       },
       commit: ({ detail, page, initialHistory }) => {
@@ -273,7 +294,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           ownerEpochRef.current++; ownerScopeRef.current = detail.ownerScope ?? null;
           mutationRevisionRef.current++;
           cache?.delete(groupId); historyReadyRef.current = false;
-          observedOwnerRef.current = detail.ownerScope ?? null; lastSeqRef.current = 0; setMessages([]); setHasOlder(false);
+          observedOwnerRef.current = detail.ownerScope ?? null; lastSeqRef.current = 0; messageRevisionRef.current = 0; setMessages([]); setHasOlder(false);
           setFullMessage(null); setLightbox(null);
           setSettingsOpen(false); setCardMemberId(null); setAdding(false); setExpandedPanel(null);
           setSearchOpen(false); setReferenceOpen(false); setJournalRecoveryOpen(false);
@@ -286,11 +307,13 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         observedOwnerRef.current = detail.ownerScope ?? null;
         ownerScopeRef.current = detail.ownerScope ?? null;
         historyReadyRef.current = true;
+        messageUpdatesSupportedRef.current = detail.group.messageRevision !== undefined;
+        if (page.revision !== undefined) messageRevisionRef.current = Math.max(messageRevisionRef.current, page.revision);
         setView(previous => previous && previous.ownerScope === detail.ownerScope && previous.group.lastSeq > detail.group.lastSeq ? previous : detail);
         setLoadError(null); setSyncError(null); setLastSyncAt(Date.now());
         if (initialHistory) setHasOlder(page.hasMore);
-        append(page.messages);
-        if (!initialHistory && page.hasMore) void observer.invalidate();
+        append(page.messages); append(page.updates ?? [], true);
+        if (!initialHistory && (page.hasMore || page.hasMoreUpdates)) void observer.invalidate();
       },
       failed: cause => {
         if (generation !== generationRef.current) return;
@@ -903,9 +926,9 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     </button>;
   };
   // 消息里的附件：样式与单聊一致（图片缩略图点开大图，其余是文件条）。
-  const attachmentRow = (message: GroupChatMessage) => message.attachments && message.attachments.length > 0 && (
+  const attachmentRow = (message: GroupChatMessage) => (messageAttachments.get(message.id)?.length ?? 0) > 0 && (
     <div className="chat-att-row">
-      {message.attachments.map((item) => item.mimeType.startsWith("image/") ? (
+      {messageAttachments.get(message.id)!.map((item) => item.mimeType.startsWith("image/") ? (
         <img key={item.id} className="chat-att-thumb" src={inspirationMediaUrl(item.id, true)} alt={item.name}
           onClick={() => setLightbox(inspirationMediaUrl(item.id, true))} />
       ) : (
@@ -1017,23 +1040,39 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         {timeline.map(entry => {
           if (entry.kind === "turn") {
             const { turn, member } = entry;
+            const waitingForInteraction = interactions.some(item => item.opportunityId === turn.opportunityId && item.status === "pending");
+            const activity = boundGroupActivity(turn.activity, { groupId, memberId: member.id, opportunityId: turn.opportunityId });
+            const phase = activity?.phase
+              ?? (turn.recovery ? "reconciling" : turn.stopping ? "stopping" : turn.dispatchState === "queued" ? "queued" : "running");
+            const canAnswer = answering.some(item => item.turn.opportunityId === turn.opportunityId);
+            const publishedIds = new Set(messages.filter(message => message.origin?.opportunityId === turn.opportunityId)
+              .flatMap(message => (message.replyMessages ?? []).map(item => item.id)));
+            const replyMessages = (turn.individualMessages ? [] : activity?.textMessages?.length ? activity.textMessages
+              : turn.floor && turn.draft?.trim() && !turn.recovery ? [{ id: "draft", text: turn.draft, pending: true }] : [])
+              .filter(item => item.text.trim() && !publishedIds.has(item.id));
+            const publishedStreaming = turn.individualMessages && messages.some(message => message.origin?.opportunityId === turn.opportunityId && message.origin.streaming);
+            const loading = !publishedStreaming && !replyMessages.some(item => item.pending && canAnswer) && !waitingForInteraction
+              && !turn.recovery && !turn.stopping && turn.queueReason !== "execution_unconfirmed"
+              && !["completed", "failed", "cancelled"].includes(phase);
+            const notice = turn.recovery || turn.stopping || turn.queueReason === "execution_unconfirmed";
+            if (!replyMessages.length && !loading && !notice) return null;
             return (
           <div key={`turn:${turn.opportunityId}`} className="chat-group is-assistant"
             data-group-execution={turn.opportunityId} data-group-member={member.id}>
             <div className="chat-group__stack">
               {authorHeader(member)}
-              <div className={`chat-bubble ${styles.liveBubble}`}>
-                <GroupChatActivity activity={turn.activity} binding={{ groupId, memberId: member.id, opportunityId: turn.opportunityId }}
-                  fallbackPhase={turn.recovery ? "reconciling" : turn.stopping ? "stopping" : turn.dispatchState === "queued" ? "queued" : "running"} context={t("groupChat.activity.discussion")} />
+              {replyMessages.map(item => <div key={item.id} className={`chat-bubble${item.pending && canAnswer ? " is-streaming" : ""}`}
+                data-group-reply-message={item.id} data-activity-phase={phase} aria-live={item.pending && canAnswer ? "polite" : undefined}>
+                <GroupChatMarkdown text={item.text} className="chat-md" members={view.members}
+                  onMemberClick={setCardMemberId} streamingCursor={item.pending && canAnswer} />
+              </div>)}
+              {(loading || notice) && <div className={`chat-bubble${loading ? " is-streaming" : ""}`} data-activity-phase={phase}>
+                {loading && <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
                 {turn.queueReason === "execution_unconfirmed" && <p className={styles.muted}>{t("groupChat.queueBlocked")}</p>}
                 {turn.recovery && <GroupChatRecovery key={`recovery:${scopeKey}`} groupId={groupId} target={{ kind: "turn", opportunityId: turn.opportunityId }}
                   recovery={turn.recovery} onView={applyView} />}
-                {!turn.floor && <p className={styles.muted}>{t("groupChat.turn.working")}</p>}
-                {turn.draft && turn.floor && answering.some(item => item.turn.opportunityId === turn.opportunityId) && (
-                  <div aria-live="polite"><GroupChatMarkdown text={turn.draft} className={`chat-md ${styles.draft}`}
-                    members={view.members} onMemberClick={setCardMemberId} /></div>
-                )}
-              </div>
+                {turn.stopping && <p className={styles.muted} role="status">{t("groupChat.activity.phase.stopping")}</p>}
+              </div>}
             </div>
           </div>
         );
@@ -1106,7 +1145,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
               </div>
             );
           }
-          const body = groupReplyBody(message);
+          const bubbles = groupReplyBubbles(message);
           const member = membersById.get(message.author.memberId);
           return (
             <div key={message.seq} data-seq={message.seq} className={`chat-group is-assistant ${styles.msg}`}
@@ -1114,8 +1153,9 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
               <div className="chat-group__stack">
                 {authorHeader(member)}
                 {quoteBlock(message)}
-                {body.trim() && <GroupChatMarkdown text={body} className="chat-bubble chat-md"
-                  members={view.members} onMemberClick={setCardMemberId} />}
+                {bubbles.map(item => <GroupChatMarkdown key={item.id} text={item.text}
+                  className={`chat-bubble chat-md${message.origin?.streaming ? " is-streaming" : ""}`}
+                  members={view.members} onMemberClick={setCardMemberId} streamingCursor={message.origin?.streaming} />)}
                 {attachmentRow(message)}
                 {fullResultNote}
                 {messageFooter(message)}

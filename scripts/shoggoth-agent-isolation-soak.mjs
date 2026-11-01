@@ -87,7 +87,7 @@ async function main() {
   assert.equal(Number.isSafeInteger(agentCount) && agentCount >= 2 && agentCount <= 16,
     true, "--agents must be an integer in [2, 16]");
 
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agent-isolation-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agent-isolation-")));
   fs.chmodSync(root, 0o700);
   const paths = resolveServicePaths({
     trustedRoot: root,

@@ -1,5 +1,6 @@
 "use strict";
 const { poolLedgerSlot } = require("./runtime-shared-ledger");
+const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupFailedPoolHost } = require("./runtime-pool-upgrade");
 
 const { PiRuntimeHost } = require("./pi-runtime-host");
 const {
@@ -81,6 +82,8 @@ class PiRuntimePool {
     this.stopAllPromise = null;
   }
 
+  runtimeIdentityKey(binding) { return poolRuntimeIdentityKey(this, binding); }
+
   get(value, options = {}) {
     let binding;
     try { binding = poolBinding(value); } catch (error) { return Promise.reject(error); }
@@ -122,16 +125,19 @@ class PiRuntimePool {
       if (existing.hookScopeFingerprint !== hookScopeFingerprint) {
         return Promise.reject(poolError("RUNTIME_HOOK_SCOPE_CONFLICT", "A native Hook scope is frozen for this Run"));
       }
-      return existing.promise.then((host) => { host.beginAcquire(); return host; });
+      return reusePoolHost(this, existing, options, () => this.get(binding, options))
+        .then(host => { host.beginAcquire(); return host; });
     }
     let hostLimit;
     try { hostLimit = poolHostLimit(this); } catch (error) { return Promise.reject(error); }
     if (this.entries.size >= hostLimit) {
       return retirePoolHost(this).then(() => this.get(binding, options));
     }
+    let executableIdentity;
+    try { executableIdentity = poolRuntimeIdentityKey(this, binding, options); } catch (error) { return Promise.reject(error); }
     let profileState = this.profileStates.get(accountId);
-    if (!profileState) {
-      profileState = { models: null, modelsExpiresAt: 0, auth: null, authExpiresAt: 0 };
+    if (!profileState || profileState.runtimeExecutableIdentity !== executableIdentity) {
+      profileState = { models: null, modelsExpiresAt: 0, auth: null, authExpiresAt: 0, runtimeExecutableIdentity: executableIdentity };
       this.profileStates.set(accountId, profileState);
     }
     let runtimeEnvironment;
@@ -181,17 +187,22 @@ class PiRuntimePool {
       profileState,
     });
     const entry = {
+      runtimeEnvironment,
       host, key, runtimeProfileId: id, runtimeAccountId: accountId, policyFingerprint, hookScopeFingerprint, promise: null,
       ledgerKey, ledgerSlot,
     };
     trackPoolHost(entry, binding);
-    entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+    entry.promise = Promise.resolve().then(async () => {
+      await preparePoolHostIdentity(this, entry, binding, options);
+      await host.initialize();
+      host.assertRuntimeIdentityCurrent?.();
+    }).then(() => {
       entry.capacity.ready = true;
       if (host.terminated && typeof host.terminated.then === "function") {
         Promise.resolve(host.terminated).then(
-          () => { if (this.entries.get(key) === entry) this.entries.delete(key); },
+          () => { if (this.entries.get(key) === entry && !entry.retiring) this.entries.delete(key); },
           (error) => {
-            if (this.entries.get(key) !== entry) return;
+            if (this.entries.get(key) !== entry || entry.retiring) return;
             if (error?.cleanupIncomplete || host.cleanupIncomplete) this.blockedProfiles.add(id);
             this.entries.delete(key);
           },
@@ -199,9 +210,7 @@ class PiRuntimePool {
       }
       return host;
     }).catch(async (error) => {
-      try { await host.stop(); } catch {}
-      if (this.entries.get(key) === entry) this.entries.delete(key);
-      if (host.cleanupIncomplete) this.blockedProfiles.add(id);
+      await cleanupFailedPoolHost(this, entry, id);
       throw error;
     });
     this.entries.set(key, entry);

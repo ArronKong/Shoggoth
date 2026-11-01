@@ -1,25 +1,28 @@
 appId: ai.shoggoth.desktop
 productName: Shoggoth
 copyright: Copyright (c) 2026 Shoggoth contributors
+
 directories:
   output: dist
   buildResources: build
+
 files:
   - app/**/*
-  - '!app/manage-ui/node_modules/**/*'
+  - "!app/manage-ui/node_modules/**/*"
   - schemas/**/*
   - package.json
   - node_modules/ws/**/*
   - node_modules/pinyin-pro/**/*
+  - node_modules/opencc-js/**/*
   - node_modules/@huggingface/tokenizers/**/*
   - node_modules/onnxruntime-common/**/*
   - node_modules/onnxruntime-node/dist/**/*
   - node_modules/onnxruntime-node/package.json
-  - '!node_modules/onnxruntime-node/bin/**/*'
+  - "!node_modules/onnxruntime-node/bin/**/*"
   - from: .vendor/embedding/node-modules/${arch}/node_modules
     to: node_modules
     filter:
-      - '**/*'
+      - "**/*"
   - node_modules/ajv/**/*
   - node_modules/fast-deep-equal/**/*
   - node_modules/fast-uri/**/*
@@ -55,24 +58,30 @@ files:
   - node_modules/lodash.isequal/**/*
   - node_modules/sax/**/*
   - node_modules/tiny-typed-emitter/**/*
-  - '!node_modules/@anthropic-ai/claude-agent-sdk*/**/*'
+  - "!node_modules/@anthropic-ai/claude-agent-sdk*/**/*"
   - node_modules/@trycua/cua-driver/**/*
   - node_modules/@ubjs/core/**/*
   - node_modules/@ubjs/node/**/*
   - node_modules/better-sqlite3/lib/**/*
   - node_modules/better-sqlite3/package.json
-  - '!node_modules/better-sqlite3/build/**/*'
-  - '!node_modules/better-sqlite3/prebuilds/**/*'
-  - '!node_modules/@trycua/cua-driver/node_modules/**/*'
-  - '!node_modules/@ubjs/node/node_modules/**/*'
-  - '!node_modules/@trycua/cua-driver-darwin-*/**/*'
-  - '!node_modules/@ubjs/node-darwin-*/**/*'
+  - "!node_modules/better-sqlite3/build/**/*"
+  - "!node_modules/better-sqlite3/prebuilds/**/*"
+  # npm optional dependencies reflect the host architecture and may be nested by rebuild.
+  # Exclude those copies; the verified per-target FileSet below is the only native source.
+  - "!node_modules/@trycua/cua-driver/node_modules/**/*"
+  - "!node_modules/@ubjs/node/node_modules/**/*"
+  - "!node_modules/@trycua/cua-driver-darwin-*/**/*"
+  - "!node_modules/@ubjs/node-darwin-*/**/*"
   - from: .vendor/cua/node-modules/${arch}/node_modules
     to: node_modules
     filter:
-      - '**/*'
-  - '!**/*.map'
+      - "**/*"
+  - "!**/*.map"
+
 asar: true
+# SQLite and Cua/UniFFI artifacts come from the architecture-specific verified FileSet.
+# Rebuild would install the host architecture again under nested node_modules and can make
+# an x64 package resolve an arm64 dylib first.
 npmRebuild: false
 asarUnpack:
   - app/agent-service/hook-worker.js
@@ -81,14 +90,26 @@ asarUnpack:
   - node_modules/@playwright/mcp/**/*
   - node_modules/playwright/**/*
   - node_modules/playwright-core/**/*
+  # Native afplay cannot open a WAV stored inside app.asar.
   - app/manage-ui/public/audio/typewriter-loop.wav
+  # Cua's FFI resolver passes a dylib path to dlopen; that path must be physical,
+  # so the SDK, UniFFI JS and native packages are loaded from app.asar.unpacked.
   - node_modules/@trycua/**/*
   - node_modules/@ubjs/**/*
+  # FileSet unpack matching uses the source path before mapping to node_modules.
   - .vendor/cua/node-modules/${arch}/node_modules/**/*
   - node_modules/better-sqlite3/**/*
   - node_modules/onnxruntime-node/bin/**/*
   - .vendor/embedding/node-modules/${arch}/node_modules/**/*
+
+# 每个 App 只携带与 Electron 相同架构的官方完整 Codex package。
 extraResources:
+  - from: .vendor/local-media
+    to: local-media
+  - from: .vendor/antigravity-mcp-timeout
+    to: antigravity-mcp-timeout
+  - from: .vendor/apple-device
+    to: apple-device
   - from: .vendor/workspace-execution
     to: workspace-execution
   - from: LICENSE
@@ -109,32 +130,33 @@ extraResources:
     to: codex/package
   - from: build/codex-runtime-manifest.json
     to: codex/runtime-manifest.json
-  - from: .vendor/gogcli/${arch}/gog
-    to: gogcli/gog
-  - from: build/gog-runtime-manifest.json
-    to: gogcli/runtime-manifest.json
   - from: resources/shoggoth-skills
     to: shoggoth-skills
-  - from: resources/shoggoth-plugins
-    to: shoggoth-plugins
-  - from: resources/bundled-plugins/catalog.json
-    to: bundled-plugins/catalog.json
+  # First-party Host bridges retain existing extension IDs and pairing ownership.
   - from: resources/external-plugin-adapters
     to: external-plugin-adapters
     filter:
-      - '**/*'
-      - '!**/__pycache__/**'
-      - '!**/*.pyc'
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
+  # Version-pinned Host compatibility source, with upstream licenses/notices.
+  # Deployment still requires a verified, exclusive writer handoff.
   - from: resources/external-plugin-host-patches
     to: external-plugin-host-patches
     filter:
-      - '**/*'
-      - '!**/__pycache__/**'
-      - '!**/*.pyc'
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
   - from: resources/pi/shoggoth-pi-extension.mjs
     to: pi/shoggoth-pi-extension.mjs
+  - from: resources/pi/shoggoth-pi-secret-projection.mjs
+    to: pi/shoggoth-pi-secret-projection.mjs
+  - from: resources/opencode/shoggoth-secret-projection.mjs
+    to: opencode/shoggoth-secret-projection.mjs
   - from: resources/deepseek-harness/shoggoth-dsh-bridge.mjs
     to: deepseek-harness/shoggoth-dsh-bridge.mjs
+  - from: resources/deepseek-harness/shoggoth-dsh-secret-projection.mjs
+    to: deepseek-harness/shoggoth-dsh-secret-projection.mjs
   - from: .vendor/cua/package
     to: cua-driver
   - from: build/cua-driver-manifest.json
@@ -149,24 +171,46 @@ extraResources:
       - better_sqlite3.node
   - from: build/release-sbom.cdx.json
     to: legal/release-sbom.cdx.json
+
+# 无 Developer ID 时 builder 跳过签名，产物只剩 linker 签名 → macOS 通知中心
+# 拒绝注册（原生通知静默丢弃）。afterPack 补 ad-hoc 深签名（详见脚本头注释）。
 afterPack: scripts/adhoc-sign.cjs
 afterSign: scripts/notarize.cjs
+
+# electron-builder writes this provider into Contents/Resources/app-update.yml.
+# Release CI uploads both macOS ZIPs plus latest-mac.yml as a draft, verifies
+# them, then promotes the draft. Private repositories are rejected by CI because
+# end-user GitHub updates must not depend on a bundled access token.
 publish:
   provider: github
   owner: ArronKong
   repo: Shoggoth
   releaseType: draft
+
 mac:
+  # Icon Composer 分层图标；Xcode 26+ 编译 Assets.car，并生成兼容用的 .icns。
   icon: build/shoggothappicon.icon
+  # 完全由 afterPack 执行显式签名。禁用 electron-builder 自动发现钥匙串
+  # identity，避免 afterPack 完成后再次签名并弹出不可恢复的授权窗口。
   identity: null
   category: public.app-category.developer-tools
   entitlements: build/entitlements.mac.plist
   extendInfo:
     LSUIElement: true
-    NSMicrophoneUsageDescription: 用于在灵感便签中录制语音。
+    NSMicrophoneUsageDescription: "用于在灵感便签中录制语音。"
+    NSSpeechRecognitionUsageDescription: "在本机将你选择的音视频转成文字，隐藏密码和密钥后再发给助理。原始音视频不会上传到语音服务。"
+    NSCalendarsUsageDescription: "在你连接日历后，按读取设置访问此 Mac 的日程；创建、修改和删除日程均需逐次批准。"
+    NSCalendarsFullAccessUsageDescription: "在你连接日历后，按读取设置访问此 Mac 的日程；创建、修改和删除日程均需逐次批准。"
+    NSRemindersUsageDescription: "在你连接提醒事项后，按读取设置访问此 Mac 的提醒；创建、修改、完成和删除提醒均需逐次批准。"
+    NSRemindersFullAccessUsageDescription: "在你连接提醒事项后，按读取设置访问此 Mac 的提醒；创建、修改、完成和删除提醒均需逐次批准。"
+    # 包内没有 .lproj，不声明的话 macOS 只给 App 英文：「跟随系统」在中文 Mac 上
+    # app.getLocale()/navigator.language 都是 en-US。声明后按系统语言取 zh-CN 或 en。
     CFBundleLocalizations:
       - en
       - zh_CN
+  # ZIP-only：DMG 路径上 electron-builder 双架构共用卷名 `/Volumes/Shoggoth`，
+  # hdiutil detach 在被 Spotlight/Finder 占用 + 磁盘紧张时确定性失败（实测两次重试
+  # 都炸在 arm64 dmg 的 detach），故仅出 zip 即可装的 .app。
   target:
     - target: zip
       arch:

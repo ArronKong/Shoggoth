@@ -9,33 +9,46 @@ const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-proto
 
 const CUSTOM_MODEL = "anthropic/fixture-custom-model";
 const GPT_MODEL = "gpt-fixture";
+// A GPT model chosen from the menu that later leaves Codex's own catalog. The
+// adapter's local reasoning-effort lookup then fails before any turn/start,
+// which proves the new native session is still empty.
+const VANISHING_MODEL = "gpt-vanishing";
 async function request(f, method, params) {
   return requestService(f.paths, { version: SERVICE_PROTOCOL_VERSION, token: readClientToken(f.paths),
     method, params }, { timeoutMs: 20_000 });
 }
+// A model choice names its source; endpoint models are offered with theirs.
 async function select(f, sessionKey, model) {
   const session = f.service.chatSessionStore.getSession(sessionKey);
   return request(f, "chat.session.runtime.model.set", { profileId: f.profile.id, sessionKey,
-    bindingId: f.binding("codex").id, revision: session.revision, model, acceptAdjustments: true });
+    bindingId: f.binding("codex").id, revision: session.revision, model, acceptAdjustments: true,
+    ...(model === CUSTOM_MODEL ? { modelProviderRef: "fixture-endpoint" } : {}) });
 }
-async function openEndpointFixture({ legacy = false, unreadable = false } = {}) {
-  const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", GPT_MODEL] } });
+const catalog = (models) => async () => ({ data: models.map((model, index) => ({
+  model, displayName: model, description: "", isDefault: index === 0, hidden: false,
+  defaultReasoningEffort: "medium" })), nextCursor: null });
+async function addEndpoint(f) {
+  f.service.providerService.protocolValidator = async () => ({ parsedBy: "fixture" });
+  f.endpoints = new CustomEndpointService({ productStore: f.service.productStore,
+    secretStore: f.service.secretStore, providerService: f.service.providerService,
+    profileServiceController: f.service.profileServiceController });
+  await f.endpoints.save(f.profile.id, { id: "fixture-endpoint", name: "fixture endpoint",
+    baseUrl: "https://endpoint.example.invalid/v1", api: "openai-responses",
+    models: [CUSTOM_MODEL], apiKey: "fixture-endpoint-secret" });
+}
+async function openFailedTurnFixture({ legacy = false, unreadable = false } = {}) {
+  const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", GPT_MODEL, VANISHING_MODEL] } });
   try {
-    f.service.providerService.protocolValidator = async () => ({ parsedBy: "fixture" });
-    f.endpoints = new CustomEndpointService({ productStore: f.service.productStore,
-      secretStore: f.service.secretStore, providerService: f.service.providerService,
-      profileServiceController: f.service.profileServiceController });
     const session = f.createSession();
     await f.complete(await f.send(session.sessionKey, "original-history", "PRESERVE ORIGINAL HISTORY"));
     const raw = f.transport.hosts.get("codex");
-    raw.modelList = async () => ({ data: ["fixture-model", GPT_MODEL].map((model, index) => ({
-      model, displayName: model, description: "", isDefault: index === 0, hidden: false,
-      defaultReasoningEffort: "medium" })), nextCursor: null });
-    await select(f, session.sessionKey, GPT_MODEL);
-    await f.endpoints.save(f.profile.id, { id: "fixture-endpoint", name: "fixture endpoint",
-      baseUrl: "https://endpoint.example.invalid/v1", api: "openai-responses",
-      models: [CUSTOM_MODEL], apiKey: "fixture-endpoint-secret" });
+    raw.modelList = catalog(["fixture-model", GPT_MODEL, VANISHING_MODEL]);
+    // Two source changes leave a fresh native session for the failing turn
+    // (a ChatGPT-only model change would keep the native session).
+    await addEndpoint(f);
     await select(f, session.sessionKey, CUSTOM_MODEL);
+    await select(f, session.sessionKey, VANISHING_MODEL);
+    raw.modelList = catalog(["fixture-model", GPT_MODEL]);
     if (unreadable) raw.unreadableFreshThreadUntilTurnStart = true;
     const completeBinding = f.service.chatSessionStore.completeBinding;
     if (legacy) {
@@ -44,21 +57,17 @@ async function openEndpointFixture({ legacy = false, unreadable = false } = {}) 
       f.service.chatSessionStore.completeBinding = () => f.service.chatSessionStore.getSession(session.sessionKey);
     }
     let failed;
-    try { failed = await f.send(session.sessionKey, "failed-custom-model"); }
+    try { failed = await f.send(session.sessionKey, "failed-vanished-model"); }
     finally { f.service.chatSessionStore.completeBinding = completeBinding; }
     assert.equal(failed.status, "failed", failed.errorCode);
     assert.equal(failed.errorCode, "RUNTIME_MODEL_CATALOG_INVALID");
-    assert.equal(raw.turnStartCalls, 1, "custom preflight failed before any new native turn");
-    await f.endpoints.remove(f.profile.id, "fixture-endpoint");
-    assert.equal(f.service.productStore.getAgentProfile(f.profile.id).providerRef, null);
-    assert.equal(f.service.productStore.getAgentProfile(f.profile.id).defaultModel, null);
-    assert.deepEqual(f.service.productStore.listModelProviders(), []);
+    assert.equal(raw.turnStartCalls, 1, "the local catalog failure happened before any new native turn");
     return { f, session, raw, failed };
   } catch (error) { await f.close(); throw error; }
 }
 
-test("failed custom-model turn retains a completed native session binding and permits GPT selection after endpoint deletion", async () => {
-  const { f, session, raw, failed } = await openEndpointFixture();
+test("a turn that failed before dispatch retains its completed native session binding and permits another model", async () => {
+  const { f, session, raw, failed } = await openFailedTurnFixture();
   try {
     assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).status, "ready");
     assert.equal(f.service.chatSessionStore.getBinding(session.sessionKey).state, "bound");
@@ -73,7 +82,7 @@ test("failed custom-model turn retains a completed native session binding and pe
     assert.equal(raw.threadStartCalls, starts);
     assert.equal(raw.turnStartCalls, turns);
     assert.equal(raw.resumeCalls, resumes, "model selection must not resume or resend the failed request");
-    await f.send(session.sessionKey, "failed-custom-model");
+    await f.send(session.sessionKey, "failed-vanished-model");
     assert.equal(raw.turnStartCalls, turns, "the failed operation stays idempotent");
     assert.equal(f.service.workRunCoordinator.getRun(failed.id).status, "failed");
     const next = await f.send(session.sessionKey, "explicit-gpt-send");
@@ -88,8 +97,8 @@ test("failed custom-model turn retains a completed native session binding and pe
 });
 
 for (const unreadable of [false, true]) {
-  test("legacy pending custom-model binding is reconciled by observation without dispatch; unreadable=" + unreadable, async () => {
-    const { f, session, raw } = await openEndpointFixture({ legacy: true, unreadable });
+  test("legacy pending binding of a failed turn is reconciled by observation without dispatch; unreadable=" + unreadable, async () => {
+    const { f, session, raw } = await openFailedTurnFixture({ legacy: true, unreadable });
     try {
       assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).status, "binding");
       const pending = f.service.chatSessionStore.getBinding(session.sessionKey);
@@ -127,7 +136,7 @@ test("complete absence of a pending native session permits recovery without crea
 
 for (const condition of ["list-failed", "partial-history", "active-native-turn", "acceptance-unknown"]) {
   test("unconfirmed pending binding remains intact with a specific public error: " + condition, async () => {
-    const { f, session, raw, failed } = await openEndpointFixture({ legacy: true });
+    const { f, session, raw, failed } = await openFailedTurnFixture({ legacy: true });
     try {
       const before = f.service.chatSessionStore.getSession(session.sessionKey);
       const binding = f.service.chatSessionStore.getBinding(session.sessionKey);
@@ -160,7 +169,7 @@ test("custom Responses inherits provider reasoning settings without looking up t
 });
 
 test("a model change during pending binding observation invalidates selection CAS", async () => {
-  const { f, session, raw } = await openEndpointFixture({ legacy: true });
+  const { f, session, raw } = await openFailedTurnFixture({ legacy: true });
   try {
     const list = raw.threadList.bind(raw);
     let changed = false;
@@ -178,7 +187,7 @@ test("a model change during pending binding observation invalidates selection CA
 });
 
 test("pending binding observation reserves the conversation against a concurrent send", async () => {
-  const { f, session, raw } = await openEndpointFixture({ legacy: true });
+  const { f, session, raw } = await openFailedTurnFixture({ legacy: true });
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   let observed;
@@ -200,7 +209,7 @@ test("pending binding observation reserves the conversation against a concurrent
 });
 
 test("source account generation changes during recovery preserve the pending binding", async () => {
-  const { f, session, raw } = await openEndpointFixture({ legacy: true });
+  const { f, session, raw } = await openFailedTurnFixture({ legacy: true });
   try {
     const before = f.service.chatSessionStore.getSession(session.sessionKey);
     const admission = f.service.runtimeAccountAdmission;
@@ -212,5 +221,102 @@ test("source account generation changes during recovery preserve the pending bin
     await assert.rejects(select(f, session.sessionKey, GPT_MODEL), { code: "ACCOUNT_AUTH_UNKNOWN" });
     assert.deepEqual(f.service.chatSessionStore.getSession(session.sessionKey), before);
     assert.equal(raw.turnStartCalls, 1);
+  } finally { await f.close(); }
+});
+
+function capture(raw) {
+  const calls = { starts: [], resumes: [], injected: [] };
+  const start = raw.threadStart, resume = raw.threadResume.bind(raw), inject = raw.threadInjectItems.bind(raw);
+  raw.threadStart = async input => { calls.starts.push(structuredClone(input)); return start(input); };
+  raw.threadResume = async input => { calls.resumes.push(structuredClone(input)); return resume(input); };
+  raw.threadInjectItems = async input => { calls.injected.push(structuredClone(input)); return inject(input); };
+  return calls;
+}
+function moveDefaultToEndpoint(f) {
+  f.service.productStore.putAgentProfile({ ...f.service.productStore.getAgentProfile(f.profile.id),
+    providerRef: "fixture-endpoint", defaultModel: CUSTOM_MODEL });
+}
+
+test("a conversation following the default continues in a fresh native session when the default source changes", async () => {
+  const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", GPT_MODEL] } });
+  try {
+    await addEndpoint(f);
+    const session = f.createSession();
+    await f.complete(await f.send(session.sessionKey, "first", "PRESERVE ORIGINAL HISTORY"), "FIRST ANSWER");
+    const bound = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.deepEqual(bound.runtimeModelSource, { runtimeSessionId: bound.runtimeSessionId, source: "@chatgpt" });
+    const calls = capture(f.transport.hosts.get("codex"));
+    moveDefaultToEndpoint(f);
+    const second = await f.send(session.sessionKey, "second", "after the default moved");
+    assert.equal(second.status, "running", second.errorCode);
+    const renewed = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(renewed.retiredRuntimeSessions.at(-1).runtimeSessionId, bound.runtimeSessionId);
+    assert.notEqual(renewed.runtimeSessionId, bound.runtimeSessionId);
+    assert.equal(calls.resumes.some(input => input.threadId === bound.runtimeSessionId), false,
+      "the ChatGPT thread is never resumed on the endpoint");
+    assert.equal(calls.starts.length, 1);
+    assert.match(calls.starts[0].config.model_provider, /^shoggoth_[0-9a-f]{16}$/u);
+    assert.ok(JSON.stringify(calls.injected).includes("PRESERVE ORIGINAL HISTORY"), "the transcript seeds the new native session");
+    await f.complete(second);
+    assert.deepEqual(f.service.chatSessionStore.getSession(session.sessionKey).runtimeModelSource,
+      { runtimeSessionId: renewed.runtimeSessionId, source: "fixture-endpoint" });
+  } finally { await f.close(); }
+});
+
+test("a model picked from the menu keeps its source when the default moves", async () => {
+  const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", GPT_MODEL] } });
+  try {
+    await addEndpoint(f);
+    const session = f.createSession();
+    await f.complete(await f.send(session.sessionKey, "first", "hello"));
+    const raw = f.transport.hosts.get("codex");
+    raw.modelList = catalog(["fixture-model", GPT_MODEL]);
+    const picked = await select(f, session.sessionKey, GPT_MODEL);
+    assert.equal(Object.hasOwn(picked, "modelProviderRef"), false, "the default source is shown without a token");
+    assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).modelProviderRef, "@chatgpt",
+      "the choice is stored with its source");
+    await f.complete(await f.send(session.sessionKey, "on-gpt"));
+    const bound = f.service.chatSessionStore.getSession(session.sessionKey);
+    const calls = capture(raw);
+    moveDefaultToEndpoint(f);
+    const next = await f.send(session.sessionKey, "after-default-change");
+    assert.equal(next.status, "running", next.errorCode);
+    assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).runtimeSessionId, bound.runtimeSessionId);
+    assert.equal(calls.starts.length, 0);
+    assert.equal(calls.resumes.at(-1).config.model_provider, "openai");
+    assert.equal(raw.lastTurnStartParams.model, GPT_MODEL);
+    const state = await request(f, "chat.session.runtime.state", { profileId: f.profile.id, sessionKey: session.sessionKey });
+    assert.equal(state.modelProviderRef, "@chatgpt", "now that ChatGPT is not the default it is named");
+    await f.complete(next);
+  } finally { await f.close(); }
+});
+
+test("a model change within ChatGPT keeps the native session; another source starts a fresh one", async () => {
+  const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", GPT_MODEL] } });
+  try {
+    await addEndpoint(f);
+    const session = f.createSession();
+    await f.complete(await f.send(session.sessionKey, "first", "KEEP THIS THREAD"));
+    const raw = f.transport.hosts.get("codex");
+    raw.modelList = catalog(["fixture-model", GPT_MODEL]);
+    const bound = f.service.chatSessionStore.getSession(session.sessionKey);
+    const calls = capture(raw);
+    await select(f, session.sessionKey, GPT_MODEL);
+    const kept = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(kept.status, "ready");
+    assert.equal(kept.runtimeSessionId, bound.runtimeSessionId);
+    assert.equal(kept.retiredRuntimeSessions.length, bound.retiredRuntimeSessions.length);
+    assert.equal(kept.modelOverride, GPT_MODEL);
+    const next = await f.send(session.sessionKey, "on-gpt");
+    assert.equal(next.status, "running", next.errorCode);
+    assert.equal(calls.starts.length, 0, "no fresh native session for a ChatGPT model change");
+    assert.equal(calls.resumes.at(-1).threadId, bound.runtimeSessionId);
+    assert.equal(calls.resumes.at(-1).config.model_provider, "openai");
+    assert.equal(raw.lastTurnStartParams.model, GPT_MODEL);
+    await f.complete(next);
+    await select(f, session.sessionKey, CUSTOM_MODEL);
+    const moved = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(moved.status, "draft", "an endpoint model is another source");
+    assert.equal(moved.retiredRuntimeSessions.at(-1).runtimeSessionId, bound.runtimeSessionId);
   } finally { await f.close(); }
 });

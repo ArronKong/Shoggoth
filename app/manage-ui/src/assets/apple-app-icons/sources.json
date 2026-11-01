@@ -1,0 +1,26 @@
+{
+  "retrievedAt": "2026-11-01",
+  "normalization": "Actual macOS app bundle icons, converted with sips to 256 x 256 PNG preserving transparency.",
+  "assets": [
+    {
+      "id": "calendar",
+      "asset": "calendar.png",
+      "bundleIdentifier": "com.apple.iCal",
+      "appVersion": "16.0",
+      "appBuild": "3036.4.14",
+      "source": "/System/Applications/Calendar.app/Contents/Resources/AppIcon.icns",
+      "sourceSha256": "279f89daa017127bde7751e920576b1269621664827cccb00b19d829d1f6b0e4",
+      "sha256": "2ae386303b3ea6d2afb32a037cce5c09d05cbf1f493dda935c91964b0fa46d73"
+    },
+    {
+      "id": "reminders",
+      "asset": "reminders.png",
+      "bundleIdentifier": "com.apple.reminders",
+      "appVersion": "7.0",
+      "appBuild": "3976",
+      "source": "/System/Applications/Reminders.app/Contents/Resources/AppIcon.icns",
+      "sourceSha256": "a29e827b9964b78b0e70cd2dedc752192a2a05b0e00a24bc2ed0ffd3f0196400",
+      "sha256": "6477699ac3a244f047553084c1359ddad51e48683e2dc8290e9c6d8ee6baf45f"
+    }
+  ]
+}

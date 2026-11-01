@@ -22,14 +22,13 @@ function publicHook(record, { source = false, offset = 0, limit = 4096 } = {}) {
 }
 class HookService {
   constructor({ store, runner, processHost, productStore, getRun, toolRegistry, permissionEngine,
-    resolveToolIdentity, requestApproval, cacheDir, pluginHooks = null, nativeCapabilities = () => ({}),
+    resolveToolIdentity, requestApproval, cacheDir, nativeCapabilities = () => ({}),
     prepareNativeCapabilities = null, getBorrowedMemoryRefs = () => [], isMemorySharingQuery = () => false, now = Date.now }) {
     this.store = store; this.runner = runner; this.processHost = processHost; this.productStore = productStore;
     this.getRun = getRun; this.toolRegistry = toolRegistry; this.permissionEngine = permissionEngine;
     this.getBorrowedMemoryRefs = getBorrowedMemoryRefs; this.isMemorySharingQuery = isMemorySharingQuery;
     this.resolveToolIdentity = resolveToolIdentity; this.requestApproval = requestApproval;
     this.cacheDir = cacheDir; this.nativeCapabilities = nativeCapabilities; this.now = now;
-    this.pluginHooks = pluginHooks;
     this.prepareNativeCapabilities = prepareNativeCapabilities; this.preparedNative = new Map();
   }
   actor(authority, scope) {
@@ -61,23 +60,21 @@ class HookService {
     }
   }
   candidate(actor, hookId, version) {
-    return hookId.startsWith("plugin-hook-") && this.pluginHooks
-      ? this.pluginHooks.get(actor.profile.id, hookId, actor.run.workspace, version ?? 1)
-      : this.store.get(actor.profile.id, hookId, version);
+    if (hookId.startsWith("plugin-hook-")) fail("HOOK_PLUGIN_UNAVAILABLE");
+    return this.store.get(actor.profile.id, hookId, version);
   }
   publicCandidate(candidate, options) {
-    return publicHook(candidate.owner === "plugin" ? this.pluginHooks.publicRecord(candidate) : candidate, options);
+    if (candidate.owner === "plugin") fail("HOOK_PLUGIN_UNAVAILABLE");
+    return publicHook(candidate, options);
   }
   listCandidates(actor, args) {
     let items = [], cursor = args.cursor || "";
     let own = this.store.list(actor.profile.id, { cursor }); items.push(...own.items);
     while (own.nextCursor) { own = this.store.list(actor.profile.id, { cursor: own.nextCursor }); items.push(...own.items); }
-    items.push(...(this.pluginHooks?.candidates(actor.profile.id, actor.run.workspace) || []));
     items = items.filter(item => item.hookId > cursor && (args.enabled === undefined || (item.activeVersion !== null) === args.enabled)
       && (args.event === undefined || item.definition.event === args.event)).sort((a, b) => a.hookId.localeCompare(b.hookId));
     const limit = args.limit ?? HOOK_LIMITS.pageSize;
-    const page = items.slice(0, limit).map(item => this.publicCandidate(item.owner === "plugin"
-      ? this.pluginHooks.get(actor.profile.id, item.hookId, actor.run.workspace) : item));
+    const page = items.slice(0, limit).map(item => this.publicCandidate(item));
     return { items: page, nextCursor: items.length > limit ? page.at(-1).hookId : null };
   }
   async handleTool(name, args, authority, scope) {
@@ -106,24 +103,18 @@ class HookService {
       result = publicHook(result);
     } else if (name === "hook_grant") {
       if (!actor.confirmed) fail("HOOK_GRANT_REQUIRED");
-      const candidate = this.candidate(actor, args.hookId, args.version);
-      result = candidate.owner === "plugin" ? this.store.operation(profileId, operationId, { name, ...args }, () => this.pluginHooks.grant(candidate))
-        : this.store.grant(profileId, operationId, args.hookId, args.version);
+      this.candidate(actor, args.hookId, args.version);
+      result = this.store.grant(profileId, operationId, args.hookId, args.version);
     } else if (name === "hook_enable") {
       const candidate = this.candidate(actor, args.hookId, args.version);
-      const receipt = candidate.owner === "plugin" ? candidate.binding?.test : this.store.latestTest?.(profileId, args.hookId, args.version);
+      const receipt = this.store.latestTest?.(profileId, args.hookId, args.version);
       if (!receipt?.passed || receipt.contentDigest !== candidate.contentDigest) fail("HOOK_TEST_REQUIRED");
       await this.validateTargets(candidate.definition, actor); check();
       supported(candidate.definition);
-      result = candidate.owner === "plugin"
-        ? this.store.operation(profileId, operationId, { name, ...args }, () => publicHook(this.pluginHooks.enable(candidate, args.expectedRevision)))
-        : publicHook(this.store.activate(profileId, operationId, args.hookId, args.version, args.expectedRevision, supported));
+      result = publicHook(this.store.activate(profileId, operationId, args.hookId, args.version, args.expectedRevision, supported));
     } else if (name === "hook_disable" || name === "hook_remove") {
-      const candidate = this.candidate(actor, args.hookId);
-      if (candidate.owner === "plugin") {
-        if (name === "hook_remove") fail("HOOK_FORBIDDEN");
-        result = this.store.operation(profileId, operationId, { name, ...args }, () => this.pluginHooks.disable(candidate, args.expectedRevision));
-      } else result = this.store.disable(profileId, operationId, args.hookId, args.expectedRevision, name === "hook_remove");
+      this.candidate(actor, args.hookId);
+      result = this.store.disable(profileId, operationId, args.hookId, args.expectedRevision, name === "hook_remove");
     } else if (name === "hook_executions") result = this.store.executions(profileId, args);
     else if (name === "hook_execution_get") {
       const { output, ...receipt } = this.store.execution(profileId, args.executionId);
@@ -136,8 +127,7 @@ class HookService {
   }
   async test(actor, { hookId, version, payload, files = [] }) {
     const candidate = this.candidate(actor, hookId, version);
-    const recordTest = passed => candidate.owner === "plugin" ? this.pluginHooks.recordTest(candidate, passed)
-      : this.store.recordTest(actor.profile.id, hookId, version, candidate.contentDigest, passed);
+    const recordTest = passed => this.store.recordTest(actor.profile.id, hookId, version, candidate.contentDigest, passed);
     const definition = candidate.definition;
     let scratch = null, workspace = actor.run.workspace, tested = definition;
     const requiresProcess = definition.handler.type === "script" || ["workspace.copy", "context.file"].includes(definition.handler.name);

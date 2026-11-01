@@ -4,7 +4,7 @@
 // MCP helpers load this contract only to advertise and validate the schema.
 const APP_STATE_SECTIONS = Object.freeze([
   "overview", "service", "backends", "agents", "cron", "inspiration", "kanban",
-  "runs", "sessions", "runtime_accounts", "models", "skills", "mcp", "plugins",
+  "runs", "sessions", "runtime_accounts", "models", "skills", "mcp", "plugins", "connectors",
   "usage", "settings", "computer", "browser",
 ]);
 const APP_STATE_HOST_SECTIONS = Object.freeze([

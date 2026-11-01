@@ -5,6 +5,7 @@ export type GroupPanelSnapshot = {
   messages: GroupChatMessage[];
   hasOlder: boolean;
   lastSyncAt: number;
+  messageRevision?: number;
 };
 
 /** Disposable, page-local history. Drafts and send receipts remain in the durable journal. */

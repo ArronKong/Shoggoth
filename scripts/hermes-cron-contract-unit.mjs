@@ -41,6 +41,7 @@ function fakeDash(routes = {}) {
 
 function makeBackend(dashes) {
   const be = new HermesBackend({ getConfig: () => ({ hermesMode: "local", hermesRemotes: [] }) });
+  be._readCronExecutionHistory = async () => { throw new Error("fixture has no local ledger"); };
   for (const [profile, d] of Object.entries(dashes)) {
     be.dashboards.set(profile, { profile, baseUrl: d.baseUrl, token: "tok" });
     be.profileById.set(`hermes-${profile}`, profile);
@@ -472,6 +473,47 @@ const J = (id, name = id) => ({ id, name, schedule: { kind: "cron", expr: "0 9 *
     recent.runs.length === 1 && recent.runs[0].sessionKey === "cron_late_close_1"
       && recent.runs[0].status === "ok" && recent.runs[0].synthesized !== true,
   );
+  await dash.close();
+}
+
+// ---- Dashboard: fallback and ledger must retain the same execution identity ----
+{
+  const T = 1783900800000;
+  const job = { ...J("identity"), last_run_at: new Date(T + 90e3).toISOString(), last_status: "error",
+    last_error: "interrupted after session creation", latest_execution: { id: "execution-identity", status: "failed",
+      claimed_at: new Date(T).toISOString(), started_at: new Date(T + 1000).toISOString(),
+      finished_at: new Date(T + 90e3).toISOString() } };
+  let sessions = [{ id: "cron_identity_session", started_at: (T + 4000) / 1000, ended_at: null }];
+  const dash = await fakeDash({
+    "GET /api/cron/jobs": () => ({ code: 200, json: [job] }),
+    "GET /api/cron/jobs/identity": () => ({ code: 200, json: job }),
+    "GET /api/cron/jobs/identity/runs": () => ({ code: 200, json: { runs: sessions } }),
+  });
+  const be = makeBackend({ default: dash });
+  const recent = await be.getRecentCronRuns({ sinceMs: T, limit: 10 });
+  check("未关闭 session 在唯一 execution 区间内只返回一条失败记录", recent.runs.length === 1
+    && recent.runs[0].status === "error" && recent.runs[0].sessionKey === "cron_identity_session"
+    && recent.runs[0].finishedAt === T + 90e3);
+  check("HTTP fallback 使用真实 execution id 与已证明的 session 别名", recent.runs.length === 1 && recent.runs[0].runId === "execution-identity"
+    && recent.runs[0].runIdAliases?.join() === "cron_identity_session");
+  const detail = await be.getCronRuns("hermes-default:identity");
+  check("详情与 Dashboard 使用相同执行身份和终态", detail.runs.length === 1 && detail.runs[0].runId === "execution-identity"
+    && detail.runs[0].status === "error" && detail.runs[0].finishedAt === T + 90e3);
+  be._readCronExecutionHistory = async () => ({ items: [{ id: "execution-identity", jobId: "identity",
+    startedAt: T + 1000, finishedAt: T + 90e3, status: "error" }] });
+  const ledger = await be.getRecentCronRuns({ sinceMs: T, limit: 10 });
+  check("恢复账本后运行身份不变", ledger.runs.length === 1 && ledger.runs[0].runId === recent.runs[0]?.runId
+    && ledger.runs[0].sessionKey === "cron_identity_session" && ledger.runs[0].runIdAliases?.join() === "cron_identity_session");
+  be._readCronExecutionHistory = async () => { throw new Error("fixture has no local ledger"); };
+  sessions = [...sessions, { id: "cron_ambiguous_session", started_at: (T + 5000) / 1000, ended_at: (T + 60e3) / 1000 }];
+  const ambiguous = await be.getRecentCronRuns({ sinceMs: T, limit: 10 });
+  check("多个 session 位于 execution 区间时不猜归属", ambiguous.runs.length === 3
+    && ambiguous.runs.filter(run => run.sessionKey).every(run => run.status === undefined)
+    && ambiguous.runs.find(run => run.synthesized)?.runId === "execution-identity");
+  delete job.latest_execution;
+  sessions = [{ id: "cron_legacy_identity", started_at: T / 1000, ended_at: (T + 90e3) / 1000 }];
+  const legacy = await be.getRecentCronRuns({ sinceMs: T, limit: 10 });
+  check("旧版 session-only fallback 也有稳定运行身份", legacy.runs.length === 1 && legacy.runs[0].runId === "cron_legacy_identity");
   await dash.close();
 }
 

@@ -18,8 +18,6 @@ const { revealHostPath } = require("./host-path-reveal");
 const { createDesktopSystemIssueReporter } = require("./desktop-system-issue");
 const { resolveDesktopProxyPort } = require("./desktop-dev-proxy-port");
 const { assertUiHostOpsCoverage } = require("./host-capability-manifest");
-const { DesktopPluginAppHost } = require("./desktop-plugin-app-host");
-const pluginAppHost = new DesktopPluginAppHost({ BrowserWindow, ipcMain, session });
 const { DesktopChatUiHost } = require("./desktop-chat-ui-host");
 const { registerDesktopChatUiIpc } = require("./desktop-chat-ui-ipc");
 const chatUiHost = new DesktopChatUiHost({ WebContentsView, ipcMain, session, webContents });
@@ -27,7 +25,6 @@ const { scanInstalledClis, resolveCliVersion } = require("./cli-scanner");
 const { startProxyGateway } = require("./core/proxy-gateway");
 const { HermesBackend, agentIdForProfile } = require("./core/hermes-backend");
 const { ShoggothBackend } = require("./core/shoggoth-backend");
-const { escapeInvisibleJsonCharacters } = require("./core/plugin-approval-display");
 const { BackendRegistry } = require("./core/backend-registry");
 const { OpenClawBackend, resolveOpenclawBin } = require("./core/openclaw-backend");
 const { getBootstrappedDesktopPaths } = require("./desktop-data-bootstrap");
@@ -429,283 +426,6 @@ const hostOps = {
     if (result.canceled || result.filePaths.length !== 1) return null;
     return result.filePaths[0];
   },
-  selectPluginPackage: async () => {
-    const format = await dialog.showMessageBox(mainWindow || undefined, {
-      type: "question", title: "选择能力包格式", message: "选择安装来源",
-      buttons: ["Agent Plugins 标准包", "Claude 内容包", "Codex 内容包", "取消"],
-      defaultId: 0, cancelId: 3, noLink: true,
-      detail: "历史内容包仅导入所选技能与 MCP；不执行 hooks、命令或宿主扩展。",
-    });
-    if (format.response === 3) return null;
-    let components = ["skills", "mcp-servers"];
-    if (format.response !== 0) {
-      const selected = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "question", title: "选择导入内容", message: "选择需要转换的组件",
-        buttons: ["技能与 MCP", "仅技能", "仅 MCP", "取消"], defaultId: 0, cancelId: 3, noLink: true,
-      });
-      if (selected.response === 3) return null;
-      components = selected.response === 1 ? ["skills"] : selected.response === 2 ? ["mcp-servers"] : components;
-    }
-    const result = await dialog.showOpenDialog(mainWindow || undefined, {
-      title: "选择 Agent Plugin 能力包目录",
-      properties: ["openDirectory"],
-      buttonLabel: "预览能力包",
-    });
-    if (result.canceled || result.filePaths.length !== 1) return null;
-    return format.response === 0 ? result.filePaths[0]
-      : { kind: "legacy-directory", path: result.filePaths[0],
-        format: format.response === 1 ? "claude-plugin" : "codex-plugin", components };
-  },
-  selectPluginGmailCredentials: async () => {
-    const result = await dialog.showOpenDialog(mainWindow || undefined, {
-      title: "选择 Google Desktop OAuth 客户端 JSON",
-      properties: ["openFile"], filters: [{ name: "JSON", extensions: ["json"] }],
-      buttonLabel: "导入客户端",
-    });
-    return result.canceled || result.filePaths.length !== 1 ? null : result.filePaths[0];
-  },
-  confirmPluginCapability: async (summary) => {
-    const clean = (text) => String(text).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").slice(0, 256);
-    const cleanPath = (text) => String(text).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ").slice(0, 4096);
-    const connect = summary.action === "connect";
-    const oauth = summary.action === "oauth-connect";
-    if (summary.action === "gmail-registration") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "导入 Gmail OAuth 客户端",
-        message: "保存你自己的 Google Desktop OAuth 客户端？",
-        detail: `文件：${cleanPath(summary.path)}\n客户端密钥由本机 gog 保存在系统钥匙串。此操作不会连接邮箱；之后仍须逐个账号登录。`,
-        buttons: ["取消", "导入"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "gmail-capabilities") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "调整 Gmail 工具权限",
-        message: summary.sendEnabled ? "允许草稿、邮箱修改和发送邮件？"
-          : summary.writeEnabled ? "允许草稿和邮箱修改？" : "恢复 Gmail 只读工具？",
-        detail: "权限适用于已连接的 Gmail 账号。永久删除始终关闭；实际工具调用仍需 Agent 的独立授权。",
-        buttons: ["取消", "保存权限"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "gmail-auth") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "连接 Gmail 账号",
-        message: `在浏览器登录 ${clean(summary.email)}？`,
-        detail: "将使用你导入的 Google Desktop OAuth 客户端请求 Gmail 完整权限，以便日后可选择开启写入。连接后的 MCP 工具默认只读，发送和永久删除默认关闭。",
-        buttons: ["取消", "打开 Google 登录"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "gmail-auth-reconcile") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "核验 Gmail 授权恢复",
-        message: `你已在本机核验并清理 ${clean(summary.email)} 的 Shoggoth gog 授权吗？`,
-        detail: "Shoggoth 不会替你删除钥匙串凭据；只有重新检查确认该账号不在 shoggoth 凭据库后，才会解除待核验锁。未清理前请取消。",
-        buttons: ["取消", "重新检查"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "graph-registration") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "配置 Microsoft Graph 客户端",
-        message: "保存你的 Entra 桌面应用客户端 ID？",
-        detail: `客户端 ID：${clean(summary.clientId)}\n本机回调登记：${clean(summary.redirectUrl)}（登录时使用随机端口）\n各卡可能请求的委托权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\nSites.Read.All 允许读取登录用户可访问的所有站点内容。这里只保存公开客户端 ID；各卡仍需分别连接和授权。保存后需要重启 Shoggoth，已保存的客户端不能在这里直接覆盖。`,
-        buttons: ["取消", "保存并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "zoom-registration") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "配置 Zoom OAuth 客户端", message: "保存你的 Zoom 客户端？",
-        detail: `客户端 ID：${clean(summary.clientId)}\n本机回调：${clean(summary.redirectUrl)}\n权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\n客户端密钥只提交到本机 Agent Service 并加密保存；保存后需要重新启动 Shoggoth 才能连接 Zoom 账号。已保存的客户端不能在这里直接覆盖。`,
-        buttons: ["取消", "保存并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "lovable-registration") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "登记 Lovable 官方 MCP 客户端",
-        message: "向 Lovable 动态登记这个 Shoggoth 本机客户端？",
-        detail: `官方注册端点：${clean(summary.registrationEndpoint)}\n本机回调：${clean(summary.redirectUrl)}\n申请权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\n此步骤会向 Lovable 创建公开 OAuth 客户端登记；不登录账号，也不会授予工具调用权限。登记结果只保存到本机私有目录。保存后重启 Shoggoth，再在已安装能力包中连接账号。原 Codex 托管 app 的能力并未由此等价移植。`,
-        buttons: ["取消", "登记并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "lovable-registration-reconcile") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "核对 Lovable 登记结果",
-        message: "此前向 Lovable 登记客户端的结果尚未确认。是否已人工核对？",
-        detail: `请先检查 Lovable 中此前的客户端登记。若远端已经创建客户端但本机未保存回执，重新登记可能留下另一个远端客户端。\n\n官方注册端点：${clean(summary.registrationEndpoint)}\n\n只有完成核对后，才清除本机待核对记录；此操作本身不会再次联系 Lovable。`,
-        buttons: ["取消", "已核对，允许重新登记"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "higgsfield-registration") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "登记 Higgsfield 官方 MCP 客户端",
-        message: "向 Higgsfield 动态登记这个 Shoggoth 本机客户端？",
-        detail: `官方注册端点：${clean(summary.registrationEndpoint)}\n本机回调：${clean(summary.redirectUrl)}\n申请权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\n此步骤会向 Higgsfield 的 Clerk 授权服务器创建公开 OAuth 客户端登记；不登录账号，也不会授予工具调用权限。登记结果只保存到本机私有目录。保存后重启 Shoggoth，再在已安装能力包中连接账号。生成工具及冻结包内 3 个 sandbox Skill 均未开放使用，需另行真实验收。`,
-        buttons: ["取消", "登记并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "higgsfield-registration-reconcile") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "核对 Higgsfield 登记结果",
-        message: "此前向 Higgsfield 登记客户端的结果尚未确认。是否已人工核对？",
-        detail: `请先检查 Higgsfield 中此前的客户端登记。若远端已经创建客户端但本机未保存回执，重新登记可能留下另一个远端客户端。\n\n官方注册端点：${clean(summary.registrationEndpoint)}\n\n只有完成核对后，才清除本机待核对记录；此操作本身不会再次联系 Higgsfield。`,
-        buttons: ["取消", "已核对，允许重新登记"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "slack-registration") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "配置 Slack 内部应用客户端",
-        message: "保存你自己的 Slack 内部应用客户端 ID？",
-        detail: `客户端 ID：${clean(summary.clientId)}\n本机回调：${clean(summary.redirectUrl)}\n用户权限：${Array.isArray(summary.scopes) ? summary.scopes.map(clean).join(", ") : ""}\n\n请先在你控制的 Slack 内部应用启用 PKCE、登记相同的 localhost 回调，并获得工作区管理员的 MCP 准入。此处只保存公开客户端 ID，不会登录账号或授予工具权限。重启后需单独连接账号；当前独立入口仅开放公共消息搜索，原 Codex 托管连接器及完整 Slack MCP 未移植。`,
-        buttons: ["取消", "保存并稍后重启"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "external-plugin-call") {
-      const command = escapeInvisibleJsonCharacters(summary.command);
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "外部助理插件逐次审批",
-        message: "允许此工具只调用一次？",
-        detail: `来源：${clean(summary.backendId)} · ${clean(summary.agentId)}\n会话：${clean(summary.sessionId)}\n回合：${clean(summary.runId || summary.taskId)}${summary.turnId ? ` / ${clean(summary.turnId)}` : ""}\n工具调用：${clean(summary.toolCallId)}\n能力包：${clean(summary.packageName)}\n工具：${clean(summary.toolName)}\n账号连接：${clean(summary.connectionId)}（修订 ${summary.connectionAuthRevision}）\n参数 SHA-256：${clean(summary.argumentDigest)}\n\n完整参数：\n${command}\n\n仅批准此来源、会话、调用与参数。停用、撤权或账号切换会使批准失效。`,
-        buttons: ["拒绝", "允许一次"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "mcp-account-select") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "切换插件账号", message: "让所有助理改用这个插件账号？",
-        detail: `能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n目标账号：${clean(summary.account)}\n\n切换会撤销当前账号在此组件的 ${summary.grantsRevoked} 项工具授权。现有调用不会改用新账号；切换后需要为新账号重新发现并授权工具。`,
-        buttons: ["取消", "切换账号"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "plugin-quick-enable") {
-      const interpreterName = kind => kind === "node" ? "Node.js" : "Python";
-      const lines = (Array.isArray(summary.components) ? summary.components : []).slice(0, 16).map(item =>
-        `• ${clean(item.name)}：${/^https?:\/\//iu.test(String(item.target)) ? "连接" : "运行"} ${clean(item.target)}`
-        + (item.interpreter ? `（使用本机 ${interpreterName(item.interpreter)}）` : "")
-        + (Array.isArray(item.missingSecrets) && item.missingSecrets.length
-          ? `（缺少凭据 ${item.missingSecrets.map(clean).join("、")}，本次跳过）` : ""));
-      const unsupported = Array.isArray(summary.unsupported) && summary.unsupported.length
-        ? `\n需在插件页单独连接账号：${summary.unsupported.map(clean).join("、")}` : "";
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "一键启用插件",
-        message: `启用 ${clean(summary.package)}${summary.version ? ` ${clean(summary.version)}` : ""}，并允许所有助理使用它的工具？`,
-        detail: `${lines.length ? lines.join("\n") : "此插件没有需要连接的 MCP 服务。"}${unsupported}\n\n确认后会启用插件、按需固定本机解释器、连接上述服务、发现工具并授权给所有助理；标注为破坏性的工具每次调用前仍需确认。可随时在插件页撤销授权或停用。`,
-        buttons: ["取消", "启用"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "plugin-first-party-install") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "question", title: "重新安装内置插件",
-        message: `重新安装 Shoggoth 内置插件 ${clean(summary.package)}${summary.version ? ` ${clean(summary.version)}` : ""}？`,
-        detail: "插件随 App 提供。安装后其技能对所有助理启用；MCP 服务仍需在插件页“快速设置”里一键启用。之后随 App 更新自动更新，再次卸载后不会自动重装。",
-        buttons: ["取消", "安装"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "plugin-secret-set" || summary.action === "plugin-secret-clear") {
-      const set = summary.action === "plugin-secret-set";
-      const where = (Array.isArray(summary.destinations) ? summary.destinations : []).slice(0, 16).map(item =>
-        item.kind === "env" ? `${clean(item.component)} 的环境变量 ${clean(item.key)}`
-          : `发往 ${clean(item.origin || item.component)} 的请求头 ${clean(item.key)}`).join("；");
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: set ? "保存插件凭据" : "清除插件凭据",
-        message: set ? `保存 ${clean(summary.name)}，供插件 ${clean(summary.package)} 使用？`
-          : `清除插件 ${clean(summary.package)} 的 ${clean(summary.name)}？`,
-        detail: set ? `仅用于：${where}\n\n凭据加密保存在本机 Agent Service，只注入到上述位置，不会发送给模型或写入会话记录。已有的值会被替换。`
-          : `清除后，依赖它的服务在重新填写前无法连接。`,
-        buttons: ["取消", set ? "保存" : "清除"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "bearer-connect") {
-      const cloudflare = summary.provider === "Cloudflare";
-      const provider = cloudflare ? "Cloudflare" : "GitHub";
-      const verification = cloudflare
-        ? "向 Cloudflare 验证用户 API Token 状态和官方 MCP 工具列表"
-        : "向 GitHub 验证账号";
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: `连接 ${provider} 插件账号`, message: `验证并保存 ${provider} 令牌？`,
-        detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n\n令牌会提交到本机 Agent Service，${verification}后加密保存，用于连接固定的 ${provider} MCP 端点。${summary.reconnect ? "重连会撤销旧连接的工具授权。" : ""}工具仍需单独发现和授权。${cloudflare ? "Cloudflare 的 execute 工具每次调用都需确认。" : ""}断开本机连接不会撤销 ${provider} 上的令牌。`,
-        buttons: ["取消", "验证并连接"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (["rollback-snapshot", "rollback-code", "rollback-restore", "rollback-retry"].includes(summary.action)) {
-      const snapshot = summary.action === "rollback-snapshot", code = summary.action === "rollback-code";
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "插件代码与数据回退", message: snapshot ? "保存停用插件的数据快照？"
-          : code ? "切回旧代码并保持停用？" : "按已核对快照恢复插件数据？",
-        detail: `能力包：${clean(summary.package)}\n当前代码：${clean(summary.fromDigest)}\n目标代码：${clean(summary.targetDigest)}\n快照：${clean(summary.snapshotId || (snapshot ? "新建" : "需要另行选择匹配快照"))}\n\n${snapshot
-          ? "插件进程会先排空。只保存此安装的持久数据，不运行包代码；账号凭据不包含在快照中。"
-          : code ? "只更换代码，当前数据会保留。恢复匹配数据快照之前无法重新启用；旧授权失效。"
-            : `将以快照替换当前插件数据${summary.byteLength === null ? "" : `（${summary.byteLength} 字节）`}，快照之后的写入将退出活动数据。原数据会单独保留，账号和工具必须重新授权。`}`,
-        buttons: ["取消", snapshot ? "保存快照" : code ? "切换代码并停用" : "确认恢复数据"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "mcp-disconnect") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "断开插件账号", message: "断开这个插件账号？",
-        detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n受影响的 Agent 绑定：${summary.affectedBindings}\n\n此账号的所有绑定将停用，工具授权将撤销，旧连接和未完成的登录将关闭。插件数据保留。${summary.credentialDisposition === "retained_encrypted_shared"
-          ? "加密账号凭据保留在共享存储中；此插件连接不可再使用，但其他单独授权的功能仍可能使用该账号。这不会撤销提供方的远端令牌。"
-          : summary.credentialDisposition === "retained_encrypted_unusable"
-            ? "本地加密凭据保留但不可用于此插件连接；这不会撤销提供方的远端令牌。"
-            : "此连接没有保存的账号凭据。"}重新连接后需要重新发现工具并授权。`,
-        buttons: ["取消", "断开账号"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (summary.action === "remote-git") {
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "question", title: "获取固定 Git 能力包", message: "从此仓库获取指定提交并预览？",
-        detail: `仓库：${cleanPath(summary.repositoryUrl)}\n提交：${clean(summary.commit)}\n子目录：${cleanPath(summary.subdir || ".")}\n\n将通过 HTTPS 获取这一提交。不会运行仓库代码、Git hooks、安装脚本或子模块；安装后默认停用。`,
-        buttons: ["取消", "获取并预览"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    if (["dependency-prepare", "dependency-revoke"].includes(summary.action)) {
-      const prepare = summary.action === "dependency-prepare";
-      const result = await dialog.showMessageBox(mainWindow || undefined, {
-        type: "warning", title: "插件解释器", message: prepare ? "检查并固定这个解释器？" : "撤销此组件的解释器登记？",
-        detail: `能力包：${clean(summary.package)}\n组件：${clean(summary.capability)}\n解释器：${clean(summary.interpreter)}\n路径：${cleanPath(summary.executablePath || "")}\nSHA-256：${clean(summary.sha256 || "")}\n\n${prepare
-          ? "将运行此文件的 --version 并固定其摘要。后续仅用它执行包内脚本；不会自动下载依赖。仅选择你信任的解释器。"
-          : "需要重新准备后才能启动此组件。能力包数据和账号凭据会保留。"}`,
-        buttons: ["取消", prepare ? "检查并固定" : "撤销登记"], defaultId: 0, cancelId: 0, noLink: true,
-      });
-      return result.response === 1;
-    }
-    const appView = summary.action === "app-open";
-    const result = await dialog.showMessageBox(mainWindow || undefined, {
-      type: "warning", title: "Shoggoth 插件授权",
-      message: oauth ? "在浏览器中连接插件账号？" : appView ? "打开这个工具的交互界面？" : connect ? "连接本地 MCP 组件？" : "允许此 Agent 使用这个工具？",
-      detail: `Agent：${clean(summary.agent)}\n能力包：${clean(summary.package)}\n组件 / 工具：${clean(summary.capability)}\n\n${connect
-        ? "连接会运行能力包内的程序。工具调用仍需逐项授权。"
-        : oauth ? `认证服务：${clean(summary.provider)}\n申请权限：${summary.scopes.map(clean).join(", ")}\n${summary.reconnect ? "重连会撤销此 Agent 原有工具授权。" : ""}完成账号验证后仍需逐项授权工具。`
-        : appView ? "此页面仅限当前会话，可使用当前已授权且无需逐次确认的工具。外部网络关闭；页面关闭或授权撤销后失效。"
-        : summary.approvalMode === "each-call"
-          ? "每次工具调用均需确认具体参数；可以随时在插件页撤销。"
-          : "授权适用于后续执行；现有产品审批仍生效。可以随时在插件页撤销。"}`,
-      buttons: ["取消", appView ? "打开" : connect || oauth ? "连接" : "允许"], defaultId: 0, cancelId: 0, noLink: true,
-    });
-    return result.response === 1;
-  },
-  openPluginApp: options => pluginAppHost.open(options),
-  selectPluginDependency: async () => {
-    const result = await dialog.showOpenDialog(mainWindow || undefined, {
-      title: "选择已安装的 Node 或 Python 解释器", properties: ["openFile"], buttonLabel: "检查文件摘要",
-    });
-    return result.canceled || result.filePaths.length !== 1 ? null : result.filePaths[0];
-  },
   // 在系统终端里跑一条命令（external provider 的 `claude setup-token` / 断开命令）。
   // 官方桌面版有内置终端，我们没有 → 借 Terminal.app，用户能看见执行的是什么。
   // **调用方必须已做白名单**（static-server 只接受 {provider,kind}，命令由服务端从
@@ -1105,7 +825,9 @@ const groupSendJournalIpc = registerDesktopGroupSendJournalIpc({
 });
 
 registerDesktopSecretIpc({
-  ipcMain,
+  ipcMain, dialog,
+  localSpeech: request => require("./local-media-permission").localMediaPermission(path.join(
+    app.isPackaged ? process.resourcesPath : path.join(__dirname, "..", ".vendor"), "local-media", "shoggoth-secret-media"), request),
   getMainWindow: () => mainWindow,
   getRegistry: () => appBackendRegistry,
 });
@@ -1282,7 +1004,7 @@ if (!gotLock) {
       setManagedMode: () => configStore.write({ openclawPluginHostMode: "managed" }),
       createClient: () => {
         const input = resolveManagedOpenClawProductInputs({ openclawBin: resolveOpenclawBin() });
-        require("./agent-service/external-plugin-adapter-auth").ensureCredential(shoggothServicePaths, "openclaw");
+        require("./agent-service/external-host-pairing").ensureCredential(shoggothServicePaths, "openclaw");
         return require("./managed-openclaw-host-client").createManagedOpenClawHostClient({
           ...input, stateDir: shoggothServicePaths.stateDir,
           serviceUserDataRoot: shoggothServicePaths.userDataRoot,
@@ -1290,8 +1012,8 @@ if (!gotLock) {
             : path.join(__dirname, "..", "resources", "external-plugin-host-patches"),
           adapterResourcesRoot: app.isPackaged ? path.join(process.resourcesPath, "external-plugin-adapters")
             : path.join(__dirname, "..", "resources", "external-plugin-adapters"),
-          gatewayConfiguration: { tools: { alsoAllow: ["shoggoth_capability_search", "shoggoth_skill_read",
-            "shoggoth_skill_file_read", "shoggoth_plugin_resource_read", "shoggoth_plugin_call"] } },
+          gatewayConfiguration: { tools: { alsoAllow: [...require("../resources/external-plugin-adapters/openclaw/mcp-tools.json").tools.map(tool=>tool.name),
+            "shoggoth_capability_search", "shoggoth_skill_read", "shoggoth_skill_file_read"] } },
         });
       },
       onUnavailable: async () => {
@@ -1386,7 +1108,7 @@ if (!gotLock) {
       setManagedMode: () => configStore.write({ hermesPluginHostMode: "managed" }),
       createClient: () => {
         const input = resolveManagedHermesProductInputs({ hermesBin: hermesBackend.bin });
-        require("./agent-service/external-plugin-adapter-auth").ensureCredential(shoggothServicePaths, "hermes");
+        require("./agent-service/external-host-pairing").ensureCredential(shoggothServicePaths, "hermes");
         return require("./managed-hermes-host-client").createManagedHermesHostClient({
           ...input, stateDir: shoggothServicePaths.stateDir,
           serviceUserDataRoot: shoggothServicePaths.userDataRoot,
@@ -1420,6 +1142,7 @@ if (!gotLock) {
       packaged: app.isPackaged,
       openclawBin: resolveOpenclawBin(),
       hermesBin: hermesBackend.bin,
+      reconcileHermesAdapter: options => hermesBackend.reconcileSharedCapabilityAdapter(options),
       getOpenClawMode: () => readConfig().openclawPluginHostMode,
       getHermesMode: () => managedHermesProductHost.isManaged() ? "managed" : readConfig().hermesMode,
     });
@@ -1453,8 +1176,6 @@ if (!gotLock) {
       version: APP_VERSION,
     });
     const nativeBackends = [shoggothBackend];
-    openclawBackend.attachExternalPluginSelectionService(shoggothBackend);
-    hermesBackend.attachExternalPluginSelectionService(shoggothBackend);
     const shoggothLaunchAgent = createLaunchAgentController({
       homeDir: os.userInfo().homedir,
       servicePaths: shoggothServicePaths,
@@ -1525,6 +1246,7 @@ if (!gotLock) {
     registry.register(hermesBackend);
     registry.register(shoggothBackend);
     registry.setInspirationOwner(shoggothBackend);
+    registry.setChatSecretOwner(shoggothBackend);
     // 设置页「断开连接」的后端：registry 聚合/路由/健康采样全部跳过（实时读
     // config，与 getUpstreamUrl 同款拉模型），startup 也不启动它们。
     registry.setDisabledBackendsProvider(() => readConfig().disabledBackends);
@@ -1650,6 +1372,14 @@ if (!gotLock) {
     // OpenClaw/Hermes registry；绝不回连无鉴权的 loopback /__api。
     try {
       federationHost = createFederationHostServer({
+        appleDeviceHost: require("./apple-device-host").createAppleDeviceHost({
+          native: require("./apple-device-native").createAppleDeviceNative({
+            addonPath: app.isPackaged ? path.join(process.resourcesPath, "apple-device", "apple-device.node")
+              : path.join(__dirname, "../.vendor/apple-device/apple-device.node"),
+          }),
+          openExternal: url => shell.openExternal(url),
+        }),
+    mcpConnectionOrigin: staticServer.url,
         paths: shoggothServicePaths,
         registry,
         verifyChatUiClick: value => desktopChatUiIpc.verifyClick(value),
@@ -1676,11 +1406,12 @@ if (!gotLock) {
           ? federationMcpRegistration?.openclaw === true
           : (federationMcpRegistration?.hermes || []).some((profile) => agentIdForProfile(profile) === agentId),
         taskRunner: createFederatedAgentTaskRunner({ origin: staticServer.url }),
-        delegateRun: ({ agentId, prompt, timeoutMs }) => runFederatedAgentViaBroker({
+        delegateRun: ({ agentId, prompt, timeoutMs, signal }) => runFederatedAgentViaBroker({
           origin: staticServer.url,
           agentId,
           prompt,
           timeoutMs,
+          signal,
         }),
       });
       await federationHost.start();
@@ -1793,7 +1524,6 @@ if (!gotLock) {
     managedOpenClawCredentialBroker?.retire();
     managedOpenClawCredentialBroker = null;
     await desktopChatUiIpc.close();
-    await pluginAppHost.closeAll();
     desktopInspiration?.dispose(); desktopInspiration = null;
     disposeMicrophoneIpc?.(); disposeMicrophoneIpc = null;
     disposeTypewriterSoundIpc?.(); disposeTypewriterSoundIpc = null;

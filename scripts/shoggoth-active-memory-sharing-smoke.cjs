@@ -299,7 +299,7 @@ test("moving a borrowed fragment preserves its in-flight authority while invalid
 
 
 for (const own of [false, true]) {
-  test(`Profile session activity only fences that Profile's recall: ${own ? "own" : "unrelated"}`, { timeout: 60000 }, async t => {
+  test(`ordinary session activity refreshes caches but never fences recall: ${own ? "own" : "unrelated"}`, { timeout: 60000 }, async t => {
     const f = await fixture(t); await f.fact();
     const foreign = f.service.chatSessionStore.createSession({ profileId: f.C, workspace: f.workspace,
       operationId: crypto.randomUUID(), createdAt: Date.now() });
@@ -308,13 +308,27 @@ for (const own of [false, true]) {
       f.service.chatSessionStore.touchSession(own ? input.session.sessionKey : foreign.sessionKey, Date.now() + 1000);
     });
     await f.owner.prepareActiveMemory(input); const recalled = f.owner.takeActiveMemory(input);
+    // Content versions still move within the reader scope, so caches refresh.
     assert.equal(before !== f.owner.semanticStamp(A), own);
     assert.equal(policy !== f.owner.sourcePolicyStamp(A), own);
-    if (own) assert.equal(recalled, null, "changes within the reader scope must still fence prepared recall");
-    else {
-      assert.match(recalled?.content || "", new RegExp(SUMMARY));
-      assert.ok(recalled.borrowedMemoryRefs.some(ref => ref.ownerProfileId === f.B));
-    }
+    // A timestamp cannot withdraw what was recalled (memory repair 2026-10-28).
+    assert.match(recalled?.content || "", new RegExp(SUMMARY));
+    assert.ok(recalled.borrowedMemoryRefs.some(ref => ref.ownerProfileId === f.B));
     f.assertNoBodies(); await f.finish(input);
   });
 }
+
+test("retiring one of the reader's own sessions still fences its prepared recall", { timeout: 60000 }, async t => {
+  const f = await fixture(t); await f.fact();
+  const spare = f.service.chatSessionStore.createSession({ profileId: A, workspace: f.workspace, operationId: crypto.randomUUID(), createdAt: Date.now() });
+  f.service.chatSessionStore.requestBinding(spare.sessionKey, "spare-binding", Date.now());
+  f.service.chatSessionStore.completeBinding(spare.sessionKey, "spare-binding", "spare-runtime");
+  const input = f.input(), operationId = crypto.randomUUID();
+  recallModel(f, async () => {
+    f.service.chatSessionStore.requestDelete(spare.sessionKey, operationId, Date.now());
+    f.service.chatSessionStore.completeRemoteOperation(operationId);
+  });
+  await f.owner.prepareActiveMemory(input);
+  assert.equal(f.owner.takeActiveMemory(input), null, "retiring a source session within the reader scope must fence prepared recall");
+  f.assertNoBodies(); await f.finish(input);
+});

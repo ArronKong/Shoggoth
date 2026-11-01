@@ -1,4 +1,5 @@
 "use strict";
+const { runtimeFailureDetail, failureDetailText } = require("../agent-service/runtime-failure-detail");
 const { CodexAutomationBackend, isCodexAutomationId, isCodexAutomationOwner } = require("./codex-automation-backend");
 const codexAutomationProtocol = require("../agent-service/codex-automation-protocol");
 const codexDesktopProtocol = require("../agent-service/codex-desktop-session-protocol");
@@ -75,6 +76,7 @@ const {
   validateAgentLifecycleResult,
 } = require("../agent-service/agent-lifecycle-service-protocol");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../agent-service/product-store");
+const { runtimeModelProfile } = require("../agent-service/agent-runtime-binding");
 const { DEFAULT_RUNTIME_ACCOUNTS, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../agent-service/runtime-account");
 const { GREETING_LOCALES } = require("../agent-service/agent-greeting");
 const {
@@ -100,20 +102,21 @@ const {
 } = require("../agent-service/token-usage-protocol");
 const { collectSessionOutputArtifacts } = require("./session-output-artifacts");
 const { readSessionImage, resolveImageReference } = require("./session-image-media");
-const { validatePluginManagementResult } = require("./plugin-management-dto");
+const { CONNECTOR_METHODS, validateConnectorParams, validateConnectorResult } = require("./connector-dto");
+const { CONNECTOR_PUBLIC_MESSAGES } = require("./connector-errors");
+const { LARK_CLI_METHODS, LARK_CLI_PUBLIC_MESSAGES,
+  validateLarkCliParams, validateLarkCliResult } = require("./lark-cli-contract");
+const { OFFICIAL_SKILL_METHODS, OFFICIAL_SKILL_PUBLIC_MESSAGES,
+  validateOfficialSkillParams, validateOfficialSkillResult } = require("./official-skill-connector-dto");
+const { APPLE_DEVICE_METHODS, APPLE_DEVICE_PUBLIC_MESSAGES,
+  validateAppleDeviceParams, validateAppleDeviceResult } = require("./apple-device-contract");
 const { validateExternalPluginAuditPage } = require("./plugin-external-audit-dto");
-const { validateExternalPluginApprovalResult } = require("./plugin-external-approval-dto");
-const { validateExternalPluginSelectionInput,
-  validateExternalPluginSelectionResult } = require("./plugin-external-selection-dto");
-const { validatePluginAppResult } = require("./plugin-app-dto");
-const { validateCodexSecurityStatusInput, projectCodexSecurityServiceStatus } = require("./plugin-codex-security-status-dto");
-const { validatePluginSelectionReadinessInput } = require("./plugin-selection-readiness-dto");
 
 const SERVICE_TIMEOUT_MS = 5_000;
+const MCP_REGISTRY_TIMEOUT_MS = 20_000;
 const ENCRYPTED_MUTATION_TIMEOUT_MS = 15_000;
 const RUNTIME_COMMAND_TIMEOUT_MS = 45_000;
 const MODEL_CATALOG_TIMEOUT_MS = 45_000;
-const PLUGIN_INSTALL_TIMEOUT_MS = 30_000;
 const DEFAULT_READINESS_TIMEOUT_MS = 70_000;
 const DEFAULT_READINESS_INTERVAL_MS = 500;
 const DEFAULT_SERVICE_STATUS_TIMEOUT_MS = 1_000;
@@ -138,16 +141,6 @@ const ENCRYPTED_MUTATION_METHODS = new Set([
   "agent.update",
   "agent.archive",
   "agent.restore",
-  "plugins.zoom.registration.configure",
-  "plugins.dropbox.registration.configure",
-  "plugins.graph.registration.configure",
-  "plugins.gmail.registration.configure",
-  "plugins.gmail.capabilities.configure",
-  "plugins.lovable.registration.configure",
-  "plugins.lovable.registration.reconcile",
-  "plugins.higgsfield.registration.configure",
-  "plugins.higgsfield.registration.reconcile",
-  "plugins.slack.registration.configure",
 ]);
 const RUNTIME_COMMAND_METHODS = new Set(["chat.command.list", "chat.command.exec", activeMemoryCommand.METHOD]);
 const NATIVE_SLASH_RUNTIMES = new Set(["codex", "claude-code", "grok-build", "pi", "antigravity", "deepseek-harness"]);
@@ -228,7 +221,10 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   ...PRODUCT_CONTEXT_PUBLIC_MESSAGES,
   RUNTIME_PROTOCOL_ERROR: "CLI 返回的通信数据不符合协议，本次任务已停止；请检查 CLI 与 App 的版本兼容性及原生会话结果",
   RUNTIME_OUTPUT_LIMIT_EXCEEDED: "CLI 的单条数据或当前保留内容超过安全容量，本次任务已停止；已生成的文件可能仍然存在，请检查原生会话结果",
-  RUNTIME_INCOMPATIBLE: "当前 CLI 版本与应用不兼容，请更新 CLI 或应用后重新检查",
+  RUNTIME_INCOMPATIBLE: "当前 CLI 未满足必需协议，请更新 CLI 或应用后重新检查",
+  RUNTIME_EXECUTABLE_CHANGED: "CLI 安装已变化，请等待当前任务结束后重新检查",
+  RUNTIME_IDENTITY_UNAVAILABLE: "暂时无法确认 CLI 安装状态，请稍后重新检查",
+  RUNTIME_CAPABILITY_UNSUPPORTED: "当前 Agent Runtime 不支持该操作",
   RUNTIME_CONNECTION_LOST: "CLI 进程或通信连接异常中断，未自动重放；请检查原生会话结果后决定是否重试",
   RUNTIME_HOST_RESTARTED: "原生 Runtime 已重启，本次任务已中断；请查看已保存的会话记录后决定是否重试，任务不会自动重发",
   CODEX_HOST_TERMINATED: "Codex 运行进程已终止，本次任务未自动重放；请检查原生会话结果后决定是否重试",
@@ -237,15 +233,16 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   CODEX_NATIVE_AUTH_READ_FAILED: "暂时无法读取本机 Codex 登录状态，请稍后重试",
   CODEX_RUNTIME_CLEANUP_INCOMPLETE: "Codex 登录检查进程未能完成清理，请重启 Shoggoth 后台服务后重试",
   RUNTIME_PERMISSION_REQUIRED: "当前权限不允许 Agent 执行所需操作，请检查会话的工作区和权限设置后重试",
+  RUNTIME_WORKSPACE_UNAVAILABLE: "会话工作目录不存在或不可访问；请恢复该目录或使用默认工作区新建会话，本次任务未发送",
   CRON_AUTHORIZATION_DENIED: "定时任务遇到授权范围外的操作，未能给出完成结果。本轮已结束并释放执行名额，请查看任务记录",
   RUNTIME_APPROVAL_UNAVAILABLE: "Antigravity 的非交互模式无法弹出原生工具授权，本次操作已被拒绝；请检查权限设置，调整后可在当前会话重新发送",
   ANTIGRAVITY_NETWORK_UNAVAILABLE: "Antigravity 无法连接 Google 服务，本次任务未完成；请检查代理与网络后重试",
-  ANTIGRAVITY_REGION_UNSUPPORTED: "Antigravity 服务不支持当前账号的访问地区，本次任务未完成；请检查服务可用地区后重试",
+  ANTIGRAVITY_REGION_UNSUPPORTED: "Google 模型接口不支持当前请求所在地区，本次任务未完成；请检查服务的地区支持范围和当前网络出口",
   ANTIGRAVITY_ACP_NOT_INSTALLED: "Antigravity 官方运行组件尚未安装；请前往「模型」登录 Antigravity，登录时会自动安装",
   ANTIGRAVITY_ACP_INTEGRITY_FAILED: "Antigravity 运行组件校验未通过（文件可能被修改或损坏），已拒绝启动；请前往「模型」重新登录 Antigravity，会自动重新安装",
   ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED: "当前设备平台暂不支持 Antigravity 官方运行组件",
   ANTIGRAVITY_MCP_UNAVAILABLE: "Antigravity 未能加载 Shoggoth 工具，本次任务未完成；请重试，若持续失败请重启 App",
-  ANTIGRAVITY_TURN_FAILED: "Antigravity 本次任务执行失败，未自动重放；请重试，若持续失败请在「模型」中检查登录状态",
+  ANTIGRAVITY_TURN_FAILED: "Antigravity 本次任务执行失败，上游未提供可展示的具体原因；未自动重放，请查看原生会话后决定是否重试",
   ANTIGRAVITY_ACP_REMOTE_ERROR: "Antigravity 服务返回错误，本次操作未完成；请稍后重试",
   ANTIGRAVITY_ACP_OUTBOUND_FRAME_TOO_LARGE: "消息或附件超过 Antigravity 的传输大小限制，本次消息未发送；请缩小附件或减少内容后重试",
   ANTIGRAVITY_ACP_REQUEST_TIMEOUT: "Antigravity 响应超时，未自动重放；请检查会话结果后决定是否重试",
@@ -261,6 +258,9 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   RUNTIME_SESSION_BUSY: "此原生会话仍有任务在执行，请等待任务结束或取消后再发送",
   RUNTIME_SESSION_WRITER_BUSY: "此会话仍由 Codex Desktop 或另一个 Codex 客户端占用。请先在原客户端归档并恢复该会话，再回这里重试。",
   RUNTIME_SESSION_ACCEPTANCE_UNKNOWN: "未能确认原生会话是否创建成功，已暂停自动重试以避免重复创建；请先检查 CLI 的会话记录",
+  RUNTIME_MAX_TOKENS: "Agent 已达到本轮输出长度限制，本轮未完成；请缩小任务范围后继续",
+  RUNTIME_MAX_TURN_REQUESTS: "Agent 已达到本轮请求次数限制，本轮已停止；请缩小任务范围后继续",
+  RUNTIME_REFUSED: "Agent 拒绝了本轮请求，原生会话不会保留这一轮；请调整请求后再发送",
   RUNTIME_TURN_ACCEPTANCE_UNKNOWN: "未能确认 CLI 是否已接受本次任务，已暂停自动重试以避免重复执行；请先检查原生会话的执行结果",
   RUNTIME_SESSION_RECOVERY_HISTORY_REQUIRED: "原生会话历史不足以确认任务执行状态，已暂停恢复以避免重复执行",
   RUNTIME_PERMISSION_POLICY_CONFLICT: "Agent 运行权限与当前会话不一致，请检查会话权限后重试",
@@ -348,7 +348,9 @@ const LOGIN_ERROR_MESSAGES = Object.freeze({
 
 const CHAT_REQUEST_MESSAGES = Object.freeze({
   ...Object.fromEntries(["FRAME_TIMEOUT", "FRAME_TOO_LARGE", "INCOMPLETE_FRAME", "MALFORMED_JSON", "MULTIPLE_REQUESTS",
-    "CODEX_NATIVE_AUTH_READ_FAILED", "CODEX_RUNTIME_CLEANUP_INCOMPLETE"].map(code => [code, RUNTIME_START_MESSAGES[code]])),
+    "CODEX_NATIVE_AUTH_READ_FAILED", "CODEX_RUNTIME_CLEANUP_INCOMPLETE",
+    "RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED",
+    "RUNTIME_MAX_TOKENS", "RUNTIME_MAX_TURN_REQUESTS", "RUNTIME_REFUSED"].map(code => [code, RUNTIME_START_MESSAGES[code]])),
   ...chatUiProtocol.MESSAGES,
   ...codexDesktopProtocol.MESSAGES,
   ...codexAutomationProtocol.MESSAGES,
@@ -372,6 +374,11 @@ const CHAT_REQUEST_MESSAGES = Object.freeze({
   ...learningProtocol.PUBLIC_ERRORS,
   ...webSettingsProtocol.PUBLIC_MESSAGES,
   ...GROUP_CHAT_PUBLIC_MESSAGES,
+  ...require("./chat-secret-contract").SECRET_MESSAGES,
+  ...CONNECTOR_PUBLIC_MESSAGES,
+  ...LARK_CLI_PUBLIC_MESSAGES,
+  ...OFFICIAL_SKILL_PUBLIC_MESSAGES,
+  ...APPLE_DEVICE_PUBLIC_MESSAGES,
   RUNTIME_AUTH_REQUIRED: CHAT_PUBLIC_MESSAGES.RUNTIME_AUTH_REQUIRED,
   CHAT_ATTACHMENT_INVALID: CHAT_PUBLIC_MESSAGES.CHAT_ATTACHMENT_INVALID,
   INSPIRATION_ARCHIVED: "此会话关联的灵感已归档，请先在「灵感便签」中恢复它，或切换到普通聊天会话",
@@ -384,6 +391,11 @@ const CONNECTION_MODES = new Set(["builtin-service", "native-runtime"]);
 const CLIENT_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SAFE_ADAPTER_ERRORS = new WeakSet();
 const PUBLIC_SERVICE_ERROR_CODES = new Set([
+  ...Object.keys(APPLE_DEVICE_PUBLIC_MESSAGES),
+  "RUNTIME_MAX_TOKENS", "RUNTIME_MAX_TURN_REQUESTS", "RUNTIME_REFUSED",
+  ...Object.keys(CONNECTOR_PUBLIC_MESSAGES),
+  ...Object.keys(LARK_CLI_PUBLIC_MESSAGES),
+  ...Object.keys(OFFICIAL_SKILL_PUBLIC_MESSAGES),
   "FRAME_TIMEOUT", "FRAME_TOO_LARGE", "INCOMPLETE_FRAME", "MALFORMED_JSON", "MULTIPLE_REQUESTS",
   "SERVICE_RECOVERY_REQUIRED",
   ...Object.keys(chatUiProtocol.MESSAGES),
@@ -409,6 +421,7 @@ const PUBLIC_SERVICE_ERROR_CODES = new Set([
   ...Object.keys(learningProtocol.PUBLIC_ERRORS),
   ...Object.keys(webSettingsProtocol.PUBLIC_MESSAGES),
   ...Object.keys(GROUP_CHAT_PUBLIC_MESSAGES),
+  ...Object.keys(require("./chat-secret-contract").SECRET_MESSAGES),
   ...Object.keys(DOMAIN_PUBLIC_MESSAGES),
   ...Object.keys(PROFILE_PUBLIC_MESSAGES),
   ...Object.keys(AGENT_LIFECYCLE_PUBLIC_MESSAGES),
@@ -546,119 +559,6 @@ function exactObject(value, fields) {
   return ownDataObject(value)
     && Object.keys(value).length === fields.length
     && fields.every((field) => Object.prototype.hasOwnProperty.call(value, field));
-}
-
-function validatePluginCatalogPage(value, params) {
-  const digest = /^[a-f0-9]{64}$/u;
-  const shortText = (text, max = 2048) => typeof text === "string"
-    && text.isWellFormed() && Buffer.byteLength(text, "utf8") <= max;
-  if (!exactObject(value, ["supported", "catalogRevision", "items", "nextCursor"])
-    || value.supported !== true || !digest.test(value.catalogRevision)
-    || !Array.isArray(value.items) || value.items.length > params.limit
-    || value.items.length > 20
-    || (value.nextCursor !== null
-      && (!Number.isSafeInteger(value.nextCursor)
-        || value.nextCursor <= params.cursor))) {
-    throw new TypeError("invalid plugin catalog page");
-  }
-  const items = value.items.map((item) => {
-    if (!exactObject(item, ["installationId", "releaseDigest", "desiredState",
-      "revision", "createdAt", "updatedAt", "sourceKind", "packageName",
-      "declaredVersion", "components", "diagnostics"])
-      || !shortText(item.installationId, 128) || !digest.test(item.releaseDigest)
-      || !["enabled", "disabled"].includes(item.desiredState)
-      || !Number.isSafeInteger(item.revision) || item.revision < 1
-      || !Number.isSafeInteger(item.createdAt) || item.createdAt < 0
-      || !Number.isSafeInteger(item.updatedAt) || item.updatedAt < 0
-      || !["directory", "git", "legacy-directory", "remote-git", "bundled", "first-party"].includes(item.sourceKind)
-      || !shortText(item.packageName, 256)
-      || (item.declaredVersion !== null && !shortText(item.declaredVersion, 256))
-      || !Array.isArray(item.components) || item.components.length > 256
-      || !Array.isArray(item.diagnostics) || item.diagnostics.length > 256) {
-      throw new TypeError("invalid plugin catalog item");
-    }
-    const components = item.components.map((component) => {
-      const common = ["componentId", "kind", "localName", "title",
-        "descriptorDigest", "state"];
-      const skill = component?.kind === "skill";
-      if (!exactObject(component, [...common, skill ? "description" : "transport"])
-        || !digest.test(component.componentId)
-        || !digest.test(component.descriptorDigest)
-        || !shortText(component.localName, 256)
-        || !shortText(component.title, 256)
-        || !shortText(component.state, 64)
-        || (skill ? !shortText(component.description, 2048)
-          : component.kind !== "mcp-server"
-            || !["stdio", "streamable-http", "shoggoth-graph"].includes(component.transport))) {
-        throw new TypeError("invalid plugin component");
-      }
-      return { componentId: component.componentId, kind: component.kind,
-        localName: component.localName, title: component.title,
-        descriptorDigest: component.descriptorDigest, state: component.state,
-        ...(skill ? { description: component.description }
-          : { transport: component.transport }) };
-    });
-    return { installationId: item.installationId,
-      releaseDigest: item.releaseDigest, desiredState: item.desiredState,
-      revision: item.revision, createdAt: item.createdAt,
-      updatedAt: item.updatedAt, sourceKind: item.sourceKind,
-      packageName: item.packageName, declaredVersion: item.declaredVersion,
-      components, diagnosticCount: item.diagnostics.length };
-  });
-  return { supported: true, catalogRevision: value.catalogRevision,
-    items, nextCursor: value.nextCursor };
-}
-
-function validateBundledPluginList(value) {
-  const digest = /^[a-f0-9]{64}$/u;
-  const id = /^[a-z0-9][a-z0-9-]{0,63}$/u;
-  if (!exactObject(value, ["batchDigest", "items"]) || !digest.test(value.batchDigest)
-    || !Array.isArray(value.items) || value.items.length > 62) {
-    throw new TypeError("invalid bundled plugin list");
-  }
-  const seen = new Set();
-  const items = value.items.map(item => {
-    if (!exactObject(item, ["id", "installationId", "displayName",
-      "shortDescription", "category", "version", "iconAvailable",
-      "components", "converted", "unconvertedMcp", "importStatus", "installationState",
-      "installedReleaseDigest", ...(item.localAdapter === undefined ? [] : ["localAdapter"])])
-      || !id.test(item.id) || seen.has(item.id) || !digest.test(item.installationId)
-      || typeof item.displayName !== "string" || item.displayName.length > 128
-      || typeof item.shortDescription !== "string" || item.shortDescription.length > 1024
-      || typeof item.category !== "string" || item.category.length > 128
-      || typeof item.version !== "string" || item.version.length > 128
-      || typeof item.iconAvailable !== "boolean"
-      || !exactObject(item.components, ["skills", "allSkillFiles", "apps", "mcp"])
-      || Object.values(item.components).some(count => !Number.isSafeInteger(count) || count < 0)
-      || !exactObject(item.converted, ["skills", "mcp"])
-      || !Number.isSafeInteger(item.converted.skills) || item.converted.skills < 0
-      || !Number.isSafeInteger(item.converted.mcp) || item.converted.mcp < 0
-      || item.converted.skills > item.components.skills
-      || item.converted.mcp > item.components.mcp
-      || !Array.isArray(item.unconvertedMcp)
-      || item.converted.mcp + item.unconvertedMcp.length !== item.components.mcp
-      || item.unconvertedMcp.some(issue => !exactObject(issue, ["name", "reasonCode"])
-        || typeof issue.name !== "string" || issue.name.length < 1 || issue.name.length > 128
-        || !["LEGACY_MCP_FIELD_UNSUPPORTED", "LEGACY_MCP_ENTRY_INVALID"].includes(issue.reasonCode))
-      || (item.importStatus === "previewable") !== (item.converted.skills + item.converted.mcp > 0)
-      || !["previewable", "needs-adapter"].includes(item.importStatus)
-      || (item.localAdapter !== undefined
-        && !(["outlook-calendar", "outlook-email", "sharepoint", "teams"].includes(item.id)
-          && item.localAdapter === "shoggoth-graph-read-only"
-          || item.id === "lovable" && item.localAdapter === "shoggoth-lovable-official-mcp"
-          || item.id === "slack" && item.localAdapter === "shoggoth-slack-official-mcp"
-          || item.id === "gmail" && item.localAdapter === "shoggoth-gogcli-gmail-mcp"
-          || item.id === "codex-security" && item.localAdapter === "shoggoth-codex-security-native"))
-      || !["not-installed", "enabled", "disabled"].includes(item.installationState)
-      || (item.installationState === "not-installed"
-        ? item.installedReleaseDigest !== null : !digest.test(item.installedReleaseDigest))) {
-      throw new TypeError("invalid bundled plugin item");
-    }
-    seen.add(item.id);
-    return { ...item, components: { ...item.components }, converted: { ...item.converted },
-      unconvertedMcp: item.unconvertedMcp.map(issue => ({ ...issue })) };
-  });
-  return { batchDigest: value.batchDigest, items };
 }
 
 function boundedIntegerOption(options, name, fallback, min, max) {
@@ -1150,6 +1050,8 @@ function validateServiceEventPage(value, params) {
 
 function validateServiceResult(method, value, params) {
   try {
+    if (require("./chat-secret-contract").SECRET_METHODS.includes(method)) return require("./chat-secret-contract").validateSecretResult(method, value);
+    if (method === "runtime.extension.status.get") return require("../agent-service/runtime-extension-status-protocol").validateResult(value);
     if (codexDesktopProtocol.METHODS.includes(method)) return codexDesktopProtocol.validateResult(method, value);
     if (codexAutomationProtocol.METHODS.includes(method)) return codexAutomationProtocol.validateResult(method, value, params);
     if (require("../agent-service/product-context-protocol").METHODS.includes(method)) return require("../agent-service/product-context-protocol").validateMethodResult(method, value);
@@ -1190,144 +1092,11 @@ function validateServiceResult(method, value, params) {
       });
     }
     if (method === "events.subscribe") return validateServiceEventPage(value, params);
-    if (method === "plugins.capabilities.list") {
-      return validatePluginCatalogPage(value, params);
-    }
+    if (CONNECTOR_METHODS.includes(method)) return validateConnectorResult(method, value, params);
+    if (LARK_CLI_METHODS.includes(method)) return validateLarkCliResult(method, value);
+    if (OFFICIAL_SKILL_METHODS.includes(method)) return validateOfficialSkillResult(method, value);
+    if (APPLE_DEVICE_METHODS.includes(method)) return validateAppleDeviceResult(method, value);
     if (method === "plugins.external.calls.list") return validateExternalPluginAuditPage(value);
-    if (method.startsWith("plugins.external.approvals.")) {
-      return validateExternalPluginApprovalResult(method, value);
-    }
-    if (method.startsWith("plugins.selection.external.")) {
-      return validateExternalPluginSelectionResult(method, value, params);
-    }
-    if (method === "plugins.codex-security.status") return projectCodexSecurityServiceStatus(value, params);
-    if (method === "plugins.bundled.list") return validateBundledPluginList(value);
-    if (method.startsWith("plugins.apps.")) return validatePluginAppResult(method, value);
-    if (method.startsWith("plugins.oauth.")) return require("./plugin-oauth-dto").validatePluginOAuthResult(method, value);
-    if (method.startsWith("plugins.bearer.")) return require("./plugin-bearer-dto").validatePluginBearerResult(method, value);
-    if (method.startsWith("plugins.gmail.")) return require("./plugin-gogcli-gmail-dto").validateGmailResult(method, value);
-    if (method.startsWith("plugins.setup.") || method.startsWith("plugins.secrets.")) {
-      return require("./plugin-setup-dto").validatePluginSetupResult(method, value);
-    }
-    if (method.startsWith("plugins.firstParty.")) return require("./plugin-setup-dto").validateFirstPartyResult(method, value);
-    if (method === "plugins.zoom.registration.status") {
-      if (!exactObject(value, ["configured", "restartRequired"])
-        || typeof value.configured !== "boolean" || typeof value.restartRequired !== "boolean"
-        || (!value.configured && value.restartRequired)) throw new Error("invalid Zoom registration status");
-      return { configured: value.configured, restartRequired: value.restartRequired };
-    }
-    if (method === "plugins.zoom.registration.configure") {
-      if (!exactObject(value, ["configured", "restartRequired", "provider"])
-        || value.configured !== true || value.restartRequired !== true
-        || value.provider !== "zoom-meetings") throw new Error("invalid Zoom registration receipt");
-      return { configured: true, restartRequired: true };
-    }
-    if (method === "plugins.dropbox.registration.status") {
-      if (!exactObject(value, ["configured", "restartRequired"])
-        || typeof value.configured !== "boolean" || typeof value.restartRequired !== "boolean"
-        || (!value.configured && value.restartRequired)) throw new Error("invalid Dropbox registration status");
-      return { configured: value.configured, restartRequired: value.restartRequired };
-    }
-    if (method === "plugins.dropbox.registration.configure") {
-      if (!exactObject(value, ["configured", "restartRequired", "provider"])
-        || value.configured !== true || value.restartRequired !== true
-        || value.provider !== "dropbox") throw new Error("invalid Dropbox registration receipt");
-      return { configured: true, restartRequired: true };
-    }
-    if (method === "plugins.graph.registration.status") {
-      if (!exactObject(value, ["configured", "restartRequired"])
-        || typeof value.configured !== "boolean" || typeof value.restartRequired !== "boolean"
-        || (!value.configured && value.restartRequired)) throw new Error("invalid Graph registration status");
-      return { configured: value.configured, restartRequired: value.restartRequired };
-    }
-    if (method === "plugins.graph.registration.configure") {
-      if (!exactObject(value, ["configured", "restartRequired"])
-        || value.configured !== true || value.restartRequired !== true) {
-        throw new Error("invalid Graph registration receipt");
-      }
-      return { configured: true, restartRequired: true };
-    }
-    if (method === "plugins.lovable.registration.status") {
-      if (!exactObject(value, ["configured", "restartRequired", "needsVerification"])
-        || typeof value.configured !== "boolean" || typeof value.restartRequired !== "boolean"
-        || typeof value.needsVerification !== "boolean"
-        || (!value.configured && value.restartRequired)
-        || (value.configured && value.needsVerification)) {
-        throw new Error("invalid Lovable registration status");
-      }
-      return { configured: value.configured, restartRequired: value.restartRequired,
-        needsVerification: value.needsVerification };
-    }
-    if (method === "plugins.lovable.registration.configure") {
-      if (!exactObject(value, ["configured", "restartRequired", "needsVerification"])
-        || value.configured !== true || value.restartRequired !== true
-        || value.needsVerification !== false) {
-        throw new Error("invalid Lovable registration receipt");
-      }
-      return { configured: true, restartRequired: true, needsVerification: false };
-    }
-    if (method === "plugins.lovable.registration.reconcile") {
-      if (!exactObject(value, ["configured", "restartRequired", "needsVerification"])
-        || value.configured !== false || value.restartRequired !== false
-        || value.needsVerification !== false) {
-        throw new Error("invalid Lovable reconciliation receipt");
-      }
-      return { configured: false, restartRequired: false, needsVerification: false };
-    }
-    if (method === "plugins.higgsfield.registration.status") {
-      if (!exactObject(value, ["configured", "restartRequired", "needsVerification"])
-        || typeof value.configured !== "boolean" || typeof value.restartRequired !== "boolean"
-        || typeof value.needsVerification !== "boolean"
-        || (!value.configured && value.restartRequired)
-        || (value.configured && value.needsVerification)) {
-        throw new Error("invalid Higgsfield registration status");
-      }
-      return { configured: value.configured, restartRequired: value.restartRequired,
-        needsVerification: value.needsVerification };
-    }
-    if (method === "plugins.higgsfield.registration.configure") {
-      if (!exactObject(value, ["configured", "restartRequired", "needsVerification"])
-        || value.configured !== true || value.restartRequired !== true
-        || value.needsVerification !== false) {
-        throw new Error("invalid Higgsfield registration receipt");
-      }
-      return { configured: true, restartRequired: true, needsVerification: false };
-    }
-    if (method === "plugins.higgsfield.registration.reconcile") {
-      if (!exactObject(value, ["configured", "restartRequired", "needsVerification"])
-        || value.configured !== false || value.restartRequired !== false
-        || value.needsVerification !== false) {
-        throw new Error("invalid Higgsfield reconciliation receipt");
-      }
-      return { configured: false, restartRequired: false, needsVerification: false };
-    }
-    if (method === "plugins.slack.registration.status") {
-      if (!exactObject(value, ["configured", "restartRequired", "accessProfile"])
-        || typeof value.configured !== "boolean" || typeof value.restartRequired !== "boolean"
-        || (!value.configured && (value.restartRequired || value.accessProfile !== null))
-        || (value.configured && !["public-search", "workspace-read", "workspace-write"]
-          .includes(value.accessProfile))) throw new Error("invalid Slack registration status");
-      return { configured: value.configured, restartRequired: value.restartRequired,
-        accessProfile: value.accessProfile };
-    }
-    if (method === "plugins.slack.registration.configure") {
-      if (!exactObject(value, ["configured", "restartRequired"])
-        || value.configured !== true || value.restartRequired !== true) {
-        throw new Error("invalid Slack registration receipt");
-      }
-      return { configured: true, restartRequired: true };
-    }
-    if (method.startsWith("plugins.connections.")) return require("./plugin-connection-dto").validatePluginConnectionResult(method, value);
-    if (method.startsWith("plugins.dependencies.")) return require("./plugin-dependency-dto").validatePluginDependencyResult(method, value);
-    if (method.startsWith("plugins.rollback.")) return require("./plugin-rollback-dto").validatePluginRollbackResult(method, value);
-    if (["plugins.install.preview", "plugins.install", "plugins.installations.set",
-      "plugins.skills.bindings.list", "plugins.skills.bindings.set",
-      "plugins.mcp.status", "plugins.mcp.tools.list", "plugins.mcp.grants.revoke",
-      "plugins.mcp.grants.revoke-all",
-      "plugins.mcp.consent.prepare", "plugins.mcp.consent.commit", "plugins.mcp.discover",
-      "plugins.uninstall.preview", "plugins.uninstall",
-      "plugins.operations.get"]
-      .includes(method)) return validatePluginManagementResult(method, value);
     if (DOMAIN_SERVICE_METHOD_SET.has(method)) {
       return validateDomainServiceResult(method, value, params);
     }
@@ -1349,6 +1118,7 @@ function validateServiceResult(method, value, params) {
     throw safeError(error, method === "service.status"
       ? "SERVICE_UNAVAILABLE"
       : method.startsWith("usage.") ? "USAGE_RESPONSE_INVALID"
+        : method.startsWith("connector.") ? "CONNECTOR_RESPONSE_INVALID"
         : method.startsWith("plugins.") ? "PLUGIN_RESPONSE_INVALID"
         : webSettingsProtocol.METHODS.includes(method) ? "WEB_SETTINGS_UNAVAILABLE"
         : learningProtocol.METHODS.has(method) ? "LEARNING_UNAVAILABLE"
@@ -1418,6 +1188,14 @@ function profileToManagedAgent(
   });
 }
 
+// A model row's source on a Profile: rows without `modelProviderRef` use the
+// Profile default; "@chatgpt" is ChatGPT (the Codex runtime's own catalog).
+function modelRowProvider(profile, model) {
+  profile = runtimeModelProfile(profile);
+  if (model.modelProviderRef === "@chatgpt") return profile.runtime;
+  return model.modelProviderRef || profile.providerRef || profile.runtime;
+}
+
 function sessionToRow(profile, value, backendId) {
   const next = value.nextRuntimeSelection;
   const modelSettings = next?.modelSettings ?? value.modelSettings;
@@ -1465,14 +1243,22 @@ function assertGatewayMessage(value) {
   return structuredClone(value);
 }
 
+function runtimeErrorMessage(code, failure) {
+  const detail = failureDetailText(failure);
+  const generic = /(?:^RUN_FAILED$|_TURN_FAILED$|_START_FAILED$|_RUNTIME_FAILED$)/u.test(code);
+  const summary = detail && generic ? "本次任务执行失败，未自动重放"
+    : RUNTIME_START_MESSAGES[code] || `Shoggoth 任务未完成 (${code})`;
+  return detail ? `${summary}\n${detail}\n错误码：${code}` : summary;
+}
+
 function displayHistoryMessage(message, item) {
   if (item.type !== "error" || item.role !== "system" || message.role !== "system"
     || message.content.length !== 1 || message.content[0]?.type !== "text") return message;
   const code = message.content[0].text;
-  if (typeof code === "string" && SAFE_CODE_PATTERN.test(code) && RUNTIME_START_MESSAGES[code]) {
+  if (typeof code === "string" && SAFE_CODE_PATTERN.test(code) && (RUNTIME_START_MESSAGES[code] || message.failure)) {
     // Only project canonical error records. Keep the durable code untouched,
     // and never rewrite an error code quoted by the user or the model.
-    message.content[0].text = `错误：${RUNTIME_START_MESSAGES[code]}`;
+    message.content[0].text = `错误：${runtimeErrorMessage(code, message.failure)}`;
   }
   return message;
 }
@@ -1774,7 +1560,11 @@ class ShoggothBackend extends AgentBackend {
     let disabled;
     try { disabled = this._getDisabledBackendIds?.() || []; } catch { disabled = []; }
     const account = DEFAULT_RUNTIME_ACCOUNTS.find((entry) => entry.id === runtimeAccountId);
+    const extension = runtime.startsWith("ext-") && this._extensionRuntimeStatusesGeneration === this._generation
+      ? this._extensionRuntimeStatuses?.get(runtimeAccountId) : null;
     return !isRuntimeAvailable(runtime) ? { available: false, reason: "runtime-unavailable" }
+      : runtime.startsWith("ext-") && (!extension || extension.runtime !== runtime || extension.availability !== "available")
+        ? { available: false, reason: extension?.code === "RUNTIME_EXTENSION_DISABLED" ? "runtime-disabled" : "runtime-unavailable" }
       : isNativeBindingDisabled(agentId, runtime, disabled, runtimeAccountId) ? { available: false, reason: "runtime-disabled" }
         : account?.kind === "native-user" && !this.runtimeCliAuth.get(runtimeAccountId)?.binaryPath
           ? { available: false, reason: "runtime-not-installed" }
@@ -1784,17 +1574,29 @@ class ShoggothBackend extends AgentBackend {
   }
 
   _runtimeReadinessFor(accountId) {
+    return this._runtimeProofFor(accountId)?.readiness ?? "unverified";
+  }
+
+  _runtimeProofFor(accountId) {
     const proof = this._runtimeReadiness?.get(accountId);
     const age = proof ? Date.now() - proof.observedAt : -1;
     return proof && proof.generation === this._generation && age >= 0 && age < 30_000
-      && proof.binaryPath === this.runtimeCliAuth.get(accountId)?.binaryPath ? proof.readiness : "unverified";
+      && proof.binaryPath === this.runtimeCliAuth.get(accountId)?.binaryPath
+      && proof.executableStamp !== null && proof.executableStamp === this._runtimeExecutableStamp(proof.binaryPath)
+      ? proof : null;
+  }
+
+  _runtimeExecutableStamp(binaryPath) {
+    try { return require("../agent-service/runtime-executable-identity").executableFileStamp(binaryPath); }
+    catch { return null; }
   }
 
   _assertRuntimeEnabled(profile, runtime = profile.runtime) {
     const availability = this._bindingAvailability(profile.agentId, runtime, profile.runtimeAccountId);
     if (!availability.available) throw safeError(null,
       availability.reason === "runtime-not-installed" ? "RUNTIME_NOT_INSTALLED"
-        : availability.reason === "runtime-incompatible" ? "RUNTIME_INCOMPATIBLE" : "NATIVE_RUNTIME_DISABLED");
+        : availability.reason === "runtime-incompatible" ? "RUNTIME_INCOMPATIBLE"
+          : runtime.startsWith("ext-") && availability.reason === "runtime-unavailable" ? "RUNTIME_IDENTITY_UNAVAILABLE" : "NATIVE_RUNTIME_DISABLED");
   }
 
   async _refreshRuntimeCliAuth() {
@@ -1944,8 +1746,8 @@ class ShoggothBackend extends AgentBackend {
 
   _profileForSession(profile, session) {
     const binding = this._bindingsByProfile?.get(profile.id)?.find(entry => entry.id === session.runtimeBindingId);
-    return binding ? { ...profile, runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
-      runtimeAccountId: binding.runtimeAccountId } : profile;
+    return runtimeModelProfile(binding ? { ...profile, runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
+      runtimeAccountId: binding.runtimeAccountId } : profile);
   }
 
   _acceptsProfileBackend(backendId) {
@@ -1953,6 +1755,21 @@ class ShoggothBackend extends AgentBackend {
   }
 
   getNativeCapacity() { return this._call("runtime.capacity.read", {}); }
+
+  async _refreshExtensionRuntimeStatuses() {
+    const generation = this._generation;
+    try {
+      const protocol = require("../agent-service/runtime-extension-status-protocol");
+      const snapshot = protocol.validateResult(await this._call(protocol.METHOD, {}));
+      if (generation !== this._generation) return [];
+      this._extensionRuntimeStatusesGeneration = generation;
+      this._extensionRuntimeStatuses = new Map(snapshot.entries.map(entry => [entry.runtimeAccountId, entry]));
+      return snapshot.entries;
+    } catch {
+      if (generation === this._generation) { this._extensionRuntimeStatusesGeneration = generation; this._extensionRuntimeStatuses = new Map(); }
+      return [];
+    }
+  }
 
   async getRuntimeStatuses() {
     // An installed executable is only inventory. Explicit refresh uses bounded,
@@ -1968,7 +1785,8 @@ class ShoggothBackend extends AgentBackend {
     let disabled = [];
     try { disabled = this._getDisabledBackendIds?.() || []; } catch { /* configuration unavailable */ }
     const names = new Map(require("../runtime-cli-auth").AUTH_SPECS.map(spec => [spec.runtimeAccountId, spec.name]));
-    return DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user").map(account => {
+    const extensions = await this._refreshExtensionRuntimeStatuses();
+    return [...DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user").map(account => {
       const descriptor = descriptors.get(account.id);
       const releaseEnabled = isRuntimeAvailable(account.runtime);
       return {
@@ -1979,8 +1797,12 @@ class ShoggothBackend extends AgentBackend {
         installsOnSignIn: RUNTIME_ACCOUNT_LOGIN_RUNTIMES[account.runtime]?.installsRuntime === true,
         serviceConnected,
         readiness: providers.find(provider => provider.id === account.id)?.status.readiness || "unverified",
+        features: this._runtimeProofFor(account.id)?.features ?? null,
       };
-    });
+    }), ...extensions.map(entry => ({ runtime: entry.runtime, name: entry.runtime, runtimeAccountId: entry.runtimeAccountId,
+      releaseEnabled: true, enabled: entry.enabled, installation: entry.availability, serviceConnected,
+      readiness: entry.authentication === "authenticated" ? "ready" : entry.authentication === "unauthenticated" ? "auth-required" : "unverified",
+      authentication: entry.authentication, availabilityCode: entry.code, features: entry.features, toggleable: false }))];
   }
 
   async applyNativeRuntimeConfig(input) {
@@ -2207,8 +2029,8 @@ class ShoggothBackend extends AgentBackend {
       }
       const byId = new Map();
       for (const result of successful) {
-        const provider = result.profile.providerRef || result.profile.runtime;
         for (const model of result.models) {
+          const provider = modelRowProvider(result.profile, model);
           const key = `${provider}\0${model.id}\0${JSON.stringify(model.capabilities || null)}`;
           const existing = byId.get(key);
           if (existing) {
@@ -2348,6 +2170,7 @@ class ShoggothBackend extends AgentBackend {
     }
     const providers = await mapBounded(accountGroups, 3, async (group) => {
       const { descriptor, accountProfiles, switchable, enabled } = group;
+      const executableStamp = this._runtimeExecutableStamp(descriptor.binaryPath);
       // A native CLI's switch stops using it as a runtime in the app; its Agents
       // stay. It never signs out, so its login state and records are intact on
       // reconnect, and a disconnected CLI is not probed.
@@ -2358,6 +2181,7 @@ class ShoggothBackend extends AgentBackend {
       let statusError = descriptor.binaryPath ? null : descriptor.unavailableReason;
       let statusVerification = null;
       let readiness = "unverified";
+      let features = null;
       if (descriptor.binaryPath && enabled && isRuntimeAvailable(descriptor.runtime)) {
         const presence = switchable || descriptor.credentialProbe === "runtime"
           ? { present: true, error: null }
@@ -2380,12 +2204,19 @@ class ShoggothBackend extends AgentBackend {
                 { ...authRead[1], limit: 1, cursor: null });
               if (!catalog.models?.length) { loggedIn = false; readiness = "unverified"; statusVerification = "unverified"; }
             }
+            // Optional features have their own proof. A failed feature read
+            // must not turn successful authentication into a sign-out.
+            try { features = await this._call(authRead[0].replace(".auth.read", ".capabilities.read"), authRead[1]); }
+            catch { features = null; }
           } catch (error) {
             loggedIn = false;
             readiness = error?.code === "RUNTIME_INCOMPATIBLE" ? "incompatible" : "unverified";
             if (readiness === "incompatible") {
               statusVerification = "incompatible";
               statusError = RUNTIME_START_MESSAGES.RUNTIME_INCOMPATIBLE;
+            } else if (["RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE"].includes(error?.code)) {
+              statusVerification = "unverified";
+              statusError = RUNTIME_START_MESSAGES[error.code];
             } else if (AUTH_STATUS_TRANSIENT_ERROR_CODES.has(error?.code)) {
               // Safe local credential still exists; a transient proof lookup cannot revoke it.
               statusVerification = "unverified";
@@ -2395,12 +2226,12 @@ class ShoggothBackend extends AgentBackend {
           }
         }
       }
-      if (generation !== this._generation) {
+      if (generation !== this._generation || executableStamp !== this._runtimeExecutableStamp(descriptor.binaryPath)) {
         loggedIn = false; readiness = "unverified"; statusVerification = "unverified"; statusError = null;
       } else if (switchable) {
         this._runtimeReadiness ||= new Map();
         this._runtimeReadiness.set(descriptor.runtimeAccountId, { readiness, generation,
-          observedAt: Date.now(), binaryPath: descriptor.binaryPath });
+          observedAt: Date.now(), binaryPath: descriptor.binaryPath, executableStamp, features });
       }
       const connectedProfiles = accountProfiles.map((profile) => profile.name)
         .sort((left, right) => left.localeCompare(right, "en"));
@@ -2769,6 +2600,9 @@ class ShoggothBackend extends AgentBackend {
     const profile = this._profilesByAgent.get(id);
     if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
     const definition = await this._call("harness.definition.meta", { profileId: profile.id });
+    // The daily review has one saved owner. Other agents retain their own
+    // heartbeat editor, without showing a daily rule file that would be unused.
+    const dailyReview = await this.proactiveCall("proactive.monitor.get", { kind: "inspiration", profileId: null }).catch(() => null);
     const sharedAgentCount = [...this._profilesByAgent.values()].filter(
       (candidate) => candidate.runtimeAccountId === profile.runtimeAccountId,
     ).length;
@@ -2794,7 +2628,8 @@ class ShoggothBackend extends AgentBackend {
         name: file.name,
         size: definition.current.documents[file.kind]?.byteLength,
         readOnly: file.readOnly,
-      })), { name: "HEARTBEAT.md", readOnly: false }],
+      })), { name: "HEARTBEAT.md", readOnly: false },
+      ...(dailyReview?.monitor.config.profileId === profile.id ? [{ name: "DAILY_REVIEW.md", readOnly: false }] : [])],
       definitionRevision: definition.current.revision,
       backendId: this.id,
     };
@@ -2941,6 +2776,7 @@ class ShoggothBackend extends AgentBackend {
     const params = validateAgentBindingParams(method, { profileId: profile.id, ...input });
     const result = await this._call(method, params);
     if (method !== "agent.binding.list") await this._refreshManagedProfiles();
+    if (result.bindings.some(binding => binding.runtime.startsWith("ext-"))) await this._refreshExtensionRuntimeStatuses();
     return { ...result, availability: result.bindings.map((binding) => ({ bindingId: binding.id,
       ...this._bindingAvailability(id, binding.runtime, binding.runtimeAccountId) })) };
   }
@@ -2990,7 +2826,8 @@ class ShoggothBackend extends AgentBackend {
     await this._ensureCodexDesktopSession(key);
     const selectingModel = method === "chat.session.runtime.model.set";
     if (!exactObject(input, method === "chat.session.runtime.switch" || selectingModel
-      ? ["bindingId", "revision", "acceptAdjustments", ...(selectingModel ? ["model"] : [])] : [])) {
+      ? ["bindingId", "revision", "acceptAdjustments", ...(selectingModel ? ["model"] : []),
+        ...(selectingModel && Object.hasOwn(input || {}, "modelProviderRef") ? ["modelProviderRef"] : [])] : [])) {
       throw safeError(null, "INVALID_PARAMS");
     }
     const profile = this._profileForManagedAgent(id);
@@ -3019,6 +2856,9 @@ class ShoggothBackend extends AgentBackend {
     const selection = await this._sessionRuntimeRequest("chat.session.runtime.state", id, key);
     const accounts = new Set(await this._connectedCliAccounts());
     accounts.add(SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
+    if (this._extensionRuntimeStatusesGeneration === this._generation) {
+      for (const entry of this._extensionRuntimeStatuses?.values() || []) if (entry.availability === "available") accounts.add(entry.runtimeAccountId);
+    }
     const names = new Map(require("../runtime-cli-auth").AUTH_SPECS.map(spec => [spec.runtimeAccountId, spec.name]));
     const desktop = this._sessionTarget(key).session.source === "codex-desktop";
     const candidates = bindings.bindings.filter(binding => (!desktop || binding.id === selection.bindingId) && binding.enabled
@@ -3034,12 +2874,18 @@ class ShoggothBackend extends AgentBackend {
       - DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === b.runtime));
     const groups = await mapBounded(unique, 3, async binding => {
       const runtimeName = names.get(binding.runtimeAccountId) || binding.runtime;
-      const capabilities = this._chatCapabilitiesForProfile({ ...profile, ...binding, id: profile.id });
+      let features;
+      try { features = await this._call("profile.binding.capabilities.read", { profileId: profile.id, bindingId: binding.id }); }
+      catch { features = require("../agent-service/runtime-capability-evidence").runtimeFeatureSupport(null); }
+      const capabilities = this._chatCapabilitiesForProfile({ ...profile, ...binding, id: profile.id }, features);
       try {
         const models = await this._page("profile.binding.models.list", { profileId: profile.id, bindingId: binding.id }, "models",
           { maxBytes: MAX_HISTORY_BYTES, maxItems: 512 });
         return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: true, capabilities, models: models.map(model => ({
-          id: model.id, name: model.displayName, backendId: this.id, provider: binding.runtime === "codex" ? profile.providerRef || binding.runtime : binding.runtime,
+          id: model.id, name: model.sourceName ? `${model.displayName} · ${model.sourceName}` : model.displayName,
+          backendId: this.id, provider: binding.runtime === "codex"
+            ? modelRowProvider({ ...profile, runtime: binding.runtime, runtimeAccountId: binding.runtimeAccountId }, model) : binding.runtime,
+          ...(model.modelProviderRef ? { modelProviderRef: model.modelProviderRef } : {}),
           runtime: binding.runtime, runtimeName, bindingId: binding.id, isDefault: model.isDefault,
           ...(model.capabilities ? { thinkingOptions: model.capabilities.thinkingOptions,
             thinkingDefault: model.capabilities.thinkingDefault, reasoning: model.capabilities.thinkingOptions.length > 0,
@@ -3048,15 +2894,18 @@ class ShoggothBackend extends AgentBackend {
       } catch { return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: false, capabilities, models: [] }; }
     });
     const currentBinding = bindings.bindings.find(binding => binding.id === selection.bindingId);
+    const currentCapabilities = groups.find(group => group.bindingId === selection.bindingId)?.capabilities
+      ?? this._chatCapabilitiesForProfile(currentBinding ? { ...profile, ...currentBinding, id: profile.id } : profile,
+        require("../agent-service/runtime-capability-evidence").runtimeFeatureSupport(null));
+    const activeCapabilities = groups.find(group => group.bindingId === this._sessionTarget(key).session.runtimeBindingId)?.capabilities;
     return { selection, models: groups.flatMap(group => group.models),
       runtimes: groups.map(({ models: _models, ...group }) => group),
-      capabilities: { ...this._chatCapabilitiesForProfile(currentBinding ? { ...profile, ...currentBinding, id: profile.id } : profile),
-        steer: this._chatCapabilitiesForProfile({ ...profile,
-          ...bindings.bindings.find(binding => binding.id === this._sessionTarget(key).session.runtimeBindingId), id: profile.id }).steer } };
+      capabilities: { ...currentCapabilities, steer: activeCapabilities?.steer === true } };
   }
 
   async selectSessionRuntimeModel(id, key, input) {
-    if (!exactObject(input, ["bindingId", "model", "revision", "acceptAdjustments"])) throw safeError(null, "INVALID_PARAMS");
+    if (!exactObject(input, ["bindingId", "model", "revision", "acceptAdjustments",
+      ...(Object.hasOwn(input || {}, "modelProviderRef") ? ["modelProviderRef"] : [])])) throw safeError(null, "INVALID_PARAMS");
     const target = this._sessionTarget(key);
     if (target.profile.agentId !== id) throw safeError(null, "CHAT_SESSION_INVALID");
     validateSessionRuntimeParams("chat.session.runtime.model.set", { ...input, profileId: target.profile.id, sessionKey: target.sessionKey });
@@ -3094,6 +2943,7 @@ class ShoggothBackend extends AgentBackend {
   async getAgentFile(id, file) {
     const profile = this._profileForManagedAgent(id);
     if (file === "HEARTBEAT.md") return (await this.proactiveCall("proactive.document.get", { profileId: profile.id })).document;
+    if (file === "DAILY_REVIEW.md") return (await this.proactiveCall("proactive.review-document.get", { profileId: profile.id })).document;
     const match = /^([A-Z]+)\.md$/u.exec(file);
     if (!match || !["IDENTITY", "SOUL", "USER", "AGENTS", "TOOLS", "MEMORY"].includes(match[1])) {
       throw safeError(null, "INVALID_PARAMS");
@@ -3106,6 +2956,10 @@ class ShoggothBackend extends AgentBackend {
 
   async setAgentFile(id, file, content, options = {}) {
     const profile = this._profileForManagedAgent(id);
+    if (file === "DAILY_REVIEW.md") {
+      const result = await this.proactiveCall("proactive.review-document.set", { profileId: profile.id, content, expectedRevision: options.expectedRevision });
+      return { id, fileRevision: result.document.revision };
+    }
     if (file === "HEARTBEAT.md") {
       const result = await this.proactiveCall("proactive.document.set", { profileId: profile.id, content, expectedRevision: options.expectedRevision });
       return { id, fileRevision: result.document.revision };
@@ -3270,24 +3124,22 @@ class ShoggothBackend extends AgentBackend {
     return this._profileForManagedAgent(options.agentId);
   }
 
-  async getPluginCapabilitiesPage(query = {}) {
-    if (!exactObject(query, ["cursor", "limit", "catalogRevision"])
-      || !Number.isSafeInteger(query.cursor) || query.cursor < 0
-      || !Number.isSafeInteger(query.limit) || query.limit < 1 || query.limit > 20
-      || (query.catalogRevision !== null
-        && (typeof query.catalogRevision !== "string"
-          || !/^[a-f0-9]{64}$/u.test(query.catalogRevision)))) {
-      throw safeError(null, "INVALID_PARAMS");
+  async connectorRequest(method, params = {}) {
+    if (OFFICIAL_SKILL_METHODS.includes(method)) {
+      try { validateOfficialSkillParams(method, params); } catch { throw safeError(null, "OFFICIAL_SKILL_INVALID_ARGUMENT"); }
+      return this._call(method, params);
     }
-    try {
-      return await this._call("plugins.capabilities.list", query);
-    } catch (error) {
-      if (error?.code === "PLUGIN_UNAVAILABLE") {
-        return { supported: false, reasonCode: "PLUGIN_UNAVAILABLE",
-          catalogRevision: null, items: [], nextCursor: null };
-      }
-      throw error;
+    if (LARK_CLI_METHODS.includes(method)) {
+      try { validateLarkCliParams(method, params); } catch { throw safeError(null, "LARK_CLI_INVALID_ARGUMENT"); }
+      return this._call(method, params);
     }
+    if (APPLE_DEVICE_METHODS.includes(method)) {
+      try { validateAppleDeviceParams(method, params); } catch { throw safeError(null, "APPLE_DEVICE_INVALID_ARGUMENT"); }
+      return this._call(method, params);
+    }
+    if (!CONNECTOR_METHODS.includes(method)) throw safeError(null, "OPEN_CONNECTOR_RETIRED");
+    try { validateConnectorParams(method, params); } catch { throw safeError(null, "CONNECTOR_REQUEST_INVALID"); }
+    return this._call(method, params);
   }
 
   async getPluginExternalCalls({ backendId = null, agentId = null, sessionId = null,
@@ -3311,326 +3163,6 @@ class ShoggothBackend extends AgentBackend {
       || Buffer.byteLength(toolCallId, "utf8") > 256)) throw safeError(null, "INVALID_PARAMS");
     return this._call("plugins.external.calls.list", {
       backendId, agentId, sessionId, toolCallId, cursor, limit });
-  }
-
-  async getExternalPluginApprovals({ backendId = null, cursor = null, limit = 2 } = {}) {
-    if (backendId !== null && !["openclaw", "hermes"].includes(backendId)) {
-      throw safeError(null, "INVALID_PARAMS");
-    }
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 2
-      || (cursor !== null && (!exactObject(cursor, ["offset", "revision"])
-        || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0
-        || !Number.isSafeInteger(cursor.revision) || cursor.revision < 1))) {
-      throw safeError(null, "INVALID_PARAMS");
-    }
-    return this._call("plugins.external.approvals.list", { backendId, cursor, limit });
-  }
-
-  async prepareExternalPluginApproval({ requestId, operationId, decision }) {
-    const id = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-    if (!id.test(requestId) || !id.test(operationId) || !["once", "deny"].includes(decision)) {
-      throw safeError(null, "INVALID_PARAMS");
-    }
-    return this._call("plugins.external.approvals.prepare", { requestId, operationId, decision });
-  }
-
-  async commitExternalPluginApproval({ challenge, approved }) {
-    if (typeof challenge !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(challenge)
-      || typeof approved !== "boolean") throw safeError(null, "INVALID_PARAMS");
-    return this._call("plugins.external.approvals.commit", { challenge, approved });
-  }
-
-  async previewPluginInstall(source) {
-    return this._call("plugins.install.preview", { source });
-  }
-
-  async prepareExternalPluginSelection(input) {
-    const method = "plugins.selection.external.prepare";
-    return this._call(method, validateExternalPluginSelectionInput(method, input));
-  }
-  async getExternalPluginSelection(input) {
-    const method = "plugins.selection.external.get";
-    return this._call(method, validateExternalPluginSelectionInput(method, input));
-  }
-  async cancelExternalPluginSelection(input) {
-    const method = "plugins.selection.external.cancel";
-    return this._call(method, validateExternalPluginSelectionInput(method, input));
-  }
-  async cancelSessionExternalPluginSelections(input) {
-    const method = "plugins.selection.external.cancelSession";
-    return this._call(method, validateExternalPluginSelectionInput(method, input));
-  }
-
-  async getCodexSecurityStatus(input) {
-    const request = validateCodexSecurityStatusInput(input);
-    let runtimeProfileId = null;
-    if (request.agentId !== null) {
-      const profile = this._profilesByAgent.get(request.agentId);
-      if (!profile?.enabled) throw safeError(null, "INVALID_PARAMS");
-      // Read current Service binding authority. The profile.list projection has
-      // no bindings array; do not sync CLI accounts or reuse the user's Codex CLI.
-      const state = await this._call("agent.binding.list", { profileId: profile.id });
-      const candidates = state.bindings.filter(binding => binding.runtime === "codex" && binding.enabled
-        && DEFAULT_RUNTIME_ACCOUNTS.find(account => account.id === binding.runtimeAccountId)?.kind !== "native-user");
-      const binding = candidates.find(item => item.id === state.defaultBindingId)
-        || candidates.find(item => item.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID)
-        || candidates[0];
-      runtimeProfileId = binding?.runtimeProfileId || null;
-    }
-    return this._call("plugins.codex-security.status", { installationId: request.installationId, runtimeProfileId });
-  }
-
-  async listBundledPlugins() {
-    return this._call("plugins.bundled.list", {});
-  }
-  async listFirstPartyPlugins() { return this._call("plugins.firstParty.list", {}); }
-  async installFirstPartyPlugin(packageId) { return this._call("plugins.firstParty.install", { packageId }); }
-
-  async previewPluginUninstall(input) { return this._call("plugins.uninstall.preview", input); }
-  async uninstallPlugin(input) { return this._call("plugins.uninstall", input); }
-  async preparePluginApp(sessionKey, callId) {
-    const target = this._sessionTarget(sessionKey);
-    return this._call("plugins.apps.prepare", { profileId: target.profile.id,
-      conversationId: target.sessionKey, callId });
-  }
-  async commitPluginApp(input) { return this._call("plugins.apps.commit", input); }
-  async readPluginAppChunk(transport, index) { return this._call("plugins.apps.chunk", { transport, index }); }
-  async messagePluginApp(transport, message) { return this._call("plugins.apps.message", { transport, message }); }
-  async closePluginApp(transport) { return this._call("plugins.apps.close", { transport }); }
-
-  async preparePluginMcpConsent(input) {
-    const profile = this._profilesByAgent.get(input.agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    const { agentId, ...request } = input;
-    return this._call("plugins.mcp.consent.prepare", { ...request, profileId: profile.id });
-  }
-
-  async preparePluginOAuth(input) {
-    const profile = this._profilesByAgent.get(input.agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    const { agentId, ...request } = input;
-    return this._call("plugins.oauth.prepare", { ...request, profileId: profile.id });
-  }
-  async commitPluginOAuth(input) { return this._call("plugins.oauth.commit", input); }
-  async preparePluginBearer(input) {
-    const profile = this._profilesByAgent.get(input.agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    const { agentId, ...request } = input;
-    return this._call("plugins.bearer.prepare", { ...request, profileId: profile.id });
-  }
-  async commitPluginBearer(input) { return this._call("plugins.bearer.commit", input); }
-  _pluginProfile(agentId) {
-    const profile = this._profilesByAgent.get(agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return profile;
-  }
-  async getPluginSetup({ agentId, installationId }) {
-    return this._call("plugins.setup.get", { profileId: this._pluginProfile(agentId).id, installationId });
-  }
-  async preparePluginSetup({ agentId, installationId, expectedRevision }) {
-    return this._call("plugins.setup.prepare", { profileId: this._pluginProfile(agentId).id,
-      installationId, expectedRevision });
-  }
-  async commitPluginSetup(input) { return this._call("plugins.setup.commit", input); }
-  async getPluginSecrets({ agentId, installationId }) {
-    return this._call("plugins.secrets.list", { profileId: this._pluginProfile(agentId).id, installationId });
-  }
-  async preparePluginSecret({ agentId, installationId, name, clear }) {
-    return this._call("plugins.secrets.prepare", { profileId: this._pluginProfile(agentId).id,
-      installationId, name, clear });
-  }
-  async commitPluginSecret(input) { return this._call("plugins.secrets.commit", input); }
-  async getPluginZoomRegistrationStatus() { return this._call("plugins.zoom.registration.status", {}); }
-  async configurePluginZoomRegistration(input) {
-    return this._call("plugins.zoom.registration.configure", input);
-  }
-  async getPluginDropboxRegistrationStatus() {
-    return this._call("plugins.dropbox.registration.status", {});
-  }
-  async configurePluginDropboxRegistration(input) {
-    return this._call("plugins.dropbox.registration.configure", input);
-  }
-  async getPluginGraphRegistrationStatus() { return this._call("plugins.graph.registration.status", {}); }
-  async getPluginGmailRegistrationStatus() { return this._call("plugins.gmail.registration.status", {}); }
-  async configurePluginGmailRegistration(credentialsPath) {
-    if (typeof credentialsPath !== "string" || !path.isAbsolute(credentialsPath)) {
-      throw safeError(null, "INVALID_PARAMS");
-    }
-    return this._call("plugins.gmail.registration.configure", { credentialsPath });
-  }
-  async getPluginGmailCapabilitiesStatus() { return this._call("plugins.gmail.capabilities.status", {}); }
-  async configurePluginGmailCapabilities(input) {
-    if (!exactObject(input, ["expectedRevision", "writeEnabled", "sendEnabled"])
-      || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
-      || typeof input.writeEnabled !== "boolean" || typeof input.sendEnabled !== "boolean"
-      || input.sendEnabled && !input.writeEnabled) throw safeError(null, "INVALID_PARAMS");
-    return this._call("plugins.gmail.capabilities.configure", input);
-  }
-  async startPluginGmailAuth(input) { return this._call("plugins.gmail.auth.start", input); }
-  async getPluginGmailAuth(input) { return this._call("plugins.gmail.auth.status", input); }
-  async cancelPluginGmailAuth(input) { return this._call("plugins.gmail.auth.cancel", input); }
-  async getPluginGmailAuthRecoveryStatus(input) { return this._call("plugins.gmail.auth.pending", input); }
-  async reconcilePluginGmailAuth(input) { return this._call("plugins.gmail.auth.reconcile", input); }
-  async configurePluginGraphRegistration(input) {
-    if (!exactObject(input, ["clientId"]) || typeof input.clientId !== "string"
-      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(input.clientId)) {
-      throw safeError(null, "INVALID_PARAMS");
-    }
-    return this._call("plugins.graph.registration.configure", input);
-  }
-  async getPluginLovableRegistrationStatus() {
-    return this._call("plugins.lovable.registration.status", {});
-  }
-  async configurePluginLovableRegistration(input) {
-    if (!exactObject(input, ["redirectPort"]) || !Number.isSafeInteger(input.redirectPort)
-      || input.redirectPort < 1024 || input.redirectPort > 65535) {
-      throw safeError(null, "INVALID_PARAMS");
-    }
-    return this._call("plugins.lovable.registration.configure", input);
-  }
-  async reconcilePluginLovableRegistration(input) {
-    if (!exactObject(input, ["reviewedRemoteOutcome"])
-      || input.reviewedRemoteOutcome !== true) throw safeError(null, "INVALID_PARAMS");
-    return this._call("plugins.lovable.registration.reconcile", input);
-  }
-  async getPluginHiggsfieldRegistrationStatus() {
-    return this._call("plugins.higgsfield.registration.status", {});
-  }
-  async configurePluginHiggsfieldRegistration(input) {
-    if (!exactObject(input, ["redirectPort"]) || !Number.isSafeInteger(input.redirectPort)
-      || input.redirectPort < 1024 || input.redirectPort > 65535) {
-      throw safeError(null, "INVALID_PARAMS");
-    }
-    return this._call("plugins.higgsfield.registration.configure", input);
-  }
-  async reconcilePluginHiggsfieldRegistration(input) {
-    if (!exactObject(input, ["reviewedRemoteOutcome"])
-      || input.reviewedRemoteOutcome !== true) throw safeError(null, "INVALID_PARAMS");
-    return this._call("plugins.higgsfield.registration.reconcile", input);
-  }
-  async getPluginSlackRegistrationStatus() {
-    return this._call("plugins.slack.registration.status", {});
-  }
-  async configurePluginSlackRegistration(input) {
-    if (!exactObject(input, ["clientId", "redirectPort", "scopes"])
-      || typeof input.clientId !== "string"
-      || !/^[0-9]{3,20}\.[0-9]{3,20}$/u.test(input.clientId)
-      || !Number.isSafeInteger(input.redirectPort) || input.redirectPort < 1024
-      || input.redirectPort > 65535
-      || !require("../agent-service/plugin-slack-access-policy").slackAccessProfile(input.scopes)) {
-      throw safeError(null, "INVALID_PARAMS");
-    }
-    return this._call("plugins.slack.registration.configure", input);
-  }
-  async preparePluginDisconnect(input) {
-    const profile = this._profilesByAgent.get(input.agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    const { agentId, ...request } = input;
-    return this._call("plugins.connections.prepare", { ...request, profileId: profile.id });
-  }
-  async commitPluginDisconnect(input) { return this._call("plugins.connections.commit", input); }
-  async preparePluginAccountSelection(input) {
-    const profile = this._profilesByAgent.get(input.agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    const { agentId, ...request } = input;
-    return this._call("plugins.connections.selectPrepare", { ...request, profileId: profile.id });
-  }
-  async commitPluginAccountSelection(input) {
-    return this._call("plugins.connections.selectCommit", input);
-  }
-  async getPluginDisconnectOperation(agentId, operationId) {
-    const profile = this._profilesByAgent.get(agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.connections.operation", { profileId: profile.id, operationId });
-  }
-  async previewPluginDependency(input) { return this._call("plugins.dependencies.preview", input); }
-  async commitPluginDependency(input) { return this._call("plugins.dependencies.commit", input); }
-  async getPluginDependencyStatus(input) { return this._call("plugins.dependencies.status", input); }
-  async getPluginDependencyOperation(operationId) { return this._call("plugins.dependencies.operation", { operationId }); }
-  async listPluginRollback(input) { return this._call("plugins.rollback.list", input); }
-  async preparePluginRollback(input) { return this._call("plugins.rollback.prepare", input); }
-  async commitPluginRollback(input) { return this._call("plugins.rollback.commit", input); }
-  async getPluginRollbackOperation(input) { return this._call("plugins.rollback.operation", input); }
-  async getPluginOAuthStatus(agentId, flowId) {
-    const profile = this._profilesByAgent.get(agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.oauth.status", { profileId: profile.id, flowId });
-  }
-  async cancelPluginOAuth(agentId, flowId) {
-    const profile = this._profilesByAgent.get(agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.oauth.cancel", { profileId: profile.id, flowId });
-  }
-
-  async commitPluginMcpConsent(input) {
-    return this._call("plugins.mcp.consent.commit", input);
-  }
-
-  async discoverPluginMcpTools(agentId, bindingId) {
-    const profile = this._profilesByAgent.get(agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.mcp.discover", { profileId: profile.id, bindingId });
-  }
-
-  async installPlugin(input) {
-    return this._call("plugins.install", input);
-  }
-
-  async getPluginOperation(operationId) {
-    return this._call("plugins.operations.get", { operationId });
-  }
-
-  async setPluginInstallationState(input) {
-    return this._call("plugins.installations.set", input);
-  }
-
-  async getPluginSkillBindings(agentId) {
-    const profile = this._profilesByAgent.get(agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.skills.bindings.list", { profileId: profile.id });
-  }
-
-  async getPluginMcpStatus(agentId, installationId) {
-    const profile = this._profilesByAgent.get(agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.mcp.status", { profileId: profile.id,
-      installationId });
-  }
-
-  async getPluginMcpTools(agentId, bindingId) {
-    const profile = this._profilesByAgent.get(agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.mcp.tools.list", { profileId: profile.id,
-      bindingId });
-  }
-
-  async revokePluginMcpGrant(input) {
-    const profile = this._profilesByAgent.get(input.agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.mcp.grants.revoke", {
-      profileId: profile.id, bindingId: input.bindingId,
-      toolIdentity: input.toolIdentity, expectedRevision: input.expectedRevision,
-      operationId: input.operationId,
-    });
-  }
-
-  async revokeAllPluginMcpGrants(input) {
-    const profile = this._profilesByAgent.get(input.agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.mcp.grants.revoke-all", {
-      profileId: profile.id, bindingId: input.bindingId,
-      expectedRevision: input.expectedRevision, operationId: input.operationId,
-    });
-  }
-
-  async setPluginSkillBinding(input) {
-    const profile = this._profilesByAgent.get(input.agentId);
-    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
-    return this._call("plugins.skills.bindings.set", {
-      profileId: profile.id, installationId: input.installationId,
-      componentId: input.componentId, enabled: input.enabled,
-      expectedRevision: input.expectedRevision, operationId: input.operationId,
-    });
   }
 
   async _nativeSkills(profile) {
@@ -3705,9 +3237,10 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async getSkillsPage(options = {}) {
-    const profile = this._profileForSkills(options);
+    if (!options.agentId) this._assertDomainReady();
+    const profile = options.agentId ? this._profileForSkills(options) : null;
     const result = await this._call("harness.skills.query", {
-      profileId: profile.id,
+      profileId: profile?.id ?? null,
       query: options.query ?? "",
       status: options.status ?? "",
       pageIndex: options.pageIndex ?? 0,
@@ -3831,6 +3364,12 @@ class ShoggothBackend extends AgentBackend {
     return this._call("usage.breakdown", { range: validateUsageRange(range), backendId: this.id });
   }
 
+  // Models come from runtime sign-in and custom endpoints only; the generic
+  // catalog editor stays unavailable without presenting itself as read-only.
+  async getModelChangeCapabilities() {
+    return { ...await super.getModelChangeCapabilities(), providerManagedCatalog: true };
+  }
+
   async getModelCatalogSources({ fresh = true } = {}) {
     // The revision API must await discovery and propagate failures. getModels is
     // the legacy best-effort path and may return an older cache immediately.
@@ -3861,15 +3400,21 @@ class ShoggothBackend extends AgentBackend {
     return this._chatCapabilitiesForProfile(profile);
   }
 
-  _chatCapabilitiesForProfile(profile) {
+  _chatCapabilitiesForProfile(profile, features = this._runtimeProofFor(profile.runtimeAccountId)?.features) {
+    if (!features && profile.runtime.startsWith("ext-")) features = require("../agent-service/runtime-capability-evidence").runtimeFeatureSupport(null);
+    const attachments = structuredClone(CHAT_ATTACHMENT_CAPABILITIES);
+    if (features) for (const kind of Object.keys(attachments)) {
+      if (!features.attachments.includes(kind)) delete attachments[kind];
+    }
     return {
-      attachments: structuredClone(CHAT_ATTACHMENT_CAPABILITIES),
+      attachments,
+      ...(features ? { runtimeFeatures: structuredClone(features) } : {}),
       maxPromptBytes: CHAT_MAX_PROMPT_BYTES,
       nativeUiArtifactsV1: this._nativeUiAvailable,
       maxAttachmentBytes: 50 * 1024 * 1024,
       maxAttachments: 8,
       slash: this._activeMemoryCommands || NATIVE_SLASH_RUNTIMES.has(profile.runtime),
-      steer: NATIVE_STEER_RUNTIMES.has(profile.runtime),
+      steer: features ? features.steer === "supported" : NATIVE_STEER_RUNTIMES.has(profile.runtime),
       modelProvider: profile.runtime === "codex" ? profile.providerRef || profile.runtime : profile.runtime,
       modelScope: profile.id,
       permissions: {
@@ -3929,15 +3474,7 @@ class ShoggothBackend extends AgentBackend {
     return this._call("chat.command.exec", { sessionKey: target.sessionKey, text });
   }
 
-  async getPluginSelectionReadiness(input) {
-    try {
-      const { agentId, sessionKey } = validatePluginSelectionReadinessInput(input);
-      this._assertDomainReady();
-      const target = this._sessionTarget(sessionKey);
-      return target.profile.enabled === true && target.profile.agentId === agentId
-        && this._acceptsProfileBackend(target.profile.backendId);
-    } catch { return false; }
-  }
+  async getConnectorSelectionReadiness() { return false; }
 
   _sessionTarget(key) {
     const parsed = parseGatewaySessionKey(key);
@@ -3981,6 +3518,17 @@ class ShoggothBackend extends AgentBackend {
     try {
       let timeoutMs = ENCRYPTED_MUTATION_METHODS.has(method)
         ? ENCRYPTED_MUTATION_TIMEOUT_MS : SERVICE_TIMEOUT_MS;
+      // OAuth startup performs remote discovery and client registration before returning its browser URL.
+      if (CONNECTOR_METHODS.includes(method)) timeoutMs = /(?:verify|add|import|credentials.update|rebind|update|signin.start)$/.test(method) ? 125_000 : SERVICE_TIMEOUT_MS;
+      // Discovery/registration can perform several sequential network requests.
+      if (method === "connector.mcp.signin.start") timeoutMs = 10 * 60_000;
+      // Registry fetches have their own 15-second deadline; IPC must allow that request to settle.
+      if (method === "connector.mcp.registry.list") timeoutMs = MCP_REGISTRY_TIMEOUT_MS;
+      if (LARK_CLI_METHODS.includes(method)) timeoutMs = method === "connector.lark.install" ? 90 * 60 * 1000 + 10_000
+        : method === "connector.lark.setup.status" ? 130_000 : 30_000;
+      if (OFFICIAL_SKILL_METHODS.includes(method)) timeoutMs = method === "connector.official.install" ? 90 * 60 * 1000 + 10_000
+        : method === "connector.official.account" ? 135_000 : 30_000;
+      if (APPLE_DEVICE_METHODS.includes(method)) timeoutMs = method === "connector.apple.connect" ? null : 40_000;
       if (RUNTIME_COMMAND_METHODS.has(method)) timeoutMs = RUNTIME_COMMAND_TIMEOUT_MS;
       if (method === "proactive.runtime.verify") timeoutMs = PROACTIVE_VERIFY_TIMEOUT_MS;
       if (method.startsWith("web.credentials.")) timeoutMs = ENCRYPTED_MUTATION_TIMEOUT_MS;
@@ -3999,24 +3547,10 @@ class ShoggothBackend extends AgentBackend {
       // Creating built-in Agents initializes each one like agent.create.
       if (method === "agent.builtin.ensure") timeoutMs = 60_000;
       if (method === "profile.models.list" || method === "profile.binding.models.list"
+        || method === "profile.capabilities.read" || method === "profile.binding.capabilities.read"
         || method === "chat.session.runtime.model.set" || method === "group.member.models"
         || method === "group.members.model" && params.modelSelection !== null) timeoutMs = MODEL_CATALOG_TIMEOUT_MS;
-      if (method === "plugins.install.preview" || method === "plugins.install"
-        || method === "plugins.installations.set" || method === "plugins.mcp.discover"
-        || method === "plugins.uninstall" || method === "plugins.firstParty.install" || method.startsWith("plugins.apps.")
-        || method.startsWith("plugins.dependencies.") || method.startsWith("plugins.connections.") || method.startsWith("plugins.rollback.")) {
-        timeoutMs = PLUGIN_INSTALL_TIMEOUT_MS;
-      }
-      if (method === "plugins.oauth.commit" || method === "plugins.bearer.commit") timeoutMs = 60_000;
-      if (method === "plugins.gmail.registration.configure") timeoutMs = 30_000;
-      if (method === "plugins.lovable.registration.configure"
-        || method === "plugins.higgsfield.registration.configure") timeoutMs = 60_000;
-      // Enabling may pin an interpreter, start each MCP server and discover its tools.
-      if (method === "plugins.setup.commit" || method === "plugins.secrets.commit") timeoutMs = 120_000;
-      if (method === "plugins.codex-security.status") timeoutMs = 20_000;
-      if (["plugins.install.preview", "plugins.install"].includes(method)
-        && params.source?.kind === "remote-git") timeoutMs = 120_000;
-      if (method === "inspiration.media.read" && params.preview === true) timeoutMs = 125_000;
+      if (method === "inspiration.media.read" && params.preview === true) timeoutMs = 610_000;
       if (options.timeoutMs !== undefined) {
         if (method !== "service.status" || !Number.isSafeInteger(options.timeoutMs)
           || options.timeoutMs < 1 || options.timeoutMs > DEFAULT_SERVICE_STATUS_TIMEOUT_MS) {
@@ -5681,6 +5215,8 @@ class ShoggothBackend extends AgentBackend {
       enabled: value.enabled,
       state: value.enabled ? "scheduled" : "disabled",
       stateLabel: value.enabled ? "scheduled" : "disabled",
+      ...(value.connectorMigrationRequired ? { connectorMigrationRequired: true,
+        state: "migration-required", stateLabel: "migration-required", actions: { run: false } } : {}),
       deliver: "chat",
       ...(value.systemManaged ? { actions: { edit: false, toggle: false, delete: false,
         run: false, reason: "system-managed" } } : {}),
@@ -5769,7 +5305,8 @@ class ShoggothBackend extends AgentBackend {
   }
   listGroupChatMessages(groupId, query = {}) {
     return this._groupChatCall("group.history", { groupId, afterSeq: query.afterSeq ?? null,
-      beforeSeq: query.beforeSeq ?? null, limit: query.limit ?? 50 });
+      beforeSeq: query.beforeSeq ?? null, limit: query.limit ?? 50,
+      ...(query.afterRevision === undefined ? {} : { afterRevision: query.afterRevision }) });
   }
   readGroupChatMessage(groupId, input) {
     return this._groupChatCall("group.message.read", { groupId, seq: input?.seq,
@@ -7174,6 +6711,19 @@ class ShoggothBackend extends AgentBackend {
       ...(result.status === "unresolved" && !target.session.inspirationId ? { canReconcile: true } : {}) };
   }
 
+  async chatSecretRequest(action, input) {
+    if (!require("./chat-secret-contract").SECRET_METHODS.includes(`chat.secret.${action}`)) throw safeError(null, "SECRET_INPUT_INVALID");
+    let params = { ...input };
+    if (params.backendId === this.id) {
+      await this._ensureCodexDesktopSession(params.sessionKey);
+      const target = this._sessionTarget(params.sessionKey);
+      params.sessionKey = target.sessionKey;
+      params.agentId = target.session.profileId || params.agentId;
+      if (action === "prepare") params.operationId = sendOperationId(target.sessionKey, params.operationId, this.randomUUID);
+    }
+    return this._call(`chat.secret.${action}`, params);
+  }
+
   async reconcileChatOperation(key, clientKey, createdAt) {
     await this._ensureCodexDesktopSession(key);
     if (!clientKey || !Number.isSafeInteger(createdAt) || createdAt <= 0) {
@@ -7226,6 +6776,8 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async sendMessage(key, message, runId, hooks = {}, opts = {}) {
+    if (Object.hasOwn(opts, "pluginSelection")) throw Object.assign(new Error("旧插件选择已停用，请重新选择连接器账号"), { code: "PLUGIN_PLATFORM_RETIRED" });
+    if (Object.hasOwn(opts,"connectorSelection")) throw Object.assign(new Error("OpenConnector 已退役，不能发送旧账号选择"), {code:"OPEN_CONNECTOR_RETIRED",receiptUncertain:true});
     let target;
     try {
       if (this._statusUncertain) {
@@ -7273,7 +6825,7 @@ class ShoggothBackend extends AgentBackend {
       ...hooks,
       ...(typeof hooks.nativeContent === "function" ? { nativeContent: (mode, parts, meta) => {
         if (terminalObserved) return;
-        if (mode === "final") terminalObserved = true;
+        if (mode === "final" || mode === "aborted") terminalObserved = true;
         this._invokeHook(hooks, "nativeContent", mode, parts, meta);
       } } : {}),
       final: (...args) => {
@@ -7303,6 +6855,7 @@ class ShoggothBackend extends AgentBackend {
     }
     try {
       if (poll.cancelled) return;
+      this._emitRunStatus(observerHooks, state, "starting", { stage: "preparing" });
       const supplied = opts.attachments ?? [];
       const pathAttachment = supplied.length ? null : explicitPathAttachment(message);
       const items = pathAttachment ? [pathAttachment] : supplied;
@@ -7320,7 +6873,6 @@ class ShoggothBackend extends AgentBackend {
           sessionKey,
           prompt: String(message),
           ...(attachments.length ? { attachments } : {}),
-          ...(opts.pluginSelection !== undefined ? { pluginSelection: opts.pluginSelection } : {}),
           createdAt: this.now(),
         });
       } catch (error) {
@@ -7680,6 +7232,7 @@ class ShoggothBackend extends AgentBackend {
           }
         }
         const payload = result.events[terminalIndex].payload || {};
+        state.failure = runtimeFailureDetail(payload.failure);
         if (TERMINAL_RUN_STATUSES.has(payload.status)) {
           terminal = {
             ...context.run,
@@ -7693,6 +7246,7 @@ class ShoggothBackend extends AgentBackend {
     if (!terminal) return false;
     await this._settleTerminal(context, state, terminal, {
       skipHistory: true,
+      failure: state.failure,
     });
     return true;
   }
@@ -7816,7 +7370,7 @@ class ShoggothBackend extends AgentBackend {
         resultSummary: payload.resultSummary ?? null,
         errorCode: payload.errorCode ?? null,
       };
-      await this._settleTerminal(context, state, terminal, { cronOutput: payload.cronOutput });
+      await this._settleTerminal(context, state, terminal, { cronOutput: payload.cronOutput, failure: payload.failure });
       return true;
     }
     return false;
@@ -7824,16 +7378,30 @@ class ShoggothBackend extends AgentBackend {
 
   _emitRunStatus(hooks, state, status, payload = {}) {
     if (!["queued", "starting", "running", "retrying", "waiting_approval", "waiting_input", "compacting", "compacted"].includes(status)) return;
+    const preparationStage = status === "queued"
+      ? payload?.reason === "CONTEXT_PREPARING" ? "context"
+        : payload?.reason === "RUNTIME_PREPARING" ? "capabilities"
+          : payload?.reason === "CONTEXT_COMPACTING" ? "compacting" : null : null;
+    if (preparationStage) {
+      // Durable admission is still pending, but the assistant is being prepared
+      // now. Project the same phase for live events and recovered snapshots.
+      status = "starting";
+      payload = { stage: preparationStage };
+    }
     const reason = status === "queued" ? boundedText(payload?.reason, 128) || null
-      : status === "retrying" && payload?.reason === "RUNTIME_RATE_LIMITED" ? payload.reason : null;
+      : status === "retrying" && ["RUNTIME_RATE_LIMITED", "RUNTIME_UPSTREAM_UNAVAILABLE"].includes(payload?.reason) ? payload.reason : null;
     const queuedAt = status === "queued" && Number.isSafeInteger(payload?.queuedAt) && payload.queuedAt >= 0
       ? payload.queuedAt : null;
-    if (state.lastStatus === status && state.lastQueueReason === reason && state.lastQueuedAt === queuedAt) return;
+    const stage = ["starting", "running"].includes(status)
+      && ["preparing", "context", "compacting", "capabilities", "connecting", "restoring", "opening", "waiting"].includes(payload?.stage) ? payload.stage : null;
+    if (state.lastStatus === status && state.lastQueueReason === reason && state.lastQueuedAt === queuedAt
+      && state.lastStartupStage === stage) return;
+    state.lastStartupStage = stage;
     state.lastStatus = status;
     state.lastQueueReason = reason;
     state.lastQueuedAt = queuedAt;
     this._invokeHook(hooks, "status", { kind: status, text: status,
-      ...(reason ? { reason } : {}), ...(queuedAt !== null ? { queuedAt } : {}) });
+      ...(reason ? { reason } : {}), ...(queuedAt !== null ? { queuedAt } : {}), ...(stage ? { stage } : {}) });
   }
 
   async _consumeActiveSnapshot(context, state, snapshotRun, snapshot = null) {
@@ -7975,12 +7543,30 @@ class ShoggothBackend extends AgentBackend {
         await this._restoreNativeUiHistory(context, state);
       } catch { /* Retain the accepted live projection if history is unavailable. */ }
     }
+    if (terminal.status === "canceled" && !terminal.errorCode) {
+      if (context.poll.consumerCancelled) return;
+      if (!this._emitNativeContent(context, state, "aborted", { runId: terminal.id })) {
+        this._invokeHook(context.hooks, "final", state.text || "", false,
+          { runId: terminal.id, stopReason: "aborted" });
+      }
+      return;
+    }
+    let failure = runtimeFailureDetail(options.failure);
+    if (!failure && !Object.hasOwn(options, "failure")
+      && ["failed", "interrupted"].includes(terminal.status) && options.skipHistory !== true) {
+      try {
+        const items = await this._getHistoryItems(context.key);
+        const messages = reassembleHistory(items.filter(item => item.runId === terminal.id && item.type === "error"));
+        failure = runtimeFailureDetail(messages.find(message => message.role === "system"
+          && message.errorCode === terminal.errorCode)?.failure);
+      } catch { /* Missing diagnostics never change the proven terminal status. */ }
+    }
+    if (context.poll?.consumerCancelled) return;
     if (state.nativeContent?.hasUi && typeof context.hooks.nativeContent === "function") {
       if (context.poll.consumerCancelled) return;
       const code = terminal.errorCode || (terminal.status === "canceled" ? "RUN_CANCELED" : "RUN_FAILED");
       const errorMessage = terminal.status === "completed" ? null
-        : RUNTIME_START_MESSAGES[code] || (code === "SERVICE_RESTARTED"
-          ? "Agent Service 已重启，本次任务已中断，请重试" : `Shoggoth 任务未完成 (${code})`);
+        : code === "SERVICE_RESTARTED" ? "Agent Service 已重启，本次任务已中断，请重试" : runtimeErrorMessage(code, failure);
       this._emitNativeContent(context, state, "final", { runId: terminal.id,
         ...(errorMessage ? { errorMessage } : {}) });
       return;
@@ -8003,7 +7589,7 @@ class ShoggothBackend extends AgentBackend {
       }
       if (!text) text = typeof terminal.resultSummary === "string" ? terminal.resultSummary : "";
       if (context.poll.consumerCancelled) return;
-      this._invokeHook(context.hooks, "final", text, false, { runId: terminal.id,
+      this._invokeHook(context.hooks, "final", text, false, { runId: terminal.id, displayId: `native-run:${terminal.id}`,
         ...(["cron", "inspiration"].includes(context.run.source) ? { notificationCategory: context.run.source } : {}) });
       return;
     }
@@ -8024,8 +7610,8 @@ class ShoggothBackend extends AgentBackend {
       this._invokeHook(context.hooks, "error", "Agent Service 已重启，本次任务已中断，请重试");
       return;
     }
-    if (RUNTIME_START_MESSAGES[code]) {
-      this._invokeHook(context.hooks, "error", RUNTIME_START_MESSAGES[code]);
+    if (RUNTIME_START_MESSAGES[code] || failure) {
+      this._invokeHook(context.hooks, "error", runtimeErrorMessage(code, failure));
       return;
     }
     this._invokeHook(context.hooks, "error", `Shoggoth 任务未完成 (${code})`);
@@ -8100,7 +7686,38 @@ class ShoggothBackend extends AgentBackend {
       status: result.run.status,
       run: result.run,
     });
+    if (record.request.kind === "user_input") {
+      // Use the committed display records, including the Service's masking or
+      // fallback text. Reconstructing an echo from submitted fields can expose
+      // a secret and would disagree with the eventual history replacement.
+      const messages = await this._promptResponseHistory(record);
+      if (messages.length) return { ...result, messages };
+    }
     return result;
+  }
+
+  async _promptResponseHistory(record) {
+    const { transcriptEventId } = require("../agent-service/transcript-store");
+    const ids = [transcriptEventId("chat-request", record.requestId), transcriptEventId("interactive-response", record.requestId)];
+    const generation = this._generation, items = [], cursors = new Set();
+    let cursor = null;
+    try {
+      // This is a bounded recent-history read, not a full transcript refresh.
+      for (let page = 0; page < 8; page++) {
+        const result = await this._call("chat.history", { sessionKey: record.sessionKey, cursor, limit: 20 });
+        if (generation !== this._generation) return [];
+        items.unshift(...result.messages.filter(item => item.runId === record.runId && ids.includes(item.fragment?.messageId ?? item.id)));
+        if (ids.every(id => items.some(item => (item.fragment?.messageId ?? item.id) === id))
+          && (!items[0]?.fragment || items[0].fragment.index === 0)) {
+          const messages = reassembleHistory(items);
+          if (messages.length === 2 && messages[0].id === ids[0] && messages[0].role === "assistant"
+            && messages[1].id === ids[1] && messages[1].role === "user") return messages;
+        }
+        if (!result.hasMore || !result.nextCursor || cursors.has(result.nextCursor)) break;
+        cursor = result.nextCursor; cursors.add(cursor);
+      }
+    } catch { /* The response was accepted. A display read must never invite resubmission. */ }
+    return [];
   }
 
   async _findActiveRun(target, { refresh = false } = {}) {

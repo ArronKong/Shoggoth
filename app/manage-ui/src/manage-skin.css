@@ -1139,7 +1139,7 @@ header.page-head {
   min-width: 0;
 }
 
-.management-page.skills-page .skill-pagination {
+.management-page.skills-page .skill-load-more {
   display: flex;
   align-items: center;
   justify-content: center;

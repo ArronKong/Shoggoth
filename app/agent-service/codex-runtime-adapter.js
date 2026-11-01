@@ -10,6 +10,7 @@ const { runtimeStageError } = require("./runtime-stage-error");
 const { normalizeRuntimeCommands } = require("./runtime-commands");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const { codexRuntimeContextUsage, unknownRuntimeContextUsage } = require("./runtime-context-usage");
+const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID, NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 
 const CODEX_COMMANDS = normalizeRuntimeCommands([
   { name: "compact", description: "Compact the current Codex conversation" },
@@ -109,14 +110,23 @@ function mapEvent(event) {
 }
 
 class CodexRuntimeHandle {
-  constructor(binding, host) {
+  constructor(binding, host, secretGateway = null) {
     this.runtime = "codex";
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
     this.capabilities = CODEX_CAPABILITIES;
     this.host = host;
+    this.secretGateway = secretGateway;
+    this.secretRoutes = new Map();
+    Promise.resolve(host.terminated).finally(() => {
+      for (const route of this.secretRoutes.values()) route.close();
+      this.secretRoutes.clear();
+    }).catch(() => {});
     this.sessionInstructions = new Map();
+    // Provider kind each native thread was started or resumed on.
+    this.threadProviderKinds = new Map();
     this.modelOnlySessions = new Set();
+    this.compactionCycles = new Map();
     this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
   }
 
@@ -138,8 +148,18 @@ class CodexRuntimeHandle {
         if (mapped.type === "context_compacted") {
           // Compacted history may no longer hold earlier injected rules/context.
           this.promptLedger.reset(mapped.sessionId);
+          const turnKey = mapped.turnId ? JSON.stringify([mapped.sessionId, mapped.turnId]) : null;
+          // The item ID distinguishes multiple compactions within one turn.
+          // A trailing legacy turn notice refers to the latest item in it.
+          const cycle = mapped.method === "thread/compacted" && turnKey
+            ? this.compactionCycles.get(turnKey) ?? mapped.compactionId : mapped.compactionId;
+          if (turnKey && cycle) {
+            this.compactionCycles.set(turnKey, cycle);
+            while (this.compactionCycles.size > 256) this.compactionCycles.delete(this.compactionCycles.keys().next().value);
+          }
           listener({ known: true, type: "context_compacted", sessionId: mapped.sessionId,
             ...(mapped.turnId ? { turnId: mapped.turnId } : {}),
+            ...(cycle ? { compactionId: cycle, compaction: { id: cycle, status: "completed" } } : {}),
             contextUsage: unknownRuntimeContextUsage(mapped.sessionId) });
           return;
         }
@@ -162,8 +182,9 @@ class CodexRuntimeHandle {
   }
 
   async resolveModelOnly(input) {
+    this._assertNamedProvider(input);
     return require("./runtime-model-resolution").runBoundedModelResolution(input, async signal => {
-      const config = await this._isolatedGenerationConfig();
+      const config = { ...await this._isolatedGenerationConfig(), ...this._threadProviderConfig(input) };
       this.assertExecutionProviderCurrent();
       if (signal.aborted) throw adapterError("MODEL_ONLY_CANCELED", "Model discovery canceled");
       let response;
@@ -199,15 +220,19 @@ class CodexRuntimeHandle {
     }
     const reviewConfig = input.proactiveReview ? await this._proactiveReviewConfig()
       : input.isolatedGeneration ? await this._isolatedGenerationConfig() : undefined;
+    const secretConfig = await this._modelSecretConfig(input);
+    const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
     const response = await this._sessionStartOrResumeRequest(() => this.host.threadStart(definedProperties({
       threadSource: input.source,
       ephemeral: input.persistent === undefined ? undefined : !input.persistent,
       developerInstructions: input.developerInstructions,
       model: input.model,
       cwd: input.cwd,
-      ...(reviewConfig ? { config: reviewConfig } : {}),
+      ...(reviewConfig || secretConfig || providerConfig
+        ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig } } : {}),
       ...permissionParams(input.permissionPolicy, input.permissionMode),
     })));
+    this._rememberThreadProvider(response?.thread?.id, input);
     assertApprovalsReviewer(input, response);
     if (typeof input.developerInstructions === "string") {
       this.sessionInstructions.set(response.thread.id, {
@@ -238,15 +263,19 @@ class CodexRuntimeHandle {
 
   async sessionResume(input) {
     const reviewConfig = input.proactiveReview ? await this._proactiveReviewConfig() : undefined;
+    const secretConfig = await this._modelSecretConfig(input);
+    const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
     const response = await this._sessionStartOrResumeRequest(() => this.host.threadResume(definedProperties({
       threadId: input.sessionId,
       excludeTurns: true,
       developerInstructions: input.developerInstructions,
       model: input.model,
       cwd: input.cwd,
-      ...(reviewConfig ? { config: reviewConfig } : {}),
+      ...(reviewConfig || secretConfig || providerConfig
+        ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig } } : {}),
       ...permissionParams(input.permissionPolicy, input.permissionMode),
     })));
+    this._rememberThreadProvider(input.sessionId, input);
     assertApprovalsReviewer(input, response);
     if (typeof input.developerInstructions === "string") {
       const previous = this.sessionInstructions.get(response.thread.id);
@@ -256,6 +285,88 @@ class CodexRuntimeHandle {
     }
     if (input.proactiveReview) await this.assertProactiveReviewIsolation(response, { requireResponseTool: input.proactiveResponseRequired !== false });
     return mapThreadEnvelope(response);
+  }
+
+  // The built-in Codex Harness declares several sources next to a ChatGPT
+  // process default, so its model work always names one: an omitted source
+  // fails here instead of silently reaching ChatGPT.
+  _namesProviderRequired() {
+    return this.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID;
+  }
+
+  _assertNamedProvider(input) {
+    if (this._namesProviderRequired() && input?.modelProvider === undefined) {
+      throw adapterError("RUNTIME_MODEL_PROVIDER_REQUIRED", "Model work on the built-in Codex Harness must name its source");
+    }
+  }
+
+  // `modelProvider` names the provider a conversation selected; the process
+  // declares it (codex-runtime-config). Omitted keeps the process default.
+  _threadProviderKind(input) {
+    const selected = input?.modelProvider;
+    if (selected === undefined) return this.host.modelProviderKind;
+    if (this.runtimeAccountId === NATIVE_CODEX_RUNTIME_ACCOUNT_ID) {
+      throw adapterError("RUNTIME_PROTOCOL_INVALID", "Native Codex uses its own provider configuration");
+    }
+    if (!selected || typeof selected !== "object" || Array.isArray(selected)
+      || Object.keys(selected).sort().join() !== "configId,kind"
+      || typeof selected.kind !== "string" || !/^[a-z][a-z0-9-]{0,63}$/u.test(selected.kind)
+      || typeof selected.configId !== "string"
+      || !/^(?:openai|amazon-bedrock|shoggoth_[0-9a-f]{16})$/u.test(selected.configId)) {
+      throw adapterError("RUNTIME_PROTOCOL_INVALID", "Model provider selection is invalid");
+    }
+    return selected.kind;
+  }
+
+  _threadProviderConfig(input) {
+    if (input?.modelProvider === undefined) return undefined;
+    this._threadProviderKind(input);
+    return { model_provider: input.modelProvider.configId };
+  }
+
+  _rememberThreadProvider(threadId, input) {
+    if (typeof threadId !== "string" || input?.modelProvider === undefined) return;
+    this.threadProviderKinds.delete(threadId);
+    this.threadProviderKinds.set(threadId, input.modelProvider.kind);
+    while (this.threadProviderKinds.size > 4096) this.threadProviderKinds.delete(this.threadProviderKinds.keys().next().value);
+  }
+
+  async _modelSecretConfig(input) {
+    if (!this.secretGateway || !input.modelSecretScope) return undefined;
+    const providerKind = this._threadProviderKind(input);
+    // Other providers retain their original route. Their native request path
+    // is not advertised as protected by this OpenAI-only integration.
+    if (!["chatgpt", "openai-api-key"].includes(providerKind)) return undefined;
+    const scope = input.modelSecretScope;
+    if (!scope || Object.keys(scope).sort().join() !== "profileId,sessionId"
+      || ![scope.profileId, scope.sessionId].every(value => typeof value === "string" && value.length > 0 && value.length <= 1024)) {
+      throw adapterError("SECRET_MODEL_SCOPE_INVALID", "Model credential scope is invalid");
+    }
+    const key = JSON.stringify([providerKind, scope.profileId, scope.sessionId]);
+    let route = this.secretRoutes.get(key);
+    if (!route) {
+      route = await this.secretGateway.bind({ scope, providerKind,
+        assertCurrent: () => this.host.assertExecutionProviderCurrent?.() });
+      this.secretRoutes.set(key, route);
+    }
+    const provider = "shoggoth_local_projection";
+    return {
+      model_provider: provider,
+      [`model_providers.${provider}.name`]: "OpenAI",
+      [`model_providers.${provider}.base_url`]: route.baseUrl,
+      [`model_providers.${provider}.wire_api`]: "responses",
+      [`model_providers.${provider}.supports_websockets`]: false,
+      // A failed local projection/response proof must not resubmit the model
+      // request behind the Product's turn and operation ownership boundary.
+      [`model_providers.${provider}.request_max_retries`]: 0,
+      [`model_providers.${provider}.stream_max_retries`]: 0,
+      [`model_providers.${provider}.requires_openai_auth`]: providerKind === "chatgpt",
+      ...(providerKind === "openai-api-key" ? { [`model_providers.${provider}.env_key`]: "OPENAI_API_KEY" } : {}),
+      // The local projection boundary accepts bounded JSON, not native zstd.
+      "features.enable_request_compression": false,
+      "features.responses_websockets": false,
+      "features.responses_websockets_v2": false,
+    };
   }
 
   async _sessionStartOrResumeRequest(request) {
@@ -467,6 +578,9 @@ class CodexRuntimeHandle {
   sessionDelete(input) { return this.host.threadDelete({ threadId: input.sessionId }); }
 
   async turnStart(input) {
+    if (this._namesProviderRequired() && !this.threadProviderKinds.has(input.sessionId)) {
+      throw adapterError("RUNTIME_MODEL_PROVIDER_REQUIRED", "Model work on the built-in Codex Harness must name its source");
+    }
     const delivery = require("./native-instruction-delivery");
     const turn = delivery.splitTurnInstructions(delivery.turnInstructions(input));
     // Injected items stay in the thread's history, so unchanged Run rules and
@@ -496,9 +610,13 @@ class CodexRuntimeHandle {
     let effort = input.thinkingLevel;
     // A null effort in turn/start means "keep the previous override". Resolve
     // the catalog default explicitly when the user selects inherited settings.
-    // Custom Responses models use the endpoint's settings and need not exist
-    // in Codex's GPT catalog. Their inherited effort carries no native override.
-    if (effort === null && this.host.modelProviderKind === "custom-responses") effort = undefined;
+    // Only OpenAI models are in Codex's GPT catalog. Other sources (custom
+    // endpoints, OpenRouter, local servers, Bedrock) use their own settings;
+    // their inherited effort carries no native override.
+    if (effort === null && !["chatgpt", "openai-api-key"]
+      .includes(this.threadProviderKinds.get(input.sessionId) ?? this.host.modelProviderKind ?? "chatgpt")) {
+      effort = undefined;
+    }
     if (effort === null) {
       let cursor = null;
       const seen = new Set();
@@ -713,9 +831,12 @@ class CodexRuntimeAdapter {
       throw adapterError("RUNTIME_ADAPTER_INVALID", "Codex adapter requires a RuntimePool");
     }
     this.runtimePool = options.runtimePool;
+    this.secretGateway = options.secretGateway || null;
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }
+
+  runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
 
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);
@@ -726,7 +847,7 @@ class CodexRuntimeAdapter {
     const key = JSON.stringify([binding.runtimeProfileId, binding.runtimeAccountId]);
     const existing = this.handles.get(key);
     if (existing?.host === host) return existing.handle;
-    const handle = Object.freeze(new CodexRuntimeHandle(binding, host));
+    const handle = Object.freeze(new CodexRuntimeHandle(binding, host, this.secretGateway));
     const entry = { host, handle };
     this.handles.set(key, entry);
     if (host.terminated && typeof host.terminated.then === "function") {

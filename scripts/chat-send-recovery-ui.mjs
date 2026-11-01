@@ -6,6 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 const root = path.resolve(import.meta.dirname, ".."), ui = path.join(root, "app/manage-ui");
 const requireUi = createRequire(path.join(ui, "package.json")), { build } = requireUi("esbuild");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-chat-send-recovery-"));
@@ -28,39 +29,65 @@ const observationOnly = process.argv.includes("--observation-only");
 const ordinaryRecoveryOnly = process.argv.includes("--ordinary-recovery-only");
 const ordinaryRecoveryCases = ["live", "late-ack", "reload"].flatMap(kind => ["", "-immersive"]
   .map(suffix => [`ordinary-recovery-${kind}${suffix}`, "openclaw"]));
-const upstreamOnly = process.argv.includes("--upstream-only");
+const hermesFailureOnly = process.argv.includes("--hermes-failure-only");
+const upstreamOnly = process.argv.includes("--upstream-only") || hermesFailureOnly;
 const slashOnly = process.argv.includes("--slash-only");
 const scenarioIndex = process.argv.indexOf("--scenario");
 const selectedScenario = scenarioIndex < 0 ? null : process.argv[scenarioIndex + 1];
 const slashCases = ["slash-order", "slash-order-error", "slash-order-uncertain", "slash-order-immersive", "slash-order-uncertain-immersive"]
   .filter(scenario => !selectedScenario || scenario === selectedScenario).map(scenario => [scenario, "hermes"]);
 assert.ok(!slashOnly || slashCases.length, "unknown slash fixture scenario");
-const upstreamCases = [["upstream-error", "shoggoth"], ["upstream-error-immersive", "shoggoth"]];
+const upstreamCases = [["upstream-error", hermesFailureOnly ? "hermes" : "shoggoth"],
+  ["upstream-error-immersive", hermesFailureOnly ? "hermes" : "shoggoth"]];
 const failureIndex = process.argv.indexOf("--error-code");
-const publicFailureCode = failureIndex < 0 ? "RUNTIME_UPSTREAM_UNAVAILABLE" : process.argv[failureIndex + 1];
+const publicFailureCode = hermesFailureOnly ? "HERMES_RATE_LIMIT" : failureIndex < 0 ? "RUNTIME_UPSTREAM_UNAVAILABLE" : process.argv[failureIndex + 1];
 const publicFailures = {
   RUNTIME_UPSTREAM_UNAVAILABLE: "上游模型服务不可用，请稍后重试，或选择其他可用模型",
   RUNTIME_OUTPUT_LIMIT_EXCEEDED: "CLI 的单条数据或当前保留内容超过安全容量，本次任务已停止；已生成的文件可能仍然存在，请检查原生会话结果",
   RUNTIME_ATTACHMENT_UNSUPPORTED: "当前模型不支持这种附件输入，请改用文件路径读取，或选择支持该附件的模型",
   RUNTIME_ATTACHMENT_RECOVERY_REQUIRED: "未能安全处理旧会话中的附件，原记录已保留；请稍后重试或新建会话",
 };
-assert.ok(Object.hasOwn(publicFailures, publicFailureCode), "unknown public error fixture");
+assert.ok(hermesFailureOnly || Object.hasOwn(publicFailures, publicFailureCode), "unknown public error fixture");
 // Use the App bridge's public message in both the terminal frame and history.
 const { ShoggothBackend } = createRequire(path.join(root, "package.json"))("./app/core/shoggoth-backend");
 const bridge = new ShoggothBackend({ requestService: async () => { throw Error("fixture stays offline"); } });
-let upstreamError;
-await bridge._settleTerminal({ sessionKey: "fixture", run: { id: "upstream-fixture" },
-  hooks: { error: message => { upstreamError = message; } } }, { settled: false },
-{ id: "upstream-fixture", status: "failed", errorCode: publicFailureCode });
-assert.equal(upstreamError, publicFailures[publicFailureCode]);
+let upstreamError, hermesFailureHistory = null;
+if (hermesFailureOnly) {
+  const { HermesBackend } = createRequire(path.join(root, "package.json"))("./app/core/hermes-backend");
+  const { createDashboardJournal } = createRequire(path.join(root, "package.json"))("./app/core/dashboard-journal");
+  const key = "agent:hermes-recovery-fixture:11111111-1111-4111-8111-111111111111";
+  const user = { id: "hermes-msg-1", role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() - 60000 };
+  const make = () => {
+    const backend = new HermesBackend({});
+    backend.profileById.set("hermes-recovery-fixture", "default");
+    backend.dashboards.set("default", { baseUrl: "http://fixture.invalid" });
+    backend.attachDashboardJournal(createDashboardJournal(path.join(temp, "journal.json")));
+    backend._fetchHistoricalMessages = async () => [user];
+    return backend;
+  };
+  const backend = make(); backend.transcripts.set(key, [user]);
+  backend._gwComplete(key, "runtime", { sessionKey: key, userTimestamp: user.timestamp, observers: new Set(),
+    hooks: { error: message => { upstreamError = message; } } },
+  { status: "error", text: "Your request was not processed.", error: "HTTP 429: model_concurrency_rate_limit_exceeded",
+    persisted_turn: { user_row_id: 1 } });
+  hermesFailureHistory = (await make().getHistory(key)).messages;
+  assert.match(upstreamError, /429/u);
+  assert.equal(hermesFailureHistory.at(-1).errorMessage, upstreamError);
+} else {
+  await bridge._settleTerminal({ sessionKey: "fixture", run: { id: "upstream-fixture" },
+    hooks: { error: message => { upstreamError = message; } } }, { settled: false },
+  { id: "upstream-fixture", status: "failed", errorCode: publicFailureCode });
+  assert.equal(upstreamError, publicFailures[publicFailureCode]);
+}
 let server;
 const cleanup = async () => { if (server) await new Promise(resolve => server.close(resolve)); fs.rmSync(temp, { recursive: true, force: true }); };
 try {
   await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-send-recovery.tsx")], bundle: true,
     format: "esm", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"', __UPSTREAM_ERROR__: JSON.stringify(upstreamError),
-      __PUBLIC_FAILURE_CODE__: JSON.stringify(publicFailureCode) },
+      __PUBLIC_FAILURE_CODE__: JSON.stringify(publicFailureCode), __HERMES_FAILURE_HISTORY__: JSON.stringify(hermesFailureHistory) },
     loader: { ".woff2": "dataurl", ".woff": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
-    outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(ui, "node_modules")], logLevel: "silent" });
+    outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(ui, "node_modules")], logLevel: "silent",
+    plugins: [viteArtworkFixturePlugin(root)] });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;min-height:0}#root{height:100vh}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
   server = http.createServer((req, res) => {
     const pathname = new URL(req.url, "http://localhost").pathname;
@@ -88,7 +115,7 @@ const rows=[];try{for(const [scenario,backend] of cases) {
   const testUrl=${JSON.stringify(url)}+"?scenario="+scenario+"&backend="+backend+"#/chat";
   await window.loadURL(testUrl);let row;
   try {row=await window.webContents.executeJavaScript("window.runChatSendRecoveryFixture()",true);}
-  catch(error){console.error(JSON.stringify({scenario,backend,diagnostic:await window.webContents.executeJavaScript("({text:document.body.innerText.slice(0,2000),pending:localStorage.getItem('shoggoth.chat.pending-native-sends.v1'),selection:localStorage.getItem('shoggoth.chat.plugin-selection.v1')})",true)}));throw error;}
+  catch(error){console.error(JSON.stringify({scenario,backend,diagnostic:await window.webContents.executeJavaScript("({text:document.body.innerText.slice(0,2000),pending:localStorage.getItem('shoggoth.chat.pending-native-sends.v1'),selection:localStorage.getItem('shoggoth.chat.connector-selection.v1')})",true)}));throw error;}
   rows.push(row);console.log(JSON.stringify(row));
   if(scenario.startsWith("native-rejected") || scenario.startsWith("legacy-recovery")) {
     ${screenshot ? `fs.writeFileSync(${JSON.stringify(screenshot)}.replace(/\\.png$/u,"-"+scenario+".png"),(await window.webContents.capturePage()).toPNG());` : ""}

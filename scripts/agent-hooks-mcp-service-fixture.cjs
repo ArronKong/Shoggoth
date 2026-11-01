@@ -7,8 +7,6 @@ const { requestService, readClientToken } = require("../app/agent-service/client
 const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
 const { createMcpStdioHandler, authenticateMcpSession, MCP_STDIO_PROTOCOL_VERSION } = require("../app/shoggoth-mcp-helper");
 const { InspirationRuntime } = require("./fixtures/inspiration-runtime.cjs");
-const { PluginComponentCatalog } = require("../app/agent-service/plugin-component-catalog");
-const { pluginServerId } = require("../app/agent-service/plugin-runtime-tool-service");
 const uuid = () => crypto.randomUUID();
 async function until(predicate) {
   const limit = Date.now() + 8000;
@@ -53,7 +51,8 @@ async function fixture(t, { separateHosts = false } = {}) {
     runtimePool,
     setCronTimer: () => 1, clearCronTimer() {}, setProactiveTimer: () => 1, clearProactiveTimer() {},
     notificationSender: async input => { sent.push(input); return { state: "submitted" }; } };
-  let service = createAgentService(serviceOptions);
+  let service;
+  service = createAgentService(serviceOptions);
   let helper;
   t.after(async () => { await helper?.close(); await service.stop({ notify: false }); fs.rmSync(root, { recursive: true, force: true }); });
   await service.start();
@@ -332,55 +331,6 @@ test("50 real Service rounds, 1000 authenticated helper interactions and five cl
   }
   assert.equal(calls, 1000); assert.equal(blocked, 500); assert.equal(native.effects().length, 500);
 });
-async function registerPluginMcp(f) {
-  const sourcePath = path.join(f.root, "plugin-package"); fs.mkdirSync(sourcePath, { mode: 0o700 });
-  fs.writeFileSync(path.join(sourcePath, "plugin.json"), JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", name: "living-mcp-fixture" }));
-  fs.writeFileSync(path.join(sourcePath, "mcp.json"), JSON.stringify({ $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-    mcpServers: { local: { type: "stdio", command: "node", args: ["./server.cjs"] } } }));
-  fs.writeFileSync(path.join(sourcePath, "server.cjs"), `
-const fs = require("node:fs"), path = require("node:path"), readline = require("node:readline");
-const schema = { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", additionalProperties: false,
-  properties: { amount: { type: "number", minimum: 0, maximum: 1000 } }, required: ["amount"] };
-readline.createInterface({ input: process.stdin }).on("line", line => {
-  const request = JSON.parse(line); let result;
-  if (request.method === "initialize") result = { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "plugin-fixture", version: "1" } };
-  else if (request.method === "tools/list") result = { tools: [{ name: "purchase_quote", description: "Isolated quote", inputSchema: schema }] };
-  else if (request.method === "tools/call") {
-    fs.appendFileSync(path.join(process.env.PLUGIN_DATA, "effects.jsonl"), JSON.stringify(request.params.arguments) + "\\n");
-    result = { content: [{ type: "text", text: "a@example.com" }], structuredContent: { status: "completed", id: "plugin-quote-1", amount: request.params.arguments.amount, text: "a@example.com" }, isError: false };
-  } else return;
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
-});
-`);
-  const installer = f.service.pluginPackageInstaller, store = f.service.pluginStore;
-  const preview = installer.preview(sourcePath);
-  let installation = installer.install({ sourcePath, previewDigest: preview.contentDigest, expectedRevision: 0, operationId: uuid() });
-  const component = new PluginComponentCatalog({ store }).list().find(item => item.installationId === installation.installationId)
-    .components.find(item => item.kind === "mcp-server");
-  const pin = { installationId: installation.installationId, releaseDigest: installation.releaseDigest,
-    componentId: component.componentId, descriptorDigest: component.descriptorDigest };
-  const dependencies = f.service.pluginDependencyController.registry;
-  const prepared = dependencies.preview({ ...pin, executablePath: process.execPath });
-  dependencies.prepare({ ...pin, executablePath: process.execPath, previewDigest: prepared.previewDigest,
-    expectedRevision: 0, operationId: uuid(), confirmed: true });
-  installation = store.setInstallationDesiredState({ installationId: installation.installationId, expectedRevision: installation.revision, desiredState: "enabled" });
-  const pending = store.createConnection({ connectionId: "living-plugin", installationId: installation.installationId,
-    componentId: component.componentId, endpointIdentity: "stdio:" + component.descriptorDigest });
-  const connection = store.setConnectionIdentity({ connectionId: pending.connectionId, expectedRevision: pending.revision,
-    principalIdentity: "fixture-local-account", state: "ready" });
-  const created = store.createBinding({ bindingId: "living-plugin-binding", profileId: f.profile.id,
-    installationId: installation.installationId, componentId: component.componentId, connectionId: connection.connectionId });
-  const binding = store.setBindingEnabled({ bindingId: created.bindingId, expectedRevision: created.revision, enabled: true });
-  const client = await f.service.pluginMcpConnectionManager.acquire({ installation, binding, connection });
-  let catalog; try { catalog = await f.service.pluginToolCatalogRegistry.refresh({ installation, connection, client }); } finally { await client.release(); }
-  const tool = catalog.entries[0];
-  store.setGrant({ grantId: "living-plugin-grant", bindingId: binding.bindingId, toolIdentity: tool.toolIdentity,
-    contractDigest: tool.contractDigest, effect: "allow", approvalMode: "always", expectedRevision: 0 });
-  const scopeId = crypto.createHash("sha256").update(JSON.stringify([component.componentId, connection.connectionId, connection.principalIdentity])).digest("hex");
-  const effectsFile = path.join(f.paths.pluginDataDir, installation.installationId, scopeId, "effects.jsonl");
-  return { serverId: pluginServerId(binding.bindingId), binding, tool,
-    effects: () => fs.existsSync(effectsFile) ? fs.readFileSync(effectsFile, "utf8").trim().split("\n").map(JSON.parse) : [] };
-}
 test("real Service → authenticated helper → Controller: all 12 headless tools and automatic next-run guard", async t => {
   const f = await fixture(t), first = await f.send("以后发提醒前，按我设置的持续规则检查。"); f.setRun(first);
   const catalog = await f.helper({ jsonrpc: "2.0", id: 101, method: "tools/list", params: {} });
@@ -526,54 +476,29 @@ test("actual native MCP process: block sends zero frames, 2020 schema and final 
   await f.complete(next);
 });
 
-test("actual plugin MCP process: final schema, result redaction, one merged approval and Hook revocation fence", async t => {
-  const f = await fixture(t), plugin = await registerPluginMcp(f);
-  const setup = await f.send("以后每次询价不能超过预算，并隐去邮箱。"); f.setRun(setup);
-  const rule = (name, event, kind, builtinName, config) => ({ schemaVersion: 1, name, event, kind,
-    scope: { workspace: "current", sources: ["chat"] }, matcher: { toolScopes: ["plugin_mcp"], toolNames: ["purchase_quote"], serverId: plugin.serverId },
-    handler: { type: "builtin", name: builtinName, config } });
-  const enable = async definition => {
-    const saved = (await f.call("hook_register", { definition })).structuredContent;
-    assert.ok(saved?.hookId);
-    assert.equal((await f.call("hook_test", { hookId: saved.hookId, version: 1,
-      payload: { arguments: { amount: 600 }, result: { isError: false, text: "a@example.com" } } })).structuredContent.passed, true);
-    assert.equal((await f.call("hook_grant", { hookId: saved.hookId, version: 1 })).isError, false);
-    const enabled = await f.call("hook_enable", { hookId: saved.hookId, version: 1, expectedRevision: saved.revision });
-    assert.equal(enabled.isError, false, JSON.stringify(enabled)); return enabled.structuredContent;
-  };
-  const guard = await enable(rule("插件报价预算", "tool.before", "guard", "guard.condition",
-    { conditions: [{ path: "arguments.amount", op: "gt", value: 500 }], decision: "block", reason: "超出预算" }));
-  await enable(rule("插件邮箱隐去", "tool.result.transform", "transform", "result.redact", { patterns: ["email"] }));
-  await f.complete(setup);
-  const run = await f.send("请求购物报价。"); f.setRun(run);
-  const invoke = amount => f.call("mcp_server_call", { serverId: plugin.serverId, toolName: "purchase_quote", arguments: { amount } });
-  assert.equal((await invoke(600)).isError, true); assert.equal((await invoke(-1)).isError, true);
-  assert.equal(plugin.effects().length, 0);
-  const result = await invoke(200); assert.equal(result.isError, false, JSON.stringify(result));
-  assert.equal(result.structuredContent.result.structuredContent.id, "plugin-quote-1");
-  assert.doesNotMatch(JSON.stringify(result), /a@example\.com/); assert.deepEqual(plugin.effects(), [{ amount: 200 }]);
+// These two OpenConnector-only execution cases are retired. The actual native
+// MCP Cron/Hook cases immediately above keep final-argument approval, exact-call
+// grant and revocation coverage against a live local MCP server.
+test("actual Service rejects retired connector management before launching any runtime", async t => {
+  const f = await fixture(t);
+  assert.equal(f.service.connectorRuntime, null);
+  for (const method of ["connector.connect", "connector.access.set", "connector.catalog.list", "connector.calls.list"]) {
+    await assert.rejects(f.ipc(method, {}), { code: "OPEN_CONNECTOR_RETIRED" });
+  }
+  assert.equal(fs.existsSync(path.join(f.paths.connectorsDir, "runtime-child.json")), false);
+  assert.equal(f.host.turnInputs.length, 0);
+});
+test("actual MCP authority rejects all retired tools without execution or approval", async t => {
+  const f = await fixture(t);
+  const run = await f.send("验证旧连接器不再执行。"); f.setRun(run);
+  const authority = { profileId: f.profile.id, callId: uuid() };
+  for (const name of require("../app/agent-service/mcp-connector-tools").RETIRED_CONNECTOR_TOOLS) {
+    await assert.rejects(f.service.mcpProductToolController.handle(name, {}, authority), { code: "OPEN_CONNECTOR_RETIRED" });
+  }
+  const listed = await f.helper({ jsonrpc: "2.0", id: 900, method: "tools/list", params: {} });
+  assert.equal(listed.result.tools.some(tool => tool.name.startsWith("connector_")), false);
+  const stream = await f.ipc("run.subscribe", { runId: run.id, streamId: null, afterSeq: 0, limit: 100 });
+  assert.equal(stream.events.some(event => event.type === "approval"), false);
+  assert.equal(f.service.connectorRuntime, null);
   await f.complete(run);
-  const update = await f.send("调整询价参数，每次提交前让我确认。"); f.setRun(update);
-  await f.call("hook_disable", { hookId: guard.hookId, expectedRevision: guard.revision });
-  await enable(rule("插件调整参数", "tool.before", "transform", "arguments.patch", { patch: { amount: 800 } }));
-  const approvalRule = await enable(rule("插件提交确认", "tool.before", "guard", "guard.require_approval", { reason: "询价前确认" }));
-  const grant = f.service.pluginStore.getGrant(plugin.binding.bindingId, plugin.tool.toolIdentity);
-  f.service.pluginStore.setGrant({ grantId: grant.grantId, bindingId: plugin.binding.bindingId,
-    toolIdentity: plugin.tool.toolIdentity, contractDigest: plugin.tool.contractDigest, effect: "allow", approvalMode: "each-call", expectedRevision: grant.revision });
-  await f.complete(update);
-  const next = await f.send("再获取购物报价。"); f.setRun(next);
-  const approve = async (pending, revoke = false) => {
-    await until(() => f.service.workDispatcher.getRun(next.id).status === "waiting_approval");
-    const requestId = f.service.workDispatcher.getRun(next.id).waitingRequestId;
-    const stream = await f.ipc("run.subscribe", { runId: next.id, streamId: null, afterSeq: 0, limit: 100 });
-    const cards = stream.events.filter(item => item.type === "approval" && item.payload.requestId === requestId);
-    assert.equal(cards.length, 1); assert.equal(JSON.parse(cards[0].payload.command).amount, 800);
-    if (revoke) f.service.hookStore.disable(f.profile.id, uuid(), approvalRule.hookId, approvalRule.revision);
-    await f.ipc("run.approval.respond", { operationId: uuid(), createdAt: Date.now(), runId: next.id, requestId, choice: "once" });
-    return pending;
-  };
-  assert.equal((await approve(invoke(20))).isError, false);
-  assert.deepEqual(plugin.effects(), [{ amount: 200 }, { amount: 800 }]);
-  assert.equal((await approve(invoke(20), true)).isError, true); assert.equal(plugin.effects().length, 2);
-  await f.complete(next);
 });

@@ -152,7 +152,95 @@ test("MCP tool approvals are hidden while clarification questions and answers st
   await question;
   const messages = await history(f, idea.latestExecution.sessionKey, 1);
   assert.ok(messages.some(message => message.content[0].text.includes("主要给谁使用？")));
-  assert.equal(messages.at(-1).content[0].text, "补充：audience: family");
+  assert.equal(messages.at(-1).content[0].text, "family");
+});
+
+test("input answer bubbles use option labels and exact multiline text while preserving the runtime answers", async t => {
+  const f = await fixture(t), idea = await f.start(await f.create()), run = await f.running(idea);
+  const custom = "请使用我输入的内容\nxhs_login: 这一行是回答正文";
+  const question = f.host.request("mcpServer/elicitation/request", {
+    threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, serverName: "fixture", mode: "form",
+    message: "请补充", requestedSchema: { type: "object", properties: {
+      login: { type: "string", enum: ["yes", "no"], enumNames: ["已完成登录", "看不到浏览器"] },
+      note: { type: "string" }, token: { type: "string", writeOnly: true },
+    }, required: ["login", "note"] },
+  });
+  await until(() => f.dispatcher.getRun(run.id).status === "waiting_input");
+  const requestId = f.dispatcher.getRun(run.id).waitingRequestId;
+  const answers = { login: "yes", note: custom, token: "fixture-private-value" };
+  await f.coordinator.respondInput({ operationId: crypto.randomUUID(), runId: run.id, requestId, action: "submit", answers });
+  const response = await question;
+  assert.deepEqual(response.content, answers, "runtime receives the original option values and text");
+  const expected = `已完成登录\n${custom}\n[隐藏]`;
+  assert.equal((await history(f, idea.latestExecution.sessionKey, 1)).at(-1).content[0].text, expected);
+  const session = f.sessions.getSession(idea.latestExecution.sessionKey);
+  const stored = f.transcript.listEvents(run.profileId, session.id).find(event => event.content?.requestId === requestId
+    && event.content?.transcriptType === "interaction.response");
+  assert.equal(stored.content.text, `补充：login: yes\nnote: ${custom}\ntoken: [隐藏]`, "raw request association remains in the audit");
+  assert.equal(JSON.stringify(stored).includes("fixture-private-value"), false);
+  await f.restart();
+  assert.equal((await history(f, session.sessionKey, 1)).filter(message => message.id === stored.id)[0].content[0].text, expected);
+});
+
+test("legacy input response prefixes are hidden only for the matching run and question", async t => {
+  const f = await fixture(t), idea = await f.start(await f.create()), run = await f.running(idea);
+  const session = f.sessions.getSession(idea.latestExecution.sessionKey), requestId = crypto.randomUUID();
+  const append = (kind, content, runId = run.id) => f.transcript.appendEvent({
+    profileId: run.profileId, sessionId: session.id, id: crypto.randomUUID(), runId, kind,
+    content, runtimeRef: run.runtimeTurnRef, contextExcluded: false, occurredAt: Date.now(),
+  });
+  append("input", { transcriptType: "prompt", requestId, kind: "mcp_elicitation", mode: "form", message: "登录状态", serverName: "fixture",
+    requestedSchema: { type: "object", properties: { xhs_login: { type: "string", enum: ["yes", "no"],
+      enumNames: ["已完成登录", "看不到浏览器"] } }, required: ["xhs_login"] } });
+  const answer = append("user", { transcriptType: "interaction.response", requestId, text: "补充：xhs_login: yes" });
+  const ordinary = append("user", { text: "补充：xhs_login: yes" });
+  const foreign = append("user", { transcriptType: "interaction.response", requestId, text: "补充：xhs_login: yes" }, `other-${run.id}`);
+  const messages = await history(f, session.sessionKey, 1), byId = new Map(messages.map(message => [message.id, message.content[0].text]));
+  assert.equal(byId.get(answer.id), "已完成登录");
+  assert.equal(byId.get(ordinary.id), "补充：xhs_login: yes", "ordinary user prose is never stripped");
+  assert.equal(byId.get(foreign.id), "补充：xhs_login: yes", "a foreign run cannot borrow this request schema");
+});
+
+test("choice-or-text replies preserve selected labels and custom text, and rejected storage masks every display field", async t => {
+  const { encodeInputChoicesDescription } = require("../app/core/shoggoth-interaction-contract");
+  const f = await fixture(t), idea = await f.start(await f.create()), run = await f.running(idea);
+  const description = encodeInputChoicesDescription("完成后继续", [
+    { label: "已完成登录", description: "继续查询" }, { label: "看不到浏览器", description: "检查窗口" },
+  ]);
+  const ask = () => f.host.request("mcpServer/elicitation/request", {
+    threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, serverName: "fixture", mode: "form",
+    message: "登录状态", requestedSchema: { type: "object", properties: { login: { type: "string", description } }, required: ["login"] },
+  });
+  const custom = "这是我自己的回答\n补充：login: 这一行也应原样保留";
+  for (const value of ["已完成登录", custom]) {
+    const question = ask();
+    await until(() => f.dispatcher.getRun(run.id).status === "waiting_input");
+    await f.coordinator.respondInput({ operationId: crypto.randomUUID(), runId: run.id,
+      requestId: f.dispatcher.getRun(run.id).waitingRequestId, action: "submit", answers: { login: value } });
+    assert.equal((await question).content.login, value);
+    assert.equal((await history(f, idea.latestExecution.sessionKey, 1)).at(-1).content[0].text, value);
+  }
+  const question = ask();
+  await until(() => f.dispatcher.getRun(run.id).status === "waiting_input");
+  const requestId = f.dispatcher.getRun(run.id).waitingRequestId, append = f.transcript.appendEvent.bind(f.transcript);
+  let rejectOnce = true;
+  f.transcript.appendEvent = input => {
+    if (rejectOnce && input.content?.transcriptType === "interaction.response") {
+      rejectOnce = false;
+      throw Object.assign(new Error("fixture secret gate"), { code: "TRANSCRIPT_SECRET_REJECTED" });
+    }
+    return append(input);
+  };
+  await f.coordinator.respondInput({ operationId: crypto.randomUUID(), runId: run.id,
+    requestId, action: "submit", answers: { login: "fixture-private-response" } });
+  assert.equal((await question).content.login, "fixture-private-response");
+  const shown = (await history(f, idea.latestExecution.sessionKey, 1)).at(-1).content[0].text;
+  assert.equal(shown, "已提交补充信息（内容未保存在会话记录中）");
+  const session = f.sessions.getSession(idea.latestExecution.sessionKey);
+  const stored = f.transcript.listEvents(run.profileId, session.id).find(event => event.content?.requestId === requestId
+    && event.content?.transcriptType === "interaction.response");
+  assert.equal(stored.contextExcluded, true);
+  assert.equal(JSON.stringify(stored).includes("fixture-private-response"), false, "displayText must follow the same secret fallback as the raw text");
 });
 
 test("approval visibility uses request and run identity instead of matching conversation text", async t => {

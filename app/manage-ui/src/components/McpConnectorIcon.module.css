@@ -1,0 +1,15 @@
+.icon { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; flex: 0 0 40px;
+  border-radius: 11px; overflow: hidden; font-size: 14px; font-weight: 650; line-height: 1; letter-spacing: .02em;
+  background: light-dark(#e4e9ee, #303b48); color: light-dark(#435e78, #b6cce2); }
+.icon[data-tone="1"] { background: light-dark(#e1ebe4, #2e4137); color: light-dark(#3f6950, #b9d7c3); }
+.icon[data-tone="2"] { background: light-dark(#eee6d9, #483d2c); color: light-dark(#806238, #dfc99f); }
+.icon[data-tone="3"] { background: light-dark(#e8e4ee, #3d3449); color: light-dark(#6c557f, #d2bfe2); }
+.icon[data-tone="4"] { background: light-dark(#e1eaea, #2e4143); color: light-dark(#3c6c70, #b1d6d9); }
+.icon[data-tone="5"] { background: light-dark(#efe2df, #493633); color: light-dark(#87574f, #e1bcb5); }
+.icon.imageSurface { background: light-dark(#fff, #fff); box-shadow: inset 0 0 0 1px light-dark(#00000008, #ffffff14); }
+.icon.darkImage { background: light-dark(#242428, #242428); }
+.icon img { position: absolute; inset: 6px; display: block; width: 28px; height: 28px; object-fit: contain; }
+.icon[data-bundled-icon="quark-drive"] img { transform: scale(2); }
+.icon[data-bundled-icon="wind"] img { object-view-box: inset(7% 55% 7% 3%); clip-path: polygon(0 0, 100% 0, 100% 28%, 83% 28%, 83% 100%, 0 100%); }
+.compact { width: 28px; height: 28px; flex-basis: 28px; border-radius: 8px; font-size: 10px; }
+.compact img { inset: 4px; width: 20px; height: 20px; }

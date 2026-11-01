@@ -76,7 +76,7 @@ function fixture() {
 
     value.store.close();
     value.store.open();
-    assert.equal(value.store.get("fixture").command, value.command);
+    assert.equal(value.store.getPrivate("fixture").transport.command, value.command);
     assert.equal(value.store.list().servers.length, 1);
 
     const shellLink = path.join(value.workspace, "not-an-mcp");

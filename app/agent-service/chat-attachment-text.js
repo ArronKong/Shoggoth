@@ -29,7 +29,13 @@ function attachmentText(name, mimeType, text) {
 
 function attachmentTextParts(attachments, fileSystem) {
   let remaining = MAX_TURN_TEXT_BYTES;
-  return attachments.filter(item => !IMAGE_TYPES.has(item.mimeType)).map(item => {
+  return attachments.filter(item => !IMAGE_TYPES.has(item.mimeType) || typeof item.extractedText === "string").map(item => {
+    if (item.secretProjection === 1 && typeof item.extractedText === "string") {
+      const size = Buffer.byteLength(item.extractedText);
+      if (size > remaining) throw serviceError("SECRET_MEDIA_CAPACITY", "附件文字超过本轮容量");
+      remaining -= size;
+      return { type: "text", text: attachmentText(item.name, item.mimeType, item.extractedText) };
+    }
     let text = null;
     if (isText(item.name, item.mimeType)) {
       try {

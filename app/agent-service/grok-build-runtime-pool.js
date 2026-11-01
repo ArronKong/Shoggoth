@@ -1,5 +1,6 @@
 "use strict";
 const { poolLedgerSlot } = require("./runtime-shared-ledger");
+const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupFailedPoolHost } = require("./runtime-pool-upgrade");
 
 const { GrokBuildRuntimeHost, buildGrokSpawnEnv } = require("./grok-build-runtime-host");
 const { readGrokUsage } = require("./grok-build-usage");
@@ -93,6 +94,8 @@ class GrokBuildRuntimePool {
     return readGrokUsage({ ...options, binaryPath: environment.binaryPath, env });
   }
 
+  runtimeIdentityKey(binding) { return poolRuntimeIdentityKey(this, binding); }
+
   get(value, options = {}) {
     let binding;
     try { binding = poolBinding(value); } catch (error) { return Promise.reject(error); }
@@ -106,8 +109,11 @@ class GrokBuildRuntimePool {
     const workspace = controlInstance ? null : normalizeGrokBuildWorkspace(options.workspace);
     let executionRunId;
     try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
-    const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
+    const modelOnlyInstance = options.modelOnly === true;
+    const key = JSON.stringify([routeKey(id, accountId, controlInstance, workspace, executionRunId), modelOnlyInstance]);
     const permissionPolicy = normalizeGrokBuildPermissionPolicy(options.permissionPolicy);
+    if (modelOnlyInstance && (controlInstance || workspace !== null || permissionPolicy.approvalPolicy !== "never"
+      || permissionPolicy.sandbox !== "read-only")) return Promise.reject(poolError("MODEL_ONLY_TOOLS_FORBIDDEN", "Model-only policy is invalid"));
     const policyFingerprint = grokBuildPermissionFingerprint(permissionPolicy);
     if (this.blockedProfiles.has(id)) {
       return Promise.reject(poolError(
@@ -136,7 +142,7 @@ class GrokBuildRuntimePool {
           "Stop the existing Grok Build runtime before changing its permission policy",
         ));
       }
-      return existing.promise.then((host) => {
+      return reusePoolHost(this, existing, options, () => this.get(binding, options)).then((host) => {
         host.beginAcquire();
         return host;
       });
@@ -159,6 +165,9 @@ class GrokBuildRuntimePool {
     }
     const ledgerKey = routeKey(id, accountId, controlInstance, workspace, null);
     const ledgerSlot = poolLedgerSlot(this, ledgerKey);
+    let authKey;
+    try { authKey = JSON.stringify([accountId, poolRuntimeIdentityKey(this, binding, options)]); }
+    catch (error) { return Promise.reject(error); }
     const host = this.hostFactory({
       ...this.hostOptions,
       paths: this.options.paths ?? this.hostOptions.paths,
@@ -171,6 +180,7 @@ class GrokBuildRuntimePool {
       parentEnv: this.options.parentEnv ?? this.hostOptions.parentEnv,
       homedir: this.options.homedir ?? this.hostOptions.homedir,
       spawnEnv: this.options.spawnEnv ?? this.hostOptions.spawnEnv,
+      secretGateway: this.options.secretGateway ?? this.hostOptions.secretGateway,
       packageVersion: this.options.packageVersion ?? this.hostOptions.packageVersion,
       initializeTimeoutMs: this.options.initializeTimeoutMs ?? this.hostOptions.initializeTimeoutMs,
       requestTimeoutMs: this.options.requestTimeoutMs ?? this.hostOptions.requestTimeoutMs,
@@ -200,46 +210,53 @@ class GrokBuildRuntimePool {
       permissionPolicy,
       controlInstance,
       workspace,
+      modelOnlyInstance,
       authProof: Object.freeze({
-        read: () => this.authProofs.get(accountId) || null,
+        read: () => this.authProofs.get(authKey) || null,
         verify: (fingerprint) => {
           if (typeof fingerprint !== "string" || fingerprint.length === 0
             || Buffer.byteLength(fingerprint, "utf8") > 1024) {
             throw poolError("GROK_BUILD_AUTH_PROOF_INVALID", "Grok Build auth proof is invalid");
           }
-          this.authProofs.set(accountId, fingerprint);
+          this.authProofs.set(authKey, fingerprint);
+          while (this.authProofs.size > 512) this.authProofs.delete(this.authProofs.keys().next().value);
         },
         invalidate: (fingerprint) => {
           if (typeof fingerprint !== "string" || fingerprint.length === 0
             || Buffer.byteLength(fingerprint, "utf8") > 1024) {
             throw poolError("GROK_BUILD_AUTH_PROOF_INVALID", "Grok Build auth proof is invalid");
           }
-          if (this.authProofs.get(accountId) === fingerprint) this.authProofs.delete(accountId);
+          if (this.authProofs.get(authKey) === fingerprint) this.authProofs.delete(authKey);
         },
         clear: (fingerprint) => {
           if (typeof fingerprint !== "string" || fingerprint.length === 0
             || Buffer.byteLength(fingerprint, "utf8") > 1024) {
             throw poolError("GROK_BUILD_AUTH_PROOF_INVALID", "Grok Build auth proof is invalid");
           }
-          if (this.authProofs.get(accountId) === fingerprint) this.authProofs.delete(accountId);
+          if (this.authProofs.get(authKey) === fingerprint) this.authProofs.delete(authKey);
         },
       }),
     });
     const entry = {
+      runtimeEnvironment,
       ledgerKey, ledgerSlot,
       host, key, runtimeProfileId: id, runtimeAccountId: accountId,
       workspace, controlInstance, policyFingerprint, promise: null,
     };
     trackPoolHost(entry, binding);
-    entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+    entry.promise = Promise.resolve().then(async () => {
+      await preparePoolHostIdentity(this, entry, binding, options);
+      await host.initialize();
+      host.assertRuntimeIdentityCurrent?.();
+    }).then(() => {
       entry.capacity.ready = true;
       if (host.terminated && typeof host.terminated.then === "function") {
         Promise.resolve(host.terminated).then(
           () => {
-            if (this.entries.get(key) === entry) this.entries.delete(key);
+            if (this.entries.get(key) === entry && !entry.retiring) this.entries.delete(key);
           },
           (error) => {
-            if (this.entries.get(key) !== entry) return;
+            if (this.entries.get(key) !== entry || entry.retiring) return;
             if (error?.cleanupIncomplete || host.cleanupIncomplete) this.blockedProfiles.add(id);
             this.entries.delete(key);
           },
@@ -247,9 +264,7 @@ class GrokBuildRuntimePool {
       }
       return host;
     }).catch(async (error) => {
-      try { await host.stop(); } catch {}
-      if (this.entries.get(key) === entry) this.entries.delete(key);
-      if (host.cleanupIncomplete) this.blockedProfiles.add(id);
+      await cleanupFailedPoolHost(this, entry, id);
       throw error;
     });
     this.entries.set(key, entry);

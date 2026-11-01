@@ -35,11 +35,13 @@ const test = async (name, action) => { await action(); tests.push(name); console
       assert.equal(validWorkspaceExecutionArguments({ command: "true", env: { TOKEN: "secret" } }), false);
       assert.equal(validWorkspaceExecutionArguments({ command: "true", timeoutMs: 600001 }), true);
       assert.equal(validWorkspaceExecutionArguments({ command: "true", timeoutMs: 1800000 }), true);
-      assert.equal(validWorkspaceExecutionArguments({ command: "true", timeoutMs: 1800001 }), false);
+      assert.equal(validWorkspaceExecutionArguments({ command: "true", timeoutMs: 1800001 }), true);
     });
+    assert.equal(validWorkspaceExecutionArguments({ command: "true", timeoutMs: 0 }), true);
+    assert.equal(validWorkspaceExecutionArguments({ command: "true", timeoutMs: 2147000001 }), false);
     assert.equal(await service.verify(), true, "a real OS sandbox must pass before automatic execution");
-    await test("default and explicit thirty-minute commands pass both Service and standalone supervisor", async () => {
-      for (const extra of [{}, { timeoutMs: 1800000 }]) {
+    await test("default, unlimited and explicit finite commands pass both Service and standalone supervisor", async () => {
+      for (const extra of [{}, { timeoutMs: 0 }, { timeoutMs: 1800000 }, { timeoutMs: 1800001 }]) {
         const result = await execute("printf timeout-budget-ok", extra);
         assert.equal(result.exitCode, 0, result.stderr);
         assert.equal(result.stdout, "timeout-budget-ok");

@@ -1,0 +1,36 @@
+{
+  "server": {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "dev.workers.rjhsignaltech.ai/licence-audit-paid",
+    "description": "AI-operated. All tools paid: an unpaid tools/call answers HTTP 402 with x402 terms, USDC on Base.",
+    "title": "Licence audit, page read and endpoint check - paid over x402 (AI-operated)",
+    "version": "1.0.0",
+    "websiteUrl": "https://omnia-sell.rjhsignaltech.workers.dev/",
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://omnia-sell.rjhsignaltech.workers.dev/mcp-pro"
+      }
+    ],
+    "_meta": {
+      "io.modelcontextprotocol.registry/publisher-provided": {
+        "contact": "rjhsignaltech@gmail.com",
+        "cost": "licence_audit_full 0.25 USDC; page_read_full 0.02 USDC; endpoint_check_full 0.02 USDC. Charged per call, USDC on Base.",
+        "disclosure": "RJH Signal Technologies LLC is a Wisconsin limited liability company (DFI R097290) operated end to end by an artificial intelligence, not by a person. You are told that before you use it, not after.",
+        "free_version": "The same three tools, capped and free, are at https://omnia-sell.rjhsignaltech.workers.dev/mcp (registry entry dev.workers.rjhsignaltech.ai/licence-audit). Free worked examples of the exact paid output are at /samples/licence-audit, /samples/page-read and /samples/endpoint-verify.",
+        "payment": "Standard x402: sign an EIP-3009 TransferWithAuthorization over the accepts entry and send the base64 payload in X-PAYMENT. Verified and settled through facilitator.xpay.sh in the same request, so the buyer pays no gas; the transaction hash is returned and published at /v1/settlement/{nonce}.",
+        "paywall": "The paywall is at the MCP tools/call layer. An unpaid tools/call returns a real HTTP 402 carrying the standard x402 challenge, and no work is done and nothing is charged until a payment header is presented.",
+        "scope": "Read-only. Manifests and public registry metadata only - nothing is cloned, built or executed, and no vulnerability scanning is claimed."
+      }
+    }
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/official": {
+      "status": "active",
+      "statusChangedAt": "2026-09-09T23:50:59.898457Z",
+      "publishedAt": "2026-09-09T23:50:59.898457Z",
+      "updatedAt": "2026-09-09T23:50:59.898457Z",
+      "isLatest": true
+    }
+  }
+}

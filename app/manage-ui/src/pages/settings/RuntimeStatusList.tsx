@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { RuntimeStatus } from "../../types";
 import { BackendMark } from "./BackendOverview";
+import { RuntimeFeatureNotice } from "../../components/RuntimeFeatureNotice";
 
 export default function RuntimeStatusList({ runtimes, loading, error, busy, onToggle }: {
   runtimes: RuntimeStatus[]; loading: boolean; error: boolean; busy: boolean;
@@ -19,6 +20,7 @@ export default function RuntimeStatusList({ runtimes, loading, error, busy, onTo
       : error || !runtimes.length ? <p className="ui-hint" role="status">{t("settings.localRuntimeStatusFailed")}</p>
       : <div className="settings-cli-grid">{runtimes.map(runtime => {
         const status = !runtime.releaseEnabled ? "runtimeReleaseDisabled"
+          : runtime.installation === "unknown" ? "runtimeUnverified"
           : runtime.installation !== "available" ? runtime.installsOnSignIn ? "runtimeInstallsOnSignIn" : "runtimeUnavailable"
           : !runtime.enabled ? "backendDisabled"
           : !runtime.serviceConnected ? "runtimeServiceOffline"
@@ -32,8 +34,9 @@ export default function RuntimeStatusList({ runtimes, loading, error, busy, onTo
           <div className="settings-cli-tile-copy">
             <h6>{runtime.name}</h6>
             <span className={`settings-health ${tone === "is-off" ? "" : tone}`}><i />{t(`settings.${status}`)}</span>
+            {runtime.enabled && runtime.serviceConnected && runtime.features && <RuntimeFeatureNotice features={runtime.features} />}
           </div>
-          {runtime.releaseEnabled && runtime.installation === "available" && <button className="ui-cbtn ui-cbtn--sm" disabled={busy} onClick={() => onToggle(runtime)}>
+          {runtime.toggleable !== false && runtime.releaseEnabled && runtime.installation === "available" && <button className="ui-cbtn ui-cbtn--sm" disabled={busy} onClick={() => onToggle(runtime)}>
             {t(runtime.enabled ? status === "runtimeReady" ? "settings.disconnect" : "agents.disable" : "settings.reconnect")}
           </button>}
         </article>;

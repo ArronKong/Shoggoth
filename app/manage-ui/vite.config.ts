@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
 import type { IncomingMessage } from "node:http";
-import type { ProxyOptions } from "vite";
+import type { Plugin, ProxyOptions } from "vite";
 import { debugInspectorSource } from "./debug-inspector-source.ts";
 
 const DEV_WS_TARGET = "http://127.0.0.1:18799";
@@ -43,11 +44,28 @@ function devWsProxy(): ProxyOptions {
   };
 }
 
+// Shared app modules stay CommonJS for the Service and Electron. The production
+// build converts them, but the dev server serves files as written, so there
+// their `module.exports = { ... }` names are re-exported as ES exports.
+const SHARED_COMMONJS = new Set([fileURLToPath(new URL("../group-journal-recovery.js", import.meta.url))]);
+function sharedCommonJsDevExports(): Plugin {
+  return {
+    name: "shoggoth-shared-commonjs-dev",
+    apply: "serve",
+    transform(code, id) {
+      if (!SHARED_COMMONJS.has(id.split("?")[0])) return null;
+      const match = /^module\.exports = \{ ([\w$, ]+) \};$/mu.exec(code);
+      if (!match || /\brequire\(/u.test(code)) throw new Error(`${id} is not a plain shared CommonJS module`);
+      return { code: code.replace(match[0], `export { ${match[1]} };`), map: null };
+    },
+  };
+}
+
 // The React control plane is the primary UI, served at the loopback root by
 // static-server.js.
 export default defineConfig({
   base: "/",
-  plugins: [react(), debugInspectorSource()],
+  plugins: [react(), debugInspectorSource(), sharedCommonJsDevExports()],
   server: {
     host: "127.0.0.1",
     proxy: {

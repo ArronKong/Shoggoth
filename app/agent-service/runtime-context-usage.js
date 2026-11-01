@@ -34,12 +34,14 @@ function validateRuntimeContextCapabilities(value) {
 // thread/compact, OpenCode session summarize). "turn": `/compact` sent as one
 // turn (Pi RPC compact, Grok Build built-in command). automatic: the admission
 // budget requests it when no product summary is available. Pi's automatic path
-// is the product summary; its native command stays user-invoked.
+// is the product summary; its native command stays user-invoked. DeepSeek also
+// keeps explicit native /compact separate from product summary maintenance.
 const NATIVE_COMPACTION = Object.freeze({
   codex: Object.freeze({ mode: "command", automatic: true }),
   opencode: Object.freeze({ mode: "command", automatic: true }),
   "grok-build": Object.freeze({ mode: "turn", automatic: true }),
   pi: Object.freeze({ mode: "turn", automatic: false }),
+  "deepseek-harness": Object.freeze({ mode: "turn", automatic: false }),
 });
 function nativeCompaction(runtime) { return Object.hasOwn(NATIVE_COMPACTION, runtime) ? NATIVE_COMPACTION[runtime] : null; }
 // The CLI compacts internally and exposes no command to trigger it (the

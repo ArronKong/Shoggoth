@@ -72,37 +72,30 @@ const writeJson = (file, value) => {
     await asar.createPackage(staging, path.join(completeResources, "app.asar"));
     assert.deepEqual(checkPackagedDependencies(path.join(scratch, "Complete.app"), { repo, arch: "arm64" }), []);
 
-    // Preflight inputs, on a copy-on-write clone of the real bundled plugins.
+    // The former sidecar gate now proves retired resources cannot re-enter a build.
     const inputs = path.join(scratch, "inputs");
-    fs.mkdirSync(path.join(inputs, "schemas"), { recursive: true });
-    fs.cpSync(path.join(__dirname, "..", "resources", "bundled-plugins"),
-      path.join(inputs, "resources", "bundled-plugins"), { recursive: true, mode: fs.constants.COPYFILE_FICLONE });
-    fs.cpSync(path.join(__dirname, "..", "resources", "external-plugin-adapters"),
-      path.join(inputs, "resources", "external-plugin-adapters"), { recursive: true });
-    assert.deepEqual(checkPackagingInputs(inputs), [], "the committed bundled plugins pass every packaging gate");
-    fs.writeFileSync(path.join(inputs, "resources", ".env"), "PLACEHOLDER=true\n");
-    assert.match(checkPackagingInputs(inputs).join("\n"), /resources: PRIVATE_KEY_MATERIAL_FOUND.*\.env.*credential file name/u);
-    fs.rmSync(path.join(inputs, "resources", ".env"));
-    // Exercise tampering with owned synthetic bytes in both development and
-    // public exports, whose catalogs intentionally contain no third-party packages.
-    const fixtureMcp = path.join(inputs, "resources/bundled-plugins/packages/packaging-fixture/.mcp.json");
-    writeJson(fixtureMcp, { mcpServers: { fixture: { command: "fixture", args: [] } } });
-    const bytes = fs.readFileSync(fixtureMcp);
-    const sha256 = value => crypto.createHash("sha256").update(value).digest("hex");
-    const files = [{ path: ".mcp.json", bytes: bytes.length, sha256: sha256(bytes), executable: false }];
-    const catalogFile = path.join(inputs, "resources/bundled-plugins/catalog.json");
-    const catalog = JSON.parse(fs.readFileSync(catalogFile, "utf8"));
-    catalog.packages.push({ id: "packaging-fixture", sourceDigest: sha256(JSON.stringify(files)),
-      fileCount: 1, bytes: bytes.length, version: "1.0.0", importStatus: "previewable", icon: null,
-      displayName: "Packaging fixture", shortDescription: "Synthetic integrity input", category: "test",
-      components: { skills: 0, mcp: 1, apps: 0 }, converted: { skills: 0, mcp: 1 }, unconvertedMcp: [],
-      details: { longDescription: "Synthetic integrity input", developerName: "Fixture", websiteURL: null,
-        prompts: [], skills: [], mcpServers: [{ name: "fixture", type: "stdio" }], connectionWarnings: [], apps: [] } });
-    writeJson(catalogFile, catalog);
-    assert.deepEqual(checkPackagingInputs(inputs), [], "the synthetic package has matching source integrity");
-    fs.rmSync(fixtureMcp);
-    assert.deepEqual(checkPackagingInputs(inputs),
-      ["bundled plugin packaging-fixture fails its install integrity check (PACKAGE_CHANGED)"]);
+    fs.mkdirSync(path.join(inputs,"schemas"),{recursive:true});
+    fs.mkdirSync(path.join(inputs,"resources"),{recursive:true});
+    fs.cpSync(path.join(__dirname,"../resources/external-plugin-adapters"),path.join(inputs,"resources/external-plugin-adapters"),{recursive:true});
+    assert.deepEqual(checkPackagingInputs(inputs),[]);
+    for(const retired of ["open-connector","open-connector-runtime","shoggoth-skills/shoggoth-plugin-authoring"]){
+      const target=path.join(inputs,"resources",retired);fs.mkdirSync(target,{recursive:true});
+      assert.match(checkPackagingInputs(inputs).join("\n"),/retired platform resource shipped/u);
+      fs.rmSync(target,{recursive:true});
+    }
+    fs.writeFileSync(path.join(inputs,"resources/.env"),"PLACEHOLDER=true\n");
+    assert.match(checkPackagingInputs(inputs).join("\n"),/PRIVATE_KEY_MATERIAL_FOUND/u);
+    fs.rmSync(path.join(inputs,"resources/.env"));
+    const {checkPackagedConnector}=require("./connector-package-checks.cjs");
+    const retiredApp=path.join(scratch,"Retired.app"),retiredResources=path.join(retiredApp,"Contents/Resources");
+    fs.mkdirSync(path.join(retiredResources,"open-connector"),{recursive:true});
+    await assert.rejects(checkPackagedConnector(retiredApp),/retired platform resource shipped/u);
+    fs.rmSync(path.join(retiredResources,"open-connector"),{recursive:true});
+    fs.mkdirSync(path.join(retiredResources,"legal"),{recursive:true});
+    fs.writeFileSync(path.join(retiredResources,"legal/release-sbom.cdx.json"),JSON.stringify({components:[{name:"@oomol-lab/open-connector"}]}));
+    await assert.rejects(checkPackagedConnector(retiredApp),/retired OpenConnector dependency/u);
+    fs.writeFileSync(path.join(retiredResources,"legal/release-sbom.cdx.json"),JSON.stringify({components:[]}));
+    assert.deepEqual(await checkPackagedConnector(retiredApp),{retired:true,resourcesAbsent:true});
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }

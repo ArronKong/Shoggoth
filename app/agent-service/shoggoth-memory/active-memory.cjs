@@ -9,6 +9,17 @@ const { serviceError } = require("../security");
 const { TurnMemo } = require("../turn-memo");
 const { ActiveMemoryStatus } = require("./active-memory-status.cjs");
 const { captureEvidence, evidenceCurrent } = require("./active-memory-evidence.cjs");
+const { recallDiagnostics, diagnosticCode } = require("./active-memory-diagnostics.cjs");
+const { hasLocalizedRecallIntent } = require("./cjk-recall-intent.cjs");
+const { presentTriggerCandidates } = require("./trigger-presentation.cjs");
+
+// One turn's raw Runtime configuration with deep recall forced. The global
+// configuration and every other setting stay as they are.
+function withAlwaysMode(base) {
+  const entry = base.plugins?.entries?.["active-memory"] || {};
+  return { ...base, plugins: { ...base.plugins, entries: { ...base.plugins?.entries,
+    "active-memory": { ...entry, config: { ...entry.config, mode: "always" } } } } };
+}
 const { extractBorrowedMemoryRefs, mergeBorrowedMemoryRefs, isBorrowedMemoryDerived, borrowedMemoryPlaceholder } = require("./borrowed-memory-provenance.cjs");
 
 // Upstream policies and recall-session lifecycle, with Product-owned source
@@ -19,9 +30,15 @@ class ActiveMemory {
     this.cacheProofs = new Map(); this.runs = new Map(); this.runtimes = new Set(); this.instance = crypto.randomUUID();
     this.status = new ActiveMemoryStatus(this);
   }
-  key(input) { return JSON.stringify([input.profile.id, input.run.id, input.run.workspace, input.query, sha256(this.stamp(input.profile.id))]); }
+  key(input) { return JSON.stringify([input.profile.id, input.run.id, input.run.workspace, input.query, sha256(this.authority(input.profile.id))]); }
   sharingPolicy(profileId) { return this.service.sharing?.config?.resolve(profileId, this.service.profiles()) || null; }
-  stamp(profileId) { return JSON.stringify([this.service.semanticStamp(profileId), this.service.sourcePolicyStamp(profileId), this.sharingPolicy(profileId)]); }
+  // Content version: any memory or source change. Only the cross-turn result
+  // cache uses it, so a later turn never reuses a recall made before a change.
+  cacheStamp(profileId) { return JSON.stringify([this.service.semanticStamp(profileId), this.service.sourcePolicyStamp(profileId), this.sharingPolicy(profileId)]); }
+  // Authority version: only changes that can withdraw returned content. A
+  // running recall and its prepare→take hand-off within one turn survive
+  // ordinary appends; cited evidence is still rechecked before use.
+  authority(profileId) { return JSON.stringify([this.service.authorityStamp(profileId), this.sharingPolicy(profileId)]); }
   sessionId(input) { return input.session?.id || this.service.chatSessionStore.getSession(input.run.sourceId)?.id; }
   runEntry(input) {
     const key = JSON.stringify([input.profile.id, input.run.id]);
@@ -117,11 +134,20 @@ class ActiveMemory {
     if (!result || result.expiresAt <= this.service.now()
       || result.parentSignal?.aborted
       || this.service.profileSignal(input.profile.id).aborted
-      || result.stamp !== this.stamp(input.profile.id)
+      || result.stamp !== this.authority(input.profile.id)
       || result.config !== JSON.stringify(this.configuration(input.profile.id))
       || !this.evidenceCurrent(input.profile.id, result.evidence, result.borrowedMemoryRefs, this.sessionId(input))) return false;
     try { result.assertParentCurrent?.(); } catch { return false; }
     return true;
+  }
+  // Escalate mode skipped deep recall although the user's own Chinese words
+  // ask about the past. The upstream decision runs first and checks a strong
+  // direct hit before intent, so this outcome already means no strong hit,
+  // recall enabled and the destination allowed.
+  wantsLocalizedRecall(config, result, query) {
+    return config.mode === "escalate" && typeof result?.prependContext === "string"
+      && result.prependContext.includes(core.buildRecallOutcomePrefix("skipped-no-recall-intent"))
+      && hasLocalizedRecallIntent(query);
   }
   borrowedContext(content, refs) {
     if (!content || !refs.length) return content;
@@ -145,9 +171,12 @@ class ActiveMemory {
     const service = this.service, profileId = input.profile.id, config = this.configuration(profileId);
     if (!config || input.run.profileId !== profileId || input.run.source !== "chat" || !input.query?.trim()
       || /^shoggoth:chat-send:(?:federation-(?:send|message)|group-(?:turn|task))-/u.test(input.run.idempotencyKey || "")) return null;
-    const host = service.host(profileId), stamp = this.stamp(profileId), serialized = JSON.stringify(config), runEntry = this.runEntry(input);
+    const host = service.host(profileId), stamp = this.authority(profileId), cacheStamp = this.cacheStamp(profileId);
+    const serialized = JSON.stringify(config), runEntry = this.runEntry(input);
     runEntry.statusPhase = "preparing";
     runEntry.policy = JSON.stringify([service.config(profileId), this.sharingPolicy(profileId)]);
+    const diagnose = recallDiagnostics({ host, runId: input.run.id, now: () => service.now() });
+    let stage = "preflight";
     const evidence = new Map();
     let borrowedMemoryRefs = [], borrowedMemoryDerived = false;
     const signal = AbortSignal.any([service.maintenance.controller.signal, service.profileSignal(profileId), runEntry.controller.signal,
@@ -163,7 +192,7 @@ class ActiveMemory {
       modelContext?.assertCurrent();
       sessionPolicy?.assertCurrent();
       if (phase === "preflight") preflightDeadline.throwIfAborted();
-      if (stamp !== this.stamp(profileId) || serialized !== JSON.stringify(this.configuration(profileId))) {
+      if (stamp !== this.authority(profileId) || serialized !== JSON.stringify(this.configuration(profileId))) {
         throw serviceError("MEMORY_SCOPE_REVOKED", "自动召回期间记忆、来源或设置已经变化");
       }
       const sessionId = this.sessionId(input);
@@ -176,8 +205,14 @@ class ActiveMemory {
     const projectKeys = workspaceMemoryRefs(input.run.workspace, "project");
     const remember = (relative, source, hash, retained) => {
       const key = `${source}:${relative}`, previous = evidence.get(key);
-      if (!hash || previous && previous.hash !== hash) throw serviceError("MEMORY_SOURCE_CHANGED", "自动召回引用的文件已经变化");
-      if (!previous) evidence.set(key, retained || captureEvidence(host.searchIndex, relative, source, hash));
+      if (!hash) throw serviceError("MEMORY_SOURCE_CHANGED", "自动召回引用的文件已经变化");
+      if (previous) {
+        // A later read of the same file may see appended entries. Keep the
+        // original proof, never widened, while its proven prefix still holds.
+        if (previous.hash === hash || previous.prefixHash !== undefined && evidenceCurrent(host.searchIndex, previous)) return;
+        throw serviceError("MEMORY_SOURCE_CHANGED", "自动召回引用的文件已经变化");
+      }
+      evidence.set(key, retained || captureEvidence(host.searchIndex, relative, source, hash));
     };
     const rememberIndexed = results => {
       for (const result of results) {
@@ -219,7 +254,7 @@ class ActiveMemory {
       const selectProof = () => {
         const reusableModel = modelContext ? Boolean(modelContext.selectedModel)
           : Boolean(config.model || input.profile.defaultModel || config.modelFallback);
-        proofKey = sha256(JSON.stringify([profileId, session?.sessionKey ?? input.run.id, input.run.workspace, query, searchQuery, stamp, serialized, modelContext?.fingerprint, sessionPolicy?.revision]));
+        proofKey = sha256(JSON.stringify([profileId, session?.sessionKey ?? input.run.id, input.run.workspace, query, searchQuery, cacheStamp, serialized, modelContext?.fingerprint, sessionPolicy?.revision]));
         proof = runEntry.proofs.get(proofKey);
         if (!proof || !this.evidenceCurrent(profileId, proof.evidence, proof.borrowedMemoryRefs || [], session.id)) {
           proof = reusableModel ? this.cacheProofs.get(proofKey) : undefined;
@@ -238,7 +273,7 @@ class ActiveMemory {
       };
       const authorityFingerprint = selectProof();
       check(); phase = "recall";
-      const runtime = new ActiveMemoryRuntime({ host, input: { ...effectiveInput, session }, config, runtimeConfig: service.config(profileId),
+      const createRuntime = (passConfig, passRuntimeConfig) => new ActiveMemoryRuntime({ host, input: { ...effectiveInput, session }, config: passConfig, runtimeConfig: passRuntimeConfig,
         modelContext, initialSearchQuery: searchQuery, complete: request => service.complete(request), signal, check, logger: service.logger, borrowedMemoryRefs, borrowedMemoryDerived,
         // Retention is a private diagnostic copy, not new recall authority. A
         // cancelled model may finish its original cleanup while its Profile and
@@ -253,7 +288,7 @@ class ActiveMemory {
         // Let the original hook decide eligibility and strong trigger matches
         // first. Freeze the actual model before its native recall/cache lookup.
         prepareRecall: async recallSignal => {
-          runEntry.statusPhase = "recalling";
+          runEntry.statusPhase = "recalling"; stage = "model-route";
           const discoverySignal = AbortSignal.any([signal, recallSignal]);
           const checkDiscovery = () => { discoverySignal.throwIfAborted(); check(); };
           checkDiscovery();
@@ -279,7 +314,8 @@ class ActiveMemory {
             }
           }
           checkDiscovery();
-          return { modelContext, authorityFingerprint: selectProof() };
+          const selected = { modelContext, authorityFingerprint: selectProof() };
+          stage = "recall"; return selected;
         },
         callTool: async (tool, args, toolSignal, conversationRecall) => {
           toolSignal.throwIfAborted(); check();
@@ -314,19 +350,20 @@ class ActiveMemory {
             }
           }
           toolSignal.throwIfAborted(); check(); return result;
-        } });
-      this.runtimes.add(runtime); void runtime.settled.then(() => this.runtimes.delete(runtime));
-      const result = await runtime.beforePromptBuild({ messages, runId: runEntry.nativeId, sessionScope,
+        }, diagnose });
+      const hookInput = { messages, runId: runEntry.nativeId, sessionScope,
         authorityFingerprint, activeProjectKeys: projectKeys,
         registerAgentEnd: handler => { runEntry.agentEnd = handler; },
         triggerSearch: async (text, options) => {
           check();
           if (options.lexicalOnly !== true || JSON.stringify(options.sources) !== '["memory"]'
             || JSON.stringify(options.activeProjectKeys) !== JSON.stringify(projectKeys)) throw serviceError("MEMORY_ACTIVE_SCOPE_INVALID", "自动召回检索范围无效");
+          // Lane-one candidates are not all injected and upstream picks the
+          // strong ones internally, so none of them count as recall signals.
           const found = await service.searchMemory({ ...searchInput, query: text, maxResults: options.maxResults,
-            minScore: options.minScore, sources: ["memory"], lexicalOnly: true,
+            minScore: options.minScore, sources: ["memory"], lexicalOnly: true, record: false,
             signal: AbortSignal.any([signal, options.signal]) });
-          rememberIndexed(found.results); return found.results;
+          rememberIndexed(found.results); return presentTriggerCandidates(found.results, effectiveInput.query);
         },
         triggerCandidates: async options => {
           check();
@@ -335,8 +372,30 @@ class ActiveMemory {
             () => host.run(() => host.searchIndex.listTriggerCandidates({ ...options, limit: 24, signal: AbortSignal.any([signal, ...(options.signal ? [options.signal] : [])]) })));
           const allowed = candidates.filter(item => service.allowResult(profileId, item, searchInput));
           const shared = service.sharedTriggers ? await service.sharedTriggers(searchInput, { ...options, query: searchQuery, maxResults: 24 }, allowed) : { results: allowed };
-          rememberIndexed(shared.results); return shared.results;
-        } });
+          rememberIndexed(shared.results); return presentTriggerCandidates(shared.results, effectiveInput.query);
+        } };
+      const runPass = runtime => {
+        this.runtimes.add(runtime); void runtime.settled.then(() => this.runtimes.delete(runtime));
+        return runtime.beforePromptBuild(hookInput);
+      };
+      let runtime = createRuntime(config, service.config(profileId));
+      let result = await runPass(runtime);
+      if (this.wantsLocalizedRecall(config, result, effectiveInput.query)) {
+        // The first instance is closed. A fresh one for the same parent turn,
+        // permissions, cancellation and model route runs deep recall once;
+        // both instances' end handlers still run when the turn ends.
+        const first = runEntry.agentEnd;
+        hookInput.registerAgentEnd = handler => {
+          runEntry.agentEnd = first ? (...args) => { try { first(...args); } finally { handler(...args); } } : handler;
+        };
+        check();
+        runtime = createRuntime({ ...config, mode: "always" }, withAlwaysMode(service.config(profileId)));
+        result = await runPass(runtime);
+      }
+      // Failed and timed-out recalls return normally rather than throwing.
+      const nativeStatus = runtime.nativeResult?.status;
+      if (["failed", "timeout", "unavailable"].includes(nativeStatus)) diagnose({ stage: "recall-result", outcome: nativeStatus });
+      stage = "evidence";
       check();
       try { await this.status.capture({ input: { ...input, session }, runtime, evidence: [...evidence.values()], borrowedMemoryRefs, check }); }
       catch { service.logger.warn?.("active-memory: status display receipt unavailable"); }
@@ -351,12 +410,14 @@ class ActiveMemory {
       }
       return receipt(this.borrowedContext(result?.prependContext || "", borrowedMemoryRefs));
     } catch (error) {
-      if (signal.aborted
-        || ["MEMORY_ACTIVE_SESSION_INVALID", "CHAT_SESSION_INVALID", "MEMORY_COMMAND_SESSION_UNAVAILABLE",
-          "MEMORY_COMMAND_STATE_INVALID", "MEMORY_COMMAND_STALE"].includes(error.code)
-        || stamp !== this.stamp(profileId)
-        || !this.evidenceCurrent(profileId, [...evidence.values()], borrowedMemoryRefs, this.sessionId(input))) return null;
-      try { input.assertCurrent?.(); modelContext?.assertCurrent(); sessionPolicy?.assertCurrent(); } catch { return null; }
+      const discarded = reason => { diagnose({ stage, outcome: "discarded", code: reason }); return null; };
+      if (signal.aborted) return discarded("CANCELED");
+      if (["MEMORY_ACTIVE_SESSION_INVALID", "CHAT_SESSION_INVALID", "MEMORY_COMMAND_SESSION_UNAVAILABLE",
+        "MEMORY_COMMAND_STATE_INVALID", "MEMORY_COMMAND_STALE"].includes(error.code)) return discarded(error.code);
+      if (stamp !== this.authority(profileId)) return discarded("AUTHORITY_CHANGED");
+      if (!this.evidenceCurrent(profileId, [...evidence.values()], borrowedMemoryRefs, this.sessionId(input))) return discarded("EVIDENCE_CHANGED");
+      try { input.assertCurrent?.(); modelContext?.assertCurrent(); sessionPolicy?.assertCurrent(); } catch { return discarded("PARENT_CHANGED"); }
+      diagnose({ stage, outcome: "error", code: diagnosticCode(error) });
       return receipt(core.buildRecallOutcomePrefix("unavailable"));
     } finally { runEntry.statusPhase = "settled"; }
   }

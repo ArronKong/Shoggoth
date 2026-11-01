@@ -4,11 +4,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { withoutBundledPlugins } from './bundled-plugin-sbom.mjs';
 import { createRequire } from 'node:module';
 
-const yaml = createRequire(import.meta.url)('js-yaml');
-
+const { RETIRED_RESOURCES } = createRequire(import.meta.url)('./connector-package-checks.cjs');
 const root = path.resolve(import.meta.dirname, '..');
 const privateDirectories = new Set(['docs', 'tasks', '.preview-specs', '.superpowers', '.vscode']);
 const privateFiles = new Set([
@@ -19,39 +17,15 @@ const privateFiles = new Set([
   'scripts/hermes-managed-title-policy-patch.py',
   'SOURCE-EXPORT.json',
 ]);
-const bundledPackages = 'resources/bundled-plugins/packages/';
-const bundledCatalog = 'resources/bundled-plugins/catalog.json';
-const bundledSbom = 'build/release-sbom.cdx.json';
-const sourceBundledCatalog = JSON.parse(fs.readFileSync(path.join(root, bundledCatalog), 'utf8'));
-const bundledCatalogVersion = sourceBundledCatalog.version;
-const emptyBundledCatalog = Buffer.from(`${JSON.stringify({
-  version: bundledCatalogVersion,
-  batchDigest: crypto.createHash('sha256').update('[]').digest('hex'),
-  packages: [],
-}, null, 2)}\n`);
-const emptyBundledSbom = Buffer.from(`${JSON.stringify(withoutBundledPlugins(
-  JSON.parse(fs.readFileSync(path.join(root, bundledSbom), 'utf8')), sourceBundledCatalog,
-), null, 2)}\n`);
-
 // Check tracked files too: .gitignore alone does not exclude already tracked notes.
 export function isPublicSourcePath(relative) {
   return !privateDirectories.has(relative.split('/')[0])
     && !privateFiles.has(relative)
-    && !relative.startsWith(bundledPackages)
+    && !RETIRED_RESOURCES.some(name => relative === `resources/${name}` || relative.startsWith(`resources/${name}/`))
     && !relative.split('/').includes('.DS_Store');
 }
 
-export function publicSourceBytes(relative, sourceBytes) {
-  if (relative === bundledCatalog) return emptyBundledCatalog;
-  if (relative === bundledSbom) return emptyBundledSbom;
-  if (relative !== 'electron-builder.yml') return sourceBytes;
-  const config = yaml.load(sourceBytes.toString('utf8'));
-  const retained = config.extraResources.filter(item =>
-    typeof item.from !== 'string' || !item.from.startsWith(bundledPackages));
-  if (retained.length === config.extraResources.length) return sourceBytes;
-  config.extraResources = retained;
-  return Buffer.from(yaml.dump(config, { lineWidth: -1, noRefs: true }));
-}
+export function publicSourceBytes(_relative, sourceBytes) { return sourceBytes; }
 
 // Export the working source without private notes, user data or Git history.
 export function exportPublicSource(destinationPath = path.join(root, 'output/public-source')) {
@@ -85,7 +59,7 @@ export function exportPublicSource(destinationPath = path.join(root, 'output/pub
   }
   const manifestPath = `${destination}.manifest.json`;
   fs.writeFileSync(manifestPath, `${JSON.stringify({ format: 1, baseCommit: git(['rev-parse', 'HEAD']).trim(), historyIncluded: false, files: entries }, null, 2)}\n`);
-  console.log(`Exported ${entries.length} source files to ${destination}; private notes, bundled third-party plugin packages and Git history excluded. Manifest: ${manifestPath}`);
+  console.log(`Exported ${entries.length} source files to ${destination}; private notes, retired package resources and Git history excluded. Manifest: ${manifestPath}`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

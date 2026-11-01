@@ -12,7 +12,10 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const option = name => process.argv.find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3);
 const repo = fs.realpathSync(path.resolve(option("repo") || path.join(__dirname, "..")));
-const ninePages = option("scenario") === "group-nine-pages";
+if (option("scenario") === "connector-twelve-pages") throw Object.assign(new Error("OPEN_CONNECTOR_RETIRED: use test:mcp-connectors:app and the MCP UI acceptance fixture"), { code: "OPEN_CONNECTOR_RETIRED" });
+const connectorPages = false;
+const dailyReview = option("scenario") === "daily-review";
+const ninePages = connectorPages || dailyReview || option("scenario") === "group-nine-pages";
 const sourceDriver = path.join(repo, ninePages ? "scripts/fixtures/group-nine-page-app-driver.cjs" : "scripts/fixtures/model-operation-recovery-app-restart-driver.cjs");
 const output = path.resolve(option("output") || `/private/tmp/model-operation-recovery-app-restart-${process.pid}-${Date.now()}.json`);
 const sha = value => crypto.createHash("sha256").update(value).digest("hex");
@@ -45,6 +48,7 @@ function productionInventory() {
     const file = `.vendor/workspace-execution/${name}`;
     if (fs.existsSync(path.join(repo, file))) result.push({ path: file, bytes: fs.statSync(path.join(repo, file)).size, sha256: fileHash(path.join(repo, file)) });
   }
+  if (connectorPages) result.push(...inventory(path.join(repo, ".vendor/open-connector", `darwin-${process.arch}`), `.vendor/open-connector/darwin-${process.arch}`));
   return result.sort((a, b) => a.path.localeCompare(b.path));
 }
 function userListeners() {
@@ -100,8 +104,12 @@ async function run() {
   for (const row of sourceSnapshot) {
     const source = path.join(repo, row.path), target = path.join(snapshot, row.path);
     assert.equal(fileHash(source), row.sha256); privateDirectory(path.dirname(target));
-    fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
-    fs.chmodSync(target, row.path === ".vendor/workspace-execution/process-owner" ? 0o700 : 0o600);
+    if (process.platform === "darwin" && row.bytes > 16 * 1024 * 1024) {
+      assert.equal(fs.existsSync(target), false);
+      const copied = spawnSync("/bin/cp", ["-c", source, target], { encoding: "utf8", timeout: 30000 });
+      assert.equal(copied.status, 0, copied.stderr);
+    } else fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE);
+    fs.chmodSync(target, row.path === ".vendor/workspace-execution/process-owner" || row.path.endsWith("/connector-runtime") ? 0o700 : 0o600);
     assert.equal(fileHash(target), row.sha256);
   }
   if (ninePages) {
@@ -145,13 +153,24 @@ async function run() {
     assert.equal(build.exitCode, 0, build.stderr); assert.equal(build.signal, null); assert.equal(build.timedOut, false);
     builtManifest = inventory(path.join(snapshot, "app/manage-ui/dist"));
     assert(builtManifest.some(row => row.path === "index.html"));
+    if (process.platform === "darwin") for (const row of builtManifest.filter(item => item.bytes > 32768)) {
+      const reference = path.join(repo, "app/manage-ui/dist", row.path), target = path.join(snapshot, "app/manage-ui/dist", row.path);
+      if (!fs.existsSync(reference) || fileHash(reference) !== row.sha256) continue;
+      const temporary = target + ".cow-copy"; assert.equal(fs.existsSync(temporary), false);
+      const cloned = spawnSync("/bin/cp", ["-c", reference, temporary], { encoding: "utf8", timeout: 30000 });
+      assert.equal(cloned.status, 0, cloned.stderr); assert.equal(fileHash(temporary), row.sha256);
+      fs.renameSync(temporary, target);
+      assert.notEqual(fs.statSync(target).ino, fs.statSync(reference).ino, "CoW keeps an independent build inode");
+    }
     // Force the production static server's existing collision fallback, without
     // touching the user's listener if they already own the preferred port.
     const preferredGuard = await reserve(18799, true); if (preferredGuard) guards.push(preferredGuard);
     for (const generation of ninePages ? [0] : [0, 1]) {
       const proxyPort = await freePort();
       const env = { ...cleanEnv, SHOGGOTH_DEV_GATEWAY_PROXY_PORT: String(proxyPort),
-        SHOGGOTH_APP_RECOVERY_FIXTURE_ROOT: root, SHOGGOTH_APP_RECOVERY_GENERATION: String(generation) };
+        SHOGGOTH_APP_RECOVERY_FIXTURE_ROOT: root, SHOGGOTH_APP_RECOVERY_GENERATION: String(generation),
+        ...(dailyReview ? { SHOGGOTH_DAILY_REVIEW_APP_ACCEPTANCE: "1" } : {}),
+        ...(connectorPages ? { SHOGGOTH_CONNECTOR_APP_ACCEPTANCE: "1" } : {}) };
       const electron = require(path.join(repo, "node_modules/electron"));
       const result = await runChild(electron, [snapshot], { cwd: snapshot, env, deadline: 95000 });
       results.push({ generation, proxyPort, ...result });
@@ -181,6 +200,14 @@ async function run() {
       assert(first.pages.length >= 9); assert(first.pages.every(page => page.rendered && !page.resourceError));
       assert.equal(first.chat.sent, true); assert.equal(first.chat.received, true); assert.equal(first.chat.workRuns, 1);
       assert.equal(first.chat.userMessages, 1); assert.equal(first.chat.nativeResponses, 1); assert.equal(first.externalModelCalls, 0);
+      if (dailyReview) assert.deepEqual(first.dailyReview, { hidden: true, backendRulesPreserved: true, heartbeatVisible: true, narrow: true });
+      if (connectorPages) {
+        assert(first.pages.length >= 12); assert.equal(first.connectors.catalogTotal, 1667);
+        assert.equal(first.connectors.grantsExplicit, true); assert.equal(first.connectors.childClosed, true);
+        assert.equal(first.immersive.received, true); assert.equal(first.immersive.selectionRetained, true);
+        assert.equal(first.group.received, true); assert.equal(first.cron.rendered, true);
+        assert.equal(first.connectors.actualRestRendered, true);
+      }
       assert.equal(fileHash(path.join(snapshot, "scripts/fixtures/codex-app-server-fake.cjs")), fileHash(path.join(repo, "scripts/fixtures/codex-app-server-fake.cjs")));
     } else {
       assert.notEqual(first.pid, second.pid); assert.equal(first.userData, second.userData); assert.equal(first.sessionData, second.sessionData);

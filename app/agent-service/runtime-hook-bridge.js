@@ -4,7 +4,7 @@ const TARGETS = Object.freeze(["codex-harness", "codex", "claude-code", "pi", "o
 function runtimeHookCapabilities(runtime, native = {}) {
   return { schemaVersion: 1, runtime, scopes: Object.fromEntries(HOOK_TOOL_SCOPES.map(scope => [
     scope, Object.fromEntries(["observe", "guard", "arguments", "action", "result"].map(kind => [kind,
-      ["product", "native_mcp", "plugin_mcp"].includes(scope)
+      ["product", "native_mcp", "connector"].includes(scope)
         ? { status: "supported", owner: "service", evidence: "hook-tool-execution-v1" }
         : native[scope]?.[kind] || { status: "unsupported", reason: "RUNTIME_HOOK_BRIDGE_UNAVAILABLE" }]))])),
     events: Object.fromEntries(Object.keys(HOOK_EVENTS).map(event => [event,

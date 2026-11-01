@@ -4,11 +4,11 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { readPrivateFile, statIfExists } = require("./private-file");
 const { STORE_SCHEMA_VERSION } = require("./product-store");
-const { assertPluginCatalogBaseline } = require("./plugin-store");
 const { serviceError } = require("./security");
 
-// This unpublished build starts a new data baseline. Refuse old state before
-// opening writers, credential stores or recovery workers; never reset on startup.
+// Unsupported baselines are refused before writers, credentials or recovery.
+// Product15 alone has an explicit validated migration in JsonlProductStore;
+// accepting its version here does not validate, repair or reset its contents.
 function assertCurrentStorageBaseline(paths) {
   const productSchemaVersion = paths.productSchemaVersion ?? STORE_SCHEMA_VERSION;
   const resetRequired = () => {
@@ -16,16 +16,17 @@ function assertCurrentStorageBaseline(paths) {
       "此版本需要全新的 Shoggoth 数据目录，请退出 App 后重置 Shoggoth 本地数据再启动");
   };
   if (productSchemaVersion !== STORE_SCHEMA_VERSION) resetRequired();
+  const readableProductSchemas = new Set([15, productSchemaVersion]);
   if (statIfExists(fs, paths.stateSnapshotPath)) {
     const snapshot = JSON.parse(readPrivateFile(paths.stateSnapshotPath, { fs, maxBytes: Number.MAX_SAFE_INTEGER }).toString("utf8"));
-    if (snapshot?.schemaVersion !== productSchemaVersion) resetRequired();
+    if (!readableProductSchemas.has(snapshot?.schemaVersion)) resetRequired();
   }
   if (statIfExists(fs, paths.eventLogPath)) {
     const bytes = readPrivateFile(paths.eventLogPath, { fs, maxBytes: Number.MAX_SAFE_INTEGER });
     const completeEnd = bytes.lastIndexOf(0x0a);
     if (completeEnd >= 0) {
       for (const line of bytes.subarray(0, completeEnd).toString("utf8").split("\n")) {
-        if (JSON.parse(line)?.schemaVersion !== productSchemaVersion) resetRequired();
+        if (!readableProductSchemas.has(JSON.parse(line)?.schemaVersion)) resetRequired();
       }
     }
   }
@@ -66,7 +67,8 @@ function assertCurrentStorageBaseline(paths) {
       }
     } finally { db.close(); }
   }
-  assertPluginCatalogBaseline(paths);
+  // Retired plugin catalogs are opaque preserved data. They cannot force a
+  // reset of Product, chat, Hook or memory authority in the connector platform.
 }
 
 module.exports = { assertCurrentStorageBaseline };

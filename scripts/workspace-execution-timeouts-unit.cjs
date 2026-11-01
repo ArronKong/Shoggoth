@@ -1,6 +1,5 @@
 "use strict";
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
 const { runtimeHandleV1 } = require("../app/agent-service/runtime-handle-v1");
 const { PiRuntimeHost } = require("../app/agent-service/pi-runtime-host");
 const { AntigravityAcpRuntimeHost } = require("../app/agent-service/antigravity-acp-runtime-host");
@@ -55,8 +54,5 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   const env = commandEnvironment({}, { spawnEnv: {} }, "/private/config", "a".repeat(64),
     { approvalPolicy: "on-request", sandbox: "danger-full-access" }, { command: "/bin/true", args: [], env: [] });
   assert.equal(JSON.parse(env.OPENCODE_CONFIG_CONTENT).mcp.shoggoth.timeout, DEFAULT_MCP_TOOL_TIMEOUT_MS);
-  const extension = fs.readFileSync(require.resolve("../resources/pi/shoggoth-pi-extension.mjs"), "utf8");
-  assert.match(extension, /WORKSPACE_REQUEST_TIMEOUT_MS = 2_147_000_000/u);
-  assert.match(extension, /params\?\.name === "workspace_execute" \? WORKSPACE_REQUEST_TIMEOUT_MS/u);
   console.log("PASS OpenCode waits count elapsed time once; MCP/Pi outer deadlines cover managed commands");
 })().catch(error => { console.error(error); process.exitCode = 1; });

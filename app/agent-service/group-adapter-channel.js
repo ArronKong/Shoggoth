@@ -1,6 +1,6 @@
 "use strict";
 
-const { authorizeAdapter } = require("./external-plugin-adapter-auth");
+const { authorizeAdapter } = require("./external-host-pairing");
 const { GROUP_MCP_TOOL_DEFINITIONS, isGroupMcpTool, validateGroupMcpArguments } = require("./group-mcp-tools");
 const { exact, id, fail } = require("../group-runtime-host-protocol");
 

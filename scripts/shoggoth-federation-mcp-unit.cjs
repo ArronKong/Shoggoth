@@ -134,7 +134,7 @@ test("外部 helper 通过独立 Service 握手认证，配置文件不直接携
 
 test("外部 MCP 排除原生设定、记忆和 Computer Use，保留外部 Agent 的自身身份", async () => {
   // D22 保留读取入口，退役写工具不再出现在产品 MCP 目录中。
-  assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.length, 93);
+  assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.length, 95);
   for (const group of ["group_member_role_read", "group_messages_read"]) {
     assert.equal(EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.some((definition) => definition.name === group), true, group);
   }
@@ -160,16 +160,17 @@ test("外部 MCP 排除原生设定、记忆和 Computer Use，保留外部 Agen
     protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" },
   } });
   const listed = await handler({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  assert.equal(listed.result.tools.length, 93);
-  for (const shared of ["app_help_search", "app_help_get", "skill_catalog", "skill_read", "skill_file_read", "plugin_resource_read",
-    "plugin_create", "plugin_install", "plugin_status", "plugin_setup_get",
-    "mcp_server_list", "mcp_server_tools", "mcp_server_call", "web_search", "web_fetch"]) {
+  assert.deepEqual(new Set(listed.result.tools.map(tool => tool.name)),
+    new Set([...EXTERNAL_FEDERATION_MCP_TOOL_DEFINITIONS.map(tool => tool.name), "product_result_read"]));
+  for (const shared of ["app_help_search", "app_help_get", "skill_catalog", "skill_read", "skill_file_read",
+    "web_search", "web_fetch"]) {
     assert.equal(listed.result.tools.some((definition) => definition.name === shared), true, shared);
   }
   for (const hidden of ["group_task", "group_collaborate", "external_agent_list", "external_agent_get", "external_agent_run",
     "native_agent_get", "native_agent_update", "native_agent_archive",
     "memory_search", "memory_save", "memory_confirm", "memory_forget", "agent_definition_read", "agent_definition_update",
-    "plugin_secret_request", "plugin_activate"]) {
+    "plugin_secret_request", "plugin_activate", "plugin_resource_read", "plugin_create", "plugin_install", "plugin_status", "plugin_setup_get",
+    "mcp_server_list", "mcp_server_tools", "mcp_server_call"]) {
     assert.equal(listed.result.tools.some((definition) => definition.name === hidden), false);
   }
   for (const name of ["group_task", "group_collaborate", "computer_status", "memory_search", "agent_definition_read"]) {
@@ -257,7 +258,7 @@ test("静默注册使用官方 CLI 配置入口、覆盖本地 Hermes profiles�
   assert.equal(serialized.includes(credential.token), false);
   assert.equal(serialized.includes("SHOGGOTH_FEDERATION_MCP_AUTH_FILE"), true);
   const openConfig = JSON.parse(calls[0][1][3]);
-  assert.equal(openConfig.requestTimeoutMs, 2 * (30 * 60_000 + 30_000) + 45_000);
+  assert.equal(openConfig.requestTimeoutMs, 2_147_000_000);
   assert.equal(openConfig.connectionTimeoutMs, 10_000);
   assert.equal(openConfig.env.SHOGGOTH_FEDERATION_MCP_CLIENT, "openclaw");
   assert.equal(openConfig.args.includes(

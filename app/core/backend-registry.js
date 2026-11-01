@@ -126,6 +126,18 @@ class BackendRegistry extends EventEmitter {
     }
   }
 
+  setChatSecretOwner(owner) {
+    this._chatSecretOwner = owner || null;
+    for (const backend of this.backends.values()) backend.setChatSecretOwner?.(owner);
+  }
+
+  async chatSecretRequest(action, input) {
+    const agentId = /^agent:([^:]+):.+$/u.exec(String(input?.sessionKey || ""))?.[1];
+    const backend = agentId && (this.route(agentId) || (!this.claimsAgentId(agentId) ? this.getBackend("openclaw") : null));
+    if (!backend || !this._chatSecretOwner?.chatSecretRequest) throw Object.assign(new Error(require("./chat-secret-contract").SECRET_MESSAGES.SECRET_PROCESSING_UNAVAILABLE), { code: "SECRET_PROCESSING_UNAVAILABLE" });
+    return this._chatSecretOwner.chatSecretRequest(action, { ...input, backendId: backend.id, agentId });
+  }
+
   _requireInspirationOwner() {
     if (!this._inspirationOwner) {
       const error = new Error("灵感服务暂不可用，输入仍保留在本机");
@@ -436,6 +448,7 @@ class BackendRegistry extends EventEmitter {
     }
     this.backends.set(backend.id, backend);
     backend.setDisabledBackendsProvider?.(this._getDisabledIds);
+    backend.setChatSecretOwner?.(this._chatSecretOwner);
     if (["openclaw", "hermes"].includes(backend.id) && typeof backend.setInspirationOwner === "function") {
       backend.setInspirationOwner(this._inspirationOwner);
     }
@@ -1109,20 +1122,6 @@ class BackendRegistry extends EventEmitter {
   async listExternalPluginCatalogs() {
     return Promise.all(this._activeBackends().map(async backend => ({ backend: backend.id,
       catalog: await this.getExternalPluginCatalog(backend.id) })));
-  }
-
-  async getPluginCapabilitiesPage(backendId, query) {
-    const unavailable = (reasonCode) => ({ supported: false, reasonCode,
-      catalogRevision: null, items: [], nextCursor: null });
-    const backend = this.getServiceBackend(backendId);
-    if (!backend) return unavailable("BACKEND_UNAVAILABLE");
-    try {
-      return await backend.getPluginCapabilitiesPage(query);
-    } catch (error) {
-      console.error(`[registry] ${backendId} getPluginCapabilitiesPage failed:`,
-        error?.code || "PLUGIN_SERVICE_UNAVAILABLE");
-      return unavailable("PLUGIN_SERVICE_UNAVAILABLE");
-    }
   }
 
   /**

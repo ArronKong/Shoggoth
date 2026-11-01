@@ -36,3 +36,26 @@ test("a cleanup failure reported after cancellation retains the unconfirmed-stop
   }));
   await started; controller.abort(); await assert.rejects(pending, { code: "RUNTIME_STOP_UNCONFIRMED" });
 });
+
+test("a dedicated native model worker may return its result after confirmed exit, but cannot be reused", async () => {
+  const { runtimeHandleV1 } = require("../app/agent-service/runtime-handle-v1");
+  const binding = { runtime: "grok-build", runtimeProfileId: "review", runtimeAccountId: "account" };
+  for (const mode of ["confirmed", "ordinary", "failed", "canceled"]) {
+    let resolve, reject;
+    const terminated = new Promise((yes, no) => { resolve = yes; reject = no; });
+    const controller = new AbortController();
+    const raw = { ...binding, capabilities: { "model.generate.toolFree": true }, terminated,
+      modelOnlyStopsHost: mode !== "ordinary", host: { modelOnlyInstance: true, state: "ready" }, subscribe: () => () => {},
+      async generateModelOnly() {
+        if (mode === "canceled") controller.abort();
+        raw.host.state = mode === "failed" ? "failed" : "stopped";
+        if (mode === "failed") reject(new Error("unconfirmed exit")); else resolve();
+        await Promise.resolve(); return { text: "{}" };
+      } };
+    const handle = runtimeHandleV1(raw, binding);
+    const pending = handle.generateModelOnly({ ...input, signal: controller.signal });
+    if (mode === "confirmed") assert.deepEqual(await pending, { text: "{}" });
+    else await assert.rejects(pending, { code: mode === "canceled" ? "MODEL_ONLY_CANCELED" : "RUNTIME_HANDLE_TERMINATED" });
+    await assert.rejects(handle.generateModelOnly(input), { code: "RUNTIME_HANDLE_TERMINATED" });
+  }
+});

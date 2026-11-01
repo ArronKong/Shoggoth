@@ -129,7 +129,7 @@ function assertUiSource(panel, modal) {
   assert.match(panel, /mutationEpoch/, "Panel 删除必须忽略 controller 切换后的迟到响应");
   assert.match(panel, /deleteRecovery/, "整端点删除恢复必须保留原 session/operation id");
   assert.match(panel, /controller\.retry\(session\)/, "整端点删除必须复用原 session 重试");
-  assert.match(panel, /disabled=\{Boolean\(deleteRecovery\)\}/, "删除恢复期间必须禁用端点编辑");
+  assert.match(panel, /disabled=\{Boolean\(deleteRecovery\)(?:\s*\|\||\})/, "删除恢复期间必须禁用端点编辑");
   assert.match(modal, /controller\.release/, "关闭或完成后必须释放冻结计划和密钥");
 }
 
@@ -559,7 +559,7 @@ async function runUiRuntime() {
       };
       const clickButton = (label) => {
         const button = [...document.querySelectorAll("button")].find(
-          (item) => (item.getAttribute("aria-label") || item.textContent?.trim()) === label,
+          (item) => (item.getAttribute("aria-label") || item.textContent?.trim()) === label || item.title === label,
         );
         if (!button) throw new Error(`missing button: ${label}`);
         button.click();
@@ -618,18 +618,21 @@ async function runUiRuntime() {
         list: () => pendingB.promise,
       };
       let root = mount();
-      const panelProps = (controller, active = true) =>
+      // The list is a cached page (staleTime 30 s); reactivation alone keeps the
+      // cached snapshot, so an explicit refreshKey requests the same-controller reload.
+      const panelProps = (controller, active = true, refreshKey = 0) =>
         React.createElement(CustomEndpointsPanel, {
           key: controller.backend,
           controller,
           active,
+          refreshKey,
           onChanged() {},
         });
       render(root, panelProps(controllerA));
       await waitFor(() => document.body.textContent.includes("Old endpoint"), "controller list was not rendered");
       render(root, panelProps(controllerA, false));
       await new Promise((resolve) => setTimeout(resolve, 30));
-      render(root, panelProps(controllerA, true));
+      render(root, panelProps(controllerA, true, 1));
       await waitFor(() => listCalls === 2, "same-controller reload did not run");
       await new Promise((resolve) => setTimeout(resolve, 30));
       if (!document.body.textContent.includes("Old endpoint")) {
@@ -637,14 +640,14 @@ async function runUiRuntime() {
       }
       clickButtonContaining("Old endpoint");
       await waitFor(() => document.querySelector('[role="dialog"]'), "edit modal did not open");
-      render(root, panelProps(controllerA, false));
+      render(root, panelProps(controllerA, false, 1));
       await new Promise((resolve) => setTimeout(resolve, 30));
-      render(root, panelProps(controllerA, true));
+      render(root, panelProps(controllerA, true, 2));
       await waitFor(() => listCalls === 3, "late list request was not started");
       render(root, panelProps(controllerB));
       await waitFor(
         () => (
-          !document.body.textContent.includes("Edit endpoint")
+          !document.body.textContent.includes("Edit custom model")
           && !document.body.textContent.includes("Old endpoint")
         ),
         `controller identity switch retained old backend UI: ${document.body.textContent}`,
@@ -757,7 +760,7 @@ async function runUiRuntime() {
           throw new Error("ID must remain editable on creation and edit");
         }
         const expectedProtocol = editing ? "openai-responses" : "openai-completions";
-        if (!protocol.textContent.includes(expectedProtocol)) throw new Error("ID-only protocol value lost");
+        if (!protocol.textContent.includes(editing ? "OpenAI Responses API" : "OpenAI Chat Completions")) throw new Error("ID-only protocol value lost");
         setNativeInputValue.call(directUrl, "https://direct-provider.test/v2");
         directUrl.dispatchEvent(new Event("input", { bubbles: true }));
         if (!editing) {
@@ -784,11 +787,62 @@ async function runUiRuntime() {
           || input.baseUrl !== "https://direct-provider.test/v2"
           || input.models.join("|") !== "direct-model"
           || session.kind !== (editing ? "edit" : "create")
-          || Object.hasOwn(input, "api") || Object.hasOwn(input, "apiKey")) {
-          throw new Error(`ID-only ${editing ? "edit" : "create"} changed the save payload`);
+          // Creation always states its protocol; an edit keeps it unless changed.
+          || (editing ? Object.hasOwn(input, "api") : input.api !== expectedProtocol)
+          || Object.hasOwn(input, "apiKey")) {
+          throw new Error(`ID-only ${editing ? "edit" : "create"} changed the save payload: ${JSON.stringify({ input, kind: session.kind })}`);
         }
         root.unmount();
       }
+
+      // Restoring Hermes auto-detect must send an explicit empty mode, rather than omit the edit.
+      const hermesEndpoint = endpoint("hermes-protocol", { api: "codex_responses" });
+      const hermesProtocolCalls = [];
+      const hermesProtocolSnapshot = snapshot([hermesEndpoint], {
+        apiOptions: ["", "chat_completions", "codex_responses", "anthropic_messages"], defaultApi: "",
+      });
+      root = mount();
+      render(root, React.createElement(EndpointModal, {
+        open: true, endpoint: hermesEndpoint, snapshot: hermesProtocolSnapshot,
+        controller: { backend: "hermes-protocol-ui", validate: async () => ({ ok: true, models: ["hermes-protocol-model"] }),
+          save: async (input, session) => {
+            hermesProtocolCalls.push(input);
+            return outcome(session.rootOperationId, { status: "applied", sync: "synced", snapshot: hermesProtocolSnapshot });
+          } }, onClose() {}, onOpenChangeComplete() {}, onSaved() {},
+      }));
+      const hermesProtocol = document.querySelector('[role="dialog"] [role="combobox"]');
+      if (!hermesProtocol?.textContent.includes("OpenAI Responses API")) throw new Error("saved Hermes protocol was not selected");
+      hermesProtocol.click();
+      const automaticOption = await waitFor(() => [...document.querySelectorAll('[role="option"]')]
+        .find(option => option.textContent.trim() === "Auto-detect"), "automatic protocol option missing");
+      automaticOption.click();
+      await waitFor(() => hermesProtocol.textContent.includes("Auto-detect"), "automatic protocol selection not applied");
+      await clickSave();
+      await waitFor(() => hermesProtocolCalls.length === 1, "Hermes automatic protocol save missing");
+      if (!Object.hasOwn(hermesProtocolCalls[0], "api") || hermesProtocolCalls[0].api !== "") {
+        throw new Error("Hermes auto-detect edit must explicitly clear its saved mode");
+      }
+      root.unmount();
+
+      // Native config edits expose ordinary fields only; hidden provider metadata is never resubmitted.
+      const draftEndpoint = endpoint("draft", { advanced: { headers: { "x-fixture": "keep" }, params: { region: "keep" } } });
+      const draftCalls = [];
+      root = mount();
+      render(root, React.createElement(EndpointModal, {
+        open: true, endpoint: draftEndpoint,
+        snapshot: snapshot([draftEndpoint], { configurationDraft: true, configRevision: "fixture-r1" }),
+        controller: { backend: "draft-ui", save: async (input, session) => {
+          draftCalls.push(input);
+          return outcome(session.rootOperationId, { status: "applied", configSaved: true, sync: "synced", snapshot: snapshot([draftEndpoint]) });
+        } }, onClose() {}, onOpenChangeComplete() {}, onSaved() {},
+      }));
+      if (document.querySelector("[role='dialog'] textarea")) throw new Error("native connection JSON editor is still visible");
+      await clickSave();
+      await waitFor(() => draftCalls.length === 1, "ordinary native config save blocked without advanced JSON");
+      if (Object.hasOwn(draftCalls[0], "advanced") || draftCalls[0].baseHash !== "fixture-r1") {
+        throw new Error("hidden provider metadata was resubmitted or config revision was lost");
+      }
+      root.unmount();
 
       // Modal 能力与完成门：只在 applied+synced+snapshot 时关闭；所有重试复用 session。
       const modalEndpoint = endpoint("caps", {

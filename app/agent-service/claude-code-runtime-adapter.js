@@ -94,6 +94,8 @@ class ClaudeCodeRuntimeAdapter {
     assertRuntimeAdapter(this);
   }
 
+  runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
+
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);
     if (binding.runtime !== CLAUDE_CODE_RUNTIME) {

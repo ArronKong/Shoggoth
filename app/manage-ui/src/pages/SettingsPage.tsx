@@ -631,7 +631,7 @@ export default function SettingsPage() {
     if (reconnectingBackends.length === 0) return;
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
-    const deadline = Date.now() + 75_000;
+    const deadline = Date.now() + 180_000;
     const poll = async () => {
       try {
         const statuses = await getStatus();

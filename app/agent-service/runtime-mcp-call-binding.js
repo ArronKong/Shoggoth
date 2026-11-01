@@ -2,7 +2,7 @@
 
 const crypto = require("node:crypto");
 const { serviceError } = require("./security");
-const { pluginToolContractDigest } = require("./plugin-tool-contract");
+const { mcpToolContractDigest } = require("./mcp-contract-digest");
 
 const META = "shoggoth/runtime-call-binding";
 const MESSAGE = "Shoggoth internal Runtime call binding v1";
@@ -37,7 +37,7 @@ function fingerprint(name, args, confirmation = false) {
     || typeof confirmation !== "boolean") fail();
   const json = JSON.stringify(args);
   if (Buffer.byteLength(json) > 256 * 1024) fail();
-  return pluginToolContractDigest({ name, arguments: args, confirmation });
+  return mcpToolContractDigest({ name, arguments: args, confirmation });
 }
 function sessionIdentity(token) {
   if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(token)) fail();

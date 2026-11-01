@@ -1,0 +1,30 @@
+{
+  "server": {
+    "name": "io.example/oci-digest",
+    "version": "1.2.3",
+    "description": "Explicit synthetic parser boundary fixture; never run.",
+    "packages": [
+      {
+        "registryType": "oci",
+        "identifier": "ghcr.io/example/mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "version": "1.2.3",
+        "transport": {
+          "type": "stdio"
+        },
+        "environmentVariables": [
+          {
+            "name": "API_KEY",
+            "isSecret": true,
+            "isRequired": true
+          }
+        ]
+      }
+    ]
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/official": {
+      "status": "active",
+      "isLatest": true
+    }
+  }
+}

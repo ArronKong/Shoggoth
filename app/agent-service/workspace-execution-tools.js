@@ -1,5 +1,5 @@
 "use strict";
-const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
+const { MAX_EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
 
 // This is an execution capability, not a caller-supplied workspace grant. The
 // Service obtains the workspace and permission mode from the frozen WorkRun.
@@ -8,8 +8,11 @@ const WORKSPACE_EXECUTION_TOOL = Object.freeze({
   inputSchema: { type: "object", properties: {
     command: { type: "string", minLength: 1, maxLength: 65536 },
     cwd: { type: "string", maxLength: 4096 },
-    timeoutMs: { type: "integer", minimum: 1, maximum: EXECUTION_TIMEOUT_MS,
-      description: "Execution deadline in milliseconds; defaults to 1800000 (30 minutes), which is also the maximum." },
+    secretEnv: { type: "object", maxProperties: 32, additionalProperties: { type: "string",
+      pattern: "^\\{\\{SHOGGOTH_SECRET_[a-f0-9]{32}\\}\\}$" },
+      description: "Optional local credential references injected as environment variables only at execution. Use the variable in your script; never interpolate a credential reference into shell source. System environment names are forbidden." },
+    timeoutMs: { type: "integer", minimum: 0, maximum: MAX_EXECUTION_TIMEOUT_MS,
+      description: "Optional execution deadline in milliseconds. Omit or use 0 for no total time limit; a positive value stops the command at that deadline. Cancellation and process cleanup always apply." },
     access: { type: "object", properties: {
       readPaths: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 4096 } },
       writePaths: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 4096 } },
@@ -51,7 +54,9 @@ function validWorkspaceExecutionArguments(args) {
     } catch { return false; }
   };
   if (!dataObject(args)
-    || Object.keys(args).some(key => !["command", "cwd", "timeoutMs", "access", "reason"].includes(key))) return false;
+    || Object.keys(args).some(key => !["command", "cwd", "timeoutMs", "access", "reason", "secretEnv"].includes(key))) return false;
+  if (args.secretEnv !== undefined && !require("./secret-tool-arguments").secretEnvironment(args.secretEnv)) return false;
+  if (require("./secret-tool-arguments").contains([args.command, args.cwd, args.reason, args.access])) return false;
   const text = (value, maximum, empty = false) => typeof value === "string" && (empty || value.length > 0)
     && value.isWellFormed() && !value.includes("\0") && Buffer.byteLength(value) <= maximum;
   const access = args.access;
@@ -79,7 +84,7 @@ function validWorkspaceExecutionArguments(args) {
   return text(args.command, 65536) && args.command.trim().length > 0
     && (args.cwd === undefined || text(args.cwd, 4096, true))
     && (args.reason === undefined || text(args.reason, 1024))
-    && (args.timeoutMs === undefined || Number.isInteger(args.timeoutMs) && args.timeoutMs >= 1 && args.timeoutMs <= EXECUTION_TIMEOUT_MS);
+    && (args.timeoutMs === undefined || Number.isInteger(args.timeoutMs) && args.timeoutMs >= 0 && args.timeoutMs <= MAX_EXECUTION_TIMEOUT_MS);
 }
 
 function widerWorkspaceAccess(args) {

@@ -115,7 +115,7 @@ function clonePrivateFile(source, target, data, trustedRoot) {
   try {
     const parent = preparePrivateParent(target, trustedRoot);
     fs.rmSync(temp, { force: true });
-    execFileSync("/bin/cp", ["-c", source, temp], { stdio: "ignore", timeout: 30000 });
+    execFileSync("/bin/cp", ["-c", source, temp], { stdio: "ignore", timeout: 120000 });
     fs.chmodSync(temp, 0o600);
     if (!readPrivateFile(temp, { maxBytes: MAX_VIDEO_BYTES }).equals(data)) throw new Error("clone mismatch");
     fs.renameSync(temp, target);

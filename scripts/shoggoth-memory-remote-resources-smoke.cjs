@@ -291,6 +291,39 @@ test("native OpenAI batch uploads synthetic JSONL and reads real status/output t
   const body = JSON.parse(server.requests[1].body); assert.equal(body.metadata.agent, "one");
 });
 
+test("actual embedding and vendor batch request bodies use local secret projection", async t => {
+  const { TemporarySecretStore } = require("../app/agent-service/temporary-secret-store");
+  const { createSecretEmbeddingProjection } = require("../app/agent-service/secret-embedding-projection");
+  const root = fs.mkdtempSync(path.join(fixtureTmpDir, "sg-memory-secret-"));
+  const secrets = await new TemporarySecretStore({ paths: { trustedRoot: root, stateDir: path.join(root, "state") },
+    cryptoBroker: { encrypt: async bytes => Buffer.from(bytes).reverse(), decrypt: async bytes => Buffer.from(bytes).reverse() } }).open();
+  t.after(async () => { await secrets.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const server = await localServer(t, (request, res) => {
+    assert(!request.body.includes("123456"), "raw credential must not reach either the JSON or multipart model body");
+    if (request.url === "/v1/embeddings") return vectors(request, res);
+    if (request.url === "/v1/files") res.end('{"id":"protected-input"}');
+    else if (request.url === "/v1/batches") res.end('{"id":"protected-batch","status":"completed","output_file_id":"protected-output"}');
+    else if (request.url === "/v1/files/protected-output/content") res.end(JSON.stringify({ custom_id: "0", response: { status_code: 200,
+      body: { data: [{ embedding: [1, 0.5] }] } } }) + "\n");
+    else assert.fail(request.url);
+  });
+  const f = fixture(t); f.owner.baseUrl = server.baseUrl;
+  f.resource.projectInput = createSecretEmbeddingProjection({ secrets, getSession: () => null,
+    media: { projectInline: async () => { throw Object.assign(Error("fixture"), { code: "SECRET_MEDIA_UNAVAILABLE" }); } } });
+  const created = await f.adapter(core.openAiMemoryEmbeddingProviderAdapter).create(options());
+  const privateText = "Public receipt. Password: 123456";
+  assert.deepEqual(await created.provider.embed(privateText), [1, 0.5]);
+  assert.deepEqual(await created.provider.embedBatch([privateText]), [[1, 0.5]]);
+  assert.deepEqual(await created.runtime.batchEmbed({ agentId: "one", chunks: [{ text: privateText }],
+    wait: true, concurrency: 1, pollIntervalMs: 1, timeoutMs: 3000 }), [[1, 0.5]]);
+  assert(server.requests.some(request => request.body.includes("Public receipt")));
+  assert.equal(created.runtime.cacheKeyData.shoggothSecretProjection, 1);
+  const count = server.requests.length;
+  await assert.rejects(created.provider.embed({ text: "Public receipt", parts: [{ type: "inline-data", mimeType: "image/png", data: "AAAA" }] }),
+    { code: "SECRET_MEDIA_UNAVAILABLE" });
+  assert.equal(server.requests.length, count, "failed media inspection must stop before any model request");
+});
+
 test("bridge retirement cancels a stalled native batch status response and joins its physical transport", async t => {
   const entered = deferred(), closed = deferred();
   const server = await localServer(t, (request, res) => {

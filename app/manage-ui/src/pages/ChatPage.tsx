@@ -5,18 +5,23 @@ import { formatChatTime as absTime } from "../lib/chatTime";
 import { validPluginAppCallId } from "../lib/turnTimeline";
 import { observedChatTerminal } from "../lib/chatTerminalObservation";
 import { codexDesktopWriterHintKey, type CodexDesktopWriterState } from "../lib/codexDesktopWriter";
-import { ChatRunWait, chatRunWaitState, type ChatRunWaitState } from "../components/ChatRunWait";
+import { ChatRunWait, updateChatRunWait, type ChatRunWaitState } from "../components/ChatRunWait";
+import { withStartupWait } from "../lib/chatRunWait";
 import ChatContextUsage from "../components/ChatContextUsage";
+import ChatServiceRecoveryNotice from "../components/ChatServiceRecoveryNotice";
+import ChatStatusNotice from "../components/ChatStatusNotice";
 import { useSessionRuntimeModels } from "../lib/useSessionRuntimeModels";
 import type { RuntimeContextUsage, RuntimeContextCapabilities, ProductContextState, ChatResponseMetadata as ResponseMetadata } from "../types";
 import ChatResponseMetadata from "./ChatResponseMetadata";
-import { compactConversation } from "../api/client";
+import { compactConversation, runShoggothBackgroundAction, getShoggothProductStatus } from "../api/client";
+import { prepareChatInputForSend } from "../api/client";
 import { setInspirationChatSession } from "../lib/inspiration-navigation";
 import { toSanitizedMarkdownHtml, formatReasoningMarkdown } from "../lib/markdown";
 import ChatMarkdown from "../components/ChatMarkdown";
 import ChatPlanDock from "../components/ChatPlanDock";
 import { chatMessagesWithoutPlans, latestChatPlan, withoutPlanSteps, type ChatPlanEntry as PlanEntry } from "../lib/chatPlan";
 import ChatUiArtifact from "../components/ChatUiArtifact";
+import McpApprovalTarget from "../components/McpApprovalTarget";
 import LegacyChatUi from "../components/LegacyChatUi";
 import { revokeNativeUiEntries } from "../lib/chatUiDesktop";
 import { normalizeNativeUiPart, nativeUiSummary, groupNativeUiHistory, nativeUiLegacySources, type NativeUiArtifactPart } from "../lib/chatUiContent";
@@ -89,10 +94,10 @@ import ChatSessionMenu from "./ChatSessionMenu";
 import { readChatUnread, writeChatUnread, sessionReadAt, hasUnreadReply,
   observeSessionReply, readSessionThrough, supportsSessionUnread, anchorUnreadMessage } from "../lib/chatUnread";
 import ChatAgentPanel, { type ChatAgentPanelKind } from "./ChatAgentPanel";
-import ChatPluginPicker, { type ChatPluginSelection } from "./ChatPluginPicker";
-import { usePluginSelectionReadiness } from "../lib/usePluginSelectionReadiness";
+import McpConnectionRequests from "../components/McpConnectionRequests";
+type ChatConnectorSelection = string; // Read-only historical account selection.
 import { createPendingChatSendStore, shouldTrackChatSend, classifyChatSendObservation,
-  isExplicitChatSendRejection, isUncertainChatSendReceipt } from "../lib/chatSendRecovery";
+  isExplicitChatSendRejection, isUncertainChatSendReceipt, chatVerificationNoticeKey } from "../lib/chatSendRecovery";
 import { createOptimisticChatHistory } from "../lib/chatOptimisticHistory";
 import { createChatSlashHistory } from "../lib/chatSlashHistory";
 import { createOpenClawPreambles, openClawPreambleIds, openClawPreambleKey } from "../lib/openclawPreambles";
@@ -103,6 +108,7 @@ import ChatPromptCard, {
   type ChatPromptEntry,
   type ChatPromptResponse,
 } from "./ChatPromptCard";
+import { applyPromptHistory, promptHistoryAnchor } from "../lib/chatPromptHistory";
 import ChatWidget from "../components/ChatWidget";
 import Modal from "../components/Modal";
 import { useConfirm } from "../components/ui";
@@ -209,6 +215,8 @@ import {
 } from "../model-catalog-store";
 import { defaultModelForScope } from "../model-identity";
 import { createModelCatalogRefresh } from "./chat-model-refresh";
+
+import { RuntimeResumeNotice } from "../components/RuntimeFeatureNotice";
 
 export const createChatHistoryController = createHistoryController;
 export const createChatSendController = createSendController;
@@ -614,8 +622,10 @@ interface ChatMsg {
   files?: ChatFile[];
   nativeAttachments?: ChatAttachment[];
   retryAttachments?: ChatAttachment[];
-  pluginSelection?: ChatPluginSelection[];
-  pluginSelectionSnapshot?: Array<ChatPluginSelection & { packageName: string; declaredVersion: string | null }>;
+  connectorSelection?: ChatConnectorSelection[];
+  connectorSelectionSnapshot?: Array<{ connectionId: string; service: string; label: string; generation: number }>;
+  legacyPluginSelection?: Array<{ installationId: string; revision: number }>;
+  legacyPluginSelectionSnapshot?: Array<{ installationId: string; revision: number; packageName: string; declaredVersion: string | null }>;
   localSendId?: string;
   localSlashId?: string;
   idempotencyKey?: string;
@@ -631,7 +641,7 @@ interface ChatMsg {
   // Backend timeline row (not a turn): renders as a quiet one-line divider like
   // `divider`, NOT as the red system/error bubble. For model switches, `model`
   // carries the new model; `parts` keep the backend's raw text for the hover title.
-  notice?: "modelSwitch" | "runInterrupted";
+  notice?: "modelSwitch" | "runInterrupted" | "contextCompacted";
 }
 
 // ---- pure helpers -------------------------------------------------------
@@ -682,31 +692,12 @@ const forgetPendingTrackedSend = pendingChatSendStore.forget;
 // Preflight uses a fixed-width UUID sample; the real idempotency key generated
 // immediately before chat.send has the same ASCII byte length.
 const CHAT_SEND_IDEMPOTENCY_SAMPLE = "00000000-0000-4000-8000-000000000000";
-const PLUGIN_SELECTION_DRAFT_KEY = "shoggoth.chat.plugin-selection.v1";
-function readPluginSelectionDrafts(): Record<string, ChatPluginSelection[]> {
-  try {
-    const stored = JSON.parse(localStorage.getItem(PLUGIN_SELECTION_DRAFT_KEY) || "{}");
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
-    return Object.fromEntries(Object.entries(stored).slice(0, 20).flatMap(([key, value]) =>
-      key.length <= 256 && Array.isArray(value) && value.length <= 4
-        && value.every(item => item && typeof item === "object"
-          && typeof item.installationId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(item.installationId)
-          && Number.isSafeInteger(item.revision) && item.revision > 0)
-        ? [[key, value as ChatPluginSelection[]]] : []));
-  } catch { return {}; }
-}
-function writePluginSelectionDrafts(value: Record<string, ChatPluginSelection[]>): boolean {
-  try {
-    const active = Object.fromEntries(Object.entries(value).filter(([, rows]) => rows.length).slice(-20));
-    localStorage.setItem(PLUGIN_SELECTION_DRAFT_KEY, JSON.stringify(active));
-    return true;
-  } catch { return false; }
-}
 // 回合终结 → 补发待发队列队首的延迟：躲开 final 分支 loadHistory(refresh) 的重拉窗口，
 // 减少刚补发的 user 气泡被旧历史覆盖的闪烁（session.message 的 300ms 合并重拉会兜底恢复）。
 const QUEUE_FLUSH_DELAY_MS = 400;
 // 待发队列条目（R357）：生成中回车的消息排队，回合终结后按 FIFO 链式补发。
-type QueuedMsg = { id: string; text: string; atts: ChatAttachment[]; pluginSelection?: ChatPluginSelection[]; pluginGeneration?: number };
+type QueuedMsg = { id: string; text: string; atts: ChatAttachment[];
+  recovery?: { backendId: string; isSlash: boolean; displayText: string } };
 // First text part of a normalized message (user/system/assistant-text live there).
 function msgText(m: ChatMsg): string {
   return m.parts.find((p) => typeof p.text === "string")?.text?.trim() ?? "";
@@ -1235,6 +1226,11 @@ function normalize(raw: any): ChatMsg {
     : raw?.role === "assistant" || raw?.role === "toolResult" || raw?.role === "system"
     ? raw.role
     : "user";
+  // OpenClaw projects Cron inputs as forwarded assistant messages, stripping
+  // their text envelope. Restore input semantics before visibility, unread and
+  // turn folding; real replies do not carry this producer/boundary combination.
+  if (role === "assistant" && raw?.__openclaw?.turnBoundary === true
+    && raw?.provenance?.kind === "internal_system" && raw.provenance.sourceTool === "cron") role = "user";
   // claude-cli 通道：并行工具调用的结果是 role:"user" 且 content 全为 tool_result 块的
   // 消息。不归一的话它会渲染成右侧空白用户气泡，还会被图片回填按「空文本」缓存键
   // 错配上历史旧图（幽灵图片）。只在全块都是 tool_result 时才转，混排保持 user。
@@ -1269,25 +1265,30 @@ function normalize(raw: any): ChatMsg {
     toolName: raw?.toolName,
     isError: raw?.isError === true,
     provenance: raw?.provenance && typeof raw.provenance === "object" ? raw.provenance : undefined,
-    notice: raw?.notice === "modelSwitch" || raw?.notice === "runInterrupted" ? raw.notice : undefined,
+    notice: ["modelSwitch", "runInterrupted", "contextCompacted"].includes(raw?.notice) ? raw.notice : undefined,
   };
   if (raw?.role === "custom" && (raw.display === false || raw.content === "")) return base;
   const media = normalizeOpenClawMediaFacts(raw?.__openclaw?.media);
   if (media.length) base.files = media;
   const nativeMedia = nativeChatMedia(raw?.shoggoth?.attachments);
+  if (role === "user" && Array.isArray(raw?.shoggoth?.connectorSelection)) {
+    base.connectorSelection = raw.shoggoth.connectorSelection.slice(0, 64).filter((item: unknown): item is string =>
+      typeof item === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(item));
+  }
+  if (role === "user" && Array.isArray(raw?.shoggoth?.connectorSelectionSnapshot)) {
+    base.connectorSelectionSnapshot = raw.shoggoth.connectorSelectionSnapshot.slice(0, 64).filter((item: any) =>
+      item && typeof item.connectionId === "string" && typeof item.service === "string" && typeof item.label === "string"
+      && Number.isSafeInteger(item.generation) && item.generation > 0);
+  }
+  // Previous choices remain historical facts; they never become new account scope.
   if (role === "user" && Array.isArray(raw?.shoggoth?.pluginSelection)) {
-    base.pluginSelection = raw.shoggoth.pluginSelection.filter((item: unknown): item is ChatPluginSelection =>
-      !!item && typeof item === "object" && typeof (item as ChatPluginSelection).installationId === "string"
-      && Number.isSafeInteger((item as ChatPluginSelection).revision));
+    base.legacyPluginSelection = raw.shoggoth.pluginSelection.slice(0, 4).filter((item: any) =>
+      item && typeof item.installationId === "string" && Number.isSafeInteger(item.revision));
   }
   if (role === "user" && Array.isArray(raw?.shoggoth?.pluginSelectionSnapshot)) {
-    base.pluginSelectionSnapshot = raw.shoggoth.pluginSelectionSnapshot.slice(0, 4)
-      .filter((item: unknown): item is ChatPluginSelection & { packageName: string; declaredVersion: string | null } =>
-        !!item && typeof item === "object" && typeof (item as { packageName?: unknown }).packageName === "string"
-        && typeof (item as ChatPluginSelection).installationId === "string"
-        && Number.isSafeInteger((item as ChatPluginSelection).revision)
-        && ((item as { declaredVersion?: unknown }).declaredVersion === null
-          || typeof (item as { declaredVersion?: unknown }).declaredVersion === "string"));
+    base.legacyPluginSelectionSnapshot = raw.shoggoth.pluginSelectionSnapshot.slice(0, 4).filter((item: any) =>
+      item && typeof item.installationId === "string" && Number.isSafeInteger(item.revision) && typeof item.packageName === "string"
+      && (item.declaredVersion === null || typeof item.declaredVersion === "string"));
   }
   if (nativeMedia.attachments.length) base.nativeAttachments = nativeMedia.attachments;
   if (nativeMedia.images.length) base.images = nativeMedia.images;
@@ -1557,20 +1558,24 @@ function applyToolStream(prev: ChatMsg[], tools: ToolEntry[], thinking = "", pla
   return [...out, { role: "assistant", parts: composePendingParts(tools, "", thinking, plan, prompts), pending: true }];
 }
 function settlePendingAssistant(prev: ChatMsg[], liveSteps?: TurnStep[]): ChatMsg[] {
-  const compactionSteps = liveSteps?.some((step) => step.kind === "status")
-    ? withoutPlanSteps(liveSteps).filter((step) => step.kind !== "user" && step.kind !== "final" && (step.kind !== "text" || step.activity)) : undefined;
-  return prev.flatMap((message) => {
+  const terminalSteps = liveSteps ? withoutPlanSteps(liveSteps)
+    .filter((step) => step.kind !== "user" && step.kind !== "final" && (step.kind !== "text" || step.activity))
+    .map((step) => ["running", "pending"].includes(step.status) ? { ...step, status: "aborted" as const } : step) : undefined;
+  let boundary = -1;
+  prev.forEach((message, index) => { if (message.role === "user") boundary = index; });
+  return prev.flatMap((message, index) => {
     if (message.role !== "assistant" || !message.pending) return [message];
     let parts = message.parts.filter((part) => part.type !== "prompt"
       && (part.type !== "text" || !!part.text?.trim()));
-    // Bind a terminal compaction receipt to this tail, rather than letting a
-    // later turn's live timeline update the stopped activity.
-    if (compactionSteps?.length) parts = [{ type: "timeline", steps: compactionSteps },
+    // Only this user tail owns the live process. Freeze it before a later run
+    // replaces the session's timeline, including when the terminal event was lost.
+    const steps = index > boundary ? terminalSteps : undefined;
+    if (steps?.length) parts = [{ type: "timeline", steps },
       ...parts.filter((part) => !["thinking", "toolCall", "toolResult", "plan", "timeline"].includes(part.type))];
     // A stop receipt can arrive before the terminal event/history. Keep the
     // visible text and process in place while retiring prompts and empty cursors.
     return parts.length || message.images?.length || message.files?.length
-      ? [{ ...message, parts, pending: false, settledPending: !compactionSteps?.length, keepLiveLayout: true }] : [];
+      ? [{ ...message, parts, pending: false, settledPending: !steps?.some((step) => step.kind === "status"), keepLiveLayout: true }] : [];
   });
 }
 function retainLiveLayout(previous: ChatMsg[], history: ChatMsg[]): ChatMsg[] {
@@ -1610,7 +1615,7 @@ function retainLiveLayout(previous: ChatMsg[], history: ChatMsg[]): ChatMsg[] {
   }
   return next;
 }
-function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?: string, preserveLiveProcess = false): ChatMsg[] {
+function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?: string, preserveLiveProcess = false, terminal = false): ChatMsg[] {
   // Normalize the completed turn the SAME way loadHistory does, so a streamed reply
   // renders identically to a reloaded one. The old path flattened content via
   // contentToText into a single text part, which dropped the thinking/text split:
@@ -1627,6 +1632,36 @@ function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?
       : { role: "assistant", content: finalMsg };
   const norm = normalize(raw);
   const out = prev.slice();
+  const isProcess = (part: Part) => ["thinking", "toolCall", "toolResult", "plan", "timeline"].includes(part.type);
+  // A durable terminal observation may load the saved answer before the final
+  // observer frame. Reconcile that exact Run instead of briefly appending a
+  // second copy. Repeated wording from a different Run or commentary stays.
+  if (terminal && norm.nativeRunId && norm.parts.length
+    && norm.parts.every(part => part.type === "text" && !part.activity)) {
+    const textOf = (message: ChatMsg) => message.parts.filter(part => part.type === "text").map(part => part.text ?? "").join("\n");
+    const text = textOf(norm);
+    let boundary = -1, existing = -1;
+    out.forEach((message, index) => { if (message.role === "user") boundary = index; });
+    for (let index = out.length - 1; index > boundary; index--) {
+      const message = out[index];
+      if (message.role === "assistant" && !message.pending && message.nativeRunId === norm.nativeRunId
+        && !message.parts.some(part => part.type === "text" && part.activity) && text.trim() && textOf(message) === text) {
+        existing = index; break;
+      }
+    }
+    if (existing >= 0) {
+      const ownsPending = (message: ChatMsg, index: number) => index > boundary && message.role === "assistant"
+        && (message.pending || message.settledPending) && (!message.nativeRunId || message.nativeRunId === norm.nativeRunId);
+      const saved = out[existing];
+      const process = preserveLiveProcess && !saved.parts.some(isProcess)
+        ? out.flatMap((message, index) => ownsPending(message, index) && index !== existing ? message.parts.filter(isProcess) : []) : [];
+      return out.flatMap((message, index) => index === existing ? [{ ...saved, parts: [...process, ...saved.parts],
+        pending: false, settledPending: false, keepLiveLayout: true,
+        model: norm.model ?? saved.model, provider: norm.provider ?? saved.provider,
+        usage: norm.usage ?? saved.usage, responseMetadata: norm.responseMetadata ?? saved.responseMetadata }]
+        : ownsPending(message, index) ? [] : [message]);
+    }
+  }
   for (let i = out.length - 1; i >= 0; i -= 1) {
     if (out[i].role === "user") break;
     if (out[i].role === "assistant" && (out[i].pending || out[i].settledPending)) {
@@ -1658,7 +1693,6 @@ function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?
       }
       const finalParts = norm.parts.some((part) => part.type !== "text" || !!part.text?.trim())
         ? norm.parts : out[i].parts;
-      const isProcess = (part: Part) => ["thinking", "toolCall", "toolResult", "plan", "timeline"].includes(part.type);
       // Text-only final frames arrive before the canonical history. Keep the
       // live process here so its row does not disappear and then reappear when
       // that history arrives. A structured final already owns its process.
@@ -1914,14 +1948,24 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[]): ChatM
 // 上下文再锚定（R280 用户校准——"留出4个气泡的高度，不直接顶到最上面"）。
 const SEND_ANCHOR_CONTEXT_PX = 280;
 
-function sizeStreamSpacer(thread: HTMLDivElement, spacer: HTMLDivElement, anchorTop: number): number {
+function sizeStreamSpacer(thread: HTMLDivElement, spacer: HTMLDivElement, anchorTop: number, anchorHeight: number, minimumScrollTop = 0): number {
   const inner = spacer.parentElement;
   const padTop = inner ? parseFloat(getComputedStyle(inner).paddingTop) || 0 : 0;
-  const target = Math.max(0, anchorTop - padTop - SEND_ANCHOR_CONTEXT_PX);
+  const style = getComputedStyle(thread);
+  const bottomClearance = (parseFloat(style.getPropertyValue("--chat-fade-bottom")) || 0)
+    + (parseFloat(style.getPropertyValue("--chat-fade")) || 0);
+  // Keep the requested context above a new send where space permits. Short
+  // windows still need room for its first response below the sent bubble.
+  // For a tall user group, let its older content move above the viewport so
+  // the latest send, activity row and reply loader remain visible together.
+  const context = Math.min(SEND_ANCHOR_CONTEXT_PX,
+    thread.clientHeight - padTop - bottomClearance - anchorHeight - (140 + 68 + 6));
+  const target = Math.max(0, anchorTop - padTop - context);
   const heightSansSpacer = thread.scrollHeight - spacer.offsetHeight;
   // never reserve more than one viewport: standing room is at most "bubble at top,
   // rest blank" — the cap bounds the damage if a measurement ever goes off the rails
-  const h = Math.min(thread.clientHeight, Math.max(0, target + thread.clientHeight - heightSansSpacer));
+  // A shorter startup row must not clamp a viewport that is already below target.
+  const h = Math.min(thread.clientHeight, Math.max(0, Math.max(target, minimumScrollTop) + thread.clientHeight - heightSansSpacer));
   spacer.style.height = `${h}px`;
   return target;
 }
@@ -2413,6 +2457,9 @@ function ChatPageApp() {
   // 仍只认 connected：行留在原位、暗着，等它转绿。
   const [startingBackends, setStartingBackends] = useState<Set<string>>(new Set());
   const [recoveryBackends, setRecoveryBackends] = useState<Set<string>>(new Set());
+  const [serviceRecoveryBusy, setServiceRecoveryBusy] = useState(false);
+  const serviceRecoveryBusyRef = useRef(false);
+  const observedRecoveryBackendsRef = useRef(new Set<string>());
   // Hermes 可用性按 profile/agent 精确到会话；历史重试只在目标 agent ready 后触发。
   const [readyAgentIds, setReadyAgentIds] = useState<Set<string>>(new Set());
   // 用户保存的连接配置立即生效，不等待下一次 status 轮询。
@@ -2492,17 +2539,20 @@ function ChatPageApp() {
       timeline: live ? liveTimelinesRef.current.get(sessionKey) : undefined });
   };
   useEffect(() => { setTimelineModal(null); }, [activeKey, activeGroupId]);
+  // Chat already renders public progress as bubbles. Filter only this page's
+  // timeline projection; shared timelines (Cron, dashboard, etc.) keep it.
   const visibleTimelineSteps = (steps: TurnStep[]) => withoutPlanSteps(steps).filter((s) =>
-    s.kind !== "user" && s.kind !== "final" && (s.kind !== "text" || s.activity) && (showThinking || s.kind !== "thinking"));
+    s.kind !== "user" && s.kind !== "final" && s.kind !== "text" && (showThinking || s.kind !== "thinking"));
   // R343:进行中气泡的直播时间线步骤(过滤掉 user/final/text——正文另有气泡,
   // 思考步随 💡 开关)。独立成函数是为了在消息层渲染一次、用固定 key:live parts
   // 每个流事件都重建,若把 TurnProcess 键在 part 内容哈希上会整组件反复重挂,
   // 行进场动画从 opacity 0 反复重播 → 时间线大面积空白/频闪(Hermes 思考流实测)。
   const liveStepsFor = (m: ChatMsg): TurnStep[] => {
-    if (!m.pending && !m.settledPending) return [];
-    const tl = liveTimelinesRef.current.get(activeKeyRef.current || "");
-    if (!tl?.steps.length) return [];
-    return subagentActivity.project(activeKeyRef.current || "", visibleTimelineSteps(tl.steps), observedRunBySessionRef.current.get(activeKeyRef.current || ""));
+    if (!m.pending) return [];
+    const key = activeKeyRef.current || "";
+    const tl = liveTimelinesRef.current.get(key);
+    const steps = subagentActivity.project(key, visibleTimelineSteps(tl?.steps ?? []), observedRunBySessionRef.current.get(key));
+    return withStartupWait(steps, m.pending ? runWaitBySession[key] : undefined);
   };
   useEffect(() => {
     if (!lightbox) return;
@@ -2536,6 +2586,10 @@ function ChatPageApp() {
   const [earlierHistory, setEarlierHistory] = useState<{ key: string; cursor: string | null; loading: boolean; error: boolean }>({ key: "", cursor: null, loading: false, error: false });
   const earlierHistoryRef = useRef(earlierHistory);
   earlierHistoryRef.current = earlierHistory;
+  // A successful read alone must not put an end-of-history note above the chat.
+  // Only a user pulling upward at the top asks to see that boundary.
+  const [historyBoundaryKey, setHistoryBoundaryKey] = useState<string | null>(null);
+  useEffect(() => { setHistoryBoundaryKey(null); }, [activeKey, immersive]);
   // onmessage 闭包（agents.changed）里要读当前错误态 → render-time 镜像成 ref。
   const historyErrorRef = useRef<string | null>(null);
   historyErrorRef.current = historyError;
@@ -2646,71 +2700,22 @@ function ChatPageApp() {
     activityRunId: item.runId, openclawPreambleKey: item.key, openclawLivePreamble: true, keepLiveLayout: true,
   })));
   const [queueTick, setQueueTick] = useState(0);
-  // A selection is a one-shot draft intent scoped to the federated session key.
-  // Reserve its generation while queued/sending; clear only on the Service's
-  // durable "accepted" event, never on the proxy's early "started" response.
-  const [pluginSelections, setPluginSelections] = useState<Record<string, ChatPluginSelection[]>>(readPluginSelectionDrafts);
-  useEffect(() => { writePluginSelectionDrafts(pluginSelections); }, [pluginSelections]);
-  const pluginSelectionsRef = useRef(pluginSelections);
-  pluginSelectionsRef.current = pluginSelections;
-  // A one-shot choice restored from localStorage is already a real draft.
-  // Give it a generation before the first submit; otherwise the visible chip
-  // would be silently omitted from chat.send until the user toggled it again.
-  const pluginGenerationRef = useRef<Map<string, number>>(new Map(
-    Object.entries(pluginSelections).filter(([, selected]) => selected.length > 0)
-      .map(([key]) => [key, 1]),
-  ));
-  const pluginReservationRef = useRef<Map<string, number>>(new Map());
-  const pluginValidityRef = useRef<Map<string, { backendId: string; selection: string;
-    valid: boolean | null }>>(new Map());
-  const onPluginSelectionValidity = useCallback((key: string, backendId: string,
-    selection: ChatPluginSelection[], valid: boolean | null) => {
-    pluginValidityRef.current.set(key, { backendId, selection: JSON.stringify(selection), valid });
-  }, []);
-  const pendingPluginSendRef = useRef<Map<string, { key: string; generation: number; text: string;
-    atts: ChatAttachment[]; selection: ChatPluginSelection[] }>>(new Map());
-  const setPluginSelectionFor = (key: string, selection: ChatPluginSelection[]) => {
-    const next = { ...pluginSelectionsRef.current, [key]: selection };
-    pluginSelectionsRef.current = next;
-    pluginGenerationRef.current.set(key, (pluginGenerationRef.current.get(key) ?? 0) + 1);
-    const persisted = writePluginSelectionDrafts(next);
-    setPluginSelections(next);
-    return persisted;
-  };
-  const clearAcceptedPluginSelection = (key: string, generation: number) => {
-    if (pluginReservationRef.current.get(key) !== generation) return true;
-    pluginReservationRef.current.delete(key);
-    return pluginGenerationRef.current.get(key) !== generation || setPluginSelectionFor(key, []);
-  };
-  const acceptTrackedPluginSend = (key: string, idem: string) => {
+  // Only an authoritative non-admission can release this in-memory payload for
+  // another send. Historical operation records never persist a replay payload.
+  const pendingSendDraftRef = useRef<Map<string, { key: string; text: string; atts: ChatAttachment[];
+    isSlash: boolean; displayText: string; recoveryRetry: boolean }>>(new Map());
+  const acceptTrackedSend = (key: string, idem: string) => {
     const entry = readPendingTrackedSends().find(item => item.key === key && item.idem === idem);
-    if (!entry) return false; // Foreign/late run events cannot consume a one-shot choice.
-    if (entry.accepted) return true; // Never consume a newly chosen draft twice.
-    let consumed = true;
-    const pendingKey = `${key}\0${idem}`;
-    const pendingSend = pendingPluginSendRef.current.get(pendingKey);
-    if (pendingSend) {
-      pendingPluginSendRef.current.delete(pendingKey);
-      consumed = clearAcceptedPluginSelection(key, pendingSend.generation);
-    } else if (entry.selection && JSON.stringify(pluginSelectionsRef.current[key]) === JSON.stringify(entry.selection)) {
-      // A reload loses in-memory generations, but not the exact captured choice.
-      pluginReservationRef.current.delete(key);
-      consumed = setPluginSelectionFor(key, []);
-    }
-    // Persist choice consumption before the accepted marker. On crash/reload a
-    // newer identical choice then remains a new intent, not the old operation's.
-    if (consumed) pendingChatSendStore.accepted(key, idem);
+    if (!entry) return false;
+    pendingSendDraftRef.current.delete(`${key}\0${idem}`);
+    pendingChatSendStore.accepted(key, idem);
     return true;
   };
-  const restoreRejectedPluginSend = (runId: string, key: string) => {
+  const restoreRejectedSend = (runId: string, key: string) => {
     optimisticHistoryRef.current.forget(key, runId);
-    const pendingSend = pendingPluginSendRef.current.get(`${key}\0${runId}`);
+    const pendingSend = pendingSendDraftRef.current.get(`${key}\0${runId}`);
     if (!pendingSend) return false;
-    pendingPluginSendRef.current.delete(`${key}\0${runId}`);
-    if (pluginReservationRef.current.get(key) === pendingSend.generation) pluginReservationRef.current.delete(key);
-    if (pendingSend.selection.length && pendingSend.generation < 0 && !pluginSelectionsRef.current[key]?.length) {
-      setPluginSelectionFor(key, pendingSend.selection);
-    }
+    pendingSendDraftRef.current.delete(`${key}\0${runId}`);
     if (activeKeyRef.current === key) {
       setInput(current => current.trim() ? `${pendingSend.text}\n${current}` : pendingSend.text);
       if (pendingSend.atts.length) setComposerAttachments(current => [...pendingSend.atts, ...current]);
@@ -2751,7 +2756,7 @@ function ChatPageApp() {
   // composed message again with a fresh idempotencyKey and the gateway appends two
   // identical user turns. Reusing the key inside DUP_SEND_WINDOW_MS lets the gateway
   // collapse the duplicate (findTranscriptMessageByIdempotencyKey) into one.
-  const recentSendRef = useRef<Map<string, { text: string; selectionKey: string; idem: string; at: number }>>(new Map());
+  const recentSendRef = useRef<Map<string, { text: string; idem: string; at: number }>>(new Map());
   const markInFlight = useCallback((key: string, on: boolean) => {
     // Terminal observation ends the generation UI, while the persisted pending
     // record still blocks every send/queue path until its exact receipt settles.
@@ -2941,6 +2946,7 @@ function ChatPageApp() {
   const sessionArtifactsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const preparingSecretInputRef = useRef(new Set<string>());
   // Always points at the latest sendChatMessage, so a widget's sendPrompt (wired
   // once at mount) forwards through the current closure rather than a stale one.
   const sendChatMessageRef = useRef<((text: string, atts: ChatAttachment[], isSlash?: boolean, displayText?: string) => Promise<void>) | null>(null);
@@ -3072,7 +3078,7 @@ function ChatPageApp() {
   // under whoever is still reading. sendAnchorRef = one-shot request armed by
   // sendChatMessage, consumed by the scroll layout-effect. anchoredRef = anchored
   // mode: no auto-stick until the next send / session switch (the jump pill covers
-  // "take me down"). The anchor itself is NOT stored — every pass re-resolves the
+  // "take me down"). The anchor element/document coordinate is NOT stored — every pass re-resolves the
   // last `.chat-group.is-user` element and measures it fresh, because the thread is
   // rebuilt under us mid-turn (reload-on-final + archive re-paste) and any stored
   // coordinate/element goes stale there (live-tested: a stored content-y drifted by
@@ -3081,6 +3087,8 @@ function ChatPageApp() {
   // state, no re-render per delta).
   const sendAnchorRef = useRef(false);
   const anchoredRef = useRef(false);
+  // Viewport-relative only; document coordinates are remeasured after every update.
+  const anchoredUserOffsetRef = useRef<number | null>(null);
   const streamSpacerRef = useRef<HTMLDivElement | null>(null);
   // Per-session composer drafts: switching agents preserves the half-typed message.
   const inputRef = useRef("");
@@ -3270,6 +3278,7 @@ function ChatPageApp() {
     id: rawHistoryId,
   }), [send]);
   const clearArchiveForSource = useCallback((key: string) => {
+    setHistoryBoundaryKey(null);
     archivePrefixRef.current = { key: "", msgs: [] };
     archivePagesRef.current = null;
     archiveGenerationRef.current++;
@@ -3353,6 +3362,7 @@ function ChatPageApp() {
     setHistoryLoaded(false);
     setHistoryVisible(cacheVisible);
     setHistoryError(null);
+    setHistoryBoundaryKey(null);
     setArchive({ key, status: "idle" });
     historyPager.reset(key);
     const earlier = { key, cursor: null, loading: false, error: false };
@@ -3402,8 +3412,19 @@ function ChatPageApp() {
   }), [clearArchiveForSource, commitCanonicalHistory, commitOpenedHistory, historyPager, prepareHistoryMessages]);
   historyControllerRef.current = chatHistoryController;
 
+  useLayoutEffect(() => {
+    if (activeKey) chatHistoryController.updateLive(activeKey, messages);
+  }, [activeKey, messages, chatHistoryController]);
 
-  const verifyPendingTrackedSends = useCallback(async (onlyKey?: string): Promise<void> => {
+  // Hidden conversations still receive their own text segments. Keep those
+  // updates in the same renderer-only snapshot used when switching back.
+  const updateSessionMessages = useCallback((key: string, update: (previous: ChatMsg[]) => ChatMsg[]) => {
+    if (key === activeKeyRef.current) setMessages(update);
+    else historyControllerRef.current?.updateLive(key, update);
+  }, []);
+
+
+  const verifyPendingTrackedSends = useCallback(async (onlyKey?: string, userRequestedCheck = false): Promise<void> => {
     const entries = readPendingTrackedSends().filter((entry) => !onlyKey || entry.key === onlyKey);
     if (onlyKey && entries.length === 0) {
       await loadHistory(onlyKey, { refresh: true });
@@ -3447,13 +3468,32 @@ function ChatPageApp() {
           && terminal.agentId === agentOf(entry.key));
         const observation = classifyChatSendObservation(response?.payload, currentEntry.accepted === true,
           terminalObserved, reconciled, entry.backendId === "shoggoth" && response?.payload?.stateAuthority === "native-service");
-        if (observation.accepted) acceptTrackedPluginSend(entry.key, entry.idem);
+        if (observation.accepted) acceptTrackedSend(entry.key, entry.idem);
         if (observation.state === "verification") throw new Error("operation unresolved");
         if (observation.state === "terminal" && !forgetPendingTrackedSend(entry.key, entry.idem)) {
           throw new Error("operation tracking unavailable");
         }
         if (response?.payload?.status === "not_admitted" && !observation.accepted) {
-          restoreRejectedPluginSend(entry.idem, entry.key);
+          const draftId = `${entry.key}\0${entry.idem}`;
+          const draft = pendingSendDraftRef.current.get(draftId);
+          const resend = draft && (!draft.recoveryRetry || userRequestedCheck);
+          let restored = false;
+          if (resend) {
+            pendingSendDraftRef.current.delete(draftId);
+            optimisticHistoryRef.current.forget(entry.key, entry.idem);
+            // A fresh key is required: reconciliation permanently fenced the
+            // original operation. Put its exact input ahead of newer queued work.
+            sendQueueRef.current.set(entry.key, [{ id: crypto.randomUUID(), text: draft.text, atts: draft.atts,
+              recovery: { backendId: entry.backendId || backendOfSession(entry.key),
+                isSlash: draft.isSlash, displayText: draft.displayText } }, ...(sendQueueRef.current.get(entry.key) ?? [])]);
+            setQueueTick(previous => previous + 1);
+          } else restored = restoreRejectedSend(entry.idem, entry.key);
+          if (activeKeyRef.current === entry.key) {
+            const notice = { text: t(resend ? "chat.resendingUnsentMessage"
+              : restored ? "chat.unsentMessageRestored" : "chat.messageNotSent"), kind: "success" as const };
+            setToast(notice);
+            setTimeout(() => setToast(current => current === notice ? null : current), 7000);
+          }
         }
         if (observation.state === "active" && currentEntry.terminalObserved) {
           if (entry.backendId !== "shoggoth"
@@ -3465,6 +3505,24 @@ function ChatPageApp() {
           && (observation.state === "terminal" || observation.state === "active")) {
           if (terminal.timer) clearTimeout(terminal.timer);
           terminalObservedSendRef.current.delete(entry.key);
+        }
+        if (observation.state === "terminal") {
+          const timeline = liveTimelinesRef.current.get(entry.key);
+          if (timeline && !["done", "error"].includes(timeline.status)) {
+            const status = response.payload.run?.status;
+            timelineFeed(entry.key, status === "completed" ? { kind: "final", text: "" }
+              : status === "failed" ? { kind: "error", message: "" } : { kind: "aborted" });
+          }
+          const steps = liveTimelinesRef.current.get(entry.key)?.steps;
+          updateSessionMessages(entry.key, previous => settlePendingAssistant(previous, steps));
+          liveToolsRef.current.delete(entry.key);
+          pendingThinkingRef.current.delete(entry.key);
+          const durableProgress = progressCardsRef.current.get(entry.key);
+          if (durableProgress) pendingPlanRef.current.set(entry.key, progressCardPlan(durableProgress));
+          else pendingPlanRef.current.delete(entry.key);
+          replacePendingPrompts(entry.key, []);
+          liveTextRef.current.delete(entry.key);
+          steerTextBaselineRef.current.delete(entry.key);
         }
         if (observation.state === "active") runStatusBySessionRef.current.set(entry.key, response.payload.run.status);
         markInFlight(entry.key, observation.state !== "terminal");
@@ -3504,7 +3562,7 @@ function ChatPageApp() {
         }
       }
     }));
-  }, [send, markInFlight, loadHistory, backendOfSession]);
+  }, [send, markInFlight, loadHistory, backendOfSession, t, timelineFeed, updateSessionMessages, replacePendingPrompts]);
   verifyTrackedSendRef.current = verifyPendingTrackedSends;
 
   // sessions.list is paginated (the gateway caps each page at 200; totalCount can
@@ -3766,7 +3824,10 @@ function ChatPageApp() {
       const execApproval = isOpenClawExecApproval(entry) ? entry : null;
       const sk = execApproval?.sessionKey || openClawQuestion?.sessionKey || activeSessionKey;
       if (!sk) return;
+      const anchors = entry.requestId && sk === activeSessionKey
+        ? promptHistoryAnchor(messagesRef.current, entry.requestId) : [];
       try {
+        let receipt: any;
         if (execApproval) {
           await execApprovals.respond(execApproval, data.choice);
           return;
@@ -3777,7 +3838,7 @@ function ChatPageApp() {
           }
           await send("question.resolve", openClawQuestionResolveParams(openClawQuestion.id, data));
         } else {
-          await send("chat.respond", "version" in entry
+          receipt = await send("chat.respond", "version" in entry
             ? { sessionKey: sk, requestId: entry.requestId, ...data }
             : { sessionKey: sk, kind: entry.kind, requestId: entry.requestId, ...data });
         }
@@ -3786,6 +3847,12 @@ function ChatPageApp() {
         if (!openClawQuestion) {
           // R339:时间线里的等待确认步落定为「已确认:<choice>」(密钥类不带值,只记应答)。
           timelineFeed(sk, { kind: "promptAnswer", requestId: entry.requestId, choice: data.choice });
+        }
+        if (entry.requestId && "version" in entry && entry.kind === "user_input"
+          && inFlightRef.current.has(sk) && Array.isArray(receipt?.payload?.messages)
+          && receipt.payload.messages.every((message: any) => message?.shoggoth?.runId === entry.runId)) {
+          const messages = receipt.payload.messages.map(normalize);
+          updateSessionMessages(sk, previous => applyPromptHistory(previous, entry.requestId!, messages, anchors));
         }
         renderLiveStateForSession(sk);
       } catch (e) {
@@ -3796,7 +3863,7 @@ function ChatPageApp() {
         throw secretQuestion ? new Error(t("chat.requestFailed")) : e;
       }
     },
-    [execApprovals, renderLiveStateForSession, replacePendingPrompts, send],
+    [execApprovals, renderLiveStateForSession, replacePendingPrompts, send, updateSessionMessages],
   );
 
   // Switch the model — one path for every backend: `sessions.patch {model}`.
@@ -4139,7 +4206,7 @@ function ChatPageApp() {
         // Receipt recovery must not replace the live run with the id of an
         // ordinary input queued behind it. Only a retained original is observed.
         if (pending && backendOfSession(key) === "openclaw") {
-          acceptTrackedPluginSend(key, runId);
+          acceptTrackedSend(key, runId);
           void verifyPendingTrackedSends(key);
         }
         return;
@@ -4163,7 +4230,7 @@ function ChatPageApp() {
           openclawPreamblesRef.current.finish(sk, p.runId);
         }
         if (sk && typeof p.runId === "string" && p.state === "accepted") {
-          const matched = acceptTrackedPluginSend(sk, p.runId);
+          const matched = acceptTrackedSend(sk, p.runId);
           if (matched && runStatusBySessionRef.current.get(sk) === "needs_verification") {
             void verifyPendingTrackedSends(sk);
           }
@@ -4193,7 +4260,7 @@ function ChatPageApp() {
           }
           if (tracked && rejected && !tracked.accepted) {
             forgetPendingTrackedSend(sk, tracked.idem);
-            restoreRejectedPluginSend(tracked.idem, sk);
+            restoreRejectedSend(tracked.idem, sk);
           } // Accepted execution errors still require the original durable operation lookup.
           if (hasPendingTrackedSend(sk)) {
             setVerificationKeys(previous => new Set(previous).add(sk));
@@ -4228,16 +4295,17 @@ function ChatPageApp() {
           }
         }
         if (sk) setRunWaitBySession((previous) => {
-          const wait = p.state === "status" ? chatRunWaitState(p) : null;
-          if (wait) {
-            const old = previous[sk];
-            if (old?.kind === wait.kind && old.reason === wait.reason) {
-              wait.since = Math.min(old.since, wait.since);
-              if (old.since === wait.since) return previous;
-            }
-            return { ...previous, [sk]: wait };
-          }
-          if (!previous[sk]) return previous;
+          const timeline = liveTimelinesRef.current.get(sk);
+          const hasOutput = (timeline && ["done", "error"].includes(timeline.status))
+            || timeline?.steps.some(step => ["tool", "prompt"].includes(step.kind)
+              || (step.kind === "plan" && !!step.planEntries?.length)
+              || (["thinking", "text", "final"].includes(step.kind) && !!step.text?.trim()))
+            || (["delta", "interim"].includes(p.state) && !!(contentToText(p.message?.content) || contentToText(p.message)).trim())
+            || (p.state === "thinking" && !!p.thinking?.trim())
+            || (p.state === "plan" && !!p.plan?.length);
+          const wait = updateChatRunWait(previous[sk], p, !!hasOutput);
+          if (wait === previous[sk]) return previous;
+          if (wait) return { ...previous, [sk]: wait };
           const next = { ...previous }; delete next[sk]; return next;
         });
         if (sk && isLiveChatState(p.state, p.statusKind)) markInFlight(sk, true);
@@ -4279,7 +4347,7 @@ function ChatPageApp() {
               if (sk && part?.type === "text" && part.activity === true && typeof part.segmentId === "string" && typeof part.text === "string")
                 timelineFeed(sk, { kind: "progress", text: part.text, activityId: part.segmentId });
             }
-            if (isActive) setMessages(prev => applyNativeUiDelta(prev, p.message,
+            if (sk) updateSessionMessages(sk, prev => applyNativeUiDelta(prev, p.message,
               (sk && liveToolsRef.current.get(sk)) || [], (sk && pendingThinkingRef.current.get(sk)) || "",
               (sk && pendingPlanRef.current.get(sk)) || [], (sk && displayPromptsFor(sk)) || []));
             return;
@@ -4294,8 +4362,8 @@ function ChatPageApp() {
               )
             : { accumulated: full, visible: full };
           if (sk) liveTextRef.current.set(sk, projected.accumulated);
-          if (isActive)
-            setMessages((prev) =>
+          if (sk)
+            updateSessionMessages(sk, (prev) =>
               applyDelta(
                 prev,
                 projected.visible,
@@ -4322,12 +4390,10 @@ function ChatPageApp() {
               ...(progress ? { activity: true, activityId: progress.segmentId } : {}) });
             liveToolsRef.current.delete(sk);
             pendingThinkingRef.current.delete(sk);
-            if (isActive) {
-              setMessages((prev) => [
-                ...finalizeAssistant(prev, p.message, wasSteered ? projected.visible : undefined, true),
-                { role: "assistant", parts: [{ type: "text", text: "" }], pending: true },
-              ]);
-            }
+            updateSessionMessages(sk, (prev) => [
+              ...finalizeAssistant(prev, p.message, wasSteered ? projected.visible : undefined, true),
+              { role: "assistant", parts: [{ type: "text", text: "" }], pending: true },
+            ]);
             // Commentary/interim seals the current runtime text item. The next
             // item starts a fresh accumulator and no longer needs the steer cut.
             liveTextRef.current.delete(sk);
@@ -4352,20 +4418,18 @@ function ChatPageApp() {
               id: `p${Date.now()}-${arr.length}`,
             });
             replacePendingPrompts(sk, nextPrompts);
-            if (isActive)
-              setMessages((prev) =>
-                applyToolStream(prev, liveToolsRef.current.get(sk) || [], pendingThinkingRef.current.get(sk) || "", pendingPlanRef.current.get(sk) || [], nextPrompts),
-              );
+            updateSessionMessages(sk, (prev) =>
+              applyToolStream(prev, liveToolsRef.current.get(sk) || [], pendingThinkingRef.current.get(sk) || "", pendingPlanRef.current.get(sk) || [], nextPrompts),
+            );
           }
         } else if (p.state === "promptExpire") {
           if (sk && typeof p.requestId === "string") {
             timelineFeed(sk, { kind: "promptExpire", requestId: p.requestId });
             const arr = (pendingPromptsRef.current.get(sk) ?? []).filter((e) => e.requestId !== p.requestId);
             replacePendingPrompts(sk, arr);
-            if (isActive)
-              setMessages((prev) =>
-                applyToolStream(prev, liveToolsRef.current.get(sk) || [], pendingThinkingRef.current.get(sk) || "", pendingPlanRef.current.get(sk) || [], arr),
-              );
+            updateSessionMessages(sk, (prev) =>
+              applyToolStream(prev, liveToolsRef.current.get(sk) || [], pendingThinkingRef.current.get(sk) || "", pendingPlanRef.current.get(sk) || [], arr),
+            );
           }
         } else if (p.state === "thinking") {
           // Streamed reasoning (Hermes). Accumulate + re-render the pending bubble's
@@ -4373,16 +4437,14 @@ function ChatPageApp() {
           if (sk && typeof p.thinking === "string") {
             timelineFeed(sk, { kind: "thinking", text: p.thinking });
             pendingThinkingRef.current.set(sk, p.thinking);
-            if (isActive)
-              setMessages((prev) => applyToolStream(prev, liveToolsRef.current.get(sk) || [], p.thinking, pendingPlanRef.current.get(sk) || [], displayPromptsFor(sk)));
+            updateSessionMessages(sk, (prev) => applyToolStream(prev, liveToolsRef.current.get(sk) || [], p.thinking, pendingPlanRef.current.get(sk) || [], displayPromptsFor(sk)));
           }
         } else if (p.state === "plan") {
           // All backends use the same plan dock; tool/thinking visibility is independent.
           if (sk && Array.isArray(p.plan)) {
             timelineFeed(sk, { kind: "plan", entries: p.plan });
             pendingPlanRef.current.set(sk, p.plan);
-            if (isActive)
-              setMessages((prev) => applyToolStream(prev, liveToolsRef.current.get(sk) || [], pendingThinkingRef.current.get(sk) || "", p.plan, displayPromptsFor(sk)));
+            updateSessionMessages(sk, (prev) => applyToolStream(prev, liveToolsRef.current.get(sk) || [], pendingThinkingRef.current.get(sk) || "", p.plan, displayPromptsFor(sk)));
           }
         } else if (p.state === "final" && p.outputDisposition === "silent") {
           // A completed background check owns no user-visible reply. Clear its
@@ -4397,8 +4459,8 @@ function ChatPageApp() {
             steerTextBaselineRef.current.delete(sk);
             replacePendingPrompts(sk, []);
             reloadOnFinalRef.current.delete(sk);
+            updateSessionMessages(sk, prev => prev.filter(message => !message.pending));
             if (isActive) {
-              setMessages(prev => prev.filter(message => !message.pending));
               setSending(false);
               void loadHistory(sk, { refresh: true });
             }
@@ -4468,16 +4530,17 @@ function ChatPageApp() {
             liveTextRef.current.delete(sk);
             steerTextBaselineRef.current.delete(sk);
           }
+          if (sk) updateSessionMessages(sk, (prev) => finalizeAssistant(
+            prev,
+            p.message,
+            wasSteered ? projectedFinal.visible : undefined,
+            true,
+            true,
+          ));
           if (isActive) {
             // Preserve the current reading position while the sealed bubbles
             // are replaced by canonical history. The next turn resumes follow.
             stoppedScrollKeyRef.current = sk;
-            setMessages((prev) => finalizeAssistant(
-              prev,
-              p.message,
-              wasSteered ? projectedFinal.visible : undefined,
-              true,
-            ));
             if (sk && progressCardsRef.current.has(sk)) renderLiveStateForSession(sk);
             setSending(false);
           }
@@ -4506,13 +4569,13 @@ function ChatPageApp() {
             liveTextRef.current.delete(sk);
             steerTextBaselineRef.current.delete(sk);
           }
+          // Store the RAW gateway error; render-time wraps it with errPrefix +
+          // translateGatewayError so the bubble follows live language switches.
+          if (sk) updateSessionMessages(sk, (prev) => [
+            ...settlePendingAssistant(prev, liveTimelinesRef.current.get(sk)?.steps),
+            { role: "system", parts: [{ type: "text", text: p.errorMessage || "" }], errPrefix: "chat.errorPrefix" },
+          ]);
           if (isActive) {
-            // Store the RAW gateway error; render-time wraps it with errPrefix +
-            // translateGatewayError so the bubble follows live language switches.
-            setMessages((prev) => [
-              ...settlePendingAssistant(prev, sk ? liveTimelinesRef.current.get(sk)?.steps : undefined),
-              { role: "system", parts: [{ type: "text", text: p.errorMessage || "" }], errPrefix: "chat.errorPrefix" },
-            ]);
             if (sk && progressCardsRef.current.has(sk)) renderLiveStateForSession(sk);
             setSending(false);
           }
@@ -4530,7 +4593,7 @@ function ChatPageApp() {
             else pendingPlanRef.current.delete(sk);
             replacePendingPrompts(sk, []);
           }
-          if (isActive) {
+          if (sk) {
             const full = contentToText(p.message?.content) || contentToText(p.message) || "";
             const wasSteered = !!sk && steerTextBaselineRef.current.has(sk);
             const projected = sk
@@ -4540,9 +4603,11 @@ function ChatPageApp() {
                   steerTextBaselineRef.current.get(sk),
                 )
               : { accumulated: full, visible: full };
-            setMessages((prev) => (p.message
+            updateSessionMessages(sk, (prev) => (p.message
               ? finalizeAssistant(prev, p.message, wasSteered ? projected.visible : undefined, true)
               : settlePendingAssistant(prev, sk ? liveTimelinesRef.current.get(sk)?.steps : undefined)));
+          }
+          if (isActive) {
             if (sk && progressCardsRef.current.has(sk)) renderLiveStateForSession(sk);
             setSending(false);
           }
@@ -4569,6 +4634,10 @@ function ChatPageApp() {
         const d = p.data || p; // session.tool/agent both carry the tool fields under data
         const id: string | undefined = d?.toolCallId || d?.id;
         if (sk && id) {
+          setRunWaitBySession(previous => {
+            if (!previous[sk]) return previous;
+            const next = { ...previous }; delete next[sk]; return next;
+          });
           const arr = liveToolsRef.current.get(sk) ?? [];
           let entry = arr.find((x) => x.id === id);
           if (entry?.phase === "result" && d.phase !== "result") return;
@@ -4607,7 +4676,7 @@ function ChatPageApp() {
             diff: d.diff,
             diffText: typeof d.diffText === "string" && d.diffText ? d.diffText : undefined,
           });
-          if (sk === activeKeyRef.current) setMessages((prev) => applyToolStream(prev, arr, pendingThinkingRef.current.get(sk) || "", pendingPlanRef.current.get(sk) || [], displayPromptsFor(sk)));
+          updateSessionMessages(sk, (prev) => applyToolStream(prev, arr, pendingThinkingRef.current.get(sk) || "", pendingPlanRef.current.get(sk) || [], displayPromptsFor(sk)));
         }
         return;
       }
@@ -4764,6 +4833,7 @@ function ChatPageApp() {
     execApprovals,
     replacePendingPrompts,
     verifyPendingTrackedSends,
+    updateSessionMessages,
   ]);
 
   // A new negotiated connection or a session switch restores only capabilities
@@ -4795,7 +4865,10 @@ function ChatPageApp() {
   // auto-stick only when already near the bottom.
   const updateJumpVisibility = useCallback(() => {
     const thread = threadRef.current;
-    const parts = latestMessagePartsRef.current;
+    // Portal approvals arrive independently of the message list. Their actions
+    // must remain reachable even when the last reply is already on screen.
+    const approvals = thread?.querySelectorAll("[data-mcp-approval] .chat-prompt__actions");
+    const parts = approvals?.length ? [approvals[approvals.length - 1]] : latestMessagePartsRef.current;
     if (!thread?.clientHeight || !parts.length) {
       setShowJump(false);
       return;
@@ -4811,7 +4884,8 @@ function ChatPageApp() {
     const bottom = Math.min(viewport.bottom - (parseFloat(style.getPropertyValue("--chat-fade-bottom")) || 0), composer?.top ?? viewport.bottom);
     const visible = parts.some((part) => {
       const rect = part.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && rect.bottom > top && rect.top < bottom
+      return rect.width > 0 && rect.height > 0
+        && (approvals?.length ? rect.top >= top && rect.bottom <= bottom : rect.bottom > top && rect.top < bottom)
         && rect.right > viewport.left && rect.left < viewport.right;
     });
     // An older search window does not contain the actual latest message.
@@ -4845,6 +4919,7 @@ function ChatPageApp() {
     const state = earlierHistoryRef.current;
     const key = activeKeyRef.current;
     if (!key || state.key !== key || !state.cursor || state.loading) return;
+    setHistoryBoundaryKey(null);
     const loading = { ...state, loading: true, error: false };
     earlierHistoryRef.current = loading; setEarlierHistory(loading);
     const previous = historyPager.current;
@@ -4968,6 +5043,7 @@ function ChatPageApp() {
       // the anchor belongs to the previous thread — drop it with its spacer
       sendAnchorRef.current = false;
       anchoredRef.current = false;
+      anchoredUserOffsetRef.current = null;
       if (spacer) spacer.style.height = "0px";
     } else if (sendAnchorRef.current && el && spacer) {
       cancelInitialScroll();
@@ -4975,7 +5051,8 @@ function ChatPageApp() {
       const sent = lastUserBubble();
       if (sent) {
         anchoredRef.current = true;
-        el.scrollTop = sizeStreamSpacer(el, spacer, topOf(sent));
+        el.scrollTop = sizeStreamSpacer(el, spacer, topOf(sent), sent.offsetHeight);
+        anchoredUserOffsetRef.current = sent.getBoundingClientRect().top - el.getBoundingClientRect().top;
         atBottomRef.current = true; // the anchor IS the (spacer-extended) max scroll
         return;
       }
@@ -4986,18 +5063,24 @@ function ChatPageApp() {
     // Anchored mode: keep the spacer absorbing the growing reply (scrollHeight
     // holds still → zero viewport motion) and never auto-stick; late messages eat
     // the reserved blank first.
-    // scrollTop is deliberately NOT touched here — the browser's own scroll
-    // anchoring keeps the visible content stable through thread rebuilds.
+    // If a shorter startup row clamps scrollTop before this effect, restore the
+    // user's viewport offset after adding standing room. Explicit scrolls update
+    // the saved offset below, so later output preserves the user's chosen place.
     if (anchoredRef.current && el && spacer) {
       const sent = lastUserBubble();
       if (sent) {
-        sizeStreamSpacer(el, spacer, topOf(sent));
+        const offset = sent.getBoundingClientRect().top - el.getBoundingClientRect().top;
+        const targetScroll = el.scrollTop + (offset - (anchoredUserOffsetRef.current ?? offset));
+        sizeStreamSpacer(el, spacer, topOf(sent), sent.offsetHeight, targetScroll);
+        el.scrollTop = targetScroll;
+        anchoredUserOffsetRef.current = sent.getBoundingClientRect().top - el.getBoundingClientRect().top;
         const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         atBottomRef.current = near;
         return;
       }
       // anchor bubble gone (filtered/cleared) → leave anchored mode
       anchoredRef.current = false;
+      anchoredUserOffsetRef.current = null;
       spacer.style.height = "0px";
     }
     if (!initialLoad && stoppedScrollKeyRef.current === activeKey) return;
@@ -5022,11 +5105,10 @@ function ChatPageApp() {
         initialScrollFrameRef.current = requestAnimationFrame(settle);
       }
     }
-  }, [messages, activeKey, historyLoaded, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, showTraj]);
+  }, [messages, activeKey, historyLoaded, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, showTraj, runWaitBySession]);
 
-  // Track whether the thread is near its bottom (drives auto-scroll only).
-  // Scroll-up loads the sealed/reset archive (no button): when the user reaches the
-  // top of a settled OpenClaw thread, fetch it once. Found → prepend; none → a note.
+  // Scroll-up loads the sealed/reset archive: when the user reaches the
+  // top of a settled OpenClaw thread, fetch it once. Found → prepend.
   // Gated by status (idle/error only) + a sync ref so a scroll burst fires it once.
   const maybeLoadArchive = () => {
     const key = activeKeyRef.current;
@@ -5052,9 +5134,18 @@ function ChatPageApp() {
     maybeLoadArchive();
   }, [activeKey, archive.status, historyLoaded, messages.length]);
 
+  const onHistoryBoundaryChange = (atTop: boolean) => {
+    setHistoryBoundaryKey(atTop && historyLoaded ? activeKeyRef.current : null);
+  };
   const onThreadScroll = () => {
     const el = threadRef.current;
     if (!el) return;
+    if (anchoredRef.current) {
+      const groups = el.querySelectorAll<HTMLElement>(".chat-group.is-user");
+      const sent = groups[groups.length - 1];
+      if (sent) anchoredUserOffsetRef.current = sent.getBoundingClientRect().top - el.getBoundingClientRect().top;
+    }
+    if (!immersive && el.scrollTop > 1) onHistoryBoundaryChange(false);
     updateJumpVisibility();
     if (initialScrollFrameRef.current != null) return;
     const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -5069,9 +5160,11 @@ function ChatPageApp() {
     cancelInitialScroll();
     stoppedScrollKeyRef.current = null;
     const el = threadRef.current;
+    if (el && e.deltaY !== 0) onHistoryBoundaryChange(e.deltaY < 0 && el.scrollTop <= 1);
     if (el && e.deltaY < 0 && el.scrollTop < 60) maybeLoadArchive();
   };
   const jumpToLatest = () => {
+    setHistoryBoundaryKey(null);
     cancelInitialScroll();
     stoppedScrollKeyRef.current = null;
     // explicit "take me down" = opt back OUT of the send-anchor mode: close the
@@ -5181,6 +5274,18 @@ function ChatPageApp() {
     if (!connectedBackends) return;
     void chatHistoryController.revalidateConnected(connectedBackends);
   }, [chatHistoryController, connectedBackends]);
+
+  useEffect(() => {
+    for (const backend of recoveryBackends) observedRecoveryBackendsRef.current.add(backend);
+    for (const backend of connectedBackends ?? []) {
+      if (!observedRecoveryBackendsRef.current.delete(backend)) continue;
+      // A backend can recover while the proxy socket remains connected. Verify
+      // only the original operations; never replay a prompt from this effect.
+      for (const entry of readPendingTrackedSends().filter(item => item.backendId === backend)) {
+        void verifyTrackedSendRef.current?.(entry.key);
+      }
+    }
+  }, [connectedBackends, recoveryBackends]);
 
   const sendCanvasWidgetPrompt = useCallback((ownerSessionKey: string, text: string) => {
     if (activeKeyRef.current !== ownerSessionKey) return;
@@ -5343,10 +5448,6 @@ function ChatPageApp() {
   deepLinkDepsRef.current = { ensureSessionRow, refreshSessions };
   const handledSessionLocationRef = useRef<string | null>(null);
   const routerNavigate = useNavigate();
-  const browsePlugins = useCallback((installationId?: string) => {
-    routerNavigate(installationId
-      ? `/plugins?installationId=${encodeURIComponent(installationId)}` : "/plugins");
-  }, [routerNavigate]);
   useEffect(() => {
     if (!shouldRefreshChatAvatars(routerLocation.pathname)) return;
     setAvatarVersion(Date.now());
@@ -5471,6 +5572,7 @@ function ChatPageApp() {
       if (divider && !selected[0]?.__archiveDivider) selected.unshift(divider);
       const prepend = await prepareHistoryMessages(key, selected);
       if (activeKeyRef.current !== key || generation !== archiveGenerationRef.current) return;
+      setHistoryBoundaryKey(null);
       capturePrependAnchor();
       const previousLength = archivePrefixRef.current.key === key ? archivePrefixRef.current.msgs.length : 0;
       archivePagesRef.current = { ...pages, start };
@@ -5503,7 +5605,7 @@ function ChatPageApp() {
       ?? caps?.maxPayloadBytes;
   };
   const inspectChatSendPayload = (key: string, text: string, atts: readonly ChatAttachment[],
-    pluginSelection?: readonly ChatPluginSelection[]) => {
+    ) => {
     const maxPromptBytes = capabilitiesForSession(key)?.maxPromptBytes;
     const promptBytes = new TextEncoder().encode(JSON.stringify(text)).byteLength;
     if (maxPromptBytes && promptBytes > maxPromptBytes) {
@@ -5512,7 +5614,7 @@ function ChatPageApp() {
     return gatewayRequestPayloadBudget(
       String(reqId.current),
       "chat.send",
-      buildChatSendParams(key, text, CHAT_SEND_IDEMPOTENCY_SAMPLE, atts, pluginSelection),
+      buildChatSendParams(key, text, CHAT_SEND_IDEMPOTENCY_SAMPLE, atts),
       maxPayloadForSession(key),
     );
   };
@@ -5541,24 +5643,23 @@ function ChatPageApp() {
   };
 
   // Send text (+ optional attachments) as a chat message via chat.send. `isSlash`
-  // arms a watchdog so a command the backend silently ignores can't wedge the
-  // composer in the "sending" state forever (a `chat` event for the session cancels it).
+  // shows a slow-operation hint after a quiet period. Only a real terminal
+  // event, cancellation or reconciliation may release the in-flight operation.
   const sendChatMessage = async (
     text: string,
     atts: ChatAttachment[],
     isSlash = false,
     displayText = text,
-    pluginSelection?: ChatPluginSelection[],
-    pluginGeneration?: number,
+    recoveryRetry = false,
   ) => {
     const key = activeKeyRef.current;
     // 防御性门禁：即使某个新入口绕过 submit，也不能在 Hermes profile 尚未 ready
     // 时制造 RPC、乐观气泡或缓存写入。
-    if (!key || !sendController.canSend(key) || inFlightRef.current.has(key)
+    if (!key || preparingSecretInputRef.current.has(key) || !sendController.canSend(key) || inFlightRef.current.has(key)
       || hasPendingTrackedSend(key)) return;
     const originalBackend = backendOfSession(key);
-    const trackedSend = shouldTrackChatSend(originalBackend, pluginSelection);
-    const inputBudget = inspectChatSendPayload(key, text, atts, pluginSelection);
+    const trackedSend = shouldTrackChatSend(originalBackend);
+    const inputBudget = inspectChatSendPayload(key, text, atts);
     if (!inputBudget.allowed) {
       showPayloadLimit("chat.sendPayloadTooLarge", inputBudget.payloadBytes, inputBudget.maxPayload);
       return;
@@ -5572,10 +5673,9 @@ function ChatPageApp() {
     // message, no phantom bubble, no composer churn), while a genuinely-lost original
     // still gets delivered. Attachment sends opt out (richer payload, own key).
     const nowTs = Date.now();
-    const selectionKey = JSON.stringify((pluginSelection ?? []).slice().sort((a, b) => a.installationId.localeCompare(b.installationId)));
     const recent = atts.length ? undefined : recentSendRef.current.get(key);
-    if (recent && recent.text === text && recent.selectionKey === selectionKey && nowTs - recent.at < DUP_SEND_WINDOW_MS) {
-      const recentParams = buildChatSendParams(key, text, recent.idem, atts, pluginSelection);
+    if (recent && recent.text === text && nowTs - recent.at < DUP_SEND_WINDOW_MS) {
+      const recentParams = buildChatSendParams(key, text, recent.idem, atts);
       const payloadBudget = gatewayRequestPayloadBudget(
         String(reqId.current),
         "chat.send",
@@ -5587,7 +5687,7 @@ function ChatPageApp() {
         return;
       }
       recent.at = nowTs;
-      if (trackedSend && !rememberPendingTrackedSend(key, recent.idem, pluginSelection, originalBackend)) {
+      if (trackedSend && !rememberPendingTrackedSend(key, recent.idem, undefined, originalBackend)) {
         setError(t("chat.sendTrackingUnavailable"));
         return;
       }
@@ -5600,7 +5700,22 @@ function ChatPageApp() {
     }
     const idem = crypto.randomUUID();
 
-    const params = buildChatSendParams(key, text, idem, atts, pluginSelection);
+    preparingSecretInputRef.current.add(key);
+    try {
+      const prepared = await prepareChatInputForSend(key, idem, text);
+      if (activeKeyRef.current !== key) { draftsRef.current.set(key, prepared.text); return; }
+      const original = text;
+      text = prepared.text;
+      if (displayText === original) displayText = prepared.text;
+      else displayText = (await prepareChatInputForSend(key, `${idem}:display`, displayText)).text;
+      draftsRef.current.delete(key);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "这条消息暂时无法安全发送，请稍后重试。内容已为你保留");
+      if (activeKeyRef.current === key && !inputRef.current) { setInput(text); inputRef.current = text; }
+      return;
+    } finally { preparingSecretInputRef.current.delete(key); }
+
+    const params = buildChatSendParams(key, text, idem, atts);
     const payloadBudget = gatewayRequestPayloadBudget(
       String(reqId.current),
       "chat.send",
@@ -5611,8 +5726,8 @@ function ChatPageApp() {
       showPayloadLimit("chat.sendPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
       return;
     }
-    if (!atts.length) recentSendRef.current.set(key, { text, selectionKey, idem, at: nowTs });
-    if (trackedSend && !rememberPendingTrackedSend(key, idem, pluginSelection, originalBackend)) {
+    if (!atts.length) recentSendRef.current.set(key, { text, idem, at: nowTs });
+    if (trackedSend && !rememberPendingTrackedSend(key, idem, undefined, originalBackend)) {
       setError(t("chat.sendTrackingUnavailable"));
       return;
     }
@@ -5629,7 +5744,9 @@ function ChatPageApp() {
     // 本地气泡缩略/缓存只针对图片；PDF/文件走 files chip。
     const imgs = atts.filter((a) => !a.kind || a.kind === "image").map((a) => a.dataUrl);
     const nonImageAtts = atts.filter((a) => a.kind && a.kind !== "image");
+    const previousMessages = settlePendingAssistant(messagesRef.current, liveTimelinesRef.current.get(key)?.steps);
     runStatusBySessionRef.current.set(key, "starting");
+    setRunWaitBySession(previous => ({ ...previous, [key]: { kind: "starting", stage: "preparing", reason: null, since: nowTs } }));
     markInFlight(key, true);
     liveToolsRef.current.delete(key); // fresh turn → drop any prior turn's live tool cards
     pendingThinkingRef.current.delete(key);
@@ -5649,14 +5766,14 @@ function ChatPageApp() {
     sendAnchorRef.current = true; // my own send repositions ONCE: park the sent bubble at the top, reply streams into the space below (no continuous auto-follow — R280)
     setImmersiveSendSeq((s) => s + 1); // 沉浸层的 R280 mirror 用这个单调计数当「本次发送要锚定」信号
     const nextMessages: ChatMsg[] = [
-      ...messagesRef.current.map((message) => message.keepLiveLayout ? { ...message, keepLiveLayout: false } : message),
+      ...previousMessages.map((message) => message.keepLiveLayout || message.settledPending
+        ? { ...message, keepLiveLayout: false, settledPending: false } : message),
       {
         role: "user",
         parts: [{ type: "text", text: displayText }],
         images: imgs.length ? imgs : undefined,
         retryAttachments: atts.length ? atts : undefined,
-        pluginSelection: pluginSelection?.length ? pluginSelection : undefined,
-        localSendId: originalBackend === "openclaw" || pluginSelection?.length ? idem : undefined,
+        localSendId: originalBackend === "openclaw" ? idem : undefined,
         // 非图片附件在气泡里以 chip 呈现（此前完全不显示——发出去后用户看不到
         // 自己附了什么）。
         // 视频带上 dataURL：气泡里渲染可播放的预览窗（点击进 lightbox）。
@@ -5704,32 +5821,22 @@ function ChatPageApp() {
       const timer = setTimeout(() => {
         slashWatchdogRef.current.delete(key);
         if (!inFlightRef.current.has(key)) return;
-        markInFlight(key, false);
         if (activeKeyRef.current === key) {
-          setSending(false);
-          setMessages((prev) =>
-            prev.some((m) => m.pending)
-              ? [
-                  ...prev.filter((m) => !m.pending),
-                  { role: "system", local: true, parts: [{ type: "text", text: t("chat.commandNoReply") }], ts: Date.now() },
-                ]
-              : prev,
-          );
+          const hint = { text: t("chat.commandStillRunning"), kind: "pending" as const };
+          setToast(hint);
+          setTimeout(() => setToast(current => current === hint ? null : current), 7000);
         }
       }, 18000);
       slashWatchdogRef.current.set(key, timer);
     }
     if (trackedSend) {
-      // Original text/attachments stay only in this renderer's memory. Unknown
-      // receipts never turn this recovery payload into a queued/replayable send.
-      pendingPluginSendRef.current.set(`${key}\0${idem}`, { key, generation: pluginGeneration ?? -2, text, atts,
-        selection: pluginSelection ?? [] });
+      // A retry that is still uncertain must be checked again, never looped.
+      pendingSendDraftRef.current.set(`${key}\0${idem}`, { key, text, atts, isSlash, displayText, recoveryRetry });
     }
     try {
       await send("chat.send", params);
     } catch (e) {
-      const uncertain = isUncertainChatSendReceipt(e)
-        || (!!pluginSelection?.length && !isExplicitChatSendRejection(e));
+      const uncertain = isUncertainChatSendReceipt(e);
       const observedSend = trackedSend || (uncertain && ["shoggoth", "openclaw", "hermes"].includes(originalBackend));
       if (observedSend && uncertain) {
         // A dispatched ordinary message can lose its ACK during an upstream
@@ -5744,7 +5851,7 @@ function ChatPageApp() {
         return;
       }
       if (trackedSend) forgetPendingTrackedSend(key, idem);
-      restoreRejectedPluginSend(idem, key);
+      restoreRejectedSend(idem, key);
       markInFlight(key, false);
       const timer = slashWatchdogRef.current.get(key);
       if (timer) {
@@ -5808,11 +5915,9 @@ function ChatPageApp() {
   const queueSendable = (key: string): boolean =>
     connected && (connectedBackends == null || connectedBackends.has(backendOfSession(key)));
   const bumpQueue = () => setQueueTick((t) => t + 1);
-  const enqueueMessage = (key: string, text: string, atts: ChatAttachment[],
-    pluginSelection?: ChatPluginSelection[], pluginGeneration?: number) => {
+  const enqueueMessage = (key: string, text: string, atts: ChatAttachment[]) => {
     const q = sendQueueRef.current.get(key) ?? [];
-    q.push({ id: crypto.randomUUID(), text, atts, pluginSelection, pluginGeneration });
-    if (pluginSelection?.length && pluginGeneration !== undefined) pluginReservationRef.current.set(key, pluginGeneration);
+    q.push({ id: crypto.randomUUID(), text, atts });
     sendQueueRef.current.set(key, q);
     bumpQueue();
     // 沉浸模式看不到 chips（v1 未接入沉浸层）——真正滞留时给个 toast，防「回车没反应」
@@ -5842,14 +5947,16 @@ function ChatPageApp() {
     const q = sendQueueRef.current.get(key);
     if (!q?.length) return;
     const item = q[0]!;
-    const payloadBudget = inspectChatSendPayload(key, item.text, item.atts, item.pluginSelection);
+    if (item.recovery && item.recovery.backendId !== backendOfSession(key)) return;
+    const payloadBudget = inspectChatSendPayload(key, item.text, item.atts);
     if (!payloadBudget.allowed) {
       showPayloadLimit("chat.queuedPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
       return;
     }
     q.shift();
     bumpQueue();
-    void sendChatMessage(item.text, item.atts, false, item.text, item.pluginSelection, item.pluginGeneration);
+    void sendChatMessage(item.text, item.atts, item.recovery?.isSlash ?? false,
+      item.recovery?.displayText ?? item.text, !!item.recovery);
   };
   flushQueueRef.current = flushQueue;
   // 点击 chip 取回编辑：出队，文本回输入框（有草稿则换行拼接不覆盖），附件并回附件区。
@@ -5860,12 +5967,9 @@ function ChatPageApp() {
     const idx = q.findIndex((m) => m.id === id);
     if (idx < 0) return;
     const [item] = q.splice(idx, 1);
-    if (item.pluginGeneration !== undefined && pluginReservationRef.current.get(key) === item.pluginGeneration)
-      pluginReservationRef.current.delete(key);
     bumpQueue();
     setInput((prev) => (prev.trim() ? `${prev}\n${item.text}` : item.text));
     if (item.atts.length) setComposerAttachments((prev) => [...prev, ...item.atts]);
-    if (item.pluginSelection?.length) setPluginSelectionFor(key, item.pluginSelection);
     visibleComposerEl()?.focus();
   };
   const removeQueued = (id: string) => {
@@ -5874,18 +5978,12 @@ function ChatPageApp() {
     const q = sendQueueRef.current.get(key) ?? [];
     const idx = q.findIndex((m) => m.id === id);
     if (idx < 0) return;
-    const [item] = q.splice(idx, 1);
-    if (item.pluginGeneration !== undefined && pluginReservationRef.current.get(key) === item.pluginGeneration)
-      pluginReservationRef.current.delete(key);
+    q.splice(idx, 1);
     bumpQueue();
   };
   const clearQueue = () => {
     const key = activeKeyRef.current;
     if (!key) return;
-    for (const item of sendQueueRef.current.get(key) ?? []) {
-      if (item.pluginGeneration !== undefined && pluginReservationRef.current.get(key) === item.pluginGeneration)
-        pluginReservationRef.current.delete(key);
-    }
     sendQueueRef.current.delete(key);
     bumpQueue();
   };
@@ -6272,6 +6370,9 @@ function ChatPageApp() {
           // the post-final refresh can erase the active session for ~30s.
           ensureSessionRow(newKey, Date.now(), {
             backendId: backendOfSession(key),
+            // Use the created child's authoritative choice: a legacy parent's
+            // displayed mode can be derived from a different profile default.
+            ...(nativeSession ? { permissionMode: res?.payload?.permissionMode } : {}),
             model: active?.model,
             modelProvider: inheritedProvider,
             thinkingLevel: active?.thinkingLevel,
@@ -6513,38 +6614,21 @@ function ChatPageApp() {
     const q = quote && quote.key === key ? quote : null;
     const prefix = q ? `${q.text.split("\n").map((l) => `> ${l}`).join("\n")}\n\n` : "";
     const outgoing = prefix && !text.startsWith(prefix) ? `${prefix}${text}` : text;
-    const selectedDraft = pluginSelectionsRef.current[key];
-    const selectionGeneration = pluginGenerationRef.current.get(key);
-    if (selectedDraft?.length && selectionGeneration === undefined) {
-      setToast({ text: t("chat.pluginSelectionStale"), kind: "error" });
-      return;
-    }
-    const knownValidity = pluginValidityRef.current.get(key);
-    if (selectedDraft?.length && knownValidity?.backendId === backendOfSession(key)
-      && knownValidity.selection === JSON.stringify(selectedDraft)
-      && knownValidity.valid === false) {
-      setToast({ text: t("chat.pluginSelectionStale"), kind: "error" });
-      return;
-    }
-    const selectedPlugins = selectionGeneration !== undefined
-      && pluginReservationRef.current.get(key) !== selectionGeneration
-      ? selectedDraft?.slice() : undefined;
     const shouldSteer = inFlight && canSteerActiveChat(
       capabilitiesForSession(key),
       runStatusBySessionRef.current.get(key),
       atts.length,
-    ) && !selectedPlugins?.length
-      && (!selectedDraft?.length || !["openclaw", "hermes"].includes(backendOfSession(key)));
+    );
     const payloadBudget = shouldSteer
       ? inspectChatSteerPayload(key, outgoing)
-      : inspectChatSendPayload(key, outgoing, atts, selectedPlugins);
+      : inspectChatSendPayload(key, outgoing, atts);
     if (!payloadBudget.allowed) {
       showPayloadLimit("chat.sendPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
       return;
     }
     if (hasPendingTrackedSend(key) && (verificationKeys.has(key)
       || runStatusBySessionRef.current.get(key) === "needs_verification")) {
-      setToast({ text: t("chat.sendNeedsVerification"), kind: "error" });
+      setToast({ text: t(chatVerificationNoticeKey(readPendingTrackedSends().find(entry => entry.key === key))), kind: "error" });
       return;
     }
     setInput("");
@@ -6556,7 +6640,7 @@ function ChatPageApp() {
     }
     // 空闲时立即新开一轮；Runtime 不支持 steering、Run 尚未 running，
     // 或消息带附件时继续使用待发队列，保持原有保序与断线恢复语义。
-    enqueueMessage(key, outgoing, atts, selectedPlugins, selectionGeneration);
+    enqueueMessage(key, outgoing, atts);
     flushQueue(key);
   };
 
@@ -6749,7 +6833,7 @@ function ChatPageApp() {
   // Stop the active session's run (composer Stop button → chat.abort).
   const abortActive = async () => {
     const key = activeKeyRef.current;
-    if (!key) return;
+    if (!key || serviceRecoveryBusyRef.current || recoveryBackends.has(backendOfSession(key))) return;
     const previousScrollKey = stoppedScrollKeyRef.current;
     stoppedScrollKeyRef.current = key;
     // Stop keeps the reading position even if a terminal notice grows the tail.
@@ -6905,8 +6989,7 @@ function ChatPageApp() {
           : m.nativeAttachments?.length ? m.nativeAttachments : retryChatAttachments(m.images ?? []);
         if (txt || atts.length) {
           recentSendRef.current.delete(key); // explicit retry = a real new turn; opt out of double-fire dedup
-          void sendChatMessage(txt, atts, false, txt, m.pluginSelection,
-            m.pluginSelection?.length ? -1 : undefined);
+          void sendChatMessage(txt, atts, false, txt);
           return;
         }
       }
@@ -7109,8 +7192,6 @@ function ChatPageApp() {
   // pdf / arbitrary file only where the backend's transport can deliver them.
   // Oversized files are refused up-front with backend-declared limits.
   const activeBackend = activeKey ? backendOfSession(activeKey) : "openclaw";
-  const pluginSelectionReadiness = usePluginSelectionReadiness(activeBackend,
-    activeKey ? agentOf(activeKey) : null, activeKey, connected);
   const duplicateToolCallIds = useMemo(() => {
     const seen = new Set<string>();
     const duplicates = new Set<string>();
@@ -7151,9 +7232,8 @@ function ChatPageApp() {
   const supportsActiveAttachments = supportsBackendAttachments(activeBackend, activeCaps);
   const attachAccept = activeCaps?.attachments.file
     ? undefined // 任意文件
-    : activeCaps?.attachments.pdf
-      ? "image/*,.pdf,application/pdf"
-      : "image/*";
+    : [activeCaps?.attachments.image ? "image/*" : "", activeCaps?.attachments.pdf ? ".pdf,application/pdf" : ""]
+      .filter(Boolean).join(",");
   const addFile = (file: File) => {
     const targetKey = activeKeyRef.current;
     const caps = activeKeyRef.current ? capabilitiesForSession(activeKeyRef.current) : undefined;
@@ -7881,11 +7961,11 @@ function ChatPageApp() {
 
   const nativeModelSelectionDisabled = activeBackendDescriptor?.surfaces.agentHarness === true
     && (runtimeModels.pending || !connected);
-  const selectComposerModel = async (id: string, provider?: string, bindingId?: string) => {
+  const selectComposerModel = async (id: string, provider?: string, bindingId?: string, modelProviderRef?: string) => {
     if (!usesRuntimeModelPicker) { await changeModel(id, provider); return; }
     if (!active || !bindingId || nativeModelSelectionDisabled) return;
     const key = active.key;
-    if (await runtimeModels.select(id, bindingId, active.permissionMode ?? null)) {
+    if (await runtimeModels.select(id, bindingId, active.permissionMode ?? null, { modelProviderRef })) {
       if (activeKeyRef.current === key) setPickedModel(null);
       await runtimeModels.refresh();
       await refreshSessions();
@@ -7902,7 +7982,8 @@ function ChatPageApp() {
     const choices = data.models.filter((model) => model.bindingId === data.selection.bindingId);
     if (choices.length === 0 || choices.some((model) => model.isDefault)) return;
     autoModelSessionsRef.current.add(active.key);
-    void runtimeModels.select(choices[0].id, data.selection.bindingId, active.permissionMode ?? null, { quiet: true })
+    void runtimeModels.select(choices[0].id, data.selection.bindingId, active.permissionMode ?? null,
+      { quiet: true, modelProviderRef: choices[0].modelProviderRef })
       .then((selected) => (selected ? refreshSessions() : undefined));
   }, [usesRuntimeModelPicker, active, runtimeModels, nativeModelSelectionDisabled, refreshSessions]);
   useEffect(() => {
@@ -7924,6 +8005,61 @@ function ChatPageApp() {
     : active ? recoveryBackends.has(backendOfSession(active.key)) : recoveryBackends.size > 0;
   const recoveryNotice = activeRecoveryRequired
     ? `${t("settings.serviceRecoveryRequired")}. ${t("settings.serviceRecoveryHint")}` : null;
+  const recoverChatService = async () => {
+    if (serviceRecoveryBusyRef.current || !recoveryBackends.has("shoggoth")) return;
+    serviceRecoveryBusyRef.current = true;
+    setServiceRecoveryBusy(true);
+    try {
+      let status = await runShoggothBackgroundAction("repair");
+      // A poisoned store must reopen and replay its journal before reads or
+      // sends resume. Keychain readiness can settle just after the restart.
+      for (const delay of [150, 300, 600, 1200]) {
+        if (status.service.healthy && !status.service.pendingCommandsLocked) break;
+        await new Promise(resolve => window.setTimeout(resolve, delay));
+        status = await getShoggothProductStatus();
+      }
+      if (!status.service.healthy || status.service.pendingCommandsLocked) throw new Error("service recovery incomplete");
+      await refreshSessions();
+      await refreshStatusRef.current?.();
+      await verifyPendingTrackedSends();
+      if (activeKeyRef.current) await loadHistory(activeKeyRef.current, { refresh: true });
+      setToast(current => current?.text === t("chat.serviceRecoveryFailed") ? null : current);
+    } catch {
+      await refreshStatusRef.current?.();
+      setToast({ text: t("chat.serviceRecoveryFailed"), kind: "error" });
+    } finally {
+      serviceRecoveryBusyRef.current = false;
+      setServiceRecoveryBusy(false);
+    }
+  };
+  const recoveryAction = activeRecoveryRequired && recoveryBackends.has("shoggoth")
+    && (activeGroupId || !active || backendOfSession(active.key) === "shoggoth") ? (
+      <button type="button" disabled={!connected || serviceRecoveryBusy} aria-busy={serviceRecoveryBusy} onClick={() => void recoverChatService()}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+          <path d="M20 7v5h-5M4 17v-5h5" /><path d="M6.1 6.1A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.9" />
+        </svg>
+        <span>{t(serviceRecoveryBusy ? "chat.serviceRecovering" : "chat.recoverService")}</span>
+      </button>
+    ) : null;
+  const recoveryCard = recoveryNotice ? <ChatServiceRecoveryNotice action={recoveryAction} /> : null;
+  const activePendingSend = activeKey ? readPendingTrackedSends().find(entry => entry.key === activeKey) : undefined;
+  const verificationNotice = activeKey && verificationKeys.has(activeKey) && !activeRecoveryRequired ? (
+    <ChatStatusNotice title={t(activePendingSend && !activePendingSend.accepted ? "chat.sendVerificationNoticeTitle" : "chat.verificationNoticeTitle")} tone="warning" className="chat-banner chat-verification-banner"
+      testId="chat-verification-notice" action={<button type="button" disabled={!connected || serviceRecoveryBusy}
+        onClick={() => void verifyPendingTrackedSends(activeKey, true)}>
+        {t(activePendingSend ? activePendingSend.accepted ? "chat.verifyOriginalSend" : "chat.checkSendResult" : "chat.retryObserve")}
+      </button>}>
+      {t(chatVerificationNoticeKey(activePendingSend))}
+    </ChatStatusNotice>
+  ) : null;
+  const connectionNotice = error ? (
+    <ChatStatusNotice title={t("chat.errorNoticeTitle")} tone="error" role="alert" className="chat-banner" testId="chat-error-notice">
+      {translateGatewayError(error, t)}
+    </ChatStatusNotice>
+  ) : !connected ? (
+    <ChatStatusNotice title={t(everConnected ? "chat.reconnectingBanner" : "chat.connecting")} className="chat-banner" testId="chat-connection-notice" />
+  ) : null;
+  const statusNotices = recoveryCard || ((connectionNotice || verificationNotice) ? <>{connectionNotice}{verificationNotice}</> : null);
   useEffect(() => {
     if (!connected || active?.source !== "codex-desktop") return;
     const timer = window.setInterval(() => { void refreshSessions().catch(() => {}); }, 5000);
@@ -7955,6 +8091,7 @@ function ChatPageApp() {
   );
   // 优先级：用户刚手动选的 > 最近回答的实际模型 > 会话配置模型 > 原生运行时默认模型。
   const selectedRuntimeModel = runtimeModels.data?.models.find(model => model.bindingId === runtimeModels.data?.selection.bindingId
+    && model.modelProviderRef === runtimeModels.data.selection.modelProviderRef
     && (runtimeModels.data.selection.model ? model.id === runtimeModels.data.selection.model : model.isDefault));
   const displayModel = usesRuntimeModelPicker
     ? runtimeModels.data?.selection.model ?? selectedRuntimeModel?.id ?? active?.model ?? ""
@@ -8082,7 +8219,9 @@ function ChatPageApp() {
   const keyedShownGroups = useMemo(() => keyedChatGroups(shownGroups), [shownGroups]);
   const modalTimeline = timelineModal?.sessionKey === activeKey ? timelineModal : null;
   const modalSteps = modalTimeline ? subagentActivity.project(modalTimeline.sessionKey,
-    modalTimeline.timeline ? visibleTimelineSteps(modalTimeline.timeline.steps) : modalTimeline.steps, modalTimeline.runId) : [];
+    modalTimeline.timeline ? withStartupWait(visibleTimelineSteps(modalTimeline.timeline.steps),
+      modalTimeline.timeline === liveTimelinesRef.current.get(modalTimeline.sessionKey)
+        ? runWaitBySession[modalTimeline.sessionKey] : undefined) : visibleTimelineSteps(modalTimeline.steps), modalTimeline.runId) : [];
   const modalStatus = modalTimeline?.timeline?.status ?? "done";
   // The native host shows one document per window. Restore the newest card
   // directly instead of letting older history mounts replace it asynchronously.
@@ -8113,14 +8252,24 @@ function ChatPageApp() {
       parts: keyedChatChildren(message.item, "part", message.item.parts),
     })),
   })), [keyedShownGroups]);
-  const latestAssistantMessageKey = useMemo(() => {
+  // Keep the previous reply laid out when the loading bubble becomes the newest reply.
+  const latestAssistantMessageKeys = useMemo(() => {
+    const keys = new Set<string>();
     for (let gi = keyedThreadGroups.length - 1; gi >= 0; gi -= 1) {
       const group = keyedThreadGroups[gi];
       if (group.item.role !== "assistant") continue;
       for (let mi = group.messages.length - 1; mi >= 0; mi -= 1) {
         const message = group.messages[mi];
-        if (message.item.parts.some((part) => part.type === "text" && part.text?.trim())) return message.key;
+        if (message.item.parts.some((part) => part.type === "text" && part.text?.trim())) keys.add(message.key);
+        if (keys.size === 2) return keys;
       }
+    }
+    return keys;
+  }, [keyedThreadGroups]);
+  const latestUserMessageKey = useMemo(() => {
+    for (let gi = keyedThreadGroups.length - 1; gi >= 0; gi -= 1) {
+      const group = keyedThreadGroups[gi];
+      if (group.item.role === "user") return group.messages[group.messages.length - 1]?.key;
     }
     return undefined;
   }, [keyedThreadGroups]);
@@ -8267,7 +8416,8 @@ function ChatPageApp() {
           footer: "",
           dividerLabel: d
             ? `${d.fromReset ? t("chat.archiveResetAt", { time: when }) : t("chat.archiveEarlierAt", { time: when })}${d.truncated ? ` · ${t("chat.archiveTruncated")}` : ""}`
-            : n.notice === "runInterrupted" ? t("chat.runInterruptedNotice")
+            : n.notice === "contextCompacted" ? t("chat.compactedCtx")
+              : n.notice === "runInterrupted" ? t("chat.runInterruptedNotice")
               : `${t("chat.modelSwitchedNotice")}${n.model ? ` · ${n.model}` : ""}`,
           dividerTitle: d ? undefined : n.parts.find((p) => p.text)?.text || undefined,
         });
@@ -8350,7 +8500,7 @@ function ChatPageApp() {
         const prompts = seg.msgs.flatMap((m) =>
           m.parts.filter((p) => p.type === "prompt" && p.promptEntry).map((p) => p.promptEntry as ChatPromptEntry),
         );
-        const liveMessage = seg.msgs.find(message => message.pending || message.settledPending);
+        const liveMessage = seg.msgs.find(message => message.pending);
         const liveSteps = liveMessage ? liveStepsFor(liveMessage) : [];
         const liveToolIds = new Set(liveSteps.map(step => step.toolCallId).filter(Boolean));
         const processes = showTraj ? seg.msgs.flatMap(message => keyedChatChildren(message, "part", message.parts)
@@ -8359,7 +8509,8 @@ function ChatPageApp() {
             const tools = part.steps.filter(step => step.kind === "tool");
             if (tools.length && tools.every(step => step.toolCallId && liveToolIds.has(step.toolCallId))) return [];
             if (!tools.length && part.steps.every(step => step.activity && liveSteps.some(live => live.id === step.id))) return [];
-            const steps = subagentActivity.project(activeKey || "", part.steps, message.activityRunId || message.nativeRunId);
+            const steps = subagentActivity.project(activeKey || "", visibleTimelineSteps(part.steps), message.activityRunId || message.nativeRunId);
+            if (!steps.length) return [];
             return [<TurnProcess key={key} steps={steps} onOpenLargeView={() => openTimelineModal(steps, message.ts, false, message.activityRunId || message.nativeRunId)} />];
           })) : [];
         if (showTraj && liveSteps.length) processes.push(<TurnProcess key={`${segId}:live-trajectory`} steps={liveSteps}
@@ -8375,10 +8526,12 @@ function ChatPageApp() {
             g.role === "assistant" && seg.cls === "chat" ? activeLegacyHtmlPolicy : "source") : "",
           images: [...segImages, ...media.srcs],
           files: segFiles.length ? segFiles : undefined,
-          pluginSelectionLabel: seg.msgs.some(m => m.pluginSelection?.length)
-            ? `${t("chat.pluginChosen")} · ${seg.msgs.flatMap(m =>
-              m.pluginSelectionSnapshot?.map(item => `${item.packageName}${item.declaredVersion ? ` ${item.declaredVersion}` : ""}`) ?? []).join("、")
-                || seg.msgs.flatMap(m => m.pluginSelection ?? []).length}` : undefined,
+          connectorSelectionLabel: seg.msgs.some(m => m.connectorSelection?.length)
+            ? `${t("chat.connectorChosen")} · ${seg.msgs.flatMap(m =>
+              m.connectorSelectionSnapshot?.map(item => `${item.service} · ${item.label}`) ?? []).join("、")
+                || seg.msgs.flatMap(m => m.connectorSelection ?? []).length}`
+            : seg.msgs.some(m => m.legacyPluginSelection?.length) ? t("chat.legacyPluginChosen") : undefined,
+          connectorSelectionHint: seg.msgs.some(m => m.legacyPluginSelection?.length) ? t("chat.legacyPluginChosenHint") : t("chat.connectorChosenHint"),
           footer: "",
           content: seg.msgs.some(m => m.parts.some(p => p.type === "ui_artifact"))
             || (activeBackendDescriptor?.surfaces.agentHarness === true && g.role === "assistant" && seg.cls === "chat")
@@ -8411,7 +8564,7 @@ function ChatPageApp() {
       out.push(...kept);
     }
     return out;
-  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, showTraj, subagentRevision, subagentActivity]);
+  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, showTraj, subagentRevision, subagentActivity, runWaitBySession]);
   // 沉浸模式的 agent 状态相位（背景媒体层 + 轻量状态行共用）。判据全部是「事件到没到」，
   // 零后端特判（铁律 1）：OpenClaw 不发 thinking/prompt 事件 → 对应相位自然不出现，由
   // 素材回退链兜退化。这是未滞回的原始相位——防抖/最短展示在 ImmersiveBackdrop 内做
@@ -8440,7 +8593,7 @@ function ChatPageApp() {
   // pendingThinkingRef 的每次变更都经 applyToolStream 回流进 messages，这里纯派生、
   // 零新订阅。没有过程信息（OpenClaw 首包前）返回 null → 沉浸层继续用三点等待。
   const immersiveLive = useMemo((): ImmersiveLiveStatus | null => {
-    if (activeKey && activeRunInFlight && runWaitBySession[activeKey]?.kind === "retrying") {
+    if (activeKey && activeRunInFlight && runWaitBySession[activeKey]) {
       return { tools: [], wait: runWaitBySession[activeKey] };
     }
     const last = messages[messages.length - 1];
@@ -9084,7 +9237,7 @@ function ChatPageApp() {
         disabled={earlierHistory.loading} onClick={loadEarlierHistory}>
         {t(earlierHistory.loading ? "chat.historyLoadingEarlier" : earlierHistory.error ? "chat.historyRetryEarlier" : "chat.historyLoadEarlier")}
       </button>
-    ) : messages.length > 0 ? <div className="chat-archive-bar is-note" data-testid="chat-history-complete">{t("chat.historyAllLoaded")}</div> : null)}
+    ) : null)}
     {backendOfSession(activeKey) === "openclaw" && (() => {
       const st = archive.key === activeKey ? archive : { status: "idle" as const, hasMore: false, error: undefined };
       // Empty chats stay blank while the archive probe distinguishes a fresh
@@ -9096,10 +9249,15 @@ function ChatPageApp() {
           disabled={st.status === "loading"} onClick={maybeLoadArchive}>
           {t(st.status === "loading" ? "chat.archiveLoading" : st.status === "error" ? "chat.archiveRetry" : "chat.archiveLoadEarlier")}
         </button>;
-      if (st.status === "empty") return <div className="chat-archive-bar is-note">{t("chat.archiveNone")}</div>;
-      if (st.status === "unsupported" && st.error === "remote") return <div className="chat-archive-bar is-note">{t("chat.archiveRemote")}</div>;
+      if (historyBoundaryKey === activeKey && !earlierHistory.cursor && st.status === "unsupported" && st.error === "remote")
+        return <div className="chat-archive-bar is-note">{t("chat.archiveRemote")}</div>;
       return null;
     })()}
+    {historyBoundaryKey === activeKey && messages.length > 0 && earlierHistory.key === activeKey
+      && !earlierHistory.cursor && !earlierHistory.loading
+      && (backendOfSession(activeKey) !== "openclaw" || (archive.key === activeKey
+        && (archive.status === "empty" || (archive.status === "loaded" && !archive.hasMore))))
+      ? <div className="chat-archive-bar is-note" data-testid="chat-history-complete" role="status">{t("chat.historyStartReached")}</div> : null}
   </> : null;
 
   return (
@@ -9372,7 +9530,7 @@ function ChatPageApp() {
 
       {activeGroupId && (
         <section className="chat-conv">
-          {recoveryNotice && <div className="chat-banner" role="alert">{recoveryNotice}</div>}
+          {recoveryCard && <div className="chat-status-notices">{recoveryCard}</div>}
           <GroupChatPanel key={`${groupCacheScope}:${activeGroupId}`} groupId={activeGroupId} cache={groupPanelCache} cacheScope={groupCacheScope}
             onArchived={() => { setOpenGroup(null); void refreshGroupChats(); }}
             agents={agents.map((g) => ({ backendId: backendOfKnownAgent(g.agentId), agentId: g.agentId,
@@ -9381,28 +9539,7 @@ function ChatPageApp() {
       )}
       <section className={`chat-conv is-board-${showSessionBoard ? sessionBoardViewMode : "chat"}`} data-native-ui-surface
         style={activeGroupId ? { display: "none" } : undefined}>
-        {recoveryNotice ? (
-          <div className="chat-banner" role="alert">{recoveryNotice}</div>
-        ) : error ? (
-          <div className="chat-banner" title={error ?? undefined}>{t("chat.errorPrefix", { msg: error ? translateGatewayError(error, t) : error })}</div>
-        ) : !connected ? (
-          // Cold start / reconnecting: a neutral state, not an error flash.
-          // 分词：冷启动是「连接中…」，掉线自愈是「连接已断开，正在重连…」——后者要让
-          // 用户知道有东西在自己跑，不必刷新页面。
-          <div className="chat-banner is-info">
-            {everConnected ? t("chat.reconnectingBanner") : t("chat.connecting")}
-          </div>
-        ) : null}
-        {activeKey && verificationKeys.has(activeKey) && (
-          <div className="chat-banner is-info chat-verification-banner" role="status">
-            <span>{t(hasPendingTrackedSend(activeKey)
-              ? "chat.sendNeedsVerification" : "chat.observeNeedsVerification")}</span>
-            <button type="button" disabled={!connected}
-              onClick={() => void verifyPendingTrackedSends(activeKey)}>
-              {t(hasPendingTrackedSend(activeKey) ? "chat.verifyOriginalSend" : "chat.retryObserve")}
-            </button>
-          </div>
-        )}
+        {!immersive && statusNotices && <div className="chat-status-notices">{statusNotices}</div>}
         {toast && (
           <div className={`chat-toast chat-toast--${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"}>
             <span className="chat-toast__text" title={toast.text}>{toast.text}</span>
@@ -9620,7 +9757,8 @@ function ChatPageApp() {
               onJump={scrollToMessage} onUnpin={unpinId} pinnedOnly={pinnedOnly} onToggle={() => setPinnedOnly(value => !value)} />
             </div>
 
-            <div className="chat-thread" ref={threadRef} onScroll={onThreadScroll} onWheel={onThreadWheel}
+            <div className="chat-thread" ref={threadRef} data-history-loaded={historyLoaded}
+              onScroll={onThreadScroll} onWheel={onThreadWheel}
               onPointerDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}
               onKeyDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}>
               <div className="chat-thread__inner">
@@ -9646,7 +9784,8 @@ function ChatPageApp() {
                     return (
                       <div key={groupRenderKey} className="chat-reset-divider">
                         <span className="chat-reset-divider__label" title={n.parts.find((p) => p.text)?.text || undefined}>
-                          {t(n.notice === "runInterrupted" ? "chat.runInterruptedNotice" : "chat.modelSwitchedNotice")}
+                          {t(n.notice === "contextCompacted" ? "chat.compactedCtx"
+                            : n.notice === "runInterrupted" ? "chat.runInterruptedNotice" : "chat.modelSwitchedNotice")}
                           {n.notice === "modelSwitch" && n.model ? ` · ${n.model}` : ""}
                         </span>
                       </div>
@@ -9675,7 +9814,7 @@ function ChatPageApp() {
                         : p.type === "toolCall" || p.type === "toolResult"
                           ? showTools
                           : p.type === "timeline"
-                            ? showTraj && !!p.steps?.length
+                            ? showTraj && !!visibleTimelineSteps(p.steps ?? []).length
                             : !!p.text?.trim(),
                     );
                   const hasVisible = g.msgs.some(isMsgVisible);
@@ -9687,7 +9826,7 @@ function ChatPageApp() {
                   // 直播时间线属于整轮 assistant 输出，不属于会被 Hermes interim 反复
                   // 定稿/新建的 pending 消息。固定放在组顶部，后续中间回复只更新步骤内容，
                   // 不再把卡片逐段推到最新 pending 消息下面。
-                  const liveMessage = g.msgs.find((message) => message.pending || message.settledPending);
+                  const liveMessage = g.msgs.find((message) => message.pending);
                   const groupLiveSteps = liveMessage ? liveStepsFor(liveMessage) : [];
                   const groupLiveToolIds = new Set(groupLiveSteps.flatMap((step) => step.toolCallId ? [step.toolCallId] : []));
                   return (
@@ -9764,15 +9903,22 @@ function ChatPageApp() {
                                   )}
                                 </div>
                               ) : null}
-                              {m.role === "user" && m.pluginSelection?.length ? (
-                                <div className="chat-plugin-selection-badge" title={t("chat.pluginChosenHint")}>
-                                  {t("chat.pluginChosen")} · {m.pluginSelectionSnapshot?.length
-                                    ? m.pluginSelectionSnapshot.map(item => `${item.packageName}${item.declaredVersion ? ` ${item.declaredVersion}` : ""}`).join("、")
-                                    : m.pluginSelection.length}
+                              {m.role === "user" && m.connectorSelection?.length ? (
+                                <div className="chat-plugin-selection-badge" title={t("chat.connectorChosenHint")}>
+                                  {t("chat.connectorChosen")} · {m.connectorSelectionSnapshot?.length
+                                    ? m.connectorSelectionSnapshot.map(item => `${item.service} · ${item.label}`).join("、")
+                                    : m.connectorSelection.length}
                                 </div>
                               ) : null}
-                              {m === liveMessage && activeRunInFlight && activeKey && runWaitBySession[activeKey]?.kind === "retrying" && (
-                                <div className="chat-bubble is-error" data-testid="chat-retry-status">
+                              {m.role === "user" && m.legacyPluginSelection?.length ? (
+                                <div className="chat-plugin-selection-badge" title={t("chat.legacyPluginChosenHint")}>
+                                  {t("chat.legacyPluginChosen")}
+                                </div>
+                              ) : null}
+                              {m === liveMessage && activeRunInFlight && activeKey && runWaitBySession[activeKey]
+                                && runWaitBySession[activeKey].kind !== "starting" && (
+                                <div className={runWaitBySession[activeKey].kind === "retrying" ? "chat-bubble is-error" : undefined}
+                                  data-testid={runWaitBySession[activeKey].kind === "retrying" ? "chat-retry-status" : "chat-queue-status"}>
                                   <ChatRunWait state={runWaitBySession[activeKey]} />
                                 </div>
                               )}
@@ -9787,7 +9933,8 @@ function ChatPageApp() {
                                 const tools = p.steps.filter((step) => step.kind === "tool");
                                 if (tools.length && tools.every((step) => step.toolCallId && groupLiveToolIds.has(step.toolCallId))) return null;
                                 if (!tools.length && p.steps.every(step => step.activity && groupLiveSteps.some(live => live.id === step.id))) return null;
-                                const steps = subagentActivity.project(activeKey || "", p.steps, m.activityRunId || m.nativeRunId);
+                                const steps = subagentActivity.project(activeKey || "", visibleTimelineSteps(p.steps), m.activityRunId || m.nativeRunId);
+                                if (!steps.length) return null;
                                 return <TurnProcess key={k} steps={steps} pluginConversation={activePluginConversation} onOpenLargeView={() => openTimelineModal(steps, m.ts, false, m.activityRunId || m.nativeRunId)} />;
                               }
                               if (p.type === "ui_artifact" && p.uiArtifact) {
@@ -9898,6 +10045,7 @@ function ChatPageApp() {
                               if (m.pending) {
                                 const waitingForPrompt = m.parts.some(part => part.type === "prompt" && part.promptEntry
                                   && chatPromptAttentionOf([part.promptEntry]));
+                                // Keep reply loading visible independently of the activity toggle.
                                 if (waitingForPrompt && !p.text?.trim()) return null;
                                 return (
                                   <div key={k} className="chat-bubble is-streaming" data-qp={pi}>
@@ -9906,11 +10054,12 @@ function ChatPageApp() {
                                         className="chat-md"
                                         text={p.text}
                                         htmlArtifactPolicy={m.role === "assistant" ? activeLegacyHtmlPolicy : "source"}
+                                        streamingCursor={!waitingForPrompt && pi === m.parts.length - 1}
                                       />
                                     ) : null}
-                                    {/* 等首字节 = 双球融合（"在思考"）；已出字 = 打字光标（"在输出"） */}
-                                    {!waitingForPrompt && pi === m.parts.length - 1 &&
-                                      (p.text?.trim() ? <span className="chat-cursor">●</span> : <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />)}
+                                    {/* 等待正文时显示双球加载动画，开始输出后切换为光标。 */}
+                                    {!p.text?.trim() && !waitingForPrompt && pi === m.parts.length - 1 &&
+                                      <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
                                   </div>
                                 );
                               }
@@ -9964,7 +10113,7 @@ function ChatPageApp() {
                                     ))}
                                     {qr.body.trim() ? (
                                       <ChatMarkdown
-                                        className="chat-bubble chat-md"
+                                        className={`chat-bubble chat-md${messageRenderKey === latestUserMessageKey ? " is-latest-send" : ""}`}
                                         data-qp={pi}
                                         text={qr.body}
                                       />
@@ -9997,7 +10146,7 @@ function ChatPageApp() {
                                   ) : null}
                                   {media.text.trim() ? (
                                     <ChatMarkdown
-                                      className={`chat-bubble chat-md${messageRenderKey === latestAssistantMessageKey ? " is-latest-reply" : ""}${m.keepLiveLayout ? " is-streamed-reply" : ""}`}
+                                      className={`chat-bubble chat-md${messageRenderKey === latestUserMessageKey ? " is-latest-send" : ""}${latestAssistantMessageKeys.has(messageRenderKey) ? " is-latest-reply" : ""}${m.keepLiveLayout ? " is-streamed-reply" : ""}`}
                                       data-qp={pi} /* R154：右键引用按这条气泡取文 */
                                       text={media.text}
                                       htmlArtifactPolicy={m.role === "assistant" ? activeLegacyHtmlPolicy : "source"}
@@ -10063,6 +10212,10 @@ function ChatPageApp() {
                     </div>
                   );
                 })}
+                {activePluginConversation && <McpApprovalTarget conversation={activePluginConversation}
+                  agentName={active ? sessionName(active) : undefined}
+                  enabled={routerLocation.pathname === "/chat" && !activeGroupId && !immersive && historyVisible
+                    && (!showSessionBoard || sessionBoardViewMode === "chat")} />}
                 {/* send-anchor standing room — height driven imperatively by sizeStreamSpacer */}
                 <div ref={streamSpacerRef} className="chat-stream-spacer" aria-hidden="true" />
                 <div ref={bottomRef} />
@@ -10108,6 +10261,7 @@ function ChatPageApp() {
               </div>
             )}
 
+            {!immersive && activeKey && <McpConnectionRequests key={activeKey} backendId={activeBackend} agentId={agentOf(activeKey)} sessionKey={activeKey} visible={!immersive && !activeGroupId && routerLocation.pathname === "/chat"} />}
             {!immersive && planDock}
             <div
               className="chat-composer"
@@ -10148,6 +10302,7 @@ function ChatPageApp() {
                   )}
                 </div>
               )}
+              {activeCaps?.runtimeFeatures?.resume === "unsupported" && <RuntimeResumeNotice />}
               {quote && (
                 <div className="chat-quote-bar">
                   <span className="chat-quote-bar__ico">↩</span>
@@ -10218,17 +10373,7 @@ function ChatPageApp() {
               <div className="chat-composer__bar">
                 <div className="chat-composer__left" title={activeRunInFlight ? t("chat.settingsNextTurn") : undefined}>
                   <div className="chat-composer__model-controls">
-                    {!immersive && <ChatPluginPicker
-                      sessionKey={activeKey}
-                      backendId={activeBackend}
-                      selectionSupported={pluginSelectionReadiness.supported}
-                      selectionChecking={pluginSelectionReadiness.checking}
-                      onRetryReadiness={pluginSelectionReadiness.refresh}
-                      selected={activeKey ? pluginSelections[activeKey] ?? [] : []}
-                      onChange={(selection) => { if (activeKey) setPluginSelectionFor(activeKey, selection); }}
-                      onSelectionValidity={onPluginSelectionValidity}
-                      onBrowse={browsePlugins}
-                    />}
+
                     <span className={listLive ? undefined : "is-stale"}>
                       <ChatModelMenu
                         models={usesRuntimeModelPicker ? selectableModels.map(model => ({ ...model, disabled: !runtimeModels.data?.selection.canSwitch
@@ -10236,6 +10381,7 @@ function ChatPageApp() {
                         activeModel={displayModel}
                         activeProvider={displayModelProvider}
                         activeBindingId={runtimeModels.data?.selection.bindingId}
+                        activeModelProviderRef={runtimeModels.data?.selection.modelProviderRef}
                         runtimeGroups={usesRuntimeModelPicker ? runtimeModels.data?.runtimes ?? [] : undefined}
                         onSelect={selectComposerModel}
                         loading={usesRuntimeModelPicker ? runtimeModels.loading : modelsLoading}
@@ -10324,6 +10470,7 @@ function ChatPageApp() {
                       type="button"
                       className="chat-iconbtn chat-send chat-stop"
                       onClick={abortActive}
+                      disabled={activeRecoveryRequired || serviceRecoveryBusy}
                       title={t("chat.stopGenerating")}
                     >
                       <IconStop />
@@ -10394,6 +10541,7 @@ function ChatPageApp() {
           live={immersiveLive}
           sendSeq={immersiveSendSeq}
           onNearTop={maybeLoadArchive}
+          onHistoryBoundaryChange={onHistoryBoundaryChange}
           historyControl={historyControl}
           unreadAnchor={unreadAnchor ?? undefined}
           onDropFiles={onDropFiles}
@@ -10411,20 +10559,12 @@ function ChatPageApp() {
           canSend={activeSendReady}
           writerHint={activeWriterHint}
           recoveryNotice={recoveryNotice}
+          statusNotices={statusNotices}
+          abortDisabled={activeRecoveryRequired || serviceRecoveryBusy}
           slashMenu={slashMenuNode}
           planDock={planDock}
           slashOpen={slashOpen}
-          pluginPicker={<ChatPluginPicker
-            sessionKey={activeKey}
-            backendId={activeBackend}
-            selectionSupported={pluginSelectionReadiness.supported}
-            selectionChecking={pluginSelectionReadiness.checking}
-            onRetryReadiness={pluginSelectionReadiness.refresh}
-            selected={activeKey ? pluginSelections[activeKey] ?? [] : []}
-            onChange={(selection) => { if (activeKey) setPluginSelectionFor(activeKey, selection); }}
-            onSelectionValidity={onPluginSelectionValidity}
-            onBrowse={browsePlugins}
-          />}
+          connectionRequests={activeKey ? <McpConnectionRequests key={`immersive:${activeKey}`} backendId={activeBackend} agentId={agentOf(activeKey)} sessionKey={activeKey} visible={immersive && !activeGroupId && routerLocation.pathname === "/chat"} /> : null}
           attachments={attachments}
           removeAttachment={removeAttachment}
           quoteText={quote && quote.key === activeKey ? quote.text : null}
@@ -10452,6 +10592,7 @@ function ChatPageApp() {
           displayModel={displayModel}
           changeModel={selectComposerModel}
           activeBindingId={runtimeModels.data?.selection.bindingId}
+          activeModelProviderRef={runtimeModels.data?.selection.modelProviderRef}
           runtimeGroups={usesRuntimeModelPicker ? runtimeModels.data?.runtimes ?? [] : undefined}
           activeModelProvider={displayModelProvider}
           modelsLoading={usesRuntimeModelPicker ? runtimeModels.loading : modelsLoading}

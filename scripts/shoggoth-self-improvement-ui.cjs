@@ -13,6 +13,7 @@ async function run() {
   let server, child, timer;
   try {
     if (unifiedCatalog) {
+      await f.backend.createAgent({ name: "Second Skills Agent", workspace: f.workspace });
       const job = await f.review("auto"); assert.equal(job.state, "applied");
       const skill = (await f.ok("skills")).items[0];
       const next = await f.send(f.session.sessionKey, "catalog-read-task", "检查构建产物");
@@ -20,6 +21,8 @@ async function run() {
         contentHash: skill.head, cursor: 0, maxBytes: 8192 },
       { profileId: f.profile.id, callId: require("node:crypto").randomUUID() }, { runId: next.id, assertCurrent() {} });
       await f.complete(next, "已核对产物并验证。");
+      assert.equal((await f.backend.getSkillsPage({ agentId: f.profile.agentId })).total, 2);
+      assert.equal((await f.backend.getSkillsPage()).total, 3, "the unified page includes the second Agent's built-in method");
     }
     await require(path.join(repo, "app/manage-ui/node_modules/esbuild")).build({ entryPoints: [path.join(repo,
       unifiedCatalog ? "scripts/fixtures/learned-skills-page.tsx" : "scripts/fixtures/self-improvement-ui.tsx")],
@@ -74,7 +77,7 @@ finally{w.destroy();app.quit();}}).catch(e=>{console.error(e);app.exit(1)});`);
     const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
     fs.writeFileSync(path.join(output, "electron.log"), log); assert.equal(code, 0, `UI failed; inspect ${output}`);
     assert.equal(f.models.length, 1); assert.equal(f.released.length, 1);
-    console.log(`PASS actual React/REST/Service UI: ${unifiedCatalog ? "unified learned catalog, counts, title search, status filters, archive/restore, version details, narrow layout and withdrawal" : "consent, own-Agent model, review, publication, edit ownership, version diff, narrow layout, source withdrawal"}; ${output}`);
+    console.log(`PASS actual React/REST/Service UI: ${unifiedCatalog ? "unified learned catalog, counts, hidden controls, status filters, archive/restore, version details, narrow layout and withdrawal" : "consent, own-Agent model, review, publication, edit ownership, version diff, narrow layout, source withdrawal"}; ${output}`);
   } finally {
     clearTimeout(timer); if (child && child.exitCode === null) child.kill("SIGKILL");
     if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } await f.close();

@@ -133,7 +133,8 @@ function load(relative) {
       if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader")) return passthrough("i");
       if (name.endsWith("/components/ChatFileButton")) return load("src/components/ChatFileButton.tsx");
       if (name.endsWith("/components/ChatMarkdown")) return passthrough("p");
-      if (name === "./GroupChatMarkdown") return { __esModule: true, default: props => React.createElement("p", null, props.lead, props.text) };
+      if (name === "./GroupChatMarkdown") return { __esModule: true, default: props => React.createElement("p", null, props.lead, props.text),
+        groupAttachmentsOutsideMarkdown: (_text, attachments) => attachments };
       if (name === "./ChatPromptCard") return { __esModule: true, default: props => React.createElement("button", { "data-prompt": true, onClick: () => props.onRespond(props.entry, { decision: "accept" }) }, "respond") };
       if (name === "./ChatModelMenu") return { __esModule: true, default: props => React.createElement("model-menu", props) };
       if (name === "./chatIcons") return load("src/pages/chatIcons.tsx");

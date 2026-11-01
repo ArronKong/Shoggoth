@@ -8,6 +8,25 @@ const { serviceError } = require("../security");
 const { estimateContextTokens } = require("../conversation-context-budget");
 const { assertNoBorrowedMemoryWrite } = require("./borrowed-memory-provenance.cjs");
 
+// The model returns its durable notes as a Markdown list. Each top-level item
+// becomes its own entry, so the daily file keeps one bullet per fact instead
+// of a list nested inside one entry's bullet, which daily ingestion would join
+// as "parent > child". Indented children stay with their item; any other
+// shape (prose, a preamble, unindented text between items) stays one entry.
+const LIST_ITEM = /^(?:[-*+]|\d+[.)])\s+/u;
+function splitFlushEntries(text) {
+  const whole = text.trim(), lines = whole.replace(/\r\n?/gu, "\n").split("\n");
+  if (!LIST_ITEM.test(lines[0])) return [whole];
+  const items = [];
+  for (const line of lines) {
+    if (LIST_ITEM.test(line)) items.push([line.replace(LIST_ITEM, "")]);
+    else if (!line.trim()) continue;
+    else if (/^(?: {2,}|\t)\S/u.test(line)) items.at(-1).push(line.replace(/^(?: {2}|\t)/u, ""));
+    else return [whole];
+  }
+  return items.map(item => item.join("\n").trim()).filter(Boolean);
+}
+
 function flushTranscript(source, profileId, sessionId) {
   const lines = source.content.split("\n"), selected = [];
   let bytes = 0, truncated = false;
@@ -167,7 +186,7 @@ class MemoryMaintenance {
     }, check);
     let committing = false;
     try {
-      const response = await service.complete({ profileId, prompt: modelPrompt, model: plan.model, timeoutMs: 180_000, signal, assertCurrent: check });
+      const response = await service.complete({ profileId, prompt: modelPrompt, model: plan.model, timeoutMs: 600_000, signal, assertCurrent: check });
       check();
       const raw = (response.text || "").trim();
       const parsed = raw === "NO_REPLY" ? { append: "" } : JSON.parse(raw);
@@ -179,13 +198,16 @@ class MemoryMaintenance {
       if (parsed.append.trim()) {
         const now = service.now(), content = parsed.append.trim();
         if (hasSecret(content)) throw serviceError("MEMORY_SECRET_REJECTED", "压缩前记忆不能保存凭据");
-        const item = { id: `flush-${id}`, profileId, scope: "agent", type: "semantic", content,
-          sourceRefs: [`compaction-flush:${id}`], confidence: 0.5, sensitivity: hasPii(content) ? "private" : "normal",
+        const parts = splitFlushEntries(content);
+        const items = parts.map((part, index) => ({ id: parts.length === 1 ? `flush-${id}` : `flush-${id}-${index + 1}`,
+          profileId, scope: "agent", type: "semantic", content: part,
+          sourceRefs: [`compaction-flush:${id}`], confidence: 0.5, sensitivity: hasPii(part) ? "private" : "normal",
           status: "active", validFrom: now, validUntil: null, supersedes: null, createdAt: now, updatedAt: now, memoryPath: plan.relativePath,
-          sourceEvidence: context.evidence };
+          sourceEvidence: context.evidence }));
         committing = true;
-        await service.store.upsert(item, { assertCurrent: check });
-        receipt = { ...receipt, appended: true, itemId: item.id };
+        // One atomic write for all entries of this flush.
+        await service.store.upsertMany(items, { assertCurrent: check });
+        receipt = { ...receipt, appended: true, itemId: items[0].id, itemIds: items.map(item => item.id) };
       }
       db.prepare("UPDATE memory_flush_runs SET state='completed',receipt=? WHERE id=?").run(JSON.stringify(receipt), id);
       return { status: "completed", path: plan.relativePath, id, ...receipt };
@@ -207,4 +229,4 @@ class MemoryMaintenance {
   }
 }
 
-module.exports = { MemoryMaintenance };
+module.exports = { MemoryMaintenance, splitFlushEntries };

@@ -53,7 +53,7 @@ class NativeMemorySemanticService {
         for await (const document of documents()) {
           if (!current()) return;
           if (hasSecret(document.text)) continue;
-          await this.embedding.request("upsert", { profileId, domain, stamp, epoch, document }, { timeoutMs: 30_000 });
+          await this.embedding.request("upsert", { profileId, domain, stamp, epoch, document }, { timeoutMs: 120_000 });
         }
         if (!current()) return;
         job.counts = await this.embedding.request("commit", { profileId, domain, stamp, epoch });

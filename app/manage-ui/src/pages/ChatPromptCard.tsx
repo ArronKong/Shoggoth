@@ -91,7 +91,7 @@ function isCancelOption(label: string): boolean {
 function directConfirmationField(request: InteractiveRequestV1 | null): InteractiveFieldV1 | null {
   if (request?.fields.length !== 1) return null;
   const field = request.fields[0];
-  return field.type === "choice" && !field.secret && field.options.length === 2
+  return (field.type === "choice" || field.type === "choice_or_text") && !field.secret && field.options.length === 2
     && field.options.filter((option) => isCancelOption(option.label)).length === 1
     ? field : null;
 }
@@ -113,7 +113,7 @@ function PromptAnswerInput({ secret, label, value, disabled, placeholder, onChan
 
 // Choices remain editable until explicit submission; secret answers stay masked
 // and are excluded from persisted drafts.
-const inputDrafts = new Map<string, Record<string, string>>();
+const inputDrafts = new Map<string, { answers: Record<string, string>; customFields: string[] }>();
 
 export default function ChatPromptCard({
   entry,
@@ -133,13 +133,15 @@ export default function ChatPromptCard({
   const { t } = useTranslation();
   const [value, setValue] = useState("");
   const [legacySelection, setLegacySelection] = useState("");
-  const [answers, setAnswers] = useState<Record<string, string>>(() => draftKey ? inputDrafts.get(draftKey) || {} : {});
+  const [answers, setAnswers] = useState<Record<string, string>>(() => draftKey ? inputDrafts.get(draftKey)?.answers || {} : {});
+  const [customFields, setCustomFields] = useState<Set<string>>(() => new Set(draftKey ? inputDrafts.get(draftKey)?.customFields : []));
   useEffect(() => {
     if (!draftKey || !("version" in entry) || entry.version !== 1) return;
     const safeAnswers = Object.fromEntries(entry.fields.filter((field) => !field.secret && answers[field.id] !== undefined).map((field) => [field.id, answers[field.id]]));
-    inputDrafts.delete(draftKey); inputDrafts.set(draftKey, safeAnswers);
+    inputDrafts.delete(draftKey); inputDrafts.set(draftKey, { answers: safeAnswers,
+      customFields: [...customFields].filter(id => Object.hasOwn(safeAnswers, id)) });
     while (inputDrafts.size > 128) inputDrafts.delete(inputDrafts.keys().next().value!);
-  }, [answers, draftKey, entry]);
+  }, [answers, customFields, draftKey, entry]);
   const [questionSelections, setQuestionSelections] = useState<Record<string, string[]>>({});
   const [questionFreeText, setQuestionFreeText] = useState<Record<string, string>>({});
   const [expiredQuestionId, setExpiredQuestionId] = useState<string | null>(null);
@@ -425,16 +427,32 @@ export default function ChatPromptCard({
                 <legend className="chat-prompt__field-label">{question.label}
                   {question.required === false ? <span className="chat-prompt__optional">{t("chat.promptOptional")}</span> : null}
                 </legend>
-                {question.description ? <span className="chat-prompt__desc">{question.description}</span> : null}
-                {question.type === "choice" ? (
+                {question.description && question.description.trim() !== canonical?.message.trim()
+                  ? <span className="chat-prompt__desc">{question.description}</span> : null}
+                {question.type === "choice" || question.type === "choice_or_text" ? (
                   <ChatPromptChoices label={question.label} options={question.options}
-                    selected={answers[question.id] === undefined ? [] : [answers[question.id]]} disabled={submitting}
-                    onChoose={(choice) => setAnswers((previous) => ({ ...previous, [question.id]: choice }))} />
-                ) : (
+                    selected={customFields.has(question.id) || answers[question.id] === undefined ? [] : [answers[question.id]]} disabled={submitting}
+                    onChoose={(choice) => {
+                      setAnswers((previous) => ({ ...previous, [question.id]: choice }));
+                      setCustomFields(previous => { const next = new Set(previous); next.delete(question.id); return next; });
+                    }} />
+                ) : null}
+                {question.type === "choice_or_text" ? (
+                  <label className="chat-prompt__custom-answer">
+                    <span className="chat-prompt__desc">{t("chat.promptCustomAnswer")}</span>
+                    <PromptAnswerInput secret={question.secret} label={`${question.label} · ${t("chat.promptCustomAnswer")}`}
+                      value={customFields.has(question.id) ? answers[question.id] ?? "" : ""}
+                      disabled={submitting} placeholder={t("chat.promptCustomPlaceholder")}
+                      onChange={(nextValue) => {
+                        setAnswers((previous) => ({ ...previous, [question.id]: nextValue }));
+                        setCustomFields(previous => new Set(previous).add(question.id));
+                      }} />
+                  </label>
+                ) : question.type === "text" ? (
                   <PromptAnswerInput secret={question.secret} label={question.label} value={answers[question.id] ?? ""}
                     disabled={submitting} placeholder={t("chat.promptPlaceholder")}
                     onChange={(nextValue) => setAnswers((previous) => ({ ...previous, [question.id]: nextValue }))} />
-                )}
+                ) : null}
               </fieldset>
             ))}
           </div>

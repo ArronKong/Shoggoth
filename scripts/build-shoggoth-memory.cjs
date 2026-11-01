@@ -160,6 +160,11 @@ async function main() {
           "./utility-model-setting.js", "../../packages/terminal-core/src/ansi.js",
           "./model-catalog-metadata.js", "./model-catalog-lookup.js"].includes(args.path)) return { path: path.join(port, "model-alias-runtime.ts") };
       });
+      build.onResolve({ filter: /^\.\/types\.js$/ }, args => {
+        if (path.relative(upstream, args.importer).startsWith("extensions/active-memory/")) {
+          return { path: path.join(port, "active-memory-types.ts") };
+        }
+      });
       build.onResolve({ filter: /^\.\/recall\.js$/ }, args => {
         if (path.relative(upstream, args.importer) === "extensions/active-memory/index.ts") {
           return { path: path.join(port, "active-recall-resolve.ts") };

@@ -1,0 +1,19 @@
+[
+  "io.github.ComposioHQ/composio",
+  "app.linear/linear",
+  "com.notion/mcp",
+  "com.figma.mcp/mcp",
+  "com.supabase/mcp",
+  "com.atlassian/atlassian-mcp-server",
+  "io.github.github/github-mcp-server",
+  "com.stripe/mcp",
+  "co.huggingface/hf-mcp-server",
+  "com.monday/monday.com",
+  "net.todoist/mcp",
+  "io.github.miroapp/mcp-server",
+  "com.airtable/mcp",
+  "com.webflow/mcp",
+  "com.neon/mcp",
+  "io.github.getsentry/sentry-mcp",
+  "com.amplitude/mcp-server"
+]

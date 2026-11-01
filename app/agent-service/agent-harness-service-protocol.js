@@ -290,7 +290,9 @@ function validComputerStatus(value) {
 function validateAgentHarnessParams(method, params) {
   if (!METHOD_SET.has(method) || !own(params)) throw protocolError("INVALID_PARAMS");
   const profileId = params.profileId;
-  if (!id(profileId)) throw protocolError("INVALID_PARAMS");
+  if (!id(profileId) && !(method === "harness.skills.query" && profileId === null)) {
+    throw protocolError("INVALID_PARAMS");
+  }
   let valid = false;
   if (method === "harness.definition.meta" || method === "harness.tools.list"
     || method === "harness.skills.usage" || method === "harness.computer.status"
@@ -546,10 +548,12 @@ function validateAgentHarnessResult(method, result, params = null) {
       && Array.isArray(result.items) && result.items.length <= 100
       && result.items.every(item => validManagementSkill(item)
         && item.backendId === "shoggoth" && id(item.profileId) && id(item.agentId)
+        && (item.agentName === undefined || text(item.agentName, 256, false))
         && text(item.category, 128) && text(item.emoji, 16)
         && item.registryRevision === result.registryRevision
         && item.registryVersion === result.registryVersion
-        && item.profileRevision === result.profileRevision
+        && (params?.profileId === null ? integer(item.profileRevision, 1)
+          : item.profileRevision === result.profileRevision)
         && integer(item.usageCount) && own(item.usageAgents)
         && Object.entries(item.usageAgents).every(([agentId, count]) => id(agentId) && integer(count, 1)));
   } else if (method === "harness.skills.preview") {

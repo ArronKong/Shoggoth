@@ -18,6 +18,8 @@ async function main() {
     const calls = [];
     let openclawPaths = ["/other/plugin"];
     let toolAllow = ["other_existing_tool"];
+    let agents = {};
+    let beforeGrantWrite;
     let pluginPolicy = { allow: ["other-existing-plugin"], deny: ["other-blocked-plugin"] };
     let beforePluginAllowWrite;
     let ignorePluginAllowWrite = false;
@@ -25,7 +27,8 @@ async function main() {
       calls.push(args);
       if (args[0] === "config" && args[1] === "get") {
         const value = args[2] === "plugins" ? pluginPolicy
-          : args[2] === "tools.alsoAllow" ? toolAllow : openclawPaths;
+          : args[2] === "tools.alsoAllow" ? toolAllow : args[2] === "agents" ? agents
+            : args[2] === "agents.entries" ? agents.entries : openclawPaths;
         if (value === undefined) {
           callback(new Error("unset"), JSON.stringify({ ok: false, error: {
             type: "cli_error", message: `Config path is valid but unset: ${args[2]}.`,
@@ -43,7 +46,16 @@ async function main() {
             return;
           }
           if (!ignorePluginAllowWrite) pluginPolicy.allow = JSON.parse(args[3]);
-        } else if (args[2] === "tools.alsoAllow") toolAllow = JSON.parse(args[3]);
+        } else if (["tools.alsoAllow", "agents.entries"].includes(args[2])) {
+          beforeGrantWrite?.(args[2]);
+          const current = args[2] === "tools.alsoAllow" ? toolAllow : agents.entries;
+          const expectedAt = args.indexOf("--expect-current-json");
+          if (expectedAt < 0 || JSON.stringify(current) !== args[expectedAt + 1]) {
+            callback(new Error(`${args[2]} changed concurrently`), "", ""); return;
+          }
+          if (args[2] === "tools.alsoAllow") toolAllow = JSON.parse(args[3]);
+          else { assert(args.includes("--replace")); agents.entries = JSON.parse(args[3]); }
+        }
         else openclawPaths = JSON.parse(args[3]);
       }
       callback(null, "", "");
@@ -62,7 +74,9 @@ async function main() {
       deny: ["other-blocked-plugin"] });
     assert.deepEqual(toolAllow, ["other_existing_tool", "group_member_role_read", "group_messages_read", "group_task", "group_collaborate", "shoggoth_capability_search",
       "shoggoth_skill_read", "shoggoth_skill_file_read",
-      "shoggoth_plugin_resource_read", "shoggoth_plugin_call"]);
+      "mcp_server_registry_search", "mcp_server_request_connection", "mcp_server_request_secret",
+      "mcp_server_add", "mcp_server_import",
+      "mcp_server_list", "mcp_server_register", "mcp_server_tools", "mcp_server_call", "mcp_server_remove"]);
     assert.equal(calls.some(args => args.includes("tools.deny") || args.includes("tools.allow")), false);
     const link = path.join(hermesHome, "plugins", "shoggoth_shared_capabilities");
     assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
@@ -75,6 +89,13 @@ async function main() {
     assert.equal(second.openclaw, true);
     assert.deepEqual(second.hermes, ["default"]);
     assert.equal(calls.filter(args => args.includes("set") || args.includes("enable")).length, 4);
+    const cache = path.join(fs.readlinkSync(link), "__pycache__");
+    fs.mkdirSync(cache, { mode: 0o755 });
+    fs.writeFileSync(path.join(cache, "transport.cpython-314.pyc"), "fixture", { mode: 0o600 });
+    assert.deepEqual((await registrar.reconcile()).hermes, ["default"], "normal Host bytecode cannot block later startup reconciliation");
+    fs.symlinkSync(path.join(cache, "transport.cpython-314.pyc"), path.join(cache, "__init__.cpython-314.pyc"));
+    assert.match((await registrar.reconcile()).errors["hermes:default"], /bytecode cache unsafe/);
+    fs.unlinkSync(path.join(cache, "__init__.cpython-314.pyc"));
     assert.deepEqual(parseToolAllowList(JSON.stringify({ ok: false,
       error: { type: "cli_error", message: "Config path is valid but unset: tools.alsoAllow." } })), []);
     assert.throws(() => parseToolAllowList(JSON.stringify(["good", ""])), /response invalid/);
@@ -134,6 +155,37 @@ async function main() {
     assert.match(unverified.errors.openclaw, /plugins.allow/);
     ignorePluginAllowWrite = false;
     assert.equal((await registrar.reconcile()).openclaw, true);
+    agents = { entries: { main: { tools: { alsoAllow: ["other_agent_tool"], deny: ["mcp_server_remove"] } },
+      inherited: { tools: { profile: "minimal" } } } };
+    const grantResult = await registrar.reconcile();
+    assert.equal(grantResult.openclaw, true);
+    assert(agents.entries.main.tools.alsoAllow.includes("mcp_server_call"));
+    assert.deepEqual(agents.entries.main.tools.deny, ["mcp_server_remove"]);
+    assert.deepEqual(agents.entries.inherited, { tools: { profile: "minimal" } });
+    toolAllow = ["other_existing_tool"];
+    beforeGrantWrite = key => { if (key === "tools.alsoAllow") toolAllow.push("parallel_tool"); };
+    const grantRace = await registrar.reconcile();
+    assert.equal(grantRace.openclaw, false);
+    assert.match(grantRace.errors.openclaw, /changed concurrently/);
+    assert.deepEqual(toolAllow, ["other_existing_tool", "parallel_tool"]);
+    beforeGrantWrite = undefined;
+    assert.equal((await registrar.reconcile()).openclaw, true);
+    const refreshCalls = [];
+    const refreshOptions = { paths, packaged: true, hermesHome,
+      resourcesRoot: path.join(__dirname, "../resources/external-plugin-adapters"),
+      getOpenClawMode: () => "managed", listHermesProfiles: () => ["default"], execFile,
+      reconcileHermesAdapter: async spec => { refreshCalls.push(spec); return { state: "ready" }; } };
+    assert.equal((await createExternalPluginAdapterRegistrar(refreshOptions).reconcile()).hermesRuntime.default.state, "ready");
+    assert.equal(refreshCalls[0].forceRefresh, false);
+    assert.equal(refreshCalls[0].expectedTools.filter(name => name.startsWith("mcp_server_")).length, 10);
+    assert(refreshCalls[0].expectedTools.includes("mcp_server_add"));
+    assert(refreshCalls[0].expectedTools.includes("mcp_server_import"));
+    const upgradedResources = path.join(root, "upgraded-resources");
+    fs.cpSync(refreshOptions.resourcesRoot, upgradedResources, { recursive: true });
+    fs.appendFileSync(path.join(upgradedResources, "hermes", "__init__.py"), "\n# fixture upgrade\n");
+    assert.equal((await createExternalPluginAdapterRegistrar({ ...refreshOptions,
+      resourcesRoot: upgradedResources }).reconcile()).hermesRuntime.default.state, "ready");
+    assert.equal(refreshCalls[1].forceRefresh, true, "a new digest must reload even with unchanged tool names");
     fs.unlinkSync(link);
     fs.mkdirSync(link);
     const conflict = await registrar.reconcile();

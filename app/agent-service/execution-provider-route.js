@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const { serviceError } = require("./security");
 const { validRuntimeAccountId } = require("./runtime-adapter");
+const { applyProviderRef } = require("./codex-session-provider");
 
 const HASH = /^[a-f0-9]{64}$/u;
 const PROVIDER_FIELDS = ["providerRef", "providerRevision", "credentialRef", "credentialRevision", "modelRef"];
@@ -70,12 +71,16 @@ function validateFrozenExecutionProviderRoute(contract) {
   });
 }
 
-function captureExecutionProviderRoute({ productStore, secretStore, profile, modelRef = null, bindingId = undefined }) {
+// providerRef (optional) is a conversation's model source; omitted means the
+// Profile default. The assertion below re-applies the frozen providerRef.
+function captureExecutionProviderRoute({ productStore, secretStore, profile, modelRef = null, bindingId = undefined,
+  providerRef = undefined }) {
   const selectedBindingId = bindingId ?? profile?.selectedBindingId ?? profile?.defaultBindingId;
   if (selectedBindingId !== undefined && productStore.resolveAgentRuntimeProfile) {
     try { profile = productStore.resolveAgentRuntimeProfile(profile.id, selectedBindingId); } catch { throw routeError(); }
   }
   if (!profile || profile.enabled !== true) throw routeError();
+  try { profile = applyProviderRef(productStore, profile, providerRef); } catch { throw routeError(); }
   const account = productStore.getRuntimeAccount(profile.runtimeAccountId);
   if (!account || account.runtime !== profile.runtime) throw routeError();
   const provider = profile.providerRef === null ? null : productStore.getModelProvider(profile.providerRef);
@@ -105,7 +110,7 @@ function assertExecutionProviderRouteCurrent(contract, { productStore, secretSto
   try {
     current = captureExecutionProviderRoute({ productStore, secretStore,
       profile: productStore.getAgentProfile(frozen.providerFence.profileId), modelRef: frozen.provider.modelRef,
-      bindingId: frozen.bindingId ?? undefined });
+      bindingId: frozen.bindingId ?? undefined, providerRef: frozen.provider.providerRef });
   } catch { throw routeError(); }
   if (JSON.stringify(current) !== JSON.stringify(frozen)) throw routeError();
   return true;

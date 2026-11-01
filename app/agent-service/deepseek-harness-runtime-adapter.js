@@ -25,6 +25,7 @@ const DEEPSEEK_HARNESS_CAPABILITIES = runtimeCapabilities({
   events: true,
   serverRequests: true,
   "context.usage.estimated": true,
+  "context.compact.native": true,
   "model.generate.toolFree": true,
   "model.generate.settings": true,
   "model.resolve.toolFree": true,
@@ -88,6 +89,8 @@ class DeepSeekHarnessRuntimeAdapter {
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }
+
+  runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
 
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);

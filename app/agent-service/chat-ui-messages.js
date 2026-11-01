@@ -23,6 +23,8 @@ const MESSAGES = Object.freeze({
   UI_HOST_REQUIRED: "请在 Shoggoth 桌面应用中操作这张卡片",
   UI_FEATURE_DISABLED: "交互卡片已停用，已有内容仍可查看",
   UI_REQUEST_INVALID: "卡片请求无效",
+  UI_PLUGIN_PLATFORM_RETIRED: "原操作使用已退役的插件选择，请核对原结果，并为新操作重新选择连接器",
+  UI_OPEN_CONNECTOR_RETIRED: "原操作使用已退役的连接器选择。请核对原结果后，通过 MCP 连接器发起新操作。",
   UI_DIRECT_CHAT_REQUIRED: "交互卡片仅供直接聊天使用",
   UI_SENSITIVE_CONTENT: "卡片包含不能保存的敏感信息",
 });

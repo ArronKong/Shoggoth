@@ -7,6 +7,17 @@ function noticeMessage(notice) {
   return `${notice.body}\n\n${links}`;
 }
 
+// Only the delivery controller writes this runless publication identity. A
+// background review, imported reply or user-supplied lookalike is not a notice.
+function isPublishedNoticeEvent(event) {
+  const notice = event?.content?.proactiveNotice;
+  return event?.kind === "assistant" && event.runId === null && event.runtimeRef === null
+    && typeof notice?.id === "string" && /^notice-[a-f0-9]{64}$/u.test(notice.id)
+    && event.id === `proactive-${notice.id}` && ["heartbeat", "inspiration"].includes(notice.kind)
+    && typeof event.content.text === "string" && event.content.text.trim().length > 0
+    && Array.isArray(notice.items) && notice.items.length > 0;
+}
+
 class NoticeDeliveryController {
   constructor({ store, productStore, chatSessionStore, transcriptStore, readConfig, sendSystemNotice,
     isFocused = () => false, validateNotice, onPublished = () => {}, resolveWorkspace = () => null, now = Date.now }) {
@@ -73,7 +84,7 @@ class NoticeDeliveryController {
           }
           notice = this.store.updateNotice(notice.id, { appState: "publishing", sessionKey: session.sessionKey });
           this.transcripts.appendEvent({ profileId: notice.profileId, sessionId: session.id, id: eventId,
-            runId: null, kind: "assistant", occurredAt: notice.createdAt, contextExcluded: true,
+            runId: null, kind: "assistant", occurredAt: notice.createdAt, contextExcluded: false,
             content: { text: noticeMessage(notice), proactiveNotice: { id: notice.id, kind: notice.kind, title: notice.title, items: notice.items } } });
         }
         this.sessions.touchSession(session.sessionKey, notice.createdAt);
@@ -109,4 +120,4 @@ class NoticeDeliveryController {
   }
   async recover() { for (const notice of this.store.outbox()) await this.deliver(notice.id); }
 }
-module.exports = { NoticeDeliveryController, noticeMessage };
+module.exports = { NoticeDeliveryController, noticeMessage, isPublishedNoticeEvent };

@@ -1,6 +1,6 @@
 "use strict";
 const PUBLIC_MESSAGES = Object.freeze({
-  PROACTIVE_DOCUMENT_INVALID: "HEARTBEAT.md 内容或路径无效，请检查 YAML web 列表和文件大小",
+  PROACTIVE_DOCUMENT_INVALID: "检查规则文件的内容或路径无效，请检查文件格式和大小",
   PROACTIVE_INVALID: "主动提醒参数无效",
   PROACTIVE_UNAVAILABLE: "主动提醒服务暂不可用",
   PROACTIVE_NOT_FOUND: "提醒或检查记录不存在",

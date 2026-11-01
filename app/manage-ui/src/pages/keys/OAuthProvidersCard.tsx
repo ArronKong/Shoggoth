@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { OAuthProvider } from "../../types";
 import { disconnectOAuthProvider, getConfig, listOAuthProviders, runProviderCommandInTerminal, updateConfig } from "../../api/client";
 import { useConfirm, useToast } from "../../components/ui";
+import BackendTabIcon from "../../components/BackendTabIcon";
 import { applyDisabledBackends } from "../../lib/backends";
 import { usePageCache } from "../../lib/usePageCache";
 import { useSlowPending } from "../models/useSlowPending";
@@ -107,6 +108,7 @@ function OAuthRow({
   const expired = exp === "expired";
   const isExternal = p.flow === "external";
   const title = providerTitle(p, backend);
+  const runtimeIcon = p.connection?.id;
   // A disconnected native CLI keeps its login; the row only offers to reconnect.
   const off = p.connection?.enabled === false;
   const incompatible = p.status.verification === "incompatible";
@@ -157,7 +159,9 @@ function OAuthRow({
   return (
     <div className={`${styles.oauthRow} ${p.status.error && !off ? styles.oauthRowErr : ""}`}>
       <button className={styles.oauthMain} title={tip} disabled={busy} onClick={main}>
-        <ProviderLogo name={p.id} />
+        {runtimeIcon && ["antigravity", "codex", "pi"].includes(runtimeIcon)
+          ? <span className={styles.logo}><BackendTabIcon backend={runtimeIcon} label={title} /></span>
+          : <ProviderLogo name={runtimeIcon ?? (backend === "shoggoth" ? p.name : p.id)} />}
         <span className={styles.oauthText}>
           <span className={styles.oauthName}>
             {title}

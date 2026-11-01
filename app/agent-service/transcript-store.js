@@ -16,6 +16,7 @@ const {
 } = require("./security");
 const { deriveSessionTitleFromEvents } = require("./session-display-projection");
 const { validateUsageRange } = require("./token-usage-protocol");
+const { isPublishedNoticeEvent } = require("./notice-delivery-controller");
 
 const TRANSCRIPT_SCHEMA_VERSION = 1;
 const TRANSCRIPT_KINDS = Object.freeze([
@@ -43,7 +44,9 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-const INDEX_CHAIN_SEED = sha256("shoggoth-transcript-index-v1");
+// The read projection now includes legacy published notices. Derived lexical
+// and semantic indexes must not reuse an old prefix that omitted them.
+const INDEX_CHAIN_SEED = sha256("shoggoth-transcript-index-v2-published-notices");
 
 function fileIdentity(stat) {
   return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
@@ -201,6 +204,8 @@ class TranscriptStore {
     this.opened = false;
     this.sessions = new Map();
     this.changeRevisions = new Map();
+    // Only records that can withdraw content already returned to a caller.
+    this.invalidationRevisions = new Map();
     this.changeSubscriptions = new Set();
     this.poisonError = null;
   }
@@ -234,16 +239,42 @@ class TranscriptStore {
     // modified journal must not keep supplying supposedly verified user text
     // to conversation recall, candidate review, or memory_explain.
     const targets = this._paths(state.profileId, state.sessionId);
-    if (this._fileIdentity(targets.log) !== state.journalIdentity
-      || this._fileIdentity(targets.manifest) !== state.manifestIdentity) {
+    const journalIdentity = this._fileIdentity(targets.log);
+    const manifestIdentity = this._fileIdentity(targets.manifest);
+    if (journalIdentity === state.journalIdentity && manifestIdentity === state.manifestIdentity) return;
+    const sameFileVersion = (before, after) => before === after || (typeof before === "string"
+      && typeof after === "string" && before.slice(0, before.lastIndexOf(":")) === after.slice(0, after.lastIndexOf(":")));
+    if (!sameFileVersion(state.journalIdentity, journalIdentity)
+      || !sameFileVersion(state.manifestIdentity, manifestIdentity)) {
       throw transcriptError("TRANSCRIPT_SOURCE_CHANGED", "Transcript 原始记录在运行中发生变化");
     }
+    // macOS provenance attributes and an unchanged chmod can advance ctime
+    // without editing the journal. Revalidate the complete journal chain and
+    // manifest before accepting that metadata change. Never repair a source
+    // here, or accept a valid but different same-length journal with a restored
+    // mtime. Ordinary cache reads retain the stat-only fast path.
+    const verifier = new TranscriptStore({ paths: this.paths, fs: this.fs,
+      maxLogBytes: this.maxLogBytes, readOnly: true });
+    verifier.openReadOnly();
+    try {
+      const verified = verifier._load(state.profileId, state.sessionId);
+      if (verified.indexDigests.at(-1) !== state.indexDigests.at(-1)
+        || stableJson(verifier._manifest(verified)) !== stableJson(this._manifest(state))
+        || verified.journalIdentity !== journalIdentity || verified.manifestIdentity !== manifestIdentity
+        || this._fileIdentity(targets.log) !== journalIdentity || this._fileIdentity(targets.manifest) !== manifestIdentity) {
+        throw new Error("Transcript source changed during metadata verification");
+      }
+      state.journalIdentity = journalIdentity;
+      state.manifestIdentity = manifestIdentity;
+    } catch {
+      throw transcriptError("TRANSCRIPT_SOURCE_CHANGED", "Transcript 原始记录在运行中发生变化");
+    } finally { verifier.close(); }
   }
 
   openReadOnly() {
     if (!this.readOnly) throw transcriptError("TRANSCRIPT_READ_ONLY_REQUIRED", "只读打开必须显式声明");
     if (this.opened) return this;
-    this.sessions.clear(); this.changeRevisions.clear(); this.poisonError = null;
+    this.sessions.clear(); this.changeRevisions.clear(); this.invalidationRevisions.clear(); this.poisonError = null;
     this.opened = true;
     return this;
   }
@@ -254,6 +285,7 @@ class TranscriptStore {
     ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot);
     this.sessions.clear();
     this.changeRevisions.clear();
+    this.invalidationRevisions.clear();
     this.poisonError = null;
     this.opened = true;
   }
@@ -262,6 +294,7 @@ class TranscriptStore {
     for (const subscription of this.changeSubscriptions) subscription.unsubscribe();
     this.sessions.clear();
     this.changeRevisions.clear();
+    this.invalidationRevisions.clear();
     this.poisonError = null;
     this.opened = false;
   }
@@ -312,6 +345,7 @@ class TranscriptStore {
   forgetProfile(profileId) {
     this._assertOpen();
     this._bumpChangeRevision(profileId);
+    this._bumpInvalidationRevision(profileId);
     for (const [key, session] of this.sessions) {
       if (session.profileId === profileId) this.sessions.delete(key);
     }
@@ -321,6 +355,15 @@ class TranscriptStore {
     this._assertOpen();
     assertId(profileId, "profileId");
     return this.changeRevisions.get(profileId) || 0;
+  }
+
+  // Ordinary appends never change what an in-flight read already returned;
+  // context exclusion and forgetting can. Any record type other than a plain
+  // append counts, so a future record kind fails safe.
+  getInvalidationRevision(profileId) {
+    this._assertOpen();
+    assertId(profileId, "profileId");
+    return this.invalidationRevisions.get(profileId) || 0;
   }
 
   assertJournalCurrent(profileId, sessionId) {
@@ -334,6 +377,10 @@ class TranscriptStore {
     this.changeRevisions.set(profileId, (this.changeRevisions.get(profileId) || 0) + 1);
   }
 
+  _bumpInvalidationRevision(profileId) {
+    this.invalidationRevisions.set(profileId, (this.invalidationRevisions.get(profileId) || 0) + 1);
+  }
+
   _emptyState(profileId, sessionId) {
     return {
       profileId,
@@ -343,6 +390,7 @@ class TranscriptStore {
       events: [],
       byId: new Map(),
       visibleUserEventsByRun: new Map(),
+      visibleNoticeCount: 0,
       indexDigests: [INDEX_CHAIN_SEED],
     };
   }
@@ -382,10 +430,15 @@ class TranscriptStore {
       if (event.seq !== state.lastEventSeq + 1 || state.byId.has(event.id)) {
         throw transcriptError("TRANSCRIPT_LOG_CORRUPT", "Transcript event seq/id 冲突");
       }
+      // Older deliveries excluded their public message along with the private
+      // review. Project that initial flag without rewriting source records.
+      // Later explicit context operations below retain their full authority.
+      if (isPublishedNoticeEvent(event)) event.contextExcluded = false;
       state.events.push(event);
       state.byId.set(event.id, event);
       state.lastEventSeq = event.seq;
       this._updateVisibleUserRun(state, event, 1);
+      if (isPublishedNoticeEvent(event)) state.visibleNoticeCount++;
     } else {
       if (!exactKeys(record.payload, ["eventId", "contextExcluded"])
         || !ID_PATTERN.test(record.payload.eventId)
@@ -395,8 +448,10 @@ class TranscriptStore {
       const event = state.byId.get(record.payload.eventId);
       if (!event) throw transcriptError("TRANSCRIPT_LOG_CORRUPT", "Transcript context event 不存在");
       this._updateVisibleUserRun(state, event, -1);
+      if (isPublishedNoticeEvent(event) && !event.contextExcluded) state.visibleNoticeCount--;
       event.contextExcluded = record.payload.contextExcluded;
       this._updateVisibleUserRun(state, event, 1);
+      if (isPublishedNoticeEvent(event) && !event.contextExcluded) state.visibleNoticeCount++;
     }
     // A hash chain over validated journal records lets a derived index prove
     // that its old prefix is still present before taking the append fast path.
@@ -574,6 +629,7 @@ class TranscriptStore {
     }
     this._validateRecord(record, state.revision + 1, state);
     this._bumpChangeRevision(state.profileId);
+    if (type !== "event.append") this._bumpInvalidationRevision(state.profileId);
     try {
       this._writeManifest(state);
       state.journalIdentity = this._fileIdentity(targets.log);
@@ -648,7 +704,7 @@ class TranscriptStore {
         ...(typeof displayContent?.text === "string" ? { text: Buffer.from(displayContent.text).subarray(0, 20 * 1024)
           .toString("utf8").toWellFormed() } : {}),
         ...Object.fromEntries(["operationId", "cronOutputVersion", "attachments", "pluginSelection", "pluginSelectionSnapshot",
-          "transcriptType", "segmentId", "origin", "uiAction", "importedFrom"].filter(key => displayContent?.[key] !== undefined)
+          "transcriptType", "segmentId", "origin", "uiAction", "importedFrom", "ownMemoryProvenance"].filter(key => displayContent?.[key] !== undefined)
           .map(key => [key, displayContent[key]])),
         ...(borrowedMemoryRefs.length ? { borrowedMemoryRefs } : {}),
         ...(derived ? { borrowedMemoryDerived: true } : {}), contextRef, displayRef,
@@ -667,7 +723,11 @@ class TranscriptStore {
     };
     const event = validateEvent(candidate, input.sessionId, {
     });
-    const safe = this.assertSecretSafe(event, Object.freeze({
+    // This private store owns the user's conversation, including credentials
+    // or verification codes they ask the Agent to read. Scan control metadata,
+    // not the conversation body. Memory admission has its own secret policy.
+    const safe = this.assertSecretSafe({ ...event, content: {} }, Object.freeze({
+      kind: "validatedTranscriptMetadata",
       profileId: input.profileId,
       sessionId: input.sessionId,
       eventId: event.id,
@@ -736,6 +796,11 @@ class TranscriptStore {
     return this._load(profileId, sessionId).visibleUserEventsByRun.has(runId);
   }
 
+  hasPublishedNotice(profileId, sessionId) {
+    this._assertOpen();
+    return this._load(profileId, sessionId).visibleNoticeCount > 0;
+  }
+
   listEventWindow(profileId, sessionId, eventId, radius = 0) {
     this._assertOpen();
     assertId(eventId, "eventId");
@@ -759,10 +824,8 @@ class TranscriptStore {
     if (!encoded || Buffer.byteLength(encoded) > MAX_CONTEXT_CONTENT_BYTES) {
       throw transcriptError("TRANSCRIPT_EVENT_TOO_LARGE", "可迁移正文超过单个对象容量");
     }
-    const safe = this.assertSecretSafe(content, Object.freeze({ profileId, sessionId, kind: "contextContent" }));
-    if (safe === false || safe?.then || require("./memory-engine").hasSecret(encoded)) {
-      throw transcriptError("TRANSCRIPT_SECRET_REJECTED", "可迁移正文含敏感信息");
-    }
+    // Preserve the original conversation for history and context replay. The
+    // private-file, size and integrity checks still apply to every saved body.
     const hash = sha256(encoded), bytes = Buffer.byteLength(encoded);
     const dir = path.join(this._sessionDir(profileId, sessionId), "context-content");
     ensurePrivateDirectoryTree(dir, this.paths.trustedRoot);

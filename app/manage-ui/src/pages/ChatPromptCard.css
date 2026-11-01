@@ -44,6 +44,7 @@
 .chat-prompt__input::placeholder { color: var(--prompt-muted); opacity: .75; }
 textarea.chat-prompt__input { min-height: 96px; max-height: 320px; resize: vertical; }
 .chat-prompt__input:disabled { opacity: .6; }
+.chat-prompt__custom-answer { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; min-width: 0; }
 
 .chat-prompt__content { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .chat-prompt__fields { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
@@ -73,10 +74,12 @@ textarea.chat-prompt__input { min-height: 96px; max-height: 320px; resize: verti
 .chat-prompt--approval > .chat-prompt__head,
 .chat-prompt--confirmation > .chat-prompt__head { margin-bottom: 8px; }
 .chat-prompt--input > .chat-prompt__actions, .chat-prompt--selection > .chat-prompt__actions {
-  padding-top: 12px; border-top: 1px solid var(--prompt-line);
+  padding-top: 12px;
 }
+.chat-prompt--selection > .chat-prompt__actions { border-top: 1px solid var(--prompt-line); }
 .chat-prompt__btn:disabled { cursor: default; opacity: 0.5; }
-.chat-prompt__btn:focus-visible, .chat-prompt__input:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+.chat-prompt__btn:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+.chat-prompt__input:focus-visible { outline: none; box-shadow: none; border-color: var(--prompt-muted); }
 
 .chat-prompt__action { margin: 0; font-size: 16px; line-height: 1.5; font-weight: 600; overflow-wrap: anywhere; }
 .chat-prompt__summary { display: grid; gap: 4px; margin: 0; }

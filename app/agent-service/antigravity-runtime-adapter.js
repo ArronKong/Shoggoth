@@ -43,8 +43,10 @@ class AntigravityRuntimeHandle {
     this.runtime = ANTIGRAVITY_RUNTIME;
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
-    this.capabilities = runtimeCapabilities({ ...ANTIGRAVITY_CAPABILITIES, serverRequests: host.nativeApprovalsAvailable === true });
+    this.capabilities = runtimeCapabilities({ ...ANTIGRAVITY_CAPABILITIES, serverRequests: host.nativeApprovalsAvailable === true,
+      "model.generate.toolFree": host.modelOnlyInstance === true });
     this.host = host;
+    this.modelOnlyStopsHost = host.modelOnlyInstance === true;
     this.workspace = host.workspace;
     this.controlInstance = host.controlInstance === true;
   }
@@ -53,6 +55,7 @@ class AntigravityRuntimeHandle {
   get registeredSecrets() { return []; }
 
   authenticationState(options) { return this.host.authenticationState(options); }
+  generateModelOnly(input) { return require("./acp-model-only").generateAcpModelOnly(this.host, input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);
@@ -84,6 +87,8 @@ class AntigravityRuntimeAdapter {
       );
     }
     this.runtimePool = options.runtimePool;
+    this.modelOnly = true;
+    this.modelOnlyPurposes = Object.freeze(["proactive"]);
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }
@@ -91,6 +96,8 @@ class AntigravityRuntimeAdapter {
   isRetiredSessionId(sessionId) {
     return typeof sessionId === "string" && sessionId.startsWith(RETIRED_SESSION_PREFIX);
   }
+
+  runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
 
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);

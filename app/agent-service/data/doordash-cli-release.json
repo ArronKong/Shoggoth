@@ -1,0 +1,18 @@
+{
+  "version": "0.2.6",
+  "releaseUrl": "https://github.com/doordash-oss/doordash-cli/releases/tag/v0.2.6",
+  "archives": {
+    "darwin-arm64": {
+      "url": "https://github.com/doordash-oss/doordash-cli/releases/download/v0.2.6/dd-cli-v0.2.6-darwin-arm64.tar.gz",
+      "sha256": "6f9bad1c93812c181fc65a6449c8d61d59ab872bbf3e60a6a6f061725396d5af",
+      "root": "dd-cli-v0.2.6-darwin-arm64",
+      "executable": "dd-cli-v0.2.6-darwin-arm64"
+    },
+    "linux-x64": {
+      "url": "https://github.com/doordash-oss/doordash-cli/releases/download/v0.2.6/dd-cli-v0.2.6-linux-amd64.tar.gz",
+      "sha256": "b6abad40c4881589611d3b87e8f5e68fa5473f12469bd2a9d71db7064c5ff051",
+      "root": "dd-cli-v0.2.6-linux-amd64",
+      "executable": "dd-cli-v0.2.6-linux-amd64"
+    }
+  }
+}

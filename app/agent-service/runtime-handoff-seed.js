@@ -17,7 +17,7 @@ function runtimeHandoffSeed(session, binding, { exec = execFileSync } = {}) {
   const previous = session.retiredRuntimeSessions.at(-1);
   const workspace = { cwd: session.workspace, gitBranch: null, changedFiles: [], truncated: false };
   if (session.workspace) {
-    const git = args => exec("git", ["-C", session.workspace, ...args], { encoding: "utf8", timeout: 750,
+    const git = args => exec("git", ["-C", session.workspace, ...args], { encoding: "utf8", timeout: 5000,
       maxBuffer: 16 * 1024, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
     try { workspace.gitBranch = bounded(git(["branch", "--show-current"]).trim(), 256); } catch {}
     try {

@@ -5,6 +5,10 @@ import type {
   CodexAutomationSource, CodexAutomationModel, CodexAutomationRunResult,
   ChatCapabilities,
   ChatCacheScope,
+  ChatSecretReference,
+  ChatSecretResult,
+  ChatSecretDisclosure,
+  LocalSpeechStatus,
   SlashCatalogResponse,
   SlashExecResult,
   CronRun,
@@ -119,6 +123,7 @@ import { fetchMemoryProviderOwnerDto, validateMemoryProviderOwnerContext, valida
 import { isVisibleCronJob } from "../lib/cronVisibility";
 import { isVisibleRuntime } from "../lib/runtimeVisibility";
 import i18n from "i18next";
+import secretFallbackCodes from "../../../core/chat-secret-fallback-codes.json";
 import { publishSystemIssue } from "../lib/system-issues";
 
 // All management calls go to the loopback REST plane served by static-server.js.
@@ -879,6 +884,10 @@ type DesktopSecretEnvelope<T> =
   | { ok: false; error: { code: string; message: string } };
 
 type DesktopSecretBridge = {
+  getLocalSpeechStatus?: () => Promise<DesktopSecretEnvelope<LocalSpeechStatus>>;
+  requestLocalSpeech?: () => Promise<DesktopSecretEnvelope<LocalSpeechStatus>>;
+  decideChatSecretDisclosure?: (sessionKey: string, disclosureId: string, choice: "original" | "retry" | "cancel") => Promise<DesktopSecretEnvelope<{ decided: boolean }>>;
+  readChatSecretResult?: (sessionKey: string, receiptId: string) => Promise<DesktopSecretEnvelope<{ status: string; result: unknown }>>;
   revealModelProviderKey?: (
     backend: string,
     providerKey: string,
@@ -1126,620 +1135,7 @@ export async function getUsageBreakdown(backend: string, range?: string): Promis
   return breakdown;
 }
 
-// Bounded plugin catalog and candidate management operations.
-export interface PluginCatalogComponent {
-  componentId: string;
-  kind: "skill" | "mcp-server";
-  title: string;
-  state: "ready" | "installed_inactive" | "connection_required" | "permission_required" | "secret_required";
-  transport?: "stdio" | "streamable-http" | "shoggoth-graph"
-    | "shoggoth-gogcli-gmail-mcp" | "shoggoth-codex-security-native";
-}
-
-export interface PluginCatalogItem {
-  installationId: string;
-  revision: number;
-  packageName: string;
-  declaredVersion: string | null;
-  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled" | "first-party";
-  desiredState: "enabled" | "disabled";
-  components: PluginCatalogComponent[];
-  diagnosticCount: number;
-}
-
-export interface PluginCatalogPage {
-  supported: boolean;
-  reasonCode?: string;
-  catalogRevision: string | null;
-  items: PluginCatalogItem[];
-  nextCursor: number | null;
-}
-
-export async function getPluginCatalogPage(
-  backend = "shoggoth", cursor = 0, limit = 20,
-  catalogRevision: string | null = null,
-): Promise<PluginCatalogPage> {
-  const qs = new URLSearchParams({ backend, cursor: String(cursor), limit: String(limit) });
-  if (catalogRevision !== null) qs.set("catalogRevision", catalogRevision);
-  const { page } = await jsonFetch<{ page: PluginCatalogPage }>(
-    `/__api/plugins?${qs.toString()}`,
-  );
-  return page;
-}
-
-export interface PluginSelectionReadiness { version: 1; supported: boolean }
-export async function getPluginSelectionReadiness(backend: string, agent: string,
-  sessionKey: string): Promise<PluginSelectionReadiness> {
-  const qs = new URLSearchParams({ backend, agent, sessionKey });
-  const result = await jsonFetch<PluginSelectionReadiness>(`/__api/plugins/selection-readiness?${qs}`);
-  if (!result || Object.keys(result).length !== 2 || result.version !== 1
-    || typeof result.supported !== "boolean") throw new Error("Plugin selection readiness unavailable");
-  return result;
-}
-
-export interface PluginInstallPreview {
-  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled" | "first-party";
-  previewDigest: string;
-  expectedRevision: number;
-  specVersion: string;
-  name: string;
-  declaredVersion: string | null;
-  installable: boolean;
-  components: {
-    skills: Array<{ name: string; description: string; descriptorDigest: string }>;
-    mcpServers: Array<{ name: string; type: "stdio" | "streamable-http" | "shoggoth-graph"
-      | "shoggoth-gogcli-gmail-mcp" | "shoggoth-codex-security-native";
-      descriptorDigest: string }>;
-  };
-  diagnostics: Array<{ scope: string; name?: string; reasonCode: string }>;
-}
-
-export interface PluginOperationReceipt {
-  operationId: string;
-  kind: "install" | "installation-state" | "skill-binding-set" | "grant-revoke"
-    | "grants-revoke-all" | "mcp-connect" | "grant-allow" | "uninstall";
-  phase: "created" | "committed" | "completed" | "failed";
-  result: PluginInstallationReceipt | PluginSkillBinding | PluginGrantRevokeReceipt
-    | PluginGrantBulkRevokeReceipt | PluginConsentReceipt | PluginUninstallReceipt
-    | { code: string } | null;
-}
-
-export interface PluginConsentReceipt {
-  kind: "mcp-connect" | "grant-allow"; profileId: string; bindingId: string;
-  toolIdentity: string | null; revision: number;
-}
-export function openPluginApp(input: { backendId: string; sessionKey: string; callId: string }): Promise<{ opened: boolean }> {
-  return jsonFetch("/__api/plugins/app-open", { method: "POST", body: JSON.stringify(input) });
-}
-export interface ExternalPluginCatalog {
-  supported: boolean; reasonCode: string | null; hostVersion?: string | null;
-  catalogRevision?: string | null; nextCursor: string | null;
-  capabilities?: { list: boolean; activationObserve: boolean; perAgentScope: boolean };
-  items: { pluginId: string; name: string; version: string | null;
-    desiredState: string; observedState: string; effectiveAt: string; sourceKind: string }[];
-}
-export function getExternalPluginCatalogs(): Promise<{ backends: { backend: string; catalog: ExternalPluginCatalog }[] }> {
-  return jsonFetch("/__api/plugins/external");
-}
-export function getExternalPluginCatalog(backend: string, cursor?: string, catalogRevision?: string): Promise<ExternalPluginCatalog> {
-  const query = new URLSearchParams({ backend });
-  if (cursor !== undefined) query.set("cursor", cursor);
-  if (catalogRevision !== undefined) query.set("catalogRevision", catalogRevision);
-  return jsonFetch(`/__api/plugins/external?${query}`);
-}
-export type PluginConsentInput = { agentId: string; operationId: string; expectedRevision: number } & (
-  { action: "connect"; installationId: string; componentId: string } |
-  { action: "allow"; bindingId: string; toolIdentity: string; contractDigest: string; catalogRevision: string;
-    approvalMode: "always" | "each-call" });
-export interface PluginOAuthFlow {
-  flowId: string; status: "starting" | "pending" | "exchanging" | "ready" | "failed" | "canceled" | "expired";
-  expiresAt: number; reasonCode: string | null; bindingId: string | null; receipt: PluginConsentReceipt | null;
-}
-export interface PluginDisconnectReceipt {
-  kind: "mcp-disconnect"; profileId: string; bindingId: string; revision: number;
-  connectionId: string; affectedBindings: number;
-  credentialDisposition: "none" | "retained_encrypted_unusable" | "retained_encrypted_shared";
-  cleanupStatus: "complete" | "pending"; reasonCode: string | null;
-}
-export interface PluginDisconnectRequest {
-  agentId: string; bindingId: string; expectedRevision: number; operationId: string;
-}
-export function disconnectPluginConnection(input: PluginDisconnectRequest): Promise<{
-  canceled: boolean; receipt: PluginDisconnectReceipt | null;
-}> {
-  return jsonFetch("/__api/plugins/disconnect", { method: "POST", body: JSON.stringify(input) });
-}
-export function getPluginDisconnectOperation(agentId: string, operationId: string): Promise<{
-  operationId: string; found: boolean; phase: "completed" | "outcome_unknown" | null;
-  receipt: PluginDisconnectReceipt | null; reasonCode: string | null;
-}> {
-  return jsonFetch("/__api/plugins/disconnect-operation", { method: "POST", body: JSON.stringify({ agentId, operationId }) });
-}
-export interface PluginDependencyState {
-  installationId: string; componentId: string; status: "missing" | "ready" | "stale" | "changed" | "revoked";
-  revision: number; operationId: string | null; interpreter: "node" | "python"; version: string | null;
-}
-export interface PluginRollbackReceipt {
-  operationId: string; installationId: string; installationRevision: number;
-  action: "snapshot" | "code" | "restore";
-  state: "snapshot_preserved" | "rollback_requires_data_restore" | "restored_from_snapshot";
-  releaseDigest: string; snapshotId: string | null; snapshotDigest: string | null;
-  dataDigest: string; retainedDataId: string | null;
-}
-export interface PluginRollbackState {
-  installationId: string; revision: number; desiredState: "enabled" | "disabled"; codeDigest: string;
-  releases: Array<{ digest: string; name: string; version: string | null }>;
-  snapshots: Array<{ snapshotId: string; snapshotDigest: string; releaseDigest: string; byteLength: number; createdAt: number }>;
-  unavailableSnapshots: number;
-  pending: Array<{ operationId: string; action: "snapshot" | "code" | "restore" | "other";
-    phase: "created" | "committed" | "completed" | "outcome_unknown" | "failed"; state: string | null }>;
-}
-export type PluginRollbackChange = { installationId: string; expectedRevision: number; operationId: string }
-  & ({ action: "snapshot" | "retry" } | { action: "code"; targetDigest: string }
-    | { action: "restore"; snapshotId: string; snapshotDigest: string });
-export function listPluginRollback(installationId: string): Promise<PluginRollbackState> {
-  return jsonFetch("/__api/plugins/rollback-list", { method: "POST", body: JSON.stringify({ installationId }) });
-}
-export function changePluginRollback(input: PluginRollbackChange): Promise<{ canceled: boolean; receipt: PluginRollbackReceipt | null }> {
-  return jsonFetch("/__api/plugins/rollback-change", { method: "POST", body: JSON.stringify(input) });
-}
-export function getPluginRollbackOperation(installationId: string, operationId: string): Promise<{
-  operationId: string; found: boolean; phase: string | null; receipt: PluginRollbackReceipt | null;
-}> {
-  return jsonFetch("/__api/plugins/rollback-operation", { method: "POST", body: JSON.stringify({ installationId, operationId }) });
-}
-export function getPluginDependencyState(installationId: string, componentId: string): Promise<PluginDependencyState> {
-  return jsonFetch("/__api/plugins/dependency-status", { method: "POST", body: JSON.stringify({ installationId, componentId }) });
-}
-export function changePluginDependency(input: { action: "prepare" | "revoke"; installationId: string;
-  componentId: string; expectedRevision: number; operationId: string }): Promise<{
-    canceled: boolean; receipt: PluginDependencyState | null;
-}> {
-  return jsonFetch("/__api/plugins/dependency-change", { method: "POST", body: JSON.stringify(input) });
-}
-export function connectPluginOAuth(input: { agentId: string; installationId: string; componentId: string;
-  expectedRevision: number; operationId: string }): Promise<{ canceled: boolean;
-    flow: Pick<PluginOAuthFlow, "flowId" | "status" | "expiresAt"> | null }> {
-  return jsonFetch("/__api/plugins/oauth-connect", { method: "POST", body: JSON.stringify(input) });
-}
-export function connectPluginBearer(input: { agentId: string; installationId: string; componentId: string;
-  expectedRevision: number; operationId: string; accessToken: string }): Promise<{
-    canceled: boolean; receipt: { kind: "mcp-connect"; profileId: string; bindingId: string;
-      toolIdentity: null; revision: number } | null }> {
-  return jsonFetch("/__api/plugins/bearer-connect", { method: "POST", body: JSON.stringify(input) });
-}
-// One-confirmation plugin enable and `${secret:NAME}` credentials. Values are
-// write-only: reads return names, configured flags and where a value is used.
-export type PluginSetupState = "ready" | "secret_required" | "activation_required" | "unsupported"
-  | "interpreter_unavailable" | "connection_failed";
-export interface PluginSetupComponent {
-  componentId: string;
-  name: string;
-  transport: string;
-  target: string;
-  interpreter: "node" | "python" | null;
-  interpreterReady: boolean | null;
-  secrets: { name: string; configured: boolean }[];
-  state: PluginSetupState;
-  reason: string | null;
-  tools: number | null;
-  granted: number;
-  eachCallTools?: string[];
-}
-export interface PluginSetup {
-  installationId: string;
-  packageName: string;
-  declaredVersion: string | null;
-  releaseDigest: string;
-  desiredState: "enabled" | "disabled";
-  revision: number;
-  skills: number;
-  components: PluginSetupComponent[];
-  nextSteps: string[];
-}
-export interface PluginActivation {
-  installationId: string;
-  packageName: string;
-  desiredState: "enabled" | "disabled";
-  components: PluginSetupComponent[];
-  nextSteps: string[];
-}
-export interface PluginSecretDestination {
-  component: string;
-  kind: "env" | "header";
-  key: string;
-  origin?: string;
-}
-export interface PluginSecrets {
-  installationId: string;
-  packageName: string;
-  items: { name: string; configured: boolean; destinations: PluginSecretDestination[] }[];
-}
-export interface PluginSecretChange {
-  installationId: string;
-  name: string;
-  configured: boolean;
-  components: { name: string; state: string; reason?: string }[];
-  nextSteps: string[];
-}
-export function getPluginSetup(agentId: string, installationId: string): Promise<PluginSetup> {
-  return jsonFetch(`/__api/plugins/setup?${new URLSearchParams({ agentId, installationId })}`);
-}
-export function activatePlugin(input: { agentId: string; installationId: string; expectedRevision: number }): Promise<{
-  canceled: boolean; result: PluginActivation | null }> {
-  return jsonFetch("/__api/plugins/setup", { method: "POST", body: JSON.stringify(input) });
-}
-export function getPluginSecrets(agentId: string, installationId: string): Promise<PluginSecrets> {
-  return jsonFetch(`/__api/plugins/secrets?${new URLSearchParams({ agentId, installationId })}`);
-}
-export function setPluginSecret(input: { agentId: string; installationId: string; name: string; value: string | null }): Promise<{
-  canceled: boolean; result: PluginSecretChange | null }> {
-  return jsonFetch("/__api/plugins/secrets", { method: "POST", body: JSON.stringify(input) });
-}
-// Plugins shipped with the App (resources/shoggoth-plugins). Installed ones are
-// part of the installed catalog; one the user uninstalled can be reinstalled.
-export interface FirstPartyPlugin {
-  packageId: string;
-  name: string;
-  version: string | null;
-  description: string;
-  installationId: string | null;
-  installationState: "enabled" | "disabled" | "uninstalled" | "not-installed";
-}
-export function getFirstPartyPlugins(): Promise<{ items: FirstPartyPlugin[] }> {
-  return jsonFetch("/__api/plugins/first-party");
-}
-export function installFirstPartyPlugin(packageId: string): Promise<{ canceled: boolean;
-  installation: { installationId: string; desiredState: "enabled" | "disabled" } | null }> {
-  return jsonFetch("/__api/plugins/first-party-install", { method: "POST", body: JSON.stringify({ packageId }) });
-}
-export interface PluginZoomRegistrationStatus {
-  configured: boolean;
-  restartRequired: boolean;
-}
-export function getPluginZoomRegistrationStatus(): Promise<PluginZoomRegistrationStatus> {
-  return jsonFetch("/__api/plugins/zoom-registration-status", { method: "POST", body: "{}" });
-}
-export function configurePluginZoomRegistration(input: { clientId: string; clientSecret: string;
-  redirectPort: number; scopes: string[] }): Promise<PluginZoomRegistrationStatus> {
-  return jsonFetch("/__api/plugins/zoom-registration-configure", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export interface PluginDropboxRegistrationStatus {
-  configured: boolean;
-  restartRequired: boolean;
-}
-export function getPluginDropboxRegistrationStatus(): Promise<PluginDropboxRegistrationStatus> {
-  return jsonFetch("/__api/plugins/dropbox-registration-status", { method: "POST", body: "{}" });
-}
-export function configurePluginDropboxRegistration(input: { clientId: string; clientSecret: string;
-  redirectPort: number }): Promise<PluginDropboxRegistrationStatus> {
-  return jsonFetch("/__api/plugins/dropbox-registration-configure", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export interface PluginGraphRegistrationStatus {
-  configured: boolean;
-  restartRequired: boolean;
-}
-export interface PluginGraphRegistrationReceipt extends PluginGraphRegistrationStatus {
-  canceled: boolean;
-}
-export function getPluginGraphRegistrationStatus(): Promise<PluginGraphRegistrationStatus> {
-  return jsonFetch("/__api/plugins/graph-registration-status", { method: "POST", body: "{}" });
-}
-export function configurePluginGraphRegistration(input: { clientId: string }):
-  Promise<PluginGraphRegistrationReceipt> {
-  return jsonFetch("/__api/plugins/graph-registration-configure", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export interface PluginLovableRegistrationStatus {
-  configured: boolean;
-  restartRequired: boolean;
-  needsVerification: boolean;
-}
-export interface PluginLovableRegistrationReceipt extends PluginLovableRegistrationStatus {
-  canceled: boolean;
-}
-export function getPluginLovableRegistrationStatus(): Promise<PluginLovableRegistrationStatus> {
-  return jsonFetch("/__api/plugins/lovable-registration-status", { method: "POST", body: "{}" });
-}
-export function configurePluginLovableRegistration(input: { redirectPort: number }):
-  Promise<PluginLovableRegistrationReceipt> {
-  return jsonFetch("/__api/plugins/lovable-registration-configure", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export function reconcilePluginLovableRegistration(): Promise<PluginLovableRegistrationReceipt> {
-  return jsonFetch("/__api/plugins/lovable-registration-reconcile", {
-    method: "POST", body: JSON.stringify({ reviewedRemoteOutcome: true }),
-  });
-}
-export interface PluginHiggsfieldRegistrationStatus {
-  configured: boolean;
-  restartRequired: boolean;
-  needsVerification: boolean;
-}
-export interface PluginHiggsfieldRegistrationReceipt extends PluginHiggsfieldRegistrationStatus {
-  canceled: boolean;
-}
-export function getPluginHiggsfieldRegistrationStatus(): Promise<PluginHiggsfieldRegistrationStatus> {
-  return jsonFetch("/__api/plugins/higgsfield-registration-status", { method: "POST", body: "{}" });
-}
-export function configurePluginHiggsfieldRegistration(input: { redirectPort: number }):
-  Promise<PluginHiggsfieldRegistrationReceipt> {
-  return jsonFetch("/__api/plugins/higgsfield-registration-configure", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export function reconcilePluginHiggsfieldRegistration(): Promise<PluginHiggsfieldRegistrationReceipt> {
-  return jsonFetch("/__api/plugins/higgsfield-registration-reconcile", {
-    method: "POST", body: JSON.stringify({ reviewedRemoteOutcome: true }),
-  });
-}
-export type PluginSlackAccessProfile = "public-search" | "workspace-read" | "workspace-write";
-export interface PluginSlackRegistrationStatus {
-  configured: boolean;
-  restartRequired: boolean;
-  accessProfile: PluginSlackAccessProfile | null;
-}
-export interface PluginSlackRegistrationReceipt {
-  canceled: boolean;
-  configured: boolean;
-  restartRequired: boolean;
-}
-export function getPluginSlackRegistrationStatus(): Promise<PluginSlackRegistrationStatus> {
-  return jsonFetch("/__api/plugins/slack-registration-status", { method: "POST", body: "{}" });
-}
-export function configurePluginSlackRegistration(input: { clientId: string; redirectPort: number;
-  scopes: string[] }): Promise<PluginSlackRegistrationReceipt> {
-  return jsonFetch("/__api/plugins/slack-registration-configure", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export interface PluginGmailRegistrationStatus {
-  configured: boolean;
-  restartRequired: boolean;
-  runtimeAvailable: boolean;
-  reasonCode: string | null;
-}
-export interface PluginGmailRegistrationReceipt extends PluginGmailRegistrationStatus {
-  canceled: boolean;
-}
-export function getPluginGmailRegistrationStatus(): Promise<PluginGmailRegistrationStatus> {
-  return jsonFetch("/__api/plugins/gmail-registration-status", { method: "POST", body: "{}" });
-}
-export function configurePluginGmailRegistration(): Promise<PluginGmailRegistrationReceipt> {
-  return jsonFetch("/__api/plugins/gmail-registration-configure", {
-    method: "POST", body: "{}",
-  });
-}
-export interface PluginGmailCapabilitiesStatus {
-  revision: number;
-  writeEnabled: boolean;
-  sendEnabled: boolean;
-  deleteEnabled: false;
-}
-export interface PluginGmailCapabilitiesReceipt extends PluginGmailCapabilitiesStatus {
-  canceled: boolean;
-}
-export function getPluginGmailCapabilitiesStatus(): Promise<PluginGmailCapabilitiesStatus> {
-  return jsonFetch("/__api/plugins/gmail-capabilities-status", { method: "POST", body: "{}" });
-}
-export function configurePluginGmailCapabilities(input: { expectedRevision: number;
-  writeEnabled: boolean; sendEnabled: boolean }): Promise<PluginGmailCapabilitiesReceipt> {
-  return jsonFetch("/__api/plugins/gmail-capabilities-configure", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export interface PluginGmailAuthFlow {
-  flowId: string;
-  status: "pending" | "verifying" | "ready" | "failed" | "canceled";
-  expiresAt: number;
-  reasonCode: string | null;
-  bindingId: string | null;
-  receipt: { kind: "mcp-connect"; profileId: string; bindingId: string;
-    toolIdentity: null; revision: number } | null;
-}
-export function startPluginGmailAuth(input: { agentId: string; installationId: string;
-  componentId: string; expectedRevision: number; operationId: string; email: string }): Promise<{
-    canceled: boolean; flow: PluginGmailAuthFlow | null }> {
-  return jsonFetch("/__api/plugins/gmail-auth-start", { method: "POST", body: JSON.stringify(input) });
-}
-export function getPluginGmailAuth(agentId: string, flowId: string, cancel = false): Promise<PluginGmailAuthFlow> {
-  return jsonFetch(`/__api/plugins/gmail-auth-${cancel ? "cancel" : "status"}`, {
-    method: "POST", body: JSON.stringify({ agentId, flowId }),
-  });
-}
-export interface PluginGmailAuthRecoveryContext {
-  agentId: string;
-  installationId: string;
-  componentId: string;
-  expectedRevision: number;
-}
-export function getPluginGmailAuthRecoveryStatus(input: PluginGmailAuthRecoveryContext): Promise<{
-  pending: { email: string; client: string } | null }> {
-  return jsonFetch("/__api/plugins/gmail-auth-recovery-status", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export function reconcilePluginGmailAuth(input: PluginGmailAuthRecoveryContext & { email: string }): Promise<{
-  canceled: boolean; recovered: boolean }> {
-  return jsonFetch("/__api/plugins/gmail-auth-reconcile", {
-    method: "POST", body: JSON.stringify(input),
-  });
-}
-export function selectPluginAccount(input: { agentId: string; bindingId: string;
-  connectionId: string; expectedRevision: number; operationId: string }): Promise<{
-    canceled: boolean; receipt: { kind: "mcp-connect"; profileId: string; bindingId: string;
-      toolIdentity: null; revision: number } | null }> {
-  return jsonFetch("/__api/plugins/account-select", { method: "POST", body: JSON.stringify(input) });
-}
-export function getPluginOAuthFlow(agentId: string, flowId: string, cancel = false): Promise<PluginOAuthFlow> {
-  return jsonFetch(`/__api/plugins/oauth-${cancel ? "cancel" : "status"}`, {
-    method: "POST", body: JSON.stringify({ agentId, flowId }) });
-}
-export function requestPluginMcpConsent(input: PluginConsentInput): Promise<{
-  canceled: boolean; receipt: PluginConsentReceipt | null;
-}> {
-  return jsonFetch("/__api/plugins/mcp-consent", { method: "POST", body: JSON.stringify(input) });
-}
-export function discoverPluginMcpTools(agentId: string, bindingId: string): Promise<{
-  profileId: string; bindingId: string; catalogRevision: string;
-}> {
-  return jsonFetch("/__api/plugins/mcp-discover", { method: "POST", body: JSON.stringify({ agentId, bindingId }) });
-}
-export interface PluginUninstallReceipt {
-  installationId: string; releaseDigest: string; revision: number; revokedBindings: number;
-  retainedConnections: number; dataRetained: true; credentialsRetained: true; packageRemoved: boolean;
-}
-export interface PluginUninstallPreview {
-  installationId: string; expectedRevision: number; releaseDigest: string; requiresDisable: boolean;
-  bindingCount: number; affectedAgentCount: number; connectionCount: number; activeCallCount: number;
-  dataRetained: true; credentialsRetained: true;
-}
-export function previewPluginUninstall(input: { installationId: string; expectedRevision: number }): Promise<PluginUninstallPreview> {
-  return jsonFetch("/__api/plugins/uninstall-preview", { method: "POST", body: JSON.stringify(input) });
-}
-export function uninstallPlugin(input: { installationId: string; expectedRevision: number; operationId: string }): Promise<{
-  uninstall: PluginUninstallReceipt; operation: PluginOperationReceipt;
-}> {
-  return jsonFetch("/__api/plugins/uninstall", { method: "POST", body: JSON.stringify(input) });
-}
-
-export interface PluginGrantRevokeReceipt {
-  bindingId: string;
-  toolIdentity: string;
-  effect: "deny";
-  revision: number;
-  epoch: number;
-}
-
-export interface PluginGrantBulkRevokeReceipt {
-  bindingId: string;
-  revokedCount: number;
-  bindingRevision: number;
-  epoch: number;
-}
-
-export interface PluginInstallationReceipt {
-  installationId: string;
-  releaseDigest: string;
-  desiredState: "enabled" | "disabled";
-  revision: number;
-  sourceKind: "directory" | "git" | "legacy-directory" | "remote-git" | "bundled" | "first-party";
-}
-
-export interface BundledPluginItem {
-  id: string;
-  installationId: string;
-  displayName: string;
-  shortDescription: string;
-  category: string;
-  version: string;
-  iconAvailable: boolean;
-  components: { skills: number; allSkillFiles: number; apps: number; mcp: number };
-  converted: { skills: number; mcp: number };
-  unconvertedMcp: { name: string; reasonCode: "LEGACY_MCP_FIELD_UNSUPPORTED" | "LEGACY_MCP_ENTRY_INVALID" }[];
-  importStatus: "previewable" | "needs-adapter";
-  localAdapter?: "shoggoth-graph-read-only" | "shoggoth-lovable-official-mcp"
-    | "shoggoth-slack-official-mcp" | "shoggoth-gogcli-gmail-mcp"
-    | "shoggoth-codex-security-native";
-  installationState: "not-installed" | "enabled" | "disabled";
-  installedReleaseDigest: string | null;
-}
-
-export interface BundledPluginDetail {
-  id: string;
-  displayName: string;
-  shortDescription: string;
-  longDescription: string;
-  category: string;
-  version: string;
-  developerName: string;
-  websiteURL: string | null;
-  license: string | null;
-  iconAvailable: boolean;
-  components: BundledPluginItem["components"];
-  converted: BundledPluginItem["converted"];
-  unconvertedMcp: BundledPluginItem["unconvertedMcp"];
-  importStatus: BundledPluginItem["importStatus"];
-  localAdapter?: BundledPluginItem["localAdapter"];
-  prompts: string[];
-  sourceWarnings: Array<{ code: "MISSING_OPTIONAL_LOCAL_REFERENCES";
-    source: string; targets: string[] }>;
-  skills: Array<{ name: string; description: string }>;
-  mcpServers: Array<{ name: string; type: "stdio" | "streamable-http" }>;
-  connectionWarnings: Array<{ name: string; reasonCode: "CODEX_GOOGLE_DESKTOP_OAUTH_REQUIRED" }>;
-  apps: string[];
-}
-
-export interface CodexSecurityStatus {
-  version: 1;
-  packageId: "codex-security";
-  source: { version: string; fileCount: number };
-  installation: { state: "not-installed" | "enabled" | "disabled" | "uninstalled";
-    integrity: "not-installed" | "verified"; skillCount: number; mcpCount: number; pendingDisable: boolean };
-  authentication: "unobserved" | "unauthenticated" | "authenticated";
-  connections: { total: number; ready: number };
-  fullPluginUsable: false;
-  originalToolsUnlocked: false;
-  blockers: string[];
-}
-
-export function getCodexSecurityStatus(input: { installationId: string | null; agentId: string | null }): Promise<CodexSecurityStatus> {
-  return jsonFetch("/__api/plugins/codex-security-status", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
-}
-
-export function getBundledPlugins(): Promise<{ batchDigest: string; items: BundledPluginItem[] }> {
-  return jsonFetch("/__api/plugins/bundled");
-}
-
-export async function getBundledPluginDetail(packageId: string): Promise<BundledPluginDetail> {
-  const { detail } = await jsonFetch<{ detail: BundledPluginDetail }>(
-    `/__api/plugins/bundled/${encodeURIComponent(packageId)}`,
-  );
-  return detail;
-}
-
-export function previewBundledPlugin(packageId: string): Promise<{
-  canceled: boolean; preview: PluginInstallPreview; selectionHandle: string | null;
-}> {
-  return jsonFetch("/__api/plugins/bundled-preview", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packageId }) });
-}
-
-export interface PluginSkillBinding {
-  bindingId: string;
-  profileId: string;
-  installationId: string;
-  componentId: string;
-  enabled: boolean;
-  revision: number;
-}
-
-export interface PluginMcpStatus {
-  installationId: string;
-  profileId: string;
-  items: Array<{
-    componentId: string;
-    connections: { pending: number; verified: number; disconnected: number };
-    accounts: Array<{ connectionId: string; label: string }>;
-    binding: null | { bindingId: string; connectionId: string; enabled: boolean;
-      revision: number; connectionState: "pending" | "ready" | "disconnected" | null;
-      grants: { allow: number; deny: number } };
-  }>;
-}
-
-export function getPluginMcpStatus(agentId: string,
-  installationId: string): Promise<PluginMcpStatus> {
-  const qs = new URLSearchParams({ agentId, installationId });
-  return jsonFetch(`/__api/plugins/mcp-status?${qs.toString()}`);
-}
-
+// Retired plugin audit projection, for historical tool cards only.
 export interface PluginExternalCall {
   callId: string; backendId: "openclaw" | "hermes"; instanceId: string;
   agentId: string; sessionId: string; runId: string | null; taskId: string | null;
@@ -1771,114 +1167,6 @@ export function getPluginExternalCallForTool(input: {
   return jsonFetch(`/__api/plugins/external-calls?${qs.toString()}`);
 }
 
-export interface PluginExternalApproval {
-  requestId: string; backendId: "openclaw" | "hermes"; instanceId: string;
-  agentId: string; sessionId: string; runId: string | null; taskId: string | null;
-  turnId: string | null; toolCallId: string; callId: string; bindingId: string;
-  connectionId: string; connectionAuthRevision: number; packageName: string;
-  toolName: string; command: string; argumentDigest: string; expiresAt: number;
-}
-export interface PluginExternalApprovalPage {
-  items: PluginExternalApproval[];
-  nextCursor: { offset: number; revision: number } | null;
-}
-export function getExternalPluginApprovals(backendId: "all" | "openclaw" | "hermes" = "all",
-  cursor: PluginExternalApprovalPage["nextCursor"] = null): Promise<PluginExternalApprovalPage> {
-  const query = new URLSearchParams({ backendId, limit: "2" });
-  if (cursor) { query.set("cursorOffset", String(cursor.offset));
-    query.set("cursorRevision", String(cursor.revision)); }
-  return jsonFetch(`/__api/plugins/external-approvals?${query}`);
-}
-export function respondExternalPluginApproval(requestId: string, decision: "once" | "deny"):
-  Promise<{ approved: boolean; requestId: string }> {
-  return jsonFetch("/__api/plugins/external-approvals", { method: "POST",
-    body: JSON.stringify({ requestId, operationId: crypto.randomUUID(), decision }) });
-}
-
-export interface PluginMcpTools {
-  profileId: string;
-  bindingId: string;
-  available: boolean;
-  catalogRevision: string | null;
-  portableCapabilities?: Array<{ id: string; toolName: string }>;
-  referenceCoverage?: { packageId: "github"; referenceName: "github";
-    managedAppId: string; relationship: "functional-overlap"; equivalence: "unverified";
-    operations: Array<{ id: string; toolName: string }> };
-  items: Array<{ toolIdentity: string; name: string; contractDigest: string;
-    savedGrant: null | { effect: "allow" | "deny";
-      approvalMode: "always" | "each-call"; revision: number;
-      expired: boolean; matchesCurrentContract: boolean } }>;
-}
-
-export function getPluginMcpTools(agentId: string, bindingId: string): Promise<PluginMcpTools> {
-  const qs = new URLSearchParams({ agentId, bindingId });
-  return jsonFetch(`/__api/plugins/mcp-tools?${qs.toString()}`);
-}
-
-export function revokePluginMcpGrant(input: { agentId: string; bindingId: string;
-  toolIdentity: string; expectedRevision: number; operationId: string;
-}): Promise<{ grant: PluginGrantRevokeReceipt; operation: PluginOperationReceipt }> {
-  return jsonFetch("/__api/plugins/mcp-grants/revoke", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
-}
-
-export function revokeAllPluginMcpGrants(input: { agentId: string; bindingId: string;
-  expectedRevision: number; operationId: string;
-}): Promise<{ revocation: PluginGrantBulkRevokeReceipt;
-  operation: PluginOperationReceipt }> {
-  return jsonFetch("/__api/plugins/mcp-grants/revoke-all", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
-}
-
-export function setPluginInstallationState(input: { installationId: string;
-  desiredState: "enabled" | "disabled"; expectedRevision: number;
-  operationId: string;
-}): Promise<{ installation: PluginInstallationReceipt; operation: PluginOperationReceipt }> {
-  return jsonFetch("/__api/plugins/state", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
-}
-
-export function getPluginSkillBindings(agentId: string): Promise<{
-  profileId: string; items: PluginSkillBinding[];
-}> {
-  const qs = new URLSearchParams({ agentId });
-  return jsonFetch(`/__api/plugins/skill-bindings?${qs.toString()}`);
-}
-
-export function setPluginSkillBinding(input: { agentId: string;
-  installationId: string; componentId: string; enabled: boolean;
-  expectedRevision: number; operationId: string;
-}): Promise<{ binding: PluginSkillBinding; operation: PluginOperationReceipt }> {
-  return jsonFetch("/__api/plugins/skill-bindings", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
-}
-
-export function selectPluginPackage(): Promise<{
-  canceled: boolean; preview?: PluginInstallPreview; selectionHandle?: string | null;
-}> {
-  return jsonFetch("/__api/plugins/preview", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: "{}" });
-}
-export function selectRemotePluginPackage(input: { repositoryUrl: string; commit: string; subdir: string | null }): Promise<{
-  canceled: boolean; preview?: PluginInstallPreview; selectionHandle?: string | null;
-}> {
-  return jsonFetch("/__api/plugins/git-preview", { method: "POST", body: JSON.stringify(input) });
-}
-
-export function installSelectedPlugin(input: { selectionHandle: string;
-  previewDigest: string; expectedRevision: number; operationId: string;
-}): Promise<{ installation: PluginInstallationReceipt; operation: PluginOperationReceipt }> {
-  return jsonFetch("/__api/plugins/install", { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
-}
-
-export async function getPluginOperation(operationId: string): Promise<{
-  found: boolean; operation: PluginOperationReceipt | null;
-}> {
-  const qs = new URLSearchParams({ operationId });
-  return jsonFetch(`/__api/plugins/operations?${qs.toString()}`);
-}
-
 // Skill list for one backend (the Skills tab-switch page).
 export async function selfImprovement<T>(backend: string, agentId: string,
   action: "status" | "configure" | "request" | "history" | "skills" | "read" | "change" | "proposal" | "resolve",
@@ -1899,13 +1187,14 @@ export async function listSkills(backend: string, agentId?: string): Promise<Uni
   return skills || [];
 }
 
-export async function listSkillsPage(backend: string, agentId: string, options: {
+export async function listSkillsPage(backend: string, agentId: string | undefined, options: {
   query: string; status: "" | "on" | "off"; pageIndex: number; limit: number;
   expectedRevision: string | null;
 }): Promise<NativeSkillPage> {
-  const qs = new URLSearchParams({ backend, agentId, paged: "1",
+  const qs = new URLSearchParams({ backend, paged: "1",
     query: options.query, status: options.status, page: String(options.pageIndex),
     limit: String(options.limit) });
+  if (agentId) qs.set("agentId", agentId);
   if (options.expectedRevision) qs.set("revision", options.expectedRevision);
   const { page } = await jsonFetch<{ page: NativeSkillPage }>(`/__api/skills?${qs.toString()}`);
   if (!page || page.supported !== true) throw new Error("Skill 分页暂不可用");
@@ -2614,7 +1903,7 @@ export function getSessionRuntimeModels(backend: string, id: string, key: string
   return jsonFetch(`${agentUrl(backend, id, "/runtime-models")}&sessionKey=${encodeURIComponent(key)}`, { signal });
 }
 export function selectSessionRuntimeModel(backend: string, id: string, key: string,
-  input: { bindingId: string; model: string; revision: number; acceptAdjustments: boolean }): Promise<import("../types").SessionRuntimeSnapshot> {
+  input: { bindingId: string; model: string; revision: number; acceptAdjustments: boolean; modelProviderRef?: string }): Promise<import("../types").SessionRuntimeSnapshot> {
   return jsonFetch(`${agentUrl(backend, id, "/runtime-models")}&sessionKey=${encodeURIComponent(key)}`, {
     method: "PUT", body: JSON.stringify(input),
   });
@@ -3065,6 +2354,61 @@ export async function getChatCacheScope(backendId: string): Promise<ChatCacheSco
   );
 }
 
+export function prepareChatInput(sessionKey: string, operationId: string, text: string,
+  selections: Array<{ start: number; end: number; kind?: string }> = [], ordinary: Array<{ start: number; end: number }> = []) {
+  return jsonFetch<{ text: string; references: ChatSecretReference[]; version: number }>("/__api/chat/secrets/prepare", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionKey, operationId, text, selections, ordinary }),
+  });
+}
+export async function prepareChatInputForSend(sessionKey: string, operationId: string, text: string) {
+  try { return await prepareChatInput(sessionKey, operationId, text); }
+  catch (error) {
+    if (!(error instanceof ApiError) || !secretFallbackCodes.includes(error.code || "")) throw error;
+    return { text, references: [], version: 1 };
+  }
+}
+export function listChatSecrets(sessionKey: string) {
+  return jsonFetch<{ items: ChatSecretReference[] }>("/__api/chat/secrets/list", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionKey }),
+  });
+}
+export function revokeChatSecret(sessionKey: string, reference: string) {
+  return jsonFetch<{ revoked: number }>("/__api/chat/secrets/revoke", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionKey, reference }),
+  });
+}
+export function listChatSecretResults(sessionKey: string) {
+  return jsonFetch<{ items: ChatSecretResult[] }>("/__api/chat/secrets/results", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionKey }),
+  });
+}
+export async function localSpeechStatus(request = false): Promise<LocalSpeechStatus> {
+  const bridge = desktopSecretBridge(), invoke = request ? bridge?.requestLocalSpeech : bridge?.getLocalSpeechStatus;
+  if (!invoke) throw desktopSecretError("DESKTOP_BRIDGE_REQUIRED", "请在桌面应用中开启本机语音识别");
+  const result = await invoke();
+  if (!result.ok) throw desktopSecretError(result.error.code, result.error.message);
+  return result.value;
+}
+export function listChatSecretDisclosures(sessionKey: string) {
+  return jsonFetch<{ items: ChatSecretDisclosure[] }>("/__api/chat/secrets/disclosures", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionKey }),
+  });
+}
+export async function decideChatSecretDisclosure(sessionKey: string, disclosureId: string, choice: "original" | "retry" | "cancel") {
+  const invoke = desktopSecretBridge()?.decideChatSecretDisclosure;
+  if (!invoke) throw desktopSecretError("DESKTOP_BRIDGE_REQUIRED", "请在桌面应用中确认这次发送");
+  const result = await invoke(sessionKey, disclosureId, choice);
+  if (!result.ok) throw desktopSecretError(result.error.code, result.error.message);
+  return result.value;
+}
+export async function readChatSecretResult(sessionKey: string, receiptId: string) {
+  const invoke = desktopSecretBridge()?.readChatSecretResult;
+  if (!invoke) throw desktopSecretError("DESKTOP_BRIDGE_REQUIRED", "仅桌面应用可读取原始操作结果");
+  const result = await invoke(sessionKey, receiptId);
+  if (!result.ok) throw desktopSecretError(result.error.code, result.error.message);
+  return result.value;
+}
+
 // 斜杠命令目录（Hermes = 网关 commands.catalog；无服务端命令面的后端 supported:false）。
 export async function listSlashCommands(
   agentId: string,
@@ -3232,6 +2576,39 @@ export async function bindShoggothChatGpt(input: {
 }): Promise<{ profile: NonNullable<ShoggothProviderSnapshot["profile"]> }> {
   return jsonFetch<{ profile: NonNullable<ShoggothProviderSnapshot["profile"]> }>(
     `/__api/shoggoth/chatgpt/bind`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+/** Makes a saved custom endpoint the assistant default; conversations keep their own choices. */
+// Removes a preset provider this assistant configured but does not use as
+// its default; the saved credential is deleted with it.
+export async function removeShoggothProvider(input: {
+  profileId: string | null;
+  operationId: string;
+  providerId: string;
+  createdAt: number;
+}): Promise<{ removed: string }> {
+  return jsonFetch<{ removed: string }>(`/__api/shoggoth/providers/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function bindShoggothEndpoint(input: {
+  profileId: string | null;
+  operationId: string;
+  providerRef: string;
+  defaultModel: string;
+  createdAt: number;
+}): Promise<{ profile: NonNullable<ShoggothProviderSnapshot["profile"]> }> {
+  return jsonFetch<{ profile: NonNullable<ShoggothProviderSnapshot["profile"]> }>(
+    `/__api/shoggoth/providers/bind-endpoint`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3583,11 +2960,13 @@ export function getGroupChatMemberRoleHistory(id: string, memberId: string, quer
   if (query.before !== undefined) params.set("before", query.before);
   return jsonFetch<import('../types').GroupChatMemberRoleHistory>(`/__api/group-chats/members/role-history?${params}`);
 }
-export function listGroupChatMessages(id: string, query: { afterSeq?: number; beforeSeq?: number; limit?: number } = {}) {
+export function listGroupChatMessages(id: string, query: { afterSeq?: number; beforeSeq?: number; limit?: number; afterRevision?: number } = {}) {
   const params = new URLSearchParams({ id, limit: String(query.limit ?? 50) });
   if (query.afterSeq !== undefined) params.set("afterSeq", String(query.afterSeq));
   if (query.beforeSeq !== undefined) params.set("beforeSeq", String(query.beforeSeq));
-  return jsonFetch<{ messages: import('../types').GroupChatMessage[]; hasMore: boolean }>(`/__api/group-chats/messages?${params}`);
+  if (query.afterRevision !== undefined) params.set("afterRevision", String(query.afterRevision));
+  return jsonFetch<{ messages: import('../types').GroupChatMessage[]; hasMore: boolean;
+    updates?: import('../types').GroupChatMessage[]; revision?: number; hasMoreUpdates?: boolean }>(`/__api/group-chats/messages?${params}`);
 }
 export function sendGroupChatMessage(id: string, input: { clientMessageId: string; body: string; mentions: string[];
   requestMode?: "auto" | "new" | "append" | "replace"; discussionId?: string; summaryMemberId?: string;

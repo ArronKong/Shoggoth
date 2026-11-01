@@ -1,13 +1,23 @@
 name: shoggoth_shared_capabilities
-version: 0.1.0
-description: Discover and invoke installed Shoggoth capabilities through a per-call Service lease.
+version: 0.3.0
+description: Use MCP connectors through paired Host turn identities and Service approvals.
 author: Shoggoth
 kind: standalone
 provides_tools:
+  - group_member_role_read
+  - group_messages_read
+  - group_task
+  - group_collaborate
+  - mcp_server_list
+  - mcp_server_register
+  - mcp_server_tools
+  - mcp_server_call
+  - mcp_server_remove
+  - mcp_server_registry_search
+  - mcp_server_request_connection
+  - mcp_server_request_secret
   - shoggoth_capability_search
   - shoggoth_skill_read
   - shoggoth_skill_file_read
-  - shoggoth_plugin_resource_read
-  - shoggoth_plugin_call
 provides_middleware:
   - tool_execution

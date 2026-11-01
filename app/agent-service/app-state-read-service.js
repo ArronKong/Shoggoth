@@ -2,8 +2,6 @@
 
 const { APP_STATE_SECTIONS, APP_STATE_HOST_SECTIONS, validAppStateArguments } = require("./app-state-contract");
 const { AppStatePager, snapshot, sourceUnavailable, fields, text, number, timestamp, stateError, resourceRevision, sectionSummary } = require("./app-state-projection");
-const { componentId } = require("./plugin-component-catalog");
-const { aliasOf } = require("./plugin-skill-facade");
 const TOKEN_FIELDS = ["totalTokens", "totalCost", "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens",
   "reasoningTokens", "missingCostEntries", "estimatedCostEntries"];
 const ACTIVE_RUN_STATUSES = new Set(["queued", "starting", "running", "waiting_input", "waiting_approval"]);
@@ -234,13 +232,6 @@ class AppStateReadService {
       summary = { configuredProviders: items.length };
     } else if (section === "skills") {
       const all = new Map();
-      for (const { installation, release } of this.#pluginInstallations()) for (const component of release?.components?.skills || []) {
-        const id = componentId(installation.installationId, "skill", component.name);
-        all.set(id, { id, name: aliasOf(id), localName: text(component.name, 256), packageName: text(release.name, 256),
-          installationId: installation.installationId, version: text(release.declaredVersion, 128), source: "plugin",
-          globalEnabled: installation.desiredState === "enabled" && !this.pluginStore.hasPendingInstallationDisable?.(installation.installationId),
-          enabled: false, enabledProfiles: new Set(), ineligibleProfiles: new Set() });
-      }
       for (const profile of this.#profiles()) {
         const installed = this.nativeSkillStore.list(profile.id), selected = this.skillStore.catalog(profile.id);
         for (const item of [...rows(installed.items), ...rows(selected.items), ...rows(selected.ineligible)]) {
@@ -258,35 +249,16 @@ class AppStateReadService {
       const value = this.nativeMcpStore.list();
       items = rows(value.servers).map(server => ({ id: server.id, name: text(server.name, 256), transport: text(server.transport ?? "stdio", 128),
         enabled: server.enabled === true, source: "shared_registry" }));
-      const bindings = this.#pluginBindings().filter(binding => ["mcp", "mcp_server", "mcp-server"].includes(binding.componentKind));
-      items.push(...bindings.map(binding => ({ id: binding.bindingId, profileId: binding.subjectKind === "profile" ? binding.subjectId : null,
-        installationId: binding.installationId, componentId: binding.componentId, enabled: binding.enabled === true, source: "plugin_binding" })));
-      for (const { installation, release } of this.#pluginInstallations()) for (const server of release?.components?.mcpServers || []) {
-        const id = componentId(installation.installationId, "mcp-server", server.name);
-        const connections = rows(this.pluginStore.listConnections()).filter(row => row.componentId === id);
-        items.push({ id, installationId: installation.installationId, name: text(server.name, 256), transport: text(server.type, 128),
-          enabled: installation.desiredState === "enabled" && !this.pluginStore.hasPendingInstallationDisable?.(installation.installationId),
-          bindingCount: bindings.filter(row => row.componentId === id).length, connectionCount: connections.length,
-          connectionStates: [...new Set(connections.map(row => text(row.state, 128)))], source: "installed_plugin" });
-      }
-      summary = { registryRevision: value.revision, sharedServers: value.servers.length, pluginBindings: bindings.length,
+      summary = { registryRevision: value.revision, sharedServers: value.servers.length,
         builtInProductTools: this.productToolCount, builtInCatalog: "shared_across_native_runtimes" };
     } else if (section === "plugins") {
-      const installations = this.#pluginInstallations();
-      items = installations.map(({ installation, release }) => ({ type: "installation", id: installation.installationId,
-        name: text(release?.name, 256), version: text(release?.declaredVersion, 128),
-        skills: release?.components?.skills?.length ?? null, mcpServers: release?.components?.mcpServers?.length ?? null,
-        hooks: release?.components?.hooks?.length ?? 0, desiredState: text(installation.desiredState, 128), revision: installation.revision,
-        pendingDisable: this.pluginStore.hasPendingInstallationDisable?.(installation.installationId) === true,
-        createdAt: timestamp(installation.createdAt), updatedAt: timestamp(installation.updatedAt) }));
-      if (this.bundledPluginCatalog) items.push(...rows(this.bundledPluginCatalog.list().items).map(entry => ({ type: "library", id: text(entry.id, 128),
-        installationId: text(entry.installationId, 128), name: text(entry.displayName, 256), version: text(entry.version, 128), category: text(entry.category, 128),
-        skills: number(entry.converted?.skills), mcpServers: number(entry.converted?.mcp), apps: number(entry.components?.apps), importStatus: text(entry.importStatus, 128),
-        installed: installations.some(({ installation }) => installation.installationId === entry.installationId) })));
-      items.push(...this.#pluginBindings().map(binding => ({ type: "binding", id: binding.bindingId,
-        ...fields(binding, ["subjectKind", "subjectId", "installationId", "componentId", "componentKind", "connectionId"]), enabled: binding.enabled === true })));
-      items.push(...rows(this.pluginStore.listConnections()).map(connection => ({ type: "connection", id: connection.connectionId,
-        ...fields(connection, ["installationId", "componentId", "state"]), revision: connection.revision })));
+      summary = { state: "retired", legacyDataPreserved: true, executionEnabled: false, uiTarget: "/connectors" };
+    } else if (section === "connectors") {
+      const status = this.getConnectorStatus?.() || { state: "unavailable", version: "1.9.2" };
+      // Account discovery is confined to the Run-frozen connector tools. This
+      // global metadata projection cannot enumerate account labels or grants.
+      items = [{ state: text(status.state, 64), version: text(status.version, 64) }];
+      summary = { uiTarget: "/connectors", accountDiscovery: "run_scoped_connector_tools" };
     } else if (section === "usage") {
       const value = this.usageStore.summarize("30d");
       items = [{ backendId: "native", range: "30d", availability: "complete", ...fields(value.series?.totals ?? value.totals, TOKEN_FIELDS, "number") }];
@@ -305,17 +277,7 @@ class AppStateReadService {
     } else throw stateError("APP_STATE_INVALID_ARGUMENTS");
     return snapshot(section, items, unavailable, summary, this.now());
   }
-  #pluginInstallations() {
-    return rows(this.pluginStore.listInstallations()).map(installation => {
-      const release = this.pluginStore.getRelease?.(installation.sourceIdentity, installation.releaseDigest);
-      if (this.pluginStore.getRelease && !release) throw stateError("APP_STATE_SOURCE_INCOMPLETE");
-      return { installation, release };
-    });
-  }
-  #pluginBindings() {
-    return [...new Map([...rows(this.pluginStore.listGlobalBindings()), ...this.#profiles().flatMap(profile => rows(this.pluginStore.listBindingsForProfile(profile.id)))]
-      .map(binding => [binding.bindingId, binding])).values()];
-  }
+
 }
 
 module.exports = { AppStateReadService, settingsProjection };

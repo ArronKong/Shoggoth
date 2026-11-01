@@ -16,3 +16,10 @@
   font-size: inherit;
   line-height: inherit;
 }
+
+.chat-run-wait[data-kind="starting"] {
+  color: var(--ui-text-1);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}

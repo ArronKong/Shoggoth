@@ -212,7 +212,7 @@ async function main() {
   let cases = 0;
   for (let round = 1; round <= rounds; round += 1) {
     for (const point of points) {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-lifecycle-crash-"));
+      const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-lifecycle-crash-")));
       try {
         const child = spawnSync(process.execPath, [
           SCRIPT, "--worker", "--root", root, "--point", point, "--round", String(round),

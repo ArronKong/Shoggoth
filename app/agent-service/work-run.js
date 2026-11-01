@@ -4,6 +4,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { assertNoSensitiveFields, storeError } = require("./product-store");
 const EXECUTION_LIMITS = require("./execution-policy");
+const { runtimeAttemptRef, runtimeSessionRef, runtimeTurnRef } = require("./runtime-adapter");
 
 const WORK_RUN_STATUSES = Object.freeze([
   "queued",
@@ -26,7 +27,7 @@ const TERMINAL_WORK_RUN_STATUSES = new Set([
 ]);
 const LEGAL_WORK_RUN_TRANSITIONS = Object.freeze({
   queued: new Set(["starting", "failed", "canceled", "skipped"]),
-  starting: new Set(["running", "failed", "canceled", "interrupted"]),
+  starting: new Set(["running", "waiting_approval", "waiting_input", "failed", "canceled", "interrupted"]),
   running: new Set([
     "waiting_approval", "waiting_input", "completed", "failed", "canceled", "interrupted",
   ]),
@@ -188,6 +189,7 @@ function createWorkDispatcher(options = {}) {
       contextSnapshotId: null,
       runtimeSessionRef: null,
       runtimeTurnRef: null,
+      runtimeAttemptRef: null,
       eventSeq: 1,
       waitingRequestId: null,
       startedAt: null,
@@ -220,15 +222,15 @@ function createWorkDispatcher(options = {}) {
   }
 
   function assertThreadAdmission(candidate) {
-    if (!ACTIVE_WORK_RUN_STATUSES.has(candidate.status)
-      || candidate.runtimeSessionRef === null) return;
+    const owned = candidate.runtimeSessionRef ?? candidate.runtimeAttemptRef;
+    if (!ACTIVE_WORK_RUN_STATUSES.has(candidate.status) || owned === null) return;
     const conflict = store.listWorkRuns().find((run) => run.id !== candidate.id
       && ACTIVE_WORK_RUN_STATUSES.has(run.status)
-      && sameRuntimeSessionRef(run.runtimeSessionRef, candidate.runtimeSessionRef));
+      && sameRuntimeSessionRef(run.runtimeSessionRef ?? run.runtimeAttemptRef, owned));
     if (conflict) {
       throw workRunError(
         "THREAD_ACTIVE_TURN_CONFLICT",
-        `Runtime session ${candidate.runtimeSessionRef.sessionId} 已有 active turn (${conflict.id})`,
+        `Runtime session ${owned.sessionId} 已有 active turn (${conflict.id})`,
       );
     }
   }
@@ -244,6 +246,10 @@ function createWorkDispatcher(options = {}) {
         "INVALID_WORK_RUN_TRANSITION",
         `非法 WorkRun 状态迁移: ${run.status} -> ${nextStatus}`,
       );
+    }
+    if (run.status === "starting" && ["waiting_approval", "waiting_input"].includes(nextStatus)
+      && run.runtimeAttemptRef?.dispatchState !== "write_attempted") {
+      throw workRunError("WORK_RUN_REQUEST_UNROUTABLE", "未派发的准备不能请求交互");
     }
     if (run.status === "queued" && nextStatus === "starting" && authority !== ADMISSION_TRANSITION) {
       throw workRunError("WORK_RUN_ADMISSION_REQUIRED", "queued -> starting 必须经过 admit 准入");
@@ -280,6 +286,65 @@ function createWorkDispatcher(options = {}) {
     if (TERMINAL_WORK_RUN_STATUSES.has(nextStatus)) admissions.delete(id);
     notifyChanged(saved);
     return saved;
+  }
+
+  function saveAttemptState(run, patch) {
+    const candidate = { ...run, ...patch, eventSeq: run.eventSeq + 1 };
+    assertThreadAdmission(candidate);
+    const saved = store.putWorkRun(candidate);
+    notifyChanged(saved);
+    return saved;
+  }
+
+  // Narrow same-state mutations: preparation cannot publish accepted native
+  // references, and a write marker can only move forward for the same identity.
+  function prepareAttempt(id, value) {
+    const run = store.getWorkRun(id);
+    if (!run || run.status !== "starting" || run.runtimeSessionRef !== null || run.runtimeTurnRef !== null) {
+      throw workRunError("WORK_RUN_BINDING_CONFLICT", "WorkRun 不可准备新回合");
+    }
+    const { runtime, runtimeProfileId, runtimeAccountId, ...details } = value || {};
+    const attempt = runtimeAttemptRef({ runtime, runtimeProfileId, runtimeAccountId }, details);
+    if (attempt.dispatchState !== "prepared") throw workRunError("WORK_RUN_BINDING_CONFLICT", "准备状态无效");
+    if (run.runtimeAttemptRef !== null) {
+      if (JSON.stringify(run.runtimeAttemptRef) !== JSON.stringify(attempt)) {
+        throw workRunError("WORK_RUN_BINDING_CONFLICT", "准备身份已固定");
+      }
+      return run;
+    }
+    return saveAttemptState(run, { runtimeAttemptRef: attempt });
+  }
+
+  function markAttemptDispatch(id, value) {
+    const run = store.getWorkRun(id);
+    const prior = run?.runtimeAttemptRef;
+    if (!run || !ACTIVE_WORK_RUN_STATUSES.has(run.status) || !prior
+      || !value || Object.keys(value).length !== 5
+      || ["sessionId", "turnId", "attemptId", "operationId", "fingerprint"].some(key => value[key] !== prior[key])) {
+      throw workRunError("WORK_RUN_BINDING_CONFLICT", "写出身份不匹配");
+    }
+    if (prior.dispatchState === "write_attempted") return run;
+    return saveAttemptState(run, { runtimeAttemptRef: { ...prior, dispatchState: "write_attempted" } });
+  }
+
+  function bindAcceptedAttempt(id, value) {
+    const run = store.getWorkRun(id), attempt = run?.runtimeAttemptRef;
+    if (!run || !ACTIVE_WORK_RUN_STATUSES.has(run.status) || !attempt
+      || attempt.dispatchState !== "write_attempted" || !value
+      || Object.keys(value).length !== 3 || value.attemptId !== attempt.attemptId
+      || value.sessionId !== attempt.sessionId || value.turnId !== attempt.turnId) {
+      throw workRunError("WORK_RUN_BINDING_CONFLICT", "远端接受证据不匹配准备身份");
+    }
+    const binding = { runtime: attempt.runtime, runtimeProfileId: attempt.runtimeProfileId,
+      runtimeAccountId: attempt.runtimeAccountId };
+    const session = runtimeSessionRef(binding, value.sessionId), turn = runtimeTurnRef(binding, value.sessionId, value.turnId);
+    if (run.runtimeTurnRef !== null) {
+      if (JSON.stringify(run.runtimeSessionRef) !== JSON.stringify(session)
+        || JSON.stringify(run.runtimeTurnRef) !== JSON.stringify(turn)) throw workRunError("WORK_RUN_BINDING_CONFLICT", "远端引用已固定");
+      return run;
+    }
+    return saveAttemptState(run, { runtimeSessionRef: session, runtimeTurnRef: turn,
+      status: run.status === "starting" ? "running" : run.status });
   }
 
   function busyResult(run, reason, onBusy) {
@@ -367,11 +432,12 @@ function createWorkDispatcher(options = {}) {
   function requeueBeforeDispatch(id) {
     const run = store.getWorkRun(id);
     if (!run || run.status !== "starting" || run.runtimeSessionRef !== null
-      || run.runtimeTurnRef !== null || run.waitingRequestId !== null) {
+      || run.runtimeTurnRef !== null || run.waitingRequestId !== null
+      || (run.runtimeAttemptRef !== null && run.runtimeAttemptRef.dispatchState !== "prepared")) {
       throw workRunError("WORK_RUN_REQUEUE_UNSAFE", "已派发的 WorkRun 不能重新排队");
     }
     const saved = store.putWorkRun({ ...run, status: "queued", startedAt: null,
-      eventSeq: run.eventSeq + 1 });
+      runtimeAttemptRef: null, eventSeq: run.eventSeq + 1 });
     admissions.delete(id);
     notifyChanged(saved);
     return saved;
@@ -386,6 +452,9 @@ function createWorkDispatcher(options = {}) {
     subscribeChanges,
     recoverActiveRunAfterServiceRestart,
     requeueBeforeDispatch,
+    prepareAttempt,
+    markAttemptDispatch,
+    bindAcceptedAttempt,
     transition,
   });
 }

@@ -145,6 +145,78 @@ function storedFixture(t) {
   return { ...f, transcripts, append };
 }
 
+function publishedReminder(f, options = {}) {
+  const id = `notice-${"a".repeat(64)}`;
+  return f.transcripts.appendEvent({ profileId: "agent-a", sessionId: SESSION_A,
+    id: `proactive-${id}`, runId: null, kind: "assistant", contextExcluded: true,
+    content: { text: "周末随机任务：去一家没去过的小店。\n\n- [便签](#/inspirations?id=weekend-idea)",
+      proactiveNotice: { id, kind: "inspiration", title: "SparkNotes", items: [
+        { id: "weekend-idea", title: "周末随机任务", href: "/inspirations?id=weekend-idea" },
+      ] } }, ...options });
+}
+
+test("legacy published reminders without user runs are searchable and readable, including reminder-only drafts", async t => {
+  const f = storedFixture(t), reminder = publishedReminder(f);
+  f.sessions[0].status = "draft"; f.sessions[0].runtimeSessionId = null;
+  const current = f.addRun("current-reminder-query", KEY_B);
+  f.append(SESSION_B, current.id, "current-question", "user", { text: "查找周末提醒" });
+  const args = { source: "chat", sourceId: KEY_B, query: "周末随机任务" };
+  const found = await readySearch(f.service, { profileId: "agent-a", args, run: current });
+  assert.deepEqual(found.results.map(row => row.eventId), [reminder.id]);
+  f.service.assertResultCurrent({ name: "conversation_search", profileId: "agent-a", args, run: current, result: found });
+  const getArgs = { source: "chat", sourceId: KEY_B, sessionId: SESSION_A, eventId: reminder.id, window: 1 };
+  const read = f.service.get({ profileId: "agent-a", args: getArgs, run: current });
+  assert.match(read.events[0].text, /inspirations\?id=weekend-idea/u);
+  f.transcripts.setContextExcluded({ profileId: "agent-a", sessionId: SESSION_A,
+    eventId: reminder.id, contextExcluded: true });
+  assert.equal((await readySearch(f.service, { profileId: "agent-a", args, run: current })).count, 0);
+  assert.throws(() => f.service.get({ profileId: "agent-a", args: getArgs, run: current }),
+    error => error.code === "CONVERSATION_EVENT_NOT_FOUND");
+  assert.throws(() => f.service.assertResultCurrent({ name: "conversation_search", profileId: "agent-a", args,
+    run: current, result: found }), error => error.code === "CONVERSATION_EVENT_NOT_FOUND");
+});
+
+test("published reminder reads retain workspace, ownership and recall-policy boundaries", async t => {
+  const f = storedFixture(t), reminder = publishedReminder(f);
+  const current = f.addRun("reminder-query", KEY_B);
+  f.append(SESSION_B, current.id, "current-question", "user", { text: "查找周末提醒" });
+  const args = { source: "chat", sourceId: KEY_B, query: "周末随机任务" };
+  assert.equal((await readySearch(f.service, { profileId: "agent-a", args, run: current })).count, 1);
+  for (const [field, value] of [["workspace", "/other-workspace"], ["profileId", "agent-b"]]) {
+    const original = f.sessions[0][field]; f.sessions[0][field] = value;
+    assert.equal((await readySearch(f.service, { profileId: "agent-a", args, run: current })).count, 0);
+    f.sessions[0][field] = original;
+  }
+  f.revoked.add(reminder.id); f.bumpPolicy();
+  assert.equal((await readySearch(f.service, { profileId: "agent-a", args, run: current })).count, 0);
+});
+
+test("published reminders do not become completed user evidence for background learning", t => {
+  const f = storedFixture(t); publishedReminder(f);
+  const result = f.service.scanEligibleSession({ profileId: "agent-a", sessionId: SESSION_A,
+    completedOnly: true });
+  assert.deepEqual(result.events, []);
+  assert.equal(result.throughSeq, 1);
+});
+
+test("upgrading a legacy derived index rebuilds previously omitted reminders without new transcript writes", async t => {
+  const f = storedFixture(t), reminder = publishedReminder(f);
+  const current = f.addRun("index-upgrade-query", KEY_B);
+  f.append(SESSION_B, current.id, "current-question", "user", { text: "查找周末提醒" });
+  const args = { source: "chat", sourceId: KEY_B, query: "周末随机任务" };
+  const load = f.service._loadPage.bind(f.service);
+  f.service._loadPage = (...input) => { const page = load(...input); return { ...page,
+    rows: page.rows.filter(row => row.eventId !== reminder.id) }; };
+  assert.equal((await readySearch(f.service, { profileId: "agent-a", args, run: current })).count, 0);
+  f.service.index.close();
+  const db = openDatabase(path.join(f.paths.agentsDir, "agent-a", "conversation-recall.sqlite"));
+  db.prepare("UPDATE meta SET value='4' WHERE key='schema_version'").run(); db.close();
+  f.service._loadPage = load;
+  const revision = f.transcripts.getRevision("agent-a", SESSION_A);
+  assert.deepEqual((await readySearch(f.service, { profileId: "agent-a", args, run: current })).results.map(row => row.eventId), [reminder.id]);
+  assert.equal(f.transcripts.getRevision("agent-a", SESSION_A), revision);
+});
+
 test("tool schema admits bounded direct conversation search/get only", () => {
   const source = { source: "chat", sourceId: KEY_A };
   assert.equal(validateMemoryMcpArguments("conversation_search", { ...source, query: "上海" }), true);

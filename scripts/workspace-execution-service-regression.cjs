@@ -9,6 +9,9 @@ const crypto = require("node:crypto");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
 const { createMcpStdioHandler } = require("../app/shoggoth-mcp-helper");
+const { requestService, readClientToken } = require("../app/agent-service/client");
+const { PROTOCOL_VERSION } = require("../app/agent-service/server");
+const { completedNotice } = require("../app/agent-service/secret-execution-broker");
 const q = value => "'" + value.replaceAll("'", "'\\''") + "'";
 async function until(read, label) {
   const end = Date.now() + 10000;
@@ -31,6 +34,8 @@ async function until(read, label) {
     computerUseController: controller("computer"), browserUseController: controller("browser"),
   } });
   const coordinator = f.service.workRunCoordinator;
+  const readOriginal = params => requestService(f.paths, { version: PROTOCOL_VERSION, token: readClientToken(f.paths),
+    method: "chat.secret.result", params });
   const results = [];
   try {
     for (const runtime of ["antigravity", "pi", "opencode", "deepseek-harness"]) {
@@ -102,11 +107,24 @@ async function until(read, label) {
       const failed = await call({ command: "exit 7" });
       assert.equal(failed.result.isError, true); assert.equal(failed.result.structuredContent.exitCode, 7);
       if (runtime === "antigravity") {
-        const large = await call({ command: `${q(process.execPath)} -e ${q("process.stdout.write('\\u0000'.repeat(100000))")}` });
+        const counter = path.join(f.workspace, "binary-output-execution-count");
+        const large = await call({ command: `${q(process.execPath)} -e ${q(`require('node:fs').appendFileSync(${JSON.stringify(counter)},'x');process.stdout.write('\\u0000'.repeat(100000))`)}` });
         assert.equal(large.result.isError, false, JSON.stringify(large));
         assert.ok(Buffer.byteLength(JSON.stringify(large)) <= 64 * 1024);
         const output = large.result.structuredContent || JSON.parse(large.result.content[0].text);
-        assert.equal(output.outputTruncated, true);
+        const { receiptId, ...notice } = output;
+        assert.match(receiptId, /^[a-f0-9]{64}$/u);
+        assert.deepEqual(notice, completedNotice, "invalid NUL text is withheld from the model without changing completion");
+        const params = { backendId: "shoggoth", agentId: f.profile.id, sessionKey: session.sessionKey, receiptId };
+        const original = await readOriginal(params);
+        assert.equal(original.status, "completed"); assert.equal(original.result.exitCode, 0);
+        assert.equal(original.result.outputTruncated, true);
+        assert.ok(original.result.stdout.includes("\0"), "the local encrypted receipt retains the bounded original bytes");
+        assert.ok(Buffer.byteLength(JSON.stringify(original.result)) < 32000);
+        assert.deepEqual(await readOriginal(params), original);
+        assert.equal(fs.readFileSync(counter, "utf8"), "x", "completion reads cannot replay the successful command");
+        const foreign = f.createSession();
+        await assert.rejects(readOriginal({ ...params, sessionKey: foreign.sessionKey }), { code: "SECRET_REFERENCE_FORBIDDEN" });
       }
       const secret = path.join(f.root, runtime + "-outside"); fs.writeFileSync(secret, "outside canary", { mode: 0o600 });
       const blocked = await call({ command: `/bin/cat ${q(secret)}` });

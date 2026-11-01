@@ -9,6 +9,7 @@ import "../../app/manage-ui/src/styles.css";
 
 declare const __UPSTREAM_ERROR__: string;
 declare const __PUBLIC_FAILURE_CODE__: string;
+declare const __HERMES_FAILURE_HISTORY__: Array<any> | null;
 const query = new URLSearchParams(location.search), scenario = query.get("scenario") || "restored";
 const backend = query.get("backend") || "openclaw", reloaded = query.has("reload");
 const legacyRecovery = scenario.startsWith("legacy-");
@@ -19,10 +20,10 @@ const nativeRejection = ["native-rejected", "native-rejected-immersive"].include
 if (!["slash-order", "slash-order-error", "slash-order-uncertain", "slash-order-immersive", "slash-order-uncertain-immersive", "upstream-error", "upstream-error-immersive", "uncertain", "restored", "rejected", "ordinary", "newer", "started", "accepted-error", "accepted-uncertain", "stale-query", "reselect", "terminal-race", "terminal-timeout", "terminal-reload", "ordinary-upstream", "ordinary-receipt", "ordinary-buffered", "ordinary-buffered-immersive", "observer-idle", "observer-idle-pending", "native-approval", "native-approval-immersive", "observer-idle-terminal", "runtime-abort", "runtime-abort-immersive", "runtime-snapshot", "runtime-abort-pending", "silent-queue", "silent-queue-immersive"].includes(scenario)
   && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !ordinaryRecovery || !["shoggoth", "openclaw", "hermes"].includes(backend)) throw Error("invalid fixture scope");
 const key = `agent:${backend}-recovery-fixture:11111111-1111-4111-8111-111111111111`, agentId = key.split(":")[1];
-const originalOperation = "original-operation-fixture", originalText = "Use this selected plugin exactly once";
-const captured = [{ installationId: "selected-fixture", revision: 1 }], selection = scenario === "newer"
-  ? [{ installationId: "selected-fixture", revision: 2 }] : captured;
-const storageKey = "shoggoth.chat.pending-native-sends.v1", selectedKey = "shoggoth.chat.plugin-selection.v1";
+const originalOperation = "original-operation-fixture", originalText = "Use this selected connector account exactly once";
+const captured = ["connection-selected-one"], selection = scenario === "newer"
+  ? ["connection-selected-two"] : captured;
+const storageKey = "shoggoth.chat.pending-native-sends.v1", selectedKey = "shoggoth.chat.connector-selection.v1";
 const sessions = [{ key, agentId, agentName: `${backend} recovery fixture`, backendId: backend, model: "fixture-model", updatedAt: Date.now(),
   ...(nativeRejection || legacyRecovery ? { kind: "cron" } : {}) }];
 const sent: Array<any> = [], observed: Array<any> = [], sockets = new Set<FixtureSocket>();
@@ -41,13 +42,14 @@ const nativeApproval = scenario.startsWith("native-approval");
 const runtimeTerminal = scenario.startsWith("runtime-");
 const silentQueue = scenario.startsWith("silent-queue");
 const slashOrder = scenario.startsWith("slash-order");
+const fixtureHasSelection = !scenario.startsWith("ordinary") && !silentQueue && !upstreamFailure && !slashOrder && !nativeRejection && !legacyRecovery;
 const slashRequests: Array<{ body: any; reply: (response: Response) => void }> = [];
 if (scenario === "runtime-abort-pending") lookup = { status: "found", run: { status: "running" } };
 if (nativeApproval) {
   lookup = { status: "found", run: { status: "waiting_approval" } };
   history = [{ role: "user", content: "读取 https://example.com", timestamp: Date.now() - 60_000 }];
 }
-const upstreamHistory = () => [
+const upstreamHistory = () => __HERMES_FAILURE_HISTORY__ ?? [
   { role: "user", content: "hi", timestamp: Date.now() - 60_000 },
   { role: "system", content: [{ type: "text", text: `错误：${__UPSTREAM_ERROR__}` }], timestamp: Date.now() - 50_000 },
 ];
@@ -71,7 +73,7 @@ if (!reloaded) {
   if (scenario.startsWith("ordinary-recovery-reload")) localStorage.setItem(storageKey, JSON.stringify([
     { key, idem: originalOperation, at: Date.now() - 3600000, backendId: backend, terminalObserved: true },
   ]));
-  if (!scenario.startsWith("ordinary") && !silentQueue && !upstreamFailure && !slashOrder && !nativeRejection && !legacyRecovery) localStorage.setItem(selectedKey, JSON.stringify({ [key]: selection }));
+  if (fixtureHasSelection) localStorage.setItem(selectedKey, JSON.stringify({ [key]: selection }));
   if (legacyRecovery || nativeActiveRecovery) localStorage.setItem(storageKey, JSON.stringify([{ key, idem: originalOperation,
     at: Date.now() - 3600000, backendId: backend, terminalObserved: true,
     ...(scenario === "legacy-accepted" || nativeActiveRecovery ? { accepted: true } : {}) }]));
@@ -110,6 +112,8 @@ class FixtureSocket {
       observed.push(frame.params); payload = lookup;
       if (backend === "openclaw") {
         const original = JSON.parse(localStorage.getItem(storageKey) || "[]").find((item: any) => item.idem === frame.params.idempotencyKey);
+        // This historical wire discriminator routes selected operations to the
+        // Service receipt reader; it does not restore package-platform execution.
         if (original && frame.params.operationKind !== (original.selection?.length ? "plugin-selection" : "chat")) {
           throw Error("original operation queried through the wrong recovery protocol");
         }
@@ -147,7 +151,7 @@ class FixtureSocket {
         // uncertainty survives the RPC error parser instead of becoming retryable.
         if (backend !== "hermes") { setTimeout(() => this.close(), 0); return; }
         setTimeout(() => this.emit({ type: "res", id: frame.id, ok: false,
-          error: { code: "PLUGIN_SELECTION_NEEDS_VERIFICATION", message: "Receipt uncertain" } }), 0); return;
+          error: { code: "CONNECTOR_SELECTION_NEEDS_VERIFICATION", message: "Receipt uncertain" } }), 0); return;
       }
       if (scenario === "ordinary-upstream" || scenario === "ordinary-receipt") {
         setTimeout(() => this.emit({ type: "res", id: frame.id, ok: false, error: {
@@ -157,7 +161,7 @@ class FixtureSocket {
       }
       if (scenario === "rejected" || scenario === "ordinary") {
         setTimeout(() => this.emit({ type: "res", id: frame.id, ok: false, error: {
-          code: scenario === "rejected" ? "PLUGIN_SELECTION_UNAVAILABLE" : "ORDINARY_CHAT_ERROR", message: "Fixture refused" } }), 0); return;
+          code: scenario === "rejected" ? "CONNECTOR_SELECTION_UNAVAILABLE" : "ORDINARY_CHAT_ERROR", message: "Fixture refused" } }), 0); return;
       }
       payload = { status: "started" };
     }
@@ -171,12 +175,13 @@ window.fetch = async (input, init) => {
   if (slashOrder && url.pathname === "/__api/chat/slash/exec") {
     return new Promise<Response>(reply => slashRequests.push({ body: JSON.parse(String(init?.body)), reply }));
   }
-  if (url.pathname === "/__api/plugins") payload = { page: { supported: true, catalogRevision: "a".repeat(64), nextCursor: null,
-    items: [{ installationId: "selected-fixture", revision: selection[0].revision, packageName: "Selected fixture",
-      declaredVersion: "1.0", sourceKind: "bundled", desiredState: "enabled", diagnosticCount: 0,
-      components: [{ componentId: "fixture-skill", kind: "skill", title: "Fixture skill", state: "ready" }] }] } };
-  if (url.pathname === "/__api/plugins/selection-readiness") payload = { version: 1, supported: url.searchParams.get("backend") === "shoggoth" };
-  if (url.pathname === "/__api/plugins/bundled") payload = { batchDigest: "a".repeat(64), items: [] };
+  if (url.pathname.startsWith("/__api/plugins")) throw Error("Active connector recovery must not use the retired plugin API");
+  if (url.pathname === "/__api/connectors/connections") payload = ["connection-selected-one", "connection-selected-two"].map(connectionId => ({
+    connectionId, service: "github", label: connectionId, accountId: connectionId, authType: "api_key",
+    state: "ready", status: "active", revision: 1, profileIds: ["fixture-profile"], scopes: [] }));
+  if (url.pathname === "/__api/connectors/agents") payload = { items: [{ profileId: "fixture-profile", backendId: backend,
+    agentId, label: "Fixture", enabled: true }], unavailableBackends: [] };
+  if (url.pathname === "/__api/connectors/selection-readiness") payload = { version: 1, supported: true };
   if (url.pathname === "/__api/status") payload = { backends: ["shoggoth", "openclaw", "hermes"].map(id =>
     ({ id, connected: true, info: { readyAgentIds: [agentId] } })) };
   if (url.pathname === "/__api/backends") payload = { backends: ["shoggoth", "openclaw", "hermes"].map(id =>
@@ -237,11 +242,11 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
       await wait(() => pending().length === 0 && !banner(), "exact original completion automatically unlocks composer");
     }
     check(observed.every(item => item.operationKind === "chat" && item.sessionKey === key && item.idempotencyKey === idem),
-      "ordinary recovery used plugin or different operation identity");
+      "ordinary recovery used selection or different operation identity");
     const before = sent.length;
     await setInput("Next fresh message after recovery"); enter();
     await wait(() => sent.length === before + 1 && input().value === "", "composer sends next message normally");
-    check(sent.at(-1).idempotencyKey !== idem && !sent.at(-1).pluginSelection, "new user intent reused the original or gained a plugin");
+    check(sent.at(-1).idempotencyKey !== idem && !sent.at(-1).connectorSelection && !sent.at(-1).pluginSelection, "new user intent reused the original or gained a connector");
     emit({ runId: sent.at(-1).idempotencyKey, state: "final", message: { role: "assistant", content: "Next reply" } });
     return { scenario, backend, immersive, originalRecovered: true, nextMessageSent: true,
       originalSends: before, noReplay: true, ordinaryProtocol: true };
@@ -604,12 +609,15 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
   }
   if (scenario === "newer") {
     await wait(() => observed.length > 0 && pending()[0]?.accepted, "restored operation admission");
-    check(chosen()[0]?.revision === 2, "old operation must not consume a newer choice");
+    check(chosen()[0] === "connection-selected-two", "old operation must not consume a newer choice");
     check(sent.length === 0, "newer draft must not replay");
     return { scenario, backend, sent: 0, newerDraftPreserved: true };
   }
   await setInput(originalText); enter(); await wait(() => sent.length === 1, "first actual chat.send");
   const idem = sent[0].idempotencyKey;
+  check(!Object.hasOwn(sent[0], "pluginSelection"), "active sends contain no retired package selection");
+  check(JSON.stringify(sent[0].connectorSelection ?? []) === JSON.stringify(fixtureHasSelection ? selection : []),
+    "original send must freeze the exact selected connection identities");
   if (nativeRejection) {
     await wait(() => pending()[0]?.idem === idem, "native Cron follow-up tracked");
     emit({ runId: idem, agentId, backendId: "hermes", state: "error", errorMessage: "Foreign rejection",
@@ -619,7 +627,7 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
     emit({ runId: idem, agentId, backendId: backend, state: "error", errorMessage: "发送准备失败",
       errorCode: "INTERNAL_ERROR", admissionAccepted: false });
     await wait(() => input().value === originalText && pending().length === 0 && !banner(), "definite native rejection restores input");
-    check(chosen().length === 0 && !Object.hasOwn(sent[0], "pluginSelection"), "ordinary Cron follow-up became a plugin send");
+    check(chosen().length === 0 && !Object.hasOwn(sent[0], "connectorSelection") && !Object.hasOwn(sent[0], "pluginSelection"), "ordinary Cron follow-up gained a connector selection");
     check(sent.length === 1 && observed.length === 0, "definite rejection retried or queried an unaccepted operation");
     check(document.body.innerText.includes("发送准备失败"), "native rejection is not visible");
     return { scenario, backend, sent: 1, cronFollowUp: true, restoredOriginalInput: true,
@@ -628,12 +636,12 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
   if (scenario === "ordinary-upstream" || scenario === "ordinary-receipt") {
     await wait(() => banner() && observed.length > 0, "dispatched ordinary receipt remains uncertain");
     check(pending()[0]?.idem === idem && pending()[0]?.backendId === backend && !pending()[0].selection
-      && chosen().length === 0 && !Object.hasOwn(sent[0], "pluginSelection"), "ordinary original identity not retained");
+      && chosen().length === 0 && !Object.hasOwn(sent[0], "connectorSelection") && !Object.hasOwn(sent[0], "pluginSelection"), "ordinary original identity not retained");
     check(input().value === "", "dispatched ordinary text was restored for resend");
     check(Object.keys(pending()[0]).every(field => ["key", "idem", "at", "backendId"].includes(field)),
       "ordinary observation record persisted a replayable payload");
     emit({ runId: idem, agentId, backendId: "hermes", state: "error", admissionAccepted: false,
-      errorCode: "PLUGIN_SELECTION_UNAVAILABLE" });
+      errorCode: "CONNECTOR_SELECTION_UNAVAILABLE" });
     await new Promise(resolve => setTimeout(resolve, 80));
     check(pending()[0]?.idem === idem && banner() && !pending()[0]?.accepted && input().value === "",
       "foreign owner restored ordinary original or erased uncertainty");
@@ -646,14 +654,14 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
   }
   if (scenario === "rejected") {
     await wait(() => input().value === originalText && pending().length === 0, "clear preflight rejection restores original input");
-    check(chosen().length === 1, "rejection must retain plugin draft");
+    check(chosen().length === 1, "rejection must retain connector draft");
     check(!banner(), "known not-sent rejection is not uncertain");
     return { scenario, backend, sent: 1, restoredOriginalInput: true, retainedSelection: true, pendingRemoved: true };
   }
   if (scenario === "ordinary") {
     await wait(() => document.body.innerText.includes("Fixture refused"), "ordinary external failure");
     check(pending().length === 0 && !banner(), "ordinary external chat must preserve existing non-durable behavior");
-    check(!Object.hasOwn(sent[0], "pluginSelection"), "ordinary chat selection injected");
+    check(!Object.hasOwn(sent[0], "connectorSelection") && !Object.hasOwn(sent[0], "pluginSelection"), "ordinary chat selection injected");
     if (backend === "shoggoth") check(input().value === originalText, "definite native rejection must restore original input");
     return { scenario, backend, sent: 1, ordinaryBehaviorUnchanged: backend !== "shoggoth",
       ...(backend === "shoggoth" ? { definiteNativeRejectionRestoresInput: true } : {}) };
@@ -699,10 +707,10 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
     emit({ runId: idem, state: "accepted" });
     await wait(() => pending()[0]?.accepted && chosen().length === 0, "first selection consumed");
     Array.from(document.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="dialog"]'))
-      .find(button => button.textContent?.startsWith("插件"))!.click();
+      .find(button => button.textContent?.startsWith("连接器"))!.click();
     await wait(() => document.querySelector('[role="dialog"] input[type="checkbox"]'), "actual picker opens");
     document.querySelector<HTMLInputElement>('[role="dialog"] input[type="checkbox"]')!.click();
-    await wait(() => chosen().length === 1, "user chooses identical plugin again");
+    await wait(() => chosen().length === 1, "user chooses identical connector again");
     emit({ runId: idem, state: "accepted" });
     await new Promise(resolve => setTimeout(resolve, 80));
     check(chosen().length === 1, "duplicate accepted consumed the newer identical choice");
@@ -735,19 +743,19 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
     await wait(() => banner() && observed.length > 0, "unaccepted generic error remains uncertain");
     check(input().value === "", "uncertain execution must not restore resendable original text");
     emit({ runId: idem, state: "error", errorMessage: "Conflicting uncertainty flags",
-      errorCode: "PLUGIN_SELECTION_NEEDS_VERIFICATION", admissionAccepted: false });
+      errorCode: "CONNECTOR_SELECTION_NEEDS_VERIFICATION", admissionAccepted: false });
     await new Promise(resolve => setTimeout(resolve, 80));
     check(input().value === "" && pending()[0]?.idem === idem,
       "uncertainty must dominate a contradictory rejection flag");
   } else await wait(() => banner() && observed.length > 0, "lost ACK observation");
   check(pending()[0]?.idem === idem, "uncertain operation ID was replaced");
-  check(chosen().length === 1, "not_found must retain plugin draft");
+  check(chosen().length === 1, "not_found must retain connector draft");
   emit({ runId: "different-operation", state: "accepted" });
   await new Promise(resolve => setTimeout(resolve, 80));
   check(chosen().length === 1 && banner(), "foreign accepted must not consume draft or clear verification");
   emit({ runId: idem, backendId: backend === "openclaw" ? "hermes" : "openclaw", state: "accepted" });
   emit({ runId: idem, backendId: backend, agentId: "wrong-agent", state: "error",
-    errorCode: "PLUGIN_SELECTION_UNAVAILABLE", admissionAccepted: false, errorMessage: "Foreign owner rejection" });
+    errorCode: "CONNECTOR_SELECTION_UNAVAILABLE", admissionAccepted: false, errorMessage: "Foreign owner rejection" });
   await new Promise(resolve => setTimeout(resolve, 80));
   check(pending()[0]?.idem === idem && !pending()[0]?.accepted && chosen().length === 1 && input().value === "" && banner(),
     "same operation with a foreign owner consumed intent or restored resendable original text");

@@ -1,0 +1,41 @@
+{
+  "server": {
+    "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+    "name": "io.github.ComposioHQ/composio",
+    "description": "Connect AI agents to 1000+ apps with managed authentication and tool-calling.",
+    "title": "Composio",
+    "repository": {
+      "url": "https://github.com/ComposioHQ/GHMCP",
+      "source": "github"
+    },
+    "version": "1.0.5",
+    "websiteUrl": "https://composio.dev",
+    "icons": [
+      {
+        "src": "https://brand.composio.dev/logos/Logomark-Black.svg",
+        "mimeType": "image/svg+xml",
+        "theme": "light"
+      },
+      {
+        "src": "https://brand.composio.dev/logos/Logomark-White.svg",
+        "mimeType": "image/svg+xml",
+        "theme": "dark"
+      }
+    ],
+    "remotes": [
+      {
+        "type": "streamable-http",
+        "url": "https://connect.composio.dev/mcp"
+      }
+    ]
+  },
+  "_meta": {
+    "io.modelcontextprotocol.registry/official": {
+      "status": "active",
+      "statusChangedAt": "2026-06-30T22:45:54.284404Z",
+      "publishedAt": "2026-06-30T22:45:54.284404Z",
+      "updatedAt": "2026-06-30T22:45:54.284404Z",
+      "isLatest": true
+    }
+  }
+}

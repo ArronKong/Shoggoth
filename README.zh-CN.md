@@ -35,7 +35,7 @@ npm run build:manage
 npm start
 ```
 
-`prepare:runtimes` 会下载固定版本的 Codex 和 Cua，并准备两种 Mac 架构使用的 SQLite 原生模块。下载文件与解压后的二进制会按照 `build/` 中的清单校验。
+`prepare:runtimes` 会下载固定版本的 Codex、Cua 和离线 E5 资源，准备两种 Mac 架构使用的 SQLite 原生模块，并构建本机工作区、Apple 设备及媒体 helper。下载文件与解压后的二进制会按照 `build/` 中的清单校验。
 
 这些步骤不会安装、配置外部代理，也不会自动登录账号。下载生成的文件位于 `.vendor/`，无需提交到仓库。
 
@@ -101,16 +101,23 @@ node scripts/desktop-app-update-unit.cjs
 node scripts/app-update-release-contract-unit.cjs
 node scripts/adhoc-sign-unit.cjs
 node scripts/notarize-unit.cjs
-node scripts/shoggoth-packaged-runtime-smoke.mjs
 node scripts/shoggoth-builtin-cli-profiles-unit.cjs
 node scripts/runtime-cli-auth-unit.cjs
 node scripts/shoggoth-runtime-adapter-registry-unit.cjs
 node scripts/proxy-smoke.mjs
 node scripts/proxy-chat-smoke.mjs
 node scripts/hermes-start-smoke.cjs
-npm audit
-npm --prefix app/manage-ui audit
+node --test scripts/dependency-audit-policy-unit.cjs scripts/undici-security-regression.cjs
+npm run audit:release
 ```
+
+构建候选包后，指定其准确产物目录执行包验收：
+
+```sh
+SHOGGOTH_SMOKE_DIST_DIR=/absolute/path/to/candidate npm run test:mcp-connectors:app -- --spike-arm64
+```
+
+Intel 候选使用 `--spike-x64`，正式发布还须经原生 Intel 环境验收。依赖审计的范围复核及原始报告保留要求见 [RELEASING.md](RELEASING.md)。
 
 在 macOS 上安装 Electron 并完成界面构建后，还可以运行窗口安全检查：
 
@@ -130,7 +137,7 @@ node_modules/.bin/electron scripts/ui-security-electron-smoke.cjs
 npm run export:source -- /absolute/path/to/an-empty-directory
 ```
 
-导出会排除内部开发记录与原仓库的 Git 历史。由于部分第三方内置插件尚未核实再分发许可，公开源码暂不包含这些插件包，源码构建中的内置插件目录为空；其他插件安装方式仍可使用。文件哈希清单保存在导出目录旁边，名称为 `<directory>.manifest.json`，用于本地核对。每次更新公开仓库前，都要检查并扫描导出的内容。
+导出会排除内部开发记录、原仓库 Git 历史及已退役的插件 / OpenConnector 资源。连接器使用 Service 托管的 MCP 客户端和推荐应用目录；Registry 工具在用户确认精确版本与启动设置后安装。文件哈希清单保存在导出目录旁边，名称为 `<directory>.manifest.json`，用于本地核对。每次更新公开仓库前，都要检查并扫描导出的内容。
 
 ## 许可证
 

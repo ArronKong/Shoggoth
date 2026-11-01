@@ -10,6 +10,8 @@ const OPENCODE_CAPABILITIES = runtimeCapabilities({
   "session.delete": true, "turn.start": true, "turn.interrupt": true,
   "models.list": true, "commands.list": true, "commands.execute": true, events: true, serverRequests: true,
   "context.compact.native": true, "context.compact.auto": true,
+  "model.generate.toolFree": true,
+  "model.generate.settings": true,
 });
 
 class OpenCodeRuntimeHandle {
@@ -27,8 +29,16 @@ class OpenCodeRuntimeHandle {
   authenticationState() { return this.host.authenticationState(); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) { return this.host.registerServerRequestHandler(method, handler); }
-  sessionStart(input) { return this.host.sessionStart(input); }
-  sessionResume(input) { return this.host.sessionResume(input); }
+  async bindSecretScope(input, invoke) {
+    const response = await invoke();
+    if (input.modelSecretScope) {
+      if (!this.host.modelSecretRoute?.ready()) throw serviceError("SECRET_MODEL_PROJECTION_UNAVAILABLE", "OpenCode model protection is not ready");
+      this.host.modelSecretScopes.set(response.session.id, Object.freeze({ ...input.modelSecretScope }));
+    }
+    return response;
+  }
+  sessionStart(input) { return this.bindSecretScope(input, () => this.host.sessionStart(input)); }
+  sessionResume(input) { return this.bindSecretScope(input, () => this.host.sessionResume(input)); }
   sessionRead(input) { return this.host.sessionRead(input); }
   sessionList(input) { return this.host.sessionList(input); }
   sessionRename(input) { return this.host.sessionRename(input); }
@@ -40,6 +50,7 @@ class OpenCodeRuntimeHandle {
   modelsList(input) { return this.host.modelsList(input); }
   commandsList(input) { return this.host.commandsList(input); }
   commandExecute(input) { return this.host.commandExecute(input); }
+  generateModelOnly(input) { return this.host.generateModelOnly(input); }
   // Settings sign-in into model providers, on the account's control instance.
   providerLoginOptions() { return this.host.providerLoginOptions(); }
   providerLoginAuthorize(input) { return this.host.providerLoginAuthorize(input); }
@@ -54,9 +65,11 @@ class OpenCodeRuntimeAdapter {
     }
     this.runtimePool = options.runtimePool;
     this.handles = new Map();
-    this.modelOnly = false;
+    this.modelOnly = true;
     assertRuntimeAdapter(this);
   }
+  runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
+
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);
     if (binding.runtime !== OPENCODE_RUNTIME) throw serviceError("RUNTIME_UNSUPPORTED", "OpenCode runtime is required");

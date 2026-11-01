@@ -25,12 +25,18 @@ try {
   execFileSync(esbuild, [appLinksHelperPath, "--bundle", "--platform=node", "--format=cjs", `--outfile=${appLinksOutfile}`], {
     stdio: "pipe",
   });
-  execFileSync(esbuild, [path.join(uiRoot, "src/lib/markdown.ts"), "--bundle", "--platform=node", "--format=cjs", "--loader:.css=empty", `--outfile=${markdownOutfile}`], {
+  execFileSync(esbuild, [path.join(uiRoot, "src/lib/markdown.ts"), "--bundle", "--platform=node", "--format=cjs", "--loader:.css=empty", "--loader:.png=dataurl", `--outfile=${markdownOutfile}`], {
     stdio: "pipe",
   });
   const { localFilePathFromHref, findLocalFileLinks } = createRequire(import.meta.url)(outfile);
   const { md } = createRequire(import.meta.url)(markdownOutfile);
   const { internalAppHashFromHref } = createRequire(import.meta.url)(appLinksOutfile);
+
+  const productImage = md.render(String.raw`![Canvas \[blue\] & "large"](<https://catalog.example.test/photo/blue(bag)?size=640&variant=blue>)`);
+  assert.ok(productImage.includes('alt="Canvas [blue] &amp; &quot;large&quot;"'),
+    "product image labels decode Markdown escapes while keeping HTML attributes escaped");
+  assert.ok(productImage.includes('src="https://catalog.example.test/photo/blue(bag)?size=640&amp;variant=blue"'),
+    "product image URLs preserve their exact path and query");
 
   const expected = "/Users/example/Library/Application Support/Shoggoth/workspaces/abc/index.html";
   assert.equal(localFilePathFromHref(

@@ -30,6 +30,28 @@ async function serviceFixture(t) {
   return { root, paths, open, close, isStopped: () => !service, profileId: DEFAULT_AGENT_PROFILE_ID };
 }
 
+test("real E5 worker vectors satisfy native file-memory search without lexical fallback", { timeout: 60_000 }, async t => {
+  const f = await serviceFixture(t), service = await f.open(true, {
+    memoryCoreConfig: { memory: { search: { provider: "shoggoth-e5", rememberAcrossConversations: false } } },
+  });
+  const owner = service.memoryEngine, query = "What is my hamster called?";
+  await owner.propose({ profileId: f.profileId, scope: "agent", type: "semantic", classification: "explicit",
+    content: "我养的仓鼠叫松子。", sourceRefs: ["user-edit:real-e5-vector-contract"] });
+  await owner.semanticService.embedding.start();
+  const workerVector = await owner.semanticService.embedding.request("encode-query", { text: query });
+  assert.ok(workerVector instanceof Float32Array, "actual worker IPC retains its typed vector");
+  const providerVector = await owner.embedding.encode(query, "query");
+  assert.ok(Array.isArray(providerVector), "native memory provider requires a plain numeric array");
+  assert.deepEqual(providerVector, Array.from(workerVector));
+  assert.equal(providerVector.length, 384); assert.ok(providerVector.every(Number.isFinite));
+  const host = owner.host(f.profileId); await host.searchIndex.sync();
+  const found = await owner.searchMemory({ profileId: f.profileId, query, minScore: 0, maxResults: 5, record: false });
+  assert.equal(found.semantic.status, "ready");
+  assert.equal(host.searchIndex.embeddingFailure, null);
+  assert.ok(found.results.some(row => row.snippet.includes("松子")), "real bilingual search must find the saved fact");
+  assert.ok(host.searchIndex.db.prepare("SELECT count(*) AS n FROM memory_index_chunks WHERE model <> 'fts-only'").get().n > 0);
+});
+
 test("explicit reauthorization recalls only the new fact while old copies, imports and raw sources stay hidden", async t => {
   const f = await serviceFixture(t), profileId = f.profileId;
   let clock = Date.now();
@@ -502,10 +524,11 @@ test("preflight failures continue without replay while uncertain file commits st
   assert.equal(calls, 1);
   const next = seedSession(f, service, { tag: "uncertain-flush" });
   service.memoryEngine.complete = async () => ({ text: '{"append":"Amber telescope calibration remains required."}' });
-  const original = service.memoryEngine.store.upsert;
-  service.memoryEngine.store.upsert = async () => { throw Object.assign(Error("uncertain file commit"), { code: "MEMORY_WRITE_UNCERTAIN" }); };
+  // Flush writes all of its entries in one upsertMany transaction.
+  const original = service.memoryEngine.store.upsertMany;
+  service.memoryEngine.store.upsertMany = async () => { throw Object.assign(Error("uncertain file commit"), { code: "MEMORY_WRITE_UNCERTAIN" }); };
   try { await assert.rejects(service.memoryEngine.observeBeforeSend({ ...input, sessionId: next.session.id }), { code: "MEMORY_WRITE_UNCERTAIN" }); }
-  finally { service.memoryEngine.store.upsert = original; }
+  finally { service.memoryEngine.store.upsertMany = original; }
 });
 
 test("failed flush is not replayed and a model cannot overwrite core files", async t => {
@@ -992,7 +1015,12 @@ test("new owner works through REST file view, MCP file/search/save, and actual C
   await assert.rejects(call("memory_get", { path: service.memoryEngine.host(profileId).searchIndex.sourceFiles.relative(scoped), from: 2, lines: 1 }), { code: "MCP_TOOL_NOT_FOUND" });
   delete memoryCoreConfig.memory;
   await assert.rejects(call("memory_get", { path: relative }), { code: "MCP_TOOL_PATH_INVALID" });
-  assert.deepEqual((await call("memory_search", { query: "violet nebula", minScore: 0 })).results, []);
+  const afterRemoval = await call("memory_search", { query: "violet nebula", minScore: 0 });
+  // A working semantic provider may return weak matches from allowed files at
+  // minScore=0. The removed library must stay unreadable and absent from both
+  // snippets and durable-memory projections, regardless of candidate ranking.
+  assert.ok(afterRemoval.results.every(result => result.path !== relative && !result.snippet.includes("Violet nebula library appendix")));
+  assert.ok(!JSON.stringify(afterRemoval.items).includes("Violet nebula library appendix"));
   assert.equal(fs.readFileSync(appendix, "utf8"), libraryText);
   const saved = await call("memory_save", { expectedRevision: service.memoryStore.getRevision(profileId), scope: "user", classification: "explicit",
     sourceQuote: "I prefer amber telescope calibration every evening.", content: "I prefer amber telescope calibration every evening." });
@@ -1197,7 +1225,11 @@ test("historical external promotions retain exact source authority across candid
     light: { enabled: false }, rem: { enabled: false }, deep: { minScore: 0, minRecallCount: 1, minUniqueQueries: 1 },
   } } } } } };
   fs.writeFileSync(path.join(host.workspaceDir, "memory/2026-10-07-fresh.md"), "Amber telescope maintenance happens before every observation.\n", { mode: 0o600 });
-  assert.ok((await owner.searchMemory({ profileId, query: "amber telescope maintenance", minScore: 0 })).results.length);
+  const fresh = (await owner.searchMemory({ profileId, query: "amber telescope maintenance", minScore: 0 })).results;
+  assert.ok(fresh.length);
+  // Searches no longer record recalls themselves (memory repair 2026-10-28);
+  // seed the fresh candidate the way a completed user turn commits one.
+  await host.run(() => core.recordShortTermRecalls({ workspaceDir: host.workspaceDir, query: "amber telescope maintenance", results: fresh, nowMs: Date.now() }));
   let calls = 0;
   owner.complete = async () => { calls++; throw new Error("revoked MEMORY.md input must not reach the model"); };
   await assert.rejects(owner.dream(profileId), { code: "MEMORY_SOURCE_CHANGED" });

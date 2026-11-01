@@ -151,9 +151,23 @@
   "externalAdapters": {
     "source": "resources/external-plugin-adapters",
     "tools": [
+      "connector_list_apps",
+      "connector_list_connections",
+      "connector_search_actions",
+      "connector_get_action_guide",
+      "connector_execute_action",
       "shoggoth_capability_search",
       "shoggoth_skill_read",
       "shoggoth_skill_file_read",
+      "group_member_role_read",
+      "group_messages_read",
+      "group_task",
+      "group_collaborate"
+    ]
+  },
+  "legacyExternalAdapters": {
+    "source": "retired Shoggoth bridge history only; never current registration",
+    "tools": [
       "shoggoth_plugin_resource_read",
       "shoggoth_plugin_call"
     ]

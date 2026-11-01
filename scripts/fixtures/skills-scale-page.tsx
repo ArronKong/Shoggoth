@@ -11,9 +11,9 @@ import "../../app/manage-ui/src/manage-skin.css";
 // boundary is replaced, so page geometry, focus, and scrolling stay real.
 const scope = window as typeof window & {
   skillsScaleErrors: string[];
-  skillsScaleRequests: Array<{ page: number; query: string; status: string }>;
-  runSkillsScalePage: (width: number) => Promise<Record<string, unknown>>;
-  showSkillsScaleDetail: () => Promise<{ top: number; bottom: number; cardCount: number }>;
+  skillsScaleRequests: Array<{ backend: string; page: number; query: string; status: string }>;
+  runSkillsScalePage: (width: number, backend: string) => Promise<Record<string, unknown>>;
+  showSkillsScaleDetail: (backend: string) => Promise<{ top: number; bottom: number; cardCount: number }>;
   runStandaloneMcpRepair: (width: number) => Promise<Record<string, unknown>>;
   showStandaloneMcpConfirmation: () => Promise<Record<string, unknown>>;
   finishStandaloneMcpRepair: () => Promise<Record<string, unknown>>;
@@ -65,11 +65,15 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     } });
   }
   if (url.pathname === "/__api/skills/preview") return answer({ preview: { content: "Fixture instructions" } });
-  if (url.pathname === "/__api/skills" && url.searchParams.get("paged") !== "1") return answer({ skills: [] });
+  if (url.pathname === "/__api/skills" && url.searchParams.get("paged") !== "1") {
+    const backend = url.searchParams.get("backend")!;
+    return answer({ skills: backend === "shoggoth" ? [] : skills.slice(0, 250).map(skill => ({ ...skill, backendId: backend })) });
+  }
   if (url.pathname === "/__api/skills" && url.searchParams.get("paged") === "1") {
     const page = Number(url.searchParams.get("page")), query = url.searchParams.get("query") || "";
     const status = url.searchParams.get("status") || "";
-    scope.skillsScaleRequests.push({ page, query, status });
+    if (url.searchParams.has("agentId")) throw Error("Skills catalog must include all Agents");
+    scope.skillsScaleRequests.push({ backend: url.searchParams.get("backend")!, page, query, status });
     if (page > 0 && url.searchParams.get("revision") !== revision) {
       return answer({ error: "stale", code: "SKILL_PAGE_STALE" }, 409);
     }
@@ -104,21 +108,32 @@ const cardNames = () => [...document.querySelectorAll<HTMLElement>(".skill-card"
 const expectedName = (index: number) => `scale-${String(index).padStart(4, "0")}`;
 const checked = (value: unknown, message: string) => { if (!value) throw Error(message); };
 const firstCard = () => document.querySelector<HTMLButtonElement>(".skill-card-open")!;
-const pageButtons = () => document.querySelectorAll<HTMLButtonElement>(".skill-pagination button");
+const backendLabel = (backend: string) => ({ shoggoth: "Shoggoth", openclaw: "OpenClaw", hermes: "Hermes" })[backend]!;
+const backendTab = (backend: string) => document.querySelector<HTMLElement>(`[role="tab"][aria-label="${backendLabel(backend)}"]`)!;
+const scrollContainer = () => main().scrollHeight > main().clientHeight + 1 ? main()
+  : skillPage().scrollHeight > skillPage().clientHeight + 1 ? skillPage() : content();
 
-scope.runSkillsScalePage = async (width: number) => {
-  await wait(() => !!document.querySelector<HTMLElement>('[role="tab"][aria-label="Shoggoth"]'), "native backend tab");
-  document.querySelector<HTMLElement>('[role="tab"][aria-label="Shoggoth"]')!.click();
-  await wait(() => cardNames().length === pageSize && cardNames()[0] === expectedName(0), "first native page");
+scope.runSkillsScalePage = async (width: number, backend: string) => {
+  const batchSize = backend === "shoggoth" ? pageSize : 100;
+  const total = backend === "shoggoth" ? skills.length : 250;
+  await wait(() => !!backendTab(backend), backend + " tab");
+  backendTab(backend).click();
+  await wait(() => cardNames().length === batchSize && cardNames()[0] === expectedName(0), "first " + backend + " batch");
   await frame();
+  checked(!document.querySelector(".skill-pagination"), "pagination must be absent");
+  checked(!document.querySelector('input[type="search"]'), "search must be hidden");
+  checked(!document.querySelector('.ui-toolbar [role="combobox"]'), "Agent filter must be hidden");
+  checked(!document.querySelector('[aria-label="自动学习"]'), "automatic learning card must be hidden");
+  checked(![...document.querySelectorAll(".ui-toolbar button")].some(button => button.textContent?.includes("Install")),
+    "local Skill installation must be hidden");
   firstCard().click();
   await wait(() => !!document.querySelector(".skill-detail"), "first card detail");
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await frame();
   const detail = document.querySelector<HTMLElement>(".skill-detail")!;
   const detailRect = detail.getBoundingClientRect();
   const viewportHeight = document.documentElement.clientHeight;
   checked(detailRect.top >= 0 && detailRect.top < viewportHeight,
-    `first card detail outside viewport at ${width}px: ${JSON.stringify({ top: detailRect.top, bottom: detailRect.bottom, viewportHeight })}`);
+    `first card detail outside viewport at ${width}px`);
   const closeRect = detail.querySelector<HTMLButtonElement>(".skill-detail-x")!.getBoundingClientRect();
   checked(closeRect.top >= 0 && closeRect.bottom <= viewportHeight, "detail close control is outside viewport");
   checked(document.documentElement.scrollWidth <= width + 1, `detail overflows horizontally at ${width}px`);
@@ -126,63 +141,42 @@ scope.runSkillsScalePage = async (width: number) => {
   await wait(() => !document.querySelector(".skill-detail"), "detail close");
   await frame();
   checked(document.activeElement === firstCard(), "closing detail must restore opener focus");
-  const pageCount = Math.ceil(skills.length / pageSize);
-  const perPage: Array<{ page: number; cards: number; first: string; last: string; scrollOwner: string }> = [];
-  for (let page = 0; page < pageCount; page += 1) {
-    const names = cardNames();
-    const expectedLength = Math.min(pageSize, skills.length - page * pageSize);
-    checked(names.length === expectedLength, `page ${page} mounted ${names.length} cards, expected ${expectedLength}`);
-    checked(names[0] === expectedName(page * pageSize), `page ${page} first card mismatch`);
-    checked(names.at(-1) === expectedName(page * pageSize + expectedLength - 1), `page ${page} last card mismatch`);
-    checked(document.documentElement.scrollWidth <= width + 1, `page ${page} document overflows horizontally`);
-    const scrollOwner = main().scrollHeight > main().clientHeight + 1 ? "grid"
-      : skillPage().scrollHeight > skillPage().clientHeight + 1 ? "page" : "content";
-    const scroller = scrollOwner === "grid" ? main() : scrollOwner === "page" ? skillPage() : content();
+  let batches = 1;
+  while (cardNames().length < total) {
+    const before = cardNames().length;
+    const scroller = scrollContainer();
     scroller.scrollTop = scroller.scrollHeight;
+    const scrollTop = scroller.scrollTop, focus = document.activeElement;
+    await wait(() => cardNames().length > before, backend + " scrolling batch " + batches);
     await frame();
-    checked(scroller.scrollTop > 0, `page ${page} cannot scroll to bottom: ${JSON.stringify({ scrollOwner,
-      grid: [main().clientHeight, main().scrollHeight], page: [skillPage().clientHeight, skillPage().scrollHeight],
-      content: [content().clientHeight, content().scrollHeight],
-      body: [document.body.clientHeight, document.body.scrollHeight], document: [document.documentElement.clientHeight, document.documentElement.scrollHeight] })}`);
-    const nav = document.querySelector<HTMLElement>(".skill-pagination")!;
-    const navRect = nav.getBoundingClientRect(), scrollerRect = scroller.getBoundingClientRect();
-    checked(navRect.bottom <= scrollerRect.bottom + 1 && navRect.top >= scrollerRect.top - 1,
-      `page ${page} navigation not visible after scroll`);
-    perPage.push({ page, cards: names.length, first: names[0], last: names.at(-1)!, scrollOwner });
-    if (page === pageCount - 1) break;
-    pageButtons()[1].click();
-    await wait(() => cardNames()[0] === expectedName((page + 1) * pageSize), `page ${page + 1}`);
-    await frame();
-    checked(document.activeElement === firstCard(), `page ${page + 1} first card did not receive focus`);
-    const focusRect = firstCard().getBoundingClientRect(), visibleRect = scroller.getBoundingClientRect();
-    checked(focusRect.top >= visibleRect.top - 1 && focusRect.top < visibleRect.bottom,
-      `page ${page + 1} focused first card outside visible area`);
+    const names = cardNames();
+    checked(names.length === Math.min(total, before + batchSize), "scroll must append one bounded batch");
+    checked(names[0] === expectedName(0) && names[before - 1] === expectedName(before - 1), "previous cards must remain in place");
+    checked(names.at(-1) === expectedName(names.length - 1), "the new batch must be contiguous");
+    checked(scroller.scrollTop >= scrollTop - 2, "loading more must preserve the scroll position");
+    checked(document.activeElement === focus, "loading more must not steal keyboard focus");
+    checked(document.documentElement.scrollWidth <= width + 1, "scroll-loaded cards overflow horizontally");
+    batches += 1;
   }
-  const input = document.querySelector<HTMLInputElement>('input[type="search"]')!;
-  input.focus();
-  // Use the native setter so React's value tracker observes a real edit.
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "scale-4999");
-  input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "scale-4999", inputType: "insertText" }));
-  await wait(() => cardNames().length === 1 && cardNames()[0] === "scale-4999", "tail search");
-  checked(document.activeElement === input, "search must retain keyboard focus");
-  checked(scope.skillsScaleRequests.some((request) => request.query === "scale-4999" && request.page === 0),
-    "search must query server from first page");
+  const names = cardNames();
+  checked(new Set(names).size === total, "all Skills appear exactly once");
+  await wait(() => !document.querySelector(".skill-load-more"), "end of catalog");
+  scrollContainer().scrollTop = scrollContainer().scrollHeight;
+  await frame();
   checked(scope.skillsScaleErrors.length === 0, `renderer errors: ${scope.skillsScaleErrors.join(" | ")}`);
-  return { width, total: skills.length, pageCount, pagesChecked: perPage.length,
-    scrollOwner: perPage[0].scrollOwner, maxMountedCards: Math.max(...perPage.map((entry) => entry.cards)),
-    firstDetailTop: Math.round(detailRect.top), firstDetailHeight: Math.round(detailRect.height),
-    firstPage: perPage[0], finalPage: perPage.at(-1), tailSearch: cardNames(),
+  return { backend, width, total, batches, visibleCards: names.length,
+    first: names[0], last: names.at(-1), hiddenControls: true,
     requests: scope.skillsScaleRequests.length, errors: scope.skillsScaleErrors };
 };
 
-scope.showSkillsScaleDetail = async () => {
-  const input = document.querySelector<HTMLInputElement>('input[type="search"]')!;
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "");
-  input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
-  await wait(() => cardNames().length === pageSize && cardNames()[0] === "scale-0000", "full first page for detail capture");
+scope.showSkillsScaleDetail = async (backend: string) => {
+  const batchSize = backend === "shoggoth" ? pageSize : 100;
+  backendTab(backend === "hermes" ? "openclaw" : "hermes").click();
+  await frame(); backendTab(backend).click();
+  await wait(() => cardNames().length === batchSize && cardNames()[0] === "scale-0000", "first batch for detail capture");
   firstCard().click();
   await wait(() => !!document.querySelector(".skill-detail"), "detail capture");
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await frame();
   const rect = document.querySelector<HTMLElement>(".skill-detail")!.getBoundingClientRect();
   checked(rect.top >= 0 && rect.top < document.documentElement.clientHeight, "captured detail heading is invisible");
   return { top: Math.round(rect.top), bottom: Math.round(rect.bottom), cardCount: cardNames().length };

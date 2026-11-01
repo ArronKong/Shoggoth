@@ -677,7 +677,11 @@ test("只在对应 runtimeProfile 解密，返回确定性专用 env/registered 
     assert.match(envName, /^SHOGGOTH_PROVIDER_[A-F0-9]{16}_API_KEY$/);
     assert.deepEqual(prepared.spawnEnv, { [envName]: canary });
     assert.deepEqual(prepared.registeredSecrets, [canary]);
-    assert.deepEqual(prepared.runtimeConfig.provider, {
+    // The built-in Codex process stays on ChatGPT; the Profile's provider is
+    // declared next to it and named by each native thread.
+    assert.equal(prepared.runtimeConfig.provider, null);
+    assert.equal(prepared.runtimeConfig.extraProviders.length, 1);
+    assert.deepEqual(prepared.runtimeConfig.extraProviders[0], {
       id: "provider-openrouter",
       kind: "openrouter",
       name: "OpenRouter",
@@ -731,12 +735,13 @@ test("共享 internal Home 的 OpenAI key 只注入绑定 Profile，ChatGPT Prof
     assert.equal(providerCredentialEnvName(openAiProvider), "OPENAI_API_KEY");
     assert.deepEqual(openAi.spawnEnv, { OPENAI_API_KEY: canary });
     assert.deepEqual(openAi.registeredSecrets, [canary]);
-    assert.equal(openAi.runtimeConfig.provider.credentialEnv, "OPENAI_API_KEY");
+    assert.equal(openAi.runtimeConfig.provider, null);
+    assert.equal(openAi.runtimeConfig.extraProviders[0].credentialEnv, "OPENAI_API_KEY");
     assert.equal(openAi.configArgs.some((value) => value.includes(canary)), false);
     const alias = providerConfigAlias(openAiProvider);
     assert.equal(openAi.configArgs.some((value) => (
       value === `model_provider=${JSON.stringify(alias)}`
-    )), true);
+    )), false, "the process default stays ChatGPT; threads name the OpenAI key source");
     assert.equal(openAi.configArgs.includes(
       `model_providers.${alias}.base_url="https://api.openai.com/v1"`,
     ), true);
@@ -746,7 +751,7 @@ test("共享 internal Home 的 OpenAI key 只注入绑定 Profile，ChatGPT Prof
     assert.equal(openAi.configArgs.includes(
       `model_providers.${alias}.requires_openai_auth=false`,
     ), true);
-    assert.equal(openAi.configArgs.some((value) => value === 'model_provider="openai"'), false);
+    assert.equal(openAi.configArgs.some((value) => value === 'model_provider="openai"'), true);
     assert.equal(fs.existsSync(sharedHome), false);
   } finally {
     await closeResources(resources);

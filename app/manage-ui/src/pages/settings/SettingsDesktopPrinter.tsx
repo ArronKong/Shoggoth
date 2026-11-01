@@ -30,9 +30,8 @@ export default function SettingsDesktopPrinter({ disabled }: { disabled: boolean
   };
   useEffect(() => {
     if (!capturing) return;
-    const timer = window.setTimeout(endCapture, 30_000);
     window.addEventListener('blur', endCapture);
-    return () => { window.clearTimeout(timer); window.removeEventListener('blur', endCapture); };
+    return () => { window.removeEventListener('blur', endCapture); };
   }, [capturing, host]);
   const begin = async () => {
     if (disabled || operation.current || !host?.captureShortcut) return;

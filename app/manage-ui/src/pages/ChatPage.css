@@ -555,6 +555,24 @@
   pointer-events: none;
 }
 .chat-topdock { top: 0; }
+/* Float over the full-width toolbar, aligned with its top and right edges. */
+.chat-status-notices {
+  position: absolute;
+  top: 36px;
+  right: var(--page-inset-right);
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 340px;
+  max-width: calc(100% - var(--page-inset-right) - var(--skin-gutter));
+  max-height: calc(100% - 48px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border-radius: 16px;
+  margin: 0;
+}
 .chat-botdock { bottom: 0; }
 .chat-botdock > .chat-plan-dock { margin: 0 var(--page-inset-right) 0 var(--skin-gutter); }
 .chat-topdock > *,
@@ -1155,9 +1173,9 @@
    block on open or on each stream update. Apply per bubble, not per group:
    delivery-only sessions can put hundreds of replies in a single group. Live
    bubbles use a nested .chat-md and deliberately stay fully laid out. The latest
-   reply and this turn's streamed progress retain that layout through settlement
-   and history replacement, avoiding the offscreen 400px estimate on new nodes. */
-.chat-thread .chat-bubble.chat-md:not(.is-latest-reply):not(.is-streamed-reply) {
+   send, replies and this turn's streamed progress retain that layout through
+   settlement and history replacement, avoiding the offscreen 400px estimate on new nodes. */
+.chat-thread .chat-bubble.chat-md:not(.is-latest-send):not(.is-latest-reply):not(.is-streamed-reply) {
   content-visibility: auto;
   contain-intrinsic-block-size: auto 400px;
 }
@@ -1379,10 +1397,25 @@
 
 /* typing cursor */
 .chat-cursor { color: var(--chat-text); animation: chat-blink 1s step-start infinite; }
-/* Keep the cursor in the existing padding, so settling text does not remove a
-   whole line from the bubble and move the reader's place. */
-.chat-bubble.is-streaming { position: relative; }
-.chat-bubble.is-streaming > .chat-cursor { position: absolute; right: 24px; bottom: 4px; line-height: 20px; }
+/* Keep the inline loader within the same line height as the first reply text. */
+.chat-bubble.is-streaming > [role="status"] { vertical-align: top; }
+/* Reserve the gap and dot beside the final grapheme. They wrap together, and
+   the inline anchor's font box centers the dot on that character. */
+.chat-cursor-tail {
+  position: relative;
+  padding-inline-end: 14px;
+  white-space: nowrap;
+}
+.chat-cursor-tail > .chat-cursor {
+  position: absolute;
+  inset-inline-end: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
 @keyframes chat-blink { 50% { opacity: 0; } }
 
 /* ============================ composer (floating glass pill) ============================ */
@@ -1653,18 +1686,6 @@
 .chat-send:hover:not(:disabled) { background: #ffe96b; color: #000; }
 .chat-send:active:not(:disabled) { transform: scale(0.96); }
 .chat-send:disabled { background: transparent; color: var(--muted-fg); opacity: 1; } /* default = no circle */
-
-.chat-banner {
-  position: relative;
-  z-index: 6; /* stay above the absolute full-height thread */
-  margin: 8px var(--page-inset-right) 0 var(--skin-gutter);
-  padding: 8px 14px;
-  border-radius: 14px;
-  background: var(--accent-subtle);
-  color: var(--accent-hover);
-  border: 1px solid var(--skin-border-user);
-  font-size: 13px;
-}
 
 /* ===================== slash-command palette ===================== */
 /* the "Commands" pill while the palette is open */
@@ -2199,30 +2220,6 @@
 
 /* ===================== QA-round additions (R54) ===================== */
 
-/* neutral "connecting…" banner (cold start / reconnect) — not an error */
-.chat-banner.is-info {
-  background: var(--skin-glass-pill);
-  color: var(--muted-fg);
-  border-color: var(--skin-hairline);
-}
-.chat-verification-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.chat-verification-banner button {
-  flex: none;
-  border: 1px solid var(--skin-hairline);
-  border-radius: 999px;
-  padding: 3px 10px;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-}
-.chat-verification-banner button:disabled { opacity: 0.5; cursor: default; }
-.chat-verification-banner button:hover:not(:disabled) { background: var(--skin-glass-pill); }
-.chat-verification-banner button:focus { outline: 2px solid var(--accent-hover); outline-offset: 2px; }
 /* toast inline action (撤销 etc.) — parent toast is pointer-events:none */
 .chat-toast__act {
   flex: none;

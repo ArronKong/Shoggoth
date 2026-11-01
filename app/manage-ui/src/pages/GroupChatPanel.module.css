@@ -195,9 +195,6 @@
   white-space: normal;
 }
 
-/* 正在回复的草稿：最终消息提交前的流式内容，不进群日志 */
-.draft { opacity: 0.72; }
-
 /* 每个讨论回合 / 任务尝试独立展示，详细工具数据留在折叠层。 */
 .executionActivity { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 12px; line-height: 18px; }
 .executionActivityHead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }

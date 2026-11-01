@@ -54,7 +54,8 @@ export interface ImmersiveMessage {
   images: string[]; // user 自发图（base64）/ agent MEDIA 图（/__media 或 URL）
   // 非图附件（视频/PDF/文件）。带 src 的视频渲染成可点开灯箱的预览窗，其余是文件 chip。
   files?: { name: string; kind: string; src?: string; path?: string }[];
-  pluginSelectionLabel?: string;
+  connectorSelectionLabel?: string;
+  connectorSelectionHint?: string;
   footer: string;
   footerModel?: ReactNode;
   unreadStart?: boolean;
@@ -89,6 +90,8 @@ export interface ImmersiveBundle {
   sendSeq: number;
   /** 滚近顶部时触发加载封存历史（幂等/节流由 ChatPage 的 archive 状态机自守）。 */
   onNearTop: () => void;
+  /** User overscroll at the top; leaving the top dismisses the boundary note. */
+  onHistoryBoundaryChange?: (atTop: boolean) => void;
   historyControl?: ReactNode;
   unreadAnchor?: { key: string; messageId: string | null; pending: boolean };
   /** 拖拽文件到 composer 上传（与普通模式同一 handler）。 */
@@ -105,20 +108,22 @@ export interface ImmersiveBundle {
   submit: (overrideText?: string) => void;
   sending: boolean;
   abortActive: () => void;
+  abortDisabled?: boolean;
   hasActiveSession: boolean;
   canSend: boolean;
   writerHint?: string | null;
   // slash 命令菜单：节点由 ChatPage 构建（与普通模式同一份 JSX），渲染进沉浸 composer。
   slashMenu: ReactNode;
   slashOpen: boolean;
-  pluginPicker?: ReactNode;
+  connectionRequests?: ReactNode;
   /** Shared session plan, anchored above the input in both chat layouts. */
   planDock?: ReactNode;
   // composer：工具行
   models: ModelMenuChoice[];
   displayModel: string;
-  changeModel: (id: string, provider?: string, bindingId?: string) => void;
+  changeModel: (id: string, provider?: string, bindingId?: string, modelProviderRef?: string) => void;
   activeBindingId?: string;
+  activeModelProviderRef?: string;
   runtimeGroups?: Array<{ runtime: string; bindingId?: string; name: string; available: boolean }>;
   activeModelProvider?: string;
   modelsLoading?: boolean;
@@ -149,6 +154,7 @@ export interface ImmersiveBundle {
   // 初次连接和重连沿用灰点皮肤，title 分别说明当前状态。
   liveStatusKind: "queued" | "running" | "online" | "offline" | "connecting" | "reconnecting";
   recoveryNotice?: string | null;
+  statusNotices?: ReactNode;
   activeAgentId: string | null;
   activeBackendId: string;
   avatarVersion: number;
@@ -169,13 +175,13 @@ export interface ImmersiveBundle {
 
 export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
-    onExit, phase, live, sendSeq, onNearTop, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
-    submit, sending, abortActive, hasActiveSession, canSend, writerHint, slashMenu, slashOpen, pluginPicker, planDock,
-    models, displayModel, changeModel, activeBindingId, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
+    onExit, phase, live, sendSeq, onNearTop, onHistoryBoundaryChange, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
+    submit, sending, abortActive, abortDisabled, hasActiveSession, canSend, writerHint, slashMenu, slashOpen, connectionRequests, planDock,
+    models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
     attachments, removeAttachment, quoteText, clearQuote,
-    sessionTitle, sessionMeta, liveStatusKind, recoveryNotice, activeAgentId, activeBackendId, avatarVersion, sessions: allSessions, openSession,
+    sessionTitle, sessionMeta, liveStatusKind, recoveryNotice, statusNotices, activeAgentId, activeBackendId, avatarVersion, sessions: allSessions, openSession,
     onRefresh, sessionLabel, onRenameSubmit, onDelete,
     openLightbox, revealAttachmentFile, lightboxOpen, onRespondPrompt,
   } = props;
@@ -280,6 +286,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     setShowJump(false);
   };
   const jumpToLatest = () => {
+    onHistoryBoundaryChange?.(false);
     clearAnchor();
     stickRef.current = true;
     const el = threadRef.current;
@@ -288,6 +295,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   const onThreadScroll = () => {
     const el = threadRef.current;
     if (el) {
+      if (el.scrollTop > 1) onHistoryBoundaryChange?.(false);
       const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       if (nearBottom && anchoredRef.current) {
         // 用户自己滚过预留区到底 = 解除锚定，回到贴底跟随
@@ -301,6 +309,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   // 滚轮到顶继续上滚 → 触发封存历史加载（前插补偿在下方 layout effect）
   const onThreadWheel = (e: WheelEvent<HTMLDivElement>) => {
     const el = threadRef.current;
+    if (el && e.deltaY !== 0) onHistoryBoundaryChange?.(e.deltaY < 0 && el.scrollTop <= 1);
     if (el && e.deltaY < 0 && el.scrollTop < 400) { captureHistoryAnchor(); onNearTop(); }
   };
   useLayoutEffect(() => {
@@ -709,6 +718,10 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         </button>
       </div>
 
+      {view === "chat" && statusNotices && (
+        <div className={`chat-status-notices ${styles.statusNotices}`}>{statusNotices}</div>
+      )}
+
       {/* 中央：消息流。assistant 卡 = data-glass-panel（WebGL 折射）；user 气泡 = CSS 半透明。
           data-glass-clip：卡片的玻璃背景在本容器边界截断（与 overflow 裁掉的文字同步）。 */}
       {view === "chat" && (
@@ -810,7 +823,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             return (
               <div key={m.id} className={styles.userRow} data-user-row="" data-immersive-message={m.id} data-unread-start={m.unreadStart || undefined} onContextMenu={m.onCtx}>
                 {attRow}
-                {m.pluginSelectionLabel && <div className={styles.pluginSelectionBadge} title={t("chat.pluginChosenHint")}>{m.pluginSelectionLabel}</div>}
+                {m.connectorSelectionLabel && <div className={styles.connectorSelectionBadge} title={m.connectorSelectionHint || t("chat.connectorChosenHint")}>{m.connectorSelectionLabel}</div>}
                 {m.content?.length ? <div className={styles.md}>{m.content}</div> : m.html && (
                   <div className={styles.userBubble} data-glass-panel>
                     <div className={styles.md} dangerouslySetInnerHTML={{ __html: m.html }} />
@@ -931,7 +944,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           DOM 背景透明；WebGL 不可用时回退 CSS 毛玻璃（fallback）。 */}
       {view === "chat" && (
       <div ref={composerDockRef} className={styles.composerDock} data-chat-composer-dock data-native-ui-clip-edge="bottom">
-      {recoveryNotice && <div className={styles.errCard} role="alert">{recoveryNotice}</div>}
       {planDock}
       <div
         className={failed ? `${styles.composer} ${styles.fallback}` : styles.composer}
@@ -976,6 +988,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             ))}
           </div>
         )}
+        {connectionRequests}
         <textarea
           ref={inputElRef}
           className={styles.input}
@@ -990,7 +1003,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         <div className={styles.bar}>
           <div className={styles.barLeft}>
             <div className={styles.modelControls}>
-              {pluginPicker}
               {hasActiveSession && (
                 <span className={listLive ? styles.modelWrap : `${styles.modelWrap} ${styles.stale}`}>
                   <ChatModelMenu
@@ -998,6 +1010,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                     activeModel={displayModel}
                     activeProvider={activeModelProvider}
                     activeBindingId={activeBindingId}
+                    activeModelProviderRef={activeModelProviderRef}
                     runtimeGroups={runtimeGroups}
                     onSelect={changeModel}
                     loading={modelsLoading}
@@ -1029,7 +1042,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
               </button>
             )}
             {sending ? (
-              <button type="button" className={`${styles.send} ${styles.stop}`} onClick={abortActive} title={t("chat.stopGenerating")}>
+              <button type="button" className={`${styles.send} ${styles.stop}`} onClick={abortActive} disabled={abortDisabled} title={t("chat.stopGenerating")}>
                 <IconStop />
               </button>
             ) : (

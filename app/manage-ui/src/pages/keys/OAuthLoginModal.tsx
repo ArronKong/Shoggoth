@@ -276,6 +276,9 @@ export default function OAuthLoginModal({
   const fmt = (s: number | null) => (s === null ? "" : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`);
   const hasCliCommand = provider.cliCommand.trim().length > 0;
   const dismissible = phase !== "submitting" && phase !== "rechecking";
+  const external = phase === "external" || phase === "rechecking";
+  const canSubmitCode = session?.flow === "pkce" && phase === "awaiting"
+    || session?.flow === "browser" && phase === "polling" && browser.codeRequired;
 
   return (
     <Modal
@@ -284,6 +287,33 @@ export default function OAuthLoginModal({
       onClose={close}
       width={440}
       dismissible={dismissible}
+      footer={phase === "choose" ? undefined : <>
+        <button type="button" className={phase === "approved" ? "btn-primary" : "btn-secondary"}
+          onClick={close} disabled={!dismissible}>
+          {t(phase === "error" || phase === "approved" ? "common.close"
+            : external && notice ? "keys.oauthCloseAnyway" : "common.cancel")}
+        </button>
+        {external && hasCliCommand && (
+          <button type="button" className="btn-primary" disabled={phase === "rechecking"} onClick={recheck}>
+            {phase === "rechecking" ? t("common.loading") : t("keys.oauthSignedIn")}
+          </button>
+        )}
+        {canSubmitCode && (
+          <button type="button" className="btn-primary" disabled={!code.trim()} onClick={submit}>
+            {t("keys.oauthSubmitCode")}
+          </button>
+        )}
+        {phase === "error" && <>
+          {provider.flow === "browser" && hasCliCommand && provider.cliRunnable !== false && (
+            <button type="button" className="btn-secondary" onClick={runInTerminal}>
+              {t("keys.oauthRunInTerminal")}
+            </button>
+          )}
+          <button type="button" className="btn-primary" onClick={() => { void start(); }}>
+            {t("keys.oauthRetry")}
+          </button>
+        </>}
+      </>}
     >
       {secondsLeft !== null && phase !== "approved" && phase !== "error" && (
         <p className={styles.cardHint}>{t("keys.oauthSessionExpires", { time: fmt(secondsLeft) })}</p>
@@ -302,11 +332,11 @@ export default function OAuthLoginModal({
             {hasCliCommand && (
               <div className={styles.cmdBlock}>
                 <code>{provider.cliCommand}</code>
-                <button className={styles.smallBtn} onClick={copyCommand}>
+                <button type="button" className="btn-subtle btn-sm" onClick={copyCommand}>
                   {copied ? t("keys.copied") : t("keys.copy")}
                 </button>
                 {provider.cliRunnable !== false && (
-                  <button className={styles.smallBtn} onClick={runInTerminal}>
+                  <button type="button" className="btn-secondary btn-sm" onClick={runInTerminal}>
                     {t("keys.oauthRunInTerminal")}
                   </button>
                 )}
@@ -317,25 +347,11 @@ export default function OAuthLoginModal({
               <p className={styles.cardHint}>{t("keys.oauthRemoteHint")}</p>
             )}
             {notice && <p className={styles.modalWarn}>{notice}</p>}
-            <div className={styles.modalFoot}>
-              {provider.docsUrl ? (
-                <a className={styles.getKey} href={provider.docsUrl} target="_blank" rel="noreferrer">
-                  {t("keys.oauthDocs", { name: provider.name })} ↗
-                </a>
-              ) : (
-                <span />
-              )}
-              <span className={styles.oauthActions}>
-                <button className={styles.smallBtn} onClick={close} disabled={!dismissible}>
-                  {notice ? t("keys.oauthCloseAnyway") : t("common.cancel")}
-                </button>
-                {hasCliCommand && (
-                  <button className={styles.smallBtn} disabled={phase === "rechecking"} onClick={recheck}>
-                    {phase === "rechecking" ? "…" : t("keys.oauthSignedIn")}
-                  </button>
-                )}
-              </span>
-            </div>
+            {provider.docsUrl && (
+              <a className={styles.getKey} href={provider.docsUrl} target="_blank" rel="noreferrer">
+                {t("keys.oauthDocs", { name: provider.name })} ↗
+              </a>
+            )}
           </>
         )}
 
@@ -357,16 +373,11 @@ export default function OAuthLoginModal({
                 if (e.key === "Enter") submit();
               }}
             />
-            <div className={styles.modalFoot}>
-              {session.authUrl && (
-                <a className={styles.getKey} href={session.authUrl} target="_blank" rel="noreferrer">
-                  {t("keys.oauthReopen")} ↗
-                </a>
-              )}
-              <button className={styles.smallBtn} disabled={!code.trim()} onClick={submit}>
-                {t("keys.oauthSubmitCode")}
-              </button>
-            </div>
+            {session.authUrl && (
+              <a className={styles.getKey} href={session.authUrl} target="_blank" rel="noreferrer">
+                {t("keys.oauthReopen")} ↗
+              </a>
+            )}
           </>
         )}
 
@@ -376,7 +387,7 @@ export default function OAuthLoginModal({
             <div className={styles.userCode}>
               <code>{session.userCode}</code>
               <button
-                className={styles.smallBtn}
+                type="button" className="btn-subtle btn-sm"
                 onClick={() => navigator.clipboard?.writeText(session.userCode || "")}
               >
                 {t("keys.copy")}
@@ -416,12 +427,6 @@ export default function OAuthLoginModal({
                     if (e.key === "Enter") submit();
                   }}
                 />
-                <div className={styles.modalFoot}>
-                  <span />
-                  <button className={styles.smallBtn} disabled={!code.trim()} onClick={submit}>
-                    {t("keys.oauthSubmitCode")}
-                  </button>
-                </div>
               </>
             ) : <p className="muted">{t("keys.oauthWaiting")}</p>}
           </>
@@ -430,38 +435,13 @@ export default function OAuthLoginModal({
         {phase === "choose" && (
           <ProviderLoginPicker backend={backend} providerId={provider.id} busy={false}
             onOAuth={(target) => { void start(target); }}
-            onApiKey={(target, key) => { void saveKey(target, key); }} />
+            onApiKey={(target, key) => { void saveKey(target, key); }} onCancel={close} />
         )}
 
         {phase === "approved" && <p className={styles.modalOk}>{t("keys.oauthApproved")}</p>}
 
         {phase === "error" && (
-          <>
-            <p className={styles.modalError}>{error || t("keys.oauthLoginFailed")}</p>
-            <div className={styles.modalFoot}>
-              <button className={styles.smallBtn} onClick={close}>
-                {t("common.close")}
-              </button>
-              {provider.flow === "browser" && hasCliCommand && provider.cliRunnable !== false && (
-                <button className={styles.smallBtn} onClick={runInTerminal}>
-                  {t("keys.oauthRunInTerminal")}
-                </button>
-              )}
-              <button className={styles.smallBtn} onClick={() => { void start(); }}>
-                {t("keys.oauthRetry")}
-              </button>
-            </div>
-          </>
-        )}
-
-        {/* external 那一支自带页脚（取消/我已登录），别再叠一行取消。 */}
-        {phase !== "error" && phase !== "approved" && phase !== "external" && phase !== "rechecking" && (
-          <div className={styles.modalFoot}>
-            <span />
-            <button className={styles.smallBtn} onClick={close} disabled={!dismissible}>
-              {t("common.cancel")}
-            </button>
-          </div>
+          <p className={styles.modalError}>{error || t("keys.oauthLoginFailed")}</p>
         )}
     </Modal>
   );

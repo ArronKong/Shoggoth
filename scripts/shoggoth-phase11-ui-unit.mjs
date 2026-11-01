@@ -293,7 +293,9 @@ async function compileClient() {
   const serviceSettings = fs.readFileSync(path.join(UI_ROOT, "src/pages/settings/ServiceSettings.tsx"), "utf8");
   const providerSetup = fs.readFileSync(path.join(UI_ROOT, "src/components/ShoggothProviderSetup.tsx"), "utf8");
   const agents = fs.readFileSync(path.join(UI_ROOT, "src/pages/AgentsPage.tsx"), "utf8");
-  const dashboard = fs.readFileSync(path.join(UI_ROOT, "src/pages/DashboardPage.tsx"), "utf8");
+  // Dashboard approvals and Run details live in their own modules.
+  const approvalRow = fs.readFileSync(path.join(UI_ROOT, "src/pages/dashboard/ApprovalRow.tsx"), "utf8");
+  const runDetailHook = fs.readFileSync(path.join(UI_ROOT, "src/pages/dashboard/useDashboardRunDetail.ts"), "utf8");
   const notifier = fs.readFileSync(path.join(UI_ROOT, "src/components/Notifier.tsx"), "utf8");
   const types = fs.readFileSync(path.join(UI_ROOT, "src/types.ts"), "utf8");
   const zh = fs.readFileSync(path.join(UI_ROOT, "src/i18n/locales/zh-CN.ts"), "utf8");
@@ -317,23 +319,22 @@ async function compileClient() {
   const beforeQuitRegistryStop = uiEntry.indexOf("appBackendRegistry.stop", beforeQuitStart);
   const beforeQuitPrefix = uiEntry.slice(beforeQuitStart, beforeQuitRegistryStop);
 
-  const compileReload = (shoggothBackend, hostCanReload, readConfig = () => ({ disabledBackends: [] })) => Function(
+  // A disconnected built-in service keeps running and is only hidden by the
+  // registry, so reload restarts it through registry.start(<its id>).
+  const compileReload = (shoggothBackend, hostCanReload, start = () => shoggothBackend.start()) => Function(
     "nativeBackends",
     "hostCanReload",
-    "readConfig",
     "registry",
+    "shoggothBackend",
     `"use strict";\n${reloadBody}\nreturn reloadNativeBackends;`,
-  )([shoggothBackend], hostCanReload, readConfig, { start: () => shoggothBackend.start() });
+  )([shoggothBackend], hostCanReload, { start }, shoggothBackend);
   {
-    let disabledBackends = [];
-    let starts = 0;
-    const reload = compileReload({
-      id: "codex",
-      async stop() { disabledBackends = ["codex"]; },
-      async start() { starts += 1; },
-    }, () => true, () => ({ disabledBackends }));
+    const started = [];
+    let stops = 0;
+    const reload = compileReload({ id: "shoggoth", async stop() { stops += 1; }, async start() {} },
+      () => true, (id) => { started.push(id); });
     await reload();
-    check("后台恢复不得重连在 stop 期间被用户断开的 CLI", starts === 0);
+    check("后台恢复停掉旧适配器后只经 registry 重启内置 Shoggoth", stops === 1 && JSON.stringify(started) === '["shoggoth"]');
   }
   {
     let backgroundCurrent = true;
@@ -412,7 +413,7 @@ async function compileClient() {
     "退出 generation fence 阻止迟到后台恢复重新启动 Shoggoth",
     /const startupGeneration\s*=\s*\+\+hostGeneration/.test(uiEntry)
       && /const hostCanReload\s*=\s*\(\)\s*=>\s*!hostStopping\s*&&\s*startupGeneration\s*===\s*hostGeneration/.test(uiEntry)
-      && /if \(!canReload\(\)\) return;[\s\S]*?await Promise\.all\(nativeBackends\.map\(\(backend\)\s*=>\s*backend\.stop\(\)\)\);[\s\S]*?if \(!canReload\(\)\) return;[\s\S]*?await Promise\.all\(nativeBackends\.filter\([\s\S]*?\.map\(\(backend\)\s*=>\s*registry\.start\(backend\.id\)\)\);/.test(reloadBody)
+      && /if \(!canReload\(\)\) return;[\s\S]*?await Promise\.all\(nativeBackends\.map\(\(backend\)\s*=>\s*backend\.stop\(\)\)\);[\s\S]*?if \(!canReload\(\)\) return;[\s\S]*?await registry\.start\(shoggothBackend\.id\);/.test(reloadBody)
       && /if \(!hostCanReload\(\)\) return;/.test(backgroundContinuationBody)
       && /hostStopping\s*=\s*true/.test(beforeQuitPrefix)
       && /hostGeneration\s*\+=\s*1/.test(beforeQuitPrefix),
@@ -421,15 +422,15 @@ async function compileClient() {
     "后台自动启动失败只记录固定诊断且返回 null",
     /const reportBackgroundStartupFailure = \(\) => \{\s*console\.error\(["']\[shoggoth\] background service auto-start unavailable["']\);\s*return null;\s*\};/.test(uiEntry),
   );
-  check("账号迁出后设置只管理后台状态，不再加载 Provider", !/getShoggothProviders|setShoggothProviders|RuntimeAccountsPanel/.test(settings)
-    && /getShoggothProviders/.test(fs.readFileSync(path.join(UI_ROOT, "src/pages/models/ModelAccounts.tsx"), "utf8")));
+  check("账号与模型迁出后设置只管理后台状态，助理页加载 Provider", !/getShoggothProviders|setShoggothProviders|RuntimeAccountsPanel/.test(settings)
+    && /getShoggothProviders/.test(agents));
   check("后台动作返回失败后仍回读权威状态并保留启动/重连出口", /catch[\s\S]*getShoggothProductStatus\(\)[\s\S]*setShoggothStatus/.test(backgroundAction));
   check("后台启动响应的瞬时锁定状态会有界回读并自动收敛", /SHOGGOTH_POST_START_REFRESH_DELAYS_MS/.test(settings) && /for\s*\(const delayMs of SHOGGOTH_POST_START_REFRESH_DELAYS_MS\)/.test(backgroundAction));
   check("Provider 列表失败不会遮住后台启动修复状态", !/Promise\.all\(\[getShoggothProductStatus\(\), getShoggothProviders\(\)\]\)/.test(settings));
   check("所有后端的断开按钮遵循同一描述契约", /descriptor\.disconnectable/.test(settings) && /isDisconnectable\(b\)/.test(settings));
   check("无权威发布源的 Shoggoth 只显示当前版本而不伪造官方比较", /comparisonSupported\s*!==\s*false/.test(settings) && /showVersionComparison/.test(settings));
-  check("Dashboard 审批可响应并刷新持久状态", /respondBackendPrompt/.test(dashboard) && /approvalResponding/.test(dashboard));
-  check("Dashboard 能读取原生通用 Run 详情", /getBackendRunDetail/.test(dashboard) && /backendRunDetail/.test(dashboard));
+  check("Dashboard 审批可响应并刷新持久状态", /respondBackendPrompt/.test(approvalRow) && /await onResponded\(\)/.test(approvalRow));
+  check("Dashboard 能读取原生通用 Run 详情", /getBackendRunDetail/.test(runDetailHook) && /BackendRunDetail/.test(runDetailHook));
   check("Notifier 聚合原生看板且保留逐后端失败隔离", /kanbanBackends/.test(notifier) && /if \(!board\) continue/.test(notifier));
   check("安全 DTO 类型不含凭据存储字段", /interface ShoggothProviderSummary/.test(types) && !/interface ShoggothProviderSummary[^}]*credentialRef/s.test(types) && !/interface ShoggothProviderSummary[^}]*headers/s.test(types));
   check("ChatGPT 模型只能从 authority 目录选择而非自由文本猜测", /getShoggothChatGptModels/.test(providerSetup) && /<Select\s+value=\{model\}/.test(providerSetup) && !/useState\(["']gpt-5["']\)/.test(providerSetup));

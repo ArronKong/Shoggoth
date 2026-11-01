@@ -12,12 +12,16 @@ const { CodexRuntimeHost } = require("../app/agent-service/codex-runtime-host");
 const { CodexRuntimeAdapter } = require("../app/agent-service/codex-runtime-adapter");
 const { CODEX_APP_SERVER_ARGS, resolveCodexRuntimeLayout, buildCodexSpawnEnv } = require("../app/agent-service/codex-runtime-paths");
 const { resolveServicePaths } = require("../app/agent-service/paths");
+const { contextFixture } = require("./fixtures/shoggoth-context-fixture.cjs");
+const { conversationContextBudget } = require("../app/agent-service/conversation-context-budget");
 
 const root = path.resolve(__dirname, "..");
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-context-regression-"));
 const home = path.join(scratch, "codex-home");
 fs.mkdirSync(home);
 const binding = { runtime: "codex", runtimeProfileId: "context-regression", runtimeAccountId: "shoggoth-internal-codex-default-v1" };
+// The built-in Harness names every thread's source (codex-session-provider).
+const SOURCE = Object.freeze({ kind: "custom-responses", configId: "shoggoth_0000000000000000" });
 const captures = [];
 let host;
 let serial = 0;
@@ -79,7 +83,8 @@ async function runtime() {
     }),
     spawnProcess(command, args, options) {
       assert.equal(options.env.https_proxy, "http://127.0.0.1:7897");
-      assert.equal(options.env.NO_PROXY, "127.0.0.1,localhost");
+      // Every loopback form bypasses the proxy (codex-runtime-paths buildCodexSpawnEnv).
+      assert.equal(options.env.NO_PROXY, "127.0.0.1,localhost,::1");
       assert.equal(options.env.no_proxy, options.env.NO_PROXY);
       assert.equal(options.env.SECRET_CANARY, undefined);
       assert.equal(options.env.CODEX_HOME, home);
@@ -132,24 +137,24 @@ async function turn(handle, id, prompt, context, turnDeveloperInstructions) {
   }
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const largeContext = process.argv.includes("--large-context");
-  fs.writeFileSync(path.join(home, "config.toml"), `model = "gpt-5.6-sol"\nmodel_provider = "fixture"\n${largeContext ? "model_context_window = 1050000\nmodel_auto_compact_token_limit = 900000\n" : ""}[model_providers.fixture]\nname = "Local fixture"\nbase_url = "http://127.0.0.1:${server.address().port}/v1"\nwire_api = "responses"\nsupports_websockets = false\n`);
+  fs.writeFileSync(path.join(home, "config.toml"), `model = "gpt-5.6-sol"\nmodel_provider = "${SOURCE.configId}"\n${largeContext ? "model_context_window = 1050000\nmodel_auto_compact_token_limit = 900000\n" : ""}[model_providers.${SOURCE.configId}]\nname = "Local fixture"\nbase_url = "http://127.0.0.1:${server.address().port}/v1"\nwire_api = "responses"\nsupports_websockets = false\n`);
   let handle = await runtime();
-  const first = await handle.sessionStart({ cwd: scratch, developerInstructions: policy("OLD"),
+  const first = await handle.sessionStart({ modelProvider: SOURCE, cwd: scratch, developerInstructions: policy("OLD"),
     permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
   const initial = await turn(handle, first.session.id, "Remember this first user message.");
   await host.stop();
   handle = await runtime();
-  await handle.sessionResume({ sessionId: first.session.id, cwd: scratch, developerInstructions: policy("NEW") });
+  await handle.sessionResume({ modelProvider: SOURCE, sessionId: first.session.id, cwd: scratch, developerInstructions: policy("NEW") });
   const resumed = await turn(handle, first.session.id, "Second user message.");
   const dev = developerTexts(resumed);
   assert.match(dev.at(-1), /SHOGGOTH_POLICY_NEW/u);
   assert.match(dev.at(-1), /supersede earlier Shoggoth developer instructions/u);
   assert.match(JSON.stringify(resumed.input), /Remember this first user message/u);
-  await handle.sessionResume({ sessionId: first.session.id, developerInstructions: policy("NEW") });
+  await handle.sessionResume({ modelProvider: SOURCE, sessionId: first.session.id, developerInstructions: policy("NEW") });
   const next = await turn(handle, first.session.id, "Third user message.", undefined, "CURRENT_RUN_3: retain long-tail tool capabilities.");
   assert.equal(developerTexts(next).filter(text => text.includes("SHOGGOTH_POLICY_NEW")).length, 1);
   assert.match(developerTexts(next).at(-1), /CURRENT_RUN_3/u);
-  await handle.sessionResume({ sessionId: first.session.id, developerInstructions: policy("NEW") });
+  await handle.sessionResume({ modelProvider: SOURCE, sessionId: first.session.id, developerInstructions: policy("NEW") });
   const fourth = await turn(handle, first.session.id, "Fourth user message.", undefined, "CURRENT_RUN_4: this supersedes current Run data.");
   assert.equal(developerTexts(fourth).filter(text => text.includes("SHOGGOTH_POLICY_NEW")).length, 1);
   assert.match(developerTexts(fourth).at(-1), /CURRENT_RUN_4/u);
@@ -157,21 +162,52 @@ async function turn(handle, id, prompt, context, turnDeveloperInstructions) {
   // This synthetic provider may advertise no tools. Preserve exactly the
   // native configuration of the initial request rather than inventing tools.
   for (const key of ["tools", "tool_choice", "parallel_tool_calls"]) assert.deepEqual(fourth[key], initial[key]);
-  const fresh = await handle.sessionStart({ cwd: scratch, developerInstructions: policy("FRESH") });
+  const fresh = await handle.sessionStart({ modelProvider: SOURCE, cwd: scratch, developerInstructions: policy("FRESH") });
   const freshBody = await turn(handle, fresh.session.id, "Fresh user message.");
   assert.equal(JSON.stringify(freshBody).includes("SHOGGOTH_POLICY_NEW"), false);
   assert.equal(developerTexts(freshBody).filter(text => text.includes("SHOGGOTH_POLICY_FRESH")).length, 1);
-  const concurrent = await Promise.all(["A", "B"].map(label => handle.sessionStart({ cwd: scratch,
+  const concurrent = await Promise.all(["A", "B"].map(label => handle.sessionStart({ modelProvider: SOURCE, cwd: scratch,
     developerInstructions: policy(`CONCURRENT_${label}`) })));
   parallel = true;
   await Promise.all(concurrent.map(({ session }, index) => turn(handle, session.id, `Parallel request ${index}`)));
   assert.equal(concurrentRequests, 2, "the same Codex host must submit both sessions before either response completes");
+  const notices = contextFixture();
+  try {
+    const reminderId = `notice-${"a".repeat(64)}`;
+    const reminder = { id: `proactive-${reminderId}`, kind: "assistant", runId: null, contextExcluded: true,
+      content: { text: "WEEKEND_NOTICE: visit a new shop. [Weekend idea](#/inspirations?id=weekend-idea)",
+        proactiveNotice: { id: reminderId, kind: "inspiration", title: "SparkNotes", items: [
+          { id: "weekend-idea", title: "Weekend idea", href: "/inspirations?id=weekend-idea" },
+        ] } } };
+    notices.append(reminder);
+    notices.append({ id: "delete-request", kind: "user", content: { text: "Delete this idea.", operationId: "delete-request" } });
+    const compiled = freshSession => notices.compiler.compile({ profile: notices.profile, run: notices.run,
+      transcriptSessionId: notices.transcriptSessionId, contextLifecycleV1: true, freshSession,
+      nativeSessionId: freshSession ? null : "existing-thread", requestBudget: conversationContextBudget(200000),
+      currentOperationId: "delete-request", currentPrompt: "Delete this idea." });
+    const started = await handle.sessionStart({ modelProvider: SOURCE, cwd: scratch, developerInstructions: policy("NOTICES") });
+    const firstNotice = await turn(handle, started.session.id, "Delete this idea.", compiled(true).dynamicContext);
+    assert.match(JSON.stringify(firstNotice.input), /WEEKEND_NOTICE.*weekend-idea/u);
+    const after = `notice-${"b".repeat(64)}`;
+    notices.append({ ...reminder, id: `proactive-${after}`, contextExcluded: false,
+      content: { ...reminder.content, text: "NEW_HEARTBEAT_NOTICE arrived after the native thread started.",
+        proactiveNotice: { ...reminder.content.proactiveNotice, id: after, kind: "heartbeat" } } });
+    notices.append({ id: "next-question", kind: "user", content: { text: "What did you just remind me about?", operationId: "next-question" } });
+    const continuing = notices.compiler.compile({ profile: notices.profile, run: notices.run,
+      transcriptSessionId: notices.transcriptSessionId, contextLifecycleV1: true, freshSession: false,
+      nativeSessionId: started.session.id, requestBudget: conversationContextBudget(200000), currentOperationId: "next-question" });
+    const secondNotice = await turn(handle, started.session.id, "What did you just remind me about?", continuing.dynamicContextWithoutTranscript);
+    assert.match(JSON.stringify(secondNotice.input), /NEW_HEARTBEAT_NOTICE/u);
+    console.log("PASS real Codex: legacy reminder text and idea link reach first model input; a later publication reaches the continuing native thread");
+  } finally { notices.cleanup(); }
   if (largeContext) {
     const original = "ORIGINAL_START\n" + "ordinary context words ".repeat(100000) + "\nORIGINAL_END";
     assert.ok(Buffer.byteLength(original) > 2 * 1024 * 1024);
-    const large = await handle.sessionStart({ cwd: scratch, developerInstructions: policy("LARGE_CONTEXT") });
+    const large = await handle.sessionStart({ modelProvider: SOURCE, cwd: scratch, developerInstructions: policy("LARGE_CONTEXT") });
     const before = captures.length;
-    await assert.rejects(turn(handle, large.session.id, "Confirm receipt of the supplied data.", original), { code: "RPC_REMOTE_ERROR", rpcCode: -32602 });
+    // Context is injected as history items (codex-runtime-adapter turnStart), so
+    // the CLI's 1 MiB guard applies to the turn's own input.
+    await assert.rejects(turn(handle, large.session.id, original), { code: "RPC_REMOTE_ERROR", rpcCode: -32602 });
     assert.equal(captures.length, before, "the CLI rejects an oversized user input before model execution");
     const fitting = "ORIGINAL_START\n" + "ordinary context words ".repeat(40000) + "\nORIGINAL_END";
     const received = await turn(handle, large.session.id, "Confirm receipt of the supplied data.", fitting);

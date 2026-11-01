@@ -1,0 +1,72 @@
+.notice {
+  --notice-accent: light-dark(#607184, #b8c9dd);
+  --notice-action-bg: light-dark(#edf0f3, #343d48);
+  --notice-action-hover: light-dark(#e2e7ed, #414d5a);
+  flex: none;
+  width: 340px;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 16px;
+  border: 0;
+  border-radius: 16px;
+  background: light-dark(#fffefd, #242429);
+  color: light-dark(#2f2b25, #f2eee7);
+  box-shadow: var(--ui-shadow-card);
+  text-align: start;
+}
+.notice[data-tone="warning"] {
+  --notice-accent: light-dark(#a66a12, #e8b761);
+  --notice-action-bg: light-dark(#f4ead6, #463d2c);
+  --notice-action-hover: light-dark(#ebddc0, #54462f);
+}
+.notice[data-tone="error"] {
+  --notice-accent: light-dark(#aa4b48, #efaaa5);
+  --notice-action-bg: light-dark(#f7e8e6, #48302f);
+  --notice-action-hover: light-dark(#efdbd8, #573b39);
+}
+.heading { display: flex; align-items: center; gap: 8px; }
+.heading svg { flex: none; color: var(--notice-accent); }
+.heading strong { font-size: 14px; line-height: 20px; font-weight: 600; }
+.description {
+  margin: 8px 0 0;
+  color: light-dark(#71695e, #c0b9af);
+  font-size: 12px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+.actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--notice-action-bg);
+  color: var(--notice-accent);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: normal;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+.actions button svg { flex: none; }
+.actions button:hover:not(:disabled) { background: var(--notice-action-hover); }
+.actions button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+.actions button:disabled { opacity: .65; cursor: default; }
+.actions button[aria-busy="true"] svg { animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-height: 680px) {
+  .notice { padding: 12px; }
+  .description { margin-top: 6px; line-height: 18px; }
+  .actions { margin-top: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .actions button { transition: none; }
+  .actions button[aria-busy="true"] svg { animation: none; }
+}

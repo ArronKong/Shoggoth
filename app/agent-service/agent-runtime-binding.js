@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const { runtimeBinding } = require("./runtime-adapter");
 const { serviceError } = require("./security");
+const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 
 const MAX_AGENT_RUNTIME_BINDINGS = 128;
 const MAX_BINDING_OPERATIONS = 2048;
@@ -88,6 +89,13 @@ function projectProfile(profile, selectedId = profile.defaultBindingId) {
   return { ...view, runtime: selected.runtime, runtimeProfileId: selected.runtimeProfileId,
     runtimeAccountId: selected.runtimeAccountId };
 }
+// Agent model settings belong to the bundled Harness. Native Codex keeps its
+// own model/provider in CODEX_HOME; only runtime views drop the Harness default,
+// so saving an Agent's management projection cannot erase that default.
+function runtimeModelProfile(profile) {
+  return profile.runtime === "codex" && profile.runtimeAccountId === NATIVE_CODEX_RUNTIME_ACCOUNT_ID
+    ? { ...profile, providerRef: null, defaultModel: null } : profile;
+}
 function profileToDisk(profile) {
   return Object.fromEntries(Object.entries(profile).filter(([field]) => !PROJECTED_RUNTIME_FIELDS.includes(field)
     && field !== "selectedBindingId"));
@@ -99,4 +107,4 @@ function profileWithoutBindingState(profile) {
 
 module.exports = { BINDING_FIELDS, BINDING_STATE_FIELDS, PROJECTED_RUNTIME_FIELDS, MAX_AGENT_RUNTIME_BINDINGS, MAX_BINDING_OPERATIONS,
   bindingError, bindingId, runtimeProfileIdForBinding, stableUuid, validateAgentRuntimeBinding, validateBindingState,
-  withInitialBinding, projectProfile, profileToDisk, profileWithoutBindingState };
+  withInitialBinding, projectProfile, runtimeModelProfile, profileToDisk, profileWithoutBindingState };

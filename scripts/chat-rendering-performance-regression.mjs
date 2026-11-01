@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,9 +25,9 @@ try {
       "process.env.NODE_ENV": '"production"',
       __CHAT_PERF_WITH_TOOLS__: String(process.env.CHAT_PERF_WITH_TOOLS === "1"),
     },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" }, outfile: bundle,
+    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: bundle,
     nodePaths: [path.join(uiRoot, "node_modules")], logLevel: "silent",
-    plugins: [{ name: "markdown-work", setup(builder) {
+    plugins: [viteArtworkFixturePlugin(root), { name: "markdown-work", setup(builder) {
       builder.onLoad({ filter: /\/lib\/markdown\.ts$/ }, ({ path: file }) => ({
         contents: fs.readFileSync(file, "utf8").replace(
           /export function toSanitizedMarkdownHtml\(markdown: string[^)]*\): string \{/,
@@ -61,11 +62,11 @@ app.whenReady().then(async()=>{
   const w=new BrowserWindow({show:false,width:1440,height:1000,webPreferences:{backgroundThrottling:false}});
   let passed=false;
   try {
-    await w.loadFile(${JSON.stringify(page)});
+    await w.loadFile(${JSON.stringify(page)},{hash:"/chat"});
     const result=await w.webContents.executeJavaScript('window.baseline=${Boolean(sourceRef) || process.env.CHAT_PERF_BASELINE === "1"};window.archiveAtTop=${process.env.CHAT_PERF_ARCHIVE_AT_TOP === "1"};window.runFixture()');
     console.log(JSON.stringify(result));
     passed=true;
-  } catch(error) {console.error(error);}
+  } catch(error) {console.error(error);console.error(await w.webContents.executeJavaScript('JSON.stringify({error:window.fixtureError,text:document.body.innerText.slice(-3000),hash:location.hash})'));}
   finally {w.destroy();app.exit(passed?0:1);}
 }).catch(error=>{console.error(error);app.exit(1)});`);
   const result = spawnSync(path.join(root, "node_modules/.bin/electron"), [main], {

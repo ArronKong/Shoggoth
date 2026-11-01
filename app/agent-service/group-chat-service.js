@@ -35,7 +35,7 @@ function publicMember(member) {
 function publicGroupView(view) {
   return {
     ownerScope: view.ownerScope,
-    group: view.group,
+    group: { ...view.group, messageRevision: view.group.messageRevision ?? 0 },
     currentOwnerId: view.currentOwnerId,
     members: view.members.map(publicMember),
     round: view.round,
@@ -120,7 +120,7 @@ class GroupChatService {
     if (view.group.status !== "active") return view;
     // 正在发言 / 在后台干活的成员：带上它们的草稿与活动（只在内存，不进群日志）。
     view.activeTurns = view.activeTurns.map((turn) => ({ ...turn, draft: this.driver.draftFor?.(turn.opportunityId) ?? null,
-      activity: this.driver.activityFor?.(turn.opportunityId) ?? null }));
+      activity: this.driver.activityFor?.(turn.opportunityId) ?? null, individualMessages: true }));
     return view;
   }
 
@@ -190,7 +190,21 @@ class GroupChatService {
         messages.push(message); bytes += size;
       }
       if (params.afterSeq === null) messages.reverse();
-      return { messages, hasMore: result.hasMore || messages.length < rows.length };
+      const history = { messages, hasMore: result.hasMore || messages.length < rows.length,
+        ...(result.revision === undefined ? {} : { revision: result.revision }) };
+      if (params.afterRevision !== undefined) {
+        const updates = [];
+        for (const row of result.updates ?? []) {
+          const message = publicMessage(row), size = Buffer.byteLength(JSON.stringify(message)) + 1;
+          if (bytes + size > MAX_HISTORY_BYTES) break;
+          updates.push(message); bytes += size;
+        }
+        history.updates = updates;
+        history.revision = params.afterSeq === null ? result.revision
+          : updates.at(-1)?.revision ?? params.afterRevision;
+        history.hasMoreUpdates = result.hasMoreUpdates || updates.length < (result.updates?.length ?? 0);
+      }
+      return history;
     }
     if (method === "group.message.read") return this.store.readMessage(params);
     if (method === "group.search") return require("./group-message-search").searchGroupMessages(this.store, params);

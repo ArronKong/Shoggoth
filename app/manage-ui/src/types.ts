@@ -104,6 +104,7 @@ export interface UnifiedCronJob {
   enabled: boolean;
   state?: string;
   stateLabel?: string;
+  connectorMigrationRequired?: boolean;
   actions?: { edit?: boolean; toggle?: boolean; delete?: boolean; run?: boolean; reason?: "system-managed" };
   createdAt?: number | null; // epoch ms; calendar hides occurrences before this
   lastRunAt?: number | null;
@@ -323,6 +324,7 @@ export interface UnifiedModel {
 // 聊天面能力（GET /__api/chat/capabilities?agent=）：composer 按此渲染附件
 // accept 列表与大小预检。image 是兼容底线；pdf/file 由真实可传输的后端声明。
 export interface ChatCapabilities {
+  runtimeFeatures?: RuntimeFeatures;
   nativeUiArtifactsV1?: boolean;
   attachments: {
     image?: { maxBytes?: number };
@@ -357,6 +359,25 @@ export interface ChatCapabilities {
   // 后端未就绪的降级信号（Hermes dashboard 冷启动竞态）：这份能力是**临时**的
   // image-only，UI 不得当终态缓存，须重取，否则命令/附件会永久停在退化态。
   notReady?: boolean;
+}
+
+export type ChatSecretDisclosure = { id: string; recipient: "OpenAI"; expiresAt: number };
+export type LocalSpeechStatus = { authorized: boolean; onDevice: boolean; status: "authorized" | "denied" | "restricted" | "not-determined" | "unavailable" };
+
+export interface ChatSecretReference {
+  reference: string;
+  kind: "password" | "api_key" | "token" | "private_key" | "secret";
+  expiresAt: number | null;
+  available: boolean;
+}
+
+export interface ChatSecretResult {
+  receiptId: string;
+  tool: string;
+  status: "dispatching" | "unknown" | "completed";
+  at: number;
+  expiresAt: number;
+  originalAvailable: boolean;
 }
 
 export interface ChatPermissionModeOption {
@@ -456,6 +477,8 @@ export interface ModelChangeCapabilities {
   providerDirectory?: boolean;
   /** 授权 profile 的读取、替换 Key 和删除是否由此后端支持。静态能力，缺省禁用。 */
   manageAuthProfiles?: boolean;
+  /** 模型目录完全来自账号登录与自定义端点，没有可编辑的目录条目。静态能力。 */
+  providerManagedCatalog?: boolean;
   fields?: Record<string, boolean>;
   blockers?: string[];
   configWrite?: ModelConfigWriteCapabilities;
@@ -1173,6 +1196,7 @@ export interface UnifiedSkill {
   ineligibleReason?: string | null;
   profileId?: string;
   agentId?: string;
+  agentName?: string;
   registryRevision?: string;
   registryVersion?: number;
   profileRevision?: number;
@@ -2564,11 +2588,13 @@ export interface NativeMemoryLocalProviderConfig {
   localService: { command: string; args?: string[]; cwd?: string; healthUrl?: string;
     readyTimeoutMs?: number; idleStopMs?: number };
 }
+export type NativeMemoryTextModel = { source: 'agent-default' | 'local' }
+  | { source: 'binding'; profileId: string; bindingId: string; model?: string };
 export interface NativeMemorySettings {
   models?: { providers?: { 'llama-cpp'?: NativeMemoryLocalProviderConfig } };
-  memory?: { search?: NativeMemorySearchConfig };
+  memory?: { search?: NativeMemorySearchConfig; textModel?: NativeMemoryTextModel };
   agents?: {
-    entries?: Record<string, { memory?: { search?: NativeMemorySearchConfig }; models?: Record<string, { alias?: string }> }>;
+    entries?: Record<string, { memory?: { search?: NativeMemorySearchConfig; textModel?: NativeMemoryTextModel }; models?: Record<string, { alias?: string }> }>;
     defaults?: { userTimezone?: string; models?: Record<string, { alias?: string }>; compaction?: { memoryFlush?: {
       enabled?: boolean; model?: string; softThresholdTokens?: number; forceFlushTranscriptBytes?: number | string;
     } } };
@@ -2588,6 +2614,8 @@ export interface NativeMemorySharingContext {
 }
 export interface NativeMemoryContext {
   owner: 'shoggoth-memory-core' | 'legacy';
+  textModelRoutes?: Array<{ profileId: string; bindingId: string; name: string; runtime: string;
+    accountName: string; defaultModel: string | null; supported: boolean }>;
   agents: Array<{ profileId: string; agentId: string; name: string }>;
 }
 export type MemoryProviderOwnerScope = { readonly kind: 'global' } | { readonly kind: 'profile'; readonly profileId: string };
@@ -2664,7 +2692,18 @@ export interface BackendDescriptor {
   };
 }
 
+export interface RuntimeFeatures {
+  attachments: ("image" | "pdf" | "file")[];
+  resume: "supported" | "unsupported" | "unverified";
+  compact: "supported" | "unsupported" | "unverified";
+  steer: "supported" | "unsupported" | "unverified";
+}
+
 export interface RuntimeStatus {
+  /** Extension inventory has Binding controls, without a separate installer or login action. */
+  toggleable?: boolean;
+  authentication?: "authenticated" | "unauthenticated" | "unverified";
+  availabilityCode?: string | null;
   backendId: string;
   runtime: string;
   name: string;
@@ -2676,6 +2715,7 @@ export interface RuntimeStatus {
   installsOnSignIn?: boolean;
   serviceConnected: boolean;
   readiness?: "ready" | "auth-required" | "unverified" | "incompatible";
+  features?: RuntimeFeatures | null;
 }
 
 export type ServiceRecoveryCode = "SERVICE_RECOVERY_REQUIRED";
@@ -2778,6 +2818,8 @@ export interface DashboardRunEntry {
   model?: string;
   sessionKey?: string;
   runId?: string;
+  /** Backend-proven alternative execution IDs, scoped to this backend and job. */
+  runIdAliases?: string[];
   /** true = 由 job 末次状态合成（无 per-run 记录），弹窗据此隐藏「查看全文」。 */
   synthesized?: boolean;
 }
@@ -2806,7 +2848,7 @@ export interface InteractiveOptionV1 {
 
 export interface InteractiveFieldV1 {
   id: string;
-  type: "text" | "choice";
+  type: "text" | "choice" | "choice_or_text";
   label: string;
   description: string;
   required: boolean;
@@ -3051,6 +3093,8 @@ export interface SessionRuntimeSnapshot {
   bindingId: string;
   runtime: string;
   model: string | null;
+  /** Source of the selected model when the Binding offers several (absent = Agent default). */
+  modelProviderRef?: string;
   contextUsage: RuntimeContextUsage | null;
   candidates: Array<{ bindingId: string; support: { supported: true } | { supported: false; code: string };
     adjustments: { clearModelOverride: boolean; permissionMode: string | null } }>;
@@ -3062,6 +3106,8 @@ export interface SessionRuntimeModel extends UnifiedModel {
   runtime: string;
   runtimeName: string;
   isDefault: boolean;
+  /** Opaque source of this choice when the Binding offers several; echoed on selection. */
+  modelProviderRef?: string;
 }
 export interface SessionRuntimeModels {
   selection: SessionRuntimeSnapshot;
@@ -3447,6 +3493,7 @@ export interface GroupChat {
   directoryRevision: number;
   controlEpoch: number;
   lastSeq: number;
+  messageRevision?: number;
 }
 
 /** 群聊运行诊断：只有计数与版本，不含消息正文。 */
@@ -3479,12 +3526,13 @@ export interface GroupActivityTool {
 export interface GroupActivity {
   groupId: string; discussionId: string | null; memberId: string; opportunityId: string | null;
   taskId: string | null; attemptId: string | null; runId: string | null; executionGeneration: string | null;
-  phase: "preparing" | "queued" | "running" | "tool" | "text" | "waiting_approval" | "waiting_input" |
+  phase: "preparing" | "queued" | "running" | "retrying" | "tool" | "text" | "waiting_approval" | "waiting_input" |
     "compacting" | "compacted" | "stopping" | "reconciling" | "completed" | "failed" | "cancelled";
   title: string; eventSeq: number; streamGeneration: string | null; observedAt: number | null;
   lastProgressAt: number | null; tool: GroupActivityTool | null; recentTools: GroupActivityTool[];
   /** observedAt is the first observation of this status; retries only advance lastObservedAt. */
   compaction?: { status: "compacting" | "compacted"; eventSeq: number; observedAt: number | null; lastObservedAt: number | null } | null;
+  textMessages?: Array<{ id: string; text: string; pending?: boolean; final?: boolean }>;
 }
 export interface GroupChatMemberCard {
   capabilities?: GroupParticipantCapabilities;
@@ -3579,9 +3627,13 @@ export interface GroupChatMessage {
   // 引用回复：被引用消息的序号、作者、摘录及附件元数据（随消息保存）。
   replyTo?: { seq: number; messageId: string; author: GroupChatAuthor; excerpt: string; attachments?: InspirationAttachment[] };
   // partial：成员让出发言位时已经写出的那段话；late：它在后台做完后交回的结果。
-  origin?: { opportunityId?: string; runId?: string | null; discussionId?: string; partial?: boolean; late?: boolean };
+  origin?: { opportunityId?: string; runId?: string | null; discussionId?: string; partial?: boolean; late?: boolean;
+    textItemId?: string; streaming?: boolean };
   createdAt: number;
+  revision?: number;
   responseMetadata?: ChatResponseMetadata;
+  /** Original public assistant-message boundaries, retained after the turn settles. */
+  replyMessages?: Array<{ id: string; text: string }>;
 }
 
 export interface GroupResultPage {
@@ -3605,7 +3657,7 @@ export interface GroupChatView {
   // 正在发言（floor）或已让出发言位、在后台干活（released）的成员。draft：草稿只在内存、不进群日志。
   activeTurns: Array<{ opportunityId: string; memberId: string; discussionId?: string; startedAt: number | null; inputThroughSeq?: number | null;
     floor: boolean; released: boolean; releasedReason: "working" | "approval" | "busy" | "timeout" | null; releasedAt?: number | null;
-    draft?: string | null; dispatchState?: "queued" | null; queueReason?: "execution_unconfirmed" | null;
+    draft?: string | null; individualMessages?: boolean; dispatchState?: "queued" | null; queueReason?: "execution_unconfirmed" | null;
     recovery?: GroupExecutionRecovery | null; stopping?: boolean; activity?: GroupActivity | null }>;
   queuedMemberIds: string[];
   // 成员在群里用的内部会话（网关形式的 key）；聊天页与通知据此排除它们。

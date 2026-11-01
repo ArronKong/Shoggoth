@@ -2,7 +2,6 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -12,6 +11,8 @@ const ROOT = path.resolve(__dirname, "..");
 const { createEventBuffer } = require(path.join(ROOT, "app", "agent-service", "event-buffer.js"));
 const {
   DEFAULT_AGENT_PROFILE_ID,
+  defaultAgentProfile,
+  snapshotChecksum,
   JsonlProductStore,
   STORE_SCHEMA_VERSION,
 } = require(path.join(ROOT, "app", "agent-service", "product-store.js"));
@@ -60,52 +61,6 @@ async function waitFor(predicate, timeoutMs = 1000) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.fail("等待条件超时");
-}
-
-function snapshotBody(snapshot) {
-  if (Object.prototype.hasOwnProperty.call(snapshot, "mcpToolCalls")) {
-    return {
-      schemaVersion: snapshot.schemaVersion,
-      lastSeq: snapshot.lastSeq,
-      modelProviders: snapshot.modelProviders,
-      agentProfiles: snapshot.agentProfiles,
-      workRuns: snapshot.workRuns,
-      runNotes: snapshot.runNotes,
-      mcpToolCalls: snapshot.mcpToolCalls,
-    };
-  }
-  if (Object.prototype.hasOwnProperty.call(snapshot, "runNotes")) {
-    return {
-      schemaVersion: snapshot.schemaVersion,
-      lastSeq: snapshot.lastSeq,
-      modelProviders: snapshot.modelProviders,
-      agentProfiles: snapshot.agentProfiles,
-      workRuns: snapshot.workRuns,
-      runNotes: snapshot.runNotes,
-    };
-  }
-  if (Object.prototype.hasOwnProperty.call(snapshot, "modelProviders")) {
-    return {
-      schemaVersion: snapshot.schemaVersion,
-      lastSeq: snapshot.lastSeq,
-      modelProviders: snapshot.modelProviders,
-      agentProfiles: snapshot.agentProfiles,
-      workRuns: snapshot.workRuns,
-    };
-  }
-  return {
-    schemaVersion: snapshot.schemaVersion,
-    lastSeq: snapshot.lastSeq,
-    agentProfiles: snapshot.agentProfiles,
-    workRuns: snapshot.workRuns,
-  };
-}
-
-function encodeSnapshot(snapshot) {
-  const candidate = { ...snapshot };
-  candidate.checksum = crypto.createHash("sha256")
-    .update(JSON.stringify(snapshotBody(candidate))).digest("hex");
-  return `${JSON.stringify(candidate)}\n`;
 }
 
 test("RED event ring 拒绝数组 accessor 且 getter 零执行", () => {
@@ -299,6 +254,15 @@ test("RED runtime server logger 对 hostile error descriptor 零读取且固定�
     onServerReady(server) { activeServer = server; },
   });
   await service.start();
+  const originalStop = service.stop;
+  let errorTriggeredStop;
+  let stopCalls = 0;
+  service.stop = (options) => {
+    stopCalls += 1;
+    errorTriggeredStop = Reflect.apply(originalStop, service, [options]);
+    return errorTriggeredStop;
+  };
+  let stopTimer;
   console.error = (...values) => { logged.push(values.map(String).join(" ")); };
   try {
     const hostile = {};
@@ -309,15 +273,30 @@ test("RED runtime server logger 对 hostile error descriptor 零读取且固定�
       },
     });
     activeServer.emit("error", hostile);
-    await waitFor(() => !fs.existsSync(paths.socketPath) && logged.length === 1);
+    assert.equal(stopCalls, 1, "原 error handler 必须自行发起 stop");
+    assert.equal(typeof errorTriggeredStop?.then, "function");
+    // Stop drains resources after server.close; embedding close alone permits
+    // two 2s waits. Observe its real Promise, not a 1s socket/log polling race.
+    // The 10s bound only detects a stuck fixture; it does not alter product grace.
+    await Promise.race([
+      errorTriggeredStop,
+      new Promise((_, reject) => {
+        stopTimer = setTimeout(() => reject(new Error("fixture Service stop did not settle")), 10_000);
+      }),
+    ]);
+    assert.equal(stopCalls, 1, "等待回执不得另行触发 stop");
+    assert.equal(fs.existsSync(paths.socketPath), false);
+    assert.equal(logged.length, 1);
   } finally {
+    clearTimeout(stopTimer);
+    service.stop = originalStop;
     console.error = originalConsoleError;
     await service.stop({ notify: false }).catch(() => {});
   }
   assert.equal(getterCalls, 0);
   assert.equal(logged.some((line) => line.includes("fixture-secret-canary")), false);
   assert.equal(logged.length, 1);
-  assert.match(logged[0], /SERVER_ERROR/u);
+  assert.deepEqual(logged, ["[agent-service] runtime server failure: SERVER_ERROR"]);
 });
 
 test("agent-service 生产 runtime reporter 不读 hostile code 且不记录原始错误", async () => {
@@ -358,6 +337,8 @@ test("bootstrap crash logger 对 hostile message getter 零读取并只输出固
   let getterCalls = 0;
   const logged = [];
   const exits = [];
+  const calls = [];
+  const diagnosticPaths = Object.freeze({ stateDir: "/fixture/bootstrap-private-state" });
   const hostile = {};
   Object.defineProperty(hostile, "message", {
     get() {
@@ -365,22 +346,37 @@ test("bootstrap crash logger 对 hostile message getter 零读取并只输出固
       return "fixture-secret-canary";
     },
   });
-  vm.runInNewContext(source, {
+  await vm.runInNewContext(source, {
     console: { error: (...values) => { logged.push(values.map(String).join(" ")); } },
     module: { exports: {} },
     exports: {},
     Promise,
     process: { exit: (code) => { exits.push(code); } },
     require(specifier) {
+      if (specifier === "./background-role-activation") return {
+        prepareBackgroundRoleActivation() { calls.push("activation"); },
+      };
       if (specifier === "./bootstrap-role") return {
-        main: () => Promise.reject(hostile),
-        bootstrapFailureCode: () => "BOOTSTRAP_FAILED",
+        main: () => { calls.push("main"); return Promise.reject(hostile); },
+        resolveTestRolePaths: () => { calls.push("paths"); return diagnosticPaths; },
+        bootstrapFailureCode: (error) => {
+          assert.equal(error, hostile);
+          calls.push("failure-code");
+          return "BOOTSTRAP_FAILED";
+        },
+      };
+      if (specifier === "./bootstrap-diagnostics") return {
+        recordBootstrapFailure(error, options) {
+          assert.equal(error, hostile);
+          assert.equal(options.paths, diagnosticPaths);
+          calls.push("diagnostic");
+        },
       };
       if (specifier === "electron") return { app: { exit: (code) => { exits.push(code); } } };
       throw new Error(`unexpected require: ${specifier}`);
     },
   }, { filename: "bootstrap.js" });
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["activation", "main", "paths", "diagnostic", "failure-code"]);
   assert.equal(getterCalls, 0);
   assert.equal(logged.some((line) => line.includes("fixture-secret-canary")), false);
   assert.deepEqual(logged, ["[bootstrap] startup failure: BOOTSTRAP_FAILED"]);
@@ -406,10 +402,43 @@ test("窗口 closed 回调不再读取已销毁 BrowserWindow 的 webContents", 
   assert.doesNotMatch(closedHandler, /windowForRecovery\.webContents/u);
 });
 
-test("应用退出期间 renderer 消失不再显示崩溃弹窗", () => {
+test("应用退出期间 renderer 消失不再显示崩溃弹窗", async () => {
   const source = fs.readFileSync(path.join(ROOT, "app", "ui-entry.js"), "utf8");
   assert.match(source, /let appIsQuitting = false;/u);
-  assert.match(source, /app\.on\("before-quit", async \(\) => \{\s*appIsQuitting = true;/u);
+  const quitMarker = 'app.on("before-quit", async () => {';
+  const quitStart = source.indexOf(quitMarker);
+  assert.notEqual(quitStart, -1);
+  assert.equal(source.indexOf(quitMarker, quitStart + quitMarker.length), -1);
+  const firstCleanup = source.indexOf("groupSendJournalIpc.dispose();", quitStart);
+  assert.ok(firstCleanup > quitStart);
+  const quitPrelude = source.slice(quitStart, firstCleanup);
+  assert.match(quitPrelude, /appIsQuitting = true;/u);
+  assert.doesNotMatch(quitPrelude, /\bawait\b/u, "退出标记必须在首次 await 前同步更新");
+  for (const scenario of [
+    { name: "OpenClaw gate pending", openclaw: true, hermes: false, complete: false, quitting: false },
+    { name: "Hermes gate pending", openclaw: false, hermes: true, complete: false, quitting: false },
+    { name: "both managed gates complete", openclaw: true, hermes: true, complete: true, quitting: true },
+    { name: "unmanaged hosts", openclaw: false, hermes: false, complete: false, quitting: true },
+    { name: "absent hosts", openclaw: null, hermes: null, complete: false, quitting: true },
+  ]) {
+    let handler;
+    const host = (managed) => managed === null ? null : { isManaged: () => managed };
+    const context = {
+      app: { on(name, callback) { assert.equal(name, "before-quit"); handler = callback; } },
+      managedOpenClawProductHost: host(scenario.openclaw),
+      managedHermesProductHost: host(scenario.hermes),
+      managedQuitGate: { complete: () => scenario.complete },
+      appIsQuitting: false,
+      cleanupCalls: 0,
+    };
+    // Execute the real handler prefix; stop before the first product cleanup.
+    vm.runInNewContext(`${quitPrelude}cleanupCalls += 1;\n});`, context);
+    assert.equal(typeof handler, "function");
+    const completion = handler();
+    assert.equal(context.appIsQuitting, scenario.quitting, scenario.name);
+    assert.equal(context.cleanupCalls, Number(scenario.quitting), scenario.name);
+    await completion;
+  }
   const goneStart = source.indexOf('webContents.on("render-process-gone"');
   const goneEnd = source.indexOf("\n  });", goneStart);
   assert.notEqual(goneStart, -1);
@@ -419,7 +448,21 @@ test("应用退出期间 renderer 消失不再显示崩溃弹窗", () => {
   const recoveryEnd = source.indexOf("\n  };", recoveryStart);
   assert.notEqual(recoveryStart, -1);
   assert.notEqual(recoveryEnd, -1);
-  assert.match(source.slice(recoveryStart, recoveryEnd), /if \(appIsQuitting\)/u);
+  const recoverySource = source.slice(recoveryStart, recoveryEnd + "\n  };".length);
+  assert.match(recoverySource, /if \(appIsQuitting\)/u);
+  for (const quitting of [false, true]) {
+    let closes = 0;
+    let dialogs = 0;
+    const window = { isDestroyed: () => false, close: () => { closes += 1; } };
+    vm.runInNewContext(`${recoverySource}\ncloseAfterRendererFailure();`, {
+      mainWindow: window,
+      windowForRecovery: window,
+      appIsQuitting: quitting,
+      dialog: { showErrorBox: () => { dialogs += 1; } },
+    });
+    assert.equal(closes, 1);
+    assert.equal(dialogs, quitting ? 0 : 1);
+  }
 });
 
 test("RED UI 不把 renderer console message/source 原样写入主进程日志", () => {
@@ -438,47 +481,80 @@ test("UI host 边界日志不转发依赖错误、路径或 dev URL 原文", () 
   ]) assert.doesNotMatch(source, unsafe);
 });
 
-test("旧版 snapshot close fault 保留原文件，可重开并迁移到当前 schema", () => {
-  for (const schemaVersion of [1, 2, 3, 4]) {
-    const paths = fixturePaths(`shoggoth-phase12-migrate-v${schemaVersion}-`);
+test("旧版与未来版 snapshot 拒绝且原 snapshot/event log 不变", () => {
+  for (const schemaVersion of [1, 2, 3, 4, STORE_SCHEMA_VERSION - 1, STORE_SCHEMA_VERSION + 1]) {
+    const paths = fixturePaths(`shoggoth-phase12-reject-v${schemaVersion}-`);
     const initial = new JsonlProductStore({ paths, now: () => 100 });
     initial.open();
     initial.close();
     const snapshot = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
     snapshot.schemaVersion = schemaVersion;
-    delete snapshot.runtimeAccounts;
-    delete snapshot.runtimeAccountTombstones;
-    for (const profile of snapshot.agentProfiles) delete profile.runtimeAccountId;
-    if (schemaVersion === 1) snapshot.modelProviders = undefined;
-    if (schemaVersion < 3) {
-      snapshot.runNotes = undefined;
-      snapshot.mcpToolCalls = undefined;
-    }
-    const legacyBytes = encodeSnapshot(snapshot);
-    fs.writeFileSync(paths.stateSnapshotPath, legacyBytes, { mode: 0o600 });
-
-    const faultFs = Object.create(fs);
-    faultFs.renameSync = (source, target) => {
-      if (target === paths.stateSnapshotPath && source.endsWith(".tmp")) {
-        throw Object.assign(new Error("fixture migration rename fault"), { code: "EIO" });
+    snapshot.checksum = snapshotChecksum(snapshot);
+    const unsupportedBytes = `${JSON.stringify(snapshot)}\n`;
+    fs.writeFileSync(paths.stateSnapshotPath, unsupportedBytes, { mode: 0o600 });
+    const eventBytes = fs.readFileSync(paths.eventLogPath);
+    const names = fs.readdirSync(paths.stateDir).sort();
+    const writeOpens = [];
+    const guardedFs = Object.create(fs);
+    guardedFs.openSync = (target, flags, ...args) => {
+      if (typeof flags !== "number" || (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR
+        | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_APPEND)) !== 0) {
+        writeOpens.push(target);
       }
-      return fs.renameSync(source, target);
+      return fs.openSync(target, flags, ...args);
     };
-    const failing = new JsonlProductStore({ paths, fs: faultFs, now: () => 101 });
-    failing.open();
-    assert.throws(() => failing.close(), (error) => error.code === "EIO");
-    assert.equal(fs.readFileSync(paths.stateSnapshotPath, "utf8"), legacyBytes);
-    assert.equal(fs.readdirSync(paths.stateDir).some((name) => name.endsWith(".tmp")), false);
-
-    const recovered = new JsonlProductStore({ paths, now: () => 102 });
-    recovered.open();
-    assert.equal(recovered.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).id, DEFAULT_AGENT_PROFILE_ID);
-    recovered.close();
-    assert.equal(
-      JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8")).schemaVersion,
-      STORE_SCHEMA_VERSION,
-    );
+    const rejected = new JsonlProductStore({ paths, fs: guardedFs, now: () => 101 });
+    assert.throws(() => rejected.open(), (error) => error.code === "STORE_SCHEMA_UNSUPPORTED");
+    rejected.close();
+    assert.deepEqual(writeOpens, []);
+    assert.equal(fs.readFileSync(paths.stateSnapshotPath, "utf8"), unsupportedBytes);
+    assert.deepEqual(fs.readFileSync(paths.eventLogPath), eventBytes);
+    assert.deepEqual(fs.readdirSync(paths.stateDir).sort(), names);
+    assert.equal(names.some((name) => name.endsWith(".tmp")), false);
   }
+});
+
+test("当前 snapshot close rename fault 保留原文件和已提交日志，可重开恢复", () => {
+  const paths = fixturePaths("shoggoth-phase12-current-close-fault-");
+  const initial = new JsonlProductStore({ paths, now: () => 100 });
+  initial.open();
+  initial.close();
+  const originalSnapshot = fs.readFileSync(paths.stateSnapshotPath);
+  assert.equal(JSON.parse(originalSnapshot).schemaVersion, STORE_SCHEMA_VERSION);
+  let renameFaults = 0;
+  const faultFs = Object.create(fs);
+  faultFs.renameSync = (source, target) => {
+    if (target === paths.stateSnapshotPath && source.endsWith(".tmp")) {
+      renameFaults += 1;
+      throw Object.assign(new Error("fixture snapshot rename fault"), { code: "EIO" });
+    }
+    return fs.renameSync(source, target);
+  };
+  const failing = new JsonlProductStore({ paths, fs: faultFs, now: () => 101 });
+  failing.open();
+  const updatedName = "Phase12 committed-before-close fixture";
+  failing.putAgentProfile({ ...defaultAgentProfile(101), name: updatedName });
+  const committedEvents = fs.readFileSync(paths.eventLogPath);
+  assert.ok(committedEvents.length > 0);
+  assert.equal(committedEvents.includes(Buffer.from(updatedName)), true);
+  assert.throws(() => failing.close(), (error) => error.code === "EIO");
+  assert.equal(renameFaults, 1);
+  assert.deepEqual(fs.readFileSync(paths.stateSnapshotPath), originalSnapshot);
+  assert.deepEqual(fs.readFileSync(paths.eventLogPath), committedEvents);
+  assert.equal(fs.readdirSync(paths.stateDir).some((name) => name.endsWith(".tmp")), false);
+
+  const recovered = new JsonlProductStore({ paths, now: () => 102 });
+  recovered.open();
+  assert.equal(recovered.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).name, updatedName);
+  recovered.close();
+  const persisted = JSON.parse(fs.readFileSync(paths.stateSnapshotPath, "utf8"));
+  assert.equal(persisted.schemaVersion, STORE_SCHEMA_VERSION);
+  assert.equal(persisted.checksum, snapshotChecksum(persisted));
+  assert.equal(fs.readdirSync(paths.stateDir).some((name) => name.endsWith(".tmp")), false);
+  const reopened = new JsonlProductStore({ paths, now: () => 103 });
+  reopened.open();
+  assert.equal(reopened.getAgentProfile(DEFAULT_AGENT_PROFILE_ID).name, updatedName);
+  reopened.close();
 });
 
 (async () => {

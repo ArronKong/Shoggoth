@@ -13,6 +13,9 @@ const {
   validateDriverBinary,
 } = require("../app/agent-service/computer-use-controller");
 
+// Assert the product's ten-minute policy independently of the implementation.
+const EXPECTED_WORKER_IDLE_MS = 10 * 60_000;
+
 function makeRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-computer-unit-"));
   fs.chmodSync(root, 0o700);
@@ -399,7 +402,7 @@ async function main() {
       snapshotRevision: snapshot.snapshotRevision, ref: "c1" });
     const rejected = assert.rejects(pending, { code: "COMPUTER_SESSION_NOT_FOUND" });
     while (!started) await new Promise(resolve => setImmediate(resolve));
-    advance(180_000); await controller.reconcile();
+    advance(EXPECTED_WORKER_IDLE_MS + 1); await controller.reconcile();
     assert.equal(delayed.closed, undefined, "idle sweeps cannot interrupt input");
     await assert.rejects(controller.applicationList(common), { code: "COMPUTER_SESSION_BUSY" });
     const closing = controller.closeForWorkRun("default", "drain");
@@ -416,9 +419,16 @@ async function main() {
       allowedApplications: ["com.apple.TextEdit"] });
     const common = { sessionId: session.id, profileId: "default", workRunId: "paused-idle" };
     await controller.snapshot({ ...common, pid: 42, windowId: 7 });
-    controller.pauseAll("system_suspended"); advance(120_001);
+    controller.pauseAll("system_suspended");
+    advance(120_001); await controller.reconcile();
+    assert.equal(workers[0].closed, undefined, "the former two-minute threshold must not reclaim the worker");
+    advance(EXPECTED_WORKER_IDLE_MS - 120_001 - 1); await controller.reconcile();
+    assert.equal(workers[0].closed, undefined, "the worker stays alive until ten idle minutes");
+    advance(1);
     await controller.reconcile();
     assert.equal(workers[0].closed, true);
+    assert.equal(controller.list()[0].status, "paused");
+    assert.equal(controller.list()[0].pauseReason, "system_suspended");
     await controller.applicationList(common);
     assert.equal(workers.length, 2);
     assert.equal(controller.list()[0].status, "paused");
@@ -429,7 +439,7 @@ async function main() {
     assert.equal(controller.list()[0].status, "ready");
     assert.equal(workers[1].calls.some(call => call.name === "bring_to_front"), false);
   }, { driverFactory: () => makeDriver() });
-  console.log("ok 17 - idle recycling never resumes a session paused for user takeover or suspend");
+  console.log("ok 17 - ten-minute idle recycling preserves a paused session through worker replacement");
 
   let releaseStart;
   const starting = new Promise(resolve => { releaseStart = resolve; });
@@ -458,7 +468,7 @@ async function main() {
   await withController(async ({ controller, workers, advance }) => {
     const session = await controller.create({ profileId: "default", workRunId: "uncertain-exit",
       allowedApplications: ["com.apple.TextEdit"] });
-    advance(120_001); await controller.reconcile(); await controller.reconcile();
+    advance(EXPECTED_WORKER_IDLE_MS); await controller.reconcile(); await controller.reconcile();
     assert.equal(controller.list()[0].status, "close_failed");
     await assert.rejects(controller.applicationList({ sessionId: session.id, profileId: "default", workRunId: "uncertain-exit" }),
       { code: "COMPUTER_SESSION_NOT_FOUND" });

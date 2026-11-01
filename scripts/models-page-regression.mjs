@@ -330,6 +330,11 @@ async function createHarness({
       await route.fulfill({ json: { entries: [] } });
       return;
     }
+    // The app shell's MCP approval inbox polls this on every page.
+    if (url.pathname === "/__api/connectors/mcp/approvals") {
+      await route.fulfill({ json: { items: [], generation: 0 } });
+      return;
+    }
     await route.fulfill({ json: {} });
   });
 

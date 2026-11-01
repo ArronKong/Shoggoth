@@ -10,6 +10,7 @@ const {
   validateResolvedEnvironment,
 } = require("./runtime-account-resolver");
 const { runtimeStageError, runtimeStageFromError } = require("./runtime-stage-error");
+const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupFailedPoolHost } = require("./runtime-pool-upgrade");
 
 function containsErrorCode(error, code, seen = new Set()) {
   if (!error || typeof error !== "object" || seen.has(error)) return false;
@@ -58,6 +59,8 @@ class CodexRuntimePool {
     this.stopAllPromise = null;
   }
 
+  runtimeIdentityKey(binding) { return poolRuntimeIdentityKey(this, binding); }
+
   get(value, options = {}) {
     const binding = typeof value === "string"
       ? runtimeBinding({
@@ -97,7 +100,7 @@ class CodexRuntimePool {
         return Promise.reject(runtimeError("RUNTIME_PERMISSION_POLICY_CONFLICT", "Stop the existing Runtime before changing permissions"));
       }
       if (permissionKey !== null) existing.permissionKey = permissionKey;
-      return existing.promise.then(async (host) => {
+      return reusePoolHost(this, existing, options, () => this.get(value, options)).then(async (host) => {
         try { host.assertExecutionProviderCurrent?.(); }
         catch (error) {
           if (error?.code !== "EXECUTION_CONTRACT_STALE"
@@ -144,16 +147,20 @@ class CodexRuntimePool {
       executionContract: options.executionContract,
     });
     this.options.nativeAuth?.open();
-    const entry = { host, runtimeProfileId, runtimeAccountId, permissionKey, promise: null };
-    entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+    const entry = { host, key, runtimeEnvironment, runtimeProfileId, runtimeAccountId, permissionKey, promise: null };
+    entry.promise = Promise.resolve().then(async () => {
+      await preparePoolHostIdentity(this, entry, binding, options);
+      await host.initialize();
+      host.assertRuntimeIdentityCurrent?.();
+    }).then(() => {
       this.circuits.delete(runtimeProfileId);
       if (host.terminated && typeof host.terminated.then === "function") {
         host.terminated.then(
           () => {
-            if (this.entries.get(key) === entry) this.entries.delete(key);
+            if (this.entries.get(key) === entry && !entry.retiring) this.entries.delete(key);
           },
           (error) => {
-            if (this.entries.get(key) !== entry) return;
+            if (this.entries.get(key) !== entry || entry.retiring) return;
             if (error?.cleanupIncomplete || host.cleanupIncomplete) this.blockedProfiles.add(runtimeProfileId);
             this.entries.delete(key);
             this._recordFailure(runtimeProfileId);
@@ -162,9 +169,9 @@ class CodexRuntimePool {
       }
       return host;
     }).catch(async (error) => {
-      if (this.entries.get(key) === entry) this.entries.delete(key);
-      try { await host.stop(); } catch {}
-      if (host.cleanupIncomplete) this.blockedProfiles.add(runtimeProfileId);
+      // Keep the exact entry until cleanup settles, including identity changes
+      // detected after initialization. A new writer must not overtake stop().
+      await cleanupFailedPoolHost(this, entry, runtimeProfileId);
       const credentialsLocked = error?.code === "credentials_locked";
       if (!credentialsLocked && !this.closing && !this.stoppingProfiles.has(runtimeProfileId)) {
         this._recordFailure(runtimeProfileId);

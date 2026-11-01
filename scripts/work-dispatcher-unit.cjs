@@ -81,6 +81,7 @@ test("WorkRun 状态集合、完整字段与同 key 幂等", () => {
     contextSnapshotId: null,
     runtimeSessionRef: null,
     runtimeTurnRef: null,
+    runtimeAttemptRef: null,
     eventSeq: 1,
     waitingRequestId: null,
     startedAt: null,

@@ -6,12 +6,14 @@ const { isRuntimeIncompatible } = require("./runtime-compatibility");
 const crypto = require("node:crypto");
 const {
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
+  NATIVE_CODEX_RUNTIME_ACCOUNT_ID,
 } = require("./runtime-account");
 const {
   readRuntimeAuthenticationState,
   runtimeBinding,
 } = require("./runtime-adapter");
 const { serviceError } = require("./security");
+const codexSessionProvider = require("./codex-session-provider");
 const {
   PUBLIC_MESSAGES,
   mapProfileServiceError,
@@ -32,7 +34,8 @@ function profileError(code, message) {
 
 function runtimeReadError(error, fallback, message) {
   if (isRuntimeIncompatible(error)) return profileError("RUNTIME_INCOMPATIBLE", PUBLIC_MESSAGES.RUNTIME_INCOMPATIBLE);
-  const codes = new Set(["CODEX_NATIVE_AUTH_READ_FAILED", "CODEX_RUNTIME_CLEANUP_INCOMPLETE"]);
+  const codes = new Set(["CODEX_NATIVE_AUTH_READ_FAILED", "CODEX_RUNTIME_CLEANUP_INCOMPLETE",
+    "RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED"]);
   for (let current = error, depth = 0; current && depth < 4; depth += 1) {
     const code = dataErrorCode(current);
     if (codes.has(code)) return profileError(code, PUBLIC_MESSAGES[code]);
@@ -302,8 +305,79 @@ function createProfileServiceController(options = {}) {
     return normalizeModelPage(raw);
   }
 
+  // Ready non-ChatGPT sources of a built-in Codex Profile (presets that
+  // passed validation and custom endpoints), in menu order.
+  function readySourceProviders(profile) {
+    return codexSessionProvider.sourceProviders(productStore, profile)
+      .filter((provider) => READY_PROVIDER_STATUSES.has(provider.validationStatus));
+  }
+
+  // Built-in Codex with several sources: the ChatGPT catalog (when signed in)
+  // followed by every ready preset's and endpoint's models. Each row names its
+  // source; rows without one belong to the Profile default source.
+  async function readSessionProviderModelPage(profile, pageParams, generation) {
+    const sourceRef = (providerRef) => codexSessionProvider.selectionForProviderRef(productStore, profile, providerRef);
+    const rows = [];
+    const row = (model, providerRef, sourceName) => {
+      const modelProviderRef = sourceRef(providerRef);
+      rows.push({ ...model, ...(modelProviderRef ? { modelProviderRef } : {}), sourceName });
+    };
+    let baseError = null;
+    try {
+      let cursor = null;
+      const seen = new Set();
+      for (let index = 0; index < 16; index++) {
+        const page = await readAuthorityModelPage(profile, { cursor, limit: 100 }, generation);
+        for (const model of page.models) {
+          row({ ...model, isDefault: profile.providerRef === null && model.isDefault }, null, "ChatGPT");
+        }
+        if (!page.nextCursor || seen.has(page.nextCursor)) break;
+        seen.add(page.nextCursor); cursor = page.nextCursor;
+      }
+    } catch (error) {
+      // A signed-out ChatGPT never hides the other sources, which carry their
+      // own credentials.
+      baseError = error;
+      rows.length = 0;
+    }
+    assertProfileStillCurrent(profile, generation);
+    for (const provider of readySourceProviders(profile)) {
+      for (const id of provider.models ?? [provider.model]) {
+        row({ id, displayName: id, description: "",
+          isDefault: provider.id === profile.providerRef && id === profile.defaultModel }, provider.id, provider.name);
+      }
+    }
+    if (rows.length === 0 && baseError) throw baseError;
+    const fingerprint = crypto.createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0, 16);
+    const prefix = `sources-${fingerprint}-`;
+    const cursor = pageParams.cursor;
+    const offset = cursor === null ? 0 : Number(cursor.slice(prefix.length));
+    if (cursor !== null && (!cursor.startsWith(prefix) || !Number.isSafeInteger(offset)
+      || offset < 0 || offset >= rows.length || cursor !== `${prefix}${offset}`)) {
+      throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Model catalog cursor is invalid");
+    }
+    const page = rows.slice(offset, offset + pageParams.limit);
+    const nextCursor = offset + page.length < rows.length ? `${prefix}${offset + page.length}` : null;
+    return { models: page, nextCursor, hasMore: nextCursor !== null };
+  }
+
   async function readRuntimeModelPage(profile, pageParams, generation) {
-    if (profile.runtime === "codex" && profile.providerRef !== null) {
+    const nativeCodex = profile.runtime === "codex" && profile.runtimeAccountId === NATIVE_CODEX_RUNTIME_ACCOUNT_ID;
+    const extension = profile.runtime.startsWith("ext-");
+    const extensionBinding = extension ? runtimeBinding({ runtime: profile.runtime,
+      runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId }) : null;
+    const cachedExtension = extension
+      ? runtimeManager.peek?.(extensionBinding, { permissionPolicy: profile.permissionPolicy }) : null;
+    if (extension && typeof cachedExtension?.modelsList !== "function") {
+      // Only a held, valid Handle may expose its implemented model catalog.
+      // No extension model read may launch a CLI to discover one.
+      throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog is unavailable");
+    }
+    if (codexSessionProvider.supportsSessionProviders(profile)) {
+      if (pageParams.source === "chatgpt") return readAuthorityModelPage(profile, pageParams, generation);
+      if (readySourceProviders(profile).length > 0) return readSessionProviderModelPage(profile, pageParams, generation);
+    }
+    if (profile.runtime === "codex" && !nativeCodex && profile.providerRef !== null) {
       const provider = productStore.getModelProvider(profile.providerRef);
       if (provider?.kind === "custom-responses") {
         loadReadyProvider(provider.id, profile.defaultModel);
@@ -322,13 +396,13 @@ function createProfileServiceController(options = {}) {
           nextCursor, hasMore: nextCursor !== null };
       }
     }
-    if (profile.runtime === "codex") {
+    if (profile.runtime === "codex" && !nativeCodex) {
       return readAuthorityModelPage(profile, pageParams, generation);
     }
     let host;
     let raw;
     try {
-      host = await runtimeManager.acquire(runtimeBinding({
+      host = cachedExtension || await runtimeManager.acquire(runtimeBinding({
         runtime: profile.runtime,
         runtimeProfileId: profile.runtimeProfileId,
         runtimeAccountId: profile.runtimeAccountId,
@@ -347,19 +421,49 @@ function createProfileServiceController(options = {}) {
       throw runtimeReadError(error, "PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog is unavailable");
     }
     assertProfileStillCurrent(profile, generation);
+    if (extension && runtimeManager.peek?.(extensionBinding, { permissionPolicy: profile.permissionPolicy }) !== host) {
+      throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog is unavailable");
+    }
     return normalizeModelPage(raw);
+  }
+
+  async function readRuntimeCapabilities(profile, generation) {
+    try {
+      const binding = runtimeBinding({ runtime: profile.runtime,
+        runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId });
+      const handle = profile.runtime.startsWith("ext-")
+        ? runtimeManager.peek?.(binding, { permissionPolicy: profile.permissionPolicy })
+        : await runtimeManager.acquire(binding, { permissionPolicy: profile.permissionPolicy });
+      if (!handle) {
+        assertProfileStillCurrent(profile, generation);
+        return require("./runtime-capability-evidence").runtimeFeatureSupport(null);
+      }
+      handle.host?.assertRuntimeIdentityCurrent?.();
+      assertProfileStillCurrent(profile, generation);
+      return require("./runtime-capability-evidence").runtimeFeatureSupport(handle.capabilityEvidence);
+    } catch (error) {
+      throw runtimeReadError(error, "PROFILE_AUTH_STATUS_UNAVAILABLE", "Runtime capabilities are unavailable");
+    }
   }
 
   async function readRuntimeAuth(profile, generation) {
     let host;
     let auth;
     try {
-      host = await runtimeManager.acquire(runtimeBinding({
-        runtime: profile.runtime,
-        runtimeProfileId: profile.runtimeProfileId,
-        runtimeAccountId: profile.runtimeAccountId,
-      }), { permissionPolicy: profile.permissionPolicy });
-      auth = await readRuntimeAuthenticationState(host);
+      const binding = runtimeBinding({ runtime: profile.runtime,
+        runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId });
+      if (profile.runtime.startsWith("ext-")) {
+        host = runtimeManager.peek?.(binding, { permissionPolicy: profile.permissionPolicy });
+        auth = host?.host?.transport === "acp" && typeof host.host.getCachedAuthenticationState === "function"
+          ? await readRuntimeAuthenticationState({ authenticationState: () => host.host.getCachedAuthenticationState() })
+          : { status: "unverified" };
+        if (host && runtimeManager.peek?.(binding, { permissionPolicy: profile.permissionPolicy }) !== host) {
+          auth = { status: "unverified" };
+        }
+      } else {
+        host = await runtimeManager.acquire(binding, { permissionPolicy: profile.permissionPolicy });
+        auth = await readRuntimeAuthenticationState(host);
+      }
       if (auth.status === "unsupported") {
         throw profileError("PROFILE_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
       }
@@ -615,7 +719,8 @@ function createProfileServiceController(options = {}) {
       } catch (error) {
         return Promise.reject(error);
       }
-      if (["profile.models.list", "profile.binding.models.list", "profile.auth.read", "profile.binding.auth.read"]
+      if (["profile.models.list", "profile.binding.models.list", "profile.auth.read", "profile.binding.auth.read",
+        "profile.capabilities.read", "profile.binding.capabilities.read"]
         .includes(method)) {
         let generation;
         let profile;
@@ -623,7 +728,7 @@ function createProfileServiceController(options = {}) {
           generation = lifecycleGeneration;
           assertAccepting(generation);
           profile = loadEnabledProfile(params.profileId);
-          if (method === "profile.binding.models.list" || method === "profile.binding.auth.read") {
+          if (method.startsWith("profile.binding.")) {
             profile = productStore.resolveAgentRuntimeProfile(profile.id, params.bindingId);
           }
         } catch (error) {
@@ -631,7 +736,8 @@ function createProfileServiceController(options = {}) {
         }
         const read = method.endsWith(".models.list")
           ? readRuntimeModelPage(profile, params, generation)
-          : readRuntimeAuth(profile, generation);
+          : method.endsWith(".capabilities.read") ? readRuntimeCapabilities(profile, generation)
+            : readRuntimeAuth(profile, generation);
         return read
           .then((result) => validateProfileServiceResult(method, result));
       }

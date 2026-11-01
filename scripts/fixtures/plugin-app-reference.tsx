@@ -15,14 +15,9 @@ const historyId = `runtime-${"b".repeat(64)}`;
 const conversation = { backendId: "shoggoth", sessionKey: "fixture-conversation" };
 const writes: Array<{ route: string; method: string; body: unknown }> = [];
 scope.fixtureWrites = writes;
-let completeRequest: ((success: boolean) => void) | null = null;
 window.fetch = async (input, init) => {
-  const route = String(input);
-  if (route !== "/__api/plugins/app-open" || init?.method !== "POST") throw Error(`Unexpected I/O: ${route}`);
-  writes.push({ route, method: init.method, body: JSON.parse(String(init.body)) });
-  const success = await new Promise<boolean>(resolve => { completeRequest = resolve; });
-  return new Response(JSON.stringify(success ? { opened: true } : { error: "PLUGIN_APP_UNAVAILABLE" }),
-    { status: success ? 200 : 409, headers: { "content-type": "application/json" } });
+  writes.push({ route: String(input), method: init?.method || "GET", body: null });
+  throw Error("Retired plugin history must not request an interactive App or execute a tool");
 };
 const pause = (ms = 20) => new Promise(resolve => setTimeout(resolve, ms));
 const check = (value: unknown, message: string) => { if (!value) throw Error(message); };
@@ -43,8 +38,8 @@ const invalid = reduceTimeline(createTimeline(), { kind: "tool", phase: "result"
 applyConfiguredLocale("zh-CN");
 document.documentElement.dataset.theme = "light";
 createRoot(document.getElementById("root")!).render(<main style={{ maxWidth: 840, margin: "0 auto", padding: 20 }}>
-  <h1 style={{ fontSize: 20 }}>能力包交互界面</h1>
-  <p>应用入口独立于文本摘要，打开时由 Service 重新验证当前授权。</p>
+  <h1 style={{ fontSize: 20 }}>历史插件记录</h1>
+  <p>保留原引用和工具文本；旧交互界面已退役，不能从历史重新执行。</p>
   <section id="live"><h2 style={{ fontSize: 15 }}>实时结果 · 空摘要</h2>
     <TurnTimeline steps={live} status="done" autoFollow={false} pluginConversation={conversation} /></section>
   <section id="history"><h2 style={{ fontSize: 15 }}>历史结果 · 已截断摘要</h2>
@@ -60,35 +55,24 @@ scope.preparePluginAppKeyboard = async () => {
   button.focus(); return { focused: document.activeElement === button };
 };
 scope.runPluginAppReferenceFixture = async () => {
-  await wait(() => appButtons(document.querySelector("#live") as any).length === 1, "keyboard expands live App card");
-  const liveButton = appButtons(document.querySelector("#live") as any)[0];
-  liveButton.click();
-  await wait(() => writes.length === 1 && liveButton.disabled, "App open request is pending and cannot be duplicated");
-  liveButton.click(); check(writes.length === 1, "disabled pending button prevents duplicate requests");
-  check(JSON.stringify(writes[0].body) === JSON.stringify({ ...conversation, callId }), "independent live reference is exact API payload");
-  completeRequest!(true); await wait(() => !liveButton.disabled, "successful native open releases button");
+  await wait(() => document.querySelector("#live [data-legacy-plugin-call]"), "keyboard expands the retained historical reference");
   document.querySelector<HTMLButtonElement>("#history button[aria-expanded=false]")!.click();
-  await wait(() => appButtons(document.querySelector("#history") as any).length === 1, "history App card survives invalid JSON summary");
-  const historyButton = appButtons(document.querySelector("#history") as any)[0];
-  historyButton.click(); await wait(() => writes.length === 2 && historyButton.disabled, "history open awaits Service");
-  check(JSON.stringify(writes[1].body) === JSON.stringify({ ...conversation, callId: historyId }), "history reference is exact API payload");
-  completeRequest!(false); await wait(() => !!document.querySelector("#history [role=status]"), "stale Service receipt reports unavailable");
-  check(!historyButton.disabled, "failure allows a later explicit retry");
+  await wait(() => document.querySelector("#history [data-legacy-plugin-call]"), "truncated history retains its original reference");
   document.querySelector<HTMLButtonElement>("#invalid button[aria-expanded=false]")!.click();
   document.querySelector<HTMLButtonElement>("#unbound button[aria-expanded=false]")?.click();
   await pause();
-  check(appButtons(document.querySelector("#invalid") as any).length === 0, "invalid reference never offers open");
-  check(appButtons(document.querySelector("#unbound") as any).length === 0, "missing conversation never offers open");
-  check(writes.length === 2 && scope.fixtureErrors.length === 0, "exact two explicit requests and no render errors");
-  return { checks: ["keyboard expansion with empty summary", "independent live reference opens exact conversation",
-    "pending duplicate prevention", "history reference with truncated non-JSON summary", "Service failure remains visible",
-    "invalid reference rejected", "conversation required"], writes };
+  check(document.querySelector("#live [data-legacy-plugin-call]")?.getAttribute("data-legacy-plugin-call") === callId, "live reference remains exact");
+  check(document.querySelector("#history [data-legacy-plugin-call]")?.getAttribute("data-legacy-plugin-call") === historyId, "history reference remains exact");
+  check(!document.querySelector("#invalid [data-legacy-plugin-call]"), "invalid reference remains unavailable");
+  check(!document.querySelector("#unbound [data-legacy-plugin-call]"), "an unbound conversation cannot gain an interactive capability");
+  check(appButtons().length === 0 && writes.length === 0 && scope.fixtureErrors.length === 0, "retired history never offers an execution action or makes a request");
+  return { checks: ["keyboard expansion", "exact historical IDs", "truncated-text reference", "retirement message", "no execution control", "zero network or writes"], writes };
 };
 scope.preparePluginAppCapture = async (theme: string) => {
   document.documentElement.dataset.theme = theme; await pause(300);
-  const bounds = appButtons().map(button => {
+  const bounds = Array.from(document.querySelectorAll<HTMLElement>("[data-legacy-plugin-call]")).map(button => {
     const rect = button.getBoundingClientRect();
-    check(rect.width > 0 && rect.left >= 0 && rect.right <= innerWidth, "App button stays within viewport");
+    check(rect.width > 0 && rect.left >= 0 && rect.right <= innerWidth, "retirement message stays within viewport");
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   });
   check(document.documentElement.scrollWidth <= innerWidth, "no horizontal overflow");

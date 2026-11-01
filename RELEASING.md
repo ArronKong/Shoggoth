@@ -7,7 +7,7 @@
 ## 1. 冻结本次源码
 
 1. 确定版本号、待发布的开发提交、工作区改动和发行说明。只纳入本次版本的改动；其他任务的未提交工作须隔离。记录公开仓库当前 `main`、拟发布的源码提交和导出清单。
-2. 从开发目录导出到**新的空目录**：`npm run export:source -- /absolute/path/to/new-empty-directory`。脚本会在目录旁生成 `<directory>.manifest.json`，记录文件名、权限、大小和 SHA-256。导出会同时清空未完成再分发审核的插件目录清单，并移除构建配置中对这些未导出文件的单独复制项。它不会覆盖已有 `output/public-source`，也不会自动识别夹在允许文件中的隐私内容。
+2. 从开发目录导出到**新的空目录**：`npm run export:source -- /absolute/path/to/new-empty-directory`。脚本会在目录旁生成 `<directory>.manifest.json`，记录文件名、权限、大小和 SHA-256。导出拒绝已退役的插件包资源；MCP 连接器的固定依赖锁、许可证和运行时重建资料须一并审核；已退役的 OpenConnector 资源不得重新引入。它不会覆盖已有 `output/public-source`，也不会自动识别夹在允许文件中的隐私内容。
 3. 对照清单逐项比较新导出与 `output/public-source` 的完整文件列表和内容。确认增加、删除和修改都有来源与用途；不能只看 Git 的文本 diff。`resources/bundled-plugins/packages/` 在再分发权利完成审核前不得进入公开导出。
 
 ## 2. 推送前审核 `public-source`：必须通过
@@ -19,7 +19,7 @@
 
 **停止条件：**任何文件来源、隐私命中、许可范围、哈希或测试结果无法解释时，先修复并重新审核；CI 通过不能代替这项人工检查。审核通过后，通过公开仓库的 PR 合并源码更新，等待必需 CI 成功，并确认远端 `main` 与已审核内容一致。源码上传不等于安装包发布。
 
-## 3. 从公开源码提交制作两个架构的正式包
+## 3. 从已审核的公开源码提交制作正式包（当前 connector 候选尚有公开发布门禁）
 
 1. 固定 `output/public-source` 中已通过 CI 的提交和 `package.json` 版本。打包前再次从该提交导出到新的空目录，运行 `node scripts/check-release-private-keys.cjs /absolute/path/to/new-export`；命中即停止。用两份锁文件安装依赖，完成 `build:manage`、`prepare:runtimes`、`release:metadata`、`licenses:check`。构建输入必须是该公开提交，不得混入开发目录未公开的改动。
 2. 分别构建 Apple Silicon（arm64）和 Intel（x64）ZIP。Electron 组装每个 App 后，`afterPack` 会扫描完整 App（包括 `app.asar` 与附加资源），私钥命中即停止，**此时尚未签名、公证或上传**。使用 `SHOGGOTH_CODESIGN_MODE=developer-id`、指定的 Developer ID Application 身份与受控钥匙串、公证凭据。确认两个 App 的签名、Team ID、公证结果为 `Accepted`，并已附加和验证公证票据。签名私钥与公证凭据不能放入源码或安装包。
@@ -32,23 +32,36 @@
 2. 在原生 Intel runner 验收 Intel ZIP 和 DMG；`verify-signed-draft.yml` 可用于草稿资产的 Intel 验收。公开源码 CI 和全部安装包验收成功后，才将草稿公开。任一门禁失败就保留草稿，不发布或覆盖已有正式资产。
 3. 发布后核对仓库公开状态、标签指向、Release 状态、八项资产及下载链接，并保存导出清单、哈希、签名、公证与验收记录。下一版本重新执行整套审核；不得沿用上次的检查结论。
 
-## 随 App 发布的 Shoggoth 内置插件（第一方通道）
+## 依赖审计范围复核（2026-11-02，复核到期 2026-11-16 UTC）
 
-- 把插件目录放进 `resources/shoggoth-plugins/<id>/`，目录名就是插件 ID（小写字母、数字、`-`）。格式可以是 Codex 内容包（`.codex-plugin/plugin.json`，Agent 创建的草稿就是这种格式），也可以是 Agent Plugins 1.0.0 标准包（根目录 `plugin.json`，含 `$schema`）。安装身份为 `first-party:<id>`，与 App 所在路径无关；这个目录和第三方的 `resources/bundled-plugins/` 分开，随公开源码一起导出，内容须是 Shoggoth 有权以 Apache-2.0 再分发的。
-- 凭据只写 `${secret:NAME}` 引用，不能放真实或示例令牌。发布前运行 `node scripts/first-party-plugin-sync-fixture.cjs`（已包含在 `npm run test:plugins` 中），它会确认这里的每个包都能安装；私钥扫描同样覆盖 `resources/`。
-- 用户侧行为：首次启动时安装，并为所有助理启用技能；MCP 服务仍需在插件页「一键启用」一次。新版本中某个包的内容有变化时会自动更新：已启用的先停用并排空旧连接，更新后再启用，旧的 MCP 授权按规则失效，需要再一键启用一次；已停用的保持停用。用户卸载过的包不会自动重装，可以在插件页重新安装。
-- 如果新内容与这个包用过的某个旧版本逐字节相同，会被当作回退而跳过，需要提高 `version`。中途中断的更新（例如已停用、尚未安装）会在下次启动时接着完成。
+正式发布执行 `npm run audit:release`，根目录和 UI 仍各自调用 `npm audit --audit-level=moderate --json`。完整原始报告与实际 npm 退出码应随验收记录保存；未解释的中危及以上结果、网络错误、无效报告和未知依赖链均阻止发布。
+
+当前仅复核 [GHSA-g3hv-75wg-m249](https://github.com/isaacs/minimatch/security/advisories/GHSA-g3hv-75wg-m249) 在旧构建依赖中的适用范围。维护者公告指向 minimatch 10.2.6 的 `optimizationLevel >= 2` 和 `firstPhasePreProcess` / `secondPhasePreProcess`；数据库的 `<11.0.1` 范围还涵盖没有该优化器的 3.1.5 与 5.1.9，[范围澄清问题](https://github.com/github/advisory-database/issues/10811) 尚未结案。这是根据维护者公告和固定源码所作的项目级范围复核。
+
+`dependency-audit-policy.cjs` 只接受上述两份源码的精确 SHA-256、锁文件版本与 dev-only 用途，逐个核对全部安装位置及优化器缺席，并只传播这一个已复核条目的传递标记。任何其它公告、版本、源码变化、生产用途、较高严重级别或复核到期都会阻止验收。原始报告可能仍列出 15 个受该条目传播的构建依赖记录，交付时应报告该事实。现代 glob/minimatch 分支使用修复版 14.0.3/11.0.3；旧构建工具保留其 callable API。
+
+Undici 分别固定为根依赖 7.30.1、node-gyp 的 6.29.1、记忆核心内嵌依赖 8.12.2。记忆依赖的官方归档完整性、来源及逐文件哈希记录在 `build/shoggoth-memory/manifest.json`；OpenClaw 上游源文件仍保持原 revision 与哈希，重建核心后须通过完整记忆回归。
+
+## MCP 连接器
+
+连接器通过 Service 托管的 MCP 客户端接入。App 不再携带 OpenConnector、Bun 编译 sidecar 或原 sidecar 的 313 项依赖清单；与主进程或 UI 共同使用的包仍按各自依赖闭包保留在 SBOM 中。Registry 包由用户明确确认后使用本机 npx / uvx / Docker 启动精确版本，不在 App 启动时自动安装。
+
+升级保留 OpenConnector 原数据和密钥，不启动旧 writer。MCP 连接确认账本由 App Host 持有独占 writer lease；离线备份和恢复必须取得同一 lease，拒绝活跃 App writer。恢复覆盖当前精确请求范围的确认屏障并把 pending 转为 unknown，不重发任何已接受或不确定的确认。旧插件退役凭证、历史、独立 Skills、外部 Host 桥、模型 Runtime 和记忆分别保留。`connector-package-checks.cjs` 的旧模块名保留供打包工具兼容，其现行合同改为拒绝包内任何已退役资源或 SBOM 条目；不再要求已删除的 sidecar 来源或 Bun/WebKit 重链接审查。Developer ID、公证、完整性、依赖闭包、私钥与发布授权门禁继续执行。
 
 ## 内部预览包（开发目录或 worktree，不公证、不发布）
 
-内部包直接从开发提交构建，包含 `resources/bundled-plugins`，不经过公开导出，只用于本机或内部验收，不上传 Release。
+内部候选只用于隔离验收，不安装到现有 App，不上传 Release。
 
-1. 提交全部改动，保持工作区干净。提升版本时用 `npm version <版本> --no-git-tag-version` 后运行 `npm run release:metadata`，同步 `package.json`、`package-lock.json` 与 SBOM。
-2. 根目录 `node_modules` 必须是与锁文件一致的真实目录：`npm ci --ignore-scripts`；worktree 可用 `unlink node_modules && cp -c -R <主检出>/node_modules node_modules`（APFS 克隆）。**不能是符号链接**：electron-builder 会丢掉全部传递依赖，却仍然返回成功。
-3. 运行 `npm run dist:arm64`（本机 Apple Silicon，产物在 `dist/release-<版本>/`）或 `npm run dist`（双架构）。两者都先执行 `node scripts/release-package-checks.cjs preflight`：核对依赖安装，对 `resources/`、`schemas/` 执行私钥门禁，逐个校验内置插件完整性；任一项失败都不开始构建。
-4. `afterPack` 在任何签名之前核对成品：私钥门禁、SQLite、依赖闭包（锁文件中的生产依赖都以锁定版本出现在 App 中）、内置插件完整性（与安装时的校验相同）。任一失败即中止。
-5. 构建后运行 `SHOGGOTH_SMOKE_DIST_DIR=<产物目录> node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-arm64`，在产物目录记录 `verification.json`（来源提交、SHA-256、各项检查结果），并更新 PROGRESS。
-6. 每次交付新包必须附更新说明：以上一份已交付包的实际构建来源提交为基线，对比本次固定构建提交，归纳用户可见的新增、改进和修复，不能只列最后一次合入。标明对应版本与来源，将未实施计划和验收限制单列；更新清单与 App、ZIP、验收记录一同交付，并写入 PROGRESS。
+1. 冻结准确源码和改动范围。版本变化后同步 `package.json`、锁文件、发行元数据和 SBOM；保留并行任务修改。
+2. 根目录和 UI `node_modules` 使用与各自锁文件一致的真实目录。worktree 可 APFS 克隆后核对版本；符号链接会让 builder 丢失传递依赖。Electron binary 的实际版本也必须匹配 npm 包，不能只改 package.json。
+3. 准备固定 Runtime，运行 `npm run dist:arm64`。构建组件后执行 release preflight：依赖锁、私钥、MCP 合同和已退役资源缺席检查均须通过。
+4. `afterPack` 在签名前检查实际 App 的私钥、SQLite、依赖闭包、MCP 协议与已退役资源缺席，并拒绝已退役资源。签名后再次检查包内不含 OpenConnector 资源，并核对 Service 正常启停。
+5. 运行 `SHOGGOTH_SMOKE_DIST_DIR=<候选产物绝对目录> npm run test:mcp-connectors:app -- --spike-arm64`（必须明确提供候选路径）；包含 MCP 连接器、Service 持久化、无旧 writer、自然停止和退出。再做 ZIP CRC、实际解包后的 App 重验，记录各自证据。
+仅检查开发候选 App 目录时可用 `--app-arm64`；此模式仍执行完整 App 门禁，但不代表 ZIP CRC、解包或分发验收。ZIP 归档失败不能记为 ZIP 成功。
+
+6. 交付说明分别报告源码、UI/Service、真实 Host/Provider、App/ZIP 和安装版状态。真实账号和业务结果不能由夹具代替；推送、安装、公开发布分别遵守用户授权。
+
+7. 每次新包必须附更新清单：以上一份已交付包的实际构建来源为基线，对比本次固定提交，归纳全部用户可见新增、改进和修复，不能只列最后一次合入。记录对应版本与来源，把未实施计划和验收限制单列；清单与 App、ZIP 和验收记录一同交付，并写入 PROGRESS。
 
 ### 稳定的本地签名身份（内部预览包）
 

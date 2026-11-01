@@ -11,6 +11,7 @@ const SUPPORT_KEYS: Record<string, string> = {
   PERMISSION_ENFORCEMENT_UNPROVEN: "sessionRuntimePermissionUnsupported",
   WORKSPACE_REQUIRED: "sessionRuntimeWorkspaceRequired",
   RUNTIME_FACTS_UNKNOWN: "sessionRuntimeFactsUnknown",
+  RUNTIME_CAPABILITY_UNSUPPORTED: "sessionRuntimeCapabilityUnsupported",
 };
 
 export function sessionRuntimeSupportKey(code: string | undefined): string | null {

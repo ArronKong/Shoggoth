@@ -33,12 +33,14 @@ process.stdin.on("data", chunk => {
 process.stdin.on("end", () => {
   try {
     config = JSON.parse(input.toString("utf8"));
-    if (config.parentPid !== parent || !Number.isInteger(config.timeoutMs)
-      // This launcher is copied standalone; mirror the shared 30-minute budget.
-      || config.timeoutMs < 1 || config.timeoutMs > 30 * 60_000) throw new Error("config");
+    // Standalone copy: null means no total deadline; the parent monitor and
+    // process ownership cleanup remain active for every invocation.
+    if (config.parentPid !== parent || (config.timeoutMs !== null
+      && (!Number.isSafeInteger(config.timeoutMs) || config.timeoutMs < 1
+        || config.timeoutMs > 2_147_000_000))) throw new Error("config");
     const child = spawn("/usr/bin/sandbox-exec", ["-p", config.profile, "/bin/sh", "-c", config.command],
       { cwd: config.cwd, env: config.env, shell: false, detached: false, stdio: ["ignore", "pipe", "pipe"] });
-    const deadline = setTimeout(killGroup, config.timeoutMs + 500);
+    const deadline = config.timeoutMs === null ? null : setTimeout(killGroup, config.timeoutMs + 500);
     child.stdout.pipe(process.stdout);
     child.stderr.pipe(process.stderr);
     const finish = result => {

@@ -27,9 +27,13 @@ function sanitizeReason(reason) {
 }
 
 const MAX_KANBAN_EVENTS_PER_KEY = 2000;
+const CHAT_FAILURE_CODES = new Set(["rate_limit", "auth", "billing", "connection", "empty", "error"]);
+const validChatFailure = row => row && CHAT_FAILURE_CODES.has(row.code)
+  && Number.isSafeInteger(row.at) && row.at > 0 && Number.isSafeInteger(row.userAt) && row.userAt >= 0
+  && (row.userRowId === null || Number.isSafeInteger(row.userRowId) && row.userRowId > 0);
 
 function emptyState() {
-  return { version: VERSION, health: { lastStates: {}, events: [] }, kanbanCursors: {}, kanbanEvents: {} };
+  return { version: VERSION, health: { lastStates: {}, events: [] }, kanbanCursors: {}, kanbanEvents: {}, chatFailures: {} };
 }
 
 function createDashboardJournal(filePath, { now = Date.now } = {}) {
@@ -49,6 +53,11 @@ function createDashboardJournal(filePath, { now = Date.now } = {}) {
         },
         kanbanCursors: parsed.kanbanCursors && typeof parsed.kanbanCursors === "object" ? parsed.kanbanCursors : {},
         kanbanEvents: parsed.kanbanEvents && typeof parsed.kanbanEvents === "object" ? parsed.kanbanEvents : {},
+        // Only typed diagnostics survive a restart. Provider error text and
+        // user/tool content may contain credentials and never enter this file.
+        chatFailures: Object.fromEntries(Object.entries(parsed.chatFailures || {}).filter(([key, row]) =>
+          /^[a-f0-9]{64}$/u.test(key) && validChatFailure(row)).sort((a, b) => b[1].at - a[1].at).slice(0, 256).map(([key, row]) =>
+          [key, { code: row.code, at: row.at, userAt: row.userAt, userRowId: row.userRowId }])),
       };
     }
   } catch (err) {
@@ -71,6 +80,8 @@ function createDashboardJournal(filePath, { now = Date.now } = {}) {
     events.sort((a, b) => a.at - b.at);
     if (events.length > MAX_EVENTS) events = events.slice(-MAX_EVENTS);
     state.health.events = events;
+    state.chatFailures = Object.fromEntries(Object.entries(state.chatFailures)
+      .filter(([, row]) => row.at >= cutoff).sort((a, b) => b[1].at - a[1].at).slice(0, 256));
   }
 
   function flush() {
@@ -89,6 +100,17 @@ function createDashboardJournal(filePath, { now = Date.now } = {}) {
   }
 
   return {
+    recordChatFailure(key, row) {
+      if (!/^[a-f0-9]{64}$/u.test(key) || !validChatFailure(row)) return;
+      state.chatFailures[key] = { code: row.code, at: row.at, userAt: row.userAt, userRowId: row.userRowId };
+      flush();
+    },
+
+    getChatFailure(key) {
+      const row = state.chatFailures[key];
+      return validChatFailure(row) && row.at >= now() - MAX_AGE_MS ? { ...row } : null;
+    },
+
     /** 一轮健康采样。targets: [{targetType,targetId,backendId,state,reason?}]；返回本轮落下的事件。 */
     recordHealthSample(targets, { atMs } = {}) {
       const at = Number.isFinite(atMs) ? atMs : now();

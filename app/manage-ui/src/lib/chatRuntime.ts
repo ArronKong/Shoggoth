@@ -90,14 +90,12 @@ export function buildChatSendParams(
   message: string,
   idempotencyKey: string,
   attachments: readonly ChatAttachment[],
-  pluginSelection?: readonly { installationId: string; revision: number }[],
 ): Record<string, unknown> {
   return {
     sessionKey,
     message,
     idempotencyKey,
     ...(attachments.length ? { attachments: attachments.map(buildOpenClawAttachment) } : {}),
-    ...(pluginSelection?.length ? { pluginSelection: pluginSelection.map(({ installationId, revision }) => ({ installationId, revision })) } : {}),
   };
 }
 

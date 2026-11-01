@@ -56,9 +56,6 @@
 }
 .keyToggle {
   flex: none;
-  font-size: 12px;
-  padding: 4px 10px;
-  min-height: 36px;
 }
 
 /* 凭证池条目行 */

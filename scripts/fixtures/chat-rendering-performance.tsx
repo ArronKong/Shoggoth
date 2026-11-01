@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import ChatPage from "../../app/manage-ui/src/pages/ChatPage";
+import { MESSAGE_PINNING_ENABLED } from "../../app/manage-ui/src/pages/ChatMessageActions";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
 import i18n from "../../app/manage-ui/src/i18n";
@@ -32,7 +33,7 @@ const longHistory = Array.from({ length: historyCount }, (_, index) => ({
       `Paragraph ${line}: **rendering** a long conversation with [safe links](https://example.com), lists and code.\n\n` +
       `- Read the history\n- Keep the scroll position\n\n${fence}js\nconst item${line} = { index: ${index}, value: "a long code sample" };\n${fence}\n`).join("\n") }],
 }));
-const sessions = [shortKey, longKey].map((key) => ({ key, agentId: key.split(":")[1], agentName: key === shortKey ? "Short chat" : "Long chat (220 messages)", updatedAt: 1_700_000_000_000 }));
+const sessions = [shortKey, longKey].map((key) => ({ key, backendId: "openclaw", agentId: key.split(":")[1], agentName: key === shortKey ? "Short chat" : "Long chat (220 messages)", updatedAt: 1_700_000_000_000 }));
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
 localStorage.setItem("shoggoth.chat.lastActive.v1", shortKey);
 localStorage.setItem("shoggoth.chat.immersive.v1", "0");
@@ -54,16 +55,29 @@ class FixtureSocket {
       payload = { runId: "fixture-run" };
     }
     if (request.method === "sessions.list") payload = { sessions, hasMore: false };
-    if (request.method === "agents.list") payload = { agents: sessions.map((row) => ({ id: row.agentId, name: row.agentName })) };
-    if (request.method === "chat.history") payload = { messages: request.params.sessionKey === longKey ? longHistory : shortHistory };
+    if (request.method === "agents.list") payload = { agents: sessions.map((row) => ({ id: row.agentId, name: row.agentName, backendId: row.backendId })) };
+    if (request.method === "chat.history") {
+      const messages = request.params.sessionKey === longKey ? longHistory : shortHistory;
+      const end = request.params.cursor ? Number(request.params.cursor) : messages.length;
+      const start = request.params.page ? Math.max(0, end - Math.min(request.params.limit ?? 100, 100)) : 0;
+      payload = { messages: messages.slice(start, end), hasMore: start > 0,
+        nextCursor: start > 0 ? String(start) : null, sourceId: `fixture:${request.params.sessionKey}` };
+    }
     setTimeout(() => this.emit({ type: "res", id: request.id, ok: true, payload }), 0);
   }
   close() { this.readyState = 3; }
 }
 state.WebSocket = FixtureSocket;
-state.fetch = async (url: unknown) => {
+state.fetch = async (url: unknown, init?: RequestInit) => {
   const pathname = String(url);
-  const payload = pathname.includes("/__api/status") ? { backends: [{ id: "openclaw", connected: true }] }
+  if (pathname.includes("/__api/chat/secrets/prepare")) {
+    const body = JSON.parse(String(init?.body));
+    if (typeof body.text !== "string" || typeof body.sessionKey !== "string" || typeof body.operationId !== "string") throw Error("invalid ordinary-input preparation fixture");
+    return new Response(JSON.stringify({ text: body.text, references: [], version: 1 }), { headers: { "Content-Type": "application/json" } });
+  }
+  const payload = pathname.includes("/__api/group-chats") ? { groups: [], enabled: true, internalSessions: [] }
+    : pathname.includes("/__api/connectors/mcp/requests") ? { items: [] }
+    : pathname.includes("/__api/status") ? { backends: [{ id: "openclaw", connected: true }] }
     : pathname.includes("/__api/backends") ? { backends: [] }
     : pathname.includes("/archive") ? { archive: { supported: true, segments: pathname.includes("%3Along") ? [{
       sealedAt: 1_600_000_000_000, fromReset: true,
@@ -102,9 +116,27 @@ state.runFixture = async () => {
   entries.length = 0;
   const start = performance.now();
   document.querySelector<HTMLButtonElement>('.chat-agent[title="perf"]')!.click();
-  await wait(() => bubbles().length === historyCount, "long history");
+  await wait(() => bubbles().length === 50, "first long-history page");
+  const initialPageMs = Math.round(performance.now() - start);
+  let earlierPages = 0;
+  while (bubbles().length < historyCount) {
+    const count = bubbles().length;
+    await wait(() => {
+      const button = document.querySelector<HTMLButtonElement>('[data-testid="chat-history-earlier"]');
+      return button && !button.disabled;
+    }, "earlier-history control ready");
+    document.querySelector<HTMLButtonElement>('[data-testid="chat-history-earlier"]')!.click();
+    await wait(() => bubbles().length > count, "earlier-history page loaded");
+    earlierPages++;
+  }
+  check(bubbles().length === historyCount, "all 220 history messages are loaded before performance checks");
+  // Earlier-page loading preserves its reading position. Opening measurements
+  // continue from the fully loaded transcript's explicit latest-message action.
+  document.querySelector<HTMLButtonElement>('.chat-jump')?.click();
+  await wait(() => thread().scrollHeight - thread().scrollTop - thread().clientHeight < 10, "expanded history at latest message");
   await frame(); await frame(); await pause(100);
   const opening = {
+    initialPageMs, earlierPages,
     elapsedMs: Math.round(performance.now() - start - 100),
     domNodes: thread().querySelectorAll("*").length,
     maxTaskMs: Math.max(0, ...entries.filter((entry) => entry.entryType === "longtask").map((entry) => entry.duration)),
@@ -182,12 +214,17 @@ state.runFixture = async () => {
   await i18n.changeLanguage(originalLanguage);
   await frame(); await frame();
 
-  document.querySelector<HTMLButtonElement>(".chat-pinbar__jump")!.click();
-  await pause(600);
-  const pinnedGroup = bubbles()[29].closest(".chat-group")!;
-  const pinnedRect = pinnedGroup.getBoundingClientRect();
-  const viewport = thread().getBoundingClientRect();
-  check(pinnedRect.bottom > viewport.top && pinnedRect.top < viewport.bottom, "pin jump must reveal the target group");
+  if (MESSAGE_PINNING_ENABLED) {
+    document.querySelector<HTMLButtonElement>(".chat-pinbar__jump")!.click();
+    await pause(600);
+    const pinnedGroup = bubbles()[29].closest(".chat-group")!;
+    const pinnedRect = pinnedGroup.getBoundingClientRect();
+    const viewport = thread().getBoundingClientRect();
+    check(pinnedRect.bottom > viewport.top && pinnedRect.top < viewport.bottom, "pin jump must reveal the target group");
+  } else {
+    check(!document.querySelector(".chat-pinbar"), "disabled pinning must not render pin controls");
+    check(localStorage.getItem("shoggoth.chat.pinned." + longKey) === JSON.stringify(["history-29"]), "disabled pinning retains saved pins");
+  }
 
   // Archive prepend must preserve the actual bubble, not just scrollHeight.
   const archiveIndex = state.archiveAtTop ? 0 : 55;
@@ -261,8 +298,8 @@ state.runFixture = async () => {
     .find((button) => button.getAttribute("aria-label") === i18n.t("chat.immersiveExit"))!.click();
   await wait(() => !document.querySelector('[data-testid="immersive-chat"]'), "exit immersive mode");
   return {
-    opening, interactions, agentSwitchMs, archiveAtTop: Boolean(state.archiveAtTop), withTools: __CHAT_PERF_WITH_TOOLS__, streamUpdates: 20, streamMarkdownCalls, bubbleReplacements: replacements,
+    opening, interactions, agentSwitchMs, archiveAtTop: Boolean(state.archiveAtTop), withTools: __CHAT_PERF_WITH_TOOLS__, pinningEnabled: MESSAGE_PINNING_ENABLED, streamUpdates: 20, streamMarkdownCalls, bubbleReplacements: replacements,
     assertions: state.baseline ? "baseline measurement (new optimization assertions skipped)"
-      : "bottom landing, pin jump, archive prepend, old-message viewport, composer, own-send anchor, session switch, immersive mode, full history retained",
+      : `bottom landing, ${MESSAGE_PINNING_ENABLED ? "pin jump" : "pin controls hidden and saved pins retained"}, archive prepend, old-message viewport, composer, own-send anchor, session switch, immersive mode, full history retained`,
   };
 };

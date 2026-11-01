@@ -5,6 +5,7 @@ import ShoggothCustomEndpointPanel from "../../app/manage-ui/src/pages/models/Sh
 import { ShoggothProviderSetup } from "../../app/manage-ui/src/components/ShoggothProviderSetup";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import { applyConfiguredLocale } from "../../app/manage-ui/src/i18n";
+import { profileProviderId } from "../../app/manage-ui/src/lib/shoggothProvider";
 import type { BackendDescriptor, CustomEndpoint, ShoggothProviderConfiguration, ShoggothProviderSnapshot } from "../../app/manage-ui/src/types";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
@@ -26,6 +27,15 @@ let snapshot: ShoggothProviderSnapshot = {
       baseUrl: "https://other-assistant.example/v1", baseUrlHost: "other-assistant.example",
       defaultModel: "other-model", authState: "configured" }],
 };
+// Presets this assistant configured earlier; they stay chat sources after the default moved.
+if (existing) {
+  const presetId = (kind: "openrouter" | "ollama") => profileProviderId(kind, snapshot);
+  snapshot.providers.push(
+    { id: presetId("openrouter"), kind: "openrouter", displayName: "OpenRouter", baseUrlHost: "openrouter.ai",
+      defaultModel: "anthropic/claude-sonnet-4.5", authState: "configured", validationStatus: "protocol_valid" },
+    { id: presetId("ollama"), kind: "ollama", displayName: "Ollama", baseUrlHost: "127.0.0.1:11434",
+      defaultModel: "qwen3:8b", authState: "not_required", validationStatus: "protocol_valid" });
+}
 let endpoints: CustomEndpoint[] = existing ? [
   { id: "provider-custom-existing", name: "gateway", baseUrl: "https://gateway.example:8443/openai/v1", model: "example-model", models: ["example-model", "example-small"], api: "openai-responses", hasApiKey: true, discoverModels: false },
   { id: "local", name: "local", baseUrl: "http://localhost:11434/v1", model: "local-model", models: ["local-model"], api: "openai-responses", hasApiKey: false, discoverModels: false },
@@ -33,7 +43,7 @@ let endpoints: CustomEndpoint[] = existing ? [
 ] : [];
 const endpointSnapshot = () => ({ supported: true, profiles: [snapshot.profile!.name], endpoints: endpoints.map(endpoint => ({ ...endpoint,
   profiles: [snapshot.profile!.name], activeIn: snapshot.profile!.configuredProviderId === endpoint.id ? [snapshot.profile!.name] : [] })),
-  form: { apiOptions: ["openai-responses"], defaultApi: "openai-responses", nameEditable: false, firstModelIsDefault: true } });
+  form: { apiOptions: ["openai-responses"], defaultApi: "openai-responses", nameEditable: false, firstModelIsDefault: false } });
 let calls = 0;
 let discoveryCalls = 0;
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -64,7 +74,7 @@ window.fetch = async (input, init) => {
       const endpoint = { ...body, hasApiKey: Boolean(body.apiKey || old?.hasApiKey), discoverModels: false, api: "openai-responses" };
       delete endpoint.apiKey;
       endpoints = [...endpoints.filter(endpoint => endpoint.id !== body.id), endpoint];
-      snapshot = { ...snapshot, profile: { ...snapshot.profile!, configuredProviderId: body.id, defaultModel: body.models[0], ready: true } };
+      // Saving adds the endpoint's models to the chat menu; the default source is chosen separately.
       document.getElementById("preview-models")!.textContent = JSON.stringify({ model: body.models[0], models: body.models });
       return response(endpointSnapshot());
     }
@@ -100,6 +110,33 @@ window.fetch = async (input, init) => {
       snapshot = { profile: { ...snapshot.profile!, configuredProviderId: provider.id, defaultModel: provider.defaultModel, ready: true },
         providers: [...snapshot.providers.filter((entry) => entry.id !== provider.id), provider] };
       return response({ profile: snapshot.profile, provider });
+    }
+    case "/__api/shoggoth/providers/bind-endpoint": {
+      const body = JSON.parse(String(init?.body));
+      record("bind-endpoint", body.profileId, body.providerRef);
+      if (body.profileId !== profileId) return response({ code: "WRONG_PROFILE" }, 400);
+      const preset = snapshot.providers.find(entry => entry.id === body.providerRef && entry.kind !== "custom-responses");
+      if (preset) {
+        if (preset.defaultModel !== body.defaultModel) return response({ code: "PROFILE_MODEL_MISMATCH" }, 409);
+        snapshot = { ...snapshot, profile: { ...snapshot.profile!, configuredProviderId: preset.id, defaultModel: body.defaultModel, ready: true } };
+        document.getElementById("preview-models")!.textContent = JSON.stringify({ defaultSource: preset.id, model: body.defaultModel });
+        return response({ profile: snapshot.profile });
+      }
+      const endpoint = endpoints.find(entry => entry.id === body.providerRef);
+      if (!endpoint?.models.includes(body.defaultModel)) return response({ code: "PROFILE_MODEL_MISMATCH" }, 409);
+      snapshot = { profile: { ...snapshot.profile!, configuredProviderId: endpoint.id, defaultModel: body.defaultModel, ready: true },
+        providers: [...snapshot.providers.filter(entry => entry.id !== endpoint.id), { id: endpoint.id, kind: "custom-responses",
+          displayName: endpoint.name, defaultModel: body.defaultModel, authState: "configured", validationStatus: "protocol_valid" }] };
+      document.getElementById("preview-models")!.textContent = JSON.stringify({ defaultSource: endpoint.id, model: body.defaultModel });
+      return response({ profile: snapshot.profile });
+    }
+    case "/__api/shoggoth/providers/remove": {
+      const body = JSON.parse(String(init?.body));
+      record("remove", body.profileId, body.providerId);
+      if (body.profileId !== profileId) return response({ code: "WRONG_PROFILE" }, 400);
+      if (snapshot.profile?.configuredProviderId === body.providerId) return response({ code: "HOST_PROVIDER_IN_USE" }, 409);
+      snapshot = { ...snapshot, providers: snapshot.providers.filter(entry => entry.id !== body.providerId) };
+      return response({ removed: body.providerId });
     }
     case "/__api/shoggoth/providers/clear": {
       const body = JSON.parse(String(init?.body));

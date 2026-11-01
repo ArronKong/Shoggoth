@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatRunWait, chatRunWaitState } from "../../app/manage-ui/src/components/ChatRunWait";
+import TurnProcess from "../../app/manage-ui/src/components/TurnTimeline/TurnProcess";
+import { withStartupWait } from "../../app/manage-ui/src/lib/chatRunWait";
 import FusionLoader from "../../app/manage-ui/src/components/FusionLoader";
 import ImmersiveStatusLine from "../../app/manage-ui/src/pages/immersive/ImmersiveStatusLine";
 import immersiveStyles from "../../app/manage-ui/src/pages/immersive/ImmersiveChat.module.css";
@@ -11,11 +13,22 @@ import "../../app/manage-ui/src/pages/ChatPage.css";
 
 const frame = () => new Promise(resolve => requestAnimationFrame(resolve));
 const require = (condition: unknown, message: string) => { if (!condition) throw Error(message); };
+const queueCases = [
+  ["global", "GLOBAL_CAPACITY", "等待原生任务执行名额", "Waiting for native task capacity"],
+  ["startup", "STARTUP_BACKPRESSURE", "等待其他助理启动完成", "Waiting for other assistants to finish starting"],
+  ["host", "HOST_CAPACITY", "等待可用的助理进程", "Waiting for an available assistant process"],
+  ["control-host", "RUNTIME_HOST_CAPACITY", "等待可用的助理进程", "Waiting for an available assistant process"],
+  ["service", "SERVICE_QUIESCED", "等待本地服务恢复接收任务", "Waiting for the local service to resume accepting tasks"],
+  ["agent-write", "PROFILE_WORKSPACE_WRITE_LIMIT", "等待此助理的可写任务名额", "Waiting for this assistant's writable task capacity"],
+  ["unknown", "private queue detail", "正在确认等待原因", "Checking the reason for waiting"],
+];
 function Fixture() {
   const [kind, setKind] = useState("queued");
   const [reason, setReason] = useState("RUNTIME_ACCOUNT_ACTIVE_LIMIT");
+  const [stage, setStage] = useState("connecting");
   const [since] = useState(Date.now() - 65000);
-  const wait = chatRunWaitState({ statusKind: kind, queuedAt: since, reason });
+  const wait = chatRunWaitState({ statusKind: kind, queuedAt: since, reason, stage });
+  const startupSteps = withStartupWait([], wait ?? undefined);
   return <main className="chat-shell" style={{ display: "block", height: "auto", padding: 24, maxWidth: 1024, margin: "0 auto", background: "#fff" }}>
     <header className="chat-header" style={{ position: "relative" }}>
       <div className="chat-header__avatar" style={{ borderRadius: "50%", background: "#e3e9e1", width: 48, height: 48, flexShrink: 0 }} />
@@ -31,7 +44,10 @@ function Fixture() {
       <button id="queue" onClick={() => { setKind("queued"); setReason("RUNTIME_ACCOUNT_ACTIVE_LIMIT"); }}>账号排队</button>
       <button id="backend" onClick={() => { setKind("queued"); setReason("BACKEND_ACTIVE_LIMIT"); }}>后端排队</button>
       <button id="background" onClick={() => { setKind("queued"); setReason("BACKEND_BACKGROUND_ACTIVE_LIMIT"); }}>后台排队</button>
-      <button id="start" onClick={() => setKind("starting")}>连接</button>
+      {queueCases.map(([id, value]) => <button key={id} id={id} onClick={() => { setKind("queued"); setReason(value); }}>{id}</button>)}
+      <button id="context" onClick={() => { setKind("starting"); setStage("context"); }}>准备上下文</button>
+      <button id="capabilities" onClick={() => { setKind("starting"); setStage("capabilities"); }}>检查助理</button>
+      <button id="start" onClick={() => { setKind("starting"); setStage("connecting"); }}>连接</button>
       <button id="run" onClick={() => setKind("running")}>运行</button>
       <button id="retry" onClick={() => { setKind("retrying"); setReason("RUNTIME_RATE_LIMITED"); }}>限流重试</button>
       <button id="retry-other" onClick={() => { setKind("retrying"); setReason("private provider trace"); }}>上游重试</button>
@@ -40,16 +56,18 @@ function Fixture() {
     </div>
     <div className="chat-group is-assistant">
       <div className="chat-group__stack">
+        {wait?.kind === "starting" && <TurnProcess steps={startupSteps} live defaultOpen />}
         {wait?.kind === "retrying" && (
           <div className="chat-bubble is-error" data-testid="chat-retry-status"><ChatRunWait state={wait} /></div>
         )}
-        <div className="chat-bubble is-streaming" style={{ width: "fit-content" }}>
-          {wait?.kind === "queued" && <ChatRunWait state={wait} />}
+        {wait?.kind !== "starting" && <div className="chat-bubble is-streaming" style={{ width: "fit-content" }}>
+          {wait && wait.kind !== "retrying" && <ChatRunWait state={wait} />}
           <FusionLoader size="sm" ariaLabel={i18n.t("chat.liveStatus.running")} />
-        </div>
+        </div>}
       </div>
     </div>
     <div style={{ marginTop: 40, padding: 24, background: "#0b0d12" }}>
+      {wait?.kind === "starting" && <TurnProcess steps={startupSteps} live defaultOpen />}
       {wait?.kind === "retrying" && (
         <div className={immersiveStyles.asstRow} data-testid="immersive-retry-status">
           <div className={immersiveStyles.errCard}><ChatRunWait state={wait} /></div>
@@ -68,10 +86,33 @@ void i18n.changeLanguage("zh-CN").then(() => {
   await click("queue");
   require(document.querySelector(".chat-bubble.is-streaming")?.textContent?.includes("等待账号空位"), "queue reason visible");
   require(document.querySelector(".chat-bubble.is-streaming")?.textContent?.includes("1m"), "elapsed queue time visible");
+  for (const lang of ["chinese", "english"]) {
+    await click(lang);
+    for (const [id, , chinese, english] of queueCases) {
+      await click(id);
+      const label = lang === "chinese" ? chinese : english;
+      require(document.querySelector(".chat-bubble.is-streaming")?.textContent?.includes(label), `${lang} ${id} queue reason visible`);
+      require(document.querySelectorAll('[data-kind="queued"]').length === 3, "header, normal and immersive chat share queue feedback");
+      require(!document.body.textContent?.includes("private queue detail"), "unknown queue data stays private");
+    }
+    for (const [id, chinese, english] of [
+      ["context", "正在准备对话上下文", "Preparing conversation context"],
+      ["capabilities", "正在检查助理是否就绪", "Checking assistant readiness"],
+    ]) {
+      await click(id);
+      const label = lang === "chinese" ? chinese : english;
+      require(document.querySelectorAll('[data-chat-process] [data-kind="starting"]').length === 2, "pre-admission work uses both activity timelines");
+      require(document.querySelector("[data-chat-process]")?.textContent?.includes(label), `${lang} ${id} preparation visible`);
+      require(!document.body.textContent?.includes("等待执行名额"), "preparation does not claim to be waiting for execution capacity");
+    }
+  }
+  await click("chinese");
   await click("start");
-  require(document.querySelector("[data-testid=chat-run-wait]") === null, "connecting label and timer are hidden across chat surfaces");
-  require(document.querySelector(".chat-bubble.is-streaming")?.textContent === "", "connecting bubble contains no status text");
-  require(!!document.querySelector(".chat-bubble.is-streaming [role=status] svg"), "connecting retains the waiting animation");
+  require(document.querySelectorAll("[data-testid=chat-run-wait][data-kind=starting]").length === 2, "connecting phase is visible in normal and immersive chat");
+  require(document.querySelectorAll('[data-chat-process] [data-kind="starting"]').length === 2, "both chat surfaces put startup inside the shared activity timeline");
+  require(document.querySelector("[data-chat-process]")?.textContent?.includes("正在连接助理"), "connecting uses conversational copy");
+  require(document.querySelector('.chat-bubble [data-kind="starting"]') === null && document.querySelector(".chat-bubble.is-streaming") === null, "startup does not create an empty reply bubble");
+  require(!!document.querySelector('[data-chat-process] [data-live="1"] svg'), "connecting retains the activity waiting animation");
   await click("run");
   require(document.querySelector(".chat-header [data-testid=chat-run-wait]") === null, "header queue disappears when running");
   await click("queue"); await click("english");
@@ -111,5 +152,7 @@ void i18n.changeLanguage("zh-CN").then(() => {
   const status = document.querySelector(".chat-header__statusline")!.getBoundingClientRect();
   const meta = document.querySelector(".chat-header__meta")!.getBoundingClientRect();
   require(meta.right <= status.right + 1, "long session title stays inside header");
+  await click("host");
+  require(document.documentElement.scrollWidth <= innerWidth, "specific queue explanation wraps without horizontal overflow");
   return { ok: true, width: innerWidth, height: innerHeight };
 };

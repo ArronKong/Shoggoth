@@ -232,7 +232,7 @@ test("终态关联 ACK 的 native runId；旧回合事件不能终结续聊，ab
   });
 });
 
-test("异步和旧同步报告均保留 30 分钟上界与显式短期限", async () => {
+test("异步默认无总时限，有限值可超过三十分钟且仍拒绝溢出", async () => {
   let sends = 0;
   await withBroker((socket, frame) => {
     if (frame.method === "sessions.create") socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { key: "long-report" } }));
@@ -242,12 +242,15 @@ test("异步和旧同步报告均保留 30 分钟上界与显式短期限", asyn
     }
   }, async origin => {
     const runner = createFederatedAgentTaskRunner({ origin });
-    const input = { backendId: "hermes", agentId: "one", prompt: "report", timeoutMs: 1_800_000 };
+    const input = { backendId: "hermes", agentId: "one", prompt: "report" };
     try {
       const task = await runner.run(input); assert.equal(task.status, "running");
-      await assert.rejects(runner.run({ ...input, timeoutMs: 1_800_001 }), error => error.code === "AGENT_OPERATION_FAILED");
-      await assert.rejects(runFederatedAgentViaBroker({ ...input, origin, timeoutMs: 1_800_001 }), error => error.code === "AGENT_OPERATION_FAILED");
-      assert.equal(sends, 1);
+      const longer = await runner.run({ ...input, timeoutMs: 1_800_001 });
+      assert.equal(longer.status, "running");
+      await runner.cancel({ backendId: input.backendId, agentId: input.agentId, taskId: longer.taskId });
+      await assert.rejects(runner.run({ ...input, timeoutMs: 2_147_000_001 }), error => error.code === "AGENT_OPERATION_FAILED");
+      await assert.rejects(runFederatedAgentViaBroker({ ...input, origin, timeoutMs: 2_147_000_001 }), error => error.code === "AGENT_OPERATION_FAILED");
+      assert.equal(sends, 2);
       await runner.cancel({ backendId: input.backendId, agentId: input.agentId, taskId: task.taskId });
     } finally { runner.close(); }
   });

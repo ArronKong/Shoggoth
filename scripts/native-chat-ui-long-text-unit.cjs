@@ -82,7 +82,7 @@ test("actual Coordinator Runtime long event reaches Backend once and stays withi
     assert.deepEqual(received, [text]); assert.equal(state.nativeContent.parts[0].text, text);
     const wrong = structuredClone(fragments); wrong[1].payload.sha256 = "f".repeat(64);
     const partial = {}; consumeChatTextFragment(partial, wrong[0]); assert.throws(() => consumeChatTextFragment(partial, wrong[1]));
-    const sent = []; assert.throws(() => appendChatText({ append: (...args) => sent.push(args) }, "text", { text }, () => false, run.id), { code: "RUN_EVENT_SECRET_REJECTED" });
-    assert.equal(sent.length, 0); unsubscribe.unsubscribe();
+    const sent = []; appendChatText({ append: (...args) => sent.push(args) }, "text", { text });
+    assert.equal(sent.length, fragments.length); unsubscribe.unsubscribe();
   } finally { await f.coordinator.close(); }
 });

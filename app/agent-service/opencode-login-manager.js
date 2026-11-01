@@ -8,7 +8,7 @@ const crypto = require("node:crypto");
 const { serviceError } = require("./security");
 
 const TERMINAL = new Set(["succeeded", "failed", "canceled", "timed_out", "unknown"]);
-const LOGIN_TIMEOUT_MS = 15 * 60 * 1_000;
+const LOGIN_TIMEOUT_MS = 60 * 60 * 1_000;
 const CANCEL_SETTLE_MS = 15_000;
 
 function delay(ms) {

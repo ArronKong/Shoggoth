@@ -12,7 +12,7 @@ import sys
 import uuid
 from pathlib import Path
 
-VERSION = 13  # Kept in sync with Service by release-package-checks and registrar.
+VERSION = 27  # Kept in sync with Service by release-package-checks and registrar.
 MAX_FRAME = 64 * 1024
 ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
@@ -137,7 +137,7 @@ def read_credential() -> str:
         os.close(fd)
 
 
-def request_service(method: str, params: dict, timeout: float = 10.0) -> dict:
+def request_service(method: str, params: dict, timeout: float | None = 10.0) -> dict:
     target = _private_child_root("run") / "service.sock"
     before = _safe(target, "socket")
     request_id = str(uuid.uuid4())
@@ -146,12 +146,13 @@ def request_service(method: str, params: dict, timeout: float = 10.0) -> dict:
     if len(frame) > MAX_FRAME:
         raise RuntimeError("Shoggoth adapter request is too large")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(timeout)
+        client.settimeout(30.0 if timeout is None else timeout)
         client.connect(str(target))
         current = _safe(target, "socket")
         if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
             raise RuntimeError("Shoggoth Service socket changed")
         client.sendall(frame)
+        client.settimeout(timeout)
         chunks = bytearray()
         while True:
             part = client.recv(8192)

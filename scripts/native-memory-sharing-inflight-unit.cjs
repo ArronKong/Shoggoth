@@ -3,7 +3,6 @@
 // This proves local interruption/publication/session renewal, not a live provider.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
@@ -50,8 +49,7 @@ for (const action of ["exclude source", "delete source memory"]) {
       assert.equal(run.status, "running", run.errorCode);
       const coordinator = f.service.workRunCoordinator, events = [];
       subscription = coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));
-      const call = (name, args) => f.service.mcpProductToolController.handle(name,
-        { source: "chat", sourceId: run.sourceId, ...args }, { profileId: f.profile.id, callId: crypto.randomUUID() });
+      const call = (name, args) => f.callTool(run, name, args);
       const found = await call("memory_search", { query: "telescope", minScore: 0, maxResults: 20, ownerProfileId: f.B });
       const borrowed = found.results.find(value => value.ownerProfileId === f.B);
       assert.ok(borrowed, "actual running chat must borrow through the real MCP controller");
@@ -105,9 +103,7 @@ test("a pending source-withdrawal interrupt filters late events and joins one na
     const session = f.createSession(), coordinator = f.service.workRunCoordinator;
     const run = await f.send(session.sessionKey, "borrowed-pending-interrupt", "Find telescope memory");
     assert.equal(run.status, "running", run.errorCode);
-    const found = await f.service.mcpProductToolController.handle("memory_search",
-      { source: "chat", sourceId: run.sourceId, query: "telescope", minScore: 0 },
-      { profileId: f.profile.id, callId: crypto.randomUUID() });
+    const found = await f.callTool(run, "memory_search", { query: "telescope", minScore: 0 });
     assert.ok(found.results.some(value => value.ownerProfileId === f.B && value.borrowed));
     const host = f.transport.hosts.get("codex"), events = [], before = host.turnInterruptCalls;
     subscription = coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));

@@ -6,6 +6,13 @@ const MAX_TEXT_BYTES = 16 * 1024;
 const MAX_COMMAND_BYTES = 24 * 1024;
 const MAX_MESSAGE_BYTES = 4 * 1024;
 const MAX_SCHEMA_BYTES = 64 * 1024;
+// Codex's typed MCP form schema drops extension keywords. Carry suggestions in
+// the standard description string while leaving the answer an unrestricted string.
+const INPUT_CHOICES_DESCRIPTION_PREFIX = "Shoggoth input choices v1\n";
+
+function encodeInputChoicesDescription(description, options) {
+  return INPUT_CHOICES_DESCRIPTION_PREFIX + JSON.stringify({ description, options });
+}
 // Keep enough headroom for the federation event envelope. Run events and the
 // Service event ring both cap an encoded item at 48 KiB, but the latter adds
 // profile/session routing fields around this payload.
@@ -137,6 +144,20 @@ function normalizeFields(schema) {
     const label = text(spec.title, id, 512);
     const rawDescription = text(spec.description, "", 2048);
     const secret = spec.writeOnly === true || spec.format === "password";
+    if (typeof spec.description === "string" && spec.description.startsWith(INPUT_CHOICES_DESCRIPTION_PREFIX)) {
+      if (spec.type !== "string" || spec.enum !== undefined || spec.enumNames !== undefined || secret
+        || id === "confirm_product_action" || !safeString(spec.description, MAX_TEXT_BYTES)) throw interactionError();
+      let suggested;
+      try { suggested = JSON.parse(spec.description.slice(INPUT_CHOICES_DESCRIPTION_PREFIX.length)); } catch { throw interactionError(); }
+      if (!exactKeys(suggested, ["description", "options"]) || !safeString(suggested.description, 2048, true)
+        || !Array.isArray(suggested.options) || suggested.options.length < 2 || suggested.options.length > MAX_OPTIONS
+        || suggested.options.some(option => !exactKeys(option, ["label", "description"])
+          || !safeString(option.label, 512) || !safeString(option.description, 2048, true))
+        || new Set(suggested.options.map(option => option.label)).size !== suggested.options.length) throw interactionError();
+      return { id, type: "choice_or_text", label, description: suggested.description,
+        required: required.has(id), secret: false,
+        options: suggested.options.map(option => ({ value: option.label, ...option })) };
+    }
     if (Array.isArray(spec.enum)) {
       if (spec.type !== "string" || spec.enum.length < 2 || spec.enum.length > MAX_OPTIONS
         || spec.enum.some((value) => !safeString(value, 512))) throw interactionError();
@@ -372,6 +393,7 @@ function validateInteractiveResponseV1(request, response) {
     }
     const value = response.answers[field.id];
     if (!safeString(value, MAX_TEXT_BYTES, !field.required)
+      || (field.type === "choice_or_text" && field.required && !value.trim())
       || (field.type === "choice" && !field.options.some((option) => option.value === value))) {
       throw interactionError("INTERACTION_RESPONSE_INVALID");
     }
@@ -381,6 +403,7 @@ function validateInteractiveResponseV1(request, response) {
 }
 
 module.exports = {
+  encodeInputChoicesDescription,
   mcpElicitationUsesApprovalWait,
   normalizeInteractiveRequestV1,
   parseMcpToolPermission,

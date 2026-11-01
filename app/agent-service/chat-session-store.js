@@ -34,6 +34,23 @@ const PRE_HANDOFF_SESSION_FIELDS = Object.freeze([
 ]);
 const SESSION_FIELDS = Object.freeze([...PRE_HANDOFF_SESSION_FIELDS, "runtimeBindingId", "retiredRuntimeSessions", "revision"]);
 const SESSION_STATUSES = new Set(["draft", "binding", "ready", "archived", "delete_pending"]);
+// Optional per-session model source: "@chatgpt" or a source provider id
+// (codex-session-provider). Absent means the Profile default source.
+const MODEL_PROVIDER_SELECTION = /^(?:@chatgpt|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/u;
+// The source the current native session was created on, recorded with that
+// session's id so that a stale record (after any renewal) is simply ignored.
+function validRuntimeModelSource(value) {
+  return exactObject(value, ["runtimeSessionId", "source"])
+    && validNullableText(value.runtimeSessionId, 512) && value.runtimeSessionId !== null
+    && validModelProviderSelection(value.source);
+}
+function validModelProviderSelection(value) {
+  return typeof value === "string" && MODEL_PROVIDER_SELECTION.test(value);
+}
+function withModelProvider(value, selection) {
+  const { modelProviderRef: _previous, ...rest } = value;
+  return selection === undefined || selection === null ? rest : { ...rest, modelProviderRef: selection };
+}
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const BINDING_FIELDS = Object.freeze([
   "operationId", "sessionKey", "threadSource", "state", "runtimeSessionId",
@@ -93,8 +110,17 @@ function normalizeSession(input, corrupt = false) {
   if (hasSettings) fields = [...fields, "modelSettings"];
   const hasNext = Object.hasOwn(input || {}, "nextRuntimeSelection");
   if (hasNext) fields = [...fields, "nextRuntimeSelection"];
+  const hasProvider = Object.hasOwn(input || {}, "modelProviderRef");
+  if (hasProvider) fields = [...fields, "modelProviderRef"];
+  if (hasProvider && !validModelProviderSelection(input.modelProviderRef)) fail();
+  const hasSource = Object.hasOwn(input || {}, "runtimeModelSource");
+  if (hasSource) fields = [...fields, "runtimeModelSource"];
+  if (hasSource && !validRuntimeModelSource(input.runtimeModelSource)) fail();
   const next = input?.nextRuntimeSelection;
-  if (hasNext && (!exactObject(next, ["bindingId", "model", "permissionMode", "modelSettings"])
+  const nextHasProvider = hasNext && Object.hasOwn(next || {}, "modelProviderRef");
+  if (nextHasProvider && !validModelProviderSelection(next.modelProviderRef)) fail();
+  if (hasNext && (!exactObject(next, ["bindingId", "model", "permissionMode", "modelSettings",
+    ...(nextHasProvider ? ["modelProviderRef"] : [])])
     || !UUID_PATTERN.test(next.bindingId) || !validNullableText(next.model, 512)
     || next.model === null || !validNullableText(next.permissionMode, 64)
     || !validModelSettings(next.modelSettings))) fail();
@@ -386,6 +412,7 @@ function validateContainer(value, { getProfileBinding = null } = {}) {
 class ChatSessionStore {
   // Every write installs a new sessions object, so its identity versions this index.
   #sessionIndex = null;
+  #authorityRevisions = new Map();
 
   constructor(options = {}) {
     if (!options.paths?.stateDir || !options.paths?.trustedRoot) {
@@ -526,6 +553,18 @@ class ChatSessionStore {
     this.changeSubscriptions.add(subscription);
     signal?.addEventListener("abort", subscription.unsubscribe, { once: true });
     return subscription.unsubscribe;
+  }
+
+  #trackAuthorityChanges(previous, current) {
+    const authority = session => JSON.stringify([session.id, session.sessionKey, session.profileId, session.workspace ?? null,
+      ["archived", "delete_pending"].includes(session.status), session.cronOrigin ?? null]);
+    for (const [key, prior] of Object.entries(previous?.sessions || {})) {
+      const next = current.sessions[key];
+      if (next && authority(next) === authority(prior)) continue;
+      for (const profileId of new Set([prior.profileId, next?.profileId].filter(Boolean))) {
+        this.#authorityRevisions.set(profileId, (this.#authorityRevisions.get(profileId) || 0) + 1);
+      }
+    }
   }
 
   #notifyChanges(previous, current) {
@@ -824,13 +863,14 @@ class ChatSessionStore {
     return binding;
   }
 
-  queueRuntimeSelection(sessionKey, { bindingId, model, permissionMode, modelSettings = { thinkingLevel: null, serviceTier: null }, revision }) {
+  queueRuntimeSelection(sessionKey, { bindingId, model, permissionMode, modelSettings = { thinkingLevel: null, serviceTier: null },
+    modelProviderRef = null, revision }) {
     this.#assertOpen();
     const session = this.container.sessions[sessionKey];
     if (!session || !["draft", "binding", "ready"].includes(session.status)) throw chatSessionError("CHAT_SESSION_NOT_READY", "会话不可修改");
     if (session.revision !== revision) throw chatSessionError("CHAT_SESSION_REVISION_CONFLICT", "会话已更新");
     this.#resolveBinding(session.profileId, bindingId);
-    const nextRuntimeSelection = { bindingId, model, permissionMode, modelSettings };
+    const nextRuntimeSelection = withModelProvider({ bindingId, model, permissionMode, modelSettings }, modelProviderRef);
     const updated = normalizeSession({ ...session, nextRuntimeSelection, revision: session.revision + 1,
       updatedAt: Math.max(this.#currentTime(), session.updatedAt) });
     this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
@@ -841,7 +881,11 @@ class ChatSessionStore {
   switchRuntime(sessionKey, input) {
     this.#assertOpen();
     if (!UUID_PATTERN.test(sessionKey) || !input || typeof input !== "object" || Array.isArray(input)
-      || Object.keys(input).some((key) => !["bindingId", "revision", "clearModelOverride", "permissionMode", "model", "renewSession"].includes(key))
+      || Object.keys(input).some((key) => !["bindingId", "revision", "clearModelOverride", "permissionMode", "model", "renewSession",
+        "modelProviderRef"].includes(key))
+      || (input.modelProviderRef !== undefined && input.modelProviderRef !== null
+        && !validModelProviderSelection(input.modelProviderRef))
+      || (input.modelProviderRef !== undefined && input.model === undefined)
       || !validOpaqueId(input.bindingId) || !Number.isSafeInteger(input.revision)
       || (input.clearModelOverride !== undefined && typeof input.clearModelOverride !== "boolean")
       || (input.renewSession !== undefined && typeof input.renewSession !== "boolean")
@@ -866,10 +910,12 @@ class ChatSessionStore {
     }
     if (input.model !== undefined && session.runtimeBindingId === target.id && input.renewSession !== true) {
       if (!session.nextRuntimeSelection && session.modelOverride === input.model
+        && (session.modelProviderRef ?? null) === (input.modelProviderRef ?? null)
         && (input.permissionMode === undefined || input.permissionMode === session.permissionMode)) {
         return this.getSession(sessionKey);
       }
-      const updated = normalizeSession({ ...settled, modelOverride: input.model, revision: session.revision + 1,
+      const updated = normalizeSession({ ...withModelProvider(settled, input.modelProviderRef), modelOverride: input.model,
+        revision: session.revision + 1,
         modelSettings: { thinkingLevel: null, serviceTier: null },
         ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
         updatedAt: Math.max(this.#currentTime(), session.updatedAt) });
@@ -886,7 +932,10 @@ class ChatSessionStore {
         runtimeSessionId: session.runtimeSessionId, retiredAt: this.#currentTime() });
     }
     const switchedAt = this.#currentTime();
-    const updated = normalizeSession({ ...settled, runtimeBindingId: target.id, runtimeSessionId: null, revision: session.revision + 1,
+    // A model choice names its source; clearing the model also drops the source.
+    const sourced = input.model !== undefined ? withModelProvider(settled, input.modelProviderRef)
+      : input.clearModelOverride ? withModelProvider(settled, null) : settled;
+    const updated = normalizeSession({ ...sourced, runtimeBindingId: target.id, runtimeSessionId: null, revision: session.revision + 1,
       retiredRuntimeSessions: retired, status: "draft", updatedAt: Math.max(switchedAt, session.updatedAt),
       ...(input.clearModelOverride ? { modelOverride: null,
         ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}) } : {}),
@@ -928,12 +977,13 @@ class ChatSessionStore {
       throw chatSessionError("CHAT_SESSION_NOT_READY", "ChatSession 当前不允许切换模型");
     }
     if (session.nextRuntimeSelection) return this.queueRuntimeSelection(sessionKey, {
-      ...session.nextRuntimeSelection, model, modelSettings: { thinkingLevel: null, serviceTier: null }, revision: session.revision });
-    if (session.modelOverride === model) return clone(session);
+      ...session.nextRuntimeSelection, model, modelSettings: { thinkingLevel: null, serviceTier: null },
+      modelProviderRef: null, revision: session.revision });
+    if (session.modelOverride === model && session.modelProviderRef === undefined) return clone(session);
     const time = this.#currentTime();
     this.#refreshWindow(time);
     const updated = normalizeSession({
-      ...session,
+      ...withModelProvider(session, null),
       modelOverride: model,
       revision: session.revision + 1,
       modelSettings: { thinkingLevel: null, serviceTier: null },
@@ -1035,6 +1085,14 @@ class ChatSessionStore {
     return index.digests.get(profileId);
   }
 
+  // Bumped only when an existing session stops being a memory source or its
+  // owner, key or workspace changes. Creating sessions, binding them and
+  // ordinary turns never bump it, so in-flight memory reads survive them.
+  profileSessionsAuthorityRevision(profileId) {
+    this.#assertOpen();
+    return this.#authorityRevisions.get(profileId) || 0;
+  }
+
   #indexedSessions() {
     const source = this.container.sessions;
     if (this.#sessionIndex?.source !== source) {
@@ -1133,6 +1191,25 @@ class ChatSessionStore {
     };
     this.container = this.#write(candidate);
     return clone(operation);
+  }
+
+  // Records the model source a native session runs on (built-in Codex
+  // Harness). Session-runtime-controller renews the native session before a
+  // send whose source differs, so a thread never resumes on another source.
+  recordRuntimeModelSource(sessionKey, runtimeSessionId, source) {
+    this.#assertOpen();
+    if (!UUID_PATTERN.test(sessionKey) || !validRuntimeModelSource({ runtimeSessionId, source })) {
+      throw chatSessionError("CHAT_SESSION_INVALID", "ChatSession 数据无效");
+    }
+    const session = this.container.sessions[sessionKey];
+    if (!session) throw chatSessionError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
+    const current = session.runtimeModelSource;
+    if (session.runtimeSessionId !== runtimeSessionId
+      || (current?.runtimeSessionId === runtimeSessionId && current.source === source)) return this.getSession(sessionKey);
+    const updated = normalizeSession({ ...session, runtimeModelSource: { runtimeSessionId, source } });
+    this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
+      sessions: { ...this.container.sessions, [sessionKey]: updated } });
+    return this.getSession(sessionKey);
   }
 
   completeBinding(sessionKey, operationId, runtimeSessionId) {
@@ -1563,6 +1640,7 @@ class ChatSessionStore {
       }
     }
     this.cronOriginIndex = null;
+    this.#trackAuthorityChanges(this.container, validated);
     this.#notifyChanges(this.container, validated);
     return validated;
   }

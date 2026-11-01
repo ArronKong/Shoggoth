@@ -9,6 +9,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { openBridgeFixture, waitUntil } = require("./fixtures/runtime-bridge-harness.cjs");
+const { createSyntheticAppleNative } = require("./fixtures/apple-device-service-fixture.cjs");
+const { createAppleDeviceHost } = require("../app/apple-device-host");
 
 async function fixture() {
   const productCalls = [];
@@ -73,13 +75,65 @@ test("Browser Use opens after the user confirms, and a second prompt works indep
   } finally { await value.close(); }
 });
 
-test("closing the bridge cancels its pending prompt and returns the Run to running", async () => {
+for (const disconnect of ["close", "end"]) test(`${disconnect} on the bridge cancels its pending prompt and returns the Run to running`, async () => {
   const value = await fixture();
   try {
-    value.callTool("computer_session_open", computerArgs);
+    const call = value.callTool("computer_session_open", computerArgs);
     await waitUntil(() => ["waiting_approval", "waiting_input"].includes(value.run().status), "the user prompt");
-    value.connection.close();
+    value.connection[disconnect]();
     await waitUntil(() => value.run().status === "running", "abandoned prompt to be withdrawn");
+    if (disconnect === "end") {
+      assert.equal((await call.response).id, call.id, "the cancelled call response must still drain after input EOF");
+      await waitUntil(() => value.connection.isClosed(), "bridge socket to close after draining");
+    }
     assert.deepEqual(value.productCalls.map(call => call.name), ["computer_status"]);
+  } finally { await value.close(); }
+});
+
+test("a timed-out Apple delete cancels its exact approval without closing the bridge or accepting a late approve", async () => {
+  const synthetic = createSyntheticAppleNative(); synthetic.authorization.reminders = "fullAccess";
+  const deviceHost = createAppleDeviceHost({ native: synthetic.native, openExternal: async () => assert.fail("no real settings") });
+  const value = await openBridgeFixture({ serviceOptions: { federationHostClient: {
+    async request(method, params, options) {
+      if (method === "apple.device.invoke") return deviceHost.invoke(params, options);
+      throw Object.assign(new Error("fixture external backends unavailable"), { code: "BACKEND_UNAVAILABLE" });
+    },
+  } } });
+  try {
+    const device = value.service.appleDeviceController;
+    await device.setPolicy({ resource: "reminders", enabled: true, readPolicy: "allow", writePolicy: "ask", disabledProfileIds: [], expectedRevision: device.state.revision });
+    const target = [...synthetic.reminders.values()][0];
+    const args = { id: target.id, expectedRevision: target.revision };
+    const call = value.callTool("apple_reminders_delete", args);
+    await waitUntil(() => value.run().status === "waiting_approval", "Apple delete approval");
+    const requestId = value.run().waitingRequestId;
+    const pending = value.service.workRunCoordinator.pendingRequests.get(requestId);
+    assert.equal(pending.params.toolName, "apple_reminders_delete");
+    assert.equal(synthetic.count("reminders.delete"), 0);
+    value.connection.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: {
+      requestId: call.id, reason: "upstream MCP timeout after 180000ms",
+    } });
+    await waitUntil(() => value.run().status === "running"
+      && !value.service.workRunCoordinator.pendingRequests.has(requestId), "canceled Apple approval to withdraw");
+    const canceled = await call.response;
+    assert.equal(canceled.id, call.id);
+    assert.ok(canceled.error || canceled.result?.isError, JSON.stringify(canceled));
+    assert.equal(value.connection.isClosed(), false, "request cancellation must not close the MCP connection");
+    await assert.rejects(() => value.service.workRunCoordinator.respondApproval({ operationId: "late-device-approval",
+      runId: value.run().id, requestId, choice: "once" }), error => error.code === "WORK_RUN_REQUEST_MISMATCH");
+    assert.equal(synthetic.count("reminders.delete"), 0, "an expired upstream call must never dispatch its late approval");
+    assert.equal(synthetic.reminders.has(target.id), true);
+    assert.equal(device.ledger.size, 0, "an unapproved cancellation creates no native write receipt to replay");
+    const read = value.callTool("apple_reminders_get", { id: target.id });
+    assert.equal((await read.response).result.structuredContent.reminder.id, target.id);
+    const fresh = value.callTool("apple_reminders_delete", args);
+    await waitUntil(() => value.run().status === "waiting_approval", "a fresh delete approval");
+    assert.notEqual(value.run().waitingRequestId, requestId);
+    assert.equal(synthetic.count("reminders.delete"), 0, "fresh requests still require their own device approval");
+    await value.service.workRunCoordinator.respondApproval({ operationId: "fresh-device-approval",
+      runId: value.run().id, requestId: value.run().waitingRequestId, choice: "once" });
+    assert.equal((await fresh.response).result.isError, false);
+    assert.equal(synthetic.count("reminders.delete"), 1);
+    assert.equal(synthetic.reminders.has(target.id), false);
   } finally { await value.close(); }
 });

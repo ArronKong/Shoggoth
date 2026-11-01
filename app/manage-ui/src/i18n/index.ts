@@ -14,6 +14,9 @@ import i18next from "i18next";
 import { initReactI18next } from "react-i18next";
 import zhCN from "./locales/zh-CN";
 import en from "./locales/en";
+import { mcpConnectorResources } from "./mcpConnectorResources";
+import { larkCliResources } from "./larkCliResources";
+import { officialConnectorResources } from "./officialConnectorResources";
 import { slashDescriptionResources } from "./slashDescriptions";
 
 export const I18N_LOCALE_KEY = "openclaw.i18n.locale";
@@ -38,8 +41,8 @@ const initialLng = resolveInitialLng();
 
 void i18next.use(initReactI18next).init({
   resources: {
-    "zh-CN": { translation: zhCN, slashCommands: slashDescriptionResources["zh-CN"] },
-    en: { translation: en, slashCommands: slashDescriptionResources.en },
+    "zh-CN": { translation: { ...zhCN, mcpConnectors: mcpConnectorResources["zh-CN"], larkCli: larkCliResources["zh-CN"], officialConnectors: officialConnectorResources["zh-CN"] }, slashCommands: slashDescriptionResources["zh-CN"] },
+    en: { translation: { ...en, mcpConnectors: mcpConnectorResources.en, larkCli: larkCliResources.en, officialConnectors: officialConnectorResources.en }, slashCommands: slashDescriptionResources.en },
   },
   lng: initialLng,
   fallbackLng: "zh-CN",

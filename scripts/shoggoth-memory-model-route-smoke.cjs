@@ -20,6 +20,10 @@ async function fixture(t, { implicit = false, discovery = true, explicitDiscover
     revision: f.service.chatSessionStore.getSession(sessionKey).revision, acceptAdjustments: true, model,
   });
   const initial = f.createSession(); await selectModel(initial.sessionKey, "pi-chat");
+  // This suite exercises an explicitly selected independent Pi lane. The
+  // foreground session remains free to choose another model or Runtime.
+  memoryCoreConfig.memory.textModel = { source: "binding", profileId: f.profile.id, bindingId: f.binding("pi").id,
+    ...(!implicit ? { model: "pi-chat" } : {}) };
   if (implicit) {
     f.service.productStore.putAgentProfile({ ...f.service.productStore.getAgentProfile(f.profile.id), defaultModel: null });
     const current = f.service.chatSessionStore.getSession(initial.sessionKey);
@@ -35,7 +39,7 @@ async function fixture(t, { implicit = false, discovery = true, explicitDiscover
   f.aliases = new Map();
   f.service.runtimeManager.canGenerateModelOnly = runtime => runtime === "pi";
   f.service.runtimeManager.acquire = async (binding, options) => {
-    assert.equal(binding.runtime, "pi", "memory must use the conversation Runtime instead of the Agent default");
+    assert.equal(binding.runtime, "pi", "memory must use its explicitly configured independent Runtime");
     const host = await acquire(binding, options);
     host.capabilities = { "model.generate.toolFree": true, "model.generate.settings": true,
       "model.resolve.toolFree": discovery, "model.resolve.explicit": explicitDiscovery };
@@ -87,7 +91,7 @@ test("real Service freezes discovered CLI defaults within a run and keys cross-r
 test("generic memory generation preserves the host JSON recall protocol without requesting native tools", async t => {
   const f = await fixture(t);
   assert.match((await f.recall()).content, /amber telescope/u);
-  const generation = f.transport.acquisitions.filter(row => row.options.executionContract?.source === "memory_extraction");
+  const generation = f.transport.acquisitions.filter(row => row.options.executionContract?.source === "memory_text");
   assert.ok(generation.length);
   for (const { options } of generation) {
     assert.match(options.executionContract.developerInstructions, /host response protocol/u);
@@ -123,7 +127,7 @@ test("native eligibility and strong triggers do not acquire an implicit-default 
 test("native recall forwards thinking and speed policy through real Service and invalidates cache when changed", async t => {
   const f = await fixture(t), config = f.memoryCoreConfig.plugins.entries["active-memory"].config;
   assert.match((await f.recall()).content, /amber telescope/u);
-  assert.ok(f.calls.every(call => call.execution.thinking === "off"));
+  assert.ok(f.calls.every(call => call.execution.thinking === "low"));
   assert.equal(f.calls[0].execution.startedAtMs, f.calls[1].execution.startedAtMs, "one recall retains its timer through tool steps");
   config.thinking = "max"; config.fastMode = "auto";
   assert.match((await f.recall()).content, /amber telescope/u);
@@ -142,7 +146,7 @@ test("native recall inherits chat speed while its explicit setting wins and chat
   const f = await fixture(t), config = f.memoryCoreConfig.plugins.entries["active-memory"].config;
   f.service.chatSessionStore.setModelSettings(f.sessionKey, { thinkingLevel: "high", serviceTier: "priority" });
   assert.match((await f.recall()).content, /amber telescope/u);
-  assert.ok(f.calls.every(call => call.execution.thinking === "off" && call.execution.fastMode === true));
+  assert.ok(f.calls.every(call => call.execution.thinking === "low" && call.execution.fastMode === true));
   config.fastMode = false;
   assert.match((await f.recall()).content, /amber telescope/u);
   assert.ok(f.calls.slice(2).every(call => call.execution.fastMode === false));
@@ -167,7 +171,7 @@ test("parent cancellation waits for implicit model discovery cleanup before rele
   await f.owner.finishActiveMemoryRun(request.run); assert.equal(f.owner.activeMemory.runs.size, 0);
 });
 
-test("native recall follows the real Product conversation Binding/model and an explicit memory model takes precedence", async t => {
+test("native recall follows the configured independent Binding/model and an explicit memory stage model takes precedence", async t => {
   const f = await fixture(t);
   assert.equal(f.service.productStore.resolveAgentRuntimeProfile(f.profile.id).runtime, "codex");
   assert.match((await f.recall()).content, /amber telescope/u);
@@ -191,10 +195,10 @@ test("native modelFallback selects only after absent current/default models and 
   assert.equal(f.discoveries.length, 0);
   await f.selectModel(f.sessionKey, "pi-chat");
   assert.match((await f.recall()).content, /amber telescope/u);
-  assert.deepEqual(f.calls.map(call => call.model), ["pi-memory", "pi-memory", "pi-memory", "pi-memory", "pi-chat", "pi-chat"]);
+  assert.deepEqual(f.calls.map(call => call.model), ["pi-memory", "pi-memory", "pi-memory", "pi-memory", "pi-memory", "pi-memory"]);
 });
 
-test("explicit recall and parent-chat aliases are frozen within a run and rediscovered before cross-run cache lookup", async t => {
+test("explicit recall and independent-lane aliases are frozen within a run and rediscovered before cross-run cache lookup", async t => {
   for (const explicit of [false, true]) {
     const f = await fixture(t), alias = explicit ? "pi-memory" : "pi-chat";
     if (explicit) f.memoryCoreConfig.plugins.entries["active-memory"].config.model = alias;
@@ -298,20 +302,38 @@ test("real Service forwards streamed recall through Coordinator and native timeo
   assert.equal(f.owner.activeMemory.cacheProofs.size, 0, "native timeout partials are not reusable cross-turn cache");
 });
 
-test("Product model changes invalidate both prepared native cache and in-flight recall results", async t => {
+test("memory model changes invalidate prepared and in-flight recall while chat overrides stay independent", async t => {
   const f = await fixture(t);
   assert.match((await f.recall()).content, /amber telescope/u);
   const prepared = f.input(); await f.owner.prepareActiveMemory(prepared); assert.equal(f.calls.length, 2);
   await f.selectModel(f.sessionKey, "pi-memory");
+  assert.match(f.owner.takeActiveMemory(prepared).content, /amber telescope/u, "chat override preserves the independent memory route");
+  f.memoryCoreConfig.memory.textModel.model = "pi-memory";
   assert.equal(f.owner.takeActiveMemory(prepared), null); await f.owner.finishActiveMemoryRun(prepared.run);
   assert.match((await f.recall()).content, /amber telescope/u);
   assert.deepEqual(f.calls.map(call => call.model), ["pi-chat", "pi-chat", "pi-memory", "pi-memory"]);
   f.owner.activeMemory.cacheProofs.clear();
   f.beforeModelResult = async () => {
-    f.service.chatSessionStore.setModelOverride(f.sessionKey, "pi-chat");
+    f.memoryCoreConfig.memory.textModel.model = "pi-chat";
   };
   assert.equal(await f.recall(), null);
   assert.equal(f.calls.length, 5);
   assert.equal(f.service.workRunCoordinator.memoryExtractionTasks.size, 0);
   assert.equal(f.owner.activeMemory.runtimes.size, 0);
+});
+
+test("local-only keeps host quick recall while deep recall acquires no model account", async t => {
+  const f = await fixture(t);
+  f.memoryCoreConfig.memory.textModel = { source: "local" };
+  f.memoryCoreConfig.plugins.entries["active-memory"].config.mode = "escalate";
+  f.service.runtimeManager.acquire = async () => assert.fail("local-only cannot acquire a model account");
+  fs.appendFileSync(path.join(f.owner.host(f.profile.id).workspaceDir, "MEMORY.md"),
+    "\n- Use concise commit descriptions. <!-- trigger:writing commit; commit descriptions -->\n");
+  const input = { ...f.input(), query: "writing commit descriptions" };
+  await f.owner.prepareActiveMemory(input);
+  assert.match(f.owner.takeActiveMemory(input).content, /concise commit descriptions/u);
+  await f.owner.finishActiveMemoryRun(input.run);
+  f.memoryCoreConfig.plugins.entries["active-memory"].config.mode = "always";
+  assert.equal((await f.recall()).content, "", "model-assisted recall stays disabled and publishes no model content");
+  assert.equal(f.calls.length, 0); assert.equal(f.discoveries.length, 0);
 });

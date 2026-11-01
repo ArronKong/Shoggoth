@@ -50,6 +50,14 @@ test("lookup and send preserve exact service fields and reject replay payloads",
   assert.deepEqual(validateParams("group.send", input), input);
   assert.throws(() => validateParams("group.send", { ...input, expectedPolicyVersion: 0 }), { code: "GROUP_CHAT_INVALID" });
 });
+
+test("message update revisions are optional, bounded integers and keep the legacy history shape valid", () => {
+  const legacy = { groupId: "g", afterSeq: 12, beforeSeq: null, limit: 20 };
+  assert.deepEqual(validateParams("group.history", legacy), legacy);
+  assert.deepEqual(validateParams("group.history", { ...legacy, afterRevision: 0 }), { ...legacy, afterRevision: 0 });
+  for (const afterRevision of [-1, 1.5, "1", null, Number.MAX_SAFE_INTEGER + 1])
+    assert.throws(() => validateParams("group.history", { ...legacy, afterRevision }), { code: "GROUP_CHAT_INVALID" });
+});
 test("adapter inventory gates new actions, legacy availability, expiration and revocation", async () => {
   let now = 1; const calls = [];
   const channel = new GroupAdapterChannel({ paths: {}, now: () => now, authorize: () => true, service: { callBoundExternalTool(...args) { calls.push(args); return { ok: true }; } } });

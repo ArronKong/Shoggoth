@@ -14,8 +14,9 @@ function validateModelOnlyInput(input) {
   if (input.signal?.aborted) throw fail("MODEL_ONLY_CANCELED");
   if (input.execution !== undefined) require("./memory-model-settings").validateMemoryModelExecution(input.execution);
 }
-async function runBoundedModelOnly(input, task, { timeoutMs = 180_000, cleanupMs = 5_000 } = {}) {
+async function runBoundedModelOnly(input, task, { timeoutMs = input.timeoutMs ?? 600_000, cleanupMs = 5_000 } = {}) {
   validateModelOnlyInput(input);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60 * 60_000) throw fail("MODEL_ONLY_INVALID");
   input.assertCurrent?.();
   const controller = new AbortController();
   let timer, onAbort;

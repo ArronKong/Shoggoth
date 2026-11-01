@@ -7,6 +7,7 @@ const PAGE_BYTES = 36 * 1024;
 const MAX_LIMIT = 100;
 const fail = code => { throw serviceError(code, "Skill 管理目录查询无效或已变化"); };
 const hash = value => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const usageCount = (item, usage) => item.usageCount ?? usage.get(item.name) ?? 0;
 
 // The Service projects one small page while retaining the full registry only
 // in its own process. Page boundaries include the same byte budget as the
@@ -24,7 +25,8 @@ function querySkillManagementCatalog({ catalog, usage, query, status, pageIndex,
   const revision = hash([catalog.registryRevision, catalog.registryVersion,
     catalog.profileRevision, query, status, usage.supported === true,
     [...usage.entries()].sort(([a], [b]) => a.localeCompare(b)),
-    catalog.items.map(item => [item.id, item.usageAgents])]);
+    catalog.items.map(item => [item.id, item.agentId, item.source, item.version,
+      item.enabled, item.usageCount, item.usageAgents])]);
   if (expectedRevision !== null && expectedRevision !== revision) fail("HARNESS_REVISION_CONFLICT");
   if (pageIndex > 0 && expectedRevision === null) fail("HARNESS_REVISION_CONFLICT");
   const usageSupported = usage.supported === true;
@@ -38,8 +40,10 @@ function querySkillManagementCatalog({ catalog, usage, query, status, pageIndex,
       || item.description.toLowerCase().includes(term)
       || category.toLowerCase().includes(term);
   }).sort((a, b) => {
-    const difference = (usage.get(b.name) || 0) - (usage.get(a.name) || 0);
-    return difference || a.name.localeCompare(b.name);
+    const difference = usageCount(b, usage) - usageCount(a, usage);
+    return difference || a.name.localeCompare(b.name)
+      || (a.agentId || "").localeCompare(b.agentId || "")
+      || (a.version || "").localeCompare(b.version || "");
   });
 
   const bounds = [];
@@ -66,7 +70,7 @@ function querySkillManagementCatalog({ catalog, usage, query, status, pageIndex,
     pageCount: bounds.length,
     total: catalog.items.length,
     enabledCount: catalog.items.filter(item => item.enabled).length,
-    usedCount: catalog.items.filter(item => (usage.get(item.name) || 0) > 0).length,
+    usedCount: catalog.items.filter(item => usageCount(item, usage) > 0).length,
     usageSupported,
     matchCount: filtered.length,
     items: filtered.slice(start, end),

@@ -170,8 +170,12 @@ app.whenReady().then(async () => {
       report.nonTerminal.after = (await call(mainWindow.webContents, "read")).value;
       assert.deepEqual(report.nonTerminal.after, initial.value);
       report.foreignIdentities = [];
-      for (const foreign of [{ ...identity, backendId: "hermes" }, { ...identity, providerKey: "foreign-provider" }, { ...identity, operationId: "missing-original" }])
+      for (const foreign of [{ ...identity, backendId: "hermes" }, { ...identity, providerKey: "foreign-provider" }])
         report.foreignIdentities.push(denied(await call(mainWindow.webContents, "ack", foreign), "MODEL_RECOVERY_STORE_UNAVAILABLE"));
+      const absentIdentity = { ...identity, operationId: "missing-original" };
+      report.knownAbsent = await call(mainWindow.webContents, "ack", absentIdentity); ok(report.knownAbsent);
+      assert.deepEqual(report.knownAbsent.value, { ...absentIdentity, revision: initial.value.revision, status: "acknowledged", outcome: "failed" });
+      assert.deepEqual((await call(mainWindow.webContents, "read")).value, initial.value, "observing a known absent operation cannot clear the retained original");
       assert.deepEqual(fileEvidence(retainedFile), report.reopenedFile);
       assert.deepEqual(fileEvidence(journalFile), journalBefore);
       // Explicit journal-only terminal injection under the real production

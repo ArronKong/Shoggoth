@@ -30,6 +30,7 @@ class GroupDraftTracker {
     } catch { return null; }
   }
   draftFor(id) { return this.#currentState(id)?.text ?? null; }
+  messagesFor(id) { return this.#currentState(id)?.projection?.replyMessages() ?? []; }
   activityFor(id) { return this.#currentState(id)?.projection?.snapshot() ?? null; }
   forget(id) {
     const state = this.states.get(id); if (!state) return;

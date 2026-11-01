@@ -1,4 +1,5 @@
 "use strict";
+const { runtimeFailureDetail } = require("./runtime-failure-detail");
 const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
 const { retireFailedSpawn, killStartedChild } = require("./failed-spawn");
 
@@ -257,8 +258,9 @@ class DeepSeekHarnessRuntimeHost {
         "DeepSeek MCP gate issuer is invalid",
       );
     }
-    if (!Number.isSafeInteger(this.serverRequestTimeoutMs) || this.serverRequestTimeoutMs < 100
-      || this.serverRequestTimeoutMs > DEFAULT_SERVER_REQUEST_TIMEOUT_MS) {
+    if (this.serverRequestTimeoutMs !== null
+      && (!Number.isSafeInteger(this.serverRequestTimeoutMs) || this.serverRequestTimeoutMs < 100
+        || this.serverRequestTimeoutMs > 2_147_000_000)) {
       throw hostError("DEEPSEEK_HARNESS_HOST_OPTIONS_INVALID", "DeepSeek server request timeout is invalid");
     }
     for (const value of [this.requestTimeoutMs, this.startupTimeoutMs,
@@ -281,6 +283,9 @@ class DeepSeekHarnessRuntimeHost {
     this.processFailure = null;
     this.reservationId = null;
     this.sessionConfigs = new Map();
+    this.secretGateway = options.secretGateway || null;
+    this.modelSecretScopes = new Map();
+    this.modelSecretRoute = null;
     this.activeTurns = new Map();
     this.listeners = new Set();
     this.modelTextObservers = new Map();
@@ -322,6 +327,9 @@ class DeepSeekHarnessRuntimeHost {
           "DeepSeek CLI 0.1.1 or newer is required",
         );
       }
+      if (this.secretGateway && versionResult.stdout.trim() !== "0.1.1-rc.2") {
+        throw hostError("SECRET_MODEL_RUNTIME_UNSUPPORTED", "This DeepSeek version has no verified private-input protection");
+      }
       this.cliVersion = version;
       this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new DeepSeekHarnessRuntimeLedger({
         fs: this.fs,
@@ -330,6 +338,10 @@ class DeepSeekHarnessRuntimeHost {
         runtimeProfileId: this.runtimeProfileId,
         workspaceShardId: workspaceShardId(this.controlInstance, this.workspace),
       }).open());
+      if (this.secretGateway) this.modelSecretRoute = await this.secretGateway.bindLocalSessions({
+        resolveScope: id => this.modelSecretScopes.get(id),
+        assertCurrent: () => { if (["failed", "stopping", "stopped"].includes(this.state)) throw hostError("SECRET_MODEL_CANCELED", "Model worker stopped"); },
+      });
       this._spawnBridge();
       let startupTimer;
       try {
@@ -344,6 +356,9 @@ class DeepSeekHarnessRuntimeHost {
         ]);
         if (this.workspaceExecutionVersion === 1 && ready?.workspaceExecutionVersion !== 1) {
           throw hostError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "DeepSeek did not attest its workspace execution guard");
+        }
+        if (this.secretGateway && !this.modelSecretRoute?.ready()) {
+          throw hostError("SECRET_MODEL_PROJECTION_UNAVAILABLE", "DeepSeek credential protection is unavailable");
         }
       } finally {
         clearTimeout(startupTimer);
@@ -455,6 +470,7 @@ class DeepSeekHarnessRuntimeHost {
         model,
         permissionMode,
       });
+      this._bindModelScope(existing.remoteSessionId, input.modelSecretScope);
       await this._bridgeSession("session/start", existing);
       return { session: this._projectSession(existing) };
     }
@@ -482,6 +498,7 @@ class DeepSeekHarnessRuntimeHost {
       model,
       permissionMode,
     });
+    this._bindModelScope(session.remoteSessionId, input.modelSecretScope);
     await this._bridgeSession("session/start", session);
     return { session: this._projectSession(session) };
   }
@@ -520,6 +537,7 @@ class DeepSeekHarnessRuntimeHost {
       model: this._validateModel(input.model, models),
       permissionMode,
     });
+    this._bindModelScope(session.remoteSessionId, input.modelSecretScope);
     await this._bridgeSession("session/resume", session);
     return { session: this._projectSession(session) };
   }
@@ -856,18 +874,21 @@ class DeepSeekHarnessRuntimeHost {
         } catch (error) { streamError = error; cancel(); }
       });
       signal.addEventListener("abort", cancel, { once: true });
+      const secretSessionId = `model-only:${input.operationId}`;
       try {
         input.assertCurrent?.();
         if (signal.aborted) throw hostError("MODEL_ONLY_CANCELED", "Model task canceled");
+        this._bindModelScope(secretSessionId, input.modelSecretScope);
         const result = await this.process.request("model/generate", {
         operationId: input.operationId, prompt: input.prompt, model,
+        ...(this.secretGateway ? { secretSessionId } : {}),
         ...(settings ? { settings } : {}),
         ...(input.onText ? { streamText: true } : {}),
-      }, { timeoutMs: 180_000 });
+      }, { timeoutMs: 60 * 60_000 + 5_000 });
         if (streamError) throw streamError;
         return result;
       } catch (error) { throw streamError || error; }
-      finally { signal.removeEventListener("abort", cancel); this.modelTextObservers.delete(input.operationId); }
+      finally { signal.removeEventListener("abort", cancel); this.modelTextObservers.delete(input.operationId); this.modelSecretScopes.delete(secretSessionId); }
     });
   }
 
@@ -949,6 +970,17 @@ class DeepSeekHarnessRuntimeHost {
     });
   }
 
+  _bindModelScope(remoteSessionId, scope) {
+    if (!this.secretGateway) return;
+    if (!scope || !safeString(scope.profileId, 256) || !safeString(scope.sessionId, 512)
+      || !this.modelSecretRoute?.ready()) throw hostError("SECRET_MODEL_IDENTITY_UNAVAILABLE", "Model session identity is unavailable");
+    const existing = this.modelSecretScopes.get(remoteSessionId);
+    if (existing && (existing.profileId !== scope.profileId || existing.sessionId !== scope.sessionId)) {
+      throw hostError("SECRET_MODEL_IDENTITY_UNAVAILABLE", "Model session identity changed");
+    }
+    this.modelSecretScopes.set(remoteSessionId, Object.freeze({ profileId: scope.profileId, sessionId: scope.sessionId }));
+  }
+
   async _beginTurn(active, input) {
     // The system section keeps only rules that persist across turns; the Run ID
     // and memory context ride in the injected context message, which stays in
@@ -1014,6 +1046,11 @@ class DeepSeekHarnessRuntimeHost {
 
   _handleEvent(active, event) {
     if (active.settled) return;
+    if (event.type === "complete") {
+      const { failure, ...terminal } = event;
+      const detail = event.status === "failed" ? runtimeFailureDetail(failure, this.registeredSecrets) : null;
+      event = { ...terminal, ...(detail ? { failure: detail } : {}) };
+    }
     if (["tool_start", "tool_result"].includes(event.type) && event.tool) {
       event = { ...event, ...require("./context-tool-content").contextToolContent(event.tool, this.registeredSecrets) };
     }
@@ -1144,6 +1181,7 @@ class DeepSeekHarnessRuntimeHost {
       runtimeAccountId: this.runtimeAccountId,
       executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.launch.command,
+      parentLauncherExecutable: "/bin/sh",
       toolExposure: require("./product-tool-exposure").toolExposureFor("deepseek-harness"),
     });
     this.reservationId = reservation?.reservationId || null;
@@ -1164,6 +1202,7 @@ class DeepSeekHarnessRuntimeHost {
       SHOGGOTH_DSH_APPROVAL_POLICY: this.permissionPolicy.approvalPolicy === "never"
         ? "never" : "ask",
       SHOGGOTH_DSH_CONTROL_INSTANCE: this.controlInstance ? "1" : "0",
+      ...(this.modelSecretRoute ? { SHOGGOTH_DSH_SECRET_PROJECTION: this.modelSecretRoute.baseUrl } : {}),
       SHOGGOTH_DSH_WORKSPACE_EXECUTION_VERSION: this.workspaceExecutionVersion === 1 ? "1" : "0",
       ...(this.launch.argsPrefix[0] ? { SHOGGOTH_DSH_ENTRYPOINT: this.launch.argsPrefix[0] } : {}),
       SHOGGOTH_DSH_MCP_CONFIG: JSON.stringify(mcpConfig),
@@ -1260,6 +1299,7 @@ class DeepSeekHarnessRuntimeHost {
   }
 
   _revokeMcp() {
+    this.modelSecretRoute?.close(); this.modelSecretScopes.clear();
     if (!this.reservationId) return;
     try { this.mcpGateIssuer.revokeMcpServer({ reservationId: this.reservationId }); } catch {}
     this.reservationId = null;

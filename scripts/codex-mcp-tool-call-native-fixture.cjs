@@ -147,7 +147,8 @@ async function main() {
     checks.push({ name: 'fixture-only MCP finish and original native app-server stdin EOF both exit naturally', passed: true });
     success = true;
   } catch (error) {
-    failure = { code: error.code || 'FIXTURE_ASSERTION_FAILED', message: String(error.message).slice(0, 250) };
+    failure = { code: error.code || 'FIXTURE_ASSERTION_FAILED', message: String(error.message).slice(0, 250),
+      ...(Array.isArray(error.errors) ? { causes: error.errors.map(cause => ({ code: cause.code || 'UNKNOWN', message: String(cause.message).slice(0, 120) })) } : {}) };
   } finally {
     if (!success) { try { await host?.stop(); } catch (error) { failure.cleanupCode = error.code || 'CLEANUP_FAILED'; } }
   }

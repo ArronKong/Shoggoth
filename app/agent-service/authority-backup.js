@@ -118,12 +118,16 @@ function portablePath(relativePath) {
 function minimalAuthorityPathDisposition(relativePath) {
   const parts = relativePath.split(path.sep);
   const [root] = parts;
+  if (root === "temporary-secrets") return "exclude";
   if (root === "agents" && parts.length === 3
     && /^native-memory-semantic\.sqlite(?:-(?:wal|shm|journal))?$/u.test(parts[2])) return "exclude";
   if (root === "chat-ui.writer.lock" || root === "self-improvement.writer.lock") return "exclude";
+  // App acknowledgement ownership is live process authority, never backup data.
+  if (root.startsWith("mcp-connection-acks.writer.lock") || root.startsWith(".quarantine-") && root.includes("mcp-connection-acks.writer.lock")) return "exclude";
   if (root === "agents" && parts[2] === "chat-ui" && ["previews", "leases", "ports"].some(part => parts.includes(part))) return "exclude";
   if (root === "hooks" && parts[1]?.startsWith("writer.lock")) return "exclude";
   if ((root === "plugins" || root === "skills") && parts[1] === "staging") return "exclude";
+  if (root === "connectors" && ![undefined, "legacy-platform-retired-v1.json", "open-connector-retired-v1.json"].includes(parts[1])) return "exclude";
   // Integration Homes and verified binaries are derived. Browser profiles contain
   // machine-local login state, caches and Chromium process locks, not product authority.
   if (root === "runtime-integration" || root === "runtime-bin" || root === "browser-use") return "exclude";
@@ -379,7 +383,9 @@ function writeManifest(target, manifest) {
   }
 }
 
-function assertServiceStopped(paths, activeServiceLock = null) {
+function assertServiceStopped(paths, activeServiceLock = null, ownedAckLease = null) {
+  ownedAckLease?.verify();
+  require("./open-connector-retirement").assertRetiredOpenConnectorStopped(paths);
   const lock = lstatIfExists(paths.lockPath);
   const allowedOwnedLock = lock && activeServiceLock
     && Number.isSafeInteger(activeServiceLock.dev)
@@ -394,7 +400,8 @@ function assertServiceStopped(paths, activeServiceLock = null) {
     throw backupError("BACKUP_SERVICE_ACTIVE", "Agent Service 运行时不能建立一致备份");
   }
   if (lstatIfExists(path.join(paths.stateDir, "hooks", "writer.lock"))
-    || fs.readdirSync(paths.stateDir).some(name => name.endsWith(".writer.lock"))) {
+    || fs.readdirSync(paths.stateDir).some(name => name.endsWith(".writer.lock")
+      && !(ownedAckLease && name === require("../mcp-connection-host").ACK_WRITER_LOCK))) {
     throw backupError("BACKUP_SERVICE_ACTIVE", "持久化 writer 未关闭，不能建立一致备份");
   }
 }
@@ -426,12 +433,13 @@ function createBackup(
     paths.backupsDir,
     path.join(paths.backupsDir, `.staging-${backupId}-${crypto.randomUUID()}`),
   );
+  const ackLease = require("../mcp-connection-host").acquireMcpConnectionAckLease({paths});
   try {
     ensurePrivateDirectoryTree(stagingPath, paths.trustedRoot);
     const payloadPath = path.join(stagingPath, "payload");
     ensurePrivateDirectoryTree(payloadPath, paths.trustedRoot);
     const entries = copyPayload(paths.stateDir, payloadPath);
-    assertServiceStopped(paths, activeServiceLock);
+    assertServiceStopped(paths, activeServiceLock, ackLease);
     const manifest = { schemaVersion: BACKUP_SCHEMA_VERSION, backupId, createdAt,
       sourceRoot: "stateDir", entries, rootDigest: rootDigest(entries) };
     writeManifest(path.join(stagingPath, "manifest.json"), manifest);
@@ -439,12 +447,12 @@ function createBackup(
     fsyncDirectory(stagingPath);
     fs.renameSync(stagingPath, backupPath);
     fsyncDirectory(paths.backupsDir);
-    assertServiceStopped(paths, activeServiceLock);
+    assertServiceStopped(paths, activeServiceLock, ackLease);
     return Object.freeze({ backupPath, manifest: structuredClone(manifest) });
   } catch (error) {
     cleanupStaging(stagingPath);
     throw error;
-  }
+  } finally { ackLease.release(); }
 }
 
 function createAuthorityBackup(options) {
@@ -1003,19 +1011,16 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
       throw backupError("BACKUP_SOURCE_CHANGED", "Hooks 恢复期间源执行账本发生变化");
     }
   };
-  let pluginBarrier = null;
   let sourceCatalogStat = null;
-  // An old snapshot can predate a completed external write or a revocation.
-  // Merge only no-replay evidence from a stopped source; never copy its grants.
+  // Retired plugin catalogs are copied as opaque evidence. They are never
+  // reopened, migrated or made executable by a connector-era restore.
   if (hasPluginCatalog) {
     assertServiceStopped(paths);
     sourceCatalogStat = lstatIfExists(paths.pluginCatalogPath);
-    const { readPluginRestoreBarrier } = require("./plugin-store");
-    pluginBarrier = readPluginRestoreBarrier(paths);
   }
   const assertPluginSourceUnchanged = () => {
     if (!hasPluginCatalog) return;
-    assertServiceStopped(paths);
+    assertServiceStopped(paths, null, mcpConnectionAckRestore || null);
     const current = lstatIfExists(paths.pluginCatalogPath);
     if ((sourceCatalogStat === null) !== (current === null)
       || (sourceCatalogStat && !sameFileVersion(sourceCatalogStat, current))) {
@@ -1039,6 +1044,7 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
     "BACKUP_RESTORE_PATH_INVALID",
   );
   const payloadPath = path.join(verified.backupPath, "payload");
+  let mcpConnectionAckRestore;
   try {
     ensurePrivateDirectoryTree(staging, paths.trustedRoot);
     const directoryModes = [];
@@ -1058,6 +1064,7 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
         }
       }
     }
+    mcpConnectionAckRestore = require("../mcp-connection-host").prepareMcpConnectionAckRestore({paths,stagedStateDir:staging});
     const recallRestore = restoreRecallPolicyHighWater(paths, staging);
     reconcileRestoredMemory(staging, paths.trustedRoot);
     // Runtime Home is not rolled back with authority snapshots. An old anchor
@@ -1070,6 +1077,7 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
     let nativeMcpRestore = null;
     let chatUiRestore = null;
     let learningRestore = null;
+    let connectorRestore = null;
     const removedLearningDirectories = new Set();
     if (learningBarrier || verified.manifest.entries.some(entry => entry.type === "file" && entry.path === "self-improvement.sqlite")) {
       assertLearningSourceUnchanged();
@@ -1097,17 +1105,14 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
       } finally { store.close(); }
       fsyncFile(restoredPaths.hookDatabasePath);
     }
+    if (verified.manifest.entries.some(entry => entry.type === "file" && entry.path.startsWith("connectors/"))) {
+      connectorRestore = { platformRetired: true, legacyDataPreserved: true, effectiveGrantsRestored: false };
+    }
     if (hasPluginCatalog) {
       assertPluginSourceUnchanged();
-      const { resolveServicePaths } = require("./paths");
-      const { PluginStore } = require("./plugin-store");
-      const restoredPaths = resolveServicePaths({ stateRoot: staging, trustedRoot: paths.trustedRoot });
-      const store = new PluginStore({ paths: restoredPaths }).open();
-      try {
-        pluginRestore = store.rotateAuthorityForRestore({ backupId, replayBarrier: pluginBarrier });
-      } finally { store.close(); }
-      fsyncFile(restoredPaths.pluginCatalogPath);
-      pluginRestore.catalogDigest = sha256File(restoredPaths.pluginCatalogPath);
+      const restoredCatalogPath = path.join(staging, "plugins", "catalog.sqlite");
+      pluginRestore = { platformRetired: true, legacyDataPreserved: true,
+        effectiveGrantsRestored: false, catalogDigest: sha256File(restoredCatalogPath) };
     }
     if (verified.manifest.entries.some(entry => entry.type === "file"
       && entry.path === "mcp-servers/registry.json")) {
@@ -1117,14 +1122,20 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
       nativeMcpRestore = quarantineNativeMcpRegistryForRestore({ paths: restoredPaths });
       fsyncFile(restoredPaths.nativeMcpRegistryPath);
     }
+    if (verified.manifest.entries.some(entry => entry.type === "file" && entry.path === "apple-device-policy.json")) {
+      const restoredPaths = { ...paths, stateDir: staging };
+      require("./apple-device-restore").quarantineAppleDevicePolicyForRestore({ paths: restoredPaths });
+      fsyncFile(path.join(staging, "apple-device-policy.json"));
+    }
     fsyncDirectoryTree(staging);
     for (const [target, mode] of directoryModes.reverse()) if (!removedLearningDirectories.has(target)) fs.chmodSync(target, mode);
     fsyncDirectory(staging);
     assertPluginSourceUnchanged();
     assertHookSourceUnchanged();
     assertLearningSourceUnchanged();
-    assertServiceStopped(paths);
+    assertServiceStopped(paths, null, mcpConnectionAckRestore);
     recallRestore.verifySourceUnchanged();
+    mcpConnectionAckRestore.verifySourceUnchanged();
     fs.renameSync(staging, destination);
     fsyncDirectory(parent);
     return Object.freeze({
@@ -1134,8 +1145,10 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
       recallRestore: Object.freeze({ overlaidProfiles: recallRestore.restored,
         digest: crypto.createHash("sha256").update(JSON.stringify(recallRestore.restored)).digest("hex") }),
       nativeMemoryAnchorsInvalidated,
+      mcpConnectionAckRestore: Object.freeze({restoredCount:mcpConnectionAckRestore.restoredCount}),
       ...(hookRestore ? { hookRestore } : {}),
       ...(learningRestore ? { learningRestore } : {}),
+      ...(connectorRestore ? { connectorRestore } : {}),
       ...(pluginRestore ? { pluginRestore } : {}),
       ...(nativeMcpRestore ? { nativeMcpRestore } : {}),
       ...(chatUiRestore ? { chatUiRestore } : {}),
@@ -1143,7 +1156,7 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
   } catch (error) {
     cleanupStaging(staging);
     throw error;
-  }
+  } finally { mcpConnectionAckRestore?.release(); }
 }
 
 module.exports = {

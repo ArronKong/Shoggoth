@@ -1,5 +1,6 @@
 "use strict";
 const { poolLedgerSlot } = require("./runtime-shared-ledger");
+const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupFailedPoolHost } = require("./runtime-pool-upgrade");
 
 const { AntigravityAcpRuntimeHost } = require("./antigravity-acp-runtime-host");
 const {
@@ -82,6 +83,8 @@ class AntigravityRuntimePool {
     this.stopAllPromise = null;
   }
 
+  runtimeIdentityKey(binding) { return poolRuntimeIdentityKey(this, binding); }
+
   get(value, options = {}) {
     let binding;
     try { binding = poolBinding(value); } catch (error) { return Promise.reject(error); }
@@ -91,8 +94,11 @@ class AntigravityRuntimePool {
     const workspace = controlInstance ? null : normalizeAntigravityWorkspace(options.workspace);
     let executionRunId;
     try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
-    const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
+    const modelOnlyInstance = options.modelOnly === true;
+    const key = JSON.stringify([routeKey(id, accountId, controlInstance, workspace, executionRunId), modelOnlyInstance]);
     const permissionPolicy = normalizeAntigravityPermissionPolicy(options.permissionPolicy);
+    if (modelOnlyInstance && (controlInstance || workspace !== null || permissionPolicy.approvalPolicy !== "never"
+      || permissionPolicy.sandbox !== "read-only")) return Promise.reject(poolError("MODEL_ONLY_TOOLS_FORBIDDEN", "Model-only policy is invalid"));
     const workspaceExecutionVersion = require("./workspace-execution-tools").workspaceAutoExecution(options.executionContract) ? 1 : null;
     const policyFingerprint = JSON.stringify([antigravityPermissionFingerprint(permissionPolicy), workspaceExecutionVersion]);
     if (this.blockedProfiles.has(id)) {
@@ -122,7 +128,7 @@ class AntigravityRuntimePool {
           "Stop the Antigravity runtime before changing its permission policy",
         ));
       }
-      return existing.promise.then((host) => {
+      return reusePoolHost(this, existing, options, () => this.get(binding, options)).then((host) => {
         host.beginAcquire();
         return host;
       });
@@ -132,9 +138,11 @@ class AntigravityRuntimePool {
     if (this.entries.size >= hostLimit) {
       return retirePoolHost(this).then(() => this.get(binding, options));
     }
+    let executableIdentity;
+    try { executableIdentity = poolRuntimeIdentityKey(this, binding, options); } catch (error) { return Promise.reject(error); }
     let profileState = this.profileStates.get(accountId);
-    if (!profileState) {
-      profileState = { authenticated: false, authCheckedAt: 0, models: null, modelsExpiresAt: 0 };
+    if (!profileState || profileState.runtimeExecutableIdentity !== executableIdentity) {
+      profileState = { authenticated: false, authCheckedAt: 0, models: null, modelsExpiresAt: 0, runtimeExecutableIdentity: executableIdentity };
       this.profileStates.set(accountId, profileState);
     }
     let runtimeEnvironment;
@@ -180,6 +188,7 @@ class AntigravityRuntimePool {
       runtimeBinding: binding,
       mcpExecutionRunId: executionRunId,
       workspaceExecutionVersion,
+      modelOnlyInstance,
       ledgerSlot,
       runtimeEnvironment,
       permissionPolicy,
@@ -188,6 +197,7 @@ class AntigravityRuntimePool {
       profileState,
     });
     const entry = {
+      runtimeEnvironment,
       ledgerKey, ledgerSlot,
       host,
       key,
@@ -197,15 +207,19 @@ class AntigravityRuntimePool {
       promise: null,
     };
     trackPoolHost(entry, binding);
-    entry.promise = Promise.resolve().then(() => host.initialize()).then(() => {
+    entry.promise = Promise.resolve().then(async () => {
+      await preparePoolHostIdentity(this, entry, binding, options);
+      await host.initialize();
+      host.assertRuntimeIdentityCurrent?.();
+    }).then(() => {
       entry.capacity.ready = true;
       if (host.terminated && typeof host.terminated.then === "function") {
         Promise.resolve(host.terminated).then(
           () => {
-            if (this.entries.get(key) === entry) this.entries.delete(key);
+            if (this.entries.get(key) === entry && !entry.retiring) this.entries.delete(key);
           },
           (error) => {
-            if (this.entries.get(key) !== entry) return;
+            if (this.entries.get(key) !== entry || entry.retiring) return;
             if (error?.cleanupIncomplete || host.cleanupIncomplete) this.blockedProfiles.add(id);
             this.entries.delete(key);
           },
@@ -213,9 +227,7 @@ class AntigravityRuntimePool {
       }
       return host;
     }).catch(async (error) => {
-      try { await host.stop(); } catch {}
-      if (this.entries.get(key) === entry) this.entries.delete(key);
-      if (host.cleanupIncomplete) this.blockedProfiles.add(id);
+      await cleanupFailedPoolHost(this, entry, id);
       throw error;
     });
     this.entries.set(key, entry);

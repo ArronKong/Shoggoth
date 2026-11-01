@@ -1,4 +1,5 @@
 "use strict";
+const { runtimeFailureDetail } = require("./runtime-failure-detail");
 const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
 const { retireFailedSpawn, killStartedChild } = require("./failed-spawn");
 
@@ -16,7 +17,7 @@ const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-
 const { piRuntimeContextUsage, unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { PiRpcProcess } = require("./pi-rpc-process");
-const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
+const { executionTimeoutMs, isExecutionTimeoutMs } = require("../execution-timeout");
 const { PiRuntimeLedger, emptyPiUsage } = require("./pi-runtime-ledger");
 const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
 const { classifyProviderFailure } = require("./runtime-provider-errors");
@@ -295,7 +296,7 @@ class PiRuntimeHost {
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.onDiagnostic = typeof options.onDiagnostic === "function" ? options.onDiagnostic : null;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
-    this.promptTimeoutMs = options.promptTimeoutMs ?? EXECUTION_TIMEOUT_MS;
+    this.promptTimeoutMs = executionTimeoutMs(options.promptTimeoutMs);
     this.acceptanceTimeoutMs = options.acceptanceTimeoutMs ?? 45_000;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 2_000;
     this.killGraceMs = options.killGraceMs ?? 2_000;
@@ -313,8 +314,7 @@ class PiRuntimeHost {
       .some((method) => typeof this.mcpGateIssuer[method] !== "function")) {
       throw hostError("PI_HOST_OPTIONS_INVALID", "Pi MCP gate issuer is invalid");
     }
-    if (!Number.isSafeInteger(this.promptTimeoutMs) || this.promptTimeoutMs < 100
-      || this.promptTimeoutMs > EXECUTION_TIMEOUT_MS) {
+    if (!isExecutionTimeoutMs(this.promptTimeoutMs, 100)) {
       throw hostError("PI_HOST_OPTIONS_INVALID", "Pi turn timeout is invalid");
     }
     for (const value of [this.requestTimeoutMs, this.acceptanceTimeoutMs,
@@ -371,6 +371,7 @@ class PiRuntimeHost {
       // (native Hooks) still require their separately verified contract.
       this.cliVersion = parsePiVersion(versionResult.stdout);
       await this._probeProtocol();
+      this.protocolProbeVerified = true;
       if (this.state !== "initializing") throw hostError("RUNTIME_HOST_TERMINATED", "Pi host stopped during initialization");
       this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new PiRuntimeLedger({
         fs: this.fs,
@@ -892,6 +893,7 @@ class PiRuntimeHost {
       runtimeAccountId: this.runtimeAccountId,
       executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.launch.command,
+      parentLauncherExecutable: "/bin/sh",
       toolExposure: require("./product-tool-exposure").toolExposureFor("pi"),
     });
     active.reservationId = reservation.reservationId;
@@ -918,6 +920,8 @@ class PiRuntimeHost {
       SHOGGOTH_PI_PERMISSION_POLICY: JSON.stringify(active.permissionPolicy),
       SHOGGOTH_PI_WORKSPACE_EXECUTION_VERSION: this.workspaceExecutionVersion === 1 ? "1" : "0",
       SHOGGOTH_PI_NATIVE_HOOK_TOOLS: JSON.stringify(this.nativeHookScope?.toolNames || []),
+      ...(this.modelSecretEndpoints?.get(active.sessionId)
+        ? { SHOGGOTH_PI_SECRET_PROJECTION: this.modelSecretEndpoints.get(active.sessionId) } : {}),
     });
     const launcherArgs = [
       "-c", "IFS= read -r _ <&3 || exit 125; exec \"$@\"",
@@ -991,6 +995,7 @@ class PiRuntimeHost {
 
   _armPromptTimeout(active, timeoutMs) {
     active.promptTimeoutRemainingMs = timeoutMs;
+    if (timeoutMs === null) { active.promptDeadlineAt = null; active.promptTimer = null; return; }
     active.promptDeadlineAt = this.now() + timeoutMs;
     active.promptTimer = setTimeout(() => {
       if (active.settled) return;
@@ -1267,6 +1272,7 @@ class PiRuntimeHost {
       }
       this._finishActive(active, {
         status,
+        failure: status === "failed" ? runtimeFailureDetail(last?.errorMessage, this.registeredSecrets) : null,
         errorCode: status === "failed" ? (accountBlocked ? "RUNTIME_ACCOUNT_BLOCKED"
           : authenticationFailed ? "AUTH_REQUIRED" : providerFailure ?? "PI_TURN_FAILED") : null,
         texts,
@@ -1360,6 +1366,7 @@ class PiRuntimeHost {
       sessionId: active.sessionId,
       turnId: active.turnId,
       status: result.status,
+      ...(result.failure ? { failure: result.failure } : {}),
     });
     active.terminal.resolve({ status: result.status });
     active.process.endInput();
@@ -1442,10 +1449,12 @@ class PiRuntimeHost {
 
   _onProcessClosed(active, result) {
     if (!active.settled) {
+      const projectionFailed = result?.code === 78 && this.modelSecretEndpoints?.has(active.sessionId)
+        && /(?:^|\n)SECRET_MODEL_PROJECTION_UNAVAILABLE\n?$/u.test(result?.stderr || "");
       const auth = AUTH_ERROR_PATTERN.test(`${result?.stderr || ""}`);
       this._failActive(active, hostError(
-        auth ? "AUTH_REQUIRED" : "PI_PROCESS_CLOSED",
-        auth ? "Pi authentication is required" : "Pi process closed before settlement",
+        projectionFailed ? "SECRET_MODEL_PROJECTION_UNAVAILABLE" : auth ? "AUTH_REQUIRED" : "PI_PROCESS_CLOSED",
+        projectionFailed ? "Local model projection did not complete" : auth ? "Pi authentication is required" : "Pi process closed before settlement",
       ), { definitelyRejected: !active.promptDispatched });
     }
     const previous = turnById(sessionById(this.ledger.snapshot(), active.sessionId), active.turnId);
@@ -1574,7 +1583,8 @@ class PiRuntimeHost {
     } else {
       requestedSchema = {
         type: "object",
-        properties: { answer: { type: "string", title: request.title || "Input" } },
+        properties: { answer: { type: "string", title: request.title || "Input",
+          ...(safeString(request.placeholder, 16 * 1024) ? { description: request.placeholder } : {}) } },
         required: ["answer"],
       };
     }
@@ -2036,6 +2046,11 @@ class PiRuntimeHost {
       }
       env[name] = value;
     }
+    // Keep local projection and MCP bodies off the external proxy path.
+    const bypass = new Set([env.NO_PROXY, env.no_proxy].filter(Boolean)
+      .flatMap(value => value.split(",").map(host => host.trim()).filter(Boolean)));
+    for (const host of ["localhost", "127.0.0.1", "::1"]) bypass.add(host);
+    env.NO_PROXY = env.no_proxy = [...bypass].join(",");
     return env;
   }
 

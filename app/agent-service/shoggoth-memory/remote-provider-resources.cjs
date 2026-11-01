@@ -44,11 +44,12 @@ function endpoint(value) {
 // ownerRef never names a SecretStore entry and cannot authorize another Profile
 // or destination. Native factories alone construct payloads, auth and identity.
 class MemoryRemoteProviderResources {
-  constructor({ getConfig, assertCurrent = () => {}, resolveOwner, secretStore } = {}) {
+  constructor({ getConfig, assertCurrent = () => {}, resolveOwner, secretStore, projectInput = null } = {}) {
     if (typeof getConfig !== "function" || typeof assertCurrent !== "function"
       || resolveOwner !== undefined && typeof resolveOwner !== "function") throw new TypeError("Invalid remote memory resources");
     this.getConfig = getConfig; this.assertAuthority = assertCurrent;
     this.resolveOwner = resolveOwner || (() => null); this.secretStore = secretStore;
+    this.projectInput = projectInput;
     this.controller = new AbortController(); this.pending = new Set(); this.handles = new Set(); this.adapters = new Map();
     this.closed = false;
     for (const name of ["capture", "assertCurrent", "resolveAdapter", "close"]) this[name] = this[name].bind(this);
@@ -164,13 +165,24 @@ class MemoryRemoteProviderResources {
     const checkHandle = () => { if (retired) fail("MEMORY_SCOPE_REVOKED"); };
     for (const method of ["embed", "embedBatch"]) if (typeof native[method] === "function") Object.defineProperty(admitted, method, {
       enumerable: true, configurable: true, writable: true,
-      value: (input, options) => { checkHandle(); return this.invoke(agentId, stamp, signal => native[method](input, { ...options, signal }), options?.signal, physical); },
+      value: (input, options) => { checkHandle(); return this.invoke(agentId, stamp, async signal => {
+        const project = value => this.projectInput ? this.projectInput(agentId, value, { signal }) : value;
+        const safe = method === "embedBatch" ? await Promise.all(input.map(project)) : await project(input);
+        signal.throwIfAborted(); this.assertCurrent(agentId, stamp); checkHandle();
+        return native[method](safe, { ...options, signal });
+      }, options?.signal, physical); },
     });
     Object.defineProperty(admitted, "close", { enumerable: true, configurable: true, writable: true, value: handle.close });
     this.handles.add(handle);
     const runtime = result.runtime?.batchEmbed ? { ...result.runtime, batchEmbed: options => {
-      checkHandle(); return this.invoke(agentId, stamp, () => result.runtime.batchEmbed(options), options?.signal, physical);
-    } } : result.runtime;
+      checkHandle(); return this.invoke(agentId, stamp, async signal => {
+        const chunks = this.projectInput ? await Promise.all(options.chunks.map(async chunk => ({ ...chunk,
+          text: await this.projectInput(agentId, chunk.text, { signal }) }))) : options.chunks;
+        signal.throwIfAborted(); this.assertCurrent(agentId, stamp); checkHandle();
+        return result.runtime.batchEmbed({ ...options, chunks });
+      }, options?.signal, physical);
+    } } : result.runtime ? { ...result.runtime } : result.runtime;
+    if (runtime && this.projectInput) runtime.cacheKeyData = { ...runtime.cacheKeyData, shoggothSecretProjection: 1 };
     return { ...result, provider: admitted, runtime };
   }
   resolveAdapter({ agentId, providerId, adapter }) {

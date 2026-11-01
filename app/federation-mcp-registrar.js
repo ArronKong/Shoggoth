@@ -9,7 +9,7 @@ const {
   federationMcpAuthPath,
 } = require("./agent-service/federation-mcp-auth");
 const { DEFAULT_RUNTIME_PROFILE_ID } = require("./agent-service/product-store");
-const { DEFAULT_SERVER_REQUEST_TIMEOUT_MS } = require("./agent-service/interactive-timeouts");
+const { DEFAULT_MCP_TOOL_TIMEOUT_MS } = require("./agent-service/interactive-timeouts");
 const {
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
 } = require("./agent-service/runtime-account");
@@ -66,9 +66,9 @@ function openClawConfig(options) {
   return {
     ...launchBase(options, "openclaw"),
     connectionTimeoutMs: 10_000,
-    // The shared tool surface can await approval and then run a bounded plugin
-    // call; its transport must cover both windows plus the Service reply grace.
-    requestTimeoutMs: 2 * DEFAULT_SERVER_REQUEST_TIMEOUT_MS + 45_000,
+    // This runtime requires a finite positive tool timeout. Local tool and
+    // approval waits remain lifecycle-bound; use its portable maximum envelope.
+    requestTimeoutMs: DEFAULT_MCP_TOOL_TIMEOUT_MS,
     supportsParallelToolCalls: true,
     codex: { defaultToolsApprovalMode: "auto" },
   };

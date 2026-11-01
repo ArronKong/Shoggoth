@@ -99,7 +99,7 @@ class DeepSeekHarnessProcess {
       ));
     }
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 10 * 60 * 1000) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 2_147_000_000) {
       return Promise.reject(processError(
         "DEEPSEEK_HARNESS_TIMEOUT_INVALID",
         "DeepSeek request timeout is invalid",

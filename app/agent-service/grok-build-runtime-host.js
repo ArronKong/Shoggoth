@@ -1,4 +1,7 @@
 "use strict";
+const { runtimeFailureDetail } = require("./runtime-failure-detail");
+
+const { executionTimeoutMs, isExecutionTimeoutMs } = require("../execution-timeout");
 const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
 
 const { imageAttachments } = require("./chat-attachments");
@@ -30,7 +33,7 @@ const {
 } = require("./runtime-commands");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
-const { classifyProviderLimit } = require("./runtime-provider-errors");
+const { classifyProviderFailure, classifyProviderLimit } = require("./runtime-provider-errors");
 const { unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { serviceError } = require("./security");
 
@@ -619,6 +622,9 @@ function defaultProcessGroupExists(pid) {
 class GrokBuildRuntimeHost {
   constructor(options = {}) {
     this.options = { ...options, spawnEnv: { ...(options.spawnEnv || {}) } };
+    this.secretGateway = options.secretGateway || null;
+    this.modelSecretScope = null;
+    this.modelSecretRoutes = [];
     this.fs = options.fs || fs;
     this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
     if (options.resolveProxy !== undefined && typeof options.resolveProxy !== "function") {
@@ -646,6 +652,10 @@ class GrokBuildRuntimeHost {
     this.ledgerSlot = options.ledgerSlot || { promise: null };
     this.runtimeEnvironment = validateResolvedEnvironment(options.runtimeEnvironment, this.binding);
     this.permissionPolicy = normalizeGrokBuildPermissionPolicy(options.permissionPolicy);
+    this.modelOnlyInstance = options.modelOnlyInstance === true;
+    this.modelOnlyHome = null;
+    if (this.modelOnlyInstance && (this.permissionPolicy.approvalPolicy !== "never" || this.permissionPolicy.sandbox !== "read-only"
+      || options.workspace !== null || options.controlInstance === true)) throw hostError("MODEL_ONLY_TOOLS_FORBIDDEN", "Invalid model-only policy");
     if (options.controlInstance !== undefined && typeof options.controlInstance !== "boolean") {
       throw hostError("GROK_BUILD_WORKSPACE_INVALID", "Grok Build control instance flag is invalid");
     }
@@ -672,7 +682,8 @@ class GrokBuildRuntimeHost {
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? 30_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 90_000;
-    this.promptTimeoutMs = options.promptTimeoutMs ?? 30 * 60 * 1_000;
+    this.promptTimeoutMs = executionTimeoutMs(options.promptTimeoutMs);
+    if (!isExecutionTimeoutMs(this.promptTimeoutMs)) throw hostError("GROK_HOST_OPTIONS_INVALID", "Prompt timeout is invalid");
     // Grok can wait on initial inference before emitting a turn update.
     this.acceptanceTimeoutMs = options.acceptanceTimeoutMs ?? 90_000;
     this.shutdownGraceMs = options.shutdownGraceMs ?? 2_000;
@@ -772,15 +783,32 @@ class GrokBuildRuntimeHost {
     this.runtimeHome = runtimeHome;
     const binaryPath = this.runtimeEnvironment.binaryPath;
     this.binaryPath = binaryPath;
-    const args = buildGrokBuildArgs(this.permissionPolicy);
-    const env = await buildSpawnEnv(this.runtimeEnvironment, this.options);
+    if (this.modelOnlyInstance) this.modelOnlyHome = await require("./grok-model-only-config").prepareGrokModelOnly(this);
+    const args = this.modelOnlyInstance ? ["--sandbox", "read-only", "--tools", "", "--no-subagents", "--disable-web-search",
+      "agent", "--no-leader", "--agent-profile", this.modelOnlyHome.profile, "stdio"] : buildGrokBuildArgs(this.permissionPolicy);
+    let env = await buildSpawnEnv(this.runtimeEnvironment, this.options);
+    if (this.secretGateway) {
+      const assertCurrent = () => {
+        if (!["starting", "ready"].includes(this.state)) throw hostError("SECRET_MODEL_PROJECTION_UNAVAILABLE", "Local credential processing is unavailable");
+      };
+      for (const providerKind of ["grok-cli", "grok-api-key"]) this.modelSecretRoutes.push(await this.secretGateway.bindGrokSession({
+        providerKind, assertCurrent, resolveScope: () => this.modelSecretScope,
+      }));
+      env = Object.freeze({ ...env, GROK_CLI_CHAT_PROXY_BASE_URL: this.modelSecretRoutes[0].baseUrl,
+        GROK_XAI_API_BASE_URL: this.modelSecretRoutes[1].baseUrl });
+    }
     this.usageEnv = env;
+    // GROK_HOME isolates config/hooks/history. Keep the account's HOME so
+    // the native read-only sandbox can identify per-user container sockets.
+    // Home/project rules and foreign integrations are independently disabled.
+    if (this.modelOnlyHome) env = this.usageEnv = Object.freeze({ ...env, GROK_HOME: this.modelOnlyHome.grokHome,
+      GROK_AUTH_PATH: this.modelOnlyHome.authPath });
     if (this.state !== "starting") {
       throw hostError("RUNTIME_HOST_TERMINATED", "Grok Build host stopped before process spawn");
     }
     const child = this.spawnProcess(binaryPath, [...args], {
       shell: false,
-      cwd: this.controlInstance ? this.runtimeEnvironment.spawnEnv.HOME : this.workspace,
+      cwd: this.modelOnlyHome?.cwd || (this.controlInstance ? this.runtimeEnvironment.spawnEnv.HOME : this.workspace),
       detached: process.platform !== "win32",
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -827,6 +855,9 @@ class GrokBuildRuntimeHost {
       clientInfo: { name: "shoggoth", version: this.packageVersion },
     }, { timeoutMs: this.initializeTimeoutMs });
     this._acceptInitialize(response);
+    if ((this.secretGateway || this.modelOnlyInstance) && response._meta?.agentVersion !== "1.0.73") {
+      throw hostError("SECRET_MODEL_RUNTIME_UNSUPPORTED", "This Grok version has not been verified for local credential processing");
+    }
     await this._refreshAuthenticationIfChanged();
     this.initializedResponse = response;
     this.startupStage = "running";
@@ -1101,6 +1132,7 @@ class GrokBuildRuntimeHost {
   }
 
   _startCwd(value) {
+    if (this.modelOnlyHome) return this.modelOnlyHome.cwd;
     if (this.workspace !== null) {
       if (value === undefined || value === null || value === this.workspace) return this.workspace;
       throw hostError("RUNTIME_WORKSPACE_MISMATCH", "Grok Build session cwd differs from its host workspace");
@@ -1112,7 +1144,7 @@ class GrokBuildRuntimeHost {
   }
 
   _resumeCwd(value, session) {
-    const expected = this.workspace || this.runtimeHome;
+    const expected = this.modelOnlyHome?.cwd || this.workspace || this.runtimeHome;
     if (session.cwd !== expected) {
       throw hostError("RUNTIME_WORKSPACE_MISMATCH", "Grok Build session belongs to another workspace");
     }
@@ -1121,7 +1153,7 @@ class GrokBuildRuntimeHost {
   }
 
   _assertTurnCwd(value, session) {
-    const expected = this.workspace || this.runtimeHome;
+    const expected = this.modelOnlyHome?.cwd || this.workspace || this.runtimeHome;
     if (session.cwd !== expected || (value !== undefined && value !== null && value !== expected)) {
       throw hostError("RUNTIME_WORKSPACE_MISMATCH", "Grok Build turn differs from its host workspace");
     }
@@ -1204,6 +1236,7 @@ class GrokBuildRuntimeHost {
   }
 
   async _mcpServers(context) {
+    if (this.modelOnlyInstance) return [];
     const factory = this.options.mcpServersFactory;
     const createMcpServer = this.options.createMcpServer;
     if (factory !== undefined && createMcpServer !== undefined) {
@@ -1255,7 +1288,21 @@ class GrokBuildRuntimeHost {
     return model;
   }
 
+  _bindModelSecretScope(input) {
+    if (!this.secretGateway) return;
+    const scope = input?.modelSecretScope;
+    if (!scope || !safeString(scope.profileId, 512) || !safeString(scope.sessionId, 1024)
+      || this.modelSecretScope && (this.modelSecretScope.profileId !== scope.profileId || this.modelSecretScope.sessionId !== scope.sessionId)) {
+      throw hostError("SECRET_MODEL_IDENTITY_UNAVAILABLE", "A protected Grok worker must belong to exactly one product conversation");
+    }
+    // Native title requests omit their session id. An immutable product scope
+    // per worker also protects those requests and native child-agent traffic.
+    // Production execution pools already isolate workers by execution run id.
+    this.modelSecretScope ||= Object.freeze({ profileId: scope.profileId, sessionId: scope.sessionId });
+  }
+
   async sessionStart(input) {
+    this._bindModelSecretScope(input);
     this._assertExecutionInstance();
     await this._prepareAuthentication();
     if (!plain(input) || !safeString(input.source, 256)
@@ -1291,7 +1338,8 @@ class GrokBuildRuntimeHost {
       _meta: model === null && input.permissionMode == null && !this.nativeRulesSupported
         ? undefined
         : { ...(model === null ? {} : { modelId: model }), ...(input.permissionMode == null ? {} : permissionMeta(permissionMode)),
-          ...(this.nativeRulesSupported ? { rules: input.developerInstructions ?? "" } : {}) },
+          ...(this.nativeRulesSupported ? { rules: input.developerInstructions ?? "" } : {}),
+          ...(this.modelOnlyInstance ? { agentProfile: "shoggoth-review" } : {}) },
     });
     this.rpc.preflightRequest("session/new", params);
     const createdAt = this.now();
@@ -1374,6 +1422,7 @@ class GrokBuildRuntimeHost {
   }
 
   async sessionResume(input) {
+    this._bindModelSecretScope(input);
     this._assertExecutionInstance();
     await this._prepareAuthentication();
     if (!plain(input) || !safeString(input.sessionId, 512)
@@ -1912,11 +1961,37 @@ class GrokBuildRuntimeHost {
       const params = message.params;
       const active = this.activeTurns.get(params?.sessionId);
       const update = params?.update;
+      // Retry notifications have no prompt ID in current Grok. Require an
+      // accepted prompt and a fresh native timestamp; only publish finite codes,
+      // never provider diagnostics, and never resubmit the prompt ourselves.
+      if (update?.sessionUpdate === "retry_state" && update.type === "retrying"
+        && active?.accepted && active.nativePromptId && !active.timedOut
+        && active.dispatchState === "write_attempted"
+        && (update.prompt_id === undefined ? active.nativeRunningPromptId === active.nativePromptId
+          : update.prompt_id === active.nativePromptId)
+        && Number.isSafeInteger(params?._meta?.agentTimestampMs)
+        && params._meta.agentTimestampMs >= active.createdAt
+        && params._meta.agentTimestampMs <= this.now() + 1000
+        && Number.isSafeInteger(update.attempt) && update.attempt > 0
+        && Number.isSafeInteger(update.max_retries) && update.max_retries <= 1000
+        && update.attempt <= update.max_retries
+        && typeof update.reason === "string" && update.reason.length <= 16 * 1024) {
+        const failure = classifyProviderFailure(update.reason);
+        const reason = ["RUNTIME_RATE_LIMITED", "RUNTIME_UPSTREAM_UNAVAILABLE"].includes(failure) ? failure : null;
+        if (!active.retrying || active.retryReason !== reason) {
+          active.retrying = true;
+          active.retryReason = reason;
+          this._publish({ known: true, method: message.method, type: "status",
+            sessionId: active.sessionId, turnId: active.turnId, status: "retrying",
+            ...(reason ? { reason } : {}) });
+        }
+      }
       // Only the receipt for this exact prompt can supply a failure category.
       // Never interpret assistant text or a stale session notification as an error.
       if (active?.nativePromptId && update?.sessionUpdate === "turn_completed"
         && update.prompt_id === active.nativePromptId && update.stop_reason === "error"
         && typeof update.agent_result === "string" && update.agent_result.length <= 16 * 1024) {
+        active.failure = runtimeFailureDetail(update.agent_result, this.registeredSecrets);
         const limit = classifyProviderLimit(update.agent_result);
         if (limit === "RUNTIME_QUOTA_EXHAUSTED") {
           active.failureCode = limit;
@@ -1948,6 +2023,12 @@ class GrokBuildRuntimeHost {
       sessionId,
       turnId: active.turnId,
     };
+    if (active.retrying && ["agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]
+      .includes(update.sessionUpdate)) {
+      active.retrying = false;
+      active.retryReason = null;
+      this._publish({ ...common, type: "status", status: "running" });
+    }
     if (update.sessionUpdate === "usage_update") {
       this._publish({ ...common, type: "context_usage", contextUsage: {
         runtimeSessionId: sessionId, usedTokens: update.used, contextWindow: update.size > 0 ? update.size : null,
@@ -2140,6 +2221,10 @@ class GrokBuildRuntimeHost {
       || !Array.isArray(params.entries) || params.entries.length > 256) return;
     const active = this.activeTurns.get(params.sessionId);
     if (!active || active.timedOut || active.dispatchState !== "write_attempted") return;
+    // Acceptance can mean queued. Unkeyed retry notifications belong only to
+    // the prompt explicitly identified as running in the latest queue receipt.
+    active.nativeRunningPromptId = params.runningKind === "prompt" && params.runningText === active.promptText
+      && safeString(params.runningPromptId, 512) ? params.runningPromptId : null;
     const candidates = [...params.entries, {
       id: params.runningPromptId,
       kind: params.runningKind,
@@ -2265,7 +2350,8 @@ class GrokBuildRuntimeHost {
         contextUsage: unknownRuntimeContextUsage(active.sessionId, { observedAt: timestamp, source: "runtime_event" }) });
     }
     this._publish({ ...common, method: "session/prompt", type: "complete", status,
-      ...(status === "failed" ? { errorCode: active.failureCode || "GROK_BUILD_TURN_FAILED" } : {}) });
+      ...(status === "failed" ? { errorCode: active.failureCode || "GROK_BUILD_TURN_FAILED",
+        ...(active.failure ? { failure: active.failure } : {}) } : {}) });
     active.terminal.resolve({ status });
   }
 
@@ -2273,10 +2359,12 @@ class GrokBuildRuntimeHost {
     if (this.activeTurns.get(active.sessionId) !== active) return;
     // Grok can return a provider failure on the exact session/prompt RPC
     // without emitting its extended turn_completed notification over ACP.
-    // The bounded private RPC detail is safe to classify, never to publish.
+    // Project only a bounded, redacted diagnostic from that private RPC detail.
     const remoteRejected = error?.code === "GROK_ACP_REMOTE_ERROR";
+    const failure = typeof error?.rpcDetail === "string" ? runtimeFailureDetail(error.rpcDetail, this.registeredSecrets) : active.failure;
     const providerCode = remoteRejected
-      ? (active.failureCode || classifyProviderLimit(error.rpcDetail)) : null;
+      ? (active.failureCode || (String(error.rpcDetail).includes("SECRET_MODEL_PROJECTION_UNAVAILABLE")
+        ? "SECRET_MODEL_PROJECTION_UNAVAILABLE" : classifyProviderLimit(error.rpcDetail))) : null;
     if (providerCode) {
       const original = error;
       error = hostError(providerCode, "Grok Build provider rejected the prompt");
@@ -2293,6 +2381,7 @@ class GrokBuildRuntimeHost {
     active.timer = null;
     const explicit = active.dispatchState === "not_sent"
       || error?.code === "AUTH_REQUIRED" || remoteRejected;
+    if (failure) error.failure = failure;
     if (active.timedOut && !explicit) {
       this.activeTurns.delete(active.sessionId);
       active.terminal.reject(error);
@@ -2344,6 +2433,7 @@ class GrokBuildRuntimeHost {
       turnId: active.turnId,
       status,
       errorCode: error?.code || "GROK_BUILD_TURN_FAILED",
+      ...(failure ? { failure } : {}),
     });
   }
 
@@ -2381,6 +2471,8 @@ class GrokBuildRuntimeHost {
   }
 
   async _stopProcess(fromFatal) {
+    for (const route of this.modelSecretRoutes) route.close();
+    this.modelSecretRoutes.length = 0; this.modelSecretScope = null;
     const termination = hostError("RUNTIME_HOST_TERMINATED", "Grok Build host stopped");
     for (const active of [...this.activeTurns.values()]) {
       clearTimeout(active.timer);
@@ -2389,7 +2481,7 @@ class GrokBuildRuntimeHost {
     this.activeTurns.clear();
     try { await this.rpc?.terminate(); } catch {}
     const child = this.child;
-    if (!child) return;
+    if (!child) { await this.modelOnlyHome?.dispose(); this.modelOnlyHome = null; return; }
     let exists = !this.childClosed;
     if (!exists) {
       try { exists = this.processGroupExists(child.pid); } catch { exists = true; }
@@ -2415,6 +2507,7 @@ class GrokBuildRuntimeHost {
     // Nothing this process received can run any more; unknown receipts remain
     // fences for their own operations only.
     this._releaseLiveTurns();
+    await this.modelOnlyHome?.dispose(); this.modelOnlyHome = null;
   }
 }
 

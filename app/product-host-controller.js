@@ -7,6 +7,7 @@ const {
   validateRuntimeAccountServiceResult,
 } = require("./agent-service/runtime-account-service-protocol");
 const { serviceError } = require("./agent-service/security");
+const { PRESET_KINDS, presetProviderId } = require("./agent-service/codex-session-provider");
 const { validStopImpact } = require("./agent-service/stop-impact");
 const {
   SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
@@ -84,9 +85,10 @@ function baseUrlHost(value) {
 }
 
 function projectSafeProvider(value) {
+  const hasModels = ownDataObject(value) && Object.prototype.hasOwnProperty.call(value, "models");
   const fields = [
     "id", "kind", "name", "baseUrl", "model", "credentialRef", "headers",
-    "awsRegion", "awsProfile", "validationStatus",
+    "awsRegion", "awsProfile", "validationStatus", ...(hasModels ? ["models"] : []),
   ];
   if (!exactObject(value, fields)) {
     throw hostError("HOST_PROVIDER_RESPONSE_INVALID", "Provider response is invalid");
@@ -97,6 +99,16 @@ function projectSafeProvider(value) {
     || !safeString(provider.model, 1024, true)
     || !safeString(provider.credentialRef, 128, true)
     || !VALIDATION_STATUSES.has(provider.validationStatus)) {
+    throw hostError("HOST_PROVIDER_RESPONSE_INVALID", "Provider response is invalid");
+  }
+  // Custom endpoints now persist multiple models. Validate that Service shape
+  // without adding private storage fields to the renderer's summary DTO.
+  if (hasModels && (provider.kind !== "custom-responses" || !Array.isArray(provider.models)
+    || provider.models.length === 0 || provider.models.length > 500
+    || new Set(provider.models).size !== provider.models.length
+    || !provider.models.includes(provider.model)
+    || provider.models.some((model) => !safeString(model, 512) || model !== model.trim()
+      || /[\u0000-\u001f\u007f]/u.test(model)))) {
     throw hostError("HOST_PROVIDER_RESPONSE_INVALID", "Provider response is invalid");
   }
   const host = baseUrlHost(provider.baseUrl);
@@ -451,21 +463,11 @@ function createProductHostController(options = {}) {
       if (current.supported === false) {
         return authorizeBackgroundStartup(current, intentGeneration);
       }
-      if (current.loaded === true && current.enabled === true && current.needsRepair === false) {
-        try {
-          const service = projectServiceStatus(await serviceRequest("service.status", {}));
-          if (!backgroundIntentIsCurrent(intentGeneration)) return null;
-          if (service.healthy === true) {
-            return authorizeBackgroundStartup(current, intentGeneration);
-          }
-        } catch {
-          if (!backgroundIntentIsCurrent(intentGeneration)) return null;
-          // loaded 仅代表 launchd job 已注册；覆盖安装期间进程可能已退出或 socket 已失效。
-        }
-      }
       if (typeof launchAgent.start !== "function") {
         throw hostError("HOST_BACKGROUND_ACTION_INVALID", "Background start action is unavailable");
       }
+      // 同一路径下的旧 Service 也可能报告 healthy；每次启动都由 LaunchAgent
+      // 核对协议和 App 版本。当前实例匹配时 start() 只确认健康，不会重启进程。
       // 已安装应用首次打开即建立后台 Service；start() 同时覆盖安装、修复、启用与健康等待。
       // LaunchAgent 自身拥有唯一健康预算和一次有界重注册；Host 不能再叠加
       // 第二个 start 窗口，否则单次 UI 恢复可被放大到 90 秒以上。
@@ -640,6 +642,7 @@ function createProductHostController(options = {}) {
           profileId: authority.profile.id,
           cursor,
           limit: 100,
+          source: "chatgpt",
         });
         let page;
         try { page = validateProfileServiceResult("profile.models.list", raw); } catch {
@@ -796,6 +799,50 @@ function createProductHostController(options = {}) {
       const configured = validateProfileServiceResult("profile.bind", result).profile;
       await Promise.resolve(onProfileConfigured(configured)).catch(() => {});
       return { profile: profileSummary(configured, true) };
+    },
+
+    // Makes a saved source (custom endpoint or configured preset) the
+    // assistant default (new conversations, HEARTBEAT, scheduled work).
+    // Conversations keep their own choices.
+    async bindEndpoint(input) {
+      const profileId = validateMutationIdentity(input, ["operationId", "providerRef", "defaultModel", "createdAt"]);
+      if (!safeString(data(input, "providerRef"), 128) || !OPAQUE_ID_PATTERN.test(data(input, "providerRef"))
+        || !safeString(data(input, "defaultModel"), 1024)) {
+        throw hostError("HOST_PROVIDER_PARAMS_INVALID", "Endpoint binding is invalid");
+      }
+      const profile = await configurableProfile(profileId);
+      const result = await serviceRequest("profile.bind", {
+        operationId: data(input, "operationId"),
+        profileId: profile.id,
+        providerRef: data(input, "providerRef"),
+        defaultModel: data(input, "defaultModel"),
+        createdAt: data(input, "createdAt"),
+      });
+      const configured = validateProfileServiceResult("profile.bind", result).profile;
+      await Promise.resolve(onProfileConfigured(configured)).catch(() => {});
+      return { profile: profileSummary(configured, true) };
+    },
+
+    // Removes a preset this assistant configured but no longer uses as its
+    // default, with its credential. A default is changed, never removed here.
+    async removeProvider(input) {
+      const profileId = validateMutationIdentity(input, ["operationId", "providerId", "createdAt"]);
+      const providerId = data(input, "providerId");
+      if (!safeString(providerId, 128) || !OPAQUE_ID_PATTERN.test(providerId)) {
+        throw hostError("HOST_PROVIDER_PARAMS_INVALID", "Provider selector is invalid");
+      }
+      const profile = await configurableProfile(profileId);
+      const raw = await serviceRequest("provider.list", {});
+      const provider = Array.isArray(raw) ? raw.find((candidate) => candidate?.id === providerId) : undefined;
+      if (!provider || !PRESET_KINDS.includes(provider.kind) || presetProviderId(provider.kind, profile) !== providerId) {
+        throw hostError("HOST_PROVIDER_TARGET_FORBIDDEN", "Provider is not configured for this assistant");
+      }
+      if (profile.providerRef === providerId) {
+        throw hostError("HOST_PROVIDER_IN_USE", "The assistant default provider cannot be removed");
+      }
+      await assertProfileProviderMutationIsExclusive(profile, providerId);
+      await serviceRequest("provider.delete", { providerId });
+      return { removed: providerId };
     },
 
     async clearProfileProvider(input) {

@@ -96,6 +96,7 @@ function run(overrides = {}) {
   return { id: "run-1", source: "chat", sourceId: SESSION_KEY, idempotencyKey: "shoggoth:chat-send:send-1",
     profileId: PROFILE_ID, workspace: null, status: "queued", contextSnapshotId: null,
     runtimeSessionRef: ref, runtimeTurnRef: codexTurnId === null ? null : { ...ref, turnId: codexTurnId },
+    runtimeAttemptRef: null,
     eventSeq: 1, waitingRequestId: null, startedAt: null, finishedAt: null, resultSummary: null,
     errorCode: null, retryOf: null, ...extra };
 }
@@ -730,6 +731,63 @@ test("response metadata is frozen on the final text of its run across history pa
   }
 });
 
+test("confirmed native compaction keeps one durable history notice across pagination and restart", async () => {
+  const events = [
+    { id: "compact-input", seq: 1, kind: "user", content: { text: "/compact" }, contextExcluded: false },
+    { id: "compact-start", seq: 2, kind: "status", content: { transcriptType: "context.native.compacting" }, contextExcluded: true },
+    { id: "compact-receipt", seq: 3, kind: "status", contextExcluded: true,
+      content: { transcriptType: "context.native.compacted", runtimeSessionId: "native-scope" } },
+    { id: "unbound-receipt", seq: 4, kind: "status", contextExcluded: true,
+      content: { transcriptType: "context.native.compacted" } },
+    { id: "wrong-kind", seq: 5, kind: "status", contextExcluded: false,
+      content: { transcriptType: "context.native.compacted", runtimeSessionId: "native-scope" } },
+    { id: "terminal-only", seq: 6, kind: "status", contextExcluded: true,
+      content: { transcriptType: "terminal", status: "completed" } },
+  ].map(event => ({ ...event, runId: "compact-run", occurredAt: 100 + event.seq }));
+  const transcriptStore = { ensureSession() {}, importHistoryItems() {}, getSessionDerivedTitle() { return null; },
+    listEvents: () => structuredClone(events) };
+  for (let restart = 0; restart < 2; restart++) {
+    const { controller } = fixture({ transcriptStore }); await controller.open();
+    const messages = []; let cursor = null;
+    do {
+      const page = await controller.handle("chat.history", { sessionKey: SESSION_KEY, cursor, limit: 1 }, "compact-history");
+      messages.unshift(...page.messages); cursor = page.nextCursor;
+    } while (cursor);
+    assert.deepEqual(messages.map(item => item.id), ["compact-input", "compact-receipt"]);
+    const notice = messages[1];
+    assert.equal(notice.type, "status");
+    assert.equal(notice.runId, "compact-run");
+    assert.equal(notice.payload.message.notice, "contextCompacted");
+    assert.equal(notice.payload.message.shoggoth.sourceEventId, "compact-receipt");
+    assert.equal(notice.payload.message.shoggoth.contextExcluded, true);
+    assert.equal(Object.hasOwn(notice.payload.message, "responseMetadata"), false);
+    await controller.close();
+  }
+});
+
+test("legacy duplicate command receipts fold across history pages without hiding distinct cycles", async () => {
+  const { transcriptEventId } = require("../app/agent-service/transcript-store");
+  const compact = (id, runId, seq, extra = {}) => ({ id, runId, seq, kind: "status", contextExcluded: true,
+    occurredAt: 1000 + seq, content: { transcriptType: "context.native.compacted", runtimeSessionId: "native", ...extra } });
+  const events = [compact("native-receipt", null, 1),
+    compact(transcriptEventId("native-context-compacted", "compact-run", "command"), "compact-run", 2),
+    compact("next-cycle", null, 3, { compactionId: "cycle-2" }),
+    compact("another-session", "other-run", 4, { runtimeSessionId: "other-native" })];
+  const before = JSON.stringify(events);
+  const transcriptStore = { ensureSession() {}, importHistoryItems() {}, getSessionDerivedTitle() { return null; },
+    listEvents: () => structuredClone(events) };
+  const { controller } = fixture({ transcriptStore }); await controller.open();
+  try {
+    const messages = []; let cursor = null;
+    do {
+      const page = await controller.handle("chat.history", { sessionKey: SESSION_KEY, cursor, limit: 1 }, "legacy-compact");
+      messages.unshift(...page.messages); cursor = page.nextCursor;
+    } while (cursor);
+    assert.deepEqual(messages.map(item => item.id), ["native-receipt", "next-cycle", "another-session"]);
+    assert.equal(JSON.stringify(events), before);
+  } finally { await controller.close(); }
+});
+
 test("transcript history 只给 federation 用户输入附加 inter-session provenance", async () => {
   const transcriptStore = {
     ensureSession() {},
@@ -847,6 +905,7 @@ test("session.create 验证 enabled profile，null workspace 使用 defaultCwd �
   assert.equal(fs.statSync(expected).mode & 0o777, 0o700);
   assert.deepEqual(managed.calls.create[0], {
     operationId: "create-1", profileId: PROFILE_ID, workspace: expected, createdAt: 900,
+    permissionMode: "auto-review",
   });
 
   const configured = fixture({ profiles: [profile({ defaultCwd: "/tmp/shoggoth-default" })] });
@@ -1250,7 +1309,7 @@ test("非 Codex Profile 的会话管理只走通用 RuntimeHandle，不依赖 Co
   value.chatSessionStore.close();
 });
 
-test("原生命令目录与执行按当前 Session 的 Runtime binding、workspace 和远端 session 路由", async () => {
+test("原生命令目录与普通命令执行按当前 Session 的 Runtime binding、workspace 和远端 session 路由", async () => {
   const commandCalls = [];
   const value = boundControllerFixture({
     host: {
@@ -1261,39 +1320,51 @@ test("原生命令目录与执行按当前 Session 的 Runtime binding、workspa
           supported: true,
           reason: null,
           commands: [{
-            name: "compact", description: "Compact context", args: null,
+            name: "status", description: "Inspect context", args: null,
             category: "session", aliases: [],
           }],
         };
       },
       async commandExecute(input) {
         commandCalls.push(["exec", structuredClone(input)]);
-        return { kind: "output", text: "Compaction started.", warning: null };
+        return { kind: "output", text: "Current context.", warning: null };
       },
     },
   });
-  value.coordinator.send = async input => {
-    commandCalls.push(["send", { ...input, operationId: "generated" }]);
-    return { run: { status: "queued" } };
-  };
   await value.controller.open();
   const catalog = await value.controller.handle("chat.command.list", {
     sessionKey: value.bound.sessionKey,
   }, "commands-list");
   const executed = await value.controller.handle("chat.command.exec", {
-    sessionKey: value.bound.sessionKey, text: "/compact",
+    sessionKey: value.bound.sessionKey, text: "/status",
   }, "commands-exec");
-  assert.deepEqual(catalog.commands.map((command) => command.name), ["compact"]);
-  assert.deepEqual(executed, { kind: "output", text: "上下文压缩已排队。", warning: null });
+  assert.deepEqual(catalog.commands.map((command) => command.name), ["status"]);
+  assert.deepEqual(executed, { kind: "output", text: "Current context.", warning: null });
   assert.deepEqual(commandCalls, [
     ["list", { sessionId: "thread-bound", cwd: "/tmp/shoggoth-bound" }],
-    ["send", { operationId: "generated", sessionKey: value.bound.sessionKey, prompt: "/compact" }],
+    ["exec", { sessionId: "thread-bound", cwd: "/tmp/shoggoth-bound", text: "/status" }],
   ]);
-  assert.deepEqual(value.calls.runtime, Array.from({ length: 1 }, () => ({
+  assert.deepEqual(value.calls.runtime, Array.from({ length: 2 }, () => ({
     runtime: "codex",
     runtimeProfileId: "shoggoth-profile-1",
     runtimeAccountId: "shoggoth-internal-codex-default-v1",
   })));
+  await value.controller.close();
+  value.chatSessionStore.close();
+});
+
+test("手动 compact 只返回 typed send 交接，不提前创建第二条运行或直调宿主", async () => {
+  const value = boundControllerFixture({ host: {
+    capabilities: { "commands.execute": true },
+    async commandExecute() { assert.fail("manual compaction must use chat.send"); },
+  } });
+  value.coordinator.send = async () => assert.fail("command parsing must not start an unsubscribed run");
+  await value.controller.open();
+  const result = await value.controller.handle("chat.command.exec", {
+    sessionKey: value.bound.sessionKey, text: " /compact \n",
+  }, "manual-compact-handoff");
+  assert.deepEqual(result, { kind: "send", text: "/compact", warning: null });
+  assert.equal(value.calls.runtime.length, 0, "the normal tracked send owns runtime acquisition");
   await value.controller.close();
   value.chatSessionStore.close();
 });

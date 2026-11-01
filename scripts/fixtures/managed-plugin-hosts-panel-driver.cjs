@@ -89,19 +89,19 @@ app.whenReady().then(async () => {
     async function click(backendId, name) { await wait(`(${button(backendId, name)}) && !(${button(backendId, name)}).disabled`, `${backendId} button unavailable: ${name}`); await evaluate(`(${button(backendId, name)}).click()`); }
     await wait(`${status("openclaw", "尚未准备")} && ${status("hermes", "尚未准备")}`, "two initial states absent");
     assert.equal(await evaluate("document.querySelectorAll('[data-managed-plugin-host]').length"), 2);
-    assert.equal(await evaluate("document.querySelector('#managed-hermes-title')?.textContent"), "Hermes 公共插件环境");
+    assert.equal(await evaluate("document.querySelector('#managed-hermes-title')?.textContent"), "Hermes 运行环境");
     assert.equal(actions.length, 0); assert.equal(controls.openclaw.clients + controls.hermes.clients, 0);
     checks.push("both actual panels start with read-only status, distinct labels and zero Worker clients");
     for (const backendId of ["openclaw", "hermes"]) {
-      await click(backendId, "准备插件环境"); await wait(status(backendId, "正在准备…"), `${backendId} preparation absent`);
+      await click(backendId, "开始准备"); await wait(status(backendId, "正在准备"), `${backendId} preparation absent`);
       assert.equal(await evaluate(`Array.from(${section(backendId)}.querySelectorAll('button')).some(b=>!b.disabled&&b.textContent!=='重新检查')`), false);
       assert.equal(controls[backendId].copies, 1); controls[backendId].releasePreparation();
-      await wait(status(backendId, "插件环境已就绪"), `${backendId} verified controller receipt absent`);
+      await wait(status(backendId, "可以使用"), `${backendId} verified controller receipt absent`);
       assert.equal(store.read()[`${backendId}PluginHostMode`], "managed");
       checks.push(`${backendId} preparation persists only its mode and requires the actual ProductController admission/receipt`);
       controls[backendId].dropAfterAccept = true;
-      await click(backendId, "重新启动"); await wait(status(backendId, "状态需要核实"), `${backendId} lost ACK incorrectly ready`);
-      await wait(status(backendId, "插件环境已就绪"), `${backendId} original restart not observed`);
+      await click(backendId, "重新启动"); await wait(status(backendId, "状态待确认"), `${backendId} lost ACK incorrectly ready`);
+      await wait(status(backendId, "可以使用"), `${backendId} original restart not observed`);
       assert.equal(controls[backendId].activations, 2);
       const original = actions.findLast(row => row.backendId === backendId);
       assert(requests.some(row => row.path === `/__api/plugins/host-runtime/${backendId}/operations/${original.operationId}`));
@@ -111,18 +111,18 @@ app.whenReady().then(async () => {
     await evaluate("window.showManagedHostPanels('openclaw')");
     for (let n = 0; !controls.openclaw.readHeld && n < 100; n++) await delay(10);
     assert.equal(controls.openclaw.readHeld, true);
-    await evaluate("window.showManagedHostPanels('hermes')"); await wait(status("hermes", "插件环境已就绪"), "single Hermes panel absent");
+    await evaluate("window.showManagedHostPanels('hermes')"); await wait(status("hermes", "可以使用"), "single Hermes panel absent");
     held.resolve(); await delay(100);
     assert.equal(await evaluate("document.querySelectorAll('[data-managed-plugin-host]').length"), 1);
     assert.equal(await evaluate("document.querySelector('[data-managed-plugin-host]')?.dataset.managedPluginHost"), "hermes");
-    assert.equal(await evaluate("document.querySelector('h3')?.textContent"), "Hermes 公共插件环境");
-    await evaluate("window.showManagedHostPanels('both')"); await wait(status("openclaw", "插件环境已就绪"), "dual remount absent");
+    assert.equal(await evaluate("document.querySelector('h3')?.textContent"), "Hermes 运行环境");
+    await evaluate("window.showManagedHostPanels('both')"); await wait(status("openclaw", "可以使用"), "dual remount absent");
     checks.push("late old-backend HTTP completion cannot mutate a reused panel's new backend scope");
     controls.hermes.stopFailure = true;
-    await click("hermes", "停止"); await wait(status("hermes", "状态需要核实"), "unknown Hermes writer reported stopped");
-    assert.equal(await evaluate(`${button("hermes", "启动插件环境")}!=null`), false);
-    assert.equal(await evaluate(status("openclaw", "插件环境已就绪")), true);
-    controls.hermes.stopFailure = false; await click("hermes", "停止"); await wait(status("hermes", "插件环境已停止"), "explicit Hermes owned stop absent");
+    await click("hermes", "停止运行"); await wait(status("hermes", "状态待确认"), "unknown Hermes writer reported stopped");
+    assert.equal(await evaluate(`${button("hermes", "启动运行环境")}!=null`), false);
+    assert.equal(await evaluate(status("openclaw", "可以使用")), true);
+    controls.hermes.stopFailure = false; await click("hermes", "停止运行"); await wait(status("hermes", "已停止"), "explicit Hermes owned stop absent");
     assert.equal(controls.hermes.stops, 2); checks.push("Hermes unknown writer cannot start a replacement; accurate explicit stop affects only Hermes");
     await evaluate("document.activeElement?.blur()"); let focused = false;
     for (let n = 0; n < 8; n++) { win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Tab" }); win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Tab" }); await delay(20);
@@ -138,24 +138,24 @@ app.whenReady().then(async () => {
     } }
     checks.push("both cards remain labelled, keyboard reachable, scrollable and contained in desktop/mobile light/dark layouts");
     await evaluate("window.setManagedHostLocale('en')");
-    await wait("document.querySelector('#managed-hermes-title')?.textContent==='Hermes shared plugin environment'", "English Hermes title absent");
+    await wait("document.querySelector('#managed-hermes-title')?.textContent==='Hermes runtime'", "English Hermes title absent");
     const english = await evaluate("window.captureManagedHostPanels('light')");
     assert.equal(english.sections.length, 2); assert(english.scrollWidth <= 390); assert.deepEqual(english.errors, []);
     geometry.push(english); fs.writeFileSync(path.join(outputDir, "managed-hosts-390-en-light.png"), (await win.webContents.capturePage()).toPNG());
     await evaluate("window.setManagedHostLocale('zh-CN')");
-    await wait("document.querySelector('#managed-hermes-title')?.textContent==='Hermes 公共插件环境'", "Chinese locale restoration absent");
+    await wait("document.querySelector('#managed-hermes-title')?.textContent==='Hermes 运行环境'", "Chinese locale restoration absent");
     checks.push("both backend titles and actions localize to English without mobile overflow");
     for (const backendId of ["hermes", "openclaw"]) {
-      if (backendId === "openclaw") { await click(backendId, "停止"); await wait(status(backendId, "插件环境已停止"), "OpenClaw stop absent"); }
+      if (backendId === "openclaw") { await click(backendId, "停止运行"); await wait(status(backendId, "已停止"), "OpenClaw stop absent"); }
       const before = actions.length, activations = controls[backendId].activations;
-      controls[backendId].dropBeforeAccept = true; await click(backendId, "启动插件环境"); await wait(status(backendId, "状态需要核实"), `${backendId} unknown action not held`);
+      controls[backendId].dropBeforeAccept = true; await click(backendId, "启动运行环境"); await wait(status(backendId, "状态待确认"), `${backendId} unknown action not held`);
       await delay(1650); await click(backendId, "重新检查"); await delay(100);
       assert.equal(actions.length, before); assert.equal(controls[backendId].activations, activations);
       const saved = await evaluate(`JSON.parse(localStorage.getItem('shoggoth:managed-plugin-host-operation:${backendId}'))`);
       assert.equal(saved.backendId, backendId); assert.equal(Object.keys(saved).length, 3);
       assert(requests.some(row => row.path === `/__api/plugins/host-runtime/${backendId}/operations/${saved.operationId}`));
-      await evaluate("window.remountManagedHostPanels()"); await wait(status(backendId, "状态需要核实"), `${backendId} original operation forgotten on remount`);
-      assert.equal(await evaluate(`${button(backendId, "启动插件环境")}!=null`), false); assert.equal(actions.length, before);
+      await evaluate("window.remountManagedHostPanels()"); await wait(status(backendId, "状态待确认"), `${backendId} original operation forgotten on remount`);
+      assert.equal(await evaluate(`${button(backendId, "启动运行环境")}!=null`), false); assert.equal(actions.length, before);
       checks.push(`${backendId} unobserved original operation remains persisted and read-only across GET 404 and remount`);
     }
     const pending = await evaluate("['openclaw','hermes'].map(id=>JSON.parse(localStorage.getItem('shoggoth:managed-plugin-host-operation:'+id)))");

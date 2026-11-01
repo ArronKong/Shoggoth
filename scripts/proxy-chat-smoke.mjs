@@ -66,6 +66,7 @@ const sessionMutationCalls = [];
 const asyncCreateCalls = [];
 let shoggothOnline = true;
 let failAsyncCreate = false;
+let createdPermissionRow;
 let shoggothWatchMode = "active";
 const shoggothWatchRecords = [];
 const shoggothAbortCalls = [];
@@ -112,6 +113,12 @@ class MockChatBackend extends AgentBackend {
       hooks.final?.("legacy backend failure", true);
       return;
     }
+    if (message === "intentional stop" || message === "native intentional stop") {
+      if (message === "native intentional stop") hooks.nativeContent("aborted", [{ type: "text", text: "partial reply", segmentId: "partial" }],
+        { runId: idempotencyKey, displayId: `native-run:${idempotencyKey}` });
+      else hooks.final("partial reply", false, { runId: idempotencyKey, stopReason: "aborted" });
+      return;
+    }
     await new Promise((r) => setTimeout(r, 10));
     hooks.delta?.("hi");
     await new Promise((r) => setTimeout(r, 10));
@@ -149,7 +156,8 @@ class AsyncChatBackend extends AgentBackend {
       label: "Shoggoth",
       updatedAt: 1_700_000_000_001,
       sessionId: "real-default",
-    }];
+      permissionMode: "full-access",
+    }, ...(createdPermissionRow ? [createdPermissionRow] : [])];
   }
   async getHistory() {
     const behavior = shoggothHistoryBehaviors.shift() || {};
@@ -169,7 +177,9 @@ class AsyncChatBackend extends AgentBackend {
     asyncCreateCalls.push({ agentId, options });
     await new Promise((resolve) => setTimeout(resolve, 15));
     if (failAsyncCreate) throw new Error("async create failed");
-    return `agent:${agentId}:created-async`;
+    const key = `agent:${agentId}:created-async`;
+    createdPermissionRow = { key, permissionMode: "request-approval" };
+    return key;
   }
   async abortChat(sessionKey) {
     shoggothAbortCalls.push(sessionKey);
@@ -181,7 +191,7 @@ class AsyncChatBackend extends AgentBackend {
   async sendMessage(sessionKey, message, runId, hooks = {}, opts = {}) {
     const record = {
       sessionKey, message, runId, actualRunId: `service-${runId}`, aborted: false, settled: false,
-      pluginSelection: opts.pluginSelection,
+      connectorSelection: opts.connectorSelection,
     };
     shoggothSendRecords.push(record);
     if (message === "thrown-preparation" || message === "thrown-uncertain") {
@@ -195,7 +205,7 @@ class AsyncChatBackend extends AgentBackend {
         ...(message === "uncertain-preparation" ? { receiptUncertain: true } : {}), privateDetails: "must not cross the bridge" });
       return;
     }
-    if (opts.pluginSelection) opts.onAccepted?.();
+    if (opts.connectorSelection) opts.onAccepted?.();
     if (message.startsWith("capacity-complete-")) {
       record.settled = true;
       hooks.final?.(message, false, { runId: record.actualRunId });
@@ -263,6 +273,8 @@ class AsyncChatBackend extends AgentBackend {
       else opts.signal?.addEventListener?.("abort", onAbort, { once: true });
       queueMicrotask(() => {
         if (record.aborted || record.settled) return;
+        for (const stage of ["context", "capabilities", "connecting", "restoring", "private-stage-detail"]) hooks.status?.({ kind: "starting", stage });
+        hooks.status?.({ kind: "running", stage: "waiting" });
         hooks.delta?.(`recovered-${index}`);
         hooks.thinking?.(`reasoning-${index}`);
         hooks.tool?.({ toolCallId: `tool-${index}`, name: "read", phase: "start" });
@@ -325,6 +337,13 @@ const upstreamUrl = `ws://127.0.0.1:${upstreamHttp.address().port}`;
 
 // --- proxy ------------------------------------------------------------------
 const registry = new BackendRegistry();
+// This routing fixture has no Service process. Supply its explicit preparation
+// dependency; the production owner's scanner is exercised by the secret E2E.
+registry.setChatSecretOwner({ async chatSecretRequest(action, input) {
+  if (action !== "prepare") throw new Error("Unexpected secret action");
+  if (input.text === "fixture mediation unavailable") throw Object.assign(new Error("Local processing unavailable"), { code: "SECRET_PROCESSING_UNAVAILABLE" });
+  return { text: input.text, references: [], version: 1 };
+} });
 const mockBackend = new MockChatBackend();
 registry.register(mockBackend);
 registry.register(new AsyncChatBackend());
@@ -583,12 +602,16 @@ try {
       && asyncCreateCalls.length === 1
       && asyncCreateCalls[0]?.options?.workspace === "/tmp/shoggoth-project",
   );
+  check("sessions.create returns the exact child permission before its first turn",
+    asyncCreated.payload?.permissionMode === "request-approval");
   send({ type: "req", id: "create-sync", method: "sessions.create", params: { agentId: "hermes-default" } });
   const syncCreated = await waitFor((f) => f.type === "res" && f.id === "create-sync", "sync sessions.create res");
   check(
     "sync Hermes-style sessions.create remains compatible",
     syncCreated.ok === true && /^agent:hermes-default:/.test(syncCreated.payload?.key || ""),
   );
+  check("sessions.create leaves permission absent when the backend has no authoritative child row",
+    !Object.hasOwn(syncCreated.payload || {}, "permissionMode"));
   const upstreamBeforeCreateFailure = upstreamReceived.length;
   failAsyncCreate = true;
   send({ type: "req", id: "create-async-fail", method: "sessions.create", params: { agentId: "shoggoth-default" } });
@@ -651,6 +674,10 @@ try {
     "history watcher reuses chat thinking and tool gateway event mapping",
     !!recoveredThinking1 && !!recoveredTool1,
   );
+  const startupFrames = clientFrames.slice(historyFrameStart).filter(frame => frame.payload?.state === "status");
+  check("startup phases cross the proxy in order", JSON.stringify(startupFrames.map(frame => frame.payload.stage).filter(Boolean))
+    === JSON.stringify(["context", "capabilities", "connecting", "restoring", "waiting"]));
+  check("unknown startup details never cross the proxy", !JSON.stringify(startupFrames).includes("private-stage-detail"));
 
   // An older history success that arrives after a newer request failed is
   // stale. It must not tear down the still-valid watcher from the last
@@ -912,6 +939,13 @@ try {
 
   // 2. chat.send to foreign session: local res + delta + final events.
   const sendUpstreamBefore = upstreamReceived.filter((f) => f.method === "chat.send").length;
+  const unavailableBefore = sendCalls.length;
+  send({ type: "req", id: "secret-unavailable", method: "chat.send", params: {
+    sessionKey: "agent:hermes-default:main", message: "fixture mediation unavailable", idempotencyKey: "not-admitted-secret",
+  } });
+  const unavailable = await waitFor(f => f.type === "res" && f.id === "secret-unavailable", "secret processing unavailable");
+  check("credential processing failure states non-admission", unavailable.error?.code === "SECRET_PROCESSING_UNAVAILABLE" && unavailable.error?.admissionAccepted === false);
+  check("credential processing failure never dispatches to backend", sendCalls.length === unavailableBefore);
   // UI sends `idempotencyKey` in the real chat.send params (not `runId`).
   send({
     type: "req",
@@ -964,29 +998,25 @@ try {
     && reconciled.payload?.observed?.createdAt === 123);
   check("native recovery is never forwarded to a foreign gateway", !upstreamReceived.some(f => f.method === "chat.operation.reconcile"));
 
-  // Selection is a Shoggoth-owned field. The proxy starts observation first,
-  // then emits a separate durable acceptance event from the Service backend.
-  const selected = [{ installationId: "fixture-installed", revision: 2 }];
+  // Old OpenConnector selections are retired before any backend admission.
+  const selected = ["fixture-connection-id"];
   send({ type: "req", id: "native-plugin-send", method: "chat.send", params: {
     sessionKey: "agent:shoggoth-default:real-default", message: "use plugin",
-    idempotencyKey: "native-plugin-run", pluginSelection: selected,
+    idempotencyKey: "native-plugin-run", connectorSelection: selected,
   } });
   const selectedResponse = await waitFor(f => f.type === "res" && f.id === "native-plugin-send", "selected native response");
-  const selectedAccepted = await waitFor(f => f.type === "event" && f.event === "chat"
-    && f.payload?.runId === "native-plugin-run" && f.payload?.state === "accepted", "selected native accepted");
-  check("native selection passes exactly to its backend and gets a separate acceptance",
-    selectedResponse.ok === true && selectedResponse.payload?.status === "started"
-      && selectedAccepted.payload.sessionKey === "agent:shoggoth-default:real-default"
-      && JSON.stringify(shoggothSendRecords.at(-1)?.pluginSelection) === JSON.stringify(selected));
-  shoggothSendRecords.at(-1)?.emitFinal?.("done");
+  check("native legacy selection is retired without backend admission or forged acceptance",
+    selectedResponse.ok===false&&selectedResponse.error?.code==="OPEN_CONNECTOR_RETIRED"
+      &&!shoggothSendRecords.some(record=>record.runId==="native-plugin-run")
+      &&!clientFrames.some(frame=>frame.type==="event"&&frame.event==="chat"&&frame.payload?.runId==="native-plugin-run"&&frame.payload?.state==="accepted"));
   const foreignCallsBeforeSelection = sendCalls.length;
   send({ type: "req", id: "hermes-plugin-send", method: "chat.send", params: {
     sessionKey: "agent:hermes-default:main", message: "use plugin",
-    idempotencyKey: "foreign-plugin-run", pluginSelection: selected,
+    idempotencyKey: "foreign-plugin-run", connectorSelection: selected,
   } });
   send2({ type: "req", id: "openclaw-plugin-send", method: "chat.send", params: {
     sessionKey: "agent:main:main", message: "use plugin",
-    idempotencyKey: "foreign-plugin-run", pluginSelection: selected,
+    idempotencyKey: "foreign-plugin-run", connectorSelection: selected,
   } });
   const [hermesPluginResponse, openclawPluginResponse] = await Promise.all([
     waitFor(f => f.type === "res" && f.id === "hermes-plugin-send", "selected Hermes response"),
@@ -994,7 +1024,7 @@ try {
   ]);
   check("concurrent external selections reject before either host executes or forwards",
     [hermesPluginResponse, openclawPluginResponse].every(response =>
-      response.ok === false && response.error?.code === "PLUGIN_SELECTION_UNAVAILABLE")
+      response.ok === false && response.error?.code === "OPEN_CONNECTOR_RETIRED")
       && sendCalls.length === foreignCallsBeforeSelection
       && upstreamReceived.filter(f => f.method === "chat.send").length === sendUpstreamBefore);
   send({ type: "req", id: "hermes-after-plugin-reject", method: "chat.send", params: {
@@ -1044,7 +1074,7 @@ try {
     && f.payload?.state === "final" && f.payload?.runId === "shared-key").length;
   check("cross-socket idempotency executes once", idempotentExecutions === 1);
   check("ordinary external dispatch has no implicit plugin selection",
-    idempotentOptions.length === 1 && !Object.hasOwn(idempotentOptions[0], "pluginSelection"));
+    idempotentOptions.length === 1 && !Object.hasOwn(idempotentOptions[0], "connectorSelection"));
   check("cross-socket idempotent final reaches each client exactly once",
     finalCount(clientFrames) === 1 && finalCount(client2Frames) === 1);
 
@@ -1296,30 +1326,30 @@ try {
         && promptResponses.length === responseCount,
     );
 
-    const selected = [{ installationId: "fixture-installed", revision: 2 }];
+    const selected = ["fixture-connection-id"];
     const nativeSteersBeforeSelection = shoggothSteerCalls.length;
     const foreignMutationsBeforeSelection = sessionMutationCalls.length;
     const promptResponsesBeforeSelection = promptResponses.length;
     const upstreamBeforeSelection = upstreamReceived.length;
     send({ type: "req", id: "steer-native-selected", method: "chat.steer", params: {
       sessionKey: "agent:shoggoth-default:real-default", message: "expand this turn",
-      pluginSelection: selected,
+      connectorSelection: selected,
     } });
     send({ type: "req", id: "steer-hermes-selected", method: "chat.steer", params: {
       sessionKey: "agent:hermes-default:hist-1", message: "expand this turn",
-      pluginSelection: [],
+      connectorSelection: [],
     } });
     send2({ type: "req", id: "steer-openclaw-selected", method: "chat.steer", params: {
       sessionKey: "agent:main:main", message: "expand this turn",
-      pluginSelection: selected,
+      connectorSelection: selected,
     } });
     send2({ type: "req", id: "respond-openclaw-selected", method: "chat.respond", params: {
       sessionKey: "agent:main:main", kind: "clarify", requestId: "input-2",
-      pluginSelection: selected,
+      connectorSelection: selected,
     } });
     send({ type: "req", id: "respond-hermes-selected", method: "chat.respond", params: {
       sessionKey: "agent:hermes-default:hist-1", kind: "clarify", requestId: "input-2",
-      pluginSelection: selected,
+      connectorSelection: selected,
     } });
     const selectionResponses = await Promise.all([
       waitFor(f => f.type === "res" && f.id === "steer-native-selected", "selected native steer"),
@@ -1330,7 +1360,7 @@ try {
     ]);
     check("selection on steer/respond fails closed before every host dispatch",
       selectionResponses.every(response => response.ok === false
-        && response.error?.code === "PLUGIN_SELECTION_UNAVAILABLE")
+        && response.error?.code === "OPEN_CONNECTOR_RETIRED")
         && shoggothSteerCalls.length === nativeSteersBeforeSelection
         && sessionMutationCalls.length === foreignMutationsBeforeSelection
         && promptResponses.length === promptResponsesBeforeSelection
@@ -1406,6 +1436,19 @@ try {
       !clientFrames.some((f) => f.type === "event" && f.event === "chat"
         && f.payload?.runId === "error-final-run" && f.payload?.state === "final"),
     );
+  }
+
+  for (const message of ["intentional stop", "native intentional stop"]) {
+    const id = message.replaceAll(" ", "-");
+    send({ type: "req", id, method: "chat.send", params: {
+      sessionKey: "agent:hermes-default:main", message, idempotencyKey: id,
+    } });
+    await waitFor(frame => frame.type === "res" && frame.id === id, `${message} acknowledged`);
+    const terminal = await waitFor(frame => frame.type === "event" && frame.event === "chat"
+      && frame.payload?.runId === id && frame.payload.state === "aborted", `${message} reaches the UI as aborted`);
+    check(`${message} retains partial reply`, terminal.payload.message.content[0].text === "partial reply");
+    check(`${message} has no error or successful-final event`, !clientFrames.some(frame => frame.type === "event" && frame.event === "chat"
+      && frame.payload?.runId === id && ["error", "final"].includes(frame.payload.state)));
   }
 
   for (const message of ["rejected-preparation", "uncertain-preparation", "thrown-preparation", "thrown-uncertain"]) {

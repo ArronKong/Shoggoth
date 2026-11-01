@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+# The upstream Baidu Skill is hash-pinned and kept byte-for-byte. This exact
+# documented resource identifier is a public example, not an auth credential.
+[[allowlists]]
+description = "Pinned Baidu Skill example resource key"
+condition = "AND"
+paths = ['''(?:^|/)app/agent-service/data/baidu-ai-map-upstream/SKILL\.md$''']
+regexTarget = "secret"
+regexes = ['''^abc123def456$''']

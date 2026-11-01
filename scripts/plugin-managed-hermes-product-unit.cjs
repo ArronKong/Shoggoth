@@ -92,10 +92,13 @@ async function main() {
     plugins: { enabled: ["unknown"], entries: { shoggoth_shared_capabilities: { allow_selection_dispatch_gate: false } } },
     auxiliary: { summary: { model: "user-summary" }, title_generation: { enabled: true } } };
   const kept = supervisor.managedConfiguration({ model: { default: "stale-fixture" } }, current);
-  assert.deepEqual(kept.model, current.model); assert.deepEqual(kept.providers, current.providers); assert.deepEqual(kept.agent, current.agent); assert.deepEqual(kept.skills, current.skills);
+  assert.deepEqual(kept.model, current.model); assert.deepEqual(kept.providers, current.providers); assert.deepEqual(kept.agent, { ...current.agent, clarify_timeout: 0 }); assert.deepEqual(kept.skills, current.skills);
   assert.equal(kept.dashboard.theme, "user"); assert.equal(kept.dashboard.input_mode, "queue"); assert.equal(kept.dashboard.process_isolation.enabled, false);
   assert.deepEqual(kept.plugins.enabled, ["shoggoth_shared_capabilities"]); assert.equal(kept.plugins.entries.shoggoth_shared_capabilities.allow_selection_dispatch_gate, true);
   assert.equal(kept.auxiliary.title_generation.enabled, false); assert.deepEqual(kept.auxiliary.summary, current.auxiliary.summary);
+  assert.deepEqual(kept.timeouts.tools, { sequential_call: 0, concurrent_batch: 0 });
+  assert.equal(kept.approvals.timeout, 2147000); assert.equal(kept.compression.context_total_ceiling_seconds, 2400);
+  assert.equal(current.agent.clarify_timeout, undefined);
   assert.equal(current.dashboard.input_mode, "steer"); assert.throws(() => supervisor.managedConfiguration({}, { model: new Date() }), { code: "MANAGED_HERMES_CONFIGURATION_INVALID" });
   cases.push("private current model/provider/agent/skills survive restart; trusted plugin/queue/isolation/title fences override without mutating input");
   const root = fs.realpathSync(fs.mkdtempSync("/private/tmp/sgh-hermes-product-unit-")); fs.chmodSync(root, 0o700);

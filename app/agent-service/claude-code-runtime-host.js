@@ -417,8 +417,9 @@ class ClaudeCodeRuntimeHost {
       .some((method) => typeof this.mcpGateIssuer[method] !== "function")) {
       throw hostError("CLAUDE_CODE_HOST_OPTIONS_INVALID", "Claude Code MCP gate issuer is invalid");
     }
-    if (!Number.isSafeInteger(this.serverRequestTimeoutMs) || this.serverRequestTimeoutMs < 100
-      || this.serverRequestTimeoutMs > DEFAULT_SERVER_REQUEST_TIMEOUT_MS) {
+    if (this.serverRequestTimeoutMs !== null
+      && (!Number.isSafeInteger(this.serverRequestTimeoutMs) || this.serverRequestTimeoutMs < 100
+        || this.serverRequestTimeoutMs > 2_147_000_000)) {
       throw hostError("CLAUDE_CODE_HOST_OPTIONS_INVALID", "Claude Code server request timeout is invalid");
     }
     for (const value of [this.requestTimeoutMs, this.acceptanceTimeoutMs,
@@ -1010,6 +1011,7 @@ class ClaudeCodeRuntimeHost {
       runtimeAccountId: this.runtimeAccountId,
       executionRunId: this.mcpExecutionRunId,
       parentExecutable: this.binaryPath,
+      parentLauncherExecutable: "/bin/sh",
     });
     active.reservationId = reservation.reservationId;
     const permission = claudeCodePermissionOptions(active.permissionPolicy, active.cwd, active.permissionMode);

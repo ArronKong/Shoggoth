@@ -7,13 +7,17 @@ const revision = { type: "integer", minimum: 0 };
 const source = { source: { type: "string", enum: ["chat", "inspiration"] }, sourceId: text(512) };
 const object = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 const nullable = (schema) => ({ anyOf: [schema, { type: "null" }] });
+const MEMORY_GET_ARGUMENT_HINT = "Use exactly one of id or path. Prefer the returned borrowed sourceRef as id, omitting path, from and lines. For a path read, copy the exact returned path; omit from and lines to use the original range, or keep both within that returned range.";
 const DEFINITIONS = [
   ["memory_search", object({ ...source, query: { type: "string", maxLength: 1024 },
     maxResults: { type: "integer", minimum: 1, maximum: 20 }, minScore: { type: "number", minimum: 0, maximum: 1 },
     memoryScope: { type: "string", enum: ["own", "all"] }, ownerProfileId: id,
     includeCandidates: { type: "boolean" } }, ["source", "sourceId", "query"])],
-  ["memory_get", object({ ...source, id, path: text(1024), from: { type: "integer", minimum: 1 },
-    lines: { type: "integer", minimum: 1, maximum: 200 } }, ["source", "sourceId"])],
+  ["memory_get", object({ ...source,
+    id: { ...id, description: "Exact active memory ID or borrowed sourceRef returned by memory_search. Omit path, from and lines when using id." },
+    path: { ...text(1024), description: "Exact path returned by memory_search. Omit id. A borrowed path is an opaque reference, not a filesystem path." },
+    from: { type: "integer", minimum: 1, description: "Optional start line for path reads only; omit for the original range. Cannot expand a borrowed result's returned range." },
+    lines: { type: "integer", minimum: 1, maximum: 200, description: "Optional line count for path reads only; omit for the original range. Cannot expand a borrowed result's returned range." } }, ["source", "sourceId"])],
   ["memory_explain", object({ ...source, id })],
   ["conversation_search", object({ ...source, query: text(1024),
     sessionId: id, limit: { type: "integer", minimum: 1, maximum: 10 } },
@@ -68,5 +72,5 @@ function validateMemoryMcpArguments(name, args) {
     && (name !== "memory_save" || args.classification !== "explicit" || args.sourceQuote?.trim()));
 }
 
-module.exports = { MEMORY_MCP_TOOL_DEFINITIONS, MEMORY_MCP_WRITE_TOOLS,
+module.exports = { MEMORY_MCP_TOOL_DEFINITIONS, MEMORY_MCP_WRITE_TOOLS, MEMORY_GET_ARGUMENT_HINT,
   isMemoryMcpTool, validateMemoryMcpArguments };

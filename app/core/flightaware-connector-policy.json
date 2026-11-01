@@ -1,0 +1,8 @@
+{
+  "COMMAND": "shoggoth-flightaware",
+  "KEY_FIELD": "FLIGHTAWARE_API_KEY",
+  "METERED_FIELD": "FLIGHTAWARE_ALLOW_METERED",
+  "METERED_ENABLED": "explicit-metered-consent-v1",
+  "METERED_DISABLED": "metered-queries-disabled-v1",
+  "METERED_MARKER": "flightaware:metered-enabled"
+}

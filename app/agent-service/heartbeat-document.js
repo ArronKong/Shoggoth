@@ -6,7 +6,7 @@ const { publicUrl } = require("./web-service");
 const MAX_DOCUMENT_BYTES = 16384, MAX_SCRATCH_BYTES = 4096;
 const EMPTY_REVISION = "0".repeat(64);
 const DEFAULT_HEARTBEAT = "# Heartbeat\n\n<!-- Write recurring checks and notification conditions here. Headings, comments, or empty content alone do not invoke a model.\nAn optional YAML web list at the start can declare public pages or search queries:\n---\nweb:\n  - kind: fetch\n    url: https://example.com/status\n  - kind: search\n    query: project release updates\n---\nThe settings above control frequency, active hours, and notifications. -->\n";
-function error(code) { throw serviceError(code, code === "PROACTIVE_REVISION_CONFLICT" ? "文件已更新，请重新读取" : "HEARTBEAT.md 内容或路径无效"); }
+function error(code) { throw serviceError(code, code === "PROACTIVE_REVISION_CONFLICT" ? "文件已更新，请重新读取" : "检查规则文件内容或路径无效"); }
 function revision(content) { return crypto.createHash("sha256").update(content).digest("hex"); }
 function meaningful(content) {
   return content.replace(/<!--[\s\S]*?(?:-->|$)/gu, "").split(/\r?\n/u).some(line => {
@@ -35,7 +35,11 @@ function parseHeartbeat(content) {
   return { body, web, empty: !meaningful(body) && web.length === 0 };
 }
 class HeartbeatDocumentStore {
-  constructor({ paths, productStore }) { this.paths = paths; this.products = productStore; }
+  constructor({ paths, productStore, documentName = "HEARTBEAT.md", defaultContent = DEFAULT_HEARTBEAT, parseContent = parseHeartbeat }) {
+    if (!["HEARTBEAT.md", "DAILY_REVIEW.md"].includes(documentName)) error("PROACTIVE_DOCUMENT_INVALID");
+    this.paths = paths; this.products = productStore;
+    this.documentName = documentName; this.defaultContent = defaultContent; this.parseContent = parseContent;
+  }
   file(profileId) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(profileId) || !this.products.getAgentProfile(profileId)) error("PROACTIVE_PROFILE_UNAVAILABLE");
     const directory = path.join(this.paths.agentsDir, profileId);
@@ -44,23 +48,23 @@ class HeartbeatDocumentStore {
       try { if (fs.realpathSync(parent) !== parent || !fs.lstatSync(parent).isDirectory()) error("PROACTIVE_DOCUMENT_INVALID"); }
       catch (e) { if (e.code !== "ENOENT") throw e; }
     }
-    return path.join(directory, "HEARTBEAT.md");
+    return path.join(directory, this.documentName);
   }
   read(profileId) {
     const file = this.file(profileId);
     let content;
     try { content = new TextDecoder("utf-8", { fatal: true }).decode(readPrivateFile(file, { maxBytes: MAX_DOCUMENT_BYTES })); }
     catch (e) {
-      if (e.code === "ENOENT") return { name: "HEARTBEAT.md", content: DEFAULT_HEARTBEAT, revision: EMPTY_REVISION, missing: true, readOnly: false };
+      if (e.code === "ENOENT") return { name: this.documentName, content: this.defaultContent, revision: EMPTY_REVISION, missing: true, readOnly: false };
       error("PROACTIVE_DOCUMENT_INVALID");
     }
     // Keep malformed YAML editable after an external edit. Parsing happens on
     // save and before each check; a read grants no execution authority.
     if (!content.isWellFormed() || content.includes("\0") || Buffer.byteLength(JSON.stringify(content)) > 20 * 1024) error("PROACTIVE_DOCUMENT_INVALID");
-    return { name: "HEARTBEAT.md", content, revision: revision(content), missing: false, readOnly: false };
+    return { name: this.documentName, content, revision: revision(content), missing: false, readOnly: false };
   }
   write(profileId, content, expectedRevision) {
-    parseHeartbeat(content);
+    this.parseContent(content);
     if (!/^[a-f0-9]{64}$/u.test(expectedRevision) || this.read(profileId).revision !== expectedRevision) error("PROACTIVE_REVISION_CONFLICT");
     const file = this.file(profileId);
     recoverInterruptedPrivateFile(file, { trustedRoot: this.paths.trustedRoot });

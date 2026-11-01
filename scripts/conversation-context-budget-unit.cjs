@@ -118,20 +118,25 @@ test("the public budget includes its provenance and cannot be mistaken for a mea
   }
 });
 
-test("past the working target a summary is advisory until the capacity trigger, and keeps a small original tail", () => {
-  const { WORKING_CONTEXT_TARGET, RETAINED_TAIL_TOKENS } = require("../app/agent-service/conversation-context-budget");
+test("summary planning uses the effective request limit and keeps a small original tail", () => {
+  const { RETAINED_TAIL_TOKENS } = require("../app/agent-service/conversation-context-budget");
   const budget = conversationContextBudget(1_000_000);
   const middle = history(100);
   assert.equal(plan(middle, { budget }), null, "without advisory summaries nothing is planned below capacity");
-  const early = plan(middle, { budget, advisory: true });
-  assert.ok(early, `history above ${WORKING_CONTEXT_TARGET} plans an early summary`);
-  assert.equal(early.advisory, true);
-  assert.equal(plan(history(40), { budget, advisory: true }), null, "below the working target nothing is planned");
+  assert.equal(plan(middle, { budget, advisory: true }), null,
+    "a large window does not acquire an independent fixed working target");
+  const limited = plan(middle, { budget, advisory: true,
+    requestPlan: { estimatedTokens: 215972, limitTokens: 200000, fixedTokens: 40000 } });
+  assert.ok(limited, "the model input limit can require compaction before 80% of the full window");
+  assert.equal(limited.advisory, false);
+  assert.equal(plan(middle, { budget, advisory: true,
+    requestPlan: { estimatedTokens: 215972, limitTokens: 380000, fixedTokens: 40000 } }), null,
+    "the reported incident fits its actual request budget");
   const required = plan(history(430), { budget, advisory: true });
   assert.equal(required.advisory, false, "past the capacity trigger the summary is required");
   // Summaries run in segments; targetThroughSeq is where the retained original tail begins.
-  const tail = middle.filter(event => event.seq > early.targetThroughSeq)
+  const tail = middle.filter(event => event.seq > limited.targetThroughSeq)
     .reduce((sum, event) => sum + estimateContextTokens(JSON.stringify(event.content)) + 32, 0);
   assert.ok(tail <= RETAINED_TAIL_TOKENS, `kept original tail ${tail} stays within ${RETAINED_TAIL_TOKENS}`);
-  assert.ok(early.targetThroughSeq >= middle.length - 15, "most history is summarized, not retained");
+  assert.ok(limited.targetThroughSeq >= middle.length - 15, "most history is summarized, not retained");
 });

@@ -22,6 +22,35 @@ function recordAuthority({ authority = [], runtimeCache = [], derived = [], uiCa
 const DATA_AUTHORITY_MANIFEST = Object.freeze({
   schemaVersion: 1,
   stores: Object.freeze({
+    officialSkillConnectors: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/official-skill-connectors.json", "stateDir/skills/registry.json", "stateDir/skills/packages/<skillId>/<version>", "stateDir/mcp-servers/registry.json", "stateDir/encrypted-secrets.json"]),
+      records: Object.freeze({
+        OfficialSkillInstallation: recordAuthority({ authority: ["id", "revision", "state", "installation", "errorCode"], runtimeCache: ["stage"] }),
+        OfficialSkillAccount: recordAuthority({ derived: ["state", "userName"], runtimeCache: ["verificationUrl", "qrCode", "userCode", "errorCode"] }),
+      }),
+      recovery: "Service owns pinned official payload hashes, exact Skill versions and the bound MCP transport. runtime-bin payloads and private CLI account homes are derived and excluded from backup; restore requires explicit repair and reauthorization. Repair preserves the existing private account home and encrypted MCP credential references. Removal revokes and drains the exact MCP process before deleting owned components, Skills and credentials; user/global installations and account homes are never adopted. Interrupted operations are not replayed.",
+    }),
+    larkCliConnector: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/lark-cli-connector.json", "stateDir/skills/registry.json", "stateDir/skills/packages/<skillId>/<version>"]),
+      records: Object.freeze({
+        LarkCliInstallation: recordAuthority({ authority: ["revision", "state", "installation", "errorCode"], runtimeCache: ["stage"] }),
+        LarkCliSetup: recordAuthority({ derived: ["configured", "appId", "brand", "userName"],
+          runtimeCache: ["requestId", "state", "verificationUrl", "userCode", "qrCode", "expiresAt", "warning", "errorCode"] }),
+      }),
+      recovery: "Service owns the pinned CLI installation and exact skill hashes; downloads and runtime-bin payloads are derived and excluded from backup. Missing payloads require explicit reinstall. Interrupted operations are never replayed. Setup processes and QR files are ephemeral, cancelled and drained on shutdown; restart reads official CLI account status without replaying login. User/global CLI installations and official CLI account credentials remain outside this connector's removal authority.",
+    }),
+    appleDevices: Object.freeze({
+      owner: "shoggoth", schemaVersion: 2, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/apple-device-policy.json", "stateDir/apple-device-write-ledger.json"]),
+      records: Object.freeze({
+        AppleDevicePolicy: recordAuthority({ authority: ["schemaVersion", "revision", "resources"] }),
+        AppleDeviceResourcePolicy: recordAuthority({ authority: ["enabled", "readPolicy", "writePolicy", "disabledProfileIds"], derived: ["id", "authorization"] }),
+        AppleDeviceWriteReceipt: recordAuthority({ authority: ["key", "fingerprint", "operation", "operationId", "state", "result", "errorCode"] }),
+      }),
+      recovery: "Private single Service writer; writing follows each resource's allow/ask/deny policy and has a durable receipt before dispatch; version 1 policies default to ask; uncertain writes never replay; authority restore disconnects both devices while retaining reading/writing choices and receipts; macOS consent, native binaries and pending approvals are never backup authority",
+    }),
     webSettings: Object.freeze({
       owner: "shoggoth", schemaVersion: 1, backupRequired: true,
       pathRules: Object.freeze(["stateDir/web-settings.json", "agents/<profileId>/web-settings.json", "stateDir/encrypted-secrets.json"]),
@@ -99,39 +128,44 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     }),
     runtimeExtensions: Object.freeze({
       owner: "shoggoth", schemaVersion: 1,
-      pathRules: Object.freeze(["stateDir/runtime-extensions-v1.json", "stateDir/runtime-acp-ledgers/<sha256-binding-workspace>.json"]),
-      records: Object.freeze({ RuntimeExtension: recordAuthority({ authority: ["enabled", "envelope", "trustedKey"] }),
-        AcpLedger: recordAuthority({ authority: ["version", "sessions", "pending"] }) }),
-      recovery: "Signed opt-in packages; ACP pending receipts reject replay when remote acceptance is unknown",
+      pathRules: Object.freeze(["stateDir/runtime-extensions-v1.json"]),
+      records: Object.freeze({ RuntimeExtension: recordAuthority({ authority: ["enabled", "envelope", "trustedKey"] }) }),
+      recovery: "Signed opt-in packages; invalid catalog entries remain unavailable without deleting account history",
     }),
-    plugins: Object.freeze({
-      owner: "shoggoth", schemaVersion: 10,
-      pathRules: Object.freeze(["stateDir/plugins/catalog.sqlite", "stateDir/plugins/packages/<contentDigest>",
-        "stateDir/plugins/staging/<operationId>", "stateDir/plugins/data/<installationId>/<dataScopeId>",
-        "stateDir/plugins/oauth-providers.json", "stateDir/plugins/data/.prepared-dependencies",
-        "stateDir/plugins/plugin-rollback/<installationId>"]),
-      records: Object.freeze({
-        PluginAuthorityState: recordAuthority({ authority: ["incarnation", "restoredAt", "restoredFrom", "receiptGap"] }),
-        PluginRelease: recordAuthority({ authority: ["sourceIdentity", "contentDigest", "name", "declaredVersion",
-          "manifest", "components", "diagnostics", "createdAt"] }),
-        PluginInstallation: recordAuthority({ authority: ["installationId", "sourceIdentity", "releaseDigest",
-          "desiredState", "revision", "createdAt", "updatedAt"] }),
-        PluginOperation: recordAuthority({ authority: ["operationId", "fingerprint", "kind", "phase", "result",
-          "createdAt", "updatedAt"] }),
-        PluginOperationIntent: recordAuthority({ authority: ["operationId", "installationId",
-          "desiredState", "expectedRevision"] }),
-        PluginConnection: recordAuthority({ authority: ["connectionId", "installationId", "componentId",
-          "endpointIdentity", "principalIdentity", "credentialRef", "state", "authRevision", "revision"] }),
-        PluginBinding: recordAuthority({ authority: ["bindingId", "subjectKind", "subjectId", "installationId",
-          "componentId", "componentKind", "connectionId", "enabled", "revision"] }),
-        PluginHookBinding: recordAuthority({ authority: ["bindingId", "profileId", "installationId", "componentId", "releaseDigest", "workspace", "enabled", "grant", "test", "epoch", "revision", "updatedAt"] }),
-        PluginGrant: recordAuthority({ authority: ["grantId", "bindingId", "connectionId", "principalIdentity",
-          "toolIdentity", "contractDigest", "effect", "approvalMode", "expiresAt", "epoch", "revision"] }),
-        PluginCapabilityCall: recordAuthority({ authority: ["callId", "runRef", "bindingId", "connectionId",
-          "principalIdentity", "toolIdentity", "contractDigest", "argumentDigest", "phase", "createdAt",
-          "updatedAt"] }),
-      }),
-      recovery: "Catalog schema 10 is preflighted read-only; headless Hook bindings and exact grants remain PluginStore-owned; maintenance intents survive restart; code rollback stays disabled until explicit pinned data restoration; authority restore rotates incarnation and preserves unknown receipts; all new installations use Product15 in one canonical root; incompatible data is rejected before writers open",
+    runtimeAcpLedger: Object.freeze({
+      owner: "shoggoth", schemaVersion: 2,
+      pathRules: Object.freeze(["stateDir/runtime-acp-ledgers/<sha256-binding-workspace>.json",
+        "stateDir/runtime-acp-ledgers/<sha256-binding-workspace>.json.v1-original",
+        "stateDir/runtime-acp-ledgers/<sha256-binding-workspace>.json.migration-v2.json"]),
+      records: Object.freeze({ AcpLedger: recordAuthority({ authority: ["version", "sessions", "pending"] }) }),
+      recovery: "V1 raw sources and migration receipts retained; structured items and independent write/terminal facts reject unknown replay",
+    }),
+    mcpConnectors: Object.freeze({
+      owner: "shoggoth", schemaVersion: 2, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/mcp-servers/registry.json", "stateDir/mcp-servers/connection-requests-v1.json"]),
+      records: Object.freeze({ McpConnector: recordAuthority({ authority: ["id", "source", "transport", "auth", "secretRef", "setup", "status", "lastCheck", "disabledProfileIds"] }),
+        McpConnectionRequest: recordAuthority({ authority: ["requestId", "owner", "fingerprint", "status", "expiresAt"] }) }),
+      recovery: "Restored connectors are disabled and lose credential references; credentials are local to the OS keychain. Empty exclusion lists include all current and future Agents. Run admission freezes readiness; revocation immediately narrows visibility and calls.",
+    }),
+    mcpConnectionAcknowledgements: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/mcp-connection-acks-v1.json"]),
+      records: Object.freeze({ McpConnectionAcknowledgement: recordAuthority({authority:["requestId","fingerprint","sessionKey","status","createdAt","updatedAt"]}) }),
+      recovery: "The App Host holds the private writer lease until close. Offline backup/restore must hold the same lease throughout the snapshot or staging commit, and refuses an active App writer. The lease and its candidates are excluded from backups. A reservation is persisted before sending a fixed confirmation. Restore overlays current exact-scope acknowledgements over older backups, converts pending to unknown and never resends accepted or uncertain operations. Conflicting request identity fails closed; the original ledger remains unchanged.",
+    }),
+    retiredOpenConnector: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: false,
+      pathRules: Object.freeze(["stateDir/connectors/access-v1.json", "stateDir/connectors/runtime/**", "stateDir/connectors/runtime-version.json", "stateDir/connectors/external-selection-v1.sqlite", "stateDir/connectors/open-connector-retired-v1.json"]),
+      records: Object.freeze({ RetiredOpenConnectorEvidence: recordAuthority({ authority: ["opaqueLegacyBytes", "retirementReceipt"] }) }),
+      recovery: "Opaque data and encrypted credential entries are preserved without opening an old Store or launching a writer. New backups exclude retired runtime/account payloads; old backups restore opaque bytes only and never re-enable execution.",
+    }),
+    retiredPluginPlatform: Object.freeze({
+      owner: "shoggoth", schemaVersion: 2, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/plugins/catalog.sqlite", "stateDir/plugins/packages/**", "stateDir/plugins/data/**",
+        "stateDir/plugins/staging/**", "stateDir/plugins/oauth-providers.json", "stateDir/plugins/plugin-rollback/**",
+        "stateDir/plugins/external-selection-dispatch.sqlite", "stateDir/connectors/legacy-platform-retired-v1.json"]),
+      records: Object.freeze({ LegacyPluginEvidence: recordAuthority({ authority: ["opaqueLegacyBytes", "retirementReceipt", "upgradeSnapshot"] }) }),
+      recovery: "Before the first cutover, an existing legacy platform requires a verified authority upgrade snapshot under the exact owned Service lock and before any Store writer. Snapshot failure leaves Connectors unavailable and ordinary chat usable. No old package Store, installer, login, Grant resolver or executor is opened. Backups preserve opaque legacy bytes and never activate them. Downgrading to an old executable requires a separately authorized stopped-state restore.",
     }),
     externalPluginAudit: Object.freeze({
       owner: "shoggoth", schemaVersion: 4, journalSchemaVersion: 1,
@@ -148,7 +182,7 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
         ExternalPluginApprovalJournalEvent: recordAuthority({ derived: ["callId", "requestId",
           "outcome", "updatedAt"] }),
       }),
-      recovery: "Authority backup retains both stopped-Service audit databases together; the journal restores exact approval decisions into the audit projection, but neither file authorizes tool execution or proves a remote result",
+      recovery: "Retired history reader snapshots both databases to a private temporary directory and opens only those copies read-only. Exact durable approval events may enrich historical display; pending calls remain unknown. Original bytes are never reconciled, pruned or written and cannot authorize execution",
     }),
     encryptedSecrets: Object.freeze({
       owner: "shoggoth", schemaVersion: 1,
@@ -203,10 +237,10 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     }),
     runExecution: Object.freeze({
       owner: "shoggoth",
-      schemaVersion: 2,
+      schemaVersion: 3,
       pathRules: Object.freeze(["stateDir/run-executions/<sha256-run-id>.json"]),
       records: Object.freeze({
-        RunExecutionBinding: recordAuthority({ authority: ["version", "identity", "contract", "command"] }),
+        RunExecutionBinding: recordAuthority({ authority: ["version", "identity", "contract", "command", "attempt"] }),
       }),
       encryption: "Service crypto broker; removed after durable Product terminal and command completion",
       recovery: "Frozen identity and execution only; native complete history must prove remote outcome",
@@ -241,9 +275,9 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     }),
     product: Object.freeze({
       owner: "shoggoth",
-      schemaVersion: 15,
+      schemaVersion: 16,
       identity: "Agent id/agentId remain stable; backendId is always shoggoth; selected runtimes belong to Agent bindings",
-      pathRules: Object.freeze(["stateSnapshotPath", "eventLogPath"]),
+      pathRules: Object.freeze(["stateSnapshotPath", "eventLogPath", "stateDir/product-schema-migrations/15-to-16/<digest>/*"]),
       records: Object.freeze({
         RuntimeAccount: recordAuthority({ authority: [...RUNTIME_ACCOUNT_FIELDS, "maxActive"] }),
         AgentProfile: recordAuthority({
@@ -268,7 +302,7 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
         WorkRun: recordAuthority({
           authority: [
             "id", "source", "sourceId", "idempotencyKey", "profileId", "workspace",
-            "status", "contextSnapshotId", "eventSeq", "waitingRequestId", "startedAt", "finishedAt",
+            "status", "contextSnapshotId", "runtimeAttemptRef", "eventSeq", "waitingRequestId", "startedAt", "finishedAt",
             "resultSummary", "errorCode", "retryOf",
           ],
           runtimeCache: ["runtimeSessionRef", "runtimeTurnRef"],
@@ -353,6 +387,7 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     classification: "authority",
     source: "MemoryStore",
     shoggothStore: "agents/<profileId>/memory",
+    diagnosticTranscripts: "stateDir/plugins/active-memory/transcripts/** (independent memory data; never retired)",
     runtimeSource: "Shoggoth MemoryEngine",
   }),
   tools: Object.freeze({

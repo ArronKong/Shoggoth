@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,7 +13,7 @@ const { build } = createRequire(path.join(root, "app/manage-ui/package.json"))("
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-web-link-icons-"));
 let serving = false;
 try {
-  await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-web-link-icons.tsx")], bundle: true, format: "esm",
+  await build({ plugins: [viteArtworkFixturePlugin(root)], entryPoints: [path.join(root, "scripts/fixtures/chat-web-link-icons.tsx")], bundle: true, format: "esm",
     define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".png": "dataurl", ".webp": "dataurl" },
     external: ["/fonts/*"], outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent" });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><title>聊天网页链接图标</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
@@ -37,13 +38,14 @@ const requests=[];
 for(const scheme of ["http","https"])protocol.handle(scheme,request=>{
   requests.push({url:request.url,referrer:request.referrer});
   const url=new URL(request.url);
+  if(url.hostname==="qr.fixture" && url.pathname==="/transfer/qrcode") return new Response('<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220"><rect width="220" height="220" fill="white"/><path d="M20 20h50v50H20zm130 0h50v50h-50zM20 150h50v50H20zm80-50h20v20h-20zm40 40h20v60h-20zm40 0h20v20h-20z" fill="black"/></svg>',{headers:{"Content-Type":"image/svg+xml"}});
   if(url.pathname!=="/favicon.ico"||url.hostname==="missing-icon.invalid")return new Response("",{status:404});
   return new Response('<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" rx="5" fill="#d33"/><circle cx="16" cy="16" r="9" fill="none" stroke="white" stroke-width="4"/></svg>',{headers:{"Content-Type":"image/svg+xml"}});
 });
 const w=new BrowserWindow({show:false,width:${Number(process.env.CHAT_WEB_LINK_WIDTH || 1000)},height:900,webPreferences:{backgroundThrottling:false}});let passed=false;
 try{await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))});
 console.log(JSON.stringify(await w.webContents.executeJavaScript('window.runFixture()')));
-if(requests.some(r=>new URL(r.url).pathname!=="/favicon.ico"||r.referrer))throw Error("favicon request leaked a path or referrer");
+if(requests.some(r=>(new URL(r.url).pathname!=="/favicon.ico" && !(new URL(r.url).hostname==="qr.fixture" && ["/transfer/qrcode","/no-image"].includes(new URL(r.url).pathname)))||r.referrer))throw Error("image request leaked a path or referrer");
 console.log(JSON.stringify({requests,externalRequests:0}));
 if(${JSON.stringify(process.env.CHAT_WEB_LINK_SCREENSHOT || "")})require('node:fs').writeFileSync(${JSON.stringify(process.env.CHAT_WEB_LINK_SCREENSHOT || "")},(await w.webContents.capturePage()).toPNG());
 passed=true;}catch(e){console.error(e);}finally{w.destroy();app.exit(passed?0:1);}});`);

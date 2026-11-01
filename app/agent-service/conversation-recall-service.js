@@ -5,6 +5,7 @@ const { ConversationRecallIndex, hashText, lexicalTerms } = require("./conversat
 const { HistoricalMemoryAnnotations } = require("./historical-memory-annotations");
 const { hasSecret } = require("./memory-engine");
 const { isHistoricalChatSession } = require("./historical-chat-session");
+const { isPublishedNoticeEvent } = require("./notice-delivery-controller");
 const { findProfileSession, listProfileSessions } = require("./chat-session-lookup");
 const { serviceError } = require("./security");
 const { hybridScore, SEMANTIC_MIN_COSINE, sourceLanguage } = require("./memory-semantic-ranking");
@@ -155,6 +156,18 @@ class ConversationRecallService {
       this.transcripts.getChangeRevision(profileId), this.memories?.getRevision(profileId) ?? null]);
   }
 
+  getReadAuthorityRevision(profileId) {
+    this.policy.assertReady(profileId);
+    if (typeof this.sessions.profileSessionsAuthorityRevision !== "function"
+      || typeof this.transcripts.getInvalidationRevision !== "function") return this.getVisibilityRevision(profileId);
+    // A snapshot may omit a later append, but it must never retain an excluded,
+    // forgotten or reassigned source. Each returned event is rechecked by
+    // assertResultCurrent; keep getVisibilityRevision for content/cache refresh.
+    return JSON.stringify([this.sessions.profileSessionsAuthorityRevision(profileId),
+      this.transcripts.getInvalidationRevision(profileId),
+      this.memories?.getRevisions?.(profileId)?.invalidationRevision ?? this.memories?.getRevision(profileId) ?? null]);
+  }
+
   assertResultCurrent({ name, profileId, args, run, result }) {
     if (name === "conversation_get") {
       if (!isDeepStrictEqual(this.get({ profileId, args, run }), result)) {
@@ -173,7 +186,7 @@ class ConversationRecallService {
       const session = sessions.get(row.sessionId);
       const current = session && this.sessions.getSession(session.sessionKey);
       if (!current || current.id !== session.id || current.profileId !== profileId
-        || current.workspace !== run.workspace || !isHistoricalChatSession(current)
+        || current.workspace !== run.workspace || !this._isRecallableSession(profileId, current)
         || this.sessions.getCronSessionOrigin?.(current.sessionKey)) {
         throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件已变化");
       }
@@ -348,8 +361,13 @@ class ConversationRecallService {
       && origin.inputSource === "chat";
   }
 
+  _isRecallableSession(profileId, session) {
+    return isHistoricalChatSession(session) || (session?.status === "draft" && session.runtimeSessionId === null
+      && this.transcripts.hasPublishedNotice?.(profileId, session.id) === true);
+  }
+
   _targetSessions(profileId) {
-    return listProfileSessions(this.sessions, profileId).filter((session) => isHistoricalChatSession(session)
+    return listProfileSessions(this.sessions, profileId).filter((session) => this._isRecallableSession(profileId, session)
       && !this.sessions.getCronSessionOrigin?.(session.sessionKey))
       .map((session) => {
         const snapshot = this.transcripts.getIndexSnapshot?.(profileId, session.id);
@@ -447,7 +465,7 @@ class ConversationRecallService {
       .map((event) => event.runId)), runs: new Map() };
     const rows = [];
     for (const event of events) {
-      if (!this._contextRun(profileId, session, event.runId, context)) continue;
+      if (!isPublishedNoticeEvent(event) && !this._contextRun(profileId, session, event.runId, context)) continue;
       const text = this._resolvedText(profileId, session, event, policyView);
       if (text === null) continue;
       rows.push({ eventId: event.id, seq: event.seq, runId: event.runId,
@@ -474,16 +492,22 @@ class ConversationRecallService {
         .filter((event) => event.seq > afterSeq).slice(0, pageLimit);
     const rows = [];
     for (const event of events) {
-      const key = `${session.id}\0${event.runId}`;
-      if (!runCache.has(key)) runCache.set(key,
-        this._verifiedRun(profileId, session, event.runId, null));
-      const run = runCache.get(key);
-      if (!run) continue;
-      if (completedOnly && run.status !== "completed") {
-        if (["failed", "canceled", "interrupted", "skipped"].includes(run.status)) continue;
-        // The user turn may still change. Leave this and later events behind
-        // the durable cursor so a later idle wake can retry after completion.
-        return { rows, throughSeq: event.seq - 1, hasMore: true };
+      if (isPublishedNoticeEvent(event)) {
+        // Public assistant reminders are history, not completed user turns
+        // from which background extraction may learn new user facts.
+        if (completedOnly) continue;
+      } else {
+        const key = `${session.id}\0${event.runId}`;
+        if (!runCache.has(key)) runCache.set(key,
+          this._verifiedRun(profileId, session, event.runId, null));
+        const run = runCache.get(key);
+        if (!run) continue;
+        if (completedOnly && run.status !== "completed") {
+          if (["failed", "canceled", "interrupted", "skipped"].includes(run.status)) continue;
+          // The user turn may still change. Leave this and later events behind
+          // the durable cursor so a later idle wake can retry after completion.
+          return { rows, throughSeq: event.seq - 1, hasMore: true };
+        }
       }
       const text = this._resolvedText(profileId, session, event, policyView);
       if (text === null) continue;
@@ -498,8 +522,8 @@ class ConversationRecallService {
     if (!context && !this.transcripts.getEvent) context = this._eventContext(profileId, session);
     const event = context ? context.byId.get(eventId)
       : this.transcripts.getEvent(profileId, session.id, eventId);
-    if (!event || !(context ? this._contextRun(profileId, session, event.runId, context)
-      : this._verifiedRun(profileId, session, event.runId, null))) return null;
+    if (!event || (!isPublishedNoticeEvent(event) && !(context ? this._contextRun(profileId, session, event.runId, context)
+      : this._verifiedRun(profileId, session, event.runId, null)))) return null;
     const text = this._resolvedText(profileId, session, event, policyView);
     if (text === null || (expected && (event.seq !== expected.seq
       || event.runId !== expected.run_id || hashText(text) !== expected.content_hash))) return null;
@@ -534,7 +558,7 @@ class ConversationRecallService {
       if (!session) continue;
       const current = this.sessions.getSession(session.sessionKey);
       if (!current || current.id !== session.id || current.profileId !== profileId
-        || current.workspace !== run.workspace || !isHistoricalChatSession(current)
+        || current.workspace !== run.workspace || !this._isRecallableSession(profileId, current)
         || this.sessions.getCronSessionOrigin?.(session.sessionKey)) continue;
       if (!this.transcripts.getEvent && !contexts.has(session.id)) {
         contexts.set(session.id, this._eventContext(profileId, current));
@@ -578,7 +602,7 @@ class ConversationRecallService {
       if (row.score < SEMANTIC_MIN_COSINE) continue;
       const source = row.source;
       const session = sessions.find(entry => entry.id === source.sessionId && entry.profileId === profileId
-        && entry.workspace === run.workspace && isHistoricalChatSession(entry)
+        && entry.workspace === run.workspace && this._isRecallableSession(profileId, entry)
         && !this.sessions.getCronSessionOrigin?.(entry.sessionKey));
       if (!session || source.runId === run.id || (args.sessionId && source.sessionId !== args.sessionId)) continue;
       const item = this._event(profileId, session, source.eventId, {
@@ -613,14 +637,14 @@ class ConversationRecallService {
       throw recallError("CONVERSATION_GET_INVALID", "原话窗口无效");
     }
     const found = findProfileSession(this.sessions, profileId, args.sessionId);
-    const session = found && found.workspace === run.workspace && isHistoricalChatSession(found)
+    const session = found && found.workspace === run.workspace && this._isRecallableSession(profileId, found)
       && !this.sessions.getCronSessionOrigin?.(found.sessionKey) ? found : null;
     if (!session) throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件不可检索");
     const target = this._event(profileId, session, args.eventId, null, policyView);
     if (!target) throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件不可检索");
     const current = this.sessions.getSession(session.sessionKey);
     if (!current || current.id !== session.id || current.profileId !== profileId
-      || current.workspace !== run.workspace || !isHistoricalChatSession(current)) {
+      || current.workspace !== run.workspace || !this._isRecallableSession(profileId, current)) {
       throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件不可检索");
     }
     const position = target.events?.findIndex((event) => event.id === args.eventId) ?? -1;
@@ -628,8 +652,8 @@ class ConversationRecallService {
       || target.events?.slice(Math.max(0, position - window), position + window + 1) || [];
     const outdatedView = this._outdatedView(profileId);
     const events = slice.map((event) => {
-      const visible = (target.context ? this._contextRun(profileId, current, event.runId, target.context)
-        : this._verifiedRun(profileId, current, event.runId, null))
+      const visible = (isPublishedNoticeEvent(event) || (target.context ? this._contextRun(profileId, current, event.runId, target.context)
+        : this._verifiedRun(profileId, current, event.runId, null)))
         ? this._resolvedText(profileId, current, event, policyView) : null;
       if (visible === null) return { hidden: true };
       const bounded = boundedText(visible, MAX_READ_TEXT_BYTES);

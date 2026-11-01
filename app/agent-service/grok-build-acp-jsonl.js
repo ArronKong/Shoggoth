@@ -28,17 +28,18 @@ function exactKeys(value, keys) {
 class GrokBuildAcpJsonlClient extends AcpJsonlClient {
   constructor(child, options = {}) {
     super(child, { ...options, naming: GROK_ACP_NAMING });
+    this.internalReloadContract = false;
     this.internalReloadVersion = null;
     this.reportedInternalReloads = new Set();
   }
 
   _handleResponse(message) {
     const pending = this.pending.get(message.id);
-    // Grok 1.0.63 injects file-watcher requests into its own ACP input, then
+    // Grok injects file-watcher requests into its own ACP input, then
     // leaks their replies to stdout. Verified with the real CLI and upstream
-    // agent/app.rs. These exact successes are maintenance acknowledgements,
+    // agent/app.rs (real 1.0.63 and 1.0.69 captures). These exact successes are maintenance acknowledgements,
     // never replies to a client request or evidence that a prompt completed.
-    if (this.internalReloadVersion === "1.0.63" && INTERNAL_RELOAD_IDS.has(message.id)
+    if (this.internalReloadContract && INTERNAL_RELOAD_IDS.has(message.id)
       && !pending && !this.retiredIds.has(message.id)
       && !this.serverRequestIds.has(message.id) && !this.activeServerRequestIds.has(message.id)
       && exactKeys(message, ["jsonrpc", "id", "result"])
@@ -58,10 +59,14 @@ class GrokBuildAcpJsonlClient extends AcpJsonlClient {
     if (pending?.method === "initialize") {
       // Record only a matched successful handshake, before processing another
       // frame in this stdout chunk. Notifications cannot enable compatibility.
-      this.internalReloadVersion = !this.ended && !Object.hasOwn(message, "error")
+      this.internalReloadContract = !this.ended && !Object.hasOwn(message, "error")
         && plain(message.result) && message.result.protocolVersion === 1
-        && plain(message.result.agentCapabilities) && plain(message.result._meta)
-        && message.result._meta.agentVersion === "1.0.63" ? "1.0.63" : null;
+        && plain(message.result.agentCapabilities);
+      // Version is diagnostic only: it neither enables the contract nor
+      // substitutes for a valid handshake, response shape and collision checks.
+      const version = message.result?._meta?.agentVersion;
+      this.internalReloadVersion = this.internalReloadContract && typeof version === "string"
+        && /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/u.test(version) ? version : null;
     }
   }
 }

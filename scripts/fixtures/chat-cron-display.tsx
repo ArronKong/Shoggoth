@@ -21,6 +21,7 @@ const cases = [
   { backendId: "hermes", agentId: "hermes-late", name: "Late", key: "agent:hermes-late:cron_late" },
   { backendId: "hermes", agentId: "hermes-reader", name: "Reader", key: "agent:hermes-reader:main" },
   { backendId: "openclaw", agentId: "claw-legacy", name: "Legacy", key: "agent:claw-legacy:cron:legacy" },
+  { backendId: "openclaw", agentId: "claw-prompt-only", name: "Scheduled", key: "agent:claw-prompt-only:cron:pending" },
 ];
 const sessions = cases.map(row => ({ ...row, agentName: row.name, kind: row.key.endsWith(":main") ? "main" : "cron", updatedAt: now - 10000 }));
 const histories = new Map<string, any[]>(), requests: any[] = [];
@@ -37,10 +38,11 @@ for (const row of cases.filter((_, index) => index < 3 || index === 6)) {
   const prompt = row.backendId === "hermes" ? "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: Fixture.] HIDDEN_CRON_PROMPT"
     : row.backendId === "openclaw" ? "HIDDEN_CRON_PROMPT: scheduled reminder in a shared main session" : "HIDDEN_CRON_PROMPT";
   const inputExtra = row.backendId === "openclaw"
-    ? { ...source, provenance: { kind: "internal_system", sourceTool: "cron" } } : source;
+    ? { ...source, ...(row.name === "OpenClaw" ? { __openclaw: { turnBoundary: true } } : {}),
+      provenance: { kind: "internal_system", sourceTool: "cron" } } : source;
   const rows = [
     message(row.agentId + "-old", "assistant", "Previously read report", since - 1000, source),
-    message(row.agentId + "-input", "user", prompt, since + 1000, inputExtra),
+    message(row.agentId + "-input", row.name === "OpenClaw" ? "assistant" : "user", prompt, since + 1000, inputExtra),
     { id: row.agentId + "-tool", role: "assistant", timestamp: since + 2000, ...source,
       content: [{ type: "toolCall", id: "slow-search", toolName: "web_search", arguments: { query: "fixture" } }] },
     { id: row.agentId + "-result", role: "toolResult", timestamp: since + 152000, ...source,
@@ -63,6 +65,8 @@ histories.set(cases[3].key, Array.from({ length: 72 }, (_, i) => message(`paged-
 histories.set(cases[4].key, [message("late-input", "user",
   "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: Fixture.] HIDDEN_CRON_PROMPT", since + 5000, hermesSource)]);
 histories.set(cases[5].key, [message("reader-old", "assistant", "Reader history", since - 1000, hermesSource)]);
+histories.set(cases[7].key, [message("projected-input-only", "assistant", "HIDDEN_CRON_PROMPT: no output has arrived", since + 5000,
+  { provenance: { kind: "internal_system", sourceTool: "cron" }, __openclaw: { turnBoundary: true } })]);
 let writes = 0;
 class FixtureSocket {
   static OPEN = 1; readyState = 1; onopen: any; onmessage: any;
@@ -142,6 +146,10 @@ state.runCronDisplayFixture = async () => {
   await wait(() => !!rowFor(cases[0].agentId) && thread()?.textContent?.includes("Reader history"), "initial view");
   await wait(() => rowFor(cases[0].agentId)?.textContent?.includes("OwlLATESTCONTINUATION"), "latest assistant preview");
   check(!rowFor(cases[4].agentId)?.textContent?.includes("IMPORTANT"), "scheduler prompt leaked into list");
+  await wait(() => requests.some(request => request.method === "chat.history" && request.params.sessionKey === cases[7].key), "probe projected input-only session");
+  await pause(150);
+  check(!rowFor(cases[7].agentId)?.textContent?.includes("HIDDEN_CRON_PROMPT"), "projected Cron input leaked into list preview");
+  check(!readState().replies[cases[7].key], "projected Cron input created a false unread reply");
   const result: any[] = [];
   for (const row of cases.filter((_, index) => index < 3 || index === 6)) {
     select(row.key);
@@ -200,7 +208,13 @@ state.runCronDisplayFixture = async () => {
   histories.get(cases[0].key)!.push(message("human-followup", "user", "HUMAN_FOLLOWUP: explain this Cron report", now + 2000, hermesSource));
   sessions[0].updatedAt = now + 2000; await runPageRefresh("/chat");
   await wait(() => thread().textContent?.includes("HUMAN_FOLLOWUP"), "manual follow-up hidden in a Cron session");
+  select(cases[1].key);
+  await wait(() => thread()?.textContent?.includes("OpenClaw_END"), "projected Cron result reopened");
+  histories.get(cases[1].key)!.push(message("openclaw-human-followup", "user", "OPENCLAW_HUMAN_FOLLOWUP: explain this Cron report", now + 3000));
+  sessions[1].updatedAt = now + 3000; await runPageRefresh("/chat");
+  await wait(() => thread().textContent?.includes("OPENCLAW_HUMAN_FOLLOWUP"), "manual OpenClaw follow-up hidden after projected Cron input");
   check(writes === 0, "fixture made external mutations");
-  return { mode: immersive ? "immersive" : "normal", language, result, previewRefresh: true, manualFollowup: true, writes };
+  return { mode: immersive ? "immersive" : "normal", language, result, projectedInputPreviewHidden: true,
+    projectedInputNoUnread: true, previewRefresh: true, manualFollowup: true, writes };
 };
 state.cronFixture = { cases, select, requests };

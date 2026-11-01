@@ -50,6 +50,7 @@ export default function SettingsMemory() {
   const [context, setContext] = useState<NativeMemoryContext | null>(null);
   const [draft, setDraft] = useState<NativeMemorySettings>({});
   const [scope, setScope] = useState("");
+  const [textModelScope, setTextModelScope] = useState("");
   const [aliasScope, setAliasScope] = useState("");
   const [newAliasTarget, setNewAliasTarget] = useState("");
   const [busy, setBusy] = useState(false);
@@ -200,6 +201,12 @@ export default function SettingsMemory() {
     [...activePath, "enabled"], value === "" ? undefined : value === "true"));
   };
 
+  const textModelPath = textModelScope ? ["agents", "entries", textModelScope, "memory", "textModel"] : ["memory", "textModel"];
+  const textModel = textModelScope ? draft.agents?.entries?.[textModelScope]?.memory?.textModel : draft.memory?.textModel;
+  const routeKey = (profileId: string, bindingId: string) => JSON.stringify([profileId, bindingId]);
+  const textModelValue = textModel?.source === "binding" ? routeKey(textModel.profileId, textModel.bindingId) : textModel?.source || "";
+  const textRoutes = context?.textModelRoutes || [];
+
   return <details className="settings-advanced settings-memory" id="settings-memory" onToggle={event => {
     if (!event.currentTarget.open && (accountStatus.dirty || accountStatus.busy)) { event.currentTarget.open = true; return; }
     setOpen(event.currentTarget.open);
@@ -214,6 +221,35 @@ export default function SettingsMemory() {
       {context?.owner === "legacy" && <p role="status">{t("nativeMemory.inactive")}</p>}
       {!snapshot && !busy && <button type="button" className="ui-cbtn ui-cbtn--sm" onClick={() => void load()}>{t("common.refresh")}</button>}
       {snapshot && context?.owner === "shoggoth-memory-core" && <form onSubmit={event => void save(event)} aria-label={t("nativeMemory.title")}>
+        <fieldset disabled={disabled} className="settings-memory-section">
+          <legend>{t("nativeMemory.textModelTitle")}</legend>
+          <p className="ui-hint">{t("nativeMemory.textModelHint")}</p>
+          <div className="settings-memory-grid">
+            <Field label={t("nativeMemory.textModelScope")}><Select title={t("nativeMemory.textModelScope")} disabled={disabled}
+              value={textModelScope} onChange={setTextModelScope}>
+              <Option value="">{t("nativeMemory.allAgents")}</Option>
+              {profileIds.map(id => <Option key={id} value={id}>{agents.find(agent => agent.profileId === id)?.name || t("nativeMemory.unavailableAgent", { id })}</Option>)}
+            </Select></Field>
+            <Field label={t("nativeMemory.textModelRoute")}><Select title={t("nativeMemory.textModelRoute")} disabled={disabled}
+              value={textModelValue} onChange={value => {
+                const selected = textRoutes.find(row => routeKey(row.profileId, row.bindingId) === value);
+                change(textModelPath, !value ? undefined : selected ? { source: "binding", profileId: selected.profileId, bindingId: selected.bindingId }
+                  : { source: value });
+              }}>
+              <Option value="">{t(textModelScope ? "nativeMemory.inherit" : "nativeMemory.textModelDefault")}</Option>
+              <Option value="agent-default">{t("nativeMemory.textModelDefault")}</Option>
+              <Option value="local">{t("nativeMemory.textModelLocal")}</Option>
+              {textModel?.source === "binding" && !textRoutes.some(row => routeKey(row.profileId, row.bindingId) === textModelValue)
+                && <Option value={textModelValue}>{t("nativeMemory.textModelUnavailable")}</Option>}
+              {textRoutes.map(row => <Option key={routeKey(row.profileId, row.bindingId)} value={routeKey(row.profileId, row.bindingId)}>
+                {row.name} · {row.accountName} · {row.defaultModel || row.runtime}{!row.supported ? ` · ${t("nativeMemory.textModelUnsupported")}` : ""}
+              </Option>)}
+            </Select></Field>
+            {textModel?.source === "binding" && field(textModelPath, { key: "textModelOverride", label: t("nativeMemory.textModelRoute"), path: ["model"], kind: "text", maxLength: 512,
+              placeholder: t("nativeMemory.textModelBindingDefault") })}
+          </div>
+          <p className="ui-hint">{t("nativeMemory.hostMemoryHint")}</p>
+        </fieldset>
         <fieldset disabled={disabled} className="settings-memory-section">
           <legend>{t("nativeMemory.search")}</legend><p className="ui-hint">{t("nativeMemory.searchHint")}</p>
           <Field label={t("nativeMemory.scope")}><Select title={t("nativeMemory.scope")} disabled={busy || accountStatus.dirty || accountStatus.busy} value={scope} onChange={setScope}>
@@ -369,7 +405,7 @@ export default function SettingsMemory() {
               { key: "thinking", options: ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"], hint: "thinkingHint" },
               { key: "fastMode", options: ["true", "false", "auto"], hint: "fastModeHint" },
               { key: "promptStyle", options: ["balanced", "strict", "contextual", "recall-heavy", "precision-heavy", "preference-only"] },
-              number("timeoutMs", 1000, 600000), number("setupGraceTimeoutMs", 0, 120000), number("maxSummaryChars", 40, 1000),
+              { ...number("timeoutMs", 1000, 600000), hint: "activeTimeoutHint" }, number("setupGraceTimeoutMs", 0, 120000), { ...number("maxSummaryChars", 40, 1000), hint: "activeSummaryHint" },
               number("cacheTtlMs", 1000, 120000), number("circuitBreakerMaxTimeouts", 1, 20), number("circuitBreakerCooldownMs", 5000, 600000),
               { ...boolean("persistTranscripts"), hint: "persistTranscriptsHint" },
               { ...text("transcriptDir", undefined, "transcriptDirHint"), maxLength: 1024 },

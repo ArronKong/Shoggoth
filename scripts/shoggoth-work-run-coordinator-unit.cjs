@@ -125,10 +125,10 @@ test("通用 MCP 包装器只规范化明确指向 Shoggoth 的联邦结果工�
   assert.equal(Buffer.from(encoded.resultBase64, "base64").toString("utf8"), escaped.task.result);
 });
 
-test("审批默认持续等待，普通输入等待 30 分钟且 transport 留有终态收敛余量", () => {
+test("审批和普通输入默认持续等待，transport 不加固定截止", () => {
   assert.equal(DEFAULT_APPROVAL_TIMEOUT_MS, null);
-  assert.equal(DEFAULT_PROMPT_TIMEOUT_MS, 30 * 60 * 1_000);
-  assert.equal(DEFAULT_SERVER_REQUEST_TIMEOUT_MS, DEFAULT_PROMPT_TIMEOUT_MS + 30_000);
+  assert.equal(DEFAULT_PROMPT_TIMEOUT_MS, null);
+  assert.equal(DEFAULT_SERVER_REQUEST_TIMEOUT_MS, null);
   assert.equal(DEFAULT_MCP_TOOL_TIMEOUT_MS, 2_147_000_000);
   assert.equal(DEFAULT_MCP_TOOL_TIMEOUT_SEC, DEFAULT_MCP_TOOL_TIMEOUT_MS / 1_000);
   const host = new CodexRuntimeHost({
@@ -265,6 +265,7 @@ function createRealTransportHost(options = {}) {
     cacheRoot: path.join(root, "cache"),
   });
   const responsePath = path.join(root, "elicitation-response.json");
+  const schemaPath = path.join(root, "elicitation-schema.json");
   const host = new CodexRuntimeHost({
     runtimeProfileId: options.runtimeProfileId || "runtime-default",
     runtimeAccountId: RUNTIME_ACCOUNT_ID,
@@ -278,6 +279,7 @@ function createRealTransportHost(options = {}) {
       CODEX_FAKE_PROFILE: options.runtimeProfileId || "runtime-default",
       CODEX_FAKE_ELICITATION_MODE: options.mode || "valid",
       CODEX_FAKE_ELICITATION_RESPONSE_PATH: responsePath,
+      CODEX_FAKE_ELICITATION_SCHEMA_PATH: schemaPath,
       ...(options.spawnEnv || {}),
     },
     spawnProcess(_command, _args, spawnOptions) {
@@ -293,6 +295,7 @@ function createRealTransportHost(options = {}) {
   return {
     host,
     responsePath,
+    schemaPath,
     async close() {
       await host.stop().catch(() => {});
       fs.rmSync(root, { recursive: true, force: true });
@@ -809,6 +812,9 @@ function fixture(options = {}) {
     getCapabilityPolicyRevision: options.getCapabilityPolicyRevision,
     ...(options.runExecutionStore ? { runExecutionStore: options.runExecutionStore } : {}),
     ...(options.transcriptStore ? { transcriptStore: options.transcriptStore } : {}),
+    temporarySecrets: options.temporarySecrets,
+    secretMedia: options.secretMedia,
+    getMediaStore: options.getMediaStore,
     verifyMemoryExtractionSource: options.verifyMemoryExtractionSource || (() => true),
     chatSessionStore: sessions,
     inbox,
@@ -862,6 +868,7 @@ function directRuntimeManager(host, runtime) {
     runtimeAccountId: RUNTIME_ACCOUNT_ID,
     terminated: host.terminated,
     registeredSecrets: [],
+    ...(host.capabilityEvidence ? { capabilityEvidence: host.capabilityEvidence } : {}),
     subscribe: (listener) => host.subscribe(listener),
     registerServerRequestHandler: (method, handler) => (
       host.registerServerRequestHandler(method, handler)
@@ -1105,6 +1112,9 @@ test("interrupted 保留安全具体原因且任意CLI文本不会成为公共�
     ["DEEPSEEK_HARNESS_WRITE_FAILED", "RUNTIME_CONNECTION_LOST"],
     ["PI_PROCESS_FAILED", "RUNTIME_CONNECTION_LOST"],
     ["GROK_ACP_OUTBOUND_FRAME_TOO_LARGE", "GROK_ACP_OUTBOUND_FRAME_TOO_LARGE"],
+    ["SECRET_MODEL_PROJECTION_UNAVAILABLE", "SECRET_MODEL_PROJECTION_UNAVAILABLE"],
+    ["SECRET_MODEL_RUNTIME_UNSUPPORTED", "SECRET_MODEL_RUNTIME_UNSUPPORTED"],
+    ["SECRET_DISCLOSURE_CANCELED", "SECRET_DISCLOSURE_CANCELED"],
     ["AUTH_REQUIRED", "RUNTIME_AUTH_REQUIRED"], ["PRIVATE_UNTRUSTED_CODE", "RUNTIME_TURN_INTERRUPTED"]]) {
     const value = await openFixture();
     const { ack } = await sendAndDrain(value, { operationId: `cause-${code}` });
@@ -1227,6 +1237,31 @@ async function sendAndDrain(value, input = {}) {
   await value.coordinator.waitForIdle(ack.run.id);
   return { ack, operationId };
 }
+
+test("local masking failure continues one admitted turn with the same input and durable chat event", async () => {
+  const transcript = [];
+  const failure = () => { throw codedError("SECRET_PROCESSING_UNAVAILABLE"); };
+  const value = await openFixture({ temporarySecrets: { prepare: failure, projectText: failure, hasPreparation: () => false },
+    transcriptStore: { appendEvent: event => { transcript.push(clone(event)); return clone(event); }, listEvents: () => transcript } });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "silent-input-once", prompt: "password: SyntheticInput987" });
+    assert.equal(value.host.turnStartCalls, 1);
+    assert.equal(value.host.lastTurnStartParams.input[0].text, "password: SyntheticInput987");
+    assert(transcript.some(event => event.kind === "user" && event.content.text === "password: SyntheticInput987"));
+    assert.equal((await value.coordinator.send({ operationId: "silent-input-once", sessionKey: SESSION_KEY,
+      prompt: "password: SyntheticInput987" })).run.id, ack.run.id);
+    await value.coordinator.waitForIdle(ack.run.id); assert.equal(value.host.turnStartCalls, 1);
+  } finally { await value.coordinator.close(); }
+});
+
+test("uncertain secret storage is rejected before any chat operation is admitted", async () => {
+  const value = await openFixture({ temporarySecrets: { prepare() { throw codedError("SECRET_STORE_UNCERTAIN"); }, hasPreparation: () => false } });
+  try {
+    await assert.rejects(value.coordinator.send({ operationId: "uncertain-secret-input", sessionKey: SESSION_KEY,
+      prompt: "private input" }), { code: "SECRET_STORE_UNCERTAIN" });
+    assert.equal(value.host.turnStartCalls, 0); assert.equal(value.inbox.get("uncertain-secret-input"), null);
+  } finally { await value.coordinator.close(); }
+});
 
 async function assertTerminalRecoverReentrancy(mode) {
   const operationId = `terminal-recover-${mode}`;
@@ -1400,6 +1435,12 @@ test("Runtime retry status reaches the run stream without private provider text"
       method: "opencode/session.status", status: "retrying", reason: "RUNTIME_RATE_LIMITED",
     });
     assert.equal(JSON.stringify(observed).includes("private provider trace"), false);
+    value.host.emit({ known: true, type: "status", method: "_x.ai/session/update",
+      threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId,
+      status: "retrying", reason: "RUNTIME_UPSTREAM_UNAVAILABLE", message: "private provider trace" });
+    assert.deepEqual(observed.at(-1).payload, {
+      method: "_x.ai/session/update", status: "retrying", reason: "RUNTIME_UPSTREAM_UNAVAILABLE",
+    });
     value.host.emit({ known: true, type: "status", method: "opencode/session.status",
       threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId,
       status: "running" });
@@ -3167,6 +3208,59 @@ test("terminal failed turn 保留权限与上游不可用公共错误码", async
   }
 });
 
+test("terminal diagnosis is scoped, redacted and immutable across recovery", async () => {
+  const { TranscriptStore } = require("../app/agent-service/transcript-store");
+  const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "terminal-diagnosis-")));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache"), trustedRoot: root });
+  const transcriptStore = new TranscriptStore({ paths }); transcriptStore.open();
+  const value = await openFixture({ transcriptStore, sessionStatus: "ready", threadId: "thread-failure-detail",
+    sessionWorkspace: root, threads: [{ id: "thread-failure-detail", threadSource: null, turns: [] }] });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "failure-detail" });
+    const running = value.coordinator.getRun(ack.run.id), events = [];
+    value.host.registeredSecrets = ["fixture-provider-key"];
+    const subscription = value.coordinator.subscribeRun(running.id, { streamId: null, afterSeq: 0 }, event => events.push(event));
+    const identity = { known: true, type: "complete", method: "turn/completed", threadId: running.runtimeSessionRef.sessionId,
+      turnId: running.runtimeTurnRef.turnId, status: "failed" };
+    value.host.emit({ ...identity, turnId: "another-turn", failure: { message: "foreign reason" } });
+    const turn = value.host.threads[0].turns[0]; turn.status = "failed"; turn.errorCode = "ANTIGRAVITY_TURN_FAILED";
+    value.host.emit({ ...identity, failure: { message: "Project verification required; fixture-provider-key", httpStatus: 400, upstreamCode: "verification_required" } });
+    await value.coordinator.waitForIdle(running.id);
+    const terminal = events.find(event => event.type === "terminal");
+    assert.match(terminal.payload.failure.message, /Project verification required/u);
+    assert.ok(!JSON.stringify(terminal).includes("fixture-provider-key"));
+    assert.ok(!JSON.stringify(terminal).includes("foreign reason"));
+    const readTerminal = () => transcriptStore.listEvents(PROFILE_ID, value.sessions.session.id).find(event => event.content.transcriptType === "terminal");
+    const saved = readTerminal();
+    assert.deepEqual(transcriptHistoryItem(saved).payload.message.failure, terminal.payload.failure);
+    await value.coordinator.recover();
+    assert.deepEqual(readTerminal(), saved);
+    assert.equal(value.host.turnStartCalls, 1, "diagnostic recovery never replays the operation");
+    subscription.unsubscribe();
+  } finally { await value.coordinator.close(); transcriptStore.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a diagnostic rejected by secret admission cannot poison or leak through a terminal", async () => {
+  const transcript = [];
+  const value = await openFixture({ sessionStatus: "ready", threadId: "thread-hidden-diagnostic",
+    threads: [{ id: "thread-hidden-diagnostic", threadSource: null, turns: [] }],
+    transcriptStore: { appendEvent: event => { transcript.push(clone(event)); return clone(event); } },
+    assertSecretSafe: payload => !payload.failure,
+  });
+  try {
+    const { ack } = await sendAndDrain(value, { operationId: "hidden-diagnostic" });
+    const run = value.coordinator.getRun(ack.run.id), events = [];
+    value.coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));
+    const turn = value.host.threads[0].turns[0]; turn.status = "failed"; turn.errorCode = "ANTIGRAVITY_TURN_FAILED";
+    value.host.emit({ known: true, type: "complete", method: "turn/completed", status: "failed",
+      threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId, failure: { message: "sensitive provider detail" } });
+    assert.equal((await value.coordinator.waitForIdle(run.id)).status, "failed");
+    assert.equal(events.find(event => event.type === "terminal").payload.failure, undefined);
+    assert.ok(!JSON.stringify(transcript).includes("sensitive provider detail"));
+  } finally { await value.coordinator.close(); }
+});
+
 test("resultSummary 只取目标 turn 的 canonical final_answer 并按 UTF-8 边界脱敏检查", async () => {
   const checked = [];
   const value = await openFixture({
@@ -3855,6 +3949,27 @@ test("准入冻结 ContextSnapshot，WorkRun 持久绑定且 Codex 分离 develo
   await value.coordinator.close();
 });
 
+test("准入前凭据与附件处理失败只终止当前输入，保留错误且不启动 Runtime", async () => {
+  for (const code of ["SECRET_MEDIA_UNAVAILABLE", "SECRET_MEDIA_INVALID", "SECRET_MEDIA_TIMEOUT",
+    "SECRET_PROCESSING_UNAVAILABLE", "SECRET_STORE_UNCERTAIN", "SECRET_MODEL_SCOPE_INVALID"]) {
+    let fail = true;
+    const value = await openFixture({ contextCompiler: { compile() {
+      if (fail) throw codedError(code);
+      return { id: `ctx-${"a".repeat(64)}`, developerInstructions: "safe", dynamicContext: "safe" };
+    } } });
+    try {
+      const { ack } = await sendAndDrain(value, { operationId: `rejected-${code}` });
+      assert.equal(value.dispatcher.getRun(ack.run.id).status, "failed");
+      assert.equal(value.dispatcher.getRun(ack.run.id).errorCode, code);
+      assert.equal(value.host.turnStartCalls, 0);
+      fail = false;
+      await sendAndDrain(value, { operationId: `independent-${code}` });
+      assert.equal(value.host.turnStartCalls, 1);
+      assert.equal(value.dispatcher.getRun(ack.run.id).status, "failed", "the earlier input is never replayed");
+    } finally { await value.coordinator.close(); }
+  }
+});
+
 test("候选记忆来源在 Runtime 获取期间失效时不得发送已冻结的上下文", async () => {
   const gate = deferred();
   const reviewedId = `reviewed-mc-${"a".repeat(64)}`;
@@ -4260,6 +4375,29 @@ test("Runtime acquire 在 turn 前只重试一次且成功后不重复发送 tur
     assert.equal(value.host.turnStartCalls, 1);
   } finally {
     await value.coordinator.close();
+  }
+});
+
+test("missing optional resume keeps new chat usable and never replaces an existing session", async () => {
+  for (const existing of [false, true]) {
+    const host = new FakeHost([], { threads: existing ? [{ id: "old-session", threadSource: null, turns: [] }] : [] });
+    host.capabilityEvidence = require("../app/agent-service/runtime-capability-evidence").runtimeCapabilityEvidence({
+      capabilities: { "session.start": true, "session.list": true, "session.read": true, "turn.start": true,
+        "turn.interrupt": true, events: true, "session.resume": false },
+    }, { runtime: "grok-build", runtimeProfileId: "runtime-default", runtimeAccountId: RUNTIME_ACCOUNT_ID }, "fixture");
+    const value = await openFixture({ host, runtime: "grok-build", runtimeManager: directRuntimeManager(host, "grok-build"),
+      ...(existing ? { sessionStatus: "ready", threadId: "old-session" } : {}) });
+    try {
+      const { ack } = await sendAndDrain(value, { operationId: `resume-capability-${existing}` });
+      const run = value.coordinator.getRun(ack.run.id);
+      assert.equal(run.status, existing ? "failed" : "running");
+      if (existing) {
+        assert.equal(run.errorCode, "RUNTIME_CAPABILITY_UNSUPPORTED");
+        assert.equal(value.sessions.session.runtimeSessionId, "old-session");
+      }
+      assert.equal(host.threadStartCalls, existing ? 0 : 1);
+      assert.equal(host.turnStartCalls, existing ? 0 : 1);
+    } finally { await value.coordinator.close(); }
   }
 });
 
@@ -5610,19 +5748,20 @@ test("真实 MCP helper request_user_input 经 elicitation 桥接 assigned turn�
     await new Promise((resolve) => setImmediate(resolve));
   }
   const waiting = value.coordinator.getRun(run.id);
+  const customAnswer = "麦乐鸡\n不辣 🍟";
   await value.coordinator.respondInput({
     operationId: "mcp-helper-e2e-answer",
     runId: run.id,
     requestId: waiting.waitingRequestId,
     action: "submit",
-    answers: { choice: "Beta" },
+    answers: { choice: customAnswer },
   });
   input.write(`${JSON.stringify({ jsonrpc: "2.0", id: outbound.id, result: await bridgeResponse })}\n`);
   const toolResponse = await nextLine();
   assert.equal(toolResponse.id, 2);
   assert.equal(toolResponse.result.isError, false);
   assert.deepEqual(toolResponse.result.structuredContent, {
-    answers: { choice: { answers: ["Beta"] } },
+    answers: { choice: { answers: [customAnswer] } },
   });
   input.end();
   await session;
@@ -5685,6 +5824,7 @@ test("真实 fake Codex JSONL 经 Host schema 进入 Coordinator assigned turn �
     const outbound = await nextLine();
     assert.equal(outbound.method, "elicitation/create");
 
+    fs.writeFileSync(transport.schemaPath, JSON.stringify(outbound.params));
     await transport.host.initialize();
     value = await openFixture({
       host: transport.host,
@@ -5716,14 +5856,14 @@ test("真实 fake Codex JSONL 经 Host schema 进入 Coordinator assigned turn �
       runId: ack.run.id,
       requestId: waiting.waitingRequestId,
       action: "submit",
-      answers: { choice: "Beta" },
+      answers: { choice: "自定义餐品\n不要辣 🍟" },
     });
     const bridgeResponse = await readJsonLineFileEventually(
       transport.responsePath, 1_000, "fake Codex server response",
     );
     assert.deepEqual(bridgeResponse.result, {
       action: "accept",
-      content: { choice: "Beta" },
+      content: { choice: "自定义餐品\n不要辣 🍟" },
     });
     input.write(`${JSON.stringify({
       jsonrpc: "2.0", id: outbound.id, result: bridgeResponse.result,
@@ -5732,7 +5872,7 @@ test("真实 fake Codex JSONL 经 Host schema 进入 Coordinator assigned turn �
     assert.equal(toolResponse.id, 2);
     assert.equal(toolResponse.result.isError, false);
     assert.deepEqual(toolResponse.result.structuredContent, {
-      answers: { choice: { answers: ["Beta"] } },
+      answers: { choice: { answers: ["自定义餐品\n不要辣 🍟"] } },
     });
   } finally {
     input.end();
@@ -6720,13 +6860,13 @@ test("approval 超过三十分钟仍保持 pending，expiresAt 为 null 且可�
   await value.coordinator.close();
 });
 
-test("ordinary input survives the old deadlines, accepts until thirty minutes, then interrupts exactly once", async () => {
-  for (const outcome of ["answer", "expire"]) {
+test("ordinary input remains answerable beyond thirty minutes and closes only on answer or cancellation", async () => {
+  for (const outcome of ["answer", "cancel"]) {
     let now = 1_000;
     const scheduled = new Set();
     const value = await openFixture({
-      sessionStatus: "ready", threadId: "thread-thirty-minute-input",
-      threads: [{ id: "thread-thirty-minute-input", threadSource: null, turns: [] }],
+      sessionStatus: "ready", threadId: "thread-unlimited-input",
+      threads: [{ id: "thread-unlimited-input", threadSource: null, turns: [] }],
       now: () => now,
       promptScheduler: {
         set(callback, delay) { const handle = { callback, at: now + delay }; scheduled.add(handle); return handle; },
@@ -6734,40 +6874,32 @@ test("ordinary input survives the old deadlines, accepts until thirty minutes, t
       },
     });
     try {
-      const { ack } = await sendAndDrain(value, { operationId: `thirty-minute-${outcome}` });
+      const { ack } = await sendAndDrain(value, { operationId: `unlimited-input-${outcome}` });
       const run = value.coordinator.getRun(ack.run.id);
       const response = value.host.request("mcpServer/elicitation/request", {
         serverName: "shoggoth", threadId: run.runtimeSessionRef.sessionId,
         turnId: run.runtimeTurnRef.turnId, mode: "form", message: "Wait for input",
         requestedSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
-      }, `raw-thirty-minute-${outcome}`);
+      }, `raw-unlimited-input-${outcome}`);
       response.catch(() => {});
-      await waitUntil(() => scheduled.size === 1, 1000, "default input timer");
-      const timer = [...scheduled][0];
+      await waitUntil(() => value.coordinator.getRun(run.id).status === "waiting_input", 1000, "unlimited input");
       const requestId = value.coordinator.getRun(run.id).waitingRequestId;
-      assert.equal(timer.at, 1_000 + 30 * 60_000);
-      for (const elapsed of [5 * 60_000, 10 * 60_000, 30 * 60_000 - 1]) {
+      assert.equal(scheduled.size, 0);
+      for (const elapsed of [30 * 60_000, 24 * 60 * 60_000, 30 * 24 * 60 * 60_000]) {
         now = 1_000 + elapsed;
         for (const pending of [...scheduled]) if (pending.at <= now) pending.callback();
         assert.equal(value.coordinator.getRun(run.id).status, "waiting_input");
         assert.equal(value.host.turnInterruptCalls, 0);
       }
-      if (outcome === "answer") {
-        await value.coordinator.respondInput({ operationId: "answer-before-deadline", runId: run.id,
-          requestId, action: "submit", answers: { answer: "done" } });
-        assert.deepEqual(await response, { action: "accept", content: { answer: "done" } });
-        assert.equal(value.coordinator.getRun(run.id).status, "running");
-      } else {
-        now += 1;
-        timer.callback();
-        assert.deepEqual(await response, { action: "cancel" });
-        const terminal = await value.coordinator.waitForIdle(run.id);
-        assert.equal(terminal.status, "interrupted");
-        assert.equal(terminal.errorCode, "CODEX_PROMPT_TIMEOUT");
-        timer.callback();
-        assert.equal(value.host.turnInterruptCalls, 1);
-      }
+      await value.coordinator.respondInput({ operationId: `settle-unlimited-${outcome}`, runId: run.id,
+        requestId, action: outcome === "answer" ? "submit" : "cancel",
+        answers: outcome === "answer" ? { answer: "done" } : {} });
+      assert.deepEqual(await response, outcome === "answer" ? { action: "accept", content: { answer: "done" } } : { action: "cancel" });
+      // Cancelling an elicitation declines this input; the provider decides
+      // how to continue. Whole-run abort is covered separately.
+      assert.equal(value.coordinator.getRun(run.id).status, "running");
       assert.equal(scheduled.size, 0);
+      assert.equal(value.coordinator.getMemoryStats().pendingRequests, 0);
     } finally { await value.coordinator.close(); }
   }
 });

@@ -206,6 +206,14 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
   revealEnvVar: (backend, key) => ipcRenderer.invoke(
     "shoggoth:secret:reveal-env", { backend, key },
   ),
+  readChatSecretResult: (sessionKey, receiptId) => ipcRenderer.invoke(
+    "shoggoth:secret:chat-result", { sessionKey, receiptId },
+  ),
+  decideChatSecretDisclosure: (sessionKey, disclosureId, choice) => ipcRenderer.invoke(
+    "shoggoth:secret:chat-decision", { sessionKey, disclosureId, choice },
+  ),
+  getLocalSpeechStatus: () => ipcRenderer.invoke("shoggoth:secret:speech-status"),
+  requestLocalSpeech: () => ipcRenderer.invoke("shoggoth:secret:speech-request"),
   // Persistent Board HTML never crosses the management HTTP plane. Main first
   // revalidates the exact widget, then returns a short-lived second-origin URL.
   mintSessionBoardHtmlWidget: (backend, agentId, sessionKey, spec) => ipcRenderer.invoke(

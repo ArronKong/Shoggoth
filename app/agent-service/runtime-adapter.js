@@ -13,6 +13,7 @@ const RUNTIME_CAPABILITY_KEYS = Object.freeze([
   "session.unarchive",
   "session.delete",
   "turn.start",
+  "turn.start.prepare",
   "turn.steer",
   "turn.interrupt",
   "models.list",
@@ -87,6 +88,22 @@ function runtimeTurnRef(bindingValue, sessionId, turnId) {
   const session = runtimeSessionRef(bindingValue, sessionId);
   if (!validRefId(turnId)) throw runtimeError("RUNTIME_REF_INVALID", "Runtime turn ref is invalid");
   return Object.freeze({ ...session, turnId });
+}
+
+// A local preparation receipt is separate from accepted native references.
+// It never permits replay or claims remote acceptance by itself.
+function runtimeAttemptRef(bindingValue, value) {
+  const binding = runtimeBinding(bindingValue);
+  const fields = ["sessionId", "turnId", "attemptId", "operationId", "fingerprint", "dispatchState"];
+  if (!exactObject(value, fields) || Reflect.ownKeys(value).length !== fields.length || fields.some(key => {
+    const property = Object.getOwnPropertyDescriptor(value, key);
+    return !property || !Object.hasOwn(property, "value") || !property.enumerable;
+  }) || !["sessionId", "turnId", "attemptId", "operationId"].every(key => validRefId(value[key]))
+    || !/^[a-f0-9]{64}$/u.test(value.fingerprint)
+    || !["prepared", "write_attempted"].includes(value.dispatchState)) {
+    throw runtimeError("RUNTIME_REF_INVALID", "Runtime attempt ref is invalid");
+  }
+  return Object.freeze({ ...binding, ...Object.fromEntries(fields.map(key => [key, value[key]])) });
 }
 
 function runtimeCapabilities(value = {}) {
@@ -167,6 +184,16 @@ async function readRuntimeAuthenticationState(handle, { allowDeferred = false } 
     } catch (error) {
       throw authenticationReadError(error);
     }
+    // Trusted adapters with no authoritative auth-state RPC can expose an
+    // explicit tri-state cache. Unknown authentication is independent of
+    // credential presence and remains unverified during an explicit task.
+    const status = ownDataValue(raw, "status");
+    if (status !== undefined) {
+      if (!["authenticated", "unauthenticated", "unverified"].includes(status)) {
+        throw runtimeError("RUNTIME_AUTH_STATUS_INVALID", "Runtime auth status is invalid");
+      }
+      return authenticationState(status);
+    }
     // An adapter may let its executing CLI authenticate the request instead
     // of doing a second network login check. Settings still require an actual
     // check; deferred verification must never be advertised as authenticated.
@@ -202,6 +229,7 @@ module.exports = {
   runtimeCapabilities,
   runtimeSessionRef,
   runtimeTurnRef,
+  runtimeAttemptRef,
   validRuntime,
   validRuntimeAccountId,
   validRuntimeProfileId,

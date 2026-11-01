@@ -4,6 +4,39 @@ const assert = require("node:assert/strict");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { UNKNOWN_WINDOW_BUDGET } = require("../app/agent-service/conversation-context-budget");
 
+test("idle time does not discard a matching native meter and recount retired sessions", async () => {
+  const f = await openHandoffFixture();
+  try {
+    const config = f.service.nativeRuntimeConfig.read();
+    f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
+      flags: { ...config.flags, runtimeContextLifecycleV1: true } });
+    const session = f.createSession(), coordinator = f.service.workRunCoordinator;
+    coordinator.beforeMemoryCompaction = null;
+    coordinator.getRuntimeModelContextWindow = () => 475000;
+    coordinator.getRuntimeModelContextLimits = () => ({ inputTokens: 380000 });
+    const first = await f.send(session.sessionKey, "idle-first");
+    for (let n = 0; n < 40; n++) f.service.transcriptStore.appendEvent({
+      profileId: session.profileId, sessionId: session.id, id: `retired-${n}`, kind: "assistant",
+      runtimeRef: { ...first.runtimeTurnRef, sessionId: "retired-native" },
+      content: { text: "old history ".repeat(4000) }, occurredAt: Date.now() - 95 * 60_000 });
+    const host = f.transport.hosts.get("codex"), native = first.runtimeSessionRef.sessionId;
+    host.emit({ known: true, type: "context_usage", threadId: native,
+      contextUsage: { runtimeSessionId: native, usedTokens: 213357, contextWindow: 475000,
+        quality: "exact", source: "runtime_event", observedAt: Date.now() - 94 * 60_000 } });
+    await f.complete(first);
+    const compile = coordinator.contextCompiler.compile.bind(coordinator.contextCompiler);
+    let admissionUsage;
+    coordinator.contextCompiler.compile = input => { admissionUsage = input.nativeUsage; return compile(input); };
+    let compactions = 0;
+    host.threadCompactStart = async () => { compactions++; throw new Error("unnecessary compaction"); };
+    const second = await f.send(session.sessionKey, "idle-next");
+    assert.equal(second.status, "running", second.errorCode);
+    assert.equal(admissionUsage?.usedTokens, 213357, "the matching observation remains the admission baseline");
+    assert.equal(compactions, 0, "idle time alone cannot increase native occupancy");
+    await f.complete(second);
+  } finally { await f.close(); }
+});
+
 test("effective windows track model changes and survive native renewal without reusing old occupancy", async () => {
   const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", "large-model"] } });
   try {
@@ -34,7 +67,10 @@ test("effective windows track model changes and survive native renewal without r
     await f.controller.handle("chat.session.runtime.model.set", { profileId: f.profile.id,
       sessionKey: session.sessionKey, bindingId: f.binding("codex").id,
       revision: current().revision, acceptAdjustments: true, model: "large-model" });
-    assert.equal(read().contextUsage, null, "a model change prepares a fresh native session without old occupancy");
+    // Within ChatGPT the native session is kept across the model change; the
+    // old model's occupancy and window are still never reused.
+    assert.equal(read().contextUsage?.usedTokens ?? null, null, "a model change never reuses the old model's occupancy");
+    assert.equal(read().contextUsage?.contextWindow ?? null, null);
     assert.equal(read().productContext.budget.tokens, UNKNOWN_WINDOW_BUDGET, "never inherit the old model's smaller window");
     const second = await f.send(session.sessionKey, "large-window");
     assert.equal(second.status, "running", second.errorCode);

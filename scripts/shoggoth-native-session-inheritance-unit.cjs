@@ -41,6 +41,19 @@ test("backend and Service inherit the authoritative selection, even with an expl
     assert.equal(child.runtimeSessionId, null);
     assert.equal(child.workspace, f.root);
     assert.equal(child.permissionMode, "request-approval", "the user's choice wins over the creation default");
+    assert.equal(f.backend.getSessionRows().find(row => row.key === childKey).permissionMode, "request-approval",
+      "creation publishes the child's authoritative permission before any turn");
+    const legacy = f.service.chatSessionStore.createSession({ operationId: "legacy-parent", profileId: profile.id,
+      workspace: f.root, createdAt: Date.now(), defaultBindingId: parent.runtimeBindingId });
+    assert.equal(legacy.permissionMode, null);
+    f.backend._upsertSession(profile, legacy);
+    const legacyKey = `agent:${profile.agentId}:${legacy.sessionKey}`;
+    const derivedLegacyMode = f.backend.getSessionRows().find(row => row.key === legacyKey).permissionMode;
+    assert.notEqual(derivedLegacyMode, "auto-review", "a legacy parent display can be derived from profile policy");
+    const legacyChildKey = await f.backend.createSession(profile.agentId, { parentSessionKey: legacyKey, workspace: f.root });
+    assert.equal(f.service.chatSessionStore.getSession(legacyChildKey.split(":").at(-1)).permissionMode, "auto-review");
+    assert.equal(f.backend.getSessionRows().find(row => row.key === legacyChildKey).permissionMode, "auto-review",
+      "a child with the initial default must not copy its legacy parent's derived display value");
     const freshKey = await f.backend.createSession(profile.agentId, { workspace: f.root });
     assert.equal(f.service.chatSessionStore.getSession(freshKey.split(":").at(-1)).permissionMode, "auto-review",
       "a new independent session uses the initial default");

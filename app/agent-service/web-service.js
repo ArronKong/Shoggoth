@@ -35,7 +35,7 @@ function raceAbort(promise, signal) {
 async function requestPublic(value, { method = "GET", headers = {}, body, signal, maxBytes = 1024 * 1024,
   allowRedirects = true, providerRequest = false, lookup = dns.lookup, request = (url, options, callback) => (url.protocol === "https:" ? https : http).request(url, options, callback) } = {}) {
   let url = publicUrl(value);
-  signal ??= AbortSignal.timeout(20000);
+  signal ??= AbortSignal.timeout(60000);
   for (let hop = 0; hop <= 5; hop++) {
     if (signal.aborted) abortError(signal);
     const host = url.hostname.replace(/^\[|\]$/gu, "");
@@ -120,7 +120,7 @@ function rpcPayload(response, id) {
   fail("WEB_RESPONSE_INVALID");
 }
 class WebService {
-  constructor({ request = requestPublic, now = Date.now, timeoutMs = 20000, settings = null, lookup = dns.lookup } = {}) {
+  constructor({ request = requestPublic, now = Date.now, timeoutMs = 60000, settings = null, lookup = dns.lookup } = {}) {
     this.request = request; this.now = now; this.timeoutMs = timeoutMs; this.active = 0; this.settings = settings; this.lookup = lookup;
   }
   async call(name, args, { signal, profileId = null } = {}) {
@@ -233,7 +233,7 @@ class WebService {
     else if (provider === "tavily") value = await this.json("https://api.tavily.com/extract", apiKey, { signal, header: "Authorization",
       body: { urls: [target], format: "markdown", extract_depth: "basic" } });
     else if (provider === "tinyfish") value = await this.json("https://api.fetch.tinyfish.ai", apiKey, { signal,
-      body: { urls: [target], format: "markdown", per_url_timeout_ms: 18000 } });
+      body: { urls: [target], format: "markdown", per_url_timeout_ms: 55000 } });
     else fail("WEB_CONFIG_UNAVAILABLE");
     if ((Array.isArray(value.errors) && value.errors.length) || (Array.isArray(value.failed_results) && value.failed_results.length)
       || (Array.isArray(value.statuses) && value.statuses.some(row => row.status !== "success"))) fail("WEB_FETCH_FAILED");

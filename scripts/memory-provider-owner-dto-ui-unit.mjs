@@ -47,6 +47,7 @@ function load(file) {
     if (name.endsWith('/lib/runtimeVisibility')) return { isVisibleRuntime: () => true };
     if (name.startsWith('.')) {
       const target = path.resolve(path.dirname(file), name);
+      if (target === path.join(draft, 'app/core/chat-secret-fallback-codes.json')) return require(target);
       for (const extension of ['.ts', '.tsx']) if (fs.existsSync(target + extension)) return load(target + extension);
       throw new Error('Unexpected synthetic local dependency');
     }

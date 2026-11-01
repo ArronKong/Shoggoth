@@ -59,6 +59,7 @@ const server = createServer(async (request, response) => {
       : p === "/__api/status" ? { backends: ["openclaw", "hermes", "shoggoth"].map(id => ({ id, connected: true,
         info: { readyAgentIds: fixture.cases.filter(row => row.backendId === id).map(row => row.agentId) } })) }
       : p === "/__api/backends" ? { backends: [] }
+      : p === "/__api/connectors/mcp/requests" ? { items: [] }
       : p.includes("/archive") ? { archive: { supported: true,
         segments: fixture.controls.created.some(row => row.key === url.searchParams.get("key")) ? []
           : [{ sealedAt: 1700000000000, fromReset: true, messages: transcript("archive", 123) }] } }

@@ -136,6 +136,7 @@ function executionTarget(target) {
 
 function validateParams(method, params) {
   const optional = method === "group.member.role" ? ["revision", "cursor"]
+    : method === "group.history" ? ["afterRevision"]
     : method === "group.send" ? ["taskId", "requestMode", "discussionId", "summaryMemberId", "ownerScope", "expectedPolicyVersion"]
       : method === "group.send.lookup" ? ["payloadDigest", "ownerScope"] : [];
   const fields = METHODS[method] && [...METHODS[method], ...optional.filter(key => plainObject(params) && Object.hasOwn(params, key))];
@@ -208,7 +209,8 @@ function validateParams(method, params) {
       && (params.digest === null ? params.offset === 0 : validDigest(params.digest)),
     "group.execution.reconcile": () => opaqueId(params.groupId) && executionTarget(params.target),
     "group.history": () => opaqueId(params.groupId) && seq(params.afterSeq) && seq(params.beforeSeq)
-      && Number.isSafeInteger(params.limit) && params.limit >= 1 && params.limit <= MAX_HISTORY_LIMIT,
+      && Number.isSafeInteger(params.limit) && params.limit >= 1 && params.limit <= MAX_HISTORY_LIMIT
+      && (!Object.hasOwn(params, "afterRevision") || Number.isSafeInteger(params.afterRevision) && params.afterRevision >= 0),
     "group.search": () => opaqueId(params.groupId) && text(params.query, 200)
       && (params.discussionId === null || opaqueId(params.discussionId))
       && (params.authorKind === null || ["user", "member"].includes(params.authorKind))

@@ -42,8 +42,9 @@ class GrokBuildRuntimeHandle {
     this.runtime = GROK_BUILD_RUNTIME;
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
-    this.capabilities = GROK_BUILD_CAPABILITIES;
+    this.capabilities = runtimeCapabilities({ ...GROK_BUILD_CAPABILITIES, "model.generate.toolFree": host.modelOnlyInstance === true });
     this.host = host;
+    this.modelOnlyStopsHost = host.modelOnlyInstance === true;
     this.workspace = host.workspace;
     this.controlInstance = host.controlInstance === true;
   }
@@ -54,6 +55,7 @@ class GrokBuildRuntimeHandle {
   }
 
   authenticationState() { return this.host.authenticationState(); }
+  generateModelOnly(input) { return require("./acp-model-only").generateAcpModelOnly(this.host, input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {
     return this.host.registerServerRequestHandler(method, handler);
@@ -86,9 +88,13 @@ class GrokBuildRuntimeAdapter {
       );
     }
     this.runtimePool = options.runtimePool;
+    this.modelOnly = true;
+    this.modelOnlyPurposes = Object.freeze(["proactive"]);
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }
+
+  runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
 
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);

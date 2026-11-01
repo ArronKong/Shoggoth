@@ -144,18 +144,6 @@ function mcpParentFields(pid) {
   }
 }
 
-function mcpAncestorFields(pid) {
-  try {
-    return {
-      executable: execFileSync("/bin/ps", ["-p", String(pid), "-o", "comm="], {
-        encoding: "utf8", timeout: 500, maxBuffer: 4096,
-      }).trim(),
-    };
-  } catch {
-    throw new Error("MCP helper runtime ancestor 无法验证");
-  }
-}
-
 function mcpRuntimeProfileArg(argv) {
   const prefix = "--shoggoth-runtime-profile=";
   const values = argv.filter((arg) => typeof arg === "string" && arg.startsWith(prefix));
@@ -249,20 +237,10 @@ function validateRuntimeMcpRoleGate(env, actual, runtime, argv) {
     if (gate.expiresAt < actual.now() || gate.expiresAt > actual.now() + 60_000) return "RUNTIME_MCP_GATE_EXPIRED";
     const servicePaths = validatedRuntimeServicePaths(gate.servicePaths, canonicalPaths);
     if (!servicePaths) return "RUNTIME_MCP_GATE_PATHS_INVALID";
-    let parent;
-    try { parent = runtime.parent || mcpParentFields(actual.ppid); } catch { return "RUNTIME_MCP_GATE_PARENT_MISMATCH"; }
-    if (path.resolve(parent.executable || "") !== path.resolve(gate.parentExecutable)
-      || typeof parent.command !== "string" || parent.command.length === 0) return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
-    if (harnessChild) {
-      if (parent.ppid !== gate.ancestorPid) return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
-      let ancestor;
-      try { ancestor = runtime.ancestor || mcpAncestorFields(gate.ancestorPid); } catch {
-        return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
-      }
-      if (path.resolve(ancestor.executable || "") !== path.resolve(gate.ancestorExecutable)) {
-        return "RUNTIME_MCP_GATE_PARENT_MISMATCH";
-      }
-    }
+    // CLI sandboxes can forbid process inspection even while this private gate
+    // and the Service socket remain readable. The relay only presents the gate;
+    // Service.consume rechecks executable/command, ancestry and pinned PID start
+    // identity before upgrading the socket. No MCP code dispatch precedes it.
     const current = fs.lstatSync(gatePath);
     if (current.dev !== stat.dev || current.ino !== stat.ino) return "RUNTIME_MCP_GATE_REPLACED";
     // 外部 Runtime 的 OS sandbox 只允许 Relay 读取 Service-private gate，

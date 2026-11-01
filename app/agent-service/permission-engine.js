@@ -4,6 +4,10 @@ const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
 const { lstatIfExists, serviceError } = require("./security");
 
 function permissionError(code, message) { return serviceError(code, message); }
+// Exact historical names only. These entries remain read-only restrictions;
+// they never grant a connector or another replacement tool.
+const RETIRED_PLATFORM_TOOL_NAMES = new Set(["plugin_create", "plugin_install", "plugin_status", "plugin_setup_get",
+  "plugin_secret_request", "plugin_activate", "plugin_resource_read"]);
 
 class PermissionEngine {
   constructor(options = {}) {
@@ -34,6 +38,7 @@ class PermissionEngine {
         throw permissionError("TOOL_PERMISSION_STORE_INVALID", "工具权限状态无效");
       }
       const restored = new Map();
+      let droppedLegacyBrowserPermission = false;
       for (const [profileId, entries] of Object.entries(state.profiles)) {
         if (!knownProfiles.has(profileId) || !entries || typeof entries !== "object"
           || Array.isArray(entries) || Object.getPrototypeOf(entries) !== Object.prototype) {
@@ -44,7 +49,10 @@ class PermissionEngine {
           if (!["allow", "deny"].includes(effect)) {
             throw permissionError("TOOL_PERMISSION_STORE_INVALID", "工具权限条目无效");
           }
-          if (!this.toolRegistry.get(toolName)) {
+          if (toolName === "browser_navigate" && !this.toolRegistry.get(toolName)) {
+            droppedLegacyBrowserPermission = true; continue;
+          }
+          if (!this.toolRegistry.get(toolName) && !RETIRED_PLATFORM_TOOL_NAMES.has(toolName)) {
             throw permissionError("TOOL_PERMISSION_STORE_INVALID", "工具权限条目无效");
           }
           values.set(toolName, effect);
@@ -54,6 +62,7 @@ class PermissionEngine {
       this.profileOverrides = restored;
       this.revision = state.revision;
       this.opened = true;
+      if (droppedLegacyBrowserPermission) { this.revision += 1; this._persist(); }
     }
     this.opened = true;
   }
@@ -143,108 +152,7 @@ class PermissionEngine {
     });
   }
 
-  // Candidate plugin Runtime calls use this evaluator at ticket issuance and
-  // final egress. Records and approval views come from Service-owned stores and
-  // opaque dispatcher receipts, never from model-provided authority fields.
-  authorizeCapability(input) {
-    this._assertOpen();
-    const deny = (code = "CAPABILITY_FORBIDDEN") => {
-      throw permissionError(code, "插件能力未获当前授权");
-    };
-    const { authority, execution, installation, binding, connection, grant,
-      envelope, authorityIncarnation, toolIdentity, contractDigest, argumentDigest, now = Date.now() } = input || {};
-    if (!authority || !execution || !installation || !binding || !connection || !grant
-      || !envelope || typeof toolIdentity !== "string" || !toolIdentity
-      || typeof contractDigest !== "string" || !/^[a-f0-9]{64}$/u.test(contractDigest)
-      || typeof argumentDigest !== "string" || !/^[a-f0-9]{64}$/u.test(argumentDigest)
-      || !Number.isSafeInteger(now) || now < 0) deny();
-    const external = authority.kind === "external-agent";
-    const bindingApplies = binding.subjectKind === "global"
-      ? binding.subjectId === "all-agents"
-      : !external && binding.subjectKind === "native-profile"
-        && binding.subjectId === authority.profileId;
-    if (!bindingApplies) deny();
-    if (external) {
-      if (!["openclaw", "hermes"].includes(authority.backendId)
-        || typeof authority.agentId !== "string" || !authority.agentId
-        || typeof authority.instanceId !== "string" || !authority.instanceId
-        || execution.kind !== "external-call"
-        || execution.backendId !== authority.backendId
-        || execution.agentId !== authority.agentId
-        || execution.instanceId !== authority.instanceId
-        || typeof execution.runKey !== "string" || !execution.runKey
-        || envelope.runId !== execution.runKey) deny();
-    } else if (authority.kind !== "native-profile"
-      || authority.profile?.id !== authority.profileId || authority.profile.enabled !== true
-      || execution.profileId !== authority.profileId) deny();
-    // Product-level deny, disabled tool, Profile, Run and confirmation rules
-    // remain upper bounds. A plugin Grant cannot widen them.
-    const product = external
-      ? (() => {
-        const tool = this.toolRegistry.get("mcp_server_call");
-        if (!tool?.enabled || ["confirm", "destructive"].includes(tool.risk)) deny();
-        return { toolRevision: this.toolRegistry.revision,
-          permissionRevision: this.revision };
-      })()
-      : this.authorize({ name: "mcp_server_call", profileId: authority.profileId,
-        profile: authority.profile, confirmed: authority.confirmed === true,
-        run: execution.run || null, workspace: execution.workspace });
-    if (installation.installationId !== binding.installationId
-      || installation.desiredState !== "enabled" || binding.enabled !== true
-      || connection.connectionId !== binding.connectionId
-      || connection.state !== "ready" || !connection.principalIdentity
-      || grant.bindingId !== binding.bindingId || grant.connectionId !== connection.connectionId
-      || grant.principalIdentity !== connection.principalIdentity
-      || grant.effect !== "allow" || grant.toolIdentity !== toolIdentity
-      || grant.contractDigest !== contractDigest || grant.argumentScope != null
-      || !Number.isSafeInteger(grant.epoch) || grant.epoch < 0
-      || !Number.isSafeInteger(binding.revision) || binding.revision < 1
-      || !Number.isSafeInteger(connection.authRevision) || connection.authRevision < 1
-      || (grant.expiresAt != null && grant.expiresAt <= now)) deny("GRANT_REVOKED");
-    if ((typeof authorityIncarnation !== "string"
-        || !/^[a-f0-9]{64}$/u.test(authorityIncarnation)
-        || envelope.authorityIncarnation !== authorityIncarnation)
-      || envelope.bindingId !== binding.bindingId
-      || envelope.installationId !== installation.installationId
-      || envelope.releaseDigest !== installation.activeReleaseDigest
-      || envelope.componentId !== binding.componentId
-      || envelope.connectionId !== connection.connectionId
-      || envelope.principalIdentity !== connection.principalIdentity
-      || envelope.bindingRevision !== binding.revision
-      || envelope.grantEpoch !== grant.epoch
-      || envelope.connectionAuthRevision !== connection.authRevision
-      || envelope.toolIdentity !== toolIdentity
-      || envelope.contractDigest !== contractDigest) deny("TOOL_CONTRACT_CHANGED");
-    if (execution.kind === "native-run") {
-      if (!execution.run || envelope.runId !== execution.run.id) deny();
-    } else if (execution.kind === "external-call") {
-      if (!external) deny();
-    } else if (execution.kind === "user-interaction") {
-      if (authority.managementTicket !== execution.managementTicket
-        || !authority.managementTicket || authority.managementTicketVerified !== true) deny();
-    } else deny();
-    if (grant.approvalMode === "each-call") {
-      const approval = execution.approval;
-      if (!approval || approval.bindingId !== binding.bindingId
-        || approval.connectionId !== connection.connectionId
-        || approval.principalIdentity !== connection.principalIdentity
-        || approval.toolIdentity !== toolIdentity
-        || (execution.kind === "native-run" && approval.runId !== execution.run.id)
-        || (execution.kind === "external-call" && approval.runId !== execution.runKey)
-        || approval.contractDigest !== contractDigest
-        || approval.argumentDigest !== argumentDigest
-        || !Number.isSafeInteger(approval.expiresAt)
-        || approval.expiresAt <= now || approval.consumed !== false) deny();
-    } else if (grant.approvalMode !== "always") deny();
-    return Object.freeze({
-      toolRevision: product.toolRevision,
-      permissionRevision: product.permissionRevision,
-      grantEpoch: grant.epoch,
-      bindingRevision: binding.revision,
-      connectionAuthRevision: connection.authRevision,
-      contractDigest,
-    });
-  }
+
 }
 
 module.exports = { PermissionEngine };

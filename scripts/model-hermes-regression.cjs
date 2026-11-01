@@ -2246,6 +2246,57 @@ test("env set+clear 仅 clear 失败时返回 warning，不误判全部失败", 
   assert.deepEqual(result, { warnings: ["BUILTIN_BASE_URL: clear failed"] });
 });
 
+test("自定义模型协议跨 Profile 读回、显式更新、恢复自动及省略保留", async () => {
+  const backend = new HermesBackend();
+  const stores = new Map(["default", "research"].map(profile => [profile, { custom: {
+    name: "custom", base_url: "https://fixture.invalid/v1", model: "one", models: ["one"],
+    api_mode: "codex_responses", headers: { "x-fixture": "preserved" },
+  } }]));
+  const writes = [];
+  for (const profile of stores.keys()) backend.dashboards.set(profile, { profile });
+  backend._settingsGet = async (dash, route) => {
+    assert.equal(route, "/api/providers/custom-endpoints");
+    const entry = stores.get(dash.profile).custom;
+    return { endpoints: [{ id: "custom", ...entry, api_mode: entry.api_mode ?? entry.transport ?? "", has_api_key: false }] };
+  };
+  backend._readProvidersByProfile = async ({ fresh, requireComplete }) => {
+    assert.ok(fresh && requireComplete);
+    return new Map([...stores].map(([profile, providers]) => [profile, structuredClone(providers)]));
+  };
+  backend._putProviderEntry = async (dash, id, entry) => {
+    writes.push({ profile: dash.profile, id });
+    stores.get(dash.profile)[id] = structuredClone(entry);
+  };
+  const input = { id: "custom", name: "custom", baseUrl: "https://fixture.invalid/v1", model: "one", models: ["one", "two"] };
+  const snapshot = await backend.listCustomEndpoints();
+  assert.deepEqual(snapshot.form.apiOptions, ["", "chat_completions", "codex_responses", "anthropic_messages"]);
+  assert.equal(snapshot.endpoints[0].api, "codex_responses");
+  assert.deepEqual((await backend.listCustomEndpoints({ profile: "research" })).form, snapshot.form);
+  for (const api of ["chat_completions", "codex_responses", "anthropic_messages"]) {
+    stores.get("research").custom.transport = "openai";
+    const saved = await backend.saveCustomEndpoint({ ...input, api });
+    assert.equal(saved.endpoints[0].api, api);
+    for (const providers of stores.values()) {
+      assert.equal(providers.custom.api_mode, api);
+      assert.equal(Object.hasOwn(providers.custom, "transport"), false);
+      assert.deepEqual(providers.custom.headers, { "x-fixture": "preserved" });
+    }
+  }
+  stores.get("research").custom.transport = "anthropic";
+  await backend.saveCustomEndpoint(input);
+  assert.equal(stores.get("research").custom.transport, "anthropic", "unrelated edits preserve existing mode fields");
+  const automatic = await backend.saveCustomEndpoint({ ...input, api: "" });
+  assert.equal(automatic.endpoints[0].api, "");
+  for (const providers of stores.values()) {
+    assert.equal(Object.hasOwn(providers.custom, "api_mode"), false);
+    assert.equal(Object.hasOwn(providers.custom, "transport"), false);
+  }
+  assert.equal(backend._customEndpointToSnake({ ...input, api: "responses" }).api_mode, "codex_responses");
+  const before = writes.length;
+  await assert.rejects(backend.saveCustomEndpoint({ ...input, api: "unsupported-wire" }), { code: "INVALID_PARAMS" });
+  assert.equal(writes.length, before, "unsupported protocols cannot write configuration");
+});
+
 // 串行执行便于定位失败用例，并让每个用例独占其假 dashboard 生命周期。
 async function main() {
   let failed = 0;

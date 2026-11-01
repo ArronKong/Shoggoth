@@ -8,8 +8,8 @@ import "./ChatUiArtifact.css";
 
 const pending = createUiPendingStore(() => localStorage);
 type Props = { part: NativeUiArtifactPart; backend: string; agentId: string; sessionKey: string; visible: boolean; autoActivate?: boolean;
-  pluginSelection?: Array<{ installationId: string; revision: number }>; onCancel?: (runId: string) => Promise<unknown> };
-export default function ChatUiArtifact({ part, backend, agentId, sessionKey, visible, autoActivate = true, pluginSelection = [], onCancel }: Props) {
+  onCancel?: (runId: string) => Promise<unknown> };
+export default function ChatUiArtifact({ part, backend, agentId, sessionKey, visible, autoActivate = true, onCancel }: Props) {
   const { i18n } = useTranslation(), slot = useRef<HTMLDivElement>(null), slotId = useRef(Symbol("native-ui-slot"));
   const entry = useMemo(() => nativeUiPoolEntry({ backend, agentId, sessionKey, part }), [backend, agentId, sessionKey, part.sourceEventId, part.segmentId, part.artifactId]);
   const state = useSyncExternalStore(useCallback(listener => attachNativeUiEntry(entry, listener), [entry]), () => entry.value);
@@ -142,7 +142,7 @@ export default function ChatUiArtifact({ part, backend, agentId, sessionKey, vis
       sourceEventId: part.sourceEventId, actionRequestId })) { updateNativeUiEntry(entry, { error: "无法记录这次操作，请先恢复本地存储" }); return; }
     updateNativeUiEntry(entry, { operation: { pending: true, actionRequestId } });
     try {
-      const receipt = await desktopUiReply(bridge.action({ mountId: entry.mountId, actionId, actionRequestId, draftId: state.draftId, pluginSelection }));
+      const receipt = await desktopUiReply(bridge.action({ mountId: entry.mountId, actionId, actionRequestId, draftId: state.draftId }));
       if (receipt.operationId) pending.accepted(actionRequestId, receipt.operationId);
       if (["completed", "failed", "cancelled", "expired"].includes(receipt.status)) pending.forget(actionRequestId);
       updateNativeUiEntry(entry, { operation: receipt, error: null });

@@ -28,8 +28,8 @@ async function main() {
   const manager = {
     async probe(spec) {
       probes += 1;
-      assert.equal(spec.command, newCommand);
-      assert.deepEqual(spec.args, ["--new"]);
+      assert.equal(spec.transport.command, newCommand);
+      assert.deepEqual(spec.transport.args, ["--new"]);
       return tools;
     },
     async closeServer() { closes += 1; },
@@ -60,6 +60,7 @@ async function main() {
     revision = store.register({ expectedRevision: revision,
       server: { id: "already-live", name: "Live", command: otherCommand, args: [],
         cwd: context.root, enabled: true } }).revision;
+    revision = store.update({ id: "restore-me", patch: { disabledProfileIds: ["excluded-agent"] }, expectedRevision: revision }).revision;
     fs.unlinkSync(oldCommand); // a restored machine can no longer resolve it
     const listed = await call(service, "harness.mcp.list", { cursor: 0, limit: 20 });
     assert.equal(listed.revision, revision);
@@ -113,8 +114,9 @@ async function main() {
     });
     assert.equal(rebound.enabled, false);
     assert.equal(store.get("restore-me").enabled, false);
-    assert.equal(store.get("restore-me").command, newCommand);
-    assert.deepEqual(store.get("restore-me").args, ["--new"]);
+    assert.equal(store.getPrivate("restore-me").transport.command, newCommand);
+    assert.deepEqual(store.getPrivate("restore-me").transport.args, ["--new"]);
+    assert.deepEqual(store.get("restore-me").disabledProfileIds, ["excluded-agent"], "rebind retains Agent exclusions");
     assert.equal(probes, 0, "saving a path must not start the command");
     assert.equal(closes, 1);
     await assert.rejects(call(controller(), "harness.mcp.activate", {
@@ -152,6 +154,8 @@ async function main() {
     });
     assert.equal(activated.enabled, true);
     assert.equal(activated.toolCount, 1);
+    assert.equal(store.isAvailable("restore-me", "profile-1"), true);
+    assert.equal(store.isAvailable("restore-me", "excluded-agent"), false);
     assert.equal(store.get("restore-me").enabled, true);
     assert.equal((await call(service, "harness.mcp.list", { cursor: 0, limit: 20 })).totalDisabled, 0);
     assert.equal(probes, 7);

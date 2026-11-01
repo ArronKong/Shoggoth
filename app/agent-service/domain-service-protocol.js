@@ -89,6 +89,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   KANBAN_CARD_NOT_FOUND: "Card 不存在",
   KANBAN_COMMENT_NOT_FOUND: "Comment 不存在",
   CRON_JOB_NOT_FOUND: "Cron Job 不存在",
+  CRON_CONNECTOR_MIGRATION_REQUIRED: "此任务依赖旧插件，请编辑任务并重新选择连接器账号",
   WORK_RUN_NOT_FOUND: "Run 不存在",
   STATE_CONFLICT: "当前状态不允许该操作",
   KANBAN_CAPACITY: "Kanban 容量已满",
@@ -111,6 +112,7 @@ const DIRECT_INTERNAL_ERROR_MAP = Object.freeze({
   KANBAN_CARD_NOT_FOUND: "KANBAN_CARD_NOT_FOUND",
   KANBAN_COMMENT_NOT_FOUND: "KANBAN_COMMENT_NOT_FOUND",
   CRON_JOB_NOT_FOUND: "CRON_JOB_NOT_FOUND",
+  CRON_CONNECTOR_MIGRATION_REQUIRED: "CRON_CONNECTOR_MIGRATION_REQUIRED",
   WORK_RUN_NOT_FOUND: "WORK_RUN_NOT_FOUND",
   KANBAN_STATUS_TRANSITION_INVALID: "STATE_CONFLICT",
   KANBAN_CARD_NOT_DISPATCHABLE: "STATE_CONFLICT",
@@ -760,7 +762,9 @@ function validateCronRunItem(value, params) {
 }
 
 function validateCronJob(value) {
-  if (!(exactObject(value, CRON_JOB_FIELDS) || exactObject(value, [...CRON_JOB_FIELDS, "systemManaged"]))
+  const optional = ["systemManaged", "connectorMigrationRequired"].filter(key => Object.hasOwn(value || {}, key));
+  if (!exactObject(value, [...CRON_JOB_FIELDS, ...optional])
+    || (value.connectorMigrationRequired !== undefined && typeof value.connectorMigrationRequired !== "boolean")
     || (value.systemManaged !== undefined && typeof value.systemManaged !== "boolean") || !validUuid(value.id)
     || !validString(value.name, 512) || typeof value.enabled !== "boolean"
     || !validUuid(value.profileId) || !validCronWorkspace(value.workspace)

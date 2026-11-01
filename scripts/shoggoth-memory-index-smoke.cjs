@@ -326,7 +326,8 @@ test("native shadow rebuild preserves the published corpus until one atomic comm
   await state.register("sentinel", { note: "Product facts must survive index replacement" });
   const productRows = f.database.db.prepare("SELECT * FROM memory_state WHERE namespace='fixture-product'").all();
   const before = publishedSnapshot(f), original = f.index.db;
-  f.config.memory.search.store = { fts: { tokenizer: "trigram" } };
+  // The Product default is trigram; switching away forces a full rebuild.
+  f.config.memory.search.store = { fts: { tokenizer: "unicode61" } };
   f.write("memory/2026-10-08.md", "Violet telescope."); rebuilding = true;
   const operation = f.index.sync(); await entered.promise;
   assert.equal(f.index.db, original); assert.deepEqual(publishedSnapshot(f), before);
@@ -334,7 +335,7 @@ test("native shadow rebuild preserves the published corpus until one atomic comm
   delayed.resolve(); await operation;
   assert.equal(f.index.db, original); assert.equal(f.rows("memory_index_sources"), 2);
   assert.equal(f.database.db.prepare("SELECT count(*) AS n FROM memory_index_chunks_fts WHERE memory_index_chunks_fts MATCH 'Violet'").get().n, 1);
-  assert.match(f.database.db.prepare("SELECT sql FROM sqlite_schema WHERE name='memory_index_chunks_fts'").get().sql, /trigram/);
+  assert.match(f.database.db.prepare("SELECT sql FROM sqlite_schema WHERE name='memory_index_chunks_fts'").get().sql, /unicode61/);
   assert.deepEqual(f.database.db.prepare("SELECT * FROM memory_state WHERE namespace='fixture-product'").all(), productRows);
   assert.deepEqual(await state.lookup("sentinel"), { note: "Product facts must survive index replacement" });
   assert.deepEqual(shadows(f), []); assert.equal(f.rows("memory_embedding_cache"), 2);
@@ -345,7 +346,7 @@ test("failure at native publication commit restores all index tables and restart
   const f = fixture(t, { batch: async ({ chunks }) => { jobs++; return chunks.map(() => [1, 0]); } });
   f.write("MEMORY.md", "Amber observatory."); await f.index.sync();
   const before = publishedSnapshot(f), write = f.index.writePublicationMetadata;
-  f.config.memory.search.store = { fts: { tokenizer: "trigram" } };
+  f.config.memory.search.store = { fts: { tokenizer: "unicode61" } };
   f.write("memory/2026-10-08.md", "Violet telescope.");
   f.index.writePublicationMetadata = function (...args) { write.apply(this, args); throw new Error("fixture pre-commit failure"); };
   await assert.rejects(f.index.sync(), /fixture pre-commit failure/);

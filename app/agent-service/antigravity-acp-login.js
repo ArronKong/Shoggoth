@@ -23,7 +23,7 @@ const { serviceError } = require("./security");
 
 const AUTH_URL_PATTERN = /https:\/\/accounts\.google\.com\/[^\s"'<>]+/u;
 const INITIALIZE_TIMEOUT_MS = 60_000;
-const LOGIN_TIMEOUT_MS = 15 * 60 * 1_000;
+const LOGIN_TIMEOUT_MS = 60 * 60 * 1_000;
 const STOP_GRACE_MS = 3_000;
 
 function delay(ms) {

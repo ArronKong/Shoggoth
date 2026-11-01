@@ -34,20 +34,6 @@ function probeError(cleanupIncomplete = false) {
   return error;
 }
 
-function supportedSystemVersion(version) {
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(version);
-  if (!match) return false;
-  const actual = match.slice(1, 4).map(Number);
-  if (!actual.every(Number.isSafeInteger)) return false;
-  // Native CLIs may update independently. Keep the stable protocol baseline;
-  // every RPC still passes the same generated request/response validation.
-  const minimum = CODEX_VERSION.split(".").map(Number);
-  for (let index = 0; index < minimum.length; index += 1) {
-    if (actual[index] !== minimum[index]) return actual[index] > minimum[index];
-  }
-  return match[4] === undefined;
-}
-
 function probeCodexBinaryVersion(runtimePath, options = {}) {
   const installationKind = options.installationKind ?? "bundled";
   if (installationKind !== "bundled" && installationKind !== "system") {
@@ -167,9 +153,11 @@ function probeCodexBinaryVersion(runtimePath, options = {}) {
       if (terminating) return;
       if (failureCode || code !== 0) return finish(probeError());
       const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
-      const version = /^codex-cli (\S+)$/u.exec(stdout)?.[1];
+      const version = /^codex-cli ([A-Za-z0-9][A-Za-z0-9._+-]{0,127})$/u.exec(stdout)?.[1];
       const compatible = installationKind === "system"
-        ? typeof version === "string" && supportedSystemVersion(version)
+        // System releases are identified here, not certified by their label.
+        // Initialization and every operation retain generated schema checks.
+        ? typeof version === "string"
         : version === CODEX_VERSION;
       if (!compatible) {
         finish(runtimeError("CODEX_RUNTIME_VERSION_MISMATCH", "Codex binary version is incompatible"));

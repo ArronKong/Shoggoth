@@ -118,6 +118,64 @@ async function testCustomEndpointEditorReceivesOnlySafeApiRoots() {
   }
 }
 
+async function testCustomEndpointModelListsFromProductStoreKeepProviderSettingsAvailable() {
+  const { JsonlProductStore, validateModelProvider } = require("../app/agent-service/product-store");
+  const { resolveServicePaths } = require("../app/agent-service/paths");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-host-custom-models-"));
+  const store = new JsonlProductStore({ paths: resolveServicePaths({
+    stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache"),
+  }) });
+  try {
+    store.open();
+    const provider = store.putModelProvider(rawProvider({
+      id: "provider-custom-models", kind: "custom-responses", name: "Custom models",
+      baseUrl: "https://gateway.example/v1", model: "fixture-primary",
+      models: ["fixture-primary", "fixture-secondary"],
+    }));
+    const host = createProductHostController({
+      serviceRequest: async (method) => {
+        // Use the store's public view and the same validation as provider.list,
+        // so the fixture cannot silently retain the former single-model shape.
+        if (method === "provider.list") return store.listModelProviders().map(validateModelProvider);
+        if (method === "profile.list") return { profiles: [{ ...PROFILE,
+          providerRef: provider.id, defaultModel: provider.model }], nextCursor: null, hasMore: false };
+        if (method === "auth.read") return { account: null };
+        throw new Error(`unexpected ${method}`);
+      },
+      launchAgent: { async status() { return { supported: false }; } },
+    });
+    const snapshot = await host.listProviders();
+    assert.equal(snapshot.profile.ready, true);
+    assert.equal(snapshot.profile.configuredProviderId, provider.id);
+    const projected = snapshot.providers.find((item) => item.id === provider.id);
+    assert.equal(projected.defaultModel, provider.model);
+    assert.equal(projected.baseUrl, provider.baseUrl);
+    assert.equal(projected.authState, "configured");
+    for (const field of ["credentialRef", "headers", "models", "revision"]) {
+      assert.equal(Object.hasOwn(projected, field), false, field);
+    }
+    assert.deepEqual(store.getModelProvider(provider.id).models, provider.models);
+  } finally {
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function testCustomEndpointProjectionRejectsMalformedModelLists() {
+  const custom = rawProvider({ kind: "custom-responses", baseUrl: "https://gateway.example/v1" });
+  for (const models of [undefined, null, "model", [], [custom.model, custom.model],
+    ["different-model"], [custom.model, " padded "], [custom.model, "bad\nmodel"],
+    [custom.model, "x".repeat(513)], [custom.model, "\ud800"],
+    [custom.model, ...Array.from({ length: 500 }, (_, index) => `model-${index}`)]]) {
+    assert.throws(() => projectSafeProvider({ ...custom, models }),
+      (error) => error.code === "HOST_PROVIDER_RESPONSE_INVALID");
+  }
+  assert.throws(() => projectSafeProvider(rawProvider({ models: [custom.model] })),
+    (error) => error.code === "HOST_PROVIDER_RESPONSE_INVALID");
+  assert.throws(() => projectSafeProvider({ ...custom, models: [custom.model], unexpected: true }),
+    (error) => error.code === "HOST_PROVIDER_RESPONSE_INVALID");
+}
+
 async function testProductHostCombinesSafeServiceBackgroundAndProviderAuthority() {
   const calls = [];
   const serviceRequest = async (method, params) => {
@@ -238,6 +296,24 @@ async function testProductHostInstallActionStartsServiceInOneStep() {
   assert.equal(status.background.loaded, true);
 }
 
+async function testAutomaticStartupVerifiesLoadedServiceThroughLaunchAgent() {
+  let starts = 0;
+  let serviceVersion = "old-app";
+  const host = createProductHostController({
+    launchAgent: {
+      async status() {
+        return { supported: true, installed: true, enabled: true, loaded: true, needsRepair: false };
+      },
+      async start() { starts += 1; serviceVersion = "current-app"; },
+    },
+    serviceRequest: async () => healthyServiceStatus(serviceVersion),
+  });
+  const result = await host.ensureBackgroundRunning();
+  assert.equal(starts, 1, "a healthy response from the previous App cannot bypass launchAgent's version check");
+  assert.equal(serviceVersion, "current-app");
+  assert.equal(host.isBackgroundStartupCurrent(result), true);
+}
+
 async function testProductHostAutoStartsBackgroundServiceIdempotently() {
   const actions = [];
   let loaded = false;
@@ -262,8 +338,7 @@ async function testProductHostAutoStartsBackgroundServiceIdempotently() {
         };
       },
       async start() {
-        actions.push("start");
-        loaded = true;
+        if (!loaded) { actions.push("start"); loaded = true; }
       },
     },
   });
@@ -295,8 +370,7 @@ async function testProductHostAutoRecoversLoadedButUnhealthyBackgroundService() 
         return { supported: true, installed: true, enabled: true, loaded: true, needsRepair: false };
       },
       async start() {
-        actions.push("start");
-        serviceHealthy = true;
+        if (!serviceHealthy) { actions.push("start"); serviceHealthy = true; }
       },
     },
   });
@@ -688,7 +762,7 @@ async function testProviderOnboardingUsesServiceSagaAndReturnsOnlySafeProjection
       loginId: "login-chatgpt", authUrl: "https://auth.openai.test/device",
     };
     if (method === "profile.bind") return {
-      profile: { ...profile, providerRef: null, defaultModel: params.defaultModel, updatedAt: params.createdAt },
+      profile: { ...profile, providerRef: params.providerRef, defaultModel: params.defaultModel, updatedAt: params.createdAt },
     };
     throw new Error(`unexpected ${method}`);
   };
@@ -722,11 +796,49 @@ async function testProviderOnboardingUsesServiceSagaAndReturnsOnlySafeProjection
   assert.equal(chatgpt.profile.ready, true);
   assert.deepEqual(configuredEvents, [openai.model, "gpt-5"]);
   assert.ok(!JSON.stringify(chatgpt).includes(PROFILE.runtimeProfileId));
+  // A saved custom endpoint becomes the default only through this explicit bind.
+  const endpointDefault = await host.bindEndpoint({
+    operationId: "bind-endpoint-1", providerRef: "ceshigpt", defaultModel: "gpt-6.1-terra", createdAt: 1_800_000_000_002,
+  });
+  assert.equal(endpointDefault.profile.configuredProviderId, "ceshigpt");
+  const endpointBind = calls.filter(([method]) => method === "profile.bind").at(-1)[1];
+  assert.deepEqual([endpointBind.profileId, endpointBind.providerRef, endpointBind.defaultModel],
+    [PROFILE.id, "ceshigpt", "gpt-6.1-terra"]);
+  await assert.rejects(host.bindEndpoint({ operationId: "bind-endpoint-2", providerRef: "../x", defaultModel: "m",
+    createdAt: 1_800_000_000_003 }), { code: "HOST_PROVIDER_PARAMS_INVALID" });
+  assert.deepEqual(configuredEvents, [openai.model, "gpt-5", "gpt-6.1-terra"]);
   const login = await host.startChatGptLogin({ mode: "browser" });
   assert.deepEqual(login, {
     mode: "browser", status: "waiting", authUrl: "https://auth.openai.test/device",
   });
   assert.ok(!JSON.stringify(login).includes("login-chatgpt"));
+}
+
+// Only a preset configured for this assistant (id convention) and not its
+// current default can be removed; endpoints and other assistants' presets stay.
+async function testProviderRemovalIsLimitedToOwnNonDefaultPresets() {
+  const deleted = [];
+  const otherOllama = "provider-ollama-profile-other-0badc0de";
+  const serviceRequest = async (method, params) => {
+    if (method === "profile.list") return { profiles: [PROFILE], nextCursor: null, hasMore: false };
+    if (method === "provider.list") return [rawProvider(), rawProvider({ id: "provider-ollama", kind: "ollama", name: "Ollama",
+      baseUrl: "http://127.0.0.1:11434/v1", credentialRef: null, headers: null, model: "qwen3" }),
+    rawProvider({ id: otherOllama, kind: "ollama", name: "Ollama", baseUrl: "http://127.0.0.1:11434/v1",
+      credentialRef: null, headers: null }),
+    rawProvider({ id: "ceshigpt", kind: "custom-responses", name: "ceshigpt", baseUrl: "https://gateway.example/v1",
+      headers: null })];
+    if (method === "provider.delete") { deleted.push(params.providerId); return null; }
+    throw new Error(`unexpected ${method}`);
+  };
+  const host = createProductHostController({ serviceRequest, launchAgent: { async status() { return { supported: false }; } } });
+  const remove = (providerId, n) => host.removeProvider({ operationId: `remove-${n}`, providerId, createdAt: 1_800_000_000_000 + n });
+  assert.deepEqual(await remove("provider-ollama", 1), { removed: "provider-ollama" });
+  await assert.rejects(remove("provider-openrouter", 2), { code: "HOST_PROVIDER_IN_USE" });
+  await assert.rejects(remove("ceshigpt", 3), { code: "HOST_PROVIDER_TARGET_FORBIDDEN" });
+  await assert.rejects(remove(otherOllama, 4), { code: "HOST_PROVIDER_TARGET_FORBIDDEN" });
+  await assert.rejects(remove("missing", 5), { code: "HOST_PROVIDER_TARGET_FORBIDDEN" });
+  await assert.rejects(remove("../x", 6), { code: "HOST_PROVIDER_PARAMS_INVALID" });
+  assert.deepEqual(deleted, ["provider-ollama"]);
 }
 
 async function testProductHostScopesProfileEnumerationToShoggothBackend() {
@@ -1099,8 +1211,11 @@ const tests = [
   testAuthenticatedCodexDefaultModelDoesNotRequireProviderSetup,
   testSafeProviderProjectionNeverLeaksStorageFieldsOrUrlSecrets,
   testCustomEndpointEditorReceivesOnlySafeApiRoots,
+  testCustomEndpointModelListsFromProductStoreKeepProviderSettingsAvailable,
+  testCustomEndpointProjectionRejectsMalformedModelLists,
   testProductHostCombinesSafeServiceBackgroundAndProviderAuthority,
   testProductHostInstallActionStartsServiceInOneStep,
+  testAutomaticStartupVerifiesLoadedServiceThroughLaunchAgent,
   testProductHostAutoStartsBackgroundServiceIdempotently,
   testProductHostAutoRecoversLoadedButUnhealthyBackgroundService,
   testProductHostDelegatesAStartFailureWithoutOpeningASecondHealthWindow,
@@ -1113,6 +1228,7 @@ const tests = [
   testStoppedServiceStillExposesBackgroundRecoveryWithoutInternalErrors,
   testBackgroundProbeFailureDoesNotHideServiceStatus,
   testProviderOnboardingUsesServiceSagaAndReturnsOnlySafeProjection,
+  testProviderRemovalIsLimitedToOwnNonDefaultPresets,
   testProductHostScopesProfileEnumerationToShoggothBackend,
   testProviderHostTargetsNonDefaultManagedProfileAndClearsItIndependently,
   testLaunchAgentStatusUsesLaunchdTruthWithoutLeakingPaths,

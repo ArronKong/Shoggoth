@@ -149,6 +149,13 @@ async function openHandoffFixture({ root: existingRoot, transport: existingTrans
       await service.workRunCoordinator.waitForIdle(ack.run.id);
       return service.workRunCoordinator.getRun(ack.run.id);
     },
+    callTool(run, name, args) {
+      const { runtimeProfileId, runtimeAccountId } = run.runtimeSessionRef;
+      return service.workRunCoordinator.invokeRuntimeCapability({ runId: run.id, runtimeProfileId,
+        runtimeAccountId, kind: "mcp" }, scope => service.mcpProductToolController.handle(name,
+        { source: "chat", sourceId: run.sourceId, ...args },
+        { profileId: run.profileId, callId: crypto.randomUUID() }, scope));
+    },
     async complete(run, text = `answer ${run.id}`) {
       const ref = run.runtimeSessionRef;
       const raw = [...transport.handles.values()].find(handle => handle.runtime === ref.runtime

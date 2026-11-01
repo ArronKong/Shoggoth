@@ -286,7 +286,10 @@ class CodexRuntimeHost {
       throw runtimeError("CODEX_RUNTIME_PREPARE_INVALID", "Codex runtime preparation is invalid");
     }
     const preparedSpawnEnv = prepared?.spawnEnv || {};
-    this.modelProviderKind = prepared?.runtimeConfig?.provider?.kind ?? "chatgpt";
+    // Native providers are owned by the CLI config. Treating them as ChatGPT
+    // would route a native custom provider through Shoggoth's OpenAI gateway.
+    this.modelProviderKind = this.runtimeEnvironment.kind === "native-user"
+      ? "native" : prepared?.runtimeConfig?.provider?.kind ?? "chatgpt";
     if (prepared?.runtimeConfig?.provider
       && prepared.runtimeConfig.provider.kind !== "chatgpt") this.nativeAuthEligible = false;
     const explicitSpawnEnv = this.options.spawnEnv || {};

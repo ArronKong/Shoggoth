@@ -7,10 +7,6 @@ const UNKNOWN_WINDOW_BUDGET = 500_000;
 // stays reachable through conversation_search/conversation_get (2026-10-22,
 // previously half the window).
 const RETAINED_TAIL_TOKENS = 24_000;
-// The summary path may summarize early, once history passes this size, even
-// though the window still has room. Such an early summary is advisory: if it
-// fails, the turn proceeds (see planConversationCompaction).
-const WORKING_CONTEXT_TARGET = 160_000;
 const validWindow = value => Number.isSafeInteger(value) && value > 0;
 
 function conversationContextBudget(contextWindow, source = "runtime") {
@@ -41,5 +37,5 @@ function documentedModelWindow(runtime, model) {
     "gemini-3.8-flash-medium", "gemini-3.8-flash-low"].includes(model) ? 1_048_576 : null;
 }
 
-module.exports = { UNKNOWN_WINDOW_BUDGET, RETAINED_TAIL_TOKENS, WORKING_CONTEXT_TARGET,
+module.exports = { UNKNOWN_WINDOW_BUDGET, RETAINED_TAIL_TOKENS,
   validWindow, conversationContextBudget, estimateContextTokens, documentedModelWindow };

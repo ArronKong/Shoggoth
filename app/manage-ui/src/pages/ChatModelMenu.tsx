@@ -13,6 +13,8 @@ export interface ModelMenuChoice {
   name: string;
   provider?: string;
   bindingId?: string;
+  /** Source within one Binding when it offers several (opaque; echoed on selection). */
+  modelProviderRef?: string;
   runtime?: string;
   runtimeName?: string;
   disabled?: boolean;
@@ -34,6 +36,7 @@ export default function ChatModelMenu({
   activeModel,
   activeProvider,
   activeBindingId,
+  activeModelProviderRef,
   runtimeGroups,
   onSelect,
   disabled,
@@ -50,7 +53,9 @@ export default function ChatModelMenu({
   activeProvider?: string;
   activeBindingId?: string;
   runtimeGroups?: Array<{ runtime: string; bindingId?: string; name: string; available: boolean }>;
-  onSelect: (id: string, provider?: string, bindingId?: string) => void;
+  onSelect: (id: string, provider?: string, bindingId?: string, modelProviderRef?: string) => void;
+  /** Source of the active choice on activeBindingId (absent = the Binding's default source). */
+  activeModelProviderRef?: string;
   disabled?: boolean;
   loading?: boolean;
   loadError?: boolean;
@@ -188,6 +193,7 @@ export default function ChatModelMenu({
     multi
       ? selectedSet.has(m.provider ? `${m.provider}/${m.id}` : m.id)
       : m.id === activeModel && (activeBindingId ? m.bindingId === activeBindingId
+          && m.modelProviderRef === activeModelProviderRef
         : !providerQualified || (m.provider || "") === activeProvider);
   const active = models.find((m) => isActiveChoice(m));
   const activeLabel = triggerLabel || active?.name || activeModel || t("chat.switchModel");
@@ -324,14 +330,14 @@ export default function ChatModelMenu({
                   const isActive = isActiveChoice(m);
                   return (
                     <button
-                      key={`${m.bindingId || m.provider || ""}:${m.id}`}
+                      key={`${m.bindingId || m.provider || ""}:${m.modelProviderRef ?? ""}:${m.id}`}
                       type="button"
                       role="option"
                       aria-selected={isActive}
                       disabled={disabled || m.disabled}
                       className={isActive ? "model-menu__item is-active" : "model-menu__item"}
                       onClick={() => {
-                        if (m.bindingId) onSelect(m.id, m.provider, m.bindingId);
+                        if (m.bindingId) onSelect(m.id, m.provider, m.bindingId, m.modelProviderRef);
                         else onSelect(m.id, m.provider);
                         if (!multi) setOpen(false); // 多选:留着菜单继续挑
                       }}

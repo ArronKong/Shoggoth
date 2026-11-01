@@ -1,0 +1,72 @@
+{
+  "test:connectors:runtime": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node --test --test-concurrency=1 scripts/connector-runtime-supervisor-unit.cjs scripts/connector-runtime-state-unit.cjs scripts/connector-runtime-identity-unit.cjs",
+    "replacement": "test:mcp-connectors:runtime"
+  },
+  "test:connectors:accounts": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node --test --test-concurrency=1 scripts/connector-store-unit.cjs scripts/connector-authority-backup-unit.cjs",
+    "replacement": "test:mcp-connectors:foundation"
+  },
+  "test:connectors:tools": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node --test --test-concurrency=1 scripts/connector-tool-service-unit.cjs scripts/connector-files-unit.cjs",
+    "replacement": "test:mcp-connectors:runtime"
+  },
+  "test:connectors:catalog": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node scripts/connector-upstream-contract.mjs",
+    "replacement": "test:mcp-connectors:foundation"
+  },
+  "test:connectors:service": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node --test --test-concurrency=1 scripts/connector-service-flow-unit.cjs scripts/connector-native-runtime-flow-unit.cjs",
+    "replacement": "test:mcp-connectors:unit"
+  },
+  "test:connectors:external": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node scripts/sync-connector-adapter-contract.cjs --check && node scripts/hermes-connector-contract-unit.cjs && node scripts/connector-openclaw-adapter-unit.mjs && python3 -B scripts/connector-hermes-adapter-unit.py && node scripts/hermes-history-id-unit.cjs",
+    "replacement": "test:mcp-connectors:shared"
+  },
+  "test:connectors:host:hermes": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node scripts/connector-hermes-real-host-flow.cjs",
+    "replacement": "test:mcp-connectors:shared"
+  },
+  "test:connectors:history": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node --test scripts/connector-retirement-unit.cjs && node scripts/plugin-app-reference-projection-unit.cjs && node scripts/plugin-app-reference-ui-regression.mjs",
+    "replacement": "test:mcp-connectors:history"
+  },
+  "test:connectors:ui": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node scripts/connectors-ui-regression.mjs",
+    "replacement": "test:mcp-connectors:ui"
+  },
+  "test:connectors:package": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node scripts/build-open-connector-runtime.mjs --check-inputs && node --test scripts/release-package-checks-unit.cjs && node scripts/connector-compiled-runtime-smoke.cjs",
+    "replacement": "test:mcp-connectors:package"
+  },
+  "test:connectors:shared": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node --test --test-concurrency=1 scripts/shoggoth-standalone-mcp-rebind-unit.cjs scripts/shoggoth-skill-management-query-unit.cjs scripts/runtime-mcp-call-binding-unit.cjs scripts/service-maintenance-unit.cjs scripts/shoggoth-product-help-unit.cjs",
+    "replacement": "test:mcp-connectors:shared"
+  },
+  "test:connectors:chat": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node scripts/chat-send-recovery-unit.mjs && node scripts/chat-send-recovery-ui.mjs && node --test scripts/native-chat-ui-recovery-unit.cjs",
+    "replacement": "test:mcp-connectors:chat"
+  },
+  "test:connectors": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "npm run test:connectors:runtime && npm run test:connectors:accounts && npm run test:connectors:tools && npm run test:connectors:catalog && npm run test:connectors:service && npm run test:connectors:external && npm run test:connectors:shared && npm run test:connectors:history",
+    "replacement": "test:mcp-connectors"
+  },
+  "test:connectors:app": {
+    "classification": "replaced-by-mcp-contract",
+    "oldCommand": "node scripts/model-operation-recovery-app-restart-fixture.cjs --scenario=connector-twelve-pages",
+    "replacement": "test:mcp-connectors:app"
+  }
+}

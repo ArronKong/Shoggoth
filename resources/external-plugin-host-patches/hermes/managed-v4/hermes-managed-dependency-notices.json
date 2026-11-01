@@ -1,0 +1,1535 @@
+{
+  "version": 1,
+  "scope": "Installed dependency metadata; retains notices but does not approve redistribution",
+  "distributions": [
+    {
+      "name": "agent-client-protocol",
+      "version": "0.9.0",
+      "declaredLicense": null,
+      "metadataSha256": "cc344aa2b23949e8fcfe1ef8621ea84b2e2965d5b32a35dfccdb4c76796d9a1a",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/agent_client_protocol-0.9.0.dist-info/licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
+      "name": "aiohappyeyeballs",
+      "version": "2.6.1",
+      "declaredLicense": "PSF-2.0",
+      "metadataSha256": "3525e5849c007e2dfcd1e123028ec14383ff4d56a5f718b4aa4c995a26ccb153",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/aiohappyeyeballs-2.6.1.dist-info/LICENSE",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+        }
+      ]
+    },
+    {
+      "name": "aiohttp",
+      "version": "3.14.3",
+      "declaredLicense": "Apache-2.0 AND MIT",
+      "metadataSha256": "287d4346fb85cdf58dae89ac33639bef485653990a19af9bcd7d39e47e54ea1b",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/aiohttp-3.14.3.dist-info/licenses/LICENSE.txt",
+          "sha256": "2e4be5fc6c4c72a466fcb665d726e049a6891981fe536c4f04b6366749461d23"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/aiohttp-3.14.3.dist-info/licenses/vendor/llhttp/LICENSE",
+          "sha256": "628168d68bb5a8a17e0bbefb3bd74e326e1edc20583d76f52f457c82c921867d"
+        }
+      ]
+    },
+    {
+      "name": "aiosignal",
+      "version": "1.4.0",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "09247ef1da8bc696728d47130e702e4307f6f7d101d6c485bff9f3a71ce7008d",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/aiosignal-1.4.0.dist-info/licenses/LICENSE",
+          "sha256": "6fd5243e92dd7f98ec69c7ac377728e74905709ff527a5bf98d6d0263c04f5b6"
+        }
+      ]
+    },
+    {
+      "name": "annotated-doc",
+      "version": "0.0.4",
+      "declaredLicense": "MIT",
+      "metadataSha256": "22b9b9289b9adf7758daa28a02327e3a129a5415487f01467a3fdd49edd9d535",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/annotated_doc-0.0.4.dist-info/licenses/LICENSE",
+          "sha256": "fff170779a6acbf65abdb405c087f1cee1786691e4a96a4034517e4a504a0cdf"
+        }
+      ]
+    },
+    {
+      "name": "annotated-types",
+      "version": "0.7.0",
+      "declaredLicense": null,
+      "metadataSha256": "ee5b6ac64b09274c026051813484025939564067801f485115d9cadc207cf791",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/annotated_types-0.7.0.dist-info/licenses/LICENSE",
+          "sha256": "fe1049884b1a0d9342901e88e07f32925d24b3121d9972b6a6805fb9824b095d"
+        }
+      ]
+    },
+    {
+      "name": "anthropic",
+      "version": "0.87.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "f040b9d6367364ac87fd82a617fb272180e34a335ec4f9b2a37c41bfef647ed7",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/anthropic-0.87.0.dist-info/licenses/LICENSE",
+          "sha256": "8bf96984ff8bcfae7e48cae76a529e8a25317ba9e02abf7fd3cc64fdf95657a6"
+        }
+      ]
+    },
+    {
+      "name": "anyio",
+      "version": "4.12.1",
+      "declaredLicense": "MIT",
+      "metadataSha256": "0df88369bf539a671fcbcd3694e2d33041c94128643926e8a42c2a0986cbb899",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/anyio-4.12.1.dist-info/licenses/LICENSE",
+          "sha256": "5361ac9dc58f2ef5fd2e9b09c68297c17f04950909bbc8023bdb82eacf22c2b0"
+        }
+      ]
+    },
+    {
+      "name": "attrs",
+      "version": "25.4.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "d917abc63eda81c311c62c1d92dea50b682ea870269062821f5de75962bb6684",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/attrs-25.4.0.dist-info/licenses/LICENSE",
+          "sha256": "882115c95dfc2af1eeb6714f8ec6d5cbcabf667caff8729f42420da63f714e9f"
+        }
+      ]
+    },
+    {
+      "name": "boto3",
+      "version": "1.42.89",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "7845f2e5af89c12337f50cf2a8cf79071b1e93e733dd4451dfcef5ecf844b334",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/boto3-1.42.89.dist-info/LICENSE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/boto3-1.42.89.dist-info/NOTICE",
+          "sha256": "04fb1e61484a7810f1ba09bb42bc01ca58c9af33927d7c5a21556e4c4d1c7fa4"
+        }
+      ]
+    },
+    {
+      "name": "botocore",
+      "version": "1.42.97",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "65772f6be1be4642f9e37d9498726ebce6c2a1ee2726330cfc68ba72748347ae",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/botocore-1.42.97.dist-info/LICENSE.txt",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/botocore-1.42.97.dist-info/NOTICE",
+          "sha256": "1d1c5a6f3d68cb11f4fad1afa86a7450d0286f15c176ef0ea048f255b46d95b0"
+        }
+      ]
+    },
+    {
+      "name": "certifi",
+      "version": "2026.5.20",
+      "declaredLicense": "MPL-2.0",
+      "metadataSha256": "1c38826bc95f7744c69501689e00e3a1a2c93a158988937ce32ef4ed5c1df0f6",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/certifi-2026.5.20.dist-info/licenses/LICENSE",
+          "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7"
+        }
+      ]
+    },
+    {
+      "name": "cffi",
+      "version": "2.0.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "b98ce7e3417af089bc12d5c73412d9b3b1683ccf8ec73c986c35ac8c9be1ba39",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/cffi-2.0.0.dist-info/licenses/LICENSE",
+          "sha256": "5ba24ddc57067f9249add644c3afc41a5d6dc37e23433ef759d95df370b0af63"
+        }
+      ]
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.4.4",
+      "declaredLicense": "MIT",
+      "metadataSha256": "8d5b94141b62f1d6afd7d60bbd68acb138a155d176a33518e0a28cc3b8dd9014",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/charset_normalizer-3.4.4.dist-info/licenses/LICENSE",
+          "sha256": "6d0d41bfe170ac6c7dc248c9a63e254d0fb45a60d50a8257d0af92c6e249b887"
+        }
+      ]
+    },
+    {
+      "name": "click",
+      "version": "8.4.2",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "194c9dd81d567f9081f026c7e401060fbafa7bc147c8e0a58b3668b40a64c031",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/click-8.4.2.dist-info/licenses/LICENSE.txt",
+          "sha256": "9a8ad106a394e853bfe21f42f4e72d592819a22805d991b5f3275029292b658d"
+        }
+      ]
+    },
+    {
+      "name": "croniter",
+      "version": "6.0.0",
+      "declaredLicense": "MIT License",
+      "metadataSha256": "46c6f669c62056b4fbb8e0d1dad223f27c7a4b5e83a5f0899c5b6a4723a46206",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/croniter-6.0.0.dist-info/LICENSE",
+          "sha256": "a8f952e6c6bb30b0cfcf71c304e3931160d2a9b578d6eddfa5cc18c832e17ed3"
+        }
+      ]
+    },
+    {
+      "name": "cryptography",
+      "version": "50.0.0",
+      "declaredLicense": "Apache-2.0 OR BSD-3-Clause",
+      "metadataSha256": "d4e345f82cb783877d73261f00303577cdf20d13229176c2d03a0a5603cb3ab5",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/cryptography-50.0.0.dist-info/licenses/LICENSE",
+          "sha256": "3e0c7c091a948b82533ba98fd7cbb40432d6f1a9acbf85f5922d2f99a93ae6bb"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/cryptography-50.0.0.dist-info/licenses/LICENSE.APACHE",
+          "sha256": "aac73b3148f6d1d7111dbca32099f68d26c644c6813ae1e4f05f6579aa2663fe"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/cryptography-50.0.0.dist-info/licenses/LICENSE.BSD",
+          "sha256": "602c4c7482de6479dd2e9793cda275e5e63d773dacd1eca689232ab7008fb4fb"
+        }
+      ]
+    },
+    {
+      "name": "defusedxml",
+      "version": "0.7.1",
+      "declaredLicense": "PSFL",
+      "metadataSha256": "369d3cef64870daf849fba711cb8d05a7efe3c8d9ab0f763adc34079fe378bb1",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/defusedxml-0.7.1.dist-info/LICENSE",
+          "sha256": "b80ce9da8c42a1f91079627fbbe2bf27210ae108a0ffe5f077d5b08e076c24c8"
+        }
+      ]
+    },
+    {
+      "name": "distro",
+      "version": "1.9.0",
+      "declaredLicense": "Apache License, Version 2.0",
+      "metadataSha256": "31632ab2de5591131091b3397bdcdf797718579d85a75186f06839dd0c09e81d",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/distro-1.9.0.dist-info/LICENSE",
+          "sha256": "cb5e8e7e5f4a3988e1063c142c60dc2df75605f4c46515e776e3aca6df976e14"
+        }
+      ]
+    },
+    {
+      "name": "docstring_parser",
+      "version": "0.18.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "cbc42027997fd4b194ae5fd064a4d1e57b92976941d0c26d369561a7c016a333",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/docstring_parser-0.18.0.dist-info/licenses/LICENSE.md",
+          "sha256": "dfe514a337ae8417abd31a8af707bbd6172b03e5430bb083e145899ea97a3eea"
+        }
+      ]
+    },
+    {
+      "name": "edge-tts",
+      "version": "7.2.7",
+      "declaredLicense": null,
+      "metadataSha256": "59d640150c1150b40730c05752a151e6979a32733b6b5b842cf3fcd7cdefdd84",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/edge_tts-7.2.7.dist-info/licenses/LICENSE",
+          "sha256": "3613045a46a5bce847f80eadbbf013e4260ef19d728ffd061d61e792689ec3a8"
+        }
+      ]
+    },
+    {
+      "name": "exa-py",
+      "version": "2.10.2",
+      "declaredLicense": "MIT",
+      "metadataSha256": "dd5b8c3f446043e960472153e08354fd3b79eae5635fd5b87ee69973050f5e4a",
+      "licenseFiles": []
+    },
+    {
+      "name": "fastapi",
+      "version": "0.133.1",
+      "declaredLicense": "MIT",
+      "metadataSha256": "b322a84ff8d29750e7e493fe0a51f134d5a560634aef001b9d24bb6b808f6965",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/fastapi-0.133.1.dist-info/licenses/LICENSE",
+          "sha256": "4ec89ffc81485b97fec584b2d4a961032eeffe834453894fd9c1274906cc744e"
+        }
+      ]
+    },
+    {
+      "name": "fire",
+      "version": "0.7.1",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "fd4cf680aadcfa80f49825bcb39bd41a8fd84c4928e5325d943a4b4f0909eebe",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/fire-0.7.1.dist-info/licenses/LICENSE",
+          "sha256": "a5de77b62266bca0bb97bf058992f0b0f308a83a8ca55ee10fbf6bd8ed8f7ed0"
+        }
+      ]
+    },
+    {
+      "name": "firecrawl-anydoc",
+      "version": "0.2.4",
+      "declaredLicense": "MIT",
+      "metadataSha256": "2f72921481c755deb09dbc78318eed58ca7b750bd81d2641944c55cbc0fc122b",
+      "licenseFiles": []
+    },
+    {
+      "name": "frozenlist",
+      "version": "1.8.0",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "946c22dc9f7e2c76f2d698f00a4306dbe49a820e2b3f1a0e22fe5286cbec35f1",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/frozenlist-1.8.0.dist-info/licenses/LICENSE",
+          "sha256": "6fd5243e92dd7f98ec69c7ac377728e74905709ff527a5bf98d6d0263c04f5b6"
+        }
+      ]
+    },
+    {
+      "name": "google-api-core",
+      "version": "2.30.3",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "af2aa9dc09f8bf3c80b9096ac079afbfa5b578d7c1477562cfb2ffcc2f5574c7",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/google_api_core-2.30.3.dist-info/licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
+      "name": "google-api-python-client",
+      "version": "2.194.0",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "7acc8cc733d9921695e6419e53aef33e391b52cb3cd92370867000886c21f206",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/google_api_python_client-2.194.0.dist-info/licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "google-auth",
+      "version": "2.55.1",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "964475aee5a26d2e1126d82d3be41afaf08c36ce536fece9185478fddf0e31cc",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/google_auth-2.55.1.dist-info/licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "google-auth-httplib2",
+      "version": "0.3.1",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "13617537939677e224f2cadb4ef923d2d2da50ecf6549abaad5f1c1fcdd98647",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/google_auth_httplib2-0.3.1.dist-info/licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "google-auth-oauthlib",
+      "version": "1.3.1",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "f3a4095dae81c395df659ca81b4689535ca2eac8b44a203bd8f9f1e40a1a41c5",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/google_auth_oauthlib-1.3.1.dist-info/licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
+      "name": "googleapis-common-protos",
+      "version": "1.73.0",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "c41d1b09661bb0730cab95de99f05003ffa6cbb1819c250a7dcebc3bab5bd4ae",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/googleapis_common_protos-1.73.0.dist-info/licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
+      "name": "h11",
+      "version": "0.16.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "28f326098ac09fcba79b8f180f96087c841fe2456215cb7b872a9c7d5cd19d64",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/h11-0.16.0.dist-info/licenses/LICENSE.txt",
+          "sha256": "37db5bb85926db28a427a25867f10b1232003aea1be69ccb851138adb8e6f361"
+        }
+      ]
+    },
+    {
+      "name": "hermes-agent",
+      "version": "0.21.4",
+      "declaredLicense": "MIT",
+      "metadataSha256": "d7294d4053edd5100f1750f54441eeaac9bf667ab7f5dcd3d5fc850433801182",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/hermes_agent-0.21.4.dist-info/licenses/LICENSE",
+          "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6"
+        }
+      ]
+    },
+    {
+      "name": "httpcore",
+      "version": "1.0.9",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "fe2d4fda6199128978779e0cf27f3c045c531863fcdd987eacc74f3a18d41c21",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/httpcore-1.0.9.dist-info/licenses/LICENSE.md",
+          "sha256": "fdcb59154c74cbaba16a11242f7740bea9f23d6feb5547917d8c5f94a80392a5"
+        }
+      ]
+    },
+    {
+      "name": "httpcore2",
+      "version": "2.7.0",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "7cb7af500749ffb547f25c33ccbc77d6dc1c20de5b9cab1463bdab0aca4ecd80",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/httpcore2-2.7.0.dist-info/licenses/LICENSE.md",
+          "sha256": "c4df125c807b0613501e943a5c92496dd11d2c16604ce396097a8dde396304d9"
+        }
+      ]
+    },
+    {
+      "name": "httplib2",
+      "version": "0.32.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "65d47cdcf4c7c3a31b79e06c60b55c467f67d8253599ce4724fee4b71330d462",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/httplib2-0.32.0.dist-info/licenses/LICENSE",
+          "sha256": "589eec38f72df2be203711d3b8cbece9b908c5e7ff00bc3cab7f63bae9e366b4"
+        }
+      ]
+    },
+    {
+      "name": "httptools",
+      "version": "0.7.1",
+      "declaredLicense": "MIT",
+      "metadataSha256": "28203e137533b97c1ac002b264ebe2834c055a18af76e91fba0a5907a8ff3c21",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/httptools-0.7.1.dist-info/licenses/LICENSE",
+          "sha256": "f4573e7cb7676745fb5b8d36fa548aa93e391cfb6872ddacd65130c45ea6a92d"
+        }
+      ]
+    },
+    {
+      "name": "httpx",
+      "version": "0.28.1",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "febb9b0f8f3e80d57c8199c304f35c4336e8581d1d18d7983c92766b82793b25",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/httpx-0.28.1.dist-info/licenses/LICENSE.md",
+          "sha256": "4ec59d544f12b5f539a3a716fd321ac58ccd8030b465221f2c880200cdf28d8d"
+        }
+      ]
+    },
+    {
+      "name": "httpx2",
+      "version": "2.7.0",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "527d59beed6b1e24bdb81ac6935b6fe631d4b28e0ac3fa550939841a023e7955",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/httpx2-2.7.0.dist-info/licenses/LICENSE.md",
+          "sha256": "7e7d6dbaf7fe160d39fd6e84fd02c33cab96bcbea34d36998d545bceb4a19c30"
+        }
+      ]
+    },
+    {
+      "name": "httpx-sse",
+      "version": "0.4.3",
+      "declaredLicense": "MIT",
+      "metadataSha256": "d4c6d804ee5ac46e9b3b6595c27ab8ae2ba7cfb5f692c78b16ff463e4bd1a81e",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/httpx_sse-0.4.3.dist-info/licenses/LICENSE",
+          "sha256": "beec67e4ee83a7af26f242bed9987aa863d6d2dfb776106aa2360c4187f31901"
+        }
+      ]
+    },
+    {
+      "name": "idna",
+      "version": "3.18",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "46dfe6e5ac462d0f680ecd9abcf66e829b6a2334824b4d9e3979b31135caf281",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/idna-3.18.dist-info/licenses/LICENSE.md",
+          "sha256": "1a9a4f0e3d479a27240ddd59a9137a66ab4a0f9dfdc8ca6188cc0bfd85187f04"
+        }
+      ]
+    },
+    {
+      "name": "Jinja2",
+      "version": "3.1.6",
+      "declaredLicense": null,
+      "metadataSha256": "68c5548fb67c4132a13898d9b31ec50c6bea2abdd915d921f214355c3a6499c8",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/jinja2-3.1.6.dist-info/licenses/LICENSE.txt",
+          "sha256": "3b49dcee4105eb37bac10faf1be260408fe85d252b8e9df2e0979fc1e094437b"
+        }
+      ]
+    },
+    {
+      "name": "jiter",
+      "version": "0.13.0",
+      "declaredLicense": null,
+      "metadataSha256": "0f158c4695a110f6fc14da364abccb42ff25160145b2e5b9fe35f9ae5aef9029",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/jiter-0.13.0.dist-info/licenses/LICENSE",
+          "sha256": "7c7134b9f7b978c03fca875517cf398db91f19bbb8109b6685e742aa3f57468e"
+        }
+      ]
+    },
+    {
+      "name": "jmespath",
+      "version": "1.1.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "81181e9a312f1b87e5be7c8376c57b0e8c962ba524a25a313d43dc2e2d3984f3",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/jmespath-1.1.0.dist-info/LICENSE",
+          "sha256": "6eefacfa4d71b82d08408c751470ac8d9854538da2142cb27be0287fb13d0ab9"
+        }
+      ]
+    },
+    {
+      "name": "jsonschema",
+      "version": "4.26.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "05b189866ca98a96da3934bf6b83687ced3ff85325273b77e16b705f6d8b26d2",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/jsonschema-4.26.0.dist-info/licenses/COPYING",
+          "sha256": "4f92a015a13c4d1a040bef018aa13430b4f1bc73b41b16bb846c346766de7439"
+        }
+      ]
+    },
+    {
+      "name": "jsonschema-specifications",
+      "version": "2025.9.1",
+      "declaredLicense": "MIT",
+      "metadataSha256": "35abd41757f32b4ea24756920ded47b70173d77cbc052a5a6d3ab583b2e8d89d",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/jsonschema_specifications-2025.9.1.dist-info/licenses/COPYING",
+          "sha256": "42dcd63495f87b4eb7c7757afa379bb55a53f94afd7a5f657d9adf57236e515c"
+        }
+      ]
+    },
+    {
+      "name": "Markdown",
+      "version": "3.10.2",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "d3ea71b57cc1a86a6a15eae20a03e0f4f73cbdb41278d8d0b641462be3e28085",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/markdown-3.10.2.dist-info/licenses/LICENSE.md",
+          "sha256": "7ba4eb6d10b32b2d11dce13821340351cdbbb30ba8ccc67841db2ffd86e79aca"
+        }
+      ]
+    },
+    {
+      "name": "markdown-it-py",
+      "version": "4.0.0",
+      "declaredLicense": null,
+      "metadataSha256": "e9fcaa1e2daf3f96d840a09fbaaa394feaadf37a36d88a7b6b6b672487c65bfb",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/markdown_it_py-4.0.0.dist-info/licenses/LICENSE",
+          "sha256": "4a2260d6e2cd0f5a151a1e86dbfe7d3ed552b1e2beabf9941c1ba5c49cbce484"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/markdown_it_py-4.0.0.dist-info/licenses/LICENSE.markdown-it",
+          "sha256": "792c48c5a849a15fdf9e37e8bcf9e6d1dd13b32b46c642a748a0a46a9919d473"
+        }
+      ]
+    },
+    {
+      "name": "MarkupSafe",
+      "version": "3.0.3",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "12b4cc61a7fa288cf7667ee3f213786d9619db57fb33ff6f934afbcb5c12ec81",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/markupsafe-3.0.3.dist-info/licenses/LICENSE.txt",
+          "sha256": "489a8e1108509ed98a37bb983e11e0f7e1d31f0bd8f99a79c8448e7ff37d07ea"
+        }
+      ]
+    },
+    {
+      "name": "mcp",
+      "version": "2.0.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "761c76bdad3a786ecf0b7c7d9c48b0fe7bd0e3ce085ab388a622bde4dbee81f9",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/mcp-2.0.0.dist-info/licenses/LICENSE",
+          "sha256": "5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d"
+        }
+      ]
+    },
+    {
+      "name": "mcp-types",
+      "version": "2.0.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "eb8d46df07ce28bf00f4138c9b76a2c0046dfa5c7ec9f2c5d22d60eb38ed162a",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/mcp_types-2.0.0.dist-info/licenses/LICENSE",
+          "sha256": "5e13dbbc1d120fc2a03cecde7c91424ae2d7de11b63d58ded2f4431e261ee50d"
+        }
+      ]
+    },
+    {
+      "name": "mdurl",
+      "version": "0.1.2",
+      "declaredLicense": null,
+      "metadataSha256": "b53b29d48f499367053fda3c81e7ce27d2558380ebbf83e66023b02eb7ddd25d",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/mdurl-0.1.2.dist-info/LICENSE",
+          "sha256": "7c605df6e28667a9603118e98274f64a49ce3eed0d26fccce9534a345e0ef955"
+        }
+      ]
+    },
+    {
+      "name": "multidict",
+      "version": "6.7.1",
+      "declaredLicense": "Apache License 2.0",
+      "metadataSha256": "4913fdaae936a309c29b89b98c2dbebd237203fb27ab9e68ae5e4ec17ba3024f",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/multidict-6.7.1.dist-info/licenses/LICENSE",
+          "sha256": "93d11a968e2f0f36373c40811ff6d20e173f58c3cab5884cd6617bbfd795492a"
+        }
+      ]
+    },
+    {
+      "name": "nemo-relay",
+      "version": "0.8.4",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "2b55038c8cc4d1ef05be51a344b839e748b607945d26a3762af2caca23a372f7",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/nemo_relay-0.8.4.dist-info/licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "oauthlib",
+      "version": "3.3.1",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "4f28d4c0549d096aec40280e909d0c99663d2ddca71e6ac52a44766daa6433a1",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/oauthlib-3.3.1.dist-info/licenses/LICENSE",
+          "sha256": "0028aa4763a8a0b09ca4c68d585263474cf9aaa6ec69ffbef3a31a9eccdd3b91"
+        }
+      ]
+    },
+    {
+      "name": "openai",
+      "version": "2.24.0",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "8ffd865c529a230b50a81b41e9338d8248d182111e7cacf2102730bedea5583f",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/openai-2.24.0.dist-info/licenses/LICENSE",
+          "sha256": "636eb7d79da9bb6d515a4b3fd417aa26679eb3cf16396ddab4bc55fa74e616e4"
+        }
+      ]
+    },
+    {
+      "name": "opentelemetry-api",
+      "version": "1.44.0",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "42aabbbacd266627b5c3839a515150ca90c18f80c9d85ca6f6fa10d440a7eeaa",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/opentelemetry_api-1.44.0.dist-info/licenses/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "packaging",
+      "version": "26.0",
+      "declaredLicense": "Apache-2.0 OR BSD-2-Clause",
+      "metadataSha256": "3362bb7d6a26da2962ba8daaa4785cd0bacac21aba908a1195cc8f59580a265a",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/packaging-26.0.dist-info/licenses/LICENSE",
+          "sha256": "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/packaging-26.0.dist-info/licenses/LICENSE.APACHE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/packaging-26.0.dist-info/licenses/LICENSE.BSD",
+          "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"
+        }
+      ]
+    },
+    {
+      "name": "pathspec",
+      "version": "1.1.1",
+      "declaredLicense": null,
+      "metadataSha256": "68de3f158b6592f086e78754c962092f32a761944ab66a660c0d62ad79c4b69b",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pathspec-1.1.1.dist-info/licenses/LICENSE",
+          "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
+        }
+      ]
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0",
+      "declaredLicense": "MIT-CMU",
+      "metadataSha256": "8fc07146cab33ef7582361dab6eac596d340b03ec648f18217da7894f73838c8",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pillow-12.3.0.dist-info/licenses/LICENSE",
+          "sha256": "dda12a98c1979cf3d94df1cff45d27a4cb3f04a60c76f76902ac54cac03ec0ce"
+        }
+      ]
+    },
+    {
+      "name": "pillow_heif",
+      "version": "1.7.0",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "02bd45777d511c03ad79cf4963e1b2e6e5724a49d6668bb56acc494ad35336d6",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pillow_heif-1.7.0.dist-info/licenses/LICENSE.txt",
+          "sha256": "9e2635f155b00af5a46cb2f2c9b052072ec546d59837ee74efc9cba2cbb83f3d"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pillow_heif-1.7.0.dist-info/licenses/LICENSES_bundled.txt",
+          "sha256": "5142993de7ede4427c3c74335958198d803ac92ac7a7d0e6705a0eea77cc32b1"
+        }
+      ]
+    },
+    {
+      "name": "pip",
+      "version": "26.2.1",
+      "declaredLicense": "MIT",
+      "metadataSha256": "3a561005822841f2c45f442f6c7a7505172c8c376c9fe274d876c8ac912968cb",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/LICENSE.txt",
+          "sha256": "634300a669d49aeae65b12c6c48c924c51a4cdf3d1ff086dc3456dc8bcaa2104"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/cachecontrol/LICENSE.txt",
+          "sha256": "86eeee87be2a43f3ff1f56496f451f69243926f025fedbb033666c304c4c161b"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/certifi/LICENSE",
+          "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/distlib/LICENSE.txt",
+          "sha256": "808e10c8a6ab8deb149ff9b3fb19f447a808094606d712a9ca57fead3552599d"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/distro/LICENSE",
+          "sha256": "cb5e8e7e5f4a3988e1063c142c60dc2df75605f4c46515e776e3aca6df976e14"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/idna/LICENSE.md",
+          "sha256": "1a9a4f0e3d479a27240ddd59a9137a66ab4a0f9dfdc8ca6188cc0bfd85187f04"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/msgpack/COPYING",
+          "sha256": "492dedba85da5872f78e6091bcd1fea474d660d35acb4dee964b8aab3f007427"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/packaging/LICENSE",
+          "sha256": "cad1ef5bd340d73e074ba614d26f7deaca5c7940c3d8c34852e65c4909686c48"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/packaging/LICENSE.APACHE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/packaging/LICENSE.BSD",
+          "sha256": "b70e7e9b742f1cc6f948b34c16aa39ffece94196364bc88ff0d2180f0028fac5"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/pkg_resources/LICENSE",
+          "sha256": "86da0f01aeae46348a3c3d465195dc1ceccde79f79e87769a64b8da04b2a4741"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/platformdirs/LICENSE",
+          "sha256": "29e0fd62e929850e86eb28c3fdccf0cefdf4fa94879011cffb3d0d4bed6d4db6"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/pygments/LICENSE",
+          "sha256": "a9d66f1d526df02e29dce73436d34e56e8632f46c275bbdffc70569e882f9f17"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/pyproject_hooks/LICENSE",
+          "sha256": "1b22b049b5267d6dfc23a67bf4a84d8ec04b9fdfb1a51d360e42b4342c8b4154"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/requests/LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/resolvelib/LICENSE",
+          "sha256": "f388fd38cad13112c1dc0f669bbe80e7f84541edbafb72f3030d2ca7642c3c9d"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/rich/LICENSE",
+          "sha256": "deed7c17a4318158190a3ea239cc879a5a50271cebb98ae7025f48fbe58dca15"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/tomli/LICENSE",
+          "sha256": "b80816b0d530b8accb4c2211783790984a6e3b61922c2b5ee92f3372ab2742fe"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/tomli_w/LICENSE",
+          "sha256": "b80816b0d530b8accb4c2211783790984a6e3b61922c2b5ee92f3372ab2742fe"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/truststore/LICENSE",
+          "sha256": "33be7b7e8fa4fd19b1760e1a8ed8a668bdab852c91b692dd41424bcb725a9fca"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/pip-26.2.1.dist-info/licenses/src/pip/_vendor/urllib3/LICENSE.txt",
+          "sha256": "130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686"
+        }
+      ]
+    },
+    {
+      "name": "prompt_toolkit",
+      "version": "3.0.52",
+      "declaredLicense": null,
+      "metadataSha256": "80d4bd40a6a171dfd25c332baebee1fd8722342f133db5385e2d5719a5da2e29",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/prompt_toolkit-3.0.52.dist-info/licenses/LICENSE",
+          "sha256": "303574d9bdd85c757d6025017942bf17baeedf2778f62bd7f425d07d880f4c4a"
+        }
+      ]
+    },
+    {
+      "name": "propcache",
+      "version": "0.4.1",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "fc23f3c52b336d5335cd053f47d91ff6316949e65ad1f1e3dfccd5284f4d6ece",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/propcache-0.4.1.dist-info/licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/propcache-0.4.1.dist-info/licenses/NOTICE",
+          "sha256": "56d6ac6c8105c0a51304c21db060e361af9a8ea0af9a75c239c28b5d13693838"
+        }
+      ]
+    },
+    {
+      "name": "proto-plus",
+      "version": "1.27.2",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "72295b6886a3c75edb53239763a51c36c0038ea44242566255f900bcfa6adc0c",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/proto_plus-1.27.2.dist-info/licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
+      "name": "protobuf",
+      "version": "6.33.5",
+      "declaredLicense": "3-Clause BSD License",
+      "metadataSha256": "bc8eb3187ac09f903cae9bd8ee4104a85c6dac8dbd1c8790069a7b6496b8e5a5",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/protobuf-6.33.5.dist-info/LICENSE",
+          "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+        }
+      ]
+    },
+    {
+      "name": "psutil",
+      "version": "7.2.2",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "525f8ba78523cf7bc3759d62a105e7c57fd679ea702402b9449fb0746aa0217f",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/psutil-7.2.2.dist-info/LICENSE",
+          "sha256": "b89c063b3786e28e0c0a38f1931db61fed35e69dd2a2966fbecffee0f46c8d10"
+        }
+      ]
+    },
+    {
+      "name": "ptyprocess",
+      "version": "0.7.0",
+      "declaredLicense": "UNKNOWN",
+      "metadataSha256": "c3c2b96b5d9a55da5958c34d08c18a0849f56609026cc46d5c95b8b77fcf3e0c",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/ptyprocess-0.7.0.dist-info/LICENSE",
+          "sha256": "c822d385b1a73329846241799becf18690b5d44764c1bed69300b536a405030a"
+        }
+      ]
+    },
+    {
+      "name": "pyasn1",
+      "version": "0.6.4",
+      "declaredLicense": "BSD-2-Clause",
+      "metadataSha256": "a092d99fad1e3744d6aa26eef2598e8ee2343ea403137ca73d06dccef19d70e2",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pyasn1-0.6.4.dist-info/licenses/LICENSE.rst",
+          "sha256": "2aad5fc00f705c4a1addb83eed10a6a75d286a3779f0cf8519d87e62bc4735fd"
+        }
+      ]
+    },
+    {
+      "name": "pyasn1_modules",
+      "version": "0.4.2",
+      "declaredLicense": "BSD",
+      "metadataSha256": "162666d75297dfcdd0116cbeab134d78fab808b8a66bfa5c1d74832d9b754771",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pyasn1_modules-0.4.2.dist-info/licenses/LICENSE.txt",
+          "sha256": "2aad5fc00f705c4a1addb83eed10a6a75d286a3779f0cf8519d87e62bc4735fd"
+        }
+      ]
+    },
+    {
+      "name": "pycparser",
+      "version": "3.0",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "f547a60b0ab54cc2f242213d1f87960ad80df7dd5dfeb98d17a444d48bfb6b93",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pycparser-3.0.dist-info/licenses/LICENSE",
+          "sha256": "0c846399369ea76ddd7b5c44fe6d16497415fcf015f5cbb508c24bf98b81c5b1"
+        }
+      ]
+    },
+    {
+      "name": "pydantic",
+      "version": "2.13.4",
+      "declaredLicense": "MIT",
+      "metadataSha256": "d1e56c3412492512fb6b59a9dfc25ab7af2a8204585cd7bca000513023133394",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pydantic-2.13.4.dist-info/licenses/LICENSE",
+          "sha256": "a9e186f3ca16b5eef84318e7a701721351a00cb7b8ae3a4394b67b49e3529ef3"
+        }
+      ]
+    },
+    {
+      "name": "pydantic_core",
+      "version": "2.46.4",
+      "declaredLicense": "MIT",
+      "metadataSha256": "135fa8b2f89473e9191c7078c2164e3ec6c8927a61c2379c2fddcc07f11f3bae",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pydantic_core-2.46.4.dist-info/licenses/LICENSE",
+          "sha256": "2afdd30d54b4d62b6f488a6bcc1546e84ec5061f13f4209c03d012348783795a"
+        }
+      ]
+    },
+    {
+      "name": "pydantic-settings",
+      "version": "2.13.1",
+      "declaredLicense": "MIT",
+      "metadataSha256": "f8359f5a08450e7a146d0d2847b9ff869d86bf063fb8a4a881b7c4c00ad16c79",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pydantic_settings-2.13.1.dist-info/licenses/LICENSE",
+          "sha256": "eb355a753e020346d33d83bf9769135b89fc610568ac531a01c295bcee7fd998"
+        }
+      ]
+    },
+    {
+      "name": "Pygments",
+      "version": "2.19.2",
+      "declaredLicense": "BSD-2-Clause",
+      "metadataSha256": "7ae100d67d67006c6479803dd835fcf47a9b59fac794441ea8e66aa7f5984d82",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pygments-2.19.2.dist-info/licenses/LICENSE",
+          "sha256": "a9d66f1d526df02e29dce73436d34e56e8632f46c275bbdffc70569e882f9f17"
+        }
+      ]
+    },
+    {
+      "name": "PyJWT",
+      "version": "2.13.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "0d1b1321a5a688caacd763e006fbbe11f60110e9fe27ff8d23a679863d01a63c",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pyjwt-2.13.0.dist-info/licenses/LICENSE",
+          "sha256": "797a7a20231d4c433e9f1911db1731d06b5828b98f499819a034f7c0f56f5ce5"
+        }
+      ]
+    },
+    {
+      "name": "pyparsing",
+      "version": "3.3.2",
+      "declaredLicense": "MIT",
+      "metadataSha256": "3311a8b949d70f71a2b9788a9327f11d9d5a6a8012d6c046ca254ad2de877f45",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pyparsing-3.3.2.dist-info/licenses/LICENSE",
+          "sha256": "a5425f9dc14ac74d4c5f0b679e941f2442e32cca7452a4418d5b1a49893ebe4e"
+        }
+      ]
+    },
+    {
+      "name": "python-dateutil",
+      "version": "2.9.0.post0",
+      "declaredLicense": "Dual License",
+      "metadataSha256": "a9d436da322be808332f98d88325998e87cb693a678a9969feb4cfad729a6e93",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/python_dateutil-2.9.0.post0.dist-info/LICENSE",
+          "sha256": "ba00f51a0d92823b5a1cde27d8b5b9d2321e67ed8da9bc163eff96d5e17e577e"
+        }
+      ]
+    },
+    {
+      "name": "python-dotenv",
+      "version": "1.2.2",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "59430a9dee8f8118dbf693e41c4a3e5150626d19901f4727503da9499f5a64a1",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/python_dotenv-1.2.2.dist-info/licenses/LICENSE",
+          "sha256": "80619b7049f08c81683ad0e01f08f257a840652dd71ee83146d36658c7d2c2b9"
+        }
+      ]
+    },
+    {
+      "name": "python-multipart",
+      "version": "0.0.32",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "e9d399d7dea5eddf0e4d24b5c24687a82e7e50bf2c2b30f8f8a06a64d887dd86",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/python_multipart-0.0.32.dist-info/licenses/LICENSE.txt",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
+      "name": "python-telegram-bot",
+      "version": "22.8",
+      "declaredLicense": "LGPL-3.0-only",
+      "metadataSha256": "9fae99aaa169ef6a554b0aa8a1e0cdc4d23d5aec5b5d01b6633fc9a86bf19e34",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/python_telegram_bot-22.8.dist-info/licenses/LICENSE",
+          "sha256": "ad8f8603e843f8973885313e3da5e63e5d522d50c3a876875d4b96bbfb49e112"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/python_telegram_bot-22.8.dist-info/licenses/LICENSE.dual",
+          "sha256": "79b96c01d2e6a6f4b1361f2578971e1150b053bacd8ad9c880cb3c5ff90811df"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/python_telegram_bot-22.8.dist-info/licenses/LICENSE.lesser",
+          "sha256": "8e1c608ff068dae9f02ca7ed877d310f4877376f20b8458ab568152297031efc"
+        }
+      ]
+    },
+    {
+      "name": "pytz",
+      "version": "2025.2",
+      "declaredLicense": "MIT",
+      "metadataSha256": "e620e4e1f9f1c8019619388d4da496eb02119a13f35aaad55f022694a3c81f6c",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pytz-2025.2.dist-info/LICENSE.txt",
+          "sha256": "be8b1a37ebe26c592a90f6c0eb33103a7f383ce2f4d7498c0af9a526990a07b8"
+        }
+      ]
+    },
+    {
+      "name": "PyYAML",
+      "version": "6.0.3",
+      "declaredLicense": "MIT",
+      "metadataSha256": "03c3b415ed38d09faedc49360e930769b40c58f68585e6de00e2e4916a858d34",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/pyyaml-6.0.3.dist-info/licenses/LICENSE",
+          "sha256": "8d3928f9dc4490fd635707cb88eb26bd764102a7282954307d3e5167a577e8a4"
+        }
+      ]
+    },
+    {
+      "name": "referencing",
+      "version": "0.37.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "c93b00e6ab1524fd60848376604c189a114374776475c25a31d57be47b29de6a",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/referencing-0.37.0.dist-info/licenses/COPYING",
+          "sha256": "42dcd63495f87b4eb7c7757afa379bb55a53f94afd7a5f657d9adf57236e515c"
+        }
+      ]
+    },
+    {
+      "name": "requests",
+      "version": "2.33.0",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "0cc0fa6e89be83cfa1777957519e3fffe78d1a79b30561934d1e4384fb177711",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/requests-2.33.0.dist-info/licenses/LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/requests-2.33.0.dist-info/licenses/NOTICE",
+          "sha256": "f5110972dedad2b4e9d314518daf3b7d72d6e02e499acd802181de6f74571dcc"
+        }
+      ]
+    },
+    {
+      "name": "requests-oauthlib",
+      "version": "2.0.0",
+      "declaredLicense": "ISC",
+      "metadataSha256": "7d85ea39c166d9f2326f89cee906331d2c80ed2ddea4d31efc020006b47fcaca",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/requests_oauthlib-2.0.0.dist-info/LICENSE",
+          "sha256": "ae01846afad8a8291fe6a08966f3015af9a8ff675d84b981f9793c122f7876e8"
+        }
+      ]
+    },
+    {
+      "name": "rich",
+      "version": "14.3.3",
+      "declaredLicense": "MIT",
+      "metadataSha256": "f643a724f7a397abd3c1abe5df9a93266b4abb6d7ca7d39bfb3fa30e8cf5013a",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/rich-14.3.3.dist-info/licenses/LICENSE",
+          "sha256": "deed7c17a4318158190a3ea239cc879a5a50271cebb98ae7025f48fbe58dca15"
+        }
+      ]
+    },
+    {
+      "name": "rpds-py",
+      "version": "0.30.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "cc01d097ddb9c7e07a29c9553ee8dd35cf920e85fb574f7b0c23d68138a716bf",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/rpds_py-0.30.0.dist-info/licenses/LICENSE",
+          "sha256": "314e4e91be3baa93c0fb4bccc9e4e97cd643eb839b065af921782c2175fe9909"
+        }
+      ]
+    },
+    {
+      "name": "ruamel.yaml",
+      "version": "0.18.17",
+      "declaredLicense": "MIT",
+      "metadataSha256": "4a030ebbcf465adca5a515fc7cf0b3e336d4eae3d1a8f70598e9c31ed78da8ad",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/ruamel_yaml-0.18.17.dist-info/licenses/LICENSE",
+          "sha256": "0ce9ad6a9d4f0829296a72c77d07795dd67f42751e2922be56c051d39ae1c011"
+        }
+      ]
+    },
+    {
+      "name": "ruamel.yaml.clib",
+      "version": "0.2.15",
+      "declaredLicense": "MIT",
+      "metadataSha256": "1f59e721f351ceb296e3311698a52e4388bc12f97ac709926fecaddea02e8a05",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/ruamel_yaml_clib-0.2.15.dist-info/licenses/LICENSE",
+          "sha256": "f8ad7efe71dde909f2d694f7dc69470d3dbe07c001c0b30c6bd9951e472077fa"
+        }
+      ]
+    },
+    {
+      "name": "s3transfer",
+      "version": "0.16.1",
+      "declaredLicense": "Apache License 2.0",
+      "metadataSha256": "d0c4312285ef38a92778dc2fcfedbaf038a18e04486b6bef58a352b5da21b8ab",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/s3transfer-0.16.1.dist-info/LICENSE.txt",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/s3transfer-0.16.1.dist-info/NOTICE.txt",
+          "sha256": "d8354e0fa7fb762da7bc054a8a6774a0b310dfbbc78006393ee573a0e57612b5"
+        }
+      ]
+    },
+    {
+      "name": "simple-term-menu",
+      "version": "1.6.6",
+      "declaredLicense": "MIT",
+      "metadataSha256": "992045e4577e8429f298b682202948b670ee6c6069783f5289079695f03c160c",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/simple_term_menu-1.6.6.dist-info/LICENSE",
+          "sha256": "0bd8e876876f0ebc995f19d1e8f6a1f10d8b86e2608bddbcd642884dbb492a4f"
+        }
+      ]
+    },
+    {
+      "name": "six",
+      "version": "1.17.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "562042078c2752549f6d8a7c86dbc5dd708088a7be6d80672ec7b07100b72468",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/six-1.17.0.dist-info/LICENSE",
+          "sha256": "4375ba20e2b9c6c4e7cad2940a628fd90e95cc3d50ee92aae755715d8ba1fbd0"
+        }
+      ]
+    },
+    {
+      "name": "sniffio",
+      "version": "1.3.1",
+      "declaredLicense": "MIT OR Apache-2.0",
+      "metadataSha256": "0b318b57098edeccf585e60a889a6b6a7b5c4086f3a9aa62eff76a1d3cee12d9",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/sniffio-1.3.1.dist-info/LICENSE",
+          "sha256": "652c878488d1456361e08c3f8607fd7ba59892a14103d15cce4ff93c85b5cc8b"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/sniffio-1.3.1.dist-info/LICENSE.APACHE2",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/sniffio-1.3.1.dist-info/LICENSE.MIT",
+          "sha256": "3e6dae555eb92787fc82d1d48355677f454c7f65aeb38d3f9e72bf9a3daf034b"
+        }
+      ]
+    },
+    {
+      "name": "snowballstemmer",
+      "version": "3.1.1",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "6c06c375da8e0a963410b6af906e3d72acc337a5fde985944a4b74e24b10479a",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/snowballstemmer-3.1.1.dist-info/licenses/COPYING",
+          "sha256": "880802872ce34f313df826e96131b1b147dcfa09c76fc82129f25503a922a678"
+        }
+      ]
+    },
+    {
+      "name": "socksio",
+      "version": "1.0.0",
+      "declaredLicense": "UNKNOWN",
+      "metadataSha256": "bbfa5fe1625dadce138e24ff9c161b6499c4f33cd6b0adde62ef3531a6870286",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/socksio-1.0.0.dist-info/LICENSE",
+          "sha256": "7087f0f5f7c2993f3c4ed117baa3622c1063626e7c692e9ea116475b5fc1396c"
+        }
+      ]
+    },
+    {
+      "name": "sse-starlette",
+      "version": "3.3.2",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "61da9f83cc4437c0569796f1a314227a781fc91395e00a9599baeb6b8a645884",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/sse_starlette-3.3.2.dist-info/licenses/LICENSE",
+          "sha256": "80af6bfccbebd2c14d4aab96695cab9950e177190cc80f5ef819e99996883e8e"
+        }
+      ]
+    },
+    {
+      "name": "starlette",
+      "version": "1.3.1",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "d83ccd9665eb05d1f9393c75e209cb353990731a6215a609a0f1c5c0a6286c9a",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/starlette-1.3.1.dist-info/licenses/LICENSE.md",
+          "sha256": "dcb95677a02240243187e964f941847d19b17821cf99e5afae684fab328c19bf"
+        }
+      ]
+    },
+    {
+      "name": "tabulate",
+      "version": "0.10.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "38dfc6db689745ff4c3890b3c30ef7e5d0b156fdbeeb765b9027fd917043d84b",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/tabulate-0.10.0.dist-info/licenses/LICENSE",
+          "sha256": "cdfab50d37d8ead06468fb76a3abafcd05c16749ec8a18eebfa50fd48c7cb2d2"
+        }
+      ]
+    },
+    {
+      "name": "tenacity",
+      "version": "9.1.4",
+      "declaredLicense": "Apache 2.0",
+      "metadataSha256": "2e3b45ca8334494f30fd1306d2adce6d47bc5c1d7a4e5df5462a3d1bd74bf5b0",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/tenacity-9.1.4.dist-info/licenses/LICENSE",
+          "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"
+        }
+      ]
+    },
+    {
+      "name": "termcolor",
+      "version": "3.3.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "880aeaba6300677d4ecc022fb63f8adcd57a753b6fd2b5ec17841f722f910196",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/termcolor-3.3.0.dist-info/licenses/COPYING.txt",
+          "sha256": "e79b6bd82962c1330caaa7c42278567b08667777673f8e2371a624d5715d4c0e"
+        }
+      ]
+    },
+    {
+      "name": "tornado",
+      "version": "6.5.7",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "11c3534b6c65830b7b07cd746e8960ec4e56744ac90727a5ff7dec24fb3fbda0",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/tornado-6.5.7.dist-info/licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
+      "name": "tqdm",
+      "version": "4.67.3",
+      "declaredLicense": "MPL-2.0 AND MIT",
+      "metadataSha256": "7c0e9a662c19095f339a4b761201eb06cff9c61fb9581535b2f96f44e718ed29",
+      "licenseFiles": []
+    },
+    {
+      "name": "truststore",
+      "version": "0.10.4",
+      "declaredLicense": "MIT",
+      "metadataSha256": "509a7b67bff99f2d04f57251b5bdb761bd9429467e1cebc453b7f96be4108f5b",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/truststore-0.10.4.dist-info/licenses/LICENSE",
+          "sha256": "33be7b7e8fa4fd19b1760e1a8ed8a668bdab852c91b692dd41424bcb725a9fca"
+        }
+      ]
+    },
+    {
+      "name": "typing_extensions",
+      "version": "4.15.0",
+      "declaredLicense": "PSF-2.0",
+      "metadataSha256": "c138378fe8f18934ac99de060535c53ec6c13aeed65e94c32641da7ee3192a72",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/typing_extensions-4.15.0.dist-info/licenses/LICENSE",
+          "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+        }
+      ]
+    },
+    {
+      "name": "typing-inspection",
+      "version": "0.4.2",
+      "declaredLicense": "MIT",
+      "metadataSha256": "61096cd0bfe3c7040b6f98c22b02d190fe01936d0ff7616c5134fed02891953a",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/typing_inspection-0.4.2.dist-info/licenses/LICENSE",
+          "sha256": "804b59b25f2c31bd278f9202a19ae49a3945aa2664387e2d0a128c7cacc61ec3"
+        }
+      ]
+    },
+    {
+      "name": "uritemplate",
+      "version": "4.2.0",
+      "declaredLicense": "BSD 3-Clause OR Apache-2.0",
+      "metadataSha256": "352afd43b6f1ab8f94ca31af2a1ad4f0d1a94dbd712c1b6d9e44e35d4bb3a962",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/uritemplate-4.2.0.dist-info/licenses/LICENSE",
+          "sha256": "3cfc9f01cdeec92900f228cf5677ffa57e7ed304c4263532bcad9cbd9969e46c"
+        }
+      ]
+    },
+    {
+      "name": "urllib3",
+      "version": "2.7.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "66147856d30bbb6bed01c6ce3326d0f48d84ed5f286ac177633a1486b82eace5",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/urllib3-2.7.0.dist-info/licenses/LICENSE.txt",
+          "sha256": "130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686"
+        }
+      ]
+    },
+    {
+      "name": "uvicorn",
+      "version": "0.41.0",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "de0db10639f51644a56d7bd594133e4aaa188f6155c22b88129e99959eb675f7",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/uvicorn-0.41.0.dist-info/licenses/LICENSE.md",
+          "sha256": "efe1acf3e62fb99c288b0ec73e5a773b7268ef4320fe757ea994214e4b63c371"
+        }
+      ]
+    },
+    {
+      "name": "uvloop",
+      "version": "0.22.1",
+      "declaredLicense": "MIT License",
+      "metadataSha256": "7106328da9670776c358802971b7dc41c0b86ed3673bf9cc4c0d5e11ff2f3583",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/uvloop-0.22.1.dist-info/licenses/LICENSE-APACHE",
+          "sha256": "377025287798f9dcd819e1f826fa5fc5e2f382528691ab0528c5cf8c8c282c27"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/uvloop-0.22.1.dist-info/licenses/LICENSE-MIT",
+          "sha256": "6dd4c399f26de043d77a2ad7e31db4cb5bf08ea8368b0a42d6e158635cc8ab62"
+        }
+      ]
+    },
+    {
+      "name": "watchfiles",
+      "version": "1.1.1",
+      "declaredLicense": "MIT",
+      "metadataSha256": "877e3062d4327b3698127f4641683ccf877d24256214b4f8be629dfe2a7a585f",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/watchfiles-1.1.1.dist-info/licenses/LICENSE",
+          "sha256": "4fd78355b67ce2677ede9fb6f63a250f377bb7e22088136a5f4699adb4bc069f"
+        }
+      ]
+    },
+    {
+      "name": "wcwidth",
+      "version": "0.6.0",
+      "declaredLicense": "MIT",
+      "metadataSha256": "dff3786b8fba955a83c5d3034ce029b8aac20e3389dadb6234d2548500d51e72",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/wcwidth-0.6.0.dist-info/licenses/LICENSE",
+          "sha256": "70b98a95a2144eb70af8017fa8c6d95ce247e40867436e8bc649e137fe13d21a"
+        }
+      ]
+    },
+    {
+      "name": "websockets",
+      "version": "15.0.1",
+      "declaredLicense": "BSD-3-Clause",
+      "metadataSha256": "551e4ae9e806fcfa49dbe190e21c9df8293581e22544c2d0a6f841e6a7e71254",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/websockets-15.0.1.dist-info/LICENSE",
+          "sha256": "3d6a0c050d8bec52fabad502e45fb25bd02bcadbd70dea34d447b6a0ff4e6da8"
+        }
+      ]
+    },
+    {
+      "name": "yarl",
+      "version": "1.22.0",
+      "declaredLicense": "Apache-2.0",
+      "metadataSha256": "8004c398c5d50b9ded9c4143c0570e775b242b914cf2424d6d8f061640910cb8",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/yarl-1.22.0.dist-info/licenses/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "venv/lib/python3.11/site-packages/yarl-1.22.0.dist-info/licenses/NOTICE",
+          "sha256": "56d6ac6c8105c0a51304c21db060e361af9a8ea0af9a75c239c28b5d13693838"
+        }
+      ]
+    },
+    {
+      "name": "youtube-transcript-api",
+      "version": "1.2.4",
+      "declaredLicense": "MIT",
+      "metadataSha256": "5ac71eb1c93ad2b4be7fb765c63e9f2c9713768556a0cb1aa865d493ef4f3d82",
+      "licenseFiles": [
+        {
+          "path": "venv/lib/python3.11/site-packages/youtube_transcript_api-1.2.4.dist-info/licenses/LICENSE",
+          "sha256": "e7608cc316ea65729d6ce63cd619fb185ae44d329740388d30099fe7e4b16a4d"
+        }
+      ]
+    }
+  ]
+}
