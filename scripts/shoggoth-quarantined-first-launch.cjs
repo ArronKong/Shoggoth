@@ -7,7 +7,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
 const { execFileSync } = require("node:child_process");
-const { randomUUID } = require("node:crypto");
+const { randomUUID, createHash } = require("node:crypto");
 const { setTimeout: delay } = require("node:timers/promises");
 
 function command(executable, args, timeout = 15000) {
@@ -40,17 +40,20 @@ async function main() {
   assert.equal(process.argv.length, 6);
   assert.equal(process.argv[2], "--app");
   assert.equal(process.argv[4], "--output");
-  const app = path.resolve(process.argv[3]), output = path.resolve(process.argv[5]);
+  const sourceApp = path.resolve(process.argv[3]), output = path.resolve(process.argv[5]);
   assert.equal(path.isAbsolute(process.argv[3]), true);
   assert.equal(path.isAbsolute(process.argv[5]), true);
-  assert.equal(inside(path.join(fs.realpathSync(process.env.GITHUB_WORKSPACE), "dist"), app), true);
+  assert.equal(inside(path.join(fs.realpathSync(process.env.GITHUB_WORKSPACE), "dist"), sourceApp), true);
   assert.equal(inside(fs.realpathSync(process.env.RUNNER_TEMP), output), true);
   assert.equal(fs.existsSync(output), false);
   const home = os.userInfo().homedir;
   for (const relative of ["Library/Application Support/Shoggoth", "Library/LaunchAgents/com.shoggoth.agent-service.plist", ".openclaw", ".hermes"]) {
     assert.equal(fs.existsSync(path.join(home, relative)), false, "First-launch proof requires an empty disposable product account");
   }
-  const marker = JSON.parse(fs.readFileSync(path.join(app, "Contents/Resources/shoggoth-release.json"), "utf8"));
+  const app = "/Applications/Shoggoth.app";
+  assert.equal(fs.lstatSync("/Applications").isSymbolicLink(), false);
+  assert.equal(fs.existsSync(app), false, "First-launch check must never replace an installed App");
+  const marker = JSON.parse(fs.readFileSync(path.join(sourceApp, "Contents/Resources/shoggoth-release.json"), "utf8"));
   assert.equal(marker.distribution, "official");
   assert.equal(marker.signingMode, "developer-id");
   assert.equal(marker.version, require("../package.json").version);
@@ -58,18 +61,29 @@ async function main() {
   assert.deepEqual(mainProcesses(binary), []);
   const gatekeeper = command("/usr/sbin/spctl", ["--status"]).trim();
   assert.equal(gatekeeper, "assessments enabled", "GUI proof requires enforced Gatekeeper");
-  command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app], 180000);
-  command("/usr/bin/xcrun", ["stapler", "validate", app], 60000);
-  command("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=4", app], 60000);
+  command("/usr/bin/codesign", ["--verify", "--deep", "--strict", sourceApp], 180000);
+  command("/usr/bin/xcrun", ["stapler", "validate", sourceApp], 60000);
+  command("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=4", sourceApp], 60000);
   fs.mkdirSync(output, { recursive: false, mode: 0o700 });
   const evidence = { version: marker.version, launch: "LaunchServices open -n; no runtime role or data-root override",
-    account: "empty disposable GitHub-hosted runner", gatekeeper, downloadProvenance: "exact draft download with controlled quarantine",
+    account: "empty disposable GitHub-hosted runner", gatekeeper, installedApp: app,
+    downloadProvenance: "exact draft download copied to the disposable runner Applications directory with controlled quarantine",
     browserDownloadVerified: false, quarantineRemoved: false, normalOpenConfirmation: false, verified: false };
   let launched = false;
   const screenshot = () => {
     try { command("/usr/sbin/screencapture", ["-x", path.join(output, "first-launch.png")]); } catch { /* keep the original failure */ }
   };
   try {
+    // The product deliberately refuses background-service installation from
+    // an unstable folder. Exercise the same /Applications path as a user install.
+    command("/usr/bin/sudo", ["/bin/cp", "-cRp", sourceApp, app], 180000);
+    for (const relative of ["Contents/MacOS/Shoggoth", "Contents/Resources/app.asar"]) {
+      const hash = root => createHash("sha256").update(fs.readFileSync(path.join(root, relative))).digest("hex");
+      assert.equal(hash(app), hash(sourceApp), "Installed draft payload differs");
+    }
+    command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app], 180000);
+    command("/usr/bin/xcrun", ["stapler", "validate", app], 60000);
+    evidence.installedPayloadMatchesDraft = true;
     const quarantine = `0001;${Math.floor(Date.now() / 1000).toString(16)};ShoggothReleaseVerification;${randomUUID()}`;
     command("/usr/bin/xattr", ["-w", "com.apple.quarantine", quarantine, app]);
     evidence.quarantineBefore = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
