@@ -2,7 +2,7 @@
 "use strict";
 const test=require("node:test"),assert=require("node:assert/strict"),fs=require("node:fs"),path=require("node:path");
 const {spawnSync}=require("node:child_process");
-const root=path.resolve(__dirname,".."),manifest=require("../docs/architecture/retired-open-connector-contracts-2026-10-26.json");
+const root=path.resolve(__dirname,".."),manifest=require("./fixtures/retired-open-connector-contracts.json");
 function files(dir){return fs.readdirSync(dir,{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?files(path.join(dir,entry.name)):entry.isFile()?[path.join(dir,entry.name)]:[]);}
 test("precise retirement inventory is absent and product imports never load retired modules",()=>{
  const removed=new Set(manifest.removed.map(entry=>path.resolve(root,entry.path)));assert.equal(removed.size,manifest.removed.length);assert.ok(removed.size>=61);

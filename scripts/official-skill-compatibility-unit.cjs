@@ -1,12 +1,12 @@
 "use strict";
 
 const test = require("node:test"), assert = require("node:assert/strict");
-const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
+const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), os = require("node:os");
 const { StdioMcpClient } = require("../app/agent-service/native-mcp-client-manager");
 const { OFFICIAL_SKILL_IDS, OFFICIAL_SKILL_PUBLIC_MESSAGES, officialSkillPublicError } = require("../app/core/official-skill-connector-dto");
 
 async function bridge(t, providerId) {
-  const base = fs.mkdtempSync("/private/tmp/official-compatibility-"); fs.chmodSync(base, 0o700);
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "official-compatibility-")); fs.chmodSync(base, 0o700);
   const root = path.join(base, "state/runtime-bin/official-skills", providerId, crypto.randomUUID()), home = path.join(root, "home");
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   const files = { "payload.txt": "private-payload-canary" };
@@ -66,7 +66,7 @@ test("DoorDash status reports a missing native runtime without discarding saved 
 // the real bridge's filesystem checks are exercised separately above and in the
 // provider suites; no remote account or business operation is dispatched here.
 async function errorPeer(t, trusted) {
-  const base = fs.mkdtempSync("/private/tmp/official-error-peer-");
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "official-error-peer-"));
   const script = path.join(base, "peer.cjs");
   fs.writeFileSync(script, `require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
     const m=JSON.parse(line);if(m.id===undefined)return;

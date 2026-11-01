@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 "use strict";
-const test=require("node:test"),assert=require("node:assert/strict"),fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypto");
+const test=require("node:test"),assert=require("node:assert/strict"),fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypto"),os=require("node:os");
 const {resolveServicePaths}=require("../app/agent-service/paths");
 const {NativeMcpStore,quarantineNativeMcpRegistryForRestore}=require("../app/agent-service/native-mcp-store");
 const {EncryptedSecretStore}=require("../app/agent-service/encrypted-secret-store");
@@ -8,7 +8,7 @@ const {McpConnectorSecrets}=require("../app/agent-service/mcp-connector-secrets"
 const {McpPackageLauncher,validatePackageTransport,tokenizeCommand}=require("../app/agent-service/mcp-package-launcher");
 const {McpRegistryClient,parseRegistryEntry,resolveOption}=require("../app/agent-service/mcp-registry-client");
 const {validateConnectorParams,validateConnectorResult}=require("../app/core/connector-dto");
-const temp=t=>{const root=fs.mkdtempSync('/private/tmp/shoggoth-mcp-foundation-');fs.chmodSync(root,0o700);t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const paths=resolveServicePaths({trustedRoot:root,stateRoot:path.join(root,'state'),profileRoot:path.join(root,'profile'),cacheRoot:path.join(root,'cache')});fs.mkdirSync(paths.defaultWorkspaceDir,{recursive:true,mode:0o700});return {root,paths};};
+const temp=t=>{const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'shoggoth-mcp-foundation-'));fs.chmodSync(root,0o700);t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const paths=resolveServicePaths({trustedRoot:root,stateRoot:path.join(root,'state'),profileRoot:path.join(root,'profile'),cacheRoot:path.join(root,'cache')});fs.mkdirSync(paths.defaultWorkspaceDir,{recursive:true,mode:0o700});return {root,paths};};
 const server=(overrides={})=>({id:'fixture',name:'Fixture',enabled:true,source:{kind:'custom'},transport:{kind:'remote',protocol:'streamable-http',url:'https://mcp.example.test/mcp'},auth:{kind:'none'},secretRef:null,setup:{requiredFields:[],configuredFields:[]},status:'checking',lastCheck:null,disabledProfileIds:[],...overrides});
 const entry=(overrides={})=>({server:{name:'io.example/fixture',version:'1.2.3',description:'untrusted description',packages:[{registryType:'npm',identifier:'@example/server',version:'1.2.3',transport:{type:'stdio'},packageArguments:[{type:'positional',valueHint:'target_dir',isRequired:true}],environmentVariables:[{name:'API_KEY',isSecret:true,isRequired:true}]}],remotes:[{type:'streamable-http',url:'https://example.test/mcp',headers:[{name:'Authorization',isSecret:true,isRequired:true}]}],...overrides},_meta:{'io.modelcontextprotocol.registry/official':{status:'active',isLatest:true}}});
 const response=value=>new Response(JSON.stringify(value),{status:200,headers:{'content-type':'application/json'}});

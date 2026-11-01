@@ -127,3 +127,14 @@ jobs:
           xcrun stapler validate "$MOUNT/Shoggoth.app"
           spctl --assess --type execute --verbose=4 "$MOUNT/Shoggoth.app"
           cmp "$APP/Contents/Resources/app.asar" "$MOUNT/Shoggoth.app/Contents/Resources/app.asar"
+
+      - name: Normal quarantined first launch on the empty hosted account
+        run: node scripts/shoggoth-quarantined-first-launch.cjs --app "$GITHUB_WORKSPACE/dist/mac/Shoggoth.app" --output "$RUNNER_TEMP/shoggoth-first-launch"
+
+      - name: Preserve first-launch evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: intel-quarantined-first-launch
+          path: ${{ runner.temp }}/shoggoth-first-launch/
+          if-no-files-found: error
