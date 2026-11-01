@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
 const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
+const apiRequire = createRequire(path.join(root, "app/manage-ui/src/api/client.ts"));
 const ts = uiRequire("typescript"), React = uiRequire("react");
 const { create, act } = uiRequire("react-test-renderer");
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -57,7 +58,7 @@ function fixture(locale = "zh-CN") {
     if (name === "i18next") return { __esModule: true, default: { t } };
     if (name === "../lib/system-issues") return issues;
     if (name === "./memoryProviderOwnerDto" || name === "../lib/cronVisibility" || name === "../lib/runtimeVisibility") return {};
-    return uiRequire(name);
+    return apiRequire(name);
   }, { fetch: async () => { writes++; return { ok: false, status: 409, text: async () => JSON.stringify(state.response) }; } });
   state.api = api;
   function Capture() { state.toast = ui.useToast(); return null; }

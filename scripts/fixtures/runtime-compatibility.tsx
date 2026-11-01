@@ -86,8 +86,17 @@ scope.verifyRuntimeCompatibility = async (locale: string) => {
     && options.some(option => option.textContent?.includes("ext-catalog")), "existing compatible extension Binding stays selectable");
   options[0].click();
   await wait(() => select.getAttribute("aria-expanded") !== "true", "Runtime selector close");
-  window.scrollTo(0, 0); await new Promise(resolve => setTimeout(resolve, 250));
-  check(document.documentElement.scrollWidth <= innerWidth + 1, "no horizontal overflow");
+  await document.fonts.ready;
+  window.scrollTo(0, 0);
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const overflow = [...document.querySelectorAll<HTMLElement>("body *")].flatMap(element => {
+    const box = element.getBoundingClientRect();
+    return box.width > 0 && box.right > innerWidth + 1
+      ? [{ tag: element.tagName, className: String(element.className).slice(0, 160), left: box.left, right: box.right }] : [];
+  });
+  check(document.documentElement.scrollWidth <= innerWidth + 1,
+    `no horizontal overflow: ${JSON.stringify({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, offenders: overflow.slice(0, 16) })}`);
   for (const tile of document.querySelectorAll<HTMLElement>(".settings-cli-tile")) {
     const box = tile.getBoundingClientRect(); check(box.left >= 0 && box.right <= innerWidth + 1, "tile fits viewport");
   }

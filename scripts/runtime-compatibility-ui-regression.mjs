@@ -35,7 +35,9 @@ app.whenReady().then(async()=>{
  const screenshots=${JSON.stringify(screenshots || null)};
  if(screenshots){fs.mkdirSync(screenshots,{recursive:true});fs.writeFileSync(path.join(screenshots,locale+"-"+width+".png"),(await w.webContents.capturePage()).toPNG());}
  }console.log(JSON.stringify({checks,verified:true}));w.destroy();app.exit(0);
- }catch(error){console.error(error);console.error(await w.webContents.executeJavaScript("document.body.innerText"));w.destroy();app.exit(1);}
+ }catch(error){console.error(error);console.error(await w.webContents.executeJavaScript("document.body.innerText"));
+ const screenshots=${JSON.stringify(screenshots || null)};if(screenshots){fs.mkdirSync(screenshots,{recursive:true});fs.writeFileSync(path.join(screenshots,"failure.png"),(await w.webContents.capturePage()).toPNG());}
+ w.destroy();app.exit(1);}
 }).catch(error=>{console.error(error);app.exit(1)});`);
   const result = spawnSync(createRequire(path.join(root, "package.json"))("electron"), [main], {
     encoding: "utf8", timeout: 45000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },

@@ -22,6 +22,7 @@ const {
   validateMcpProductToolArguments,
 } = require("./agent-service/mcp-product-tool-controller");
 const { MESSAGES: CHAT_UI_PUBLIC_MESSAGES } = require("./agent-service/chat-ui-messages");
+const { SECRET_MESSAGES: SECRET_PUBLIC_MESSAGES } = require("./core/chat-secret-contract");
 const { groupManagementRequest } = require("./agent-service/group-chat-agent-tools");
 const { PRODUCT_CONFIRMATION_META, productConfirmationIdentity } = require("./agent-service/cron-approval-policy");
 const {
@@ -424,6 +425,7 @@ function publicServiceErrorCode(error) {
   return /^[A-Z][A-Z0-9_]{2,63}$/u.test(code)
     && (PUBLIC_SERVICE_ERROR_PREFIXES.some((prefix) => code.startsWith(prefix))
       || Object.hasOwn(CHAT_UI_PUBLIC_MESSAGES, code)
+      || Object.hasOwn(SECRET_PUBLIC_MESSAGES, code)
       || code.startsWith("WEB_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
       || code.startsWith("PROACTIVE_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
       || code.startsWith("APPLE_DEVICE_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
@@ -434,7 +436,7 @@ function publicServiceErrorCode(error) {
 
 function toolFailureResponse(id, error) {
   const code = publicServiceErrorCode(error);
-  const message = MCP_PRODUCT_PUBLIC_MESSAGES[code] || "Shoggoth Service request failed";
+  const message = MCP_PRODUCT_PUBLIC_MESSAGES[code] || SECRET_PUBLIC_MESSAGES[code] || "Shoggoth Service request failed";
   return jsonRpcResult(id, {
     content: [{ type: "text", text: `${message} (${code})` }],
     structuredContent: { error: { code } },

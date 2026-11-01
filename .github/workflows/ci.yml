@@ -117,6 +117,7 @@ jobs:
           node scripts/hermes-start-smoke.cjs
       - name: Pinned OpenClaw memory core and isolated Service
         run: |
+          node scripts/fetch-e5-model.mjs
           npm run check:memory-core
           npm run test:memory-core
       - name: OpenClaw endpoint and credential regressions

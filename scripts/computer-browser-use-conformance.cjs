@@ -130,19 +130,27 @@ test("Computer Use: status, confirmed open, observe, act and close through the b
     assert.ok(snapshot.snapshotRevision, "an action needs the fresh snapshot revision");
     // Pi, OpenCode and DeepSeek pass only the text content to the model: act on what it says.
     const text = snapshotResult.content.find((item) => item.type === "text").text;
-    const revision = text.match(/snapshotRevision=(\S+)/u)?.[1];
-    const ref = text.match(/^(c\d+) /mu)?.[1];
+    // Privacy mode can omit the image and return the snapshot as JSON text.
+    // Derive both capabilities from model-visible text in either representation.
+    let textSnapshot;
+    try { textSnapshot = JSON.parse(text); } catch { textSnapshot = null; }
+    const revision = textSnapshot?.snapshotRevision ?? text.match(/snapshotRevision=(\S+)/u)?.[1];
+    const ref = textSnapshot?.elements?.[0]?.ref ?? text.match(/^(c\d+) /mu)?.[1];
     assert.equal(revision, snapshot.snapshotRevision, "the text carries the fresh snapshot revision");
     assert.equal(ref, snapshot.elements[0].ref, "the text lists the snapshot-bound refs");
     await value.ok("computer_click", { ...scope, snapshotRevision: revision, pid: 42, windowId: 7,
       ref, x: null, y: null });
     assert.equal(value.driverCalls.some(call => call.name === "click"), true, "the click reached the driver");
 
+    const clicksBeforeStale = value.driverCalls.filter(call => call.name === "click").length;
     const stale = await value.call("computer_click", { ...scope, snapshotRevision: revision, pid: 42,
       windowId: 7, ref, x: null, y: null });
     assert.equal(stale.isError, true, "a used snapshot revision must not be replayed");
-    assert.equal(stale.structuredContent.error.code, "COMPUTER_SNAPSHOT_STALE", "the model is told why");
-    assert.match(stale.content[0].text, /重新调用 computer_snapshot/u);
+    assert.equal(stale.structuredContent.error.code, "SECRET_TOOL_OUTCOME_UNKNOWN",
+      "an error after mediated dispatch intent keeps the conservative unknown outcome");
+    assert.match(stale.content[0].text, /不会自动重复执行/u);
+    assert.equal(value.driverCalls.filter(call => call.name === "click").length, clicksBeforeStale,
+      "the stale request never reaches the desktop driver");
 
     await value.ok("computer_session_close", scope);
     assert.equal(value.driverCalls.some(call => call.name === "shutdown"), true, "closing ends the private worker");
@@ -235,8 +243,7 @@ test("Browser handoff uses the Service input card without Runtime elicitation, r
       workRunId: value.run().id, sessionId: scope.sessionId, toolName: "browser_snapshot", arguments: {} }),
     { code: "BROWSER_SESSION_BUSY" });
     const request = value.service.workRunCoordinator.pendingRequests.get(value.run().waitingRequestId);
-    assert.ok(request.expiresAt - request.waitingStartedAt >= 30 * 60_000
-      && request.expiresAt - request.waitingStartedAt < 30 * 60_000 + 1000);
+    assert.equal(request.expiresAt, null, "ordinary handoff input has no default task deadline");
     assert.deepEqual(request.params.requestedSchema.properties.browser_user_action.enum, ["已完成操作", "取消并关闭"]);
     assert.match(request.params.message, /只在浏览器内输入/u);
     await value.answer("submit", { browser_user_action: "已完成操作" });

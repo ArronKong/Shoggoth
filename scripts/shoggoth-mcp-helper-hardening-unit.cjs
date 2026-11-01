@@ -643,6 +643,22 @@ test("工具失败只公开允许的稳定错误码且不泄露私有消息", as
   assert.doesNotMatch(JSON.stringify(privateCode), /PRIVATE_SECRET_CANARY|another-private-secret/u);
 });
 
+test("known credential errors retain their safe guidance and unknown credential codes stay private", async () => {
+  const messages = require("../app/core/chat-secret-contract").SECRET_MESSAGES;
+  for (const [code, message] of [...Object.entries(messages), ["SECRET_PRIVATE_DETAIL_CANARY", null]]) {
+    const handler = createMcpStdioHandler({ runtimeProfileId: "runtime-a", sessionToken: token(0x3b),
+      requestService: async () => { throw Object.assign(new Error("private-credential-path-canary"), { code }); } });
+    try {
+      await handler(initialize(1));
+      const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "computer_status", arguments: {} } });
+      assert.equal(response.result.isError, true);
+      assert.equal(response.result.structuredContent.error.code, message ? code : "SERVICE_REQUEST_FAILED");
+      if (message) assert.equal(response.result.content[0].text, `${message} (${code})`);
+      assert.doesNotMatch(JSON.stringify(response), /private-credential-path-canary|SECRET_PRIVATE_DETAIL_CANARY/u);
+    } finally { handler.close(); }
+  }
+});
+
 test("web tools and preference errors keep their fixed public codes without leaking private provider details", async () => {
   const messages = { ...require("../app/agent-service/web-tools").WEB_PUBLIC_MESSAGES,
     ...require("../app/agent-service/web-settings-protocol").PUBLIC_MESSAGES };

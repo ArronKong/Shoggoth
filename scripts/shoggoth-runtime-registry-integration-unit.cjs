@@ -23,7 +23,7 @@ const {
 } = require(path.join(ROOT, "app", "agent-service", "claude-code-runtime-paths.js"));
 
 async function main() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-runtime-registry-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sg-runtime-"));
   const paths = resolveServicePaths({
     stateRoot: path.join(root, "state"),
     cacheRoot: path.join(root, "cache"),
@@ -458,7 +458,7 @@ async function main() {
 }
 
 async function disabledClaudeRelease() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-disabled-claude-"));
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sg-disabled-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   let service = createAgentService({ paths, version: "disabled-claude-proof", builtinCliProfiles: true,
     builtinCliInstalledAccountIds: FIXTURE_INSTALLED_ACCOUNT_IDS });
