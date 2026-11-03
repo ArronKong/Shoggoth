@@ -78,7 +78,7 @@ async function assemble(input, output, version, sha, runId) {
     assert.equal(metadata.path, zip);
     assert.equal(metadata.sha512, sha512);
     documents.push(metadata);
-    for (const name of names) fs.copyFileSync(path.join(directory, name), path.join(output, name));
+    for (const name of names) fs.copyFileSync(path.join(directory, name), path.join(output, name), fs.constants.COPYFILE_FICLONE);
   }
   // Keep the Intel fallback fields while merging both architecture entries.
   const merged = { ...documents[1], files: documents.flatMap(document => document.files) };
@@ -99,7 +99,7 @@ function githubClient(repository, token) {
       ...options,
       headers: {
         Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28", ...options.headers,
+        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json", ...options.headers,
       },
       signal: AbortSignal.timeout(15 * 60_000),
     });
@@ -224,6 +224,7 @@ async function main() {
   if (command === "assemble") return assemble("artifacts", "dist", version, sha, process.env.GITHUB_RUN_ID);
   const client = githubClient(process.env.GITHUB_REPOSITORY, process.env.GH_TOKEN);
   if (command === "validate") {
+    assert.equal(process.env.GITHUB_REF, `refs/tags/${tag}`, "Dispatch from the protected version tag");
     assert.equal(sha, process.env.GITHUB_SHA, "Dispatch the workflow at the exact tagged source commit");
     await client.assertTag(tag, sha);
     const release = (await client.releases()).find(item => item.tag_name === tag);
@@ -251,4 +252,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { packageNames, fileDigest, assertDraft, assertAssetInventory, recordBuild, assemble, uploadDraft, verifyDraft, confirmDraft };
+module.exports = { packageNames, fileDigest, assertDraft, assertAssetInventory, recordBuild, assemble, githubClient, uploadDraft, verifyDraft, confirmDraft };

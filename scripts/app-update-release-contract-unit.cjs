@@ -34,8 +34,19 @@ assert.equal(release.jobs["native-verification"].uses, "./.github/workflows/veri
 assert.deepEqual(release.jobs["accepted-draft"].needs, ["validate", "draft", "native-verification"]);
 assert.equal(release.jobs.build.env.SHOGGOTH_CODESIGN_MODE, "developer-id");
 assert.equal(release.jobs.build.env.SHOGGOTH_EXPECT_NOTARIZED, "1");
-assert.match(workflow, /electron-builder --mac zip --"\$BUILD_ARCH" --publish never/u);
-assert.match(workflow, /shoggoth-source-parity\.cjs/u);
+assert.equal(release.jobs.build.environment, "macos-signing");
+for (const workflowName of ["release.yml", "verify-signed-draft.yml", "ci.yml"]) {
+  const parsed = yaml.load(fs.readFileSync(path.join(root, ".github/workflows", workflowName), "utf8"));
+  for (const job of Object.values(parsed.jobs)) for (const step of job.steps || []) {
+    if (step.uses) assert.match(step.uses, /^actions\/[a-z-]+@[a-f0-9]{40}$/u, "Release actions must pin immutable commits");
+  }
+}
+assert.match(workflow, /node scripts\/release-build\.cjs/u);
+const build = fs.readFileSync(path.join(root, "scripts/release-build.cjs"), "utf8");
+for (const gate of ["electron-builder", '"--publish", "never"', "shoggoth-source-parity.cjs",
+  "verify-app-update-release.mjs", "create-macos-dmg.mjs", "buildNotarytoolArgs",
+  "assertAcceptedReceipt(result)", '"stapler", "staple"', '"stapler", "validate"',
+  '"/usr/bin/hdiutil", ["verify"', "recordBuild("]) assert.ok(build.includes(gate));
 assert.match(workflow, /release-draft\.cjs confirm/u);
 assert.doesNotMatch(workflow, /--draft=false|--publish always|--clobber/u);
 const native = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/verify-signed-draft.yml"), "utf8"));

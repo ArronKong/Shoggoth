@@ -2,7 +2,7 @@
 
 本文件是每次公开源码更新和正式 macOS 发布的检查清单。开发目录与 `output/public-source` 是两个独立的 Git 仓库；公开仓库只接收审核后的源码快照，不能推送开发目录的 Git 历史。Shoggoth 自有代码采用 Apache-2.0；第三方组件保留各自的许可证和署名。
 
-当前可重复执行的正式发布路径是**本机 Developer ID 签名、公证，GitHub 草稿 Release 验收后发布**。`.github/workflows/release.yml` 提供一次手动触发的双架构草稿流水线；通过全部自动验收后仍保留草稿。首次端到端验证需要先配置下文列出的签名与公证凭据。推送版本标签本身不会自动打包或发布。
+自动化入口有两种。`.github/workflows/release.yml` 使用两台 GitHub 托管 Mac 并行签名、公证；`scripts/release-local.cjs` 使用本机钥匙串依次构建两个架构，再调用 GitHub 双架构原生验收。两者共用构建、公证、资产收据和验收逻辑，通过后都保留草稿。正式公开仍是独立操作。云端路径需要配置下文的发布环境 Secrets，本机路径使用已有钥匙串身份和公证 profile。推送版本标签本身不会自动打包或发布。
 
 ## 1. 冻结本次源码
 
@@ -81,7 +81,7 @@ node scripts/local-signing.cjs run -- npm run dist:arm64   # 用该身份打包
 
 ## GitHub Actions 自动发布路径
 
-`Signed macOS draft` 以已审核的公开源码标签为输入。选择的工作流分支或标签必须与该版本标签指向同一提交，`tag` 必须等于 `v<package.json version>`。按本文件前述流程完成源码审核和公开 PR 后，用下面的命令触发一次即可。
+`Signed macOS draft` 以已审核的公开源码标签为输入。必须从该版本标签触发，`tag` 必须等于 `v<package.json version>`。按本文件前述流程完成源码审核和公开 PR 后，用下面的命令触发一次即可。
 
 ```bash
 gh workflow run release.yml --repo ArronKong/Shoggoth --ref v<VERSION> -f tag=v<VERSION>
@@ -95,6 +95,34 @@ gh workflow run release.yml --repo ArronKong/Shoggoth --ref v<VERSION> -f tag=v<
 
 同一标签的运行通过 concurrency 串行化。已成功上传的架构产物属于同一 Actions run，失败 job 可单独重跑。若重新构建导致字节改变，而草稿已有旧字节，上传会停止并保留现场。新的源码提交应使用新的版本标签。完整流水线成功仅代表该草稿通过上述自动门禁；正式公开仍需要单独授权及其它适用的生产验收。
 
-仓库需要七项 Actions secrets，值必须通过 GitHub 的加密 Secrets 设置渠道配置。`MACOS_CERTIFICATE_BASE64` 是带私钥的 Developer ID PKCS#12，`MACOS_CERTIFICATE_PASSWORD` 是其密码，`MACOS_SIGNING_IDENTITY` 是该证书身份，`APPLE_API_KEY_BASE64` 是 App Store Connect API 私钥，另有 `APPLE_API_KEY_ID`、`APPLE_API_ISSUER`、`APPLE_TEAM_ID`。签名私钥移交给 GitHub 托管 runner 前须取得用户的相应授权。缺失任一凭据就停止该构建。
+签名 Secrets 放在受保护的 `macos-signing` Environment，只有签名 job 声明并使用它，不放在仓库通用 Secrets。环境只接受 `v*` 标签，仓库版本标签规则限制创建、更新和删除为管理员操作。普通分支、PR 和 fork 不获得这些签名凭据。当前保护通过标签规则和环境部署限制执行，没有额外配置每次运行的人工 reviewer。管理员仍能更改规则或工作流，因此应保持管理员账号安全。所有外部 Actions 固定到完整提交 SHA。
+
+通过 GitHub 加密 Secrets 渠道配置以下四项通用配置和一组公证凭据，私钥值不进入代码、日志或聊天。签名私钥移交 GitHub 托管 runner 前须取得用户相应授权。
+
+| Secret | 用途 |
+| --- | --- |
+| `MACOS_CERTIFICATE_BASE64` | 包含 Developer ID 私钥的加密 PKCS#12，编码为单行 Base64 |
+| `MACOS_CERTIFICATE_PASSWORD` | PKCS#12 的随机强密码 |
+| `MACOS_SIGNING_IDENTITY` | Developer ID 身份的 SHA-1 指纹 |
+| `APPLE_TEAM_ID` | Developer ID 所属 Team ID |
+
+公证方式任选一组。API Key 使用 `APPLE_API_KEY_BASE64`、`APPLE_API_KEY_ID` 和 `APPLE_API_ISSUER`（App Store Connect 团队 API Key）；Apple ID 方式使用 `APPLE_ID` 和 `APPLE_APP_SPECIFIC_PASSWORD`（应用专用密码，不能填 Apple 账号登录密码）。两组都完整时优先使用 API Key。缺少证书或任一完整公证方式即停止，临时钥匙串和密钥文件在 job 结束时清理。
 
 独立的 `Verify notarized macOS draft` 手动验收入口继续接受 `tag` 和 `release_id`，用于复验已有草稿。
+
+## 本机签名、GitHub 双架构验收路径
+
+本机需要 Node 22.22.3、已登录并有仓库写权限的 `gh`、Xcode 工具、可用 Developer ID 私钥和已验证的 `shoggoth-notary` profile。发布时 Mac 必须保持在线，构建会占用本机资源和临时磁盘空间。脚本从公开 GitHub 标签建立独立检出，等待该精确提交的 CI 成功，不打包当前开发目录。先做只读预检，再用同一标签运行完整流程。
+
+```bash
+node scripts/release-local.cjs --tag v<VERSION> --check-only
+node scripts/release-local.cjs --tag v<VERSION>
+```
+
+可用 `--identity`、`--keychain`、`--notary-profile` 和 `--notary-keychain` 指定已有凭据。默认不传公证钥匙串路径，让 Apple 工具使用其默认钥匙串搜索，兼容存于数据保护钥匙串的 profile。本机路径不读取 GitHub 签名 Secrets，也不导出本机私钥。
+
+脚本先重新导出并扫描固定源码、安装锁定依赖和准备构建输入，然后依次生成两个架构的已签名、公证 ZIP 和 DMG。每个架构验完 ZIP CRC 后，收集原始文件与签名回执，并移除本任务独立检出中的可由 ZIP 恢复的临时 App，以控制空间。汇总采用文件系统支持的复制优化，随后上传草稿、核对全部远端字节，触发唯一运行编号对应的双架构原生验收。下载验收证据后生成 `accepted-draft.json`，草稿仍保持未公开。
+
+状态、包和证据默认保存在 `.artifacts/local-draft-v<VERSION>/`，也可用 `--work-dir /absolute/path` 指定。网络上传中断后用同一命令加 `--resume`，只续传相同字节。已完成但尚未收集的构建可根据原收据恢复；没有 Accepted 构建收据的签名或公证中断会停止，须先核对 Apple 提交状态，不能盲目重签。遗留 `release.lock` 须确认对应进程已退出后处理。验收失败应检查已有 run，按失败原因修复或重跑失败 job，再恢复本地等待。请求发出后未找到对应 run 时先核对 Actions，不自动重复触发。
+
+两条路径可以分别体验，但同一版本只应有一套确定的签名产物。测试另一条路径时使用新的已审核版本标签，不能覆盖已有草稿中不同字节的资产。

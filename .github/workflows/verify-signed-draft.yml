@@ -1,4 +1,5 @@
 name: Verify notarized macOS draft
+run-name: Verify signed draft ${{ inputs.tag }} / ${{ inputs.request_id || github.run_id }}
 
 on:
   workflow_dispatch:
@@ -11,6 +12,10 @@ on:
         description: Numeric ID of the draft release
         required: true
         type: string
+      request_id:
+        description: Local release operation ID for matching its verification run
+        required: false
+        type: string
 
   workflow_call:
     inputs:
@@ -22,6 +27,9 @@ on:
         type: string
       source_sha:
         required: true
+        type: string
+      request_id:
+        required: false
         type: string
 
 permissions:
@@ -57,12 +65,12 @@ jobs:
       SHOGGOTH_DRAFT_ZIP_SUFFIX: ${{ matrix.zip_suffix }}
       SHOGGOTH_DRAFT_BINARY_ARCH: ${{ matrix.binary_arch }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.source_sha || inputs.tag }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.22.3"
           cache: npm
@@ -207,7 +215,7 @@ jobs:
 
       - name: Preserve first-launch evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.evidence }}-quarantined-first-launch-attempt-${{ github.run_attempt }}
           path: |
