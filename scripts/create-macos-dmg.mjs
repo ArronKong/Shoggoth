@@ -8,6 +8,7 @@ import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { runStapler } from "./release-stapler.cjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const usage = "Usage: node scripts/create-macos-dmg.mjs --arch arm64|x64 --distribution internal|official [--dist path]";
@@ -71,9 +72,7 @@ try {
     stdio: "inherit", timeout: 180_000,
   });
   if (distribution === "official") {
-    execFileSync("/usr/bin/xcrun", ["stapler", "validate", payloadApp], {
-      stdio: "inherit", timeout: 60_000,
-    });
+    runStapler("validate", payloadApp);
   }
   symlinkSync("/Applications", path.join(payload, "Applications"));
   const temporaryDmg = path.join(scratch, dmgName);

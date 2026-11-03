@@ -58,14 +58,15 @@ assert.match(workflow, /node scripts\/release-build\.cjs/u);
 const build = fs.readFileSync(path.join(root, "scripts/release-build.cjs"), "utf8");
 for (const gate of ["electron-builder", '"--publish", "never"', "shoggoth-host-capability-coverage-unit.cjs", "shoggoth-source-parity.cjs",
   "verify-app-update-release.mjs", "create-macos-dmg.mjs", "buildNotarytoolArgs",
-  "assertAcceptedReceipt(result)", '"stapler", "staple"', '"stapler", "validate"',
+  "assertAcceptedReceipt(result)", 'runStapler("staple", dmg)', 'runStapler("validate", dmg)',
   '"/usr/bin/hdiutil", ["verify"', "recordBuild("]) assert.ok(build.includes(gate));
 assert.match(workflow, /release-draft\.cjs confirm/u);
 assert.doesNotMatch(workflow, /--draft=false|--publish always|--clobber/u);
 const native = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/verify-signed-draft.yml"), "utf8"));
+assert.equal(native.jobs.macos.env.DEVELOPER_DIR, release.jobs.build.env.DEVELOPER_DIR);
 assert.ok(native.on.workflow_dispatch && native.on.workflow_call);
 const nativeSteps = native.jobs.macos.steps.map(step => step.run || "").join("\n");
 for (const gate of ["shoggoth-packaged-runtime-smoke.mjs", "shoggoth-memory-e5-packaged.cjs",
-  "shoggoth-quarantined-first-launch.cjs", "stapler validate", "codesign --verify --deep --strict",
+  "shoggoth-quarantined-first-launch.cjs", "release-stapler.cjs validate", "codesign --verify --deep --strict",
   "verify-app-update-release.mjs", "spctl --assess", "hdiutil verify"]) assert.ok(nativeSteps.includes(gate));
 console.log("App update release contract unit: PASS");

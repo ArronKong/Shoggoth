@@ -138,6 +138,7 @@ jobs:
           node scripts/desktop-app-update-unit.cjs
           node scripts/app-update-release-contract-unit.cjs
           node --test scripts/release-draft-unit.cjs
+          node --test scripts/release-stapler-unit.cjs
           node scripts/check-release-private-keys-unit.cjs
           node scripts/adhoc-sign-unit.cjs
           node scripts/release-package-checks-unit.cjs

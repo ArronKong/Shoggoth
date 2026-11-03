@@ -6,6 +6,7 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { assertAcceptedReceipt, buildNotarytoolArgs } = require("./notarize.cjs");
 const { recordBuild, packageNames } = require("./release-draft.cjs");
+const { runStapler } = require("./release-stapler.cjs");
 
 async function main() {
   const arch = process.env.BUILD_ARCH;
@@ -40,8 +41,8 @@ async function main() {
   });
   fs.writeFileSync(receiptPath, result);
   assertAcceptedReceipt(result);
-  run("/usr/bin/xcrun", ["stapler", "staple", dmg]);
-  run("/usr/bin/xcrun", ["stapler", "validate", dmg]);
+  runStapler("staple", dmg);
+  runStapler("validate", dmg);
   run("/usr/bin/hdiutil", ["verify", dmg]);
   fs.copyFileSync(`${app}.notarization.json`, path.join(evidence, "app-notarization.json"));
   await recordBuild(path.join(root, "dist"), version, arch, sha, process.env.GITHUB_RUN_ID,

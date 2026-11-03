@@ -1,7 +1,7 @@
 {
   "name": "shoggoth-desktop",
   "productName": "Shoggoth",
-  "version": "0.8.274",
+  "version": "0.8.275",
   "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
   "private": true,
   "license": "Apache-2.0",

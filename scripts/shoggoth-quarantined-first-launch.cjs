@@ -10,6 +10,7 @@ const { execFileSync, spawn } = require("node:child_process");
 const { randomUUID, createHash } = require("node:crypto");
 const { performance } = require("node:perf_hooks");
 const { setTimeout: delay } = require("node:timers/promises");
+const { runStapler } = require("./release-stapler.cjs");
 
 function command(executable, args, timeout = 15000) {
   try {
@@ -169,7 +170,7 @@ async function main() {
   const gatekeeper = command("/usr/sbin/spctl", ["--status"]).trim();
   assert.equal(gatekeeper, "assessments enabled", "GUI proof requires enforced Gatekeeper");
   command("/usr/bin/codesign", ["--verify", "--deep", "--strict", sourceApp], 180000);
-  command("/usr/bin/xcrun", ["stapler", "validate", sourceApp], 60000);
+  runStapler("validate", sourceApp);
   command("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=4", sourceApp], 60000);
   fs.mkdirSync(output, { recursive: false, mode: 0o700 });
   const evidence = { version: marker.version, launch: "LaunchServices open -n; no runtime role or data-root override",
@@ -189,7 +190,7 @@ async function main() {
       assert.equal(hash(app), hash(sourceApp), "Installed draft payload differs");
     }
     command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app], 180000);
-    command("/usr/bin/xcrun", ["stapler", "validate", app], 60000);
+    runStapler("validate", app);
     evidence.installedPayloadMatchesDraft = true;
     const quarantine = `0001;${Math.floor(Date.now() / 1000).toString(16)};ShoggothReleaseVerification;${randomUUID()}`;
     command("/usr/bin/xattr", ["-w", "com.apple.quarantine", quarantine, app]);
