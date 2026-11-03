@@ -22,17 +22,26 @@ assert.ok(builder.mac.target.some((target) => target.target === "zip"
 const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "release.yml"), "utf8");
 assert.deepEqual(Object.keys(yaml.load(workflow).on), ["workflow_dispatch"],
   "signed release must require a deliberate manual trigger");
-for (const contract of [
-  /REPOSITORY_VISIBILITY[\s\S]*"public"/u,
-  /SHOGGOTH_CODESIGN_MODE:\s*developer-id/u,
-  /SHOGGOTH_EXPECT_NOTARIZED:\s*"1"/u,
-  /electron-builder --mac --publish always/u,
-  /verify-app-update-release\.mjs/u,
-  /shoggoth-packaged-runtime-smoke\.mjs --spike/u,
-  /gh release view[\s\S]*isDraft/u,
-  /gh release edit[\s\S]*--draft=false/u,
-]) assert.match(workflow, contract);
-assert.ok(workflow.indexOf("verify-app-update-release.mjs") < workflow.indexOf("--draft=false"),
-  "release must be verified before draft promotion");
-
+const release = yaml.load(workflow);
+assert.deepEqual(release.permissions, { contents: "read" });
+assert.equal(release.concurrency.group, "shoggoth-release-${{ inputs.tag }}");
+assert.equal(release.jobs.build.strategy["fail-fast"], false);
+assert.deepEqual(release.jobs.build.strategy.matrix.include.map(row => [row.arch, row.runner]),
+  [["arm64", "macos-latest"], ["x64", "macos-15-intel"]]);
+assert.deepEqual(release.jobs.build.needs, ["validate", "source-ci"]);
+assert.equal(release.jobs["source-ci"].uses, "./.github/workflows/ci.yml");
+assert.equal(release.jobs["native-verification"].uses, "./.github/workflows/verify-signed-draft.yml");
+assert.deepEqual(release.jobs["accepted-draft"].needs, ["validate", "draft", "native-verification"]);
+assert.equal(release.jobs.build.env.SHOGGOTH_CODESIGN_MODE, "developer-id");
+assert.equal(release.jobs.build.env.SHOGGOTH_EXPECT_NOTARIZED, "1");
+assert.match(workflow, /electron-builder --mac zip --"\$BUILD_ARCH" --publish never/u);
+assert.match(workflow, /shoggoth-source-parity\.cjs/u);
+assert.match(workflow, /release-draft\.cjs confirm/u);
+assert.doesNotMatch(workflow, /--draft=false|--publish always|--clobber/u);
+const native = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/verify-signed-draft.yml"), "utf8"));
+assert.ok(native.on.workflow_dispatch && native.on.workflow_call);
+const nativeSteps = native.jobs.macos.steps.map(step => step.run || "").join("\n");
+for (const gate of ["shoggoth-packaged-runtime-smoke.mjs", "shoggoth-memory-e5-packaged.cjs",
+  "shoggoth-quarantined-first-launch.cjs", "stapler validate", "codesign --verify --deep --strict",
+  "verify-app-update-release.mjs", "spctl --assess", "hdiutil verify"]) assert.ok(nativeSteps.includes(gate));
 console.log("App update release contract unit: PASS");

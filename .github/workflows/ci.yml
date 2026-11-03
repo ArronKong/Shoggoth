@@ -1,5 +1,6 @@
 name: CI
 on:
+  workflow_call:
   push:
   pull_request:
 permissions:
@@ -94,6 +95,7 @@ jobs:
           node scripts/export-public-source-unit.mjs
           node scripts/desktop-app-update-unit.cjs
           node scripts/app-update-release-contract-unit.cjs
+          node --test scripts/release-draft-unit.cjs
           node scripts/check-release-private-keys-unit.cjs
           node scripts/adhoc-sign-unit.cjs
           node scripts/release-package-checks-unit.cjs

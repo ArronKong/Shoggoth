@@ -2,7 +2,7 @@
 
 本文件是每次公开源码更新和正式 macOS 发布的检查清单。开发目录与 `output/public-source` 是两个独立的 Git 仓库；公开仓库只接收审核后的源码快照，不能推送开发目录的 Git 历史。Shoggoth 自有代码采用 Apache-2.0；第三方组件保留各自的许可证和署名。
 
-当前可重复执行的正式发布路径是**本机 Developer ID 签名、公证，GitHub 草稿 Release 验收后发布**。`.github/workflows/release.yml` 仅供手动触发；只有配置好所需 Actions secrets、修复并实测整条工作流后，才能将它用作正式发布路径。推送版本标签本身不会自动打包或发布。
+当前可重复执行的正式发布路径是**本机 Developer ID 签名、公证，GitHub 草稿 Release 验收后发布**。`.github/workflows/release.yml` 提供一次手动触发的双架构草稿流水线；通过全部自动验收后仍保留草稿。首次端到端验证需要先配置下文列出的签名与公证凭据。推送版本标签本身不会自动打包或发布。
 
 ## 1. 冻结本次源码
 
@@ -81,4 +81,20 @@ node scripts/local-signing.cjs run -- npm run dist:arm64   # 用该身份打包
 
 ## GitHub Actions 自动发布路径
 
-`Signed macOS release` 是独立的手动触发工作流，要求公开仓库和七项 Actions secrets：`MACOS_CERTIFICATE_BASE64`、`MACOS_CERTIFICATE_PASSWORD`、`MACOS_SIGNING_IDENTITY`、`APPLE_API_KEY_BASE64`、`APPLE_API_KEY_ID`、`APPLE_API_ISSUER`、`APPLE_TEAM_ID`。配置凭据之前以及完整端到端实测通过之前，正式版仍按上面的本机签名与草稿验收路径发布。不能为了启用自动化，把本机私钥直接加入 Git 仓库。
+`Signed macOS draft` 以已审核的公开源码标签为输入。选择的工作流分支或标签必须与该版本标签指向同一提交，`tag` 必须等于 `v<package.json version>`。按本文件前述流程完成源码审核和公开 PR 后，用下面的命令触发一次即可。
+
+```bash
+gh workflow run release.yml --repo ArronKong/Shoggoth --ref v<VERSION> -f tag=v<VERSION>
+```
+
+1. 固定源码 SHA，拒绝已公开版本和归属不符的草稿，重新扫描源码，并调用同提交的完整 `CI` 工作流。源码 CI 失败会阻止签名。
+2. 在 `macos-latest` arm64 与 `macos-15-intel` x64 上并行安装锁定依赖、构建、签名及公证。保留 App 和 DMG 的四次独立公证、Accepted、staple/validate、许可证、包内私钥和源码一致性门禁。凭据仅用于签名 job，并在退出时清理临时文件和钥匙串。
+3. 汇总两个架构的构建收据，核对源码 SHA、运行编号、架构和资产摘要。合并 `latest-mac.yml` 的两个 ZIP 条目并保留 Intel fallback，重新计算 SHA-512 与全部七项资产的 SHA-256 清单。
+4. 创建带操作标记的草稿，通过 Release ID 上传八项资产并读取远端字节核对。部分上传可以重试，只有同源码、同归属、同字节的已有资产才能复用。冲突、来源不明或已公开的资产会停止流程，需先调查。
+5. 调用 `verify-signed-draft.yml` 的双架构原生验收，继续覆盖 ZIP、Runtime、离线 E5、签名、公证、Gatekeeper、DMG、隔离首次启动、窗口、Renderer、Service 与自然退出，并保存截图。最后将草稿状态和资产 ID、大小、摘要与已验字节收据再次核对，生成 `accepted-draft` artifact。
+
+同一标签的运行通过 concurrency 串行化。已成功上传的架构产物属于同一 Actions run，失败 job 可单独重跑。若重新构建导致字节改变，而草稿已有旧字节，上传会停止并保留现场。新的源码提交应使用新的版本标签。完整流水线成功仅代表该草稿通过上述自动门禁；正式公开仍需要单独授权及其它适用的生产验收。
+
+仓库需要七项 Actions secrets，值必须通过 GitHub 的加密 Secrets 设置渠道配置。`MACOS_CERTIFICATE_BASE64` 是带私钥的 Developer ID PKCS#12，`MACOS_CERTIFICATE_PASSWORD` 是其密码，`MACOS_SIGNING_IDENTITY` 是该证书身份，`APPLE_API_KEY_BASE64` 是 App Store Connect API 私钥，另有 `APPLE_API_KEY_ID`、`APPLE_API_ISSUER`、`APPLE_TEAM_ID`。签名私钥移交给 GitHub 托管 runner 前须取得用户的相应授权。缺失任一凭据就停止该构建。
+
+独立的 `Verify notarized macOS draft` 手动验收入口继续接受 `tag` 和 `release_id`，用于复验已有草稿。

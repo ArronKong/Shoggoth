@@ -12,6 +12,18 @@ on:
         required: true
         type: string
 
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      release_id:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+
 permissions:
   contents: write
 
@@ -47,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.source_sha || inputs.tag }}
           persist-credentials: false
 
       - uses: actions/setup-node@v4
@@ -58,6 +70,7 @@ jobs:
       - name: Verify first-launch harness and preserve tagged product source
         env:
           VERIFICATION_HARNESS_SHA: ${{ github.sha }}
+          EXPECTED_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           node <<'NODE'
           const assert = require('node:assert/strict');
@@ -67,6 +80,7 @@ jobs:
           assert.equal(process.arch, process.env.SHOGGOTH_DRAFT_ARCH);
           const git = args => execFileSync('git', args, { encoding: 'utf8', timeout: 120000 }).trim();
           const source = git(['rev-parse', 'HEAD']);
+          if (process.env.EXPECTED_SOURCE_SHA) assert.equal(source, process.env.EXPECTED_SOURCE_SHA);
           const harness = process.env.VERIFICATION_HARNESS_SHA;
           assert.match(harness, /^[a-f0-9]{40}$/);
           if (source !== harness) git(['fetch', '--no-tags', '--depth=1', 'origin', harness]);
@@ -138,7 +152,7 @@ jobs:
           const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
           assert.match(sourceCommit, /^[a-f0-9]{40}$/);
           assert.equal(release.target_commitish, sourceCommit, 'Draft target differs from the checked out version tag');
-          for (const name of [`Shoggoth-${version}-${zipSuffix}.zip`, `Shoggoth-${version}-${arch}.dmg`, 'SHA256SUMS.txt']) {
+          for (const name of [`Shoggoth-${version}-${zipSuffix}.zip`, `Shoggoth-${version}-${arch}.dmg`, 'SHA256SUMS.txt', 'latest-mac.yml', `Shoggoth-${version}-${zipSuffix}.zip.blockmap`]) {
             const asset = release.assets.find(item => item.name === name);
             assert.ok(asset, `Missing draft asset: ${name}`);
             const response = await fetch(`${base}/releases/assets/${asset.id}`, {
@@ -171,6 +185,7 @@ jobs:
           VERSION="$(node -p 'require("./package.json").version')"
           APP="$GITHUB_WORKSPACE/dist/$SHOGGOTH_DRAFT_APP_SUBDIR/Shoggoth.app"
           DMG="dist/Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ARCH}.dmg"
+          node scripts/verify-app-update-release.mjs --arch "$SHOGGOTH_DRAFT_ARCH"
           node scripts/shoggoth-packaged-runtime-smoke.mjs "--spike-$SHOGGOTH_DRAFT_ARCH"
           node scripts/shoggoth-memory-e5-packaged.cjs --app "$APP" --output "$RUNNER_TEMP/e5-$SHOGGOTH_DRAFT_ARCH-result.json"
           hdiutil verify "$DMG"
@@ -194,7 +209,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.evidence }}-quarantined-first-launch
+          name: ${{ matrix.evidence }}-quarantined-first-launch-attempt-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/shoggoth-first-launch/
             ${{ runner.temp }}/e5-${{ matrix.arch }}-result.json
