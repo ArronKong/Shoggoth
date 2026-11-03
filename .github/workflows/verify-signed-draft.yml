@@ -97,7 +97,8 @@ jobs:
           const allowed = ['.github/workflows/verify-signed-draft.yml',
             'scripts/shoggoth-quarantined-first-launch.cjs', 'scripts/shoggoth-quarantined-first-launch-unit.cjs',
             'scripts/shoggoth-memory-batch-smoke.cjs', 'scripts/shoggoth-active-memory-diagnostics-regression.cjs',
-            'scripts/shoggoth-packaged-runtime-smoke.mjs', 'scripts/release-stapler.cjs', 'scripts/release-stapler-unit.cjs'];
+            'scripts/shoggoth-packaged-runtime-smoke.mjs', 'scripts/release-stapler.cjs', 'scripts/release-stapler-unit.cjs',
+            'scripts/app-update-release-contract-unit.cjs'];
           assert.ok(changedPaths.every(name => allowed.includes(name)), 'Harness differs in product or unrelated files');
           const hashes = {};
           for (const name of allowed.slice(1)) {

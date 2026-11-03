@@ -53,6 +53,6 @@ const native = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/veri
 assert.ok(native.on.workflow_dispatch && native.on.workflow_call);
 const nativeSteps = native.jobs.macos.steps.map(step => step.run || "").join("\n");
 for (const gate of ["shoggoth-packaged-runtime-smoke.mjs", "shoggoth-memory-e5-packaged.cjs",
-  "shoggoth-quarantined-first-launch.cjs", "stapler validate", "codesign --verify --deep --strict",
+  "shoggoth-quarantined-first-launch.cjs", "release-stapler.cjs validate", "codesign --verify --deep --strict",
   "verify-app-update-release.mjs", "spctl --assess", "hdiutil verify"]) assert.ok(nativeSteps.includes(gate));
 console.log("App update release contract unit: PASS");
