@@ -4,6 +4,8 @@
 
 自动化入口有两种。`.github/workflows/release.yml` 使用两台 GitHub 托管 Mac 并行签名、公证；`scripts/release-local.cjs` 使用本机钥匙串依次构建两个架构，再调用 GitHub 双架构原生验收。两者共用构建、公证、资产收据和验收逻辑，通过后都保留草稿。正式公开仍是独立操作。云端路径需要配置下文的发布环境 Secrets，本机路径使用已有钥匙串身份和公证 profile。推送版本标签本身不会自动打包或发布。
 
+**公开边界：**草稿 Release 的可见性限制不覆盖公开仓库的源码、Actions 日志和工作流 artifacts；这些内容均应按可公开材料审核。源码推送前的人工隐私复核不能由推送后的 CI 代替。自动扫描覆盖常见密钥与凭据模式，不保证识别全部姓名、账号、对话或二进制元数据。打包输入来自固定公开标签和明确资源列表，不读取本机用户运行数据目录。GitHub Secrets 会在获授权的签名 job 内解密，日志自动遮罩不是绝对保证；不得打印凭据、上传钥匙串或把完整 runner 临时目录作为 artifact。签名包中的公开开发者证书身份是正常公开信息，私钥不属于包内容。
+
 ## 1. 冻结本次源码
 
 1. 确定版本号、待发布的开发提交、工作区改动和发行说明。只纳入本次版本的改动；其他任务的未提交工作须隔离。记录公开仓库当前 `main`、拟发布的源码提交和导出清单。
@@ -88,7 +90,7 @@ gh workflow run release.yml --repo ArronKong/Shoggoth --ref v<VERSION> -f tag=v<
 ```
 
 1. 固定源码 SHA，拒绝已公开版本和归属不符的草稿，重新扫描源码，并调用同提交的完整 `CI` 工作流。源码 CI 失败会阻止签名。
-2. 在 `macos-latest` arm64 与 `macos-15-intel` x64 上并行安装锁定依赖、构建、签名及公证。保留 App 和 DMG 的四次独立公证、Accepted、staple/validate、许可证、包内私钥和源码一致性门禁。凭据仅用于签名 job，并在退出时清理临时文件和钥匙串。
+2. 在 `macos-latest` arm64 与 `macos-15-intel` x64 上并行安装锁定依赖、构建、签名及公证。固定选择 Xcode 26.3，先验证 Icon Composer 工具链。临时钥匙串加入搜索列表，Apple 公开中间证书核对固定摘要后导入，不改变系统信任设置；验证指定 Developer ID、Team ID 并实际签名一个临时探针后才打包。保留 App 和 DMG 的四次独立公证、Accepted、staple/validate、许可证、包内私钥和源码一致性门禁。凭据仅用于签名 job，退出时恢复钥匙串搜索列表并清理临时文件和钥匙串。
 3. 汇总两个架构的构建收据，核对源码 SHA、运行编号、架构和资产摘要。合并 `latest-mac.yml` 的两个 ZIP 条目并保留 Intel fallback，重新计算 SHA-512 与全部七项资产的 SHA-256 清单。
 4. 创建带操作标记的草稿，通过 Release ID 上传八项资产并读取远端字节核对。部分上传可以重试，只有同源码、同归属、同字节的已有资产才能复用。冲突、来源不明或已公开的资产会停止流程，需先调查。
 5. 调用 `verify-signed-draft.yml` 的双架构原生验收，继续覆盖 ZIP、Runtime、离线 E5、签名、公证、Gatekeeper、DMG、隔离首次启动、窗口、Renderer、Service 与自然退出，并保存截图。最后将草稿状态和资产 ID、大小、摘要与已验字节收据再次核对，生成 `accepted-draft` artifact。

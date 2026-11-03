@@ -35,6 +35,19 @@ assert.deepEqual(release.jobs["accepted-draft"].needs, ["validate", "draft", "na
 assert.equal(release.jobs.build.env.SHOGGOTH_CODESIGN_MODE, "developer-id");
 assert.equal(release.jobs.build.env.SHOGGOTH_EXPECT_NOTARIZED, "1");
 assert.equal(release.jobs.build.environment, "macos-signing");
+assert.equal(release.jobs.build.env.DEVELOPER_DIR, "/Applications/Xcode_26.3.app/Contents/Developer");
+const buildSteps = release.jobs.build.steps;
+const importStep = buildSteps.find(step => step.name === "Import Developer ID certificate and Notary credentials");
+const packageStepIndex = buildSteps.findIndex(step => step.run === "node scripts/release-build.cjs");
+assert.ok(buildSteps.indexOf(importStep) < packageStepIndex, "Signing readiness must fail before packaging");
+assert.match(importStep.run, /'find-identity', '-v', '-p', 'codesigning'/u);
+assert.match(importStep.run, /codesign --verify --strict/u);
+assert.match(importStep.run, /shoggoth-keychain-search-list\.json/u);
+assert.doesNotMatch(importStep.run, /add-trusted-cert|trustRoot|trustAsRoot/u);
+const cleanupStep = buildSteps.find(step => step.name === "Remove temporary signing credentials");
+assert.equal(cleanupStep.if, "always()");
+assert.match(cleanupStep.run, /'list-keychains', '-d', 'user', '-s'/u);
+assert.match(cleanupStep.run, /security delete-keychain/u);
 for (const workflowName of ["release.yml", "verify-signed-draft.yml", "ci.yml"]) {
   const parsed = yaml.load(fs.readFileSync(path.join(root, ".github/workflows", workflowName), "utf8"));
   for (const job of Object.values(parsed.jobs)) for (const step of job.steps || []) {
