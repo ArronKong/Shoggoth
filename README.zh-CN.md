@@ -1,29 +1,67 @@
-# Shoggoth
+<p align="center">
+  <img src="app/manage-ui/public/logo.png" width="96" height="96" alt="Shoggoth 标志" />
+</p>
 
-[English](README.md) | **简体中文**
+<h1 align="center">Shoggoth</h1>
 
-Shoggoth 是一款面向 macOS 的本地 AI Agent 工作台。它把聊天、模型与账号、代理管理、定时任务、技能、用量统计和灵感便签放在同一个桌面应用中。
+<p align="center"><strong>macOS 上的本地 AI Agent 工作台</strong></p>
+<p align="center">和 Agent 对话，把多个 Agent 拉进同一个群聊，也能把重复工作设成定时任务。</p>
 
-你可以通过统一界面使用本地代理，连接 OpenClaw、Hermes 和已启用的 CLI 后端，管理不同代理的工作与对话。应用基于 Electron 和 React，通过本地代理服务与各个后端通信。
+<p align="center">
+  <a href="https://github.com/ArronKong/Shoggoth/releases/latest"><strong>下载 macOS 版</strong></a>
+  · <a href="#产品导览">产品导览</a>
+  · <a href="#从源码运行">从源码运行</a>
+  · <a href="README.md">English</a>
+</p>
+
+<p align="center">macOS 13 或更新版本 · Apple 芯片与 Intel · <a href="LICENSE">Apache-2.0</a></p>
+
+<p align="center">
+  <a href=".github/readme-assets/dashboard.png"><img src=".github/readme-assets/dashboard.png" width="100%" alt="Shoggoth 仪表盘，显示 Token 用量、成本、Agent 活动和最近产物" /></a>
+</p>
+
+## 快速上手
+
+1. 在[最新发布](https://github.com/ArronKong/Shoggoth/releases/latest)里下载对应的 DMG。打开「关于本机」：显示 Apple 芯片就选 arm64，显示 Intel 处理器就选 x64。
+2. 打开 DMG，将 Shoggoth 拖入「应用程序」。
+3. 在 Shoggoth 的「模型」页配置模型和账号，然后打开「聊天」。如果已经安装了 OpenClaw 或 Hermes，可以在「设置」里连接。
 
 ## 可以做什么
 
-- **与代理聊天**：在统一界面中切换代理、管理会话并查看对话记录。
-- **管理模型与账号**：集中配置模型供应商、模型选择和账号授权。
-- **管理代理**：查看代理状态，配置不同代理使用的后端与模型。
-- **安排定时任务**：创建和管理定时任务，查看执行记录。
-- **管理技能与工具**：查看和管理后端提供的 Skills 与 CLI 工具。
-- **查看用量**：通过用量页面了解模型的 Token 使用情况。
-- **记录灵感**：用灵感便签收集想法、整理内容并归档。
+- **和多个 Agent 协作。** 在单聊里处理具体任务，也可以启用群聊，让多个 Agent 在同一个会话里协作。
+- **安排定时任务。** 给重复工作设置执行时间，并在桌面应用里回看运行记录。
+- **管理模型和工具。** 集中配置模型和账号、连接支持的运行时，并管理 Skills 和 MCP 连接器。
 
-## 环境要求
+Agent 服务在本机运行。根据你的配置，模型请求和连接的工具可能访问外部服务。
 
-- 桌面应用需要 **macOS 13 或更新版本**，支持 Apple Silicon 和 Intel。
+## 产品导览
+
+<table>
+<tr>
+<td width="33%" valign="top">
+<a href=".github/readme-assets/chat.png"><img src=".github/readme-assets/chat.png" width="100%" alt="Agent 聊天界面，展示一份每日简报" /></a><br />
+<strong>聊天</strong><br />
+<sub>切换 Agent，回看各自的对话。</sub>
+</td>
+<td width="33%" valign="top">
+<a href=".github/readme-assets/cron.png"><img src=".github/readme-assets/cron.png" width="100%" alt="Shoggoth 定时任务的周历视图" /></a><br />
+<strong>定时任务</strong><br />
+<sub>在周历上查看重复任务的执行时间。</sub>
+</td>
+<td width="33%" valign="top">
+<a href=".github/readme-assets/spark-notes.png"><img src=".github/readme-assets/spark-notes.png" width="100%" alt="灵感便签的输入区和已保存的便签" /></a><br />
+<strong>灵感便签</strong><br />
+<sub>随手记录想法，之后再回来整理。</sub>
+</td>
+</tr>
+</table>
+
+## 从源码运行
+
+- **macOS 13 或更新版本**，支持 Apple 芯片和 Intel。
 - 从源码开发需要 **Node.js 22.22.3 或更新版本**及 npm；打包后的应用自带所需运行时。
 - 安装依赖和下载固定版本的运行时需要联网。
 - 根据使用的功能，准备相应账号，以及需要连接的外部 CLI 或后端。仅构建界面、运行隔离测试时不需要登录这些账号。
-
-## 从源码运行
 
 下载或克隆仓库后，在项目根目录执行：
 
