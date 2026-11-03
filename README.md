@@ -1,21 +1,68 @@
-# Shoggoth
+<p align="center">
+  <img src="app/manage-ui/public/logo.png" width="96" height="96" alt="Shoggoth logo" />
+</p>
 
-**English** | [简体中文](README.zh-CN.md)
+<h1 align="center">Shoggoth</h1>
 
-Shoggoth is a local macOS desktop workspace for AI agents. It brings chat,
-models, agent management, scheduled tasks, skills, usage and inspiration notes
-into one Electron application. The React interface communicates with a local
-agent service and optional OpenClaw, Hermes and native CLI integrations.
+<p align="center"><strong>A local workspace for AI agents on macOS</strong></p>
+<p align="center">Chat with your agents, bring them into one conversation, and schedule recurring work.</p>
 
-## Requirements
+<p align="center">
+  <a href="https://github.com/ArronKong/Shoggoth/releases/latest"><strong>Download for macOS</strong></a>
+  · <a href="#product-tour">Product tour</a>
+  · <a href="#build-from-source">Build from source</a>
+  · <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-- macOS 13 or newer on Apple Silicon or Intel for the desktop app.
+<p align="center">macOS 13+ · Apple Silicon and Intel · <a href="LICENSE">Apache-2.0</a></p>
+
+<p align="center">
+  <a href=".github/readme-assets/dashboard.png"><img src=".github/readme-assets/dashboard.png" width="100%" alt="Shoggoth Dashboard showing token usage, cost, agent activity, and recent files" /></a>
+</p>
+
+## Get started
+
+1. Open the [latest release](https://github.com/ArronKong/Shoggoth/releases/latest) and download the DMG for your Mac. In **About This Mac**, **Chip** means Apple Silicon (arm64); an Intel **Processor** means Intel (x64).
+2. Open the DMG and drag Shoggoth into Applications.
+3. In Shoggoth, configure a model and account in **Models**, then open **Chat**. To use an existing OpenClaw or Hermes installation, connect it in **Settings**.
+
+## What you can do
+
+- **Work with several agents.** Use individual chats for focused work, or enable group chat to bring multiple agents into one conversation.
+- **Run recurring tasks.** Set a schedule and review past runs from the desktop.
+- **Manage models and tools.** Configure models and accounts, connect supported runtimes, and manage skills and MCP connectors from the same app.
+
+The desktop app runs a local agent service. Model requests and connected tools may use external services, depending on what you configure.
+
+## Product tour
+
+<table>
+<tr>
+<td width="33%" valign="top">
+<a href=".github/readme-assets/chat.png"><img src=".github/readme-assets/chat.png" width="100%" alt="Chat with an agent and read a daily digest" /></a><br />
+<strong>Chat</strong><br />
+<sub>Switch between agents and revisit their conversations.</sub>
+</td>
+<td width="33%" valign="top">
+<a href=".github/readme-assets/cron.png"><img src=".github/readme-assets/cron.png" width="100%" alt="Weekly calendar of scheduled jobs in Shoggoth" /></a><br />
+<strong>Cron</strong><br />
+<sub>See when recurring jobs are scheduled to run.</sub>
+</td>
+<td width="33%" valign="top">
+<a href=".github/readme-assets/spark-notes.png"><img src=".github/readme-assets/spark-notes.png" width="100%" alt="Spark Notes composer and a grid of saved notes" /></a><br />
+<strong>Spark Notes</strong><br />
+<sub>Capture ideas and come back to them later.</sub>
+</td>
+</tr>
+</table>
+
+## Build from source
+
+- macOS 13 or newer on Apple Silicon or Intel.
 - Node.js 22.22.3 or newer and npm. The packaged app carries its own runtime.
 - Internet access during dependency and pinned runtime downloads.
 - Accounts and any external CLI/backend you choose to connect. They are not
   required to build the UI or run the isolated tests.
-
-## Build from source
 
 From the repository root:
 
