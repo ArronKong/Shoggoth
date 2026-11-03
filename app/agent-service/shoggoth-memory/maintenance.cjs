@@ -87,15 +87,26 @@ class MemoryMaintenance {
     }
     return { ...row, schedule };
   }
+  // One Profile whose config cannot be read (for example a broken provider
+  // credential) must not stop Dreaming for every other Profile, or leave the
+  // scheduler without a wake-up time. Skip it and log why.
+  scheduleOrSkip(profile) {
+    try { return this.schedule(profile); }
+    catch (error) {
+      const code = typeof error?.code === "string" ? error.code : "MEMORY_DREAM_SCHEDULE_FAILED";
+      this.service.logger?.warn?.(`shoggoth-memory: dreaming schedule skipped [profile=${profile.id},code=${code}]`);
+      return null;
+    }
+  }
   nextDueAt() {
     if (!this.service.opened || this.controller?.signal.aborted) return null;
-    return this.service.profiles().map(profile => this.schedule(profile)?.next_at).filter(value => Number.isSafeInteger(value))
+    return this.service.profiles().map(profile => this.scheduleOrSkip(profile)?.next_at).filter(value => Number.isSafeInteger(value))
       .sort((a, b) => a - b)[0] ?? null;
   }
   tick(now = this.service.now()) {
     if (!this.service.opened || this.controller?.signal.aborted) return;
     for (const profile of this.service.profiles()) {
-      const row = this.schedule(profile);
+      const row = this.scheduleOrSkip(profile);
       if (!row || row.next_at > now || this.service.jobs.has(profile.id) || this.pending.has(`dream:${profile.id}`)) continue;
       const db = this.service.database.db;
       db.prepare("UPDATE memory_dream_schedule SET next_at=?,state='running',last_error=NULL WHERE profile_id=?")
