@@ -96,7 +96,8 @@ jobs:
           const changedPaths = git(['diff', '--name-only', source, harness]).split('\n').filter(Boolean).sort();
           const allowed = ['.github/workflows/verify-signed-draft.yml',
             'scripts/shoggoth-quarantined-first-launch.cjs', 'scripts/shoggoth-quarantined-first-launch-unit.cjs',
-            'scripts/shoggoth-memory-batch-smoke.cjs', 'scripts/shoggoth-active-memory-diagnostics-regression.cjs'];
+            'scripts/shoggoth-memory-batch-smoke.cjs', 'scripts/shoggoth-active-memory-diagnostics-regression.cjs',
+            'scripts/shoggoth-packaged-runtime-smoke.mjs', 'scripts/release-stapler.cjs', 'scripts/release-stapler-unit.cjs'];
           assert.ok(changedPaths.every(name => allowed.includes(name)), 'Harness differs in product or unrelated files');
           const hashes = {};
           for (const name of allowed.slice(1)) {
@@ -105,6 +106,7 @@ jobs:
             fs.writeFileSync(name, bytes);
           }
           execFileSync(process.execPath, ['--test', allowed[2]], { stdio: 'inherit', timeout: 30000 });
+          execFileSync(process.execPath, ['--test', 'scripts/release-stapler-unit.cjs'], { stdio: 'inherit', timeout: 30000 });
           assert.equal(git(['rev-parse', 'HEAD']), source);
           fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'verification-harness.json'), JSON.stringify({
             sourceCommit: source, harnessCommit: harness, architecture: process.arch,
@@ -187,26 +189,6 @@ jobs:
           )
           ditto -x -k "dist/Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ZIP_SUFFIX}.zip" "dist/$SHOGGOTH_DRAFT_APP_SUBDIR"
 
-      - name: Diagnose the unchanged App ticket with both Apple toolchains
-        shell: bash
-        run: |
-          APP="$GITHUB_WORKSPACE/dist/$SHOGGOTH_DRAFT_APP_SUBDIR/Shoggoth.app"
-          for version in 16.4 26.3; do
-            developer="/Applications/Xcode_${version}.app/Contents/Developer"
-            if [[ ! -d "$developer" ]]; then continue; fi
-            for scope in inherited minimal; do
-              echo "Ticket diagnostic: Xcode $version / $scope environment"
-              status=0
-              if [[ "$scope" = minimal ]]; then
-                env -i PATH="$PATH" TMPDIR="$TMPDIR" DEVELOPER_DIR="$developer" /usr/bin/xcrun stapler validate -v "$APP" || status=$?
-              else
-                DEVELOPER_DIR="$developer" /usr/bin/xcrun stapler validate -v "$APP" || status=$?
-              fi
-              echo "Ticket diagnostic exit: $status"
-            done
-          done
-          # Diagnostics do not replace the mandatory native gates below.
-
       - name: Verify App and DMG on native hardware
         shell: bash
         run: |
@@ -218,7 +200,7 @@ jobs:
           node scripts/shoggoth-packaged-runtime-smoke.mjs "--spike-$SHOGGOTH_DRAFT_ARCH"
           node scripts/shoggoth-memory-e5-packaged.cjs --app "$APP" --output "$RUNNER_TEMP/e5-$SHOGGOTH_DRAFT_ARCH-result.json"
           hdiutil verify "$DMG"
-          xcrun stapler validate "$DMG"
+          node scripts/release-stapler.cjs validate "$DMG"
           MOUNT="$RUNNER_TEMP/shoggoth-$SHOGGOTH_DRAFT_ARCH-dmg"
           mkdir -p "$MOUNT"
           trap 'hdiutil detach "$MOUNT" >/dev/null 2>&1 || true' EXIT
@@ -227,7 +209,7 @@ jobs:
           codesign --verify --deep --strict "$MOUNT/Shoggoth.app"
           codesign -dv --verbose=4 "$MOUNT/Shoggoth.app" 2>&1 |
             grep -Fx "TeamIdentifier=$SHOGGOTH_EXPECT_TEAM_ID"
-          xcrun stapler validate "$MOUNT/Shoggoth.app"
+          node scripts/release-stapler.cjs validate "$MOUNT/Shoggoth.app"
           spctl --assess --type execute --verbose=4 "$MOUNT/Shoggoth.app"
           cmp "$APP/Contents/Resources/app.asar" "$MOUNT/Shoggoth.app/Contents/Resources/app.asar"
 
