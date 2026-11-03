@@ -25,6 +25,7 @@ async function main() {
   const app = path.join(root, "dist", arch === "arm64" ? "mac-arm64" : "mac", "Shoggoth.app");
   const evidence = path.join(root, "dist", `signing-${arch}`);
   fs.mkdirSync(evidence, { recursive: true });
+  run(process.execPath, ["scripts/shoggoth-host-capability-coverage-unit.cjs"]);
   run("npx", ["--no-install", "electron-builder", "--mac", "zip", `--${arch}`, "--publish", "never"], 90 * 60_000);
   run(process.execPath, ["scripts/shoggoth-source-parity.cjs", path.join(app, "Contents/Resources/app.asar"),
     path.join(evidence, "source-parity.json"), arch]);

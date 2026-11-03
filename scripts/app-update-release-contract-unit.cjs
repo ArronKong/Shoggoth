@@ -43,7 +43,7 @@ for (const workflowName of ["release.yml", "verify-signed-draft.yml", "ci.yml"])
 }
 assert.match(workflow, /node scripts\/release-build\.cjs/u);
 const build = fs.readFileSync(path.join(root, "scripts/release-build.cjs"), "utf8");
-for (const gate of ["electron-builder", '"--publish", "never"', "shoggoth-source-parity.cjs",
+for (const gate of ["electron-builder", '"--publish", "never"', "shoggoth-host-capability-coverage-unit.cjs", "shoggoth-source-parity.cjs",
   "verify-app-update-release.mjs", "create-macos-dmg.mjs", "buildNotarytoolArgs",
   "assertAcceptedReceipt(result)", '"stapler", "staple"', '"stapler", "validate"',
   '"/usr/bin/hdiutil", ["verify"', "recordBuild("]) assert.ok(build.includes(gate));

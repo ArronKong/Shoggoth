@@ -24,12 +24,13 @@ test("local input requires an exact version and keeps default notarization in Ap
 
 test("source signing waits for exact-source CI and rejects failed or unrelated success", async () => {
   let count = 0;
-  const client = { request: async () => response({ workflow_runs: [{ id: 12, head_sha: sha,
+  const client = { request: async () => response({ workflow_runs: [{ id: 12, head_sha: sha, event: "push",
     status: ++count === 1 ? "in_progress" : "completed", conclusion: count === 1 ? null : "success" }] }) };
   assert.equal(await waitForSourceCi(client, sha, immediate), 12);
   await assert.rejects(waitForSourceCi({ request: async () => response({ workflow_runs: [
-    { head_sha: "b".repeat(40), status: "completed", conclusion: "success" },
-    { head_sha: sha, status: "completed", conclusion: "failure" },
+    { head_sha: "b".repeat(40), event: "push", status: "completed", conclusion: "success" },
+    { head_sha: sha, event: "pull_request", status: "completed", conclusion: "success" },
+    { head_sha: sha, event: "push", status: "completed", conclusion: "failure" },
   ] }) }, sha, immediate), /requires successful CI/u);
 });
 

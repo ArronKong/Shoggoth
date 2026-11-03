@@ -27,8 +27,9 @@ function localOptions(args) {
 
 async function waitForSourceCi(client, sha, { attempts = 240, pause = delay } = {}) {
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const runs = await (await client.request(`/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100`)).json();
-    const exact = runs.workflow_runs.filter(run => run.head_sha === sha);
+    const runs = await (await client.request(`/actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&per_page=100`)).json();
+    // pull_request runs check out a synthetic merge commit, not this source SHA.
+    const exact = runs.workflow_runs.filter(run => run.head_sha === sha && run.event === "push");
     const success = exact.find(run => run.status === "completed" && run.conclusion === "success");
     if (success) return success.id;
     assert.ok(!exact.length || exact.some(run => run.status !== "completed"),
