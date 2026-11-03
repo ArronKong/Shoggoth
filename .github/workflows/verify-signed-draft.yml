@@ -115,23 +115,13 @@ jobs:
           }, null, 2) + '\n', { flag: 'wx' });
           NODE
 
-      - name: Use TCP HTTPS on the hosted Intel runner
-        if: matrix.arch == 'x64'
+      - name: Verify pinned Xcode and initialize binary inspection tools
+        timeout-minutes: 2
         run: |
-          set -euo pipefail
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          test "$RUNNER_OS" = macOS
-          test "$RUNNER_ARCH" = X64
-          # actions/runner-images#14924: HTTP/3 ticket lookups can lose connections.
-          # Use a private anchor; preserve the runner's existing PF rules.
-          sudo /sbin/pfctl -sr > "$RUNNER_TEMP/shoggoth-pf-original.txt"
-          grep -E '^anchor "com[.]apple/[*]"' "$RUNNER_TEMP/shoggoth-pf-original.txt"
-          touch "$RUNNER_TEMP/shoggoth-pf-anchor-created"
-          printf '%s\n' 'block return out quick proto udp from any to any port 443' |
-            sudo /sbin/pfctl -a com.apple/shoggoth-notary -f -
-          sudo /sbin/pfctl -E 2> "$RUNNER_TEMP/shoggoth-pf-enable.txt"
-          grep -E '^Token[[:space:]]*:[[:space:]]*[0-9]+$' "$RUNNER_TEMP/shoggoth-pf-enable.txt"
-          sudo /sbin/pfctl -a com.apple/shoggoth-notary -sr
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version | head -n 1 | grep -Fx 'Xcode 26.3'
+          xcrun --find lipo
+          /usr/bin/lipo -archs /bin/ls
 
       - name: Install dependencies and pinned runtimes
         run: |
@@ -207,6 +197,24 @@ jobs:
             awk -v name="Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ARCH}.dmg" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
           )
           ditto -x -k "dist/Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ZIP_SUFFIX}.zip" "dist/$SHOGGOTH_DRAFT_APP_SUBDIR"
+
+      - name: Use TCP HTTPS on the hosted Intel runner
+        if: matrix.arch == 'x64'
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = X64
+          # actions/runner-images#14924: HTTP/3 ticket lookups can lose connections.
+          # Use a private anchor; preserve the runner's existing PF rules.
+          sudo /sbin/pfctl -sr > "$RUNNER_TEMP/shoggoth-pf-original.txt"
+          grep -E '^anchor "com[.]apple/[*]"' "$RUNNER_TEMP/shoggoth-pf-original.txt"
+          touch "$RUNNER_TEMP/shoggoth-pf-anchor-created"
+          printf '%s\n' 'block return out quick proto udp from any to any port 443' |
+            sudo /sbin/pfctl -a com.apple/shoggoth-notary -f -
+          sudo /sbin/pfctl -E 2> "$RUNNER_TEMP/shoggoth-pf-enable.txt"
+          grep -E '^Token[[:space:]]*:[[:space:]]*[0-9]+$' "$RUNNER_TEMP/shoggoth-pf-enable.txt"
+          sudo /sbin/pfctl -a com.apple/shoggoth-notary -sr
 
       - name: Verify App and DMG on native hardware
         shell: bash
