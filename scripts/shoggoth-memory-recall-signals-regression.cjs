@@ -293,7 +293,13 @@ test("delivered historical conversation hits count against the existing corpus c
   for (let index = 0; index < 6; index++) {
     const input = f.turn(`Review the amber telescope lens calibration detail ${index}.`);
     if (index === 0) {
-      const result = await call(input, "conversation_search", { sessionId: past.id, query: "amber telescope lens" });
+      const args = { sessionId: past.id, query: "amber telescope lens" };
+      let result = await call(input, "conversation_search", args);
+      if (result.status === "rebuilding") {
+        await f.service.conversationRecallService.whenIndexReady(A);
+        result = await call(input, "conversation_search", args);
+      }
+      assert.equal(result.status, "ready");
       assert.ok(result.results.some(row => row.eventId === original.event.id && row.snippet.includes(FACT)));
     } else {
       const args = { sessionId: past.id, eventId: original.event.id };
