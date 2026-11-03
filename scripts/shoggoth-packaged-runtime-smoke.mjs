@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parsePackagedSmokeOptions } from "./shoggoth-packaged-smoke-options.cjs";
+import { runStapler } from "./release-stapler.cjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = path.resolve(path.dirname(SCRIPT_PATH), "..");
@@ -1456,8 +1457,10 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: signed-mach-o`);
   await verifyEveryMachOSigned(appPath);
   if (process.env.SHOGGOTH_EXPECT_NOTARIZED === "1") {
-    const staple = await runCaptured("/usr/bin/xcrun", ["stapler", "validate", appPath]);
-    assert.equal(staple.code, 0, `${appPath} has no valid notarization ticket`);
+    runStapler("validate", appPath, { env: {
+      PATH: process.env.PATH ?? "", TMPDIR: process.env.TMPDIR ?? tmpdir(),
+      ...(process.env.DEVELOPER_DIR ? { DEVELOPER_DIR: process.env.DEVELOPER_DIR } : {}),
+    } });
     const gatekeeper = await runCaptured("/usr/sbin/spctl", [
       "--assess", "--type", "execute", "--verbose=4", appPath,
     ]);

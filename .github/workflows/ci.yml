@@ -1,5 +1,6 @@
 name: CI
 on:
+  workflow_call:
   push:
   pull_request:
 permissions:
@@ -8,8 +9,8 @@ jobs:
   macos-hook-checks:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.3'
           cache: npm
@@ -41,8 +42,8 @@ jobs:
   isolated-checks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.3'
           cache: npm
@@ -94,6 +95,9 @@ jobs:
           node scripts/export-public-source-unit.mjs
           node scripts/desktop-app-update-unit.cjs
           node scripts/app-update-release-contract-unit.cjs
+          node --test scripts/release-draft-unit.cjs
+          node --test scripts/release-stapler-unit.cjs
+          node --test scripts/release-local-unit.cjs
           node scripts/check-release-private-keys-unit.cjs
           node scripts/adhoc-sign-unit.cjs
           node scripts/release-package-checks-unit.cjs

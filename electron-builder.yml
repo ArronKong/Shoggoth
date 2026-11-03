@@ -179,7 +179,7 @@ afterSign: scripts/notarize.cjs
 
 # electron-builder writes this provider into Contents/Resources/app-update.yml.
 # Release CI uploads both macOS ZIPs plus latest-mac.yml as a draft, verifies
-# them, then promotes the draft. Private repositories are rejected by CI because
+# them, and retains the verified draft. Private repositories are rejected by CI because
 # end-user GitHub updates must not depend on a bundled access token.
 publish:
   provider: github

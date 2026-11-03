@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { releaseDistribution } = require("./release-distribution.cjs");
+const { runStapler } = require("./release-stapler.cjs");
 
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
@@ -68,17 +69,15 @@ exports.default = function notarize(context) {
       encoding: "utf8", timeout: 30 * 60_000,
     });
     const receipt = assertAcceptedReceipt(stdout);
-    execFileSync("/usr/bin/xcrun", ["stapler", "staple", appPath], {
-      stdio: "inherit", timeout: 180_000,
-    });
-    execFileSync("/usr/bin/xcrun", ["stapler", "validate", appPath], {
-      stdio: "inherit", timeout: 60_000,
-    });
-    execFileSync("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=4", appPath], {
-      stdio: "inherit", timeout: 60_000,
-    });
+    // Preserve Apple's accepted submission even if the later ticket lookup loses
+    // its connection. The final build receipt still requires every gate below.
     fs.writeFileSync(`${appPath}.notarization.json`, `${JSON.stringify(receipt, null, 2)}\n`, {
       encoding: "utf8", mode: 0o600,
+    });
+    runStapler("staple", appPath);
+    runStapler("validate", appPath);
+    execFileSync("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=4", appPath], {
+      stdio: "inherit", timeout: 60_000,
     });
     console.log(`  • notarized and stapled  ${appPath} (${receipt.id})`);
   } finally {

@@ -1,96 +1,155 @@
-name: Signed macOS release
+name: Signed macOS draft
+run-name: Validate signed draft ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing v-prefixed release tag to build
+        description: Existing v-prefixed tag at the selected workflow commit
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: shoggoth-release-${{ github.ref }}
+  group: shoggoth-release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  macos-release:
-    runs-on: macos-latest
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Draft release visibility requires write permission.
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Freeze reviewed public source and reject published releases
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          test "$REPOSITORY_VISIBILITY" = "public"
+          export RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
+          node scripts/release-draft.cjs validate
+          echo "sha=$RELEASE_SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          npm run export:source -- "$RUNNER_TEMP/shoggoth-release-source"
+          node scripts/check-release-private-keys.cjs "$RUNNER_TEMP/shoggoth-release-source"
+          node scripts/check-connector-public-release.cjs
+
+  source-ci:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    name: Sign and notarize ${{ matrix.arch }}
+    needs: [validate, source-ci]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+            app_dir: mac-arm64
+            zip_suffix: arm64-mac
+          - arch: x64
+            runner: macos-15-intel
+            app_dir: mac
+            zip_suffix: mac
+    runs-on: ${{ matrix.runner }}
+    environment: macos-signing
     timeout-minutes: 180
     env:
       RELEASE_TAG: ${{ inputs.tag }}
-      GH_TOKEN: ${{ github.token }}
+      RELEASE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      BUILD_ARCH: ${{ matrix.arch }}
       SHOGGOTH_CODESIGN_MODE: developer-id
+      SHOGGOTH_RELEASE_DISTRIBUTION: official
       SHOGGOTH_CODESIGN_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
       SHOGGOTH_NOTARY_KEYCHAIN_PROFILE: shoggoth-release
       SHOGGOTH_EXPECT_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       SHOGGOTH_EXPECT_NOTARIZED: "1"
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v4
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.22.3"
           cache: npm
           cache-dependency-path: |
             package-lock.json
             app/manage-ui/package-lock.json
-
-      - name: Validate public release inputs
-        shell: bash
+      - name: Require native hardware and all signing credentials
         env:
-          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
           MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
-          set -euo pipefail
-          test "$REPOSITORY_VISIBILITY" = "public" || { echo "Release blocked: GitHub updater requires a public repository." >&2; exit 1; }
-          case "$RELEASE_TAG" in v*) ;; *) echo "Release tag must start with v." >&2; exit 1 ;; esac
-          PACKAGE_VERSION="$(node -p 'require("./package.json").version')"
-          test "$RELEASE_TAG" = "v$PACKAGE_VERSION" || { echo "Tag/version mismatch: $RELEASE_TAG != v$PACKAGE_VERSION" >&2; exit 1; }
-          if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/existing-release-state" 2>/dev/null; then
-            grep -x true "$RUNNER_TEMP/existing-release-state" > /dev/null \
-              || { echo "Release blocked: $RELEASE_TAG is already published." >&2; exit 1; }
-          fi
-          for value in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_TEAM_ID SHOGGOTH_CODESIGN_IDENTITY; do
-            test -n "${!value:-}" || { echo "Release secret missing: $value" >&2; exit 1; }
+          node -e 'require("node:assert/strict").equal(process.arch, process.env.BUILD_ARCH)'
+          missing=0
+          for name in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD SHOGGOTH_EXPECT_TEAM_ID SHOGGOTH_CODESIGN_IDENTITY; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Release secret missing: $name"
+              missing=1
+            fi
           done
-          npm run export:source -- "$RUNNER_TEMP/shoggoth-release-source"
-          node scripts/check-release-private-keys.cjs "$RUNNER_TEMP/shoggoth-release-source"
-          node scripts/check-connector-public-release.cjs
-
-      - name: Install locked dependencies
+          if [[ -z "$APPLE_API_KEY_BASE64" || -z "$APPLE_API_KEY_ID" || -z "$APPLE_API_ISSUER" ]]; then
+            if [[ -z "$APPLE_ID" || -z "$APPLE_APP_SPECIFIC_PASSWORD" ]]; then
+              echo "::error::Provide complete App Store Connect API credentials or Apple ID with an app-specific password"
+              missing=1
+            fi
+          fi
+          test "$missing" = 0
+      - name: Verify the pinned Xcode and Icon Composer toolchain
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun actool --version
+          xcodebuild -version | head -n 1 | grep -Fx 'Xcode 26.3'
+      - name: Install locked dependencies and restore Electron licenses
         run: |
           npm ci --ignore-scripts
           npm --prefix app/manage-ui ci --ignore-scripts
-
-      - name: Restore Electron license files
-        run: |
           node node_modules/electron/install.js
           test -s node_modules/electron/dist/LICENSE
           test -s node_modules/electron/dist/LICENSES.chromium.html
-
-      - name: Run update, signing, and UI contracts
+      - name: Run update, signing, and package contracts
         run: |
-          npm --prefix app/manage-ui exec -- tsc --noEmit --project app/manage-ui/tsconfig.json
           node scripts/desktop-app-update-unit.cjs
           node scripts/app-update-release-contract-unit.cjs
+          node --test scripts/release-draft-unit.cjs
+          node --test scripts/release-stapler-unit.cjs
           node scripts/check-release-private-keys-unit.cjs
           node scripts/adhoc-sign-unit.cjs
           node scripts/release-package-checks-unit.cjs
           node scripts/notarize-unit.cjs
-          npm audit --audit-level=moderate
-          npm --prefix app/manage-ui audit --audit-level=moderate
-
+      - name: Prepare pinned build inputs
+        run: |
+          npm run build:manage
+          npm run prepare:runtimes
+          node scripts/release-package-checks.cjs preflight
+          npm run release:metadata
+          npm run licenses:check
       - name: Import Developer ID certificate and Notary credentials
         shell: bash
         env:
@@ -99,132 +158,233 @@ jobs:
           APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
+          umask 077
           KEYCHAIN_PATH="$RUNNER_TEMP/shoggoth-release.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
           CERTIFICATE_PATH="$RUNNER_TEMP/shoggoth-release.p12"
-          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          API_KEY_PATH="$RUNNER_TEMP/shoggoth-notary.p8"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const list = execFileSync('security', ['list-keychains', '-d', 'user'], { encoding: 'utf8' });
+          const paths = [...list.matchAll(/"([^"]+)"/g)].map(match => match[1]);
+          if (!paths.length) throw new Error('Cannot preserve the original keychain search list');
+          fs.writeFileSync(`${process.env.RUNNER_TEMP}/shoggoth-keychain-search-list.json`, JSON.stringify(paths), { mode: 0o600, flag: 'wx' });
+          NODE
           printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
-          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$API_KEY_PATH"
-          chmod 600 "$CERTIFICATE_PATH" "$API_KEY_PATH"
+          chmod 600 "$CERTIFICATE_PATH"
+          echo "SHOGGOTH_RELEASE_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const paths = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/shoggoth-keychain-search-list.json`, 'utf8'));
+          execFileSync('security', ['list-keychains', '-d', 'user', '-s', ...paths, `${process.env.RUNNER_TEMP}/shoggoth-release.keychain-db`]);
+          NODE
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          xcrun notarytool store-credentials "$SHOGGOTH_NOTARY_KEYCHAIN_PROFILE" \
-            --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
-            --keychain "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+          # These are public Apple intermediates, verified by digest; never alter trust settings.
+          curl --fail --silent --show-error --location --retry 3 https://www.apple.com/certificateauthority/DeveloperIDCA.cer -o "$RUNNER_TEMP/DeveloperIDCA.cer"
+          curl --fail --silent --show-error --location --retry 3 https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          printf '%s  %s\n' '7afc9d01a62f03a2de9637936d4afe68090d2de18d03f29c88cfb0b1ba63587f' "$RUNNER_TEMP/DeveloperIDCA.cer" | shasum -a 256 -c -
+          printf '%s  %s\n' 'f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a' "$RUNNER_TEMP/DeveloperIDG2CA.cer" | shasum -a 256 -c -
+          security import "$RUNNER_TEMP/DeveloperIDCA.cer" -k "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN_PATH"
+          node <<'NODE'
+          const { execFileSync } = require('node:child_process');
+          const keychain = `${process.env.RUNNER_TEMP}/shoggoth-release.keychain-db`;
+          const listing = execFileSync('security', ['find-identity', '-v', '-p', 'codesigning', keychain], { encoding: 'utf8' });
+          const expected = process.env.SHOGGOTH_CODESIGN_IDENTITY;
+          const team = process.env.SHOGGOTH_EXPECT_TEAM_ID;
+          const identities = [...listing.matchAll(/^\s*\d+\) ([A-F0-9]{40}) "([^"]+)"/gm)];
+          const matches = identities.filter(([, hash, name]) => (hash === expected.toUpperCase() || name === expected)
+            && name.startsWith('Developer ID Application: ') && name.endsWith(`(${team})`));
+          if (matches.length !== 1) throw new Error('The configured Developer ID is not a unique valid signing identity in the temporary keychain');
+          console.log('Configured Developer ID and Team ID validated in the temporary keychain.');
+          NODE
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/shoggoth-signing-probe.c"
+          xcrun clang "$RUNNER_TEMP/shoggoth-signing-probe.c" -o "$RUNNER_TEMP/shoggoth-signing-probe"
+          codesign --force --options runtime --timestamp --keychain "$KEYCHAIN_PATH" --sign "$SHOGGOTH_CODESIGN_IDENTITY" "$RUNNER_TEMP/shoggoth-signing-probe"
+          codesign --verify --strict "$RUNNER_TEMP/shoggoth-signing-probe"
+          if [[ -n "$APPLE_API_KEY_BASE64" && -n "$APPLE_API_KEY_ID" && -n "$APPLE_API_ISSUER" ]]; then
+            printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$API_KEY_PATH"
+            xcrun notarytool store-credentials "$SHOGGOTH_NOTARY_KEYCHAIN_PROFILE" \
+              --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
+              --keychain "$KEYCHAIN_PATH"
+          else
+            xcrun notarytool store-credentials "$SHOGGOTH_NOTARY_KEYCHAIN_PROFILE" \
+              --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$SHOGGOTH_EXPECT_TEAM_ID" --keychain "$KEYCHAIN_PATH"
+          fi
+          rm -f "$CERTIFICATE_PATH" "$API_KEY_PATH"
           echo "SHOGGOTH_CODESIGN_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
           echo "SHOGGOTH_NOTARY_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-          echo "SHOGGOTH_RELEASE_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
-      - name: Build, notarize, and upload draft artifacts
-        run: |
-          npm run build:manage
-          npm run prepare:runtimes
-          npm run release:metadata
-          npm run licenses:check
-          npx electron-builder --mac --publish always
 
-      - name: Create, notarize, and upload architecture-specific DMGs
-        shell: bash
+      - name: Use TCP HTTPS on the hosted Intel runner
+        if: matrix.arch == 'x64'
         run: |
           set -euo pipefail
-          VERSION="$(node -p 'require("./package.json").version')"
-          for ARCH in arm64 x64; do
-            node scripts/create-macos-dmg.mjs --arch "$ARCH" --distribution official
-            DMG="dist/Shoggoth-${VERSION}-${ARCH}.dmg"
-            xcrun notarytool submit "$DMG" \
-              --keychain-profile "$SHOGGOTH_NOTARY_KEYCHAIN_PROFILE" \
-              --keychain "$SHOGGOTH_NOTARY_KEYCHAIN" \
-              --wait --output-format json > "$RUNNER_TEMP/shoggoth-dmg-${ARCH}-notary.json"
-            node -e 'const fs=require("node:fs"); const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(r.status!=="Accepted") process.exit(1)' \
-              "$RUNNER_TEMP/shoggoth-dmg-${ARCH}-notary.json"
-            xcrun stapler staple "$DMG"
-            xcrun stapler validate "$DMG"
-          done
-          (
-            cd dist
-            shasum -a 256 \
-              "Shoggoth-${VERSION}-arm64-mac.zip" \
-              "Shoggoth-${VERSION}-mac.zip" \
-              "Shoggoth-${VERSION}-arm64.dmg" \
-              "Shoggoth-${VERSION}-x64.dmg" > SHA256SUMS.txt
-          )
-          gh release upload "$RELEASE_TAG" \
-            "dist/Shoggoth-${VERSION}-arm64.dmg" \
-            "dist/Shoggoth-${VERSION}-x64.dmg" \
-            dist/SHA256SUMS.txt --clobber
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = X64
+          # actions/runner-images#14924: HTTP/3 ticket lookups can lose connections.
+          # Use a private anchor; preserve the runner's existing PF rules.
+          sudo /sbin/pfctl -sr > "$RUNNER_TEMP/shoggoth-pf-original.txt"
+          grep -E '^anchor "com[.]apple/[*]"' "$RUNNER_TEMP/shoggoth-pf-original.txt"
+          touch "$RUNNER_TEMP/shoggoth-pf-anchor-created"
+          printf '%s\n' 'block return out quick proto udp from any to any port 443' |
+            sudo /sbin/pfctl -a com.apple/shoggoth-notary -f -
+          sudo /sbin/pfctl -E 2> "$RUNNER_TEMP/shoggoth-pf-enable.txt"
+          grep -E '^Token[[:space:]]*:[[:space:]]*[0-9]+$' "$RUNNER_TEMP/shoggoth-pf-enable.txt"
+          sudo /sbin/pfctl -a com.apple/shoggoth-notary -sr
 
-      - name: Verify signed packages and updater metadata
-        run: |
-          node scripts/verify-app-update-release.mjs
-          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-arm64
-          VERSION="$(node -p 'require("./package.json").version')"
-          (cd dist && shasum -a 256 -c SHA256SUMS.txt)
-          for ARCH in arm64 x64; do
-            DMG="dist/Shoggoth-${VERSION}-${ARCH}.dmg"
-            hdiutil verify "$DMG"
-            xcrun stapler validate "$DMG"
-          done
-          ASSETS="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
-          for NAME in \
-            "Shoggoth-${VERSION}-arm64-mac.zip" \
-            "Shoggoth-${VERSION}-mac.zip" \
-            "Shoggoth-${VERSION}-arm64.dmg" \
-            "Shoggoth-${VERSION}-x64.dmg" \
-            latest-mac.yml SHA256SUMS.txt; do
-            printf '%s\n' "$ASSETS" | grep -Fx "$NAME"
-          done
-          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -x true
-
-      - name: Remove temporary signing keychain
-        if: always()
-        shell: bash
-        run: |
-          if [[ -n "${SHOGGOTH_RELEASE_KEYCHAIN:-}" && -f "$SHOGGOTH_RELEASE_KEYCHAIN" ]]; then
-            security delete-keychain "$SHOGGOTH_RELEASE_KEYCHAIN" || true
-          fi
-          rm -f "$RUNNER_TEMP"/shoggoth-release.p12 "$RUNNER_TEMP"/AuthKey_*.p8
-
-  verify-x64-and-publish:
-    needs: macos-release
-    runs-on: macos-15-intel
-    timeout-minutes: 120
-    env:
-      RELEASE_TAG: ${{ inputs.tag }}
-      GH_TOKEN: ${{ github.token }}
-      SHOGGOTH_EXPECT_NOTARIZED: "1"
-    steps:
-      - uses: actions/checkout@v4
+      - name: Build and notarize this architecture
+        run: node scripts/release-build.cjs
+      - name: Upload signed architecture assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          ref: ${{ inputs.tag }}
+          name: signed-${{ matrix.arch }}
+          path: |
+            dist/*-${{ matrix.zip_suffix }}.zip
+            dist/*-${{ matrix.zip_suffix }}.zip.blockmap
+            dist/*-${{ matrix.arch }}.dmg
+            dist/latest-mac.yml
+            dist/build-receipt.json
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+      - name: Preserve signing and source evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signing-${{ matrix.arch }}-attempt-${{ github.run_attempt }}
+          path: |
+            dist/${{ matrix.app_dir }}/Shoggoth.app.notarization.json
+            dist/signing-${{ matrix.arch }}/*.json
+          if-no-files-found: warn
+      - name: Remove temporary signing credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/shoggoth-release.p12" "$RUNNER_TEMP/shoggoth-notary.p8"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const saved = `${process.env.RUNNER_TEMP}/shoggoth-keychain-search-list.json`;
+          if (fs.existsSync(saved)) {
+            execFileSync('security', ['list-keychains', '-d', 'user', '-s', ...JSON.parse(fs.readFileSync(saved, 'utf8'))]);
+            fs.unlinkSync(saved);
+          }
+          NODE
+          if [[ -n "${SHOGGOTH_RELEASE_KEYCHAIN:-}" && -f "$SHOGGOTH_RELEASE_KEYCHAIN" ]]; then
+            security delete-keychain "$SHOGGOTH_RELEASE_KEYCHAIN"
+          fi
+          rm -f "$RUNNER_TEMP/DeveloperIDCA.cer" "$RUNNER_TEMP/DeveloperIDG2CA.cer" "$RUNNER_TEMP/shoggoth-signing-probe.c" "$RUNNER_TEMP/shoggoth-signing-probe"
 
-      - uses: actions/setup-node@v4
+      - name: Remove the hosted Intel transport workaround
+        if: always() && matrix.arch == 'x64'
+        run: |
+          set -euo pipefail
+          if [[ -f "$RUNNER_TEMP/shoggoth-pf-anchor-created" ]]; then
+            sudo /sbin/pfctl -a com.apple/shoggoth-notary -F rules
+          fi
+          if [[ -f "$RUNNER_TEMP/shoggoth-pf-enable.txt" ]]; then
+            PF_REFERENCE="$(awk '/^Token[[:space:]]*:/ {print $NF}' "$RUNNER_TEMP/shoggoth-pf-enable.txt")"
+            if [[ "$PF_REFERENCE" =~ ^[0-9]+$ ]]; then
+              sudo /sbin/pfctl -X "$PF_REFERENCE"
+            fi
+          fi
+
+  draft:
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.upload.outputs.release_id }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.22.3"
           cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: signed-*
+          path: artifacts
+      - name: Merge architecture metadata and verify build receipts
+        run: node scripts/release-draft.cjs assemble
+      - name: Create or resume the matching draft without replacing assets
+        id: upload
+        run: node scripts/release-draft.cjs upload
+      - name: Verify all uploaded bytes
+        env:
+          RELEASE_ID: ${{ steps.upload.outputs.release_id }}
+        run: node scripts/release-draft.cjs verify draft-upload.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: draft-upload
+          overwrite: true
+          path: draft-upload.json
+          if-no-files-found: error
 
-      - name: Prepare exact source and Intel runtime
+  native-verification:
+    needs: [validate, draft]
+    uses: ./.github/workflows/verify-signed-draft.yml
+    permissions:
+      contents: write
+    with:
+      tag: ${{ inputs.tag }}
+      release_id: ${{ needs.draft.outputs.release_id }}
+      source_sha: ${{ needs.validate.outputs.source_sha }}
+
+  accepted-draft:
+    needs: [validate, draft, native-verification]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: draft-upload
+      - name: Confirm the verified asset identities after native verification
         run: |
-          npm ci --ignore-scripts
-          npm run prepare:runtimes
-
-      - name: Download and verify notarized Intel assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="$(node -p 'require("./package.json").version')"
-          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' | grep -x true
-          mkdir -p dist/mac
-          gh release download "$RELEASE_TAG" --pattern "Shoggoth-${VERSION}-mac.zip" --dir dist
-          gh release download "$RELEASE_TAG" --pattern "Shoggoth-${VERSION}-x64.dmg" --dir dist
-          ditto -x -k "dist/Shoggoth-${VERSION}-mac.zip" dist/mac
-          node scripts/shoggoth-packaged-runtime-smoke.mjs --spike-x64
-          hdiutil verify "dist/Shoggoth-${VERSION}-x64.dmg"
-          xcrun stapler validate "dist/Shoggoth-${VERSION}-x64.dmg"
-
-      - name: Publish verified release
-        run: gh release edit "$RELEASE_TAG" --draft=false --latest --verify-tag
+          node scripts/release-draft.cjs confirm
+          echo "Signed draft $RELEASE_TAG passed source CI and both native verification jobs." >> "$GITHUB_STEP_SUMMARY"
+          echo "Release ID $RELEASE_ID remains a draft." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: accepted-draft-attempt-${{ github.run_attempt }}
+          path: accepted-draft.json
+          if-no-files-found: error
