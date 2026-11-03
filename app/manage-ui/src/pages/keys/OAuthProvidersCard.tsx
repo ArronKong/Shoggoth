@@ -71,6 +71,14 @@ function IconTerminal() {
     </svg>
   );
 }
+function IconRefresh() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 16 16" fill="none" stroke="currentColor"
+      strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M13 4v3h-3M12.7 7A5 5 0 1 0 13 10" />
+    </svg>
+  );
+}
 // 断链（lucide unlink-2 的形制）：两段链环、中间断开 = 解除授权。
 function IconUnlink() {
   return (
@@ -174,6 +182,12 @@ function OAuthRow({
       </button>
 
       <div className={showActionLabels ? styles.oauthActions : styles.oauthIcons}>
+        {!off && p.status.verification === "unverified" && (
+          <button type="button" className={styles.iconBtn} disabled={busy}
+            title={t("settings.retry")} aria-label={`${title} — ${t("settings.retry")}`} onClick={onRecheck}>
+            <IconRefresh />
+          </button>
+        )}
         <button className={showActionLabels ? "ui-cbtn ui-cbtn--sm" : styles.iconBtn} title={mainLabel} aria-label={`${title} — ${mainLabel}`}
           disabled={busy} onClick={main}>
           {showActionLabels ? mainLabel : !off && isExternal && p.cliCommand ? <IconTerminal /> : <IconChevron />}
@@ -218,7 +232,7 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
   const toast = useToast();
   const confirm = useConfirm();
   const { data, loading, error, refresh } = usePageCache(`models:oauth:${backend}`,
-    () => listOAuthProviders(backend), { staleTime: 30_000 });
+    () => listOAuthProviders(backend), { staleTime: backend === "shoggoth" ? 0 : 30_000 });
   const providers = data?.providers ?? null;
   const [busyId, setBusyId] = useState<string | null>(null);
   const slowDisconnect = useSlowPending(Boolean(busyId && providers?.some(p => p.id === busyId && p.disconnectable && !p.connection)));
@@ -230,6 +244,27 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
     previousRefreshKey.current = refreshKey;
     void refresh();
   }, [refresh, refreshKey]);
+
+  // A chat or the native CLI can verify sign-in while this card is away.
+  // Re-entry reads above bypass the old snapshot; focus also rechecks a card
+  // left open during terminal sign-in. Coalesce visibility/focus notifications.
+  useEffect(() => {
+    if (backend !== "shoggoth") return;
+    let active = true;
+    let pending = false;
+    const recheck = async () => {
+      if (!active || pending || document.visibilityState === "hidden") return;
+      pending = true;
+      try { await refresh(); } finally { pending = false; }
+    };
+    window.addEventListener("focus", recheck);
+    document.addEventListener("visibilitychange", recheck);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", recheck);
+      document.removeEventListener("visibilitychange", recheck);
+    };
+  }, [backend, refresh]);
 
   // 在系统终端里跑该 provider 的断开命令。它会删钥匙串条目/凭证文件 → danger 确认
   // 展示命令原文。前端只发 {provider, kind}，命令串由服务端从 oauth 目录解析。

@@ -155,7 +155,7 @@ const context = vm.createContext({ configStore: { read: () => config }, appliedC
   openClawEndpointGeneration: 0, gatewayProxy: null,
   appBackendRegistry: { backends, start: id => backends.get(id).start(),
     keepsRunningWhenDisconnected: id => descriptors.get(id).connectionMode === "builtin-service",
-    notifyConnectionsChanged: () => calls.push(["registry", "notify"]) }, nativeTheme: {}, buildMenu() {},
+    notifyConnectionsChanged: () => calls.push(["registry", "notify"]) }, nativeTheme: {}, appIconController: null, buildMenu() {},
   mainWindow: { webContents: { reload: () => calls.push(["window", "reload"]) } }, console,
 });
 vm.runInContext(functions, context);

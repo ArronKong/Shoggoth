@@ -12,6 +12,18 @@ const key = 'agent:review:reminder-session', taskKey = 'agent:review:original-ta
 const text = '这三条便签值得回顾：一个可以继续的小想法、一项待审批请求，以及已发芽多日但还没标记为结果的产出。\n\n'
   + '- [灵感种子](#/inspirations?id=note-0)\n- [待审批的原任务](#/chat?backend=shoggoth&session=' + encodeURIComponent(taskKey) + ')\n'
   + '- [已有产出，查看后可标记为结果](#/inspirations?id=note-2)';
+const message = (id: string, hour: number, minute: number, text: string, kind?: 'inspiration' | 'heartbeat') => ({
+  role: 'assistant', id, timestamp: new Date(2026, 10, 3, hour, minute).getTime(),
+  content: [{ type: 'text', text }],
+  ...(kind ? { shoggoth: { proactiveNotice: { id: `notice-${id}`, kind }, notificationCategory: 'proactive' } } : {}),
+});
+const reminderHistory = [
+  message('sparknotes', 15, 0, text, 'inspiration'),
+  message('checking', 16, 46, '我核对一下哪些方式需要 API Key。'),
+  message('reply', 16, 46, '不一定需要配置 API Key。'),
+  message('heartbeat-first', 17, 33, 'HEARTBEAT 已启动，本次检查正在运行。\n\n- [HEARTBEAT.md](#/agents)', 'heartbeat'),
+  message('heartbeat-second', 19, 2, 'HEARTBEAT 正在运行，本次检查已启动。\n\n- [HEARTBEAT.md](#/agents)', 'heartbeat'),
+];
 class Socket {
   static OPEN = 1; readyState = 1; onopen: (() => void) | null = null; onmessage: ((event: any) => void) | null = null;
   constructor() { setTimeout(() => this.onopen?.(), 0); }
@@ -21,9 +33,9 @@ class Socket {
       { key, backendId: 'shoggoth', agentId: 'review', agentName: '审查 Agent', displayName: '提醒', source: 'proactive', proactiveTarget: true, updatedAt: now },
       { key: taskKey, backendId: 'shoggoth', agentId: 'review', agentName: '审查 Agent', displayName: '原任务', updatedAt: now - 1000 }], hasMore: false }
       : request.method === 'agents.list' ? { agents: [{ id: 'review', name: '审查 Agent', backendId: 'shoggoth' }] }
-      : request.method === 'chat.history' ? { messages: [{ role: 'assistant', id: 'fixture-message', timestamp: now,
-        content: [{ type: 'text', text: request.params?.sessionKey === taskKey ? 'ORIGINAL-TASK-RESTORED' : text }],
-        ...(request.params?.sessionKey === taskKey ? {} : { shoggoth: { proactiveNotice: { id: 'notice-fixture', kind: 'inspiration' }, notificationCategory: 'proactive' } }) }] }
+      : request.method === 'chat.history' ? { messages: request.params?.sessionKey === taskKey
+        ? [message('task', 16, 0, 'ORIGINAL-TASK-RESTORED')] : reminderHistory,
+        hasMore: false, nextCursor: null, sourceId: request.params?.sessionKey }
       : {};
     setTimeout(() => this.onmessage?.({ data: JSON.stringify({ type: 'res', id: request.id, ok: true, payload }) }), 1);
   }
@@ -34,7 +46,7 @@ window.fetch = async url => {
   const pathname = String(url).split('?')[0]; let payload: any = {};
   if (pathname.startsWith('/__api/proactive')) throw Error('SparkNotes must not load a settings or note-reminder UI');
   if (pathname === '/__api/config') payload = { disabledBackends: [], locale: 'zh-CN', notifications: { chat: true, cron: true, task: true, proactive: true } };
-  else if (pathname === '/__api/status') payload = [{ id: 'shoggoth', name: 'Shoggoth', enabled: true, state: 'started', capabilities: { chat: true } }];
+  else if (pathname === '/__api/status') payload = { backends: [{ id: 'shoggoth', connected: true }] };
   else if (pathname === '/__api/models') payload = { catalogRevision: 'fixture', models: [], profiles: {}, readyModels: [], canAddModel: false };
   else if (pathname === '/__api/providers') payload = { providers: [] };
   else if (pathname === '/__api/sessions') payload = { sessions: [] };

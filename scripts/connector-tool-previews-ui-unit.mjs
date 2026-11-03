@@ -165,7 +165,7 @@ const shared = {
   "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator), i18n: translator }) },
   "../components/ConnectorTools": { __esModule: true, default: props => { observedTools = props; return null; } },
   "../components/McpConnectorIcon": { __esModule: true, default: () => null },
-  "../components/Modal": { __esModule: true, default: ({ children }) => React.createElement("section", {}, children) },
+  "../components/Modal": { __esModule: true, default: ({ children, footer, subtitle }) => React.createElement("section", {}, children, React.createElement("p", {}, subtitle), footer) },
   "../components/ui": { useConfirm: () => async () => true },
   "../lib/mcpConnectorUi": helper,
   "../lib/mcpRecommendationCatalog": load("../app/manage-ui/src/lib/mcpRecommendationCatalog.ts"),
@@ -211,9 +211,32 @@ for (const definition of officialDefinitions) {
   assert.equal(observedTools.refreshKey, "3:0");
   await unmount();
 }
-const lark = load("../app/manage-ui/src/pages/LarkCliConnector.tsx", { ...shared, "../api/larkCliConnector": {}, "./LarkCliSetup": { useLarkCliSetup: () => ({ active: false, working: false }) } });
-await Renderer.act(async () => { ui = Renderer.create(React.createElement(lark.default, { model: { busy: false, data: { state: "notInstalled", canRemove: false } }, onClose() {} })); });
+const lark = load("../app/manage-ui/src/pages/LarkCliConnector.tsx", { ...shared, "../api/larkCliConnector": {}, "./LarkCliSetup": { useLarkCliSetup: () => ({ active: false, working: false }), useLarkCliSetupView: () => ({ content: null, actions: null }) } });
+await Renderer.act(async () => { ui = Renderer.create(React.createElement(lark.default, { model: { busy: false, setup: {}, data: { state: "notInstalled", canRemove: false } }, onClose() {} })); });
 assert.equal(observedTools.previewId, "lark-cli");
 assert.equal(observedTools.serverId, undefined, "CLI capabilities do not fabricate an MCP service");
 await unmount();
 console.log(`PASS actual dialog integration: ${presetRows.length} presets, registry/installed identities, both Figma modes, custom-name isolation, ${officialDefinitions.length} official connectors and Lark CLI`);
+
+// The compact overview must remain read-only; real tools are fetched only when
+// requested and retain the same authoritative/abort semantics as disclosures.
+requests = [];
+fetcher = async id => liveResult(id, []);
+await render({ overview: true, previewId: 'github', serverId: 'installed', status: 'ready', description: 'Connector summary' });
+assert.equal(requests.length, 0, 'opening the overview does not probe or fetch actual tools');
+assert.equal(ui.root.findAllByType('li').length, 3, 'overview shows at most three known capabilities');
+assert.ok(text().includes('Search repositories'));
+const switchView = () => Renderer.act(async () => ui.root.findAllByType('button').find(node => typeof node.props['aria-expanded'] === 'boolean').props.onClick());
+await switchView();
+assert.equal(requests.length, 1);
+assert.equal(list().props['data-tool-list'], 'live');
+assert.equal(ui.root.findAllByType('li').length, 0, 'an authoritative empty snapshot also replaces the overview preview in tool view');
+assert.equal(ui.root.findAllByType('button')[0].props['aria-expanded'], true);
+await switchView();
+assert.equal(requests[0].signal.aborted, true, 'returning to overview cancels late reads');
+assert.equal(ui.root.findAllByType('li').length, 3);
+await render({ overview: true, previewId: 'unknown-custom', description: 'User supplied summary' });
+assert.equal(ui.root.findAllByType('li').length, 0, 'unknown custom connectors do not invent capabilities');
+assert.ok(text().includes('User supplied summary'));
+await unmount();
+console.log('PASS compact overview: bounded known capabilities, no implicit service requests, explicit tool view, empty live authority, cancellation and honest custom fallback');

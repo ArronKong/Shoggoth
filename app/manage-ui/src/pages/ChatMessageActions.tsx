@@ -20,6 +20,11 @@ export function IconTrash() {
     <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13" />
   </svg>;
 }
+export function IconStopMessage() {
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="5" y="5" width="14" height="14" rx="2" />
+  </svg>;
+}
 function IconFilter() {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
     <path d="M4 5h16l-6 8v6l-4-2v-4z" />

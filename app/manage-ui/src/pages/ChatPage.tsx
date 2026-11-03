@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { formatChatTime as absTime } from "../lib/chatTime";
 import { validPluginAppCallId } from "../lib/turnTimeline";
 import { observedChatTerminal } from "../lib/chatTerminalObservation";
+import { acknowledgeDashboardPrompt } from "../lib/dashboardPromptResponses";
 import { codexDesktopWriterHintKey, type CodexDesktopWriterState } from "../lib/codexDesktopWriter";
 import { ChatRunWait, updateChatRunWait, type ChatRunWaitState } from "../components/ChatRunWait";
 import { withStartupWait } from "../lib/chatRunWait";
@@ -240,7 +241,7 @@ const SHOW_CHAT_CONTEXT_USAGE = false;
 // Live activity status shown as a dot+label in the chat header / agent list.
 // 首次连接与已连接后的中断分开呈现；后端曾就绪的证据只保留在本次页面生命周期。
 // Hermes 的精确就绪状态仍只用于 composer 门禁，不占用 Agent 行的缓存预览。
-type LiveStatus = "queued" | "running" | "online" | "offline" | "connecting" | "reconnecting";
+type LiveStatus = "running" | "online" | "offline" | "connecting" | "reconnecting";
 type AgentListStatus = LiveStatus | ChatPromptAttention;
 
 interface SessionRow {
@@ -603,6 +604,7 @@ interface ChatMsg {
   openclawLivePreamble?: boolean;
   historySource?: "hermes";
   automation?: "cron" | "continuation";
+  isProactiveNotice?: boolean;
   sourceEventIds?: string[];
   canonicalSourceEventId?: string;
   id?: string; // canonical gateway identity — kept separate from local UI actions
@@ -859,11 +861,11 @@ function isHeartbeatNoise(m: ChatMsg): boolean {
   return false;
 }
 // Raw-text twin of isHeartbeatNoise's assistant branch — used at the live `chat` final event
-// (we have raw reply text there, not a ChatMsg). Empty or a bare/short heartbeat ack ⇒ noise
+// (we have raw reply text there, not a ChatMsg). Empty/silent or a bare/short heartbeat ack ⇒ noise
 // (don't flag unread); real text ⇒ a genuine new message worth a dot.
 function isHeartbeatAckText(text: string): boolean {
   const v = (text || "").trim();
-  if (!v) return true;
+  if (!v || v === "[SILENT]") return true;
   const rest = stripHeartbeatToken(v);
   return rest !== v && rest.length <= HEARTBEAT_ACK_MAX_CHARS;
 }
@@ -1113,7 +1115,7 @@ function recordActivity(key: string, at: number): void {
 function isUnreadReply(key: string, m: ChatMsg): boolean {
   return (m.role === "assistant" || sessionKindOf(key) === "channel" && m.role === "user" && !m.local)
     && !m.pending && !isNoiseForPreview(m)
-    && !!(!isHeartbeatAckText(msgText(m)) || m.parts.some(p => p.type === "canvas" || p.type === "ui_artifact") || m.images?.length || m.files?.length);
+    && !!(!isHeartbeatAckText(lastText(m.parts)) || m.parts.some(p => p.type === "canvas" || p.type === "ui_artifact") || m.images?.length || m.files?.length);
 }
 function latestUnreadReplyTime(key: string, messages: ChatMsg[]): number {
   return messages.reduce((latest, m) => isUnreadReply(key, m) ? Math.max(latest, m.ts ?? 0) : latest, 0);
@@ -1247,6 +1249,7 @@ function normalize(raw: any): ChatMsg {
     historySource: raw?.historySource === "hermes" ? "hermes" : undefined,
     automation: raw?.automation === "continuation" ? "continuation"
       : raw?.automation === "cron" || role === "user" && raw?.shoggoth?.source === "cron" ? "cron" : undefined,
+    isProactiveNotice: typeof raw?.shoggoth?.proactiveNotice?.id === "string",
     nativeDisplayId: raw?.shoggoth?.nativeUiVersion === 1 && typeof raw.shoggoth.displayId === "string" ? raw.shoggoth.displayId : undefined,
     nativeRunId: raw?.shoggoth?.nativeUiVersion === 1 && typeof raw.shoggoth.runId === "string" ? raw.shoggoth.runId : undefined,
     activityRunId: typeof raw?.__openclaw?.runId === "string" && raw.__openclaw.runId.trim() ? raw.__openclaw.runId : undefined,
@@ -1799,17 +1802,15 @@ function collapseErrorRuns(msgs: ChatMsg[]): ChatMsg[] {
 
 function groupMessages(msgs: ChatMsg[]): Group[] {
   const groups: Group[] = [];
+  // Published reminders are assistant bubbles with their own timestamp and actions.
+  const standalone = (m: ChatMsg) => !!(m.divider || m.notice || m.isProactiveNotice);
   for (const m of msgs) {
     const last = groups[groups.length - 1];
     // Group consecutive same-role messages into one visual block — INCLUDING
     // toolResults (was excluded), so a turn's tool-output cards stack tightly in
     // one group with a single footer instead of each becoming a separate, spaced,
     // individually-footered group (matches OpenClaw's compact tool rendering).
-    // Archive dividers + backend timeline notices never merge (in either
-    // direction) — each is its own one-line row.
-    const standalone = (x: ChatMsg) => !!x.divider || !!x.notice;
-    const lastIsDivider = last && standalone(last.msgs[last.msgs.length - 1]);
-    if (last && last.role === m.role && !lastIsDivider && !standalone(m)) {
+    if (last && last.role === m.role && !standalone(last.msgs[last.msgs.length - 1]) && !standalone(m)) {
       last.msgs.push(m);
       // g.ts 保留组内 FIRST 条的时间，但只作 footer 的兜底：footer 实际显示组内最后一条
       // 「可见」消息的时间（见 footer 渲染处 footerTs）。被隐藏的 heartbeat 会让不同时间的
@@ -1832,7 +1833,8 @@ function groupMessages(msgs: ChatMsg[]): Group[] {
 // 粘连,但同一个已知 Run 的慢工具/审批等待不能被间隙拆开。
 const TURN_GAP_MS = 90_000;
 function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[]): ChatMsg[] {
-  const isBoundary = (x: ChatMsg) => x.role === "user" || !!x.divider || !!x.notice || x.local === true || x.pending === true;
+  const isBoundary = (x: ChatMsg) => x.role === "user" || !!x.divider || !!x.notice || x.isProactiveNotice === true
+    || x.local === true || x.pending === true;
   const isProcessPart = (p: Part) => p.type === "thinking" || p.type === "toolCall" || p.type === "toolResult" || p.type === "plan"
     || (p.type === "text" && p.activity === true);
   const out: ChatMsg[] = [];
@@ -2399,6 +2401,9 @@ function ChatPageApp() {
   // doesn't freeze other sessions' composers, and switching back can restore
   // the streaming placeholder. `sending` mirrors this for the ACTIVE session.
   const inFlightRef = useRef<Set<string>>(new Set(readPendingTrackedSends().filter(entry => entry.terminalObserved !== true).map(entry => entry.key)));
+  // A user can continue a report in its original Cron session. Track this turn's
+  // origin separately from the session kind, including retained local sends.
+  const interactiveRunsRef = useRef<Set<string>>(new Set(inFlightRef.current));
 
   const [connected, setConnected] = useState(false);
   // 曾经成功连上过（onopen 落一次，之后不回退）——断线横幅据此在「连接中…」（冷启动）
@@ -2777,6 +2782,7 @@ function ChatPageApp() {
     if (on) inFlightRef.current.add(key);
     else {
       inFlightRef.current.delete(key);
+      interactiveRunsRef.current.delete(key);
       if (!keepVerification) runStatusBySessionRef.current.delete(key);
       // R342:回合已终结（final / error / aborted / chat.send reject）→ 同一句再发是
       // **用户主动重试**，不是双触发，必须换新 idempotencyKey。留着这条记录的话，重试
@@ -3824,12 +3830,14 @@ function ChatPageApp() {
       const execApproval = isOpenClawExecApproval(entry) ? entry : null;
       const sk = execApproval?.sessionKey || openClawQuestion?.sessionKey || activeSessionKey;
       if (!sk) return;
+      const promptBackend = backendOfSession(sk);
       const anchors = entry.requestId && sk === activeSessionKey
         ? promptHistoryAnchor(messagesRef.current, entry.requestId) : [];
       try {
         let receipt: any;
         if (execApproval) {
           await execApprovals.respond(execApproval, data.choice);
+          acknowledgeDashboardPrompt({ backendId: promptBackend, requestId: execApproval.requestId });
           return;
         }
         if (openClawQuestion) {
@@ -3841,6 +3849,10 @@ function ChatPageApp() {
           receipt = await send("chat.respond", "version" in entry
             ? { sessionKey: sk, requestId: entry.requestId, ...data }
             : { sessionKey: sk, kind: entry.kind, requestId: entry.requestId, ...data });
+          if ("version" in entry && receipt?.payload?.state === "responded"
+            && receipt.payload.run?.id === entry.runId && receipt.payload.requestId === entry.requestId) {
+            acknowledgeDashboardPrompt({ backendId: promptBackend, runId: entry.runId, requestId: entry.requestId });
+          }
         }
         const arr = (pendingPromptsRef.current.get(sk) ?? []).filter((e) => e.id !== entry.id);
         replacePendingPrompts(sk, arr);
@@ -3863,7 +3875,7 @@ function ChatPageApp() {
         throw secretQuestion ? new Error(t("chat.requestFailed")) : e;
       }
     },
-    [execApprovals, renderLiveStateForSession, replacePendingPrompts, send, updateSessionMessages],
+    [backendOfSession, execApprovals, renderLiveStateForSession, replacePendingPrompts, send, updateSessionMessages],
   );
 
   // Switch the model — one path for every backend: `sessions.patch {model}`.
@@ -3958,6 +3970,7 @@ function ChatPageApp() {
         // forever. A still-running gateway turn's outcome re-arrives via
         // session.message / the loadHistory below regardless.
         inFlightRef.current = new Set(readPendingTrackedSends().filter(entry => entry.terminalObserved !== true).map(entry => entry.key));
+        interactiveRunsRef.current = new Set(inFlightRef.current);
         runStatusBySessionRef.current.clear();
         observedRunBySessionRef.current.clear();
         setRunningKeys(new Set(inFlightRef.current));
@@ -5691,6 +5704,7 @@ function ChatPageApp() {
         setError(t("chat.sendTrackingUnavailable"));
         return;
       }
+      interactiveRunsRef.current.add(key);
       if (trackedSend) {
         markInFlight(key, true);
         setVerificationKeys(previous => new Set(previous).add(key));
@@ -5745,6 +5759,7 @@ function ChatPageApp() {
     const imgs = atts.filter((a) => !a.kind || a.kind === "image").map((a) => a.dataUrl);
     const nonImageAtts = atts.filter((a) => a.kind && a.kind !== "image");
     const previousMessages = settlePendingAssistant(messagesRef.current, liveTimelinesRef.current.get(key)?.steps);
+    interactiveRunsRef.current.add(key);
     runStatusBySessionRef.current.set(key, "starting");
     setRunWaitBySession(previous => ({ ...previous, [key]: { kind: "starting", stage: "preparing", reason: null, since: nowTs } }));
     markInFlight(key, true);
@@ -5878,6 +5893,10 @@ function ChatPageApp() {
     }
     try {
       await send("chat.steer", { sessionKey: key, message: text });
+      if (inFlightRef.current.has(key)) {
+        interactiveRunsRef.current.add(key);
+        setRunningKeys(new Set(inFlightRef.current));
+      }
       steerTextBaselineRef.current.set(key, liveTextRef.current.get(key) || "");
       liveToolsRef.current.delete(key);
       pendingThinkingRef.current.delete(key);
@@ -6408,6 +6427,7 @@ function ChatPageApp() {
           localSlashHistoryRef.current.forget(key);
           // A reset must not flush queued prompts into the fresh conversation.
           inFlightRef.current.delete(key);
+          interactiveRunsRef.current.delete(key);
           runStatusBySessionRef.current.delete(key);
           recentSendRef.current.delete(key);
           setRunningKeys(new Set(inFlightRef.current));
@@ -8112,15 +8132,15 @@ function ChatPageApp() {
     if (startingBackends.has(backend) || !connectedBackends?.has(backend)) {
       return connectedOnceBackendsRef.current.has(backend) ? "reconnecting" : "connecting";
     }
-    return runningKeys.has(key) ? (runStatusBySessionRef.current.get(key) === "queued" ? "queued" : "running") : "online";
+    // Queue admission remains internal; a queued conversation keeps its normal preview.
+    return runningKeys.has(key) && runStatusBySessionRef.current.get(key) !== "queued" ? "running" : "online";
   };
   const activeHeaderStatus = active ? statusOf(active.key) : null;
-  // Agent-level (left rail): the agent is "running" if ANY of its sessions is.
+  // Agent-level (left rail): any foreground or user-initiated turn can be running.
   const agentStatusOf = (rows: SessionRow[]): LiveStatus => {
     if (!rows.length) return "offline";
     const activeRows = rows.filter((s) => runningKeys.has(s.key));
     if (activeRows.some((s) => runStatusBySessionRef.current.get(s.key) !== "queued")) return "running";
-    if (activeRows.length) return "queued";
     return statusOf(rows[0].key);
   };
   // Pretty label for a thinking level (off→Off, xhigh→Extra high, …); unknown
@@ -8594,6 +8614,7 @@ function ChatPageApp() {
   // 零新订阅。没有过程信息（OpenClaw 首包前）返回 null → 沉浸层继续用三点等待。
   const immersiveLive = useMemo((): ImmersiveLiveStatus | null => {
     if (activeKey && activeRunInFlight && runWaitBySession[activeKey]) {
+      if (runWaitBySession[activeKey].kind === "queued") return null;
       return { tools: [], wait: runWaitBySession[activeKey] };
     }
     const last = messages[messages.length - 1];
@@ -8831,6 +8852,10 @@ function ChatPageApp() {
     const map = new Map<string, SessionRow[]>();
     for (const s of sessions) {
       if (groupInternalKeys.has(s.key)) continue;
+      // Keep unfinished/empty Cron sessions in the authority-read catalog, not
+      // in chat navigation. The existing reply probe publishes their first
+      // completed result; metadata and saved process steps cannot promote them.
+      if (sessionKindOf(s.key, s.kind) === "cron" && !(unreadState.replies[s.key] > 0)) continue;
       const a = agentOf(s.key);
       if (!isChatAgentListed(agentRoster, backendOfSessionRows([s], s.key, a), a)) continue;
       const arr = map.get(a);
@@ -8839,12 +8864,17 @@ function ChatPageApp() {
     }
     const list = Array.from(map.entries()).map(([agentId, ss]) => {
       const sorted = ss.slice().sort((x, y) => (y.updatedAt ?? 0) - (x.updatedAt ?? 0));
-      // sessions = 全量（R266：切换器要能看到并打开 cron/子代理/dream/心跳，靠 Tab 分流）。
+      // sessions includes Cron only after a completed result has been observed.
       // foreground = 挑「行代表会话 / 行时间 / 排序」的候选池，仍排除后台会话——否则心跳
       // phantom 会当上代表：行反复浮顶、点开永远空白（R153 Vincent 事故）。全是后台会话
       // 的 agent 退回全量，行才不会空着。
       const foreground = sorted.filter((s) => !isBackgroundSession(s.key, s.kind));
-      return { agentId, sessions: sorted, foreground: foreground.length ? foreground : sorted };
+      // Status follows the current interaction rather than the session's origin.
+      // Automatic Cron/heartbeat runs stay quiet, while user follow-ups remain
+      // visible even after the user switches to a different conversation.
+      const statusSessions = sorted.filter((s) => !isBackgroundSession(s.key, s.kind)
+        || interactiveRunsRef.current.has(s.key));
+      return { agentId, sessions: sorted, foreground: foreground.length ? foreground : sorted, statusSessions };
     });
     const aAgent = activeKey ? agentOf(activeKey) : null;
     // Foreground activity keeps the existing heartbeat-safe ordering. Cron joins only
@@ -8878,8 +8908,8 @@ function ChatPageApp() {
       // A blocking prompt outranks the ordinary row preview. Prefer an approval
       // over free-form input, and route the row click to the exact session that
       // owns the card so users do not have to hunt through the session menu.
-      const approvalKey = g.foreground.find((s) => promptAttentionByKey[s.key] === "approval")?.key;
-      const inputKey = g.foreground.find((s) => promptAttentionByKey[s.key] === "input")?.key;
+      const approvalKey = g.statusSessions.find((s) => promptAttentionByKey[s.key] === "approval")?.key;
+      const inputKey = g.statusSessions.find((s) => promptAttentionByKey[s.key] === "input")?.key;
       const attentionKey = approvalKey || inputKey || "";
       const attention = attentionKey ? promptAttentionByKey[attentionKey] : undefined;
       const unreadKey = g.sessions.filter(showSessionUnread)
@@ -8897,7 +8927,7 @@ function ChatPageApp() {
     // 网关一重启整组 agent 当场蒸发，是「聊着聊着 AI 全没了」的最后一刀。
     // 正在启动（startingBackends）本来就不该隐藏，现在天然涵盖。
     return disabledBackends.size ? ranked.filter((g) => !disabledBackends.has(backendOfKnownAgent(g.agentId))) : ranked;
-  }, [sessions, agentRoster, groupInternalKeys, disabledBackends, realTimes, realTimeBounds, activeKey, activeGroupId, previewTimes, activeRealPreview, chosenSessions, unreadState, promptAttentionByKey, showSessionUnread]);
+  }, [sessions, agentRoster, groupInternalKeys, disabledBackends, realTimes, realTimeBounds, activeKey, activeGroupId, previewTimes, activeRealPreview, chosenSessions, unreadState, promptAttentionByKey, showSessionUnread, runningKeys]);
   // 单聊与群聊共用按最新消息倒序的列表。群资料修改不推进排序；无消息的群以创建时间兜底。
   const chatList = useMemo(() => [
     ...groupChats.map((group) => ({ kind: "group" as const, group, key: "group:" + group.group.id,
@@ -9475,9 +9505,9 @@ function ChatPageApp() {
             // 点击统一使用 g.targetKey，列表位置独立按真实消息时间排序。
             const previewKey = g.previewKey || rep.key;
             const rowTime = g.rowTime;
-            // 行上的「运行中」仍只看前台会话：后台 cron/心跳跑起来不该把每个 agent 行
-            // 都染成运行中（也会连带压掉红点）。后台跑没跑在切换器对应 Tab 里看。
-            const st: AgentListStatus = g.attention ?? agentStatusOf(g.foreground);
+            // User follow-ups count even in a Cron session; automatic background
+            // runs retain their normal preview and unread behavior.
+            const st: AgentListStatus = g.attention ?? agentStatusOf(g.statusSessions);
             return (
               <button
                 key={item.key}
@@ -9513,8 +9543,6 @@ function ChatPageApp() {
                       </>
                     ) : st === "running" ? (
                       <ChatTypingText className="chat-agent__subtext" text={t("chat.liveStatus.running")} />
-                    ) : st === "queued" ? (
-                      <span className="chat-agent__subtext">{t("chat.liveStatus.queued")}</span>
                     ) : (
                       <span className="chat-agent__subtext">
                         {(isActive ? activeRealPreview.text || previews[previewKey] : previews[previewKey]) || (g.sessions.length > 1 ? t("chat.sessionCount", { count: g.sessions.length }) : rep.model || sessionSub(rep))}
@@ -9590,7 +9618,7 @@ function ChatPageApp() {
                   aria-controls="chat-agent-panel"
                   onClick={event => toggleAgentHeaderPanel("profile", event.currentTarget)}>{sessionName(active)}</button>
                 <div className="chat-header__statusline">
-                {(activeHeaderStatus === "queued" || activeHeaderStatus === "connecting" || activeHeaderStatus === "reconnecting" || activeHeaderStatus === "offline") && (
+                {(activeHeaderStatus === "connecting" || activeHeaderStatus === "reconnecting" || activeHeaderStatus === "offline") && (
                   <span className={`chat-status chat-status--${activeHeaderStatus}`}>
                     <span className="status-dot" />
                     <span className="chat-status__label">{t(activeRecoveryRequired ? "settings.serviceRecoveryRequired" : `chat.liveStatus.${activeHeaderStatus}`)}</span>
@@ -9916,9 +9944,8 @@ function ChatPageApp() {
                                 </div>
                               ) : null}
                               {m === liveMessage && activeRunInFlight && activeKey && runWaitBySession[activeKey]
-                                && runWaitBySession[activeKey].kind !== "starting" && (
-                                <div className={runWaitBySession[activeKey].kind === "retrying" ? "chat-bubble is-error" : undefined}
-                                  data-testid={runWaitBySession[activeKey].kind === "retrying" ? "chat-retry-status" : "chat-queue-status"}>
+                                && runWaitBySession[activeKey].kind === "retrying" && (
+                                <div className="chat-bubble is-error" data-testid="chat-retry-status">
                                   <ChatRunWait state={runWaitBySession[activeKey]} />
                                 </div>
                               )}

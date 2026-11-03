@@ -567,6 +567,89 @@ function fakeProc() {
         await new Promise((r) => server.close(r));
       }
     }
+    // --- 新建 profile 要补拉自己的 dashboard -------------------------------
+    // 回归：本地模式 createAgent 只建 profile 不起 dashboard → 读模型报
+    // 「没有可用的 dashboard」、聊天名单（按会话派生）看不到新 agent。
+    console.log("--- 新建 profile 补拉 dashboard ---");
+    {
+      process.env.HERMES_HOME = homes[0];
+      const makeCreateBackend = async () => {
+        const ctx = makeBackend();
+        const { be, start } = ctx;
+        const roster = ["default", "bull", "coder", "horse", "owl"];
+        be._refreshAgentsFor = async () => {
+          be._installProfileRows(roster.map((p) => ({ name: p, model: `model-${p}`, provider: "xm" })));
+        };
+        be.refreshSessions = async () => {
+          be.sessionRows = [...be.dashboards.keys()].map((p) => ({ key: `agent:hermes-${p}:main`, agentId: `hermes-${p}` }));
+          return be.sessionRows;
+        };
+        const posts = [];
+        be._httpRequest = async (method, url, opts) => {
+          posts.push({ method, url, body: opts?.body });
+          // Hermes 把输入转小写建目录；权威名单随之多出小写名。
+          roster.push(String(opts?.body?.name).toLowerCase());
+          return { status: 200, body: "{\"ok\":true}" };
+        };
+        const publishes = [];
+        await start({ onPartialReady: () => publishes.push([...be.dashboards.keys()]) });
+        if (be.sessionsRefreshTimer) clearInterval(be.sessionsRefreshTimer);
+        return { ...ctx, posts, publishes };
+      };
+
+      {
+        const { be, posts, publishes } = await makeCreateBackend();
+        const spawns = [];
+        be._spawnOrReuseDashboard = async (profile, port, claimed) => {
+          spawns.push({ profile, port, claimed: [...claimed].sort() });
+          return { profile, port, baseUrl: `http://127.0.0.1:${port}`, token: "t", proc: null, spawned: true };
+        };
+        const publishedBefore = publishes.length;
+        const result = await be.createAgent({ name: "Vincent" });
+        ok("新建请求已发到 /api/profiles", posts.length === 1 && posts[0].url.endsWith("/api/profiles"));
+        ok("按 Hermes 实际（小写）profile 名补拉 dashboard", spawns.length === 1 && spawns[0].profile === "vincent", JSON.stringify(spawns));
+        ok(
+          "补拉避开已有 dashboard 的端口",
+          spawns[0]?.port === 9124 && JSON.stringify(spawns[0]?.claimed) === JSON.stringify([9119, 9120, 9121, 9122, 9123]),
+          JSON.stringify(spawns[0]),
+        );
+        ok("新 dashboard 已登记", be.dashboards.get("vincent")?.port === 9124);
+        ok("新 agent 已有会话行（聊天名单可见）", be.sessionRows.some((row) => row.agentId === "hermes-vincent"));
+        ok(
+          "创建后广播 backend.ready 且带上新 dashboard",
+          publishes.length === publishedBefore + 1 && publishes.at(-1).includes("vincent"),
+          JSON.stringify(publishes.slice(publishedBefore)),
+        );
+        ok("返回 ok", result?.ok === true);
+
+        await be.start();
+        if (be.sessionsRefreshTimer) clearInterval(be.sessionsRefreshTimer);
+        ok("内部无参重启不冲掉就绪广播钩子", typeof be._startHooks?.onPartialReady === "function");
+      }
+
+      {
+        const { be, publishes } = await makeCreateBackend();
+        be._spawnOrReuseDashboard = async () => {
+          be.lastError = "hermes dashboard 进程退出（exit 1）\nTraceback 尾行";
+          return null;
+        };
+        const publishedBefore = publishes.length;
+        let error = null;
+        try {
+          await be.createAgent({ name: "cssssss" });
+        } catch (e) {
+          error = e;
+        }
+        ok(
+          "dashboard 起不来 → 明确报错（profile 已建、重启会重试）",
+          /profile「cssssss」已创建.*dashboard 启动失败（hermes dashboard 进程退出（exit 1））.*重启 App 会重试/.test(error?.message || ""),
+          error?.message,
+        );
+        ok("单个 profile 失败不把整个后端标成故障", be.lastError === null, String(be.lastError));
+        ok("失败时不广播", publishes.length === publishedBefore);
+        ok("失败时不登记 dashboard", !be.dashboards.has("cssssss"));
+      }
+    }
   } finally {
     delete process.env.HERMES_HOME;
     for (const h of homes) fs.rmSync(h, { recursive: true, force: true });

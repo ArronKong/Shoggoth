@@ -77,7 +77,7 @@ finally{w.destroy();app.quit();}}).catch(e=>{console.error(e);app.exit(1)});`);
     const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
     fs.writeFileSync(path.join(output, "electron.log"), log); assert.equal(code, 0, `UI failed; inspect ${output}`);
     assert.equal(f.models.length, 1); assert.equal(f.released.length, 1);
-    console.log(`PASS actual React/REST/Service UI: ${unifiedCatalog ? "unified learned catalog, counts, hidden controls, status filters, archive/restore, version details, narrow layout and withdrawal" : "consent, own-Agent model, review, publication, edit ownership, version diff, narrow layout, source withdrawal"}; ${output}`);
+    console.log(`PASS actual React/REST/Service UI: ${unifiedCatalog ? "unified learned catalog, counts, hidden controls, minimal cards, archive/restore, current Markdown details, narrow layout and withdrawal" : "consent, own-Agent model, review, publication, edit ownership, current Markdown content, narrow layout, source withdrawal"}; ${output}`);
   } finally {
     clearTimeout(timer); if (child && child.exitCode === null) child.kill("SIGKILL");
     if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); } await f.close();

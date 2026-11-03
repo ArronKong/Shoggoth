@@ -12,6 +12,8 @@
 //   token          operator token for the gateway (re-seeded into the UI)
 //   locale         "" follow-system | "zh-CN" | "en"
 //   theme          "light" (default) | "dark" | "system" follow-OS
+//   appIcon        "shoggoth-ip" (default; the bundle's own icon) | "shoggoth-logo".
+//                  Applied by desktop-app-icon.js to the Dock and the Finder icon.
 //   hermesMode     "local"  → spawn `hermes dashboard` per profile (default)
 //                  "remote" → connect to already-running remote dashboards
 //   hermesRemotes  [{ profile, baseUrl, token }] used when hermesMode==="remote"
@@ -22,9 +24,7 @@
 //                  非布尔脏值 fail-closed 为 false（不能被脏值带成开）。
 //                  只在「app 正常退出」这一条路径生效；断开连接/自更新/模式切换
 //                  仍然真杀（语义不同，见 ARCHITECTURE §9）。
-//   groupChatEnabled  true (default) → 聊天页显示多 Agent 群聊入口。false → 隐藏入口、拒绝新建群 / 发消息 /
-//                  重试，并在关闭那一刻停掉进行中的发言与后台工作；群与历史都保留，重新打开即恢复。
-//                  缺字段或脏值视为 true（群数据不能因为配置损坏而看不见）。
+//   groupChatEnabled  固定为 true，兼容旧版设置读取。旧配置中的 false 不再生效。
 //   disabledBackends  backend id 列表（如 ["hermes"]）：用户在设置页「断开连接」
 //                  的后端。registry 聚合/路由跳过它们，UI 隐藏对应切换项。
 //   notifications  { chat, cron, task } per-category desktop-notification toggles
@@ -60,6 +60,8 @@ function normalizeNativeChatUiConfig(value) {
 }
 
 const SUPPORTED_LOCALES = new Set(["", "zh-CN", "en"]);
+const APP_ICON_IDS = Object.freeze(["shoggoth-ip", "shoggoth-logo"]);
+const DEFAULT_APP_ICON = "shoggoth-ip";
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
 // 窗口尺寸：默认值与下限都住在这里（schema 唯一源），main.js 直接消费这两个常量。
 const DEFAULT_WINDOW_BOUNDS = { width: 1728, height: 1117 };
@@ -267,12 +269,13 @@ function normalizeConfig(parsed) {
     hermesPluginHostMode: p.hermesPluginHostMode === "managed" ? "managed" : "existing",
     locale: SUPPORTED_LOCALES.has(localeRaw) ? localeRaw : "",
     theme: p.theme === "dark" || p.theme === "system" ? p.theme : "light",
+    appIcon: APP_ICON_IDS.includes(p.appIcon) ? p.appIcon : DEFAULT_APP_ICON,
     hermesMode: p.hermesMode === "remote" ? "remote" : "local",
     hermesRemotes: sanitizeRemotes(p.hermesRemotes),
     hermesKeepAlive: typeof p.hermesKeepAlive === "boolean"
       ? p.hermesKeepAlive
       : !Object.prototype.hasOwnProperty.call(p, "hermesKeepAlive"),
-    groupChatEnabled: p.groupChatEnabled !== false,
+    groupChatEnabled: true,
     groupRuntimeHosts: normalizeGroupRuntimeHosts(p.groupRuntimeHosts),
     disabledBackends: sanitizeDisabledBackends(p.disabledBackends),
     notifications: sanitizeNotifications(p.notifications),
@@ -460,6 +463,8 @@ module.exports = {
   sanitizeDisabledBackends,
   sanitizeWindowBounds,
   SUPPORTED_LOCALES,
+  APP_ICON_IDS,
+  DEFAULT_APP_ICON,
   DEFAULT_GATEWAY_URL,
   DEFAULT_WINDOW_BOUNDS,
   MIN_WINDOW_BOUNDS,

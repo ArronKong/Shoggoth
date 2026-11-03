@@ -3,13 +3,12 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
 import type { TFunction } from "i18next";
-import type { CronDelivery, CronRun, CronRunTrajectory, UnifiedAgent, UnifiedCronJob } from "../types";
+import type { CronDelivery, CronRun, UnifiedAgent, UnifiedCronJob } from "../types";
 import {
   createCronJob,
   deleteCronJob,
   getCronJobDetail,
   getCronLatestDelivery,
-  getCronRunTrajectory,
   getCronRuns, getCronRunsPage, runCodexAutomation,
   listAgents,
   listCronJobs,
@@ -26,8 +25,6 @@ import Modal, { DetailRow, ModalSection } from "../components/Modal";
 import { Switch } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
 import { toSanitizedMarkdownHtml } from "../lib/markdown";
-import TurnProcess from "../components/TurnTimeline/TurnProcess";
-import { stepsFromParts } from "../lib/turnTimeline";
 import { cronForceRunResumesPaused, useBackendCatalog, useEnabledBackends } from "../lib/backends";
 import { usePageCache } from "../lib/usePageCache";
 import { isVisibleCronJob } from "../lib/cronVisibility";
@@ -48,6 +45,7 @@ import CronCreateForm from "./cron/CronCreateForm";
 import { cronAgentAvailable, cronCreateInputFromDraft, emptyCronCreateDraft } from "./cron/cronCreateDraft";
 import { IconPlus, IconSearch } from "./cron/cronIcons";
 import CronRunHistoryPanel from "./cron/CronRunHistoryPanel";
+import CronRunReportModal, { ReportNote, runExecutionFailed } from "./cron/CronRunReportModal";
 import { formatCronTime, scheduleText } from "./cron/cronPresets";
 import HermesCronForm, {
   emptyHermesDraft,
@@ -209,8 +207,6 @@ export default function CronPage() {
   const [runsFilters, setRunsFilters] = useState<CronRunsFilters>(DEFAULT_RUN_FILTERS);
   const [deliveryJob, setDeliveryJob] = useState<UnifiedCronJob | null>(null);
   const [delivery, setDelivery] = useState<CronDelivery | null>(null);
-  // R342:该次运行的 Agent Trajectory(仅本机 OpenClaw 转录可及;其余 supported=false 隐藏)
-  const [trajectory, setTrajectory] = useState<CronRunTrajectory | null>(null);
 
   const toast = useToast();
   const confirm = useConfirm();
@@ -235,6 +231,8 @@ export default function CronPage() {
   const notificationJobId = searchParams.get("job");
   const notificationBackendId = searchParams.get("backend");
   const notificationRequest = searchParams.get("notification");
+  // Dashboard 运行结果弹窗的编辑图标带 edit=1：直接进编辑表单，与本页弹窗一致。
+  const notificationEdit = searchParams.get("edit") === "1";
   // 打开后保留消费标记，用户手动关闭详情时不应因同一深链再次自动弹出。
   const openedNotificationJobId = useRef<string | null>(null);
   const stats = useMemo(() => countJobs(jobs), [jobs]);
@@ -431,7 +429,7 @@ export default function CronPage() {
       job.id === notificationJobId
       && (!notificationBackendId || job.backendId === notificationBackendId));
     if (notificationJob) {
-      void openView(notificationJob);
+      void (notificationEdit ? openEdit(notificationJob) : openView(notificationJob));
       return;
     }
     const ticket = detailIntentController.begin("detail", `notification:${identity}`);
@@ -439,7 +437,7 @@ export default function CronPage() {
       if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
       const job = allJobs.find(item => item.id === notificationJobId
         && (!notificationBackendId || item.backendId === notificationBackendId));
-      if (job) void openView(job);
+      if (job) void (notificationEdit ? openEdit(job) : openView(job));
       else toast.info(t("notif.cronUnavailable"));
     }).catch(error => {
       if (detailIntentController.isCurrent(ticket, ticket.context)) toast.error(error instanceof Error ? error.message : String(error));
@@ -492,27 +490,14 @@ export default function CronPage() {
     const detailTicket = detailIntentController.begin("detail", intent);
     const seq = ++deliveryReqRef.current;
     // 没有可复用的稳定摘要时不要先打开一行 loading 的矮弹窗；先关闭旧详情，
-    // 等正文与可用轨迹完整就绪后再一次提交，保证首帧就是最终详情几何。
+    // 等正文完整就绪后再一次提交，保证首帧就是最终详情几何。
     setDeliveryJob(null);
     setDelivery(null);
-    setTrajectory(null);
     try {
       const latest = await getCronLatestDelivery(job.id, occurrenceMs);
       if (seq !== deliveryReqRef.current) return;
       if (!detailIntentController.isCurrent(detailTicket, intent)) return;
-      let nextTrajectory: CronRunTrajectory | null = null;
-      // R342:拿到 run 的 sessionKey 后同步准备过程轨迹；失败静默（区块隐藏）。
-      if (latest.sessionKey) {
-        try {
-          nextTrajectory = await getCronRunTrajectory(job.id, latest.sessionKey, latest.runId);
-        } catch {
-          nextTrajectory = null;
-        }
-      }
-      if (seq !== deliveryReqRef.current) return;
-      if (!detailIntentController.isCurrent(detailTicket, intent)) return;
       setDelivery(latest);
-      setTrajectory(nextTrajectory);
       setDeliveryJob(job);
     } catch (err) {
       // 迟到的失败不能关掉用户当前正在看的那个弹窗。
@@ -528,25 +513,7 @@ export default function CronPage() {
     deliveryReqRef.current += 1; // 关闭后，在途响应不得再写回弹窗
     setDeliveryJob(null);
     setDelivery(null);
-    setTrajectory(null);
   };
-
-  // R342:轨迹 parts → 时间线步骤;toolCallId 精确配对,用转录消息级 ms 时间戳
-  // 推真实耗时(与聊天历史的降级「—」不同,cron 转录有可信时刻)。
-  const trajectorySteps = useMemo(() => {
-    if (!trajectory?.supported || !trajectory.parts.length) return [];
-    const callTs = new Map<string, number>();
-    const parts = trajectory.parts.map((p) => ({ ...p } as typeof p & { durationS?: number }));
-    for (const p of parts) {
-      if (p.type === "toolCall" && p.toolCallId && typeof p.ts === "number") {
-        callTs.set(p.toolCallId, p.ts);
-      } else if (p.type === "toolResult" && p.toolCallId && typeof p.ts === "number") {
-        const t0 = callTs.get(p.toolCallId);
-        if (typeof t0 === "number" && p.ts > t0) p.durationS = (p.ts - t0) / 1000;
-      }
-    }
-    return stepsFromParts(parts);
-  }, [trajectory]);
 
   // 报告正文走 sessionStorage，路由只携带短 session key；ChatPage 会把正文作为
   // 引用草稿放入该次运行的真实会话，不会自动发送。
@@ -557,6 +524,9 @@ export default function CronPage() {
 
   const deliveryReport = firstNonBlankText(delivery?.fullText, delivery?.summary);
   const deliverySessionKey = canonicalCronSessionKey(deliveryJob?.agentId, delivery?.sessionKey);
+  const deliveryAgent = deliveryJob?.agentId
+    ? agents[deliveryJob.backendId]?.find((agent) => agent.id === deliveryJob.agentId)
+    : undefined;
 
   const openCreate = () => {
     detailIntentController.begin("detail", "create");
@@ -1019,73 +989,46 @@ export default function CronPage() {
         )}
       </Modal>
 
-      <Modal
+      <CronRunReportModal
         open={!!deliveryJob && !!delivery}
         onClose={closeDelivery}
         title={deliveryJob?.name}
-        subtitle={deliveryJob && cronKindFor(deliveryJob.backendId) === "native" ? undefined : deliveryJob?.id}
-        width={680}
-        footer={
-          deliveryJob && (
-            <>
-              {deliverySessionKey && deliveryReport && (
-                <button className="foot-left btn-secondary" onClick={() => askInChat(deliveryJob.backendId, deliverySessionKey, deliveryReport)}>
-                  {t("cron.askInChat")}
-                </button>
-              )}
-              <button
-                className="btn-primary"
-                disabled={deliveryJob.actions?.edit === false}
-                onClick={() => {
-                  const job = deliveryJob;
-                  closeDelivery();
-                  openEdit(job);
-                }}
-              >
-                {t("common.edit")}
-              </button>
-            </>
-          )
-        }
+        failed={runExecutionFailed(delivery?.status)}
+        agentId={deliveryJob?.agentId}
+        agentName={deliveryAgent?.name}
+        startedAt={delivery?.startedAt}
+        durationMs={delivery?.durationMs}
+        model={delivery?.model
+          ? `${delivery.provider ? `${delivery.provider}/` : ""}${delivery.model}`
+          : deliveryJob?.model || t("cronForm.modelDefault")}
+        bodyLabel={delivery && delivery.outputDisposition !== "silent" && delivery.outputDisposition !== "pending"
+          ? (delivery.fullText ? t("dashboard.fullTextTitle") : delivery.summary ? t("dashboard.summaryTitle") : undefined)
+          : undefined}
+        onAskInChat={deliveryJob && deliverySessionKey && deliveryReport
+          ? () => askInChat(deliveryJob.backendId, deliverySessionKey, deliveryReport)
+          : undefined}
+        editDisabled={deliveryJob?.actions?.edit === false}
+        onEdit={() => {
+          const job = deliveryJob;
+          if (!job) return;
+          closeDelivery();
+          openEdit(job);
+        }}
       >
-        {delivery ? (
-          <>
-            <div className="cron-delivery-meta">
-              {deliveryJob && <BackendBadge backendId={deliveryJob.backendId} />}
-              {delivery.status && <span className={`status status-${delivery.status}`}>{delivery.status}</span>}
-              <span className="mono muted">{fmtTime(delivery.startedAt)}</span>
-              {typeof delivery.durationMs === "number" && (
-                <span className="muted">{Math.round(delivery.durationMs / 100) / 10}s</span>
-              )}
-              {delivery.model && (
-                <span className="muted">{delivery.provider ? `${delivery.provider}/` : ""}{delivery.model}</span>
-              )}
-            </div>
-            {delivery.error && <div className="error">{delivery.error}</div>}
-            {trajectorySteps.length > 0 && (
-              <div style={{ margin: "10px 0 4px" }}>
-                <TurnProcess steps={trajectorySteps} />
-              </div>
-            )}
-            {delivery.source === "summary" && (
-              <p className="muted cron-delivery-note">{t("cron.deliverySummaryNote")}</p>
-            )}
-            {delivery.outputDisposition === "silent" ? (
-              <p className="muted">{t("cron.silentDelivery")}</p>
-            ) : delivery.outputDisposition === "pending" ? (
-              <p className="muted">{t("cron.pendingDelivery")}</p>
-            ) : delivery.fullText ? (
-              <div className="chat-md cron-delivery-md" dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(delivery.fullText, true) }} />
-            ) : delivery.summary ? (
-              <div className="chat-md cron-delivery-md" dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(delivery.summary, true) }} />
-            ) : (
-              <p className="muted">{t("cron.deliveryNone")}</p>
-            )}
-          </>
+        {delivery?.error && <ReportNote error>{delivery.error}</ReportNote>}
+        {delivery?.source === "summary" && <ReportNote>{t("cron.deliverySummaryNote")}</ReportNote>}
+        {delivery?.outputDisposition === "silent" ? (
+          <ReportNote>{t("cron.silentDelivery")}</ReportNote>
+        ) : delivery?.outputDisposition === "pending" ? (
+          <ReportNote>{t("cron.pendingDelivery")}</ReportNote>
+        ) : delivery?.fullText ? (
+          <div className="chat-md cron-delivery-md" dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(delivery.fullText, true) }} />
+        ) : delivery?.summary ? (
+          <div className="chat-md cron-delivery-md" dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(delivery.summary, true) }} />
         ) : (
-          <p className="muted">{t("cron.deliveryNone")}</p>
+          <ReportNote>{t("cron.deliveryNone")}</ReportNote>
         )}
-      </Modal>
+      </CronRunReportModal>
     </div>
   );
 }

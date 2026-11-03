@@ -378,6 +378,32 @@ async function compileClient() {
 
   check("首启明确识别原生 Shoggoth 而不落入 Hermes 远程表单", /b\.id\s*===\s*["']shoggoth["']/.test(setup) && /getShoggothProductStatus/.test(setup));
   check("首启就绪口径不再要求所有外部后端全绿", !/statuses\.every\(\(b\)\s*=>\s*b\.connected\)/.test(setup));
+  {
+    // 首启整页：没装的后端不显示；识别中视频静音循环；自定义配置走端点通道；
+    // 恒浅色靠逐字照抄 styles.css :root 的 light-dark token，照抄必须与源头一致。
+    const setupCss = fs.readFileSync(path.join(UI_ROOT, "src/components/SetupOverlay.module.css"), "utf8");
+    const stylesCss = fs.readFileSync(path.join(UI_ROOT, "src/styles.css"), "utf8");
+    const tokenLines = (css) => new Map([...css.matchAll(/^\s*(--[a-z0-9-]+):\s*(light-dark\([^;]*\));/gm)].map((m) => [m[1], m[2]]));
+    const rootBlock = /^:root \{([\s\S]*?)^\}/m.exec(stylesCss)?.[1] ?? "";
+    const mirrorBlock = /^\.root \{\n  color-scheme: light;([\s\S]*?)^\}/m.exec(setupCss)?.[1] ?? "";
+    const source = tokenLines(rootBlock);
+    const mirror = tokenLines(mirrorBlock);
+    check("首启页照抄的主题 token 与 styles.css :root 逐字一致且无遗漏",
+      source.size > 0 && source.size === mirror.size && [...source].every(([name, value]) => mirror.get(name) === value));
+    check("首启列表隐藏未安装的 Hermes / OpenClaw",
+      /const shownExternals = externals\.filter\(installed\)/.test(setup)
+      && /b\.id === "openclaw" \? Boolean\(ocHost\?\.binPath\) : !missing\.current\[b\.id\]/.test(setup));
+    check("首启列表变成什么都没有时（持续一段时间）回到「没找到」页",
+      /outcome !== "setup"[\s\S]{0,160}setTimeout\([\s\S]{0,120}if \(phase === "found"\) setPhase\("setup"\)[\s\S]{0,40}NOTHING_LEFT_MS/.test(setup));
+    check("首启识别中视频静音循环播放", /<video[^>]*\bloop\b[^>]*\bmuted\b[^>]*\bplaysInline\b/.test(setup.replace(/\s+/g, " ")));
+    check("首启自定义配置不挂模型来源表单，设置页 / Agent 页的模型配置表单不受影响",
+      !/ShoggothProviderSetup/.test(setup) && !/onboarding/.test(providerSetup));
+    check("首启自定义配置走自定义端点通道：填 URL 自动拉取模型，多选全部存进端点，第一个选中的绑定为默认",
+      /validateCustomEndpoint\("shoggoth"/.test(setup)
+      && /await saveCustomEndpoint\("shoggoth"[\s\S]{0,600}await bindShoggothEndpoint\(/.test(setup)
+      && /models: \[\.\.\.selected,/.test(setup)
+      && /defaultModel: selected\[0\]/.test(setup));
+  }
   check("设置有独立 Shoggoth Service 分区和错误重试", /id=["']settings-shoggoth["']/.test(serviceSettings) && /getShoggothProductStatus/.test(settings) && /onRetry=\{shoggothRetry\}/.test(settings));
   check("后台 loaded 但 Service 断开时显示重新连接且仍可停止", /background\.loaded\s*&&\s*!status\.service\.healthy/.test(serviceSettings) && /action\("repair", "settings\.reconnect"/.test(serviceSettings) && /background\.loaded\s*&&\s*action\("stop", "settings\.shoggothStop"/.test(serviceSettings) && /onAction=\{\(action\) => void runShoggothAction\(action\)\}/.test(settings));
   check(

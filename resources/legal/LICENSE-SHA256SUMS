@@ -17,12 +17,6 @@ c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4  licenses/npm/_
 0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a  licenses/npm/_modelcontextprotocol_client@2.3.1/LICENSE
 0382b0057770ca05e9c350a50aa3b1c1fea84da0bc81d723bf00b9aa841be58a  licenses/npm/_modelcontextprotocol_core@2.3.1/LICENSE
 057cd72079110405e7534351196edae4819913ba348a4d5ae87ae79baa9d3e65  licenses/npm/_playwright_mcp@0.0.82/LICENSE
-c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383  licenses/npm/_types_linkify-it@5.0.0/LICENSE
-c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383  licenses/npm/_types_markdown-it@14.1.2/LICENSE
-c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383  licenses/npm/_types_mdurl@2.0.0/LICENSE
-c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383  licenses/npm/_types_prop-types@15.7.15/LICENSE
-c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383  licenses/npm/_types_react@18.3.29/LICENSE
-c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383  licenses/npm/_types_trusted-types@2.0.7/LICENSE
 6bb5b2d4c07d793ca928daa63a8899c6914fafb5ac3aa04ec10cae07f3d57dca  licenses/npm/adm-zip@0.6.1/LICENSE
 9b6a90e9be78799534e4030d71b6817271fb99aa10e261f9f9f6dec1cff4177a  licenses/npm/ajv@8.20.0/LICENSE
 3f3e835a9952cfc2a6ca836fb95b3257c981f24fa3ef51249055acb09931897b  licenses/npm/animejs@4.4.1/LICENSE.md
@@ -33,7 +27,6 @@ de4d1f2d2ad5ad0cfd1657a106476b31cb5db5ef9d1ff842b237c0c81f0c8a23  licenses/npm/a
 fe9538ec27e7fb9bfbcc05c97bc5087a2a25a7caf4ad7e6bc99fbcbf1a37e6ce  licenses/npm/cookie@1.1.1/LICENSE
 7eba1c8774e8bcb77356bafc70ac9de8383e7592bb79ab979130ab757d40f53d  licenses/npm/cron-parser@5.4.0/LICENSE
 aaa78451b6fecd1b9c4594c796c133c0e90cad100372ff8bc6de615e9ef9adf1  licenses/npm/cross-spawn@7.0.6/LICENSE
-11d55bd4541c75ee7879547ac49089c489163dae49551389713c3d026cab383e  licenses/npm/csstype@3.2.3/LICENSE
 23eb8602cd5902bcfca56b23aa08e8672a809f5a12eaf8bb56abfa9d44e1a4fd  licenses/npm/debug@4.4.3/LICENSE
 b41d08bc3624d8c436fc80237d73ebb361985a67f4504bbcd703e5ca2b27254c  licenses/npm/define-data-property@1.1.4/LICENSE
 210549bd75abec340599f291e5ecd95b9acd0d8a713543838ab42f6f462b16bc  licenses/npm/define-properties@1.2.1/LICENSE
@@ -110,11 +103,9 @@ c5c6c5183a789d122f267c405f685037efb87e27fcde28ab1dd7378a2d2f5962  licenses/npm/s
 48da2f39e100d4085767e94966b43f4fa95ff6a0698fba57ed460914e35f94a0  licenses/npm/shebang-regex@3.0.0/license
 fa5659948374d4f555594f47f6da073b40dc503e921aeeece30df4362b3051a5  licenses/npm/smol-toml@1.9.0/LICENSE
 f8287e4dd9480be58c56aca4a55c23b782c43a86e69aabad78fff4df0d29edef  licenses/npm/sprintf-js@1.1.3/LICENSE
-8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc  licenses/npm/three@0.185.0/LICENSE
 4b3faf884ee71eec3df920b66c98fc6618af28e824cf3a32ef3d8774048cc76d  licenses/npm/tiny-typed-emitter@2.1.0/LICENSE
 d013c4966dbea41607b4abf37517d6d72f66488bc97cdf309aaa5ffb59d35b9f  licenses/npm/tslib@2.8.1/LICENSE.txt
 64a93ffc0a06a2266dbb57ed7ebe3b56ba66ab337b6347fabdbf86c76819fbae  licenses/npm/type-fest@0.13.1/license
-e9262ce6b9f0115feeaa6f6be2820acf87e8ffe2e29a44cbaf485ef40d51aba9  licenses/npm/typescript@5.9.3/LICENSE.txt
 483acb265f182907d1caf6cff9c16c96f31325ed23792832cc5d8b12d5f88c8a  licenses/npm/uc.micro@2.1.0/LICENSE.txt
 a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27  licenses/npm/undici@7.30.1/LICENSE
 3fda5977c0904e226190b4e21d64340c1731e2142d6fe5f3dee0090a216b8b63  licenses/npm/universalify@2.0.1/LICENSE
@@ -124,6 +115,7 @@ da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93  licenses/npm/u
 2b29dcfe0d6471f7e8c92c5fb38c9f93edee10330937055440192f1832b1ecef  licenses/npm/ws@8.21.0/LICENSE
 3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8  licenses/npm/zod@4.6.7/LICENSE
 efe8f1903440d3e757fa3c91fdbbe410c496b7983f1a92420f252ce3b417e0ee  licenses/overrides/LAZY-VAL.txt
+3a850fa5f08101db6f40676c2786e10bd2cd5fff7b12ffdf1e0c434d4e49d90c  licenses/overrides/QRCODE-GENERATOR-2.0.4.txt
 af691e837eb18415075db251f47a4a0b1457257ff20fedcc6b460b7ed71d74ac  licenses/source/CHILL-KAI.txt
 9a755af092b494944c99f471be6fddd19b006a448fefdc4717e4ee0aa09a97b0  licenses/source/COURIER-PRIME.txt
 821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6  licenses/source/HERMES.txt

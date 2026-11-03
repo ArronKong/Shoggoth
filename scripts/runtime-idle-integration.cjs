@@ -204,4 +204,87 @@ async function until(check) {
   } finally {
     await service.stop(); fs.rmSync(root, { recursive: true, force: true });
   }
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+})().then(productionDefaultWindow).catch((error) => { console.error(error); process.exitCode = 1; });
+
+// app/agent-service.js creates the Service without runtimeIdleTimeoutMs. A model
+// catalog read (the composer model menu) must not keep that Agent's CLI host
+// forever: it retires after 120 idle seconds, never while work is active.
+async function productionDefaultWindow() {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sg-idle-default-")));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
+  let stops = 0; let nativeTurn = false;
+  const hosts = new Map();
+  const pool = {
+    entries: new Map(), stoppingProfiles: new Set(), blockedProfiles: new Set(),
+    async get(binding) {
+      if (hosts.has("control")) return hosts.get("control");
+      let finish;
+      const host = {
+        terminated: new Promise((resolve) => { finish = resolve; }),
+        registeredSecrets: [],
+        subscribe() { return () => {}; },
+        registerServerRequestHandler() { return () => {}; },
+        authenticationState() { return { authenticated: true, credentialPresent: true }; },
+        canRetireIdle() { return !nativeTurn; },
+        async modelsList() {
+          return { data: [{ model: "idle-fixture", displayName: "Fixture", description: "", isDefault: true, hidden: false }], nextCursor: null };
+        },
+        finish() { finish(); },
+      };
+      const entry = { key: "control", host, runtimeProfileId: binding.runtimeProfileId, runtimeAccountId: binding.runtimeAccountId };
+      trackPoolHost(entry, binding);
+      entry.capacity.ready = true;
+      this.entries.set("control", entry);
+      hosts.set("control", host); return host;
+    },
+    async stop() { stops += 1; for (const host of hosts.values()) host.finish(); hosts.clear(); this.entries.clear(); },
+    async stopAll() { for (const host of hosts.values()) host.finish(); hosts.clear(); this.entries.clear(); },
+  };
+  const service = createAgentService({
+    paths, version: "idle-default", builtinCliProfiles: true,
+    builtinCliInstalledAccountIds: ["native-deepseek-harness-default-v1"],
+    safeStorage: { isEncryptionAvailable: () => true, encryptString: (v) => Buffer.from(v), decryptString: (v) => Buffer.from(v).toString() },
+    deepSeekHarnessRuntimePool: pool,
+  });
+  // Record the registry's idle timers instead of waiting two real minutes.
+  const timers = new Map(); let serial = 0;
+  service.runtimeManager.setTimer = (fn, delayMs) => { timers.set(++serial, { fn, delayMs }); return serial; };
+  service.runtimeManager.clearTimer = (id) => { timers.delete(id); };
+  const fireIdleTimer = () => {
+    assert.equal(timers.size, 1);
+    const [[id, timer]] = timers;
+    timers.delete(id);
+    assert.equal(timer.delayMs, 120_000);
+    timer.fn();
+  };
+  try {
+    await service.start();
+    const profile = service.productStore.listAgentProfiles().find((p) => p.runtime === "deepseek-harness");
+    assert.ok(profile);
+    const models = await requestService(paths, { version: SERVICE_PROTOCOL_VERSION, id: randomUUID(), token: readClientToken(paths),
+      method: "profile.models.list", params: { profileId: profile.id, cursor: null, limit: 100 } });
+    assert.equal(models.models[0].id, "idle-fixture");
+    assert.equal(hosts.size, 1);
+    await until(() => timers.size === 1);
+
+    const listRuns = service.workRunCoordinator.listRuns.bind(service.workRunCoordinator);
+    for (const status of ["running", "waiting_approval", "waiting_input"]) {
+      service.workRunCoordinator.listRuns = () => [{ id: `default-${status}`, status, profileId: profile.id }];
+      fireIdleTimer(); await delay(20);
+      assert.equal(stops, 0, `${status} Run must retain the host`);
+    }
+    service.workRunCoordinator.listRuns = listRuns;
+    nativeTurn = true;
+    fireIdleTimer(); await delay(20);
+    assert.equal(stops, 0, "a native turn in progress must retain the host");
+    nativeTurn = false;
+
+    fireIdleTimer();
+    await until(() => stops === 1);
+    assert.equal(hosts.size, 0);
+    assert.equal(timers.size, 0);
+    console.log("PASS production default: a model-catalog host retires after 120 idle seconds; running/approval/input Runs and native turns retain it");
+  } finally {
+    await service.stop(); fs.rmSync(root, { recursive: true, force: true });
+  }
+}

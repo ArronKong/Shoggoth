@@ -125,6 +125,7 @@ import { isVisibleRuntime } from "../lib/runtimeVisibility";
 import i18n from "i18next";
 import secretFallbackCodes from "../../../core/chat-secret-fallback-codes.json";
 import { publishSystemIssue } from "../lib/system-issues";
+import { acknowledgeDashboardPrompt } from "../lib/dashboardPromptResponses";
 
 // All management calls go to the loopback REST plane served by static-server.js.
 // Same origin as the embedding iframe, so relative paths just work.
@@ -352,6 +353,10 @@ export async function getCronRunTrajectory(id: string, sessionKey: string, runId
 export async function getCronLatestDelivery(id: string, atMs?: number): Promise<CronDelivery> {
   const at = typeof atMs === "number" ? `&at=${Math.round(atMs)}` : "";
   return jsonFetch<CronDelivery>(`${jobUrl(id, "delivery")}${at}`);
+}
+
+export function getNativeCronRunDelivery(id: string, runId: string): Promise<CronDelivery> {
+  return jsonFetch(`${jobUrl(id, "result")}&runId=${encodeURIComponent(runId)}`);
 }
 
 export async function runCodexAutomation(id: string, revision: string, operationId: string): Promise<{ runId: string; status: string; executionOrigin: "shoggoth" }> {
@@ -2690,7 +2695,7 @@ export async function respondBackendPrompt(
     | { runId: string; requestId: string; kind: "approval"; choice: InteractiveApprovalChoice }
     | { runId: string; requestId: string; kind: "input"; action: "submit" | "cancel"; answers: Record<string, string> },
 ): Promise<{ runId: string; status: string }> {
-  return jsonFetch<{ runId: string; status: string }>(
+  const result = await jsonFetch<{ runId: string; status: string }>(
     `/__api/dashboard/prompts/respond?backend=${encodeURIComponent(backendId)}`,
     {
     method: "POST",
@@ -2698,6 +2703,10 @@ export async function respondBackendPrompt(
     body: JSON.stringify(input),
     },
   );
+  if (result.runId === input.runId && result.status === "running") {
+    acknowledgeDashboardPrompt({ backendId, runId: input.runId, requestId: input.requestId });
+  }
+  return result;
 }
 
 // 统一活动流分页（筛选在服务端；cursor 为 opaque 串）。无参 = 本地 0 点第一页。

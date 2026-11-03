@@ -62,7 +62,7 @@ test("untouched v3 AGENTS upgrades once while preserving its saved revision", (t
   assert.equal(upgraded.manifest.revision, old.manifest.revision + 1);
   assert.equal(upgraded.manifest.reason, `default-template:v${DEFAULT_TEMPLATE_VERSION}`);
   assert.equal(upgraded.documents.AGENTS, DEFAULT_DOCUMENTS.AGENTS);
-  assert.match(upgraded.documents.AGENTS, /Background extraction creates review candidates/u);
+  assert.match(upgraded.documents.AGENTS, /reviews direct conversations in the background/u);
   assert.deepEqual(f.definitions.readRevision(id, old.manifest.revision).documents, old.documents);
   assert.deepEqual(f.definitions.ensureProfile({ profileId: id, profileName: "Current" }), upgraded);
 });

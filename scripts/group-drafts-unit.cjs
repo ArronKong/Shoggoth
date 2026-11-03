@@ -32,6 +32,22 @@ function harness({ opportunity, events = [], externalDraft = null }) {
 
 const delta = (seq, delta, itemId = "a") => ({ seq, type: "text.delta", payload: { itemId, delta } });
 
+test("native observation reports bound read failures and recovery separately from text progress", async () => {
+  const h = harness({ opportunity: { id: "o", groupId: "g", memberId: "m", fence: 1, state: "running", runId: "r" } });
+  const observed = [], originalRead = h.tracker.nativeExecutor.readEvents;
+  h.tracker.onObservation = (id, observation) => observed.push({ id, ...observation });
+  h.tracker.nativeExecutor.getRun = () => ({ status: "running" });
+  h.tracker.watch("o"); await h.tick();
+  assert.equal(observed.at(-1).status, "running");
+  h.tracker.nativeExecutor.readEvents = async () => { throw Error("temporary reader outage"); };
+  await h.tick(); assert.equal(observed.at(-1).status, "unavailable");
+  assert.equal(observed.at(-1).runId, "r"); assert.equal(observed.at(-1).memberId, "m");
+  h.tracker.nativeExecutor.readEvents = originalRead;
+  await h.tick(); assert.equal(observed.at(-1).status, "running");
+  assert.equal(h.tracker.draftFor("o"), null, "a status read cannot invent reply text");
+  h.tracker.stop();
+});
+
 test("native deltas accumulate, snapshots replace their own paragraph, and public paragraphs stay visible", async () => {
   const h = harness({ opportunity: { id: "o", groupId: "g", state: "running", runId: "r" },
     events: [delta(1, "先看"), delta(2, "一下")] });

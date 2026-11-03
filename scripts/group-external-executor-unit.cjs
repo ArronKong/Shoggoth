@@ -8,6 +8,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { GroupChatStore } = require("../app/agent-service/group-chat-store");
 const { GroupChatDriver } = require("../app/agent-service/group-chat-driver");
+const { GroupDraftTracker } = require("../app/agent-service/group-drafts");
 const { GroupExternalExecutor } = require("../app/agent-service/group-external-executor");
 const { normalizeInteractiveRequestV1 } = require("../app/core/shoggoth-interaction-contract");
 
@@ -17,7 +18,7 @@ const HOST = "11111111-1111-4111-8111-111111111111";
 function fakeClient() {
   const client = {
     calls: [], snapshots: new Map(), failStartOnce: false, sessions: 0, startStatus: () => "running",
-    lostSessions: new Set(), failGet: false,
+    lostSessions: new Set(), lostSessionCode: "HERMES_INSPIRATION_SESSION_UNCONFIRMED", failGet: false,
     reply: () => ({ status: "completed", resultSummary: "外部成员的回答", errorCode: null, attention: null }),
     async request(method, params) {
       client.calls.push({ method, params: structuredClone(params) });
@@ -26,7 +27,7 @@ function fakeClient() {
         mode: params.mode, status, sequence: 1, resultSummary: null, errorCode: null, finishedAt: null, attention: null, ...extra } });
       if (method === "group.external.prepare") {
         if (params.sessionKey && client.lostSessions.has(params.sessionKey)) {
-          throw Object.assign(new Error("unconfirmed"), { code: "HERMES_INSPIRATION_SESSION_UNCONFIRMED" });
+          throw Object.assign(new Error("unconfirmed"), { code: client.lostSessionCode });
         }
         const sessionKey = params.sessionKey ?? `agent:${params.agentId}:group-${++client.sessions}`;
         return { hostId: HOST, binding: { sessionKey, workspace: params.workspace ?? "/tmp/hermes-ws", mode: "gateway" } };
@@ -65,26 +66,27 @@ function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gex-")));
   fs.chmodSync(root, 0o700);
   const paths = { stateDir: path.join(root, "state"), trustedRoot: root };
-  let store = new GroupChatStore({ paths }).open();
+  let clock = 0;
+  let store = new GroupChatStore({ paths, now: () => clock }).open();
   const client = fakeClient();
   const timers = [];
   const setTimer = (fn, ms) => { const timer = { fn, ms, cleared: false }; timers.push(timer); return timer; };
   const clearTimer = (timer) => { if (timer) timer.cleared = true; };
   const nativeStarts = [];
-  let clock = 0;
   const nativeExecutor = { async ensureSession(b) { return `native-${b.memberId}`; },
     async start({ prompt }) { nativeStarts.push(prompt); return { id: `n-${nativeStarts.length}`, status: "running" }; },
     findRun() { return null; }, getRun() { return null; }, async abort() {}, finalText() { return null; } };
-  const make = () => {
+  const make = (options = {}) => {
     let driver;
     const external = new GroupExternalExecutor({ store, getClient: () => client, pollMs: 10, setTimer, clearTimer,
       now: () => clock, unconfirmedTimeoutMs: 90_000,
       onTerminal: (id, outcome) => driver.onExternalTerminal(id, outcome),
       onResumed: id => driver.onExternalResumed(id),
+      onObservation: id => driver.onExternalObservation(id),
       onInteraction: (id, attention) => driver.onExternalInteraction(id, attention) });
     driver = new GroupChatDriver({ store, executor: nativeExecutor, externalExecutor: external, setTimer, clearTimer,
       attachmentPath: (attachment) => (attachment.name === "丢了.pdf" ? null : `/state/inspiration-media/${attachment.id}.bin`),
-      inactivityMs: 60_000, abortGraceMs: 30_000 });
+      inactivityMs: 60_000, abortGraceMs: 30_000, ...options });
     return driver;
   };
   const { groupId } = store.createGroup({ operationId: "g", name: "混合群", purpose: "", members: [
@@ -101,7 +103,7 @@ function fixture(t) {
       await settle();
     }
   };
-  return { get store() { return store; }, reopen() { store.close(); store = new GroupChatStore({ paths }).open(); },
+  return { get store() { return store; }, reopen() { store.close(); store = new GroupChatStore({ paths, now: () => clock }).open(); },
     client, make, groupId, ids, settle, tick, timers, nativeStarts, advance(ms) { clock += ms; },
     send: (body) => store.appendUserMessage({ groupId, clientMessageId: `c-${Math.random()}`, body, mentionMemberIds: [] }),
     messages: () => store.listMessages({ groupId, afterSeq: null, beforeSeq: null, limit: 100 }).messages };
@@ -161,7 +163,35 @@ test("a persisted stop retries the same cancel operation after a temporary bridg
   });
 });
 
-test("a proven Host queue clears legacy start uncertainty, gives up the floor without cancelling and accepts the same run once", async t => {
+test("a member stop releases the external floor even when the original cancellation fails or hangs", async t => {
+  for (const hangs of [false, true]) await t.test(hangs ? "pending cancellation" : "bridge failure", async t => {
+    const f = fixture(t), driver = f.make(); await driver.start(); t.after(() => driver.stop());
+    f.client.reply = () => ({ status: "running" });
+    f.send("@all 依次处理"); driver.wake(f.groupId); await f.settle();
+    const original = f.store.runningOpportunities()[0], request = f.client.request.bind(f.client);
+    let releaseCancel, cancels = 0;
+    f.client.request = async (method, params) => {
+      if (method === "group.external.cancel") {
+        cancels++;
+        if (hangs) await new Promise(resolve => { releaseCancel = resolve; });
+        else throw Object.assign(new Error("bridge unavailable"), { code: "APP_HOST_UNAVAILABLE" });
+      }
+      return request(method, params);
+    };
+    await driver.abortAll(f.store.stopMember({ groupId: f.groupId, memberId: original.memberId }).aborts);
+    driver.wake(f.groupId); await f.settle();
+    assert.equal(f.client.calls.filter(call => call.method === "group.external.start").length, 2, "the next agent starts before the original cancellation settles");
+    const stopped = f.store.getGroup(f.groupId).activeTurns.find(turn => turn.opportunityId === original.id);
+    assert.equal(stopped.floor, false); assert.equal(stopped.releasedReason, "stopped");
+    assert.equal(f.messages().filter(message => message.system?.eventType === "turn_stopped").length, 1);
+    await f.tick(2);
+    assert.ok(cancels >= 1);
+    assert.equal(f.client.calls.filter(call => call.method === "group.external.start" && call.params.agentId === original.external.agentId).length, 1);
+    if (hangs) { assert.equal(cancels, 1); releaseCancel(); await f.settle(); }
+  });
+});
+
+test("a proven Host queue clears start uncertainty and waits without skipping or duplicating the run", async t => {
   const f = fixture(t), driver = f.make(); await driver.start();
   t.after(() => driver.stop());
   let proven = false;
@@ -185,11 +215,11 @@ test("a proven Host queue clears legacy start uncertainty, gives up the floor wi
   assert.equal(current.observation.unknownSince, null); assert.equal(current.observation.acceptedAt, null);
   f.advance(600_000); await f.tick(2);
   // Even a timeout armed before the queue proof must re-read current state.
-  for (const timer of f.timers.filter(timer => !timer.cleared && timer.ms > 10)) { timer.cleared = true; timer.fn(); }
+  for (const timer of f.timers.filter(timer => !timer.cleared && timer.ms !== 10)) { timer.cleared = true; timer.fn(); }
   await f.settle();
   current = f.store.getOpportunity(original.id);
   assert.equal(current.recovery, null); assert.ok(!current.abortReason);
-  assert.equal(current.released, true, "a Host-queued run gives up the floor instead of timing out");
+  assert.equal(current.released, false, "a proven resource queue is normal waiting, not an execution anomaly");
   assert.equal(f.client.calls.some(call => call.method === "group.external.cancel"), false);
   f.client.snapshots.set(original.external.executionId, { status: "running" }); await f.tick(1);
   current = f.store.getOpportunity(original.id);
@@ -213,8 +243,8 @@ test("a disconnected unaccepted queue is never cancelled for silence, including 
     };
     f.send(`@${f.store.getGroup(f.groupId).members[0].handle} wait`); driver.wake(f.groupId); await f.settle();
     const original = f.store.runningOpportunities()[0];
-    const preflight = f.timers.find(timer => timer.ms === 60_000);
     f.client.failGet = true; await f.tick(1);
+    const preflight = f.timers.find(timer => !timer.cleared && timer.ms === 60_000);
     assert.equal(f.store.getOpportunity(original.id).observation.status, "unavailable");
     assert.equal(f.store.getOpportunity(original.id).activeSince, null);
     now += 9 * 60 * 60_000; f.advance(9 * 60 * 60_000);
@@ -229,11 +259,68 @@ test("a disconnected unaccepted queue is never cancelled for silence, including 
     f.client.failGet = false; await f.tick(1);
     f.client.snapshots.set(original.external.executionId, { status: "running" }); await f.tick(1);
     assert.equal(f.store.getOpportunity(original.id).activeSince, now);
-    assert.equal(f.store.getOpportunity(original.id).releasedReason, "busy", "the unobservable run gave up the floor instead");
+    assert.equal(f.store.getOpportunity(original.id).releasedReason, "idle", "the unobservable run gave up the floor instead");
     f.client.snapshots.set(original.external.executionId, { status: "completed", resultSummary: "original run finished" }); await f.tick(1);
     assert.equal(f.store.getOpportunity(original.id).state, "replied");
     assert.equal(f.client.calls.filter(call => call.method === "group.external.start").length, 1);
   });
+});
+
+test("an unknown external start releases only its floor at two minutes and its original result still arrives once", async t => {
+  const f = fixture(t); let now = 10_000; f.store.now = () => now;
+  const driver = f.make({ inactivityMs: 120_000 }); await driver.start(); t.after(() => driver.stop());
+  f.client.startStatus = () => "unknown";
+  f.client.reply = () => ({ status: "unknown" });
+  const members = f.store.getGroup(f.groupId).members;
+  f.send(`@${members[0].handle} @${members[1].handle} 分工`); driver.wake(f.groupId); await f.settle();
+  const original = f.store.runningOpportunities()[0];
+  now += 91_000; f.advance(91_000); await f.tick(1);
+  assert.equal(f.store.getOpportunity(original.id).recovery.reason, "GROUP_EXTERNAL_START_UNCONFIRMED");
+  now += 29_000; f.advance(29_000); driver.timers.get(`idle:${original.id}`).fn(); await f.settle();
+  assert.equal(f.store.getOpportunity(original.id).releasedReason, "idle");
+  assert.equal(f.store.getOpportunity(original.id).runId, original.runId);
+  assert.equal(f.client.calls.filter(call => call.method === "group.external.start").length, 2, "the other member starts");
+  assert.equal(f.client.calls.some(call => call.method === "group.external.cancel"), false);
+  f.client.snapshots.set(original.external.executionId, { status: "completed", resultSummary: "原外部任务交回" });
+  await f.tick(2);
+  assert.equal(f.messages().filter(message => message.body === "原外部任务交回").length, 1);
+  assert.equal(f.client.calls.filter(call => call.method === "group.external.start" && call.params.executionId === original.external.executionId).length, 1);
+});
+
+test("external text progress is observed while the original start response is still pending", async t => {
+  const f = fixture(t); let now = 10_000, draft = null, finishStart;
+  f.store.now = () => now;
+  const tracker = new GroupDraftTracker({ store: f.store, nativeExecutor: {}, now: () => now,
+    setTimer: fn => { const timer = { fn, ms: 20 }; f.timers.push(timer); return timer; },
+    clearTimer: timer => { timer.cleared = true; },
+    onActivity: (id, activity) => driver.onActivity(id, activity) });
+  const driver = f.make({ inactivityMs: 120_000, drafts: tracker });
+  tracker.externalExecutor = driver.externalExecutor;
+  driver.externalExecutor.activity = async () => null;
+  driver.externalExecutor.draft = async () => draft;
+  const request = f.client.request.bind(f.client);
+  f.client.request = async (method, params) => {
+    const result = await request(method, params);
+    if (method === "group.external.start" && !finishStart) return new Promise(resolve => { finishStart = () => resolve(result); });
+    return result;
+  };
+  await driver.start(); t.after(() => driver.stop());
+  const members = f.store.getGroup(f.groupId).members;
+  f.send(`@${members[0].handle} @${members[1].handle} 分工`); driver.wake(f.groupId); await f.settle();
+  const original = f.store.runningOpportunities()[0];
+  now += 110_000; f.advance(110_000); draft = "启动回执未返回，但原任务正在输出新内容。";
+  for (const timer of f.timers.filter(timer => timer.ms === 20 && !timer.cleared)) { timer.cleared = true; timer.fn(); }
+  await f.settle();
+  now += 10_000; f.advance(10_000);
+  const idle = driver.timers.get(`idle:${original.id}`); if (idle) idle.fn(); await f.settle();
+  assert.equal(f.store.getOpportunity(original.id).released, false, "new text keeps the floor beyond two minutes total time");
+  assert.equal(f.messages().filter(message => message.body === draft).length, 1, "progress is visible before the start reply");
+  now += 110_000; f.advance(110_000);
+  const later = driver.timers.get(`idle:${original.id}`); if (later) later.fn(); await f.settle();
+  assert.equal(f.store.getOpportunity(original.id).released, false, "normal pending start and real progress do not trigger anomaly skipping");
+  finishStart(); await f.settle();
+  assert.equal(f.client.calls.filter(call => call.method === "group.external.start" && call.params.executionId === original.external.executionId).length, 1);
+  assert.equal(f.client.calls.some(call => call.method === "group.external.cancel"), false);
 });
 
 test("queue proof cannot erase a cancellation request or accepted execution", async t => {
@@ -446,6 +533,28 @@ test("a hidden session the backend no longer resumes is replaced: new session, r
   // 重启后放弃的旧会话仍然算群内部会话。
   driver.stop(); f.reopen();
   assert.ok(f.store.getGroup(f.groupId).internalSessionKeys.includes(oldSession));
+});
+
+for (const lostSessionCode of ["OPENCLAW_GROUP_SESSION_ARCHIVED", "GROUP_HOST_SESSION_ARCHIVED"])
+test(`an archived OpenClaw group session is replaced before start; refusal=${lostSessionCode}`, async t => {
+  const f = fixture(t), driver = f.make();
+  t.after(() => driver.stop());
+  await driver.start();
+  const member = f.store.getGroup(f.groupId).members.find(item => item.backendId === "openclaw");
+  f.send(`@${member.handle} 第一个问题`); driver.wake(f.groupId); await f.settle(); await f.tick();
+  const original = f.client.calls.find(call => call.method === "group.external.start").params;
+  f.client.lostSessions.add(original.sessionKey); f.client.lostSessionCode = lostSessionCode;
+  const from = f.client.calls.length;
+  f.send(`@${member.handle} 第二个问题`); driver.wake(f.groupId); await f.settle(); await f.tick();
+  const calls = f.client.calls.slice(from), prepares = calls.filter(call => call.method === "group.external.prepare");
+  assert.deepEqual(prepares.map(call => call.params.sessionKey), [original.sessionKey, null]);
+  const starts = calls.filter(call => call.method === "group.external.start");
+  assert.equal(starts.length, 1);
+  assert.notEqual(starts[0].params.sessionKey, original.sessionKey);
+  assert.notEqual(starts[0].params.executionId, prepares[0].params.executionId);
+  assert.match(starts[0].params.prompt, /第一个问题/u);
+  assert.equal(f.messages().some(message => message.system?.eventType === "turn_failed"), false);
+  assert.equal(f.store.getGroup(f.groupId).activeTurns.length, 0);
 });
 
 test("external members get attachments as a note with local paths instead of files", async (t) => {

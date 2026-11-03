@@ -16,6 +16,8 @@ const { resolveServicePaths } = require("../app/agent-service/paths");
 const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-protocol-version");
 const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
 const { bindingId } = require("../app/agent-service/agent-runtime-binding");
+const { createRuntimeCliAuth } = require("../app/runtime-cli-auth");
+const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
 
 const SESSION_A = "11111111-1111-4111-8111-111111111111";
 const SESSION_B = "22222222-2222-4222-8222-222222222222";
@@ -1016,6 +1018,118 @@ test("a Shoggoth-owned sign-in command is runnable before the runtime is install
   assert.throws(() => fakeBackend(() => {}, {
     runtimeCliAuth: [{ ...entry, loginCommand: { ...entry.loginCommand, executable: "Shoggoth" } }],
   }), TypeError);
+});
+
+test("Harness auth reads the runtime without a local credential and avoids custom endpoint Profiles", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-harness-auth-status-"));
+  const paths = resolveServicePaths({ homeDir: root, userDataRoot: path.join(root, "data") });
+  const descriptor = createRuntimeCliAuth({
+    paths, homedir: root, parentEnv: {},
+    resolveBundledCodexLayout: () => ({ runtimePath: path.join(root, "codex") }),
+  }).find(entry => entry.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
+  const codex = profile({
+    id: "profile-harness-auth", agentId: "harness-auth", providerRef: null,
+    runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID, isDefault: false,
+  });
+  const endpoint = profile({ runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID });
+  let authStatus = "authenticated";
+  let authError = null;
+  const value = fakeBackend(request => {
+    if (request.method === "profile.list") return page("profiles", [endpoint, codex]);
+    if (request.method === "chat.session.list") return page("sessions", []);
+    if (request.method === "profile.auth.read") {
+      assert.equal(request.params.profileId, codex.id, "an endpoint cannot prove the account's OAuth login");
+      if (authError) throw Object.assign(new Error("temporary auth status failure"), { code: authError });
+      return { status: authStatus };
+    }
+    throw new Error(`unexpected ${request.method}`);
+  }, { runtimeCliAuth: [descriptor] });
+  t.after(async () => { await value.backend.stop(); fs.rmSync(root, { recursive: true, force: true }); });
+  assert.equal(fs.existsSync(path.join(descriptor.accountHome, "auth.json")), false);
+  assert.equal(await value.backend.start(), true);
+  for (const status of ["authenticated", "unauthenticated", "unverified"]) {
+    authStatus = status;
+    const [provider] = (await value.backend.listOAuthProviders()).providers;
+    assert.equal(provider.status.loggedIn, status === "authenticated", status);
+    assert.equal(provider.status.verification, status === "unverified" ? "unverified" : undefined, status);
+    assert.equal(provider.status.error, null);
+  }
+  authError = "CODEX_NATIVE_AUTH_READ_FAILED";
+  const [unavailable] = (await value.backend.listOAuthProviders()).providers;
+  assert.equal(unavailable.status.loggedIn, false);
+  assert.equal(unavailable.status.verification, "unverified");
+  assert.equal(unavailable.status.error, null);
+  assert.equal(value.calls.filter(({ request }) => request.method === "profile.auth.read").length, 4);
+  assert.equal(fs.existsSync(path.join(descriptor.accountHome, "auth.json")), false);
+});
+
+test("a custom endpoint alone cannot turn the Harness OAuth account green", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-harness-endpoint-auth-"));
+  const paths = resolveServicePaths({ homeDir: root, userDataRoot: path.join(root, "data") });
+  const descriptor = createRuntimeCliAuth({
+    paths, homedir: root, parentEnv: {},
+    resolveBundledCodexLayout: () => ({ runtimePath: path.join(root, "codex") }),
+  }).find(entry => entry.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
+  fs.mkdirSync(descriptor.accountHome, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(descriptor.accountHome, "auth.json"), '{"fixture":true}\n', { mode: 0o600 });
+  const endpoint = profile({ runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID });
+  const value = fakeBackend(request => {
+    if (request.method === "profile.list") return page("profiles", [endpoint]);
+    if (request.method === "chat.session.list") return page("sessions", []);
+    if (request.method === "profile.auth.read") return { status: "authenticated" };
+    throw new Error(`unexpected ${request.method}`);
+  }, { runtimeCliAuth: [descriptor] });
+  t.after(async () => { await value.backend.stop(); fs.rmSync(root, { recursive: true, force: true }); });
+  assert.equal(await value.backend.start(), true);
+  const [provider] = (await value.backend.listOAuthProviders()).providers;
+  assert.equal(provider.status.loggedIn, false);
+  assert.equal(provider.status.verification, "unverified");
+  assert.equal(value.calls.some(({ request }) => request.method === "profile.auth.read"), false);
+});
+
+test("Harness status keeps unsafe local credentials blocked before a Runtime read", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-harness-auth-safety-"));
+  const paths = resolveServicePaths({ homeDir: root, userDataRoot: path.join(root, "data") });
+  const descriptor = createRuntimeCliAuth({
+    paths, homedir: root, parentEnv: {},
+    resolveBundledCodexLayout: () => ({ runtimePath: path.join(root, "codex") }),
+  }).find(entry => entry.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
+  fs.mkdirSync(descriptor.accountHome, { recursive: true, mode: 0o700 });
+  const credentialPath = path.join(descriptor.accountHome, "auth.json");
+  fs.writeFileSync(credentialPath, '{"fixture":true}\n', { mode: 0o644 });
+  const codex = profile({ providerRef: null, runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID });
+  const value = fakeBackend(request => {
+    if (request.method === "profile.list") return page("profiles", [codex]);
+    if (request.method === "chat.session.list") return page("sessions", []);
+    if (request.method === "profile.auth.read") return { status: "authenticated" };
+    throw new Error(`unexpected ${request.method}`);
+  }, { runtimeCliAuth: [descriptor] });
+  t.after(async () => { await value.backend.stop(); fs.rmSync(root, { recursive: true, force: true }); });
+  assert.equal(await value.backend.start(), true);
+  const [provider] = (await value.backend.listOAuthProviders()).providers;
+  assert.equal(provider.status.loggedIn, false);
+  assert.equal(provider.status.error, "Managed CLI credential permissions are unsafe");
+  assert.equal(value.calls.some(({ request }) => request.method === "profile.auth.read"), false);
+  assert.equal(fs.statSync(credentialPath).mode & 0o777, 0o644, "status checks never repair credentials implicitly");
+});
+
+test("account status checks allow cold Runtime initialization through Profiles and Bindings", async () => {
+  const requests = [];
+  const backend = new ShoggothBackend({
+    readToken: () => "fixture-token",
+    requestService: async (_paths, request, options) => {
+      requests.push({ request, options });
+      // A cold native host may need more than the ordinary five-second control deadline.
+      if (options.timeoutMs < 30_000) throw Object.assign(new Error("cold Runtime timed out"), { code: "REQUEST_TIMEOUT" });
+      return { status: "authenticated" };
+    },
+  });
+  for (const [method, params] of [
+    ["profile.auth.read", { profileId: "profile-grok" }],
+    ["profile.binding.auth.read", { profileId: "profile-grok", bindingId: "binding-grok" }],
+  ]) assert.deepEqual(await backend._call(method, params), { status: "authenticated" });
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(({ options }) => Number.isSafeInteger(options.timeoutMs) && options.timeoutMs <= 45_000));
 });
 
 test("empty managed credential storage remains logged out without a Runtime auth probe", async () => {

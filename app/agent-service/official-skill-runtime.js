@@ -323,8 +323,14 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
     if (providerId === "meituan-paotui") {
       if (action === "logout") { successful(await passport(["logout", ...clientArgs], { signal })); authorization = null; return account("signedOut"); }
       if (action === "start") {
+        authorization = null;
         const result = await passport(["auth", "get-code", ...clientArgs, "--json"], { signal }), parsed = successful(result);
-        const url = resultUrl(parsed, result.stdout); if (url) { authorization = url; return account("authorizing", { verificationUrl: url }); }
+        // Passport returns an official dpurl.cn short link. Its auth_link is
+        // user-facing; direct_auth_link must never be substituted or exposed.
+        const url = officialUrl(parsed?.auth_link); if (url) { authorization = url; return account("authorizing", { verificationUrl: url }); }
+        // get-code may instead return a previously cached token. Missing or
+        // rejected links are not a reason to attempt login before authorization.
+        if (parsed?.auth_link || typeof parsed?.token !== "string" || !/^[\x21-\x7e]{1,32768}$/u.test(parsed.token)) throw failure();
         await paotui(["login"], signal); return account("ready");
       }
       if (action === "bind") successful(await passport(["auth", "poll-token", "--client_id", clientArgs[1], "--timeout", "90", "--interval", "3", "--json"], { signal }));

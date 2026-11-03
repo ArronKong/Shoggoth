@@ -6,20 +6,42 @@ const { redactGrantTokens } = require("./group-tool-grant");
 const { parseMemberReply } = require("./group-reply-format");
 const { validateInteractiveResponseV1 } = require("../core/shoggoth-interaction-contract");
 const { validText } = require("../group-result-content");
-const { EXECUTION_TIMEOUT_MS } = require("../execution-timeout");
+const crypto = require("node:crypto");
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "canceled", "interrupted", "skipped"]);
 const WAITING_STATUSES = new Set(["waiting_approval", "waiting_input"]);
 // 会话放不下这次输入、原生压缩 / 产品摘要没完成时的拒绝原因；换一条新会话能接着答。
 // CONTEXT_INPUT_TOO_LARGE 不在内：这次输入本身就放不下，换会话也没用。
 const RENEWABLE_CONTEXT_ERRORS = /^(?:CONTEXT_COMPACTION_REQUIRED|CONTEXT_TRANSPORT_EXCEEDED|RUNTIME_COMPACTION_[A-Z_]+|PRODUCT_COMPACTION_[A-Z_]+)$/u;
-// 开始用工具满 15 秒还没说完，就让出发言位，活在后台继续。
-const RELEASE_AFTER_TOOL_MS = 15_000;
-// 拿不到工具信号的外部成员：开始 60 秒后还没说完就让位。
-const EXTERNAL_RELEASE_MS = 60_000;
-// 持有发言位时 30 分钟完全没有动静才算超时；让位后在后台干活的回合不按时间中止，用户可以停下它。
-const INACTIVITY_TIMEOUT_MS = EXECUTION_TIMEOUT_MS;
+// 只有执行状态持续不明且没有有效活动满两分钟，才让位；正常慢任务继续等。
+const FLOOR_IDLE_MS = 120_000;
 const ABORT_GRACE_MS = 30_000;
+
+function anomalySince(turn) {
+  if (turn.abortReason || turn.recovery?.cancelRequested || turn.recovery?.type === "result"
+    || turn.observation?.terminalStatus || turn.observation?.dispatchState === "queued") return null;
+  if (turn.observation?.status === "queued" && turn.runKind !== "external") return null;
+  const observed = ["unknown", "unavailable", "queued"].includes(turn.observation?.status)
+    && Number.isSafeInteger(turn.observation.unknownSince) ? turn.observation.unknownSince : null;
+  const at = observed ?? (turn.recovery?.type === "execution" ? turn.recovery.since : null);
+  return Number.isSafeInteger(at) && at >= 0 ? at : null;
+}
+
+// 观察时间、事件游标和重复状态不是工作进展。只保留公开正文 / 工具事实的摘要，
+// 同一正文在重建观察器时也不能重新刷新计时；不把内容复制到调度记录中。
+function progressProof(activity) {
+  if (!["running", "text", "tool", "retrying", "compacting", "compacted"].includes(activity.phase)
+    || !Number.isSafeInteger(activity.lastProgressAt) || activity.lastProgressAt < 0) return null;
+  const texts = (activity.textMessages ?? []).map(({ id, text }) => ({ id, text }));
+  const tools = (activity.recentTools ?? []).map(({ updatedAt, ...tool }) => tool);
+  if (activity.tool && !tools.some(tool => tool.id === activity.tool.id)) {
+    const { updatedAt, ...tool } = activity.tool; tools.push(tool);
+  }
+  const phase = ["retrying", "compacting", "compacted"].includes(activity.phase) ? activity.phase : null;
+  if (!texts.length && !tools.length && !phase) return null;
+  return { signature: crypto.createHash("sha256").update(JSON.stringify({ texts, tools, phase })).digest("hex"),
+    progressAt: activity.lastProgressAt, streamGeneration: activity.streamGeneration, eventSeq: activity.eventSeq };
+}
 
 // 确定性群驱动：全群一次一人发言（谁下一个由存储按轮次决定），不调用任何选人模型；不持有存储
 // 事务等待模型；终态回调重新经过存储的状态与 fence 校验。
@@ -30,8 +52,8 @@ class GroupChatDriver {
   // ingestAttachment(rootRef, path, key)：把成员工作区里的一个文件核对后存进媒体库，返回附件描述或 null。
   constructor({ store, executor, externalExecutor = null, directory = null, drafts = null, attachmentPath = null,
     ingestAttachment = null, onChanged = () => {}, setTimer = setTimeout, clearTimer = clearTimeout,
-    releaseAfterToolMs = RELEASE_AFTER_TOOL_MS, externalReleaseMs = EXTERNAL_RELEASE_MS,
-    inactivityMs = INACTIVITY_TIMEOUT_MS, abortGraceMs = ABORT_GRACE_MS, reconcileMs = 5000, onError = () => {} }) {
+    releaseAfterToolMs = null, floorIdleMs = FLOOR_IDLE_MS,
+    inactivityMs = floorIdleMs, abortGraceMs = ABORT_GRACE_MS, reconcileMs = 5000, onError = () => {} }) {
     this.store = store;
     this.executor = executor;
     this.externalExecutor = externalExecutor;
@@ -43,7 +65,7 @@ class GroupChatDriver {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.releaseAfterToolMs = releaseAfterToolMs;
-    this.externalReleaseMs = externalReleaseMs;
+    // inactivityMs is retained as an internal test/embedding alias; it now only limits floor ownership.
     this.inactivityMs = inactivityMs;
     this.abortGraceMs = abortGraceMs;
     this.reconcileMs = reconcileMs;
@@ -53,6 +75,7 @@ class GroupChatDriver {
     this.pumping = new Set();
     this.again = new Set();
     this.deletionChecks = new Map();
+    this.abortRequests = new Map();
   }
 
   async start() {
@@ -73,6 +96,7 @@ class GroupChatDriver {
     this.drafts?.stop();
     this.directory?.stop?.();
     this.deletionChecks.clear();
+    this.abortRequests.clear();
     for (const timer of this.timers.values()) this.clearTimer(timer);
     this.timers.clear();
   }
@@ -137,6 +161,10 @@ class GroupChatDriver {
       // 会话准备期间收到停止：尚未发送执行请求，可以直接结束，不再启动一次模型调用。
       if (current.abortReason) { this.#complete(current.id, { status: "canceled" }); return; }
       await this.executor.prepareModel?.({ member: claim.member, sessionKey, modelSelection: opportunity.modelSelection ?? null });
+      const ready = this.store.getOpportunity(opportunity.id);
+      if (this.fence === null || this.fence !== opportunity.fence || this.fence !== this.store.getDriverFence()
+        || !ready || !["running", "waiting"].includes(ready.state)) return;
+      if (ready.abortReason) { this.#complete(ready.id, { status: "canceled" }); return; }
       // 这次输入里用户与同伴新发的附件随本回合一起交给运行时（各会话拿到的是同一份数据的克隆）。
       const attachments = turnAttachments([...claim.earlier, ...claim.current]).attachments
         .map(({ id, name, mimeType, size }) => ({ id, name, mimeType, size }));
@@ -155,6 +183,8 @@ class GroupChatDriver {
     const { opportunity, member, binding } = claim;
     try {
       if (!this.externalExecutor) throw Object.assign(new Error("external"), { code: "GROUP_EXTERNAL_UNAVAILABLE" });
+      // 启动回执可能晚于真实输出。先观察回合，登记执行身份后即可读取同一原运行的进展。
+      this.drafts?.watch(opportunity.id);
       const started = await this.externalExecutor.startTurn({ opportunity, member, binding, prompt: this.#prompt(claim, true) });
       const current = this.store.getOpportunity(opportunity.id);
       if (!started || !current || current.state !== "running") {
@@ -162,14 +192,13 @@ class GroupChatDriver {
         return;
       }
       this.drafts?.watch(current.id);
-      // 外部成员可能报不出工具活动：开始一段时间后还没说完就让位（报得出时按工具规则提前让位）。
-      if (current.floor && !current.released) this.#armRelease(current.id, this.externalReleaseMs);
       if (current.abortReason) void this.#abort(current);
     } catch (error) {
       // 成员原来的群内部会话续接不上：换新会话，回合回到原位置；下一次认领给它看最近的群消息。
       if (error?.code === "GROUP_EXTERNAL_SESSION_LOST"
         && this.store.resetSession({ groupId: binding.groupId, memberId: binding.memberId })
         && this.store.requeue({ opportunityId: opportunity.id })) {
+        this.drafts?.forget(opportunity.id);
         this.#clearTimers(opportunity.id);
         this.wake(opportunity.groupId);
         return;
@@ -196,6 +225,7 @@ class GroupChatDriver {
     if (prior) this.clearTimer(prior);
     const fence = this.fence;
     const timer = this.setTimer(() => {
+      if (this.timers.get(key) !== timer) return;
       this.timers.delete(key);
       if (this.fence === null || this.fence !== fence || this.fence !== this.store.getDriverFence()) return;
       try { fn(); } catch (error) { this.onError(error); }
@@ -213,38 +243,40 @@ class GroupChatDriver {
     for (const key of [opportunityId, `idle:${opportunityId}`, `release:${opportunityId}`]) this.#cancelTimer(key);
   }
 
-  // 持有发言位时，最后一次动静之后 inactivityMs 内没有新动静就超时：让出发言位并中止。
+  // 连续异常和无新进展均满等待期限才让位；正常运行的沉默不算异常。
+  // 异常起点及真实进展落库，重启和重复查询不会重置期限。
   #armInactivity(opportunity) {
-    if (!opportunity.floor || opportunity.released || opportunity.state !== "running" || opportunity.abortReason) {
+    const since = anomalySince(opportunity);
+    if (!opportunity.floor || opportunity.released || opportunity.state !== "running" || since === null) {
       this.#cancelTimer(`idle:${opportunity.id}`);
       return;
     }
-    this.#timer(`idle:${opportunity.id}`, this.inactivityMs, () => {
+    const remaining = Math.max(since, opportunity.floorActivityAt ?? 0)
+      + this.inactivityMs - this.store.now();
+    this.#timer(`idle:${opportunity.id}`, remaining, () => {
       const current = this.store.getOpportunity(opportunity.id);
-      if (!current || current.state !== "running" || !current.floor || current.released) return;
-      // 外部运行还在宿主排队，或桥暂时查不到它：不是成员没动静，不能据此取消；只让出发言位，结果出来照常回群。
-      const unproven = current.runKind === "external" && (current.observation?.dispatchState === "queued"
-        || current.observation?.status === "unavailable");
-      this.#release(current.id, unproven ? "busy" : "timeout");
-      if (unproven) return;
-      const marked = this.store.requestAbort({ opportunityId: current.id, reason: "GROUP_TURN_TIMEOUT" });
+      if (!current || current.state !== "running" || !current.floor || current.released || current.abortReason) return;
+      const currentSince = anomalySince(current);
+      if (currentSince === null) return;
+      const due = Math.max(currentSince, current.floorActivityAt ?? 0) + this.inactivityMs;
+      // 取消前已经进事件队列的旧回调，也必须重读最新的有效活动时间。
+      if (due > this.store.now()) { this.#armInactivity(current); return; }
+      const marked = this.store.markReconciliation({ kind: "turn", id: current.id, runId: current.runId,
+        reason: current.recovery?.reason || "GROUP_TURN_EXECUTION_UNCONFIRMED", fence: this.fence });
       if (!marked) return;
-      if (marked.runId) void this.#abort(marked);
-      else this.#pending(marked, "execution", "GROUP_TURN_TIMEOUT");
+      this.#release(current.id, "idle");
+      if (current.runKind !== "external") this.#timer(current.id, this.reconcileMs,
+        () => void this.reconcile(current.id).catch(error => this.onError(error)));
     });
-  }
-
-  #armRelease(opportunityId, delayMs) {
-    if (this.timers.has(`release:${opportunityId}`)) return;
-    this.#timer(`release:${opportunityId}`, delayMs, () => this.#release(opportunityId, "working"));
   }
 
   // 让出发言位：已经写出的正文先发到群里，下一位开始发言；回合在后台继续。
   #release(opportunityId, reason) {
     const current = this.store.getOpportunity(opportunityId);
-    if (!current || current.state !== "running" || !current.floor || current.released) return;
-    const replyMessages = reason === "working" ? this.drafts?.messagesFor?.(opportunityId) ?? [] : [];
-    const text = reason === "working" ? redactGrantTokens(replyMessages.length ? replyMessages.map(item => item.text).join("\n\n")
+    if (!current || current.state !== "running" || !current.floor || current.released || current.abortReason) return;
+    const publishing = reason === "working" || reason === "idle";
+    const replyMessages = publishing ? this.drafts?.messagesFor?.(opportunityId) ?? [] : [];
+    const text = publishing ? redactGrantTokens(replyMessages.length ? replyMessages.map(item => item.text).join("\n\n")
       : this.drafts?.draftFor(opportunityId) ?? null) : null;
     const result = this.store.releaseTurn({ opportunityId, reason, fence: this.fence, text: validText(text) ? text : null, replyMessages });
     this.#cancelTimer(`idle:${opportunityId}`);
@@ -255,27 +287,52 @@ class GroupChatDriver {
   /** 草稿 / 活动观察到的新动静：重置无动静计时；开始用工具后按时让位。 */
   onActivity(opportunityId, activity) {
     if (this.fence === null || !activity) return;
-    const current = this.store.getOpportunity(opportunityId);
-    if (current && activity.groupId === current.groupId && activity.memberId === current.memberId
-      && activity.opportunityId === current.id && activity.runId === current.runId && activity.textMessages?.length) {
+    let current = this.store.getOpportunity(opportunityId);
+    if (!current || current.fence !== this.fence || this.fence !== this.store.getDriverFence()
+      || activity.groupId !== current.groupId || activity.memberId !== current.memberId
+      || activity.opportunityId !== current.id || activity.runId !== current.runId
+      || activity.executionGeneration !== [current.fence ?? "", current.sessionKey ?? "", current.runId ?? "", current.external?.executionId ?? ""].join(":")) return;
+    if (activity.textMessages?.length) {
       const published = this.store.syncTurnMessages({ opportunityId, fence: this.fence, runId: current.runId, messages: activity.textMessages });
       if (published.changed) this.onChanged(current.groupId);
     }
     if (!current || current.state !== "running" || !current.floor || current.released) return;
+    const proof = progressProof(activity);
+    if (proof) current = this.store.recordFloorActivity({ opportunityId, runId: current.runId, fence: this.fence, proof }) ?? current;
     this.#armInactivity(current);
     const starts = [activity.tool, ...(activity.recentTools ?? [])].filter(Boolean).map(tool => tool.startedAt)
       .filter(Number.isFinite);
-    if (starts.length) {
+    // 只有显式配置的旧集成使用工具主动让位；产品默认按顺序等待正常工具完成。
+    if (starts.length && Number.isFinite(this.releaseAfterToolMs) && this.releaseAfterToolMs > 0) {
       const due = Math.min(...starts) + this.releaseAfterToolMs - this.store.now();
       this.#cancelTimer(`release:${opportunityId}`);
       this.#timer(`release:${opportunityId}`, due, () => this.#release(opportunityId, "working"));
-    } else if (current.runKind === "external" && activity.streamGeneration) {
-      // 报得出活动的外部成员按工具规则让位，不再用开始后固定时长的兜底。
-      this.#cancelTimer(`release:${opportunityId}`);
     }
   }
 
   // ---- 外部成员回调 ----
+
+  onExternalObservation(opportunityId) {
+    if (this.fence === null || this.fence !== this.store.getDriverFence()) return;
+    const current = this.store.getOpportunity(opportunityId);
+    if (current?.fence === this.fence) this.#armInactivity(current);
+  }
+
+  /** 原生观察器只报告绑定运行的可查询状态；读取失败不能当成任务失败。 */
+  onExecutionObservation(opportunityId, observation) {
+    if (this.fence === null || !observation || this.fence !== this.store.getDriverFence()) return;
+    const current = this.store.getOpportunity(opportunityId);
+    if (!current || current.fence !== this.fence || current.runKind === "external"
+      || observation.groupId !== current.groupId || observation.memberId !== current.memberId
+      || observation.opportunityId !== current.id || observation.runId !== current.runId
+      || observation.executionGeneration !== [current.fence ?? "", current.sessionKey ?? "", current.runId ?? "", current.external?.executionId ?? ""].join(":")) return;
+    const updated = this.store.recordExecutionObservation({ kind: "turn", id: current.id, runId: current.runId,
+      status: observation.status, fence: this.fence });
+    if (!updated) return;
+    this.#armInactivity(updated.record);
+    if (updated.changed && current.recovery) this.onChanged(current.groupId);
+    if (TERMINAL_STATUSES.has(observation.status)) void this.reconcile(current.id).catch(error => this.onError(error));
+  }
 
   onExternalTerminal(opportunityId, outcome) {
     if (this.fence === null) return;
@@ -335,10 +392,13 @@ class GroupChatDriver {
       this.store.markInteractionResponded({ opportunityId, requestId: recorded.interaction.request.requestId });
     }
     recorded = this.store.getOpportunity(opportunityId);
+    this.#armInactivity(recorded);
     this.drafts?.watch(opportunityId);
     if (recorded.abortReason) void this.#abort(recorded);
     if (TERMINAL_STATUSES.has(current.status)) this.onRunTerminal(current);
     else if (WAITING_STATUSES.has(current.status)) this.onRunInteraction(current, null);
+    if (recorded.recovery && !TERMINAL_STATUSES.has(current.status)) this.#timer(recorded.id, this.reconcileMs,
+      () => void this.reconcile(recorded.id).catch(error => this.onError(error)));
   }
 
   #opportunityForRun(run) {
@@ -405,6 +465,7 @@ class GroupChatDriver {
     for (const opportunity of opportunities) {
       this.#cancelTimer(`idle:${opportunity.id}`);
       this.#cancelTimer(`release:${opportunity.id}`);
+      if (opportunity.releasedReason === "stopped") this.drafts?.forget(opportunity.id);
       if (opportunity.runId) void this.#abort(opportunity);
       else this.#armAbortGrace(opportunity, this.abortGraceMs);
     }
@@ -439,14 +500,17 @@ class GroupChatDriver {
     const current = this.store.requestAbort({ opportunityId: opportunity.id,
       reason: opportunity.abortReason || "GROUP_TURN_TIMEOUT" });
     if (!current) return;
-    // 先挂兜底再请求取消。没有停止证据时保持占用并进入待核对，不能开放新一轮写入。
+    // 发言位可以先让出；原运行的同成员忙锁要等停止证据，不能开放重叠写入。
     this.#armAbortGrace(current, this.abortGraceMs);
-    try {
-      if (opportunity.runKind === "external") await this.externalExecutor?.cancel(opportunity);
-      else await this.executor.abort({ sessionKey: opportunity.sessionKey, runId: opportunity.runId });
-    } catch (error) {
-      this.onError(error);
-    }
+    if (this.abortRequests.has(current.id)) return;
+    const request = Promise.resolve().then(() => current.runKind === "external"
+      ? this.externalExecutor?.cancel(current)
+      : this.executor.abort({ sessionKey: current.sessionKey, runId: current.runId }))
+      .catch(error => this.onError(error)).finally(() => {
+        if (this.abortRequests.get(current.id) === request) this.abortRequests.delete(current.id);
+      });
+    this.abortRequests.set(current.id, request);
+    await request;
   }
 
   // 请求停止后一段时间仍没有终态：转入待核对，按原执行身份继续读取。
@@ -463,6 +527,7 @@ class GroupChatDriver {
     const marked = this.store.markReconciliation({ kind: "turn", id: opportunity.id, runId: opportunity.runId,
       type, reason, cancelRequested: Boolean(opportunity.abortReason), fence: this.fence });
     if (!marked) return;
+    this.#armInactivity(marked.record);
     this.drafts?.forget(opportunity.id);
     if (marked.changed) { this.onChanged(marked.groupId); this.wake(marked.groupId); }
     if (opportunity.runKind !== "external") this.#timer(opportunity.id, this.reconcileMs,
@@ -512,6 +577,8 @@ class GroupChatDriver {
   // 成员的回复可以带引用和附件（约定见 group-reply-format）。附件只认它自己工作区里的文件，先存进媒体库
   // 再提交回合；读不到的附件行原样留在正文里，让大家看到它原本想发什么。
   async #publishTurn(opportunity, outcome) {
+    const current = this.store.getOpportunity(opportunity.id);
+    if (current?.abortReason) { this.#complete(opportunity.id, { status: "canceled" }); return; }
     const parsed = outcome.status === "completed" && typeof outcome.text === "string" ? parseMemberReply(outcome.text) : null;
     if (!parsed || (parsed.replyToSeq === null && parsed.attachmentLines.length === 0)) {
       this.#complete(opportunity.id, outcome);
@@ -538,6 +605,7 @@ class GroupChatDriver {
     this.drafts?.forget(opportunityId);
     this.#clearTimers(opportunityId);
     const result = this.store.completeTurn({ opportunityId, fence: this.fence, ...outcome });
+    if (result.changed && !["running", "waiting"].includes(result.state)) this.abortRequests.delete(opportunityId);
     if (["running", "waiting"].includes(result.state)) {
       // 去掉引用 / 附件标记后仍可能没有可见正文；继续读原结果，不丢掉自动核对定时器。
       const pending = this.store.getOpportunity(opportunityId);
@@ -556,6 +624,7 @@ class GroupChatDriver {
     for (const opportunity of this.store.runningOpportunities()) {
       const adopted = this.store.adopt({ opportunityId: opportunity.id, fence: this.fence });
       if (!adopted) continue;
+      this.#armInactivity(adopted);
       const member = this.store.getGroup(adopted.groupId).members.find((item) => item.id === adopted.memberId);
       if (member && !member.profileId) {
         // 外部回合：已登记执行身份就按原身份继续核对；从未登记说明启动请求没发出，回到原位置。

@@ -59,6 +59,36 @@ test("Meituan authorization consumes the official auth_link then exchanges the s
   assert.equal(status.state, "ready"); assert.equal(JSON.stringify(status).includes("fixture-passport-private"), false);
   assert.ok(f.calls.some(call => call.argv[1] === "poll-token"));
 });
+test("Meituan accepts the official dpurl.cn auth_link without exposing direct_auth_link or attempting login", async t => {
+  const url = "https://dpurl.cn/official-auth-fixture";
+  const f = fixture(t, "meituan-paotui", call => call.child.finish(call.argv[1] === "get-code"
+    ? { auth_link: url, direct_auth_link: "https://dpurl.cn/private-direct-fixture" } : "", call.argv[1] === "get-code" ? 0 : 1));
+  const result = await f.runtime.call("account_start", {});
+  assert.equal(result.state, "authorizing"); assert.equal(result.verificationUrl, url);
+  assert.equal(f.calls.length, 1, "link creation must wait for the user before any token or login operation");
+  assert.ok(!JSON.stringify(result).includes("private-direct-fixture"));
+  const { validOfficialVerificationUrl, validateOfficialAccountResult } = require("../app/core/official-skill-connector-dto");
+  assert.deepEqual(validateOfficialAccountResult(result), result);
+  assert.ok(require("../app/agent-service/official-skill-providers").PROVIDERS["meituan-paotui"].verificationHosts.includes("dpurl.cn"));
+  for (const invalid of ["http://dpurl.cn/fixture", "https://dpurl.cn.evil.test/fixture", "https://evil.dpurl.cn/fixture", "https://user@dpurl.cn/fixture", "https://dpurl.cn:444/fixture"]) assert.equal(validOfficialVerificationUrl("meituan-paotui", invalid), false);
+  assert.equal(validOfficialVerificationUrl("weread", url), false, "the extra host is scoped only to Meituan");
+});
+test("Meituan rejects a missing or invalid auth_link without falling back to direct links or login", async t => {
+  for (const auth_link of [undefined, "https://untrusted.example/authorize", "http://dpurl.cn/fixture"]) {
+    const f = fixture(t, "meituan-paotui", call => call.child.finish({ auth_link, direct_auth_link: "https://passport.meituan.com/private-direct-fixture" }));
+    await assert.rejects(f.runtime.call("account_start", {}), { code: "OFFICIAL_SKILL_AUTH_FAILED" });
+    assert.equal(f.calls.length, 1);
+  }
+});
+test("Meituan get-code may return a cached token, which is checked internally without opening authorization", async t => {
+  const token = "fixture-cached-passport-token";
+  const f = fixture(t, "meituan-paotui", call => call.child.finish(call.argv[1] === "get-code" ? { token }
+    : call.argv[0] === "get-token" ? token : { success: true }));
+  const result = await f.runtime.call("account_start", {});
+  assert.equal(result.state, "ready"); assert.equal(result.verificationUrl, null);
+  assert.ok(!JSON.stringify(result).includes(token));
+  assert.equal(f.calls.length, 3);
+});
 test("Meituan timeout clears authorization, and prices above 100 yuan require a second confirmation", async t => {
   let pollsFail = true;
   const f = fixture(t, "meituan-paotui", call => {

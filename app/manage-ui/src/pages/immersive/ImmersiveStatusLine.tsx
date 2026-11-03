@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { ImmersivePhase } from "./immersiveBg";
 import { toolActivityTitle } from "../../lib/turnTimeline";
-import { ChatRunWait, type ChatRunWaitState } from "../../components/ChatRunWait";
+import type { ChatRunWaitState } from "../../components/ChatRunWait";
 import styles from "./ImmersiveStatusLine.module.css";
 
 // 轻量状态行：流式期间在消息流尾部显示一行半透明状态（思考中/正在运行某工具），
@@ -57,9 +57,7 @@ export default function ImmersiveStatusLine({ phase, live }: { phase: ImmersiveP
   }, [open]);
 
   // Startup already lives in the shared activity timeline above the reply.
-  if (!shown || live?.wait?.kind === "retrying" || live?.wait?.kind === "starting") return null;
-  if (shown.wait?.kind === "retrying" || shown.wait?.kind === "starting") return null;
-  if (shown.wait) return live?.wait ? <div className={styles.wrap}><ChatRunWait state={live.wait} /></div> : null;
+  if (!shown || live?.wait || shown.wait) return null;
   const toolTitle = (tool: ImmersiveLiveTool) => tool.title || toolActivityTitle(tool.name, undefined, t);
   const runningTool = [...shown.tools].reverse().find((x) => !x.done);
   const thinkingLines = (shown.thinkingText || "").trim().split("\n").filter(Boolean);

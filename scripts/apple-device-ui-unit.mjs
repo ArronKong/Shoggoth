@@ -26,9 +26,7 @@ const status = (overrides = {}) => ({ revision: 4, available: true, errorCode: n
   { id: "reminders", authorization: "notDetermined", enabled: false, readPolicy: "ask", writePolicy: "ask", disabledProfileIds: [] },
 ], ...overrides });
 const connected = () => { const value = status(); value.resources.forEach(resource => { resource.authorization = "fullAccess"; resource.enabled = true; }); return value; };
-const fixtureSubjects = [{ profileId: "agent-a", backendId: "shoggoth", agentId: "a", label: "Planning agent", enabled: true },
-  { profileId: "agent-b", backendId: "hermes", agentId: "b", label: "Assistant B", enabled: true },
-  { profileId: "disabled-agent", backendId: "openclaw", agentId: "c", label: "Disabled agent", enabled: false }];
+
 
 let checked = 0;
 for (const language of ["zh-CN", "en"]) {
@@ -37,7 +35,7 @@ for (const language of ["zh-CN", "en"]) {
   await translator.init({ lng: language, resources: { [language]: { translation: dictionary } }, interpolation: { escapeValue: false } });
   const tr = (key, values) => translator.t(`appleDevices.${key}`, values);
   const surface = new EventTarget(), document = new EventTarget(); document.visibilityState = "visible";
-  let current = status(), reads = 0, readFailed = false, delayedRead, connectResolve, policyResolve, subjectsUnavailable = false;
+  let current = status(), reads = 0, readFailed = false, delayedRead, connectResolve, policyResolve, subjectReads = 0;
   let saveError = null;
   const calls = { connect: [], policy: [], settings: [] };
   const api = {
@@ -57,8 +55,8 @@ for (const language of ["zh-CN", "en"]) {
   const components = load("app/manage-ui/src/components/AppleDeviceConnectors.tsx", {
     "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator) }) },
     "../api/appleDevices": api,
-    "../api/mcpConnectors": { listMcpSubjects: async () => ({ items: fixtureSubjects, unavailableBackends: subjectsUnavailable ? ["offline-backend"] : [] }) },
-    "./Modal": { __esModule: true, default: ({ children }) => React.createElement("section", { role: "dialog" }, children) },
+    "../api/mcpConnectors": { listMcpSubjects: async () => { subjectReads++; return { items: [], unavailableBackends: [] }; } },
+    "./Modal": { __esModule: true, default: ({ children, footer, subtitle }) => React.createElement("section", { role: "dialog" }, children, React.createElement("p", {}, subtitle), footer) },
     "./ConnectorTools": { __esModule: true, default: () => null },
     "./ui": { useConfirm: () => async () => true },
     "../lib/usePendingConnectors": { usePendingConnectors: () => ({ ids: ["device:calendar", "device:reminders"], add() {}, remove() {} }) },
@@ -77,12 +75,12 @@ for (const language of ["zh-CN", "en"]) {
   const event = async callback => act(async () => { callback(); for (let i = 0; i < 5; i++) await Promise.resolve(); });
   await event(() => { renderer = create(React.createElement(Page)); });
   const card = id => renderer.root.findAllByType("article").find(node => node.props["data-resource"] === id);
-  const button = (id, key) => card(id).findAllByType("button").find(node => node.children.join("") === (key === "disconnect" ? translator.t("mcpConnectors.flow.remove") : tr(key)));
+  const button = (id, key) => card(id).parent.findAllByType("button").find(node => node.children.join("") === (key === "disconnect" ? translator.t("mcpConnectors.flow.remove") : tr(key)));
   const select = (id, kind = "read") => card(id).findByProps({ "aria-label": tr(`${kind}For`, { name: tr(`resources.${id}.name`) }) });
   const state = id => card(id).find(node => typeof node.props["data-state"] === "string").props["data-state"];
-  const agent = (id, profile) => card(id).findAllByType("input").find(node => node.props["aria-label"] === tr("agentFor", { name: tr(`resources.${id}.name`), agent: fixtureSubjects.find(item => item.profileId === profile).label }));
 
   assert.equal(renderer.root.findAllByType("article").length, 2);
+  assert.equal(subjectReads, 0, "device dialogs do not fetch an agent selector list");
   assert.equal(JSON.stringify(renderer.toJSON()).includes("appleDevices."), false, "all UI copy is localized");
   assert.deepEqual(select("calendar").findAllByType("option").map(node => node.props.value), ["allow", "ask", "deny"]);
   assert.equal(select("calendar").props.value, "ask"); assert.equal(select("calendar").props.disabled, true);
@@ -90,7 +88,7 @@ for (const language of ["zh-CN", "en"]) {
     assert.deepEqual(select(resource, "write").findAllByType("option").map(node => node.props.value), ["allow", "ask", "deny"]);
     assert.equal(select(resource, "write").props.value, "ask"); assert.equal(select(resource, "write").props.disabled, true);
   }
-  assert.equal(renderer.root.findAllByType("input").length, 0, "agent choices progressively appear after connection");
+  assert.equal(renderer.root.findAllByType("input").length, 0, "device dialogs do not offer agent selection");
   await event(() => button("calendar", "connect").props.onClick());
   assert.deepEqual(calls.connect, [["calendar", 4]]); assert.equal(state("calendar"), "notDetermined", "request acceptance cannot grant access");
   assert.equal(button("reminders", "connect").props.disabled, true, "mutations are serialized across both cards");
@@ -132,14 +130,8 @@ for (const language of ["zh-CN", "en"]) {
   await event(() => select("calendar", "write").props.onChange({ target: { value: "ask" } }));
   assert.equal(select("calendar", "write").props.value, "allow", "a failed save cannot display a grant or revocation as confirmed");
   saveError = null;
-  await event(() => agent("calendar", "agent-a").props.onChange({ target: { checked: false } }));
-  assert.deepEqual(calls.policy.at(-1).disabledProfileIds, ["unknown-preserved", "agent-a"], "unknown and unavailable profile choices survive edits");
-  await event(() => agent("calendar", "agent-a").props.onChange({ target: { checked: true } }));
-  assert.deepEqual(calls.policy.at(-1).disabledProfileIds, ["unknown-preserved"]);
-  assert.equal(agent("calendar", "disabled-agent").props.disabled, true);
-  subjectsUnavailable = true;
-  await event(() => surface.dispatchEvent(new Event("focus")));
-  assert.ok(JSON.stringify(renderer.toJSON()).includes(tr("agentsUnavailable")));
+  assert.equal(renderer.root.findAllByType("input").length, 0, "connected devices never display agent selectors");
+  assert.deepEqual(calls.policy.at(-1).disabledProfileIds, ["unknown-preserved"], "read/write edits retain existing stored policy without UI migration");
   saveError = "REVISION_CONFLICT";
   await event(() => select("calendar").props.onChange({ target: { value: "deny" } }));
   assert.equal(select("calendar").props.value, "allow"); assert.ok(renderer.root.findAllByProps({ role: "alert" }).some(node => node.children.join("").includes(tr("errors.conflict"))));

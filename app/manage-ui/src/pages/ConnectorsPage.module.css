@@ -161,3 +161,41 @@
   .accountRow .status { margin-left: 0; }
   .dialogIdentity { max-width: 100%; overflow-wrap: anywhere; }
 }
+
+/* Connector detail layout, shared by MCP, managed skills, CLI and devices. */
+.detail { font-size: 13px; }
+.capabilities { margin: 0 0 23px; min-width: 0; }
+.capabilityHeading, .connectionHeading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px 14px; margin: 0 0 14px; }
+.capabilityHeading h3, .connectionHeading h3 { margin: 0; font-size: 13px; line-height: 1.5; font-weight: 600; }
+.capabilityHeading .textButton { font-size: 12px; color: var(--ui-text-2); }
+.capabilityList { list-style: none; padding: 0; margin: 0; display: grid; gap: 15px; }
+.capabilityList li { display: flex; align-items: flex-start; gap: 11px; min-width: 0; }
+.capabilityList li > div { min-width: 0; overflow-wrap: anywhere; }
+.capabilityList strong { font-size: 13px; line-height: 1.5; font-weight: 500; }
+.capabilityList p { font-size: 12px; line-height: 1.6; color: var(--ui-text-2); margin: 3px 0 0; }
+.capabilityIcon { flex: none; width: 17px; margin-top: 2px; color: var(--ui-text-2); font-size: 14px; }
+.capabilities .toolList { max-height: none; overflow: visible; }
+.connectionPanel { border: 0; margin: 0 0 17px; padding: 18px 19px; border-radius: 13px; background: var(--ui-surface-2); }
+.connectionPanel .connectionHeading { margin-bottom: 8px; }
+.connectionPanel h3 { font-size: 13px; line-height: 1.5; margin: 0 0 8px; }
+.connectionPanel p { font-size: 12px; line-height: 1.7; margin: 8px 0 0; }
+.connectionPanel .notice { padding: 0; background: transparent; }
+.connectionPanel .actions { margin-top: 9px; gap: 15px; }
+.connectionPanel .status { font-size: 11px; }
+.management { border: 0; margin: 0; padding: 0 0 8px; }
+.management > summary { color: var(--ui-text-2); font-size: 12px; line-height: 1.5; font-weight: 400; padding: 9px 0; }
+.management[open] { padding-bottom: 16px; }
+.management p { font-size: 12px; }
+.management > .button, .management > .danger { margin: 8px 8px 0 0; }
+.detail > .management:last-child { margin-bottom: 10px; }
+.flowFooter { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 14px; width: 100%; min-width: 0; color: var(--ui-text-1); }
+.flowFooter > p { flex: 1; min-width: 140px; margin: 0; font-size: 11px; line-height: 1.6; color: var(--ui-text-2); }
+.flowFooterActions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; max-width: 100%; margin-left: auto; }
+.flowFooterActions .actions { margin: 0; gap: 8px; }
+.flowFooter button { font-family: inherit; font-size: 12px; line-height: 1.5; border-radius: 9px; padding: 10px 16px; }
+.flowFooter button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+@media (max-width: 480px) {
+  .connectionPanel { padding: 16px; }
+  .flowFooterActions .actions { flex-wrap: wrap; }
+  .flowFooter button { min-height: 40px; }
+}

@@ -8,8 +8,8 @@ const React=uiRequire('react'),Renderer=uiRequire('react-test-renderer');
 const recommendations=JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/mcp-featured-presets.json',import.meta.url),'utf8'));
 const server={id:'mcp-ui-update',name:'Update test',source:{kind:'registry',registryName:'org/test',version:'1.0.0'},transport:{kind:'remote',protocol:'streamable-http',url:'https://example.test/mcp'},disabledProfileIds:[],status:'ready',setup:{requiredFields:[],configuredFields:[]},lastCheck:{toolCount:1,errorCode:null}};
 const latest={registryName:'org/test',version:'1.0.1',description:'Latest fixture metadata',repositoryUrl:'https://github.com/example/project',options:[{id:'remote:0',transport:server.transport,fields:[]}]};
-let reads=0,updates=[],observed=[];
-const api={getMcpOAuthInfo:async()=>({redirectUri:'http://127.0.0.1:45829/callback'}),listMcpSubjects:async()=>({items:[],unavailableBackends:[]}),searchMcpRegistry:async()=>{reads++;return {items:[latest]};},listMcpConnectors:async()=>({revision:8,servers:[server]}),updateMcpConnector:async(...args)=>{updates.push(args);return {revision:9,server:{...server,source:{...server.source,version:'1.0.1'}}};},formatMcpError:()=> 'safe-error'};
+let reads=0,subjectReads=0,updates=[],observed=[];
+const api={getMcpOAuthInfo:async()=>({redirectUri:'http://127.0.0.1:45829/callback'}),listMcpSubjects:async()=>{subjectReads++;return {items:[],unavailableBackends:[]};},searchMcpRegistry:async()=>{reads++;return {items:[latest]};},listMcpConnectors:async()=>({revision:8,servers:[server]}),updateMcpConnector:async(...args)=>{updates.push(args);return {revision:9,server:{...server,source:{...server.source,version:'1.0.1'}}};},formatMcpError:()=> 'safe-error'};
 function load(relative,customRequire,globals={}){const module={exports:{}};const compiled=ts.transpileModule(fs.readFileSync(new URL(relative,import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;vm.runInNewContext(compiled,{module,exports:module.exports,require:customRequire,AbortController,URL,setInterval,clearInterval,...globals});return module.exports;}
 const helpers=load('../app/manage-ui/src/lib/mcpConnectorUi.ts',uiRequire);
 const catalog=load('../app/manage-ui/src/lib/mcpRecommendationCatalog.ts',uiRequire);
@@ -22,7 +22,7 @@ const mod=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
  if(name==='../components/ConnectorTools')return {__esModule:true,default:()=>null};
  if(name==='react')return React;if(name==='react/jsx-runtime')return uiRequire(name);
  if(name==='react-i18next')return {useTranslation:()=>({t:(key,options)=>key+(options?.version?':'+options.version:''),i18n:{resolvedLanguage:currentLanguage}})};
- if(name==='../components/Modal')return {__esModule:true,default:({children,title})=>React.createElement('section',{},React.createElement('header',{},title),children)};
+ if(name==='../components/Modal')return {__esModule:true,default:({children, footer, subtitle,title})=>React.createElement('section',{},React.createElement('header',{},title), children, React.createElement("p", {}, subtitle), footer)};
  if(name==='../components/ui')return {useConfirm:()=>async()=>true};
  if(name==='../api/mcpConnectors')return api;if(name==='../lib/mcpConnectorUi')return helpers;
  if(name==='../lib/mcpRecommendationCatalog')return catalog;
@@ -32,6 +32,8 @@ const mod=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
  throw Error('Unexpected import '+name);
 },{window:{open:href=>authorizations.push(href)}});
 let mounted;await Renderer.act(async()=>{mounted=Renderer.create(React.createElement(mod.default,{server,onClose(){},onChanged(){},onLatest:value=>observed.push(value)}));});
+assert.equal(subjectReads,0,'connector dialogs do not fetch an agent selector list');
+assert.equal(JSON.stringify(mounted.toJSON()).includes('mcpConnectors.agents'),false,'agent access controls are absent');
 assert.equal(reads,1);assert.equal(updates.length,0,'discovery must never install');assert.equal(observed[0].version,'1.0.1');
 assert.ok(mounted.root.findAllByType('input').some(input=>input.props.value==='1.0.1'),'target version prefilled');
 const update=mounted.root.findAllByType('button').find(button=>button.props.children==='mcpConnectors.update');assert.ok(update);assert.equal(update.props.disabled,false);
@@ -445,7 +447,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
   if(name==='../components/AppleDeviceConnectors')return {AppleDeviceRows:()=>null,useAppleDeviceConnectors:()=>({count:0})};
   if(name==='../components/McpConnectorIcon')return {__esModule:true,default:props=>React.createElement('i',{'data-icon':props.iconId||props.identity})};
   if(name==='../components/PageHead')return {PageHead:()=>null};
-  if(name==='../components/Modal')return {__esModule:true,default:({children,title})=>React.createElement('section',{'data-unavailable-dialog':true},React.createElement('header',{},title),children)};
+  if(name==='../components/Modal')return {__esModule:true,default:({children, footer, subtitle,title})=>React.createElement('section',{'data-unavailable-dialog':true},React.createElement('header',{},title), children, React.createElement("p", {}, subtitle), footer)};
   if(name==='../../../core/flightaware-connector-policy.json')return {__esModule:true,default:JSON.parse(fs.readFileSync(new URL('../app/core/flightaware-connector-policy.json',import.meta.url),'utf8'))};
  if(name.endsWith('.module.css'))return {__esModule:true,default:{}};
   throw Error('Unexpected page dependency '+name);

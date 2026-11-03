@@ -8,21 +8,39 @@ import { useConfirm, useToast } from "../../components/ui";
 import {
   acceptModelOperationRecoveryRead, beginModelOperationRecoveryRead, confirmModelOperationTerminal,
   failModelOperationRecoveryRead, getModelOperationRecoverySnapshot, initializeModelOperationRecoveryStorage, retainModelOperation,
-  subscribeModelOperationRecovery, type RetainedModelOperation,
+  setModelOperationRecoveryAdvisory, subscribeModelOperationRecovery, type RetainedModelOperation,
 } from "./model-operation-recovery";
 import styles from "../keys/KeysPanel.module.css";
 
-/** Journal-only recovery remains available even if config/catalog reads fail. */
-export default function ModelOperationRecovery({ backend, active, onSettled }: {
-  backend: string; active: boolean; onSettled: () => void;
+/** Journal-only recovery remains available even if config/catalog reads fail.
+ * advisory (native-config): like the official UI nothing is locked; earlier rows are
+ * settled by one read-only check per open, and only unresolved rows are shown.
+ * advisory undefined = write mode not known yet: the journal is read, nothing is shown. */
+export default function ModelOperationRecovery({ backend, active, advisory, onSettled }: {
+  backend: string; active: boolean; advisory?: boolean; onSettled: () => void;
 }) {
   const { t } = useTranslation(), toast = useToast(), confirm = useConfirm();
   const snapshot = useSyncExternalStore(subscribeModelOperationRecovery,
     () => getModelOperationRecoverySnapshot(backend));
   const [busy, setBusy] = useState<string | null>(null);
   const [settled, setSettled] = useState<ModelChangeOperation[]>([]);
-  const epoch = useRef(0), currentBackend = useRef(backend), currentActive = useRef(active);
-  currentBackend.current = backend; currentActive.current = active;
+  const [checked, setChecked] = useState(false);
+  const advisoryOn = advisory === true;
+  const epoch = useRef(0), currentBackend = useRef(backend), currentActive = useRef(active), currentAdvisory = useRef(advisoryOn);
+  currentBackend.current = backend; currentActive.current = active; currentAdvisory.current = advisoryOn;
+  const current = (captured: number) => captured === epoch.current && currentBackend.current === backend && currentActive.current;
+  // Read-only GET per earlier row; a terminal receipt is acknowledged silently, anything else stays visible.
+  const settleEarlierRows = async (captured: number) => {
+    const snapshot = getModelOperationRecoverySnapshot(backend);
+    for (const row of snapshot.operations) {
+      if (snapshot.serverPending.includes(row.operationId)) continue;
+      if (!current(captured)) return;
+      try {
+        const receipt = await getModelChangeOperation(backend, row.operationId, row.providerKey);
+        if (receipt.terminal && current(captured)) await confirmModelOperationTerminal(receipt);
+      } catch { /* unresolved rows stay for a manual check */ }
+    }
+  };
   const read = useCallback(async () => {
     const captured = ++epoch.current;
     beginModelOperationRecoveryRead(backend);
@@ -32,17 +50,21 @@ export default function ModelOperationRecovery({ backend, active, onSettled }: {
       const summary = await getPendingModelOperationIdentities(backend);
       if (captured !== epoch.current || currentBackend.current !== backend || !currentActive.current) return;
       await acceptModelOperationRecoveryRead(summary);
+      if (currentAdvisory.current) await settleEarlierRows(captured);
     } catch {
       if (captured === epoch.current && currentBackend.current === backend && currentActive.current) {
         failModelOperationRecoveryRead(backend);
       }
+    } finally {
+      if (current(captured)) setChecked(true);
     }
   }, [backend]);
+  useEffect(() => { setModelOperationRecoveryAdvisory(backend, advisoryOn); }, [backend, advisoryOn]);
   useEffect(() => {
-    setBusy(null); setSettled([]);
+    setBusy(null); setSettled([]); setChecked(false);
     if (active) void read();
     return () => { epoch.current += 1; };
-  }, [active, read]);
+  }, [active, advisoryOn, read]);
   const observe = async (original: RetainedModelOperation, recover = false) => {
     if (busy || !currentActive.current || currentBackend.current !== backend) return;
     const captured = epoch.current;
@@ -104,18 +126,19 @@ export default function ModelOperationRecovery({ backend, active, onSettled }: {
     ? "models.dirManagedNotAdmitted" : receipt.code === "abandoned_by_user" ? "models.dirManagedAbandoned"
       : receipt.status === "applied" ? "models.dirManagedApplied"
         : receipt.status === "compensated" ? "models.dirManagedCompensated" : "models.dirManagedFailed";
-  if (!active) return null;
-  if (snapshot.journal === "ready" && snapshot.storageVerified && snapshot.operations.length === 0 && settled.length === 0) return null;
+  if (!active || advisory === undefined) return null;
+  if (advisory ? !checked || snapshot.operations.length === 0 && settled.length === 0
+    : snapshot.journal === "ready" && snapshot.storageVerified && snapshot.operations.length === 0 && settled.length === 0) return null;
   return <section className={styles.card} data-model-operation-recovery>
     <div className={styles.cardHead}><h4>{t("models.dirManagedRecoveryTitle")}</h4>
       <p className={styles.cardDesc}>{t("models.dirManagedRecoveryDescription")}</p></div>
     <div className={styles.cardBody}>
-      {(snapshot.journal !== "ready" || !snapshot.storageVerified) && <div role="status" data-model-recovery-unknown>
+      {!advisory && (snapshot.journal !== "ready" || !snapshot.storageVerified) && <div role="status" data-model-recovery-unknown>
         <p>{t(snapshot.journal === "loading" ? "models.dirManagedRecoveryLoading" : "models.dirManagedRecoveryUnknown")}</p>
         <button type="button" className={styles.linkBtn} disabled={snapshot.journal === "loading" || busy !== null}
           onClick={() => void read()}>{t("models.dirManagedRecoveryRead")}</button>
       </div>}
-      {!snapshot.storageVerified && <p role="status">{t("models.dirManagedRecoveryStorage")}</p>}
+      {!advisory && !snapshot.storageVerified && <p role="status">{t("models.dirManagedRecoveryStorage")}</p>}
       {snapshot.operations.map((original) => <div key={original.operationId} className={styles.group} data-model-recovery-operation>
         <p>{original.providerKey}</p>
         <p>{t("models.dirManagedOperation", { operationId: original.operationId, status: original.status })}</p>

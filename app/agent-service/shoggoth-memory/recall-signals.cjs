@@ -1,8 +1,12 @@
 "use strict";
 
+const path = require("node:path");
+const { core } = require("./host.cjs");
 const { sha256 } = require("./migration.cjs");
 const { isBorrowedMemoryDerived, extractBorrowedMemoryRefs, refsFromEvents } = require("./borrowed-memory-provenance.cjs");
 const { recallDiagnostics, diagnosticCode } = require("./active-memory-diagnostics.cjs");
+const { evidenceCurrent } = require("./active-memory-evidence.cjs");
+const { isUiActionSubmission } = require("../ui-input-provenance");
 
 const RECEIPTS = "recall-signal-receipts";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -24,6 +28,8 @@ const resultKey = result => `${result.path}\0${result.startLine}\0${result.endLi
 // ingestion signal for the same claim.
 const ENTRY_MARKER = /<!--\s*\/?shoggoth-memory-entry\b[^>]*-->/gu;
 const cleanSnippet = snippet => String(snippet || "").replace(ENTRY_MARKER, " ").replace(/\s+/gu, " ").trim().replace(/^(?:[-*+]\s+)+/u, "");
+const normalizeHistory = text => String(text || "").replace(/\s+/gu, " ").trim();
+const EXTERNAL_CHAT = /^shoggoth:chat-send:(?:federation-(?:send|message)|group-(?:turn|task))-/u;
 
 // Own recall signals for Dreaming promotion. A search only stages the own
 // results it actually delivered, with their original relevance. The turn
@@ -36,7 +42,7 @@ class RecallSignals {
 
   stage(input, results) {
     const run = input?.run;
-    if (!run?.id || run.source !== "chat" || run.profileId !== input.profileId) return;
+    if (!run?.id || run.source !== "chat" || run.profileId !== input.profileId || EXTERNAL_CHAT.test(run.idempotencyKey || "")) return;
     const own = results.filter(result => result && result.borrowed !== true && result.source === "memory" && isShortTerm(result.path));
     if (!own.length) return;
     const key = this.key(input.profileId, run.id);
@@ -50,6 +56,81 @@ class RecallSignals {
       if (!previous || result.score > previous.score) entry.results.set(id, result);
     }
     this.pending.set(key, entry);
+  }
+
+  historyEvent(input, host, sessionId, eventId) {
+    const session = host.sessions.current(input.profileId, sessionId);
+    if (session.workspace !== input.workspace) return null;
+    const raw = this.service.transcriptStore.getEvent(input.profileId, sessionId, eventId);
+    if (!raw || raw.runId === input.run.id || isBorrowedMemoryDerived(raw) || isUiActionSubmission(raw)) return null;
+    const page = this.service.conversationRecall.scanEligibleSession({ profileId: input.profileId,
+      sessionId, afterSeq: raw.seq - 1, limit: 1, completedOnly: true });
+    const event = page.events.find(row => row.eventId === eventId && row.seq === raw.seq);
+    if (event) this.service.conversationRecall.assertCandidateSourceCurrent(input.profileId, event);
+    return event || null;
+  }
+
+  // Join only to an existing canonical candidate. Internal corpus files stay
+  // outside the search index and are never returned to a model by this join.
+  historyCandidates(input, rows) {
+    if (!input.run?.id || input.run.source !== "chat" || EXTERNAL_CHAT.test(input.run.idempotencyKey || "") || !rows.length) return [];
+    const host = this.service.host(input.profileId), cfg = this.service.config(input.profileId);
+    const { timezone } = core.resolveMemoryDreamingConfig({ cfg, pluginConfig: core.resolveMemoryDreamingPluginConfig(cfg) });
+    const statePrefix = core.memoryCoreWorkspaceStateKey(host.workspaceDir);
+    const query = host.database.db.prepare(`SELECT key,value FROM memory_state
+      WHERE namespace=? AND key>=? AND key<? AND value IS NOT NULL
+      AND json_extract(value,'$.value.path')=? LIMIT 10000`);
+    const files = new Map();
+    return rows.slice(0, MAX_STAGED_PER_RUN).flatMap(row => {
+      try {
+        if (row.borrowed || row.hidden || !row.eventId || !row.sessionId || !Number.isFinite(row.score)) return [];
+        const event = this.historyEvent(input, host, row.sessionId, row.eventId);
+        if (!event) return [];
+        const relative = `memory/.dreams/session-corpus/${core.formatMemoryDreamingDay(event.occurredAt, timezone)}.txt`;
+        if (!files.has(relative)) {
+          const filesOwner = host.getAgentWorkspaceAccess(host.workspaceDir).memoryFiles;
+          const lines = filesOwner.read(path.join(host.workspaceDir, relative)).toString("utf8").split("\n");
+          const candidates = query.all(core.SHORT_TERM_RECALL_NAMESPACE, `${statePrefix}:`, `${statePrefix};`, relative)
+            .map(item => ({ ...JSON.parse(item.value).value, stateKey: item.key }));
+          files.set(relative, { lines, candidates });
+        }
+        const { lines, candidates } = files.get(relative);
+        const body = normalizeHistory(event.text), delivered = normalizeHistory(row.snippet);
+        const kind = event.kind === "user" ? "User" : "Assistant";
+        const citation = `[${input.profileId}/sessions/${input.profileId}/${event.sessionId}#L${event.seq}] `;
+        const legacy = `[${input.profileId}/sessions/${event.sessionId}#L${event.seq}] `;
+        return candidates.flatMap(candidate => {
+          const line = lines[candidate.startLine - 1], prefix = [citation, legacy].find(value => line?.startsWith(value));
+          const excerpt = candidate.snippet?.replace(/^(?:User|Assistant):\s+/u, "").replace(/…$/u, "").trimEnd();
+          if (candidate.promotedAt || candidate.startLine !== candidate.endLine || !prefix || !excerpt
+            || !line.startsWith(`${prefix}${kind}: `) || !body.startsWith(excerpt) || !delivered.includes(excerpt)
+            || !candidate.snippet.startsWith(`${kind}: `) || !candidate.snippet.startsWith(line.slice(prefix.length).replace(/…$/u, ""))) return [];
+          return [{ path: relative, source: "memory", startLine: candidate.startLine, endLine: candidate.endLine,
+            score: Math.max(0, Math.min(1, row.score)), snippet: candidate.snippet, provenance: candidate.provenance,
+            sessionOrigin: { agentId: input.profileId, sessionId: event.sessionId },
+            history: { eventId: event.eventId, sessionId: event.sessionId, seq: event.seq,
+              hash: event.contentHash, sourceHash: sha256(line), excerpt, stateKey: candidate.stateKey } }];
+        });
+      } catch { return []; } // Optional signals must not interrupt chat or disclose inaccessible sources.
+    });
+  }
+
+  currentResult(host, scope, result) {
+    if (!result.history) return host.searchIndex.isCurrent(result)
+      && (!result.recallEvidence || evidenceCurrent(host.searchIndex, result.recallEvidence));
+    try {
+      const { eventId, sessionId, seq, hash, sourceHash, stateKey } = result.history;
+      const event = this.historyEvent(scope, host, sessionId, eventId);
+      const row = host.database.db.prepare("SELECT value FROM memory_state WHERE namespace=? AND key=? AND value IS NOT NULL")
+        .get(core.SHORT_TERM_RECALL_NAMESPACE, stateKey);
+      const candidate = row && JSON.parse(row.value).value;
+      return event?.seq === seq && event.contentHash === hash && this.service.sourceSessionsVisible(
+        scope.profileId, `${result.path}#L${result.startLine}-L${result.endLine}`, scope.workspace)
+        && candidate?.path === result.path && candidate.startLine === result.startLine
+        && candidate.endLine === result.endLine && candidate.snippet === result.snippet && !candidate.promotedAt
+        && sha256(host.getAgentWorkspaceAccess(host.workspaceDir).memoryFiles
+          .read(path.join(host.workspaceDir, result.path)).toString("utf8").split("\n")[result.startLine - 1]) === sourceHash;
+    } catch { return false; }
   }
 
   discardProfile(profileId) {
@@ -83,7 +164,8 @@ class RecallSignals {
     const host = service.host(profileId), now = host.database.now();
     if (!(question.occurredAt > now - ACCEPT_WINDOW_MS)) return { committed: 0, reason: "outside-window" };
     return service.searchScope.run(entry.scope, async () => {
-      const current = host.run(() => [...entry.results.values()].filter(result => host.searchIndex.isCurrent(result)));
+      const isCurrent = result => this.currentResult(host, entry.scope, result);
+      const current = host.run(() => [...entry.results.values()].filter(isCurrent));
       if (!current.length) return { committed: 0, reason: "no-current-result" };
       const receipts = host.database.openKeyedStore({ namespace: RECEIPTS, maxEntries: MAX_RECEIPTS,
         defaultTtlMs: RECEIPT_TTL_MS, overflowPolicy: "reject-new" });
@@ -96,7 +178,7 @@ class RecallSignals {
         try { if (await receipts.registerIfAbsent(receipt, { at: now })) admitted.push(result); } catch { break; }
       }
       if (admitted.length) await host.searchIndex.recordRecallSignals({ questionKey: question.key,
-        results: admitted.map(result => ({ ...result, snippet: cleanSnippet(result.snippet) })), nowMs: now });
+        results: admitted, isCurrent, normalizeSnippet: cleanSnippet, nowMs: now });
       return { committed: admitted.length, reason: admitted.length ? "committed" : "already-counted" };
     });
   }
@@ -117,4 +199,4 @@ class RecallSignals {
   }
 }
 
-module.exports = { RecallSignals, RECALL_SIGNAL_RECEIPTS_NAMESPACE: RECEIPTS };
+module.exports = { RecallSignals, isShortTerm, RECALL_SIGNAL_RECEIPTS_NAMESPACE: RECEIPTS };

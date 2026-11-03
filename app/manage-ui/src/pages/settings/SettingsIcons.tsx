@@ -7,6 +7,7 @@ const paths = {
   update: <><path d="M12 3.5v10" /><path d="m8.5 10.5 3.5 3.5 3.5-3.5" /><path d="M4.5 15.5v1.75A2.75 2.75 0 0 0 7.25 20h9.5a2.75 2.75 0 0 0 2.75-2.75V15.5" /></>,
   schedule: <><circle cx="12" cy="12" r="8.5" /><path d="M12 7.5V12l3 2" /></>,
   task: <><rect x="4" y="4" width="16" height="16" rx="3" /><path d="m8.5 12 2.5 2.5 4.5-5" /></>,
+  appIcon: <><rect x="4" y="4" width="16" height="16" rx="4.5" /><circle cx="12" cy="12" r="3.5" /></>,
 } as const;
 
 export type SettingsIconName = keyof typeof paths | "chat";

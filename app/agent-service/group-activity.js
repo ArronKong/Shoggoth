@@ -174,7 +174,10 @@ class GroupActivityProjection {
       }
       if (["text", "text.delta", "text.done"].includes(event.type) && p.delivery !== "async" && p.phase !== "analysis"
         && p.phase !== "reasoning") {
-        const id = p.itemId ?? "default";
+        // The Coordinator seals a streamed item's visible prefix at tool/UI
+        // boundaries. Its segment ID is shared by deltas and that receipt;
+        // the runtime item ID may span several segments or be absent on flush.
+        const id = p.segmentId ?? p.itemId ?? "default";
         const updated = this.#text(id, event.type === "text.delta" ? p.delta : p.text, event.type === "text.delta");
         if (event.type === "text.done" && this.items.has(id)) this.phase = "running";
         if (!updated && event.type !== "text.done") continue;

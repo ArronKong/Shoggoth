@@ -1,0 +1,153 @@
+.detailModal {
+  max-height: min(920px, calc(100dvh - 64px));
+  padding: 30px 38px 26px;
+  border-radius: 28px;
+}
+
+.detailModal > header h2 {
+  font-size: 22px;
+  line-height: 1.45;
+  font-weight: 500;
+  letter-spacing: -.3px;
+}
+
+.detailModal > header p {
+  margin-top: 6px;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.detailModal > header + div {
+  min-height: 0;
+  margin-top: 24px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+
+.detailSummary { display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 12px; }
+.skillState { display: inline-flex; align-items: center; gap: 7px; color: var(--ui-text-1); }
+.skillState::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.skillState[data-active=false] { color: var(--ui-text-2); }
+.inspector { border-top: 1px solid var(--ui-hairline); border-bottom: 1px solid var(--ui-hairline); }
+.inspector > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 12px 0; list-style: none; cursor: pointer; color: var(--ui-text-2); font-size: 12px; }
+.inspector > summary::-webkit-details-marker { display: none; }
+.inspector > summary::after { content: ""; flex: 0 0 auto; width: 6px; height: 6px; margin: -3px 3px 0 0; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); }
+.inspector[open] > summary::after { margin-top: 3px; transform: rotate(225deg); }
+.inspector > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; border-radius: 6px; }
+.inspectorBody { display: flex; flex-direction: column; gap: 20px; padding: 4px 0 20px; color: var(--ui-text-2); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.inspectorBody > details > summary { cursor: pointer; padding: 4px 0; }
+.inspectorBody > details > div { margin-top: 12px; }
+.detailActions { border-top: 1px solid var(--ui-hairline); padding-top: 16px; }
+.detailActions > button { min-height: 36px; padding: 8px 12px; border: 0; border-radius: 9px; background: transparent; box-shadow: none; font-size: 12px; }
+.detailActions > button:hover:not(:disabled) { background: var(--ui-surface-2); }
+
+.detailModal :global(.skill-sec) {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.detailModal :global(.skill-sec-head) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detailModal :global(.skill-sec h4) {
+  margin: 0;
+  color: var(--ui-text-1);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.detailModal :global(.skill-sec-aside) {
+  color: var(--ui-text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.detailModal :global(.skill-sec-desc) {
+  margin: 0;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.detailModal :global(.skill-usage-list) {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.detailModal :global(.skill-u-row) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.detailModal :global(.skill-u-avatar) {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--ui-agent-avatar-bg);
+  color: var(--ui-agent-avatar-fg);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.detailModal :global(.skill-u-label) {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--ui-text-1);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.detailModal :global(.skill-u-bar) {
+  flex: 1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--ui-text-1) 15%, var(--ui-surface-1));
+}
+
+.detailModal :global(.skill-u-bar > span) {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--ui-text-1);
+}
+
+@media (max-width: 600px) {
+  .detailModal {
+    max-width: calc(100vw - 32px);
+    max-height: calc(100dvh - 32px);
+    padding: 24px;
+    border-radius: 24px;
+  }
+
+  .detailModal > header h2 { font-size: 19px; line-height: 1.5; }
+  .detailModal > header + div { margin-top: 20px; }
+}

@@ -35,6 +35,7 @@ const { PROTOCOL_VERSION } = require("./agent-service/server");
 const { createProductHostController } = require("./product-host-controller");
 const { createFederationHostServer } = require("./federation-host-server");
 const { notificationPolicy } = require("./agent-service/notification-policy");
+const { showNativeNotification } = require("./agent-service/native-notification-sender");
 const { ExternalInspirationRunner } = require("./external-inspiration-runner");
 const { createFederationMcpRegistrar } = require("./federation-mcp-registrar");
 const { createExternalPluginAdapterRegistrar } = require("./external-plugin-adapter-registrar");
@@ -74,6 +75,7 @@ const { registerDesktopBrowserIpc } = require("./desktop-browser-ipc");
 const { createDesktopComputerServiceRestart } = require("./desktop-computer-service-restart");
 const { registerDesktopInspirationIpc } = require("./desktop-inspiration-ipc");
 const { createDesktopInspirationController } = require("./desktop-inspiration-controller");
+const { createAppIconController } = require("./desktop-app-icon");
 const { createDesktopBackendStopAction } = require("./desktop-backend-stop");
 const { registerDesktopMicrophoneIpc } = require("./desktop-microphone-ipc");
 const { registerDesktopTypewriterSoundIpc } = require("./desktop-typewriter-sound-ipc");
@@ -227,6 +229,7 @@ function nativeT(locale, key, params) {
 let mainWindow = null;
 let desktopSystemIssues = null;
 let desktopInspiration = null;
+let appIconController = null;
 let disposeMicrophoneIpc = null;
 let disposeTypewriterSoundIpc = null;
 let disposeChatClipboardIpc = null;
@@ -313,6 +316,7 @@ async function applyConfigChange() {
     } catch {
       /* ignore */
     }
+    void appIconController?.apply(next.appIcon);
 
     if (appBackendRegistry && diff.gateway && !managedOpenClawProductHost?.isManaged()) {
       openClawEndpointGeneration += 1;
@@ -558,10 +562,12 @@ function createMainWindow() {
       : _sameDocument;
     if (isMainFrame && isSameDocument !== true
       && !boardWidgetNavigation.isBoardFrame(details?.initiator)) {
+      notificationTargetReceiver = null;
       desktopSystemIssues?.reset();
       void desktopBoardWidgetIpc.revokeOwner(windowWebContentsId);
     }
   });
+  mainWindow.webContents.on("did-finish-load", flushNotificationTarget);
 
   // Renderer text/source URLs are untrusted and may contain prompts or secrets.
   // Keep native diagnostics fixed instead of forwarding the raw console payload.
@@ -622,6 +628,7 @@ function createMainWindow() {
     void desktopBoardWidgetIpc.revokeOwner(windowWebContentsId);
     if (rendererRecoveryTimer) clearTimeout(rendererRecoveryTimer);
     rendererRecoveryTimer = null;
+    notificationTargetReceiver = null;
     mainWindow = null;
   });
 
@@ -657,12 +664,10 @@ function showUpdateReadyNotification(state) {
   if (!Notification.isSupported()) return;
   const locale = resolveLocale(readConfig().locale);
   const version = state?.availableVersion || "";
-  const note = new Notification({
+  showNativeNotification(Notification, {
     title: nativeT(locale, "appUpdate.ready.title"),
     body: nativeT(locale, "appUpdate.ready.body", { version }),
-  });
-  note.on("click", openGatewaySettings);
-  note.show();
+  }, openGatewaySettings);
 }
 
 function setLocaleAndApply(localeRaw) {
@@ -875,6 +880,32 @@ ipcMain.handle("openclaw:resolve-cli-version", async (_event, cliPath) => {
 // config toggle (config-store is the single source) and suppresses while the
 // window is focused (you're already looking at the app). A click routes back to
 // the renderer via "openclaw:open-target" so the Notifier can navigate.
+let notificationTargetReceiver = null;
+let pendingNotificationTarget = null;
+function flushNotificationTarget() {
+  if (!pendingNotificationTarget || !mainWindow || mainWindow.isDestroyed()
+    || notificationTargetReceiver !== mainWindow.webContents.mainFrame
+    || mainWindow.webContents.isLoadingMainFrame()) return;
+  const payload = pendingNotificationTarget;
+  pendingNotificationTarget = null;
+  mainWindow.webContents.send("openclaw:open-target", payload);
+}
+function openNotificationTarget(payload) {
+  // The most recent click wins while a window/renderer is starting up. React's
+  // Notifier subscribes after load, so did-finish-load alone cannot deliver it.
+  pendingNotificationTarget = payload;
+  showMainWindow();
+  flushNotificationTarget();
+}
+ipcMain.on("openclaw:open-target-ready", (event) => {
+  if (!mainWindow || mainWindow.isDestroyed()
+    || event.sender !== mainWindow.webContents
+    || event.senderFrame !== mainWindow.webContents.mainFrame
+    || !isInternalUrl(event.senderFrame?.url)) return;
+  notificationTargetReceiver = event.senderFrame;
+  flushNotificationTarget();
+});
+
 function proactiveNoticeArgument(argv) {
   const value = argv.find(arg => typeof arg === "string" && /^--shoggoth-open-notice=notice-[a-f0-9]{64}$/u.test(arg));
   return value ? value.slice("--shoggoth-open-notice=".length) : null;
@@ -882,7 +913,7 @@ function proactiveNoticeArgument(argv) {
 let pendingProactiveNotice = proactiveNoticeArgument(process.argv);
 let proactiveUiRegistry = null;
 async function openProactiveNotice(id) {
-  if (!mainWindow || !proactiveUiRegistry || !id) return;
+  if (!proactiveUiRegistry || !id) return;
   const { notice } = await proactiveUiRegistry.proactiveCall("proactive.notice.get", { id });
   if (!notice.sessionKey) return;
   let cursor = null, profile = null;
@@ -891,10 +922,9 @@ async function openProactiveNotice(id) {
     profile = result.agents.find(agent => agent.id === notice.profileId);
     if (profile || !result.nextCursor) break; cursor = result.nextCursor;
   }
-  if (!profile || !mainWindow) return;
-  const destination = `/chat?backend=${encodeURIComponent(profile.backendId)}&session=${encodeURIComponent(`agent:${profile.agentId}:${notice.sessionKey}`)}`;
-  mainWindow.webContents.send("openclaw:navigate", destination);
-  mainWindow.show(); mainWindow.focus();
+  if (!profile) return;
+  openNotificationTarget({ category: "proactive", target: { kind: "chat", backendId: profile.backendId,
+    agentId: profile.agentId, sessionKey: notice.sessionKey } });
 }
 
 ipcMain.handle("openclaw:notify", (_event, opts) => {
@@ -905,15 +935,7 @@ ipcMain.handle("openclaw:notify", (_event, opts) => {
   if (!notificationPolicy({ config: readConfig(), category, focused: mainWindow?.isFocused() === true }).allowed) return false;
   const title = typeof o.title === "string" && o.title ? o.title : "OpenClaw";
   const body = typeof o.body === "string" ? o.body : "";
-  const note = new Notification({ title, body });
-  note.on("click", () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-    mainWindow.webContents.send("openclaw:open-target", { category, target: o.target ?? null });
-  });
-  note.show();
+  showNativeNotification(Notification, { title, body }, () => openNotificationTarget({ category, target: o.target ?? null }));
   return true;
 });
 
@@ -974,6 +996,9 @@ if (!gotLock) {
     } catch {
       /* ignore */
     }
+    // Early, so the Dock shows the chosen icon right after launch.
+    appIconController = createAppIconController({ app, nativeImage });
+    void appIconController.apply(appliedConfig.appIcon);
 
     // 统一认证解析器:管理面(OpenClawBackend)与聊天面(chat broker)共用一份
     // 凭证(config.token / 本机 operator 身份 / loopback 网关 token / 已存设备令牌)。

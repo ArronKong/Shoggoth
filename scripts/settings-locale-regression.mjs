@@ -70,7 +70,7 @@ app.whenReady().then(async()=>{
   w.webContents.on("console-message",(_event,level,message)=>{if(level>=2)console.error(message);});
   w.webContents.on("will-prevent-unload",()=>blockedReloads++);
   let config={locale:"zh-CN",gatewayUrl:"ws://127.0.0.1:1",hermesMode:"local",hermesRemotes:[],disabledBackends:[]};
-  const context=vm.createContext({configStore:{read:()=>config},appliedConfig:config,appBackendRegistry:null,configApplyQueue:Promise.resolve(),nativeTheme:{},buildMenu:()=>menus++,mainWindow:{webContents:{reload:()=>{reloads++;w.webContents.reload();}}}});
+  const context=vm.createContext({configStore:{read:()=>config},appliedConfig:config,appBackendRegistry:null,configApplyQueue:Promise.resolve(),nativeTheme:{},appIconController:null,buildMenu:()=>menus++,mainWindow:{webContents:{reload:()=>{reloads++;w.webContents.reload();}}}});
   vm.runInContext(${JSON.stringify(hostFunctions)},context);
   ipcMain.on("fixture:config-saved",(_e,next)=>{config=next;context.applyConfigChange().catch(error=>hostFailures.push(error));});
   try {

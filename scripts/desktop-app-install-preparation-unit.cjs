@@ -95,6 +95,62 @@ async function main() {
     assert.equal(calls.includes("stop"), false);
   }
 
+  for (const state of ["active-runs", "unavailable", "invalid"]) {
+    let stopped = 0;
+    let requests = 0;
+    const item = createDesktopAppInstallPreparation({
+      launchAgent: { ...launchAgent, whenIdle: async () => {},
+        stop: async () => { stopped += 1; } },
+      serviceRequest: async (method) => {
+        requests += 1;
+        if (state === "unavailable") throw Object.assign(new Error("timeout"), { code: "REQUEST_TIMEOUT" });
+        if (state === "invalid") return null;
+        return method === "service.stopImpact"
+          ? { ...impact, totalCount: 1, runs: [{ runId: "run-1", source: "chat",
+            status: "running", agentName: null, title: null }] }
+          : { instanceNonce };
+      },
+      suspendBackgroundActions: () => () => {},
+    });
+    assert.equal(await item.prepareInstall(), null,
+      `an explicit update must stop the old Service even when its state is ${state}`);
+    assert.equal(stopped, 1);
+    assert.equal(requests, 0, "manual updates must not depend on Service RPCs");
+    await item.restoreAfterInstallFailure();
+  }
+
+  {
+    let stopped = 0;
+    const item = createDesktopAppInstallPreparation({
+      launchAgent: { ...launchAgent, whenIdle: async () => {},
+        status: async () => { throw new Error("status unavailable"); },
+        stop: async () => { stopped += 1; } },
+      serviceRequest: async () => { throw new Error("Service unavailable"); },
+      suspendBackgroundActions: () => () => {},
+    });
+    assert.equal(await item.prepareInstall(), null,
+      "a failed preliminary status read must not prevent an explicit stop");
+    assert.equal(stopped, 1);
+    await item.restoreAfterInstallFailure();
+  }
+
+  {
+    let released = 0;
+    let stops = 0;
+    let started = 0;
+    const item = createDesktopAppInstallPreparation({
+      launchAgent: { ...launchAgent, whenIdle: async () => {},
+        stop: async () => { stops += 1; throw new Error("stop not confirmed"); },
+        start: async () => { started += 1; } },
+      suspendBackgroundActions: () => () => { released += 1; },
+    });
+    assert.equal(await item.prepareInstall(), "background-stop-failed");
+    assert.equal(stops, 1, "a failed forced stop stays retryable without restarting the old Service");
+    assert.equal(released, 1);
+    await item.restoreAfterInstallFailure();
+    assert.equal(started, 0, "an unconfirmed stop must not authorize a restart");
+  }
+
   {
     let stopped = 0;
     let started = 0;
@@ -141,15 +197,18 @@ async function main() {
   }
 
   for (const loaded of [false, true]) {
+    let stopped = 0;
     let started = 0;
     let released = 0;
     const item = createDesktopAppInstallPreparation({
       launchAgent: { ...launchAgent, whenIdle: async () => {},
         status: async () => ({ supported: true, loaded }),
+        stop: async () => { stopped += 1; },
         start: async () => { started += 1; if (loaded) throw new Error("restart failed"); } },
       serviceRequest, suspendBackgroundActions: () => () => { released += 1; },
     });
     assert.equal(await item.prepareInstall(), null);
+    assert.equal(stopped, 1, "always confirm the stop, even if the earlier snapshot was unloaded");
     if (loaded) await assert.rejects(item.restoreAfterInstallFailure(), /restart failed/);
     else await item.restoreAfterInstallFailure();
     assert.equal(started, loaded ? 1 : 0, "do not enable a background the user had already stopped");
@@ -158,11 +217,17 @@ async function main() {
 
   {
     let released = 0;
-    const item = createDesktopAppInstallPreparation({ launchAgent, serviceRequest,
+    let stopped = 0;
+    const item = createDesktopAppInstallPreparation({
+      launchAgent: { ...launchAgent, whenIdle: async () => {}, stop: async () => { stopped += 1; } },
+      serviceRequest,
       backgroundStartup: Promise.reject(new Error("startup failed")),
       suspendBackgroundActions: () => () => { released += 1; },
     });
-    assert.equal(await item.prepareInstall(), "background-unavailable");
+    assert.equal(await item.prepareInstall(), null, "a failed startup must not block manual installation");
+    assert.equal(stopped, 1);
+    assert.equal(released, 0);
+    await item.restoreAfterInstallFailure();
     assert.equal(released, 1);
   }
 

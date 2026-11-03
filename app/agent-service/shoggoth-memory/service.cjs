@@ -280,7 +280,8 @@ class ShoggothMemoryService {
       recall: this.conversationRecall, database, assertProfile: id => this.assertProfile(id) });
     const host = new ShoggothMemoryHost({ database, paths: this.paths, profileId, workspaceDir,
       roster: () => this.rosterView(),
-      sessions, assertCurrent: () => this.assertProfile(profileId) });
+      sessions, sourceSessionsVisible: (text, workspace) => this.sourceSessionsVisible(profileId, text, workspace),
+      assertCurrent: () => this.assertProfile(profileId) });
     host.activeMemoryRecovery = activeMemoryRecovery;
     if (activeMemoryRecovery.unresolved) this.logger.warn?.(`active-memory: Profile ${profileId} has ${activeMemoryRecovery.unresolved} unverified scratch records; recall paused`);
     new MemorySearchIndex({ host, databasePath: database.path, sharedDatabase: true, embedding: this.embedding,
@@ -468,7 +469,7 @@ class ShoggothMemoryService {
     const items = all.filter(item => { const size = Buffer.byteLength(item.content); if (bytes + size > maxBytes) return false; bytes += size; return true; }).slice(0, limit);
     return { items, revision: this.store.getRevision(input.profileId), truncated: items.length < all.length };
   }
-  searchMemory(input) {
+  searchMemory(input, onDeliveredOwnResults) {
     const deadlineAt = performance.now() + 30_000;
     return this.sharing.withRequest(input, async scoped => {
       const policy = this.sharing.policy(scoped);
@@ -476,8 +477,10 @@ class ShoggothMemoryService {
       // commits the own results it actually delivered (RecallSignals).
       const own = await this.searchOwnMemory({ ...scoped, record: false });
       const result = await this.sharing.search({ ...scoped, deadlineAt }, own);
-      this.ownMemory.read(scoped, { results: deliveredOwnResults(own.results, result.results) });
-      if (scoped.record !== false) this.recallSignals.stage(scoped, deliveredOwnResults(own.results, result.results));
+      const delivered = deliveredOwnResults(own.results, result.results);
+      this.ownMemory.read(scoped, { results: delivered });
+      if (scoped.record !== false) this.recallSignals.stage(scoped, delivered);
+      onDeliveredOwnResults?.(delivered);
       return result;
     });
   }
@@ -738,6 +741,22 @@ class ShoggothMemoryService {
     if (result?.content) this.ownMemory.read({ profileId: input.profile.id, run: input.run }, { results: result.evidence || [] });
     return result;
   }
+  bindFastRecallDelivery(input, snapshotId, content, activeMemory) {
+    this.activeMemory.bindDelivery(input, snapshotId, content, activeMemory);
+  }
+  stageFastRecallDelivery(run, snapshotId, context) {
+    this.activeMemory.stageDelivery(run, snapshotId, context);
+  }
+  stageConversationRecall(run, name, result) {
+    const input = { profileId: run.profileId, workspace: run.workspace, run, maxSensitivity: "private" };
+    const rows = name === "conversation_search" ? result?.results
+      // An exact event read proves which source was selected; adjacent window
+      // events are context only and carry no recall signal of their own.
+      : result?.events?.filter(event => event.eventId === result.eventId && !event.truncated)
+        .map(event => ({ ...event, snippet: event.text, score: 1 }));
+    try { this.recallSignals.stage(input, this.recallSignals.historyCandidates(input, rows || [])); }
+    catch { /* An optional Dreaming signal cannot block a verified read. */ }
+  }
   async finishActiveMemoryRun(run, status = run?.status) {
     // The commit must see the run's borrowing before the broker forgets it.
     // A failed commit only loses that turn's signals and never blocks cleanup.
@@ -757,7 +776,7 @@ class ShoggothMemoryService {
     return { ...cfg, agents: { ...cfg.agents, list: undefined,
       entries: { [profileId]: { ...selected, id: profileId, workspace: this.store.workspace(profileId) } } } };
   }
-  dream(profileId, { signal } = {}) {
+  dream(profileId, { signal, beforeWrite } = {}) {
     if (this.jobs.has(profileId)) return this.jobs.get(profileId);
     signal = AbortSignal.any([this.maintenance.controller.signal, this.profileSignal(profileId), ...(signal ? [signal] : [])]);
     const host = this.host(profileId);
@@ -791,7 +810,7 @@ class ShoggothMemoryService {
         }
       }
       return result;
-    }));
+    }, beforeWrite));
     this.jobs.set(profileId, job);
     void job.finally(() => { if (this.jobs.get(profileId) === job) this.jobs.delete(profileId); }).catch(() => {});
     return job;

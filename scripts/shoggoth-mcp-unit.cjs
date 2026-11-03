@@ -1801,15 +1801,32 @@ test("原生 helper 绑定真实 WorkRun 后读取帮助，未绑定外部 helpe
         } });
       if (handler === external) {
         // The legacy federation token proves a Profile, not a conversation.
-        // Do not invent a session to make model-result projection succeed.
-        for (const [id, name, args] of [[3, "app_help_search", { query: "灵感是什么" }],
-          [4, "app_help_get", { featureId: "memory" }]]) {
-          const withheld = await call(id, name, args);
+        // Shared help uses unscoped redaction without borrowing a private vault.
+        const search = await call(3, "app_help_search", { query: "灵感是什么" });
+        assert.equal(search.result.isError, false, JSON.stringify(search));
+        assert.deepEqual(search.result.structuredContent,
+          require("../app/agent-service/product-help-catalog").searchProductHelp({ query: "灵感是什么" }));
+        const memory = await call(4, "app_help_get", { featureId: "memory" });
+        assert.equal(memory.result.isError, false, JSON.stringify(memory));
+        assert.equal(memory.result.structuredContent.featureId, "memory");
+        assert.equal(memory.result.structuredContent.runtime, null);
+        assert.deepEqual(memory.result.structuredContent.runtimeCapabilities, {});
+        const memorySearch = memory.result.structuredContent.actions.find(item => item.id === "search");
+        assert.equal(memorySearch.availability, "unavailable");
+        assert.equal(memorySearch.reason.code, "NATIVE_ONLY");
+        // A real projection failure still delivers the non-replayable fallback.
+        const unscoped = require("../app/agent-service/temporary-secret-store");
+        const projectUnscopedResult = unscoped.projectUnscopedResult;
+        try {
+          unscoped.projectUnscopedResult = async () => { throw new Error("fixture projection unavailable"); };
+          const withheld = await call(6, "app_help_search", { query: "灵感是什么" });
           assert.equal(withheld.result.isError, false, JSON.stringify(withheld));
           assert.deepEqual(withheld.result.structuredContent,
             require("../app/agent-service/secret-execution-broker").completedNotice);
           assert.equal(Object.hasOwn(withheld.result.structuredContent, "items"), false);
           assert.equal(Object.hasOwn(withheld.result.structuredContent, "actions"), false);
+        } finally {
+          unscoped.projectUnscopedResult = projectUnscopedResult;
         }
         const denied = await call(5, "memory_search", { query: "private", limit: 5 });
         assert.equal(denied.error.code, -32602, "the external catalogue still excludes native memory tools");

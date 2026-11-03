@@ -188,20 +188,28 @@ class OpenClawInspirationAdapter {
       || LEDGER_METHODS.every((method) => this.backend.hasGatewayMethod(method));
   }
 
-  _require(method) {
+  _require(method, scope = METHOD_SCOPES[method]) {
     if (typeof this.backend.hasGatewayMethod === "function" && !this.backend.hasGatewayMethod(method)) {
       throw failure("OPENCLAW_INSPIRATION_UNSUPPORTED");
     }
     if (typeof this.backend._hasGatewayScope === "function"
-      && !this.backend._hasGatewayScope(METHOD_SCOPES[method])) {
+      && !this.backend._hasGatewayScope(scope)) {
       throw failure("OPENCLAW_INSPIRATION_SCOPE_REQUIRED");
     }
   }
 
-  async _request(method, params) {
+  async _request(method, params, scope = METHOD_SCOPES[method]) {
     await this._ready();
-    this._require(method);
+    this._require(method, scope);
     return this.backend.request(method, params, 15000);
+  }
+
+  async _prepareGroupPermission(sessionKey) {
+    if (this.sessionPurpose !== "group") return;
+    const result = await this._request("sessions.patch", { key: sessionKey, permissionMode: "full" }, "operator.admin");
+    if (result?.entry?.permissionMode !== "full" || result.key !== sessionKey) {
+      throw failure("OPENCLAW_GROUP_PERMISSION_UNCONFIRMED");
+    }
   }
 
   async _workspace(agentId, requested) {
@@ -218,6 +226,7 @@ class OpenClawInspirationAdapter {
     if (typeof agentId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(agentId)
       || (!sessionKey && !string(sessionId, 128))) throw failure("OPENCLAW_EXECUTION_IDENTITY_INVALID");
     await this._ready();
+    if (this.sessionPurpose === "group") this._require("sessions.patch", "operator.admin");
     // A run can ask a question or request execution approval at any time.
     const ledger = this._hasLedger();
     for (const method of Object.keys(METHOD_SCOPES)) {
@@ -227,7 +236,32 @@ class OpenClawInspirationAdapter {
     const resolved = await this._workspace(agentId, workspace);
     if (sessionKey) {
       identity({ agentId, sessionKey, runId: "prepare" }, this.sessionPurpose);
+      if (this.sessionPurpose === "group") {
+        // An archived internal session cannot accept work. Only an explicit,
+        // complete, exact-session reading permits the group driver to replace
+        // it before dispatch; absence or a partial scan proves nothing.
+        let result;
+        try { result = await this._request("sessions.list", { agentId, search: sessionKey, limit: 100, archived: "all" }); }
+        catch (error) {
+          // Older Gateways may not support the archive filter. Without an
+          // exact idle observation, Full access cannot be applied below.
+          if (error?.code !== "INVALID_REQUEST") throw error;
+        }
+        let idle = false;
+        if (Array.isArray(result?.sessions) && result.truncated !== true && result.hasMore !== true && !result.nextCursor) {
+          const rows = result.sessions.filter(row => row?.key === sessionKey);
+          if (rows.length === 1 && (rows[0].agentId === undefined || rows[0].agentId === agentId)
+            && rows[0].hasActiveRun === false) {
+            if (rows[0].archived === true) throw failure("OPENCLAW_GROUP_SESSION_ARCHIVED");
+            idle = rows[0].archived === undefined || rows[0].archived === false;
+          }
+        }
+        // Permission changes can apply to an active Gateway run. Only prepare
+        // the next group turn after this exact stored session is proven idle.
+        if (!idle) throw failure("OPENCLAW_GROUP_PERMISSION_UNCONFIRMED");
+      }
       if (modelSelection !== undefined) await this.backend.applyGroupSessionModel(agentId, sessionKey, modelSelection);
+      await this._prepareGroupPermission(sessionKey);
       return { sessionKey, workspace: resolved, mode: "openclaw" };
     }
     const suffix = createHash("sha256").update(sessionId).digest("hex");
@@ -241,6 +275,7 @@ class OpenClawInspirationAdapter {
       throw failure("OPENCLAW_SESSION_IDENTITY_MISMATCH");
     }
     if (modelSelection !== undefined) await this.backend.applyGroupSessionModel(agentId, sessionKey, modelSelection);
+    await this._prepareGroupPermission(sessionKey);
     return { sessionKey, workspace: resolved, mode: "openclaw" };
   }
 
@@ -341,7 +376,18 @@ class OpenClawInspirationAdapter {
           },
         }, 15000);
       } else result = await this.backend.request("agent", params, 15000);
-    } catch {
+    } catch (error) {
+      // Gateway's lifecycle guard rejects this exact session before admission.
+      // Do not turn that definite refusal into a forever-running observation.
+      // A timeout or a generic transport error still cannot prove nonacceptance.
+      if (error?.code === "INVALID_REQUEST"
+        && error.message === `Session "${target.sessionKey}" is archived. Restore it before starting new work.`) {
+        if (observation) {
+          observation.rejected = "OPENCLAW_SESSION_ARCHIVED";
+          observation.invalid = true; observation.controller.abort();
+        }
+        return snapshot("failed", "OPENCLAW_SESSION_ARCHIVED", null);
+      }
       // Even a transport failure can follow successful acceptance. Never replay.
       return snapshot("unknown", "OPENCLAW_START_UNCERTAIN");
     }
@@ -491,16 +537,31 @@ class OpenClawInspirationAdapter {
 
   /** @returns {Promise<{task: object|null, state: object}>} 运行的当前状态；task 只在有任务账时存在。 */
   async _state(target) {
+    const rejected = this.observations.get(this._observationKey(target))?.rejected;
+    if (rejected) return { task: null, state: snapshot("failed", rejected) };
     if (!this._hasLedger()) return { task: null, state: await this._waitState(target) };
     const task = await this._task(target);
     return { task, state: task ? taskSnapshot(task) : snapshot("unknown", "OPENCLAW_TASK_NOT_FOUND") };
   }
 
-  async _inactive(target, { allowAbsent = false } = {}) {
-    const result = await this._request("sessions.list", { agentId: target.agentId, search: target.sessionKey, limit: 100 });
+  async _inactive(target, { allowAbsent = false, requireArchived = false } = {}) {
+    const params = { agentId: target.agentId, search: target.sessionKey, limit: 100 };
+    let result;
+    try {
+      result = await this._request("sessions.list", { ...params,
+        ...(this.sessionPurpose === "group" ? { archived: "all" } : {}) });
+    } catch (error) {
+      if (this.sessionPurpose !== "group" || error?.code !== "INVALID_REQUEST") throw error;
+      // Older Gateways cannot prove archived inactivity. Keep their ordinary
+      // session observation, but never use it to confirm an archived stop.
+      if (requireArchived) return false;
+      result = await this._request("sessions.list", params);
+    }
     if (!Array.isArray(result?.sessions) || result.truncated === true || result.hasMore === true || result.nextCursor) return false;
     const sessions = result.sessions.filter((session) => session?.key === target.sessionKey);
-    return allowAbsent && sessions.length === 0 || sessions.length === 1 && sessions[0].hasActiveRun === false;
+    return allowAbsent && !requireArchived && sessions.length === 0 || sessions.length === 1
+      && (sessions[0].agentId === undefined || sessions[0].agentId === target.agentId)
+      && sessions[0].hasActiveRun === false && (!requireArchived || sessions[0].archived === true);
   }
 
   _question(row, target) {
@@ -696,12 +757,13 @@ class OpenClawInspirationAdapter {
     if (!task && abort?.aborted === true && Array.isArray(abort.runIds) && abort.runIds.includes(target.runId)) {
       try { if (await this._inactive(target)) return snapshot("canceled"); } catch {}
     }
-    // A Host-sealed group cannot dispatch another turn. Its expired run receipt
-    // may be discarded only after an exact no-op abort and an authoritative
-    // inactive reading of the original dedicated group session.
-    if (groupDeleted && this.sessionPurpose === "group" && !task && abort?.aborted === false
+    // An archived dedicated session cannot admit more work, just like a
+    // Host-sealed deleted group. An exact no-op abort plus a complete inactive
+    // reading can retire its expired run without restoring or replaying it.
+    // Ordinary stops still require the exact archived row; absence is not proof.
+    if (this.sessionPurpose === "group" && (groupDeleted || abort?.ok === true) && !task && abort?.aborted === false
       && Array.isArray(abort.runIds) && abort.runIds.length === 0) {
-      try { if (await this._inactive(target, { allowAbsent: true })) return snapshot("canceled"); } catch {}
+      try { if (await this._inactive(target, { allowAbsent: groupDeleted, requireArchived: !groupDeleted })) return snapshot("canceled"); } catch {}
     }
     return { ...state, errorCode: "OPENCLAW_STOP_UNCONFIRMED" };
   }

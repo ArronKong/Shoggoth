@@ -39,7 +39,7 @@ for (const language of ["zh-CN", "en"]) {
     if (name === "react") return React;
     if (name === "react/jsx-runtime") return uiRequire(name);
     if (name === "react-i18next") return { useTranslation: () => ({ t: key => key, i18n: { resolvedLanguage: language } }) };
-    if (name === "../components/Modal") return { __esModule: true, default: ({ children }) => React.createElement("section", {}, children) };
+    if (name === "../components/Modal") return { __esModule: true, default: ({ children, footer, subtitle }) => React.createElement("section", {}, children, React.createElement("p", {}, subtitle), footer) };
     if (name === "../components/ui") return { useConfirm: () => async () => true };
     if (name === "../api/mcpConnectors") return api;
     if (name === "../lib/mcpConnectorUi") return helpers;

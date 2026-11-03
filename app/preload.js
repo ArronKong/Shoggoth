@@ -243,6 +243,7 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
       try { cb(payload); } catch { /* best-effort */ }
     };
     ipcRenderer.on("openclaw:open-target", handler);
+    ipcRenderer.send("openclaw:open-target-ready");
     return () => ipcRenderer.removeListener("openclaw:open-target", handler);
   },
   // Menu「设置连接…」routes here so connection settings open the SPA's 设置 page

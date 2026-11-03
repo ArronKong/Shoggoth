@@ -72,12 +72,15 @@ const checkLayout=()=>{
  equal(rect(composer).bottom<=innerHeight+1,true,'composer stays inside the window');
  equal(document.documentElement.scrollWidth<=innerWidth+1,true,'no horizontal overflow');
  const rows=Array.from(list.querySelectorAll('[data-group-execution],[data-group-interaction]'));
- for(const row of rows){const bubble=row.querySelector('.chat-bubble')!;
-   equal(Boolean(bubble),true,'live entry uses an assistant message bubble');
+ for(const row of rows){const approval=row.getAttribute('data-group-interaction')==='approval';
+   const bubble=row.querySelector('.chat-bubble');
+   const content=approval?row.querySelector('.chat-prompt'):bubble;
+   equal(Boolean(bubble),!approval,'only execution and input entries use a message bubble');
+   equal(Boolean(content),true,'live entry keeps its message or actionable approval card');
    const author=row.querySelector('[data-group-author]')!;
    equal(Boolean(author?.textContent?.trim()),true,'the execution or interaction retains its member identity');
-   equal(author.parentElement===bubble.parentElement,true,'member name and bubble share the same message stack');
-   equal(rect(author).bottom<=rect(bubble).top+1,true,'member identity remains above its bubble');
+   equal(author.parentElement===content.parentElement,true,'member name and content share the same message stack');
+   equal(rect(author).bottom<=rect(content).top+1,true,'member identity remains above its content');
    equal(getComputedStyle(row).overflowY,'visible','live entry has no separate scroll dock');
  }
  for(let index=1;index<rows.length;index++)equal(rect(rows[index-1]).bottom<=rect(rows[index]).top+1,true,'message cards do not overlap');
@@ -108,7 +111,9 @@ state.runActivityFixture=async()=>{
  equal(timeline().querySelectorAll('[data-group-activity]').length,0,'quiet replies do not render an activity panel');
  equal(timeline().querySelectorAll('[data-group-execution]').length,1,'approval uses its interaction card without a duplicate loader');
  equal(document.querySelectorAll('[data-card-interactive]').length,1,'one approval card');
- equal(Boolean(interaction('approval')?.querySelector('.chat-bubble .chat-prompt')),true,'approval is an inline message card');
+ equal(Boolean(interaction('approval')?.querySelector('.chat-bubble')),false,'approval has no enclosing message bubble');
+ equal(Boolean(interaction('approval')?.querySelector('.chat-prompt')),true,'approval stays actionable in the message stream');
+ equal(Boolean(interaction('approval')?.querySelector('p')),false,'pending approval omits the extra waiting line');
  let turn=activity('alpha');const approval=interaction('approval');
  equal(turn.getAttribute('data-activity-phase'),'tool','Alpha tool fact stays bound to its reply');
  equal(Boolean(approval.querySelector('.chat-prompt')),true,'Beta approval remains actionable');

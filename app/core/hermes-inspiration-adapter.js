@@ -131,6 +131,7 @@ class HermesInspirationAdapter {
       if (existingSessionKey !== null) {
         const prepared = await this.#prepareExisting({ agentId, sessionKey: existingSessionKey, workspace });
         if (modelSelection !== undefined) await this.backend.applyGroupSessionModel(agentId, existingSessionKey, modelSelection);
+        await this.#prepareGroupPermission(existingSessionKey, prepared.mode);
         return prepared;
       }
       const sessionKey = await this.backend.createSession(agentId, { workspace, freezeWorkspace: true });
@@ -153,12 +154,29 @@ class HermesInspirationAdapter {
       const prepared = { sessionKey, workspace: actualWorkspace, mode };
       this.sessions.set(sessionKey, { ...prepared, agentId, generation: this.backend._lifecycleGeneration });
       if (modelSelection !== undefined) await this.backend.applyGroupSessionModel(agentId, sessionKey, modelSelection);
+      await this.#prepareGroupPermission(sessionKey, mode);
       return prepared;
     })();
     // Retain rejected preparation promises: another call must not mint an
     // orphan session after an ambiguous create response.
     this.preparations.set(key, preparation);
     return copy(await preparation.promise);
+  }
+
+  async #prepareGroupPermission(sessionKey, mode) {
+    if (this.sessionPurpose !== "group") return;
+    if (mode !== "gateway") throw adapterError("HERMES_GROUP_PERMISSION_UNSUPPORTED");
+    const generation = this.backend._lifecycleGeneration;
+    const target = this.backend._sessionTarget(sessionKey), token = target.dash.token;
+    // The idle group session needs an applied RPC receipt, rather than the
+    // private-chat setter's possibly deferred display selection.
+    const { result, scope } = await this.backend._sessionConfigSet(sessionKey, "yolo", "1");
+    const current = this.backend._sessionTarget(sessionKey);
+    if (generation !== this.backend._lifecycleGeneration || current.profile !== target.profile
+      || current.dash !== target.dash || current.dash.token !== token || scope !== "session"
+      || result?.scope !== "session" || result.key !== "yolo" || result.value !== "1") {
+      throw adapterError("HERMES_GROUP_PERMISSION_UNCONFIRMED");
+    }
   }
 
   start(input, onSnapshot = () => {}) {

@@ -12,13 +12,23 @@ const ts = require("typescript");
 const i18next = require("i18next");
 
 function load(file, stubs = {}) {
-  const compiled = ts.transpileModule(fs.readFileSync(path.join(root, file), "utf8"), {
+  const source = path.join(root, file);
+  const localRequire = createRequire(source);
+  const compiled = ts.transpileModule(fs.readFileSync(source, "utf8"), {
     compilerOptions: { esModuleInterop: true, module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   const module = { exports: {} };
   vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})(require, module, module.exports);`, {
-    module, require: (name) => stubs[name] || require(name),
+    module, require: (name) => {
+      if (stubs[name]) return stubs[name];
+      if (name.startsWith(".")) {
+        const dependency = path.resolve(path.dirname(source), name);
+        const typescript = [".ts", ".tsx"].map(extension => dependency + extension).find(fs.existsSync);
+        if (typescript) return load(path.relative(root, typescript), stubs);
+      }
+      return localRequire(name);
+    },
   });
   return module.exports;
 }

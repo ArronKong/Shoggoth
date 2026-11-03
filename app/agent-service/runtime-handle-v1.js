@@ -17,6 +17,8 @@ const EVENT_TYPES = new Set(["text", "text_delta", "reasoning", "reasoning_delta
 const IDENTITY_FENCED_METHODS = new Set(["sessionStart", "sessionResume", "turnStart", "turnSteer",
   "sessionRename", "sessionArchive", "sessionUnarchive", "sessionDelete", "commandExecute", "commandsList",
   "modelsList", "accountRead", "accountLogin", "accountLogout", "generateModelOnly", "resolveModelOnly"]);
+const PREPARATION_READS = new Set(["modelsList", "accountRead"]);
+const ACCOUNT_STATE_WRITES = new Set(["accountLogin", "accountLogout", "commandExecute"]);
 const fail = (code = "RUNTIME_HANDLE_INVALID") => serviceError(code, "Runtime V1 contract rejected the operation");
 function data(value, maxBytes = 8 * 1024 * 1024) {
   let size = 0, nodes = 0;
@@ -144,9 +146,33 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {}, onCapab
   const identity = Object.freeze({ ...binding, homeIdentity: crypto.createHash("sha256")
     .update(JSON.stringify([binding.runtime, binding.runtimeAccountId, home])).digest("hex") });
   let alive = true, terminatedCleanly = false;
-  const cleanups = new Set(), observations = new Map();
+  const cleanups = new Set(), observations = new Map(), pendingReads = new Map();
+  let readEpoch = 0;
   const assertAlive = () => { if (!alive) throw fail("RUNTIME_HANDLE_TERMINATED"); };
-  const finish = () => { alive = false; for (const unsubscribe of cleanups) { try { unsubscribe(); } catch {} } cleanups.clear(); observations.clear(); };
+  const invalidateReads = () => { readEpoch += 1; pendingReads.clear(); };
+  // Only overlapping, identical read-only probes of this exact transport may
+  // share work. Every caller validates its own result; nothing stays cached.
+  const preparationRead = async (method, input, load, share = true) => {
+    const key = share ? JSON.stringify([method, input], (_name, value) => value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.keys(value).sort().map(name => [name, value[name]])) : value) : null;
+    const canShare = key !== null && key.length <= 8192 && (pendingReads.size < 32 || pendingReads.has(key));
+    const epoch = readEpoch;
+    let pending = canShare ? pendingReads.get(key) : load();
+    if (canShare && !pending) {
+      pending = Promise.resolve().then(() => {
+        assertAlive();
+        if (epoch !== readEpoch) throw fail(method === "modelsList" ? "RUNTIME_MODEL_CATALOG_CHANGED" : "RUNTIME_AUTH_STATUS_UNAVAILABLE");
+        return load();
+      });
+      pendingReads.set(key, pending);
+      pending.finally(() => { if (pendingReads.get(key) === pending) pendingReads.delete(key); }).catch(() => {});
+    }
+    const result = await pending;
+    assertAlive(); raw.host?.assertRuntimeIdentityCurrent?.();
+    if (epoch !== readEpoch) throw fail(method === "modelsList" ? "RUNTIME_MODEL_CATALOG_CHANGED" : "RUNTIME_AUTH_STATUS_UNAVAILABLE");
+    return result;
+  };
+  const finish = () => { alive = false; invalidateReads(); for (const unsubscribe of cleanups) { try { unsubscribe(); } catch {} } cleanups.clear(); observations.clear(); };
   const terminated = Promise.resolve(raw.terminated).then(value => { terminatedCleanly = true; finish(); return value; }, error => { finish(); throw error; });
   terminated.catch(() => {});
   const facade = { kind: "shoggoth-runtime-handle", version: 1, ...binding, identity, capabilities, capabilityEvidence, terminated,
@@ -169,7 +195,9 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {}, onCapab
     },
     async authenticationState(input) { assertAlive(); raw.host?.assertRuntimeIdentityCurrent?.();
       if (typeof raw.authenticationState !== "function") throw fail("RUNTIME_CAPABILITY_UNSUPPORTED");
-      const result = await raw.authenticationState(input); assertAlive(); return data(result); },
+      const checked = data(input || {});
+      const result = await preparationRead("authenticationState", checked, () => raw.authenticationState(checked));
+      assertAlive(); return data(result); },
     subscribe(listener) {
       assertAlive();
       const unsubscribe = raw.subscribe(value => {
@@ -262,8 +290,11 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {}, onCapab
       onText(data(text, 64 * 1024));
     });
     try {
-      const result = await raw[nativeMethod(method)]({ ...checked, ...(signal ? { signal } : {}),
+      if (ACCOUNT_STATE_WRITES.has(method)) invalidateReads();
+      const invoke = () => raw[nativeMethod(method)]({ ...checked, ...(signal ? { signal } : {}),
         ...(observer ? { onText: observer } : {}), ...(fence ? { assertCurrent: fence } : {}) }, preparedObserver);
+      const result = await (PREPARATION_READS.has(method)
+        ? preparationRead(method, checked, invoke, !signal && checked.refreshToken !== true) : invoke());
       try {
         // Dedicated ACP model workers return only after their process group
         // has stopped. Accept that one completed result, never a later call
@@ -285,12 +316,15 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {}, onCapab
   if (facade.accountLogin) facade.accountLoginStart = facade.accountLogin;
   for (const method of ["accountLoginApiKey", "accountLoginCancel"]) if (capabilities["account.login"] && typeof raw[method] === "function") {
     facade[method] = async input => { assertAlive(); if (method !== "accountLoginCancel") raw.host?.assertRuntimeIdentityCurrent?.();
-      const result = await raw[method](data(input)); assertAlive(); return data(result); };
+      const checked = data(input); invalidateReads();
+      const result = await raw[method](checked); assertAlive(); return data(result); };
   }
   // Settings sign-in into model providers (OpenCode); a waiting callback keeps its abort signal.
   for (const method of ["providerLoginOptions", "providerLoginAuthorize", "providerLoginCallback", "providerLoginApiKey"]) if (typeof raw[method] === "function") {
     facade[method] = async input => { assertAlive(); raw.host?.assertRuntimeIdentityCurrent?.(); const { signal, ...payload } = input || {};
-      const result = await raw[method]({ ...data(payload), ...(signal ? { signal } : {}) }); assertAlive(); return data(result ?? null); };
+      const checked = data(payload);
+      if (method !== "providerLoginOptions") invalidateReads();
+      const result = await raw[method]({ ...checked, ...(signal ? { signal } : {}) }); assertAlive(); return data(result ?? null); };
   }
   return Object.freeze(facade);
 }

@@ -858,6 +858,9 @@ class WorkRunCoordinator {
         "onRunInteraction 必须是函数",
       );
     }
+    if (options.onSessionSend !== undefined && typeof options.onSessionSend !== "function") {
+      throw coordinatorError("WORK_RUN_COORDINATOR_DEPENDENCY_REQUIRED", "onSessionSend 必须是函数");
+    }
     requireMethods(options.chatSessionStore, [
       "getSession", "requestBinding", "completeBinding", "recoverBinding", "listPendingBindings",
     ], "ChatSessionStore");
@@ -1026,6 +1029,7 @@ class WorkRunCoordinator {
     this.onRunTerminal = options.onRunTerminal || null;
     this.validateRunCompletion = options.validateRunCompletion || (() => null);
     this.onRunInteraction = options.onRunInteraction || null;
+    this.onSessionSend = options.onSessionSend || null;
     this.chatSessionStore = options.chatSessionStore;
     this.getMediaStore = options.getMediaStore;
     this.resolveRunSession = options.resolveRunSession || (() => null);
@@ -3455,6 +3459,8 @@ class WorkRunCoordinator {
   }
 
   async send(input) {
+    // Lets background memory review yield to a new turn; never affects the send.
+    try { this.onSessionSend?.(input?.sessionKey); } catch {}
     return this.#serializeSessionSend(input?.sessionKey, () => this.#send(input));
   }
 
@@ -9075,6 +9081,8 @@ class WorkRunCoordinator {
           if (preparesTurn) Object.assign(params, { signal: token.controller.signal,
             contextSnapshotId: profile.contextSnapshotId, contextRevisions: profile.contextRevisions ?? null,
             nativeMemoryVersion: profile.nativeMemoryVersion ?? null });
+          this.contextCompiler?.memoryEngine?.stageFastRecallDelivery?.(
+            this.dispatcher.getRun(token.runId), profile.contextSnapshotId, params.context);
           return host.turnStart(params, this.#turnPreparationObserver(host, threadId, profile, command, token));
         },
       );

@@ -323,7 +323,7 @@
     {
       "path": "dist/embedded-agent-helpers-CNzM9z5K.mjs",
       "beforeSha256": "73d0194fa72a0d8b072130585a8e78f40a57fa92777d9371930d15dd3f8b6e59",
-      "afterSha256": "af1f90768235652363202968344beca64865ef0a2f34acd072e7c30f0dde387c",
+      "afterSha256": "f7340ef303bbfe12f739931d54c57e71bc099f725e25b319656f7371f2a73175",
       "edits": [
         {
           "before": "\tconst raw = (msg.errorMessage ?? \"\").trim();\n\tif (msg.stopReason !== \"error\" && !raw) return;",
@@ -332,6 +332,10 @@
         {
           "before": "\t\tcode: signal.code\n\t};",
           "after": "\t\tcode: msg.errorMessage?.trim() === \"SECRET_MODEL_PROJECTION_UNAVAILABLE\" ? \"SECRET_MODEL_PROJECTION_UNAVAILABLE\" : signal.code\n\t};"
+        },
+        {
+          "before": "\tconst runtimeCopy = RUNTIME_FAILURE_COPY[providerRuntimeFailureKind];",
+          "after": "\tif (providerRuntimeFailureKind === \"model_not_found\") return renderAssistantRequestFailureCopy({ reason: \"model_not_found\", status: formatStatus });\n\tconst runtimeCopy = RUNTIME_FAILURE_COPY[providerRuntimeFailureKind];"
         }
       ]
     },
@@ -342,9 +346,28 @@
         {
           "before": "function renderAssistantRequestFailureCopy(facts) {",
           "after": "function renderAssistantRequestFailureCopy(facts) {\n\tif (facts.code === \"SECRET_MODEL_PROJECTION_UNAVAILABLE\") return \"SECRET_MODEL_PROJECTION_UNAVAILABLE\";"
+        },
+        {
+          "before": "\tmodel_not_found: \"model not found\",",
+          "after": "\tmodel_not_found: \"model unavailable\","
+        },
+        {
+          "before": "\tif (facts.reason === \"auth\" || facts.reason === \"auth_permanent\") return",
+          "after": "\tif (normalizedReason === \"model_not_found\") return `${summary} Choose another model or check the model id and provider availability.`;\n\tif (facts.reason === \"auth\" || facts.reason === \"auth_permanent\") return"
         }
       ],
-      "afterSha256": "d3f7e4e917e1fdb52a1d221e6110015e88cd97820cceb5b56ab880f54fbb718d"
+      "afterSha256": "eaa38c4767dbef3c1f050f83c45831640e8121bdc52e25cb536e949cecdad78e"
+    },
+    {
+      "path": "dist/classify-core-CZDKY3fB.mjs",
+      "beforeSha256": "322eb902fc7d0d6ad22ded6fe87e38ceafcc4d971233dbafadd498e7e71c08f5",
+      "edits": [
+        {
+          "before": "\tif (!msg) return false;\n\tif (/no endpoints found for/i.test(msg)) return true;",
+          "after": "\tif (!msg) return false;\n\tconst providerText = extractLeadingHttpStatus(msg)?.rest ?? msg;\n\tconst modelMessage = (parseApiErrorInfo(providerText)?.message ?? providerText).trim();\n\tif (/^Model id\\s*:\\s*[a-z0-9][a-z0-9._:/+-]{0,255}\\s*,\\s*has no provider supported[.!]?$/i.test(modelMessage)) return true;\n\tif (/no endpoints found for/i.test(msg)) return true;"
+        }
+      ],
+      "afterSha256": "a3e2d7dc8fdef105d90ac9a5e04687b8600c14e10b549b087b632b05062729c5"
     }
   ],
   "newFiles": [

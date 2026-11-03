@@ -63,6 +63,8 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const data = model.data?.items.find(item => item.id === id), installed = data?.state === "installed";
   const language = i18n.resolvedLanguage || i18n.language;
   const [values, setValues] = useState<Record<string, string>>({}), [code, setCode] = useState(""), [working, setWorking] = useState(false), [checking, setChecking] = useState(false);
+  const [serviceCheckFailed, setServiceCheckFailed] = useState(false);
+  const [authorizationQr, setAuthorizationQr] = useState<string | null>(null);
   const [codeFocused, setCodeFocused] = useState(false);
   const [account, setAccount] = useState<OfficialAccountStatus | null>(null), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [server, setServer] = useState<McpServer | null>(null), [showTools, setShowTools] = useState(false);
@@ -70,11 +72,38 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const mounted = useRef(true), locked = useRef(false);
   const accountEpoch = useRef(0);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  useEffect(() => { accountEpoch.current++; setAccount(null); setChecking(false); setError(""); setNotice(""); setCodeFocused(false); if (id === "quark-drive") setCode(""); }, [id, data?.revision]);
+  useEffect(() => { accountEpoch.current++; setAccount(null); setChecking(false); setServiceCheckFailed(false); setError(""); setNotice(""); setCodeFocused(false); if (id === "quark-drive") setCode(""); }, [id, data?.revision]);
+  useEffect(() => {
+    let current = true;
+    setAuthorizationQr(null);
+    if (id === "meituan-paotui" && account?.state === "authorizing" && account.verificationUrl && !account.qrCode) {
+      const url = account.verificationUrl;
+      // The official auth_link opens the Meituan app rather than a desktop
+      // page. Encode it locally; never send the authorization link elsewhere.
+      void import("qrcode-generator").then(({ default: qrcode }) => {
+        const qr = qrcode(0, "M"); qr.addData(url); qr.make();
+        if (current) setAuthorizationQr(qr.createDataURL(6, 24));
+      }).catch(() => {});
+    }
+    return () => { current = false; };
+  }, [id, account?.state, account?.verificationUrl, account?.qrCode]);
+  useEffect(() => {
+    let current = true;
+    const epoch = accountEpoch.current;
+    setServer(null);
+    if (serviceOnly && installed && data?.serverId) {
+      // Read saved-field metadata only. Listing MCP tools does not prove that
+      // the provider accepts the credential, and opening must not spend quota.
+      void listMcpConnectors().then(snapshot => {
+        if (current && mounted.current && epoch === accountEpoch.current) setServer(snapshot.servers.find(value => value.id === data.serverId) || null);
+      }).catch(() => {});
+    }
+    return () => { current = false; };
+  }, [id, installed, data?.serverId, data?.revision, toolsRevision]);
   const toolsChanged = () => {
     accountEpoch.current++;
     setToolsRevision(value => value + 1);
-    if (mounted.current) { setAccount(null); setChecking(false); setError(""); setNotice(""); }
+    if (mounted.current) { setAccount(null); setChecking(false); setServiceCheckFailed(false); setError(""); setNotice(""); }
     onChanged();
   };
   const act = async (operation: () => Promise<void>) => {
@@ -90,8 +119,9 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
     const epoch = ++accountEpoch.current;
     const authorizationCode = action === "bind" ? code.trim() : undefined;
     if (["doordash", "quark-drive"].includes(id) && action === "bind") setCode("");
-    if (serviceOnly && action === "status") setChecking(true);
+    if (serviceOnly && action === "status") { setChecking(true); setServiceCheckFailed(false); }
     const result = await officialAccount(id, data.revision, action, authorizationCode).catch(error => {
+      if (serviceOnly && mounted.current && epoch === accountEpoch.current) setServiceCheckFailed(true);
       if (retainPending && mounted.current && epoch === accountEpoch.current) setAccount(null);
       throw error;
     }).finally(() => { if (mounted.current && epoch === accountEpoch.current) setChecking(false); });
@@ -111,7 +141,7 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const save = () => act(async () => {
     if (!data?.serverId) return;
     const epoch = ++accountEpoch.current; setAccount(null);
-    if (serviceOnly) setChecking(true);
+    if (serviceOnly) { setChecking(true); setServiceCheckFailed(false); }
     const snapshot = await listMcpConnectors();
     const credentials = Object.entries(values).filter(([, value]) => value.trim()).map(([name, value]) => [name, id === "netease-music" ? value.trim() : value]);
     const result = await saveMcpCredentials(data.serverId, { env: Object.fromEntries(credentials) }, snapshot.revision);
@@ -120,7 +150,10 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
     if (serviceOnly && mounted.current && epoch === accountEpoch.current) {
       setChecking(true);
       try {
-        const checked = await officialAccount(id, data.revision, "status");
+        const checked = await officialAccount(id, data.revision, "status").catch(error => {
+          if (mounted.current && epoch === accountEpoch.current) setServiceCheckFailed(true);
+          throw error;
+        });
         if (mounted.current && epoch === accountEpoch.current) { setAccount(checked); if (checked.errorCode) setError(tr(`errors.${officialConnectorErrorKey({ code: checked.errorCode })}`)); }
       } finally { if (mounted.current && epoch === accountEpoch.current) setChecking(false); }
     }
@@ -134,43 +167,61 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const recommendation: McpRecommendation = { ...definition, setup: "local", fields: definition.fields.map(field => ({ ...field, location: "env" })) };
   const busy = working || model.busy;
   const installationError = model.actionError?.id === id ? model.actionError.key : data?.errorCode ? officialConnectorErrorKey({ code: data.errorCode }) : null;
-  return <Modal open title={<span className={s.dialogIdentity}><McpConnectorIcon name={definition.name} identity={id} />{definition.name}</span>} width={680} onClose={onClose} dismissible={!busy}>
+  const supportsLogin = ["doordash", "shop", "quark-drive", "rollinggo-hotel", "meituan-paotui", "alipay", "netease-music"].includes(id);
+  const credentialsDirty = Object.values(values).some(value => value.trim());
+  const accountReady = account?.state === "ready";
+  const credentialsSaved = definition.fields.some(field => server?.setup?.configuredFields.includes(`env:${field.name}`));
+  const requiredCredentialsMissing = server?.setup && definition.fields.some(field => field.required && !server.setup.configuredFields.includes(`env:${field.name}`));
+  const serviceStatus = checking ? "serviceChecking" : accountReady ? "serviceReady"
+    : account?.state === "signedOut" ? "serviceNeedsCredentials" : serviceCheckFailed || account?.errorCode ? "serviceCheckFailed"
+      : requiredCredentialsMissing ? "serviceNeedsCredentials" : "serviceUnknown";
+  const footer = <div className={s.flowFooter}><p>{t(accountReady ? "mcpConnectors.flow.connectedHint" : "mcpConnectors.defaultAccess")}</p><div className={s.flowFooterActions}>
+    {!installed ? <button type="button" className={s.primary} disabled={busy || !data || !!model.error} onClick={() => void model.change(id, "install")}>{data?.canRemove ? tr("repair") : t("mcpConnectors.add")}</button> : <>
+      {definition.fields.length > 0 && <button type="button" className={credentialsDirty || !supportsLogin && !accountReady ? s.primary : s.button} disabled={busy || !credentialsDirty} onClick={() => void save()}>{t("mcpConnectors.flow.saveConnect")}</button>}
+      {supportsLogin && <button type="button" className={!credentialsDirty && !accountReady ? s.primary : s.button} disabled={busy} onClick={() => void accountAction("start")}>{t(accountReady ? "mcpConnectors.flow.reconnect" : "mcpConnectors.flow.authorize")}</button>}
+      {accountReady && <button type="button" className={s.primary} disabled={busy} onClick={onClose}>{t("mcpConnectors.flow.done")}</button>}
+    </>}
+    {!accountReady && <button type="button" className={s.button} disabled={busy} onClick={onClose}>{tr("close")}</button>}
+  </div></div>;
+  return <Modal open title={<span className={s.dialogIdentity}><McpConnectorIcon name={definition.name} identity={id} />{definition.name}</span>} width={640} variant="connector" subtitle={mcpRecommendationText(definition.description, language)} footer={footer} onClose={onClose} dismissible={!busy}>
     <div className={s.detail}>
-      <section className={s.overview}><h3>{t("mcpConnectors.flow.capabilities")}</h3><p>{mcpRecommendationText(definition.description, language)}</p></section>
-      <ConnectorTools serverId={data?.serverId || undefined} status={server?.status} checkedAt={server?.lastCheck?.at} previewId={id} refreshKey={`${data?.revision}:${toolsRevision}`} />
-      {(installed || ["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(id)) && <p className={s.notice}>{mcpRecommendationText(definition.note, language)}</p>}
-      <a href={definition.docsUrl} target="_blank" rel="noreferrer">{tr("source")}</a>
-      {definition.accessUrl && <a href={definition.accessUrl} target="_blank" rel="noreferrer">{tr("requestAccess")}</a>}
-      <p className={s.muted}>{tr("version")} {data?.installedVersion || definition.version}{data?.canRemove && <> · {t("officialConnectors.skills", { count: data.skillCount })}</>}</p>
-      {!data?.canRemove && <p className={s.muted}>{t("mcpConnectors.flow.addHint")}</p>}
+      <ConnectorTools overview description={mcpRecommendationText(definition.description, language)} serverId={data?.serverId || undefined} status={server?.status} checkedAt={server?.lastCheck?.at} previewId={id} refreshKey={`${data?.revision}:${toolsRevision}`} />
+      {!installed && <section className={s.connectionPanel}><div className={s.connectionHeading}><h3>{t("mcpConnectors.flow.connectionTitle", { name: definition.name })}</h3><span className={s.status}>{tr(data?.stage ? `stages.${data.stage}` : `states.${data?.state || "notInstalled"}`)}</span></div><p className={s.muted}>{t("mcpConnectors.flow.addHint")}</p></section>}
       {model.loading && !data && <p role="status">{tr("loading")}</p>}
       {model.error && <p className={s.error} role="alert">{tr("loadFailed")} <button className={s.textButton} onClick={() => void model.refresh()}>{tr("retry")}</button></p>}
       {installationError && <p className={s.error} role="alert">{tr(`errors.${installationError}`)}</p>}
-      {data && <p role="status" className={s.status}>{tr(data.stage ? `stages.${data.stage}` : `states.${data.state}`)}</p>}
-      {installed && <>
-        <h3>{t("mcpConnectors.flow.setup")}</h3><p className={s.muted}>{tr("localHint")}</p>
-        {definition.fields.length > 0 && <><div className={s.fields}>{definition.fields.map(field => <label className={s.field} key={field.name}><span>{mcpRecommendationText(field.label, language)}{field.required ? " *" : ""}</span>{field.name === "NCM_PRIVATE_KEY" ? <textarea className={s.masked} rows={4} autoComplete="off" spellCheck={false} disabled={busy} value={values[field.name] || ""} onChange={event => setValues(previous => ({ ...previous, [field.name]: event.target.value }))} /> : <input autoComplete="off" spellCheck={false} type={field.secret ? "password" : "text"} disabled={busy} value={values[field.name] || ""} onChange={event => setValues(previous => ({ ...previous, [field.name]: event.target.value }))} />}</label>)}</div><p className={s.muted}>{tr("credentialHint")}</p><button type="button" className={s.button} disabled={busy || !Object.values(values).some(value => value.trim())} onClick={() => void save()}>{t("mcpConnectors.flow.saveConnect")}</button></>}
-        <p className={s.status} role="status">{tr(serviceOnly ? checking ? "serviceChecking" : account?.state === "ready" ? "serviceReady" : "serviceUnknown" : `accountStates.${account?.state || "unknown"}`)}{account?.userName ? ` · ${account.userName}` : ""}</p>
+      {installed && <section className={s.connectionPanel}>
+        <h3>{t("mcpConnectors.flow.connectionTitle", { name: definition.name })}</h3><p className={s.muted}>{tr("localHint")}</p>
+        {definition.fields.length > 0 && <details className={s.clientSetup} open={!accountReady || undefined}><summary>{t("mcpConnectors.flow.configure")}</summary><div className={s.fields}>{definition.fields.map(field => <label className={s.field} key={field.name}><span>{mcpRecommendationText(field.label, language)}{field.required ? " *" : ""}</span>{field.name === "NCM_PRIVATE_KEY" ? <textarea className={s.masked} rows={4} autoComplete="off" spellCheck={false} disabled={busy} value={values[field.name] || ""} onChange={event => setValues(previous => ({ ...previous, [field.name]: event.target.value }))} /> : <input autoComplete="off" spellCheck={false} type={field.secret ? "password" : "text"} placeholder={serviceOnly && server?.setup?.configuredFields.includes(`env:${field.name}`) ? tr("credentialSavedPlaceholder") : undefined} disabled={busy} value={values[field.name] || ""} onChange={event => setValues(previous => ({ ...previous, [field.name]: event.target.value }))} />}</label>)}</div><p className={s.muted}>{tr(serviceOnly && credentialsSaved ? "credentialSavedHint" : "credentialHint")}</p></details>}
+        <p className={s.status} role="status">{tr(serviceOnly ? serviceStatus : `accountStates.${account?.state || "unknown"}`)}{account?.userName ? ` · ${account.userName}` : ""}</p>
         {account?.qrCode && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(account.qrCode) && account.qrCode.length < 350000 && <img src={account.qrCode} alt={tr("open")} width={192} height={192} />}
+        {id === "meituan-paotui" && account?.state === "authorizing" && authorizationQr && <img src={authorizationQr} alt={tr("meituanScan")} width={192} height={192} />}
+        {id === "meituan-paotui" && account?.state === "authorizing" && <p className={s.muted}>{tr("meituanAuthorizationHint")}</p>}
         {account?.verificationUrl && /^https:\/\//i.test(account.verificationUrl) && <a href={account.verificationUrl} target="_blank" rel="noreferrer">{tr("open")}</a>}
         {account?.userCode && <p><code>{account.userCode}</code></p>}
         {id === "alipay" && account?.state === "authorizing" && <label className={s.field}><span>{tr("code")}</span><input autoComplete="off" value={code} maxLength={32} disabled={busy} onChange={event => setCode(event.target.value)} /><button type="button" className={s.button} disabled={busy || !code.trim()} onClick={() => void accountAction("bind")}>{tr("bind")}</button></label>}
         {id === "doordash" && account?.state === "authorizing" && <label className={s.field}><span>{tr("doordashCallback")}</span><input type="password" autoComplete="off" spellCheck={false} value={code} maxLength={8192} disabled={busy} onChange={event => setCode(event.target.value)} /><button type="button" className={s.button} disabled={busy || !code.trim()} onClick={() => void accountAction("bind")}>{tr("bind")}</button></label>}
         {id === "quark-drive" && account?.state === "authorizing" && <label className={s.field}><span>{tr("quarkCode")}</span><input type="password" autoComplete="off" spellCheck={false} value={code} maxLength={4096} disabled={busy} onFocus={() => setCodeFocused(true)} onBlur={() => setCodeFocused(false)} onChange={event => setCode(event.target.value)} /><button type="button" className={s.button} disabled={busy || !code.trim()} onClick={() => void accountAction("bind")}>{tr("bind")}</button></label>}
         <div className={s.actions}>
-          {["doordash", "shop", "quark-drive", "rollinggo-hotel", "meituan-paotui", "alipay", "netease-music"].includes(id) && <button type="button" className={s.primary} disabled={busy} onClick={() => void accountAction("start")}>{t(account?.state === "ready" ? "mcpConnectors.flow.reconnect" : "mcpConnectors.flow.authorize")}</button>}
-          <button type="button" className={s.button} disabled={busy} onClick={() => void accountAction("status")}>{tr(serviceOnly ? "checkService" : "check")}</button>
-          {["doordash", "shop", "quark-drive", "rollinggo-hotel", "meituan-paotui", "alipay", "netease-music"].includes(id) && <button type="button" className={s.button} disabled={busy} onClick={() => void accountAction("logout")}>{tr("logout")}</button>}
-          <button type="button" className={s.button} disabled={busy} onClick={() => void toolSettings()}>{tr("toolSettings")}</button>
+          <button type="button" className={s.textButton} disabled={busy} onClick={() => void accountAction("status")}>{tr(serviceOnly ? "checkService" : "check")}</button>
+
         </div>
-      </>}
+      </section>}
       {showTools && server && <div className={s.embeddedManagement}><McpConnectorDialog embedded server={server} recommendation={recommendation} managed onClose={() => setShowTools(false)} onChanged={toolsChanged} /></div>}
       {notice && <p className={s.notice} role="status">{notice}</p>}{error && <p className={s.error} role="alert">{error}</p>}
-      <div className={s.actions}>
-        <button type="button" className={installed ? s.button : s.primary} disabled={busy || !data || !!model.error} onClick={() => void model.change(id, "install")}>{data?.canRemove ? tr("repair") : t("mcpConnectors.add")}</button>
+      <details className={s.management}><summary>{t("mcpConnectors.flow.advanced")}</summary>
+          {installed && ["doordash", "shop", "quark-drive", "rollinggo-hotel", "meituan-paotui", "alipay", "netease-music"].includes(id) && <button type="button" className={s.button} disabled={busy} onClick={() => void accountAction("logout")}>{tr("logout")}</button>}
+          {installed && <button type="button" className={s.button} disabled={busy} onClick={() => void toolSettings()}>{tr("toolSettings")}</button>}
+        {installed && <button type="button" className={s.button} disabled={busy || !data || !!model.error} onClick={() => void model.change(id, "install")}>{tr("repair")}</button>}
         {data?.canRemove && <button type="button" className={s.danger} disabled={busy} onClick={() => void (async () => { if (await confirm({ title: tr("removeTitle"), message: tr("removeConfirm"), confirmLabel: tr("remove") })) { await model.change(id, "remove"); setAccount(null); onChanged(); } })()}>{t("mcpConnectors.flow.remove")}</button>}
-        <button type="button" className={s.button} disabled={busy} onClick={onClose}>{tr("close")}</button>
-      </div>
+      </details>
+      <details className={s.management}><summary>{t("mcpConnectors.flow.help")}</summary>
+      {(installed || ["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(id)) && <p className={s.notice}>{mcpRecommendationText(definition.note, language)}</p>}
+      <a href={definition.docsUrl} target="_blank" rel="noreferrer">{tr("source")}</a>
+      {definition.accessUrl && <a href={definition.accessUrl} target="_blank" rel="noreferrer">{tr("requestAccess")}</a>}
+      <p className={s.muted}>{tr("version")} {data?.installedVersion || definition.version}{data?.canRemove && <> · {t("officialConnectors.skills", { count: data.skillCount })}</>}</p>
+      {!data?.canRemove && <p className={s.muted}>{t("mcpConnectors.flow.addHint")}</p>}
+      </details>
     </div>
   </Modal>;
 }

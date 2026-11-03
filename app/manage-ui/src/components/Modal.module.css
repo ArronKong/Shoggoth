@@ -138,6 +138,78 @@
   margin-right: auto;
 }
 
+/* Connector setup follows the compact detail / connection / footer layout.
+   The shared Dialog still owns focus, dismissal, scroll locking and motion. */
+.panel.connector {
+  width: 640px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 48px);
+  border: 1px solid var(--ui-hairline);
+  border-radius: 24px;
+  padding: 0;
+  overflow: hidden;
+}
+.connector .head { padding: 27px 28px 22px; gap: 14px; }
+.connector .titles { position: relative; flex: 1; min-height: 48px; padding-left: 62px; }
+.connector .title { font-size: 20px; font-weight: 600; line-height: 26px; letter-spacing: normal; }
+.connector .title > span { display: inline; }
+.connector .title > span > :first-child { position: absolute; left: 0; top: 0; width: 48px; height: 48px; }
+.connector .subtitle { font-size: 13px; line-height: 1.65; margin: 5px 0 0; color: var(--ui-text-2); word-break: normal; overflow-wrap: anywhere; }
+.connector .close { margin: 0; border-radius: 8px; }
+.connector .body { margin: 0; padding: 0 28px; min-height: 0; overscroll-behavior: contain; }
+.connector .foot { margin: 0; padding: 17px 28px; border-top: 1px solid var(--ui-hairline); justify-content: space-between; }
+@media (max-width: 480px) {
+  .panel.connector { max-height: calc(100dvh - 24px); border-radius: 20px; }
+  .connector .head { padding: 22px 18px 20px; gap: 10px; }
+  .connector .titles { padding-left: 57px; }
+  .connector .title { font-size: 18px; line-height: 25px; }
+  .connector .body { padding: 0 18px; }
+  .connector .foot { padding: 16px 18px; }
+}
+
+/* 运行结果弹窗（设计稿 246:1193；出错 426:1071）：圆角 24、品牌黄→米白竖向渐变，
+   出错换警示红→白。标题顶距 24、左右下 40；标题行 36 高，32 的图标盒下移 2 居中，
+   盒间距 8，关闭键盒子距右边 32（-8 外拉）。深色只保留品牌色的淡染，终点落回表面色。 */
+.panel.report {
+  border-radius: 24px;
+  padding: 24px 40px 40px;
+  background: linear-gradient(180deg,
+    light-dark(#ffde59, color-mix(in srgb, #ffde59 26%, #1f1f23)),
+    light-dark(#fffcf2, #1f1f23));
+}
+.panel.report[data-tone="error"] {
+  background: linear-gradient(180deg,
+    light-dark(#ff6e6e, color-mix(in srgb, #ff6e6e 30%, #1f1f23)),
+    light-dark(#ffffff, #1f1f23));
+}
+.report .title {
+  font-size: 24px;
+  line-height: 36px;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  margin: 2px 0 0 auto;
+}
+.report .head { gap: 8px; }
+.report .titles { margin-right: 8px; }
+.report .close {
+  margin: 2px -8px 0 0;
+  display: inline-grid;
+  place-items: center;
+}
+.report .close:hover:not(:disabled),
+.report .actions > button:hover:not(:disabled) {
+  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.1));
+}
+.report .body {
+  margin-top: 24px;
+  gap: 24px;
+  overflow: hidden;
+  min-height: 0;
+}
+
 /* 详情结构（R370 自 Drawer.module.css 平移，视觉不变）：分节标题 + 标签/值行。 */
 .section {
   display: flex;

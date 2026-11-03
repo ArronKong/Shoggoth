@@ -591,21 +591,22 @@ class CodexRuntimeHandle {
     const turnInstructions = [plan.send.rules, delivery.unchangedBlocksNotice(plan.omitted), turn.run]
       .filter(Boolean).join("\n\n");
     const instructions = this.sessionInstructions.get(input.sessionId);
-    if (instructions && instructions.current !== instructions.applied) {
+    const policyUpdate = instructions && instructions.current !== instructions.applied ? instructions.current : undefined;
+    const items = [];
+    if (policyUpdate !== undefined) {
       // 0.149.0 accepts developerInstructions on resume but leaves model-visible
       // history unchanged. Append the current trusted policy before the next turn,
       // never while reattaching to a running turn. Failed injection blocks dispatch.
-      await this.host.threadInjectItems({ threadId: input.sessionId, items: [{
+      items.push({
         type: "message", role: "developer", content: [{ type: "input_text", text:
           "These are the current Shoggoth developer instructions. They supersede earlier Shoggoth developer instructions; retain the conversation history as context.\n\n"
-          + instructions.current }],
-      }] });
-      instructions.applied = instructions.current;
+          + policyUpdate }],
+      });
     }
     if (turnInstructions) {
-      await this.host.threadInjectItems({ threadId: input.sessionId, items: [{
+      items.push({
         type: "message", role: "developer", content: [{ type: "input_text", text: turnInstructions }],
-      }] });
+      });
     }
     let effort = input.thinkingLevel;
     // A null effort in turn/start means "keep the previous override". Resolve
@@ -634,9 +635,15 @@ class CodexRuntimeHandle {
       // native userMessage projection. Keep dynamic data at user authority;
       // never put memory/transcripts/catalog data into developer instructions.
       // Failed injection must block dispatch rather than omit frozen context.
-      await this.host.threadInjectItems({ threadId: input.sessionId, items: [{
+      items.push({
         type: "message", role: "user", content: [{ type: "input_text", text: plan.send.context }],
-      }] });
+      });
+    }
+    if (items.length) {
+      // One ordered request preserves the separate authority of policy, Run
+      // rules and untrusted context without a round trip for each block.
+      await this.host.threadInjectItems({ threadId: input.sessionId, items });
+      if (policyUpdate !== undefined) instructions.applied = policyUpdate;
     }
     const started = await this.host.turnStart({ ...definedProperties({
       threadId: input.sessionId,

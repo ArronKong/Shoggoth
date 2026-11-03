@@ -20,6 +20,8 @@ const calls = [];
 let config = { disabledBackends: ['hermes'] };
 let providers = [];
 let disconnectFailure = false;
+const windowEvents = new EventTarget();
+const documentEvents = Object.assign(new EventTarget(), { visibilityState: 'visible' });
 const provider = (enabled, loggedIn = true) => ({
   id: 'native-grok', name: 'Grok', flow: 'external', cliCommand: 'grok login', cliRunnable: true, docsUrl: '',
   disconnectHint: null, disconnectCommand: null, disconnectable: false,
@@ -60,7 +62,11 @@ function load(file) {
     return load(['.ts', '.tsx'].map((ext) => base + ext).find((candidate) => fs.existsSync(candidate)));
   };
   vm.runInNewContext(`(function(require, module, exports) { ${source}\n})(require, module, module.exports);`, {
-    require: localRequire, module, window: { setTimeout, clearTimeout },
+    require: localRequire, module,
+    window: { setTimeout, clearTimeout,
+      addEventListener: windowEvents.addEventListener.bind(windowEvents),
+      removeEventListener: windowEvents.removeEventListener.bind(windowEvents) },
+    document: documentEvents,
   }, { filename: file });
   return module.exports;
 }
@@ -99,6 +105,52 @@ assert.deepEqual(plain(calls.filter(([name]) => ['updateConfig', 'signOut', 'ter
   [['updateConfig', { disabledBackends: ['hermes'] }]], 'reconnecting needs no confirmation and signs nothing out');
 assert.ok(calls.some(([name, key]) => name === 'toast' && key === 'keys.oauthReconnected'));
 renderer.unmount();
+// Unverified is a status to recheck; it does not require starting another login.
+providers = [{ ...provider(true, false), status: { ...provider(true, false).status, verification: 'unverified' } }];
+await settle(() => { renderer = create(React.createElement(Card, { backend: 'shoggoth-unverified' })); });
+assert.ok(text(renderer.toJSON()).includes('keys.oauthCredentialUnverified'));
+const recheck = buttons().find(button => button.props.title === 'settings.retry');
+assert.ok(recheck, 'an unverified account offers a read-only recheck');
+assert.ok(buttons().some(button => button.props.title === 'keys.oauthLoginExternal'), 'explicit sign-in remains available');
+providers = [provider(true)];
+calls.length = 0;
+await settle(() => recheck.props.onClick());
+assert.ok(calls.some(([name]) => name === 'list'));
+assert.ok(text(renderer.toJSON()).includes('keys.oauthConnectedBadge'));
+assert.ok(!text(renderer.toJSON()).includes('keys.oauthCredentialUnverified'));
+assert.ok(!calls.some(([name]) => ['terminal', 'signOut', 'updateConfig'].includes(name)));
+await settle(() => renderer.unmount());
+
+// Returning immediately from a successful chat must read the account again,
+// including when the previous account snapshot is less than 30 seconds old.
+providers = [{ ...provider(true, false), status: { ...provider(true, false).status, verification: 'unverified' } }];
+calls.length = 0;
+await settle(() => { renderer = create(React.createElement(Card, { backend: 'shoggoth' })); });
+assert.ok(calls.some(([name]) => name === 'list'), 're-entry always refreshes the cached account status');
+assert.ok(text(renderer.toJSON()).includes('keys.oauthCredentialUnverified'));
+providers = [provider(true)];
+calls.length = 0;
+await settle(() => windowEvents.dispatchEvent(new Event('focus')));
+assert.equal(calls.filter(([name]) => name === 'list').length, 1);
+assert.ok(text(renderer.toJSON()).includes('keys.oauthConnectedBadge'));
+documentEvents.visibilityState = 'hidden';
+calls.length = 0;
+await settle(() => { windowEvents.dispatchEvent(new Event('focus')); documentEvents.dispatchEvent(new Event('visibilitychange')); });
+assert.equal(calls.filter(([name]) => name === 'list').length, 0, 'a hidden page does not probe account state');
+providers = [provider(true, false)];
+documentEvents.visibilityState = 'visible';
+await settle(() => { documentEvents.dispatchEvent(new Event('visibilitychange')); windowEvents.dispatchEvent(new Event('focus')); });
+assert.equal(calls.filter(([name]) => name === 'list').length, 1, 'visibility and focus share an in-flight recheck');
+assert.ok(!text(renderer.toJSON()).includes('keys.oauthConnectedBadge'), 'a confirmed sign-out replaces the old green status');
+await settle(() => renderer.unmount());
+calls.length = 0;
+await settle(() => { windowEvents.dispatchEvent(new Event('focus')); documentEvents.dispatchEvent(new Event('visibilitychange')); });
+assert.equal(calls.filter(([name]) => name === 'list').length, 0, 'unmount removes account refresh listeners');
+providers = [provider(true)];
+await settle(() => { renderer = create(React.createElement(Card, { backend: 'shoggoth' })); });
+assert.equal(calls.filter(([name]) => name === 'list').length, 1);
+assert.ok(text(renderer.toJSON()).includes('keys.oauthConnectedBadge'));
+await settle(() => renderer.unmount());
 // An incompatible CLI offers a read-only recheck instead of repeating login.
 providers = [{ ...provider(true, false), status: { ...provider(true, false).status,
   verification: 'incompatible', error: 'safe fixed message' } }];

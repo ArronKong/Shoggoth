@@ -8,6 +8,7 @@ const { GroupActivityProjection, validGroupActivity } = require("../app/agent-se
 const { GroupNativeExecutor } = require("../app/agent-service/group-native-executor");
 const { GroupChatStore } = require("../app/agent-service/group-chat-store");
 const { groupReplyMessages } = require("../app/group-reply-messages");
+const { ChatUiTextProjection } = require("../app/agent-service/chat-ui-text-projection");
 const binding = { groupId: "g", discussionId: "d", memberId: "m", opportunityId: "o", runId: "r", executionGeneration: "f:r" };
 const event = (seq, type, payload) => ({ seq, type, payload });
 
@@ -84,6 +85,62 @@ function fixture(t) {
     sync(messages) { return store.syncTurnMessages({ opportunityId, fence, runId: "run", messages }); },
     reopen() { store.close(); store = new GroupChatStore({ paths, now: () => clock }).open(); } };
 }
+
+test("native live text, tool-boundary receipts and transcript settlement publish each segment once", t => {
+  const f = fixture(t), buffer = new ChatUiTextProjection(), activity = new GroupActivityProjection({ ...binding, runId: "run" });
+  const transcript = [];
+  let seq = 0;
+  const observe = (type, payload) => {
+    activity.observeEvents([event(++seq, type, payload)], "stream");
+    f.sync(activity.replyMessages());
+  };
+  const text = (type, payload) => {
+    const projected = buffer.observe("run", type, payload);
+    if (type === "text") transcript.push({ id: `receipt:${seq}`, runId: "run", kind: "assistant", content: projected });
+    observe(type, projected);
+  };
+  const flush = id => buffer.flush("run", id, part => {
+    const content = { ...part, phase: "commentary" };
+    transcript.push({ id: `boundary:${id}`, runId: "run", kind: "assistant", content });
+    observe("text", content);
+    return content;
+  });
+  const first = "我来负责把稿子和 HTML 交付，先让各位领取板块。我先核对最近两天 AI 领域的事件。";
+  const second = "材料已够用：我先把可交付的 HTML 做出来。\n";
+  text("text.delta", { itemId: "part:one", delta: first });
+  const original = f.store.listMessages({ groupId: f.groupId, limit: 1 }).messages[0];
+  flush("search");
+  text("text.delta", { itemId: "part:two", delta: second });
+  flush("write");
+  // OpenCode ends by replaying all its original text parts. The projection has
+  // already sealed the first two, so their canonical text is empty here.
+  text("text", { itemId: "part:one", text: first, phase: "final_answer" });
+  text("text", { itemId: "part:two", text: second, phase: "final_answer" });
+  text("text", { itemId: "part:final", text: "已完成。", phase: "final_answer" });
+  const executor = new GroupNativeExecutor({ chatSessionStore: { getSession: () => ({ profileId: "p", id: "s" }) },
+    transcriptStore: { listEvents: () => transcript } });
+  f.store.completeTurn({ opportunityId: f.opportunityId, fence: f.fence, status: "completed", text: "已完成。",
+    replyMessages: executor.replyMessages({ id: "run", sourceId: "s", profileId: "p" }) });
+  f.reopen();
+  const rows = f.store.listMessages({ groupId: f.groupId, limit: 20 }).messages.filter(item => item.author.kind === "member");
+  assert.deepEqual(rows.map(item => item.body), [first, second, "已完成。"]);
+  assert.deepEqual([rows[0].id, rows[0].seq, rows[0].createdAt], [original.id, original.seq, original.createdAt]);
+});
+
+test("one native runtime item can contain several visible segments around tool boundaries", () => {
+  const buffer = new ChatUiTextProjection(), activity = new GroupActivityProjection(binding);
+  let seq = 0;
+  const project = (type, payload) => activity.observeEvents([event(++seq, type, buffer.observe("r", type, payload))], "stream");
+  const flush = id => buffer.flush("r", id, payload => {
+    activity.observeEvents([event(++seq, "text", { ...payload, phase: "commentary" })], "stream");
+    return payload;
+  });
+  project("text.delta", { itemId: "one-item", delta: "收到。" }); flush("first-tool");
+  project("text.delta", { itemId: "one-item", delta: "收到。" }); flush("second-tool");
+  project("text", { itemId: "one-item", text: "收到。收到。已完成。", phase: "final_answer" });
+  assert.deepEqual(activity.replyMessages().map(item => item.text), ["收到。", "收到。", "已完成。"]);
+  assert.equal(new Set(activity.replyMessages().map(item => item.id)).size, 3, "identical wording in distinct segments remains intentional");
+});
 
 test("each settled message has its own sequence and survives SQLite reopen and pagination", t => {
   const f = fixture(t), replyMessages = [{ id: "one", text: "先核对配置。", final: false }, { id: "two", text: "已完成。", final: true }];

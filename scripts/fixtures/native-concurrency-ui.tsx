@@ -96,8 +96,8 @@ void i18n.changeLanguage("zh-CN").then(() => {
       require(!document.body.textContent?.includes("private queue detail"), "unknown queue data stays private");
     }
     for (const [id, chinese, english] of [
-      ["context", "正在准备对话上下文", "Preparing conversation context"],
-      ["capabilities", "正在检查助理是否就绪", "Checking assistant readiness"],
+      ["context", "正在思考", "Thinking"],
+      ["capabilities", "正在思考", "Thinking"],
     ]) {
       await click(id);
       const label = lang === "chinese" ? chinese : english;
@@ -110,7 +110,7 @@ void i18n.changeLanguage("zh-CN").then(() => {
   await click("start");
   require(document.querySelectorAll("[data-testid=chat-run-wait][data-kind=starting]").length === 2, "connecting phase is visible in normal and immersive chat");
   require(document.querySelectorAll('[data-chat-process] [data-kind="starting"]').length === 2, "both chat surfaces put startup inside the shared activity timeline");
-  require(document.querySelector("[data-chat-process]")?.textContent?.includes("正在连接助理"), "connecting uses conversational copy");
+  require(document.querySelector("[data-chat-process]")?.textContent?.includes("正在思考"), "connecting uses the unified thinking copy");
   require(document.querySelector('.chat-bubble [data-kind="starting"]') === null && document.querySelector(".chat-bubble.is-streaming") === null, "startup does not create an empty reply bubble");
   require(!!document.querySelector('[data-chat-process] [data-live="1"] svg'), "connecting retains the activity waiting animation");
   await click("run");

@@ -29,6 +29,7 @@ function fixture() {
       switch (method) {
         case "agents.list": return { agents: [{ id: "main", workspace: state.workspace }] };
         case "sessions.create": return { ok: true, key: params.key, runStarted: false };
+        case "sessions.patch": return { key: params.key, entry: { permissionMode: params.permissionMode } };
         case "sessions.list": return { sessions: [{ key: SESSION, hasActiveRun: state.active }] };
         case "agent": return { runId: params.idempotencyKey, sessionKey: params.sessionKey, agentId: params.agentId, status: "accepted" };
         case "tasks.list": return { tasks: state.tasks };
@@ -128,6 +129,35 @@ test("prepare freezes the remote Agent workspace and deterministic session ident
   assert.deepEqual(state.calls.filter((call) => call.method === "sessions.create").map((call) => call.params.key), [first.sessionKey, first.sessionKey]);
   assert.equal(state.calls.find((call) => call.method === "sessions.create").params.idempotencyKey, "inspiration-session:execution-session-1");
   assert.equal(state.calls.some((call) => call.method === "agent"), false);
+  assert.equal(state.calls.some((call) => call.method === "sessions.patch"), false, "inspiration keeps its current permission defaults");
+});
+
+test("new and reused group sessions confirm Full access without changing Agent defaults or starting work", async () => {
+  const { state, backend } = fixture();
+  const adapter = new OpenClawInspirationAdapter({ backend, sessionPurpose: "group" });
+  const first = await adapter.prepare({ agentId: "main", sessionId: "new-group" });
+  state.overrides["sessions.list"] = () => ({ sessions: [{ key: first.sessionKey, agentId: "main", hasActiveRun: false }] });
+  await adapter.prepare({ agentId: "main", sessionKey: first.sessionKey });
+  assert.deepEqual(state.calls.filter(call => call.method === "sessions.patch").map(call => call.params),
+    [{ key: first.sessionKey, permissionMode: "full" }, { key: first.sessionKey, permissionMode: "full" }]);
+  assert.equal(state.calls.some(call => call.method === "agent" || call.method.startsWith("config.")), false);
+});
+
+test("group Full access requires admin scope and an exact confirmed session response", async t => {
+  for (const variant of ["scope", "unsupported", "ignored", "foreign", "transport"]) await t.test(variant, async () => {
+    const { state, backend } = fixture();
+    if (variant === "scope") backend._hasGatewayScope = scope => scope !== "operator.admin";
+    if (variant === "unsupported") backend.hasGatewayMethod = method => method !== "sessions.patch";
+    state.overrides["sessions.patch"] = params => {
+      if (variant === "transport") throw Error("offline");
+      return { key: variant === "foreign" ? "other-session" : params.key,
+        entry: { permissionMode: variant === "ignored" ? "workspace" : "full" } };
+    };
+    const adapter = new OpenClawInspirationAdapter({ backend, sessionPurpose: "group" });
+    await assert.rejects(adapter.prepare({ agentId: "main", sessionId: variant }));
+    assert.equal(state.calls.some(call => call.method === "agent"), false);
+    if (["scope", "unsupported"].includes(variant)) assert.equal(state.calls.some(call => call.method === "sessions.create"), false);
+  });
 });
 
 test("existing inspiration session is bound without creating or resetting it", async () => {
@@ -136,6 +166,59 @@ test("existing inspiration session is bound without creating or resetting it", a
   assert.equal(result.sessionKey, SESSION);
   assert.equal(state.calls.some((call) => call.method === "sessions.create"), false);
   await assert.rejects(adapter.prepare({ agentId: "main", sessionKey: "agent:other:main" }), { code: "OPENCLAW_EXECUTION_IDENTITY_INVALID" });
+});
+
+test("an archived group session is rejected during preparation before any execution or model mutation", async t => {
+  const { backend, state } = fixture();
+  const adapter = new OpenClawInspirationAdapter({ backend, now: () => state.now, sessionPurpose: "group" });
+  t.after(() => adapter.reset());
+  const sessionKey = SESSION.replace(":inspiration-", ":group-");
+  backend.applyGroupSessionModel = async () => { throw new Error("must not mutate an archived session"); };
+  state.overrides["sessions.list"] = params => {
+    assert.equal(params.archived, "all"); assert.equal(params.search, sessionKey); assert.equal(params.agentId, "main");
+    return { sessions: [{ key: sessionKey, agentId: "main", archived: true, hasActiveRun: false }] };
+  };
+  await assert.rejects(adapter.prepare({ agentId: "main", sessionKey, workspace: state.workspace, modelSelection: null }),
+    { code: "OPENCLAW_GROUP_SESSION_ARCHIVED" });
+  assert.equal(state.calls.some(call => ["agent", "sessions.create", "sessions.patch", "chat.abort"].includes(call.method)), false);
+});
+
+test("partial, ambiguous and foreign session listings cannot authorize replacing a group session", async t => {
+  for (const kind of ["truncated", "hasMore", "nextCursor", "duplicate", "foreign", "active"]) await t.test(kind, async () => {
+    const { backend, state } = fixture();
+    const adapter = new OpenClawInspirationAdapter({ backend, now: () => state.now, sessionPurpose: "group" });
+    const sessionKey = SESSION.replace(":inspiration-", ":group-");
+    const row = { key: sessionKey, agentId: kind === "foreign" ? "other" : "main", archived: true, hasActiveRun: kind === "active" };
+    state.overrides["sessions.list"] = () => ({ sessions: kind === "duplicate" ? [row, row] : [row],
+      ...(kind === "truncated" ? { truncated: true } : kind === "hasMore" ? { hasMore: true }
+        : kind === "nextCursor" ? { nextCursor: "more" } : {}) });
+    await assert.rejects(adapter.prepare({ agentId: "main", sessionKey, workspace: state.workspace }),
+      { code: "OPENCLAW_GROUP_PERMISSION_UNCONFIRMED" });
+    assert.equal(state.calls.some(call => ["agent", "sessions.create", "sessions.patch", "chat.abort"].includes(call.method)), false,
+      "ambiguous or active sessions cannot receive a permission change");
+  });
+});
+
+test("a definite archived-session startup rejection is terminal, while transport or foreign errors remain uncertain", async t => {
+  for (const kind of ["archived", "transport", "foreign", "timeout"]) await t.test(kind, async t => {
+    const { backend, state } = fixture();
+    const adapter = new OpenClawInspirationAdapter({ backend, now: () => state.now, sessionPurpose: "group" });
+    t.after(() => adapter.reset());
+    const target = { ...TARGET, sessionKey: SESSION.replace(":inspiration-", ":group-") };
+    const message = `Session "${kind === "foreign" ? "another-session" : target.sessionKey}" is archived. Restore it before starting new work.`;
+    state.overrides.agent = () => { throw Object.assign(new Error(kind === "timeout" ? "timeout after acceptance" : message),
+      kind === "transport" || kind === "timeout" ? {} : { code: "INVALID_REQUEST" }); };
+    const result = await adapter.start({ ...target, prompt: "核对新闻", workspace: state.workspace });
+    assert.equal(result.status, kind === "archived" ? "failed" : "unknown");
+    assert.equal(result.errorCode, kind === "archived" ? "OPENCLAW_SESSION_ARCHIVED" : "OPENCLAW_START_UNCERTAIN");
+    if (kind === "archived") {
+      state.active = true;
+      assert.deepEqual(await adapter.inspect(target), result, "session activity cannot revive a rejected run");
+      assert.equal((await adapter.cancel(target)).status, "failed");
+      assert.equal(state.calls.some(call => call.method === "chat.abort"), false, "there is no accepted run to abort");
+    }
+    assert.equal(state.calls.filter(call => call.method === "agent").length, 1, "never replay an uncertain start");
+  });
 });
 
 test("unsupported methods, scopes, workspace overrides, and creation identity changes fail before start", async () => {
@@ -612,6 +695,7 @@ test("without the ledger cancellation is chat.abort plus verified inactivity, an
 
 test("a group-purpose adapter runs group sessions end to end; the two purposes never accept each other's sessions", async () => {
   const { backend, state } = waitFixture();
+  state.methods.push("sessions.patch");
   const group = new OpenClawInspirationAdapter({ backend, now: () => state.now, sessionPurpose: "group" });
   const prepared = await group.prepare({ agentId: "main", sessionId: "group-opportunity-1", workspace: state.workspace });
   assert.match(prepared.sessionKey, /^agent:main:dashboard:group-[a-f0-9]{64}$/u);

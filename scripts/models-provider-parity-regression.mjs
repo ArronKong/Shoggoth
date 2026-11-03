@@ -31,7 +31,7 @@ for (const candidate of playwrightCandidates) {
 }
 assert.ok(chromium, "找不到 Playwright；请先安装项目测试依赖");
 const requested = new Set(process.argv.slice(2));
-const knownFlags = new Set(["--provider", "--tool-keys", "--managed-provider", "--managed-recovery", "--managed-native"]);
+const knownFlags = new Set(["--provider", "--tool-keys", "--managed-provider", "--managed-recovery", "--managed-native", "--native-config"]);
 const unknownFlags = [...requested].filter((flag) => !knownFlags.has(flag));
 
 if (unknownFlags.length > 0) {
@@ -44,6 +44,7 @@ const runToolKeys = requested.size === 0 || requested.has("--tool-keys");
 const runManagedProvider = requested.size === 0 || requested.has("--managed-provider");
 const runManagedRecovery = requested.size === 0 || requested.has("--managed-recovery");
 const runManagedNative = requested.size === 0 || requested.has("--managed-native");
+const runNativeConfig = requested.size === 0 || requested.has("--native-config");
 const REDACTED = "••••sentinel";
 const REVEALED_SENTINEL = "revealed-sentinel";
 const INPUT_SENTINEL = "input-sentinel";
@@ -142,6 +143,7 @@ function createState(backend) {
   return {
     backend,
     managed: false,
+    nativeConfig: false,
     pendingOperations: [],
     pendingIdentityResponse: null,
     pendingIdentityHttpStatus: 200,
@@ -218,7 +220,7 @@ function providerDirectory(state) {
         getKeyUrl: null,
         inConfig: state.provider.inConfig,
         api: state.managed && state.provider.api === null ? null : "openai-responses",
-        ...(state.managed ? { writeMode: "managed-model-change" } : {}),
+        ...(state.managed ? { writeMode: state.nativeConfig ? "native-config" : "managed-model-change" } : {}),
         baseUrl: { value: state.provider.baseUrl,
           defaultValue: state.managed && state.provider.noDefaultEndpoint ? null : BASE_URL,
           editable: !state.managed || !state.provider.noModel && state.provider.api !== null },
@@ -246,7 +248,7 @@ function providerDirectory(state) {
           logoKey: "auth-only-custom",
           getKeyUrl: null,
           inConfig: false,
-          ...(state.managed ? { writeMode: "managed-model-change" } : {}),
+          ...(state.managed ? { writeMode: state.nativeConfig ? "native-config" : "managed-model-change" } : {}),
           api: null,
           baseUrl: { value: null, defaultValue: null, editable: false },
           key: { configured: true, clearable: !state.managed, source: "auth-profile", redacted: REDACTED,
@@ -264,7 +266,7 @@ function providerDirectory(state) {
           logoKey: "manual-no-url",
           getKeyUrl: null,
           inConfig: true,
-          ...(state.managed ? { writeMode: "managed-model-change" } : {}),
+          ...(state.managed ? { writeMode: state.nativeConfig ? "native-config" : "managed-model-change" } : {}),
           api: "openai-completions",
           baseUrl: { value: null, defaultValue: null, editable: true },
           key: { configured: false, clearable: false, source: null, redacted: null,
@@ -392,6 +394,7 @@ async function installApiFake(page, state) {
                 providerDirectory: true,
                 manageAuthProfiles: !state.managed,
                 renameProvider: false, batch: !state.managed,
+                ...(state.nativeConfig ? { mutationSemantics: "native-config" } : {}),
                 blockers: [],
               },
       });
@@ -462,9 +465,9 @@ async function installApiFake(page, state) {
       }
       if (method === "POST" && state.backend === "openclaw") {
         const body = request.postDataJSON();
-        if (state.managed && state.nativeRows) assert.equal(state.nativeRows.some(row => row.operationId === body.operationId
+        if (state.managed && !state.nativeConfig && state.nativeRows) assert.equal(state.nativeRows.some(row => row.operationId === body.operationId
           && row.backendId === rawBackend && row.providerKey === body.providerKey), true, "native retain must precede managed model HTTP");
-        if (state.managed && state.nativeRows) assert.equal(state.nativeRows.some(row => row.operationId === body.operationId
+        if (state.managed && !state.nativeConfig && state.nativeRows) assert.equal(state.nativeRows.some(row => row.operationId === body.operationId
         && row.backendId === rawBackend && row.providerKey === body.providerKey), true, "native retain must precede managed model HTTP");
       if (state.managed) state.modelRequests.push({ method, operationId: body.operationId,
           endpoint: Boolean(body.baseUrl), key: Boolean(body.apiKey), clear: body.clearApiKey === true });
@@ -505,7 +508,7 @@ async function installApiFake(page, state) {
       }
       if (method !== "PUT") return rejectUnexpected(["GET", "POST", "PUT"]);
       const body = request.postDataJSON();
-      if (state.managed && state.nativeRows) assert.equal(state.nativeRows.some(row => row.operationId === body.operationId
+      if (state.managed && !state.nativeConfig && state.nativeRows) assert.equal(state.nativeRows.some(row => row.operationId === body.operationId
         && row.backendId === rawBackend && row.providerKey === body.providerKey), true, "native retain must precede managed model HTTP");
       if (state.managed) state.modelRequests.push({ method, operationId: body.operationId,
         endpoint: Boolean(body.baseUrl), key: Boolean(body.apiKey), clear: body.clearApiKey === true });
@@ -838,6 +841,7 @@ async function createHarness(browser, baseUrl, backend, options = {}) {
   page.setDefaultTimeout(7_000);
   const state = options.state ?? createState(backend);
   state.managed = options.managed === true;
+  state.nativeConfig = options.nativeConfig === true;
   Object.assign(state.provider, options.provider ?? {});
   if (Object.hasOwn(options, "nextResult")) state.nextResult = options.nextResult;
   Object.assign(state, options.stateOverrides ?? {});
@@ -864,6 +868,7 @@ async function createHarness(browser, baseUrl, backend, options = {}) {
   });
   await installNativeRecoveryFixture(page, state, options.nativeMode ?? "normal");
   await installApiFake(page, state);
+  if (options.initScript) await page.addInitScript(options.initScript);
   await page.goto(`${baseUrl}/#/models`, { waitUntil: "domcontentloaded" });
 
   if (!options.skipProviderReady) {
@@ -1676,6 +1681,85 @@ async function managedRecoveryScenario(browser, baseUrl) {
   console.log("PASS real loopback HTTP rejects a mismatched recovery ACK; new context retains original intent and only GET confirms terminal");
 }
 
+async function nativeConfigScenario(browser, baseUrl) {
+  // native-config follows the official Control UI: writes are neither recorded nor locked in the Renderer.
+  const STORE = "shoggoth.model-operation-recovery.v1";
+  const earlier = "provider:10000000-0000-4000-8000-0000000000aa";
+  const earlierRow = { version: 1, backendId: "openclaw", providerKey: "openrouter", operationId: earlier, status: "unconfirmed" };
+  const receipt = (status = "applied", terminal = true) => ({ version: 1, backendId: "openclaw", operationId: earlier,
+    providerKey: "openrouter", status, stage: terminal ? "commit" : "observation", terminal });
+  const card = page => page.locator("[data-model-operation-recovery]");
+  const secretButton = page => page.locator("[data-provider-secret] button").first();
+  const enterKey = async page => {
+    const secret = page.locator("[data-provider-secret]").first();
+    await secret.locator("button").first().click();
+    await secret.locator("input").fill(INPUT_SENTINEL);
+    await secret.locator("input").press("Enter");
+  };
+  const storedRows = page => page.evaluate(key => JSON.parse(localStorage.getItem(key) ?? '{"operations":[]}').operations.length, STORE);
+  const watchCard = () => {
+    window.__recoveryCardSeen = false;
+    new MutationObserver(() => {
+      if (document.querySelector("[data-model-operation-recovery]")) window.__recoveryCardSeen = true;
+    }).observe(document, { childList: true, subtree: true });
+  };
+  const withNativeConfig = async (options, run) => {
+    const harness = await createHarness(browser, baseUrl, "openclaw", { managed: true, nativeConfig: true, initScript: watchCard, ...options });
+    try { await run(harness); assertHarnessClean(harness); }
+    finally { await harness.context.close(); }
+  };
+
+  await withNativeConfig({ provider: { inConfig: true, keyConfigured: false }, nextResult: { status: "applied", lostAck: true } },
+    async ({ page, state }) => {
+      await enterKey(page);
+      await waitFor(() => state.modelRequests.length === 1, "native key write dispatched");
+      await waitFor(async () => await secretButton(page).isEnabled(), "lost native ACK settles without a lock");
+      assert.equal(await card(page).count(), 0);
+      assert.equal(await page.locator("[data-managed-provider-operation]").count(), 0);
+      assert.equal(callCount(state, "native-model-retain"), 0, "native-config never records an operation");
+      assert.equal(state.nativeRows.length, 0); assert.equal(await storedRows(page), 0);
+      state.nextResult = { status: "applied" }; state.provider.keyConfigured = false;
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.locator("span").filter({ hasText: /^OpenRouter$/ }).first().waitFor();
+      await enterKey(page);
+      await page.getByText("OpenRouter 已保存", { exact: true }).waitFor();
+      assert.equal(state.modelRequests.length, 2, "the user can save again, like the official UI");
+      assert.notEqual(state.modelRequests[0].operationId, state.modelRequests[1].operationId);
+      assert.equal(await page.evaluate(() => window.__recoveryCardSeen), false);
+    });
+  console.log("PASS native-config lost ACK shows no recovery card or lock; a later save is allowed");
+
+  await withNativeConfig({ stateOverrides: { nativeRows: [earlierRow], operationResponse: receipt() } }, async ({ page, state }) => {
+    await waitFor(() => state.nativeRows.length === 0, "earlier row acknowledged by a read-only check");
+    assert.equal(callCount(state, "observe-managed-provider"), 1);
+    assert.equal(callCount(state, "recover-original-model"), 0);
+    assert.equal(state.modelRequests.length, 0);
+    await waitFor(async () => await storedRows(page) === 0, "cache follows Main");
+    assert.equal(await secretButton(page).isEnabled(), true);
+    assert.equal(await page.evaluate(() => window.__recoveryCardSeen), false, "a settled earlier row never flashes the card");
+  });
+  console.log("PASS native-config settles an earlier terminal row silently on open");
+
+  await withNativeConfig({ stateOverrides: { nativeRows: [earlierRow] } }, async ({ page, state }) => {
+    const row = page.locator("[data-model-recovery-operation]").first();
+    await row.waitFor(); assert.match(await row.innerText(), new RegExp(earlier));
+    assert.equal(callCount(state, "observe-managed-provider"), 1);
+    assert.equal(await page.locator("[data-model-recovery-unknown]").count(), 0);
+    assert.equal(await secretButton(page).isEnabled(), true, "an unresolved row never locks native-config writes");
+  });
+  console.log("PASS native-config keeps an unresolved earlier row visible without locking writes");
+
+  await withNativeConfig({ stateOverrides: { pendingOperations: [{ operationId: earlier, backendId: "openclaw", providerKey: "openrouter",
+    kind: "update-provider", status: "partial", stage: "commit", source: null, target: null }] } }, async ({ page, state }) => {
+    const row = page.locator("[data-model-recovery-operation]").first();
+    await row.waitFor();
+    await row.getByRole("button", { name: "放弃此操作", exact: true }).waitFor();
+    assert.equal(callCount(state, "observe-managed-provider"), 0, "server-pending rows are not auto-checked");
+    assert.equal(await secretButton(page).isEnabled(), true);
+  });
+  console.log("PASS native-config shows a server-pending operation with its abandon action and no Renderer lock");
+}
+
 async function managedNativeScenario(browser, baseUrl) {
   const STORE = "shoggoth.model-operation-recovery.v1", original = "provider:native-original";
   const nativeRow = (id = original, status = "cleanup_pending", code) => ({ version: 1, backendId: "openclaw",
@@ -2136,6 +2220,10 @@ try {
     try { await managedNativeScenario(browser, baseUrl); }
     catch (error) { failures.push(`managed-native: ${formatError(error)}`); }
   }
+  if (runNativeConfig) {
+    try { await nativeConfigScenario(browser, baseUrl); }
+    catch (error) { failures.push(`native-config: ${formatError(error)}`); }
+  }
   if (runToolKeys) {
     try {
       await toolKeysScenario(browser, baseUrl);
@@ -2170,6 +2258,6 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`- ${failure}`);
   process.exitCode = 1;
 } else {
-  const scenarios = [runProvider && "provider", runManagedProvider && "managed-provider", runManagedRecovery && "managed-recovery", runManagedNative && "managed-native", runToolKeys && "tool-keys"].filter(Boolean);
+  const scenarios = [runProvider && "provider", runManagedProvider && "managed-provider", runManagedRecovery && "managed-recovery", runManagedNative && "managed-native", runNativeConfig && "native-config", runToolKeys && "tool-keys"].filter(Boolean);
   console.log(`models provider parity regression: PASS (${scenarios.join(", ")})`);
 }

@@ -295,7 +295,10 @@ export function createOpenClawEndpointController(
   ): Promise<EndpointMutationStep> => {
     const previous = plan.state.steps.find((step) => step.operationId === operationId);
     if (previous?.status === "applied") return previous;
-    const monitored = getModelOperationRecoverySnapshot(backend).required || plan.singleModelMutations || plan.configurationDraft;
+    // native-config drafts follow the official UI: no Renderer record or lock; the server
+    // journal (same operationId) and config hash keep a retry safe.
+    const monitored = !plan.configurationDraft
+      && (getModelOperationRecoverySnapshot(backend).required || plan.singleModelMutations);
     const providerKey = plan.source && operationId.endsWith(":provider") ? plan.source.id : plan.target.id!;
     const original = retainedProviderModelOperation(backend, providerKey);
     if (monitored && (plan.singleModelMutations || plan.configurationDraft) && (previous || original?.operationId === operationId)) {
@@ -316,16 +319,17 @@ export function createOpenClawEndpointController(
         receipt = await dependencies.getModelChangeOperation?.(backend, operationId, providerKey) ?? null;
       } catch { receipt = null; }
       if (receipt?.terminal) {
-        const acknowledged = await confirmModelOperationTerminal(receipt);
+        const acknowledged = monitored ? await confirmModelOperationTerminal(receipt) : true;
         serverRejected = acknowledged && receipt.status === "failed";
         return acknowledged;
       }
+      if (!monitored) return true;
       const status = receipt && receipt.status !== "not_found" ? receipt.status : fallbackStatus;
       return retainModelOperation({ version: 1, backendId: backend, providerKey, operationId, status });
     };
     try {
       const result = await request();
-      if (monitored && (plan.singleModelMutations || plan.configurationDraft) && (result.receiptIdentityVerified !== true || result.operationId !== operationId
+      if ((plan.singleModelMutations || plan.configurationDraft) && (result.receiptIdentityVerified !== true || result.operationId !== operationId
         || !["applied", "failed", "compensated", "in_progress", "partial", "blocked", "needs_secret", "cleanup_pending"].includes(result.status)
         || typeof result.stage !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(result.stage)
         || result.code !== undefined && (typeof result.code !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(result.code))
@@ -352,7 +356,7 @@ export function createOpenClawEndpointController(
     } catch (error) {
       // HTTP 错误说明服务端已处理并拒绝：核对原操作后解锁。journal_* 是受理后的
       // 锁/记录故障，结论仍需恢复区确认，保持锁定。
-      if (monitored && error instanceof ApiError && error.status > 0
+      if ((monitored || plan.configurationDraft) && error instanceof ApiError && error.status > 0
         && !String(error.code || "").startsWith("journal_")) {
         await settleWithServer("unconfirmed").catch(() => false);
       }

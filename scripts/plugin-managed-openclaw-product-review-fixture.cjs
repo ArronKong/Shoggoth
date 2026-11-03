@@ -77,7 +77,7 @@ async function run() {
     const end=text.indexOf("\n// Capabilities the loopback REST plane",start);
     assert(start>=0&&end>start,"actual applyConfigChange source boundary changed");
     const wait=deferred(); let current={disabledBackends:[]}, prepareCalls=0;
-    const context={ configApplyQueue:Promise.resolve(), configStore:{read:()=>current}, appliedConfig:{disabledBackends:[]}, nativeTheme:{},
+    const context={ configApplyQueue:Promise.resolve(), configStore:{read:()=>current}, appliedConfig:{disabledBackends:[]}, nativeTheme:{}, appIconController:null,
       connectionFieldsChanged:(prev,next)=>({gateway:false,hermes:false,backends:JSON.stringify(prev.disabledBackends)!==JSON.stringify(next.disabledBackends)}),
       appBackendRegistry:{backends:new Map([["openclaw",{getBackendDescriptor:()=>({disconnectable:true})}]]), start:async()=>{}, keepsRunningWhenDisconnected:()=>false, notifyConnectionsChanged(){}},
       managedOpenClawProductHost:{isManaged:()=>true,suspend:()=>wait.promise,prepare:()=>{prepareCalls++;}},

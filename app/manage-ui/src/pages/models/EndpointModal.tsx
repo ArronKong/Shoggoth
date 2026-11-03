@@ -281,7 +281,7 @@ export default function EndpointModal({
     && mutationOutcome?.recovery?.retryable !== false
     && Boolean(controller.retry)
     && (!recoveryNeedsSecret || Boolean(apiKey.trim()));
-  const pendingOriginal = formalOperations && (!modelRecovery.storageVerified || modelRecovery.required
+  const pendingOriginal = formalOperations && !modelRecovery.advisory && (!modelRecovery.storageVerified || modelRecovery.required
     && (modelRecovery.journal !== "ready"
       || modelRecovery.operations.some((row) => row.providerKey === providerId || row.providerKey === endpoint?.id)));
   const canSave = Boolean(

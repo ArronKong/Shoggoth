@@ -43,6 +43,8 @@ state.fetch=async(url:any,init:any={})=>{
  if(failNextRead&&parsed.pathname.includes('/detail')){failNextRead=false;return new Response('{}',{status:503})}
  if(parsed.pathname.includes('/detail')){if(delayDetail){const deferred=delayDetail;delayDetail=null;return new Promise(resolve=>deferred(resolve))}return new Response(JSON.stringify(views[groupId]))}
  if(parsed.pathname.includes('/messages')){const after=Number(parsed.searchParams.get('afterSeq')||0);return new Response(JSON.stringify({messages:messages[groupId].filter((m:any)=>m.seq>after),hasMore:false}))}
+ if(parsed.pathname.endsWith('/members/role-history'))return new Response(JSON.stringify({snapshots:[],hasMore:false,nextCursor:null}));
+ if(parsed.pathname.endsWith('/members/role'))return new Response(JSON.stringify({ok:true,text:'Isolated fixture role',disclosure:'verbatim',revisionId:'fixture-role',nextCursor:null}));
  if(parsed.pathname.includes('/status'))return new Response(JSON.stringify({backends:[]}));
  return new Response('{}');
 };
@@ -50,10 +52,19 @@ await i18n.changeLanguage(language);document.documentElement.setAttribute('data-
 const mount=(id:string)=>root.render(<UiProvider><GroupChatPanel key={id} groupId={id} onArchived={()=>{}}/></UiProvider>);
 const textarea=()=>document.querySelector('textarea')as HTMLTextAreaElement;
 const type=async(text:string)=>{const el=textarea();Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(el,text);el.dispatchEvent(new Event('input',{bubbles:true}));await pause()};
-const send=()=>{const button=document.querySelector('.chat-send') as HTMLButtonElement;if(button.disabled)throw Error('send disabled');button.click()};
+const send=()=>{const button=document.querySelector('.chat-send:not(.chat-stop)') as HTMLButtonElement;if(button.disabled)throw Error('send disabled');button.click()};
 const queueFile=(name:string)=>{const input=document.querySelector('input[type=file]')as HTMLInputElement;Object.defineProperty(input,'files',{configurable:true,value:[new File(['data'],name,{type:'text/plain'})]});input.dispatchEvent(new Event('change',{bubbles:true}))};
 const addFile=async(name:string)=>{queueFile(name);await wait(()=>document.querySelector('[data-status=ready]'),'attachment ready')};
 const named=(key:string)=>Array.from(document.querySelectorAll('button')).find(el=>el.textContent===i18n.t(key))as HTMLButtonElement;
+const openSendRecords=async()=>{
+ (document.querySelector('[data-group-details-trigger]')as HTMLButtonElement).click();
+ await wait(()=>document.querySelector('[data-group-details-action=menu]'),'details actions');
+ (document.querySelector('[data-group-details-action=menu]')as HTMLButtonElement).click();
+ await wait(()=>document.querySelector('[data-group-details-action=send-records]'),'send records menu');
+ (document.querySelector('[data-group-details-action=send-records]')as HTMLButtonElement).click();
+ await wait(()=>document.querySelector('[data-group-send-records]'),'send records modal');
+};
+const closeSendRecords=async()=>{const dialog=document.querySelector('[data-group-send-records]')?.closest('[role=dialog]');(dialog?.querySelector('button[aria-label="'+i18n.t('common.close')+'"]')as HTMLButtonElement)?.click();await wait(()=>!document.querySelector('[data-group-send-records]'),'send records closed')};
 mount('g');
 state.runPanelFixture=async()=>{
  const checks:string[]=[];await wait(()=>textarea()&&!textarea().disabled,'panel ready');
@@ -64,15 +75,17 @@ state.runPanelFixture=async()=>{
  if(state.baseline)return{checks};
  // A failed request can only be retried by the explicit retry control with the same frozen operation.
  send();await wait(()=>sends.length===2,'B dispatched');equal(sends[1].input.replyTo,1,'B frozen quote');await type('new draft C');pending.shift().lost();
- await wait(()=>document.querySelector('[data-group-send-journal]'),'uncertain visible');
+ await wait(()=>lookups.some(row=>row.id===sends[1].input.clientMessageId),'lost receipt automatically queried');
+ equal(Boolean(document.querySelector('[data-chat-composer] [data-group-send-journal]')),false,'send recovery stays out of composer');
  const original=sends[1].input.clientMessageId;await pause(100);equal(sends.length,2,'failure does not replay');
  mount('h');await wait(()=>textarea()&&!textarea().disabled&&document.body.textContent?.includes('Group h'),'h ready');equal(textarea().value,'','group draft isolation');
  mount('g');await wait(()=>textarea()&&!textarea().disabled&&textarea().value==='new draft C'&&document.body.textContent?.includes('Group g'),'g restore');
  await wait(()=>lookups.some(row=>row.id===original),'original lookup on remount');await wait(()=>!document.querySelector('[data-send-id="'+original+'"]'),'accepted lost receipt reconciled');equal(sends.length,2,'remount never sends');equal(textarea().value,'new draft C','lookup keeps C');checks.push('remount lookup and no replay');
  // A fresh intentional send of the same text gets a fresh ID.
  await type('send A');send();await wait(()=>sends.length===3,'same text new send');equal(sends[2].input.clientMessageId===sends[0].input.clientMessageId,false,'fresh intent fresh id');pending.shift().error();
- await wait(()=>document.querySelector('[data-send-id="'+sends[2].input.clientMessageId+'"]')&&named('groupChat.sendJournal.retry')&&!named('groupChat.sendJournal.retry').disabled,'failed send row');
- named('groupChat.sendJournal.retry').click();await wait(()=>sends.length===4,'explicit retry');equal(sends[3].input.clientMessageId,sends[2].input.clientMessageId,'explicit retry same id');equal(sends[3].input.body,sends[2].input.body,'explicit retry original body');pending.shift().success();await wait(()=>textarea().value==='','retry consumes only exact draft');checks.push('explicit retry identity');
+ await wait(()=>lookups.some(row=>row.id===sends[2].input.clientMessageId),'failed send automatic lookup');await openSendRecords();
+ await wait(()=>document.querySelector('[data-send-id="'+sends[2].input.clientMessageId+'"]')&&named('groupChat.sendJournal.retry')&&!named('groupChat.sendJournal.retry').disabled,'failed send in records modal');
+ named('groupChat.sendJournal.retry').click();await wait(()=>sends.length===4,'explicit retry');equal(sends[3].input.clientMessageId,sends[2].input.clientMessageId,'explicit retry same id');equal(sends[3].input.body,sends[2].input.body,'explicit retry original body');pending.shift().success();await wait(()=>textarea().value==='','retry consumes only exact draft');await closeSendRecords();checks.push('explicit retry identity outside composer');
  // Idle panel: one event and a failed first read must recover without another event or work submission.
  const before=sends.length;const newMsg={id:'remote',groupId:'g',seq:50,threadId:'main',author:{kind:'user'},body:'idle recovered',mentions:{memberIds:[],broadcast:false,unresolved:[]},createdAt:1};messages.g.push(newMsg);views.g.group.lastSeq=50;
  failNextRead=true;emitGroupChanged('g');await wait(()=>document.body.textContent?.includes('idle recovered'),'idle sole notification recovered');equal(sends.length,before,'panel recovery read only');checks.push('idle failed read retries');
@@ -84,10 +97,18 @@ state.runPanelFixture=async()=>{
  delayUpload=true;queueFile('late-upload.txt');await wait(()=>resolveUpload&&document.querySelector('[data-status=uploading]'),'upload in old group');mount('g');await wait(()=>textarea()&&!textarea().disabled&&document.body.textContent?.includes('Group g'),'upload group switch');resolveUpload();await pause(120);equal(document.body.textContent?.includes('late-upload.txt'),false,'late upload cannot attach to another group');mount('h');await wait(()=>textarea()&&!textarea().disabled&&document.body.textContent?.includes('Group h'),'return h');equal(document.querySelector('[data-status=error]')?.textContent?.includes('late-upload.txt'),true,'interrupted upload restores explicit error metadata');(document.querySelector('.chat-att-x')as HTMLButtonElement).click();await pause();checks.push('late upload fence');
  await type('old authority input');send();await wait(()=>sends.length===5,'old authority send');views.h.ownerScope='replacement-owner';views.h.group.lastSeq=0;messages.h=[];emitGroupChanged('h');await wait(()=>textarea()&&!textarea().disabled&&textarea().value==='','new authority ready');await type('new authority draft');pending.shift().success();await pause(100);
  equal(textarea().value,'new authority draft','old authority ACK retains new authority input');equal(document.body.textContent?.includes('old authority input'),false,'old authority result excluded');equal(sends.length,5,'owner change never replays');checks.push('authority fence');
- await type('unconfirmed request F');send();await wait(()=>sends.length===6,'F submitted');pending.shift().error();await wait(()=>named('groupChat.sendJournal.new')&&!named('groupChat.sendJournal.new').disabled,'F explicit new control');await type('draft B survives new request');named('groupChat.sendJournal.new').click();await wait(()=>sends.length===7,'explicit new request');equal(sends[6].input.clientMessageId===sends[5].input.clientMessageId,false,'explicit new gets fresh identity');equal(sends[6].input.body,sends[5].input.body,'explicit new uses original text');pending.shift().error();await wait(()=>!named('groupChat.sendJournal.new').disabled,'fork completed uncertain');
+ await type('unconfirmed request F');send();await wait(()=>sends.length===6,'F submitted');pending.shift().error();await wait(()=>lookups.some(row=>row.id===sends[5].input.clientMessageId),'F automatically queried');await type('draft B survives new request');await openSendRecords();await wait(()=>named('groupChat.sendJournal.new')&&!named('groupChat.sendJournal.new').disabled,'F explicit new control');named('groupChat.sendJournal.new').click();await wait(()=>sends.length===7,'explicit new request');equal(sends[6].input.clientMessageId===sends[5].input.clientMessageId,false,'explicit new gets fresh identity');equal(sends[6].input.body,sends[5].input.body,'explicit new uses original text');pending.shift().error();await wait(()=>!named('groupChat.sendJournal.new').disabled,'fork completed uncertain');await closeSendRecords();
  mount('g');await wait(()=>textarea()&&!textarea().disabled&&document.body.textContent?.includes('Group g'),'fork leave');mount('h');await wait(()=>textarea()&&!textarea().disabled&&document.body.textContent?.includes('Group h'),'fork restore');equal(textarea().value,'draft B survives new request','detached fork must not replace current draft after remount');equal(sends.length,7,'remount never replays either fork');checks.push('explicit new ID preserves current draft on remount');
+ // An unresolved old receipt and a pending whole-group stop do not block a fresh message.
+ views.h.activeTurns=[{opportunityId:'still-stopping',memberId:'a',startedAt:1,stopping:true,recovery:{type:'execution',reason:'unconfirmed',since:1,cancelRequested:true}}];emitGroupChanged('h');
+ await wait(()=>document.querySelector('.chat-stop'),'pending old stop');await type('new message while old receipt is pending');
+ equal(Boolean(document.querySelector('[data-chat-composer] [role=status], [data-chat-composer] [role=alert], [data-chat-composer] [data-group-send-journal]')),false,'all operational composer statuses stay hidden');
+ const beforeFresh=sends.length;send();await wait(()=>sends.length===beforeFresh+1,'new message despite uncertain old receipt');equal(sends.at(-1).input.body,'new message while old receipt is pending','fresh draft submitted without a manual check');pending.shift().success();await wait(()=>textarea().value==='','fresh message accepted');
+ await pause(150);await type('draft while background receipt recovers');const postsBeforePoll=sends.length,checksBeforePoll=lookups.length;sends[5].result=result('h',sends[5].input);
+ await wait(()=>lookups.length>checksBeforePoll&&Array.from(document.querySelectorAll('.chat-group.is-user')).some(el=>el.textContent?.includes('unconfirmed request F')),'uncertain receipt recovers by timer without an event');
+ equal(sends.length,postsBeforePoll,'automatic recovery is lookup only');equal(textarea().value,'draft while background receipt recovers','automatic receipt keeps newer draft');checks.push('fresh sends during stop and uncertain receipt; automatic no-replay polling');
  equal(getComputedStyle(document.querySelector('.chat-header__row')!).display,'flex','actual shared Chat skin');equal(document.documentElement.scrollWidth<=innerWidth+1,true,'pending journal has no horizontal overflow');equal(matchMedia('(prefers-reduced-motion: reduce)').matches,innerWidth===390,'motion preference observed');
- state.openPendingDetails=()=>{for(const el of document.querySelectorAll('[data-send-id]'))(el as HTMLDetailsElement).open=true};
+ state.openPendingDetails=async()=>{await openSendRecords();for(const el of document.querySelectorAll('[data-send-id]'))(el as HTMLDetailsElement).open=true};
  return{passed:true,language,theme,reducedMotion:matchMedia('(prefers-reduced-motion: reduce)').matches,checks,sends:sends.length,lookups:lookups.length,reads:reads.length,writes:writes.length,providerCalls:0};
 };`;
 try {

@@ -106,6 +106,13 @@ const check=(cond:unknown,label:string)=>{if(!cond)throw Error(label);};
 
 const tick=()=>new Promise(r=>setTimeout(r,60));
 const waitNode=()=>visible<HTMLElement>('[data-testid="chat-run-wait"]');
+const checkThinkingCopy=(label:string)=>{
+  const node=waitNode()!;
+  const timer=node.querySelector('[aria-hidden="true"]')?.textContent||"";
+  check(node.textContent===i18n.t("chat.runWait.thinking")+timer,`unified thinking copy for ${label}`);
+  check(node.title===node.textContent,`thinking tooltip follows its displayed timer for ${label}`);
+  if(timer)check(i18n.language==="zh-CN"?/^ · \d+ (秒|分钟)$/.test(timer):/^ · \d+[sm]$/.test(timer),`localized thinking timer for ${label}`);
+};
 const loadingSelector='.chat-thread .chat-bubble.is-streaming [role="status"]';
 const checkLoadingBubble=()=>{
   if(immersive)return;
@@ -119,7 +126,7 @@ const checkLoadingBubble=()=>{
 const stage=async(value:string,statusKind="starting")=>{
   emit({state:"status",statusKind,stage:value});
   await wait(()=>waitNode()?.dataset.stage===value,`stage ${value}`);
-  check(waitNode()?.textContent?.includes(i18n.t(`chat.runWait.${value}`)),`translated ${value}`);
+  checkThinkingCopy(value);
   const process=waitNode()!.closest('[data-chat-process]');
   check(!!process && process.textContent?.includes(i18n.t("turnLab.processLabel")),"startup is outside the activity timeline");
   check(!waitNode()!.closest('.chat-bubble'),"startup appears in a reply bubble");
@@ -142,6 +149,7 @@ const send=async()=>{
   input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
   await wait(()=>requests.filter(r=>r.method==="chat.send").length>count,"actual send");
   await wait(()=>waitNode()?.dataset.stage==="preparing","immediate preparing before receipt");
+  check(waitNode()?.textContent===i18n.t("chat.runWait.thinking"),"immediate unified thinking copy");
   check(!!waitNode()!.closest('[data-chat-process]'),"activity timeline must appear before acceptance");
   checkLoadingBubble();
   check(!!releaseSend,"request must still await acceptance");releaseSend!();releaseSend=null;
@@ -159,7 +167,7 @@ const preview=async()=>{await send();if(!query.has("all-stages"))await stage("re
 Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests,preview},runStartupFeedbackFixture:async()=>{
   await send();
   check(!waitNode()?.textContent?.includes("0s")&&!waitNode()?.textContent?.includes("0 秒"),"hide immediate zero counter");
-  for(const value of ["context","compacting","connecting","restoring","opening"])await stage(value);
+  for(const value of ["context","capabilities","compacting","connecting","restoring","opening"])await stage(value);
   check(!document.querySelector('.chat-header .chat-status__label')?.textContent?.includes(i18n.t("chat.liveStatus.queued")),"context maintenance must not claim a queue");
   await stage("waiting","running");
   if(runtime==="codex"&&!immersive&&i18n.language==="zh-CN") {
@@ -178,7 +186,11 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
   emit({state:"status",statusKind:"running",stage:"waiting"});await tick();
   check(waitNode()?.dataset.stage==="waiting","empty thinking/plan erased startup");
   checkLoadingBubble();
-  if(runtime==="antigravity"&&!immersive){await new Promise(r=>setTimeout(r,3200));check(!!waitNode()?.querySelector('[aria-hidden="true"]'),"elapsed delay missing");}
+  if(runtime==="antigravity"&&!immersive){
+    await new Promise(r=>setTimeout(r,3200));
+    checkThinkingCopy("long startup");
+    check(!!waitNode()?.querySelector('[aria-hidden="true"]'),"startup retains its original elapsed counter");
+  }
   const sentBubble=()=>Array.from(document.querySelectorAll<HTMLElement>(".chat-thread .chat-group.is-user")).at(-1);
   const measure=()=>{const thread=document.querySelector<HTMLElement>(".chat-thread")!;return {top:sentBubble()?.getBoundingClientRect().top,
     scroll:thread?.scrollTop,height:thread?.scrollHeight,client:thread?.clientHeight,spacer:document.querySelector<HTMLElement>('.chat-stream-spacer')?.style.height,
@@ -213,8 +225,18 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
     await wait(()=>waitNode()?.dataset.stage==="preparing","restore activity timeline");
     checkLoadingBubble();
   }
+  const sendsBeforeQueue = requests.filter(r=>r.method==="chat.send").length;
   emit({state:"status",statusKind:"queued",reason:"RUNTIME_ACCOUNT_ACTIVE_LIMIT",queuedAt:Date.now()});
-  await wait(()=>waitNode()?.dataset.kind==="queued","queue shown");
+  await wait(()=>!waitNode(),"queue keeps its state internal");
+  await tick();
+  check(!document.querySelector('[data-testid="chat-queue-status"]'),"queued status must not leave an empty message row");
+  for(const label of [i18n.t("chat.liveStatus.queued"),i18n.t("chat.runWait.queued")]) {
+    check(!document.body.innerText.includes(label),"chat must not show a queued status");
+    check(!Array.from(document.querySelectorAll<HTMLElement>('[title],[aria-label]')).some(node=>node.title.includes(label)||node.getAttribute("aria-label")?.includes(label)),"queued status must not remain in tooltips or accessible labels");
+  }
+  check(requests.filter(r=>r.method==="chat.send").length===sendsBeforeQueue,"hiding the queue must not resend the message");
+  const stopWhileQueued=visible<HTMLButtonElement>('button[title="'+i18n.t("chat.stopGenerating")+'"]');
+  check(stopWhileQueued&&!stopWhileQueued.disabled,"a queued run remains stoppable");
   checkLoadingBubble();
   emit({state:"status",statusKind:"retrying",reason:"RUNTIME_RATE_LIMITED"});
   await wait(()=>waitNode()?.dataset.kind==="retrying","retry shown");
@@ -232,11 +254,13 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
     await finish("aborted");
   }
   await send();
+  emit({state:"status",statusKind:"queued",reason:"CHAT_SESSION_BUSY",queuedAt:Date.now()});
+  await wait(()=>!waitNode(),"queue remains hidden before stopping");
   await wait(()=>visible('button[title="'+i18n.t("chat.stopGenerating")+'"]'),"stop ready");
   visible<HTMLButtonElement>('button[title="'+i18n.t("chat.stopGenerating")+'"]')!.click();
   await wait(()=>requests.some(r=>r.method==="chat.abort"),"stop request");await finish("aborted");
   await send();await finish("error");
-  return {runtime,immersive,lang:i18n.language,width:innerWidth,immediate:true,insideActivity:true,replyLoadingBubble:!immersive,loadingWithoutTrajectory:!immersive,manualScrollPreserved:!immersive,stages:true,emptyEvents:true,firstOutput:true,lateStatus:true,queue:true,retry:true,blockingPrompts:true,stop:true,error:true};
+  return {runtime,immersive,lang:i18n.language,width:innerWidth,immediate:true,insideActivity:true,replyLoadingBubble:!immersive,loadingWithoutTrajectory:!immersive,manualScrollPreserved:!immersive,stages:true,emptyEvents:true,firstOutput:true,lateStatus:true,queueHidden:true,retry:true,blockingPrompts:true,stopQueued:true,error:true};
 }});
 // Preview-only comparison: reuse the real activity renderer without inventing
 // completed phases in the product's live event stream.

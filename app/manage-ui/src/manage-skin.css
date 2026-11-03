@@ -1128,9 +1128,7 @@ header.page-head {
   padding: 2px 4px 8px 2px;
 }
 
-/* 列数规则与 CLI 页 `.cli-grid` 逐字一致：auto-fill + minmax(340px,1fr)，宽屏自然
-   排 4 列，详情展开吃掉 401px 后自己减列。**别改回定列**——定列在详情展开时和 CLI
-   对不上（CLI 3 列时这里只有 2 列），用户点名以 CLI 为准。 */
+/* 自适应列数与 CLI 页一致，打开详情弹窗时保持网格宽度。 */
 .management-page.skills-page .skill-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -1149,7 +1147,7 @@ header.page-head {
   font-size: 13px;
 }
 
-/* 尺寸同 `.cli-card`：min-height 94 + 纯横向内边距 + 居中，不给竖向 padding。 */
+/* 名称单行、介绍预留两行，所有技能共用同一套卡片尺寸。 */
 .management-page.skills-page .skill-card {
   position: relative;
   display: flex;
@@ -1164,7 +1162,7 @@ header.page-head {
   text-align: left;
   cursor: pointer;
   background: var(--ui-surface-1);
-  border: 1px solid var(--ui-hairline);
+  border: 0;
   border-radius: 24px;
   box-shadow: var(--ui-shadow-card);
   transition: box-shadow 0.15s ease, transform 0.05s ease;
@@ -1197,14 +1195,7 @@ header.page-head {
 .management-page.skills-page .skill-card-top {
   display: flex;
   align-items: center;
-  gap: 8px;
   min-width: 0;
-}
-.management-page.skills-page .skill-card-tags {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
 }
 
 /* 第二行：说明占满，开关贴右下。开关自带点击拦截（stopPropagation）。 */
@@ -1223,48 +1214,9 @@ header.page-head {
   align-items: center;
 }
 
-/* 选中卡反白，与 CLI 页 .cli-card-selected 同一套语言。多带一个 .skill-card 提到
-   (0,4,0)：下面的 .skill-off 是同级 (0,3,0) 且源序更靠后，不加权重会让「选中 +
-   已停用」的卡片退回灰底黑字。 */
-.management-page.skills-page .skill-card.skill-card-selected,
-.management-page.skills-page .skill-card.skill-card-selected:hover {
-  background: light-dark(#000, #000);
-  border-color: transparent;
-}
-
-.management-page.skills-page .skill-card.skill-card-selected .skill-name {
-  color: #fff;
-}
-
-.management-page.skills-page .skill-card.skill-card-selected .skill-desc {
-  color: rgba(255, 255, 255, 0.6);
-}
-
-.management-page.skills-page .skill-card.skill-card-selected .skill-emoji {
-  background: rgba(255, 255, 255, 0.14);
-}
-
-/* emoji 收进圆角底片：几百张卡平铺时给每张一个稳定的视觉锚点（同 CLI 卡片的做法）。 */
-.management-page.skills-page .skill-emoji {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  box-sizing: border-box;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: var(--ui-surface-2);
-  font-size: 17px;
-  line-height: 1;
-}
-
-.management-page.skills-page .skill-off .skill-emoji {
-  background: color-mix(in srgb, var(--ui-text-1) 6%, var(--ui-surface-2));
-}
-
 .management-page.skills-page .skill-name {
   flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--ui-text-1);
   font-size: 16px;
@@ -1274,34 +1226,13 @@ header.page-head {
   white-space: nowrap;
 }
 
-/* 使用次数徽章：黄底=用过、灰底=没用过，与 CLI 卡片的 .cli-badge 同一套读法。 */
-.management-page.skills-page .skill-badge {
-  flex: 0 0 auto;
-  padding: 3px 9px;
-  border: 0;
-  border-radius: 999px;
-  color: #000;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.3;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.management-page.skills-page .skill-badge-used {
-  background: #ffef84;
-}
-
-.management-page.skills-page .skill-badge-never {
-  background: light-dark(rgba(0, 0, 0, 0.06), rgba(255, 255, 255, 0.14));
-  color: light-dark(#000, #ddd);
-}
-
 /* 卡内竖向间距由 .skill-card 的 gap 统一给，这里不再自带 margin。 */
 .management-page.skills-page .skill-desc {
   display: -webkit-box;
   flex: 1 1 auto;
   min-width: 0;
+  height: 36px;
+  margin: 0;
   overflow: hidden;
   color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
   font-size: 12px;
@@ -1312,166 +1243,13 @@ header.page-head {
 }
 
 .management-page.skills-page .skill-off {
-  background: var(--ui-surface-2);
+  background: var(--ui-surface-1);
   opacity: 1;
 }
 
 .management-page.skills-page .skill-off .skill-name,
 .management-page.skills-page .skill-off .skill-desc {
-  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-2));
-}
-
-/* ---- 右侧详情栏（对位 CLI 页的 .cli-drawer：常驻分栏，不是浮层）---- */
-.management-page.skills-page .skill-detail {
-  flex: 0 0 401px;
-  width: 401px;
-  align-self: stretch;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-  padding: 24px;
-  background: var(--ui-surface-1);
-  border: 1px solid var(--ui-hairline);
-  border-radius: 24px;
-  box-shadow: var(--ui-shadow-card);
-}
-
-.management-page.skills-page .skill-detail-head {
-  position: relative;
-  padding-right: 24px;
-}
-
-.management-page.skills-page .skill-detail-x {
-  position: absolute;
-  top: -2px;
-  right: -4px;
-  padding: 3px 6px;
-  border: 0;
-  background: transparent;
-  color: var(--ui-text-2, var(--muted));
-  font-size: 16px;
-  cursor: pointer;
-}
-
-.management-page.skills-page .skill-detail-x:hover {
-  color: var(--ui-text-1);
-}
-
-.management-page.skills-page .skill-detail-name {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 6px;
-  color: var(--ui-text-1);
-  font-size: 22px;
-  font-weight: 400;
-  line-height: 1.3;
-  word-break: break-word;
-}
-
-.management-page.skills-page .skill-detail-emoji {
-  flex: 0 0 auto;
-  font-size: 20px;
-  line-height: 1;
-}
-
-.management-page.skills-page .skill-detail-meta {
-  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
-  font-size: 12px;
-  line-height: 16px;
-}
-
-.management-page.skills-page .skill-sec {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-}
-
-.management-page.skills-page .skill-sec-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.management-page.skills-page .skill-sec h4 {
-  margin: 0;
-  color: var(--ui-text-1);
-  font-size: 14px;
-  font-weight: 400;
-}
-
-.management-page.skills-page .skill-sec-aside {
-  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.management-page.skills-page .skill-sec-desc {
-  margin: 0;
-  color: color-mix(in srgb, var(--ui-text-1) 55%, var(--ui-surface-1));
-  font-size: 12px;
-  line-height: 18px;
-  word-break: break-word;
-}
-
-/* per-agent 使用条：与 CLI 抽屉的 .cli-u-* 同构（头像 + 名字·次数 + 比例条）。 */
-.management-page.skills-page .skill-usage-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.management-page.skills-page .skill-u-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.management-page.skills-page .skill-u-avatar {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  overflow: hidden;
-  border-radius: 50%;
-  background: var(--ui-agent-avatar-bg);
-  color: var(--ui-agent-avatar-fg);
-  font-size: 10px;
-  font-weight: 600;
-}
-
-.management-page.skills-page .skill-u-label {
-  flex-shrink: 0;
-  max-width: 45%;
-  overflow: hidden;
-  color: var(--ui-text-1);
-  font-size: 12px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.management-page.skills-page .skill-u-bar {
-  flex: 1;
-  height: 4px;
-  overflow: hidden;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--ui-text-1) 15%, var(--ui-surface-1));
-}
-
-.management-page.skills-page .skill-u-bar > span {
-  display: block;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--ui-text-1);
+  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
 }
 
 /* 管理页 Switch 的开态覆盖 marker 外的旧品牌金。走 --ui-switch-on（R319 起=纯黑，
@@ -1518,23 +1296,6 @@ header.page-head {
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   }
 
-}
-
-/* 双栏放不下就堆成上下——断点与 `.cli-body` 同为 900px（别用 960/720 另立一套）。 */
-@media (max-width: 900px) {
-  .management-page.skills-page .skill-body {
-    flex-direction: column;
-  }
-
-  .management-page.skills-page .skill-detail {
-    /* A paged grid can contain 100 cards. Keep the opened detail ahead of it
-       on narrow windows, with its own bounded scroll area. */
-    order: -1;
-    flex: 0 0 auto;
-    width: 100%;
-    max-width: none;
-    max-height: min(75vh, 720px);
-  }
 }
 
 @media (max-width: 720px) {

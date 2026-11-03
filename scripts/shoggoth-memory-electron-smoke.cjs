@@ -158,7 +158,7 @@ async function renderer() {
   window.webContents.on("render-process-gone", (_event, details) => errors.push(JSON.stringify(details)));
   try {
     const routes = { dashboard: "总览", inspirations: "灵感", cron: "定时任务", tasks: "工作板|Kanban", agents: "AI 助理",
-      token: "Token 用量", skills: "技能", plugins: "插件", settings: "设置" };
+      token: "Token 用量", skills: "技能", plugins: "连接器", settings: "设置" };
     const evidence = [];
     for (const [route, title] of Object.entries(routes)) {
       await window.loadURL(`${option("--url")}#/${route}`);

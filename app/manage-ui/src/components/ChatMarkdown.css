@@ -1,0 +1,107 @@
+/* Shared Chat Markdown styles. Documents supply the same base type and tokens
+   outside .chat-shell; element formatting below stays identical on both surfaces. */
+.markdown-document {
+  min-width: 0;
+  color: var(--ui-text-1);
+  font-size: 15px;
+  line-height: 20px;
+  word-break: break-word;
+  --bg-muted: light-dark(#f4f4f5, #1a1d23);
+  --bg-accent: light-dark(#f7f7f7, #1a1d23);
+  --bg-hover: light-dark(rgba(247, 247, 247, 0.9), rgba(255, 255, 255, 0.06));
+  --chat-text: light-dark(#171717, #e4e6eb);
+  --muted: light-dark(#6b7280, #8b8f99);
+  --muted-strong: light-dark(#4b5563, #aeb2bb);
+  --muted-fg: light-dark(#8993a3, #6b7080);
+  --border: light-dark(#eceff3, #2a2d33);
+  --border-strong: light-dark(#dfe4ea, #2f3239);
+}
+.markdown-document code {
+  font-family: var(--mono);
+  background: var(--bg-muted);
+  border-radius: 6px;
+  padding: 1px 5px;
+  font-size: .92em;
+}
+
+/* ---- markdown content inside bubbles ---- */
+.chat-md > :first-child { margin-top: 0; }
+.chat-md > :last-child { margin-bottom: 0; }
+.chat-md p { margin: 0.5em 0; }
+.chat-md :where(p, ul, ol, pre, blockquote, table) + :where(p, ul, ol, pre, blockquote, table) { margin-top: 0.75em; }
+.chat-md ul, .chat-md ol { margin: 0.5em 0; padding-left: 1.4em; }
+.chat-md li { margin: 0.15em 0; }
+.chat-md h1, .chat-md h2, .chat-md h3, .chat-md h4 { margin: 0.7em 0 0.4em; line-height: 1.3; }
+.chat-md h1 { font-size: 1.35em; }
+.chat-md h2 { font-size: 1.2em; }
+.chat-md h3 { font-size: 1.08em; }
+.chat-md a { color: var(--ui-focus); text-decoration: none; }
+.is-user .chat-bubble:where(:not(.is-error, .is-local, .is-injected)) a { color: #064fdf; text-decoration: none; }
+.chat-md a[data-local-path] code { color: inherit; background: none; padding: 0; }
+.chat-md blockquote { margin: 0.5em 0; padding: 2px 12px; border-left: 3px solid var(--border-strong); color: var(--muted-strong); }
+.is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected)) blockquote { color: inherit; }
+.chat-md hr { border: 0; border-top: 1px solid var(--border); margin: 0.8em 0; }
+.chat-md table { border-collapse: collapse; margin: 0.5em 0; font-size: 0.92em; display: block; overflow-x: auto; max-width: 100%; }
+.chat-md th, .chat-md td { border: 1px solid var(--border-strong); padding: 5px 10px; text-align: left; }
+.chat-md th { background: var(--bg-muted); font-weight: 400; }
+.is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected)) th { background: rgba(0, 0, 0, 0.06); }
+.chat-md .markdown-inline-image { max-width: min(420px, 100%); max-height: 320px; object-fit: contain; border-radius: 10px; margin: 0.4em 0; cursor: zoom-in; }
+.chat-md .task-list-item { list-style: none; }
+.chat-md .task-list-item input { margin-right: 6px; }
+.markdown-plain-text-fallback { white-space: pre-wrap; word-break: break-word; font-family: var(--font-body); }
+.chat-md .code-block-wrapper { margin: 0.5em 0; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: var(--bg-muted); }
+.is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected)) .code-block-wrapper {
+  --bg-muted: #202020;
+  --bg-accent: #282828;
+  --bg-hover: #353535;
+  --border: rgba(255, 255, 255, 0.16);
+  --chat-text: #fff;
+  --muted: #b8b8b8;
+  --muted-fg: #b8b8b8;
+  background: #202020;
+}
+.chat-md .code-block-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-muted) 70%, var(--bg-accent) 30%);
+}
+.chat-md .code-block-lang { font-family: var(--mono); font-size: 11px; color: var(--muted-fg); text-transform: uppercase; letter-spacing: 0.04em; }
+.chat-md .code-block-copy { margin-left: auto; padding: 2px 9px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.chat-md .code-block-copy:hover { background: var(--bg-hover); color: var(--chat-text); }
+.chat-md .code-block-copy__done { display: none; }
+.chat-md .code-block-copy.copied .code-block-copy__idle { display: none; }
+.chat-md .code-block-copy.copied .code-block-copy__done { display: inline; color: var(--accent); }
+.chat-md pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
+.chat-md .code-block-wrapper pre code { background: transparent; padding: 0; border-radius: 0; }
+/* GitHub 高亮主题按浅底配色；深色主题和用户气泡内的深底代码块共用暗色语法配色。 */
+:is(:root[data-theme="dark"] .chat-md, .is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected))) .hljs { color: #e6edf3; background: transparent; }
+:is(:root[data-theme="dark"] .chat-md, .is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected))) :is(.hljs-comment, .hljs-quote) { color: #8b949e; }
+:is(:root[data-theme="dark"] .chat-md, .is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected))) :is(.hljs-keyword, .hljs-selector-tag, .hljs-type) { color: #ff7b72; }
+:is(:root[data-theme="dark"] .chat-md, .is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected))) :is(.hljs-string, .hljs-regexp, .hljs-addition) { color: #a5d6ff; }
+:is(:root[data-theme="dark"] .chat-md, .is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected))) :is(.hljs-number, .hljs-literal) { color: #79c0ff; }
+:is(:root[data-theme="dark"] .chat-md, .is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected))) :is(.hljs-title, .hljs-name, .hljs-section) { color: #d2a8ff; }
+:is(:root[data-theme="dark"] .chat-md, .is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected))) :is(.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-built_in, .hljs-symbol) { color: #ffa657; }
+:is(:root[data-theme="dark"] .chat-md, .is-user .chat-bubble.chat-md:where(:not(.is-error, .is-local, .is-injected))) .hljs-deletion { color: #ffa198; }
+.chat-md .json-collapse { margin: 0.5em 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg-muted); }
+.chat-md .json-collapse > summary { padding: 7px 12px; cursor: pointer; font-size: 12px; color: var(--muted-fg); font-weight: 400; list-style: none; }
+.chat-md .json-collapse > summary::-webkit-details-marker { display: none; }
+.chat-md .json-collapse[open] > summary { border-bottom: 1px solid var(--border); }
+
+/* ```html live preview — sandboxed iframe with a preview/source toggle (see lib/htmlArtifacts.ts) */
+.chat-md .chat-html-artifact { margin: 0.5em 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg-muted); max-width: 100%; }
+.chat-md .chat-html-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-muted) 70%, var(--bg-accent) 30%);
+}
+.chat-md .chat-html-bar__label { font-family: var(--mono); font-size: 11px; color: var(--muted-fg); text-transform: uppercase; letter-spacing: 0.04em; }
+.chat-md .chat-html-toggle { margin-left: auto; padding: 2px 9px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.chat-md .chat-html-toggle:hover { background: var(--bg-hover); color: var(--chat-text); }
+.chat-md .chat-html-frame { width: 100%; border: 0; display: block; background: transparent; color-scheme: light dark; }
+/* the fallback code block keeps its own rounded border; flatten it to sit flush inside the artifact shell */
+.chat-md .chat-html-artifact .code-block-wrapper { margin: 0; border: 0; border-radius: 0; }
+/* source view: wrap long lines. A nowrap <pre>'s min-content = its longest line, which
+   forces the right-hugging user bubble past its width cap and overflows the viewport. */
+.chat-md .chat-html-artifact pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-md .chat-html-artifact[data-view="preview"] .code-block-wrapper { display: none; }
+.chat-md .chat-html-artifact[data-view="source"] .chat-html-frame { display: none; }

@@ -4,7 +4,7 @@ import Modal from "../components/Modal";
 import McpConnectorIcon from "../components/McpConnectorIcon";
 import ConnectorTools from "../components/ConnectorTools";
 import { useConfirm } from "../components/ui";
-import { addMcpConnector, cancelMcpSignIn, getMcpSignIn, getMcpOAuthInfo, importMcpConnectors, listMcpConnectors, listMcpSubjects, formatMcpError, searchMcpRegistry, removeMcpConnector, rebindMcpConnector, saveMcpCredentials, setMcpAgents, startMcpSignIn, updateMcpConnector, verifyMcpConnector, type McpFields, type McpMutation, type McpRegistryItem, type McpServer, type McpSignIn, type McpSubject, type McpSetupField, type McpTransport } from "../api/mcpConnectors";
+import { addMcpConnector, cancelMcpSignIn, getMcpSignIn, getMcpOAuthInfo, importMcpConnectors, listMcpConnectors, formatMcpError, searchMcpRegistry, removeMcpConnector, rebindMcpConnector, saveMcpCredentials, startMcpSignIn, updateMcpConnector, verifyMcpConnector, type McpFields, type McpMutation, type McpRegistryItem, type McpServer, type McpSignIn, type McpSetupField, type McpTransport } from "../api/mcpConnectors";
 import { FIGMA_DESKTOP_URL, FIGMA_REGISTRY_NAME, isFigmaDesktopConnector, mcpFieldsFromInputs, parseMcpArguments, mcpRecommendationText, mcpRemoteUrlsMatch, mcpRecommendationPackageTransport, mcpRecommendationMatchesServer, mcpServiceGroupEndpoints, mcpServiceGroupSummary, type McpRecommendation } from "../lib/mcpConnectorUi";
 import { mcpBrandId, mcpConnectorName, mcpOfficialSkillBrand, mcpRegistrySummary } from "../lib/mcpRecommendationCatalog";
 import featuredPresets from "../../../agent-service/data/mcp-featured-presets.json";
@@ -111,11 +111,17 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
     if (mounted.current) { onUnstage?.(); onChanged(); onClose(); }
   });
   if (selected) return <McpSingleConnectorDialog key={selected.id} server={selected} recommendation={recommendation} onClose={() => { setSelected(undefined); reload(); }} onChanged={() => { onChanged(); reload(); }} />;
-  return <Modal open onClose={onClose} dismissible={!busy} title={<span className={s.dialogIdentity}><McpConnectorIcon name={displayName} identity={recommendation.id} iconId={recommendation.id} />{displayName}</span>} width={720} className={s.modal}>
+  const footer = <div className={s.flowFooter}><p>{tr(ready ? "flow.connectedHint" : "defaultAccess")}</p><div className={s.flowFooterActions}>
+    {preAdd ? <button type="button" className={s.primary} disabled={!loaded || busy} onClick={stage}>{tr("add")}</button>
+      : !ready || editing ? <button type="button" className={s.primary} disabled={busy || !loaded || !!missingKey || summary.ambiguous} onClick={() => void configure()}>{tr(busy ? "working" : "group.connectAll")}</button>
+      : <button type="button" className={s.primary} disabled={busy} onClick={onClose}>{tr("flow.done")}</button>}
+  </div></div>;
+  return <Modal open onClose={onClose} dismissible={!busy} title={<span className={s.dialogIdentity}><McpConnectorIcon name={displayName} identity={recommendation.id} iconId={recommendation.id} />{displayName}</span>} width={640} variant="connector" subtitle={mcpRecommendationText(recommendation.description, language)} footer={footer}>
     <div className={s.detail}>
-      <span className={s.status} data-state={ready ? "ready" : undefined} role="status" aria-live="polite">{busy ? tr("working") : !loaded ? tr("loading") : !servers.length ? tr(preAdd ? "flow.notAdded" : "flow.pending") : t("mcpConnectors.group.summary", { ready: summary.ready, total: summary.total })}</span>
-      <section className={s.overview}><h3>{tr("flow.capabilities")}</h3><p>{mcpRecommendationText(recommendation.description, language)}</p><a href={recommendation.docsUrl} target="_blank" rel="noreferrer">{tr("officialGuide")}</a></section>
-      {!servers.length && <ConnectorTools previewId={recommendation.id} />}
+      <ConnectorTools overview description={mcpRecommendationText(recommendation.description, language)} previewId={recommendation.id} />
+      <section className={s.connectionPanel}>
+      <div className={s.connectionHeading}><h3>{tr("flow.connectionStatus")}</h3><span className={s.status} data-state={ready ? "ready" : undefined} role="status" aria-live="polite">{busy ? tr("working") : !loaded ? tr("loading") : !servers.length ? tr(preAdd ? "flow.notAdded" : "flow.pending") : t("mcpConnectors.group.summary", { ready: summary.ready, total: summary.total })}</span></div><p className={s.muted}>{tr("group.hint")}</p></section>
+      <details className={s.management}><summary>{tr("group.services")}</summary>
       <section className={s.connectionPanel}><h3>{tr("group.services")}</h3><p className={s.muted}>{tr("group.hint")}</p>
         {endpoints.map(endpoint => {
           const members = servers.filter(value => value.transport.kind === "remote" && mcpRemoteUrlsMatch(value.transport.url, endpoint.url));
@@ -131,8 +137,9 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
         {summary.ambiguous && <p className={s.notice}>{tr("group.ambiguous")}</p>}
         {servers.some(value => !value.enabled || value.status === "disabled") && <p className={s.notice}>{tr("group.disabledHint")}</p>}
       </section>
+      </details>
       {loadError && <p className={s.error} role="alert">{loadError} <button type="button" className={s.textButton} disabled={busy} onClick={reload}>{tr("retry")}</button></p>}
-      {preAdd ? <section className={s.connectionPanel}><p className={s.muted}>{tr("flow.addHint")}</p><button type="button" className={s.primary} disabled={!loaded || busy} onClick={stage}>{tr("add")}</button></section> : <>
+      {preAdd ? <section className={s.connectionPanel}><p className={s.muted}>{tr("flow.addHint")}</p></section> : <>
         {(!ready || editing) && <section className={s.connectionPanel}><h3>{tr("flow.setup")}</h3>
           {recommendation.note && <p className={s.notice}>{mcpRecommendationText(recommendation.note, language)}</p>}
           {recommendation.setupSteps && <ol className={s.setupSteps}>{recommendation.setupSteps.map((step, index) => <li key={index}>{mcpRecommendationText(step, language)}</li>)}</ol>}
@@ -142,12 +149,12 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
             {fields.map(field => <label className={s.field} key={`${field.location}:${field.name}`}><span>{field.label ? mcpRecommendationText(field.label, language) : field.name}{field.required ? " *" : ""}</span><input type={field.secret && !showSecrets ? "password" : "text"} autoComplete="off" spellCheck={false} required={field.required} disabled={busy} value={values[`${field.location}:${field.name}`] ?? field.default ?? ""} onChange={event => setValues(previous => ({ ...previous, [`${field.location}:${field.name}`]: event.target.value }))} /></label>)}
           </div>
           <p className={s.muted}>{tr("secretsHint")}</p><button type="button" className={s.textButton} disabled={busy} aria-pressed={showSecrets} onClick={() => setShowSecrets(value => !value)}>{tr(showSecrets ? "hideValue" : "showValue")}</button>
-          <p className={s.muted}>{tr("defaultAccess")}</p>
-          <div className={s.actions}><button type="button" className={s.primary} disabled={busy || !loaded || !!missingKey || summary.ambiguous} onClick={() => void configure()}>{tr(busy ? "working" : "group.connectAll")}</button></div>
+
         </section>}
         {!!servers.length && <section className={s.connectionPanel}><div className={s.actions}><button type="button" className={s.button} disabled={busy || !loaded} onClick={() => void verify()}>{tr("group.verifyAll")}</button>{ready && <button type="button" className={s.textButton} disabled={busy} onClick={() => setEditing(value => !value)}>{tr("flow.configure")}</button>}</div></section>}
-        {(!!servers.length || added) && <div className={s.dialogFooter}><button type="button" className={s.danger} disabled={busy || !loaded} onClick={() => void remove()}>{tr("group.remove")}</button></div>}
+        {(!!servers.length || added) && <details className={s.management}><summary>{tr("flow.manage")}</summary><button type="button" className={s.danger} disabled={busy || !loaded} onClick={() => void remove()}>{tr("group.remove")}</button></details>}
       </>}
+      <details className={s.management}><summary>{tr("flow.help")}</summary><a href={recommendation.docsUrl} target="_blank" rel="noreferrer">{tr("officialGuide")}</a></details>
       {error && <p className={s.error} role="alert">{error}</p>}
     </div>
   </Modal>;
@@ -199,15 +206,13 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
   const [credentialsOpen, setCredentialsOpen] = useState(initialServer?.lastCheck?.errorCode === "MCP_OAUTH_CLIENT_REQUIRED" || recommendation?.setup === "oauth-client");
   const [clientId, setClientId] = useState(""), [clientSecret, setClientSecret] = useState(""), [oauthClient, setOAuthClient] = useState(initialServer?.auth?.kind === "oauth-client" || !initialServer && recommendation?.setup === "oauth-client");
   const [optionId, setOptionId] = useState((recommendation ? item?.options.find(value => value.transport.kind === "remote" && value.transport.protocol === "streamable-http" && mcpRemoteUrlsMatch(value.transport.url, recommendation.url)) : item?.options[0])?.id || ""), [values, setValues] = useState<Record<string,string>>({});
-  const [subjects, setSubjects] = useState<McpSubject[]>([]), [subjectsError, setSubjectsError] = useState<"" | "unavailable" | "failed">(""), [signIn, setSignIn] = useState<McpSignIn | null>(null);
+  const [signIn, setSignIn] = useState<McpSignIn | null>(null);
   const [redirectUri, setRedirectUri] = useState("");
   useEffect(() => { let active = true; if (oauthClient) void getMcpOAuthInfo().then(value => { if (active) setRedirectUri(value.redirectUri); }).catch(error => { if (active) setError(formatMcpError(error, t)); }); return () => { active = false; }; }, [oauthClient]);
   const [version, setVersion] = useState(latest?.version || initialServer?.availableUpdate || "");
   const [latestEntry, setLatestEntry] = useState(latest), [checkingUpdate, setCheckingUpdate] = useState(false), [updateError, setUpdateError] = useState("");
   const mounted = useRef(true), signInRef = useRef(signIn); signInRef.current = signIn;
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; const pending = signInRef.current; if (pending && !["completed", "authorized", "cancelled", "failed", "expired"].includes(pending.status || pending.phase || "")) void cancelMcpSignIn(pending.signInId).catch(() => {}); }; }, []);
-  const loadSubjects = () => void listMcpSubjects().then(value => { if (mounted.current) { setSubjects(value.items); setSubjectsError(value.unavailableBackends.length > 0 ? "unavailable" : ""); } }).catch(() => { if (mounted.current) setSubjectsError("failed"); });
-  useEffect(loadSubjects, []);
   const registryName = server?.source.kind === "registry" ? server.source.registryName : null;
   const installedVersion = server?.source.kind === "registry" ? server.source.version : null;
   const checkUpdates = async (signal?: AbortSignal) => {
@@ -381,34 +386,34 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     if (server) { const current = await listMcpConnectors(); await removeMcpConnector(server.id, current.revision); }
     onUnstage?.(); onChanged(); onClose();
   });
+  const primaryAction = <button type="button" className={s.primary} disabled={locked || recommendationMissingSetup || !server && !!item && (!optionId || option?.available === false)} onClick={() => void (managed && server ? act(async () => accept(await verifyMcpConnector(server.id))) : primary())}>{tr(verifying ? "flow.verifying" : signingIn ? "flow.waiting" : busy ? "working" : needsForm || editing ? "flow.saveConnect" : isRemote && canSignIn ? "flow.authorize" : "flow.checkConnect")}</button>;
+  const connectionState = <span className={s.status} data-state={server?.status} role="status" aria-live="polite">{verifying ? tr("flow.verifying") : signingIn ? tr("flow.waiting") : ready ? <>{tr("flow.connected")}{server.lastCheck ? ` · ${t("mcpConnectors.toolCount", { count: server.lastCheck.toolCount })}` : ""}</> : server ? tr(`statuses.${server.status}`) : tr(preAdd ? "flow.notAdded" : added ? "flow.pending" : "flow.notAdded")}</span>;
+  const footer = <div className={s.flowFooter}><p>{tr(ready ? "flow.connectedHint" : "defaultAccess")}</p><div className={s.flowFooterActions}>
+    {preAdd ? <button type="button" className={s.primary} disabled={busy || recommendation?.setup === "restricted" || !!item && (!option || option.available === false)} onClick={() => void add()}>{tr(busy ? "working" : "add")}</button>
+      : ready && !editing && !credentialsOnly ? <button type="button" className={s.primary} disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : recommendation?.setup === "restricted" ? <button type="button" className={s.primary} disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : figmaDesktop ? <button type="button" className={s.primary} disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button> : primaryAction}
+  </div></div>;
   const Frame = embedded ? InlineFrame : Modal;
-  return <Frame open onClose={onClose} dismissible={!busy && !verifying} title={<span className={s.dialogIdentity}><McpConnectorIcon name={title} identity={item?.registryName || recommendation?.id || (server?.source.kind === "registry" ? server.source.registryName : server?.id) || "custom"} iconId={recommendation?.id || mcpOfficialSkillBrand(server) || server?.recommendationId} />{title}</span>} width={720} className={s.modal}>
+  return <Frame open onClose={onClose} dismissible={!busy && !verifying} title={<span className={s.dialogIdentity}><McpConnectorIcon name={title} identity={item?.registryName || recommendation?.id || (server?.source.kind === "registry" ? server.source.registryName : server?.id) || "custom"} iconId={recommendation?.id || mcpOfficialSkillBrand(server) || server?.recommendationId} />{title}</span>} width={640} variant="connector" subtitle={description} footer={footer}>
     <div className={s.detail}>
-      <span className={s.status} data-state={server?.status} role="status" aria-live="polite">{verifying ? tr("flow.verifying") : signingIn ? tr("flow.waiting") : ready ? tr("flow.connected") : server ? tr(`statuses.${server.status}`) : tr(preAdd ? "flow.notAdded" : added ? "flow.pending" : "flow.notAdded")}</span>
-      {!embedded && (description || recommendation) && <section className={s.overview}><h3>{tr("flow.capabilities")}</h3><p>{description}</p>
-        {recommendation && <a href={recommendation.docsUrl} target="_blank" rel="noreferrer">{tr("officialGuide")}</a>}
-        {!recommendation && item?.repositoryUrl && /^https:\/\//i.test(item.repositoryUrl) && <a href={item.repositoryUrl} target="_blank" rel="noreferrer">{tr("repository")}</a>}
-      </section>}
-      {!embedded && <ConnectorTools serverId={server?.id} status={server?.status} checkedAt={server?.lastCheck?.at} previewId={previewId} />}
-      {preAdd ? <section className={s.connectionPanel}><p className={s.muted}>{tr("flow.addHint")}</p><button type="button" className={s.primary} disabled={busy || recommendation?.setup === "restricted" || !!item && (!option || option.available === false)} onClick={() => void add()}>{tr(busy ? "working" : "add")}</button></section> : <>
-      {ready && !credentialsOnly && <section className={s.connectionPanel}><p className={s.authReady}>{tr("flow.connected")}{server.lastCheck ? ` · ${t("mcpConnectors.toolCount", { count: server.lastCheck.toolCount })}` : ""}</p><p className={s.muted}>{tr("flow.readyHint")}</p>
-        <div className={s.actions}><button type="button" className={s.button} disabled={locked} onClick={() => void act(async () => accept(await verifyMcpConnector(server.id)))}>{tr(busy ? figmaDesktop ? "figmaDesktop.checking" : "working" : "verify")}</button>
+      {!embedded && <ConnectorTools overview description={description} serverId={server?.id} status={server?.status} checkedAt={server?.lastCheck?.at} previewId={previewId} />}
+      {preAdd ? <section className={s.connectionPanel}><div className={s.connectionHeading}><h3>{t("mcpConnectors.flow.connectionTitle", { name: title })}</h3>{connectionState}</div><p className={s.muted}>{tr("flow.addHint")}</p></section> : <>
+      {ready && !editing && !credentialsOnly && <section className={s.connectionPanel}><div className={s.connectionHeading}><h3>{tr("flow.connectionStatus")}</h3>{connectionState}</div><p className={s.muted}>{tr("flow.readyHint")}</p>
+        <div className={s.actions}><button type="button" className={s.textButton} disabled={locked} onClick={() => void act(async () => accept(await verifyMcpConnector(server.id)))}>{tr(busy ? figmaDesktop ? "figmaDesktop.checking" : "working" : "verify")}</button>
         {!figmaDesktop && !managed && <button type="button" className={s.textButton} disabled={locked} aria-expanded={editing} onClick={() => setEditing(value => !value)}>{tr("flow.configure")}</button>}</div>
       </section>}
-      {setupVisible && <section className={s.connectionPanel}><h3>{tr("flow.setup")}</h3>
+      {setupVisible && <section className={s.connectionPanel}><div className={s.connectionHeading}><h3>{t("mcpConnectors.flow.connectionTitle", { name: title })}</h3>{connectionState}</div>
       {added && !server && <p className={s.muted}>{tr("flow.pendingHint")}</p>}
       {canChooseFigmaMode && <div className={s.modeTabs} role="group" aria-label={tr("figmaDesktop.connectionMode")}>
         {(["desktop", "remote"] as const).map(value => <button type="button" key={value} className={figmaMode === value ? s.primary : s.button} aria-pressed={figmaMode === value} disabled={locked} onClick={() => { setFigmaMode(value); setError(""); clearValues(); }}>{tr(`figmaDesktop.${value}`)}</button>)}
       </div>}
       {figmaDesktop ? <section className={s.desktopConnection} aria-label={tr("figmaDesktop.desktop")}>
         {server?.status === "failed" && <p className={s.notice}>{tr("figmaDesktop.failedHint")}</p>}
-        {!server && <p className={s.muted}>{tr("defaultAccess")}</p>}
         <p>{tr("figmaDesktop.description")}</p><p className={s.muted}>{tr(server?.status === "disabled" ? "figmaDesktop.disabledHint" : "figmaDesktop.setupHint")}</p>
         <details className={s.clientSetup} open={desktopStepsOpen} onToggle={event => setDesktopStepsOpen(event.currentTarget.open)}><summary>{tr("figmaDesktop.setupTitle")}</summary>
           <ol><li>{tr("figmaDesktop.stepOpen")}</li><li>{tr("figmaDesktop.stepEnable")}</li><li>{tr("figmaDesktop.stepCheck")}</li></ol>
           <a href="https://developers.figma.com/docs/figma-mcp-server/local-server-installation/" target="_blank" rel="noreferrer">{tr("figmaDesktop.guide")}</a>
         </details>
-        <div className={s.actions}><button type="button" className={s.primary} disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button></div>
+        {embedded && <div className={s.actions}><button type="button" className={s.primary} disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button></div>}
       </section> : recommendation?.setup === "restricted" ? <p className={s.notice}>{recommendation.note && mcpRecommendationText(recommendation.note, language)}</p> : <>
       {canChooseFigmaMode && <p className={s.muted}>{tr("figmaDesktop.remoteHint")}</p>}
       {recommendation?.note && <p className={s.notice}>{mcpRecommendationText(recommendation.note, language)}</p>}
@@ -444,17 +449,15 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
       {signIn?.flow === "device" && signIn.userCode && signingIn && <div className={s.notice} role="status"><p>{tr("deviceCodeHint")}</p><p><code data-device-user-code>{signIn.userCode}</code></p><p className={s.muted}>{tr("deviceWaiting")}{signIn.expiresAt ? ` · ${t("mcpConnectors.expires", { time: new Date(signIn.expiresAt).toLocaleTimeString() })}` : ""}</p></div>}
       {authUrl && /^https?:\/\//i.test(authUrl) && signingIn && <p><a href={authUrl} target="_blank" rel="noreferrer">{tr("openSignin")}</a> <button className={s.textButton} type="button" disabled={busy || verifying} onClick={() => void act(async () => { await cancelMcpSignIn(signIn!.signInId); setSignIn(null); })}>{tr("cancelSignin")}</button></p>}
       {signIn?.installationUrl && /^https:\/\//i.test(signIn.installationUrl) && <p><a href={signIn.installationUrl} target="_blank" rel="noreferrer">{tr("chooseRepositories")}</a><small className={s.muted}> {tr("repositoryAccessHint")}</small></p>}
-      <p className={s.muted}>{tr("defaultAccess")}</p>
+      {embedded && <p className={s.muted}>{tr("defaultAccess")}</p>}
       <div className={s.actions}>
-        <button type="button" className={s.primary} disabled={locked || recommendationMissingSetup || !server && !!item && (!optionId || option?.available === false)} onClick={() => void (managed && server ? act(async () => accept(await verifyMcpConnector(server.id))) : primary())}>{tr(verifying ? "flow.verifying" : signingIn ? "flow.waiting" : busy ? "working" : needsForm || editing ? "flow.saveConnect" : isRemote && canSignIn ? "flow.authorize" : "flow.checkConnect")}</button>
+        {embedded && primaryAction}
+        {editing && <button type="button" className={s.textButton} disabled={locked} onClick={() => setEditing(false)}>{t("common.cancel")}</button>}
         {clientRequired && server?.auth?.kind !== "oauth-client" && <button className={s.button} type="button" disabled={locked} onClick={() => { setCredentialsOpen(true); setOAuthClient(true); }}>{tr("configureOAuth")}</button>}
       </div>
       </>}
       </section>}
       {server && !credentialsOnly && <>
-        <details className={s.management} open={ready || undefined}><summary>{tr("agents")}</summary><p className={s.muted}>{tr("allAgents")}</p>{subjectsError && <p className={s.error} role="alert">{tr(subjectsError === "unavailable" ? "subjectsUnavailable" : "subjectsLoadFailed")} <button type="button" className={s.textButton} onClick={loadSubjects}>{tr("retry")}</button></p>}
-          <div className={s.choices}>{subjects.map(subject => <label className={s.choice} key={subject.profileId}><input type="checkbox" disabled={locked} checked={!server.disabledProfileIds.includes(subject.profileId)} onChange={event => { const enabled = event.target.checked; void act(async () => { const current = await listMcpConnectors(); const latest = current.servers.find(value => value.id === server.id); if (!latest) return; accept(await setMcpAgents(server.id, enabled ? latest.disabledProfileIds.filter(id => id !== subject.profileId) : [...new Set([...latest.disabledProfileIds, subject.profileId])], current.revision)); }); }} /><span>{subject.label}<small>{subject.backendId}</small></span></label>)}</div>
-        </details>
         <details className={s.management}><summary>{tr("flow.manage")}</summary>
           {figmaDesktop && ready && <details className={s.clientSetup} open={desktopStepsOpen} onToggle={event => setDesktopStepsOpen(event.currentTarget.open)}><summary>{tr("figmaDesktop.setupTitle")}</summary><ol><li>{tr("figmaDesktop.stepOpen")}</li><li>{tr("figmaDesktop.stepEnable")}</li><li>{tr("figmaDesktop.stepCheck")}</li></ol></details>}
           {server.transport.kind === "remote" && !figmaDesktop && canSignIn && <button type="button" className={s.button} disabled={locked} onClick={() => { setEditing(true); void act(() => signin(server.id)); }}>{tr("flow.reconnect")}</button>}
@@ -463,10 +466,12 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
             {latestEntry && <><p className={latestEntry.version !== server.source.version ? s.updateHint : s.muted}>{latestEntry.version !== server.source.version ? t("mcpConnectors.updateAvailable", { version: latestEntry.version }) : tr("upToDate")}</p><p className={s.muted}>{registryDescription(latestEntry)}</p>{latestEntry.repositoryUrl && /^https:\/\//i.test(latestEntry.repositoryUrl) && <a href={latestEntry.repositoryUrl} target="_blank" rel="noreferrer">{tr("repository")}</a>}<p className={s.muted}>{tr("targetTransport")} {latestEntry.options.map(option => option.transport.kind === "stdio-package" ? `${option.transport.registryType} · ${option.transport.identifier}@${option.transport.version}` : option.transport.kind === "remote" ? option.transport.url : option.transport.command).join(" · ")}</p></>}
             <button className={s.textButton} type="button" disabled={locked || checkingUpdate} onClick={() => void checkUpdates()}>{tr(checkingUpdate ? "loading" : "checkUpdates")}</button>{updateError && <p className={s.error} role="alert">{updateError}</p>}<p className={s.muted}>{tr("manualUpdateHint")}</p>{input(tr("newVersion"), version, setVersion)}<button className={s.button} disabled={locked || !version.trim() || version.trim() === server.source.version} type="button" onClick={() => void act(async () => { const current = await listMcpConnectors(); accept(await updateMcpConnector(server.id, version.trim(), current.revision)); })}>{tr("update")}</button>
           </section>}
+          {!managed && !credentialsOnly && <button type="button" className={s.danger} disabled={locked} onClick={() => void remove()}>{tr("flow.remove")}</button>}
         </details>
       </>}
-      {!managed && !credentialsOnly && (server || added) && <div className={s.dialogFooter}><button type="button" className={s.danger} disabled={locked} onClick={() => void remove()}>{tr("flow.remove")}</button></div>}
+      {!server && added && !managed && !credentialsOnly && <details className={s.management}><summary>{tr("flow.manage")}</summary><button type="button" className={s.danger} disabled={locked} onClick={() => void remove()}>{tr("flow.remove")}</button></details>}
       </>}
+      {!embedded && (recommendation?.docsUrl || item?.repositoryUrl) && <details className={s.management}><summary>{tr("flow.help")}</summary>{recommendation?.docsUrl ? <a href={recommendation.docsUrl} target="_blank" rel="noreferrer">{tr("officialGuide")}</a> : item?.repositoryUrl && /^https:\/\//i.test(item.repositoryUrl) && <a href={item.repositoryUrl} target="_blank" rel="noreferrer">{tr("repository")}</a>}</details>}
       {(error || signIn?.errorCode) && <p className={s.error} role="alert">{error || formatMcpError({ code: signIn?.errorCode }, t)}</p>}
     </div>
   </Frame>;

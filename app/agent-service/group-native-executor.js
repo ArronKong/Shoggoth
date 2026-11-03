@@ -8,7 +8,7 @@ const { GROUP_SESSION_OPERATION_PREFIX } = require("./group-chat-run");
 const { normalizeInteractiveRequestV1 } = require("../core/shoggoth-interaction-contract");
 const { nativeCapabilities, groupCapabilities } = require("./group-capabilities");
 const { isRuntimeAvailable } = require("../runtime-availability");
-const { resolveRuntimePermissionMode } = require("./runtime-permission-modes");
+const { CHAT_PERMISSION_MODES, resolveRuntimePermissionMode } = require("./runtime-permission-modes");
 const { assertModelCatalog, assertModelSelection, modelError } = require("../group-member-model");
 
 // 原生成员的群回合：沿用 chat.session.create / chat.send / chat.abort，
@@ -98,9 +98,9 @@ class GroupNativeExecutor {
         if (!selected?.enabled || !isRuntimeAvailable(selected.runtime)) {
           return groupCapabilities({ availability: "unavailable", checkedAt: this.now() });
         }
-        const permission = resolveRuntimePermissionMode(selected.runtime, session?.permissionMode ?? null, selected.permissionPolicy);
-        // Coordinator acquires the host with the profile policy; the selected
-        // session mode is the separately frozen permission used by the turn.
+        const permission = resolveRuntimePermissionMode(selected.runtime, CHAT_PERMISSION_MODES.full, selected.permissionPolicy);
+        // Keep the profile policy for Codex's shared app-server. Other Runtime
+        // pools use the same full-access process policy as the upcoming turn.
         const runtimeHostPermissionPolicy = selected.permissionPolicy ? Object.freeze({ ...selected.permissionPolicy }) : undefined;
         const workspace = session ? session.workspace ?? null : binding?.workspace ?? this.resolveWorkspace(selected);
         profile = { ...selected, workspace, permissionMode: permission.mode, nativePermissionMode: permission.nativeMode,
@@ -118,7 +118,8 @@ class GroupNativeExecutor {
             || currentSession.workspace !== session.workspace)) throw Error("group preparation binding changed");
         };
         host = await coordinator.runtimeManager.acquire({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
-          runtimeAccountId: profile.runtimeAccountId }, { workspace, permissionPolicy: runtimeHostPermissionPolicy });
+          runtimeAccountId: profile.runtimeAccountId }, { workspace,
+          permissionPolicy: profile.runtime === "codex" ? runtimeHostPermissionPolicy : permission.permissionPolicy });
       }
       const runtimeBinding = { runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
         runtimeAccountId: profile.runtimeAccountId };
@@ -137,7 +138,10 @@ class GroupNativeExecutor {
 
   // 逻辑键 groupId + memberId + threadId + purpose 决定唯一的创建操作，重放返回同一会话。
   async ensureSession(binding) {
-    if (binding.sessionKey) return binding.sessionKey;
+    if (binding.sessionKey) {
+      await this.#preparePermission(binding.sessionKey);
+      return binding.sessionKey;
+    }
     // 会话被放弃重建过（任务换了工作副本）时，创建操作的键带上代次，不会命中旧会话。
     const epoch = binding.external?.retired?.length ?? 0;
     const key = crypto.createHash("sha256")
@@ -150,10 +154,21 @@ class GroupNativeExecutor {
       workspace: binding.workspace ?? null,
       createdAt: this.now(),
     });
+    await this.#preparePermission(result.session.sessionKey);
     return result.session.sessionKey;
   }
 
+  async #preparePermission(sessionKey) {
+    if (this.chatSessionStore.getSession(sessionKey)?.permissionMode === CHAT_PERMISSION_MODES.full) return;
+    // Group sessions are separate from private chats. Update only the next-turn
+    // selection; an already-running WorkRun keeps its frozen execution policy.
+    await this.getChatServiceController().handle("chat.session.permission.set", {
+      sessionKey, mode: CHAT_PERMISSION_MODES.full,
+    });
+  }
+
   async start({ sessionKey, operationId, prompt, attachments = [] }) {
+    await this.#preparePermission(sessionKey);
     const result = await this.getChatServiceController().handle("chat.send", {
       operationId, sessionKey, prompt, createdAt: this.now(), ...(attachments.length ? { attachments } : {}),
     });
@@ -251,7 +266,7 @@ class GroupNativeExecutor {
     const selected = events.findLast(event => event.content.phase === "final_answer")
       ?? events.findLast(event => event.content.phase == null);
     const through = selected ? events.indexOf(selected) + 1 : events.length;
-    return events.slice(0, through).map((event, index) => ({ id: String(event.content.itemId ?? event.id ?? `message:${index}`),
+    return events.slice(0, through).map((event, index) => ({ id: String(event.content.segmentId ?? event.content.itemId ?? event.id ?? `message:${index}`),
       text: redactGrantTokens((this.transcriptStore.displayEvent?.(session.profileId, session.id, event) ?? event).content.text),
       final: event === selected }));
   }

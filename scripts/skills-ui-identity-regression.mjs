@@ -28,6 +28,7 @@ const mocks = {
     export const activateStandaloneMcp = async () => { throw new Error('not expected'); };
     export const listSkillsPage = async (backend, agentId, options) => {
       globalThis.calls.push({ method: 'page', backend, agentId, options });
+      if (globalThis.pageWait) await globalThis.pageWait;
       if (globalThis.failNextPage) { globalThis.failNextPage = false; throw new ApiError('unavailable', 503); }
       const revision = String(globalThis.skills.length) + '-' + globalThis.skills.map(skill => Number(skill.enabled)).join('');
       if (options.pageIndex > 0 && options.expectedRevision !== revision) throw new ApiError('changed', 409);
@@ -74,7 +75,7 @@ const mocks = {
     export const useBackendCatalog = () => catalog;
     export const useBackendState = () => useState(globalThis.initialBackend || 'native-fixture');
   `,
-  "../lib/useStickyState": "import { useState } from 'react'; export const useStickyState = (key, value) => useState(value);",
+  "../lib/useStickyState": "import { useState } from 'react'; export const useStickyState = (key, value) => useState(key === 'skills.status' ? 'off' : value);",
   "../components/Field": `
     export const Field = ({children}) => children;
     export const Option = () => null;
@@ -90,9 +91,14 @@ const mocks = {
     export const useConfirm = () => confirm;
   `,
   "../lib/markdown": "export const toSanitizedMarkdownHtml = value => value;",
+  "../components/ChatMarkdown": "export default function ChatMarkdown({text, className}) { return <div className={className} data-markdown={text} />; }",
   "../components/PageHead": "export const PageHead = ({actions}) => <header>{actions}</header>;",
   "../components/BackendTabs": "export default function BackendTabs(props) { return <backend-tabs-fixture {...props} />; }",
-  "../components/FilterTabs": "export default function FilterTabs() { return null; }",
+  "../components/Modal": `export default function Modal({ open, title, subtitle, children, onClose }) {
+    return open ? <section role="dialog"><h2>{title}</h2>{subtitle}{children}<button aria-label="Close" onClick={onClose} /></section> : null;
+  }`,
+  "./SkillsPage.module.css": "export default { detailModal: 'skill-detail-modal', detail: 'skill-detail-content' };",
+  "../components/FilterTabs": "export default function FilterTabs() { return <filter-tabs-fixture />; }",
   "../components/SearchCapsule": "export default function SearchCapsule(props) { return <search-fixture {...props} />; }",
   "react-i18next": `
     import en from ${JSON.stringify(path.join(ui, "src/i18n/locales/en.ts"))};
@@ -110,10 +116,19 @@ try {
       import TestRenderer, { act } from 'react-test-renderer';
       import SkillsPage from './src/pages/SkillsPage';
       import { skillIdentity } from './src/lib/skillIdentity';
+      import { splitSkillDocument, markdownCodeBlock } from './src/lib/skillDocument';
       import { listSkillsPage, previewSkill, uninstallSkill } from './src/api/client';
       import en from './src/i18n/locales/en';
       import zh from './src/i18n/locales/zh-CN';
       async function main() {
+        const document = splitSkillDocument("\\ufeff---\\r\\nname: lark-im\\r\\nversion: 1.0.0\\r\\n---\\r\\n\\r\\n## Shoggoth installation\\r\\n\\r\\nThis official Feishu / Lark skill belongs to the CLI connector (CLI 1.0.98).\\r\\nUse /private/fixture/bin/lark-cli\\r\\n\\r\\n~~~sh\\r\\n# not a document boundary\\r\\n~~~\\r\\n\\r\\n# im (v1)\\r\\n\\r\\n## Concepts\\r\\n\\r\\nAuthored instructions.");
+        assert.equal(document.frontmatter, 'name: lark-im\\r\\nversion: 1.0.0');
+        assert.match(document.installation, /# not a document boundary/);
+        assert.equal(document.body, '# im (v1)\\n\\n## Concepts\\n\\nAuthored instructions.');
+        assert.equal(splitSkillDocument('---\\nUnclosed metadata').body, '---\\nUnclosed metadata');
+        assert.equal(splitSkillDocument('# Guide\\n\\n---\\nordinary body').body, '# Guide\\n\\n---\\nordinary body');
+        assert.equal(splitSkillDocument('## Shoggoth installation\\n\\nCustom authored section').installation, '');
+        assert.equal(markdownCodeBlock('a' + String.fromCharCode(96).repeat(4) + 'b', 'yaml').split('\\n')[0].length, 9);
         globalThis.calls = [];
         globalThis.skills = ['1.0.0', '1.0.1'].map(version => ({
           backendId: 'native-fixture', agentId: 'agent-a', id: 'review', name: 'review', version,
@@ -129,6 +144,9 @@ try {
         await act(async () => { renderer = TestRenderer.create(<SkillsPage />); });
         assert.equal(globalThis.calls.find(call => call.method === 'page').agentId, undefined,
           'the catalog must request all Agents');
+        assert.equal(globalThis.calls.find(call => call.method === 'page').options.status, '',
+          'the catalog must ignore saved status filters');
+        assert.equal(renderer.root.findAllByType('filter-tabs-fixture').length, 0);
         assert.equal(renderer.root.findAllByType('search-fixture').length, 0);
         assert.equal(renderer.root.findAllByType('select-fixture').length, 0);
         assert.equal(renderer.root.findAllByType('learned-detail-fixture').length, 0,
@@ -136,12 +154,17 @@ try {
         assert.equal(renderer.root.findAllByType('button').some(node => node.children.includes(en.skills.install)), false);
         await act(async () => { renderer.root.findByProps({ 'aria-label': 'review v1.0.1 · user' }).props.onClick(); });
         const cards = () => renderer.root.findAllByType('article');
-        assert.equal(cards().filter(node => node.props.className.includes('skill-card-selected')).length, 1);
-        assert.equal(cards()[1].props.className.includes('skill-card-selected'), true);
-        const detail = () => renderer.root.findByType('aside');
+        assert.equal(cards().filter(node => node.props.className.includes('skill-card-selected')).length, 0);
+        assert.equal(renderer.root.findAllByType('aside').length, 0, 'details must use the shared modal');
+        const detail = () => renderer.root.findByProps({ role: 'dialog' });
         assert.match(detail().findByProps({ className: 'skill-detail-meta' }).children.join(''), /v1\.0\.1/);
         assert.equal(globalThis.calls.find(call => call.method === 'preview').skill.version, '1.0.1');
+        let releasePage;
+        globalThis.pageWait = new Promise(resolve => { releasePage = resolve; });
         await act(async () => { await detail().findByType('switch-fixture').props.onChange(true); });
+        assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 1,
+          'refreshing after a toggle must keep the detail modal open');
+        await act(async () => { releasePage(); delete globalThis.pageWait; });
         const updated = globalThis.calls.find(call => call.method === 'update');
         assert.equal(updated.patch.id, 'review');
         assert.equal(updated.patch.version, '1.0.1');
@@ -153,7 +176,7 @@ try {
         assert.match(globalThis.confirmation.message, /review v1.0.1/);
         assert.equal(globalThis.calls.find(call => call.method === 'uninstall').skill.version, '1.0.1');
         assert.equal(globalThis.calls.find(call => call.method === 'uninstall').skill.registryVersion, 4);
-        assert.equal(renderer.root.findAllByType('aside').length, 0);
+        assert.equal(renderer.root.findAllByProps({ role: 'dialog' }).length, 0);
         assert.deepEqual(globalThis.skills.map(skill => skill.version), ['1.0.0']);
         await act(async () => renderer.unmount());
 
@@ -163,18 +186,20 @@ try {
         globalThis.skills = ['agent-a', 'agent-b'].flatMap((agentId, index) => [
           { backendId: 'native-fixture', agentId, id: 'scoped-review', name: 'scoped-review',
             version: '1.0.0', source: 'builtin', description: 'Agent method', enabled: true,
-            profileRevision: index + 3, usageCount: index + 1 },
+            profileRevision: index + 3, usageCount: index + 1, usageAgents: { [agentId]: index + 1 } },
           { backendId: 'native-fixture', agentId, id: 'learned-' + agentId, name: 'learned-review',
             version: '1.0.0', source: 'learned', description: 'Learned method', enabled: true,
             contentHash: String(index + 1).repeat(64), learnedRevision: index + 5, usageCount: index + 7 },
         ]);
         await act(async () => { renderer = TestRenderer.create(<SkillsPage />); });
         assert.equal(cards().length, 4, 'skills from both Agents must appear together');
-        assert.deepEqual(cards().map(card => card.findByProps({ className: 'skill-badge skill-badge-used' }).children.join('')),
-          [1, 7, 2, 8].map(count => en.skills.usedTimes.replace('{{count}}', String(count))),
-          'same-name usage must stay scoped to each row');
+        await act(async () => cards()[0].findByProps({ className: 'skill-card-open' }).props.onClick());
+        assert.equal(detail().findByProps({ className: 'skill-sec-aside' }).children.join(''),
+          en.skills.usageTotal.replace('{{count}}', '1'));
         await act(async () => cards()[2].findByProps({ className: 'skill-card-open' }).props.onClick());
         assert.equal(globalThis.calls.findLast(call => call.method === 'preview').agent, 'agent-b');
+        assert.equal(detail().findByProps({ className: 'skill-sec-aside' }).children.join(''),
+          en.skills.usageTotal.replace('{{count}}', '2'), 'same-name usage must stay scoped to the selected Agent');
         await act(async () => detail().findByType('switch-fixture').props.onChange(false));
         const scopedUpdate = globalThis.calls.findLast(call => call.method === 'update');
         assert.equal(scopedUpdate.agent, 'agent-b');

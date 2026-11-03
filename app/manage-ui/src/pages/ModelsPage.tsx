@@ -1412,7 +1412,8 @@ export default function ModelsPage() {
       {/* 模型配置 per-agent 的后端（Hermes）：本页 = **跨 agent 共享**的凭证层
           （读聚合、写广播到每个 Profile）。per-agent 的主模型/参数/辅助模型/MoA/
           回退链在「代理」页每个 agent 的概览里，本页不再有 Profile 作用域概念。 */}
-      <ModelOperationRecovery backend={backend} active={backend === "openclaw"} onSettled={() => {
+      <ModelOperationRecovery backend={backend} active={backend === "openclaw"}
+        advisory={modelsData ? capabilities.mutationSemantics === "native-config" : error ? false : undefined} onSettled={() => {
         void refreshAccountsAndModels();
       }} />
 

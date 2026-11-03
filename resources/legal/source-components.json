@@ -369,6 +369,16 @@
         "licenses/overrides/LAZY-VAL.txt"
       ],
       "source": "https://github.com/develar/lazy-val"
+    },
+    {
+      "names": [
+        "qrcode-generator"
+      ],
+      "version": "2.0.4",
+      "licenseFiles": [
+        "licenses/overrides/QRCODE-GENERATOR-2.0.4.txt"
+      ],
+      "source": "https://github.com/kazuhikoarase/qrcode-generator/blob/83b7e8fe3fddd3b0368dbafd6ce56995bd25e3c8/LICENSE"
     }
   ]
 }

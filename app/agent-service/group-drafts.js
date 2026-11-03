@@ -11,9 +11,9 @@ function tail(text) {
 // private projections; public messages remain Store-owned. onActivity lets the driver
 // see new movement (inactivity timeout) and tool starts (giving up the speaking slot).
 class GroupDraftTracker {
-  constructor({ store, nativeExecutor, externalExecutor = null, onChanged = () => {}, onActivity = () => {},
+  constructor({ store, nativeExecutor, externalExecutor = null, onChanged = () => {}, onActivity = () => {}, onObservation = () => {},
     setTimer = setTimeout, clearTimer = clearTimeout, pollMs = 800, onError = () => {}, now = Date.now }) {
-    Object.assign(this, { store, nativeExecutor, externalExecutor, onChanged, onActivity, setTimer, clearTimer, pollMs, onError, now });
+    Object.assign(this, { store, nativeExecutor, externalExecutor, onChanged, onActivity, onObservation, setTimer, clearTimer, pollMs, onError, now });
     this.states = new Map(); this.stopped = false;
   }
   start() { this.stopped = false; }
@@ -63,6 +63,7 @@ class GroupDraftTracker {
     const projection = state.projection;
     const prior = JSON.stringify({ ...projection.snapshot(), observedAt: null });
     let text = state.text;
+    let observedStatus = null;
     try {
       if (record.runKind === "external") {
         // Legacy hosts have no event facts. Their status remains usable; no tool
@@ -79,15 +80,22 @@ class GroupDraftTracker {
         await this.#readNative(state, projection, record.runId);
         text = projection.draft() ?? text;
         const snapshot = this.nativeExecutor.getRun?.(record.runId);
+        if (typeof this.nativeExecutor.getRun === "function") observedStatus = snapshot?.status ?? "unknown";
         if (snapshot) projection.observeStatus(snapshot.status, { at: snapshot.finishedAt ?? this.now(),
           cancelRequested: Boolean(record.abortReason), recovery: Boolean(record.recovery) });
       }
-    } catch (error) { this.onError(error); }
+    } catch (error) {
+      this.onError(error);
+      if (record.runKind !== "external" && record.runId) observedStatus = "unavailable";
+    }
     // A forgotten/rebound execution cannot receive the late RPC's text/activity.
     if (this.states.get(id) !== state || state.projection !== projection) return;
     let current;
     try { current = this.store.getOpportunity(id); } catch { this.forget(id); return; }
     if (!current || !projection.matches(this.#binding(current))) { this.#schedule(id); return; }
+    if (observedStatus) {
+      try { this.onObservation(id, { ...binding, status: observedStatus }); } catch (error) { this.onError(error); }
+    }
     if (current.runKind === "external") projection.observeStatus(current.recovery ? "unknown" : current.interaction?.status === "pending"
       ? current.interaction.request?.kind === "runtime_approval" ? "waiting_approval" : "waiting_input"
         : current.observation?.status ?? "running", {

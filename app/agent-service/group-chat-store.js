@@ -434,7 +434,7 @@ class GroupChatStore {
       releasedReason: released ? "busy" : null, releasedAt: released ? this.now() : null,
       operationId: `${GROUP_TURN_OPERATION_PREFIX}${id}`, runId: null, sessionKey: null, fence: null,
       inputThroughSeq: null, errorCode: null, abortReason: null, resultMessageId: null,
-      postedText: null, createdAt: this.now(), startedAt: null, finishedAt: null,
+      postedText: null, createdAt: this.now(), startedAt: null, finishedAt: null, floorActivityAt: null, floorActivityProof: null,
     };
     this.#putTurn(turn);
     return turn;
@@ -1034,14 +1034,37 @@ class GroupChatStore {
 
   #stopMemberTurns(groupId, memberId, reason) {
     const aborts = [];
+    const group = reason === "GROUP_MEMBER_STOPPED" ? this.#group(groupId) : null;
     for (const turn of this.#turns("group_id=? AND member_id=? AND state IN ('queued','running','waiting')", groupId, memberId)) {
       if (turn.state === "queued") { this.#cancelTurn(turn, reason); continue; }
       if (!turn.abortReason) turn.abortReason = reason;
       if (turn.interaction?.status === "pending") turn.interaction.status = "cancelled";
+      if (group) {
+        this.#freezeVisibleReplies(group, turn);
+        if (turn.abortReason === "GROUP_MEMBER_STOPPED") this.#releaseStoppedSpeech(group, turn);
+      }
       this.#putTurn(turn);
       aborts.push(clone(turn));
     }
+    if (group) this.#putGroup(group);
     return aborts;
+  }
+
+  // 用户结束的是本次发言；底层是否退出仍按原身份核对，同成员忙锁不因此解除。
+  #releaseStoppedSpeech(group, turn) {
+    if (turn.releasedReason !== "stopped") Object.assign(turn, {
+      released: true, releasedReason: "stopped", releasedAt: this.now(),
+    });
+    if (group.status !== "active" || turn.stopMessageId) return;
+    const prior = parse(this.db.prepare("SELECT data FROM messages WHERE group_id=? AND origin_key=?").get(group.id, `turn:${turn.id}`));
+    turn.stopMessageId = (prior ?? this.#systemMessage(group,
+      { eventType: "turn_stopped", memberId: turn.memberId }, `turn:${turn.id}`)).id;
+  }
+
+  #freezeVisibleReplies(group, turn) {
+    for (const message of this.#turnTextMessages(turn)) if (message.origin.streaming) {
+      this.#replaceMessage(group, message, message.body, { origin: { ...message.origin, streaming: false } });
+    }
   }
 
   /** 停止全群：清空排队与轮次，中止正在发言和在后台干活的回合。 */
@@ -1368,6 +1391,7 @@ class GroupChatStore {
     const order = round ? round.order.map(id => this.#turn(id)) : [turn];
     const status = (item) => {
       if (item.id === turn.id) return "speaking";
+      if (USER_STOPS.has(item.abortReason)) return item.abortReason === "GROUP_MEMBER_REMOVED" ? "left" : "stopped";
       if (item.state === "replied") return "posted";
       if (item.state === "passed") return "passed";
       if (item.state === "failed") return item.errorCode === "GROUP_TURN_TIMEOUT" ? "missed" : "failed";
@@ -1378,9 +1402,11 @@ class GroupChatStore {
       return null;
     };
     const working = this.#turns("group_id=? AND state IN ('running','waiting')", group.id)
-      .filter(item => item.released && item.memberId !== member.id)
-      .map(item => ({ memberId: item.memberId, since: item.releasedAt ?? item.startedAt ?? this.now() }));
+      .filter(item => item.released && !item.abortReason && item.memberId !== member.id)
+      .map(item => ({ memberId: item.memberId, since: item.releasedAt ?? item.startedAt ?? this.now(),
+        ...(item.releasedReason === "idle" || item.recovery?.type === "execution" ? { unconfirmed: true } : {}) }));
     Object.assign(turn, { state: "running", floor, fence, startedAt: this.now(), sessionKey: binding.session_key,
+      floorActivityAt: this.now(), floorActivityProof: null,
       // 这一回合是不是在新会话上开始的（recordRun 之后 sessionKey 总会有值，不能拿它判断）。
       freshSession: fresh,
       inputThroughSeq: group.lastSeq, modelSelection: clone(member.modelSelection ?? null),
@@ -1498,6 +1524,12 @@ class GroupChatStore {
         turn.activeSince = this.now();
       }
       if (turn.interaction?.status === "pending") turn.interaction.status = "cancelled";
+      if (turn.abortReason === "GROUP_MEMBER_STOPPED") {
+        const group = this.#group(turn.groupId);
+        this.#freezeVisibleReplies(group, turn);
+        this.#releaseStoppedSpeech(group, turn);
+        this.#putGroup(group);
+      }
       this.#putTurn(turn);
       return clone(turn);
     });
@@ -1508,6 +1540,33 @@ class GroupChatStore {
       const turn = this.#turn(opportunityId);
       if (!turn || !ACTIVE_TURN.includes(turn.state)) return null;
       turn.fence = fence;
+      if (turn.abortReason === "GROUP_MEMBER_STOPPED") {
+        const group = this.#group(turn.groupId);
+        this.#freezeVisibleReplies(group, turn);
+        this.#releaseStoppedSpeech(group, turn);
+        this.#putGroup(group);
+      }
+      this.#putTurn(turn);
+      return clone(turn);
+    });
+  }
+
+  /** 有效活动只延长发言等待；保存摘要以免重建观察器 / 重读相同正文刷新计时。 */
+  recordFloorActivity({ opportunityId, runId, fence, proof }) {
+    return this.#write(() => {
+      const turn = this.#turn(opportunityId);
+      if (!turn || !holdsFloor(turn) || turn.abortReason || turn.runId !== runId
+        || fence !== this.getDriverFence() || turn.fence !== fence) return null;
+      if (!Number.isSafeInteger(proof?.progressAt) || proof.progressAt < 0
+        || typeof proof.signature !== "string" || !/^[a-f0-9]{64}$/u.test(proof.signature)
+        || !Number.isSafeInteger(proof.eventSeq) || proof.eventSeq < 0) return clone(turn);
+      const prior = turn.floorActivityProof;
+      const changed = prior?.signature !== proof.signature;
+      const advanced = prior && prior.streamGeneration === proof.streamGeneration
+        && proof.eventSeq > prior.eventSeq && proof.progressAt > prior.progressAt;
+      if (!changed && !advanced) return clone(turn);
+      turn.floorActivityProof = clone(proof);
+      turn.floorActivityAt = Math.max(turn.floorActivityAt ?? turn.startedAt ?? 0, Math.min(this.now(), proof.progressAt));
       this.#putTurn(turn);
       return clone(turn);
     });
@@ -1528,7 +1587,7 @@ class GroupChatStore {
       const member = this.#member(turn.memberId);
       let messageId = null;
       const body = typeof text === "string" ? text.trim() : "";
-      if (reason === "working" && body && !isPassReply(body) && group.status === "active" && member?.state === "active") {
+      if (["working", "idle"].includes(reason) && body && !isPassReply(body) && group.status === "active" && member?.state === "active") {
         const parts = groupReplyMessages(replyMessages);
         if (parts.length) this.#syncTurnMessages(group, turn, member, parts);
         const published = turn.individualMessages ? this.#turnTextMessages(turn) : [];
@@ -1840,9 +1899,10 @@ class GroupChatStore {
       let message = null;
       if (group.status !== "active" || USER_STOPS.has(turn.abortReason) || member.state !== "active") {
         finish("cancelled", { errorCode: turn.abortReason ?? "GROUP_DISCUSSION_STOPPED" });
-        preserveVisibleReplies();
+        // 停止后的快照可能带上新的段落或增量；只保留点击前已经发布的正文。
+        this.#freezeVisibleReplies(group, turn);
         if (turn.abortReason === "GROUP_MEMBER_STOPPED" && group.status === "active") {
-          message = this.#systemMessage(group, { eventType: "turn_stopped", memberId: member.id }, `turn:${turn.id}`);
+          this.#releaseStoppedSpeech(group, turn);
         }
       } else if (turn.abortReason || status !== "completed") {
         const code = turn.abortReason ?? errorCode ?? `GROUP_TURN_${String(status).toUpperCase()}`;

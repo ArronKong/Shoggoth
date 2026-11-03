@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { filterLegacyHostSettings, type ManagedPluginHostModes } from "../lib/managedPluginHostSettings";
-import { ManagedPluginHostPanel } from "../components/ManagedPluginHostPanel";
 import type {
   AppConfig,
   BackendSelfUpdate,
@@ -45,7 +44,6 @@ import {
 import { setDebugEnabled, useDebugEnabled } from "../components/debug/store";
 import { PageHead } from "../components/PageHead";
 import SettingsPreferences from "./settings/SettingsPreferences";
-import SettingsMemory from "./settings/SettingsMemory";
 import BackendOverview, { BackendMark } from "./settings/BackendOverview";
 import ServiceSettings from "./settings/ServiceSettings";
 import RuntimeStatusList from "./settings/RuntimeStatusList";
@@ -96,6 +94,7 @@ const EMPTY: AppConfig = {
   token: "",
   locale: "",
   theme: "light",
+  appIcon: "shoggoth-ip",
   hermesMode: "local",
   hermesRemotes: [],
   hermesKeepAlive: true,
@@ -141,18 +140,11 @@ export default function SettingsPage() {
   const [runtimesLoading, setRuntimesLoading] = useState(true);
   const [runtimesError, setRuntimesError] = useState(false);
   const [cfg, setCfg] = useState<AppConfig>(EMPTY);
-  const [observedManagedModes, setObservedManagedModes] = useState<ManagedPluginHostModes>({ openclaw: false, hermes: false });
   const managedModes: ManagedPluginHostModes = {
-    openclaw: cfg.openclawPluginHostMode === "managed" || observedManagedModes.openclaw,
-    hermes: cfg.hermesPluginHostMode === "managed" || observedManagedModes.hermes,
+    openclaw: cfg.openclawPluginHostMode === "managed",
+    hermes: cfg.hermesPluginHostMode === "managed",
   };
   const managedModesRef = useRef(managedModes); managedModesRef.current = managedModes;
-  const onHostModeObserved = useCallback((backendId: "openclaw" | "hermes", mode: "existing" | "managed") => {
-    if (mode === "managed") {
-      managedModesRef.current = { ...managedModesRef.current, [backendId]: true };
-      setObservedManagedModes(previous => previous[backendId] ? previous : { ...previous, [backendId]: true });
-    }
-  }, []);
   const isManagedPluginHost = (backendId: string) => (backendId === "openclaw" || backendId === "hermes") && managedModesRef.current[backendId];
   const cfgRef = useRef(cfg);
   cfgRef.current = cfg;
@@ -1260,10 +1252,6 @@ export default function SettingsPage() {
             dependents={dependentChips}
           />
         </section>
-        <div className="settings-managed-plugin-hosts">
-          <ManagedPluginHostPanel backendId="openclaw" onModeObserved={onHostModeObserved} />
-          <ManagedPluginHostPanel backendId="hermes" onModeObserved={onHostModeObserved} />
-        </div>
         </div>
 
         <div className="settings-group" id="settings-general">
@@ -1272,7 +1260,6 @@ export default function SettingsPage() {
             <p className="settings-sech">{t("settings.generalDesc")}</p>
           </header>
           <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} onComputerServiceRestarted={shoggothRetry} />
-          {backendCatalog.some(descriptor => descriptor.surfaces.nativeMemoryConfig === true) && <SettingsMemory />}
           {/* Developer-only switches; hidden in release builds, so they stay last and collapsed. */}
           <details className="settings-advanced" id="settings-debug">
             <summary className="settings-advanced-summary">

@@ -28,10 +28,11 @@ export function useLarkCliSetup(enabled: boolean) {
 }
 
 type Model = ReturnType<typeof useLarkCliSetup>;
-export default function LarkCliSetup({ model, revision }: { model: Model; revision: number }) {
+export function useLarkCliSetupView({ model, revision, enabled = true }: { model: Model; revision: number; enabled?: boolean }) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<"auto" | "existing">("auto"), [brand, setBrand] = useState<"feishu" | "lark">("feishu");
   const [appId, setAppId] = useState(""), [appSecret, setAppSecret] = useState("");
+  useEffect(() => { if (!enabled) { setMode("auto"); setBrand("feishu"); setAppId(""); setAppSecret(""); } }, [enabled]);
   const data = model.data, ready = data?.state === "ready", disabled = model.working || model.active;
   const errorKey = model.actionError || (data?.errorCode ? larkCliErrorKey({ code: data.errorCode }) : "");
   const start = () => {
@@ -41,7 +42,7 @@ export default function LarkCliSetup({ model, revision }: { model: Model; revisi
     setAppSecret("");
     void model.start(input);
   };
-  return <section className={s.updatePanel} data-lark-setup>
+  const content = <section className={s.connectionPanel} data-lark-setup>
     <h3>{t("larkCli.setupTitle")}</h3>
     {model.loading && !data && <p role="status" className={s.muted}>{t("larkCli.authLoading")}</p>}
     {model.error && <p role="alert" className={s.error}>{t("larkCli.errors.authStatus")}</p>}
@@ -72,11 +73,18 @@ export default function LarkCliSetup({ model, revision }: { model: Model; revisi
         <p className={s.muted}>{t("larkCli.autoContinue")}</p>
       </div>
     </div>}
-    <div className={s.actions}>
+
+  </section>;
+  const actions = <div className={s.actions}>
       {ready && <button type="button" className={s.button} disabled={disabled} onClick={start}>{t("larkCli.reauthorize")}</button>}
       {!ready && !model.active && <button type="button" className={s.primary} disabled={disabled || !data || Boolean(model.error) || !data.configured && mode === "existing" && (!appId.trim() || !appSecret.trim())} onClick={start}>{model.working ? t("larkCli.authStages.starting") : t(data?.configured ? "larkCli.signIn" : "larkCli.connect")}</button>}
       {model.active && <button type="button" className={s.button} disabled={model.working} onClick={() => void model.cancel()}>{t("larkCli.cancelSetup")}</button>}
       {!model.active && <button type="button" className={s.button} disabled={model.working} onClick={() => void model.refresh()}>{t("larkCli.checkAuth")}</button>}
-    </div>
-  </section>;
+    </div>;
+  return { content, actions };
+}
+
+export default function LarkCliSetup(props: { model: Model; revision: number }) {
+  const view = useLarkCliSetupView(props);
+  return <>{view.content}{view.actions}</>;
 }

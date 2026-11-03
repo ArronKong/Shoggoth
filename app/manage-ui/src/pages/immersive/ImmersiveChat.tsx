@@ -152,7 +152,7 @@ export interface ImmersiveBundle {
   sessionMeta: string;
   // 身份区状态点：与普通模式 header 状态点同口径（statusOf：running=前台轮次在跑）。
   // 初次连接和重连沿用灰点皮肤，title 分别说明当前状态。
-  liveStatusKind: "queued" | "running" | "online" | "offline" | "connecting" | "reconnecting";
+  liveStatusKind: "running" | "online" | "offline" | "connecting" | "reconnecting";
   recoveryNotice?: string | null;
   statusNotices?: ReactNode;
   activeAgentId: string | null;

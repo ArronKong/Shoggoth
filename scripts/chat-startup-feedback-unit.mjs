@@ -21,7 +21,7 @@ let state = fromStatus({ statusKind: "starting", stage: "preparing" }, 1000);
 for (const stage of ["connecting", "restoring", "waiting"]) {
   state = update(state, { state: "status", statusKind: stage === "waiting" ? "running" : "starting", stage }, false, 5000);
   assert.equal(state.stage, stage);
-  assert.equal(state.since, 1000, "the user sees total waiting time rather than a resetting clock");
+  assert.equal(state.since, 1000, "phase changes retain the original startup timestamp");
 }
 assert.equal(update(state, { state: "accepted" }, false), state);
 assert.equal(update(state, { state: "delta" }, false), state, "empty runtime chunks are not visible progress");

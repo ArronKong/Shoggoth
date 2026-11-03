@@ -18,13 +18,14 @@ export type GroupChatDetailsProps = {
   onSearch?(): void;
   onRename?(): void;
   onSettings?(): void;
+  onSendRecords?(): void;
   onDelete?(): void;
   deleting?: boolean;
 };
 
 /** 群详情占用原聊天区域；公开角色原文仍通过固定版本和摘要校验读取。 */
 export default function GroupChatDetails({ view, onClose, onAddMember, onOpenMember, onSearch,
-  onRename, onSettings, onDelete, deleting = false }: GroupChatDetailsProps) {
+  onRename, onSettings, onSendRecords, onDelete, deleting = false }: GroupChatDetailsProps) {
   const { t } = useTranslation();
   const id = useId();
   const listRef = useRef<HTMLDivElement>(null);
@@ -39,7 +40,7 @@ export default function GroupChatDetails({ view, onClose, onAddMember, onOpenMem
   }, [selected?.id, view.group.id]);
   const active = view.group.status === "active" && !deleting;
   const canAdd = active && members.length < GROUP_MAX_MEMBERS && Boolean(onAddMember);
-  const hasActions = Boolean(onSearch || onRename || onSettings || onDelete || onOpenMember);
+  const hasActions = Boolean(onSearch || onRename || onSettings || onSendRecords || onDelete || onOpenMember);
   const selectMember = (memberId: string) => setSelection({ groupId: view.group.id, memberId });
   const navigateMembers = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const next = event.key === "ArrowRight" ? (index + 1) % members.length
@@ -66,6 +67,7 @@ export default function GroupChatDetails({ view, onClose, onAddMember, onOpenMem
                 {onOpenMember && selected && <Menu.Item className={styles.menuItem} data-group-details-action="profile"
                   onClick={() => onOpenMember(selected.id)}>{t("groupChat.card.open")}</Menu.Item>}
                 {onSearch && <Menu.Item className={styles.menuItem} data-group-details-action="search" onClick={onSearch}>{t("groupChat.search.open")}</Menu.Item>}
+                {onSendRecords && <Menu.Item className={styles.menuItem} data-group-details-action="send-records" onClick={onSendRecords}>{t("groupChat.sendJournal.open")}</Menu.Item>}
                 {onRename && <Menu.Item className={styles.menuItem} data-group-details-action="rename" disabled={!active} onClick={onRename}>{t("groupChat.rename")}</Menu.Item>}
                 {onSettings && <Menu.Item className={styles.menuItem} data-group-details-action="settings" disabled={!active} onClick={onSettings}>{t("groupChat.strategy.settings")}</Menu.Item>}
                 {onDelete && <Menu.Item className={`${styles.menuItem} ${styles.deleteItem}`}

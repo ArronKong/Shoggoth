@@ -20,7 +20,7 @@ const UNCONFIRMED_STATUSES = new Set(["queued", "unknown"]);
 const DEFAULT_UNCONFIRMED_TIMEOUT_MS = 90_000;
 // 准备旧会话时对方表示这条会话已经续接不上（典型：App 重启后 Hermes 不再认它）。
 const SESSION_LOST_CODES = new Set(["HERMES_INSPIRATION_SESSION_UNCONFIRMED", "HERMES_INSPIRATION_WORKSPACE_UNCONFIRMED",
-  "HERMES_INSPIRATION_TARGET_MISMATCH", "INSPIRATION_BINDING_INVALID"]);
+  "HERMES_INSPIRATION_TARGET_MISMATCH", "INSPIRATION_BINDING_INVALID", "OPENCLAW_GROUP_SESSION_ARCHIVED", "GROUP_HOST_SESSION_ARCHIVED"]);
 
 // 外部成员（Hermes / OpenClaw）的群回合（群聊开发计划 §12.2，R4）：经 App 私有桥
 // group.external.*，与灵感外部执行同一合同。执行身份先写进群库再请求启动；终态靠轮询
@@ -30,7 +30,7 @@ const SESSION_LOST_CODES = new Set(["HERMES_INSPIRATION_SESSION_UNCONFIRMED", "H
 // 内部以 "turn:<回合 id>" 标识一次执行。
 class GroupExternalExecutor {
   constructor({ store, getClient, onTerminal, getGroupToolCapability = () => null, onInteraction = () => {},
-    onResumed = () => {}, pollMs = 1500, unconfirmedTimeoutMs = DEFAULT_UNCONFIRMED_TIMEOUT_MS,
+    onResumed = () => {}, onObservation = () => {}, pollMs = 1500, unconfirmedTimeoutMs = DEFAULT_UNCONFIRMED_TIMEOUT_MS,
     lostTimeoutMs = 2 * unconfirmedTimeoutMs, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
     onChanged = () => {}, onError = () => {} }) {
     this.store = store;
@@ -39,6 +39,7 @@ class GroupExternalExecutor {
     this.onTerminal = onTerminal;
     this.onInteraction = onInteraction;
     this.onResumed = onResumed;
+    this.onObservation = onObservation;
     this.pollMs = pollMs;
     this.unconfirmedTimeoutMs = unconfirmedTimeoutMs;
     this.lostTimeoutMs = lostTimeoutMs;
@@ -137,6 +138,7 @@ class GroupExternalExecutor {
     const observed = this.store.recordExecutionObservation({ kind, id, runId: snapshot.runId,
       status: snapshot.status, dispatchState: snapshot.dispatchState, sequence: snapshot.sequence, hostId, at: this.now(), fence: this.fence });
     if (!observed) return;
+    this.onObservation(id);
     if (observed.changed) this.onChanged(observed.groupId);
     if (EXTERNAL_TERMINAL.has(snapshot.status)) {
       let text = snapshot.resultSummary;
@@ -280,6 +282,7 @@ class GroupExternalExecutor {
       if (this.stopped || this.fence !== this.store.getDriverFence()) return;
       const [kind, id] = key.split(":");
       const observed = this.store.recordExecutionObservation({ kind, id, status: "unavailable", at: this.now(), fence: this.fence });
+      if (observed) this.onObservation(id);
       if (observed) this.#unconfirmed(key, observed.record);
       this.#retryCancellation(key);
       this.#schedule(key);

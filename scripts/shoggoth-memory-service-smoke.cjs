@@ -575,16 +575,62 @@ test("Dreaming schedule is durable, dispatches one run per occurrence, and does 
   const maintenance = service.memoryEngine.maintenance, due = maintenance.nextDueAt();
   assert.ok(due > Date.now());
   let calls = 0, release;
-  service.memoryEngine.dream = async () => { calls++; await new Promise(resolve => { release = resolve; }); return { handled: true }; };
+  service.memoryEngine.dream = async () => {
+    calls++;
+    await new Promise(resolve => { release = resolve; });
+    return { outcome: { candidates: 1, applied: 1, failed: 0, degraded: 0 } };
+  };
   maintenance.tick(due); maintenance.tick(due); await Promise.resolve();
   assert.equal(calls, 1); assert.ok(maintenance.nextDueAt() > due);
   release(); await Promise.all([...maintenance.pending.values()]);
   assert.equal(service.memoryEngine.database.db.prepare("SELECT state FROM memory_dream_schedule WHERE profile_id=?").get(profileId).state, "completed");
-  service.memoryEngine.database.db.prepare("UPDATE memory_dream_schedule SET state='running' WHERE profile_id=?").run(profileId);
-  const next = maintenance.nextDueAt(); await f.close();
+  service.memoryEngine.database.db.prepare("UPDATE memory_dream_schedule SET state='running',write_started=1 WHERE profile_id=?").run(profileId);
+  const next = service.memoryEngine.database.db.prepare("SELECT next_at FROM memory_dream_schedule WHERE profile_id=?").get(profileId).next_at;
+  await f.close();
   const restarted = await f.open(true);
+  restarted.memoryEngine.maintenance.tick();
   assert.equal(restarted.memoryEngine.maintenance.nextDueAt(), next);
   assert.equal(restarted.memoryEngine.database.db.prepare("SELECT state FROM memory_dream_schedule WHERE profile_id=?").get(profileId).state, "interrupted");
+});
+
+test("Dreaming catches up only the latest missed night and durably retries a transient pre-write failure", async t => {
+  const f = await serviceFixture(t);
+  let clock = Date.now() - 7 * 86400_000;
+  const options = { now: () => clock, memoryCoreConfig: { memory: { search: { provider: "none" } } } };
+  const first = await f.open(true, options), owner = first.memoryEngine, maintenance = owner.maintenance;
+  maintenance.onDreamScheduleChanged = null;
+  const getRow = engine => engine.database.db.prepare("SELECT * FROM memory_dream_schedule WHERE profile_id=?").get(f.profileId);
+  const earliest = maintenance.nextDueAt();
+  clock = earliest + 3 * 86400_000 + 10_000;
+  let calls = 0;
+  owner.dream = async () => {
+    calls++;
+    throw Object.assign(new Error("isolated lock"), { code: "ERR_SQLITE_ERROR", errcode: 5 });
+  };
+  maintenance.tick();
+  await Promise.all([...maintenance.pending.values()]);
+  const retry = getRow(owner);
+  assert.equal(calls, 1);
+  assert.ok(retry.due_at > earliest + 2 * 86400_000 && retry.due_at <= clock);
+  assert.equal(retry.state, "retry");
+  assert.equal(retry.last_error, "SQLITE_BUSY");
+  assert.equal(retry.write_started, 0);
+  assert.equal(retry.retry_at, clock + 60_000);
+  assert.equal(maintenance.nextDueAt(), retry.retry_at);
+  await f.close();
+  const second = await f.open(true, options), resumed = second.memoryEngine, scheduler = resumed.maintenance;
+  scheduler.onDreamScheduleChanged = null;
+  scheduler.tick();
+  assert.equal(getRow(resumed).attempts, 1);
+  clock = retry.retry_at;
+  scheduler.tick(); scheduler.tick();
+  await Promise.all([...scheduler.pending.values()]);
+  const completed = getRow(resumed);
+  assert.equal(completed.due_at, retry.due_at);
+  assert.equal(completed.attempts, 2);
+  assert.equal(completed.state, "empty");
+  assert.equal(completed.retry_at, null);
+  assert.equal(scheduler.nextDueAt(), completed.next_at);
 });
 
 test("optional Active Memory uses upstream trigger policy and a read-only grounded recall loop", async t => {

@@ -1231,22 +1231,13 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       try {
         const id = requestUrl?.searchParams.get("id") || "";
         const seqParam = (name) => (requestUrl?.searchParams.has(name) ? Number(requestUrl.searchParams.get(name)) : null);
-        // 群功能开关（config-store groupChatEnabled）：关闭后只读、停止与管理仍可用，会引发新群活动的写入一律拒绝。
-        const enabled = !configStore || configStore.read().groupChatEnabled !== false;
-        const startsActivity = method === "POST" && (segs.length === 1
-          || (segs.length === 2 && ["members", "messages"].includes(segs[1]))
-          || (segs.length === 3 && segs[1] === "turns" && segs[2] === "retry"));
-        if (!enabled && startsActivity) {
-          const { PUBLIC_MESSAGES } = require("./agent-service/group-chat-protocol");
-          return sendJson(res, 409, { code: "GROUP_CHAT_DISABLED", error: PUBLIC_MESSAGES.GROUP_CHAT_DISABLED });
-        }
         if (segs.length === 1 && method === "GET") return sendJson(res, 200, { ...await registry.listGroupChats({
-          includeArchived: requestUrl?.searchParams.get("includeArchived") === "1" }), enabled });
+          includeArchived: requestUrl?.searchParams.get("includeArchived") === "1" }), enabled: true });
         if (segs.length === 2 && segs[1] === "hosts" && method === "GET") return sendJson(res, 200, await registry.listGroupChatHostMembers());
         if (segs.length === 3 && segs[1] === "hosts" && segs[2] === "test" && method === "POST") return sendJson(res, 200,
           await registry.testGroupChatHost((await readJsonBody(req)).peer));
         if (segs.length === 2 && segs[1] === "diagnostics" && method === "GET") return sendJson(res, 200,
-          { enabled, ...await registry.getGroupChatDiagnostics() });
+          { ...await registry.getGroupChatDiagnostics(), enabled: true });
         if (segs.length === 1 && method === "POST") return sendJson(res, 200,
           await registry.createGroupChat(await readJsonBody(req)));
         if (segs.length === 2 && segs[1] === "detail" && method === "GET") return sendJson(res, 200,
@@ -1780,17 +1771,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
             return sendJson(res, 409, { code: "LAST_BACKEND_REQUIRED", error: "At least one connection must remain enabled." });
           }
         }
-        const groupChatWasEnabled = configStore.read().groupChatEnabled !== false;
         const saved = configStore.write(writable);
-        // 关闭群功能的那一刻停掉进行中的发言与后台工作（尽力而为：一个群失败不影响其他群，也不影响保存）。
-        if (groupChatWasEnabled && saved.groupChatEnabled === false && registry) {
-          void (async () => {
-            try {
-              const { groups } = await registry.listGroupChats({ includeArchived: false });
-              await Promise.all(groups.map((view) => registry.stopGroupChatDiscussion(view.group.id).catch(() => {})));
-            } catch { /* 群聊服务不可用时没有可停的活动 */ }
-          })();
-        }
         // Respond BEFORE applying: onConfigChanged may reload the Electron window,
         // which would abort THIS fetch mid-flight (the renderer navigates away
         // before it sees the 200), making a successful save look like it failed.

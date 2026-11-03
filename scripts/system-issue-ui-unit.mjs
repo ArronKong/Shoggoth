@@ -57,6 +57,7 @@ function fixture(locale = "zh-CN") {
   const api = load("api/client.ts", name => {
     if (name === "i18next") return { __esModule: true, default: { t } };
     if (name === "../lib/system-issues") return issues;
+    if (name === "../lib/dashboardPromptResponses") return load("lib/dashboardPromptResponses.ts");
     if (name === "./memoryProviderOwnerDto" || name === "../lib/cronVisibility" || name === "../lib/runtimeVisibility") return {};
     return apiRequire(name);
   }, { fetch: async () => { writes++; return { ok: false, status: 409, text: async () => JSON.stringify(state.response) }; } });

@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const { createDesktopAppInstallPreparation } = require("../app/desktop-app-install-preparation");
 const {
   CHANNELS,
   CHECK_INTERVAL_MS,
@@ -131,12 +132,90 @@ async function main() {
   }
 
   {
-    let reason = "active-runs";
+    let finishStop;
+    let stops = 0;
+    let serviceRequests = 0;
+    let held = false;
+    const stopping = new Promise((resolve) => { finishStop = resolve; });
+    const preparation = createDesktopAppInstallPreparation({
+      launchAgent: {
+        whenIdle: async () => {},
+        status: async () => ({ supported: true, loaded: true }),
+        stop: async () => { stops += 1; await stopping; },
+        start: async () => {},
+      },
+      serviceRequest: async () => {
+        serviceRequests += 1;
+        throw Object.assign(new Error("unresponsive old Service"), { code: "REQUEST_TIMEOUT" });
+      },
+      suspendBackgroundActions: () => {
+        held = true;
+        return () => { held = false; };
+      },
+    });
+    const item = fixture(preparation);
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(stops, 0, "downloading an update must not stop background work");
+    assert.equal(await item.handlers.get(CHANNELS.install)({ sender: {}, senderFrame: {} }), false);
+    assert.equal(stops, 0, "only the trusted manual action can stop background work");
+    const install = item.handlers.get(CHANNELS.install)(item.event);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(stops, 1, "the manual install action must stop an unresponsive old Service");
+    assert.equal(serviceRequests, 0);
+    assert.equal(item.controller.getState().status, "preparing");
+    assert.equal(item.deferred.length, 0, "the installer must wait for the confirmed stop");
+    finishStop();
+    assert.equal(await install, true);
+    item.deferred.shift()();
+    assert.equal(item.updater.installs, 1);
+    assert.equal(held, true, "background restarts stay blocked until installation finishes or fails");
+    item.controller.dispose();
+    await preparation.restoreAfterInstallFailure();
+    assert.equal(held, false);
+  }
+
+  {
+    let stopFails = true;
+    let starts = 0;
+    let held = false;
+    const preparation = createDesktopAppInstallPreparation({
+      launchAgent: {
+        whenIdle: async () => {},
+        status: async () => ({ supported: true, loaded: true }),
+        stop: async () => { if (stopFails) throw new Error("stop not confirmed"); },
+        start: async () => { starts += 1; },
+      },
+      suspendBackgroundActions: () => {
+        held = true;
+        return () => { held = false; };
+      },
+    });
+    const item = fixture(preparation);
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
+    assert.equal(item.controller.getState().installBlockReason, "background-stop-failed");
+    assert.equal(item.deferred.length, 0, "an unconfirmed stop must not start installation");
+    assert.equal(held, false);
+    assert.equal(starts, 0);
+    stopFails = false;
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), true);
+    item.deferred.shift()();
+    assert.equal(item.updater.installs, 1);
+    item.updater.emit("error", new Error("installer failed"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(starts, 1, "an installer failure restores the background stopped by this update");
+    assert.equal(held, false);
+    assert.equal(item.controller.getState().installBlockReason, "install-failed");
+    item.controller.dispose();
+  }
+
+  {
+    let reason = "background-stop-failed";
     const item = fixture({ prepareInstall: async () => reason });
     item.updater.emit("update-downloaded", { version: "0.8.126" });
     assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
     assert.equal(item.controller.getState().status, "downloaded");
-    assert.equal(item.controller.getState().installBlockReason, "active-runs");
+    assert.equal(item.controller.getState().installBlockReason, "background-stop-failed");
     assert.equal(item.controller.getState().canInstall, true);
     assert.equal(item.deferred.length, 0, "blocked install must leave the app running");
     reason = null;

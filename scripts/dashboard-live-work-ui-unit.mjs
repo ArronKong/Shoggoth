@@ -15,6 +15,11 @@ const document = { visibilityState: 'visible',
   addEventListener: (name, fn) => listeners.set(name, fn),
   removeEventListener: name => listeners.delete(name),
 };
+const responseModule = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'app/manage-ui/src/lib/dashboardPromptResponses.ts'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText, { exports: responseModule.exports });
+const { acknowledgeDashboardPrompt } = responseModule.exports;
 const source = ts.transpileModule(fs.readFileSync(path.join(root, 'app/manage-ui/src/pages/dashboard/useDashboardLiveWork.ts'), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
@@ -24,23 +29,35 @@ vm.runInNewContext(source, { exports: module.exports, document, window: {
   clearInterval: id => timers.delete(id),
 }, require: name => name.endsWith('/api/client') ? {
   getDashboardLiveWork: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
-} : require(name) });
+} : name.endsWith('/lib/dashboardPromptResponses') ? responseModule.exports : require(name) });
 
-let state;
-const fallback = { generatedAt: 1, running: [{ backend: 'a', supported: true, items: [{ id: 'active-run' }] }],
-  approvals: [{ backend: 'a', supported: true, items: [] }] };
+let state, displayedWork;
+const fallback = { generatedAt: 1, running: [{ backend: 'a', supported: true, items: [{ id: 'active-run' },
+  { id: 'old-waiting-run', status: 'waiting_approval', waitingRequestId: 'cached-task-request' }] }],
+  approvals: [{ backend: 'a', supported: true, items: [{ id: 'old-cached-approval' }] }] };
 const failed = { backend: 'a', supported: false, reason: 'error', items: [] };
-const snapshot = (id) => ({ generatedAt: 2, running: [{ backend: 'a', supported: true, items: id ? [{ id }] : [] }], approvals: fallback.approvals });
-function Host({ scope = '', seed = fallback }) { state = module.exports.useDashboardLiveWork(seed, scope); return null; }
+const snapshot = (id) => ({ generatedAt: 2, running: [{ backend: 'a', supported: true, items: id ? [{ id }] : [] }],
+  approvals: [{ backend: 'a', supported: true, items: [] }] });
+function Host({ scope = '', seed = fallback }) {
+  state = module.exports.useDashboardLiveWork(seed, scope);
+  displayedWork = state.work || seed;
+  return null;
+}
 const settle = async fn => act(async () => { fn?.(); await new Promise(setImmediate); });
 const tick = () => { for (const fn of timers.values()) fn(); };
 let renderer;
 await settle(() => { renderer = create(React.createElement(Host)); });
 assert.equal(requests.length, 1, 'Live work refreshes immediately on entry');
+assert.equal(displayedWork.approvals[0]?.items.length || 0, 0,
+  'Cached approvals must not flash as pending before the live read returns');
+assert.equal(displayedWork.running[0].items.length, 1, 'A cached waiting task must not recreate an approval row');
 await settle(tick);
 assert.equal(requests.length, 1, 'Slow polls cannot overlap or accumulate');
 await settle(() => requests[0].resolve({ generatedAt: 2, running: [failed], approvals: [failed] }));
 assert.equal(state.work.running[0].items[0].id, 'active-run', 'A failed first poll preserves the summary fallback');
+assert.equal(state.work.running[0].items.length, 1, 'A failed first poll cannot revive cached waiting tasks');
+assert.equal(state.work.approvals[0].items.length, 0,
+  'A failed first poll cannot revive approvals from a historical summary');
 await settle(tick);
 assert.equal(requests.length, 2);
 await settle(() => requests[1].resolve(snapshot('new-run')));
@@ -75,13 +92,55 @@ await settle(() => { renderer = create(React.createElement(Host, { scope: 'a' })
 const previousRequest = requests.at(-1);
 const seedB = { generatedAt: 4, running: [{ backend: 'b', supported: true, items: [{ id: 'b-run' }] }], approvals: [] };
 await settle(() => renderer.update(React.createElement(Host, { scope: 'b', seed: seedB })));
-assert.equal(state.work, undefined, 'Connection scope changes clear the old live snapshot immediately');
+assert.equal(state.work.running[0].items[0].id, 'b-run', 'Connection scope changes select only the new fallback');
 assert.notEqual(requests.at(-1), previousRequest, 'A scope change starts a fresh poll without waiting for the previous request');
 await settle(() => previousRequest.resolve(snapshot('disabled-a-run')));
-assert.equal(state.work, undefined, 'A poll from a disconnected scope cannot repopulate live work');
+assert.equal(state.work.running[0].items[0].id, 'b-run', 'A poll from a disconnected scope cannot repopulate live work');
 await settle(() => requests.at(-1).resolve({ generatedAt: 5,
   running: [{ backend: 'b', supported: false, reason: 'error', items: [] }], approvals: [],
 }));
 assert.equal(state.work.running[0].items[0].id, 'b-run', 'Failure fallback belongs to the new connection scope');
 await settle(() => renderer.unmount());
-console.log('PASS Dashboard live polling: single-flight, response ordering, source failures, connection scope and cleanup');
+
+// A Chat receipt must win immediately, including over a late poll and source
+// errors, without hiding the next request or another backend's request.
+const identity = { backendId: 'a', runId: 'chat-run', requestId: 'answered-request' };
+const approval = { id: 'approval-a', ...identity, source: 'chat', kind: 'approval' };
+const foreign = { ...approval, id: 'approval-b', backendId: 'b' };
+const taskIdentity = { backendId: 'a', runId: 'task-run', requestId: 'task-request' };
+const live = { generatedAt: 10,
+  approvals: [{ backend: 'a', supported: true, items: [approval, { id: 'task-approval', ...taskIdentity }] },
+    { backend: 'b', supported: true, items: [foreign] }],
+  running: [{ backend: 'a', supported: true, items: [{ id: 'task', runId: 'task-run', status: 'waiting_approval',
+    waitingRequestId: 'task-request', kind: 'inspiration' }] }],
+};
+await settle(() => { renderer = create(React.createElement(Host, { scope: 'a,b' })); });
+await settle(() => requests.at(-1).resolve(live));
+assert.equal(state.work.approvals[0].items.length, 2, 'A verified pending request stays visible until acknowledged');
+await settle(tick);
+const latePoll = requests.at(-1);
+await settle(() => acknowledgeDashboardPrompt(identity));
+assert.equal(state.work.approvals[0].items.length, 1, 'Chat acknowledgment clears its Dashboard approval immediately');
+assert.equal(state.work.approvals[1].items.length, 1, 'The same request ID on a different backend stays pending');
+await settle(() => latePoll.resolve(live));
+assert.equal(state.work.approvals[0].items.length, 1, 'A poll started before the Chat receipt cannot resurrect the approval');
+await settle(() => acknowledgeDashboardPrompt(taskIdentity));
+assert.equal(state.work.running[0].items[0].status, 'running', 'Answering a task keeps the task and clears only its wait');
+assert.equal(state.work.running[0].items[0].waitingRequestId, undefined);
+await settle(tick);
+await settle(() => requests.at(-1).resolve({ generatedAt: 11, running: [failed], approvals: [failed] }));
+assert.equal(state.work.approvals[0].items.length, 0, 'Source failure cannot revive an acknowledged approval');
+await settle(tick);
+await settle(() => requests.at(-1).resolve({ ...live, approvals: [{ backend: 'a', supported: true,
+  items: [{ ...approval, id: 'approval-next', requestId: 'next-request' }] }] }));
+assert.equal(state.work.approvals[0].items[0].requestId, 'next-request', 'The next request in the same run remains actionable');
+await settle(() => renderer.unmount());
+await settle(() => { renderer = create(React.createElement(Host, { scope: 'a,b', seed: live })); });
+assert.equal(state.work.approvals[0]?.items.length || 0, 0, 'Revisiting Dashboard never renders cached pending approvals');
+await settle(() => requests.at(-1).resolve(live));
+assert.equal(state.work.approvals[0].items.length, 0, 'Receipts survive a Dashboard route remount');
+assert.equal(state.work.approvals[1].items.length, 1);
+await settle(() => renderer.unmount());
+assert.equal(timers.size, 0);
+assert.equal(listeners.size, 0);
+console.log('PASS Dashboard live polling and Chat receipt sync: cache entry, acknowledgment races, exact ownership, source failures and route remount');

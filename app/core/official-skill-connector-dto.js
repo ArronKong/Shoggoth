@@ -76,7 +76,7 @@ const VERIFICATION_HOSTS = Object.freeze({
   "quark-drive": ["pan.quark.cn"],
   "rollinggo-hotel": ["api.rollinggo.store", "api.rollinggo.cn"],
   fliggy: ["open.fly.ai", "flyai.open.fliggy.com"],
-  "meituan-paotui": ["passport.meituan.com", "waimai.meituan.com", "i.meituan.com", "e.meituan.com"], weread: ["weread.qq.com"],
+  "meituan-paotui": ["dpurl.cn", "passport.meituan.com", "waimai.meituan.com", "i.meituan.com", "e.meituan.com"], weread: ["weread.qq.com"],
   alipay: ["u.alipay.cn", "u.alipay.com", "render.alipay.com", "aipay.alipay.com"],
   "netease-music": ["music.163.com", "interface.music.163.com", "developer.music.163.com", "163cn.tv"],
 });

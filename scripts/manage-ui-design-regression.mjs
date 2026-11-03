@@ -537,7 +537,7 @@ const CATALOG_PAGE_REQUIREMENTS = [
     declarations: ["display: flex;", "gap: 16px;", "min-height: 0;", "min-width: 0;"],
   },
   { kind: "text", id: "skills-grid-class", path: "pages/SkillsPage.tsx", expected: 'className="skill-grid"' },
-  { kind: "text", id: "skills-card-class", path: "pages/SkillsPage.tsx", expected: 'className={`skill-card${isSel ? " skill-card-selected" : ""}${s.enabled ? "" : " skill-off"}`}' },
+  { kind: "text", id: "skills-card-class", path: "pages/SkillsPage.tsx", expected: 'className={`skill-card${s.enabled ? "" : " skill-off"}`}' },
   {
     kind: "css-rule",
     id: "skills-list",
@@ -550,7 +550,7 @@ const CATALOG_PAGE_REQUIREMENTS = [
     id: "skills-row-surface",
     path: "manage-skin.css",
     selector: ".management-page.skills-page .skill-card",
-    declarations: ["display: flex;", "background: var(--ui-surface-1);", "border: 1px solid var(--ui-hairline);", "border-radius: 24px;", "padding: 14px 24px;"],
+    declarations: ["display: flex;", "background: var(--ui-surface-1);", "border: 0;", "border-radius: 24px;", "padding: 14px 24px;"],
   },
   {
     kind: "css-rule",
@@ -571,7 +571,7 @@ const CATALOG_PAGE_REQUIREMENTS = [
     id: "skills-disabled-readable",
     path: "manage-skin.css",
     selector: ".management-page.skills-page .skill-off",
-    declarations: ["background: var(--ui-surface-2);", "opacity: 1;"],
+    declarations: ["background: var(--ui-surface-1);", "opacity: 1;"],
   },
   {
     kind: "css-rule",

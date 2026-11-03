@@ -16,13 +16,14 @@ import {
 import { usePageCache } from "../lib/usePageCache";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import BackendTabs from "../components/BackendTabs";
-import FilterTabs from "../components/FilterTabs";
+import Modal from "../components/Modal";
+import ChatMarkdown from "../components/ChatMarkdown";
 import { useBackendCatalog, useBackendState } from "../lib/backends";
-import { useStickyState } from "../lib/useStickyState";
 import { Field, Switch, TextArea, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
-import { toSanitizedMarkdownHtml } from "../lib/markdown";
+import { markdownCodeBlock, splitSkillDocument } from "../lib/skillDocument";
 import { skillIdentity } from "../lib/skillIdentity";
+import styles from "./SkillsPage.module.css";
 const SelfImprovementPanel = lazy(() => import("./SelfImprovementPanel"));
 
 const EMPTY_USAGE = {
@@ -51,8 +52,6 @@ export default function SkillsPage() {
   const activeBackendDescriptor = backendCatalog.find((descriptor) => descriptor.id === backend);
   const isNativeSkills = activeBackendDescriptor?.surfaces.agentHarness === true;
   const backendName = activeBackendDescriptor?.name || backend;
-  // 「只看启用」的原生 checkbox 换成三态筛选胶囊（全部/已启用/已停用）。
-  const [status, setStatus] = useStickyState<"" | "on" | "off">("skills.status", "");
   const [page, setPage] = useState(0);
   const [nativeReload, setNativeReload] = useState(0);
   const [nativeRetry, setNativeRetry] = useState(0);
@@ -63,16 +62,17 @@ export default function SkillsPage() {
   const [nativeErrorState, setNativeErrorState] = useState<{ key: string; error: string } | null>(null);
   const skillMainRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
-  const skillDetailRef = useRef<HTMLElement>(null);
   const detailOpenerRef = useRef<HTMLButtonElement | null>(null);
+  const detailSnapshot = useRef<UnifiedSkill | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
-  // 保存完整安装身份，刷新后重新解析当前快照；同名版本与不同 Agent 不共享选中态。
+  // 详情按完整安装身份定位，避免混淆同名版本或不同 Agent 的技能。
   const [selectedIdentity, setSelectedIdentity] = useState<string | null>(null);
+  const [learnedBusy, setLearnedBusy] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const [envText, setEnvText] = useState("");
   const [saving, setSaving] = useState(false);
-  const [preview, setPreview] = useState<{ key: string; content: string } | null>(null);
+  const [preview, setPreview] = useState<{ key: string; content: string; error?: string } | null>(null);
   const previewRequestId = useRef(0);
   const [packageBusy, setPackageBusy] = useState(false);
 
@@ -99,13 +99,13 @@ export default function SkillsPage() {
     `skills:${backend}:default`,
     () => isNativeSkills ? Promise.resolve([]) : listSkills(backend),
   );
-  const nativeKey = JSON.stringify([backend, status, nativeReload]);
+  const nativeKey = JSON.stringify([backend, nativeReload]);
   const nativeRequestKey = JSON.stringify([nativeKey, page, nativeRetry]);
   useEffect(() => {
     if (!isNativeSkills) return;
     let current = true;
     setNativeErrorState(null);
-    void listSkillsPage(backend, undefined, { query: "", status, pageIndex: page,
+    void listSkillsPage(backend, undefined, { query: "", status: "", pageIndex: page,
       limit: SKILLS_PER_BATCH, expectedRevision: page === 0 ? null : nativeRevision.current })
       .then((value) => {
         if (!current) return;
@@ -130,7 +130,7 @@ export default function SkillsPage() {
           error: error instanceof Error ? error.message : String(error) });
       });
     return () => { current = false; };
-  }, [backend, isNativeSkills, nativeKey, nativeRequestKey, page, status]);
+  }, [backend, isNativeSkills, nativeKey, nativeRequestKey, page]);
   const nativeSnapshot = nativePageState?.key === nativeKey ? nativePageState : null;
   const nativePage = nativeSnapshot?.page;
   const skills = isNativeSkills ? nativeSnapshot?.skills ?? [] : skillsData ?? [];
@@ -196,18 +196,12 @@ export default function SkillsPage() {
   // usage 到位前全是 0，等价于字母序——叠加层到达后自动重排。
   const shown = useMemo(() => {
     if (isNativeSkills) return skills;
-    const res = skills.filter((s) => {
-      if (status === "on" && !s.enabled) return false;
-      if (status === "off" && s.enabled) return false;
-      return true;
-    });
-    return res.sort((a, b) => {
+    return [...skills].sort((a, b) => {
       const d = (usage.get(b.name) || 0) - (usage.get(a.name) || 0);
       if (d) return d;
       return a.name.localeCompare(b.name);
     });
-  }, [skills, status, usage, isNativeSkills]);
-  const matchedCount = isNativeSkills ? nativePage?.matchCount ?? 0 : shown.length;
+  }, [skills, usage, isNativeSkills]);
   const visibleSkills = isNativeSkills ? shown : shown.slice(0, (page + 1) * SKILLS_PER_BATCH);
   const hasMore = isNativeSkills
     ? Boolean(nativePage && nativePage.pageIndex + 1 < nativePage.pageCount)
@@ -226,16 +220,21 @@ export default function SkillsPage() {
     }, { rootMargin: "200px 0px" });
     observer.observe(target);
     return () => { requested = true; observer.disconnect(); };
-  }, [hasMore, loading, error, visibleSkills.length, backend, status]);
+  }, [hasMore, loading, error, visibleSkills.length, backend]);
 
-  const selected = useMemo(
-    () => (selectedIdentity ? skills.find((s) => skillIdentity(s) === selectedIdentity) || null : null),
-    [skills, selectedIdentity],
-  );
+  const selected = useMemo(() => {
+    if (!selectedIdentity) return null;
+    return skills.find((skill) => skillIdentity(skill) === selectedIdentity)
+      // 刷新期间保留当前详情；收到新快照后，已移除的技能仍会关闭弹窗。
+      || (loading && detailSnapshot.current && skillIdentity(detailSnapshot.current) === selectedIdentity
+        ? detailSnapshot.current : null);
+  }, [skills, selectedIdentity, loading]);
+  useEffect(() => { detailSnapshot.current = selected; }, [selected]);
   const learnedSelection = useMemo(() => selected?.source === "learned" && selected.id && selected.contentHash
     ? { id: selected.id, versionHash: selected.contentHash } : null, [selected]);
   const previewKey = isNativeSkills && selected && selected.source !== "learned"
     ? skillIdentity(selected) : null;
+  const skillDocument = useMemo(() => splitSkillDocument(preview?.key === previewKey ? preview.content : ""), [preview, previewKey]);
 
   useEffect(() => {
     const requestId = ++previewRequestId.current;
@@ -250,7 +249,9 @@ export default function SkillsPage() {
       })
       .catch((error) => {
         if (previewRequestId.current === requestId) {
-          toast.error(error instanceof Error ? error.message : String(error));
+          const message = error instanceof Error ? error.message : String(error);
+          setPreview({ key: previewKey, content: "", error: message });
+          toast.error(message);
         }
       });
 
@@ -298,21 +299,13 @@ export default function SkillsPage() {
   };
   const closeDetail = () => {
     setSelectedIdentity(null);
+  };
+  const finishDetailClose = (open: boolean) => {
+    if (open) return;
     const opener = detailOpenerRef.current;
     detailOpenerRef.current = null;
-    if (typeof window !== "undefined") window.requestAnimationFrame(() => {
-      if (opener?.isConnected) opener.focus();
-    });
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
   };
-  useEffect(() => {
-    if (!selectedIdentity || typeof window === "undefined"
-      || !window.matchMedia?.("(max-width: 900px)").matches) return;
-    const detail = skillDetailRef.current;
-    // The page itself owns scrolling at narrow widths. Returning it to the
-    // top keeps the detail heading and close control visible below the toolbar.
-    detail?.closest<HTMLElement>(".skills-page")?.scrollTo({ top: 0 });
-    detail?.querySelector<HTMLButtonElement>(".skill-detail-x")?.focus({ preventScroll: true });
-  }, [selectedIdentity]);
 
   const uninstallNative = async () => {
     if (!selected || selected.source !== "user") return;
@@ -388,17 +381,6 @@ export default function SkillsPage() {
       <div className="ui-toolbar">
         <BackendTabs value={backend} onChange={(value) => {
           setBackend(value); setPage(0); setSelectedIdentity(null); }} surface="skills" />
-        <FilterTabs
-          value={status}
-          onChange={(v) => {
-            setStatus(v as "" | "on" | "off"); setPage(0); setSelectedIdentity(null); }}
-          ariaLabel={t("skills.filterAria")}
-          items={[
-            { value: "", label: t("skills.filterAll") },
-            { value: "on", label: t("skills.filterOn") },
-            { value: "off", label: t("skills.filterOff") },
-          ]}
-        />
       </div>
 
       {error && <div className="error">{t("skills.errorPrefix", { msg: error })}
@@ -409,27 +391,18 @@ export default function SkillsPage() {
       {!loading && !error && totalCount === 0 && (
         <p className="muted">{t("skills.empty")}</p>
       )}
-      {!loading && !error && totalCount > 0 && matchedCount === 0 && (
-        <div className="ui-empty">{t("skills.noMatch")}</div>
-      )}
 
-      {/* 主区 + 右侧详情，结构同 CLI 页的 .cli-body 双栏；列数交给 auto-fill，
-          详情展开吃掉 401px 后网格自己减列（与 CLI 同一套规则，别加 split 类）。 */}
+      {/* 详情独立弹出，卡片网格保持原来的列数和滚动位置。 */}
       <div className="skill-body">
         <div className="skill-main-content" ref={skillMainRef}>
           {visibleSkills.length > 0 && (
             <div className="skill-grid">
               {visibleSkills.map((s) => {
                 const identity = skillIdentity(s);
-                const used = usage.get(isNativeSkills ? identity : s.name) || 0;
-                const isSel = selectedIdentity === identity;
-                const usageBadge = usageSupported && (used > 0
-                  ? <span className="skill-badge skill-badge-used">{t("skills.usedTimes", { count: used })}</span>
-                  : <span className="skill-badge skill-badge-never">{t("skills.neverUsed")}</span>);
                 return (
                   <article
                     key={identity}
-                    className={`skill-card${isSel ? " skill-card-selected" : ""}${s.enabled ? "" : " skill-off"}`}
+                    className={`skill-card${s.enabled ? "" : " skill-off"}`}
                     title={s.title || s.name}
                   >
                     <button
@@ -439,24 +412,9 @@ export default function SkillsPage() {
                       onClick={(event) => openDetail(s, event?.currentTarget)}
                     />
                     <div className="skill-card-top">
-                      <span className="skill-emoji" aria-hidden="true">
-                        {s.emoji || "🧩"}
-                      </span>
                       <span className="skill-name">{s.title || s.name}</span>
-                      {s.source !== "learned" && s.version && <span className="skill-badge">v{s.version}</span>}
-                      {isNativeSkills && s.globalEnabled && <span className="skill-badge">
-                        {t("skills.globalScope")}</span>}
-                      {s.source !== "learned" && usageBadge}
                     </div>
-                    {isNativeSkills && s.source !== "user" && <div className="skill-card-tags">
-                      <span className="skill-badge" title={s.agentId}>{s.agentName || s.agentId}</span>
-                      {s.source === "learned" && <>
-                        <span className="skill-badge">{t("skills.learnedSource")}</span>
-                        <span className="skill-badge">v{s.contentHash?.slice(0, 12) || s.version}</span>
-                        {usageBadge}
-                      </>}
-                    </div>}
-                    {/* 开关放第二行右下角：跟徽章挤在标题行会把技能名压到 ~110px 全是省略号。 */}
+                    {/* 开关放介绍右下角，名称独占标题行。 */}
                     <div className="skill-card-foot">
                       <div className="skill-desc">{s.description || ""}</div>
                       <span className="skill-card-switch">
@@ -479,161 +437,161 @@ export default function SkillsPage() {
             </div>
           )}
         </div>
+      </div>
 
-        {isNativeSkills && learnedSelection && selected?.agentId && <Suspense fallback={null}>
+      <Modal
+        open={Boolean(selected)}
+        title={selected?.title || selected?.name}
+        onClose={closeDetail}
+        onOpenChangeComplete={finishDetailClose}
+        dismissible={!saving && !packageBusy && !learnedBusy && busy !== selectedIdentity}
+        className={styles.detailModal}
+        width={880}
+        subtitle={selected?.source === "learned" ? t("skills.learnedSource") : backendName}
+      >
+        {isNativeSkills && learnedSelection && selected?.agentId && <Suspense fallback={<p role="status">{t("common.loading")}</p>}>
           <SelfImprovementPanel key={`${backend}:${selected.agentId}`} backend={backend} agentId={selected.agentId}
             detailOnly skillSelection={learnedSelection} onSelectionClosed={closeDetail}
-            onSkillsChanged={() => void refresh()} />
+            onBusyChange={setLearnedBusy} onSkillsChanged={() => void refresh()} />
         </Suspense>}
 
         {selected && selected.source !== "learned" && (
-          <aside className="skill-detail" ref={skillDetailRef}>
-            <div className="skill-detail-head">
-              <button
-                className="skill-detail-x"
-                onClick={closeDetail}
-                aria-label={t("common.close")}
-              >
-                ✕
-              </button>
-              <h3 className="skill-detail-name">
-                <span className="skill-detail-emoji" aria-hidden="true">{selected.emoji || "🧩"}</span>
-                {selected.name}
-              </h3>
-              <div className="skill-detail-meta">
-                {backendName}
-                {isNativeSkills && selected.source !== "user" ? ` · ${selected.agentName || selected.agentId}` : ""}
-                {selected.version ? ` · v${selected.version}` : ""}
-                {isNativeSkills && selected.globalEnabled ? ` · ${t("skills.globalScope")}` : ""}
-                {selected.source ? ` · ${selected.source}` : ""}
-                {selected.category ? ` · ${selected.category}` : ""}
-              </div>
+          <div className={`${styles.detail} skill-detail`}>
+            <div className={styles.detailSummary}>
+              <span className={styles.skillState} data-active={selected.enabled}>
+                {selected.enabled ? t("skills.filterOn") : t("skills.filterOff")}
+              </span>
+              <Switch
+                checked={selected.enabled}
+                disabled={busy === skillIdentity(selected)}
+                ariaLabel={`${t("skills.enabledLabel")}: ${selected.name}${selected.version ? ` v${selected.version}` : ""}`}
+                onChange={(v) => toggle(selected, v)}
+              />
             </div>
 
-            <section className="skill-sec">
-              <div className="skill-sec-head">
-                <h4>{t("skills.statusSection")}</h4>
-                <Switch
-                  checked={selected.enabled}
-                  disabled={busy === skillIdentity(selected)}
-                  ariaLabel={`${t("skills.enabledLabel")}: ${selected.name}${selected.version ? ` v${selected.version}` : ""}`}
-                  onChange={(v) => toggle(selected, v)}
-                />
+            <details className={styles.inspector}>
+              <summary>{t("skills.detailsSection")}</summary>
+              <div className={styles.inspectorBody}>
+                <span className="skill-detail-meta">
+                  {backendName}
+                  {isNativeSkills && selected.source !== "user" && selected.agentName !== backendName ? ` · ${selected.agentName || selected.agentId}` : ""}
+                  {selected.version ? ` · v${selected.version}` : ""}
+                  {isNativeSkills && selected.globalEnabled ? ` · ${t("skills.globalScope")}` : ""}
+                  {selected.category ? ` · ${selected.category}` : ""}
+                </span>
+                {isNativeSkills && selected.description && skillDocument.body && (
+                  <section className="skill-sec">
+                    <h4>{t("skills.descriptionSection")}</h4>
+                    <ChatMarkdown className="chat-md markdown-document" text={selected.description} />
+                  </section>
+                )}
+                {!usageLoaded ? (
+                  <section className="skill-sec">
+                    <div className="skill-sec-head"><h4>{t("skills.usageHeading")}</h4></div>
+                    <p className="skill-sec-desc">{t("common.loading")}</p>
+                  </section>
+                ) : usageSupported ? (() => {
+                  const agents = usageByAgent.get(isNativeSkills ? skillIdentity(selected) : selected.name);
+                  const rows = agents ? [...agents.entries()].sort((a, b) => b[1] - a[1]) : [];
+                  const total = rows.reduce((n, [, c]) => n + c, 0);
+                  const max = rows.length ? rows[0][1] : 0;
+                  return (
+                    <section className="skill-sec">
+                      <div className="skill-sec-head">
+                        <h4>{t("skills.usageHeading")}</h4>
+                        {total > 0 && <span className="skill-sec-aside">{t("skills.usageTotal", { count: total })}</span>}
+                      </div>
+                      {rows.length === 0 ? (
+                        <p className="skill-sec-desc">{t("skills.usageNever")}</p>
+                      ) : (
+                        <ul className="skill-usage-list">
+                          {rows.map(([agentId, count]) => (
+                            <li key={agentId} className="skill-u-row">
+                              <AgentAvatarView agentId={agentId} className="skill-u-avatar" />
+                              <span className="skill-u-label" title={agentId}>{agentId} · {count}x</span>
+                              <span className="skill-u-bar"><span style={{ width: `${max ? Math.round((count / max) * 100) : 0}%` }} /></span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {scanLimit ? <p className="skill-sec-desc">{t("skills.usageScanNote", { count: scanLimit })}</p> : null}
+                    </section>
+                  );
+                })() : (
+                  <section className="skill-sec">
+                    <div className="skill-sec-head"><h4>{t("skills.usageHeading")}</h4></div>
+                    <p className="skill-sec-desc">{t("skills.usageUnsupported")}</p>
+                  </section>
+                )}
+                {isNativeSkills && (
+                  <section className="skill-sec">
+                    <h4>{t("skills.dependenciesSection")}</h4>
+                    <p className="skill-sec-desc">
+                      {(selected.requiredTools || []).length
+                        ? t("skills.requiredTools", { tools: selected.requiredTools?.join(", ") })
+                        : t("skills.noRequiredTools")}
+                    </p>
+                    <p className="skill-sec-desc">
+                      {(selected.requiredRuntimeCapabilities || []).length
+                        ? t("skills.requiredRuntime", { capabilities: selected.requiredRuntimeCapabilities?.join(", ") })
+                        : t("skills.noRequiredRuntime")}
+                    </p>
+                  </section>
+                )}
+                {skillDocument.frontmatter && <details>
+                  <summary>{t("skills.documentMetadata")}</summary>
+                  <ChatMarkdown className="chat-md markdown-document" text={markdownCodeBlock(skillDocument.frontmatter, "yaml")} />
+                </details>}
+                {skillDocument.installation && <details>
+                  <summary>{t("skills.installationInfo")}</summary>
+                  <ChatMarkdown className="chat-md markdown-document" text={skillDocument.installation} />
+                </details>}
+                {backend === "openclaw" && (
+                  <section className="skill-sec">
+                    <h4>{t("skills.configSection")}</h4>
+                    <Field label={t("skills.apiKey")} hint={t("skills.apiKeyHint")}>
+                      <TextInput
+                        type="password"
+                        value={apiKey}
+                        onChange={(e) => setApiKey(e.target.value)}
+                        placeholder="sk-…"
+                        autoComplete="off"
+                      />
+                    </Field>
+                    <Field label={t("skills.envLabel")} hint={t("skills.envHint")}>
+                      <TextArea
+                        className="field-textarea field-mono"
+                        value={envText}
+                        onChange={(e) => setEnvText(e.target.value)}
+                        rows={4}
+                        placeholder={"FOO=bar\nBAZ=qux"}
+                      />
+                    </Field>
+                    <button className="btn-primary" onClick={saveConfig} disabled={saving}>
+                      {saving ? t("common.saving") : t("skills.saveConfig")}
+                    </button>
+                  </section>
+                )}
+                {backend === "hermes" && <p className="muted">{t("skills.hermesNote")}</p>}
               </div>
-              <p className="skill-sec-desc">
-                {selected.enabled ? t("skills.filterOn") : t("skills.filterOff")}
-              </p>
+            </details>
+
+            <section aria-label={t("skills.instructionsSection")}>
+              {isNativeSkills && preview?.key !== previewKey ? <p className="skill-sec-desc" role="status">{t("common.loading")}</p>
+                : preview?.key === previewKey && preview.error ? <p className="skill-sec-desc" role="alert">{preview.error}</p>
+                : <ChatMarkdown className="chat-md markdown-document" text={skillDocument.body || selected.description || ""} />}
             </section>
 
-            {!usageLoaded ? (
-              <section className="skill-sec">
-                <div className="skill-sec-head"><h4>{t("skills.usageHeading")}</h4></div>
-                <p className="skill-sec-desc">{t("common.loading")}</p>
-              </section>
-            ) : usageSupported ? (() => {
-              const agents = usageByAgent.get(isNativeSkills ? skillIdentity(selected) : selected.name);
-              const rows = agents ? [...agents.entries()].sort((a, b) => b[1] - a[1]) : [];
-              const total = rows.reduce((n, [, c]) => n + c, 0);
-              const max = rows.length ? rows[0][1] : 0;
-              return (
-                <section className="skill-sec">
-                  <div className="skill-sec-head">
-                    <h4>{t("skills.usageHeading")}</h4>
-                    {total > 0 && <span className="skill-sec-aside">{t("skills.usageTotal", { count: total })}</span>}
-                  </div>
-                  {rows.length === 0 ? (
-                    <p className="skill-sec-desc">{t("skills.usageNever")}</p>
-                  ) : (
-                    <ul className="skill-usage-list">
-                      {rows.map(([agentId, count]) => (
-                        <li key={agentId} className="skill-u-row">
-                          <AgentAvatarView agentId={agentId} className="skill-u-avatar" />
-                          <span className="skill-u-label" title={agentId}>{agentId} · {count}x</span>
-                          <span className="skill-u-bar"><span style={{ width: `${max ? Math.round((count / max) * 100) : 0}%` }} /></span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {scanLimit ? <p className="skill-sec-desc">{t("skills.usageScanNote", { count: scanLimit })}</p> : null}
-                </section>
-              );
-            })() : (
-              <section className="skill-sec">
-                <div className="skill-sec-head"><h4>{t("skills.usageHeading")}</h4></div>
-                <p className="skill-sec-desc">{t("skills.usageUnsupported")}</p>
-              </section>
-            )}
-
-            {selected.description && (
-              <section className="skill-sec">
-                <h4>{t("skills.descriptionSection")}</h4>
-                <div
-                  className="md-body"
-                  dangerouslySetInnerHTML={{
-                    __html: toSanitizedMarkdownHtml(selected.description),
-                  }}
-                />
-              </section>
-            )}
-
-            {isNativeSkills && preview?.key === previewKey && preview.content && (
-              <section className="skill-sec">
-                <h4>{t("skills.instructionsSection")}</h4>
-                <div className="md-body" dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(preview.content) }} />
-              </section>
-            )}
-
-            {isNativeSkills && (
-              <section className="skill-sec">
-                <h4>{t("skills.dependenciesSection")}</h4>
-                <p className="skill-sec-desc">
-                  {(selected.requiredTools || []).length
-                    ? t("skills.requiredTools", { tools: selected.requiredTools?.join(", ") })
-                    : t("skills.noRequiredTools")}
-                </p>
-                <p className="skill-sec-desc">
-                  {(selected.requiredRuntimeCapabilities || []).length
-                    ? t("skills.requiredRuntime", { capabilities: selected.requiredRuntimeCapabilities?.join(", ") })
-                    : t("skills.noRequiredRuntime")}
-                </p>
-                {selected.source === "user" && (
-                  <button className="btn-danger" onClick={uninstallNative} disabled={packageBusy}>
-                    {t("skills.uninstall")}
-                  </button>
-                )}
-              </section>
-            )}
-
-            {backend === "openclaw" && (
-              <section className="skill-sec">
-                <h4>{t("skills.configSection")}</h4>
-                <Field label={t("skills.apiKey")} hint={t("skills.apiKeyHint")}>
-                  <TextInput
-                    type="password"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder="sk-…"
-                    autoComplete="off"
-                  />
-                </Field>
-                <Field label={t("skills.envLabel")} hint={t("skills.envHint")}>
-                  <TextArea
-                    className="field-textarea field-mono"
-                    value={envText}
-                    onChange={(e) => setEnvText(e.target.value)}
-                    rows={4}
-                    placeholder={"FOO=bar\nBAZ=qux"}
-                  />
-                </Field>
-                <button className="btn-primary" onClick={saveConfig} disabled={saving}>
-                  {saving ? t("common.saving") : t("skills.saveConfig")}
+            {isNativeSkills && selected.source === "user" && (
+              <footer className={styles.detailActions}>
+                <button className="btn-danger" onClick={uninstallNative} disabled={packageBusy}>
+                  {t("skills.uninstall")}
                 </button>
-              </section>
+              </footer>
             )}
-            {backend === "hermes" && <p className="muted">{t("skills.hermesNote")}</p>}
-          </aside>
+          </div>
         )}
-      </div>
+      </Modal>
     </div>
   );
 }

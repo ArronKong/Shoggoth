@@ -518,6 +518,9 @@ class ContextCompiler {
     const fileBootstrap = this.memoryEngine.bootstrap?.({ profileId: input.profile.id, workspace: input.run.workspace,
       mainSession: directUserChat, maxSensitivity: maxMemorySensitivity });
     const activeMemory = directUserChat ? this.memoryEngine.takeActiveMemory?.(input) : null;
+    // Runtimes may elide unchanged dynamic context. A countable fast recall
+    // belongs to this particular turn and must travel with its request.
+    const activeMemoryLabel = activeMemory?.fastRecalls?.length ? `ACTIVE MEMORY FOR RUN ${input.run.id}` : "ACTIVE MEMORY";
     const prepared = this.preparedRelated.get(this._relatedKey(input));
     this.preparedRelated.delete(this._relatedKey(input));
     const semanticCandidates = prepared && prepared.stamp === this.memoryEngine.semanticStamp?.(input.profile.id)
@@ -845,7 +848,7 @@ class ContextCompiler {
       }, this.budgets.memory),
       ...(activeMemory?.content ? [block({
         id: "active-memory", kind: "memory", trust: "retrieved-data", priority: 410, safe: false,
-        sourceRevision: activeMemory.revision, content: untrusted("ACTIVE MEMORY", activeMemory.content),
+        sourceRevision: activeMemory.revision, content: untrusted(activeMemoryLabel, activeMemory.content),
         borrowedMemoryRefs: extractBorrowedMemoryRefs(activeMemory),
       }, 8 * 1024)] : []),
       ...(input.handoffSeed && !recall.hasRevocations ? [block({
@@ -1165,7 +1168,16 @@ class ContextCompiler {
         })),
       },
     };
-    return input.preview === true ? material : this.snapshotStore.create(material);
+    if (input.preview === true) return material;
+    const snapshot = this.snapshotStore.create(material);
+    if (activeMemory?.fastRecalls?.length) {
+      const content = untrusted(activeMemoryLabel, activeMemory.content);
+      const delivered = deduped.find(item => item.id === "active-memory");
+      if (delivered && !delivered.truncated && delivered.content === content) {
+        this.memoryEngine.bindFastRecallDelivery(input, snapshot.id, content, activeMemory);
+      }
+    }
+    return snapshot;
   }
 }
 

@@ -146,6 +146,7 @@ const Notifier = load('app/manage-ui/src/components/Notifier.tsx', {
     if (name === '../api/client') return api;
     if (name === '../lib/backends') return { useEnabledBackends: () => backends };
     if (name === '../lib/agentDisplay') return agentDisplay;
+    if (name === '../lib/cronNotifications') return load('app/manage-ui/src/lib/cronNotifications.ts');
     if (name === '../lib/shoggothDomainUi') return { usesExplicitBoardIdentity: () => boardIds.length > 0 };
     if (name === '../lib/inspiration-notifications') return helper;
     if (name === '../lib/groupChat') return { isGroupInternalSession: async () => false };

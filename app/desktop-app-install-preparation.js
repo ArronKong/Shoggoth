@@ -4,10 +4,24 @@ const { validStopImpact } = require("./agent-service/stop-impact");
 
 // ShipIt waits for the app bundle's running background service to exit. Keep
 // the UI open until that service has stopped, so a failed stop can be retried.
-async function prepareDesktopAppInstall({ launchAgent, serviceRequest, backgroundStartup,
+async function prepareDesktopAppInstall({ launchAgent, serviceRequest, backgroundStartup, forceStop = false,
   onBackgroundStopped = () => {} }) {
   try { if (backgroundStartup) await backgroundStartup; }
-  catch { return "background-unavailable"; }
+  catch { if (!forceStop) return "background-unavailable"; }
+
+  // Only an explicit App update opts in: the old Service need not be idle or
+  // responsive. stop() disables KeepAlive and confirms launchd has unloaded it.
+  if (forceStop) {
+    let background;
+    // This snapshot only preserves an already-stopped background on recovery;
+    // failure to read it must not prevent the authoritative stop below.
+    try { background = await launchAgent.status(); } catch {}
+    try {
+      await launchAgent.stop();
+      if (background?.loaded !== false) onBackgroundStopped();
+    } catch { return "background-stop-failed"; }
+    return null;
+  }
 
   let background;
   try { background = await launchAgent.status(); }
@@ -70,17 +84,18 @@ function createDesktopAppInstallPreparation(options) {
       try { releaseBackgroundActions = options.suspendBackgroundActions(); }
       catch { return "background-busy"; }
       try {
-        if (options.backgroundStartup) await options.backgroundStartup;
+        // Drain startup even if it failed; a user-requested stop can still work.
+        try { if (options.backgroundStartup) await options.backgroundStartup; } catch {}
         // The Host fence blocks new actions; drain a start/stop already queued
         // before observing launchd, including one whose old callback is stale.
         await options.launchAgent.whenIdle();
-        const reason = await prepareDesktopAppInstall({ ...options, backgroundStartup: null,
+        const reason = await prepareDesktopAppInstall({ ...options, backgroundStartup: null, forceStop: true,
           onBackgroundStopped: () => { backgroundStopped = true; } });
         if (reason) release();
         return reason;
       } catch {
         release();
-        return "background-unavailable";
+        return "background-stop-failed";
       }
     },
     async restoreAfterInstallFailure() {

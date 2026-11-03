@@ -11,6 +11,7 @@ const rows = Array.from({ length: 242 }, (_, index) => ({
   started_at: 1_800_000_000 - index,
   last_active: 1_800_000_100 - index,
   source: index % 3 === 0 ? "cron" : "cli",
+  ended_at: index === 0 ? null : 1_800_000_200 - index,
   model: "gpt-6-luna",
   provider: "openai-codex",
 }));
@@ -64,6 +65,10 @@ async function listen(handler) {
     assert.equal(new Set(firstTwoPages.map((row) => row.key)).size, 200, "分页不得产生重复 session");
     assert.deepEqual(firstTwoPages.map((row) => row.source), rows.slice(0, 200).map((row) => row.source),
       "会话分类需要保留 Hermes 的原始来源");
+    assert.equal(firstTwoPages[0].hasActiveRun, true,
+      "Hermes Cron starts outside chat.send; its open session must suppress partial-result publication");
+    assert.equal(firstTwoPages[3].hasActiveRun, false, "an ended Cron can be checked for its completed result");
+    assert.equal(firstTwoPages[1].hasActiveRun, undefined, "an open interactive session is not an active Cron run");
     assert.deepEqual(
       [...new Set(firstTwoPages.map((row) => `${row.backendId}:${row.agentId}`))],
       ["hermes:hermes-default"],

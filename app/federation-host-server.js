@@ -322,9 +322,15 @@ function createFederationHostServer(options = {}) {
     }
     if (method === "mcp.connection.owner") return mcpConnections().owner(params);
     if (method === "model.projection.owner") {
-      const { backend } = await requireBackend(params.backendId);
-      await getAgent(backend, params.backendId, params.agentId);
+      // Input projection needs the current native Agent/Session identity. Its
+      // resolver already verifies both; overview status and full Agent details
+      // add unrelated cron, model and file reads to every chat preparation.
+      // getBackend also enforces the user's current disabled-backend policy.
+      const backend = registry.getBackend(params.backendId);
+      if (!backend) throw hostError("BACKEND_UNAVAILABLE");
+      if (typeof backend.resolveModelProjectionSession !== "function") throw hostError("MODEL_PROJECTION_OWNER_UNCONFIRMED");
       const session = await backend.resolveModelProjectionSession({ agentId: params.agentId, sessionId: params.sessionId });
+      if (registry.getBackend(params.backendId) !== backend) throw hostError("BACKEND_UNAVAILABLE");
       if (!session || typeof session.sessionKey !== "string" || !session.sessionKey.startsWith(`agent:${params.agentId}:`)
         || session.sessionKey.length > 512 || /[\u0000-\u001f\u007f]/u.test(session.sessionKey)) throw hostError("MODEL_PROJECTION_OWNER_UNCONFIRMED");
       return { owner: { backendId: params.backendId, agentId: params.agentId, sessionKey: session.sessionKey,

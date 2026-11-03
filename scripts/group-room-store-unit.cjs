@@ -240,6 +240,34 @@ test("a failed owner hands a plain message to the next member; timeouts and stop
   assert.equal(f.bodies().at(-1), "[turn_stopped]");
 });
 
+test("member stop releases the floor immediately and freezes already visible text without accepting late output", t => {
+  const f = fixture(t); f.send("@all 依次核对");
+  const owner = f.claim(), original = f.run(owner);
+  const input = { opportunityId: original.id, runId: original.runId, fence: f.fence };
+  f.store.syncTurnMessages({ ...input, messages: [{ id: "opening", text: "停止前已经看见的内容", pending: true }] });
+  const stopped = f.store.stopMember({ groupId: f.groupId, memberId: owner.member.id });
+  assert.equal(stopped.aborts.length, 1);
+  assert.equal(f.view().activeTurns.find(turn => turn.memberId === owner.member.id).floor, false);
+  assert.equal(f.store.getOpportunity(original.id).state, "running", "runtime cleanup remains tracked, without inventing an exit");
+  assert.equal(f.store.getOpportunity(original.id).releasedReason, "stopped");
+  assert.equal(f.bodies().at(-1), "[turn_stopped]", "the speech-stop notice is published at acceptance");
+  const visible = f.store.listMessages({ groupId: f.groupId, limit: 100 }).messages.find(message => message.author.kind === "member");
+  assert.equal(visible.origin.streaming, false);
+  f.store.stopMember({ groupId: f.groupId, memberId: owner.member.id });
+  assert.equal(f.bodies().filter(body => body === "[turn_stopped]").length, 1, "repeated stop is idempotent");
+  const next = f.claim(); assert.equal(next.member.displayName, "写手");
+  assert.equal(next.working.some(item => item.memberId === owner.member.id), false, "stopped speech is not described as ongoing work");
+  assert.equal(next.order.find(item => item.memberId === owner.member.id).status, "stopped");
+  f.store.completeTurn({ ...input, status: "completed", text: "迟到的最终结果", replyMessages: [
+    { id: "opening", text: "停止前已经看见的内容加上停止后的增量", pending: false },
+    { id: "late", text: "停止后才到的消息", pending: false },
+  ] });
+  const after = f.store.listMessages({ groupId: f.groupId, limit: 100 }).messages;
+  assert.equal(after.find(message => message.id === visible.id).body, visible.body);
+  assert.equal(after.filter(message => message.author.kind === "member").length, 1);
+  assert.equal(f.bodies().filter(body => body === "[turn_stopped]").length, 1);
+});
+
 test("stopping the group clears the queue and aborts background work", (t) => {
   const f = fixture(t);
   f.send("@all 各说一句");

@@ -1042,8 +1042,27 @@ class PiRuntimeHost {
   }
 
   async _beginTurn(active) {
-    const state = await active.process.request("get_state", {}, { timeoutMs: this.acceptanceTimeoutMs });
+    // These are independent reads. Join every probe, including its cleanup,
+    // before settings or prompt dispatch can cross the preparation boundary.
+    const reads = await Promise.allSettled([
+      Promise.resolve().then(() => active.process.request("get_state", {}, { timeoutMs: this.acceptanceTimeoutMs })),
+      Promise.resolve().then(() => active.thinkingLevel === undefined ? null
+        : active.process.request("get_available_thinking_levels", {})),
+      Promise.resolve().then(async () => {
+        if (active.thinkingLevel !== null) return active.thinkingLevel;
+        // A fresh no-session process reads the model's inherited default.
+        const control = this._spawnControlRpc({ model: active.model });
+        try { return (await control.request("get_state", {})).thinkingLevel; }
+        finally {
+          control.endInput();
+          await Promise.race([control.closedPromise, delay(this.killGraceMs)]);
+          if (!control.closed) control.kill("SIGKILL");
+        }
+      }),
+    ]);
     if (active.settled) return;
+    for (const result of reads) if (result.status === "rejected") throw result.reason;
+    const [state, available, level] = reads.map(result => result.value);
     if (!plain(state) || state.sessionId !== active.remoteSessionId
       || !Number.isSafeInteger(state.messageCount) || state.messageCount < 0) {
       throw hostError("PI_RPC_STATE_INVALID", "Pi RPC session state is invalid");
@@ -1051,24 +1070,12 @@ class PiRuntimeHost {
     active.baselineMessageCount = state.messageCount;
     this._recordSessionFile(active.sessionId, state.sessionFile);
     if (active.thinkingLevel !== undefined) {
-      let level = active.thinkingLevel;
-      if (level === null) {
-        // A fresh no-session process reads the runtime default without the
-        // previous session override, including per-model configuration.
-        const control = this._spawnControlRpc({ model: active.model });
-        try { level = (await control.request("get_state", {})).thinkingLevel; }
-        finally {
-          control.endInput();
-          await Promise.race([control.closedPromise, delay(this.killGraceMs)]);
-          if (!control.closed) control.kill("SIGKILL");
-        }
-      }
-      const available = await active.process.request("get_available_thinking_levels", {});
       if (!Array.isArray(available?.levels) || !available.levels.includes(level)) {
         throw hostError("RUNTIME_TURN_PARAMS_INVALID", "Pi thinking level is unavailable for this model");
       }
       await active.process.request("set_thinking_level", { level });
     }
+    if (active.settled) return;
     active.promptDispatched = true;
     const command = active.nativeCommand;
     if (command && PI_RPC_COMMANDS.some((entry) => entry.name === command.command.name)) {

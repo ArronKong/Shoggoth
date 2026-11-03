@@ -63,6 +63,7 @@ async function fixture(native = true) {
       "../api/client": { getConfig: async () => config },
       "../lib/backends": { useEnabledBackends: () => enabled },
       "../lib/agentDisplay": display,
+      "../lib/cronNotifications": load("lib/cronNotifications.ts"),
       "../lib/shoggothDomainUi": {},
       "../lib/inspiration-notifications": {},
       "../lib/notify": notifications,

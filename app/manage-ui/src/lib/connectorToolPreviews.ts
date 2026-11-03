@@ -11,7 +11,7 @@ export interface ConnectorToolPreview {
 // Display-only examples from the bundled connector summaries and setup guides.
 // Remote entries use purpose labels, not invented MCP tool identifiers. Entries
 // with fixed local definitions keep their actual names; neither grants access.
-// Loaded only when tool details are expanded, outside the initial UI bundle.
+// Loaded on demand by connector details, outside the initial UI bundle.
 type Row = readonly [englishName: string, chineseName: string, englishPurpose: string, chinesePurpose: string];
 const previews: Record<string, readonly Row[]> = {
   github: [

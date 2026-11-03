@@ -253,7 +253,26 @@ test("Proxy intercepts exact bindings before owns without changing ordinary pass
     getAgents() { return [{ id: "hermes-fixture", name: "Fixture" }]; }
     async sendMessage() { assert.fail("Bound Hermes send must not call raw backend"); }
   }
+  class OpenClawFixture extends AgentBackend {
+    get id() { return "openclaw"; }
+    ownsAgentId() { return false; }
+    claimsAgentId() { return false; }
+    async sendMessage() { assert.fail("Bound OpenClaw send must not call raw backend"); }
+  }
+  registry.register(new OpenClawFixture());
   registry.register(new HermesFixture());
+  let preparationUnavailable = false;
+  const prepared = [];
+  registry.setChatSecretOwner({ async chatSecretRequest(action, input) {
+    assert.equal(action, "prepare");
+    assert.ok(["openclaw", "hermes"].includes(input.backendId));
+    assert.equal(input.sessionKey.startsWith(`agent:${input.agentId}:`), true);
+    if (input.operationId !== undefined) assert.equal(typeof input.operationId, "string");
+    if (preparationUnavailable) throw Object.assign(new Error("fixture preparation unavailable"),
+      { code: "SECRET_PROCESSING_UNAVAILABLE" });
+    prepared.push(input);
+    return { text: input.text, references: [], version: 1 };
+  } });
   const keys = ["agent:main:inspiration-fixture", "agent:hermes-fixture:inspiration-fixture"];
   let lookupFails = false;
   registry.setInspirationOwner({ getExternalInspirationSessionRoute: async input => {
@@ -286,8 +305,17 @@ test("Proxy intercepts exact bindings before owns without changing ordinary pass
   const denied = await send("chat.send", { sessionKey: keys[0], message: "Unauthorized", idempotencyKey: "unauthorized" });
   assert.equal(denied.ok, false); assert.equal(routed.length, 0);
   assert.equal(lookups.length, 0);
+  assert.equal(prepared.length, 0, "unauthenticated input cannot enter preparation");
   assert.equal(received.some(frame => frame.method === "chat.send"), false);
   assert.equal((await send("connect", {})).ok, true);
+  preparationUnavailable = true;
+  const unavailable = await send("chat.send", { sessionKey: keys[0], message: "No preparation", idempotencyKey: "unavailable" });
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.error.code, "SECRET_PROCESSING_UNAVAILABLE");
+  assert.equal(routed.length, 0);
+  assert.equal(lookups.length, 0);
+  assert.equal(received.some(frame => frame.method === "chat.send"), false);
+  preparationUnavailable = false;
   for (const key of keys) {
     const runId = randomUUID();
     assert.equal((await send("chat.send", { sessionKey: key, message: "Continue", idempotencyKey: runId })).ok, true);
@@ -298,6 +326,8 @@ test("Proxy intercepts exact bindings before owns without changing ordinary pass
   }
   assert.equal(registry.route("main"), null);
   assert.equal(routed.filter(call => call.method === "send").length, 2);
+  assert.deepEqual(prepared.filter(input => input.text === "Continue").map(input => input.backendId),
+    ["openclaw", "hermes"]);
   assert.equal(received.some(frame => ["chat.send", "chat.respond", "chat.abort"].includes(frame.method)), false);
   assert.equal((await send("chat.send", { sessionKey: "agent:main:ordinary", message: "Ordinary" })).payload.upstream, true);
   assert.equal(lookups.at(-1).backendId, "openclaw");
