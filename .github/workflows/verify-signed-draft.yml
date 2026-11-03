@@ -60,6 +60,7 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag }}
       SHOGGOTH_EXPECT_TEAM_ID: MK3JHXWR7H
       SHOGGOTH_EXPECT_NOTARIZED: "1"
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       SHOGGOTH_DRAFT_ARCH: ${{ matrix.arch }}
       SHOGGOTH_DRAFT_APP_SUBDIR: ${{ matrix.app_dir }}
       SHOGGOTH_DRAFT_ZIP_SUFFIX: ${{ matrix.zip_suffix }}
@@ -185,6 +186,26 @@ jobs:
             awk -v name="Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ARCH}.dmg" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -
           )
           ditto -x -k "dist/Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ZIP_SUFFIX}.zip" "dist/$SHOGGOTH_DRAFT_APP_SUBDIR"
+
+      - name: Diagnose the unchanged App ticket with both Apple toolchains
+        shell: bash
+        run: |
+          APP="$GITHUB_WORKSPACE/dist/$SHOGGOTH_DRAFT_APP_SUBDIR/Shoggoth.app"
+          for version in 16.4 26.3; do
+            developer="/Applications/Xcode_${version}.app/Contents/Developer"
+            if [[ ! -d "$developer" ]]; then continue; fi
+            for scope in inherited minimal; do
+              echo "Ticket diagnostic: Xcode $version / $scope environment"
+              status=0
+              if [[ "$scope" = minimal ]]; then
+                env -i PATH="$PATH" TMPDIR="$TMPDIR" DEVELOPER_DIR="$developer" /usr/bin/xcrun stapler validate -v "$APP" || status=$?
+              else
+                DEVELOPER_DIR="$developer" /usr/bin/xcrun stapler validate -v "$APP" || status=$?
+              fi
+              echo "Ticket diagnostic exit: $status"
+            done
+          done
+          # Diagnostics do not replace the mandatory native gates below.
 
       - name: Verify App and DMG on native hardware
         shell: bash
