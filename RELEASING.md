@@ -108,6 +108,8 @@ gh workflow run release.yml --repo ArronKong/Shoggoth --ref v<VERSION> -f tag=v<
 
 公证方式任选一组。API Key 使用 `APPLE_API_KEY_BASE64`、`APPLE_API_KEY_ID` 和 `APPLE_API_ISSUER`（App Store Connect 团队 API Key）；Apple ID 方式使用 `APPLE_ID` 和 `APPLE_APP_SPECIFIC_PASSWORD`（应用专用密码，不能填 Apple 账号登录密码）。两组都完整时优先使用 API Key。缺少证书或任一完整公证方式即停止，临时钥匙串和密钥文件在 job 结束时清理。
 
+Apple ID 方式可在 [Apple 账号页面](https://account.apple.com/) 的「登录和安全 → App 专用密码」生成独立密码，例如命名 `Shoggoth GitHub Actions`，再到仓库 Settings → Environments → `macos-signing` → Environment secrets 分别填写开发者账号邮箱和生成的密码。此功能需要双重认证；生成与撤销步骤见 [Apple 说明](https://support.apple.com/zh-cn/102654)。凭据直接填写在 GitHub，不经聊天传递。
+
 独立的 `Verify notarized macOS draft` 手动验收入口继续接受 `tag` 和 `release_id`，用于复验已有草稿。
 
 ## 本机签名、GitHub 双架构验收路径
@@ -118,6 +120,8 @@ gh workflow run release.yml --repo ArronKong/Shoggoth --ref v<VERSION> -f tag=v<
 node scripts/release-local.cjs --tag v<VERSION> --check-only
 node scripts/release-local.cjs --tag v<VERSION>
 ```
+
+如果本机通过 `HTTP_PROXY` / `HTTPS_PROXY` 联网，在上述命令前加 `NODE_USE_ENV_PROXY=1`，让锁定的 Node 22.22.3 下载器使用现有代理。例如 `NODE_USE_ENV_PROXY=1 node scripts/release-local.cjs --tag v<VERSION>`。它不改变系统代理配置，下载仍校验锁定的官方摘要。
 
 可用 `--identity`、`--keychain`、`--notary-profile` 和 `--notary-keychain` 指定已有凭据。默认不传公证钥匙串路径，让 Apple 工具使用其默认钥匙串搜索，兼容存于数据保护钥匙串的 profile。本机路径不读取 GitHub 签名 Secrets，也不导出本机私钥。
 
