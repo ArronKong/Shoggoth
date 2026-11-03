@@ -65,6 +65,16 @@ assert.doesNotMatch(workflow, /--draft=false|--publish always|--clobber/u);
 const native = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/verify-signed-draft.yml"), "utf8"));
 assert.equal(native.jobs.macos.env.DEVELOPER_DIR, release.jobs.build.env.DEVELOPER_DIR);
 assert.ok(native.on.workflow_dispatch && native.on.workflow_call);
+for (const steps of [buildSteps, native.jobs.macos.steps]) {
+  const transport = steps.find(step => step.name === "Use TCP HTTPS on the hosted Intel runner");
+  assert.equal(transport.if, "matrix.arch == 'x64'");
+  assert.match(transport.run, /test "\$RUNNER_ENVIRONMENT" = github-hosted/u);
+  assert.match(transport.run, /pfctl -a com\.apple\/shoggoth-notary -f -/u);
+  assert.doesNotMatch(transport.run, /pfctl -f -/u, "Do not replace the runner's root firewall rules");
+  const restore = steps.find(step => step.name === "Remove the hosted Intel transport workaround");
+  assert.equal(restore.if, "always() && matrix.arch == 'x64'");
+  assert.match(restore.run, /pfctl -X "\$PF_REFERENCE"/u);
+}
 const nativeSteps = native.jobs.macos.steps.map(step => step.run || "").join("\n");
 for (const gate of ["shoggoth-packaged-runtime-smoke.mjs", "shoggoth-memory-e5-packaged.cjs",
   "shoggoth-quarantined-first-launch.cjs", "release-stapler.cjs validate", "codesign --verify --deep --strict",

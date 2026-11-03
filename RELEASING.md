@@ -36,6 +36,8 @@
 
 票据查询与附加只对 `stapler` 退出码 68 且明确包含 Apple 网络超时（-1001）或连接断开（-1005）的情况做最多四次尝试，间隔 3/6/12 秒。票据缺失、无效、撤销、TLS 信任错误及其他未知失败不自动重试，最终仍必须返回成功。它不会重新提交公证。App 的 Accepted 公证编号会立即保存，后续票据校验失败也保留原提交证据；最终 build-receipt 仍需全部门禁通过后才能生成。
 
+GitHub 托管 Intel runner 的 HTTP/3 网络路径故障已由 [runner-images #14924](https://github.com/actions/runner-images/issues/14924#issuecomment-6188826956) 复现。构建与原生验收仅在确认 `github-hosted`、macOS、X64 的临时 runner 上添加独立 PF anchor 阻止 UDP 443，让 Apple 工具使用 TCP HTTPS；保留系统原有规则，结束时移除本任务 anchor 并释放自己的 PF enable 引用。本机入口不改用户网络配置。该处理不关闭 TLS、Gatekeeper 或票据检查。
+
 ## 依赖审计范围复核（2026-11-02，复核到期 2026-11-16 UTC）
 
 正式发布执行 `npm run audit:release`，根目录和 UI 仍各自调用 `npm audit --audit-level=moderate --json`。完整原始报告与实际 npm 退出码应随验收记录保存；未解释的中危及以上结果、网络错误、无效报告和未知依赖链均阻止发布。

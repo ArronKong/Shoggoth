@@ -115,6 +115,24 @@ jobs:
           }, null, 2) + '\n', { flag: 'wx' });
           NODE
 
+      - name: Use TCP HTTPS on the hosted Intel runner
+        if: matrix.arch == 'x64'
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = X64
+          # actions/runner-images#14924: HTTP/3 ticket lookups can lose connections.
+          # Use a private anchor; preserve the runner's existing PF rules.
+          sudo /sbin/pfctl -sr > "$RUNNER_TEMP/shoggoth-pf-original.txt"
+          grep -E '^anchor "com[.]apple/[*]"' "$RUNNER_TEMP/shoggoth-pf-original.txt"
+          touch "$RUNNER_TEMP/shoggoth-pf-anchor-created"
+          printf '%s\n' 'block return out quick proto udp from any to any port 443' |
+            sudo /sbin/pfctl -a com.apple/shoggoth-notary -f -
+          sudo /sbin/pfctl -E 2> "$RUNNER_TEMP/shoggoth-pf-enable.txt"
+          grep -E '^Token[[:space:]]*:[[:space:]]*[0-9]+$' "$RUNNER_TEMP/shoggoth-pf-enable.txt"
+          sudo /sbin/pfctl -a com.apple/shoggoth-notary -sr
+
       - name: Install dependencies and pinned runtimes
         run: |
           node -e 'require("node:assert/strict").equal(process.arch, process.env.SHOGGOTH_DRAFT_ARCH, "Draft verification requires native hardware")'
@@ -227,3 +245,17 @@ jobs:
             ${{ runner.temp }}/e5-${{ matrix.arch }}-result.json
             ${{ runner.temp }}/verification-harness.json
           if-no-files-found: error
+
+      - name: Remove the hosted Intel transport workaround
+        if: always() && matrix.arch == 'x64'
+        run: |
+          set -euo pipefail
+          if [[ -f "$RUNNER_TEMP/shoggoth-pf-anchor-created" ]]; then
+            sudo /sbin/pfctl -a com.apple/shoggoth-notary -F rules
+          fi
+          if [[ -f "$RUNNER_TEMP/shoggoth-pf-enable.txt" ]]; then
+            PF_REFERENCE="$(awk '/^Token[[:space:]]*:/ {print $NF}' "$RUNNER_TEMP/shoggoth-pf-enable.txt")"
+            if [[ "$PF_REFERENCE" =~ ^[0-9]+$ ]]; then
+              sudo /sbin/pfctl -X "$PF_REFERENCE"
+            fi
+          fi
