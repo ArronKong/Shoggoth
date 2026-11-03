@@ -224,6 +224,10 @@ async function disclosureUiProof(profile, chat) {
 }
 async function capture(label, expectedText) {
   const file = path.join(root, `acp-${generation}-${label}.png`);
+  // A hidden/minimized private window cannot produce animation frames after
+  // reload. Make this fixture window paintable without taking keyboard focus.
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.showInactive();
   // Layout rectangles can exist while a column's finite entry animation is
   // still transparent. Wait for the actual paint boundary without disabling
   // motion, changing production styles, or waiting on infinite spinners.
@@ -350,6 +354,10 @@ async function run() {
         const direct = require(path.join(moduleRoot, "agent-service/data/mcp-featured-presets.json"))
           .filter(item => !item.hidden && !item.supersededBy && !item.registryName && item.setup !== "oauth-client" && item.setup !== "restricted" && !item.requiresOAuthApp);
         const officialSkills = require(path.join(moduleRoot, "agent-service/data/official-skill-connectors.json"));
+        const displayName = item => ({ didi: "滴滴打车", luckin: "瑞幸咖啡", figma: "Figma", notion: "Notion", canva: "Canva",
+          mcdonalds: "麦当劳", kiwi: "Kiwi", amap: "高德地图", mijia: "米家", "baidu-maps": "百度地图",
+          variflight: "飞常准", eastmoney: "东方财富", ifind: "同花顺", "rollinggo-hotel": "RollingGo 酒店", monday: "Monday" }[item.id] || item.name);
+
         const recommended = await until(async () => await js("(() => { const sections = Array.from(document.querySelectorAll('main.content section')); const section = sections.find(value => value.querySelector('h2')?.textContent === '推荐'); const names = section ? Array.from(section.querySelectorAll('button strong')).filter(value => !value.closest('[data-device-recommendation]')).map(value => value.textContent) : []; if (!section || names.length !== " + (direct.length + officialSkills.length + 2) + ") return null; return { names, devices: Array.from(section.querySelectorAll('[data-device-recommendation]')).map(value => value.dataset.deviceRecommendation).sort(), github: section.querySelectorAll('[data-mcp-icon=\\\"io.github.github/github-mcp-server\\\"]').length, oldDirectory: sections.some(value => value.querySelector('h2')?.textContent === 'MCP 目录') }; })()"), "curated recommendations rendered through actual Registry REST");
         assert.equal(recommended.github, 1);
         assert.equal(recommended.oldDirectory, false);
@@ -357,11 +365,11 @@ async function run() {
           assert.equal(recommended.names.includes(item.name), false, "superseded or explicitly hidden entries remain configured but are not recommended");
         }
         assert.deepEqual(recommended.devices, ["calendar", "reminders"]);
-        for (const item of direct) assert(recommended.names.includes(item.name), item.name);
+        for (const item of direct) assert(recommended.names.includes(displayName(item)), displayName(item));
         for (const item of officialSkills) {
-          assert(recommended.names.includes(item.name), item.name);
+          assert(recommended.names.includes(displayName(item)), displayName(item));
           await js(`document.querySelector('[data-official-recommendation="${item.id}"] button').click();void 0`);
-          await until(async () => await js(`(() => { const d=document.querySelector('[role="dialog"]'); return d?.textContent.includes(${JSON.stringify(item.name)}) && Array.from(d.querySelectorAll('button')).some(b=>b.textContent==='添加'&&!b.disabled); })()`), `${item.id} actual installation dialog and Service state`);
+          await until(async () => await js(`(() => { const d=document.querySelector('[role="dialog"]'); return d?.textContent.includes(${JSON.stringify(displayName(item))}) && Array.from(d.querySelectorAll('button')).some(b=>b.textContent==='添加'&&!b.disabled); })()`), `${item.id} actual installation dialog and Service state`);
           assert.equal(await js("document.querySelector('[role=dialog]').textContent.includes('账号检查通过')"), false);
           if (item.id === "alipay") await capture("connectors-alipay-setup");
           await js("Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent==='关闭').click();void 0");

@@ -12,6 +12,7 @@ const { captureEvidence, evidenceCurrent } = require("./active-memory-evidence.c
 const { recallDiagnostics, diagnosticCode } = require("./active-memory-diagnostics.cjs");
 const { hasLocalizedRecallIntent } = require("./cjk-recall-intent.cjs");
 const { presentTriggerCandidates } = require("./trigger-presentation.cjs");
+const { isShortTerm } = require("./recall-signals.cjs");
 
 // One turn's raw Runtime configuration with deep recall forced. The global
 // configuration and every other setting stay as they are.
@@ -130,6 +131,17 @@ class ActiveMemory {
     const key = this.key(input), result = this.prepared.get(key); this.prepared.delete(key);
     return this.valid(input, result) ? result : null;
   }
+  bindDelivery(input, snapshotId, content, result) {
+    const entry = this.runs.get(JSON.stringify([input.profile.id, input.run.id]));
+    if (entry) entry.delivery = { input, snapshotId, content, result };
+  }
+  stageDelivery(run, snapshotId, context) {
+    const delivery = this.runs.get(JSON.stringify([run.profileId, run.id]))?.delivery;
+    if (!delivery || delivery.snapshotId !== snapshotId || !context?.includes(delivery.content)
+      || !this.valid(delivery.input, delivery.result)) return;
+    this.service.recallSignals.stage({ profileId: run.profileId, run, workspace: run.workspace,
+      sessionId: this.sessionId(delivery.input), maxSensitivity: "private" }, delivery.result.fastRecalls);
+  }
   valid(input, result) {
     if (!result || result.expiresAt <= this.service.now()
       || result.parentSignal?.aborted
@@ -178,6 +190,8 @@ class ActiveMemory {
     const diagnose = recallDiagnostics({ host, runId: input.run.id, now: () => service.now() });
     let stage = "preflight";
     const evidence = new Map();
+    const fastCandidates = new WeakMap();
+    const historyHits = new Map();
     let borrowedMemoryRefs = [], borrowedMemoryDerived = false;
     const signal = AbortSignal.any([service.maintenance.controller.signal, service.profileSignal(profileId), runEntry.controller.signal,
       ...(input.signal ? [input.signal] : [])]);
@@ -225,6 +239,9 @@ class ActiveMemory {
         const source = result.source || "memory";
         const indexed = host.searchIndex.db.prepare("SELECT hash FROM memory_index_sources WHERE path=? AND source=?").get(result.path, source);
         remember(result.path, source, indexed?.hash);
+        if (source === "sessions" && historyHits.size < 24) {
+          historyHits.set(JSON.stringify([result.path, result.startLine, result.endLine]), result);
+        }
       }
       check();
     };
@@ -360,10 +377,33 @@ class ActiveMemory {
             || JSON.stringify(options.activeProjectKeys) !== JSON.stringify(projectKeys)) throw serviceError("MEMORY_ACTIVE_SCOPE_INVALID", "自动召回检索范围无效");
           // Lane-one candidates are not all injected and upstream picks the
           // strong ones internally, so none of them count as recall signals.
+          let own;
           const found = await service.searchMemory({ ...searchInput, query: text, maxResults: options.maxResults,
             minScore: options.minScore, sources: ["memory"], lexicalOnly: true, record: false,
-            signal: AbortSignal.any([signal, options.signal]) });
-          rememberIndexed(found.results); return presentTriggerCandidates(found.results, effectiveInput.query);
+            signal: AbortSignal.any([signal, options.signal]) }, results => { own = results; });
+          rememberIndexed(found.results);
+          const byRange = result => JSON.stringify([result.path, result.startLine, result.endLine]);
+          const shortTerm = new Map((own || []).filter(result => result.source === "memory"
+            && isShortTerm(result.path) && core.isAutomaticMemoryEntryEligible(result))
+            .map(result => [byRange(result), result]));
+          if (!shortTerm.size || effectiveInput.query.length > 4096) return presentTriggerCandidates(found.results, effectiveInput.query);
+          const queryTags = new Set(core.deriveConceptTags({ path: "", snippet: effectiveInput.query }));
+          const ownCandidate = result => result.borrowed === true ? undefined : shortTerm.get(byRange(result));
+          const candidates = found.results.flatMap(result => {
+            const original = ownCandidate(result);
+            if (!original) return [result];
+            // Short-term files have no curated triggers. Use two matching
+            // concepts from the authorized lexical hit, without editing it.
+            const tags = core.deriveConceptTags({ path: "", snippet: original.snippet }).filter(tag => queryTags.has(tag));
+            if (tags.length < 2) return [];
+            return [{ ...original, triggers: tags.slice(0, 2).join(" ") }];
+          });
+          const presented = presentTriggerCandidates(candidates, effectiveInput.query);
+          for (const hit of presented) {
+            const original = ownCandidate(hit);
+            if (original) fastCandidates.set(hit, original);
+          }
+          return presented;
         },
         triggerCandidates: async options => {
           check();
@@ -408,7 +448,29 @@ class ActiveMemory {
           proof.expiresAt = service.now() + config.cacheTtlMs;
         } else this.cacheProofs.delete(proofKey);
       }
-      return receipt(this.borrowedContext(result?.prependContext || "", borrowedMemoryRefs));
+      const fastRecalls = (result?.deliveredMatches || []).flatMap(match => {
+        const original = fastCandidates.get(match.shoggothTriggerResult);
+        const recallEvidence = original && evidence.get(`memory:${original.path}`);
+        return recallEvidence ? [{ ...original, recallEvidence }] : [];
+      });
+      if (nativeStatus === "ok" && result?.prependContext && historyHits.size) {
+        // A tool result used by the auxiliary model is not proof of what the
+        // main model received. Only its verbatim sourced excerpt can count.
+        try {
+          const rows = [...historyHits.values()].flatMap(hit => {
+            const sessionId = host.searchIndex.sessionIdForPath(hit.path);
+            const page = service.conversationRecall.scanEligibleSession({ profileId, sessionId,
+              afterSeq: hit.startLine - 1, limit: 24, completedOnly: true });
+            return page.events.filter(event => event.seq <= hit.endLine)
+              .map(event => ({ sessionId, eventId: event.eventId, snippet: hit.snippet, score: hit.score }));
+          });
+          const context = result.prependContext.replace(/\s+/gu, " ");
+          const summary = runtime.nativeResult.summary.replace(/\s+/gu, " ");
+          fastRecalls.push(...service.recallSignals.historyCandidates(searchInput, rows)
+            .filter(candidate => summary.includes(candidate.history.excerpt) && context.includes(candidate.history.excerpt)));
+        } catch { /* Keep the authorized recall even if counting is unavailable. */ }
+      }
+      return { ...receipt(this.borrowedContext(result?.prependContext || "", borrowedMemoryRefs)), fastRecalls };
     } catch (error) {
       const discarded = reason => { diagnose({ stage, outcome: "discarded", code: reason }); return null; };
       if (signal.aborted) return discarded("CANCELED");

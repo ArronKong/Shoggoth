@@ -191,11 +191,92 @@ async function main() {
         if (path.relative(upstream, args.importer) !== "src/auto-reply/reply/memory-flush.ts") return;
         return { path: path.join(port, "flush-timing-runtime.ts") };
       });
-      build.onLoad({ filter: /\/extensions\/memory-core\/src\/dreaming\.ts$/ }, args => ({
-        // Export the existing runner without importing Gateway lifecycle hooks.
-        // The pinned file and all algorithm bodies remain unchanged.
-        contents: fs.readFileSync(args.path, "utf8") + "\nexport { runShortTermDreamingPromotion };\n", loader: "ts",
-      }));
+      build.onLoad({ filter: /\/extensions\/memory-core\/src\/short-term-promotion-apply\.ts$/ }, args => {
+        let contents = fs.readFileSync(args.path, "utf8");
+        const replace = (before, after) => {
+          if (contents.split(before).length !== 2) throw new Error(`Pinned history promotion seam changed: ${before}`);
+          contents = contents.replace(before, () => after);
+        };
+        const imports = `import { getMemoryWorkspaceMaintenance } from "./memory-workspace-files.js";
+const isShoggothHistory = (candidate: { path: string }) =>
+  /^memory\\/\\.dreams\\/session-corpus\\/\\d{4}-\\d{2}-\\d{2}\\.txt$/u.test(candidate.path);
+const verifiedHistoryPromotion = (workspaceDir: string, candidate: PromotionCandidate) =>
+  (getMemoryWorkspaceMaintenance(workspaceDir) as unknown as {
+    verifiedHistoryPromotion(candidate: PromotionCandidate): PromotionCandidate | null;
+  } | undefined)?.verifiedHistoryPromotion?.(candidate);
+`;
+        contents = imports + contents;
+        replace(": isContaminatedDreamingSnippet(candidate.snippet)", `: isContaminatedDreamingSnippet(candidate.snippet, {
+          allowTranscriptTurnSnippet: isShoggothHistory(candidate),
+        })`);
+        replace("const rehydrated = await rehydratePromotionCandidate(workspaceDir, candidate);", `const rehydrated = isShoggothHistory(candidate)
+      ? verifiedHistoryPromotion(workspaceDir, candidate)
+      : await rehydratePromotionCandidate(workspaceDir, candidate);`);
+        replace("if (entry.promotedAt) {", `if (entry.promotedAt || (isShoggothHistory(candidate) &&
+          !verifiedHistoryPromotion(workspaceDir, { ...candidate, snippet: entry.snippet }))) {`);
+        return { contents, loader: "ts" };
+      });
+      build.onLoad({ filter: /\/extensions\/memory-core\/src\/dreaming\.ts$/ }, args => {
+        let contents = fs.readFileSync(args.path, "utf8");
+        const replace = (before, after, count = 1) => {
+          if (contents.split(before).length !== count + 1) throw new Error(`Pinned Dreaming outcome seam changed: ${before}`);
+          contents = contents.replaceAll(before, () => after);
+        };
+        replace("let failedWorkspaces = 0;", "let failedWorkspaces = 0;\n  let errorCode: string | undefined;");
+        replace("failedWorkspaces += 1;", `failedWorkspaces += 1;
+      const failure = err as { code?: unknown; errcode?: number } | null;
+      let code = failure?.code;
+      if (code === "ERR_SQLITE_ERROR" && typeof failure?.errcode === "number") {
+        const sqliteCode = failure.errcode & 0xff;
+        if (sqliteCode === 5) code = "SQLITE_BUSY";
+        if (sqliteCode === 6) code = "SQLITE_LOCKED";
+      }
+      if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,95}$/.test(code)) errorCode ??= code;`, 2);
+        replace("}): Promise<{ handled: true; reason: string } | undefined> {",
+          "}): Promise<{ handled: true; reason: string; outcome?: { candidates: number; applied: number; failed: number; degraded: number; errorCode?: string } } | undefined> {");
+        replace("    reason:\n      degradedNarratives > 0", "    outcome: { candidates: totalCandidates, applied: totalApplied, failed: failedWorkspaces, degraded: degradedNarratives, errorCode },\n    reason:\n      degradedNarratives > 0");
+        return { contents: contents + "\nexport { runShortTermDreamingPromotion };\n", loader: "ts" };
+      });
+      build.onLoad({ filter: /\/extensions\/active-memory\/(?:index|trigger-recall)\.ts$/ }, args => {
+        let contents = fs.readFileSync(args.path, "utf8");
+        const replace = (before, after) => {
+          if (contents.split(before).length !== 2) throw new Error(`Pinned Active Memory delivery seam changed: ${before}`);
+          contents = contents.replace(before, after);
+        };
+        if (args.path.endsWith("/trigger-recall.ts")) {
+          // Preserve the original Product result through upstream selection.
+          replace("excerpt: stripMemoryAnnotationCarriers(entry.snippet),",
+            "excerpt: stripMemoryAnnotationCarriers(entry.snippet), shoggothTriggerResult: entry,");
+          const matchLine = '`- ${entry.excerpt.trim()} (Source: ${entry.citations?.map((citation) => citation.label).join(", ") || `${entry.reference.providerId}:${entry.reference.id}`})`';
+          const format = `const summary = matches
+    .map(
+      (entry) =>
+        ${matchLine},
+    )
+    .join("\\n");`;
+          replace(format, "const summary = matches.map(formatTriggerRecallMatch).join(\"\\n\");");
+          replace("export function buildTriggerRecallContext", `function formatTriggerRecallMatch(entry: TriggerRecallMatch) {
+  return ${matchLine};
+}
+
+export function buildTriggerRecallContext`);
+          replace("injectedCount: number }> {", "injectedCount: number; deliveredMatches?: TriggerRecallMatch[] }> {");
+          replace("injectedCount: matches.length,", `injectedCount: matches.length,
+    deliveredMatches: matches.filter((_, index) =>
+      matches.slice(0, index + 1).map(formatTriggerRecallMatch).join("\\n").length <= MAX_TRIGGER_CONTEXT_CHARS
+    ),`);
+        } else {
+          replace("const publishPrependContext = (parts: Array<string | undefined>) => {",
+            "const publishPrependContext = (parts: Array<string | undefined>, deliveredMatches?: Awaited<ReturnType<typeof resolveTriggerRecall>>['deliveredMatches']) => {");
+          replace("return { prependContext };", "return { prependContext, deliveredMatches };");
+          replace("let laneOne: { context?: string; hasStrongHit: boolean; injectedCount: number } = {",
+            "let laneOne: Awaited<ReturnType<typeof resolveTriggerRecall>> = {");
+          for (const parts of ["laneOneContext", "laneOneContext, outcomeContext", "laneOneContext, recallContext"]) {
+            replace(`publishPrependContext([${parts}])`, `publishPrependContext([${parts}], laneOne.deliveredMatches)`);
+          }
+        }
+        return { contents, loader: "ts" };
+      });
       build.onLoad({ filter: /\/extensions\/llama-cpp\/src\/embedding-provider\.ts$/ }, args => ({
         // Product coordinates the complete model/resource operation. Export
         // the existing preparation helpers without changing their bodies.

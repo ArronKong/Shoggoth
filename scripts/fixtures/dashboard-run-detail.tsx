@@ -16,6 +16,7 @@ const now = Date.now(), startedAt = now - 42_000;
 const runId = "preview-task", title = "Tibo 额度重置监测";
 let stage = options.get("state") === "completed" ? 4 : 0, outage = false, detailReads = 0, summaryReads = 0;
 const resultText = "### 监测结果\n\n官方公告与生效时区已核对，本次监测已完成。\n\n- **公告来源**：已核对\n- **生效时间**：已完成时区换算\n\n这是一条用于查看界面效果的示例任务。";
+const reportEnding = "这是一条用于查看界面效果的示例任务。";
 const events: any[] = [
   { type: "status", status: "running" },
   { type: "performance.stage" },
@@ -37,7 +38,7 @@ const detail = () => ({ id: `shoggoth:${runId}`, backendId: "shoggoth", runId, s
 const running = () => stage >= 4 ? [] : [{ id: `shoggoth:${runId}`, backendId: "shoggoth", runId, kind: "cron", title, agentId: "preview-grok", status: "running", startedAt }];
 const resultRun = () => ({ backendId: "shoggoth", jobId: "shoggoth:preview-job", jobName: title, runId,
   agentId: "preview-grok", sessionKey: "preview-session", startedAt, finishedAt: now + 20_000,
-  status: "ok", completionStatus: "succeeded", durationMs: 62_000, summary: resultText });
+  status: "ok", completionStatus: "succeeded", durationMs: 62_000, summary: resultText.split(reportEnding)[0] });
 const summary = () => ({ generatedAt: Date.now(), sinceMs: now - 60_000,
   status: [{ id: "shoggoth", name: "Shoggoth", connected: true, info: {} }], runs: stage >= 4 ? [resultRun()] : [],
   running: [{ backend: "shoggoth", supported: true, items: running() }], approvals: [],
@@ -53,7 +54,10 @@ state.fetch = async (url: unknown, init: RequestInit = {}) => {
   if (p.pathname === "/__api/dashboard") { summaryReads++; value = { summary: summary() }; }
   else if (p.pathname === "/__api/dashboard/live") value = { generatedAt: now, running: summary().running, approvals: [] };
   else if (p.pathname === "/__api/dashboard/activities") value = summary().activityPage;
-  else if (p.pathname === "/__api/cron" && p.searchParams.get("action") === "delivery") value = { ...resultRun(), fullText: resultText };
+  else if (p.pathname === "/__api/cron/jobs" && p.searchParams.get("id") === "shoggoth:preview-job"
+    && p.searchParams.get("action") === "result" && p.searchParams.get("runId") === runId) {
+    value = { ...resultRun(), fullText: resultText, source: "transcript" };
+  }
   else if (p.pathname.startsWith("/__api/dashboard/runs/")) {
     detailReads++;
     if (outage) return new Response("{}", { status: 503 });
@@ -90,7 +94,7 @@ state.openResultFixture = async () => {
   await wait(() => !document.querySelector('[role="dialog"]'), "Execution dialog did not close");
   await wait(() => document.querySelector('.dash-feed .dash-run'), "Completed result card missing");
   document.querySelector<HTMLButtonElement>('.dash-feed .dash-run')!.click();
-  await wait(() => body().includes("监测结果") && body().includes(i18n.t("dashboard.openInCron")), "Existing result dialog did not open");
+  await wait(() => body().includes("监测结果") && document.querySelector(`[role="dialog"] button[aria-label="${i18n.t("common.edit")}"]`), "Existing result dialog did not open");
 };
 state.runFixture = async () => {
   await state.openFixture();
@@ -122,9 +126,10 @@ state.runFixture = async () => {
   const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
   if (dialog.scrollWidth > dialog.clientWidth + 1) throw Error("Dialog overflows horizontally");
   await state.openResultFixture();
+  await wait(() => body().includes(reportEnding) && body().includes(i18n.t("dashboard.fullTextTitle")), "Completed result did not load the full report by run ID");
   if (document.querySelectorAll('[role="dialog"] .cron-delivery-md h3').length !== 1) throw Error("Existing result Markdown missing");
   if (body().includes(i18n.t("turnLab.processLabel"))) throw Error("Execution activity leaked into result dialog");
-  if (!body().includes(i18n.t("cron.askInChat"))) throw Error("Existing result follow-up action missing");
+  if (!document.querySelector(`[role="dialog"] button[aria-label="${i18n.t("cron.askInChat")}"]`)) throw Error("Existing result follow-up action missing");
   return { language, theme, publicProgress: true, liveUpdate: true, separateResultCard: true, separateResultDialog: true,
     replyDoesNotCompleteRun: true, markdown: true, failureRetention: true, terminalStopsPolling: true, reads: detailReads };
 };

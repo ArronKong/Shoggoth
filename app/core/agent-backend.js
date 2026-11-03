@@ -715,7 +715,9 @@ class AgentBackend {
   async resolveMcpConnectionSession({ agentId, sessionId }) { return null; }
 
   /** Resolve model-input ownership using the backend's current native session
-   * identity. Unlike connector setup this read-only operation also supports
+   * identity. Implementations verify the enabled Agent and uniquely resolve the
+   * Session in its current connection/profile; callers need no full Agent read.
+   * Unlike connector setup this read-only operation also supports
    * owned derived sessions; it never authorizes a tool call or a continuation.
    * @returns {Promise<{sessionKey:string}|null>}
    */

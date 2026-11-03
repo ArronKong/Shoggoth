@@ -7,6 +7,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const uiRoot = path.join(root, "app/manage-ui");
@@ -20,7 +21,7 @@ try {
     format: "esm", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' },
     nodePaths: [path.join(uiRoot, "node_modules")],
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
-    outfile: path.join(temp, "fixture.js"), logLevel: "silent" });
+    outfile: path.join(temp, "fixture.js"), logLevel: "silent", plugins: [viteArtworkFixturePlugin(root)] });
   fs.writeFileSync(path.join(temp, "index.html"),
     '<!doctype html><meta charset="utf-8"><title>Chat sidebar ordering fixture</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
   if (process.argv.includes("--serve")) {
@@ -47,7 +48,9 @@ try {
       let passed = false;
       try {
         const results = [];
-        for (const test of scenario ? [scenario] : ["session", "restored", "mixed", "unread", "unread-running", "unread-baseline",
+        for (const test of scenario ? scenario.split(",") : ["session", "restored", "mixed", "unread", "unread-running", "unread-baseline",
+          "cron-results-openclaw", "cron-results-hermes", "cron-results-shoggoth",
+          "cron-results-openclaw-immersive", "cron-results-hermes-immersive", "cron-results-shoggoth-immersive",
           "sending-openclaw", "sending-hermes", "sending-shoggoth",
           "sending-openclaw-immersive", "sending-hermes-immersive", "sending-shoggoth-immersive",
           "steering-native", "steering-native-immersive", "queued-native", "queued-native-immersive", "events-user", "events-assistant", "events-string-time"]) {

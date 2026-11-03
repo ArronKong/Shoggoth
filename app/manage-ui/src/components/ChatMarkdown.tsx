@@ -2,6 +2,7 @@ import { memo, useContext, useLayoutEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { toSanitizedMarkdownHtml, type HtmlArtifactPolicy } from "../lib/markdown";
 import { ChatMediaContext } from "./ChatMediaContext";
+import "./ChatMarkdown.css";
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -55,7 +56,18 @@ const ChatMarkdown = memo(function ChatMarkdown({ text, className, htmlArtifactP
       parent?.normalize();
     };
   }, [html, streamingCursor]);
-  return <div ref={rootRef} className={className} data-qp={quotePart} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div ref={rootRef} className={className} data-qp={quotePart} onClick={event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>(".code-block-copy");
+    if (!button || !event.currentTarget.contains(button)) return;
+    // Own the interaction here so Markdown also works outside the Chat page.
+    event.preventDefault(); event.stopPropagation();
+    const decoder = document.createElement("textarea");
+    decoder.innerHTML = button.getAttribute("data-code") || "";
+    void navigator.clipboard?.writeText(decoder.value).then(() => {
+      button.classList.add("copied");
+      setTimeout(() => button.classList.remove("copied"), 1500);
+    }).catch(() => {});
+  }} dangerouslySetInnerHTML={{ __html: html }} />;
 });
 
 export default ChatMarkdown;

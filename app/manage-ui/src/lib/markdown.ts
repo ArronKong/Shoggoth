@@ -134,6 +134,31 @@ function normalizeMarkdownImageLabel(text?: string | null): string {
 
 export const md: MarkdownIt = new MarkdownIt({ html: true, breaks: true, linkify: true });
 md.enable("strikethrough");
+// Chinese prose has no spaces around strong spans: **句子。**接着 and
+// 这是**“重点”**内容. Relax only the punctuation/Han boundary for double
+// asterisks. Feed the native delimiter balancer so nesting and link scopes stay
+// intact; code, escapes, other markers and the original Markdown are untouched.
+md.inline.ruler.before("emphasis", "cjk-strong", (state, silent) => {
+  const start = state.pos;
+  if (silent || !state.src.startsWith("**", start)) return false;
+  const scanned = state.scanDelims(start, true);
+  if (scanned.length !== 2) return false;
+  // Two UTF-16 units include astral Han characters at either boundary.
+  const before = state.src.slice(Math.max(0, start - 2), start);
+  const after = state.src.slice(start + 2, start + 4);
+  const canOpen = scanned.can_open || /\p{Script=Han}$/u.test(before) && /^\p{P}/u.test(after);
+  const canClose = scanned.can_close || /\p{P}$/u.test(before) && /^\p{Script=Han}/u.test(after);
+  if (canOpen === scanned.can_open && canClose === scanned.can_close) return false;
+  for (let i = 0; i < 2; i++) {
+    state.push("text", "", 0).content = "*";
+    state.delimiters.push({
+      marker: 0x2A, length: 2, token: state.tokens.length - 1, end: -1,
+      open: canOpen, close: canClose,
+    });
+  }
+  state.pos += 2;
+  return true;
+});
 md.renderer.rules.link_open = (tokens, index, options, _env, renderer) => {
   const token = tokens[index];
   const href = token.attrGet("href") || "";

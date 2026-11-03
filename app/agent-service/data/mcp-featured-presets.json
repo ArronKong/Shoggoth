@@ -1431,14 +1431,14 @@
   {
     "id": "eastmoney",
     "name": "东方财富妙想 / Eastmoney",
-    "docsUrl": "https://marketing.dfcfs.com/views/finskillshub/indexZfdcxNpu?appfenxiang=1",
+    "docsUrl": "https://choice.eastmoney.com/mcp/guide",
     "description": {
       "zh-CN": "查询证券行情、财务数据与金融资讯。",
       "en": "Query securities data, financial statements and financial news."
     },
     "note": {
-      "zh-CN": "从妙想平台领取自己的 API Key。使用公开远程 MCP，额度和数据范围按账号权限提供。",
-      "en": "Obtain your own API key from the MX platform. Uses the public remote MCP; quota and data coverage depend on your account."
+      "zh-CN": "在妙想 MCP 官网登录，点击“查看 API Key”获取 MCP 密钥，填写原值，无需加 Bearer。Skills / API 页面的 Key 不一定适用于此 MCP 服务。额度和数据范围按账号权限提供。",
+      "en": "Sign in to the official MX MCP site and select View API Key to get your MCP key. Enter the raw value without Bearer. A key from the Skills / API page may not work with this MCP service. Quota and data coverage depend on your account."
     },
     "setup": "api-key",
     "url": "https://mxapi.eastmoney.com/mxds/mcp",
@@ -1447,8 +1447,8 @@
         "name": "em_api_key",
         "location": "header",
         "label": {
-          "zh-CN": "妙想 API Key",
-          "en": "MX API key"
+          "zh-CN": "妙想 MCP API Key",
+          "en": "MX MCP API key"
         },
         "required": true,
         "secret": true

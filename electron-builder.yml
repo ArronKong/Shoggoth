@@ -90,6 +90,8 @@ asarUnpack:
   - node_modules/@playwright/mcp/**/*
   - node_modules/playwright/**/*
   - node_modules/playwright-core/**/*
+  # NSWorkspace (Finder custom icon) reads the image from a physical path.
+  - app/assets/app-icons/**/*
   # Native afplay cannot open a WAV stored inside app.asar.
   - app/manage-ui/public/audio/typewriter-loop.wav
   # Cua's FFI resolver passes a dylib path to dlopen; that path must be physical,
@@ -189,7 +191,9 @@ publish:
 
 mac:
   # Icon Composer 分层图标；Xcode 26+ 编译 Assets.car，并生成兼容用的 .icns。
-  icon: build/shoggothappicon.icon
+  # 默认图标 Shoggoth IP；旧 Shoggoth Logo（shoggothappicon.icon）只作设置页可选项，
+  # 成品图由 scripts/render-app-icons.cjs 渲染到 app/assets/app-icons/。
+  icon: build/shoggoth-ip.icon
   # 完全由 afterPack 执行显式签名。禁用 electron-builder 自动发现钥匙串
   # identity，避免 afterPack 完成后再次签名并弹出不可恢复的授权窗口。
   identity: null

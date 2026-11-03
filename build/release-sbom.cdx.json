@@ -253,36 +253,6 @@
     },
     {
       "type": "library",
-      "name": "@dimforge/rapier3d-compat",
-      "version": "0.12.0",
-      "bom-ref": "pkg:npm/%40dimforge/rapier3d-compat@0.12.0",
-      "purl": "pkg:npm/%40dimforge/rapier3d-compat@0.12.0",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "b9e90819eb72c08828a5f0fdee80cbe4f7de7b3905a4d87097395a11834e03437a82176c3af87f1d88d231e9394363b53d8bd148315ca85549978af8641c0ea3"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "Apache-2.0"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "frontend"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "name": "@electron-internal/extract-zip",
       "version": "1.0.5",
       "bom-ref": "pkg:npm/%40electron-internal/extract-zip@1.0.5",
@@ -2725,36 +2695,6 @@
     },
     {
       "type": "library",
-      "name": "@tweenjs/tween.js",
-      "version": "23.1.3",
-      "bom-ref": "pkg:npm/%40tweenjs/tween.js@23.1.3",
-      "purl": "pkg:npm/%40tweenjs/tween.js@23.1.3",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "bc99afbf017162e1a71766b146d3d8a1c6a0e8295b6f9612ee42cbf923bf4de545cc7a83216acd298b5cb0f3226e30f1f4ef9bbbea6c032f4d29f5a495ab2c50"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "frontend"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "name": "@types/cacheable-request",
       "version": "6.0.3",
       "bom-ref": "pkg:npm/%40types/cacheable-request@6.0.3",
@@ -2929,7 +2869,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -2959,7 +2899,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -2989,7 +2929,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -3109,7 +3049,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -3169,7 +3109,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -3205,66 +3145,6 @@
     },
     {
       "type": "library",
-      "name": "@types/stats.js",
-      "version": "0.17.4",
-      "bom-ref": "pkg:npm/%40types/stats.js@0.17.4",
-      "purl": "pkg:npm/%40types/stats.js@0.17.4",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "8c806f5964a10af941a8134866dd0a02c856a6f4a3864c2412ee1951c012a00be19ab800508dadd5d5eb8d22f8c5754b0781739cfac8b17de7297165fc3b78bc"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "frontend"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "@types/three",
-      "version": "0.185.4",
-      "bom-ref": "pkg:npm/%40types/three@0.185.4",
-      "purl": "pkg:npm/%40types/three@0.185.4",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "800b01202d3b34816bc636dfeed1f6b7bd5cdfcbae9457e4fd11680bb14d0528cc44043c275c7f441beeb17d0de4f268b9a60525ac1742a7c243444a531ff59c"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "frontend"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "name": "@types/trusted-types",
       "version": "2.0.7",
       "bom-ref": "pkg:npm/%40types/trusted-types@2.0.7",
@@ -3273,36 +3153,6 @@
         {
           "alg": "SHA-512",
           "content": "49c68f767d5d41cce06e5d101537933a65471542eddfde17260390368c95859eabdaf2e730b25f04f779dd2079d93ff71b7e95235fe0d8c65a5f47300ee5ec7f"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "frontend"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "macos-production-input"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "name": "@types/webxr",
-      "version": "0.5.24",
-      "bom-ref": "pkg:npm/%40types/webxr@0.5.24",
-      "purl": "pkg:npm/%40types/webxr@0.5.24",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "87c7e011dfc3a684bd081ae31105d1f9d203adaa290047eee30615358dad10fc24eb4b2d3d686f64c7f8168a3915a92e43b1c56686bc59c79a5857abbcad8ebe"
         }
       ],
       "licenses": [
@@ -5241,7 +5091,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -9095,36 +8945,6 @@
     },
     {
       "type": "library",
-      "name": "meshoptimizer",
-      "version": "1.1.1",
-      "bom-ref": "pkg:npm/meshoptimizer@1.1.1",
-      "purl": "pkg:npm/meshoptimizer@1.1.1",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "a1114d58944303f593ad58fb356bea6b91ea135b7d3180e3d956968ab402cc20ab01dd861eba91fec41ecc2c625804cf36529371168f4473c9c084683c1029e6"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "frontend"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "development-or-other-platform"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "name": "mime-db",
       "version": "1.52.0",
       "bom-ref": "pkg:npm/mime-db@1.52.0",
@@ -10721,6 +10541,36 @@
     },
     {
       "type": "library",
+      "name": "qrcode-generator",
+      "version": "2.0.4",
+      "bom-ref": "pkg:npm/qrcode-generator@2.0.4",
+      "purl": "pkg:npm/qrcode-generator@2.0.4",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9994a23fa4676c7978c4bd80a791df9232e79b17ca70f5a959efdcfb95f10ae7ad11e9ea98d15fd451ff7ed5cf0ad146e7f4c3a1b8ec8f3eac48d2f44abf19f6"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "shoggoth:dependency-scopes",
+          "value": "frontend"
+        },
+        {
+          "name": "shoggoth:distribution",
+          "value": "macos-production-input"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "quick-lru",
       "version": "5.1.1",
       "bom-ref": "pkg:npm/quick-lru@5.1.1",
@@ -12249,36 +12099,6 @@
     },
     {
       "type": "library",
-      "name": "three",
-      "version": "0.185.0",
-      "bom-ref": "pkg:npm/three@0.185.0",
-      "purl": "pkg:npm/three@0.185.0",
-      "hashes": [
-        {
-          "alg": "SHA-512",
-          "content": "fb246b7113b68996bcbb3bcd365d1dedc2f886e8602a006f549d278dc4def3116a67a0cc00565d08a0cff7548402e8f6e5b3408fb93541075ffacad9cb054aeb"
-        }
-      ],
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:dependency-scopes",
-          "value": "frontend"
-        },
-        {
-          "name": "shoggoth:distribution",
-          "value": "macos-production-input"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "name": "tiny-async-pool",
       "version": "1.3.0",
       "bom-ref": "pkg:npm/tiny-async-pool@1.3.0",
@@ -12541,7 +12361,7 @@
         },
         {
           "name": "shoggoth:distribution",
-          "value": "macos-production-input"
+          "value": "development-or-other-platform"
         }
       ]
     },
@@ -13797,7 +13617,6 @@
         "pkg:npm/%40babel/runtime@7.29.7",
         "pkg:npm/%40base-ui/react@1.5.0",
         "pkg:npm/%40base-ui/utils@0.2.9",
-        "pkg:npm/%40dimforge/rapier3d-compat@0.12.0",
         "pkg:npm/%40electron-internal/extract-zip@1.0.5",
         "pkg:npm/%40electron/asar@3.4.1",
         "pkg:npm/%40electron/asar@4.3.0",
@@ -13879,7 +13698,6 @@
         "pkg:npm/%40trycua/cua-driver-win32-arm64-msvc@0.22.0",
         "pkg:npm/%40trycua/cua-driver-win32-x64-msvc@0.22.0",
         "pkg:npm/%40trycua/cua-driver@0.22.0",
-        "pkg:npm/%40tweenjs/tween.js@23.1.3",
         "pkg:npm/%40types/cacheable-request@6.0.3",
         "pkg:npm/%40types/debug@4.1.13",
         "pkg:npm/%40types/fs-extra@9.0.13",
@@ -13895,10 +13713,7 @@
         "pkg:npm/%40types/react-dom@18.3.7",
         "pkg:npm/%40types/react@18.3.29",
         "pkg:npm/%40types/responselike@1.0.3",
-        "pkg:npm/%40types/stats.js@0.17.4",
-        "pkg:npm/%40types/three@0.185.4",
         "pkg:npm/%40types/trusted-types@2.0.7",
-        "pkg:npm/%40types/webxr@0.5.24",
         "pkg:npm/%40ubjs/core@0.31.0-3",
         "pkg:npm/%40ubjs/node-darwin-arm64@0.31.0-3",
         "pkg:npm/%40ubjs/node-darwin-x64@0.31.0-3",
@@ -14090,7 +13905,6 @@
         "pkg:npm/matcher@3.0.0",
         "pkg:npm/math-intrinsics@1.1.0",
         "pkg:npm/mdurl@2.0.0",
-        "pkg:npm/meshoptimizer@1.1.1",
         "pkg:npm/mime-db@1.52.0",
         "pkg:npm/mime-types@2.1.35",
         "pkg:npm/mime@2.6.0",
@@ -14144,6 +13958,7 @@
         "pkg:npm/punycode.js@2.3.1",
         "pkg:npm/pvtsutils@1.3.6",
         "pkg:npm/pvutils@1.2.0",
+        "pkg:npm/qrcode-generator@2.0.4",
         "pkg:npm/quick-lru@5.1.1",
         "pkg:npm/react-dom@18.3.1",
         "pkg:npm/react-i18next@17.0.8",
@@ -14195,7 +14010,6 @@
         "pkg:npm/tar@7.5.22",
         "pkg:npm/temp-file@3.4.0",
         "pkg:npm/temp@0.9.4",
-        "pkg:npm/three@0.185.0",
         "pkg:npm/tiny-async-pool@1.3.0",
         "pkg:npm/tiny-typed-emitter@2.1.0",
         "pkg:npm/tinyglobby@0.2.17",

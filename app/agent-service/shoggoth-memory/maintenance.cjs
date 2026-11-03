@@ -1,12 +1,20 @@
 "use strict";
 
+const path = require("node:path");
 const { core } = require("./host.cjs");
 const { sha256 } = require("./migration.cjs");
 const { computeNextOccurrence } = require("../native-cron-store");
+const { previousCronOccurrence } = require("../native-cron-scheduler");
 const { hasSecret, hasPii } = require("../memory-engine");
 const { serviceError } = require("../security");
 const { estimateContextTokens } = require("../conversation-context-budget");
 const { assertNoBorrowedMemoryWrite } = require("./borrowed-memory-provenance.cjs");
+const { diagnosticCode } = require("./active-memory-diagnostics.cjs");
+const { transaction } = require("../inspiration-database");
+const MAX_DREAM_LATE_MS = 24 * 60 * 60_000;
+const DREAM_RETRY_DELAYS = [60_000, 5 * 60_000];
+const RETRYABLE_DREAM_ERRORS = new Set(["EAGAIN", "EBUSY", "SQLITE_BUSY", "SQLITE_LOCKED",
+  "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "TIMEOUT"]);
 
 // The model returns its durable notes as a Markdown list. Each top-level item
 // becomes its own entry, so the daily file keeps one bullet per fact instead
@@ -61,9 +69,17 @@ class MemoryMaintenance {
       CREATE TABLE IF NOT EXISTS memory_dream_schedule(profile_id TEXT PRIMARY KEY,config TEXT NOT NULL,next_at INTEGER,state TEXT NOT NULL,last_error TEXT) STRICT;
       CREATE TABLE IF NOT EXISTS memory_flush_runs(id TEXT PRIMARY KEY,profile_id TEXT NOT NULL,session_id TEXT NOT NULL,state TEXT NOT NULL,target TEXT NOT NULL,receipt TEXT) STRICT;
       CREATE TABLE IF NOT EXISTS memory_flush_cycles(profile_id TEXT NOT NULL,session_id TEXT NOT NULL,cycle_key TEXT NOT NULL,cycle INTEGER NOT NULL,attempted INTEGER,run_id TEXT,PRIMARY KEY(profile_id,session_id)) STRICT;
-      UPDATE memory_dream_schedule SET state='interrupted' WHERE state='running';
       UPDATE memory_flush_runs SET state='interrupted' WHERE state='running';
     `);
+    const db = this.service.database.db;
+    transaction(db, () => {
+      const columns = new Set(db.prepare("PRAGMA table_info(memory_dream_schedule)").all().map(column => column.name));
+      for (const [name, type] of Object.entries({ due_at: "INTEGER", retry_at: "INTEGER",
+        attempts: "INTEGER NOT NULL DEFAULT 0", write_started: "INTEGER NOT NULL DEFAULT 1", publication: "TEXT" })) {
+        if (!columns.has(name)) db.exec(`ALTER TABLE memory_dream_schedule ADD COLUMN ${name} ${type}`);
+      }
+      db.exec("UPDATE memory_dream_schedule SET state='recovering' WHERE state='running'");
+    });
   }
   async close() {
     this.controller?.abort();
@@ -81,7 +97,9 @@ class MemoryMaintenance {
     if (!row || row.config !== signature) {
       const next = computeNextOccurrence(schedule, service.now());
       if (next === null) throw serviceError("MEMORY_SCHEDULE_INVALID", "记忆整理时间无效");
-      db.prepare("INSERT INTO memory_dream_schedule VALUES (?,?,?,'waiting',NULL) ON CONFLICT(profile_id) DO UPDATE SET config=excluded.config,next_at=excluded.next_at,state='waiting',last_error=NULL")
+      db.prepare(`INSERT INTO memory_dream_schedule (profile_id,config,next_at,state) VALUES (?,?,?,'waiting')
+        ON CONFLICT(profile_id) DO UPDATE SET config=excluded.config,next_at=excluded.next_at,state='waiting',
+        last_error=NULL,due_at=NULL,retry_at=NULL,attempts=0,write_started=0,publication=NULL`)
         .run(profile.id, signature, next);
       row = db.prepare("SELECT * FROM memory_dream_schedule WHERE profile_id=?").get(profile.id);
     }
@@ -89,24 +107,115 @@ class MemoryMaintenance {
   }
   nextDueAt() {
     if (!this.service.opened || this.controller?.signal.aborted) return null;
-    return this.service.profiles().map(profile => this.schedule(profile)?.next_at).filter(value => Number.isSafeInteger(value))
+    return this.service.profiles().map(profile => {
+      const row = this.schedule(profile);
+      if (!row) return null;
+      if (this.service.jobs.has(profile.id) || this.pending.has(`dream:${profile.id}`)) {
+        return row.next_at > this.service.now() ? row.next_at : null;
+      }
+      if (row.state === "recovering" || row.state === "running") {
+        return row.write_started ? this.service.now() : Math.max(row.due_at ?? 0, this.service.now());
+      }
+      return Math.min(row.next_at, row.retry_at ?? Infinity);
+    }).filter(value => Number.isSafeInteger(value))
       .sort((a, b) => a - b)[0] ?? null;
+  }
+  reconcileDream(profileId, publication) {
+    if (!publication) return "MEMORY_DREAM_OUTPUT_UNCERTAIN";
+    try {
+      const { name, before, after } = JSON.parse(publication);
+      if (!["MEMORY.md", "memory.md"].includes(name)) return "MEMORY_DREAM_OUTPUT_UNCERTAIN";
+      const host = this.service.host(profileId);
+      const files = host.getAgentWorkspaceAccess(host.workspaceDir).memoryFiles;
+      const content = files.read(path.join(host.workspaceDir, name)).toString("utf8"), hash = sha256(content);
+      if (hash !== after) return hash === before ? "MEMORY_DREAM_OUTPUT_NOT_COMMITTED" : "MEMORY_DREAM_OUTPUT_UNCERTAIN";
+      const workspaceKey = core.memoryCoreWorkspaceStateKey(host.workspaceDir);
+      const receipt = host.database.db.prepare("SELECT 1 FROM memory_promotion_sources WHERE state_key=?");
+      const keys = core.extractPromotionKeys(content);
+      return keys.length && keys.every(key => receipt.get(`${workspaceKey}:${sha256(key)}`))
+        ? null : "MEMORY_DREAM_RECEIPT_PENDING";
+    } catch { return "MEMORY_DREAM_OUTPUT_UNCERTAIN"; }
   }
   tick(now = this.service.now()) {
     if (!this.service.opened || this.controller?.signal.aborted) return;
     for (const profile of this.service.profiles()) {
       const row = this.schedule(profile);
-      if (!row || row.next_at > now || this.service.jobs.has(profile.id) || this.pending.has(`dream:${profile.id}`)) continue;
+      const key = `dream:${profile.id}`;
+      if (!row || this.service.jobs.has(profile.id) || this.pending.has(key)) continue;
       const db = this.service.database.db;
-      db.prepare("UPDATE memory_dream_schedule SET next_at=?,state='running',last_error=NULL WHERE profile_id=?")
-        .run(computeNextOccurrence(row.schedule, now), profile.id);
-      const task = Promise.resolve().then(() => this.service.dream(profile.id, { signal: this.controller.signal }))
-        .then(() => { if (this.service.opened) db.prepare("UPDATE memory_dream_schedule SET state='completed' WHERE profile_id=?").run(profile.id); }, error => {
-          if (this.service.opened) db.prepare("UPDATE memory_dream_schedule SET state='failed',last_error=? WHERE profile_id=?")
-            .run(error.code || "MEMORY_DREAM_FAILED", profile.id);
-        }).finally(() => this.pending.delete(`dream:${profile.id}`));
-      this.pending.set(`dream:${profile.id}`, task);
+      const recovering = ["running", "recovering"].includes(row.state);
+      if (recovering && (row.write_started || row.due_at === null)) {
+        const error = this.reconcileDream(profile.id, row.publication);
+        db.prepare("UPDATE memory_dream_schedule SET state=?,last_error=?,retry_at=NULL WHERE profile_id=? AND config=?")
+          .run(error ? "interrupted" : "reconciled", error, profile.id, row.config);
+        continue;
+      }
+      const fresh = row.next_at <= now;
+      if (!fresh && !recovering && (row.retry_at === null || row.retry_at > now)) continue;
+      const due = fresh ? Math.max(row.next_at, previousCronOccurrence(row.schedule, now) ?? row.next_at) : row.due_at;
+      if (due > now) continue;
+      const attempts = fresh ? 1 : row.attempts + 1;
+      const next = fresh ? computeNextOccurrence(row.schedule, now) : row.next_at;
+      if (due === null || now - due > MAX_DREAM_LATE_MS || attempts > DREAM_RETRY_DELAYS.length + 1) {
+        db.prepare("UPDATE memory_dream_schedule SET next_at=?,state='missed',retry_at=NULL,last_error=NULL WHERE profile_id=? AND config=?")
+          .run(next, profile.id, row.config);
+        continue;
+      }
+      db.prepare(`UPDATE memory_dream_schedule SET next_at=?,due_at=?,attempts=?,state='running',
+        retry_at=NULL,last_error=NULL,write_started=0,publication=NULL WHERE profile_id=? AND config=?`)
+        .run(next, due, attempts, profile.id, row.config);
+      this.pending.set(key, this.runDream(profile.id, row.config, due, attempts, next)
+        .catch(() => { this.service.logger.warn?.("memory: Dreaming schedule receipt unavailable"); })
+        .finally(() => {
+          this.pending.delete(key);
+          if (!this.controller.signal.aborted) this.onDreamScheduleChanged?.();
+        }));
     }
+  }
+  async runDream(profileId, config, due, attempt, next) {
+    const db = this.service.database.db, signal = this.controller.signal;
+    const identity = [profileId, config, due, attempt];
+    const where = "profile_id=? AND config=? AND due_at=? AND attempts=? AND state='running'";
+    let writeStarted = false;
+    const beforeWrite = (target, request) => {
+      signal.throwIfAborted();
+      const name = path.basename(target);
+      const publication = ["MEMORY.md", "memory.md"].includes(name) && typeof request?.content === "string"
+        && path.dirname(target) === this.service.host(profileId).workspaceDir
+        ? JSON.stringify({ name, before: request.expectedHash, after: sha256(request.content) }) : null;
+      if (!db.prepare(`UPDATE memory_dream_schedule SET write_started=1,publication=coalesce(?,publication) WHERE ${where}`)
+        .run(publication, ...identity).changes) throw serviceError("MEMORY_SCOPE_REVOKED", "Dreaming occurrence was superseded");
+      writeStarted = true;
+    };
+    let state, error = null, retryAt = null;
+    try {
+      const { outcome } = await this.service.dream(profileId, { signal, beforeWrite }) || {};
+      state = outcome?.failed ? "failed" : outcome?.degraded ? "degraded"
+        : !outcome ? "skipped" : outcome.candidates === 0 ? "empty" : "completed";
+      if (state === "failed") error = outcome.errorCode || "MEMORY_DREAM_FAILED";
+    } catch (cause) {
+      state = signal.aborted ? "recovering" : "failed";
+      error = diagnosticCode(cause);
+      if (error === "ERR_SQLITE_ERROR" && Number.isInteger(cause.errcode)) {
+        const sqliteCode = cause.errcode & 0xff;
+        if (sqliteCode === 5) error = "SQLITE_BUSY";
+        if (sqliteCode === 6) error = "SQLITE_LOCKED";
+      }
+    }
+    if (state === "failed" && !writeStarted && RETRYABLE_DREAM_ERRORS.has(error)) {
+      const candidate = this.service.now() + (DREAM_RETRY_DELAYS[attempt - 1] ?? Infinity);
+      if (candidate < next && candidate - due <= MAX_DREAM_LATE_MS) { state = "retry"; retryAt = candidate; }
+    }
+    if (state === "failed" && writeStarted) {
+      const row = db.prepare(`SELECT publication FROM memory_dream_schedule WHERE ${where}`).get(...identity);
+      if (row?.publication) {
+        const reconciliation = this.reconcileDream(profileId, row.publication);
+        state = reconciliation ? "interrupted" : "reconciled";
+        error = reconciliation || error;
+      }
+    }
+    if (this.service.opened) db.prepare(`UPDATE memory_dream_schedule SET state=?,last_error=?,retry_at=? WHERE ${where}`)
+      .run(state, error, retryAt, ...identity);
   }
   flush(input) {
     const key = `flush:${input.profileId}:${input.sessionId}`;

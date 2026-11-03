@@ -136,6 +136,7 @@ const { MemoryProvenanceStore } = require("./memory-provenance-store");
 const { MemoryProvenanceService } = require("./memory-provenance-service");
 const { MemoryCandidateStore } = require("./memory-candidate-store");
 const { MemoryCandidateService } = require("./memory-candidate-service");
+const { MemoryReviewService } = require("./memory-review-service");
 const { CodexMemoryImportStore } = require("./codex-memory-import-store");
 const { CodexMemoryImportService } = require("./codex-memory-import-service");
 const { readCodexMemorySource } = require("./codex-memory-source");
@@ -1138,7 +1139,8 @@ function createAgentService(options) {
   }
   const runtimeManager = options.runtimeManager || (() => {
     const registry = new RuntimeAdapterRegistry({
-      idleTimeoutMs: options.runtimeIdleTimeoutMs,
+      // Retire a proven-idle Binding after 120 seconds; 0 keeps hosts until stopped.
+      idleTimeoutMs: options.runtimeIdleTimeoutMs ?? 120_000,
       onProtocolViolation: event => runtimeTelemetry.record("runtime.handle.violation", {
         source: event.runtime, reason: event.code, stage: event.type }),
       onCapabilityDifference: event => runtimeTelemetry.record("runtime.capability.difference", {
@@ -2157,6 +2159,7 @@ function createAgentService(options) {
   const memoryConsolidationTimers = new Map();
   let memoryCandidateBacklogTimer = null;
   let memoryCandidateAbortController = null;
+  let memoryReviewService = null;
   const scheduleMemoryCandidateBacklog = (delayMs) => {
     if (lifecycleState !== "started" || memoryCandidateBacklogTimer
       || typeof memoryCandidateService?.processBacklog !== "function") return;
@@ -2288,6 +2291,13 @@ function createAgentService(options) {
   const handleRunTerminal = (run, payload) => {
     queueMemoryConsolidation(run, payload);
     if (shoggothMemory && run) void shoggothMemory.finishActiveMemoryRun(run, payload?.status ?? run.status).catch(() => {});
+    if (memoryReviewService && (payload?.status ?? run?.status) === "completed" && run?.source === "chat"
+      && !isNativeFederationChatRun(run) && !isGroupChatRun(run)) {
+      setImmediate(() => {
+        if (lifecycleState !== "started") return;
+        try { memoryReviewService.onTurnCompleted(run); } catch {}
+      });
+    }
     if (!shoggothMemory && payload?.status === "completed" && ["chat", "inspiration"].includes(run?.source)
       && !isNativeFederationChatRun(run)) {
       // A completed direct user conversation triggers background consolidation
@@ -2394,6 +2404,7 @@ function createAgentService(options) {
     productMcpApprovalPolicy,
     onRunInteraction: handleRunInteraction,
     onRunTerminal: handleRunTerminal,
+    onSessionSend: sessionKey => memoryReviewService?.cancelSession(sessionKey),
     validateRunCompletion: (run, report) => codexMemoryImportService?.completionError(run, report) ?? null,
     onTranscriptCommitted: (_event, run) => {
       conversationRecallService.scheduleWarm(run.profileId);
@@ -2564,6 +2575,21 @@ function createAgentService(options) {
       excludeSession: ({ profileId, sessionId }) => shoggothMemory.forgetSession(profileId, sessionId),
     };
   }
+  // The memory core replaced the legacy candidate review; direct chats get a
+  // periodic background review instead (Hermes memory nudge).
+  if (shoggothMemory) {
+    memoryReviewService = new MemoryReviewService({ memory: shoggothMemory, recall: conversationRecallService,
+      transcripts: transcriptStore, sessions: chatSessionStore, provenance: memoryProvenanceService,
+      generate: input => workRunCoordinator.generateMemoryText(input), now: options.now,
+      onError: error => {
+        const code = typeof error?.code === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(error.code)
+          ? error.code : error?.name === "AbortError" ? "ABORTED" : "MEMORY_REVIEW_FAILED";
+        // Cancellation, and memory set to local-only search, are expected outcomes.
+        if (!["MODEL_ONLY_CANCELED", "ABORTED", "MEMORY_TEXT_MODEL_DISABLED"].includes(code)) {
+          console.error(`[agent-service] memory review skipped: ${code}`);
+        }
+      } });
+  }
   if (!memoryCandidateService) {
     memoryCandidateService = new MemoryCandidateService({
       candidateStore: memoryCandidateStore, memoryEngine, memoryStore,
@@ -2700,6 +2726,7 @@ function createAgentService(options) {
     onTerminal: (opportunityId, outcome) => groupChatDriver.onExternalTerminal(opportunityId, outcome),
     onInteraction: (opportunityId, attention) => groupChatDriver.onExternalInteraction(opportunityId, attention),
     onResumed: (opportunityId) => groupChatDriver.onExternalResumed(opportunityId),
+    onObservation: (opportunityId) => groupChatDriver.onExternalObservation(opportunityId),
     ...(options.groupChatExternalPollMs ? { pollMs: options.groupChatExternalPollMs } : {}),
     onError: () => {},
   });
@@ -2714,8 +2741,10 @@ function createAgentService(options) {
     chatSessionStore, transcriptStore, now: options.now,
   });
   const groupDrafts = new GroupDraftTracker({ store: groupChatStore, nativeExecutor: groupNativeExecutor,
+    now: options.now,
     externalExecutor: groupExternalExecutor, onChanged: (groupId) => eventBuffer.append("group.changed", { groupId }),
-    onActivity: (opportunityId, activity) => groupChatDriver.onActivity(opportunityId, activity) });
+    onActivity: (opportunityId, activity) => groupChatDriver.onActivity(opportunityId, activity),
+    onObservation: (opportunityId, observation) => groupChatDriver.onExecutionObservation(opportunityId, observation) });
   // 群消息的附件存在媒体库里（与私聊、灵感同一处）。外部成员没有原生附件通道，拿落盘文件的本机路径自己读。
   const groupAttachmentPath = (attachment) => {
     const { id, name, mimeType, size } = attachment;
@@ -2742,7 +2771,8 @@ function createAgentService(options) {
     ingestAttachment: ingestGroupAttachment,
     executor: groupNativeExecutor,
     onChanged: (groupId) => eventBuffer.append("group.changed", { groupId }),
-    ...(options.groupChatTurnTimeoutMs ? { inactivityMs: options.groupChatTurnTimeoutMs } : {}),
+    ...((options.groupChatFloorIdleMs ?? options.groupChatTurnTimeoutMs)
+      ? { floorIdleMs: options.groupChatFloorIdleMs ?? options.groupChatTurnTimeoutMs } : {}),
     ...(options.groupChatReleaseAfterToolMs ? { releaseAfterToolMs: options.groupChatReleaseAfterToolMs } : {}),
     onError: (error) => console.error(`[agent-service] group chat driver: ${error?.code || error?.message || "UNKNOWN"}`),
   });
@@ -2844,6 +2874,9 @@ function createAgentService(options) {
     },
     onFatalError: (error) => reportDomainFatal("cron", error),
   });
+  if (shoggothMemory) shoggothMemory.maintenance.onDreamScheduleChanged = () => {
+    nativeCronScheduler.refreshMemoryTimer?.();
+  };
   codexMemoryImportService = new CodexMemoryImportService({
     store: codexMemoryImportStore, profileId: DEFAULT_AGENT_PROFILE_ID,
     readRunReport: (run) => {
@@ -5631,6 +5664,7 @@ function createAgentService(options) {
     codexMemoryImportAbortController = null;
     memoryCandidateAbortController?.abort();
     memoryCandidateAbortController = null;
+    memoryReviewService?.abortAll();
     if (agentArchiveRetention?.opened) {
       try { await agentArchiveRetention.close(); } catch (error) { errors.push(error); }
     }

@@ -107320,7 +107320,9 @@ async function applyShortTermPromotions(options) {
       candidate.key,
       "consolidation origin/session",
       "consolidation origin/session filter"
-    ) : false : isContaminatedDreamingSnippet(candidate.snippet) ? reject(candidate.key, "contamination", "contamination filter") : candidate.promotedAt || latest?.promotedAt ? reject(candidate.key, "already promoted", "already promoted") : candidate.score < minScore ? reject(
+    ) : false : isContaminatedDreamingSnippet(candidate.snippet, {
+      allowTranscriptTurnSnippet: isShoggothHistory(candidate)
+    }) ? reject(candidate.key, "contamination", "contamination filter") : candidate.promotedAt || latest?.promotedAt ? reject(candidate.key, "already promoted", "already promoted") : candidate.score < minScore ? reject(
       candidate.key,
       "score threshold",
       `score threshold (${candidate.score.toFixed(3)} < ${minScore})`
@@ -107346,7 +107348,7 @@ async function applyShortTermPromotions(options) {
   const plannedSourceFingerprints = /* @__PURE__ */ new Map();
   for (const candidate of selected) {
     const sourceFingerprintBefore = await promotionSourceFingerprint(workspaceDir, candidate);
-    const rehydrated = await rehydratePromotionCandidate(workspaceDir, candidate);
+    const rehydrated = isShoggothHistory(candidate) ? verifiedHistoryPromotion(workspaceDir, candidate) : await rehydratePromotionCandidate(workspaceDir, candidate);
     const sourceFingerprintAfter = await promotionSourceFingerprint(workspaceDir, candidate);
     if (sourceFingerprintBefore === sourceFingerprintAfter && rehydrated && !isContaminatedDreamingSnippet(rehydrated.snippet)) {
       rehydratedSelected.push(rehydrated);
@@ -107428,7 +107430,7 @@ async function applyShortTermPromotions(options) {
           }
           continue;
         }
-        if (entry.promotedAt) {
+        if (entry.promotedAt || isShoggothHistory(candidate) && !verifiedHistoryPromotion(workspaceDir, { ...candidate, snippet: entry.snippet })) {
           continue;
         }
         const storeChanged = plannedStoreEntryFingerprints.get(candidate.key) !== recallStoreEntryFingerprint(entry);
@@ -107669,9 +107671,10 @@ async function applyShortTermPromotions(options) {
     compactedDates
   };
 }
-var import_node_crypto24, import_promises50, import_node_path103, MEMORY_WRITE_LOCK_OPTIONS;
+var import_node_crypto24, import_promises50, import_node_path103, isShoggothHistory, verifiedHistoryPromotion, MEMORY_WRITE_LOCK_OPTIONS;
 var init_short_term_promotion_apply = __esm({
   "build/shoggoth-memory/source/extensions/memory-core/src/short-term-promotion-apply.ts"() {
+    init_memory_workspace_files();
     import_node_crypto24 = require("node:crypto");
     import_promises50 = __toESM(require("node:fs/promises"));
     import_node_path103 = __toESM(require("node:path"));
@@ -107697,6 +107700,8 @@ var init_short_term_promotion_apply = __esm({
     init_short_term_promotion_types();
     init_short_term_promotion_utils();
     init_time();
+    isShoggothHistory = (candidate) => /^memory\/\.dreams\/session-corpus\/\d{4}-\d{2}-\d{2}\.txt$/u.test(candidate.path);
+    verifiedHistoryPromotion = (workspaceDir, candidate) => getMemoryWorkspaceMaintenance(workspaceDir)?.verifiedHistoryPromotion?.(candidate);
     MEMORY_WRITE_LOCK_OPTIONS = {
       retries: { retries: 100, factor: 1.2, minTimeout: 25, maxTimeout: 250 },
       stale: 12e4,
@@ -110301,6 +110306,7 @@ __export(entry_exports, {
   decodeMemoryEmbedding: () => decodeMemoryEmbedding,
   deleteMemoryCoreWorkspaceEntry: () => deleteMemoryCoreWorkspaceEntry,
   deleteShortTermLockEntryIfCurrent: () => deleteShortTermLockEntryIfCurrent,
+  deriveConceptTags: () => deriveConceptTags,
   detectMime: () => detectMime,
   dropDisabledMemoryFts: () => dropDisabledMemoryFts,
   dropMemoryChunkFtsTriggers: () => dropMemoryChunkFtsTriggers,
@@ -111878,6 +111884,7 @@ async function runShortTermDreamingPromotion(params) {
   let totalCandidates = 0;
   let totalApplied = 0;
   let failedWorkspaces = 0;
+  let errorCode;
   let degradedNarratives = 0;
   let pendingNarratives = 0;
   const pluginConfig = params.cfg ? resolveMemoryDreamingPluginConfig(params.cfg) : void 0;
@@ -111914,6 +111921,14 @@ async function runShortTermDreamingPromotion(params) {
       pendingNarratives += phaseResult.pendingNarratives;
     } catch (err2) {
       failedWorkspaces += 1;
+      const failure = err2;
+      let code = failure?.code;
+      if (code === "ERR_SQLITE_ERROR" && typeof failure?.errcode === "number") {
+        const sqliteCode = failure.errcode & 255;
+        if (sqliteCode === 5) code = "SQLITE_BUSY";
+        if (sqliteCode === 6) code = "SQLITE_LOCKED";
+      }
+      if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,95}$/.test(code)) errorCode ??= code;
       params.logger.error(
         `memory-core: dreaming sweep failed for workspace ${workspaceDir}: ${formatErrorMessage2(err2)}`
       );
@@ -112042,6 +112057,14 @@ async function runShortTermDreamingPromotion(params) {
       }
     } catch (err2) {
       failedWorkspaces += 1;
+      const failure = err2;
+      let code = failure?.code;
+      if (code === "ERR_SQLITE_ERROR" && typeof failure?.errcode === "number") {
+        const sqliteCode = failure.errcode & 255;
+        if (sqliteCode === 5) code = "SQLITE_BUSY";
+        if (sqliteCode === 6) code = "SQLITE_LOCKED";
+      }
+      if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,95}$/.test(code)) errorCode ??= code;
       const error = formatErrorMessage2(err2);
       params.logger.error(
         `memory-core: dreaming promotion failed for workspace ${workspaceDir}: ${error}`
@@ -112064,6 +112087,7 @@ async function runShortTermDreamingPromotion(params) {
   }
   return {
     handled: true,
+    outcome: { candidates: totalCandidates, applied: totalApplied, failed: failedWorkspaces, degraded: degradedNarratives, errorCode },
     reason: degradedNarratives > 0 ? "memory-core: short-term dreaming degraded" : "memory-core: short-term dreaming processed"
   };
 }
@@ -128959,13 +128983,14 @@ function selectStrongTriggerMatches(message, entries, activeProjectKeys = []) {
     })
   ).slice(0, TRIGGER_INJECTION_LIMIT);
 }
+function formatTriggerRecallMatch(entry) {
+  return `- ${entry.excerpt.trim()} (Source: ${entry.citations?.map((citation) => citation.label).join(", ") || `${entry.reference.providerId}:${entry.reference.id}`})`;
+}
 function buildTriggerRecallContext(matches) {
   if (matches.length === 0) {
     return void 0;
   }
-  const summary = matches.map(
-    (entry) => `- ${entry.excerpt.trim()} (Source: ${entry.citations?.map((citation) => citation.label).join(", ") || `${entry.reference.providerId}:${entry.reference.id}`})`
-  ).join("\n");
+  const summary = matches.map(formatTriggerRecallMatch).join("\n");
   return buildPromptPrefix(truncateUtf16Safe(summary, MAX_TRIGGER_CONTEXT_CHARS));
 }
 var triggerRecallRuns = /* @__PURE__ */ new Map();
@@ -129061,6 +129086,7 @@ function toLegacyTriggerRecallHit(entry, providerId) {
   return {
     reference: { providerId, id: entry.path, fragment: `L${String(entry.startLine)}` },
     excerpt: stripMemoryAnnotationCarriers(entry.snippet),
+    shoggothTriggerResult: entry,
     score: entry.score,
     source: entry.source,
     citations: [{ label: `${entry.path}#L${String(entry.startLine)}` }],
@@ -129158,7 +129184,10 @@ async function resolveTriggerRecall(params) {
   return {
     ...context ? { context } : {},
     hasStrongHit: matches.length > 0,
-    injectedCount: matches.length
+    injectedCount: matches.length,
+    deliveredMatches: matches.filter(
+      (_, index) => matches.slice(0, index + 1).map(formatTriggerRecallMatch).join("\n").length <= MAX_TRIGGER_CONTEXT_CHARS
+    )
   };
 }
 function forgetTriggerRecallRun(runId) {
@@ -129194,6 +129223,8 @@ function waitForTriggerLookup(work, signal) {
 }
 
 // build/shoggoth-memory/entry.ts
+init_concept_vocabulary();
+init_dreaming();
 init_types();
 
 // build/shoggoth-memory/source/extensions/active-memory/recall-run.ts
@@ -130883,7 +130914,7 @@ ${formatActiveMemoryCommandHelp()}`
               sessionId: ctx.sessionId
             }) : void 0);
             const effectiveAgentId = resolvedAgentId || resolveStatusUpdateAgentId({ sessionKey: resolvedSessionKey });
-            const publishPrependContext = (parts) => {
+            const publishPrependContext = (parts, deliveredMatches) => {
               const prependContext = parts.filter(Boolean).join("\n");
               if (!prependContext) {
                 return void 0;
@@ -130892,7 +130923,7 @@ ${formatActiveMemoryCommandHelp()}`
               toolAuthority.assertActive();
               ctx.hookInvocation?.assertActive();
               ctx.assertMemoryAudienceCurrent?.();
-              return { prependContext };
+              return { prependContext, deliveredMatches };
             };
             const skipRecall = async (reason) => {
               logRecallSkipped(reason);
@@ -131043,7 +131074,7 @@ ${formatActiveMemoryCommandHelp()}`
             }
             if (!activeMemoryAllowed && !productRecallAllowed) {
               await skipRecall("destination-not-allowed");
-              return publishPrependContext([laneOneContext]);
+              return publishPrependContext([laneOneContext], laneOne.deliveredMatches);
             }
             const escalationDecision = resolveRecallEscalationDecision({
               mode: invocationConfig.mode,
@@ -131053,7 +131084,7 @@ ${formatActiveMemoryCommandHelp()}`
             if (escalationDecision !== "recall") {
               api.logger.debug?.(`active-memory: recall skipped reason=${escalationDecision}`);
               const outcomeContext = escalationDecision === "no-recall-intent" ? buildRecallOutcomePrefix("skipped-no-recall-intent") : void 0;
-              return publishPrependContext([laneOneContext, outcomeContext]);
+              return publishPrependContext([laneOneContext, outcomeContext], laneOne.deliveredMatches);
             }
             const conversationRecall = productRecallAllowed && resolvedSessionKey ? {
               anchorSessionKey: resolvedSessionKey,
@@ -131092,7 +131123,7 @@ ${formatActiveMemoryCommandHelp()}`
               assertMemoryAudienceCurrent: ctx.assertMemoryAudienceCurrent
             });
             const recallContext = result.summary ? buildPromptPrefix(result.summary) : result.status === "unavailable" ? buildRecallOutcomePrefix(result.status) : void 0;
-            return publishPrependContext([laneOneContext, recallContext]);
+            return publishPrependContext([laneOneContext, recallContext], laneOne.deliveredMatches);
           } catch (error) {
             if (deadlineController.signal.aborted) {
               return void 0;
@@ -139171,6 +139202,7 @@ function normalizeMemoryModelReference(raw, defaultProvider) {
   decodeMemoryEmbedding,
   deleteMemoryCoreWorkspaceEntry,
   deleteShortTermLockEntryIfCurrent,
+  deriveConceptTags,
   detectMime,
   dropDisabledMemoryFts,
   dropMemoryChunkFtsTriggers,

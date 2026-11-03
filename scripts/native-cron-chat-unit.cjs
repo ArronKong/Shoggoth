@@ -146,6 +146,33 @@ test("scheduled cron persists a typed conversation, full reply, trajectory and a
       delivery, trajectory, activity: ctx.activities.find((event) => event.runId === run.id) }));
 });
 
+test("Dashboard reads the full report by run ID even when a scheduled run starts late", async (t) => {
+  const ctx = await fixture(t);
+  const job = await ctx.create("continue");
+  const jobId = `shoggoth:${job.id}`;
+  await ctx.ipc("cron.job.enabled.set", { operationId: id(), jobId: job.id,
+    enabled: true, createdAt: ctx.clock.value });
+  ctx.clock.value = job.schedule.at + 1_300;
+  await ctx.service.nativeCronScheduler.tick();
+  const scheduled = ctx.service.workDispatcher.listRuns({ source: "cron", sourceId: job.id })[0];
+  const report = "定时任务报告。".repeat(600) + "【报告结尾】";
+  await ctx.complete(scheduled, report);
+  const manual = await ctx.trigger(job);
+  await ctx.complete(manual, "随后手动运行的报告");
+  const { runs } = await ctx.backend.getRecentCronRuns();
+  const row = runs.find((run) => run.runId === scheduled.id);
+  assert.equal(row.startedAt, job.schedule.at + 1_300);
+  assert.ok(row.summary.length < report.length);
+  assert.equal((await ctx.backend.getCronLatestDelivery(jobId, job.schedule.at)).fullText, report);
+  assert.deepEqual(await ctx.backend.getCronLatestDelivery(jobId, row.startedAt), { source: "none" });
+  const result = await ctx.backend.getCronRunResult(jobId, row.runId);
+  assert.equal(result.runId, scheduled.id);
+  assert.equal(result.fullText, report);
+  assert.equal((await ctx.backend.getCronRunResult(jobId, manual.id)).fullText, "随后手动运行的报告");
+  const other = await ctx.create();
+  assert.deepEqual(await ctx.backend.getCronRunResult(`shoggoth:${other.id}`, row.runId), { source: "none" });
+});
+
 test("silent cron keeps its audit but emits no chat history, delivery or terminal text", async (t) => {
   const ctx = await fixture(t);
   const job = await ctx.create("continue");

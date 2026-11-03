@@ -13,25 +13,43 @@ try {
   write('resources/legal/source-components.json', { components: [], npmOverrides: [] });
   write('package-lock.json', { packages: {
     '': { name: 'test' },
-    'node_modules/shared': { version: '1.0.0', license: 'MIT' },
+    'node_modules/shared': { version: '1.0.0', license: 'MIT', devOptional: true },
     'node_modules/build-only': { version: '1.0.0', license: 'ISC', dev: true },
+    'node_modules/dev-optional-tool': { version: '1.0.0', license: 'MIT', devOptional: true },
+    'node_modules/electron': { version: '1.0.0', license: 'MIT', dev: true },
+    'node_modules/optional-runtime': { version: '1.0.0', license: 'MIT', optional: true, os: ['darwin'] },
+    'node_modules/other-platform': { version: '1.0.0', license: 'MIT', optional: true, os: ['linux'] },
   } });
   write('app/manage-ui/package-lock.json', { packages: {
     'node_modules/shared': { version: '1.0.0', license: 'MIT' },
     'node_modules/frontend-only': { version: '2.0.0', license: 'ISC' },
+    'node_modules/@types/fixture': { version: '1.0.0', license: 'MIT', optional: true },
   } });
   for (const [prefix, name, version] of [
     ['', 'shared', '1.0.0'], ['app/manage-ui/', 'shared', '1.0.0'],
     ['app/manage-ui/', 'frontend-only', '2.0.0'],
+    ['', 'electron', '1.0.0'], ['', 'optional-runtime', '1.0.0'],
   ]) {
     write(`${prefix}node_modules/${name}/package.json`, { name, version });
     write(`${prefix}node_modules/${name}/LICENSE`, `Fixture full license for ${name}\nCopyright fixture author\n`);
   }
   const inventory = collectThirdPartyLicenses(root);
-  assert.equal(inventory.distributedCount, 2);
-  assert.equal(inventory.npm.length, 3);
+  assert.equal(inventory.distributedCount, 4);
+  assert.equal(inventory.npm.length, 8, 'development and other-platform dependencies remain in the source inventory');
   assert.deepEqual(inventory.npm.find(item => item.name === 'shared').scopes, ['desktop', 'frontend']);
   assert.equal(inventory.npm.find(item => item.name === 'build-only').distributed, false);
+  assert.equal(inventory.npm.find(item => item.name === 'dev-optional-tool').distributed, false);
+  assert.equal(inventory.npm.find(item => item.name === '@types/fixture').distributed, false,
+    'frontend type declarations are not runtime code even when npm marks them optional');
+  assert.equal(inventory.npm.find(item => item.name === 'other-platform').distributed, false);
+  assert.equal(inventory.npm.find(item => item.name === 'electron').distributed, true,
+    'Electron is distributed even though it is installed as a development dependency');
+  assert.equal(inventory.npm.find(item => item.name === 'optional-runtime').distributed, true,
+    'optional production dependencies for macOS must retain their license');
+  assert.equal(inventory.npm.find(item => item.name === 'shared').distributed, true,
+    'a production dependency in either scope must retain its license');
+  const index = JSON.parse(fs.readFileSync(path.join(root, 'resources/legal/third-party-index.json'), 'utf8'));
+  assert.deepEqual(index.npm.map(item => item.name), ['electron', 'frontend-only', 'optional-runtime', 'shared']);
   collectThirdPartyLicenses(root, { check: true });
   const notice = path.join(root, 'resources/legal/THIRD-PARTY-NOTICES.md');
   fs.writeFileSync(notice, 'tampered');
@@ -50,5 +68,5 @@ try {
   write(`${dependency}/LICENSE`, 'restored fixture license');
   write(`${dependency}/package.json`, { name: 'frontend-only', version: '2.0.1' });
   assert.throws(() => collectThirdPartyLicenses(root), /version mismatch/);
-  console.log('PASS license generator: both lockfiles, deduplication, completeness, version matching, read-only check, safe stale cleanup');
+  console.log('PASS license generator: development and frontend type classification, Electron and optional runtime retention, both lockfiles, deduplication, completeness, version matching, read-only check, safe stale cleanup');
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

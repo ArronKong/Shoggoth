@@ -65,7 +65,7 @@ async function fixture(id = 'wind', language = 'en') {
     if (name === 'react' || name === 'react/jsx-runtime') return uiRequire(name);
     if (name === 'react-i18next') return { useTranslation: () => ({ t: translate, i18n: { resolvedLanguage: language } }) };
     if (name === '../api/mcpConnectors') return api;
-    if (name === '../components/Modal') return { __esModule: true, default: ({ children, title }) => React.createElement('section', {}, React.createElement('header', {}, title), children) };
+    if (name === '../components/Modal') return { __esModule: true, default: ({ children, footer, subtitle, title }) => React.createElement('section', {}, React.createElement('header', {}, title), children, React.createElement("p", {}, subtitle), footer) };
     if (name === '../components/McpConnectorIcon') return { __esModule: true, default: () => null };
     if (name === '../components/ConnectorTools') return { __esModule: true, default: props => React.createElement('div', { 'data-tools-server': props.serverId }) };
     if (name === '../components/ui') return { useConfirm: () => async () => true };

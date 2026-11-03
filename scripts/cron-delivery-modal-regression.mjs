@@ -18,27 +18,22 @@ assert.ok(openDeliveryBody, "必须找到 Cron 日历产出详情打开流程");
 const deliveryRequestIndex = openDeliveryBody.indexOf(
   "await getCronLatestDelivery(job.id, occurrenceMs)",
 );
-const trajectoryRequestIndex = openDeliveryBody.indexOf(
-  "await getCronRunTrajectory(job.id, latest.sessionKey, latest.runId)",
-);
 const publishModalIndex = openDeliveryBody.indexOf("setDeliveryJob(job)");
 
 assert.ok(deliveryRequestIndex >= 0, "必须加载对应 occurrence 的最终产出");
-assert.ok(trajectoryRequestIndex >= 0, "有 sessionKey 时必须在打开前等待 trajectory");
 assert.ok(publishModalIndex >= 0, "完整数据 ready 后必须发布弹窗 payload");
-assert.ok(
-  deliveryRequestIndex < trajectoryRequestIndex && trajectoryRequestIndex < publishModalIndex,
-  "必须依次完成 delivery、trajectory，再打开 Modal",
-);
+assert.ok(deliveryRequestIndex < publishModalIndex, "必须先完成 delivery，再打开 Modal");
 assert.doesNotMatch(
   openDeliveryBody.slice(0, deliveryRequestIndex),
   /setDeliveryJob\(job\)/,
   "delivery 请求完成前不得先打开只有 loading 的小弹窗",
 );
+// 运行结果弹窗不显示「助理实时动态」，打开时也不再请求运行轨迹。
+assert.doesNotMatch(openDeliveryBody, /getCronRunTrajectory/);
 assert.match(
   openDeliveryBody,
-  /if \(seq !== deliveryReqRef\.current\) return;[\s\S]*?setDelivery\(latest\);\s*setTrajectory\(nextTrajectory\);\s*setDeliveryJob\(job\);/,
-  "只有最新请求可以一次提交正文、trajectory 和打开状态",
+  /if \(seq !== deliveryReqRef\.current\) return;[\s\S]*?setDelivery\(latest\);\s*setDeliveryJob\(job\);/,
+  "只有最新请求可以一次提交正文和打开状态",
 );
 assert.match(
   cronPage,

@@ -28,11 +28,13 @@ class MemoryWorkspaceFiles {
         this.checkSources();
         const source = this.owned(from), destination = this.owned(to, false, true);
         this.ensureDirectory(path.dirname(destination));
+        this.host.beforeDreamWrite(destination);
         fs.renameSync(source, destination);
         this.checkSources();
       },
       resolveWritePath: async target => this.owned(await core.resolveMemoryWritePath(this.owned(target, false, true)), false, true),
-      commitContent: request => this.write(request.filePath, () => core.commitMemoryContent({ ...request, workspaceDir: undefined })),
+      commitContent: request => this.write(request.filePath,
+        () => core.commitMemoryContent({ ...request, workspaceDir: undefined }), request),
       resolveDreamsPath: async () => {
         for (const name of core.DREAMS_FILENAMES) {
           const target = this.owned(path.join(host.workspaceDir, name), false, true);
@@ -44,7 +46,24 @@ class MemoryWorkspaceFiles {
       writeDreams: (target, content) => this.write(target, () => core.writeDreamsFileAtomic(target, content)),
       replaceReport: (target, content) => this.write(target, () => core.replaceDreamingMarkdownFile(target, content)),
       appendCorpus: (target, content) => this.write(target, () => core.appendSessionCorpusText(target, content)),
+      verifiedHistoryPromotion: candidate => this.verifiedHistoryPromotion(candidate),
     };
+  }
+  verifiedHistoryPromotion(candidate) {
+    if (candidate.startLine !== candidate.endLine || !(candidate.recallCount > 0)) return null;
+    try {
+      const { host } = this, relative = candidate.path;
+      const line = this.read(path.join(host.workspaceDir, relative)).toString("utf8").split("\n")[candidate.startLine - 1];
+      const citation = /^(?<ref>\[(?<owner>[^/\s\]]+)\/sessions\/(?:(?<agent>[^/\s]+)\/)?(?<session>[^#\s\]]+)#L\d+\])\s+(?<text>.+)$/u.exec(line)?.groups;
+      if (!citation || citation.owner !== host.profileId || (citation.agent && citation.agent !== host.profileId)) return null;
+      const session = host.sessions.current(host.profileId, citation.session);
+      const turn = /^(?:User|Assistant): (.+)$/u.exec(candidate.snippet);
+      const corpusExcerpt = citation.text.replace(/…$/u, "").trimEnd();
+      if (!turn || !candidate.snippet.replace(/…$/u, "").startsWith(corpusExcerpt)) return null;
+      const evidence = `${relative}#L${candidate.startLine}-L${candidate.endLine}\n${citation.ref} ${candidate.snippet}`;
+      if (!host.sourceSessionsVisible(evidence, session.workspace)) return null;
+      return { ...candidate, snippet: turn[1] };
+    } catch { return null; }
   }
   rehydrateExact(candidate) {
     return this.readTarget.run(path.resolve(this.host.workspaceDir, candidate.path),
@@ -103,9 +122,10 @@ class MemoryWorkspaceFiles {
     this.owned(target, stat.isDirectory());
     return { isFile: stat.isFile(), isDirectory: stat.isDirectory(), isSymbolicLink: false, size: stat.size, mtimeMs: stat.mtimeMs, mode: stat.mode };
   }
-  async write(target, action) {
+  async write(target, action, request) {
     this.checkSources(); this.owned(target, false, true);
     this.ensureDirectory(path.dirname(target));
+    this.host.beforeDreamWrite(target, request);
     const result = await action();
     try { this.checkSources(); }
     catch (error) { error.publication = "committed"; throw error; }

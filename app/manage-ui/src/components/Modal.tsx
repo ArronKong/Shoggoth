@@ -20,6 +20,9 @@ export default function Modal({
   width = 800,
   dismissible = true,
   className,
+  variant,
+  actions,
+  tone,
 }: {
   open: boolean;
   title?: ReactNode;
@@ -33,10 +36,16 @@ export default function Modal({
   // 提交中的表单用它锁住 Escape / 遮罩 / 关闭键，避免半途关窗。
   dismissible?: boolean;
   className?: string;
+  // report = 运行结果弹窗（设计稿 246:1193）：渐变底、24px 标题、右上角图标按钮。
+  variant?: "connector" | "report";
+  // 标题行关闭键左侧的图标按钮。
+  actions?: ReactNode;
+  // report 变体出错时的红色渐变（设计稿 426:1071）。
+  tone?: "error";
 }) {
   const { t } = useTranslation();
   const wasOpenRef = useRef(false);
-  const currentContent = { title, subtitle, children, footer };
+  const currentContent = { title, subtitle, children, footer, actions, tone };
   const retainedContent = useRef(currentContent);
   // React 18 尚未把 inert 当布尔属性处理；空字符串既符合 HTML 的 presence
   // 语义，也能避免 inert={true} 被 React 丢弃而让退场表单继续响应键盘。
@@ -66,6 +75,8 @@ export default function Modal({
           subtitle: undefined,
           children: undefined,
           footer: undefined,
+          actions: undefined,
+          tone: undefined,
         };
       }
       onOpenChangeComplete?.(nextOpen);
@@ -84,7 +95,9 @@ export default function Modal({
         <Dialog.Backdrop className={styles.overlay} />
         <Dialog.Popup
           {...closingInteractionProps}
-          className={[styles.panel, className].filter(Boolean).join(' ')}
+          className={[styles.panel, variant === "connector" && styles.connector, variant === "report" && styles.report, className].filter(Boolean).join(' ')}
+          data-modal-variant={variant}
+          data-tone={visibleContent.tone}
           style={{ width }}
         >
           <header className={styles.head}>
@@ -96,12 +109,20 @@ export default function Modal({
                 </Dialog.Description>
               )}
             </div>
+            {visibleContent.actions && (
+              <div className={styles.actions}>{visibleContent.actions}</div>
+            )}
             <Dialog.Close
               className={styles.close}
               aria-label={t("common.close")}
               disabled={!dismissible}
             >
-              ✕
+              {variant === "report" ? (
+                // 设计稿的细线 X，与同一行的图标按钮同一描边。
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+                  <path d="M10.85 10.85L22.15 22.15M22.15 10.85L10.85 22.15" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
+              ) : "✕"}
             </Dialog.Close>
           </header>
           <div className={styles.body}>{visibleContent.children}</div>

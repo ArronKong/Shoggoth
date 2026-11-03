@@ -16,6 +16,8 @@ const state = window as any;
 const options = new URLSearchParams(location.search);
 const language = options.get("language") || "zh-CN";
 const scenario = options.get("scenario") || "mixed";
+const cronResults = scenario.startsWith("cron-results-");
+const alphaBackend = cronResults ? scenario.split("-")[2] : "openclaw";
 const queued = scenario.startsWith("queued-");
 const steering = scenario.startsWith("steering-");
 const sending = scenario.startsWith("sending-") || steering;
@@ -23,14 +25,14 @@ const betaBackend = steering || queued ? "shoggoth" : sending ? scenario.split("
 const immersive = scenario.endsWith("-immersive");
 const now = Date.now();
 const minute = 60_000;
-const alpha = "order-alpha", beta = betaBackend + "-order-beta";
+const alpha = cronResults ? alphaBackend + "-order-alpha" : "order-alpha", beta = betaBackend + "-order-beta";
 const mainKey = "agent:" + alpha + ":main";
 const oldKey = "agent:" + alpha + ":old";
 const cronKey = "agent:" + alpha + ":cron:fixture:run:1";
 const betaKey = "agent:" + beta + ":main";
 const internalKey = "agent:order-internal:main";
 const session = (key: string, agentId: string, name: string, age: number, kind = "main") =>
-  ({ key, agentId, agentName: name, backendId: agentId === beta ? betaBackend : "openclaw",
+  ({ key, agentId, agentName: name, backendId: agentId === beta ? betaBackend : alphaBackend,
     label: key === oldKey ? "Old session" : key === mainKey ? "Latest session" : undefined,
     updatedAt: now - age * minute, kind });
 const sessions = [
@@ -41,11 +43,20 @@ const sessions = [
 if (queued) sessions.push(session(betaKey + "-other", beta, "Beta", 25));
 const agents = [alpha, beta, "order-internal"].map(id => ({
   id, name: id === alpha ? "Alpha" : id === beta ? "Beta" : "Internal member",
-  backendId: id === beta ? betaBackend : "openclaw",
+  backendId: id === beta ? betaBackend : alphaBackend,
 }));
-const histories = new Map(sessions.map(row => [row.key, [{
+const histories = new Map<string, any[]>(sessions.map(row => [row.key, [{
   id: row.key + ":reply", role: "assistant", content: "History for " + row.key, timestamp: row.updatedAt,
 }]]));
+if (cronResults) {
+  sessions.splice(0, sessions.length,
+    Object.assign(session(oldKey, alpha, "Alpha", 40, "cron"), { hasActiveRun: false, status: "completed" }),
+    Object.assign(session(cronKey, alpha, "Alpha", 0, "cron"), { hasActiveRun: true, status: "running" }),
+    session(betaKey, beta, "Beta", 5));
+  histories.set(oldKey, [{ id: "previous-report", role: "assistant", content: "Previous completed report", timestamp: now - 40 * minute }]);
+  histories.set(cronKey, [{ id: "cron-input", role: "user",
+    content: "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: report] daily research", timestamp: now }]);
+}
 const makeGroup = (id: string, name: string, age: number, empty = false) => ({
   ownerScope: "sidebar-order-fixture-owner",
   group: { id, name, purpose: "", status: "active", createdAt: now - (empty ? age : 120) * minute,
@@ -112,8 +123,15 @@ class FixtureSocket {
 }
 state.WebSocket = FixtureSocket;
 state.fetch = async (input: unknown, init: RequestInit = {}) => {
-  if (init.method && init.method !== "GET") { writes++; throw Error("Unexpected API write: " + input); }
   const url = new URL(String(input), "http://fixture");
+  if (sending && init.method === "POST" && url.pathname === "/__api/chat/secrets/prepare") {
+    const body = JSON.parse(String(init.body));
+    check(typeof body.text === "string" && typeof body.sessionKey === "string" && typeof body.operationId === "string",
+      "ordinary sends must provide their scoped preparation fields");
+    return new Response(JSON.stringify({ text: body.text, references: [], version: 1 }),
+      { headers: { "Content-Type": "application/json" } });
+  }
+  if (init.method && init.method !== "GET") { writes++; throw Error("Unexpected API write: " + input); }
   let payload: unknown = {};
   if (url.pathname === "/__api/group-chats") payload = { groups, enabled };
   else if (url.pathname === "/__api/group-chats/detail") payload = groups.find(g => g.group.id === url.searchParams.get("id"));
@@ -156,7 +174,9 @@ if (scenario === "unread-baseline") {
 }
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
 localStorage.setItem("shoggoth.chat.activity.v2", JSON.stringify(Object.fromEntries(sessions.map(s => [s.key, s.updatedAt]))));
-const initialKey = scenario === "restored" ? betaKey : mainKey;
+const initialKey = scenario === "restored" || cronResults ? betaKey : mainKey;
+if (cronResults) localStorage.setItem("shoggoth.chat.sessionUnread.v2", JSON.stringify({ since: now - minute,
+  read: {}, replies: { [oldKey]: now - 40 * minute } }));
 localStorage.setItem("shoggoth.chat.lastActive.v1", initialKey);
 if (scenario === "restored") localStorage.setItem("shoggoth.chat.chosenSessions.v2", JSON.stringify({ [alpha]: oldKey }));
 localStorage.setItem("shoggoth.chat.immersive.v1", immersive ? "1" : "0");
@@ -181,6 +201,7 @@ state.runSidebarOrderFixture = async () => {
   if (queued) return runQueuedFixture();
   if (sending) return runSendingFixture();
   if (scenario.startsWith("events-")) return runActivityEventFixture();
+  if (cronResults) return runCronResultsFixture();
   if (scenario === "unread") return runUnreadFixture();
   if (scenario === "unread-running") return runUnreadRunningFixture();
   if (scenario === "unread-baseline") return runUnreadBaselineFixture();
@@ -525,6 +546,74 @@ async function runUnreadFixture() {
   return { scenario, language, stages, writes, passed: true };
 }
 
+async function runCronResultsFixture() {
+  const stages: string[] = [];
+  const change = () => state.socket.emit({ type: "event", event: "sessions.changed", payload: {} });
+  const thread = () => document.querySelector(immersive ? '[data-testid="immersive-chat"]' : ".chat-thread");
+  const picker = () => document.querySelector(immersive ? '[data-testid="immersive-chat"]' : ".session-menu");
+  const togglePicker = () => {
+    const trigger = document.querySelector<HTMLButtonElement>(immersive
+      ? '[data-testid="immersive-chat"] button[class*="identity"]' : ".chat-session-select");
+    trigger?.click(); return !!trigger;
+  };
+  const option = (key: string) => picker()?.querySelector<HTMLButtonElement>('button[title="' + key + '"]');
+  await wait(() => thread()?.textContent?.includes("History for " + betaKey), "initial foreground history missing");
+  await pause(250);
+  expectOrder(["Beta", "Alpha"], "a newly started Cron must not move an Agent ahead of its previous report");
+  rows().find(row => row.title === alpha)!.click();
+  await wait(() => thread()?.textContent?.includes("Previous completed report"), "Agent must still open its previous completed report");
+  if (togglePicker()) {
+    await wait(() => option(oldKey), "previous result must remain in the session picker");
+    check(!option(cronKey), "a prompt-only Cron session must not appear in the session picker");
+    option(oldKey)!.click();
+  }
+  stages.push("startup keeps the previous report, sidebar order and session picker");
+
+  histories.set(cronKey, [{ id: "partial", role: "assistant", content: "Still writing the new report", timestamp: now + 1 }]);
+  change(); await pause(250);
+  expectOrder(["Beta", "Alpha"], "partial output must not promote a running Cron");
+  if (togglePicker()) {
+    await wait(() => option(oldKey), "session picker missing");
+    check(!option(cronKey), "partial output is not a completed result"); option(oldKey)!.click();
+  }
+  stages.push("partial output remains unpublished while the task runs");
+
+  const result = { id: "completed-report", role: "assistant", content: "New completed daily report", timestamp: now + 2 };
+  histories.set(cronKey, [result]);
+  Object.assign(sessions.find(s => s.key === cronKey)!, { hasActiveRun: false, status: "completed" }); change();
+  await wait(() => names()[0] === "Alpha", "completed report must promote its Agent without a list timestamp change");
+  rows().find(row => row.title === alpha)!.click();
+  await wait(() => thread()?.textContent?.includes(result.content), "Agent click must open the completed report");
+  togglePicker(); await wait(() => option(cronKey), "completed report must appear in the session picker"); option(cronKey)!.click();
+  stages.push("completion publishes the result and promotes the Agent at the reply time");
+
+  for (const [suffix, body] of [["empty", ""], ["silent", "[SILENT]"]]) {
+    const key = cronKey + ":" + suffix;
+    sessions.push(Object.assign(session(key, alpha, "Alpha", -1, "cron"), { hasActiveRun: false, status: "completed" }));
+    histories.set(key, body ? [{ id: suffix, role: "assistant", content: body, timestamp: now + 3 }] : [
+      { id: "tool-only", role: "assistant", content: [{ type: "thinking", thinking: "Researching" },
+        { type: "toolCall", id: "search", toolName: "web_search", arguments: { query: "daily research" } }], timestamp: now + 3 },
+      { id: "tool-result", role: "toolResult", content: [{ type: "text", text: "search result" }], toolCallId: "search", timestamp: now + 4 },
+    ]);
+  }
+  change(); await pause(350);
+  togglePicker(); await wait(() => option(cronKey), "completed report picker missing");
+  check(!option(cronKey + ":empty") && !option(cronKey + ":silent"), "empty, tool-only and silent tasks must not publish empty conversations");
+  option(cronKey)!.click();
+  stages.push("completed tasks with only process records or a silent control token remain hidden");
+
+  const failedKey = cronKey + ":failed";
+  sessions.push(Object.assign(session(failedKey, alpha, "Alpha", -2, "cron"), { hasActiveRun: false, status: "failed" }));
+  histories.set(failedKey, [{ id: "failure", role: "assistant", content: "Scheduled task failed: fixture provider error",
+    isError: true, stopReason: "error", timestamp: now + 5 }]); change();
+  await pause(350);
+  togglePicker(); await wait(() => option(failedKey), "a saved terminal failure must remain visible"); option(failedKey)!.click();
+  await wait(() => thread()?.textContent?.includes("Scheduled task failed"), "failure details must be readable");
+  check(writes === 0, "result publication must not send, resume or rerun the task");
+  stages.push("terminal failures remain readable and all publication reads make zero Agent writes");
+  return { scenario, language, stages, writes, passed: true };
+}
+
 async function runUnreadRunningFixture() {
   const stages: string[] = [];
   const badge = () => rows().find(row => row.title === alpha)?.querySelector('[role="img"]');
@@ -666,19 +755,23 @@ async function runQueuedFixture() {
   } });
   const text = () => row().querySelector(".chat-agent__subtext")?.textContent;
   const queueLabel = i18n.t("chat.liveStatus.queued"), runningLabel = i18n.t("chat.liveStatus.running");
+  const normalPreview = text(), previousOrder = names();
   emit(betaKey, "queue-one", "queued");
-  await wait(() => text() === queueLabel, "queued Agent was incorrectly shown as typing");
+  await wait(() => text() === normalPreview, "queued Agent must keep its normal preview");
   check(!row().querySelector('.chat-agent__subtext [aria-hidden="true"]'), "queued Agent must not animate typing");
-  if (!immersive) check(document.querySelector(".chat-status--queued")?.textContent === queueLabel, "header must show the queue");
+  check(!text()?.includes(queueLabel), "internal queue state must not replace the sidebar preview");
+  check(JSON.stringify(names()) === JSON.stringify(previousOrder), "queue admission must not promote the Agent");
+  check(!document.querySelector(".chat-status--queued"), "internal queue state must not appear in the header");
   emit(betaKey + "-other", "running-neighbor", "running");
   await wait(() => text()?.includes(runningLabel), "another running session must take precedence over a queued session");
   emit(betaKey + "-other", "running-neighbor", "failed");
-  await wait(() => text() === queueLabel, "remaining queued session must not stay typing after its neighbor ends");
+  await wait(() => text() === normalPreview, "remaining queued session must restore the normal preview after its neighbor ends");
+  check(!row().querySelector('.chat-agent__subtext [aria-hidden="true"]'), "queued sibling must not keep the typing animation");
   emit(betaKey, "queue-one", "failed");
   await wait(() => !text()?.includes(queueLabel) && !text()?.includes(runningLabel), "failed preparation left a stale activity indicator");
   check(writes === 0, "observing queue transitions must not send or retry a message");
   // Leave the preview on the state whose label changed.
   emit(betaKey, "queue-preview", "queued");
-  await wait(() => text() === queueLabel, "queue preview did not settle");
-  return { scenario, language, result: "PASS", checks: ["queued label", "running sibling priority", "terminal clears activity", "no replay"], writes };
+  await wait(() => text() === normalPreview, "queue preview did not settle");
+  return { scenario, language, result: "PASS", checks: ["queue preserves preview and order", "queue has no typing or header status", "running sibling priority", "terminal clears activity", "no replay"], writes };
 }

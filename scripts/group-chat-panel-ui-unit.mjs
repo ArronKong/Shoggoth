@@ -225,7 +225,7 @@ const mount = async () => {
   await act(async () => {});
 };
 const buttons = (label) => renderer.root.findAllByType("button")
-  .filter((node) => node.children.includes(label) || node.props["aria-label"] === label);
+  .filter((node) => node.children.includes(label) || node.props["aria-label"] === label || node.props["aria-label"]?.startsWith(`${label} `));
 const click = async (node) => { await act(async () => { await node.props.onClick({ preventDefault() {}, stopPropagation() {} }); }); };
 const detailActions = (action) => renderer.root.findAll(node => node.type === "button"
   && node.props["data-group-details-action"] === action);
@@ -279,6 +279,7 @@ for (const [errorCode, key] of [["RUNTIME_ATTACHMENT_UNSUPPORTED", "groupChat.ev
 view = base(); messages = timeline();
 await mount();
 assert.equal(buttons("groupChat.retry").length, 1, "Beta's failure is retryable; Gamma answered afterwards, so its old failure is not");
+assert.ok(buttons("groupChat.retry")[0].props.className.includes("retry"));
 await click(buttons("groupChat.retry")[0]);
 await click(buttons("groupChat.retry")[0]);
 assert.deepEqual(named("retry").map((call) => call.args.slice(0, 2)), [["g", "b"], ["g", "b"]]);
@@ -487,8 +488,9 @@ assert.deepEqual([prevented, uploads.length, uploads.at(-1).file.name], [true, 9
   })];
   await mount();
   assert.equal(buttons("groupChat.retry").length, 0, "pending reconciliation does not expose the ordinary retry");
-  await click(buttons("groupChat.recovery.reread")[0]);
-  assert.deepEqual(plain(named("reconcile")[0].args), ["g", { kind: "turn", opportunityId: "pending-result" }]);
+  assert.equal(buttons("groupChat.recovery.reread").length, 0, "result recovery runs automatically without a manual button");
+  assert.equal(buttons("groupChat.recovery.reconcile").length, 0);
+  assert.equal(named("reconcile").length, 0, "UI does not create a second reconciliation loop");
   await click(buttons("groupChat.fullResult.open")[0]);
   for (let n = 0; n < 10 && !JSON.stringify(renderer.toJSON()).includes("groupChat.fullResult.verified"); n++) {
     if (buttons("groupChat.fullResult.more")[0]) await click(buttons("groupChat.fullResult.more")[0]);
@@ -551,11 +553,12 @@ await mount();
 assert.equal(renderer.root.find(node => node.props.className === "headerMembers").props.title, "Alpha · Beta · Gamma",
   "the compact header summarizes all active member names");
 const status = renderer.root.findAll(node => node.props["data-group-status-member"]);
-assert.deepEqual(status.map(node => [node.props["data-group-status-member"],
-  node.findAllByType("span").flatMap(item => item.children).find(text => typeof text === "string" && text.startsWith("groupChat.status."))]),
-[["a", "groupChat.status.speaking"], ["b", "groupChat.status.working"], ["c", "groupChat.status.approval"]]);
+assert.equal(status.length, 0, "composer no longer contains member execution labels");
+assert.equal(renderer.root.findAll(node => node.props["data-group-status"]).length, 0);
 assert.equal(buttons("groupChat.status.stop").length, 3);
-await click(buttons("groupChat.status.stop")[1]);
+const betaStop = renderer.root.find(node => node.type === "button" && node.props["data-group-stop-member"] === "b");
+assert.equal(betaStop.parent.props.className, "chat-group__footer", "Stop lives below the current agent bubble");
+await click(betaStop);
 assert.deepEqual(plain(named("stopMember")[0].args), ["g", "b"], "stopping one member leaves the others running");
 assert.equal(named("stop").length, 0);
 assert.equal(byClass("muted").filter(node => node.children.includes("groupChat.turn.working")).length, 0,
@@ -565,11 +568,143 @@ assert.equal(messages[1].origin.late, true, "hiding the label preserves the save
 assert.equal(buttons("groupChat.stop").length, 1, "a running discussion keeps its stop action");
 assert.equal(buttons("groupChat.send").length, 0, "send and stop actions are mutually exclusive");
 await act(async () => renderer.root.findByType("textarea").props.onChange({ target: { value: "继续补充方向" } }));
+assert.equal(buttons("groupChat.send").length, 1, "new input exposes Send during a running discussion");
+assert.equal(buttons("groupChat.send")[0].props.disabled, false, "a running agent does not block a new message");
 await act(async () => renderer.root.findByType("textarea").props.onKeyDown({
   key: "Enter", shiftKey: false, nativeEvent: { isComposing: false }, preventDefault() {},
 }));
-assert.equal(named("send").length, 1, "Enter still sends while the send button is hidden");
+assert.equal(named("send").length, 1, "Enter and the visible Send button use the same send path");
 assert.equal(named("stop").length, 0, "sending with Enter does not stop the discussion");
+await act(async () => renderer.unmount());
+
+// Quiet recovery has no status bubble or orphan author row; the next member still speaks.
+view = { ...base(), activeTurns: [
+  { opportunityId: "quiet", memberId: "a", startedAt: 1, floor: false, released: true, releasedReason: "idle" },
+  { opportunityId: "next", memberId: "b", startedAt: 2, floor: true, released: false, releasedReason: null }], queuedMemberIds: ["c"] };
+messages = [message(1, { kind: "user" }, "大家继续")]; await mount();
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "quiet").length, 0,
+  "a hidden status does not leave an avatar/name/Stop-only placeholder");
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.turn.idle"));
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "next").length, 1);
+assert.equal(buttons("groupChat.status.stop").length, 1, "the next member's genuine loading bubble retains Stop");
+assert.ok(!JSON.stringify(renderer.toJSON()).includes('groupChat.queued'), "queued speaker lists are hidden from the timeline");
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.status.working"));
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.status.speaking"));
+await act(async () => renderer.unmount());
+
+view = { ...base(), activeTurns: [{ opportunityId: "start-receipt", memberId: "a", startedAt: 1,
+  floor: true, released: false, recovery: { type: "execution", reason: "GROUP_EXTERNAL_START_UNCONFIRMED", since: 1, cancelRequested: false } }] };
+messages = [message(1, { kind: "user" }, "等待原启动结果")]; await mount();
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "start-receipt").length, 0);
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.start"));
+assert.equal(buttons("groupChat.status.stop").length, 0, "there is no synthetic empty row just to host an action");
+assert.equal(named("reconcile").length, 0, "automatic reconciliation remains a service concern");
+await act(async () => renderer.unmount());
+
+view = { ...base(), activeTurns: [{ opportunityId: "unavailable", memberId: "a", startedAt: 1,
+  floor: true, released: false, recovery: { type: "execution", reason: "GROUP_TURN_EXECUTION_UNCONFIRMED", since: 1, cancelRequested: false } }] };
+messages = [message(1, { kind: "user" }, "原状态查询异常")]; await mount();
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "unavailable").length, 0);
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.execution"));
+await act(async () => renderer.unmount());
+
+// Already published real text stays visible and keeps its current turn's Stop after recovery UI is hidden.
+view.activeTurns[0].released = true; view.activeTurns[0].releasedReason = "idle";
+messages.push(message(2, { kind: "member", memberId: "a" }, "已经发出的真实内容", { origin: { opportunityId: "unavailable", partial: true } }));
+await mount();
+assert.ok(JSON.stringify(renderer.toJSON()).includes("已经发出的真实内容"));
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "unavailable").length, 0);
+assert.equal(buttons("groupChat.status.stop").length, 1);
+assert.equal(buttons("groupChat.status.stop")[0].parent.props["data-group-message-footer"], messages[1].id);
+await act(async () => renderer.unmount());
+
+// Whole-group stopping also has no per-member confirmation bubble or author-only placeholder.
+view = { ...base(), activeTurns: [{ opportunityId: "stopping", memberId: "a", startedAt: 1, floor: true,
+  released: false, stopping: true, recovery: { type: "execution", cancelRequested: true, since: 1, reason: "GROUP_EXECUTION_STOP_UNCONFIRMED" } }] };
+messages = [message(1, { kind: "user" }, "停止")]; await mount();
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.status.speaking"));
+assert.equal(buttons("groupChat.recovery.reconcile").length, 0, "stop confirmation is automatic");
+assert.equal(buttons("groupChat.status.stop").length, 0);
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "stopping").length, 0);
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.cancel"));
+assert.equal(byClass("muted").filter(node => node.children.includes("groupChat.activity.phase.stopping")).length, 0,
+  "stop confirmation stays out of the message timeline");
+await act(async () => renderer.unmount());
+messages.push(message(2, { kind: "member", memberId: "a" }, "整群停止前已显示的内容", {
+  origin: { opportunityId: "stopping", partial: true, streaming: true } }));
+await mount();
+assert.ok(JSON.stringify(renderer.toJSON()).includes("整群停止前已显示的内容"));
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "stopping").length, 0);
+assert.equal(renderer.root.findByProps({ "data-seq": 2 }).findAll(node => String(node.props.className ?? "").includes("is-streaming")).length, 0,
+  "whole-group stopping freezes the existing visible response instead of leaving its cursor active");
+await act(async () => renderer.unmount());
+
+// The click hides speech immediately; a slow HTTP response never opens a confirmation bubble or duplicate request.
+view = { ...base(), activeTurns: [{ opportunityId: "stop-click", memberId: "a", startedAt: 1, floor: true, released: false }] };
+messages = [message(1, { kind: "user" }, "停下这一位")];
+const savedStopMember = api.stopGroupChatMember;
+let acceptMemberStop;
+api.stopGroupChatMember = record("stopMember", () => new Promise(resolve => { acceptMemberStop = resolve; }));
+await mount();
+const immediateStop = renderer.root.find(node => node.type === "button" && node.props["data-group-stop-turn"] === "stop-click");
+const stopClick = immediateStop.props.onClick;
+await act(async () => { stopClick(); stopClick(); });
+assert.equal(named("stopMember").length, 1, "repeated clicks do not duplicate a pending member stop");
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "stop-click").length, 0);
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.cancel"));
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.stopState.confirming"));
+view = { ...view, round: null, activeTurns: [{ ...view.activeTurns[0], floor: false, released: true, releasedReason: "stopped", stopping: true }] };
+await act(async () => { acceptMemberStop(view); });
+assert.equal(buttons("groupChat.send").length, 1);
+api.stopGroupChatMember = savedStopMember;
+await act(async () => renderer.unmount());
+
+view = { ...base(), activeTurns: [{ opportunityId: "stop-rejected", memberId: "a", startedAt: 1, floor: true, released: false }] };
+api.stopGroupChatMember = record("stopMember", () => Promise.reject(new Error("stop request not accepted")));
+await mount();
+await click(renderer.root.find(node => node.type === "button" && node.props["data-group-stop-turn"] === "stop-rejected"));
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "stop-rejected").length, 1,
+  "a rejected stop restores the original speech instead of pretending it was accepted");
+assert.equal(renderer.root.findAll(node => node.type === "button" && node.props["data-group-stop-turn"] === "stop-rejected").length, 1);
+api.stopGroupChatMember = savedStopMember;
+await act(async () => renderer.unmount());
+
+// A member's stopped speech has no confirmation bubble or composer hint, while its original run is still tracked.
+view = { ...base(), activeTurns: [
+  { opportunityId: "old", memberId: "a", startedAt: 1, floor: false, released: true, releasedReason: "stopped", stopping: true,
+    recovery: { type: "execution", cancelRequested: true, since: 1, reason: "GROUP_EXTERNAL_RUN_LOST" } },
+  { opportunityId: "next", memberId: "b", startedAt: 2, floor: true, released: false } ] };
+messages = [message(1, { kind: "user" }, "停止一位"), message(2, { kind: "member", memberId: "a" }, "已经看见的内容", {
+  origin: { opportunityId: "old", partial: true, streaming: true } })];
+await mount();
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "old").length, 0);
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "next").length, 1);
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.cancel"));
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.stopState.confirming"));
+assert.ok(!renderer.root.findByProps({ "data-seq": 2 }).findAll(node => String(node.props.className ?? "").includes("is-streaming")).length);
+await act(async () => renderer.unmount());
+view = { ...view, round: null, activeTurns: [view.activeTurns[0]], queuedMemberIds: [] };
+await mount();
+assert.equal(buttons("groupChat.send").length, 1, "background cleanup does not keep the whole-group stop state on screen");
+assert.equal(buttons("groupChat.stop").length, 0);
+await act(async () => renderer.unmount());
+
+// Stop follows the last visible message of the bound active turn, after Copy/Delete.
+view = { ...base(), activeTurns: [{ opportunityId: "live", memberId: "a", startedAt: 1, floor: true,
+  released: false, individualMessages: true }] };
+messages = [message(1, { kind: "member", memberId: "a" }, "旧回合", { origin: { opportunityId: "old" } }),
+  message(2, { kind: "member", memberId: "a" }, "当前第一段", { origin: { opportunityId: "live", partial: true } }),
+  message(3, { kind: "member", memberId: "a" }, "当前第二段", { origin: { opportunityId: "live", partial: true, streaming: true } })];
+await mount();
+const liveStops = renderer.root.findAll(node => node.type === "button" && node.props["data-group-stop-turn"] === "live");
+assert.equal(liveStops.length, 1);
+assert.equal(liveStops[0].props.className, "chat-copybtn", "Stop shares the exact copy/delete dimensions and hover/focus rules");
+assert.equal(liveStops[0].children.some(child => typeof child === "string"), false, "Stop is icon-only");
+assert.equal(liveStops[0].parent.props["data-group-message-footer"], messages[2].id);
+assert.deepEqual(liveStops[0].parent.findAllByType("button").map(node => node.props["aria-label"]),
+  ["chat.copyAsMarkdown", "chat.deleteLocal", "groupChat.status.stop Alpha"]);
+assert.equal(renderer.root.findByProps({ "data-chat-composer": true }).findAll(node => node.props["data-group-stop-member"]).length, 0);
+await click(liveStops[0]); assert.deepEqual(plain(named("stopMember")[0].args), ["g", "a"]);
 await act(async () => renderer.unmount());
 
 // Published results precede older unfinished turns. A lagging view must not
@@ -602,4 +737,4 @@ await mount();
 assert.deepEqual(order(), [9, 11, 14, "turn:next-maya"], "final result clears only its exact turn and stale interaction");
 await act(async () => renderer.unmount());
 
-console.log("PASS group chat panel UI: retry, quote, compact and expanded roster, member tabs, owner settings, attachments, recovery, immutable pages, role versions, status capsule, published result ordering and exact turn settlement");
+console.log("PASS group chat panel UI: retry, quote, compact and expanded roster, member tabs, owner settings, attachments, automatic recovery, immutable pages, role versions, bubble Stop actions, published result ordering and exact turn settlement");

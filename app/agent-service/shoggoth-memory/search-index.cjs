@@ -564,11 +564,11 @@ class MemorySearchIndex {
 
   // Records own recall signals that a completed user turn proved (see
   // RecallSignals); the search itself never records. Stale results drop out.
-  async recordRecallSignals({ questionKey, results, nowMs }) {
+  async recordRecallSignals({ questionKey, results, nowMs, isCurrent, normalizeSnippet }) {
     if (!questionKey || !results.length) return;
     await this.host.run(async () => {
       await this.host.pruneUnavailableLibraryCandidates();
-      const current = results.filter(result => this.isCurrent(result));
+      const current = results.filter(isCurrent).map(result => ({ ...result, snippet: normalizeSnippet(result.snippet) }));
       if (current.length) await core.recordShortTermRecalls({ workspaceDir: this.workspaceDir, query: questionKey, results: current, nowMs });
     });
   }

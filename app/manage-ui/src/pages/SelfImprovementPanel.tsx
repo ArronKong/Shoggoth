@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { selfImprovement } from "../api/client";
 import { Field, Option, Select, Switch, TextArea, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
+import ChatMarkdown from "../components/ChatMarkdown";
 import type { LearnedSkill, LearnedSkillDetail, LearningConfig, LearningJob, LearningMode,
   LearningPage, LearningProposal, LearningStatus } from "../types";
 import styles from "./SelfImprovementPanel.module.css";
@@ -19,14 +20,23 @@ const reasonText: Record<string, string> = { review_required: "按当前策略�
 const date = (at: number | null) => at ? new Date(at).toLocaleString() : "尚未使用";
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 function bodyOf(detail: LearnedSkillDetail) {
-  return (detail.files.find(file => file.path === "SKILL.md")?.content ?? "")
-    .replace(/^---\n[\s\S]*?\n---\n\n# [^\n]*\n\n/u, "").trimEnd();
+  let text = (detail.files.find(file => file.path === "SKILL.md")?.content ?? "")
+    .replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/u, "").trim();
+  // Older files can include the generated title and another identical title
+  // inside the authored body. The modal already provides this heading.
+  let heading = /^#\s+([^\r\n]+)(?:\r?\n|$)/u.exec(text);
+  while (heading && heading[1].trim() === detail.version.title.trim()) {
+    text = text.slice(heading[0].length).trimStart();
+    heading = /^#\s+([^\r\n]+)(?:\r?\n|$)/u.exec(text);
+  }
+  return text;
 }
 
-export default function SelfImprovementPanel({ backend, agentId, skillSelection, onSelectionClosed, onSkillsChanged, detailOnly = false }: {
+export default function SelfImprovementPanel({ backend, agentId, skillSelection, onSelectionClosed, onSkillsChanged, onBusyChange, detailOnly = false }: {
   backend: string; agentId: string; detailOnly?: boolean;
   skillSelection?: { id: string; versionHash: string } | null;
   onSelectionClosed?: () => void; onSkillsChanged?: () => void;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const [status, setStatus] = useState<LearningStatus | null>(null);
   const [config, setConfig] = useState<LearningConfig | null>(null);
@@ -35,11 +45,15 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
   const [tab, setTab] = useState<"skills" | "history" | "settings">("skills");
   const [filter, setFilter] = useState("active");
   const [detail, setDetail] = useState<LearnedSkillDetail | null>(null);
-  const [previous, setPrevious] = useState<LearnedSkillDetail | null>(null);
+  const [proposalBase, setProposalBase] = useState<LearnedSkillDetail | null>(null);
   const [proposal, setProposal] = useState<LearningProposal | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    onBusyChange?.(busy);
+    return () => onBusyChange?.(false);
+  }, [busy, onBusyChange]);
   const detailRef = useRef<HTMLElement>(null);
   const alive = useRef(true), epoch = useRef(0), inspectionEpoch = useRef(0);
   const confirm = useConfirm(), toast = useToast();
@@ -49,7 +63,7 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
     selfImprovement<T>(backend, agentId, action, input), [backend, agentId]);
   const clearInspection = useCallback(() => {
     inspectionEpoch.current += 1;
-    setDetail(null); setPrevious(null); setProposal(null); setEditing(null);
+    setDetail(null); setProposalBase(null); setProposal(null); setEditing(null);
   }, []);
   const load = useCallback(async () => {
     clearInspection();
@@ -90,25 +104,20 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
     const inspection = inspectionEpoch.current;
     const value = await api<LearnedSkillDetail>("read", { skillId: skill.id, ...(versionHash ? { versionHash } : {}) });
     if (!alive.current || inspection !== inspectionEpoch.current) return;
-    setDetail(value); setPrevious(null); setProposal(null); setEditing(null);
-    if (value.version.baseVersionHash) {
-      try { const old = await api<LearnedSkillDetail>("read", { skillId: skill.id, versionHash: value.version.baseVersionHash });
-        if (alive.current && inspection === inspectionEpoch.current) setPrevious(old);
-      } catch { /* withdrawn ancestors remain unreadable */ }
-    }
+    setDetail(value); setProposalBase(null); setProposal(null); setEditing(null);
   }, [api, clearInspection]);
   useEffect(() => {
     if (!skillSelection) { clearInspection(); return; }
     setTab("skills");
-    void choose({ id: skillSelection.id }, skillSelection.versionHash).catch(cause => {
+    void choose({ id: skillSelection.id }, detailOnly ? undefined : skillSelection.versionHash).catch(cause => {
       if (alive.current) setError(errorText(cause));
     });
-  }, [choose, clearInspection, skillSelection?.id, skillSelection?.versionHash]);
+  }, [choose, clearInspection, detailOnly, skillSelection?.id, skillSelection?.versionHash]);
   useEffect(() => {
-    if (!detail || detail.skill.id !== skillSelection?.id) return;
+    if (detailOnly || !detail || detail.skill.id !== skillSelection?.id) return;
     detailRef.current?.scrollIntoView({ block: "nearest" });
     detailRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
-  }, [detail, skillSelection?.id]);
+  }, [detail, detailOnly, skillSelection?.id]);
   const saveSettings = () => run(async () => {
     if (!config || !status?.settings) return;
     const activating = config.mode !== "off" && status.settings.config.mode === "off";
@@ -120,7 +129,7 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
   const change = (action: string, extra: Record<string, unknown> = {}) => run(async () => {
     if (!detail) return;
     await api("change", { skillId: detail.skill.id, expectedRevision: detail.skill.revision, action, ...extra });
-    setDetail(null); setPrevious(null); setEditing(null); await load(); onSkillsChanged?.();
+    setDetail(null); setProposalBase(null); setEditing(null); await load(); onSkillsChanged?.();
     if (detailOnly) onSelectionClosed?.();
   });
   const resolve = (action: "accept" | "reject") => run(async () => {
@@ -128,37 +137,95 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
     await api("resolve", { jobId: proposal.id, expectedRevision: proposal.revision, action });
     setProposal(null); await load(); onSkillsChanged?.();
   });
-  const detailView = detail && <article className={`${styles.detail}${detailOnly ? ` ${styles.detailOnly}` : ""}`} ref={detailRef} aria-label="学习技能详情"><div className={styles.head}><h3>{detail.version.title}</h3>
+  const detailView = detail && (
+    <article className={`${styles.detail}${detailOnly ? ` ${styles.detailOnly}` : ""}`} ref={detailRef} aria-label="学习技能详情">
+      {!detailOnly && <div className={styles.head}>
+        <h3>{detail.version.title}</h3>
         <button className="btn-secondary" disabled={busy} onClick={() => {
           clearInspection(); onSelectionClosed?.();
-        }}>关闭详情</button></div>
-        <p>{reasonText[detail.version.reason] ?? detail.version.reason}</p><small>版本 {detail.version.hash.slice(0, 12)} · {detail.usage.reads} 个任务读取 · {detail.version.sourceTaskCount} 个来源任务 / {detail.version.sourceEventCount} 条证据</small>
-        <p className="muted">进入候选 {detail.usage.exposures} 次 · 显式选择 {detail.usage.selections} 次 · 含纠正信号的任务 {detail.usage.correctionSignals} 个。
-          使用与任务结果只表示关联，不代表技能导致成功或失败。</p>
-        {editing !== null ? <Field label="编辑方法正文" hint="保存后转为用户管理，后台不再自动覆盖。"><TextArea rows={12} value={editing}
-          onChange={event => setEditing(event.target.value)} disabled={busy} /></Field> : <div className={styles.diff}>
-          {previous && <div><h4>上一版本</h4><pre>{bodyOf(previous)}</pre></div>}<div><h4>{previous ? "当前查看的版本" : "方法正文"}</h4><pre>{bodyOf(detail)}</pre></div></div>}
-        {detail.files.filter(file => file.path !== "SKILL.md").map(file => <details key={file.path}><summary>{file.path}</summary><pre>{file.content}</pre></details>)}
-        <details><summary>来源任务{detail.version.sourceTaskCount > detail.version.sources.length ? `（显示前 ${detail.version.sources.length} 个）` : ""}</summary>
-          <ul>{detail.version.sources.map(source => <li key={source.runId}><code>{source.runId}</code></li>)}</ul></details>
-        <div className={styles.actions}>{editing !== null ? <><button className="btn-primary" disabled={busy || !editing.trim()} onClick={() => change("edit", { body: editing })}>保存并转为用户管理</button>
-          <button className="btn-secondary" disabled={busy} onClick={() => setEditing(null)}>取消编辑</button></> : <>
+        }}>关闭详情</button>
+      </div>}
+
+      <div className={styles.detailSummary}>
+        <div className={styles.detailBadges}>
+          <span className={styles.skillState} data-active={!detail.skill.archived}>{detail.skill.archived ? "已归档" : "已启用"}</span>
+          {detail.skill.owner === "user" && <span className={styles.ownerLabel}>用户管理</span>}
+          {detail.skill.pinned && <span className={styles.ownerLabel}>已固定</span>}
+        </div>
+        <span className={styles.readCount}>{detail.usage.reads} 次任务读取</span>
+      </div>
+
+      {editing !== null ? (
+        <div className={styles.editor}>
+          <Field label="编辑方法正文" hint="保存后转为用户管理，后台不再自动覆盖。">
+            <TextArea rows={14} value={editing} onChange={event => setEditing(event.target.value)} disabled={busy} />
+          </Field>
+        </div>
+      ) : (
+        <section className={styles.documentSection} aria-label="当前版本内容">
+          <ChatMarkdown className="chat-md markdown-document" text={bodyOf(detail)} />
+        </section>
+      )}
+
+      <details className={styles.inspector}>
+        <summary><span>来源与版本</span><span className={styles.inspectorHint}>{detail.version.sourceTaskCount} 个来源任务</span></summary>
+        <div className={styles.inspectorBody}>
+          <dl className={styles.metadata}>
+            <dt>当前版本</dt><dd><code>{detail.version.hash.slice(0, 12)}</code><span>{date(detail.version.createdAt)}</span></dd>
+            <dt>来源证据</dt><dd>{detail.version.sourceTaskCount} 个来源任务 · {detail.version.sourceEventCount} 条证据</dd>
+            <dt>使用记录</dt><dd>进入候选 {detail.usage.exposures} 次 · 显式选择 {detail.usage.selections} 次 · 纠正信号 {detail.usage.correctionSignals} 个</dd>
+          </dl>
+          <p className={styles.inspectionNote}>使用与任务结果只表示关联，不代表技能导致成功或失败。</p>
+          <div className={styles.learningReason}><h4>学习说明</h4><p>{reasonText[detail.version.reason] ?? detail.version.reason}</p></div>
+          <details><summary>来源任务{detail.version.sourceTaskCount > detail.version.sources.length ? `（显示前 ${detail.version.sources.length} 个）` : ""}</summary>
+            <ul>{detail.version.sources.map(source => <li key={source.runId}><code>{source.runId}</code></li>)}</ul>
+          </details>
+          {detail.files.filter(file => file.path !== "SKILL.md").map(file => <details key={file.path}>
+            <summary>{file.path}</summary>
+            {/\.md$/iu.test(file.path)
+              ? <ChatMarkdown className="chat-md markdown-document" text={file.content} />
+              : <pre>{file.content}</pre>}
+          </details>)}
+          <details><summary>最近 10 个版本</summary><div className={styles.versionList}>{detail.history.map(version => detailOnly ? (
+            <div key={version.hash} className={styles.versionRow}>
+              <code>{version.hash.slice(0, 12)}</code><span>{date(version.createdAt)}</span>
+              <span>{version.revoked ? "已撤回" : version.hash === detail.skill.head ? "当前版本" : "历史版本"}</span>
+            </div>
+          ) : (
+            <button key={version.hash} className={styles.item} disabled={busy || version.revoked}
+              onClick={() => void run(() => choose(detail.skill, version.hash))}>
+              <span>{version.hash.slice(0, 12)} · {date(version.createdAt)}{version.revoked ? " · 已撤回" : ""}</span>
+              <small>{reasonText[version.reason] ?? version.reason}</small>
+            </button>
+          ))}</div></details>
+          <details><summary>变更记录</summary><ul>{detail.changes.map(change => <li key={change.id}>
+            {date(change.createdAt)} · {({ create: "创建", patch: "更新", pin: "固定", unpin: "取消固定", archive: "归档", restore: "恢复", adopt: "转为用户管理", edit: "编辑", revert: "恢复旧版本", withdraw: "来源撤回" } as Record<string, string>)[change.action] ?? change.action}
+            {` · ${change.actor === "user" ? "用户操作" : change.actor === "curator" ? "闲置整理" : "自动学习"}`}
+          </li>)}</ul></details>
+        </div>
+      </details>
+
+      <div className={`${styles.actions} ${styles.detailActions}`}>
+        {editing !== null ? <>
+          <button className="btn-secondary" disabled={busy} onClick={() => setEditing(null)}>取消编辑</button>
+          <button className={`btn-primary ${styles.editButton}`} disabled={busy || !editing.trim()}
+            onClick={() => change("edit", { body: editing })}>保存并转为用户管理</button>
+        </> : <>
           <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.pinned ? "unpin" : "pin")}>{detail.skill.pinned ? "取消固定" : "固定技能"}</button>
           <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.archived ? "restore" : "archive")}>{detail.skill.archived ? "恢复技能" : "归档技能"}</button>
           {detail.skill.owner === "managed" && <button className="btn-secondary" disabled={busy} onClick={() => change("adopt")}>转为用户管理</button>}
-          <button className="btn-secondary" disabled={busy || detail.version.hash !== detail.skill.head} onClick={() => setEditing(bodyOf(detail))}>编辑正文</button>
-          {detail.version.hash !== detail.skill.head && <button className="btn-primary" disabled={busy} onClick={() => change("revert", { versionHash: detail.version.hash })}>恢复为此版本</button>}
-        </>}</div>
-        <details><summary>最近 10 个版本</summary><div className={styles.list}>{detail.history.map(version => <button key={version.hash} className={styles.item}
-          disabled={busy || version.revoked} onClick={() => void run(() => choose(detail.skill, version.hash))}>
-          <span>{version.hash.slice(0, 12)} · {date(version.createdAt)}{version.revoked ? " · 已撤回" : ""}</span><small>{reasonText[version.reason] ?? version.reason}</small></button>)}</div></details>
-        <details><summary>变更记录</summary><ul>{detail.changes.map(change => <li key={change.id}>
-          {date(change.createdAt)} · {({ create: "创建", patch: "更新", pin: "固定", unpin: "取消固定", archive: "归档", restore: "恢复", adopt: "转为用户管理", edit: "编辑", revert: "恢复旧版本", withdraw: "来源撤回" } as Record<string, string>)[change.action] ?? change.action}
-          {` · ${change.actor === "user" ? "用户操作" : change.actor === "curator" ? "闲置整理" : "自动学习"}`}</li>)}</ul></details>
-      </article>;
-  if (detailOnly) return detail || error ? <aside className="skill-detail">
-    {error && <p className="error" role="alert">{error}</p>}{detailView}
-  </aside> : null;
+          <button className={`btn-primary ${styles.editButton}`} disabled={busy || detail.version.hash !== detail.skill.head}
+            onClick={() => setEditing(bodyOf(detail))}>编辑正文</button>
+          {!detailOnly && detail.version.hash !== detail.skill.head && <button className="btn-secondary" disabled={busy}
+            onClick={() => change("revert", { versionHash: detail.version.hash })}>恢复为此版本</button>}
+        </>}
+      </div>
+    </article>
+  );
+  if (detailOnly) return <>
+    {error && <p className="error" role="alert">{error}</p>}
+    {detailView || (!error && <p className="muted" role="status">正在读取技能详情…</p>)}
+  </>;
   if (status?.supported === false) return null;
   const visibleSkills = skills?.items.filter(skill => filter === "all" || (filter === "archived" ? skill.archived : !skill.archived));
   return <section className={styles.panel} aria-label="自动学习">
@@ -236,7 +303,7 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
             setProposal(value);
             if (value.proposal.action === "patch") {
               const base = await api<LearnedSkillDetail>("read", { skillId: value.proposal.skillId, versionHash: value.proposal.baseVersionHash });
-              if (alive.current && inspection === inspectionEpoch.current) setPrevious(base);
+              if (alive.current && inspection === inspectionEpoch.current) setProposalBase(base);
             }
           })}>查看提案</button>}
         </article>)}</div>
@@ -246,7 +313,7 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
       </>}
       {proposal && <article className={styles.detail} aria-label="学习提案详情"><h3>{proposal.proposal.title}</h3>
         <p>{proposal.proposal.reason}</p><p className="muted">{proposal.sourceCount} 条证据 · {proposal.proposal.action === "patch" ? "修改现有技能" : "创建技能"}</p>
-        <div className={styles.diff}>{previous && <div><h4>当前版本</h4><pre>{bodyOf(previous)}</pre></div>}
+        <div className={styles.diff}>{proposalBase && <div><h4>当前版本</h4><pre>{bodyOf(proposalBase)}</pre></div>}
           <div><h4>建议内容</h4><pre>{proposal.proposal.body}</pre></div></div>{proposal.proposal.references.map(file => <details key={file.path}><summary>{file.path}</summary><pre>{file.content}</pre></details>)}
         <div className={styles.actions}><button className="btn-primary" disabled={busy} onClick={() => resolve("accept")}>接受并保存</button>
           <button className="btn-secondary" disabled={busy} onClick={() => resolve("reject")}>拒绝提案</button>

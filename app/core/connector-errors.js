@@ -21,6 +21,7 @@ const CONNECTOR_PUBLIC_MESSAGES = Object.freeze({
   MCP_RETIREMENT_DATA_UNSAFE: "OpenConnector 原数据无法稳定核验，已保留原数据",
 
   MCP_AUTH_REQUIRED: "此连接器需要登录或补填授权凭据",
+  MCP_API_KEY_INVALID: "此 API Key 未被 MCP 服务识别，请从官方 MCP 页面获取密钥并在当前连接中更新",
   MCP_SERVER_ACCESS_DENIED: "MCP 服务拒绝此连接（HTTP 403），请向服务方确认客户端准入或访问限制",
   MCP_SERVER_START_FAILED: "MCP 连接器未能启动",
   MCP_SERVER_EXITED: "MCP 连接器进程已退出",

@@ -240,8 +240,9 @@ check("Dashboard 正文与 session 共用同运行 handoff selector", () => {
   assert.match(dashboard, /writeCronChatHandoff\(backendId, sessionKey, report\)/);
   assert.match(dashboard, /backend=\$\{encodeURIComponent\(backendId\)\}&session=\$\{encodeURIComponent\(sessionKey\)\}/);
   assert.match(dashboard, /runSessionKey && visibleRunText && visibleRunText\.trim\(\)/);
-  assert.match(dashboard, /t\("cron\.askInChat"\)/);
-  assert.match(dashboard, /t\("dashboard\.openInCron"\)/);
+  assert.match(dashboard, /askInChat\(openRun\.backendId, runSessionKey, visibleRunText\)/);
+  assert.match(dashboard, /navigate\(`\/cron\?job=\$\{encodeURIComponent\(openRun\.jobId\)\}&edit=1`\)/);
+  assert.match(cron, /notificationEdit \? openEdit\(notificationJob\) : openView\(notificationJob\)/);
 });
 
 const deepLinkEffect = chat.match(

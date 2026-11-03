@@ -325,14 +325,23 @@ await test("a visible model choice can be saved while its menu refreshes the cat
   assert.deepEqual(JSON.parse(JSON.stringify(named("modelSave")[0].args[1].modelSelection)), { model: "model-b", provider: "codex" });
   pending.resolve({ models: [], defaultModel: "model-a" }); await flush();
 });
-await test("late execution reconciliation response cannot overwrite the current owner", async () => {
+await test("late member-stop response cannot overwrite the current owner or hide its current turn", async () => {
   await setup(); await act(async () => renderer.unmount()); renderer = null;
   view.activeTurns = [{ opportunityId: "op", memberId: "a", startedAt: 1,
+    floor: true, released: false,
     recovery: { type: "execution", reason: "GROUP_TURN_EXECUTION_UNCONFIRMED", since: 1, cancelRequested: false } }];
-  await mount(); const old = plain(view), pending = deferred(); handler.set("reconcile", () => pending.promise);
-  await click(buttons("groupChat.recovery.reconcile")[0]); await changeOwner();
-  pending.resolve({ ...old, group: { ...old.group, name: "STALE_RECOVERY" } }); await flush();
-  assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_RECOVERY")); assert.equal(named("reconcile").length, 1); noWrites();
+  messages = [message(7, { kind: "member", memberId: "a" }, "OLD_OWNER_PARTIAL", { origin: { opportunityId: "op", partial: true } })];
+  await mount(); const old = plain(view), pending = deferred(); handler.set("stopMember", () => pending.promise);
+  await click(renderer.root.find(node => node.type === "button" && node.props["data-group-stop-turn"] === "op"));
+  view = { ...plain(view), ownerScope: "owner-b", group: { ...view.group, name: "OWNER_B" } };
+  messages = [message(7, { kind: "member", memberId: "a" }, "NEW_OWNER_PARTIAL", { origin: { opportunityId: "op", partial: true } })];
+  await refresh();
+  assert.ok(text().includes("NEW_OWNER_PARTIAL"));
+  assert.equal(renderer.root.findAll(node => node.type === "button" && node.props["data-group-stop-turn"] === "op").length, 1,
+    "an old owner's pending stop cannot hide the new owner's action on real content");
+  pending.resolve({ ...old, group: { ...old.group, name: "STALE_STOP" } }); await flush();
+  assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_STOP")); assert.equal(named("stopMember").length, 1);
+  assert.equal(named("reconcile").length, 0, "reconciliation no longer depends on a manual UI action");
 });
 await test("late settings save cannot close settings reopened by the new owner", async () => {
   await setup(); await groupAction("settings"); const pending = deferred(), old = plain(view);

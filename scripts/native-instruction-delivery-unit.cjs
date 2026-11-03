@@ -338,7 +338,7 @@ test("Codex injects unchanged Run rules and context once, and again after compac
   let emit = null;
   const host = {
     threadStart: async () => ({ thread: { id: "s" } }),
-    threadInjectItems: async input => { injected.push(input.items[0]); },
+    threadInjectItems: async input => { injected.push(...input.items); },
     turnStart: async () => ({ turn: { id: "t" } }),
     subscribe: listener => { emit = listener; return () => {}; },
   };

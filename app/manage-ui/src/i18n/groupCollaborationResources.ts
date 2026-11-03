@@ -5,6 +5,10 @@ type TranslationShape<T> = { [K in keyof T]: T[K] extends string ? string : Tran
 const zhCN = {
   "groupChat": {
     "sendJournal": {
+      "open": "发送记录",
+      "empty": "没有待处理的发送记录。",
+      "backgroundHint": "系统会自动查询原消息是否送达。你可以继续发送新消息。",
+      "uncertainToast": "消息暂未确认送达，系统会自动查询。你可以继续输入新消息。",
       "pending": "{{count}} 条发送记录待处理",
       "prepared": "发送已保存",
       "submitting": "发送中，等待回执",
@@ -57,7 +61,7 @@ const zhCN = {
         "compacted": "上下文已压缩",
         "waiting_approval": "等待你的审批",
         "waiting_input": "等待你的补充",
-        "stopping": "正在请求停止",
+        "stopping": "正在停止，等待执行端确认",
         "reconciling": "正在核对原执行",
         "completed": "执行已完成",
         "failed": "执行失败",
@@ -87,6 +91,10 @@ const zhCN = {
 const en: TranslationShape<typeof zhCN> = {
   "groupChat": {
     "sendJournal": {
+      "open": "Send records",
+      "empty": "No pending sends.",
+      "backgroundHint": "Original message receipts are checked automatically. You can keep sending new messages.",
+      "uncertainToast": "Delivery is not confirmed yet. We will check automatically; you can keep typing new messages.",
       "pending": "{{count}} sends need attention",
       "prepared": "Send saved",
       "submitting": "Sending; awaiting receipt",
@@ -139,7 +147,7 @@ const en: TranslationShape<typeof zhCN> = {
         "compacted": "Context compacted",
         "waiting_approval": "Waiting for approval",
         "waiting_input": "Waiting for your input",
-        "stopping": "Requesting stop",
+        "stopping": "Stopping · awaiting execution confirmation",
         "reconciling": "Reconciling original execution",
         "completed": "Execution completed",
         "failed": "Execution failed",

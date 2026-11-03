@@ -632,8 +632,8 @@ class OpenCodeRuntimeHost {
     }
   }
 
-  async #ensureNativeSession(session) {
-    const found = await this.client.request("GET", this.#sessionRoute(session.id));
+  async #ensureNativeSession(session, observation) {
+    const found = observation ?? await this.client.request("GET", this.#sessionRoute(session.id));
     const native = found.data;
     if (native?.id !== this.#nativeSessionId(session.id) || native.directory !== session.cwd) {
       throw error("OPENCODE_SESSION_IDENTITY_MISMATCH", "OpenCode session identity changed");
@@ -745,8 +745,15 @@ class OpenCodeRuntimeHost {
     this.#cwd(input?.cwd);
     const session = this.#requireSession(input?.sessionId);
     if (session.archived) throw error("RUNTIME_SESSION_NOT_FOUND", "OpenCode session is archived");
-    await this.#assertModelAvailable(input.model);
-    await this.#ensureNativeSession(session);
+    // Resolve the provider and native identity in parallel. No permission
+    // update or continuation may start until both read-only probes succeed.
+    const preparation = await Promise.allSettled([
+      this.#assertModelAvailable(input.model),
+      this.client.request("GET", this.#sessionRoute(session.id)),
+    ]);
+    this.#assertExecution();
+    for (const result of preparation) if (result.status === "rejected") throw result.reason;
+    await this.#ensureNativeSession(session, preparation[1].value);
     this.sessionConfigs.set(session.id, { model: input.model ?? null,
       developerInstructions: input.developerInstructions ?? "" });
     await this.#reconcileSession(session.id);

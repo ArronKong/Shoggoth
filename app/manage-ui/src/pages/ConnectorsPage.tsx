@@ -141,11 +141,11 @@ export default function ConnectorsPage() {
     </section>
     <section className={s.section}><div className={s.sectionHeading}><h2>{tr("recommended")}</h2></div>{error(recommended.error, () => void recommended.refresh())}{rows}{devices.hasRecommendations && <><div className={s.sectionHeading}><h2>{t("appleDevices.title")}</h2></div><div className={s.catalog}><AppleDeviceRows model={devices} installed={false} /></div></>}{recommended.loading && !recommended.data && <p className={s.muted} role="status">{tr("loading")}</p>}</section>
     </div>
-    {unavailableDialog && <Modal open title={<span className={s.dialogIdentity}><McpConnectorIcon name={unavailableName(unavailableDialog)} identity={unavailableDialog.slice(9)} />{unavailableName(unavailableDialog)}</span>} onClose={() => setUnavailableDialog(null)} width={520}>
-      <div className={s.detail}><p>{tr("flow.unavailableEntry")}</p><div className={s.actions}>
-        <button type="button" className={s.button} onClick={() => { void recommended.refresh(); setUnavailableDialog(null); }}>{tr("retry")}</button>
+    {unavailableDialog && <Modal open title={<span className={s.dialogIdentity}><McpConnectorIcon name={unavailableName(unavailableDialog)} identity={unavailableDialog.slice(9)} />{unavailableName(unavailableDialog)}</span>} onClose={() => setUnavailableDialog(null)} width={640} variant="connector" footer={<div className={s.flowFooter}><p>{tr("flow.pending")}</p><div className={s.flowFooterActions}>
+        <button type="button" className={s.primary} onClick={() => { void recommended.refresh(); setUnavailableDialog(null); }}>{tr("retry")}</button>
         <button type="button" className={s.danger} onClick={() => { pending.remove(unavailableDialog); setUnavailableDialog(null); }}>{tr("flow.remove")}</button>
-      </div></div>
+      </div></div>}>
+      <div className={s.detail}><section className={s.connectionPanel}><p>{tr("flow.unavailableEntry")}</p></section></div>
     </Modal>}
     {dialog && <McpConnectorDialog {...dialog} catalogEntry={!!dialog.pendingKey} pending={!!dialog.pendingKey && pending.ids.includes(dialog.pendingKey)} onStage={dialog.pendingKey ? () => pending.add(dialog.pendingKey!) : undefined} onUnstage={dialog.pendingKey ? () => pending.remove(dialog.pendingKey!) : undefined} allowFigmaDesktop onLatest={item => setCheckedUpdates(previous => [...previous.filter(value => value.registryName !== item.registryName), item])} onClose={() => setDialog(null)} onChanged={() => void installed.refresh()} />}
     {larkDialog && <LarkCliDialog model={lark} onClose={() => setLarkDialog(false)} />}

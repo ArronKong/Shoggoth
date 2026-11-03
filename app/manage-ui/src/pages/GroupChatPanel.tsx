@@ -7,6 +7,7 @@ import AgentAvatar from "../components/AgentAvatar";
 import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
 import GroupChatMarkdown, { groupAttachmentsOutsideMarkdown } from "./GroupChatMarkdown";
 import FusionLoader from "../components/FusionLoader";
+import Modal from "../components/Modal";
 import { useConfirm, usePrompt, useToast } from "../components/ui";
 import {
   getGroupChat, listGroupChatMessages, lookupGroupChatSend, revealAttachment, respondGroupChatInteraction, retryGroupChatTurn,
@@ -35,7 +36,7 @@ import type { GroupChatMember, GroupChatMessage, GroupChatView, InspirationAttac
 import { groupReplyBody, groupReplyBubbles } from "../lib/groupReply";
 import { formatChatTime } from "../lib/chatTime";
 import { orderGroupTimeline } from "../lib/groupTimeline";
-import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconTrash, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
+import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconTrash, IconStopMessage, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
 import ChatResponseMetadata from "./ChatResponseMetadata";
 import { useGroupMessagePresentation } from "../lib/groupMessagePresentation";
 import styles from "./GroupChatPanel.module.css";
@@ -133,6 +134,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const [sending, setSending] = useState(false);
   const [stoppingScope, setStoppingScope] = useState<string | null>(null);
   const stoppingScopeRef = useRef<string | null>(null);
+  const [memberStopPending, setMemberStopPending] = useState<Set<string>>(() => new Set());
+  const memberStopPendingRef = useRef(new Set<string>());
   const deletingScopeRef = useRef<string | null>(null);
   const [deletingScope, setDeletingScope] = useState<string | null>(null);
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
@@ -145,6 +148,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const [replyTo, setReplyTo] = useState<GroupChatMessage | null>(null);
   const [referenceOpen, setReferenceOpen] = useState(false);
   const [journalRecoveryOpen, setJournalRecoveryOpen] = useState(false);
+  const [sendRecordsOpen, setSendRecordsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [fullMessage, setFullMessage] = useState<GroupChatMessage | null>(null);
   const retryOps = useRef(new Map<number, string>());
@@ -177,12 +181,12 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const [syncError, setSyncError] = useState<string | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(cached?.lastSyncAt ?? null);
   const verifyingRef = useRef(new Set<string>());
+  const dispatchingRef = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
   const readingPositionRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mentionMenuId = useId();
-  const composerHintId = useId();
   useLayoutEffect(() => {
     if (!pinJumpTarget || pinJumpTarget.scope !== scopeKey || pinJumpTarget.jump !== pinJumpRef.current) return;
     const target = listRef.current?.querySelector(`[data-seq="${pinJumpTarget.seq}"]`);
@@ -249,7 +253,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     setDraft("");
     setMentionIds([]);
     setReplyTo(null);
-    setReferenceOpen(false); setSearchOpen(false); setJournalRecoveryOpen(false);
+    setReferenceOpen(false); setSearchOpen(false); setJournalRecoveryOpen(false); setSendRecordsOpen(false);
     setFullMessage(null);
     setAdding(false);
     setSettingsOpen(false);
@@ -297,7 +301,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           observedOwnerRef.current = detail.ownerScope ?? null; lastSeqRef.current = 0; messageRevisionRef.current = 0; setMessages([]); setHasOlder(false);
           setFullMessage(null); setLightbox(null);
           setSettingsOpen(false); setCardMemberId(null); setAdding(false); setExpandedPanel(null);
-          setSearchOpen(false); setReferenceOpen(false); setJournalRecoveryOpen(false);
+          setSearchOpen(false); setReferenceOpen(false); setJournalRecoveryOpen(false); setSendRecordsOpen(false);
           setJournalReady(false); draftSessionRef.current = null; setSendRecords([]); setForeignPending(0); setJournalError(null);
           setSending(false); setDraft(""); setMentionIds([]); setMention(null); setReplyTo(null);
           for (const file of filesRef.current) if (file.preview) URL.revokeObjectURL(file.preview);
@@ -350,7 +354,10 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const discussionRunning = view?.group.status === "deleting" || Boolean(view?.round) || (view?.activeTurns ?? []).length > 0
     || (view?.queuedMemberIds ?? []).length > 0 || (view?.pendingInteractions ?? []).length > 0;
   discussionRunningRef.current = discussionRunning;
-  const stoppingTurns = (view?.activeTurns ?? []).filter(turn => turn.stopping || turn.recovery?.cancelRequested);
+  const memberStopKey = (opportunityId: string) => `${scopeKey}:${opportunityId}`;
+  const stoppedSpeech = (turn: GroupChatView["activeTurns"][number]) => turn.releasedReason === "stopped"
+    || memberStopPending.has(memberStopKey(turn.opportunityId));
+  const stoppingTurns = (view?.activeTurns ?? []).filter(turn => !stoppedSpeech(turn) && (turn.stopping || turn.recovery?.cancelRequested));
   const canStopDiscussion = Boolean(view?.round) || (view?.queuedMemberIds.length ?? 0) > 0
     || (view?.activeTurns ?? []).some(turn => !turn.stopping && !turn.recovery?.cancelRequested);
   const stopPending = stoppingScope === scopeKey;
@@ -545,6 +552,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     addFiles(pasted);
   };
   const filesBusy = files.some((file) => file.status !== "ready");
+  const hasComposerContent = Boolean(draft.trim() || files.length);
   const sameDraftPending = sendRecords.some(record => record.draftId === draftSessionRef.current?.draftId
     && record.draftRevision === draftSessionRef.current?.revision);
   const send = async () => {
@@ -591,23 +599,28 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     stickToBottomRef.current = true; append([message]); void pull();
   };
   const dispatchRecord = async (record: GroupSendRecord, session: GroupDraftSession | null, generation: number) => {
-    if (!currentScope()) return;
-    let submitting = await groupSendJournal.update(record, { phase: "submitting", lastError: null });
-    if (submitting.phase === "observed" || !currentScope()) return;
+    if (!currentScope() || dispatchingRef.current.has(record.key)) return;
+    dispatchingRef.current.add(record.key);
     try {
-      const result = await sendGroupChatMessage(record.groupId, record.inputSnapshot);
-      submitting = await groupSendJournal.update(submitting, { phase: "accepted_awaiting_echo", acceptedMessageId: result.message.id,
-        acceptedSeq: result.message.seq, discussionId: result.discussionId, lastCheckedAt: Date.now() });
-      await acceptRecord(submitting, result.message, result.discussionId, session, generation);
-    } catch (cause) {
-      const code = (cause as { code?: string })?.code;
-      const refused = ["GROUP_CHAT_INVALID", "GROUP_CHAT_NOT_FOUND", "GROUP_CHAT_ARCHIVED", "GROUP_CHAT_MESSAGE_CONFLICT",
-        "GROUP_CHAT_POLICY_CONFLICT", "GROUP_CHAT_POLICY_CHANGED", "GROUP_CHAT_OWNER_CHANGED", "GROUP_CHAT_REPLY_NOT_FOUND",
-        "GROUP_CHAT_MEMBER_NOT_FOUND"].includes(code ?? "");
-      await groupSendJournal.update(submitting, { phase: refused ? "rejected" : "needs_verification",
-        lastError: cause instanceof Error ? cause.message : String(cause), lastCheckedAt: Date.now() });
-      if (currentScope() && generation === generationRef.current) toast.error(cause instanceof Error ? cause.message : String(cause));
-    }
+      let submitting = await groupSendJournal.update(record, { phase: "submitting", lastError: null });
+      if (submitting.phase === "observed" || !currentScope()) return;
+      try {
+        const result = await sendGroupChatMessage(record.groupId, record.inputSnapshot);
+        submitting = await groupSendJournal.update(submitting, { phase: "accepted_awaiting_echo", acceptedMessageId: result.message.id,
+          acceptedSeq: result.message.seq, discussionId: result.discussionId, lastCheckedAt: Date.now() });
+        await acceptRecord(submitting, result.message, result.discussionId, session, generation);
+      } catch (cause) {
+        const code = (cause as { code?: string })?.code;
+        const refused = ["GROUP_CHAT_INVALID", "GROUP_CHAT_NOT_FOUND", "GROUP_CHAT_ARCHIVED", "GROUP_CHAT_MESSAGE_CONFLICT",
+          "GROUP_CHAT_POLICY_CONFLICT", "GROUP_CHAT_POLICY_CHANGED", "GROUP_CHAT_OWNER_CHANGED", "GROUP_CHAT_REPLY_NOT_FOUND",
+          "GROUP_CHAT_MEMBER_NOT_FOUND"].includes(code ?? "");
+        await groupSendJournal.update(submitting, { phase: refused ? "rejected" : "needs_verification",
+          lastError: cause instanceof Error ? cause.message : String(cause), lastCheckedAt: Date.now() });
+        if (currentScope() && generation === generationRef.current) toast.error(refused
+          ? cause instanceof Error ? cause.message : String(cause)
+          : t("groupChat.sendJournal.uncertainToast"));
+      }
+    } finally { dispatchingRef.current.delete(record.key); }
   };
   const verifyRecord = useCallback(async (record: GroupSendRecord) => {
     if (!currentScope() || record.groupId !== currentGroupRef.current || record.ownerScope !== ownerScopeRef.current) return;
@@ -632,25 +645,40 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         .catch(() => {});
     } finally { verifyingRef.current.delete(record.key); if (currentScope() && generation === generationRef.current) void refreshSendRecords(); }
   }, [append, applyComposer, pull, refreshSendRecords, currentScope]);
+  const receiptSignature = sendRecords.map(record => `${record.key}:${record.phase}`).join("|");
   useEffect(() => {
-    if (!journalReady) return;
-    let disposed = false;
+    if (!journalReady || !ownerScope) return;
+    let disposed = false, checking = false, again = false, attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     // Recovery checks originals only. Neither prepared nor uncertain entries are replayed.
     const check = () => {
-      void groupSendJournal.read(ownerScope!, groupId).then(async state => {
+      if (disposed || !currentScope()) return;
+      clearTimeout(timer);
+      if (checking) { again = true; return; }
+      checking = true;
+      let pendingReceipt = false;
+      void groupSendJournal.read(ownerScope, groupId).then(async state => {
         if (disposed || !currentScope()) return;
-        const pending = state.sends.filter(record => record.phase !== "observed" && record.phase !== "rejected");
+        const pending = state.sends.filter(record => record.phase !== "observed" && record.phase !== "rejected"
+          && !dispatchingRef.current.has(record.key));
+        pendingReceipt = pending.length > 0;
         let index = 0;
         await Promise.all(Array.from({ length: Math.min(4, pending.length) }, async () => {
           while (!disposed && currentScope() && index < pending.length) await verifyRecord(pending[index++]);
         }));
-      }).catch(() => {});
+      }).catch(() => { pendingReceipt = true; }).finally(() => {
+        checking = false;
+        if (disposed || !currentScope()) return;
+        if (again) { again = false; check(); }
+        else if (pendingReceipt) timer = setTimeout(check, Math.min(30_000, 2_000 * 2 ** Math.min(attempts++, 4)));
+      });
     };
     check();
     const off = onGroupChanged(changed => { if (changed === groupId) check(); });
     if (typeof window !== "undefined") { window.addEventListener("online", check); window.addEventListener("focus", check); window.addEventListener(GROUP_CONNECTION_EVENT, check); }
-    return () => { disposed = true; off(); if (typeof window !== "undefined") { window.removeEventListener("online", check); window.removeEventListener("focus", check); window.removeEventListener(GROUP_CONNECTION_EVENT, check); } };
-  }, [groupId, journalReady, ownerScope, verifyRecord, currentScope]);
+    return () => { disposed = true; clearTimeout(timer); off(); if (typeof window !== "undefined") { window.removeEventListener("online", check); window.removeEventListener("focus", check); window.removeEventListener(GROUP_CONNECTION_EVENT, check); } };
+  }, [groupId, journalReady, ownerScope, verifyRecord, currentScope,
+    receiptSignature]);
   const retrySend = async (record: GroupSendRecord) => {
     if (!currentScope() || sending || !view || view.group.status !== "active" || view.ownerScope !== record.ownerScope || !journalReady) return;
     const generation = generationRef.current; setSending(true);
@@ -788,10 +816,11 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     }
   }
   const interactions = (view.pendingInteractions ?? [])
-    .filter(item => settledTurnMembers.get(item.opportunityId) !== item.memberId);
+    .filter(item => settledTurnMembers.get(item.opportunityId) !== item.memberId
+      && !view.activeTurns.some(turn => turn.opportunityId === item.opportunityId && stoppedSpeech(turn)));
   const speaking = view.activeTurns.flatMap((turn) => {
     const member = membersById.get(turn.memberId);
-    return member && settledTurnMembers.get(turn.opportunityId) !== turn.memberId ? [{ turn, member }] : [];
+    return member && !stoppedSpeech(turn) && settledTurnMembers.get(turn.opportunityId) !== turn.memberId ? [{ turn, member }] : [];
   });
   const answering = speaking.filter((item) => {
     const phase = boundGroupActivity(item.turn.activity, { groupId, memberId: item.member.id, opportunityId: item.turn.opportunityId })?.phase;
@@ -800,7 +829,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
       && !interactions.some(interaction => interaction.opportunityId === item.turn.opportunityId && interaction.status === "pending");
   });
   const speakingIds = new Set(speaking.map((item) => item.member.id));
-  const queued = view.queuedMemberIds.map((id) => membersById.get(id)?.displayName).filter(Boolean);
   const archived = view.group.status !== "active";
   const timeline = orderGroupTimeline([
     ...messages.filter(message => message.author.kind === "system" || (!presentation.hidden.has(message.id)
@@ -873,6 +901,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         aria-pressed={pinned} onClick={() => pinMessage(message)}><IconPin /></button>}
       <button type="button" className="chat-copybtn" title={t("chat.deleteLocal")} aria-label={t("chat.deleteLocal")}
         onClick={() => hideMessage(message)}><IconTrash /></button>
+      {message.author.kind === "member" && message.origin?.opportunityId
+        && stopMessageIds.get(message.origin.opportunityId) === message.id && memberStopButton(message.origin.opportunityId)}
     </div>;
   };
   const jumpToPin = async (id: string) => {
@@ -942,14 +972,44 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const quoteButton = (message: GroupChatMessage) => !archived && (
     <button type="button" className={`btn-sm ${styles.msgAction}`} disabled={!journalReady} onClick={() => quote(message)}>{t("groupChat.reply.action")}</button>
   );
-  // 输入框上方的状态条：谁在发言、谁在后台干活、谁在等审批；每位都可以单独停下。
-  const busyMembers = speaking.map(({ turn, member }) => ({ turn, member,
-    state: interactions.some(item => item.opportunityId === turn.opportunityId && item.status === "pending") ? "approval" as const
-      : turn.floor ? "speaking" as const : "working" as const }));
-  const stopMember = async (memberId: string) => {
+  const stopMember = async (memberId: string, opportunityId: string) => {
     if (!currentScope()) return;
-    await run(() => stopGroupChatMember(groupId, memberId));
+    const key = memberStopKey(opportunityId);
+    if (memberStopPendingRef.current.has(key)) return;
+    memberStopPendingRef.current.add(key);
+    setMemberStopPending(new Set(memberStopPendingRef.current));
+    mutationRevisionRef.current++;
+    try { applyView(await stopGroupChatMember(groupId, memberId)); }
+    catch (cause) {
+      if (currentScope()) { toast.error(cause instanceof Error ? cause.message : String(cause)); void pull(); }
+    } finally {
+      memberStopPendingRef.current.delete(key);
+      setMemberStopPending(new Set(memberStopPendingRef.current));
+    }
   };
+  // 与原状态条使用相同的停止资格；入口只放在当前回合最后一个可见气泡下。
+  const stoppableTurns = new Map(speaking.filter(({ turn }) => !archived && !turn.stopping && !turn.recovery?.cancelRequested)
+    .map(item => [item.turn.opportunityId, item]));
+  const stopMessageIds = new Map<string, string>();
+  const visibleMessageIds = new Set<string>();
+  for (const entry of timeline) {
+    if (entry.kind !== "message") continue;
+    const message = entry.message;
+    visibleMessageIds.add(message.id);
+    if (message.author.kind === "member" && message.origin?.opportunityId
+      && stoppableTurns.get(message.origin.opportunityId)?.member.id === message.author.memberId) {
+      stopMessageIds.set(message.origin.opportunityId, message.id);
+    }
+  }
+  const memberStopButton = (opportunityId: string) => {
+    const item = stoppableTurns.get(opportunityId);
+    return item ? <button type="button" className="chat-copybtn"
+      title={`${t("groupChat.status.stop")} ${item.member.displayName}`} aria-label={`${t("groupChat.status.stop")} ${item.member.displayName}`}
+      data-group-stop-member={item.member.id} data-group-stop-turn={opportunityId}
+      onClick={() => void stopMember(item.member.id, opportunityId)}><IconStopMessage /></button> : null;
+  };
+  const unfinishedFooter = (opportunityId: string) => !stopMessageIds.has(opportunityId) && stoppableTurns.has(opportunityId)
+    ? <div className="chat-group__footer">{memberStopButton(opportunityId)}</div> : null;
   const authorHeader = (member: GroupChatMember | undefined) => (
     <button type="button" className={styles.author} data-group-author
       onClick={() => member && setCardMemberId(member.id)} disabled={!member}
@@ -967,6 +1027,50 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   return (
     <div className={styles.panel}>
       {settingsOpen && <GroupChatSettings key={`settings:${scopeKey}`} view={view} onView={applyView} onClose={() => { if (currentScope()) setSettingsOpen(false); }} />}
+      {sendRecordsOpen && <Modal open width={680} title={t("groupChat.sendJournal.open")} onClose={() => setSendRecordsOpen(false)}>
+        <div data-group-send-records>
+        {!ownerScope && <p className={styles.scopeHint} role="status">{t("groupChat.sendJournal.scopeUnavailable")}</p>}
+        {syncError && <p className={styles.scopeHint} role="status">
+          {t("groupChat.sync.recovering")}{lastSyncAt ? ` · ${t("groupChat.sync.last", { time: new Date(lastSyncAt).toLocaleTimeString() })}` : ""}
+          <button type="button" className="btn-sm" onClick={() => void pull()}>{t("groupChat.sync.check")}</button>
+        </p>}
+        {journalError && <div className={styles.scopeHint} role="alert">
+          {t("groupChat.sendJournal.storageError", { code: journalError })}
+          <button type="button" className="btn-sm" disabled={!ownerScope} onClick={() => setJournalRecoveryOpen(true)}>{t("groupChat.sendJournal.recoveryOpen")}</button>
+          <button type="button" className="btn-sm" onClick={() => void journalObserverRef.current?.invalidate()}>{t("groupChat.sendJournal.checkStorage")}</button>
+          {draftSessionRef.current && <button type="button" className="btn-sm" onClick={() => {
+            const session = draftSessionRef.current!, generation = generationRef.current;
+            void session.saveAsNewDraft().then(() => { if (generation === generationRef.current) setJournalError(null); }, cause => {
+              if (generation === generationRef.current) setJournalError(cause instanceof Error ? cause.message : String(cause));
+            });
+          }}>{t("groupChat.sendJournal.saveDraft")}</button>}
+        </div>}
+        {foreignPending > 0 && <p className={styles.scopeHint} role="status">{t("groupChat.sendJournal.otherOwner", { count: foreignPending })}</p>}
+        {sendRecords.length > 0 && <div className={styles.sendJournal} data-group-send-journal>
+          <span role="status">{t("groupChat.sendJournal.pending", { count: sendRecords.length })}</span>
+          <p>{t("groupChat.sendJournal.backgroundHint")}</p>
+          {[...sendRecords].sort((a, b) => b.createdAt - a.createdAt)
+            .slice(Math.min(sendRecordPage, Math.floor((sendRecords.length - 1) / 20)) * 20, (Math.min(sendRecordPage, Math.floor((sendRecords.length - 1) / 20)) + 1) * 20)
+            .map(record => <details key={record.key} data-send-id={record.clientMessageId}>
+            <summary>{t(`groupChat.sendJournal.${record.phase}`)} · {excerptOf(record.inputSnapshot.body || record.inputSnapshot.attachments?.map(file => file.name).join("、") || "", 70)}</summary>
+            <p>{record.inputSnapshot.body}</p>
+            {record.inputSnapshot.attachments?.map(file => <p key={file.id}>{file.name}</p>)}
+            {record.lastError && <p>{t("groupChat.sendJournal.detail", { code: record.lastError })}</p>}
+            {archived && <p>{t("groupChat.sendJournal.archived")}</p>}
+            <button type="button" className="btn-sm" disabled={sending} onClick={() => void verifyRecord(record)}>{t("groupChat.sendJournal.check")}</button>
+            {record.phase !== "rejected" && <button type="button" className="btn-sm" disabled={sending || archived || !journalReady || !!journalError}
+              onClick={() => void retrySend(record)}>{t("groupChat.sendJournal.retry")}</button>}
+            <button type="button" className="btn-sm" disabled={sending || archived || !journalReady || !!journalError}
+              onClick={() => void sendAsNew(record)}>{t("groupChat.sendJournal.new")}</button>
+            <button type="button" className="btn-sm" disabled={JSON.stringify(composer) !== JSON.stringify(emptyGroupComposer())}
+              onClick={() => { applyComposer(record.composerSnapshot); }}>{t("groupChat.sendJournal.restore")}</button>
+          </details>)}
+          {sendRecordPage > 0 && <button type="button" className="btn-sm" onClick={() => setSendRecordPage(value => Math.max(0, value - 1))}>{t("groupChat.sendJournal.previous")}</button>}
+          {(sendRecordPage + 1) * 20 < sendRecords.length && <button type="button" className="btn-sm" onClick={() => setSendRecordPage(value => value + 1)}>{t("groupChat.sendJournal.next")}</button>}
+        </div>}
+        {!sendRecords.length && <p className={styles.muted}>{t("groupChat.sendJournal.empty")}</p>}
+        </div>
+      </Modal>}
       {cardMemberId && membersById.get(cardMemberId) && (
         <Suspense fallback={null}><GroupChatMemberModal key={`member:${scopeKey}:${cardMemberId}`} groupId={groupId} member={membersById.get(cardMemberId)!} view={view}
           onView={applyView} isCurrentScope={currentScope} onClose={() => { if (currentScope()) setCardMemberId(null); }} /></Suspense>
@@ -981,6 +1085,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           onAddMember={!archived && activeMembers.length < MAX_MEMBERS ? () => setAdding(true) : undefined}
           onOpenMember={setCardMemberId} onSearch={() => { setExpandedPanel(null); setSearchOpen(true); }}
           onRename={() => void rename()} onSettings={() => setSettingsOpen(true)}
+          onSendRecords={() => { setExpandedPanel(null); setSendRecordPage(0); setSendRecordsOpen(true); }}
           onDelete={() => void removeGroup()} deleting={view.group.status === "deleting" || deletingScope === scopeKey} />
           : <GroupChatFiles key={`files:${scopeKey}`} view={view} onClose={() => setExpandedPanel(null)} />}
       </Suspense>}
@@ -1019,7 +1124,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         }}>{t("chat.undo")}</button>
       </div>}
       {journalRecoveryOpen && ownerScope && <GroupChatJournalRecovery key={`journal:${scopeKey}`}
-        ownerScope={ownerScope} groupId={groupId} onClose={() => { if (currentScope()) setJournalRecoveryOpen(false); }} />}
+        ownerScope={ownerScope} groupId={groupId} onClose={() => { if (currentScope()) setJournalRecoveryOpen(false); setSendRecordsOpen(false); }} />}
       {searchOpen && <GroupChatSearch key={`search:${scopeKey}`} view={view} onClose={() => { if (currentScope()) setSearchOpen(false); }}
         onOpenMessage={message => { if (!currentScope()) return; setSearchOpen(false); setFullMessage(message); }} />}
       {referenceOpen && <GroupChatReference key={`reference:${scopeKey}`} onClose={() => { if (currentScope()) setReferenceOpen(false); }} onInsert={excerpt => {
@@ -1042,19 +1147,24 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
             const { turn, member } = entry;
             const waitingForInteraction = interactions.some(item => item.opportunityId === turn.opportunityId && item.status === "pending");
             const activity = boundGroupActivity(turn.activity, { groupId, memberId: member.id, opportunityId: turn.opportunityId });
-            const phase = activity?.phase
-              ?? (turn.recovery ? "reconciling" : turn.stopping ? "stopping" : turn.dispatchState === "queued" ? "queued" : "running");
+            const stopping = Boolean(turn.stopping || turn.recovery?.cancelRequested);
+            const phase = stopping ? "stopping" : turn.recovery ? "reconciling"
+              : activity?.phase ?? (turn.dispatchState === "queued" ? "queued" : "running");
+            const idleReleased = turn.released && turn.releasedReason === "idle" && !stopping;
+            const quietRecovery = idleReleased || stopping || turn.recovery?.type === "execution";
             const canAnswer = answering.some(item => item.turn.opportunityId === turn.opportunityId);
             const publishedIds = new Set(messages.filter(message => message.origin?.opportunityId === turn.opportunityId)
               .flatMap(message => (message.replyMessages ?? []).map(item => item.id)));
-            const replyMessages = (turn.individualMessages ? [] : activity?.textMessages?.length ? activity.textMessages
+            const replyMessages = (stopping || turn.individualMessages ? [] : activity?.textMessages?.length ? activity.textMessages
               : turn.floor && turn.draft?.trim() && !turn.recovery ? [{ id: "draft", text: turn.draft, pending: true }] : [])
               .filter(item => item.text.trim() && !publishedIds.has(item.id));
-            const publishedStreaming = turn.individualMessages && messages.some(message => message.origin?.opportunityId === turn.opportunityId && message.origin.streaming);
-            const loading = !publishedStreaming && !replyMessages.some(item => item.pending && canAnswer) && !waitingForInteraction
+            const publishedStreaming = turn.individualMessages && messages.some(message => visibleMessageIds.has(message.id)
+              && message.origin?.opportunityId === turn.opportunityId && message.origin.streaming);
+            const loading = !idleReleased && !publishedStreaming && !replyMessages.some(item => item.pending && canAnswer) && !waitingForInteraction
               && !turn.recovery && !turn.stopping && turn.queueReason !== "execution_unconfirmed"
               && !["completed", "failed", "cancelled"].includes(phase);
-            const notice = turn.recovery || turn.stopping || turn.queueReason === "execution_unconfirmed";
+            const notice = !quietRecovery && (turn.recovery?.type === "result" || turn.queueReason === "execution_unconfirmed");
+            const footer = !waitingForInteraction ? unfinishedFooter(turn.opportunityId) : null;
             if (!replyMessages.length && !loading && !notice) return null;
             return (
           <div key={`turn:${turn.opportunityId}`} className="chat-group is-assistant"
@@ -1069,10 +1179,9 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
               {(loading || notice) && <div className={`chat-bubble${loading ? " is-streaming" : ""}`} data-activity-phase={phase}>
                 {loading && <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
                 {turn.queueReason === "execution_unconfirmed" && <p className={styles.muted}>{t("groupChat.queueBlocked")}</p>}
-                {turn.recovery && <GroupChatRecovery key={`recovery:${scopeKey}`} groupId={groupId} target={{ kind: "turn", opportunityId: turn.opportunityId }}
-                  recovery={turn.recovery} onView={applyView} />}
-                {turn.stopping && <p className={styles.muted} role="status">{t("groupChat.activity.phase.stopping")}</p>}
+                {turn.recovery && <GroupChatRecovery recovery={turn.recovery} />}
               </div>}
+              {footer}
             </div>
           </div>
         );
@@ -1080,24 +1189,27 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           if (entry.kind === "interaction") {
             const { item } = entry;
           const member = membersById.get(item.memberId);
+          const approval = item.request.fields?.length === 0;
+          const prompt = <>
+            {(!approval || item.status !== "pending") && <p className={styles.muted}>{t(item.status === "pending" ? "groupChat.interaction.waiting" : "groupChat.interaction.continuing",
+              { name: member?.displayName ?? t("groupChat.someMember") })}</p>}
+            {item.status === "pending" && (
+              <>
+                {item.context?.command && <pre className="chat-prompt__cmd">{item.context.command}</pre>}
+                <ChatPromptCard key={item.request.requestId} compactInput
+                  draftKey={`group:${item.opportunityId}:${item.request.requestId}`} agentName={member?.displayName}
+                  entry={{ ...item.request, id: item.request.requestId }}
+                  onRespond={(_entry, data) => respond(item.opportunityId, item.request.requestId, data)} />
+              </>
+            )}
+          </>;
           return (
             <div key={`interaction:${item.opportunityId}:${item.request.requestId}`} className="chat-group is-assistant" data-card-interactive
               data-group-interaction={item.request.requestId} data-group-member={item.memberId}>
               <div className="chat-group__stack">
                 {authorHeader(member)}
-                <div className={`chat-bubble ${styles.liveBubble}`}>
-                  <p className={styles.muted}>{t(item.status === "pending" ? "groupChat.interaction.waiting" : "groupChat.interaction.continuing",
-                    { name: member?.displayName ?? t("groupChat.someMember") })}</p>
-                  {item.status === "pending" && (
-                    <>
-                      {item.context?.command && <pre className="chat-prompt__cmd">{item.context.command}</pre>}
-                      <ChatPromptCard key={item.request.requestId} compactApproval compactInput
-                        draftKey={`group:${item.opportunityId}:${item.request.requestId}`} agentName={member?.displayName}
-                        entry={{ ...item.request, id: item.request.requestId }}
-                        onRespond={(_entry, data) => respond(item.opportunityId, item.request.requestId, data)} />
-                    </>
-                  )}
-                </div>
+                {approval ? prompt : <div className={`chat-bubble ${styles.liveBubble}`}>{prompt}</div>}
+                {unfinishedFooter(item.opportunityId)}
               </div>
             </div>
           );
@@ -1147,6 +1259,9 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           }
           const bubbles = groupReplyBubbles(message);
           const member = membersById.get(message.author.memberId);
+          const streaming = Boolean(message.origin?.streaming && !view.activeTurns.some(turn =>
+            turn.opportunityId === message.origin?.opportunityId
+              && (stoppedSpeech(turn) || turn.stopping || turn.recovery?.cancelRequested)));
           return (
             <div key={message.seq} data-seq={message.seq} className={`chat-group is-assistant ${styles.msg}`}
               onContextMenu={event => openMessageMenu(event, message)}>
@@ -1154,8 +1269,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
                 {authorHeader(member)}
                 {quoteBlock(message)}
                 {bubbles.map(item => <GroupChatMarkdown key={item.id} text={item.text}
-                  className={`chat-bubble chat-md${message.origin?.streaming ? " is-streaming" : ""}`}
-                  members={view.members} onMemberClick={setCardMemberId} streamingCursor={message.origin?.streaming} />)}
+                  className={`chat-bubble chat-md${streaming ? " is-streaming" : ""}`}
+                  members={view.members} onMemberClick={setCardMemberId} streamingCursor={streaming} />)}
                 {attachmentRow(message)}
                 {fullResultNote}
                 {messageFooter(message)}
@@ -1165,7 +1280,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           );
 
         })}
-        {queued.length > 0 && <div className={styles.system} role="status">{t("groupChat.queued", { names: queued.join("、") })}</div>}
       </div>
 
       <div className={`chat-composer ${styles.composer}`} data-chat-composer
@@ -1174,55 +1288,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           if (event.dataTransfer.files.length === 0) return;
           event.preventDefault(); addFiles(Array.from(event.dataTransfer.files));
         }}>
-        {(stopPending || stoppingTurns.length > 0) && <p className={styles.scopeHint} role="status">
-          {t(stopPending ? "groupChat.stopState.requesting" : "groupChat.stopState.confirming")}
-        </p>}
-        {busyMembers.length > 0 && <div className={styles.statusCapsule} role="status" data-group-status>
-          {busyMembers.map(({ turn, member, state }) => <span key={turn.opportunityId} className={styles.statusItem} data-group-status-member={member.id}>
-            <AgentAvatar agentId={member.agentId} name={member.displayName} className={styles.memberAvatar} />
-            <span>{t(`groupChat.status.${state}`, { name: member.displayName })}</span>
-            {!archived && !turn.stopping && <button type="button" className="btn-sm" onClick={() => void stopMember(member.id)}>{t("groupChat.status.stop")}</button>}
-          </span>)}
-        </div>}
-        {!ownerScope && <p className={styles.scopeHint} role="status">{t("groupChat.sendJournal.scopeUnavailable")}</p>}
-        {syncError && <p className={styles.scopeHint} role="status">
-          {t("groupChat.sync.recovering")}{lastSyncAt ? ` · ${t("groupChat.sync.last", { time: new Date(lastSyncAt).toLocaleTimeString() })}` : ""}
-          <button type="button" className="btn-sm" onClick={() => void pull()}>{t("groupChat.sync.check")}</button>
-        </p>}
-        {journalError && <div className={styles.scopeHint} role="alert">
-          {t("groupChat.sendJournal.storageError", { code: journalError })}
-          <button type="button" className="btn-sm" disabled={!ownerScope} onClick={() => setJournalRecoveryOpen(true)}>{t("groupChat.sendJournal.recoveryOpen")}</button>
-          <button type="button" className="btn-sm" onClick={() => void journalObserverRef.current?.invalidate()}>{t("groupChat.sendJournal.checkStorage")}</button>
-          {draftSessionRef.current && <button type="button" className="btn-sm" onClick={() => {
-            const session = draftSessionRef.current!, generation = generationRef.current;
-            void session.saveAsNewDraft().then(() => { if (generation === generationRef.current) setJournalError(null); }, cause => {
-              if (generation === generationRef.current) setJournalError(cause instanceof Error ? cause.message : String(cause));
-            });
-          }}>{t("groupChat.sendJournal.saveDraft")}</button>}
-        </div>}
-        {foreignPending > 0 && <p className={styles.scopeHint} role="status">{t("groupChat.sendJournal.otherOwner", { count: foreignPending })}</p>}
-        {sendRecords.length > 0 && <div className={styles.sendJournal} data-group-send-journal>
-          <span role="status">{t("groupChat.sendJournal.pending", { count: sendRecords.length })}</span>
-          <p>{t("groupChat.sendJournal.newHint")}</p>
-          {[...sendRecords].sort((a, b) => b.createdAt - a.createdAt)
-            .slice(Math.min(sendRecordPage, Math.floor((sendRecords.length - 1) / 20)) * 20, (Math.min(sendRecordPage, Math.floor((sendRecords.length - 1) / 20)) + 1) * 20)
-            .map(record => <details key={record.key} data-send-id={record.clientMessageId}>
-            <summary>{t(`groupChat.sendJournal.${record.phase}`)} · {excerptOf(record.inputSnapshot.body || record.inputSnapshot.attachments?.map(file => file.name).join("、") || "", 70)}</summary>
-            <p>{record.inputSnapshot.body}</p>
-            {record.inputSnapshot.attachments?.map(file => <p key={file.id}>{file.name}</p>)}
-            {record.lastError && <p>{t("groupChat.sendJournal.detail", { code: record.lastError })}</p>}
-            {archived && <p>{t("groupChat.sendJournal.archived")}</p>}
-            <button type="button" className="btn-sm" disabled={sending} onClick={() => void verifyRecord(record)}>{t("groupChat.sendJournal.check")}</button>
-            {record.phase !== "rejected" && <button type="button" className="btn-sm" disabled={sending || archived || !journalReady || !!journalError}
-              onClick={() => void retrySend(record)}>{t("groupChat.sendJournal.retry")}</button>}
-            <button type="button" className="btn-sm" disabled={sending || archived || !journalReady || !!journalError}
-              onClick={() => void sendAsNew(record)}>{t("groupChat.sendJournal.new")}</button>
-            <button type="button" className="btn-sm" disabled={JSON.stringify(composer) !== JSON.stringify(emptyGroupComposer())}
-              onClick={() => { applyComposer(record.composerSnapshot); }}>{t("groupChat.sendJournal.restore")}</button>
-          </details>)}
-          {sendRecordPage > 0 && <button type="button" className="btn-sm" onClick={() => setSendRecordPage(value => Math.max(0, value - 1))}>{t("groupChat.sendJournal.previous")}</button>}
-          {(sendRecordPage + 1) * 20 < sendRecords.length && <button type="button" className="btn-sm" onClick={() => setSendRecordPage(value => value + 1)}>{t("groupChat.sendJournal.next")}</button>}
-        </div>}
         {mention && candidates.length > 0 && (
           <div className={styles.mentionMenu} id={mentionMenuId} role="listbox" aria-label={t("groupChat.composer.mention")}>
             {candidates.map((member, index) => (
@@ -1287,20 +1352,20 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
               onMouseDown={(event) => event.preventDefault()}>
               <span className={styles.mentionIcon} aria-hidden="true">@</span>{t("groupChat.composer.mention")}
             </button>
-            <span className={styles.composerHint} id={composerHintId}>{t("groupChat.composer.hint")}</span>
           </div>
           <div className="chat-composer__right">
             <button type="button" className="chat-iconbtn" title={t("chat.attachFile")} aria-label={t("chat.attachFile")}
               disabled={archived || !journalReady || files.length >= MAX_INSPIRATION_ATTACHMENTS} onClick={() => fileInputRef.current?.click()}>
               <IconClip />
             </button>
-            {(canStopDiscussion || stopPending || stoppingTurns.length > 0) ? (
+            {(canStopDiscussion || stopPending || stoppingTurns.length > 0) && (
               <button type="button" className="chat-iconbtn chat-send chat-stop"
                 title={t(stopPending ? "groupChat.stopState.requesting" : !canStopDiscussion ? "groupChat.stopState.confirming" : "groupChat.stop")}
                 aria-label={t(stopPending ? "groupChat.stopState.requesting" : !canStopDiscussion ? "groupChat.stopState.confirming" : "groupChat.stop")}
                 disabled={stopPending || !canStopDiscussion} aria-busy={stopPending}
                 onClick={() => void stopDiscussion()}><IconStop /></button>
-            ) : (
+            )}
+            {(hasComposerContent || !(canStopDiscussion || stopPending || stoppingTurns.length > 0)) && (
               <button type="button" className="chat-iconbtn chat-send" title={t("groupChat.send")} aria-label={t("groupChat.send")}
                 onClick={() => void send()} disabled={(!draft.trim() && files.length === 0) || filesBusy || sending || archived || !journalReady || !!journalError || sameDraftPending}>
                 <IconSend />

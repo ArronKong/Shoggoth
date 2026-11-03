@@ -4,9 +4,10 @@ import { listMcpTools, type McpToolDescription, type McpToolList } from "../api/
 import type { ConnectorToolPreview } from "../lib/connectorToolPreviews";
 import s from "../pages/ConnectorsPage.module.css";
 
-export default function ConnectorTools({ serverId, checkedAt, status, items, previewId, refreshKey }: {
+export default function ConnectorTools({ serverId, checkedAt, status, items, previewId, refreshKey, overview = false, description }: {
   serverId?: string; checkedAt?: number | null; status?: string; items?: McpToolDescription[];
   previewId?: string; refreshKey?: string | number;
+  overview?: boolean; description?: string;
 }) {
   const { t, i18n } = useTranslation();
   const language = i18n?.resolvedLanguage || i18n?.language || "en";
@@ -26,13 +27,13 @@ export default function ConnectorTools({ serverId, checkedAt, status, items, pre
   }, [open, serverId, requestKey, retry, items]);
   useEffect(() => {
     setPreview(null);
-    if (!open || !previewId || items) return;
+    if ((!open && !overview) || !previewId || items) return;
     let active = true;
     void import("../lib/connectorToolPreviews").then(module => {
       if (active) setPreview({ id: previewId, language, value: module.getConnectorToolPreview(previewId, language) });
     }).catch(() => { if (active) setPreview({ id: previewId, language, error: true }); });
     return () => { active = false; };
-  }, [open, previewId, language, retry, items]);
+  }, [open, overview, previewId, language, retry, items]);
   const currentRead = read?.key === requestKey ? read : null;
   const currentPreview = preview?.id === previewId && preview?.language === language ? preview : null;
   const data = currentRead?.data;
@@ -44,9 +45,9 @@ export default function ConnectorTools({ serverId, checkedAt, status, items, pre
   const loading = currentRead?.loading || !items && !!previewId && !currentPreview;
   const error = currentRead?.error || !items && !live && currentPreview?.error;
   const shown = tools.filter(tool => `${tool.name} ${tool.description}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
-  return <details className={s.toolDetails} open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary>{t(shownPreview ? "mcpConnectors.flow.previewTools" : "mcpConnectors.flow.viewTools")}{tools.length > 0 && <span>{tools.length}</span>}</summary>
-    {open && <>
+  const capabilities = items || currentPreview?.value?.items || [];
+  const namedTools = !!items || currentPreview?.value?.kind === "tools";
+  const details = <>
       {loading && !available && <p role="status" className={s.muted}>{t("mcpConnectors.loading")}</p>}
       {error && <p role="alert" className={s.error}>{t("mcpConnectors.loadFailed")} <button type="button" className={s.textButton} onClick={() => setRetry(value => value + 1)}>{t("mcpConnectors.retry")}</button></p>}
       {!loading && !error && !available && <p className={s.muted}>{t("mcpConnectors.flow.toolsAfterCheck")}</p>}
@@ -58,6 +59,17 @@ export default function ConnectorTools({ serverId, checkedAt, status, items, pre
         {!shown.length && <p className={s.muted}>{t("mcpConnectors.flow.noTools")}</p>}
         {live && data && tools.length < data.totalCount && <p className={s.muted}>{t("mcpConnectors.flow.toolsPartial")}</p>}
       </>}
+    </>;
+  if (overview) return <section className={s.capabilities} data-connector-capabilities>
+    <div className={s.capabilityHeading}><h3>{t(open ? "mcpConnectors.flow.toolDetails" : "mcpConnectors.flow.capabilities")}</h3>
+      <button type="button" className={s.textButton} aria-expanded={open} onClick={() => setOpen(value => !value)}>{open ? t("mcpConnectors.flow.backOverview") : t("mcpConnectors.flow.viewTools")}<span aria-hidden="true">{open ? " ←" : " ›"}</span></button>
+    </div>
+    {open ? details : <>
+      {capabilities.length ? <ul className={s.capabilityList}>{capabilities.slice(0, 3).map(tool => <li key={tool.name}><span className={s.capabilityIcon} aria-hidden="true">✓</span><div><strong>{namedTools ? tool.description || tool.name : tool.name}</strong>{!namedTools && tool.description && <p>{tool.description}</p>}</div></li>)}</ul> : <p className={s.muted}>{description || t("mcpConnectors.flow.toolsAfterCheck")}</p>}
     </>}
+  </section>;
+  return <details className={s.toolDetails} open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>{t(shownPreview ? "mcpConnectors.flow.previewTools" : "mcpConnectors.flow.viewTools")}{tools.length > 0 && <span>{tools.length}</span>}</summary>
+    {open && details}
   </details>;
 }

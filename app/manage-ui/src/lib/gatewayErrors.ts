@@ -80,6 +80,15 @@ const PATTERNS: Array<[RegExp, string]> = [
 export function translateGatewayError(raw: string, t: TFn): string {
   const detailed = detailedFailure(raw, t);
   if (detailed !== null) return detailed;
+  // OpenClaw uses the same bounded copy for live failures and saved history.
+  // Match that complete envelope, never a generic HTTP 400 or provider detail.
+  const unavailable = /^(错误：)?(?:⚠️\s*)?LLM request failed \(model unavailable(?:, HTTP ([1-5]\d{2}))?\)\. Choose another model or check the model id and provider availability\.$/u.exec(raw.trim());
+  if (unavailable) {
+    const message = unavailable[2]
+      ? t("chat.gwErrors.providerModelUnavailableHttp", { status: unavailable[2] })
+      : t("chat.gwErrors.providerModelUnavailable");
+    return unavailable[1] ? t("chat.errorPrefix", { msg: message }) : message;
+  }
   for (const [re, key] of PATTERNS) {
     if (re.test(raw.trim())) {
       const message = t(`chat.gwErrors.${key}`);

@@ -23,7 +23,7 @@ const Component=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
  // tool-list rendering (covered by connector-setup-flow and official tools).
  if(['../components/McpConnectorIcon','../components/ConnectorTools'].includes(name))return {__esModule:true,default:()=>null};
  if(name==='../../../core/flightaware-connector-policy.json')return {__esModule:true,default:JSON.parse(fs.readFileSync(new URL('../app/core/flightaware-connector-policy.json',import.meta.url)))};
- if(name==='../components/Modal')return {__esModule:true,default:({children})=>React.createElement('section',{},children)};
+ if(name==='../components/Modal')return {__esModule:true,default:({children, footer, subtitle})=>React.createElement('section',{}, children, React.createElement("p", {}, subtitle), footer)};
  if(name==='../components/ui')return {useConfirm:()=>async()=>true};if(name==='../api/mcpConnectors')return api;
  if(name==='../lib/mcpConnectorUi')return helpers;if(name==='../lib/mcpRecommendationCatalog')return catalog;
  if(name==='../../../agent-service/data/mcp-featured-presets.json')return {__esModule:true,default:recommendations};
@@ -64,6 +64,15 @@ await Renderer.act(async()=>save().props.onClick());assert.equal(mutations.at(-1
 await Renderer.act(async()=>dialog.root.findAllByType('button').find(b=>b.props.children==='mcpConnectors.flow.configure').props.onClick());
 await fillLabel('Allowed directory','/private/tmp/replacement');await Renderer.act(async()=>save().props.onClick());assert.equal(mutations.at(-1).kind,'rebind');assert.equal(mutations.at(-1).option.version,'0.9.0','path changes never upgrade package');await unmount();
 await mount(preset('ifind'));assert.equal(dialog.root.findAllByType('input').some(n=>n.props.required&&n.props.type==='password'),true);await fillLabel('iFinD MCP key','opaque:raw+key');await Renderer.act(async()=>save().props.onClick());assert.deepEqual(serial(mutations.at(-1).input.fields.headers),{Authorization:'opaque:raw+key'});assert.equal(JSON.stringify(dialog.toJSON()).includes('opaque:raw+key'),false);await unmount();
+for(language of ['en','zh-CN']){
+ const p=preset('eastmoney');assert.equal(p.docsUrl,'https://choice.eastmoney.com/mcp/guide');
+ await mount(p);assert.ok(JSON.stringify(dialog.toJSON()).includes(p.note[language]));
+ await fillLabel(language==='en'?'MX MCP API key':'妙想 MCP API Key','eastmoney-private-canary');
+ await Renderer.act(async()=>save().props.onClick());
+ assert.deepEqual(serial(mutations.at(-1).input.fields.headers),{em_api_key:'eastmoney-private-canary'});
+ assert.equal(JSON.stringify(dialog.toJSON()).includes('eastmoney-private-canary'),false);await unmount();
+}
+language='en';
 for(const id of ['variflight','wind']){
  const p=preset(id);await mount(p);assert.equal(dialog.root.findAllByType('select').length,0,'all services replace endpoint selection');
  if(id==='wind')await fillLabel('mcpConnectors.accessTokenRequired','Bearer opaque:key+value');else await fillLabel('VariFlight API key','variflight-canary');

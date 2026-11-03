@@ -145,14 +145,16 @@ test('stop gives immediate single-flight feedback and retains the draft until a 
   await act(async () => { stopping = stop().props.onClick(); });
   assert.equal(stops, 1);
   assert.equal(stop().props.disabled, true, 'stop must be visibly pending before the RPC settles');
-  assert.ok(h.text().includes('groupChat.stopState.requesting'));
+  assert.equal(h.root().findByProps({ 'data-chat-composer': true }).findAll(node => node.props.role === 'status').length, 0,
+    'requesting stop has no status copy inside the composer');
   await act(async () => stop().props.onClick());
   assert.equal(stops, 1, 'repeat clicks cannot post another stop or invalidate ongoing reads');
   authority = { ...authority, round: null, activeTurns: [
     { ...authority.activeTurns[0], stopping: true, recovery: { type: 'execution', reason: 'GROUP_EXECUTION_STOP_UNCONFIRMED', since: 1, cancelRequested: true } },
   ] };
   await act(async () => { pending.resolve(authority); await stopping; });
-  assert.ok(h.text().includes('groupChat.stopState.confirming'));
+  assert.equal(h.root().findByProps({ 'data-chat-composer': true }).findAll(node => node.props.role === 'status').length, 0,
+    'background stop confirmation has no status copy inside the composer');
   assert.equal(stop().props.disabled, true);
   assert.equal(h.root().findByType('textarea').props.value, 'preserve draft');
   authority = { ...authority, activeTurns: [] };
@@ -216,7 +218,7 @@ test('cached empty groups and a failed warm refresh remain usable without a full
   assert.ok(h.text().includes('owned-a'));
   assert.equal(h.root().findAllByType('textarea').length, 1);
   assert.deepEqual(h.calls.filter(c => c.method === 'messages').at(-1).query, { afterSeq: 0, limit: 200 });
-  assert.ok(h.text().includes('groupChat.sync.recovering'));
+  assert.ok(!h.text().includes('groupChat.sync.recovering'), 'background refresh does not add composer status copy');
 });
 
 test('owner changes cannot paint cached history and restart from the latest page', async t => {

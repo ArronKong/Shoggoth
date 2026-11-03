@@ -27,11 +27,12 @@ const DEFINITIONS = [
   ["source", "sourceId", "sessionId", "eventId"])],
   ["memory_save", object({ ...source, expectedRevision: revision, content: text(2048),
     scope: { type: "string", enum: ["user", "agent", "project", "workspace"] },
-    classification: { type: "string", enum: ["explicit"] },
+    classification: { type: "string", enum: ["explicit", "observed"] },
     sensitivity: { type: "string", enum: ["normal", "private"] },
     sourceQuote: text(2048), supersedes: nullable(id),
     validUntil: nullable({ type: "integer", minimum: 0 }) },
-  ["source", "sourceId", "expectedRevision", "content", "scope", "classification", "sourceQuote"])],
+  // sourceQuote is required for classification=explicit (checked below).
+  ["source", "sourceId", "expectedRevision", "content", "scope", "classification"])],
   ["memory_forget", object({ ...source, id, expectedRevision: revision, sourceQuote: text(2048) })],
 ];
 const BY_NAME = new Map(DEFINITIONS);
@@ -69,7 +70,9 @@ function validateMemoryMcpArguments(name, args) {
     && (name !== "memory_search" || args.includeCandidates !== true)
     && (name !== "memory_get" || Boolean(args.id) !== Boolean(args.path))
     && (name !== "memory_get" || args.path || args.from === undefined && args.lines === undefined)
-    && (name !== "memory_save" || args.classification !== "explicit" || args.sourceQuote?.trim()));
+    && (name !== "memory_save" || args.classification !== "explicit" || args.sourceQuote?.trim())
+    // An Agent's own observation is its private note, never a fact about the user.
+    && (name !== "memory_save" || args.classification !== "observed" || args.scope === "agent"));
 }
 
 module.exports = { MEMORY_MCP_TOOL_DEFINITIONS, MEMORY_MCP_WRITE_TOOLS, MEMORY_GET_ARGUMENT_HINT,

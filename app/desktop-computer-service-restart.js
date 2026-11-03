@@ -3,7 +3,7 @@
 const { prepareDesktopAppInstall } = require("./desktop-app-install-preparation");
 const { serviceError } = require("./agent-service/security");
 
-// Reuse the idle fence and stop recovery used by app updates. repair() alone
+// Permission reloads retain the idle fence and stop recovery. repair() alone
 // keeps the same healthy process when its launchd plist is already correct.
 function createDesktopComputerServiceRestart(options) {
   let pending = null;

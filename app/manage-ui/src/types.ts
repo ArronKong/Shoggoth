@@ -2409,6 +2409,8 @@ export interface AppConfig {
   token: string;
   locale: string;
   theme: "system" | "light" | "dark";
+  /** Dock + Finder icon (default "shoggoth-ip", the bundle's own icon). */
+  appIcon?: "shoggoth-ip" | "shoggoth-logo";
   hermesMode: "local" | "remote";
   hermesRemotes: HermesRemote[];
   /** 退出 app 时保留本地 spawn 的 Hermes dashboard 进程，留给下次启动复用（默认 true）。 */
@@ -3653,10 +3655,10 @@ export interface GroupChatView {
   /** 正在进行的一轮：发言顺序与每一位的状态。 */
   round: { id: string; causeMessageId: string; order: Array<{ opportunityId: string; memberId: string;
     state: "queued" | "running" | "waiting" | "replied" | "passed" | "failed" | "cancelled"; released: boolean;
-    releasedReason: "working" | "approval" | "busy" | "timeout" | null; errorCode: string | null }> } | null;
+    releasedReason: "working" | "approval" | "busy" | "timeout" | "idle" | "stopped" | null; errorCode: string | null }> } | null;
   // 正在发言（floor）或已让出发言位、在后台干活（released）的成员。draft：草稿只在内存、不进群日志。
   activeTurns: Array<{ opportunityId: string; memberId: string; discussionId?: string; startedAt: number | null; inputThroughSeq?: number | null;
-    floor: boolean; released: boolean; releasedReason: "working" | "approval" | "busy" | "timeout" | null; releasedAt?: number | null;
+    floor: boolean; released: boolean; releasedReason: "working" | "approval" | "busy" | "timeout" | "idle" | "stopped" | null; releasedAt?: number | null;
     draft?: string | null; individualMessages?: boolean; dispatchState?: "queued" | null; queueReason?: "execution_unconfirmed" | null;
     recovery?: GroupExecutionRecovery | null; stopping?: boolean; activity?: GroupActivity | null }>;
   queuedMemberIds: string[];

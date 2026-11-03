@@ -388,8 +388,12 @@ for (const mode of ["gateway", "acp"]) test(`Hermes ${mode}: actual hooks projec
   const backend = { _lifecycleGeneration: 1, sessionWorkspaceByKey: new Map([[sessionKey, "/private/tmp"]]),
     freshSessionTransports: new Map([[sessionKey, mode]]),
     createSession: async () => sessionKey,
+    _sessionConfigSet: async (_key, key, value) => ({ result: { key, value, scope: "session" }, scope: "session" }),
     sendMessage: async (_s, _p, _r, observed) => { hooks = observed; return new Promise(resolve => { finish = resolve; }); } };
-  const adapter = new HermesInspirationAdapter({ backend, sessionPurpose: "group", now: () => clock });
+  backend._sessionTarget = () => ({ profile: "fixture", dash: backend });
+  // ACP has no session-level Full access control. Its activity transport remains
+  // covered through inspiration; group admission rejects it explicitly.
+  const adapter = new HermesInspirationAdapter({ backend, sessionPurpose: mode === "gateway" ? "group" : "inspiration", now: () => clock });
   const prepared = await adapter.prepare({ agentId: "hermes-test", sessionId: "intent" });
   const input = { ...prepared, agentId: "hermes-test", runId: "r", prompt: "fixture" };
   adapter.start(input); await new Promise(resolve => setImmediate(resolve));

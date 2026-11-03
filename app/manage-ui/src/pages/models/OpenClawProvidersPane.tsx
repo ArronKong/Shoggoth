@@ -76,13 +76,15 @@ function ProviderRow({
   const prepareEndpoint = (endpoint: string | null) => { preparedEndpointRef.current = endpoint; setPreparedEndpoint(endpoint); };
   const nativeConfig = entry.writeMode === "native-config";
   const managed = entry.writeMode === "managed-model-change" || nativeConfig;
+  // native-config writes use the official RPCs; like the official UI they are not recorded or locked here.
+  const tracked = managed && !nativeConfig;
   const providerKey = entry.key.statusUnknown && !entry.key.configured
     ? { ...entry.key, configured: true, redacted: t("models.dirNativeKeyStatusUnknown") } : entry.key;
   const recovery = useSyncExternalStore(subscribeModelOperationRecovery,
     () => getModelOperationRecoverySnapshot(backend));
-  const recoveryBlocked = managed && (!recovery.storageVerified || modelOperationRecoveryBlocks(backend, entry.id));
+  const recoveryBlocked = tracked && (!recovery.storageVerified || modelOperationRecoveryBlocks(backend, entry.id));
   const [pendingWrite, setPendingWrite] = useState<ProviderWriteReceipt | null>(() =>
-    managed ? readProviderWriteReceipt(backend, entry.id) : null);
+    tracked ? readProviderWriteReceipt(backend, entry.id) : null);
   const pendingWriteRef = useRef(pendingWrite);
   const [observation, setObservation] = useState<"found" | "not-found" | null>(null);
   const [settledWrite, setSettledWrite] = useState<ModelChangeOperation | null>(null);
@@ -106,7 +108,7 @@ function ProviderRow({
   useEffect(() => {
     lifecycleEpoch.current += 1;
     setBusy(false);
-    const receipt = managed ? readProviderWriteReceipt(backend, entry.id) : null;
+    const receipt = tracked ? readProviderWriteReceipt(backend, entry.id) : null;
     pendingWriteRef.current = receipt;
     setPendingWrite(receipt);
     setObservation(null);
@@ -114,14 +116,14 @@ function ProviderRow({
     return () => {
       lifecycleEpoch.current += 1;
     };
-  }, [active, backend, entry.id, managed]);
+  }, [active, backend, entry.id, tracked]);
 
   useEffect(() => { prepareEndpoint(null); }, [active, backend, entry.id, entry.baseUrl.value]);
 
   useEffect(() => {
-    const retained = managed ? readProviderWriteReceipt(backend, entry.id) : null;
+    const retained = tracked ? readProviderWriteReceipt(backend, entry.id) : null;
     pendingWriteRef.current = retained; setPendingWrite(retained);
-  }, [managed, backend, entry.id, recovery.revision]);
+  }, [tracked, backend, entry.id, recovery.revision]);
 
   const run = async (
     request: (operationId?: string) => Promise<ModelChangeApplyResult | { ok: boolean; activation?: Activation }>,
@@ -129,7 +131,7 @@ function ProviderRow({
   ): Promise<boolean> => {
     const epoch = lifecycleEpoch.current;
     if (!activeRef.current || backendRef.current !== backend) return false;
-    if (managed && (pendingWriteRef.current || !getModelOperationRecoverySnapshot(backend).storageVerified
+    if (tracked && (pendingWriteRef.current || !getModelOperationRecoverySnapshot(backend).storageVerified
       || modelOperationRecoveryBlocks(backend, entry.id))) {
       toast.info(t(pendingWriteRef.current ? "models.dirManagedPending" : "models.dirManagedRecoveryUnknown"));
       return false;
@@ -138,7 +140,7 @@ function ProviderRow({
     setSettledWrite(null);
     setBusy(true);
     try {
-      if (operationId && !await recordWrite({ operationId, status: "unconfirmed" })) {
+      if (tracked && operationId && !await recordWrite({ operationId, status: "unconfirmed" })) {
         toast.error(t("models.dirManagedRecoveryStorage")); return false;
       }
       if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
@@ -153,7 +155,7 @@ function ProviderRow({
         throw new Error(t("models.dirManagedUnconfirmed"));
       }
       if ("status" in result && result.status !== "applied") {
-        if (operationId) {
+        if (tracked && operationId) {
           if (["failed", "compensated"].includes(result.status)) {
             if (!await recordWrite(null, { version: 1, backendId: backend, providerKey: entry.id, operationId,
               status: result.status === "compensated" ? "compensated" : "failed", stage: result.stage, terminal: true })) {
@@ -170,7 +172,7 @@ function ProviderRow({
         }
         return false;
       }
-      if (operationId && "status" in result && !await recordWrite(null, { version: 1, backendId: backend,
+      if (tracked && operationId && "status" in result && !await recordWrite(null, { version: 1, backendId: backend,
         providerKey: entry.id, operationId, status: "applied", stage: result.stage, terminal: true })) {
         toast.error(t("models.dirManagedRecoveryStorage")); return false;
       }
@@ -182,8 +184,9 @@ function ProviderRow({
       if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
       return true;
     } catch (error) {
-      // The original record is retained. Neither refresh nor another click
-      // resubmits this write after an uncertain acknowledgement.
+      // Legacy writes retain the original record, so neither refresh nor another
+      // click resubmits after an uncertain acknowledgement. native-config writes
+      // only report the error, like the official UI; the config hash guards a retry.
       if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
       toast.error(error instanceof Error ? error.message : String(error));
       return false;
@@ -256,7 +259,7 @@ function ProviderRow({
   const saveKeylessEndpoint = async () => {
     const endpoint = preparedEndpoint;
     const epoch = lifecycleEpoch.current;
-    if (!managed || !endpoint || pendingWriteRef.current || busy || modelOperationRecoveryBlocks(backend, entry.id)) return;
+    if (!managed || !endpoint || pendingWriteRef.current || busy || tracked && modelOperationRecoveryBlocks(backend, entry.id)) return;
     if (entry.key.configured && !await confirm({
       title: t("models.dirManagedKeylessConfirmTitle", { name: entry.label }),
       message: t("models.dirManagedKeylessConfirmMessage", { endpoint }),

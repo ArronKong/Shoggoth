@@ -12,13 +12,14 @@ const { assertNoBorrowedMemoryWrite } = require("./borrowed-memory-provenance.cj
 const sha256 = value => crypto.createHash("sha256").update(value).digest("hex");
 
 class ShoggothMemoryHost {
-  constructor({ database, paths, profileId, workspaceDir, roster, sessions, assertCurrent = () => {} }) {
+  constructor({ database, paths, profileId, workspaceDir, roster, sessions, sourceSessionsVisible, assertCurrent = () => {} }) {
     this.database = database;
     this.paths = paths;
     this.profileId = profileId;
     this.workspaceDir = path.resolve(workspaceDir);
     this.roster = roster;
     this.sessions = sessions;
+    this.sourceSessionsVisible = sourceSessionsVisible;
     this.assertAuthority = assertCurrent;
     this.fileEvidence = new AsyncLocalStorage();
   }
@@ -31,9 +32,13 @@ class ShoggothMemoryHost {
     }
   }
   run(action) { return withMemoryHost(this, action); }
-  runWithSourceEvidence(action) {
+  runWithSourceEvidence(action, beforeDreamWrite) {
     return this.fileEvidence.run({ files: new Map(), sourceRanges: new Map(), actualReads: new Map(),
-      deepSources: new Map(), pendingWrites: [], phaseEvidence: [], completedPhase: null, narrative: null }, () => this.run(action));
+      deepSources: new Map(), pendingWrites: [], phaseEvidence: [], completedPhase: null, narrative: null,
+      beforeDreamWrite }, () => this.run(action));
+  }
+  beforeDreamWrite(target, request) {
+    this.fileEvidence.getStore()?.beforeDreamWrite?.(target, request);
   }
   rememberUnavailableInput(relative, kind, reason) {
     const reads = this.fileEvidence.getStore()?.actualReads;
@@ -352,7 +357,10 @@ class ShoggothMemoryHost {
       for (const entry of await store.entries()) {
         if (entry.value.workspaceKey !== workspaceKey) continue;
         const candidate = entry.value.value;
-        if (!candidate || this.searchIndex?.sourceFiles.isManaged(candidate.path)) continue;
+        // Session corpus is owned by Dreaming and intentionally excluded
+        // from the search index. Its source authority is checked separately.
+        if (!candidate || /^memory\/\.dreams\/session-corpus\/\d{4}-\d{2}-\d{2}\.(?:txt|md)$/u.test(candidate.path)
+          || this.searchIndex?.sourceFiles.isManaged(candidate.path)) continue;
         let valid = false;
         try {
           if (this.searchIndex?.sourceFiles.isExtra(candidate.path)) {

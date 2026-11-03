@@ -43,6 +43,10 @@ function fakeBackend(mode = "gateway") {
       this.calls.push(["respond", sessionKey, data]);
       return { resolved: true };
     },
+    async _sessionConfigSet(sessionKey, key, value) {
+      this.calls.push(["permission", sessionKey, { key, value }]);
+      return { result: { key, value, scope: "session" }, scope: "session" };
+    },
     async abortChat(sessionKey) {
       this.calls.push(["abort", sessionKey]);
       if (this.abortCompletion) this.finish(sessionKey, this.abortCompletion);
@@ -98,6 +102,34 @@ test("prepare freezes the actual workspace and deduplicates the caller identity"
   assert.equal(backend.calls.length, 1);
   assert.deepEqual(backend.calls[0][2], { workspace: null, freezeWorkspace: true });
   await assert.rejects(adapter.prepare({ ...input, workspace: "/other" }), /CONFLICT/);
+});
+
+test("group preparation enables session YOLO for new and existing idle sessions without a model call", async () => {
+  const backend = fakeBackend();
+  const adapter = new HermesInspirationAdapter({ backend, sessionPurpose: "group" });
+  const prepared = await adapter.prepare({ agentId, sessionId: "new-group" });
+  assert.deepEqual(backend.calls.find(call => call[0] === "permission"), ["permission", prepared.sessionKey, { key: "yolo", value: "1" }]);
+  backend._gatewayChatEnabled = () => true;
+  backend._httpGetJson = async () => ({ status: 200, json: { id: "stored", profile: "fixture", cwd: "/expected" } });
+  backend.activeRows = [{ id: "runtime", session_key: "stored", status: "idle" }];
+  await adapter.prepare({ agentId, sessionId: "existing-group", sessionKey: `agent:${agentId}:stored`, workspace: "/expected" });
+  assert.deepEqual(backend.calls.filter(call => call[0] === "permission").at(-1), ["permission", `agent:${agentId}:stored`, { key: "yolo", value: "1" }]);
+  assert.equal(backend.calls.some(call => call[0] === "send" || call[0] === "session.resume"), false);
+});
+
+test("group preparation rejects unsupported or unconfirmed permissions without sending", async () => {
+  for (const variant of ["acp", "profile-scope", "ignored", "wrong-key", "replaced", "endpoint-changed"]) {
+    const backend = fakeBackend(variant === "acp" ? "acp" : "gateway");
+    backend._sessionConfigSet = async () => {
+      if (variant === "replaced") backend._lifecycleGeneration++;
+      if (variant === "endpoint-changed") backend.dash = { ...backend.dash };
+      return { result: { key: variant === "wrong-key" ? "model" : "yolo", value: variant === "ignored" ? "0" : "1",
+        scope: variant === "profile-scope" ? "global" : "session" }, scope: "session" };
+    };
+    const adapter = new HermesInspirationAdapter({ backend, sessionPurpose: "group" });
+    await assert.rejects(adapter.prepare({ agentId, sessionId: variant }), /HERMES_GROUP_PERMISSION/);
+    assert.equal(backend.calls.some(call => call[0] === "send"), false);
+  }
 });
 
 test("prepare refuses ignored workspace overrides without dispatching a model", async () => {

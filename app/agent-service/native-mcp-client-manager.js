@@ -5,6 +5,7 @@ const path = require("node:path");
 const { Client, StreamableHTTPClientTransport, SSEClientTransport, UnsupportedProtocolVersionError } = require("@modelcontextprotocol/client");
 const { endpointOf, boundedHttpResponse, validatedHeaders, validatedQueryCredentials } = require("./mcp-transport-utils");
 const { serviceError, ensurePrivateDirectoryTree } = require("./security");
+const { CONNECTOR_PUBLIC_MESSAGES } = require("../core/connector-errors");
 const { officialSkillBridgeEnvironment, validateOfficialSkillBridgeCredentials } = require("./official-skill-mcp-launch");
 const { OFFICIAL_SKILL_PUBLIC_MESSAGES } = require("../core/official-skill-connector-dto");
 const { ticketmasterBridgeEnvironment, validateTicketmasterBridgeCredentials } = require("./ticketmaster-mcp-launch");
@@ -336,6 +337,14 @@ function scrub(value, spec, ...envelopes) {
   };
   return visit(value);
 }
+async function isEastmoneyApiKeyRejection(response, endpoint) {
+  // The official MCP reports an unknown key as a challenge-free 403. Match
+  // only its exact endpoint and observed JSON signature; never publish its body.
+  if (endpoint.href !== "https://mxapi.eastmoney.com/mxds/mcp"
+    || (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase() !== "application/json") return false;
+  try { return (await boundedHttpResponse(response).json())?.error === "密钥不存在，请联系业务人员处理"; }
+  catch { return false; }
+}
 class RemoteMcpClient {
   constructor(spec, options = {}) {
     this.spec = spec; this.endpoint = endpointOf(spec.transport.url); this.protocol = spec.transport.protocol;
@@ -379,8 +388,11 @@ class RemoteMcpClient {
     // Do not turn that refusal into an inferred OAuth connection or discard its
     // credentials. An already dispatched business call still must not be replayed.
     if (response.status === 403 && !response.headers.get("www-authenticate")?.trim()) {
+      let code = business ? "MCP_SERVER_RESULT_UNKNOWN" : "MCP_SERVER_ACCESS_DENIED";
+      if (!business && this.spec.auth?.kind === "headers" && headers.get("em_api_key")
+        && await isEastmoneyApiKeyRejection(response, this.endpoint)) code = "MCP_API_KEY_INVALID";
       void response.body?.cancel().catch(() => {});
-      throw clientError(business ? "MCP_SERVER_RESULT_UNKNOWN" : "MCP_SERVER_ACCESS_DENIED", business ? "MCP 调用结果未知，未自动重发" : "MCP 服务拒绝此连接（HTTP 403），请向服务方确认客户端准入或访问限制");
+      throw clientError(code, CONNECTOR_PUBLIC_MESSAGES[code]);
     }
     if (response.status === 401 || response.status === 403) {
       await this.oauth?.noteUnauthorized?.(this.spec.id, response);

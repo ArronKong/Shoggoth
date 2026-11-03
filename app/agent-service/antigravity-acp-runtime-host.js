@@ -698,8 +698,10 @@ class AntigravityAcpRuntimeHost {
   }
 
   async _applyConfig(sessionId, { model, mode }) {
-    const config = this.sessionConfigs.get(sessionId) || {};
-    for (const [configId, value, current] of [["model", model, config.currentModel], ["mode", mode, config.currentMode]]) {
+    for (const [configId, value, field] of [["model", model, "currentModel"], ["mode", mode, "currentMode"]]) {
+      // A model response may also update the selected mode. Its latest receipt
+      // decides whether the next write is still needed.
+      const current = this.sessionConfigs.get(sessionId)?.[field];
       if (value === null || value === undefined || value === current) continue;
       let result;
       try {

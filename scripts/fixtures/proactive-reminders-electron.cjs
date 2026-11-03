@@ -1,4 +1,5 @@
 const { app, BrowserWindow } = require('electron');
+const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path');
 const [html, output] = process.argv.slice(2);
 app.setPath('userData', path.join(path.dirname(html), 'profile'));
@@ -22,10 +23,23 @@ app.whenReady().then(async () => {
     await wait('.chat-md a[href*="original-task-session"]');
     const ordinaryMessage = await run(`(()=>{const message=document.querySelector('.chat-md');if(!message.textContent.includes('值得回顾')||!message.textContent.includes('还没标记为结果'))throw Error('Actual model body missing');if(message.querySelectorAll('a').length!==3)throw Error('Authoritative links missing');return true;})()`);
     const noReminderUI = await run(`(()=>{if(document.querySelector('[data-proactive-panel],[data-proactive-notice]')||document.body.textContent.includes('提醒选项'))throw Error('Unrequested reminder UI');return true;})()`);
+    const expectedTimes = await run(`[[15, 0], [16, 46], [17, 33], [19, 2]].map(([hour, minute]) =>
+      new Date(2026, 10, 3, hour, minute).toLocaleString([], {
+        month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      }))`);
+    const timestamps = await run(`Array.from(document.querySelectorAll('.chat-group')).flatMap(group => {
+      const count = group.querySelectorAll('.chat-bubble.chat-md').length;
+      if (!count) return [];
+      return [[count, group.querySelector('.chat-group__footer > span:not(.dot)')?.textContent]];
+    })`);
+    assert.deepEqual(timestamps, [1, 2, 1, 1].map((count, index) => [count, expectedTimes[index]]),
+      'Each proactive reminder has its own footer and the two ordinary assistant bubbles stay grouped');
     await screenshot('sparknotes-chat-zh.png');
     await run(`document.querySelector('button[title="沉浸模式"]').click()`);
     await wait('button[aria-label="退出沉浸模式"]');
     const immersive = await run(`(()=>{if(document.querySelectorAll('a[href*="original-task-session"]').length<2)throw Error('Ordinary message not rendered in immersive chat');return true;})()`);
+    const immersiveTimes = await run(`Array.from(document.querySelectorAll('[data-immersive-message-footer] > span'), footer => footer.textContent)`);
+    assert.deepEqual(immersiveTimes, expectedTimes, 'Immersive chat also shows each reminder timestamp');
     await screenshot('sparknotes-immersive-zh.png');
     await run(`document.querySelector('button[aria-label="退出沉浸模式"]').click()`);
     window.setContentSize(700, 1000);
@@ -39,7 +53,7 @@ app.whenReady().then(async () => {
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     const taskNavigation = await run(`(()=>{if(!document.body.textContent.includes('ORIGINAL-TASK-RESTORED'))throw Error('Original history not opened');if(window.fixtureError)throw Error(window.fixtureError);if(window.proactiveFixture.calls.some(c=>c.method==='chat.send'||c.method==='inspiration.respond'))throw Error('Reminder performed an action');return true;})()`);
-    console.log(JSON.stringify({ verified: true, ordinaryMessage, noReminderUI, immersive, narrow, taskNavigation }));
+    console.log(JSON.stringify({ verified: true, ordinaryMessage, noReminderUI, timestamps, immersive, narrow, taskNavigation }));
     passed = true;
   } catch (error) {
     console.error(error.stack || error);

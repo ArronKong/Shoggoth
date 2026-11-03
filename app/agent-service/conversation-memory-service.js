@@ -7,6 +7,7 @@ const { hasSecret, matchesWorkspace, memoryTrust, quoteSupportsContent, UNTRUSTE
   workspaceMemoryRefs } = require("./memory-engine");
 const { bindConversationSource } = require("./conversation-source");
 const { isBorrowedMemoryDerived, isReferentialMemoryRequest } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
+const { memoryThreatPattern } = require("./memory-threat-scan");
 const PUBLIC_MEMORY_FIELDS = ["id", "profileId", "scope", "type", "content", "sourceRefs", "confidence", "sensitivity", "status", "validFrom", "validUntil", "supersedes", "createdAt", "updatedAt", "score", "citation"];
 const PUBLIC_SEARCH_FIELDS = ["path", "startLine", "endLine", "score", "snippet", "source", "citation", "id", "ownerProfileId", "ownerDisplayName", "documentKind", "canonicalRelativePath",
   "sourceHash", "sourceRevision", "sourceOriginHash", "policyRevision", "sourceRef", "borrowed", "persistPolicy", "borrowedMemoryRefs", "version", "requesterProfileId"];
@@ -212,6 +213,13 @@ class ConversationMemoryService {
       const run = sharing.runs.get(binding.runId)?.input.run;
       return sharing.forget({ ...args, profileId, run, workspace: binding.workspace, maxSensitivity: "private" }, id);
     }
+    if (name === "memory_save" && args.classification === "observed") {
+      // The Agent's own note has no user quote behind it, so it is held to
+      // stricter rules: private scope, no borrowed content, no injected text.
+      if (args.scope !== "agent") throw serviceError("MEMORY_INVALID", "自主记录只能保存为当前助理笔记");
+      if (sharing?.borrowedRefsForRun(binding.runId).length) throw serviceError("MEMORY_BORROWED_READ_ONLY", "借阅内容不能回存为当前助理记忆");
+      if (memoryThreatPattern(args.content)) throw serviceError("MEMORY_INJECTION_REJECTED", "记忆内容疑似注入或外泄指令");
+    }
     if (name === "memory_save") {
       const sourceEvent = this.transcripts.listEvents(profileId, binding.source.sessionId).find(event => event.id === binding.source.eventId);
       if (isBorrowedMemoryDerived(sourceEvent) || (sharing?.borrowedRefsForRun(binding.runId).length
@@ -232,8 +240,10 @@ class ConversationMemoryService {
     }
     let item;
     if (name === "memory_save") {
-      const unsupported = !quoteSupportsContent(args.sourceQuote || "", args.content);
-      item = await this.engine.propose({ ...args, profileId, id, assertCurrent: call.assertCurrent, type: args.validUntil == null ? "semantic" : "temporary",
+      const observed = args.classification === "observed";
+      const unsupported = !observed && !quoteSupportsContent(args.sourceQuote || "", args.content);
+      item = await this.engine.propose({ ...args, classification: observed ? "inferred" : args.classification,
+        profileId, id, assertCurrent: call.assertCurrent, type: args.validUntil == null ? "semantic" : "temporary",
         sourceRefs: [...binding.sourceRefs, ...(["project", "workspace"].includes(args.scope) ? workspaceMemoryRefs(binding.workspace, args.scope) : []),
           ...(unsupported ? [`${UNTRUSTED_REF_PREFIX}quote-unsupported`] : [])] });
       this._recordSource(profileId, id, item, binding);

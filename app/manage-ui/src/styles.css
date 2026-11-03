@@ -1018,20 +1018,8 @@ button:disabled {
   padding: 0 18px;
 }
 
-/* cron delivery modal (latest delivered content viewer) */
-.cron-delivery-meta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  font-size: 0.82rem;
-}
-.cron-delivery-note {
-  font-size: 0.8rem;
-  margin: 0;
-}
 /* delivery report renders with the chat markdown styles (.chat-md, defined in
-   ChatPage.css). Match the chat bubble's base type (15px/20px) and supply the
+   components/ChatMarkdown.css). Match the chat bubble's base type (15px/20px) and supply the
    `.chat-shell`-scoped vars .chat-md reads, so it renders identically out here. */
 .cron-delivery-md {
   font-size: 15px;
@@ -1123,11 +1111,6 @@ button:disabled {
 .skill-off {
   opacity: 0.55;
 }
-.skill-emoji {
-  font-size: 1.1rem;
-  line-height: 1.4;
-  flex-shrink: 0;
-}
 .skill-name {
   font-weight: 400;
 }
@@ -1141,23 +1124,6 @@ button:disabled {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
-.skill-badge {
-  flex-shrink: 0;
-  font-size: 0.72rem;
-  padding: 0.1rem 0.45rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-}
-.skill-badge.on {
-  background: light-dark(#ecfdf5, #0e2f23);
-  color: light-dark(#047857, #34d399);
-  border-color: light-dark(#a7f3d0, #155e44);
-}
-.skill-badge.off {
-  background: light-dark(#f3f4f6, #26262b);
-  color: light-dark(#6b7280, #a1a1aa);
-}
-
 /* tasks 一级页面 chrome（Figma 6379-530，R109）：统计行 + 胶囊过滤条结构。
    页头标题已归一到共享 PageHead 组件；外观（玻璃胶囊/黑滑块/列距）在
    manage-skin.css 看板段。 */

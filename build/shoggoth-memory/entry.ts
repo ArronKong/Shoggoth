@@ -88,6 +88,8 @@ export { buildQuery as buildActiveMemoryQuery, buildSearchQuery as buildActiveMe
 export { resolveRecallEscalationDecision } from "upstream:extensions/active-memory/escalation.ts";
 export { buildRecallPrompt, normalizeActiveSummary, truncateSummary, buildPromptPrefix, buildRecallOutcomePrefix } from "upstream:extensions/active-memory/prompt.ts";
 export { selectStrongTriggerMatches, buildTriggerRecallContext } from "upstream:extensions/active-memory/trigger-recall.ts";
+export { deriveConceptTags } from "upstream:extensions/memory-core/src/concept-vocabulary.ts";
+export { formatMemoryDreamingDay } from "upstream:src/memory-host-sdk/dreaming.ts";
 export { buildCircuitBreakerKey, isCircuitBreakerOpen, recordCircuitBreakerTimeout, resetCircuitBreaker,
   forgetActiveRecallRun, shouldCacheResult } from "upstream:extensions/active-memory/recall-state.ts";
 export { DEFAULT_MAX_CACHE_ENTRIES as ACTIVE_MEMORY_MAX_CACHE_ENTRIES } from "upstream:extensions/active-memory/types.ts";

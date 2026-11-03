@@ -9,11 +9,14 @@ const { CURRENT_MEMORY_RULE, createDefaultDocuments } = require("../app/agent-se
 const { DEFAULT_TOOL_REGISTRY } = require("../app/agent-service/mcp-product-tool-controller");
 const { PermissionEngine } = require("../app/agent-service/permission-engine");
 
-test("tool catalog has no memory confirmation action and requires the user's quote", () => {
+test("tool catalog has no memory confirmation action; explicit saves require the user's quote", () => {
   const tools = DEFAULT_TOOL_REGISTRY.mcpDefinitions();
   assert.equal(tools.some((tool) => tool.name === "memory_confirm"), false);
   assert.doesNotMatch(DEFAULT_TOOL_REGISTRY.toolsMarkdown(), /memory_confirm|unconfirmed notes|inferred facts stay candidates/u);
   const schema = tools.find((tool) => tool.name === "memory_save").inputSchema;
-  assert.deepEqual(schema.properties.classification.enum, ["explicit"]);
-  assert.ok(schema.required.includes("sourceQuote"));
+  assert.deepEqual(schema.properties.classification.enum, ["explicit", "observed"]);
+  const { validateMemoryMcpArguments } = require("../app/agent-service/memory-mcp-tools");
+  const base = { source: "chat", sourceId: "s", expectedRevision: 0, content: "fact", scope: "user", classification: "explicit" };
+  assert.equal(validateMemoryMcpArguments("memory_save", base), false);
+  assert.equal(validateMemoryMcpArguments("memory_save", { ...base, sourceQuote: "fact" }), true);
 });

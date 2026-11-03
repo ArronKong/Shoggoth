@@ -3190,6 +3190,27 @@ test("direct tick 重排 timer 失败时保留主错并固定关闭清理", asyn
   ctx.close();
 });
 
+test("Dreaming receipt changes rearm the scheduler without dispatching another tick", async () => {
+  const ctx = fixture();
+  let due = ctx.clock.value + 3600_000, ticks = 0;
+  const scheduler = ctx.createScheduler({ memoryMaintenance: {
+    nextDueAt: () => due,
+    tick: () => { ticks++; },
+  } });
+  try {
+    await scheduler.open();
+    const initialTicks = ticks;
+    assert.deepEqual([...ctx.timer.entries.values()].map(timer => timer.delay), [3600_000]);
+    due = ctx.clock.value + 60_000;
+    scheduler.refreshMemoryTimer();
+    assert.deepEqual([...ctx.timer.entries.values()].map(timer => timer.delay), [60_000]);
+    assert.equal(ticks, initialTicks);
+  } finally {
+    await scheduler.close();
+    ctx.close();
+  }
+});
+
 (async () => {
   let failed = 0;
   try {

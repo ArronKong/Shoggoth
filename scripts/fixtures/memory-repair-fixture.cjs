@@ -15,17 +15,19 @@ const { sha256 } = require("../../app/agent-service/shoggoth-memory/migration.cj
 const DAY = 24 * 60 * 60 * 1000;
 const FACT = "The amber telescope lens is calibrated every evening.";
 
-async function fixture(t, { mode = "escalate", activeMemory = {} } = {}) {
+async function fixture(t, { mode = "escalate", activeMemory = {}, runtimePool, daysAgo = 10, memorySearch = {} } = {}) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "mrb-")); fs.chmodSync(root, 0o700);
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "s"), profileRoot: path.join(root, "p"), cacheRoot: path.join(root, "c") });
   const workspace = path.join(root, "w"); fs.mkdirSync(workspace, { mode: 0o700 });
   // Stay in the past so day jumps never look like future operations.
-  let clock = Date.now() - 10 * DAY;
-  const config = { memory: { search: { provider: "none" } },
+  let clock = Date.now() - daysAgo * DAY;
+  const config = { memory: { search: { provider: "none", ...memorySearch } },
     plugins: { entries: { "active-memory": { enabled: true, config: { mode, model: "literal", timeoutMs: 15000, setupGraceTimeoutMs: 10000, ...activeMemory } } } } };
   const service = createAgentService({ paths, prewarmMcpAuth: false, memoryCoreConfig: config, memorySharingFeatureReady: true, now: () => ++clock,
     safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value), decryptString: value => value.toString() },
-    runtimeManager: { async acquire() { assert.fail("baseline cannot acquire a Runtime"); }, async stop() {}, async stopAll() {} } });
+    ...(runtimePool ? { runtimePool } : {
+      runtimeManager: { async acquire() { assert.fail("baseline cannot acquire a Runtime"); }, async stop() {}, async stopAll() {} },
+    }) });
   t.after(async () => { await service.stop({ notify: false }); fs.rmSync(root, { recursive: true, force: true }); });
   await service.start();
   const owner = service.memoryEngine, B = "repair-source-b", base = service.productStore.getAgentProfile(A);
@@ -94,8 +96,9 @@ async function fixture(t, { mode = "escalate", activeMemory = {} } = {}) {
     },
   };
   owner.complete = async request => { modelCalls++; return f.model(request); };
-  f.sharing = enabled => requestService(paths, { id: crypto.randomUUID(), token: readClientToken(paths), version: PROTOCOL_VERSION,
-    method: "memory.sharing.config.apply", params: { revision: service.nativeMemorySharingConfig.read().revision + 1, config: { enabled, excludedProfiles: [] } } });
+  f.ipc = (method, params) => requestService(paths, { id: crypto.randomUUID(), token: readClientToken(paths), version: PROTOCOL_VERSION, method, params });
+  f.sharing = enabled => f.ipc("memory.sharing.config.apply",
+    { revision: service.nativeMemorySharingConfig.read().revision + 1, config: { enabled, excludedProfiles: [] } });
   await f.sharing(true);
   return f;
 }

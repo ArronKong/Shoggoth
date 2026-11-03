@@ -23,7 +23,9 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
  const serviceOnly = ['fliggy', 'baidu-maps'].includes(definition.id);
  const translator = i18next.createInstance(); await translator.init({ lng: language, resources: { [language]: { translation: { officialConnectors: resources[language], mcpConnectors: mcpResources[language] } } } });
  const t = translator.t.bind(translator), events = new EventTarget(), document = new EventTarget(); document.visibilityState = 'visible';
- let items = catalog.map(item => initial(item.id)), mutations = [], accountCalls = [], credentialCalls = [], allowRemove = false, statusFails = false, holdStatus = false, holdCredentials = false, settleCredentials, settleAccount, settleInstall;
+ const openedUrls = [], qrInputs = []; events.open = (...args) => { openedUrls.push(args); return null; };
+ let items = catalog.map(item => initial(item.id)), mutations = [], accountCalls = [], credentialCalls = [], configuredFields = [], allowRemove = false, statusFails = false, holdStatus = false, holdCredentials = false, settleCredentials, settleAccount, settleInstall;
+ const serverSnapshot = () => ({ id: 'mcp-fixture', status: definition.fields.every(field => !field.required || configuredFields.includes(`env:${field.name}`)) ? 'ready' : 'needsSetup', setup: { requiredFields: definition.fields.filter(field => field.required).map(field => `env:${field.name}`), configuredFields: [...configuredFields] } });
  let account = { id: definition.id, state: 'ready', verificationUrl: null, qrCode: null, userCode: null, userName: 'Fixture account', errorCode: null };
  const authorizationTimers = new Map(); let timerId = 100000;
  const api = load('../app/manage-ui/src/api/officialSkillConnectors.ts', { './mcpConnectors': { MCP_CHANGE_EVENT: 'mcp-change' }, './client': { jsonFetch: async (url, options) => {
@@ -41,9 +43,10 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
  assert.equal(api.officialConnectorErrorKey({ code: 'OFFICIAL_SKILL_CONFLICT' }), 'skillConflict');
  const cache = load('../app/manage-ui/src/lib/usePageCache.ts', {}, { window: events, document });
  const component = load('../app/manage-ui/src/pages/OfficialSkillConnectors.tsx', {
+  'qrcode-generator': (...args) => { const qr = require('qrcode-generator')(...args), addData = qr.addData; qr.addData = value => { qrInputs.push(value); addData(value); }; return qr; },
   'react-i18next': { useTranslation: () => ({ t, i18n: translator }) }, '../api/officialSkillConnectors': api, '../lib/usePageCache': cache, '../lib/mcpConnectorUi': helpers, '../lib/mcpRecommendationCatalog': branding,
-  '../api/mcpConnectors': { listMcpConnectors: async () => ({ revision: 9, servers: [{ id: 'mcp-fixture', status: 'ready' }] }), saveMcpCredentials: async (...args) => { credentialCalls.push(plain(args)); const result = { server: { id: 'mcp-fixture', status: 'ready' } }; if (holdCredentials) return new Promise(resolve => { settleCredentials = () => resolve(result); }); return result; } },
-  '../components/Modal': { __esModule: true, default: ({ children, title, dismissible }) => React.createElement('section', { role: 'dialog', 'aria-label': typeof title === 'string' ? title : 'connector', 'data-dismissible': dismissible }, children) },
+  '../api/mcpConnectors': { listMcpConnectors: async () => ({ revision: 9, servers: [serverSnapshot()] }), saveMcpCredentials: async (...args) => { credentialCalls.push(plain(args)); const saved = () => { configuredFields = Object.keys(args[1].env).map(name => `env:${name}`); return { server: serverSnapshot() }; }; if (holdCredentials) return new Promise(resolve => { settleCredentials = () => resolve(saved()); }); return saved(); } },
+  '../components/Modal': { __esModule: true, default: ({ children, footer, subtitle, title, dismissible }) => React.createElement('section', { role: 'dialog', 'aria-label': typeof title === 'string' ? title : 'connector', 'data-dismissible': dismissible }, children, React.createElement("p", {}, subtitle), footer) },
   '../components/ConnectorTools': { __esModule: true, default: () => null },
  '../components/ui': { useConfirm: () => async () => allowRemove }, '../components/McpConnectorIcon': { __esModule: true, default: () => null },
   './McpConnectorDialog': { __esModule: true, default: ({ managed }) => React.createElement('div', { 'data-managed-tools': managed }) },
@@ -92,7 +95,7 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   await Renderer.act(async () => { button('install').props.onClick(); button('install').props.onClick(); await flush(); });
   assert.equal(mutations.length, 1, 'duplicate install fenced'); assert.equal(rendered.root.findByProps({ role: 'dialog' }).props['data-dismissible'], false);
   await Renderer.act(async () => { settleInstall(); await flush(); });
-  assert.equal(accountCalls.length, 0); assert.ok(JSON.stringify(rendered.toJSON()).includes(t(serviceOnly ? 'officialConnectors.serviceUnknown' : 'officialConnectors.accountStates.unknown')), 'local installation never claims account ready');
+  assert.equal(accountCalls.length, 0); assert.ok(JSON.stringify(rendered.toJSON()).includes(t(serviceOnly ? definition.fields.some(field => field.required) ? 'officialConnectors.serviceNeedsCredentials' : 'officialConnectors.serviceUnknown' : 'officialConnectors.accountStates.unknown')), `${definition.id}: local installation reports missing required credentials without claiming account ready`);
   let installedRows, opened;
   const rowProps = { model, servers: [{ id: 'mcp-fixture', status: 'signedOut' }], onOpen: id => { opened = id; } };
   try {
@@ -134,6 +137,8 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
     assert.equal(rendered.root.findByProps({ role: 'dialog' }).props['data-dismissible'], false);
     await Renderer.act(async () => { holdStatus = false; settleAccount(); await flush(); });
     assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceReady')), 'save confirms the actual service result');
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.credentialSavedHint')), 'saved credentials remain visible as metadata after the input is cleared');
+    assert.equal(rendered.root.findByType('input').props.placeholder, t('officialConnectors.credentialSavedPlaceholder'));
     statusFails = true;
     await Renderer.act(async () => { rendered.root.findByType('input').props.onChange({ target: { value: 'replacement-secret-canary' } }); });
     await click(button('credentials'));
@@ -141,12 +146,28 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
     assert.ok(!JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceReady')), 'failed save check clears previous success');
     assert.ok(!JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceChecking')), 'failed check clears progress');
     assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.errors.auth')));
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceCheckFailed')), 'a failed service check is distinct from a connection that has not been checked');
     assert.equal(rendered.root.findByType('input').props.value, '');
     assert.ok(!JSON.stringify(rendered.toJSON()).includes('private-secret-error'));
     statusFails = false;
    }
   }
   await click(button('check')); assert.equal(accountCalls.at(-1).action, 'status'); assert.ok(JSON.stringify(rendered.toJSON()).includes(t(serviceOnly ? 'officialConnectors.serviceReady' : 'officialConnectors.accountStates.ready')));
+  if (serviceOnly) {
+   const checksBeforeReopen = accountCalls.length;
+   await Renderer.act(async () => rendered.unmount());
+   await Renderer.act(async () => { rendered = Renderer.create(React.createElement(Harness)); await flush(); });
+   assert.equal(accountCalls.length, checksBeforeReopen, 'reopening reads credential metadata without repeating a provider request');
+   assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.credentialSavedHint')), 'reopening acknowledges the saved token');
+   assert.equal(rendered.root.findByType('input').props.value, '', 'stored credentials are never copied into the input');
+   assert.equal(rendered.root.findByType('input').props.placeholder, t('officialConnectors.credentialSavedPlaceholder'));
+   assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceUnknown')), 'reopening clearly requests a fresh service check');
+   assert.ok(!JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceReady')), 'MCP readiness alone never claims provider availability');
+   account = { ...account, state: 'signedOut' };
+   await click(button('check'));
+   assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceNeedsCredentials')), 'an actual missing-token result has a specific next step');
+   account = { ...account, state: 'ready' };
+  }
   account = { ...account, state: 'unknown', errorCode: 'OFFICIAL_SKILL_OPERATION_UNCERTAIN' };
   await click(button('check')); assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.errors.uncertain')), 'uncertain effects preserve the do-not-resubmit message');
   account = { ...account, state: 'ready', errorCode: null };
@@ -154,8 +175,22 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   statusFails = true; await click(button('check')); assert.ok(!JSON.stringify(rendered.toJSON()).includes(t(serviceOnly ? 'officialConnectors.serviceReady' : 'officialConnectors.accountStates.ready')), 'failed check clears stale ready');
   assert.ok(!JSON.stringify(rendered.toJSON()).includes('private-secret-error')); statusFails = false;
   if (button('login')) {
-   account = { ...account, state: 'authorizing', userName: null, verificationUrl: 'https://provider.example/authorize', userCode: 'ABC123' };
+   account = { ...account, state: 'authorizing', userName: null, verificationUrl: definition.id === 'meituan-paotui' ? 'https://dpurl.cn/official-auth-fixture' : 'https://provider.example/authorize', userCode: 'ABC123' };
    await click(button('login')); assert.equal(accountCalls.at(-1).action, 'start'); assert.ok(rendered.root.findAllByType('a').some(a => a.props.href === account.verificationUrl));
+   if (definition.id === 'meituan-paotui') {
+    assert.equal(openedUrls.length, 0, 'Meituan app-only links are shown as a QR code instead of opening a broken desktop page');
+    assert.match(rendered.root.findByType('img').props.src, /^data:image\/gif;base64,R0lGOD/);
+    assert.equal(rendered.root.findByType('img').props.alt, t('officialConnectors.meituanScan'));
+    assert.deepEqual(qrInputs, [account.verificationUrl], 'the actual local QR encoder receives only the user-facing official auth_link');
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.meituanAuthorizationHint')));
+    assert.equal(accountCalls.at(-1).action, 'start', 'showing a QR code never exchanges a token before user action');
+    statusFails = true; await click(button('login')); statusFails = false;
+    assert.equal(rendered.root.findAllByType('img').length, 0, 'failed authorization clears the previous QR code');
+    await click(button('login'));
+    assert.ok(rendered.root.findAllByType('a').some(a => a.props.href === account.verificationUrl), 'the official link remains available beside the QR code');
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.accountStates.authorizing')));
+    assert.ok(!JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.errors.auth')));
+   } else assert.equal(openedUrls.length, 0, 'other provider authorization behavior is preserved');
    if (definition.id === 'rollinggo-hotel') assert.equal(authorizationTimers.size, 1, 'RollingGo schedules status checks only during explicit authorization');
    if (definition.id === 'alipay') { const code = rendered.root.findAllByType('input').find(input => input.props.maxLength === 32); await Renderer.act(async () => code.props.onChange({ target: { value: '123456' } })); await click(button('bind')); assert.equal(accountCalls.at(-1).code, '123456'); }
    if (definition.id === 'doordash') {

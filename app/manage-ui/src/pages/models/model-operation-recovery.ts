@@ -6,7 +6,8 @@ import type {
 // Main owns durable identity. localStorage is an auxiliary legacy-page cache.
 export type RetainedModelOperation = ModelOperationRecoveryStoredRow;
 export type ModelOperationRecoverySnapshot = {
-  revision: number; required: boolean; journal: "unknown" | "loading" | "ready" | "error";
+  // advisory: native-config backends follow the official UI and never lock on this journal.
+  revision: number; required: boolean; advisory: boolean; journal: "unknown" | "loading" | "ready" | "error";
   storageVerified: boolean; serverPending: readonly string[]; operations: readonly RetainedModelOperation[];
 };
 const STORAGE_KEY = "shoggoth.model-operation-recovery.v1";
@@ -17,6 +18,7 @@ const STATUSES = new Set(["unconfirmed", "in_progress", "partial", "blocked", "n
 const operations = new Map<string, RetainedModelOperation>();
 const phases = new Map<string, { required: boolean; journal: ModelOperationRecoverySnapshot["journal"] }>();
 const serverPending = new Map<string, Set<string>>();
+const advisoryBackends = new Set<string>();
 const snapshots = new Map<string, ModelOperationRecoverySnapshot>();
 const listeners = new Set<() => void>();
 let loaded = false, cacheVerified = true, cacheCorrupt = false, revision = 0;
@@ -155,10 +157,18 @@ export function subscribeModelOperationRecovery(listener: () => void) { listener
 export function getModelOperationRecoverySnapshot(backend: string): ModelOperationRecoverySnapshot {
   load(); const previous = snapshots.get(backend); if (previous) return previous;
   const phase = phases.get(backend) ?? { required: false, journal: "unknown" as const };
-  const snapshot = Object.freeze({ revision, ...phase, storageVerified: nativeDetected ? nativeState === "ready" : cacheVerified,
+  const advisory = advisoryBackends.has(backend);
+  const snapshot = Object.freeze({ revision, ...phase, required: phase.required && !advisory, advisory, storageVerified: nativeDetected ? nativeState === "ready" : cacheVerified,
     serverPending: Object.freeze([...(serverPending.get(backend) ?? [])]),
     operations: Object.freeze([...operations.values()].filter((row) => row.backendId === backend)),
   }); snapshots.set(backend, snapshot); return snapshot;
+}
+/** native-config writes go straight to the official RPCs like the official UI:
+ * the Renderer neither records nor locks them; only server-pending rows are shown. */
+export function setModelOperationRecoveryAdvisory(backend: string, advisory: boolean) {
+  if (advisoryBackends.has(backend) === advisory) return;
+  if (advisory) advisoryBackends.add(backend); else advisoryBackends.delete(backend);
+  publish();
 }
 export function beginModelOperationRecoveryRead(backend: string) { load(); serverPending.delete(backend); phases.set(backend, { required: true, journal: "loading" }); publish(); }
 export function failModelOperationRecoveryRead(backend: string) { serverPending.delete(backend); phases.set(backend, { required: true, journal: "error" }); publish(); }

@@ -56,7 +56,7 @@ for (const language of ["zh-CN", "en"]) {
   const componentImports = {
     "react-i18next": { useTranslation: () => ({ t }) }, "../api/larkCliConnector": api,
     "../lib/usePageCache": cache,
-    "../components/Modal": { __esModule: true, default: ({ children, title, dismissible }) => React.createElement("section", { role: "dialog", "aria-label": typeof title === "string" ? title : "connector", "data-dismissible": dismissible }, children) },
+    "../components/Modal": { __esModule: true, default: ({ children, footer, subtitle, title, dismissible }) => React.createElement("section", { role: "dialog", "aria-label": typeof title === "string" ? title : "connector", "data-dismissible": dismissible }, children, React.createElement("p", {}, subtitle), footer) },
     "../components/ui": { useConfirm: () => async () => allowRemove },
     "../components/McpConnectorIcon": { __esModule: true, default: () => null }, "../components/ConnectorTools": { __esModule: true, default: () => null }, "./ConnectorsPage.module.css": styles,
   };

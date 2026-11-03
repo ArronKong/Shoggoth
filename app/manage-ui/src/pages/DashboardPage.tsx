@@ -6,6 +6,7 @@ import { Trans, useTranslation } from "react-i18next";
 import { animate } from "animejs";
 import {
   getCronLatestDelivery,
+  getNativeCronRunDelivery,
   getDashboardSummary,
   getUsageSeries,
   listAgents,
@@ -28,15 +29,16 @@ import {
 import { usePageCache } from "../lib/usePageCache";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { PageHead } from "../components/PageHead";
-import Modal, { DetailRow, ModalSection } from "../components/Modal";
+import Modal from "../components/Modal";
 import { useToast } from "../components/ui";
 import { toSanitizedMarkdownHtml } from "../lib/markdown";
 import { selectCronRunHandoffSource, writeCronChatHandoff } from "../lib/cronChatHandoff";
-import { fmtCost, fmtTokens, fmtMs } from "./usage/charts";
+import { fmtCost, fmtTokens } from "./usage/charts";
 import { cronDeliveryView, cronExecutionView } from "./cron/runPresentation";
 import ActivityFeed from "./dashboard/ActivityFeed";
 import { useDashboardLiveWork } from "./dashboard/useDashboardLiveWork";
 import RunDetailModal from "./dashboard/RunDetailModal";
+import CronRunReportModal, { ReportNote, runExecutionFailed } from "./cron/CronRunReportModal";
 import { recentDashboardArtifacts } from "../lib/dashboardArtifacts";
 import ArtifactThumb from "../components/ArtifactThumb";
 import { inspirationMediaUrl } from "./inspiration-media";
@@ -418,9 +420,16 @@ export default function DashboardPage() {
 
       // 等入场过渡完成后再读 transcript；已有摘要先稳定占位，不在动画中途换全文。
       const requestId = runDeliveryRequestRef.current;
-      getCronLatestDelivery(run.jobId, run.startedAt ?? undefined)
+      // 原生 Cron 的实际启动时间可能晚于计划时刻，运行 ID 可以直接定位这次结果。
+      const runId = run.backendId === "shoggoth" ? run.runId : undefined;
+      const request = runId
+        ? getNativeCronRunDelivery(run.jobId, runId)
+        : getCronLatestDelivery(run.jobId, run.startedAt ?? undefined);
+      request
         .then((nextDelivery) => {
-          if (runDeliveryRequestRef.current === requestId) setDelivery(nextDelivery);
+          if (runDeliveryRequestRef.current === requestId && (!runId || nextDelivery.runId === runId)) {
+            setDelivery(nextDelivery);
+          }
         })
         .catch(() => {
           if (runDeliveryRequestRef.current === requestId) setDelivery(null);
@@ -639,86 +648,47 @@ export default function DashboardPage() {
         </Suspense>
       )}
 
-      <Modal
+      <CronRunReportModal
         open={runModalOpen}
         onClose={closeRunModal}
         onOpenChangeComplete={handleRunModalOpenChangeComplete}
         title={openRun?.jobName || openRun?.jobId || ""}
-        subtitle={t("dashboard.runModalTitle")}
-        footer={
-          openRun && (
-            <>
-              {runSessionKey && visibleRunText && visibleRunText.trim() && (
-                <button className="foot-left btn-secondary" onClick={() => askInChat(openRun.backendId, runSessionKey, visibleRunText)}>
-                  {t("cron.askInChat")}
-                </button>
-              )}
-              <button
-                className="btn-primary"
-                onClick={() => navigate(`/cron?job=${encodeURIComponent(openRun.jobId)}`)}
-              >
-                {t("dashboard.openInCron")}
-              </button>
-            </>
-          )
-        }
+        failed={runExecutionFailed(openRun?.status, openRun?.completionStatus)}
+        agentId={openRun?.agentId}
+        agentName={openRun?.agentId ? currentAgentName(openRun.agentId, openRun.backendId) : undefined}
+        startedAt={openRun?.startedAt}
+        durationMs={openRun?.durationMs}
+        model={openRun?.model}
+        bodyLabel={visibleRunText
+          ? (runHandoff.isFullText ? t("dashboard.fullTextTitle") : t("dashboard.summaryTitle"))
+          : undefined}
+        onAskInChat={openRun && runSessionKey && visibleRunText && visibleRunText.trim()
+          ? () => askInChat(openRun.backendId, runSessionKey, visibleRunText)
+          : undefined}
+        // 与 Cron 页同一个编辑：跳过去直接打开该任务的编辑表单。
+        onEdit={() => {
+          if (openRun) navigate(`/cron?job=${encodeURIComponent(openRun.jobId)}&edit=1`);
+        }}
       >
-        {openRun && (
-          <>
-            <ModalSection>
-              <DetailRow label={t("cronForm.runExecutionResult")}>
-                <span className={openRunExecution?.tone === "success"
-                  ? "status-ok"
-                  : openRunExecution?.tone === "error"
-                    ? "status-error"
-                    : "muted"}>
-                  {openRunExecution?.value}
-                </span>
-              </DetailRow>
-              {openRunExecution?.detail && (
-                <DetailRow label={t("dashboard.errorLabel")}>
-                  <span className="status-error">{openRunExecution.detail}</span>
-                </DetailRow>
-              )}
-              <DetailRow label={t("dashboard.timeLabel")}>
-                {openRun.startedAt ? new Date(openRun.startedAt).toLocaleString() : "—"}
-              </DetailRow>
-              {typeof openRun.durationMs === "number" && (
-                <DetailRow label={t("dashboard.durationLabel")}>{fmtMs(openRun.durationMs)}</DetailRow>
-              )}
-              {openRun.agentId && (
-                <DetailRow label={t("dashboard.agentLabel")}>
-                  {currentAgentName(openRun.agentId, openRun.backendId)}
-                </DetailRow>
-              )}
-              {openRun.model && <DetailRow label={t("dashboard.modelLabel")}>{openRun.model}</DetailRow>}
-              {openRunDelivery && (
-                <DetailRow label={t("cronForm.runDeliveryResult")}>
-                  <span>
-                    {openRunDelivery.value === "silent" ? t("cron.silentComplete") : openRunDelivery.value}
-                    {openRunDelivery.detail ? ` · ${openRunDelivery.detail}` : ""}
-                  </span>
-                </DetailRow>
-              )}
-            </ModalSection>
-            {/* 全文优先（本机 transcript），退回摘要；合成行（Hermes 末次状态）两者皆无。 */}
-            {visibleRunText && (
-              <ModalSection title={runHandoff.isFullText ? t("dashboard.fullTextTitle") : t("dashboard.summaryTitle")}>
-                <div
-                  className="chat-md cron-delivery-md"
-                  dangerouslySetInnerHTML={{
-                    __html: toSanitizedMarkdownHtml(visibleRunText, true),
-                  }}
-                />
-              </ModalSection>
-            )}
-            {deliveryLoading && !visibleRunText && <ModalSection>{t("dashboard.fullTextLoading")}</ModalSection>}
-            {!deliveryLoading && !visibleRunText && (
-              <ModalSection>{t("dashboard.fullTextNone")}</ModalSection>
-            )}
-          </>
+        {openRunExecution?.detail && <ReportNote error>{openRunExecution.detail}</ReportNote>}
+        {openRunDelivery && openRunDelivery.tone !== "success" && (
+          <ReportNote>
+            {t("cronForm.runDeliveryResult")} · {openRunDelivery.value === "silent" ? t("cron.silentComplete") : openRunDelivery.value}
+            {openRunDelivery.detail ? ` · ${openRunDelivery.detail}` : ""}
+          </ReportNote>
         )}
-      </Modal>
+        {/* 全文优先（本机 transcript），退回摘要；合成行（Hermes 末次状态）两者皆无。 */}
+        {visibleRunText && (
+          <div
+            className="chat-md cron-delivery-md"
+            dangerouslySetInnerHTML={{
+              __html: toSanitizedMarkdownHtml(visibleRunText, true),
+            }}
+          />
+        )}
+        {deliveryLoading && !visibleRunText && <ReportNote>{t("dashboard.fullTextLoading")}</ReportNote>}
+        {!deliveryLoading && !visibleRunText && <ReportNote>{t("dashboard.fullTextNone")}</ReportNote>}
+      </CronRunReportModal>
 
       {backendRun && enabledBackendIds.includes(backendRun.backendId!) && <Suspense fallback={null}>
         <RunDetailModal key={JSON.stringify([backendScopeKey, backendRun.backendId, backendRun.runId])}

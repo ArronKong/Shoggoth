@@ -37,6 +37,7 @@ function scriptedExecutor(state) {
     async abort({ runId }) {
       const run = runs.get(runId);
       state.aborted.push(runId);
+      if (state.abortGate) await state.abortGate;
       run.status = "canceled";
       setImmediate(() => state.fixture.service.groupChatDriver.onRunTerminal(run));
     },
@@ -297,6 +298,27 @@ async function run() {
     await settle(groupId);
     assert.equal(state.aborted.length, 2);
     assert.equal((await history(groupId)).at(-1).system.eventType, "turn_stopped");
+
+    // 停止确认可以晚到；单成员停止接口先返回并让下一位接话，不重复派发原任务。
+    state.calls.length = 0;
+    let releaseStop;
+    state.abortGate = new Promise(resolve => { releaseStop = resolve; });
+    state.reply = profileId => profileId === c.id ? { hang: true } : { text: "下一位继续处理。" };
+    const noticeCount = (await history(groupId)).filter(message => message.system?.eventType === "turn_stopped").length;
+    try {
+      await api("POST", `/messages?id=${groupId}`, { clientMessageId: "m7d", body: `@${handle[c.agentId]} @${handle[b.agentId]} 依次处理`, mentions: [] });
+      for (let attempt = 0; attempt < 100 && state.calls.length === 0; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+      const accepted = await api("POST", `/members/stop?id=${groupId}`, { memberId: memberId[c.agentId] });
+      assert.equal(accepted.status, 200);
+      const cleanup = accepted.body.activeTurns.find(turn => turn.memberId === memberId[c.agentId]);
+      assert.equal(cleanup.floor, false); assert.equal(cleanup.releasedReason, "stopped");
+      for (let attempt = 0; attempt < 100 && state.calls.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.deepEqual(state.calls.map(call => call.profileId), [c.id, b.id], "Maya-equivalent starts while the old cancellation is pending");
+      assert.equal((await history(groupId)).filter(message => message.system?.eventType === "turn_stopped").length, noticeCount + 1);
+    } finally { releaseStop(); state.abortGate = null; }
+    await settle(groupId);
+    assert.equal((await history(groupId)).filter(message => message.system?.eventType === "turn_stopped").length, noticeCount + 1,
+      "confirmed cleanup does not publish another stopped notice");
 
     // 改群主：之后的普通消息先交给新群主。
     state.calls.length = 0;
@@ -760,12 +782,16 @@ async function runNativeInteraction() {
   }
 }
 
-async function runFeatureSwitch() {
+async function runAlwaysEnabled() {
   const os = require("node:os");
   const { createConfigStore } = require("../app/core/config-store");
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "gcfg-"));
   const state = { fixture: null, calls: [], aborted: [], reply: () => null };
-  const f = await startInspirationFixture({ agentCount: 2, configStore: createConfigStore(path.join(configDir, "config.json")),
+  const configPath = path.join(configDir, "config.json");
+  const configStore = createConfigStore(configPath);
+  assert.equal(configStore.read().groupChatEnabled, true, "on by default");
+  fs.writeFileSync(configPath, JSON.stringify({ groupChatEnabled: false }));
+  const f = await startInspirationFixture({ agentCount: 2, configStore,
     serviceOptions: { groupChatExecutor: scriptedExecutor(state), prewarmMcpAuth: false } });
   state.fixture = f;
   const request = async (method, url, body) => {
@@ -777,8 +803,8 @@ async function runFeatureSwitch() {
   try {
     const profiles = f.service.productStore.listAgentProfiles().filter((profile) => profile.enabled).slice(0, 2);
     const members = profiles.map((profile) => ({ backendId: "shoggoth", agentId: profile.agentId }));
-    assert.equal((await request("GET", "/__api/config")).body.config.groupChatEnabled, true, "on by default");
-    const created = await api("POST", "", { operationId: "sw1", name: "开关群", purpose: "", members });
+    assert.equal((await request("GET", "/__api/config")).body.config.groupChatEnabled, true, "old disabled config is treated as enabled");
+    const created = await api("POST", "", { operationId: "sw1", name: "默认开启群", purpose: "", members });
     const groupId = created.body.group.id;
     state.reply = () => ({ hang: true });
     await api("POST", `/messages?id=${groupId}`, { clientMessageId: "s1", body: "@all 先聊着", mentions: [] });
@@ -794,34 +820,19 @@ async function runFeatureSwitch() {
     assert.deepEqual([before.turns.running, before.turns.queued], [1, 1], "one speaks while the other waits its turn");
     assert.equal(JSON.stringify(before).includes("先聊着"), false, "diagnostics carry counts only");
 
-    assert.equal((await request("PUT", "/__api/config", { groupChatEnabled: false })).body.config.groupChatEnabled, false);
-    for (let attempt = 0; ; attempt++) {
-      const detail = (await api("GET", `/detail?id=${groupId}`)).body;
-      if (quiet(detail)) break;
-      assert.ok(attempt < 200, "turning the feature off stops the running round");
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    assert.equal(state.aborted.length, 1);
-    assert.equal(state.calls.length, 1, "the waiting member never starts");
+    assert.equal((await request("PUT", "/__api/config", { groupChatEnabled: false })).body.config.groupChatEnabled, true);
     const listed = (await api("GET", "")).body;
-    assert.equal(listed.enabled, false);
-    assert.equal(listed.groups.length, 1, "groups are kept while the feature is off");
-    assert.equal((await api("GET", `/messages?id=${groupId}&limit=20`)).body.messages[0].body, "@all 先聊着", "history stays readable");
-    for (const [method, suffix, body] of [
-      ["POST", "", { operationId: "sw2", name: "x", purpose: "", members }],
-      ["POST", `/messages?id=${groupId}`, { clientMessageId: "s2", body: "还在吗", mentions: [] }],
-    ]) {
-      const refused = await api(method, suffix, body);
-      assert.equal(refused.status, 409);
-      assert.equal(refused.body.code, "GROUP_CHAT_DISABLED");
-    }
-    assert.equal((await api("POST", `/discussion/stop?id=${groupId}`)).status, 200, "stopping stays available");
-    assert.equal((await api("GET", "/diagnostics")).body.enabled, false);
-
-    await request("PUT", "/__api/config", { groupChatEnabled: true });
-    state.reply = () => ({ text: "回来了" });
+    assert.equal(listed.enabled, true);
+    assert.equal(listed.groups.length, 1);
+    assert.equal((await api("GET", `/messages?id=${groupId}&limit=20`)).body.messages[0].body, "@all 先聊着");
+    const after = (await api("GET", "/diagnostics")).body;
+    assert.equal(after.enabled, true);
+    assert.deepEqual([after.turns.running, after.turns.queued], [1, 1], "legacy config writes leave the round active");
+    assert.equal(state.aborted.length, 0);
+    assert.equal((await api("POST", `/discussion/stop?id=${groupId}`)).status, 200, "manual stop stays available");
+    state.reply = () => ({ text: "继续讨论" });
     assert.equal((await api("POST", `/messages?id=${groupId}`, { clientMessageId: "s3", body: "继续", mentions: [] })).status, 200);
-    console.log("PASS group chat feature switch: diagnostics counts, disable stops activity and refuses new writes, data kept, re-enable resumes");
+    console.log("PASS group chat stays enabled with legacy disabled configs and writes");
   } finally {
     await f.close();
     fs.rmSync(configDir, { recursive: true, force: true });
@@ -1068,7 +1079,7 @@ async function runAll() {
   await runNative();
   await runExternal();
   await runNativeInteraction();
-  await runFeatureSwitch();
+  await runAlwaysEnabled();
   await runStoreUnavailable();
   await runReliability();
   await runRoleDocuments();

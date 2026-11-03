@@ -43,9 +43,9 @@ for (const [runtime, policy] of [
   const result = await f.executor.probe({ member: { profileId: "p" } });
   assert.equal(result.availability, "available"); assert.equal(result.collaborationActions, true);
   assert.ok(validGroupCapabilities(result));
+  const permission = resolveRuntimePermissionMode(runtime, "full-access", policy);
   assert.deepEqual(f.acquired, [{ binding: { runtime, runtimeProfileId: "rp", runtimeAccountId: "ra" },
-    options: { workspace: before.defaultCwd, permissionPolicy: policy } }]);
-  const permission = resolveRuntimePermissionMode(runtime, null, policy);
+    options: { workspace: before.defaultCwd, permissionPolicy: runtime === "codex" ? policy : permission.permissionPolicy } }]);
   assert.deepEqual(f.observed[0].profile.permissionPolicy, permission.permissionPolicy);
   assert.deepEqual(f.observed[0].profile.runtimeHostPermissionPolicy, policy);
   assert.equal(f.observed[0].profile.permissionMode, permission.mode);
@@ -53,15 +53,16 @@ for (const [runtime, policy] of [
   assert.deepEqual(f.profile, before, "capability observations never modify the selected profile");
 });
 
-test("a session's explicit workspace and selected permission mode use its exact Runtime binding", async () => {
+test("an existing group session previews full access with its exact workspace and Runtime binding", async () => {
   const f = fixture(); f.setSession({ profileId: "p", runtimeBindingId: "selected-binding", workspace: "/private/tmp/session-workspace",
     permissionMode: "workspace-auto" });
   await f.executor.probe({ member: { profileId: "other" }, binding: { sessionKey: "s", workspace: "/private/tmp/task-workspace" } });
   assert.deepEqual(f.resolved, [{ id: "p", bindingId: "selected-binding" }]);
   assert.equal(f.acquired[0].options.workspace, "/private/tmp/session-workspace");
   assert.deepEqual(f.acquired[0].options.permissionPolicy, f.profile.permissionPolicy);
-  assert.deepEqual(f.observed[0].profile.permissionPolicy, { approvalPolicy: "on-request", sandbox: "workspace-write" });
-  assert.equal(f.observed[0].profile.nativePermissionMode, "workspace-auto");
+  assert.deepEqual(f.observed[0].profile.permissionPolicy, { approvalPolicy: "on-request", sandbox: "danger-full-access" });
+  assert.equal(f.observed[0].profile.permissionMode, "full-access");
+  assert.equal(f.observed[0].profile.nativePermissionMode, "full");
 });
 
 test("task workspace overrides the profile default while a session's explicit null remains authoritative", async () => {

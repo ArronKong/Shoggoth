@@ -96,6 +96,30 @@ test("prepared model policy is recovered from the host journal before dispatch",
   assert.equal(f.starts.length, 1);
 });
 
+test("an exact archived-session preparation refusal crosses the Host HTTP boundary without private details", async t => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "group-host-archived-"))); fs.chmodSync(root, 0o700);
+  const agent = { backendId: "openclaw", agentId: "main" }, ownerToken = token(), runtimeToken = token();
+  const authority = { groupId: crypto.randomUUID(), ownerId: crypto.randomUUID(), epoch: 1 };
+  const host = new GroupRuntimeHost({ paths: { stateDir: path.join(root, "state"), trustedRoot: root },
+    registry: { getBackend: () => ({}) }, agent, ownerToken, runtimeToken }).open();
+  t.after(async () => { await host.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const address = await host.listen();
+  const peer = { id: "archived-fixture", ...agent, hostId: host.hostId, token: ownerToken, baseUrl: `http://127.0.0.1:${address.port}/` };
+  for (const code of ["OPENCLAW_GROUP_SESSION_ARCHIVED", "ETIMEDOUT"]) {
+    host.runner.adapters.openclaw = { prepare: async () => { throw Object.assign(new Error("private session and workspace details"), { code }); } };
+    host.runner.drivers.clear();
+    const execution = { executionId: crypto.randomUUID(), runId: crypto.randomUUID(), ...agent,
+      sessionKey: `agent:main:dashboard:group-${"a".repeat(64)}`, workspace: null, operationId: crypto.randomUUID() };
+    await assert.rejects(requestGroupHost(peer, "host.prepare", { execution, kind: "turn", taskId: null }, authority), error => {
+      const expected = code === "OPENCLAW_GROUP_SESSION_ARCHIVED" ? "GROUP_HOST_SESSION_ARCHIVED" : "GROUP_HOST_UNAVAILABLE";
+      assert.equal(error.code, expected); assert.equal(error.message, expected);
+      assert.ok(!JSON.stringify(error).includes("private session")); return true;
+    });
+    const record = JSON.parse(host.db.prepare("SELECT data FROM executions WHERE id=?").get(execution.executionId).data);
+    assert.equal(record.dispatchPossible, false, "preparation cannot start or reserve a running execution");
+  }
+});
+
 test("terminal response facts survive Host restart and retain group authority and execution binding", async t => {
   const f = await fixture(t), { execution } = await f.prepare();
   const metadata = { models: ["actual"], modelSource: "reported", usage: { inputTokens: 800, outputTokens: 24 } };

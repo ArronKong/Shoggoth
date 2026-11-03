@@ -1042,6 +1042,10 @@ function rowFromSession(session, agentId) {
     sessionId: hermesId,
     startedAt: Number(session.started_at) ? Math.round(session.started_at * 1000) : undefined,
     endedAt: Number(session.ended_at) ? Math.round(session.ended_at * 1000) : undefined,
+    // Cron runs outside Shoggoth's send lifecycle. Its open native session may
+    // already contain tools or commentary, but cannot publish a finished reply.
+    ...(session.source === "cron" && Object.hasOwn(session, "ended_at")
+      ? { hasActiveRun: !Number(session.ended_at) } : {}),
     model: typeof session.model === "string" ? session.model : undefined,
     modelProvider: typeof session.provider === "string" && session.provider ? session.provider : undefined,
     permissionMode: session.yolo === true ? "yolo" : "inherit",
@@ -1265,6 +1269,9 @@ class HermesBackend extends AgentBackend {
   // 包装出「启动中」窗口：getStatus 在窗口内报「正在启动」而不是
   // 「未检测到」（spawn→ready 有数秒窗，误报会让首启用户以为失败）。
   async start(hooks) {
+    // 记下 registry 给的就绪广播，createAgent 新拉起 dashboard 后复用；自更新/
+    // reconfigure/自愈的内部重启无参调用，不能把它冲掉。
+    if (hooks) this._startHooks = hooks;
     const generation = this._lifecycleGeneration;
     if (this._startInFlight?.generation === generation) return this._startInFlight.promise;
     this._sessionRowsComplete = false;
@@ -6642,6 +6649,7 @@ class HermesBackend extends AgentBackend {
     if (!dash) throw new Error("hermes: 没有可用的 dashboard");
     if (!spec?.name) throw new Error("hermes: 创建 profile 需要 name");
     this._assertProfileIdentityAvailable(spec.name);
+    const generation = this._lifecycleGeneration;
     const { status, body } = await this._httpRequest("POST", `${dash.baseUrl}/api/profiles`, {
       token: dash.token,
       body: {
@@ -6652,7 +6660,39 @@ class HermesBackend extends AgentBackend {
     }, dash);
     if (status >= 300) throw new Error(`hermes create profile failed: ${status} ${body}`);
     await this._refreshAgentsFor(dash).catch(() => {});
+    // Hermes 会把名字转小写建目录，按 agent id 反查实际 profile 名。
+    await this._ensureCreatedProfileDashboard(this.profileById.get(agentIdForProfile(spec.name)), generation);
+    // 聊天名单按会话派生：先重拉会话再广播 backend.ready，聊天页才会露出新 agent。
+    const publishReady = this._makeReadyPublisher(this._startHooks, generation);
+    publishReady();
+    await publishReady.drain();
     return { ok: true, name: spec.name };
+  }
+
+  // 本地模式每个 profile 一个 dashboard 进程，原先只在 start() 时拉起：新建的 profile
+  // 只进了名单没有服务，读模型报「没有可用的 dashboard」，聊天名单也看不到它。
+  // 受管模式由 _refreshAgentsFor 绑定，远程模式不 spawn。
+  async _ensureCreatedProfileDashboard(profile, generation) {
+    if (!profile || this._localRuntime.isManaged() || this._getConfig().hermesMode === "remote") return;
+    // 启动未结束时先等它：_reconcileProfiles 可能正在为这个 profile 补拉。
+    if (this._startInFlight) await this._startInFlight.promise.catch(() => {});
+    if (generation !== this._lifecycleGeneration || this.dashboards.has(profile)) return;
+    const claimed = new Set([...this.dashboards.values()].map((d) => d?.port).filter(Number.isInteger));
+    // 单个 profile 起不来只算少一个 agent，不能把整个后端报成故障。
+    const backendError = this.lastError;
+    let dash = null;
+    let reason = null;
+    try {
+      dash = await this._spawnOrReuseDashboard(profile, this.startPort + this.dashboards.size, claimed, generation);
+      if (!dash) reason = this.lastError;
+    } catch (e) {
+      reason = e?.message || String(e);
+    }
+    if (!dash) this.lastError = backendError;
+    if (dash && (await this._commitStartedDashboard(profile, dash, generation))) return;
+    if (generation !== this._lifecycleGeneration) return;
+    const detail = String(reason || "").split("\n")[0];
+    throw new Error(`hermes: profile「${profile}」已创建，但它的 dashboard 启动失败${detail ? `（${detail}）` : ""}，重启 App 会重试`);
   }
 
   // Hermes profiles support rename here; model is set via the 模型 page, SOUL via files.

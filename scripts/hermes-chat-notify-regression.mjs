@@ -41,6 +41,12 @@ upstreamWss.on("connection", (sock) => {
 await new Promise((r) => upstream.listen(0, "127.0.0.1", r));
 
 const registry = new BackendRegistry();
+// This broadcast fixture has no credential Service; provide the same explicit
+// preparation dependency as the other isolated proxy-routing fixtures.
+registry.setChatSecretOwner({ async chatSecretRequest(action, input) {
+  if (action !== "prepare") throw new Error("Unexpected secret action");
+  return { text: input.text, references: [], version: 1 };
+} });
 registry.register(new MockHermes());
 const proxy = await startProxyGateway({
   port: 0,

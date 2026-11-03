@@ -71,11 +71,11 @@ function SubagentActivity({ progress }: { progress: SubagentProgress }) {
   const status = running ? "running" : failed ? "error" : progress.status === "done" ? "ok"
     : progress.status === "killed" || progress.status === "interrupted" ? "aborted" : "pending";
   const labels: Record<string, string> = { running: "turnLab.running", done: "turnLab.done", failed: "turnLab.failed",
-    timeout: "turnLab.subagentTimeout", killed: "turnLab.aborted", interrupted: "turnLab.aborted", queued: "chat.liveStatus.queued", pending: "turnLab.subagentWaiting" };
+    timeout: "turnLab.subagentTimeout", killed: "turnLab.aborted", interrupted: "turnLab.aborted", pending: "turnLab.subagentWaiting" };
   return <section className={styles.subagent} data-subagent-key={progress.key}>
     <button type="button" className={styles.head} aria-expanded={open} onClick={() => setOpen(value => !value)}>
       <span className={styles.title}>{t("turnLab.subagentTask", { label: progress.label || t("turnLab.subagentDefault") })}</span>
-      <span className={styles.chip} data-st={status}>{t(labels[progress.status] || "turnLab.subagentWaiting")}</span>
+      {progress.status !== "queued" && <span className={styles.chip} data-st={status}>{t(labels[progress.status] || "turnLab.subagentWaiting")}</span>}
       <span className={styles.chev} data-show="1" data-open={open ? "1" : undefined}><TrajChevron /></span>
     </button>
     {progress.unavailable ? <p className={styles.subagentHint}>{t("turnLab.subagentUnavailable")}</p> : null}

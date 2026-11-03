@@ -67,7 +67,8 @@ scope.learningAcceptance = async (stage: string) => {
     await click("保存并转为用户管理");
     await wait(() => document.body.innerText.includes("用户管理"), "user ownership");
     ([...document.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent?.includes("核对构建配置与产物"))!).click();
-    await wait(() => document.body.innerText.includes("上一版本"), "before/after versions");
+    await wait(() => document.querySelector('[aria-label="当前版本内容"]')?.textContent?.includes("人工整理："), "edited current version renders");
+    check(!document.body.innerText.includes("上一版本"), "only the selected version is displayed");
     const skill = (await api("skills")).items[0]; check(skill.owner === "user" && skill.revision === 2, "manual edit ownership and revision");
     return { owner: skill.owner, revision: skill.revision };
   }
@@ -96,7 +97,7 @@ scope.learningAcceptance = async (stage: string) => {
         await wait(() => captured, "pre-withdrawal read is held in flight");
       } else {
         check(document.querySelector('[aria-label="学习技能详情"]'), "old detail is open before withdrawal");
-        check(document.body.innerText.includes("上一版本"), "old comparison is open before withdrawal");
+        check(document.querySelector('[aria-label="当前版本内容"]')?.textContent?.includes("人工整理："), "current content is open before withdrawal");
         await click("编辑正文");
         check(document.querySelector("textarea"), "old edit draft is present before withdrawal");
       }
@@ -107,7 +108,7 @@ scope.learningAcceptance = async (stage: string) => {
         window.dispatchEvent(new CustomEvent("shoggoth:skills-changed", { detail: { backendId: "shoggoth", agentId, change: "withdraw" } }));
         release!();
       } else await click("刷新");
-      await wait(() => !document.querySelector('[aria-label="学习技能详情"], [aria-label="学习提案详情"], textarea'), "withdrawn detail, comparison and edit draft disappear");
+      await wait(() => !document.querySelector('[aria-label="学习技能详情"], [aria-label="学习提案详情"], textarea'), "withdrawn detail and edit draft disappear");
       await wait(() => button("刷新"), "in-flight read or refresh completed");
       check(!document.body.innerText.includes("人工整理：") && !document.body.innerText.includes("检查产物内容和时间"), "no stale body or late response restored");
       const response = await originalFetch("/__api/skills/learning", { method: "POST", headers: { "Content-Type": "application/json" },

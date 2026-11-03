@@ -117,6 +117,15 @@ const MCP_REGISTRY_TIMEOUT_MS = 20_000;
 const ENCRYPTED_MUTATION_TIMEOUT_MS = 15_000;
 const RUNTIME_COMMAND_TIMEOUT_MS = 45_000;
 const MODEL_CATALOG_TIMEOUT_MS = 45_000;
+// The composer model menu shows each Runtime's last catalog while it refreshes,
+// so one slow CLI (Codex's own catalog refresh can wait 5 s) no longer holds the
+// whole menu. A refresh that settles within the budget is shown instead; it
+// fits catalogs the Service already holds (a few ms), not a CLI round trip.
+const RUNTIME_MODEL_GROUP_FRESH_BUDGET_MS = 80;
+const RUNTIME_MODEL_GROUP_MAX_STALE_MS = 30 * 60_000;
+// Facade writes that can change a Runtime's catalog or capabilities. A menu
+// read after one of them waits for a fresh catalog.
+const RUNTIME_MODEL_CATALOG_MUTATION = /^(?:agent\.binding\.(?:add|update|remove|setDefault)$|agent\.update$|profile\.(?:bind|configure|clear)$|provider\.endpoints\.(?:save|delete)$|runtime\.account\.(?:login\.|logout$)|runtime\.config\.apply$)/u;
 const DEFAULT_READINESS_TIMEOUT_MS = 70_000;
 const DEFAULT_READINESS_INTERVAL_MS = 500;
 const DEFAULT_SERVICE_STATUS_TIMEOUT_MS = 1_000;
@@ -1463,6 +1472,8 @@ class ShoggothBackend extends AgentBackend {
     this._complete = false;
     this._state = "stopped";
     this._generation = 0;
+    this._runtimeModelGroups = new Map();
+    this._runtimeModelsEpoch = 0;
     this._startPromise = null;
     this._queuedStartPromise = null;
     this._stopPromise = null;
@@ -1730,6 +1741,7 @@ class ShoggothBackend extends AgentBackend {
 
   // A CLI connected again in Settings may need its built-in Agent.
   onConnectionsChanged() {
+    this._runtimeModelsEpoch += 1;
     if (this._state !== "started") return;
     void this._refreshManagedProfiles().catch(() => {});
   }
@@ -2174,7 +2186,7 @@ class ShoggothBackend extends AgentBackend {
       // A native CLI's switch stops using it as a runtime in the app; its Agents
       // stay. It never signs out, so its login state and records are intact on
       // reconnect, and a disconnected CLI is not probed.
-      const accountProfile = switchable ? accountProfiles.find(profile => profile.providerRef == null) : accountProfiles[0];
+      const accountProfile = accountProfiles.find(profile => profile.providerRef == null);
       const authRead = accountProfile ? ["profile.auth.read", { profileId: accountProfile.id }]
         : group.binding ? ["profile.binding.auth.read", group.binding] : null;
       let loggedIn = false;
@@ -2191,9 +2203,14 @@ class ShoggothBackend extends AgentBackend {
             descriptor.accountKind,
           );
         statusError = presence.error;
+        // The Harness can borrow native Codex sign-in without a local auth.json.
+        // Keep unsafe local storage blocked, but let the runtime resolve missing
+        // credentials and the persisted opt-out after an explicit sign-out.
+        const canReadAuth = presence.present || (!presence.error
+          && descriptor.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
         // With no Agent Binding yet to verify through, a present credential stays unverified.
-        if (presence.present && !authRead) statusVerification = "unverified";
-        if (presence.present && authRead) {
+        if (canReadAuth && !authRead) statusVerification = "unverified";
+        if (canReadAuth && authRead) {
           try {
             const verified = await this._call(...authRead);
             loggedIn = verified.status === "authenticated";
@@ -2849,6 +2866,49 @@ class ShoggothBackend extends AgentBackend {
       profileId: profile.id, sessionKey: target.sessionKey, includeTrace }));
   }
 
+  // One candidate's capabilities and catalog. Never rejects: a failed catalog
+  // is `models: null`, shown as that Runtime's failed group.
+  async _loadRuntimeModelGroup(profile, binding) {
+    let features;
+    try { features = await this._call("profile.binding.capabilities.read", { profileId: profile.id, bindingId: binding.id }); }
+    catch { features = require("../agent-service/runtime-capability-evidence").runtimeFeatureSupport(null); }
+    try {
+      return { features, models: await this._page("profile.binding.models.list", { profileId: profile.id, bindingId: binding.id }, "models",
+        { maxBytes: MAX_HISTORY_BYTES, maxItems: 512 }) };
+    } catch { return { features, models: null }; }
+  }
+
+  // Every read starts (or joins) a refresh. With a usable previous catalog the
+  // menu waits only the fresh budget, then shows that catalog while the refresh
+  // continues for the next read. A failed refresh drops the previous catalog, so
+  // a failure is never hidden. Native CLI accounts share one entry across Agents,
+  // as the Service's own catalogs are account-scoped; a Harness catalog depends
+  // on its Agent's sources and default.
+  async _runtimeModelGroup(profile, binding) {
+    const nativeAccount = DEFAULT_RUNTIME_ACCOUNTS.some(account => account.id === binding.runtimeAccountId
+      && account.kind === "native-user");
+    const key = nativeAccount ? `account:${binding.runtimeAccountId}` : `binding:${profile.id}:${binding.id}`;
+    const generation = this._generation, epoch = this._runtimeModelsEpoch;
+    let entry = this._runtimeModelGroups.get(key);
+    if (!entry) this._runtimeModelGroups.set(key, entry = { snapshot: null, at: 0, stamp: null, refresh: null, refreshStamp: null });
+    const stamp = `${generation}:${epoch}`;
+    const cached = entry.snapshot && entry.stamp === stamp
+      && this.now() - entry.at <= RUNTIME_MODEL_GROUP_MAX_STALE_MS ? entry.snapshot : null;
+    if (!entry.refresh || entry.refreshStamp !== stamp) {
+      const refresh = this._loadRuntimeModelGroup(profile, binding).then(snapshot => {
+        const current = this._runtimeModelGroups.get(key) === entry
+          && `${this._generation}:${this._runtimeModelsEpoch}` === stamp;
+        if (current) Object.assign(entry, snapshot.models ? { snapshot, at: this.now(), stamp } : { snapshot: null });
+        return snapshot;
+      }).finally(() => { if (entry.refresh === refresh) entry.refresh = null; });
+      Object.assign(entry, { refresh, refreshStamp: stamp });
+    }
+    if (!cached) return entry.refresh;
+    let timer;
+    const budget = new Promise(resolve => { timer = setTimeout(resolve, RUNTIME_MODEL_GROUP_FRESH_BUDGET_MS, null); });
+    try { return (await Promise.race([entry.refresh, budget])) ?? cached; } finally { clearTimeout(timer); }
+  }
+
   async getSessionRuntimeModels(id, key) {
     const profile = this._profileForManagedAgent(id);
     if (this._sessionTarget(key).profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
@@ -2872,26 +2932,22 @@ class ShoggothBackend extends AgentBackend {
       entry.runtimeAccountId === binding.runtimeAccountId) === index);
     unique.sort((a, b) => DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === a.runtime)
       - DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === b.runtime));
-    const groups = await mapBounded(unique, 3, async binding => {
+    // All candidates load together: a cold CLI must not queue behind another.
+    const groups = await mapBounded(unique, Math.max(1, unique.length), async binding => {
       const runtimeName = names.get(binding.runtimeAccountId) || binding.runtime;
-      let features;
-      try { features = await this._call("profile.binding.capabilities.read", { profileId: profile.id, bindingId: binding.id }); }
-      catch { features = require("../agent-service/runtime-capability-evidence").runtimeFeatureSupport(null); }
+      const { features, models } = await this._runtimeModelGroup(profile, binding);
       const capabilities = this._chatCapabilitiesForProfile({ ...profile, ...binding, id: profile.id }, features);
-      try {
-        const models = await this._page("profile.binding.models.list", { profileId: profile.id, bindingId: binding.id }, "models",
-          { maxBytes: MAX_HISTORY_BYTES, maxItems: 512 });
-        return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: true, capabilities, models: models.map(model => ({
-          id: model.id, name: model.sourceName ? `${model.displayName} · ${model.sourceName}` : model.displayName,
-          backendId: this.id, provider: binding.runtime === "codex"
-            ? modelRowProvider({ ...profile, runtime: binding.runtime, runtimeAccountId: binding.runtimeAccountId }, model) : binding.runtime,
-          ...(model.modelProviderRef ? { modelProviderRef: model.modelProviderRef } : {}),
-          runtime: binding.runtime, runtimeName, bindingId: binding.id, isDefault: model.isDefault,
-          ...(model.capabilities ? { thinkingOptions: model.capabilities.thinkingOptions,
-            thinkingDefault: model.capabilities.thinkingDefault, reasoning: model.capabilities.thinkingOptions.length > 0,
-            fast: model.capabilities.fastTier !== null } : {}),
-        })) };
-      } catch { return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: false, capabilities, models: [] }; }
+      if (!models) return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: false, capabilities, models: [] };
+      return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: true, capabilities, models: models.map(model => ({
+        id: model.id, name: model.sourceName ? `${model.displayName} · ${model.sourceName}` : model.displayName,
+        backendId: this.id, provider: binding.runtime === "codex"
+          ? modelRowProvider({ ...profile, runtime: binding.runtime, runtimeAccountId: binding.runtimeAccountId }, model) : binding.runtime,
+        ...(model.modelProviderRef ? { modelProviderRef: model.modelProviderRef } : {}),
+        runtime: binding.runtime, runtimeName, bindingId: binding.id, isDefault: model.isDefault,
+        ...(model.capabilities ? { thinkingOptions: model.capabilities.thinkingOptions,
+          thinkingDefault: model.capabilities.thinkingDefault, reasoning: model.capabilities.thinkingOptions.length > 0,
+          fast: model.capabilities.fastTier !== null } : {}),
+      })) };
     });
     const currentBinding = bindings.bindings.find(binding => binding.id === selection.bindingId);
     const currentCapabilities = groups.find(group => group.bindingId === selection.bindingId)?.capabilities
@@ -3514,6 +3570,10 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async _call(method, params, options = {}) {
+    // Bumped before and after, so a menu read that overlaps the write never
+    // keeps a catalog loaded before the write settled.
+    const catalogMutation = RUNTIME_MODEL_CATALOG_MUTATION.test(method);
+    if (catalogMutation) this._runtimeModelsEpoch += 1;
     let token;
     try {
       let timeoutMs = ENCRYPTED_MUTATION_METHODS.has(method)
@@ -3546,7 +3606,8 @@ class ShoggothBackend extends AgentBackend {
       if (method.startsWith("codex.desktop.") && method !== "codex.desktop.sessions.list") timeoutMs = MODEL_CATALOG_TIMEOUT_MS;
       // Creating built-in Agents initializes each one like agent.create.
       if (method === "agent.builtin.ensure") timeoutMs = 60_000;
-      if (method === "profile.models.list" || method === "profile.binding.models.list"
+      if (method === "profile.auth.read" || method === "profile.binding.auth.read"
+        || method === "profile.models.list" || method === "profile.binding.models.list"
         || method === "profile.capabilities.read" || method === "profile.binding.capabilities.read"
         || method === "chat.session.runtime.model.set" || method === "group.member.models"
         || method === "group.members.model" && params.modelSelection !== null) timeoutMs = MODEL_CATALOG_TIMEOUT_MS;
@@ -3580,6 +3641,7 @@ class ShoggothBackend extends AgentBackend {
       throw safeError(error);
     } finally {
       token = null;
+      if (catalogMutation) this._runtimeModelsEpoch += 1;
     }
   }
 
@@ -5599,9 +5661,13 @@ class ShoggothBackend extends AgentBackend {
     if (!isCodexAutomationId(id)) throw safeError(null, "CODEX_AUTOMATION_RUN_UNSUPPORTED");
     return this._codexAutomations().control(id, input);
   }
-  getCronRunResult(id, runId) {
-    if (!isCodexAutomationId(id)) throw safeError(null, "CODEX_AUTOMATION_RUN_UNSUPPORTED");
-    return this._codexAutomations().result(id, runId);
+  async getCronRunResult(id, runId) {
+    if (isCodexAutomationId(id)) return this._codexAutomations().result(id, runId);
+    if (typeof runId !== "string" || !runId) return { source: "none" };
+    const target = await this._loadCronTarget(id);
+    const values = await this._cronRunsForTarget(target);
+    const match = values.find((value) => value.run.id === runId);
+    return this._readCronDelivery(target, match ? this._mapCronRun(match) : null);
   }
 
   async getCronJobs(options = {}) {
@@ -6331,6 +6397,10 @@ class ShoggothBackend extends AgentBackend {
         .filter((value) => typeof value.startedAt === "number")
         .sort((left, right) => right.startedAt - left.startedAt)[0] || null;
     }
+    return this._readCronDelivery(target, selected);
+  }
+
+  async _readCronDelivery(target, selected) {
     if (!selected) return { source: "none" };
     const output = {
       status: selected.status,

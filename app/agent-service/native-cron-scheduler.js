@@ -493,6 +493,19 @@ class NativeCronScheduler {
     return wrapped;
   }
 
+  refreshMemoryTimer() {
+    const generation = this.generation;
+    const refresh = () => {
+      if (this.state !== "open" || generation !== this.generation) return;
+      try {
+        this.#clearScheduledTimer();
+        this.#scheduleNextTimer(generation);
+      } catch (error) { this.#handleTimerError(error, generation); }
+    };
+    if (this.tickPromise) void this.tickPromise.then(refresh, refresh);
+    else refresh();
+  }
+
   triggerJob(input) {
     this.#assertGeneration(this.generation);
     if (!exactObject(input, MANUAL_TRIGGER_FIELDS) || !validOpaqueId(input.operationId)
@@ -1469,4 +1482,5 @@ module.exports = {
   describeCronRun,
   dueOccurrences,
   occurrenceKey,
+  previousCronOccurrence,
 };

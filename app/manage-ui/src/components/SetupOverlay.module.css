@@ -1,191 +1,439 @@
-/* 首启引导浮层。颜色一律 light-dark() 对（主题规范见 ARCHITECTURE §5）。
-   z-index 落位：Modal(100/101) 之上、toast(200) 之下——成功 toast 要压过浮层。 */
+/* 首启引导整页（Figma 333:185 / 333:409 / 333:472 / 421:289，画框 1380×900）。
+   舞台原点放在窗口中心，所有位置都是设计稿坐标减去中心点 (690, 450)；
+   窗口放不下时由 --setup-scale 整体等比缩小。设计稿只有浅色（视频也是白底），
+   所以这里恒为浅色（color-scheme + 重新声明主题 token，见下方 .root），深色主题下
+   内嵌表单也是浅色。
+   切换不硬切：区块交叉淡入淡出，Logo 与配图走缩放 / 位移过渡。 */
 
-.overlay {
+.root {
   position: fixed;
   inset: 0;
-  z-index: 150;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  background: light-dark(rgba(240, 244, 248, 0.62), rgba(6, 10, 14, 0.58));
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  /* 盖住主界面（内容层最高 80），但低于 Modal(100)、确认框(110)、下拉(300)、
+     提示(10001)，内嵌表单弹出的东西都能显示在上面。沉浸模式下整体抬高一档。 */
+  z-index: 99;
+  overflow: hidden;
+  background: #ffffff;
+  color: #000000;
+  font-family: "PingFang SC", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  transition: opacity 600ms ease;
+}
+/* Chromium 在定义处（:root）就把 token 里的 light-dark() 解析掉了，子树改
+   color-scheme 不会让它们重新取值。这里逐字照抄 styles.css :root 的主题 token，
+   让它们在本页的浅色下重新解析（scripts/shoggoth-phase11-ui-unit.mjs 校验与源头一致）。 */
+.root {
+  color-scheme: light;
+  --ui-canvas: light-dark(#f4f4f4, #18181b);
+  --ui-surface-1: light-dark(#ffffff, #1f1f23);
+  --ui-surface-2: light-dark(#f3f3f3, #28282e);
+  --ui-agent-avatar-bg: light-dark(#e9e9e7, #343439);
+  --ui-agent-avatar-fg: light-dark(#777777, #a3a3a3);
+  --ui-surface-glass: light-dark(rgba(255, 255, 255, 0.55), rgba(40, 40, 46, 0.55));
+  --ui-text-1: light-dark(#1a1a1a, #e4e4e7);
+  --ui-text-2: light-dark(rgba(0, 0, 0, 0.5), rgba(255, 255, 255, 0.62));
+  --ui-text-3: light-dark(#7d8796, #a1a1aa);
+  --ui-hairline: light-dark(rgba(20, 24, 31, 0.08), rgba(228, 230, 235, 0.1));
+  --ui-control-border: light-dark(rgba(20, 24, 31, 0.12), rgba(228, 230, 235, 0.16));
+  --ui-focus: light-dark(#2563eb, #60a5fa);
+  --ui-switch-on: light-dark(#000000, #ffffff);
+  --ui-success: light-dark(#047857, #34d399);
+  --ui-warning: light-dark(#b45309, #f59e0b);
+  --ui-error: light-dark(#b91c1c, #f87171);
+  --ui-info: light-dark(#0369a1, #38bdf8);
+  --bg: light-dark(#ffffff, #18181b);
+  --fg: light-dark(#1a1a1a, #e4e4e7);
+  --muted: light-dark(#6b7280, #a1a1aa);
+  --border: light-dark(#e5e7eb, #2e2e33);
+  --accent: light-dark(#2563eb, #3b82f6);
+  --row-hover: light-dark(#f9fafb, #232327);
+  --nav-bg: light-dark(#f4f4f4, #202024);
+  --nav-hover: light-dark(#e8e8e8, #2c2c31);
+}
+:global(body[data-immersive]) .root { z-index: 1099; }
+.root[data-entry="fade"] { animation: setupFadeIn 450ms ease both; }
+.root[data-exiting="true"] {
+  opacity: 0;
+  pointer-events: none;
 }
 
-.panel {
-  width: min(660px, 100%);
-  max-height: min(86vh, 760px);
-  overflow: auto;
-  border-radius: 18px;
-  border: 1px solid light-dark(rgba(15, 23, 42, 0.08), rgba(148, 163, 184, 0.18));
-  background: light-dark(#ffffff, #161c23);
-  box-shadow: 0 24px 64px light-dark(rgba(15, 23, 42, 0.16), rgba(0, 0, 0, 0.55));
-  padding: 28px 30px 24px;
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
-.title {
+.stage {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  transform: scale(var(--setup-scale, 1));
+}
+
+/* ── Logo：启动页居中 282×40；识别中缩到 192 宽并移到左侧（缩放位移动画）── */
+.logo {
+  position: absolute;
+  left: -141px;
+  top: -20px;
+  width: 282px;
+  height: 40px;
+  background: url("../assets/onboarding/shoggoth-wordmark.svg") center / 100% 100% no-repeat;
+  animation: setupLogoIn 700ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
+  transition:
+    transform 900ms cubic-bezier(0.65, 0, 0.35, 1),
+    opacity 450ms ease;
+}
+/* 192 / 282：识别页、没找到页的 Logo 尺寸。所有状态左边统一在 -364（Logo 左边 = 中心 -268 - 96） */
+.root[data-phase="detecting"] .logo { transform: translate(-268px, -22.38px) scale(0.680851); }
+.root[data-phase="setup"] .logo,
+.root[data-phase="login"] .logo { transform: translate(-268px, -62.38px) scale(0.680851); }
+.root[data-phase="custom"] .logo { transform: translate(-268px, -334.38px) scale(0.680851); }
+.root[data-phase="found"] .logo {
+  transform: translate(-268px, -22.38px) scale(0.62);
+  opacity: 0;
+}
+
+/* ── 配图：识别中与助理列表同一段视频 / 没找到的插图 / 配置中的视频，
+   400×223，所有状态同一位置（不再随状态横移），只交叉淡化。
+   左 40：最宽的左列（自定义表单 -364～16、列表 -384～3）不压到视频框，
+   画面主体（框内约 72～308）与左列内容整体视觉居中。 ── */
+.media {
+  position: absolute;
+  left: 40px;
+  top: -112px;
+  width: 400px;
+  height: 223px;
+  /* 素材是白底，四边再羽化一点，避免露出视频首帧的浅灰边 */
+  mask-image:
+    linear-gradient(to right, transparent 0, #000 5%, #000 95%, transparent 100%),
+    linear-gradient(to bottom, transparent 0, #000 5%, #000 95%, transparent 100%);
+  mask-composite: intersect;
+}
+
+.layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 600ms ease;
+}
+.media[data-kind="video"] .videoLayer,
+.media[data-kind="notFound"] .notFoundLayer,
+.media[data-kind="configuring"] .configuringLayer {
+  opacity: 1;
+  transition-delay: 200ms;
+}
+
+/* ── 文案区块：关掉的淡出并下沉，打开的稍晚淡入，形成交叉过渡 ── */
+.block {
+  position: absolute;
   margin: 0;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(10px);
+  transition:
+    opacity 380ms ease,
+    transform 600ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    visibility 0s linear 380ms;
+}
+.block[data-on="true"] {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition:
+    opacity 500ms ease 280ms,
+    transform 700ms cubic-bezier(0.2, 0.8, 0.2, 1) 280ms,
+    visibility 0s;
+}
+
+/* 识别中文案：Logo 移到位后再出现 */
+.detectText {
+  left: -364px;
+  top: 7.62px;
+  /* 中文一行（设计稿 207 宽）；英文更长时折行，不压到右侧视频 */
+  max-width: 220px;
   font-size: 20px;
-  font-weight: 700;
-  color: light-dark(#0f172a, #eef4f8);
+  font-weight: 300;
+  line-height: 28px;
 }
-
-.subtitle {
-  margin: 6px 0 20px;
-  font-size: 13px;
-  line-height: 1.6;
-  color: light-dark(#5b6b7b, #9fb0bd);
+.detectText[data-on="true"] { transition-delay: 520ms, 520ms, 0s; }
+/* 识别中的省略号：三个点依次轻轻上浮并变实，循环；点始终占位，文字不跳动 */
+.dots > span {
+  display: inline-block;
+  animation: setupDot 1.4s ease-in-out infinite;
 }
+.dots > span:nth-child(2) { animation-delay: 0.2s; }
+.dots > span:nth-child(3) { animation-delay: 0.4s; }
 
-.cards {
+/* 没找到 / 登录中 / 自定义配置：左侧一列 */
+.column {
+  left: -364px;
+  top: -32px;
+  /* 舞台宽 0，绝对定位块默认被压到 364 宽；按内容撑开，英文按钮不折行 */
+  width: max-content;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  align-items: flex-start;
 }
-
-.card {
-  border: 1px solid light-dark(rgba(15, 23, 42, 0.1), rgba(148, 163, 184, 0.16));
-  border-radius: 14px;
-  padding: 14px 16px;
-  background: light-dark(rgba(248, 250, 252, 0.7), rgba(255, 255, 255, 0.03));
-}
-
-.cardHead {
+/* 标题行：需要返回时，返回箭头和标题合成一个按钮（整行可点）；
+   箭头的视觉左边与下方内容左边对齐，悬停时箭头出现圆形底色。 */
+.titleRow { margin-bottom: 40px; }
+.backTitle {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 2px;
+  min-width: 0;
+  margin-left: -11px;
+  padding: 0 6px 0 0;
+  border: 0;
+  border-radius: 14px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.backIcon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  transition: background-color 150ms ease;
+}
+.backTitle:hover .backIcon { background: rgba(0, 0, 0, 0.06); }
+.backTitle:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.headline {
+  /* 中文一行；英文更长时折行，不压到右侧配图 */
+  max-width: 360px;
+  margin: 0;
+  font-size: 20px;
+  font-weight: 300;
+  line-height: 28px;
+  text-wrap: balance;
+}
+.buttons {
+  display: flex;
+  gap: 20px;
+}
+.cta {
+  white-space: nowrap;
+}
+/* 要压过全局 :is(.btn-*).btn-md 的 min-width（同为两类选择器） */
+.root .cta.ctaWide { min-width: 152px; }
+.gptIcon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  background: currentColor;
+  mask: url("../assets/provider-logos/openai-api.svg") center / contain no-repeat;
+}
+
+/* 自定义模型配置：表单最长时（英文说明三行 + 模型标签到最大高度 + 拉取状态）约
+   -348～+350，整列上移让它上下大致对称（Logo 同步上移），配合 STAGE_H 的 ±360。 */
+.customColumn {
+  top: -304px;
+  width: 380px;
+}
+.customColumn .titleRow { margin-bottom: 16px; }
+.form {
+  align-self: stretch;
+  display: grid;
+  gap: 12px;
+}
+/* 模型：同模型页端点弹窗——标签多选（第一个选中的标「默认」）+ 手动添加。
+   区块内间距同 .field（8）；标签全部展开，超过约 6 行（198）再滚动。 */
+.models {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chips {
+  /* 作为标签的 offsetParent，滚动定位用 */
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 198px;
+  overflow-y: auto;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-1);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+.chip:hover:not(:disabled) { background: color-mix(in srgb, var(--ui-text-1) 10%, var(--ui-surface-2)); }
+.chip[aria-pressed="true"],
+.chip[aria-pressed="true"]:hover:not(:disabled) {
+  background: #111111;
+  color: #ffffff;
+}
+/* 不用浏览器默认焦点框（随系统强调色，会是黄色）；键盘聚焦时给一圈灰色 */
+.chip:focus { outline: none; }
+.chip:focus-visible { outline: 2px solid color-mix(in srgb, var(--ui-text-1) 35%, transparent); outline-offset: 2px; }
+.chipDefault {
+  font-size: 10px;
+  opacity: 0.72;
+}
+.manualRow {
+  display: flex;
+  gap: 8px;
+}
+.manualRow > input {
+  flex: 1;
   min-width: 0;
 }
+/* 「配置并启用」与输入框同宽；出错提示放在按钮下方 */
+.formActions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.root .submit { width: 100%; }
 
+/* ── 找到的助理（421:289）：图标 80 · 名称 18 · 说明 12 · 行尾状态，行距 40 ── */
+/* 左 -384：40px 图标在 80 格内居中，图标左边 = -364，与其它状态左边对齐 */
+.found {
+  left: -384px;
+  top: 0;
+  translate: 0 -50%;
+}
+/* 列表定宽 387 = 图标 80 + 文字 271 + 行尾「已就绪」36（设计稿）。行尾按钮更宽时
+   向左占用文字列（说明过长省略），右边不超出，与「开始使用」右对齐。 */
+.rows {
+  display: grid;
+  width: 387px;
+  gap: 40px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.row {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr) auto;
+  height: 80px;
+  align-items: center;
+  opacity: 0;
+  transform: translateY(10px);
+  transition:
+    opacity 380ms ease,
+    transform 600ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.found[data-on="true"] .row,
+.found[data-on="true"] .startBtn {
+  opacity: 1;
+  transform: none;
+  transition-delay: calc(var(--i, 0) * 90ms + 380ms);
+}
+.iconCell {
+  display: grid;
+  place-items: center;
+  width: 80px;
+  height: 80px;
+  --backend-tab-icon-size: 40px;
+}
+.meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
 .name {
-  font-weight: 650;
-  font-size: 14px;
-  flex: none;
-  color: light-dark(#0f172a, #eef4f8);
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 25px;
+}
+.desc,
+.status {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 17px;
+  opacity: 0.5;
+}
+.desc {
+  max-width: 255px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 行尾与说明文字同一行（设计稿 y=334 对齐）；按钮和加载动画以这一行为中线 */
+.mark {
+  display: flex;
+  align-items: center;
+  align-self: start;
+  height: 17px;
+  justify-self: end;
+  margin-top: 44px;
+  /* 与说明文字至少留 12px */
+  padding-left: 12px;
+  white-space: nowrap;
+}
+.loader { flex: none; }
+.rowBtn { flex: none; }
+/* 左与图标左边对齐（40px 图标在 80px 格内居中，左边在 20），右与列表右边对齐 */
+.root .startBtn {
+  width: 367px;
+  margin: 40px 0 0 20px;
+}
+.startBtn {
+  opacity: 0;
+  transform: translateY(10px);
+  transition:
+    opacity 380ms ease,
+    transform 600ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    filter var(--ui-motion-state) ease;
 }
 
-.line {
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: light-dark(#5b6b7b, #9fb0bd);
+@keyframes setupFadeIn {
+  from { opacity: 0; }
 }
-
-.dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  flex: none;
+@keyframes setupDot {
+  0%, 60%, 100% {
+    opacity: 0.25;
+    transform: none;
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
 }
-
-.dotDetecting {
-  background: #eab308;
-  animation: setupPulse 1.1s ease-in-out infinite;
-}
-
-.dotOk {
-  background: #10b981;
-}
-
-.dotWarn {
-  background: #ef4444;
-}
-
-.dotSkipped {
-  background: light-dark(#cbd5e1, #475569);
-}
-
-@keyframes setupPulse {
-  50% {
-    opacity: 0.35;
+@keyframes setupLogoIn {
+  from {
+    opacity: 0;
+    scale: 0.94;
   }
 }
 
-.err {
-  display: block;
-  margin-top: 8px;
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.5;
-  word-break: break-all;
-  white-space: pre-wrap; /* 多行错误（exit 码 + CLI 输出尾）按行显示 */
-  color: light-dark(#9a6060, #d69a9a);
-}
-
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.btn {
-  min-height: 30px;
-  padding: 0 12px;
-  border-radius: 8px;
-  font: inherit;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-  border: 1px solid light-dark(rgba(15, 23, 42, 0.16), rgba(148, 163, 184, 0.3));
-  background: transparent;
-  color: light-dark(#22364f, #dce6ee);
-}
-
-.btn:hover {
-  background: light-dark(rgba(15, 23, 42, 0.05), rgba(148, 163, 184, 0.1));
-}
-
-.form {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.testLine {
-  font-size: 12px;
-  color: light-dark(#5b6b7b, #9fb0bd);
-}
-
-.testOk {
-  color: #10b981;
-}
-
-.testBad {
-  color: #ef4444;
-}
-
-.foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin-top: 22px;
-}
-
-.hint {
-  font-size: 12px;
-  color: light-dark(#7b8a99, #7f909e);
-}
-
-.primary {
-  min-height: 36px;
-  padding: 0 20px;
-  border-radius: 10px;
-  border: none;
-  cursor: pointer;
-  font: inherit;
-  font-weight: 700;
-  font-size: 13.5px;
-  flex: none;
-  background: light-dark(#0f172a, #8bd3ff);
-  color: light-dark(#ffffff, #061019);
-}
-
-.primary:disabled {
-  opacity: 0.6;
-  cursor: default;
+@media (prefers-reduced-motion: reduce) {
+  .logo,
+  .layer,
+  .block,
+  .block[data-on="true"],
+  .row,
+  .startBtn,
+  .found[data-on="true"] .row,
+  .found[data-on="true"] .startBtn {
+    transition: opacity 150ms ease, visibility 0s !important;
+    transition-delay: 0s !important;
+  }
+  .logo { animation: none; }
+  .dots > span { animation: none; }
 }

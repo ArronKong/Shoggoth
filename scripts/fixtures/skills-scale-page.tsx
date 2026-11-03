@@ -31,6 +31,20 @@ const skills = Array.from({ length: 5_000 }, (_, index) => {
 });
 const pageSize = 60;
 const revision = "fixture-revision-1";
+// Reproduce the structure of an installed Lark adapter, not just plain prose.
+const skillMarkdown = [
+  "---", "name: fixture-lark", "description: Package metadata must stay outside the document", "---", "",
+  "## Shoggoth installation", "",
+  "This official Feishu / Lark skill belongs to the CLI connector (CLI 1.0.98).",
+  "Use /private/fixture/lark-cli in place of every lark-cli command below.", "",
+  "# Current skill document", "",
+  "## Workflow", "", "1. Read the shared rules.", "2. Inspect the current document.", "",
+  "| Command | Purpose | Result | Scope | Permission | Notes | Reference |",
+  "| --- | --- | --- | --- | --- | --- | --- |",
+  "| lark-cli docs fetch | Read the requested document | Markdown document | Current account | Read permission | Keep document structure | references/fixture-reference.md |", "",
+  "```bash", "lark-cli docs fetch --token 'fixture & <token>'", "```", "",
+  "<script>window.skillMarkdownInjected = true</script>",
+].join("\n");
 let showDisabledMcp = false;
 let mcpRevision = 1;
 const mcpRequests: Array<{ action: string; body: Record<string, unknown> }> = [];
@@ -64,7 +78,7 @@ scope.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       nextCursor: showDisabledMcp ? 1 : 0, hasMore: false,
     } });
   }
-  if (url.pathname === "/__api/skills/preview") return answer({ preview: { content: "Fixture instructions" } });
+  if (url.pathname === "/__api/skills/preview") return answer({ preview: { content: skillMarkdown } });
   if (url.pathname === "/__api/skills" && url.searchParams.get("paged") !== "1") {
     const backend = url.searchParams.get("backend")!;
     return answer({ skills: backend === "shoggoth" ? [] : skills.slice(0, 250).map(skill => ({ ...skill, backendId: backend })) });
@@ -126,19 +140,49 @@ scope.runSkillsScalePage = async (width: number, backend: string) => {
   checked(!document.querySelector('[aria-label="自动学习"]'), "automatic learning card must be hidden");
   checked(![...document.querySelectorAll(".ui-toolbar button")].some(button => button.textContent?.includes("Install")),
     "local Skill installation must be hidden");
+  const gridWidth = document.querySelector(".skill-grid")!.getBoundingClientRect().width;
   firstCard().click();
-  await wait(() => !!document.querySelector(".skill-detail"), "first card detail");
+  await wait(() => !!document.querySelector('[role="dialog"]'), "first card detail modal");
   await frame();
-  const detail = document.querySelector<HTMLElement>(".skill-detail")!;
+  const detail = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  if (backend === "shoggoth") {
+    await wait(() => !!detail.querySelector('.skill-detail > section .chat-md h1'), "rendered Skill Markdown");
+    const documentBody = detail.querySelector<HTMLElement>('.skill-detail > section .chat-md')!;
+    const information = detail.querySelector<HTMLDetailsElement>('.skill-detail > details')!;
+    checked(!information.open, "skill metadata must start collapsed");
+    checked(!documentBody.innerText.includes("Shoggoth installation") && !documentBody.innerText.includes("name: fixture-lark"),
+      "package metadata and installation paths must not appear in the authored document");
+    checked(documentBody.querySelectorAll('ol li').length === 2 && !!documentBody.querySelector('table'),
+      "Skill lists and tables must use the shared Markdown renderer");
+    checked(getComputedStyle(documentBody).fontSize === "15px" && getComputedStyle(documentBody).lineHeight === "20px",
+      "Skill Markdown must match the App's base text size and line height");
+    const code = documentBody.querySelector<HTMLElement>('.code-block-wrapper pre')!;
+    checked(getComputedStyle(code).padding === "10px 12px" && !!code.querySelector('.hljs-string'),
+      "code blocks must use the App's shared presentation and syntax highlighting");
+    let copied = "";
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { copied = text; } } });
+    documentBody.querySelector<HTMLButtonElement>('.code-block-copy')!.click();
+    await wait(() => copied.length > 0, "Skill code copy outside Chat");
+    checked(copied.trim() === "lark-cli docs fetch --token 'fixture & <token>'", "copy preserves the original code");
+    checked(!(window as typeof window & { skillMarkdownInjected?: boolean }).skillMarkdownInjected, "Markdown HTML must remain sanitized");
+    information.querySelector('summary')!.click();
+    checked(information.innerText.includes("Package metadata") && information.innerText.includes("Installation information"),
+      "package information must remain available on demand");
+    information.querySelector('summary')!.click();
+  }
+  checked(!document.querySelector(".skill-card-selected"), "opening details must not select the card");
+  checked(document.querySelector(".skill-grid")!.getBoundingClientRect().width === gridWidth,
+    "opening details must preserve the grid width");
+  checked(detail.contains(document.activeElement), "the modal must own keyboard focus");
   const detailRect = detail.getBoundingClientRect();
   const viewportHeight = document.documentElement.clientHeight;
   checked(detailRect.top >= 0 && detailRect.top < viewportHeight,
     `first card detail outside viewport at ${width}px`);
-  const closeRect = detail.querySelector<HTMLButtonElement>(".skill-detail-x")!.getBoundingClientRect();
+  const closeRect = detail.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.getBoundingClientRect();
   checked(closeRect.top >= 0 && closeRect.bottom <= viewportHeight, "detail close control is outside viewport");
   checked(document.documentElement.scrollWidth <= width + 1, `detail overflows horizontally at ${width}px`);
-  detail.querySelector<HTMLButtonElement>(".skill-detail-x")!.click();
-  await wait(() => !document.querySelector(".skill-detail"), "detail close");
+  detail.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click();
+  await wait(() => !document.querySelector('[role="dialog"]'), "detail close");
   await frame();
   checked(document.activeElement === firstCard(), "closing detail must restore opener focus");
   let batches = 1;
@@ -175,15 +219,15 @@ scope.showSkillsScaleDetail = async (backend: string) => {
   await frame(); backendTab(backend).click();
   await wait(() => cardNames().length === batchSize && cardNames()[0] === "scale-0000", "first batch for detail capture");
   firstCard().click();
-  await wait(() => !!document.querySelector(".skill-detail"), "detail capture");
+  await wait(() => !!document.querySelector('[role="dialog"]'), "detail capture");
   await frame();
-  const rect = document.querySelector<HTMLElement>(".skill-detail")!.getBoundingClientRect();
+  const rect = document.querySelector<HTMLElement>('[role="dialog"]')!.getBoundingClientRect();
   checked(rect.top >= 0 && rect.top < document.documentElement.clientHeight, "captured detail heading is invisible");
   return { top: Math.round(rect.top), bottom: Math.round(rect.bottom), cardCount: cardNames().length };
 };
 
 scope.runStandaloneMcpRepair = async (width: number) => {
-  document.querySelector<HTMLButtonElement>(".skill-detail-x")?.click();
+  document.querySelector<HTMLButtonElement>('[role="dialog"] button[aria-label="Close"]')?.click();
   showDisabledMcp = true;
   const shoggothTab = document.querySelector<HTMLElement>('[role="tab"][aria-label="Shoggoth"]')!;
   const otherTab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find((tab) => tab !== shoggothTab)!;

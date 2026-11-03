@@ -1,0 +1,104 @@
+/* 运行结果弹窗内容（设计稿 246:1193）。外壳——渐变底、标题、图标行——在
+   components/Modal.module.css 的 report 变体里。 */
+
+.iconBtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: light-dark(#000000, #ffffff);
+  display: inline-grid;
+  place-items: center;
+}
+.iconBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-focus);
+}
+.iconBtn:disabled {
+  opacity: 0.35;
+}
+
+/* 两组「标签 + 值」：左组从 0 起、右组从 400 起（标签 88 / 85 宽），行高 24、行距 8。 */
+.meta {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 312fr) 85px minmax(0, 235fr);
+  row-gap: 8px;
+  margin: 0;
+  flex-shrink: 0;
+  font-size: 16px;
+  line-height: 24px;
+  color: var(--ui-text-1);
+}
+.meta dt {
+  margin: 0;
+  font-weight: 300;
+}
+.meta dd {
+  margin: 0;
+  min-width: 0;
+  padding-right: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.avatar {
+  width: 20px;
+  height: 20px;
+}
+.ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 白色正文卡：圆角 16，内距 20/24；内容超高时只有卡片自己滚动。 */
+.card {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border-radius: 16px;
+  padding: 20px 24px 24px;
+  background: light-dark(#ffffff, #28282e);
+  color: light-dark(#000000, #e4e4e7);
+  font-size: 14px;
+  line-height: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/* 卡片小标题与正文间距 20（设计稿 Describe 224..245，正文 265 起）。 */
+.cardLabel {
+  margin: 0 0 8px;
+  font-size: 14px;
+  line-height: 21px;
+  font-weight: 300;
+}
+.card p {
+  margin: 0;
+}
+/* 正文沿用聊天 Markdown，只把字号行高对到设计稿的 14/22。 */
+.card :global(.cron-delivery-md) {
+  font-size: 14px;
+  line-height: 22px;
+  color: inherit;
+}
+.note {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--ui-text-2);
+}
+.error {
+  font-size: 13px;
+  line-height: 20px;
+  color: light-dark(#b91c1c, #f87171);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

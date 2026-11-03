@@ -24,7 +24,7 @@ function systemText(message, nameOf) {
   if (system.eventType === "member_added") return `${name} joined the group`;
   if (system.eventType === "member_removed") return `${name} left the group`;
   if (system.eventType === "turn_failed") return system.errorCode === "GROUP_TURN_TIMEOUT" ? `${name} did not respond` : `${name} could not answer`;
-  if (system.eventType === "turn_stopped") return `The user stopped ${name}'s work`;
+  if (system.eventType === "turn_stopped") return `The user ended ${name}'s turn. Do not wait for that reply or assume the unfinished work completed`;
   if (system.eventType === "work_done") return `${name} finished the assigned work`;
   return null;
 }
@@ -71,7 +71,7 @@ const STATUS_TEXT = { posted: "posted", passed: "passed", missed: "no response",
  * @param {{ group: {name: string, purpose?: string}, member: object, members: object[], ownerId: string|null,
  *   earlier: object[], current: object[], omitted?: number, spokeThisRound?: boolean,
  *   order: {memberId: string, status: string|null}[], position: number,
- *   working?: {memberId: string, since: number}[], note: string, now?: number,
+ *   working?: {memberId: string, since: number, unconfirmed?: boolean}[], note: string, now?: number,
  *   attachmentPath?: (attachment: object) => string|null, readHistory?: boolean }} input
  *   order 里当前发言者的 status 为 "speaking"；attachmentPath 只给没有原生附件通道的外部成员；
  *   readHistory 表示成员有 group_messages_read 可以回查没列出的消息（原生成员）。
@@ -100,12 +100,13 @@ function renderRoomPrompt({ group, member, members, ownerId, earlier, current, o
       ? `${spokeThisRound ? "Since your last turn this round" : "Round so far"} (oldest first):\n${lines(current).join("\n")}`
       : "No new messages since your last turn.",
     omitted > 0 ? `(${omitted} earlier messages not listed${readHistory ? "; read them with group_messages_read when needed" : ""})` : "",
-    working.length ? `Still working; results will return: ${working.map(item => `${nameOf(item.memberId)} (${minutes(item.since)} min)`).join(", ")}.` : "",
+    working.some(item => !item.unconfirmed) ? `Still working; results will return: ${working.filter(item => !item.unconfirmed).map(item => `${nameOf(item.memberId)} (${minutes(item.since)} min)`).join(", ")}.` : "",
+    working.some(item => item.unconfirmed) ? `Execution status unconfirmed: ${working.filter(item => item.unconfirmed).map(item => nameOf(item.memberId)).join(", ")}. Their original runs are being checked automatically. Continue independent work only; do not assume their missing results are available.` : "",
     `Current speaking queue: ${order.map((slot, index) => (index === position ? "you (now)"
       : `${nameOf(slot.memberId)}${STATUS_TEXT[slot.status] ? ` (${STATUS_TEXT[slot.status]})` : ""}`)).join(" → ")}.`,
     `Your queued position: ${position + 1}/${order.length}; ${before === 0 ? "no earlier slots" : `${before} earlier slots`}`
       + `${after === 0 ? "; no members queued after you; invite others if the user requested it." : `; ${after} after you will see this message.`}`,
-    "Reply in the user's language. Write the message without a name prefix; keep discussion brief. If asked to work, use tools now: the group can move on while you work. "
+    "Reply in the user's language. Write the message without a name prefix; keep discussion brief. If asked to work, use tools now and post the results in this turn before handing off. "
       + "Briefly state your intent, share material findings, then give results; do not promise to work later. With nothing new or nothing addressed to you, reply only (pass). "
       + "To share a file, end with a separate line: Attachment: file path.",
   ];

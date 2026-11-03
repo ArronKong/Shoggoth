@@ -610,8 +610,10 @@ class GroupRuntimeHost {
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); res.end(body);
       } catch (error) {
         let value; try { value = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {}
-        const code = /^GROUP_HOST_[A-Z_]+$/u.test(error?.code ?? "") || require("./group-member-model").isModelError(error?.code)
-          ? error.code : "GROUP_HOST_UNAVAILABLE";
+        const code = value?.method === "host.prepare" && value.params?.execution?.backendId === "openclaw"
+          && error?.code === "OPENCLAW_GROUP_SESSION_ARCHIVED" ? "GROUP_HOST_SESSION_ARCHIVED"
+          : /^GROUP_HOST_[A-Z_]+$/u.test(error?.code ?? "") || require("./group-member-model").isModelError(error?.code)
+            ? error.code : "GROUP_HOST_UNAVAILABLE";
         const reply = rpc ? { version: [1, p.VERSION].includes(value?.version) ? value.version : p.VERSION,
           id: value?.id ?? null, hostId: this.hostId, ok: false, error: { code } } : { ok: false, error: { code } };
         res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" }); res.end(JSON.stringify(reply));

@@ -91,10 +91,10 @@ state.queueFixture=async(phase:string)=>{
     activity:{groupId:'owned',memberId:'member',opportunityId:'owned-turn',taskId:null,attemptId:null,
       runId:'original-run',executionGeneration:'host-generation',phase,eventSeq:0,recentTools:[],tool:null,lastProgressAt:1}}];
   window.dispatchEvent(new Event('focus'));
-  await wait(()=>Boolean(document.querySelector('[data-group-activity="owned-turn"][data-activity-phase="'+phase+'"]')),
-    'bound execution phase missing: '+phase);
-  if(!document.body.innerText.includes(i18n.t('groupChat.activity.phase.'+phase))||writes)
-    throw Error('queue phase or read-only boundary failed');
+  await wait(()=>Boolean(document.querySelector('[data-group-execution="owned-turn"] [data-group-stop-turn="owned-turn"]')),
+    'healthy queued/running turn lost its normal bubble and Stop: '+phase);
+  if(document.querySelector('[data-chat-composer] [role=status], [data-chat-composer] [role=alert]')||writes)
+    throw Error('quiet composer or read-only boundary failed');
   if(document.querySelector('textarea')?.value!=='Keep this draft')throw Error('queue transition erased draft');
   if(groupChatActivity(group)!==(phase==='queued'?'queued':'running'))throw Error('sidebar mislabels execution phase');
   if(phase==='queued'&&groupChatPreview(group,i18n.t.bind(i18n))!==i18n.t('groupChat.sidebar.queued'))throw Error('queue preview missing');
@@ -109,8 +109,9 @@ state.startStopFixture=async()=>{
   window.dispatchEvent(new Event('focus'));
   await wait(()=>Boolean(stopButton()&&!stopButton()!.disabled),'stop button did not become available');
   stopButton()!.click();
-  await wait(()=>writes===1&&Boolean(stopButton()?.disabled)&&document.body.innerText.includes(i18n.t('groupChat.stopState.requesting')),
-    'stop did not show immediate pending feedback');
+  await wait(()=>writes===1&&Boolean(stopButton()?.disabled)&&Boolean(stopButton()?.getAttribute('aria-busy')),
+    'stop did not enter the immediate pending button state');
+  if(document.querySelector('[data-chat-composer] [role=status]'))throw Error('requesting copy leaked into composer');
   stopButton()!.click();
   if(writes!==1)throw Error('repeat click posted another stop');
   return {requesting:true,stopWrites:writes};
@@ -120,8 +121,8 @@ state.confirmStopFixture=async()=>{
   group.activeTurns=[{...group.activeTurns[0],stopping:true,recovery:{type:'execution',reason:'GROUP_EXECUTION_STOP_UNCONFIRMED',since:1,cancelRequested:true}}];
   if(!completeStop)throw Error('stop request missing');
   completeStop();
-  await wait(()=>document.body.innerText.includes(i18n.t('groupChat.stopState.confirming'))&&Boolean(stopButton()?.disabled),
-    'persisted cancellation did not show confirmation pending');
+  await wait(()=>Boolean(stopButton()?.disabled),'persisted cancellation must keep its duplicate-stop guard');
+  if(document.querySelector('[data-chat-composer] [role=status]'))throw Error('stop confirmation copy leaked into composer');
   if(document.querySelector('textarea')?.value!=='Keep this draft')throw Error('stop erased draft');
   return {confirmationPending:true,draftPreserved:true};
 };
@@ -184,9 +185,9 @@ const result=await w.webContents.executeJavaScript('window.runFixture()');
 for(const phase of ['queued','running']){
 Object.assign(result,await w.webContents.executeJavaScript('window.queueFixture('+JSON.stringify(phase)+')'));
 for(const width of [1200,390]){w.setContentSize(width,800);await w.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-await w.webContents.executeJavaScript("document.querySelector('[data-group-activity=owned-turn]').scrollIntoView({block:'center'})");
+await w.webContents.executeJavaScript("document.querySelector('[data-group-execution=owned-turn]').scrollIntoView({block:'center'})");
 await w.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-if(!await w.webContents.executeJavaScript("(()=>{const r=document.querySelector('[data-group-activity=owned-turn]').getBoundingClientRect();return r.top>=0&&r.bottom<=document.querySelector('textarea').getBoundingClientRect().top})()"))throw Error('execution phase is outside the visible chat area');
+if(!await w.webContents.executeJavaScript("(()=>{const r=document.querySelector('[data-group-execution=owned-turn]').getBoundingClientRect();return r.top>=0&&r.bottom<=document.querySelector('textarea').getBoundingClientRect().top})()"))throw Error('execution phase is outside the visible chat area');
 fs.writeFileSync(${JSON.stringify(output)}+'/'+language+'-'+width+'-'+phase+'.png',(await w.webContents.capturePage()).toPNG());}}
 for(const phase of ['requesting','confirming']){
 Object.assign(result,await w.webContents.executeJavaScript(phase==='requesting'?'window.startStopFixture()':'window.confirmStopFixture()'));
