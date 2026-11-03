@@ -61,11 +61,18 @@ test("a resumed native session receives fresh memory but never repeats the trans
       const turn = f.host.lastTurnStartParams;
       assert.equal(f.host.turnStartCalls, 1);
       assert.deepEqual(turn.input, [{ type: "text", text: "current-user-message", text_elements: [] }]);
-      assert.deepEqual(f.host.lastInjectedItems, {
-        threadId: turn.threadId,
-        items: [{ type: "message", role: "user", content: [{ type: "input_text",
-          text: resumed ? "fresh-memory" : "fresh-memory\nprior-transcript-seed" }] }],
-      });
+      const { threadId, items } = f.host.lastInjectedItems;
+      assert.equal(threadId, turn.threadId);
+      assert.equal(items.length, resumed ? 2 : 1);
+      if (resumed) {
+        assert.equal(items[0].type, "message");
+        assert.equal(items[0].role, "developer");
+        assert.equal(items[0].content.length, 1);
+        assert.equal(items[0].content[0].type, "input_text");
+        assert.match(items[0].content[0].text, /\n\ninstructions$/u);
+      }
+      assert.deepEqual(items.at(-1), { type: "message", role: "user", content: [{ type: "input_text",
+        text: resumed ? "fresh-memory" : "fresh-memory\nprior-transcript-seed" }] });
       assert.ok(f.log.lastIndexOf("host.threadInjectItems") < f.log.indexOf("host.turnStart"),
         "the current memory and first-session transcript seed must arrive before the user turn");
     } finally { await f.coordinator.close(); }
