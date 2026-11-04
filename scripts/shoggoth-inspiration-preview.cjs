@@ -34,18 +34,31 @@ async function startPreview(port = 61805, { liveTrajectory = false } = {}) {
     const pending = new Map();
     const observers = new Map();
     const watchSession = f.backend.watchSession.bind(f.backend);
+    // Only a live simulated round is watched here; once it settles the Session's later rounds are real.
     f.backend.watchSession = (key, hooks, options = {}) => {
-      const execution = [...simulated.values()].find(value => key === `agent:${value.agentId}:${value.sessionKey}`);
+      const execution = [...simulated.values()].find(value => key === `agent:${value.agentId}:${value.sessionKey}`
+        && !terminal.has(dispatcher.getRun(value.runId)?.status));
       if (!execution) return watchSession(key, hooks, options);
       return new Promise(resolve => {
-        const watchers = observers.get(execution.runId) || new Set();
-        observers.set(execution.runId, watchers); watchers.add(hooks);
+        const watchers = observers.get(execution.runId) || new Map();
+        observers.set(execution.runId, watchers);
         const stop = () => { watchers.delete(hooks); if (!watchers.size) observers.delete(execution.runId); resolve(); };
+        watchers.set(hooks, stop);
         if (options.signal?.aborted) stop(); else options.signal?.addEventListener('abort', stop, { once: true });
       });
     };
+    // Settle a simulated round for its watchers the way the real backend does: retire the answered
+    // request, report the final reply, then stop watching.
+    const finish = (execution, requestId, text, canceled) => {
+      for (const [hooks, stop] of [...(observers.get(execution.runId) || [])]) {
+        if (requestId) hooks.promptExpire?.({ requestId });
+        hooks.final?.(text, false, { runId: execution.runId, notificationCategory: 'inspiration',
+          ...(canceled ? { stopReason: 'cancelled' } : {}) });
+        stop();
+      }
+    };
     const notify = (execution, kind, content) => {
-      for (const hooks of observers.get(execution.runId) || []) {
+      for (const hooks of observers.get(execution.runId)?.keys() || []) {
         if (kind === 'tool_call' || kind === 'tool_result') hooks.tool?.({
           toolCallId: content.toolCallId, name: content.tool.name, args: content.tool.displayArgs,
           phase: kind === 'tool_call' ? 'start' : 'result', result: content.tool.resultSummary,
@@ -84,11 +97,13 @@ async function startPreview(port = 61805, { liveTrajectory = false } = {}) {
         if (status === 'waiting_input' || status === 'waiting_approval') {
           const type = status === 'waiting_input' ? 'prompt' : 'approval';
           const requestId = id();
-          const payload = type === 'prompt' ? { requestId, message: '第一版想先记录哪一类咖啡？',
+          // Same shapes a real runtime produces, so the Session's prompt card can render them too.
+          const payload = type === 'prompt' ? { requestId, method: 'mcpServer/elicitation/request', kind: 'mcp_elicitation',
+            serverName: 'shoggoth', mode: 'form', message: '第一版想先记录哪一类咖啡？',
             requestedSchema: { type: 'object', properties: { coffee: { type: 'string', title: '优先支持',
               enum: ['handbrew', 'espresso'], oneOf: [{ const: 'handbrew', title: '手冲', description: '豆子、研磨与水温' },
                 { const: 'espresso', title: '意式', description: '粉量、萃取时间与奶量' }] } }, required: ['coffee'] } }
-            : { requestId, reason: '按类型整理下载文件前，需要你确认。此处为状态演示，不会移动真实文件。',
+            : { requestId, kind: 'command', reason: '按类型整理下载文件前，需要你确认。此处为状态演示，不会移动真实文件。',
               command: 'mkdir -p downloads/{images,documents,archives}', cwd: workspace };
           dispatcher.transition(execution.runId, status, { waitingRequestId: requestId });
           store.recordAttention(execution.runId, { type, payload, occurredAt: Date.now() });
@@ -137,15 +152,28 @@ async function startPreview(port = 61805, { liveTrajectory = false } = {}) {
     const getSnapshot = coordinator.getRunSnapshot.bind(coordinator);
     coordinator.getRunSnapshot = runId => ({ ...getSnapshot(runId),
       ...(pending.has(runId) ? { interaction: pending.get(runId) } : {}) });
+    // The Session reads the run stream's authoritative snapshot; give simulated requests the same interaction.
+    const subscribeRun = coordinator.subscribeRun.bind(coordinator);
+    coordinator.subscribeRun = (runId, cursor, listener) => {
+      const subscription = subscribeRun(runId, cursor, listener);
+      return pending.has(runId) && subscription.snapshot && !subscription.snapshot.interaction
+        ? { ...subscription, snapshot: { ...subscription.snapshot, interaction: pending.get(runId) } } : subscription;
+    };
     const settle = (input, summary, canceled = false) => {
       const execution = simulated.get(input.runId);
       const run = dispatcher.getRun(input.runId);
       if (terminal.has(run.status)) return run;
+      const requestId = pending.get(run.id)?.payload.requestId;
       pending.delete(run.id);
-      if (canceled) return dispatcher.transition(run.id, 'canceled');
+      if (canceled) {
+        const stopped = dispatcher.transition(run.id, 'canceled');
+        finish(execution, requestId, '', true);
+        return stopped;
+      }
       if (run.status.startsWith('waiting_')) dispatcher.transition(run.id, 'running');
       const completed = dispatcher.transition(run.id, 'completed', { resultSummary: summary });
       append(execution, 'assistant', { text: summary });
+      finish(execution, requestId, summary, false);
       return completed;
     };
     const respondInput = coordinator.respondInput.bind(coordinator);

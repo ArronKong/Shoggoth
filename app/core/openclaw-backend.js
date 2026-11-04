@@ -62,6 +62,7 @@ const {
 } = require("./external-plugin-catalog");
 const { compareVersions } = require("./version-checker");
 const { workboardCardToActivities } = require("./dashboard-activity");
+const { isOpenClawSystemCronJob, cronJobIdFromTask } = require("./openclaw-cron-visibility");
 const { normalizeArtifactRoots, walkArtifactRoots, resolveArtifactPreviewPath } = require("./artifact-scan");
 const { collectSessionOutputArtifacts, sessionArtifactHistory } = require("./session-output-artifacts");
 const { scanUsageCube, cubeToSeries, cubeToBreakdown } = require("./usage-file-scan");
@@ -600,6 +601,7 @@ function normalizeOpenClawCronJob(job) {
     id: `openclaw:${localId}`,
     backendId: "openclaw",
     agentId: job?.agentId || undefined,
+    systemManaged: isOpenClawSystemCronJob(job),
     name: job?.name || localId,
     description: job?.description || undefined,
     prompt: typeof prompt === "string" ? prompt : undefined,
@@ -646,6 +648,38 @@ function normalizeOpenClawCronJob(job) {
 // translate it to `false` at the gateway boundary (anyOf [Literal(false), obj]).
 function cronFailureAlertForGateway(value) {
   return value == null ? false : value;
+}
+
+// Runs may send the report through `message` and finish with a short note.
+// Messages are chronological; prefer the longest delivery, otherwise the last
+// assistant text. A gateway display cap must never be presented as full text.
+function cronReportText(messages) {
+  let lastText = "", delivered = "";
+  let lastTruncated = false, deliveredTruncated = false;
+  for (const row of messages) {
+    const msg = row?.message || row;
+    if ((msg?.role || row?.role) !== "assistant") continue;
+    const truncated = msg.__openclaw?.truncated === true;
+    let text = "";
+    if (typeof msg.content === "string") text = msg.content;
+    else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part?.type === "text" && typeof part.text === "string") text += part.text;
+        else if (part?.type === "toolCall" && part.name === "message") {
+          const sent = part.arguments?.message;
+          if (typeof sent === "string" && sent.trim().length > delivered.length) {
+            delivered = sent;
+            deliveredTruncated = truncated;
+          }
+        }
+      }
+    } else if (typeof msg.text === "string") text = msg.text;
+    if (text.trim()) {
+      lastText = text;
+      lastTruncated = truncated;
+    }
+  }
+  return delivered ? (deliveredTruncated ? "" : delivered) : (lastTruncated ? "" : lastText);
 }
 
 class OpenClawBackend extends AgentBackend {
@@ -4895,6 +4929,12 @@ class OpenClawBackend extends AgentBackend {
     const runs = [];
     let truncated = false;
     try {
+      // Run logs do not retain the job payload. Join by stable id before
+      // pagination/counting, while leaving the scheduler inventory intact.
+      const endpoint = this._endpointGuard.capture();
+      const systemJobIds = new Set((await this.getCronJobs({ strict: true }))
+        .filter(isOpenClawSystemCronJob).map(job => job.id));
+      if (!this._endpointGuard.isCurrent(endpoint)) throw new Error("openclaw: cron ownership read superseded");
       let offset = 0;
       pages: for (;;) {
         const page = await this.request(
@@ -4902,12 +4942,14 @@ class OpenClawBackend extends AgentBackend {
           { scope: "all", limit: 200, offset, sortDir: "desc" },
           12000,
         );
+        if (!this._endpointGuard.isCurrent(endpoint)) throw new Error("openclaw: cron ownership read superseded");
         const entries = Array.isArray(page?.entries) ? page.entries : [];
         for (const e of entries) {
           if (!e || !e.jobId) continue; // run-log entries always carry jobId; skip malformed rows
           // ts（运行结束时刻，必填）是 desc 排序键 → 跨过零点即可停止翻页；
           // 开始于昨天、结束于今天的运行仍属于今日完成数量。
           if (typeof e.ts === "number" && e.ts < sinceMs) break pages;
+          if (systemJobIds.has(`openclaw:${e.jobId}`) || isOpenClawSystemCronJob(e)) continue;
           const startedAt = typeof e.runAtMs === "number" ? e.runAtMs : typeof e.ts === "number" ? e.ts : null;
           if ((e.ts ?? startedAt ?? 0) < sinceMs) continue;
           if (runs.length >= limit) { truncated = true; break pages; }
@@ -4965,6 +5007,8 @@ class OpenClawBackend extends AgentBackend {
   }
 
   async getCronLatestDelivery(id, atMs) {
+    const binding = this._endpointGuard.capture();
+    if (!binding) return { source: "none" };
     let run;
     try {
       if (typeof atMs === "number" && Number.isFinite(atMs)) {
@@ -4976,7 +5020,7 @@ class OpenClawBackend extends AgentBackend {
     } catch (err) {
       console.error("[openclaw] cron delivery runs failed:", err?.message || err);
     }
-    if (!run) return { source: "none" };
+    if (!run || !this._endpointGuard.isCurrent(binding)) return { source: "none" };
     const base = {
       status: run.status,
       startedAt: run.startedAt,
@@ -4989,13 +5033,41 @@ class OpenClawBackend extends AgentBackend {
       error: run.error,
       deliveryStatus: run.deliveryStatus,
     };
-    // The full untruncated output lives ONLY in the run's on-disk transcript —
-    // the gateway's chat.history/sessions.get return nothing for cron run
-    // sessions. Local gateway only: any failure (remote gateway, missing file,
-    // parse error) silently degrades to the capped summary.
-    const full = this._isLocalGateway() ? this._readCronTranscriptText(id, run.sessionKey) : "";
+    // Current OpenClaw stores transcripts in SQLite. cron.history resolves the
+    // recorded run even when chat.history cannot resolve its synthetic run key.
+    // Keep JSONL compatibility for older local gateways.
+    let full = await this._readCronHistoryText(id, run);
+    if (!this._endpointGuard.isCurrent(binding)) return { source: "none" };
+    if (!full && this._isLocalGateway()) full = this._readCronTranscriptText(id, run.sessionKey);
     if (full) return { ...base, fullText: full, source: "transcript" };
     return { ...base, fullText: null, source: run.summary ? "summary" : "none" };
+  }
+
+  async _readCronHistoryText(id, run) {
+    const runId = typeof run.runId === "string" ? run.runId.trim() : "";
+    const selector = runId ? { runId }
+      : Number.isSafeInteger(run.startedAt) && run.startedAt >= 0 ? { runAtMs: run.startedAt } : null;
+    if (!selector || (this._gatewayHello && !this.hasGatewayMethod("cron.history"))) return "";
+    const binding = this._endpointGuard.capture();
+    const pages = [], cursors = new Set();
+    let cursor, bytes = 0;
+    try {
+      for (let pageNumber = 0; pageNumber < 10; pageNumber++) {
+        if (!this._endpointGuard.isCurrent(binding)) return "";
+        const page = await this.request("cron.history", {
+          id: this._localId(id), ...selector, limit: 100, ...(cursor ? { cursor } : {}),
+        }, 15000);
+        if (!this._endpointGuard.isCurrent(binding) || !Array.isArray(page?.messages)) return "";
+        bytes += Buffer.byteLength(JSON.stringify(page));
+        if (bytes > 8 * 1024 * 1024) return "";
+        pages.unshift(page.messages); // The next cursor reads older messages.
+        if (page.nextCursor == null || page.nextCursor === "") return cronReportText(pages.flat());
+        if (typeof page.nextCursor !== "string" || page.nextCursor.length > 8192 || cursors.has(page.nextCursor)) return "";
+        cursor = page.nextCursor;
+        cursors.add(cursor);
+      }
+    } catch { /* Unsupported/expired history falls back to a local transcript or summary. */ }
+    return ""; // Never label an incomplete scan as the full report.
   }
 
   // R342:单次 cron 运行的 Agent Trajectory——解析与 _readCronTranscriptText 同一份
@@ -5135,33 +5207,12 @@ class OpenClawBackend extends AgentBackend {
       const file = this._cronRunTranscriptPath(id, sessionKey);
       if (!file) return "";
       const raw = fs.readFileSync(file, "utf8");
-      let lastText = ""; // last non-empty assistant text (fallback)
-      let delivered = ""; // longest outbound `message`-tool payload (preferred)
+      const messages = [];
       for (const line of raw.split("\n")) {
         if (!line.trim()) continue;
-        let o;
-        try { o = JSON.parse(line); } catch { continue; }
-        const msg = o.message || o;
-        if ((msg.role || o.role) !== "assistant") continue;
-        const c = msg.content;
-        if (typeof c === "string") {
-          if (c.trim()) lastText = c;
-        } else if (Array.isArray(c)) {
-          let text = "";
-          for (const p of c) {
-            if (!p) continue;
-            if (p.type === "text" && p.text) text += p.text;
-            else if (p.type === "toolCall" && p.name === "message") {
-              const sent = p.arguments?.message;
-              if (typeof sent === "string" && sent.trim().length > delivered.length) delivered = sent;
-            }
-          }
-          if (text.trim()) lastText = text;
-        } else if (msg.text && String(msg.text).trim()) {
-          lastText = String(msg.text);
-        }
+        try { messages.push(JSON.parse(line)); } catch { continue; }
       }
-      return delivered || lastText;
+      return cronReportText(messages);
     } catch {
       return "";
     }
@@ -5449,9 +5500,15 @@ class OpenClawBackend extends AgentBackend {
       return { supported: false, reason: "unavailable", items: [] };
     }
     try {
+      const endpoint = this._endpointGuard.capture();
       const res = await this.request("tasks.list", { status: "running", limit: 50 }, 10000);
       const rows = Array.isArray(res?.tasks) ? res.tasks : Array.isArray(res?.items) ? res.items : Array.isArray(res) ? res : [];
+      const systemJobIds = rows.some(cronJobIdFromTask)
+        ? new Set((await this.getCronJobs({ strict: true })).filter(isOpenClawSystemCronJob).map(job => job.id))
+        : new Set();
+      if (!this._endpointGuard.isCurrent(endpoint)) throw new Error("openclaw: cron ownership read superseded");
       const items = rows
+        .filter(t => !isOpenClawSystemCronJob(t) && !systemJobIds.has(cronJobIdFromTask(t)))
         .map((t) => ({
           id: String(t?.id || t?.taskId || ""),
           title: t?.title || undefined,

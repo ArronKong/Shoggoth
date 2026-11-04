@@ -9,6 +9,7 @@ import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { WebSocket, WebSocketServer } from "ws";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 const root = path.resolve(import.meta.dirname, ".."), require = createRequire(import.meta.url);
 const { build } = createRequire(path.join(root, "app/manage-ui/package.json"))("esbuild");
 const { startProxyGateway } = require("../app/core/proxy-gateway");
@@ -114,7 +115,8 @@ try {
   await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-history-pagination.tsx")],
     bundle: true, format: "esm", define: { "process.env.NODE_ENV": '"production"', __HISTORY_CASES__: JSON.stringify(fixture.cases) },
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
-    outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent" });
+    outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
+    plugins: [viteArtworkFixturePlugin(root)] });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}.history-fixture-toolbar{display:flex;gap:12px;padding:8px 20px;align-items:center;background:#eee;flex-shrink:0;font:13px system-ui}.history-fixture-toolbar button{padding:5px 10px}</style><div id="root"></div><script type="module" src="/fixture.js"></script>');
   await listen(server);
   const url = `http://127.0.0.1:${server.address().port}/#/chat`;
@@ -127,6 +129,7 @@ try {
     fs.writeFileSync(path.join(temp, "electron.cjs"), `const {app,BrowserWindow}=require("electron");const fs=require("node:fs");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1360,height:950,webPreferences:{backgroundThrottling:false}});let ok=false;
+w.webContents.on('console-message', (_event, ...details) => console.error('Renderer:', ...details));
 try{await w.loadURL(${JSON.stringify(url)});const fresh=await w.webContents.executeJavaScript("window.runNewSessionHistoryFixture()");
 const result=await w.webContents.executeJavaScript("window.runHistoryFixture()");
 if(${!!output})fs.writeFileSync(${JSON.stringify(output ? path.join(output, "history-final.png") : "")},(await w.webContents.capturePage()).toPNG());

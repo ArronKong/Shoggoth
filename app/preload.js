@@ -184,6 +184,7 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
   appUpdate: {
     getState: () => ipcRenderer.invoke("shoggoth:app-update:get-state"),
     check: () => ipcRenderer.invoke("shoggoth:app-update:check"),
+    setAutomatic: enabled => ipcRenderer.invoke("shoggoth:app-update:set-automatic", enabled),
     install: () => ipcRenderer.invoke("shoggoth:app-update:install"),
     onState: (cb) => {
       const handler = (_event, state) => {

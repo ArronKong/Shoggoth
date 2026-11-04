@@ -11,6 +11,7 @@
   --ui-scrollbar-radius: 2px;
   --ui-scrollbar-fade-duration: 400ms;
   --ui-scrollbar-thumb-visible: rgba(0, 0, 0, 0.1);
+  --ui-scrollbar-thumb-inverse: rgba(255, 255, 255, 0.16);
 }
 
 :root[data-theme="dark"] {

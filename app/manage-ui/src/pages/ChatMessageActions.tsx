@@ -54,7 +54,7 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onQuote, quoteDi
     setPosition({ left: Math.max(8, Math.min(x, window.innerWidth - bounds.width - 8)),
       top: Math.max(8, Math.min(y, window.innerHeight - bounds.height - 8)) });
     const previous = document.activeElement;
-    menu.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    (menu.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? menu).focus();
     return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true }); };
   }, [x, y]);
   useEffect(() => {
@@ -66,7 +66,7 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onQuote, quoteDi
   return createPortal(<>
     <div className="chat-ctxmenu__backdrop" onClick={onClose} onWheel={onClose}
       onContextMenu={event => { event.preventDefault(); onClose(); }} />
-    <div ref={ref} className="chat-ctxmenu" role="menu" data-message-menu="" data-keyboard={keyboard || undefined} style={position} onKeyDown={event => {
+    <div ref={ref} className="chat-ctxmenu" role="menu" tabIndex={-1} data-message-menu="" data-keyboard={keyboard || undefined} style={position} onKeyDown={event => {
       if (event.key === "Escape" || event.key === "Tab") { event.preventDefault(); onClose(); return; }
       if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
       event.preventDefault();

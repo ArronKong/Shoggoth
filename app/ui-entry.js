@@ -1500,6 +1500,8 @@ if (!gotLock) {
       app,
       ipcMain,
       getMainWindow: () => mainWindow,
+      automaticUpdates: readConfig().autoAppUpdates,
+      saveAutomaticUpdates: (enabled) => configStore.write({ autoAppUpdates: enabled }),
       onDownloaded: showUpdateReadyNotification,
       ...appInstallPreparation,
     });
@@ -1534,8 +1536,9 @@ if (!gotLock) {
       dialog.showErrorBox("Shoggoth", "暂时无法确认插件后台已停止。请稍后重试退出；原任务不会重复启动。");
     },
   });
-  app.on("before-quit", async () => {
+  app.on("before-quit", async (event) => {
     if ([managedOpenClawProductHost, managedHermesProductHost].some(host => host?.isManaged()) && !managedQuitGate.complete()) return;
+    if (appUpdateController?.handleBeforeQuit(event)) return;
     appIsQuitting = true;
     groupSendJournalIpc.dispose();
     const sendJournalStore = groupSendJournalStore;

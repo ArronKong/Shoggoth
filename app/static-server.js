@@ -1258,6 +1258,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           await registry.setGroupChatMemberModel(id, await readJsonBody(req)));
         if (segs.length === 3 && segs[1] === "members" && segs[2] === "role" && method === "GET") {
           return sendJson(res, 200, await registry.getGroupChatMemberRole(id, requestUrl?.searchParams.get("memberId") || "", {
+            ...(requestUrl?.searchParams.has("document") ? { document: requestUrl.searchParams.get("document") } : {}),
             ...(requestUrl?.searchParams.has("revision") ? { revision: requestUrl.searchParams.get("revision") } : {}),
             ...(requestUrl?.searchParams.has("cursor") ? { cursor: requestUrl.searchParams.get("cursor") } : {}) }));
         }

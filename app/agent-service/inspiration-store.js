@@ -19,6 +19,7 @@ const { EXTERNAL_BACKENDS, EXTERNAL_STATUSES, EXTERNAL_TERMINAL,
 
 const INSPIRATION_STORE_VERSION = 3;
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_HANDOFF_BYTES = 32 * 1024;
 const IDEA_FIELDS = Object.freeze([
   "id", "body", "title", "revision", "favorite", "archivedAt", "acceptedAt", "createdAt", "updatedAt", "deletedAt",
 ]);
@@ -107,8 +108,10 @@ function validExecution(value) {
   const fields = [...attachmentFields(value, EXECUTION_FIELDS)];
   if (own(value, "turnAttachments")) fields.push("turnAttachments");
   if (own(value, "inputSource")) fields.push("inputSource");
+  if (own(value, "handoffContext")) fields.push("handoffContext");
   return exact(value, fields) && UUID.test(value.id) && UUID.test(value.ideaId)
     && (!own(value, "inputSource") || (value.inputSource === "chat" && value.sessionKey !== null))
+    && (!own(value, "handoffContext") || (!own(value, "inputSource") && textValue(value.handoffContext, MAX_HANDOFF_BYTES)))
     && (!own(value, "attachments") || validAttachments(value.attachments))
     && (!own(value, "turnAttachments") || validAttachments(value.turnAttachments))
     && UUID.test(value.runId) && validId(value.operationId)
@@ -761,7 +764,7 @@ class InspirationStore extends EventEmitter {
     });
   }
 
-  prepareExecution(input, canStart, sessionKey = null) {
+  prepareExecution(input, canStart, sessionKey = null, buildHandoff = () => "") {
     const fields = ["operationId", "id", "expectedRevision", "instruction", "agentId", "backendId", "profileId", "workspace"];
     if (own(input, "turnAttachments")) fields.push("turnAttachments");
     if (own(input, "inputSource")) fields.push("inputSource");
@@ -785,12 +788,15 @@ class InspirationStore extends EventEmitter {
       if (previous.some((execution) => (execution.external && !EXTERNAL_TERMINAL.has(execution.external.status))
         || !canStart(execution))) fail("INSPIRATION_BUSY", "这条灵感已有未结束的执行");
       this.#safe({ body: idea.body, instruction: input.instruction });
+      const handoffContext = buildHandoff(previous, idea);
+      if (handoffContext) this.#safe({ handoffContext });
       const id = this.randomUUID();
       if (this.#record("executions", id)) fail("INSPIRATION_OPERATION_CONFLICT", "灵感执行 ID 冲突");
       const at = Math.max(this.#at(), idea.updatedAt, (previous[0]?.createdAt ?? -1) + 1);
       candidate.executions[id] = { id, ideaId: idea.id, operationId: input.operationId,
         ideaRevision: idea.revision, body: idea.body, title: idea.title, instruction: input.instruction,
         ...(input.inputSource ? { inputSource: input.inputSource } : {}),
+        ...(handoffContext ? { handoffContext } : {}),
         ...(idea.attachments ? { attachments: clone(idea.attachments) } : {}),
         ...(input.turnAttachments?.length ? { turnAttachments: clone(input.turnAttachments) } : {}),
         agentId: input.agentId, backendId: input.backendId, profileId: input.profileId,
@@ -817,7 +823,7 @@ class InspirationStore extends EventEmitter {
     return clone(candidate.executions[executionId]);
   }
 
-  prepareExternalExecution(input, canStart, sessionKey = null) {
+  prepareExternalExecution(input, canStart, sessionKey = null, buildHandoff = () => "") {
     const fields = ["operationId", "id", "expectedRevision", "instruction", "agentId", "backendId", "workspace"];
     if (own(input, "inputSource")) fields.push("inputSource");
     if (!exact(input, fields)
@@ -840,12 +846,15 @@ class InspirationStore extends EventEmitter {
       if (previous.some((execution) => (execution.external && !EXTERNAL_TERMINAL.has(execution.external.status))
         || !canStart(execution))) fail("INSPIRATION_BUSY", "这条灵感已有未结束的执行");
       this.#safe({ body: idea.body, instruction: input.instruction });
+      const handoffContext = buildHandoff(previous, idea);
+      if (handoffContext) this.#safe({ handoffContext });
       const id = this.randomUUID();
       if (this.#record("executions", id)) fail("INSPIRATION_OPERATION_CONFLICT", "灵感执行 ID 冲突");
       const at = Math.max(this.#at(), idea.updatedAt, (previous[0]?.createdAt ?? -1) + 1);
       const execution = { id, ideaId: idea.id, operationId: input.operationId,
         ideaRevision: idea.revision, body: idea.body, title: idea.title, instruction: input.instruction,
         ...(input.inputSource ? { inputSource: input.inputSource } : {}),
+        ...(handoffContext ? { handoffContext } : {}),
         ...(idea.attachments ? { attachments: clone(idea.attachments) } : {}),
         agentId: input.agentId, backendId: input.backendId, profileId: null,
         workspace: input.workspace, sessionKey, runId: this.randomUUID(),
@@ -1062,4 +1071,4 @@ class InspirationStore extends EventEmitter {
 }
 
 module.exports = { InspirationStore, INSPIRATION_STORE_VERSION, IDEA_FIELDS, EXECUTION_FIELDS, OPERATION_FIELDS,
-  MAX_BODY_BYTES, canonicalJson };
+  MAX_BODY_BYTES, MAX_HANDOFF_BYTES, canonicalJson };

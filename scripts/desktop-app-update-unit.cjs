@@ -2,6 +2,10 @@
 
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { createConfigStore } = require("../app/core/config-store");
 const { createDesktopAppInstallPreparation } = require("../app/desktop-app-install-preparation");
 const {
   CHANNELS,
@@ -27,6 +31,7 @@ class FakeUpdater extends EventEmitter {
 }
 
 function fixture({ packaged = true, marker = "official", config = true,
+  automaticUpdates = true, saveAutomaticUpdates, quit,
   prepareInstall = async () => null, restoreAfterInstallFailure = async () => {} } = {}) {
   const handlers = new Map();
   const ipcMain = {
@@ -45,7 +50,7 @@ function fixture({ packaged = true, marker = "official", config = true,
     ? { schemaVersion: 1, distribution: "official", signingMode: "developer-id", updateChannel: "stable" }
     : { schemaVersion: 1, distribution: "internal", signingMode: "adhoc", updateChannel: null };
   const controller = createDesktopAppUpdateController({
-    app: { isPackaged: packaged, getVersion: () => "0.8.125" },
+    app: { isPackaged: packaged, getVersion: () => "0.8.125", quit },
     platform: "darwin",
     ipcMain,
     getMainWindow: () => window,
@@ -62,6 +67,8 @@ function fixture({ packaged = true, marker = "official", config = true,
     clearIntervalFn: (timer) => { timer.cleared = true; },
     defer: (callback) => deferred.push(callback),
     onDownloaded: (state) => notifications.push(state),
+    automaticUpdates,
+    saveAutomaticUpdates,
     prepareInstall,
     restoreAfterInstallFailure,
   });
@@ -87,6 +94,102 @@ async function main() {
     assert.equal(item.controller.getState().reason, "internal-build");
     assert.equal(item.handlers.get(CHANNELS.check)(item.event).then instanceof Function, true);
     assert.equal(item.updater.checks, 0);
+    item.controller.dispose();
+  }
+
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-update-pref-"));
+    try {
+      const file = path.join(dir, "config.json");
+      const store = createConfigStore(file);
+      const fromStore = () => fixture({
+        automaticUpdates: createConfigStore(file).read().autoAppUpdates,
+        saveAutomaticUpdates: (enabled) => store.write({ autoAppUpdates: enabled }),
+      });
+      const initial = fromStore();
+      assert.equal(initial.controller.getState().automaticUpdates, false);
+      assert.equal(initial.timeouts.length + initial.intervals.length, 0);
+      const set = initial.handlers.get(CHANNELS.setAutomatic);
+      assert.equal(set({ ...initial.event, senderFrame: {} }, true), null);
+      assert.equal(set(initial.event, "true"), null);
+      assert.equal(set(initial.event, true).automaticUpdates, true);
+      initial.controller.dispose();
+
+      const reopened = fromStore();
+      assert.equal(reopened.controller.getState().automaticUpdates, true);
+      assert.equal(reopened.intervals[0].ms, CHECK_INTERVAL_MS);
+      const disable = reopened.handlers.get(CHANNELS.setAutomatic);
+      assert.equal(disable(reopened.event, false).automaticUpdates, false);
+      assert.equal(reopened.timeouts[0].cleared && reopened.intervals[0].cleared, true);
+      reopened.intervals[0].callback();
+      assert.equal(reopened.updater.checks, 0);
+      await reopened.handlers.get(CHANNELS.check)(reopened.event);
+      assert.equal(reopened.updater.checks, 1, "turning off automatic updates preserves manual checking");
+      reopened.updater.emit("update-downloaded", { version: "0.8.126" });
+      assert.equal(reopened.controller.handleBeforeQuit({ preventDefault: assert.fail }), false);
+      assert.equal(await reopened.handlers.get(CHANNELS.install)(reopened.event), true);
+      reopened.deferred.shift()();
+      assert.equal(reopened.updater.autoRunAppAfterInstall, true);
+      assert.equal(createConfigStore(file).read().autoAppUpdates, false);
+      reopened.controller.dispose();
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+
+  for (const outcome of ["ready", "busy", "installer-error"]) {
+    let stops = 0;
+    let resumes = 0;
+    let restores = 0;
+    const preparation = createDesktopAppInstallPreparation({
+      launchAgent: {
+        whenIdle: async () => {},
+        status: async () => ({ supported: true, loaded: true }),
+        stop: async () => { stops += 1; },
+        start: async () => { restores += 1; },
+      },
+      serviceRequest: async (name) => {
+        if (name === "service.stopImpact") return {
+          availability: "available", revision: "b".repeat(64), totalCount: outcome === "busy" ? 1 : 0,
+          runs: outcome === "busy" ? [{ runId: "run-1", source: "chat", status: "running", agentName: null, title: null }] : [],
+        };
+        if (name === "service.status") return { instanceNonce: "a".repeat(48) };
+        assert.equal(name, "service.quiesceIdle");
+        return { quiesced: true, instanceNonce: "a".repeat(48) };
+      },
+      suspendBackgroundActions: () => () => {},
+    });
+    const item = fixture({ ...preparation, quit: () => {
+      resumes += 1;
+      assert.equal(item.controller.handleBeforeQuit({ preventDefault: assert.fail }), false);
+    } });
+    item.timeouts[0].callback();
+    assert.equal(item.updater.checks, 1, "an enabled setting runs the startup check");
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(stops, 0, "automatic download must never stop the service before quitting");
+    let prevented = 0;
+    const event = { preventDefault: () => { prevented += 1; } };
+    assert.equal(item.controller.handleBeforeQuit(event), true);
+    assert.equal(item.controller.handleBeforeQuit(event), true);
+    assert.equal(prevented, 2);
+    await new Promise((resolve) => setImmediate(resolve));
+    if (outcome === "busy") {
+      assert.equal(item.controller.getState().installBlockReason, "active-runs");
+      assert.equal(stops, 0);
+      assert.equal(resumes, 1, "active background work should skip installation and quit normally");
+      assert.equal(item.deferred.length, 0);
+    } else {
+      assert.equal(stops, 1);
+      item.deferred.shift()();
+      assert.equal(item.updater.installs, 1);
+      assert.equal(item.updater.autoRunAppAfterInstall, false, "auto-install should not relaunch after quitting");
+      if (outcome === "installer-error") {
+        item.updater.emit("error", new Error("native installer failed"));
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(restores, 1);
+        assert.equal(resumes, 1);
+      } else {
+        assert.equal(item.controller.handleBeforeQuit({ preventDefault: assert.fail }), false, "the updater must be allowed to finish quitting");
+      }
+    }
     item.controller.dispose();
   }
 

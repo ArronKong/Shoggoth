@@ -132,7 +132,6 @@
   padding: 7px;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: none;
 }
 
 /* Base UI measures the trailing inset against scrollWidth. The indicator's

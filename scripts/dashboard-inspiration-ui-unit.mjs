@@ -48,7 +48,9 @@ const heartbeat = ['heartbeat wake requested', 'heartbeat completed', 'heartbeat
   ...cron, id: `heartbeat:${i}`, backendId: 'openclaw', title: 'heartbeat-vincent', summary: message,
   run: { backendId: 'openclaw', jobId: 'openclaw:hb', jobName: 'heartbeat-vincent', error: message },
 }));
-const firstPage = { ...empty, items: [inspiration, cron, ...heartbeat] };
+const dreaming = { ...cron, id: 'system:dreaming', backendId: 'openclaw', title: 'Memory Dreaming Promotion',
+  run: { backendId: 'openclaw', jobId: 'openclaw:dreaming', systemManaged: true, summary: 'NO_REPLY' } };
+const firstPage = { ...empty, items: [inspiration, cron, dreaming, ...heartbeat] };
 const props = { status: [{ id: 'native', connected: true }, { id: 'other', connected: true }, { id: 'openclaw', connected: true }], firstPage,
   sinceMs: 0, running: [], getAgentDisplayName: id => id,
   onOpenRun: row => opened.push(row.kind), onOpenTask: row => opened.push(row.kind),
@@ -93,6 +95,7 @@ await settle(() => { renderer = create(React.createElement(Feed, props)); });
 assert.ok(tabs(renderer).props.items.some(item => item.value === 'inspiration' && item.label === 'dashboard.filterInspiration'));
 assert.equal(rows(renderer).length, 2);
 assert.doesNotMatch(textOf(renderer.toJSON()), /heartbeat-vincent/, 'Cached heartbeat rows must be hidden on the first render');
+assert.doesNotMatch(textOf(renderer.toJSON()), /Memory Dreaming Promotion/, 'System memory maintenance must be hidden');
 assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '2', 'Feed count excludes heartbeat rows');
 const approvals = [{ id: 'pending', backendId: 'native', runId: 'run', requestId: 'request', agentId: 'agent' }];
 const onApprovalResponded = async () => {};

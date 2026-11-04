@@ -19,7 +19,7 @@
 .popup[data-starting-style], .popup[data-ending-style] { opacity: 0; transform: translateX(4px); }
 .panel {
   box-sizing: border-box; display: flex; flex-direction: column; width: 100%; max-height: inherit;
-  padding: 24px 32px 32px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
+  padding: 24px 32px 32px; overflow-y: auto; overscroll-behavior: contain;
   visibility: visible; transition: visibility 0ms;
 }
 .panel[data-active=false] {
@@ -47,7 +47,7 @@
 .heading [role=switch][data-disabled] > span { background: light-dark(#fff, #171717); }
 .hint { margin: 24px 0; min-height: 40px; flex: none; font: inherit; letter-spacing: 0; }
 .executors { display: flex; flex-direction: column; flex: 0 1 auto; gap: 12px; min-height: 24px; margin: 24px 0;
-  overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+  overflow-y: auto; overscroll-behavior: contain; }
 .executor { display: flex; align-items: center; gap: 4px; min-height: 24px; flex: none; }
 .avatar { position: relative; display: grid; place-items: center; width: 24px; height: 24px; flex: none; overflow: hidden; border-radius: 50%; background: var(--ui-agent-avatar-bg); color: var(--ui-agent-avatar-fg); font-size: 9px; font-weight: 400; letter-spacing: 0; }
 .agentName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
@@ -71,17 +71,18 @@
 .back { display: inline-flex; align-items: center; gap: 4px; box-sizing: border-box; min-width: 111px; height: 32px; padding: 4px 8px 4px 4px; margin: 0; border: 0; border-radius: 16px; background: transparent; color: inherit; font: inherit; letter-spacing: 0; cursor: pointer; }
 .back:hover:not(:disabled) { background: light-dark(#00000008, #ffffff0d); }
 .count { flex: none; font-size: 16px; font-weight: 400; line-height: 24px; }
-.runtimes { position: relative; display: flex; align-items: center; flex: none; height: 32px; gap: 0; margin-bottom: 16px; overflow-x: auto; scrollbar-width: none; }
+.runtimes { position: relative; display: flex; align-items: center; flex: none; min-height: 32px; gap: 0; margin-bottom: 16px; overflow-x: auto; overflow-y: hidden; }
 .runtimePill { background: light-dark(#000, #fff); }
 .runtime { position: relative; z-index: 1; display: grid; place-items: center; box-sizing: border-box; width: 32px; height: 32px; flex: none; padding: 8px; border: 0; border-radius: 50%; background: transparent; color: light-dark(#000, #fff); cursor: pointer;
   transition: background-color var(--ui-motion-state) ease, color 130ms ease 100ms; }
 .runtime:hover:not(:disabled) { background: light-dark(#0000000d, #ffffff14); color: light-dark(#000, #fff); }
 .runtime[aria-pressed=true], .runtime[aria-pressed=true]:hover:not(:disabled) { background: transparent; color: light-dark(#fff, #000); }
 .runtime[aria-pressed=true] { transition: background-color var(--ui-motion-state) ease, color 120ms ease 40ms; }
-.agents { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 32px; overflow-y: auto; overscroll-behavior: contain; margin-bottom: 24px; scrollbar-width: none; }
+.agents { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 32px; overflow-y: auto; overscroll-behavior: contain; margin-bottom: 24px; }
 .scrollFade {
   --fade-top: 0px; --fade-bottom: 0px;
-  mask-image: linear-gradient(transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent); }
+  mask-image: linear-gradient(transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent), linear-gradient(#000, #000);
+  mask-size: 100% 100%, var(--ui-scrollbar-track-size) 100%; mask-position: left top, right top; mask-repeat: no-repeat; }
 .scrollFade[data-scrolled] { --fade-top: 32px; }
 .scrollFade[data-more] { --fade-bottom: 32px; }
 .agent { display: flex; align-items: center; gap: 4px; box-sizing: border-box; width: 100%; min-height: 32px; height: 32px; flex: none; padding: 4px; border: 0; border-radius: 16px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -96,7 +97,7 @@
 .waiting { color: var(--ui-text-2); }
 .retry { display: block; margin-top: 4px; padding: 0; border: 0; background: transparent; color: inherit; text-decoration: underline; font: inherit; cursor: pointer; }
 .noticeTrigger { color: var(--ui-warning); }
-.noticesPopup { padding: 24px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.noticesPopup { padding: 24px; overflow-y: auto; overscroll-behavior: contain; }
 .noticesTitle { margin: 0; color: var(--ui-error); font-size: 14px; font-weight: 500; line-height: 20px; }
 .failures { font-size: 12px; }
 .failures button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; text-align: left; padding: 16px 0; border: 0; border-bottom: 1px solid var(--ui-hairline); border-radius: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }

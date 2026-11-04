@@ -239,6 +239,32 @@ test("results persist across Service restart and continuation reuses the exact e
   await assert.rejects(f.call("session.send", { ...send, backendId: "openclaw" }), { code: "INSPIRATION_BINDING_INVALID" });
 });
 
+test("switching an external Agent dispatches saved note context to the new session once", async t => {
+  const f = fixture(t);
+  const original = await f.create();
+  const first = (await f.call("start", f.params(original))).idea;
+  const oldRunId = first.latestExecution.runId;
+  await f.settle(oldRunId);
+  f.snapshots.set(oldRunId, { status: "completed", resultSummary: "第一轮交接成果", finishedAt: Date.now() });
+  await f.reconcile(oldRunId);
+  const oldPrompt = f.calls.find(call => call.method.endsWith(".start")).params.prompt;
+  const nextParams = { ...f.params(f.service.view(original.id)), backendId: "openclaw", agentId: "other",
+    instruction: "第二轮请完善交接成果" };
+  const next = (await f.call("start", nextParams)).idea;
+  await f.settle(next.latestExecution.runId);
+  const starts = f.calls.filter(call => call.method.endsWith(".start"));
+  assert.equal(starts.length, 2);
+  assert.notEqual(starts[1].params.sessionKey, starts[0].params.sessionKey);
+  for (const text of [original.body, "保留原文约束", "第一轮交接成果", nextParams.instruction]) {
+    assert.ok(starts[1].params.prompt.includes(text), text);
+  }
+  await f.call("start", nextParams);
+  await f.restart();
+  assert.equal(f.calls.filter(call => call.method.endsWith(".start")).length, 2);
+  assert.equal(f.service.buildPrompt(f.store.executionForRun(oldRunId)), oldPrompt);
+  assert.equal(f.service.buildPrompt(f.store.executionForRun(next.latestExecution.runId)), starts[1].params.prompt);
+});
+
 for (const backendId of ["hermes", "openclaw"]) test(`${backendId}: composer sends plain text, card additions retain the template after restart`, async t => {
   const f = fixture(t), idea = await f.create();
   const first = (await f.call("start", { ...f.params(idea), backendId })).idea;

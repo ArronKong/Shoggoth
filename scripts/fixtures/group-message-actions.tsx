@@ -354,6 +354,46 @@ state.runFixture = async () => {
   check(sends[0].input.replyTo === 10 && sends[0].input.ownerScope === "owner-b", "quoted send retains selected seq and current owner");
   check(writes.length === 1, "only the intentional test send writes to the API");
   checks.push("quote submission preserves canonical sequence and current owner");
+  await state.showDesignState("members");
+  const memberButton = document.querySelector<HTMLButtonElement>('[data-group-details-member="member-1"]')!;
+  const nativeMenuSuppressed = !memberButton.dispatchEvent(new MouseEvent("contextmenu", {
+    bubbles: true, cancelable: true, clientX: innerWidth - 1, clientY: innerHeight - 1,
+  }));
+  await wait(() => document.querySelector('[data-group-member-remove]'), "member context menu opened");
+  const memberAction = document.querySelector<HTMLButtonElement>('[data-group-member-remove]')!;
+  const memberMenuBounds = document.querySelector('[role="menu"]')!.getBoundingClientRect();
+  check(nativeMenuSuppressed && memberAction.textContent === i18n.t("groupChat.members.remove") && !memberAction.disabled,
+    "member context menu replaces the native image menu with the localized remove action");
+  check(memberMenuBounds.right <= innerWidth && memberMenuBounds.bottom <= innerHeight, "member menu stays inside viewport edges");
+  memberAction.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await wait(() => !document.querySelector('.chat-ctxmenu'), "member menu Escape dismisses");
+  check(document.activeElement === memberButton, "Escape returns focus to the member");
+  const iconColors = ["close", "settings", "delete"].map(action => {
+    const button = document.querySelector<HTMLElement>(`[data-group-details-action="${action}"]`)!, icon = button.firstElementChild!;
+    const bounds = button.getBoundingClientRect(), iconBounds = icon.getBoundingClientRect(), css = getComputedStyle(icon);
+    check(bounds.width === 40 && bounds.height === 40 && iconBounds.width === 40 && iconBounds.height === 40,
+      "all header controls and icon canvases share a 40px square");
+    check(css.maskImage !== "none", "header icon mask loads even with inline SVG URLs");
+    check([[-18,0],[18,0],[0,-18],[0,18]].every(([x,y]) =>
+      document.elementFromPoint(bounds.left + 20 + x, bounds.top + 20 + y)?.closest("button") === button),
+      "header control blank edges belong to the same click target");
+    return css.backgroundColor;
+  });
+  check(new Set(iconColors).size === 1, "header icons share one theme color");
+  if (theme === "light") check(iconColors[0] === "rgb(0, 0, 0)", "light-theme header icons are pure black");
+  memberCount = 2; emitGroupChanged("g");
+  await wait(() => document.querySelectorAll('[data-group-details-member]').length === 2, "two-member roster observed");
+  const lastMember = document.querySelector<HTMLButtonElement>('[data-group-details-member]')!;
+  lastMember.focus();
+  lastMember.dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true }));
+  await wait(() => document.querySelector('[data-group-member-remove]'), "two-member menu opened with keyboard");
+  check(document.querySelector<HTMLButtonElement>('[data-group-member-remove]')!.disabled, "removal is disabled with two members remaining");
+  check(document.activeElement === document.querySelector('[role="menu"]'), "an all-disabled menu still receives keyboard focus");
+  document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await wait(() => !document.querySelector('.chat-ctxmenu'), "disabled member menu closes with Escape");
+  check(document.activeElement === lastMember && writes.length === 1, "disabled removal restores member focus without a write");
+  memberCount = 5; emitGroupChanged("g"); await state.showDesignState("chat");
+  checks.push("member context menu and keyboard dismissal; two-member minimum; matching header icon color and 40px click targets");
   await open(12);
   return { passed: true, language, theme, checks, apiWrites: writes.length, providerCalls: 0, historyReads: historyReads.length };
 };

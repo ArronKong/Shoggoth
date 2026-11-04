@@ -42,7 +42,7 @@ export function LarkCliRecommendation({ model, onOpen, onAdd }: { model: Model; 
   return <div className={s.service} data-lark-recommendation>
     <button type="button" className={s.serviceOpen} onClick={onOpen}><McpConnectorIcon name={t("larkCli.name")} identity="lark-cli" />
       <span className={s.serviceText}><strong>{t("larkCli.name")}</strong><small>{t("larkCli.description")}</small></span></button>
-    {!model.data?.canRemove && <button type="button" className={s.button} disabled={model.busy || !model.data || !!model.error} onClick={onAdd || onOpen}>{t("mcpConnectors.add")}</button>}
+    {!model.data?.canRemove && <button type="button" className="btn-secondary btn-sm" disabled={model.busy || !model.data || !!model.error} onClick={onAdd || onOpen}>{t("mcpConnectors.add")}</button>}
   </div>;
 }
 
@@ -66,8 +66,8 @@ export default function LarkCliDialog({ model, onClose }: { model: Model; onClos
   const canInstall = data && !["LARK_CLI_STATE_UNAVAILABLE", "LARK_CLI_UNSUPPORTED", "LARK_CLI_OWNERSHIP_CONFLICT"].includes(data.errorCode || "");
   const setupView = useLarkCliSetupView({ model: setup, revision: data?.revision || 0, enabled: installed });
   const footer = <div className={s.flowFooter}><p>{t(setup.data?.state === "ready" ? "mcpConnectors.flow.connectedHint" : "mcpConnectors.defaultAccess")}</p><div className={s.flowFooterActions}>
-    {!installed ? <button type="button" className={s.primary} disabled={model.busy || !canInstall || Boolean(model.error)} onClick={() => void model.change("install")}>{t(data?.canRemove ? "larkCli.reinstall" : "mcpConnectors.add")}</button> : setupView.actions}
-    <button type="button" className={setup.data?.state === "ready" ? s.primary : s.button} disabled={model.busy} onClick={onClose}>{t("larkCli.close")}</button>
+    {!installed ? <button type="button" className="btn-dark btn-sm" disabled={model.busy || !canInstall || Boolean(model.error)} onClick={() => void model.change("install")}>{t(data?.canRemove ? "larkCli.reinstall" : "mcpConnectors.add")}</button> : setupView.actions}
+    <button type="button" className={setup.data?.state === "ready" ? "btn-dark btn-sm" : "btn-secondary btn-sm"} disabled={model.busy} onClick={onClose}>{t("larkCli.close")}</button>
   </div></div>;
   return <Modal open title={<span className={s.dialogIdentity}><McpConnectorIcon name={t("larkCli.name")} identity="lark-cli" />{t("larkCli.name")}</span>} onClose={onClose} dismissible={!model.busy} width={640} variant="connector" subtitle={t("larkCli.description")} footer={footer}>
     <div className={s.detail}>
@@ -80,7 +80,7 @@ export default function LarkCliDialog({ model, onClose }: { model: Model; onClos
       {installed && setupView.content}
       <details className={s.management}><summary>{t("mcpConnectors.flow.advanced")}</summary>
         {data && <p className={s.muted}>{t("larkCli.version")} {data.installedVersion || data.version}{data.canRemove && <> · {t("larkCli.skills", { count: data.skillCount })}</>}</p>}
-        {data?.canRemove && <button type="button" className={s.danger} disabled={model.busy || setup.active || setup.working} onClick={() => void (async () => {
+        {data?.canRemove && <button type="button" className="btn-danger btn-sm" disabled={model.busy || setup.active || setup.working} onClick={() => void (async () => {
           if (await confirm({ title: t("larkCli.removeTitle"), message: t("larkCli.removeConfirm"), confirmLabel: t("larkCli.remove") })) await model.change("remove");
         })()}>{t("mcpConnectors.flow.remove")}</button>}
       </details>

@@ -23,17 +23,8 @@
 .close { display: flex; flex: 0 0 40px; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
 .close img { display: block; }
 .close:hover { background: var(--bg-hover); }
-.close:focus-visible, .file:focus-visible, .notice button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
+.close:focus-visible, .notice button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
 .scroll { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; padding: 17px 60px 28px 59px; }
-.list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 60px; align-content: start; }
-.file { display: flex; align-items: center; min-width: 0; width: 100%; min-height: 112px; padding: 0; border: 0; border-radius: 12px; background: transparent; color: inherit; font: inherit; text-align: start; cursor: pointer; }
-.file:hover { background: color-mix(in srgb, var(--bg-hover) 65%, transparent); }
-.body { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 8px; padding: 20px 0; font-size: 12px; line-height: 16px; }
-.name, .author { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.name { color: var(--chat-text); }
-.author { color: var(--chat-text); }
-.meta { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--muted-fg); font-weight: 300; white-space: nowrap; }
-.meta time { overflow: hidden; text-overflow: ellipsis; }
 .note, .notice, .empty { margin: 0 0 12px; color: var(--muted-fg); font-size: 12px; line-height: 18px; }
 .notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .notice p { margin: 0; }
@@ -45,13 +36,11 @@
 
 @container group-files (max-width: 780px) {
   .scroll { padding-inline: 28px; }
-  .list { column-gap: 24px; }
 }
 
 @container group-files (max-width: 620px) {
   .header { padding-left: 23px; }
   .scroll { padding: 8px 23px 24px; }
-  .list { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (max-width: 760px) {

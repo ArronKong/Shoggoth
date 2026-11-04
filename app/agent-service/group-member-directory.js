@@ -190,8 +190,9 @@ class GroupMemberDirectory {
     this.refreshGenerations.set(groupId, (this.refreshGenerations.get(groupId) ?? 0) + 1);
   }
 
-  #snapshot(groupId, memberId, source, exported) {
+  #snapshot(groupId, memberId, source, exported, document) {
     return this.store.saveRoleSnapshot({ groupId, memberId, text: exported.text,
+      ...(document ? { document } : {}),
       sourceRevision: source.revision, sourceDigest: exported.sourceDigest, exportDigest: exported.exportDigest,
       disclosurePolicyRevision: this.disclosurePolicyRevision, disclosure: exported.disclosure });
   }
@@ -288,6 +289,7 @@ class GroupMemberDirectory {
         source = { name: agent.name || null, online: true, runtime: member.backendId, model: agent.model || null,
           revision: null, identity, soul, readable: true, groupTools: capabilities.groupTools, capabilities };
         source.identity = identity.text; source.soul = soul.text; source.readable = identity.available && soul.available;
+        source.soulReadable = soul.available;
       } catch { /* 后端未连接或 Agent 不存在：离线 */ }
     }
     this.externalSources.set(key, { at: this.now(), source });
@@ -370,10 +372,14 @@ class GroupMemberDirectory {
     const member = view.members.find((item) => item.id === memberId);
     if (!member) return { ok: false, code: "member_not_found" };
     if (member.state !== "active") return { ok: false, code: "access_revoked" };
+    const document = options.document;
+    if (document !== undefined && document !== "SOUL.md") return { ok: false, code: "source_unavailable" };
+    const exportSource = source => exportRoleDocuments(document ? { soul: source.soul } : source);
     let snapshot, offset = 0;
     if (options.cursor) {
       const cursor = this.store.roleCursor(null, options.cursor);
       if (!cursor || cursor.groupId !== groupId || cursor.memberId !== memberId
+        || cursor.document !== document
         || cursor.policy !== this.disclosurePolicyRevision || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0
         || (options.revision === "seen" && !options.seenSnapshotId)
         || (options.revision === "seen" && options.seenSnapshotId && cursor.id !== options.seenSnapshotId)
@@ -392,18 +398,21 @@ class GroupMemberDirectory {
       if (!snapshot && member.profileId && /^[1-9][0-9]{0,8}$/u.test(options.revision)) {
         const old = this.definitionStore.readRevision?.(member.profileId, Number(options.revision));
         if (old) snapshot = this.#snapshot(groupId, memberId, { revision: old.manifest.revision },
-          exportRoleDocuments({ identity: old.documents.IDENTITY, soul: old.documents.SOUL }));
+          exportSource({ identity: old.documents.IDENTITY, soul: old.documents.SOUL }), document);
       }
     } else {
       const source = await this.#source(member, true);
-      if (!source.readable) return { ok: false, code: "source_unavailable" };
-      snapshot = this.#snapshot(groupId, memberId, source, exportRoleDocuments(source));
+      if (!(document ? source.soulReadable ?? source.readable : source.readable)) return { ok: false, code: "source_unavailable" };
+      snapshot = this.#snapshot(groupId, memberId, source, exportSource(source), document);
     }
-    if (!snapshot || snapshot.disclosurePolicyRevision !== this.disclosurePolicyRevision) return { ok: false, code: "revision_unavailable" };
+    if (!snapshot || snapshot.document !== document || snapshot.disclosurePolicyRevision !== this.disclosurePolicyRevision) {
+      return { ok: false, code: options.cursor ? "invalid_cursor" : "revision_unavailable" };
+    }
     let page;
     try { page = resultPage(snapshot.text, { offset, digest: snapshot.exportDigest }); }
     catch { return { ok: false, code: options.cursor ? "invalid_cursor" : "revision_unavailable" }; }
     const nextCursor = page.nextOffset === null ? null : this.store.roleCursor({ groupId, memberId, id: snapshot.id,
+      ...(document ? { document } : {}),
       digest: snapshot.exportDigest, sourceRevision: snapshot.sourceRevision,
       policy: this.disclosurePolicyRevision, offset: page.nextOffset });
     return {

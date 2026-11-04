@@ -54,6 +54,7 @@ function ocEntry(ts, i, over = {}) {
 function mkOcBackend(pages) {
   const b = new OpenClawBackend({ getUpstreamUrl: () => "ws://127.0.0.1:1" });
   b._connect = async () => {};
+  b.getCronJobs = async () => []; // Ownership joins are covered by openclaw-system-cron-visibility-unit.
   b.calls = [];
   b.request = async (method, params) => {
     b.calls.push({ method, params });

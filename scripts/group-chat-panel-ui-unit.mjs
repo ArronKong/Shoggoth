@@ -13,37 +13,19 @@ const { act, create } = require("react-test-renderer");
 const ts = require("typescript");
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-// Replace the DOM-backed menu primitive while retaining its open/close and item dispatch behavior.
-const MenuContext = React.createContext(null);
-const menuMock = {
-  Root: ({ children }) => {
-    const [open, setOpen] = React.useState(false);
-    return React.createElement(MenuContext.Provider, { value: { open, setOpen } }, children);
-  },
-  Trigger: ({ children, onClick, ...props }) => {
-    const state = React.useContext(MenuContext);
-    return React.createElement("button", { ...props, type: "button", "aria-expanded": state.open,
-      onClick: event => { onClick?.(event); state.setOpen(!state.open); } }, children);
-  },
-  Portal: ({ children }) => React.useContext(MenuContext).open ? children : null,
-  Positioner: ({ children }) => React.createElement("div", null, children),
-  Popup: ({ children }) => React.createElement("div", { role: "menu" }, children),
-  Item: ({ children, onClick, disabled, ...props }) => {
-    const state = React.useContext(MenuContext);
-    return React.createElement("button", { ...props, role: "menuitem", disabled,
-      onClick: event => { if (!disabled) { onClick?.(event); state.setOpen(false); } } }, children);
-  },
-};
-
 const { resultPage, sha256 } = require("../group-result-content.js");
 let fullAnswer = "";
 const groupChangedListeners = new Set();
-let roleSource = "role", oldRoleSource = "旧版公开设定。", corruptRolePage = false;
+let roleSource = "IDENTITY_ONLY_MARKER", oldRoleSource = "旧版公开设定。", corruptRolePage = false;
+let soulSource = "# SOUL.md\n\n所选 Agent 的 SOUL 内容";
 const translate = (key) => key;
 const calls = [];
 let view;
 let messages;
+let addMemberResult = () => view;
+let removeMemberResult = () => view;
 let confirmAnswer = true;
+let promptAnswer = null;
 const record = (name, result) => (...args) => { calls.push({ name, args }); return Promise.resolve(result(...args)); };
 const api = {
   getGroupChat: () => Promise.resolve(view),
@@ -56,11 +38,11 @@ const api = {
   readGroupChatMessage: record("readFull", (_id, input) => ({ page: resultPage(fullAnswer, input) })),
   reconcileGroupChatExecution: record("reconcile", () => view),
   retryGroupChatTurn: record("retry", () => view),
-  addGroupChatMember: record("add", () => view),
-  removeGroupChatMember: record("remove", () => view),
+  addGroupChatMember: record("add", (...args) => addMemberResult(...args)),
+  removeGroupChatMember: record("remove", (...args) => removeMemberResult(...args)),
   getGroupChatMemberRole: record("role", (_id, _memberId, query = {}) => {
     const id = query.cursor?.split(":")[0] ?? (query.revision === "old" ? "old" : "current");
-    const text = id === "old" ? oldRoleSource : roleSource;
+    const text = query.document === "SOUL.md" ? soulSource : id === "old" ? oldRoleSource : roleSource;
     const page = resultPage(text, { offset: Number(query.cursor?.split(":")[1] ?? 0) });
     return { ok: true, ...page, disclosure: "verbatim", revisionId: corruptRolePage && query.cursor ? "wrong-version" : id,
       exportDigest: page.digest, disclosurePolicyRevision: 1, nextCursor: page.nextOffset === null ? null : `${id}:${page.nextOffset}` };
@@ -105,6 +87,7 @@ function load(relative) {
       // 样式类名按属性名返回，便于按类名定位元素。
       if (name.endsWith(".css")) return new Proxy({}, { get: (_target, key) => (key === "__esModule" ? undefined : String(key)) });
       if (name.endsWith(".svg")) return name;
+      if (name === "react-dom") return { createPortal: children => children };
       if (name.endsWith("/api/client") || name.endsWith("/api/groupReads") || name.endsWith("/api/groupMemberModel")) return api;
       if (name.endsWith("/group-journal-recovery")) return require(path.resolve(ui, "../group-journal-recovery.js"));
       if (name.endsWith("/lib/groupSendJournal")) return groupJournalMock;
@@ -119,11 +102,11 @@ function load(relative) {
       if (/\/i18n\/group(?:Reference|Search|Execution|Model|Files)Resources$/u.test(name)) return {};
       if (name.endsWith("/components/ui")) return { useToast: () => ({ error: (value) => calls.push({ name: "toast", args: [value] }) }),
         useConfirm: () => (options) => { calls.push({ name: "confirm", args: [options] }); return Promise.resolve(confirmAnswer); },
-        usePrompt: () => () => Promise.resolve(null) };
-      if (name.endsWith("/lib/groupChat")) return { onGroupChanged: callback => { groupChangedListeners.add(callback); return () => groupChangedListeners.delete(callback); }, GROUP_NATIVE_BACKEND_ID: "shoggoth", GROUP_MAX_MEMBERS: 32,
+        usePrompt: () => (options) => { calls.push({ name: "prompt", args: [options] }); return Promise.resolve(promptAnswer); } };
+      if (name.endsWith("/lib/groupChat")) return { onGroupChanged: callback => { groupChangedListeners.add(callback); return () => groupChangedListeners.delete(callback); }, GROUP_NATIVE_BACKEND_ID: "shoggoth", GROUP_MIN_MEMBERS: 2, GROUP_MAX_MEMBERS: 32,
         GROUP_MEMBER_BACKEND_IDS: new Set(["shoggoth", "hermes", "openclaw"]) };
       if (name.endsWith("/components/Modal")) return { __esModule: true, default: (props) => props.open
-        ? React.createElement("section", { role: "dialog" }, props.title, props.children, props.footer) : null };
+        ? React.createElement("section", { role: "dialog" }, props.title, props.subtitle, props.children, props.footer) : null };
       if (name.endsWith("/components/Field")) return {
         Field: props => React.createElement("label", null, props.label, props.children),
         TextInput: props => React.createElement("input", props),
@@ -134,8 +117,8 @@ function load(relative) {
           disabled: props.disabled, onChange: event => props.onChange(event.target.checked) })),
       };
       if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader")) return passthrough("i");
-      if (name === "@base-ui/react/menu") return { Menu: menuMock };
-      if (name.endsWith("/components/ChatMarkdown")) return passthrough("p");
+      if (name.endsWith("/components/AgentSoulDocument")) return load("src/components/AgentSoulDocument.tsx");
+      if (name.endsWith("/components/ChatMarkdown") || name === "./ChatMarkdown") return passthrough("p");
       if (name.endsWith("/components/ChatFileButton")) return load("src/components/ChatFileButton.tsx");
       if (name === "./GroupChatMarkdown") return { __esModule: true, default: props => React.createElement("p", null, props.lead, props.text),
         groupAttachmentsOutsideMarkdown: (_text, attachments) => attachments };
@@ -218,10 +201,10 @@ const agents = [{ backendId: "shoggoth", agentId: "agent-a", name: "Alpha" }, { 
   { backendId: "other", agentId: "x", name: "Unsupported" }];
 
 let renderer;
-const mount = async () => {
+const mount = async (candidateAgents = agents) => {
   calls.length = 0;
   journalDrafts.clear(); journalSends.clear();
-  await act(async () => { renderer = create(React.createElement(Panel, { groupId: "g", agents, onArchived() {} })); });
+  await act(async () => { renderer = create(React.createElement(Panel, { groupId: "g", agents: candidateAgents, onArchived() {} })); });
   await act(async () => {});
 };
 const buttons = (label) => renderer.root.findAllByType("button")
@@ -240,12 +223,25 @@ const openDetails = async () => {
   assert.equal(trigger.props["aria-expanded"], true, "the header exposes its expanded state");
   assert.equal(renderer.root.findAll(node => node.type === "section" && node.props["data-group-details"] !== undefined).length, 1);
 };
-const menuAction = async (action) => {
-  await click(detailActions("menu")[0]);
-  await click(detailActions(action)[0]);
-};
+const clickDetailAction = async (action) => { await click(detailActions(action)[0]); };
 const selectDetailMember = async (id) => {
   await click(detailMembers().find(node => node.props["data-group-details-member"] === id));
+};
+const openMemberMenu = async (id, keyboard = false) => {
+  const node = detailMembers().find(node => node.props["data-group-details-member"] === id);
+  let prevented = false;
+  const event = { clientX: 120, clientY: 160, key: "F10", shiftKey: true,
+    preventDefault() { prevented = true; },
+    currentTarget: { focus() {}, getBoundingClientRect: () => ({ left: 120, bottom: 160 }) } };
+  await act(async () => { keyboard ? node.props.onKeyDown(event) : node.props.onContextMenu(event); });
+  assert.equal(prevented, true, "the app menu suppresses the browser image menu");
+  return renderer.root.find(node => node.type === "button" && node.props["data-group-member-remove"] === id);
+};
+const openMember = async (name) => {
+  const author = renderer.root.findAll(node => node.type === "button" && node.props["data-group-author"] !== undefined)
+    .find(node => node.findAllByType("span").some(span => span.children.includes(name)));
+  assert.ok(author, `member ${name} has a visible author entry`);
+  await click(author);
 };
 const named = (name) => calls.filter((call) => call.name === name);
 // 组件在独立的 vm 环境里运行，它创建的对象原型与这里不同：比较前先转成普通对象。
@@ -292,12 +288,42 @@ await mount();
 assert.equal(buttons("groupChat.retry").length, 0, "an archived group offers no retry");
 assert.equal(buttons("groupChat.archive").length, 0, "archive is replaced by deletion");
 await openDetails();
-await menuAction("delete");
+assert.ok(named("role").some(call => call.args[2].document === "SOUL.md"), "group details requests SOUL explicitly");
+await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
+assert.ok(JSON.stringify(renderer.toJSON()).includes("所选 Agent 的 SOUL 内容"));
+assert.ok(!JSON.stringify(renderer.toJSON()).includes("IDENTITY_ONLY_MARKER"));
+assert.equal(named("roleHistory").length, 0, "compact SOUL view does not request version history");
+assert.equal(detailActions("rename")[0].props.disabled, true, "an archived group cannot be renamed");
+await clickDetailAction("delete");
 assert.equal(named("deleteGroup").length, 1);
 assert.deepEqual(plain(named("deleteGroup")[0].args), ["g", 1]);
-await click(detailActions("menu")[0]);
 assert.equal(detailActions("delete")[0].props.disabled, true, "pending deletion cannot be resubmitted");
 assert.equal(renderer.root.findByType("textarea").props.disabled, true);
+assert.equal(detailActions("rename")[0].props.disabled, true, "pending deletion disables title renaming");
+
+// ---- 群名点击改名；设置和删除直接显示为图标按钮 ----
+view = base(); messages = timeline();
+await mount();
+await openDetails();
+assert.equal(detailActions("menu").length, 0, "no overflow menu remains");
+for (const [action, label] of [["settings", "groupChat.strategy.settings"], ["delete", "groupChat.delete"]]) {
+  const button = detailActions(action)[0];
+  assert.equal(button.props["aria-label"], label);
+  assert.equal(button.props.title, label);
+  assert.equal(button.children.some(child => typeof child === "string"), false, "group actions are icon buttons");
+}
+confirmAnswer = false;
+await clickDetailAction("delete");
+assert.equal(named("deleteGroup").length, 0, "cancelling the direct delete action does not delete");
+confirmAnswer = true;
+promptAnswer = "  新群名  ";
+await click(detailActions("rename")[0]);
+await act(async () => {});
+assert.deepEqual(plain(named("prompt")[0].args), [{ title: "groupChat.rename", defaultValue: "群", required: true }]);
+assert.deepEqual(plain(named("update")[0].args), ["g", { expectedMetadataRevision: 1, patch: { name: "新群名" } }]);
+promptAnswer = null;
+await click(detailActions("rename")[0]);
+assert.equal(named("update").length, 1, "cancelling title renaming does not write");
 
 // ---- 引用回复 ----
 view = base(); messages = timeline();
@@ -321,14 +347,48 @@ assert.equal(named("send")[1].args[1].replyTo, null);
 
 // ---- 添加成员 ----
 view = base(); messages = timeline();
-await mount();
+const additionAgents = [...agents, { backendId: "openclaw", agentId: "owl", name: "Owl" }];
+let finishAdd;
+let failAdd = false;
+addMemberResult = async (_id, input) => {
+  assert.equal(input.expectedRosterRevision, view.group.rosterRevision, "each add uses the latest roster revision");
+  if (failAdd) throw new Error("ADD_MEMBER_FAILED");
+  await new Promise(resolve => { finishAdd = resolve; });
+  view = { ...view, group: { ...view.group, rosterRevision: view.group.rosterRevision + 1 },
+    members: [...view.members, { ...member(`added-${input.member.agentId}`, input.member.agentId), ...input.member }] };
+  return view;
+};
+await mount(additionAgents);
 await openDetails();
 await click(detailActions("add")[0]);
 const addRows = buttons("groupChat.members.add");
-assert.equal(addRows.length, 2, "agents already in the group are not offered (Alpha), the others are listed");
-assert.deepEqual(addRows.map((node) => node.props.disabled), [false, true], "an unsupported backend cannot be added");
+assert.equal(addRows.length, 3, "agents already in the group are not offered (Alpha), the others are listed");
+assert.deepEqual(addRows.map((node) => node.props.disabled), [false, true, false], "an unsupported backend cannot be added");
 await click(addRows[0]);
 assert.deepEqual(plain(named("add")[0].args), ["g", { expectedRosterRevision: 7, member: { backendId: "hermes", agentId: "bull" } }]);
+assert.equal(buttons("groupChat.members.adding").length, 1, "the submitted row reports progress");
+assert.ok(buttons("groupChat.members.add").every(node => node.props.disabled), "other rows cannot submit while one add is pending");
+await act(async () => { finishAdd(); });
+assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 1, "adding a member keeps the dialog open");
+assert.equal(detailMembers().length, 4, "the roster updates without reopening the dialog");
+assert.deepEqual(buttons("groupChat.members.add").map(node => node.props.disabled), [true, false],
+  "the added row disappears and the next supported member is immediately available");
+assert.equal(buttons("groupChat.members.adding").length, 0, "success releases the busy state");
+failAdd = true;
+await click(buttons("groupChat.members.add").find(node => !node.props.disabled));
+assert.equal(renderer.root.findByProps({ role: "alert" }).children.join(""), "ADD_MEMBER_FAILED");
+assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 1, "a failed add also keeps the dialog open");
+assert.ok(buttons("groupChat.members.add").some(node => !node.props.disabled), "a failed add can be retried");
+failAdd = false;
+await click(buttons("groupChat.members.add").find(node => !node.props.disabled));
+await act(async () => { finishAdd(); });
+assert.deepEqual(plain(named("add").map(call => call.args[1].expectedRosterRevision)), [7, 8, 8]);
+assert.equal(detailMembers().length, 5, "two different members can be added during one dialog session");
+assert.equal(renderer.root.findAllByProps({ role: "alert" }).length, 0, "successful retry clears the error");
+assert.equal(buttons("groupChat.members.add").length, 1, "both newly added agents are excluded from the candidate list");
+assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 1);
+await act(async () => renderer.unmount());
+addMemberResult = () => view;
 view = { ...base(), members: Array.from({ length: 32 }, (_, i) => member(`member-${i}`, `成员 ${i}`)) };
 await mount();
 await openDetails();
@@ -344,29 +404,71 @@ assert.equal(detailMembers().length, 0, "closing the details returns to the comp
 view = base(); messages = timeline();
 await mount();
 await openDetails();
-await menuAction("settings");
+await clickDetailAction("settings");
 await act(async () => { renderer.root.findAllByType("select").find(node => node.props.value === "a").props.onChange({ target: { value: "c" } }); });
 await click(buttons("groupChat.strategy.save")[0]);
 assert.deepEqual(plain(named("update")[0].args), ["g", { expectedMetadataRevision: 1, patch: { ownerMemberId: "c" } }]);
 await act(async () => renderer.unmount());
 
-// ---- 移出成员 ----
+// ---- 群详情右键移出成员：直接移除、立即刷新、失败重试、两人下限 ----
 view = base(); messages = timeline();
-await mount();
-await openDetails();
+await mount(); await openDetails();
+confirmAnswer = false;
 await selectDetailMember("b");
-await menuAction("profile");
+removeMemberResult = (_id, input) => {
+  view = { ...view, group: { ...view.group, rosterRevision: view.group.rosterRevision + 1 },
+    members: view.members.map(item => item.id === input.memberId ? { ...item, state: "removed" } : item) };
+  return view;
+};
+await click(await openMemberMenu("b", true));
+assert.deepEqual(plain(named("remove")[0].args), ["g", { expectedRosterRevision: 7, memberId: "b" }]);
+assert.equal(named("confirm").length, 0, "member removal is immediate without a confirmation dialog");
+assert.equal(renderer.root.findAllByProps({ role: "menu" }).length, 0, "choosing an action dismisses the context menu");
+assert.deepEqual(detailMembers().map(node => node.props["data-group-details-member"]), ["a", "c"]);
+assert.equal(detailMembers()[0].props["aria-selected"], true, "removing the selected member switches SOUL to the owner");
+assert.ok(JSON.stringify(renderer.toJSON()).includes("Alpha 的回答"), "history remains after removing a member");
+assert.equal((await openMemberMenu("a")).props.disabled, true, "the refreshed two-member roster disables further removal");
+
+view = base(); await mount(); await openDetails();
+let finishRemoval;
+removeMemberResult = () => new Promise(resolve => { finishRemoval = resolve; });
+await click(await openMemberMenu("b"));
+assert.equal((await openMemberMenu("b")).props.disabled, true, "a pending removal cannot be submitted twice");
+await act(async () => { finishRemoval(view); });
+assert.equal((await openMemberMenu("b")).props.disabled, false, "the removal action unlocks after the request settles");
+removeMemberResult = () => { throw new Error("REMOVE_FAILED"); };
+await click(await openMemberMenu("b"));
+assert.equal(named("toast").at(-1).args[0], "REMOVE_FAILED");
+assert.equal(detailMembers().length, 3, "a failed removal preserves the member");
+removeMemberResult = () => view;
+await click(await openMemberMenu("b"));
+assert.equal(named("remove").length, 3, "a failed removal can be retried explicitly");
+
+for (const guarded of [{ ...base(), members: [member("a", "Alpha"), member("b", "Beta")] },
+  { ...base(), members: [member("a", "Alpha")] },
+  { ...base(), group: { ...base().group, status: "archived" } },
+  { ...base(), group: { ...base().group, status: "deleting" } }]) {
+  view = guarded; await mount(); await openDetails();
+  const action = await openMemberMenu("a");
+  assert.equal(action.props.disabled, true, "two-member, legacy one-member and inactive-group removal is disabled");
+  await click(action);
+  assert.equal(named("remove").length, 0);
+}
+
+// ---- 成员资料弹窗的原移出入口 ----
+view = base(); messages = timeline();
+messages.push(message(7, { kind: "member", memberId: "b" }, "Beta 的回答"));
+await mount();
+await openMember("Beta");
 confirmAnswer = false;
 await click(buttons("groupChat.members.remove")[0]);
-assert.equal(named("remove").length, 0, "removal needs confirmation");
-confirmAnswer = true;
-await click(buttons("groupChat.members.remove")[0]);
 assert.deepEqual(plain(named("remove")[0].args), ["g", { expectedRosterRevision: 7, memberId: "b" }]);
-view = { ...base(), members: [member("a", "Alpha")] };
+assert.equal(named("confirm").length, 0, "the member card also removes without confirmation");
+confirmAnswer = true;
+view = { ...base(), members: [member("a", "Alpha"), member("b", "Beta")] };
 await mount();
-await openDetails();
-await menuAction("profile");
-assert.equal(buttons("groupChat.members.remove").length, 0, "the last member cannot be removed");
+await openMember("Alpha");
+assert.equal(buttons("groupChat.members.remove").length, 0, "the member card retains two members");
 
 // ---- 图片与附件：样式沿用单聊（chat-att-*），传完才能发，可以只发附件 ----
 const image = { id: "11111111-1111-4111-8111-111111111111", name: "截图.png", mimeType: "image/png", size: 2048 };
@@ -507,7 +609,7 @@ assert.deepEqual([prevented, uploads.length, uploads.at(-1).file.name], [true, 9
 view = base(); messages = timeline();
 roleSource = "公开角色🙂协作方式。\n".repeat(3000) + "角色全文尾部";
 await mount();
-await openDetails();
+await openMember("Alpha");
 for (let n = 0; n < 15 && !JSON.stringify(renderer.toJSON()).includes("groupChat.fullResult.verified"); n++) {
   if (buttons("groupChat.fullResult.more")[0]) await click(buttons("groupChat.fullResult.more")[0]);
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
@@ -521,6 +623,7 @@ assert.ok(JSON.stringify(renderer.toJSON()).includes(oldRoleSource));
 assert.ok(!JSON.stringify(renderer.toJSON()).includes("角色全文尾部"));
 await act(async () => renderer.unmount());
 corruptRolePage = true;
+soulSource = roleSource;
 await mount();
 await openDetails();
 await click(buttons("groupChat.fullResult.more")[0]);

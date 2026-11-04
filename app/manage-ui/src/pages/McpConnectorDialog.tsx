@@ -112,9 +112,9 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
   });
   if (selected) return <McpSingleConnectorDialog key={selected.id} server={selected} recommendation={recommendation} onClose={() => { setSelected(undefined); reload(); }} onChanged={() => { onChanged(); reload(); }} />;
   const footer = <div className={s.flowFooter}><p>{tr(ready ? "flow.connectedHint" : "defaultAccess")}</p><div className={s.flowFooterActions}>
-    {preAdd ? <button type="button" className={s.primary} disabled={!loaded || busy} onClick={stage}>{tr("add")}</button>
-      : !ready || editing ? <button type="button" className={s.primary} disabled={busy || !loaded || !!missingKey || summary.ambiguous} onClick={() => void configure()}>{tr(busy ? "working" : "group.connectAll")}</button>
-      : <button type="button" className={s.primary} disabled={busy} onClick={onClose}>{tr("flow.done")}</button>}
+    {preAdd ? <button type="button" className="btn-dark btn-sm" disabled={!loaded || busy} onClick={stage}>{tr("add")}</button>
+      : !ready || editing ? <button type="button" className="btn-dark btn-sm" disabled={busy || !loaded || !!missingKey || summary.ambiguous} onClick={() => void configure()}>{tr(busy ? "working" : "group.connectAll")}</button>
+      : <button type="button" className="btn-dark btn-sm" disabled={busy} onClick={onClose}>{tr("flow.done")}</button>}
   </div></div>;
   return <Modal open onClose={onClose} dismissible={!busy} title={<span className={s.dialogIdentity}><McpConnectorIcon name={displayName} identity={recommendation.id} iconId={recommendation.id} />{displayName}</span>} width={640} variant="connector" subtitle={mcpRecommendationText(recommendation.description, language)} footer={footer}>
     <div className={s.detail}>
@@ -130,7 +130,7 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
             {members.map(member => <details key={member.id} className={s.management}><summary>{tr("flow.manage")}{members.length > 1 ? ` · ${member.name}` : ""}</summary>
               {member.lastCheck?.errorCode && <p className={s.error}>{formatMcpError({ code: member.lastCheck.errorCode }, t)}</p>}
               <ConnectorTools serverId={member.id} status={member.status} checkedAt={member.lastCheck?.at} />
-              <button type="button" className={s.button} disabled={busy} onClick={() => setSelected(member)}>{tr("group.manageService")}</button>
+              <button type="button" className="btn-secondary btn-sm" disabled={busy} onClick={() => setSelected(member)}>{tr("group.manageService")}</button>
             </details>)}
           </div>;
         })}
@@ -151,8 +151,8 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
           <p className={s.muted}>{tr("secretsHint")}</p><button type="button" className={s.textButton} disabled={busy} aria-pressed={showSecrets} onClick={() => setShowSecrets(value => !value)}>{tr(showSecrets ? "hideValue" : "showValue")}</button>
 
         </section>}
-        {!!servers.length && <section className={s.connectionPanel}><div className={s.actions}><button type="button" className={s.button} disabled={busy || !loaded} onClick={() => void verify()}>{tr("group.verifyAll")}</button>{ready && <button type="button" className={s.textButton} disabled={busy} onClick={() => setEditing(value => !value)}>{tr("flow.configure")}</button>}</div></section>}
-        {(!!servers.length || added) && <details className={s.management}><summary>{tr("flow.manage")}</summary><button type="button" className={s.danger} disabled={busy || !loaded} onClick={() => void remove()}>{tr("group.remove")}</button></details>}
+        {!!servers.length && <section className={s.connectionPanel}><div className={s.actions}><button type="button" className="btn-secondary btn-sm" disabled={busy || !loaded} onClick={() => void verify()}>{tr("group.verifyAll")}</button>{ready && <button type="button" className={s.textButton} disabled={busy} onClick={() => setEditing(value => !value)}>{tr("flow.configure")}</button>}</div></section>}
+        {(!!servers.length || added) && <details className={s.management}><summary>{tr("flow.manage")}</summary><button type="button" className="btn-danger btn-sm" disabled={busy || !loaded} onClick={() => void remove()}>{tr("group.remove")}</button></details>}
       </>}
       <details className={s.management}><summary>{tr("flow.help")}</summary><a href={recommendation.docsUrl} target="_blank" rel="noreferrer">{tr("officialGuide")}</a></details>
       {error && <p className={s.error} role="alert">{error}</p>}
@@ -386,11 +386,11 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     if (server) { const current = await listMcpConnectors(); await removeMcpConnector(server.id, current.revision); }
     onUnstage?.(); onChanged(); onClose();
   });
-  const primaryAction = <button type="button" className={s.primary} disabled={locked || recommendationMissingSetup || !server && !!item && (!optionId || option?.available === false)} onClick={() => void (managed && server ? act(async () => accept(await verifyMcpConnector(server.id))) : primary())}>{tr(verifying ? "flow.verifying" : signingIn ? "flow.waiting" : busy ? "working" : needsForm || editing ? "flow.saveConnect" : isRemote && canSignIn ? "flow.authorize" : "flow.checkConnect")}</button>;
+  const primaryAction = <button type="button" className="btn-dark btn-sm" disabled={locked || recommendationMissingSetup || !server && !!item && (!optionId || option?.available === false)} onClick={() => void (managed && server ? act(async () => accept(await verifyMcpConnector(server.id))) : primary())}>{tr(verifying ? "flow.verifying" : signingIn ? "flow.waiting" : busy ? "working" : needsForm || editing ? "flow.saveConnect" : isRemote && canSignIn ? "flow.authorize" : "flow.checkConnect")}</button>;
   const connectionState = <span className={s.status} data-state={server?.status} role="status" aria-live="polite">{verifying ? tr("flow.verifying") : signingIn ? tr("flow.waiting") : ready ? <>{tr("flow.connected")}{server.lastCheck ? ` · ${t("mcpConnectors.toolCount", { count: server.lastCheck.toolCount })}` : ""}</> : server ? tr(`statuses.${server.status}`) : tr(preAdd ? "flow.notAdded" : added ? "flow.pending" : "flow.notAdded")}</span>;
   const footer = <div className={s.flowFooter}><p>{tr(ready ? "flow.connectedHint" : "defaultAccess")}</p><div className={s.flowFooterActions}>
-    {preAdd ? <button type="button" className={s.primary} disabled={busy || recommendation?.setup === "restricted" || !!item && (!option || option.available === false)} onClick={() => void add()}>{tr(busy ? "working" : "add")}</button>
-      : ready && !editing && !credentialsOnly ? <button type="button" className={s.primary} disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : recommendation?.setup === "restricted" ? <button type="button" className={s.primary} disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : figmaDesktop ? <button type="button" className={s.primary} disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button> : primaryAction}
+    {preAdd ? <button type="button" className="btn-dark btn-sm" disabled={busy || recommendation?.setup === "restricted" || !!item && (!option || option.available === false)} onClick={() => void add()}>{tr(busy ? "working" : "add")}</button>
+      : ready && !editing && !credentialsOnly ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : recommendation?.setup === "restricted" ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : figmaDesktop ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button> : primaryAction}
   </div></div>;
   const Frame = embedded ? InlineFrame : Modal;
   return <Frame open onClose={onClose} dismissible={!busy && !verifying} title={<span className={s.dialogIdentity}><McpConnectorIcon name={title} identity={item?.registryName || recommendation?.id || (server?.source.kind === "registry" ? server.source.registryName : server?.id) || "custom"} iconId={recommendation?.id || mcpOfficialSkillBrand(server) || server?.recommendationId} />{title}</span>} width={640} variant="connector" subtitle={description} footer={footer}>
@@ -404,7 +404,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
       {setupVisible && <section className={s.connectionPanel}><div className={s.connectionHeading}><h3>{t("mcpConnectors.flow.connectionTitle", { name: title })}</h3>{connectionState}</div>
       {added && !server && <p className={s.muted}>{tr("flow.pendingHint")}</p>}
       {canChooseFigmaMode && <div className={s.modeTabs} role="group" aria-label={tr("figmaDesktop.connectionMode")}>
-        {(["desktop", "remote"] as const).map(value => <button type="button" key={value} className={figmaMode === value ? s.primary : s.button} aria-pressed={figmaMode === value} disabled={locked} onClick={() => { setFigmaMode(value); setError(""); clearValues(); }}>{tr(`figmaDesktop.${value}`)}</button>)}
+        {(["desktop", "remote"] as const).map(value => <button type="button" key={value} className={figmaMode === value ? "btn-dark btn-sm" : "btn-secondary btn-sm"} aria-pressed={figmaMode === value} disabled={locked} onClick={() => { setFigmaMode(value); setError(""); clearValues(); }}>{tr(`figmaDesktop.${value}`)}</button>)}
       </div>}
       {figmaDesktop ? <section className={s.desktopConnection} aria-label={tr("figmaDesktop.desktop")}>
         {server?.status === "failed" && <p className={s.notice}>{tr("figmaDesktop.failedHint")}</p>}
@@ -413,7 +413,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
           <ol><li>{tr("figmaDesktop.stepOpen")}</li><li>{tr("figmaDesktop.stepEnable")}</li><li>{tr("figmaDesktop.stepCheck")}</li></ol>
           <a href="https://developers.figma.com/docs/figma-mcp-server/local-server-installation/" target="_blank" rel="noreferrer">{tr("figmaDesktop.guide")}</a>
         </details>
-        {embedded && <div className={s.actions}><button type="button" className={s.primary} disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button></div>}
+        {embedded && <div className={s.actions}><button type="button" className="btn-dark btn-sm" disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button></div>}
       </section> : recommendation?.setup === "restricted" ? <p className={s.notice}>{recommendation.note && mcpRecommendationText(recommendation.note, language)}</p> : <>
       {canChooseFigmaMode && <p className={s.muted}>{tr("figmaDesktop.remoteHint")}</p>}
       {recommendation?.note && <p className={s.notice}>{mcpRecommendationText(recommendation.note, language)}</p>}
@@ -431,7 +431,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
         {item && <><p className={s.muted}>{item.registryName} · {tr("version")} {item.version}</p>{!server && <label className={s.field}><span>{tr("transport")}</span><select value={optionId} onChange={event => { setOptionId(event.target.value); setValues({}); setAccessToken(""); }} disabled={locked}>{item.options.map(value => <option key={value.id} value={value.id} disabled={value.available === false}>{value.transport.kind === "remote" ? value.transport.url : value.transport.kind === "stdio-package" ? `${value.transport.registryType} · ${value.transport.identifier}@${value.transport.version}` : value.transport.command}</option>)}</select></label>}</>}
         {!builtinQuery && !server && !item && input(tr("name"), name, setName)}
         {!builtinQuery && (!server && !item && !presetPackage || server && repair && server.transport.kind !== "stdio-package") && <>
-          {<div className={s.modeTabs}>{(["remote", "command", "paste"] as const).filter(value => recommendation?.setup === "local" ? value === "command" : !server || value !== "paste").map(value => <button type="button" key={value} disabled={locked} aria-pressed={mode === value} className={mode === value ? s.primary : s.button} onClick={() => { setMode(value); setAccessToken(""); }}>{tr(value)}</button>)}</div>}
+          {<div className={s.modeTabs}>{(["remote", "command", "paste"] as const).filter(value => recommendation?.setup === "local" ? value === "command" : !server || value !== "paste").map(value => <button type="button" key={value} disabled={locked} aria-pressed={mode === value} className={mode === value ? "btn-dark btn-sm" : "btn-secondary btn-sm"} onClick={() => { setMode(value); setAccessToken(""); }}>{tr(value)}</button>)}</div>}
           {mode === "remote" && !(recommendation && ["instance", "endpoint"].includes(recommendation.setup || "") && !server) && input(tr("url"), url, setUrl)}
           {mode === "command" && <>{recommendation?.setup !== "local" && input(tr("commandLabel"), command, setCommand)}{input(tr("args"), args, setArgs, false, true)}{input(tr("cwd"), cwd, setCwd)}</>}
           {mode === "paste" && input(tr("config"), config, setConfig, true, true)}
@@ -453,23 +453,23 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
       <div className={s.actions}>
         {embedded && primaryAction}
         {editing && <button type="button" className={s.textButton} disabled={locked} onClick={() => setEditing(false)}>{t("common.cancel")}</button>}
-        {clientRequired && server?.auth?.kind !== "oauth-client" && <button className={s.button} type="button" disabled={locked} onClick={() => { setCredentialsOpen(true); setOAuthClient(true); }}>{tr("configureOAuth")}</button>}
+        {clientRequired && server?.auth?.kind !== "oauth-client" && <button className="btn-secondary btn-sm" type="button" disabled={locked} onClick={() => { setCredentialsOpen(true); setOAuthClient(true); }}>{tr("configureOAuth")}</button>}
       </div>
       </>}
       </section>}
       {server && !credentialsOnly && <>
         <details className={s.management}><summary>{tr("flow.manage")}</summary>
           {figmaDesktop && ready && <details className={s.clientSetup} open={desktopStepsOpen} onToggle={event => setDesktopStepsOpen(event.currentTarget.open)}><summary>{tr("figmaDesktop.setupTitle")}</summary><ol><li>{tr("figmaDesktop.stepOpen")}</li><li>{tr("figmaDesktop.stepEnable")}</li><li>{tr("figmaDesktop.stepCheck")}</li></ol></details>}
-          {server.transport.kind === "remote" && !figmaDesktop && canSignIn && <button type="button" className={s.button} disabled={locked} onClick={() => { setEditing(true); void act(() => signin(server.id)); }}>{tr("flow.reconnect")}</button>}
+          {server.transport.kind === "remote" && !figmaDesktop && canSignIn && <button type="button" className="btn-secondary btn-sm" disabled={locked} onClick={() => { setEditing(true); void act(() => signin(server.id)); }}>{tr("flow.reconnect")}</button>}
           <p className={s.muted}>{tr("currentTransport")} <code>{server.transport.kind === "remote" ? server.transport.url : server.transport.kind === "stdio-package" ? `${server.transport.identifier}@${server.transport.version}` : server.transport.command}</code></p>
           {server.source.kind === "registry" && <section className={s.updatePanel}><h3>{tr("update")}</h3><p className={s.muted}>{tr("installedVersion")} <strong>{server.source.version}</strong> · {server.source.registryName}</p>
             {latestEntry && <><p className={latestEntry.version !== server.source.version ? s.updateHint : s.muted}>{latestEntry.version !== server.source.version ? t("mcpConnectors.updateAvailable", { version: latestEntry.version }) : tr("upToDate")}</p><p className={s.muted}>{registryDescription(latestEntry)}</p>{latestEntry.repositoryUrl && /^https:\/\//i.test(latestEntry.repositoryUrl) && <a href={latestEntry.repositoryUrl} target="_blank" rel="noreferrer">{tr("repository")}</a>}<p className={s.muted}>{tr("targetTransport")} {latestEntry.options.map(option => option.transport.kind === "stdio-package" ? `${option.transport.registryType} · ${option.transport.identifier}@${option.transport.version}` : option.transport.kind === "remote" ? option.transport.url : option.transport.command).join(" · ")}</p></>}
-            <button className={s.textButton} type="button" disabled={locked || checkingUpdate} onClick={() => void checkUpdates()}>{tr(checkingUpdate ? "loading" : "checkUpdates")}</button>{updateError && <p className={s.error} role="alert">{updateError}</p>}<p className={s.muted}>{tr("manualUpdateHint")}</p>{input(tr("newVersion"), version, setVersion)}<button className={s.button} disabled={locked || !version.trim() || version.trim() === server.source.version} type="button" onClick={() => void act(async () => { const current = await listMcpConnectors(); accept(await updateMcpConnector(server.id, version.trim(), current.revision)); })}>{tr("update")}</button>
+            <button className={s.textButton} type="button" disabled={locked || checkingUpdate} onClick={() => void checkUpdates()}>{tr(checkingUpdate ? "loading" : "checkUpdates")}</button>{updateError && <p className={s.error} role="alert">{updateError}</p>}<p className={s.muted}>{tr("manualUpdateHint")}</p>{input(tr("newVersion"), version, setVersion)}<button className="btn-secondary btn-sm" disabled={locked || !version.trim() || version.trim() === server.source.version} type="button" onClick={() => void act(async () => { const current = await listMcpConnectors(); accept(await updateMcpConnector(server.id, version.trim(), current.revision)); })}>{tr("update")}</button>
           </section>}
-          {!managed && !credentialsOnly && <button type="button" className={s.danger} disabled={locked} onClick={() => void remove()}>{tr("flow.remove")}</button>}
+          {!managed && !credentialsOnly && <button type="button" className="btn-danger btn-sm" disabled={locked} onClick={() => void remove()}>{tr("flow.remove")}</button>}
         </details>
       </>}
-      {!server && added && !managed && !credentialsOnly && <details className={s.management}><summary>{tr("flow.manage")}</summary><button type="button" className={s.danger} disabled={locked} onClick={() => void remove()}>{tr("flow.remove")}</button></details>}
+      {!server && added && !managed && !credentialsOnly && <details className={s.management}><summary>{tr("flow.manage")}</summary><button type="button" className="btn-danger btn-sm" disabled={locked} onClick={() => void remove()}>{tr("flow.remove")}</button></details>}
       </>}
       {!embedded && (recommendation?.docsUrl || item?.repositoryUrl) && <details className={s.management}><summary>{tr("flow.help")}</summary>{recommendation?.docsUrl ? <a href={recommendation.docsUrl} target="_blank" rel="noreferrer">{tr("officialGuide")}</a> : item?.repositoryUrl && /^https:\/\//i.test(item.repositoryUrl) && <a href={item.repositoryUrl} target="_blank" rel="noreferrer">{tr("repository")}</a>}</details>}
       {(error || signIn?.errorCode) && <p className={s.error} role="alert">{error || formatMcpError({ code: signIn?.errorCode }, t)}</p>}

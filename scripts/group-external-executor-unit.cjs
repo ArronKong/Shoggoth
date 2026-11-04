@@ -418,6 +418,8 @@ test("restart recovery resumes an external turn by its recorded identity", async
 
 test("removing an external member mid-turn cancels it and drops a late reply", async (t) => {
   const f = fixture(t);
+  f.store.addMember({ groupId: f.groupId, expectedRosterRevision: f.store.getGroup(f.groupId).group.rosterRevision,
+    member: { backendId: "openclaw", agentId: "spare", profileId: null, displayName: "Spare" } });
   f.client.reply = () => ({ status: "running" });
   const driver = f.make();
   await driver.start();

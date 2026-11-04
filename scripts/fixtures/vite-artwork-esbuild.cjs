@@ -30,7 +30,7 @@ function viteArtworkFixturePlugin(root) {
               : ts.isStringLiteral(value) ? value.text : null];
           }));
           assert.equal(values.eager, true); assert.equal(values.import, "default");
-          assert(["?raw", "?url&no-inline"].includes(values.query), "unsupported fixture artwork query");
+          assert(["?raw", "?inline", "?url&no-inline"].includes(values.query), "unsupported fixture artwork query");
           const match = /^(.*\/)\*\.(png|svg)$/.exec(pattern.text);
           assert(match, "unsupported fixture artwork glob");
           const directory = path.resolve(path.dirname(file), match[1]);

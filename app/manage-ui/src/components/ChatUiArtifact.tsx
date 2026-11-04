@@ -55,14 +55,14 @@ export default function ChatUiArtifact({ part, backend, agentId, sessionKey, vis
       });
       for (const target of observed) if (!resizeTargets.has(target)) { resize.unobserve(target); observed.delete(target); }
       for (const target of resizeTargets) if (!observed.has(target)) { resize.observe(target); observed.add(target); }
-      const occluded = !!document.querySelector('[aria-modal="true"], [role="menu"], [role="listbox"], .chat-ctxmenu, .session-menu, .model-menu, .slash-menu, .chat-artifacts-popover');
+      const occluded = !!document.querySelector('[aria-modal="true"], [role="menu"], [role="listbox"], .chat-ctxmenu, .session-menu, .model-menu, .slash-menu, .chat-header[data-agent-panel]');
       void desktopUiReply(bridge.layout({ mountId: entry.mountId, layout: { generation: ++entry.generation,
         rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
         clip: { x: left, y: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) }, occluded } })).catch(() => {});
     };
     const schedule = () => { if (raf === null) raf = requestAnimationFrame(measure); };
     const resize = new ResizeObserver(schedule), mutations = new MutationObserver(schedule);
-    mutations.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["class", "style", "hidden", "aria-modal", "data-native-ui-clip-edge"] });
+    mutations.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["class", "style", "hidden", "aria-modal", "data-native-ui-clip-edge", "data-agent-panel"] });
     document.addEventListener("scroll", schedule, true); window.addEventListener("resize", schedule); measure();
     return () => { resize.disconnect(); mutations.disconnect(); document.removeEventListener("scroll", schedule, true); window.removeEventListener("resize", schedule);
       if (raf !== null) cancelAnimationFrame(raf);

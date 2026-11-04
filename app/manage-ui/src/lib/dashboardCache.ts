@@ -4,7 +4,8 @@ import type { DashboardSummary } from "../types";
 export const DASHBOARD_CACHE_KEY = "shoggoth.dashboard.summary";
 
 /** 缓存信封版本；结构不兼容时递增并让旧缓存自动失效。 */
-export const DASHBOARD_CACHE_VERSION = 1;
+// Older summaries include system Cron runs/counts without ownership metadata.
+export const DASHBOARD_CACHE_VERSION = 2;
 
 /** 原始 JSON 的最大 UTF-8 字节数，避免解析异常大的本地缓存。 */
 export const DASHBOARD_CACHE_MAX_BYTES = 1024 * 1024;

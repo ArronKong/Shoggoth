@@ -270,6 +270,7 @@ function normalizeConfig(parsed) {
     locale: SUPPORTED_LOCALES.has(localeRaw) ? localeRaw : "",
     theme: p.theme === "dark" || p.theme === "system" ? p.theme : "light",
     appIcon: APP_ICON_IDS.includes(p.appIcon) ? p.appIcon : DEFAULT_APP_ICON,
+    autoAppUpdates: p.autoAppUpdates === true,
     hermesMode: p.hermesMode === "remote" ? "remote" : "local",
     hermesRemotes: sanitizeRemotes(p.hermesRemotes),
     hermesKeepAlive: typeof p.hermesKeepAlive === "boolean"

@@ -5,6 +5,9 @@ import { desktopBrowserAvailable, getDesktopBrowserState } from "../../api/clien
 import type { AppConfig, BrowserUseSettings, BrowserUseState } from "../../types";
 import s from "./SettingsBrowserUse.module.css";
 
+// Session diagnostics remain available in code but are hidden in Settings.
+const SHOW_SESSION_DETAILS = false;
+
 export default function SettingsBrowserUse({ cfg, onChange, disabled }: {
   cfg: AppConfig; onChange: (patch: Partial<AppConfig>) => void; disabled: boolean;
 }) {
@@ -73,7 +76,7 @@ export default function SettingsBrowserUse({ cfg, onChange, disabled }: {
         <p className="ui-hint">{t("settings.browserUse.settingsHint")}</p>
         {state?.engineVersion && <span className={s.version}>{t("settings.browserUse.engineVersion", { version: state.engineVersion })}</span>}
       </div>
-      {desktop && state && <details className={s.sessions}>
+      {SHOW_SESSION_DETAILS && desktop && state && <details className={s.sessions}>
         <summary>{t("settings.browserUse.sessions", { count: state.sessions.length })}</summary>
         {state.sessions.length === 0 ? <p className="ui-hint">{t("settings.browserUse.sessionsEmpty")}</p>
           : <ul>{state.sessions.map(session => <li key={session.id}>

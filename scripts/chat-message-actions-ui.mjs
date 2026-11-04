@@ -6,6 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const { build } = createRequire(path.join(root, "app/manage-ui/package.json"))("esbuild");
@@ -16,11 +17,11 @@ try {
     entryPoints: [path.join(root, "scripts/fixtures/chat-message-actions.tsx")], bundle: true, format: "esm",
     define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
-    plugins: process.env.CHAT_ACTIONS_SOURCE_PATH ? [{ name: "baseline", setup(builder) {
+    plugins: [viteArtworkFixturePlugin(root), ...(process.env.CHAT_ACTIONS_SOURCE_PATH ? [{ name: "baseline", setup(builder) {
       builder.onLoad({ filter: /\/ChatPage\.tsx$/ }, ({ path: file }) => ({
         contents: fs.readFileSync(process.env.CHAT_ACTIONS_SOURCE_PATH, "utf8"), loader: "tsx", resolveDir: path.dirname(file),
       }));
-    } }] : [],
+    } }] : [])],
   });
   fs.writeFileSync(path.join(temp, "index.html"), `<!doctype html><meta charset="utf-8"><title>消息置顶和删除检查</title>
 <link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}#fixture-controls{position:fixed;right:12px;top:12px;z-index:2000;background:white;padding:8px;max-width:280px;font-size:12px}</style>
@@ -44,6 +45,7 @@ try {
     fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1280,height:900,webPreferences:{backgroundThrottling:false}});let passed=false;
+w.webContents.on('console-message',(_event,level,message)=>{if(level>=2)console.error(message)});
 try{await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))});console.log(JSON.stringify(await w.webContents.executeJavaScript('window.runFixture()')));passed=true;}catch(e){console.error(e);}finally{w.destroy();app.exit(passed?0:1);}});`);
     const result = spawnSync(path.join(root, "node_modules/.bin/electron"), [main], {
       encoding: "utf8", timeout: 45_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },

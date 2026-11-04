@@ -9,7 +9,7 @@
   content: ''; position: absolute; inset: 0 0 auto; height: 24px; border-radius: 16px;
   background: var(--run-color); transition: height 180ms ease, background-color 180ms ease;
 }
-.root[data-expanded=true] { height: 192px; }
+.root[data-expanded=true] { height: auto; }
 .root[data-expanded=true]::before { height: 152px; }
 .root[data-expanded=true]::after {
   content: ''; position: absolute; z-index: -1; inset: 0; border-radius: 16px; background: var(--note-paper);
@@ -27,7 +27,7 @@
 .line { flex: 1; min-width: 0; margin-left: 4px; overflow: hidden; text-overflow: ellipsis; text-align: right; white-space: nowrap; }
 .elapsed { flex-shrink: 0; margin-left: 4px; }
 .root[data-tone=running] .line { margin-left: 0; text-align: left; }
-.expansion { position: relative; height: 144px; overflow: auto; scrollbar-width: thin; }
+.expansion { position: relative; min-height: 144px; overflow: auto; }
 .expansion > div { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
 .expansion[data-approval=true] { overflow: visible; }
 .expansion :global(.chat-prompt) {
@@ -36,9 +36,10 @@
   max-width: none; margin: 0; padding: 0; background: transparent; border: 0; gap: 0;
 }
 .expansion :global(.chat-prompt__content) {
+  --ui-scrollbar-thumb-visible: var(--ui-scrollbar-thumb-inverse);
   box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; height: 104px; flex: 0 0 104px;
-  padding: 0 16px 16px; overflow: auto; scrollbar-width: thin; overscroll-behavior: contain;
-  border-radius: 0 0 16px 16px; scrollbar-color: #ffffff66 transparent;
+  padding: 0 16px 16px; overflow: auto; overscroll-behavior: contain;
+  border-radius: 0 0 16px 16px;
   color: #fff; font-family: inherit;
 }
 .expansion :global(.chat-prompt__content) > * { flex-shrink: 0; }
@@ -52,7 +53,7 @@
 .expansion :global(.chat-prompt__input) { border-color: #ffffff88; }
 .root[data-expanded=true]:has(:global(.chat-prompt--selection), :global(.chat-prompt--input)) { height: auto; }
 .root[data-expanded=true]:has(:global(.chat-prompt--selection), :global(.chat-prompt--input))::before { height: calc(100% - 40px); }
-.expansion:has(:global(.chat-prompt--selection), :global(.chat-prompt--input)) { height: auto; }
+.expansion:has(:global(.chat-prompt--selection), :global(.chat-prompt--input)) { min-height: 0; }
 .expansion :global(.chat-prompt--selection) > :global(.chat-prompt__content),
 .expansion :global(.chat-prompt--input) > :global(.chat-prompt__content) { height: auto; min-height: 104px; max-height: min(320px, 40vh); flex: 0 1 auto; }
 .expansion :global(.chat-prompt__head) { margin: 0; }
@@ -62,7 +63,7 @@
   color: #fff; font-size: 12px; font-weight: 400; line-height: 20px;
 }
 .expansion :global(.chat-prompt__cmd) { padding: 0; margin: 0; background: transparent; border-radius: 0; font-family: inherit; max-height: none; overflow: visible; }
-.expansion :global(.chat-prompt__actions) { flex-wrap: nowrap; height: 32px; min-height: 32px; margin: 8px 0 0; padding-top: 0; border-top: 0; gap: 8px; overflow-x: auto; scrollbar-width: thin; }
+.expansion :global(.chat-prompt__actions) { flex-wrap: nowrap; min-height: 32px; margin: 8px 0 0; padding-top: 0; border-top: 0; gap: 8px; overflow-x: auto; overflow-y: hidden; }
 .expansion :global(.chat-prompt__btn), .expansion :global(.chat-prompt__btn.is-primary) {
   flex-shrink: 0; min-height: 32px; padding: 6px 8px; border: 1px solid var(--note-ink); border-radius: 16px;
   color: var(--note-ink); background: transparent; font-family: inherit; font-size: 12px; font-weight: 400; line-height: 18px; white-space: nowrap;

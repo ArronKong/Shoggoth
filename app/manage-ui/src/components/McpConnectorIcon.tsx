@@ -20,9 +20,10 @@ export default function McpConnectorIcon({ name, identity, iconId, icons, compac
   const [loadedSrc, setLoadedSrc] = useState("");
   const brand = mcpBrandId(iconId || identity), bundled = bundledMcpIcon(brand);
   const icon = bundled && !failed.has(bundled.src) ? bundled : selectMcpIcon(icons, theme, failed);
-  const fallback = mcpIconFallback(name, identity), loaded = !!icon && loadedSrc === icon.src;
+  // Bundled data URLs need no network wait or per-mount load-event gate.
+  const fallback = mcpIconFallback(name, identity), loaded = !!icon && (icon === bundled || loadedSrc === icon.src);
   return <span className={`${s.icon}${compact ? ` ${s.compact}` : ""}${loaded ? ` ${s.imageSurface}` : ""}${loaded && icon?.theme === "dark" ? ` ${s.darkImage}` : ""}`} data-mcp-icon={identity} data-bundled-icon={icon === bundled ? brand : undefined} data-tone={fallback.tone} aria-hidden="true">
     {!icon && <span>{fallback.initials}</span>}
-    {icon && <img key={icon.src} src={icon.src} alt="" loading="lazy" decoding="async" style={{ opacity: loaded ? 1 : 0 }} onLoad={() => setLoadedSrc(icon.src)} referrerPolicy="no-referrer" onError={() => setFailed(previous => new Set([...previous, icon.src]))} />}
+    {icon && <img key={icon.src} src={icon.src} alt="" loading={icon === bundled ? "eager" : "lazy"} decoding="async" style={{ opacity: loaded ? 1 : 0 }} onLoad={icon === bundled ? undefined : () => setLoadedSrc(icon.src)} referrerPolicy="no-referrer" onError={() => setFailed(previous => new Set([...previous, icon.src]))} />}
   </span>;
 }

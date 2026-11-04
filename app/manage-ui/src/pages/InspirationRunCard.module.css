@@ -1,0 +1,52 @@
+/* The idea detail's run card (Figma 210:3387 collapsed, 218:4241 trajectory, 221:68 approval).
+   Black bar → black trajectory card; a live approval or input request shows the Session's own prompt card. */
+.avatar { position: relative; display: grid; place-items: center; width: 24px; height: 24px; flex: 0 0 24px; overflow: hidden; border-radius: 50%; background: var(--ui-agent-avatar-bg); color: var(--ui-agent-avatar-fg); }
+.pill, .cardHead {
+  display: flex; align-items: center; width: 100%; min-width: 0; border: 0; color: #fff; background: transparent;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.pill:hover:not(:disabled), .cardHead:hover:not(:disabled) { color: #fff; border-color: transparent; }
+.pill:focus-visible, .cardHead:focus-visible { outline: 2px solid #fff; outline-offset: -4px; }
+.pill {
+  gap: 16px; height: 48px; padding: 0 16px 0 12px; border-radius: 24px; background: #000;
+  font-size: 12px; line-height: 20px; animation: runCardIn 160ms ease-out;
+}
+.pill:hover:not(:disabled) { background: #1a1a1a; }
+/* The wall card's failure red (InspirationRunBar) carries a failed or stopped round. */
+.pill[data-tone=error] { background: #f96060; }
+.pill[data-tone=error]:hover:not(:disabled) { background: #ef5454; }
+.pill[data-tone=error] .elapsed { color: rgb(255 255 255 / 75%); }
+.stepIcon { display: grid; place-items: center; flex: none; width: 16px; height: 16px; margin-right: -12px; color: #fff; }
+.line { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.elapsed { flex: none; margin-left: -4px; color: #7d8796; font-size: 12px; line-height: 18px; font-variant-numeric: tabular-nums; }
+.chevron { display: grid; place-items: center; flex: none; width: 24px; height: 24px; margin-left: auto; color: #fff; transform: rotate(90deg); transition: transform 160ms ease; }
+.chevron[data-open] { transform: rotate(-90deg); }
+.card {
+  --ui-scrollbar-thumb-visible: var(--ui-scrollbar-thumb-inverse);
+  /* The shared timeline paints itself from these tokens; the card is black in both themes. */
+  --ui-text-1: #fff; --ui-text-2: rgb(255 255 255 / 50%); --ui-text-3: #7d8796;
+  --ui-surface-1: #000; --ui-surface-2: rgb(255 255 255 / 10%); --ui-hairline: rgb(255 255 255 / 12%); --row-hover: rgb(255 255 255 / 8%);
+  position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 8px;
+  border-radius: 24px; background: #000; color: #fff; color-scheme: dark; animation: runCardIn 160ms ease-out;
+}
+.cardHead { gap: 4px; height: 32px; padding: 0 4px; border-radius: 16px; }
+.cardHead:hover:not(:disabled) { background: rgb(255 255 255 / 8%); }
+.cardHead .avatar { margin-right: 4px; }
+.name { font-size: 14px; line-height: 21px; letter-spacing: -.15px; }
+.cardHead .elapsed { margin-left: 0; }
+.timeline {
+  --trajectory-visible-rows: 6;
+  height: auto; max-height: calc(var(--trajectory-row-height) * var(--trajectory-visible-rows) + var(--trajectory-wrap-padding-block) * 2);
+  padding-inline: 0; overflow-y: auto;
+}
+.empty, .note { margin: 0; padding: 4px 12px 8px; color: var(--ui-text-3); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.retry { align-self: flex-start; margin: 0 12px 8px; padding: 2px 12px; border: 1px solid rgb(255 255 255 / 40%); border-radius: 999px; background: transparent; color: #fff; font-size: 12px; line-height: 18px; }
+.retry:hover:not(:disabled) { color: #fff; border-color: #fff; background: rgb(255 255 255 / 8%); }
+/* A live request uses the Session's own prompt card unchanged; it only fills the detail's column. */
+.request { min-width: 0; animation: runCardIn 160ms ease-out; }
+.request :global(.chat-prompt) { max-width: none; margin: 0; }
+@keyframes runCardIn { from { transform: translateY(-4px); } to { transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .pill, .card, .request { animation: none; }
+  .chevron { transition: none; }
+}

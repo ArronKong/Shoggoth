@@ -37,7 +37,7 @@ const dictionaries = Object.fromEntries(["zh-CN", "en"].map((language) => [langu
   load(`app/manage-ui/src/i18n/locales/${language}.ts`).default]));
 const downloaded = { supported: true, reason: null, status: "downloaded", currentVersion: "0.8.152",
   availableVersion: "0.8.153", releaseName: null, releaseDate: null, progress: 100,
-  canCheck: false, canInstall: true, installBlockReason: null };
+  canCheck: false, canInstall: true, installBlockReason: null, automaticUpdates: false };
 let checkedStates = 0;
 for (const language of ["zh-CN", "en"]) {
   const translator = i18next.createInstance();
@@ -45,14 +45,21 @@ for (const language of ["zh-CN", "en"]) {
     resources: { [language]: { translation: dictionaries[language] } }, interpolation: { escapeValue: false } });
   let listener;
   let unsubscribed = false;
+  let saveFails = false;
   const bridge = {
     getState: async () => downloaded,
     onState: (next) => { listener = next; return () => { unsubscribed = true; }; },
+    setAutomatic: async (enabled) => {
+      if (saveFails) throw new Error("Could not write setting");
+      return { ...downloaded, automaticUpdates: enabled };
+    },
     install: async () => { throw new Error("IPC disconnected"); },
   };
   const Page = load("app/manage-ui/src/pages/settings/SettingsAppUpdate.tsx", {
     "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator) }) },
     "../../lib/appUpdate": { appUpdateBridge: () => bridge },
+    "../../components/Field": { Switch: ({ checked, disabled, onChange, label }) =>
+      React.createElement("input", { role: "switch", checked, disabled, onChange, "aria-label": label }) },
     "./SettingsIcons": { SettingsIcon: () => null },
   }).default;
   let renderer;
@@ -61,6 +68,25 @@ for (const language of ["zh-CN", "en"]) {
   const buttons = () => renderer.root.findAllByType("button");
   assert.equal(hint().children.join(""), translator.t("settings.appUpdate.downloaded", { version: "0.8.153" }));
   assert.equal(hint().props["aria-live"], "polite");
+  const toggle = () => renderer.root.findByProps({ role: "switch" });
+  assert.equal(toggle().props.checked, false);
+  await act(async () => { toggle().props.onChange(true); });
+  assert.equal(toggle().props.checked, true);
+  saveFails = true;
+  await act(async () => { toggle().props.onChange(false); });
+  assert.equal(toggle().props.checked, true, "a failed save keeps the last saved preference");
+  assert.equal(renderer.root.findByProps({ role: "alert" }).children.join(""), translator.t("settings.appUpdate.preferenceError"));
+  assert.equal(renderer.root.findAllByType("a").length, 0);
+  const Project = load("app/manage-ui/src/pages/settings/SettingsProject.tsx", {
+    "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator) }) },
+    "./SettingsIcons": { SettingsIcon: () => null },
+  }).default;
+  let projectRenderer;
+  await act(async () => { projectRenderer = create(React.createElement(Project)); });
+  const github = projectRenderer.root.findByType("a");
+  assert.equal(github.props.href, "https://github.com/ArronKong/Shoggoth");
+  assert.equal(github.props.target, "_blank");
+  await act(async () => { projectRenderer.unmount(); });
   for (const reason of Object.keys(dictionaries[language].settings.appUpdate.installBlocked)) {
     await act(async () => { listener({ ...downloaded, installBlockReason: reason }); });
     assert.equal(hint().children.join(""), translator.t(`settings.appUpdate.installBlocked.${reason}`));

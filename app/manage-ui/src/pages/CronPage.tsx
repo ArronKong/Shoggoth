@@ -317,6 +317,7 @@ export default function CronPage() {
     job: UnifiedCronJob,
     ticket: ReturnType<typeof detailIntentController.begin>,
   ): Promise<UnifiedCronJob | null> => {
+    if (!isVisibleCronJob(job)) return null;
     if (cronKindFor(job.backendId) !== "native") {
       return detailIntentController.isCurrent(ticket, ticket.context) ? job : null;
     }
@@ -435,7 +436,7 @@ export default function CronPage() {
     const ticket = detailIntentController.begin("detail", `notification:${identity}`);
     void listCronJobs(notificationBackendId ? { backend: notificationBackendId } : {}).then(allJobs => {
       if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
-      const job = allJobs.find(item => item.id === notificationJobId
+      const job = allJobs.find(item => isVisibleCronJob(item) && item.id === notificationJobId
         && (!notificationBackendId || item.backendId === notificationBackendId));
       if (job) void (notificationEdit ? openEdit(job) : openView(job));
       else toast.info(t("notif.cronUnavailable"));
@@ -481,6 +482,7 @@ export default function CronPage() {
   // just job.lastRunAt — keeps a recurring job's not-yet-due slot from showing
   // an earlier run's report.
   const openJobFromCalendar = async (job: UnifiedCronJob, occurrenceMs?: number) => {
+    if (!isVisibleCronJob(job)) return;
     const isFutureSlot = typeof occurrenceMs === "number" && occurrenceMs > Date.now();
     if (isFutureSlot || !job.lastRunAt) {
       await openEdit(job);

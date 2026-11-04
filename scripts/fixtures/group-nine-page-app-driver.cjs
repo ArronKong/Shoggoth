@@ -326,7 +326,7 @@ async function run() {
     await js("document.querySelector('.chat-conv .chat-pill--plugin').click();void 0");
     await until(async () => await js("!!document.querySelector('.chat-connector-menu input[type=checkbox]:not(:disabled)')"), "next-round account can be explicitly selected");
     await js("document.querySelector('.chat-connector-menu input[type=checkbox]:not(:disabled)').click();document.querySelector('.chat-connector-menu button[aria-label=\"关闭\"]').click();void 0");
-    await until(async () => await js("!!document.querySelector('[data-testid=chat-immersive-enter]:not([hidden])')"), "immersive entry enabled by native UI capability");
+    await until(async () => await js("document.querySelector('[data-testid=chat-immersive-enter]')?.hidden === true"), "immersive entry stays hidden with native UI capability");
     await js("document.querySelector('[data-testid=chat-immersive-enter]').click();void 0");
     await until(async () => await js("document.body.dataset.immersive==='1'&&!!document.querySelector('[data-send-entry=immersiveButton]')"), "immersive composer mounted");
     const immersivePrompt = "隔离沉浸聊天验收：请再回复一个确认词。";

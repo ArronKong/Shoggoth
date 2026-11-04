@@ -116,6 +116,7 @@ export function useGroupChats() {
 
 // 群聊里可加入的候选：原生 Agent 与已连接的 Hermes / OpenClaw Agent。
 export const GROUP_NATIVE_BACKEND_ID = "shoggoth";
+export const GROUP_MIN_MEMBERS = 2;
 export const GROUP_MAX_MEMBERS = 32;
 export const GROUP_MEMBER_BACKEND_IDS = new Set(["shoggoth", "hermes", "openclaw"]);
 export type GroupCandidateAgent = { backendId: string; agentId: string; name: string; peerId?: string; connected?: boolean };

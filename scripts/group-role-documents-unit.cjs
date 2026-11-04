@@ -9,6 +9,7 @@ const { GroupChatStore } = require("../app/agent-service/group-chat-store");
 const { GroupMemberDirectory, exportRoleDocuments } = require("../app/agent-service/group-member-directory");
 const { createDefaultDocuments } = require("../app/agent-service/agent-definition-defaults");
 const { sha256 } = require("../app/group-result-content");
+const { validateParams } = require("../app/agent-service/group-chat-protocol");
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -29,7 +30,7 @@ function fixture(t, options = {}) {
     ...options });
   const makeGroup = (operationId, external = false) => {
     const { groupId } = store.createGroup({ operationId, name: operationId, purpose: "", members: [
-      external ? { backendId: "hermes", agentId: "agent-a", displayName: "甲" }
+      external ? { backendId: typeof external === "string" ? external : "hermes", agentId: "agent-a", displayName: "甲" }
         : { backendId: "shoggoth", agentId: "a", profileId: "pa", displayName: "甲" },
       { backendId: "shoggoth", agentId: "b", profileId: "pb", displayName: "乙" }] });
     return { groupId, memberId: store.getGroup(groupId).members[0].id };
@@ -37,6 +38,62 @@ function fixture(t, options = {}) {
   t.after(() => { directory.stop(); store.close(); fs.rmSync(root, { recursive: true, force: true }); });
   return { paths, store, directory, definitions, oldDefinitions, makeGroup, now, advance: ms => { clock += ms; } };
 }
+
+test("SOUL pages exclude IDENTITY and stay scoped across edits, cursors, history and removal", async t => {
+  const f = fixture(t);
+  const { groupId, memberId } = f.makeGroup("soul");
+  const doc = f.definitions.get("pa");
+  doc.documents.IDENTITY = "# IDENTITY.md\nIDENTITY_ONLY_MARKER";
+  doc.documents.SOUL = "# SOUL.md\n\n" + "协作🙂方式。\n".repeat(3000)
+    + "末尾 SOUL_ONLY_MARKER\n## IDENTITY.md\nSOUL 中的示例标题也必须保留\n<!-- 私人备注 -->";
+  const read = options => f.directory.readRole(groupId, memberId, { document: "SOUL.md", ...options });
+  validateParams("group.member.role", { groupId, memberId, document: "SOUL.md" });
+  assert.throws(() => validateParams("group.member.role", { groupId, memberId, document: "USER.md" }));
+  const first = await read();
+  assert.equal(first.ok, true); assert.equal(first.disclosure, "redacted"); assert.ok(first.nextCursor);
+  const combined = await f.directory.readRole(groupId, memberId);
+  assert.match(combined.text, /IDENTITY_ONLY_MARKER/u);
+  assert.deepEqual(await read({ cursor: combined.nextCursor }), { ok: false, code: "invalid_cursor" });
+  assert.deepEqual(await f.directory.readRole(groupId, memberId, { cursor: first.nextCursor }), { ok: false, code: "invalid_cursor" });
+  assert.deepEqual(await read({ revision: combined.revisionId }), { ok: false, code: "revision_unavailable" });
+  f.oldDefinitions.set("pa:1", structuredClone(doc));
+  doc.manifest.revision = 2; doc.documents.SOUL = "新版 SOUL";
+  f.store.close(); f.store.open();
+  let page = first, full = first.text;
+  while (page.nextCursor) {
+    page = await read({ cursor: page.nextCursor }); assert.equal(page.ok, true);
+    assert.equal(page.offset, Buffer.byteLength(full)); full += page.text;
+  }
+  assert.equal(sha256(full), first.exportDigest);
+  assert.doesNotMatch(full, /IDENTITY_ONLY_MARKER|私人备注|新版 SOUL/u);
+  assert.match(full, /SOUL_ONLY_MARKER/u); assert.match(full, /SOUL 中的示例标题也必须保留/u);
+  assert.equal((await read()).text, "## SOUL.md\n\n新版 SOUL");
+  assert.equal((await read({ revision: "1" })).revisionId, first.revisionId);
+  const history = await f.directory.history(groupId, memberId, {});
+  assert.equal(history.snapshots.length, 2);
+  assert.ok(history.snapshots.every(item => item.id !== first.revisionId && item.document === undefined));
+  doc.manifest.revision = 3; doc.documents.SOUL = "";
+  const empty = await read(); assert.equal(empty.text, ""); assert.equal(empty.totalBytes, 0);
+  assert.doesNotMatch(empty.text, /IDENTITY_ONLY_MARKER/u, "missing SOUL never falls back to IDENTITY");
+  f.store.addMember({ groupId, expectedRosterRevision: f.store.getGroup(groupId).group.rosterRevision,
+    member: { backendId: "shoggoth", agentId: "c", profileId: "pc", displayName: "丙" } });
+  f.store.removeMember({ groupId, memberId, expectedRosterRevision: f.store.getGroup(groupId).group.rosterRevision });
+  assert.deepEqual(await read({ cursor: first.nextCursor }), { ok: false, code: "access_revoked" });
+});
+
+test("external SOUL remains readable when only IDENTITY is unavailable", async t => {
+  const client = { request: async (method, input) => {
+    if (method === "agent.get") return { agent: { name: "外部", model: "m" } };
+    if (method === "group.external.capabilities") return { groupTools: true };
+    if (input.file === "IDENTITY.md") throw new Error("identity unavailable");
+    return { file: { content: "外部 SOUL 内容", missing: false } };
+  } };
+  const f = fixture(t, { getFederationClient: () => client });
+  const { groupId, memberId } = f.makeGroup("external-soul", "openclaw");
+  const soul = await f.directory.readRole(groupId, memberId, { document: "SOUL.md" });
+  assert.equal(soul.ok, true); assert.match(soul.text, /外部 SOUL 内容/u);
+  assert.equal((await f.directory.readRole(groupId, memberId)).code, "source_unavailable");
+});
 
 test("public role pages retain their exact UTF-8 snapshot through edits, restart, policy changes and revocation", async t => {
   const f = fixture(t);
@@ -80,6 +137,8 @@ test("public role pages retain their exact UTF-8 snapshot through edits, restart
   assert.deepEqual(await f.directory.readRole(a.groupId, a.memberId, { revision: first.revisionId }), { ok: false, code: "revision_unavailable" });
   const policyPage = await f.directory.readRole(a.groupId, a.memberId);
   assert.equal(policyPage.disclosurePolicyRevision, 2);
+  f.store.addMember({ groupId: a.groupId, expectedRosterRevision: f.store.getGroup(a.groupId).group.rosterRevision,
+    member: { backendId: "shoggoth", agentId: "c", profileId: "pc", displayName: "丙" } });
   f.store.removeMember({ ...a, expectedRosterRevision: f.store.getGroup(a.groupId).group.rosterRevision });
   assert.deepEqual(await f.directory.readRole(a.groupId, a.memberId, { cursor: first.nextCursor }), { ok: false, code: "access_revoked" });
 });

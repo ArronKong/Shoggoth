@@ -171,7 +171,8 @@ class GroupChatService {
     if (method === "group.get") return this.#view(params.groupId, { refresh: true });
     if (method === "group.member.role") {
       if (!this.directory) fail("GROUP_CHAT_UNAVAILABLE");
-      return this.directory.readRole(params.groupId, params.memberId, { revision: params.revision ?? "latest", cursor: params.cursor });
+      return this.directory.readRole(params.groupId, params.memberId, {
+        revision: params.revision ?? "latest", cursor: params.cursor, document: params.document });
     }
     if (method === "group.member.role.history") {
       if (!this.directory) fail("GROUP_CHAT_UNAVAILABLE");

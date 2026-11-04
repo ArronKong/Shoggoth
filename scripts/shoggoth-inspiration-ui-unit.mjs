@@ -23,7 +23,21 @@ const execution = { exports: {} };
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'app/manage-ui/src/pages/inspiration-execution.ts'), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText, { exports: execution.exports });
-const capabilities = { execute: true, session: true, respond: true, cancel: true, reason: null };
+const noteText = { exports: {} };
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'app/manage-ui/src/pages/inspiration-note-text.ts'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+}).outputText, { exports: noteText.exports });
+{
+  const { inspirationNoteContent } = noteText.exports;
+  const plain = inspirationNoteContent({ title: null, body: 'Body', attachments: [] });
+  assert.equal(plain.body, 'Body');
+  assert.equal(plain.attachments.length, 0);
+  const merged = inspirationNoteContent({ title: 'Title', body: 'Body', attachments: [{ id: 'a', textOffset: 2 }, { id: 'b' }] });
+  assert.equal(merged.body, 'Title\nBody', 'A legacy title is simply the first line of the text');
+  assert.deepEqual(merged.attachments.map(item => item.textOffset), [8, 6], 'Attachments keep their places after the folded first line');
+  assert.equal(inspirationNoteContent({ title: 'Only', body: '', attachments: [] }).body, 'Only');
+}
+const capabilities ={ execute: true, session: true, respond: true, cancel: true, reason: null };
 const agents = ['shoggoth', 'openclaw', 'hermes'].map((backendId) => ({
   backendId, backendName: backendId, id: `${backendId}-agent`, name: backendId, capabilities: { ...capabilities },
 }));
@@ -47,7 +61,7 @@ const stubs = {
     Select: host('select'), Option: host('option') },
   '../components/ui': { useConfirm: () => async () => true, useToast: () => ({ error: assert.fail, success() {} }) },
   '../components/AgentAvatar': host('span'),
-  '../lib/usePageCache': { usePageCache: (key) => ({ refresh, data: key === 'inspiration-agents' ? { agents: roster }
+  '../lib/usePageCache': { usePageCache: (key) => ({ refresh, data: key.startsWith('inspiration-agents') ? { agents: roster }
     : { idea, history: { executions: idea.latestExecution ? [idea.latestExecution] : [], nextCursor: null } } }) },
   '../lib/page-refresh': { useRegisterPageLoading() {}, useRegisterPageRefresh() {} },
   '../lib/navigation-guard': { useNavigationGuard() {} },
@@ -62,6 +76,7 @@ const stubs = {
   './InspirationActionIcon': host('i'),
   './InspirationActivity': host('section'),
   './InspirationRunBar': host('section'),
+  './InspirationRunCard': host('section'),
   './InspirationArchiveControls': () => null, './InspirationTypewriter': host('div'),
   './InspirationCapture': host('section'),
     './InspirationContent': props => props.renderText(props.body, 0),
@@ -70,6 +85,7 @@ const stubs = {
   './InspirationAgentDock': host('aside'),
   './inspiration-paper-motion': { prepareInspirationPaperFlight: () => null },
   './inspiration-execution': execution.exports,
+  './inspiration-note-text': noteText.exports,
   './inspiration-scroll-stages': { attachInspirationScrollStages() {} },
   './inspiration-card-drag': { beginInspirationCardDrag: () => () => {} },
   './inspiration-wall-pages': { readInspirationWallPages: async () => ({ items: [], total: 0, hasMore: false, nextCursor: null, pageCount: 1 }) },
@@ -176,17 +192,72 @@ for (const backendId of ['openclaw', 'hermes']) {
   act(() => renderer.unmount());
 }
 {
+  const renderer = render('completed');
+  await click(button(renderer, 'inspiration.edit'));
+  act(() => renderer.root.findByType('textarea').props.onChange({ target: { value: 'Plain note' } }));
+  await click(button(renderer, 'inspiration.saveEdit'));
+  assert.equal(Object.hasOwn(updates.at(-1).input.patch, 'title'), false, 'Editing an untitled note never writes a title');
+  act(() => renderer.unmount());
+}
+{
+  // Notes have no title/body split: a legacy title is the first line of the text, not a heading.
   const renderer = render('completed', null, 'Legacy title');
-  assert.ok(textOf(renderer.toJSON()).includes('Legacy title'), 'Existing titles remain visible in the dialog heading');
+  assert.ok(renderer.root.findAllByType('p').map((value) => textOf(value)).includes('Legacy title\nOriginal idea'),
+    'A legacy title is shown as the first line of the note text');
+  assert.equal(textOf(renderer.toJSON()).split('Legacy title').length - 1, 1, 'The dialog shows no separate title heading');
   await click(button(renderer, 'inspiration.edit'));
   assert.equal(renderer.root.findAllByType('input').length, 0, 'Editing a note should expose no separate title field');
-  assert.equal(renderer.root.findAllByType('textarea').length, 1, 'The note body remains the single text editor');
+  assert.equal(renderer.root.findAllByType('textarea').length, 1, 'The note text remains the single text editor');
+  assert.equal(renderer.root.findByType('textarea').props.value, 'Legacy title\nOriginal idea', 'The editor holds the complete text');
   assert.ok(!textOf(renderer.toJSON()).includes('inspiration.optionalTitle'));
   act(() => renderer.root.findByType('textarea').props.onChange({ target: { value: 'Updated note' } }));
   await click(button(renderer, 'inspiration.saveEdit'));
   assert.equal(updates.at(-1).input.patch.body, 'Updated note');
-  assert.equal(Object.hasOwn(updates.at(-1).input.patch, 'title'), false, 'Editing text must preserve an existing legacy title');
-  assert.equal(idea.title, 'Legacy title');
+  assert.equal(updates.at(-1).input.patch.title, null, 'Saving folds the legacy title into the text');
+  assert.equal(idea.title, null);
   act(() => renderer.unmount());
 }
-console.log('PASS Inspiration UI: external routes, workspace isolation, native continuation, offline guard, stopped failures and titleless note details');
+{
+  // A cold deep link mounts the wall and detail together. Use the real cache:
+  // one consumer's request must not leave the other's Agent selector empty.
+  const seed = render();
+  act(() => seed.unmount());
+  const realCache = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'app/manage-ui/src/lib/usePageCache.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, { exports: realCache, require: uiRequire });
+  stubs['../lib/usePageCache'].usePageCache = realCache.usePageCache;
+  stubs['../api/client'].getInspiration = async () => ({ idea });
+  stubs['../api/client'].getInspirationExecutions = async () => ({ executions: [idea.latestExecution], nextCursor: null });
+  let requests;
+  stubs['../api/client'].getInspirationAgents = () => new Promise(resolve => requests.push(resolve));
+  function WallRoster() {
+    const roster = realCache.usePageCache('inspiration-agents', stubs['../api/client'].getInspirationAgents);
+    return React.createElement('output', {}, String(roster.data?.agents.length || 0));
+  }
+  for (const reverse of [false, true]) {
+    realCache.invalidatePageCache();
+    requests = [];
+    let renderer;
+    await act(async () => {
+      renderer = create(React.createElement(React.Fragment, {},
+        React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh }),
+        React.createElement(WallRoster)));
+      await new Promise(setImmediate);
+    });
+    assert.equal(requests.length, 2);
+    await act(async () => {
+      for (const resolve of reverse ? [...requests].reverse() : requests) resolve({ agents });
+      await new Promise(setImmediate);
+    });
+    assert.equal(textOf(renderer.root.findByType('output')), '3');
+    assert.equal(renderer.root.findAllByType('option').filter(option => option.props.value).length, 3,
+      'A deep-linked detail receives its roster even when the wall reads the same catalog');
+    assert.equal(button(renderer, 'inspiration.continue').props.disabled, false);
+    act(() => renderer.root.findByType('select').props.onChange('hermes/hermes-agent'));
+    await click(button(renderer, 'inspiration.continue'));
+    assert.equal(starts.at(-1).input.agentId, 'hermes-agent');
+    act(() => renderer.unmount());
+  }
+}
+console.log('PASS Inspiration UI: external routes, workspace isolation, native continuation, offline guard, stopped failures, plain-text notes, legacy titles and concurrent deep-link rosters');

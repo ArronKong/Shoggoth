@@ -225,8 +225,16 @@ async function electronMain() {
     await js("document.documentElement.dataset.theme='dark';document.documentElement.classList.add('dark')"); await delay(150); assert.equal(await active.child.executeJavaScript("window.initCount"), 1); check("theme-keeps-active-document");
     await verifyFloatingClip("ordinary", second.part, active);
     await verifyComposerFocusReturn("ordinary", active);
-    assert.equal(await js("document.querySelector('[data-testid=chat-immersive-enter]')?.hidden"), false, "enabled native capability must expose immersive entry");
-    await click(window.webContents, "[data-testid=chat-immersive-enter]"); await waitFor(() => js("!!document.querySelector('[data-testid=immersive-chat]')?.getClientRects().length"), "immersive mode not mounted"); await delay(200);
+    await js("document.querySelector('.chat-artifacts-trigger').click();void 0");
+    await waitFor(() => js("document.querySelector('.chat-header')?.dataset.agentPanel === 'artifacts'"), "Agent outputs did not expand");
+    await waitFor(() => !active.view.visible, "expanded Agent panel must hide the covered native card");
+    await js("document.querySelector('.chat-artifacts-trigger').click();void 0");
+    await waitFor(() => active.view.visible, "closing Agent outputs must restore the native card");
+    assert.equal(host.entries.get(mountId)?.view.webContents.id, viewId);
+    assert.equal(await active.child.executeJavaScript("window.initCount"), 1);
+    check("Agent-panel-occlusion-preserves-native-card-state");
+    assert.equal(await js("document.querySelector('[data-testid=chat-immersive-enter]')?.hidden"), true, "native capability does not expose the hidden immersive entry");
+    await js("document.querySelector('[data-testid=chat-immersive-enter]').click();void 0"); await waitFor(() => js("!!document.querySelector('[data-testid=immersive-chat]')?.getClientRects().length"), "immersive mode not mounted"); await delay(200);
     assert.equal(host.entries.get(mountId)?.view.webContents.id, viewId); assert.equal(active.entry.state.selected, "B"); assert.equal(await active.child.executeJavaScript("window.initCount"), 1);
     fs.writeFileSync(path.join(options.output, "immersive.png"), (await window.webContents.capturePage()).toPNG()); check("ordinary-immersive-share-host-state");
     await verifyFloatingClip("immersive", second.part, active);
@@ -267,7 +275,7 @@ async function electronMain() {
     await waitFor(() => active.view.visible, "chosen native card is not visible after legacy preview");
     const legacyMounts = () => [...mainIpc.entries.values()].filter(entry => entry.descriptor.legacy).map(entry => entry.mountId);
     assert.deepEqual(legacyMounts(), [], "choosing native card did not release the legacy preview");
-    await click(window.webContents, "[data-testid=chat-immersive-enter]");
+    await js("document.querySelector('[data-testid=chat-immersive-enter]').click();void 0");
     // Native input arrives asynchronously after the marker. Wait for the visible
     // surface before reading its card; a fixed delay can precede the real click.
     await waitFor(() => js(`!!document.querySelector('[data-testid="immersive-chat"] ${secondCard}')?.getClientRects().length`), "chosen native card did not enter the visible immersive surface"); await delay(250);

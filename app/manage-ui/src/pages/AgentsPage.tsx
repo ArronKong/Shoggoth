@@ -11,6 +11,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearchParams } from "react-router-dom";
 import { PageHead } from "../components/PageHead";
 import type {
   DashboardArtifactItem,
@@ -142,7 +143,10 @@ function fileTargetKey(backend: string, detail: UnifiedAgentDetail, name: string
 }
 
 export default function AgentsPage() {
-  const [backend, setBackend] = useBackendState("agents", undefined, { surface: "agents" });
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedBackend = searchParams.get("backend") || undefined;
+  const requestedAgent = searchParams.get("agent");
+  const [backend, setBackend, availableBackends] = useBackendState("agents", requestedBackend, { surface: "agents" });
   const backendCatalog = useBackendCatalog("agents");
   const backendDescriptors = useMemo(
     () => new Map(backendCatalog.map((descriptor) => [descriptor.id, descriptor])),
@@ -313,6 +317,26 @@ export default function AgentsPage() {
     setSelectedId(id);
     openDetail(id);
   };
+
+  // Chat's details shortcut carries both identities. Never open a same-named
+  // Agent from the remembered backend, and consume the link once so closing stays closed.
+  useEffect(() => {
+    if (!requestedBackend || !requestedAgent) return;
+    if (availableBackends.includes(requestedBackend)) {
+      if (backend !== requestedBackend) { setBackend(requestedBackend); return; }
+      if (loading || !agentsData) return;
+    }
+    if (backend === requestedBackend && agents.some(agent => agent.id === requestedAgent)) {
+      setClosing(false);
+      selectAgent(requestedAgent);
+    } else toast.error(t("chat.agentDetailsUnavailable"));
+    setSearchParams(previous => {
+      const next = new URLSearchParams(previous);
+      next.delete("agent");
+      next.delete("backend");
+      return next;
+    }, { replace: true });
+  }, [requestedBackend, requestedAgent, backend, availableBackends, loading, agentsData]);
 
   // 主模型改完后只把 detail 的服务端真值刷新一遍（左侧卡片的模型/提供方跟着变）。
   // 故意不复用 openDetail：那会 setDetail(null) 并清空 kanban/cron/artifacts/文件缓存，

@@ -1247,8 +1247,9 @@ class AgentBackend {
   async getGroupMemberModels(_agentId) { throw groupChatUnsupported(this.id); }
   /** Apply only to an already owned group session; null resolves the current Agent default. */
   async applyGroupSessionModel(_agentId, _sessionKey, _selection) { throw groupChatUnsupported(this.id); }
+  /** Remove with roster revision CAS; retain at least two active members, without partial writes or stopping their runs on refusal. */
   async removeGroupChatMember(_id, _input) { throw groupChatUnsupported(this.id); }
-  /** 成员可共享的角色设定（当前版本、已过滤）；移除的成员返回 access_revoked。 */
+  /** 成员可共享的角色设定（当前版本、已过滤）；query.document="SOUL.md" 只读 SOUL。移除的成员返回 access_revoked。 */
   async getGroupChatMemberRole(_id, _memberId, _query = {}) { throw groupChatUnsupported(this.id); }
   /** 该成员已保存的公开角色版本，不包含私有原文；before 为上页末尾的版本 id。 */
   async getGroupChatMemberRoleHistory(_id, _memberId, _query = {}) { throw groupChatUnsupported(this.id); }
@@ -1989,16 +1990,17 @@ class AgentBackend {
   async updateAgent(id, patch) { throw new Error(`${this.id}: updateAgent() not supported`); }
 
   /**
-   * 该 agent 的「产出文件」（Agent 页文件 tab）。复用 dashboard 产出区的同一套
-   * 扫描规则（core/artifact-scan.js：深度≤2、lstat 不追 symlink、点文件/黑名单/
-   * 身份文件排除），只是把根收窄到这个 agent 自己的目录。
+   * 该 agent 的「产出文件」（Agent 页文件 tab / Chat 顶栏）。外部后端复用
+   * dashboard 的扫描规则，根收窄到这个 agent 自己的目录；原生后端聚合
+   * 该 Agent 所有公开会话（包括归档会话）的成功写入证据，不扫描共享工作区兜底。
    * 纯本地磁盘能力（远端网关/远端 Hermes → supported:false + reason:"remote"），
    * 与 getRecentArtifacts 同一约束。
    * `total` = 扫描到的产出文件总数（items 按 mtime 倒序截到 limit，长度 ≠ 总数）；
    * 与 dashboard 同受 walker 的 stat 硬上限约束。
    * @param {string} _agentId
    * @param {{limit?: number}} [_opts]
-   * @returns {Promise<{supported: boolean, reason?: string, total?: number, items: Array<{path: string,
+   * `partial` 表示部分会话无法读取，已确认的文件仍可展示。
+   * @returns {Promise<{supported: boolean, reason?: string, partial?: boolean, total?: number, items: Array<{path: string,
    *   name: string, area: string, size: number, mtimeMs: number, ext?: string, kind: string}>}>}
    */
   async listAgentArtifacts(_agentId, _opts) { return { supported: false, reason: "unsupported", items: [] }; }

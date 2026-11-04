@@ -95,6 +95,12 @@ import ChatSessionMenu from "./ChatSessionMenu";
 import { readChatUnread, writeChatUnread, sessionReadAt, hasUnreadReply,
   observeSessionReply, readSessionThrough, supportsSessionUnread, anchorUnreadMessage } from "../lib/chatUnread";
 import ChatAgentPanel, { type ChatAgentPanelKind } from "./ChatAgentPanel";
+import headerPanelCloseIcon from "../assets/figma/group-chat/group-details-close.svg";
+import headerFilesIcon from "../assets/figma/group-chat/group-files-trigger.svg";
+import { ChatFileCard, ChatFileGrid } from "../components/ChatFileGrid";
+import headerAgentIcon from "../assets/figma/chat-header/agent.svg";
+import headerCronIcon from "../assets/figma/chat-header/cron.svg";
+import headerNoteIcon from "../assets/figma/chat-header/note.svg";
 import McpConnectionRequests from "../components/McpConnectionRequests";
 type ChatConnectorSelection = string; // Read-only historical account selection.
 import { createPendingChatSendStore, shouldTrackChatSend, classifyChatSendObservation,
@@ -163,7 +169,7 @@ import ChatThinkFastMenu from "./ChatThinkFastMenu";
 import { localizePermissionMode } from "../lib/permissionModeText";
 import type { ImmersivePhase } from "./immersive/immersiveBg";
 import type { ImmersiveLiveStatus, ImmersiveLiveTool } from "./immersive/ImmersiveStatusLine";
-import { IconSend, IconClip, IconSearch, IconClock, IconMic, IconStop } from "./chatIcons";
+import { IconSend, IconClip, IconSearch, IconMic, IconStop } from "./chatIcons";
 import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
 import "./ChatPage.css";
 import GroupChatPanel, { GroupChatAvatar } from "./GroupChatPanel";
@@ -185,7 +191,7 @@ import type {
   OpenClawQuestion,
   OpenClawQuestionPromptEntry,
   SessionAdvancedDescription,
-  SessionArtifactsResult,
+  AgentArtifactsResult,
   SessionBoardOp,
   SessionBoardResult,
   SessionBoardWidget,
@@ -199,7 +205,7 @@ import {
   getChatCacheScope,
   getChatCapabilities,
   getModelCatalog,
-  listSessionArtifacts,
+  listAgentArtifacts,
   getSessionBoard,
   grantSessionBoardWidget,
   listSlashCommands,
@@ -292,15 +298,10 @@ interface SessionListSnapshot {
   rows: SessionRow[];
   degradedBackends: Set<string>;
 }
-interface SessionArtifactState {
+interface AgentArtifactState {
   key: string;
   status: "idle" | "loading" | "done" | "error";
-  result: SessionArtifactsResult | null;
-}
-interface SessionArtifactPopoverPosition {
-  top: number;
-  right: number;
-  maxHeight: number;
+  result: AgentArtifactsResult | null;
 }
 const GLOBAL_SEARCH_PAGE_SIZE = 50;
 interface PendingSearchJump extends GlobalChatSearchHit {
@@ -2263,14 +2264,6 @@ function IconRetry() {
 
 // header tools + composer icons (Figma 6377:264 — drawn to match, wired only where the feature exists)。
 // 与沉浸模式共用的那批（Send/Clip/Search/Clock/Archive/Mic/Command/Stop/Pencil）在 ./chatIcons.tsx。
-function IconNote() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M5 3.5h14a1.5 1.5 0 0 1 1.5 1.5v10.5L15.5 21H5a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 5 3.5Z" />
-      <path d="M15.5 21v-5.5H21M8 8h8M8 12h5" />
-    </svg>
-  );
-}
 function IconBulb() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -2287,14 +2280,6 @@ function IconWrench() {
   );
 }
 
-function IconArtifacts() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 7.5h6l2 2h8v9.5a1.5 1.5 0 01-1.5 1.5h-13A1.5 1.5 0 014 19V7.5z" />
-      <path d="M4 7.5V5a1.5 1.5 0 011.5-1.5H10l2 2h6" />
-    </svg>
-  );
-}
 function IconImmersive() {
   // 沉浸模式入口：四角扩展（fullscreen/expand）。原先占位用 IconBulb，与「显示思考」开关撞图标。
   return (
@@ -2303,14 +2288,6 @@ function IconImmersive() {
       <path d="M15 4h3a2 2 0 0 1 2 2v3" />
       <path d="M9 20H6a2 2 0 0 1-2-2v-3" />
       <path d="M15 20h3a2 2 0 0 0 2-2v-3" />
-    </svg>
-  );
-}
-function IconFolderReveal() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
-      <path d="M9 13h6M13 10l3 3-3 3" />
     </svg>
   );
 }
@@ -2937,19 +2914,15 @@ function ChatPageApp() {
     const timer = window.setTimeout(() => setToast((current) => current === toast ? null : current), 7000);
     return () => window.clearTimeout(timer);
   }, [toast]);
-  const [sessionArtifactsOpen, setSessionArtifactsOpen] = useState(false);
   const [agentHeaderPanel, setAgentHeaderPanel] = useState<{ scope: string; kind: ChatAgentPanelKind } | null>(null);
-  const agentHeaderRef = useRef<HTMLElement | null>(null);
+  const [agentHeaderInstant, setAgentHeaderInstant] = useState(false);
   const agentHeaderTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const [sessionArtifactReload, setSessionArtifactReload] = useState(0);
-  const [sessionArtifactPopoverPosition, setSessionArtifactPopoverPosition] = useState<SessionArtifactPopoverPosition | null>(null);
-  const [sessionArtifactState, setSessionArtifactState] = useState<SessionArtifactState>({
+  const [agentArtifactState, setAgentArtifactState] = useState<AgentArtifactState>({
     key: "",
     status: "idle",
     result: null,
   });
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const sessionArtifactsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const preparingSecretInputRef = useRef(new Set<string>());
@@ -2978,6 +2951,18 @@ function ChatPageApp() {
   // Session-scoped plan snapshots feed the composer dock, independently of the thread.
   const pendingPlanRef = useRef<Map<string, PlanEntry[]>>(new Map());
   const [expandedPlans, setExpandedPlans] = useState<Record<string, boolean>>({});
+  // Local presentation only. A durable card survives turns/revisions; a runtime
+  // plan belongs to its transcript turn. Neither choice writes to the backend.
+  const [dismissedPlans, setDismissedPlans] = useState<Record<string, string>>({});
+  const planLifetimesRef = useRef(new Map<string, number>());
+  const restoreDismissedPlan = useCallback((key: string, source: "progress" | "turn") => {
+    const lifetimeKey = `${source}:${key}`;
+    planLifetimesRef.current.set(lifetimeKey, (planLifetimesRef.current.get(lifetimeKey) ?? 0) + 1);
+    setDismissedPlans(previous => {
+      if (!previous[key]?.startsWith(`${source}:`)) return previous;
+      const next = { ...previous }; delete next[key]; return next;
+    });
+  }, []);
   // Blocking agent prompts (approval/clarify/sudo/secret cards) per session —
   // pushed by `chat` state:"prompt", answered via chat.respond, cleared on
   // final/error/expire.
@@ -3783,6 +3768,7 @@ function ChatPageApp() {
 
   const clearOpenClawProgressCard = useCallback((sessionKey: string) => {
     progressCardsRef.current.delete(sessionKey);
+    restoreDismissedPlan(sessionKey, "progress");
     const plan = pendingPlanRef.current.get(sessionKey);
     if (plan?.some((entry) => entry.progressRevision !== undefined)) {
       // Keep an explicit empty override until the next snapshot/turn so the dock
@@ -3790,7 +3776,7 @@ function ChatPageApp() {
       pendingPlanRef.current.set(sessionKey, []);
     }
     renderLiveStateForSession(sessionKey);
-  }, [renderLiveStateForSession]);
+  }, [renderLiveStateForSession, restoreDismissedPlan]);
 
   const refreshOpenClawProgressCard = useCallback(async (
     sessionKey: string,
@@ -3803,7 +3789,7 @@ function ChatPageApp() {
       const response = await send("progressCard.get", { sessionKey });
       if (gatewayContractRef.current !== contract) return;
       if ((progressEventEpochRef.current.get(sessionKey) ?? 0) !== eventEpoch) return;
-      if (response?.payload?.card == null) {
+      if (response?.payload?.card === null) {
         clearOpenClawProgressCard(sessionKey);
         return;
       }
@@ -4118,7 +4104,9 @@ function ChatPageApp() {
         const eventEpoch = (progressEventEpochRef.current.get(progressSessionKey) ?? 0) + 1;
         progressEventEpochRef.current.set(progressSessionKey, eventEpoch);
         if (f.payload.revision === null) {
-          clearOpenClawProgressCard(progressSessionKey);
+          // A notification is only a refresh hint. Keep a local dismissal until
+          // a current read confirms removal, even if a null event arrives late.
+          void refreshOpenClawProgressCard(progressSessionKey, undefined, eventEpoch);
         } else if (Number.isInteger(f.payload.revision) && f.payload.revision >= 1) {
           void refreshOpenClawProgressCard(progressSessionKey, f.payload.revision, eventEpoch);
         }
@@ -4455,6 +4443,7 @@ function ChatPageApp() {
         } else if (p.state === "plan") {
           // All backends use the same plan dock; tool/thinking visibility is independent.
           if (sk && Array.isArray(p.plan)) {
+            if (!p.plan.length) restoreDismissedPlan(sk, "turn");
             timelineFeed(sk, { kind: "plan", entries: p.plan });
             pendingPlanRef.current.set(sk, p.plan);
             updateSessionMessages(sk, (prev) => applyToolStream(prev, liveToolsRef.current.get(sk) || [], pendingThinkingRef.current.get(sk) || "", p.plan, displayPromptsFor(sk)));
@@ -4840,7 +4829,7 @@ function ChatPageApp() {
     advanceRealActivity,
     rememberChosen,
     chatHistoryController,
-    clearOpenClawProgressCard,
+    restoreDismissedPlan,
     refreshOpenClawProgressCard,
     renderLiveStateForSession,
     execApprovals,
@@ -6690,7 +6679,7 @@ function ChatPageApp() {
       if (t instanceof HTMLElement) {
         if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable) return;
         if (t.closest('[role="dialog"], [role="menu"], [role="listbox"]')) return; // don't steal focus from open popups
-        if (t.closest(".chat-header")) return; // keep Space/Enter on the capsule's buttons and note summaries
+        if (t.closest(".chat-header, .chat-plan-dock")) return; // retain native keyboard activation on header and plan controls
       }
       const el = visibleComposerEl();
       if (!el) return;
@@ -7804,43 +7793,33 @@ function ChatPageApp() {
     : null;
   const activeAdvancedMethods = activeAdvancedDescription?.methods;
   const activeRunInFlight = sending || (activeKey ? runningKeys.has(activeKey) : false);
-  const activeSessionArtifactResult = sessionArtifactState.key === activeKey
-    ? sessionArtifactState.result
+  const activeAgentId = activeKey ? agentOf(activeKey) : null;
+  const agentArtifactScope = JSON.stringify([activeBackend, activeAgentId]);
+  const activeAgentArtifactResult = agentArtifactState.key === agentArtifactScope
+    ? agentArtifactState.result
     : null;
-  const sessionArtifactItems = activeSessionArtifactResult?.items ?? [];
-  const sessionArtifactCount = activeSessionArtifactResult?.total ?? sessionArtifactItems.length;
+  const agentArtifactItems = activeAgentArtifactResult?.items ?? [];
+  const agentArtifactCount = activeAgentArtifactResult?.total ?? agentArtifactItems.length;
   const agentHeaderScope = JSON.stringify([activeBackend, activeKey]);
   const activeAgentHeaderPanel = agentHeaderPanel?.scope === agentHeaderScope && !immersive
     ? agentHeaderPanel.kind : null;
-  const toggleAgentHeaderPanel = (kind: ChatAgentPanelKind, trigger: HTMLButtonElement) => {
+  const agentArtifactsOpen = activeAgentHeaderPanel === "artifacts";
+  const toggleAgentHeaderPanel = (kind: ChatAgentPanelKind, trigger: HTMLButtonElement, instant: boolean) => {
     agentHeaderTriggerRef.current = trigger;
-    setSessionArtifactsOpen(false);
+    setAgentHeaderInstant(instant);
     setAgentHeaderPanel(activeAgentHeaderPanel === kind ? null : { scope: agentHeaderScope, kind });
   };
 
-  useEffect(() => { setAgentHeaderPanel(null); }, [activeKey, activeBackend, immersive]);
+  useEffect(() => { setAgentHeaderInstant(true); setAgentHeaderPanel(null); }, [activeKey, activeBackend, immersive]);
   useLayoutEffect(() => {
-    if (!activeAgentHeaderPanel) return;
-    const header = agentHeaderRef.current;
-    const conversation = header?.closest<HTMLElement>(".chat-conv");
-    const row = header?.querySelector<HTMLElement>(".chat-header__row");
-    if (!header || !conversation || !row) return;
-    const composerDock = conversation.querySelector<HTMLElement>(".chat-botdock");
+    const conversation = threadRef.current?.parentElement;
+    const header = conversation?.querySelector<HTMLElement>(".chat-header");
+    if (!conversation || !header || immersive) return;
     const measure = () => {
-      const composer = (composerDock?.querySelector<HTMLElement>("[data-chat-plan-dock]")
-        ?? composerDock?.querySelector<HTMLElement>(".chat-composer"))?.getBoundingClientRect();
-      const context = composerDock?.querySelector<HTMLElement>(".chat-ctx")?.getBoundingClientRect();
-      // Always reserve the latest-message pill's 30px height and 20px gap.
-      // Measuring the dock itself would make expansion and pill visibility
-      // repeatedly resize each other when the last message is partly covered.
-      const bottom = composer?.height ? (context?.height ? context.top : composer.top) - 50
-        : conversation.getBoundingClientRect().bottom;
-      // Leave room for the expansion's margins, header padding and a gap above
-      // the composer, including its taller narrow-window / attachment states.
-      const available = Math.max(0, Math.floor(bottom - row.getBoundingClientRect().bottom - 40));
-      const value = `${available}px`;
-      if (header.style.getPropertyValue("--chat-agent-panel-max-height") !== value) {
-        header.style.setProperty("--chat-agent-panel-max-height", value);
+      const inset = parseFloat(getComputedStyle(header).marginTop);
+      const height = `${Math.max(66, conversation.clientHeight - inset * 2)}px`;
+      if (header.style.getPropertyValue("--chat-agent-panel-height") !== height) {
+        header.style.setProperty("--chat-agent-panel-height", height);
       }
     };
     measure();
@@ -7850,20 +7829,20 @@ function ChatPageApp() {
       frame = requestAnimationFrame(() => { frame = null; measure(); });
     });
     observer.observe(conversation);
-    observer.observe(row);
-    if (composerDock) observer.observe(composerDock);
     return () => { observer.disconnect(); if (frame !== null) cancelAnimationFrame(frame); };
-  }, [activeAgentHeaderPanel]);
+  }, [activeKey, activeBackend, immersive]);
   useEffect(() => {
     if (!activeAgentHeaderPanel) return;
     const outside = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest(".chat-header, [role='dialog']")) return;
+      setAgentHeaderInstant(false);
       setAgentHeaderPanel(null);
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented
         || document.querySelector("[role='dialog'][aria-modal='true'], .session-menu")) return;
+      setAgentHeaderInstant(true);
       setAgentHeaderPanel(null);
       agentHeaderTriggerRef.current?.focus();
     };
@@ -7876,72 +7855,27 @@ function ChatPageApp() {
   }, [activeAgentHeaderPanel]);
 
   useEffect(() => {
-    setSessionArtifactsOpen(false);
-  }, [activeKey]);
-
-  useLayoutEffect(() => {
-    if (!sessionArtifactsOpen) return;
-    const updatePosition = () => {
-      const rect = sessionArtifactsTriggerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const panelWidth = Math.min(380, window.innerWidth - 32);
-      const maxRight = Math.max(16, window.innerWidth - panelWidth - 16);
-      const right = Math.min(Math.max(window.innerWidth - rect.right, 16), maxRight);
-      const top = Math.max(16, Math.min(rect.bottom + 10, window.innerHeight - 160));
-      setSessionArtifactPopoverPosition({
-        top,
-        right,
-        maxHeight: Math.min(560, Math.max(144, window.innerHeight - top - 16)),
-      });
-    };
-    updatePosition();
-    window.addEventListener("resize", updatePosition);
-    return () => window.removeEventListener("resize", updatePosition);
-  }, [sessionArtifactsOpen]);
-
-  useEffect(() => {
-    if (!sessionArtifactsOpen) return;
-    const closeOnOutsidePress = (event: PointerEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.closest?.(".chat-artifacts-popover, .chat-artifacts-trigger")) return;
-      setSessionArtifactsOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSessionArtifactsOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePress);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePress);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [sessionArtifactsOpen]);
-
-  useEffect(() => {
-    if (!sessionArtifactsOpen || !activeKey || activeRunInFlight) return;
+    if (!agentArtifactsOpen || !activeAgentId) return;
     const controller = new AbortController();
-    const key = activeKey;
-    setSessionArtifactState((current) => ({
+    const key = agentArtifactScope;
+    setAgentArtifactState((current) => ({
       key,
       status: "loading",
       result: current.key === key ? current.result : null,
     }));
-    void listSessionArtifacts(activeBackend, agentOf(key), key, {
-      limit: 50,
-      signal: controller.signal,
-    }).then((result) => {
-      if (controller.signal.aborted || activeKeyRef.current !== key) return;
-      setSessionArtifactState({ key, status: "done", result });
+    void listAgentArtifacts(activeBackend, activeAgentId, controller.signal).then((result) => {
+      if (controller.signal.aborted) return;
+      setAgentArtifactState({ key, status: "done", result });
     }).catch((error) => {
-      if (controller.signal.aborted || activeKeyRef.current !== key) return;
-      setSessionArtifactState({
+      if (controller.signal.aborted) return;
+      setAgentArtifactState({
         key,
         status: "error",
         result: { supported: false, reason: error instanceof Error ? error.message : "error", items: [] },
       });
     });
     return () => controller.abort();
-  }, [activeBackend, activeKey, activeRunInFlight, sessionArtifactReload, sessionArtifactsOpen]);
+  }, [activeBackend, activeAgentId, agentArtifactScope, activeRunInFlight, agentArtifactsOpen]);
 
   const revealAttachmentFile = useCallback(async (file: { name: string; src?: string; path?: string }) => {
     try {
@@ -8158,9 +8092,24 @@ function ChatPageApp() {
   // Retain transcript snapshots for recovery/search, but render plans only above the input.
   const historyPlan = useMemo(() => latestChatPlan(messages), [messages]);
   const activePlan = activeKey ? pendingPlanRef.current.get(activeKey) ?? historyPlan : [];
-  const planDock = activeKey && activePlan.length ? (
+  const planTurnKey = useMemo(() => {
+    for (let i = actionableMessages.length - 1; i >= 0; i--) {
+      const message = actionableMessages[i];
+      if (message.role === "user" || message.divider || message.notice || message.local) {
+        return message.actionId ?? JSON.stringify([message.ts, message.parts, message.divider, message.notice]);
+      }
+    }
+    return "initial";
+  }, [actionableMessages]);
+  const planSource = activePlan.some(entry => entry.progressRevision !== undefined) ? "progress" : "turn";
+  const planScope = `${planSource}:${planLifetimesRef.current.get(`${planSource}:${activeKey}`) ?? 0}:${planSource === "turn" ? planTurnKey : "card"}`;
+  const planDock = activeKey && activePlan.length && dismissedPlans[activeKey] !== planScope ? (
     <ChatPlanDock key={activeKey} entries={activePlan} expanded={expandedPlans[activeKey] ?? false}
-      onToggle={() => setExpandedPlans((previous) => ({ ...previous, [activeKey]: !previous[activeKey] }))} />
+      onToggle={() => setExpandedPlans((previous) => ({ ...previous, [activeKey]: !previous[activeKey] }))}
+      onDismiss={() => {
+        setDismissedPlans(previous => ({ ...previous, [activeKey]: planScope }));
+        focusComposer();
+      }} />
   ) : null;
 
   useLayoutEffect(() => {
@@ -8952,7 +8901,6 @@ function ChatPageApp() {
     return () => observer.disconnect();
   }, [chatList.length, updateAgentListFade]);
 
-  const activeAgentId = activeKey ? agentOf(activeKey) : null;
   const activeAgentSessions = useMemo(
     () => agents.find((g) => g.agentId === activeAgentId)?.sessions ?? [],
     [agents, activeAgentId],
@@ -9604,19 +9552,22 @@ function ChatPageApp() {
           <>
             {/* top dock: header + search + pinbar float above the full-height thread */}
             <div className="chat-topdock" data-native-ui-clip-edge="top">
-            <header ref={agentHeaderRef} className="chat-header" data-agent-panel={activeAgentHeaderPanel ?? undefined}>
+            <header className="chat-header" data-agent-panel={activeAgentHeaderPanel ?? undefined}
+              data-panel-motion={agentHeaderInstant ? "instant" : undefined}>
               <div className="chat-header__row">
               <button type="button" className="chat-header__avatar-trigger"
-                title={t("chat.agentPanelProfile")} aria-label={t("chat.agentPanelProfile")}
+                title={t(activeAgentHeaderPanel === "profile" ? "common.close" : "chat.agentPanelProfile")}
+                aria-label={t(activeAgentHeaderPanel === "profile" ? "common.close" : "chat.agentPanelProfile")}
                 aria-expanded={activeAgentHeaderPanel === "profile"} aria-controls="chat-agent-panel"
-                onClick={event => toggleAgentHeaderPanel("profile", event.currentTarget)}>
-                <Avatar agentId={agentOf(active.key)} name={sessionName(active)} className="chat-header__avatar" version={avatarVersion} />
+                onClick={event => toggleAgentHeaderPanel("profile", event.currentTarget, event.detail === 0)}>
+                {activeAgentHeaderPanel === "profile" ? <img src={headerPanelCloseIcon} alt="" />
+                  : <Avatar agentId={agentOf(active.key)} name={sessionName(active)} className="chat-header__avatar" version={avatarVersion} />}
               </button>
               <div className="chat-header__id">
                 <button type="button" className="chat-header__name"
                   title={t("chat.agentPanelProfile")} aria-expanded={activeAgentHeaderPanel === "profile"}
                   aria-controls="chat-agent-panel"
-                  onClick={event => toggleAgentHeaderPanel("profile", event.currentTarget)}>{sessionName(active)}</button>
+                  onClick={event => toggleAgentHeaderPanel("profile", event.currentTarget, event.detail === 0)}>{sessionName(active)}</button>
                 <div className="chat-header__statusline">
                 {(activeHeaderStatus === "connecting" || activeHeaderStatus === "reconnecting" || activeHeaderStatus === "offline") && (
                   <span className={`chat-status chat-status--${activeHeaderStatus}`}>
@@ -9649,97 +9600,84 @@ function ChatPageApp() {
               {/* tool actions (Figma layout; wired to real features) */}
               <div className="chat-header__tools">
                 <button
-                  ref={sessionArtifactsTriggerRef}
                   type="button"
-                  className={sessionArtifactsOpen ? "chat-headbtn is-active chat-artifacts-trigger" : "chat-headbtn chat-artifacts-trigger"}
-                  title={t("chat.artifactsTitle")}
-                  aria-label={t("chat.artifactsTitle")}
-                  aria-expanded={sessionArtifactsOpen}
-                  aria-controls="chat-session-artifacts"
-                  onClick={() => { setAgentHeaderPanel(null); setSessionArtifactsOpen((value) => !value); }}
+                  className={agentArtifactsOpen ? "chat-headbtn is-active chat-artifacts-trigger" : "chat-headbtn chat-artifacts-trigger"}
+                  title={t(agentArtifactsOpen ? "common.close" : "chat.agentArtifactsTitle")}
+                  aria-label={t(agentArtifactsOpen ? "common.close" : "chat.agentArtifactsTitle")}
+                  aria-expanded={agentArtifactsOpen}
+                  aria-controls="chat-agent-panel"
+                  onClick={event => toggleAgentHeaderPanel("artifacts", event.currentTarget, event.detail === 0)}
                 >
-                  <IconArtifacts />
-                  {sessionArtifactCount > 0 ? (
-                    <span className="chat-artifacts-badge">{Math.min(sessionArtifactCount, 99)}</span>
-                  ) : null}
+                  <img src={agentArtifactsOpen ? headerPanelCloseIcon : headerFilesIcon} alt="" />
                 </button>
-                {sessionArtifactsOpen ? (
-                  <div
-                    id="chat-session-artifacts"
-                    className="chat-artifacts-popover"
-                    role="dialog"
-                    aria-label={t("chat.artifactsTitle")}
-                    style={sessionArtifactPopoverPosition
-                      ? sessionArtifactPopoverPosition
-                      : { visibility: "hidden" }}
-                  >
+                <button type="button" className={`chat-headbtn${activeAgentHeaderPanel === "cron" ? " is-active" : ""}`}
+                  title={t(activeAgentHeaderPanel === "cron" ? "common.close" : "chat.agentPanelCron")}
+                  aria-label={t(activeAgentHeaderPanel === "cron" ? "common.close" : "chat.agentPanelCron")}
+                  aria-expanded={activeAgentHeaderPanel === "cron"} aria-controls="chat-agent-panel"
+                  onClick={event => toggleAgentHeaderPanel("cron", event.currentTarget, event.detail === 0)}>
+                  {activeAgentHeaderPanel === "cron" ? <img src={headerPanelCloseIcon} alt="" /> : <img src={headerCronIcon} alt="" />}</button>
+                <button type="button" className={`chat-headbtn${activeAgentHeaderPanel === "inspiration" ? " is-active" : ""}`}
+                  title={t(activeAgentHeaderPanel === "inspiration" ? "common.close" : "agents.tabInspiration")}
+                  aria-label={t(activeAgentHeaderPanel === "inspiration" ? "common.close" : "agents.tabInspiration")}
+                  aria-expanded={activeAgentHeaderPanel === "inspiration"} aria-controls="chat-agent-panel"
+                  onClick={event => toggleAgentHeaderPanel("inspiration", event.currentTarget, event.detail === 0)}>
+                  {activeAgentHeaderPanel === "inspiration" ? <img src={headerPanelCloseIcon} alt="" /> : <img src={headerNoteIcon} alt="" />}</button>
+                <button type="button" className="chat-headbtn" data-chat-agent-details
+                  title={t("chat.agentOpenDetails")} aria-label={t("chat.agentOpenDetails")}
+                  onClick={() => {
+                    setAgentHeaderPanel(null);
+                    routerNavigate(`/agents?${new URLSearchParams({ backend: activeBackend, agent: agentOf(active.key) })}`);
+                  }}><img src={headerAgentIcon} alt="" /></button>
+                {/* Keep the saved immersive view compatible; its header entry is hidden. */}
+                <button hidden type="button" className="chat-headbtn" data-testid="chat-immersive-enter"
+                  title={t("chat.immersiveEnter")} onClick={() => setImmersive(true)}><IconImmersive /></button>
+              </div>
+              </div>
+              <ChatAgentPanel key={agentHeaderScope} kind={activeAgentHeaderPanel} backendId={activeBackend}
+                backendName={activeBackendDescriptor?.name ?? activeBackend} agentId={agentOf(active.key)} name={sessionName(active)}
+                renderAvatar={name => <Avatar agentId={agentOf(active.key)} name={name} className="chat-header__avatar"
+                  version={avatarVersion} editable onUploaded={() => setAvatarVersion(v => v + 1)} />}>
+                {agentArtifactsOpen && <div id="chat-agent-artifacts" className="chat-artifacts-panel">
                     <div className="chat-artifacts-head">
                       <div>
-                        <div className="chat-artifacts-title">{t("chat.artifactsTitle")}</div>
+                        <h2 className="chat-artifacts-title">{t("chat.agentArtifactsTitle")}</h2>
                         <div className="chat-artifacts-subtitle">
-                          {activeSessionArtifactResult?.approximate
-                            ? t("chat.artifactsApproximate")
-                            : t("chat.artifactsProduced")}
+                          {t("chat.agentArtifactsProduced")}
+                          {activeAgentArtifactResult?.supported && <> · {t("agents.artifactsCount", { count: agentArtifactCount })}
+                            {agentArtifactItems.length < agentArtifactCount && t("agents.artifactsShown", { shown: agentArtifactItems.length })}</>}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        className="chat-artifacts-refresh"
-                        title={t("chat.artifactsRefresh")}
-                        aria-label={t("chat.artifactsRefresh")}
-                        disabled={sessionArtifactState.status === "loading" || activeRunInFlight}
-                        onClick={() => setSessionArtifactReload((value) => value + 1)}
-                      >
-                        ↻
-                      </button>
                     </div>
-                    {sessionArtifactState.status === "loading" && sessionArtifactItems.length === 0 ? (
-                      <div className="chat-artifacts-note">{t("chat.artifactsLoading")}</div>
+                    {agentArtifactState.status === "loading" && agentArtifactItems.length === 0 ? (
+                      <div className="chat-artifacts-note">{t("chat.agentArtifactsLoading")}</div>
                     ) : null}
-                    {activeSessionArtifactResult?.supported === false ? (
+                    {activeAgentArtifactResult?.supported === false ? (
                       <div className="chat-artifacts-note">
-                        {activeSessionArtifactResult.reason === "remote"
+                        {activeAgentArtifactResult.reason === "remote"
                           ? t("chat.artifactsRemote")
-                          : activeSessionArtifactResult.reason === "session-time-unavailable"
-                            ? t("chat.artifactsSessionTimeUnavailable")
-                            : t("chat.artifactsUnavailable")}
+                          : t("chat.agentArtifactsUnavailable")}
                       </div>
                     ) : null}
-                    {sessionArtifactItems.length === 0
-                      && sessionArtifactState.status !== "loading"
-                      && activeSessionArtifactResult?.supported !== false ? (
-                      <div className="chat-artifacts-empty">{t("chat.artifactsEmpty")}</div>
+                    {activeAgentArtifactResult?.partial && <p className="chat-artifacts-note" role="status">{t("chat.agentArtifactsPartial")}</p>}
+                    {agentArtifactItems.length === 0
+                      && agentArtifactState.status !== "loading"
+                      && activeAgentArtifactResult?.supported !== false ? (
+                      <div className="chat-artifacts-empty">{t("chat.agentArtifactsEmpty")}</div>
                     ) : (
-                      <div className="chat-artifacts-list">
-                        {sessionArtifactItems.map((artifact) => (
+                      <ChatFileGrid>
+                        {agentArtifactItems.map((artifact) => (
                           <div className="chat-artifact-row" key={artifact.path}>
-                            <button
-                              type="button"
+                            <ChatFileCard
                               className="chat-artifact-open"
+                              name={artifact.name}
+                              detail={artifact.path}
+                              size={artifact.size}
+                              timestamp={artifact.mtimeMs || undefined}
+                              timeLabel={relTime(artifact.mtimeMs, t("chat.justNow"))}
                               title={`${t("chat.artifactsRevealInFolder")} · ${artifact.path}`}
-                              disabled={!activeSessionArtifactResult || activeSessionArtifactResult.reason === "remote"}
+                              disabled={!activeAgentArtifactResult || activeAgentArtifactResult.reason === "remote"}
                               onClick={() => { void revealLocalFile(artifact.path); }}
-                            >
-                              <span className="chat-artifact-icon" aria-hidden="true">
-                                {artifact.kind === "image" ? "▧" : artifact.kind === "doc" ? "▤" : artifact.kind === "data" ? "⌗" : "◇"}
-                              </span>
-                              <span className="chat-artifact-body">
-                                <span className="chat-artifact-name">{artifact.name}</span>
-                                <span className="chat-artifact-path">{artifact.path}</span>
-                                <span className="chat-artifact-meta">
-                                  {artifact.mtimeMs ? relTime(artifact.mtimeMs, t("chat.justNow")) : ""}
-                                </span>
-                              </span>
-                            </button>
-                            <button
-                              type="button"
-                              className="chat-artifact-reveal"
-                              title={t("chat.artifactsRevealInFolder")}
-                              aria-label={t("chat.artifactsRevealInFolder")}
-                              onClick={() => { void revealLocalFile(artifact.path); }}
-                            >
-                              <IconFolderReveal />
-                            </button>
+                            />
                             <button
                               type="button"
                               className="chat-artifact-copy"
@@ -9756,29 +9694,10 @@ function ChatPageApp() {
                             </button>
                           </div>
                         ))}
-                      </div>
+                      </ChatFileGrid>
                     )}
-                  </div>
-                ) : null}
-                {/* 原生卡片开关启用后显示已有沉浸入口；能力未知或关闭时保持隐藏。 */}
-                <button hidden={activeCaps?.nativeUiArtifactsV1 !== true} type="button" className="chat-headbtn" data-testid="chat-immersive-enter" title={t("chat.immersiveEnter")} onClick={() => setImmersive(true)}>
-                  <IconImmersive />
-                </button>
-                <button type="button" className={`chat-headbtn${activeAgentHeaderPanel === "cron" ? " is-active" : ""}`}
-                  title={t("chat.agentPanelCron")} aria-label={t("chat.agentPanelCron")}
-                  aria-expanded={activeAgentHeaderPanel === "cron"} aria-controls="chat-agent-panel"
-                  onClick={event => toggleAgentHeaderPanel("cron", event.currentTarget)}><IconClock /></button>
-                <button type="button" className={`chat-headbtn${activeAgentHeaderPanel === "inspiration" ? " is-active" : ""}`}
-                  title={t("agents.tabInspiration")} aria-label={t("agents.tabInspiration")}
-                  aria-expanded={activeAgentHeaderPanel === "inspiration"} aria-controls="chat-agent-panel"
-                  onClick={event => toggleAgentHeaderPanel("inspiration", event.currentTarget)}><IconNote /></button>
-              </div>
-              </div>
-              <ChatAgentPanel key={agentHeaderScope} kind={activeAgentHeaderPanel} backendId={activeBackend}
-                agentId={agentOf(active.key)} name={sessionName(active)}
-                renderAvatar={name => <Avatar agentId={agentOf(active.key)} name={name} className="chat-header__avatar"
-                  version={avatarVersion} editable onUploaded={() => setAvatarVersion(v => v + 1)} />}
-                onClose={() => { setAgentHeaderPanel(null); agentHeaderTriggerRef.current?.focus(); }} />
+                </div>}
+              </ChatAgentPanel>
             </header>
 
             <ChatPinnedMessages items={pinnedList} index={pinNavIndex} onIndex={setPinNavIndex}
@@ -9786,6 +9705,7 @@ function ChatPageApp() {
             </div>
 
             <div className="chat-thread" ref={threadRef} data-history-loaded={historyLoaded}
+              {...(activeAgentHeaderPanel ? { inert: "", "aria-hidden": true } : {})}
               onScroll={onThreadScroll} onWheel={onThreadWheel}
               onPointerDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}
               onKeyDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}>
@@ -10270,7 +10190,8 @@ function ChatPageApp() {
             ) : null}
 
             {/* The plan and input share the bottom dock, outside the scrollable conversation. */}
-            <div className="chat-botdock" data-native-ui-clip-edge="bottom">
+            <div className="chat-botdock" data-native-ui-clip-edge="bottom"
+              {...(activeAgentHeaderPanel ? { inert: "", "aria-hidden": true } : {})}>
             {showJump && (
               <button type="button" className="chat-jump" onClick={jumpToLatest} title={t("chat.jumpToLatest")}>
                 ↓ {t("chat.latestMessage")}

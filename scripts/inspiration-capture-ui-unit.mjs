@@ -22,6 +22,8 @@ const cacheCode = compile('lib/usePageCache.ts');
 const wallCode = compile('pages/inspiration-wall-pages.ts');
 const execution = { exports: {} };
 vm.runInNewContext(compile('pages/inspiration-execution.ts'), { exports: execution.exports });
+const noteText = { exports: {} };
+vm.runInNewContext(compile('pages/inspiration-note-text.ts'), { exports: noteText.exports });
 const draftKey = 'shoggoth.inspiration.capture.v1';
 const flush = () => new Promise(setImmediate);
 
@@ -54,7 +56,7 @@ async function fixture({ filter = 'saved', reduced = false, initialCount = 0,
     '../components/PageHead': { PageHead: host('header') },
     '../components/AgentAvatar': host('span'),
     '../components/FilterTabs': host('nav'), '../components/SearchCapsule': host('input'), '../components/Modal': host('dialog'),
-    './ChatPromptCard': host('aside'), './InspirationActivity': host('section'), './InspirationRunBar': host('section'),
+    './ChatPromptCard': host('aside'), './InspirationActivity': host('section'), './InspirationRunBar': host('section'), './InspirationRunCard': host('section'),
     './InspirationActionIcon': host('i'), './InspirationStatusIcon': { __esModule: true, default: host('i'), inspirationGrowthStage: () => 0 },
     './InspirationAutoGrowth': host('section'), './InspirationAgentChatter': host('aside'),
     './InspirationAgentDock': React.forwardRef((props, ref) => {
@@ -62,6 +64,7 @@ async function fixture({ filter = 'saved', reduced = false, initialCount = 0,
       return React.createElement('aside', { 'data-dock': true, ...props });
     }),
     './inspiration-execution': execution.exports,
+    './inspiration-note-text': noteText.exports,
     './inspiration-scroll-stages': { attachInspirationScrollStages() {} },
     './inspiration-card-drag': { beginInspirationCardDrag: (_source, _pointer, options) => {
       state.gestures.push(options); options.onActive(true); return () => options.onActive(false);

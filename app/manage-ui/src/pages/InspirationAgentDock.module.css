@@ -37,10 +37,8 @@
   box-sizing: border-box;
   overflow-x: auto;
   overscroll-behavior: contain;
-  scrollbar-width: none;
   pointer-events: auto;
 }
-.track::-webkit-scrollbar { display: none; }
 .agent {
   position: relative;
   display: grid;

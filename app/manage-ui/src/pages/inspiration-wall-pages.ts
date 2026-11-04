@@ -2,6 +2,7 @@ import { listInspirations } from '../api/client';
 import type { InspirationFilter, InspirationIdea, InspirationPageResult } from '../types';
 
 export type InspirationWallPages = InspirationPageResult & { pageCount: number };
+export const INSPIRATION_WALL_PAGE_SIZE = 20;
 
 // Refresh the revealed portion using a fresh cursor chain. Insertions and
 // growth can move page boundaries; stale cursors would skip or duplicate notes.
@@ -14,7 +15,7 @@ export async function readInspirationWallPages(query: string, filter: Inspiratio
   let pageCount = 0;
   let hasMore = false;
   do {
-    const page = await listInspirations({ query, filter, cursor, limit: 20, ...agent });
+    const page = await listInspirations({ query, filter, cursor, limit: INSPIRATION_WALL_PAGE_SIZE, ...agent });
     if (!pageCount) total = page.total;
     pageCount++;
     for (const idea of page.items) {

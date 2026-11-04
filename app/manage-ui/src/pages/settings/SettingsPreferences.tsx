@@ -5,9 +5,6 @@ import ThemePicker from "./ThemePicker";
 import AppIconPicker from "./AppIconPicker";
 import SettingsDesktopPrinter from "./SettingsDesktopPrinter";
 import SettingsAppUpdate from "./SettingsAppUpdate";
-import SettingsComputerUse from "./SettingsComputerUse";
-import SettingsBrowserUse from "./SettingsBrowserUse";
-import SettingsWeb from "./SettingsWeb";
 import { SettingsIcon } from "./SettingsIcons";
 
 // Keep the theme preference and picker implementation available for a later
@@ -15,18 +12,20 @@ import { SettingsIcon } from "./SettingsIcons";
 const SHOW_THEME_PICKER = false;
 
 
-export default function SettingsPreferences({ cfg, onChange, disabled, themeLoaded, onComputerServiceRestarted }: {
+export default function SettingsPreferences({ cfg, onChange, disabled, themeLoaded }: {
   cfg: AppConfig;
   onChange: (patch: Partial<AppConfig>) => void;
   disabled: boolean;
   themeLoaded: boolean;
-  onComputerServiceRestarted?: () => void;
 }) {
   const { t } = useTranslation();
   return (
     <div className="settings-preferences">
-      {/* Everyday preferences share one grouped card: one row per setting. */}
-      <section className="settings-section settings-preferences-main" aria-label={t("settings.category.general")}>
+      <section className="settings-section settings-preferences-main" id="settings-general" aria-labelledby="settings-general-title">
+        <header className="settings-section-head">
+          <h3 className="settings-h" id="settings-general-title">{t("settings.category.general")}</h3>
+          <p className="settings-sech">{t("settings.generalDesc")}</p>
+        </header>
         <div className="settings-card settings-list-card">
           <div className="settings-list-row settings-list-row--icon" id="settings-appearance">
             <SettingsIcon name="language" />
@@ -49,13 +48,8 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
           </div>
           <AppIconPicker value={cfg.appIcon} disabled={disabled} onChange={(appIcon) => onChange({ appIcon })} />
           <SettingsDesktopPrinter disabled={disabled} />
-          <SettingsAppUpdate />
         </div>
       </section>
-
-      <SettingsComputerUse onServiceRestarted={onComputerServiceRestarted} />
-      <SettingsBrowserUse cfg={cfg} onChange={onChange} disabled={disabled} />
-      <SettingsWeb />
 
       {/* Notifications — native macOS desktop notifications. */}
       <section className="settings-section" id="settings-notif">
@@ -85,6 +79,12 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
           <div className="settings-notification-footer">
             <p className="ui-hint">{t("settings.notifHint")}</p>
           </div>
+        </div>
+      </section>
+
+      <section className="settings-section" id="settings-updates" aria-label={t("settings.appUpdate.title")}>
+        <div className="settings-card settings-list-card">
+          <SettingsAppUpdate />
         </div>
       </section>
     </div>

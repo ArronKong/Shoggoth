@@ -61,7 +61,6 @@ export default function PillTabs({
           ref={listRef}
           className={`${styles.tabs}${iconOnly ? ` ${styles.iconTabs}` : ""}`}
           aria-label={ariaLabel}
-          data-scrollbar={iconOnly ? "hidden" : undefined}
         >
           <Tabs.Indicator ref={indicatorRef} className={styles.indicator} />
           {items.map((it) => {

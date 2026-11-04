@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Switch } from "../../components/Field";
 import { appUpdateBridge, type AppUpdateState } from "../../lib/appUpdate";
 import { SettingsIcon } from "./SettingsIcons";
 
@@ -8,6 +9,7 @@ const fallbackState: AppUpdateState = {
   reason: "desktop-only",
   status: "unsupported",
   currentVersion: "—",
+  automaticUpdates: false,
   availableVersion: null,
   releaseName: null,
   releaseDate: null,
@@ -21,6 +23,8 @@ export default function SettingsAppUpdate() {
   const { t } = useTranslation();
   const [state, setState] = useState<AppUpdateState | null>(null);
   const [actionPending, setActionPending] = useState(false);
+  const [preferencePending, setPreferencePending] = useState(false);
+  const [preferenceError, setPreferenceError] = useState(false);
 
   useEffect(() => {
     const bridge = appUpdateBridge();
@@ -56,9 +60,22 @@ export default function SettingsAppUpdate() {
       case "up-to-date": return t("settings.appUpdate.upToDate");
       case "error": return t("settings.appUpdate.error");
       case "installing": return t("settings.appUpdate.installing");
-      default: return t("settings.appUpdate.idle");
+      default: return null;
     }
   }, [state, t]);
+
+  const setAutomatic = async (enabled: boolean) => {
+    const bridge = appUpdateBridge();
+    if (!bridge) return;
+    setPreferencePending(true);
+    setPreferenceError(false);
+    try {
+      const next = await bridge.setAutomatic(enabled);
+      if (next) setState(next);
+      else setPreferenceError(true);
+    } catch { setPreferenceError(true); }
+    finally { setPreferencePending(false); }
+  };
 
   const runCheck = async () => {
     const bridge = appUpdateBridge();
@@ -83,30 +100,44 @@ export default function SettingsAppUpdate() {
   const progress = state?.status === "downloading" || state?.status === "downloaded"
     ? Math.round(state.progress || 0)
     : null;
+  const installationBusy = state && ["preparing", "installing", "recovering"].includes(state.status);
 
   return (
-    <div className="settings-list-row settings-list-row--split settings-list-row--icon settings-app-update-card" id="settings-app-update">
-      <SettingsIcon name="update" />
-      <div className="settings-list-copy settings-app-update-copy">
-        <h4>
-          {t("settings.appUpdate.title")}
-          <span className="settings-app-update-version mono" aria-label={t("settings.appUpdate.currentVersion")}>{state?.currentVersion || "—"}</span>
-        </h4>
-        <p>{t("settings.appUpdate.description")}</p>
+    <div className="settings-list-row settings-app-update-card" id="settings-app-update">
+      <div className="settings-update-heading">
+        <SettingsIcon name="update" />
+        <div className="settings-list-copy">
+          <h4>
+            {t("settings.appUpdate.title")}
+            <span className="settings-app-update-version mono" aria-label={t("settings.appUpdate.currentVersion")}>{state?.currentVersion || "—"}</span>
+          </h4>
+        </div>
+        <div className="settings-app-update-actions">
+          {state?.canInstall && (
+            <button type="button" className="ui-cbtn ui-cbtn--sm ui-cbtn--gold" disabled={actionPending} onClick={() => void install()}>
+              {t("settings.appUpdate.restart")}
+            </button>
+          )}
+          <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={actionPending || !state?.canCheck} onClick={() => void runCheck()}>
+            {t("settings.appUpdate.check")}
+          </button>
+        </div>
+      </div>
+      <div className="settings-app-update-copy">
+        <Switch
+          checked={state?.automaticUpdates === true}
+          disabled={!state?.supported || preferencePending || Boolean(installationBusy)}
+          onChange={(enabled) => void setAutomatic(enabled)}
+          label={<span className="settings-update-label">
+            <span>{t("settings.appUpdate.automatic")}</span>
+            {state?.supported && <small>{t("settings.appUpdate.automaticHint")}</small>}
+          </span>}
+        />
+        {preferenceError && <p role="alert">{t("settings.appUpdate.preferenceError")}</p>}
         {statusText && <p className="ui-hint" role="status" aria-live="polite">{statusText}</p>}
         {progress !== null && (
           <progress value={progress} max={100} aria-label={t("settings.appUpdate.downloadProgress")} />
         )}
-      </div>
-      <div className="settings-app-update-actions">
-        {state?.canInstall && (
-          <button type="button" className="ui-cbtn ui-cbtn--sm ui-cbtn--gold" disabled={actionPending} onClick={() => void install()}>
-            {t("settings.appUpdate.restart")}
-          </button>
-        )}
-        <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={actionPending || !state?.canCheck} onClick={() => void runCheck()}>
-          {t("settings.appUpdate.check")}
-        </button>
       </div>
     </div>
   );

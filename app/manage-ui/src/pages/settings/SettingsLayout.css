@@ -32,10 +32,10 @@
 }
 
 .management-page.settings-page .settings-app-update-card {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 18px;
 }
 
 .management-page.settings-page .settings-app-update-copy {
@@ -43,14 +43,9 @@
   flex: 1 1 auto;
   min-width: 0;
   flex-direction: column;
-  gap: 8px;
-}
-
-.management-page.settings-page .settings-app-update-copy > div {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--ui-hairline);
 }
 
 .management-page.settings-page .settings-app-update-label,
@@ -62,6 +57,12 @@
 
 .management-page.settings-page .settings-app-update-copy p { margin: 0; }
 .management-page.settings-page .settings-app-update-copy progress { width: min(100%, 360px); }
+.management-page.settings-page .settings-project-repository a {
+  color: var(--ui-text-1);
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 
 .management-page.settings-page .settings-app-update-actions {
   display: flex;
@@ -93,17 +94,22 @@
 .management-page.settings-page .settings-preferences .settings-prefs-row > .field .field-label {
   grid-column: 1;
   color: var(--ui-text-1);
+  font-weight: 400;
+  line-height: 20px;
 }
 
 .management-page.settings-page .settings-preferences .settings-prefs-row > .field .field-hint {
   grid-column: 1;
   grid-row: 2;
+  font-weight: 400;
+  line-height: 20px;
 }
 
 .management-page.settings-page .settings-preferences .settings-prefs-row [role="combobox"] {
   grid-column: 2;
   grid-row: 1 / 3;
   width: 100%;
+  font-weight: 400;
 }
 
 .management-page.settings-page .settings-preferences .settings-switch-list {
@@ -187,7 +193,6 @@
   .management-page.settings-page > .page-head { gap: 16px; }
   .management-page.settings-page .page-head-actions { width: 100%; justify-content: space-between; }
   .management-page.settings-page .settings-preferences .settings-prefs-row > .field { display: flex; gap: 8px; align-items: stretch; }
-  .management-page.settings-page .settings-app-update-card { align-items: stretch; flex-direction: column; }
   .management-page.settings-page .settings-app-update-actions { justify-content: flex-start; }
   .management-page.settings-page .settings-advanced-summary { gap: 10px; }
   .management-page.settings-page .settings-shortcut-row { gap: 12px; }

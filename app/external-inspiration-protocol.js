@@ -34,6 +34,7 @@ const EXTERNAL_STATUSES = new Set([
 ]);
 const EXTERNAL_TERMINAL = new Set(["completed", "failed", "canceled", "interrupted"]);
 const EXTERNAL_MODES = new Set(["openclaw", "gateway", "acp"]);
+const MAX_EXTERNAL_PROMPT_BYTES = 40 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const id = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value);
 const uuid = value => typeof value === "string" && UUID.test(value);
@@ -92,7 +93,7 @@ function validateExternalInspirationParams(rawMethod, value) {
   if (!exact(value, [...BOUND_FIELDS, ...additional, ...remoteFields, ...stopFields]) || !uuid(value.hostId)
     || !text(value.sessionKey, 512) || !workspace(value.workspace) || !validMode(value.backendId, value.mode)
     || (additional.includes("operationId") && !id(value.operationId))) return false;
-  if (method.endsWith(".start")) return text(value.prompt, 40 * 1024);
+  if (method.endsWith(".start")) return text(value.prompt, MAX_EXTERNAL_PROMPT_BYTES);
   if (method.endsWith(".respond")) {
     const response = value.response;
     return id(value.requestId) && (exact(response, ["choice"])
@@ -207,5 +208,6 @@ module.exports = {
   GROUP_EXTERNAL_CAPABILITIES_METHOD, validateGroupExternalCapabilitiesParams, validateGroupExternalCapabilitiesResult,
   EXTERNAL_INSPIRATION_METHODS, GROUP_EXTERNAL_METHODS, EXTERNAL_EXECUTION_METHODS, canonicalExternalMethod,
   EXTERNAL_BACKENDS, EXTERNAL_STATUSES, EXTERNAL_TERMINAL,
+  MAX_EXTERNAL_PROMPT_BYTES,
   validExternalSnapshot, validateExternalInspirationParams, validateExternalInspirationResult,
 };

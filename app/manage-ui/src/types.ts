@@ -82,6 +82,7 @@ export interface CronBackendDetails {
 
 export interface UnifiedCronJob {
   id: string; // External Codex ids have their own namespace.
+  systemManaged?: boolean;
   origin?: "codex-desktop";
   externalTaskId?: string;
   ownerProfileId?: string;
@@ -2798,6 +2799,7 @@ export interface DashboardBackendSection<T> {
 }
 
 export interface DashboardRunEntry {
+  systemManaged?: boolean;
   outputDisposition?: "pending" | "deliver" | "silent";
   backendId: string;
   /** 统一 id "<prefix>:<localId>"，可直接深链 /cron?job=。 */
@@ -3267,6 +3269,14 @@ export interface DashboardArtifactItem {
   mtimeMs: number;
   ext?: string;
   kind: "doc" | "image" | "data" | "other";
+}
+
+export interface AgentArtifactsResult {
+  supported: boolean;
+  reason?: string;
+  partial?: boolean;
+  total?: number;
+  items: DashboardArtifactItem[];
 }
 
 export interface DashboardGroupArtifact {

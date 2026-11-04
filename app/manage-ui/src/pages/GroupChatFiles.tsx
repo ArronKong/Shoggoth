@@ -5,19 +5,12 @@ import { getGroupChat, listGroupChatMessages, revealAttachment } from '../api/cl
 import type { GroupChatMessage, GroupChatView, InspirationAttachment } from '../types';
 import { inspirationMediaUrl } from './inspiration-media';
 import close from '../assets/figma/group-chat/group-files-close.svg';
-import ArtifactThumb from '../components/ArtifactThumb';
+import { ChatFileCard, ChatFileGrid } from '../components/ChatFileGrid';
 import styles from './GroupChatFiles.module.css';
 
 type GroupFile = { attachment: InspirationAttachment; author: GroupChatMessage['author']; createdAt: number; seq: number };
 type FileState = { scope: string; items: GroupFile[]; loading: boolean; error: 'failed' | 'partial' | 'changed' | null };
 const PAGE = 100;
-
-function fileSize(size: number) {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
-  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
-}
 
 /** Group files come from this group's saved message attachments, including older pages and user uploads. */
 export default function GroupChatFiles({ view, onClose }: { view: GroupChatView; onClose(): void }) {
@@ -121,18 +114,13 @@ export default function GroupChatFiles({ view, onClose }: { view: GroupChatView;
         {active.error !== 'changed' && <button type="button" onClick={() => setReload(value => value + 1)}>{t('groupChat.files.retry')}</button>}</div>}
       {revealError?.scope === scope && <p className={styles.notice} role="alert">{revealError.error}</p>}
       {!active.loading && !active.error && !active.items.length && <p className={styles.empty}>{t('groupChat.files.empty')}</p>}
-      <div className={styles.list}>
-        {active.items.map(item => <button className={styles.file} data-group-file={item.attachment.id} key={item.attachment.id} type="button"
-          title={t('groupChat.files.reveal', { name: item.attachment.name })} onClick={() => void reveal(item)}>
-          <ArtifactThumb name={item.attachment.name} />
-          <span className={styles.body}>
-            <span className={styles.name}>{item.attachment.name}</span>
-            <span className={styles.author}>{item.author.kind === 'user' ? t('groupChat.files.me')
-              : view.members.find(member => item.author.kind === 'member' && member.id === item.author.memberId)?.displayName ?? t('groupChat.files.unknownMember')}</span>
-            <span className={styles.meta}><span>{fileSize(item.attachment.size)}</span><time dateTime={new Date(item.createdAt).toISOString()}>{relativeTime(item.createdAt)}</time></span>
-          </span>
-        </button>)}
-      </div>
+      <ChatFileGrid>
+        {active.items.map(item => <ChatFileCard data-group-file={item.attachment.id} key={item.attachment.id}
+          name={item.attachment.name} size={item.attachment.size} timestamp={item.createdAt} timeLabel={relativeTime(item.createdAt)}
+          detail={item.author.kind === 'user' ? t('groupChat.files.me')
+            : view.members.find(member => item.author.kind === 'member' && member.id === item.author.memberId)?.displayName ?? t('groupChat.files.unknownMember')}
+          title={t('groupChat.files.reveal', { name: item.attachment.name })} onClick={() => void reveal(item)} />)}
+      </ChatFileGrid>
     </div>
   </section>;
 }
