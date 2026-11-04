@@ -79,7 +79,7 @@ function createDesktopAppInstallPreparation(options) {
     callback?.();
   };
   return {
-    async prepareInstall() {
+    async prepareInstall({ automatic = false } = {}) {
       if (releaseBackgroundActions) return "background-busy";
       try { releaseBackgroundActions = options.suspendBackgroundActions(); }
       catch { return "background-busy"; }
@@ -89,7 +89,7 @@ function createDesktopAppInstallPreparation(options) {
         // The Host fence blocks new actions; drain a start/stop already queued
         // before observing launchd, including one whose old callback is stale.
         await options.launchAgent.whenIdle();
-        const reason = await prepareDesktopAppInstall({ ...options, backgroundStartup: null, forceStop: true,
+        const reason = await prepareDesktopAppInstall({ ...options, backgroundStartup: null, forceStop: !automatic,
           onBackgroundStopped: () => { backgroundStopped = true; } });
         if (reason) release();
         return reason;

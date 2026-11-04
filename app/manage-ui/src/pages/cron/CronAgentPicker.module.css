@@ -19,7 +19,7 @@
   content: ''; position: absolute; left: 1.5px; top: 3.5px; width: 12px; height: 6px;
   background: currentColor; mask: var(--growth-glyph) center / 100% 100% no-repeat; transform: rotate(-45deg);
 }
-.runtimes { display: flex; align-items: center; flex: none; height: 32px; gap: 0; margin-bottom: 16px; overflow-x: auto; scrollbar-width: none; }
+.runtimes { display: flex; align-items: center; flex: none; min-height: 32px; gap: 0; margin-bottom: 16px; overflow-x: auto; overflow-y: hidden; }
 .runtime { display: grid; place-items: center; min-width: 32px; height: 32px; flex: none; padding: 8px; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
 .runtime:hover:not(:disabled) { background: light-dark(#0000000d, #ffffff14); }
 .runtime[aria-selected=true], .runtime[aria-selected=true]:hover:not(:disabled) { background: light-dark(#000, #fff); color: light-dark(#fff, #000); }
@@ -31,7 +31,7 @@
 .runtime[data-runtime=grok-build] { --growth-glyph: url('../../assets/inspiration/runtime-grok-build.svg'); }
 .runtime[data-runtime=deepseek-harness] { --growth-glyph: url('../../assets/inspiration/runtime-deepseek-harness.svg'); }
 .runtime[data-runtime=deepseek-harness] .glyph { width: 18px; height: 18px; margin: -1px; }
-.agents { display: flex; flex-direction: column; min-height: 32px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+.agents { display: flex; flex-direction: column; min-height: 32px; overflow-y: auto; overscroll-behavior: contain; }
 .agent { display: flex; align-items: center; box-sizing: border-box; width: 100%; flex: none; padding: 4px; border: 0; border-radius: 16px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .agent:hover:not(:disabled) { background: light-dark(#0000000d, #ffffff14); }
 .agent > .check { margin: 0 8px; }

@@ -6,6 +6,7 @@ const path = require("node:path");
 const CHANNELS = Object.freeze({
   getState: "shoggoth:app-update:get-state",
   check: "shoggoth:app-update:check",
+  setAutomatic: "shoggoth:app-update:set-automatic",
   install: "shoggoth:app-update:install",
   state: "shoggoth:app-update:state",
 });
@@ -66,6 +67,8 @@ function createDesktopAppUpdateController(options = {}) {
     clearIntervalFn = clearInterval,
     defer = setImmediate,
     onDownloaded = () => {},
+    automaticUpdates = false,
+    saveAutomaticUpdates = () => {},
     prepareInstall = async () => null,
     restoreAfterInstallFailure = async () => {},
   } = options;
@@ -86,6 +89,7 @@ function createDesktopAppUpdateController(options = {}) {
     reason: support.reason,
     status: support.supported ? "idle" : "unsupported",
     currentVersion: app.getVersion(),
+    automaticUpdates: automaticUpdates === true,
     availableVersion: null,
     releaseName: null,
     releaseDate: null,
@@ -100,6 +104,8 @@ function createDesktopAppUpdateController(options = {}) {
   let initialTimer = null;
   let intervalTimer = null;
   let disposed = false;
+  let installingOnQuit = false;
+  let skipQuitInstall = false;
   const updaterListeners = [];
 
   const publicState = () => ({ ...state });
@@ -113,6 +119,13 @@ function createDesktopAppUpdateController(options = {}) {
     state = { ...state, ...patch };
     broadcast();
   };
+  const resumeQuit = () => {
+    installingOnQuit = false;
+    if (disposed) return;
+    skipQuitInstall = true;
+    try { app.quit(); }
+    finally { skipQuitInstall = false; }
+  };
   const recoverInstall = () => {
     if (installRecoveryPromise) return installRecoveryPromise;
     updateState({ status: "recovering", canCheck: false, canInstall: false });
@@ -120,6 +133,7 @@ function createDesktopAppUpdateController(options = {}) {
       .then(() => "install-failed", () => "background-restore-failed")
       .then((installBlockReason) => {
         updateState({ status: "downloaded", canCheck: false, canInstall: true, installBlockReason });
+        if (installingOnQuit) resumeQuit();
       })
       .finally(() => { installRecoveryPromise = null; });
     return installRecoveryPromise;
@@ -135,8 +149,10 @@ function createDesktopAppUpdateController(options = {}) {
       return Promise.resolve(publicState());
     }
     if (checkPromise) return checkPromise.then(publicState);
+    if (!state.canCheck) return Promise.resolve(publicState());
     updateState({ status: "checking", progress: null, canCheck: false, canInstall: false });
     checkPromise = Promise.resolve(updater.checkForUpdates())
+      .then((result) => { void result?.downloadPromise?.catch(() => {}); })
       .catch(() => {
         if (["preparing", "installing", "recovering"].includes(state.status)) return;
         updateState({ status: "error", progress: null, canCheck: true, canInstall: false });
@@ -145,14 +161,42 @@ function createDesktopAppUpdateController(options = {}) {
     return checkPromise.then(publicState);
   };
 
+  const clearSchedule = () => {
+    if (initialTimer !== null) clearTimeoutFn(initialTimer);
+    if (intervalTimer !== null) clearIntervalFn(intervalTimer);
+    initialTimer = intervalTimer = null;
+  };
+  const schedule = () => {
+    if (!updater || !state.automaticUpdates) return;
+    const automaticCheck = () => { if (state.automaticUpdates) void check(); };
+    initialTimer = setTimeoutFn(() => {
+      initialTimer = null;
+      automaticCheck();
+    }, INITIAL_CHECK_DELAY_MS);
+    initialTimer?.unref?.();
+    intervalTimer = setIntervalFn(automaticCheck, CHECK_INTERVAL_MS);
+    intervalTimer?.unref?.();
+  };
+
   const authorize = (event) => trustedRenderer(event, getMainWindow);
   ipcMain.handle(CHANNELS.getState, (event) => authorize(event) ? publicState() : null);
   ipcMain.handle(CHANNELS.check, (event) => authorize(event) ? check() : null);
-  ipcMain.handle(CHANNELS.install, async (event) => {
-    if (!authorize(event) || !updater || !state.canInstall) return false;
+  ipcMain.handle(CHANNELS.setAutomatic, (event, enabled) => {
+    if (!authorize(event) || !updater || typeof enabled !== "boolean"
+      || ["preparing", "installing", "recovering"].includes(state.status)) return null;
+    if (enabled !== state.automaticUpdates) {
+      saveAutomaticUpdates(enabled);
+      updateState({ automaticUpdates: enabled });
+      clearSchedule();
+      schedule();
+    }
+    return publicState();
+  });
+  const install = async ({ automatic = false } = {}) => {
+    if (!updater || !state.canInstall) return false;
     updateState({ status: "preparing", canCheck: false, canInstall: false, installBlockReason: null });
     let blockReason;
-    try { blockReason = await prepareInstall(); }
+    try { blockReason = await prepareInstall({ automatic }); }
     catch { blockReason = "background-stop-failed"; }
     if (disposed) {
       try { await restoreAfterInstallFailure(); } catch { /* the renderer has already closed */ }
@@ -169,11 +213,16 @@ function createDesktopAppUpdateController(options = {}) {
         void Promise.resolve().then(restoreAfterInstallFailure).catch(() => {});
         return;
       }
-      try { updater.quitAndInstall(); }
+      try {
+        // On a normal quit, let the macOS installer apply the update without relaunching.
+        updater.autoRunAppAfterInstall = !automatic;
+        updater.quitAndInstall();
+      }
       catch { void recoverInstall(); }
     });
     return true;
-  });
+  };
+  ipcMain.handle(CHANNELS.install, (event) => authorize(event) ? install() : false);
 
   if (support.supported) {
     try {
@@ -231,10 +280,7 @@ function createDesktopAppUpdateController(options = {}) {
         }
         updateState({ status: "error", progress: null, canCheck: true, canInstall: false });
       });
-      initialTimer = setTimeoutFn(() => { void check(); }, INITIAL_CHECK_DELAY_MS);
-      initialTimer?.unref?.();
-      intervalTimer = setIntervalFn(() => { void check(); }, CHECK_INTERVAL_MS);
-      intervalTimer?.unref?.();
+      schedule();
     } catch {
       updater = null;
       state = { ...state, supported: false, reason: "updater-unavailable", status: "unsupported", canCheck: false };
@@ -244,14 +290,28 @@ function createDesktopAppUpdateController(options = {}) {
   return {
     getState: publicState,
     check,
+    handleBeforeQuit(event) {
+      if (disposed || skipQuitInstall || !state.automaticUpdates) return false;
+      if (installingOnQuit && ["preparing", "recovering"].includes(state.status)) {
+        event.preventDefault();
+        return true;
+      }
+      if (!state.canInstall) return false;
+      event.preventDefault();
+      installingOnQuit = true;
+      void install({ automatic: true }).then((started) => {
+        if (!started) resumeQuit();
+      });
+      return true;
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
-      if (initialTimer) clearTimeoutFn(initialTimer);
-      if (intervalTimer) clearIntervalFn(intervalTimer);
+      clearSchedule();
       for (const [name, handler] of updaterListeners) updater?.removeListener?.(name, handler);
       ipcMain.removeHandler(CHANNELS.getState);
       ipcMain.removeHandler(CHANNELS.check);
+      ipcMain.removeHandler(CHANNELS.setAutomatic);
       ipcMain.removeHandler(CHANNELS.install);
     },
   };

@@ -473,7 +473,6 @@
 
 /* 待审批与运行状态共享活动滚动区，展开多条也不会挤掉底部操作。 */
 .management-page.dashboard-page .dash-activity-scroll {
-  --dash-scroll-inset: var(--ui-scrollbar-track-size, 12px);
   scrollbar-gutter: stable;
 }
 .management-page.dashboard-page .dash-status-list {
@@ -504,7 +503,7 @@
 .management-page.dashboard-page .dash-artifacts .dash-art {
   padding-right: 24px;
 }
-/* 活动面板：滚动槽同样贴面板右边；head 与活动行内容仍距面板右 24，头像距左 24 不变。 */
+/* 活动面板：滚动槽贴面板右边，正文保留与产出卡相同的 24px 内边距。 */
 .management-page.dashboard-page .dash-columns > .dash-section:not(.dash-artifacts) {
   padding-right: 0;
 }
@@ -513,11 +512,10 @@
 }
 .management-page.dashboard-page .dash-status-list,
 .management-page.dashboard-page .dash-columns .dash-feed .dash-run {
-  padding-right: calc(24px - var(--dash-scroll-inset, 0px));
+  padding-right: 24px;
 }
 @media (max-width: 900px) {
   .management-page.dashboard-page .dash-activity-scroll {
-    --dash-scroll-inset: 0px;
     scrollbar-gutter: auto;
   }
 }
@@ -643,7 +641,6 @@
   --backend-tab-icon-size: 12px;
   gap: 0;
   max-width: 100%;
-  scrollbar-width: none;
 }
 
 .management-page.dashboard-page .dash-feed-filters [role="tab"] {

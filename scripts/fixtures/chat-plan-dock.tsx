@@ -39,7 +39,7 @@ const history: Record<string, any[]> = Object.fromEntries(Object.values(keys).ma
 ]]));
 history[keys.hermes] = [{ id: "hermes-u", role: "user", content: "开始工作。" }];
 history[keys.native].push({ id: "native-plan", role: "assistant", content: [
-  { type: "plan", planEntries: [{ content: "原生历史步骤", status: "completed" }, { content: "原生待处理步骤", status: "pending" }] },
+  { type: "plan", planEntries: [{ content: "原生历史步骤", status: "completed" }, { content: "原生待处理步骤", status: "completed" }] },
   { type: "text", text: "原生会话正文保留。" },
 ] });
 localStorage.clear();
@@ -67,9 +67,14 @@ class FixtureSocket {
     state.requests.push(request);
     const payload = request.method === "sessions.list" ? { sessions, hasMore: false }
       : request.method === "agents.list" ? { agents: sessions.map((session) => ({ id: session.agentId, name: session.agentName, backendId: session.backendId })) }
-      : request.method === "chat.history" ? { messages: history[request.params.sessionKey] ?? [] }
+      : request.method === "chat.history" ? { messages: history[request.params.sessionKey] ?? [],
+        hasMore: false, nextCursor: null, sourceId: `fixture:${request.params.sessionKey}` }
       : request.method === "progressCard.get" ? { card: request.params.sessionKey === keys.openclaw ? card : null } : {};
-    const reply = () => this.emit({ type: "res", id: request.id, ok: true, payload });
+    const fail = request.method === "progressCard.get" && state.failProgressRead;
+    if (fail) state.failProgressRead = false;
+    const reply = () => this.emit(fail
+      ? { type: "res", id: request.id, ok: false, error: { message: "fixture read unavailable" } }
+      : { type: "res", id: request.id, ok: true, payload });
     if (request.method === "chat.history" && state.holdHistoryFor === request.params.sessionKey) {
       state.holdHistoryFor = null;
       state.delayedHistoryReply = reply;
@@ -78,9 +83,10 @@ class FixtureSocket {
       state.delayedProgressReply = reply;
     } else setTimeout(reply, 0);
     if (request.method === "chat.send") {
-      history[request.params.sessionKey].push({ id: "send-user", role: "user", content: request.params.message });
+      history[request.params.sessionKey].push({ id: "send-user", role: "user", content: request.params.message,
+        idempotencyKey: request.params.idempotencyKey });
       setTimeout(() => this.emit({ type: "event", event: "chat", payload: {
-        sessionKey: request.params.sessionKey, runId: "fixture-run", state: "delta",
+        sessionKey: request.params.sessionKey, runId: request.params.idempotencyKey, state: "delta",
         message: { role: "assistant", content: [{ type: "text", text: "新回复正在生成。" }] },
       } }), 20);
     }
@@ -88,9 +94,11 @@ class FixtureSocket {
   close() { this.readyState = 3; }
 }
 state.WebSocket = FixtureSocket;
-state.fetch = async (url: unknown) => {
+state.fetch = async (url: unknown, init?: RequestInit) => {
   const path = String(url);
-  const payload = path.includes("/__api/status") ? { backends: ["openclaw", "hermes", "shoggoth"].map((id) => ({ id, connected: true })) }
+  const payload = path.includes("/__api/chat/secrets/prepare")
+    ? { text: JSON.parse(String(init?.body)).text, references: [], version: 1 }
+    : path.includes("/__api/status") ? { backends: ["openclaw", "hermes", "shoggoth"].map((id) => ({ id, connected: true })) }
     : path.includes("/__api/backends") ? { backends: [] }
     : path.includes("runtime-models") ? { selection: { bindingId: "fixture", runtime: "codex", model: null, canSwitch: false, candidates: [] }, capabilities: { attachments: {}, slash: false }, models: [], runtimes: [] }
     : path.includes("/archive") ? { archive: { supported: true, segments: [] } } : {};
@@ -110,7 +118,29 @@ const wait = async (fn: () => unknown, label: string) => {
 };
 const check = (ok: unknown, label: string) => { if (!ok) throw Error(label); };
 const dock = () => document.querySelector<HTMLElement>("[data-chat-plan-dock]")!;
-const toggle = () => dock().querySelector<HTMLButtonElement>("button")!;
+const toggle = () => dock().querySelector<HTMLButtonElement>(".chat-plan-dock__toggle")!;
+const dismiss = () => dock().querySelector<HTMLButtonElement>(".chat-plan-dock__dismiss")!;
+const dismissPlan = async () => {
+  const before = JSON.stringify({ card, history });
+  const requests = state.requests.length;
+  const button = dismiss();
+  check(button.getAttribute("aria-label") === i18n.t("chat.planDismiss"), "close has an accessible label");
+  check(!button.closest(".chat-plan-dock__toggle"), "close is independent of disclosure");
+  button.click();
+  await wait(() => !dock(), "dismiss plan");
+  check(document.activeElement?.tagName === "TEXTAREA", "close returns focus to the composer");
+  check(Boolean(document.activeElement?.closest('[data-testid="immersive-chat"]'))
+    === Boolean(document.querySelector('[data-testid="immersive-chat"]')), "close focuses the visible composer");
+  check(JSON.stringify({ card, history }) === before, "close preserves the saved card and transcript");
+  check(!state.requests.slice(requests).some((request: any) =>
+    ["progressCard.put", "progressCard.refresh", "chat.send", "chat.abort", "sessions.reset"].includes(request.method)),
+  "close makes no write, send, refresh-task or abort request");
+};
+const refreshProgress = async (revision: number | null) => {
+  const reads = state.requests.filter((request: any) => request.method === "progressCard.get").length;
+  state.socket.emit({ type: "event", event: "progressCard.changed", payload: { sessionKey: keys.openclaw, revision } });
+  await wait(() => state.requests.filter((request: any) => request.method === "progressCard.get").length > reads, "progress read");
+};
 const thread = () => document.querySelector<HTMLElement>(".chat-thread")!;
 let activeFixtureSession: keyof typeof keys = "openclaw";
 const openSession = async (backend: keyof typeof keys) => {
@@ -133,6 +163,9 @@ const geometry = () => {
   check(c.bottom <= innerHeight && p.top > 100, "expanded plan/input stay inside the viewport");
   const body = dock().querySelector<HTMLElement>(".chat-plan-dock__body")!;
   check(dock().scrollWidth <= dock().clientWidth + 2 && body.scrollWidth <= body.clientWidth + 2, "long content does not overflow the plan horizontally");
+  const close = dismiss().getBoundingClientRect(), disclosure = toggle().getBoundingClientRect();
+  check(close.width >= 32 && close.height >= 32 && close.right <= p.right && close.left >= disclosure.right,
+    "close remains visible with a separate click target");
   return { planTop: Math.round(p.top), planHeight: Math.round(p.height), composerTop: Math.round(c.top), composerBottom: Math.round(c.bottom) };
 };
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
@@ -170,6 +203,7 @@ state.preparePlanFixture = async () => {
 
 state.runPlanFixture = async () => {
   const geometryResult = state.geometryResult ?? await state.preparePlanFixture();
+  await dismissPlan();
   const input = document.querySelector<HTMLTextAreaElement>(".chat-composer__input")!;
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "说明新的问题");
   input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -178,16 +212,19 @@ state.runPlanFixture = async () => {
   await wait(() => state.requests.some((request: any) => request.method === "chat.send"), "send new message");
   await wait(() => thread().textContent?.includes("新回复正在生成"), "streaming reply");
   check(state.requests.find((request: any) => request.method === "chat.send").params.message === "说明新的问题", "plan is not added to chat.send");
-  check(toggle().getAttribute("aria-expanded") === "true", "streaming updates preserve expansion");
+  check(!dock(), "sending and streaming do not reopen a dismissed durable plan");
   ensureNoInlinePlan();
   const answer = { id: "new-answer", role: "assistant", content: "新的回复已经完成。" };
   history[keys.openclaw].push(answer);
   state.holdHistoryFor = keys.openclaw;
-  state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: keys.openclaw, runId: "fixture-run", state: "final", message: answer } });
+  state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: keys.openclaw,
+    runId: state.requests.find((request: any) => request.method === "chat.send").params.idempotencyKey,
+    state: "final", message: answer } });
   await wait(() => thread().textContent?.includes(answer.content), "final response");
   await wait(() => state.delayedHistoryReply, "hold final history refresh");
+  check(!dock(), "completion does not reopen a dismissed plan");
   card = null;
-  state.socket.emit({ type: "event", event: "progressCard.changed", payload: { sessionKey: keys.openclaw, revision: null } });
+  await refreshProgress(null);
   await wait(() => !dock(), "cleared progress cannot fall back to the settled live snapshot");
   state.delayedHistoryReply();
   card = structuredClone(initialCard);
@@ -201,12 +238,34 @@ state.runPlanFixture = async () => {
   check(toggle().getAttribute("aria-expanded") === "false", "expansion is session scoped");
   ensureNoInlinePlan();
   check(!thread().textContent?.includes("Hermes 正在验证"), "live timeline has no duplicate plan");
+  await dismissPlan();
+  state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: keys.hermes, runId: "hermes-run", state: "plan",
+    plan: [{ content: "Hermes 更新同一计划", status: "completed" }] } });
+  await pause();
+  check(!dock(), "ACP updates stay hidden");
+  await openSession("openclaw");
+  check(dock(), "another session keeps its own visibility");
+  await openSession("hermes");
+  check(!dock(), "ACP dismissal survives navigation and history reload");
   state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: keys.hermes, state: "plan", plan: [] } });
   await wait(() => !dock(), "explicit empty plan");
+  state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: keys.hermes, state: "plan",
+    plan: [{ content: "Hermes 清空后的新计划", status: "pending" }] } });
+  await wait(() => dock()?.textContent?.includes("Hermes 清空后的新计划"), "ACP new plan after clear");
   await openSession("native");
   await wait(() => dock()?.textContent?.includes("原生待处理步骤"), "native history plan");
+  check(dock().textContent?.includes("2/2"), "completed history plan can be closed");
   check(thread().textContent?.includes("原生会话正文保留"), "mixed plan/text message preserves text");
   check(!thread().textContent?.includes("原生历史步骤"), "native plan stays out of the thread");
+  await dismissPlan();
+  await openSession("hermes");
+  await openSession("native");
+  check(!dock(), "native historical plan stays dismissed after navigation");
+  history[keys.native].push({ id: "native-next-user", role: "user", content: "开始下一项工作。" },
+    { id: "native-next-plan", role: "assistant", content: [{ type: "plan", planEntries: [{ content: "新一轮原生计划", status: "pending" }] }] });
+  await openSession("hermes");
+  await openSession("native");
+  await wait(() => dock()?.textContent?.includes("新一轮原生计划"), "native next turn is visible");
   history[keys.native].push({ id: "native-clear", role: "assistant", content: [{ type: "plan", planEntries: [] }], errorMessage: "计划已清空，执行已停止。" });
   await openSession("hermes");
   await openSession("native");
@@ -232,29 +291,60 @@ state.runPlanFixture = async () => {
     toggle().click();
     await wait(() => toggle().getAttribute("aria-expanded") === "false", "immersive collapse");
     geometry();
+    await dismissPlan();
     root.querySelector<HTMLButtonElement>(`[aria-label="${i18n.t("chat.immersiveExit")}"]`)!.click();
     await wait(() => !document.querySelector('[data-testid="immersive-chat"]'), "exit immersive");
-    check(toggle().getAttribute("aria-expanded") === "false", "collapse persists across modes");
+    check(!dock(), "dismissal persists across modes");
     state.immersiveGeometry = immersiveGeometry;
+  } else {
+    toggle().click();
+    await wait(() => toggle().getAttribute("aria-expanded") === "false", "collapse before close");
+    await dismissPlan();
   }
+  card = { ...card, revision: 20, markdown: "同一计划的最新说明。", steps: [] };
+  await refreshProgress(20);
+  check(!dock(), "new revision and note-only replacement remain dismissed");
+  await refreshProgress(null);
+  check(!dock(), "late null notification cannot unhide a card that still exists");
+  state.failProgressRead = true;
+  await refreshProgress(null);
+  check(!dock(), "failed clear confirmation preserves dismissal");
+  await openSession("native");
+  await openSession("openclaw");
+  check(!dock(), "durable dismissal survives session changes and reads");
   const sockets = state.socketCount;
   state.socket.readyState = 3;
   state.socket.onclose?.();
-  await wait(() => state.socketCount > sockets && dock()?.dataset.progressRevision === "19", "reconnect restores the plan");
+  await wait(() => state.socketCount > sockets, "reconnect");
+  await pause(100);
+  check(!dock(), "reconnect does not reset dismissal");
   ensureNoInlinePlan();
+  card = null;
+  await refreshProgress(null);
+  card = { ...initialCard, revision: 21, markdown: "清空后新建的计划" };
+  await refreshProgress(21);
+  await wait(() => dock()?.dataset.progressRevision === "21", "confirmed clear restores the next card");
+  await dismissPlan();
+  card = null;
+  await refreshProgress(null);
+  card = { ...initialCard, revision: 22, markdown: "只有说明的计划也可以关闭。", steps: [] };
+  await refreshProgress(22);
+  await wait(() => dock()?.dataset.progressRevision === "22", "new note-only plan");
+  await dismissPlan();
   // A cleared card and a late read cannot revive a previous revision.
   state.holdProgressRead = true;
-  state.socket.emit({ type: "event", event: "progressCard.changed", payload: { sessionKey: keys.openclaw, revision: 19 } });
+  state.delayedProgressReply = null;
+  await refreshProgress(22);
   await wait(() => state.delayedProgressReply, "hold progress read");
   card = null;
-  state.socket.emit({ type: "event", event: "progressCard.changed", payload: { sessionKey: keys.openclaw, revision: null } });
+  await refreshProgress(null);
   await wait(() => !dock(), "clear progress card");
   state.delayedProgressReply();
   await pause(100);
   check(!dock(), "late progress read cannot restore a cleared card");
   ensureNoInlinePlan();
   return { passed: true, ...geometryResult, updated: expanded, immersive: state.immersiveGeometry ?? null,
-    checks: "persistent / ACP / native, history, send, stream, empty clear, session and mode isolation, revision, reconnect, late read, geometry" };
+    checks: "persistent / ACP / native, local-only dismiss, focus, send/stream/final/revision/reconnect retention, session and mode isolation, confirmed clear/new card, failed/late reads, completed and note-only cards, geometry" };
 };
 
 state.previewPlanDock = async (immersive: boolean, expanded: boolean) => {
@@ -270,4 +360,18 @@ state.previewPlanDock = async (immersive: boolean, expanded: boolean) => {
   if ((toggle().getAttribute("aria-expanded") === "true") !== expanded) toggle().click();
   await pause(150);
   return geometry();
+};
+
+state.checkKeyboardPlanDismiss = async () => {
+  await wait(() => !dock(), "keyboard close");
+  check(document.activeElement?.tagName === "TEXTAREA", "keyboard close returns focus to input");
+  check(card?.revision === 18, "keyboard close preserves the saved card");
+};
+
+state.restoreKeyboardPlanFixture = async () => {
+  card = null;
+  await refreshProgress(null);
+  card = structuredClone(initialCard);
+  await refreshProgress(18);
+  await wait(() => dock()?.dataset.progressRevision === "18", "fresh keyboard plan");
 };

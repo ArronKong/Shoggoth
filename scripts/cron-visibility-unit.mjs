@@ -33,12 +33,16 @@ const hidden = [
   job("renamed-system-task", { payload: { kind: "heartbeat" }, enabled: false, lastStatus: "error" }),
   job("tag-only", { backendDetails: { capabilityTags: ["heartbeat"] } }),
   job("legacy-tag-only", { rawCapabilities: ["heartbeat"] }),
+  job("dreaming", { name: "Memory Dreaming Promotion", systemManaged: true, payload: { kind: "agentTurn" } }),
+  job("skill-review", { payload: { kind: "skillCollectionReview" } }),
+  job("managed-snapshot", { actions: { reason: "system-managed" } }),
+  job("review-tag-only", { rawCapabilities: ["skillCollectionReview"] }),
 ];
 const visible = [
   job("daily-report", { payload: { kind: "agentTurn", message: "Report" }, wakeMode: "next-heartbeat" }),
   job("heartbeat-metrics", { payload: { kind: "agentTurn", message: "Report heartbeat health" } }),
   job("heartbeat-name-only"),
-  job("skill-review", { payload: { kind: "skillCollectionReview" }, actions: { reason: "system-managed" } }),
+  job("user-dreaming-name", { name: "Memory Dreaming Promotion", payload: { kind: "agentTurn", message: "Write a report" } }),
   job("hermes-report", { backendId: "hermes" }),
   job("native-report", { backendId: "shoggoth" }),
   job("Codex Desktop", { backendId: "shoggoth", agentId: "shoggoth-codex", payload: { kind: "agentTurn" } }),
@@ -58,7 +62,7 @@ const api = load("api/client.ts", {
 
 const result = await api.listCronJobs();
 assert.deepEqual(Array.from(result, row => row.id), visible.map(row => row.id),
-  "all cron list consumers hide system heartbeats while retaining user and other managed jobs");
+  "all cron list consumers hide OpenClaw system tasks while retaining user jobs");
 assert.equal(JSON.stringify(allJobs), original, "visibility must not mutate scheduler records");
 responseJobs = hidden;
 assert.equal((await api.listCronJobs({ query: "heartbeat", agentIds: ["vincent"] })).length, 0,
@@ -69,4 +73,4 @@ assert.equal((await api.listCronJobs()).length, 0, "missing job lists remain emp
 assert.equal((await api.getCronJobDetail(hidden[0].id)).id, hidden[0].id,
   "the display filter does not remove access to the underlying job");
 assert.ok(calls.every(call => call.method === "GET"), "hiding heartbeats performs no scheduler mutation");
-console.log("PASS Cron visibility: Codex Desktop and system heartbeats hidden; native Codex jobs, user tasks and backend records preserved");
+console.log("PASS Cron visibility: OpenClaw system tasks hidden; user tasks and backend records preserved");

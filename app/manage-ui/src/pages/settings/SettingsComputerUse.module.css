@@ -19,5 +19,6 @@
 .sessions small { color: var(--settings-muted-surface-1); }
 @container computerUse (max-width: 540px) {
   .permission { grid-template-columns: minmax(0, 1fr) auto; gap: 10px 12px; }
-  .permission > button { grid-column: 1 / -1; justify-self: start; }
+  .permission > :global(.settings-list-copy) { grid-column: 1 / -1; }
+  .permission > button { justify-self: end; }
 }

@@ -729,6 +729,25 @@ function normalizeHermesRunRow(row) {
   };
 }
 
+// Dashboard and run details must use the same execution timestamp. Session
+// startup can lag behind it; attach a transcript only for a unique pairing.
+function linkHermesCronSessions(executions, sessions) {
+  const contains = (run, session) => session.startedAt >= run.startedAt
+    && session.startedAt <= (run.finishedAt ?? Date.now());
+  for (const session of sessions) {
+    if (!session.sessionKey) continue;
+    const matches = executions.filter(run => contains(run, session));
+    if (matches.length !== 1) continue;
+    const run = matches[0];
+    if (sessions.filter(candidate => candidate.sessionKey && contains(run, candidate)).length !== 1) continue;
+    run.sessionKey = session.sessionKey;
+    run.runIdAliases = session.runIdAliases;
+    for (const field of ["deliveryStatus", "deliveryError"]) {
+      if (session[field] !== undefined) run[field] = session[field];
+    }
+  }
+}
+
 const HERMES_CRON_LAST_RUN_GRACE_MS = 60_000;
 const HERMES_CRON_EXECUTION_CLOCK_GRACE_MS = 1_000;
 
@@ -10119,17 +10138,7 @@ class HermesBackend extends AgentBackend {
             if (status !== 200 || !Array.isArray(json?.runs)) return;
             const ledger = out.filter(run => run.jobId === job.id);
             const sessions = json.runs.map(normalizeHermesRunRow).filter(Boolean);
-            for (const session of sessions) {
-              const matches = ledger.filter(run => session.startedAt >= run.startedAt
-                && session.startedAt <= (run.finishedAt ?? Date.now()));
-              if (matches.length !== 1) continue;
-              const run = matches[0];
-              if (sessions.filter(candidate => candidate.startedAt >= run.startedAt
-                && candidate.startedAt <= (run.finishedAt ?? Date.now())).length === 1) {
-                run.sessionKey = session.sessionKey;
-                run.runIdAliases = session.runIdAliases;
-              }
-            }
+            linkHermesCronSessions(ledger, sessions);
             return;
           }
           if (status === 404) {
@@ -10383,10 +10392,10 @@ class HermesBackend extends AgentBackend {
     }
   }
 
-  // 详情页 run 历史：官方 GET /api/cron/jobs/{id}/runs 是真实 per-run 记录（行=会话，
-  // 无 per-run status——只把 job 的 last_* 叠加到最新一条，与 getRecentCronRuns 同一
-  // 世界观）。旧版 Hermes 无该端点，或执行在创建 session 前失败而返回 200 空行
-  // 时，退回 last_* 合成单条。
+  // 详情与 Dashboard 优先使用本地执行账本的身份、开始时间和终态；HTTP /runs
+  // 的会话只补充唯一归属的转录入口。旧版/远端没有账本时保留 session-backed
+  // 记录（无 per-run status），把 job.last_* 只叠加到可证明匹配的最新执行。
+  // 执行在创建 session 前失败时，仍可退回 last_* 合成单条。
   // filters 本地应用：status/deliveryStatus/limit/offset/sortDir。
   async getCronRuns(id, options = {}) {
     try {
@@ -10440,6 +10449,19 @@ class HermesBackend extends AgentBackend {
         const synthesized = synthesizeHermesLastRun(job);
         runs = synthesized ? [synthesized] : [];
       }
+      if (this._getConfig().hermesMode !== "remote") {
+        try {
+          const history = await this._readCronExecutionHistory(profile, 0);
+          const executions = history.items.filter(entry => entry.jobId === jobId).map(entry => ({
+            ...entry, runId: entry.id,
+            durationMs: entry.finishedAt == null ? undefined : entry.finishedAt - entry.startedAt,
+          }));
+          if (executions.length) {
+            linkHermesCronSessions(executions, runs);
+            runs = executions.sort((a, b) => b.startedAt - a.startedAt);
+          }
+        } catch { /* Older local Hermes versions keep session-backed run history. */ }
+      }
       if (options.status) runs = runs.filter((r) => r.status === options.status);
       if (options.deliveryStatus) runs = runs.filter((r) => r.deliveryStatus === options.deliveryStatus);
       if (options.sortDir === "asc") runs.reverse();
@@ -10453,21 +10475,16 @@ class HermesBackend extends AgentBackend {
 
   async getCronLatestDelivery(id, atMs) {
     try {
+      const generation = this._lifecycleGeneration;
       const { agentId } = this._cronTarget(id);
-      const { runs } = await this.getCronRuns(id);
-      const run = runs[0];
-      // Delivery info only exists on the newest run (the job's last_* overlay).
-      // A click on an occurrence from a different day has no matching report to
-      // show, so don't pass off the last run as that day's.
-      if (
-        run &&
-        typeof atMs === "number" &&
-        Number.isFinite(atMs) &&
-        typeof run.startedAt === "number" &&
-        !sameLocalDay(run.startedAt, atMs)
-      ) {
-        return { source: "none" };
-      }
+      const { runs } = await this.getCronRuns(id, { limit: 100 });
+      if (generation !== this._lifecycleGeneration) return { source: "none" };
+      // Dashboard supplies the execution start; calendar occurrences may be
+      // slightly earlier. Never substitute the latest run for an older click.
+      const run = typeof atMs === "number" && Number.isFinite(atMs)
+        ? runs.filter(item => typeof item.startedAt === "number" && sameLocalDay(item.startedAt, atMs))
+          .sort((a, b) => Math.abs(a.startedAt - atMs) - Math.abs(b.startedAt - atMs))[0]
+        : runs[0];
       if (!run) return { source: "none" };
       const base = {
         status: run.status,
@@ -10487,6 +10504,7 @@ class HermesBackend extends AgentBackend {
       }
       try {
         const messages = await this._fetchHistoricalMessages(`agent:${agentId}:${run.sessionKey}`);
+        if (generation !== this._lifecycleGeneration) return { source: "none" };
         for (let i = messages.length - 1; i >= 0; i -= 1) {
           const message = messages[i];
           if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;

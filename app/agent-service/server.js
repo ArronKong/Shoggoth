@@ -293,6 +293,7 @@ const PERSISTENT_WRITER_LOCK_BASENAMES = Object.freeze([
   "pending-commands.writer.lock",
 ]);
 const CHAT_SERVICE_METHOD_SET = new Set(CHAT_SERVICE_METHODS);
+const { withChatSendDiagnostics, setChatSendDiagnosticPhase } = require("./chat-send-diagnostics");
 const INSPIRATION_SERVICE_METHOD_SET = new Set(INSPIRATION_SERVICE_METHODS);
 const DOMAIN_SERVICE_METHOD_SET = new Set(DOMAIN_SERVICE_METHODS);
 const PROFILE_SERVICE_METHOD_SET = new Set(PROFILE_SERVICE_METHODS);
@@ -2432,16 +2433,20 @@ function createAgentService(options) {
       return crypto.createHash("sha256").update(JSON.stringify([projection.registryRevision, projection.tools])).digest("hex");
     },
     beforeSessionSend: async input => {
+      setChatSendDiagnosticPhase("desktop_preflight");
       const ownActive = workRunCoordinator.listSessionRuns(input.sessionKey).some(run =>
         ["starting", "running", "waiting_approval", "waiting_input"].includes(run.status));
       if (!ownActive) await codexDesktopSessionController?.assertSendable(input.sessionKey);
+      setChatSendDiagnosticPhase("runtime_selection");
       const selected = await sessionRuntimeController.selectForSend(input);
       if (shoggothMemory && !workRunCoordinator.listSessionRuns(input.sessionKey).some(run =>
         ["starting", "running", "waiting_approval", "waiting_input"].includes(run.status))) {
         const session = chatSessionStore.getSession(input.sessionKey);
         if (require("./historical-chat-session").isHistoricalChatSession(session)) {
+          setChatSendDiagnosticPhase("memory_context");
           const context = workRunCoordinator.getRuntimeContext(session);
           const budget = context?.productContext?.budget;
+          setChatSendDiagnosticPhase("memory_preflight");
           await shoggothMemory.observeBeforeSend({ profileId: session.profileId, sessionId: session.id,
             prompt: input.prompt, contextUsage: context?.contextUsage,
             ...(budget && budget.source !== "fallback" ? { contextWindowTokens: budget.tokens } : {}) });
@@ -4405,8 +4410,11 @@ function createAgentService(options) {
       } catch { errorResponse(socket, id, "RUNTIME_EXTENSION_STATUS_INVALID", "Runtime extension status is unavailable"); return; }
     } else if (require("./chat-secret-service").METHODS.includes(request.method)) {
       try {
-        if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("SECRET_INPUT_INVALID", "Invalid envelope");
-        result = await chatSecretService.handle(request.method, request.params);
+        result = await withChatSendDiagnostics({ paths, method: request.method, input: request.params }, async () => {
+          if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("SECRET_INPUT_INVALID", "Invalid envelope");
+          setChatSendDiagnosticPhase("secret_preparation");
+          return chatSecretService.handle(request.method, request.params);
+        });
       } catch (error) {
         const messages = require("../core/chat-secret-contract").SECRET_MESSAGES;
         const code = Object.hasOwn(messages, error?.code) ? error.code : "SECRET_PROCESSING_UNAVAILABLE";
@@ -4690,13 +4698,13 @@ function createAgentService(options) {
       }
     } else if (CHAT_SERVICE_METHOD_SET.has(request.method)) {
       try {
-        const canonical = validateChatServiceRequest(request);
-        result = await chatServiceController.handle(
-          canonical.method,
-          canonical.params,
-          canonical.id,
-        );
-        result = validateChatServiceResult(canonical.method, result);
+        result = await withChatSendDiagnostics({ paths, method: request.method, input: request.params }, async () => {
+          const canonical = validateChatServiceRequest(request);
+          setChatSendDiagnosticPhase("controller");
+          const handled = await chatServiceController.handle(canonical.method, canonical.params, canonical.id);
+          setChatSendDiagnosticPhase("response_validation");
+          return validateChatServiceResult(canonical.method, handled);
+        });
       } catch (error) {
         if (error?.code === "UNKNOWN_METHOD") {
           errorResponse(socket, id, "UNKNOWN_METHOD", "Chat Service 方法尚未接线");

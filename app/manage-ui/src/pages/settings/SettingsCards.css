@@ -1,7 +1,5 @@
-/* Settings redesign. Connections and their full-width backend cards come
-   first, followed by the shared background service, everyday preferences,
-   and developer switches folded last. Loaded after SettingsPage.css /
-   SettingsLayout.css and overrides their older three-column card grid. */
+/* Settings surfaces, backend details and status presentation.
+   Page composition lives in SettingsOverview.css. */
 
 .management-page.settings-page {
   --settings-inset: color-mix(in srgb, var(--ui-surface-2) 72%, var(--ui-surface-1));
@@ -12,10 +10,6 @@
 
 .management-page.settings-page .settings-stack { gap: 44px; }
 .management-page.settings-page .settings-group { gap: 36px; }
-/* 通用 heads its own card like every other section; its later sections keep the group rhythm. */
-.management-page.settings-page #settings-general { gap: 14px; }
-.management-page.settings-page #settings-general > .settings-preferences { gap: 36px; }
-.management-page.settings-page #settings-general > .settings-advanced { margin-top: 22px; }
 .management-page.settings-page .settings-section { gap: 14px; }
 .management-page.settings-page .settings-section-head { gap: 4px; }
 .management-page.settings-page .settings-section-head.settings-heading-row { align-items: flex-end; }

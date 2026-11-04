@@ -78,6 +78,8 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     "./CronCalendar": { __esModule: true, default: host("calendar"), calendarRangeTitle: () => "Calendar", shiftCalendarCursor: date => date, startOfMonth: date => date },
     "./cron/CronFiltersBar": host("filters"), "./cron/cronIcons": { IconPlus: host("i"), IconSearch: host("i") },
     "./cron/CronRunHistoryPanel": host("run-history"),
+    "./cron/CronRunReportModal": { __esModule: true, default: props => React.createElement("report-modal", props,
+      props.open ? props.children : null), ReportNote: host("report-note"), runExecutionFailed: () => false },
     "./cron/cronPresets": scheduleDisplay.exports,
     "./cron/OpenClawCronForm": form,
     "./cron/CodexCronForm": { __esModule: true, default: host("codex-form"), emptyCodexCronDraft: () => ({}) },
@@ -155,24 +157,28 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   const now = Date.now();
   const visibleJobs = [
     { ...jobs[0], nextRunAt: now + 120000 },
+    { ...jobs[1], name: "Memory Dreaming Promotion" },
+  ];
+  const systemJobs = [
     { ...jobs[2], payload: { kind: "skillCollectionReview" } },
+    { ...jobs[0], id: "dreaming", name: "Internal memory sweep", systemManaged: true },
   ];
   const heartbeat = { ...jobs[2], id: "heartbeat", name: "heartbeat-vincent", nextRunAt: now + 60000,
     lastStatus: "error", payload: { kind: "heartbeat" } };
   const desktop = { ...heartbeat, id: "desktop", name: "Desktop schedule", origin: "codex-desktop", payload: { kind: "agentTurn" } };
-  const f = await fixture(undefined, [heartbeat, desktop, ...visibleJobs]);
-  assert.deepEqual(f.renderer.root.findAllByProps({ className: "job-name" }).map(node => node.children[0]), ["A", "System"],
-    "cached heartbeat jobs must be hidden on the first list render");
+  const f = await fixture(undefined, [heartbeat, desktop, ...systemJobs, ...visibleJobs]);
+  assert.deepEqual(f.renderer.root.findAllByProps({ className: "job-name" }).map(node => node.children[0]), ["A", "Memory Dreaming Promotion"],
+    "system jobs are hidden on the first render; a same-named user job remains visible");
   assert.deepEqual(Array.from(f.renderer.root.findByType("header").props.subtitle.props.children, node => node.props.children),
     ["cron.statTotal:2", "cron.statEnabled:2", "cron.statError:0"], "all counts use visible jobs");
   act(() => f.renderer.root.findByProps({ ariaLabel: "cron.viewToggle" }).props.onChange("calendar"));
   const calendar = f.renderer.root.findByType("calendar");
-  assert.deepEqual(Array.from(calendar.props.jobs, row => row.id), ["A", "System"],
-    "month/week/day calendars share the heartbeat-free list");
+  assert.deepEqual(Array.from(calendar.props.jobs, row => row.id), ["A", "B"],
+    "month/week/day calendars contain only user jobs");
   assert.equal(calendar.props.nextUp.id, "A", "the next-run highlight must skip earlier heartbeats");
   assert.equal(f.state.updates.length + f.state.creates.length, 0);
   f.dispose();
-  const empty = await fixture(undefined, [heartbeat, desktop]);
+  const empty = await fixture(undefined, [heartbeat, desktop, ...systemJobs]);
   assert.equal(empty.renderer.root.findAllByProps({ className: "empty-hint" }).length, 1,
     "a heartbeat-only list shows the normal empty state");
   empty.dispose();
@@ -268,14 +274,15 @@ for (const rejectOld of [false, true]) {
 }
 {
   const f = await fixture();
-  // Invoke the handler as well as checking disabled markup, so the calendar
-  // path cannot bypass the per-job capability gate.
-  await f.edit("System");
+  assert.equal(f.row("System"), undefined, "system tasks have no list row");
+  await f.notify("System");
   assert.equal(f.formModal(), undefined);
-  assert.equal(f.renderer.root.findAllByType("modal").find(modal => modal.props.open)?.props.title, "System");
+  assert.equal(f.renderer.root.findAllByType("modal").find(modal => modal.props.open), undefined,
+    "an old notification cannot open a hidden system task");
   act(() => f.renderer.root.findByProps({ ariaLabel: "cron.viewToggle" }).props.onChange("calendar"));
   await act(async () => { await f.renderer.root.findByType("calendar").props.onJobClick(jobs[2], Date.now() + 60000); await flush(); });
-  assert.equal(f.formModal(), undefined, "future system-managed calendar occurrences open read-only details");
+  assert.equal(f.formModal(), undefined, "stale system calendar occurrences cannot reopen details");
+  assert.deepEqual(f.state.runRequests, [], "hidden tasks never load run history");
   assert.equal(f.state.updates.length + f.state.creates.length, 0);
   f.dispose();
 }

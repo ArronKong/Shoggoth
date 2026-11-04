@@ -32,6 +32,7 @@ const KIND_FILTERS = ["", "cron", "inspiration"] as const;
 export function isVisibleDashboardActivity(entry: DashboardActivityEntry): entry is Exclude<DashboardActivityEntry, { kind: "health" }> {
   if (entry.kind === "health") return false;
   if (entry.kind === "cron" && entry.run.outputDisposition === "silent") return false;
+  if (entry.kind === "cron" && entry.backendId === "openclaw" && entry.run.systemManaged === true) return false;
   return !(entry.kind === "cron" && entry.backendId === "openclaw"
     && [entry.summary, entry.run.summary, entry.run.error].some((message) =>
       typeof message === "string" && /^heartbeat (?:(?:wake requested|(?:task )?completed)$|(?:failed|skipped):)/.test(message),

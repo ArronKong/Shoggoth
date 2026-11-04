@@ -1,36 +1,40 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import type { CSSProperties, KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { Menu } from "@base-ui/react/menu";
 import AgentAvatar from "../components/AgentAvatar";
-import { GROUP_MAX_MEMBERS } from "../lib/groupChat";
-import type { GroupChatView } from "../types";
+import { GROUP_MIN_MEMBERS, GROUP_MAX_MEMBERS } from "../lib/groupChat";
+import type { GroupChatMember, GroupChatView } from "../types";
 import GroupChatRoleDocument from "./GroupChatRoleDocument";
+import { ChatMessageContextMenu, IconTrash } from "./ChatMessageActions";
 import closeIcon from "../assets/figma/group-chat/group-details-close.svg";
 import addIcon from "../assets/figma/group-chat/group-details-add.svg";
+import deleteIcon from "../assets/figma/group-chat/group-details-delete.svg";
+import settingsIcon from "../assets/nav-icons/settings.svg";
 import styles from "./GroupChatDetails.module.css";
 
 export type GroupChatDetailsProps = {
   view: GroupChatView;
   onClose(): void;
   onAddMember?(): void;
-  onOpenMember?(memberId: string): void;
-  onSearch?(): void;
+  onRemoveMember?(member: GroupChatMember): void;
+  removingMember?: boolean;
   onRename?(): void;
   onSettings?(): void;
-  onSendRecords?(): void;
   onDelete?(): void;
   deleting?: boolean;
 };
 
-/** 群详情占用原聊天区域；公开角色原文仍通过固定版本和摘要校验读取。 */
-export default function GroupChatDetails({ view, onClose, onAddMember, onOpenMember, onSearch,
-  onRename, onSettings, onSendRecords, onDelete, deleting = false }: GroupChatDetailsProps) {
+/** 群详情占用原聊天区域；只展示成员 SOUL，仍通过固定版本和摘要校验读取。 */
+export default function GroupChatDetails({ view, onClose, onAddMember,
+  onRemoveMember, removingMember = false, onRename, onSettings, onDelete, deleting = false }: GroupChatDetailsProps) {
   const { t } = useTranslation();
   const id = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<{ groupId: string; memberId: string } | null>(null);
+  const [memberMenu, setMemberMenu] = useState<{ groupId: string; ownerScope: GroupChatView["ownerScope"]; memberId: string; x: number; y: number } | null>(null);
   const members = view.members.filter(member => member.state === "active");
+  const menuMember = memberMenu?.groupId === view.group.id && memberMenu.ownerScope === view.ownerScope
+    ? members.find(member => member.id === memberMenu.memberId) : undefined;
   const preferred = members.find(member => member.id === view.currentOwnerId) ?? members[0];
   const selected = (selection?.groupId === view.group.id
     ? members.find(member => member.id === selection.memberId) : undefined) ?? preferred;
@@ -40,9 +44,18 @@ export default function GroupChatDetails({ view, onClose, onAddMember, onOpenMem
   }, [selected?.id, view.group.id]);
   const active = view.group.status === "active" && !deleting;
   const canAdd = active && members.length < GROUP_MAX_MEMBERS && Boolean(onAddMember);
-  const hasActions = Boolean(onSearch || onRename || onSettings || onSendRecords || onDelete || onOpenMember);
+  const canRemove = active && !removingMember && members.length > GROUP_MIN_MEMBERS;
   const selectMember = (memberId: string) => setSelection({ groupId: view.group.id, memberId });
+  const openMemberMenu = (memberId: string, x: number, y: number) => {
+    if (onRemoveMember) setMemberMenu({ groupId: view.group.id, ownerScope: view.ownerScope, memberId, x, y });
+  };
   const navigateMembers = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+      event.preventDefault();
+      const bounds = event.currentTarget.getBoundingClientRect();
+      openMemberMenu(members[index].id, bounds.left, bounds.bottom);
+      return;
+    }
     const next = event.key === "ArrowRight" ? (index + 1) % members.length
       : event.key === "ArrowLeft" ? (index + members.length - 1) % members.length
         : event.key === "Home" ? 0 : event.key === "End" ? members.length - 1 : -1;
@@ -53,31 +66,26 @@ export default function GroupChatDetails({ view, onClose, onAddMember, onOpenMem
     button?.focus();
     button?.scrollIntoView({ block: "nearest", inline: "nearest" });
   };
+  const iconStyle = (source: string) => ({ "--group-details-icon": `url(${JSON.stringify(source)})` }) as CSSProperties;
 
   return <section className={styles.details} data-group-details aria-labelledby={`${id}-title`}>
     <header className={styles.header}>
-      <h2 id={`${id}-title`} className={styles.title}>{view.group.name}</h2>
+      <button type="button" className={styles.iconButton} data-group-details-action="close" onClick={onClose}
+        aria-label={t("common.close")} title={t("common.close")}><span className={styles.headerIcon} style={iconStyle(closeIcon)} aria-hidden="true" /></button>
+      <h2 id={`${id}-title`} className={styles.title}>
+        {onRename ? <button type="button" className={styles.titleButton} data-group-details-action="rename"
+          disabled={!active} onClick={onRename} title={t("groupChat.rename")}
+          aria-label={`${view.group.name} · ${t("groupChat.rename")}`}>{view.group.name}</button> : view.group.name}
+      </h2>
       <div className={styles.tools}>
-        {hasActions && <Menu.Root>
-          <Menu.Trigger className={styles.iconButton} data-group-details-action="menu" title={t("groupChat.strategy.settings")}
-            aria-label={t("groupChat.strategy.settings")}><span className={styles.moreIcon} aria-hidden="true">···</span></Menu.Trigger>
-          <Menu.Portal>
-            <Menu.Positioner className={styles.menuPositioner} sideOffset={6} align="end">
-              <Menu.Popup className={styles.menu}>
-                {onOpenMember && selected && <Menu.Item className={styles.menuItem} data-group-details-action="profile"
-                  onClick={() => onOpenMember(selected.id)}>{t("groupChat.card.open")}</Menu.Item>}
-                {onSearch && <Menu.Item className={styles.menuItem} data-group-details-action="search" onClick={onSearch}>{t("groupChat.search.open")}</Menu.Item>}
-                {onSendRecords && <Menu.Item className={styles.menuItem} data-group-details-action="send-records" onClick={onSendRecords}>{t("groupChat.sendJournal.open")}</Menu.Item>}
-                {onRename && <Menu.Item className={styles.menuItem} data-group-details-action="rename" disabled={!active} onClick={onRename}>{t("groupChat.rename")}</Menu.Item>}
-                {onSettings && <Menu.Item className={styles.menuItem} data-group-details-action="settings" disabled={!active} onClick={onSettings}>{t("groupChat.strategy.settings")}</Menu.Item>}
-                {onDelete && <Menu.Item className={`${styles.menuItem} ${styles.deleteItem}`}
-                  data-group-details-action="delete" disabled={deleting || view.group.status === "deleting"} onClick={onDelete}>{t("groupChat.delete")}</Menu.Item>}
-              </Menu.Popup>
-            </Menu.Positioner>
-          </Menu.Portal>
-        </Menu.Root>}
-        <button type="button" className={styles.iconButton} data-group-details-action="close" onClick={onClose}
-          aria-label={t("common.close")} title={t("common.close")}><img src={closeIcon} alt="" /></button>
+        {onSettings && <button type="button" className={styles.iconButton} data-group-details-action="settings"
+          disabled={!active} onClick={onSettings} title={t("groupChat.strategy.settings")} aria-label={t("groupChat.strategy.settings")}>
+          <span className={styles.headerIcon} style={iconStyle(settingsIcon)} aria-hidden="true" />
+        </button>}
+        {onDelete && <button type="button" className={styles.iconButton} data-group-details-action="delete"
+          disabled={deleting || view.group.status === "deleting"} onClick={onDelete} title={t("groupChat.delete")} aria-label={t("groupChat.delete")}>
+          <span className={`${styles.headerIcon} ${styles.deleteIcon}`} style={iconStyle(deleteIcon)} aria-hidden="true" />
+        </button>}
       </div>
     </header>
     <div ref={listRef} className={styles.members} role="tablist" aria-label={t("groupChat.membersLabel")}>
@@ -85,8 +93,14 @@ export default function GroupChatDetails({ view, onClose, onAddMember, onOpenMem
         const isSelected = member.id === selected?.id;
         return <button type="button" key={member.id} role="tab" id={`${id}-member-${index}`} data-group-details-member={member.id}
           aria-controls={`${id}-role`} aria-selected={isSelected} tabIndex={isSelected ? 0 : -1}
+          aria-haspopup={onRemoveMember ? "menu" : undefined}
           className={`${styles.member}${isSelected ? ` ${styles.selected}` : ""}`}
           title={member.displayName} onClick={() => selectMember(member.id)}
+          onContextMenu={event => {
+            event.preventDefault();
+            event.currentTarget.focus({ preventScroll: true });
+            openMemberMenu(member.id, event.clientX, event.clientY);
+          }}
           onKeyDown={event => navigateMembers(event, index)}>
           <AgentAvatar agentId={member.agentId} name={member.displayName} className={styles.avatar} />
           <span className={styles.memberName}>{member.displayName}</span>
@@ -99,10 +113,15 @@ export default function GroupChatDetails({ view, onClose, onAddMember, onOpenMem
       aria-labelledby={selected ? `${id}-member-${members.indexOf(selected)}` : undefined}>
       {selected && <GroupChatRoleDocument key={`${view.ownerScope ?? ""}:${view.group.id}:${selected.id}`}
         groupId={view.group.id} memberId={selected.id} variant="compact" />}
-      <details className={styles.secondaryInfo}>
-        <summary>{t("groupChat.memorySummary")}</summary>
-        <p>{t("groupChat.memoryNote")}</p>
-      </details>
     </div>
+    {memberMenu && menuMember && onRemoveMember && <ChatMessageContextMenu x={memberMenu.x} y={memberMenu.y}
+      onClose={() => setMemberMenu(null)} extra={<button type="button" role="menuitem" data-group-member-remove={menuMember.id}
+        className="chat-ctxmenu__item is-danger" disabled={!canRemove} onClick={() => {
+          setMemberMenu(null);
+          if (canRemove) {
+            listRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[members.indexOf(menuMember)]?.focus({ preventScroll: true });
+            onRemoveMember(menuMember);
+          }
+        }}><IconTrash /><span>{t("groupChat.members.remove")}</span></button>} />}
   </section>;
 }

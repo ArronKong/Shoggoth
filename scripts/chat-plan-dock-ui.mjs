@@ -6,6 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const require = createRequire(path.join(root, "app/manage-ui/package.json"));
@@ -17,8 +18,9 @@ try {
   await build({
     entryPoints: [path.join(root, "scripts/fixtures/chat-plan-dock.tsx")], bundle: true, format: "esm",
     define: { "process.env.NODE_ENV": '"production"' },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" },
+    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
+    plugins: [viteArtworkFixturePlugin(root)],
   });
   fs.writeFileSync(path.join(temp, "index.html"), `<!doctype html><meta charset="utf-8"><title>计划输入区验证</title>
 <link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}</style>
@@ -42,22 +44,35 @@ try {
     fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron"), fs=require("node:fs");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1280,height:900,webPreferences:{backgroundThrottling:false}});let passed=false;
+w.webContents.on("console-message",event=>{if(event.level==="error")console.error("Renderer:",event.message);});
 try{const results=[];for(const [width,height,theme] of [[1280,900,"light"],[1280,900,"dark"],[600,800,"light"]]){
   w.setContentSize(width,height);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))});
   await w.webContents.executeJavaScript('document.documentElement.setAttribute("data-theme",'+JSON.stringify(theme)+')');
   await w.webContents.executeJavaScript('window.preparePlanFixture()');
   if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/"+width+"-"+theme+"-expanded.png",(await w.webContents.capturePage()).toPNG());
   const result=await w.webContents.executeJavaScript('window.runPlanFixture()');results.push({width,height,theme,...result});
-  if(width>=1000&&${Boolean(output)}){
-    await w.webContents.executeJavaScript('window.previewPlanDock(false,false)');
+  await w.webContents.executeJavaScript('window.previewPlanDock(false,false)');
+  if(${Boolean(output)}){
     fs.writeFileSync(${JSON.stringify(output)}+"/"+width+"-"+theme+"-collapsed.png",(await w.webContents.capturePage()).toPNG());
+  }
+  if(width>=1000&&${Boolean(output)}){
     await w.webContents.executeJavaScript('window.previewPlanDock(true,true)');
     fs.writeFileSync(${JSON.stringify(output)}+"/"+width+"-"+theme+"-immersive.png",(await w.webContents.capturePage()).toPNG());
   }
+  for(const key of ["Enter","Space"]){
+    if(key==="Space")await w.webContents.executeJavaScript('window.restoreKeyboardPlanFixture()');
+    w.webContents.focus();
+    await w.webContents.executeJavaScript('document.querySelector(".chat-plan-dock__dismiss").focus()');
+    w.webContents.sendInputEvent({type:"keyDown",keyCode:key});
+    w.webContents.sendInputEvent({type:"char",keyCode:key==="Enter"?String.fromCharCode(13):" "});
+    w.webContents.sendInputEvent({type:"keyUp",keyCode:key});
+    await w.webContents.executeJavaScript('window.checkKeyboardPlanDismiss()');
+  }
+  results[results.length-1].keyboardDismiss=["Enter","Space"];
 }console.log(JSON.stringify({passed:true,results}));passed=true;}catch(error){
   console.error(error.stack||error);
   if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/failure.png",(await w.webContents.capturePage()).toPNG());
-  console.error(JSON.stringify(await w.webContents.executeJavaScript('({error:window.fixtureError,text:document.body.innerText.slice(-2000),requests:window.requests.slice(-8),geometry:[...document.querySelectorAll("[data-chat-plan-dock],[data-chat-composer]")].map(e=>({class:e.className,rect:e.getBoundingClientRect().toJSON()}))})')));
+  console.error(JSON.stringify(await w.webContents.executeJavaScript('({error:window.fixtureError,text:document.body.innerText.slice(-2000),requests:window.requests?.slice(-8),geometry:[...document.querySelectorAll("[data-chat-plan-dock],[data-chat-composer]")].map(e=>({class:e.className,rect:e.getBoundingClientRect().toJSON()}))})')));
 }finally{w.destroy();app.exit(passed?0:1);}});`);
     const result = spawnSync(path.join(root, "node_modules/.bin/electron"), [main], {
       encoding: "utf8", timeout: 60_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },

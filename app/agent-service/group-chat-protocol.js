@@ -6,7 +6,8 @@ const { validAttachments } = require("./inspiration-media");
 const { validModelSelection, validModelCatalog } = require("../group-member-model");
 
 const MAX_GROUP_MEMBERS = 32;
-const MIN_GROUP_MEMBERS_ON_CREATE = 2;
+const MIN_GROUP_MEMBERS = 2;
+const MIN_GROUP_MEMBERS_ON_CREATE = MIN_GROUP_MEMBERS;
 const MAX_GROUP_NAME_CHARS = 64;
 const MAX_GROUP_PURPOSE_CHARS = 1000;
 const MAX_USER_MESSAGE_BYTES = 32 * 1024;
@@ -65,7 +66,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   GROUP_CHAT_POLICY_CONFLICT: "群设置已变化，请核对原输入后重新发送",
   GROUP_CHAT_POLICY_CHANGED: "群设置已变化或尚未确认，请刷新并核对原输入后重新发送",
   GROUP_CHAT_OWNER_CHANGED: "群聊所属实例已变化，请核对原发送记录",
-  GROUP_CHAT_MEMBER_LIMIT: `群成员需要 ${MIN_GROUP_MEMBERS_ON_CREATE}–${MAX_GROUP_MEMBERS} 位`,
+  GROUP_CHAT_MEMBER_LIMIT: `群成员需要 ${MIN_GROUP_MEMBERS}–${MAX_GROUP_MEMBERS} 位`,
   GROUP_CHAT_MEMBER_DUPLICATE: "这个 Agent 已经在群里",
   GROUP_CHAT_MEMBER_NOT_FOUND: "群成员不存在或已移除",
   GROUP_CHAT_MEMBER_UNSUPPORTED: "这个后端的 Agent 暂不支持入群",
@@ -135,7 +136,7 @@ function executionTarget(target) {
 }
 
 function validateParams(method, params) {
-  const optional = method === "group.member.role" ? ["revision", "cursor"]
+  const optional = method === "group.member.role" ? ["revision", "cursor", "document"]
     : method === "group.history" ? ["afterRevision"]
     : method === "group.send" ? ["taskId", "requestMode", "discussionId", "summaryMemberId", "ownerScope", "expectedPolicyVersion"]
       : method === "group.send.lookup" ? ["payloadDigest", "ownerScope"] : [];
@@ -183,6 +184,7 @@ function validateParams(method, params) {
     "group.members.model": () => opaqueId(params.groupId) && revision(params.expectedRosterRevision)
       && opaqueId(params.memberId) && validModelSelection(params.modelSelection),
     "group.member.role": () => opaqueId(params.groupId) && opaqueId(params.memberId)
+      && (!Object.hasOwn(params, "document") || params.document === "SOUL.md")
       && (!Object.hasOwn(params, "revision") || text(params.revision, 128))
       && (!Object.hasOwn(params, "cursor") || text(params.cursor, 2048)),
     "group.member.role.history": () => opaqueId(params.groupId) && opaqueId(params.memberId)
@@ -287,6 +289,7 @@ module.exports = {
   MAX_GROUP_PURPOSE_CHARS,
   MAX_HISTORY_LIMIT,
   MAX_USER_MESSAGE_BYTES,
+  MIN_GROUP_MEMBERS,
   MIN_GROUP_MEMBERS_ON_CREATE,
   PUBLIC_MESSAGES,
   fail,

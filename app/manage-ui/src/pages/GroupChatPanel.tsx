@@ -11,7 +11,7 @@ import Modal from "../components/Modal";
 import { useConfirm, usePrompt, useToast } from "../components/ui";
 import {
   getGroupChat, listGroupChatMessages, lookupGroupChatSend, revealAttachment, respondGroupChatInteraction, retryGroupChatTurn,
-  sendGroupChatMessage, stopGroupChatDiscussion, stopGroupChatMember, updateGroupChat, deleteGroupChat,
+  sendGroupChatMessage, stopGroupChatDiscussion, stopGroupChatMember, updateGroupChat, deleteGroupChat, removeGroupChatMember,
 } from "../api/client";
 import ChatPromptCard, { type ChatPromptResponse } from "./ChatPromptCard";
 import { IconClip, IconSend, IconStop } from "./chatIcons";
@@ -19,7 +19,7 @@ import groupFilesTrigger from "../assets/figma/group-chat/group-files-trigger.sv
 import {
   inspirationMediaLimit, inspirationMediaUrl, MAX_INSPIRATION_ATTACHMENTS, normalizeMediaType, uploadInspirationMedia,
 } from "./inspiration-media";
-import { onGroupChanged, GROUP_MAX_MEMBERS, type GroupCandidateAgent } from "../lib/groupChat";
+import { onGroupChanged, GROUP_MIN_MEMBERS, GROUP_MAX_MEMBERS, type GroupCandidateAgent } from "../lib/groupChat";
 import { createGroupPanelObserver } from "../lib/groupPanelObserver";
 import type { GroupPanelCache } from "../lib/groupPanelCache";
 import { emptyGroupComposer, GroupDraftSession, groupSendJournal, GROUP_CONNECTION_EVENT, GROUP_JOURNAL_CHANGED,
@@ -106,6 +106,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   // remount old readers under a new epoch before their panels are cleared.
   const [ownedView, setOwnedView] = useState<{ view: GroupChatView | null; epoch: number }>({ view: cached?.view ?? null, epoch: 0 });
   const { view, epoch: ownerEpoch } = ownedView;
+  const latestViewRef = useRef(view);
+  latestViewRef.current = view;
   const setView = (next: GroupChatView | null | ((previous: GroupChatView | null) => GroupChatView | null)) => {
     const epoch = ownerEpochRef.current;
     setOwnedView(previous => ({ view: typeof next === "function" ? next(previous.view) : next, epoch }));
@@ -138,6 +140,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const memberStopPendingRef = useRef(new Set<string>());
   const deletingScopeRef = useRef<string | null>(null);
   const [deletingScope, setDeletingScope] = useState<string | null>(null);
+  const removingMemberScopeRef = useRef<string | null>(null);
+  const [removingMemberScope, setRemovingMemberScope] = useState<string | null>(null);
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [cardMemberId, setCardMemberId] = useState<string | null>(null);
@@ -768,6 +772,30 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     }
   };
 
+  const removeMember = async (member: GroupChatMember) => {
+    const canRemove = () => {
+      const latest = latestViewRef.current;
+      return currentScope() && latest?.group.status === "active" && deletingScopeRef.current !== scopeKey
+        && latest.members.filter(item => item.state === "active").length > GROUP_MIN_MEMBERS
+        && latest.members.some(item => item.id === member.id && item.state === "active");
+    };
+    if (!canRemove() || removingMemberScopeRef.current === scopeKey) return;
+    removingMemberScopeRef.current = scopeKey; setRemovingMemberScope(scopeKey);
+    try {
+      mutationRevisionRef.current++;
+      applyView(await removeGroupChatMember(groupId, {
+        expectedRosterRevision: latestViewRef.current!.group.rosterRevision, memberId: member.id,
+      }));
+    } catch (cause) {
+      if (currentScope()) { toast.error(cause instanceof Error ? cause.message : String(cause)); void pull(); }
+    } finally {
+      if (removingMemberScopeRef.current === scopeKey) {
+        removingMemberScopeRef.current = null;
+        if (currentScope()) setRemovingMemberScope(null);
+      }
+    }
+  };
+
   const systemText = (message: GroupChatMessage) => {
     const system = message.system;
     const who = (id?: string) => (id && membersById.get(id)?.displayName) || t("groupChat.someMember");
@@ -1083,9 +1111,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         {expandedPanel === "members" ? <GroupChatDetails key={`details:${scopeKey}`} view={view}
           onClose={() => setExpandedPanel(null)}
           onAddMember={!archived && activeMembers.length < MAX_MEMBERS ? () => setAdding(true) : undefined}
-          onOpenMember={setCardMemberId} onSearch={() => { setExpandedPanel(null); setSearchOpen(true); }}
+          onRemoveMember={member => void removeMember(member)} removingMember={removingMemberScope === scopeKey}
           onRename={() => void rename()} onSettings={() => setSettingsOpen(true)}
-          onSendRecords={() => { setExpandedPanel(null); setSendRecordPage(0); setSendRecordsOpen(true); }}
           onDelete={() => void removeGroup()} deleting={view.group.status === "deleting" || deletingScope === scopeKey} />
           : <GroupChatFiles key={`files:${scopeKey}`} view={view} onClose={() => setExpandedPanel(null)} />}
       </Suspense>}

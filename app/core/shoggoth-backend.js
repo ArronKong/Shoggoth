@@ -25,6 +25,7 @@ const {
 } = require("./shoggoth-interaction-contract");
 const { requestService, readClientToken, PROACTIVE_VERIFY_TIMEOUT_MS } = require("../agent-service/client");
 const { recordServiceRequestTimeout } = require("../agent-service/service-request-diagnostics");
+const { recordChatSendFailure } = require("../agent-service/chat-send-diagnostics");
 const { resolveServicePaths } = require("../agent-service/paths");
 const { SERVICE_PROTOCOL_VERSION } = require("../agent-service/service-protocol-version");
 const {
@@ -1210,7 +1211,8 @@ function sessionToRow(profile, value, backendId) {
   const modelSettings = next?.modelSettings ?? value.modelSettings;
   const title = typeof value.title === "string" && value.title.length > 0
     ? value.title : undefined;
-  const derivedTitle = value.proactiveTarget ? "提醒" : value.inspirationTitle ? `Inspiration · ${value.inspirationTitle}`
+  // The session list already files inspiration sessions under their own category, so the note names itself.
+  const derivedTitle = value.proactiveTarget ? "提醒" : value.inspirationTitle ? value.inspirationTitle
     : typeof value.derivedTitle === "string" && value.derivedTitle.length > 0
     ? value.derivedTitle : undefined;
   return Object.freeze({
@@ -2650,6 +2652,41 @@ class ShoggothBackend extends AgentBackend {
       definitionRevision: definition.current.revision,
       backendId: this.id,
     };
+  }
+
+  async listAgentArtifacts(agentId, { limit = 100 } = {}) {
+    this._assertDomainReady();
+    const generation = this._generation;
+    const profile = (await this._dashboardProfiles()).find(value => value.agentId === agentId && value.enabled);
+    if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    const current = () => this._generation === generation && this._state === "started";
+    const sessions = await this._page("chat.session.list", {
+      profileId: profile.id, includeArchived: true,
+    }, "sessions", { maxBytes: MAX_HISTORY_BYTES, maxItems: MAX_HISTORY_ITEMS });
+    if (sessions.some(session => session.profileId !== profile.id)) throw safeError(null, "CHAT_RESPONSE_INVALID");
+    let failed = 0;
+    let aggregate = { bytes: 0, items: 0 };
+    const results = await mapBounded(sessions, MAX_PROFILE_SESSION_CONCURRENCY, async session => {
+      if (!current()) throw safeError(null, "BACKEND_NOT_READY");
+      let items;
+      try {
+        items = await this._sessionOutputArtifacts({
+          profile: this._profileForSession(profile, session), session, sessionKey: session.sessionKey, agentId,
+        });
+      } catch { failed++; return []; }
+      aggregate = this._assertDomainAggregate(items, aggregate.bytes, aggregate.items);
+      return items.map(item => ({ ...item, agentId, agentName: profile.name }));
+    });
+    if (!current()) throw safeError(null, "BACKEND_NOT_READY");
+    if (sessions.length > 0 && failed === sessions.length) {
+      return { supported: false, reason: "provenance-unavailable", items: [] };
+    }
+    const byPath = new Map();
+    for (const item of results.flat().sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))) {
+      if (!byPath.has(item.path)) byPath.set(item.path, item);
+    }
+    const take = Math.min(100, Math.max(1, Math.floor(Number(limit) || 100)));
+    return { supported: true, partial: failed > 0, total: byPath.size, items: [...byPath.values()].slice(0, take) };
   }
 
   async listSessionArtifacts(agentId, key, { limit = 50 } = {}) {
@@ -5360,6 +5397,7 @@ class ShoggothBackend extends AgentBackend {
   }
   getGroupChatMemberRole(groupId, memberId, query = {}) {
     return this._groupChatCall("group.member.role", { groupId, memberId,
+      ...(query.document === undefined ? {} : { document: query.document }),
       ...(query.revision === undefined ? {} : { revision: query.revision }), ...(query.cursor === undefined ? {} : { cursor: query.cursor }) });
   }
   getGroupChatMemberRoleHistory(groupId, memberId, query = {}) {
@@ -6848,6 +6886,8 @@ class ShoggothBackend extends AgentBackend {
   async sendMessage(key, message, runId, hooks = {}, opts = {}) {
     if (Object.hasOwn(opts, "pluginSelection")) throw Object.assign(new Error("旧插件选择已停用，请重新选择连接器账号"), { code: "PLUGIN_PLATFORM_RETIRED" });
     if (Object.hasOwn(opts,"connectorSelection")) throw Object.assign(new Error("OpenConnector 已退役，不能发送旧账号选择"), {code:"OPEN_CONNECTOR_RETIRED",receiptUncertain:true});
+    const diagnosticStartedAt = Date.now();
+    let diagnosticPhase = "app_preflight";
     let target;
     try {
       if (this._statusUncertain) {
@@ -6867,6 +6907,8 @@ class ShoggothBackend extends AgentBackend {
       const enabled = this._assertSessionRuntimeEnabled(target);
       if (enabled) await enabled;
     } catch (error) {
+      recordChatSendFailure({ paths: this.paths, method: "chat.send", phase: diagnosticPhase,
+        input: { operationId: runId, sessionKey: key }, error, startedAt: diagnosticStartedAt, client: true });
       // No chat.send was attempted. Preserve this fact through the broker so
       // the composer restores the draft instead of waiting for a nonexistent Run.
       throw Object.assign(safeError(error), { admissionAccepted: false });
@@ -6929,6 +6971,7 @@ class ShoggothBackend extends AgentBackend {
       const supplied = opts.attachments ?? [];
       const pathAttachment = supplied.length ? null : explicitPathAttachment(message);
       const items = pathAttachment ? [pathAttachment] : supplied;
+      diagnosticPhase = "attachment_upload";
       const attachments = items.length || !Array.isArray(items)
         ? await uploadChatAttachments((method, params) => {
           if (poll.cancelled) throw Object.assign(new Error("附件上传已取消"), { code: "ABORT_ERR" });
@@ -6936,8 +6979,10 @@ class ShoggothBackend extends AgentBackend {
         }, items, operationId) : [];
       if (poll.cancelled) return;
       let sent;
+      diagnosticPhase = "recall_observation";
       recall = this._watchAdmissionRecall(target, observerHooks, poll);
       try {
+        diagnosticPhase = "service_request";
         sent = await this._call("chat.send", {
           operationId,
           sessionKey,
@@ -6958,6 +7003,7 @@ class ShoggothBackend extends AgentBackend {
       }
       acceptedOrUncertain = true;
       recall.stop(true);
+      diagnosticPhase = "receipt_validation";
       this._assertRunBinding(target, sent.run);
       opts.onAccepted?.();
       const currentSession = this._sessionsByKey.get(sessionKey);
@@ -6975,9 +7021,12 @@ class ShoggothBackend extends AgentBackend {
       this._emitRunStatus(observerHooks, state, sent.run.status, {
         reason: sent.reason, queuedAt: this.now(),
       });
+      diagnosticPhase = "run_observation";
       await this._observeAcceptedRun({ key, sessionKey, target, run: sent.run,
         hooks: observerHooks, poll, generation, state });
     } catch (error) {
+      recordChatSendFailure({ paths: this.paths, method: "chat.send", phase: diagnosticPhase,
+        input: { operationId, sessionKey }, error, startedAt: diagnosticStartedAt, client: true });
       if (!terminalObserved && !opts.signal?.aborted) {
         if (acceptedOrUncertain) {
           this._invokeHook(observerHooks, "status",

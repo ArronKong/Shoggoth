@@ -119,7 +119,11 @@ const invalid = {
     const user = x.f.service.transcriptStore.listEvents(x.f.profile.id, x.session.id).find(event => event.runId === x.run.id && event.kind === "user");
     x.f.service.transcriptStore.setContextExcluded({ profileId: x.f.profile.id, sessionId: x.session.id, eventId: user.id, contextExcluded: true });
   },
-  "removed member": x => { x.store.removeMember({ groupId: x.groupId, memberId: x.member.id, expectedRosterRevision: x.store.getGroup(x.groupId).group.rosterRevision }); },
+  "removed member": x => {
+    x.store.addMember({ groupId: x.groupId, expectedRosterRevision: x.store.getGroup(x.groupId).group.rosterRevision,
+      member: { backendId: "shoggoth", agentId: "spare-fixture-agent", profileId: "spare-fixture-profile", displayName: "Spare" } });
+    x.store.removeMember({ groupId: x.groupId, memberId: x.member.id, expectedRosterRevision: x.store.getGroup(x.groupId).group.rosterRevision });
+  },
 };
 for (const [name, mutate] of Object.entries(invalid)) test(`recovery rejects ${name} without publishing or replay`, async t => {
   const x = await fixture(t); mutate(x);

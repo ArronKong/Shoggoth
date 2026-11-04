@@ -99,6 +99,7 @@ function load(relative) {
       // 样式类名按属性名返回，便于按类名定位元素。
       if (name.endsWith(".css")) return new Proxy({}, { get: (_target, key) => (key === "__esModule" ? undefined : String(key)) });
       if (name.endsWith(".svg")) return name;
+      if (name === "react-dom") return { createPortal: children => children };
       if (name === "@base-ui/react/menu") return { Menu: menuMock };
       if (name.endsWith("/api/client") || name.endsWith("/api/groupReads") || name.endsWith("/api/groupMemberModel")) return api;
       if (name.endsWith("/group-journal-recovery")) return require(path.resolve(ui, "../group-journal-recovery.js"));
@@ -117,7 +118,7 @@ function load(relative) {
       if (name.endsWith("/components/ui")) return { useToast: () => ({ error: (value) => calls.push({ name: "toast", args: [value] }) }),
         useConfirm: () => record("confirm", () => confirmAnswer),
         usePrompt: () => record("prompt", () => null) };
-      if (name.endsWith("/lib/groupChat")) return { onGroupChanged: () => () => {}, GROUP_NATIVE_BACKEND_ID: "shoggoth", GROUP_MAX_MEMBERS: 32,
+      if (name.endsWith("/lib/groupChat")) return { onGroupChanged: () => () => {}, GROUP_NATIVE_BACKEND_ID: "shoggoth", GROUP_MIN_MEMBERS: 2, GROUP_MAX_MEMBERS: 32,
         GROUP_MEMBER_BACKEND_IDS: new Set(["shoggoth", "hermes", "openclaw"]) };
       if (name.endsWith("/components/Modal")) return { __esModule: true, default: (props) => props.open
         ? React.createElement("section", { role: "dialog" }, props.title, props.children, props.footer) : null };
@@ -132,7 +133,8 @@ function load(relative) {
       };
       if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader")) return passthrough("i");
       if (name.endsWith("/components/ChatFileButton")) return load("src/components/ChatFileButton.tsx");
-      if (name.endsWith("/components/ChatMarkdown")) return passthrough("p");
+      if (name.endsWith("/components/AgentSoulDocument")) return load("src/components/AgentSoulDocument.tsx");
+      if (name.endsWith("/components/ChatMarkdown") || name === "./ChatMarkdown") return passthrough("p");
       if (name === "./GroupChatMarkdown") return { __esModule: true, default: props => React.createElement("p", null, props.lead, props.text),
         groupAttachmentsOutsideMarkdown: (_text, attachments) => attachments };
       if (name === "./ChatPromptCard") return { __esModule: true, default: props => React.createElement("button", { "data-prompt": true, onClick: () => props.onRespond(props.entry, { decision: "accept" }) }, "respond") };
@@ -211,12 +213,26 @@ const buttons = (label) => renderer.root.findAllByType("button")
   .filter((node) => node.children.includes(label) || node.props["aria-label"] === label);
 const click = async (node) => { await act(async () => { await node.props.onClick({ preventDefault() {} }); }); };
 const groupAction = async action => {
+  if (action === "profile") {
+    await click(renderer.root.findAll(node => node.type === "button" && node.props["data-group-author"] !== undefined)[0]);
+    await act(async () => {});
+    return;
+  }
   const trigger = renderer.root.find(node => node.type === "button" && node.props["data-group-details-trigger"] !== undefined);
   if (!trigger.props["aria-expanded"]) { await click(trigger); await act(async () => {}); }
   const button = value => renderer.root.find(node => node.type === "button" && node.props["data-group-details-action"] === value);
-  await click(button("menu")); await click(button(action)); await act(async () => {});
+  await click(button(action)); await act(async () => {});
 };
 const named = (name) => calls.filter((call) => call.name === name);
+const removeFromDetails = async (submit = true) => {
+  const trigger = renderer.root.find(node => node.type === "button" && node.props["data-group-details-trigger"] !== undefined);
+  if (!trigger.props["aria-expanded"]) { await click(trigger); await act(async () => {}); }
+  const member = renderer.root.find(node => node.type === "button" && node.props["data-group-details-member"] === "a");
+  await act(async () => member.props.onContextMenu({ clientX: 120, clientY: 160, preventDefault() {}, currentTarget: { focus() {} } }));
+  const action = renderer.root.find(node => node.type === "button" && node.props["data-group-member-remove"] === "a");
+  if (submit) await click(action);
+  return action;
+};
 // 组件在独立的 vm 环境里运行，它创建的对象原型与这里不同：比较前先转成普通对象。
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
@@ -232,9 +248,9 @@ const setup = async () => {
   })];
   await mount(); await flush();
 };
-const changeOwner = async (owner = "owner-b", name = "OWNER_B") => {
+const changeOwner = async (owner = "owner-b", name = "OWNER_B", nextMessages = []) => {
   view = { ...plain(view), ownerScope: owner, group: { ...view.group, name } };
-  messages = [];
+  messages = nextMessages;
   await refresh();
   assert.ok(text().includes(name), "authoritative view observed the new owner");
 };
@@ -298,10 +314,43 @@ await test("owner transition cancels a delayed delete confirmation before postin
   await groupAction("delete"); await changeOwner(); pending.resolve(true); await flush();
   noWrites(); assert.equal(named("deleteGroup").length, 0); assert.equal(archived, 0);
 });
-await test("owner transition cancels delayed member removal before posting", async () => {
+await test("retired member-card removal cannot post after an owner transition", async () => {
   await setup(); await groupAction("profile");
-  const pending = deferred(); handler.set("confirm", () => pending.promise);
-  await click(buttons("groupChat.members.remove")[0]); await changeOwner(); pending.resolve(true); await flush(); noWrites();
+  const remove = buttons("groupChat.members.remove")[0].props.onClick;
+  await changeOwner(); await act(async () => remove()); await flush(); noWrites();
+});
+await test("retired details-menu removal cannot post after an owner leaves and returns", async () => {
+  await setup();
+  const remove = (await removeFromDetails(false)).props.onClick;
+  await changeOwner(); await changeOwner("fixture-owner", "OWNER_A_RETURNED");
+  await act(async () => remove()); await flush(); noWrites();
+  assert.equal(renderer.root.findAllByProps({ role: "menu" }).length, 0);
+});
+await test("late member-card removal cannot replace or close the new owner's card", async () => {
+  await setup(); await groupAction("profile");
+  const pending = deferred(), old = plain(view); handler.set("remove", () => pending.promise);
+  const remove = buttons("groupChat.members.remove")[0].props.onClick;
+  await act(async () => { remove(); remove(); });
+  assert.equal(named("remove").length, 1, "rapid clicks submit only once");
+  assert.equal(named("confirm").length, 0);
+  await changeOwner("owner-b", "OWNER_B", [message(3, { kind: "member", memberId: "b" }, "New owner reply")]);
+  await groupAction("profile");
+  pending.resolve({ ...old, group: { ...old.group, name: "STALE_REMOVAL" } }); await flush();
+  assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_REMOVAL"));
+  assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 1);
+});
+await test("late details-menu removal cannot replace a new owner", async () => {
+  await setup(); const pending = deferred(), old = plain(view);
+  handler.set("remove", () => pending.promise); await removeFromDetails(); await flush();
+  assert.equal(named("remove").length, 1);
+  await changeOwner(); handler.set("getGroupChat", () => new Promise(() => {}));
+  pending.resolve({ ...old, group: { ...old.group, name: "STALE_REMOVAL" } }); await flush();
+  assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_REMOVAL"));
+});
+await test("details removal checks the latest roster even from an older menu callback", async () => {
+  await setup(); const remove = (await removeFromDetails(false)).props.onClick;
+  view = { ...view, members: view.members.filter(item => item.id !== "c"), group: { ...view.group, rosterRevision: 8 } };
+  await refresh(); await act(async () => remove()); await flush(); noWrites();
 });
 await test("late member model saves cannot replace the current owner and retired controls cannot write", async () => {
   await setup(); await groupAction("profile");

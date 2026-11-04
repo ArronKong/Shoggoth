@@ -344,6 +344,13 @@ async function run() {
     const removed = await api("DELETE", `/members?id=${groupId}`, { expectedRosterRevision: renamed.body.group.rosterRevision,
       memberId: memberId[c.agentId] });
     assert.equal(removed.body.members.find((member) => member.id === memberId[c.agentId]).state, "removed");
+    assert.equal(removed.body.members.filter(member => member.state === "active").length, 2);
+    const minimum = await api("DELETE", `/members?id=${groupId}`, { expectedRosterRevision: removed.body.group.rosterRevision,
+      memberId: memberId[a.agentId] });
+    assert.equal(minimum.body.code, "GROUP_CHAT_MEMBER_LIMIT");
+    assert.ok(minimum.status >= 400);
+    assert.deepEqual((await api("GET", `/detail?id=${groupId}`)).body, removed.body,
+      "refused removal retains the roster revision, members, owner and public history position");
     const page = await api("GET", `/messages?id=${groupId}&afterSeq=3&limit=2`);
     assert.deepEqual(page.body.messages.map((message) => message.seq), [4, 5]);
     assert.equal(page.body.hasMore, true);
@@ -1017,6 +1024,11 @@ async function runRoleDocuments() {
     assert.equal(crypto.createHash("sha256").update(fullSeen).digest("hex"), seenPage.exportDigest);
     assert.match(fullSeen, /角色旧版尾部/u); assert.doesNotMatch(fullSeen, /私密备注/u);
     assert.match(latestPage.text, /新版乙/u); assert.equal(latestPage.changedSinceSeen, true);
+    const soul = await api("GET", `/members/role?id=${groupId}&memberId=${target}&document=SOUL.md`);
+    assert.equal(soul.status, 200); assert.equal(soul.body.ok, true);
+    assert.match(soul.body.text, /新版乙/u); assert.doesNotMatch(soul.body.text, /IDENTITY|公开核验员|源码核验/u);
+    const wrongDocument = await api("GET", `/members/role?id=${groupId}&memberId=${target}&document=USER.md`);
+    assert.equal(wrongDocument.status, 400);
     const roleHistory = await api("GET", `/members/role-history?id=${groupId}&memberId=${target}&limit=1`);
     assert.equal(roleHistory.status, 200); assert.equal(roleHistory.body.snapshots.length, 1); assert.equal(roleHistory.body.hasMore, true);
     const earlier = await api("GET", `/members/role-history?id=${groupId}&memberId=${target}&limit=1&before=${roleHistory.body.nextCursor}`);

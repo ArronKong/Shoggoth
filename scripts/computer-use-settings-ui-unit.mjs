@@ -70,7 +70,7 @@ for (const language of ["zh-CN", "en"]) {
     }
     return buttons().find(node => node.children.join("") === translator.t(`settings.computerUse.${key}`));
   };
-  assert.equal(renderer.root.findAllByType("small").some(node => node.children.join("") === translator.t("settings.computerUse.sessionLifetime")), true);
+  assert.equal(renderer.root.findAllByType("details").length, 0, "session details stay hidden even with active sessions");
   assert.equal(JSON.stringify(renderer.toJSON()).includes("Invalid Date"), false);
   const permissions = () => renderer.root.findAll(node => !!node.props["data-permission"]);
   assert.deepEqual(permissions().map(node => node.props["data-state"]), ["false", "false"]);

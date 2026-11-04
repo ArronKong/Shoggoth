@@ -13,6 +13,7 @@ const { validAttachments, attachmentFields } = require("./inspiration-media");
 
 const { prepareChatAttachments, chatAttachmentDirectory, attachmentPrompt } = require("./chat-attachments");
 const { canUseOriginal, prepareForSend, projectTextOrOriginal } = require("../core/chat-secret-fallback");
+const { setChatSendDiagnosticPhase } = require("./chat-send-diagnostics");
 const { createRunEventStream } = require("./run-event-stream");
 const { createMemoryModelTextStream } = require("./memory-model-text-stream");
 const { domainOperationId, domainThreadSource } = require("./domain-work-run-executor");
@@ -3654,6 +3655,7 @@ class WorkRunCoordinator {
   }
 
   async #send(input) {
+    setChatSendDiagnosticPhase("send_validation");
     this.#assertOpen();
     this.#assertInboxAvailable();
     if (this.contextHandoffs.has(input?.sessionKey) || this.sessionBindingReconciliations.has(input?.sessionKey)) {
@@ -3705,6 +3707,7 @@ class WorkRunCoordinator {
     const terminalReplay = Boolean(existingCommand && run
       && !ACTIVE_COMMAND_STATES.has(existingCommand.state));
     // Existing admitted operations retain their original fingerprints.
+    setChatSendDiagnosticPhase("secret_preparation");
     if (this.temporarySecrets && (!existingCommand && !run || this.temporarySecrets.hasPreparation(
       { profileId: session.profileId, sessionId: session.sessionKey }, input.operationId))) {
       try {
@@ -3713,14 +3716,17 @@ class WorkRunCoordinator {
         input = { ...input, prompt: prepared.text };
       } catch (error) { error.admissionAccepted = false; throw error; }
     }
+    setChatSendDiagnosticPhase("send_validation");
     let resolvedSelection = [];
     if (!sendableSession(session) && !terminalReplay) {
       throw coordinatorError("CHAT_SESSION_NOT_READY", `ChatSession 当前不可发送: ${session.status}`);
     }
     if (!existingCommand && !run) {
       try {
+        setChatSendDiagnosticPhase("ui_validation");
         this.validateUiAction(input);
         await this.beforeSessionSend(input);
+        setChatSendDiagnosticPhase("send_validation");
       } catch (error) {
         // This request has not reached inbox.enqueue. A preparation failure is
         // a definite rejection only while the same Service generation can still
@@ -3734,6 +3740,7 @@ class WorkRunCoordinator {
         } catch { /* unavailable durable state leaves the receipt uncertain */ }
         if (rejected) {
           const failure = coordinatorError(error?.code || "WORK_RUN_SEND_FAILED", error?.message || "发送准备失败");
+          Object.defineProperty(failure, "cause", { value: error });
           failure.admissionAccepted = false;
           throw failure;
         }
@@ -3746,10 +3753,12 @@ class WorkRunCoordinator {
       if (this.contextHandoffs.has(input.sessionKey)) throw coordinatorError("SESSION_BUSY", "正在准备会话上下文");
 
     }
+    setChatSendDiagnosticPhase("run_input");
     const runId = existingCommand?.runId || run?.id || this.randomUUID();
     const uiSource = terminalReplay ? previousUiSource(this.transcriptStore, session, input.operationId) : this.validateUiAction(input);
     const createdAt = existingCommand?.createdAt ?? this.now();
     const runInput = run ? null : this.#runInput(runId, input.operationId, session);
+    setChatSendDiagnosticPhase("command_enqueue");
     const command = await this.inbox.enqueue({
       operationId: input.operationId,
       runId,
@@ -3759,6 +3768,7 @@ class WorkRunCoordinator {
       ...(connectorSelection ? { connectorSelection } : {}),
       createdAt,
     });
+    setChatSendDiagnosticPhase("run_enqueue");
     if (!run) run = this.dispatcher.enqueue(runInput);
     this.#streamFor(run.id);
     if (run.id !== runId) {
@@ -3774,6 +3784,7 @@ class WorkRunCoordinator {
         `operation ${input.operationId} 与 chat WorkRun 身份不一致`,
       );
     }
+    setChatSendDiagnosticPhase("transcript_append");
     const userEventId = transcriptEventId("chat-user", input.operationId);
     const previousUser = existingCommand && this.transcriptStore?.listEvents?.(session.profileId, session.id)
       .find(event => event.id === userEventId);
@@ -3796,6 +3807,7 @@ class WorkRunCoordinator {
       return { disposition: "completed", reason: null, run };
     }
 
+    setChatSendDiagnosticPhase("runtime_admission");
     if (this.getNativeRuntimeConfig()?.flags?.runtimeAdmissionV1) {
       await this.#drainQueuedRuns(this.lifecycleGeneration);
       run = this.dispatcher.getRun(run.id);

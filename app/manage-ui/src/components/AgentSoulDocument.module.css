@@ -1,0 +1,5 @@
+.text { white-space: normal; font-size: 14px; font-weight: 300; line-height: 20px; overflow-wrap: anywhere; }
+.text :is(h1, h2, h3, h4) { margin: 16px 0 8px; font-size: 15px; line-height: 1.5; }
+.text > :first-child { margin-top: 0; }
+.text > :last-child { margin-bottom: 0; }
+.empty { margin: 6px 0 14px; color: var(--muted-fg); font-size: 12px; line-height: 20px; }

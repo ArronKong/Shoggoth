@@ -155,7 +155,9 @@
 .connector .title > span { display: inline; }
 .connector .title > span > :first-child { position: absolute; left: 0; top: 0; width: 48px; height: 48px; }
 .connector .subtitle { font-size: 13px; line-height: 1.65; margin: 5px 0 0; color: var(--ui-text-2); word-break: normal; overflow-wrap: anywhere; }
-.connector .close { margin: 0; border-radius: 8px; }
+.connector .close { margin: 0; }
+.connector :is(button, input:not([type="checkbox"]):not([type="radio"]), select):where(:not(:global(.btn-primary), :global(.btn-secondary), :global(.btn-dark), :global(.btn-subtle), :global(.btn-danger))) { border-radius: 999px; }
+.panel.connector textarea { border-radius: 24px; }
 .connector .body { margin: 0; padding: 0 28px; min-height: 0; overscroll-behavior: contain; }
 .connector .foot { margin: 0; padding: 17px 28px; border-top: 1px solid var(--ui-hairline); justify-content: space-between; }
 @media (max-width: 480px) {

@@ -10,6 +10,95 @@ const { validateChatServiceResult, mapChatServiceError } = require("../app/agent
 const { fixture, until } = require("./fixtures/inspiration-coordinator-fixture.cjs");
 const id = () => crypto.randomUUID();
 
+test('OpenClaw 完成后切到原生 Agent，携带便签历史并启动独立 WorkRun', async (t) => {
+  const f = await fixture(t);
+  const idea = await f.create('原始便签约束：只写文字。');
+  const outside = f.store.prepareExternalExecution({
+    id: idea.id, expectedRevision: idea.revision, operationId: id(), instruction: '上一轮补充：保留三个选项',
+    agentId: 'main', backendId: 'openclaw', workspace: null,
+  }, () => true);
+  const hostId = id();
+  const sessionKey = 'agent:main:inspiration:external-handoff';
+  f.store.bindExternalSession(outside.id, { hostId, binding: { sessionKey, workspace: f.root, mode: 'openclaw' } });
+  f.store.markExternalDispatched(outside.id);
+  f.store.updateExternalSnapshot(outside.id, { hostId, snapshot: {
+    executionId: outside.id, runId: outside.runId, backendId: 'openclaw', agentId: 'main',
+    sessionKey, workspace: f.root, mode: 'openclaw', status: 'completed', sequence: 1,
+    resultSummary: '上一轮完整成果：选项甲、选项乙、选项丙。', errorCode: null, finishedAt: Date.now(), attention: null,
+  } });
+  const other = await f.create('不相关便签的私有内容');
+  const unrelated = await f.running(await f.start(other));
+  f.host.complete(unrelated, '不相关便签的成果');
+  await until(() => f.dispatcher.getRun(unrelated.id).status === 'completed');
+
+  const turnStart = f.host.turnStart.bind(f.host);
+  let delivered;
+  f.host.turnStart = params => { delivered = JSON.stringify(params); return turnStart(params); };
+  const continued = await f.start(f.service.view(idea.id), '本轮补充：比较这三个选项');
+  const run = await f.running(continued);
+  assert.equal(f.dispatcher.getRun(outside.runId), null);
+  assert.equal(run.retryOf, null);
+  assert.equal(continued.latestExecution.retryOf, outside.runId, 'the note keeps its cross-backend round history');
+  assert.notEqual(continued.latestExecution.sessionKey, sessionKey);
+  for (const text of ['原始便签约束', '上一轮补充', '上一轮完整成果', '本轮补充']) assert.ok(delivered.includes(text), text);
+  assert.ok(!delivered.includes('不相关便签'));
+  const binding = await f.call('activity.binding', { id: idea.id, runId: run.id });
+  f.host.complete(run, '原生 Agent 已完成对比。');
+  await until(() => f.dispatcher.getRun(run.id).status === 'completed');
+  await f.restart();
+  assert.equal((await f.call('activity.binding', { id: idea.id, runId: run.id })).prompt, binding.prompt);
+  assert.equal((await f.call('executions', { id: idea.id, cursor: null, limit: 20 })).executions.length, 2);
+});
+
+test('Hermes 失败及旧版跨后端准备失败后，原生新一轮接收历史且不重放失败执行', async (t) => {
+  const f = await fixture(t);
+  const idea = await f.create('交接约束：保留前轮方案，只做文字比较。');
+  const saveExternal = (backendId, agentId, status, instruction, resultSummary, errorCode) => {
+    const current = f.store.get(idea.id);
+    const execution = f.store.prepareExternalExecution({ id: idea.id, expectedRevision: current.revision,
+      operationId: id(), instruction, agentId, backendId, workspace: null }, () => true);
+    const hostId = id(), sessionKey = `agent:${agentId}:inspiration:${id()}`;
+    const mode = backendId === 'openclaw' ? 'openclaw' : 'gateway';
+    f.store.bindExternalSession(execution.id, { hostId, binding: { sessionKey, workspace: f.root, mode } });
+    f.store.markExternalDispatched(execution.id);
+    f.store.updateExternalSnapshot(execution.id, { hostId, snapshot: {
+      executionId: execution.id, runId: execution.runId, backendId, agentId, sessionKey,
+      workspace: f.root, mode, status, sequence: 1, resultSummary, errorCode, finishedAt: Date.now(), attention: null,
+    } });
+    return execution;
+  };
+  saveExternal('openclaw', 'main', 'completed', '先保留方案甲和乙。', '前轮成果：甲成本低，乙交付快。', null);
+  const failed = saveExternal('hermes', 'hermes-bull', 'failed', '比较两套方案。', null, 'HERMES_EXECUTION_FAILED');
+  const legacy = f.store.prepareExecution({ id: idea.id, expectedRevision: f.store.get(idea.id).revision,
+    operationId: id(), instruction: '切换原生助理继续。', agentId: f.profile.agentId,
+    backendId: f.profile.backendId, profileId: f.profile.id, workspace: f.root }, () => true);
+  f.store.failPreparation(legacy.id, 'UNKNOWN_RETRY_WORK_RUN');
+  const oldRecords = f.store.executions(idea.id);
+  await f.restart();
+  assert.equal(f.host.turnStarts, 0, 'reopening must not replay external or preparation failures');
+
+  const turnStart = f.host.turnStart.bind(f.host);
+  let delivered;
+  f.host.turnStart = params => { delivered = JSON.stringify(params); return turnStart(params); };
+  const before = f.service.view(idea.id), operationId = id();
+  const continued = await f.start(before, '本轮只给出最终建议。', operationId);
+  assert.equal(continued.latestExecution.errorCode, null);
+  const run = await f.running(continued);
+  assert.equal(run.retryOf, null, 'the external predecessor is not a native WorkRun');
+  assert.equal(continued.latestExecution.retryOf, failed.runId, 'the note retains its external predecessor');
+  for (const text of ['交接约束', '先保留方案甲和乙', '前轮成果', '比较两套方案',
+    '切换原生助理继续', 'UNKNOWN_RETRY_WORK_RUN', '本轮只给出最终建议']) assert.ok(delivered.includes(text), text);
+  f.host.complete(run, '综合成本与交期，建议方案甲。');
+  await until(() => f.dispatcher.getRun(run.id).status === 'completed');
+  const frozenPrompt = (await f.call('activity.binding', { id: idea.id, runId: run.id })).prompt;
+  await f.restart();
+  const replay = await f.start(before, '本轮只给出最终建议。', operationId);
+  assert.equal(replay.latestExecution.runId, run.id);
+  assert.equal(f.host.turnStarts, 1, 'an operation receipt never dispatches a second turn');
+  assert.equal((await f.call('activity.binding', { id: idea.id, runId: run.id })).prompt, frozenPrompt);
+  assert.deepEqual(f.store.executions(idea.id).filter(row => row.id !== continued.latestExecution.id), oldRecords);
+});
+
 test('灵感聊天额度耗尽立即落为可见失败，历史保留且恢复后不会重放旧消息', async (t) => {
   const f = await fixture(t, { accountAdmission: true });
   const idea = await f.start(await f.create('中国科技新闻'));
@@ -39,6 +128,20 @@ test('灵感聊天额度耗尽立即落为可见失败，历史保留且恢复�
   await f.restart();
   assert.equal(f.dispatcher.getRun(ack.run.id).status, 'failed');
   assert.equal(f.host.turnStarts, 1);
+});
+
+test('当前轮未结束时从会话发送被明确拒绝，标记为未受理且不留下执行记录', async (t) => {
+  const f = await fixture(t);
+  const idea = await f.start(await f.create('咖啡记录工具'));
+  const run = await f.running(idea);
+  const input = { sessionKey: idea.latestExecution.sessionKey, operationId: id(), prompt: '拿铁' };
+  assert.throws(() => f.service.sendFromSession(input), error => error.code === 'INSPIRATION_BUSY' && error.admissionAccepted === false);
+  assert.equal(f.store.executionForOperation(input.operationId), null, 'a rejected send leaves no execution behind');
+  f.host.complete(run, '本轮完成');
+  await until(() => f.dispatcher.getRun(run.id).status === 'completed');
+  const ack = f.service.sendFromSession({ ...input, operationId: id() });
+  validateChatServiceResult('chat.send', ack);
+  assert.equal(ack.run.source, 'inspiration', 'once the round ends the same Session starts the next one');
 });
 
 test('Agent 次数按完整执行历史统计，重放不重复计数，重试和删除后的历史仍保留', async (t) => {
@@ -173,7 +276,7 @@ test('正在执行和尚未准入的灵感不可删除，结束后删除保留 S
   const history = f.transcript.listEvents(run.profileId, session.id);
   await f.call('delete', { id: idea.id, operationId: id(), expectedRevision: idea.revision });
   await assert.rejects(f.start(original, '', operationId), { code: 'INSPIRATION_NOT_FOUND' });
-  assert.throws(() => f.service.sendFromSession({ sessionKey: session.sessionKey, operationId: id(), prompt: '不能复活已删除灵感' }), { code: 'INSPIRATION_NOT_FOUND' });
+  assert.throws(() => f.service.sendFromSession({ sessionKey: session.sessionKey, operationId: id(), prompt: '不能复活已删除灵感' }), { code: 'INSPIRATION_NOT_FOUND', admissionAccepted: false });
   await f.restart();
   assert.deepEqual(f.transcript.listEvents(run.profileId, session.id), history);
   assert.equal(f.sessions.getSession(session.sessionKey).id, session.id);

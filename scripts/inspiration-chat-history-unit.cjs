@@ -13,6 +13,18 @@ const { inspirationUserText, inspirationPromptHash, projectInspirationHistory } 
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { fixture, until } = require("./fixtures/inspiration-coordinator-fixture.cjs");
 
+test("handoff preserves the current task and stays inside the encoded prompt budget", () => {
+  const { MAX_EXTERNAL_PROMPT_BYTES } = require("../app/external-inspiration-protocol");
+  const body = "原始要求：" + "甲".repeat(4500);
+  const instruction = "本轮补充：" + "乙".repeat(4500);
+  const prompt = inspirationPrompt({ body, instruction, handoffContext: "最近成果：" + '"\\中文'.repeat(12000) });
+  assert.ok(Buffer.byteLength(JSON.stringify(prompt), "utf8") <= MAX_EXTERNAL_PROMPT_BYTES);
+  assert.ok(prompt.includes(body) && prompt.includes(instruction));
+  assert.match(prompt, /最近成果/);
+  assert.match(prompt, /Some earlier context was omitted/);
+  assert.ok(prompt.isWellFormed());
+});
+
 test("display changes only exact user prompts, preserving source history, attachments and ordinary messages", () => {
   const attachment = { id: id(), name: "参考.png", mimeType: "image/png", size: 100 };
   const execution = { title: "灵感标题", body: "rsi 是什么\n\nAdditional user instructions for this turn:\n这也是原文", instruction: "举一个例子", attachments: [attachment] };

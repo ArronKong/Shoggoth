@@ -9,7 +9,7 @@ const { parseReplyHeader } = require("./group-reply-format");
 const { openDatabase, transaction } = require("./inspiration-database");
 const { preparePrivateParent, fsyncPrivateParent } = require("./private-file");
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
-const { fail, MAX_GROUP_MEMBERS, MIN_GROUP_MEMBERS_ON_CREATE } = require("./group-chat-protocol");
+const { fail, MAX_GROUP_MEMBERS, MIN_GROUP_MEMBERS, MIN_GROUP_MEMBERS_ON_CREATE } = require("./group-chat-protocol");
 const { GROUP_TURN_OPERATION_PREFIX } = require("./group-chat-run");
 const { isPassReply, parseMentions, uniqueHandle } = require("./group-mentions");
 const { parseGrantToken, sameDigest } = require("./group-tool-grant");
@@ -923,6 +923,7 @@ class GroupChatStore {
       if (group.rosterRevision !== expectedRosterRevision) fail("GROUP_CHAT_REVISION_CONFLICT");
       const member = this.#member(memberId);
       if (!member || member.groupId !== groupId || member.state !== "active") fail("GROUP_CHAT_MEMBER_NOT_FOUND");
+      if (this.#members(groupId).filter(item => item.state === "active").length <= MIN_GROUP_MEMBERS) fail("GROUP_CHAT_MEMBER_LIMIT");
       const aborts = this.#stopMemberTurns(groupId, memberId, "GROUP_MEMBER_REMOVED");
       Object.assign(member, { state: "removed", leftSeq: group.lastSeq });
       this.#putMember(member);
@@ -1229,10 +1230,11 @@ class GroupChatStore {
 
   listRoleSnapshots({ groupId, memberId, before = null, limit = 20 }) {
     this.#ready();
-    const cursor = before ? this.db.prepare("SELECT rowid FROM role_snapshots WHERE group_id=? AND member_id=? AND id=?")
+    const cursor = before ? this.db.prepare("SELECT rowid FROM role_snapshots WHERE group_id=? AND member_id=? AND id=? AND json_extract(data,'$.document') IS NULL")
       .get(groupId, memberId, before)?.rowid : null;
     if (before && !cursor) return { snapshots: [], hasMore: false, nextCursor: null };
     const rows = this.db.prepare(`SELECT data FROM role_snapshots WHERE group_id=? AND member_id=?
+      AND json_extract(data,'$.document') IS NULL
       AND (? IS NULL OR rowid<?) ORDER BY rowid DESC LIMIT ?`).all(groupId, memberId, cursor, cursor, limit + 1);
     const snapshots = rows.slice(0, limit).map(parse);
     return { snapshots, hasMore: rows.length > limit, nextCursor: rows.length > limit ? snapshots.at(-1).id : null };

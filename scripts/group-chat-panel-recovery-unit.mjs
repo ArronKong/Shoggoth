@@ -81,7 +81,7 @@ async function harness(t, detail, messages = id => page(id), options = {}) {
       if (name.endsWith('/lib/groupTimeline')) return importModule('src/lib/groupTimeline.ts');
       if (name.endsWith('/lib/groupMessagePresentation')) return importModule('src/lib/groupMessagePresentation.ts');
       if (name.endsWith('/i18n/groupCollaborationResources') || name.endsWith('/i18n/groupComposerResources')) return {};
-      if (name.endsWith('/lib/groupChat')) return { GROUP_MAX_MEMBERS: 32,
+      if (name.endsWith('/lib/groupChat')) return { GROUP_MIN_MEMBERS: 2, GROUP_MAX_MEMBERS: 32,
         onGroupChanged: fn => { groupChanged.add(fn); return () => groupChanged.delete(fn); } };
       if (name.endsWith('/components/ui')) return { useToast: () => ({ error() {} }), useConfirm: () => async () => false, usePrompt: () => async () => null };
       if (name.endsWith('.css')) return new Proxy({}, { get: (_target, key) => key === '__esModule' ? undefined : String(key) });

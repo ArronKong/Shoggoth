@@ -246,8 +246,8 @@ body {
    数据本来就没变化时页面一动不动，这段动画是「确实刷了」唯一的可见证据。
 
    只有设置仍是整体旋转的 `<img>`（齿轮转动，语义天然贴合）——选择器必须钉在
-   `img.nav-icon` 上，否则内联 SVG 的图标会连壳一起转，压掉自己的专属动画。其余 9 个
-   是内联 SVG（components/NavIcons.tsx），每个按自身图形做局部动画；灵感的导出 SVG
+   `img.nav-icon` 上，否则内联 SVG 的图标会连壳一起转，压掉自己的专属动画。其余需要
+   局部动画的图标是内联 SVG（components/NavIcons.tsx）；灵感的导出 SVG
    放在容器内，只让种子舒展回摆，不命中齿轮的整体旋转。
 
    ★ 不跳跃的两条硬规则（R373 用户要求，改动画时必须一起守住）★
@@ -398,6 +398,27 @@ body {
 .nav-link.is-refreshing .ni-star--a { animation-name: ni-twinkle-a; }
 .nav-link.is-refreshing .ni-star--b { animation-name: ni-twinkle-b; }
 
+/* 连接器：中心呼吸，四个端口顺时针依次响应。相位写进关键帧，
+   与导航共用 1.2s 周期，首尾都回到原尺寸和完全不透明的静止态。 */
+@keyframes ni-hub-core {
+  0%, 75%, 100% { transform: scale(1); }
+  38%           { transform: scale(1.12); }
+}
+@keyframes ni-hub-port-top { 0%, 38%, 100% { opacity: 1; } 19% { opacity: 0.25; } }
+@keyframes ni-hub-port-right { 0%, 16%, 54%, 100% { opacity: 1; } 35% { opacity: 0.25; } }
+@keyframes ni-hub-port-bottom { 0%, 32%, 70%, 100% { opacity: 1; } 51% { opacity: 0.25; } }
+@keyframes ni-hub-port-left { 0%, 48%, 86%, 100% { opacity: 1; } 67% { opacity: 0.25; } }
+.nav-link.is-refreshing :is(.ni-hub-core, .ni-hub-port) {
+  animation-duration: 1.2s;
+  animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
+  animation-iteration-count: infinite;
+}
+.nav-link.is-refreshing .ni-hub-core { animation-name: ni-hub-core; transform-origin: 20px 20px; }
+.nav-link.is-refreshing .ni-hub-port--top { animation-name: ni-hub-port-top; }
+.nav-link.is-refreshing .ni-hub-port--right { animation-name: ni-hub-port-right; }
+.nav-link.is-refreshing .ni-hub-port--bottom { animation-name: ni-hub-port-bottom; }
+.nav-link.is-refreshing .ni-hub-port--left { animation-name: ni-hub-port-left; }
+
 /* CLI：提示符 `>` 像光标一样闪；后面那行先清掉、再像敲字一样打回来。首尾都是打满
    的静止态（规则 ②），所以停下时那一行是完整的、不会凭空缺一截。 */
 @keyframes ni-caret { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
@@ -413,7 +434,7 @@ body {
   .nav-link.is-refreshing :is(
     img.nav-icon, .ni-card, .ni-dot, .ni-minute, .ni-hour, .ni-check, .ni-eye,
     .ni-antenna, .ni-bulb, .ni-symbol, .ni-pin, .ni-chip, .ni-core, .ni-star,
-    .ni-caret, .ni-typeline, .ni-seed
+    .ni-caret, .ni-typeline, .ni-seed, .ni-hub-core, .ni-hub-port
   ) { animation: none; }
   .nav-link.is-refreshing .nav-icon { opacity: 0.55; }
 }
@@ -2341,7 +2362,8 @@ button:disabled {
 /* 聚焦态（设计稿 7112:1834）：**只把描边换成纯黑**，不加外环、不加粗。
    单行与多行同口径——R316 当时给 textarea 留的半透明蓝外环到此取消。 */
 .field-input:focus-visible,
-.field-textarea:focus-visible {
+.field-textarea:focus-visible,
+[data-modal-variant="connector"] :is(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus-visible {
   outline: none;
   border-color: light-dark(#000000, #ffffff);
   box-shadow: none;
@@ -3125,9 +3147,12 @@ button:disabled {
   vector-effect: non-scaling-stroke;
   stroke-width: 1.2;
 }
-/* 导航图标的圆点（聊天三点、代理双眼）是靠 2 倍粗描边 + 圆头画出来的零长度路径，
-   保持 2 倍关系，否则加粗后点会相对变小。特异性 (0,2,0) 高过上面的 (0,1,0)，压得住。 */
-.nav-icon .ni-dot,
+/* 代理双眼保留现有描边设置。 */
 .nav-icon .ni-eye {
   stroke-width: 2.4;
+}
+/* 聊天三点独立设为 2px。上方 :is(...) + :not(...) 的特异性是 (0,2,1)，
+   这里用 (0,3,1) 确保设定值真正生效，同时不改变气泡轮廓和其他图标。 */
+svg.nav-icon:not([data-trajectory-icon]) .ni-dot {
+  stroke-width: 2;
 }

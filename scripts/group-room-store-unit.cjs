@@ -33,6 +33,35 @@ function fixture(t, names = ["Chief", "写手", "程序员"]) {
   return { store, groupId, view, memberId, fence, send, claim, run, finish, bodies, tick: (ms) => { clock += ms; } };
 }
 
+test("member removal retains two active members and stale revisions cannot bypass the minimum", t => {
+  const f = fixture(t), revision = f.view().group.rosterRevision;
+  f.store.removeMember({ groupId: f.groupId, memberId: f.memberId("程序员"), expectedRosterRevision: revision });
+  assert.equal(f.view().members.filter(member => member.state === "active").length, 2);
+  assert.equal(f.view().group.rosterRevision, revision + 1);
+  const before = f.view(), messages = f.bodies();
+  assert.throws(() => f.store.removeMember({ groupId: f.groupId, memberId: f.memberId("写手"), expectedRosterRevision: revision }),
+    { code: "GROUP_CHAT_REVISION_CONFLICT" });
+  assert.throws(() => f.store.removeMember({ groupId: f.groupId, memberId: f.memberId("写手"), expectedRosterRevision: revision + 1 }),
+    { code: "GROUP_CHAT_MEMBER_LIMIT" });
+  assert.deepEqual(f.view(), before);
+  assert.deepEqual(f.bodies(), messages, "refusal does not append a member-removed notice");
+  f.store.close(); f.store.open();
+  assert.deepEqual(f.view(), before, "only the successful three-to-two removal is persisted");
+});
+
+test("refusing removal from a two-member group leaves the owner's running turn untouched", t => {
+  const f = fixture(t, ["Chief", "写手"]);
+  f.send("继续当前工作"); const turn = f.claim(); f.run(turn);
+  const before = f.view(), opportunity = f.store.getOpportunity(turn.opportunity.id), messages = f.bodies();
+  assert.throws(() => f.store.removeMember({ groupId: f.groupId, memberId: turn.member.id,
+    expectedRosterRevision: before.group.rosterRevision }), { code: "GROUP_CHAT_MEMBER_LIMIT" });
+  assert.deepEqual(f.view(), before, "owner, revision, membership and active turn stay unchanged");
+  assert.deepEqual(f.store.getOpportunity(turn.opportunity.id), opportunity, "refusal does not stop the member's execution");
+  assert.deepEqual(f.bodies(), messages);
+  f.finish(turn, "工作已完成");
+  assert.equal(f.bodies().at(-1), "Chief: 工作已完成");
+});
+
 test("a plain message goes to the owner alone; members speak one at a time", (t) => {
   const f = fixture(t);
   assert.equal(f.view().group.ownerMemberId, f.memberId("Chief"), "first member owns the group without built-in Shoggoth");

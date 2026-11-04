@@ -5,7 +5,7 @@ import inspirationIcon from "../assets/nav-icons/inspiration.svg";
 //
 // 为什么不继续用 `<img src="…svg">`：刷新反馈要做成**每个图标自己的加载动画**
 // （总览的卡片高低起伏、聊天的三点、看板的勾生长…），这些都得给 SVG 内部节点挂
-// class + keyframes——外部 CSS 进不到 `<img>` 引用的隔离文档里。需要专属动画的这 9 个
+// class + keyframes——外部 CSS 进不到 `<img>` 引用的隔离文档里。需要局部动画的图标
 // 内联；灵感直接用 Figma 导出的种子 SVG，在固定容器里做舒展回摆。设置仍走 `<img>`
 // （整张图旋转就够，见 styles.css 里 `img.nav-icon`），玻璃/组件没有刷新登记，保持静止。
 //
@@ -16,10 +16,8 @@ import inspirationIcon from "../assets/nav-icons/inspiration.svg";
 // 描边粗细（R374）：1 → **1.2**，用户在三档对比页（1 / 1.5 / 2）里定的——1 在真机上偏
 // 细，尤其深色下反相把描边压到 ~#d4d4d8、对比度还要再低一档。**只动了这一个参数**，
 // 图形尺寸/路径/留白全未变。
-// 圆点类元素（聊天三点、代理双眼）是 stroke-width 2 倍的圆头零长度路径，必须跟着等比
-// 到 2.4，否则加粗后点会相对变小、比例失调。
-// assets/nav-icons/*.svg 里 12 个源文件也同步到了 1.2/2.4——那些只服务仍是 `<img>` 的
-// 图标，但保持一致才不会让人误以为实际渲染是 1。
+// 圆点用圆头零长度路径；聊天三点单独设为 2px，并在 styles.css 中保留专属描边，
+// 避免被全站 1.2px 图标归一规则覆盖。静态 SVG 源文件同步保持相同的图形。
 const STROKE = {
   stroke: "var(--stroke-0, black)",
   strokeWidth: 1.2,
@@ -28,6 +26,7 @@ const STROKE = {
 };
 /** 圆点类元素的描边：基础的 2 倍，与源文件的 stroke-width="2.4" 对齐。 */
 const DOT_STROKE = 2.4;
+const CHAT_DOT_STROKE = 2;
 
 type IconProps = { className?: string };
 
@@ -64,9 +63,9 @@ export function ChatIcon({ className }: IconProps) {
   return (
     <Frame className={className}>
       <path d="M12 19C12 15.6863 14.6863 13 18 13H22C25.3137 13 28 15.6863 28 19V21C28 24.3137 25.3137 27 22 27H12V19Z" />
-      <path className="ni-dot ni-dot--1" d="M16 20H16.01" strokeWidth={DOT_STROKE} />
-      <path className="ni-dot ni-dot--2" d="M20 20H20.01" strokeWidth={DOT_STROKE} />
-      <path className="ni-dot ni-dot--3" d="M24 20H24.01" strokeWidth={DOT_STROKE} />
+      <path className="ni-dot ni-dot--1" d="M16 20H16.01" strokeWidth={CHAT_DOT_STROKE} />
+      <path className="ni-dot ni-dot--2" d="M20 20H20.01" strokeWidth={CHAT_DOT_STROKE} />
+      <path className="ni-dot ni-dot--3" d="M24 20H24.01" strokeWidth={CHAT_DOT_STROKE} />
     </Frame>
   );
 }
@@ -176,6 +175,20 @@ function SkillsIcon({ className }: IconProps) {
   );
 }
 
+// 连接器：四向枢纽，中心轻轻呼吸，四个端口依次响应。
+function ConnectorsIcon({ className }: IconProps) {
+  return (
+    <Frame className={className}>
+      <path d="M20 17V13M23 20H27M20 23V27M17 20H13" />
+      <rect className="ni-hub-core" x="17" y="17" width="6" height="6" rx="2" />
+      <circle className="ni-hub-port ni-hub-port--top" cx="20" cy="11" r="2" />
+      <circle className="ni-hub-port ni-hub-port--right" cx="29" cy="20" r="2" />
+      <circle className="ni-hub-port ni-hub-port--bottom" cx="20" cy="29" r="2" />
+      <circle className="ni-hub-port ni-hub-port--left" cx="11" cy="20" r="2" />
+    </Frame>
+  );
+}
+
 // CLI：终端框不动，提示符 `>` 闪烁 + 后面那行像敲字一样打出来再清掉。
 function CliIcon({ className }: IconProps) {
   return (
@@ -198,5 +211,6 @@ export const NAV_ICON_COMPONENTS: Record<string, (p: IconProps) => ReactNode> = 
   "/token": TokenIcon,
   "/models": ModelsIcon,
   "/skills": SkillsIcon,
+  "/connectors": ConnectorsIcon,
   "/cli": CliIcon,
 };

@@ -53,8 +53,8 @@ export function useLarkCliSetupView({ model, revision, enabled = true }: { model
     {data?.warning && <p role="status" className={s.notice}>{t("larkCli.missingScopes")}</p>}
     {!ready && data && !data.configured && !model.active && <>
       <div className={s.modeTabs} role="group" aria-label={t("larkCli.configMode")}>
-        <button type="button" className={mode === "auto" ? s.primary : s.button} disabled={disabled} aria-pressed={mode === "auto"} onClick={() => setMode("auto")}>{t("larkCli.createApp")}</button>
-        <button type="button" className={mode === "existing" ? s.primary : s.button} disabled={disabled} aria-pressed={mode === "existing"} onClick={() => setMode("existing")}>{t("larkCli.existingApp")}</button>
+        <button type="button" className={mode === "auto" ? "btn-dark btn-sm" : "btn-secondary btn-sm"} disabled={disabled} aria-pressed={mode === "auto"} onClick={() => setMode("auto")}>{t("larkCli.createApp")}</button>
+        <button type="button" className={mode === "existing" ? "btn-dark btn-sm" : "btn-secondary btn-sm"} disabled={disabled} aria-pressed={mode === "existing"} onClick={() => setMode("existing")}>{t("larkCli.existingApp")}</button>
       </div>
       <div className={s.fields}>
         <label className={s.field}>{t("larkCli.brand")}<select value={brand} disabled={disabled} onChange={event => setBrand(event.target.value as "feishu" | "lark")}><option value="feishu">{t("larkCli.name")}</option><option value="lark">Lark</option></select></label>
@@ -68,7 +68,7 @@ export function useLarkCliSetupView({ model, revision, enabled = true }: { model
     {model.active && data?.verificationUrl && <div className={s.authorization}>
       {data.qrCode && <img src={data.qrCode} alt={t("larkCli.qrAlt")} width={184} height={184} />}
       <div><p>{t("larkCli.scanHint")}</p>
-        <a className={s.button} href={data.verificationUrl} target="_blank" rel="noreferrer">{t("larkCli.openAuthorization")}</a>
+        <a className="btn-secondary btn-sm" href={data.verificationUrl} target="_blank" rel="noreferrer">{t("larkCli.openAuthorization")}</a>
         {data.userCode && <p className={s.muted}>{t("larkCli.userCode")} <strong>{data.userCode}</strong></p>}
         <p className={s.muted}>{t("larkCli.autoContinue")}</p>
       </div>
@@ -76,10 +76,10 @@ export function useLarkCliSetupView({ model, revision, enabled = true }: { model
 
   </section>;
   const actions = <div className={s.actions}>
-      {ready && <button type="button" className={s.button} disabled={disabled} onClick={start}>{t("larkCli.reauthorize")}</button>}
-      {!ready && !model.active && <button type="button" className={s.primary} disabled={disabled || !data || Boolean(model.error) || !data.configured && mode === "existing" && (!appId.trim() || !appSecret.trim())} onClick={start}>{model.working ? t("larkCli.authStages.starting") : t(data?.configured ? "larkCli.signIn" : "larkCli.connect")}</button>}
-      {model.active && <button type="button" className={s.button} disabled={model.working} onClick={() => void model.cancel()}>{t("larkCli.cancelSetup")}</button>}
-      {!model.active && <button type="button" className={s.button} disabled={model.working} onClick={() => void model.refresh()}>{t("larkCli.checkAuth")}</button>}
+      {ready && <button type="button" className="btn-secondary btn-sm" disabled={disabled} onClick={start}>{t("larkCli.reauthorize")}</button>}
+      {!ready && !model.active && <button type="button" className="btn-dark btn-sm" disabled={disabled || !data || Boolean(model.error) || !data.configured && mode === "existing" && (!appId.trim() || !appSecret.trim())} onClick={start}>{model.working ? t("larkCli.authStages.starting") : t(data?.configured ? "larkCli.signIn" : "larkCli.connect")}</button>}
+      {model.active && <button type="button" className="btn-secondary btn-sm" disabled={model.working} onClick={() => void model.cancel()}>{t("larkCli.cancelSetup")}</button>}
+      {!model.active && <button type="button" className="btn-secondary btn-sm" disabled={model.working} onClick={() => void model.refresh()}>{t("larkCli.checkAuth")}</button>}
     </div>;
   return { content, actions };
 }

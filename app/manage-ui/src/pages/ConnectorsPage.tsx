@@ -103,7 +103,7 @@ export default function ConnectorsPage() {
     const content = cardContent(card);
     return <div className={s.service} key={card.id}>
       <button type="button" className={s.serviceOpen} onClick={() => openCard(card)}>{content.icon}<span className={s.serviceText}><strong>{content.name}</strong><small>{content.description}</small></span></button>
-      <button type="button" className={s.button} onClick={() => openCard(card, true)}>{tr("add")}</button>
+      <button type="button" className="btn-secondary btn-sm" onClick={() => openCard(card, true)}>{tr("add")}</button>
     </div>;
   })}</div>;
 
@@ -142,8 +142,8 @@ export default function ConnectorsPage() {
     <section className={s.section}><div className={s.sectionHeading}><h2>{tr("recommended")}</h2></div>{error(recommended.error, () => void recommended.refresh())}{rows}{devices.hasRecommendations && <><div className={s.sectionHeading}><h2>{t("appleDevices.title")}</h2></div><div className={s.catalog}><AppleDeviceRows model={devices} installed={false} /></div></>}{recommended.loading && !recommended.data && <p className={s.muted} role="status">{tr("loading")}</p>}</section>
     </div>
     {unavailableDialog && <Modal open title={<span className={s.dialogIdentity}><McpConnectorIcon name={unavailableName(unavailableDialog)} identity={unavailableDialog.slice(9)} />{unavailableName(unavailableDialog)}</span>} onClose={() => setUnavailableDialog(null)} width={640} variant="connector" footer={<div className={s.flowFooter}><p>{tr("flow.pending")}</p><div className={s.flowFooterActions}>
-        <button type="button" className={s.primary} onClick={() => { void recommended.refresh(); setUnavailableDialog(null); }}>{tr("retry")}</button>
-        <button type="button" className={s.danger} onClick={() => { pending.remove(unavailableDialog); setUnavailableDialog(null); }}>{tr("flow.remove")}</button>
+        <button type="button" className="btn-dark btn-sm" onClick={() => { void recommended.refresh(); setUnavailableDialog(null); }}>{tr("retry")}</button>
+        <button type="button" className="btn-danger btn-sm" onClick={() => { pending.remove(unavailableDialog); setUnavailableDialog(null); }}>{tr("flow.remove")}</button>
       </div></div>}>
       <div className={s.detail}><section className={s.connectionPanel}><p>{tr("flow.unavailableEntry")}</p></section></div>
     </Modal>}

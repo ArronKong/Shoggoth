@@ -141,11 +141,11 @@ try {
   assert.match(markdownSource, /appRoute[\s\S]{0,240}removeAttribute\("target"\)/);
   const linkHandlerSource = fs.readFileSync(path.join(uiRoot, "src/components/LocalFileLinks.tsx"), "utf8");
   assert.match(linkHandlerSource, /a\[data-local-path\]/);
-  assert.match(chatSource, /chat-artifacts-popover/);
-  assert.match(chatSource, /ref=\{sessionArtifactsTriggerRef\}[\s\S]{0,240}chat-artifacts-trigger/);
-  assert.match(chatSource, /const sessionArtifactItems = activeSessionArtifactResult\?\.items \?\? \[\]/);
+  assert.match(chatSource, /chat-artifacts-panel/);
+  assert.match(chatSource, /onClick=\{event => toggleAgentHeaderPanel\("artifacts", event.currentTarget, event.detail === 0\)\}/);
+  assert.match(chatSource, /const agentArtifactItems = activeAgentArtifactResult\?\.items \?\? \[\]/);
   assert.doesNotMatch(chatSource, /extractLocalFilePaths|mergeSessionArtifacts|messageReferenced/);
-  assert.match(chatSource, /chat-artifact-reveal/);
+  assert.match(chatSource, /<ChatFileCard[\s\S]*?revealLocalFile\(artifact\.path\)/);
   assert.match(clientSource, /export async function revealPath[\s\S]*\/__api\/host\/reveal-path/);
 
   const revealCalls = [];

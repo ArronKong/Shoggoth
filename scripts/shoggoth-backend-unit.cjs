@@ -4090,6 +4090,20 @@ test("session mutations preserve the listed derived title beneath manual rename"
   assert.equal(backend.getSessionRows()[0].derivedTitle, derivedTitle);
 });
 
+test("inspiration sessions are titled by the note alone, without a category prefix", async () => {
+  const { backend } = fakeBackend((request) => {
+    if (request.method === "profile.list") return page("profiles", [profile()]);
+    if (request.method === "chat.session.list") {
+      return page("sessions", [session(SESSION_A, { title: null, inspirationId: "11111111-2222-4333-8444-555555555555", inspirationTitle: "阳台小花园" })]);
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  assert.equal(await backend.start(), true);
+  const [row] = backend.getSessionRows();
+  assert.equal(row.derivedTitle, "阳台小花园");
+  assert.equal(row.inspirationId, "11111111-2222-4333-8444-555555555555");
+});
+
 test("history paginates and unwraps only canonical message payloads", async () => {
   const first = { id: "msg-1", role: "user", content: [{ type: "text", text: "hello" }] };
   const second = { id: "msg-2", role: "assistant", content: [{ type: "text", text: "world" }] };
@@ -5887,6 +5901,23 @@ test("chat request failures distinguish archived inspiration and missing login w
   }
 });
 
+test("a busy inspiration rejects the chat send as not admitted instead of an uncertain receipt", async () => {
+  const { backend } = await readyBackend(request => {
+    assert.equal(request.method, "chat.send");
+    throw Object.assign(new Error("这条灵感已有未结束的执行"), { code: "INSPIRATION_BUSY", admissionAccepted: false });
+  });
+  const errors = [];
+  const statuses = [];
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "拿铁", "busy-send", {
+    error: (message, meta) => errors.push({ message, ...meta }),
+    status: value => statuses.push(value.kind),
+  });
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, "INSPIRATION_BUSY");
+  assert.equal(errors[0].admissionAccepted, false, "the Session can restore the message instead of verifying it");
+  assert.equal(statuses.includes("needs_verification"), false);
+});
+
 test("public runtime failures reach both live chat and canonical history", async () => {
   const messages = require("../app/agent-service/product-context-protocol").MESSAGES;
   for (const code of ["PRODUCT_COMPACTION_FAILED", "PRODUCT_COMPACTION_AUTH_REQUIRED",
@@ -6131,6 +6162,26 @@ test("watchSession reconnects to an active run and local cancellation never abor
     prompt: (value) => { prompts.push(value); controller.abort(); },
   }, { signal: controller.signal });
   assert.equal(prompts[0].requestId, "watch-request");
+  assert.equal(methods.includes("chat.abort"), false);
+});
+
+test("opening a waiting inspiration session replays its pending request as a chat prompt card", async () => {
+  const controller = new AbortController();
+  const ideaId = "11111111-2222-4333-8444-555555555555";
+  const waiting = run("waiting_input", { source: "inspiration", sourceId: ideaId, waitingRequestId: "idea-request", eventSeq: 3 });
+  const methods = [];
+  const { backend } = await readyBackend((request) => {
+    methods.push(request.method);
+    if (request.method === "run.list") return page("runs", [waiting]);
+    if (request.method === "run.subscribe") return cursorGapSnapshot(waiting);
+    throw new Error(`unexpected ${request.method}`);
+  }, { sessions: [session(SESSION_A, { inspirationId: ideaId, inspirationTitle: "咖啡记录工具" })] });
+  const prompts = [];
+  await backend.watchSession(`agent:shoggoth-default:${SESSION_A}`, {
+    prompt: (value) => { prompts.push(value); controller.abort(); },
+  }, { signal: controller.signal });
+  assert.equal(prompts[0]?.requestId, "idea-request");
+  assert.equal(prompts[0].fields.length, 1, "the input request keeps its form field");
   assert.equal(methods.includes("chat.abort"), false);
 });
 

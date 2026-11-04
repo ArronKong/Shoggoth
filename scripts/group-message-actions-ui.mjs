@@ -24,7 +24,7 @@ try {
         contents: fs.readFileSync(process.env.GROUP_MESSAGE_ACTIONS_BASELINE_PANEL,"utf8"), loader: "tsx", resolveDir: path.dirname(file),
       }));
     } }] : [] });
-  fs.writeFileSync(path.join(temp,"index.html"),'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Group message actions</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column}.fixture-controls{position:fixed;right:12px;top:12px;z-index:2000;background:var(--ui-surface-1);padding:6px;font-size:12px}</style><div id="root" class="chat-shell"></div><details class="fixture-controls"><summary>隔离验证</summary><button id="run-fixture">运行交互检查</button><p id="fixture-result"></p></details><script type="module" src="fixture.js"></script>');
+  fs.writeFileSync(path.join(temp,"index.html"),'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Group message actions</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column}.fixture-controls{position:fixed;right:12px;top:12px;z-index:2000;background:var(--ui-surface-1);padding:6px;font-size:12px}</style><div id="root" class="chat-shell"></div><details class="fixture-controls"'+(process.argv.includes("--serve") ? '' : ' hidden')+'><summary>隔离验证</summary><button id="run-fixture">运行交互检查</button><p id="fixture-result"></p></details><script type="module" src="fixture.js"></script>');
   if (process.argv.includes("--serve")) {
     server = http.createServer((req,res) => {
       if (new URL(req.url,"http://fixture").pathname.startsWith("/avatar/")) {

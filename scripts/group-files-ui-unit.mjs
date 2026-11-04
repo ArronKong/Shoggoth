@@ -25,7 +25,8 @@ const code = ts.transpileModule(fs.readFileSync(path.join(ui, relative), 'utf8')
 vm.runInNewContext(code, { module, exports: module.exports, setInterval, clearInterval, Date, Map, JSON, Number, Promise, Error,
   require: name => name.includes('/i18n/') ? {} : name.endsWith('.css') ? { default: {} }
     : /\.(svg|png)$/.test(name) ? { __esModule: true, default: name }
-      : name.endsWith('/components/ArtifactThumb') ? load('src/components/ArtifactThumb.tsx')
+      : name.endsWith('/components/ChatFileGrid') ? load('src/components/ChatFileGrid.tsx')
+      : name === './ArtifactThumb' ? load('src/components/ArtifactThumb.tsx')
       : name.endsWith('/api/client') ? api
         : name.endsWith('/inspiration-media') ? { inspirationMediaUrl: id => `/__api/inspirations/media?id=${id}` }
           : name === 'react-i18next' ? { useTranslation: () => ({ i18n: { language: 'en' }, t: (key, values) => key + (values ? JSON.stringify(values) : '') }) }

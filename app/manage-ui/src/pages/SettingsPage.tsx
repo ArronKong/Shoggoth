@@ -44,6 +44,10 @@ import {
 import { setDebugEnabled, useDebugEnabled } from "../components/debug/store";
 import { PageHead } from "../components/PageHead";
 import SettingsPreferences from "./settings/SettingsPreferences";
+import SettingsProject from "./settings/SettingsProject";
+import SettingsComputerUse from "./settings/SettingsComputerUse";
+import SettingsBrowserUse from "./settings/SettingsBrowserUse";
+import SettingsWeb from "./settings/SettingsWeb";
 import BackendOverview, { BackendMark } from "./settings/BackendOverview";
 import ServiceSettings from "./settings/ServiceSettings";
 import RuntimeStatusList from "./settings/RuntimeStatusList";
@@ -54,7 +58,10 @@ import "./SettingsPage.css";
 import "./settings/SettingsLayout.css";
 import "./settings/SettingsOperations.css";
 import "./settings/SettingsCards.css";
+import "./settings/SettingsOverview.css";
 
+// Keep the web-service settings implementation available while its UI is hidden.
+const SHOW_WEB_SETTINGS = false;
 const SHOGGOTH_POST_START_REFRESH_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
 // Keep writes ordered even when Settings is left and reopened before a response.
 let settingsSaveQueue: Promise<void> = Promise.resolve();
@@ -1213,71 +1220,75 @@ export default function SettingsPage() {
         error && <div className="error">{t("settings.copy.error", { msg: error })}</div>
       )}
 
-      <div className="settings-stack">
-        <div className="settings-group" id="settings-connections">
-        <BackendOverview
-          backends={backends} descriptors={backendDescriptors}
-          versions={new Map([...versionsById].filter(([id]) => !isManagedPluginHost(id)))} loading={loading || saving || togglingBackend}
-          attention={(id) => {
-            if (isManagedPluginHost(id)) return false;
-            const status = selfUpdatesById.get(id)?.status;
-            return !!status && (status.running || status.ok === false || isActionableUpdatePhase(status));
-          }}
-          renderDetails={(b) => <>{renderBackendVersion(versionsById.get(b.id), b)}{renderStandingGrants(b)}</>}
-          renderBody={renderBackendBody}
-          isDisconnectable={isDisconnectable} enabledCount={enabledCount} configFailed={configFailed}
-          onToggle={(b) => void toggleBackendConnection(b)}
-        />
-        {REMOTE_CONNECTIONS_ENABLED && !managedModes.hermes && !hasHermesCard && renderFallbackCard("hermes", "Hermes", renderHermesRemotes())}
-        {!managedModes.openclaw && !hasOpenclawCard && renderFallbackCard("openclaw", "OpenClaw", renderOpenclawGateway())}
-        {!hasShoggothCard && showRuntimeStatus && renderFallbackCard("shoggoth", "Shoggoth", renderShoggothBody())}
+      <div className="settings-workspace">
+        <div className="settings-stack">
+          <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} />
+          <div className="settings-group" id="settings-connections">
+            <BackendOverview
+              backends={backends} descriptors={backendDescriptors}
+              versions={new Map([...versionsById].filter(([id]) => !isManagedPluginHost(id)))} loading={loading || saving || togglingBackend}
+              attention={(id) => {
+                if (isManagedPluginHost(id)) return false;
+                const status = selfUpdatesById.get(id)?.status;
+                return !!status && (status.running || status.ok === false || isActionableUpdatePhase(status));
+              }}
+              renderDetails={(b) => <>{renderBackendVersion(versionsById.get(b.id), b)}{renderStandingGrants(b)}</>}
+              renderBody={renderBackendBody}
+              isDisconnectable={isDisconnectable} enabledCount={enabledCount} configFailed={configFailed}
+              onToggle={(b) => void toggleBackendConnection(b)}
+            />
+            {REMOTE_CONNECTIONS_ENABLED && !managedModes.hermes && !hasHermesCard && renderFallbackCard("hermes", "Hermes", renderHermesRemotes())}
+            {!managedModes.openclaw && !hasOpenclawCard && renderFallbackCard("openclaw", "OpenClaw", renderOpenclawGateway())}
+            {!hasShoggothCard && showRuntimeStatus && renderFallbackCard("shoggoth", "Shoggoth", renderShoggothBody())}
 
-        {backendCatalog.filter((descriptor) => descriptor.aliases?.length).flatMap((descriptor) =>
-          [descriptor.id, ...(descriptor.surfaces.runtimeStatus ? [] : descriptor.aliases!)].filter((id) => cfg.disabledBackends.includes(id)).map((id) => (
-            <div className="settings-inline-state" key={`legacy-disabled:${id}`}>
-              <div><strong>{t("settings.legacyRuntimeDisabled", { name: id })}</strong><p>{t("settings.legacyRuntimeDisabledHint")}</p></div>
-              <button className="ui-cbtn ui-cbtn--sm" disabled={loading || saving || togglingBackend || configFailed}
-                onClick={() => void applyBackendConnection({ id, name: id }, false)}>{t("settings.reconnect")}</button>
-            </div>
-          ))) }
+            {backendCatalog.filter((descriptor) => descriptor.aliases?.length).flatMap((descriptor) =>
+              [descriptor.id, ...(descriptor.surfaces.runtimeStatus ? [] : descriptor.aliases!)].filter((id) => cfg.disabledBackends.includes(id)).map((id) => (
+                <div className="settings-inline-state" key={`legacy-disabled:${id}`}>
+                  <div><strong>{t("settings.legacyRuntimeDisabled", { name: id })}</strong><p>{t("settings.legacyRuntimeDisabledHint")}</p></div>
+                  <button className="ui-cbtn ui-cbtn--sm" disabled={loading || saving || togglingBackend || configFailed}
+                    onClick={() => void applyBackendConnection({ id, name: id }, false)}>{t("settings.reconnect")}</button>
+                </div>
+              ))) }
 
-        <section className="settings-section" id="settings-service">
-          <header className="settings-section-head">
-            <h3 className="settings-h">{t("settings.serviceSubsection")}</h3>
-            <p className="settings-sech">{t("settings.serviceSharedDesc")}</p>
-          </header>
-          <ServiceSettings
-            status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
-            onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
-            dependents={dependentChips}
-          />
-        </section>
-        </div>
+            <section className="settings-section" id="settings-service">
+              <header className="settings-section-head">
+                <h3 className="settings-h">{t("settings.serviceSubsection")}</h3>
+                <p className="settings-sech">{t("settings.serviceSharedDesc")}</p>
+              </header>
+              <ServiceSettings
+                status={shoggothStatus} error={shoggothError} busy={shoggothBusy}
+                onRetry={shoggothRetry} onAction={(action) => void runShoggothAction(action)}
+                dependents={dependentChips}
+              />
+            </section>
+          </div>
 
-        <div className="settings-group" id="settings-general">
-          <header className="settings-section-head">
-            <h3 className="settings-h">{t("settings.category.general")}</h3>
-            <p className="settings-sech">{t("settings.generalDesc")}</p>
-          </header>
-          <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} onComputerServiceRestarted={shoggothRetry} />
-          {/* Developer-only switches; hidden in release builds, so they stay last and collapsed. */}
-          <details className="settings-advanced" id="settings-debug">
-            <summary className="settings-advanced-summary">
-              <div><h3 className="settings-h">{t("settings.copy.debug.section")}</h3><p className="settings-sech">{t("settings.debugSectionDesc")}</p></div>
-              <span className="settings-count">{t("settings.immediateEffect")}</span>
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 6 3 3 3-3" /></svg>
-            </summary>
-            <div className="settings-card settings-debug-card">
-              <div className="settings-heading-row">
-                <div><h4 id="settings-debug-label">{t("settings.copy.debug.toggleLabel")}</h4><p>{t("settings.debugPurpose")}</p></div>
-                <Switch checked={debugOn} onChange={setDebugEnabled} ariaLabelledBy="settings-debug-label" />
+          <div className="settings-tools-grid" id="settings-tools">
+            <SettingsComputerUse onServiceRestarted={shoggothRetry} />
+            <SettingsBrowserUse cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} />
+          </div>
+          {SHOW_WEB_SETTINGS && <SettingsWeb />}
+          <SettingsProject />
+          <div className="settings-advanced-group">
+            {/* Developer-only switches; hidden in release builds, so they stay last and collapsed. */}
+            <details className="settings-advanced" id="settings-debug">
+              <summary className="settings-advanced-summary">
+                <div><h3 className="settings-h">{t("settings.copy.debug.section")}</h3><p className="settings-sech">{t("settings.debugSectionDesc")}</p></div>
+                <span className="settings-count">{t("settings.immediateEffect")}</span>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m5 6 3 3 3-3" /></svg>
+              </summary>
+              <div className="settings-card settings-debug-card">
+                <div className="settings-heading-row">
+                  <div><h4 id="settings-debug-label">{t("settings.copy.debug.toggleLabel")}</h4><p>{t("settings.debugPurpose")}</p></div>
+                  <Switch checked={debugOn} onChange={setDebugEnabled} ariaLabelledBy="settings-debug-label" />
+                </div>
+                <div className="settings-debug-guide">
+                  <p>{t("settings.debugInstructions")} <kbd>Shift</kbd> + {t("settings.debugClick")}</p>
+                </div>
+                {debugOn && <p className="ui-hint" role="status">{t("settings.copy.debug.toggleHint")}</p>}
               </div>
-              <div className="settings-debug-guide">
-                <p>{t("settings.debugInstructions")} <kbd>Shift</kbd> + {t("settings.debugClick")}</p>
-              </div>
-              {debugOn && <p className="ui-hint" role="status">{t("settings.copy.debug.toggleHint")}</p>}
-            </div>
-          </details>
+            </details>
+          </div>
         </div>
       </div>
 

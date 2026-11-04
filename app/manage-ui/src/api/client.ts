@@ -82,6 +82,7 @@ import type {
   AgentChannel,
   SessionArchive,
   SessionArtifactsResult,
+  AgentArtifactsResult,
   GlobalChatSearchResult,
   SessionPreview,
   EnvironmentInventory,
@@ -101,7 +102,6 @@ import type {
   DashboardSummary,
   DashboardLiveWork,
   DashboardActivityPage,
-  DashboardArtifactItem,
   OpenclawHostInfo,
   GatewayStartResult,
   DiscoveredGateway,
@@ -2164,10 +2164,9 @@ export async function getAgentChannels(backend: string, id: string): Promise<Age
 export async function listAgentArtifacts(
   backend: string,
   id: string,
-): Promise<{ supported: boolean; reason?: string; total?: number; items: DashboardArtifactItem[] }> {
-  const { artifacts } = await jsonFetch<{
-    artifacts: { supported: boolean; reason?: string; total?: number; items: DashboardArtifactItem[] };
-  }>(agentUrl(backend, id, "/artifacts"));
+  signal?: AbortSignal,
+): Promise<AgentArtifactsResult> {
+  const { artifacts } = await jsonFetch<{ artifacts: AgentArtifactsResult }>(agentUrl(backend, id, "/artifacts"), { signal });
   return artifacts || { supported: false, items: [] };
 }
 // Archived (sealed/reset) transcript segments preceding a session's live thread.
@@ -2958,8 +2957,9 @@ export function stopGroupChatMember(id: string, memberId: string) {
 export function removeGroupChatMember(id: string, input: { expectedRosterRevision: number; memberId: string }) {
   return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/members", id), { method: "DELETE", body: JSON.stringify(input) });
 }
-export function getGroupChatMemberRole(id: string, memberId: string, query: { revision?: string; cursor?: string } = {}) {
+export function getGroupChatMemberRole(id: string, memberId: string, query: { revision?: string; cursor?: string; document?: "SOUL.md" } = {}) {
   const params = new URLSearchParams({ id, memberId });
+  if (query.document !== undefined) params.set("document", query.document);
   if (query.revision !== undefined) params.set("revision", query.revision);
   if (query.cursor !== undefined) params.set("cursor", query.cursor);
   return jsonFetch<import('../types').GroupChatMemberRole>(`/__api/group-chats/members/role?${params}`);

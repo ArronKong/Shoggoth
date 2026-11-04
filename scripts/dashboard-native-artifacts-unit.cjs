@@ -28,7 +28,7 @@ function fixture(t) {
     if (method === "profile.list") return { profiles, hasMore: false, nextCursor: null };
     if (method === "chat.session.list") {
       // Exercise real pagination instead of depending on the first sidebar page.
-      const all = sessions.filter(session => session.profileId === params.profileId && session.status !== "archived");
+      const all = sessions.filter(session => session.profileId === params.profileId && (params.includeArchived || session.status !== "archived"));
       const cursor = Number(params.cursor || 0);
       return { sessions: all.slice(cursor, cursor + 1), hasMore: cursor + 1 < all.length, nextCursor: cursor + 1 < all.length ? String(cursor + 1) : null };
     }
@@ -120,4 +120,56 @@ test("a changed Service generation cannot publish an in-flight native artifact s
   };
   await assert.rejects(f.backend.getRecentArtifacts({ sinceMs: f.sinceMs }), /BACKEND_NOT_READY/);
   assert.equal(f.backend._recentArtifactsCache, undefined);
+});
+
+test("Agent outputs include only that Agent across paginated live and archived sessions, deduplicated before the limit", async t => {
+  const f = fixture(t);
+  const chat = f.file("chat.md"), cron = f.file("cron.pdf", 100), note = f.file("note.txt", 200);
+  f.output("a-chat", chat); f.output("a-cron", cron); f.output("a-inspiration", note);
+  f.output("a-cron", chat);
+  f.sessions.find(session => session.id === "a-inspiration").status = "archived";
+  f.output("b-chat", f.file("foreign-agent.md"));
+  f.output("a-chat", f.file("user-upload.md"), { input: true });
+  f.output("a-chat", f.file("read-only.md"), { name: "read" });
+  f.output("a-chat", f.file("failed.md"), { success: false });
+  f.file("unattributed-in-shared-workspace.md");
+  const limited = await f.backend.listAgentArtifacts("agent-a", { limit: 1 });
+  assert.equal(limited.total, 3);
+  assert.equal(limited.partial, false);
+  assert.deepEqual(limited.items.map(item => item.path), [chat]);
+  assert.deepEqual((await f.backend.listAgentArtifacts("agent-a")).items.map(item => item.path), [chat, cron, note]);
+  assert.ok(f.calls.filter(call => call.method === "chat.session.list").every(call => call.params.profileId === "a" && call.params.includeArchived));
+  assert.ok(!f.calls.some(call => call.params.profileId === "b" || call.params.profileId === "archived"));
+  await assert.rejects(() => f.backend.listAgentArtifacts("agent-archived"), /AGENT_NOT_FOUND/);
+  await assert.rejects(() => f.backend.listAgentArtifacts("missing-agent"), /AGENT_NOT_FOUND/);
+});
+
+test("Agent outputs distinguish partial and unavailable histories without a workspace fallback", async t => {
+  const f = fixture(t), good = f.file("good.md"); f.output("a-chat", good);
+  const call = f.backend._call;
+  f.backend._call = (method, params) => {
+    if (method === "harness.transcript.events" && params.sessionId === "a-cron") throw Error("unavailable transcript");
+    return call(method, params);
+  };
+  const result = await f.backend.listAgentArtifacts("agent-a");
+  assert.equal(result.supported, true); assert.equal(result.partial, true);
+  assert.deepEqual(result.items.map(item => item.path), [good]);
+  f.backend._call = (method, params) => {
+    if (method === "harness.transcript.events") throw Error("unavailable transcript");
+    return call(method, params);
+  };
+  assert.deepEqual(await f.backend.listAgentArtifacts("agent-a"), { supported: false, reason: "provenance-unavailable", items: [] });
+});
+
+test("Agent outputs reject foreign session ownership and a replaced Service generation", async t => {
+  const f = fixture(t), call = f.backend._call;
+  f.backend._call = (method, params) => method === "chat.session.list"
+    ? { sessions: [f.sessions.find(session => session.profileId === "b")], hasMore: false, nextCursor: null }
+    : call(method, params);
+  await assert.rejects(() => f.backend.listAgentArtifacts("agent-a"), /CHAT_RESPONSE_INVALID/);
+  f.backend._call = (method, params) => {
+    if (method === "harness.transcript.events") f.backend._generation++;
+    return call(method, params);
+  };
+  await assert.rejects(() => f.backend.listAgentArtifacts("agent-a"), /BACKEND_NOT_READY/);
 });

@@ -1,6 +1,8 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { HashRouter } from "react-router-dom";
+import { HashRouter, Route, Routes } from "react-router-dom";
+import AgentsPage from "../../app/manage-ui/src/pages/AgentsPage";
+import { NavigationGuardProvider } from "../../app/manage-ui/src/lib/navigation-guard";
 import ChatPage from "../../app/manage-ui/src/pages/ChatPage";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
@@ -31,6 +33,8 @@ state.failCron = false;
 state.longSoul = false;
 state.deferSoul = false;
 state.unsafeSoul = false;
+state.deferArtifacts = false;
+state.failArtifacts = false;
 state.requests = requests;
 state.writes = writes;
 localStorage.clear();
@@ -57,7 +61,7 @@ class FixtureSocket {
         : request.method === "chat.history" ? { messages: [
           { id: "user", role: "user", content: "整理一下今天的想法。", timestamp: Date.now() - 60_000 },
           { id: "assistant", role: "assistant", content: `${current.agentName}：原有笔记都整理好了。点击顶部胶囊，可以查看我的资料、Cron 任务和灵感便签。`, timestamp: Date.now() },
-        ] } : {};
+        ], hasMore: false, nextCursor: null, sourceId: `capsule-${current.key}` } : {};
     setTimeout(() => this.onmessage?.({ data: JSON.stringify({ type: "res", id: request.id, ok: true, payload }) }), 0);
   }
   close() { this.readyState = 3; }
@@ -74,10 +78,20 @@ window.fetch = async (input, init) => {
     id, connected: true, info: { readyAgentIds: agents.filter(agent => agent.backendId === id).map(agent => agent.id) },
   })) };
   if (url.pathname === "/__api/backends") payload = { backends: FALLBACK_BACKEND_DESCRIPTORS };
-  if (url.pathname === "/__api/agents") payload = { agents };
+  if (url.pathname === "/__api/agents") payload = { agents: url.searchParams.has("backend") ? agents.filter(agent => agent.backendId === url.searchParams.get("backend")) : agents };
   if (url.pathname.startsWith("/__api/agents/")) {
     const agent = agents.find(value => url.pathname.includes(value.id))!;
-    if (url.pathname.endsWith("/file")) {
+    if (url.pathname.endsWith("/artifacts")) {
+      if (state.deferArtifacts) {
+        state.deferArtifacts = false;
+        await new Promise<void>(resolve => { state.releaseArtifacts = resolve; });
+      }
+      if (state.failArtifacts) return new Response(JSON.stringify({ error: "Artifacts fixture unavailable" }), { status: 503 });
+      payload = { artifacts: { supported: true, total: agent.id === alpha.id ? 2 : 0, items: agent.id === alpha.id ? [
+        { path: "/fixture/current-report.md", name: "本轮报告.md", kind: "doc", area: "session-output", mtimeMs: Date.now() },
+        { path: "/fixture/older-session.pdf", name: "往期会话产出.pdf", kind: "doc", area: "session-output", mtimeMs: Date.now() - 86_400_000 },
+      ] : [] } };
+    } else if (url.pathname.endsWith("/file")) {
       if (url.searchParams.get("file") !== "SOUL.md") throw Error("Only SOUL should be loaded");
       if (agent.id === alpha.id && state.deferSoul) {
         state.deferSoul = false;
@@ -97,7 +111,8 @@ window.fetch = async (input, init) => {
         nextRunAt: Date.now() + 86_400_000, lastRunAt: Date.now() - 3_600_000, lastStatus: "ok" },
       { id: "capsule-weekly", backendId: alpha.backendId, agentId: alpha.id, name: "周末阅读回顾",
         prompt: "回顾这一周收藏的文章和灵感。", enabled: false,
-        schedule: { kind: "cron", expr: "0 18 * * 0" }, scheduleDisplay: "每周日 18:00" },
+        schedule: { kind: "cron", expr: "0 18 * * 0" }, scheduleDisplay: "每周日 18:00",
+        lastStatus: "error", lastError: "Fixture previous run failed" },
       { id: "foreign-agent", backendId: alpha.backendId, agentId: "someone-else", name: "其他 Agent 的任务", enabled: true },
       { id: "foreign-backend", backendId: beta.backendId, agentId: alpha.id, name: "其他后端的同名 Agent 任务", enabled: true },
     ] };
@@ -114,7 +129,7 @@ window.fetch = async (input, init) => {
   }
   if (url.pathname === "/__api/inspirations/detail") payload = { idea: [...notes, archived].find(value => value.id === url.searchParams.get("id")) };
   if (url.pathname === "/__api/inspirations/executions") payload = { executions: [], total: 0, hasMore: false, nextCursor: null };
-  if (url.pathname.endsWith("/artifacts")) payload = { supported: true, total: 0, items: [] };
+  if (url.pathname === "/__api/sessions/artifacts") throw Error("Chat must request Agent outputs, not session artifacts");
   if (url.pathname.endsWith("/archive")) payload = { archive: { supported: false, segments: [] } };
   if (url.pathname === "/__api/chat/capabilities") payload = { slash: false, attachments: {} };
   if (url.pathname === "/__api/chat/cache-scope") payload = { backendId: url.searchParams.get("backend"), cacheScope: "capsule-fixture" };
@@ -136,8 +151,8 @@ const header = () => document.querySelector<HTMLElement>(".chat-header")!;
 const region = () => document.getElementById("chat-agent-panel")!;
 const tools = () => Array.from(header().querySelectorAll<HTMLButtonElement>(".chat-header__tools > button:not([hidden])"));
 const clickPanel = (kind: string) => {
-  if (kind === "profile") header().querySelector<HTMLButtonElement>(".chat-header__name")!.click();
-  else tools()[kind === "cron" ? 1 : 2].click();
+  if (kind === "profile") header().querySelector<HTMLButtonElement>(".chat-header__avatar-trigger")!.click();
+  else tools()[kind === "artifacts" ? 0 : kind === "cron" ? 1 : 2].click();
 };
 const switchAgent = async (agent: typeof alpha) => {
   const row = Array.from(document.querySelectorAll<HTMLElement>(".chat-agent"))
@@ -150,7 +165,7 @@ const closePanel = async () => {
   await wait(() => region().getAttribute("aria-hidden") === "true", "panel closed");
   await settle();
 };
-createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
+createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><NavigationGuardProvider><ScrollbarProvider /><Routes><Route path="/agents" element={<AgentsPage />} /><Route path="*" element={<ChatPage />} /></Routes></NavigationGuardProvider></UiProvider></HashRouter>);
 state.prepareCapsuleShot = async (kind: string, theme = "light") => {
   document.documentElement.dataset.theme = theme;
   await switchAgent(alpha);
@@ -158,13 +173,84 @@ state.prepareCapsuleShot = async (kind: string, theme = "light") => {
   clickPanel(kind);
   await wait(() => kind === "profile" ? region().textContent?.includes("我的工作方式")
     : kind === "cron" ? region().textContent?.includes("每天早上的灵感整理")
-      : region().querySelector("[data-inspiration-id]"), "shot data");
+      : kind === "artifacts" ? region().textContent?.includes("往期会话产出.pdf") : region().querySelector("[data-inspiration-id]"), "shot data");
   await settle();
+};
+state.runCapsuleMotionFixture = async (reduced = false) => {
+  await switchAgent(alpha);
+  await closePanel();
+  const baseline = [header().querySelector(".chat-header__avatar-trigger")!,
+    header().querySelector(".chat-header__id")!, ...tools()].map(element => element.getBoundingClientRect().toJSON());
+  const collapsed = header().getBoundingClientRect().height;
+  const expanded = parseFloat(header().style.getPropertyValue("--chat-agent-panel-height"));
+  const pointerToggle = (kind: string) => {
+    const trigger = kind === "profile" ? header().querySelector(".chat-header__avatar-trigger")!
+      : tools()[kind === "artifacts" ? 0 : kind === "cron" ? 1 : 2];
+    trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+  };
+  const sample = async () => {
+    const heights: number[] = [];
+    const start = performance.now();
+    do {
+      await new Promise(requestAnimationFrame);
+      const controls = [header().querySelector(".chat-header__avatar-trigger")!,
+        header().querySelector(".chat-header__id")!, ...tools()];
+      controls.forEach((element, index) => {
+        const rect = element.getBoundingClientRect();
+        for (const key of ["x", "y", "width", "height"] as const) {
+          check(Math.abs(rect[key] - baseline[index][key]) < .1, `${index} ${key} moved during panel transition`);
+        }
+      });
+      heights.push(header().getBoundingClientRect().height);
+    } while (performance.now() - start < 300);
+    return heights;
+  };
+  for (const kind of ["profile", "artifacts", "cron", "inspiration"]) {
+    pointerToggle(kind);
+    const opening = await sample();
+    check(Math.abs(opening.at(-1)! - expanded) < 1, `${kind} reaches full height`);
+    check(reduced || opening.some(height => height > collapsed + 1 && height < expanded - 1), `${kind} has intermediate opening frames`);
+    if (reduced) check(opening.every(height => Math.abs(height - expanded) < 1), "reduced motion opens immediately");
+    pointerToggle(kind);
+    const closing = await sample();
+    check(Math.abs(closing.at(-1)! - collapsed) < 1, `${kind} returns to collapsed height`);
+    check(reduced || closing.some(height => height > collapsed + 1 && height < expanded - 1), `${kind} has intermediate closing frames`);
+    if (reduced) check(closing.every(height => Math.abs(height - collapsed) < 1), "reduced motion closes immediately");
+  }
+  if (!reduced) {
+    pointerToggle("profile");
+    await new Promise(resolve => setTimeout(resolve, 45));
+    const interrupted = header().getBoundingClientRect().height;
+    check(interrupted > collapsed + 1 && interrupted < expanded - 1, "interrupt while the surface is moving");
+    pointerToggle("profile");
+    await wait(() => !header().dataset.agentPanel, "reverse state committed");
+    const reverseStart = header().getBoundingClientRect().height;
+    const reversing = await sample();
+    check(reverseStart < expanded - 1 && reversing[0] <= reverseStart + 1
+      && reversing.every((height, index) => index === 0 || height <= reversing[index - 1] + 1)
+      && Math.abs(reversing.at(-1)! - collapsed) < 1,
+    `closing reverses from the current height: ${JSON.stringify({ interrupted, reverseStart, reversing })}`);
+  }
+  const avatar = header().querySelector<HTMLButtonElement>(".chat-header__avatar-trigger")!;
+  avatar.focus();
+  await new Promise(resolve => setTimeout(resolve, 160));
+  const avatarCss = { backgroundColor: getComputedStyle(avatar).backgroundColor, outlineColor: getComputedStyle(avatar).outlineColor };
+  tools()[0].focus();
+  await new Promise(resolve => setTimeout(resolve, 160));
+  const toolCss = getComputedStyle(tools()[0]);
+  check(avatarCss.backgroundColor === toolCss.backgroundColor && avatarCss.outlineColor === toolCss.outlineColor,
+    `left and right controls share neutral keyboard feedback: ${JSON.stringify({ avatar: avatarCss,
+      tool: { backgroundColor: toolCss.backgroundColor, outlineColor: toolCss.outlineColor },
+      focusVisible: tools()[0].matches(":focus-visible") })}`);
+  check(writes.length === 0, "motion review cannot execute Agent work");
+  return { passed: true, reduced, viewport: [innerWidth, innerHeight], collapsed, expanded,
+    checks: "fixed control and identity geometry on every frame, open/close intermediate frames, reversal, neutral focus" };
 };
 state.runCapsuleFixture = async () => {
   await wait(() => header() && document.querySelector(".chat-thread .chat-bubble"), "ChatPage ready");
-  check(tools().length === 3, "exactly three visible actions");
-  check(tools().map(button => button.title).join("|") === [i18n.t("chat.artifactsTitle"), i18n.t("chat.agentPanelCron"), i18n.t("agents.tabInspiration")].join("|"), "artifact / Cron / Spark Notes order");
+  check(tools().length === 4, "exactly four visible actions");
+  check(document.querySelector<HTMLButtonElement>("[data-testid=chat-immersive-enter]")?.getClientRects().length === 0, "immersive entry is hidden");
+  check(tools().map(button => button.title).join("|") === [i18n.t("chat.agentArtifactsTitle"), i18n.t("chat.agentPanelCron"), i18n.t("agents.tabInspiration"), i18n.t("chat.agentOpenDetails")].join("|"), "Agent outputs / Cron / Spark Notes / Agent details order");
   check(!requests.some(url => /SOUL|\/__api\/cron|\/__api\/inspirations\?/.test(url)), "panels load on demand");
   await settle();
   const collapsedHeight = header().getBoundingClientRect().height;
@@ -174,6 +260,14 @@ state.runCapsuleFixture = async () => {
   await wait(() => header().getBoundingClientRect().height > collapsedHeight + 100, "capsule expansion layout settled");
   check(header().getBoundingClientRect().height > collapsedHeight + 100, "the original capsule extends downward");
   check(region().querySelector(".chat-header__avatar"), "expanded profile includes avatar");
+  check(region().querySelector('[data-backend-icon="openclaw"]')?.parentElement?.textContent === "OpenClaw",
+    "profile shows the owning backend icon and display name");
+  check(!region().textContent?.includes(`@${alpha.id}`), "profile omits the Agent ID");
+  check(!region().querySelector(`button[aria-label='${i18n.t("common.refresh")}']`), "profile has no manual refresh");
+  const fullHeight = header().getBoundingClientRect().height;
+  const avatarTrigger = header().querySelector<HTMLButtonElement>(".chat-header__avatar-trigger")!;
+  check(avatarTrigger.title === i18n.t("common.close") && avatarTrigger.querySelector("img")?.getAttribute("src")?.includes("svg"), "profile trigger becomes the close icon");
+  check(document.querySelector(".chat-thread")?.hasAttribute("inert") && document.querySelector(".chat-botdock")?.hasAttribute("inert"), "covered chat controls cannot receive focus");
   check(!region().querySelector("script") && !state.fixtureUnsafe, "SOUL uses safe Markdown");
   state.unsafeSoul = false;
   header().querySelector<HTMLButtonElement>(".chat-header__avatar-trigger")!.click();
@@ -183,16 +277,29 @@ state.runCapsuleFixture = async () => {
   check(Math.abs(header().getBoundingClientRect().height - collapsedHeight) < 2, "capsule returns to its original height");
   clickPanel("cron");
   await wait(() => region().querySelectorAll("a[href^='#/cron']").length === 2, "scoped Cron jobs");
+  check(Math.abs(header().getBoundingClientRect().height - fullHeight) < 2, "Cron uses the same full-height surface as the profile");
+  check(tools()[1].title === i18n.t("common.close") && tools()[1].querySelector("img"), "Cron trigger becomes close");
   check(!region().textContent?.includes("其他"), "other Agent/backend jobs are excluded");
   check(region().textContent?.includes("下次"), "next scheduled time is shown");
+  check(region().querySelector("h2")?.textContent === "定时任务"
+    && region().textContent?.includes(i18n.t("cron.enabled")) && region().textContent?.includes(i18n.t("cron.disabled")),
+  "scheduled tasks show their title and enabled/disabled state");
+  check(!region().textContent?.includes("Fixture previous run failed")
+    && !region().querySelector(`button[aria-label='${i18n.t("common.refresh")}']`),
+  "scheduled task rows omit run errors and manual refresh");
   const cronRequest = new URL(requests.find(url => url.startsWith("/__api/cron/jobs?"))!, location.origin);
   check(cronRequest.searchParams.get("backend") === alpha.backendId && cronRequest.searchParams.get("agentIds") === alpha.id, "Cron request carries backend and Agent");
   clickPanel("inspiration");
   await wait(() => region().querySelector("[data-inspiration-id='capsule-note-1']"), "Agent notes loaded");
+  check(region().querySelector("[data-inspiration-id='capsule-archived']"), "results and ordinary notes are shown together");
+  check(!region().querySelector("[role='tablist']") && !region().textContent?.includes(i18n.t("common.refresh")),
+    "notes have no filter tabs or manual refresh");
   check(!region().querySelector("a[href^='#/cron']"), "only one view is displayed");
+  check(Math.abs(header().getBoundingClientRect().height - fullHeight) < 2, "notes use the same full-height surface");
+  check(tools()[2].title === i18n.t("common.close"), "notes trigger becomes close");
   const loadMore = Array.from(region().querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent?.trim() === i18n.t("dashboard.loadMore"))!;
   loadMore.click();
-  await wait(() => region().querySelectorAll("[data-inspiration-id]").length === 2, "notes pagination");
+  await wait(() => region().querySelectorAll("[data-inspiration-id]").length === 3, "combined notes pagination");
   const attachmentNote = region().querySelector<HTMLDetailsElement>("[data-inspiration-id='capsule-note-2']")!;
   attachmentNote.querySelector<HTMLElement>("summary")!.click();
   check(Array.from(attachmentNote.querySelectorAll("a")).some(link => link.textContent?.includes("设计参考.pdf")
@@ -208,19 +315,35 @@ state.runCapsuleFixture = async () => {
   check(firstNote.querySelector("a")?.href.includes("id=capsule-note-1"), "the note links to its existing detail page");
   firstNote.querySelector<HTMLElement>("summary")!.click();
   check(!firstNote.open && header().dataset.agentPanel === "inspiration", "closing a note keeps the capsule expanded");
-  const archiveTab = Array.from(region().querySelectorAll<HTMLButtonElement>("[role='tab']"))
-    .find(button => button.textContent?.includes(i18n.t("inspiration.filters.archived")))!;
-  archiveTab.click();
-  await wait(() => region().querySelector("[data-inspiration-id='capsule-archived']"), "archived notes filter");
   await closePanel();
   check(document.activeElement === tools()[2], "Escape returns focus to the trigger");
+  const noteReadsBeforeReopen = requests.length;
+  clickPanel("inspiration");
+  await wait(() => {
+    const reads = requests.slice(noteReadsBeforeReopen).filter(url => url.startsWith("/__api/inspirations?"));
+    return reads.some(url => url.includes("filter=all")) && reads.some(url => url.includes("filter=archived"));
+  }, "notes revalidate both sets when reopened");
+  await closePanel();
   clickPanel("profile");
   await settle();
   tools()[0].click();
-  await wait(() => document.querySelector(".chat-artifacts-popover"), "artifacts retained");
-  check(region().getAttribute("aria-hidden") === "true", "artifacts close the expanded view");
+  await wait(() => document.querySelector(".chat-artifacts-panel")?.textContent?.includes("往期会话产出.pdf"), "Agent outputs include previous sessions");
+  check(region().querySelector("h2")?.textContent === "文件"
+    && region().querySelectorAll("[data-chat-file-grid] [data-artifact-thumb]").length === 2
+    && !region().querySelector(".chat-artifacts-refresh"), "files use the shared group file grid and have no refresh");
+  check(region().getAttribute("aria-hidden") === "false" && !region().querySelector(".chat-md"), "artifacts replace the profile inside the common surface");
+  check(Math.abs(header().getBoundingClientRect().height - fullHeight) < 2, "artifacts use the same full-height surface");
+  check(tools()[0].title === i18n.t("common.close") && tools()[0].querySelector("img"), "artifacts trigger becomes close");
+  check(!requests.some(url => url.startsWith("/__api/sessions/artifacts")), "no session-scoped output request");
+  const artifactRequest = new URL(requests.find(url => url.includes(`/agents/${alpha.id}/artifacts`))!, location.origin);
+  check(artifactRequest.searchParams.get("backend") === alpha.backendId, "output request carries the current Agent and backend");
+  tools()[0].click();
+  await wait(() => region().getAttribute("aria-hidden") === "true", "same output icon closes the panel");
+  check(!document.querySelector(".chat-botdock")?.hasAttribute("inert"), "closing restores composer focusability");
+  clickPanel("artifacts");
+  await wait(() => document.querySelector(".chat-artifacts-panel"), "outputs reopened");
   clickPanel("cron");
-  await wait(() => !document.querySelector(".chat-artifacts-popover"), "Cron closes artifacts");
+  await wait(() => !document.querySelector(".chat-artifacts-panel"), "Cron closes artifacts");
   document.querySelector(".chat-thread")!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
   await wait(() => region().getAttribute("aria-hidden") === "true", "outside click closes the capsule");
   await settle();
@@ -231,17 +354,22 @@ state.runCapsuleFixture = async () => {
   check(region().getAttribute("aria-hidden") === "true", "Agent switch closes the panel immediately");
   clickPanel("profile");
   await wait(() => region().textContent?.includes(i18n.t("chat.agentSoulEmpty")), "missing SOUL state");
+  check(region().querySelector('[data-backend-icon="hermes"]')?.parentElement?.textContent === "Hermes",
+    "switching Agents shows the new backend identity");
   state.releaseSoul();
   await settle();
   check(!region().textContent?.includes("虾长老"), "old SOUL response cannot populate the new Agent");
   clickPanel("cron");
   await wait(() => region().textContent?.includes(i18n.t("chat.panelCronEmpty")), "empty Cron state");
   state.failCron = true;
-  region().querySelector<HTMLButtonElement>(`button[aria-label='${i18n.t("common.refresh")}']`)!.click();
-  await wait(() => region().querySelector("[role='alert']"), "Cron request failure is visible");
+  await closePanel();
+  clickPanel("cron");
+  await wait(() => region().textContent?.includes(i18n.t("chat.panelCronUnavailable")), "Cron uses a generic load notice");
+  check(!region().textContent?.includes("Cron fixture unavailable"), "raw load failure is hidden");
   state.failCron = false;
-  region().querySelector<HTMLButtonElement>(`button[aria-label='${i18n.t("common.refresh")}']`)!.click();
-  await wait(() => !region().querySelector("[role='alert']"), "Cron retry recovers");
+  await closePanel();
+  clickPanel("cron");
+  await wait(() => region().textContent?.includes(i18n.t("chat.panelCronEmpty")), "Cron reopen recovers");
   clickPanel("inspiration");
   await wait(() => region().textContent?.includes(i18n.t("agents.inspirationEmpty")), "empty notes state");
   await closePanel();
@@ -255,9 +383,42 @@ state.runCapsuleFixture = async () => {
   scrollArea.scrollTop = 100;
   check(scrollArea.scrollTop === 100, "profile scrolling is available");
   state.longSoul = false;
-  region().querySelector<HTMLButtonElement>(`button[aria-label='${i18n.t("common.refresh")}']`)!.click();
-  await wait(() => (region().querySelector(".chat-md")?.textContent?.length || 0) < 1000, "profile refreshed");
   await closePanel();
+  const requestsBeforeReopen = requests.length;
+  clickPanel("profile");
+  await wait(() => {
+    const body = region().querySelector(".chat-md")?.textContent;
+    return body?.includes("我的工作方式") && body.length < 1000;
+  }, "reopening refreshes cached SOUL without user action");
+  const reopenRequests = requests.slice(requestsBeforeReopen);
+  check(reopenRequests.includes(`/__api/agents/${alpha.id}?backend=${alpha.backendId}`)
+    && reopenRequests.includes(`/__api/agents/${alpha.id}/file?backend=${alpha.backendId}&file=SOUL.md`),
+  "reopening fetches both profile and SOUL for the current backend and Agent");
+  await closePanel();
+  state.deferArtifacts = true;
+  clickPanel("artifacts");
+  await wait(() => state.releaseArtifacts, "delayed Agent output read");
+  await switchAgent(beta);
+  clickPanel("artifacts");
+  await wait(() => region().textContent?.includes(i18n.t("chat.agentArtifactsEmpty")), "new Agent has its own empty outputs");
+  state.releaseArtifacts();
+  await settle();
+  check(!region().textContent?.includes("往期会话产出"), "late outputs never cross Agent boundaries");
+  state.failArtifacts = true;
+  await closePanel();
+  clickPanel("artifacts");
+  await wait(() => region().textContent?.includes(i18n.t("chat.agentArtifactsUnavailable")), "failed outputs are unavailable, not empty");
+  state.failArtifacts = false;
+  await closePanel();
+  clickPanel("artifacts");
+  await wait(() => region().textContent?.includes(i18n.t("chat.agentArtifactsEmpty")), "file reopen recovers");
+  await closePanel();
+  tools()[3].click();
+  await wait(() => document.querySelector(".agents-page[data-detail-open='true']")?.textContent?.includes(beta.name), "details shortcut selects the exact Agent in the correct backend");
+  check(requests.some(url => url.startsWith(`/__api/agents/${beta.id}?`) && url.includes("backend=hermes")), "details read uses the linked backend, not a remembered backend");
+  location.hash = "/chat";
+  await wait(() => header() && document.querySelector(".chat-thread .chat-bubble"), "return to Chat");
+  await switchAgent(alpha);
   check(writes.length === 0, "reviewing these views does not mutate or execute Agent work");
-  return { passed: true, checks: "three actions, on-demand loading, capsule height, avatar/name toggles, safe SOUL, Agent/backend Cron scope, notes pagination/detail, Escape focus, artifacts, outside click, late response isolation, empty states, retry", writes: writes.length };
+  return { passed: true, checks: "four actions, Agent outputs across sessions, scoped details deep link, on-demand loading, capsule height, avatar/name toggles, safe SOUL, Agent/backend Cron scope, notes pagination/detail, Escape focus, artifacts, outside click, late response isolation, empty states, retry", writes: writes.length };
 };

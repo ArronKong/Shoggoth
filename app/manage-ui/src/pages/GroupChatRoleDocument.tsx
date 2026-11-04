@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Field, Option, Select } from "../components/Field";
 import ChatMarkdown from "../components/ChatMarkdown";
+import AgentSoulDocument from "../components/AgentSoulDocument";
 import FusionLoader from "../components/FusionLoader";
 import { getGroupChatMemberRole, getGroupChatMemberRoleHistory } from "../api/client";
 import type { GroupChatMemberRole, GroupChatMemberRoleRevision } from "../types";
@@ -37,7 +38,8 @@ export default function GroupChatRoleDocument({ groupId, memberId, variant = "de
     state.current.busy = true; setLoading(true); setError(null);
     const generation = state.current.generation;
     try {
-      const page = await getGroupChatMemberRole(groupId, memberId, { revision, cursor });
+      const page = await getGroupChatMemberRole(groupId, memberId, {
+        revision, cursor, ...(variant === "compact" ? { document: "SOUL.md" as const } : {}) });
       if (state.current.generation !== generation) return;
       if (!page.ok) throw new Error(t(`groupChat.card.code.${page.code}`));
       const previous = cursor ? state.current.result : null;
@@ -66,16 +68,17 @@ export default function GroupChatRoleDocument({ groupId, memberId, variant = "de
     } finally {
       if (state.current.generation === generation) { state.current.busy = false; setLoading(false); }
     }
-  }, [groupId, memberId, revision, t]);
+  }, [groupId, memberId, revision, variant, t]);
   useEffect(() => {
     state.current = { generation: state.current.generation + 1, busy: false, result: null };
     setResult(null); void read();
     return () => { state.current.generation++; state.current.busy = false; };
   }, [read]);
   useEffect(() => {
+    if (variant === "compact") return;
     void loadHistory();
     return () => { historyGeneration.current++; };
-  }, [loadHistory]);
+  }, [loadHistory, variant]);
 
   const versionControls = <>
     <Field label={t("groupChat.card.documentVersion")}>
@@ -88,23 +91,13 @@ export default function GroupChatRoleDocument({ groupId, memberId, variant = "de
     </Field>
     {historyCursor && <button type="button" className="btn-sm" onClick={() => void loadHistory(historyCursor)}>{t("groupChat.card.moreVersions")}</button>}
   </>;
-  const verification = <>
-    {result?.page.totalBytes !== undefined && <p className={styles.muted}>
-      {t("groupChat.fullResult.progress", { loaded: new TextEncoder().encode(result.text).length, total: result.page.totalBytes })}
-    </p>}
-    {result?.verified && <p className={styles.muted}>{t("groupChat.fullResult.verified")}</p>}
-  </>;
   if (variant === "compact") return <div className={documentStyles.compact}>
     {result?.page.disclosure === "redacted" && <p className={styles.muted}>{t("groupChat.card.redacted")}</p>}
-    {result && <div className={documentStyles.text}>{result.text}</div>}
+    {result && <AgentSoulDocument text={result.text} />}
     {loading && <FusionLoader size="sm" />}
     {error && <p className={styles.error} role="alert">{error}</p>}
     {result?.page.nextCursor && !error && <button type="button" className={`btn ${documentStyles.more}`} disabled={loading}
       onClick={() => void read(result.page.nextCursor!)}>{t("groupChat.fullResult.more")}</button>}
-    <details className={documentStyles.metadata}>
-      <summary>{t("groupChat.card.documentVersion")}</summary>
-      <div>{versionControls}{verification}</div>
-    </details>
   </div>;
 
   return <>

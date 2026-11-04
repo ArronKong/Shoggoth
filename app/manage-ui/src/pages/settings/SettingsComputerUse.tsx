@@ -8,6 +8,9 @@ import {
 } from "../../api/client";
 import s from "./SettingsComputerUse.module.css";
 
+// Session diagnostics remain available in code but are hidden in Settings.
+const SHOW_SESSION_DETAILS = false;
+
 function errorKey(error: unknown): string {
   const code = (error as { code?: string })?.code;
   if (code === "COMPUTER_PERMISSION_RELOAD_BUSY") return "reloadBusy";
@@ -119,7 +122,7 @@ export default function SettingsComputerUse({ onServiceRestarted }: { onServiceR
         <p className={`ui-hint ${s.reloadHint}`}>{t("settings.computerUse.reloadHint")}</p>
         {state?.available && <span className={s.version}>{t("settings.computerUse.driver", { version: state.driverVersion || "—" })}</span>}
       </div>
-      {state && <details className={s.sessions}>
+      {SHOW_SESSION_DETAILS && state && <details className={s.sessions}>
         <summary>{t("settings.computerUse.sessions", { count: state.sessions.length })}</summary>
         {state.sessions.length === 0 ? <p className="ui-hint">{t("settings.computerUse.sessionsEmpty")}</p>
           : <ul>{state.sessions.map(session => <li key={session.id}>

@@ -9,14 +9,14 @@
 .page input:focus-visible, .page select:focus-visible, .detail :is(button,input,select,textarea,a,summary):focus-visible {
   outline: 2px solid var(--ui-focus); outline-offset: 3px;
 }
-.page button, .detail button { font: inherit; }
+:is(.page, .detail) button:where(:not(:global(.btn-primary), :global(.btn-secondary), :global(.btn-dark), :global(.btn-subtle), :global(.btn-danger))) { font: inherit; }
 .section { margin: 26px 0 30px; }
 .sectionHeading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
 .sectionHeading h2 { font-size: 18px; line-height: 24px; font-weight: 500; margin: 0; color: var(--ui-text-1); }
 .count, .muted { color: var(--ui-text-2); font-size: 12px; line-height: 1.6; }
 .catalog { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 0 24px; }
 .service { display: flex; align-items: center; gap: 14px; padding: 16px 8px; text-align: left; border: 0;
-  border-bottom: 1px solid var(--ui-hairline); border-radius: 0; background: transparent; color: var(--ui-text-1); cursor: pointer; min-width: 0; }
+  border-radius: 0; background: transparent; color: var(--ui-text-1); cursor: pointer; min-width: 0; }
 .service:hover { background: var(--ui-surface-2); }
 .monogram { display: grid; place-items: center; width: 39px; height: 39px; flex: none; border-radius: 10px;
   background: var(--ui-surface-2); color: var(--ui-text-2); font-size: 16px; font-weight: 500; }
@@ -133,7 +133,7 @@
 .service { gap: 12px; padding: 16px 0; cursor: default; }
 .serviceOpen { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; padding: 4px 8px; text-align: left; border: 0; border-radius: 8px; background: transparent; color: var(--ui-text-1); cursor: pointer; }
 .serviceOpen:hover { color: var(--ui-text-1); background: var(--ui-surface-2); }
-.service > .button { flex: none; border-radius: 999px; }
+.service > :global(.btn-secondary) { flex: none; }
 .serviceText strong, .accountLabel strong, .accountLabel small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dialogIdentity { display: inline-flex; gap: 12px; align-items: center; min-width: 0; }
 .overview { margin: 22px 0; }
@@ -186,16 +186,14 @@
 .management > summary { color: var(--ui-text-2); font-size: 12px; line-height: 1.5; font-weight: 400; padding: 9px 0; }
 .management[open] { padding-bottom: 16px; }
 .management p { font-size: 12px; }
-.management > .button, .management > .danger { margin: 8px 8px 0 0; }
+.management > :is(.button, .danger, :global(.btn-secondary), :global(.btn-danger)) { margin: 8px 8px 0 0; }
 .detail > .management:last-child { margin-bottom: 10px; }
 .flowFooter { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 14px; width: 100%; min-width: 0; color: var(--ui-text-1); }
 .flowFooter > p { flex: 1; min-width: 140px; margin: 0; font-size: 11px; line-height: 1.6; color: var(--ui-text-2); }
 .flowFooterActions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; max-width: 100%; margin-left: auto; }
 .flowFooterActions .actions { margin: 0; gap: 8px; }
-.flowFooter button { font-family: inherit; font-size: 12px; line-height: 1.5; border-radius: 9px; padding: 10px 16px; }
 .flowFooter button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 @media (max-width: 480px) {
   .connectionPanel { padding: 16px; }
   .flowFooterActions .actions { flex-wrap: wrap; }
-  .flowFooter button { min-height: 40px; }
 }

@@ -16,6 +16,7 @@ export type AppUpdateState = {
   reason: string | null;
   status: AppUpdateStatus;
   currentVersion: string;
+  automaticUpdates: boolean;
   availableVersion: string | null;
   releaseName: string | null;
   releaseDate: string | null;
@@ -28,6 +29,7 @@ export type AppUpdateState = {
 export type DesktopAppUpdateBridge = {
   getState: () => Promise<AppUpdateState | null>;
   check: () => Promise<AppUpdateState>;
+  setAutomatic: (enabled: boolean) => Promise<AppUpdateState | null>;
   install: () => Promise<boolean>;
   onState: (listener: (state: AppUpdateState) => void) => () => void;
 };

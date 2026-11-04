@@ -133,6 +133,7 @@ jobs:
         run: |
           node scripts/shoggoth-runtime-adapter-contract.cjs
           node scripts/shoggoth-work-run-coordinator-unit.cjs
+          node --test scripts/chat-send-diagnostics-unit.cjs
           node --test scripts/runtime-execution-context-unit.cjs
           node --test scripts/runtime-mcp-bridge-isolation-unit.cjs
           node --test scripts/runtime-mcp-bridge-confirmation-unit.cjs

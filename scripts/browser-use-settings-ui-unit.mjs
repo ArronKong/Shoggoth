@@ -49,7 +49,7 @@ for (const language of ["zh-CN", "en"]) {
   await render(false);
   const status = () => tree.root.find(node => node.props["data-browser-state"] !== undefined).props["data-browser-state"];
   const switches = () => tree.root.findAllByType("switch");
-  assert.equal(tree.root.findAllByType("small").some(node => node.children.join("") === translator.t("settings.browserUse.sessionLifetime")), true);
+  assert.equal(tree.root.findAllByType("details").length, 0, "session details stay hidden even with active sessions");
   checks++;
   assert.equal(status(), "ready"); assert.equal(switches().length, 3); assert.equal(reads > 0, true); checks++;
   await act(async () => switches()[1].props.onChange(true));

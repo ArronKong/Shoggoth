@@ -51,6 +51,7 @@ for (const exportName of requiredExports) {
 
 const {
   DASHBOARD_CACHE_KEY,
+  DASHBOARD_CACHE_VERSION,
   decodeDashboardCache,
   encodeDashboardCache,
   readDashboardCache,
@@ -165,14 +166,14 @@ for (const [name, savedAt] of [
   ["null savedAt", null],
 ]) {
   test(`${name} 被拒绝并清理`, () => {
-    const storage = makeStorage(JSON.stringify({ version: 1, savedAt, data: makeSummary() }));
+    const storage = makeStorage(JSON.stringify({ version: DASHBOARD_CACHE_VERSION, savedAt, data: makeSummary() }));
     assert.equal(readDashboardCache({ storage, now: TODAY_NOON }), null);
     assert.equal(storage.values.has(DASHBOARD_CACHE_KEY), false);
   });
 }
 
 test("Infinity savedAt 被拒绝", () => {
-  const raw = JSON.stringify({ version: 1, savedAt: 0, data: makeSummary() }).replace('"savedAt":0', '"savedAt":1e309');
+  const raw = JSON.stringify({ version: DASHBOARD_CACHE_VERSION, savedAt: 0, data: makeSummary() }).replace('"savedAt":0', '"savedAt":1e309');
   assert.equal(decodeDashboardCache(raw, TODAY_NOON), null);
 });
 
@@ -184,7 +185,9 @@ test("昨日 summary 禁止在今日写入", () => {
 
 for (const [name, raw] of [
   ["损坏 JSON", "{"],
-  ["错误版本", JSON.stringify({ version: 2, savedAt: TODAY_NOON, data: makeSummary() })],
+  ["错误版本", JSON.stringify({ version: DASHBOARD_CACHE_VERSION + 1, savedAt: TODAY_NOON, data: makeSummary() })],
+  ["包含系统 Cron 的旧版缓存", JSON.stringify({ version: 1, savedAt: TODAY_NOON,
+    data: makeSummary({ runs: [{ backendId: "openclaw", jobId: "dreaming", jobName: "Memory Dreaming Promotion" }] }) })],
 ]) {
   test(`${name} 被拒绝`, () => {
     assert.equal(decodeDashboardCache(raw, TODAY_NOON), null);
