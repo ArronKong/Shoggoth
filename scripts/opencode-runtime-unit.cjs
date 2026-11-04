@@ -576,6 +576,11 @@ test("an unconfirmed native stop fences other operations until its server stops,
       { code: "RUNTIME_TURN_OUTCOME_UNKNOWN" });
     await assert.rejects(first.sessionRead({ sessionId, includeTurns: true }),
       { code: "RUNTIME_TURN_OUTCOME_UNKNOWN" });
+    const observer = fixture.host(ledger, async () => ({ data: [] }));
+    await assert.rejects(observer.turnStart({ ...original, operationId: "other-server-idle" }),
+      { code: "RUNTIME_TURN_OUTCOME_UNKNOWN" });
+    observer.state = "stopped";
+    assert.equal(prompts, 1, "an idle replacement server does not prove the accepting server stopped");
     await first.stop();
     const second = fixture.host(ledger, async (method, route) => {
       if (method === "POST" && route.endsWith("/prompt_async")) { prompts += 1; return { status: 204, data: null }; }
@@ -592,6 +597,126 @@ test("an unconfirmed native stop fences other operations until its server stops,
     first.state = "stopped";
     fixture.cleanup();
   }
+});
+
+test("disk-full terminal writes do not keep a confirmed stopped OpenCode turn busy after recovery", async t => {
+  for (const persistUnknown of [true, false]) await t.test(`unknown receipt persisted: ${persistUnknown}`, async () => {
+    const f = openCodeFixture("shoggoth-opencode-disk-full-");
+    const sessionId = "ses_diskfull12345";
+    let diskFull = false, writes = 0;
+    const fileSystem = Object.create(fs);
+    fileSystem.writeSync = (...args) => {
+      if (diskFull && (!persistUnknown || writes++ === 0)) throw Object.assign(Error("disk full"), { code: "ENOSPC" });
+      return fs.writeSync(...args);
+    };
+    const ledger = new OpenCodeRuntimeLedger({ ...f.ledgerOptions, fs: fileSystem }).open();
+    ledger.update(data => data.sessions.push({ id: sessionId, source: "disk-full", cwd: f.workspace,
+      title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+    const messages = [];
+    let prompts = 0, aborts = 0, clock = 1_000_000;
+    const native = async (method, route, body) => {
+      if (method === "POST" && route.endsWith("/prompt_async")) {
+        prompts++;
+        messages.push({ info: { id: body.messageID, sessionID: sessionId, role: "user" }, parts: [] },
+          { info: { id: `msg_diskanswer${prompts}`, sessionID: sessionId, role: "assistant", parentID: body.messageID,
+            ...(prompts > 1 ? { time: { completed: clock } } : {}) },
+          parts: prompts > 1 ? [{ id: "prt_recovered", type: "text", text: "recovered" }] : [] });
+        return { status: 204, data: null };
+      }
+      if (method === "POST" && route.endsWith("/abort")) { aborts++; diskFull = true; return { data: true }; }
+      if (route === "/session/status") { clock += 61_000; return { data: {} }; }
+      if (route.startsWith(`/session/${sessionId}/message?`)) return { data: structuredClone(messages) };
+      return { data: [] };
+    };
+    const first = f.host(ledger, native, () => clock);
+    const original = { sessionId, operationId: "disk-interrupted", prompt: "work", cwd: f.workspace, permissionPolicy: POLICY };
+    const failed = completion(first);
+    let second;
+    try {
+      await first.turnStart(original);
+      assert.equal((await failed.settled).errorCode, "RUNTIME_TURN_OUTCOME_UNKNOWN");
+      assert.equal(aborts, 1);
+      assert.equal(ledger.snapshot().sessions[0].turns[0].status, persistUnknown ? "failed" : "inProgress");
+      diskFull = false;
+      // Real execution Hosts are per Run and share this workspace ledger.
+      // The old server remains alive; only its exact turn has stopped.
+      second = f.host(ledger, native, () => clock);
+      await assert.rejects(second.turnStart(original), { code: "RUNTIME_TURN_OUTCOME_UNKNOWN" });
+      const done = completion(second);
+      void done.settled.catch(() => {});
+      await second.turnStart({ ...original, operationId: "new-user-message", prompt: "continue" });
+      assert.equal((await done.settled).status, "completed");
+      assert.equal(prompts, 2, "the interrupted prompt was never replayed");
+      assert.equal(aborts, 1, "a new message does not abort another server's work");
+      assert.deepEqual(ledger.snapshot().sessions[0].turns.map(turn => [turn.status, turn.errorCode]),
+        [["failed", "RUNTIME_TURN_OUTCOME_UNKNOWN"], ["completed", null]]);
+      assert.equal(first.state, "ready", "recovery does not require restarting the Service or CLI");
+    } finally { first.state = "stopped"; if (second) second.state = "stopped"; f.cleanup(); }
+  });
+});
+
+test("reading from another OpenCode Host never resumes or interrupts a live turn between tool steps", async () => {
+  const f = openCodeFixture("shoggoth-opencode-live-owner-");
+  const sessionId = "ses_liveowner12345";
+  const ledger = new OpenCodeRuntimeLedger(f.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "live-owner", cwd: f.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+  let messageId, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const messages = () => [
+    { info: { id: messageId, sessionID: sessionId, role: "user" }, parts: [] },
+    { info: { id: "msg_livestep12345", sessionID: sessionId, role: "assistant", parentID: messageId,
+      time: { completed: Date.now() }, finish: "tool-calls" }, parts: [] },
+  ];
+  const first = f.host(ledger, async (method, route, body) => {
+    if (route.endsWith("/prompt_async")) { messageId = body.messageID; return { status: 204 }; }
+    if (route.startsWith(`/session/${sessionId}/message?`)) { await gate; return { data: messages() }; }
+    if (route === "/session/status") return { data: { [sessionId]: { type: "busy" } } };
+    return { data: [] };
+  });
+  const observer = f.host(ledger, async (method, route) => {
+    assert.equal(method, "GET");
+    assert.ok(route.startsWith(`/session/${sessionId}/message?`), "only native history is observed");
+    return { data: messages() };
+  });
+  try {
+    await first.turnStart({ sessionId, operationId: "long-running", prompt: "work", cwd: f.workspace, permissionPolicy: POLICY });
+    assert.equal((await observer.sessionRead({ sessionId, includeTurns: true })).session.turns[0].status, "inProgress");
+    assert.equal(observer.activeTurns.size, 0);
+    await assert.rejects(observer.turnStart({ sessionId, operationId: "next", prompt: "next", cwd: f.workspace, permissionPolicy: POLICY }),
+      { code: "RUNTIME_SESSION_BUSY" });
+    assert.equal(first.activeTurns.size, 1);
+  } finally {
+    first.state = "stopped"; observer.state = "stopped"; release();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    f.cleanup();
+  }
+});
+
+test("a stopped generation with an unfinished tool step permits a new message without claiming success", async () => {
+  const f = openCodeFixture("shoggoth-opencode-orphan-");
+  const sessionId = "ses_orphaned12345", messageId = "msg_orphaned12345";
+  const ledger = new OpenCodeRuntimeLedger(f.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "orphan", cwd: f.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1,
+    turns: [{ id: "opencode-turn-orphan", operationId: "original-operation", messageId,
+      fingerprint: "a".repeat(64), acceptance: "accepted", status: "inProgress", errorCode: null,
+      assistantMessages: [], createdAt: 1, updatedAt: 1 }] }));
+  const host = f.host(ledger, async (method, route) => {
+    assert.equal(method, "GET", "reading recovery never dispatches or aborts work");
+    assert.ok(route.startsWith(`/session/${sessionId}/message?`));
+    return { data: [
+      { info: { id: messageId, sessionID: sessionId, role: "user" }, parts: [] },
+      { info: { id: "msg_orphanedstep12345", sessionID: sessionId, role: "assistant", parentID: messageId,
+        time: { completed: Date.now() }, finish: "tool-calls" }, parts: [{ type: "text", text: "still working" }] },
+    ] };
+  });
+  try {
+    const read = await host.sessionRead({ sessionId, includeTurns: true });
+    assert.equal(read.session.turns[0].status, "failed");
+    assert.equal(read.session.turns[0].errorCode, "RUNTIME_TURN_OUTCOME_UNKNOWN");
+    assert.equal(host.activeTurns.size, 0, "a dead generation is not resumed in a new private server");
+  } finally { host.state = "stopped"; f.cleanup(); }
 });
 
 test("a native permission reaches Shoggoth as the tool and its command, not a composed sentence", async () => {

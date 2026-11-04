@@ -90,6 +90,11 @@ const STOP_CODES = new Set(["RUNTIME_RATE_LIMITED", "RUNTIME_QUOTA_EXHAUSTED",
 // stopped, so this liveness is kept per ledger instance and never persisted.
 const LIVE_TURNS = new WeakMap();
 
+function completedAssistant(message) {
+  return Number.isSafeInteger(message?.info?.time?.completed)
+    && (message.info.error || message.info.finish !== "tool-calls");
+}
+
 function fingerprint(input) {
   return crypto.createHash("sha256").update(JSON.stringify({
     prompt: input.prompt, context: input.context ?? null, model: input.model ?? null,
@@ -1200,7 +1205,7 @@ class OpenCodeRuntimeHost {
     const subsequent = messages.slice(userIndex + 1).filter(message => message.info.role === "assistant"
       && message.info.parentID === active.messageId);
     const last = subsequent.at(-1);
-    if (!last || !Number.isSafeInteger(last.info.time?.completed)) return;
+    if (!completedAssistant(last)) return;
     const texts = subsequent.flatMap(message => (message.parts || []).filter(item => item.type === "text"
       && typeof item.text === "string").map(item => ({ id: item.id || message.info.id, text: item.text })));
     const status = aborted(last.info.error) ? "interrupted" : last.info.error ? "failed" : "completed";
@@ -1238,13 +1243,24 @@ class OpenCodeRuntimeHost {
     for (const turn of session.turns.filter(item => item.status === "inProgress" || item.acceptance === "unknown"
       || item.errorCode === "RUNTIME_TURN_OUTCOME_UNKNOWN")) {
       const index = messages.findIndex(message => message.info.id === turn.messageId && message.info.role === "user");
-      if (index < 0) continue;
+      if (index < 0) {
+        // Reopening a workspace ledger proves its previous server generation
+        // stopped. Missing native history must keep this operation fenced, but
+        // must not resume an orphaned observer and block new user messages.
+        if (!this.#mayStillRun(turn) && turn.status === "inProgress") {
+          this.ledger.update(data => { const current = turnById(sessionById(data, sessionId), turn.id);
+            current.status = "failed";
+            current.errorCode = current.acceptance === "accepted" ? OUTCOME_UNKNOWN : "RUNTIME_TURN_ACCEPTANCE_UNKNOWN";
+            current.updatedAt = Math.max(current.updatedAt, this.now()); });
+        }
+        continue;
+      }
       const end = messages.findIndex((message, offset) => offset > index && message.info.role === "user");
       const slice = messages.slice(index + 1, end < 0 ? undefined : end);
       const assistants = slice.filter(message => message.info.role === "assistant"
         && message.info.parentID === turn.messageId);
       const last = assistants.at(-1);
-      const completed = last && Number.isSafeInteger(last.info.time?.completed);
+      const completed = completedAssistant(last);
       if (completed) this.#markStopped(turn.id);
       this.ledger.update(data => { const current = turnById(sessionById(data, sessionId), turn.id);
         current.acceptance = "accepted";
@@ -1254,6 +1270,9 @@ class OpenCodeRuntimeHost {
           current.assistantMessages = assistants.flatMap(message => (message.parts || [])
             .filter(item => item.type === "text" && typeof item.text === "string")
             .map(item => ({ id: item.id || message.info.id, text: item.text })));
+        } else if (!this.#mayStillRun(turn) && current.status === "inProgress") {
+          current.status = "failed";
+          current.errorCode = OUTCOME_UNKNOWN;
         }
         current.updatedAt = Math.max(current.updatedAt, this.now()); });
     }
@@ -1264,6 +1283,9 @@ class OpenCodeRuntimeHost {
     const session = this.#requireSession(sessionId);
     const pending = session.turns.find(turn => turn.acceptance === "accepted" && turn.status === "inProgress");
     if (!pending) return;
+    // A different per-Run server has its own status map. Its idle response
+    // cannot observe or stop the server that actually accepted this turn.
+    if (LIVE_TURNS.get(this.ledger)?.get(pending.id) !== this) return;
     const active = { sessionId, turnId: pending.id, messageId: pending.messageId,
       accepted: true, done: false, pending: new Set(), responded: new Set(),
       usage: null, abort: new AbortController() };
@@ -1288,8 +1310,12 @@ class OpenCodeRuntimeHost {
     try {
       const response = await this.client.request("POST", this.#sessionRoute(active.sessionId, "/abort"), {},
         { timeoutMs: 5000 });
-      if (response.data === true && await this.#waitIdle(active.sessionId)
-        && await this.#settleStopped(active, cause)) return;
+      if (response.data === true && await this.#waitIdle(active.sessionId)) {
+        // Execution liveness and durable outcome are separate facts. ENOSPC
+        // while saving the terminal must not erase this confirmed native stop.
+        this.#markStopped(active.turnId);
+        if (await this.#settleStopped(active, cause)) return;
+      }
     } catch {}
     this.#settleUnknown(active);
   }
@@ -1297,6 +1323,7 @@ class OpenCodeRuntimeHost {
   async #waitIdle(sessionId) {
     for (let attempt = 0; attempt < 30; attempt += 1) {
       const statuses = (await this.client.request("GET", "/session/status")).data;
+      if (!statuses || typeof statuses !== "object" || Array.isArray(statuses)) return false;
       const nativeId = this.#nativeSessionId(sessionId);
       if (!statuses?.[nativeId] || statuses[nativeId].type === "idle") return true;
       await sleep(100);
@@ -1313,7 +1340,7 @@ class OpenCodeRuntimeHost {
       && message.info.parentID === active.messageId);
     const last = subsequent.at(-1);
     const nativeError = last?.info.error ?? null;
-    if (last && Number.isSafeInteger(last.info.time?.completed) && !nativeError) {
+    if (completedAssistant(last) && !nativeError) {
       await this.#finishFromMessages(active, messages);
       return true;
     }

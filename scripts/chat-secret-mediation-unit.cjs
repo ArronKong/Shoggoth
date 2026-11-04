@@ -438,6 +438,76 @@ test("unknown dispatch never replays after restart and an unrelated scope contin
   assert.equal(result.result.ok, true);
 }));
 
+test("tool receipts recover from disk exhaustion without a Service restart or replaying dispatched calls", async t => {
+  for (const stage of ["before-dispatch", "after-dispatch"]) await t.test(stage, async t => executionFixture(async ({ broker }) => {
+    const originalOpen = fs.openSync, originalWrite = fs.writeSync, receiptFds = new Set();
+    let diskFull = stage === "before-dispatch", executions = 0;
+    t.mock.method(fs, "openSync", (file, ...args) => {
+      const fd = originalOpen(file, ...args); receiptFds.delete(fd);
+      if (file === `${broker.file}.tmp`) receiptFds.add(fd);
+      return fd;
+    });
+    t.mock.method(fs, "writeSync", (fd, ...args) => {
+      if (diskFull && receiptFds.has(fd)) throw Object.assign(Error("disk full"), { code: "ENOSPC" });
+      return originalWrite(fd, ...args);
+    });
+    const request = { scope: SCOPE, callId: "disk-full-call", tool: "fixture", args: {}, assertCurrent() {},
+      invoke() { executions++; diskFull = true; return { ok: true }; } };
+    await assert.rejects(broker.execute(request), {
+      code: stage === "before-dispatch" ? "SECRET_PROCESSING_UNAVAILABLE" : "SECRET_TOOL_OUTCOME_UNKNOWN",
+    });
+    assert.equal(executions, stage === "before-dispatch" ? 0 : 1);
+    diskFull = false;
+    if (stage === "after-dispatch") {
+      await assert.rejects(broker.execute(request), { code: "SECRET_TOOL_OUTCOME_UNKNOWN" });
+      assert.equal(executions, 1, "missing completion receipt must not repeat an executed action");
+    }
+    const resumed = await broker.execute({ ...request, callId: "new-call-after-space-restored",
+      invoke() { executions++; return { ok: true }; } });
+    assert.equal(resumed.result.ok, true);
+    assert.equal(broker.uncertain, false);
+    if (stage === "after-dispatch") {
+      await assert.rejects(broker.execute(request), { code: "SECRET_TOOL_OUTCOME_UNKNOWN" });
+      assert.equal(executions, 2);
+    }
+  }));
+});
+
+test("a confirmed receipt rollback allows later calls after storage recovery", async t => executionFixture(async ({ broker }) => {
+  const originalSync = fs.fsyncSync;
+  let failSync = true, executions = 0;
+  t.mock.method(fs, "fsyncSync", fd => {
+    if (failSync && fs.fstatSync(fd).isDirectory()) {
+      failSync = false;
+      throw Object.assign(Error("disk quota exhausted"), { code: "EDQUOT" });
+    }
+    return originalSync(fd);
+  });
+  const request = { scope: SCOPE, callId: "rolled-back", tool: "fixture", args: {}, assertCurrent() {},
+    invoke() { executions++; return { ok: true }; } };
+  await assert.rejects(broker.execute(request), { code: "SECRET_PROCESSING_UNAVAILABLE" });
+  assert.equal(executions, 0);
+  assert.equal(broker.uncertain, false);
+  assert.equal((await broker.execute({ ...request, callId: "after-rollback" })).result.ok, true);
+  assert.equal(executions, 1);
+}));
+
+test("uncertain receipt commit remains fenced after space returns", async t => executionFixture(async ({ broker }) => {
+  const originalSync = fs.fsyncSync;
+  let failSync = true;
+  t.mock.method(fs, "fsyncSync", fd => {
+    if (failSync && fs.fstatSync(fd).isDirectory()) throw Object.assign(Error("disk full"), { code: "ENOSPC" });
+    return originalSync(fd);
+  });
+  let executions = 0;
+  const request = { scope: SCOPE, callId: "uncertain-commit", tool: "fixture", args: {}, assertCurrent() {},
+    invoke() { executions++; return { ok: true }; } };
+  await assert.rejects(broker.execute(request), { code: "SECRET_STORE_UNCERTAIN" });
+  failSync = false;
+  await assert.rejects(broker.execute({ ...request, callId: "another-operation" }), { code: "SECRET_STORE_UNCERTAIN" });
+  assert.equal(executions, 0, "free space is not proof of an uncertain commit");
+}));
+
 test("concurrent exact calls execute once and expiry removes only encrypted raw result", async () => executionFixture(async ({ store, broker, paths, setNow, now }) => {
   const prepared = await store.prepare({ scope: SCOPE, operationId: "input", text: "password: true" });
   let executions = 0, release;

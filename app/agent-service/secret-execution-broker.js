@@ -95,7 +95,16 @@ class SecretExecutionBroker {
     const data = `${JSON.stringify(next)}\n`;
     if (Buffer.byteLength(data) > 64 * 1024 * 1024) fail("SECRET_PROCESSING_UNAVAILABLE");
     try { atomicWritePrivateFile(this.file, data, { trustedRoot: this.paths.trustedRoot }); }
-    catch { this.uncertain = true; fail("SECRET_STORE_UNCERTAIN"); }
+    catch (error) {
+      // A failed temp write (or a confirmed rollback) leaves the prior receipt
+      // authoritative. Keep any dispatching receipt as its operation's fence,
+      // while allowing new calls after storage recovers. Ambiguous commits and
+      // incomplete committed cleanup still block the store.
+      const unchanged = !error?.committed && !error?.committedUncertain
+        && ["ENOSPC", "EDQUOT", "PRIVATE_FILE_COMMIT_FAILED"].includes(error?.code);
+      if (!unchanged) this.uncertain = true;
+      fail(this.uncertain ? "SECRET_STORE_UNCERTAIN" : "SECRET_PROCESSING_UNAVAILABLE");
+    }
     this.state = next;
   }
   _record(id, row) {
@@ -311,6 +320,11 @@ class SecretExecutionBroker {
       } catch (error) { result = completedNotice; this.onError(error?.code || "SECRET_PROJECTION_UNAVAILABLE"); }
       this._assert(); assertCurrent();
       return { receiptId: id, result, recovered: false };
+    }).catch(error => {
+      // The endpoint may already have acted. A missing completion receipt is
+      // never a processing error that suggests the operation can be retried.
+      if (error?.code === "SECRET_PROCESSING_UNAVAILABLE") fail("SECRET_TOOL_OUTCOME_UNKNOWN");
+      throw error;
     }).finally(() => { for (const item of used) item.bytes.fill(0); this.inflight.delete(id); });
     this.inflight.set(id, task); return task;
   }
