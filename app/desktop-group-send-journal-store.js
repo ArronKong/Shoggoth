@@ -73,9 +73,11 @@ function composer(value) {
     if (!Array.isArray(quote.mentions.memberIds) || !quote.mentions.memberIds.every(part) || typeof quote.mentions.broadcast !== "boolean"
       || !Array.isArray(quote.mentions.unresolved) || !quote.mentions.unresolved.every(part)) throw failure("GROUP_JOURNAL_INVALID");
     if (quote.origin) {
-      quote.origin = closed(quote.origin, [], ["opportunityId", "runId", "taskId", "attemptId", "taskVersion", "discussionId", "rootUserMessageId", "inputThroughSeq", "summary", "coordinationStale", "artifacts", "requestRevision", "requestStale", "partial", "late"]);
+      quote.origin = closed(quote.origin, [], ["opportunityId", "runId", "taskId", "attemptId", "taskVersion", "discussionId", "rootUserMessageId", "inputThroughSeq", "summary", "coordinationStale", "artifacts", "requestRevision", "requestStale", "partial", "late", "textItemId", "streaming"]);
+      // textItemId / streaming：成员流式发出的回复带这两个字段，引用这类回复也必须能保存草稿。
       if (quote.origin.requestRevision !== undefined && (!number(quote.origin.requestRevision) || quote.origin.requestRevision < 1)
-        || ["requestStale", "partial", "late"].some(key => quote.origin[key] !== undefined && typeof quote.origin[key] !== "boolean")) throw failure("GROUP_JOURNAL_INVALID");
+        || quote.origin.textItemId !== undefined && !part(quote.origin.textItemId)
+        || ["requestStale", "partial", "late", "streaming"].some(key => quote.origin[key] !== undefined && typeof quote.origin[key] !== "boolean")) throw failure("GROUP_JOURNAL_INVALID");
     }
     if (quote.fullResult) quote.fullResult = closed(quote.fullResult, ["bytes", "digest"]);
     if (quote.taskRef) quote.taskRef = closed(quote.taskRef, ["taskId"]);
