@@ -153,3 +153,36 @@ test("post-native confirmation binds immutable asset IDs and the frozen source",
   remote.releases[0].assets[0].id += 100;
   await assert.rejects(confirmDraft(remote.client, receipt, version, tag, sha, "5"), /assets changed/);
 });
+
+test("a lost asset upload response is reconciled byte-for-byte before any retry", async t => {
+  const { output } = await fixture(t), remote = fakeClient();
+  const upload = remote.client.upload;
+  let interrupted = false;
+  remote.client.upload = async (...args) => {
+    await upload(...args);
+    if (!interrupted) { interrupted = true; throw Object.assign(new Error("lost response"), { retryable: true }); }
+  };
+  await uploadDraft(remote.client, output, version, tag, sha, async () => {});
+  assert.equal(remote.uploads(), 8, "The uploaded asset must not be posted twice");
+  assert.equal(remote.releases[0].assets.length, 8);
+});
+
+test("transient uploads retry a missing asset within a finite budget", async t => {
+  const { output } = await fixture(t), remote = fakeClient();
+  let calls = 0;
+  remote.client.upload = async () => { calls++; throw Object.assign(new Error("503 before upload"), { retryable: true }); };
+  await assert.rejects(uploadDraft(remote.client, output, version, tag, sha, async () => {}), /503 before upload/u);
+  assert.equal(calls, 3); assert.equal(remote.releases[0].assets.length, 0);
+});
+
+test("a lost draft creation response never creates a second release", async t => {
+  const { output } = await fixture(t), remote = fakeClient(), original = remote.client.request;
+  let creates = 0;
+  remote.client.request = async (route, options) => {
+    const response = await original(route, options);
+    if (route === "/releases" && options?.method === "POST") { creates++; throw new Error("lost create response"); }
+    return response;
+  };
+  await uploadDraft(remote.client, output, version, tag, sha);
+  assert.equal(creates, 1); assert.equal(remote.releases.length, 1);
+});

@@ -7,6 +7,7 @@ const { createHash } = require("node:crypto");
 const { execFileSync } = require("node:child_process");
 const yaml = require("js-yaml");
 const { assertAcceptedReceipt } = require("./notarize.cjs");
+const { releaseApi, releaseRequest, sleep } = require("./release-http.cjs");
 
 function packageNames(version, arch) {
   assert.match(version, /^\d+\.\d+\.\d+$/u);
@@ -91,21 +92,10 @@ async function assemble(input, output, version, sha, runId) {
 }
 
 function githubClient(repository, token) {
-  assert.equal(repository, "ArronKong/Shoggoth");
-  assert.ok(token, "GitHub token is required");
-  const base = `https://api.github.com/repos/${repository}`;
-  async function request(route, options = {}) {
-    const response = await fetch(`${base}${route}`, {
-      ...options,
-      headers: {
-        Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json", ...options.headers,
-      },
-      signal: AbortSignal.timeout(15 * 60_000),
-    });
-    assert.ok(response.ok, `GitHub request failed: ${response.status} ${route}`);
-    return response;
-  }
+  const api = releaseApi(repository, token);
+  const request = (route, options = {}) => api.request(route, {
+    ...(route.startsWith("/releases/assets/") ? { signal: AbortSignal.timeout(15 * 60_000) } : {}), ...options,
+  });
   async function releases() {
     const result = [];
     for (let page = 1; ; page++) {
@@ -134,42 +124,52 @@ function githubClient(repository, token) {
     assert.equal(url.origin, "https://uploads.github.com");
     assert.equal(url.pathname, `/repos/${repository}/releases/${release.id}/assets`);
     url.searchParams.set("name", name);
-    const response = await fetch(url, {
+    await releaseRequest(url, {
       method: "POST", duplex: "half", body: fs.createReadStream(file),
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream",
         "Content-Length": String(fs.statSync(file).size) },
       signal: AbortSignal.timeout(15 * 60_000),
     });
-    assert.ok(response.ok, `Asset upload failed: ${response.status} ${name}; inspect the draft before retrying`);
   }
   return { request, releases, assertTag, downloadDigest, upload };
 }
 
-async function uploadDraft(client, directory, version, tag, sha) {
+async function uploadDraft(client, directory, version, tag, sha, pause = sleep) {
   await client.assertTag(tag, sha);
   const names = [...packageNames(version, "arm64"), ...packageNames(version, "x64"), "latest-mac.yml", "SHA256SUMS.txt"];
   let release = (await client.releases()).find(item => item.tag_name === tag);
   if (!release) {
-    release = await (await client.request("/releases", {
+    try { release = await (await client.request("/releases", {
       method: "POST", body: JSON.stringify({ tag_name: tag, target_commitish: sha,
         name: `Shoggoth ${version} — draft validation`, draft: true, make_latest: "false",
         body: `Automated signed macOS draft. Native verification results are recorded in the Actions run.\n\n<!-- shoggoth-draft-pipeline:${sha} -->` }),
-    })).json();
+    })).json(); } catch (error) {
+      release = (await client.releases()).find(item => item.tag_name === tag);
+      if (!release) throw error; // A missing result never authorizes a second create.
+    }
   }
   assertDraft(release, tag, sha);
   assertAssetInventory(release.assets, names);
   // Resume a partial upload only when every existing byte matches. Never clobber.
   for (const name of names) {
-    release = await (await client.request(`/releases/${release.id}`)).json();
-    assertDraft(release, tag, sha);
-    assertAssetInventory(release.assets, names);
-    const asset = release.assets.find(item => item.name === name);
-    const file = path.join(directory, name);
-    if (asset) {
-      assert.equal(asset.size, fs.statSync(file).size, `Existing asset differs: ${name}`);
-      assert.equal(await client.downloadDigest(asset), await fileDigest(file), `Existing asset differs: ${name}`);
-    } else {
-      await client.upload(release, name, file);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      release = await (await client.request(`/releases/${release.id}`)).json();
+      assertDraft(release, tag, sha);
+      assertAssetInventory(release.assets, names);
+      const asset = release.assets.find(item => item.name === name);
+      const file = path.join(directory, name);
+      if (asset) {
+        assert.equal(asset.size, fs.statSync(file).size, `Existing asset differs: ${name}`);
+        assert.equal(await client.downloadDigest(asset), await fileDigest(file), `Existing asset differs: ${name}`);
+        break;
+      } else {
+        try { await client.upload(release, name, file); break; }
+        catch (error) {
+          if (!error.retryable || attempt === 3) throw error;
+          // Re-read the inventory before retrying: the previous upload may exist.
+          await pause(attempt * 1500);
+        }
+      }
     }
   }
   return release.id;

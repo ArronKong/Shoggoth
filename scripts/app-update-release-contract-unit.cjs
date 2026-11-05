@@ -32,6 +32,19 @@ assert.deepEqual(release.jobs.build.needs, ["validate", "source-ci"]);
 assert.equal(release.jobs["source-ci"].uses, "./.github/workflows/ci.yml");
 assert.equal(release.jobs["native-verification"].uses, "./.github/workflows/verify-signed-draft.yml");
 assert.deepEqual(release.jobs["accepted-draft"].needs, ["validate", "draft", "native-verification"]);
+assert.equal(release.on.workflow_dispatch.inputs.release_mode.default, "draft");
+assert.deepEqual(release.on.workflow_dispatch.inputs.release_mode.options, ["draft", "publish"]);
+assert.equal(release.jobs.publish.if, "inputs.release_mode == 'publish'");
+assert.deepEqual(release.jobs.publish.needs, ["validate", "draft", "accepted-draft"]);
+assert.deepEqual(release.jobs.publish.concurrency, { group: "shoggoth-release-publication", "cancel-in-progress": false },
+  "Serialize publication across versions before checking and updating Latest");
+assert.deepEqual(release.jobs.publish.permissions, { contents: "write", actions: "read", "pull-requests": "read" });
+assert.ok(!release.jobs.publish.environment && !release.jobs.publish.env.MACOS_CERTIFICATE_BASE64,
+  "Publication must not load signing credentials");
+const publicationSteps = release.jobs.publish.steps.map(step => step.run || "").join("\n");
+assert.match(publicationSteps, /dependency-audit-policy\.cjs --output publication\/audit-root\.json/u);
+assert.match(publicationSteps, /dependency-audit-policy\.cjs --directory app\/manage-ui --output publication\/audit-ui\.json/u);
+assert.match(publicationSteps, /release-publication\.cjs publish/u);
 assert.equal(release.jobs.build.env.SHOGGOTH_CODESIGN_MODE, "developer-id");
 assert.equal(release.jobs.build.env.SHOGGOTH_EXPECT_NOTARIZED, "1");
 assert.equal(release.jobs.build.environment, "macos-signing");
@@ -48,12 +61,24 @@ const cleanupStep = buildSteps.find(step => step.name === "Remove temporary sign
 assert.equal(cleanupStep.if, "always()");
 assert.match(cleanupStep.run, /'list-keychains', '-d', 'user', '-s'/u);
 assert.match(cleanupStep.run, /security delete-keychain/u);
-for (const workflowName of ["release.yml", "verify-signed-draft.yml", "ci.yml"]) {
+for (const workflowName of ["release.yml", "verify-signed-draft.yml", "ci.yml", "release-recovery.yml"]) {
   const parsed = yaml.load(fs.readFileSync(path.join(root, ".github/workflows", workflowName), "utf8"));
   for (const job of Object.values(parsed.jobs)) for (const step of job.steps || []) {
     if (step.uses) assert.match(step.uses, /^actions\/[a-z-]+@[a-f0-9]{40}$/u, "Release actions must pin immutable commits");
   }
 }
+const recovery = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/release-recovery.yml"), "utf8"));
+assert.deepEqual(recovery.on, { workflow_run: { workflows: ["Signed macOS draft"], types: ["completed"] } });
+assert.deepEqual(recovery.permissions, { contents: "read", actions: "write", checks: "read" });
+assert.equal(recovery.jobs.recover.steps[0].with.ref, "${{ github.sha }}", "Recovery must execute trusted default-branch code");
+assert.equal(recovery.jobs.recover.steps[0].with["persist-credentials"], false);
+assert.ok(!recovery.jobs.recover.environment, "Recovery cannot read the signing environment");
+assert.ok(!JSON.stringify(recovery).includes("secrets."));
+assert.ok(recovery.jobs.recover.steps.at(-1).with.name.includes("observer-${{ github.run_attempt }}"),
+  "A controller rerun must preserve earlier recovery receipts without an artifact-name collision");
+const ci = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"));
+assert.deepEqual(ci.on.push.branches, ["**"], "Release tags must not start a duplicate source CI");
+assert.ok(ci.on.workflow_call !== undefined && ci.on.pull_request !== undefined);
 assert.match(workflow, /node scripts\/release-build\.cjs/u);
 const build = fs.readFileSync(path.join(root, "scripts/release-build.cjs"), "utf8");
 for (const gate of ["electron-builder", '"--publish", "never"', "shoggoth-host-capability-coverage-unit.cjs", "shoggoth-source-parity.cjs",
