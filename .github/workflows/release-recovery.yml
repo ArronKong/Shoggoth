@@ -35,6 +35,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          name: release-recovery-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-observer-${{ github.run_attempt }}
           path: release-recovery.json
           if-no-files-found: warn

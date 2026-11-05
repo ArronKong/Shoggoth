@@ -74,6 +74,8 @@ assert.equal(recovery.jobs.recover.steps[0].with.ref, "${{ github.sha }}", "Reco
 assert.equal(recovery.jobs.recover.steps[0].with["persist-credentials"], false);
 assert.ok(!recovery.jobs.recover.environment, "Recovery cannot read the signing environment");
 assert.ok(!JSON.stringify(recovery).includes("secrets."));
+assert.ok(recovery.jobs.recover.steps.at(-1).with.name.includes("observer-${{ github.run_attempt }}"),
+  "A controller rerun must preserve earlier recovery receipts without an artifact-name collision");
 const ci = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"));
 assert.deepEqual(ci.on.push.branches, ["**"], "Release tags must not start a duplicate source CI");
 assert.ok(ci.on.workflow_call !== undefined && ci.on.pull_request !== undefined);
