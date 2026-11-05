@@ -981,7 +981,7 @@ const en: Dict = {
     agentPermission: {
       title: "Agent permissions",
       description: "Every Agent chat uses this permission. Chats no longer have their own picker.",
-      hint: "Each runtime uses its closest native option (for example, Hermes only has Inherit and YOLO). Changes apply from each chat's next message.",
+      hint: "Each runtime uses its closest native option (for example, Hermes only has Inherit and YOLO). Changes apply from each chat's next message. Group chats, scheduled tasks and inspiration notes aren't affected; they use full access by default.",
     },
     browserUse: {
       engineVersion: "Web component v{{version}}",
@@ -3501,6 +3501,7 @@ const en: Dict = {
     permissionFromSettings: "All Agents currently use: {{mode}}. Change it in Settings → Agent permissions.",
     permissionCurrentSession: "This chat is still on “{{mode}}” and switches to the Settings permission with your next message.",
     permissionSyncFailed: "Couldn't apply the permission from Settings, so the message wasn't sent: {{msg}}",
+    permissionNotApplied: "This chat belongs to a scheduled task or inspiration note. It keeps its own permission and isn't affected by Settings → Agent permissions.",
     availableCommands: "Available commands",
     currentModel: "**Current model**: `{{model}}`\n\nUse `/model <id>` to switch; `/models` to list all.",
     notSet: "(not set)",

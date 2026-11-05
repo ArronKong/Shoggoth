@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getConfig } from "../api/client";
 import type { ChatPermissionModeOption, GlobalPermissionMode } from "../types";
+import { sessionCategoryOf, type SessionCategoryRow } from "./sessionKind";
 
 // One permission choice in Settings applies to every Agent chat. Each runtime
 // keeps its own native options; this module maps the global choice onto them.
@@ -45,6 +46,14 @@ export function sessionPermissionModeFor(
     if (match) return match.id;
   }
   return null;
+}
+
+// Group chats, scheduled tasks and inspiration notes run with full access under
+// their own rules. Group sessions never reach the chat list; the other two can,
+// so leave their sessions alone when someone sends a follow-up there.
+export function followsGlobalPermission(row: SessionCategoryRow): boolean {
+  const category = sessionCategoryOf(row);
+  return category !== "task" && category !== "inspiration";
 }
 
 let cached: GlobalPermissionMode | null = null;

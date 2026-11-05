@@ -979,7 +979,7 @@ const zhCN = {
     agentPermission: {
       title: "Agent 权限",
       description: "所有 Agent 对话统一使用这里的权限，不再在每个对话里单独选择。",
-      hint: "每个运行环境会自动对应到最接近的原生选项（例如 Hermes 只有「跟随配置」和「全部允许」）。修改后，从各对话的下一条消息开始生效。",
+      hint: "每个运行环境会自动对应到最接近的原生选项（例如 Hermes 只有「跟随配置」和「全部允许」）。修改后，从各对话的下一条消息开始生效。群聊、定时任务和灵感便签不受此设置影响，默认使用完全访问权限。",
     },
     browserUse: {
       engineVersion: "网页组件 v{{version}}",
@@ -3499,6 +3499,7 @@ const zhCN = {
     permissionFromSettings: "所有 Agent 当前使用的权限：{{mode}}。可在「设置 → Agent 权限」中修改。",
     permissionCurrentSession: "本会话目前为「{{mode}}」，发送下一条消息时会切换为设置中的权限。",
     permissionSyncFailed: "无法应用设置中的权限，消息未发送：{{msg}}",
+    permissionNotApplied: "此会话属于定时任务或灵感便签，按其自身规则使用权限，不受「设置 → Agent 权限」影响。",
     availableCommands: "可用命令",
     currentModel: "**当前模型**：`{{model}}`\n\n用 `/model <id>` 切换；`/models` 查看全部。",
     notSet: "（未设置）",

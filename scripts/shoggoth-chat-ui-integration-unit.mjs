@@ -331,6 +331,8 @@ assert.match(chatPage, /sessionPermissionModeFor\(await loadGlobalPermissionMode
   "发送前必须把设置中的权限映射到当前运行环境的原生选项");
 assert.match(chatPage, /await syncSessionPermission\(key\);\s*const prepared = await prepareChatInputForSend/,
   "新回合发送前必须先应用设置中的权限，失败时不发送");
+assert.match(chatPage, /const syncSessionPermission = async \(key: string\) => \{\s*if \(!followsSettingsPermission\(key\)\) return;/,
+  "定时任务和灵感便签会话按自身规则（完全访问）运行，不受设置中的权限影响");
 assert.match(chatPage, /activeCaps\?\.modelScope[\s\S]*?model\.modelScopes\?\.includes\(activeCaps\.modelScope/,
   "共享 Shoggoth 模型目录必须优先按当前 Agent Profile 隔离");
 assert.match(chatPage, /activeCaps\?\.modelProvider[\s\S]*?models\.filter\(\(model\)\s*=>\s*model\.provider\s*===\s*activeCaps\.modelProvider\)/,

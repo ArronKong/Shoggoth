@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import SettingsAgentPermission from "../../app/manage-ui/src/pages/settings/SettingsAgentPermission";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import {
+  followsGlobalPermission,
   GLOBAL_PERMISSION_MODES,
   normalizeGlobalPermissionMode,
   sessionPermissionModeFor,
@@ -76,6 +77,20 @@ state.runPermissionFixture = async () => {
   check(mapped(hermes) === "inherit|inherit|yolo", "Hermes falls back to its stricter option");
   check(sessionPermissionModeFor("full-access", []) === null && sessionPermissionModeFor("auto-review", undefined) === null,
     "backends without permission options are left alone");
+
+  // Scheduled tasks and inspiration notes keep their own (full access) rules.
+  const uuid = "11111111-1111-4111-8111-111111111111";
+  check(followsGlobalPermission({ key: `agent:shoggoth-a:${uuid}`, kind: "direct" }), "ordinary native chats follow Settings");
+  check(followsGlobalPermission({ key: "agent:main:main" }) && followsGlobalPermission({ key: `agent:hermes-a:dashboard:${uuid}` }),
+    "main and web chats follow Settings");
+  for (const [label, row] of Object.entries({
+    nativeCron: { key: `agent:shoggoth-a:${uuid}`, kind: "cron" },
+    gatewayCron: { key: "agent:main:cron:daily-report" },
+    kanban: { key: "agent:main:kanban:t_1", source: "kanban" },
+    nativeInspiration: { key: `agent:shoggoth-a:${uuid}`, kind: "direct", inspirationId: "idea-1" },
+    inspirationKey: { key: "agent:main:inspiration:idea-1" },
+    legacyHermesInspiration: { key: `agent:hermes-a:${uuid}`, title: "这是用户当前委派的灵感任务。请推进。" },
+  })) check(!followsGlobalPermission(row), `${label} sessions are not changed by Settings`);
   return { runtimes: Object.keys(state.permissionCatalog).length, options: 3, saves: saves.length,
-    fullAccessWithoutDialog: true, openclawMapped: true, hermesMapped: true };
+    fullAccessWithoutDialog: true, openclawMapped: true, hermesMapped: true, tasksAndInspirationExcluded: true };
 };

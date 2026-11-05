@@ -167,6 +167,7 @@ import ImmersiveChat, { type ImmersiveMessage } from "./immersive/ImmersiveChat"
 import ChatThinkFastMenu from "./ChatThinkFastMenu";
 import { localizePermissionMode } from "../lib/permissionModeText";
 import {
+  followsGlobalPermission,
   GLOBAL_PERMISSION_MODE_TEXT,
   loadGlobalPermissionMode,
   sessionPermissionModeFor,
@@ -5653,7 +5654,13 @@ function ChatPageApp() {
   // Bring this session in line with the permission chosen in Settings before a
   // new turn starts. Each runtime gets its closest native option. A failed
   // update stops the send, so a turn never runs with a different permission.
+  const followsSettingsPermission = (key: string) => {
+    const row: SessionRow = sessionsRef.current.find((item) => item.key === key) ?? { key };
+    const title = friendlySessionLabel(row, t);
+    return followsGlobalPermission({ ...row, title, sub: sessionDisplayPreview(row, title) });
+  };
   const syncSessionPermission = async (key: string) => {
+    if (!followsSettingsPermission(key)) return;
     const agent = agentOf(key);
     let caps = capabilitiesForSession(key);
     if (!caps || caps.notReady) {
@@ -6085,6 +6092,7 @@ function ChatPageApp() {
     switch (action) {
       case "permission": {
         // Permission is one app-wide choice in Settings; chats only display it.
+        if (!followsSettingsPermission(key)) { pushLocal(t("chat.permissionNotApplied")); return true; }
         const label = t(`chat.permissionModes.${GLOBAL_PERMISSION_MODE_TEXT[globalPermissionMode].label}`);
         const current = permissionOptions.find((option) => option.id === activePermissionMode);
         const target = sessionPermissionModeFor(globalPermissionMode, permissionOptions);

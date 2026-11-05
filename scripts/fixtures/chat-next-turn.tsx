@@ -10,6 +10,8 @@ import i18n from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
 const query = new URLSearchParams(location.search), runtime = query.get("runtime") || "codex", immersive = query.has("immersive");
+// Scheduled-task and inspiration sessions keep their own permission rules.
+const origin = query.get("origin") as "cron" | "inspiration" | null;
 const backend = ["openclaw", "hermes"].includes(runtime) ? runtime : "shoggoth", agentId = `${backend}-next-turn`;
 const key = `agent:${agentId}:11111111-1111-4111-8111-111111111111`, bindingId = "22222222-2222-4222-8222-222222222222";
 const steer = ["codex", "claude-code", "pi", "deepseek-harness", "openclaw", "hermes"].includes(runtime);
@@ -24,7 +26,8 @@ const models = ["current-model", "next-model"].map(id => ({ id, name: id, provid
 let selection = { sessionKey: key, revision: 1, bindingId, runtime, model: "current-model", canSwitch: true,
   candidates: [{ bindingId, support: { supported: true }, adjustments: { clearModelOverride: false, permissionMode: "ask" } }], contextUsage: null };
 const sessions: any[] = [{ key, agentId, backendId: backend, agentName: runtime, model: "current-model", modelProvider: runtime,
-  permissionMode: "ask", thinkingLevel: null, fastMode: false, updatedAt: Date.now() }];
+  permissionMode: "ask", thinkingLevel: null, fastMode: false, updatedAt: Date.now(),
+  ...(origin === "cron" ? { kind: "cron" } : origin === "inspiration" ? { inspirationId: "idea-next-turn" } : {}) }];
 const requests: any[] = [], sockets = new Set<FixtureSocket>();
 const history = [{ role: "user", content: "帮我整理这个项目的进展", timestamp: Date.now()-10000 },
   { role: "assistant", content: "我正在检查当前的项目进展。", timestamp: Date.now()-5000 }];
@@ -137,11 +140,14 @@ Object.assign(window,{ nextTurnFixture:{runtime,backend,immersive,requests,runni
     await wait(()=>requests.some(r=>r.method==="chat.send"),"next turn sends");
   }
   const firstSend=requests.findIndex(r=>r.method==="chat.send");
-  const permissionPatch=requests.findIndex(r=>r.method==="sessions.patch"&&r.params.permissionMode===fullAccessMode);
-  check(permissionPatch>=0 && permissionPatch<firstSend,"the Settings permission is applied before the next turn starts");
-  check(permissionPatches().length===1 && permissionPatches()[0].params.key===key,"the Settings permission is applied once to the active session");
+  if(origin) check(firstSend>=0 && permissionPatches().length===0,`${origin} sessions keep their own permission`);
+  else {
+    const permissionPatch=requests.findIndex(r=>r.method==="sessions.patch"&&r.params.permissionMode===fullAccessMode);
+    check(permissionPatch>=0 && permissionPatch<firstSend,"the Settings permission is applied before the next turn starts");
+    check(permissionPatches().length===1 && permissionPatches()[0].params.key===key,"the Settings permission is applied once to the active session");
+  }
   check(!document.querySelector('[role="alertdialog"], [role="dialog"]'),"applying the Settings permission opens a dialog");
-  return {runtime,backend,immersive,settingsEnabled:true,settingsSaved:true,permissionFromSettings:true,controlsVisible:true,sendHiddenWhileRunning:true,enterSends:true,behavior:steer?"native-steering":"next-turn-queue",abort:false};
+  return {runtime,backend,immersive,...(origin?{origin}:{}),settingsEnabled:true,settingsSaved:true,permissionFromSettings:!origin,controlsVisible:true,sendHiddenWhileRunning:true,enterSends:true,behavior:steer?"native-steering":"next-turn-queue",abort:false};
 }});
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider/><ChatPage/></UiProvider></HashRouter>);
 if(query.has("preview")) void running();
