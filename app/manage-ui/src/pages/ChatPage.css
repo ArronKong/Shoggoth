@@ -988,7 +988,8 @@
 
 /* thread — full-height base layer; the floating header/composer docks overlay it,
    so messages scroll continuously under the glass bars (top ↔ bottom). */
-.chat-thread {
+.chat-thread,
+.chat-group-thread {
   position: absolute;
   inset: 0;
   z-index: 1;

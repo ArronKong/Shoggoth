@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import test from 'node:test';
 import ts from '../app/manage-ui/node_modules/typescript/lib/typescript.js';
+import { bundledBridgeVersions, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 
 const require = createRequire(import.meta.url), uiRequire = createRequire(new URL('../app/manage-ui/package.json', import.meta.url));
 const React = uiRequire('react'), Renderer = uiRequire('react-test-renderer');
@@ -61,6 +62,7 @@ async function fixture(id = 'wind', language = 'en') {
     const value = key.replace(/^mcpConnectors\./, '').split('.').reduce((value, part) => value?.[part], resources[language]);
     return typeof value === 'string' ? value.replace(/\{\{(\w+)\}\}/g, (_, name) => String(values[name])) : key;
   };
+  const connectorDetails = loadConnectorDetails(translate);
   const Component = load('../app/manage-ui/src/pages/McpConnectorDialog.tsx', name => {
     if (name === 'react' || name === 'react/jsx-runtime') return uiRequire(name);
     if (name === 'react-i18next') return { useTranslation: () => ({ t: translate, i18n: { resolvedLanguage: language } }) };
@@ -68,6 +70,8 @@ async function fixture(id = 'wind', language = 'en') {
     if (name === '../components/Modal') return { __esModule: true, default: ({ children, footer, subtitle, title }) => React.createElement('section', {}, React.createElement('header', {}, title), children, React.createElement("p", {}, subtitle), footer) };
     if (name === '../components/McpConnectorIcon') return { __esModule: true, default: () => null };
     if (name === '../components/ConnectorTools') return { __esModule: true, default: props => React.createElement('div', { 'data-tools-server': props.serverId }) };
+    if (name === '../components/ConnectorDetails') return connectorDetails;
+    if (name === '../../../agent-service/data/mcp-bundled-bridge-versions.json') return bundledBridgeVersions;
     if (name === '../components/ui') return { useConfirm: () => async () => true };
     if (name === '../lib/mcpConnectorUi') return helpers;
     if (name === '../lib/mcpRecommendationCatalog') return catalog;
@@ -222,7 +226,8 @@ await test('pending Add never saves a key or connects; explicit group removal le
     assert.equal(staged, 1); assert.equal(f.writes().length, 0);
     await f.fill(); await f.click('group.connectAll');
     const unrelated = (await f.add(0, 'unrelated-key', 'https://unrelated.example/mcp')).server;
-    await f.click('group.remove');
+    assert.ok(f.dialog.root.findByProps({ 'data-connector-footer': true }).findAllByType('button').some(button => button.props.children === 'Delete'));
+    await f.click('flow.remove');
     assert.deepEqual(f.store.list().servers.map(value => value.id), [unrelated.id]); assert.equal(f.closed, 1);
     assert.equal(f.secretValues.size, 1);
   } finally { await f.close(); }

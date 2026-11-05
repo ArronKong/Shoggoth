@@ -287,6 +287,8 @@ const RUNTIME_START_MESSAGES = Object.freeze({
   RUNTIME_REQUEST_NOT_SENT: "本次请求在发送前已停止；确认未发送，可以在当前会话重新提交",
   PI_TURN_TIMEOUT: "Pi 本次任务执行超时，未自动重放；请检查原生会话结果后决定是否重试",
   PI_PROCESS_CLOSED: "Pi 进程在任务完成前退出，未自动重放；请检查 CLI 状态和原生会话结果",
+  PI_TOOL_DESCRIPTION_TOO_LARGE: "Pi 无法加载 Shoggoth 工具，因为工具说明超出大小限制。本次消息未发送。请更新 Shoggoth 后重试。",
+  PI_TOOL_CATALOG_TOO_LARGE: "Pi 无法加载 Shoggoth 工具，因为工具目录超出传输容量。本次消息未发送。",
   PI_RPC_STARTUP_TIMEOUT: "Pi 通信初始化超时，请检查 CLI 安装与登录状态后重试",
   DEEPSEEK_HARNESS_REQUEST_TIMEOUT: "DeepSeek 通信超时，未自动重放；请检查原生会话结果后决定是否重试",
   DEEPSEEK_HARNESS_STARTUP_TIMEOUT: "DeepSeek 初始化超时，请检查 CLI 安装与登录状态后重试",
@@ -1255,7 +1257,7 @@ function assertGatewayMessage(value) {
 }
 
 function runtimeErrorMessage(code, failure) {
-  const detail = failureDetailText(failure);
+  const detail = failureDetailText(failure, ["PI_TOOL_DESCRIPTION_TOO_LARGE", "PI_TOOL_CATALOG_TOO_LARGE"].includes(code) ? "启动详情" : undefined);
   const generic = /(?:^RUN_FAILED$|_TURN_FAILED$|_START_FAILED$|_RUNTIME_FAILED$)/u.test(code);
   const summary = detail && generic ? "本次任务执行失败，未自动重放"
     : RUNTIME_START_MESSAGES[code] || `Shoggoth 任务未完成 (${code})`;
@@ -3232,6 +3234,13 @@ class ShoggothBackend extends AgentBackend {
     }
     if (!CONNECTOR_METHODS.includes(method)) throw safeError(null, "OPEN_CONNECTOR_RETIRED");
     try { validateConnectorParams(method, params); } catch { throw safeError(null, "CONNECTOR_REQUEST_INVALID"); }
+    // Native chat rows carry gateway keys; the Service looks up requests by session UUID.
+    if (method === "connector.mcp.requests.list" && (!params.backendId || params.backendId === "shoggoth")
+      && params.sessionKey.startsWith("agent:")) {
+      const { agentId, sessionKey } = parseGatewaySessionKey(params.sessionKey);
+      if (agentId !== params.agentId) throw safeError(null, "MCP_REQUEST_ACCESS_DENIED");
+      return this._call(method, { ...params, sessionKey });
+    }
     return this._call(method, params);
   }
 
@@ -5523,7 +5532,7 @@ class ShoggothBackend extends AgentBackend {
 
   _assertExternalInspirationExecution(target, idea, runId = null) {
     const execution = idea?.latestExecution;
-    if (idea?.id !== target.inspirationId || !execution || execution.profileId !== null
+    if (idea?.id !== target.inspirationId || !execution || execution.ideaId !== target.inspirationId || execution.profileId !== null
       || execution.agentId !== target.agentId || execution.backendId !== target.backendId
       || execution.sessionKey !== target.sessionKey || (runId !== null && execution.runId !== runId)) {
       throw safeError(null, "INSPIRATION_BINDING_INVALID");
@@ -5541,16 +5550,16 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async _loadExternalInspirationExecution(target, runId = null, idea = null) {
-    if (idea === null) ({ idea } = await this._call("inspiration.get", { id: target.inspirationId }));
-    const latest = this._assertExternalInspirationExecution(target, idea, runId);
-    // get/list intentionally omit attention. The execution projection is the
-    // bounded, canonical source for an approval or input card.
-    if (!["waiting_input", "waiting_approval"].includes(latest.status)) return latest;
-    const result = await this._call("inspiration.executions", { id: idea.id, cursor: null, limit: 1 });
-    const detailed = this._assertExternalInspirationExecution(target,
-      { id: idea.id, latestExecution: result.executions[0] }, latest.runId);
-    if (detailed.id !== latest.id) throw safeError(null, "INSPIRATION_BINDING_INVALID");
-    return detailed;
+    const accepted = idea === null ? null : this._assertExternalInspirationExecution(target, idea, runId);
+    if (accepted && !["waiting_input", "waiting_approval"].includes(accepted.status)) return accepted;
+    const result = await this._call("inspiration.session.execution", {
+      backendId: target.backendId, agentId: target.agentId, sessionKey: target.sessionKey,
+      runId: runId ?? accepted?.runId ?? null,
+    });
+    const execution = this._assertExternalInspirationExecution(target,
+      { id: target.inspirationId, latestExecution: result.execution }, runId ?? accepted?.runId ?? null);
+    if (accepted && execution.id !== accepted.id) throw safeError(null, "INSPIRATION_BINDING_INVALID");
+    return execution;
   }
 
   async _controlExternalInspirationSession(target, key, data) {
@@ -5592,9 +5601,15 @@ class ShoggothBackend extends AgentBackend {
     if (opts.signal?.aborted) return;
     const generation = this._generation;
     const execution = await this._loadExternalInspirationExecution(target);
+    if (opts.signal?.aborted || generation !== this._generation) return;
     // Historical terminal messages belong to the real backend's history.
-    // Replaying a terminal on every refresh would cause a history/final loop.
-    if (!["queued", "starting", "running", "waiting_input", "waiting_approval"].includes(execution.status)) return;
+    // Clear stale generation controls without replaying final/error text and
+    // triggering another history refresh. Unknown is not evidence of idleness.
+    if (!ACTIVE_RUN_STATUSES.has(execution.status)) {
+      const kind = TERMINAL_RUN_STATUSES.has(execution.status) ? "idle" : "needs_verification";
+      this._invokeHook(hooks, "status", { kind, text: kind });
+      return;
+    }
     return this._observeExternalInspirationExecution(target, execution, hooks, opts, generation);
   }
 

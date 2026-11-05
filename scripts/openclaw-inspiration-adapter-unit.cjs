@@ -129,7 +129,8 @@ test("prepare freezes the remote Agent workspace and deterministic session ident
   assert.deepEqual(state.calls.filter((call) => call.method === "sessions.create").map((call) => call.params.key), [first.sessionKey, first.sessionKey]);
   assert.equal(state.calls.find((call) => call.method === "sessions.create").params.idempotencyKey, "inspiration-session:execution-session-1");
   assert.equal(state.calls.some((call) => call.method === "agent"), false);
-  assert.equal(state.calls.some((call) => call.method === "sessions.patch"), false, "inspiration keeps its current permission defaults");
+  assert.deepEqual(state.calls.filter(call => call.method === "sessions.patch").map(call => call.params),
+    [{ key: first.sessionKey, permissionMode: "full" }, { key: first.sessionKey, permissionMode: "full" }]);
 });
 
 test("new and reused group sessions confirm Full access without changing Agent defaults or starting work", async () => {
@@ -165,7 +166,24 @@ test("existing inspiration session is bound without creating or resetting it", a
   const result = await adapter.prepare({ agentId: "main", sessionKey: SESSION, workspace: state.workspace });
   assert.equal(result.sessionKey, SESSION);
   assert.equal(state.calls.some((call) => call.method === "sessions.create"), false);
+  assert.equal(state.calls.some((call) => call.method === "sessions.patch"), false);
   await assert.rejects(adapter.prepare({ agentId: "main", sessionKey: "agent:other:main" }), { code: "OPENCLAW_EXECUTION_IDENTITY_INVALID" });
+});
+
+test("new inspiration refuses an unconfirmed Full access selection before dispatch", async t => {
+  for (const variant of ["scope", "unsupported", "ignored", "foreign", "transport"]) await t.test(variant, async () => {
+    const { state, backend, adapter } = fixture();
+    if (variant === "scope") backend._hasGatewayScope = scope => scope !== "operator.admin";
+    if (variant === "unsupported") backend.hasGatewayMethod = method => method !== "sessions.patch";
+    state.overrides["sessions.patch"] = params => {
+      if (variant === "transport") throw Error("offline");
+      return { key: variant === "foreign" ? "other-session" : params.key,
+        entry: { permissionMode: variant === "ignored" ? "workspace" : "full" } };
+    };
+    await assert.rejects(adapter.prepare({ agentId: "main", sessionId: variant }));
+    assert.equal(state.calls.some(call => call.method === "agent"), false);
+    if (["scope", "unsupported"].includes(variant)) assert.equal(state.calls.some(call => call.method === "sessions.create"), false);
+  });
 });
 
 test("an archived group session is rejected during preparation before any execution or model mutation", async t => {
@@ -603,7 +621,7 @@ test("a Host-sealed deleted group can confirm an expired inactive run, never an 
 });
 
 // ---- Gateway 2026.9.9 起没有任务账 RPC（tasks.*）：改用 agent.wait ----
-const WITHOUT_LEDGER = ["agents.list", "sessions.create", "sessions.list", "agent", "agent.wait", "chat.abort",
+const WITHOUT_LEDGER = ["agents.list", "sessions.create", "sessions.patch", "sessions.list", "agent", "agent.wait", "chat.abort",
   "question.list", "question.resolve", "exec.approval.list", "exec.approval.get", "exec.approval.resolve"];
 
 function waitFixture() {

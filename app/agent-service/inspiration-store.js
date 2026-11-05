@@ -502,6 +502,15 @@ class InspirationStore extends EventEmitter {
       .map(row => this.#decode("executions", row));
   }
 
+  // Rounds and the agents that worked on one idea, in first-use order, from indexed columns.
+  executionRoster(ideaId) {
+    this.#assertOpen();
+    const rows = this.#statement(`SELECT backend_id,agent_id,COUNT(*) AS execution_count,MIN(created_at) AS first_at
+      FROM executions WHERE idea_id=? GROUP BY backend_id,agent_id ORDER BY first_at,backend_id,agent_id`).all(ideaId);
+    return { count: rows.reduce((sum, row) => sum + row.execution_count, 0),
+      agents: rows.slice(0, 8).map(row => ({ backendId: row.backend_id, agentId: row.agent_id })) };
+  }
+
   executionForRun(runId) {
     this.#assertOpen();
     const row = this.#statement("SELECT data FROM executions WHERE run_id=?").get(runId);

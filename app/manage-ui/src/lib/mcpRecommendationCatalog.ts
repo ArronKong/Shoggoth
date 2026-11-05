@@ -42,6 +42,17 @@ export function mcpBrandId(identity: string): string {
   return mcpRegistryBrands[identity] || identity;
 }
 
+// Recommendations for apps aimed primarily at Chinese-language users.
+const chineseRecommendationIds = new Set([
+  "12306", "alipay", "amap", "baidu-maps", "didi", "eastmoney", "fliggy", "ifind",
+  "luckin", "mcdonalds", "meituan-paotui", "mijia", "netease-music",
+  "quark-drive", "rollinggo-hotel", "variflight", "weread", "wind",
+]);
+
+export function mcpRecommendationVisibleInLocale(identity: string, language: string): boolean {
+  return language.startsWith("zh") || !chineseRecommendationIds.has(mcpBrandId(identity));
+}
+
 // Curated product labels are presentation only; saved connector identities and
 // transport/account settings continue to use their existing records.
 const connectorNames: Record<string, string> = {
@@ -67,6 +78,30 @@ export function mcpConnectorName(identity: string | undefined, fallback: string)
   return Object.hasOwn(legacyConnectorNames, fallback) ? legacyConnectorNames[fallback] : fallback;
 }
 
+// Display names for known publishers. A preset's name is used only when it is
+// the provider's brand; user-supplied connector names are never publishers.
+const connectorDevelopers: Record<string, string> = {
+  "day-one": "Bloom Built Inc", fantastical: "Flexibits", "home-assistant": "Open Home Foundation",
+  gmail: "Google", "google-calendar": "Google", "google-contacts": "Google", "google-docs": "Google",
+  "google-drive": "Google", "google-places": "Google", "google-sheets": "Google", "google-slides": "Google",
+  "outlook-calendar": "Microsoft", "outlook-mail": "Microsoft", "link-by-stripe": "Stripe",
+  shop: "Shopify", shopify: "Shopify", "shop-pay": "Shopify", "shopify-ucp": "Shopify",
+  "uber-eats": "Uber", quickbooks: "Intuit", "blender-lab": "Blender Foundation", "chrome-devtools": "Google",
+  context7: "Upstash", filesystem: "Model Context Protocol", fetch: "Model Context Protocol", time: "Model Context Protocol",
+  "12306": "Joooook", n8n: "Romuald Czlonkowski", flightaware: "Shoggoth", ticketmaster: "Shoggoth",
+  amap: "高德", "baidu-maps": "百度", didi: "滴滴出行", luckin: "瑞幸咖啡", mcdonalds: "麦当劳",
+  mijia: "小米", "meituan-paotui": "美团", "netease-music": "网易", weread: "腾讯", "quark-drive": "夸克",
+  "rollinggo-hotel": "RollingGo", wind: "万得", variflight: "飞常准", eastmoney: "东方财富", ifind: "同花顺",
+  airtable: "Airtable", amplitude: "Amplitude", canva: "Canva", miro: "Miro", monday: "monday.com",
+  neon: "Neon", sentry: "Sentry", todoist: "Doist", webflow: "Webflow",
+};
+
+export function mcpConnectorDeveloper(identity: string | undefined, catalogName?: string): string | undefined {
+  const brand = identity && mcpBrandId(identity);
+  return brand && Object.hasOwn(connectorDevelopers, brand) ? connectorDevelopers[brand]
+    : catalogName || (identity ? mcpRegistrySummary(identity)?.name : undefined);
+}
+
 // App-created registrations retain a display identity even when the separate
 // ownership status is loading or unavailable. This never grants install/account
 // authority; those operations still require the official controller's record.
@@ -81,7 +116,7 @@ export function mcpRecommendationRank(identity: string): number {
 }
 
 // Registry metadata is often English-only. Curated summaries must follow the app language.
-const registrySummaries: Record<string, { name: string; description: { "zh-CN": string; en: string } }> = {
+const registrySummaries: Record<string, { name: string; iconId?: string; description: { "zh-CN": string; en: string } }> = {
   composio: { name: "Composio", description: { "zh-CN": "连接常用 SaaS 工具，让助理在已授权的应用之间协作。", en: "Connect everyday SaaS tools so agents can work across your authorized apps." } },
   linear: { name: "Linear", description: { "zh-CN": "跟进团队的 Issue、项目与开发进度。", en: "Track team issues, projects, and development progress." } },
   notion: { name: "Notion", description: { "zh-CN": "查找和整理笔记、文档与数据库，让团队知识随时可用。", en: "Find and organize notes, documents, and databases to put team knowledge to work." } },
@@ -91,8 +126,13 @@ const registrySummaries: Record<string, { name: string; description: { "zh-CN": 
   github: { name: "GitHub", description: { "zh-CN": "查看代码仓库、Issue 和 Pull Request，协作处理开发工作。", en: "Explore repositories, issues, and pull requests to collaborate on development." } },
   stripe: { name: "Stripe", description: { "zh-CN": "查询支付、客户与订阅数据，协助处理业务运营。", en: "Look up payments, customers, and subscriptions to support business operations." } },
   huggingface: { name: "Hugging Face", description: { "zh-CN": "搜索模型、数据集与 Spaces，查找可用的机器学习资源。", en: "Search models, datasets, and Spaces to discover machine learning resources." } },
+  "io.github.variflight/variflight-mcp": {
+    name: "飞常准", iconId: "variflight",
+    description: { "zh-CN": "查询航班、天气、出行舒适度和机票价格。", en: "Look up flights, weather, travel comfort, and fares." },
+  },
 };
 
 export function mcpRegistrySummary(registryName: string) {
-  return registrySummaries[mcpBrandId(registryName)];
+  const key = Object.hasOwn(registrySummaries, registryName) ? registryName : mcpBrandId(registryName);
+  return Object.hasOwn(registrySummaries, key) ? registrySummaries[key] : undefined;
 }

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
+import { loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 const require = createRequire(new URL('../app/manage-ui/package.json', import.meta.url));
 const React = require('react'), Renderer = require('react-test-renderer'), ts = require('typescript'), i18next = require('i18next');
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -48,6 +49,7 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   '../api/mcpConnectors': { listMcpConnectors: async () => ({ revision: 9, servers: [serverSnapshot()] }), saveMcpCredentials: async (...args) => { credentialCalls.push(plain(args)); const saved = () => { configuredFields = Object.keys(args[1].env).map(name => `env:${name}`); return { server: serverSnapshot() }; }; if (holdCredentials) return new Promise(resolve => { settleCredentials = () => resolve(saved()); }); return saved(); } },
   '../components/Modal': { __esModule: true, default: ({ children, footer, subtitle, title, dismissible }) => React.createElement('section', { role: 'dialog', 'aria-label': typeof title === 'string' ? title : 'connector', 'data-dismissible': dismissible }, children, React.createElement("p", {}, subtitle), footer) },
   '../components/ConnectorTools': { __esModule: true, default: () => null },
+  '../components/ConnectorDetails': loadConnectorDetails(t),
  '../components/ui': { useConfirm: () => async () => allowRemove }, '../components/McpConnectorIcon': { __esModule: true, default: () => null },
   './McpConnectorDialog': { __esModule: true, default: ({ managed }) => React.createElement('div', { 'data-managed-tools': managed }) },
   '../../../agent-service/data/official-skill-connectors.json': { __esModule: true, default: catalog }, './ConnectorsPage.module.css': { __esModule: true, default: {} },
@@ -62,21 +64,20 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
  try {
   await Renderer.act(async () => { rendered = Renderer.create(React.createElement(Harness)); await flush(); });
   assert.equal(mutations.length, 0); assert.equal(accountCalls.length, 0, 'opening never authorizes or probes a real account');
+  assert.deepEqual(rendered.root.findByProps({ 'data-connector-footer': true }).findAllByType('button').map(node => node.props.children), [t('mcpConnectors.add')], 'before adding, the only footer action is Add');
+  assert.ok(!rendered.root.findAllByType('a').some(link => link.props.href === definition.docsUrl), 'setup guide is hidden before adding');
   if (definition.id === 'shop') {
    assert.equal(definition.name, 'Shopify'); assert.equal(definition.fields.length, 0);
-   assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === 'https://shop.com/skill.md'));
   }
   if (definition.id === 'quark-drive') {
    assert.equal(definition.version, '1.0.25'); assert.equal(definition.fields.length, 0);
    assert.ok(JSON.stringify(rendered.toJSON()).includes(definition.note[language]), 'Quark scope and account-entitlement notes visible before installation');
-   assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === definition.docsUrl));
    assert.equal(api.officialConnectorErrorKey({ code: 'OFFICIAL_SKILL_QUARK_FAILED' }), 'quarkFailed');
    assert.equal(api.officialConnectorErrorKey({ code: 'OFFICIAL_SKILL_QUARK_LIMITED' }), 'quarkLimited');
   }
   if (definition.id === 'rollinggo-hotel') {
    assert.equal(definition.version, '1.1.6'); assert.equal(definition.fields.length, 0);
    assert.ok(JSON.stringify(rendered.toJSON()).includes(definition.note[language]), 'keyless Skill authorization and booking scope visible before installation');
-   assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === 'https://github.com/RollingGo-AI/rollinggo-hotel-skill-CN'));
    assert.equal(rendered.root.findAllByType('input').length, 0, 'RollingGo never asks for an API key');
   }
   if (definition.id === 'baidu-maps') {
@@ -95,6 +96,8 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   await Renderer.act(async () => { button('install').props.onClick(); button('install').props.onClick(); await flush(); });
   assert.equal(mutations.length, 1, 'duplicate install fenced'); assert.equal(rendered.root.findByProps({ role: 'dialog' }).props['data-dismissible'], false);
   await Renderer.act(async () => { settleInstall(); await flush(); });
+  assert.equal(rendered.root.findByProps({ 'data-connector-footer': true }).findAllByType('button').filter(node => node.props.children === t('mcpConnectors.flow.remove')).length, 1, 'official components use the shared footer Delete action');
+  assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === definition.docsUrl), 'the same guide is available after adding');
   assert.equal(accountCalls.length, 0); assert.ok(JSON.stringify(rendered.toJSON()).includes(t(serviceOnly ? definition.fields.some(field => field.required) ? 'officialConnectors.serviceNeedsCredentials' : 'officialConnectors.serviceUnknown' : 'officialConnectors.accountStates.unknown')), `${definition.id}: local installation reports missing required credentials without claiming account ready`);
   let installedRows, opened;
   const rowProps = { model, servers: [{ id: 'mcp-fixture', status: 'signedOut' }], onOpen: id => { opened = id; } };

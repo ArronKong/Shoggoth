@@ -6,7 +6,7 @@ const { spawn } = require("node:child_process");
 const { resolveOnPath } = require("./mcp-package-launcher");
 const { CLI_ENTRY, KEY_FIELD } = require("./ticketmaster-mcp-launch");
 
-const VERSION = "0.2.1";
+const { ticketmaster: VERSION } = require("./data/mcp-bundled-bridge-versions.json");
 const fail = (code, status) => Object.assign(new Error(code), { code, ...(status ? { status } : {}) });
 const string = (description, maxLength = 256) => ({ type: "string", minLength: 1, maxLength, description });
 const paging = { size: { type: "integer", minimum: 1, maximum: 20, default: 10 }, page: { type: "integer", minimum: 0, maximum: 999, default: 0 } };

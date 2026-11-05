@@ -1,5 +1,5 @@
 import AgentAvatarView from "../components/AgentAvatar";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { InspirationAgent, InspirationExecution } from '../types';
 import { toolActivityTitle } from '../lib/turnTimeline';
@@ -9,15 +9,12 @@ import styles from './InspirationRunBar.module.css';
 
 const oneLine = (text?: string) => text?.replace(/\s+/gu, ' ').trim() || '';
 
-export default function InspirationRunBar({ ideaId, execution, agent, attention, onOpen }: {
-  ideaId: string; execution: InspirationExecution; agent?: InspirationAgent; attention: ReactNode; onOpen: () => void;
+export default function InspirationRunBar({ ideaId, execution, agent, onOpen }: {
+  ideaId: string; execution: InspirationExecution; agent?: InspirationAgent; onOpen: () => void;
 }) {
   const { t } = useTranslation();
   const element = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
-  const [hovered, setHovered] = useState(false);
-  const [focused, setFocused] = useState(false);
-  const [pinned, setPinned] = useState(false);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!element.current) return;
@@ -32,12 +29,9 @@ export default function InspirationRunBar({ ideaId, execution, agent, attention,
     const timer = window.setInterval(() => { if (!document.hidden) setNow(Date.now()); }, 1000);
     return () => window.clearInterval(timer);
   }, [visible, live, execution.runId]);
-  useEffect(() => { setHovered(false); setFocused(false); setPinned(false); }, [execution.runId, execution.attention?.request.requestId]);
   const step = useMemo(() => latestInspirationStep(activity?.trajectory.parts || [], live), [activity, live]);
   const tone = inspirationRunTone(execution);
   const expired = execution.attention?.request.expiresAt != null && execution.attention.request.expiresAt <= now;
-  const expandable = Boolean(execution.attention?.active && !expired);
-  const expanded = expandable && (hovered || focused || pinned);
   const name = agent?.name || execution.agentId;
   const status = t(`inspiration.status.${execution.status === 'canceled' ? 'failed' : execution.status}`);
   let detail = '';
@@ -57,27 +51,13 @@ export default function InspirationRunBar({ ideaId, execution, agent, attention,
   const label = tone === 'running' ? line : `${name} · ${line}`;
   const seconds = Math.max(0, Math.floor(((execution.finishedAt ?? now) - execution.createdAt) / 1000));
   const elapsed = seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
-  const panelId = `inspiration-attention-${execution.id}`;
-  return <div ref={element} className={styles.root} data-inspiration-run-bar data-tone={tone} data-expanded={expanded}
-    data-input={needsAttention && waitingForInput || undefined}
-    data-card-interactive onPointerEnter={event => { if (event.pointerType === 'mouse') setHovered(true); }}
-    onPointerLeave={() => setHovered(false)}
-    onFocus={event => { if (event.target.matches(':focus-visible')) setFocused(true); }}
-    onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setFocused(false); setPinned(false); } }}
-    onKeyDown={event => { if (event.key === 'Escape') {
-      event.stopPropagation(); element.current?.querySelector('button')?.focus();
-      setHovered(false); setFocused(false); setPinned(false);
-    } }}>
+  return <div ref={element} className={styles.root} data-inspiration-run-bar data-tone={tone} data-card-interactive>
     <button type="button" className={styles.header} data-inspiration-run-header
-      aria-label={label} aria-expanded={expandable ? expanded : undefined}
-      aria-controls={expandable ? panelId : undefined} title={label}
-      onClick={() => { if (expandable) setPinned(value => !value); else onOpen(); }}>
+      aria-label={label} aria-haspopup="dialog" title={label} onClick={onOpen}>
       <AgentAvatarView agentId={execution.agentId} name={name} className={styles.avatar} />
       {tone !== 'running' && <span className={styles.name}>{name}</span>}
       <span className={styles.line} role="status" aria-live="polite" aria-atomic="true">{line}</span>
       {tone === 'running' && <span className={styles.elapsed}>{elapsed}</span>}
     </button>
-    {expandable && <div id={panelId} className={styles.expansion} hidden={!expanded} data-inspiration-run-attention
-      data-approval={execution.attention?.request.fields.length === 0}>{attention}</div>}
   </div>;
 }

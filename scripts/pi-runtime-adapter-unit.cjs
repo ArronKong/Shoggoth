@@ -181,6 +181,7 @@ function rpcFixture(behavior = {}) {
             }
             if (turn && behavior.holdState) continue;
             if (turn && behavior.closeBeforeState) {
+              if (behavior.closeBeforeStateStderr) current.stderr.write(behavior.closeBeforeStateStderr);
               current.finish(1);
               continue;
             }
@@ -226,6 +227,7 @@ function rpcFixture(behavior = {}) {
             prompted = true;
             messages.push({ role: "user", content: command.message, timestamp: 1 });
             if (behavior.closeAfterPrompt) {
+              if (behavior.closeAfterPromptStderr) current.stderr.write(behavior.closeAfterPromptStderr);
               current.finish(1);
               continue;
             }
@@ -1313,8 +1315,9 @@ test("stopping reaps a settled Pi process that ignores stdin EOF", async () => {
   }
 });
 
-test("confirmed process exit releases Pi session without replaying an ambiguous operation", async () => {
-  const behavior = { closeAfterPrompt: true };
+for (const marker of ["PI_TOOL_DESCRIPTION_TOO_LARGE memory_save 16386 16384", "PI_TOOL_CATALOG_TOO_LARGE 262144"]) {
+test(`confirmed process exit releases Pi session without replay or a false not-sent claim (${marker})`, async () => {
+  const behavior = { closeAfterPrompt: true, closeAfterPromptStderr: `${marker}\n` };
   const value = rpcFixture(behavior);
   try {
     const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
@@ -1361,6 +1364,7 @@ test("confirmed process exit releases Pi session without replaying an ambiguous 
     value.cleanup();
   }
 });
+}
 
 test("Pi surfaces provider authentication errors without locking the conversation", async () => {
   const behavior = {};
@@ -1607,8 +1611,14 @@ test("an ambiguous Pi turn blocks continuation until the old process actually ex
   }
 });
 
-test("transport loss before get_state is definitely rejected instead of poisoning the session", async () => {
-  const value = rpcFixture({ closeBeforeState: true });
+for (const [marker, expectedCode] of [
+  ["", "PI_PROCESS_CLOSED"],
+  ["PI_TOOL_DESCRIPTION_TOO_LARGE memory_save 16386 16384\n", "PI_TOOL_DESCRIPTION_TOO_LARGE"],
+  ["PI_TOOL_CATALOG_TOO_LARGE 262144\n", "PI_TOOL_CATALOG_TOO_LARGE"],
+  ["PI_TOOL_CATALOG_TOO_LARGE 262144 private-diagnostic\n", "PI_PROCESS_CLOSED"],
+]) {
+test(`transport loss before get_state is definitely rejected with its safe startup cause (${marker.trim() || "no marker"})`, async () => {
+  const value = rpcFixture({ closeBeforeState: true, closeBeforeStateStderr: marker });
   try {
     const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
     const runtime = await value.adapter.acquire(PI_BINDING, {
@@ -1622,21 +1632,32 @@ test("transport loss before get_state is definitely rejected instead of poisonin
       cwd: value.workspace,
       permissionPolicy,
     });
-    await assert.rejects(runtime.turnStart({
+    const input = {
       sessionId: started.session.id,
       operationId: "operation-before-state",
       prompt: "not dispatched",
       model: "openai/gpt-5.6",
       cwd: value.workspace,
       permissionPolicy,
-    }), { code: "PI_PROCESS_CLOSED" });
+    };
+    await assert.rejects(runtime.turnStart(input), error => {
+      assert.equal(error.code, expectedCode);
+      assert.equal(JSON.stringify(error).includes("private-diagnostic"), false);
+      if (expectedCode === "PI_TOOL_CATALOG_TOO_LARGE") assert.match(error.failure?.message, /工具目录响应超过 262144 字节/u);
+      return true;
+    });
     await waitFor(() => runtime.host.activeTurns.size === 0, "pre-prompt Pi failure");
     const snapshot = runtime.host.ledger.snapshot();
     assert.equal(snapshot.sessions[0].sessionFile, null);
     assert.equal(snapshot.sessions[0].turns[0].acceptance, "failed");
+    await assert.rejects(runtime.turnStart(input), { code: expectedCode });
+    const turnSpawns = value.spawns.filter(entry => entry.command === "/bin/sh");
+    assert.equal(turnSpawns.length, 1, "duplicate operations are not replayed");
+    assert.doesNotMatch(turnSpawns[0].child.input, /"type":"prompt"/u);
     await runtime.sessionRead({ sessionId: started.session.id, includeTurns: true });
     await value.adapter.stopAll();
   } finally {
     value.cleanup();
   }
 });
+}

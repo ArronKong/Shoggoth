@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {createRequire} from 'node:module';
 import ts from '../app/manage-ui/node_modules/typescript/lib/typescript.js';
+import { bundledBridgeVersions, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 const require=createRequire(new URL('../app/manage-ui/package.json',import.meta.url));
 const React=require('react'),Renderer=require('react-test-renderer');
 const recommendations=JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/mcp-featured-presets.json',import.meta.url),'utf8'));
@@ -16,7 +17,10 @@ const api={listMcpSubjects:async()=>({items:[],unavailableBackends:[]}),listMcpC
  verifyMcpConnector:async id=>{mutations.push({kind:'verify',id});return {revision,server:current};},startMcpSignIn:async id=>{oauth.push(id);throw Error('Unexpected OAuth');}};
 function load(relative,customRequire){const module={exports:{}};vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL(relative,import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText,{module,exports:module.exports,require:customRequire,AbortController,URL,setInterval,clearInterval,window:{open(){throw Error('Unexpected sign-in window');}}});return module.exports;}
 const helpers=load('../app/manage-ui/src/lib/mcpConnectorUi.ts',require),catalog=load('../app/manage-ui/src/lib/mcpRecommendationCatalog.ts',require);
+const connectorDetails=loadConnectorDetails();
 const Component=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
+ if(name==='../components/ConnectorDetails')return connectorDetails;
+ if(name==='../../../agent-service/data/mcp-bundled-bridge-versions.json')return bundledBridgeVersions;
  if(name==='react')return React;if(name==='react/jsx-runtime')return require(name);
  if(name==='react-i18next')return {useTranslation:()=>({t:key=>key,i18n:{resolvedLanguage:language}})};
  // This suite exercises preset setup/transport, not decorative artwork or
@@ -38,10 +42,10 @@ async function fillLabel(label,value){const node=dialog.root.findAllByType('labe
 for(language of ['en','zh-CN'])for(const id of ids){
  const p=preset(id);assert.ok(p);const count=mutations.length;await mount(p);
  assert.equal(mutations.length,count,'opening never installs '+id);assert.equal(oauth.length,0);
- assert.ok(dialog.root.findAllByType('a').some(a=>a.props.href===p.docsUrl));
+ assert.ok(!dialog.root.findAllByType('a').some(a=>a.props.href===p.docsUrl),'the guide is hidden before adding '+id);
  const required=(p.fields||[]).filter(f=>f.required).length||p.envKey||p.setup==='token';
  assert.equal(save().props.disabled,!!required,id+' initial gate');
- if(!required){await Renderer.act(async()=>save().props.onClick());assert.equal(mutations.at(-1).kind,'add');assert.ok(helpers.mcpRecommendationMatchesServer(p,serial(current)),id+' keeps management identity');}
+ if(!required){await Renderer.act(async()=>save().props.onClick());assert.equal(mutations.at(-1).kind,'add');assert.ok(helpers.mcpRecommendationMatchesServer(p,serial(current)),id+' keeps management identity');assert.ok(dialog.root.findAllByType('a').some(a=>a.props.href===p.docsUrl));}
  await unmount();
 }
 for(language of ['en','zh-CN'])for(const id of ['uber','uber-eats']){

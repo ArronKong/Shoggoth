@@ -4,24 +4,17 @@ import { useTranslation } from 'react-i18next';
 import { PageHead } from '../components/PageHead';
 import FilterTabs from '../components/FilterTabs';
 import SearchCapsule from '../components/SearchCapsule';
-import Modal from '../components/Modal';
 import AgentAvatarView from '../components/AgentAvatar';
-import { Field, TextArea, TextInput, Select, Option } from '../components/Field';
 import { useConfirm, useToast } from '../components/ui';
 import { usePageCache } from '../lib/usePageCache';
 import { useRegisterPageLoading, useRegisterPageRefresh } from '../lib/page-refresh';
 import { useNavigationGuard } from '../lib/navigation-guard';
-import { toSanitizedMarkdownHtml } from '../lib/markdown';
 import { rememberInspirationReturn, forgetInspirationReturn } from '../lib/inspiration-navigation';
 import { createInspiration, listInspirations, getInspiration, getInspirationAgents,
-  getInspirationExecutions, updateInspiration, startInspiration, respondInspiration,
-  cancelInspiration, deleteInspiration } from '../api/client';
-import type { InspirationIdea, InspirationExecution, InspirationFilter, InspirationPatch, InspirationAttachment, InspirationAgent } from '../types';
-import ChatPromptCard, { type ChatPromptResponse } from './ChatPromptCard';
+  getInspirationExecutions, updateInspiration, startInspiration, deleteInspiration } from '../api/client';
+import type { InspirationIdea, InspirationExecution, InspirationFilter, InspirationPatch, InspirationAgent } from '../types';
 import InspirationStatusIcon, { inspirationGrowthStage } from './InspirationStatusIcon';
 import InspirationActionIcon from './InspirationActionIcon';
-import InspirationActivity from './InspirationActivity';
-import InspirationRunCard from './InspirationRunCard';
 import InspirationRunBar from './InspirationRunBar';
 import InspirationTypewriter from './InspirationTypewriter';
 import InspirationArchiveControls from './InspirationArchiveControls';
@@ -38,29 +31,14 @@ import { beginInspirationCardDrag, type InspirationDropTarget } from './inspirat
 import { attachInspirationScrollStages } from './inspiration-scroll-stages';
 import { canStartInspiration, defaultInspirationAgent, inspirationStartFields } from './inspiration-execution';
 import { inspirationNoteContent } from './inspiration-note-text';
+import { ACTIVE, IdeaDetail, displayStatusOf, messageOf, paperToneOf } from './InspirationThread';
 import paperStyles from './InspirationPaper.module.css';
 import pillStyles from '../components/PillTabs.module.css';
 import styles from './InspirationPage.module.css';
 
-const ACTIVE = new Set(['queued', 'starting', 'running', 'waiting_input', 'waiting_approval', 'unknown']);
+export { IdeaDetail };
 const FILTERS: InspirationFilter[] = ['saved', 'active', 'result', 'archived', 'favorite'];
-const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
 const titleOf = (idea: InspirationIdea) => inspirationNoteContent(idea).body.trim().split('\n')[0].slice(0, 80) || idea.attachments?.[0]?.name || '';
-const displayStatusOf = (status: InspirationIdea['status'], execution?: InspirationExecution) =>
-  execution?.attention?.active && execution.attention.request.kind !== 'user_input' ? 'waiting_approval'
-    : status === 'canceled' ? 'failed' : status;
-// Keep the original four-color mapping for notes saved before paperTone existed.
-const paperToneOf = (idea: InspirationIdea) => idea.paperTone
-  ?? [...idea.id].reduce((sum, character) => sum + character.charCodeAt(0), 0) % 4;
-// The detail's growth track follows the wall's four stage filters, which file an idea by its latest run.
-const GROWTH_STAGES = ['saved', 'active', 'result', 'archived'] as const;
-const GROWTH_GLYPHS = { saved: 'saved', active: 'running', result: 'completed', archived: 'completed' } as const;
-const growthStageOf = (idea: InspirationIdea) => idea.archivedAt !== null ? 3 : idea.status === 'completed' ? 2
-  : idea.status === 'saved' || idea.status === 'skipped' ? 0 : 1;
-const detailToneOf =(status: InspirationIdea['status'], archived: boolean) => archived ? 'fruit'
-  : status === 'completed' ? 'result' : status === 'starting' || status === 'running' ? 'live'
-    : status === 'waiting_input' ? 'input' : status === 'waiting_approval' ? 'approval'
-      : status === 'failed' || status === 'interrupted' ? 'wilted' : status === 'unknown' ? 'unknown' : 'seed';
 
 function useVisibleRefresh(refresh: () => Promise<void>, interval = 3000) {
   const latest = useRef(refresh); latest.current = refresh;
@@ -135,60 +113,14 @@ function DeleteIdeaButton({ idea, disabled, compact = false, onDeleted }: {
   </span>;
 }
 
-function Attention({ ideaId, execution, onChange, compact = false, chat = false, agentName }: {
-  ideaId: string; execution: InspirationExecution; onChange: () => Promise<void>; compact?: boolean;
-  /** Show the request exactly as the Session's prompt card, without the wall's attention block. */
-  chat?: boolean;
-  /** The execution's agent, the subject of its approval card. */
-  agentName?: string;
-}) {
-  const { t } = useTranslation();
-  const toast = useToast();
-  const operation = useRef({ input: '', id: '' });
-  const attention = execution.attention;
-  if (!attention) return null;
-  const respond = async (response: ChatPromptResponse) => {
-    const input = JSON.stringify([execution.runId, attention.request.requestId, response]);
-    if (operation.current.input !== input) operation.current = { input, id: crypto.randomUUID() };
-    try {
-      await respondInspiration(ideaId, { operationId: operation.current.id, runId: execution.runId,
-        requestId: attention.request.requestId, response });
-      await onChange();
-    } catch (error) {
-      toast.error(messageOf(error)); await onChange(); throw error;
-    }
-  };
-  // A live approval card that can be allowed prints its own command, so the context only adds what the card leaves out.
-  const { approvalChoices, approvalOptions, approvalDetails } = attention.request;
-  const allowable = approvalChoices?.some((choice) => ['once', 'session', 'always'].includes(choice)
-    || approvalOptions?.some((option) => option.choice === choice && option.kind.startsWith('allow_')));
-  const printed = compact || (attention.active && allowable) ? approvalDetails?.command : undefined;
-  const context = <>
-    {attention.command && attention.command !== printed
-      && <pre className={compact ? 'chat-prompt__cmd' : styles.command}>{attention.command}</pre>}
-    {!compact && attention.cwd && !(chat && approvalDetails?.cwd === attention.cwd)
-      && <p className={styles.attentionPath}>{t('inspiration.workspace')}<span>{attention.cwd}</span></p>}
-    {attention.details && <pre className={compact ? 'chat-prompt__cmd' : styles.command}>{attention.details}</pre>}
-  </>;
-  return <div className={compact ? styles.compactAttention : chat ? styles.chatAttention : styles.attention} data-active={attention.active} data-card-interactive>
-    {attention.active ? <ChatPromptCard key={attention.request.requestId}
-      compactApproval={compact}
-      compactInput={compact}
-      draftKey={`inspiration:${execution.runId}:${attention.request.requestId}`} agentName={agentName}
-      entry={{ ...attention.request, id: attention.request.requestId }} onRespond={(_entry, data) => respond(data)} />
-      : <><strong>{t('inspiration.expired')}</strong><p>{attention.request.message}</p>
-        {attention.request.fields.map((field) => <p key={field.id}>{field.label}</p>)}
-        <p className={styles.meta}>{t('inspiration.expiredHint')}</p></>}
-    {!compact && context}
-  </div>;
-}
-
 // Draft, search and drag state belong to the page; settled cards only need to
 // render again when their own props or subscribed UI/translation context change.
-const IdeaCard = memo(function IdeaCard({ idea, execution, agent, onOpen, onChange, onPress, starting = false }: {
-  idea: InspirationIdea; execution?: InspirationExecution; agent?: InspirationAgent; onOpen: (id: string) => void;
-  onChange: () => Promise<void>;
-  onPress?: (event: ReactPointerEvent<HTMLElement>, idea: InspirationIdea) => void; starting?: boolean;
+const IdeaCard = memo(function IdeaCard({ idea, execution, agent, roster, onOpen, onChange, onPress, onSend, starting = false }: {
+  idea: InspirationIdea; execution?: InspirationExecution; agent?: InspirationAgent; roster?: InspirationAgent[];
+  onOpen: (id: string) => void; onChange: () => Promise<void>;
+  onPress?: (event: ReactPointerEvent<HTMLElement>, idea: InspirationIdea) => void;
+  /** Hands the idea to an agent picked from the dock, as a drop would. */
+  onSend?: (idea: InspirationIdea) => void; starting?: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const toast = useToast();
@@ -206,10 +138,13 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, onOpen, onChan
   const paperTone = paperToneOf(idea);
   const content = inspirationNoteContent(idea);
   const latest = execution?.runId === idea.latestExecution?.runId ? execution : idea.latestExecution;
-  const agentNameOf = (value?: InspirationExecution) => value && agent?.id === value.agentId
-    && agent.backendId === value.backendId ? agent.name : undefined;
   const rooting = Boolean(latest && idea.archivedAt === null
     && ['queued', 'starting', 'running', 'waiting_input', 'waiting_approval', 'failed', 'canceled', 'interrupted', 'unknown'].includes(idea.status));
+  const sendable = Boolean(onSend) && canStartInspiration(idea) && !busy && !starting;
+  const rounds = idea.rounds?.count ?? (idea.latestExecution ? 1 : 0);
+  const workers = idea.rounds?.agents ?? (idea.latestExecution ? [{ backendId: idea.latestExecution.backendId, agentId: idea.latestExecution.agentId }] : []);
+  const nameOf = (value: { backendId: string; agentId: string }) => roster?.find(item => item.id === value.agentId
+    && item.backendId === value.backendId)?.name || value.agentId;
   return <article className={`${paperStyles.surface} ${styles.card}`} data-inspiration-id={idea.id} data-paper={paperTone} data-has-media={Boolean(idea.attachments?.length) || undefined}
     data-rooting={rooting || undefined}
     data-inspiration-draggable={Boolean(onPress) && canStartInspiration(idea) && !busy && !starting || undefined}
@@ -218,15 +153,7 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, onOpen, onChan
       || window.getSelection()?.toString()) return;
     onOpen(idea.id);
   }}>
-    <div className={styles.cardActions} data-card-interactive>
-      {idea.latestExecution && <SessionLink execution={idea.latestExecution} icon />}
-      <button className={styles.iconButton} type="button" disabled={busy} aria-pressed={idea.favorite}
-        aria-label={t(idea.favorite ? 'inspiration.unfavorite' : 'inspiration.favorite')}
-        onClick={() => { void patch({ favorite: !idea.favorite }); }}><InspirationActionIcon name="favorite" filled={idea.favorite} /></button>
-      <DeleteIdeaButton idea={idea} compact disabled={busy} onDeleted={onChange} />
-    </div>
-    {rooting && latest && <InspirationRunBar ideaId={idea.id} execution={latest} agent={agent} onOpen={() => onOpen(idea.id)}
-      attention={<Attention ideaId={idea.id} execution={latest} onChange={onChange} compact agentName={agentNameOf(latest)} />} />}
+    {rooting && latest && <InspirationRunBar ideaId={idea.id} execution={latest} agent={agent} onOpen={() => onOpen(idea.id)} />}
     <div className={styles.cardContent}>
       <InspirationContent body={content.body} attachments={content.attachments} compact onOpen={() => onOpen(idea.id)}
         renderText={text => (text || !content.attachments.length) && <button className={styles.bodyButton} data-inspiration-body type="button"
@@ -234,280 +161,32 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, onOpen, onChan
         <p>{text}</p>
       </button>} />
     </div>
-    {!rooting && execution && <Attention ideaId={idea.id} execution={execution} onChange={onChange} agentName={agentNameOf(execution)} />}
-    {!rooting && idea.latestExecution?.resultSummary && <div className={styles.resultPreview}>
-      <span className={styles.meta}>{t('inspiration.result')}</span>
-      <p>{idea.latestExecution.resultSummary}</p>
-    </div>}
     <div className={styles.cardFoot}>
       <RunStatus status={idea.status} accepted={idea.acceptedAt !== null} archived={idea.archivedAt !== null} execution={execution} />
-      <div className={styles.cardTools} data-card-interactive>
-        {idea.archivedAt !== null && <button className="btn-subtle" disabled={busy} onClick={() => { void patch({ archived: false }); }}>{t('inspiration.restore')}</button>}
-        {idea.archivedAt === null && idea.status === 'completed' && <button className="btn-subtle" disabled={busy} onClick={() => { void patch({ archived: true }); }}>{t('inspiration.archive')}</button>}
-      </div>
-      <time className={styles.cardDate} dateTime={new Date(idea.updatedAt).toISOString()}>
-        {new Date(idea.updatedAt).toLocaleDateString(i18n?.resolvedLanguage || i18n?.language, { year: 'numeric', month: 'short', day: 'numeric' })}
-      </time>
+      {rounds > 0 && <>
+        <span className={styles.cardRounds}>{t('inspiration.thread.rounds', { count: rounds })}</span>
+        <span className={styles.cardStack}>{workers.map(value => <AgentAvatarView key={`${value.backendId}/${value.agentId}`}
+          agentId={value.agentId} name={nameOf(value)} className={styles.cardStackAvatar}
+          fallback={Array.from(nameOf(value)).slice(0, 2).join('').toUpperCase()} />)}</span>
+      </>}
+      {/* The date gives way to the card's tools on hover, in the same place. */}
+      <span className={styles.footEnd}>
+        <time className={styles.cardDate} dateTime={new Date(idea.updatedAt).toISOString()}>
+          {new Date(idea.updatedAt).toLocaleDateString(i18n?.resolvedLanguage || i18n?.language, { year: 'numeric', month: 'short', day: 'numeric' })}
+        </time>
+        <span className={styles.cardActions} data-card-interactive>
+          {sendable && <button type="button" className={styles.iconButton} aria-label={t('inspiration.start')} title={t('inspiration.start')}
+            onClick={() => onSend?.(idea)}><InspirationActionIcon name="send" /></button>}
+          {idea.latestExecution && <SessionLink execution={idea.latestExecution} icon />}
+          <button className={styles.iconButton} type="button" disabled={busy} aria-pressed={idea.favorite}
+            aria-label={t(idea.favorite ? 'inspiration.unfavorite' : 'inspiration.favorite')} title={t(idea.favorite ? 'inspiration.unfavorite' : 'inspiration.favorite')}
+            onClick={() => { void patch({ favorite: !idea.favorite }); }}><InspirationActionIcon name="favorite" filled={idea.favorite} toolbar /></button>
+          <DeleteIdeaButton idea={idea} compact disabled={busy} onDeleted={onChange} />
+        </span>
+      </span>
     </div>
   </article>;
 });
-
-// Four growth stages named as on the wall's filters; the exact status is in the round's panel below.
-function GrowthTrack({ idea, status }: { idea: InspirationIdea; status: InspirationIdea['status'] }) {
-  const { t } = useTranslation();
-  const current = growthStageOf(idea);
-  const archived = idea.archivedAt !== null;
-  return <span className={styles.growthTrack}>
-    {GROWTH_STAGES.map((stage, index) => index === current
-      ? <span key={stage} className={styles.growthNow}>
-        <InspirationStatusIcon className={styles.growthGlyph} archived={archived}
-          status={inspirationGrowthStage(status, archived) < 0 ? status : GROWTH_GLYPHS[stage]} />{t(`inspiration.filters.${stage}`)}
-      </span>
-      : <span key={stage} className={styles.growthStep} data-reached={index < current || undefined} title={t(`inspiration.filters.${stage}`)}>
-        <InspirationStatusIcon className={styles.growthGlyph} status={GROWTH_GLYPHS[stage]} archived={stage === 'archived'} />
-      </span>)}
-  </span>;
-}
-
-export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onChange }: {
-  id: string; open?: boolean; onClose: () => void; onOpenChangeComplete?: (open: boolean) => void;
-  onChange: () => Promise<void>;
-}) {
-  const { t, i18n } = useTranslation();
-  const toast = useToast();
-  const confirm = useConfirm();
-  const detail = usePageCache(`inspiration-detail:${id}`, async () => {
-    const [value, history] = await Promise.all([getInspiration(id), getInspirationExecutions(id)]);
-    return { idea: value.idea, history };
-  });
-  // The wall can mount or refresh beside this dialog. Its cache request
-  // generation must not discard the dialog's own roster response.
-  const roster = usePageCache('inspiration-agents:detail', getInspirationAgents);
-  const [edit, setEdit] = useState<{ body: string; revision: number; attachments: InspirationAttachment[] } | null>(null);
-  const [mediaBusy, setMediaBusy] = useState(false);
-  const [agent, setAgent] = useState('');
-  const [instruction, setInstruction] = useState('');
-  const [workspace, setWorkspace] = useState('');
-  const [busy, setBusy] = useState(false);
-  const pending = useRef(false);
-  const operation = useRef({ input: '', id: '' });
-  const [more, setMore] = useState<InspirationExecution[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [loadedMore, setLoadedMore] = useState(false);
-  const [expandedRuns, setExpandedRuns] = useState<Set<string>>(() => new Set());
-  const idea = detail.data?.idea;
-  const content = idea ? inspirationNoteContent(idea) : null;
-  const dirty = Boolean(edit && (edit.body !== content?.body
-    || JSON.stringify(edit.attachments) !== JSON.stringify(content?.attachments || []))) || instruction.trim().length > 0;
-  useNavigationGuard({ dirty, busy: busy || mediaBusy, onDiscard: onClose });
-  useVisibleRefresh(detail.refresh);
-  useVisibleRefresh(roster.refresh, 15000);
-  const refresh = async () => { await Promise.all([detail.refresh(), onChange()]); };
-  const act = async (input: unknown, action: (operationId: string) => Promise<unknown>, done?: () => void) => {
-    if (pending.current) return;
-    const key = JSON.stringify(input);
-    if (operation.current.input !== key) operation.current = { input: key, id: crypto.randomUUID() };
-    pending.current = true; setBusy(true);
-    try { await action(operation.current.id); operation.current = { input: '', id: '' }; done?.(); await refresh(); }
-    catch (error) { toast.error(messageOf(error)); await refresh(); }
-    finally { pending.current = false; setBusy(false); }
-  };
-  const close = async () => {
-    if (busy || mediaBusy) return;
-    if (dirty && !await confirm({ title: t('inspiration.discardTitle'), message: t('inspiration.discardHint'), confirmLabel: t('inspiration.discard') })) return;
-    onClose();
-  };
-  const candidates = roster.data?.agents || [];
-  const defaultAgent = defaultInspirationAgent(candidates, idea);
-  const chosen = candidates.find((value) => `${value.backendId}/${value.id}` === agent) || (!agent ? defaultAgent : undefined);
-  const externalAgent = chosen?.backendId === 'openclaw' || chosen?.backendId === 'hermes';
-  const executions = [...(detail.data?.history.executions || []), ...more]
-    .filter((value, index, values) => values.findIndex((item) => item.id === value.id) === index);
-  const nextCursor = loadedMore ? cursor : detail.data?.history.nextCursor;
-  const latest = executions[0];
-  const displayStatus = idea ? displayStatusOf(idea.status, latest) : 'saved';
-  const agentName = (execution: InspirationExecution) => candidates.find((value) => value.id === execution.agentId
-    && value.backendId === execution.backendId)?.name || execution.agentId;
-  const start = () => {
-    if (!chosen?.capabilities.execute || !idea || ACTIVE.has(idea.status)) return;
-    const input = { expectedRevision: idea.revision, agentId: chosen.id, backendId: chosen.backendId,
-      instruction, workspace: externalAgent ? null : workspace.trim() || (chosen.id === idea.latestExecution?.agentId
-        && chosen.backendId === idea.latestExecution?.backendId ? idea.latestExecution.workspace : null) };
-    void act(['start', input], (operationId) => startInspiration(id, { ...input, operationId }),
-      () => { setInstruction(''); setMore([]); setLoadedMore(false); });
-  };
-  const archived = Boolean(idea && idea.archivedAt !== null);
-  const running = Boolean(idea && ACTIVE.has(idea.status));
-  const tone = detailToneOf(displayStatus, archived);
-  const locale = i18n?.resolvedLanguage || i18n?.language;
-  const when = (time: number) => new Date(time).toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-  // Explain known service codes in the current language; keep unknown codes visible for support.
-  const failureOf = (execution: InspirationExecution, hinted: boolean) => {
-    if (execution.status === 'canceled') return { reason: t('inspiration.growth.errors.INSPIRATION_CANCELED'), code: null };
-    if (!execution.errorCode) return null;
-    const known = `inspiration.growth.errors.${execution.errorCode}`;
-    const reason = i18n?.exists?.(known) ? t(known) : null;
-    return { reason: reason || (hinted ? null : t('inspiration.runError')), code: reason ? null : execution.errorCode };
-  };
-  const failure = latest ? failureOf(latest, !latest.attention && !latest.resultSummary) : null;
-  const statusLabel = idea ? t(archived ? 'inspiration.filters.archived' : idea.acceptedAt ? 'inspiration.accepted'
-    : `inspiration.status.${displayStatus}`) : '';
-  const fullWhen = (time: number) => new Date(time).toLocaleString(locale, { year: 'numeric', month: 'numeric', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const requesting = Boolean(latest?.attention?.active);
-  return <Modal open={open} onOpenChangeComplete={onOpenChangeComplete} className={styles.detailModal} variant="report"
-    title={idea ? <span className={styles.detailTitle} data-tone={tone}>
-      <GrowthTrack idea={idea} status={displayStatus} />
-    </span> : t('inspiration.title')}
-    onClose={() => { void close(); }} dismissible={!busy && !mediaBusy}
-    footer={idea && <div className={styles.detailFooter}>
-      <div className={styles.detailTools}>
-        {!edit && latest && <SessionLink execution={latest} icon />}
-        <button type="button" className={styles.iconButton} disabled={busy || Boolean(edit)} aria-pressed={idea.favorite}
-          aria-label={t(idea.favorite ? 'inspiration.unfavorite' : 'inspiration.favorite')}
-          title={t(idea.favorite ? 'inspiration.unfavorite' : 'inspiration.favorite')}
-          onClick={() => { void act(['favorite', idea.revision], (operationId) => updateInspiration(id,
-            { operationId, expectedRevision: idea.revision, patch: { favorite: !idea.favorite } })); }}>
-          <InspirationActionIcon name="favorite" filled={idea.favorite} toolbar />
-        </button>
-        <DeleteIdeaButton idea={idea} compact disabled={busy || Boolean(edit)} onDeleted={async () => { onClose(); await onChange(); }} />
-      </div>
-      <div className={styles.detailPrimary}>
-        {edit ? <>
-          <button className="btn-subtle btn-md" disabled={busy || mediaBusy} onClick={() => setEdit(null)}>{t('common.cancel')}</button>
-          <button className="btn-dark btn-md" disabled={busy || mediaBusy || (!edit.body.trim() && !edit.attachments.length) || bytes(edit.body) > 16 * 1024 || edit.revision !== idea.revision}
-            onClick={() => { void act(['edit', edit], (operationId) => updateInspiration(id, { operationId, expectedRevision: edit.revision,
-              // The editor held a legacy title as the text's first line, so saving folds it into the text.
-              patch: { body: edit.body, attachments: edit.attachments, ...(idea.title ? { title: null } : {}) } }), () => setEdit(null)); }}>{t('inspiration.saveEdit')}</button>
-        </> : running && idea.latestExecution ? <>
-          {idea.status === 'unknown' && <button className="btn-secondary btn-md" disabled={busy}
-            onClick={() => { void act(['refresh', idea.latestExecution?.runId], roster.refresh); }}>{t('inspiration.checkStatus')}</button>}
-          <button type="button" className="btn-danger btn-md" disabled={busy} onClick={() => { void act(['cancel', idea.latestExecution?.runId],
-            (operationId) => cancelInspiration(id, { operationId, runId: idea.latestExecution!.runId })); }}>{t('inspiration.stop')}</button></>
-          : archived ? <button className="btn-secondary btn-md" disabled={busy} onClick={() => { void act(['restore', idea.revision],
-            (operationId) => updateInspiration(id, { operationId, expectedRevision: idea.revision, patch: { archived: false } })); }}>{t('inspiration.restore')}</button>
-            : <>
-              {idea.status === 'completed' && <button type="button" className="btn-secondary btn-md" disabled={busy}
-                onClick={() => { void act(['archive', idea.revision], (operationId) => updateInspiration(id,
-                  { operationId, expectedRevision: idea.revision, patch: { archived: true } })); }}>
-                {t('inspiration.finish')}
-              </button>}
-              <button className="btn-dark btn-md" disabled={busy || running || !chosen?.capabilities.execute || bytes(instruction) > 16 * 1024} onClick={start}>
-                {busy ? t('inspiration.starting') : t(idea.latestExecution ? 'inspiration.continue' : 'inspiration.start')}
-                <InspirationActionIcon name="arrow" />
-              </button>
-            </>}
-      </div>
-    </div>}>
-    {(detail.error || roster.error) && <p className={styles.detailAlert} role="alert">{detail.error || roster.error}</p>}
-    {!idea ? <div className={styles.detailLoading} role="status" aria-label={t('common.loading')}>
-      <span /><span />
-    </div> : <div className={styles.detail} data-tone={tone} data-editing={Boolean(edit) || undefined}>
-      <section className={`${paperStyles.surface} ${styles.notePaper}`} data-paper={paperToneOf(idea)} aria-label={t('inspiration.original')}>
-        {edit ? <div className={styles.editFields}>
-          <InspirationMediaEditor body={edit.body} attachments={edit.attachments} disabled={busy} onBusyChange={setMediaBusy}
-            onChange={update => setEdit(previous => previous ? { ...previous, ...update(previous) } : null)}
-            inputProps={{ rows: 7, 'aria-label': t('inspiration.original') }} />
-          {edit.revision !== idea.revision && <p role="alert" className={styles.error}>{t('inspiration.editConflict')}</p>}
-          {edit.revision !== idea.revision && <button className="btn-subtle" disabled={busy} onClick={() => setEdit({ ...edit, revision: idea.revision })}>{t('inspiration.keepMyEdit')}</button>}
-        </div> : <>
-          <div className={styles.noteBody}><InspirationContent body={content!.body} attachments={content!.attachments}
-            renderText={text => text && <p className={styles.original}>{text}</p>} /></div>
-          <div className={styles.noteFoot}>
-            <InspirationStatusIcon className={styles.noteGlyph} status={displayStatus} archived={archived} />
-            <button type="button" className={styles.noteEdit} disabled={busy} onClick={() => setEdit({ ...content!, revision: idea.revision })}>
-              <InspirationActionIcon name="edit" />{t('inspiration.edit')}</button>
-            <time className={styles.noteDate} dateTime={new Date(idea.createdAt).toISOString()}
-              title={t('inspiration.savedOn', { date: new Date(idea.createdAt).toLocaleDateString(locale, { year: 'numeric', month: 'short', day: 'numeric' }) })}>
-              {new Date(idea.createdAt).toLocaleDateString(locale, { year: 'numeric', month: 'short', day: 'numeric' })}</time>
-          </div>
-        </>}
-      </section>
-      {!edit && <>
-        {latest && <InspirationRunCard key={latest.runId} ideaId={id} execution={latest} agentName={agentName(latest)}
-          attention={requesting ? <Attention ideaId={id} execution={latest} onChange={refresh} chat agentName={agentName(latest)} /> : undefined}>
-          {!requesting && <section className={styles.statePanel} data-tone={tone}>
-            {latest.attention ? <Attention ideaId={id} execution={latest} onChange={refresh} agentName={agentName(latest)} />
-              : latest.resultSummary ? <>
-                <h3 className={styles.panelLabel}>{t(idea.status === 'completed' ? 'inspiration.result' : 'inspiration.currentRun')}</h3>
-                <div className={styles.markdown} dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(latest.resultSummary, true) }} />
-              </> : <p className={styles.progressHint}>{t(`inspiration.progressHint.${idea.status}`)}</p>}
-            {failure && <p className={styles.runFailure}><span className={styles.runFailureMark} aria-hidden="true">!</span>
-              <span className={styles.runFailureText}>{failure.reason && <span>{failure.reason}</span>}{failure.code && <code>{failure.code}</code>}</span></p>}
-            <div className={styles.panelFoot}>
-              <span className={styles.panelMeta}>
-                <AgentAvatarView agentId={latest.agentId} name={agentName(latest)} className={styles.panelAvatar} />
-                <span className={styles.panelAgent}>{agentName(latest)}</span>
-                {latest.status !== 'completed' && <span className={styles.statusChip} data-tone={tone}>
-                  {running && <span className={styles.liveDot} data-still={tone !== 'live' || undefined} aria-hidden="true" />}{statusLabel}
-                </span>}
-              </span>
-              <span className={styles.panelSide}>
-                <time className={styles.panelTime} dateTime={new Date(latest.createdAt).toISOString()}>{fullWhen(latest.createdAt)}</time>
-                {idea.status === 'completed' && <button className={styles.acceptAction} disabled={busy} aria-pressed={Boolean(idea.acceptedAt)}
-                  onClick={() => { void act(['accept', idea.revision], (operationId) => updateInspiration(id,
-                    { operationId, expectedRevision: idea.revision, patch: { accepted: !idea.acceptedAt } })); }}>
-                  <InspirationActionIcon name="check" />{t(idea.acceptedAt ? 'inspiration.undoAccept' : 'inspiration.accept')}
-                </button>}
-              </span>
-            </div>
-          </section>}
-        </InspirationRunCard>}
-        {!running && !archived && <section className={styles.composer}>
-          <div className={styles.composerHead}>
-            <h3 className={styles.panelLabel}>{t('inspiration.nextStep')}</h3>
-            {!latest && <p>{t('inspiration.progressHint.saved')}</p>}
-          </div>
-          <div className={styles.agentField}><Field label={t('inspiration.agent')}>
-            <Select value={chosen ? `${chosen.backendId}/${chosen.id}` : ''} disabled={busy} onChange={setAgent}>
-              {!chosen && <Option value="" disabled>{t('inspiration.noAgent')}</Option>}
-              {candidates.map((value) => <Option key={`${value.backendId}/${value.id}`} value={`${value.backendId}/${value.id}`} disabled={!value.capabilities.execute}>
-                <span className={styles.agentChoice}>
-                  <AgentAvatarView agentId={value.id} name={value.name} className={styles.agentChoiceAvatar} />
-                  <span className={styles.agentChoiceName}>{value.name}<span> · {value.backendName}{value.capabilities.execute ? ''
-                    : ` · ${t(value.capabilities.reason === 'backend-unavailable' ? 'inspiration.unavailable' : 'inspiration.unsupported')}`}</span></span>
-                </span>
-              </Option>)}
-            </Select>
-          </Field></div>
-          <Field label={t('inspiration.instruction')}><TextArea className={`field-textarea ${paperStyles.typeface}`} value={instruction} disabled={busy} rows={3}
-            placeholder={t('inspiration.instructionPlaceholder')} onChange={(event) => setInstruction(event.target.value)} /></Field>
-          {externalAgent ? <p className={styles.composerNote}>{t('inspiration.externalWorkspaceHint')}</p> : <details className={styles.workspaceDisclosure}><summary><InspirationActionIcon name="chevron" />{t('inspiration.workspace')}</summary>
-            <Field label={t('inspiration.workspace')} hint={t('inspiration.workspaceHint')}><TextInput value={workspace} disabled={busy} placeholder={idea.latestExecution?.workspace || t('inspiration.defaultWorkspace')}
-              onChange={(event) => setWorkspace(event.target.value)} /></Field>
-          </details>}
-          <p className={styles.composerNote}>{t('inspiration.sessionHint')}</p>
-        </section>}
-        {executions.length > 0 && <details className={styles.history} open>
-          <summary className={styles.historyHeading}><span className={styles.panelLabel}>{t('inspiration.history')}<span className={styles.historyCount}>{executions.length}{nextCursor ? '+' : ''}</span></span>
-            <InspirationActionIcon name="chevron" /></summary>
-          <div className={styles.historyList}>
-            {executions.map((execution) => <details key={execution.id} className={styles.run} onToggle={(event) => {
-              const open = event.currentTarget.open;
-              setExpandedRuns(previous => { const next = new Set(previous); if (open) next.add(execution.id); else next.delete(execution.id); return next; });
-            }}>
-              <summary className={styles.runSummary}>
-                <RunStatus status={execution.status} execution={execution} />
-                <span className={styles.meta}>{when(execution.createdAt)} · {agentName(execution)}</span>
-                <InspirationActionIcon name="chevron" />
-              </summary>
-              <div className={styles.runBody}>
-                {execution.resultSummary && <div className={styles.markdown} dangerouslySetInnerHTML={{ __html: toSanitizedMarkdownHtml(execution.resultSummary, true) }} />}
-                {execution.errorCode && <p className={styles.error}>{failureOf(execution, false)?.reason} · <code>{execution.errorCode}</code></p>}
-                <SessionLink execution={execution} />
-                {execution.runId !== latest?.runId && expandedRuns.has(execution.id)
-                  && <InspirationActivity key={execution.runId} ideaId={id} execution={execution} />}
-              </div>
-            </details>)}
-            {nextCursor && <button className="btn-subtle" disabled={busy} onClick={() => {
-              void act(['history', nextCursor], async () => { const page = await getInspirationExecutions(id, nextCursor); setMore((previous) => [...previous, ...page.executions]); setCursor(page.nextCursor); setLoadedMore(true); });
-            }}>{t('inspiration.moreHistory')}</button>}
-          </div>
-        </details>}
-      </>}
-    </div>}
-  </Modal>;
-}
 
 export function AgentInspirationPanel({ backendId, agentId }: { backendId: string; agentId: string }) {
   const { t } = useTranslation();
@@ -552,7 +231,7 @@ export function AgentInspirationPanel({ backendId, agentId }: { backendId: strin
     {!page.loading && !page.error && page.data?.items.length === 0 && <p className={styles.meta}>
       {t(filter === 'archived' ? 'agents.inspirationArchivedEmpty' : 'agents.inspirationEmpty')}
     </p>}
-    <div className={styles.grid}>{page.data?.items.map(idea => <IdeaCard key={idea.id} idea={idea}
+    <div className={styles.grid}>{page.data?.items.map(idea => <IdeaCard key={idea.id} idea={idea} roster={roster.data?.agents}
       agent={roster.data?.agents.find(agent => agent.id === idea.latestExecution?.agentId && agent.backendId === idea.latestExecution?.backendId)}
       onOpen={setDetailId} onChange={refresh} />)}</div>
     {page.data?.hasMore && <div className={styles.loadMore}>
@@ -588,6 +267,8 @@ export default function InspirationPage() {
   const paperFlight = useRef<InspirationPaperFlight | null>(null);
   const savingRef = useRef(false);
   const [dragging, setDragging] = useState(false);
+  // A card's send button opens the same dock for a click choice.
+  const [picking, setPicking] = useState<InspirationIdea | null>(null);
   const [startingIdeas, setStartingIdeas] = useState<Set<string>>(() => new Set());
   const pendingStarts = useRef(new Set<string>());
   const startOperations = useRef(new Map<string, { input: string; operationId: string }>());
@@ -606,7 +287,7 @@ export default function InspirationPage() {
   useEffect(() => { const timer = window.setTimeout(() => setQuery(search), 250); return () => window.clearTimeout(timer); }, [search]);
   const viewKey = JSON.stringify([query, filter]);
   const detailId = params.get('id');
-  useEffect(() => () => { dragCancel.current?.(); dragCancel.current = null; }, [viewKey, detailId]);
+  useEffect(() => () => { dragCancel.current?.(); dragCancel.current = null; setPicking(null); }, [viewKey, detailId]);
   const visibleView = useRef(viewKey); visibleView.current = viewKey;
   const requestedPages = useRef({ key: viewKey, count: 1 });
   if (requestedPages.current.key !== viewKey) requestedPages.current = { key: viewKey, count: 1 };
@@ -750,6 +431,10 @@ export default function InspirationPage() {
       onDrop: target => { void handToAgent(idea, target); },
     });
   }, [printing, saving, handToAgent]);
+  const sendIdea = useCallback((idea: InspirationIdea) => {
+    if (!canStartInspiration(idea) || pendingStarts.current.has(idea.id)) return;
+    dragCancel.current?.(); agentDock.current?.prepare(); setPicking(idea);
+  }, []);
   const onSavedView = filter === 'saved' && !query;
   const wallItems = page.data?.items ?? [];
   const addPrintedIdea = printJob && onSavedView && !wallItems.some(idea => idea.id === printJob.id);
@@ -843,7 +528,7 @@ export default function InspirationPage() {
       <h2>{t(query || filter !== 'saved' ? 'inspiration.noMatches' : 'inspiration.empty')}</h2><p>{t(query || filter !== 'saved' ? 'inspiration.noMatchesHint' : 'inspiration.emptyHint')}</p></div>}
     <div className={styles.grid}>{visibleIdeas.map((idea) => <IdeaCard key={idea.id} idea={idea} execution={page.data?.executions[idea.id]}
       agent={roster.data?.agents.find(agent => agent.id === idea.latestExecution?.agentId && agent.backendId === idea.latestExecution?.backendId)}
-      onPress={pressIdea} starting={startingIdeas.has(idea.id)}
+      roster={roster.data?.agents} onPress={pressIdea} onSend={sendIdea} starting={startingIdeas.has(idea.id)}
       onOpen={openIdea} onChange={refresh} />)}</div>
     <div className={styles.loadMore} ref={moreElement} data-inspiration-load-more>
       {loadingMore && <span role="status" className={styles.meta}>{t('common.loading')}</span>}
@@ -851,8 +536,9 @@ export default function InspirationPage() {
         <button type="button" className="btn-subtle" onClick={() => { void refresh(); }}>{t('common.refresh')}</button></div>}
     </div>
     </section>
-    <InspirationAgentChatter paused={Boolean(params.get('id')) || Boolean(draft.body.trim()) || Boolean(draft.attachments?.length) || mediaBusy || archiveBusy || saving || printing || dragging} />
-    <InspirationAgentDock ref={agentDock} active={dragging} />
+    <InspirationAgentChatter paused={Boolean(params.get('id')) || Boolean(draft.body.trim()) || Boolean(draft.attachments?.length) || mediaBusy || archiveBusy || saving || printing || dragging || Boolean(picking)} />
+    <InspirationAgentDock ref={agentDock} active={dragging || Boolean(picking)} onCancel={picking ? () => setPicking(null) : undefined}
+      onPick={picking ? agent => { const idea = picking; setPicking(null); void handToAgent(idea, { element: document.body, agent }); } : undefined} />
     {params.get('id') && <IdeaDetail key={params.get('id')!} id={params.get('id')!} onClose={() => setParams((previous) => { const next = new URLSearchParams(previous); next.delete('id'); return next; })} onChange={refresh} />}
   </div>;
 }

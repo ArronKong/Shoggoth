@@ -2775,6 +2775,16 @@ export async function revokeStandingGrant(
 }
 
 // App config read/write (设置 page).
+export function getChatReadState(previous?: import('../types').ChatReadState, signal?: AbortSignal): Promise<{ state: import('../types').ChatReadState | null }> {
+  const query = previous ? `?${new URLSearchParams({ installationId: previous.installationId, revision: String(previous.revision) })}` : '';
+  return jsonFetch(`/__api/chat-read-state${query}`, { signal });
+}
+export function mergeChatReadState(installationId: string, read: Record<string, number>, signal?: AbortSignal): Promise<{ state: import('../types').ChatReadState }> {
+  return jsonFetch('/__api/chat-read-state', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ installationId, read }), signal,
+  });
+}
+
 export async function getConfig(): Promise<AppConfig> {
   const { config } = await jsonFetch<{ config: AppConfig }>(`/__api/config`);
   return config;
@@ -2851,8 +2861,8 @@ export function listInspirations(query: { query: string; filter: import('../type
   if (query.agentId !== undefined) params.set('agentId', query.agentId);
   return jsonFetch<import('../types').InspirationPageResult>(`/__api/inspirations?${params}`);
 }
-export function getInspiration(id: string) {
-  return jsonFetch<{ idea: import('../types').InspirationIdea }>(`/__api/inspirations/detail?id=${encodeURIComponent(id)}`);
+export function getInspiration(id: string, signal?: AbortSignal) {
+  return jsonFetch<{ idea: import('../types').InspirationIdea }>(`/__api/inspirations/detail?id=${encodeURIComponent(id)}`, { signal });
 }
 export function getInspirationAgents() {
   return jsonFetch<{ agents: import('../types').InspirationAgent[] }>('/__api/inspirations/agents');

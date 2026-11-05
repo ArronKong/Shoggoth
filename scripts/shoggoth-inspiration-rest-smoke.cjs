@@ -2,10 +2,13 @@
 'use strict';
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { requestService, readClientToken } = require('../app/agent-service/client');
 const { startInspirationFixture } = require('./fixtures/inspiration-service-fixture.cjs');
 const id = () => crypto.randomUUID();
 async function runInspirationRestSmoke() {
-  const fixture = await startInspirationFixture();
+  const approvalCommand = `echo ${'x'.repeat(24 * 1024 - 64)}`;
+  const fixture = await startInspirationFixture({ isolatedHome: true, permissionMode: 'request-approval',
+    codexFakeEnv: { CODEX_FAKE_INSPIRATION_APPROVAL_COMMAND: approvalCommand } });
   const request = async (route = '', method = 'GET', body) => {
     const response = await fetch(`${fixture.url}/__api/inspirations${route}`, { method,
       ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
@@ -16,6 +19,9 @@ async function runInspirationRestSmoke() {
     const input = { operationId: id(), body: 'REST 灵感回归' };
     let idea = (await request('', 'POST', input)).data.idea;
     assert.ok(idea?.id);
+    await assert.rejects(requestService(fixture.paths, { id: id(), token: readClientToken(fixture.paths),
+      version: 27, method: 'inspiration.get', params: { id: idea.id } }), { code: 'PROTOCOL_VERSION_MISMATCH' });
+    assert.deepEqual((await fixture.ipc('inspiration.get', { id: idea.id })).idea.rounds, { count: 0, agents: [] });
     assert.equal((await request('', 'POST', input)).data.idea.id, idea.id);
     assert.equal(fixture.service.productStore.listWorkRuns().length, 0);
     const detail = `/detail?id=${idea.id}`;
@@ -81,7 +87,7 @@ async function runInspirationRestSmoke() {
     assert.match(JSON.stringify(history), /Alpha/);
     assert.equal(fixture.service.productStore.listWorkRuns().length, 1);
     const followupInput = { operationId: id(), sessionKey: execution.sessionKey,
-      prompt: '从 Session 输入框继续完善', createdAt: Date.now() };
+      prompt: `从 Session 输入框继续完善\n${'a'.repeat(16 * 1024 - 128)}`, createdAt: Date.now() };
     const followup = await fixture.ipc('chat.send', followupInput);
     assert.equal(followup.run.source, 'inspiration');
     assert.equal(followup.disposition, 'queued');
@@ -89,12 +95,17 @@ async function runInspirationRestSmoke() {
     const followupDeadline = Date.now() + 8000;
     let approval;
     while (Date.now() < followupDeadline) {
-      approval = (await request(`/executions?id=${idea.id}&limit=1`)).data.executions[0];
+      const page = await request(`/executions?id=${idea.id}&limit=1`);
+      assert.equal(page.status, 200, JSON.stringify(page.data));
+      approval = page.data.executions[0];
       if (approval.attention?.active) break;
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     assert.equal(approval.status, 'waiting_approval');
     assert.equal(approval.sessionKey, execution.sessionKey);
+    assert.equal(approval.instruction, followupInput.prompt);
+    assert.equal(approval.attention.request.approvalDetails.command, approvalCommand);
+    assert.ok(Buffer.byteLength(JSON.stringify(approval)) > 64 * 1024, 'the entire round crosses the previous frame limit');
     assert.equal((await request(`/respond?id=${idea.id}`, 'POST', {
       operationId: id(), runId: approval.runId, requestId: approval.attention.request.requestId,
       response: { choice: 'deny' },
@@ -102,6 +113,10 @@ async function runInspirationRestSmoke() {
     await fixture.service.workRunCoordinator.waitForTerminal(approval.runId);
     assert.equal((await fixture.ipc('chat.send', followupInput)).run.id, approval.runId);
     assert.equal(fixture.service.productStore.listWorkRuns().length, 2);
+    const executionHistory = (await request(`/executions?id=${idea.id}`)).data;
+    assert.equal(executionHistory.total, 2);
+    assert.equal(executionHistory.executions[0].instruction, followupInput.prompt);
+    assert.equal(executionHistory.executions[0].reusableSession, true);
     assert.match(JSON.stringify(await fixture.ipc('chat.history', {
       sessionKey: execution.sessionKey, cursor: null, limit: 100,
     })), /从 Session 输入框继续完善/);

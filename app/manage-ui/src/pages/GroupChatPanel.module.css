@@ -17,7 +17,7 @@
     url('../assets/figma/group-chat/header-sheen.png') center / 100% 100%, #f3f3f3;
 }
 .head :global(.chat-header__row) { gap: 8px; }
-.chatContent { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; }
+.chatContent { position: relative; display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; }
 .chatContent[hidden] { display: none; }
 .expandedLoading { display: grid; place-items: center; flex: 1; min-height: 0; }
 .detailsTrigger { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; padding: 0; border: 0; border-radius: 24px; background: transparent; color: inherit; font: inherit; text-align: start; cursor: pointer; }
@@ -27,8 +27,6 @@
 .headerMembers { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 300; line-height: 16px; color: light-dark(rgba(0, 0, 0, .4), rgba(255, 255, 255, .5)); }
 .headerAvatar { width: 48px; height: 48px; }
 .filesTrigger { flex: 0 0 40px; color: var(--chat-text); }
-.filesTrigger img { display: block; }
-:global(:root[data-theme="dark"]) .filesTrigger img { filter: invert(1); }
 .members { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 4px 4px; }
 .coordinator { align-self: center; max-width: 100%; max-height: 60px; overflow: auto; overflow-wrap: anywhere; padding-inline-end: 6px; color: var(--muted-fg); font-size: 12px; line-height: 20px; }
 .availability { max-height: 54px; overflow: auto; overflow-wrap: anywhere; padding: 2px 4px 4px; color: var(--muted-fg); font-size: 12px; line-height: 18px; }
@@ -61,15 +59,8 @@
 .sendJournal summary { cursor: pointer; overflow-wrap: anywhere; }
 .sendJournal details > button { margin: 6px 6px 0 0; }
 
-/* 消息、实时动态和审批共用滚动区，历史长度不挤占输入框。 */
-.timeline {
-  flex: 1 1 0;
-  min-height: 0;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-  padding: 8px calc(var(--page-inset-right) - var(--ui-scrollbar-track-size, 12px)) 24px var(--skin-gutter);
-}
-.timeline > :global(.chat-group) { margin: 0 0 32px; }
+/* 群聊与单聊共用整高消息流、浮层和渐隐，只保留群消息的间距。 */
+.timeline > :global(.chat-thread__inner) > :global(.chat-group) { margin: 0 0 32px; }
 .older { display: block; margin: 8px auto; }
 .empty { margin: 48px auto; color: var(--muted-fg); text-align: center; font-size: 13px; }
 .system { margin: 14px auto; color: var(--muted-fg); text-align: center; font-size: 12px; line-height: 18px; }
@@ -130,6 +121,32 @@
   cursor: pointer;
 }
 .mentionItem.isActive, .mentionItem:hover { background: var(--bg-hover); }
+
+/* 「发给」贴在输入文字最前面：输入框首行按它的宽度缩进；输入框内部滚动时它跟着第一行走。 */
+.composerField { position: relative; overflow: hidden; }
+.sendTarget {
+  position: absolute; top: 2px; left: 10px; z-index: 1;
+  display: inline-flex; align-items: center; gap: 4px; max-width: min(260px, calc(100% - 40px)); height: 20px;
+  padding: 0 4px 0 6px; border: 0; border-radius: 6px; background: var(--bg-muted); color: var(--chat-text);
+  font: inherit; font-size: 12px; line-height: 20px; white-space: nowrap; cursor: pointer;
+  transform: translateY(var(--group-send-target-shift, 0px));
+}
+.sendTarget:hover:not(:disabled), .sendTarget[aria-expanded="true"] { background: var(--bg-hover); }
+.sendTarget:disabled { cursor: default; opacity: 0.6; }
+.composer .sendTarget:focus-visible { outline-offset: -2px; }
+.sendTargetLabel { flex: 0 0 auto; color: var(--muted-fg); }
+.sendTargetAvatar { width: 16px; height: 16px; border-radius: 50%; flex: 0 0 auto; }
+.sendTargetName { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.sendTargetTag { flex: 0 0 auto; color: var(--muted-fg); }
+.sendTargetCaret { flex: 0 0 auto; width: 10px; height: 10px; fill: none; stroke: var(--muted-fg); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.sendTargetStack { display: inline-flex; flex: 0 0 auto; }
+.sendTargetStack > * + * { margin-left: -6px; }
+.sendTargetStack > * { box-shadow: 0 0 0 1.5px var(--skin-card-fg); }
+.mentionItem .sendTargetStack > * { width: 20px; height: 20px; }
+.mentionItem .sendTargetStack > * + * { margin-left: -10px; }
+.sendTargetMenu .mentionItem > .muted { margin-left: auto; padding-left: 8px; }
+.sendTargetOptionName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sendTargetCheck { flex: 0 0 auto; width: 14px; color: var(--ui-focus); text-align: center; }
 
 /* 建群弹窗 */
 .createForm { display: flex; flex-direction: column; gap: 12px; }
@@ -282,6 +299,8 @@
 
 @container group-chat (max-width: 580px) {
   .composerHint { display: none; }
+  .sendTarget { max-width: min(180px, calc(100% - 40px)); }
+  .sendTargetTag { display: none; }
   .members { gap: 4px; }
   .member { max-width: 140px; }
   .headerAvatar { width: 48px; height: 48px; }

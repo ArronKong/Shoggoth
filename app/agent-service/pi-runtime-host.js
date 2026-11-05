@@ -60,6 +60,27 @@ const PARENT_ENV_ALLOWLIST = Object.freeze([
 ]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "interrupted", "canceled"]);
 const AUTH_ERROR_PATTERN = /(?:auth|credential|api[ -]?key|login|sign[ -]?in|unauthorized|forbidden)/iu;
+
+function toolCatalogStartupError(stderr, exitCode) {
+  if (/^PI_TOOL_CATALOG_TOO_LARGE 262144\r?$/mu.test(stderr)) {
+    const error = hostError("PI_TOOL_CATALOG_TOO_LARGE", "Pi could not load the Shoggoth tool catalog within the transport capacity");
+    error.failure = { message: `Shoggoth 工具目录响应超过 262144 字节的传输上限。Pi 启动退出码为 ${exitCode}。` };
+    return error;
+  }
+  // Keep diagnostics from older extensions readable during upgrades.
+  const marker = /^PI_TOOL_DESCRIPTION_TOO_LARGE ([a-z][a-z0-9_]{0,127}|-) ([1-9]\d{0,5}) ([1-9]\d{0,5})\r?$/mu.exec(stderr);
+  if (!marker) return null;
+  const [, name, actual, limit] = marker;
+  if (Number(actual) <= Number(limit) || Number(actual) > 256 * 1024) return null;
+  // Only known Shoggoth tool identifiers and bounded numbers reach chat history.
+  const known = require("./product-capability-manifest").productToolRisk(name)
+    || require("./product-tool-exposure").ENTRY_TOOL_NAMES.has(name);
+  const tool = known ? `工具 ${name}` : "某个 Shoggoth 工具";
+  const error = hostError("PI_TOOL_DESCRIPTION_TOO_LARGE", "Pi could not load an oversized Shoggoth tool description");
+  error.failure = { message: `${tool}的说明为 ${actual} 字节，上限为 ${limit} 字节。Pi 启动退出码为 ${exitCode}。` };
+  return error;
+}
+
 const MAX_CONTROL_OUTPUT_BYTES = 1024 * 1024;
 const MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024;
 const MAX_ASSISTANT_TEXT_BYTES = 8 * 1024 * 1024;
@@ -952,6 +973,8 @@ class PiRuntimeHost {
       maxFrameBytes: this.maxFrameBytes,
       maxStreamBytes: this.maxStreamBytes,
       randomUUID: this.randomUUID,
+      classifyClose: (code, signal, stderr) => !active.promptDispatched && code === 1 && signal === null
+        ? toolCatalogStartupError(stderr, code) : null,
       onEvent: (event) => this._onPiEvent(active, event),
       onExtensionRequest: (request) => this._onExtensionRequest(active, request),
       onFatal: (error) => {
@@ -1459,10 +1482,11 @@ class PiRuntimeHost {
       const projectionFailed = result?.code === 78 && this.modelSecretEndpoints?.has(active.sessionId)
         && /(?:^|\n)SECRET_MODEL_PROJECTION_UNAVAILABLE\n?$/u.test(result?.stderr || "");
       const auth = AUTH_ERROR_PATTERN.test(`${result?.stderr || ""}`);
-      this._failActive(active, hostError(
+      const failure = ["PI_TOOL_DESCRIPTION_TOO_LARGE", "PI_TOOL_CATALOG_TOO_LARGE"].includes(result?.error?.code) ? result.error : hostError(
         projectionFailed ? "SECRET_MODEL_PROJECTION_UNAVAILABLE" : auth ? "AUTH_REQUIRED" : "PI_PROCESS_CLOSED",
         projectionFailed ? "Local model projection did not complete" : auth ? "Pi authentication is required" : "Pi process closed before settlement",
-      ), { definitelyRejected: !active.promptDispatched });
+      );
+      this._failActive(active, failure, { definitelyRejected: !active.promptDispatched });
     }
     const previous = turnById(sessionById(this.ledger.snapshot(), active.sessionId), active.turnId);
     if (previous?.acceptance !== "unknown" || !TERMINAL_STATUSES.has(previous.status)) return;

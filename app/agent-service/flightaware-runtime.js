@@ -3,7 +3,7 @@
 const fs = require("node:fs"), path = require("node:path"), { spawn } = require("node:child_process");
 const { resolveOnPath } = require("./mcp-package-launcher");
 const { CLI_ENTRY, KEY_FIELD, METERED_FIELD, METERED_ENABLED } = require("./flightaware-mcp-launch");
-const VERSION = "0.2.1";
+const { flightaware: VERSION } = require("./data/mcp-bundled-bridge-versions.json");
 const fail = (code, status) => Object.assign(new Error(code), { code, ...(status ? { status } : {}) });
 const string = (description, maxLength = 256) => ({ type: "string", minLength: 1, maxLength, description });
 const identifier = description => ({ ...string(description), pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]*$" });

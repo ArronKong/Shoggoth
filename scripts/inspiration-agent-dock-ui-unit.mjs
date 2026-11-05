@@ -13,9 +13,11 @@ const code = ts.transpileModule(fs.readFileSync('app/manage-ui/src/pages/Inspira
   compilerOptions: { esModuleInterop: true, jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const pending = [];
+const keyListeners = new Set();
 const module = { exports: {} };
 vm.runInNewContext(`(function(require,module,exports){${code}\n})(require,module,module.exports)`, {
   module, AbortController, AbortSignal, document: { body: {} },
+  window: { addEventListener: (type, listener) => { keyListeners.add(listener); }, removeEventListener: (type, listener) => { keyListeners.delete(listener); } },
   require: name => name.endsWith('.css') ? {} : name === 'react-dom' ? { createPortal: node => node }
     : name === 'react-i18next' ? { useTranslation: () => ({ t: key => key }) }
       : name === '../api/client' ? { getInspirationAgentDock: signal => new Promise((resolve, reject) => pending.push({ resolve, reject, signal })) }
@@ -42,7 +44,9 @@ await act(async () => { pending.shift().resolve({ agents: initial }); });
 act(() => { ref.current.prepare(); renderer.update(view(true)); });
 assert.deepEqual(entries().map(node => node.props['data-inspiration-agent-target']), initial.map(key));
 for (const [index, entry] of entries().entries()) {
-  assert.ok(entry.props['aria-label'].includes(initial[index].backendName), 'avatar identity remains accessible without visible names');
+  assert.ok(entry.props['aria-label'].startsWith(initial[index].name), 'each avatar is announced by its agent name');
+  assert.ok(entry.findAll(node => node.type === 'span' && node.children?.[0] === initial[index].name).length > 0,
+    'the agent name shows under its avatar');
   assert.equal(entry.findByProps({ role: 'status' }).children[0], 'inspiration.agentDock.dropHint', 'each avatar owns its release hint');
 }
 assert.deepEqual(Array.from(ref.current.targets(), target => key(target.agent)), initial.slice(0, 2).map(key), 'show disabled Agents without accepting drops');
@@ -69,4 +73,24 @@ act(() => { ref.current.prepare(); });
 await act(async () => { pending.shift().resolve({ agents: initial }); });
 assert.equal(entries().length, 3, 'a slow first load becomes droppable during the gesture');
 act(() => { renderer.unmount(); });
-console.log('PASS Agent dock: preload, complete roster, composite identity, fixed gesture order, refreshed ranking, disabled targets, failure recovery and cleanup');
+
+// A card's send button opens the same dock for a click choice: agents become buttons, Escape cancels.
+{
+  const picks = [];
+  let canceled = 0;
+  const pick = active => React.createElement(Dock, { ref, active, onPick: value => picks.push(value), onCancel: () => { canceled++; } });
+  act(() => { renderer = create(pick(false)); });
+  await act(async () => { pending.shift().resolve({ agents: initial }); });
+  act(() => { renderer.update(pick(true)); });
+  const buttons = renderer.root.findAll(node => node.type === 'button');
+  assert.equal(buttons.length, initial.length, 'every agent is a button while picking');
+  assert.equal(buttons[2].props.disabled, true, 'an agent that cannot run ideas cannot be picked');
+  act(() => { buttons[1].props.onClick(); });
+  assert.deepEqual(picks.map(key), [key(initial[1])], 'a click hands the idea to that agent');
+  assert.ok(JSON.stringify(renderer.toJSON()).includes('inspiration.agentDock.pickHint'));
+  act(() => { for (const listener of keyListeners) listener({ key: 'Escape' }); });
+  assert.equal(canceled, 1, 'Escape cancels the choice');
+  act(() => { renderer.unmount(); });
+  assert.equal(keyListeners.size, 0, 'the Escape listener is removed with the dock');
+}
+console.log('PASS Agent dock: preload, complete roster, composite identity, visible names, fixed gesture order, refreshed ranking, disabled targets, click picking, failure recovery and cleanup');

@@ -21,3 +21,11 @@ i18n.addResourceBundle('zh-CN', 'translation', { groupChat: { stopState: { reque
   reference: { open: '引用会话摘录', tooLarge: '当前草稿加上摘录超过消息大小限制，原草稿已保留。' } } }, true, true);
 i18n.addResourceBundle('en', 'translation', { groupChat: { stopState: { requesting: 'Requesting discussion stop…', confirming: 'Stop requested. Checking whether the tasks have exited.' }, search: { open: 'Search group history' },
   reference: { open: 'Quote conversation excerpt', tooLarge: 'The combined message exceeds the size limit. Your original draft is kept.' } } }, true, true);
+
+// 输入框最前面的「发给」。
+i18n.addResourceBundle('zh-CN', 'translation', { groupChat: { target: {
+  label: '发给', owner: '群主', all: '所有人', change: '选择发给谁',
+} } }, true, true);
+i18n.addResourceBundle('en', 'translation', { groupChat: { target: {
+  label: 'To', owner: 'Owner', all: 'Everyone', change: 'Choose who gets this message',
+} } }, true, true);

@@ -7,6 +7,7 @@ import { useMcpConnectorRefresh } from "../lib/useMcpConnectorRefresh";
 import McpApprovalInbox from "../components/McpApprovalInbox";
 import { AppleDeviceRows, useAppleDeviceConnectors } from "../components/AppleDeviceConnectors";
 import McpConnectorIcon from "../components/McpConnectorIcon";
+import { ConnectorInfo } from "../components/ConnectorDetails";
 import { PageHead } from "../components/PageHead";
 import Modal from "../components/Modal";
 import { usePageCache } from "../lib/usePageCache";
@@ -16,7 +17,7 @@ import LarkCliDialog, { LarkCliInstalledRow, LarkCliRecommendation, useLarkCliCo
 import OfficialSkillDialog, { OfficialSkillInstalledRows, OfficialSkillRecommendation, officialConnectorDefinitions, useOfficialSkillConnectors, type OfficialConnectorDefinition } from "./OfficialSkillConnectors";
 import type { OfficialConnectorId } from "../api/officialSkillConnectors";
 import { FIGMA_REGISTRY_NAME, isFigmaDesktopConnector, mcpAvailableUpdate, mcpRecommendationText, mcpRecommendationMatchesServer, mcpServiceGroupEndpoints, mcpServiceGroupSummary, type McpRecommendation } from "../lib/mcpConnectorUi";
-import { mcpBrandId, mcpConnectorName, mcpOfficialSkillBrand, mcpRecommendationRank, mcpRegistrySummary } from "../lib/mcpRecommendationCatalog";
+import { mcpBrandId, mcpConnectorDeveloper, mcpConnectorName, mcpOfficialSkillBrand, mcpRecommendationRank, mcpRecommendationVisibleInLocale, mcpRegistrySummary } from "../lib/mcpRecommendationCatalog";
 import featuredServers from "../../../agent-service/data/mcp-featured-servers.json";
 import featuredPresets from "../../../agent-service/data/mcp-featured-presets.json";
 import s from "./ConnectorsPage.module.css";
@@ -86,9 +87,11 @@ export default function ConnectorsPage() {
   // An offline Registry lookup must not make a pending entry disappear.
   const unavailablePending = pending.ids.filter(id => id.startsWith("registry:") && !cards.some(card => keyFor(card) === id)
     && !installed.data?.servers.some(server => server.source.kind === "registry" && `registry:${server.source.registryName}` === id));
-  const recommendedCards = cards.filter(card => card.kind === "lark" ? !lark.data?.canRemove
-    : card.kind === "official" ? !official.data?.items.find(item => item.id === card.definition.id)?.canRemove && !serverFor(card)
-    : !serverFor(card) && !pending.ids.includes(keyFor(card)));
+  const recommendedCards = cards
+    .filter(card => mcpRecommendationVisibleInLocale(card.id, language))
+    .filter(card => card.kind === "lark" ? !lark.data?.canRemove
+      : card.kind === "official" ? !official.data?.items.find(item => item.id === card.definition.id)?.canRemove && !serverFor(card)
+      : !serverFor(card) && !pending.ids.includes(keyFor(card)));
   const cardContent = (card: Extract<RecommendationCard, { kind: "registry" | "preset" }>) => {
     const recommendation = card.kind === "preset" ? card.recommendation : recommendations.find(value => value.registryName === card.item.registryName);
     const summary = card.kind === "registry" ? mcpRegistrySummary(card.item.registryName) : undefined;
@@ -145,7 +148,7 @@ export default function ConnectorsPage() {
         <button type="button" className="btn-dark btn-sm" onClick={() => { void recommended.refresh(); setUnavailableDialog(null); }}>{tr("retry")}</button>
         <button type="button" className="btn-danger btn-sm" onClick={() => { pending.remove(unavailableDialog); setUnavailableDialog(null); }}>{tr("flow.remove")}</button>
       </div></div>}>
-      <div className={s.detail}><section className={s.connectionPanel}><p>{tr("flow.unavailableEntry")}</p></section></div>
+      <div className={s.detail}><section className={s.connectionPanel}><p>{tr("flow.unavailableEntry")}</p></section><ConnectorInfo developer={mcpConnectorDeveloper(unavailableDialog.slice(9))} /></div>
     </Modal>}
     {dialog && <McpConnectorDialog {...dialog} catalogEntry={!!dialog.pendingKey} pending={!!dialog.pendingKey && pending.ids.includes(dialog.pendingKey)} onStage={dialog.pendingKey ? () => pending.add(dialog.pendingKey!) : undefined} onUnstage={dialog.pendingKey ? () => pending.remove(dialog.pendingKey!) : undefined} allowFigmaDesktop onLatest={item => setCheckedUpdates(previous => [...previous.filter(value => value.registryName !== item.registryName), item])} onClose={() => setDialog(null)} onChanged={() => void installed.refresh()} />}
     {larkDialog && <LarkCliDialog model={lark} onClose={() => setLarkDialog(false)} />}

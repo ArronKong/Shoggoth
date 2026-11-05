@@ -35,7 +35,7 @@ function fixture(backendId = "openclaw") {
   const view = (changes = {}) => { const latestExecution = { ...execution, ...changes }; return {
     id: target.inspirationId, title: "Fixture", body: "Fixture idea", revision: 1,
     favorite: false, archivedAt: null, acceptedAt: null, createdAt: 1, updatedAt: 1,
-    status: latestExecution.status, latestExecution,
+    status: latestExecution.status, latestExecution, rounds: { count: 1, agents: [{ backendId, agentId: target.agentId }] },
   }; };
   const owner = Object.create(ShoggothBackend.prototype);
   Object.assign(owner, { _state: "started", _generation: 1, randomUUID, pollIntervalMs: 0, maxPages: 10,
@@ -52,6 +52,19 @@ test("Typed external Session methods enforce exact identity and result shapes", 
     origin: { inspirationId, inspirationTitle: "Fixture" },
   }).origin.inspirationId, inspirationId);
   assert.deepEqual(validateInspirationServiceResult("inspiration.session.get", { origin: null }), { origin: null });
+  for (const runId of [null, view().latestExecution.runId]) {
+    const read = { ...input, runId };
+    assert.deepEqual(validateInspirationServiceParams("inspiration.session.execution", read), read);
+  }
+  assert.equal(validateInspirationServiceResult("inspiration.session.execution", {
+    execution: view().latestExecution,
+  }).execution.sessionKey, input.sessionKey);
+  assert.throws(() => validateInspirationServiceParams("inspiration.session.execution", { ...input, runId: "" }),
+    { code: "INSPIRATION_INVALID" });
+  assert.throws(() => validateInspirationServiceParams("inspiration.cancel", { id: inspirationId, operationId: "cancel", runId: null }),
+    { code: "INSPIRATION_INVALID" });
+  assert.throws(() => validateInspirationServiceResult("inspiration.session.execution", { execution: null }),
+    { code: "INSPIRATION_RESPONSE_INVALID" });
   const send = { ...input, operationId: "send-fixture", prompt: "Continue" };
   assert.deepEqual(validateInspirationServiceParams("inspiration.session.send", send), send);
   assert.equal(validateInspirationServiceResult("inspiration.session.send", { idea: view() }).idea.id, inspirationId);
@@ -78,12 +91,11 @@ for (const backendId of ["openclaw", "hermes"]) test(`${backendId}: Service owns
   owner._call = async (method, params) => {
     validateInspirationServiceParams(method, params);
     calls.push({ method, params });
-    if (method === "inspiration.get") current = snapshots.shift();
-    // The real Service omits attention from get/start/send projections; only
-    // inspiration.executions includes its canonical interaction payload.
+    if (method === "inspiration.session.execution") current = snapshots.shift();
+    // The Session read returns canonical attention for its exact execution.
     const result = method === "inspiration.session.get"
       ? { origin: { inspirationId: target.inspirationId, inspirationTitle: "Fixture" } }
-      : method === "inspiration.executions" ? { executions: [current.latestExecution], total: 1, hasMore: false, nextCursor: null }
+      : method === "inspiration.session.execution" ? { execution: current.latestExecution }
         : { idea: { ...current, latestExecution: { ...current.latestExecution, attention: null } } };
     return validateInspirationServiceResult(method, result);
   };
@@ -103,7 +115,7 @@ for (const backendId of ["openclaw", "hermes"]) test(`${backendId}: Service owns
   assert.deepEqual({ ...prompts[0], message: request.message }, request);
   assert.match(prompts[0].message, /命令：\nfixture-command/);
   assert.match(prompts[0].message, /工作目录：\n\/tmp\/inspiration-fixture/);
-  assert.equal(calls.filter(call => call.method === "inspiration.executions").length, 1);
+  assert.equal(calls.filter(call => call.method === "inspiration.session.execution").length, 2);
   assert.deepEqual(events.filter(event => event[0] === "promptExpire").map(event => event[1]), [{ requestId: request.requestId }]);
   assert.deepEqual(events.at(-1), ["final", "Fixture finished", false,
     { runId: execution.runId, notificationCategory: "inspiration" }]);
@@ -123,8 +135,8 @@ test("Bound replies and cancellation revalidate exact execution and canonical ch
   const calls = [];
   owner._call = async (method, params) => {
     calls.push({ method, params });
-    return method === "inspiration.executions"
-      ? { executions: [structuredClone(idea.latestExecution)], total: 1, hasMore: false, nextCursor: null }
+    return method === "inspiration.session.execution"
+      ? { execution: structuredClone(idea.latestExecution) }
       : { idea: { ...structuredClone(idea), latestExecution: { ...structuredClone(idea.latestExecution), attention: null } } };
   };
   await assert.rejects(owner._controlExternalInspirationSession(target, target.sessionKey,
@@ -148,7 +160,7 @@ test("Production Service get omits attention while execution detail restores the
   const request = { version: 1, requestId: "request-fixture", runId: execution.runId,
     kind: "runtime_approval", title: "Approve", message: "Fixture", fields: [],
     approvalChoices: ["once", "deny", "cancel"], expiresAt: null };
-  const { status, latestExecution, ...idea } = view();
+  const { status, latestExecution, rounds, ...idea } = view();
   const storedExecution = { ...execution, preparationFailure: null, external: {
     status: "waiting_approval", resultSummary: null, errorCode: null, finishedAt: null,
     attention: { request, active: true, occurredAt: 1, command: "fixture", cwd: execution.workspace, details: null },
@@ -156,7 +168,10 @@ test("Production Service get omits attention while execution detail restores the
   const service = new InspirationService({ store: sessionStore({
     get: id => id === idea.id ? { ...idea, deletedAt: null } : null,
     executions: () => [storedExecution],
+    executionRoster: () => rounds,
     latestExecution: () => storedExecution,
+    executionForSession: () => storedExecution,
+    executionForRun: () => storedExecution,
     pendingExecutions: () => [], projectNativeStatuses() {},
     executionsPage: () => ({ rows: [storedExecution], total: 1, hasMore: false }),
   }), now: () => 10 });
@@ -181,7 +196,8 @@ test("Observer abort never cancels external execution or reads another Session",
   assert.deepEqual(calls, ["inspiration.session.send"]);
   assert.deepEqual(events, []);
   owner.delay = () => Promise.resolve();
-  owner._call = async (method) => ({ idea: view(method === "inspiration.get" ? { runId: randomUUID() } : {}) });
+  owner._call = async (method) => method === "inspiration.session.execution"
+    ? { execution: view({ runId: randomUUID() }).latestExecution } : { idea: view() };
   await assert.rejects(owner.sendExternalInspirationMessage(target, "Continue", "client-next"),
     { code: "INSPIRATION_BINDING_INVALID" });
 });
@@ -198,20 +214,91 @@ test("Read-only Session watch observes a card-started request and never dispatch
   } });
   owner._call = async (method, params) => {
     calls.push(method);
-    assert.equal(params.id, target.inspirationId);
-    if (method === "inspiration.get") return { idea: { ...waiting,
-      latestExecution: { ...waiting.latestExecution, attention: null } } };
-    if (method === "inspiration.executions") return { executions: [waiting.latestExecution] };
+    assert.equal(params.sessionKey, target.sessionKey);
+    if (method === "inspiration.session.execution") return { execution: waiting.latestExecution };
     assert.fail(`Watch must not dispatch ${method}`);
   };
   owner.delay = async () => controller.abort();
   await owner.watchExternalInspirationSession(target, { prompt: value => prompts.push(value) }, { signal: controller.signal });
-  assert.deepEqual(calls, ["inspiration.get", "inspiration.executions"]);
+  assert.deepEqual(calls, ["inspiration.session.execution"]);
   assert.deepEqual(prompts, [request]);
   waiting.status = waiting.latestExecution.status = "completed";
   const after = [];
-  await owner.watchExternalInspirationSession(target, { final: () => after.push("final"), prompt: () => after.push("prompt") });
-  assert.deepEqual(after, []);
+  await owner.watchExternalInspirationSession(target, { final: () => after.push("final"), prompt: () => after.push("prompt"),
+    status: value => after.push(value.kind) });
+  assert.deepEqual(after, ["idle"]);
+});
+
+for (const backendId of ["openclaw", "hermes"]) test(`${backendId}: a moved idea leaves its original Session idle without replay`, async () => {
+  const { target, execution, view, owner } = fixture(backendId);
+  const { latestExecution, status, rounds, ...idea } = view();
+  const original = { ...execution, preparationFailure: null, external: {
+    status: backendId === "hermes" ? "failed" : "completed", resultSummary: "Original reply",
+    errorCode: backendId === "hermes" ? "HERMES_EXECUTION_FAILED" : null, finishedAt: 2, attention: null,
+  } };
+  const replacement = { ...original, id: randomUUID(), runId: randomUUID(), agentId: "replacement-agent",
+    sessionKey: "agent:replacement-agent:another-session", createdAt: 3,
+    external: { ...original.external, status: "running", resultSummary: null, errorCode: null, finishedAt: null } };
+  const records = [replacement, original];
+  const service = new InspirationService({ store: sessionStore({
+    get: id => id === idea.id ? { ...idea, deletedAt: null } : null,
+    executions: () => records, latestExecution: () => replacement,
+    executionRoster: () => ({ count: 2, agents: [...rounds.agents, { backendId, agentId: replacement.agentId }] }),
+    executionForRun: runId => records.find(value => value.runId === runId) || null,
+    executionForSession: (key, backend, agent) => records.find(value => value.sessionKey === key
+      && value.backendId === backend && value.agentId === agent) || null,
+    pendingExecutions: () => [], projectNativeStatuses() {},
+  }), now: () => 10 });
+  service.open();
+  const calls = [], events = [];
+  owner._call = (method, params) => { calls.push(method); return service.handle(method, params); };
+  const hooks = Object.fromEntries(["status", "delta", "final", "error", "prompt"]
+    .map(name => [name, (...args) => events.push([name, ...args])]));
+  try {
+    await owner.watchExternalInspirationSession(target, hooks);
+    assert.deepEqual(events, [["status", { kind: "idle", text: "idle" }]]);
+    assert.deepEqual(calls, ["inspiration.session.execution"]);
+    assert.equal(service.view(idea.id).latestExecution.runId, replacement.runId);
+    assert.equal(replacement.external.status, "running");
+    assert.equal(original.external.status, backendId === "hermes" ? "failed" : "completed");
+  } finally { service.close(); }
+});
+
+test("Session observation distinguishes terminal, unknown, and retired reads", async () => {
+  const { target, view, owner } = fixture();
+  for (const status of ["completed", "failed", "canceled", "interrupted", "skipped", "unknown"]) {
+    const events = [];
+    owner._call = async () => ({ execution: view({ status }).latestExecution });
+    await owner.watchExternalInspirationSession(target, {
+      status: value => events.push(value.kind), final: () => assert.fail("history must own terminal messages"),
+      error: () => assert.fail("history must own errors"),
+    });
+    assert.deepEqual(events, [status === "unknown" ? "needs_verification" : "idle"]);
+  }
+  for (const retire of [controller => controller.abort(), () => { owner._generation++; }]) {
+    const controller = new AbortController(), events = [];
+    owner._call = async () => { retire(controller); return { execution: view({ status: "completed" }).latestExecution }; };
+    await owner.watchExternalInspirationSession(target, { status: value => events.push(value) }, { signal: controller.signal });
+    assert.deepEqual(events, []);
+  }
+});
+
+test("An attached observer pins the original run and rejects a mismatched result", async () => {
+  const { target, execution, view, owner } = fixture();
+  const calls = [], events = [];
+  owner._call = async (method, params) => {
+    assert.equal(method, "inspiration.session.execution"); calls.push(params);
+    return { execution: view(calls.length === 1 ? {} : { status: "completed", finishedAt: 2 }).latestExecution };
+  };
+  await owner.watchExternalInspirationSession(target, { final: (...args) => events.push(args) });
+  assert.deepEqual(calls.map(params => params.runId), [null, execution.runId]);
+  assert.equal(events.length, 1);
+  for (const patch of [{ runId: randomUUID() }, { ideaId: randomUUID() }, { backendId: "hermes" },
+    { agentId: "someone-else" }, { sessionKey: "agent:main:another-session" }]) {
+    owner._call = async () => ({ execution: view(patch).latestExecution });
+    await assert.rejects(owner._loadExternalInspirationExecution(target, execution.runId),
+      { code: "INSPIRATION_BINDING_INVALID" });
+  }
 });
 
 test("Session approval shows complete command details or retains only allowed rejection choices", () => {
@@ -341,9 +428,9 @@ test("Proxy intercepts exact bindings before owns without changing ordinary pass
   assert.equal(gate.snapshot("openclaw").activeAdmissions, 0);
 });
 
-test("Card-started Sessions load authentic backend history then restore prompts on open and refresh", { timeout: 5000 }, async (t) => {
+for (const moved of [false, true]) test(`Card-started Sessions ${moved ? "clear terminal state after their idea moves" : "restore prompts on open and refresh"}`, { timeout: 5000 }, async (t) => {
   const fixtures = [fixture("openclaw"), fixture("hermes")];
-  const ideas = new Map(), executions = new Map();
+  const ideas = new Map(), executions = new Map(), replacements = new Map();
   for (const f of fixtures) {
     const { status, latestExecution, ...idea } = f.view();
     ideas.set(idea.id, { ...idea, deletedAt: null });
@@ -353,11 +440,20 @@ test("Card-started Sessions load authentic backend history then restore prompts 
     executions.set(idea.id, { ...f.execution, title: idea.title, body: idea.body, instruction: "本轮继续完善", preparationFailure: null,
       external: { status: "waiting_approval", resultSummary: null, errorCode: null, finishedAt: null,
         attention: { request, active: true, occurredAt: 1, command: "fixture", cwd: f.execution.workspace, details: null } } });
+    if (moved) {
+      const original = executions.get(idea.id);
+      Object.assign(original.external, { status: f.target.backendId === "hermes" ? "failed" : "completed",
+        finishedAt: 2, attention: null });
+      replacements.set(idea.id, { ...original, id: randomUUID(), runId: randomUUID(),
+        sessionKey: "agent:new-owner:replacement", agentId: "new-owner", createdAt: 3,
+        external: { ...original.external, status: "running", finishedAt: null } });
+    }
   }
   const service = new InspirationService({ store: sessionStore({
     get: id => ideas.get(id) || null,
     executions: id => id ? [executions.get(id)] : [...executions.values()],
-    latestExecution: id => executions.get(id),
+    latestExecution: id => replacements.get(id) || executions.get(id),
+    executionForRun: runId => [...executions.values()].find(value => value.runId === runId) || null,
     executionForSession: (key, backendId, agentId) => [...executions.values()].find(value => value.sessionKey === key && value.backendId === backendId && value.agentId === agentId) || null,
     sessionExecutionsPage: ({ sessionKey, backendId, agentId }) => {
       const rows = [...executions.values()].filter(value => value.sessionKey === sessionKey && value.backendId === backendId && value.agentId === agentId);
@@ -390,6 +486,7 @@ test("Card-started Sessions load authentic backend history then restore prompts 
     claimsAgentId(id) { return this.ownsAgentId(id); }
     getAgents() { return [{ id: "hermes-fixture", name: "Fixture" }]; }
     async getHistory(key) { historyCalls.push({ backendId: "hermes", key }); return history("hermes"); }
+    async getHistoryPage() { return { ...history("hermes"), hasMore: false, nextCursor: null, sourceId: "hermes-fixture" }; }
   }
   class OpenClawHistoryFixture extends AgentBackend {
     get id() { return "openclaw"; }
@@ -398,6 +495,7 @@ test("Card-started Sessions load authentic backend history then restore prompts 
       assert.equal(method, "chat.history");
       historyCalls.push({ backendId: "openclaw", params }); return history("openclaw");
     }
+    async getHistoryPage() { return { ...history("openclaw"), hasMore: false, nextCursor: null, sourceId: "openclaw-fixture" }; }
   }
   registry.register(new HermesHistoryFixture()); registry.register(new OpenClawHistoryFixture());
   registry.setInspirationOwner(owner);
@@ -430,20 +528,25 @@ test("Card-started Sessions load authentic backend history then restore prompts 
   assert.deepEqual(serviceCalls, []); assert.deepEqual(historyCalls, []);
   assert.equal((await send("connect", {})).ok, true);
   for (const f of fixtures) {
-    for (let refresh = 0; refresh < 2; refresh++) {
+    for (let refresh = 0; refresh < 3; refresh++) {
       const start = frames.length;
-      const params = { sessionKey: f.target.sessionKey, limit: 23 };
+      const page = refresh > 0;
+      const params = { sessionKey: f.target.sessionKey, limit: 23, ...(page ? { page: true } : {}) };
       const response = await send("chat.history", params);
       const expected = history(f.target.backendId);
+      if (page) Object.assign(expected, { hasMore: false, nextCursor: null, sourceId: `${f.target.backendId}-fixture` });
       expected.messages[0].content = [{ type: "text", text: "Fixture\n\nFixture idea\n\n本轮补充：\n本轮继续完善" }];
       assert.deepEqual(response.payload, expected);
       assert.match(history(f.target.backendId).messages[0].content, /^The user has captured/);
-      const prompt = await waitFor(frame => frame.event === "chat" && frame.payload?.sessionKey === f.target.sessionKey
-        && frame.payload.state === "prompt", start);
-      assert.equal(prompt.payload.prompt.runId, f.execution.runId);
-      assert.equal(prompt.payload.prompt.requestId, `card-${f.target.backendId}`);
-      assert.ok(frames.indexOf(response) < frames.indexOf(prompt));
-      if (f.target.backendId === "openclaw") assert.deepEqual(historyCalls.at(-1).params, params);
+      const observed = await waitFor(frame => frame.event === "chat" && frame.payload?.sessionKey === f.target.sessionKey
+        && (moved ? frame.payload.state === "status" && frame.payload.statusKind === "idle" : frame.payload.state === "prompt"), start);
+      if (moved) assert.equal(replacements.get(f.target.inspirationId).external.status, "running");
+      else {
+        assert.equal(observed.payload.prompt.runId, f.execution.runId);
+        assert.equal(observed.payload.prompt.requestId, `card-${f.target.backendId}`);
+      }
+      assert.ok(frames.indexOf(response) < frames.indexOf(observed));
+      if (f.target.backendId === "openclaw" && !page) assert.deepEqual(historyCalls.at(-1).params, params);
     }
   }
   assert.equal(registry.route("main"), null);
@@ -455,7 +558,9 @@ test("Card-started Sessions load authentic backend history then restore prompts 
   await proxy.close();
   await Promise.all(watchRecords.map(record => record.finished));
   assert.ok(watchRecords.length >= 2);
-  assert.equal(watchRecords.every(record => record.signal.aborted && record.settled), true);
-  assert.equal([...executions.values()].every(execution => execution.external.status === "waiting_approval"), true);
+  assert.equal(watchRecords.every(record => record.settled && (moved || record.signal.aborted)), true);
+  assert.equal([...executions.values()].every(execution => moved
+    ? ["completed", "failed"].includes(execution.external.status) : execution.external.status === "waiting_approval"), true);
+  assert.equal(frames.some(frame => frame.event === "chat" && ["final", "error"].includes(frame.payload?.state)), false);
   assert.equal(serviceCalls.some(method => ["inspiration.session.send", "inspiration.start", "inspiration.cancel"].includes(method)), false);
 });

@@ -43,6 +43,7 @@ class PiRpcProcess {
     this.onExtensionRequest = typeof options.onExtensionRequest === "function"
       ? options.onExtensionRequest : null;
     this.onFatal = typeof options.onFatal === "function" ? options.onFatal : () => {};
+    this.classifyClose = options.classifyClose;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.pending = new Map();
     this.stderr = "";
@@ -178,6 +179,7 @@ class PiRpcProcess {
     this.closed = true;
     let failure = null;
     try { this.decoder.finish(); } catch (error) { failure = error; }
+    failure ??= this.classifyClose?.(code, signal, this.stderr) ?? null;
     if (!failure && this.pending.size > 0) {
       failure = processError("PI_PROCESS_CLOSED", "Pi RPC process closed with pending requests");
     }

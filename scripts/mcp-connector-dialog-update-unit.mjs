@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {createRequire} from 'node:module';
 import ts from '../app/manage-ui/node_modules/typescript/lib/typescript.js';
+import { bundledBridgeVersions, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 const uiRequire=createRequire(new URL('../app/manage-ui/package.json',import.meta.url));
 const React=uiRequire('react'),Renderer=uiRequire('react-test-renderer');
 const recommendations=JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/mcp-featured-presets.json',import.meta.url),'utf8'));
@@ -13,6 +14,7 @@ const api={getMcpOAuthInfo:async()=>({redirectUri:'http://127.0.0.1:45829/callba
 function load(relative,customRequire,globals={}){const module={exports:{}};const compiled=ts.transpileModule(fs.readFileSync(new URL(relative,import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;vm.runInNewContext(compiled,{module,exports:module.exports,require:customRequire,AbortController,URL,setInterval,clearInterval,...globals});return module.exports;}
 const helpers=load('../app/manage-ui/src/lib/mcpConnectorUi.ts',uiRequire);
 const catalog=load('../app/manage-ui/src/lib/mcpRecommendationCatalog.ts',uiRequire);
+const connectorDetails=loadConnectorDetails();
 const detailsFor=(dialog,key)=>dialog.root.findAllByType('details').find(node=>node.findAllByType('summary')[0]?.props.children==='mcpConnectors.'+key);
 let currentLanguage='en';
 const authorizations=[];
@@ -20,6 +22,8 @@ const mod=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
 
  if(name==='../components/McpConnectorIcon')return {__esModule:true,default:props=>React.createElement('i',{'data-dialog-icon':props.iconId||props.identity})};
  if(name==='../components/ConnectorTools')return {__esModule:true,default:()=>null};
+ if(name==='../components/ConnectorDetails')return connectorDetails;
+ if(name==='../../../agent-service/data/mcp-bundled-bridge-versions.json')return bundledBridgeVersions;
  if(name==='react')return React;if(name==='react/jsx-runtime')return uiRequire(name);
  if(name==='react-i18next')return {useTranslation:()=>({t:(key,options)=>key+(options?.version?':'+options.version:''),i18n:{resolvedLanguage:currentLanguage}})};
  if(name==='../components/Modal')return {__esModule:true,default:({children, footer, subtitle,title})=>React.createElement('section',{},React.createElement('header',{},title), children, React.createElement("p", {}, subtitle), footer)};
@@ -33,12 +37,16 @@ const mod=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
 },{window:{open:href=>authorizations.push(href)}});
 let mounted;await Renderer.act(async()=>{mounted=Renderer.create(React.createElement(mod.default,{server,onClose(){},onChanged(){},onLatest:value=>observed.push(value)}));});
 assert.equal(subjectReads,0,'connector dialogs do not fetch an agent selector list');
+assert.equal(mounted.root.findByProps({'data-connector-footer':true}).findAllByType('button').filter(button=>button.props.children==='mcpConnectors.flow.remove').length,1,'installed connectors expose one Delete action in the common footer');
+assert.equal(detailsFor(mounted,'flow.manage'),undefined,'maintenance no longer adds a separate management section');
 assert.equal(JSON.stringify(mounted.toJSON()).includes('mcpConnectors.agents'),false,'agent access controls are absent');
 assert.equal(reads,1);assert.equal(updates.length,0,'discovery must never install');assert.equal(observed[0].version,'1.0.1');
+assert.deepEqual(mounted.root.findAllByType('dd').map(node=>node.children.join('')),['—','1.0.0'],'information uses the installed version, even if a newer version is available');
 assert.ok(mounted.root.findAllByType('input').some(input=>input.props.value==='1.0.1'),'target version prefilled');
 const update=mounted.root.findAllByType('button').find(button=>button.props.children==='mcpConnectors.update');assert.ok(update);assert.equal(update.props.disabled,false);
 await Renderer.act(async()=>{update.props.onClick();await Promise.resolve();await Promise.resolve();});
 assert.deepEqual(updates,[['mcp-ui-update','1.0.1',8]],'only the explicit update button mutates');
+assert.equal(mounted.root.findAllByType('dd').at(-1).children.join(''),'1.0.1');
 await Renderer.act(async()=>mounted.unmount());
 console.log('PASS actual dialog component: read-only latest discovery, prefilled target, exact explicit update mutation');
 
@@ -197,11 +205,12 @@ console.log('PASS installed dialog identities: registry, eight official componen
    assert.equal(added.length,signedIn.length,'opening a recommendation does not add or sign in');
    assert.ok(dialog.root.findAllByType('input').some(node=>node.props.value===recommendation.url));
    assert.ok(dialog.root.findAllByType('input').some(node=>node.props.value===recommendation.name));
-   assert.ok(dialog.root.findAllByType('a').some(node=>node.props.href===recommendation.docsUrl));
+   assert.ok(!dialog.root.findAllByType('a').some(node=>node.props.href===recommendation.docsUrl),'the guide is hidden before adding');
    if(recommendation.note)assert.ok(dialog.root.findAllByType('p').some(node=>node.props.children===recommendation.note.en));
    await Renderer.act(async()=>save().props.onClick());
    assert.deepEqual(JSON.parse(JSON.stringify(added.at(-1))),{source:{kind:'custom'},option:{kind:'remote',protocol:'streamable-http',url:recommendation.url},fields:{},expectedRevision:12,name:recommendation.name});
    assert.equal(signedIn.at(-1),current.id,'saved remote continues into the existing OAuth flow');
+   assert.ok(dialog.root.findAllByType('a').some(node=>node.props.href===recommendation.docsUrl),'the guide is visible after adding');
    await Renderer.act(async()=>dialog.unmount());dialog=null;
   }
   assert.equal(added.length,24);assert.equal(cancelled.length,24);
@@ -288,7 +297,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const field=key=>dialog.root.findAllByType('label').find(node=>node.findAllByType('span').some(span=>span.props.children==='mcpConnectors.'+key)).findByType('input');
  try{
   await mount('strava');assert.equal(button('save'),undefined);assert.equal(dialog.root.findAllByType('input').length,0);
-  assert.equal(dialog.root.findByType('a').props.href,preset('strava').docsUrl);assert.equal(added.length,0);await unmount();
+  assert.equal(dialog.root.findAllByType('a').length,0);assert.equal(added.length,0);await unmount();
   await mount('kiwi');assert.equal(JSON.stringify(dialog.toJSON()).includes('mcpConnectors.oauthRecommendationHint'),false);
   await Renderer.act(async()=>button('save').props.onClick());assert.equal(added.at(-1).option.url,preset('kiwi').url);assert.deepEqual(JSON.parse(JSON.stringify(added.at(-1).fields)),{});assert.equal(signedIn.length,0);assert.equal(button('signin'),undefined);await unmount();
   for(const id of ['fantastical','day-one']){
@@ -405,6 +414,10 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const {parseRegistryEntry}=rootRequire('./app/agent-service/mcp-registry-client');
  const featured=rootRequire('./app/agent-service/data/mcp-featured-servers.json');
  const hiddenIds=new Set(['gmail','google-calendar','google-contacts','google-docs','google-drive','google-sheets','google-slides','zoom','asana','box','dropbox','quickbooks','outlook-mail','outlook-calendar','strava','vercel','shop-pay','shopify','shopify-ucp','uber','uber-eats']);
+ const chinesePresets=new Set(['12306','amap','didi','eastmoney','ifind','luckin','mcdonalds','mijia','variflight','wind']);
+ const chineseOfficial=new Set(['alipay','baidu-maps','fliggy','meituan-paotui','netease-music','quark-drive','rollinggo-hotel','weread']);
+ const officialCatalog=rootRequire('./app/agent-service/data/official-skill-connectors.json');
+ const presetVisible=id=>!hiddenIds.has(id)&&(currentLanguage==='zh-CN'||!chinesePresets.has(id));
  const github=parseRegistryEntry(rootRequire('./scripts/fixtures/mcp-registry/io.github.github__github-mcp-server.json'));
  const figma=parseRegistryEntry(rootRequire('./scripts/fixtures/mcp-registry/com.figma.mcp__mcp.json'));
  const newRegistryItems=featured.filter(name=>![github.registryName,figma.registryName].includes(name)).map(name=>({registryName:name,name:catalog.mcpBrandId(name),version:'1.0.0',description:'English-only registry sentinel',options:[{id:'remote:0',transport:{kind:'remote',protocol:'streamable-http',url:recommendations.find(value=>value.registryName===name)?.url||'https://example.test/mcp'},fields:[]}]}));
@@ -428,6 +441,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const cache=load('../app/manage-ui/src/lib/usePageCache.ts',uiRequire);
  const page=load('../app/manage-ui/src/pages/ConnectorsPage.tsx',name=>{
   if(name==='react'||name==='react/jsx-runtime')return uiRequire(name);
+  if(name==='../components/ConnectorDetails')return connectorDetails;
   if(name==='react-i18next')return {useTranslation:()=>({t:key=>key,i18n:{resolvedLanguage:currentLanguage}})};
   if(name==='react-router-dom')return {useLocation:()=>({search:''})};
   if(name==='../api/mcpConnectors')return pageApi;
@@ -469,13 +483,14 @@ console.log('PASS installed dialog identities: registry, eight official componen
   assert.equal(installedRow.findByType('button').props['aria-label'],'mcpConnectors.manage '+installed.name);
   assert.ok(hasGithub(section('recommended')),'GitHub loads directly in recommendations');
   const recommendedCards=()=>section('recommended').findAllByType('button').filter(button=>button.findAllByType('strong').length);
-  const cardIds=recommendedCards().map(button=>catalog.mcpBrandId(button.findByType('i').props['data-icon']));
-  assert.equal(new Set(cardIds).size, cardIds.length, 'each recommendation appears once');
-  assert.deepEqual(cardIds,[...catalog.mcpRecommendationOrder].filter(id=>!['lark-cli',...JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/official-skill-connectors.json',import.meta.url),'utf8')).map(item=>item.id)].includes(id)&&!hiddenIds.has(id)),'visible registry and local presets share one popularity order');
-  assert.ok(cardIds.every(id=>!hiddenIds.has(id)),'OAuth app setup and restricted guides stay hidden');
+  const cardIds=()=>recommendedCards().map(button=>catalog.mcpBrandId(button.findByType('i').props['data-icon']));
+  const expectedPresetIds=()=>[...catalog.mcpRecommendationOrder].filter(id=>id!=='lark-cli'&&!officialCatalog.some(item=>item.id===id)&&presetVisible(id));
+  assert.equal(new Set(cardIds()).size, cardIds().length, 'each recommendation appears once');
+  assert.deepEqual(cardIds(),expectedPresetIds(),'English recommendations omit Chinese apps and keep the curated order');
   assert.equal(section('recommended').findAllByType('span').some(span=>span.children.join('').includes('mcpConnectors.officialGuide')),false,'recommendations never expose guide-only actions');
   assert.ok(recommendedCards().every(button=>!/[\u3400-\u9fff]/.test(button.findAllByType('small')[0].children.join(''))),'every English description is English');
   currentLanguage='zh-CN';await Renderer.act(async()=>rendered.update(React.createElement(page.default)));
+  assert.deepEqual(cardIds(),expectedPresetIds(),'changing to Chinese adds the local recommendations in the same order');
   assert.ok(recommendedCards().every(button=>/[\u3400-\u9fff]/.test(button.findAllByType('small')[0].children.join(''))),'every card switches to Chinese on the existing page');
   assert.equal(JSON.stringify(rendered.toJSON()).includes('English-only registry sentinel'),false,'English-only remote metadata must not leak into curated summaries');
   const githubChinese=recommendedCards().find(button=>button.findByType('strong').children.join('')==='GitHub');
@@ -483,28 +498,30 @@ console.log('PASS installed dialog identities: registry, eight official componen
   assert.ok(rendered.root.findAllByType('p').some(p=>p.children.join('')===catalog.mcpRegistrySummary(github.registryName).description['zh-CN']),'dialog follows Chinese too');
   await Renderer.act(async()=>rendered.root.findByType(mod.default).props.onClose());
   currentLanguage='en';await Renderer.act(async()=>rendered.update(React.createElement(page.default)));
+  assert.deepEqual(cardIds(),expectedPresetIds(),'changing back to English removes the local recommendations');
   assert.ok(recommendedCards().every(button=>!/[\u3400-\u9fff]/.test(button.findAllByType('small')[0].children.join(''))),'all descriptions switch back to English');
 
-  for(const recommendation of recommendations)assert.equal(section('recommended').findAllByType('strong').some(label=>label.children.join('')===catalog.mcpConnectorName(recommendation.id,recommendation.name)),!hiddenIds.has(recommendation.id),'recommendation visibility: '+recommendation.name);
+  for(const recommendation of recommendations)assert.equal(section('recommended').findAllByType('strong').some(label=>label.children.join('')===catalog.mcpConnectorName(recommendation.id,recommendation.name)),presetVisible(recommendation.id),'recommendation visibility: '+recommendation.name);
   assert.equal(section('directory'),undefined);
   assert.equal(rendered.root.findAllByProps({type:'search'}).length,0);
   assert.deepEqual([...registryQueries].sort(),[...featured].sort());
   assert.ok(section('installed').findAllByType('strong').some(label=>label.children.join('')===installed.name));
   const githubButton=section('recommended').findAllByType('button').find(button=>button.findAllByType('strong').some(label=>label.children.join('')==='GitHub'));
   await Renderer.act(async()=>{githubButton.props.onClick();await flush();});
-  assert.ok(rendered.root.findAllByType('a').some(link=>link.props.href==='https://github.com/github/github-mcp-server'));
+  assert.ok(!rendered.root.findAllByType('a').some(link=>link.props.href===github.repositoryUrl),'the registry guide is hidden before adding');
+  assert.deepEqual(rendered.root.findAllByType('dd').map(node=>node.children.join('')),['GitHub',github.version]);
   await unmount();
 
   recommendationsFail=true;
   await mount();
   assert.ok(hasAlert(section('recommended')));
-  for(const recommendation of recommendations.filter(value=>!value.registryName))assert.equal(section('recommended').findAllByType('strong').some(label=>label.children.join('')===catalog.mcpConnectorName(recommendation.id,recommendation.name)),!hiddenIds.has(recommendation.id),'recommendation visibility during registry outage: '+recommendation.name);
+  for(const recommendation of recommendations.filter(value=>!value.registryName))assert.equal(section('recommended').findAllByType('strong').some(label=>label.children.join('')===catalog.mcpConnectorName(recommendation.id,recommendation.name)),presetVisible(recommendation.id),'recommendation visibility during registry outage: '+recommendation.name);
   recommendationsFail=false;
   await Renderer.act(async()=>{retry(section('recommended')).props.onClick();await flush();});
   assert.ok(hasGithub(section('recommended')));assert.equal(hasAlert(section('recommended')),false);
   await unmount();
 
-  console.log(`PASS actual connectors page: OAuth-app, superseded Shop and restricted entries hidden, ${cardIds.length} MCP cards in popularity order, live bilingual descriptions and dialog, no directory/search, registry failure/retry`);
+  console.log(`PASS actual connectors page: ${expectedPresetIds().length} English MCP cards in popularity order, Chinese-only recommendations, live bilingual descriptions and dialog, no directory/search, registry failure/retry`);
   installedServers=[{...installed,id:'existing-local-figma',auth:{kind:'none'},transport:{kind:'remote',protocol:'streamable-http',url:helpers.FIGMA_DESKTOP_URL}}];
   await mount();
   assert.equal(section('recommended').findAllByType('strong').some(node=>node.children.join('')==='Figma'),false);
@@ -529,21 +546,27 @@ console.log('PASS installed dialog identities: registry, eight official componen
   }
   currentLanguage='en';
   console.log('PASS service groups: one compact app entry, connected groups omit status, partial groups show not connected, no duplicate Add and legacy management in both languages');
-  officialDefinitions.push(...JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/official-skill-connectors.json',import.meta.url),'utf8')));
+  officialDefinitions.push(...officialCatalog);
   const installedOfficialIds=['alipay','fliggy','netease-music','shop'];
   installedServers=installedOfficialIds.map((id,index)=>({...installed,id:`official-${id}-a0b0c0d${index}`,name:`Renamed ${id}`,source:{kind:'custom'},transport:{kind:'stdio-command',command:'/Applications/Shoggoth.app/Contents/MacOS/Shoggoth'}}));
+  const officialRecommendations=()=>section('recommended').findAll(node=>node.props['data-official-recommendation']).map(node=>node.props['data-official-recommendation']);
+  const availableOfficial=officialDefinitions.filter(item=>!installedOfficialIds.includes(item.id)).sort((a,b)=>catalog.mcpRecommendationRank(a.id)-catalog.mcpRecommendationRank(b.id)).map(item=>item.id);
   for(const state of [{data:{items:[]},loading:false},{data:undefined,loading:true},{data:undefined,loading:false,error:'OFFICIAL_SKILL_STATE_UNAVAILABLE'}]){
    officialModel={...officialModel,...state};
    await mount();
    assert.deepEqual(section('installed').findAllByType('i').map(icon=>icon.props['data-icon']),installedOfficialIds,'installed official registrations keep bundled artwork while ownership metadata is unavailable');
-   const visible=section('recommended').findAll(node=>node.props['data-official-recommendation']).map(node=>node.props['data-official-recommendation']);
-   assert.deepEqual(visible,[...officialDefinitions].filter(item=>!installedOfficialIds.includes(item.id)).sort((a,b)=>catalog.mcpRecommendationRank(a.id)-catalog.mcpRecommendationRank(b.id)).map(item=>item.id),'already added official connectors never expose another Add button');
+   assert.deepEqual(officialRecommendations(),availableOfficial.filter(id=>!chineseOfficial.has(id)),'English keeps global official recommendations');
    await unmount();
   }
+  currentLanguage='zh-CN';
+  await mount();
+  assert.deepEqual(officialRecommendations(),availableOfficial,'Chinese includes the regional official recommendations without duplicating installed connectors');
+  await unmount();
   installedServers=[{...installed,id:'custom-alipay',name:'支付宝',transport:{kind:'stdio-command',command:'/custom/node'}}];
   await mount();
   assert.equal(section('recommended').findAll(node=>node.props['data-official-recommendation']==='alipay').length,1,'a custom display name cannot hide the real recommendation');
   await unmount();
+  currentLanguage='en';
   officialDefinitions.length=0;officialModel={data:{items:[]},refresh:async()=>{},loading:false};
   console.log('PASS installed official connectors: stable icons and no duplicate Add during loading, missing metadata or service errors; custom names retain recommendations');
   const clickup=recommendations.find(value=>value.id==='clickup');
@@ -633,19 +656,23 @@ console.log('PASS installed dialog identities: registry, eight official componen
   }
   assert.equal(checked.length,2);
   console.log('PASS canonical endpoint identity: Lovable, Kiwi, Box, Tessie and Shopify keep installed logos, setup metadata and existing management in both languages with Registry offline; public Kiwi recovers by checking without OAuth or credentials');
-  installedServers=[];pendingIds=['preset:home-assistant','registry:dev.shoggoth.offline/mcp'];
+  currentLanguage='en';installedServers=[];pendingIds=['preset:home-assistant','preset:mijia','registry:dev.shoggoth.offline/mcp'];
   await mount();
   const pendingRows=section('installed').findAllByType('li');
-  assert.equal(pendingRows.length,2,'pending and offline catalog entries remain visible');
+  assert.equal(pendingRows.length,3,'pending and offline entries remain visible in English, including Chinese apps');
   assert.ok(pendingRows.every(row=>row.findByType('small').children.join('')==='mcpConnectors.flow.notConnected'));
+  const mijiaRow=pendingRows.find(row=>row.findByType('i').props['data-icon']==='mijia');
+  await Renderer.act(async()=>mijiaRow.findByType('button').props.onClick());
+  assert.equal(rendered.root.findByType(mod.default).props.pendingKey,'preset:mijia','a pending Chinese app can still be configured in English');
+  await Renderer.act(async()=>rendered.root.findByType(mod.default).props.onClose());
   const offlineRow=pendingRows.find(row=>row.findByType('strong').children.join('')==='dev.shoggoth.offline/mcp');
   assert.equal(offlineRow.findAllByType('i').length,1,'offline entries retain a fallback icon');
   await Renderer.act(async()=>offlineRow.findByType('button').props.onClick());
   const offlineDialog=rendered.root.findByProps({'data-unavailable-dialog':true});
   assert.ok(offlineDialog.findAllByType('button').some(button=>button.props.children==='mcpConnectors.retry'),'retry stays available in management');
   await Renderer.act(async()=>offlineDialog.findAllByType('button').find(button=>button.props.children==='mcpConnectors.flow.remove').props.onClick());
-  assert.deepEqual(pendingIds,['preset:home-assistant'],'removing an offline entry clears only its pending identity');
-  assert.equal(section('installed').findAllByType('li').length,1);
+  assert.deepEqual(pendingIds,['preset:home-assistant','preset:mijia'],'removing an offline entry clears only its pending identity');
+  assert.equal(section('installed').findAllByType('li').length,2);
   await unmount();
   console.log('PASS compact pending entries: not connected text, fallback icon, offline management retry and removal');
  }finally{if(rendered)await unmount();for(const key of Object.keys(api))delete api[key];Object.assign(api,originalApi);}

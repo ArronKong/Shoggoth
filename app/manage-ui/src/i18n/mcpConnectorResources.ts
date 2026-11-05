@@ -2,7 +2,7 @@ export const mcpConnectorResources = {
   "zh-CN": {
     flow: {
       notAdded: "未添加", pending: "待配置", added: "已添加", connected: "已连接", notConnected: "未连接", addHint: "添加后即可在这里完成连接设置。",
-      pendingHint: "已添加，完成下方配置后才能连接。", capabilities: "可以帮你", toolDetails: "工具明细", backOverview: "返回概览", help: "连接帮助", connectionTitle: "连接 {{name}}", connectionStatus: "连接状态", done: "完成", connectedHint: "已连接", devicePermissions: "读写权限", connect: "连接", authorize: "登录并授权", saveConnect: "保存并连接", checkConnect: "检测并连接",
+      pendingHint: "已添加，完成下方配置后才能连接。", capabilities: "可以帮你", toolDetails: "工具明细", backOverview: "返回概览", information: "信息", developer: "开发者", connectionTitle: "连接 {{name}}", connectionStatus: "连接状态", done: "完成", connectedHint: "已连接", devicePermissions: "读写权限", connect: "连接", authorize: "登录并授权", saveConnect: "保存并连接", checkConnect: "检测并连接",
       waiting: "等待浏览器授权…", verifying: "正在验证连接…", readyHint: "连接检查已通过，可以查看工具明细。", configure: "修改连接设置", advanced: "高级设置", manage: "管理连接", remove: "删除",
       viewTools: "查看工具", toolsAfterCheck: "连接检查成功后，可在这里查看服务返回的工具名称和说明。重启后请点击“检查连接”刷新清单。", toolsHint: "以下是最近一次连接检查返回的工具，实际调用仍遵循当前账号和助理权限。", deviceToolsHint: "这些是此系统连接支持的操作，每次执行仍遵循下方读写权限。",
       previewTools: "工具预览", toolsPreviewHint: "以下为常用工具预览。连接检查成功后将更新为实际清单，可用范围取决于账号和权限。", operationsPreviewHint: "以下按公开说明列出常见操作，名称用于说明用途。连接检查成功后将替换为服务实际返回的工具清单。", previewSource: "查看来源说明", refreshPreview: "当前显示预览；点击“检查连接”可刷新实际工具清单。",
@@ -21,6 +21,7 @@ export const mcpConnectorResources = {
     flightawareSource: "AeroAPI · 仅查询",
     flightawareMetered: "允许可能计费的航班查询（保存后生效）",
     flightawareMeteredHint: "默认关闭。检查连接只读取标价为 $0 的账号用量；启用后查询可能按量计费，免费额度不是费用上限。此开关不会替你开通套餐。",
+    requestDismiss: "关闭{{name}}连接请求",
     setupResuming: "连接器已就绪，当前任务结束后会自动继续原任务。",
     setupUserAction: "连接器已添加。需要登录或密钥时，请在这里完成；全部就绪后会自动继续原任务。",
     recommendationSetup: { oauth: "OAuth 登录", "oauth-client": "需要 OAuth 应用", token: "需要访问令牌", endpoint: "填写部署地址", none: "无需登录", instance: "连接自己的实例", local: "需要本机应用", "api-key": "需要 API Key", restricted: "接入受限" }, instanceUrl: "实例 MCP 地址（以 /api/mcp 结尾）",
@@ -48,7 +49,7 @@ export const mcpConnectorResources = {
   en: {
     flow: {
       notAdded: "Not added", pending: "Needs setup", added: "Added", connected: "Connected", notConnected: "Not connected", addHint: "Add this connector to set up its connection here.",
-      pendingHint: "Added. Complete the configuration below to connect.", capabilities: "What you can do", toolDetails: "Tool details", backOverview: "Back to overview", help: "Connection help", connectionTitle: "Connect {{name}}", connectionStatus: "Connection status", done: "Done", connectedHint: "Connected", devicePermissions: "Reading and writing", connect: "Connect", authorize: "Sign in and authorize", saveConnect: "Save and connect", checkConnect: "Check and connect",
+      pendingHint: "Added. Complete the configuration below to connect.", capabilities: "What you can do", toolDetails: "Tool details", backOverview: "Back to overview", information: "Information", developer: "Developer", connectionTitle: "Connect {{name}}", connectionStatus: "Connection status", done: "Done", connectedHint: "Connected", devicePermissions: "Reading and writing", connect: "Connect", authorize: "Sign in and authorize", saveConnect: "Save and connect", checkConnect: "Check and connect",
       waiting: "Waiting for browser approval…", verifying: "Verifying connection…", readyHint: "The connection check passed. View the available tools.", configure: "Edit connection settings", advanced: "Advanced settings", manage: "Manage connection", remove: "Delete",
       viewTools: "View tools", toolsAfterCheck: "After a successful connection check, tool names and descriptions appear here. Check the connection again after a restart to refresh this list.", toolsHint: "Tools returned by the latest connection check. Calls still follow current account and agent permissions.", deviceToolsHint: "Operations supported by this system connection. Each call follows the reading and writing policies below.",
       previewTools: "Tool preview", toolsPreviewHint: "A preview of common tools. A successful connection check replaces this with the actual list. Availability depends on your account and permissions.", operationsPreviewHint: "Common operations from published guides. Names describe their purpose. A successful connection check replaces this preview with the tools returned by the service.", previewSource: "View source guide", refreshPreview: "Showing a preview. Check the connection to refresh the actual tool list.",
@@ -67,6 +68,7 @@ export const mcpConnectorResources = {
     flightawareSource: "AeroAPI · Queries only",
     flightawareMetered: "Allow metered flight queries (save to apply)",
     flightawareMeteredHint: "Off by default. Checking reads only the documented $0 account-usage endpoint. Enabled queries may incur charges; free credit is not a spending cap. This switch does not enroll you in a plan.",
+    requestDismiss: "Dismiss {{name}} connection request",
     setupResuming: "The connectors are ready. The original task will resume automatically after the current turn.",
     setupUserAction: "The connectors have been added. Complete any required sign-in or credentials here; the original task resumes automatically when all are ready.",
     recommendationSetup: { oauth: "OAuth sign-in", "oauth-client": "OAuth app required", token: "Access token required", endpoint: "Deployment URL required", none: "No sign-in needed", instance: "Connect your instance", local: "Desktop app required", "api-key": "API key required", restricted: "Restricted access" }, instanceUrl: "Instance MCP URL (ending in /api/mcp)",

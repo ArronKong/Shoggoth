@@ -47,7 +47,14 @@ test('OpenClaw 完成后切到原生 Agent，携带便签历史并启动独立 W
   await until(() => f.dispatcher.getRun(run.id).status === 'completed');
   await f.restart();
   assert.equal((await f.call('activity.binding', { id: idea.id, runId: run.id })).prompt, binding.prompt);
-  assert.equal((await f.call('executions', { id: idea.id, cursor: null, limit: 20 })).executions.length, 2);
+  const history = await f.call('executions', { id: idea.id, cursor: null, limit: 20 });
+  assert.equal(history.executions.length, 2);
+  assert.deepEqual(history.executions.map(execution => execution.instruction), ['本轮补充：比较这三个选项', '上一轮补充：保留三个选项'],
+    'the idea thread shows what was asked in each round');
+  assert.deepEqual((await f.call('get', { id: idea.id })).idea.rounds, { count: 2, agents: [
+    { backendId: 'openclaw', agentId: 'main' }, { backendId: f.profile.backendId, agentId: f.profile.agentId }] },
+    'cards show how many rounds ran and who worked on the idea, in first-use order');
+  assert.deepEqual((await f.call('get', { id: other.id })).idea.rounds.count, 1);
 });
 
 test('Hermes 失败及旧版跨后端准备失败后，原生新一轮接收历史且不重放失败执行', async (t) => {
@@ -346,8 +353,48 @@ test("一次启动冻结输入、只建一个领域 Run 和一个可见 Session"
   assert.ok(events[0].content.text.includes("先做网页"));
 });
 
-test("补充与授权在卡片响应后沿同一 Run 继续，并写入同一 Transcript", async (t) => {
+test('新灵感会话使用完全访问，续轮保留修改后的权限，换目录按新默认创建', async (t) => {
   const f = await fixture(t);
+  const first = await f.start(await f.create());
+  const firstRun = await f.running(first);
+  const sessionKey = first.latestExecution.sessionKey;
+  assert.equal(f.sessions.getSession(sessionKey).permissionMode, 'full-access');
+  assert.equal(f.coordinator.runExecutionContracts.get(firstRun.id).permissionMode, 'full-access');
+  assert.deepEqual(f.coordinator.runExecutionContracts.get(firstRun.id).permissionPolicy,
+    { approvalPolicy: 'on-request', sandbox: 'danger-full-access' });
+  assert.deepEqual(await f.host.approve(firstRun), { decision: 'accept' });
+  assert.equal(f.dispatcher.getRun(firstRun.id).status, 'running');
+  f.host.complete(firstRun);
+  await until(() => f.dispatcher.getRun(firstRun.id).status === 'completed');
+
+  f.sessions.setPermissionMode(sessionKey, 'request-approval');
+  await f.restart();
+  const second = await f.start(f.service.view(first.id), '继续完善');
+  const secondRun = await f.running(second);
+  assert.equal(second.latestExecution.sessionKey, sessionKey);
+  assert.equal(f.sessions.getSession(sessionKey).permissionMode, 'request-approval');
+  const approval = f.host.approve(secondRun);
+  await until(() => f.dispatcher.getRun(secondRun.id).status === 'waiting_approval');
+  await f.call('respond', { id: first.id, operationId: id(), runId: secondRun.id,
+    requestId: f.dispatcher.getRun(secondRun.id).waitingRequestId, response: { choice: 'deny' } });
+  await approval;
+  f.host.complete(secondRun);
+  await until(() => f.dispatcher.getRun(secondRun.id).status === 'completed');
+
+  const workspace = path.join(f.root, 'other-workspace');
+  fs.mkdirSync(workspace);
+  const third = (await f.call('start', { id: first.id, expectedRevision: f.service.view(first.id).revision,
+    operationId: id(), instruction: '换目录继续', agentId: f.profile.agentId, backendId: f.profile.backendId, workspace })).idea;
+  const thirdRun = await f.running(third);
+  assert.notEqual(third.latestExecution.sessionKey, sessionKey);
+  assert.equal(f.sessions.getSession(third.latestExecution.sessionKey).permissionMode, 'full-access');
+  assert.deepEqual(f.productStore.getAgentProfile(f.profile.id).permissionPolicy, f.profile.permissionPolicy);
+  f.host.complete(thirdRun);
+  await until(() => f.dispatcher.getRun(thirdRun.id).status === 'completed');
+});
+
+test("补充与授权在卡片响应后沿同一 Run 继续，并写入同一 Transcript", async (t) => {
+  const f = await fixture(t, { permissionMode: 'request-approval' });
   const idea = await f.start(await f.create());
   let run = await f.running(idea);
   const answer = f.host.ask(run);
@@ -380,7 +427,7 @@ test("补充与授权在卡片响应后沿同一 Run 继续，并写入同一 Tr
 
 test("灵感授权保留 Grok 工具与服务器范围，响应和记录使用实际选项", async (t) => {
   const { validateInspirationServiceResult } = require("../app/agent-service/inspiration-service-protocol");
-  const f = await fixture(t);
+  const f = await fixture(t, { permissionMode: 'request-approval' });
   const idea = await f.start(await f.create());
   const run = await f.running(idea);
   const approvalOptions = [
@@ -421,7 +468,7 @@ test("灵感授权保留 Grok 工具与服务器范围，响应和记录使用�
 });
 
 test("从会话处理请求后卡片同步结算；过期授权和跨灵感响应被拒绝", async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { permissionMode: 'request-approval' });
   const idea = await f.start(await f.create());
   const run = await f.running(idea);
   const approval = f.host.approve(run);
@@ -614,6 +661,60 @@ for (const lostStartResponse of [false, true]) test(
   assert.ok(events.some(event => event.runId === run.id && event.kind === 'assistant'));
 });
 
+test('切换模型重建原生线程时，同目录灵感沿用原产品会话和模型', async (t) => {
+  const { startInspirationFixture } = require('./fixtures/inspiration-service-fixture.cjs');
+  const f = await startInspirationFixture({ isolatedHome: true, permissionMode: 'request-approval',
+    codexFakeEnv: { CODEX_FAKE_MODEL_CATALOG: '1' } });
+  t.after(() => f.close());
+  const { chatSessionStore: sessions, productStore, workRunCoordinator: coordinator } = f.service;
+  const { idea } = await f.backend.createInspiration({ operationId: id(), body: '模型切换回归' });
+  const start = async (current, instruction) => (await f.backend.startInspiration(idea.id, {
+    operationId: id(), expectedRevision: current.revision, agentId: ideaAgent.id,
+    backendId: ideaAgent.backendId, workspace: null, instruction,
+  })).idea.latestExecution;
+  const readLatest = async () => (await f.backend.getInspirationExecutions(idea.id, { cursor: null, limit: 1 })).executions[0];
+  const waitAttention = async (runId, status) => {
+    let latest;
+    const deadline = Date.now() + 8000;
+    do {
+      latest = await readLatest();
+      if (latest?.runId === runId && latest.status === status && latest.attention?.active) return latest;
+      if (['failed', 'interrupted', 'canceled'].includes(latest?.status)) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    } while (Date.now() < deadline);
+    assert.fail(`Expected ${status}, got ${latest?.status} (${latest?.errorCode ?? 'no error code'})`);
+  };
+  const respond = async (execution, response) => f.backend.respondInspiration(idea.id, {
+    operationId: id(), runId: execution.runId, requestId: execution.attention.request.requestId, response,
+  });
+  const { agents } = await f.registry.getInspirationAgents();
+  const ideaAgent = agents.find(agent => agent.capabilities.execute);
+  assert.ok(ideaAgent);
+  const first = await start(idea, '');
+  await respond(await waitAttention(first.runId, 'waiting_input'), { action: 'submit', answers: { choice: 'Alpha' } });
+  await coordinator.waitForTerminal(first.runId);
+  const session = sessions.getSession(first.sessionKey);
+  const target = productStore.getAgentRuntimeBinding(session.profileId, session.runtimeBindingId);
+  const model = 'fake-model';
+  // Exercise the stored shape from a provider/model switch that needs a fresh
+  // native thread, using the production context handoff before retiring it.
+  await coordinator.prepareRuntimeHandoff(session, target, { model, permissionMode: session.permissionMode ?? null });
+  const switched = sessions.switchRuntime(session.sessionKey, { bindingId: target.id, revision: session.revision,
+    model, renewSession: true });
+  sessions.markRuntimeSwitchAudited(session.sessionKey, switched.revision);
+  assert.equal(switched.status, 'draft');
+  assert.equal((await readLatest()).reusableSession, true);
+  const { idea: current } = await f.backend.getInspiration(idea.id);
+  const second = await start(current, '同目录继续');
+  assert.equal(second.sessionKey, session.sessionKey);
+  const approval = await waitAttention(second.runId, 'waiting_approval');
+  const active = sessions.getSession(session.sessionKey);
+  assert.notEqual(active.runtimeSessionId, session.runtimeSessionId);
+  assert.equal(coordinator.getRuntimeContextForSource(session.profileId, 'inspiration', idea.id).effectiveModel, model);
+  await respond(approval, { choice: 'deny' });
+  await coordinator.waitForTerminal(second.runId);
+});
+
 test('会话续写固定原绑定，归档会话不能另开 Session 执行', async (t) => {
   const f = await fixture(t);
   let idea = await f.start(await f.create());
@@ -623,6 +724,8 @@ test('会话续写固定原绑定，归档会话不能另开 Session 执行', as
   const archiveId = id();
   f.sessions.requestArchive(originalSession, archiveId, Date.now());
   f.sessions.completeRemoteOperation(archiveId);
+  const { executions } = await f.call('executions', { id: idea.id, cursor: null, limit: 10 });
+  assert.equal(executions[0].reusableSession, false);
   const count = f.store.executions(idea.id).length;
   assert.throws(() => f.service.sendFromSession({ sessionKey: originalSession, operationId: id(), prompt: '不能暗中创建新会话' }), { code: 'INSPIRATION_BINDING_INVALID' });
   assert.equal(f.store.executions(idea.id).length, count);
@@ -699,7 +802,7 @@ test('密码字段传给 Runtime，但不进入可见 Session 历史', async (t)
 });
 
 test('权限范围完整可见，无法完整展示的审批仅可拒绝或取消', async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { permissionMode: 'request-approval' });
   const idea = await f.start(await f.create());
   const run = await f.running(idea);
   const approval = f.host.request('item/permissions/requestApproval', { threadId: run.runtimeSessionRef?.sessionId,

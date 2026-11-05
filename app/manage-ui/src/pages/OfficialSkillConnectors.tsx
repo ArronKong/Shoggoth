@@ -4,8 +4,9 @@ import { changeOfficialConnector, getOfficialConnectors, officialAccount, offici
 import { listMcpConnectors, saveMcpCredentials, type McpServer } from "../api/mcpConnectors";
 import { usePageCache } from "../lib/usePageCache";
 import { mcpRecommendationText, type McpRecommendation } from "../lib/mcpConnectorUi";
-import { mcpConnectorName } from "../lib/mcpRecommendationCatalog";
+import { mcpConnectorDeveloper, mcpConnectorName } from "../lib/mcpRecommendationCatalog";
 import ConnectorTools from "../components/ConnectorTools";
+import { ConnectorConnectionHeading, ConnectorFooter, ConnectorInfo } from "../components/ConnectorDetails";
 import McpConnectorIcon from "../components/McpConnectorIcon";
 import Modal from "../components/Modal";
 import { useConfirm } from "../components/ui";
@@ -175,25 +176,39 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const serviceStatus = checking ? "serviceChecking" : accountReady ? "serviceReady"
     : account?.state === "signedOut" ? "serviceNeedsCredentials" : serviceCheckFailed || account?.errorCode ? "serviceCheckFailed"
       : requiredCredentialsMissing ? "serviceNeedsCredentials" : "serviceUnknown";
-  const footer = <div className={s.flowFooter}><p>{t(accountReady ? "mcpConnectors.flow.connectedHint" : "mcpConnectors.defaultAccess")}</p><div className={s.flowFooterActions}>
+  const guide = data?.canRemove || installed ? { url: definition.docsUrl, label: tr("source") } : undefined;
+  const setupNotes = <>
+    {(installed || ["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(id)) && <p className={s.notice}>{mcpRecommendationText(definition.note, language)}</p>}
+    {definition.accessUrl && <p><a className={s.connectionGuide} href={definition.accessUrl} target="_blank" rel="noreferrer">{tr("requestAccess")}</a></p>}
+  </>;
+  const remove = async () => {
+    if (await confirm({ title: tr("removeTitle"), message: tr("removeConfirm"), confirmLabel: tr("remove"), danger: true })) { await model.change(id, "remove"); setAccount(null); onChanged(); }
+  };
+  const footer = <ConnectorFooter hint={t(accountReady ? "mcpConnectors.flow.connectedHint" : "mcpConnectors.defaultAccess")} onRemove={data?.canRemove ? () => void remove() : undefined} removeDisabled={busy}>
     {!installed ? <button type="button" className="btn-dark btn-sm" disabled={busy || !data || !!model.error} onClick={() => void model.change(id, "install")}>{data?.canRemove ? tr("repair") : t("mcpConnectors.add")}</button> : <>
       {definition.fields.length > 0 && <button type="button" className={credentialsDirty || !supportsLogin && !accountReady ? "btn-dark btn-sm" : "btn-secondary btn-sm"} disabled={busy || !credentialsDirty} onClick={() => void save()}>{t("mcpConnectors.flow.saveConnect")}</button>}
-      {supportsLogin && <button type="button" className={!credentialsDirty && !accountReady ? "btn-dark btn-sm" : "btn-secondary btn-sm"} disabled={busy} onClick={() => void accountAction("start")}>{t(accountReady ? "mcpConnectors.flow.reconnect" : "mcpConnectors.flow.authorize")}</button>}
-      {accountReady && <button type="button" className="btn-dark btn-sm" disabled={busy} onClick={onClose}>{t("mcpConnectors.flow.done")}</button>}
+      {supportsLogin && !accountReady && <button type="button" className={!credentialsDirty ? "btn-dark btn-sm" : "btn-secondary btn-sm"} disabled={busy} onClick={() => void accountAction("start")}>{t("mcpConnectors.flow.authorize")}</button>}
+      {(accountReady || !supportsLogin && !definition.fields.length) && <button type="button" className="btn-dark btn-sm" disabled={busy} onClick={onClose}>{t("mcpConnectors.flow.done")}</button>}
     </>}
-    {!accountReady && <button type="button" className="btn-secondary btn-sm" disabled={busy} onClick={onClose}>{tr("close")}</button>}
-  </div></div>;
+  </ConnectorFooter>;
   return <Modal open title={<span className={s.dialogIdentity}><McpConnectorIcon name={definition.name} identity={id} />{definition.name}</span>} width={640} variant="connector" subtitle={mcpRecommendationText(definition.description, language)} footer={footer} onClose={onClose} dismissible={!busy}>
     <div className={s.detail}>
       <ConnectorTools overview description={mcpRecommendationText(definition.description, language)} serverId={data?.serverId || undefined} status={server?.status} checkedAt={server?.lastCheck?.at} previewId={id} refreshKey={`${data?.revision}:${toolsRevision}`} />
-      {!installed && <section className={s.connectionPanel}><div className={s.connectionHeading}><h3>{t("mcpConnectors.flow.connectionTitle", { name: definition.name })}</h3><span className={s.status}>{tr(data?.stage ? `stages.${data.stage}` : `states.${data?.state || "notInstalled"}`)}</span></div><p className={s.muted}>{t("mcpConnectors.flow.addHint")}</p></section>}
+      {!installed && <section className={s.connectionPanel}>
+        <ConnectorConnectionHeading title={t("mcpConnectors.flow.connectionTitle", { name: definition.name })} guide={guide}
+          status={<span className={s.status}>{tr(data?.stage ? `stages.${data.stage}` : `states.${data?.state || "notInstalled"}`)}</span>} />
+        {!data?.canRemove && <p className={s.muted}>{t("mcpConnectors.flow.addHint")}</p>}
+        {setupNotes}
+      </section>}
       {model.loading && !data && <p role="status">{tr("loading")}</p>}
       {model.error && <p className={s.error} role="alert">{tr("loadFailed")} <button className={s.textButton} onClick={() => void model.refresh()}>{tr("retry")}</button></p>}
       {installationError && <p className={s.error} role="alert">{tr(`errors.${installationError}`)}</p>}
       {installed && <section className={s.connectionPanel}>
-        <h3>{t("mcpConnectors.flow.connectionTitle", { name: definition.name })}</h3><p className={s.muted}>{tr("localHint")}</p>
+        <ConnectorConnectionHeading title={t("mcpConnectors.flow.connectionTitle", { name: definition.name })} guide={guide}
+          status={<span className={s.status} data-state={accountReady ? "ready" : undefined} role="status">{tr(serviceOnly ? serviceStatus : `accountStates.${account?.state || "unknown"}`)}{account?.userName ? ` · ${account.userName}` : ""}</span>} />
+        <p className={s.muted}>{tr("localHint")}</p>
+        {setupNotes}
         {definition.fields.length > 0 && <details className={s.clientSetup} open={!accountReady || undefined}><summary>{t("mcpConnectors.flow.configure")}</summary><div className={s.fields}>{definition.fields.map(field => <label className={s.field} key={field.name}><span>{mcpRecommendationText(field.label, language)}{field.required ? " *" : ""}</span>{field.name === "NCM_PRIVATE_KEY" ? <textarea className={s.masked} rows={4} autoComplete="off" spellCheck={false} disabled={busy} value={values[field.name] || ""} onChange={event => setValues(previous => ({ ...previous, [field.name]: event.target.value }))} /> : <input autoComplete="off" spellCheck={false} type={field.secret ? "password" : "text"} placeholder={serviceOnly && server?.setup?.configuredFields.includes(`env:${field.name}`) ? tr("credentialSavedPlaceholder") : undefined} disabled={busy} value={values[field.name] || ""} onChange={event => setValues(previous => ({ ...previous, [field.name]: event.target.value }))} />}</label>)}</div><p className={s.muted}>{tr(serviceOnly && credentialsSaved ? "credentialSavedHint" : "credentialHint")}</p></details>}
-        <p className={s.status} role="status">{tr(serviceOnly ? serviceStatus : `accountStates.${account?.state || "unknown"}`)}{account?.userName ? ` · ${account.userName}` : ""}</p>
         {account?.qrCode && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(account.qrCode) && account.qrCode.length < 350000 && <img src={account.qrCode} alt={tr("open")} width={192} height={192} />}
         {id === "meituan-paotui" && account?.state === "authorizing" && authorizationQr && <img src={authorizationQr} alt={tr("meituanScan")} width={192} height={192} />}
         {id === "meituan-paotui" && account?.state === "authorizing" && <p className={s.muted}>{tr("meituanAuthorizationHint")}</p>}
@@ -204,24 +219,19 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
         {id === "quark-drive" && account?.state === "authorizing" && <label className={s.field}><span>{tr("quarkCode")}</span><input type="password" autoComplete="off" spellCheck={false} value={code} maxLength={4096} disabled={busy} onFocus={() => setCodeFocused(true)} onBlur={() => setCodeFocused(false)} onChange={event => setCode(event.target.value)} /><button type="button" className="btn-secondary btn-sm" disabled={busy || !code.trim()} onClick={() => void accountAction("bind")}>{tr("bind")}</button></label>}
         <div className={s.actions}>
           <button type="button" className={s.textButton} disabled={busy} onClick={() => void accountAction("status")}>{tr(serviceOnly ? "checkService" : "check")}</button>
-
+          {supportsLogin && accountReady && <button type="button" className={s.textButton} disabled={busy} onClick={() => void accountAction("start")}>{t("mcpConnectors.flow.reconnect")}</button>}
         </div>
+        <details className={s.clientSetup}><summary>{t("mcpConnectors.flow.advanced")}</summary>
+          <div className={s.setupActions}>
+            {supportsLogin && <button type="button" className="btn-secondary btn-sm" disabled={busy} onClick={() => void accountAction("logout")}>{tr("logout")}</button>}
+            <button type="button" className="btn-secondary btn-sm" disabled={busy} onClick={() => void toolSettings()}>{tr("toolSettings")}</button>
+            <button type="button" className="btn-secondary btn-sm" disabled={busy || !data || !!model.error} onClick={() => void model.change(id, "install")}>{tr("repair")}</button>
+          </div>
+        </details>
       </section>}
       {showTools && server && <div className={s.embeddedManagement}><McpConnectorDialog embedded server={server} recommendation={recommendation} managed onClose={() => setShowTools(false)} onChanged={toolsChanged} /></div>}
       {notice && <p className={s.notice} role="status">{notice}</p>}{error && <p className={s.error} role="alert">{error}</p>}
-      <details className={s.management}><summary>{t("mcpConnectors.flow.advanced")}</summary>
-          {installed && ["doordash", "shop", "quark-drive", "rollinggo-hotel", "meituan-paotui", "alipay", "netease-music"].includes(id) && <button type="button" className="btn-secondary btn-sm" disabled={busy} onClick={() => void accountAction("logout")}>{tr("logout")}</button>}
-          {installed && <button type="button" className="btn-secondary btn-sm" disabled={busy} onClick={() => void toolSettings()}>{tr("toolSettings")}</button>}
-        {installed && <button type="button" className="btn-secondary btn-sm" disabled={busy || !data || !!model.error} onClick={() => void model.change(id, "install")}>{tr("repair")}</button>}
-        {data?.canRemove && <button type="button" className="btn-danger btn-sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: tr("removeTitle"), message: tr("removeConfirm"), confirmLabel: tr("remove") })) { await model.change(id, "remove"); setAccount(null); onChanged(); } })()}>{t("mcpConnectors.flow.remove")}</button>}
-      </details>
-      <details className={s.management}><summary>{t("mcpConnectors.flow.help")}</summary>
-      {(installed || ["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(id)) && <p className={s.notice}>{mcpRecommendationText(definition.note, language)}</p>}
-      <a href={definition.docsUrl} target="_blank" rel="noreferrer">{tr("source")}</a>
-      {definition.accessUrl && <a href={definition.accessUrl} target="_blank" rel="noreferrer">{tr("requestAccess")}</a>}
-      <p className={s.muted}>{tr("version")} {data?.installedVersion || definition.version}{data?.canRemove && <> · {t("officialConnectors.skills", { count: data.skillCount })}</>}</p>
-      {!data?.canRemove && <p className={s.muted}>{t("mcpConnectors.flow.addHint")}</p>}
-      </details>
+      <ConnectorInfo developer={mcpConnectorDeveloper(definition.id, definition.name)} version={data?.installedVersion || definition.version} />
     </div>
   </Modal>;
 }

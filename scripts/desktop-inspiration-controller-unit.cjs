@@ -31,6 +31,7 @@ class Window extends EventEmitter {
 class StatusItem extends EventEmitter {
   constructor(image) { super(); this.image = image; }
   getBounds() { return { x: 1760, y: 0, width: 24, height: 24 }; }
+  setIgnoreDoubleClickEvents(value) { this.ignoreDoubleClickEvents = value; }
   setToolTip(value) { this.tooltip = value; }
   popUpContextMenu(value) { this.menu = value; }
   destroy() { this.destroyed = true; }
@@ -66,6 +67,7 @@ const conceal = panel => call('conceal', panel, panel.messages.findLast(([channe
   assert.equal(tray.image.width, 14);
   assert.ok(tray.image.file.endsWith('/assets/tray/shoggoth.png'));
   assert.equal(tray.image.template, process.platform === 'darwin', 'macOS chooses the tray color for light and dark menu bars');
+  assert.equal(tray.ignoreDoubleClickEvents, process.platform === 'darwin' ? true : undefined);
   tray.emit('click');
   assert.equal(controller.getWindow(), null, 'a tray click must not create the inspiration printer');
   assert.equal(main.visible, true); assert.equal(main.minimized, false); assert.equal(shown, 1);

@@ -39,6 +39,12 @@ jobs:
         env:
           SHOGGOTH_HOOKS_PI_PACKAGE: ${{ runner.temp }}/shoggoth-hooks-pi/node_modules/@earendil-works/pi-coding-agent
         run: npm run test:hooks:pi
+      - name: Pi production tool catalog and startup error regressions
+        env:
+          SHOGGOTH_TEST_PI_BINARY: ${{ runner.temp }}/shoggoth-hooks-pi/node_modules/.bin/pi
+        run: |
+          node --test scripts/pi-catalog-unit.mjs scripts/pi-runtime-adapter-unit.cjs
+          node scripts/pi-runtime-live-contract.cjs
   isolated-checks:
     runs-on: ubuntu-latest
     steps:

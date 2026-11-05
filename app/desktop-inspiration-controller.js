@@ -167,6 +167,7 @@ function createDesktopInspirationController({ BrowserWindow, Tray, Menu, nativeI
   const image = nativeImage.createFromPath(path.join(__dirname, "assets/tray/shoggoth.png"));
   if (process.platform === "darwin") image.setTemplateImage(true);
   tray = new Tray(image);
+  if (process.platform === "darwin") tray.setIgnoreDoubleClickEvents(true);
   tray.setToolTip(`Shoggoth · ${configured()}`);
   const openMainWindow = () => { hide(); showMainWindow(); };
   const stopBackendFromTray = async () => {

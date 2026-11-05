@@ -1,3 +1,4 @@
+import { createChatReadStateFixture } from "./chat-read-state";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
@@ -92,7 +93,10 @@ class FixtureSocket {
   close() { this.readyState = 3; }
 }
 state.WebSocket = FixtureSocket;
+const readStateFixture = createChatReadStateFixture(since);
 state.fetch = async (input: unknown, init: RequestInit = {}) => {
+  const readState = readStateFixture(input, init);
+  if (readState) return readState;
   if (init.method && init.method !== "GET") { writes++; throw Error("Unexpected external write"); }
   const url = new URL(String(input), "http://fixture"); let payload: unknown = {};
   if (url.pathname === "/__api/group-chats") payload = { groups: [], enabled: false };
@@ -132,7 +136,7 @@ const wait = async (fn: () => unknown, label: string) => {
   await frame();
 };
 const rowFor = (agent: string) => Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-aside__list > button")).find(row => row.title === agent);
-const readState = () => JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v2")!);
+const readState = () => JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3")!);
 const visibleStart = (tag: string) => {
   const heading = Array.from(thread().querySelectorAll<HTMLElement>("h1, h2, p")).find(node => node.textContent?.startsWith(tag));
   check(heading, "missing start " + tag);

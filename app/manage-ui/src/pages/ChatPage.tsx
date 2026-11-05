@@ -92,8 +92,9 @@ import {
 } from "../lib/chatWidget";
 import ChatModelMenu from "./ChatModelMenu";
 import ChatSessionMenu from "./ChatSessionMenu";
-import { readChatUnread, writeChatUnread, sessionReadAt, hasUnreadReply,
+import { sessionReadAt, hasUnreadReply,
   observeSessionReply, readSessionThrough, supportsSessionUnread, anchorUnreadMessage } from "../lib/chatUnread";
+import { useChatUnread } from "../lib/useChatUnread";
 import ChatAgentPanel, { type ChatAgentPanelKind } from "./ChatAgentPanel";
 import headerPanelCloseIcon from "../assets/figma/group-chat/group-details-close.svg";
 import headerFilesIcon from "../assets/figma/group-chat/group-files-trigger.svg";
@@ -2807,16 +2808,17 @@ function ChatPageApp() {
   const [realTimeBounds, setRealTimeBounds] = useState<Record<string, number>>({});
   const realTimeFetchedRef = useRef<Map<string, number>>(new Map());
   // Unread is independent of sidebar ranking and of the Agent's selected session.
-  const [unreadState, setUnreadState] = useState(() => readChatUnread(localStorage));
+  const { state: unreadState, update: setUnreadState, ready: unreadReady, loading: unreadLoading } = useChatUnread();
   // Freeze the read watermark at navigation, before rendering can acknowledge it.
-  const unreadLandingRef = useRef<{ key: string; after: number; pending: boolean } | null>(null);
+  const unreadLandingRef = useRef<{ key: string; after: number; pending: boolean; confirmed: boolean } | null>(null);
+  const unreadReadyRef = useRef(unreadReady);
+  unreadReadyRef.current = unreadReady;
   const [unreadAnchor, setUnreadAnchor] = useState<{ key: string; messageId: string | null; pending: boolean } | null>(null);
   const unreadScrollCleanupRef = useRef<(() => void) | null>(null);
   // Filled by the shared projection below before layout effects run.
   const turnStartByMessageRef = useRef<ReadonlyMap<string, string>>(new Map());
   const unreadStateRef = useRef(unreadState);
   unreadStateRef.current = unreadState;
-  useEffect(() => { writeChatUnread(localStorage, unreadState); }, [unreadState]);
   const observeReply = useCallback((key: string, at: number) => {
     if (inFlightRef.current.has(key) || isSessionReplyPending(sessionsRef.current.find(row => row.key === key))) return false;
     setUnreadState(prev => observeSessionReply(prev, key, at));
@@ -2825,13 +2827,13 @@ function ChatPageApp() {
   // Suppress the viewed session immediately, including during history loading.
   // Read acknowledgements below still require focused, authoritative content.
   const viewedSessionKey = shouldRefreshChatAvatars(routerLocation.pathname) && !activeGroupId ? activeKey : null;
-  const showSessionUnread = useCallback((row: SessionRow) => row.key !== viewedSessionKey
+  const showSessionUnread = useCallback((row: SessionRow) => unreadReady && row.key !== viewedSessionKey
     && !runningKeys.has(row.key) && !isSessionReplyPending(row)
     && supportsSessionUnread(row.key, row.kind) && hasUnreadReply(unreadState, row.key, row.kind),
-  [viewedSessionKey, runningKeys, unreadState]);
+  [unreadReady, viewedSessionKey, runningKeys, unreadState]);
   useEffect(() => {
     const markVisible = () => {
-      if (!shouldRefreshChatAvatars(routerLocation.pathname) || !activeKey || activeGroupId || !historyVisible || !historyLoaded || unreadLandingRef.current?.pending || document.visibilityState === "hidden" || !document.hasFocus()) return;
+      if (!unreadReady || !shouldRefreshChatAvatars(routerLocation.pathname) || !activeKey || activeGroupId || !historyVisible || !historyLoaded || unreadLandingRef.current?.pending || document.visibilityState === "hidden" || !document.hasFocus()) return;
       // Live frames may carry a proxy emission clock. Only acknowledge through a
       // canonical reply that is also covered by the visible history/stream.
       const through = Math.min(latestUnreadReplyTime(activeKey, messages), unreadState.replies[activeKey] ?? 0);
@@ -2844,7 +2846,7 @@ function ChatPageApp() {
       window.removeEventListener("focus", markVisible);
       document.removeEventListener("visibilitychange", markVisible);
     };
-  }, [activeKey, activeGroupId, historyVisible, historyLoaded, messages, routerLocation.pathname, unreadState.replies, unreadAnchor]);
+  }, [unreadReady, activeKey, activeGroupId, historyVisible, historyLoaded, messages, routerLocation.pathname, unreadState.replies, unreadAnchor]);
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<UnifiedModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -3062,6 +3064,7 @@ function ChatPageApp() {
   const atBottomRef = useRef(true);
   const stoppedScrollKeyRef = useRef<string | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const settledKeyRef = useRef<string | null>(null);
   const latestMessagePartsRef = useRef<Element[]>([]);
   // Send-anchor (R280): on my own send, park the sent user bubble at the TOP of the
   // viewport in ONE deliberate reposition and open a spacer below it, so the reply
@@ -3315,7 +3318,7 @@ function ChatPageApp() {
   const commitOpenedHistory = useCallback((key: string, msgs: ChatMsg[], cacheVisible: boolean) => {
     if (!isVisibleSession(sessionsRef.current.find(row => row.key === key) || { key })) return;
     const prevKey = activeKeyRef.current;
-    unreadLandingRef.current = { key, after: sessionReadAt(unreadStateRef.current, key), pending: true };
+    unreadLandingRef.current = { key, after: sessionReadAt(unreadStateRef.current, key), pending: true, confirmed: unreadReadyRef.current };
     setUnreadAnchor({ key, messageId: null, pending: true });
     if (prevKey && prevKey !== key) {
       draftsRef.current.set(prevKey, inputRef.current);
@@ -3339,6 +3342,9 @@ function ChatPageApp() {
     setPinNavIndex(0);
     setQuote(null);
     setMenu(null);
+    // Every open replaces the transcript, including a second click on the
+    // selected Agent. Its new DOM needs an initial landing even for the same key.
+    settledKeyRef.current = null;
     atBottomRef.current = true;
     activeKeyRef.current = key;
     stoppedScrollKeyRef.current = null;
@@ -4893,7 +4899,6 @@ function ChatPageApp() {
     // An older search window does not contain the actual latest message.
     setShowJump(!visible || searchHistoryWindowKeyRef.current === activeKeyRef.current);
   }, []);
-  const settledKeyRef = useRef<string | null>(null);
   const initialScrollFrameRef = useRef<number | null>(null);
   const cancelInitialScroll = useCallback(() => {
     unreadScrollCleanupRef.current?.(); unreadScrollCleanupRef.current = null;
@@ -4901,6 +4906,36 @@ function ChatPageApp() {
     initialScrollFrameRef.current = null;
   }, []);
   useEffect(() => cancelInitialScroll, [cancelInitialScroll]);
+
+  const scrollThreadToBottom = useCallback(() => {
+    cancelInitialScroll();
+    const el = threadRef.current;
+    const key = activeKeyRef.current;
+    if (!el?.clientHeight) return;
+    // A smooth scroll fixes its destination before skipped history bubbles
+    // have their real heights. Jump directly, then settle the newly laid-out
+    // tail without traversing (and expanding) all the intervening history.
+    el.scrollTo({ top: el.scrollHeight, behavior: "instant" });
+    atBottomRef.current = true;
+    let height = el.scrollHeight;
+    let viewport = el.clientHeight;
+    let attempts = 0;
+    let stableFrames = 0;
+    const settle = () => {
+      initialScrollFrameRef.current = null;
+      if (activeKeyRef.current !== key || !el.isConnected || !el.clientHeight) return;
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stableFrames = Math.abs(gap) <= 1 && el.scrollHeight === height && el.clientHeight === viewport
+        ? stableFrames + 1 : 0;
+      height = el.scrollHeight;
+      viewport = el.clientHeight;
+      if (Math.abs(gap) > 1) el.scrollTo({ top: height, behavior: "instant" });
+      atBottomRef.current = true;
+      if (++attempts < 8 && stableFrames < 2) initialScrollFrameRef.current = requestAnimationFrame(settle);
+      else updateJumpVisibility();
+    };
+    initialScrollFrameRef.current = requestAnimationFrame(settle);
+  }, [cancelInitialScroll, updateJumpVisibility]);
 
   const capturePrependAnchor = useCallback(() => {
     const thread = threadRef.current;
@@ -4967,10 +5002,16 @@ function ChatPageApp() {
     if (landing?.key === activeKey && landing.pending) {
       // Cached paint is provisional. Wait for canonical history and, when needed,
       // page back to the read boundary before choosing the first unread reply.
-      if (!historyLoaded) return;
+      if (!historyLoaded || unreadLoading) return;
+      if (!landing.confirmed) {
+        landing.after = sessionReadAt(unreadState, activeKey);
+        landing.confirmed = true;
+      }
       const replies = keyedChatMessages(messages).filter(({ item, key }) =>
         isUnreadReply(activeKey, item) && !hiddenIds.has(item.id || `local:${key}`));
-      const first = replies.find(({ item }) => (item.ts ?? 0) > landing.after);
+      // A missing read-state service must not block the transcript's initial
+      // scroll or invent an unread boundary from the browser cache.
+      const first = unreadReady ? replies.find(({ item }) => (item.ts ?? 0) > landing.after) : undefined;
       const boundaryLoaded = replies.some(({ item }) => (item.ts ?? 0) <= landing.after);
       if (first && !boundaryLoaded && earlierHistory.key === activeKey && earlierHistory.cursor) {
         if (!earlierHistory.loading && !earlierHistory.error) void loadEarlierHistory();
@@ -5087,27 +5128,11 @@ function ChatPageApp() {
     }
     if (!initialLoad && stoppedScrollKeyRef.current === activeKey) return;
     if (initialLoad || atBottomRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: initialLoad ? "auto" : "smooth" });
+      if (initialLoad) scrollThreadToBottom();
+      else if (initialScrollFrameRef.current == null) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
       atBottomRef.current = true;
-      if (initialLoad && el) {
-        // content-visibility resolves the newly visible tail after the first
-        // layout. Re-anchor until two frames agree (bounded); never fight user
-        // input, a search/pin jump, a session switch or an unmounted thread.
-        let attempts = 0;
-        let stableFrames = 0;
-        const settle = () => {
-          initialScrollFrameRef.current = null;
-          if (activeKeyRef.current !== activeKey || !el.isConnected || !el.clientHeight) return;
-          const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-          stableFrames = Math.abs(gap) <= 1 ? stableFrames + 1 : 0;
-          if (stableFrames === 0) el.scrollTop = el.scrollHeight;
-          atBottomRef.current = true;
-          if (++attempts < 8 && stableFrames < 2) initialScrollFrameRef.current = requestAnimationFrame(settle);
-        };
-        initialScrollFrameRef.current = requestAnimationFrame(settle);
-      }
     }
-  }, [messages, activeKey, historyLoaded, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, showTraj, runWaitBySession]);
+  }, [messages, activeKey, historyLoaded, unreadReady, unreadLoading, unreadState.installationId, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, scrollThreadToBottom, showTraj, runWaitBySession]);
 
   // Scroll-up loads the sealed/reset archive: when the user reaches the
   // top of a settled OpenClaw thread, fetch it once. Found → prepend.
@@ -5173,17 +5198,19 @@ function ChatPageApp() {
     // standing room first so the jump lands on real content, not reserved blank,
     // and let the classic stick-to-bottom resume for whatever streams next (R280)
     anchoredRef.current = false;
+    anchoredUserOffsetRef.current = null;
     if (streamSpacerRef.current) streamSpacerRef.current.style.height = "0px";
     atBottomRef.current = true;
     setShowJump(false);
     const key = activeKeyRef.current;
     if (key && searchHistoryWindowKeyRef.current === key) {
       searchHistoryWindowKeyRef.current = null;
+      settledKeyRef.current = null;
       setArchive({ key, status: "idle" });
       void loadHistory(key);
       return;
     }
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    scrollThreadToBottom();
   };
 
   // Probe live backend connectivity (same /__api/status the 设置 page uses) so the
@@ -5416,6 +5443,7 @@ function ChatPageApp() {
   const openSession = useCallback((key: string) => {
     sessionOpenIntentRef.current += 1;
     if (!isVisibleSession(sessionsRef.current.find(row => row.key === key) || { key })) return Promise.resolve();
+    cancelInitialScroll();
     if (pendingSearchJumpKeyRef.current && pendingSearchJumpKeyRef.current !== key) {
       searchJumpTokenRef.current += 1;
       pendingSearchJumpKeyRef.current = null;
@@ -5438,7 +5466,7 @@ function ChatPageApp() {
       }
     });
     return opening;
-  }, [chatHistoryController]);
+  }, [chatHistoryController, cancelInitialScroll]);
 
   // 会话深链 #/chat?session=<key>（工作板「打开会话」/官方 onOpenSession 语义）。
   // ChatPage 是保活常驻页（App.tsx 只挂一次且在 Router 内），react-router 的跳转走
@@ -8764,8 +8792,9 @@ function ChatPageApp() {
   // updatedAt only schedules an authority read: metadata and heartbeat acks are not unread.
   // Only catalogued sessions qualify, so broadcast-only cron keys cannot create phantom badges.
   const unreadProbedRef = useRef(new Map<string, number>());
+  useEffect(() => { unreadProbedRef.current.clear(); }, [unreadState.installationId]);
   useEffect(() => {
-    if (!connected || !listLive) return;
+    if (!unreadReady || !connected || !listLive) return;
     let stopped = false;
     void (async () => {
       for (const row of sessions) {
@@ -8796,7 +8825,7 @@ function ChatPageApp() {
       }
     })();
     return () => { stopped = true; };
-  }, [connected, listLive, sessions, groupInternalKeys, runningKeys, send, observeReply, recordHistoryPreview]);
+  }, [unreadReady, unreadState.installationId, connected, listLive, sessions, groupInternalKeys, runningKeys, send, observeReply, recordHistoryPreview]);
   const agents = useMemo(() => {
     const map = new Map<string, SessionRow[]>();
     for (const s of sessions) {

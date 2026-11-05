@@ -154,7 +154,8 @@ test("Owner injection never enables unrelated backends and respects service avai
 
 test("Native execution retains Profile binding, Session prefix, and sync", async () => {
   const { owner } = ownerFixture();
-  const profile = { id: "native-profile", agentId: "shoggoth-main" };
+  const profile = { id: "native-profile", agentId: "shoggoth-main", runtime: "codex",
+    runtimeAccountId: "shoggoth-internal-codex-default-v1" };
   const sessionKey = "b1dc5c34-0a70-4c37-802e-a11489a26073"; // gitleaks:allow -- synthetic test fixture; not a usable credential
   owner._profilesByAgent.set(profile.agentId, profile);
   owner._call = async () => ({ idea: { latestExecution: { profileId: profile.id,

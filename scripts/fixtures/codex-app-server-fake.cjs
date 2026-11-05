@@ -131,7 +131,8 @@ function emitElicitation(threadId, turnId) {
       id: pendingServerRequestId, method: "item/commandExecution/requestApproval",
       params: { threadId: requestThreadId, turnId: requestTurnId, itemId: `command-${turnSequence}`,
         startedAtMs: Date.now(), environmentId: null,
-        command: "mkdir -p inspiration-demo", cwd: process.cwd(), reason: "Create the demo directory" },
+        command: process.env.CODEX_FAKE_INSPIRATION_APPROVAL_COMMAND ?? "mkdir -p inspiration-demo",
+        cwd: process.cwd(), reason: "Create the demo directory" },
     }), 20);
     return;
   }

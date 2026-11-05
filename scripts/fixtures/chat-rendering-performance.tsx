@@ -63,7 +63,12 @@ class FixtureSocket {
       payload = { messages: messages.slice(start, end), hasMore: start > 0,
         nextCursor: start > 0 ? String(start) : null, sourceId: `fixture:${request.params.sessionKey}` };
     }
-    setTimeout(() => this.emit({ type: "res", id: request.id, ok: true, payload }), 0);
+    setTimeout(() => {
+      if (request.method === "chat.history" && request.params.page && !request.params.cursor) {
+        state.tailHistoryResponses = (state.tailHistoryResponses || 0) + 1;
+      }
+      this.emit({ type: "res", id: request.id, ok: true, payload });
+    }, 0);
   }
   close() { this.readyState = 3; }
 }
@@ -110,6 +115,52 @@ for (const type of ["longtask", "long-animation-frame"]) {
 }
 
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
+state.runScrollNavigationFixture = async () => {
+  await wait(() => bubbles().length === 1, "short history before navigation");
+  const gap = () => thread().scrollHeight - thread().scrollTop - thread().clientHeight;
+  const openLong = async () => {
+    const responses = state.tailHistoryResponses || 0;
+    document.querySelector<HTMLButtonElement>('.chat-agent[title="perf"]')!.click();
+    await wait(() => state.tailHistoryResponses > responses && bubbles().length === 50, "long history navigation");
+    await wait(() => gap() < 2, "long history navigation reaches latest message");
+    await pause(150);
+    check(gap() < 2, `long history navigation drifted by ${gap()}px`);
+  };
+  await openLong();
+  // Opening the selected Agent replaces its history too, even though its key
+  // is unchanged. It must use the same landing as a cross-Agent navigation.
+  await openLong();
+  const reopenedGap = gap();
+
+  // These older bubbles still have estimated content-visibility heights. A
+  // smooth scroll to their old scrollHeight stops short as they are laid out.
+  thread().dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true }));
+  thread().scrollTop = 800;
+  await frame(); await frame(); await pause(100);
+  await wait(() => !!document.querySelector(".chat-jump"), "latest-message control above the tail");
+  document.querySelector<HTMLButtonElement>(".chat-jump")!.click();
+  await wait(() => gap() < 2, "one latest-message click reaches the tail");
+  await pause(150);
+  check(gap() < 2, `latest-message landing drifted by ${gap()}px`);
+  const jumpedGap = gap();
+
+  // An intentional upward scroll owns the viewport, including during the
+  // layout-settling frames immediately after an explicit latest-message jump.
+  thread().scrollTop -= 2000;
+  thread().dispatchEvent(new Event("scroll"));
+  await wait(() => !!document.querySelector(".chat-jump"), "latest-message control for cancellation");
+  document.querySelector<HTMLButtonElement>(".chat-jump")!.click();
+  thread().dispatchEvent(new WheelEvent("wheel", { deltaY: -200, bubbles: true }));
+  thread().scrollTop -= 200;
+  await pause(150);
+  check(gap() >= 150, "a latest-message jump must yield to the user's upward scroll");
+
+  document.querySelector<HTMLButtonElement>('.chat-agent[title="short"]')!.click();
+  await wait(() => bubbles().length === 1, "return to short history after navigation");
+  await frame(); await frame();
+  check(thread().scrollTop === 0, "tail settling must not affect the next conversation");
+  return { reopenedGap, jumpedGap, userScrollCancels: true };
+};
 state.runFixture = async () => {
   await wait(() => bubbles().length === 1 && document.querySelector(".chat-composer__input"), "short history");
   await pause(100);

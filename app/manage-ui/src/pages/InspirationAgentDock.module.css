@@ -41,12 +41,42 @@
 }
 .agent {
   position: relative;
-  display: grid;
-  place-items: center;
-  flex: 0 0 64px;
-  height: 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 72px;
   min-width: 0;
 }
+/* The agent's name under its avatar, in drag and pick modes alike. */
+.name {
+  max-width: 64px;
+  overflow: hidden;
+  color: var(--ui-text-1);
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pick {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.pick:disabled { cursor: not-allowed; }
+.pick:hover:not(:disabled) .avatar, .pick:focus-visible .avatar { transform: scale(calc(56 / 48)); }
+.pick:hover:not(:disabled) .avatar::after, .pick:focus-visible .avatar::after { opacity: 1; }
+.pick:focus-visible { outline: none; }
+/* Click mode: the wall stays visible behind a light scrim, and any click outside cancels. */
+.scrim { position: fixed; z-index: 79; inset: 0; background: color-mix(in srgb, var(--ui-canvas) 40%, transparent); animation: arrive 180ms ease-out both; }
+.dock[data-picking] { pointer-events: none; }
 .avatar {
   position: relative;
   display: grid;
@@ -64,9 +94,10 @@
 .agent[data-inspiration-drop-over] .avatar { transform: scale(calc(56 / 48)); }
 .agent[data-inspiration-drop-over] .avatar::after { opacity: 1; }
 .agent[aria-disabled=true] { opacity: .4; }
+
 .empty { margin: 12px 24px; font-size: 13px; text-align: center; }
 @keyframes arrive { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
-  .dock { animation: none; }
+  .dock, .scrim { animation: none; }
   .avatar, .avatar::after { transition: none; }
 }

@@ -4,7 +4,8 @@ const { serviceError } = require("./security");
 const { canonicalWorkspace } = require("./work-run");
 const { resolveProfileWorkspace } = require("./chat-service-controller");
 const { normalizeInteractiveRequestV1, validateInteractiveResponseV1, interactiveApprovalCanAllow } = require("../core/shoggoth-interaction-contract");
-const { validateInspirationServiceParams, validateInspirationServiceResult } = require("./inspiration-service-protocol");
+const { INSPIRATION_HISTORY_MAX_RESULT_BYTES,
+  validateInspirationServiceParams, validateInspirationServiceResult } = require("./inspiration-service-protocol");
 const { InspirationGrowth } = require("./inspiration-growth");
 const { prepareChatAttachments } = require("./chat-attachments");
 const { inspirationUserText, inspirationUserAttachments, inspirationPromptHash } = require("../core/inspiration-chat-history");
@@ -182,6 +183,15 @@ class InspirationService {
     return rounds.join("\n");
   }
 
+  #canReuseNativeSession(execution) {
+    if (execution.external || !execution.sessionKey) return false;
+    const session = this.chatSessionStore.getSession(execution.sessionKey);
+    if (!session || session.profileId !== execution.profileId || session.workspace !== execution.workspace) return false;
+    // A model change may retire the native thread while keeping the same
+    // product conversation and its selected model.
+    return session.status === "ready" || (session.status === "draft" && session.retiredRuntimeSessions?.length > 0);
+  }
+
   #materialize(original) {
     let execution = this.store.executionForRun(original.runId);
     let run = this.dispatcher.getRun(execution.runId);
@@ -190,11 +200,11 @@ class InspirationService {
       // Reuse only this idea's explicitly bound session with the same ownership.
       const previous = this.store.executions(execution.ideaId).find((candidate) => candidate.id !== execution.id
         && candidate.createdAt < execution.createdAt && candidate.profileId === execution.profileId
-        && candidate.workspace === execution.workspace && candidate.sessionKey !== null
-        && this.chatSessionStore.getSession(candidate.sessionKey)?.status === "ready");
+        && candidate.workspace === execution.workspace && this.#canReuseNativeSession(candidate));
       const session = previous ? this.chatSessionStore.getSession(previous.sessionKey)
         : this.chatSessionStore.createSession({
           operationId: `inspiration-${execution.id}`, profileId: execution.profileId,
+          permissionMode: "full-access",
           workspace: execution.workspace, createdAt: execution.createdAt,
         });
       if (session.profileId !== execution.profileId || session.workspace !== execution.workspace) {
@@ -331,7 +341,7 @@ class InspirationService {
     const latestExecution = execution ? this.#executionView(execution) : null;
     const { deletedAt, ...publicIdea } = idea;
     return { ...publicIdea, body: summary ? [...idea.body.trim()].slice(0, 240).join("") : idea.body,
-      status: latestExecution?.status ?? "saved", latestExecution };
+      status: latestExecution?.status ?? "saved", latestExecution, rounds: this.store.executionRoster(id) };
   }
 
   reminderView(id) {
@@ -357,15 +367,15 @@ class InspirationService {
     this.store.projectNativeStatuses(values);
   }
 
-  #page(result, field, transform) {
+  #page(result, field, transform, maxBytes = 60 * 1024) {
     const key = (value) => `${value.updatedAt ?? value.createdAt}:${value.id}`;
     const page = [];
     let bytes = 512;
     for (const row of result.rows) {
       const value = transform(row);
       const size = Buffer.byteLength(JSON.stringify(value));
-      if (size + 512 > 60 * 1024) fail("INSPIRATION_RESPONSE_INVALID", "单条记录超过返回容量");
-      if (bytes + size > 60 * 1024) break;
+      if (size + 512 > maxBytes) fail("INSPIRATION_RESPONSE_INVALID", "单条记录超过返回容量");
+      if (bytes + size > maxBytes) break;
       page.push(value);
       bytes += size + 1;
     }
@@ -548,6 +558,14 @@ class InspirationService {
       const execution = this.#externalSession(input);
       result = { origin: execution ? { inspirationId: execution.ideaId,
         inspirationTitle: execution.title || execution.body.trim().split("\n")[0].slice(0, 80) || execution.attachments?.[0]?.name || "" } : null };
+    } else if (method === "inspiration.session.execution") {
+      // A note can move to another Agent while its previous Session stays open.
+      // Observe this Session's latest round, or the exact round already watched,
+      // without substituting the note's latest execution on a different owner.
+      const execution = input.runId === null ? this.#externalSession(input) : this.store.executionForRun(input.runId);
+      if (!execution?.external || execution.backendId !== input.backendId || execution.agentId !== input.agentId
+        || execution.sessionKey !== input.sessionKey) fail("INSPIRATION_BINDING_INVALID", "运行不属于这个灵感会话");
+      result = { execution: this.#executionView(execution, true) };
     } else if (method === "inspiration.session.messages") {
       result = this.#page(this.store.sessionExecutionsPage(input), "items", execution => ({
         id: execution.id, createdAt: execution.createdAt,
@@ -561,7 +579,10 @@ class InspirationService {
       result = this.#page(this.store.listPage(input), "items", idea => this.view(idea.id, true));
     } else if (method === "inspiration.executions") {
       if (!this.store.get(input.id)) fail("INSPIRATION_NOT_FOUND", "灵感不存在");
-      result = this.#page(this.store.executionsPage(input), "executions", value => this.#executionView(value, true));
+      // The idea thread shows what the user asked for in each round.
+      result = this.#page(this.store.executionsPage(input), "executions", value => ({
+        ...this.#executionView(value, true), instruction: value.instruction || null,
+        reusableSession: this.#canReuseNativeSession(value) }), INSPIRATION_HISTORY_MAX_RESULT_BYTES);
     } else if (method === "inspiration.activity.binding") {
       if (!this.store.get(input.id)) fail("INSPIRATION_NOT_FOUND", "灵感不存在");
       const execution = this.store.executionForRun(input.runId);

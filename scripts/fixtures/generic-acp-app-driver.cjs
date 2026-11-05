@@ -372,7 +372,8 @@ async function run() {
           await until(async () => await js(`(() => { const d=document.querySelector('[role="dialog"]'); return d?.textContent.includes(${JSON.stringify(displayName(item))}) && Array.from(d.querySelectorAll('button')).some(b=>b.textContent==='添加'&&!b.disabled); })()`), `${item.id} actual installation dialog and Service state`);
           assert.equal(await js("document.querySelector('[role=dialog]').textContent.includes('账号检查通过')"), false);
           if (item.id === "alipay") await capture("connectors-alipay-setup");
-          await js("Array.from(document.querySelectorAll('[role=dialog] button')).find(b=>b.textContent==='关闭').click();void 0");
+          assert.deepEqual(await js("Array.from(document.querySelectorAll('[role=dialog] footer button')).map(b=>b.textContent)"), ["添加"], "unadded connectors have one footer action");
+          await js("document.querySelector('[role=dialog] button[aria-label=\"关闭\"]').click();void 0");
           await until(async () => await js("!document.querySelector('[role=dialog]')"), `${item.id} dialog closes`);
           assert.equal(service.officialSkillConnectorController.status(item.id).state, "notInstalled", "opening setup never installs or authorizes");
         }

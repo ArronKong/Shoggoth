@@ -1,3 +1,4 @@
+import { createChatReadStateFixture } from "./chat-read-state";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
@@ -19,6 +20,9 @@ localStorage.setItem("shoggoth.chat.immersive.v1", "0");
 // pages to its first unread reply (covered by chat-cron-display-ui instead).
 localStorage.setItem("shoggoth.chat.sessionUnread.v2", JSON.stringify({ since: now - 1000,
   read: Object.fromEntries(cases.map(row => [row.key, now + 1_000_000])), replies: {} }));
+const readStateFixture = createChatReadStateFixture(now - 1000, Object.fromEntries(cases.map(row => [row.key, now + 1_000_000])));
+const historyFetch = window.fetch.bind(window);
+window.fetch = async (input, init) => readStateFixture(input, init) || historyFetch(input, init);
 void i18n.changeLanguage("zh-CN");
 window.addEventListener("error", event => { state.fixtureError = event.error?.stack || event.message; });
 window.addEventListener("unhandledrejection", event => { state.fixtureError = String(event.reason?.stack || event.reason); });

@@ -53,6 +53,7 @@ const {
   runFederatedAgentViaBroker,
 } = require("./federated-agent-runner");
 const { createConfigStore, MIN_WINDOW_BOUNDS } = require("./core/config-store");
+const { createChatReadStateStore } = require("./core/chat-read-state-store");
 const { createAuthResolver } = require("./core/device-auth");
 const { createDashboardJournal } = require("./core/dashboard-journal");
 const { createKanbanProjectStore } = require("./core/kanban-project-store");
@@ -151,6 +152,7 @@ const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
 // Single source of truth for config.json (schema incl. hermesMode/hermesRemotes).
 const configStore = createConfigStore(CONFIG_PATH, { defaultGatewayUrl: "ws://127.0.0.1:18792" });
+const chatReadStateStore = createChatReadStateStore({ trustedRoot: app.getPath("userData") });
 
 // Local federating gateway proxy. The Control UI connects here instead of
 // straight to the gateway; the proxy relays every frame to the real gateway
@@ -270,6 +272,8 @@ function readConfig() {
 // token once (URL is pre-filled). Token intentionally not shipped in the app.
 function ensureConfigFile() {
   configStore.ensure();
+  try { chatReadStateStore.ensure(); }
+  catch { console.warn("[chat] shared read state unavailable; unread badges wait for recovery"); }
 }
 
 function writeConfig(config) {
@@ -1326,6 +1330,7 @@ if (!gotLock) {
       configStore,
       hostOps,
       productHost: shoggothProductHost,
+      chatReadStateStore,
       managedOpenClawHost: managedOpenClawProductHost,
       managedHermesHost: managedHermesProductHost,
       onConfigChanged: applyConfigChange,

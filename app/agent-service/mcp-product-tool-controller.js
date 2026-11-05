@@ -1274,10 +1274,12 @@ function validText(value, maxBytes, options = {}) {
 }
 
 function assertValidDownstreamMcpTools(tools) {
+  // NativeMcpClientManager bounds the complete response before validation here.
+  // Keep full tool instructions; a separate description cap rejects valid tools.
   if (!Array.isArray(tools) || tools.some((tool) => !ownDataObject(tool)
     || !validText(tool.name, 256)
     || (tool.description !== undefined
-      && !validText(tool.description, 16 * 1024, { allowEmpty: true }))
+      && !validText(tool.description, Infinity, { allowEmpty: true }))
     || !ownDataObject(tool.inputSchema))) {
     throw toolError("MCP_TOOL_RESPONSE_INVALID");
   }

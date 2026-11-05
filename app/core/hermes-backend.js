@@ -7054,7 +7054,7 @@ class HermesBackend extends AgentBackend {
    * converges on the same identity (ACP persists at session/new; gateway may
    * expose its row only after the first accepted prompt).
    * @param {string} agentId  e.g. "hermes-default"
-   * @param {{model?: string, provider?: string, acpProviderRef?: string, parentSessionKey?: string, workspace?: string|null, freezeWorkspace?: boolean}} [options]
+   * @param {{model?: string, provider?: string, acpProviderRef?: string, parentSessionKey?: string, workspace?: string|null, freezeWorkspace?: boolean, requiredTransport?: "gateway"}} [options]
    * @returns {Promise<string>} canonical new sessionKey
    */
   async _setPreparedGroupWorkspace(sessionKey, workspace) {
@@ -7125,6 +7125,7 @@ class HermesBackend extends AgentBackend {
     const dash = this.dashboards.get(profile);
     if (!dash) throw new Error(`hermes: 未找到 agent ${agentId} 的 dashboard`);
     const generation = this._lifecycleGeneration;
+    const requireGateway = options.requiredTransport === "gateway";
     let model = String(options?.model || "").trim();
     let provider = String(options?.provider || "").trim();
     let acpProviderRef = String(options?.acpProviderRef || "").trim();
@@ -7172,7 +7173,7 @@ class HermesBackend extends AgentBackend {
       [acpProviderRef, provider] = routes.entries().next().value;
     }
 
-    if (this._gatewayChatEnabled(profile)) {
+    if (requireGateway || this._gatewayChatEnabled(profile)) {
       const sock = this._gwSocket(profile, dash);
       const runtimeProvider = this._modelProviderRef(model, provider, acpProviderRef);
       let res;
@@ -7187,7 +7188,7 @@ class HermesBackend extends AgentBackend {
       } catch (err) {
         // A served JSON-RPC error is authoritative. Only transport failure may
         // fall back to the existing ACP channel.
-        if (err?.jsonRpc === true || err?.noAcpFallback === true || this._localRuntime.isManaged()) throw err;
+        if (requireGateway || err?.jsonRpc === true || err?.noAcpFallback === true || this._localRuntime.isManaged()) throw err;
         this.gwChatDisabledUntil.set(profile, Date.now() + GW_CHAT_RETRY_MS);
         console.warn(`[hermes] profile ${profile}: 新会话网关不可用（${err?.message || err}），回落 ACP`);
         res = null;
@@ -7242,6 +7243,9 @@ class HermesBackend extends AgentBackend {
       }
     }
 
+    if (requireGateway) throw Object.assign(new Error("hermes: 无法确认新会话的完全访问权限"), {
+      code: "HERMES_INSPIRATION_PERMISSION_UNCONFIRMED",
+    });
     const client = this._clientForProfile(profile);
     const acpWorkspace = workspace ?? os.tmpdir();
     if (workspace !== null && !fs.statSync(acpWorkspace).isDirectory()) {

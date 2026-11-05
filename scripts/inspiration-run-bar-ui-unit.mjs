@@ -73,7 +73,7 @@ assert.equal(inspirationRunTone({ ...execution, status: 'waiting_approval' }), '
 const RunBar = load('pages/InspirationRunBar.tsx').default;
 let renderer, opens = 0;
 const view = current => React.createElement(RunBar, { ideaId: current.ideaId, execution: current,
-  agent: { name: 'Shoggoth' }, attention: React.createElement('button', { type: 'button' }, 'Allow once'), onOpen: () => opens++ });
+  agent: { name: 'Shoggoth' }, onOpen: () => opens++ });
 const root = () => renderer.root.findByProps({ 'data-inspiration-run-bar': true });
 const header = () => renderer.root.findByProps({ 'data-inspiration-run-header': true });
 const text = () => JSON.stringify(renderer.toJSON());
@@ -164,21 +164,21 @@ act(() => renderer.update(view({ ...approval, status: 'waiting_input', attention
 assert.ok(header().props['aria-label'].includes('inspiration.status.waiting_approval'), 'MCP permission requests use approval wording even on a waiting_input run');
 assert.equal(root().props['data-tone'], 'attention', 'approval keeps its own state even after a failed tool');
 assert.equal(renderer.root.findAllByProps({ className: 'elapsed' }).length, 0);
-const panel = () => renderer.root.findByProps({ 'data-inspiration-run-attention': true });
-assert.equal(panel().props.hidden, true);
-act(() => root().props.onPointerEnter({ pointerType: 'mouse' }));
-assert.equal(header().props['aria-expanded'], true);
-assert.equal(panel().props.hidden, false);
-const mountedPanel = panel();
-act(() => root().props.onPointerLeave());
-assert.equal(panel().props.hidden, true);
-assert.equal(panel(), mountedPanel, 'collapse preserves the in-flight approval component');
-act(() => header().props.onClick());
-assert.equal(panel().props.hidden, false, 'touch/click can open the approval');
-act(() => root().props.onKeyDown({ key: 'Escape', stopPropagation() {} }));
-assert.equal(panel().props.hidden, true);
-act(() => root().props.onFocus({ target: { matches: () => true } }));
-assert.equal(panel().props.hidden, false, 'keyboard focus opens the approval');
+for (const [status, kind] of [['waiting_approval', 'runtime_approval'], ['waiting_input', 'user_input']]) {
+  act(() => renderer.update(view({ ...approval, status, attention: {
+    ...approval.attention, request: { ...approval.attention.request, kind },
+  } })));
+  assert.ok(header().props['aria-label'].includes(`inspiration.status.${status}`));
+  assert.equal(header().props['aria-haspopup'], 'dialog');
+  assert.equal(header().props['aria-expanded'], undefined);
+  assert.equal(root().props.onPointerEnter, undefined);
+  assert.equal(root().props.onFocus, undefined);
+  assert.equal(renderer.root.findAllByType('button').length, 1, 'the wall only shows the detail opener');
+  assert.equal(renderer.root.findAllByProps({ 'data-inspiration-run-attention': true }).length, 0);
+  const previousOpens = opens;
+  act(() => header().props.onClick());
+  assert.equal(opens, previousOpens + 1, 'activating the wall status opens the detail dialog');
+}
 
 const abandoned = requests.at(-1);
 act(() => renderer.update(view({ ...execution, id: 'execution-b', runId: 'run-b' })));

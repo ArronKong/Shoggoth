@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
+import { loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const require = createRequire(path.join(root, "app/manage-ui/package.json"));
@@ -54,6 +55,7 @@ for (const language of ["zh-CN", "en"]) {
   };
   const components = load("app/manage-ui/src/components/AppleDeviceConnectors.tsx", {
     "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator) }) },
+    "./ConnectorDetails": loadConnectorDetails(translator.t.bind(translator)),
     "../api/appleDevices": api,
     "../api/mcpConnectors": { listMcpSubjects: async () => { subjectReads++; return { items: [], unavailableBackends: [] }; } },
     "./Modal": { __esModule: true, default: ({ children, footer, subtitle }) => React.createElement("section", { role: "dialog" }, children, React.createElement("p", {}, subtitle), footer) },
@@ -74,6 +76,7 @@ for (const language of ["zh-CN", "en"]) {
   let renderer;
   const event = async callback => act(async () => { callback(); for (let i = 0; i < 5; i++) await Promise.resolve(); });
   await event(() => { renderer = create(React.createElement(Page)); });
+  for (const footer of renderer.root.findAllByProps({ "data-connector-footer": true })) assert.equal(footer.findAllByType("button").filter(node => node.children.join("") === translator.t("mcpConnectors.flow.remove")).length, 1, "each device uses one footer Delete action");
   const card = id => renderer.root.findAllByType("article").find(node => node.props["data-resource"] === id);
   const button = (id, key) => card(id).parent.findAllByType("button").find(node => node.children.join("") === (key === "disconnect" ? translator.t("mcpConnectors.flow.remove") : tr(key)));
   const select = (id, kind = "read") => card(id).findByProps({ "aria-label": tr(`${kind}For`, { name: tr(`resources.${id}.name`) }) });

@@ -166,8 +166,8 @@ test("the actual Electron runtime executes the bundled CLI from app.asar without
   try {
     const asar = await import("@electron/asar");
     const source = path.join(fixture.root, "mini-app"), service = path.join(source, "app", "agent-service");
-    fs.mkdirSync(service, { recursive: true, mode: 0o700 });
-    for (const name of ["ticketmaster-cli.py", "ticketmaster-mcp-bridge.js", "ticketmaster-mcp-launch.js", "ticketmaster-runtime.js", "mcp-package-launcher.js", "security.js"]) {
+    fs.mkdirSync(path.join(service, "data"), { recursive: true, mode: 0o700 });
+    for (const name of ["ticketmaster-cli.py", "ticketmaster-mcp-bridge.js", "ticketmaster-mcp-launch.js", "ticketmaster-runtime.js", "mcp-package-launcher.js", "security.js", "data/mcp-bundled-bridge-versions.json"]) {
       fs.copyFileSync(path.join(__dirname, "../app/agent-service", name), path.join(service, name));
     }
     const archive = path.join(fixture.root, "app.asar"); await asar.createPackage(source, archive);

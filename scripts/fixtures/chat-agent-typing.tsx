@@ -1,3 +1,4 @@
+import { CHAT_READ_STATE_FIXTURE_INSTALLATION_ID, createChatReadStateFixture } from "./chat-read-state";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
@@ -5,6 +6,7 @@ import ChatPage from "../../app/manage-ui/src/pages/ChatPage";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
 import { FALLBACK_BACKEND_DESCRIPTORS } from "../../app/manage-ui/src/lib/backends";
+import { writeChatUnread } from "../../app/manage-ui/src/lib/chatUnread";
 import i18n from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
@@ -67,7 +69,10 @@ class FixtureSocket {
   close() { this.readyState = 3; }
 }
 state.WebSocket = FixtureSocket;
+const readStateFixture = createChatReadStateFixture(now - 10000);
 state.fetch = async (input: unknown, init: RequestInit = {}) => {
+  const readState = readStateFixture(input, init);
+  if (readState) return readState;
   const url = new URL(String(input), location.href); let payload: any = {};
   if (url.pathname === "/__api/chat/secrets/prepare") {
     const body = JSON.parse(String(init.body)); payload = { text: body.text, references: [], version: 1 };
@@ -94,8 +99,9 @@ localStorage.clear();
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
 localStorage.setItem("shoggoth.chat.lastActive.v1", cronKey);
 localStorage.setItem("shoggoth.chat.immersive.v1", "0");
-localStorage.setItem("shoggoth.chat.sessionUnread.v2", JSON.stringify({ since: now - 10000, read: {},
-  replies: { [cronKey]: now - 1000, [scheduledKey]: now - 5000 } }));
+// This returning profile has already discovered both saved Cron replies.
+writeChatUnread(localStorage, { since: now - 10000, installationId: CHAT_READ_STATE_FIXTURE_INSTALLATION_ID,
+  read: {}, replies: { [cronKey]: now - 1000, [scheduledKey]: now - 5000 } });
 void i18n.changeLanguage(language);
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
 
@@ -137,6 +143,7 @@ state.runAgentTypingFixture = async () => {
   await wait(() => rowFor() && rowFor(scheduled) && document.querySelector(".chat-thread")?.textContent?.includes("Saved report for Owl"), "initial Cron report");
   await pause(300);
   await ask("Please explain this report.");
+  check(currentRun.key === cronKey, "The restored conversation sends to the Cron session");
   check(!!stop() && typing(), "A user question in a Cron session shows Agent typing before the first token");
   emit(cronKey, { state: "status", statusKind: "queued" });
   await pause();

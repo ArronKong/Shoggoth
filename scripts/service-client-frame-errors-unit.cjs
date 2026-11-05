@@ -21,6 +21,14 @@ test("request ID defaults survive undefined/null IDs", async t => {
     assert.equal(result, "matched");
   }
 });
+test("only Inspiration history accepts the larger response frame", async t => {
+  const result = "x".repeat(65 * 1024);
+  const response = req => ({ id: req.id, ok: true, result });
+  assert.equal(await reply(t, response, { method: "inspiration.executions" }), result);
+  await assert.rejects(reply(t, response), { code: "RESPONSE_TOO_LARGE" });
+  const oversized = req => ({ ...response(req), result: "x".repeat(84 * 1024) });
+  await assert.rejects(reply(t, oversized, { method: "inspiration.executions" }), { code: "RESPONSE_TOO_LARGE" });
+});
 test("unparsed frame failures preserve their fixed code without pretending to match an RPC", async t => {
   for (const code of ["FRAME_TIMEOUT", "FRAME_TOO_LARGE", "INCOMPLETE_FRAME", "MALFORMED_JSON", "MULTIPLE_REQUESTS"]) {
     await assert.rejects(reply(t, () => ({ id: null, ok: false, error: { code, message: "private raw message" } })),

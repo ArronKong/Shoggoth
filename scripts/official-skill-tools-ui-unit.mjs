@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createRequire } from "node:module";
+import { bundledBridgeVersions, loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
 
 const require = createRequire(new URL("../app/manage-ui/package.json", import.meta.url));
 const React = require("react"), Renderer = require("react-test-renderer"), ts = require("typescript");
@@ -20,6 +21,8 @@ const helpers = load("../app/manage-ui/src/lib/mcpConnectorUi.ts");
 const Modal = ({ children }) => React.createElement("section", { role: "dialog" }, children);
 const common = {
   "react-i18next": { useTranslation: () => ({ t: key => key, i18n: { language: "zh-CN", resolvedLanguage: "zh-CN" } }) },
+  "../components/ConnectorDetails": loadConnectorDetails(),
+  "../../../agent-service/data/mcp-bundled-bridge-versions.json": bundledBridgeVersions,
   "../components/Modal": { __esModule: true, default: Modal },
   "../components/McpConnectorIcon": { __esModule: true, default: props => React.createElement("span", { "data-icon": props.identity }) },
   "../../../core/flightaware-connector-policy.json": { __esModule: true, default: JSON.parse(fs.readFileSync(new URL("../app/core/flightaware-connector-policy.json", import.meta.url))) },

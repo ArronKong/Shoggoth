@@ -106,7 +106,11 @@
 .failures button > span:first-child { grid-column: 1; overflow-wrap: anywhere; }
 .failures button > span:last-child { grid-column: 2; grid-row: 1 / 3; align-self: center; }
 .failures small { grid-column: 1; color: var(--ui-text-2); font: inherit; overflow-wrap: anywhere; }
-.trigger:focus-visible, .popup button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.trigger:is(:focus, :focus-visible, :focus-within) {
+  outline: none; border-color: light-dark(#fff, #ffffff14); box-shadow: 0 8px 10px #00000005;
+}
+.trigger[data-popup-open]:is(:focus, :focus-visible, :focus-within) { border-color: transparent; box-shadow: none; }
+.popup button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .agent:focus-visible { outline-offset: -2px; }
 @media (max-width: 420px) {
   .panel { padding-inline: 24px; }

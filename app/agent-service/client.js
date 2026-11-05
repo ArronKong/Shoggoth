@@ -13,6 +13,7 @@ const {
 } = require("./security");
 
 const { executionTimeoutMs, isExecutionTimeoutMs } = require("../execution-timeout");
+const { INSPIRATION_HISTORY_MAX_RESPONSE_BYTES } = require("./service-protocol-version");
 const DEFAULT_TIMEOUT_MS = 2000;
 const PROACTIVE_VERIFY_TIMEOUT_MS = 120_000;
 const CLIENT_MAX_RESPONSE_BYTES = 64 * 1024;
@@ -74,6 +75,8 @@ function requestService(paths, request, options = {}) {
   const timeoutMs = executionTimeoutMs(options.timeoutMs, migration ? 65_000 : runtimeVerification ? PROACTIVE_VERIFY_TIMEOUT_MS
     : permissionRequest ? 30_000 : authRead ? 20_000 : DEFAULT_TIMEOUT_MS);
   if (!isExecutionTimeoutMs(timeoutMs)) return Promise.reject(serviceError("REQUEST_TIMEOUT_INVALID", "Invalid request timeout"));
+  const maxResponseBytes = request.method === "inspiration.executions"
+    ? INSPIRATION_HISTORY_MAX_RESPONSE_BYTES : CLIENT_MAX_RESPONSE_BYTES;
   const payload = {
     ...request,
     id: request.id || randomUUID(),
@@ -116,7 +119,7 @@ function requestService(paths, request, options = {}) {
     });
     socket.on("data", (chunk) => {
       buffered = Buffer.concat([buffered, chunk]);
-      if (buffered.length > CLIENT_MAX_RESPONSE_BYTES) {
+      if (buffered.length > maxResponseBytes) {
         finish(serviceError("RESPONSE_TOO_LARGE", "Service 响应超过上限"));
       }
     });
