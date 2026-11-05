@@ -131,6 +131,32 @@
 }
 .mentionItem.isActive, .mentionItem:hover { background: var(--bg-hover); }
 
+/* 「发给」贴在输入文字最前面：输入框首行按它的宽度缩进；输入框内部滚动时它跟着第一行走。 */
+.composerField { position: relative; overflow: hidden; }
+.sendTarget {
+  position: absolute; top: 2px; left: 10px; z-index: 1;
+  display: inline-flex; align-items: center; gap: 4px; max-width: min(260px, calc(100% - 40px)); height: 20px;
+  padding: 0 4px 0 6px; border: 0; border-radius: 6px; background: var(--bg-muted); color: var(--chat-text);
+  font: inherit; font-size: 12px; line-height: 20px; white-space: nowrap; cursor: pointer;
+  transform: translateY(var(--group-send-target-shift, 0px));
+}
+.sendTarget:hover:not(:disabled), .sendTarget[aria-expanded="true"] { background: var(--bg-hover); }
+.sendTarget:disabled { cursor: default; opacity: 0.6; }
+.composer .sendTarget:focus-visible { outline-offset: -2px; }
+.sendTargetLabel { flex: 0 0 auto; color: var(--muted-fg); }
+.sendTargetAvatar { width: 16px; height: 16px; border-radius: 50%; flex: 0 0 auto; }
+.sendTargetName { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.sendTargetTag { flex: 0 0 auto; color: var(--muted-fg); }
+.sendTargetCaret { flex: 0 0 auto; width: 10px; height: 10px; fill: none; stroke: var(--muted-fg); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.sendTargetStack { display: inline-flex; flex: 0 0 auto; }
+.sendTargetStack > * + * { margin-left: -6px; }
+.sendTargetStack > * { box-shadow: 0 0 0 1.5px var(--skin-card-fg); }
+.mentionItem .sendTargetStack > * { width: 20px; height: 20px; }
+.mentionItem .sendTargetStack > * + * { margin-left: -10px; }
+.sendTargetMenu .mentionItem > .muted { margin-left: auto; padding-left: 8px; }
+.sendTargetOptionName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sendTargetCheck { flex: 0 0 auto; width: 14px; color: var(--ui-focus); text-align: center; }
+
 /* 建群弹窗 */
 .createForm { display: flex; flex-direction: column; gap: 12px; }
 .createMembersHead { display: flex; justify-content: space-between; font-size: 13px; }
@@ -282,6 +308,8 @@
 
 @container group-chat (max-width: 580px) {
   .composerHint { display: none; }
+  .sendTarget { max-width: min(180px, calc(100% - 40px)); }
+  .sendTargetTag { display: none; }
   .members { gap: 4px; }
   .member { max-width: 140px; }
   .headerAvatar { width: 48px; height: 48px; }

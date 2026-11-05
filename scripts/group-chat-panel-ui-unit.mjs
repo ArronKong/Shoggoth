@@ -16,6 +16,8 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { resultPage, sha256 } = require("../group-result-content.js");
 let fullAnswer = "";
 const groupChangedListeners = new Set();
+// 增量读取（afterSeq）返回的新消息；默认没有。
+let newerMessages = [];
 let roleSource = "IDENTITY_ONLY_MARKER", oldRoleSource = "旧版公开设定。", corruptRolePage = false;
 let soulSource = "# SOUL.md\n\n所选 Agent 的 SOUL 内容";
 const translate = (key) => key;
@@ -31,7 +33,8 @@ const api = {
   getGroupChat: () => Promise.resolve(view),
   getGroupChatMemberModels: record("models", () => ({ models: [{ id: "model-b", name: "Model B", provider: "codex" }], defaultModel: "model-a" })),
   setGroupChatMemberModel: record("modelSave", () => view),
-  listGroupChatMessages: (_id, query) => Promise.resolve({ messages: query.afterSeq ? [] : messages, hasMore: false }),
+  listGroupChatMessages: (_id, query) => Promise.resolve({ messages: query.afterSeq
+    ? newerMessages.filter(item => item.seq > query.afterSeq) : messages, hasMore: false }),
   sendGroupChatMessage: record("send", (_id, input) => ({ message: { id: "new", groupId: "g", seq: 99, threadId: "main",
     author: { kind: "user" }, body: input.body, mentions: { memberIds: [], broadcast: false, unresolved: [] }, createdAt: 1 },
   discussionId: "d", duplicate: false })),
@@ -534,8 +537,9 @@ await click(pendingRow().findAllByType("button")[0]);
 calls.length = 0;
 await click(sendButton());
 const sentInput = plain(named("send")[0].args[1]);
-assert.deepEqual([sentInput.body, sentInput.attachments.map((item) => [item.name, item.mimeType, item.size])],
-  ["", [["b.pdf", "application/pdf", 2048]]]);
+// 正文为空时也带上「发给」：最后发言的是 Gamma。
+assert.deepEqual([sentInput.body, sentInput.mentions, sentInput.attachments.map((item) => [item.name, item.mimeType, item.size])],
+  ["@c", ["c"], [["b.pdf", "application/pdf", 2048]]]);
 assert.equal(pendingRow(), undefined, "the pending row is cleared after sending");
 // 一条消息最多 8 个。
 uploads.length = 0; calls.length = 0;
@@ -840,4 +844,115 @@ await mount();
 assert.deepEqual(order(), [9, 11, 14, "turn:next-maya"], "final result clears only its exact turn and stale interaction");
 await act(async () => renderer.unmount());
 
-console.log("PASS group chat panel UI: retry, quote, compact and expanded roster, member tabs, owner settings, attachments, automatic recovery, immutable pages, role versions, bubble Stop actions, published result ordering and exact turn settlement");
+// ---- 「发给」：默认跟随最后发言的成员，可换人、选所有人，不选就交给群主 ----
+{
+  const chip = () => renderer.root.findAll(node => node.type === "button" && node.props["data-group-send-target"] !== undefined)[0];
+  const options = () => renderer.root.findAll(node => node.type === "button" && node.props["data-group-send-target-option"] !== undefined);
+  const option = key => options().find(node => node.props["data-group-send-target-option"] === key);
+  const type = async value => { await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value, selectionStart: value.length } }); }); };
+  const sendNow = async () => { await click(buttons("groupChat.send")[0]); };
+  const lastSend = () => plain(named("send").at(-1).args[1]);
+  const pick = async key => { await click(chip()); await click(option(key)); };
+  const arrive = async (...incoming) => {
+    newerMessages = [...newerMessages, ...incoming];
+    // 变更通知会合并 150ms 后再读取。
+    await act(async () => { for (const listener of [...groupChangedListeners]) listener("g"); await new Promise(resolve => setTimeout(resolve, 200)); });
+    await act(async () => {});
+  };
+
+  // 还没有成员发言：交给群主，正文不加 @。
+  view = base(); messages = [message(1, { kind: "user" }, "大家好")]; newerMessages = [];
+  await mount();
+  assert.equal(chip().props["data-group-send-target"], "owner");
+  assert.ok(chip().props["aria-label"].startsWith("groupChat.target.label Alpha"), "the owner chip names the owner");
+  assert.equal(chip().props["aria-haspopup"], "listbox");
+  await type("在吗");
+  await sendNow();
+  assert.deepEqual([lastSend().body, lastSend().mentions], ["在吗", []]);
+  await act(async () => renderer.unmount());
+
+  // 最后发言的是群主本人：同样不加 @，保留群主离线时顺延的规则。
+  view = base(); messages = [message(1, { kind: "user" }, "大家好"), message(2, { kind: "member", memberId: "a" }, "我是群主")];
+  await mount();
+  assert.equal(chip().props["data-group-send-target"], "owner");
+  await act(async () => renderer.unmount());
+
+  // 跟随最后发言的成员；菜单里群主在最前，其次其他成员，最后是所有人。
+  view = base(); messages = timeline(); newerMessages = [];
+  await mount();
+  assert.equal(chip().props["data-group-send-target"], "c", "the last member who spoke is preselected");
+  await click(chip());
+  assert.equal(chip().props["aria-expanded"], true);
+  assert.deepEqual(options().map(node => node.props["data-group-send-target-option"]), ["owner", "b", "c", "all"]);
+  assert.deepEqual(options().map(node => node.props["aria-selected"]), [false, false, true, false]);
+  await click(chip());
+  assert.equal(options().length, 0, "clicking the chip again closes the menu");
+  await type("继续");
+  await sendNow();
+  assert.deepEqual([lastSend().body, lastSend().mentions], ["@c 继续", ["c"]], "the preselected member is addressed like a typed @");
+
+  // 发出后保持到下一位成员发言，然后跟随新的发言者。
+  assert.equal(chip().props["data-group-send-target"], "c");
+  await arrive(message(100, { kind: "member", memberId: "b" }, "Beta 接着说"));
+  assert.equal(chip().props["data-group-send-target"], "b", "the chip follows the newest speaker");
+
+  // 输入中途有人发言，「发给」不变，避免按回车前被改掉。
+  await type("问 Beta");
+  await arrive(message(101, { kind: "member", memberId: "c" }, "Gamma 插话"));
+  assert.equal(chip().props["data-group-send-target"], "b", "typing holds the current recipient");
+  await type("");
+  assert.equal(chip().props["data-group-send-target"], "c", "clearing the draft follows the newest speaker again");
+
+  // 手动换成所有人：正文前加 @all。
+  await pick("all");
+  assert.equal(chip().props["data-group-send-target"], "all");
+  assert.equal(options().length, 0, "picking closes the menu");
+  await type("都来看看");
+  await sendNow();
+  assert.deepEqual([lastSend().body, lastSend().mentions], ["@all 都来看看", []]);
+
+  // 手动选群主：不加 @；手动选择在清空输入后也保留。
+  await pick("owner");
+  await type("x"); await type("");
+  assert.equal(chip().props["data-group-send-target"], "owner", "a manual choice survives an emptied draft");
+  await type("交给群主");
+  await sendNow();
+  assert.deepEqual([lastSend().body, lastSend().mentions], ["交给群主", []]);
+
+  // 手动选某位成员，再在正文里 @ 另一位：两位都会收到；正文已经以同一个 @ 开头时不重复。
+  await pick("b");
+  await type("@c 一起看");
+  await sendNow();
+  assert.deepEqual([lastSend().body, lastSend().mentions], ["@b @c 一起看", ["b"]]);
+  await pick("b");
+  await type("@b 只问你");
+  await sendNow();
+  assert.equal(lastSend().body, "@b 只问你");
+  await act(async () => renderer.unmount());
+
+  // 引用某位成员的话：「发给」换成被引用的那位。
+  view = base(); messages = timeline(); newerMessages = [];
+  await mount();
+  assert.equal(chip().props["data-group-send-target"], "c");
+  await click(buttons("groupChat.reply.action")[1]);
+  assert.equal(chip().props["data-group-send-target"], "owner", "quoting the owner sends without an @");
+  await click(buttons("groupChat.reply.action")[2]);
+  assert.equal(chip().props["data-group-send-target"], "c", "quoting a member addresses that member");
+  await act(async () => renderer.unmount());
+
+  // 最后发言的成员已移出：顺延到更早一位仍在群里的发言者。
+  view = { ...base(), members: [member("a", "Alpha"), member("b", "Beta"), { ...member("c", "Gamma"), state: "removed" }] };
+  messages = [message(1, { kind: "member", memberId: "b" }, "Beta"), message(2, { kind: "member", memberId: "c" }, "Gamma")];
+  await mount();
+  assert.equal(chip().props["data-group-send-target"], "b");
+  await act(async () => renderer.unmount());
+
+  // 归档的群不显示「发给」。
+  view = { ...base(), group: { ...base().group, status: "archived" } }; messages = timeline();
+  await mount();
+  assert.equal(chip(), undefined);
+  await act(async () => renderer.unmount());
+  newerMessages = [];
+}
+
+console.log("PASS group chat panel UI: send target chip, retry, quote, compact and expanded roster, member tabs, owner settings, attachments, automatic recovery, immutable pages, role versions, bubble Stop actions, published result ordering and exact turn settlement");
