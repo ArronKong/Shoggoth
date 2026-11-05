@@ -1,5 +1,5 @@
 name: Signed macOS draft
-run-name: Validate signed draft ${{ inputs.tag }}
+run-name: ${{ inputs.release_mode == 'publish' && 'Publish signed macOS' || 'Validate signed draft' }} ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
@@ -7,6 +7,16 @@ on:
       tag:
         description: Existing v-prefixed tag at the selected workflow commit
         required: true
+        type: string
+      release_mode:
+        description: Draft only, or authorize automatic publication after all acceptance gates
+        required: true
+        type: choice
+        default: draft
+        options: [draft, publish]
+      notes_file:
+        description: Reviewed release-notes/v<VERSION>.md in this tag; required for publish (English then Chinese)
+        required: false
         type: string
 
 permissions:
@@ -39,14 +49,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          RELEASE_NOTES_FILE: ${{ inputs.notes_file }}
         run: |
           test "$REPOSITORY_VISIBILITY" = "public"
           export RELEASE_SOURCE_SHA="$(git rev-parse HEAD)"
           node scripts/release-draft.cjs validate
+          node scripts/release-publication.cjs intent
           echo "sha=$RELEASE_SOURCE_SHA" >> "$GITHUB_OUTPUT"
           npm run export:source -- "$RUNNER_TEMP/shoggoth-release-source"
           node scripts/check-release-private-keys.cjs "$RUNNER_TEMP/shoggoth-release-source"
           node scripts/check-connector-public-release.cjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-intent
+          path: release-intent.json
+          if-no-files-found: error
 
   source-ci:
     needs: validate
@@ -360,6 +378,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: write
+    outputs:
+      receipt_artifact: ${{ steps.confirm.outputs.receipt_artifact }}
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag }}
@@ -379,12 +399,88 @@ jobs:
         with:
           name: draft-upload
       - name: Confirm the verified asset identities after native verification
+        id: confirm
         run: |
           node scripts/release-draft.cjs confirm
           echo "Signed draft $RELEASE_TAG passed source CI and both native verification jobs." >> "$GITHUB_STEP_SUMMARY"
-          echo "Release ID $RELEASE_ID remains a draft." >> "$GITHUB_STEP_SUMMARY"
+          echo "Release ID $RELEASE_ID accepted; publication follows only when explicitly selected at dispatch." >> "$GITHUB_STEP_SUMMARY"
+          echo "receipt_artifact=accepted-draft-attempt-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: accepted-draft-attempt-${{ github.run_attempt }}
           path: accepted-draft.json
           if-no-files-found: error
+
+  publish:
+    if: inputs.release_mode == 'publish'
+    needs: [validate, draft, accepted-draft]
+    concurrency:
+      group: shoggoth-release-publication
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      RELEASE_MODE: ${{ inputs.release_mode }}
+      RELEASE_NOTES_FILE: ${{ inputs.notes_file }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/manage-ui/package-lock.json
+      - name: Install locked audit tools without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts
+          npm --prefix app/manage-ui ci --ignore-scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-intent
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.accepted-draft.outputs.receipt_artifact }}
+      - name: Refresh both dependency audits immediately before publication
+        run: |
+          mkdir -p publication
+          node scripts/dependency-audit-policy.cjs --output publication/audit-root.json
+          node scripts/dependency-audit-policy.cjs --directory app/manage-ui --output publication/audit-ui.json
+      - name: Publish accepted immutable assets and verify anonymous downloads
+        run: node scripts/release-publication.cjs publish
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: publication-attempt-${{ github.run_attempt }}
+          path: publication/*.json
+          if-no-files-found: warn
+
+  result:
+    if: always()
+    needs: [validate, source-ci, build, draft, native-verification, accepted-draft, publish]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Record the final stage results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const results = JSON.parse(process.env.RESULTS);
+          const rows = Object.entries(results).map(([name, job]) => `| ${name} | ${job.result} |`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `Requested mode: **${process.env.RELEASE_MODE || 'draft'}**\n\n| Stage | Result |\n| --- | --- |\n${rows.join('\n')}\n\n` +
+            'A publish failure can occur after the release is public. Consult the publication receipt before retrying; never replace signed assets.\n');
+          NODE

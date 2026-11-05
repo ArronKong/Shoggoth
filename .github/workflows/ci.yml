@@ -2,6 +2,7 @@ name: CI
 on:
   workflow_call:
   push:
+    branches: ["**"] # Version tags are fully checked by release.yml; avoid a duplicate Mac allocation.
   pull_request:
 permissions:
   contents: read
@@ -102,6 +103,7 @@ jobs:
           node scripts/desktop-app-update-unit.cjs
           node scripts/app-update-release-contract-unit.cjs
           node --test scripts/release-draft-unit.cjs
+          node --test scripts/release-automation-unit.cjs
           node --test scripts/release-stapler-unit.cjs
           node --test scripts/release-local-unit.cjs
           node scripts/check-release-private-keys-unit.cjs
