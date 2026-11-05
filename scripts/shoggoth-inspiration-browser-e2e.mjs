@@ -32,8 +32,10 @@ const evidence = [];
 const reportPath = process.env.INSPIRATION_E2E_REPORT || '/tmp/a307-inspiration-browser-e2e.json';
 for (let round = 1; round <= rounds; round++) {
   await page.click('article[data-inspiration-id] [data-status]');
-  const start = `[role="dialog"] button:text-is("${round === 1 ? '交给 Agent' : '继续完善'}")`;
+  // A seed is sent as it opens (first intent chosen); a later round picks a follow-up chip first.
+  const start = '[role="dialog"] button[aria-label="发送"]';
   await page.waitForSelector(start, { state: 'visible' });
+  if (round > 1) await page.click('[role="dialog"] button:text-is("继续深入")');
   await page.click(start);
   await page.waitForSelector('[role="dialog"] .chat-prompt', { state: 'visible' });
   await page.click('button[aria-label="关闭"]');
@@ -65,7 +67,7 @@ for (let round = 1; round <= rounds; round++) {
   if (inSession) {
     assert.equal(await page.evaluate(() => [...document.querySelectorAll('.chat-header__tools button')].some(button => button.textContent.includes('回到灵感'))), false);
     await page.click('a[aria-label="灵感"]');
-    await page.waitForSelector('[role="dialog"] button:text-is("继续完善")', { state: 'visible' });
+    await page.waitForSelector('[role="dialog"] #inspiration-thread-input', { state: 'visible' });
     assert.ok((await page.url()).includes(`id=${captured.ideas[0].id}`));
     await page.click('button[aria-label="关闭"]');
   }

@@ -47,7 +47,14 @@ test('OpenClaw 完成后切到原生 Agent，携带便签历史并启动独立 W
   await until(() => f.dispatcher.getRun(run.id).status === 'completed');
   await f.restart();
   assert.equal((await f.call('activity.binding', { id: idea.id, runId: run.id })).prompt, binding.prompt);
-  assert.equal((await f.call('executions', { id: idea.id, cursor: null, limit: 20 })).executions.length, 2);
+  const history = await f.call('executions', { id: idea.id, cursor: null, limit: 20 });
+  assert.equal(history.executions.length, 2);
+  assert.deepEqual(history.executions.map(execution => execution.instruction), ['本轮补充：比较这三个选项', '上一轮补充：保留三个选项'],
+    'the idea thread shows what was asked in each round');
+  assert.deepEqual((await f.call('get', { id: idea.id })).idea.rounds, { count: 2, agents: [
+    { backendId: 'openclaw', agentId: 'main' }, { backendId: f.profile.backendId, agentId: f.profile.agentId }] },
+    'cards show how many rounds ran and who worked on the idea, in first-use order');
+  assert.deepEqual((await f.call('get', { id: other.id })).idea.rounds.count, 1);
 });
 
 test('Hermes 失败及旧版跨后端准备失败后，原生新一轮接收历史且不重放失败执行', async (t) => {

@@ -125,7 +125,7 @@ const at = (value) => Number.isSafeInteger(value) && value >= 0;
 const optionalAt = (value) => value === null || at(value);
 const optionalText = (value, max) => value === null || string(value, max);
 const publicId = (value) => typeof value === "string" && ID.test(value);
-const VIEW_FIELDS = ["id", "body", "title", "revision", "favorite", "archivedAt", "acceptedAt", "createdAt", "updatedAt", "status", "latestExecution"];
+const VIEW_FIELDS = ["id", "body", "title", "revision", "favorite", "archivedAt", "acceptedAt", "createdAt", "updatedAt", "status", "latestExecution", "rounds"];
 const EXECUTION_VIEW_FIELDS = ["id", "ideaId", "runId", "profileId", "agentId", "backendId", "workspace", "sessionKey", "ideaRevision", "createdAt", "retryOf", "status", "resultSummary", "errorCode", "finishedAt", "attention"];
 function validRequest(request, runId) {
   return request !== null && typeof request === "object"
@@ -163,9 +163,10 @@ function validInspirationAttention(attention, runId) {
     && optionalText(attention.details, 48 * 1024) && optionalText(attention.command, 32 * 1024)
     && optionalText(attention.cwd, 4096) && validRequest(attention.request, runId));
 }
-function validateExecution(execution) {
+function validateExecution(execution, withInstruction = false) {
   const external = ["openclaw", "hermes"].includes(execution?.backendId);
-  if (!exact(execution, EXECUTION_VIEW_FIELDS) || !uuid(execution.id) || !uuid(execution.ideaId) || !uuid(execution.runId)
+  if (!exact(execution, withInstruction ? [...EXECUTION_VIEW_FIELDS, "instruction"] : EXECUTION_VIEW_FIELDS)
+    || (withInstruction && !optionalText(execution.instruction, 16 * 1024)) || !uuid(execution.id) || !uuid(execution.ideaId) || !uuid(execution.runId)
     || (execution.sessionKey !== null && !(external ? string(execution.sessionKey, 512, false) : uuid(execution.sessionKey)))
     || ![execution.agentId, execution.backendId].every(publicId)
     || (external ? execution.profileId !== null : !publicId(execution.profileId))
@@ -188,7 +189,10 @@ function validateView(value) {
     || !Number.isSafeInteger(value.revision) || value.revision < 1
     || typeof value.favorite !== "boolean" || !STATUSES.has(value.status)
     || !at(value.createdAt) || !at(value.updatedAt) || value.updatedAt < value.createdAt
-    || !optionalAt(value.archivedAt) || !optionalAt(value.acceptedAt)) invalid("INSPIRATION_RESPONSE_INVALID");
+    || !optionalAt(value.archivedAt) || !optionalAt(value.acceptedAt)
+    || !exact(value.rounds, ["count", "agents"]) || !at(value.rounds.count) || !Array.isArray(value.rounds.agents)
+    || value.rounds.agents.length > 8 || !value.rounds.agents.every(agent => exact(agent, ["backendId", "agentId"])
+      && publicId(agent.backendId) && publicId(agent.agentId))) invalid("INSPIRATION_RESPONSE_INVALID");
   if (value.latestExecution !== null) {
     validateExecution(value.latestExecution);
     if (value.latestExecution.ideaId !== value.id || value.latestExecution.ideaRevision > value.revision
@@ -249,7 +253,7 @@ function validateInspirationServiceResult(method, result) {
           || !STATUSES.has(item.status) || item.status === "saved") invalid("INSPIRATION_RESPONSE_INVALID");
       }
     } else if (field === "items") result.items.forEach(validateView);
-    else result.executions.forEach(validateExecution);
+    else result.executions.forEach(execution => validateExecution(execution, true));
   } else if (method === "inspiration.delete") {
     if (!exact(result, ["id", "deleted"]) || !uuid(result.id) || result.deleted !== true) invalid("INSPIRATION_RESPONSE_INVALID");
   } else {

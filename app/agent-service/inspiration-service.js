@@ -331,7 +331,7 @@ class InspirationService {
     const latestExecution = execution ? this.#executionView(execution) : null;
     const { deletedAt, ...publicIdea } = idea;
     return { ...publicIdea, body: summary ? [...idea.body.trim()].slice(0, 240).join("") : idea.body,
-      status: latestExecution?.status ?? "saved", latestExecution };
+      status: latestExecution?.status ?? "saved", latestExecution, rounds: this.store.executionRoster(id) };
   }
 
   reminderView(id) {
@@ -561,7 +561,9 @@ class InspirationService {
       result = this.#page(this.store.listPage(input), "items", idea => this.view(idea.id, true));
     } else if (method === "inspiration.executions") {
       if (!this.store.get(input.id)) fail("INSPIRATION_NOT_FOUND", "灵感不存在");
-      result = this.#page(this.store.executionsPage(input), "executions", value => this.#executionView(value, true));
+      // The idea thread shows what the user asked for in each round.
+      result = this.#page(this.store.executionsPage(input), "executions", value => ({
+        ...this.#executionView(value, true), instruction: value.instruction || null }));
     } else if (method === "inspiration.activity.binding") {
       if (!this.store.get(input.id)) fail("INSPIRATION_NOT_FOUND", "灵感不存在");
       const execution = this.store.executionForRun(input.runId);

@@ -4,16 +4,18 @@ const toolbarPaths = {
   session: 'M3 12a7 7 0 0 1 7-7h4a7 7 0 0 1 0 14H3z',
   favorite: 'm12 3.3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L2.9 9.9l6.3-.9z',
   delete: 'M3.5 6.5h17M9 6.5v-2a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 6.5V18a2.5 2.5 0 0 0 2.5 2.5h7A2.5 2.5 0 0 0 18 18V6.5M10 10.5v6m4-6v6',
+  // The chat composer's send glyph (chatIcons IconSend), for handing a card to an agent.
+  send: 'M22.1525 3.55273L11.1772 21.0039L9.50684 12.4073L2 7.89747L22.1525 3.55273ZM9.45508 12.4431L22.1519 3.55273',
 };
 
 export default function InspirationActionIcon({ name, className, filled = false, toolbar = false }: {
-  name: 'favorite' | 'archive' | 'edit' | 'arrow' | 'chevron' | 'check' | 'session' | 'delete';
+  name: 'favorite' | 'archive' | 'edit' | 'arrow' | 'chevron' | 'check' | 'session' | 'delete' | 'send';
   className?: string; filled?: boolean; toolbar?: boolean;
 }) {
   // Keep the exported favorite glyph in the stage filter and on note cards.
   if (name === 'favorite' && !toolbar) return <span className={[styles.favorite, className].filter(Boolean).join(' ')}
     data-inspiration-icon="favorite" data-filled={filled || undefined} aria-hidden="true" />;
-  if (name === 'session' || name === 'favorite' || name === 'delete') {
+  if (name === 'session' || name === 'favorite' || name === 'delete' || name === 'send') {
     return <svg className={className} data-inspiration-icon={name} viewBox="0 0 24 24" width="20" height="20"
       fill={filled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.5"
       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
