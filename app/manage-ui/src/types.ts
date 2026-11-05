@@ -381,6 +381,9 @@ export interface ChatSecretResult {
   originalAvailable: boolean;
 }
 
+/** The single Agent permission choice made in Settings. */
+export type GlobalPermissionMode = "request-approval" | "auto-review" | "full-access";
+
 export interface ChatPermissionModeOption {
   id: string;
   label: string;
@@ -2422,6 +2425,8 @@ export interface AppConfig {
   groupRuntimeHosts?: GroupRuntimeHostConnection[];
   /** 设置页「断开连接」的后端 id 列表；registry 聚合/路由跳过它们。 */
   disabledBackends: string[];
+  /** Permission mode applied to every Agent chat (set in Settings, not per chat). */
+  chatPermissionMode?: GlobalPermissionMode;
   notifications: NotificationPrefs;
   notificationPolicy?: { suppressWhileFocused: boolean; quietHours: { start: string; end: string; timezone: string } | null };
   // 首启引导完成/跳过的时间戳（epoch ms）；0 = 从未。SetupOverlay 仅在

@@ -49,7 +49,7 @@ app.whenReady().then(async()=>{
       env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" } });
     process.stdout.write(result.stdout || "");
     if (result.status !== 0) process.stderr.write(result.stderr || String(result.error || ""));
-    assert.equal(result.status, 0, "permission menu Electron DOM regression failed");
+    assert.equal(result.status, 0, "Settings permission Electron DOM regression failed");
     assert.match(result.stdout, /"verified":true/);
   }
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

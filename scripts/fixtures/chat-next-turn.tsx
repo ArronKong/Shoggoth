@@ -61,6 +61,8 @@ Object.assign(window,{WebSocket:FixtureSocket});
 window.fetch=async (input,init) => {
   const url=new URL(String(input),location.href);let payload:any={};
   if(url.pathname==="/__api/backends") payload={backends:FALLBACK_BACKEND_DESCRIPTORS};
+  // Permission is one choice in Settings; every chat follows it.
+  if(url.pathname==="/__api/config") payload={config:{disabledBackends:[],chatPermissionMode:"full-access"}};
   if(url.pathname==="/__api/status") payload={backends:FALLBACK_BACKEND_DESCRIPTORS.map(b=>({id:b.id,connected:true,info:{readyAgentIds:[agentId]}}))};
   if(url.pathname==="/__api/chat/capabilities") payload=caps;
   if(url.pathname==="/__api/models") payload={models,catalogRevision:"a".repeat(64)};
@@ -90,29 +92,14 @@ const checkComposerLayout=(input:HTMLTextAreaElement)=>{
 const running=async()=>{await wait(()=>visible("textarea") && sockets.size,"composer");await new Promise(r=>setTimeout(r,400));emit({state:"delta",message:{role:"assistant",content:[{type:"text",text:"我正在继续检查，请随时补充方向。"}]}});await wait(()=>visible('button[title="'+i18n.t("chat.stopGenerating")+'"]'),"running stop action");};
 Object.assign(window,{ nextTurnFixture:{runtime,backend,immersive,requests,running}, runNextTurnFixture:async()=>{
   await running();
-  const model=visible<HTMLButtonElement>(".chat-pill--model")!,permission=visible<HTMLButtonElement>(".chat-pill--permission")!;
-  check(!model.disabled && !permission.disabled,"streaming disables settings");
+  const model=visible<HTMLButtonElement>(".chat-pill--model")!;
+  check(!model.disabled,"streaming disables settings");
+  check(!document.querySelector(".chat-pill--permission, .permission-menu"),"chats must not offer their own permission picker");
   if(!immersive) checkComposerLayout(visible<HTMLTextAreaElement>("textarea")!);
   model.click();await wait(()=>visible('button[title="next-model"]'),"model menu");visible<HTMLButtonElement>('button[title="next-model"]')!.click();
   await wait(()=>requests.some(r=>r.method==="model.pick"||r.method==="sessions.patch"&&r.params.model==="next-model"),"model pick");
-  permission.click();await wait(()=>visible(".permission-menu__item"),"permission menu");visible<HTMLButtonElement>(".permission-menu__item")!.click();
-  await wait(()=>requests.some(r=>r.method==="sessions.patch"&&r.params.permissionMode==="read-only"),"permission pick");
   const permissionPatches=()=>requests.filter(r=>r.method==="sessions.patch"&&"permissionMode" in r.params);
-  await wait(()=>permission.textContent?.includes(i18n.t("chat.permissionModes.readOnly")),"read-only mode reflected");
-  permission.click();await wait(()=>visible(".permission-menu__item[data-risk=danger]"),"full access option");
-  visible<HTMLButtonElement>(".permission-menu__item[data-risk=danger]")!.click();
-  await wait(()=>permissionPatches().some(r=>r.params.permissionMode===fullAccessMode),"full access saves without confirmation");
-  await wait(()=>permission.textContent?.includes(i18n.t("chat.permissionModes.fullAccess")),"full access reflected");
-  check(!document.querySelector('[role="alertdialog"], [role="dialog"]'),"permission switch opens a dialog");
-  check(permissionPatches().length===2 && permissionPatches().every(r=>r.params.key===key),"each choice saves once to the active session");
-  permission.click();await wait(()=>visible(".permission-menu__item[data-risk=danger]"),"active full access option");
-  visible<HTMLButtonElement>(".permission-menu__item[data-risk=danger]")!.click();
-  await wait(()=>!document.querySelector(".permission-menu"),"selecting current mode closes menu");
-  check(permissionPatches().length===2,"selecting current mode saves again");
-  permission.click();await wait(()=>visible(".permission-menu__item[data-risk=standard]"),"ask option");
-  visible<HTMLButtonElement>(".permission-menu__item[data-risk=standard]")!.click();
-  await wait(()=>permission.textContent?.includes(i18n.t("chat.permissionModes.ask")),"switch back to ask reflected");
-  check(permissionPatches().length===3 && !document.querySelector('[role="alertdialog"], [role="dialog"]'),"switching back saves once without a dialog");
+  check(permissionPatches().length===0,"opening a chat must not change its permission before a new turn");
   if(!immersive) {
     const thinking=visible<HTMLButtonElement>(".chat-pill--think-fast")!;check(!thinking.disabled,"streaming disables effort/fast");thinking.click();
     await wait(()=>visible('.think-fast-menu__slider'),"effort slider");
@@ -138,7 +125,23 @@ Object.assign(window,{ nextTurnFixture:{runtime,backend,immersive,requests,runni
   else { await new Promise(r=>setTimeout(r,100));check(!requests.some(r=>r.method==="chat.send"||r.method==="chat.steer"),"queue interrupts original");
     emit({state:"final",message:{role:"assistant",content:[{type:"text",text:"当前回复已完成。"}]}});await wait(()=>requests.some(r=>r.method==="chat.send"),"queue sends next turn"); }
   check(!requests.some(r=>r.method==="chat.abort"),"guidance stops original run");
-  return {runtime,backend,immersive,settingsEnabled:true,settingsSaved:true,permissionSwitchWithoutDialog:true,controlsVisible:true,sendHiddenWhileRunning:true,enterSends:true,behavior:steer?"native-steering":"next-turn-queue",abort:false};
+  if(steer) {
+    // Steering joins the running turn; the Settings permission applies to the next one.
+    check(permissionPatches().length===0,"steering must not change the running turn's permission");
+    emit({state:"final",message:{role:"assistant",content:[{type:"text",text:"当前回复已完成。"}]}});
+    await wait(()=>visible("textarea") && !visible('button[title="'+i18n.t("chat.stopGenerating")+'"]'),"turn finished");
+    const next=visible<HTMLTextAreaElement>("textarea")!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value")!.set!.call(next,"继续下一步");next.dispatchEvent(new Event("input",{bubbles:true}));
+    await new Promise(r=>setTimeout(r,60));
+    next.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+    await wait(()=>requests.some(r=>r.method==="chat.send"),"next turn sends");
+  }
+  const firstSend=requests.findIndex(r=>r.method==="chat.send");
+  const permissionPatch=requests.findIndex(r=>r.method==="sessions.patch"&&r.params.permissionMode===fullAccessMode);
+  check(permissionPatch>=0 && permissionPatch<firstSend,"the Settings permission is applied before the next turn starts");
+  check(permissionPatches().length===1 && permissionPatches()[0].params.key===key,"the Settings permission is applied once to the active session");
+  check(!document.querySelector('[role="alertdialog"], [role="dialog"]'),"applying the Settings permission opens a dialog");
+  return {runtime,backend,immersive,settingsEnabled:true,settingsSaved:true,permissionFromSettings:true,controlsVisible:true,sendHiddenWhileRunning:true,enterSends:true,behavior:steer?"native-steering":"next-turn-queue",abort:false};
 }});
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider/><ChatPage/></UiProvider></HashRouter>);
 if(query.has("preview")) void running();

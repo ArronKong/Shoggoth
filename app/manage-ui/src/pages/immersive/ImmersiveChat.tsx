@@ -9,8 +9,6 @@ import { useGlassRenderer } from "./useGlassRenderer";
 import FilterTabs from "../../components/FilterTabs";
 import { SESSION_CATEGORY_ORDER, isVisibleSession, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../../lib/sessionKind";
 import ChatModelMenu, { type ModelMenuChoice } from "../ChatModelMenu";
-import ChatPermissionMenu from "../ChatPermissionMenu";
-import type { ChatPermissionModeOption } from "../../types";
 import ChatPromptCard, { type ChatPromptEntry, type ChatPromptResponse } from "../ChatPromptCard";
 import ImmersiveBackdrop from "./ImmersiveBackdrop";
 import ImmersiveStatusLine, { type ImmersiveLiveStatus } from "./ImmersiveStatusLine";
@@ -130,10 +128,6 @@ export interface ImmersiveBundle {
   modelsError?: boolean;
   refreshModels?: () => void;
   modelSelectionDisabled: boolean;
-  permissionOptions?: ChatPermissionModeOption[];
-  permissionMode?: string;
-  changePermissionMode?: (option: ChatPermissionModeOption) => void;
-  permissionSelectionDisabled?: boolean;
   listLive: boolean;
   thinkingLevel: string; // 已经过 thinkLabel 的显示文案（如 "Think hard"），空串 = 不显示
   ctxSummary: string; // 会话上下文用量摘要（"34% · 12k/200k"），空串 = 不显示
@@ -178,7 +172,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     onExit, phase, live, sendSeq, onNearTop, onHistoryBoundaryChange, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
     submit, sending, abortActive, abortDisabled, hasActiveSession, canSend, writerHint, slashMenu, slashOpen, connectionRequests, planDock,
     models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
-    permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
     attachments, removeAttachment, quoteText, clearQuote,
     sessionTitle, sessionMeta, liveStatusKind, recoveryNotice, statusNotices, activeAgentId, activeBackendId, avatarVersion, sessions: allSessions, openSession,
@@ -1021,14 +1014,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                 </span>
               )}
             </div>
-            <ChatPermissionMenu
-              options={permissionOptions}
-              activeMode={permissionMode}
-              onSelect={(option) => changePermissionMode?.(option)}
-              disabled={permissionSelectionDisabled}
-              triggerClassName={styles.pill}
-              appearance="dark"
-            />
             {thinkingLevel && <span className={styles.pillStatic}>{thinkingLevel}</span>}
             {ctxSummary && <span className={`${styles.pillStatic} ${styles.pillCtx}`} title={t("chat.ctxUsage")}>{ctxSummary}</span>}
           </div>

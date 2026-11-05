@@ -164,9 +164,14 @@ import {
 } from "../lib/chatBackend";
 import { useRegisterPageRefresh } from "../lib/page-refresh";
 import ImmersiveChat, { type ImmersiveMessage } from "./immersive/ImmersiveChat";
-import ChatPermissionMenu from "./ChatPermissionMenu";
 import ChatThinkFastMenu from "./ChatThinkFastMenu";
 import { localizePermissionMode } from "../lib/permissionModeText";
+import {
+  GLOBAL_PERMISSION_MODE_TEXT,
+  loadGlobalPermissionMode,
+  sessionPermissionModeFor,
+  useGlobalPermissionMode,
+} from "../lib/globalPermissionMode";
 import type { ImmersivePhase } from "./immersive/immersiveBg";
 import type { ImmersiveLiveStatus, ImmersiveLiveTool } from "./immersive/ImmersiveStatusLine";
 import { IconSend, IconClip, IconSearch, IconMic, IconStop } from "./chatIcons";
@@ -184,7 +189,6 @@ import type {
   ChatCanvasWidgetPart,
   ChatCanvasWidgetPreview,
   ChatCapabilities,
-  ChatPermissionModeOption,
   GlobalChatSearchHit,
   GlobalChatSearchResult,
   OpenClawProgressCard,
@@ -2403,6 +2407,8 @@ function ChatPageApp() {
   const sessions = useMemo(() => allSessions.filter(isVisibleSession), [allSessions]);
   const sessionsRef = useRef<SessionRow[]>(allSessions);
   sessionsRef.current = allSessions;
+  // Agent permission is one app-wide choice made in Settings.
+  const globalPermissionMode = useGlobalPermissionMode();
   // sessions.list carries stable ids but OpenClaw does not guarantee a current
   // agentName. Seed from cache, then replace from agents.list on each list refresh.
   const agentNamesRef = useRef<AgentNameIndex>(createAgentNameIndex(
@@ -5644,6 +5650,30 @@ function ChatPageApp() {
     setTimeout(() => setToast(null), 4200);
   };
 
+  // Bring this session in line with the permission chosen in Settings before a
+  // new turn starts. Each runtime gets its closest native option. A failed
+  // update stops the send, so a turn never runs with a different permission.
+  const syncSessionPermission = async (key: string) => {
+    const agent = agentOf(key);
+    let caps = capabilitiesForSession(key);
+    if (!caps || caps.notReady) {
+      try { caps = await getChatCapabilities(agent, backendOfKnownAgent(agent)); } catch { /* keep what we have */ }
+    }
+    const options = caps?.permissions?.options;
+    const target = sessionPermissionModeFor(await loadGlobalPermissionMode(), options);
+    if (!target) return;
+    const current = sessionsRef.current.find((row) => row.key === key)?.permissionMode
+      || caps?.permissions?.defaultMode || options?.[0]?.id;
+    if (current === target) return;
+    try {
+      const res = await send("sessions.patch", { key, permissionMode: target });
+      const applied = res?.payload?.entry?.permissionMode ?? target;
+      setSessions((prev) => prev.map((row) => row.key === key ? { ...row, permissionMode: applied } : row));
+    } catch (error) {
+      throw new Error(t("chat.permissionSyncFailed", { msg: error instanceof Error ? error.message : String(error) }));
+    }
+  };
+
   // Send text (+ optional attachments) as a chat message via chat.send. `isSlash`
   // shows a slow-operation hint after a quiet period. Only a real terminal
   // event, cancellation or reconciliation may release the in-flight operation.
@@ -5705,6 +5735,7 @@ function ChatPageApp() {
 
     preparingSecretInputRef.current.add(key);
     try {
+      await syncSessionPermission(key);
       const prepared = await prepareChatInputForSend(key, idem, text);
       if (activeKeyRef.current !== key) { draftsRef.current.set(key, prepared.text); return; }
       const original = text;
@@ -5715,6 +5746,7 @@ function ChatPageApp() {
     } catch (error) {
       setError(error instanceof Error ? error.message : "这条消息暂时无法安全发送，请稍后重试。内容已为你保留");
       if (activeKeyRef.current === key && !inputRef.current) { setInput(text); inputRef.current = text; }
+      if (activeKeyRef.current === key && atts.length && !attachmentsRef.current.length) setComposerAttachments(atts);
       return;
     } finally { preparingSecretInputRef.current.delete(key); }
 
@@ -6052,13 +6084,12 @@ function ChatPageApp() {
     }
     switch (action) {
       case "permission": {
-        if (!args) {
-          pushLocal(`${activePermissionMode}\n${permissionOptions.map((option) => `${option.id}: ${option.label}`).join("\n")}`);
-        } else {
-          const option = permissionOptions.find((candidate) => candidate.id === args);
-          if (!option) pushLocal(`Usage: /permission <${permissionOptions.map((candidate) => candidate.id).join("|")}>`);
-          else await changePermissionMode(option);
-        }
+        // Permission is one app-wide choice in Settings; chats only display it.
+        const label = t(`chat.permissionModes.${GLOBAL_PERMISSION_MODE_TEXT[globalPermissionMode].label}`);
+        const current = permissionOptions.find((option) => option.id === activePermissionMode);
+        const target = sessionPermissionModeFor(globalPermissionMode, permissionOptions);
+        pushLocal(t("chat.permissionFromSettings", { mode: label })
+          + (current && target && current.id !== target ? `\n${t("chat.permissionCurrentSession", { mode: current.label })}` : ""));
         return true;
       }
       case "rename":
@@ -7948,10 +7979,6 @@ function ChatPageApp() {
     || activeCaps?.permissions?.defaultMode
     || permissionOptions[0]?.id
     || "";
-  const changePermissionMode = async (option: ChatPermissionModeOption) => {
-    if (!activeKey) return;
-    await patchSession({ permissionMode: option.id }, t("chat.labelPermission"));
-  };
   const activeSendReady = canSendActiveSession(active?.key);
   const writerHintKey = active?.source === "codex-desktop" ? codexDesktopWriterHintKey(active.codexDesktopWriter) : null;
   const activeWriterHint = writerHintKey ? t(writerHintKey) : null;
@@ -10378,12 +10405,6 @@ function ChatPageApp() {
                       }}
                     />
                   )}
-                  <ChatPermissionMenu
-                    options={permissionOptions}
-                    activeMode={activePermissionMode}
-                    onSelect={(option) => { void changePermissionMode(option); }}
-                    disabled={!connected}
-                  />
                   <button
                     type="button"
                     className={showTraj ? "chat-iconbtn is-active" : "chat-iconbtn"}
@@ -10547,10 +10568,6 @@ function ChatPageApp() {
           modelsError={usesRuntimeModelPicker ? runtimeModels.error : modelsError}
           refreshModels={refreshModelMenu}
           modelSelectionDisabled={nativeModelSelectionDisabled}
-          permissionOptions={permissionOptions}
-          permissionMode={activePermissionMode}
-          changePermissionMode={(option) => { void changePermissionMode(option); }}
-          permissionSelectionDisabled={!connected}
           listLive={listLive}
           thinkingLevel={active?.thinkingLevel ? thinkLabel(active.thinkingLevel) : ""}
           ctxSummary={ctxPct != null ? `${ctxPct}% · ${fmtTokens(active?.totalTokens)}/${fmtTokens(ctxLimit)}` : ""}

@@ -5,6 +5,7 @@ import ThemePicker from "./ThemePicker";
 import AppIconPicker from "./AppIconPicker";
 import SettingsDesktopPrinter from "./SettingsDesktopPrinter";
 import SettingsAppUpdate from "./SettingsAppUpdate";
+import SettingsAgentPermission from "./SettingsAgentPermission";
 import { SettingsIcon } from "./SettingsIcons";
 
 // Keep the theme preference and picker implementation available for a later
@@ -50,6 +51,8 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
           <SettingsDesktopPrinter disabled={disabled} />
         </div>
       </section>
+
+      <SettingsAgentPermission cfg={cfg} onChange={onChange} disabled={disabled} />
 
       {/* Notifications — native macOS desktop notifications. */}
       <section className="settings-section" id="settings-notif">

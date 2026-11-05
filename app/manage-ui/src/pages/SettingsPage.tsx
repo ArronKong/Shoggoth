@@ -35,6 +35,7 @@ import { Field, Switch, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
 import { applyConfiguredLocale } from "../i18n";
 import { setTheme } from "../lib/theme";
+import { applyGlobalPermissionMode } from "../lib/globalPermissionMode";
 import { createSettingsLifecycleGuard } from "../lib/lowUiLifecycle";
 import { isLocalGatewayUrl, REMOTE_CONNECTIONS_ENABLED } from "../lib/connectionOptions";
 import {
@@ -106,6 +107,7 @@ const EMPTY: AppConfig = {
   hermesRemotes: [],
   hermesKeepAlive: true,
   disabledBackends: [],
+  chatPermissionMode: "auto-review",
   notifications: { chat: true, cron: true, task: true, proactive: true },
   setupCompletedAt: 0,
 };
@@ -233,6 +235,7 @@ export default function SettingsPage() {
         reconcile(saved);
         if ("theme" in patch) setTheme(saved.theme);
         if ("locale" in patch) await applyConfiguredLocale(saved.locale);
+        if ("chatPermissionMode" in patch) applyGlobalPermissionMode(saved.chatPermissionMode);
         window.dispatchEvent(new CustomEvent("openclaw:config-changed"));
         if (lifecycleGuard.isMounted() && ("gatewayUrl" in patch || "hermesMode" in patch || "hermesRemotes" in patch)) {
           const ids = ["gatewayUrl" in patch ? "openclaw" : "hermes"];

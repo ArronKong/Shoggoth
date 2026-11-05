@@ -47,15 +47,6 @@ const permissionTextKeys = new Map<string, string>([
   ["Allow workspace changes and ask before broader access.", "workspaceDescription"],
 ]);
 
-export function displayedPermissionMode(mode: string): string {
-  if (["request-approval", "auto-review", "full-access"].includes(mode)) return mode;
-  if (["full", "always-approve", "bypassPermissions", "danger-full-access"].includes(mode)) return "full-access";
-  // Legacy edit-only modes do not provide an approval reviewer. Keep their
-  // restrictions, without presenting the new reviewer as already selected.
-  if (mode === "auto") return "auto-review";
-  return "request-approval";
-}
-
 export function localizePermissionMode(option: ChatPermissionModeOption, t: TFunction): ChatPermissionModeOption {
   const translate = (text: string) => {
     const key = permissionTextKeys.get(text);

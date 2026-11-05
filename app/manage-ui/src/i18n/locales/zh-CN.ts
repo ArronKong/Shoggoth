@@ -976,6 +976,11 @@ const zhCN = {
       unavailable: "群聊服务暂不可用",
       refresh: "刷新",
     },
+    agentPermission: {
+      title: "Agent 权限",
+      description: "所有 Agent 对话统一使用这里的权限，不再在每个对话里单独选择。",
+      hint: "每个运行环境会自动对应到最接近的原生选项（例如 Hermes 只有「跟随配置」和「全部允许」）。修改后，从各对话的下一条消息开始生效。",
+    },
     browserUse: {
       engineVersion: "网页组件 v{{version}}",
       title: "网页操作",
@@ -3491,8 +3496,9 @@ const zhCN = {
       bypassDescription: "跳过所有权限检查。",
       workspaceDescription: "允许修改工作区，获取更广访问权限前询问。",
     },
-    permissionAppliesNextTurn: "会话级设置，将从下一轮开始生效",
-    permissionLegacyRetained: "此会话保留原有权限限制；选择任一选项后更新。",
+    permissionFromSettings: "所有 Agent 当前使用的权限：{{mode}}。可在「设置 → Agent 权限」中修改。",
+    permissionCurrentSession: "本会话目前为「{{mode}}」，发送下一条消息时会切换为设置中的权限。",
+    permissionSyncFailed: "无法应用设置中的权限，消息未发送：{{msg}}",
     availableCommands: "可用命令",
     currentModel: "**当前模型**：`{{model}}`\n\n用 `/model <id>` 切换；`/models` 查看全部。",
     notSet: "（未设置）",

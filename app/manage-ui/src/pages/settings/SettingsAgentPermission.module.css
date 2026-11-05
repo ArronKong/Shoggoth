@@ -1,0 +1,21 @@
+.options { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; }
+.option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  color: var(--ui-text-1);
+  cursor: pointer;
+}
+.option:hover, .active { background: var(--ui-surface-2); }
+.option input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.option:has(input:focus-visible) { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.option:has(input:disabled) { cursor: default; opacity: 0.6; }
+.copy { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; gap: 3px; }
+.name { font-size: 14px; line-height: 20px; }
+.option[data-risk="danger"] .name { color: var(--danger, #d14343); }
+.description { color: var(--settings-muted-surface-1); font-size: 12px; line-height: 18px; }
+.check { flex: none; width: 16px; text-align: center; }
+.hint { margin: 0; padding: 14px 0 18px; border-top: 1px solid var(--ui-hairline); color: var(--settings-muted-surface-1); font-size: 12px; line-height: 18px; }

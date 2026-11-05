@@ -322,13 +322,15 @@ assert.match(chatPage, /disabled=\{nativeModelSelectionDisabled\}/,
 assert.match(chatPage, /modelSelectionDisabled=\{nativeModelSelectionDisabled\}/,
   "沉浸模式必须复用同一空闲门禁");
 assert.match(chatPage, /activeCaps\?\.permissions\?\.options/,
-  "权限选择器必须从当前后端能力读取选项，不能写死全局列表");
-assert.match(chatPage, /<ChatPermissionMenu[\s\S]*?options=\{permissionOptions\}[\s\S]*?disabled=\{activeRunInFlight\}/,
-  "普通 composer 必须在固定工具栏位置渲染后端自适应权限选择器");
-assert.match(chatPage, /permissionOptions=\{permissionOptions\}[\s\S]*?permissionSelectionDisabled=\{activeRunInFlight\}/,
-  "沉浸 composer 必须复用同一权限选项和运行态门禁");
-assert.match(immersiveChat, /<ChatPermissionMenu[\s\S]*?appearance="dark"/,
-  "沉浸 composer 必须渲染权限选择器并使用暗色弹层");
+  "权限映射必须从当前后端能力读取选项，不能写死全局列表");
+assert.doesNotMatch(chatPage, /ChatPermissionMenu|permissionSelectionDisabled/,
+  "普通/沉浸 composer 不再提供单个对话的权限选择器，权限统一在设置中选择");
+assert.doesNotMatch(immersiveChat, /ChatPermissionMenu/,
+  "沉浸 composer 不再渲染权限选择器");
+assert.match(chatPage, /sessionPermissionModeFor\(await loadGlobalPermissionMode\(\), options\)/,
+  "发送前必须把设置中的权限映射到当前运行环境的原生选项");
+assert.match(chatPage, /await syncSessionPermission\(key\);\s*const prepared = await prepareChatInputForSend/,
+  "新回合发送前必须先应用设置中的权限，失败时不发送");
 assert.match(chatPage, /activeCaps\?\.modelScope[\s\S]*?model\.modelScopes\?\.includes\(activeCaps\.modelScope/,
   "共享 Shoggoth 模型目录必须优先按当前 Agent Profile 隔离");
 assert.match(chatPage, /activeCaps\?\.modelProvider[\s\S]*?models\.filter\(\(model\)\s*=>\s*model\.provider\s*===\s*activeCaps\.modelProvider\)/,

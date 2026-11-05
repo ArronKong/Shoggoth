@@ -27,6 +27,9 @@
 //   groupChatEnabled  固定为 true，兼容旧版设置读取。旧配置中的 false 不再生效。
 //   disabledBackends  backend id 列表（如 ["hermes"]）：用户在设置页「断开连接」
 //                  的后端。registry 聚合/路由跳过它们，UI 隐藏对应切换项。
+//   chatPermissionMode  "request-approval" | "auto-review" (default) | "full-access".
+//                  One Agent permission choice set in Settings. The chat UI maps it
+//                  onto each runtime's own options before every send.
 //   notifications  { chat, cron, task } per-category desktop-notification toggles
 //                  (all on by default; task also includes Inspiration)
 //   setupCompletedAt  epoch ms when the first-run setup overlay was completed or
@@ -63,6 +66,8 @@ const SUPPORTED_LOCALES = new Set(["", "zh-CN", "en"]);
 const APP_ICON_IDS = Object.freeze(["shoggoth-ip", "shoggoth-logo"]);
 const DEFAULT_APP_ICON = "shoggoth-ip";
 const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
+const CHAT_PERMISSION_MODES = Object.freeze(["request-approval", "auto-review", "full-access"]);
+const DEFAULT_CHAT_PERMISSION_MODE = "auto-review";
 // 窗口尺寸：默认值与下限都住在这里（schema 唯一源），main.js 直接消费这两个常量。
 const DEFAULT_WINDOW_BOUNDS = { width: 1728, height: 1117 };
 const MIN_WINDOW_BOUNDS = { width: 720, height: 560 };
@@ -279,6 +284,8 @@ function normalizeConfig(parsed) {
     groupChatEnabled: true,
     groupRuntimeHosts: normalizeGroupRuntimeHosts(p.groupRuntimeHosts),
     disabledBackends: sanitizeDisabledBackends(p.disabledBackends),
+    chatPermissionMode: CHAT_PERMISSION_MODES.includes(p.chatPermissionMode)
+      ? p.chatPermissionMode : DEFAULT_CHAT_PERMISSION_MODE,
     notifications: sanitizeNotifications(p.notifications),
     notificationPolicy: sanitizeNotificationPolicy(p.notificationPolicy),
     setupCompletedAt: Number.isFinite(p.setupCompletedAt) && p.setupCompletedAt > 0 ? p.setupCompletedAt : 0,
