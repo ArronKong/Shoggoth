@@ -5,6 +5,7 @@ import ChatPage from "../../app/manage-ui/src/pages/ChatPage";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
 import { FALLBACK_BACKEND_DESCRIPTORS } from "../../app/manage-ui/src/lib/backends";
+import { createChatReadStateFixture } from "./chat-read-state";
 import { readChatUnread } from "../../app/manage-ui/src/lib/chatUnread";
 import { runPageRefresh } from "../../app/manage-ui/src/lib/page-refresh";
 import i18n from "../../app/manage-ui/src/i18n";
@@ -16,6 +17,8 @@ const state = window as any;
 const options = new URLSearchParams(location.search);
 const language = options.get("language") || "zh-CN";
 const scenario = options.get("scenario") || "mixed";
+const sharedUnread = scenario === "unread-shared";
+const realFetch = window.fetch.bind(window);
 const cronResults = scenario.startsWith("cron-results-");
 const alphaBackend = cronResults ? scenario.split("-")[2] : "openclaw";
 const queued = scenario.startsWith("queued-");
@@ -122,7 +125,11 @@ class FixtureSocket {
   close() { this.readyState = 3; }
 }
 state.WebSocket = FixtureSocket;
+const readStateFixture = createChatReadStateFixture(scenario === "unread-baseline" ? now : now - minute);
 state.fetch = async (input: unknown, init: RequestInit = {}) => {
+  if (sharedUnread && ["/__api/chat-read-state", "/fixture/restart", "/fixture/availability"].includes(new URL(String(input), location.href).pathname)) return realFetch(String(input), init);
+  const readState = readStateFixture(input, init);
+  if (readState) return readState;
   const url = new URL(String(input), "http://fixture");
   if (sending && init.method === "POST" && url.pathname === "/__api/chat/secrets/prepare") {
     const body = JSON.parse(String(init.body));
@@ -156,6 +163,17 @@ state.fetch = async (input: unknown, init: RequestInit = {}) => {
 window.addEventListener("error", event => { state.fixtureError = event.error?.stack || event.message; });
 window.addEventListener("unhandledrejection", event => { state.fixtureError = String(event.reason); });
 localStorage.clear();
+if (sharedUnread) {
+  // Old cached dots are deliberately present in both independent browser profiles.
+  for (const row of sessions) {
+    row.updatedAt = now - minute;
+    for (const message of histories.get(row.key) || []) message.timestamp = now - minute;
+  }
+  if (options.has("longHistory")) histories.set(mainKey, Array.from({ length: 50 }, (_, index) => ({
+    id: `history-${index}`, role: index % 2 ? "assistant" : "user", timestamp: now - minute + index,
+    content: `UNREAD_SERVICE_HISTORY_${index}\n\n${"Historical conversation content. ".repeat(24)}`,
+  })));
+}
 let focused = true;
 if (scenario.startsWith("unread")) {
   Object.defineProperty(document, "hasFocus", { value: () => focused });
@@ -163,6 +181,8 @@ if (scenario.startsWith("unread")) {
   localStorage.setItem("shoggoth.chat.sessionUnread.v2", JSON.stringify({ since: now - minute, baseline: {}, read: {}, replies: {} }));
 }
 if (scenario === "unread-running") Object.assign(sessions.find(s => s.key === cronKey)!, { hasActiveRun: true, status: "running" });
+if (sharedUnread) localStorage.setItem("shoggoth.chat.sessionUnread.v2", JSON.stringify({ since: now - 30 * 86400000,
+  read: {}, replies: Object.fromEntries(sessions.map(row => [row.key, row.updatedAt])) }));
 if (scenario === "unread-baseline") {
   localStorage.removeItem("shoggoth.chat.sessionUnread.v2");
   localStorage.setItem("shoggoth.chat.readAt.v1", JSON.stringify({ [alpha]: now - 100 * minute }));
@@ -193,6 +213,22 @@ const select = async (key: string) => {
   await wait(() => document.querySelector('.session-menu button[title="' + key + '"]'), "session menu did not open");
   document.querySelector<HTMLButtonElement>('.session-menu button[title="' + key + '"]')!.click();
   await wait(() => document.querySelector(".chat-thread")?.textContent?.includes("History for " + key), "session history did not load");
+};
+if (sharedUnread) state.sharedUnreadFixture = {
+  ready: () => rows().length === 2 && !!JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3") || "{}").installationId,
+  badge: () => !!rows().find(row => row.title === alpha)?.querySelector(".chat-agent__unread-dot"),
+  stored: () => JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3") || "{}"),
+  read: () => rows().find(row => row.title === alpha)!.click(),
+  main: () => select(mainKey),
+  focus: () => window.dispatchEvent(new Event("focus")),
+  publish: (text: string, timestamp: number) => {
+    const message = { id: text, role: "assistant", content: text, timestamp };
+    histories.set(cronKey, [message]);
+    sessions.find(row => row.key === cronKey)!.updatedAt = timestamp;
+    state.socket.emit({ type: "event", event: "sessions.changed", payload: {} });
+    state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: cronKey, state: "final", message } });
+  },
+  key: cronKey,
 };
 createRoot(document.getElementById("root")!).render(
   <HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>,
@@ -415,7 +451,7 @@ async function runUnreadFixture() {
   histories.set(cronKey, [fresh]);
   state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: cronKey, state: "final", message: fresh } });
   await wait(() => document.querySelector(".chat-thread")?.textContent?.includes(fresh.content), "fresh reply missing");
-  await wait(() => JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v2")!).replies[cronKey] === fresh.timestamp,
+  await wait(() => JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3")!).replies[cronKey] === fresh.timestamp,
     "unfocused current session must preserve its unread watermark");
   check(!badge(), "the open session must not show a dot even before read acknowledgement");
   focused = true; window.dispatchEvent(new Event("focus"));
@@ -444,7 +480,7 @@ async function runUnreadFixture() {
   check(!menuBadge(cronKey), "reading one reminder must not be undone by a new reminder");
   document.querySelector<HTMLButtonElement>('.session-menu button[title="' + mainKey + '"]')!.click();
   stages.push("live UUID cron is discovered and independently unread");
-  const persisted = JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v2")!);
+  const persisted = JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3")!);
   check(persisted.replies[secondKey] > (persisted.read[secondKey] || persisted.since), "live unread must persist");
   // Reading a failed/empty history cannot acknowledge an unread message.
   histories.set(secondKey, []);
@@ -453,7 +489,7 @@ async function runUnreadFixture() {
     "empty-history session must finish opening before checking its badge");
   await pause(200);
   check(!badge(), "an open session must hide its dot even while history is empty");
-  const emptyRead = JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v2")!);
+  const emptyRead = JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3")!);
   check(emptyRead.replies[secondKey] > (emptyRead.read[secondKey] || emptyRead.since), "empty history must not acknowledge an unseen reply");
   histories.set(secondKey, [reply]);
   await select(mainKey);
@@ -461,7 +497,7 @@ async function runUnreadFixture() {
   await wait(() => document.querySelector(".chat-thread")?.textContent?.includes(reply.content), "second result missing");
   await wait(() => !badge(), "second reply not marked read");
   stages.push("empty history preserves unread until result is visible");
-  const canonicalRead = JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v2")!);
+  const canonicalRead = JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3")!);
   check(canonicalRead.read[secondKey] === reply.timestamp && canonicalRead.replies[secondKey] === reply.timestamp,
     "proxy emission timestamp must not become a permanent/future unread or read watermark");
   stages.push("proxy timestamps newer than canonical history never poison read/unread watermarks");
@@ -617,7 +653,7 @@ async function runCronResultsFixture() {
 async function runUnreadRunningFixture() {
   const stages: string[] = [];
   const badge = () => rows().find(row => row.title === alpha)?.querySelector('[role="img"]');
-  const stored = () => JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v2")!);
+  const stored = () => JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3")!);
   const emit = (key: string, status: string, message?: unknown) => state.socket.emit({ type: "event", event: "chat",
     payload: { sessionKey: key, state: status, message } });
   const change = () => state.socket.emit({ type: "event", event: "sessions.changed", payload: {} });
@@ -704,7 +740,7 @@ async function runUnreadBaselineFixture() {
   await wait(() => document.querySelector('.session-menu button[title="' + cronKey + '"]'), "old Cron entry missing");
   check(!document.querySelector('.session-menu [role="img"]'), "install must not light old session dots");
   document.querySelector<HTMLButtonElement>('.session-menu button[title="' + mainKey + '"]')!.click();
-  check(JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v2")!).since === now,
+  check(JSON.parse(localStorage.getItem("shoggoth.chat.sessionUnread.v3")!).since === now,
     "first Chat mount must retain the app-start cutoff");
   stages.push("v1 cached dots and old ordinary/Cron history stay quiet without opening each chat");
   rows().find(row => row.title === alpha)!.click();

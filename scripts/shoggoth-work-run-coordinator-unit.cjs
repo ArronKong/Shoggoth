@@ -4454,10 +4454,13 @@ test("原生 CLI 安装与兼容性错误穿透启动包装且不重复启动或
   }
 });
 
-test("turn_start 的上游暂时不可用错误穿透阶段包装且不自动重放", async () => {
- for (const errorCode of ["RUNTIME_UPSTREAM_UNAVAILABLE", "RUNTIME_ATTACHMENT_UNSUPPORTED", "RUNTIME_ATTACHMENT_RECOVERY_REQUIRED"]) {
+test("turn_start 的具体失败穿透阶段包装且不自动重放", async () => {
+ for (const errorCode of ["RUNTIME_UPSTREAM_UNAVAILABLE", "RUNTIME_ATTACHMENT_UNSUPPORTED", "RUNTIME_ATTACHMENT_RECOVERY_REQUIRED", "PI_TOOL_DESCRIPTION_TOO_LARGE", "PI_TOOL_CATALOG_TOO_LARGE"]) {
+  const error = codedError(errorCode);
+  if (errorCode === "PI_TOOL_DESCRIPTION_TOO_LARGE") error.failure = { message: "工具 memory_save 的说明超过 16384 字节。" };
+  if (errorCode === "PI_TOOL_CATALOG_TOO_LARGE") error.failure = { message: "Shoggoth 工具目录响应超过 262144 字节的传输上限。" };
   const value = await openFixture({
-    turnStartError: codedError(errorCode),
+    turnStartError: error,
     unreadableFreshThreadUntilTurnStart: true,
   });
   try {
@@ -4470,6 +4473,11 @@ test("turn_start 的上游暂时不可用错误穿透阶段包装且不自动重
     assert.equal(settled.status, "failed");
     assert.equal(settled.errorCode, errorCode);
     assert.equal(value.host.turnStartCalls, 1);
+    if (error.failure) {
+      const subscription = value.coordinator.subscribeRun(ack.run.id, { streamId: null, afterSeq: 0 }, () => {});
+      assert.deepEqual(subscription.events.find(event => event.type === "terminal")?.payload.failure, error.failure);
+      subscription.unsubscribe();
+    }
   } finally {
     await value.coordinator.close();
   }

@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-const VERSION = 27; // Checked against the Service at registration and packaging.
+const VERSION = 28; // Checked against the Service at registration and packaging.
 const MAX_FRAME = 64 * 1024;
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/u;
 

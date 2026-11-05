@@ -822,10 +822,11 @@ class AgentBackend {
   /**
    * Create a new session for the given agent.
    * @param {string} agentId
-   * @param {{model?: string, provider?: string, acpProviderRef?: string, workspace?: string|null}} [options]
+   * @param {{model?: string, provider?: string, acpProviderRef?: string, workspace?: string|null, requiredTransport?: "gateway"}} [options]
    *        optional session-scoped creation hints. model is always the raw model
    *        id; provider identity travels separately so ids containing `/` stay
    *        unambiguous. acpProviderRef is a transport-specific provider alias.
+   *        requiredTransport pins a backend-supported creation transport and rejects fallback.
    * @returns {string|Promise<string>} canonical new sessionKey. The proxy
    *   normalizes both forms so durable Service backends may finish persistence
    *   before publishing a key.

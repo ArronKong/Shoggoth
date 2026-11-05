@@ -26,6 +26,12 @@ const observationCases = [["native-active-recovery", "shoggoth"], ["native-activ
   ["legacy-unresolved", "shoggoth"], ["legacy-unavailable", "shoggoth"],
   ["legacy-accepted", "shoggoth"], ["legacy-late-accepted", "shoggoth"]];
 const observationOnly = process.argv.includes("--observation-only");
+const inspirationObservationOnly = process.argv.includes("--inspiration-observation-only");
+const inspirationObservationCases = [
+  ...["openclaw", "hermes"].flatMap(backend => ["", "-immersive"]
+    .map(suffix => [`observer-idle${backend === "hermes" ? "-failed" : ""}${suffix}`, backend])),
+  ["observer-idle-pending", "shoggoth"], ["observer-idle-terminal", "shoggoth"],
+];
 const ordinaryRecoveryOnly = process.argv.includes("--ordinary-recovery-only");
 const ordinaryRecoveryCases = ["live", "late-ack", "reload"].flatMap(kind => ["", "-immersive"]
   .map(suffix => [`ordinary-recovery-${kind}${suffix}`, "openclaw"]));
@@ -110,7 +116,7 @@ try {
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const window=new BrowserWindow({show:false,width:1080,height:920,webPreferences:{backgroundThrottling:false}});
 window.webContents.on("console-message",event=>{if(event.level==="error") console.error(event.message);});
-const cases=${JSON.stringify(ordinaryRecoveryOnly ? ordinaryRecoveryCases : slashOnly ? slashCases : upstreamOnly ? upstreamCases : observationOnly ? observationCases : bufferedOnly ? [["ordinary-buffered", "openclaw"], ["ordinary-buffered-immersive", "openclaw"]] : [["uncertain", "openclaw"], ["uncertain", "hermes"], ["uncertain", "shoggoth"], ["started", "openclaw"], ["restored", "openclaw"], ["restored", "hermes"], ["newer", "openclaw"], ["rejected", "openclaw"], ["rejected", "hermes"], ["ordinary", "hermes"], ["ordinary", "openclaw"], ["ordinary", "shoggoth"], ["accepted-error", "openclaw"], ["accepted-uncertain", "hermes"], ["stale-query", "openclaw"], ["reselect", "shoggoth"], ["terminal-race", "openclaw"], ["terminal-timeout", "hermes"], ["terminal-reload", "openclaw"], ["ordinary-upstream", "openclaw"], ["ordinary-receipt", "openclaw"], ["ordinary-buffered", "openclaw"], ["ordinary-buffered-immersive", "openclaw"], ...observationCases, ...upstreamCases, ...slashCases, ...ordinaryRecoveryCases])};
+const cases=${JSON.stringify(inspirationObservationOnly ? inspirationObservationCases : ordinaryRecoveryOnly ? ordinaryRecoveryCases : slashOnly ? slashCases : upstreamOnly ? upstreamCases : observationOnly ? observationCases : bufferedOnly ? [["ordinary-buffered", "openclaw"], ["ordinary-buffered-immersive", "openclaw"]] : [["uncertain", "openclaw"], ["uncertain", "hermes"], ["uncertain", "shoggoth"], ["started", "openclaw"], ["restored", "openclaw"], ["restored", "hermes"], ["newer", "openclaw"], ["rejected", "openclaw"], ["rejected", "hermes"], ["ordinary", "hermes"], ["ordinary", "openclaw"], ["ordinary", "shoggoth"], ["accepted-error", "openclaw"], ["accepted-uncertain", "hermes"], ["stale-query", "openclaw"], ["reselect", "shoggoth"], ["terminal-race", "openclaw"], ["terminal-timeout", "hermes"], ["terminal-reload", "openclaw"], ["ordinary-upstream", "openclaw"], ["ordinary-receipt", "openclaw"], ["ordinary-buffered", "openclaw"], ["ordinary-buffered-immersive", "openclaw"], ...observationCases, ...inspirationObservationCases, ...upstreamCases, ...slashCases, ...ordinaryRecoveryCases])};
 const rows=[];try{for(const [scenario,backend] of cases) {
   const testUrl=${JSON.stringify(url)}+"?scenario="+scenario+"&backend="+backend+"#/chat";
   await window.loadURL(testUrl);let row;

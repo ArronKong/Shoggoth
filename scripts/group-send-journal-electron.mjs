@@ -21,7 +21,7 @@ w.runJournalFixture=async(vectors:any[])=>{
   const checks:string[]=[],check=(label:string)=>checks.push(label);
   for(const vector of vectors)equal(canonicalGroupSendPayload(vector.input.groupId,vector.input),vector.canonical,'canonical server/client parity');check('canonical parity');
   const one=new GroupSendJournal(indexedDB,'journal-proof'),two=new GroupSendJournal(indexedDB,'journal-proof');
-  const composer={...emptyGroupComposer(),text:'first',files:[{id:'f',name:'file',status:'ready' as const,attachment:{id:'f',name:'file',mimeType:'text/plain',size:1}}]};
+  const composer={...emptyGroupComposer(),text:'first',sendTarget:{target:{kind:'member' as const,memberId:'b'},manual:true,afterSeq:null},files:[{id:'f',name:'file',status:'ready' as const,attachment:{id:'f',name:'file',mimeType:'text/plain',size:1}}]};
   let draft=await one.saveComposer('owner','g','draft',1,composer,0);
   const input={clientMessageId:'original',body:'first',mentions:[],attachments:[composer.files[0].attachment],ownerScope:'owner'};
   const frozen=await one.prepare('owner','g',input,draft);input.body='mutated';
@@ -39,6 +39,13 @@ w.runJournalFixture=async(vectors:any[])=>{
   equal(late.phase,'observed','late failure cannot downgrade accepted');check('ACK draft and monotonic receipt');
   await one.close();await two.close();const restarted=new GroupSendJournal(indexedDB,'journal-proof');
   const recovered=await restarted.read('owner','g');equal(recovered.sends[0].clientMessageId,'original','restart keeps original identity');equal(recovered.draft?.composer.text,changed.composer.text,'restart keeps revision');check('restart read-only recovery');
+  equal(recovered.draft?.composer.sendTarget,composer.sendTarget,'restart keeps selected recipient');check('recipient persistence');
+  const targetSession=new GroupDraftSession('owner','target-only',null,restarted);
+  targetSession.update(composer);const targetDraft=await targetSession.persist();
+  const targetSend=await restarted.prepare('owner','target-only',{clientMessageId:'target-original',body:composer.text,mentions:['b']},targetDraft);
+  targetSession.update({...composer,sendTarget:{target:{kind:'all'},manual:true,afterSeq:null}});await targetSession.persist();
+  equal(await targetSession.accepted(targetSend,{id:'target-ack',groupId:'target-only',seq:3}as any,'target-discussion'),false,'recipient-only edit increments draft revision');
+  equal((await restarted.read('owner','target-only')).draft?.composer.sendTarget?.target.kind,'all','old ACK retains new target');check('recipient-only revision');
   const scope=new GroupDraftSession('owner','g',recovered.draft,restarted);scope.update({...scope.composer,text:'sent A'});draft=await scope.persist();
   const a=await restarted.prepare('owner','g',{clientMessageId:'A',body:'sent A',mentions:[]},draft);
   scope.update({...scope.composer,text:'draft B'});await scope.persist();equal(await scope.accepted(a,{id:'ma',groupId:'g',seq:5}as any,'da'),false,'session preserves B');equal(scope.composer.text,'draft B','session text remains B');check('session revision');

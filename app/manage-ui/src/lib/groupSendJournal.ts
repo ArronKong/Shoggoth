@@ -8,9 +8,11 @@ export type GroupSendInput = {
   discussionId?: string; summaryMemberId?: string; expectedPolicyVersion?: number; ownerScope?: string;
 };
 export type ComposerFile = { id: string; name: string; status: "uploading" | "ready" | "error"; attachment: InspirationAttachment | null };
+export type GroupSendTarget = { kind: "owner" } | { kind: "all" } | { kind: "member"; memberId: string };
+export type GroupSendTargetLock = { target: GroupSendTarget; manual: boolean; afterSeq: number | null };
 export type GroupComposer = { text: string; mentionIds: string[]; replyTo: GroupChatMessage | null;
   replyTask: { id: string; objective: string } | null; requestRef: { id: string; label: string; mode: "append" | "replace" } | null;
-  newRequest: boolean; summaryMemberId: string; files: ComposerFile[] };
+  newRequest: boolean; summaryMemberId: string; files: ComposerFile[]; sendTarget?: GroupSendTargetLock | null };
 export type ComposerSnapshot = { version: 1; key: string; ownerScope: string; groupId: string; draftId: string;
   revision: number; storageRevision: number; composer: GroupComposer; updatedAt: number; detached?: true };
 export type SendPhase = "prepared" | "submitting" | "accepted_awaiting_echo" | "observed" | "rejected" | "needs_verification";
@@ -49,6 +51,10 @@ function validAttachment(value: unknown): value is InspirationAttachment {
 function validComposer(value: unknown): value is GroupComposer {
   const item = value as GroupComposer;
   return !!item && typeof item.text === "string" && Array.isArray(item.mentionIds) && item.mentionIds.every(part)
+    && (item.sendTarget == null || typeof item.sendTarget.manual === "boolean"
+      && (item.sendTarget.afterSeq === null || Number.isSafeInteger(item.sendTarget.afterSeq) && item.sendTarget.afterSeq >= 0)
+      && (item.sendTarget.target?.kind === "owner" || item.sendTarget.target?.kind === "all"
+        || item.sendTarget.target?.kind === "member" && part(item.sendTarget.target.memberId)))
     && typeof item.newRequest === "boolean" && typeof item.summaryMemberId === "string" && Array.isArray(item.files)
     && item.files.length <= 8 && item.files.every(file => file && part(file.id) && typeof file.name === "string"
       && ["uploading", "ready", "error"].includes(file.status) && (file.attachment === null || validAttachment(file.attachment)))

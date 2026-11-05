@@ -64,6 +64,64 @@ const openDetailsActions=async()=>{
 };
 const closeDetails=async()=>{(document.querySelector('[data-group-details-action=close]')as HTMLButtonElement).click();await wait(()=>!document.querySelector('[data-group-details]'),'group details closed')};
 mount('g');
+state.runRecipientFixture=async()=>{
+ const groupId='recipient';
+ views[groupId]={...base(groupId),currentOwnerId:'a',members:['a','b','c'].map((id,index)=>({...base(groupId).members[0],id,agentId:id,handle:id,position:index,
+  displayName:id==='b'?'Beta · 长名称用于窄窗口收件人布局测试':id==='c'?'Gamma':'Alpha'}))};
+ const memberMessage=(id:string)=>({id:'recipient-'+(++nextMessage),groupId,seq:nextMessage,threadId:'main',author:{kind:'member',memberId:id},body:'Reply from '+id,
+  mentions:{memberIds:[],broadcast:false,unresolved:[]},createdAt:1});
+ messages[groupId]=[memberMessage('b'),memberMessage('c')];
+ const target=()=>document.querySelector<HTMLButtonElement>('[data-group-send-target]')!;
+ const selected=()=>target()?.dataset.groupSendTarget;
+ const pick=async(id:string)=>{
+  target().click();await wait(()=>document.querySelector('[data-group-send-target-option="'+id+'"]'),'recipient option');
+  document.querySelector<HTMLButtonElement>('[data-group-send-target-option="'+id+'"]')!.click();
+  await wait(()=>selected()===id&&!document.querySelector('[data-group-send-target-option]'),'recipient picked');
+ };
+ const arrive=async(id:string)=>{messages[groupId].push(memberMessage(id));emitGroupChanged(groupId);await pause(250)};
+ const remount=async()=>{
+  mount('g');await wait(()=>document.body.textContent?.includes('Group g')&&textarea()&&!textarea().disabled,'leave recipient group');
+  mount(groupId);await wait(()=>document.body.textContent?.includes('Group recipient')&&textarea()&&!textarea().disabled,'restore recipient group');
+ };
+ const submit=async()=>{
+  const count=sends.length;send();await wait(()=>sends.length===count+1,'recipient message submitted');
+  const input=sends.at(-1).input;pending.shift().success();await wait(()=>textarea().value==='','recipient message accepted');return input;
+ };
+ mount(groupId);await wait(()=>selected()==='c'&&textarea()&&!textarea().disabled,'latest speaker selected');
+ await pick('b');await type('Draft for Beta');await remount();
+ equal([selected(),textarea().value],['b','Draft for Beta'],'saved draft keeps recipient');
+ await arrive('c');equal(selected(),'b','typing prevents a new speaker changing the recipient');
+ equal((await submit()).mentions,['b'],'selected recipient is submitted');equal(selected(),'b','send keeps selection until next member speaks');
+ await remount();equal(selected(),'b','post-send selection survives remount');
+ await arrive('c');await wait(()=>selected()==='c','next speaker resumes following');
+ const quote=Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(button=>button.textContent===i18n.t('groupChat.reply.action'));
+ if(!quote)throw Error('quote control missing');quote.click();await wait(()=>selected()==='b','quote picks source member');
+ await pick('owner');await type('Owner, review this');const ownerInput=await submit();
+ equal(ownerInput.mentions,['a'],'owner overrides quoted recipient');equal(ownerInput.replyTo,messages[groupId][0].seq,'quote remains attached');
+ await pick('all');await type('Everyone');equal((await submit()).mentions,['a','b','c'],'all members, owner first');
+ await pick('c');
+ for(const body of ['\x60\x60\x60text\n@unknown\n\x60\x60\x60','x'.repeat(32768)]){
+  await type(body);const input=await submit();equal(input.body,body,'recipient preserves original body');equal(input.mentions,['c'],'body retains recipient');
+ }
+ await arrive('c');await type('Removal draft');
+ views[groupId].members=views[groupId].members.map((member:any)=>member.id==='c'?{...member,state:'removed'}:member);
+ emitGroupChanged(groupId);await wait(()=>selected()==='b','removed last speaker falls back to earlier active speaker');
+ await arrive('a');equal(selected(),'b','fallback is held during a draft');
+ await type('');await pick('b');
+ const input=textarea(),chip=target(),inputBox=input.getBoundingClientRect(),chipBox=chip.getBoundingClientRect(),style=getComputedStyle(input);
+ if(inputBox.left+parseFloat(style.paddingLeft)+parseFloat(style.textIndent)<chipBox.right+3)throw Error('recipient overlaps input text');
+ if(chipBox.left<inputBox.left||chipBox.right>inputBox.right||chipBox.top<inputBox.top||chipBox.bottom>inputBox.bottom)throw Error('recipient outside input');
+ target().click();await wait(()=>document.querySelector('[data-group-send-target-option]'),'keyboard menu open');
+ equal(document.activeElement?.getAttribute('data-group-send-target-option'),'b','menu focuses selected recipient');
+ document.activeElement!.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true}));
+ equal(document.activeElement?.getAttribute('data-group-send-target-option'),'all','End reaches all');
+ document.activeElement!.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+ await wait(()=>!document.querySelector('[data-group-send-target-option]'),'Escape closes menu');equal(document.activeElement===textarea(),true,'Escape returns focus');
+ equal(document.documentElement.scrollWidth<=innerWidth+1,true,'recipient has no horizontal overflow');
+ state.openRecipientMenu=async()=>{target().click();await wait(()=>document.querySelector('[data-group-send-target-option]'),'recipient menu screenshot')};
+ return{passed:true,draftAndPostSendPersistence:true,quoteAndOwner:true,all:true,markdownAndFullBudget:true,removedMemberFallback:true,keyboard:true,
+  chipWidth:chipBox.width,textIndent:parseFloat(style.textIndent)};
+};
 state.runPanelFixture=async()=>{
  const checks:string[]=[];await wait(()=>textarea()&&!textarea().disabled,'panel ready');
  await type('send A');send();await wait(()=>sends.length===1,'A dispatched');
@@ -123,6 +181,7 @@ await w.loadURL('about:blank');w.webContents.debugger.attach('1.3');await w.webC
 await w.loadFile(${JSON.stringify(path.join(temp,"index.html"))},{query:{language,theme}});await w.webContents.executeJavaScript('window.baseline=${baseline}');
 const result=await w.webContents.executeJavaScript('window.runPanelFixture()');result.width=width;results.push(result);console.log(JSON.stringify(result));
 if(${Boolean(output)}){fs.writeFileSync(${JSON.stringify(output)}+'/pending-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());await w.webContents.executeJavaScript('window.openPendingDetails()');await new Promise(resolve=>setTimeout(resolve,30));if(await w.webContents.executeJavaScript('document.documentElement.scrollWidth>innerWidth+1'))throw Error('expanded journal horizontal overflow');fs.writeFileSync(${JSON.stringify(output)}+'/pending-details-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG())}
+if(!${baseline}){result.recipient=await w.webContents.executeJavaScript('window.runRecipientFixture()');if(${Boolean(output)}){fs.writeFileSync(${JSON.stringify(output)}+'/recipient-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());await w.webContents.executeJavaScript('window.openRecipientMenu()');fs.writeFileSync(${JSON.stringify(output)}+'/recipient-menu-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG())}}
 w.destroy();w=null;}
 if(results.length!==cases.length)throw Error('incomplete visual case matrix');fs.writeFileSync(${JSON.stringify(path.join(temp,"complete.json"))},JSON.stringify({cases:results.length,passed:true}));
 if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/results.json',JSON.stringify(results,null,2));ok=true;

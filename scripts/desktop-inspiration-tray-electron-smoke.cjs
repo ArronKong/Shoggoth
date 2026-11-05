@@ -99,6 +99,7 @@ if (!process.versions.electron) {
       if (process.platform === "darwin") {
         const bounds = controller.getTrayBounds();
         assert.ok(bounds.width > 0 && bounds.height > 0, "macOS must allocate a menu bar status item");
+        assert.equal(tray.getIgnoreDoubleClickEvents(), true, "macOS must deliver each left click to the open-window handler");
       }
       tray.emit("click");
       assert.equal(main.isVisible(), true, "tray click shows the real main window");

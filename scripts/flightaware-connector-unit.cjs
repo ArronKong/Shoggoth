@@ -158,8 +158,8 @@ test("actual Electron runs the bundled Python CLI directly from app.asar with co
   const fixture = createFlightawareFixture(); let client;
   try {
     const asar = await import("@electron/asar"), source = path.join(fixture.root, "mini-app"), service = path.join(source, "app", "agent-service"), core = path.join(source, "app", "core");
-    fs.mkdirSync(service, { recursive: true, mode: 0o700 }); fs.mkdirSync(core, { recursive: true, mode: 0o700 });
-    for (const name of ["flightaware-cli.py", "flightaware-mcp-bridge.js", "flightaware-mcp-launch.js", "flightaware-runtime.js", "mcp-package-launcher.js", "security.js"]) fs.copyFileSync(path.join(__dirname, "../app/agent-service", name), path.join(service, name));
+    fs.mkdirSync(path.join(service, "data"), { recursive: true, mode: 0o700 }); fs.mkdirSync(core, { recursive: true, mode: 0o700 });
+    for (const name of ["flightaware-cli.py", "flightaware-mcp-bridge.js", "flightaware-mcp-launch.js", "flightaware-runtime.js", "mcp-package-launcher.js", "security.js", "data/mcp-bundled-bridge-versions.json"]) fs.copyFileSync(path.join(__dirname, "../app/agent-service", name), path.join(service, name));
     fs.copyFileSync(path.join(__dirname, "../app/core/flightaware-connector-policy.json"), path.join(core, "flightaware-connector-policy.json"));
     const archive = path.join(fixture.root, "app.asar"); await asar.createPackage(source, archive);
     client = new StdioMcpClient({ command: require("electron"), args: [path.join(archive, "app", "agent-service", "flightaware-mcp-bridge.js")], cwd: fixture.root }, { env: fixture.env, secretEnv: { [KEY_FIELD]: KEY }, trustedEnv: { ELECTRON_RUN_AS_NODE: "1" }, trustedFlightawareBridge: true });

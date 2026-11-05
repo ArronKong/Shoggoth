@@ -274,7 +274,7 @@ const {
   rejectSymlink,
   serviceError,
 } = require("./security");
-const { SERVICE_PROTOCOL_VERSION: PROTOCOL_VERSION } = require("./service-protocol-version");
+const { SERVICE_PROTOCOL_VERSION: PROTOCOL_VERSION, INSPIRATION_HISTORY_MAX_RESPONSE_BYTES } = require("./service-protocol-version");
 const { createExternalProviderCredentialRpc } = require("./external-provider-credential-rpc");
 const { createExternalProviderWriterVerifier } = require("./external-provider-credential-writer");
 
@@ -3394,10 +3394,10 @@ function createAgentService(options) {
     return result;
   }
 
-  function writeResponse(socket, payload, close = true) {
+  function writeResponse(socket, payload, close = true, maxFrameBytes = MAX_FRAME_BYTES) {
     if (socket.destroyed) return;
     let frame = `${JSON.stringify(payload)}\n`;
-    if (Buffer.byteLength(frame) > MAX_FRAME_BYTES) {
+    if (Buffer.byteLength(frame) > maxFrameBytes) {
       const safeId = jsonlBytes(payload?.id) <= 256 ? payload?.id ?? null : null;
       frame = `${JSON.stringify({
         id: safeId,
@@ -4771,7 +4771,8 @@ function createAgentService(options) {
       agents: result.agents.map(item => ({ ...item, profile: publicProfile(item.profile) })) };
     else if ((AGENT_LIFECYCLE_METHOD_SET.has(request.method) || PROFILE_SERVICE_METHOD_SET.has(request.method))
       && result.profile) result = { ...result, profile: publicProfile(result.profile) };
-    writeResponse(socket, { id, ok: true, result });
+    const maxFrameBytes = request.method === "inspiration.executions" ? INSPIRATION_HISTORY_MAX_RESPONSE_BYTES : MAX_FRAME_BYTES;
+    writeResponse(socket, { id, ok: true, result }, true, maxFrameBytes);
     if (request.method === "service.stop") {
       setImmediate(() => { void api.stop().catch(reportStopFailure); });
     }

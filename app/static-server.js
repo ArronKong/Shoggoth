@@ -35,6 +35,7 @@ const { ModelChangeError } = require("./core/model-change-validation");
 const { ModelChangeJournalError } = require("./core/model-change-journal");
 const { HermesCatalogUnavailableError } = require("./core/hermes-backend");
 const { WorkAdmissionError } = require("./core/work-admission-gate");
+const { createChatReadStateStore } = require("./core/chat-read-state-store");
 const { createNativeRuntimeConfigController } = require("./core/native-runtime-config-controller");
 const { createNativeMemoryConfigController } = require("./core/native-memory-config-controller");
 const { NATIVE_MEMORY_CONFIG_PUBLIC_MESSAGES } = require("./agent-service/native-memory-config-protocol");
@@ -1007,6 +1008,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     nativeMemoryConfigController,
     nativeMemorySharingConfigController,
     avatarPool,
+    chatReadStateStore,
   } = deps;
   const method = req.method || "GET";
   let rawPath = pathname;
@@ -1743,6 +1745,25 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       } catch (error) {
         const safe = memoryProviderOwnerProtocol.publicError(error);
         return sendJson(res, safe.code === "MEMORY_OWNER_INVALID" ? 400 : 409, { code: safe.code, error: safe.message });
+      }
+    }
+
+    // App-level read receipts are shared across browser profiles and backends.
+    // They never mutate a conversation or dispatch work to an Agent.
+    if (segs[0] === "chat-read-state" && segs.length === 1) {
+      if (!["GET", "POST"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+      if (method === "POST" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+      if (!chatReadStateStore) return sendJson(res, 503, { code: "CHAT_READ_STATE_UNAVAILABLE", error: "Read state unavailable" });
+      try {
+        const state = method === "POST" ? chatReadStateStore.merge(await readJsonBody(req)) : chatReadStateStore.read();
+        const unchanged = method === "GET" && requestUrl.searchParams.get("installationId") === state.installationId
+          && requestUrl.searchParams.get("revision") === String(state.revision);
+        return sendJson(res, 200, { state: unchanged ? null : state });
+      } catch (error) {
+        const code = ["CHAT_READ_STATE_INVALID", "CHAT_READ_STATE_STALE"].includes(error?.code)
+          ? error.code : "CHAT_READ_STATE_UNAVAILABLE";
+        return sendJson(res, code === "CHAT_READ_STATE_INVALID" ? 400 : code === "CHAT_READ_STATE_STALE" ? 409 : 503,
+          { code, error: "Read state unavailable" });
       }
     }
 
@@ -4073,8 +4094,16 @@ function startStaticServer(
     userDataRoot,
     packaged = false,
     resourcesPath = process.resourcesPath,
+    chatReadStateStore,
   } = {},
 ) {
+  // Development/isolated servers have their own config root. Never fall back to
+  // the real user's root when a fixture did not provide one.
+  if (!chatReadStateStore && configStore?.path) {
+    chatReadStateStore = createChatReadStateStore({ trustedRoot: path.dirname(configStore.path),
+      directory: `${path.basename(configStore.path)}.ui-state` });
+  }
+  try { chatReadStateStore?.ensure(); } catch { /* The API stays unavailable; never reset damaged state. */ }
   const assetPaths = resolveDesktopAssetPaths({ homeDir, userDataRoot });
   const avatarPool = createDefaultAgentAvatarPool(assetPaths, {
     hasCustomAvatar: (agentId) => Boolean(resolveCustomAgentAvatarFile(agentId, assetPaths)),
@@ -4093,6 +4122,7 @@ function startStaticServer(
     configStore,
     hostOps,
     attachmentRevealer,
+    chatReadStateStore,
     productHost,
     managedOpenClawHost,
     managedHermesHost,

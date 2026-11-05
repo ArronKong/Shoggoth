@@ -38,6 +38,10 @@ const messages = [message(1, { kind: "user" }, "帮我整理群聊样式优化�
 if (scene === "files") messages.push(message(2, { kind: "member", memberId: "alpha" },
   "已整理好建议，文档在这里：\n\n[群聊样式优化.md](/Users/preview/workspace/群聊样式优化.md)\n\n重点是保留回复正文、简化等待状态，以及合并重复的文件入口。", [report, checklist]));
 else messages.push(message(2, { kind: "member", memberId: "alpha" }, "我会从消息层级和阅读节奏两方面整理建议。"));
+if (scene === "scroll") {
+  for (let seq = 3; seq <= 122; seq++) messages.push(message(seq, { kind: "member", memberId: "alpha" },
+    `历史消息 ${seq}\n\n` + "检查群聊中长消息的阅读位置和返回底部行为。\n\n".repeat(2 + seq % 5)));
+}
 const activity = (id: string): any => ({ groupId: "g", discussionId: "d", memberId: id, opportunityId: id + "-turn", taskId: null,
   attemptId: null, phase: "tool", eventSeq: 1, lastProgressAt: now, recentTools: [], tool: { id: "tool-" + id,
     name: "exec_command", input: { command: "node scripts/check-chat-ui.mjs", title: "检查消息渲染" },
@@ -67,13 +71,87 @@ document.documentElement.setAttribute("data-theme", options.get("theme") || "lig
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider />
   <GroupChatPanel groupId="g" onArchived={() => {}} /></UiProvider></HashRouter>);
 
+const runScrollFixture = async (timeline: HTMLElement) => {
+  const jump = () => document.querySelector<HTMLButtonElement>("[data-group-jump-latest]");
+  const gap = () => timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop;
+  const paint = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  await paint();
+  check(gap() <= 2 && !jump(), "long group history opens at the bottom without a jump button");
+  timeline.scrollTop = timeline.scrollHeight / 2;
+  await wait(jump, "scrolling up reveals the latest-message button");
+  await paint();
+  const position = timeline.scrollTop;
+  const button = jump()!, composer = document.querySelector<HTMLElement>("[data-chat-composer]")!;
+  const streamBounds = timeline.getBoundingClientRect(), composerBounds = composer.getBoundingClientRect();
+  const headerBounds = document.querySelector<HTMLElement>(".chat-header")!.getBoundingClientRect();
+  const buttonBounds = button.getBoundingClientRect();
+  check(button.textContent?.includes(i18n.t("chat.latestMessage")), "button uses the existing latest-message translation");
+  check(buttonBounds.bottom <= composerBounds.top,
+    "jump button remains above the composer");
+  check(streamBounds.top < headerBounds.top && streamBounds.bottom > composerBounds.bottom,
+    "messages extend beneath both floating docks instead of ending above the jump button");
+  check(timeline.contains(document.elementFromPoint(buttonBounds.left - 12, buttonBounds.top + buttonBounds.height / 2)),
+    "the transparent space beside the jump button passes input to the message stream");
+  const streamStyle = getComputedStyle(timeline);
+  check(streamStyle.maskImage.includes("linear-gradient") && streamStyle.getPropertyValue("--chat-fade").trim() === "36px",
+    "the stream uses the shared top and bottom fade");
+  check(Math.abs(Number.parseFloat(streamStyle.getPropertyValue("--chat-fade-bottom")) - (streamBounds.bottom - composerBounds.top)) <= 1,
+    "the bottom fade ends at the composer, leaving messages visible behind the jump button");
+  messages.push(message(123, { kind: "member", memberId: "alpha" }, "阅读历史期间到达的新消息。"));
+  view.group.lastSeq = 123; emitGroupChanged("g");
+  await wait(() => timeline.querySelector('[data-seq="123"]'), "new group message arrives");
+  await paint();
+  check(Math.abs(timeline.scrollTop - position) <= 2 && jump(), "new messages preserve the reader's position and jump button");
+  button.click();
+  await wait(() => gap() <= 2 && !jump(), "one click reaches the latest message and hides the button");
+  await paint();
+  check(gap() <= 2, "removing the button leaves the timeline at the bottom");
+  messages.push(message(124, { kind: "member", memberId: "alpha" }, "回到底部后自动跟随的新消息。\n\n".repeat(8)));
+  view.group.lastSeq = 124; emitGroupChanged("g");
+  await wait(() => timeline.querySelector('[data-seq="124"]'), "next group message arrives");
+  await paint();
+  check(gap() <= 2 && !jump(), "jumping to latest restores automatic following");
+  const textarea = composer.querySelector<HTMLTextAreaElement>("textarea")!;
+  const setDraft = (value: string) => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const composerHeight = composer.offsetHeight;
+  setDraft("输入框增高后，最新回复仍完整显示。\n".repeat(12));
+  await wait(() => composer.offsetHeight > composerHeight, "composer grows with a multiline draft");
+  await paint();
+  check(gap() <= 2 && !jump(), "a taller composer preserves the latest-message position");
+  const clearance = timeline.getBoundingClientRect().bottom - composer.getBoundingClientRect().top;
+  check(Math.abs(Number.parseFloat(timeline.style.getPropertyValue("--chat-fade-bottom")) - clearance) <= 1,
+    "fade boundary follows composer height changes");
+  setDraft("");
+  await wait(() => composer.offsetHeight === composerHeight, "composer returns to its resting height");
+  await paint();
+  timeline.scrollTop = 0;
+  await wait(jump, "jump button returns when reading older history");
+  timeline.scrollTop = timeline.scrollHeight;
+  await wait(() => !jump(), "manually scrolling to the bottom also hides the button");
+  const root = document.getElementById("root")!;
+  root.style.display = "none";
+  await paint();
+  root.style.display = "flex";
+  await paint();
+  await wait(() => gap() <= 2 && !jump(), "returning from a hidden page restores latest-message positioning");
+  // Place a message behind the control to make an opaque dock or a hard cut visible.
+  const previewMessage = timeline.querySelector<HTMLElement>('[data-seq="64"] .chat-bubble')!;
+  timeline.scrollTop += previewMessage.getBoundingClientRect().top - (composer.getBoundingClientRect().top - 100);
+  await wait(jump, "preview shows the latest-message button");
+};
+
 const runFixture = async () => {
   await wait(() => document.querySelector('[data-seq="2"]') && document.querySelector('[data-chat-composer] textarea:not(:disabled)'), "panel ready");
   const timeline = document.querySelector<HTMLElement>("[data-group-timeline]")!;
   if (!GROUP_QUIET_BASELINE) {
     check(!timeline.querySelector("[data-group-activity]"), "discussion and tool activity stay out of message bubbles");
     check(!timeline.textContent?.includes("node scripts/check-chat-ui.mjs"), "tool arguments stay out of the quiet conversation");
-    if (scene === "waiting") {
+    if (scene === "scroll") {
+      await runScrollFixture(timeline);
+    } else if (scene === "waiting") {
       check(timeline.querySelectorAll('[data-group-execution] .chat-bubble [role="status"]').length === 2, "each working member has the single-chat loader");
     } else if (scene === "streaming") {
       const draft = timeline.querySelector('[data-group-reply-message="two"] .chat-md')!;

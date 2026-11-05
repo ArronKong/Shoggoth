@@ -14,7 +14,9 @@ export interface InspirationAgentDockHandle {
 }
 const identity = (agent: InspirationDockAgent) => JSON.stringify([agent.backendId, agent.id]);
 
-export default forwardRef<InspirationAgentDockHandle, { active: boolean }>(function InspirationAgentDock({ active }, ref) {
+// `onPick` opens the same dock for a click choice (a card's send button) instead of a drop.
+export default forwardRef<InspirationAgentDockHandle, { active: boolean; onPick?: (agent: InspirationDockAgent) => void;
+  onCancel?: () => void }>(function InspirationAgentDock({ active, onPick, onCancel }, ref) {
   const { t } = useTranslation();
   const track = useRef<HTMLDivElement>(null);
   const cached = useRef<InspirationDockAgent[] | null>(null);
@@ -60,21 +62,39 @@ export default forwardRef<InspirationAgentDockHandle, { active: boolean }>(funct
       }),
   }), [prepare, byIdentity]);
 
+  useEffect(() => {
+    if (!active || !onCancel) return;
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') onCancel(); };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
+  }, [active, onCancel]);
+
   if (!active) return null;
-  return createPortal(<aside className={styles.dock} data-inspiration-agent-dock aria-label={t('inspiration.agentDock.label')}>
+  const picking = Boolean(onPick);
+  const labelOf = (agent: InspirationDockAgent) => `${agent.name}${agent.capabilities.execute ? ''
+    : ` · ${t(agent.capabilities.reason === 'backend-unavailable' ? 'inspiration.unavailable' : 'inspiration.unsupported')}`}`;
+  return createPortal(<>
+    {picking && <div className={styles.scrim} aria-hidden="true" onClick={onCancel} />}
+    <aside className={styles.dock} data-inspiration-agent-dock data-picking={picking || undefined} aria-label={t('inspiration.agentDock.label')}>
     <div className={styles.track} ref={track} data-inspiration-agent-scroll role="list" aria-label={t('inspiration.agentDock.label')}>
-      {agents?.map(agent => <div key={identity(agent)} role="listitem" className={styles.agent}
-        data-inspiration-agent-target={identity(agent)} aria-disabled={!agent.capabilities.execute || undefined}
-        aria-label={`${agent.name} · ${agent.backendName}${agent.capabilities.execute ? ''
-          : ` · ${t(agent.capabilities.reason === 'backend-unavailable' ? 'inspiration.unavailable' : 'inspiration.unsupported')}`}`}
-        title={`${agent.name} · ${agent.backendName} · ${t('inspiration.agentDock.executions', { count: agent.executionCount })}`}>
-        <AgentAvatarView agentId={agent.id} name={agent.name} className={styles.avatar}
-          fallback={Array.from(agent.name).slice(0, 2).join('').toUpperCase()} />
-        <span className={styles.dropHint} data-inspiration-drop-hint role="status">{t('inspiration.agentDock.dropHint')}</span>
-      </div>)}
+      {agents?.map(agent => {
+        const face = <>
+          <AgentAvatarView agentId={agent.id} name={agent.name} className={styles.avatar}
+            fallback={Array.from(agent.name).slice(0, 2).join('').toUpperCase()} />
+          <span className={styles.name}>{agent.name}</span>
+        </>;
+        return <div key={identity(agent)} role="listitem" className={styles.agent}
+          data-inspiration-agent-target={identity(agent)} aria-disabled={!agent.capabilities.execute || undefined}
+          aria-label={picking ? undefined : labelOf(agent)}
+          title={`${agent.name} · ${t('inspiration.agentDock.executions', { count: agent.executionCount })}`}>
+          {picking ? <button type="button" className={styles.pick} disabled={!agent.capabilities.execute}
+            aria-label={labelOf(agent)} onClick={() => onPick?.(agent)}>{face}</button> : face}
+          <span className={styles.dropHint} data-inspiration-drop-hint role="status">{t('inspiration.agentDock.dropHint')}</span>
+        </div>;
+      })}
       {(!agents || agents.length === 0) && <p className={styles.empty} role="status">{t(agents ? 'inspiration.noAgent'
         : failed ? 'inspiration.agentDock.failed' : 'inspiration.agentDock.loading')}</p>}
     </div>
-    <p className={styles.dragHint} role="status">{t('inspiration.agentDock.dragHint')}</p>
-  </aside>, document.body);
+    <p className={styles.dragHint} role="status">{t(picking ? 'inspiration.agentDock.pickHint' : 'inspiration.agentDock.dragHint')}</p>
+  </aside></>, document.body);
 });

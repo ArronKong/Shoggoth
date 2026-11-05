@@ -5986,6 +5986,8 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
   const expected = new Map([
     ["RUNTIME_AUTH_REQUIRED", "当前 Agent 登录验证失败，请前往「模型」检查账号状态或重新登录后重试"],
     ["RUNTIME_AUTH_STATUS_UNAVAILABLE", "暂时无法读取 Agent 登录状态，请稍后重试"],
+    ["PI_TOOL_DESCRIPTION_TOO_LARGE", "Pi 无法加载 Shoggoth 工具，因为工具说明超出大小限制。本次消息未发送。请更新 Shoggoth 后重试。"],
+    ["PI_TOOL_CATALOG_TOO_LARGE", "Pi 无法加载 Shoggoth 工具，因为工具目录超出传输容量。本次消息未发送。"],
     ["CODEX_NATIVE_AUTH_READ_FAILED", "暂时无法读取本机 Codex 登录状态，请稍后重试"],
     ["CODEX_RUNTIME_CLEANUP_INCOMPLETE", "Codex 登录检查进程未能完成清理，请重启 Shoggoth 后台服务后重试"],
     ["RUNTIME_PERMISSION_REQUIRED", "当前权限不允许 Agent 执行所需操作，请检查会话的工作区和权限设置后重试"],
@@ -6025,6 +6027,11 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
   ]);
   for (const [errorCode, message] of expected) {
     const errors = [];
+    const failure = errorCode === "PI_TOOL_DESCRIPTION_TOO_LARGE"
+      ? { message: "工具 memory_save 的说明为 16386 字节，上限为 16384 字节。Pi 启动退出码为 1。" }
+      : errorCode === "PI_TOOL_CATALOG_TOO_LARGE"
+      ? { message: "Shoggoth 工具目录响应超过 262144 字节的传输上限。Pi 启动退出码为 1。" }
+      : null;
     await backend._settleTerminal({
       key: `agent:shoggoth-default:${SESSION_A}`,
       sessionKey: SESSION_A,
@@ -6034,8 +6041,8 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
       generation: backend._generation,
     }, {
       text: "", reasoning: "", settled: false, lastStatus: "starting",
-    }, run("failed", { id: `run-${errorCode}`, errorCode }));
-    assert.deepEqual(errors, [message], errorCode);
+    }, run("failed", { id: `run-${errorCode}`, errorCode }), failure ? { failure } : undefined);
+    assert.deepEqual(errors, [failure ? `${message}\n启动详情：${failure.message}\n错误码：${errorCode}` : message], errorCode);
   }
 });
 

@@ -25,6 +25,7 @@ const realApi = moduleFrom('../app/manage-ui/src/api/mcpConnectors.ts', name => 
   assert.equal(name, './client'); return { jsonFetch() { throw Error('Unexpected real network request'); } };
 }, { URLSearchParams, Event });
 const helpers = moduleFrom('../app/manage-ui/src/lib/mcpConnectorUi.ts', uiRequire);
+const catalog = moduleFrom('../app/manage-ui/src/lib/mcpRecommendationCatalog.ts', uiRequire);
 const now = Date.now();
 function request(id, patch = {}) {
   return { requestId: id, kind: 'secret', serverId: 'mcp-local', registryName: null, url: null,
@@ -35,16 +36,29 @@ function request(id, patch = {}) {
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function fixture() {
   let servers = [{ id: 'mcp-local', name: 'Fixture server', status: 'ready' }];
-  const rows = new Map(), reads = [], submissions = [], storageWrites = [], timers = new Map(), listeners = new Map(); let timerId = 0, completeBehavior = async input => {
+  let search = async () => ({ items: [] });
+  const rows = new Map(), reads = [], searches = [], submissions = [], storageWrites = [], timers = new Map(), listeners = new Map(); let timerId = 0, completeBehavior = async input => {
     for (const [scope, items] of rows) rows.set(scope, items.map(item => item.requestId === input.requestId ? { ...item, status: 'completed' } : item));
     return { status: 'completed' };
   };
-  const storage = { getItem() { return null; }, setItem(...args) { storageWrites.push(args); }, removeItem(...args) { storageWrites.push(args); } };
-  const browser = { localStorage: storage, sessionStorage: storage, addEventListener(name, fn) { (listeners.get(name) || listeners.set(name, new Set()).get(name)).add(fn); }, removeEventListener(name, fn) { listeners.get(name)?.delete(fn); } };
+  const savedValues = new Map(), uiTimers = new Map();
+  const storage = {
+    getItem(key) { return savedValues.get(key) ?? null; },
+    setItem(key, value) { storageWrites.push([key, value]); savedValues.set(key, value); },
+    removeItem(key) { storageWrites.push([key]); savedValues.delete(key); },
+  };
+  const browser = {
+    localStorage: storage, sessionStorage: storage,
+    addEventListener(name, fn) { (listeners.get(name) || listeners.set(name, new Set()).get(name)).add(fn); },
+    removeEventListener(name, fn) { listeners.get(name)?.delete(fn); },
+    setTimeout(fn) { const id = ++timerId; uiTimers.set(id, fn); return id; },
+    clearTimeout(id) { uiTimers.delete(id); },
+  };
+  const stickyState = moduleFrom('../app/manage-ui/src/lib/useStickyState.ts', uiRequire, { window: browser });
   const api = { MCP_CHANGE_EVENT: 'fixture-mcp-changed', formatMcpError: realApi.formatMcpError,
     async listMcpRequests(input) { reads.push(clone(input)); return { items: clone(rows.get(input.sessionKey) || []) }; },
     async listMcpConnectors() { return { revision: 1, servers: clone(servers) }; },
-    async searchMcpRegistry() { throw Error('Not used in single-field lifecycle test'); },
+    async searchMcpRegistry(query, cursor, signal) { searches.push(query); return search(query, signal); },
     async completeMcpRequest(input) { submissions.push(clone(input)); return completeBehavior(input); },
   };
   // The visual shell is replaced because react-test-renderer has no DOM portal.
@@ -54,26 +68,35 @@ function fixture() {
   const mod = moduleFrom('../app/manage-ui/src/components/McpConnectionRequests.tsx', name => {
     if (name === 'react') return React;
     if (name === 'react/jsx-runtime') return uiRequire(name);
-    if (name === 'react-i18next') return { useTranslation: () => ({ t: translate }) };
+    if (name === 'react-i18next') return { useTranslation: () => ({ t: translate, i18n: { resolvedLanguage: 'zh-CN' } }) };
     if (name === '../api/mcpConnectors') return api;
     if (name === '../lib/mcpConnectorUi') return helpers;
+    if (name === '../lib/mcpRecommendationCatalog') return catalog;
+    if (name === '../lib/useStickyState') return stickyState;
+    if (name === './McpConnectorIcon') return { __esModule: true, default: ({ iconId, identity }) => React.createElement('span', { 'data-icon': iconId || identity }) };
     if (name === './Modal') return { __esModule: true, default: Modal };
     if (name === '../pages/McpConnectorDialog') return { __esModule: true, default: props => React.createElement('div', { 'data-setup-dialog': true, ...props }) };
     if (name.endsWith('.module.css')) return { __esModule: true, default: {} };
     throw Error('Unexpected component dependency: ' + name);
-  }, { document: { visibilityState: 'visible' }, window: browser, localStorage: storage, sessionStorage: storage,
+  }, { document: { visibilityState: 'visible' }, window: browser, localStorage: storage, sessionStorage: storage, URL,
     setInterval(fn) { const id = ++timerId; timers.set(id, fn); return id; }, clearInterval(id) { timers.delete(id); } });
   let mounted;
   const props = (sessionKey, extra = {}) => ({ backendId: 'shoggoth', agentId: 'agent-a', sessionKey, visible: true, ...extra });
   // Production ChatPage keys both ordinary and immersive instances by session.
   const host = (mode, sessionKey, extra) => React.createElement('section', { 'data-mode': mode }, React.createElement(mod.default, { key: `${mode}:${sessionKey}`, ...props(sessionKey, extra) }));
-  return { rows, reads, submissions, storageWrites, setServers(value) { servers = value; }, setBehavior(value) { completeBehavior = value; },
+  return { rows, reads, searches, submissions, storageWrites, setServers(value) { servers = value; },
+    setSearch(value) { search = value; }, setBehavior(value) { completeBehavior = value; },
     get root() { return mounted.root; }, get json() { return mounted.toJSON(); },
     async mount(mode, session, extra = {}) { await Renderer.act(async () => { mounted = Renderer.create(host(mode, session, extra)); }); },
     async change(mode, session, extra = {}) { await Renderer.act(async () => { mounted.update(host(mode, session, extra)); }); },
     async event(fn) { await Renderer.act(async () => { fn(); await Promise.resolve(); await Promise.resolve(); }); },
     async tick() { await Renderer.act(async () => { for (const callback of [...timers.values()]) callback(); }); },
-    async close() { if (mounted) await Renderer.act(async () => mounted.unmount()); assert.equal(timers.size, 0); for (const set of listeners.values()) assert.equal(set.size, 0); },
+    pagehide() { for (const callback of listeners.get('pagehide') || []) callback(); },
+    async close() {
+      if (mounted) await Renderer.act(async () => mounted.unmount());
+      assert.equal(timers.size, 0);
+      assert.equal(listeners.get(api.MCP_CHANGE_EVENT)?.size || 0, 0);
+    },
   };
 }
 function button(f, label) { const found = f.root.findAllByType('button').find(node => text(node.props.children) === label); assert.ok(found, `Missing button ${label}`); return found; }
@@ -159,6 +182,90 @@ for (const mode of ['normal', 'immersive']) {
   } finally { await f.close(); }
 }
 assert.equal(realApi.formatMcpError({code:'MCP_REQUEST_PRIVATE_CHAT_REQUIRED',message:'private-canary'},translate),resources['zh-CN'].privateOnly);
+{
+  const f = fixture();
+  const registryName = 'io.github.variflight/variflight-mcp';
+  const entry = { registryName, version: '1.1.0', name: registryName };
+  try {
+    f.setServers([]);
+    f.rows.set('connect', [request('add-flight', { kind: 'connection', serverId: null, registryName, title: registryName, requiredFields: [] })]);
+    await f.mount('normal', 'connect');
+    assert.match(text(f.json), /飞常准.*查询航班/);
+    assert.ok(f.root.findByProps({ 'data-icon': 'variflight' }));
+    assert.equal(f.root.findAllByProps({ role: 'dialog' }).length, 0);
+    await f.event(() => button(f, resources['zh-CN'].add).props.onClick());
+    assert.equal(f.root.findAllByProps({ 'data-setup-dialog': true }).length, 0);
+    assert.ok(f.root.findByProps({ role: 'alert' }));
+    f.setSearch(async () => ({ items: [{ registryName: 'other/flight' }, entry] }));
+    await f.event(() => button(f, resources['zh-CN'].add).props.onClick());
+    const dialog = f.root.findByProps({ 'data-setup-dialog': true });
+    assert.deepEqual(dialog.props.item, entry);
+    assert.equal(f.root.findAllByProps({ role: 'dialog' }).length, 0, 'Add opens the shared setup dialog directly');
+    assert.deepEqual(f.searches, [registryName, registryName]);
+    assert.deepEqual(f.submissions, []);
+    f.setBehavior(async () => { throw { code: 'MCP_SERVER_PROBE_FAILED' }; });
+    await f.event(() => dialog.props.onReady({ id: 'flight-registry', status: 'ready' }));
+    assert.equal(f.root.findByProps({ 'data-setup-dialog': true }).props.connectionRequest.error, resources['zh-CN'].errors.probe);
+    assert.deepEqual(f.submissions, [{ requestId: 'add-flight', serverId: 'flight-registry' }]);
+    scenarios++;
+  } finally { await f.close(); }
+}
+{
+  const f = fixture();
+  const registryName = 'io.github.variflight/variflight-mcp';
+  const connection = id => request(id, { kind: 'connection', serverId: null, registryName, requiredFields: [] });
+  const first = connection('dismiss-flight');
+  const pending = deferred();
+  let lookupSignal;
+  try {
+    f.setServers([]);
+    f.setSearch((_, signal) => { lookupSignal = signal; return pending.promise; });
+    f.rows.set('dismiss', [first, request('credential-card')]);
+    await f.mount('normal', 'dismiss');
+    await f.event(() => button(f, resources['zh-CN'].add).props.onClick());
+    assert.equal(lookupSignal.aborted, false);
+    const close = () => f.root.findByProps({ 'aria-label': '关闭飞常准连接请求' });
+    await f.event(() => close().props.onClick());
+    assert.equal(lookupSignal.aborted, true, 'closing stops an in-flight setup lookup');
+    pending.resolve({ items: [{ registryName }] });
+    await f.tick();
+    assert.equal(f.root.findAllByProps({ 'data-setup-dialog': true }).length, 0);
+    assert.equal(text(f.json).includes('飞常准'), false);
+    assert.ok(text(f.json).includes('Fixture credential-card'));
+    f.pagehide();
+    const [[storageKey, stored]] = f.storageWrites;
+    assert.equal(storageKey, 'shoggoth.ui.v1');
+    assert.deepEqual(JSON.parse(stored).values, { 'chat.dismissedMcpConnectionRequests': [first.requestId] });
+    await f.change('immersive', 'dismiss');
+    assert.equal(text(f.json).includes('飞常准'), false, 'switching layout keeps this request hidden');
+    f.rows.set('dismiss', [first, connection('another-flight')]);
+    await f.tick();
+    await f.event(() => close().props.onClick());
+    assert.equal(f.root.findAllByType('h3').length, 0, 'the new request can appear and be closed independently');
+    assert.deepEqual(f.submissions, [], 'closing must not complete a request');
+    scenarios++;
+  } finally { await f.close(); }
+}
+{
+  const f = fixture();
+  const url = 'https://mcp.example.test/flights';
+  const server = (id, endpoint) => ({ id, name: id, source: { kind: 'custom' }, transport: { kind: 'remote', url: endpoint }, status: 'ready' });
+  try {
+    f.setServers([server('unrelated', 'https://mcp.example.test/other'), server('account-a', url), server('account-b', url + '?account=b')]);
+    f.rows.set('existing', [request('reuse-flight', { kind: 'connection', serverId: null, url, requiredFields: [] })]);
+    await f.mount('immersive', 'existing');
+    await f.event(() => button(f, resources['zh-CN'].add).props.onClick());
+    const dialog = () => f.root.findByProps({ 'data-setup-dialog': true });
+    assert.equal(dialog().props.server.id, 'account-a');
+    assert.deepEqual(dialog().props.connectionRequest.servers.map(item => item.id), ['account-a', 'account-b']);
+    assert.deepEqual(f.submissions, [], 'opening never binds an existing connection by itself');
+    await f.event(() => dialog().props.connectionRequest.onSelect('account-b'));
+    assert.equal(dialog().props.server.id, 'account-b');
+    await f.event(() => dialog().props.onReady(dialog().props.server));
+    assert.deepEqual(f.submissions, [{ requestId: 'reuse-flight', serverId: 'account-b' }]);
+    scenarios++;
+  } finally { await f.close(); }
+}
 for (const mode of ['normal', 'immersive']) {
   const f = fixture(); try {
     f.setServers([{ id: 'mcp-key', name: 'API connector', status: 'needsSetup' }, { id: 'mcp-login', name: 'OAuth connector', status: 'signedOut' }]);

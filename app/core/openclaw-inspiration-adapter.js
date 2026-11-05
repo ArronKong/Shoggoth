@@ -204,11 +204,10 @@ class OpenClawInspirationAdapter {
     return this.backend.request(method, params, 15000);
   }
 
-  async _prepareGroupPermission(sessionKey) {
-    if (this.sessionPurpose !== "group") return;
+  async _prepareFullAccess(sessionKey) {
     const result = await this._request("sessions.patch", { key: sessionKey, permissionMode: "full" }, "operator.admin");
     if (result?.entry?.permissionMode !== "full" || result.key !== sessionKey) {
-      throw failure("OPENCLAW_GROUP_PERMISSION_UNCONFIRMED");
+      throw failure(this.sessionPurpose === "group" ? "OPENCLAW_GROUP_PERMISSION_UNCONFIRMED" : "OPENCLAW_INSPIRATION_PERMISSION_UNCONFIRMED");
     }
   }
 
@@ -226,7 +225,7 @@ class OpenClawInspirationAdapter {
     if (typeof agentId !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/u.test(agentId)
       || (!sessionKey && !string(sessionId, 128))) throw failure("OPENCLAW_EXECUTION_IDENTITY_INVALID");
     await this._ready();
-    if (this.sessionPurpose === "group") this._require("sessions.patch", "operator.admin");
+    if (this.sessionPurpose === "group" || !sessionKey) this._require("sessions.patch", "operator.admin");
     // A run can ask a question or request execution approval at any time.
     const ledger = this._hasLedger();
     for (const method of Object.keys(METHOD_SCOPES)) {
@@ -261,7 +260,7 @@ class OpenClawInspirationAdapter {
         if (!idle) throw failure("OPENCLAW_GROUP_PERMISSION_UNCONFIRMED");
       }
       if (modelSelection !== undefined) await this.backend.applyGroupSessionModel(agentId, sessionKey, modelSelection);
-      await this._prepareGroupPermission(sessionKey);
+      if (this.sessionPurpose === "group") await this._prepareFullAccess(sessionKey);
       return { sessionKey, workspace: resolved, mode: "openclaw" };
     }
     const suffix = createHash("sha256").update(sessionId).digest("hex");
@@ -275,7 +274,7 @@ class OpenClawInspirationAdapter {
       throw failure("OPENCLAW_SESSION_IDENTITY_MISMATCH");
     }
     if (modelSelection !== undefined) await this.backend.applyGroupSessionModel(agentId, sessionKey, modelSelection);
-    await this._prepareGroupPermission(sessionKey);
+    await this._prepareFullAccess(sessionKey);
     return { sessionKey, workspace: resolved, mode: "openclaw" };
   }
 

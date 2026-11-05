@@ -5,6 +5,7 @@ import s from "./AppleDeviceConnectors.module.css";
 import c from "../pages/ConnectorsPage.module.css";
 import Modal from "./Modal";
 import ConnectorTools from "./ConnectorTools";
+import { ConnectorConnectionHeading, ConnectorFooter, ConnectorInfo } from "./ConnectorDetails";
 import { useConfirm } from "./ui";
 import { usePendingConnectors } from "../lib/usePendingConnectors";
 import calendarIcon from "../assets/apple-app-icons/calendar.png";
@@ -88,6 +89,7 @@ export function AppleDeviceRows({ model, installed }: { model: Model; installed:
   const available = !!status?.available && !loadError;
   const stage = (id: AppleDeviceResource) => { try { pending.add(`device:${id}`); setStorageError(false); } catch { setStorageError(true); } setSelected(id); };
   const resource = selected ? status?.resources.find(item => item.id === selected) || unconnected(selected) : null;
+  const isAdded = resource && added(resource);
   const name = resource ? tr(`resources.${resource.id}.name`) : "";
   const connected = available && resource?.enabled && resource.authorization === "fullAccess";
   const authorization = available ? resource?.authorization || "unavailable" : "unavailable";
@@ -96,7 +98,14 @@ export function AppleDeviceRows({ model, installed }: { model: Model; installed:
   const connectionAction = resource && (authorization === "denied" ? <button type="button" className="btn-dark btn-sm" disabled={disabled} onClick={() => void mutate(resource.id, () => openAppleDeviceSettings(resource.id))}>{tr(busy === resource.id ? "working" : "settings")}</button>
     : !connected ? <button type="button" className="btn-dark btn-sm" disabled={disabled || authorization === "restricted"} onClick={() => status && void mutate(resource.id, () => connectAppleDevice(resource.id, status.revision))}>{tr(busy === resource.id ? "working" : "connect")}</button>
     : <button type="button" className="btn-dark btn-sm" disabled={!!busy} onClick={() => setSelected(null)}>{t("mcpConnectors.flow.done")}</button>);
-  const footer = resource && <div className={c.flowFooter}><p>{t(connected ? "mcpConnectors.flow.connectedHint" : "mcpConnectors.defaultAccess")}</p><div className={c.flowFooterActions}>{!added(resource) ? <button type="button" className="btn-dark btn-sm" onClick={() => stage(resource.id)}>{t("mcpConnectors.add")}</button> : connectionAction}</div></div>;
+  const remove = async () => {
+    if (!resource || !await confirm({ title: t("mcpConnectors.flow.remove"), message: tr("disconnectFor", { name }), confirmLabel: t("mcpConnectors.flow.remove"), danger: true })) return;
+    if (resource.enabled && !await policy(resource, { enabled: false })) return;
+    try { pending.remove(`device:${resource.id}`); setStorageError(false); setSelected(null); } catch { setStorageError(true); }
+  };
+  const footer = resource && <ConnectorFooter hint={t(connected ? "mcpConnectors.flow.connectedHint" : "mcpConnectors.defaultAccess")} onRemove={isAdded ? () => void remove() : undefined} removeDisabled={!!busy}>
+    {!isAdded ? <button type="button" className="btn-dark btn-sm" onClick={() => stage(resource.id)}>{t("mcpConnectors.add")}</button> : connectionAction}
+  </ConnectorFooter>;
   return <>{resources.map(id => {
     const entry = status?.resources.find(item => item.id === id) || unconnected(id);
     if (added(entry) !== installed) return null;
@@ -107,13 +116,15 @@ export function AppleDeviceRows({ model, installed }: { model: Model; installed:
   {installed && resource && <Modal open title={<span className={c.dialogIdentity}><DeviceIcon resource={resource.id} />{name}</span>} onClose={() => setSelected(null)} dismissible={!busy} width={640} variant="connector" subtitle={tr(`resources.${resource.id}.description`)} footer={footer}>
     <article className={c.detail} data-resource={resource.id} aria-label={name}>
       <ConnectorTools overview description={tr(`resources.${resource.id}.description`)} items={operations[resource.id].map(([operation, label]) => ({ name: `apple_${resource.id}_${operation}`, description: tr(`approvalActions.${label}`) }))} />
-      {!added(resource) ? <section className={c.connectionPanel}><div className={c.connectionHeading}><h3>{t("mcpConnectors.flow.connectionTitle", { name })}</h3><span className={c.status}>{t("mcpConnectors.flow.notAdded")}</span></div><p className={c.muted}>{t("mcpConnectors.flow.addHint")}</p></section> : <>
-        <section className={c.connectionPanel}><div className={c.connectionHeading}><h3>{t(connected ? "mcpConnectors.flow.connectionStatus" : "mcpConnectors.flow.setup")}</h3><span className={c.status} data-state={currentState} role="status">{added(resource) ? tr(`states.${currentState}`) : t("mcpConnectors.flow.notAdded")}</span></div><p className={c.muted}>{t("mcpConnectors.flow.deviceSetup")}</p>
+      <section className={c.connectionPanel}>
+        <ConnectorConnectionHeading title={t(!isAdded ? "mcpConnectors.flow.connectionTitle" : connected ? "mcpConnectors.flow.connectionStatus" : "mcpConnectors.flow.setup", { name })}
+          status={<span className={c.status} data-state={isAdded ? currentState : undefined} role="status">{isAdded ? tr(`states.${currentState}`) : t("mcpConnectors.flow.notAdded")}</span>} />
+        <p className={c.muted}>{t(isAdded ? "mcpConnectors.flow.deviceSetup" : "mcpConnectors.flow.addHint")}</p>
+        <p className={c.muted}>{tr("privacy")}</p>
+        {isAdded && <>
           {(loadError || status && !status.available) && <p role="status" className={c.notice}>{tr("unavailable")} <button type="button" className={c.textButton} disabled={!!busy || loading} onClick={() => void refresh()}>{tr("retry")}</button></p>}
           {authorization !== "fullAccess" && authorization !== "notDetermined" && authorization !== "unavailable" && <p className={c.notice}>{tr(`hints.${authorization}`)}</p>}
-
-        </section>
-        <details className={c.management}><summary>{t("mcpConnectors.flow.devicePermissions")}</summary><div className={s.policies}>
+        <details className={c.clientSetup}><summary>{t("mcpConnectors.flow.devicePermissions")}</summary><div className={s.policies}>
           <label className={s.policy}><span>{tr("reading")}</span><select aria-label={tr("readFor", { name })} value={resource.readPolicy} disabled={policyDisabled || !resource.enabled} onChange={event => void policy(resource, { readPolicy: event.target.value as AppleDeviceReadPolicy })}>
             <option value="allow">{tr("readPolicies.allow")}</option><option value="ask">{tr("readPolicies.ask")}</option><option value="deny">{tr("readPolicies.deny")}</option>
           </select></label>
@@ -122,15 +133,11 @@ export function AppleDeviceRows({ model, installed }: { model: Model; installed:
           </select></label>
         </div><p className={c.muted}>{tr(`writeHints.${resource.writePolicy}`)}</p>
         </details>
-        <details className={c.management}><summary>{t("mcpConnectors.flow.manage")}</summary><button type="button" className="btn-danger btn-sm" disabled={!!busy} onClick={() => void (async () => {
-          if (!await confirm({ title: t("mcpConnectors.flow.remove"), message: tr("disconnectFor", { name }), confirmLabel: t("mcpConnectors.flow.remove") })) return;
-          if (resource.enabled && !await policy(resource, { enabled: false })) return;
-          try { pending.remove(`device:${resource.id}`); setStorageError(false); setSelected(null); } catch { setStorageError(true); }
-        })()}>{t("mcpConnectors.flow.remove")}</button></details>
-      </>}
+        </>}
+      </section>
       {actionError && <p className={c.error} role="alert">{tr(`errors.${actionError}`)}</p>}
       {storageError && <p className={c.error} role="alert">{t("mcpConnectors.flow.storageError")}</p>}
-      <details className={c.management}><summary>{t("mcpConnectors.flow.help")}</summary><p className={c.muted}>{tr("privacy")}</p></details>
+      <ConnectorInfo developer="Apple" />
     </article>
   </Modal>}
   </>;

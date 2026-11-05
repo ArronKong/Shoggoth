@@ -414,6 +414,15 @@ export interface ChatCacheScope {
   cacheScope: string;
 }
 
+/** App-owned read acknowledgements; history remains owned by its backend. */
+export interface ChatReadState {
+  version: 1;
+  installationId: string;
+  since: number;
+  revision: number;
+  read: Record<string, number>;
+}
+
 // 服务端斜杠命令目录（GET /__api/chat/slash?agent=）。
 export interface SlashCatalogResponse {
   supported: boolean;
@@ -3423,6 +3432,10 @@ export interface InspirationExecution {
   workspace: string | null; sessionKey: string | null; sessionHref?: string | null; ideaRevision: number;
   createdAt: number; retryOf: string | null; status: InspirationStatus;
   resultSummary: string | null; errorCode: string | null; finishedAt: number | null;
+  /** What the user asked for in this round; present on an idea's execution history. */
+  instruction?: string | null;
+  /** The Service can continue this native product conversation in the same workspace. */
+  reusableSession?: boolean;
   attention: { request: InteractiveRequestV1; active: boolean; occurredAt: number;
     command?: string | null; cwd?: string | null; details?: string | null } | null;
 }
@@ -3438,6 +3451,8 @@ export interface InspirationIdea {
   archivedAt: number | null; acceptedAt: number | null; createdAt: number; updatedAt: number;
   restoredAt?: number;
   status: InspirationStatus; latestExecution: InspirationExecution | null;
+  /** Every round of this idea and the agents that ran them, in first-use order. */
+  rounds?: { count: number; agents: Array<{ backendId: string; agentId: string }> };
 }
 export interface InspirationPageResult {
   items: InspirationIdea[]; total: number; hasMore: boolean; nextCursor: string | null;

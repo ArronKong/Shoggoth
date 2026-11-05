@@ -8,7 +8,7 @@ const { outputFiles } = await build({ entryPoints: [new URL("../app/manage-ui/sr
 const module = { exports: {} };
 vm.runInNewContext(outputFiles[0].text, { module, exports: module.exports });
 const { readChatUnread, writeChatUnread, sessionReadAt, hasUnreadReply, observeSessionReply,
-  readSessionThrough, supportsSessionUnread } = module.exports;
+  readSessionThrough, supportsSessionUnread, mergeSharedChatReadState } = module.exports;
 const values = new Map();
 const storage = { getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };
 const a = "agent:alpha:main", b = "agent:alpha:cron:reminder", c = "agent:beta:main";
@@ -77,7 +77,7 @@ for (const key of [a, b, nativeCron]) {
     "late discovery cannot resurrect old cached or unobserved history: " + key);
 }
 // Bootstrap persists the cutoff before ChatPage opens or its first reply arrives.
-assert.equal(JSON.parse(values.get("shoggoth.chat.sessionUnread.v2")).since, 5000);
+assert.equal(JSON.parse(values.get("shoggoth.chat.sessionUnread.v3")).since, 5000);
 state = readChatUnread(storage, 6000);
 assert.equal(state.since, 5000, "opening Chat later must retain the app-start cutoff");
 state = observeSessionReply(state, b, 5500);
@@ -96,7 +96,7 @@ writeChatUnread(storage, state);
 assert.equal(hasUnreadReply(readChatUnread(storage, 8000), b), false);
 
 // Persisted reads older than the cutoff cannot lower it for any session kind.
-values.set("shoggoth.chat.sessionUnread.v2", JSON.stringify({ since: 5000,
+values.set("shoggoth.chat.sessionUnread.v3", JSON.stringify({ since: 5000,
   read: { [a]: 50, [b]: 100, invalid: "bad" }, replies: { [a]: 4900, [b]: 4999 } }));
 state = readChatUnread(storage, 9000);
 assert.equal(sessionReadAt(state, a), 5000);
@@ -104,9 +104,33 @@ assert.equal(sessionReadAt(state, b), 5000);
 assert.equal(hasUnreadReply(state, a), false);
 assert.equal(hasUnreadReply(state, b), false);
 assert.equal(state.read.invalid, undefined);
-values.set("shoggoth.chat.sessionUnread.v2", "corrupt");
+values.set("shoggoth.chat.sessionUnread.v3", "corrupt");
 state = readChatUnread(storage, 10000);
 assert.equal(state.since, 10000, "corrupt storage recovers without showing old history");
 const blockedStorage = { getItem() { throw Error("blocked"); }, setItem() { throw Error("blocked"); } };
 assert.equal(readChatUnread(blockedStorage, 11000).since, 11000, "unavailable storage does not block chat");
 console.log("PASS unread migration: one-time cutoff, old cached dots, delayed Chat visit, restart, new reminders and unavailable storage");
+
+// Different browser profiles share the App cutoff and read receipts.
+const shared = { version: 1, installationId: "install-a", since: 5000, revision: 0, read: {} };
+values.clear();
+values.set("shoggoth.chat.sessionUnread.v2", JSON.stringify({ since: 1, read: {}, replies: { [a]: 4900 } }));
+state = mergeSharedChatReadState(readChatUnread(storage, 9000), shared);
+assert.equal(state.since, 5000, "opening another browser does not move the install cutoff");
+state = observeSessionReply(state, a, 4900);
+assert.equal(hasUnreadReply(state, a), false, "legacy history predating the shared cutoff stays quiet");
+state = observeSessionReply(state, a, 5100);
+assert.equal(hasUnreadReply(state, a), true, "new messages before this browser's first visit still count");
+state = mergeSharedChatReadState(state, { ...shared, revision: 1, read: { [a]: 5100 } });
+assert.equal(hasUnreadReply(state, a), false, "reading in the App clears the browser's dot");
+state = readSessionThrough(state, b, 5300);
+state = mergeSharedChatReadState(state, shared);
+assert.equal(state.read[a], 5100, "a late snapshot cannot undo another client's acknowledgement");
+assert.equal(state.read[b], 5300, "a late snapshot cannot undo an unsent local acknowledgement");
+state = observeSessionReply(state, a, 5400);
+assert.equal(hasUnreadReply(state, a), true, "a truly newer reply remains unread");
+state = mergeSharedChatReadState(state, { ...shared, installationId: "install-b", since: 6000 });
+assert.deepEqual(Object.keys(state.read), []);
+assert.deepEqual(Object.keys(state.replies), []);
+assert.equal(state.since, 6000, "another data root never inherits reads or cutoff from the old root");
+console.log("PASS shared unread: old cache retirement, first app cutoff, cross-client reads, late snapshots and data-root isolation");

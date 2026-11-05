@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createRequire } from "node:module";
+import { bundledBridgeVersions, loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
 import ts from "../app/manage-ui/node_modules/typescript/lib/typescript.js";
 
 const uiRequire = createRequire(new URL("../app/manage-ui/package.json", import.meta.url));
@@ -16,6 +17,7 @@ function load(relative, customRequire) {
 }
 const helpers = load("../app/manage-ui/src/lib/mcpConnectorUi.ts", uiRequire);
 const catalog = load("../app/manage-ui/src/lib/mcpRecommendationCatalog.ts", uiRequire);
+const connectorDetails = loadConnectorDetails();
 const resources = load("../app/manage-ui/src/i18n/mcpConnectorResources.ts", uiRequire).mcpConnectorResources;
 assert.ok(catalog.mcpRecommendationOrder.includes("ticketmaster"));
 
@@ -33,6 +35,8 @@ for (const language of ["zh-CN", "en"]) {
     startMcpSignIn: async () => assert.fail("Ticketmaster must not attempt OAuth"),
   };
   const component = load("../app/manage-ui/src/pages/McpConnectorDialog.tsx", name => {
+    if (name === "../components/ConnectorDetails") return connectorDetails;
+    if (name === "../../../agent-service/data/mcp-bundled-bridge-versions.json") return bundledBridgeVersions;
 
  if (['../components/McpConnectorIcon','../components/ConnectorTools'].includes(name)) return {__esModule:true,default:()=>null};
     if (name === "react") return React;

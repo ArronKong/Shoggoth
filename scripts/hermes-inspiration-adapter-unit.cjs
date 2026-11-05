@@ -83,7 +83,16 @@ function fakeBackend(mode = "gateway") {
 async function running(mode = "gateway") {
   const backend = fakeBackend(mode);
   const adapter = new HermesInspirationAdapter({ backend, now: () => 900 });
-  const prepared = await adapter.prepare({ agentId, sessionId: "intent-1", workspace: null });
+  let sessionKey;
+  if (mode === "acp") {
+    // Existing ACP conversations retain their original settings and transport.
+    sessionKey = await backend.createSession(agentId, { workspace: null });
+    backend.acpSessionByKey.set(sessionKey, { profile: "fixture", acpSessionId: sessionKey.split(':').at(-1) });
+    backend._httpGetJson = async () => ({ status: 200, json: {
+      id: sessionKey.split(':').at(-1), profile: "fixture", source: "acp", cwd: "/fixture/actual-workspace",
+    } });
+  }
+  const prepared = await adapter.prepare({ agentId, sessionId: "intent-1", workspace: null, ...(sessionKey ? { sessionKey } : {}) });
   const input = { ...prepared, agentId, runId: "run-1", prompt: "fixture prompt" };
   const snapshots = [];
   const started = adapter.start(input, (value) => snapshots.push(value));
@@ -99,9 +108,28 @@ test("prepare freezes the actual workspace and deduplicates the caller identity"
   const [first, second] = await Promise.all([adapter.prepare(input), adapter.prepare(input)]);
   assert.deepEqual(first, second);
   assert.equal(first.workspace, "/fixture/actual-workspace");
-  assert.equal(backend.calls.length, 1);
-  assert.deepEqual(backend.calls[0][2], { workspace: null, freezeWorkspace: true });
+  assert.equal(backend.calls.filter(call => call[0] === "create").length, 1);
+  assert.deepEqual(backend.calls[0][2], { workspace: null, freezeWorkspace: true, requiredTransport: "gateway" });
+  assert.deepEqual(backend.calls.filter(call => call[0] === "permission"), [["permission", first.sessionKey, { key: "yolo", value: "1" }]]);
   await assert.rejects(adapter.prepare({ ...input, workspace: "/other" }), /CONFLICT/);
+});
+
+test("new inspiration requires confirmed session YOLO and never silently accepts ACP", async () => {
+  for (const variant of ["acp", "profile-scope", "ignored", "wrong-key", "replaced", "endpoint-changed"]) {
+    const backend = fakeBackend(variant === "acp" ? "acp" : "gateway");
+    backend._sessionConfigSet = async () => {
+      if (variant === "replaced") backend._lifecycleGeneration++;
+      if (variant === "endpoint-changed") backend.dash = { ...backend.dash };
+      return { result: { key: variant === "wrong-key" ? "model" : "yolo", value: variant === "ignored" ? "0" : "1",
+        scope: variant === "profile-scope" ? "global" : "session" }, scope: "session" };
+    };
+    const adapter = new HermesInspirationAdapter({ backend });
+    const input = { agentId, sessionId: variant };
+    await assert.rejects(adapter.prepare(input), /HERMES_INSPIRATION_PERMISSION/);
+    await assert.rejects(adapter.prepare(input), /HERMES_INSPIRATION_PERMISSION/);
+    assert.equal(backend.calls.filter(call => call[0] === "create").length, 1);
+    assert.equal(backend.calls.some(call => call[0] === "send"), false);
+  }
 });
 
 test("group preparation enables session YOLO for new and existing idle sessions without a model call", async () => {
@@ -591,6 +619,25 @@ test("real backend rejects an ignored workspace before exposing its session", as
   await assert.rejects(backend.createSession(agentId, { workspace: "/wanted", freezeWorkspace: true }), /工作目录/);
   assert.equal(backend.freshSessionKeys.size, 0);
   assert.deepEqual(calls, ["session.create", "session.close"]);
+});
+
+test("real backend pins new inspiration to Gateway and confirms session-only YOLO", async () => {
+  const calls = [];
+  const backend = actualBackend("gateway", async (method, params) => {
+    calls.push([method, params]);
+    if (method === "session.create") return { session_id: "runtime", stored_session_id: "stored", info: { cwd: "/fixture/default" } };
+    if (method === "session.cwd.set") return { cwd: params.cwd };
+    if (method === "config.set") return { scope: "session", key: params.key, value: params.value };
+    throw new Error(`Unexpected ${method}`);
+  });
+  const adapter = new HermesInspirationAdapter({ backend });
+  const prepared = await adapter.prepare({ agentId, sessionId: "full-access" });
+  assert.equal(prepared.mode, "gateway");
+  assert.deepEqual(calls.find(([method]) => method === "config.set"),
+    ["config.set", { session_id: "runtime", key: "yolo", value: "1" }]);
+  const offline = actualBackend("gateway", async () => { throw new Error("Gateway offline"); });
+  offline._clientForProfile = () => assert.fail("Required Gateway must never fall back to ACP");
+  await assert.rejects(offline.createSession(agentId, { requiredTransport: "gateway" }), /Gateway offline/);
 });
 
 test("real ACP creation uses the selected directory and exposes actual default cwd", async () => {

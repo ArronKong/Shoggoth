@@ -5,6 +5,8 @@
 .file:disabled { cursor: default; }
 .body { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 8px; padding: 20px 0; font-size: 12px; line-height: 16px; }
 .name, .detail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--chat-text); }
+.name { font-size: 14px; }
+.detail { opacity: 0.5; }
 .meta { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--muted-fg); font-weight: 300; white-space: nowrap; }
 .meta time { overflow: hidden; text-overflow: ellipsis; }
 

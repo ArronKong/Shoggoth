@@ -7,6 +7,9 @@ const tests = [], test = (name, run) => tests.push({ name, run });
 const compose = text => ({ text, mentionIds: [], replyTo: null, replyTask: null, requestRef: null, newRequest: false, summaryMemberId: "", files: [] });
 const input = (id = "original") => ({ clientMessageId: id, ownerScope: "owner", body: "A", mentions: [], expectedPolicyVersion: 1 });
 const scope = { ownerScope: "owner", groupId: "g" };
+// Same quote snapshot the group composer saves (GroupChatPanel), after the bridge's JSON copy.
+const quoteOf = message => JSON.parse(JSON.stringify({ id: message.id, groupId: message.groupId, seq: message.seq, threadId: message.threadId,
+  author: message.author, body: message.body, mentions: message.mentions, createdAt: message.createdAt, origin: message.origin, attachments: message.attachments }));
 async function fixture(options = {}) {
   const root = fs.realpathSync(fs.mkdtempSync("/private/tmp/shoggoth-group-native-journal-")); fs.chmodSync(root, 0o700);
   const store = new DesktopGroupSendJournalStore({ userDataRoot: root, ...options }); await store.open();
@@ -14,6 +17,34 @@ async function fixture(options = {}) {
   const prepare = draft => store.prepare({ ...scope, inputSnapshot: input(), draft });
   return { root, store, save, prepare, file: path.join(root,"group-send-journal/journal.json"), async cleanup() { await store.close(); fs.rmSync(root,{recursive:true,force:true}); } };
 }
+test("recipient locks survive native storage and old ACKs preserve a changed recipient", async () => {
+  const f = await fixture(); let reopened;
+  try {
+    const original = { ...compose("same text"), sendTarget: { target: { kind: "member", memberId: "b" }, manual: true, afterSeq: null } };
+    const saved = await f.store.saveComposer({ ...scope, draftId: "target", revision: 1, composer: original, expectedStorageRevision: 0 });
+    const record = await f.store.prepare({ ...scope, draft: saved, inputSnapshot: { ...input(), body: original.text, mentions: ["b"] } });
+    const changed = { ...original, sendTarget: { target: { kind: "all" }, manual: true, afterSeq: null } };
+    await f.store.saveComposer({ ...scope, draftId: "target", revision: 2, composer: changed, expectedStorageRevision: saved.storageRevision });
+    await f.store.accepted({ record, message: { id: "ack", groupId: "g", seq: 5 }, discussionId: "d" });
+    await f.store.close(); reopened = new DesktopGroupSendJournalStore({ userDataRoot: f.root }); await reopened.open();
+    assert.deepEqual((await reopened.read(scope)).draft.composer, changed);
+    assert.deepEqual((await reopened.read(scope)).sends[0].inputSnapshot.mentions, ["b"], "retry/lookup keeps the original recipient");
+    for (const lock of [{ target: { kind: "owner" }, manual: false, afterSeq: 5 }, { target: { kind: "all" }, manual: true, afterSeq: null }, null]) {
+      const row = await reopened.saveComposer({ ...scope, draftId: `valid-${JSON.stringify(lock)}`, revision: 1,
+        composer: { ...compose("saved"), sendTarget: lock }, expectedStorageRevision: 0 });
+      assert.deepEqual(row.composer.sendTarget, lock);
+    }
+    for (const lock of [{}, { target: { kind: "member" }, manual: true, afterSeq: null },
+      { target: { kind: "owner", memberId: "b" }, manual: true, afterSeq: null },
+      { target: { kind: "all" }, manual: "yes", afterSeq: null },
+      { target: { kind: "owner" }, manual: false, afterSeq: -1 }]) {
+      assert.throws(() => reopened.saveComposer({ ...scope, draftId: "invalid", revision: 1,
+        composer: { ...compose("saved"), sendTarget: lock }, expectedStorageRevision: 0 }), { code: "GROUP_JOURNAL_INVALID" });
+    }
+    const legacy = await reopened.saveComposer({ ...scope, draftId: "legacy", revision: 1, composer: compose("old draft"), expectedStorageRevision: 0 });
+    assert.equal(Object.hasOwn(legacy.composer, "sendTarget"), false, "legacy composer fields remain valid");
+  } finally { await reopened?.close(); await f.cleanup(); }
+});
 test("quoted member replies keep their origin, including late results, through native draft persistence", async () => {
   const { createFixture } = require("./fixtures/group-store-fixture.cjs");
   const cleanups = [], group = createFixture({ after: callback => cleanups.push(callback) });
@@ -28,15 +59,43 @@ test("quoted member replies keep their origin, including late results, through n
     const history = await group.service.handle("group.history", { groupId: group.groupId, afterSeq: null, beforeSeq: null, limit: 50 });
     const message = history.messages.find(row => row.author.kind === "member");
     assert.equal(message.origin.late, true, "a result finished after giving up the floor is a late result");
-    const value = { ...compose("引用这条结果补充。"), replyTo: message };
+    const value = { ...compose("引用这条结果补充。"), replyTo: quoteOf(message) };
     const saved = await f.store.saveComposer({ ...scope, draftId: "quote", revision: 1, composer: value, expectedStorageRevision: 0 });
     assert.deepEqual(saved.composer.replyTo.origin, message.origin);
     await f.store.close(); reopened = new DesktopGroupSendJournalStore({ userDataRoot: f.root }); await reopened.open();
     assert.deepEqual((await reopened.read(scope)).draft.composer.replyTo.origin, message.origin);
     for (const origin of [{ ...message.origin, late: "true" }, { ...message.origin, partial: 1 }, { ...message.origin, requestRevision: 0 }, { ...message.origin, credential: "refused" }]) {
-      assert.throws(() => reopened.saveComposer({ ...scope, draftId: "bad", revision: 1, composer: { ...value, replyTo: { ...message, origin } }, expectedStorageRevision: 0 }), { code: "GROUP_JOURNAL_INVALID" });
+      assert.throws(() => reopened.saveComposer({ ...scope, draftId: "bad", revision: 1, composer: { ...value, replyTo: { ...value.replyTo, origin } }, expectedStorageRevision: 0 }), { code: "GROUP_JOURNAL_INVALID" });
     }
   } finally { await reopened?.close(); await f.cleanup(); for (const cleanup of cleanups.reverse()) await cleanup(); }
+});
+test("quoting a member's streamed reply saves the draft and asks that member, not the owner", async () => {
+  const { createFixture } = require("./fixtures/group-store-fixture.cjs");
+  const cleanups = [], group = createFixture({ after: callback => cleanups.push(callback) });
+  const f = await fixture();
+  try {
+    const owner = group.view().group.ownerMemberId, b = group.roster.find(member => member.id !== owner);
+    group.send("B 来负责这件事。", { mentionMemberIds: [b.id] });
+    const claim = group.store.claimNext(group.groupId, group.fence);
+    assert.equal(claim.member.id, b.id);
+    group.store.bindSession({ groupId: group.groupId, memberId: b.id, sessionKey: "session-b", fence: group.fence });
+    group.store.recordRun({ opportunityId: claim.opportunity.id, runId: "run-b", sessionKey: "session-b", fence: group.fence });
+    const question = "收到。想确认一下：截止时间是哪天？";
+    group.store.syncTurnMessages({ opportunityId: claim.opportunity.id, fence: group.fence, runId: "run-b", messages: [{ id: "item-b", text: question, pending: true }] });
+    group.store.completeTurn({ opportunityId: claim.opportunity.id, fence: group.fence, status: "completed", text: question });
+    const history = await group.service.handle("group.history", { groupId: group.groupId, afterSeq: null, beforeSeq: null, limit: 50 });
+    const message = history.messages.find(row => row.author.kind === "member" && row.author.memberId === b.id);
+    assert.equal(message.origin.textItemId, "item-b", "live member replies carry their text item identity");
+    assert.equal(message.origin.streaming, false);
+    const value = { ...compose("周五。"), replyTo: quoteOf(message) };
+    const saved = await f.store.saveComposer({ ...scope, draftId: "quote-b", revision: 1, composer: value, expectedStorageRevision: 0 });
+    assert.deepEqual(saved.composer.replyTo.origin, message.origin);
+    for (const origin of [{ ...message.origin, textItemId: "" }, { ...message.origin, textItemId: 7 }, { ...message.origin, streaming: "false" }]) {
+      assert.throws(() => f.store.saveComposer({ ...scope, draftId: "bad", revision: 1, composer: { ...value, replyTo: { ...value.replyTo, origin } }, expectedStorageRevision: 0 }), { code: "GROUP_JOURNAL_INVALID" });
+    }
+    group.send("周五。", { replyToSeq: message.seq });
+    assert.equal(group.store.claimNext(group.groupId, group.fence).member.id, b.id, "a quote without @ goes to the quoted member");
+  } finally { await f.cleanup(); for (const cleanup of cleanups.reverse()) await cleanup(); }
 });
 test("private durable frozen payload, close/reopen and multiwindow CAS", async () => {
   const f = await fixture(); try {

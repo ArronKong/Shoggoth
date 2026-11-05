@@ -11,9 +11,9 @@ export function defaultInspirationAgent(agents: InspirationAgent[], idea?: Inspi
     && agent.backendId === idea.latestExecution.backendId) || agents.find(agent => agent.capabilities.execute);
 }
 
-export function inspirationStartFields(idea: InspirationIdea, agent: InspirationAgent) {
+export function inspirationStartFields(idea: InspirationIdea, agent: InspirationAgent, instruction = '', workspace = '') {
   const external = agent.backendId === 'openclaw' || agent.backendId === 'hermes';
-  return { expectedRevision: idea.revision, agentId: agent.id, backendId: agent.backendId, instruction: '',
-    workspace: !external && agent.id === idea.latestExecution?.agentId && agent.backendId === idea.latestExecution.backendId
-      ? idea.latestExecution.workspace : null };
+  const sameAgent = agent.id === idea.latestExecution?.agentId && agent.backendId === idea.latestExecution.backendId;
+  return { expectedRevision: idea.revision, agentId: agent.id, backendId: agent.backendId, instruction,
+    workspace: external ? null : workspace.trim() || (sameAgent ? idea.latestExecution!.workspace : null) };
 }

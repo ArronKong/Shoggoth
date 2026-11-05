@@ -22,8 +22,8 @@ test("unscoped shared projection preserves MCP structure, redacts cross-field ec
   assert.equal(JSON.stringify(result), before);
   await assert.rejects(projectUnscopedResult({ a: undefined }), { code: "SECRET_INPUT_INVALID" });
 });
-async function mcpFixture(t) {
-  const f = await fixture(t);
+async function mcpFixture(t, fixtureOptions) {
+  const f = await fixture(t, fixtureOptions);
   let ready = true;
   const calls = [];
   const options = {
@@ -133,7 +133,7 @@ test("dispatch checks live readiness, creates one real run, returns results, and
 });
 
 test("waiting approvals stay in the App; exact run cancellation and confirmed deletion reuse domain guards", async t => {
-  const f = await mcpFixture(t);
+  const f = await mcpFixture(t, { permissionMode: 'request-approval' });
   const idea = (await f.tool("create", { body: "执行一个需要审批的任务" })).idea;
   const other = (await f.tool("create", { body: "另一个便签" })).idea;
   const started = (await f.tool("start", f.startArgs(idea))).idea;

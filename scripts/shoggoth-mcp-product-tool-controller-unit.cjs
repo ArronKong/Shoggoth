@@ -1175,6 +1175,37 @@ test("全局 Skill 与共享 MCP 工具经同一产品入口供原生和联邦 A
   assert.equal(hostileRegistered, false);
 });
 
+test("共享 MCP 注册和发现保留超 16 KiB 的完整说明，仍拒绝非法说明", async () => {
+  const server = { id: "long-description", name: "Long description", command: process.execPath,
+    args: [], cwd: os.tmpdir(), enabled: true };
+  let description = "界".repeat(5462), registrations = 0;
+  const definitions = () => [{ name: "read_document", description, inputSchema: { type: "object" } }];
+  const f = makeFixture({
+    nativeMcpStore: {
+      prepare: value => ({ ...value }), list: () => ({ revision: 1, servers: [] }), get: () => null,
+      register: value => { registrations++; return { revision: 2, server: value.server, replaced: false }; },
+      remove() { throw new Error("not used"); },
+    },
+    nativeMcpClientManager: { probe: async () => definitions(), listTools: async () => definitions(), closeServer: async () => {},
+      callTool() { throw new Error("not used"); } },
+  });
+  for (const [index, text] of [description, "完整说明🙂\n".repeat(1800) + "END_OF_DESCRIPTION"].entries()) {
+    description = text;
+    assert.ok(Buffer.byteLength(description) > 16 * 1024);
+    const registered = await f.controller.handle("mcp_server_register", { expectedRevision: 1, ...server }, authorityFor(String(index + 1)));
+    assert.equal(registered.toolCount, 1);
+    const listed = await f.controller.handle("mcp_server_tools", { serverId: server.id, cursor: 0, limit: 20 }, authorityFor("3"));
+    assert.deepEqual(listed.items, definitions(), "no truncation before the description reaches the model");
+  }
+  assert.equal(registrations, 2);
+  for (const invalid of ["bad\0description", "bad\ud800description", null, {}]) {
+    description = invalid;
+    await expectCode(() => f.controller.handle("mcp_server_register", { expectedRevision: 1, ...server }, authorityFor("4")), "MCP_TOOL_RESPONSE_INVALID");
+    await expectCode(() => f.controller.handle("mcp_server_tools", { serverId: server.id, cursor: 0, limit: 20 }, authorityFor("5")), "MCP_TOOL_RESPONSE_INVALID");
+  }
+  assert.equal(registrations, 2, "invalid catalogs never reach registration");
+});
+
 test("官方 MCP 会话上下文来自可信原生 Run 或外部身份，模型参数不能覆盖", async () => {
   const seen = [], nativeSession = "a1111111-1111-4111-8111-111111111111", externalSession = "b2222222-2222-4222-8222-222222222222";
   let failureCode;

@@ -71,6 +71,55 @@ function fixture(t, options = {}) {
   };
 }
 
+test('Session execution reads and controls stay with the original Agent after a note moves', async t => {
+  const f = fixture(t), idea = await f.create();
+  const started = (await f.call('start', f.params(idea))).idea;
+  await f.settle(started.latestExecution.runId);
+  const original = f.service.view(idea.id).latestExecution;
+  f.snapshots.set(original.runId, { status: 'failed', errorCode: 'HERMES_EXECUTION_FAILED', finishedAt: Date.now() });
+  await f.reconcile(original.runId);
+  const replacement = (await f.call('start', { ...f.params(f.service.view(idea.id)),
+    backendId: 'openclaw', agentId: 'another-agent' })).idea;
+  await f.settle(replacement.latestExecution.runId);
+  const input = { backendId: original.backendId, agentId: original.agentId, sessionKey: original.sessionKey, runId: null };
+  const before = JSON.stringify(f.store.executions(idea.id)), callsBefore = f.calls.length;
+  for (const runId of [null, original.runId]) {
+    const read = await f.call('session.execution', { ...input, runId });
+    assert.equal(read.execution.runId, original.runId);
+    assert.equal(read.execution.status, 'failed');
+  }
+  for (const patch of [{ backendId: 'openclaw' }, { agentId: 'another-agent' }, { sessionKey: 'unknown-session' },
+    { runId: replacement.latestExecution.runId }, { runId: id() }]) {
+    await assert.rejects(f.call('session.execution', { ...input, ...patch }), { code: 'INSPIRATION_BINDING_INVALID' });
+  }
+  const { ShoggothBackend } = require('../app/core/shoggoth-backend');
+  const owner = Object.create(ShoggothBackend.prototype);
+  Object.assign(owner, { randomUUID: id, _call: (method, params) => f.service.handle(method, params) });
+  const { runId, ...scope } = input;
+  await owner._controlExternalInspirationSession({ ...scope, inspirationId: idea.id }, original.sessionKey, null);
+  assert.equal(JSON.stringify(f.store.executions(idea.id)), before, 'reading or stopping a terminal Session must not change either execution');
+  assert.equal(f.calls.length, callsBefore, 'terminal control must not dispatch to either runtime');
+  assert.equal(f.service.view(idea.id).latestExecution.runId, replacement.latestExecution.runId);
+  assert.equal(f.service.view(idea.id).status, 'running');
+});
+
+test('a pinned Session run stays readable after a newer round in the same Session', async t => {
+  const f = fixture(t), idea = await f.create();
+  const started = (await f.call('start', f.params(idea))).idea;
+  await f.settle(started.latestExecution.runId);
+  const original = f.service.view(idea.id).latestExecution;
+  f.snapshots.set(original.runId, { status: 'completed', resultSummary: 'Original reply', finishedAt: Date.now() });
+  await f.reconcile(original.runId);
+  const input = { backendId: original.backendId, agentId: original.agentId, sessionKey: original.sessionKey };
+  const next = (await f.call('session.send', { ...input, operationId: id(), prompt: 'Next fixture round' })).idea;
+  await f.settle(next.latestExecution.runId);
+  assert.equal((await f.call('session.execution', { ...input, runId: null })).execution.runId, next.latestExecution.runId);
+  const pinned = (await f.call('session.execution', { ...input, runId: original.runId })).execution;
+  assert.equal(pinned.runId, original.runId);
+  assert.equal(pinned.status, 'completed');
+  assert.equal(pinned.resultSummary, 'Original reply');
+});
+
 test('external attachment-only notes receive saved media paths and retain a readable Session origin', async t => {
   const f = fixture(t);
   const data = Buffer.alloc(44); data.write('RIFF'); data.write('WAVE', 8);

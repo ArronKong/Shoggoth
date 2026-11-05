@@ -54,9 +54,17 @@ function attachment(value) {
   return safeTree(row);
 }
 function composer(value) {
-  const row = closed(value, ["text", "mentionIds", "replyTo", "replyTask", "requestRef", "newRequest", "summaryMemberId", "files"]);
+  const row = closed(value, ["text", "mentionIds", "replyTo", "replyTask", "requestRef", "newRequest", "summaryMemberId", "files"], ["sendTarget"]);
   if (typeof row.text !== "string" || !Array.isArray(row.mentionIds) || !row.mentionIds.every(part) || typeof row.newRequest !== "boolean"
     || typeof row.summaryMemberId !== "string" || !Array.isArray(row.files) || row.files.length > 8) throw failure("GROUP_JOURNAL_INVALID");
+  if (row.sendTarget != null) {
+    const lock = closed(row.sendTarget, ["target", "manual", "afterSeq"]);
+    const target = closed(lock.target, ["kind"], ["memberId"]);
+    if (typeof lock.manual !== "boolean" || lock.afterSeq !== null && !number(lock.afterSeq)
+      || !["owner", "all", "member"].includes(target.kind)
+      || (target.kind === "member" ? !part(target.memberId) : Object.hasOwn(target, "memberId"))) throw failure("GROUP_JOURNAL_INVALID");
+    row.sendTarget = { ...lock, target };
+  }
   row.files = row.files.map(value => {
     const file = closed(value, ["id", "name", "status", "attachment"]);
     if (!part(file.id) || typeof file.name !== "string" || !["ready", "uploading", "error"].includes(file.status)) throw failure("GROUP_JOURNAL_INVALID");
@@ -73,9 +81,11 @@ function composer(value) {
     if (!Array.isArray(quote.mentions.memberIds) || !quote.mentions.memberIds.every(part) || typeof quote.mentions.broadcast !== "boolean"
       || !Array.isArray(quote.mentions.unresolved) || !quote.mentions.unresolved.every(part)) throw failure("GROUP_JOURNAL_INVALID");
     if (quote.origin) {
-      quote.origin = closed(quote.origin, [], ["opportunityId", "runId", "taskId", "attemptId", "taskVersion", "discussionId", "rootUserMessageId", "inputThroughSeq", "summary", "coordinationStale", "artifacts", "requestRevision", "requestStale", "partial", "late"]);
+      quote.origin = closed(quote.origin, [], ["opportunityId", "runId", "taskId", "attemptId", "taskVersion", "discussionId", "rootUserMessageId", "inputThroughSeq", "summary", "coordinationStale", "artifacts", "requestRevision", "requestStale", "partial", "late", "textItemId", "streaming"]);
+      // textItemId / streaming：成员流式发出的回复带这两个字段，引用这类回复也必须能保存草稿。
       if (quote.origin.requestRevision !== undefined && (!number(quote.origin.requestRevision) || quote.origin.requestRevision < 1)
-        || ["requestStale", "partial", "late"].some(key => quote.origin[key] !== undefined && typeof quote.origin[key] !== "boolean")) throw failure("GROUP_JOURNAL_INVALID");
+        || quote.origin.textItemId !== undefined && !part(quote.origin.textItemId)
+        || ["requestStale", "partial", "late", "streaming"].some(key => quote.origin[key] !== undefined && typeof quote.origin[key] !== "boolean")) throw failure("GROUP_JOURNAL_INVALID");
     }
     if (quote.fullResult) quote.fullResult = closed(quote.fullResult, ["bytes", "digest"]);
     if (quote.taskRef) quote.taskRef = closed(quote.taskRef, ["taskId"]);

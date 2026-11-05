@@ -7,6 +7,7 @@ import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 const root = path.resolve(import.meta.dirname, ".."), ui = path.join(root, "app/manage-ui");
 const sourceRoot = process.env.CHAT_CRON_SOURCE_ROOT || root;
 const require = createRequire(path.join(ui, "package.json"));
@@ -17,7 +18,8 @@ let serving = false, server;
 try {
   const contents = fs.readFileSync(path.join(root, "scripts/fixtures/chat-cron-display.tsx"), "utf8")
     .replaceAll('"../../app/', '"' + sourceRoot + '/app/');
-  await build({ stdin: { contents, sourcefile: "chat-cron-display.tsx", resolveDir: path.join(root, "scripts/fixtures"), loader: "tsx" },
+  await build({ plugins: [viteArtworkFixturePlugin(sourceRoot)],
+    stdin: { contents, sourcefile: "chat-cron-display.tsx", resolveDir: path.join(root, "scripts/fixtures"), loader: "tsx" },
     bundle: true, format: "esm", jsx: "automatic", nodePaths: [path.join(ui, "node_modules")],
     define: { "process.env.NODE_ENV": '"production"' },
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },

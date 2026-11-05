@@ -34,6 +34,10 @@ async function fixture(t, options = {}) {
   const productStore = new JsonlProductStore({ paths }).open();
   const store = new InspirationStore({ paths }).open();
   const sessions = new ChatSessionStore({ paths }).open();
+  if (options.permissionMode) {
+    const createSession = sessions.createSession.bind(sessions);
+    sessions.createSession = input => createSession({ ...input, permissionMode: options.permissionMode });
+  }
   const transcript = new TranscriptStore({ paths });
   transcript.open();
   const dispatcher = createWorkDispatcher({ store: productStore });

@@ -13,7 +13,6 @@ import "./manage-skin.css";
 import "./debug-overrides.css";
 import { initThemeFromCache, setTheme } from "./lib/theme";
 import { getConfig } from "./api/client";
-import { readChatUnread } from "./lib/chatUnread";
 import { NavigationGuardProvider } from "./lib/navigation-guard";
 import { loadInspirationFonts } from "./pages/inspiration-fonts";
 const DesktopInspiration = lazy(async () => {
@@ -27,7 +26,6 @@ if (desktopInspiration) document.documentElement.setAttribute('data-desktop-insp
 // Apply the cached theme before first render (index.html already seeded the
 // attribute pre-paint); then re-sync from config — the source of truth.
 async function bootstrap() {
-  if (!desktopInspiration) readChatUnread(localStorage);
   initThemeFromCache();
   try {
     const config = await getConfig();

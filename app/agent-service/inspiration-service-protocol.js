@@ -1,6 +1,7 @@
 "use strict";
 
 const { serviceError } = require("./security");
+const { INSPIRATION_HISTORY_MAX_RESPONSE_BYTES } = require("./service-protocol-version");
 const path = require("node:path");
 const { validExecutors, validGrowthSettings } = require("./inspiration-growth");
 const {
@@ -8,6 +9,7 @@ const {
   validInteractiveApprovalOptions, interactiveApprovalCanAllow,
 } = require("../core/shoggoth-interaction-contract");
 const { validAttachment, validAttachments, attachmentFields, decodeChunk, CHUNK_BYTES } = require("./inspiration-media");
+const INSPIRATION_HISTORY_MAX_RESULT_BYTES = INSPIRATION_HISTORY_MAX_RESPONSE_BYTES - 4 * 1024;
 const METHODS = Object.freeze({
   "inspiration.media.write": ["attachment", "offset", "content"],
   "inspiration.media.read": ["id", "offset"],
@@ -27,6 +29,7 @@ const METHODS = Object.freeze({
   "inspiration.respond": ["id", "operationId", "runId", "requestId", "response"],
   "inspiration.cancel": ["id", "operationId", "runId"],
   "inspiration.session.get": ["backendId", "agentId", "sessionKey"],
+  "inspiration.session.execution": ["backendId", "agentId", "sessionKey", "runId"],
   "inspiration.session.messages": ["backendId", "agentId", "sessionKey", "cursor", "limit"],
   "inspiration.session.send": ["backendId", "agentId", "sessionKey", "operationId", "prompt"],
 });
@@ -81,6 +84,7 @@ function validateInspirationServiceParams(method, input) {
   if (fields.includes("id") && !uuid(input.id)) invalid();
   if (fields.includes("archiveId") && !uuid(input.archiveId)) invalid();
   for (const key of ["operationId", "agentId", "backendId", "runId", "requestId"]) {
+    if (method === "inspiration.session.execution" && key === "runId" && input.runId === null) continue;
     if (fields.includes(key) && (typeof input[key] !== "string" || !ID.test(input[key]))) invalid();
   }
   if (fields.includes("expectedRevision") && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1)) invalid();
@@ -125,7 +129,7 @@ const at = (value) => Number.isSafeInteger(value) && value >= 0;
 const optionalAt = (value) => value === null || at(value);
 const optionalText = (value, max) => value === null || string(value, max);
 const publicId = (value) => typeof value === "string" && ID.test(value);
-const VIEW_FIELDS = ["id", "body", "title", "revision", "favorite", "archivedAt", "acceptedAt", "createdAt", "updatedAt", "status", "latestExecution"];
+const VIEW_FIELDS = ["id", "body", "title", "revision", "favorite", "archivedAt", "acceptedAt", "createdAt", "updatedAt", "status", "latestExecution", "rounds"];
 const EXECUTION_VIEW_FIELDS = ["id", "ideaId", "runId", "profileId", "agentId", "backendId", "workspace", "sessionKey", "ideaRevision", "createdAt", "retryOf", "status", "resultSummary", "errorCode", "finishedAt", "attention"];
 function validRequest(request, runId) {
   return request !== null && typeof request === "object"
@@ -163,9 +167,12 @@ function validInspirationAttention(attention, runId) {
     && optionalText(attention.details, 48 * 1024) && optionalText(attention.command, 32 * 1024)
     && optionalText(attention.cwd, 4096) && validRequest(attention.request, runId));
 }
-function validateExecution(execution) {
+function validateExecution(execution, history = false) {
   const external = ["openclaw", "hermes"].includes(execution?.backendId);
-  if (!exact(execution, EXECUTION_VIEW_FIELDS) || !uuid(execution.id) || !uuid(execution.ideaId) || !uuid(execution.runId)
+  if (!exact(execution, history ? [...EXECUTION_VIEW_FIELDS, "instruction", "reusableSession"] : EXECUTION_VIEW_FIELDS)
+    || (history && (!optionalText(execution.instruction, 16 * 1024) || typeof execution.reusableSession !== "boolean"
+      || (execution.reusableSession && (external || execution.sessionKey === null))))
+    || !uuid(execution.id) || !uuid(execution.ideaId) || !uuid(execution.runId)
     || (execution.sessionKey !== null && !(external ? string(execution.sessionKey, 512, false) : uuid(execution.sessionKey)))
     || ![execution.agentId, execution.backendId].every(publicId)
     || (external ? execution.profileId !== null : !publicId(execution.profileId))
@@ -188,7 +195,10 @@ function validateView(value) {
     || !Number.isSafeInteger(value.revision) || value.revision < 1
     || typeof value.favorite !== "boolean" || !STATUSES.has(value.status)
     || !at(value.createdAt) || !at(value.updatedAt) || value.updatedAt < value.createdAt
-    || !optionalAt(value.archivedAt) || !optionalAt(value.acceptedAt)) invalid("INSPIRATION_RESPONSE_INVALID");
+    || !optionalAt(value.archivedAt) || !optionalAt(value.acceptedAt)
+    || !exact(value.rounds, ["count", "agents"]) || !at(value.rounds.count) || !Array.isArray(value.rounds.agents)
+    || value.rounds.agents.length > 8 || !value.rounds.agents.every(agent => exact(agent, ["backendId", "agentId"])
+      && publicId(agent.backendId) && publicId(agent.agentId))) invalid("INSPIRATION_RESPONSE_INVALID");
   if (value.latestExecution !== null) {
     validateExecution(value.latestExecution);
     if (value.latestExecution.ideaId !== value.id || value.latestExecution.ideaRevision > value.revision
@@ -197,8 +207,9 @@ function validateView(value) {
 }
 
 function validateInspirationServiceResult(method, result) {
+  const maxBytes = method === "inspiration.executions" ? INSPIRATION_HISTORY_MAX_RESULT_BYTES : 60 * 1024;
   if (!METHODS[method] || !result || typeof result !== "object" || Array.isArray(result)
-    || Buffer.byteLength(JSON.stringify(result)) > 60 * 1024) invalid("INSPIRATION_RESPONSE_INVALID");
+    || Buffer.byteLength(JSON.stringify(result)) > maxBytes) invalid("INSPIRATION_RESPONSE_INVALID");
   if (method.startsWith("inspiration.media.")) {
     const read = method === "inspiration.media.read";
     if (!exact(result, read ? ["attachment", "content", "nextOffset"] : ["attachment", "nextOffset"])
@@ -224,6 +235,9 @@ function validateInspirationServiceResult(method, result) {
         || !uuid(result.origin.inspirationId) || !string(result.origin.inspirationTitle, 512, false)))) {
       invalid("INSPIRATION_RESPONSE_INVALID");
     }
+  } else if (method === "inspiration.session.execution") {
+    if (!exact(result, ["execution"])) invalid("INSPIRATION_RESPONSE_INVALID");
+    validateExecution(result.execution);
   } else if (method === "inspiration.activity.binding") {
     if (!exact(result, ["execution", "prompt"]) || !string(result.prompt, 48 * 1024, false)) invalid("INSPIRATION_RESPONSE_INVALID");
     validateExecution(result.execution);
@@ -249,7 +263,7 @@ function validateInspirationServiceResult(method, result) {
           || !STATUSES.has(item.status) || item.status === "saved") invalid("INSPIRATION_RESPONSE_INVALID");
       }
     } else if (field === "items") result.items.forEach(validateView);
-    else result.executions.forEach(validateExecution);
+    else result.executions.forEach(execution => validateExecution(execution, true));
   } else if (method === "inspiration.delete") {
     if (!exact(result, ["id", "deleted"]) || !uuid(result.id) || result.deleted !== true) invalid("INSPIRATION_RESPONSE_INVALID");
   } else {
@@ -259,5 +273,5 @@ function validateInspirationServiceResult(method, result) {
   return structuredClone(result);
 }
 
-module.exports = { INSPIRATION_SERVICE_METHODS, PUBLIC_MESSAGES,
+module.exports = { INSPIRATION_SERVICE_METHODS, INSPIRATION_HISTORY_MAX_RESULT_BYTES, PUBLIC_MESSAGES,
   validateInspirationServiceParams, validateInspirationServiceResult, validInspirationAttention, validInspirationPaperTone };

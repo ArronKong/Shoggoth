@@ -57,11 +57,11 @@ function runtimeFailureDetail(value, registeredSecrets = []) {
   } catch { return null; }
 }
 
-function failureDetailText(value) {
+function failureDetailText(value, label = "上游原因") {
   const detail = runtimeFailureDetail(value);
   if (!detail) return "";
   const codes = [detail.httpStatus ? `HTTP ${detail.httpStatus}` : null, detail.upstreamCode].filter(Boolean);
-  return `上游原因：${detail.message}${codes.length ? `\n${codes.join(" · ")}` : ""}`;
+  return `${label}：${detail.message}${codes.length ? `\n${codes.join(" · ")}` : ""}`;
 }
 
 function runtimeFailureFromError(error) {

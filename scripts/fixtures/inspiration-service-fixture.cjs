@@ -23,6 +23,7 @@ const { DEFAULT_OPERATOR_SCOPES, generateIdentity } = require('../../app/core/de
 const { startStaticServer } = require('../../app/static-server');
 const { createFederationHostServer } = require('../../app/federation-host-server');
 const { authenticateMcpSession, createMcpStdioHandler } = require('../../app/shoggoth-mcp-helper');
+const { parseBindingElicitation } = require('../../app/agent-service/runtime-mcp-call-binding');
 const ROOT = path.resolve(__dirname, '../..');
 
 async function startInspirationFixture(options = {}) {
@@ -68,6 +69,10 @@ async function startInspirationFixture(options = {}) {
     }) });
   const service = createAgentService({ paths, safeStorage, runtimePool, version: 'inspiration-l2', ...options.serviceOptions });
   await service.start();
+  if (options.permissionMode) {
+    const createSession = service.chatSessionStore.createSession.bind(service.chatSessionStore);
+    service.chatSessionStore.createSession = input => createSession({ ...input, permissionMode: options.permissionMode });
+  }
   const token = readClientToken(paths);
   const ipc = async (method, params) => {
     try { return await requestService(paths, { id: crypto.randomUUID(), token, version: PROTOCOL_VERSION, method, params }); }
@@ -138,16 +143,36 @@ async function startInspirationFixture(options = {}) {
     authResolver: { resolveConnectAuth: () => ({ ...identity, token: 'inspiration-fixture', scopes: DEFAULT_OPERATOR_SCOPES }), storeDeviceToken() {} } });
   const helper = createMcpStdioHandler({ paths, runtimeProfileId: profile.runtimeProfileId,
     runtimeAccountId: profile.runtimeAccountId, sessionToken: session.token,
-    sessionExpiresAt: session.expiresAt, refreshSession: loadSession, requestService });
+    sessionExpiresAt: session.expiresAt, refreshSession: loadSession, requestService, bindRuntimeCalls: true });
   await helper({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18",
-    capabilities: {}, clientInfo: { name: "inspiration-l2", version: "1" } } });
+    capabilities: { elicitation: {} }, clientInfo: { name: "inspiration-l2", version: "1" } } });
   let helperSequence = 1;
   const inspect = async () => {
     const runs = service.productStore.listWorkRuns().filter((run) => run.source === 'inspiration');
     let runtimeContext = null;
-    const active = runs.find((run) => ['running', 'waiting_input', 'waiting_approval'].includes(run.status));
-    if (active) runtimeContext = await helper({ jsonrpc: '2.0', id: ++helperSequence, method: 'tools/call',
-      params: { name: 'runtime_context_get', arguments: { source: 'inspiration', sourceId: active.sourceId } } });
+    const coordinator = service.workRunCoordinator;
+    const { runtimeProfileId, runtimeAccountId } = profile;
+    const active = runs.find(run => coordinator.hasActiveRuntimeWork(runtimeProfileId, runtimeAccountId, run.id));
+    if (active) {
+      const scope = { runtimeProfileId, runtimeAccountId, runId: active.id };
+      try {
+        runtimeContext = await coordinator.withCurrentRuntimeCapabilityLease(scope, ({ assertCurrent, signal }) => helper({
+          jsonrpc: '2.0', id: ++helperSequence, method: 'tools/call',
+          params: { name: 'runtime_context_get', arguments: { source: 'inspiration', sourceId: active.sourceId } },
+        }, {
+          signal,
+          // The fixture speaks for the fake runtime. The Helper and Service still authenticate and consume the bound call.
+          async requestClient(method, params) {
+            const proof = method === 'elicitation/create' && parseBindingElicitation({ ...params, serverName: 'shoggoth' });
+            if (proof?.name !== 'runtime_context_get') throw new Error('Unexpected fixture runtime call');
+            coordinator.runtimeMcpCallBindings.register({ ...scope, proof, profileId: active.profileId, assertCurrent });
+            return { action: 'accept', content: {} };
+          },
+        }));
+      } catch (error) {
+        if (coordinator.hasActiveRuntimeWork(runtimeProfileId, runtimeAccountId, active.id)) throw error;
+      }
+    }
     return { ideas: service.inspirationStore.list(), runs, runtimeContext, helperAuthentications,
       growth: service.inspirationService.growthView(),
       responses: fs.existsSync(responsesPath) ? fs.readFileSync(responsesPath, 'utf8').trim().split('\n').filter(Boolean).length : 0,
@@ -172,7 +197,8 @@ async function startInspirationFixture(options = {}) {
 module.exports = { startInspirationFixture };
 
 if (require.main === module) {
-  startInspirationFixture({ agentCount: Number(process.env.INSPIRATION_FIXTURE_AGENTS || 1),
+  startInspirationFixture({ isolatedHome: true, agentCount: Number(process.env.INSPIRATION_FIXTURE_AGENTS || 1),
+    ...(process.env.INSPIRATION_FIXTURE_PERMISSION_MODE ? { permissionMode: process.env.INSPIRATION_FIXTURE_PERMISSION_MODE } : {}),
     ...(process.env.CODEX_FAKE_AUTOCOMPLETE_ALL === '1' ? { codexFakeEnv: { CODEX_FAKE_AUTOCOMPLETE_ALL: '1' } } : {}) }).then((fixture) => {
     const control = http.createServer(async (req, res) => {
       try { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(await fixture.inspect())); }

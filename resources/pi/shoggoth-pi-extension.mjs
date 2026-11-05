@@ -277,7 +277,11 @@ class McpClient {
     this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
     let newline;
     while ((newline = this.buffer.indexOf(0x0a)) >= 0) {
-      if (newline === 0 || newline > MAX_CATALOG_FRAME_BYTES) {
+      if (newline > MAX_CATALOG_FRAME_BYTES) {
+        this.failOversizedFrame();
+        return;
+      }
+      if (newline === 0) {
         this.fail(new Error("Invalid Shoggoth MCP frame"));
         return;
       }
@@ -294,7 +298,13 @@ class McpClient {
       }
       void this.onMessage(message);
     }
-    if (this.buffer.length > MAX_CATALOG_FRAME_BYTES) this.fail(new Error("Oversized Shoggoth MCP frame"));
+    if (this.buffer.length > MAX_CATALOG_FRAME_BYTES) this.failOversizedFrame();
+  }
+
+  failOversizedFrame() {
+    const catalog = [...this.pending.values()].some(request => request.method === "tools/list");
+    if (catalog) process.stderr.write(`PI_TOOL_CATALOG_TOO_LARGE ${MAX_CATALOG_FRAME_BYTES}\n`);
+    this.fail(new Error(catalog ? "Shoggoth MCP tool catalog exceeds its transport size limit" : "Oversized Shoggoth MCP frame"));
   }
 
   async onMessage(message) {
@@ -494,11 +504,14 @@ export default async function shoggothPiExtension(pi) {
     process.title = originalProcessTitle;
   }
   for (const tool of catalog.tools) {
-    if (!plain(tool) || !safeString(tool.name, 128) || !safeString(tool.description, 4096)
-      || !plain(tool.inputSchema)) {
+    // Catalog transport already bounds these strings. Preserve complete tool
+    // instructions instead of imposing a separate per-description byte cap.
+    if (!safeString(tool.description, Infinity) || !tool.description.isWellFormed() || !plain(tool.inputSchema)) {
       client.close();
       throw new Error("Shoggoth MCP tool catalog is invalid");
     }
+  }
+  for (const tool of catalog.tools) {
     pi.registerTool({
       name: tool.name,
       label: safeString(tool.title, 1024) ? tool.title : tool.name,

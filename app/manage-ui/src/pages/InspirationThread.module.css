@@ -1,0 +1,217 @@
+/* The idea thread: the report modal (Modal.module.css) holding the note, each round as a chat
+   exchange, and the chat page's composer pinned at its foot. Values follow InspirationPage.module.css
+   (paper note, growth track, panels) and ChatPage.css (bubbles, composer, pills, send/stop). */
+.modal {
+  --detail-sheet: light-dark(#fff, #2a2a30); --detail-ink: light-dark(#1a1a1a, #f2f2f4);
+  --detail-field: light-dark(#f5f5f3, #35353c); --detail-olive: light-dark(#4f6043, #b4c39d);
+  --detail-line: light-dark(rgb(0 0 0 / 8%), rgb(255 255 255 / 10%)); --ui-hairline: var(--detail-line);
+  /* A growing thread keeps one height so the composer stays put; the margin is 40px top and bottom. */
+  height: calc(100vh - 80px);
+}
+.modal.fit { height: auto; }
+.modal > div { overflow: visible; }
+.modal [data-tone] { --tone: var(--ui-text-2); }
+.modal [data-tone=seed] { --tone: color-mix(in srgb, var(--ui-text-2) 72%, var(--ui-warning)); }
+.modal [data-tone=live], .modal [data-tone=result] { --tone: var(--ui-success); }
+.modal [data-tone=input] { --tone: var(--ui-info); }
+.modal [data-tone=approval] { --tone: var(--ui-warning); }
+.modal [data-tone=wilted] { --tone: var(--ui-error); }
+.modal [data-tone=fruit] { --tone: var(--detail-olive); }
+.modal [data-tone=adopted] { --tone: light-dark(#000, #fff); }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.meta { margin: 0; font-size: 12px; line-height: 1.7; color: var(--ui-text-2); overflow-wrap: anywhere; }
+.error { margin: 0; color: var(--ui-error); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.alert { margin: 0; padding: 12px 16px; border-radius: 16px; color: var(--ui-error); background: var(--detail-sheet); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+
+/* Header: the growth track, then 32px icon buttons beside the close button. */
+.title { display: flex; align-items: center; min-width: 0; margin-top: 4px; letter-spacing: 0; }
+.growthTrack { display: flex; align-items: center; flex-wrap: wrap; min-height: 28px; font-size: 12px; font-weight: 500; line-height: 20px; }
+.growthStep, .growthNow { position: relative; display: inline-flex; align-items: center; flex: none; }
+.growthTrack > * + * { margin-left: 26px; }
+.growthTrack > * + *::before { content: ''; position: absolute; top: 50%; right: calc(100% + 5px); width: 16px; height: 1px; background: currentColor; opacity: .35; }
+.growthStep { color: var(--ui-text-2); opacity: .32; }
+.growthStep[data-reached] { opacity: .72; }
+.growthNow { gap: 6px; padding: 4px 12px 4px 8px; border-radius: 999px; color: var(--tone); background: color-mix(in srgb, var(--tone) 12%, transparent); transition: color 500ms ease, background-color 500ms ease; }
+.growthGlyph { width: 16px; height: 16px; }
+.headButton { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--ui-text-1); cursor: pointer; text-decoration: none; }
+.headButton:hover:not(:disabled) { background: light-dark(rgba(0, 0, 0, .06), rgba(255, 255, 255, .1)); color: var(--ui-text-1); }
+.headButton:disabled { opacity: .3; cursor: not-allowed; }
+.headButton > svg, .headButton > [data-inspiration-icon] { width: 20px; height: 20px; }
+.headGlyph { width: 20px; height: 20px; }
+
+/* The scroller reaches into the dialog's side gutters so paper shadows stay visible. */
+.thread { display: flex; flex: 1 1 auto; flex-direction: column; gap: 20px; min-height: 0; margin: -8px -16px 0; padding: 8px 16px 20px; overflow-y: auto; overscroll-behavior: contain; }
+.thread > * { flex: none; min-width: 0; }
+.loading { display: flex; flex-direction: column; gap: 24px; padding: 8px 0 24px; }
+.loading > span { display: block; height: 200px; border-radius: 24px; background: linear-gradient(100deg, light-dark(rgb(255 255 255 / 45%), rgb(255 255 255 / 6%)) 30%, light-dark(rgb(255 255 255 / 80%), rgb(255 255 255 / 14%)) 50%, light-dark(rgb(255 255 255 / 45%), rgb(255 255 255 / 6%)) 70%) 0 0 / 300% 100%; animation: shimmer 1.4s ease-in-out infinite; }
+.loading > span + span { height: 120px; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+
+/* The note keeps the seed's height in every stage; editing happens on the text in place. */
+.notePaper { --note-ink: light-dark(rgb(0 0 0 / 90%), rgb(240 243 232 / 90%)); display: flex; flex-direction: column; gap: 16px; min-height: 200px; padding: 24px; border-radius: 24px; box-shadow: inset 1px 0 0 var(--note-edge-light), 0 6px 14px -8px light-dark(rgb(72 75 64 / 26%), rgb(8 12 6 / 45%)); }
+.noteBody { display: flex; flex: 1; flex-direction: column; gap: 12px; min-width: 0; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+.original { margin: 0; font-size: var(--note-font-size); line-height: var(--note-line-height); white-space: pre-wrap; overflow-wrap: anywhere; }
+.noteInline { display: flex; flex: 1; flex-direction: column; gap: 12px; min-width: 0; }
+.noteInline :global(.field-textarea), .noteInline :global(.field-textarea):focus, .noteInline :global(.field-textarea):focus-visible, .noteInline :global(.field-textarea):hover {
+  min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; outline: none;
+  color: inherit; font-family: var(--note-font-family); font-size: var(--note-font-size); line-height: var(--note-line-height); caret-color: currentColor;
+}
+.noteFoot { display: flex; align-items: center; gap: 12px; min-height: 24px; margin-top: auto; }
+.noteGlyphSlot { display: inline-flex; }
+.noteGlyph { width: 16px; height: 16px; color: var(--note-ink); }
+.noteEdit { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; margin: 0; padding: 0 8px 0 4px; border: 0; border-radius: 999px; background: transparent; color: color-mix(in srgb, var(--note-ink) 56%, transparent); font-size: 12px; line-height: 16px; cursor: pointer; }
+.noteEdit svg { width: 16px; height: 16px; }
+.noteEdit:hover:not(:disabled) { color: var(--note-ink); background: color-mix(in srgb, var(--note-ink) 7%, transparent); border-color: transparent; }
+.noteEditFirst { margin-left: auto; }
+.noteDate { margin: 0; font-size: 12px; line-height: 16px; color: var(--note-ink); white-space: nowrap; }
+
+/* Seed start: the lineup, the chosen agent's greeting and the composer read as one step.
+   144px from the greeting to the intent chips: this margin, the thread's 20px padding and the foot's 20px. */
+.plant { display: flex; flex-direction: column; gap: 14px; margin-bottom: 104px; }
+.plantHead { margin: 0; text-align: center; font-size: 13px; line-height: 20px; color: var(--ui-text-2); }
+.lineup { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; }
+.lineupAgent { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 84px; padding: 10px 0 8px; border: 0; border-radius: 16px; background: transparent; color: var(--ui-text-1); font: inherit; cursor: pointer; }
+.lineupAgent:hover:not(:disabled) { background: light-dark(rgb(255 255 255 / 45%), rgb(255 255 255 / 6%)); }
+.lineupAgent:disabled { opacity: .4; cursor: not-allowed; }
+.lineupAvatar { position: relative; display: grid; width: 48px; height: 48px; transition: transform 200ms linear; }
+.lineupAvatar > span { width: 48px; height: 48px; font-size: 15px; }
+.lineupAvatar::after { content: ''; position: absolute; inset: 0; border: 1.7px solid light-dark(#000, #fff); border-radius: 50%; opacity: 0; transition: opacity 200ms linear; }
+.lineupAgent[aria-checked=true] .lineupAvatar { transform: scale(calc(56 / 48)); }
+.lineupAgent[aria-checked=true] .lineupAvatar::after { opacity: 1; }
+.lineupName { max-width: 80px; margin-top: 4px; overflow: hidden; font-size: 13px; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.lineupAgent[aria-checked=true] .lineupName { font-weight: 600; }
+.lineupState { font-size: 11px; line-height: 14px; color: var(--ui-text-2); }
+.greet { animation: greetIn 260ms cubic-bezier(.22, 1, .36, 1) both; }
+.greetLine { margin: 0; font-size: 14px; line-height: 20px; }
+@keyframes greetIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* Rounds: the chat page's user bubble, and the agent's reply under its name. */
+.turnYou { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 80%; }
+.userBubble { padding: 12px 20px; border-radius: 24px 0 24px 24px; background: light-dark(#000, #fff); color: light-dark(#fff, #000); font-size: 14px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.queued .userBubble { background: light-dark(rgb(255 255 255 / 60%), rgb(255 255 255 / 8%)); color: var(--ui-text-1); outline: 1.5px dashed light-dark(rgb(0 0 0 / 45%), rgb(255 255 255 / 45%)); outline-offset: -1.5px; }
+.turnMeta { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; line-height: 18px; color: var(--ui-text-2); }
+.turnAi { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; }
+.author { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; margin: 0 0 2px; color: var(--ui-text-1); font-size: 14px; line-height: 20px; }
+.authorAvatar { width: 24px; height: 24px; flex: 0 0 24px; font-size: 9px; }
+.authorName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.authorSide { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--ui-text-2); font-size: 12px; font-variant-numeric: tabular-nums; }
+.when { white-space: nowrap; }
+.statusChip { display: inline-flex; align-items: center; gap: 6px; flex: none; padding: 1px 10px; border-radius: 999px; background: color-mix(in srgb, var(--tone) 12%, transparent); color: var(--tone); font-size: 12px; font-weight: 400; line-height: 18px; }
+.liveDot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.8s ease-out infinite; }
+.liveDot[data-still] { animation: none; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
+/* The chat page's live-activity toggle, beside the round's time. */
+.trajectoryButton { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--ui-text-1); cursor: pointer; }
+.trajectoryButton svg { width: 16px; height: 16px; }
+.trajectoryButton:hover:not(:disabled), .trajectoryButton[aria-pressed=true] { background: light-dark(rgb(0 0 0 / 6%), rgb(255 255 255 / 10%)); color: var(--ui-text-1); }
+.trajectory { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px 16px; border-radius: 16px; background: light-dark(rgb(255 255 255 / 60%), rgb(255 255 255 / 6%)); }
+.timeline { max-height: calc(36px * 6 + 8px); overflow-y: auto; overscroll-behavior: contain; }
+.aiCard { display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 24px; border-radius: 0 24px 24px 24px; background: var(--detail-sheet); color: var(--detail-ink); }
+.aiCard[data-adopted] { box-shadow: 0 0 0 1.5px light-dark(#000, #fff); }
+.progressHint { margin: 0; font-size: 14px; font-weight: 300; line-height: 20px; color: var(--detail-ink); }
+.markdown { font-size: 14px; line-height: 1.75; color: var(--detail-ink); overflow-wrap: anywhere; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown ul, .markdown ol { padding-left: 22px; }
+.markdown li + li { margin-top: 5px; }
+.markdown table { display: block; max-width: 100%; overflow: auto; border-collapse: collapse; }
+.markdown td, .markdown th { padding: 8px 12px; border: 1px solid var(--ui-hairline); }
+.markdown pre { overflow: auto; max-width: 100%; padding: 12px; background: var(--detail-field); border-radius: 10px; }
+.markdown img { max-width: 100%; }
+.runFailure { display: flex; align-items: flex-start; gap: 10px; margin: 0; color: var(--ui-error); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.runFailureMark { display: grid; place-items: center; flex: none; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; background: var(--ui-error); color: var(--detail-sheet); font-size: 12px; font-weight: 700; line-height: 1; }
+.runFailureText { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; min-height: 20px; }
+.runFailure code { padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, var(--ui-error) 9%, transparent); font: 11px/18px var(--mono); }
+.aiActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+/* Choosing a version reads in black, like the composer's chosen chip. */
+.acceptAction { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 4px 12px 4px 10px; border: 1px solid light-dark(rgb(0 0 0 / 25%), rgb(255 255 255 / 30%)); border-radius: 999px; background: transparent; color: var(--ui-text-1); font-size: 12px; cursor: pointer; }
+.acceptAction svg { width: 16px; height: 16px; }
+.acceptAction:hover:not(:disabled) { border-color: light-dark(rgb(0 0 0 / 45%), rgb(255 255 255 / 50%)); background: light-dark(rgb(0 0 0 / 5%), rgb(255 255 255 / 6%)); color: var(--ui-text-1); }
+.acceptAction[aria-pressed=true], .acceptAction[aria-pressed=true]:hover:not(:disabled) { border-color: light-dark(#000, #fff); background: light-dark(#000, #fff); color: light-dark(#fff, #000); }
+.chip { min-width: 0; border-radius: 999px; }
+.textAction { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 28px; padding: 3px 7px; border: 0; border-radius: 8px; background: transparent; color: var(--ui-text-2); font-size: 12px; cursor: pointer; }
+.textAction:hover:not(:disabled) { background: var(--ui-surface-2); color: var(--ui-text-1); border-color: transparent; }
+.more { align-self: center; }
+/* Files a round produced: the dashboard's folder icons by extension, drawn at half size. */
+.artifacts { display: flex; flex-direction: column; gap: 8px; }
+.sectionHeading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 20px; }
+.sectionHeading h3 { margin: 0; font-size: 12px; font-weight: 400; line-height: 20px; color: var(--detail-ink); }
+.sectionHeading span { font-size: 12px; color: var(--ui-text-2); }
+.artifactList { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.artifact { display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; padding: 6px 12px 6px 6px; border: 0; border-radius: 16px; background: var(--detail-field); color: var(--detail-ink); text-align: left; cursor: pointer; }
+.artifact:hover:not(:disabled) { background: color-mix(in srgb, var(--detail-ink) 7%, var(--detail-field)); color: var(--detail-ink); border-color: transparent; }
+.artifactThumb { display: grid; place-items: center; flex: none; width: 56px; height: 56px; overflow: hidden; }
+.artifactThumb > [data-artifact-thumb] { zoom: .5; }
+.artifactName { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+.artifactName strong { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.artifactName > span { overflow: hidden; color: var(--ui-text-2); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+/* Approval and input: the Session's own prompt card, standing on its own. */
+.chatAttention { display: flex; flex-direction: column; gap: 8px; min-width: 0; overflow-wrap: anywhere; cursor: default; }
+.chatAttention > :is(pre, p) { margin: 0 24px; color: var(--ui-text-2); }
+.chatAttention > pre { font-family: var(--mono); }
+.attention { --chat-prompt-primary-ink: #1a1a1a; overflow-wrap: anywhere; cursor: default; color: var(--ui-text-2); font-size: 13px; }
+.attention :global(.chat-prompt) { margin: 0; padding: 0; border: 0; background: transparent; max-width: 100%; }
+.attention > :is(strong, p) { margin: 0 0 4px; }
+.command { margin: 12px 0 0; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--ui-text-1) 5%, transparent); font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+.attentionPath { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 12px 0 0; font-size: 12px; line-height: 18px; color: var(--ui-text-2); }
+.attentionPath span { color: var(--ui-text-1); font: 11px/18px var(--mono); opacity: .75; overflow-wrap: anywhere; }
+
+/* Composer: intent chips above the chat page's composer (ChatPage.css .chat-composer). */
+.foot { display: flex; flex-direction: column; gap: 10px; width: 100%; margin-top: -12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.harvested { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-radius: 16px; background: light-dark(rgb(255 255 255 / 80%), rgb(255 255 255 / 6%)); color: var(--ui-text-2); font-size: 13px; line-height: 20px; }
+.workspaceRow { display: flex; align-items: center; gap: 10px; padding: 0 4px; color: var(--ui-text-2); font-size: 12px; }
+.workspaceRow > span { flex: none; }
+.workspaceRow input { flex: 1; min-width: 0; height: 32px; padding: 0 12px; border: 0; border-radius: 16px; background: light-dark(rgb(255 255 255 / 80%), rgb(255 255 255 / 6%)); color: var(--ui-text-1); font: inherit; font-size: 13px; }
+.composer { position: relative; padding: 12px 12px 8px 10px; border-radius: 24px; border: 1px solid light-dark(#fff, rgb(255 255 255 / 10%));
+  background: light-dark(linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 70.19%, rgba(255, 255, 255, .9) 100%), none),
+    light-dark(linear-gradient(180deg, rgba(0, 0, 0, .05) 0%, rgba(51, 51, 51, 0) 49.52%, rgba(102, 102, 102, 0) 100%), none), light-dark(#fff, #2a2a30);
+  box-shadow: 0 8px 10px 0 rgba(0, 0, 0, .02); }
+.input { display: block; width: 100%; min-height: 40px; max-height: 140px; padding: 2px 0 2px 10px; overflow-y: auto; border: 0; background: transparent; color: var(--ui-text-1); font-family: var(--font-body, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif); font-size: 14px; font-weight: 400; line-height: 20px; resize: none; field-sizing: content; outline: none; box-shadow: none; }
+.input:focus, .input:focus-visible { outline: none; box-shadow: none; border: 0; }
+.input::placeholder { color: #8993a3; }
+.bar { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding-top: 6px; }
+.barLeft { display: flex; flex: 1 1 auto; align-items: center; gap: 6px; min-width: 0; }
+.barRight { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; margin-left: auto; }
+/* The chat page's 32px flat pills (ChatPage.css .chat-composer__bar .chat-pill); ChatModelMenu.css adds the model pill's own rules. */
+.bar :global(.chat-pill) { position: relative; display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; height: 32px; padding: 0 10px; border: 0; border-radius: 15px; background: transparent; box-shadow: none; color: var(--ui-text-1); font-family: var(--font-body, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif); font-size: 13px; font-weight: 400; white-space: nowrap; cursor: pointer; }
+.bar :global(.chat-pill):hover:not(:disabled) { background-color: light-dark(rgba(0, 0, 0, .04), rgba(255, 255, 255, .06)); color: var(--ui-text-1); }
+.bar :global(.chat-pill):disabled { cursor: default; opacity: 1; }
+.bar :global(.chat-pill--icon-label) { padding: 0 12px 0 32px; }
+.bar :global(.chat-pill__icon) { position: absolute; left: 9px; top: 50%; display: grid; width: 15px; height: 15px; transform: translateY(-50%); pointer-events: none; }
+.bar :global(.chat-pill__icon) svg { width: 100%; height: 100%; }
+.bar :global(.chat-pill__label) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mention { padding: 0 8px 0 4px; }
+.mention[data-popup-open] { background: light-dark(#000, #fff); color: light-dark(#fff, #000); }
+.mention[data-popup-open]:hover:not(:disabled) { background: light-dark(#000, #fff); color: light-dark(#fff, #000); }
+.mentionAvatar { width: 24px; height: 24px; flex: 0 0 24px; font-size: 9px; }
+.mentionName { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.mentionChevron { width: 14px; height: 14px; opacity: .55; }
+.workspacePill { padding: 0 8px; }
+.workspacePill svg { width: 16px; height: 16px; }
+.workspacePill[aria-pressed=true] { background: light-dark(rgba(0, 0, 0, .06), rgba(255, 255, 255, .1)); }
+.pickerPopup { width: 320px; }
+.pickerPanel { max-height: 440px; padding: 20px 24px 12px; }
+.pickerAgents { margin-bottom: 12px; }
+/* Send in the nav bar's yellow; while a round runs, the black stop button with a yellow square. */
+.send { display: inline-grid; place-items: center; width: 40px; min-width: 40px; height: 40px; padding: 0; border: 0; border-radius: 999px; background: #ffef84; color: #000; cursor: pointer; }
+.send svg { width: 18px; height: 18px; }
+.send:hover:not(:disabled) { background: #ffe96b; color: #000; }
+.send:active:not(:disabled) { transform: scale(.96); }
+.send:disabled { background: transparent; color: #8993a3; opacity: 1; cursor: default; }
+.send.stop { background: #141414; color: #ffef84; }
+.send.stop:hover:not(:disabled) { background: #000; color: #ffe96b; }
+.send.stop svg { width: 12px; height: 12px; }
+.modal button:focus-visible, .modal a:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .growthNow, .lineupAvatar, .lineupAvatar::after { transition: none; }
+  .liveDot, .loading > span, .greet { animation: none; }
+}
+@media (max-width: 580px) {
+  .modal.modal[data-modal-variant="report"] { max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); height: calc(100dvh - 32px); padding: 20px 20px 24px; }
+  .modal.fit.fit { height: auto; }
+  .growthTrack > * + * { margin-left: 20px; }
+  .growthTrack > * + *::before { right: calc(100% + 4px); width: 12px; }
+  .notePaper, .aiCard { padding: 18px; }
+  .plant { margin-bottom: 48px; }
+}

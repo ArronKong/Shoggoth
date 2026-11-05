@@ -18,6 +18,7 @@ const ordinaryRecovery = scenario.startsWith("ordinary-recovery-");
 const nativeActiveRecovery = scenario.startsWith("native-active-");
 const nativeRejection = ["native-rejected", "native-rejected-immersive"].includes(scenario);
 if (!["slash-order", "slash-order-error", "slash-order-uncertain", "slash-order-immersive", "slash-order-uncertain-immersive", "upstream-error", "upstream-error-immersive", "uncertain", "restored", "rejected", "ordinary", "newer", "started", "accepted-error", "accepted-uncertain", "stale-query", "reselect", "terminal-race", "terminal-timeout", "terminal-reload", "ordinary-upstream", "ordinary-receipt", "ordinary-buffered", "ordinary-buffered-immersive", "observer-idle", "observer-idle-pending", "native-approval", "native-approval-immersive", "observer-idle-terminal", "runtime-abort", "runtime-abort-immersive", "runtime-snapshot", "runtime-abort-pending", "silent-queue", "silent-queue-immersive"].includes(scenario)
+  && !["observer-idle-immersive", "observer-idle-failed", "observer-idle-failed-immersive"].includes(scenario)
   && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !ordinaryRecovery || !["shoggoth", "openclaw", "hermes"].includes(backend)) throw Error("invalid fixture scope");
 const key = `agent:${backend}-recovery-fixture:11111111-1111-4111-8111-111111111111`, agentId = key.split(":")[1];
 const originalOperation = "original-operation-fixture", originalText = "Use this selected connector account exactly once";
@@ -58,9 +59,11 @@ const repeatedText = "你再随便创建 3 个";
 if (buffered) history = [{ role: "user", content: repeatedText, timestamp: Date.now() - 60_000,
   idempotencyKey: "older-operation:user", __openclaw: { id: "older-user" } },
   { role: "assistant", content: "上一轮的回复", timestamp: Date.now() - 50_000 }];
+const terminalHistoryText = scenario.startsWith("observer-idle-failed")
+  ? "错误：模型额度或余额不足，本轮对话已失败结束" : "已完成的最终回复";
 if (scenario.startsWith("observer-idle")) history = [
   { role: "user", content: "已完成的请求", timestamp: Date.now() - 60_000 },
-  { role: "assistant", content: "已完成的最终回复", timestamp: Date.now() - 50_000 },
+  { role: scenario.startsWith("observer-idle-failed") ? "system" : "assistant", content: terminalHistoryText, timestamp: Date.now() - 50_000 },
 ];
 if (reloaded && scenario === "terminal-reload") lookup = { status: "found", admissionAccepted: true, run: { status: "running" } };
 if (scenario === "stale-query") lookup = { status: "found", admissionAccepted: true, run: { status: "running" } };
@@ -479,7 +482,7 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
     return { scenario, backend, immersive, sent: 0, nativeApprovalVisible: true, recoveredInterruptedOriginal: true, noReplay: true };
   }
   if (scenario.startsWith("observer-idle")) {
-    await wait(() => document.body.innerText.includes("已完成的最终回复"), "completed canonical history");
+    await wait(() => document.body.innerText.includes(terminalHistoryText), "terminal canonical history");
     const thinking = () => document.querySelector(".chat-agent.is-active")?.textContent?.includes(i18n.t("chat.liveStatus.running"));
     emit({ state: "status", statusKind: "running" });
     await wait(() => thinking() && document.querySelector(".chat-stop"), "restored running controls");
@@ -496,9 +499,9 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
       return { scenario, backend, sent: 0, originalOperationPreserved: true, idleDoesNotSettleReceipt: true };
     }
     await wait(() => !banner() && !thinking() && !document.querySelector(".chat-stop"), "idle clears banner and generation controls");
-    check(pending().length === 0 && sent.length === 0 && document.body.innerText.includes("已完成的最终回复"), "idle changed the completed answer or sent a task");
+    check(pending().length === 0 && sent.length === 0 && document.body.innerText.includes(terminalHistoryText), "idle changed the terminal history or sent a task");
     check(!/\bidle\b/.test(document.body.innerText), "idle observation must not add a visible execution step");
-    return { scenario, backend, sent: 0, idleClearsThinking: true, idleClearsVerification: true, finalAnswerPreserved: true };
+    return { scenario, backend, immersive, sent: 0, idleClearsThinking: true, idleClearsVerification: true, terminalHistoryPreserved: true };
   }
   if (buffered) {
     const userCount = () => Array.from(document.querySelectorAll(immersive ? "[data-user-row]" : ".chat-thread .chat-bubble"))
