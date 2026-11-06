@@ -16,6 +16,7 @@ import FusionLoader from "../../components/FusionLoader";
 import { useStickyState } from "../../lib/useStickyState";
 import ApprovalRow from "./ApprovalRow";
 import { activityStatusRows } from "./activityStatusRows";
+import { DashboardActivitySkeleton } from "./DashboardSkeleton";
 
 // 统一活动流（今日动态）：cron / kanban / inspiration，隐藏静默输出、系统健康及 heartbeat 记录。
 // - 首屏来自 summary.activityPage（默认筛选第一页）；筛选/加载更多走
@@ -268,7 +269,7 @@ export default function ActivityFeed({
           : t("dashboard.filterInspiration");
 
   return (
-    <section className="dash-section">
+    <section className="dash-section" aria-busy={busy || undefined}>
       <div className="dash-feed-head">
         <h2 className="dash-section-title">
           {t("dashboard.feedTitle")}
@@ -331,7 +332,7 @@ export default function ActivityFeed({
         {fetchError && <div className="dash-degraded-note">{t("dashboard.activityFetchFailed")}</div>}
 
         {visibleEntries.length === 0 ? (
-          <div className="dash-empty">{busy ? t("common.loading") : t("dashboard.feedEmpty")}</div>
+          busy ? <DashboardActivitySkeleton /> : <div className="dash-empty">{t("dashboard.feedEmpty")}</div>
         ) : (
           <div className="dash-feed">
             {visibleEntries.map((e) => (

@@ -26,6 +26,7 @@ const realApi = moduleFrom('../app/manage-ui/src/api/mcpConnectors.ts', name => 
 }, { URLSearchParams, Event });
 const helpers = moduleFrom('../app/manage-ui/src/lib/mcpConnectorUi.ts', uiRequire);
 const catalog = moduleFrom('../app/manage-ui/src/lib/mcpRecommendationCatalog.ts', uiRequire);
+const presets = JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/mcp-featured-presets.json', import.meta.url), 'utf8'));
 const now = Date.now();
 function request(id, patch = {}) {
   return { requestId: id, kind: 'secret', serverId: 'mcp-local', registryName: null, url: null,
@@ -51,10 +52,12 @@ function fixture() {
     localStorage: storage, sessionStorage: storage,
     addEventListener(name, fn) { (listeners.get(name) || listeners.set(name, new Set()).get(name)).add(fn); },
     removeEventListener(name, fn) { listeners.get(name)?.delete(fn); },
+    dispatchEvent(event) { for (const fn of listeners.get(event.type) || []) fn(event); return true; },
     setTimeout(fn) { const id = ++timerId; uiTimers.set(id, fn); return id; },
     clearTimeout(id) { uiTimers.delete(id); },
   };
   const stickyState = moduleFrom('../app/manage-ui/src/lib/useStickyState.ts', uiRequire, { window: browser });
+  const pendingConnectors = moduleFrom('../app/manage-ui/src/lib/usePendingConnectors.ts', uiRequire, { window: browser, Event });
   const api = { MCP_CHANGE_EVENT: 'fixture-mcp-changed', formatMcpError: realApi.formatMcpError,
     async listMcpRequests(input) { reads.push(clone(input)); return { items: clone(rows.get(input.sessionKey) || []) }; },
     async listMcpConnectors() { return { revision: 1, servers: clone(servers) }; },
@@ -73,6 +76,8 @@ function fixture() {
     if (name === '../lib/mcpConnectorUi') return helpers;
     if (name === '../lib/mcpRecommendationCatalog') return catalog;
     if (name === '../lib/useStickyState') return stickyState;
+    if (name === '../lib/usePendingConnectors') return pendingConnectors;
+    if (name === '../../../agent-service/data/mcp-featured-presets.json') return { __esModule: true, default: presets };
     if (name === './McpConnectorIcon') return { __esModule: true, default: ({ iconId, identity }) => React.createElement('span', { 'data-icon': iconId || identity }) };
     if (name === './Modal') return { __esModule: true, default: Modal };
     if (name === '../pages/McpConnectorDialog') return { __esModule: true, default: props => React.createElement('div', { 'data-setup-dialog': true, ...props }) };
@@ -184,14 +189,14 @@ for (const mode of ['normal', 'immersive']) {
 assert.equal(realApi.formatMcpError({code:'MCP_REQUEST_PRIVATE_CHAT_REQUIRED',message:'private-canary'},translate),resources['zh-CN'].privateOnly);
 {
   const f = fixture();
-  const registryName = 'io.github.variflight/variflight-mcp';
+  const registryName = 'io.github.github/github-mcp-server';
   const entry = { registryName, version: '1.1.0', name: registryName };
   try {
     f.setServers([]);
     f.rows.set('connect', [request('add-flight', { kind: 'connection', serverId: null, registryName, title: registryName, requiredFields: [] })]);
     await f.mount('normal', 'connect');
-    assert.match(text(f.json), /飞常准.*查询航班/);
-    assert.ok(f.root.findByProps({ 'data-icon': 'variflight' }));
+    assert.match(text(f.json), /GitHub.*查看代码/);
+    assert.ok(f.root.findByProps({ 'data-icon': registryName }));
     assert.equal(f.root.findAllByProps({ role: 'dialog' }).length, 0);
     await f.event(() => button(f, resources['zh-CN'].add).props.onClick());
     assert.equal(f.root.findAllByProps({ 'data-setup-dialog': true }).length, 0);
@@ -212,7 +217,7 @@ assert.equal(realApi.formatMcpError({code:'MCP_REQUEST_PRIVATE_CHAT_REQUIRED',me
 }
 {
   const f = fixture();
-  const registryName = 'io.github.variflight/variflight-mcp';
+  const registryName = 'io.github.github/github-mcp-server';
   const connection = id => request(id, { kind: 'connection', serverId: null, registryName, requiredFields: [] });
   const first = connection('dismiss-flight');
   const pending = deferred();
@@ -224,20 +229,20 @@ assert.equal(realApi.formatMcpError({code:'MCP_REQUEST_PRIVATE_CHAT_REQUIRED',me
     await f.mount('normal', 'dismiss');
     await f.event(() => button(f, resources['zh-CN'].add).props.onClick());
     assert.equal(lookupSignal.aborted, false);
-    const close = () => f.root.findByProps({ 'aria-label': '关闭飞常准连接请求' });
+    const close = () => f.root.findByProps({ 'aria-label': '关闭GitHub连接请求' });
     await f.event(() => close().props.onClick());
     assert.equal(lookupSignal.aborted, true, 'closing stops an in-flight setup lookup');
     pending.resolve({ items: [{ registryName }] });
     await f.tick();
     assert.equal(f.root.findAllByProps({ 'data-setup-dialog': true }).length, 0);
-    assert.equal(text(f.json).includes('飞常准'), false);
+    assert.equal(text(f.json).includes('GitHub'), false);
     assert.ok(text(f.json).includes('Fixture credential-card'));
     f.pagehide();
     const [[storageKey, stored]] = f.storageWrites;
     assert.equal(storageKey, 'shoggoth.ui.v1');
     assert.deepEqual(JSON.parse(stored).values, { 'chat.dismissedMcpConnectionRequests': [first.requestId] });
     await f.change('immersive', 'dismiss');
-    assert.equal(text(f.json).includes('飞常准'), false, 'switching layout keeps this request hidden');
+    assert.equal(text(f.json).includes('GitHub'), false, 'switching layout keeps this request hidden');
     f.rows.set('dismiss', [first, connection('another-flight')]);
     await f.tick();
     await f.event(() => close().props.onClick());
@@ -274,7 +279,7 @@ for (const mode of ['normal', 'immersive']) {
     assert.equal(f.root.findAllByType('button').length, 2, 'only credential and sign-in actions remain; no add/import confirmation');
     await f.event(() => button(f, resources['zh-CN'].requestSecret).props.onClick());
     const dialog = f.root.findByProps({ 'data-setup-dialog': true });
-    assert.equal(dialog.props.credentialsOnly, true); assert.equal(dialog.props.server.id, 'mcp-key');
+    assert.equal(dialog.props.credentialsOnly, undefined, 'setup requests use the full shared connector details'); assert.equal(dialog.props.server.id, 'mcp-key');
     await f.event(() => dialog.props.onReady({ id: 'mcp-key', status: 'ready' }));
     assert.deepEqual(f.submissions, [{ requestId: 'setup-batch' }], 'completion carries no credential or alternate server identity');
     assert.equal(f.root.findAllByProps({ 'data-setup-dialog': true }).length, 0);

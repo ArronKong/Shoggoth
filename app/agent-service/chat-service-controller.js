@@ -304,8 +304,25 @@ function withoutLegacyCompactionDuplicates(events) {
   });
 }
 
+// Non-streaming providers make Codex emit item/started with the full text and
+// then item/completed; both land under one segmentId. Show only the last
+// non-empty snapshot of a Run's segment; distinct segments stay separate.
+function supersededTextSnapshotIds(events) {
+  const last = new Map();
+  for (const event of events) if (event.runId && event.kind === "assistant"
+    && typeof event.content?.segmentId === "string" && event.content.segmentId && transcriptMessageText(event)) {
+    last.set(JSON.stringify([event.runId, event.content.segmentId]), event.id);
+  }
+  return new Set(events.filter(event => {
+    if (!event.runId || event.kind !== "assistant" || typeof event.content?.segmentId !== "string") return false;
+    const kept = last.get(JSON.stringify([event.runId, event.content.segmentId]));
+    return kept !== undefined && kept !== event.id;
+  }).map(event => event.id));
+}
+
 function paginateTranscriptEvents(options) {
   const { params, responseId, cursorCodec } = options;
+  const superseded = supersededTextSnapshotIds(options.events);
   // One footer per native response, even when it has several text/tool/UI
   // segments or the final message lives on a different history page.
   const finalTextByRun = new Map();
@@ -344,7 +361,7 @@ function paginateTranscriptEvents(options) {
     }
   }
   const available = options.events
-    .filter((event) => event.seq <= beforeSeq)
+    .filter((event) => event.seq <= beforeSeq && !superseded.has(event.id))
     .filter((event) => !isApproval(event)
       && !(event.content?.transcriptType === "interaction.response" && approvalRequests.has(requestKey(event))))
     .flatMap((event) => {

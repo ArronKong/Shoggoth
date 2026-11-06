@@ -6,7 +6,7 @@ import ConnectorTools from "../components/ConnectorTools";
 import { ConnectorConnectionHeading, ConnectorFooter, ConnectorInfo } from "../components/ConnectorDetails";
 import { useConfirm } from "../components/ui";
 import { addMcpConnector, cancelMcpSignIn, getMcpSignIn, getMcpOAuthInfo, importMcpConnectors, listMcpConnectors, formatMcpError, searchMcpRegistry, removeMcpConnector, rebindMcpConnector, saveMcpCredentials, startMcpSignIn, updateMcpConnector, verifyMcpConnector, type McpFields, type McpMutation, type McpRegistryItem, type McpServer, type McpSignIn, type McpSetupField, type McpTransport } from "../api/mcpConnectors";
-import { FIGMA_DESKTOP_URL, FIGMA_REGISTRY_NAME, isFigmaDesktopConnector, mcpFieldsFromInputs, parseMcpArguments, mcpRecommendationText, mcpRemoteUrlsMatch, mcpRecommendationPackageTransport, mcpRecommendationMatchesServer, mcpServiceGroupEndpoints, mcpServiceGroupSummary, type McpRecommendation } from "../lib/mcpConnectorUi";
+import { FIGMA_DESKTOP_URL, FIGMA_REGISTRY_NAME, isFigmaDesktopConnector, mcpFieldsFromInputs, parseMcpArguments, mcpRecommendationText, mcpRemoteUrlsMatch, mcpRecommendationPackageTransport, mcpRecommendationMatchesServer, mcpRecommendationForTarget, mcpServiceGroupEndpoints, mcpServiceGroupSummary, type McpRecommendation } from "../lib/mcpConnectorUi";
 import { mcpBrandId, mcpConnectorDeveloper, mcpConnectorName, mcpOfficialSkillBrand, mcpRegistrySummary } from "../lib/mcpRecommendationCatalog";
 import featuredPresets from "../../../agent-service/data/mcp-featured-presets.json";
 import bridgeVersions from "../../../agent-service/data/mcp-bundled-bridge-versions.json";
@@ -15,7 +15,7 @@ import flightawarePolicy from "../../../core/flightaware-connector-policy.json";
 
 function InlineFrame({ children }: { children?: ReactNode }) { return <div>{children}</div>; }
 
-function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, autoAdd, onStage, onUnstage, onClose, onChanged }: McpConnectorDialogProps & { recommendation: McpRecommendation }) {
+function McpServiceGroupDialog({ recommendation, server, initialUrl, catalogEntry, pending, autoAdd, onStage, onUnstage, onClose, onChanged, onReady, connectionRequest }: McpConnectorDialogProps & { recommendation: McpRecommendation }) {
   const { t, i18n } = useTranslation(), confirm = useConfirm();
   const tr = (key: string) => t(`mcpConnectors.${key}`), language = i18n?.resolvedLanguage || i18n?.language || "en";
   const displayName = mcpConnectorName(recommendation.id, recommendation.name);
@@ -27,6 +27,7 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
   const [selected, setSelected] = useState<McpServer>();
   const mounted = useRef(true), actionLock = useRef(false), readGeneration = useRef(0), initialAdd = useRef(false);
   const summary = mcpServiceGroupSummary(recommendation, servers), ready = summary.ready === summary.total;
+  const locked = busy || !!connectionRequest?.busy;
   const preAdd = !!catalogEntry && !added && !servers.length;
   const fields = recommendation.fields || [];
   const missingKey = recommendation.setup === "token" && !accessToken.trim()
@@ -40,6 +41,13 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
     return snapshot;
   };
   const reload = () => void load().catch(error => { if (mounted.current) { setLoaded(false); setLoadError(formatMcpError(error, t)); } });
+  const notifyReady = (members: McpServer[]) => {
+    const current = mcpServiceGroupSummary(recommendation, members);
+    if (!onReady || current.ready !== current.total || current.ambiguous) return;
+    const targetUrl = initialUrl || (server?.transport.kind === "remote" ? server.transport.url : recommendation.url);
+    const target = current.members.find(value => value.transport.kind === "remote" && mcpRemoteUrlsMatch(value.transport.url, targetUrl));
+    if (target) onReady(target);
+  };
   useEffect(() => {
     mounted.current = true; const controller = new AbortController();
     void load(controller.signal).catch(error => { if (mounted.current && !controller.signal.aborted) setLoadError(formatMcpError(error, t)); });
@@ -53,15 +61,18 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
     if (!mounted.current) return;
     setServers(previous => [...previous.filter(value => value.id !== result.server.id), result.server]); onChanged();
   };
-  const run = async (action: () => Promise<void>) => {
-    if (actionLock.current) return;
+  const run = async (action: () => Promise<void>, completeWhenReady = false) => {
+    if (actionLock.current || connectionRequest?.busy) return;
     actionLock.current = true; setBusy(true); setError(""); readGeneration.current++;
-    try { await action(); }
+    let succeeded = false;
+    try { await action(); succeeded = true; }
     catch (error) { if (mounted.current) setError(formatMcpError(error, t)); }
     finally {
       if (mounted.current) {
         setAccessToken(""); setValues({}); setShowSecrets(false);
-        try { await load(); } catch (error) { if (mounted.current) { setLoaded(false); setLoadError(formatMcpError(error, t)); } }
+        let refreshed: McpServer[] | undefined;
+        try { refreshed = (await load()).servers; } catch (error) { if (mounted.current) { setLoaded(false); setLoadError(formatMcpError(error, t)); } }
+        if (mounted.current && succeeded && completeWhenReady && refreshed) notifyReady(refreshed);
         if (mounted.current) setBusy(false);
       }
       actionLock.current = false;
@@ -90,7 +101,7 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
           name: `${recommendation.name} · ${mcpRecommendationText(endpoint.label, language)}`, fields: credentials, expectedRevision: snapshot.revision }));
     }
     if (mounted.current) { setEditing(false); try { onUnstage?.(); } catch { setError(tr("flow.storageError")); } }
-  });
+  }, true);
   const verify = () => run(async () => {
     for (const member of servers) {
       if (!mounted.current) return;
@@ -98,7 +109,7 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
       if (!mounted.current) return;
       if (current?.enabled && current.status !== "disabled" && mcpRecommendationMatchesServer(recommendation, current)) remember(await verifyMcpConnector(current.id));
     }
-  });
+  }, true);
   const remove = () => run(async () => {
     if (!await confirm({ title: tr("group.remove"), message: t("mcpConnectors.group.removeConfirm", { count: servers.length }), confirmLabel: tr("flow.remove"), danger: true })) return;
     for (const member of servers) {
@@ -113,17 +124,17 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
     if (mounted.current) { onUnstage?.(); onChanged(); onClose(); }
   });
   if (selected) return <McpSingleConnectorDialog key={selected.id} server={selected} recommendation={recommendation} onClose={() => { setSelected(undefined); reload(); }} onChanged={() => { onChanged(); reload(); }} />;
-  const footer = <ConnectorFooter hint={tr(ready ? "flow.connectedHint" : "defaultAccess")} onRemove={servers.length || added ? () => void remove() : undefined} removeDisabled={busy || !loaded}>
-    {preAdd ? <button type="button" className="btn-dark btn-sm" disabled={!loaded || busy} onClick={stage}>{tr("add")}</button>
-      : !ready || editing ? <button type="button" className="btn-dark btn-sm" disabled={busy || !loaded || !!missingKey || summary.ambiguous} onClick={() => void configure()}>{tr(busy ? "working" : "group.connectAll")}</button>
-      : <button type="button" className="btn-dark btn-sm" disabled={busy} onClick={onClose}>{tr("flow.done")}</button>}
+  const footer = <ConnectorFooter hint={tr(ready ? "flow.connectedHint" : "defaultAccess")} onRemove={servers.length || added ? () => void remove() : undefined} removeDisabled={locked || !loaded}>
+    {preAdd ? <button type="button" className="btn-dark btn-sm" disabled={!loaded || locked} onClick={stage}>{tr("add")}</button>
+      : !ready || editing ? <button type="button" className="btn-dark btn-sm" disabled={locked || !loaded || !!missingKey || summary.ambiguous} onClick={() => void configure()}>{tr(locked ? "working" : "group.connectAll")}</button>
+      : <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={onReady ? () => notifyReady(servers) : onClose}>{tr("flow.done")}</button>}
   </ConnectorFooter>;
-  return <Modal open onClose={onClose} dismissible={!busy} title={<span className={s.dialogIdentity}><McpConnectorIcon name={displayName} identity={recommendation.id} iconId={recommendation.id} />{displayName}</span>} width={640} variant="connector" subtitle={mcpRecommendationText(recommendation.description, language)} footer={footer}>
+  return <Modal open onClose={onClose} dismissible={!locked} title={<span className={s.dialogIdentity}><McpConnectorIcon name={displayName} identity={recommendation.id} iconId={recommendation.id} />{displayName}</span>} width={640} variant="connector" subtitle={mcpRecommendationText(recommendation.description, language)} footer={footer}>
     <div className={s.detail}>
       <ConnectorTools overview description={mcpRecommendationText(recommendation.description, language)} previewId={recommendation.id} />
       <section className={s.connectionPanel}>
       <ConnectorConnectionHeading title={tr("flow.connectionStatus")} guide={added || servers.length ? { url: recommendation.docsUrl, label: tr("officialGuide") } : undefined}
-        status={<span className={s.status} data-state={ready ? "ready" : undefined} role="status" aria-live="polite">{busy ? tr("working") : !loaded ? tr("loading") : !servers.length ? tr(preAdd ? "flow.notAdded" : "flow.pending") : t("mcpConnectors.group.summary", { ready: summary.ready, total: summary.total })}</span>} />
+        status={<span className={s.status} data-state={ready ? "ready" : undefined} role="status" aria-live="polite">{locked ? tr("working") : !loaded ? tr("loading") : !servers.length ? tr(preAdd ? "flow.notAdded" : "flow.pending") : t("mcpConnectors.group.summary", { ready: summary.ready, total: summary.total })}</span>} />
       <p className={s.muted}>{tr(preAdd ? "flow.addHint" : "group.hint")}</p>
       <details className={s.clientSetup}><summary>{tr("group.services")}</summary>
         {endpoints.map(endpoint => {
@@ -133,7 +144,7 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
             {members.map(member => <details key={member.id} className={s.clientSetup}><summary>{member.name}</summary>
               {member.lastCheck?.errorCode && <p className={s.error}>{formatMcpError({ code: member.lastCheck.errorCode }, t)}</p>}
               <ConnectorTools serverId={member.id} status={member.status} checkedAt={member.lastCheck?.at} />
-              <button type="button" className="btn-secondary btn-sm" disabled={busy} onClick={() => setSelected(member)}>{tr("group.manageService")}</button>
+              <button type="button" className="btn-secondary btn-sm" disabled={locked} onClick={() => setSelected(member)}>{tr("group.manageService")}</button>
             </details>)}
           </div>;
         })}
@@ -146,18 +157,18 @@ function McpServiceGroupDialog({ recommendation, server, catalogEntry, pending, 
           {recommendation.setupSteps && <ol className={s.setupSteps}>{recommendation.setupSteps.map((step, index) => <li key={index}>{mcpRecommendationText(step, language)}</li>)}</ol>}
           <p className={s.muted}>{tr("group.keyHint")}</p>
           <div className={s.fields}>
-            {recommendation.setup === "token" && <label className={s.field}><span>{tr("accessTokenRequired")}</span><input type={showSecrets ? "text" : "password"} autoComplete="off" spellCheck={false} disabled={busy} value={accessToken} onChange={event => setAccessToken(event.target.value)} /></label>}
-            {fields.map(field => <label className={s.field} key={`${field.location}:${field.name}`}><span>{field.label ? mcpRecommendationText(field.label, language) : field.name}{field.required ? " *" : ""}</span><input type={field.secret && !showSecrets ? "password" : "text"} autoComplete="off" spellCheck={false} required={field.required} disabled={busy} value={values[`${field.location}:${field.name}`] ?? field.default ?? ""} onChange={event => setValues(previous => ({ ...previous, [`${field.location}:${field.name}`]: event.target.value }))} /></label>)}
+            {recommendation.setup === "token" && <label className={s.field}><span>{tr("accessTokenRequired")}</span><input type={showSecrets ? "text" : "password"} autoComplete="off" spellCheck={false} disabled={locked} value={accessToken} onChange={event => setAccessToken(event.target.value)} /></label>}
+            {fields.map(field => <label className={s.field} key={`${field.location}:${field.name}`}><span>{field.label ? mcpRecommendationText(field.label, language) : field.name}{field.required ? " *" : ""}</span><input type={field.secret && !showSecrets ? "password" : "text"} autoComplete="off" spellCheck={false} required={field.required} disabled={locked} value={values[`${field.location}:${field.name}`] ?? field.default ?? ""} onChange={event => setValues(previous => ({ ...previous, [`${field.location}:${field.name}`]: event.target.value }))} /></label>)}
           </div>
-          <p className={s.muted}>{tr("secretsHint")}</p><button type="button" className={s.textButton} disabled={busy} aria-pressed={showSecrets} onClick={() => setShowSecrets(value => !value)}>{tr(showSecrets ? "hideValue" : "showValue")}</button>
+          <p className={s.muted}>{tr("secretsHint")}</p><button type="button" className={s.textButton} disabled={locked} aria-pressed={showSecrets} onClick={() => setShowSecrets(value => !value)}>{tr(showSecrets ? "hideValue" : "showValue")}</button>
 
         </>}
-        {!!servers.length && <div className={s.actions}><button type="button" className={s.textButton} disabled={busy || !loaded} onClick={() => void verify()}>{tr("group.verifyAll")}</button>{ready && <button type="button" className={s.textButton} disabled={busy} onClick={() => setEditing(value => !value)}>{tr("flow.configure")}</button>}</div>}
+        {!!servers.length && <div className={s.actions}><button type="button" className={s.textButton} disabled={locked || !loaded} onClick={() => void verify()}>{tr("group.verifyAll")}</button>{ready && <button type="button" className={s.textButton} disabled={locked} onClick={() => setEditing(value => !value)}>{tr("flow.configure")}</button>}</div>}
       </>}
       </section>
-      {loadError && <p className={s.error} role="alert">{loadError} <button type="button" className={s.textButton} disabled={busy} onClick={reload}>{tr("retry")}</button></p>}
+      {loadError && <p className={s.error} role="alert">{loadError} <button type="button" className={s.textButton} disabled={locked} onClick={reload}>{tr("retry")}</button></p>}
       <ConnectorInfo developer={mcpConnectorDeveloper(recommendation.id, recommendation.name)} />
-      {error && <p className={s.error} role="alert">{error}</p>}
+      {(connectionRequest?.error || error) && <p className={s.error} role="alert">{connectionRequest?.error || error}</p>}
     </div>
   </Modal>;
 }
@@ -169,9 +180,13 @@ type McpConnectorDialogProps = {
 };
 
 export default function McpConnectorDialog(props: McpConnectorDialogProps) {
-  return mcpServiceGroupEndpoints(props.recommendation).length && !props.managed && !props.credentialsOnly && !props.embedded
-    ? <McpServiceGroupDialog key={props.recommendation!.id} {...props} recommendation={props.recommendation!} />
-    : <McpSingleConnectorDialog {...props} />;
+  const registryName = props.item?.registryName || (props.server?.source?.kind === "registry" ? props.server.source.registryName : undefined);
+  const recommendation = props.recommendation || mcpRecommendationForTarget(featuredPresets as McpRecommendation[], {
+    server: props.server, registryName, catalogId: registryName ? mcpBrandId(registryName) : undefined, url: props.initialUrl,
+  });
+  return mcpServiceGroupEndpoints(recommendation).length && !props.managed && !props.credentialsOnly && !props.embedded
+    ? <McpServiceGroupDialog key={recommendation!.id} {...props} recommendation={recommendation!} />
+    : <McpSingleConnectorDialog {...props} recommendation={recommendation} />;
 }
 
 function McpSingleConnectorDialog({ server: initialServer, item, latest, onLatest, recommendation, initialUrl = "", allowFigmaDesktop = false, managed = false, credentialsOnly = false, embedded = false, catalogEntry = false, pending = false, autoAdd = false, onStage, onUnstage, onClose, onChanged, onReady, connectionRequest }: McpConnectorDialogProps) {
@@ -405,7 +420,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     {preAdd ? <button type="button" className="btn-dark btn-sm" disabled={busy || recommendation?.setup === "restricted" || !!item && (!option || option.available === false)} onClick={() => void add()}>{tr(busy ? "working" : "add")}</button>
       : ready && !editing && !credentialsOnly ? <button type="button" className="btn-dark btn-sm" disabled={locked}
         onClick={connectionRequest && onReady ? () => onReady(server) : onClose}>
-        {tr(connectionRequest ? connectionRequest.busy ? "working" : "finish" : "flow.done")}
+        {tr(connectionRequest?.busy ? "working" : "flow.done")}
       </button> : recommendation?.setup === "restricted" ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={onClose}>{tr("flow.done")}</button> : figmaDesktop ? <button type="button" className="btn-dark btn-sm" disabled={locked} onClick={() => void checkDesktop()}>{tr(busy ? "figmaDesktop.checking" : server?.status === "disabled" ? "figmaDesktop.reconnect" : server ? "verify" : "figmaDesktop.connect")}</button> : primaryAction}
   </ConnectorFooter>;
   const maintenance = server && !credentialsOnly && <>
@@ -418,7 +433,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
   const Frame = embedded ? InlineFrame : Modal;
   return <Frame open onClose={onClose} dismissible={!busy && !verifying && !connectionRequest?.busy}
     title={<span className={s.dialogIdentity}><McpConnectorIcon name={title}
-      identity={item?.registryName || recommendation?.id || registryName || server?.id || "custom"}
+      identity={item?.registryName || registryName || recommendation?.id || server?.id || "custom"}
       iconId={recommendation?.id || mcpOfficialSkillBrand(server) || server?.recommendationId || registrySummary?.iconId} />{title}</span>}
     width={640} variant="connector" subtitle={description} footer={footer}>
     <div className={s.detail}>

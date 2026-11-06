@@ -16,7 +16,7 @@ import McpConnectorDialog from "./McpConnectorDialog";
 import LarkCliDialog, { LarkCliInstalledRow, LarkCliRecommendation, useLarkCliConnector } from "./LarkCliConnector";
 import OfficialSkillDialog, { OfficialSkillInstalledRows, OfficialSkillRecommendation, officialConnectorDefinitions, useOfficialSkillConnectors, type OfficialConnectorDefinition } from "./OfficialSkillConnectors";
 import type { OfficialConnectorId } from "../api/officialSkillConnectors";
-import { FIGMA_REGISTRY_NAME, isFigmaDesktopConnector, mcpAvailableUpdate, mcpRecommendationText, mcpRecommendationMatchesServer, mcpServiceGroupEndpoints, mcpServiceGroupSummary, type McpRecommendation } from "../lib/mcpConnectorUi";
+import { FIGMA_REGISTRY_NAME, isFigmaDesktopConnector, mcpAvailableUpdate, mcpRecommendationText, mcpRecommendationMatchesServer, mcpRecommendationForTarget, mcpServiceGroupEndpoints, mcpServiceGroupSummary, type McpRecommendation } from "../lib/mcpConnectorUi";
 import { mcpBrandId, mcpConnectorDeveloper, mcpConnectorName, mcpOfficialSkillBrand, mcpRecommendationRank, mcpRecommendationVisibleInLocale, mcpRegistrySummary } from "../lib/mcpRecommendationCatalog";
 import featuredServers from "../../../agent-service/data/mcp-featured-servers.json";
 import featuredPresets from "../../../agent-service/data/mcp-featured-presets.json";
@@ -80,7 +80,7 @@ export default function ConnectorsPage() {
     if (card.kind === "lark") { setLarkDialog(true); if (autoAdd) void lark.change("install"); return; }
     if (card.kind === "official") { setOfficialDialog(card.definition.id); if (autoAdd && !serverFor(card) && !official.data?.items.find(item => item.id === card.definition.id)?.canRemove) void official.change(card.definition.id, "install"); return; }
     const server = serverFor(card);
-    setDialog({ ...(card.kind === "registry" ? { item: card.item, recommendation: recommendations.find(value => value.registryName === card.item.registryName) } : { recommendation: card.recommendation }),
+    setDialog({ ...(card.kind === "registry" ? { item: card.item, recommendation: mcpRecommendationForTarget(recommendations, { registryName: card.item.registryName, catalogId: card.id }) } : { recommendation: card.recommendation }),
       server, pendingKey: keyFor(card), autoAdd });
   };
   const pendingCards = cards.filter(card => ["registry", "preset"].includes(card.kind) && pending.ids.includes(keyFor(card)) && !serverFor(card));
@@ -93,7 +93,7 @@ export default function ConnectorsPage() {
       : card.kind === "official" ? !official.data?.items.find(item => item.id === card.definition.id)?.canRemove && !serverFor(card)
       : !serverFor(card) && !pending.ids.includes(keyFor(card)));
   const cardContent = (card: Extract<RecommendationCard, { kind: "registry" | "preset" }>) => {
-    const recommendation = card.kind === "preset" ? card.recommendation : recommendations.find(value => value.registryName === card.item.registryName);
+    const recommendation = card.kind === "preset" ? card.recommendation : mcpRecommendationForTarget(recommendations, { registryName: card.item.registryName, catalogId: card.id });
     const summary = card.kind === "registry" ? mcpRegistrySummary(card.item.registryName) : undefined;
     const name = mcpConnectorName(recommendation?.id || (card.kind === "registry" ? card.item.registryName : card.id), recommendation?.name || summary?.name || (card.kind === "registry" ? card.item.name : card.id));
     const description = recommendation?.description || summary?.description;
@@ -124,7 +124,7 @@ export default function ConnectorsPage() {
       <ul className={s.installedList}><AppleDeviceRows model={devices} installed /><LarkCliInstalledRow model={lark} onOpen={() => setLarkDialog(true)} /><OfficialSkillInstalledRows model={official} servers={installed.data?.servers} onOpen={setOfficialDialog} />{installedRows.map(server => {
         const local = isFigmaDesktopConnector(server);
         const identity = local ? FIGMA_REGISTRY_NAME : server.source.kind === "registry" ? server.source.registryName : server.id;
-        const recommendation = recommendations.find(value => mcpRecommendationMatchesServer(value, server));
+        const recommendation = mcpRecommendationForTarget(recommendations, { server, catalogId: server.source.kind === "registry" ? mcpBrandId(server.source.registryName) : undefined });
         const group = recommendation && mcpServiceGroupEndpoints(recommendation).length ? mcpServiceGroupSummary(recommendation, unmanagedServers || []) : undefined;
         const officialDefinition = officialConnectorDefinitions.find(value => value.id === mcpOfficialSkillBrand(server));
         const name = mcpConnectorName(local ? "figma" : officialDefinition?.id || recommendation?.id || identity, group ? recommendation!.name : server.name);

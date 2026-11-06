@@ -6,6 +6,7 @@ export const FIGMA_DESKTOP_URL = "http://127.0.0.1:3845/mcp";
 
 export interface McpRecommendation {
   id: string; name: string; url?: string; docsUrl: string; registryName?: string;
+  registryAliases?: string[];
   endpoints?: Array<{ url: string; label: { "zh-CN": string; en: string } }>;
   connectAllServices?: boolean;
   setup?: "oauth" | "oauth-client" | "token" | "none" | "instance" | "endpoint" | "local" | "api-key" | "restricted";
@@ -54,6 +55,23 @@ export function mcpRecommendationMatchesServer(value: McpRecommendation, server:
   }
   if (value.transport?.kind === "stdio-package") return transport.kind === "stdio-package" && transport.registryType === value.transport.registryType && transport.identifier === value.transport.identifier;
   return false;
+}
+
+export function mcpRecommendationForTarget(recommendations: McpRecommendation[], target: { server?: McpServer; registryName?: string | null; catalogId?: string; url?: string | null }): McpRecommendation | undefined {
+  if (target.server?.transport) {
+    const existing = recommendations.find(value => mcpRecommendationMatchesServer(value, target.server!));
+    if (existing) return existing;
+  }
+  const registryName = target.registryName || (target.server?.source?.kind === "registry" ? target.server.source.registryName : undefined);
+  if (registryName) {
+    const registry = recommendations.find(value => value.registryName === registryName || value.id === target.catalogId);
+    if (registry) return registry;
+    // Aliases select the current app setup for a new request. An installed
+    // Registry package keeps its own transport and credential requirements.
+    if (!target.server) return recommendations.find(value => value.registryAliases?.includes(registryName));
+  }
+  return !target.server && target.url ? recommendations.find(value =>
+    [value.url, ...(value.endpoints || []).map(endpoint => endpoint.url)].some(url => mcpRemoteUrlsMatch(url, target.url!))) : undefined;
 }
 
 export function mcpServiceGroupEndpoints(value?: McpRecommendation): NonNullable<McpRecommendation["endpoints"]> {

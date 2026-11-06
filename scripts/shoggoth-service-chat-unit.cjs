@@ -788,6 +788,36 @@ test("legacy duplicate command receipts fold across history pages without hiding
   } finally { await controller.close(); }
 });
 
+test("repeated full snapshots of one native text segment show once across history pages", async () => {
+  // Non-streaming providers (e.g. mimo via Codex) emit item/started with the
+  // full text before item/completed; both are stored under one segmentId.
+  const text = (id, runId, seq, segmentId, value, method) => ({ id, runId, seq, kind: "assistant", contextExcluded: false,
+    occurredAt: 1000 + seq, content: { transcriptType: "text", method, itemId: segmentId, segmentId, text: value } });
+  const events = [
+    { id: "user-a", runId: "run-a", seq: 1, kind: "user", contextExcluded: false, occurredAt: 1001, content: { text: "你好" } },
+    text("a-started-empty", "run-a", 2, "native-text:run-a:1", "", "item/started"),
+    text("a-started-full", "run-a", 3, "native-text:run-a:1", "你好！我是 Shoggoth。", "item/started"),
+    text("a-completed", "run-a", 4, "native-text:run-a:1", "你好！我是 Shoggoth。", "item/completed"),
+    text("a-second-segment", "run-a", 5, "native-text:run-a:2", "你好！我是 Shoggoth。", "item/completed"),
+    { id: "user-b", runId: "run-b", seq: 6, kind: "user", contextExcluded: false, occurredAt: 1006, content: { text: "再说一次" } },
+    text("b-started-empty", "run-b", 7, "native-text:run-a:1", "", "item/started"),
+    text("b-completed", "run-b", 8, "native-text:run-a:1", "你好！我是 Shoggoth。", "item/completed"),
+  ];
+  const before = JSON.stringify(events);
+  const transcriptStore = { ensureSession() {}, importHistoryItems() {}, getSessionDerivedTitle() { return null; },
+    listEvents: () => structuredClone(events) };
+  const { controller } = fixture({ transcriptStore }); await controller.open();
+  try {
+    const messages = []; let cursor = null;
+    do {
+      const page = await controller.handle("chat.history", { sessionKey: SESSION_KEY, cursor, limit: 1 }, "segment-snapshots");
+      messages.unshift(...page.messages); cursor = page.nextCursor;
+    } while (cursor);
+    assert.deepEqual(messages.map(item => item.id), ["user-a", "a-completed", "a-second-segment", "user-b", "b-completed"]);
+    assert.equal(JSON.stringify(events), before);
+  } finally { await controller.close(); }
+});
+
 test("transcript history 只给 federation 用户输入附加 inter-session provenance", async () => {
   const transcriptStore = {
     ensureSession() {},

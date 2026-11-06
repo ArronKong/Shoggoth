@@ -15,6 +15,7 @@ const { matchTicketmasterBridgeLaunch, normalizeTicketmasterTransport, validateT
 const { matchFlightawareBridgeLaunch, normalizeFlightawareTransport, validateFlightawareBridgeCredentials, flightawareConfiguredFields, KEY_FIELD: FLIGHTAWARE_KEY_FIELD } = require("./flightaware-mcp-launch");
 const { normalizeCustomMcpTransport } = require("./mcp-agent-setup-plan");
 const { McpAgentSetup } = require("./mcp-agent-setup");
+const catalogPresets = require("./data/mcp-featured-presets.json");
 const fail = code => { throw serviceError(code, code); };
 const copy = value => JSON.parse(JSON.stringify(value));
 const MAX_REQUESTS = 512;
@@ -22,6 +23,11 @@ const EXPIRES_MS = 24 * 60 * 60 * 1000;
 const RETIRED_TOOLS = Object.freeze(["connector_list_apps", "connector_list_connections", "connector_search_actions", "connector_get_action_guide", "connector_execute_action"]);
 const publicRequest = r => Object.fromEntries(["requestId", "kind", "serverId", "registryName", "url", "title", "purpose", "status", "requiredFields", "expiresAt", "createdAt", "updatedAt", ...(r.kind === "setup" ? ["serverIds", "continuation"] : [])].map(k => [k, copy(r[k])]));
 function publicUrl(raw) { if (!raw) return null; const u = new URL(raw); u.username = ""; u.password = ""; u.search = ""; u.hash = ""; return u.href; }
+function matchesCatalogAlias(registryName, server) {
+  const preset = catalogPresets.find(value => value.registryAliases?.includes(registryName));
+  return !!preset?.url && server.source.kind === "custom" && server.transport.kind === "remote"
+    && server.transport.protocol === "streamable-http" && new URL(server.transport.url).href === new URL(preset.url).href;
+}
 const { mcpConnectorSubjectId: subjectId } = require("../core/mcp-connector-identity");
 function configured(fields) {
   return ["env", "headers", "query", "arguments", "variables"].flatMap(k => Object.keys(fields?.[k] || {}).map(n => `${k === "headers" ? "header" : k === "arguments" ? "argument" : k === "variables" ? "variable" : k}:${n}`))
@@ -400,7 +406,8 @@ class McpConnectorController {
           || !Object.hasOwn(input.fields[container], name)) fail("MCP_REQUEST_TARGET_MISMATCH");
       }
       const id = r.serverId || input.serverId; const server = id && this.store.get(id); if (!server) fail("MCP_SERVER_NOT_FOUND");
-      if (r.registryName && (server.source.kind !== "registry" || server.source.registryName !== r.registryName)) fail("MCP_REQUEST_TARGET_MISMATCH");
+      if (r.registryName && (server.source.kind !== "registry" || server.source.registryName !== r.registryName)
+        && !(r.kind === "connection" && matchesCatalogAlias(r.registryName, server))) fail("MCP_REQUEST_TARGET_MISMATCH");
       if (r.url && (server.transport.kind !== "remote" || publicUrl(server.transport.url) !== r.url)) fail("MCP_REQUEST_TARGET_MISMATCH");
       if (input.fields) await this.completeCredentials(id, input.fields, input.expectedRevision ?? this.store.revision);
       const checked = await this.verify(id); if (checked.server?.status !== "ready") fail("MCP_SERVER_PROBE_FAILED");

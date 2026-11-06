@@ -30,6 +30,7 @@ const stubs = {
   '../../components/AgentAvatar': avatarModule,
   './ApprovalRow': host('approval-row'),
   './activityStatusRows': statusModule.exports,
+  './DashboardSkeleton': { DashboardActivitySkeleton: host('activity-skeleton') },
   '../../lib/useStickyState': { useStickyState: (key, initial) => React.useState(key === 'dashboard.kindFilter' ? savedKindFilter ?? initial : initial) },
   '../usage/charts': { fmtMs: String },
 };

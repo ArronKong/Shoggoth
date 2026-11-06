@@ -320,8 +320,12 @@ class CodexRuntimeHandle {
 
   _threadProviderConfig(input) {
     if (input?.modelProvider === undefined) return undefined;
-    this._threadProviderKind(input);
-    return { model_provider: input.modelProvider.configId };
+    const kind = this._threadProviderKind(input);
+    // Third-party routes do not guarantee Codex's hosted search contract and
+    // can reject the entire request just because the unused tool is present.
+    // Product web_search/web_fetch remain available through Shoggoth's MCP.
+    return { model_provider: input.modelProvider.configId,
+      ...(!["chatgpt", "openai-api-key"].includes(kind) ? { web_search: "disabled" } : {}) };
   }
 
   _rememberThreadProvider(threadId, input) {

@@ -1,7 +1,7 @@
 {
   "name": "shoggoth-desktop",
   "productName": "Shoggoth",
-  "version": "0.8.283",
+  "version": "0.8.285",
   "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
   "private": true,
   "license": "Apache-2.0",
@@ -101,7 +101,7 @@
     "test:mcp-connectors:shared": "node --test --test-concurrency=1 scripts/shoggoth-standalone-mcp-rebind-unit.cjs scripts/shoggoth-skill-management-query-unit.cjs scripts/runtime-mcp-call-binding-unit.cjs scripts/service-maintenance-unit.cjs scripts/shoggoth-product-help-unit.cjs",
     "test:mcp-connectors:chat": "node scripts/chat-send-recovery-unit.mjs && node scripts/chat-send-recovery-ui.mjs && node --test scripts/native-chat-ui-recovery-unit.cjs",
     "test:mcp-connectors:package": "node scripts/release-package-checks-unit.cjs",
-    "test:mcp-connectors:ui": "node scripts/mcp-connectors-ui-regression.mjs && node scripts/mcp-connector-dialog-update-unit.mjs && node scripts/mcp-service-groups-ui-unit.mjs && node scripts/connector-setup-flow-ui-unit.mjs && node scripts/connector-tool-previews-ui-unit.mjs && node scripts/mcp-connection-request-card-unit.mjs",
+    "test:mcp-connectors:ui": "node scripts/mcp-connectors-ui-regression.mjs && node scripts/mcp-connector-dialog-update-unit.mjs && node scripts/mcp-service-groups-ui-unit.mjs && node scripts/connector-setup-flow-ui-unit.mjs && node scripts/connector-tool-previews-ui-unit.mjs && node scripts/mcp-connection-request-card-unit.mjs && node scripts/mcp-connector-entry-consistency-unit.mjs",
     "test:mcp-connectors:app": "node scripts/shoggoth-packaged-runtime-smoke.mjs --require-candidate",
     "test:flightaware": "node --test scripts/flightaware-connector-unit.cjs && node scripts/flightaware-connector-ui-unit.mjs && node scripts/flightaware-connector-service-e2e.cjs",
     "test:ticketmaster": "node --test scripts/ticketmaster-connector-unit.cjs && node scripts/ticketmaster-connector-ui-unit.mjs && node scripts/ticketmaster-connector-service-e2e.cjs",

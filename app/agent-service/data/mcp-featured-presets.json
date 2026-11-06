@@ -1372,6 +1372,7 @@
   {
     "id": "variflight",
     "name": "飞常准 / VariFlight",
+    "registryAliases": ["io.github.variflight/variflight-mcp"],
     "docsUrl": "https://ai.variflight.com/zh",
     "description": {
       "zh-CN": "查询航班动态、机场天气、机票及中转信息。",

@@ -22,7 +22,7 @@ function setup() {
   const calls=[];
   const manager={async probe(){return [{name:"echo",inputSchema:{type:"object"}}];},async listTools(){return [{name:"echo",inputSchema:{type:"object"}}];},async callTool(id,name,args,options){options.assertCurrent();calls.push({id,name,args});return {content:[{type:"text",text:"ok"}]};},async closeServer(){}};
   const connector=new McpConnectorController({store,manager,paths,secrets:{async remove(){}},registry:{async list(p){return {items:[],nextCursor:null,query:p.search};}},assertSecretSafe(){}}).open();
-  const add=id=>{store.register({expectedRevision:store.revision,server:{id,name:id,enabled:true,source:{kind:"custom"},transport:{kind:"remote",protocol:"streamable-http",url:"https://example.com/mcp"},auth:{kind:"none"},secretRef:null,setup:{requiredFields:[],configuredFields:[]},disabledProfileIds:[],status:"ready",lastCheck:null}});store.setStatus(id,"ready",{at:1,toolCount:1,errorCode:null});};
+  const add=(id,url="https://example.com/mcp")=>{store.register({expectedRevision:store.revision,server:{id,name:id,enabled:true,source:{kind:"custom"},transport:{kind:"remote",protocol:"streamable-http",url},auth:{kind:"none"},secretRef:null,setup:{requiredFields:[],configuredFields:[]},disabledProfileIds:[],status:"ready",lastCheck:null}});store.setStatus(id,"ready",{at:1,toolCount:1,errorCode:null});};
   add("echo");
   const fixture=makeFixture({nativeMcpStore:store,nativeMcpClientManager:manager,mcpConnectorController:connector,getMcpRequestOwner:(auth,scope)=>({profileId:auth.profileId,sessionKey:"session-1",transcriptSessionId:"transcript-1",runId:scope?.runId})});
   connector.captureRun({id:RUN_ID,profileId:PROFILE_ID});
@@ -77,6 +77,27 @@ test("request card binds real session, is idempotent and expires without storing
     for(const tool of RETIRED_CONNECTOR_TOOLS)await assert.rejects(c.handle(tool,{},caller(3)),e=>e.code==="OPEN_CONNECTOR_RETIRED");
     c.getMcpRequestOwner=()=>null;
     await assert.rejects(c.handle("mcp_server_request_connection",{url:"https://example.com/mcp",purpose:"test"},caller(4),scope),e=>e.code==="MCP_CONNECTOR_ACCESS_DENIED");
+  }finally{await s.close();}
+});
+test("curated app requests accept only their canonical primary endpoint and preserve exact Registry matching",async()=>{
+  const s=setup();try{
+    const registryName="io.github.variflight/variflight-mcp";
+    const preset=require("../app/agent-service/data/mcp-featured-presets.json").find(value=>value.id==="variflight");
+    const owner={profileId:PROFILE_ID,sessionKey:"session-1",transcriptSessionId:"transcript-1"};
+    s.add("canonical-flight",preset.url);s.add("secondary-flight",preset.endpoints[1].url);s.add("unrelated-flight","https://example.com/variflight");
+    const request=await s.connector.request({registryName,purpose:"Connect the current catalog application"},owner);
+    for(const serverId of ["secondary-flight","unrelated-flight"])await assert.rejects(s.connector.complete({requestId:request.requestId,serverId}),error=>error.code==="MCP_REQUEST_TARGET_MISMATCH");
+    const unknown=await s.connector.request({registryName:registryName+"-lookalike",purpose:"Unknown publisher"},owner);
+    await assert.rejects(s.connector.complete({requestId:unknown.requestId,serverId:"canonical-flight"}),error=>error.code==="MCP_REQUEST_TARGET_MISMATCH");
+    const completed=await s.connector.complete({requestId:request.requestId,serverId:"canonical-flight"});
+    assert.equal(completed.status,"completed");assert.equal(completed.serverId,"canonical-flight");assert.equal(completed.registryName,registryName);
+    assert.deepEqual(await s.connector.complete({requestId:request.requestId,serverId:"canonical-flight"}),completed,"completed requests remain idempotent");
+    assert.equal(s.connector.requests.get(unknown.requestId).status,"pending");
+    const changed=await s.connector.request({registryName,purpose:"Do not acknowledge a target changed during verification"},owner);
+    const listTools=s.manager.listTools;let replaced=false;
+    s.manager.listTools=async id=>{if(id==="canonical-flight"&&!replaced){replaced=true;s.store.update({id,patch:{transport:{kind:"remote",protocol:"streamable-http",url:"https://example.com/changed"}},expectedRevision:s.store.revision});}return listTools(id);};
+    await assert.rejects(s.connector.complete({requestId:changed.requestId,serverId:"canonical-flight"}),error=>error.code==="MCP_REGISTRY_REVISION_CONFLICT");
+    assert.equal(s.connector.requests.get(changed.requestId).status,"pending","the existing revision fence rejects a target changed during the asynchronous probe");
   }finally{await s.close();}
 });
 test("approval previews keep Chinese parameters and pending inbox within wire byte bounds",async()=>{
