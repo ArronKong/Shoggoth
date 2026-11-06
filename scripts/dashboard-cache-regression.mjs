@@ -562,7 +562,8 @@ test("Dashboard 页面接入持久缓存并按统一视图状态渲染", () => {
   assert.match(source, /\},\s*\[liveData\]\s*\)/);
   assert.match(source, /blockingError\s*&&[\s\S]*?<div\s+className=["']dash-error["']\s+role=["']alert["']/);
   assert.match(source, /nonBlockingError\s*&&/);
-  assert.match(source, /showLoading\s*&&/);
+  assert.match(source, /const initialLoading = !data && !blockingError && \(showLoading \|\| refreshing\)/);
+  assert.match(source, /initialLoading\s*&&\s*<DashboardSkeleton/);
 });
 
 let passed = 0;

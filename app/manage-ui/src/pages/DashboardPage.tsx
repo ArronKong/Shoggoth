@@ -36,6 +36,7 @@ import { selectCronRunHandoffSource, writeCronChatHandoff } from "../lib/cronCha
 import { fmtCost, fmtTokens } from "./usage/charts";
 import { cronDeliveryView, cronExecutionView } from "./cron/runPresentation";
 import ActivityFeed from "./dashboard/ActivityFeed";
+import DashboardSkeleton, { DashboardKpiSubSkeleton, DashboardKpiValueSkeleton } from "./dashboard/DashboardSkeleton";
 import { useDashboardLiveWork } from "./dashboard/useDashboardLiveWork";
 import RunDetailModal from "./dashboard/RunDetailModal";
 import CronRunReportModal, { ReportNote, runExecutionFailed } from "./cron/CronRunReportModal";
@@ -89,15 +90,17 @@ function Kpi({
   sub,
   chart,
   className,
+  loading = false,
 }: {
   label: string;
   value: ReactNode;
   sub?: ReactNode;
   chart?: ReactNode;
   className?: string;
+  loading?: boolean;
 }) {
   return (
-    <div className={`kpi${className ? ` ${className}` : ""}`}>
+    <div className={`kpi${className ? ` ${className}` : ""}`} aria-busy={loading || undefined}>
       {chart}
       {chart && <div className="kpi-scrim" aria-hidden="true" />}
       <div className="kpi-label">{label}</div>
@@ -307,12 +310,20 @@ export default function DashboardPage() {
     ),
     [agentNames],
   );
-  const refresh = useCallback(
-    () => Promise.all([refreshDashboard(), refreshAgentDirectory(), refreshLiveWork()]).then(() => undefined),
-    [refreshAgentDirectory, refreshDashboard, refreshLiveWork],
-  );
+  const [refreshing, setRefreshing] = useState(false);
+  const pendingRefreshes = useRef(0);
+  const refresh = useCallback(async () => {
+    pendingRefreshes.current++;
+    setRefreshing(true);
+    try {
+      await Promise.all([refreshDashboard(), refreshAgentDirectory(), refreshLiveWork()]);
+    } finally {
+      if (--pendingRefreshes.current === 0) setRefreshing(false);
+    }
+  }, [refreshAgentDirectory, refreshDashboard, refreshLiveWork]);
+  const initialLoading = !data && !blockingError && (showLoading || refreshing);
   useRegisterPageRefresh("/dashboard", refresh);
-  useRegisterPageLoading("/dashboard", showLoading);
+  useRegisterPageLoading("/dashboard", initialLoading);
 
   // 只持久化服务端实时结果；缓存首帧本身不回写，避免延长陈旧数据寿命。
   useEffect(() => {
@@ -368,6 +379,7 @@ export default function DashboardPage() {
   const [trend, setTrend] = useState<{ scope: string; tokens: number[]; costs: number[] }>({ scope: "", tokens: [], costs: [] });
   const trendPoints = trend.scope === backendScopeKey ? trend : { tokens: [], costs: [] };
   const usagePending = (data?.usage || []).some((entry) => entry.error === "pending");
+  const usageLoading = usagePending && usageAgg.ready === 0;
   useEffect(() => {
     if (!backendScopeKey) return;
     let cancelled = false;
@@ -515,7 +527,7 @@ export default function DashboardPage() {
           </button>
         </div>
       )}
-      {showLoading && <div className="dash-empty">{t("common.loading")}</div>}
+      {initialLoading && <DashboardSkeleton backendCount={enabledBackendIds.length} />}
 
       {data && (
         <>
@@ -524,27 +536,29 @@ export default function DashboardPage() {
           <div className="kpi-row">
             <Kpi
               label={t("dashboard.kpiTodayTokens")}
-              value={usageAgg.ready ? <CountUp value={usageAgg.todayTokens} fmt={fmtTokens} /> : "—"}
-              sub={
+              loading={usageLoading}
+              value={usageLoading ? <DashboardKpiValueSkeleton /> : usageAgg.ready ? <CountUp value={usageAgg.todayTokens} fmt={fmtTokens} /> : "—"}
+              sub={usageLoading ? <DashboardKpiSubSkeleton /> : (
                 <Trans
                   i18nKey="dashboard.vsYesterday"
                   values={{ value: tokenDelta?.text ?? "—" }}
                   components={{ percent: <span className={tokenDelta ? (tokenDelta.up ? "delta-up" : "delta-down") : undefined} /> }}
                 />
-              }
+              )}
               chart={<KpiSpark points={trendPoints.tokens} gradientId="kpi-token-spark-fill" />}
             />
             <Kpi
               className="kpi-cost"
               label={t("dashboard.kpiTodayCost")}
-              value={costReady ? <CountUp value={usageAgg.todayCost} fmt={fmtCost} /> : "—"}
-              sub={
+              loading={usageLoading}
+              value={usageLoading ? <DashboardKpiValueSkeleton /> : costReady ? <CountUp value={usageAgg.todayCost} fmt={fmtCost} /> : "—"}
+              sub={usageLoading ? <DashboardKpiSubSkeleton /> : (
                 <Trans
                   i18nKey="dashboard.vsYesterday"
                   values={{ value: costDelta?.text ?? "—" }}
                   components={{ percent: <span className={costDelta ? (costDelta.up ? "delta-up" : "delta-down") : undefined} /> }}
                 />
-              }
+              )}
               chart={<KpiSpark points={trendPoints.costs} gradientId="kpi-cost-spark-fill" />}
             />
             <TaskBoardCard

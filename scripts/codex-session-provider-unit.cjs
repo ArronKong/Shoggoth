@@ -214,6 +214,57 @@ test("each native thread names its provider and keeps the endpoint's own reasoni
     (error) => error?.code !== "RUNTIME_MODEL_PROVIDER_REQUIRED", "native Codex keeps its own default");
 });
 
+test("third-party Harness sources disable hosted web search on session start and resume", async () => {
+  for (const [kind, model] of [["custom-responses", "mimo-v2.6-flash"], ["custom-responses", "DeepSeek-V4.1-Flash"],
+    ["openrouter", "vendor/model"], ["ollama", "local"], ["lmstudio", "local"], ["amazon-bedrock", "anthropic.claude"]]) {
+    const calls = [];
+    const host = {
+      modelProviderKind: "chatgpt", terminated: new Promise(() => {}),
+      async threadStart(params) { calls.push(params); return { thread: { id: "search-fixture" } }; },
+      async threadResume(params) { calls.push(params); return { thread: { id: params.threadId } }; },
+    };
+    const handle = await new CodexRuntimeAdapter({ runtimePool: { get: async () => host },
+      secretGateway: { bind: async () => assert.fail("third-party requests keep their own provider route") } })
+      .acquire({ runtime: "codex", runtimeProfileId: "runtime-search", runtimeAccountId: INTERNAL });
+    const configId = kind === "amazon-bedrock" ? "amazon-bedrock" : "shoggoth_0123456789abcdef";
+    const input = { model, modelProvider: { kind, configId },
+      modelSecretScope: { profileId: "profile", sessionId: "search-fixture" } };
+    await handle.sessionStart(input);
+    await handle.sessionResume({ ...input, sessionId: "search-fixture" });
+    assert.deepEqual(calls.map(call => call.config), [
+      { model_provider: configId, web_search: "disabled" },
+      { model_provider: configId, web_search: "disabled" },
+    ], `${kind}/${model}: hosted search must not prevent an ordinary chat request`);
+  }
+});
+
+test("official OpenAI sources and native Codex retain their web search configuration", async () => {
+  for (const selection of [undefined, { kind: "chatgpt", configId: "openai" },
+    { kind: "openai-api-key", configId: "shoggoth_0123456789abcdef" }]) {
+    const calls = [];
+    const host = {
+      modelProviderKind: "chatgpt", terminated: new Promise(() => {}),
+      async threadStart(params) { calls.push(params); return { thread: { id: "official-search" } }; },
+      async threadResume(params) { calls.push(params); return { thread: { id: params.threadId } }; },
+    };
+    const handle = await new CodexRuntimeAdapter({ runtimePool: { get: async () => host } })
+      .acquire({ runtime: "codex", runtimeProfileId: "runtime-official", runtimeAccountId: INTERNAL });
+    await handle.sessionStart({ modelProvider: selection });
+    await handle.sessionResume({ sessionId: "official-search", modelProvider: selection });
+    for (const call of calls) assert.deepEqual(call.config, selection ? { model_provider: selection.configId } : undefined);
+  }
+  const calls = [], host = {
+    modelProviderKind: "native", terminated: new Promise(() => {}),
+    async threadStart(params) { calls.push(params); return { thread: { id: "native-search" } }; },
+    async threadResume(params) { calls.push(params); return { thread: { id: params.threadId } }; },
+  };
+  const native = await new CodexRuntimeAdapter({ runtimePool: { get: async () => host } })
+    .acquire({ runtime: "codex", runtimeProfileId: "runtime-native", runtimeAccountId: "native-codex-default-v1" });
+  await native.sessionStart({});
+  await native.sessionResume({ sessionId: "native-search" });
+  for (const call of calls) assert.equal(call.config, undefined, "native CLI preferences remain authoritative");
+});
+
 test("a conversation's source travels with its model choice, survives restart and is dropped with it", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "csp-"));
   try {

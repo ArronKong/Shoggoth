@@ -52,7 +52,7 @@ console.log('PASS actual dialog component: read-only latest discovery, prefilled
 
 // Installed management must retain its identity without a recommendation prop.
 for(const [saved,expected] of [
- [{...server,source:{kind:'registry',registryName:'com.canva.mcp/mcp',version:'1.0.0'}},'com.canva.mcp/mcp'],
+ [{...server,source:{kind:'registry',registryName:'com.canva.mcp/mcp',version:'1.0.0'}},'canva'],
  ...JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/official-skill-connectors.json',import.meta.url),'utf8')).map(item=>[{...server,id:`official-${item.id}-a0b0c0d0`,source:{kind:'custom'},transport:{kind:'stdio-command',command:'/managed/Shoggoth'}},item.id]),
  ...['blender-lab','flightaware','ticketmaster'].map(id=>[{...server,source:{kind:'custom'},recommendationId:id,transport:{kind:'stdio-command',command:'/managed/runtime'}},id])
 ]){
