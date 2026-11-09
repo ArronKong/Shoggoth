@@ -23,6 +23,7 @@ const cronResults = scenario.startsWith("cron-results-");
 const alphaBackend = cronResults ? scenario.split("-")[2] : "openclaw";
 const queued = scenario.startsWith("queued-");
 const steering = scenario.startsWith("steering-");
+const nativeMain = scenario.startsWith("sending-shoggoth-main");
 const sending = scenario.startsWith("sending-") || steering;
 const betaBackend = steering || queued ? "shoggoth" : sending ? scenario.split("-")[1] : "hermes";
 const immersive = scenario.endsWith("-immersive");
@@ -32,11 +33,12 @@ const alpha = cronResults ? alphaBackend + "-order-alpha" : "order-alpha", beta 
 const mainKey = "agent:" + alpha + ":main";
 const oldKey = "agent:" + alpha + ":old";
 const cronKey = "agent:" + alpha + ":cron:fixture:run:1";
-const betaKey = "agent:" + beta + ":main";
+const betaKey = "agent:" + beta + ":" + (nativeMain ? "11111111-1111-4111-8111-111111111111" : "main");
 const internalKey = "agent:order-internal:main";
 const session = (key: string, agentId: string, name: string, age: number, kind = "main") =>
   ({ key, agentId, agentName: name, backendId: agentId === beta ? betaBackend : alphaBackend,
     label: key === oldKey ? "Old session" : key === mainKey ? "Latest session" : undefined,
+    mainSession: nativeMain && key === betaKey,
     updatedAt: now - age * minute, kind });
 const sessions = [
   session(mainKey, alpha, "Alpha", 5), session(oldKey, alpha, "Alpha", 90),
@@ -44,6 +46,7 @@ const sessions = [
   session(internalKey, "order-internal", "Internal member", 0),
 ];
 if (queued) sessions.push(session(betaKey + "-other", beta, "Beta", 25));
+if (nativeMain) sessions.push(session("agent:" + beta + ":22222222-2222-4222-8222-222222222222", beta, "Beta", 10));
 const agents = [alpha, beta, "order-internal"].map(id => ({
   id, name: id === alpha ? "Alpha" : id === beta ? "Beta" : "Internal member",
   backendId: id === beta ? betaBackend : alphaBackend,
@@ -345,6 +348,11 @@ async function runSendingFixture() {
   expectOrder(directOrder, "cached activity ordering");
   rows().find(row => row.title === beta)!.click();
   await wait(() => document.querySelector(".chat-thread")?.textContent?.includes("History for " + betaKey), "older Agent did not open");
+  if (nativeMain && !immersive) {
+    const mainTitle = language === "zh-CN" ? "主会话" : "Main session";
+    await wait(() => document.querySelector(".session-menu__selected-title")?.textContent?.split(" · ")[0] === mainTitle,
+      "localized Main title missing");
+  }
   expectOrder(directOrder, "opening an older Agent must not promote it");
   const input = () => Array.from(document.querySelectorAll<HTMLTextAreaElement>("textarea"))
     .find(element => element.getClientRects().length > 0 && !element.disabled);

@@ -1,30 +1,51 @@
-import { lazy, Suspense, type ReactNode } from "react";
+import { lazy, Suspense, useLayoutEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { getAgent, getAgentFile, listCronJobs } from "../api/client";
+import AgentAvatar from "../components/AgentAvatar";
 import AgentSoulDocument from "../components/AgentSoulDocument";
 import BackendTabIcon from "../components/BackendTabIcon";
 import { usePageCache } from "../lib/usePageCache";
+import ChatAvatarPicker from "./ChatAvatarPicker";
 import styles from "./ChatAgentPanel.module.css";
 
 const AgentInspirationPanel = lazy(() => import("./ChatAgentNotes"));
 
-export type ChatAgentPanelKind = "profile" | "cron" | "inspiration" | "artifacts";
+export type ChatAgentPanelKind = "profile" | "avatar" | "cron" | "inspiration" | "artifacts";
 
-function Profile({ backendId, backendName, agentId, name, renderAvatar }: {
-  backendId: string; backendName: string; agentId: string; name: string; renderAvatar: (name: string) => ReactNode;
-}) {
+type ProfileProps = {
+  backendId: string; backendName: string; agentId: string; name: string; avatarVersion: number;
+  onEditAvatar: () => void; onAvatarSaved: (returnToProfile: boolean) => void; onAvatarSavingChange: (saving: boolean) => void;
+};
+
+function Profile({ backendId, backendName, agentId, name, avatarVersion, editingAvatar,
+  onEditAvatar, onAvatarSaved, onAvatarSavingChange }: ProfileProps & { editingAvatar: boolean }) {
   const { t } = useTranslation();
+  const avatarTrigger = useRef<HTMLButtonElement>(null);
+  const wasEditingAvatar = useRef(false);
+  useLayoutEffect(() => {
+    if (!editingAvatar && wasEditingAvatar.current) avatarTrigger.current?.focus({ preventScroll: true });
+    wasEditingAvatar.current = editingAvatar;
+  }, [editingAvatar]);
   const scope = JSON.stringify([backendId, agentId]);
   // The profile mounts on each open and revalidates both reads in the background.
   const detail = usePageCache(`chat-agent-profile:${scope}`, () => getAgent(backendId, agentId));
   const soul = usePageCache(`chat-agent-soul:${scope}`, () => getAgentFile(backendId, agentId, "SOUL.md"));
   const displayName = detail.data?.name || name;
-  return <>
-    <div className={styles.profile}>
-      {renderAvatar(displayName)}
+  const profileBody = `${styles.body} ${styles.profileBody}`;
+  if (editingAvatar) return <div className={profileBody} key="avatar">
+    <ChatAvatarPicker agentId={agentId} name={displayName} version={avatarVersion}
+      onSaved={onAvatarSaved} onSavingChange={onAvatarSavingChange} />
+  </div>;
+  return <div className={profileBody} key="profile">
+    <div className={`${styles.profileRow} ${styles.profile}`}>
+      <button type="button" ref={avatarTrigger} className={styles.avatarEdit}
+        title={t("chat.changeAvatar")} aria-label={t("chat.changeAvatar")} onClick={onEditAvatar}>
+        <AgentAvatar agentId={agentId} name={displayName} className="chat-header__avatar" version={avatarVersion} />
+        <span className={styles.avatarAction} aria-hidden="true">{t("chat.change")}</span>
+      </button>
       <div className={styles.identity}>
         <div className={styles.name}>{displayName}</div>
-        <div className={styles.backend}>
+        <div className={`${styles.backend} ${styles.profileMeta}`}>
           <BackendTabIcon backend={backendId} label={backendName} />
           <span>{backendName}</span>
         </div>
@@ -35,7 +56,7 @@ function Profile({ backendId, backendName, agentId, name, renderAvatar }: {
     {soul.error && <p className={styles.error} role="alert">{soul.error}</p>}
     {(Boolean(soul.data?.content.trim()) || !soul.loading && !soul.error)
       && <AgentSoulDocument text={soul.data?.content ?? ""} />}
-  </>;
+  </div>;
 }
 
 function Cron({ backendId, agentId }: { backendId: string; agentId: string }) {
@@ -53,7 +74,7 @@ function Cron({ backendId, agentId }: { backendId: string; agentId: string }) {
     {!jobs.loading && !jobs.error && jobs.data?.length === 0 && <p className={styles.note}>{t("chat.panelCronEmpty")}</p>}
     <div className={styles.jobs}>
       {jobs.data?.map(job => <a key={job.id} className={styles.job}
-        href={`#/cron?${new URLSearchParams({ backend: job.backendId, job: job.id })}`}>
+        href={`#/cron?${new URLSearchParams({ backend: job.backendId, job: job.id, run: "latest" })}`}>
         <div className={styles.jobHead}>
           <span className={styles.jobName}>{job.name || job.id}</span>
           <span className={styles.state}>{t(job.enabled ? "cron.enabled" : "cron.disabled")}</span>
@@ -71,23 +92,24 @@ function Cron({ backendId, agentId }: { backendId: string; agentId: string }) {
 
 // All header entries share the same full-height surface and scroll area.
 // Agent/session changes remount this region via its scope key.
-export default function ChatAgentPanel({ kind, backendId, backendName, agentId, name, renderAvatar, children }: {
-  kind: ChatAgentPanelKind | null; backendId: string; backendName: string; agentId: string; name: string;
-  renderAvatar: (name: string) => ReactNode; children?: ReactNode;
+export default function ChatAgentPanel({ kind, children, ...profile }: ProfileProps & {
+  kind: ChatAgentPanelKind | null; children?: ReactNode;
 }) {
   const { t } = useTranslation();
+  const { backendId, agentId } = profile;
   const title = kind === "profile" ? t("chat.agentPanelProfile")
-    : kind === "cron" ? t("chat.agentPanelCron")
-      : kind === "artifacts" ? t("chat.agentArtifactsTitle") : t("agents.tabInspiration");
+    : kind === "avatar" ? t("chat.changeAvatar")
+      : kind === "cron" ? t("chat.agentPanelCron")
+        : kind === "artifacts" ? t("chat.agentArtifactsTitle") : t("agents.tabInspiration");
   return <div id="chat-agent-panel" className={styles.expansion} data-open={Boolean(kind)}
     role="region" aria-label={title} aria-hidden={!kind} {...(!kind ? { inert: "" } : {})}>
     <div className={styles.clip}>
-      {kind && <div key={kind} className={styles.body}>
-        {kind !== "profile" && kind !== "artifacts" && <div className={styles.toolbar}>
+      {kind === "profile" || kind === "avatar" ? <Profile {...profile} editingAvatar={kind === "avatar"} />
+        : kind && <div key={kind} className={styles.body}>
+        {kind !== "artifacts" && <div className={styles.toolbar}>
           <h2 className={styles.title}>{title}</h2>
         </div>}
         {kind === "artifacts" ? children
-          : kind === "profile" ? <Profile backendId={backendId} backendName={backendName} agentId={agentId} name={name} renderAvatar={renderAvatar} />
           : kind === "cron" ? <Cron backendId={backendId} agentId={agentId} />
             : <Suspense fallback={<p className={styles.note} role="status">{t("common.loading")}</p>}>
               <AgentInspirationPanel key={JSON.stringify([backendId, agentId])} backendId={backendId} agentId={agentId} />

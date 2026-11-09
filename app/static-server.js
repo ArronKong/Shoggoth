@@ -24,7 +24,7 @@ const {
   resolveDesktopAssetPaths, resolveDesktopAssetFile, validAssetName,
   ensureAssetDirectory, migrateLegacyDesktopAssets,
 } = require("./desktop-assets");
-const { createDefaultAgentAvatarPool } = require("./default-agent-avatar-pool");
+const { createDefaultAgentAvatarPool, listAgentAvatarPresets, resolveAgentAvatarPreset } = require("./default-agent-avatar-pool");
 const { scanInstalledClis, resolveCliVersion, resolveCliInfo, CLI_CATEGORIES } = require("./cli-scanner");
 const { detectOpenclawHost, startOpenclawGateway } = require("./openclaw-host");
 const { browseOpenclawGateways } = require("./core/mdns-browser");
@@ -45,6 +45,8 @@ const memoryProviderOwnerProtocol = require("./agent-service/memory-provider-own
 const { MESSAGES: MEMORY_COMMAND_PUBLIC_MESSAGES } = require("./agent-service/active-memory-command-protocol");
 const { NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES } = require("./agent-service/native-runtime-config-protocol");
 const { AGENT_BINDING_PUBLIC_MESSAGES, validateAgentBindingParams } = require("./agent-service/agent-runtime-binding-protocol");
+const { PUBLIC_MESSAGES: AGENT_LIFECYCLE_PUBLIC_MESSAGES } = require("./agent-service/agent-lifecycle-service-protocol");
+const agentFileProtocol = require("./agent-service/agent-file-protocol");
 const { SESSION_RUNTIME_PUBLIC_MESSAGES, validateSessionRuntimeParams } = require("./agent-service/session-runtime-protocol");
 const {
   projectWidgetResourceResult,
@@ -298,6 +300,28 @@ function resolveAgentAvatarFile(agentId, assetPaths, avatarPool) {
     return custom;
   }
   return avatarPool.select(agentId);
+}
+
+const AVATAR_LIBRARY_PREFIX = "/avatar/library/";
+
+function serveAgentAvatarLibrary(req, res, presetId) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.writeHead(405, { Allow: "GET, HEAD" });
+    res.end();
+    return;
+  }
+  if (!presetId) return sendJson(res, 200, { presets: listAgentAvatarPresets() });
+  const file = resolveAgentAvatarPreset(presetId);
+  if (!file) return sendJson(res, 404, { error: "unknown avatar preset" });
+  fs.readFile(file, (error, image) => {
+    if (error) return sendJson(res, 404, { error: "avatar preset unavailable" });
+    res.writeHead(200, {
+      "Content-Type": "image/jpeg",
+      "Content-Length": image.length,
+      "Cache-Control": "public, max-age=31536000, immutable",
+    });
+    res.end(req.method === "HEAD" ? undefined : image);
+  });
 }
 
 // 沉浸模式背景素材（用户自定义）：Shoggoth userDataRoot/immersive-bg/<state>.<ext>。
@@ -771,6 +795,71 @@ function readRawBody(req, maxBytes) {
     req.on("error", (err) => settle(reject, err));
     req.on("aborted", () => settle(reject, new Error("request aborted")));
   });
+}
+
+const AGENT_FILE_PREVIEWS = new Map([
+  [".png", "image/png"], [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"],
+  [".gif", "image/gif"], [".webp", "image/webp"], [".txt", "text/plain; charset=utf-8"],
+  [".md", "text/plain; charset=utf-8"], [".csv", "text/plain; charset=utf-8"],
+  [".tsv", "text/plain; charset=utf-8"], [".json", "text/plain; charset=utf-8"],
+]);
+
+async function handleManagedAgentFiles(req, res, backend, agentId, segments, query) {
+  const method = req.method || "GET";
+  if (method !== "GET" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+  const [fileId, subresource] = segments;
+  try {
+    if (!fileId && method === "GET") {
+      return sendJson(res, 200, await backend.agentFiles(agentId, "list", {
+        runId: query.get("runId"), sessionKey: query.get("sessionKey"), cursor: Number(query.get("cursor") ?? 0),
+        limit: Number(query.get("limit") ?? agentFileProtocol.FILE_PAGE_SIZE),
+        includeMissing: query.get("includeMissing") !== "0",
+      }));
+    }
+    if (!fileId && method === "POST") {
+      const bytes = await readRawBody(req, agentFileProtocol.MAX_FILE_BYTES);
+      return sendJson(res, 200, await backend.agentFiles(agentId, "import", {
+        operationId: query.get("operationId"), name: query.get("name"), mimeType: query.get("mimeType"), bytes,
+      }));
+    }
+    if (fileId && subresource === "content" && method === "GET") {
+      const { file, bytes } = await backend.agentFiles(agentId, "content", { fileId });
+      const mime = query.get("preview") === "1" ? AGENT_FILE_PREVIEWS.get(path.extname(file.name).toLowerCase()) : null;
+      const encoded = encodeURIComponent(file.name).replace(/['()*]/gu, character => "%" + character.charCodeAt(0).toString(16));
+      res.writeHead(200, {
+        "Content-Type": mime || "application/octet-stream",
+        "Content-Length": bytes.length,
+        "Content-Disposition": `${mime ? "inline" : "attachment"}; filename*=UTF-8''${encoded}`,
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      });
+      return res.end(bytes);
+    }
+    if (fileId && !subresource && method === "GET") {
+      res.setHeader("Cache-Control", "no-store");
+      return sendJson(res, 200, await backend.agentFiles(agentId, "get", { fileId }));
+    }
+    if (fileId && !subresource && ["PUT", "DELETE"].includes(method)) {
+      const body = await readJsonBody(req);
+      const fields = method === "PUT" ? ["expectedRevision", "name"] : ["expectedRevision"];
+      if (!body || Object.keys(body).length !== fields.length || fields.some(key => !Object.hasOwn(body, key))) {
+        agentFileProtocol.fail("AGENT_FILE_INVALID");
+      }
+      return sendJson(res, 200, await backend.agentFiles(agentId, method === "PUT" ? "rename" : "delete", { ...body, fileId }));
+    }
+    return sendJson(res, 405, { error: "method not allowed" });
+  } catch (error) {
+    const code = error?.code === "BODY_TOO_LARGE" ? "AGENT_FILE_TOO_LARGE"
+      : Object.hasOwn(agentFileProtocol.MESSAGES, error?.code || "") ? error.code : "AGENT_FILE_UNAVAILABLE";
+    const status = {
+      AGENT_FILE_INVALID: 400, AGENT_FILE_CONFLICT: 409, AGENT_FILE_CAPACITY: 409,
+      AGENT_FILE_SOURCE_CHANGED: 409, AGENT_FILE_DELETED: 410, AGENT_FILE_TOO_LARGE: 413,
+      AGENT_FILE_NOT_FOUND: 404, AGENT_FILE_MISSING: 404, AGENT_FILE_UNSUPPORTED: 404,
+    }[code] || 503;
+    return sendJson(res, status, { code, error: agentFileProtocol.MESSAGES[code] });
+  }
 }
 
 // Archive/search 的 agentId 必须是单一路径段；后端仍会再做 resolved containment。
@@ -1659,7 +1748,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
 
     if (segs[0] === "runtime-status" && segs.length === 1) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-      return sendJson(res, 200, { runtimes: await registry.getRuntimeStatuses() });
+      const url = new URL(req.url, "http://127.0.0.1");
+      const forAgentCreation = url.searchParams.get("view") === "agent-create";
+      return sendJson(res, 200, { runtimes: await registry.getRuntimeStatuses({ forAgentCreation }) });
     }
 
     if (segs[0] === "web-settings" && (segs.length === 1 || segs.length === 2 && segs[1] === "credentials")) {
@@ -3300,6 +3391,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       if (!backend) return sendJson(res, 400, { error: `unknown backend ${backendId}` });
       const id = segs[1]; // agent ids are [a-z0-9-]; safe as a path segment
+      if (segs[2] === "managed-files" && segs.length <= 5) {
+        return handleManagedAgentFiles(req, res, backend, id, segs.slice(3), url.searchParams);
+      }
       if (segs[2] === "memory-status" && segs.length === 3) {
         if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
         const protocol = require("./agent-service/active-memory-status-protocol");
@@ -3611,7 +3705,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       // artifacts：该 agent 的产出文件（read-only，本地磁盘扫描）
       if (segs.length === 3 && segs[2] === "artifacts" && method === "GET") {
         const limit = Number(url.searchParams.get("limit")) || undefined;
-        return sendJson(res, 200, { artifacts: await backend.listAgentArtifacts(id, limit ? { limit } : {}) });
+        return sendJson(res, 200, { artifacts: await backend.listAgentArtifacts(id, {
+          limit, includeManaged: url.searchParams.get("scope") !== "workspace",
+        }) });
       }
     }
     if (segs[0] === "environments" && segs.length === 1) {
@@ -3973,6 +4069,12 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     if (systemIssue) {
       try { deps.onSystemIssue?.(err); } catch { /* reporting must not hide the request failure */ }
     }
+    if (segs[0] === "agents" && err?.code === "AGENT_NAME_CONFLICT"
+      && ((method === "POST" && segs.length === 1) || (method === "PUT" && segs.length === 2))) {
+      return sendJson(res, 409, {
+        code: "AGENT_NAME_CONFLICT", field: "name", error: AGENT_LIFECYCLE_PUBLIC_MESSAGES.AGENT_NAME_CONFLICT,
+      });
+    }
     // 参数/路径边界错误保持客户端 400；请求体溢出用 413，其余运行时故障保持 500。
     const trusted = trustedApiError(err);
     const modelChangeError = err instanceof ModelChangeError || err instanceof ModelChangeJournalError;
@@ -4303,6 +4405,12 @@ function startStaticServer(
         return;
       }
       fs.createReadStream(filePath).pipe(res);
+      return;
+    }
+
+    // Browsing the bundled library does not initialize or reserve an Agent avatar.
+    if (pathname.startsWith(AVATAR_LIBRARY_PREFIX)) {
+      serveAgentAvatarLibrary(req, res, pathname.slice(AVATAR_LIBRARY_PREFIX.length));
       return;
     }
 

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
+import "../i18n/chatUiResources";
 import { chatUiRequest } from "../api/client";
-import { nativeUiSummary, type NativeUiArtifactPart } from "../lib/chatUiContent";
+import type { NativeUiArtifactPart } from "../lib/chatUiContent";
+import { translateProductError } from "../lib/gatewayErrors";
 import { attachNativeUiEntry, desktopUiReply, nativeUiDesktopBridge, nativeUiPoolEntry, openNativeUiEntry, updateNativeUiEntry } from "../lib/chatUiDesktop";
 import { createUiPendingStore } from "../lib/chatUiPending";
 import "./ChatUiArtifact.css";
@@ -10,7 +12,7 @@ const pending = createUiPendingStore(() => localStorage);
 type Props = { part: NativeUiArtifactPart; backend: string; agentId: string; sessionKey: string; visible: boolean; autoActivate?: boolean;
   onCancel?: (runId: string) => Promise<unknown> };
 export default function ChatUiArtifact({ part, backend, agentId, sessionKey, visible, autoActivate = true, onCancel }: Props) {
-  const { i18n } = useTranslation(), slot = useRef<HTMLDivElement>(null), slotId = useRef(Symbol("native-ui-slot"));
+  const { i18n, t } = useTranslation(), slot = useRef<HTMLDivElement>(null), slotId = useRef(Symbol("native-ui-slot"));
   const entry = useMemo(() => nativeUiPoolEntry({ backend, agentId, sessionKey, part }), [backend, agentId, sessionKey, part.sourceEventId, part.segmentId, part.artifactId]);
   const state = useSyncExternalStore(useCallback(listener => attachNativeUiEntry(entry, listener), [entry]), () => entry.value);
   const [source, setSource] = useState<string | null>(null), [sourceBusy, setSourceBusy] = useState(false), [expanded, setExpanded] = useState(false);
@@ -154,34 +156,41 @@ export default function ChatUiArtifact({ part, backend, agentId, sessionKey, vis
     }
   };
   const summary = state.descriptor?.actions.flatMap(action => action.stateFields.map(key => `${key}: ${JSON.stringify(state.localState[key])}`)).filter((value, index, all) => all.indexOf(value) === index).join(" · ");
-  const displayPart = state.sourceUnavailable ? { ...part, title: "卡片来源已失效", summary: "请重新生成交互卡片" } : part;
+  const displayPart = state.sourceUnavailable
+    ? { ...part, title: t("chatErrors:renderer.UI_SOURCE_INVALIDATED"), summary: t("chat.nativeUi.regenerate") } : part;
+  const operation = state.operation;
+  const operationStatus = operation?.uncertain || operation?.status === "unknown" ? "verifying"
+    : operation?.pending ? "pending" : operation?.status;
   return <section className={`chat-ui-artifact${expanded ? " is-expanded" : ""}`} data-native-ui-source={part.sourceEventId} aria-label={displayPart.title}>
     <header><div><strong>{displayPart.title}</strong><p>{displayPart.summary}</p></div><div className="chat-ui-artifact__tools">
-      <button type="button" onClick={() => setExpanded(value => !value)}>{expanded ? "收起" : "展开"}</button>
-      <button type="button" disabled={sourceBusy || state.sourceUnavailable} onClick={() => void readSource()}>{sourceBusy ? "读取中…" : source === null ? "源码" : "界面"}</button>
+      <button type="button" onClick={() => setExpanded(value => !value)}>{t(expanded ? "chat.nativeUi.collapse" : "chat.nativeUi.expand")}</button>
+      <button type="button" disabled={sourceBusy || state.sourceUnavailable} onClick={() => void readSource()}>{t(sourceBusy ? "chat.nativeUi.reading" : source === null ? "chat.nativeUi.source" : "chat.nativeUi.view")}</button>
       {source !== null && !state.sourceUnavailable && <button type="button" onClick={() => {
         const url = URL.createObjectURL(new Blob([source], { type: "text/html;charset=utf-8" }));
         const link = document.createElement("a"); link.href = url; link.download = `shoggoth-ui-${part.artifactId}-v${part.revision}.html`;
         link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }}>导出 HTML</button>}
-      {state.active && <button type="button" onClick={async () => { await bridge?.release({ mountId: entry.mountId }); updateNativeUiEntry(entry, { active: false }); void activate(); }}>重新加载</button>}
+      }}>{t("chat.nativeUi.exportHtml")}</button>}
+      {state.active && <button type="button" onClick={async () => { await bridge?.release({ mountId: entry.mountId }); updateNativeUiEntry(entry, { active: false }); void activate(); }}>{t("chat.nativeUi.reload")}</button>}
     </div></header>
     {source !== null && !state.sourceUnavailable ? <pre className="chat-ui-artifact__source">{source}</pre> : <div ref={slot} className="chat-ui-artifact__slot" style={{ height: expanded ? Math.max(560, state.height) : state.height }}>
-      {!state.active && <div className="chat-ui-artifact__placeholder"><span>{state.sourceUnavailable ? "来源已失效，请重新生成" : state.loading ? "正在加载交互内容…" : bridge ? "交互内容暂未显示" : "在桌面应用中可操作这张卡片"}</span>
-        {bridge && <button type="button" disabled={state.loading || state.sourceUnavailable || !visible} onClick={() => void activate()}>{state.loading ? "加载中…" : state.error ? "重新加载" : "显示交互卡片"}</button>}</div>}
+      {!state.active && <div className="chat-ui-artifact__placeholder"><span>{t(state.sourceUnavailable ? "chat.nativeUi.expired"
+        : state.loading ? "chat.nativeUi.loading" : bridge ? "chat.nativeUi.inactive" : "chat.nativeUi.desktopOnly")}</span>
+        {bridge && <button type="button" disabled={state.loading || state.sourceUnavailable || !visible} onClick={() => void activate()}>{t(state.loading ? "common.loading" : state.error ? "chat.nativeUi.reload" : "chat.nativeUi.activate")}</button>}</div>}
     </div>}
-    {state.error && <div className="chat-ui-artifact__notice" role="status">{state.error}</div>}
-    {state.readOnly && <div className="chat-ui-artifact__notice">{state.readOnlyReason === "CODEX_DESKTOP_BUSY" ? "Codex 客户端正在运行，完成后可继续操作这张卡片" : "这张卡片当前仅供查看"}</div>}
+    {state.error && <div className="chat-ui-artifact__notice" role="status">{translateProductError(state.error, t)}</div>}
+    {state.readOnly && <div className="chat-ui-artifact__notice">{t(state.readOnlyReason === "CODEX_DESKTOP_BUSY" ? "chatErrors:chatUi.CODEX_DESKTOP_BUSY" : "chat.nativeUi.readOnly")}</div>}
     {summary && <div className="chat-ui-artifact__selection" title={summary}>{summary}</div>}
     {state.descriptor?.actions.map(item => <div className="chat-ui-artifact__action" key={item.actionId}>
       <span>{item.instruction}</span><button type="button" className={state.hintedAction === item.actionId ? "is-highlighted" : ""}
         disabled={!visible || !state.active || state.readOnly || state.operation?.pending === true || state.operation?.uncertain === true || state.operation?.status === "unknown"} onClick={event => void action(event, item.actionId)}>{item.label}</button>
     </div>)}
-    {state.legacyPrompt && <div className="chat-ui-artifact__legacy-prompt"><span>卡片提供的待提交内容</span><pre>{state.legacyPrompt}</pre>
-      <button type="button" onClick={() => { void navigator.clipboard.writeText(state.legacyPrompt || ""); }}>复制内容</button></div>}
-    {state.operation && <div className="chat-ui-artifact__receipt" role="status">{state.operation.errorMessage || (state.operation.uncertain || state.operation.status === "unknown" ? "正在查询原操作的结果" : state.operation.pending ? "正在确认当前参数…" : ({ queued: "已排队", running: "正在分析", completed: "已完成", failed: "操作未完成", cancelled: "已取消", expired: "原操作已过期" } as Record<string, string>)[state.operation.status] || "操作已受理")}</div>}
-    {onCancel && state.operation?.runId && ["queued", "accepted", "running"].includes(state.operation.status) && <button type="button"
-      className="chat-ui-artifact__cancel" onClick={() => { void onCancel(state.operation.runId).catch(error => updateNativeUiEntry(entry, { error: error instanceof Error ? error.message : "暂时无法取消" })); }}>取消这次操作</button>}
-    <span className="chat-ui-artifact__fallback" aria-hidden="true">{nativeUiSummary(displayPart)}</span>
+    {state.legacyPrompt && <div className="chat-ui-artifact__legacy-prompt"><span>{t("chat.nativeUi.legacyPrompt")}</span><pre>{state.legacyPrompt}</pre>
+      <button type="button" onClick={() => { void navigator.clipboard.writeText(state.legacyPrompt || ""); }}>{t("chat.nativeUi.copy")}</button></div>}
+    {operation && <div className="chat-ui-artifact__receipt" role="status">{typeof operation.errorMessage === "string" && operation.errorMessage
+      ? translateProductError(operation.errorMessage, t)
+      : t(`chat.nativeUi.operation.${operationStatus}`, { defaultValue: t("chat.nativeUi.operation.accepted") })}</div>}
+    {onCancel && operation?.runId && ["queued", "accepted", "running"].includes(operation.status) && <button type="button"
+      className="chat-ui-artifact__cancel" onClick={() => { void onCancel(operation.runId).catch(error => updateNativeUiEntry(entry, { error: error instanceof Error ? error.message : "暂时无法取消" })); }}>{t("chat.nativeUi.cancel")}</button>}
+    <span className="chat-ui-artifact__fallback" aria-hidden="true">{t("chat.nativeUi.summary", { title: displayPart.title, summary: displayPart.summary })}</span>
   </section>;
 }

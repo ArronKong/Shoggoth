@@ -10,7 +10,7 @@ const zh = {
   invalid: '搜索范围或来源不一致，请重新搜索。', failed: '搜索暂不可用，请重试。',
 };
 const en: Record<keyof typeof zh, string> = {
-  open: 'Search group history', title: 'Search public messages in this group', hint: 'Search saved user and member posts. Private chats and system status are excluded. Matches literal text; English letters are case-insensitive.',
+  open: 'Search group history', title: 'Search this group’s messages', hint: 'Search saved messages visible to group members. Private chats and system status are excluded. Matches literal text and ignores case for English letters.',
   query: 'Search text', search: 'Search', searching: 'Searching…', author: 'Author', allAuthors: 'All authors', user: 'Me',
   request: 'Request scope', allRequests: 'All historical requests', knownRequests: 'The list contains recent requests. Choose all to search older history too.',
   more: 'Search earlier messages', empty: 'No matches on this page.', finished: 'Search complete for this scope.',

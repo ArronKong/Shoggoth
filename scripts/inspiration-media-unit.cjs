@@ -40,10 +40,28 @@ test('media uploads survive restart, retry exactly, and support attachment-only 
   assert.deepEqual(fs.readFileSync(file), value.data);
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.ok(f.service.buildPrompt(execution).includes(file));
-  assert.ok(file.startsWith(path.join(f.paths.stateDir, 'inspiration-media')));
+  assert.equal(file, path.join(f.paths.stateDir, 'attachment-files', `${value.attachment.id}.png`));
   await f.call('update', { id: idea.id, operationId: id(), expectedRevision: started.revision, patch: { body: '改成文字', attachments: [] } });
   assert.deepEqual(f.store.executionForRun(started.latestExecution.runId).attachments, input.attachments);
   assert.deepEqual(fs.readFileSync(f.store.media.materialize(value.attachment)), value.data);
+});
+
+test('saved attachments materialize at the new path and old absolute paths still work', async t => {
+  const f = await fixture(t), value = image();
+  await upload(f, value);
+  const { idea } = await f.call('create', { operationId: id(), body: '', attachments: [value.attachment] });
+  const name = `${value.attachment.id}.png`;
+  const legacyFile = path.join(f.paths.stateDir, 'inspiration-media', name);
+  fs.mkdirSync(path.dirname(legacyFile), { mode: 0o700 });
+  fs.writeFileSync(legacyFile, value.data, { mode: 0o600 });
+
+  await f.restart();
+  const { idea: reopened } = await f.call('get', { id: idea.id });
+  assert.deepEqual(reopened.attachments, idea.attachments);
+  const file = f.store.media.materialize(reopened.attachments[0]);
+  assert.equal(file, path.join(f.paths.stateDir, 'attachment-files', name));
+  assert.deepEqual(fs.readFileSync(file), value.data);
+  assert.deepEqual(fs.readFileSync(legacyFile), value.data);
 });
 
 test('attachment preparation failures settle the run instead of stranding a saved note', async t => {
@@ -139,7 +157,9 @@ test('compatible previews return their own MIME and size with chunk integrity wh
   const { previewPath } = require('../app/agent-service/inspiration-media-preview');
   const { atomicWritePrivateFile } = require('../app/agent-service/private-file');
   const preview = Buffer.alloc(CHUNK_BYTES + 123, 5); Buffer.from('ffd8ff', 'hex').copy(preview);
-  atomicWritePrivateFile(previewPath(f.paths, attachment), preview, { trustedRoot: f.paths.trustedRoot });
+  const file = path.join(f.paths.stateDir, 'attachment-files', `${attachment.id}.preview-v1.jpg`);
+  assert.equal(previewPath(f.paths, attachment), file);
+  atomicWritePrivateFile(file, preview, { trustedRoot: f.paths.trustedRoot });
   const chunks = [];
   for (const offset of [0, CHUNK_BYTES]) {
     const result = await f.call('media.read', { id: attachment.id, offset, preview: true });

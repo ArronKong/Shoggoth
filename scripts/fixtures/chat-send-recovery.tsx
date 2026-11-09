@@ -17,16 +17,19 @@ const observerLoop = scenario.startsWith("legacy-observer-loop");
 const ordinaryRecovery = scenario.startsWith("ordinary-recovery-");
 const nativeActiveRecovery = scenario.startsWith("native-active-");
 const nativeRejection = ["native-rejected", "native-rejected-immersive"].includes(scenario);
+const inspirationBuffered = ["inspiration-buffered", "inspiration-buffered-immersive"].includes(scenario);
 if (!["slash-order", "slash-order-error", "slash-order-uncertain", "slash-order-immersive", "slash-order-uncertain-immersive", "upstream-error", "upstream-error-immersive", "uncertain", "restored", "rejected", "ordinary", "newer", "started", "accepted-error", "accepted-uncertain", "stale-query", "reselect", "terminal-race", "terminal-timeout", "terminal-reload", "ordinary-upstream", "ordinary-receipt", "ordinary-buffered", "ordinary-buffered-immersive", "observer-idle", "observer-idle-pending", "native-approval", "native-approval-immersive", "observer-idle-terminal", "runtime-abort", "runtime-abort-immersive", "runtime-snapshot", "runtime-abort-pending", "silent-queue", "silent-queue-immersive"].includes(scenario)
   && !["observer-idle-immersive", "observer-idle-failed", "observer-idle-failed-immersive"].includes(scenario)
-  && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !ordinaryRecovery || !["shoggoth", "openclaw", "hermes"].includes(backend)) throw Error("invalid fixture scope");
-const key = `agent:${backend}-recovery-fixture:11111111-1111-4111-8111-111111111111`, agentId = key.split(":")[1];
+  && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !ordinaryRecovery && !inspirationBuffered
+  || !["shoggoth", "openclaw", "hermes"].includes(backend)) throw Error("invalid fixture scope");
+const key = `agent:${backend}-recovery-fixture:${inspirationBuffered ? "dashboard:inspiration-fixture" : "11111111-1111-4111-8111-111111111111"}`;
+const agentId = key.split(":")[1];
 const originalOperation = "original-operation-fixture", originalText = "Use this selected connector account exactly once";
 const captured = ["connection-selected-one"], selection = scenario === "newer"
   ? ["connection-selected-two"] : captured;
 const storageKey = "shoggoth.chat.pending-native-sends.v1", selectedKey = "shoggoth.chat.connector-selection.v1";
 const sessions = [{ key, agentId, agentName: `${backend} recovery fixture`, backendId: backend, model: "fixture-model", updatedAt: Date.now(),
-  ...(nativeRejection || legacyRecovery ? { kind: "cron" } : {}) }];
+  ...(nativeRejection || legacyRecovery ? { kind: "cron" } : inspirationBuffered ? { kind: "inspiration" } : {}) }];
 const sent: Array<any> = [], observed: Array<any> = [], sockets = new Set<FixtureSocket>();
 let lookup: any = scenario === "restored" ? { status: "found", admissionAccepted: true, run: { status: "needs_verification" } }
   : scenario === "newer" ? { status: "found", admissionAccepted: true, run: { status: "running" } } : { status: "not_found" };
@@ -37,13 +40,13 @@ if (legacyRecovery) lookup = { status: "unresolved", run: null, canReconcile: tr
 if (scenario.startsWith("ordinary-recovery-reload")) lookup = { status: "found", stateAuthority: "openclaw",
   admissionAccepted: true, run: { id: originalOperation, sessionKey: key, status: "completed" } };
 let history: Array<any> = [], releaseLookup: (() => void) | null = null, historyReads = 0, lookupUnavailable = false;
-const buffered = scenario.startsWith("ordinary-buffered"), immersive = scenario.endsWith("-immersive");
+const buffered = scenario.startsWith("ordinary-buffered") || inspirationBuffered, immersive = scenario.endsWith("-immersive");
 const upstreamFailure = scenario.startsWith("upstream-error");
 const nativeApproval = scenario.startsWith("native-approval");
 const runtimeTerminal = scenario.startsWith("runtime-");
 const silentQueue = scenario.startsWith("silent-queue");
 const slashOrder = scenario.startsWith("slash-order");
-const fixtureHasSelection = !scenario.startsWith("ordinary") && !silentQueue && !upstreamFailure && !slashOrder && !nativeRejection && !legacyRecovery;
+const fixtureHasSelection = !scenario.startsWith("ordinary") && !inspirationBuffered && !silentQueue && !upstreamFailure && !slashOrder && !nativeRejection && !legacyRecovery;
 const slashRequests: Array<{ body: any; reply: (response: Response) => void }> = [];
 if (scenario === "runtime-abort-pending") lookup = { status: "found", run: { status: "running" } };
 if (nativeApproval) {
@@ -175,6 +178,9 @@ class FixtureSocket {
 Object.assign(window, { WebSocket: FixtureSocket });
 window.fetch = async (input, init) => {
   const url = new URL(String(input), location.href); let payload: unknown = {};
+  if (url.pathname === "/__api/chat/secrets/prepare") {
+    payload = { text: JSON.parse(String(init?.body)).text, references: [], version: 1 };
+  }
   if (slashOrder && url.pathname === "/__api/chat/slash/exec") {
     return new Promise<Response>(reply => slashRequests.push({ body: JSON.parse(String(init?.body)), reply }));
   }
@@ -535,9 +541,16 @@ Object.assign(window, { runChatSendRecoveryFixture: async () => {
     }
     for (let index = 0; index < sent.length; index += 1) {
       const idem = sent[index].idempotencyKey;
+      const runtimeKey = inspirationBuffered ? `inspiration-run-${index}` : idem;
+      let shoggoth;
+      if (inspirationBuffered) {
+        const input = new TextEncoder().encode(`shoggoth-chat-send\0openclaw:${key}\0${idem}`);
+        const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+        shoggoth = { inspirationSendOperationId: `send-${Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("")}` };
+      }
       history = [...history, { role: "user", content: repeatedText, timestamp: Date.now(),
-        ...(index === 0 ? { idempotencyKey: `${idem}:user` } : {}),
-        __openclaw: { id: `persisted-user-${index}`, ...(index > 0 ? { idempotencyKey: `${idem}:user` } : {}) } },
+        ...(index === 0 ? { idempotencyKey: `${runtimeKey}:user` } : {}), shoggoth,
+        __openclaw: { id: `persisted-user-${index}`, ...(index > 0 ? { idempotencyKey: `${runtimeKey}:user` } : {}) } },
         { role: "assistant", content: `第 ${index + 1} 轮回复`, timestamp: Date.now() }];
       const readsBefore = historyReads;
       emit({ runId: `resumed-run-${index}`, state: "final", message: history.at(-1) });

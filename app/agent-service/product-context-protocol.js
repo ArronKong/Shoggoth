@@ -8,16 +8,7 @@ const nullableText = value => value === null || (typeof value === "string" && va
   && value.length <= 512 && value.isWellFormed() && !value.includes("\0"));
 const BREAKDOWN_METHOD = "chat.context.breakdown";
 const METHODS = ["chat.context.compact", BREAKDOWN_METHOD];
-const MESSAGES = Object.freeze({ PRODUCT_CONTEXT_INVALID: "上下文请求或响应无效", PRODUCT_CONTEXT_UNAVAILABLE: "请在 Agent 设置中配置可生成摘要的 Runtime",
-  PRODUCT_CONTEXT_DISABLED: "产品级上下文管理未启用", SESSION_BUSY: "会话仍有任务，请完成后再压缩", CHAT_SESSION_NOT_FOUND: "会话不存在",
-  PRODUCT_CONTEXT_FAILED: "上下文压缩未完成，请查看任务状态",
-  PRODUCT_CONTEXT_BREAKDOWN_UNAVAILABLE: "无法读取这条回复的上下文组成",
-  PRODUCT_COMPACTION_FAILED: "上下文摘要未完成，原会话记录已保留；请检查 Agent 的摘要 Runtime 配置，再点击「压缩」重试",
-  PRODUCT_COMPACTION_AUTH_REQUIRED: "摘要 Runtime 的默认模型尚未登录或凭据不可用；请检查该 Runtime 的登录和默认模型，或在 Agent 设置中选择其他摘要 Runtime，再点击「压缩」重试",
-  PRODUCT_COMPACTION_MODEL_UNAVAILABLE: "摘要 Runtime 不支持当前默认模型或模型配置；请调整摘要模型或选择其他摘要 Runtime，再点击「压缩」重试",
-  PRODUCT_COMPACTION_OUTPUT_INVALID: "摘要模型未返回有效的会话摘要，原会话记录已保留；请检查摘要模型，再点击「压缩」重试",
-  PRODUCT_COMPACTION_OUTCOME_UNKNOWN: "尚无法确认上次摘要请求的结果，已暂停自动重试；请检查摘要 Runtime 的记录后，再决定是否点击「压缩」重试",
-});
+const MESSAGES = Object.freeze(require("./chat-error-messages.json").productContext);
 function compactionErrorCode(error) {
   const code = error?.code;
   if (typeof code === "string" && Object.hasOwn(MESSAGES, code) && code.startsWith("PRODUCT_COMPACTION_")) return code;

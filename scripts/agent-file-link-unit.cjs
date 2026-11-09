@@ -55,7 +55,7 @@ function makeBackend({ local = true, workspace = ws, files = GATEWAY_FILES } = {
     assert.equal(params.agentId, "cto", "文件请求必须绑定当前 agent");
     if (method === "agents.files.list") return { workspace, files };
     if (method === "agents.files.get") {
-      if (params.name === "SOUL.md") return { file: { name: "SOUL.md", content: "# soul\n" } };
+      if (params.name === "SOUL.md") return { workspace, file: { name: "SOUL.md", content: "# soul\n" } };
       throw new Error(`${UNSAFE} "${params.name}"`);
     }
     if (method === "agents.files.set") {
@@ -72,7 +72,7 @@ function makeBackend({ local = true, workspace = ws, files = GATEWAY_FILES } = {
     // --- 读：软链 / 硬链都按目标内容返回 ---
     assert.deepEqual(
       await makeBackend().getAgentFile("cto", "TOOLS.md"),
-      { name: "TOOLS.md", content: "# shared tools\n", missing: false },
+      { name: "TOOLS.md", content: "# shared tools\n", missing: false, localDirectory: ws },
       "软链条目应读到链接目标的内容，而不是把网关的 unsafe 抛出去",
     );
     assert.equal(
@@ -87,19 +87,25 @@ function makeBackend({ local = true, workspace = ws, files = GATEWAY_FILES } = {
     );
 
     // --- 读：普通文件仍然走网关，兜底不越权接管 ---
-    assert.equal(
-      (await makeBackend().getAgentFile("cto", "SOUL.md")).content,
-      "# soul\n",
-      "普通文件必须走网关原路径",
-    );
+    const soul = await makeBackend().getAgentFile("cto", "SOUL.md");
+    assert.equal(soul.content, "# soul\n", "普通文件必须走网关原路径");
+    assert.equal(soul.localDirectory, ws, "使用网关读取该文件时确认的本机目录");
+    assert.equal((await makeBackend({ local: false }).getAgentFile("cto", "SOUL.md")).localDirectory,
+      undefined, "远端路径即使和本机目录同名也不可打开");
+    assert.equal((await makeBackend({ workspace: path.join(ws, "SOUL.md") }).getAgentFile("cto", "SOUL.md")).localDirectory,
+      undefined, "打开目标必须是目录");
 
     // --- 列表：软链条目补回 size/modifiedAt，普通文件保持网关值 ---
     const listed = await makeBackend().listAgentFiles("cto");
     assert.deepEqual(listed.map((file) => file.name), [
       "AGENTS.md", "IDENTITY.md", "SOUL.md", "USER.md", "MEMORY.md", "TOOLS.md", "HEARTBEAT.md",
     ], "五份核心档案固定有序，额外文件保留且不重复");
-    assert.deepEqual((await makeBackend().getAgent("cto")).files, listed,
+    const detail = await makeBackend().getAgent("cto");
+    assert.deepEqual(detail.files, listed,
       "Agent 详情和文件列表共用同一清单与网关确认的工作区");
+    assert.deepEqual(detail.setupFiles, ["SOUL.md", "USER.md"].map((name) => (
+      listed.find((file) => file.name === name)
+    )), "即使网关列出 HEARTBEAT.md，OpenClaw 设定也只显示 SOUL.md 和 USER.md");
     const withIdentity = await makeBackend({ local: false, files: [
       ...GATEWAY_FILES, { name: "IDENTITY.md", size: 50, updatedAtMs: 222 },
     ] }).listAgentFiles("cto");

@@ -163,6 +163,8 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
     ack: identity => ipcRenderer.invoke("shoggoth:model-operation-recovery:ack", identity),
   },
   readClipboardFiles: () => ipcRenderer.invoke("shoggoth:chat:clipboard-files"),
+  readChatClipboard: chatOnly => ipcRenderer.invoke("shoggoth:chat:clipboard-files", { withCaption: true, chatOnly }),
+  writeChatClipboard: value => ipcRenderer.invoke("shoggoth:chat:write-clipboard", value),
   requestMicrophoneAccess: () => ipcRenderer.invoke("shoggoth:microphone:request"),
   getMicrophoneAccessStatus: () => ipcRenderer.invoke("shoggoth:microphone:status"),
   ...(process.platform === "darwin" ? { typewriterSound: {

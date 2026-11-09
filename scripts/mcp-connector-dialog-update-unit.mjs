@@ -213,7 +213,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
    assert.ok(dialog.root.findAllByType('a').some(node=>node.props.href===recommendation.docsUrl),'the guide is visible after adding');
    await Renderer.act(async()=>dialog.unmount());dialog=null;
   }
-  assert.equal(added.length,24);assert.equal(cancelled.length,24);
+  assert.equal(added.length,25);assert.equal(cancelled.length,25);
   const registryPresets=[...recommendations.filter(value=>value.registryName),{...recommendations.find(value=>value.id==='lovable'),registryName:'dev.lovable/fixture'}];
   for(const recommendation of registryPresets){
    const remote={id:'remote:1',transport:{kind:'remote',protocol:'streamable-http',url:new URL(recommendation.url).href},fields:[]};
@@ -225,7 +225,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
    await mount({item:{...item,options:[tokenPackage]},recommendation});assert.equal(save().props.disabled,true,'a missing OAuth option cannot silently select an executable');
    await Renderer.act(async()=>dialog.unmount());dialog=null;
   }
-  console.log('PASS recommended OAuth dialogs: twenty-four official OAuth remote presets including creative services, no implicit install, no API key, browser sign-in and preferred registry remotes with safe drift handling');
+  console.log(`PASS recommended OAuth dialogs: ${added.length} official OAuth remote presets including creative services, no implicit install, no API key, browser sign-in and preferred registry remotes with safe drift handling`);
  }finally{if(dialog)await Renderer.act(async()=>dialog.unmount());for(const key of Object.keys(api))delete api[key];Object.assign(api,originalApi);}
 }
 

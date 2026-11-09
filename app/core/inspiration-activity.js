@@ -148,6 +148,15 @@ async function loadInspirationActivity(registry, id, runId) {
   let artifacts = { supported: false, reason: local ? "unavailable" : "remote", items: [], hasMore: false };
   if (local) {
     try { artifacts = await executionArtifacts(execution, projected.parts, history?.runtimeHome); } catch { /* Keep trajectory available. */ }
+    try {
+      const managed = await backend.listRunArtifacts?.(execution.agentId, execution.runId);
+      if (managed?.length) {
+        const paths = new Set(managed.map(file => file.path));
+        const items = [...managed, ...artifacts.items.filter(file => !paths.has(file.path))]
+          .sort((left, right) => right.mtimeMs - left.mtimeMs);
+        artifacts = { supported: true, reason: null, items: items.slice(0, 50), hasMore: artifacts.hasMore || items.length > 50 };
+      }
+    } catch { /* Project references are independently available. */ }
   }
   return { runId, errorMessage, trajectory: { supported: selected.supported, reason: selected.reason, ...projected }, artifacts };
 }

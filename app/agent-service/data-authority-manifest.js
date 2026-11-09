@@ -88,6 +88,16 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
       }),
       recovery: "Private single Service writer; immutable objects and confirmed facts survive restart; authority restore advances UI epochs before Inbox recovery; stale operations never replay; writer locks, mounts, ports and previews are excluded from backup",
     }),
+    agentFiles: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["agents/<profileId>/files/<fileId>/.shoggoth-file.json",
+        "agents/<profileId>/files/<fileId>/<filename>"]),
+      records: Object.freeze({
+        AgentFile: recordAuthority({ authority: ["profileId", "fileId", "name", "mimeType", "sizeBytes",
+          "sha256", "source", "createdAt", "updatedAt", "revision", "status", "intent", "pendingName"] }),
+      }),
+      recovery: "A private Service writer commits metadata and payload together. Rename intents and delete receipts survive restart and restore. The in-memory index is rebuilt from the records, and incomplete import staging is outside backup authority.",
+    }),
     hooks: Object.freeze({
       owner: "shoggoth", schemaVersion: 1, backupRequired: true,
       pathRules: Object.freeze(["stateDir/hooks/hooks.sqlite", "stateDir/hooks/packages/<contentDigest>"]),

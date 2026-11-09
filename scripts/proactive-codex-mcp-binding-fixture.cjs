@@ -4,18 +4,21 @@
 // Responses served only on loopback. No account credentials or model quota.
 const assert = require("node:assert/strict"), fs = require("node:fs"), path = require("node:path");
 const crypto = require("node:crypto"), http = require("node:http"), { spawn } = require("node:child_process");
-const { createAgentService } = require("../app/agent-service/server");
+const { createAgentService, PROTOCOL_VERSION } = require("../app/agent-service/server");
+const { readClientToken, requestService } = require("../app/agent-service/client");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { CodexRuntimeHost } = require("../app/agent-service/codex-runtime-host");
 const { CodexRuntimePool } = require("../app/agent-service/codex-runtime-pool");
 const { resolveCodexRuntimeLayout, CODEX_APP_SERVER_ARGS } = require("../app/agent-service/codex-runtime-paths");
+const { providerConfigAlias } = require("../app/agent-service/codex-runtime-config");
 const { defaultConfig, DAY_MS } = require("../app/agent-service/proactive-service-protocol");
+const { seedProactiveAgentContext } = require("./helpers/proactive-native-closure.cjs");
 const repo = path.resolve(__dirname, ".."), root = fs.realpathSync(fs.mkdtempSync("/tmp/sg-spark-binding-"));
 const home = path.join(root, "codex"); fs.mkdirSync(home, { mode: 0o700 });
 const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"), profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
 const safeStorage = { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value).reverse(), decryptString: value => Buffer.from(value).reverse().toString() };
 const clock = { value: Date.now() }, bindings = [], starts = [], cases = [];
-let service, pool, activeCase, nativeHost, providerRequests = 0, serial = 0;
+let service, pool, activeCase, nativeHost, expected, providerRequests = 0, serial = 0;
 const provider = http.createServer((req, res) => {
   const chunks = []; req.on("data", data => chunks.push(data)); req.on("end", () => {
     try {
@@ -30,6 +33,32 @@ const provider = http.createServer((req, res) => {
       if (activeCase.proactive) {
         assert.ok(tools.every(tool => ["request_user_input", "tool_search", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"].includes(tool.name)
           || tool.name?.endsWith("proactive_respond")), "Proactive model must have no shell, file, browser or other product tools: " + JSON.stringify(tools.map(tool => tool.name)));
+      }
+      if (!activeCase.toolSent) {
+        const textForRole = role => body.input.filter(row => row.role === role)
+          .flatMap(row => row.content || []).map(part => part.text || "").join("\n");
+        const developer = [body.instructions, textForRole("developer")].filter(Boolean).join("\n");
+        const user = textForRole("user");
+        assert.ok(user.includes(activeCase.userProfile), `Full USER.md must reach the model in ${activeCase.mode}`);
+        assert.match(user, /BEGIN SAVED USER PROFILE AND WORKING PREFERENCES/u);
+        if (activeCase.proactive) {
+          for (const [name, content] of Object.entries(expected.definitions)) {
+            assert.ok(developer.includes(content), `${name}.md must reach the model in full`);
+          }
+          for (const memory of [expected.user, expected.agent, expected.daily]) assert.ok(user.includes(memory), memory);
+          assert.ok(!user.includes(expected.project));
+          assert.match(user, /SYSTEM-INITIATED CHECK/u);
+          const run = service.workDispatcher.listRuns({ source: "proactive" }).find(row => row.status === "running");
+          const snapshot = service.contextCompiler.snapshotStore.get(run.profileId, run.contextSnapshotId);
+          const main = snapshot.blocks.find(block => block.id === "proactive-conversation");
+          assert.ok(main, "The check receives verified main-conversation context");
+          assert.ok(user.includes(main.content));
+          assert.match(main.content, /Synthetic transport acceptance ask/u);
+          assert.doesNotMatch(main.content, /Synthetic transport acceptance full/u);
+        } else {
+          assert.ok(developer.includes(activeCase.soul), `Full SOUL.md must reach the model in ${activeCase.mode} chat`);
+          assert.ok(developer.includes(activeCase.identity), `Full IDENTITY.md must reach the model in ${activeCase.mode} chat`);
+        }
       }
       const n = ++serial, responseId = `response-fixture-${n}`;
       let item;
@@ -68,16 +97,18 @@ async function until(predicate) {
 (async () => {
   await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
   const binary = resolveCodexRuntimeLayout({ repoRoot: process.env.SHOGGOTH_FIXTURE_RUNTIME_ROOT || repo }).runtimePath;
-  pool = new CodexRuntimePool({ paths, parentEnv: { HOME: root, PATH: process.env.PATH, TMPDIR: root },
+  const parentEnv = { HOME: root, PATH: process.env.PATH, TMPDIR: root, NO_PROXY: "127.0.0.1,localhost",
+    HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9", ALL_PROXY: "http://127.0.0.1:9" };
+  pool = new CodexRuntimePool({ paths, parentEnv,
     runtimeAccountResolver: { resolve: binding => Object.freeze({ runtime: "codex", runtimeAccountId: binding.runtimeAccountId,
       kind: "shoggoth-managed", installationKind: "bundled", homeKind: "managed-shared", strategy: "managed-shared", home,
       nativeHome: null, integrationRoot: null, binaryPath: binary, launchArgs: Object.freeze([...CODEX_APP_SERVER_ARGS]),
       spawnEnv: Object.freeze({ HOME: root, CODEX_HOME: home }), configurationMode: "overlay" }) },
     hostFactory(options) {
       nativeHost = new CodexRuntimeHost({ ...options, repoRoot: repo, cwd: root,
-        parentEnv: { HOME: root, PATH: process.env.PATH, TMPDIR: root },
-        prepareRuntime: async () => ({ spawnEnv: { OPENAI_API_KEY: "synthetic-fixture-key" }, registeredSecrets: ["synthetic-fixture-key"],
-          configArgs: [], runtimeConfig: { provider: { kind: "openai-api-key" } } }),
+        parentEnv,
+        prepareRuntime: async () => ({ spawnEnv: {}, registeredSecrets: [], configArgs: [],
+          runtimeConfig: { provider: { kind: "custom-responses" } } }),
         spawnProcess(command, args, opts) {
           assert.equal(opts.env.HOME, root); assert.equal(opts.env.CODEX_HOME, home);
           const child = spawn(command, args, opts); let buffered = "";
@@ -96,35 +127,67 @@ async function until(predicate) {
     } });
   service = createAgentService({ paths, safeStorage, runtimePool: pool, autoSparkNotes: false, now: () => clock.value,
     prewarmMcpAuth: false, parentEnv: {}, proactiveProfileAvailable: () => true,
-    modelSecretRequest: (url, options, callback) => {
-      assert.equal(url.origin, "https://api.openai.com");
-      return http.request(new URL(url.pathname, `http://127.0.0.1:${provider.address().port}`), options, callback);
-    },
+    modelSecretRequest: () => assert.fail("The fixture model must use the loopback provider"),
     proactiveRuntimeCapability: () => ({ semanticVerified: true, reason: null }),
     setProactiveTimer: () => 1, clearProactiveTimer() {}, notificationSender: async () => ({ state: "submitted" }) });
-  await service.start(); const profile = service.productStore.listAgentProfiles().find(item => item.enabled);
+  await service.start();
+  const route = service.productStore.putModelProvider({ id: "fixture-loopback", kind: "custom-responses", name: "Loopback fixture",
+    baseUrl: `http://127.0.0.1:${provider.address().port}/v1`, model: "gpt-4.1", models: ["gpt-4.1"],
+    credentialRef: null, headers: null, awsRegion: null, awsProfile: null, validationStatus: "protocol_valid" });
+  const profile = service.productStore.putAgentProfile({ ...service.productStore.listAgentProfiles().find(item => item.enabled),
+    providerRef: route.id, defaultModel: route.model });
+  const providerAlias = providerConfigAlias(route);
   const helper = path.join(root, "helper.cjs");
   fs.writeFileSync(helper, `"use strict";require(${JSON.stringify(path.join(repo, "app/shoggoth-mcp-helper.js"))}).startShoggothMcpHelper({paths:${JSON.stringify(paths)},electronApp:{whenReady:async()=>{},quit(){}},runtimeProfileId:${JSON.stringify(profile.runtimeProfileId)},runtimeAccountId:${JSON.stringify(profile.runtimeAccountId)},safeStorage:{isEncryptionAvailable:()=>true,encryptString:v=>Buffer.from(v).reverse(),decryptString:v=>Buffer.from(v).reverse().toString()},serviceVersion:"fixture"}).catch(e=>{console.error(e.code);process.exitCode=1});\n`, { mode: 0o600 });
-  fs.writeFileSync(path.join(home, "config.toml"), `model = "gpt-4.1"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "Loopback fixture"\nbase_url = "http://127.0.0.1:${provider.address().port}/v1"\nwire_api = "responses"\nsupports_websockets = false\n[mcp_servers.shoggoth]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(helper)}]\nstartup_timeout_sec = 15\ntool_timeout_sec = 20\nrequired = true\n`, { mode: 0o600 });
-  let fullSession;
+  fs.writeFileSync(path.join(home, "config.toml"), `model = "${route.model}"\nmodel_provider = "${providerAlias}"\n[model_providers.${providerAlias}]\nname = "Loopback fixture"\nbase_url = "${route.baseUrl}"\nwire_api = "responses"\nsupports_websockets = false\n[mcp_servers.shoggoth]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(helper)}]\nstartup_timeout_sec = 15\ntool_timeout_sec = 20\nrequired = true\n`, { mode: 0o600 });
+  const ipc = (method, params) => requestService(paths, { id: id(), token: readClientToken(paths), version: PROTOCOL_VERSION, method, params });
+  const mainKey = service.proactiveStore.getTarget(profile.id).sessionKey;
+  const main = service.chatSessionStore.getSession(mainKey);
+  const saveUser = (content, extra = {}) => service.memoryEngine.propose({ profileId: profile.id,
+    scope: "user", classification: "explicit", sourceRefs: ["user-edit:native-profile-fixture"], content, ...extra });
+  for (let i = 0; i < 2; i++) await saveUser(`Preference ${i}: `
+    + "When reviewing work, describe the observed result before giving suggestions. ".repeat(90));
+  await saveUser("Last profile preference: use a brief closing.");
+  const soulBody = "# Soul\n\n" + "Report observations gently. Keep your reply grounded in what you saw.\n".repeat(420);
+  const identity = "# Identity\n\n" + "You are the observatory's patient guide.\n".repeat(300) + "Identity final line.\n";
+  let fullSession, fullRuntimeSessionId;
   for (const mode of ["ask", "full", "workspace-auto", "full-resume"]) {
-    activeCase = { mode, proactive: false, toolSent: false };
-    const workspace = path.join(root, mode); fs.mkdirSync(workspace, { mode: 0o700 });
-    const session = mode === "full-resume" ? fullSession : service.chatSessionStore.createSession({ operationId: id(), profileId: profile.id, workspace, createdAt: clock.value });
+    const resuming = mode === "full-resume";
+    const soul = soulBody + (resuming ? "最后一行是续聊后的新设定。\n" : "最后一行也要读到。\n");
+    if (mode === "ask" || resuming) {
+      const current = service.agentDefinitionStore.get(profile.id);
+      service.agentDefinitionStore.update({ profileId: profile.id, expectedRevision: current.manifest.revision,
+        actor: "user", documents: { SOUL: soul, IDENTITY: identity } });
+    }
+    if (resuming) await saveUser("Additional profile preference: include the verification result.");
+    const userProfile = service.memoryEngine.readCanonical(profile.id, "USER").content;
+    assert.ok(Buffer.byteLength(userProfile) > 8 * 1024);
+    activeCase = { mode, proactive: false, toolSent: false, soul, identity, userProfile };
+    let session = main;
+    if (resuming) session = fullSession;
+    else if (mode !== "ask") ({ session } = await ipc("chat.session.create", { operationId: id(), profileId: profile.id,
+      workspace: null, parentSessionKey: mainKey, createdAt: clock.value }));
     if (mode !== "full-resume") service.chatSessionStore.setPermissionMode(session.sessionKey, mode);
     if (mode === "full") fullSession = session;
-    const accepted = await service.workRunCoordinator.send({ operationId: id(), sessionKey: session.sessionKey, prompt: `Synthetic transport acceptance ${mode}` });
+    const accepted = await ipc("chat.send", { operationId: id(), sessionKey: session.sessionKey,
+      prompt: `Synthetic transport acceptance ${mode}`, createdAt: clock.value });
     await until(() => ["completed", "failed", "interrupted", "canceled"].includes(service.workDispatcher.getRun(accepted.run.id).status));
-    assert.equal(service.workDispatcher.getRun(accepted.run.id).status, "completed", JSON.stringify({ run: service.workDispatcher.getRun(accepted.run.id), fixture: activeCase.error }));
+    const run = service.workDispatcher.getRun(accepted.run.id);
+    assert.equal(run.status, "completed", JSON.stringify({ run, fixture: activeCase.error }));
+    if (mode === "full") fullRuntimeSessionId = run.runtimeSessionRef.sessionId;
+    if (resuming) assert.equal(run.runtimeSessionRef.sessionId, fullRuntimeSessionId);
     assert.ok(activeCase.output && !activeCase.output.includes("mcp_session_invalid"));
     const calls = starts.filter(item => item.mode === mode);
     assert.ok(calls.every(item => item.approvalPolicy === "on-request"));
     assert.ok(calls.some(item => item.method !== "turnStart" && item.sandbox === (mode.startsWith("full") ? "danger-full-access" : "workspace-write")));
-    cases.push({ mode, bindingForwarded: bindings.length === cases.length + 1, toolSucceeded: true });
+    cases.push({ mode, bindingForwarded: bindings.length === cases.length + 1, toolSucceeded: true, fullSoul: true, fullIdentity: true, fullUser: true });
   }
+  const mainHistoryIds = new Set(service.transcriptStore.listEvents(profile.id, main.id).map(item => item.id));
   activeCase = { mode: "SparkNotes", proactive: true, toolSent: false };
   service.inspirationStore.create({ operationId: id(), body: "可回顾的灵感种子" });
   clock.value += 2 * DAY_MS;
+  expected = await seedProactiveAgentContext(service, profile.id, root, clock.value);
+  activeCase.userProfile = service.memoryEngine.readCanonical(profile.id, "USER").content;
   const config = { ...defaultConfig("inspiration", profile.id, clock.value, "UTC"), enabled: true };
   service.proactiveStore.setMonitor({ operationId: id(), expectedRevision: 0, config });
   const occurrence = service.proactiveStore.claimOccurrence(config.id, clock.value, clock.value);
@@ -134,12 +197,16 @@ async function until(predicate) {
   assert.equal(bindings.length, 5); assert.ok(bindings.every(item => item.threadId && item.turnId));
   const notice = service.proactiveStore.noticeForOccurrence(occurrence.id);
   assert.equal(notice.title, "SparkNotes"); assert.equal(notice.items[0].group, "seed");
-  const session = service.chatSessionStore.getSession(notice.sessionKey);
-  const event = service.transcriptStore.listEvents(profile.id, session.id).find(item => item.content?.proactiveNotice?.id === notice.id);
+  assert.equal(notice.sessionKey, mainKey);
+  const history = service.transcriptStore.listEvents(profile.id, main.id).filter(item => !mainHistoryIds.has(item.id));
+  assert.deepEqual(history.map(item => item.kind), ["assistant"]);
+  assert.doesNotMatch(JSON.stringify(history), /SYSTEM-INITIATED CHECK/u);
+  const event = history.find(item => item.content?.proactiveNotice?.id === notice.id);
   assert.ok(event.content.text.includes("#/inspirations?id="));
   assert.equal(service.proactiveStore.getNote(notice.items[0].ideaId).lastRemindedAt, clock.value);
   cases.push({ mode: "SparkNotes", bindingForwarded: true, toolSucceeded: true, noticePublished: true });
-  activeCase = { mode: "HEARTBEAT", proactive: true, toolSent: false };
+  activeCase = { mode: "HEARTBEAT", proactive: true, toolSent: false,
+    userProfile: service.memoryEngine.readCanonical(profile.id, "USER").content };
   const document = await service.proactiveService.handle("proactive.document.get", { profileId: profile.id });
   await service.proactiveService.handle("proactive.document.set", { profileId: profile.id, expectedRevision: document.document.revision,
     content: "# Check\nReview the supplied check and record working notes. Notify once for this acceptance." });

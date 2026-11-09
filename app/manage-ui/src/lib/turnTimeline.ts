@@ -568,7 +568,7 @@ export function turnElapsedMs(startedAt: number | null | undefined, finishedAt: 
 
 // 与 ChatPage 工具卡耗时 chip 同规则:≥10s 取整,否则一位小数。
 export function formatDuration(s?: number): string {
-  if (typeof s !== "number" || !(s > 0)) return "—";
+  if (typeof s !== "number" || !Number.isFinite(s) || s < 0) return "—";
   return s >= 10 ? `${Math.round(s)}s` : `${s.toFixed(1)}s`;
 }
 

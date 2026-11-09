@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ClipboardEvent, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { formatChatTime as absTime } from "../lib/chatTime";
@@ -30,9 +30,9 @@ import { createNativeChatFrameAssembler } from "../lib/nativeChatUiFrames";
 import { ChatMediaContext } from "../components/ChatMediaContext";
 import { installHtmlArtifacts, setSendPromptHandler, setHtmlArtifactScope } from "../lib/htmlArtifacts";
 import { readXHighCache, writeXHighCache, probeXHigh } from "../lib/thinkingCapability";
-import { resizeToSquarePng, uploadAvatar } from "../lib/avatar";
 import AgentAvatarView from "../components/AgentAvatar";
-import { imgCacheKey, putImages, getImages, fileCacheKey, putFiles, getFiles } from "../lib/imageCache";
+import { imgCacheKey, putImages, getImages, fileCacheKey, putFiles, getFiles, getOperationAttachments, putOperationAttachments } from "../lib/imageCache";
+import { clipboardFile, desktopChatClipboard, writeChatClipboard, type ChatClipboardAttachment } from "../lib/chatClipboard";
 import {
   clearCachedChatHistoryExcept,
   deleteCachedChatHistory,
@@ -64,7 +64,7 @@ import {
   SLASH_COMMANDS,
   type SlashCommand,
 } from "../lib/slashCommands";
-import { translateGatewayError } from "../lib/gatewayErrors";
+import { translateGatewayError, translateProductError } from "../lib/gatewayErrors";
 import { createExecApprovalController, isOpenClawExecApproval } from "../lib/openclawExecApprovals";
 import {
   buildChatSendParams,
@@ -106,7 +106,7 @@ import McpConnectionRequests from "../components/McpConnectionRequests";
 type ChatConnectorSelection = string; // Read-only historical account selection.
 import { createPendingChatSendStore, shouldTrackChatSend, classifyChatSendObservation,
   isExplicitChatSendRejection, isUncertainChatSendReceipt, chatVerificationNoticeKey } from "../lib/chatSendRecovery";
-import { createOptimisticChatHistory } from "../lib/chatOptimisticHistory";
+import { createOptimisticChatHistory, openClawInspirationSendOperationId } from "../lib/chatOptimisticHistory";
 import { createChatSlashHistory } from "../lib/chatSlashHistory";
 import { createOpenClawPreambles, openClawPreambleIds, openClawPreambleKey } from "../lib/openclawPreambles";
 import ChatPromptCard, {
@@ -178,6 +178,7 @@ import { IconSend, IconClip, IconSearch, IconMic, IconStop } from "./chatIcons";
 import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
 import "./ChatPage.css";
 import GroupChatPanel, { GroupChatAvatar } from "./GroupChatPanel";
+import { GroupMemberConnectionContext } from "./GroupMemberAvatar";
 import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconQuote, IconTrash, MESSAGE_DELETION_ENABLED, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
 import { createGroupPanelCache } from "../lib/groupPanelCache";
 import GroupChatCreateModal from "./GroupChatCreateModal";
@@ -186,6 +187,7 @@ import {
   emitGroupChanged, GROUP_MEMBER_BACKEND_IDS, GROUP_NATIVE_BACKEND_ID, groupChatActivity, groupChatPreview, useGroupChats, type GroupCandidateAgent,
 } from "../lib/groupChat";
 import type {
+  BackendStatus,
   ChatCanvasWidgetPart,
   ChatCanvasWidgetPreview,
   ChatCapabilities,
@@ -193,6 +195,7 @@ import type {
   GlobalChatSearchHit,
   GlobalChatSearchResult,
   GlobalGroupChatSearchHit,
+  GroupChatMember,
   GroupChatMessage,
   OpenClawProgressCard,
   OpenClawQuestion,
@@ -221,6 +224,8 @@ import {
   updateSessionBoard,
   revealAttachment,
   revealPath,
+  getManagedAgentFile,
+  revealManagedAgentFile,
 } from "../api/client";
 import {
   readModelCatalog,
@@ -265,6 +270,7 @@ interface SessionRow {
   inspirationId?: string;
   kind?: string;
   source?: string;
+  mainSession?: boolean;
   codexDesktopSourceError?: string;
   codexDesktopWriter?: CodexDesktopWriterState;
   key: string;
@@ -643,8 +649,10 @@ interface ChatMsg {
   localSendId?: string;
   localSlashId?: string;
   idempotencyKey?: string;
+  inspirationSendOperationId?: string;
   pending?: boolean;
   finalReplyStreaming?: boolean;
+  promptResponse?: boolean;
   interimActivityId?: number;
   turnTiming?: TurnTiming;
   settledPending?: boolean; // stopped live tail awaiting its terminal frame or canonical history
@@ -802,7 +810,7 @@ function kindFromFilename(name: string): string {
  * 「Attached Context」区块（权威，Hermes），和我们本地转录写的 `[file: x]`
  * marker（转录尚未被权威历史取代时）。都没有就原样返回。
  */
-function extractAttachmentMarkers(text: string): { text: string; files: ChatFile[] } {
+function extractAttachmentMarkers(text: string): { text: string; files: ChatFile[]; imageCount: number } {
   const files: ChatFile[] = [];
   let body = text;
   const ctx = ATTACHED_CONTEXT_RE.exec(body);
@@ -831,9 +839,8 @@ function extractAttachmentMarkers(text: string): { text: string; files: ChatFile
     }
     return "";
   });
-  // `[image ×N]` 只说明有 N 张图；真图走 images/缓存，这里不造 chip，仅剥文本。
-  void imageCount;
-  return { text: body.replace(/[ \t]+$/gm, "").trim(), files };
+  // `[image ×N]` is an attachment fact, even when history omits the bytes.
+  return { text: body.replace(/[ \t]+$/gm, "").trim(), files, imageCount };
 }
 // Envelope/heartbeat records: the agent's "alive, nothing to report" ack (HEARTBEAT_OK /
 // NO_REPLY) plus its paired "[OpenClaw …]" poll/envelope prompt. The gateway returns these
@@ -1280,12 +1287,15 @@ function normalize(raw: any): ChatMsg {
     isProactiveNotice: typeof raw?.shoggoth?.proactiveNotice?.id === "string",
     nativeDisplayId: raw?.shoggoth?.nativeUiVersion === 1 && typeof raw.shoggoth.displayId === "string" ? raw.shoggoth.displayId : undefined,
     nativeRunId: raw?.shoggoth?.nativeUiVersion === 1 && typeof raw.shoggoth.runId === "string" ? raw.shoggoth.runId : undefined,
+    promptResponse: role === "user" && raw?.shoggoth?.promptResponse === true ? true : undefined,
     activityRunId: typeof raw?.__openclaw?.runId === "string" && raw.__openclaw.runId.trim() ? raw.__openclaw.runId : undefined,
     canonicalSourceEventId: raw?.shoggoth?.contextExcluded !== true && typeof raw?.shoggoth?.sourceEventId === "string" ? raw.shoggoth.sourceEventId : undefined,
     sourceEventIds: Array.isArray(raw?.shoggoth?.sourceEventIds) ? raw.shoggoth.sourceEventIds.filter((id: unknown) => typeof id === "string") : undefined,
     id: raw?.__openclaw?.id ?? (typeof raw?.id === "string" ? raw.id : undefined),
     idempotencyKey: typeof raw?.idempotencyKey === "string" ? raw.idempotencyKey
       : typeof raw?.__openclaw?.idempotencyKey === "string" ? raw.__openclaw.idempotencyKey : undefined,
+    inspirationSendOperationId: typeof raw?.shoggoth?.inspirationSendOperationId === "string"
+      ? raw.shoggoth.inspirationSendOperationId : undefined,
     ts: typeof raw?.timestamp === "number" ? raw.timestamp : undefined,
     turnTiming: turnElapsedMs(raw?.shoggoth?.turnTiming?.startedAt, raw?.shoggoth?.turnTiming?.finishedAt) != null
       ? { startedAt: raw.shoggoth.turnTiming.startedAt, finishedAt: raw.shoggoth.turnTiming.finishedAt } : undefined,
@@ -1844,7 +1854,8 @@ function collapseErrorRuns(msgs: ChatMsg[]): ChatMsg[] {
 function groupMessages(msgs: ChatMsg[]): Group[] {
   const groups: Group[] = [];
   // Published reminders are assistant bubbles with their own timestamp and actions.
-  const standalone = (m: ChatMsg) => !!(m.divider || m.notice || m.isProactiveNotice);
+  const standalone = (m: ChatMsg) => !!(m.divider || m.notice || m.isProactiveNotice
+    || (m.role === "user" && (m.images?.length || m.files?.length)));
   for (const m of msgs) {
     const last = groups[groups.length - 1];
     // Group consecutive same-role messages into one visual block — INCLUDING
@@ -2124,69 +2135,43 @@ function groupCopyText(g: Group, msgIndex?: number, partIndex?: number): string 
   return parts.map((p) => p.text || "").join("\n").trim();
 }
 
-// ---- small components ---------------------------------------------------
+type MessageAttachment = ChatClipboardAttachment & { original?: ChatAttachment };
 
-function Avatar({
-  agentId,
-  name,
-  className,
-  version,
-  editable,
-  onUploaded,
-}: {
-  agentId: string;
-  name: string;
-  className: string;
-  version?: number;
-  editable?: boolean;
-  onUploaded?: () => void;
-}) {
-  const { t } = useTranslation();
-  const [ver, setVer] = useState(0); // local cache-buster, bumped after a successful upload
-  const [busy, setBusy] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => setVer(0), [agentId, version]);
+function messageImage(message: ChatMsg, preview: string, index: number): MessageAttachment {
+  const item = (message.nativeAttachments ?? message.retryAttachments)?.filter(item => !item.kind || item.kind === "image")[index];
+  const original = item && (item.dataUrl === preview || item.dataUrl.startsWith("/") && `${item.dataUrl}&preview=1` === preview) ? item : undefined;
+  const extension = /^data:image\/([a-z0-9]+)[;,]/i.exec(preview)?.[1] ?? "png";
+  return { kind: "image", name: original?.name ?? `image.${extension}`, src: original?.dataUrl ?? preview, preview, original };
+}
 
-  // Both the external version and local uploads refresh the shared image state.
-  const inner = <AgentAvatarView agentId={agentId} name={name} className={className} version={ver || version} />;
+function messageFile(message: ChatMsg, file: ChatFile): MessageAttachment {
+  const original = file.src ? (message.nativeAttachments ?? message.retryAttachments)?.find(item =>
+    item.dataUrl === file.src && item.name === file.name) : undefined;
+  return { kind: file.kind === "image" ? "image" : "file", name: file.name, src: file.src, path: file.path, original };
+}
 
-  if (!editable) return inner;
+function messageMedia(message: ChatMsg): MessageAttachment[] {
+  return [...(message.images ?? []).map((src, index) => messageImage(message, src, index)),
+    ...(message.files ?? []).map(file => messageFile(message, file))];
+}
 
-  const onPick = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-picking the same file later
-    if (!file || !agentId) return;
-    setBusy(true);
-    try {
-      const png = await resizeToSquarePng(file);
-      await uploadAvatar(agentId, png);
-      // Force the <img> to refetch the freshly-written file. Prefer notifying the
-      // parent so SIBLING avatars (the agent list) re-fetch too; fall back to a
-      // local-only cache-bust when this Avatar is used standalone.
-      if (onUploaded) onUploaded();
-      else setVer(Date.now());
-    } catch (err) {
-      alert(t("chat.avatarUploadFailed", { msg: err instanceof Error ? err.message : String(err) }));
-    } finally {
-      setBusy(false);
-    }
-  };
+const attachmentQuoteText = (media: readonly MessageAttachment[]) => media.map(item => `[${item.name}]`).join(" ");
 
-  return (
-    <span className="avatar-edit">
-      {inner}
-      <button
-        type="button"
-        className="avatar-edit__btn"
-        title={t("chat.changeAvatar")}
-        disabled={busy}
-        onClick={() => inputRef.current?.click()}
-      >
-        {busy ? "…" : t("chat.change")}
-      </button>
-      <input ref={inputRef} type="file" accept="image/*" hidden onChange={onPick} />
-    </span>
-  );
+function quotedChatAttachment(item: MessageAttachment): ChatAttachment[] {
+  if (item.original) return [item.original];
+  const dataUrl = item.src;
+  const mimeType = dataUrl && /^data:([^;,]+);base64,/i.exec(dataUrl)?.[1];
+  if (!dataUrl || !mimeType) return [];
+  const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+  return [{ id: crypto.randomUUID(), dataUrl, name: item.name, mimeType,
+    kind: item.kind === "image" ? "image" : mimeType === "application/pdf" ? "pdf" : "file",
+    sizeBytes: Math.floor(base64.length * 3 / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0) }];
+}
+
+function QuoteImages({ media = [] }: { media?: readonly MessageAttachment[] }) {
+  const images = media.filter(item => item.kind === "image" && (item.preview || item.src));
+  return images.length ? <span className="chat-quote-images">{images.map((item, index) =>
+    <img key={index} className="chat-quote-image" src={item.preview ?? item.src} alt={item.name} />)}</span> : null;
 }
 
 // ---- ANSI (SGR) → HTML（R1 终端渲染）----
@@ -2534,13 +2519,16 @@ function ChatPageApp() {
   // False until the first live sessions.list lands — cache-painted times/models
   // render dimmed (is-stale) so stale values read as provisional, not truth.
   const [listLive, setListLive] = useState(false);
+  const [backendStatuses, setBackendStatuses] = useState<BackendStatus[] | null>(null);
   // Set of backend ids that are currently CONNECTED, from the same /__api/status
   // the 设置 page uses. The agent list / session caches (localStorage + the proxy's
   // injected Hermes rows) keep painting agents from disconnected backends; this is
   // the live truth we filter the list against. `null` = not probed yet → don't
   // filter (preserves the stale-while-revalidate instant paint); once probed it's a
   // real set, so a fully-offline backend yields an empty set and its agents vanish.
-  const [connectedBackends, setConnectedBackends] = useState<Set<string> | null>(null);
+  const connectedBackends = useMemo(() => backendStatuses && new Set(
+    backendStatuses.filter(backend => backend?.connected && backend.id).map(backend => backend.id),
+  ), [backendStatuses]);
   const connectedOnceBackendsRef = useRef(new Set<string>());
   // 正在启动的后端（status 的 info.starting，契约见 agent-backend.js getStatus）。
   // 冷启动要拉起多个 dashboard 进程的后端（Hermes）在这个窗口里 connected=false
@@ -2559,6 +2547,16 @@ function ChatPageApp() {
   const disabledBackends = useMemo(() => new Set(chatBackendCatalog
     .filter(backend => !enabledChatBackends.includes(backend.id)).map(backend => backend.id)),
   [chatBackendCatalog, enabledChatBackends]);
+  const groupMemberConnection = useCallback((member: GroupChatMember) => {
+    // Paired members use their own host's status from the member card.
+    if (member.peerId) return undefined;
+    if (disabledBackends.has(member.backendId)) return false;
+    const status = backendStatuses?.find(row => row?.id === member.backendId);
+    if (status?.disabled === true || status?.connected === false) return false;
+    if (status?.connected !== true) return undefined;
+    const readyAgents = status.info?.readyAgentIds;
+    return !Array.isArray(readyAgents) || readyAgents.includes(member.agentId);
+  }, [backendStatuses, disabledBackends]);
   const canSendActiveSession = (key: string | null | undefined): boolean =>
     (!key || isChatAgentListed(agentRoster, backendOfSession(key), agentOf(key)))
     && !(sessionsRef.current.find(row => row.key === key && row.source === "codex-desktop")?.codexDesktopWriter?.state === "busy")
@@ -3029,6 +3027,8 @@ function ChatPageApp() {
   const [agentHeaderPanel, setAgentHeaderPanel] = useState<{ scope: string; kind: ChatAgentPanelKind } | null>(null);
   const [agentHeaderInstant, setAgentHeaderInstant] = useState(false);
   const agentHeaderTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const agentAvatarBackRef = useRef<HTMLButtonElement>(null);
+  const [agentAvatarSaving, setAgentAvatarSaving] = useState(false);
   const [agentArtifactState, setAgentArtifactState] = useState<AgentArtifactState>({
     key: "",
     status: "idle",
@@ -3213,8 +3213,9 @@ function ChatPageApp() {
   // Quote is pinned to the session it was taken from: a quote captured in one
   // session never rides a send in another (defends the cross-session race the
   // QA round saw once — the bar already clears on switch, this closes the gap).
-  const [quote, setQuote] = useState<{ key: string; text: string } | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; group: Group; copyText: string; msgIndex?: number; partIndex?: number } | null>(null);
+  const [quote, setQuote] = useState<{ key: string; text: string; media?: MessageAttachment[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; group: Group; copyText: string; media: MessageAttachment[];
+    attachmentTarget?: MessageAttachment; msgIndex?: number; partIndex?: number } | null>(null);
   const [advancedProbe, setAdvancedProbe] = useState<{
     key: string;
     backendId: string;
@@ -3313,29 +3314,52 @@ function ChatPageApp() {
   // 缓存和 chat.history 共用同一条 raw → 可见消息路径，避免 Hermes 冷启动首屏与
   // 随后权威替换在附件 marker、心跳过滤或本地媒体恢复上出现两套口径。
   const prepareHistoryMessages = useCallback(async (key: string, raw: unknown[]): Promise<ChatMsg[]> => {
-    const msgs = groupNativeUiHistory(raw).map(normalize).filter((m: ChatMsg) => !isInterruptMarker(m));
+    const legacyCounts = new Map<string, { images: number; files: number }>();
+    const rows = groupNativeUiHistory(raw).map(row => {
+      const message = normalize(row);
+      // Native transcript attachments are complete, including the absence of
+      // an attachment. Do not fill their missing types from a caption cache.
+      if (message.role !== "user" || Number.isSafeInteger(row?.shoggoth?.transcriptSeq) || message.nativeAttachments?.length) {
+        return { message };
+      }
+      const textPart = message.parts.find(part => typeof part.text === "string");
+      const parsed = extractAttachmentMarkers(textPart?.text ?? "");
+      const text = parsed.text === OPENCLAW_MEDIA_PLACEHOLDER ? "" : parsed.text;
+      if (textPart && (parsed.files.length || text !== textPart.text?.trim())) textPart.text = text;
+      if (parsed.files.length && !message.files?.length) message.files = parsed.files;
+      const imageCount = parsed.imageCount || message.files?.filter(file => file.kind === "image").length || 0;
+      const knownFiles = message.files?.filter(file => file.kind !== "image") ?? [];
+      const captionOnly = !!text && !imageCount && !knownFiles.length;
+      const counts = legacyCounts.get(text) ?? { images: 0, files: 0 };
+      if (imageCount || captionOnly) counts.images++;
+      if (knownFiles.length || captionOnly) counts.files++;
+      legacyCounts.set(text, counts);
+      return { message, text, imageCount, knownFiles, captionOnly, counts };
+    }).filter(({ message }) => !isInterruptMarker(message));
     await Promise.all(
-      msgs.map(async (m: ChatMsg) => {
-        if (m.role !== "user") return;
-        const textPart = m.parts.find((p) => typeof p.text === "string");
-        let lookupText = msgText(m);
-        if (textPart?.text) {
-          const parsed = extractAttachmentMarkers(textPart.text);
-          if (parsed.files.length || parsed.text !== textPart.text.trim()) {
-            textPart.text = parsed.text;
-            lookupText = parsed.text;
-            if (parsed.files.length && !m.files?.length) m.files = parsed.files;
-          }
-          if (textPart.text.trim() === OPENCLAW_MEDIA_PLACEHOLDER) {
-            textPart.text = "";
-            lookupText = "";
+      rows.map(async ({ message: m, text, imageCount, knownFiles, captionOnly, counts }) => {
+        if (text === undefined || !counts) return;
+        const exact = m.idempotencyKey ? await getOperationAttachments(key, m.idempotencyKey) : undefined;
+        if (exact?.length) {
+          m.retryAttachments = exact;
+          m.images = exact.filter(item => !item.kind || item.kind === "image").map(item => item.dataUrl);
+          m.files = exact.filter(item => item.kind && item.kind !== "image").map(item => ({
+            name: item.name, kind: item.kind || "file", src: item.dataUrl, mimeType: item.mimeType,
+            sizeBytes: item.sizeBytes, durationMs: item.durationMs, width: item.width, height: item.height,
+          }));
+          return;
+        }
+        // A legacy lookup needs a unique candidate for this media type. Empty
+        // captions also need attachment facts from the same history row.
+        if (counts.images === 1 && !m.images?.length && (imageCount || captionOnly)) {
+          const cached = await getImages(imgCacheKey(key, text));
+          if (cached?.length && (!imageCount || cached.length === imageCount)) {
+            m.images = cached;
+            m.files = knownFiles;
           }
         }
-        if (!m.images?.length) {
-          const cached = await getImages(imgCacheKey(key, lookupText));
-          if (cached?.length) m.images = cached;
-        }
-        const cachedFiles = await getFiles(fileCacheKey(key, lookupText));
+        if (counts.files !== 1 || (!knownFiles?.length && !captionOnly)) return;
+        const cachedFiles = await getFiles(fileCacheKey(key, text));
         if (!cachedFiles?.length) return;
         if (!m.files?.length) m.files = cachedFiles;
         else {
@@ -3343,12 +3367,12 @@ function ChatPageApp() {
           for (const cached of cachedFiles) byName.set(cached.name, [...(byName.get(cached.name) || []), cached]);
           m.files = m.files.map((f) => {
             const cached = byName.get(f.name)?.shift();
-            return cached ? { ...f, kind: f.kind || cached.kind, src: f.src ?? cached.src } : f;
+            return cached && !f.path ? { ...f, kind: f.kind || cached.kind, src: f.src ?? cached.src } : f;
           });
         }
       }),
     );
-    return msgs;
+    return rows.map(({ message }) => message);
   }, []);
 
   const historyControllerRef = useRef<ReturnType<typeof createHistoryController<ChatMsg>> | null>(null);
@@ -5355,10 +5379,8 @@ function ChatPageApp() {
         if (!r.ok) { markSettled(false); return; }
         const d = await r.json();
         if (!Array.isArray(d?.backends)) return;
-        const rows: { id?: string; connected?: boolean; disabled?: boolean; info?: { starting?: boolean; busy?: boolean; readyAgentIds?: string[]; recoveryCode?: string } }[] =
-          Array.isArray(d?.backends) ? d.backends : [];
+        const rows: (BackendStatus & { info: { busy?: boolean } })[] = d.backends;
         markSettled(rows.every((b) => !b?.id || b.disabled === true || (b.connected === true && b.info?.busy !== true)));
-        const set = new Set(rows.filter((b) => b?.connected && b.id).map((b) => b.id as string));
         const starting = new Set(
           rows.filter((b) => !b?.connected && b?.info?.starting && b.id).map((b) => b.id as string),
         );
@@ -5369,7 +5391,7 @@ function ChatPageApp() {
             if (b.disabled === true) connectedOnceBackendsRef.current.delete(b.id);
             else if (b.connected === true) connectedOnceBackendsRef.current.add(b.id);
           }
-          setConnectedBackends(set);
+          setBackendStatuses(rows);
           setStartingBackends(starting);
           setRecoveryBackends(current => {
             const next = new Set(current);
@@ -5854,9 +5876,14 @@ function ChatPageApp() {
     }
     const idem = crypto.randomUUID();
 
+    let inspirationOperationId: string | undefined;
     preparingSecretInputRef.current.add(key);
     try {
-      const prepared = await prepareChatInputForSend(key, idem, text);
+      const [prepared, operationId] = await Promise.all([
+        prepareChatInputForSend(key, idem, text),
+        originalBackend === "openclaw" ? openClawInspirationSendOperationId(key, idem).catch(() => undefined) : undefined,
+      ]);
+      inspirationOperationId = operationId;
       if (activeKeyRef.current !== key) { draftsRef.current.set(key, prepared.text); return; }
       const original = text;
       text = prepared.text;
@@ -5952,25 +5979,21 @@ function ChatPageApp() {
         pending: true,
       },
     ];
-    if (originalBackend === "openclaw") optimisticHistoryRef.current.remember(key, nextMessages[nextMessages.length - 2]);
+    if (originalBackend === "openclaw") {
+      optimisticHistoryRef.current.remember(key, nextMessages[nextMessages.length - 2], inspirationOperationId);
+      void putOperationAttachments(key, idem, atts);
+    } else if (!chatBackendDescriptors.get(originalBackend)?.surfaces.agentHarness) {
+      // Legacy external history has no durable operation identity. Keep its
+      // existing caption cache as a fallback for attributable records.
+      if (imgs.length) void putImages(imgCacheKey(key, text), imgs);
+      if (nonImageAtts.length) void putFiles(fileCacheKey(key, text), nonImageAtts.map(a => ({
+        name: a.name, kind: a.kind || "file",
+        ...(a.dataUrl.length <= FILE_CACHE_MAX_BYTES ? { src: a.dataUrl } : {}),
+      })));
+    }
     messagesRef.current = nextMessages;
     chatHistoryController.markSend(key, nextMessages);
     setMessages(nextMessages);
-    // 落本地缓存：gateway 不持久化用户图片，重开后靠这份缓存 + 「会话::文本」键还原（lib/imageCache）。
-    if (imgs.length) void putImages(imgCacheKey(key, text), imgs);
-    // 保留文件来源，切回会话后仍可打开；权威历史提供的来源优先于本地缓存。
-    if (nonImageAtts.length) {
-      // 大文件可能几十 MB，超过 FILE_CACHE_MAX_BYTES 只保留元数据，
-      // 原生附件引用和 Hermes 路径仍由权威历史恢复。
-      void putFiles(
-        fileCacheKey(key, text),
-        nonImageAtts.map((a) => ({
-          name: a.name,
-          kind: a.kind || "file",
-          ...(a.dataUrl.length <= FILE_CACHE_MAX_BYTES ? { src: a.dataUrl } : {}),
-        })),
-      );
-    }
     // 2026.8.1: each attachment carries raw base64 at top level. Hermes already
     // accepts this public envelope, so the page stays transport-neutral.
     if (isSlash) {
@@ -6717,7 +6740,6 @@ function ChatPageApp() {
     // 普通消息放行 → 走下方统一入队路径（排队，回合终结后链式补发）。
     const looksSlash = !attachments.length && (parsedSlash !== null || isSlashCommandInput(text));
     if (inFlight && looksSlash && !isRunControl) return;
-    const atts = attachments;
 
     // record the sent input for ↑/↓ recall (per session, dedup consecutive, cap 50)
     if (text) {
@@ -6779,6 +6801,22 @@ function ChatPageApp() {
     const q = quote && quote.key === key ? quote : null;
     const prefix = q ? `${q.text.split("\n").map((l) => `> ${l}`).join("\n")}\n\n` : "";
     const outgoing = prefix && !text.startsWith(prefix) ? `${prefix}${text}` : text;
+    const caps = capabilitiesForSession(key);
+    const quoted = supportsBackendAttachments(backendId, caps) ? (q?.media?.flatMap(quotedChatAttachment) ?? []).filter(item => {
+      const kind = !item.kind || item.kind === "image" ? "image" : item.kind === "pdf" ? "pdf" : "file";
+      if (!caps) return kind === "image";
+      const supported = caps.attachments[kind];
+      return !!supported && (!supported.maxBytes || (item.sizeBytes ?? 0) <= supported.maxBytes);
+    }) : [];
+    const atts = [...attachments, ...quoted];
+    if (quoted.length && ((caps?.maxAttachments && atts.length > caps.maxAttachments)
+      || (caps?.maxAttachmentBytes && atts.reduce((sum, item) => sum + (item.sizeBytes || 0), 0) > caps.maxAttachmentBytes))) {
+      const notice = { text: t("chat.attachBatchLimit", { count: caps.maxAttachments,
+        limit: Math.round((caps.maxAttachmentBytes || 0) / 1024 / 1024) }), kind: "error" as const };
+      setToast(notice);
+      setTimeout(() => setToast(current => current === notice ? null : current), 2600);
+      return;
+    }
     const shouldSteer = inFlight && canSteerActiveChat(
       capabilitiesForSession(key),
       runStatusBySessionRef.current.get(key),
@@ -7096,10 +7134,17 @@ function ChatPageApp() {
     setTimeout(() => setToast(null), 1600);
   };
 
-  const copyText = (md: string) => {
-    navigator.clipboard?.writeText(md).catch(() => {});
-    setToast({ text: t("chat.copied"), kind: "success" });
-    setTimeout(() => setToast(null), 1200);
+  const copyText = (md: string, media: MessageAttachment[] = []) => {
+    const key = activeKeyRef.current;
+    const current = () => activeKeyRef.current === key;
+    const show = (ok: boolean) => {
+      if (!current()) return;
+      const notice = ok ? { text: t("chat.copied"), kind: "success" as const }
+        : { text: t("chat.copyFailed"), kind: "error" as const };
+      setToast(notice);
+      setTimeout(() => setToast(value => value === notice ? null : value), ok ? 1200 : 2600);
+    };
+    void writeChatClipboard(md, media, current).then(copied => { if (copied) show(true); }, () => show(false));
   };
 
   // Un-hide specific message ids of a GIVEN session (the undo toast). Keyed
@@ -7200,17 +7245,18 @@ function ChatPageApp() {
   // 里）；会话被 reset/压缩后指针悬空、模型接不上（Maya topic-3 事故），改为全文随发。
   // R154：优先取右键落点的那条气泡（part）→ 那条消息 → 整组，逐级回退——组是渲染
   // 归并的产物，用户引用的语义单位是气泡。
-  const quoteGroup = (g: Group, msgIndex?: number, partIndex?: number) => {
+  const quoteGroup = (g: Group, msgIndex?: number, partIndex?: number, attachmentTarget?: MessageAttachment) => {
     const m = msgIndex != null ? g.msgs[msgIndex] : undefined;
     const p = m && partIndex != null ? m.parts[partIndex] : undefined;
-    const s =
+    const s = attachmentTarget ? "" : (
       (p && p.type === "text" ? quoteTextOfParts([p]) : "") ||
       (m ? quoteTextOfParts(m.parts) : "") ||
-      groupQuoteText(g);
+      groupQuoteText(g));
+    const media = attachmentTarget ? [attachmentTarget] : s ? [] : (m ? [m] : g.msgs).flatMap(messageMedia);
     setMenu(null);
     const key = activeKeyRef.current;
-    if (!s || !key) return;
-    setQuote({ key, text: s });
+    if ((!s && !media.length) || !key) return;
+    setQuote({ key, text: s || attachmentQuoteText(media), media });
     requestAnimationFrame(() => visibleComposerEl()?.focus());
   };
   // Scroll a pinned message into view (the carousel thumbnail click).
@@ -7232,24 +7278,33 @@ function ChatPageApp() {
       ({ item: g }) =>
         groupQuoteText(g) === snippet ||
         groupSnippet(g) === snippet ||
-        (probe.length >= 20 && groupQuoteText(g).includes(probe)),
+        (probe.length >= 20 && groupQuoteText(g).includes(probe)) ||
+        (snippet.startsWith("[") && g.msgs.some(message => {
+          const media = messageMedia(message);
+          return attachmentQuoteText(media) === snippet || media.some(item => attachmentQuoteText([item]) === snippet);
+        })),
     );
     if (hit) scrollToMessage(hit.key);
   };
   // Right-click context menu (复制/引用/置顶/删除) on a message group.
-  const openMenu = (e: ReactMouseEvent<HTMLDivElement>, g: Group, copyTextOverride?: string) => {
+  const openMenu = (e: ReactMouseEvent, g: Group, copyTextOverride?: string, attachmentTarget?: MessageAttachment,
+    segmentMedia?: MessageAttachment[]) => {
     e.preventDefault();
+    if (attachmentTarget) e.stopPropagation();
     // R154：从事件目标向上找 data-mi（消息序号）/ data-qp（文本气泡的 part 序号），
     // 记录右键落点。引用按落点气泡取文——连续同角色消息归组渲染，整组取文会把
     // 相邻消息（如 cron 投递前的另一条回复）串进引用（Maya topic-3 事故）。
-    const el = e.target instanceof HTMLElement ? e.target : null;
+    const el = e.target instanceof Element ? e.target : null;
     const mi = Number(el?.closest("[data-mi]")?.getAttribute("data-mi") ?? NaN);
     const pi = Number(el?.closest("[data-qp]")?.getAttribute("data-qp") ?? NaN);
     setMenu({
       x: e.clientX,
       y: e.clientY,
       group: g,
-      copyText: copyTextOverride ?? groupCopyText(g, mi, pi),
+      copyText: attachmentTarget ? "" : copyTextOverride ?? groupCopyText(g, mi, pi),
+      media: attachmentTarget ? [attachmentTarget] : Number.isNaN(pi)
+        ? segmentMedia ?? (g.msgs[mi] ? [g.msgs[mi]] : g.msgs).flatMap(messageMedia) : [],
+      attachmentTarget,
       msgIndex: Number.isNaN(mi) ? undefined : mi,
       partIndex: Number.isNaN(pi) ? undefined : pi,
     });
@@ -7561,34 +7616,37 @@ function ChatPageApp() {
       .filter((it) => it.kind === "file")
       .map((it) => it.getAsFile())
       .filter((f): f is File => !!f);
-    if (files.length) {
+    const desktop = desktopChatClipboard();
+    if (files.length && !desktop?.readChatClipboard) {
       e.preventDefault();
       files.forEach(addFile);
       return;
     }
-    // Finder file copies can expose only an OS pasteboard URL, not a DOM File.
-    const desktop = (window as unknown as { openclawDesktop?: {
-      readClipboardFiles?: () => Promise<Array<{ fileName: string; mimeType: string; content: string }>>;
-    } }).openclawDesktop;
-    if (desktop?.readClipboardFiles) {
+    // Chromium can expose only the bitmap or omit the caption when the OS
+    // clipboard has both text and files. Read our complete copy when available.
+    if (desktop?.readChatClipboard || desktop?.readClipboardFiles) {
       const pastedText = e.clipboardData.getData("text/plain");
       const before = e.currentTarget.value;
       const start = e.currentTarget.selectionStart;
       const end = e.currentTarget.selectionEnd;
       const withText = before.slice(0, start) + pastedText + before.slice(end);
-      if (!pastedText) e.preventDefault();
+      if (files.length || !pastedText) e.preventDefault();
       const key = activeKeyRef.current;
-      void desktop.readClipboardFiles().then(items => {
-        if (activeKeyRef.current !== key || !items.length) return;
-        // Finder may also supply a plain-text filename. Remove only that default
-        // insertion; never overwrite edits made while the IPC request was pending.
-        if (pastedText && inputRef.current === withText) setInput(before);
-        for (const item of items) {
-          const bytes = Uint8Array.from(atob(item.content), value => value.charCodeAt(0));
-          addFile(new File([bytes], item.fileName, { type: item.mimeType }));
+      const read = desktop.readChatClipboard ? desktop.readChatClipboard(files.length > 0)
+        : desktop.readClipboardFiles!().then(items => ({ files: items, caption: undefined }));
+      void read.then(({ files: items, caption }) => {
+        if (activeKeyRef.current !== key) return;
+        // Finder may supply a filename as text. Replace only the original paste
+        // and preserve edits made while IPC was pending.
+        if (caption !== undefined && (inputRef.current === before || inputRef.current === withText)) {
+          setInput(before.slice(0, start) + caption + before.slice(end));
+        } else if (!files.length && items.length && pastedText && inputRef.current === withText) {
+          setInput(before);
         }
+        (items.length ? items.map(clipboardFile) : files).forEach(addFile);
       }).catch(error => {
         if (activeKeyRef.current !== key) return;
+        if (files.length) { files.forEach(addFile); return; }
         setToast({ text: String(error.message || error), kind: "error" });
       });
     }
@@ -7961,6 +8019,13 @@ function ChatPageApp() {
   const activeAgentHeaderPanel = agentHeaderPanel?.scope === agentHeaderScope && !immersive
     ? agentHeaderPanel.kind : null;
   const agentArtifactsOpen = activeAgentHeaderPanel === "artifacts";
+  const agentAvatarEditing = activeAgentHeaderPanel === "avatar";
+  const agentProfileButtonLabel = t(agentAvatarEditing ? "chat.avatarPicker.back"
+    : activeAgentHeaderPanel === "profile" ? "common.close" : "chat.agentPanelProfile");
+  const backToAgentProfile = useCallback(() => {
+    setAgentHeaderPanel(current => current?.scope === agentHeaderScope && current.kind === "avatar"
+      ? { scope: agentHeaderScope, kind: "profile" } : current);
+  }, [agentHeaderScope]);
   const toggleAgentHeaderPanel = (kind: ChatAgentPanelKind, trigger: HTMLButtonElement, instant: boolean) => {
     agentHeaderTriggerRef.current = trigger;
     setAgentHeaderInstant(instant);
@@ -7968,6 +8033,9 @@ function ChatPageApp() {
   };
 
   useEffect(() => { setAgentHeaderInstant(true); setAgentHeaderPanel(null); }, [activeKey, activeBackend, immersive]);
+  useLayoutEffect(() => {
+    if (agentAvatarEditing) agentAvatarBackRef.current?.focus({ preventScroll: true });
+  }, [agentAvatarEditing]);
   useLayoutEffect(() => {
     const conversation = threadRef.current?.parentElement;
     const header = conversation?.querySelector<HTMLElement>(".chat-header");
@@ -7999,6 +8067,11 @@ function ChatPageApp() {
     const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented
         || document.querySelector("[role='dialog'][aria-modal='true'], .session-menu")) return;
+      if (agentAvatarEditing) {
+        event.preventDefault();
+        if (!agentAvatarSaving) backToAgentProfile();
+        return;
+      }
       setAgentHeaderInstant(true);
       setAgentHeaderPanel(null);
       agentHeaderTriggerRef.current?.focus();
@@ -8009,7 +8082,7 @@ function ChatPageApp() {
       document.removeEventListener("pointerdown", outside);
       document.removeEventListener("keydown", escape);
     };
-  }, [activeAgentHeaderPanel]);
+  }, [activeAgentHeaderPanel, agentAvatarEditing, agentAvatarSaving, backToAgentProfile]);
 
   useEffect(() => {
     if (!agentArtifactsOpen || !activeAgentId) return;
@@ -8045,9 +8118,10 @@ function ChatPageApp() {
     }
   }, [t]);
 
-  const revealLocalFile = useCallback(async (filePath: string) => {
+  const revealLocalFile = useCallback(async (filePath: string, fileId?: string) => {
     try {
-      await revealPath(filePath);
+      if (fileId && activeAgentId) await revealManagedAgentFile(activeBackend, activeAgentId, fileId);
+      else await revealPath(filePath);
     } catch (error) {
       setToast({
         text: t("chat.artifactsRevealFailed", { msg: error instanceof Error ? error.message : String(error) }),
@@ -8055,7 +8129,7 @@ function ChatPageApp() {
       });
       setTimeout(() => setToast(null), 2600);
     }
-  }, [t]);
+  }, [t, activeAgentId, activeBackend]);
 
   useEffect(() => {
     const onMarkdownImageClick = (event: MouseEvent) => {
@@ -8350,12 +8424,18 @@ function ChatPageApp() {
     const timeline = activeKey ? liveTimelinesRef.current.get(activeKey) : undefined;
     const nativeRun = timeline?.nativeRunId ?? pending?.nativeRunId;
     const observedRun = activeKey ? observedRunBySessionRef.current.get(activeKey) : undefined;
+    const liveRun = nativeRun ?? observedRun;
     const liveSteps = pending ? liveStepsFor(pending) : [];
     const liveToolIds = new Set(liveSteps.map(step => step.toolCallId).filter(Boolean));
     const recoveredSteps: TurnStep[] = [];
     let anchor: { group: Group; message: ChatMsg } | undefined;
     for (const group of groups) {
-      if (group.role !== "assistant") continue;
+      if (group.role !== "assistant") {
+        // A card reply starts a new visible segment of the same live turn.
+        if (liveRun && group.role === "user" && group.msgs.some(message =>
+          message.promptResponse && message.nativeRunId === liveRun)) anchor = undefined;
+        continue;
+      }
       const last = group.msgs[group.msgs.length - 1];
       if (!last.pending && group.msgs.some(message => message.ts) && group.msgs.some(message => message.actionId)
         && group.msgs.some(message => message.parts.some(part => part.type === "text" && part.text?.trim()))) {
@@ -8703,8 +8783,11 @@ function ChatPageApp() {
         }
         // chat / local：assistant 的 MEDIA:<path/url> 指令行 → 图片（与普通模式同一解析）
         const media = g.role === "assistant" && seg.cls === "chat" ? extractAgentMedia(segText, imageContext) : { text: segText, srcs: [] as string[] };
-        const segImages = seg.msgs.flatMap((m) => m.images ?? []);
-        const segFiles = seg.msgs.flatMap((m) => m.files ?? []);
+        const segImages = seg.msgs.flatMap(m => m.images ?? []);
+        const segFiles = seg.msgs.flatMap(m => m.files ?? []);
+        const imageMedia = seg.msgs.flatMap(m => (m.images ?? []).map((src, index) => messageImage(m, src, index)));
+        const fileMedia = seg.msgs.flatMap(m => (m.files ?? []).map(file => messageFile(m, file)));
+        const segmentMedia = [...imageMedia, ...fileMedia];
         const prompts = seg.msgs.flatMap((m) =>
           m.parts.filter((p) => p.type === "prompt" && p.promptEntry).map((p) => p.promptEntry as ChatPromptEntry),
         );
@@ -8752,13 +8835,17 @@ function ChatPageApp() {
           pending: (!!liveMessage && !awaitingPrompt && !loadingReply) || undefined,
           prompts: prompts.length ? prompts : undefined,
           // 悬浮操作/右键：无参闭包捕获 Group，动作与普通模式同一套 handler
-          onCopy: segText ? () => copyText(segText) : undefined,
-          onQuote: segText ? () => quoteGroup(g) : undefined,
+          onCopy: segText || segmentMedia.length ? () => copyText(segText, segmentMedia) : undefined,
+          onQuote: segText || segmentMedia.length ? () => quoteGroup(g) : undefined,
           onOpenActivity: activity && !activity.live ? () => openTimelineModal(activity) : undefined,
           onPin: MESSAGE_PINNING_ENABLED && hasId ? () => pinGroup(g) : undefined,
           pinned: MESSAGE_PINNING_ENABLED && hasId ? g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) : undefined,
           onDelete: hasId ? () => deleteGroup(g) : undefined,
-          onCtx: (e) => openMenu(e, g, segText),
+          onCtx: (e) => openMenu(e, g, segText, undefined, segmentMedia),
+          onAttachmentContextMenu: (e, kind, index) => {
+            const item = (kind === "image" ? imageMedia : fileMedia)[index];
+            if (item) openMenu(e, g, segText, item);
+          },
         });
       });
       // 空段（纯 thinking/工具轮次）不保留；审批卡在正文之前到达时靠 prompts 保住 pending 段
@@ -9104,7 +9191,8 @@ function ChatPageApp() {
       const attention = attentionKey ? promptAttentionByKey[attentionKey] : undefined;
       const unreadKey = g.sessions.filter(showSessionUnread)
         .sort((a, b) => (unreadState.replies[b.key] ?? 0) - (unreadState.replies[a.key] ?? 0))[0]?.key;
-      const targetKey = attentionKey || unreadKey || latestKey;
+      const mainKey = g.sessions.find(session => session.mainSession)?.key;
+      const targetKey = attentionKey || mainKey || unreadKey || latestKey;
       const previewKey = g.agentId === aAgent && !activeGroupId && activeKey
         && g.sessions.some(s => s.key === activeKey) ? activeKey : targetKey;
       return { ...g, rank, previewKey, targetKey, attentionKey, attention,
@@ -9184,7 +9272,7 @@ function ChatPageApp() {
 
   // Once the agent list is ready (seeded from cache or fetched over WS), land
   // the user back in the LAST SESSION they had open (persisted per origin) —
-  // falling back to the first (most-recent) agent's most-recent session when
+  // falling back to the first Agent's main or most recent session when
   // there's no record or it no longer exists (deleted / backend offline).
   // activeKey becomes non-null after the first pick, so it never re-selects
   // (selection stays sticky when the list reorders/refreshes).
@@ -9197,7 +9285,9 @@ function ChatPageApp() {
     if (!restorableSessions.length) return;
     const last = readLastActive();
     const restorable = last && restorableSessions.some(session => session.key === last);
-    void chatHistoryController.bootstrap(restorable ? (last as string) : restorableSessions[0].key);
+    const first = restorableSessions[0];
+    const main = restorableSessions.find(session => session.mainSession && agentOf(session.key) === agentOf(first.key));
+    void chatHistoryController.bootstrap(restorable ? (last as string) : (main ?? first).key);
   }, [agents, activeKey, chatHistoryController]);
 
   // One-shot hand-off from a CLICKED chat desktop notification: the app-level
@@ -9453,7 +9543,7 @@ function ChatPageApp() {
           if (activeKeyRef.current) void loadHistory(activeKeyRef.current);
         }}
       >
-        {t("chat.historyLoadFailed", { msg: historyError })}
+        {t("chat.historyLoadFailed", { msg: translateProductError(historyError, t) })}
       </button>
     )
   ) : !historyLoaded && !historyVisible && activeKey ? (
@@ -9665,6 +9755,7 @@ function ChatPageApp() {
         )}
       </div>
     ) : null}
+    <GroupMemberConnectionContext.Provider value={groupMemberConnection}>
     <div className="chat-shell">
       <aside className="chat-aside">
         <div className="chat-aside__head">
@@ -9717,9 +9808,7 @@ function ChatPageApp() {
             const rep = g.sessions[0];
             const name = rep.agentName || chatAgentDisplayName(g.agentId);
             const isActive = !activeGroupId && g.agentId === activeAgentId;
-            // The sub-line for the agent you're viewing follows the session you've selected
-            // (header switcher), mirroring the preview-fetch key; others preview their newest.
-            // 正在阅读时保留当前会话的预览；其他行跟随最新未读/最新结果。
+            // 当前助理显示正在阅读的会话。其他行显示点击后将打开的会话。
             // 点击统一使用 g.targetKey，列表位置独立按真实消息时间排序。
             const previewKey = g.previewKey || rep.key;
             const rowTime = g.rowTime;
@@ -9743,7 +9832,7 @@ function ChatPageApp() {
                 }}
                 title={g.agentId}
               >
-                <Avatar agentId={g.agentId} name={name} className="chat-agent__avatar" version={avatarVersion} />
+                <AgentAvatarView agentId={g.agentId} name={name} className="chat-agent__avatar" version={avatarVersion} />
                 <span className="chat-agent__body">
                   <span className="chat-agent__top">
                     <span className="chat-agent__name">{name}</span>
@@ -9830,15 +9919,21 @@ function ChatPageApp() {
             <header className="chat-header" data-agent-panel={activeAgentHeaderPanel ?? undefined}
               data-panel-motion={agentHeaderInstant ? "instant" : undefined}>
               <div className="chat-header__row">
-              <button type="button" className="chat-header__avatar-trigger"
-                title={t(activeAgentHeaderPanel === "profile" ? "common.close" : "chat.agentPanelProfile")}
-                aria-label={t(activeAgentHeaderPanel === "profile" ? "common.close" : "chat.agentPanelProfile")}
-                aria-expanded={activeAgentHeaderPanel === "profile"} aria-controls="chat-agent-panel"
-                onClick={event => toggleAgentHeaderPanel("profile", event.currentTarget, event.detail === 0)}>
-                {activeAgentHeaderPanel === "profile" ? <img src={headerPanelCloseIcon} alt="" />
-                  : <Avatar agentId={agentOf(active.key)} name={sessionName(active)} className="chat-header__avatar" version={avatarVersion} />}
+              <button type="button" className="chat-header__avatar-trigger" ref={agentAvatarBackRef}
+                title={agentProfileButtonLabel} aria-label={agentProfileButtonLabel}
+                aria-expanded={agentAvatarEditing ? undefined : activeAgentHeaderPanel === "profile"} aria-controls="chat-agent-panel"
+                disabled={agentAvatarEditing && agentAvatarSaving}
+                onClick={event => {
+                  if (agentAvatarEditing) backToAgentProfile();
+                  else toggleAgentHeaderPanel("profile", event.currentTarget, event.detail === 0);
+                }}>
+                {agentAvatarEditing ? <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                  strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m12 5-7 7 7 7M5 12h14" /></svg>
+                  : activeAgentHeaderPanel === "profile" ? <img src={headerPanelCloseIcon} alt="" />
+                    : <AgentAvatarView agentId={agentOf(active.key)} name={sessionName(active)} className="chat-header__avatar" version={avatarVersion} />}
               </button>
               <div className="chat-header__id">
+                {agentAvatarEditing ? <h2 id="chat-avatar-picker-title" className="chat-header__page-title">{t("chat.changeAvatar")}</h2> : <>
                 <button type="button" className="chat-header__name"
                   title={t("chat.agentPanelProfile")} aria-expanded={activeAgentHeaderPanel === "profile"}
                   aria-controls="chat-agent-panel"
@@ -9870,7 +9965,7 @@ function ChatPageApp() {
                       await refreshSessions();
                     } catch (error) { setToast({ kind: "error", text: error instanceof Error ? error.message : String(error) }); }
                   }} />}
-
+                </>}
               </div>
               {/* tool actions (Figma layout; wired to real features) */}
               <div className="chat-header__tools">
@@ -9910,8 +10005,11 @@ function ChatPageApp() {
               </div>
               <ChatAgentPanel key={agentHeaderScope} kind={activeAgentHeaderPanel} backendId={activeBackend}
                 backendName={activeBackendDescriptor?.name ?? activeBackend} agentId={agentOf(active.key)} name={sessionName(active)}
-                renderAvatar={name => <Avatar agentId={agentOf(active.key)} name={name} className="chat-header__avatar"
-                  version={avatarVersion} editable onUploaded={() => setAvatarVersion(v => v + 1)} />}>
+                avatarVersion={avatarVersion} onEditAvatar={() => setAgentHeaderPanel({ scope: agentHeaderScope, kind: "avatar" })}
+                onAvatarSavingChange={setAgentAvatarSaving} onAvatarSaved={returnToProfile => {
+                  setAvatarVersion(v => v + 1);
+                  if (returnToProfile) backToAgentProfile();
+                }}>
                 {agentArtifactsOpen && <div id="chat-agent-artifacts" className="chat-artifacts-panel">
                     <div className="chat-artifacts-head">
                       <div>
@@ -9941,7 +10039,7 @@ function ChatPageApp() {
                     ) : (
                       <ChatFileGrid>
                         {agentArtifactItems.map((artifact) => (
-                          <div className="chat-artifact-row" key={artifact.path}>
+                          <div className="chat-artifact-row" key={artifact.fileId || artifact.path}>
                             <ChatFileCard
                               className="chat-artifact-open"
                               name={artifact.name}
@@ -9951,7 +10049,7 @@ function ChatPageApp() {
                               timeLabel={relTime(artifact.mtimeMs, t("chat.justNow"))}
                               title={`${t("chat.artifactsRevealInFolder")} · ${artifact.path}`}
                               disabled={!activeAgentArtifactResult || activeAgentArtifactResult.reason === "remote"}
-                              onClick={() => { void revealLocalFile(artifact.path); }}
+                              onClick={() => { void revealLocalFile(artifact.path, artifact.fileId); }}
                             />
                             <button
                               type="button"
@@ -9959,10 +10057,18 @@ function ChatPageApp() {
                               title={t("chat.artifactsCopyPath")}
                               aria-label={t("chat.artifactsCopyPath")}
                               onClick={() => {
-                                void navigator.clipboard?.writeText(artifact.path).then(() => {
+                                const path = artifact.fileId && activeAgentId
+                                  ? getManagedAgentFile(activeBackend, activeAgentId, artifact.fileId).then(item => item.path)
+                                  : Promise.resolve(artifact.path);
+                                void path.then(async file => {
+                                  if (!file) throw new Error(t("agents.managedFiles.missing"));
+                                  await navigator.clipboard?.writeText(file);
                                   setToast({ text: t("chat.artifactsPathCopied"), kind: "success" });
                                   setTimeout(() => setToast(null), 1200);
-                                }).catch(() => {});
+                                }).catch(() => {
+                                  setToast({ text: t("agents.managedFiles.unavailable"), kind: "error" });
+                                  setTimeout(() => setToast(null), 2600);
+                                });
                               }}
                             >
                               <IconCopy />
@@ -10045,9 +10151,10 @@ function ChatPageApp() {
                   const liveActivity = liveMessage && liveMessage === liveTurn?.pending ? liveTurn.activity : undefined;
                   const waitingForPrompt = liveMessage?.parts.some(part => part.type === "prompt" && part.promptEntry
                     && chatPromptAttentionOf([part.promptEntry]));
-                  const canCopy = !last.pending && g.msgs.some(m => m.parts.some(p => p.text?.trim()));
-                  const quoteTarget = canCopy ? lastQuoteableBubble(g) : undefined;
-                  const footerActivity = footerTs && canCopy ? footerActivityFor(g, last) : undefined;
+                  const footerMedia = last.pending ? [] : g.msgs.flatMap(messageMedia);
+                  const hasText = !last.pending && g.msgs.some(m => m.parts.some(p => p.text?.trim()));
+                  const quoteTarget = hasText ? lastQuoteableBubble(g) : undefined;
+                  const footerActivity = footerTs && hasText ? footerActivityFor(g, last) : undefined;
                   return (
                     <div
                       key={groupRenderKey}
@@ -10074,12 +10181,13 @@ function ChatPageApp() {
                             <div key={messageRenderKey} data-mi={mi} data-message-key={messageRenderKey} data-chat-message-id={m.actionId} style={{ display: "contents" }}>
                               {m.images?.length ? (
                                 <div className="chat-att-row">
-                                  {keyedImages.map(({ item: src, key: imageRenderKey }) => (
+                                  {keyedImages.map(({ item: src, key: imageRenderKey }, imageIndex) => (
                                     <img
                                       key={imageRenderKey}
                                       className="chat-att-thumb"
                                       src={src}
                                       alt=""
+                                      onContextMenu={e => openMenu(e, g, undefined, messageImage(m, src, imageIndex))}
                                       onClick={() => setLightbox({ src, kind: "image" })}
                                     />
                                   ))}
@@ -10095,6 +10203,7 @@ function ChatPageApp() {
                                         key={fileRenderKey}
                                         className="chat-att-videowrap"
                                         title={attachmentChipTitle(f)}
+                                        onContextMenu={e => openMenu(e, g, undefined, messageFile(m, f))}
                                         onClick={() => setLightbox({ src: f.src as string, kind: "video" })}
                                       >
                                         <video
@@ -10109,6 +10218,7 @@ function ChatPageApp() {
                                     ) : (
                                       <ChatFileButton key={fileRenderKey} name={f.name}
                                         title={`${t("chat.artifactsRevealInFolder")} · ${attachmentChipTitle(f)}`}
+                                        onContextMenu={e => openMenu(e, g, undefined, messageFile(m, f))}
                                         onClick={() => void revealAttachmentFile(f)} />
                                     ),
                                   )}
@@ -10381,20 +10491,20 @@ function ChatPageApp() {
                               <IconTrajectory />
                             </button>
                           )}
-                          {canCopy && (
+                          {(hasText || footerMedia.length > 0) && (
                             <button
                               type="button"
                               className="chat-copybtn"
                               data-chat-footer-icon=""
-                              title={t("chat.copyAsMarkdown")}
-                              onClick={() => copyText(groupCopyText(g))}
+                              title={t(footerMedia.length ? "chat.copy" : "chat.copyAsMarkdown")}
+                              onClick={() => copyText(groupCopyText(g), footerMedia)}
                             >
                               <IconCopy />
                             </button>
                           )}
-                          {quoteTarget && (
+                          {(quoteTarget || footerMedia.length > 0) && (
                             <button type="button" className="chat-copybtn" data-chat-footer-icon=""
-                              aria-label={t("chat.quote")} title={t("chat.quote")} onClick={() => quoteGroup(g, ...quoteTarget)}>
+                              aria-label={t("chat.quote")} title={t("chat.quote")} onClick={() => quoteGroup(g, quoteTarget?.[0], quoteTarget?.[1])}>
                               <IconQuote />
                             </button>
                           )}
@@ -10514,6 +10624,7 @@ function ChatPageApp() {
               {quote && (
                 <div className="chat-quote-bar">
                   <IconQuote className="chat-quote-icon" />
+                  <QuoteImages media={quote.media} />
                   {/* title = 悬停核对将随消息发出的引用文本（显示层限长 300/600，payload 全文不受影响） */}
                   <span
                     className="chat-quote-bar__text"
@@ -10694,6 +10805,7 @@ function ChatPageApp() {
         )}
       </section>
     </div>
+    </GroupMemberConnectionContext.Provider>
     {/* 右键菜单：提升到 Fragment 顶层（.chat-shell 外）供普通/沉浸两模式共用——
         position:fixed + state 驱动，DOM 位置不影响视觉；z 抬到沉浸层(1000)之上
         （ChatPage.css .chat-ctxmenu* 1199/1200）。 */}
@@ -10722,8 +10834,8 @@ function ChatPageApp() {
       />
     )}
     {menu && <ChatMessageContextMenu x={menu.x} y={menu.y} onClose={closeMenu}
-      onCopy={menu.copyText ? () => copyText(menu.copyText) : undefined}
-      onQuote={groupSnippet(menu.group) ? () => quoteGroup(menu.group, menu.msgIndex, menu.partIndex) : undefined}
+      onCopy={menu.copyText || menu.media.length ? () => copyText(menu.copyText, menu.media) : undefined}
+      onQuote={menu.media.length || groupSnippet(menu.group) ? () => quoteGroup(menu.group, menu.msgIndex, menu.partIndex, menu.attachmentTarget) : undefined}
       onPin={menu.group.msgs.some(message => message.actionId) ? () => pinGroup(menu.group) : undefined}
       pinned={menu.group.msgs.some(message => message.actionId && pinnedIds.has(message.actionId))}
       onDelete={menu.group.msgs.some(message => message.actionId) ? () => deleteGroup(menu.group) : undefined}
@@ -10767,6 +10879,7 @@ function ChatPageApp() {
           attachments={attachments}
           removeAttachment={removeAttachment}
           quoteText={quote && quote.key === activeKey ? quote.text : null}
+          quoteImages={quote?.key === activeKey ? <QuoteImages media={quote.media} /> : undefined}
           clearQuote={() => setQuote(null)}
           sessionTitle={active ? sessionName(active) : ""}
           sessionMeta={active ? friendlySessionLabel(active, t) : ""}

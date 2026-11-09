@@ -1,4 +1,6 @@
-// Cron 工具栏图标 —— path 1:1 取自设计稿（Figma 6458-121 的 16×16 图标节点）。
+import { CronClockGlyph } from "../../components/NavIcons";
+
+// Cron 工具栏图标使用 16×16 图框。
 // 设计稿里 stroke 写死 black；这里换成 currentColor，让暗色主题跟着文字反色。
 
 const BASE = {
@@ -25,7 +27,7 @@ export function IconAgent() {
   );
 }
 
-// Statuses / Schedules 共用同一个三段滑杆图标（7018:126 与 7018:142 完全一致）。
+// 状态筛选的三段滑杆（7018:126）。
 export function IconSliders() {
   return (
     <svg {...BASE}>
@@ -42,12 +44,30 @@ export function IconSliders() {
   );
 }
 
+// 计划沿用导航时钟轮廓，描边由筛选按钮的样式统一设置。
+export function IconSchedule() {
+  return (
+    <svg {...BASE} viewBox="9 9 22 22">
+      <CronClockGlyph />
+    </svg>
+  );
+}
+
 // 新建按钮的加号（7018:188）。
 export function IconPlus() {
   return (
     <svg {...BASE}>
       <path d="M14 8L2 8" />
       <path d="M8 2V14" />
+    </svg>
+  );
+}
+
+export function IconCalendarChevron({ direction }: { direction: "left" | "right" }) {
+  const path = direction === "left" ? "M9.75 4 6.25 8 9.75 12" : "M6.25 4 9.75 8 6.25 12";
+  return (
+    <svg {...BASE} strokeWidth="1.8">
+      <path d={path} />
     </svg>
   );
 }

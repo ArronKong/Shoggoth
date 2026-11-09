@@ -410,11 +410,11 @@ class BackendRegistry extends EventEmitter {
 
   getNativeCapacity() { return this._nativeCapacityBackend().getNativeCapacity(); }
 
-  async getRuntimeStatuses() {
+  async getRuntimeStatuses(options) {
     return (await Promise.all([...this.backends.values()].map(async (backend) => {
       try {
         if (backend.getBackendDescriptor()?.surfaces?.runtimeStatus !== true) return [];
-        return (await backend.getRuntimeStatuses()).map(row => ({ ...row, backendId: backend.id }));
+        return (await backend.getRuntimeStatuses(options)).map(row => ({ ...row, backendId: backend.id }));
       } catch { return []; }
     }))).flat();
   }

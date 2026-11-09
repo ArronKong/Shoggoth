@@ -5,6 +5,9 @@ const chatUiProtocol = require("./chat-ui-protocol");
 const { ChatUiConfig } = require("./chat-ui-config");
 const { ChatUiStore } = require("./chat-ui-store");
 const { ChatUiController } = require("./chat-ui-controller");
+const { syncAgentNameLinks } = require("./agent-name-links");
+const { AgentFileStore } = require("./agent-file-store");
+const agentFileProtocol = require("./agent-file-protocol");
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
@@ -862,7 +865,7 @@ function createAgentService(options) {
     beforeRevoke: (scope, reference) => browserUseController.closeForSecret?.(scope, reference),
   });
   const modelSecretProjection = new (require("./model-secret-projection").ModelSecretProjection)({
-    secrets: temporarySecrets, media: secretMedia,
+    secrets: temporarySecrets, media: secretMedia, stateDir: paths.stateDir,
   });
   const modelSecretGateway = options.modelSecretGateway
     || new (require("./model-secret-gateway").ModelSecretGateway)({ projection: modelSecretProjection,
@@ -924,6 +927,7 @@ function createAgentService(options) {
   const productStore = options.productStore || new JsonlProductStore({
     paths, beforeCreateDefaultAgentProfile: beforeCreateBuiltinAgentProfile,
   });
+  const agentFileStore = new AgentFileStore({ paths, productStore, now: options.now });
   if (typeof secretStore.withPlaintextMatcher !== "function") {
     throw serviceError("SECRET_STORE_MATCHER_REQUIRED", "SecretStore 必须提供有界敏感值 matcher session");
   }
@@ -1953,7 +1957,14 @@ function createAgentService(options) {
   memoryEngine.setSemanticSearchService?.(nativeMemorySemanticService);
   const contextCompiler = options.contextCompiler || new ContextCompiler({
     projectText: (input, text) => require("../core/chat-secret-fallback").projectTextOrOriginal(temporarySecrets, { profileId: input.profile.id,
-      sessionId: workRunCoordinator?.getRunSessionKey(input.run) || input.transcriptSessionId || `${input.run.source}:${input.run.sourceId}` }, text),
+      sessionId: workRunCoordinator?.getRunSessionKey(input.run) || input.transcriptSessionId
+        || (input.run.source === "proactive" ? input.run.sourceId : `${input.run.source}:${input.run.sourceId}`) }, text),
+    defaultWorkspaceDir: paths.defaultWorkspaceDir,
+    proactiveConversation: { read: profileId => {
+      const target = proactiveStore.getTarget(profileId);
+      return target?.sessionKey && !target.deleted
+        ? conversationRecallService.recentContext(profileId, target.sessionKey) : null;
+    } },
     definitionStore: agentDefinitionStore,
     memoryEngine,
     semanticSearch: nativeMemorySemanticService,
@@ -2038,6 +2049,13 @@ function createAgentService(options) {
     handle() { throw serviceError("AGENT_SERVICE_CLOSED", "Agent lifecycle is unavailable"); },
   });
   const chatUiStore = options.chatUiStore || new ChatUiStore({ paths, secretMatcher: isSensitiveValue, now: options.now, fault: options.chatUiFault });
+  const refreshAgentNameLinks = () => {
+    try {
+      syncAgentNameLinks(paths, productStore.listAgentProfilesReadOnly?.() ?? productStore.listAgentProfiles());
+    } catch (error) {
+      console.error(`[agent-service] Agent folder links unavailable: ${error?.code || "UNKNOWN"}`);
+    }
+  };
   const retentionStores = [chatSessionStore, nativeCronStore, nativeKanbanStore,
     inspirationStore, proactiveStore, hookStore, permissionEngine, runtimeSessionOwnershipStore, tokenUsageStore, sourceConversationStore];
   const agentArchiveRetention = typeof productStore.purgeArchivedProfile === "function"
@@ -2085,6 +2103,8 @@ function createAgentService(options) {
         memoryProvenanceStore.forgetProfile(profileId);
         conversationRecallService.forgetProfile(profileId);
         nativeSkillStore.profileManifests?.delete(profileId);
+        agentFileStore.forgetProfile(profileId);
+        refreshAgentNameLinks();
         eventBuffer.append("agent.profile.changed", { profileId,
           backendId: "shoggoth" });
       },
@@ -2120,6 +2140,7 @@ function createAgentService(options) {
           shoggothMemory?.resumeProfile(profile.id);
           nativeSkillStore.ensureProfile(profile.id);
           agentDefinitionStore.ensureProfile({ profileId: profile.id, profileName: profile.name, initialIdentity });
+          agentFileStore.ensureProfile(profile.id);
           if (typeof toolRegistry.toolsMarkdown === "function"
             && typeof toolRegistry.revision === "string") {
             agentDefinitionStore.writeGeneratedView({
@@ -2134,6 +2155,8 @@ function createAgentService(options) {
         },
         async activateProfile(profile) {
           if (proactiveStoreOpened) {
+            const main = noticeDelivery.ensureMainSession(profile.id);
+            if (main) transcriptStore.ensureSession({ profileId: profile.id, sessionId: main.id });
             proactiveStore.ensureHeartbeatMonitor(profile.id);
             proactiveScheduler.wake();
           }
@@ -2142,6 +2165,7 @@ function createAgentService(options) {
           }
         },
         onProfileChanged: (payload) => {
+          refreshAgentNameLinks();
           chatUiController.profileChanged(payload.profileId);
           eventBuffer.append("agent.profile.changed", { ...payload, backendId: payload.backendId });
         },
@@ -2370,7 +2394,6 @@ function createAgentService(options) {
   });
   const createDefaultWorkRunCoordinator = () => createWorkRunCoordinator({
     temporarySecrets,
-    secretMedia,
     ...(shoggothMemory ? { beforeMemoryCompaction: input => shoggothMemory.flushBeforeCompaction(input) } : {}),
     hookService, hookWorkspaceWriters,
     hostMemoryCommands: shoggothMemory ? new (require("./host-memory-commands").HostMemoryCommands)({
@@ -2505,6 +2528,7 @@ function createAgentService(options) {
     },
     memoryCommands: shoggothMemory?.activeMemoryCommands,
     getInspirationService: () => inspirationService,
+    ensureMainSession: profileId => noticeDelivery.ensureMainSession(profileId),
     getProactiveSessionOrigin: sessionKey => proactiveStore.sessionOrigin(sessionKey),
     isInternalSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey),
     onSessionCreated: session => { void shoggothMemory?.sessionCapture.onSessionCreated(session.profileId, session.id); },
@@ -2527,7 +2551,7 @@ function createAgentService(options) {
       try { return (await federationHostClient.request("chat.ui.click.verify", input)).approved === true; } catch { return false; }
     },
     getOrigins: (run, session) => ({ cron: chatSessionStore.getCronSessionOrigin(session.sessionKey),
-      inspiration: inspirationStore.executionForSession(session.sessionKey), proactive: proactiveStore.sessionOrigin(session.sessionKey),
+      inspiration: inspirationStore.executionForSession(session.sessionKey), proactive: run?.source === "proactive" ? run : null,
       federation: run && /^shoggoth:chat-send:federation-(?:send|message)-/u.test(run.idempotencyKey || "") ? { runId: run.id } : null,
       group: null }),
     assertPublishAllowed: sessionKey => {
@@ -2708,7 +2732,8 @@ function createAgentService(options) {
     return proactiveCliFacts.rows.some(row => row.runtimeAccountId === profile.runtimeAccountId && row.binaryPath !== null);
   };
   const noticeDelivery = new NoticeDeliveryController({ store: proactiveStore, productStore, chatSessionStore, transcriptStore,
-    resolveWorkspace: profileId => resolveProfileWorkspace({ paths, profile: productStore.getAgentProfile(profileId), requested: null, errorCode: "PROACTIVE_PROFILE_UNAVAILABLE" }),
+    resolveWorkspace: (profileId, sessionOperationId) => resolveProfileWorkspace({ paths,
+      profile: productStore.getAgentProfile(profileId), requested: null, sessionOperationId, errorCode: "PROACTIVE_PROFILE_UNAVAILABLE" }),
     readConfig: () => browserConfigStore.read(), isFocused: async () => {
       try { return (await federationHostClient.request("notification.context", {})).focused; }
       catch { return false; }
@@ -2722,6 +2747,18 @@ function createAgentService(options) {
   const heartbeatDocuments = new HeartbeatDocumentStore({ paths, productStore });
   const dailyReviewDocuments = new DailyReviewDocumentStore({ paths, productStore });
   const proactiveService = new ProactiveService({ store: proactiveStore, productStore, dispatcher: workDispatcher,
+    isContextCurrent: run => {
+      if (!run.contextSnapshotId) return true;
+      try {
+        const snapshot = contextSnapshotStore.get(run.profileId, run.contextSnapshotId);
+        if (!snapshot) return false;
+        const source = snapshot.report?.proactiveConversation;
+        if (!source) return true;
+        const target = proactiveStore.getTarget(run.profileId);
+        return !target?.deleted && target?.sessionKey === source.sessionKey
+          && conversationRecallService.contextSourcesCurrent(run.profileId, source);
+      } catch { return false; }
+    },
     heartbeatDocuments, dailyReviewDocuments, webService,
     executor: domainWorkRunExecutor, getCoordinator: () => workRunCoordinator, reminders: inspirationReminders,
     delivery: noticeDelivery, usageStore: tokenUsageStore, now: options.now, randomUUID: options.randomUUID,
@@ -3226,6 +3263,8 @@ function createAgentService(options) {
       isSensitiveValue,
       onFatalError: (error) => reportMcpProductFatal(error, ownerToken),
       artifactRoot: options.artifactRoot || path.join(paths.stateDir, "artifacts"),
+      agentFileStore,
+      getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
       toolRegistry,
       permissionEngine,
       fs: options.artifactFs,
@@ -4590,6 +4629,19 @@ function createAgentService(options) {
         }
         return;
       }
+    } else if (agentFileProtocol.METHODS.includes(request.method)) {
+      try {
+        if (!exactObject(request, ["id", "token", "version", "method", "params"])) {
+          agentFileProtocol.fail("AGENT_FILE_INVALID");
+        }
+        const params = agentFileProtocol.validateParams(request.method, request.params);
+        const action = request.method.slice("agent.files.".length);
+        result = agentFileProtocol.validateResult(request.method, await agentFileStore[action](params), params);
+      } catch (error) {
+        const code = Object.hasOwn(agentFileProtocol.MESSAGES, error?.code || "") ? error.code : "AGENT_FILE_UNAVAILABLE";
+        errorResponse(socket, id, code, agentFileProtocol.MESSAGES[code]);
+        return;
+      }
     } else if (AGENT_LIFECYCLE_METHOD_SET.has(request.method)) {
       try {
         if (!exactObject(request, ["id", "token", "version", "method", "params"])) {
@@ -5204,9 +5256,12 @@ function createAgentService(options) {
           assertStartGeneration(generation);
           agentDefinitionStoreOpened = true;
           await agentDefinitionStore.open();
+          agentFileStore.open();
           if (typeof productStore.listAgentProfiles === "function") {
             for (const profile of productStore.listAgentProfiles()) {
               agentDefinitionStore.ensureProfile({ profileId: profile.id, profileName: profile.name });
+              try { agentFileStore.ensureProfile(profile.id); }
+              catch { console.error("[agent-service] Agent file directory unavailable"); }
             }
           }
           if (typeof toolRegistry.toolsMarkdown === "function"
@@ -5352,6 +5407,7 @@ function createAgentService(options) {
             await agentLifecycleServiceController.runMaintenance(() => agentArchiveRetention.sweep({ resumeOnly: true }));
           }
           assertStartGeneration(generation);
+          refreshAgentNameLinks();
           for (const run of workDispatcher.listRuns({ status: "skipped" })) hookService.observeSkippedRun(run);
           for (const session of chatSessionStore.listSessions()) {
             hookService.observeSession(session, "session.created", null);
@@ -5878,6 +5934,7 @@ function createAgentService(options) {
       try { await transcriptStore.close(); } catch (error) { errors.push(error); }
     }
     if (agentDefinitionStoreOpened) {
+      try { await agentFileStore.close(); } catch (error) { errors.push(error); }
       if (memoryEngineOpened) {
         memoryEngineOpened = false;
         try { await memoryEngine.close(); } catch (error) { errors.push(error); }

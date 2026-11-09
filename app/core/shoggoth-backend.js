@@ -15,7 +15,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { performance } = require("node:perf_hooks");
-const { AgentBackend } = require("./agent-backend");
+const { AgentBackend, existingLocalDirectory } = require("./agent-backend");
 const { validateCustomEndpointResult } = require("../agent-service/custom-endpoint-protocol");
 const { inspirationExecutionToActivity } = require("./dashboard-activity");
 const {
@@ -28,6 +28,10 @@ const { recordServiceRequestTimeout } = require("../agent-service/service-reques
 const { recordChatSendFailure } = require("../agent-service/chat-send-diagnostics");
 const { resolveServicePaths } = require("../agent-service/paths");
 const { SERVICE_PROTOCOL_VERSION } = require("../agent-service/service-protocol-version");
+const agentFileProtocol = require("../agent-service/agent-file-protocol");
+const { importPath, payloadPath, readBoundedFile, sha256, fileIdFromStorageKey } = require("../agent-service/agent-file-store");
+const { ensurePrivateDirectoryTree } = require("../agent-service/security");
+const { artifactKind } = require("./artifact-scan");
 const {
   NATIVE_RUNTIME_CONFIG_METHODS, NATIVE_RUNTIME_CONFIG_PUBLIC_MESSAGES,
   validateNativeRuntimeConfigProjection, validateNativeRuntimeConfigResult,
@@ -226,121 +230,10 @@ const RUN_RECONCILE_STREAM_IDS = Object.freeze([
   "00000000-0000-4000-8000-000000000001",
   "00000000-0000-4000-8000-000000000002",
 ]);
+// The public catalog includes retired terminal codes for saved chat history.
 const RUNTIME_START_MESSAGES = Object.freeze({
-  FRAME_TIMEOUT: "后台未及时接收完整请求，尚未获得执行结果，请稍后重试",
-  FRAME_TOO_LARGE: "请求超过后台通信大小限制，请减少内容后重试",
-  INCOMPLETE_FRAME: "请求未完整送达后台，尚未获得执行结果",
-  MALFORMED_JSON: "后台无法解析请求数据，请检查 App 与后台版本是否一致",
-  MULTIPLE_REQUESTS: "后台拒绝了不符合协议的重复请求帧",
-  CODEX_DESKTOP_BUSY: "原对话正在 Codex 客户端运行，请等当前回合结束后再发送",
-  CODEX_DESKTOP_CONTEXT_CHANGED: "原对话的 Shoggoth 记忆或撤回状态已变化，请新建会话继续",
   ...PRODUCT_CONTEXT_PUBLIC_MESSAGES,
-  RUNTIME_PROTOCOL_ERROR: "CLI 返回的通信数据不符合协议，本次任务已停止；请检查 CLI 与 App 的版本兼容性及原生会话结果",
-  RUNTIME_OUTPUT_LIMIT_EXCEEDED: "CLI 的单条数据或当前保留内容超过安全容量，本次任务已停止；已生成的文件可能仍然存在，请检查原生会话结果",
-  RUNTIME_INCOMPATIBLE: "当前 CLI 未满足必需协议，请更新 CLI 或应用后重新检查",
-  RUNTIME_EXECUTABLE_CHANGED: "CLI 安装已变化，请等待当前任务结束后重新检查",
-  RUNTIME_IDENTITY_UNAVAILABLE: "暂时无法确认 CLI 安装状态，请稍后重新检查",
-  RUNTIME_CAPABILITY_UNSUPPORTED: "当前 Agent Runtime 不支持该操作",
-  RUNTIME_CONNECTION_LOST: "CLI 进程或通信连接异常中断，未自动重放；请检查原生会话结果后决定是否重试",
-  RUNTIME_HOST_RESTARTED: "原生 Runtime 已重启，本次任务已中断；请查看已保存的会话记录后决定是否重试，任务不会自动重发",
-  CODEX_HOST_TERMINATED: "Codex 运行进程已终止，本次任务未自动重放；请检查原生会话结果后决定是否重试",
-  RUNTIME_AUTH_REQUIRED: "当前 Agent 登录验证失败，请前往「模型」检查账号状态或重新登录后重试",
-  RUNTIME_AUTH_STATUS_UNAVAILABLE: "暂时无法读取 Agent 登录状态，请稍后重试",
-  CODEX_NATIVE_AUTH_READ_FAILED: "暂时无法读取本机 Codex 登录状态，请稍后重试",
-  CODEX_RUNTIME_CLEANUP_INCOMPLETE: "Codex 登录检查进程未能完成清理，请重启 Shoggoth 后台服务后重试",
-  RUNTIME_PERMISSION_REQUIRED: "当前权限不允许 Agent 执行所需操作，请检查会话的工作区和权限设置后重试",
-  RUNTIME_WORKSPACE_UNAVAILABLE: "会话工作目录不存在或不可访问；请恢复该目录或使用默认工作区新建会话，本次任务未发送",
-  CRON_AUTHORIZATION_DENIED: "定时任务遇到授权范围外的操作，未能给出完成结果。本轮已结束并释放执行名额，请查看任务记录",
-  RUNTIME_APPROVAL_UNAVAILABLE: "Antigravity 的非交互模式无法弹出原生工具授权，本次操作已被拒绝；请检查权限设置，调整后可在当前会话重新发送",
-  ANTIGRAVITY_NETWORK_UNAVAILABLE: "Antigravity 无法连接 Google 服务，本次任务未完成；请检查代理与网络后重试",
-  ANTIGRAVITY_REGION_UNSUPPORTED: "Google 模型接口不支持当前请求所在地区，本次任务未完成；请检查服务的地区支持范围和当前网络出口",
-  ANTIGRAVITY_ACP_NOT_INSTALLED: "Antigravity 官方运行组件尚未安装；请前往「模型」登录 Antigravity，登录时会自动安装",
-  ANTIGRAVITY_ACP_INTEGRITY_FAILED: "Antigravity 运行组件校验未通过（文件可能被修改或损坏），已拒绝启动；请前往「模型」重新登录 Antigravity，会自动重新安装",
-  ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED: "当前设备平台暂不支持 Antigravity 官方运行组件",
-  ANTIGRAVITY_MCP_UNAVAILABLE: "Antigravity 未能加载 Shoggoth 工具，本次任务未完成；请重试，若持续失败请重启 App",
-  ANTIGRAVITY_TURN_FAILED: "Antigravity 本次任务执行失败，上游未提供可展示的具体原因；未自动重放，请查看原生会话后决定是否重试",
-  ANTIGRAVITY_ACP_REMOTE_ERROR: "Antigravity 服务返回错误，本次操作未完成；请稍后重试",
-  ANTIGRAVITY_ACP_OUTBOUND_FRAME_TOO_LARGE: "消息或附件超过 Antigravity 的传输大小限制，本次消息未发送；请缩小附件或减少内容后重试",
-  ANTIGRAVITY_ACP_REQUEST_TIMEOUT: "Antigravity 响应超时，未自动重放；请检查会话结果后决定是否重试",
-  ANTIGRAVITY_ACP_WRITE_FAILED: "写入 Antigravity 时连接中断，尚无法确认完整执行结果；请检查会话记录",
-  ANTIGRAVITY_ACP_STDIN_CLOSED: "Antigravity 通信通道已关闭，未自动重放；请检查会话结果",
-  RUNTIME_QUOTA_EXHAUSTED: "当前账号额度已用尽，本次请求已停止，不会继续排队。请等待额度恢复、补充额度或更换账号后重试",
-  RUNTIME_RATE_LIMITED: "模型服务限流，本次回复未完成。请稍后重试，或更换模型",
-  RUNTIME_SPENDING_LIMIT_REACHED: "当前账号已达到消费上限，本次请求已停止，不会继续排队。请检查服务商的消费上限设置，恢复后重试",
-  RUNTIME_ACCOUNT_BLOCKED: "模型服务商返回账号受限（account blocked），请前往服务商检查账号状态；解除限制或更换可用账号后重试",
-  RUNTIME_UPSTREAM_UNAVAILABLE: "上游模型服务不可用，请稍后重试，或选择其他可用模型",
-  RUNTIME_ATTACHMENT_UNSUPPORTED: "当前模型不支持这种附件输入，请改用文件路径读取，或选择支持该附件的模型",
-  RUNTIME_ATTACHMENT_RECOVERY_REQUIRED: "未能安全处理旧会话中的附件，原记录已保留；请稍后重试或新建会话",
-  RUNTIME_SESSION_BUSY: "此原生会话仍有任务在执行，请等待任务结束或取消后再发送",
-  RUNTIME_SESSION_WRITER_BUSY: "此会话仍由 Codex Desktop 或另一个 Codex 客户端占用。请先在原客户端归档并恢复该会话，再回这里重试。",
-  RUNTIME_SESSION_ACCEPTANCE_UNKNOWN: "未能确认原生会话是否创建成功，已暂停自动重试以避免重复创建；请先检查 CLI 的会话记录",
-  RUNTIME_MAX_TOKENS: "Agent 已达到本轮输出长度限制，本轮未完成；请缩小任务范围后继续",
-  RUNTIME_MAX_TURN_REQUESTS: "Agent 已达到本轮请求次数限制，本轮已停止；请缩小任务范围后继续",
-  RUNTIME_REFUSED: "Agent 拒绝了本轮请求，原生会话不会保留这一轮；请调整请求后再发送",
-  RUNTIME_TURN_ACCEPTANCE_UNKNOWN: "未能确认 CLI 是否已接受本次任务，已暂停自动重试以避免重复执行；请先检查原生会话的执行结果",
-  RUNTIME_SESSION_RECOVERY_HISTORY_REQUIRED: "原生会话历史不足以确认任务执行状态，已暂停恢复以避免重复执行",
-  RUNTIME_PERMISSION_POLICY_CONFLICT: "Agent 运行权限与当前会话不一致，请检查会话权限后重试",
-  RUNTIME_ACCOUNT_BINDING_CONFLICT: "Agent 的运行账号已变化，请重新选择账号后重试",
-  RUNTIME_HOOK_SCOPE_CONFLICT: "Agent 的运行规则已变化，请重试",
-  RUNTIME_MODEL_CATALOG_UNAVAILABLE: "暂时无法读取当前账号的模型列表，请检查 CLI 登录和网络后重试",
-  RUNTIME_MODEL_CATALOG_INVALID: "CLI 返回的模型列表无法识别，请检查 CLI 与 App 的版本兼容性",
-  RUNTIME_MODEL_UNAVAILABLE: "当前账号或登录方式不支持所选模型，请选择其他可用模型",
-  RUNTIME_MODEL_SETTINGS_INVALID: "所选模型不支持当前推理档位或服务档位，请调整会话模型设置后重试",
-  GROK_ACP_OUTBOUND_FRAME_TOO_LARGE: "消息或附件超过 Grok CLI 的传输大小限制，本次消息未发送；请缩小附件或减少内容后重试",
-  GROK_ACP_REQUEST_TIMEOUT: "Grok CLI 响应超时，未自动重放；请检查原生会话结果后决定是否重试",
-  GROK_ACP_WRITE_FAILED: "写入 Grok CLI 时连接中断，尚无法确认完整执行结果；请检查原生会话记录",
-  GROK_ACP_STDIN_CLOSED: "Grok CLI 通信通道已关闭，未自动重放；请检查 CLI 状态和原生会话结果",
-  RUNTIME_REQUEST_NOT_SENT: "本次请求在发送前已停止；确认未发送，可以在当前会话重新提交",
-  PI_TURN_TIMEOUT: "Pi 本次任务执行超时，未自动重放；请检查原生会话结果后决定是否重试",
-  PI_PROCESS_CLOSED: "Pi 进程在任务完成前退出，未自动重放；请检查 CLI 状态和原生会话结果",
-  PI_TOOL_DESCRIPTION_TOO_LARGE: "Pi 无法加载 Shoggoth 工具，因为工具说明超出大小限制。本次消息未发送。请更新 Shoggoth 后重试。",
-  PI_TOOL_CATALOG_TOO_LARGE: "Pi 无法加载 Shoggoth 工具，因为工具目录超出传输容量。本次消息未发送。",
-  PI_RPC_STARTUP_TIMEOUT: "Pi 通信初始化超时，请检查 CLI 安装与登录状态后重试",
-  DEEPSEEK_HARNESS_REQUEST_TIMEOUT: "DeepSeek 通信超时，未自动重放；请检查原生会话结果后决定是否重试",
-  DEEPSEEK_HARNESS_STARTUP_TIMEOUT: "DeepSeek 初始化超时，请检查 CLI 安装与登录状态后重试",
-  DEEPSEEK_HARNESS_PROCESS_CLOSED: "DeepSeek 进程在任务完成前退出，未自动重放；请检查原生会话结果",
-  OPENCODE_TURN_TIMEOUT: "OpenCode 本次任务执行超时，已通知 CLI 停止；未自动重放，请检查会话结果后决定是否重试",
-  CODEX_TERMINAL_RECONCILIATION_FAILED: "未能从原生 CLI 读取本次任务的最终结果，已停止等待；未自动重放，请先检查原生会话记录，避免重复执行",
-  RUNTIME_TURN_INTERRUPTED: "Agent 本次任务已中断，尚无法确认完整执行结果；请检查会话记录后决定是否重试",
-  EXECUTION_BINDING_UNAVAILABLE: "无法安全保存任务的恢复记录，本次任务尚未发送；请检查本地存储后重试",
-  EXECUTION_CONTRACT_LOST: "缺少原任务的完整执行记录，无法安全恢复；请检查原生会话结果后决定是否重试",
-  RUNTIME_RECOVERY_UNAVAILABLE: "Service 重启后无法确认原任务的完整结果或恢复执行绑定，已停止自动恢复；请检查原生会话结果后决定是否重试",
-  CODEX_SYSTEM_BINARY_NOT_FOUND: "未找到可执行的本机 Codex CLI，请先安装 Codex 并检查 PATH",
-  CODEX_RUNTIME_VERSION_MISMATCH: "Codex CLI 版本与当前 App 不兼容，请检查 CLI 与 App 版本",
-  CODEX_RUNTIME_VERSION_PROBE_FAILED: "无法读取 Codex CLI 版本，请检查本机安装与执行权限",
-  CODEX_SCHEMA_ERROR: "Codex 协议校验失败，请检查 CLI 与 App 的版本兼容性",
-  RUNTIME_TURN_FAILED: "Agent 本次任务执行失败，请查看原生会话的错误原因后决定是否重试",
-  RUNTIME_TURN_OUTCOME_UNKNOWN: "原生 CLI 尚未确认本次任务的最终结果，已停止等待；请先检查原生会话记录，避免重复执行",
-  RUNTIME_START_FAILED: "启动 Agent Runtime 失败，请重试；若持续失败，请检查 CLI 安装与登录状态",
-  RUNTIME_START_RUNTIME_ACQUIRE_FAILED: "获取 Agent Runtime 失败，请重试",
-  RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED: "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试",
-  RUNTIME_START_PROCESS_SPAWN_FAILED: "启动 Agent Runtime 进程失败，请重试或检查 CLI 安装",
-  RUNTIME_START_BOOTSTRAP_ROLE_FAILED: "启动 Shoggoth Helper 失败，请重试或重启 App",
-  RUNTIME_START_RPC_INITIALIZE_FAILED: "初始化 Agent Runtime 通信失败，请重试",
-  RUNTIME_START_MCP_INITIALIZE_FAILED: "初始化 Shoggoth 工具失败，请重试或重启 App",
-  RUNTIME_START_SESSION_START_OR_RESUME_FAILED: "创建或恢复 Agent 会话失败，请重试",
-  RUNTIME_START_TURN_START_FAILED: "发送本次任务失败；为避免重复执行，未自动重放",
-  CODEX_START_FAILED: "启动 Codex Runtime 失败，请重试",
-  CODEX_TURN_FAILED: "Codex 本次任务执行失败，请查看原生会话的错误原因后决定是否重试",
-  CODEX_START_RUNTIME_ACQUIRE_FAILED: "获取 Agent Runtime 失败，请重试",
-  CODEX_START_RUNTIME_AUTHENTICATION_FAILED: "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试",
-  CODEX_START_PROCESS_SPAWN_FAILED: "启动 Codex 进程失败，请重试或检查安装完整性",
-  CODEX_START_BOOTSTRAP_ROLE_FAILED: "启动 Shoggoth Helper 失败，请重试或重启 App",
-  CODEX_START_RPC_INITIALIZE_FAILED: "初始化 Codex 通信失败，请重试",
-  CODEX_START_MCP_INITIALIZE_FAILED: "初始化 Shoggoth 工具失败，请重试或重启 App",
-  CODEX_START_SESSION_START_OR_RESUME_FAILED: "创建或恢复 Agent 会话失败，请重试",
-  CODEX_START_TURN_START_FAILED: "发送本次任务失败；为避免重复执行，未自动重放",
-  // Retired Antigravity terminal-transport codes. Nothing produces them any more;
-  // they stay so error records already in chat history still render as text.
-  ANTIGRAVITY_ONBOARDING_REQUIRED: "请先在 Antigravity CLI 中完成首次登录引导，再回到当前会话重试",
-  ANTIGRAVITY_ELIGIBILITY_FAILED: "Antigravity 账号可用性检查未通过，本次消息未发送；请在原生 CLI 中查看账号状态后重试",
-  ANTIGRAVITY_STARTUP_TIMEOUT: "Antigravity 启动或登录检查超时，本次消息未发送；请检查网络和 CLI 登录状态后重试",
-  ANTIGRAVITY_APPROVAL_FORMAT_UNSUPPORTED: "暂时无法识别 Antigravity 的原生授权界面，本次操作已停止；请检查 CLI 与 Shoggoth 的版本兼容性",
-  ANTIGRAVITY_APPROVAL_CHANGED: "Antigravity 的原生授权请求已变化，旧选择未被应用；请在当前会话重新发送",
-  ANTIGRAVITY_APPROVAL_TIMEOUT: "等待 Antigravity 授权选择已超时，本次任务已停止，迟到的选择不会应用",
-  ANTIGRAVITY_APPROVAL_RESPONSE_UNCONFIRMED: "Antigravity 尚未确认授权选择，任务已停止；无法确定工具是否执行，请检查原生会话结果后决定是否重试",
-  ANTIGRAVITY_TURN_TIMEOUT: "Antigravity 本次任务执行超时，未自动重放；请检查原生会话结果后决定是否重试",
-  ANTIGRAVITY_PROCESS_EXIT_INVALID: "Antigravity 进程异常退出，未自动重放；请检查 CLI 状态和原生会话结果",
+  ...require("../agent-service/chat-error-messages.json").runtime,
 });
 // Settings sign-in errors the backend passes through with their Service copy.
 const RUNTIME_ACCOUNT_LOGIN_ERROR_CODES = Object.freeze([
@@ -417,6 +310,7 @@ const PUBLIC_SERVICE_ERROR_CODES = new Set([
   "FRAME_TIMEOUT", "FRAME_TOO_LARGE", "INCOMPLETE_FRAME", "MALFORMED_JSON", "MULTIPLE_REQUESTS",
   "SERVICE_RECOVERY_REQUIRED",
   ...Object.keys(chatUiProtocol.MESSAGES),
+  ...Object.keys(agentFileProtocol.MESSAGES),
   ...Object.keys(codexDesktopProtocol.MESSAGES),
   ...Object.keys(codexAutomationProtocol.MESSAGES),
   ...Object.keys(require("../agent-service/product-context-protocol").MESSAGES),
@@ -1081,6 +975,7 @@ function validateServiceResult(method, value, params) {
     if (AGENT_BINDING_METHODS.includes(method)) return validateAgentBindingResult(method, value, params);
     if (NATIVE_RUNTIME_CONFIG_METHODS.includes(method)) return validateNativeRuntimeConfigResult(method, value);
     if (chatUiProtocol.METHODS.includes(method)) return chatUiProtocol.validateResult(method, value);
+    if (agentFileProtocol.METHODS.includes(method)) return agentFileProtocol.validateResult(method, value, params);
     if (NATIVE_MEMORY_CONFIG_METHODS.includes(method)) return validateNativeMemoryConfigResult(method, value);
     if (NATIVE_MEMORY_SHARING_METHODS.includes(method)) return validateNativeMemorySharingResult(method, value);
     if (method === activeMemoryCommand.METHOD) return activeMemoryCommand.validateResult(value, params);
@@ -1225,7 +1120,7 @@ function sessionToRow(profile, value, backendId) {
   const title = typeof value.title === "string" && value.title.length > 0
     ? value.title : undefined;
   // The session list already files inspiration sessions under their own category, so the note names itself.
-  const derivedTitle = value.proactiveTarget ? "提醒" : value.inspirationTitle ? value.inspirationTitle
+  const derivedTitle = value.proactiveTarget ? "Main session" : value.inspirationTitle ? value.inspirationTitle
     : typeof value.derivedTitle === "string" && value.derivedTitle.length > 0
     ? value.derivedTitle : undefined;
   return Object.freeze({
@@ -1235,7 +1130,7 @@ function sessionToRow(profile, value, backendId) {
     displayName: title,
     ...(derivedTitle ? { derivedTitle } : {}),
     ...(value.inspirationId ? { inspirationId: value.inspirationId } : {}),
-    ...(value.proactiveTarget ? { source: "proactive", proactiveTarget: true } : {}),
+    ...(value.proactiveTarget ? { source: "proactive", proactiveTarget: true, mainSession: true } : {}),
     ...(value.source === "codex-desktop" ? { source: "codex-desktop",
       ...(value.codexDesktopWriter ? { codexDesktopWriter: value.codexDesktopWriter } : {}) } : {}),
     subject: undefined,
@@ -1553,6 +1448,7 @@ class ShoggothBackend extends AgentBackend {
         oauth: true,
         dashboardRuns: true,
         agentHarness: true,
+        agentFiles: true,
         nativeCapacity: true,
         nativeMemoryConfig: true,
         nativeChatUi: this._nativeUiAvailable,
@@ -1805,24 +1701,31 @@ class ShoggothBackend extends AgentBackend {
     }
   }
 
-  async getRuntimeStatuses() {
-    // An installed executable is only inventory. Explicit refresh uses bounded,
-    // read-only account/model probes; it never sends a prompt or starts login.
+  async getRuntimeStatuses({ forAgentCreation = false } = {}) {
     const descriptors = await this._refreshRuntimeCliAuth();
-    const serviceConnected = await this.getStatus().then(status => status.connected === true, () => false);
-    const providers = serviceConnected ? await this.listOAuthProviders().then(result => result.providers, () => []) : [];
-    // A CLI installed since the last check gets its built-in Agent now.
-    if (this._state === "started") {
-      void this._ensureBuiltinAgents({ force: true }).then((result) => (result?.createdProfileIds.length
-        || result?.greetedProfileIds.length ? this._refreshManagedProfiles() : null)).catch(() => {});
+    let serviceConnected = this._state === "started" && !this._statusUncertain;
+    let providers = [];
+    let extensions = [];
+    // Creation accepts built-in account IDs and only needs local inventory.
+    // Settings can wait for fresh login, model and extension status checks.
+    if (!forAgentCreation) {
+      serviceConnected = await this.getStatus().then(status => status.connected === true, () => false);
+      providers = serviceConnected ? await this.listOAuthProviders().then(result => result.providers, () => []) : [];
+      // A CLI installed since the last check gets its built-in Agent now.
+      if (this._state === "started") {
+        void this._ensureBuiltinAgents({ force: true }).then((result) => (result?.createdProfileIds.length
+          || result?.greetedProfileIds.length ? this._refreshManagedProfiles() : null)).catch(() => {});
+      }
+      extensions = await this._refreshExtensionRuntimeStatuses();
     }
     let disabled = [];
     try { disabled = this._getDisabledBackendIds?.() || []; } catch { /* configuration unavailable */ }
     const names = new Map(require("../runtime-cli-auth").AUTH_SPECS.map(spec => [spec.runtimeAccountId, spec.name]));
-    const extensions = await this._refreshExtensionRuntimeStatuses();
     return [...DEFAULT_RUNTIME_ACCOUNTS.filter(account => account.kind === "native-user").map(account => {
       const descriptor = descriptors.get(account.id);
       const releaseEnabled = isRuntimeAvailable(account.runtime);
+      const proof = this._runtimeProofFor(account.id);
+      const readiness = forAgentCreation ? proof?.readiness : providers.find(provider => provider.id === account.id)?.status.readiness;
       return {
         runtime: account.runtime, name: names.get(account.id) || account.runtime,
         runtimeAccountId: account.id, releaseEnabled,
@@ -1830,8 +1733,8 @@ class ShoggothBackend extends AgentBackend {
         installation: !releaseEnabled ? "unknown" : descriptor?.binaryPath ? "available" : "unavailable",
         installsOnSignIn: RUNTIME_ACCOUNT_LOGIN_RUNTIMES[account.runtime]?.installsRuntime === true,
         serviceConnected,
-        readiness: providers.find(provider => provider.id === account.id)?.status.readiness || "unverified",
-        features: this._runtimeProofFor(account.id)?.features ?? null,
+        readiness: readiness ?? "unverified",
+        features: proof?.features ?? null,
       };
     }), ...extensions.map(entry => ({ runtime: entry.runtime, name: entry.runtime, runtimeAccountId: entry.runtimeAccountId,
       releaseEnabled: true, enabled: entry.enabled, installation: entry.availability, serviceConnected,
@@ -2675,11 +2578,95 @@ class ShoggothBackend extends AgentBackend {
     };
   }
 
-  async listAgentArtifacts(agentId, { limit = 100 } = {}) {
+  async agentFiles(agentId, action, input = {}) {
+    this._assertDomainReady();
+    const profile = this._profilesByAgent.get(agentId);
+    if (!profile) agentFileProtocol.fail("AGENT_FILE_NOT_FOUND");
+    const profileId = profile.id;
+    const request = (method, params) => this._call(method, agentFileProtocol.validateParams(method, { ...params, profileId }));
+    if (action === "content" || action === "get") {
+      const get = async () => {
+        const result = await request("agent.files.get", { fileId: input.fileId });
+        if (result.path !== null && result.path !== payloadPath(this.paths, profileId, result.file.fileId, result.file.name)) {
+          agentFileProtocol.fail("AGENT_FILE_INVALID");
+        }
+        return result;
+      };
+      let result = await get();
+      for (let attempt = 0; result.path && attempt < 2; attempt++) {
+        const { file } = result;
+        const bytes = await readBoundedFile(result.path, { privateFile: true }).catch(error => {
+          if (!["AGENT_FILE_MISSING", "AGENT_FILE_SOURCE_CHANGED", "AGENT_FILE_INVALID", "AGENT_FILE_TOO_LARGE"].includes(error?.code)) throw error;
+          return null;
+        });
+        const current = await get();
+        if (current.path && bytes?.length === file.sizeBytes && sha256(bytes) === file.sha256 && current.file.sha256 === file.sha256) {
+          return action === "get" ? current : { file: current.file, bytes };
+        }
+        if (current.path === result.path) {
+          result = { file: { ...current.file, status: "missing" }, path: null };
+          break;
+        }
+        result = current;
+      }
+      if (result.path) agentFileProtocol.fail("AGENT_FILE_CONFLICT");
+      if (action === "get") return result;
+      agentFileProtocol.fail(result.file.status === "deleted" ? "AGENT_FILE_DELETED" : "AGENT_FILE_MISSING");
+    }
+    if (action === "import") {
+      const { name, mimeType, operationId, bytes } = input;
+      if (!Buffer.isBuffer(bytes)) agentFileProtocol.fail("AGENT_FILE_INVALID");
+      if (bytes.length > agentFileProtocol.MAX_FILE_BYTES) agentFileProtocol.fail("AGENT_FILE_TOO_LARGE");
+      const uploadId = crypto.randomUUID();
+      const method = "agent.files.import";
+      const params = agentFileProtocol.validateParams(method, { profileId, uploadId, operationId, name, mimeType,
+        sizeBytes: bytes.length, sha256: sha256(bytes) });
+      const target = importPath(this.paths, uploadId);
+      ensurePrivateDirectoryTree(path.dirname(target), this.paths.trustedRoot);
+      const handle = await fs.promises.open(target, "wx", 0o600);
+      try {
+        try { await handle.writeFile(bytes); }
+        finally { await handle.close(); }
+        return await this._call(method, params);
+      }
+      finally { await fs.promises.unlink(target).catch(() => {}); }
+    }
+    if (["list", "rename", "delete"].includes(action)) return request(`agent.files.${action}`, input);
+    agentFileProtocol.fail("AGENT_FILE_INVALID");
+  }
+
+  _managedArtifact(profile, file) {
+    const ext = path.extname(file.name).toLowerCase();
+    return { fileId: file.fileId, path: payloadPath(this.paths, profile.id, file.fileId, file.name),
+      name: file.name, area: "agent-files", size: file.sizeBytes, mtimeMs: file.updatedAt, ext, kind: artifactKind(ext),
+      agentId: profile.agentId, agentName: profile.name };
+  }
+
+  async _managedArtifacts(profile, { limit, sessionKey = null, runId = null }) {
+    let cursor = 0;
+    const files = [];
+    do {
+      const pageLimit = Math.min(agentFileProtocol.FILE_PAGE_SIZE, limit - files.length);
+      const params = { profileId: profile.id, cursor, limit: pageLimit, sessionKey, runId, includeMissing: false };
+      const page = await this._call("agent.files.list", params);
+      files.push(...page.items.map(file => this._managedArtifact(profile, file)));
+      cursor = page.nextCursor;
+    } while (cursor !== null && files.length < limit);
+    return files;
+  }
+
+  async listRunArtifacts(agentId, runId) {
+    const profile = this._profileForManagedAgent(agentId);
+    return this._managedArtifacts(profile, { limit: 51, runId });
+  }
+
+  async listAgentArtifacts(agentId, { limit = 100, includeManaged = true } = {}) {
     this._assertDomainReady();
     const generation = this._generation;
     const profile = (await this._dashboardProfiles()).find(value => value.agentId === agentId && value.enabled);
     if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
+    const take = Math.min(100, Math.max(1, Math.floor(Number(limit) || 100)));
+    const managed = includeManaged ? this._managedArtifacts(profile, { limit: take }).catch(() => []) : [];
     const current = () => this._generation === generation && this._state === "started";
     const sessions = await this._page("chat.session.list", {
       profileId: profile.id, includeArchived: true,
@@ -2699,26 +2686,31 @@ class ShoggothBackend extends AgentBackend {
       return items.map(item => ({ ...item, agentId, agentName: profile.name }));
     });
     if (!current()) throw safeError(null, "BACKEND_NOT_READY");
-    if (sessions.length > 0 && failed === sessions.length) {
+    const saved = await managed;
+    if (!current()) throw safeError(null, "BACKEND_NOT_READY");
+    if (sessions.length > 0 && failed === sessions.length && saved.length === 0) {
       return { supported: false, reason: "provenance-unavailable", items: [] };
     }
     const byPath = new Map();
-    for (const item of results.flat().sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))) {
+    for (const item of [...saved, ...results.flat()].sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path))) {
       if (!byPath.has(item.path)) byPath.set(item.path, item);
     }
-    const take = Math.min(100, Math.max(1, Math.floor(Number(limit) || 100)));
-    return { supported: true, partial: failed > 0, total: byPath.size, items: [...byPath.values()].slice(0, take) };
+    const items = [...byPath.values()].slice(0, take);
+    return { supported: true, partial: failed > 0, total: byPath.size, items };
   }
 
   async listSessionArtifacts(agentId, key, { limit = 50 } = {}) {
     const target = this._sessionTarget(key);
     if (target.agentId !== agentId) throw safeError(null, "CHAT_SESSION_INVALID");
+    const take = Math.min(Math.max(Math.floor(Number(limit) || 50), 1), 100);
+    const saved = await this._managedArtifacts(target.profile, { limit: take, sessionKey: target.session.sessionKey }).catch(() => []);
     try {
-      const matched = await this._sessionOutputArtifacts(target);
-      const take = Math.min(Math.max(Math.floor(Number(limit) || 50), 1), 100);
+      const workspace = await this._sessionOutputArtifacts(target);
+      const matched = [...saved, ...workspace].sort((a, b) => b.mtimeMs - a.mtimeMs);
       return { supported: true, approximate: false, sinceMs: target.session.createdAt,
         total: matched.length, items: matched.slice(0, take) };
     } catch {
+      if (saved.length) return { supported: true, partial: true, total: saved.length, items: saved };
       return { supported: false, reason: "provenance-unavailable", items: [] };
     }
   }
@@ -2763,7 +2755,7 @@ class ShoggothBackend extends AgentBackend {
     const descriptor = this.runtimeCliAuth.get(target.profile.runtimeAccountId);
     const runtimeHome = descriptor?.runtime === target.profile.runtime
       ? descriptor.processHome : os.homedir();
-    return collectSessionOutputArtifacts({
+    const files = await collectSessionOutputArtifacts({
       events,
       runs,
       workspace: target.session.workspace,
@@ -2771,12 +2763,17 @@ class ShoggothBackend extends AgentBackend {
       sessionCreatedAt: sinceMs,
       agentId: target.agentId,
     });
+    // Private files are resolved only through their owner-scoped catalog.
+    return files.filter(item => !item.path.startsWith(this.paths.agentsDir + path.sep));
   }
 
   async getRecentArtifacts({ sinceMs = 0, limit = 20 } = {}) {
     this._assertDomainReady();
     const generation = this._generation;
     const profiles = (await this._dashboardProfiles()).filter(profile => profile.enabled);
+    const take = Math.min(100, Math.max(1, Math.floor(Number(limit) || 20)));
+    const saved = mapBounded(profiles, MAX_PROFILE_SESSION_CONCURRENCY,
+      profile => this._managedArtifacts(profile, { limit: take }).catch(() => []));
     // Read the public roster before using a cache: archive/delete and Agent
     // changes must immediately remove their files, including during a rescan.
     let partial = false;
@@ -2800,9 +2797,11 @@ class ShoggothBackend extends AgentBackend {
       session.id, session.sessionKey, session.workspace, session.createdAt, session.updatedAt,
     ])]);
     const current = () => this._generation === generation && this._state === "started";
-    const clamp = data => {
+    const clamp = async data => {
+      const managed = (await saved).flat().filter(item => item.mtimeMs >= sinceMs);
       if (!current()) throw safeError(null, "BACKEND_NOT_READY");
-      return { ...data, items: data.items.slice(0, Math.min(100, Math.max(1, Math.floor(Number(limit) || 20)))) };
+      const items = [...managed, ...data.items].sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
+      return { ...data, items: items.slice(0, take) };
     };
     if (!current()) throw safeError(null, "BACKEND_NOT_READY");
     const cached = this._recentArtifactsCache?.key === key ? this._recentArtifactsCache : null;
@@ -3170,8 +3169,11 @@ class ShoggothBackend extends AgentBackend {
 
   async getAgentFile(id, file) {
     const profile = this._profileForManagedAgent(id);
-    if (file === "HEARTBEAT.md") return (await this.proactiveCall("proactive.document.get", { profileId: profile.id })).document;
-    if (file === "DAILY_REVIEW.md") return (await this.proactiveCall("proactive.review-document.get", { profileId: profile.id })).document;
+    if (file === "HEARTBEAT.md" || file === "DAILY_REVIEW.md") {
+      const method = file === "HEARTBEAT.md" ? "proactive.document.get" : "proactive.review-document.get";
+      const { document } = await this.proactiveCall(method, { profileId: profile.id });
+      return { ...document, localDirectory: existingLocalDirectory(path.join(this.paths.agentsDir, profile.id)) };
+    }
     const match = /^([A-Z]+)\.md$/u.exec(file);
     if (!match || !["IDENTITY", "SOUL", "USER", "AGENTS", "TOOLS", "MEMORY"].includes(match[1])) {
       throw safeError(null, "INVALID_PARAMS");
@@ -3179,7 +3181,8 @@ class ShoggothBackend extends AgentBackend {
     const result = await this._call("harness.definition.read", {
       profileId: profile.id, kind: match[1], revision: null,
     });
-    return { name: file, content: result.content, revision: result.revision, readOnly: result.readOnly };
+    return { name: file, content: result.content, revision: result.revision, readOnly: result.readOnly,
+      localDirectory: existingLocalDirectory(result.localDirectory) };
   }
 
   async setAgentFile(id, file, content, options = {}) {
@@ -5022,6 +5025,19 @@ class ShoggothBackend extends AgentBackend {
       });
     }
     const mappedRuns = runs.map((value) => this._mapTaskRun(value, target.profile));
+    const mappedArtifacts = await mapBounded(artifacts, MAX_PROFILE_SESSION_CONCURRENCY, async (value) => {
+      const base = { id: value.id, label: value.name, mimeType: value.mimeType || undefined, createdAt: value.createdAt };
+      const fileId = fileIdFromStorageKey(value.storageKey);
+      if (!fileId) return base;
+      try {
+        const { file } = await this._call("agent.files.get", { profileId: target.profile.id, fileId });
+        if (file.source.kind !== "kanban" || file.source.runId !== value.runId || file.source.sourceId !== target.card.id) {
+          return { ...base, status: "missing" };
+        }
+        return { ...base, label: file.name, status: file.status,
+          ...(file.status === "available" ? { url: agentFileProtocol.contentUrl(this.id, target.profile.agentId, fileId) } : {}) };
+      } catch { return { ...base, status: "missing" }; }
+    });
     const latestSummary = [...mappedRuns].reverse().find((value) => value.summary)?.summary;
     const detail = this._mapTaskDetail(target.card, body, target.profile, {
       comments: mappedComments,
@@ -5032,12 +5048,7 @@ class ShoggothBackend extends AgentBackend {
         size: value.sizeBytes,
         createdAt: value.createdAt,
       })),
-      artifacts: artifacts.map((value) => ({
-        id: value.id,
-        label: value.name,
-        mimeType: value.mimeType || undefined,
-        createdAt: value.createdAt,
-      })),
+      artifacts: mappedArtifacts,
       runs: mappedRuns,
       latestSummary,
     });
@@ -5590,7 +5601,9 @@ class ShoggothBackend extends AgentBackend {
       requestId: input?.requestId, response: input?.response, operationId: input?.operationId });
   }
   deleteGroupChat(groupId, input) {
-    return this._groupChatCall("group.delete", { groupId, expectedMetadataRevision: input.expectedMetadataRevision });
+    return this._groupChatCall("group.delete", { groupId, expectedMetadataRevision: input.expectedMetadataRevision,
+      ...(Object.hasOwn(input, "force") ? { force: input.force } : {}),
+      ...(Object.hasOwn(input, "ownerScope") ? { ownerScope: input.ownerScope } : {}) });
   }
   getGroupChatDiagnostics() { return this._groupChatCall("group.diagnostics", {}); }
 
@@ -5687,9 +5700,15 @@ class ShoggothBackend extends AgentBackend {
   async projectExternalInspirationHistory(target, history) {
     const { inspirationHistoryText, projectInspirationHistory } = require("./inspiration-chat-history");
     if (!Array.isArray(history?.messages) || !history.messages.some(message => inspirationHistoryText(message))) return history;
-    const projections = await this._page("inspiration.session.messages", target, "items", {
+    const readProjections = (params) => this._page("inspiration.session.messages", params, "items", {
       pageLimit: 50, maxBytes: MAX_HISTORY_BYTES, maxItems: MAX_HISTORY_ITEMS,
     });
+    const projections = target.backendId === "openclaw"
+      ? await readProjections({ ...target, includeChatSend: true }).catch(error => {
+        // Older Services accept only the original display projection request.
+        if (error?.code !== "INSPIRATION_INVALID") throw error;
+        return readProjections(target);
+      }) : await readProjections(target);
     return projectInspirationHistory(history, projections);
   }
 
@@ -6554,7 +6573,8 @@ class ShoggothBackend extends AgentBackend {
     const run = result.run;
     if (run.id !== runId) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
     const profile = this._assertKnownProfileId(run.profileId);
-    const [events, title] = await Promise.all([this._dashboardRunEvents(runId), this._dashboardRunTitle(run)]);
+    const [events, title, files] = await Promise.all([this._dashboardRunEvents(runId), this._dashboardRunTitle(run),
+      this._managedArtifacts(profile, { limit: 20, runId }).catch(() => [])]);
     const fragmentState = {};
     const projectedEvents = events.flatMap(raw => {
       const event = require("../agent-service/chat-text-fragments").consumeChatTextFragment(fragmentState, raw);
@@ -6576,7 +6596,8 @@ class ShoggothBackend extends AgentBackend {
       ...(run.errorCode ? { error: run.errorCode } : {}),
       ...(run.retryOf ? { retryOf: run.retryOf } : {}),
       events: projectedEvents,
-      artifacts: [],
+      artifacts: files.map(file => ({ id: file.fileId, name: file.name, kind: file.kind,
+        url: agentFileProtocol.contentUrl(this.id, profile.agentId, file.fileId) })),
     };
   }
 

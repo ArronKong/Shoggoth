@@ -19,7 +19,9 @@ for (let index = 0; index < 2; index++) {
   prompts.push(normalizeInteractiveRequestV1({ runId: "input-run", eventType: "prompt", payload, expiresAt: null }));
   receipts.push([
     { id: transcriptEventId("chat-request", payload.requestId), seq: index * 10 + 4, kind: "input", content: { transcriptType: "prompt", ...payload } },
-    { id: transcriptEventId("interactive-response", payload.requestId), seq: index * 10 + 5, kind: "user", content: { text: `补充：answer: ${index ? "确认下单" : "门店 A"}` } },
+    { id: transcriptEventId("interactive-response", payload.requestId), seq: index * 10 + 5, kind: "user", content: {
+      transcriptType: "interaction.response", requestId: payload.requestId, displayText: index ? "确认下单" : "门店 A",
+    } },
   ].map(event => transcriptHistoryItem({ ...event, runId: "input-run", occurredAt: Date.now() }).payload.message));
 }
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-input-continuity-"));

@@ -55,7 +55,7 @@ check.deepEqual(decode(ui.mcpFieldsFromInputs({ env: "", headers: "", definition
 const iconUi = load("../app/manage-ui/src/lib/mcpConnectorIcons.ts", { URL });
 const catalog = load("../app/manage-ui/src/lib/mcpRecommendationCatalog.ts");
 const presets = JSON.parse(fs.readFileSync(new URL("../app/agent-service/data/mcp-featured-presets.json", import.meta.url), "utf8"));
-for (const [id, url] of Object.entries({ runway: "https://mcp.runwayml.com/mcp", higgsfield: "https://mcp.higgsfield.ai/mcp", "black-forest-labs": "https://mcp.bfl.ai", "fal-ai": "https://mcp.fal.ai/mcp-relay" })) {
+for (const [id, url] of Object.entries({ runway: "https://mcp.runwayml.com/mcp", higgsfield: "https://mcp.higgsfield.ai/mcp", hyperframes: "https://mcp.heygen.com/mcp/hyperframes/", "black-forest-labs": "https://mcp.bfl.ai", "fal-ai": "https://mcp.fal.ai/mcp-relay" })) {
   const preset = presets.find(value => value.id === id);
   check.equal(preset.url, url, `${id} uses the official generation endpoint`);
   check.equal(preset.setup, "oauth");

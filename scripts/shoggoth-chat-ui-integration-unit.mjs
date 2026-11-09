@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import { createRequire } from "node:module";
 import ts from "../app/manage-ui/node_modules/typescript/lib/typescript.js";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -14,7 +15,6 @@ const chatPagePath = path.join(ROOT, "app/manage-ui/src/pages/ChatPage.tsx");
 const chatCssPath = path.join(ROOT, "app/manage-ui/src/pages/ChatPage.css");
 const turnTimelinePath = path.join(ROOT, "app/manage-ui/src/lib/turnTimeline.ts");
 const historyRuntimePath = path.join(ROOT, "app/manage-ui/src/lib/chatHistoryRuntime.ts");
-const gatewayErrorsPath = path.join(ROOT, "app/manage-ui/src/lib/gatewayErrors.ts");
 const immersiveChatPath = path.join(ROOT, "app/manage-ui/src/pages/immersive/ImmersiveChat.tsx");
 const kanbanPath = path.join(ROOT, "app/manage-ui/src/pages/immersive/ImmersiveKanbanPanel.tsx");
 const profilePath = path.join(ROOT, "app/manage-ui/src/pages/immersive/ImmersiveProfilePanel.tsx");
@@ -220,18 +220,9 @@ assert.match(appSource, /toast\.error\(t\("common\.agentServiceRecovering"\)\)/,
 assert.match(appSource, /common\.agentServiceRestarted/,
   "App 壳层必须显示 Agent Service 重启完成提示");
 
-const gatewayErrorsSource = fs.readFileSync(gatewayErrorsPath, "utf8");
-const gatewayErrorsJavaScript = ts.transpileModule(gatewayErrorsSource, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  fileName: gatewayErrorsPath,
-}).outputText;
-const gatewayErrorsModule = { exports: {} };
-vm.runInNewContext(`(function(module, exports) { ${gatewayErrorsJavaScript}\n})(module, module.exports);`, {
-  module: gatewayErrorsModule,
-  exports: gatewayErrorsModule.exports,
-});
+const gatewayErrors = createRequire(import.meta.url)("./fixtures/load-ui-typescript.cjs").load("lib/gatewayErrors.ts");
 assert.equal(
-  gatewayErrorsModule.exports.translateGatewayError("CODEX_PROMPT_TIMEOUT", (key) => key),
+  gatewayErrors.translateGatewayError("CODEX_PROMPT_TIMEOUT", (key) => key),
   "chat.gwErrors.inputTimeout",
   "输入超时的 durable 错误码在历史重载后也必须显示明确说明",
 );

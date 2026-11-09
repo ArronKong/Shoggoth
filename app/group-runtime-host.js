@@ -43,14 +43,17 @@ class GroupRuntimeHost {
     this.readTerminalReceipt = readTerminalReceipt; this.receiptReads = new Map();
     this.groupCancellations = new Map();
   }
-  open() {
+  open({ expectedHostId = null } = {}) {
     const file = path.join(this.paths.stateDir, "group-host.sqlite");
+    if (expectedHostId !== null && !fs.existsSync(file)) p.fail("GROUP_HOST_IDENTITY_MISMATCH");
     preparePrivateParent(file, this.paths.trustedRoot);
     this.lease = acquirePrivateWriterLease({ lockPath: `${file}.writer.lock`, trustedRoot: this.paths.trustedRoot });
     try {
+      if (expectedHostId !== null && !fs.existsSync(file)) p.fail("GROUP_HOST_IDENTITY_MISMATCH");
       this.db = openDatabase(file);
       const version = this.db.prepare("PRAGMA user_version").get().user_version;
       if (version !== 0 && version !== 1) p.fail("GROUP_HOST_STORE_INVALID");
+      if (expectedHostId !== null && version !== 1) p.fail("GROUP_HOST_IDENTITY_MISMATCH");
       if (version === 0) transaction(this.db, () => this.db.exec(`
         CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         CREATE TABLE owners(group_id TEXT PRIMARY KEY,data TEXT NOT NULL);
@@ -61,6 +64,7 @@ class GroupRuntimeHost {
           PRIMARY KEY(execution_id,path,digest)); PRAGMA user_version=1;`));
       if (this.db.prepare("PRAGMA quick_check").get().quick_check !== "ok") p.fail("GROUP_HOST_STORE_INVALID");
       this.hostId = this.db.prepare("SELECT value FROM meta WHERE key='hostId'").get()?.value;
+      if (expectedHostId !== null && this.hostId !== expectedHostId) p.fail("GROUP_HOST_IDENTITY_MISMATCH");
       if (!this.hostId) {
         this.hostId = crypto.randomUUID(); this.db.prepare("INSERT INTO meta(key,value) VALUES('hostId',?)").run(this.hostId);
       }
@@ -156,9 +160,36 @@ class GroupRuntimeHost {
     if (EXTERNAL_TERMINAL.has(snapshot.status)) void this.#pump().catch(() => {});
   }
   #bound(record) { return { ...record.identity, ...record.binding, hostId: record.runnerHostId }; }
+  #groupExecutions(groupId) {
+    return this.db.prepare("SELECT data FROM executions WHERE json_extract(data,'$.groupId')=?").all(groupId)
+      .map(row => JSON.parse(row.data));
+  }
+  // A disconnected local runtime can still prove a stop from its durable Host
+  // journal. Check the exact binding and fence the group in one transaction.
+  stopGroupFromJournal(params, authority) {
+    if (this.closed || !this.db) p.fail("GROUP_HOST_UNAVAILABLE");
+    if (!p.validAuthority(authority)) p.fail("GROUP_HOST_AUTHORITY_INVALID");
+    const { groupId, ownerId, epoch } = authority;
+    return transaction(this.db, () => {
+      const owner = this.#row("owners", "group_id", groupId);
+      if (owner?.groupId !== groupId || owner.ownerId !== ownerId || !p.epoch(owner.epoch) || epoch < owner.epoch) {
+        p.fail("GROUP_HOST_OWNER_CHANGED");
+      }
+      const selected = this.#record(params, authority);
+      for (const record of this.#groupExecutions(groupId)) {
+        const snapshot = record.snapshot;
+        if (!EXTERNAL_TERMINAL.has(snapshot?.status) || !validExternalSnapshot(snapshot)
+          || !p.uuid(record.runnerHostId) || !same(snapshot, this.#bound(record), boundFields)
+          || (record.isolation != null && record.isolation.sealed !== true)) p.fail("GROUP_HOST_UNAVAILABLE");
+      }
+      if (owner.stopped !== true || owner.epoch !== epoch) {
+        this.#put("owners", "group_id", groupId, { ...authority, stopped: true, until: this.now() + LEASE_MS });
+      }
+      return { hostId: selected.runnerHostId, snapshot: selected.snapshot, groupStopped: true };
+    });
+  }
   #stopGroupExecutions(groupId) {
-    const records = this.db.prepare("SELECT data FROM executions").all().map(row => JSON.parse(row.data))
-      .filter(record => record.groupId === groupId);
+    const records = this.#groupExecutions(groupId);
     for (const record of records) {
       if (EXTERNAL_TERMINAL.has(record.snapshot?.status)) {
         if (record.isolation && !record.isolation.sealed) void this.#seal(record).catch(() => {});
@@ -467,9 +498,8 @@ class GroupRuntimeHost {
       // terminal callback may wake other groups, but cannot dispatch this one.
       transaction(this.db, () => {
         this.#put("owners", "group_id", authority.groupId, { ...owner, stopped: true });
-        for (const row of this.db.prepare("SELECT data FROM executions").all()) {
-          const record = JSON.parse(row.data);
-          if (record.groupId !== authority.groupId || EXTERNAL_TERMINAL.has(record.snapshot?.status)) continue;
+        for (const record of this.#groupExecutions(authority.groupId)) {
+          if (EXTERNAL_TERMINAL.has(record.snapshot?.status)) continue;
           record.cancelRequested = true; record.queued = false; record.grantDigest = null;
           if (!record.dispatchPossible && record.binding) {
             record.dispatchPossible = true;

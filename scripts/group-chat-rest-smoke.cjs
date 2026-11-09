@@ -427,6 +427,34 @@ async function run() {
       "deletion preserves internal session exclusion without touching other sessions");
     assert.equal((await api("GET", `/messages?id=${groupId}`)).body.code, "GROUP_CHAT_DELETED");
     console.log("PASS group chat REST: create/idempotency, owner answers first, resend, @ relay, routing, @all order, failure vs pass, retry, quote reply, attachments, call cap, stop all, stop one member, owner change, rename/remove, hidden sessions, member roles and read-only tools, search, delete");
+
+    const forceGroup = await api("POST", "", { operationId: "force-delete-fixture", name: "Pending deletion", purpose: "", members: refs.slice(0, 2) });
+    assert.equal(forceGroup.status, 200);
+    const forceId = forceGroup.body.group.id, forcePath = `/detail?id=${forceId}`;
+    const force = { force: true, ownerScope: forceGroup.body.ownerScope };
+    assert.equal((await api("DELETE", forcePath, { ...force, expectedMetadataRevision: 1 })).body.code, "GROUP_CHAT_FORCE_DELETE_CONFLICT");
+    state.reply = () => ({ hang: true });
+    const priorRuns = state.runs.size;
+    let releaseAbort;
+    state.abortGate = new Promise(resolve => { releaseAbort = resolve; });
+    try {
+      assert.equal((await api("POST", `/messages?id=${forceId}`, { clientMessageId: "pending", body: "Keep running", mentions: [] })).status, 200);
+      for (let attempt = 0; state.runs.size === priorRuns && attempt < 150; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(state.runs.size, priorRuns + 1);
+      const running = [...state.runs.values()].at(-1);
+      assert.deepEqual((await api("DELETE", forcePath, { expectedMetadataRevision: 1 })).body, { groupId: forceId, status: "deleting" });
+      const pending = (await api("GET", forcePath)).body;
+      assert.equal(pending.group.status, "deleting");
+      const confirmed = { ...force, expectedMetadataRevision: pending.group.metadataRevision };
+      const forced = await api("DELETE", forcePath, confirmed);
+      assert.equal(forced.status, 200);
+      assert.deepEqual(forced.body, { groupId: forceId, status: "deleted" });
+      assert.equal(running.status, "running", "force deletion returns before the runtime acknowledges stop");
+      assert.equal((await api("GET", forcePath)).body.code, "GROUP_CHAT_DELETED");
+      assert.equal((await api("GET", "")).body.groups.length, 0);
+      assert.deepEqual((await api("DELETE", forcePath, confirmed)).body, forced.body);
+    } finally { releaseAbort(); state.abortGate = null; }
+    console.log("PASS force delete REST: explicit owner and pending revision, removal before stop acknowledgement, repeat-safe");
   } finally {
     await f.close();
   }
@@ -525,22 +553,20 @@ async function runNative() {
     }
     assert.equal(f.service.workDispatcher.getRun(missed.id).errorCode, "SKILL_NOT_FOUND");
     assert.equal((await f.ipc("service.status", {})).healthy, true, "the service is not poisoned by a skill selection error");
-    // A local decoder failure continues this same input with its original
-    // attachment. The following valid image still uses the real local decoder.
-    const invalid = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=", "base64");
-    const brokenPicture = { id: crypto.randomUUID(), name: "broken.png", mimeType: "image/png", size: invalid.length };
-    await f.ipc("inspiration.media.write", { attachment: brokenPicture, offset: 0, content: invalid.toString("base64") });
-    const pictureInput = { operationId: "attachment-decode-failure", sessionKey: skillChat.session.sessionKey,
-      prompt: "检查附件", attachments: [brokenPicture], createdAt: Date.now() };
-    const originalPicture = await f.ipc("chat.send", pictureInput);
-    const originalRun = await f.service.workRunCoordinator.waitForTerminal(originalPicture.run.id);
+    const pagesBytes = Buffer.from("504b030400ff0166697874757265", "hex");
+    const pages = { id: crypto.randomUUID(), name: "会议纪要.pages", mimeType: "application/octet-stream", size: pagesBytes.length };
+    await f.ipc("inspiration.media.write", { attachment: pages, offset: 0, content: pagesBytes.toString("base64") });
+    const fileInput = { operationId: "opaque-attachment-original", sessionKey: skillChat.session.sessionKey,
+      prompt: "检查附件", attachments: [pages], createdAt: Date.now() };
+    const original = await f.ipc("chat.send", fileInput);
+    const originalRun = await f.service.workRunCoordinator.waitForTerminal(original.run.id);
     assert.equal(originalRun.status, "completed"); assert.equal(originalRun.errorCode, null);
     assert.deepEqual(fs.readFileSync(path.join(f.paths.stateDir, "chat-attachments", skillChat.session.sessionKey,
-      brokenPicture.id, "broken.png")), invalid, "the ordinary attachment transport receives the original bytes");
-    assert.equal((await f.ipc("chat.send", pictureInput)).run.id, originalRun.id, "retry retains the completed operation");
-    assert.equal(f.service.productStore.listWorkRuns().filter(run => run.idempotencyKey === "shoggoth:chat-send:attachment-decode-failure").length, 1);
+      pages.id, pages.name)), pagesBytes, "an arbitrary file reaches the session with its original bytes");
+    assert.equal((await f.ipc("chat.send", fileInput)).run.id, originalRun.id, "retry retains the completed operation");
+    assert.equal(f.service.productStore.listWorkRuns().filter(run => run.idempotencyKey === "shoggoth:chat-send:opaque-attachment-original").length, 1);
     assert.equal((await f.ipc("service.status", {})).healthy, true);
-    // Original user bytes remain shared. Each session gets its own safe model copy.
+    // Each member gets its own session copy of the original attachment.
     const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAIAAABMXPacAAABKklEQVR4nO3RMQ0AAAjAMPybBhk9WBUs2Wyo0QHfNQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYA3AGoA1AGsA1gCsAVgDsAZgDcAagDUAawDWAKwBWAOwBmANwBqANQBrANYArAFYA7AGYAeU6UsysMvN4wAAAABJRU5ErkJggg==", "base64");
     const picture = { id: crypto.randomUUID(), name: "界面 截图.png", mimeType: "image/png", size: png.length };
     await f.ipc("inspiration.media.write", { attachment: picture, offset: 0, content: png.toString("base64") });
@@ -564,11 +590,10 @@ async function runNative() {
         "the member's own session records the attachment like a direct chat does");
       const source = f.service.inspirationStore.media.materialize(picture);
       assert.ok(fs.readFileSync(source).equals(png), "the original user attachment stays intact");
-      const safe = f.service.mcpProductToolController.secretExecution.media.read(
-        { profileId: session.profileId, sessionId: session.sessionKey }, picture);
-      assert.equal(safe.secretProjection, 1); assert.equal(safe.mimeType, "image/png");
-      assert.notEqual(safe.path, source); assert.ok(fs.readFileSync(safe.path).length > 0);
-      savedPaths.push(safe.path);
+      const sessionCopy = path.join(f.paths.stateDir, "chat-attachments", session.sessionKey, picture.id, picture.name);
+      assert.notEqual(sessionCopy, source);
+      assert.deepEqual(fs.readFileSync(sessionCopy), png);
+      savedPaths.push(sessionCopy);
     }
     assert.equal(new Set(savedPaths).size, 2);
     console.log("PASS group chat native: hidden per-group sessions, group-turn runs one after another, final answer from transcript, plain-text input, member models, dollar amounts, attachments through the direct-chat channel");

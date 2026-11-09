@@ -5,10 +5,13 @@
 
 import { useSyncExternalStore } from "react";
 
+// Keep the inspector available for development while its settings entry is hidden.
+export const SHOW_UI_TOOLS = false;
 const KEY = "shoggoth.debug.inspector.v1";
 const listeners = new Set<() => void>();
 
 export function isDebugEnabled(): boolean {
+  if (!SHOW_UI_TOOLS) return false;
   try {
     return localStorage.getItem(KEY) === "1";
   } catch {

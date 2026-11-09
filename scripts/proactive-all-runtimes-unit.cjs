@@ -6,6 +6,7 @@ const { resolveServicePaths } = require("../app/agent-service/paths");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
 const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
 const { DAY_MS } = require("../app/agent-service/proactive-service-protocol");
+const { seedProactiveAgentContext } = require("./helpers/proactive-native-closure.cjs");
 const RUNTIMES = ["grok-build", "pi", "opencode", "deepseek-harness", "antigravity"];
 const id = () => crypto.randomUUID();
 
@@ -75,18 +76,34 @@ async function fixture(t, runtime) {
       usage: { totalTokens: 20, inputTokens: 12, outputTokens: 8, cachedInputTokens: 0, cacheWriteInputTokens: 0, reasoningOutputTokens: 0 } };
   };
   generate = input => reply(input);
-  return { service, clock, calls, sent, select, call, get, save, tick, reply, rules, profileId,
+  return { service, root, clock, calls, sent, select, call, get, save, tick, reply, rules, profileId,
     setGenerate(fn) { generate = fn; } };
 }
 
 for (const runtime of RUNTIMES) test(`${runtime}: nonempty HEARTBEAT, notes, notice, default model, dedup and daily inspiration`, async t => {
   const f = await fixture(t, runtime);
+  const expected = await seedProactiveAgentContext(f.service, f.profileId, f.root, f.clock.value);
+  const assertModelInput = occurrence => {
+    const { input } = f.calls.at(-1);
+    assert.match(input.prompt, /SYSTEM-INITIATED CHECK/u);
+    for (const [name, content] of Object.entries(expected.definitions)) {
+      assert.ok(input.prompt.includes(content), `${name}.md must reach the model in full`);
+    }
+    for (const memory of [expected.user, expected.agent, expected.daily]) assert.ok(input.prompt.includes(memory), memory);
+    assert.ok(!input.prompt.includes(expected.project));
+    assert.doesNotMatch(input.prompt, /Frozen permission context|Skills are available/u);
+    const run = f.service.workDispatcher.getRun(occurrence.runId);
+    const snapshot = f.service.contextSnapshotStore.get(f.profileId, run.contextSnapshotId);
+    assert.equal(snapshot.report.inputOrigin, "system");
+    assert.equal(f.service.workRunCoordinator.getRunSessionKey(run), null);
+  };
   const check = await f.tick();
   assert.equal(check.state, "published", JSON.stringify({ reason: check.reason, calls: f.calls.length,
     runs: f.service.workDispatcher.listRuns({ source: "proactive" }),
     errors: [...f.service.workRunCoordinator.lastErrors.values()].map(e => ({ code: e.code, message: e.message, stack: e.stack })) }));
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].binding.runtime, runtime);
+  assertModelInput(check);
   assert.equal(f.calls[0].input.model, `${runtime}-chosen-model`);
   assert.deepEqual(f.calls[0].input.modelSecretScope, { profileId: f.profileId, sessionId: check.monitorId });
   assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).content, "已检查：状态 A");
@@ -109,6 +126,7 @@ for (const runtime of RUNTIMES) test(`${runtime}: nonempty HEARTBEAT, notes, not
   await f.tick(60 * 60_000);
   const review = f.service.proactiveStore.history(daily.config.id)[0];
   assert.equal(review.state, "published", review.reason); assert.equal(f.sent.length, 2);
+  assertModelInput(review);
   assert.equal(f.service.proactiveService.status(f.service.proactiveStore.getMonitor(daily.config.id)).totalTokens, 20,
     "daily review has its own budget even after same-day HEARTBEAT runs");
   assert.equal(f.service.proactiveStore.history(check.monitorId)[0].reason, "duplicate_notice");

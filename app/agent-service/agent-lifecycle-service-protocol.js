@@ -24,7 +24,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   INVALID_PARAMS: "请求参数无效",
   AGENT_BACKEND_NOT_SUPPORTED: "当前后端不支持创建长期 Agent",
   AGENT_NOT_FOUND: "Agent 不存在",
-  AGENT_NAME_CONFLICT: "当前后端已有同名 Agent",
+  AGENT_NAME_CONFLICT: "已有同名 Agent，请换一个名称",
   AGENT_PROFILE_CONFLICT: "Agent 设置已被其他操作更新",
   AGENT_PROTECTED: "默认 Agent 不可归档",
   AGENT_ACTIVE_RUNS: "Agent 仍有待执行或运行中的任务",

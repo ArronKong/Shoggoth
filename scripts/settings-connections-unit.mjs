@@ -38,10 +38,13 @@ assert.deepEqual(Array.from(FALLBACK_BACKEND_DESCRIPTORS, d => d.id), ids);
 const toggleIds = Array.from(FALLBACK_BACKEND_DESCRIPTORS.filter(d => d.disconnectable), d => d.id);
 assert.deepEqual(toggleIds, ids);
 assert.equal(FALLBACK_BACKEND_DESCRIPTORS.find(d => d.id === "shoggoth")?.disconnectable, true);
+const BackendTabIcon = load("app/manage-ui/src/components/BackendTabIcon.tsx", {
+  "./BackendTabIcon.module.css": {},
+});
 const Overview = load("app/manage-ui/src/pages/settings/BackendOverview.tsx", {
   "react-i18next": { useTranslation: () => ({ t: key => key }) },
   "../../lib/connectionOptions": { REMOTE_CONNECTIONS_ENABLED: false },
-  "../../components/BackendTabIcon": { __esModule: true, default: () => null },
+  "../../components/BackendTabIcon": BackendTabIcon,
 }).default;
 const descriptors = new Map(FALLBACK_BACKEND_DESCRIPTORS.map(d => [d.id, d]));
 const render = async (disabled, extra = {}) => {

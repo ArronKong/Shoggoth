@@ -616,6 +616,22 @@ test("MCP crypto 分派仅加载 one-shot worker，不加载 UI/Service 产品�
   );
 });
 
+test("真实 MCP crypto worker 模块加载通过角色隔离", () => {
+  const script = [
+    'const bootstrap = require("./app/bootstrap-role")',
+    'bootstrap.assertMcpCryptoRoleIsolation()',
+    'require("./app/mcp-crypto-worker")',
+    'bootstrap.assertMcpCryptoRoleIsolation()',
+  ].join(";");
+  assert.doesNotThrow(() => execFileSync(process.execPath, ["-e", script], {
+    cwd: ROOT,
+    encoding: "utf8",
+    timeout: 5_000,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    stdio: "pipe",
+  }));
+});
+
 test("Service role require-cache 发现 UI/OpenClaw/Hermes 产品模块即 fail closed", () => {
   assert.doesNotThrow(() => bootstrap.assertServiceRoleIsolation({
     "/app/agent-service.js": {},

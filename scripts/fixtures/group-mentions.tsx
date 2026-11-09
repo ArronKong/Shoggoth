@@ -133,28 +133,33 @@ state.verifyReadOnlyMentions = async () => {
   layout();
   return { readOnlyMentions: true };
 };
-const verifyDeletedAvatar = async (scope: string) => {
+const verifyAvatarColors = async (scope: string, offline: boolean) => {
   const avatar = (id: string) => document.querySelector<HTMLImageElement>(scope + ' img[src="/avatar/agent-' + id + '"]')!;
   await wait(() => avatar('b')?.naturalWidth && avatar('c')?.naturalWidth, 'original group avatar assets load');
   await wait(() => getComputedStyle(avatar('b')).filter === 'grayscale(1)', 'deleted member is black and white');
-  equal(getComputedStyle(avatar('c')).filter, 'none', 'offline member remains in color');
+  await wait(() => getComputedStyle(avatar('c')).filter === (offline ? 'grayscale(1)' : 'none'),
+    offline ? 'offline member is black and white' : 'reconnected member is in color');
 };
 state.showDeletedTimeline = async () => {
   view = { ...view, members: members.map(item => item.id === 'b' ? { ...item, agentMissing: true }
     : item.id === 'c' ? { ...item, card: { availability: 'offline', freshness: 'stale' } } : item) };
   emitGroupChanged('g');
-  await verifyDeletedAvatar('[data-group-details-trigger]');
-  await verifyDeletedAvatar('[data-seq="2"]');
+  await verifyAvatarColors('[data-group-details-trigger]', true);
+  await verifyAvatarColors('[data-seq="2"]', true);
   timeline().scrollTop = timeline().scrollHeight; await pause();
   return { deletedAvatarInHistory: true, deletedAvatarInCollage: true };
 };
 state.showDeletedMember = async () => {
   document.querySelector<HTMLButtonElement>('[data-group-details-trigger]')!.click();
   await wait(() => document.querySelector('[data-group-details]'), 'group details open');
-  await verifyDeletedAvatar('[data-group-details]');
-  return { deletedAvatarInDetails: true, offlineAvatarInColor: true };
+  await verifyAvatarColors('[data-group-details]', true);
+  return { deletedAvatarInDetails: true, offlineAvatarInDetails: true };
 };
 state.finish = async () => {
+  view = { ...view, members: view.members.map((item: any) => item.id === 'c'
+    ? { ...item, card: { availability: 'online', freshness: 'current' } } : item) };
+  emitGroupChanged('g');
+  await verifyAvatarColors('[data-group-details]', false);
   document.querySelector<HTMLButtonElement>('[data-group-details-action=close]')!.click();
   await wait(() => !document.querySelector('[data-group-details]'), 'details close');
   view.activeTurns = [{ opportunityId: 'stream-a', memberId: 'a', discussionId: 'round', startedAt: 20, floor: true, released: false,

@@ -1,14 +1,16 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const { TemporarySecretStore } = require("../app/agent-service/temporary-secret-store");
 const { ModelSecretProjection } = require("../app/agent-service/model-secret-projection");
+const { attachmentPrompt, prepareChatAttachments } = require("../app/agent-service/chat-attachments");
 const SCOPE = { profileId: "fixture-agent", sessionId: "fixture-session" };
 async function fixture(action) {
   const root = fs.mkdtempSync("/private/tmp/sg-model-project-");
   const secrets = await new TemporarySecretStore({ paths: { stateDir: path.join(root, "state"), trustedRoot: root },
     cryptoBroker: { encrypt: async bytes => Buffer.from(bytes).reverse(), decrypt: async bytes => Buffer.from(bytes).reverse() } }).open();
-  try { await action({ secrets, projection: new ModelSecretProjection({ secrets }) }); }
+  try { await action({ secrets, root, projection: new ModelSecretProjection({ secrets }) }); }
   finally { await secrets.close(); fs.rmSync(root, { recursive: true, force: true }); }
 }
 test("Responses native shell output, instructions and resumed history use scoped references", async () => fixture(async ({ secrets, projection }) => {
@@ -68,17 +70,58 @@ test("remote media reports a processing failure while inline media uses actual p
   const projection = new ModelSecretProjection({ secrets, media: { async projectInline(scope, item) {
     seen.push({ scope, ...item }); return { mimeType: "image/png", data: Buffer.from("masked-pixels"), text: "Public text" };
   } } });
-  const original = { input: [{ role: "user", content: [
+  const original = { input: [{ role: "tool", content: [
     { type: "input_image", image_url: "https://example.invalid/private.png" },
     { type: "input_image", image_url: `data:image/png;base64,${Buffer.from("raw-pixels").toString("base64")}` },
   ] }] };
   await assert.rejects(projection.project(SCOPE, original), { code: "SECRET_MEDIA_UNAVAILABLE" });
-  const safe = await projection.project(SCOPE, { input: [{ role: "user", content: original.input[0].content.slice(1) }] });
+  const safe = await projection.project(SCOPE, { input: [{ role: "tool", content: original.input[0].content.slice(1) }] });
   assert(!JSON.stringify(safe).includes("example.invalid"));
   assert.equal(safe.input[0].content[0].image_url, `data:image/png;base64,${Buffer.from("masked-pixels").toString("base64")}`);
   assert.deepEqual(seen[0].scope, SCOPE); assert.equal(seen.length, 2);
   assert.equal(Buffer.from(seen[1].data, "base64").toString(), "masked-pixels",
     "the final known-value pass must examine the processed image, not release the original");
+}));
+test("user attachment parts retain their wire bytes and surrounding chat text is processed", async () => fixture(async ({ secrets }) => {
+  const projection = new ModelSecretProjection({ secrets, media: { async projectInline() {
+    throw Object.assign(new Error("attachment reached local media processing"), { code: "SECRET_MEDIA_INVALID" });
+  } } });
+  const data = Buffer.from("opaque original bytes").toString("base64");
+  for (const [list, key, parts] of [
+    ["input", "content", [{ type: "input_file", filename: "纪要.pages", file_data: `data:application/octet-stream;base64,${data}` },
+      { type: "input_image", image_url: `data:image/jpeg;base64,${data}` }]],
+    ["messages", "content", [{ type: "image_url", image_url: { url: `data:image/png;base64,${data}` } },
+      { type: "document", source: { type: "base64", media_type: "application/pdf", data } }]],
+    ["contents", "parts", [{ inlineData: { mimeType: "application/octet-stream", data } }]],
+  ]) {
+    const input = { [list]: [{ role: "user", [key]: [...parts, { text: "password: FixtureInput123" }] }] };
+    const result = await projection.project(SCOPE, input);
+    assert.deepEqual(result[list][0][key].slice(0, -1), parts);
+    assert.match(result[list][0][key].at(-1).text, /SHOGGOTH_SECRET_/u);
+  }
+  const file = { type: "file", file: { file_id: "agent-file-id" } };
+  const result = await projection.project(SCOPE, { messages: [{ role: "assistant", content: [file] }] });
+  assert.deepEqual(result.messages[0].content, [file]);
+}));
+test("inline attachment text is exempt only when it matches the saved file in this session", async () => fixture(async ({ secrets, root }) => {
+  const scope = { ...SCOPE, sessionId: randomUUID() };
+  const stateDir = path.join(root, "state"), source = path.join(root, "original.txt");
+  const fileText = "password: AttachmentPassword123\nKeep this line verbatim.";
+  fs.writeFileSync(source, fileText, { mode: 0o600 });
+  const descriptor = { id: randomUUID(), name: "纪要.txt", mimeType: "text/plain", size: Buffer.byteLength(fileText) };
+  const attachments = prepareChatAttachments({ paths: { stateDir, trustedRoot: root },
+    assertAvailable: refs => assert.deepEqual(refs, [descriptor]), materialize: () => source }, [descriptor], scope.sessionId);
+  const projection = new ModelSecretProjection({ secrets, stateDir });
+  const prompt = attachmentPrompt("password: ChatPassword123", attachments);
+  const project = async (scope, text) => (await projection.project(scope,
+    { input: [{ role: "user", content: [{ type: "input_text", text }] }] })).input[0].content[0].text;
+  const result = await project(scope, prompt);
+  assert.ok(result.includes(`BEGIN ATTACHMENT CONTENT\n${fileText}\nEND ATTACHMENT CONTENT`));
+  assert.ok(!result.includes("ChatPassword123"));
+  assert.ok(!(await project({ ...scope, sessionId: randomUUID() }, prompt)).includes("AttachmentPassword123"));
+  assert.ok(!(await project(scope, prompt.replace("AttachmentPassword123", "ForgedPassword123"))).includes("ForgedPassword123"));
+  const tool = await projection.project(scope, { input: [{ type: "function_call_output", call_id: "c", output: prompt }] });
+  assert.ok(!tool.input[0].output.includes("AttachmentPassword123"));
 }));
 test("later labels protect earlier echoes across request fields and dynamic metadata", async () => fixture(async ({ projection }) => {
   const safe = await projection.project(SCOPE, { input: "Earlier echo: FixtureSecret987", metadata: { note: "FixtureSecret987" },

@@ -1,6 +1,7 @@
 "use strict";
 const { digest, fail } = require("./proactive-service-protocol");
 const { notificationPolicy } = require("./notification-policy");
+const { initialRuntimePermissionMode } = require("./runtime-permission-modes");
 function noticeMessage(notice) {
   const label = value => (value || "灵感便签").replace(/\s+/gu, " ").replace(/[\\\[\]()*_`<>]/gu, "\\$&");
   const links = notice.items.map(item => `- [${label(item.title)}](${item.href.startsWith("/") ? `#${item.href}` : item.href})`).join("\n");
@@ -28,30 +29,40 @@ class NoticeDeliveryController {
   }
   open() { this.closed = false; }
   close() { this.closed = true; }
-  #target(notice) {
-    let target;
-    if (notice.target.mode === "explicit") target = this.sessions.getSession(notice.target.sessionKey);
-    else {
-      let binding = this.store.getTarget(notice.profileId);
-      if (binding?.deleted) fail("PROACTIVE_TARGET_DELETED");
-      if (binding?.sessionKey) {
-        target = this.sessions.getSession(binding.sessionKey);
-        if (!target) {
-          this.store.setTarget(notice.profileId, { ...binding, deleted: true });
-          fail("PROACTIVE_TARGET_DELETED");
-        }
-      } else {
-        binding ??= this.store.setTarget(notice.profileId, { operationId: `proactive-target-${digest(notice.profileId)}`,
-          profileId: notice.profileId, sessionKey: null, createdAt: this.now(), deleted: false });
-        const operation = this.sessions.getCreateOperation(binding.operationId);
-        if (operation?.state === "deleted") {
-          this.store.setTarget(notice.profileId, { ...binding, deleted: true }); fail("PROACTIVE_TARGET_DELETED");
-        }
-        target = this.sessions.createSession({ operationId: binding.operationId, profileId: notice.profileId,
-          workspace: this.resolveWorkspace(notice.profileId), createdAt: operation?.createdAt ?? binding.createdAt });
-        this.store.setTarget(notice.profileId, { ...binding, sessionKey: target.sessionKey });
-      }
+  ensureMainSession(profileId) {
+    let binding = this.store.getTarget(profileId);
+    if (binding?.deleted) return null;
+    if (binding?.sessionKey) {
+      const session = this.sessions.getSession(binding.sessionKey);
+      if (!session) this.store.setTarget(profileId, { ...binding, deleted: true });
+      if (session && session.profileId !== profileId) fail("PROACTIVE_TARGET_INVALID");
+      return session;
     }
+    // An existing reminder target is authoritative. If this Agent never had
+    // one, adopt the original default chat before creating a new Main session.
+    if (!binding) {
+      const legacy = this.sessions.getLegacyDefaultSession?.(profileId);
+      binding = this.store.setTarget(profileId, { operationId: `proactive-target-${digest(profileId)}`,
+        profileId, sessionKey: legacy?.sessionKey ?? null, createdAt: legacy?.createdAt ?? this.now(), deleted: false });
+      if (legacy) return legacy;
+    }
+    const operation = this.sessions.getCreateOperation(binding.operationId);
+    if (operation?.state === "deleted") {
+      this.store.setTarget(profileId, { ...binding, deleted: true });
+      return null;
+    }
+    const profile = this.products.getAgentProfile(profileId);
+    const session = this.sessions.createSession({ operationId: binding.operationId, profileId,
+      permissionMode: initialRuntimePermissionMode(profile?.runtime || "codex"),
+      workspace: operation ? operation.workspace : this.resolveWorkspace(profileId, binding.operationId),
+      createdAt: operation?.createdAt ?? binding.createdAt });
+    this.store.setTarget(profileId, { ...binding, sessionKey: session.sessionKey });
+    return session;
+  }
+  #target(notice) {
+    const explicit = notice.target.mode === "explicit";
+    const target = explicit ? this.sessions.getSession(notice.target.sessionKey) : this.ensureMainSession(notice.profileId);
+    if (!explicit && !target) fail("PROACTIVE_TARGET_DELETED");
     if (!target || target.profileId !== notice.profileId || !["draft", "ready"].includes(target.status)) fail("PROACTIVE_TARGET_INVALID");
     return target;
   }

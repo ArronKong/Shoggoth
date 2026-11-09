@@ -12,7 +12,7 @@ const { build } = require('esbuild');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'shoggoth-panel-recovery-ui-'));
 const output = path.resolve(process.env.GROUP_PANEL_UI_OUTPUT || path.join(root, '.artifacts/group-panel-recovery-ui'));
 const fixture = String.raw`
-import React from 'react';
+import React, {useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {HashRouter} from 'react-router-dom';
 import GroupChatPanel from './app/manage-ui/src/pages/GroupChatPanel';
@@ -23,19 +23,27 @@ import i18n from './app/manage-ui/src/i18n';
 import './app/manage-ui/src/styles.css';
 import './app/manage-ui/src/manage-skin.css';
 import './app/manage-ui/src/pages/ChatPage.css';
-const state = window as any, language = new URLSearchParams(location.search).get('language') || 'zh-CN';
-let ready = false, seq = 1, reads = 0, writes = 0, stopMode = false, completeStop: (()=>void)|null = null;
-let deletionMode=false, gone=false, removed=0;
-const group:any = {ownerScope:'recovery-fixture-owner',group:{id:'owned',name:'Recovery Fixture',purpose:'',status:'active',createdAt:1,updatedAt:1,
-  metadataRevision:1,rosterRevision:1,directoryRevision:1,controlEpoch:0,lastSeq:0},members:[],discussion:null,
+const state = window as any, query = new URLSearchParams(location.search), language = query.get('language') || 'zh-CN';
+const forceScenario = query.has('force');
+let ready = forceScenario, seq = 1, reads = 0, writes = 0, stopMode = false, completeStop: (()=>void)|null = null;
+let deletionMode=forceScenario, gone=false, removed=0;
+const group:any = {ownerScope:'recovery-fixture-owner',group:{id:'owned',name:'Recovery Fixture',purpose:'',status:forceScenario?'deleting':'active',createdAt:1,updatedAt:1,
+  metadataRevision:forceScenario?2:1,rosterRevision:1,directoryRevision:1,controlEpoch:0,lastSeq:0},members:[],discussion:null,
   activeTurns:[],queuedMemberIds:[],internalSessionKeys:[],pendingInteractions:[],tasks:[]};
 state.fetch = async (url:unknown, init:RequestInit={}) => {
   const p = new URL(String(url), 'http://fixture');
   if(init.method && init.method !== 'GET') {
     writes++;
     if(deletionMode && init.method==='DELETE' && p.pathname.endsWith('/detail') && p.searchParams.get('id')==='owned') {
-      if(JSON.parse(String(init.body)).expectedMetadataRevision!==1)throw Error('wrong delete revision');
+      const input=JSON.parse(String(init.body));
+      if(forceScenario) {
+        if(input.force!==true || input.ownerScope!==group.ownerScope || input.expectedMetadataRevision!==2)throw Error('wrong force-delete authority');
+        gone=true;
+        return new Response(JSON.stringify({groupId:'owned',status:'deleted'}),{headers:{'content-type':'application/json'}});
+      }
+      if(input.expectedMetadataRevision!==1 || input.force!==undefined)throw Error('wrong delete revision or mode');
       group.group.status='deleting';
+      group.group.metadataRevision++;
       return new Response(JSON.stringify({groupId:'owned',status:'deleting'}),{headers:{'content-type':'application/json'}});
     }
     if(!stopMode || init.method !== 'POST' || !p.pathname.endsWith('/discussion/stop') || p.searchParams.get('id') !== 'owned')
@@ -60,8 +68,15 @@ state.fetch = async (url:unknown, init:RequestInit={}) => {
 window.addEventListener('error', event=>{state.fixtureError=event.error?.stack||event.message;});
 await i18n.changeLanguage(language);
 document.documentElement.setAttribute('data-theme', language === 'en' ? 'dark' : 'light');
+function FixtureGroup() {
+  const [visible,setVisible] = useState(true);
+  return visible ? <GroupChatPanel groupId="owned" agents={[]} onArchived={()=>{
+    if(!deletionMode)throw Error('Unexpected removal');
+    removed++;setVisible(false);
+  }}/> : null;
+}
 createRoot(document.getElementById('root')!).render(<HashRouter><UiProvider><ScrollbarProvider /><div className="chat-shell" style={{display:"flex",flex:1,minHeight:0}}>
-  <GroupChatPanel groupId="owned" agents={[]} onArchived={()=>{if(!deletionMode)throw Error('Unexpected removal');removed++;}}/>
+  <FixtureGroup />
 </div></UiProvider></HashRouter>);
 const wait = async(fn:()=>boolean,label:string)=>{const end=Date.now()+6000;while(!fn()){if(state.fixtureError)throw Error(state.fixtureError);
   if(Date.now()>end)throw Error(label);await new Promise(r=>setTimeout(r,20));}};
@@ -136,15 +151,10 @@ state.deleteFixture=async()=>{
   deletionMode=true;
   const details=document.querySelector<HTMLButtonElement>('[data-group-details-trigger]');
   if(!details)throw Error('group details entry missing');details.click();
-  await wait(()=>Boolean(document.querySelector('[data-group-details-action="menu"]')),'group details missing');
-  const openDelete=async()=>{
-    document.querySelector<HTMLButtonElement>('[data-group-details-action="menu"]')!.click();
-    await wait(()=>Boolean(document.querySelector('[data-group-details-action="delete"]')),'delete entry missing');
-    return document.querySelector<HTMLElement>('[data-group-details-action="delete"]')!;
-  };
-  const disabled=(element:HTMLElement)=>element.getAttribute('aria-disabled')==='true'||element.hasAttribute('data-disabled');
-  const button=await openDelete();
-  if(disabled(button))throw Error('delete entry disabled before deletion');button.click();
+  await wait(()=>Boolean(document.querySelector('[data-group-details-action="delete"]')),'delete entry missing');
+  if(document.querySelector('[data-group-details-action="force-delete"]'))throw Error('force delete is visible for an active group');
+  const button=document.querySelector<HTMLButtonElement>('[data-group-details-action="delete"]')!;
+  if(button.disabled)throw Error('delete entry disabled before deletion');button.click();
   await wait(()=>Boolean(document.querySelector('[role="alertdialog"] .btn-danger')),'delete confirmation missing');
   (document.querySelector('[role="alertdialog"] .btn-danger') as HTMLButtonElement).click();
   await wait(()=>writes===2&&group.group.status==='deleting','deletion request missing');
@@ -153,12 +163,11 @@ state.deleteFixture=async()=>{
   await wait(()=>!document.querySelector('[data-group-details]')&&document.body.innerText.includes(i18n.t('groupChat.deletingNotice')),
     'pending deletion feedback missing');
   document.querySelector<HTMLButtonElement>('[data-group-details-trigger]')!.click();
-  await wait(()=>Boolean(document.querySelector('[data-group-details-action="menu"]')),'pending group details missing');
-  const pendingDelete=await openDelete();
-  if(!disabled(pendingDelete)||!document.querySelector<HTMLTextAreaElement>('textarea')?.disabled)throw Error('deleted group still accepts actions');
+  await wait(()=>Boolean(document.querySelector('[data-group-details-action="force-delete"]')),'force-delete entry missing for pending group');
+  if(document.querySelector('[data-group-details-action="delete"]')||!document.querySelector('[data-group-composer-input][aria-disabled="true"]'))
+    throw Error('pending group still accepts normal deletion or new messages');
   if(groupChatActivity(group)!=='deleting')throw Error('sidebar hides pending deletion');
-  pendingDelete.click();if(writes!==2)throw Error('duplicate delete request');
-  document.querySelector<HTMLButtonElement>('[data-group-details-action="menu"]')!.click();
+  if(writes!==2)throw Error('normal delete issued a force request');
   document.querySelector<HTMLButtonElement>('[data-group-details-action="close"]')!.click();
   await wait(()=>!document.querySelector('[data-group-details]'),'details did not close');
   return {deletePending:true,deleteWrites:1};
@@ -168,6 +177,36 @@ state.finishDeleteFixture=async()=>{
   await wait(()=>removed===1,'confirmed deletion did not close the group');
   if(writes!==2)throw Error('deletion made an unexpected write');
   return {deleteConfirmed:true,totalWrites:writes};
+};
+state.openForceDeleteFixture=async()=>{
+  const trigger='[data-group-details-trigger]', action='[data-group-details-action="force-delete"]';
+  await wait(()=>Boolean(document.querySelector(trigger)),'pending group did not load');
+  document.querySelector<HTMLButtonElement>(trigger)!.click();
+  await wait(()=>Boolean(document.querySelector(action)),'force action did not load');
+  const open=async()=>{
+    const button=document.querySelector<HTMLButtonElement>(action)!;
+    const rect=button.getBoundingClientRect();
+    if(button.disabled||rect.left<0||rect.right>window.innerWidth)throw Error('force action is unavailable or clipped');
+    button.click();
+    const cancel='[role="alertdialog"] .btn-secondary';
+    await wait(()=>document.activeElement?.matches(cancel)===true,'force confirmation did not focus Cancel');
+    const dialog=document.querySelector('[role="alertdialog"]')!;
+    if(!dialog.textContent?.includes(i18n.t('groupChat.forceDeleteConfirm',{name:group.group.name})))throw Error('missing force-delete warning');
+    if(dialog.querySelector('.btn-danger')?.textContent!==i18n.t('groupChat.forceDelete'))throw Error('ambiguous confirm button');
+    return dialog.querySelector<HTMLButtonElement>('.btn-secondary')!;
+  };
+  (await open()).click();
+  await wait(()=>!document.querySelector('[role="alertdialog"]') && !document.querySelector<HTMLButtonElement>(action)?.disabled,
+    'cancel did not close force confirmation');
+  if(writes||removed)throw Error('canceling force deletion changed the group');
+  await open();
+  return {forceWarning:true,cancelPreservedGroup:true};
+};
+state.finishForceDeleteFixture=async()=>{
+  document.querySelector<HTMLButtonElement>('[role="alertdialog"] .btn-danger')!.click();
+  await wait(()=>removed===1&&!document.querySelector('[data-group-details]'),'confirmed force deletion did not close the group');
+  if(writes!==1)throw Error('force delete must write exactly once');
+  return {forceDeleted:true,forceWrites:writes};
 };
 `;
 try {
@@ -197,7 +236,12 @@ Object.assign(result,await w.webContents.executeJavaScript('window.finishStopFix
 Object.assign(result,await w.webContents.executeJavaScript('window.deleteFixture()'));
 for(const width of [1200,390]){w.setContentSize(width,800);await w.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
 fs.writeFileSync(${JSON.stringify(output)}+'/'+language+'-'+width+'-deleting.png',(await w.webContents.capturePage()).toPNG());}
-Object.assign(result,await w.webContents.executeJavaScript('window.finishDeleteFixture()'));results.push(result);}
+Object.assign(result,await w.webContents.executeJavaScript('window.finishDeleteFixture()'));
+for(const width of [1200,390]){w.setContentSize(width,800);await w.loadFile(${JSON.stringify(path.join(temp,'index.html'))},{query:{language,force:'1'}});
+Object.assign(result,await w.webContents.executeJavaScript('window.openForceDeleteFixture()'));
+fs.writeFileSync(${JSON.stringify(output)}+'/'+language+'-'+width+'-force-delete.png',(await w.webContents.capturePage()).toPNG());
+Object.assign(result,await w.webContents.executeJavaScript('window.finishForceDeleteFixture()'));}
+results.push(result);}
 fs.writeFileSync(${JSON.stringify(output)}+'/results.json',JSON.stringify(results,null,2));console.log(JSON.stringify(results));passed=true;
 }catch(e){console.error(e.stack||e);console.error(await w.webContents.executeJavaScript('document.body.innerText.slice(0,2000)'));}
 finally{w.destroy();app.exit(passed?0:1);}});`);

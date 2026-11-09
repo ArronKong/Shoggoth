@@ -31,11 +31,12 @@ const loadModule = (file, { require: loadDependency = uiRequire, globals = {} } 
 };
 const execution = loadModule('pages/inspiration-execution.ts');
 const noteText = loadModule('pages/inspiration-note-text.ts');
-const gatewayErrors = loadModule('lib/gatewayErrors.ts');
+const gatewayErrors = loadUiSource('lib/gatewayErrors.ts');
+const errorCatalog = uiRequire(path.join(root, 'app/agent-service/chat-error-messages.json'));
 const chatI18n = uiRequire('i18next').createInstance();
 await chatI18n.init({ lng: 'zh-CN', fallbackLng: 'en', interpolation: { escapeValue: false }, resources: {
-  'zh-CN': { translation: loadUiSource('i18n/locales/zh-CN.ts').default },
-  en: { translation: loadUiSource('i18n/locales/en.ts').default },
+  'zh-CN': { translation: loadUiSource('i18n/locales/zh-CN.ts').default, chatErrors: errorCatalog },
+  en: { translation: loadUiSource('i18n/locales/en.ts').default, chatErrors: loadUiSource('i18n/chatErrorMessages.en.ts').default },
 } });
 {
   const { inspirationNoteContent } = noteText;
@@ -72,7 +73,7 @@ const refresh = async () => { refreshes++; };
 const host = (type) => (props) => React.createElement(type, props, props.children);
 const passthrough = (props) => React.createElement(React.Fragment, {}, props.children);
 const stubs = {
-  'react-i18next': { useTranslation: () => ({ t: (key, options) => key.startsWith('chat.') ? chatI18n.t(key, options)
+  'react-i18next': { useTranslation: () => ({ t: (key, options) => key.startsWith('chat.') || key.startsWith('chatErrors:') ? chatI18n.t(key, options)
     : options?.returnObjects ? lists[key] ?? [] : errorLabel(key) || key,
     i18n: { exists: (key) => Boolean(errorLabel(key)) } }) },
   'react-router-dom': { Link: host('a'), useSearchParams: () => [new URLSearchParams(), () => {}] },
@@ -96,6 +97,7 @@ const stubs = {
   '../lib/navigation-guard': { useNavigationGuard() {} },
   '../lib/markdown': { toSanitizedMarkdownHtml: (text) => text },
   '../lib/gatewayErrors': gatewayErrors,
+  '../i18n/chatErrorResources': {},
   '../lib/inspiration-navigation': { rememberInspirationReturn() {} },
   '../lib/backends': { useBackendCatalog: () => [] },
   '../lib/useSessionRuntimeModels': { useSessionRuntimeModels: () => ({ data: undefined, loading: false, error: false, pending: false,

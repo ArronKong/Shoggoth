@@ -93,6 +93,9 @@ test("explicit remote time zones and stagger remain visible without raw code", (
 test("English UI uses the selected locale for both schedules and dates", () => {
   assert.equal(describe({ kind: "cron", expr: "0 9 * * *" }, "en"), "Every day at 09:00");
   assert.equal(describe({ kind: "every", everyMs: 1800000 }, "en"), "Every 30 minutes");
+  assert.equal(describe({ kind: "every", everyMs: 3600000 }, "en"), "Every hour");
+  assert.equal(describe({ kind: "cron", expr: "* * * * *" }, "en"), "Every minute");
+  assert.equal(describe({ kind: "cron", expr: "0 9 * * *", staggerMs: 1000 }, "en"), "Every day at 09:00 · Staggered by up to 1 second");
   const once = describe({ kind: "at", at: "2026-09-18T01:46:00Z" }, "en");
   assert.match(once, /Sep 18, 2026/);
   assert.match(once, /09:46 · Once$/);

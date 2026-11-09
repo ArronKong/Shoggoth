@@ -1,4 +1,9 @@
 .expansion {
+  --chat-profile-avatar-max: 160px;
+  --chat-profile-gap: 24px;
+  --chat-profile-name-size: 28px;
+  --chat-profile-name-leading: 34px;
+  --chat-profile-bottom-gap: 64px;
   display: none;
   flex: 1;
   min-width: 0;
@@ -15,15 +20,51 @@
   padding: 48px 24px 32px;
   color: var(--chat-text);
 }
+.profileBody {
+  container-type: inline-size;
+  scrollbar-gutter: stable;
+  --chat-avatar-column-gap: clamp(12px, 2.4cqw, 28px);
+  /* Keep the profile and the current avatar preview at the same scale. */
+  --chat-profile-avatar-size: clamp(0px, calc((100cqw - 4 * var(--chat-avatar-column-gap)) / 5), var(--chat-profile-avatar-max));
+}
 .toolbar { margin-bottom: 24px; }
 .title { margin: 0; font-size: 20px; font-weight: 400; line-height: 28px; }
 .job:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
-.profile { display: flex; align-items: center; gap: 24px; margin-bottom: 64px; }
-.profile :global(.chat-header__avatar) { width: 160px; height: 160px; }
+.profileRow { display: flex; align-items: center; column-gap: var(--chat-profile-gap); }
+.profile { margin-bottom: var(--chat-profile-bottom-gap); }
+.profile :global(.chat-header__avatar) { width: var(--chat-profile-avatar-size); height: var(--chat-profile-avatar-size); }
+button.avatarEdit, button.avatarEdit:hover:not(:disabled) {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+.avatarAction {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: inherit;
+  background: rgba(18, 18, 20, 0.48);
+  color: #fafafa;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity var(--ui-motion-state) ease;
+}
+.avatarEdit:is(:hover, :focus-visible) .avatarAction { opacity: 1; }
+@media (hover: none) {
+  .avatarAction { inset: auto 0 4px; width: max-content; margin: 0 auto; padding: 4px 8px; opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .avatarAction { transition: none; }
+}
 .identity { min-width: 0; flex: 1; }
-.name { overflow-wrap: anywhere; font-size: 28px; line-height: 34px; }
+.name { overflow-wrap: anywhere; font-size: var(--chat-profile-name-size); line-height: var(--chat-profile-name-leading); }
 .backend { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
-.backend, .count, .note { color: var(--muted-fg); font-size: 12px; line-height: 20px; }
+.profileMeta, .count, .note { color: var(--muted-fg); font-size: 12px; line-height: 20px; }
 .count { margin: -8px 0 4px; }
 .note { margin: 6px 0 14px; }
 .jobs { display: flex; flex-direction: column; }
@@ -60,9 +101,13 @@
 .attachment > span:first-of-type { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .attachment:hover { color: var(--chat-text); }
 .attachment:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
-@container chat-header-panel (max-width: 640px) {
+@container (max-width: 640px) {
+  .expansion {
+    --chat-profile-avatar-max: 96px;
+    --chat-profile-gap: 16px;
+    --chat-profile-name-size: 24px;
+    --chat-profile-name-leading: 30px;
+    --chat-profile-bottom-gap: 40px;
+  }
   .body { padding: 32px 8px 24px; }
-  .profile { gap: 16px; margin-bottom: 40px; }
-  .profile :global(.chat-header__avatar) { width: 96px; height: 96px; }
-  .name { font-size: 24px; line-height: 30px; }
 }

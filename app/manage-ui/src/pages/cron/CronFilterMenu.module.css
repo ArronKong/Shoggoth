@@ -1,3 +1,8 @@
+.trigger,
+.popup {
+  --ui-focus: light-dark(#707070, #858585);
+}
+
 /* Cron 工具栏的筛选胶囊：48px 控件高度 + 与 PillTabs（Figma 6999-633）同一份
    表面配方——底部白光晕 + 顶部 3% 黑内影 + #F3F3F3 底，1px 白描边，极软投影。 */
 .trigger {
@@ -15,10 +20,11 @@
   padding: 0 24px;
   border: 1px solid #ffffff;
   border-radius: 32px;
-  background:
+  --trigger-background:
     linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.9) 100%),
     linear-gradient(180deg, rgba(0, 0, 0, 0.03) 0%, rgba(51, 51, 51, 0) 50%, rgba(102, 102, 102, 0) 100%),
     #f3f3f3;
+  background: var(--trigger-background);
   box-shadow: 0 8px 10px 0 rgba(0, 0, 0, 0.02);
   color: light-dark(#000000, #ffffff);
   white-space: nowrap;
@@ -32,23 +38,19 @@
 /* 同配方暗色适配（与 PillTabs 一致）：光晕/内影换低亮度，底 #2a2a2e。 */
 :global(:root[data-theme="dark"]) .trigger {
   border-color: rgba(255, 255, 255, 0.08);
-  background:
+  --trigger-background:
     linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 50%, rgba(255, 255, 255, 0.07) 100%),
     linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0%, rgba(0, 0, 0, 0) 50%),
     #2a2a2e;
 }
 
-/* hover 与 PillTabs 同口径：字色不变，只垫黑 10%（暗色白 10%）。 */
-.trigger:hover:not(:disabled) {
-  background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.1));
-  color: light-dark(#000000, #ffffff);
+/* 按下或浮层展开时，在原渐变底上叠 2% 黑并去掉投影。 */
+.trigger:where(:active, [data-popup-open]):not(:disabled) {
+  background: linear-gradient(rgba(0, 0, 0, 0.02), rgba(0, 0, 0, 0.02)), var(--trigger-background);
+  box-shadow: none;
+  transition: none;
 }
-.trigger:focus-visible,
-.trigger[data-popup-open] {
-  outline: none;
-  border-color: var(--ui-focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-focus) 18%, transparent);
-}
+
 /* 选中态不改字重：设计稿整排统一 Light，加粗会让这一颗跳出来。
    选中反馈靠触发文案本身（显示选中项名）+ 多选时的计数徽标。 */
 .trigger:disabled {
@@ -85,50 +87,102 @@
   z-index: 300;
 }
 .popup {
-  min-width: max(var(--anchor-width), 200px);
-  max-height: min(20rem, var(--available-height));
-  overflow-y: auto;
-  padding: 6px;
-  border: 1px solid var(--ui-hairline);
-  border-radius: var(--ui-radius-compact);
-  background: var(--ui-surface-1);
-  box-shadow: var(--ui-shadow-hover);
+  composes: surface from "../../components/Picker.module.css";
+  display: flex;
+  flex-direction: column;
+  width: 240px;
+  max-height: min(22rem, var(--available-height, 22rem));
+  overflow: hidden;
+  padding: 20px 32px;
   animation: cronFilterPopIn var(--ui-motion-popover) cubic-bezier(0.22, 1, 0.36, 1);
 }
-.item {
+.popup[data-agent-picker] {
+  width: var(--picker-agent-width);
+}
+.popup:focus {
+  outline: none;
+}
+.backendHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  box-sizing: border-box;
-  min-height: 36px;
-  padding: 8px 10px;
-  border-radius: 10px;
-  font-size: 0.86rem;
-  color: var(--ui-text-1);
-  cursor: pointer;
+  flex: none;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.backendTabs {
+  composes: backendTabs from "../../components/Picker.module.css";
+}
+.backendHeader > .backendTabs {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
+.backendPill {
+  composes: backendPill from "../../components/Picker.module.css";
+}
+.backendTab {
+  composes: backendTab from "../../components/Picker.module.css";
+}
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.agentOptions {
+  composes: scrollFade from "../../components/Picker.module.css";
+  --picker-fade-size: min(32px, 20%);
+  /* Fit the scrollbar in the popup padding so the rows align with the header. */
+  margin-inline-end: calc(0px - var(--ui-scrollbar-track-size, 12px));
+  scrollbar-gutter: stable;
+  scroll-padding-block: var(--picker-fade-size);
+}
+.item {
+  composes: option from "../../components/Picker.module.css";
   user-select: none;
 }
-.item[data-highlighted] {
-  background: var(--ui-surface-2);
-}
-.item[data-checked] {
-  font-weight: 500;
+.item:focus-visible,
+.backendTab:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: -2px;
 }
 .itemText {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  composes: label from "../../components/Picker.module.css";
+}
+.item > .itemText:first-child {
+  padding-inline-start: 8px;
+}
+.avatar {
+  composes: avatar from "../../components/Picker.module.css";
 }
 .indicator {
-  flex-shrink: 0;
-  color: var(--ui-focus);
-  font-size: 0.8rem;
+  composes: check from "../../components/Picker.module.css";
+  --picker-check-mask: url("../../assets/inspiration/check.svg");
+  margin-inline: 8px;
+}
+.item.headerSelectAll {
+  width: auto;
+  margin-inline-start: auto;
+  padding-inline: 12px;
+  border: 1px solid light-dark(#00000026, #ffffff30);
+}
+.headerSelectAll > .itemText:first-child {
+  padding-inline-start: 0;
+}
+.headerSelectAll > .indicator {
+  margin-inline: 0;
 }
 .empty {
-  padding: 10px;
-  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
-  font-size: 0.82rem;
+  padding: 4px;
+  color: var(--ui-text-2);
+}
+
+@media (max-width: 420px) {
+  .popup {
+    padding-inline: 24px;
+  }
 }
 
 @keyframes cronFilterPopIn {

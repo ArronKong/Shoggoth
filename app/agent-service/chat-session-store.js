@@ -616,6 +616,17 @@ class ChatSessionStore {
     return clone(this.container.createOperations[operationId] || null);
   }
 
+  getLegacyDefaultSession(profileId) {
+    this.#assertOpen();
+    for (const operation of Object.values(this.container.createOperations)) {
+      if (operation.profileId !== profileId || operation.state !== "active"
+        || !operation.operationId.startsWith("default-session-")) continue;
+      const session = this.container.sessions[operation.sessionKey];
+      if (session?.status === "draft" || session?.status === "ready") return clone(session);
+    }
+    return null;
+  }
+
   createSession(input) {
     this.#assertOpen();
     if (!exactObject(input, ["operationId", "profileId", "workspace", "createdAt",

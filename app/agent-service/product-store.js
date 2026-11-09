@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { STORE_SCHEMA_VERSION } = require("./product-schema-version");
 const { BUILTIN_CLI_AGENT_PROFILES } = require("./builtin-cli-profiles");
 const {
   runtimeBinding,
@@ -21,7 +22,6 @@ const {
   withInitialBinding, projectProfile, runtimeModelProfile, profileToDisk, profileWithoutBindingState,
 } = require("./agent-runtime-binding");
 
-const STORE_SCHEMA_VERSION = 17;
 const READABLE_PRODUCT_SCHEMA_VERSIONS = Object.freeze([15, 16, STORE_SCHEMA_VERSION]);
 const DEFAULT_AGENT_PROFILE_UUID = "f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4";
 const DEFAULT_AGENT_PROFILE_ID = DEFAULT_AGENT_PROFILE_UUID;

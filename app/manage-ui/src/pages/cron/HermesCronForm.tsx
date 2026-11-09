@@ -1,9 +1,10 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { CronSchedule, HermesCronJobInput, UnifiedCronJob } from "../../types";
 import { Field, TextArea, TextInput } from "../../components/Field";
 import i18n from "../../i18n";
 import { CronExpressionPicker, DateTimePicker, IntervalPicker } from "./CronSchedulePicker";
-import { CronScheduleType } from "./CronFormLayout";
+import { CronScheduleType, CronTaskNameRow } from "./CronFormLayout";
 
 type SchedKind = "cron" | "every" | "at";
 type HermesMode = "agent" | "script";
@@ -161,20 +162,19 @@ export function validateHermesDraft(draft: HermesCronDraft): string | null {
 }
 
 // Hermes 表单突出自动化任务形态，尤其是 script/no-agent 配置。
-export default function HermesCronForm({ draft, setDraft }: {
+export default function HermesCronForm({ draft, setDraft, assistant }: {
   draft: HermesCronDraft;
   setDraft: (draft: HermesCronDraft) => void;
+  assistant: ReactNode;
 }) {
   const { t } = useTranslation();
   const set = <K extends keyof HermesCronDraft>(key: K, value: HermesCronDraft[K]) => setDraft({ ...draft, [key]: value });
   // Existing hidden options stay in the draft and continue through the original serializers.
   return <div className="cron-form">
-    <Field label={t("cronForm.taskNameLabel")}>
-      <TextInput value={draft.name} onChange={(event) => set("name", event.target.value)} placeholder={t("cronForm.taskNamePlaceholder")} />
-    </Field>
-      {draft.mode === "script" && <Field label={t("common.script")} hint={t("cronForm.hermesScriptHint")}>
-        <TextInput value={draft.script} onChange={(event) => set("script", event.target.value)} placeholder="watchdog.sh" />
-      </Field>}
+    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} assistant={assistant} />
+    {draft.mode === "script" && <Field label={t("common.script")} hint={t("cronForm.hermesScriptHint")}>
+      <TextInput value={draft.script} onChange={(event) => set("script", event.target.value)} placeholder="watchdog.sh" />
+    </Field>}
     <Field label={draft.mode === "script" ? t("cronForm.hermesPromptOptionalLabel") : t("cronForm.taskPromptLabel")}>
       <TextArea value={draft.prompt} onChange={(event) => set("prompt", event.target.value)} rows={4} placeholder={t("cronForm.taskPromptPlaceholder")} />
     </Field>

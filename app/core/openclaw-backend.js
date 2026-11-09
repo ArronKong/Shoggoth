@@ -38,6 +38,7 @@ const { pinyin } = require("pinyin-pro");
 const {
   AgentBackend,
   dirCreatedAtMs,
+  existingLocalDirectory,
   sortAgentsByCreatedAt,
   WIDGET_RESOURCE_MAX_BYTES,
   SESSION_BOARD_HTML_MAX_BYTES,
@@ -7561,6 +7562,7 @@ class OpenClawBackend extends AgentBackend {
       emoji: a.identity?.emoji || a.emoji || undefined,
       isDefault: a.id != null && a.id === defaultId,
       files,
+      setupFiles: files.filter(({ name }) => name === "SOUL.md" || name === "USER.md"),
       backendId: "openclaw",
     };
   }
@@ -7815,13 +7817,15 @@ class OpenClawBackend extends AgentBackend {
 
   async getAgentFile(id, file) {
     await this._connect();
+    const local = this._isLocalGateway();
     try {
       const r = await this.request("agents.files.get", { agentId: id, name: file }, 12000);
-      return { name: file, content: r?.file?.content ?? "", missing: r?.file?.missing === true };
+      const localDirectory = local && this._isLocalGateway() ? existingLocalDirectory(r?.workspace) : undefined;
+      return { name: file, content: r?.file?.content ?? "", missing: r?.file?.missing === true, localDirectory };
     } catch (err) {
       const real = await this._resolveLinkedWorkspaceFile(id, file);
       if (!real) throw err;
-      return { name: file, content: await fs.promises.readFile(real, "utf8"), missing: false };
+      return { name: file, content: await fs.promises.readFile(real, "utf8"), missing: false, localDirectory: path.dirname(real) };
     }
   }
 

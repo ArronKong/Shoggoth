@@ -55,7 +55,7 @@ class FixtureSocket {
     const request = JSON.parse(data);
     const payload = request.method === "sessions.list" ? { sessions, hasMore: false }
       : request.method === "agents.list" ? { agents: [{ id: "copy", name: "复制检查" }] }
-      : request.method === "chat.history" ? { messages } : {};
+      : request.method === "chat.history" ? { messages, sourceId: "message-copy-fixture", hasMore: false, nextCursor: null } : {};
     setTimeout(() => this.onmessage?.({ data: JSON.stringify({ type: "res", id: request.id, ok: true, payload }) }), 0);
   }
   close() { this.readyState = 3; }
@@ -63,7 +63,6 @@ class FixtureSocket {
 state.WebSocket = FixtureSocket;
 state.fetch = async (url: unknown) => {
   const pathname = String(url);
-  if (pathname.includes("/sessions/describe")) state.forkAdvertised = true;
   const payload = pathname.includes("/__api/status") ? { backends: [{ id: "openclaw", connected: true }] }
     : pathname.includes("/__api/backends") ? { backends: [] }
     : pathname.includes("/sessions/describe") ? { supported: true, session: { key }, methods: {
@@ -105,8 +104,11 @@ const copyFromMenu = async (element: Element, expected: string, label: string) =
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
 
 state.runFixture = async () => {
-  await wait(() => document.querySelectorAll(".chat-thread .chat-bubble").length === 7 && state.forkAdvertised, "history and fork capability");
-  const bubbles = Array.from(document.querySelectorAll<HTMLElement>(".chat-thread .chat-bubble"));
+  const messageBubbles = () => Array.from(document.querySelectorAll<HTMLElement>(".chat-thread .chat-bubble.chat-md, .chat-thread .chat-bubble.is-error"));
+  await wait(() => messageBubbles().length === 7, "message history").catch(error => {
+    throw Error(`${error.message}; ${messageBubbles().length} bubbles; ${document.querySelector('.chat-thread')?.textContent?.slice(-240)}`);
+  });
+  const bubbles = messageBubbles();
   const expected = [...userTexts, errorText, ...texts];
   for (const [index, bubble] of bubbles.entries()) {
     // Include nested Markdown elements, not only a bubble's outer container.

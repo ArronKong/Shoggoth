@@ -226,9 +226,6 @@ check("沉浸头像在 agent/version 变化后重试", /<AgentAvatarView agentId
 check("Cron busy 使用按 job Set", /busyIdsRef\s*=\s*useRef<Set<string>>/.test(source.cron));
 check("Cron 同一 job 在途时拒绝重复动作", /busyIdsRef\.current\.has\(id\)/.test(source.cron));
 check("Cron 动作完成只移除自身 busy", /busyIdsRef\.current\.delete\(id\)/.test(source.cron));
-check("Cron 详情动作使用生产 selection controller", /createCronSelectionController/.test(source.cron) && /selectionControllerRef/.test(source.cron));
-check("Cron 详情动作完成后重新核对当前目标", /selectionController\.currentForAction\(id\)/.test(source.cron));
-check("Cron 详情动作使用当前目标和当前 runs filters", /loadRunsFor\(current\.job,\s*current\.filters\)/.test(source.cron));
 check(
   "Cron force-resume 语义由 descriptor 协议能力驱动",
   /descriptor\?\.surfaces\.cron\?\.kind\s*===\s*"hermes"[\s\S]{0,180}\[job\.state,\s*job\.stateLabel\][\s\S]{0,180}===\s*"paused"/.test(source.backends)
@@ -237,7 +234,7 @@ check(
 );
 {
   const runBody = source.cron.match(
-    /const runCronFromUi = async \(job: UnifiedCronJob, reloadRuns = false\) => \{([\s\S]*?)\n  \};/,
+    /const runCronFromUi = async \(job: UnifiedCronJob\) => \{([\s\S]*?)\n  \};/,
   )?.[1] || "";
   const confirmIndex = runBody.indexOf("await confirm({");
   const cancelIndex = runBody.indexOf("if (!okToRun) return;");
@@ -249,11 +246,9 @@ check(
   );
 }
 check(
-  "Cron 列表和详情复用暂停 force-resume 运行确认入口",
+  "Cron 列表使用暂停 force-resume 运行确认入口",
   /runCronFromUi\(job\)/.test(source.cron)
-    && /runCronFromUi\(selected, true\)/.test(source.cron)
-    && /runWillResumePaused\(job\) \? "cron\.runAndEnable" : "cron\.run"/.test(source.cron)
-    && /runWillResumePaused\(selected\) \? "cron\.runAndEnable" : "cron\.runNow"/.test(source.cron),
+    && /runWillResumePaused\(job\) \? "cron\.runAndEnable" : "cron\.run"/.test(source.cron),
 );
 {
   const runBody = source.agents.match(

@@ -12,6 +12,7 @@ import {
   listAgents,
   revealCli,
   revealAttachment,
+  revealManagedAgentFile,
 } from "../api/client";
 import type {
   CronDelivery,
@@ -472,6 +473,9 @@ export default function DashboardPage() {
     if (item.attachment) {
       try { await revealAttachment(item.name, inspirationMediaUrl(item.attachment.id)); }
       catch { toast.error(t("dashboard.artifactRevealFailed")); }
+    } else if (item.fileId && item.agentId) {
+      try { await revealManagedAgentFile(item.backend, item.agentId, item.fileId); }
+      catch { toast.error(t("dashboard.artifactRevealFailed")); }
     } else if (item.path) {
       const ok = await revealCli(item.path);
       if (!ok) toast.info(t("dashboard.revealFailed"));
@@ -669,6 +673,8 @@ export default function DashboardPage() {
         title={openRun?.jobName || openRun?.jobId || ""}
         failed={runExecutionFailed(openRun?.status, openRun?.completionStatus)}
         agentId={openRun?.agentId}
+        backendId={openRun?.backendId}
+        runId={openRun?.runId}
         agentName={openRun?.agentId ? currentAgentName(openRun.agentId, openRun.backendId) : undefined}
         startedAt={openRun?.startedAt}
         durationMs={openRun?.durationMs}

@@ -109,6 +109,50 @@ test("persisted session snapshots paginate, survive edits/reopening and isolate 
   }
 });
 
+test("OpenClaw composer history links each persisted user row to its own send operation", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shg-insp-chat-send-"));
+  const store = new InspirationStore({ paths: { trustedRoot: root, stateDir: path.join(root, "state") } }).open();
+  const service = new InspirationService({ store });
+  t.after(() => { service.close(); store.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const target = { backendId: "openclaw", agentId: "main", sessionKey: "agent:main:dashboard:inspiration-fixture" };
+  const { sessionKey, ...scope } = target;
+  const idea = store.create({ operationId: id(), body: "原始便签" });
+  const prompt = "相同的正文";
+  const sends = ["a", "b"].map(digit => {
+    const execution = store.prepareExternalExecution({ ...scope,
+      operationId: `send-${digit.repeat(64)}`, id: idea.id, expectedRevision: store.get(idea.id).revision,
+      workspace: root, instruction: prompt, inputSource: "chat" }, () => true, sessionKey);
+    store.finishExternalBeforeStart(execution.id, { status: "canceled" });
+    return execution;
+  });
+  store.close(); store.open(); service.open();
+  const [first, second] = sends;
+  const raw = { messages: [
+    { role: "user", content: prompt, idempotencyKey: `${first.runId}:user` },
+    { role: "assistant", content: "Reply", idempotencyKey: `${first.runId}:user` },
+    { role: "user", content: prompt, idempotencyKey: `${id()}:user` },
+    { role: "user", content: prompt, __openclaw: { idempotencyKey: `${second.runId}:user` } },
+  ] };
+  const owner = new ShoggothBackend({ maxPages: 10 });
+  owner._call = async (method, params) => validateInspirationServiceResult(method,
+    await service.handle(method, validateInspirationServiceParams(method, params)));
+  const shown = await owner.projectExternalInspirationHistory(target, raw);
+  assert.deepEqual(shown.messages.map(message => message.shoggoth?.inspirationSendOperationId),
+    [first.operationId, undefined, undefined, second.operationId]);
+  assert.equal(shown.messages[0].idempotencyKey, raw.messages[0].idempotencyKey);
+  assert.equal(raw.messages[0].shoggoth, undefined);
+  const legacy = await owner._call("inspiration.session.messages", { ...target, cursor: null, limit: 50 });
+  assert.ok(legacy.items.every(item => !Object.hasOwn(item, "chatSend")));
+  const other = await owner.projectExternalInspirationHistory({ ...target, sessionKey: "agent:main:other" }, raw);
+  assert.deepEqual(other, raw);
+  const read = owner._call;
+  owner._call = (method, { includeChatSend, ...params }) => {
+    if (includeChatSend) throw Object.assign(new Error("Unknown field"), { code: "INSPIRATION_INVALID" });
+    return read(method, params);
+  };
+  assert.deepEqual(await owner.projectExternalInspirationHistory(target, raw), projectInspirationHistory(raw, legacy.items));
+});
+
 test("native composer sends plain input; card continuation keeps its template, including after reopen and retry", async t => {
   const f = await fixture(t), submitted = [];
   const turnStart = f.host.turnStart.bind(f.host);

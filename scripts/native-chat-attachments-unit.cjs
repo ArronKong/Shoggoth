@@ -10,7 +10,7 @@ const { uploadChatAttachments, explicitPathAttachment, prepareChatAttachments,
   chatAttachmentDirectory, attachmentPrompt, imageAttachments } = require("../app/agent-service/chat-attachments");
 const { CHUNK_BYTES } = require("../app/agent-service/inspiration-media");
 const { PendingCommandInbox, fingerprintCommand } = require("../app/agent-service/pending-command-inbox");
-const { clipboardFilePaths, registerDesktopChatClipboardIpc } = require("../app/desktop-chat-clipboard-ipc");
+const { WRITE_CHANNEL, clipboardFilePaths, registerDesktopChatClipboardIpc } = require("../app/desktop-chat-clipboard-ipc");
 const { createChatServiceController } = require("../app/agent-service/chat-service-controller");
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=", "base64");
@@ -108,6 +108,36 @@ test("Electron clipboard URI lists preserve filenames, deduplicate files, and en
   await assert.rejects(clipboardFilePaths({ read: async () => [item("file:///tmp/bad%") ] }), URIError);
 });
 
+test("chat clipboard writes require the trusted frame and stage only allowed files", async () => {
+  const handlers = new Map(), writes = [];
+  const sender = { isDestroyed: () => false, mainFrame: {}, getURL: () => "http://127.0.0.1:19000/chat" };
+  const window = { isDestroyed: () => false, webContents: sender };
+  class Item {
+    constructor(formats) { this.formats = formats; this.types = Object.keys(formats); }
+    async getType(type) { return new Blob([this.formats[type]]); }
+  }
+  const clipboard = { write: async items => { writes.push(items); }, read: async () => writes.at(-1) ?? [] };
+  const dispose = registerDesktopChatClipboardIpc({ ipcMain: { handle: (key, fn) => handlers.set(key, fn), removeHandler: key => handlers.delete(key) },
+    clipboard, ClipboardItem: Item, getWindows: () => [window], getUiOrigin: () => "http://127.0.0.1:19000" });
+  let paths;
+  try {
+    const write = handlers.get(WRITE_CHANNEL), event = { sender, senderFrame: sender.mainFrame };
+    const attachment = { name: "同名.pages", bytes: Uint8Array.of(12).buffer };
+    await assert.rejects(write({ ...event, senderFrame: {} }, { text: "test", files: [attachment] }), /Untrusted/);
+    await assert.rejects(write(event, { text: "test", files: [attachment, { name: "../test", bytes: attachment.bytes }] }), /Invalid attachment name/);
+    await assert.rejects(write(event, { text: "test", files: [{ name: "private.txt", path: "/private/tmp/private.txt" }] }), /Invalid attachment path/);
+    assert.equal(writes.length, 0);
+    await write(event, { text: "caption", files: [attachment, { ...attachment, bytes: Uint8Array.of(34).buffer }] });
+    paths = await clipboardFilePaths(clipboard);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0][0].formats["text/plain"], "caption");
+    assert.deepEqual(paths.map(file => path.basename(file)), [attachment.name, attachment.name]);
+    assert.deepEqual(paths.map(file => fs.readFileSync(file)[0]), [12, 34]);
+  } finally { dispose(); }
+  assert.equal(handlers.size, 0);
+  assert(paths.every(file => !fs.existsSync(file)));
+});
+
 test("attachment-only chat reaches Codex image input and the durable transcript exactly once", async t => {
   let f, inbox;
   t.after(async () => { await f?.coordinator.close(); await inbox?.close(); });
@@ -163,66 +193,63 @@ test("pending attachments survive reopen and old text fingerprints remain compat
   ])).digest("hex"));
 });
 
-test("selected plugins survive inbox restart and bind the send idempotency key", async t => {
+test("historical plugin selections remain readable after inbox restart without allowing new admission", async t => {
   let inbox;
   t.after(() => inbox?.close());
   const f = await fixture(t);
-  const input = { operationId: id(), runId: id(), sessionKey: id(), prompt: "Use the plugin",
-    createdAt: Date.now(), pluginSelection: [
-      { installationId: "plugin-z", revision: 2 },
-      { installationId: "plugin-a", revision: 4 },
-    ] };
-  inbox = await new PendingCommandInbox({ paths: f.paths, cryptoBroker }).open();
-  const first = await inbox.enqueue(input);
-  assert.deepEqual(first.pluginSelection, [
-    { installationId: "plugin-a", revision: 4 },
+  const input = { operationId: id(), runId: id(), sessionKey: id(), prompt: "Historical plugin turn", createdAt: Date.now() };
+  const pluginSelection = [
     { installationId: "plugin-z", revision: 2 },
-  ]);
-  await inbox.close(); await inbox.open();
-  assert.deepEqual(inbox.get(input.operationId).pluginSelection, first.pluginSelection);
-  assert.deepEqual(await inbox.enqueue({ ...input, pluginSelection: [...input.pluginSelection].reverse() }), first,
-    "the same set of selected plugins has one canonical send identity");
-  await assert.rejects(inbox.enqueue({ ...input, pluginSelection: [input.pluginSelection[0]] }),
-    { code: "PENDING_COMMAND_IDEMPOTENCY_CONFLICT" });
+    { installationId: "plugin-a", revision: 4 },
+  ];
+  inbox = await new PendingCommandInbox({ paths: f.paths, cryptoBroker }).open();
+  await inbox.enqueue(input);
+  await inbox.close();
+
+  // The fixture broker copies plaintext, so this seeds a v1 inbox written before retirement.
+  const envelope = JSON.parse(fs.readFileSync(inbox.filePath, "utf8"));
+  const saved = JSON.parse(Buffer.from(envelope.ciphertext, "base64").toString("utf8"));
+  saved.activeCommands[input.operationId].pluginSelection = pluginSelection;
+  envelope.ciphertext = Buffer.from(JSON.stringify(saved)).toString("base64");
+  fs.writeFileSync(inbox.filePath, JSON.stringify(envelope), { mode: 0o600 });
+
+  await inbox.open();
+  const historical = inbox.get(input.operationId);
+  assert.deepEqual(historical.pluginSelection, [...pluginSelection].reverse());
+  assert.equal(fingerprintCommand(historical), fingerprintCommand({ ...input, pluginSelection }));
+  assert.notEqual(fingerprintCommand(historical), fingerprintCommand({ ...input, pluginSelection: pluginSelection.slice(1) }));
+  assert.throws(() => inbox.enqueue({ ...input, pluginSelection }), { code: "PLUGIN_PLATFORM_RETIRED" });
+  assert.throws(() => inbox.enqueue({ ...input, operationId: id(), pluginSelection }), { code: "PLUGIN_PLATFORM_RETIRED" });
+  assert.deepEqual(inbox.get(input.operationId), historical);
 });
 
-test("Service chat send validates an installed plugin before durable admission", async t => {
+test("Service chat send rejects retired plugin selections before durable admission", async t => {
   let f, inbox, controller;
   t.after(async () => { await controller?.close(); await f?.coordinator.close(); await inbox?.close(); });
   f = await fixture(t);
   inbox = await new PendingCommandInbox({ paths: f.paths, cryptoBroker }).open();
   f.coordinator.inbox = inbox;
-  const installed = { installationId: "plugin-selected", revision: 2,
-    desiredState: "enabled", sourceIdentity: "bundled:plugin-selected", releaseDigest: "a".repeat(64) };
-  f.coordinator.pluginStore = {
-    getInstallation(id) { return id === installed.installationId ? installed : null; },
-    getRelease() { return { name: "Selected Package", declaredVersion: "1.0",
-      components: { skills: [{ name: "selected-skill" }], mcpServers: [] } }; },
-  };
   const session = f.sessions.createSession({ operationId: id(), profileId: f.profile.id,
     workspace: f.root, createdAt: Date.now() });
   controller = createChatServiceController({ paths: f.paths, productStore: f.productStore,
     chatSessionStore: f.sessions, coordinator: f.coordinator, transcriptStore: f.transcript,
     cursorSecret: Buffer.alloc(32, 7) });
   await controller.open();
-  const selection = [{ installationId: installed.installationId, revision: installed.revision }];
-  const request = { operationId: id(), sessionKey: session.sessionKey,
-    prompt: "Use this package", pluginSelection: selection, createdAt: Date.now() };
+  const request = { operationId: id(), sessionKey: session.sessionKey, prompt: "Send one turn", createdAt: Date.now() };
+  const retired = { ...request, pluginSelection: [{ installationId: "plugin-selected", revision: 2 }] };
+  await assert.rejects(controller.handle("chat.send", retired), { code: "PLUGIN_PLATFORM_RETIRED" });
+  assert.equal(inbox.get(request.operationId), null);
+  assert.equal(f.host.turnStarts, 0);
+  assert.equal(f.transcript.listEvents(f.profile.id, session.id).filter(event => event.kind === "user").length, 0);
+
   const result = await controller.handle("chat.send", request);
   await f.coordinator.waitForIdle(result.run.id);
-  const user = f.transcript.listEvents(f.profile.id, session.id).find(event => event.kind === "user");
-  assert.deepEqual(user.content.pluginSelection, selection);
-  assert.equal(user.content.pluginSelectionSnapshot[0].packageName, "Selected Package");
-  assert.equal(user.content.pluginSelectionSnapshot[0].declaredVersion, "1.0");
-  const runCount = f.host.turnStarts;
+  await assert.rejects(controller.handle("chat.send", retired), { code: "PLUGIN_PLATFORM_RETIRED" });
   await controller.handle("chat.send", request);
-  assert.equal(f.host.turnStarts, runCount, "the same operation must not execute a second turn");
-  await assert.rejects(controller.handle("chat.send", {
-    ...request, pluginSelection: [{ ...selection[0], revision: 3 }],
-  }), { code: "WORK_RUN_OPERATION_CONFLICT" });
-  installed.desiredState = "disabled";
-  await assert.rejects(controller.handle("chat.send", { ...request, operationId: id() }),
-    { code: "PLUGIN_SELECTION_STALE" });
+  assert.equal(f.host.turnStarts, 1, "the same operation must not execute a second turn");
+  const users = f.transcript.listEvents(f.profile.id, session.id).filter(event => event.kind === "user");
+  assert.equal(users.length, 1);
+  assert.equal(users[0].content.pluginSelection, undefined);
 });
 
 test("native Inspiration follow-ups keep their own attachments across restart and reject replay changes", async t => {

@@ -299,6 +299,10 @@ const previews: Record<string, readonly Row[]> = {
     ["Create audio", "生成音频", "Generate audio for creative work.", "为创作生成音频。"],
     ["Organize assets", "整理创作素材", "Organize creative assets.", "整理创作素材。"],
   ],
+  hyperframes: [
+    ["Create and revise scenes", "制作和修改动画", "Create or revise animated compositions from a prompt.", "根据文字描述制作动画或修改已有作品。"],
+    ["Render video", "渲染视频", "Render a composition in the cloud as MP4, WebM, or MOV.", "在云端将作品渲染为 MP4、WebM 或 MOV。"],
+  ],
   "black-forest-labs": [
     ["Create images", "生成和编辑图像", "Generate and edit images with FLUX.", "通过 FLUX 生成和编辑图像。"],
     ["Create video", "生成视频", "Use the video capabilities described by the service.", "使用服务提供的视频能力。"],

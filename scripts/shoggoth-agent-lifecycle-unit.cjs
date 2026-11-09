@@ -19,6 +19,7 @@ const {
   JsonlProductStore,
 } = require(path.join(ROOT, "app", "agent-service", "product-store.js"));
 const { resolveServicePaths } = require(path.join(ROOT, "app", "agent-service", "paths.js"));
+const { syncAgentNameLinks } = require("../app/agent-service/agent-name-links");
 const {
   BUILTIN_CLI_AGENT_PROFILES,
 } = require(path.join(ROOT, "app", "agent-service", "builtin-cli-profiles.js"));
@@ -141,6 +142,16 @@ async function testCrudReplayAndGuards() {
       () => value.controller.handle("agent.create", createParams("create-alpha", "Different")),
       (error) => error.code === "AGENT_OPERATION_CONFLICT",
     );
+    await assert.rejects(
+      () => value.controller.handle("agent.create", createParams("create-duplicate", " ＡＬＰＨＡ ")),
+      { code: "AGENT_NAME_CONFLICT" },
+    );
+    const defaultProfile = value.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
+    await assert.rejects(() => value.controller.handle("agent.update", {
+      operationId: "rename-duplicate", profileId: defaultProfile.id, name: "alpha",
+      defaultCwd: defaultProfile.defaultCwd, expectedUpdatedAt: defaultProfile.updatedAt, createdAt: 10_000,
+    }), { code: "AGENT_NAME_CONFLICT" });
+    assert.equal(value.effects.initialized.length, 1);
 
     const updated = await value.controller.handle("agent.update", {
       operationId: "update-alpha",
@@ -189,6 +200,10 @@ async function testCrudReplayAndGuards() {
     );
     const archivedList = await value.controller.handle("agent.lifecycle.list", { backendId: "shoggoth" });
     assert.equal(archivedList.agents.find(item => item.profile.id === created.profile.id).state, "archived");
+    await assert.rejects(
+      () => value.controller.handle("agent.create", createParams("create-archived-duplicate", updated.profile.name)),
+      { code: "AGENT_NAME_CONFLICT" },
+    );
 
     const restored = await value.controller.handle("agent.restore", {
       operationId: "restore-alpha",
@@ -201,6 +216,42 @@ async function testCrudReplayAndGuards() {
     assert.equal(value.effects.activated.length, 2);
   } finally {
     await closeFixture(value);
+  }
+}
+
+function testAgentNameLinks() {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agent-name-links-")));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state") });
+  const profiles = [
+    { id: "12345678-first", name: "资料/助理" },
+    { id: "12345678-second", name: "资料/助理" },
+    { id: "87654321-third", name: "产品助手" },
+    { id: "33333333-fourth", name: "资料:助理" },
+  ];
+  const data = (id) => path.join(paths.agentsDir, id);
+  try {
+    fs.mkdirSync(paths.agentsDir, { recursive: true, mode: 0o700 });
+    for (const profile of profiles) fs.mkdirSync(data(profile.id), { mode: 0o700 });
+    fs.writeFileSync(path.join(data(profiles[0].id), "SOUL.md"), "unchanged");
+    assert.throws(() => syncAgentNameLinks({ ...paths, trustedRoot: paths.stateDir }, profiles), { code: "UNSAFE_PATH" });
+    const links = syncAgentNameLinks(paths, profiles);
+    const resolve = (name) => fs.realpathSync(path.join(links, name));
+    assert.equal(resolve("资料-助理--12345678"), data(profiles[0].id));
+    assert.equal(resolve("资料-助理--12345678-2"), data(profiles[1].id));
+    assert.equal(resolve("产品助手"), data(profiles[2].id));
+    assert.equal(resolve("资料-助理--33333333"), data(profiles[3].id));
+    fs.writeFileSync(path.join(links, "新名称"), "unmanaged");
+    const renamed = { ...profiles[2], name: "新名称" };
+    syncAgentNameLinks(paths, [renamed, profiles[0]]);
+    syncAgentNameLinks(paths, [profiles[0], renamed]);
+    assert.equal(resolve("资料-助理"), data(profiles[0].id));
+    assert.equal(resolve("新名称--87654321"), data(renamed.id));
+    assert.deepEqual(fs.readdirSync(links).sort(), ["新名称", "新名称--87654321", "资料-助理"].sort());
+    assert.equal(fs.readFileSync(path.join(links, "新名称"), "utf8"), "unmanaged");
+    assert.equal(fs.readFileSync(path.join(data(profiles[0].id), "SOUL.md"), "utf8"), "unchanged");
+    assert.equal(fs.statSync(data(profiles[1].id)).isDirectory(), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 }
 
@@ -268,13 +319,14 @@ async function testServiceResourceWiringAndRestart() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sagl-")));
   fs.chmodSync(root, 0o700);
   const paths = resolveServicePaths({
+    homeDir: root,
     trustedRoot: root,
     stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profile"),
     cacheRoot: path.join(root, "cache"),
   });
   let service = createAgentService({
-    paths, version: "agent-lifecycle-integration", builtinCliProfiles: true,
+    paths, runtimeStorageHomedir: () => root, version: "agent-lifecycle-integration", builtinCliProfiles: true,
     builtinCliInstalledAccountIds: require("../app/agent-service/runtime-account").DEFAULT_RUNTIME_ACCOUNTS
       .filter(account => account.kind === "native-user").map(account => account.id),
   });
@@ -366,7 +418,7 @@ async function testServiceResourceWiringAndRestart() {
     await service.stop();
 
     service = createAgentService({
-      paths, version: "agent-lifecycle-integration-restart", builtinCliProfiles: true,
+      paths, runtimeStorageHomedir: () => root, version: "agent-lifecycle-integration-restart", builtinCliProfiles: true,
       builtinCliInstalledAccountIds: require("../app/agent-service/runtime-account").DEFAULT_RUNTIME_ACCOUNTS
         .filter(account => account.kind === "native-user").map(account => account.id),
     });
@@ -467,6 +519,7 @@ async function testNativeMcpManagement() {
   const tests = [
     ["protocol exactness", testProtocol],
     ["CRUD replay and guards", testCrudReplayAndGuards],
+    ["Agent folder links and collision handling", testAgentNameLinks],
     ["pending recovery", testPendingRecovery],
     ["native MCP management, recovery and data retention", testNativeMcpManagement],
     ["store identity uniqueness", testStoreIdentityUniqueness],

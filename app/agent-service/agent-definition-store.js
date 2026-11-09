@@ -197,11 +197,19 @@ class AgentDefinitionStore {
     return path.join(this._profileDir(profileId), "definition", "revisions", String(revision));
   }
 
+  _generatedDir(profileId) {
+    return path.join(this._profileDir(profileId), "generated");
+  }
+
+  documentDirectory(profileId, kind, revision) {
+    return GENERATED_VIEW_KINDS.includes(kind) ? this._generatedDir(profileId) : this._revisionDir(profileId, revision);
+  }
+
   _ensureProfileDirectories(profileId) {
     const profileDir = this._profileDir(profileId);
     ensurePrivateDirectoryTree(profileDir, this.paths.trustedRoot);
     ensurePrivateDirectoryTree(path.join(profileDir, "definition", "revisions"), this.paths.trustedRoot);
-    ensurePrivateDirectoryTree(path.join(profileDir, "generated"), this.paths.trustedRoot);
+    ensurePrivateDirectoryTree(this._generatedDir(profileId), this.paths.trustedRoot);
     ensurePrivateDirectoryTree(path.join(profileDir, "proposals"), this.paths.trustedRoot);
     return profileDir;
   }
@@ -581,7 +589,7 @@ class AgentDefinitionStore {
     }
     const byteLength = assertContent(input.content, input.kind, this.maxDocumentBytes);
     if (!this.get(profileId)) throw definitionError("DEFINITION_NOT_FOUND", "Agent Definition 不存在");
-    const generatedDir = path.join(this._profileDir(profileId), "generated");
+    const generatedDir = this._generatedDir(profileId);
     const contentHash = sha256(input.content);
     atomicWritePrivateFile(path.join(generatedDir, `${input.kind}.md`), input.content, {
       fs: this.fs,
@@ -607,7 +615,7 @@ class AgentDefinitionStore {
     if (!GENERATED_VIEW_KINDS.includes(kind)) {
       throw definitionError("GENERATED_VIEW_KIND_INVALID", "Generated view kind 无效");
     }
-    const generatedDir = path.join(this._profileDir(profileId), "generated");
+    const generatedDir = this._generatedDir(profileId);
     const metaPath = path.join(generatedDir, `${kind}.json`);
     const contentPath = path.join(generatedDir, `${kind}.md`);
     if (!lstatIfExists(metaPath) || !lstatIfExists(contentPath)) return null;

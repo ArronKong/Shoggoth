@@ -10,7 +10,7 @@ function compile(fixture, run = fixture.run, query = "晨舟项目构建编号")
     transcriptSessionId: fixture.transcriptSessionId, query });
 }
 
-test("hot context selects complete stable preferences and relevant workspace facts within existing budgets", () => {
+test("hot context preserves the user profile and budgets relevant workspace facts", () => {
   const f = contextFixture({ budgets: { user: 480, memory: 600, transcript: 512 } });
   try {
     for (const [id, scope, type, content, sourceRefs] of [
@@ -28,10 +28,12 @@ test("hot context selects complete stable preferences and relevant workspace fac
     const snapshot = compile(f);
     const user = snapshot.blocks.find((item) => item.id === "user");
     const memory = snapshot.blocks.find((item) => item.id === "memory");
-    assert.ok(user.byteLength <= 480 && memory.byteLength <= 600);
+    assert.ok(user.byteLength > 480 && memory.byteLength <= 600);
+    assert.equal(user.truncated, false);
+    assert.equal(snapshot.report.hotMemory.user.budgetBytes, null);
     assert.match(user.content, /u-pref/u);
     assert.match(user.content, /u-agreement/u);
-    assert.doesNotMatch(user.content, /u-noise/u);
+    assert.match(user.content, /u-noise/u, "the full visible profile is retained, including descriptive facts");
     assert.match(memory.content, /QK-4827/u);
     assert.match(memory.content, /p-agreement/u, "无查询词重叠的当前 workspace 约定仍进入热区");
     assert.doesNotMatch(memory.content, /CROSS-SECRET/u);

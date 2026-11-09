@@ -2,7 +2,7 @@
 
 const os = require("node:os");
 const path = require("node:path");
-const { STORE_SCHEMA_VERSION } = require("./product-store");
+const { STORE_SCHEMA_VERSION } = require("./product-schema-version");
 
 function commonAncestor(paths) {
   const split = paths.map((target) => path.resolve(target).split(path.sep));

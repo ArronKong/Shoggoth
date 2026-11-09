@@ -157,8 +157,13 @@ class GroupChatService {
   async handle(method, params) {
     if (method === "group.execution.receipt") return this.store.executionTerminalReceipt(params);
     if (method === "group.delete") {
-      this.store.deleteGroup(params);
+      const deletion = this.store.deleteGroup(params);
       this.responsePages.deleteGroup(params.groupId);
+      if (params.force === true) {
+        this.#changed(params.groupId);
+        this.driver.wake(params.groupId);
+        return deletion;
+      }
       await this.driver.deleteGroup(params.groupId);
       this.#changed(params.groupId);
       return this.store.finishGroupDeletion(params.groupId);

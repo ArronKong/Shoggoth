@@ -259,10 +259,10 @@ export default function ChatPromptCard({
                 {question.isOther || question.options.length === 0 ? (
                   <PromptAnswerInput
                     secret={question.isSecret}
-                    label={question.options.length > 0 ? `${question.header} · ${t("models.other")}` : question.header}
+                    label={question.options.length > 0 ? `${question.header} · ${t("chat.promptOtherAnswer")}` : question.header}
                     value={questionFreeText[question.questionId] ?? ""}
                     disabled={submitting}
-                    placeholder={question.options.length > 0 ? t("models.other") : t("chat.promptPlaceholder")}
+                    placeholder={question.options.length > 0 ? t("chat.promptOtherPlaceholder") : t("chat.promptPlaceholder")}
                     onChange={(nextValue) => updateOther(question, nextValue)}
                   />
                 ) : null}
@@ -458,7 +458,7 @@ export default function ChatPromptCard({
           </div>
         ) : needsInput ? (
           <PromptAnswerInput secret={legacy?.kind === "sudo" || legacy?.kind === "secret"}
-            label={legacy?.choices?.length ? t("models.other") : legacy?.question || heading}
+            label={legacy?.choices?.length ? t("chat.promptOtherAnswer") : legacy?.question || heading}
             value={value} disabled={submitting}
             placeholder={legacy?.choices?.length ? t("chat.promptOtherPlaceholder") : t("chat.promptPlaceholder")}
             onChange={(nextValue) => { setValue(nextValue); setLegacySelection(""); }}

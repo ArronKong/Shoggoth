@@ -1,4 +1,6 @@
 import type {
+  AgentManagedFile,
+  AgentManagedFilesPage,
   InteractiveApprovalChoice,
   DesktopProductTelemetryBridge,
   UnifiedCronJob,
@@ -78,6 +80,7 @@ import type {
   BackendCliUsage,
   UnifiedAgent,
   UnifiedAgentDetail,
+  AgentFileContent,
   AgentInput,
   AgentChannel,
   SessionArchive,
@@ -237,10 +240,16 @@ function jobUrl(id: string, action = ""): string {
   return `${BASE}?${qs.toString()}`;
 }
 
+export interface CronAgentScope {
+  backendId: string;
+  agentId: string;
+}
+
 export interface CronListFilters {
   backend?: string;
   query?: string;
   agentIds?: string[];
+  agentScopes?: CronAgentScope[];
   enabled?: "all" | "enabled" | "disabled";
   scheduleKind?: "all" | "cron" | "every" | "at" | "on-exit" | "stream" | "rrule";
   lastStatus?: string;
@@ -283,10 +292,15 @@ function searchParams(input: Record<string, unknown>): string {
 }
 
 export async function listCronJobs(filters: CronListFilters = {}): Promise<UnifiedCronJob[]> {
+  const { agentScopes, ...query } = filters;
+  // The existing REST filter narrows the result by ID. Check the backend too
+  // when the picker knows it, since two backends can use the same local ID.
+  if (agentScopes?.length) query.agentIds = [...new Set(agentScopes.map(({ agentId }) => agentId))];
   const { jobs } = await jsonFetch<{ jobs: UnifiedCronJob[] }>(
-    `${BASE}${searchParams({ ...filters })}`,
+    `${BASE}${searchParams(query)}`,
   );
-  return (jobs || []).filter(isVisibleCronJob);
+  return (jobs || []).filter((job) => isVisibleCronJob(job) && (!agentScopes?.length
+    || agentScopes.some(({ backendId, agentId }) => job.backendId === backendId && job.agentId === agentId)));
 }
 
 export async function getCronJobDetail(id: string): Promise<UnifiedCronJob> {
@@ -1692,8 +1706,9 @@ export async function taskAction(
 }
 
 // Host-level CLI scan (local-only, no backend).
-export async function getRuntimeStatuses(): Promise<import("../types").RuntimeStatus[]> {
-  const { runtimes } = await jsonFetch<{ runtimes: import("../types").RuntimeStatus[] }>(`/__api/runtime-status`);
+export async function getRuntimeStatuses({ forAgentCreation = false } = {}): Promise<import("../types").RuntimeStatus[]> {
+  const query = forAgentCreation ? "?view=agent-create" : "";
+  const { runtimes } = await jsonFetch<{ runtimes: import("../types").RuntimeStatus[] }>(`/__api/runtime-status${query}`);
   return runtimes.filter((runtime) => isVisibleRuntime(runtime.runtime));
 }
 
@@ -1857,8 +1872,8 @@ export async function getAgentFile(
   backend: string,
   id: string,
   file: string,
-): Promise<{ name: string; content: string; missing?: boolean; revision?: number | string | null; readOnly?: boolean }> {
-  const { file: f } = await jsonFetch<{ file: { name: string; content: string; missing?: boolean; revision?: number | string | null; readOnly?: boolean } }>(
+): Promise<AgentFileContent> {
+  const { file: f } = await jsonFetch<{ file: AgentFileContent }>(
     agentUrl(backend, id, "/file") + `&file=${encodeURIComponent(file)}`,
   );
   return f;
@@ -2172,12 +2187,58 @@ export async function getAgentChannels(backend: string, id: string): Promise<Age
 }
 // 该 agent 的产出文件（Agent 页「文件」tab）。与 Dashboard 产出区同一套扫描规则，
 // 只是根收窄到这个 agent；本地磁盘能力，远端后端返回 supported:false。
+export function managedAgentFileUrl(backend: string, id: string, fileId: string, preview = false) {
+  return agentUrl(backend, id, `/managed-files/${encodeURIComponent(fileId)}/content`) + (preview ? "&preview=1" : "");
+}
+
+export function listManagedAgentFiles(backend: string, id: string, options: { cursor?: number; runId?: string } = {}, signal?: AbortSignal) {
+  const query = new URLSearchParams();
+  if (options.cursor !== undefined) query.set("cursor", String(options.cursor));
+  if (options.runId) query.set("runId", options.runId);
+  return jsonFetch<AgentManagedFilesPage>(
+    agentUrl(backend, id, "/managed-files") + (query.size ? `&${query}` : ""), { signal },
+  );
+}
+
+export function importManagedAgentFile(backend: string, id: string, file: File, operationId: string) {
+  const query = new URLSearchParams({ name: file.name, operationId });
+  if (file.type) query.set("mimeType", file.type);
+  return jsonFetch<{ file: AgentManagedFile }>(
+    agentUrl(backend, id, "/managed-files") + `&${query}`,
+    { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file },
+  );
+}
+
+export function getManagedAgentFile(backend: string, id: string, fileId: string) {
+  return jsonFetch<{ file: AgentManagedFile; path: string | null }>(
+    agentUrl(backend, id, `/managed-files/${encodeURIComponent(fileId)}`),
+  );
+}
+
+export async function revealManagedAgentFile(backend: string, id: string, fileId: string, open = false) {
+  const { file, path } = await getManagedAgentFile(backend, id, fileId);
+  if (!path) throw new ApiError("The file is no longer available.", {
+    status: 404, code: file.status === "deleted" ? "AGENT_FILE_DELETED" : "AGENT_FILE_MISSING",
+  });
+  await (open ? openPath(path) : revealPath(path));
+}
+
+export function mutateManagedAgentFile(backend: string, id: string, file: AgentManagedFile, name?: string) {
+  return jsonFetch<{ file: AgentManagedFile }>(
+    agentUrl(backend, id, `/managed-files/${encodeURIComponent(file.fileId)}`),
+    { method: name === undefined ? "DELETE" : "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevision: file.revision, ...(name === undefined ? {} : { name }) }) },
+  );
+}
+
 export async function listAgentArtifacts(
   backend: string,
   id: string,
   signal?: AbortSignal,
+  workspaceOnly = false,
 ): Promise<AgentArtifactsResult> {
-  const { artifacts } = await jsonFetch<{ artifacts: AgentArtifactsResult }>(agentUrl(backend, id, "/artifacts"), { signal });
+  const { artifacts } = await jsonFetch<{ artifacts: AgentArtifactsResult }>(
+    agentUrl(backend, id, "/artifacts") + (workspaceOnly ? "&scope=workspace" : ""), { signal });
   return artifacts || { supported: false, items: [] };
 }
 // Archived (sealed/reset) transcript segments preceding a session's live thread.
@@ -2970,9 +3031,9 @@ export function testGroupChatHost(peer: import('../types').GroupRuntimeHostConne
 export function getGroupChat(id: string) {
   return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/detail", id));
 }
-export function deleteGroupChat(id: string, expectedMetadataRevision: number) {
+export function deleteGroupChat(id: string, expectedMetadataRevision: number, options?: { force: true; ownerScope: string }) {
   return jsonFetch<{ groupId: string; status: "deleting" | "deleted" }>(groupChatUrl("/detail", id), {
-    method: "DELETE", body: JSON.stringify({ expectedMetadataRevision }),
+    method: "DELETE", body: JSON.stringify({ expectedMetadataRevision, ...options }),
   });
 }
 export function createGroupChat(input: { operationId: string; name: string; purpose: string;

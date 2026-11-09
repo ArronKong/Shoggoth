@@ -998,6 +998,21 @@
     }
   },
   {
+    "id": "hyperframes",
+    "name": "HyperFrames",
+    "setup": "oauth",
+    "url": "https://mcp.heygen.com/mcp/hyperframes/",
+    "docsUrl": "https://hyperframes.heygen.com/guides/mcp",
+    "description": {
+      "zh-CN": "通过对话制作和修改动态图形、演示幻灯片和短片，在云端渲染视频。",
+      "en": "Create and revise motion graphics, animated slides, and short videos in chat, then render them in the cloud."
+    },
+    "note": {
+      "zh-CN": "使用 HeyGen 账号授权，无需 API Key。云端创作和渲染可能消耗账号额度。",
+      "en": "Sign in with your HeyGen account without an API key. Cloud creation and rendering may use account credits."
+    }
+  },
+  {
     "id": "black-forest-labs",
     "name": "Black Forest Labs",
     "setup": "oauth",

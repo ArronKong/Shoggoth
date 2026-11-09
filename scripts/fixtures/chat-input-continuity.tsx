@@ -15,6 +15,7 @@ const immersive = new URLSearchParams(location.search).get("immersive") === "1";
 const sessions = [{ key, agentId: "shoggoth-default", agentName: "Shoggoth", backendId: "shoggoth", updatedAt: now }];
 const user = { id: "user-initial", role: "user", content: "帮我查询商品并确认订单。", timestamp: now };
 const notes = ["先查询门店。", "已找到候选门店。", "请确认具体门店。", "已选门店，开始查询规格。", "已核对默认规格。", "请确认订单。", "按已确认规格创建订单。", "订单已生成，核对支付状态。"];
+const toolTitles = ["检查候选门店", "核对商品规格", "核对订单状态"];
 const answer = "订单已创建，待付款。[微信支付二维码](https://qr.fixture/transfer/qrcode?token=fixture-only)";
 const canonical: any[] = [user];
 const rawNote = (index: number) => ({ id: `note-${index}`, role: "assistant", timestamp: now + index + 1,
@@ -38,9 +39,16 @@ const wait = async (predicate: () => unknown, label: string) => {
 };
 const bodies = () => [...document.querySelectorAll<HTMLElement>(immersive ? `.${immersiveStyles.md}` : ".chat-thread .chat-bubble")]
   .flatMap(node => immersive && node.querySelector(".chat-md") ? [...node.querySelectorAll<HTMLElement>(".chat-md")] : [node])
-  .filter(node => !node.closest(".chat-prompt") && node.textContent?.trim());
+  .filter(node => !node.closest(".chat-prompt") && !node.querySelector("[data-chat-activity-preview]") && node.textContent?.trim());
 const sequence = () => bodies().map(node => node.textContent!.replace(/●/g, "").replace(/\s+/g, " ").trim());
+const thread = () => document.querySelector<HTMLElement>(immersive ? `.${immersiveStyles.thread}` : ".chat-thread")!;
+const previews = () => [...thread().querySelectorAll<HTMLElement>('[data-chat-activity-preview][data-status="running"]')];
+const precedes = (first: HTMLElement, second: HTMLElement) => first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING;
 const chat = (status: string, extra: any = {}) => state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: key, runId, state: status, ...extra } });
+const tool = (index: number, phase: "start" | "result") => state.socket.emit({ type: "event", event: "session.tool", payload: {
+  sessionKey: key, runId, data: { phase, toolCallId: `tool-${index}`, name: "shoggoth/memory_search",
+    args: { activityTitle: toolTitles[index], query: "fixture" }, ...(phase === "result" ? { result: "完成" } : {}) },
+} });
 const emitNote = (index: number) => {
   chat("delta", { message: rawNote(index) });
   chat("interim", { message: rawNote(index) });
@@ -59,7 +67,9 @@ class Socket {
       // The Runtime can resume before the acknowledgement reaches the renderer.
       chat("promptExpire", { requestId: req.params.requestId });
       if (index === 1) { emitNote(6); state.earlyNote = true; }
-      setTimeout(() => this.emit({ type: "res", id: req.id, ok: true, payload: { messages: receipts[index] } }), 50);
+      setTimeout(() => this.emit({ type: "res", id: req.id, ok: true, payload: {
+        state: "responded", run: { id: runId, status: "running" }, requestId: req.params.requestId, messages: receipts[index],
+      } }), 50);
       return;
     }
     const payload = req.method === "sessions.list" ? { sessions, hasMore: false }
@@ -86,6 +96,12 @@ state.runFixture = async () => {
   for (let index = 0; index < notes.length; index++) {
     if (!(index === 6 && state.earlyNote)) emitNote(index);
     await wait(() => sequence().includes(notes[index]), `progress ${index}`);
+    if ([0, 3, 6].includes(index)) {
+      const toolIndex = index / 3;
+      tool(toolIndex, "start");
+      await wait(() => previews()[0]?.textContent?.includes(toolTitles[toolIndex]), `live tool ${toolIndex}`);
+      tool(toolIndex, "result");
+    }
     if (index !== 2 && index !== 5) continue;
     const promptIndex = index === 2 ? 0 : 1;
     chat("prompt", { prompt: prompts[promptIndex] });
@@ -101,9 +117,29 @@ state.runFixture = async () => {
     const rows = sequence();
     check(rows.indexOf(notes[index]) < rows.indexOf(expectedAnswer), "pre-input progress stays before its answer");
     if (promptIndex === 1) check(rows.indexOf(expectedAnswer) < rows.indexOf(notes[6]), "early resumed output stays after its answer");
+    const answerBubble = bodies()[rows.indexOf(expectedAnswer)];
+    const [preview] = previews();
+    check(previews().length === 1 && precedes(answerBubble, preview),
+      `one live activity bubble follows accepted input ${promptIndex + 1}`);
+    if (promptIndex === 1) check(precedes(preview, bodies()[rows.indexOf(notes[6])]),
+      "the relocated activity appears before the early resumed progress bubble");
   }
-  chat("delta", { message: finalMessage });
+  const scroller = thread();
+  scroller.scrollTop = scroller.scrollHeight;
+  const composer = document.querySelector("[data-chat-composer]")!;
+  await wait(() => {
+    const bubble = previews()[0]?.getBoundingClientRect();
+    return bubble && bubble.height > 0 && bubble.top >= scroller.getBoundingClientRect().top
+      && bubble.bottom <= composer.getBoundingClientRect().top;
+  }, "the live activity is visible at the latest reply");
+  previews()[0].click();
+  const dialog = () => document.querySelector('[role="dialog"]');
+  await wait(() => toolTitles.every(title => dialog()?.textContent?.includes(title)), "relocated activity opens the full turn timeline");
+  dialog()?.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("common.close")}"]`)?.click();
+  await wait(() => !dialog(), "activity details close");
+  chat("delta", { replyPhase: "final_answer", message: finalMessage });
   await wait(() => sequence().some(text => text.includes("订单已创建，待付款")), "streamed answer");
+  check(previews().length === 0, "the final answer takes over from live activity");
   await pause(100);
   const before = sequence();
   check(notes.every(note => before.filter(text => text === note).length === 1), "all eight public progress bubbles remain exactly once");
@@ -120,5 +156,6 @@ state.runFixture = async () => {
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await wait(() => !document.querySelector(".chat-lightbox"), "lightbox closes");
   check(document.documentElement.scrollWidth <= innerWidth, "no page overflow");
-  return { passed: true, immersive, width: innerWidth, progressBubbles: 8, inputBoundaries: 2, unchangedOrder: true, earlyResume: true, qrLightbox: true };
+  return { passed: true, immersive, width: innerWidth, progressBubbles: 8, inputBoundaries: 2, relocatedActivity: true,
+    unchangedOrder: true, earlyResume: true, qrLightbox: true };
 };

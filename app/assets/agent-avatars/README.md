@@ -18,10 +18,17 @@ Restoring an archived Agent preserves its identity and existing avatar.
 records each filename and SHA-256 digest. Two files have identical bytes, so the
 library contains 149 distinct images.
 
+The chat profile's avatar picker reads the same library from `/avatar/library/`.
+The catalog and previews use one content digest per distinct image; browsing
+does not reserve an avatar or touch user data. The UI draws up to twenty images
+at a time, excluding the preceding batch when shuffling. On save, both presets
+and user-provided images use the existing custom avatar upload route.
+
 The loopback `/avatar/<agentId>` route serves a user-uploaded image first. For
-an Agent without a custom image, it randomly chooses a bundled image that no
-other Agent currently uses. Byte-identical files count as one image for this
-purpose. Once all distinct images have assignments, reuse is allowed.
+an Agent without a custom image, it randomly chooses a bundled image that has
+not been automatically assigned to another Agent. Byte-identical files count
+as one image for this purpose. Once all distinct images have assignments, reuse
+is allowed.
 
 The management API reserves a selection when it creates an Agent with a known ID;
 other Agents receive one on their first avatar request. Selections live in the App's user data at

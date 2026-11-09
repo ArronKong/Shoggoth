@@ -42,6 +42,8 @@ const { GROUP_MCP_TOOL_DEFINITIONS, isGroupMcpTool, validateGroupMcpArguments, e
 const { GROUP_CHAT_AGENT_TOOL_DEFINITIONS, GROUP_CHAT_AGENT_READ_TOOLS, GROUP_CHAT_AGENT_WRITE_TOOLS, isGroupChatAgentTool,
   validateGroupChatAgentArguments } = require("./group-chat-agent-tools");
 const { isGroupChatRun } = require("./group-chat-run");
+const { fileIdFor, readWorkspaceOutput, sha256: artifactDigest } = require("./agent-file-store");
+const { RUN_SOURCES: FILE_RUN_SOURCES, filename: managedFilename, fileMimeType, contentUrl: managedFileUrl } = require("./agent-file-protocol");
 const { DEFINITION_MCP_TOOL_DEFINITIONS, isDefinitionMcpTool,
   validateDefinitionMcpArguments } = require("./definition-mcp-tools");
 const { BROWSER_MCP_TOOL_DEFINITIONS, BROWSER_MCP_TOOL_NAMES,
@@ -79,7 +81,8 @@ const MCP_PRODUCT_TOOL_NAMES = Object.freeze(PRODUCT_CAPABILITIES
 
 const MCP_PRODUCT_TOOL_NAME_SET = new Set(INTERNAL_MCP_PRODUCT_TOOL_NAMES);
 function isNativeOnlyMcpTool(name) {
-  return name === "workspace_execute" || name === "skill_learn" || HEARTBEAT_SETTINGS_TOOL_NAMES.has(name) || WEB_PREFERENCE_TOOL_NAMES.has(name) || name === "app_manage"
+  return name === "workspace_execute" || name === "skill_learn" || name === "artifact_publish"
+    || HEARTBEAT_SETTINGS_TOOL_NAMES.has(name) || WEB_PREFERENCE_TOOL_NAMES.has(name) || name === "app_manage"
     || name.startsWith("computer_") || name.startsWith("browser_") || name.startsWith("native_agent_")
     || isChatUiMcpTool(name) || HOOK_TOOL_NAMES.includes(name) || isMemoryMcpTool(name) || isDefinitionMcpTool(name);
 }
@@ -737,7 +740,7 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
   },
   {
     name: "artifact_publish",
-    description: "Publish a regular file from an authorized Kanban Run workspace.",
+    description: "Save a deliverable from the current WorkRun workspace to the Agent's private files.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2391,6 +2394,8 @@ class McpProductToolController {
     this.isSensitiveValue = options.isSensitiveValue;
     this.onFatalError = options.onFatalError || null;
     this.artifactRoot = path.resolve(options.artifactRoot);
+    this.agentFileStore = options.agentFileStore || null;
+    this.getRunSessionKey = options.getRunSessionKey || (() => null);
     this.fs = options.fs || fs;
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
@@ -2795,6 +2800,8 @@ class McpProductToolController {
         throw toolError("MCP_TOOL_STATE_CONFLICT");
       }
     }
+    if (name === "artifact_publish" && this.agentFileStore
+      && this.executionContext.getStore()?.runId !== args.runId) throw toolError("MCP_TOOL_FORBIDDEN");
     if (name === "skill_learn") {
       const scope = this.executionContext.getStore();
       if (authority.federationClient || !scope?.runId || typeof scope.assertCurrent !== "function") throw toolError("MCP_TOOL_FORBIDDEN");
@@ -3246,6 +3253,7 @@ class McpProductToolController {
       return null;
     }
     if (name === "artifact_publish") {
+      if (this.agentFileStore) return this.#bindManagedArtifact(args, authority);
       const runValue = this.#requireRun(args.runId, authority.profileId);
       const cardValue = this.#requireCard(runValue.sourceId, authority.profileId);
       this.#requireKanbanBinding(cardValue, runValue);
@@ -4234,6 +4242,7 @@ class McpProductToolController {
       return { note: safeJsonClone(stored) };
     }
     if (name === "artifact_publish") {
+      if (this.agentFileStore) return this.#publishManagedArtifact(args, authority, call);
       const runValue = this.#requireRun(args.runId, authority.profileId);
       const cardValue = this.#requireCard(runValue.sourceId, authority.profileId);
       this.#requireKanbanBinding(cardValue, runValue);
@@ -4303,6 +4312,91 @@ class McpProductToolController {
       throw toolError("NOTIFICATION_FAILED");
     }
     return { delivered: true };
+  }
+
+  #managedArtifactTarget(args, authority) {
+    const scope = this.executionContext.getStore();
+    if (authority.federationClient || scope?.runId !== args.runId) throw toolError("MCP_TOOL_FORBIDDEN");
+    scope.assertCurrent();
+    const run = this.#requireRun(args.runId, authority.profileId);
+    if (!ACTIVE_RUN_STATUSES.has(run.status) || !FILE_RUN_SOURCES.includes(run.source) || isGroupChatRun(run)) {
+      throw toolError("MCP_TOOL_FORBIDDEN");
+    }
+    const card = run.source === "kanban" ? this.#requireCard(run.sourceId, authority.profileId) : null;
+    if (card) this.#requireKanbanBinding(card, run);
+    return { run, card, scope };
+  }
+
+  async #readManagedArtifact(run, relativePath) {
+    try {
+      return await readWorkspaceOutput(this.agentFileStore.paths, {
+        profileId: run.profileId, workspace: run.workspace, relativePath,
+      });
+    } catch (error) {
+      if (error?.code === "AGENT_FILE_TOO_LARGE") throw toolError("MCP_TOOL_ARTIFACT_TOO_LARGE");
+      throw toolError("MCP_TOOL_PATH_INVALID");
+    }
+  }
+
+  async #bindManagedArtifact(args, authority) {
+    const { run, card, scope } = this.#managedArtifactTarget(args, authority);
+    let name, mimeType;
+    try {
+      name = managedFilename(args.name);
+      mimeType = fileMimeType(args.mimeType);
+    } catch { throw toolError("MCP_TOOL_INVALID_ARGUMENTS"); }
+    const bytes = await this.#readManagedArtifact(run, args.relativePath);
+    scope.assertCurrent();
+    return {
+      cardId: card?.id ?? null, runId: run.id, workspace: run.workspace, name, kind: args.kind, mimeType,
+      sizeBytes: bytes.length, sha256: artifactDigest(bytes),
+      storageKey: `agent-files/${fileIdFor(run.profileId, `publish-${authority.callId}`)}`,
+      source: { kind: run.source, runId: run.id, sourceId: run.sourceId, sessionKey: this.getRunSessionKey(run) },
+    };
+  }
+
+  async #publishManagedArtifact(args, authority, call) {
+    const { run, card, scope } = this.#managedArtifactTarget(args, authority);
+    const profile = this.#requireProfile(authority.profileId);
+    const operationId = `publish-${authority.callId}`;
+    const fileId = fileIdFor(profile.id, operationId);
+    const binding = call.binding;
+    if (!exactObject(binding, ["cardId", "runId", "workspace", "name", "kind", "mimeType",
+      "sizeBytes", "sha256", "storageKey", "source"])
+      || binding.cardId !== (card?.id ?? null) || binding.runId !== run.id || binding.workspace !== run.workspace
+      || binding.name !== managedFilename(args.name) || binding.kind !== args.kind || binding.mimeType !== fileMimeType(args.mimeType)
+      || binding.storageKey !== `agent-files/${fileId}` || binding.source?.kind !== run.source
+      || binding.source?.runId !== run.id || binding.source?.sourceId !== run.sourceId) {
+      throw toolError("MCP_TOOL_COMMIT_UNCERTAIN");
+    }
+    let file;
+    try {
+      ({ file } = await this.agentFileStore.save({
+        profileId: profile.id, operationId, name: binding.name, mimeType: binding.mimeType,
+        source: binding.source, sizeBytes: binding.sizeBytes, sha256: binding.sha256,
+        read: () => this.#readManagedArtifact(run, args.relativePath), assertCurrent: () => scope.assertCurrent(),
+      }));
+    } catch (error) {
+      if (error?.code === "AGENT_FILE_COMMIT_UNCERTAIN" || error?.code === "AGENT_FILE_CONFLICT") {
+        throw toolError("MCP_TOOL_COMMIT_UNCERTAIN");
+      }
+      if (error?.code === "AGENT_FILE_SOURCE_CHANGED") throw toolError("MCP_TOOL_PATH_INVALID");
+      throw error;
+    }
+    if (file.status !== "available") throw toolError("MCP_TOOL_COMMIT_UNCERTAIN");
+    const url = managedFileUrl(profile.backendId, profile.agentId, fileId);
+    const output = { fileId, name: file.name, url };
+    if (!card) return { file: output };
+    try {
+      const artifact = await this.#storeArtifactReference({ cardValue: card, runValue: run, binding, call });
+      return { artifact, file: output };
+    } catch (error) {
+      if (error?.code !== "MCP_TOOL_COMMIT_UNCERTAIN") {
+        try { this.agentFileStore.delete({ profileId: profile.id, fileId, expectedRevision: file.revision }); }
+        catch { throw toolError("MCP_TOOL_COMMIT_UNCERTAIN"); }
+      }
+      throw error;
+    }
   }
 
   #validateArtifactRoot() {

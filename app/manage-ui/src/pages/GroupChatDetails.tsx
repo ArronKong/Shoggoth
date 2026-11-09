@@ -82,10 +82,16 @@ export default function GroupChatDetails({ view, onClose, onAddMember,
           disabled={!active} onClick={onSettings} title={t("groupChat.strategy.settings")} aria-label={t("groupChat.strategy.settings")}>
           <span className={styles.headerIcon} style={iconStyle(settingsIcon)} aria-hidden="true" />
         </button>}
-        {onDelete && <button type="button" className={styles.iconButton} data-group-details-action="delete"
-          disabled={deleting || view.group.status === "deleting"} onClick={onDelete} title={t("groupChat.delete")} aria-label={t("groupChat.delete")}>
-          <span className={`${styles.headerIcon} ${styles.deleteIcon}`} style={iconStyle(deleteIcon)} aria-hidden="true" />
-        </button>}
+        {onDelete && (view.group.status === "deleting" ? (
+          <button type="button" className="btn-danger btn-sm" data-group-details-action="force-delete" disabled={deleting} onClick={onDelete}>
+            {t("groupChat.forceDelete")}
+          </button>
+        ) : (
+          <button type="button" className={styles.iconButton} data-group-details-action="delete"
+            disabled={deleting} onClick={onDelete} title={t("groupChat.delete")} aria-label={t("groupChat.delete")}>
+            <span className={`${styles.headerIcon} ${styles.deleteIcon}`} style={iconStyle(deleteIcon)} aria-hidden="true" />
+          </button>
+        ))}
       </div>
     </header>
     <div ref={listRef} className={styles.members} role="tablist" aria-label={t("groupChat.membersLabel")}>

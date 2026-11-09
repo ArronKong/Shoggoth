@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { getCodexAutomationModels } from "../../api/client";
 import { Field, Option, Select, TextArea, TextInput } from "../../components/Field";
@@ -6,6 +6,7 @@ import type { CodexAutomationModel } from "../../types";
 import "./CodexAutomation.css";
 
 import { type CodexCronDraft } from "./codexCronDraft";
+import { CronTaskNameRow } from "./CronFormLayout";
 export * from "./codexCronDraft";
 const DAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
 function fields(rrule: string): Record<string, string> { return Object.fromEntries(rrule.replace(/^RRULE:/, "").split(";").map(value => value.split("="))); }
@@ -87,11 +88,13 @@ export function CodexCronOptions({ draft, setDraft, backendId, timeZone, editing
     </> : <><Field label={t("codexAutomation.targetThread")}><TextInput value={draft.targetThreadId} disabled={disabled} onChange={event => set("targetThreadId", event.target.value)} /></Field><p className="codex-source-note">{t("codexAutomation.heartbeatRunUnavailable")}</p></>}
   </div>;
 }
-export default function CodexCronForm({ draft, setDraft, backendId, timeZone, targetEditable, disabled }: {
-  draft: CodexCronDraft; setDraft: (value: CodexCronDraft) => void; backendId: string; timeZone?: string; targetEditable?: boolean; disabled?: boolean;
+export default function CodexCronForm({ draft, setDraft, assistant, backendId, timeZone, targetEditable, disabled }: {
+  draft: CodexCronDraft; setDraft: (value: CodexCronDraft) => void; assistant: ReactNode;
+  backendId: string; timeZone?: string; targetEditable?: boolean; disabled?: boolean;
 }) {
   const { t } = useTranslation();
-  return <div className="cron-form"><Field label={t("cronForm.taskNameLabel")}><TextInput value={draft.name} disabled={disabled} onChange={event => setDraft({ ...draft, name: event.target.value })} /></Field>
+  return <div className="cron-form">
+    <CronTaskNameRow name={draft.name} onChange={name => setDraft({ ...draft, name })} assistant={assistant} disabled={disabled} />
     <Field label={t("cronForm.taskPromptLabel")}><TextArea value={draft.prompt} disabled={disabled} rows={4} onChange={event => setDraft({ ...draft, prompt: event.target.value })} /></Field>
     <CodexCronOptions draft={draft} setDraft={setDraft} backendId={backendId} timeZone={timeZone} editing targetEditable={targetEditable} disabled={disabled} />
   </div>;

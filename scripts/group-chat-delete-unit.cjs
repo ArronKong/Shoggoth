@@ -8,7 +8,7 @@ const crypto = require("node:crypto");
 const { GroupChatStore } = require("../app/agent-service/group-chat-store");
 const { GroupChatService } = require("../app/agent-service/group-chat-service");
 const { GroupChatDriver } = require("../app/agent-service/group-chat-driver");
-const { validateParams } = require("../app/agent-service/group-chat-protocol");
+const { validateParams, validateResult } = require("../app/agent-service/group-chat-protocol");
 
 function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "group-delete-")));
@@ -114,6 +114,96 @@ test("ended business records still require the complete group's durable Host sto
   assert.equal(targets.targets[0].executionId, external.executionId);
   assert.equal(f.store.confirmGroupDeletionHosts(id, targets.digest), true);
   assert.equal(f.store.finishGroupDeletion(id).status, "deleted");
+});
+
+test("force deletion purges history immediately and recovers the original stop after restart", async t => {
+  const f = fixture(t), id = f.create("force", [
+    { backendId: "hermes", agentId: "helper", profileId: null, displayName: "Helper" },
+    { backendId: "shoggoth", agentId: "beta", profileId: "p-beta", displayName: "Beta" },
+  ]), other = f.create("keep");
+  const resumed = [], canceled = [], checks = [], errors = [];
+  let hostStopped = false;
+  const createDriver = () => new GroupChatDriver({ store: f.store, onError: error => errors.push(error),
+    executor: { start() { assert.fail("a deleted group cannot restart an execution"); } },
+    externalExecutor: {
+      start() {}, stop() {}, resume(turn) { resumed.push(turn.runId); }, cancel(turn) { canceled.push(turn.runId); },
+      async stopGroup(groupId) {
+        checks.push(groupId);
+        return { confirmed: hostStopped, digest: f.store.groupDeletionTargets(groupId).digest };
+      },
+    },
+  });
+  let driver = createDriver(); t.after(() => driver.stop()); await driver.start();
+  const service = new GroupChatService({ store: f.store, driver });
+  const ownerScope = f.store.getOwnerScope();
+  const force = { groupId: id, expectedMetadataRevision: 2, force: true, ownerScope };
+  assert.throws(() => validateParams("group.delete", { groupId: id, expectedMetadataRevision: 2, force: true }),
+    { code: "GROUP_CHAT_INVALID" });
+  assert.throws(() => validateParams("group.delete", { ...force, force: "true" }), { code: "GROUP_CHAT_INVALID" });
+  await assert.rejects(service.handle("group.delete", { ...force, expectedMetadataRevision: 1 }),
+    { code: "GROUP_CHAT_FORCE_DELETE_CONFLICT" });
+
+  f.send(id, "old request");
+  const fence = driver.fence, turn = f.store.claimNext(id, fence).opportunity;
+  const external = { executionId: crypto.randomUUID(), runId: crypto.randomUUID(), backendId: "hermes", agentId: "helper",
+    sessionKey: "agent:helper:group-original", workspace: "/fixture", mode: "gateway", hostId: crypto.randomUUID(),
+    remote: { peerId: "original-peer", hostId: crypto.randomUUID(), groupId: id, ownerId: f.store.getRemoteOwnerId(), epoch: fence } };
+  f.store.bindSession({ groupId: id, memberId: turn.memberId, sessionKey: external.sessionKey });
+  f.store.recordRun({ opportunityId: turn.id, runId: external.runId, sessionKey: external.sessionKey, runKind: "external", external, fence });
+  const before = JSON.stringify(f.store.getGroup(other));
+  assert.equal((await service.handle("group.delete", { groupId: id, expectedMetadataRevision: 1 })).status, "deleting");
+  await assert.rejects(service.handle("group.delete", { ...force, expectedMetadataRevision: 1 }), { code: "GROUP_CHAT_REVISION_CONFLICT" });
+  await assert.rejects(service.handle("group.delete", { ...force, ownerScope: "another-owner" }), { code: "GROUP_CHAT_OWNER_CHANGED" });
+  assert.equal(f.store.listMessages({ groupId: id }).messages.length, 1);
+  const result = await service.handle("group.delete", validateParams("group.delete", force));
+  validateResult("group.delete", result, force);
+  assert.deepEqual(result, { groupId: id, status: "deleted" });
+  assert.deepEqual(await service.handle("group.delete", force), result, "confirmed retries are idempotent");
+  assert.equal(f.store.groupNeedsDeletionStop(id), true);
+  assert.equal(f.store.getOpportunity(turn.id).state, "running", "deletion does not fabricate terminal evidence");
+  assert.equal(f.store.claimNext(id, fence), null);
+  assert.equal(f.store.listGroups({ includeArchived: true }).some(view => view.group.id === id), false);
+  await assert.rejects(service.handle("group.get", { groupId: id }), { code: "GROUP_CHAT_DELETED" });
+  const role = "late member role";
+  assert.equal(f.store.saveRoleSnapshot({ groupId: id, memberId: turn.memberId, text: role,
+    exportDigest: crypto.createHash("sha256").update(role).digest("hex") }), null);
+  const publicMessages = () => f.store.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE group_id=?").get(id).n;
+  assert.equal(publicMessages(), 0);
+
+  driver.stop(); f.reopen(); driver = createDriver(); await driver.start();
+  assert.deepEqual(resumed, [external.runId]);
+  assert.ok(canceled.includes(external.runId));
+  assert.deepEqual(new Set(checks), new Set([id]));
+  assert.deepEqual(f.store.groupsPendingDeletion(), [id]);
+  assert.equal(f.store.listInternalSessions().some(session => session.key === external.sessionKey), true);
+  driver.onExternalTerminal(turn.id, { status: "completed", text: "late answer" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.store.getOpportunity(turn.id).state, "cancelled");
+  assert.equal(publicMessages(), 0, "late replies cannot recreate history");
+  assert.equal(f.store.groupNeedsDeletionStop(id), true, "whole-host confirmation is still outstanding");
+  hostStopped = true;
+  await driver.deleteGroup(id);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.store.groupsPendingDeletion(), []);
+  assert.equal(JSON.stringify(f.store.getGroup(other)), before);
+  assert.deepEqual(errors, []);
+});
+
+test("a force-deleted turn that never launched is canceled during restart recovery", async t => {
+  const f = fixture(t), id = f.create("unaccepted");
+  f.send(id, "unaccepted request");
+  const turn = f.store.claimNext(id, f.store.advanceDriverFence()).opportunity;
+  f.store.deleteGroup({ groupId: id, expectedMetadataRevision: 1 });
+  f.store.deleteGroup({ groupId: id, expectedMetadataRevision: 2, force: true, ownerScope: f.store.getOwnerScope() });
+  assert.equal(f.store.groupNeedsDeletionStop(id), true);
+  f.reopen();
+  const driver = new GroupChatDriver({ store: f.store, executor: { findRun: () => null,
+    start() { assert.fail("a force-deleted turn cannot launch"); } } });
+  t.after(() => driver.stop());
+  await driver.start();
+  assert.equal(f.store.getOpportunity(turn.id).state, "cancelled");
+  assert.deepEqual(f.store.groupsWithQueuedTurns(), []);
+  assert.deepEqual(f.store.groupsPendingDeletion(), []);
 });
 
 test("deletion during session preparation never starts a late model turn or leaves an empty run occupied", async t => {

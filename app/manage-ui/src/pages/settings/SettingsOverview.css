@@ -225,6 +225,7 @@
 }
 .management-page.settings-page .settings-stack .settings-backend--card .settings-backend-actions {
   margin-top: auto;
+  min-height: 36px;
   padding: 4px 0 0;
   width: auto;
   justify-content: flex-start;

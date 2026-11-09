@@ -7,4 +7,3 @@
 .codex-run-detail { border-top: 1px solid var(--ui-border); padding-top: 16px; margin-top: 12px; min-width: 0; }
 .codex-run-detail .detail-pre, .codex-run-detail .codex-run-output { max-height: 420px; overflow: auto; overflow-wrap: anywhere; }
 .codex-run-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 12px; margin-bottom: 12px; }
-.codex-run-pagination { display: flex; gap: 10px; align-items: center; justify-content: flex-end; margin-top: 12px; }

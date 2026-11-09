@@ -1,3 +1,5 @@
+import publicErrors from "../../../agent-service/chat-error-messages.json";
+
 // 已知网关/模型错误串 → i18n key 的显示层翻译。
 // 收录原则：只翻【全串语义都被译文覆盖】的固定文案（gateway 自有兜底/汇总文案，
 // 或 "401 Invalid API Key" 这类本身就是全部信息的短句）。provider 透传的具体错误
@@ -9,6 +11,26 @@
 // 原始英文串保留在气泡 title（hover 可见）供排障对照。
 
 type TFn = (key: string, opts?: Record<string, unknown>) => string;
+
+// Older transcripts and some live events only carry the product's display
+// string. Match the complete message against the shared public catalog.
+const publicErrorKeys = new Map(Object.entries(publicErrors).flatMap(([group, messages]) =>
+  Object.entries(messages).map(([code, message]) => [message, `chatErrors:${group}.${code}`] as const)));
+
+function productErrorMessage(raw: string, t: TFn): string | null {
+  const key = publicErrorKeys.get(raw);
+  if (key) return t(key, { defaultValue: raw });
+  const fallback = /^Shoggoth (任务未完成|请求失败) \(([A-Z][A-Z0-9_]{0,127})\)$/u.exec(raw);
+  if (!fallback) return null;
+  return t(fallback[1] === "任务未完成" ? "chat.gwErrors.taskFailedCode" : "chat.gwErrors.requestFailedCode", { code: fallback[2] });
+}
+
+export function translateProductError(raw: string, t: TFn): string {
+  const prefixed = raw.startsWith("错误：");
+  const message = productErrorMessage(prefixed ? raw.slice("错误：".length) : raw, t);
+  if (message === null) return raw;
+  return prefixed ? t("chat.errorPrefix", { msg: message }) : message;
+}
 
 // Error-code presentation data, shared by all Chat surfaces and runtimes.
 // Provider text and codes retain their original language; only App copy changes.
@@ -33,13 +55,15 @@ const FAILURE_SUMMARIES: Record<string, string> = {
 function detailedFailure(raw: string, t: TFn): string | null {
   // This exact envelope is emitted by the App bridge. Never translate a
   // provider sentence merely because it contains a familiar error keyword.
-  const match = /^(错误：)?([^\n]+)\n上游原因：([\s\S]+)\n错误码：([A-Z][A-Z0-9_]{0,127})$/u.exec(raw);
+  const match = /^(错误：)?([^\n]+)\n(上游原因|启动详情)：([\s\S]+)\n错误码：([A-Z][A-Z0-9_]{0,127})$/u.exec(raw);
   if (!match) return null;
-  const [, prefix, summary, originalDetail, code] = match;
+  const [, prefix, summary, detailLabel, originalDetail, code] = match;
   const detail = originalDetail.replace(/\[(已隐藏|地址已隐藏|邮箱已隐藏|路径已隐藏)\]/gu, (_match, label: string) =>
     t(`chat.gwErrors.${({ 已隐藏: "redacted", 地址已隐藏: "redactedUrl", 邮箱已隐藏: "redactedEmail", 路径已隐藏: "redactedPath" } as Record<string, string>)[label]}`));
-  const title = t(`chat.gwErrors.${FAILURE_SUMMARIES[code] || "runtimeFailureSummary"}`, { summary });
-  const message = `${title}\n${t("chat.gwErrors.providerReason", { detail })}\n${t("chat.gwErrors.errorCode", { code })}`;
+  const title = FAILURE_SUMMARIES[code] ? t(`chat.gwErrors.${FAILURE_SUMMARIES[code]}`)
+    : productErrorMessage(summary, t) ?? t("chat.gwErrors.runtimeFailureSummary", { summary });
+  const detailKey = detailLabel === "启动详情" ? "chat.gwErrors.startupDetail" : "chat.gwErrors.providerReason";
+  const message = `${title}\n${t(detailKey, { detail })}\n${t("chat.gwErrors.errorCode", { code })}`;
   return prefix ? t("chat.errorPrefix", { msg: message }) : message;
 }
 
@@ -95,5 +119,5 @@ export function translateGatewayError(raw: string, t: TFn): string {
       return raw.startsWith("错误：") ? t("chat.errorPrefix", { msg: message }) : message;
     }
   }
-  return raw;
+  return translateProductError(raw, t);
 }

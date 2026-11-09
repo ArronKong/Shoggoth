@@ -85,7 +85,7 @@ function fixture(t) {
       onObservation: id => driver.onExternalObservation(id),
       onInteraction: (id, attention) => driver.onExternalInteraction(id, attention) });
     driver = new GroupChatDriver({ store, executor: nativeExecutor, externalExecutor: external, setTimer, clearTimer,
-      attachmentPath: (attachment) => (attachment.name === "丢了.pdf" ? null : `/state/inspiration-media/${attachment.id}.bin`),
+      attachmentPath: (attachment) => (attachment.name === "丢了.pdf" ? null : `/state/attachment-files/${attachment.id}.bin`),
       inactivityMs: 60_000, abortGraceMs: 30_000, ...options });
     return driver;
   };
@@ -570,7 +570,7 @@ test("external members get attachments as a note with local paths instead of fil
   driver.wake(f.groupId); await f.settle(); await f.tick();
   const start = f.client.calls.find((call) => call.method === "group.external.start").params;
   assert.ok(start.prompt.includes(`user: @${helper.handle} 看一下 [Files: 截图.png, 丢了.pdf]`));
-  assert.ok(start.prompt.includes("- 截图.png (image/png): /state/inspiration-media/00000000-0000-4000-8000-000000000001.bin"));
+  assert.ok(start.prompt.includes("- 截图.png (image/png): /state/attachment-files/00000000-0000-4000-8000-000000000001.bin"));
   assert.ok(start.prompt.includes("- 丢了.pdf (application/pdf): local path unavailable"));
   assert.equal(Object.hasOwn(start, "attachments"), false, "the bridge contract stays text only");
 });

@@ -80,7 +80,7 @@ function normalizedName(value) {
 }
 
 function nameKey(value) {
-  return normalizedName(value).toLocaleLowerCase("und");
+  return value.normalize("NFKC").trim().toLocaleLowerCase("und");
 }
 
 function normalizedWorkspace(value) {
@@ -223,6 +223,14 @@ function createAgentLifecycleServiceController(options = {}) {
     }
   }
 
+  function assertNameAvailable(name, exceptProfileId) {
+    const key = nameKey(name);
+    if (productStore.listAgentProfiles().some(profile => (
+      profile.id !== exceptProfileId && nameKey(profile.name) === key
+    ))) {
+      throw lifecycleError("AGENT_NAME_CONFLICT");
+    }
+  }
 
   function loadProfile(profileId) {
     const profile = productStore.getAgentProfile(profileId);
@@ -295,6 +303,7 @@ function createAgentLifecycleServiceController(options = {}) {
     const { identity } = binding;
     let profile = productStore.getAgentProfile(identity.id);
     if (!profile) {
+      assertNameAvailable(binding.name);
       profile = putProfile({
         id: identity.id,
         backendId: binding.backendId,
@@ -336,6 +345,7 @@ function createAgentLifecycleServiceController(options = {}) {
       return validateAgentLifecycleResult("agent.update", { profile });
     }
     assertCas(profile, binding.expectedUpdatedAt);
+    if (profile.name !== binding.name) assertNameAvailable(binding.name, profile.id);
     const saved = putProfile({ ...profile, name: binding.name, defaultCwd: binding.defaultCwd });
     return validateAgentLifecycleResult("agent.update", { profile: saved });
   }

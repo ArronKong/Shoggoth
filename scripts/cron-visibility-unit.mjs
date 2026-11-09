@@ -68,6 +68,15 @@ responseJobs = hidden;
 assert.equal((await api.listCronJobs({ query: "heartbeat", agentIds: ["vincent"] })).length, 0,
   "search and assistant filters cannot make heartbeats visible again");
 assert.match(calls[1].url, /query=heartbeat&agentIds=vincent/);
+responseJobs = [
+  job("shared-openclaw", { agentId: "shared" }),
+  job("shared-hermes", { backendId: "hermes", agentId: "shared" }),
+];
+const scoped = await api.listCronJobs({ agentScopes: [{ backendId: "hermes", agentId: "shared" }] });
+assert.deepEqual(Array.from(scoped, row => row.id), ["shared-hermes"], "a selection matches the assistant's backend too");
+assert.equal(new URL(calls.at(-1).url, "http://localhost").search, "?agentIds=shared", "the REST query keeps the existing ID filter");
+const legacy = await api.listCronJobs({ agentIds: ["shared"] });
+assert.deepEqual(Array.from(legacy, row => row.id), ["shared-openclaw", "shared-hermes"], "older saved IDs retain their original scope");
 responseJobs = undefined;
 assert.equal((await api.listCronJobs()).length, 0, "missing job lists remain empty");
 assert.equal((await api.getCronJobDetail(hidden[0].id)).id, hidden[0].id,

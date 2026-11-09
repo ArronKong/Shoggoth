@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type {
   CronSchedule,
   OpenClawCronDelivery,
@@ -9,9 +10,9 @@ import type {
   UnifiedCronJob,
 } from "../../types";
 import { useTranslation } from "react-i18next";
-import { Field, TextArea, TextInput } from "../../components/Field";
+import { Field, TextArea } from "../../components/Field";
 import { CronExpressionPicker, DateTimePicker, IntervalPicker } from "./CronSchedulePicker";
-import { CronScheduleType } from "./CronFormLayout";
+import { CronScheduleType, CronTaskNameRow } from "./CronFormLayout";
 
 type SchedKind = CronSchedule["kind"];
 type PayloadKind = "agentTurn" | "systemEvent";
@@ -321,17 +322,16 @@ export function validateOpenClawDraft(draft: OpenClawCronDraft): string | null {
 }
 
 // OpenClaw 表单只表达 OpenClaw 控制面，避免和 Hermes 字段混在一起。
-export default function OpenClawCronForm({ draft, setDraft }: {
+export default function OpenClawCronForm({ draft, setDraft, assistant }: {
   draft: OpenClawCronDraft;
   setDraft: (draft: OpenClawCronDraft) => void;
+  assistant: ReactNode;
 }) {
   const { t } = useTranslation();
   const set = <K extends keyof OpenClawCronDraft>(key: K, value: OpenClawCronDraft[K]) => setDraft({ ...draft, [key]: value });
   // Existing hidden options stay in the draft and continue through the original serializers.
   return <div className="cron-form">
-    <Field label={t("cronForm.taskNameLabel")}>
-      <TextInput value={draft.name} onChange={(event) => set("name", event.target.value)} placeholder={t("cronForm.taskNamePlaceholder")} />
-    </Field>
+    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} assistant={assistant} />
     <Field label={draft.payloadKind === "agentTurn" ? t("cronForm.taskPromptLabel") : t("cronForm.openclawSystemEventText")}>
       <TextArea value={draft.payloadKind === "agentTurn" ? draft.prompt : draft.systemText} onChange={(event) => set(draft.payloadKind === "agentTurn" ? "prompt" : "systemText", event.target.value)} rows={4} placeholder={t("cronForm.taskPromptPlaceholder")} />
     </Field>

@@ -1,7 +1,7 @@
-// 本地图片缓存（IndexedDB）。OpenClaw 不把用户发送的图片写进 chat.history（图片只活在
-// 喂给模型的 trajectory 里），所以重开 app 从 chat.history 重载时 user 消息已没有图。这里在
-// 发送时按 `会话Key::文本` 存图，loadHistory 后据此还原 user 消息的 images。
-// 局限：同一会话用「完全相同的文本」发不同图会互相覆盖（罕见，已与用户对齐）。
+import type { ChatAttachment } from "./chatRuntime";
+
+// External history can carry media metadata without bytes. Prefer the exact
+// send operation. The text keys below are retained for legacy history.
 const DB_NAME = "shoggoth-chat";
 const STORE = "images";
 
@@ -25,7 +25,34 @@ function openDb(): Promise<IDBDatabase> {
   return opening;
 }
 
-// 关联键：会话 + 归一化文本。重开后 history 消息只有文本可用来回认其图片。
+const operationCacheKey = (session: string, operation: string) =>
+  `attachments::${JSON.stringify([session, operation.replace(/:user$/u, "")])}`;
+
+export async function putOperationAttachments(session: string, operation: string, attachments: ChatAttachment[]): Promise<void> {
+  if (!attachments.length) return;
+  try {
+    const d = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = d.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(attachments, operationCacheKey(session, operation));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch { /* An unavailable local cache must not block chat.send. */ }
+}
+
+export async function getOperationAttachments(session: string, operation: string): Promise<ChatAttachment[] | undefined> {
+  try {
+    const d = await openDb();
+    return await new Promise<ChatAttachment[] | undefined>((resolve) => {
+      const req = d.transaction(STORE, "readonly").objectStore(STORE).get(operationCacheKey(session, operation));
+      req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : undefined);
+      req.onerror = () => resolve(undefined);
+    });
+  } catch { return undefined; }
+}
+
+// Legacy key: session + normalized text.
 export function imgCacheKey(sessionKey: string, text: string): string {
   return `${sessionKey}::${(text || "").trim()}`;
 }
@@ -37,7 +64,14 @@ export async function putImages(key: string, images: string[]): Promise<void> {
     const d = await openDb();
     await new Promise<void>((resolve, reject) => {
       const tx = d.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(images, key);
+      const store = tx.objectStore(STORE);
+      const previous = store.get(key);
+      previous.onsuccess = () => {
+        const old = previous.result;
+        const ambiguous = old === null || Array.isArray(old)
+          && (old.length !== images.length || old.some((src, index) => src !== images[index]));
+        store.put(ambiguous ? null : images, key);
+      };
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });

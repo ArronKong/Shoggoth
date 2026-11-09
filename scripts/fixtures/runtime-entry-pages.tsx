@@ -9,6 +9,7 @@ import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvi
 import { FALLBACK_BACKEND_DESCRIPTORS } from "../../app/manage-ui/src/lib/backends";
 import { NavigationGuardProvider } from "../../app/manage-ui/src/lib/navigation-guard";
 import { applyConfiguredLocale } from "../../app/manage-ui/src/i18n";
+import type { AgentManagedFile } from "../../app/manage-ui/src/types";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
 
@@ -30,13 +31,32 @@ const openLocalRuntimes = async () => {
   if (!document.querySelector("#settings-local-runtimes")) document.querySelector<HTMLButtonElement>('[data-manage="shoggoth"]')!.click();
 };
 const agentId = "shoggoth-agent-ui-entry";
-const artifactPath = "/fixture/Agent output.pdf";
+const occupiedName = "已有助理";
+let agentName = "独立 Agent";
+const artifactName = "Private report.txt";
+const artifactPath = `/fixture/workspace/${artifactName}`;
 let artifactReads = 0;
 let revealedPath: string | undefined;
+let managedFile: AgentManagedFile | null = null;
+let failManagedRead = false;
+const managedId = "f".repeat(64);
+const managedBytes = "Private file fixture text";
+const managedRoute = `/__api/agents/${agentId}/managed-files`;
+const managedPath = () => `/fixture/agents/${agentId}/files/${managedId}/${managedFile?.name}`;
+const filesTime = Date.now();
+const day = 24 * 60 * 60 * 1000;
+const managedSamples: AgentManagedFile[] = Array.from({ length: 21 }, (_, index) => ({
+  fileId: String(index).padStart(64, "0"),
+  profileId: agentId,
+  name: index === 0 ? "Agent-workspace-notes-with-a-long-filename-for-narrow-layout.md" : `Agent notes ${index}.md`,
+  mimeType: "text/markdown", sizeBytes: 2048, sha256: "a".repeat(64), status: index === 1 ? "missing" : "available",
+  revision: 1, createdAt: filesTime - (index + 1) * day, updatedAt: filesTime - (index + 1) * day,
+  source: { kind: "chat", runId: "fixture-run", sourceId: "fixture-source", sessionKey: null },
+}));
 const sessionKey = `agent:${agentId}:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
 const first = "11111111-1111-8111-8111-111111111111", second = "22222222-2222-8222-8222-222222222222";
 const descriptors = FALLBACK_BACKEND_DESCRIPTORS.filter(item => item.id === "shoggoth").map(item => ({ ...item,
-  surfaces: { ...item.surfaces, nativeCapacity: false } }));
+  surfaces: { ...item.surfaces, nativeCapacity: false, agentFiles: true } }));
 const row = () => ({ key: sessionKey, backendId: "shoggoth", agentId, agentName: "独立 Agent", displayName: preview ? "模型与 Runtime" : "Runtime 入口验收",
   kind: "direct", updatedAt: preview ? Date.now() : 123456, runtime: session.runtime, model: session.model });
 let session = { sessionKey, revision: 1, bindingId: first, runtime: "codex", model: preview ? "gpt-5.4" : "shared-model", canSwitch: true, contextUsage: null };
@@ -65,7 +85,7 @@ const catalog = () => ({ selection: snapshot(), capabilities,
 let bindingRevision = 1, defaultBindingId = first;
 let defaultModel = preview ? "gpt-5.4" : "shared-model";
 let defaultProvider: string | undefined = "@chatgpt", defaultReject = false, defaultReads = 0, defaultWrites = 0;
-const agentDetail = () => ({ id: agentId, name: "独立 Agent", backendId: "shoggoth", profile: agentId,
+const agentDetail = () => ({ id: agentId, name: agentName, backendId: "shoggoth", profile: agentId,
   model: defaultModel, provider: defaultProvider === "@chatgpt" ? "ChatGPT" : defaultProvider ?? "pi",
   runtime: bindings.find(binding => binding.id === defaultBindingId)!.runtime,
   environmentKind: defaultBindingId === first ? "shoggoth-managed" : "native-user",
@@ -141,13 +161,55 @@ scope.fetch = async (input: string, init?: RequestInit) => {
   if (route === "/__api/shoggoth/status") return Response.json({ error: "fixture service details unavailable" }, { status: 503 });
   if (route === "/__api/versions") return Response.json({ versions: [] });
   if (route === "/__api/self-updates") return Response.json({ backends: [] });
+  if ((route === "/__api/agents" && init?.method === "POST")
+    || (route === `/__api/agents/${agentId}` && init?.method === "PUT")) {
+    const { name } = JSON.parse(String(init.body));
+    if (name === occupiedName) {
+      return Response.json({ code: "AGENT_NAME_CONFLICT", field: "name", error: "fixture conflict" }, { status: 409 });
+    }
+    if (init.method === "PUT") agentName = name;
+    return Response.json({ result: init.method === "PUT" ? { id: agentId } : {} });
+  }
   if (route === "/__api/agents") return Response.json({ agents: [agentDetail()] });
   if (route === `/__api/agents/${agentId}`) return Response.json({ agent: agentDetail() });
+  if (route === managedRoute || route.startsWith(managedRoute + "/")) {
+    check(url.searchParams.get("backend") === "shoggoth", "Private file uses the selected backend");
+    if (route === managedRoute && init?.method === "POST") {
+      check(init.body instanceof File && await init.body.text() === managedBytes, "Upload preserves file bytes");
+      check(url.searchParams.get("operationId"), "Upload uses an operation ID");
+      const now = Date.now();
+      managedFile = { fileId: managedId, profileId: agentId, name: url.searchParams.get("name")!,
+        mimeType: "text/plain", sizeBytes: managedBytes.length, sha256: "a".repeat(64),
+        status: "available", revision: 1, createdAt: now, updatedAt: now,
+        source: { kind: "import", runId: null, sourceId: null, sessionKey: null } };
+      return Response.json({ file: managedFile });
+    }
+    if (route === managedRoute) {
+      if (failManagedRead) {
+        failManagedRead = false;
+        return Response.json({ error: "fixture private files unavailable" }, { status: 503 });
+      }
+      const cursor = Number(url.searchParams.get("cursor")) || 0;
+      const items = managedFile?.status === "available" ? [managedFile, ...managedSamples] : managedSamples;
+      return Response.json({ items: items.slice(cursor, cursor + 20), nextCursor: items.length > cursor + 20 ? cursor + 20 : null });
+    }
+    check(route === `${managedRoute}/${managedId}` || route === `${managedRoute}/${managedId}/content`, "Private file keeps its ID");
+    if (route.endsWith("/content")) return new Response(managedBytes, { headers: { "Content-Type": "text/plain" } });
+    if (init?.method === "PUT" || init?.method === "DELETE") {
+      const body = JSON.parse(String(init.body));
+      check(managedFile && body.expectedRevision === managedFile.revision, "Private file changes are revision checked");
+      managedFile = { ...managedFile!, revision: managedFile!.revision + 1,
+        ...(init.method === "PUT" ? { name: body.name } : { status: "deleted" }) };
+      return Response.json({ file: managedFile });
+    }
+    return Response.json({ file: managedFile, path: managedPath() });
+  }
   if (route === `/__api/agents/${agentId}/artifacts`) {
     check(url.searchParams.get("backend") === "shoggoth", "Agent files request uses the selected backend");
+    check(url.searchParams.get("scope") === "workspace", "workspace read excludes the separate private index");
     if (++artifactReads === 1) return Response.json({ error: "fixture unavailable" }, { status: 503 });
     return Response.json({ artifacts: { supported: true, partial: true, total: 2, items: [
-      { path: artifactPath, name: "Agent output.pdf", kind: "doc", area: "session-output", mtimeMs: 123456, size: 2048 },
+      { path: artifactPath, name: artifactName, kind: "doc", area: "session-output", mtimeMs: filesTime - 1.5 * day, size: 2048 },
     ] } });
   }
   if (route === "/__api/host/reveal-path") {
@@ -351,18 +413,109 @@ scope.checkAgentFiles = async () => {
   const files = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(tab => tab.textContent === "Files");
   check(files, "Shoggoth Agent shows the Files tab");
   files!.click();
-  await wait(() => button("Retry"), "an unavailable file list can be retried");
+  const list = () => document.querySelector<HTMLUListElement>('ul[aria-label="Files"]');
+  const rows = () => [...(list()?.querySelectorAll<HTMLButtonElement>("li > button") ?? [])];
+  await wait(() => button("Retry") && rows().length === 20, "a failed workspace read still shows the private files");
   check(files!.getAttribute("aria-selected") === "true", "the Files tab remains selected");
   button("Retry").click();
   const row = () => document.querySelector<HTMLButtonElement>(`button[title$="${artifactPath}"]`);
   await wait(row, "Agent file from the shared artifact route");
-  check(artifactReads === 2 && row()!.textContent?.includes("Agent output.pdf"), "retry renders the Agent output");
-  check(document.body.textContent?.includes("2 total")
+  check(artifactReads === 2 && row()!.textContent?.includes(artifactName), "retry renders the Agent output");
+  check(document.body.textContent?.includes("Showing 21")
     && [...document.querySelectorAll('[role="status"]')].some(status => status.textContent?.includes("Some sessions are unavailable")),
     "confirmed files and partial results are visible");
+  check(document.querySelectorAll('ul[aria-label="Files"]').length === 1 && rows()[1] === row(),
+    "workspace output and private files share one list in modification order");
+  check(rows().every(item => item.className === row()!.className && item.scrollWidth <= item.clientWidth + 1)
+    && getComputedStyle(list()!).flexDirection === "column" && rows()[2].textContent?.includes("Missing on disk"),
+    "both sources use compact rows that fit the narrow window");
+  button("Load more").click();
+  await wait(() => rows().length === 22 && !button("Load more"), "older private files append to the same list");
+  check(rows()[1] === row(), "loading older files retains the workspace output");
   row()!.click();
   await wait(() => revealedPath === artifactPath, "file row reveals the exact output in Finder");
-  return { filesTab: true, artifactReads, reveal: true };
+
+  const uploadInput = () => document.querySelector<HTMLInputElement>('input[type="file"][hidden]');
+  await wait(() => button("Import file") && uploadInput(), "private library entry");
+  const transfer = new DataTransfer();
+  transfer.items.add(new File([managedBytes], artifactName, { type: "text/plain" }));
+  uploadInput()!.files = transfer.files;
+  uploadInput()!.dispatchEvent(new Event("change", { bubbles: true }));
+  const privateRow = (name: string) => [...document.querySelectorAll<HTMLButtonElement>("button")]
+    .find(item => item.textContent?.includes(name) && item.textContent.includes("Imported"));
+  await wait(() => privateRow(artifactName) && !privateRow(artifactName)!.disabled, "uploaded private file in the list");
+  check(rows()[0] === privateRow(artifactName) && rows().filter(item => item.firstElementChild?.textContent === artifactName).length === 2,
+    "same-name files have separate rows and the newer file appears first");
+  privateRow(artifactName)!.click();
+  const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
+  const dialogButton = (label: string) => [...(dialog()?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
+    .find(item => item.textContent === label);
+  await wait(() => dialog()?.querySelector("pre")?.textContent === managedBytes, "bounded private text preview");
+  const originalHref = dialog()!.querySelector("a[download]")!.getAttribute("href");
+  const filename = dialog()!.querySelector<HTMLInputElement>("input")!;
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(filename, "Renamed report.txt");
+  filename.dispatchEvent(new Event("input", { bubbles: true }));
+  await wait(() => dialogButton("Save") && !dialogButton("Save")!.disabled, "private file rename ready");
+  dialogButton("Save")!.click();
+  await wait(() => dialog()?.querySelector("h2")?.textContent === "Renamed report.txt", "rename updates the private file");
+  check(dialog()!.querySelector("a[download]")!.getAttribute("href") === originalHref, "download URL survives rename");
+  const reveal = [...dialog()!.querySelectorAll<HTMLButtonElement>("button")]
+    .find(item => /reveal|finder/iu.test(item.textContent || ""));
+  check(reveal, "private Finder reveal");
+  reveal!.click();
+  await wait(() => revealedPath === managedPath(), "private Finder action resolves the renamed path");
+  dialogButton("Delete")!.click();
+  const confirmation = () => document.querySelector<HTMLElement>('[role="alertdialog"]');
+  await wait(() => confirmation()?.textContent?.includes("Renamed report.txt"), "confirm private deletion");
+  confirmation()!.querySelector<HTMLButtonElement>(".btn-danger")!.click();
+  await wait(() => managedFile?.status === "deleted" && !privateRow("Renamed report.txt") && !dialog(), "private file removed from index");
+  await wait(() => !button("Refresh")?.disabled, "file controls ready after deletion");
+  failManagedRead = true;
+  button("Refresh").click();
+  await wait(() => button("Retry"), "a failed private file refresh can be retried");
+  check(rows().length === 1 && rows()[0] === row(), "private file errors keep the workspace row visible");
+  button("Retry").click();
+  await wait(() => !button("Retry") && !button("Refresh")?.disabled, "private file retry succeeds");
+  return { filesTab: true, singleList: true, loadMore: true, sameNameFiles: true, artifactReads, reveal: true, privateImportPreviewRenameDelete: true };
+};
+
+scope.checkAgentNameConflicts = async () => {
+  scope.showAgents(false);
+  await wait(() => !document.querySelector(".agents-page"), "return to chat");
+  scope.showAgents(true);
+  await applyConfiguredLocale("en");
+  const add = () => document.querySelector<HTMLButtonElement>('button[title="+ New Agent"]');
+  await wait(add, "new Agent button");
+  add()!.click();
+  const createName = () => document.querySelector<HTMLInputElement>('[role="dialog"] input');
+  await wait(createName, "new Agent name field");
+  const setName = (input: HTMLInputElement, name: string) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, name);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const errorFor = (input: HTMLInputElement) => document.getElementById(input.getAttribute("aria-describedby") || "");
+  setName(createName()!, occupiedName);
+  button("Create").click();
+  await wait(() => errorFor(createName()!)?.textContent?.includes("Choose a different name"), "localized create conflict");
+  check(createName()!.value === occupiedName && createName()!.getAttribute("aria-invalid") === "true", "keep the create draft");
+  setName(createName()!, "新助理");
+  await wait(() => !errorFor(createName()!), "editing clears the create conflict");
+  button("Create").click();
+  await wait(() => !createName(), "corrected creation succeeds");
+
+  await openAgentOverview();
+  await applyConfiguredLocale("zh-CN");
+  const rename = () => document.querySelector<HTMLInputElement>("[data-agent-overview-panel] input");
+  setName(rename()!, occupiedName);
+  await wait(() => button("保存"), "rename save button");
+  button("保存").click();
+  await wait(() => errorFor(rename()!)?.textContent?.includes("请换一个名称"), "localized rename conflict");
+  check(rename()!.value === occupiedName && agentName === "独立 Agent", "keep the rename draft and saved name");
+  setName(rename()!, "资料助理");
+  await wait(() => !errorFor(rename()!), "editing clears the rename conflict");
+  button("保存").click();
+  await wait(() => agentName === "资料助理" && rename()?.value === agentName, "corrected rename succeeds");
+  return { create: true, rename: true };
 };
 
 if (preview) {

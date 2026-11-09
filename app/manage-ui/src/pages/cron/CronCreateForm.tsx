@@ -1,8 +1,8 @@
 import { useTranslation } from "react-i18next";
-import { Field, TextArea, TextInput } from "../../components/Field";
+import { Field, TextArea } from "../../components/Field";
 import type { BackendDescriptor, UnifiedAgent } from "../../types";
 import CronAgentPicker from "./CronAgentPicker";
-import { CronScheduleType } from "./CronFormLayout";
+import { CronScheduleType, CronTaskNameRow } from "./CronFormLayout";
 import { CronExpressionPicker, DateTimePicker, IntervalPicker } from "./CronSchedulePicker";
 import type { CronCreateDraft } from "./cronCreateDraft";
 
@@ -20,13 +20,10 @@ export default function CronCreateForm({ draft, setDraft, backends, agents, load
   const set = <K extends keyof CronCreateDraft>(key: K, value: CronCreateDraft[K]) => setDraft({ ...draft, [key]: value });
   const minInterval = backends.find((backend) => backend.id === draft.backendId)?.surfaces.cron?.kind === "openclaw" ? 1 / 60 : 1;
   return <div className="cron-form">
-    <div className="field-row">
-      <Field label={t("cronForm.taskNameLabel")}>
-        <TextInput value={draft.name} onChange={(event) => set("name", event.target.value)} placeholder={t("cronForm.taskNamePlaceholder")} required />
-      </Field>
+    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} assistant={
       <CronAgentPicker value={draft} onChange={(assistant) => setDraft({ ...draft, ...assistant })}
         backends={backends} agents={agents} loading={loading} failedBackends={failedBackends} onRetry={onRetry} disabled={disabled} />
-    </div>
+    } />
     <Field label={t("cronForm.taskPromptLabel")}>
       <TextArea value={draft.prompt} onChange={(event) => set("prompt", event.target.value)} rows={4}
         placeholder={t("cronForm.taskPromptPlaceholder")} required />

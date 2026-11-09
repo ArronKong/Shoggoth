@@ -13,7 +13,9 @@ import "../../app/manage-ui/src/manage-skin.css";
 
 // The actual ChatPage, with all transports confined to synthetic records.
 const state = window as any;
-const alpha = { id: "capsule-shrimp", name: "虾长老", backendId: "openclaw" };
+const previewParams = new URLSearchParams(location.search);
+const avatarPreview = previewParams.has("avatar-preview");
+const alpha = { id: "capsule-shrimp", name: avatarPreview ? "Shoggoth" : "虾长老", backendId: avatarPreview ? "shoggoth" : "openclaw" };
 const beta = { id: "hermes-lotus", name: "莲叶", backendId: "hermes" };
 const agents = [alpha, beta];
 const sessions = [alpha, beta].map((agent, index) => ({ key: `agent:${agent.id}:main`,
@@ -37,12 +39,12 @@ state.deferArtifacts = false;
 state.failArtifacts = false;
 state.requests = requests;
 state.writes = writes;
-localStorage.clear();
+if (!avatarPreview) localStorage.clear();
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
 localStorage.setItem("shoggoth.chat.lastActive.v1", sessions[0].key);
 localStorage.setItem("shoggoth.chat.immersive.v1", "0");
-document.documentElement.dataset.theme = "light";
-void i18n.changeLanguage("zh-CN");
+document.documentElement.dataset.theme = previewParams.get("theme") === "dark" ? "dark" : "light";
+void i18n.changeLanguage(previewParams.get("lang") === "en" ? "en" : "zh-CN");
 class FixtureSocket {
   static OPEN = 1;
   readyState = 1;
@@ -70,6 +72,8 @@ state.WebSocket = FixtureSocket;
 const realFetch = window.fetch.bind(window);
 window.fetch = async (input, init) => {
   const url = new URL(String(input), location.origin);
+  if (state.failAvatarLibrary && url.pathname === "/avatar/library/") return new Response(null, { status: 503 });
+  if (state.failAvatarSave && url.pathname === `/avatar/${alpha.id}` && init?.method === "PUT") return new Response(null, { status: 507 });
   if (!url.pathname.startsWith("/__api")) return realFetch(input, init);
   requests.push(url.pathname + url.search);
   if (init?.method && init.method !== "GET") writes.push(`${init.method} ${url.pathname}`);
@@ -91,6 +95,9 @@ window.fetch = async (input, init) => {
         { path: "/fixture/current-report.md", name: "本轮报告.md", kind: "doc", area: "session-output", mtimeMs: Date.now() },
         { path: "/fixture/older-session.pdf", name: "往期会话产出.pdf", kind: "doc", area: "session-output", mtimeMs: Date.now() - 86_400_000 },
       ] : [] } };
+    } else if (url.pathname.endsWith("/runtime-models")) {
+      payload = { selection: { bindingId: "fixture-binding", runtime: "codex", model: null, canSwitch: false, candidates: [] },
+        capabilities: { attachments: {}, slash: false, steer: false }, models: [], runtimes: [] };
     } else if (url.pathname.endsWith("/file")) {
       if (url.searchParams.get("file") !== "SOUL.md") throw Error("Only SOUL should be loaded");
       if (agent.id === alpha.id && state.deferSoul) {
@@ -161,15 +168,149 @@ const switchAgent = async (agent: typeof alpha) => {
   await wait(() => header().querySelector(".chat-header__name")?.textContent === agent.name, `switch to ${agent.name}`);
 };
 const closePanel = async () => {
+  if (header()?.dataset.agentPanel === "avatar") {
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await wait(() => header().dataset.agentPanel === "profile", "avatar picker returns to profile");
+  }
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await wait(() => region().getAttribute("aria-hidden") === "true", "panel closed");
   await settle();
 };
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><NavigationGuardProvider><ScrollbarProvider /><Routes><Route path="/agents" element={<AgentsPage />} /><Route path="*" element={<ChatPage />} /></Routes></NavigationGuardProvider></UiProvider></HashRouter>);
+
+const avatarEdit = () => region().querySelector<HTMLButtonElement>(`button[title="${i18n.t("chat.changeAvatar")}"]`);
+const avatarPicker = () => region().querySelector<HTMLElement>("section[aria-labelledby]");
+const avatarBack = () => header().querySelector<HTMLButtonElement>(".chat-header__avatar-trigger")!;
+const openAvatarPicker = async () => {
+  await wait(() => header(), "chat header ready");
+  if (header().dataset.agentPanel !== "profile") clickPanel("profile");
+  await wait(avatarEdit, "avatar edit entry");
+  const trigger = avatarEdit()!;
+  const avatar = trigger.querySelector(".chat-header__avatar")!.getBoundingClientRect();
+  const name = trigger.nextElementSibling!.firstElementChild!.getBoundingClientRect();
+  trigger.click();
+  await wait(avatarPicker, "avatar picker page");
+  return { avatar, name };
+};
+if (avatarPreview) void openAvatarPicker().catch(error => { state.fixtureError = String(error); });
+
+state.runAvatarPickerFixture = async () => {
+  await switchAgent(alpha);
+  const button = (key: string) => Array.from(avatarPicker()!.querySelectorAll<HTMLButtonElement>("button"))
+    .find(element => element.textContent?.trim() === i18n.t(key))!;
+  const choices = () => Array.from(avatarPicker()?.querySelectorAll<HTMLInputElement>('input[type="radio"]') ?? []);
+  const choiceImage = (choice: HTMLInputElement) => choice.closest("label")!.querySelector("img")!;
+  const loaded = () => wait(() => choices().length === 20 && choices().every(choice => {
+    const image = choiceImage(choice);
+    return image.complete && image.naturalWidth > 0;
+  }), "twenty preset images decoded");
+  const currentImage = () => realFetch(`/avatar/${alpha.id}`, { cache: "reload" });
+  state.failAvatarLibrary = true;
+  await openAvatarPicker();
+  check(avatarBack().title === i18n.t("chat.avatarPicker.back") && document.activeElement === avatarBack(),
+    "the header has a focused Back button for the avatar page");
+  check(header().querySelector("h2")?.textContent === i18n.t("chat.changeAvatar")
+    && !header().querySelector(".chat-header__statusline") && !avatarPicker()?.querySelector("h2"),
+    "the avatar title replaces session identity in the header and is shown only once");
+  await wait(() => avatarPicker()?.querySelector('[role="alert"]'), "library error");
+  check(!button("chat.avatarPicker.upload").disabled, "upload stays available if the gallery is unavailable");
+  state.failAvatarLibrary = false;
+  button("common.retry").click();
+  await loaded();
+  check(button("chat.avatarPicker.save").disabled, "opening the gallery doesn't select an image");
+  const first = choices();
+  check(new Set(first.map(choice => choice.value)).size === 20, "one batch has twenty distinct images");
+  const selectedUrl = choiceImage(first[0]).src;
+  first[0].click();
+  await wait(() => avatarPicker()?.querySelector("img")?.src === selectedUrl, "preset preview");
+  button("chat.avatarPicker.shuffle").click();
+  await loaded();
+  check(choices().every(choice => !first.some(previous => previous.value === choice.value)), "successive batches don't share images");
+  check(avatarPicker()?.querySelector("img")?.src === selectedUrl, "shuffling keeps the preview selection");
+  avatarBack().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await wait(() => avatarEdit() && document.activeElement === avatarEdit(), "Escape returns focus to the profile avatar");
+  check((await currentImage()).headers.get("content-type") === "image/jpeg", "preview and Escape don't change the saved image");
+
+  await openAvatarPicker();
+  avatarBack().click();
+  await wait(() => avatarEdit() && document.activeElement === avatarEdit(), "header Back returns focus to the profile avatar");
+  await openAvatarPicker();
+  await loaded();
+  choices()[0].click();
+  await wait(() => !button("chat.avatarPicker.save").disabled, "preset ready to save");
+  const sidebarAvatar = () => document.querySelector<HTMLImageElement>(`.chat-agent__avatar img[src^="/avatar/${alpha.id}"]`);
+  const priorAvatarUrl = sidebarAvatar()?.src;
+  state.failAvatarSave = true;
+  button("chat.avatarPicker.save").click();
+  await wait(() => avatarPicker()?.querySelector('[role="alert"]'), "failed save shows a retryable error");
+  check(choices()[0].checked, "failed save keeps the selection");
+  state.failAvatarSave = false;
+  button("chat.avatarPicker.save").click();
+  await wait(avatarEdit, "save returns to the profile");
+  await wait(() => sidebarAvatar()?.src !== priorAvatarUrl && sidebarAvatar()?.naturalWidth === 640, "sidebar loads saved preset");
+  const preset = await (await currentImage()).blob();
+  check(preset.type === "image/png", "the preset was saved by the real avatar endpoint");
+
+  await openAvatarPicker();
+  const input = avatarPicker()!.querySelector<HTMLInputElement>('input[type="file"]')!;
+  const upload = (file: File) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  upload(new File(["bad image"], "invalid.png", { type: "image/png" }));
+  await wait(() => avatarPicker()?.querySelector('[role="alert"]')?.textContent === i18n.t("chat.avatarPicker.imageFailed"), "invalid upload shows an error");
+  upload(new File([preset], "custom.png", { type: "image/png" }));
+  await wait(() => avatarPicker()?.querySelector("img")?.src.startsWith("blob:"), "uploaded image is previewed locally");
+  button("chat.avatarPicker.save").click();
+  await wait(avatarEdit, "custom image save returns to the profile");
+  await wait(() => sidebarAvatar()?.naturalWidth === 768, "sidebar loads the uploaded image");
+  await closePanel();
+  return { passed: true, checks: "header title and Back, Escape focus, real preset gallery, retry, non-overlapping batches, preview, failed save, sidebar refresh, invalid and valid upload" };
+};
+
 state.prepareCapsuleShot = async (kind: string, theme = "light") => {
   document.documentElement.dataset.theme = theme;
-  await switchAgent(alpha);
   await closePanel();
+  await switchAgent(alpha);
+  if (kind === "avatar-picker") {
+    const profile = await openAvatarPicker();
+    await wait(() => {
+      const images = Array.from(avatarPicker()?.querySelectorAll<HTMLImageElement>('[role="radiogroup"] img') ?? []);
+      return images.length === 20 && images.every(img => img.complete && img.naturalWidth > 0);
+    }, "avatar gallery ready for screenshot");
+    const picker = avatarPicker()!;
+    const grid = picker.querySelector('[role="radiogroup"]')!;
+    const columns = getComputedStyle(grid).gridTemplateColumns.split(" ").map(value => parseFloat(value));
+    check(columns.length === 5, "avatar gallery always shows five per row");
+    const currentAvatar = picker.querySelector("img")!.getBoundingClientRect();
+    const pickerName = picker.querySelector('[role="status"]')!.previousElementSibling!.getBoundingClientRect();
+    check(Math.abs(pickerName.x - profile.name.x) <= 1 && Math.abs(pickerName.y - profile.name.y) <= 1,
+      "avatar picker text aligns with profile text");
+    check(currentAvatar.width === profile.avatar.width && currentAvatar.height === profile.avatar.height,
+      "current avatar matches the profile at this width");
+    const tiles = Array.from(grid.querySelectorAll("img"), image => image.getBoundingClientRect());
+    check(tiles.every((tile, index) => tile.width === tile.height
+      && Math.abs(tile.width - Math.min(140, columns[index % columns.length])) <= 0.1),
+      "presets are 140px squares when the column has room and scale down to fit");
+    check(tiles[1].left - tiles[0].right >= 16 && tiles[5].top - tiles[0].bottom >= 18,
+      "presets have increased horizontal and vertical spacing");
+    const buttons = Array.from(picker.querySelectorAll("button"));
+    const shuffle = buttons.find(button => button.textContent?.trim() === i18n.t("chat.avatarPicker.shuffle"))!.getBoundingClientRect();
+    const save = buttons.find(button => button.textContent?.trim() === i18n.t("chat.avatarPicker.save"))!.getBoundingClientRect();
+    check(shuffle.right <= save.left && save.bottom <= grid.getBoundingClientRect().top
+      && Math.abs((shuffle.top + shuffle.bottom) / 2 - (save.top + save.bottom) / 2) <= 1,
+      "Save sits to the right of Shuffle on the gallery toolbar");
+    const body = picker.parentElement!;
+    const style = getComputedStyle(body);
+    const availableWidth = body.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    check(Math.abs(grid.getBoundingClientRect().width - availableWidth) <= 1,
+      "avatar gallery fills the available page width");
+    picker.querySelector<HTMLInputElement>('input[type="radio"]')?.click();
+    await settle();
+    return;
+  }
   clickPanel(kind);
   await wait(() => kind === "profile" ? region().textContent?.includes("我的工作方式")
     : kind === "cron" ? region().textContent?.includes("每天早上的灵感整理")
@@ -277,6 +418,11 @@ state.runCapsuleFixture = async () => {
   check(Math.abs(header().getBoundingClientRect().height - collapsedHeight) < 2, "capsule returns to its original height");
   clickPanel("cron");
   await wait(() => region().querySelectorAll("a[href^='#/cron']").length === 2, "scoped Cron jobs");
+  const cronLinks = Array.from(region().querySelectorAll<HTMLAnchorElement>("a[href^='#/cron']"))
+    .map(link => new URLSearchParams(link.hash.split("?")[1]));
+  check(cronLinks.every(params => params.get("run") === "latest" && params.get("backend") === alpha.backendId)
+    && cronLinks.map(params => params.get("job")).join(",") === "capsule-daily,capsule-weekly",
+  "chat task links request current run results for the exact tasks");
   check(Math.abs(header().getBoundingClientRect().height - fullHeight) < 2, "Cron uses the same full-height surface as the profile");
   check(tools()[1].title === i18n.t("common.close") && tools()[1].querySelector("img"), "Cron trigger becomes close");
   check(!region().textContent?.includes("其他"), "other Agent/backend jobs are excluded");

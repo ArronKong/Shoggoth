@@ -338,6 +338,24 @@
 :is(.management-page.settings-page, .settings-manage-modal) .settings-cli-tile > button { flex: 0 0 auto; }
 :is(.management-page.settings-page, .settings-manage-modal) .settings-cli-tile.is-off :is(.settings-backend-mark, h6) { opacity: 0.55; }
 
+.settings-manage-modal #settings-local-runtimes { padding: 0; background: transparent; }
+.settings-manage-modal #settings-local-runtimes .settings-subsection-meta {
+  background: var(--ui-surface-2);
+  color: var(--settings-muted-surface-2);
+}
+.settings-manage-modal #settings-local-runtimes .settings-cli-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+.settings-manage-modal #settings-local-runtimes .settings-cli-tile {
+  padding-inline: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.settings-manage-modal #settings-local-runtimes .settings-cli-tile + .settings-cli-tile {
+  border-top: 1px solid var(--ui-hairline);
+}
+
 /* ── General preferences: one grouped card, one row per setting ───── */
 
 .management-page.settings-page .settings-list-card { gap: 0; padding-block: 6px; }

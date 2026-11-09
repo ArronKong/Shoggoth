@@ -51,18 +51,17 @@ void i18next.use(initReactI18next).init({
   react: { useSuspense: false }, // resources are bundled + synchronous
 });
 
-// Keep <html lang> in sync with the active locale. index.html hard-codes
-// lang="zh"; without this the attribute never tracks an `en` switch (a11y/SEO,
-// and any :lang() CSS hook). Set on boot + on every runtime language change.
-function syncHtmlLang(lng: string) {
+// Apply the configured language to the browser tab as well as the React UI.
+function syncDocumentLocale(lng: string) {
   try {
     document.documentElement.lang = lng;
+    document.title = i18next.getFixedT(lng)("common.documentTitle");
   } catch {
     /* no document (non-browser context) — ignore */
   }
 }
-i18next.on("languageChanged", syncHtmlLang);
-syncHtmlLang(initialLng);
+i18next.on("languageChanged", syncDocumentLocale);
+syncDocumentLocale(initialLng);
 
 // Electron preload 会先写 localStorage；standalone 浏览器没有 preload，必须在首个
 // React render 前把 config.locale 应用到同一缓存与 i18next，避免一直沿用旧缓存/系统值。
@@ -76,7 +75,7 @@ export async function applyConfiguredLocale(locale: string | null | undefined): 
   }
   const next = configured || systemLocale();
   await i18next.changeLanguage(next);
-  syncHtmlLang(next);
+  syncDocumentLocale(next);
 }
 
 export default i18next;

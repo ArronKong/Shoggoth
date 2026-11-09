@@ -121,6 +121,8 @@ function minimalAuthorityPathDisposition(relativePath) {
   if (root === "temporary-secrets") return "exclude";
   if (root === "agents" && parts.length === 3
     && /^native-memory-semantic\.sqlite(?:-(?:wal|shm|journal))?$/u.test(parts[2])) return "exclude";
+  if (root === "agents" && parts[2] === "files"
+    && (parts[3]?.startsWith(".stage-") || parts[4] === ".shoggoth-file.json.tmp")) return "exclude";
   if (root === "chat-ui.writer.lock" || root === "self-improvement.writer.lock") return "exclude";
   // App acknowledgement ownership is live process authority, never backup data.
   if (root.startsWith("mcp-connection-acks.writer.lock") || root.startsWith(".quarantine-") && root.includes("mcp-connection-acks.writer.lock")) return "exclude";

@@ -291,13 +291,15 @@ class AgentHarnessServiceController {
       }
       if (GENERATED.has(params.kind)) {
         const view = this.definitionStore.readGeneratedView(params.profileId, params.kind);
-        return { kind: params.kind, revision: view?.revision ?? null, content: view?.content ?? "", readOnly: true };
+        const localDirectory = this.definitionStore.documentDirectory?.(params.profileId, params.kind, view?.revision);
+        return { kind: params.kind, revision: view?.revision ?? null, content: view?.content ?? "", readOnly: true, localDirectory };
       }
       const value = params.revision === null
         ? this.definitionStore.get(params.profileId)
         : this.definitionStore.readRevision(params.profileId, params.revision);
       if (!value) throw harnessError("HARNESS_PROFILE_NOT_FOUND", "Definition revision 不存在");
-      return { kind: params.kind, revision: value.manifest.revision, content: value.documents[params.kind], readOnly: params.kind === "USER" };
+      const localDirectory = this.definitionStore.documentDirectory?.(params.profileId, params.kind, value.manifest.revision);
+      return { kind: params.kind, revision: value.manifest.revision, content: value.documents[params.kind], readOnly: params.kind === "USER", localDirectory };
     }
     if (method === "harness.definition.update") {
       if (params.kind === "USER" || GENERATED.has(params.kind)) {

@@ -1549,7 +1549,7 @@ export interface TaskChildResult {
   latestSummary?: string;
 }
 export interface TaskProof { id: string; status: "passed" | "failed" | "skipped" | "unknown"; createdAt: number; label?: string; command?: string; url?: string; note?: string; }
-export interface TaskArtifact { id: string; createdAt: number; label?: string; url?: string; path?: string; mimeType?: string; }
+export interface TaskArtifact { id: string; createdAt: number; label?: string; url?: string; path?: string; mimeType?: string; status?: AgentManagedFile["status"]; }
 export interface TaskLink { id: string; type: "parent" | "child" | "blocks" | "blocked_by" | "relates_to"; createdAt: number; targetCardId?: string; title?: string; url?: string; }
 export interface TaskAttachment {
   id: string; filename: string; size?: number;
@@ -1768,6 +1768,14 @@ export interface AgentFileMeta {
   modifiedAt?: number;
   readOnly?: boolean;
 }
+export interface AgentFileContent {
+  name: string;
+  content: string;
+  missing?: boolean;
+  revision?: number | string | null;
+  readOnly?: boolean;
+  localDirectory?: string;
+}
 export interface AgentChannel {
   id: string;
   type?: string;
@@ -1791,6 +1799,7 @@ export interface SessionArchive {
 }
 export interface SessionArtifactItem {
   path: string;
+  fileId?: string;
   name: string;
   area: string;
   size?: number;
@@ -2066,6 +2075,7 @@ export interface UnifiedAgentDetail {
   lifecycleState?: UnifiedAgent["lifecycleState"];
   updatedAt?: number;
   files?: AgentFileMeta[];
+  setupFiles?: AgentFileMeta[];
   definitionRevision?: number;
   backendId: string;
 }
@@ -2705,6 +2715,7 @@ export interface BackendDescriptor {
     oauth: boolean;
     dashboardRuns: boolean;
     agentHarness: boolean;
+    agentFiles?: boolean;
     nativeCapacity?: boolean;
     nativeMemoryConfig?: boolean;
     nativeMemorySharingConfig?: boolean;
@@ -3289,7 +3300,7 @@ export interface BackendRunDetail {
   error?: string;
   retryOf?: string;
   events: ShoggothRunEvent[];
-  artifacts: Array<{ id: string; name: string; kind: string }>;
+  artifacts: Array<{ id: string; name: string; kind: string; url?: string }>;
 }
 
 /** @deprecated Use BackendRunDetail. */
@@ -3298,6 +3309,7 @@ export type ShoggothRunDetail = BackendRunDetail;
 export interface DashboardArtifactItem {
   /** 绝对路径：Finder reveal（/__api/cli/reveal）与 /__media 缩略图直接用。 */
   path: string;
+  fileId?: string;
   name: string;
   /** "workspace" | "media/outbound" | "agents/<id>" | "session-reference" */
   area: string;
@@ -3315,6 +3327,30 @@ export interface AgentArtifactsResult {
   partial?: boolean;
   total?: number;
   items: DashboardArtifactItem[];
+}
+
+export interface AgentManagedFile {
+  fileId: string;
+  profileId: string;
+  name: string;
+  mimeType: string | null;
+  sizeBytes: number;
+  sha256: string;
+  createdAt: number;
+  updatedAt: number;
+  revision: number;
+  status: "available" | "missing" | "deleted";
+  source: {
+    kind: "import" | "chat" | "cron" | "kanban" | "inspiration";
+    runId: string | null;
+    sourceId: string | null;
+    sessionKey: string | null;
+  };
+}
+
+export interface AgentManagedFilesPage {
+  items: AgentManagedFile[];
+  nextCursor: number | null;
 }
 
 export interface DashboardGroupArtifact {

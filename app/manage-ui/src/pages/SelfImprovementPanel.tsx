@@ -1,23 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import "../i18n/selfImprovementResources";
 import { selfImprovement } from "../api/client";
 import { Field, Option, Select, Switch, TextArea, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
 import ChatMarkdown from "../components/ChatMarkdown";
+import { translateProductError } from "../lib/gatewayErrors";
 import type { LearnedSkill, LearnedSkillDetail, LearningConfig, LearningJob, LearningMode,
   LearningPage, LearningProposal, LearningStatus } from "../types";
 import styles from "./SelfImprovementPanel.module.css";
 
-const states: Record<string, string> = { queued: "等待闲置", reviewing: "正在复盘", validating: "检查提案",
-  applied: "已保存", pending_review: "待审核", noop: "无需更新", failed: "复盘失败", canceled: "已取消",
-  interrupted: "已中断", outcome_unknown: "调用结果未知", rejected: "已拒绝", withdrawn: "来源已撤回",
-  insufficient_evidence: "缺少可复用方法的验证证据", awaiting_completion: "等待当前任务完成" };
-const reasonText: Record<string, string> = { review_required: "按当前策略等待审核", similar_skill_exists: "存在同名技能，请检查重复内容",
-  source_unavailable: "原任务来源已不可用", source_withdrawn: "来源已撤回", service_restarted: "服务重启后无法确认原调用结果，未自动重试",
-  disabled: "自动学习已关闭", LEARNING_BUDGET: "已达到复盘预算", LEARNING_INPUT_BUDGET: "已达到单次复盘输入预算", MODEL_ONLY_CANCELED: "已为前台任务让出资源",
-  LEARNING_OUTPUT_INVALID: "输出格式或证据未通过校验", LEARNING_UNSUPPORTED: "当前模型运行方式暂不支持复盘",
-  user_rejected: "用户拒绝了提案", unchanged_content: "方法内容没有变化", user_edit: "用户手动整理了方法正文",
-  backup_restored: "恢复备份后已停止旧复盘，需重新开启学习", restore_source_unverified: "恢复备份时无法核对当前来源，已撤回" };
-const date = (at: number | null) => at ? new Date(at).toLocaleString() : "尚未使用";
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 function bodyOf(detail: LearnedSkillDetail) {
   let text = (detail.files.find(file => file.path === "SKILL.md")?.content ?? "")
@@ -38,6 +30,11 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
   onSelectionClosed?: () => void; onSkillsChanged?: () => void;
   onBusyChange?: (busy: boolean) => void;
 }) {
+  const { t, i18n } = useTranslation("selfImprovement");
+  const date = (at: number | null) => at ? new Date(at).toLocaleString(i18n.resolvedLanguage === "en" ? "en" : undefined) : t("notUsed");
+  const jobState = (state: string) => t(`states.${state}`, { defaultValue: state });
+  const reason = (value: string) => t(`reasons.${value}`, { defaultValue: value });
+  const displayError = (message: string) => translateProductError(message, i18n.getFixedT(null, "translation"));
   const [status, setStatus] = useState<LearningStatus | null>(null);
   const [config, setConfig] = useState<LearningConfig | null>(null);
   const [skills, setSkills] = useState<LearningPage<LearnedSkill> | null>(null);
@@ -96,7 +93,7 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
   const run = async (action: () => Promise<void>) => {
     if (busy) return; setBusy(true); setError("");
     try { await action(); }
-    catch (cause) { if (alive.current) { setError(errorText(cause)); toast.error(errorText(cause)); } }
+    catch (cause) { if (alive.current) { setError(errorText(cause)); toast.error(displayError(errorText(cause))); } }
     finally { if (alive.current) setBusy(false); }
   };
   const choose = useCallback(async (skill: Pick<LearnedSkill, "id">, versionHash?: string) => {
@@ -121,10 +118,13 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
   const saveSettings = () => run(async () => {
     if (!config || !status?.settings) return;
     const activating = config.mode !== "off" && status.settings.config.mode === "off";
-    if (activating && !await confirm({ title: `为 ${status.agentName ?? "当前 Agent"} 开启自动学习`,
-      message: `开启后，会将该 Agent 已完成任务中的目标、对话和工具验证摘要发送给下方配置的模型复盘，并产生额外模型用量。${config.mode === "auto" ? "通过检查的纯文本技能会自动保存。" : "所有技能变更先生成提案，等待你审核。"}可随时关闭。`, confirmLabel: "确认开启" })) return;
+    if (activating && !await confirm({
+      title: t("enableTitle", { name: status.agentName ?? t("currentAgent") }),
+      message: t("enableMessage", { policy: t(config.mode === "auto" ? "autoPolicy" : "reviewPolicy") }),
+      confirmLabel: t("enable"),
+    })) return;
     await api("configure", { expectedRevision: status.settings.revision, patch: config, ...(activating ? { consent: true } : {}) });
-    await load(); toast.success("自动学习设置已保存");
+    await load(); toast.success(t("saved"));
   });
   const change = (action: string, extra: Record<string, unknown> = {}) => run(async () => {
     if (!detail) return;
@@ -138,46 +138,46 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
     setProposal(null); await load(); onSkillsChanged?.();
   });
   const detailView = detail && (
-    <article className={`${styles.detail}${detailOnly ? ` ${styles.detailOnly}` : ""}`} ref={detailRef} aria-label="学习技能详情">
+    <article className={`${styles.detail}${detailOnly ? ` ${styles.detailOnly}` : ""}`} ref={detailRef} aria-label={t("detailTitle")}>
       {!detailOnly && <div className={styles.head}>
         <h3>{detail.version.title}</h3>
         <button className="btn-secondary" disabled={busy} onClick={() => {
           clearInspection(); onSelectionClosed?.();
-        }}>关闭详情</button>
+        }}>{t("closeDetail")}</button>
       </div>}
 
       <div className={styles.detailSummary}>
         <div className={styles.detailBadges}>
-          <span className={styles.skillState} data-active={!detail.skill.archived}>{detail.skill.archived ? "已归档" : "已启用"}</span>
-          {detail.skill.owner === "user" && <span className={styles.ownerLabel}>用户管理</span>}
-          {detail.skill.pinned && <span className={styles.ownerLabel}>已固定</span>}
+          <span className={styles.skillState} data-active={!detail.skill.archived}>{t(detail.skill.archived ? "archived" : "translation:skills.filterOn")}</span>
+          {detail.skill.owner === "user" && <span className={styles.ownerLabel}>{t("userManaged")}</span>}
+          {detail.skill.pinned && <span className={styles.ownerLabel}>{t("pinned")}</span>}
         </div>
-        <span className={styles.readCount}>{detail.usage.reads} 次任务读取</span>
+        <span className={styles.readCount}>{t("taskReads", { count: detail.usage.reads })}</span>
       </div>
 
       {editing !== null ? (
         <div className={styles.editor}>
-          <Field label="编辑方法正文" hint="保存后转为用户管理，后台不再自动覆盖。">
+          <Field label={t("editMethod")} hint={t("editHint")}>
             <TextArea rows={14} value={editing} onChange={event => setEditing(event.target.value)} disabled={busy} />
           </Field>
         </div>
       ) : (
-        <section className={styles.documentSection} aria-label="当前版本内容">
+        <section className={styles.documentSection} aria-label={t("currentContent")}>
           <ChatMarkdown className="chat-md markdown-document" text={bodyOf(detail)} />
         </section>
       )}
 
       <details className={styles.inspector}>
-        <summary><span>来源与版本</span><span className={styles.inspectorHint}>{detail.version.sourceTaskCount} 个来源任务</span></summary>
+        <summary><span>{t("sourceVersions")}</span><span className={styles.inspectorHint}>{t("sourceTaskCount", { count: detail.version.sourceTaskCount })}</span></summary>
         <div className={styles.inspectorBody}>
           <dl className={styles.metadata}>
-            <dt>当前版本</dt><dd><code>{detail.version.hash.slice(0, 12)}</code><span>{date(detail.version.createdAt)}</span></dd>
-            <dt>来源证据</dt><dd>{detail.version.sourceTaskCount} 个来源任务 · {detail.version.sourceEventCount} 条证据</dd>
-            <dt>使用记录</dt><dd>进入候选 {detail.usage.exposures} 次 · 显式选择 {detail.usage.selections} 次 · 纠正信号 {detail.usage.correctionSignals} 个</dd>
+            <dt>{t("currentVersion")}</dt><dd><code>{detail.version.hash.slice(0, 12)}</code><span>{date(detail.version.createdAt)}</span></dd>
+            <dt>{t("sourceEvidence")}</dt><dd>{t("sourceTaskCount", { count: detail.version.sourceTaskCount })} · {t("evidenceCount", { count: detail.version.sourceEventCount })}</dd>
+            <dt>{t("usage")}</dt><dd>{t("usageCounts", { exposures: detail.usage.exposures, selections: detail.usage.selections, corrections: detail.usage.correctionSignals })}</dd>
           </dl>
-          <p className={styles.inspectionNote}>使用与任务结果只表示关联，不代表技能导致成功或失败。</p>
-          <div className={styles.learningReason}><h4>学习说明</h4><p>{reasonText[detail.version.reason] ?? detail.version.reason}</p></div>
-          <details><summary>来源任务{detail.version.sourceTaskCount > detail.version.sources.length ? `（显示前 ${detail.version.sources.length} 个）` : ""}</summary>
+          <p className={styles.inspectionNote}>{t("association")}</p>
+          <div className={styles.learningReason}><h4>{t("learningReason")}</h4><p>{reason(detail.version.reason)}</p></div>
+          <details><summary>{t("sourceTasks")}{detail.version.sourceTaskCount > detail.version.sources.length ? t("firstSources", { count: detail.version.sources.length }) : ""}</summary>
             <ul>{detail.version.sources.map(source => <li key={source.runId}><code>{source.runId}</code></li>)}</ul>
           </details>
           {detail.files.filter(file => file.path !== "SKILL.md").map(file => <details key={file.path}>
@@ -186,115 +186,125 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
               ? <ChatMarkdown className="chat-md markdown-document" text={file.content} />
               : <pre>{file.content}</pre>}
           </details>)}
-          <details><summary>最近 10 个版本</summary><div className={styles.versionList}>{detail.history.map(version => detailOnly ? (
+          <details><summary>{t("recentVersions")}</summary><div className={styles.versionList}>{detail.history.map(version => detailOnly ? (
             <div key={version.hash} className={styles.versionRow}>
               <code>{version.hash.slice(0, 12)}</code><span>{date(version.createdAt)}</span>
-              <span>{version.revoked ? "已撤回" : version.hash === detail.skill.head ? "当前版本" : "历史版本"}</span>
+              <span>{t(version.revoked ? "revoked" : version.hash === detail.skill.head ? "currentVersion" : "priorVersion")}</span>
             </div>
           ) : (
             <button key={version.hash} className={styles.item} disabled={busy || version.revoked}
               onClick={() => void run(() => choose(detail.skill, version.hash))}>
-              <span>{version.hash.slice(0, 12)} · {date(version.createdAt)}{version.revoked ? " · 已撤回" : ""}</span>
-              <small>{reasonText[version.reason] ?? version.reason}</small>
+              <span>{version.hash.slice(0, 12)} · {date(version.createdAt)}{version.revoked ? ` · ${t("revoked")}` : ""}</span>
+              <small>{reason(version.reason)}</small>
             </button>
           ))}</div></details>
-          <details><summary>变更记录</summary><ul>{detail.changes.map(change => <li key={change.id}>
-            {date(change.createdAt)} · {({ create: "创建", patch: "更新", pin: "固定", unpin: "取消固定", archive: "归档", restore: "恢复", adopt: "转为用户管理", edit: "编辑", revert: "恢复旧版本", withdraw: "来源撤回" } as Record<string, string>)[change.action] ?? change.action}
-            {` · ${change.actor === "user" ? "用户操作" : change.actor === "curator" ? "闲置整理" : "自动学习"}`}
+          <details><summary>{t("changeHistory")}</summary><ul>{detail.changes.map(change => <li key={change.id}>
+            {date(change.createdAt)} · {t(`changes.${change.action}`, { defaultValue: change.action })}
+            {` · ${t(change.actor === "user" ? "actors.user" : change.actor === "curator" ? "actors.curator" : "actors.learning")}`}
           </li>)}</ul></details>
         </div>
       </details>
 
       <div className={`${styles.actions} ${styles.detailActions}`}>
         {editing !== null ? <>
-          <button className="btn-secondary" disabled={busy} onClick={() => setEditing(null)}>取消编辑</button>
+          <button className="btn-secondary" disabled={busy} onClick={() => setEditing(null)}>{t("cancelEdit")}</button>
           <button className={`btn-primary ${styles.editButton}`} disabled={busy || !editing.trim()}
-            onClick={() => change("edit", { body: editing })}>保存并转为用户管理</button>
+            onClick={() => change("edit", { body: editing })}>{t("saveAndAdopt")}</button>
         </> : <>
-          <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.pinned ? "unpin" : "pin")}>{detail.skill.pinned ? "取消固定" : "固定技能"}</button>
-          <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.archived ? "restore" : "archive")}>{detail.skill.archived ? "恢复技能" : "归档技能"}</button>
-          {detail.skill.owner === "managed" && <button className="btn-secondary" disabled={busy} onClick={() => change("adopt")}>转为用户管理</button>}
+          <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.pinned ? "unpin" : "pin")}>{t(detail.skill.pinned ? "changes.unpin" : "pinSkill")}</button>
+          <button className="btn-secondary" disabled={busy} onClick={() => change(detail.skill.archived ? "restore" : "archive")}>{t(detail.skill.archived ? "restoreSkill" : "archiveSkill")}</button>
+          {detail.skill.owner === "managed" && <button className="btn-secondary" disabled={busy} onClick={() => change("adopt")}>{t("changes.adopt")}</button>}
           <button className={`btn-primary ${styles.editButton}`} disabled={busy || detail.version.hash !== detail.skill.head}
-            onClick={() => setEditing(bodyOf(detail))}>编辑正文</button>
+            onClick={() => setEditing(bodyOf(detail))}>{t("editBody")}</button>
           {!detailOnly && detail.version.hash !== detail.skill.head && <button className="btn-secondary" disabled={busy}
-            onClick={() => change("revert", { versionHash: detail.version.hash })}>恢复为此版本</button>}
+            onClick={() => change("revert", { versionHash: detail.version.hash })}>{t("restoreVersion")}</button>}
         </>}
       </div>
     </article>
   );
   if (detailOnly) return <>
-    {error && <p className="error" role="alert">{error}</p>}
-    {detailView || (!error && <p className="muted" role="status">正在读取技能详情…</p>)}
+    {error && <p className="error" role="alert">{displayError(error)}</p>}
+    {detailView || (!error && <p className="muted" role="status">{t("loadingDetail")}</p>)}
   </>;
   if (status?.supported === false) return null;
   const visibleSkills = skills?.items.filter(skill => filter === "all" || (filter === "archived" ? skill.archived : !skill.archived));
-  return <section className={styles.panel} aria-label="自动学习">
+  return <section className={styles.panel} aria-label={t("title")}>
     <div className={styles.head}>
-      <div><h2>自动学习 <span className={styles.preview}>预览</span></h2>
-        <p>从已验证的任务中积累方法，供当前 Agent 按需读取。</p></div>
-      <span className={styles.badge}>{status?.running ? "正在复盘" : status?.settings?.config.mode === "auto" ? "自动保存"
-        : status?.settings?.config.mode === "review" ? "仅生成建议" : "已关闭"}</span>
+      <div><h2>{t("title")} <span className={styles.preview}>{t("preview")}</span></h2>
+        <p>{t("description")}</p></div>
+      <span className={styles.badge}>{t(status?.running ? "states.reviewing" : `modes.${status?.settings?.config.mode ?? "off"}`)}</span>
       <button className="btn-secondary" disabled={busy} onClick={() => void run(async () => {
         await load(); onSkillsChanged?.();
-      })}>刷新</button>
+      })}>{t("translation:common.refresh")}</button>
     </div>
-    {error && <p className="error" role="alert">{error}</p>}
-    {!status && !error && <p className="muted">正在读取自动学习状态…</p>}
+    {error && <p className="error" role="alert">{displayError(error)}</p>}
+    {!status && !error && <p className="muted">{t("loading")}</p>}
     {status?.supported && <>
-      <nav className={styles.tabs} aria-label="自动学习视图">
-        {([ ["skills", "学到的技能"], ["history", "复盘历史"], ["settings", "学习设置"] ] as const).map(([id, label]) =>
-          <button key={id} type="button" aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}>{label}</button>)}
+      <nav className={styles.tabs} aria-label={t("views")}>
+        {(["skills", "history", "settings"] as const).map(id =>
+          <button key={id} type="button" aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}>{t(`tabs.${id}`)}</button>)}
       </nav>
       {tab === "settings" && config && <div className={styles.settings}>
-        <p className={styles.note}>首次使用需确认开启。后台模型默认跟随此 Agent 的默认 Provider 和模型；临时切换的聊天模型不会改变复盘模型。</p>
-        <Field label="学习模式"><Select value={config.mode} disabled={busy} onChange={value => setConfig({ ...config, mode: value as LearningMode })}>
-          <Option value="off">关闭</Option><Option value="review">仅生成建议，审核后保存</Option><Option value="auto">自动保存受管理技能</Option>
+        <p className={styles.note}>{t("settingsNote")}</p>
+        <Field label={t("learningMode")}><Select value={config.mode} disabled={busy} onChange={value => setConfig({ ...config, mode: value as LearningMode })}>
+          <Option value="off">{t("modeChoices.off")}</Option><Option value="review">{t("modeChoices.review")}</Option><Option value="auto">{t("modeChoices.auto")}</Option>
         </Select></Field>
-        <Field label="后台模型" hint={`留空跟随 Agent 默认模型。当前：${status.capability?.model ?? (status.capability?.supported ? "Runtime 默认模型" : "暂不可用")}（${status.capability?.runtime ?? "未绑定"}）`}>
-          <TextInput value={config.model ?? ""} placeholder="跟随 Agent 默认模型" disabled={busy}
+        <Field label={t("backgroundModel")} hint={t("backgroundModelHint", {
+          model: status.capability?.model ?? t(status.capability?.supported ? "runtimeDefault" : "modelUnavailable"),
+          runtime: status.capability?.runtime ?? t("runtimeUnbound"),
+        })}>
+          <TextInput value={config.model ?? ""} placeholder={t("followAgent")} disabled={busy}
             onChange={event => setConfig({ ...config, model: event.target.value.trim() || null })} /></Field>
-        <Field label="单次复盘输入预算" hint="留空自动取模型上下文的 75%，最多 600,000 tokens；上下文未知时用 120,000。填 0 或负数表示不限输入预算。">
-          <TextInput type="number" step={1} disabled={busy} value={config.maxInputTokens ?? ""} placeholder="自动"
+        <Field label={t("inputBudget")} hint={t("inputBudgetHint")}>
+          <TextInput type="number" step={1} disabled={busy} value={config.maxInputTokens ?? ""} placeholder={t("automatic")}
             onChange={event => setConfig({ ...config, maxInputTokens: event.target.value === "" ? null : Number(event.target.value) })} />
         </Field>
-        <p className="muted">单次最多 {status.capability?.maxIterations ?? 16} 轮；当前输入预算{status.capability?.maxInputTokens == null
-          ? "不限" : ` ${status.capability.maxInputTokens.toLocaleString()} tokens`}。不设每日配额或固定冷却时间。</p>
-        <Field label="闲置时整理" hint="固定、用户管理、正在使用或存在持续任务依赖的技能会受到保护。">
+        <p className="muted">{t("reviewBudget", {
+          iterations: status.capability?.maxIterations ?? 16,
+          budget: status.capability?.maxInputTokens == null
+            ? t("unlimitedBudget") : t("limitedBudget", { tokens: status.capability.maxInputTokens.toLocaleString() }),
+        })}</p>
+        <Field label={t("curation")} hint={t("curationHint")}>
           <Switch checked={config.curationEnabled} disabled={busy} onChange={value => setConfig({ ...config, curationEnabled: value })} />
         </Field>
-        {!status.capability?.supported && <p role="status" className={styles.note}>当前运行方式暂不能复盘：{status.capability?.reason ?? "模型绑定不可用"}</p>}
-        <p className="muted">今日复盘 {status.budget?.runs ?? 0} 次 · 记录用量 {status.budget?.tokens.toLocaleString() ?? "0"} tokens
-          {Boolean(status.budget?.unknownCalls) && ` · ${status.budget?.unknownCalls} 次用量未知，包含估算值`}</p>
-        <div className={styles.actions}><button className="btn-primary" disabled={busy} onClick={saveSettings}>保存设置</button>
+        {!status.capability?.supported && <p role="status" className={styles.note}>{t("reviewUnavailable", {
+          reason: status.capability?.reason == null ? t("bindingUnavailable") : displayError(status.capability.reason),
+        })}</p>}
+        <p className="muted">{t("today", { runs: status.budget?.runs ?? 0, tokens: status.budget?.tokens.toLocaleString() ?? "0" })}
+          {Boolean(status.budget?.unknownCalls) && t("unknownCalls", { count: status.budget?.unknownCalls })}</p>
+        <div className={styles.actions}><button className="btn-primary" disabled={busy} onClick={saveSettings}>{t("translation:settings.saveSettings")}</button>
           <button className="btn-secondary" disabled={busy || status.settings?.config.mode === "off" || !status.latestRunId || !status.capability?.supported}
             onClick={() => void run(async () => { const result = await api<{ queued: boolean; state: string }>("request", { runId: status.latestRunId });
-              await load(); toast.success(result.queued ? "已提交，等待 Agent 闲置后复盘" : `该任务已处理：${states[result.state] ?? result.state}`); })}>复盘最近完成任务</button></div>
+              await load(); toast.success(result.queued ? t("reviewQueued") : t("alreadyReviewed", { state: jobState(result.state) })); })}>{t("reviewLatest")}</button></div>
       </div>}
       {tab === "skills" && <>
         {status.curation?.map(item => <p className={styles.note} key={item.skillIds.join(":")}>
-          整理建议：{item.title} — {item.reason}</p>)}
+          {t("curationSuggestion", { title: item.title, reason: item.reason })}</p>)}
         <div className={styles.toolbar}><Select value={filter} onChange={setFilter}>
-          <Option value="active">当前可用</Option><Option value="archived">已归档</Option><Option value="all">全部自动学习技能</Option></Select>
-          <span className="muted">已加载 {skills?.items.length ?? 0} 条</span></div>
-        {!visibleSkills?.length && <p className={styles.empty}>{status.settings?.config.mode === "off" ? "尚未开启自动学习。可在学习设置中启用，已有技能仍保留。" : "还没有可显示的技能。只有形成经过工具验证的方法，复盘才会提出更新。"}</p>}
+          <Option value="active">{t("filterActive")}</Option><Option value="archived">{t("archived")}</Option><Option value="all">{t("filterAll")}</Option></Select>
+          <span className="muted">{t("loadedCount", { count: skills?.items.length ?? 0 })}</span></div>
+        {!visibleSkills?.length && <p className={styles.empty}>{t(status.settings?.config.mode === "off" ? "noSkillsOff" : "noSkills")}</p>}
         <div className={styles.list}>{visibleSkills?.map(skill => <button key={skill.id} className={styles.item}
           disabled={busy || skill.revoked} onClick={() => void run(() => choose(skill))}>
-          <strong>{skill.revoked ? "来源已撤回" : skill.title}</strong><span>{skill.description}</span>
-          <small>{skill.owner === "user" ? "用户管理" : "自动维护"}{skill.pinned ? " · 已固定" : ""}{skill.archived ? " · 已归档" : ""}
-            {skill.observation === "unused_14_days" ? " · 14 天未使用，待观察" : ""}
-            {` · ${skill.usage?.reads ?? 0} 个任务读取 · ${date(skill.updatedAt)}`}</small></button>)}</div>
+          <strong>{skill.revoked ? t("states.withdrawn") : skill.title}</strong><span>{skill.description}</span>
+          <small>{t(skill.owner === "user" ? "userManaged" : "autoManaged")}{skill.pinned ? ` · ${t("pinned")}` : ""}{skill.archived ? ` · ${t("archived")}` : ""}
+            {skill.observation === "unused_14_days" ? ` · ${t("unused")}` : ""}
+            {` · ${t("tasksRead", { count: skill.usage?.reads ?? 0 })} · ${date(skill.updatedAt)}`}</small></button>)}</div>
         {skills?.nextCursor && <button className="btn-secondary" disabled={busy} onClick={() => void run(async () => {
           const next = await api<LearningPage<LearnedSkill>>("skills", { cursor: skills.nextCursor });
-          if (alive.current) setSkills({ ...next, items: [...skills.items, ...next.items] }); })}>加载更多技能</button>}
+          if (alive.current) setSkills({ ...next, items: [...skills.items, ...next.items] }); })}>{t("moreSkills")}</button>}
       </>}
       {tab === "history" && <>
-        {!jobs?.items.length && <p className={styles.empty}>尚无复盘记录。简单问答和未完成验证的任务不会自动生成技能。</p>}
+        {!jobs?.items.length && <p className={styles.empty}>{t("noHistory")}</p>}
         <div className={styles.list}>{jobs?.items.map(job => <article className={styles.history} key={job.id}>
-          <div className={styles.head}><strong>{job.proposal?.title ?? states[job.state] ?? job.state}</strong>
-            <span className={styles.badge}>{states[job.state] ?? job.state}</span><small>{date(job.createdAt)}</small></div>
-          <p>{reasonText[job.reason ?? ""] ?? job.reason ?? job.proposal?.reason ?? "已根据任务验证结果处理"}</p>
-          <small>{job.sourceCount} 条来源证据{job.calls.map(call => ` · 调用 ${call.attempt}：${call.model ?? "未知模型"}，${call.usage
-            ? `${call.usage.inputTokens + call.usage.outputTokens} 实际 tokens` : `用量未知，估算 ${call.reservedTokens} tokens`}`).join("")}</small>
+          <div className={styles.head}><strong>{job.proposal?.title ?? jobState(job.state)}</strong>
+            <span className={styles.badge}>{jobState(job.state)}</span><small>{date(job.createdAt)}</small></div>
+          <p>{job.reason == null ? job.proposal?.reason ?? t("processed") : reason(job.reason)}</p>
+          <small>{t("historyEvidence", { count: job.sourceCount })}{job.calls.map(call => t("modelCall", {
+            attempt: call.attempt, model: call.model ?? t("unknownModel"),
+            usage: call.usage ? t("actualUsage", { tokens: call.usage.inputTokens + call.usage.outputTokens })
+              : t("estimatedUsage", { tokens: call.reservedTokens }),
+          })).join("")}</small>
           {job.state === "pending_review" && <button className="btn-secondary" disabled={busy} onClick={() => void run(async () => {
             clearInspection();
             const inspection = inspectionEpoch.current;
@@ -305,19 +315,19 @@ export default function SelfImprovementPanel({ backend, agentId, skillSelection,
               const base = await api<LearnedSkillDetail>("read", { skillId: value.proposal.skillId, versionHash: value.proposal.baseVersionHash });
               if (alive.current && inspection === inspectionEpoch.current) setProposalBase(base);
             }
-          })}>查看提案</button>}
+          })}>{t("viewProposal")}</button>}
         </article>)}</div>
         {jobs?.nextCursor && <button className="btn-secondary" disabled={busy} onClick={() => void run(async () => {
           const next = await api<LearningPage<LearningJob>>("history", { cursor: jobs.nextCursor });
-          if (alive.current) setJobs({ ...next, items: [...jobs.items, ...next.items] }); })}>加载更多历史</button>}
+          if (alive.current) setJobs({ ...next, items: [...jobs.items, ...next.items] }); })}>{t("moreHistory")}</button>}
       </>}
-      {proposal && <article className={styles.detail} aria-label="学习提案详情"><h3>{proposal.proposal.title}</h3>
-        <p>{proposal.proposal.reason}</p><p className="muted">{proposal.sourceCount} 条证据 · {proposal.proposal.action === "patch" ? "修改现有技能" : "创建技能"}</p>
-        <div className={styles.diff}>{proposalBase && <div><h4>当前版本</h4><pre>{bodyOf(proposalBase)}</pre></div>}
-          <div><h4>建议内容</h4><pre>{proposal.proposal.body}</pre></div></div>{proposal.proposal.references.map(file => <details key={file.path}><summary>{file.path}</summary><pre>{file.content}</pre></details>)}
-        <div className={styles.actions}><button className="btn-primary" disabled={busy} onClick={() => resolve("accept")}>接受并保存</button>
-          <button className="btn-secondary" disabled={busy} onClick={() => resolve("reject")}>拒绝提案</button>
-          <button className="btn-secondary" onClick={clearInspection}>关闭</button></div></article>}
+      {proposal && <article className={styles.detail} aria-label={t("proposalTitle")}><h3>{proposal.proposal.title}</h3>
+        <p>{proposal.proposal.reason}</p><p className="muted">{t("evidenceCount", { count: proposal.sourceCount })} · {t(proposal.proposal.action === "patch" ? "updateSkill" : "createSkill")}</p>
+        <div className={styles.diff}>{proposalBase && <div><h4>{t("currentVersion")}</h4><pre>{bodyOf(proposalBase)}</pre></div>}
+          <div><h4>{t("proposedContent")}</h4><pre>{proposal.proposal.body}</pre></div></div>{proposal.proposal.references.map(file => <details key={file.path}><summary>{file.path}</summary><pre>{file.content}</pre></details>)}
+        <div className={styles.actions}><button className="btn-primary" disabled={busy} onClick={() => resolve("accept")}>{t("acceptProposal")}</button>
+          <button className="btn-secondary" disabled={busy} onClick={() => resolve("reject")}>{t("rejectProposal")}</button>
+          <button className="btn-secondary" onClick={clearInspection}>{t("translation:common.close")}</button></div></article>}
       {detailView}
     </>}
   </section>;

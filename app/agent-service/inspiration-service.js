@@ -589,6 +589,8 @@ class InspirationService {
         id: execution.id, createdAt: execution.createdAt,
         promptHash: inspirationPromptHash(this.buildPrompt(execution)), text: inspirationUserText(execution),
         attachments: inspirationUserAttachments(execution),
+        ...(input.includeChatSend && execution.inputSource === "chat"
+          ? { chatSend: { runId: execution.runId, operationId: execution.operationId } } : {}),
       }));
     } else if (method === "inspiration.session.send") {
       result = { idea: this.sendFromExternalSession(input) };

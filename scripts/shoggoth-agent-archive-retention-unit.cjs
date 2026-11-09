@@ -8,6 +8,8 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { createAgentService } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
+const { importPath } = require("../app/agent-service/agent-file-store");
+const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { AgentArchiveRetention, AGENT_ARCHIVE_RETENTION_MS: WEEK,
   AGENT_ARCHIVE_RETRY_DELAY_MS: RETRY } = require("../app/agent-service/agent-archive-retention");
 
@@ -171,14 +173,15 @@ async function testDeadlineScheduler() {
 async function main() {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sagr-")));
   fs.chmodSync(root, 0o700);
-  const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
+  const paths = resolveServicePaths({ homeDir: root, trustedRoot: root, stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
+  const backend = new ShoggothBackend({ paths });
   let time = Date.now();
   let service;
   let operation = 0;
   const errors = [];
   const start = async () => {
-    service = createAgentService({ paths, version: "archive-retention-test", now: () => time,
+    service = createAgentService({ paths, runtimeStorageHomedir: () => root, version: "archive-retention-test", now: () => time,
       onRuntimeError: (error) => errors.push(error) });
     await service.start();
     assert.ok(service.agentArchiveRetention, "production cleanup is wired to all Stores");
@@ -197,6 +200,21 @@ async function main() {
   });
   const sweep = () => service.agentLifecycleServiceController.runMaintenance(() => service.agentArchiveRetention.sweep());
   const dir = (profile) => path.join(paths.agentsDir, profile.id);
+  const finderLink = (profile) => path.join(paths.userDataRoot, "agents-by-name", profile.name);
+  const saveFile = async (profile) => {
+    const uploadId = crypto.randomUUID();
+    const staging = importPath(paths, uploadId);
+    const bytes = Buffer.from(`file owned by ${profile.name}`);
+    fs.mkdirSync(path.dirname(staging), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(staging, bytes, { mode: 0o600 });
+    try {
+      return (await backend._call("agent.files.import", { profileId: profile.id,
+        operationId: crypto.randomUUID(), uploadId, name: "Report.txt", mimeType: "text/plain",
+        sizeBytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
+      })).file.fileId;
+    } finally { fs.unlinkSync(staging); }
+  };
+  const getFile = (profile, fileId) => backend._call("agent.files.get", { profileId: profile.id, fileId });
   const seed = (profile) => {
     const session = service.chatSessionStore.createSession({ operationId: `session-${++operation}`,
       profileId: profile.id, workspace: root, createdAt: time });
@@ -253,6 +271,9 @@ async function main() {
     assert.equal(service.agentArchiveRetention.timer, null);
     const dataA = seed(a);
     const dataB = seed(b);
+    const fileA = await saveFile(a);
+    const fileB = await saveFile(b);
+    const privatePayload = (await getFile(a, fileA)).path;
     const originalDefinition = fs.readFileSync(path.join(dir(b), "manifest.json"), "utf8");
     const sharedAccount = service.productStore.getRuntimeAccount(a.runtimeAccountId);
     const outside = path.join(root, "workspace-file.txt");
@@ -263,13 +284,17 @@ async function main() {
       id: idea.id, expectedRevision: idea.revision, instruction: "Private instruction",
       agentId: a.agentId, backendId: a.backendId, profileId: a.id, workspace: root }, () => true, dataA.session.sessionKey);
     await archive(a);
+    await assert.rejects(() => getFile(a, fileA), { code: "AGENT_FILE_NOT_FOUND" });
+    assert.equal(fs.readFileSync(privatePayload, "utf8"), "file owned by Expire me");
     assert.ok(service.agentArchiveRetention.timer, "real lifecycle archive schedules the deadline");
     const firstDeadline = service.agentArchiveRetention.entries[a.id].deleteAfter;
     time += WEEK - 1;
     await sweep();
     assert.ok(service.productStore.getAgentProfile(a.id));
     assert.ok(fs.existsSync(dir(a)));
+    assert.equal(fs.realpathSync(finderLink(a)), dir(a));
     await restore(a);
+    assert.equal((await getFile(a, fileA)).path, privatePayload);
     assert.equal(service.agentArchiveRetention.entries[a.id], undefined);
     assert.equal(service.agentArchiveRetention.timer, null, "real lifecycle restore cancels the last timer");
     await archive(a);
@@ -289,6 +314,8 @@ async function main() {
     await sweep();
     assert.equal(service.productStore.getAgentProfile(a.id), null);
     assert.equal(fs.existsSync(dir(a)), false);
+    assert.equal(fs.lstatSync(finderLink(a), { throwIfNoEntry: false }), undefined);
+    assert.equal(fs.realpathSync(finderLink(b)), dir(b));
     assert.equal(fs.existsSync(dataA.computerDir), false);
     assert.equal(fs.existsSync(dataA.ledgerDir), false);
     assert.equal(fs.existsSync(dataA.artifactFile), false);
@@ -302,6 +329,8 @@ async function main() {
     assert.equal(service.inspirationStore.get(idea.id).body, "Shared user note");
     assert.equal(service.tokenUsageStore.list({ profileId: a.id }).length, 0);
     assert.equal(fs.readFileSync(outside, "utf8"), "user workspace must survive");
+    assert.equal(fs.existsSync(privatePayload), false);
+    assert.equal(fs.readFileSync((await getFile(b, fileB)).path, "utf8"), "file owned by Keep me");
     assert.deepEqual(service.productStore.getRuntimeAccount(a.runtimeAccountId), sharedAccount);
     assert.ok(service.chatSessionStore.getSession(dataB.session.sessionKey));
     assert.ok(service.nativeCronStore.getJob(dataB.job.id));

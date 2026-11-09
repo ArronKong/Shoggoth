@@ -2,6 +2,8 @@ import i18n from './index';
 
 i18n.addResourceBundle('zh-CN', 'translation', { groupChat: {
   delete: '删除群', deleteConfirm: '删除后将停止本群所有讨论和排队动作，并移除这个群。无法撤销，不影响其他群、单聊或共享账号。',
+  forceDelete: '强制删除',
+  forceDeleteConfirm: '「{{name}}」的旧任务可能仍在运行，并可能继续调用工具或修改文件。确认后会立即删除这个群及其聊天记录，无法撤销。',
   deletingNotice: '正在删除群：已禁止新动作，正在等待本群执行确认停止。',
   archivedPlaceholder: '群聊已归档',
   sidebar: { waiting: '等待你的回应', reading: '回答待读取', stopping: '正在请求停止',
@@ -10,6 +12,8 @@ i18n.addResourceBundle('zh-CN', 'translation', { groupChat: {
 } }, true, true);
 i18n.addResourceBundle('en', 'translation', { groupChat: {
   delete: 'Delete group', deleteConfirm: 'Stop all discussions and queued actions in this group, then remove it? This cannot be undone. Other groups, direct chats and shared accounts are unaffected.',
+  forceDelete: 'Force delete',
+  forceDeleteConfirm: 'Earlier tasks in “{{name}}” may still be running and may continue to use tools or modify files. Confirm to delete this group and its chat history immediately. This cannot be undone.',
   deletingNotice: 'Deleting group: new actions are blocked while its executions confirm they have stopped.',
   archivedPlaceholder: 'This group is archived',
   sidebar: { waiting: 'Waiting for your response', reading: 'Answer pending retrieval', stopping: 'Requesting stop',

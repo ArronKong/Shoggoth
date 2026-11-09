@@ -693,40 +693,16 @@
   font-weight: 400;
   box-shadow: 0 1px 2px var(--skin-shadow-soft);
 }
-/* editable avatar (chat header): hover overlay + click-to-replace */
-.avatar-edit {
-  position: relative;
-  display: inline-flex;
-  flex: 0 0 auto;
-  border-radius: 50%;
-}
-.avatar-edit__btn {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  padding: 0;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.45);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 400;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-.avatar-edit__btn:hover,
-.avatar-edit__btn:focus-visible,
-.avatar-edit__btn:disabled {
-  opacity: 1;
-}
-.avatar-edit__btn:disabled {
-  cursor: default;
-}
 .chat-header__id { flex: 1; min-width: 0; margin-right: auto; }
+.chat-header__page-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .chat-header__name {
   display: block;
   max-width: 100%;
@@ -1912,6 +1888,8 @@
 .chat-quote-icon { flex: none; width: 14px; height: 14px; color: var(--muted-fg); }
 .chat-quote-icon path { vector-effect: non-scaling-stroke; stroke-width: 1; }
 .chat-quote-bar__text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-quote-images { display: inline-flex; flex: 0 1 auto; gap: 4px; min-width: 0; overflow: hidden; }
+.chat-quote-image { display: block; width: 36px; height: 28px; object-fit: contain; border-radius: 4px; }
 .chat-quote-bar__x {
   flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 6px;
   background: transparent; color: var(--muted-strong); font-size: 15px; line-height: 1; cursor: pointer;

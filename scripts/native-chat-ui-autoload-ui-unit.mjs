@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 const ui = path.resolve(import.meta.dirname, "../app/manage-ui");
 const require = createRequire(path.join(ui, "package.json"));
 const React = require("react"), { act, create } = require("react-test-renderer"), ts = require("typescript");
+const { I18nextProvider } = require("react-i18next");
 const part = { schemaVersion: 1, artifactId: "loan-card", revision: 1, sourceEventId: "loan-source",
   segmentId: "loan-segment", title: "贷款计算器", summary: "调整参数" };
 const textOf = node => typeof node === "string" ? node : Array.isArray(node)
@@ -34,6 +35,7 @@ async function harness(t, { available = true, failFirst = false } = {}) {
   const window = { openclawDesktop: available ? { chatUi: bridge } : undefined };
   class Observer { observe() {} disconnect() {} }
   const context = { window, document: { documentElement: { dataset: {}, classList: { contains: () => false } } },
+    navigator: { language: "zh-CN" },
     crypto: webcrypto, structuredClone, MutationObserver: Observer,
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
     clearTimeout: id => timers.delete(id) };
@@ -45,25 +47,27 @@ async function harness(t, { available = true, failFirst = false } = {}) {
         jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true }, fileName: file,
     }).outputText;
     vm.runInNewContext(code, { ...context, module, exports: module.exports, require: name => {
-      if (name === "react-i18next") return { useTranslation: () => ({ i18n: { language: "zh-CN" } }) };
+      if (name === "i18next") return require("i18next").createInstance();
       if (name === "../api/client") return { chatUiRequest: () => assert.fail("autoload performed an action/query") };
       if (name.endsWith(".css")) return {};
+      if (name.endsWith(".json")) return require(path.resolve(path.dirname(file), name));
       if (name.startsWith(".")) return load(path.resolve(path.dirname(file), name) + (name.includes("ChatUiArtifact") ? ".tsx" : ".ts"));
       return require(name);
     } });
     return module.exports;
   }
   const Card = load(path.join(ui, "src/components/ChatUiArtifact.tsx")).default;
+  const i18n = load(path.join(ui, "src/i18n/index.ts")).default;
   const pool = load(path.join(ui, "src/lib/chatUiDesktop.ts"));
   const owner = { backend: "shoggoth", agentId: "shoggoth-codex", sessionKey: "loan-session", part };
   const props = { ...owner, visible: true };
   let renderer;
   t.after(async () => { if (renderer) await act(async () => renderer.unmount()); });
   const render = async (extra = {}) => act(async () => {
-    const element = React.createElement(Card, { ...props, ...extra });
+    const element = React.createElement(I18nextProvider, { i18n }, React.createElement(Card, { ...props, ...extra }));
     if (renderer) renderer.update(element); else renderer = create(element);
   });
-  return { calls, pool, owner, props, Card, render, get renderer() { return renderer; },
+  return { calls, pool, owner, props, Card, render, i18n, get renderer() { return renderer; },
     get mounts() { return mounts; }, get text() { return textOf(renderer.toJSON()); },
     set confirmed(value) { confirmed = value; },
     async emit(value) { await act(async () => { for (const listener of subscribers) listener(value); }); },
@@ -128,5 +132,19 @@ test("a non-current history card waits for explicit selection", async t => {
   assert.equal(h.mounts, 0);
   const button = h.renderer.root.findAllByType("button").find(button => button.children.includes("显示交互卡片"));
   assert(button); await act(async () => button.props.onClick());
+  assert.equal(h.mounts, 1);
+});
+
+test("open cards update controls and errors in both languages without reopening", async t => {
+  const h = await harness(t);
+  await h.render();
+  const { mountId } = h.pool.nativeUiPoolEntry(h.owner);
+  await h.emit({ mountId, type: "status", code: "UI_SCRIPT_ERROR" });
+  assert.match(h.text, /源码.*卡片脚本出错，可以重新加载/u);
+  await act(async () => h.i18n.changeLanguage("en"));
+  assert.match(h.text, /View source.*The card’s script encountered an error/u);
+  assert.match(h.text, /贷款计算器/u, "the card's authored title must be preserved");
+  await act(async () => h.i18n.changeLanguage("zh-CN"));
+  assert.match(h.text, /源码.*卡片脚本出错，可以重新加载/u);
   assert.equal(h.mounts, 1);
 });
