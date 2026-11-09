@@ -1,7 +1,5 @@
-// SearchCapsule —— 一级工具栏/页头右侧的搜索框（48px 玻璃胶囊，见
-// docs/ui-design-spec.md §3/§4）。Cron 页那颗 .cron-search-box 是同一份配方的
-// 先行实现（宽度要跟「月|周|日」等宽，绑了 ResizeObserver），保持原样不动；
-// Workboard / Models / Skills 三页共用这一个组件。
+// SearchCapsule —— 一级工具栏/页头的 48px 玻璃胶囊搜索框。
+// 灵感与定时任务使用可折叠版本；默认直接显示输入框。
 import { useRef, useState } from "react";
 import styles from "./SearchCapsule.module.css";
 
@@ -41,14 +39,15 @@ export default function SearchCapsule({
   const [expanded, setExpanded] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const label = ariaLabel || placeholder;
+  const boxClassName = [styles.box, collapsible && styles.collapsible, className].filter(Boolean).join(" ");
   if (collapsible && !expanded && !value) return (
-    <button ref={trigger} type="button" className={[styles.box, styles.collapsed, className].filter(Boolean).join(" ")}
+    <button ref={trigger} type="button" className={`${boxClassName} ${styles.collapsed}`}
       aria-label={label} title={label} aria-expanded={false} onClick={() => setExpanded(true)}>
       <IconSearch />
     </button>
   );
   return (
-    <label className={[styles.box, className].filter(Boolean).join(" ")} title={label}>
+    <label className={boxClassName} title={label}>
       <IconSearch />
       <input
         className={styles.input}

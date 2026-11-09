@@ -1,61 +1,50 @@
 /* Page composition. Shared controls keep their design-system styles. */
-.management-page.settings-page .settings-workspace {
-  max-width: 1320px;
+.management-page.settings-page {
+  --settings-muted-canvas: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-canvas));
 }
 
 .management-page.settings-page .settings-workspace > .settings-stack {
-  gap: 40px;
+  gap: 36px;
   min-width: 0;
   container: settingsContent / inline-size;
 }
 
-.management-page.settings-page .settings-preferences { gap: 32px; }
+.management-page.settings-page .settings-preferences { gap: 24px; }
 .management-page.settings-page .settings-group { gap: 28px; }
-.management-page.settings-page .settings-section { scroll-margin-top: 24px; }
+.management-page.settings-page .settings-section { gap: 12px; scroll-margin-top: 24px; }
 .management-page.settings-page :is(#settings-connections, #settings-tools) { scroll-margin-top: 24px; }
-.management-page.settings-page .settings-section-head { padding: 0 2px; gap: 5px; }
-.management-page.settings-page .settings-sech { line-height: 20px; }
-.management-page.settings-page .settings-list-row { padding: 20px 0; }
-.management-page.settings-page .settings-list-copy { gap: 5px; }
-.management-page.settings-page .settings-list-copy p { line-height: 20px; }
-.management-page.settings-page .settings-card { border: 1px solid var(--ui-hairline); }
+.management-page.settings-page .settings-section-head { padding-inline: 4px; gap: 4px; }
+.management-page.settings-page .settings-sech { color: var(--settings-muted-canvas); line-height: 20px; font-weight: 400; }
+.management-page.settings-page .settings-list-row { padding-block: 16px; }
+.management-page.settings-page .settings-list-copy h4 { font-weight: 500; }
 .management-page.settings-page .settings-list-card { padding: 4px 24px; }
-.management-page.settings-page .settings-list-row > .settings-row-icon { background: transparent; color: var(--ui-text-2); }
-.management-page.settings-page .settings-preferences .settings-prefs-row > .field { gap: 5px 24px; }
-.management-page.settings-page .settings-notification-footer { padding-top: 16px; }
-.management-page.settings-page .settings-preferences .settings-switch-row { min-height: 76px; }
-.management-page.settings-page .settings-preferences .settings-notification-label { gap: 16px; }
-.management-page.settings-page .settings-notification-label .settings-row-icon { background: transparent; color: var(--ui-text-2); }
+.management-page.settings-page .settings-preferences .settings-prefs-row > .field { gap: 4px 16px; }
+.management-page.settings-page .settings-preferences .settings-prefs-row .field-label { font-weight: 500; }
+.management-page.settings-page #settings-notif > .settings-card { gap: 12px; padding-block: 4px 16px; }
+.management-page.settings-page #settings-notif .settings-switch-row {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-height: 64px;
+  padding-block: 12px;
+}
+.management-page.settings-page #settings-notif .settings-notification-footer { margin: 0; padding-top: 12px; }
 
 .management-page.settings-page .settings-update-heading { display: flex; align-items: center; gap: 16px; }
-.management-page.settings-page .settings-update-heading > .settings-row-icon { background: transparent; color: var(--ui-text-2); }
-.management-page.settings-page .settings-app-update-copy > label {
-  display: flex;
-  flex-direction: row-reverse;
-  justify-content: space-between;
-  align-self: stretch;
-  gap: 24px;
-}
-.management-page.settings-page .settings-update-label { display: flex; flex-direction: column; gap: 6px; }
-.management-page.settings-page .settings-update-label small {
-  max-width: 64ch;
-  font-size: 12px;
-  line-height: 20px;
-  font-weight: 400;
-  color: var(--settings-muted-surface-1);
+.management-page.settings-page .settings-app-update-copy progress {
+  height: 6px;
+  accent-color: var(--ui-text-1);
 }
 
 .management-page.settings-page .settings-tools-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: stretch;
-  gap: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 36px;
 }
-.management-page.settings-page .settings-tools-grid > .settings-section > .settings-card { flex: 1; }
-.management-page.settings-page .settings-tools-grid > .settings-section > .settings-section-head { min-height: 50px; }
+.management-page.settings-page #settings-app-update { border-top: 1px solid var(--ui-hairline); }
 
 /* Background status shares the same calm surface as editable settings. */
-.management-page.settings-page .settings-service-hero { background: var(--ui-surface-1); border: 1px solid var(--ui-hairline); gap: 20px; }
+.management-page.settings-page .settings-service-hero { background: var(--ui-surface-1); gap: 20px; }
 .management-page.settings-page .settings-service-hero .settings-service-icon { width: 40px; height: 40px; border-radius: 12px; }
 .management-page.settings-page .settings-service-hero .settings-service-icon.is-healthy::after { display: none; }
 .management-page.settings-page .settings-service-hero .settings-service-copy h4 { font-size: 16px; line-height: 24px; }
@@ -72,24 +61,101 @@
   border-radius: 0;
   background: transparent;
 }
-.management-page.settings-page .settings-backend--card,
-.management-page.settings-page .settings-backend-fallback { border: 1px solid var(--ui-hairline); }
-.management-page.settings-page .settings-backend--card .settings-backend-mark { width: 36px; height: 36px; flex-basis: 36px; --backend-tab-icon-size: 22px; border-radius: 12px; }
-.management-page.settings-page .settings-subsection { border-radius: var(--ui-radius-compact); }
+:is(.management-page.settings-page, .settings-manage-modal) .settings-subsection { border-radius: var(--ui-radius-compact); }
 .management-page.settings-page .settings-service-hero .settings-service-bottom p { text-align: left; }
 
 .management-page.settings-page .settings-project-repository a { display: inline-flex; align-items: center; gap: 8px; line-height: 20px; }
 .management-page.settings-page .settings-project-repository svg { flex-shrink: 0; }
 .management-page.settings-page .settings-advanced-group { margin-top: -16px; }
 
-@container settingsContent (max-width: 820px) {
-  .management-page.settings-page .settings-tools-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+/* ── Single column: one rhythm for every section ─────────────────── */
+.management-page.settings-page .settings-workspace > .settings-stack,
+.management-page.settings-page .settings-group,
+.management-page.settings-page .settings-preferences,
+.management-page.settings-page .settings-tools-grid { gap: 40px; }
+.management-page.settings-page .settings-section { gap: 10px; }
+.management-page.settings-page .settings-h { font-size: 16px; line-height: 24px; }
+.management-page.settings-page .settings-sech { font-size: 13px; line-height: 18px; }
+
+/* Cards share one radius and inset; list rows share one height. */
+.management-page.settings-page :is(.settings-card, .settings-service-hero, .settings-backend--card, .settings-backend-fallback) { border-radius: 20px; }
+.management-page.settings-page .settings-list-card { padding: 4px 20px; }
+.management-page.settings-page .settings-list-row { min-height: 64px; padding-block: 14px; }
+.management-page.settings-page :is(.settings-backend--card, .settings-backend-fallback) { padding: 20px; }
+
+.management-page.settings-page .settings-row-icon { color: var(--ui-text-2); }
+/* Switch rows color their text spans; row icons keep the same gray as the other rows. */
+.management-page.settings-page .settings-switch-row .settings-row-icon { color: var(--ui-text-2); }
+/* Disabled switches keep the enabled look, only dimmed, so every row's switch matches. */
+.management-page.settings-page [role="switch"][data-disabled] { opacity: 0.45; }
+.management-page.settings-page [role="switch"][data-disabled][data-unchecked] { background: light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.16)); }
+.management-page.settings-page [role="switch"][data-disabled][data-checked] { background: var(--ui-switch-on); }
+.management-page.settings-page [role="switch"][data-disabled] > span { background: light-dark(#ffffff, #171717); }
+
+/* Connection cards: identity, state and version on one line; settings open in a dialog. */
+.management-page.settings-page :is(.settings-backend--card, .settings-backend-fallback) { padding: 16px 20px; }
+.management-page.settings-page .settings-backend-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.management-page.settings-page .settings-backend-version {
+  padding: 2px 9px;
+  border-radius: 8px;
+  background: var(--ui-surface-2);
+  color: var(--settings-muted-surface-2);
+  font-size: 11px;
+  line-height: 18px;
+}
+.management-page.settings-page .settings-manage-attention { position: relative; }
+.management-page.settings-page .settings-manage-attention::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--ui-surface-1);
+  border-radius: 50%;
+  background: var(--ui-warning);
 }
 
+@container settings (max-width: 720px) {
+  /* Wrapped card actions sit together under the name instead of being pushed apart. */
+  .management-page.settings-page .settings-backend--card .settings-backend-actions { justify-content: flex-start; }
+}
+
+/* The dialog renders outside the page, so it carries the page tokens it needs. */
+.settings-manage-modal {
+  --settings-muted-surface-1: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  --settings-muted-surface-2: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-2));
+  --settings-inset: color-mix(in srgb, var(--ui-surface-2) 72%, var(--ui-surface-1));
+  --settings-tile: var(--ui-surface-1);
+  --settings-ok-tint: color-mix(in srgb, var(--ui-success) 11%, var(--ui-surface-1));
+  --settings-warn-tint: color-mix(in srgb, var(--ui-warning) 12%, var(--ui-surface-1));
+}
+.settings-manage-modal .settings-manage-form { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.settings-manage-modal .settings-manage-form .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.settings-manage-modal .settings-manage-form :is(.field-input, .field-textarea) { width: 100%; max-width: 100%; }
+.settings-manage-modal .settings-manage-form .settings-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.settings-manage-modal .standing-grants { margin-top: 24px; }
+:is(.management-page.settings-page, .settings-manage-modal) .settings-subsection { padding: 16px; }
+
+/* ── Sections stack: heading above its settings, a hairline between sections ── */
+.management-page.settings-page .settings-workspace > .settings-stack,
+.management-page.settings-page .settings-group,
+.management-page.settings-page .settings-preferences,
+.management-page.settings-page .settings-tools-grid { gap: 28px; }
+/* Connections open the card, so they carry no divider above them. */
+.management-page.settings-page .settings-stack .settings-section:not(#settings-conn) {
+  padding-top: 28px;
+  border-top: 1px solid var(--ui-hairline);
+}
+.management-page.settings-page .settings-stack .settings-section { gap: 14px; }
+.management-page.settings-page .settings-stack .settings-section-head { padding-inline: 0; }
+.management-page.settings-page .settings-advanced-group { margin-top: 0; }
+
 @container settingsContent (max-width: 540px) {
-  .management-page.settings-page .settings-list-card { padding-inline: 18px; }
+  .management-page.settings-page .settings-card { padding-inline: 18px; }
   .management-page.settings-page .settings-update-heading { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; }
   .management-page.settings-page .settings-update-heading .settings-app-update-actions { grid-column: 2; justify-content: flex-start; }
+  .management-page.settings-page .settings-list-card { padding-inline: 18px; }
   .management-page.settings-page .settings-service-hero .settings-service-facts > div { padding: 0 10px; }
   .management-page.settings-page .settings-service-hero .settings-service-facts > div:first-child { padding: 0 10px 0 0; }
   .management-page.settings-page .settings-list-copy h4 { flex-wrap: wrap; }
@@ -110,3 +176,68 @@
   .management-page.settings-page .settings-service-hero .settings-service-facts > div:first-child { padding: 10px 0; border: 0; }
   .management-page.settings-page .settings-service-hero .settings-service-facts dd { margin: 0; }
 }
+
+/* Inner cards lose their frame: content lines up with the column, rows keep their dividers. */
+.management-page.settings-page .settings-stack :is(.settings-card, .settings-service-hero) {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.management-page.settings-page .settings-stack .settings-list-row:first-child { padding-top: 4px; min-height: 0; }
+.management-page.settings-page .settings-stack .settings-list-row:last-child { padding-bottom: 0; }
+.management-page.settings-page .settings-stack #settings-notif .settings-switch-row:first-child { padding-top: 0; min-height: 48px; }
+
+/* Connections: one tile per backend, side by side. */
+.management-page.settings-page .settings-stack .settings-backend-stack {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.management-page.settings-page .settings-stack :is(.settings-backend--card, .settings-backend-fallback) {
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--ui-surface-2);
+  box-shadow: none;
+}
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-row {
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1;
+}
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-copy { width: 100%; }
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-mark { background: var(--ui-surface-1); }
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-title { gap: 6px; }
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-title h4 { flex-basis: 100%; }
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-version {
+  max-width: 100%;
+  overflow: hidden;
+  background: var(--ui-surface-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-actions {
+  margin-top: auto;
+  padding: 4px 0 0;
+  width: auto;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-notice { margin: 12px 0 0; }
+.management-page.settings-page .settings-stack .settings-advanced-summary { padding-bottom: 4px; }
+.management-page.settings-page > .settings-workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+/* Tile buttons sit on the gray tile without their own white fill; hover keeps the shared tint. */
+.management-page.settings-page .settings-stack .settings-backend--card .settings-backend-actions .btn-secondary:not(:hover) { background: transparent; }

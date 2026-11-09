@@ -67,7 +67,8 @@ const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
 const DEFAULT_WINDOW_BOUNDS = { width: 1728, height: 1117 };
 const MIN_WINDOW_BOUNDS = { width: 720, height: 560 };
 const DEFAULT_NATIVE_CONCURRENCY = Object.freeze({ maxActive: 32, startupConcurrency: 8, revision: 0 });
-const DEFAULT_BROWSER_USE = Object.freeze({ enabled: true, browser: "chrome", headless: false, isolated: true });
+// Browser Use keeps sign-ins by default (isolated:false); saved choices are left as they are.
+const DEFAULT_BROWSER_USE = Object.freeze({ enabled: true, browser: "chrome", headless: false, isolated: false });
 
 function normalizeBrowserUse(raw) {
   if (raw === undefined) return { ...DEFAULT_BROWSER_USE };

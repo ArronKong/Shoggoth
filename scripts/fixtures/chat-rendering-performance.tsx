@@ -106,7 +106,7 @@ const wait = async (predicate: () => unknown, label: string) => {
 };
 const check = (value: unknown, message: string) => { if (!value) throw Error(message); };
 const thread = () => document.querySelector<HTMLDivElement>(".chat-thread")!;
-const bubbles = () => document.querySelectorAll<HTMLElement>(".chat-thread .chat-bubble");
+const bubbles = () => document.querySelectorAll<HTMLElement>(".chat-thread .chat-bubble:not(.is-activity-loading)");
 const entries: any[] = [];
 for (const type of ["longtask", "long-animation-frame"]) {
   if (PerformanceObserver.supportedEntryTypes.includes(type)) {
@@ -222,36 +222,27 @@ state.runFixture = async () => {
   await measureInteraction("type in composer", () => setInput("Draft"));
   await measureInteraction("edit composer", () => setInput("Draft revised"));
   await measureInteraction("clear composer", () => setInput(""));
-  const trajectoryButton = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-iconbtn"))
-    .find((button) => [i18n.t("chat.showTrajectory"), i18n.t("chat.hideTrajectory")].includes(button.title))!;
-  const trajectoryCards = () => Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-thread button"))
-    .filter((button) => button.title === i18n.t("turnLab.processLargeView"));
-  const trajectoryInitiallyVisible = trajectoryButton().getAttribute("aria-pressed") === "true";
-  if (!state.baseline) check(trajectoryInitiallyVisible, "trajectory is enabled by default");
-  if (trajectoryInitiallyVisible) {
-    if (__CHAT_PERF_WITH_TOOLS__) check(trajectoryCards().length === longHistory.filter((message) => message.role === "assistant").length, "trajectory shows historical tool processes by default");
-    await measureInteraction("hide default trajectory", () => trajectoryButton().click());
-    check(trajectoryCards().length === 0, "default trajectory can still be hidden");
-  }
-  await measureInteraction("show trajectory", () => trajectoryButton().click());
-  if (__CHAT_PERF_WITH_TOOLS__) check(trajectoryCards().length === longHistory.filter((message) => message.role === "assistant").length, "show trajectory must retain every historical tool process");
-  if (__CHAT_PERF_WITH_TOOLS__) {
-    const processToggle = trajectoryCards()[0].parentElement!.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
-    processToggle.click();
-    await frame(); await frame();
-    check(processToggle.getAttribute("aria-expanded") === "true", "historical process expands");
+  if (__CHAT_PERF_WITH_TOOLS__ && !state.baseline) {
+    const activities = () => Array.from(document.querySelectorAll<HTMLButtonElement>(
+      `.chat-thread button[aria-haspopup="dialog"][aria-label="${i18n.t("turnLab.processOpen")}"]`));
+    const count = longHistory.filter(message => message.role === "assistant").length;
+    check(activities().length === count, "each historical tool turn has one activity shortcut");
+    const entry = activities()[0];
+    await measureInteraction("open activity details", () => entry.click());
+    const modal = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    check(modal?.querySelector("[data-action]"), "historical activity shows its tool");
+    await measureInteraction("close activity details", () => modal
+      .querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("common.close")}"]`)!.click());
     const preservedBubble = bubbles()[1];
     Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-headbtn"))
       .find((button) => button.title === i18n.t("chat.immersiveEnter"))!.click();
-    await wait(() => document.querySelector('[data-testid="immersive-chat"]'), "enter immersive with expanded process");
-    check(preservedBubble === bubbles()[1] && processToggle.isConnected, "immersive mode must preserve mounted ordinary-chat contents");
+    await wait(() => document.querySelector('[data-testid="immersive-chat"]'), "enter immersive after reviewing activity");
+    check(preservedBubble === bubbles()[1] && entry.isConnected, "immersive mode preserves mounted ordinary-chat contents");
     Array.from(document.querySelectorAll<HTMLButtonElement>('[data-testid="immersive-chat"] button'))
       .find((button) => button.getAttribute("aria-label") === i18n.t("chat.immersiveExit"))!.click();
-    await wait(() => !document.querySelector('[data-testid="immersive-chat"]'), "return to expanded process");
-    check(processToggle.isConnected && processToggle.getAttribute("aria-expanded") === "true", "immersive round trip must preserve expanded process state");
+    await wait(() => !document.querySelector('[data-testid="immersive-chat"]'), "return to the activity shortcut");
+    check(entry.isConnected && activities().length === count, "immersive round trip preserves the activity shortcuts");
   }
-  await measureInteraction("hide trajectory", () => trajectoryButton().click());
-  check(trajectoryCards().length === 0, "hide trajectory must still hide the tool process cards");
 
   // A memoized message must still refresh translated controls when the locale changes.
   const originalLanguage = i18n.language;

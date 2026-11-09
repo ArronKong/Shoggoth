@@ -105,7 +105,7 @@ gh workflow run release.yml --repo ArronKong/Shoggoth --ref v<VERSION> \
   -f notes_file=release-notes/v<VERSION>.md
 ```
 
-在 Actions 页面操作时，选择版本标签、填写相同 `tag`，将 `release_mode` 选为 `publish`，并填写说明文件的相对路径。选中 `publish` 就是对该固定版本在验收后正式公开的授权，无须流水线结束时再次确认。源码推送前的人工隐私审核仍须先完成。
+在 Actions 页面操作时，工作流来源须选择版本标签、填写相同 `tag`，将 `release_mode` 选为 `publish`，并填写说明文件的相对路径。若网页只提供分支、无法选择版本标签，使用上方带 `--ref` 的 CLI 命令；不能保留来源为 `main` 后只填写 tag 输入。选中 `publish` 就是对该固定版本在验收后正式公开的授权，无须流水线结束时再次确认。源码推送前的人工隐私审核仍须先完成。
 
 1. 固定源码 SHA，拒绝已公开版本和归属不符的草稿，重新扫描源码，并调用同提交的完整 `CI` 工作流。源码 CI 失败会阻止签名。
 2. 在 `macos-latest` arm64 与 `macos-15-intel` x64 上并行安装锁定依赖、构建、签名及公证。固定选择 Xcode 26.3，先验证 Icon Composer 工具链。临时钥匙串加入搜索列表，Apple 公开中间证书核对固定摘要后导入，不改变系统信任设置；验证指定 Developer ID、Team ID 并实际签名一个临时探针后才打包。保留 App 和 DMG 的四次独立公证、Accepted、staple/validate、许可证、包内私钥和源码一致性门禁。凭据仅用于签名 job，退出时恢复钥匙串搜索列表并清理临时文件和钥匙串。

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
+import { loadConnectorAddButton, loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
 const require = createRequire(new URL("../app/manage-ui/package.json", import.meta.url));
 const React = require("react"), Renderer = require("react-test-renderer"), ts = require("typescript"), i18next = require("i18next");
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -60,6 +60,7 @@ for (const language of ["zh-CN", "en"]) {
   const componentImports = {
     "react-i18next": { useTranslation: () => ({ t, i18n: translator }) }, "../api/larkCliConnector": api,
     "../components/ConnectorDetails": loadConnectorDetails(t),
+    "../components/ConnectorAddButton": loadConnectorAddButton(t),
     "../lib/usePageCache": cache,
     "../components/Modal": { __esModule: true, default: ({ children, footer, subtitle, title, dismissible }) => React.createElement("section", { role: "dialog", "aria-label": typeof title === "string" ? title : "connector", "data-dismissible": dismissible }, children, React.createElement("p", {}, subtitle), footer) },
     "../components/ui": { useConfirm: () => async () => allowRemove },
@@ -84,6 +85,7 @@ for (const language of ["zh-CN", "en"]) {
   }, { window: events, document });
   let mounted;
   const button = text => mounted.root.findAllByType("button").find(item => item.props.children === text);
+  const addRecommendation = () => mounted.root.findAllByType("button").find(item => item.props["aria-label"] === `${t("mcpConnectors.add")} ${t("larkCli.name")}`);
   const click = async target => Renderer.act(async () => { target.props.onClick(); await flush(); });
   const notify = async () => Renderer.act(async () => { events.dispatchEvent(new Event(api.LARK_CLI_CHANGE_EVENT)); await flush(); });
   const switchLanguage = async locale => Renderer.act(async () => {
@@ -174,8 +176,8 @@ for (const language of ["zh-CN", "en"]) {
     await Renderer.act(async () => { settleRemove(plain(current)); await flush(); });
     assert.equal(mounted.root.findAllByProps({ "data-lark-installed": true }).length, 0);
     assert.equal(mounted.root.findAllByProps({ "data-lark-recommendation": true }).length, 1, "removal returns the connector to recommendations in both languages");
-    assert.equal(button(t("mcpConnectors.add")).props.disabled, false);
-    statusFailure = true; await notify(); assert.equal(button(t("mcpConnectors.add")).props.disabled, true);
+    assert.equal(addRecommendation().props.disabled, false);
+    statusFailure = true; await notify(); assert.equal(addRecommendation().props.disabled, true);
     assert.equal(JSON.stringify(mounted.toJSON()).includes("private-status-canary"), false);
     statusFailure = false;
     await Renderer.act(async () => { await cache.invalidatePageCache(); await flush(); });

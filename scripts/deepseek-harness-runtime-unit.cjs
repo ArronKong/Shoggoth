@@ -27,7 +27,6 @@ const {
   DEFAULT_DEEPSEEK_HARNESS_PERMISSION_POLICY,
   parseDeepSeekHarnessVersion,
   prepareDeepSeekHarnessHome,
-  supportsDeepSeekHarnessVersion,
 } = require(path.join(ROOT, "app", "agent-service", "deepseek-harness-runtime-paths.js"));
 const {
   NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID,
@@ -159,6 +158,10 @@ function runtimeFixture(behavior = {}) {
       success(child, message, { authenticated: true, credentialPresent: true });
       return;
     }
+    if (message.command === "model/generate") {
+      success(child, message, { text: "fixture summary", usage: null, provider: "deepseek-official", model: MODEL });
+      return;
+    }
     if (message.command === "commands/list") {
       success(child, message, { scoped: !!message.params.remoteSessionId, commands: [
         { name: "goal", description: "Manage goal", input: { hint: "[objective]" } },
@@ -251,7 +254,7 @@ function runtimeFixture(behavior = {}) {
     if (args.includes("--version")) {
       const child = new FakeChild();
       queueMicrotask(() => {
-        child.stdout.write("0.1.1-rc.2\n");
+        child.stdout.write(`${behavior.version ?? "0.1.1-rc.2"}\n`);
         child.finish();
       });
       return child;
@@ -266,6 +269,7 @@ function runtimeFixture(behavior = {}) {
     bridgePath: path.join(ROOT, "resources", "deepseek-harness", "shoggoth-dsh-bridge.mjs"),
     parentEnv: { PATH: path.dirname(process.execPath), ...behavior.parentEnv },
     homedir: trustedRoot,
+    secretGateway: behavior.secretGateway,
     mcpGateIssuer: gate,
     spawnProcess,
     killProcessGroup() {},
@@ -446,8 +450,58 @@ async function verifyControlDiscoveryWithoutMcp() {
   console.log("PASS DeepSeek control discovery: no MCP authority, execution gate preserved, catalog errors visible");
 }
 
+// Background memory text runs on a tool-free model-only host. It must not
+// reserve the product MCP helper: a helper the Service rejects would hold the
+// native CLI before "ready" until DEEPSEEK_HARNESS_STARTUP_TIMEOUT.
+async function verifyModelOnlyWithoutMcp() {
+  const value = runtimeFixture({ mcpUnavailable: true });
+  const adapter = new DeepSeekHarnessRuntimeAdapter({ runtimePool: value.pool });
+  const binding = { runtime: "deepseek-harness", runtimeProfileId: "dsh-model-only",
+    runtimeAccountId: NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID };
+  const isolated = { approvalPolicy: "never", sandbox: "read-only" };
+  const options = { workspace: null, permissionPolicy: isolated, modelOnly: true,
+    executionContract: { runId: "memory-op-1", source: "memory_text" } };
+  try {
+    const host = await adapter.acquire(binding, options);
+    assert.equal(host.host.modelOnlyInstance, true);
+    assert.deepEqual(value.gateCalls, [], "model-only text never reserves product MCP authority");
+    assert.equal(value.bridgeEnvironments[0].SHOGGOTH_DSH_CONTROL_INSTANCE, "1", "the MCP client stays disabled");
+    assert.equal(value.bridgeEnvironments[0].SHOGGOTH_RUNTIME_MCP_GATE_NONCE, undefined);
+    const result = await host.generateModelOnly({ operationId: "memory-op-1", model: MODEL, prompt: "Summarize" });
+    assert.equal(result.text, "fixture summary");
+    for (const method of ["sessionStart", "sessionResume", "turnStart", "commandExecute"]) {
+      await assert.rejects(host[method]({}), { code: "RUNTIME_CAPABILITY_UNSUPPORTED" },
+        `a model-only host must not authorize ${method}`);
+    }
+    for (const invalid of [{ ...options, permissionPolicy: POLICY }, { ...options, workspace: value.workspace },
+      { permissionPolicy: isolated, modelOnly: true }]) {
+      await assert.rejects(adapter.acquire(binding, invalid), { code: "MODEL_ONLY_TOOLS_FORBIDDEN" });
+    }
+    await assert.rejects(adapter.acquire(binding, { workspace: value.workspace, permissionPolicy: POLICY }),
+      { code: "credentials_locked" }, "chat execution still requires the MCP gate");
+  } finally {
+    await adapter.stopAll().catch(() => {});
+    value.cleanup();
+  }
+  console.log("PASS DeepSeek model-only text: no MCP authority, no sessions, chat gate preserved");
+}
+
 async function main() {
+  for (const version of ["0.1.0", "2.0.0", "nightly"]) {
+    let bindings = 0;
+    const value = runtimeFixture({ version, secretGateway: { bindLocalSessions: async () => {
+      bindings++;
+      return { baseUrl: `http://127.0.0.1:9/${"a".repeat(64)}`, ready: () => true, close() {} };
+    } } });
+    try {
+      const host = await value.pool.get({ runtime: "deepseek-harness", runtimeProfileId: "version-contract",
+        runtimeAccountId: NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID });
+      assert.equal(host.state, "ready", version);
+      assert.equal(bindings, 1, "protection stays installed for every compatible version label");
+    } finally { await value.pool.stopAll(); value.cleanup(); }
+  }
   await verifyControlDiscoveryWithoutMcp();
+  await verifyModelOnlyWithoutMcp();
   const native = runtimeFixture({ nativeBinary: true });
   const nativeAdapter = new DeepSeekHarnessRuntimeAdapter({ runtimePool: native.pool });
   try {
@@ -566,8 +620,6 @@ async function main() {
     sandbox: "danger-full-access",
   });
   assert.deepEqual(parseDeepSeekHarnessVersion("0.1.1-rc.2\n"), [0, 1, 1]);
-  assert.equal(supportsDeepSeekHarnessVersion("0.1.1-rc.2"), true);
-  assert.equal(supportsDeepSeekHarnessVersion("0.1.0"), false);
   assert.equal(parseDeepSeekHarnessVersion("not-a-version"), null);
 
   const decoder = new DeepSeekHarnessJsonlDecoder();

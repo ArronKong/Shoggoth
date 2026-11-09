@@ -109,13 +109,20 @@ const wait = async (predicate: () => unknown, label: string) => {
 const expect = (value: unknown, label: string) => { if (!value) throw Error(label); };
 const visible = <T extends Element>(items: Iterable<T>) => [...items].filter(item => item.getClientRects().length > 0);
 const surface = () => document.querySelector('[data-testid="immersive-chat"]') ?? document;
-const children = (key = childKey) => visible(surface().querySelectorAll<HTMLElement>(`[data-subagent-key="${key}"]`));
+const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]');
+const children = (key = childKey) => visible(dialog()?.querySelectorAll<HTMLElement>(`[data-subagent-key="${key}"]`) ?? []);
 const navigate = (key: string) => window.dispatchEvent(new CustomEvent("openclaw:open-chat-session", { detail: key }));
 const expand = async () => {
-  await wait(() => visible(surface().querySelectorAll<HTMLButtonElement>('button[aria-expanded]')).some(button => /助理实时动态|Agent Steps/.test(button.textContent || "")), "parent timeline");
-  for (const button of visible(surface().querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]'))) {
-    if (/助理实时动态|Agent Steps/.test(button.textContent || "")) button.click();
-  }
+  if (dialog()) return;
+  const entry = () => visible(surface().querySelectorAll<HTMLElement>(
+    `[aria-haspopup="dialog"][aria-label="${i18n.t("turnLab.processOpen")}"]`))[0];
+  await wait(entry, "parent activity entry");
+  entry().click();
+  await wait(dialog, "parent activity dialog");
+};
+const close = async () => {
+  dialog()?.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("common.close")}"]`)?.click();
+  await wait(() => !dialog(), "close parent activity dialog");
 };
 Object.assign(window, { runSubagentPageFixture: async () => {
   await expand();
@@ -123,6 +130,7 @@ Object.assign(window, { runSubagentPageFixture: async () => {
   expect(children().length === 1 && children(siblingKey).length === 1, "parallel child tasks appear once each");
   await wait(() => scope.fixtureSocket.subscriptions.has(mainKey) && scope.fixtureSocket.subscriptions.has(childKey), "parent and child must have explicit message subscriptions");
   const detail = () => children()[0];
+  await close();
   const pickerButton = surface().querySelector<HTMLButtonElement>(query.get("immersive") === "1" ? 'button[class*="identity"]' : '.chat-session-select');
   expect(pickerButton, "session picker must be available");
   pickerButton!.click();
@@ -134,9 +142,11 @@ Object.assign(window, { runSubagentPageFixture: async () => {
   pickerButton!.click();
   const before = scope.fixtureCalls.length;
   navigate(childKey); await new Promise(resolve => setTimeout(resolve, 100));
+  await expand();
   expect(children().length === 1, "hidden child deep link must preserve current parent");
   expect(!scope.fixtureCalls.slice(before).some((c: any) => c.method === "chat.history" && c.params.sessionKey === childKey), "hidden child links cannot open an independent history");
 
+  await close();
   scope.fixtureSocket.emit("exec.approval.requested", { id: "child-approval", createdAtMs: now, expiresAtMs: Date.now() + 60_000,
     request: { sessionKey: childKey, agentId: "main", runId: childRun, command: "printf fixture-check",
       cwd: "/isolated/child", allowedDecisions: ["allow-once", "deny"] } });
@@ -153,6 +163,7 @@ Object.assign(window, { runSubagentPageFixture: async () => {
   scope.fixtureSocket.emit("question.resolved", { id: "child-question", status: "answered" });
   await wait(() => !surface().querySelector('.chat-prompt'), "externally resolved child question clears from parent");
 
+  await expand();
   scope.fixtureSocket.emit("session.tool", { sessionKey: childKey, runId: childRun, data: {
     toolCallId: "live-query", name: "web_search", phase: "start", args: { query: "子代理实时查询" } } });
   await wait(() => detail()?.textContent?.includes("子代理实时查询"), "live child tool start");
@@ -197,6 +208,7 @@ Object.assign(window, { runSubagentPageFixture: async () => {
   await expand();
   expect(children().length === 1, "parent refresh does not duplicate the child task");
   if (query.get("immersive") !== "1") {
+    await close();
     const composer = document.querySelector<HTMLTextAreaElement>(".chat-composer__input")!;
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(composer, "/subagents ");
     composer.dispatchEvent(new Event("input", { bubbles: true }));

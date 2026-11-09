@@ -19,6 +19,12 @@ function memoryOperationId(profileId, operationId) {
 
 // The MCP authority and WorkRun supply ownership and provenance. Models never
 // choose another profile, transcript, path, or source event ID.
+// A new fact (no supersedes) needs no revision read: an unrelated change since
+// the Agent last looked cannot make the addition wrong. Corrections still do.
+function newFactWithoutRevision(name, args) {
+  return name === "memory_save" && args.expectedRevision === undefined && args.supersedes == null;
+}
+
 class ConversationMemoryService {
   constructor({ memoryEngine, memoryStore, transcriptStore, chatSessionStore, getRunSessionKey,
     getInspirationOrigin = null, memoryProvenanceService = null, semanticSearch = null }) {
@@ -77,7 +83,9 @@ class ConversationMemoryService {
       this.bind("memory_search", args, run);
       const result = await this.engine.searchMemory({ profileId, query: args.query, workspace: run.workspace,
         maxSensitivity: "private", maxResults: args.maxResults, minScore: args.minScore, run,
-        memoryScope: args.memoryScope, ownerProfileId: args.ownerProfileId });
+        // Like OpenClaw, a search reads only this Agent's memory unless the
+        // model asks for other Agents (memoryScope=all or a named source).
+        memoryScope: args.memoryScope ?? (args.ownerProfileId === undefined ? "own" : "all"), ownerProfileId: args.ownerProfileId });
       this.bind("memory_search", args, run);
       // Upstream ranking records include optional undefined fields. Project the
       // public tool shape; the strict MCP serializer must remain fail-closed.
@@ -111,7 +119,8 @@ class ConversationMemoryService {
       || (this.engine.isReviewCommitted && !this.engine.isReviewCommitted(home, item))
       || memoryTrust(item) === "untrusted"
       || item.sensitivity === "restricted" || hasSecret(item.content)
-      || (["project", "workspace"].includes(item.scope) && !matchesWorkspace(item, run.workspace))) {
+      || (["project", "workspace"].includes(item.scope)
+        && !(this.engine.matchesMemoryWorkspace?.(item, run.workspace) ?? matchesWorkspace(item, run.workspace)))) {
       throw serviceError("MEMORY_NOT_FOUND", "记忆不可读取");
     }
     this.engine.ownMemory?.read({ profileId, run }, { items: [item] });
@@ -150,7 +159,8 @@ class ConversationMemoryService {
         reason: "forgotten", operationId: `forget-${id}`,
         revocationSourceRefs: binding.sourceRefs }));
     }
-    if (this.store.getRevision(profileId) !== args.expectedRevision) {
+    if (name === "memory_save" && args.placement === "daily") throw serviceError("MEMORY_INVALID", "每日笔记需要 Shoggoth Memory");
+    if (this.store.getRevision(profileId) !== args.expectedRevision && !newFactWithoutRevision(name, args)) {
       throw serviceError("MEMORY_REVISION_CONFLICT", "记忆已经变化，请重新读取");
     }
     // Another Agent's shared fact is forgotten at its home and in every copy.
@@ -228,23 +238,29 @@ class ConversationMemoryService {
     }
     const previous = this.store.get(profileId, name === "memory_save" ? id : args.id);
     const superseded = args.supersedes && this.store.get(profileId, args.supersedes);
-    if (superseded && ["project", "workspace"].includes(superseded.scope) && !matchesWorkspace(superseded, binding.workspace)) {
+    if (superseded && ["project", "workspace"].includes(superseded.scope) && !this.engine.matchesMemoryWorkspace(superseded, binding.workspace)) {
       throw serviceError("MCP_TOOL_FORBIDDEN", "不能替代其他工作区的记忆");
     }
-    if (previous && ["project", "workspace"].includes(previous.scope) && !matchesWorkspace(previous, binding.workspace)) {
+    if (previous && ["project", "workspace"].includes(previous.scope) && !this.engine.matchesMemoryWorkspace(previous, binding.workspace)) {
       throw serviceError("MCP_TOOL_FORBIDDEN", "项目记忆不属于当前工作区");
     }
     if (name === "memory_save" && previous) return this.result(profileId, previous);
-    if (this.store.getRevision(profileId) !== args.expectedRevision && previous?.status !== "deleted") {
+    if (this.store.getRevision(profileId) !== args.expectedRevision && previous?.status !== "deleted"
+      && !newFactWithoutRevision(name, args)) {
       throw serviceError("MEMORY_REVISION_CONFLICT", "记忆已经变化，请重新读取");
     }
     let item;
     if (name === "memory_save") {
       const observed = args.classification === "observed";
+      const scope = this.engine.conversationMemoryScope(profileId, args.scope, binding.workspace);
       const unsupported = !observed && !quoteSupportsContent(args.sourceQuote || "", args.content);
-      item = await this.engine.propose({ ...args, classification: observed ? "inferred" : args.classification,
-        profileId, id, assertCurrent: call.assertCurrent, type: args.validUntil == null ? "semantic" : "temporary",
-        sourceRefs: [...binding.sourceRefs, ...(["project", "workspace"].includes(args.scope) ? workspaceMemoryRefs(binding.workspace, args.scope) : []),
+      // placement=daily: an Agent working note in today's daily note, loaded
+      // with today's and tomorrow's conversations and searchable afterwards.
+      const daily = args.placement === "daily" ? `memory/${this.engine.sessionCapture.day(profileId, this.engine.now()).day}.md` : undefined;
+      item = await this.engine.propose({ ...args, scope, workspace: binding.workspace, classification: observed ? "inferred" : args.classification,
+        profileId, id, assertCurrent: call.assertCurrent, dailyNotePath: daily,
+        type: daily ? "episodic" : args.validUntil == null ? "semantic" : "temporary",
+        sourceRefs: [...binding.sourceRefs, ...(["project", "workspace"].includes(scope) ? workspaceMemoryRefs(binding.workspace, scope) : []),
           ...(unsupported ? [`${UNTRUSTED_REF_PREFIX}quote-unsupported`] : [])] });
       this._recordSource(profileId, id, item, binding);
     } else item = await this.engine.forgetEverywhere({ profileId, id: args.id, assertCurrent: call.assertCurrent, reason: "forgotten",

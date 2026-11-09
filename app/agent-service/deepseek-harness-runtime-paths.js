@@ -12,7 +12,6 @@ const DEEPSEEK_HARNESS_RUNTIME = "deepseek-harness";
 const DEEPSEEK_HARNESS_PROFILE = "shoggoth";
 const DEEPSEEK_HARNESS_INTEGRATION_PROFILE = "headless";
 const DEEPSEEK_HARNESS_INTEGRATION_MARKER = ".shoggoth-integration-v1.json";
-const MIN_DEEPSEEK_HARNESS_VERSION = Object.freeze([0, 1, 1]);
 const DEFAULT_DEEPSEEK_HARNESS_PERMISSION_POLICY = Object.freeze({
   approvalPolicy: "on-request",
   sandbox: "danger-full-access",
@@ -361,16 +360,6 @@ function parseDeepSeekHarnessVersion(value) {
   return parts.every((part) => Number.isSafeInteger(part)) ? Object.freeze(parts) : null;
 }
 
-function supportsDeepSeekHarnessVersion(value) {
-  const version = Array.isArray(value) ? value : parseDeepSeekHarnessVersion(value);
-  if (!version || version.length !== 3) return false;
-  for (let index = 0; index < MIN_DEEPSEEK_HARNESS_VERSION.length; index += 1) {
-    if (version[index] > MIN_DEEPSEEK_HARNESS_VERSION[index]) return true;
-    if (version[index] < MIN_DEEPSEEK_HARNESS_VERSION[index]) return false;
-  }
-  return true;
-}
-
 function assertDeepSeekHarnessBridgePath(value, options = {}) {
   const fileSystem = options.fs || fs;
   if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) {
@@ -425,7 +414,6 @@ module.exports = {
   DEEPSEEK_HARNESS_PROFILE,
   DEEPSEEK_HARNESS_RUNTIME,
   DEFAULT_DEEPSEEK_HARNESS_PERMISSION_POLICY,
-  MIN_DEEPSEEK_HARNESS_VERSION,
   assertDeepSeekHarnessBridgePath,
   deepSeekHarnessPermissionFingerprint,
   normalizeDeepSeekHarnessPermissionPolicy,
@@ -436,5 +424,4 @@ module.exports = {
   resolveDeepSeekHarnessBinary,
   resolveDeepSeekHarnessExecutable,
   resolveDeepSeekHarnessLaunch,
-  supportsDeepSeekHarnessVersion,
 };

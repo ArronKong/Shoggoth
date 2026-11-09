@@ -7,6 +7,7 @@ import {
   requestDesktopComputerPermissions,
 } from "../../api/client";
 import s from "./SettingsComputerUse.module.css";
+import { SettingsIcon } from "./SettingsIcons";
 
 // Session diagnostics remain available in code but are hidden in Settings.
 const SHOW_SESSION_DETAILS = false;
@@ -90,7 +91,7 @@ export default function SettingsComputerUse({ onServiceRestarted }: { onServiceR
   const label = (value: boolean | null) => t(`settings.computerUse.${value === null ? "unknown" : value ? "granted" : "notGranted"}`);
   const unavailable = error || (state?.reason ? errorKey({ code: state.reason }) : null);
   const button = (action: Parameters<typeof run>[0], key: string, primary = false) => <button
-    type="button" className={`ui-cbtn ui-cbtn--sm${primary ? " ui-cbtn--gold" : ""}`}
+    type="button" className={`${primary ? "btn-dark" : "btn-secondary"} btn-sm`}
     disabled={!desktop || busy !== null} onClick={() => void run(action)}>
     {busy === action ? t("settings.serviceWorking") : t(`settings.computerUse.${key}`)}
   </button>;
@@ -104,6 +105,7 @@ export default function SettingsComputerUse({ onServiceRestarted }: { onServiceR
       {(["accessibility", "screenRecording"] as const).map(kind => {
         const value = state?.permissions[kind] ?? null;
         return <div className={`settings-list-row ${s.permission}`} key={kind}>
+          <SettingsIcon name={kind === "accessibility" ? "accessibility" : "screen"} />
           <div className="settings-list-copy"><h4>{t(`settings.computerUse.${kind}`)}</h4><p>{t(`settings.computerUse.${kind}Hint`)}</p></div>
           <span className={`${s.status} ${value === true ? s.granted : ""}`} data-permission={kind} data-state={value === null ? "unknown" : String(value)}>
             <i aria-hidden="true" />{label(value)}

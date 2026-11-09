@@ -56,6 +56,7 @@ for (const language of ["zh-CN", "en"]) {
     "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator), i18n: translator }) },
     "../../api/client": api,
     "./SettingsComputerUse.module.css": new Proxy({}, { get: (_, name) => String(name) }),
+    "./SettingsIcons": { SettingsIcon: () => null },
   };
   const Page = load("app/manage-ui/src/pages/settings/SettingsComputerUse.tsx", stubs,
     { window: surface, document: surface }).default;

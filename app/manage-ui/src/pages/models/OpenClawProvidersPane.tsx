@@ -17,7 +17,9 @@ import {
   validateCustomEndpoint,
 } from "../../api/client";
 import { useConfirm, useToast } from "../../components/ui";
+import { SkeletonShape, SkeletonStatus } from "../../components/Skeleton";
 import OAuthProvidersCard from "../keys/OAuthProvidersCard";
+import { ProviderRowsSkeleton } from "../keys/ProviderSkeleton";
 import ProviderLogo from "../keys/ProviderLogo";
 import { ProviderCredentialFields } from "../keys/ProviderCredentialFields";
 import { SHOW_TOOL_KEYS, ToolKeysCard } from "../keys/ToolKeysCard";
@@ -603,9 +605,10 @@ export default function OpenClawProvidersPane({
   recoveryRefreshKey?: number;
 }) {
   const { t } = useTranslation();
-  const { data: directory, error, refresh } = usePageCache(`models:providers:${backend}`,
-    () => getProviderDirectory(backend), { staleTime: 30_000, enabled: active });
+  const { data: directory, loading, error, refresh } = usePageCache(`models:providers:${backend}`,
+    () => getProviderDirectory(backend), { staleTime: 30_000, enabled: active, loadingOnEmptyRefresh: true });
   const entries = directory ? (directory.supported ? directory.providers ?? [] : []) : null;
+  const directoryLoading = active && loading && !directory;
   const [expanded, setExpanded] = useState(false);
   const [providerWriteRevision, setProviderWriteRevision] = useState(0);
   const currentBackend = useRef(backend);
@@ -686,12 +689,13 @@ export default function OpenClawProvidersPane({
             ) : null}
           </div>
           <p className={styles.cardDesc}>
-            {t("models.dirConfigured", { total: directoryEntries.length, count: configured.length })}
+            {directoryLoading ? <SkeletonShape style={{ width: "10em" }} />
+              : directory && t("models.dirConfigured", { total: directoryEntries.length, count: configured.length })}
           </p>
         </div>
         <div className={`${styles.cardBody} ${styles.cardBodyFlush}`}>
           {error && <div className="error">{t("models.error", { msg: error })}</div>}
-          {entries === null && !error && <p className="muted">{t("common.loading")}</p>}
+          {directoryLoading && <SkeletonStatus><ProviderRowsSkeleton /></SkeletonStatus>}
           {visible.map((provider) => (
             <ProviderRow
               key={provider.id}

@@ -42,12 +42,16 @@ function fenceOf(line) {
 
 // 返回可参与解析的文本片段（逐行，已剔除代码块、引用块和缩进代码）。
 function mentionableLines(text) {
-  const lines = String(text).split(/\r?\n/u);
+  const lines = String(text).split(/(\r?\n)/u);
   const result = [];
   let fence = null;
   let previousBlank = true;
   let inQuote = false;
-  for (const line of lines) {
+  let offset = 0;
+  for (let index = 0; index < lines.length; index += 2) {
+    const line = lines[index];
+    const start = offset;
+    offset += line.length + (lines[index + 1]?.length ?? 0);
     if (fence) {
       const close = fenceOf(line);
       if (close && close[0] === fence[0] && close.length >= fence.length
@@ -62,12 +66,12 @@ function mentionableLines(text) {
     inQuote = false;
     if (previousBlank && /^(?: {4}|\t)/u.test(line) && !blank) continue;
     previousBlank = blank;
-    result.push(line);
+    result.push({ line, start });
   }
   return result;
 }
 
-// 剔除行内代码、URL、Markdown 链接目标后，按位置报告每个 @ 之后的文本。
+// 剔除行内代码、URL、Markdown 链接目标后，报告每个 @ 的位置。
 function mentionSites(line) {
   const sites = [];
   let index = 0;
@@ -96,7 +100,7 @@ function mentionSites(line) {
       }
     }
     if (char === "@" && (index === 0 || !NON_MENTION_PREFIX.test(line[index - 1]))) {
-      sites.push(line.slice(index + 1));
+      sites.push(index);
     }
     index += 1;
   }
@@ -112,6 +116,43 @@ function readToken(text) {
   return token.replace(/-+$/u, "");
 }
 
+function* scanMentions(text, members) {
+  const candidates = [
+    ...members.map(({ memberId, handle }) => ({ memberId, handle: normalizeHandle(handle) })),
+    ...BROADCAST_HANDLES.map(handle => ({ memberId: null, handle })),
+  ].sort((left, right) => right.handle.length - left.handle.length);
+  for (const { line, start } of mentionableLines(text)) {
+    for (const at of mentionSites(line)) {
+      const site = line.slice(at + 1);
+      const normalized = normalizeHandle(site);
+      const match = candidates.find(candidate => normalized.startsWith(candidate.handle)
+        && !(ASCII_WORD_CHAR.test(candidate.handle.at(-1))
+          && ASCII_WORD_CHAR.test(normalized[candidate.handle.length] ?? "")));
+      yield { start: start + at, site, match };
+    }
+  }
+}
+
+/** Source spans for pasted draft chips, using the same syntax as message routing. */
+function findMentionSpans(text, members) {
+  const spans = [];
+  for (const { start, site, match } of scanMentions(text, members)) {
+    if (!match || start < (spans.at(-1)?.end ?? 0)) continue;
+    let length = 0;
+    while (length < site.length && normalizeHandle(site.slice(0, length)).length < match.handle.length) {
+      length += String.fromCodePoint(site.codePointAt(length)).length;
+    }
+    if (length && normalizeHandle(site.slice(0, length)) === match.handle) {
+      spans.push({ start, end: start + 1 + length, memberId: match.memberId });
+    }
+  }
+  return spans;
+}
+
+function isBroadcastHandle(handle) {
+  return BROADCAST_HANDLES.includes(normalizeHandle(handle));
+}
+
 /**
  * @param {string} text 正文
  * @param {Array<{memberId: string, handle: string}>} members 当前群可解析的成员
@@ -119,30 +160,20 @@ function readToken(text) {
  */
 function parseMentions(text, members, options = {}) {
   const handoffs = [];
-  const candidates = [
-    ...members.map((member) => ({ memberId: member.memberId, handle: normalizeHandle(member.handle) })),
-    ...BROADCAST_HANDLES.map((handle) => ({ memberId: null, handle: normalizeHandle(handle) })),
-  ].sort((left, right) => right.handle.length - left.handle.length);
   const memberIds = [];
   const unresolved = [];
   let broadcast = false;
-  for (const line of mentionableLines(text)) {
-    for (const site of mentionSites(line)) {
-      const normalized = normalizeHandle(site);
-      const match = candidates.find((candidate) => normalized.startsWith(candidate.handle)
-        && !(ASCII_WORD_CHAR.test(candidate.handle.at(-1))
-          && ASCII_WORD_CHAR.test(normalized[candidate.handle.length] ?? "")));
-      if (match?.memberId === null) {
-        broadcast = true;
-      } else if (match) {
-        if (!memberIds.includes(match.memberId)) {
-          memberIds.push(match.memberId);
-          handoffs.push({ memberId: match.memberId, excerpt: `@${[...site].slice(0, 180).join("")}` });
-        }
-      } else {
-        const token = readToken(site);
-        if (token && !unresolved.includes(token)) unresolved.push(token);
+  for (const { site, match } of scanMentions(text, members)) {
+    if (match?.memberId === null) {
+      broadcast = true;
+    } else if (match) {
+      if (!memberIds.includes(match.memberId)) {
+        memberIds.push(match.memberId);
+        handoffs.push({ memberId: match.memberId, excerpt: `@${[...site].slice(0, 180).join("")}` });
       }
+    } else {
+      const token = readToken(site);
+      if (token && !unresolved.includes(token)) unresolved.push(token);
     }
   }
   return { memberIds, broadcast, unresolved, ...(options.handoffs ? { handoffs } : {}) };
@@ -158,6 +189,8 @@ function isPassReply(text) {
 module.exports = {
   BROADCAST_HANDLES,
   deriveHandle,
+  findMentionSpans,
+  isBroadcastHandle,
   isPassReply,
   normalizeHandle,
   parseMentions,

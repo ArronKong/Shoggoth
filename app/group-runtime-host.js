@@ -431,7 +431,9 @@ class GroupRuntimeHost {
     if (method === "host.member") {
       if (params.backendId !== this.agent.backendId || params.agentId !== this.agent.agentId) p.fail("GROUP_HOST_AGENT_INVALID");
       const backend = this.registry.getBackend(this.agent.backendId);
-      const agent = await backend.getAgent(this.agent.agentId);
+      let agent;
+      try { agent = await backend.getAgent(this.agent.agentId); }
+      catch (error) { if (error?.code === "AGENT_NOT_FOUND") p.fail("GROUP_HOST_AGENT_MISSING"); throw error; }
       const read = async file => { const value = await backend.getAgentFile(this.agent.agentId, file); return value?.missing ? null : value?.content ?? null; };
       const [identity, soul] = await Promise.all([this.agent.backendId === "hermes" ? Promise.resolve(null) : read("IDENTITY.md"), read("SOUL.md")]);
       const body = JSON.stringify({ identity, soul });

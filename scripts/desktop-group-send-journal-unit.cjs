@@ -45,6 +45,24 @@ test("recipient locks survive native storage and old ACKs preserve a changed rec
     assert.equal(Object.hasOwn(legacy.composer, "sendTarget"), false, "legacy composer fields remain valid");
   } finally { await reopened?.close(); await f.cleanup(); }
 });
+test("selected inline mentions survive reopening and stay attached to the original send draft", async () => {
+  const f = await fixture(); let reopened;
+  try {
+    const text = "say @b and @Everyone";
+    const composer = { ...compose(text), mentionIds: ["b"], mentionSpans: [
+      { start: 4, end: 6, memberId: "b" }, { start: 11, end: text.length, memberId: null },
+    ] };
+    const draft = await f.store.saveComposer({ ...scope, draftId: "mentions", revision: 1, composer, expectedStorageRevision: 0 });
+    await f.store.prepare({ ...scope, draft, inputSnapshot: { ...input(), body: text, mentions: ["b"] } });
+    await f.store.close(); reopened = new DesktopGroupSendJournalStore({ userDataRoot: f.root }); await reopened.open();
+    const saved = await reopened.read(scope);
+    assert.deepEqual(saved.draft.composer, composer);
+    assert.deepEqual(saved.sends[0].composerSnapshot.mentionSpans, composer.mentionSpans);
+    const overlapping = { ...composer, mentionSpans: [...composer.mentionSpans, composer.mentionSpans[0]] };
+    assert.throws(() => reopened.saveComposer({ ...scope, draftId: "invalid", revision: 1, composer: overlapping,
+      expectedStorageRevision: 0 }), { code: "GROUP_JOURNAL_INVALID" });
+  } finally { await reopened?.close(); await f.cleanup(); }
+});
 test("quoted member replies keep their origin, including late results, through native draft persistence", async () => {
   const { createFixture } = require("./fixtures/group-store-fixture.cjs");
   const cleanups = [], group = createFixture({ after: callback => cleanups.push(callback) });

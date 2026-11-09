@@ -1,7 +1,7 @@
 // PillTabs — 统一胶囊切换组件（Figma 6999-633）。后端切换（BackendTabs）与
 // usage 区间切换共用同一份视觉与交互；base-ui Tabs（方向键导航 + roving
 // tabindex），受控——父组件持有当前值。
-import { useEffect, useRef, type ReactNode, type Ref } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Tabs } from "@base-ui/react/tabs";
 import { Tooltip } from "@base-ui/react/tooltip";
 import styles from "./PillTabs.module.css";
@@ -33,14 +33,11 @@ export default function PillTabs({
   onChange,
   items,
   ariaLabel,
-  listRef,
 }: {
   value: string;
   onChange: (v: string) => void;
   items: PillTabItem[];
   ariaLabel?: string;
-  /** 拿到承载胶囊的那个盒子（Root 是 display:contents，量不到宽度）。 */
-  listRef?: Ref<HTMLDivElement>;
 }) {
   const indicatorRef = useRef<HTMLSpanElement>(null);
   const prevValue = useRef(value);
@@ -58,7 +55,6 @@ export default function PillTabs({
     <Tooltip.Provider delay={300}>
       <Tabs.Root value={value} onValueChange={(v) => onChange(v as string)} className={styles.root}>
         <Tabs.List
-          ref={listRef}
           className={`${styles.tabs}${iconOnly ? ` ${styles.iconTabs}` : ""}`}
           aria-label={ariaLabel}
         >

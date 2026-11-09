@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
-import { loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
+import { loadConnectorAddButton, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 const require = createRequire(new URL('../app/manage-ui/package.json', import.meta.url));
 const React = require('react'), Renderer = require('react-test-renderer'), ts = require('typescript'), i18next = require('i18next');
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -50,6 +50,7 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   '../components/Modal': { __esModule: true, default: ({ children, footer, subtitle, title, dismissible }) => React.createElement('section', { role: 'dialog', 'aria-label': typeof title === 'string' ? title : 'connector', 'data-dismissible': dismissible }, children, React.createElement("p", {}, subtitle), footer) },
   '../components/ConnectorTools': { __esModule: true, default: () => null },
   '../components/ConnectorDetails': loadConnectorDetails(t),
+  '../components/ConnectorAddButton': loadConnectorAddButton(t),
  '../components/ui': { useConfirm: () => async () => allowRemove }, '../components/McpConnectorIcon': { __esModule: true, default: () => null },
   './McpConnectorDialog': { __esModule: true, default: ({ managed }) => React.createElement('div', { 'data-managed-tools': managed }) },
   '../../../agent-service/data/official-skill-connectors.json': { __esModule: true, default: catalog }, './ConnectorsPage.module.css': { __esModule: true, default: {} },
@@ -220,7 +221,12 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   try {
    for (const canRemove of [false, true]) {
     await Renderer.act(async () => { recommendation?.unmount(); recommendation = Renderer.create(React.createElement(component.OfficialSkillRecommendation, { definition, model: { data: { items: [{ ...initial(definition.id), canRemove }] } }, onOpen() {} })); });
-    assert.equal(recommendation.root.findAllByType('button').filter(node => node.props.children === t('mcpConnectors.add')).length, Number(!canRemove), 'an existing installation never renders another Add button');
+    const addButtons = recommendation.root.findAllByType('button').filter(node => node.props['aria-label'] === `${t('mcpConnectors.add')} ${definition.name}`);
+    assert.equal(addButtons.length, Number(!canRemove), 'an existing installation never renders another Add button');
+    if (!canRemove) {
+     assert.equal(addButtons[0].findByType('svg').props['aria-hidden'], 'true');
+     assert.equal(addButtons[0].children.length, 1, 'the list action displays only the icon');
+    }
    }
   } finally { await Renderer.act(async () => recommendation?.unmount()); }
   assertions++;

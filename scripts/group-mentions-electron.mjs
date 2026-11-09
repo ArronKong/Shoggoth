@@ -11,19 +11,23 @@ const root = path.resolve(import.meta.dirname, '..');
 const require = createRequire(path.join(root, 'app/manage-ui/package.json'));
 const output = path.resolve(process.env.GROUP_ASSIGNMENT_UI_OUTPUT || path.join(root, '.artifacts/group-mentions-ui'));
 const temp = fs.realpathSync(fs.mkdtempSync('/private/tmp/shoggoth-group-mentions-ui-'));
+const avatarDir = path.join(root, 'app/assets/agent-avatars/library');
+const avatarFiles = fs.readdirSync(avatarDir).filter(file => file.endsWith('.jpg')).sort();
+const avatars = Object.fromEntries([..."abcde"].map((id, index) => [`/avatar/agent-${id}`,
+  path.join(avatarDir, avatarFiles[index * 5])]));
 const server = http.createServer((request, response) => {
   const url = new URL(request.url, 'http://fixture');
-  const asset = url.pathname.startsWith('/avatar/') ? path.join(root, 'app/manage-ui/public/logo.png')
+  const asset = url.pathname.startsWith('/avatar/') ? avatars[url.pathname]
     : ({ '/': path.join(temp, 'index.html'), '/fixture.js': path.join(temp, 'fixture.js'), '/fixture.css': path.join(temp, 'fixture.css') })[url.pathname];
   if (!asset) { response.writeHead(404); response.end(); return; }
-  response.setHeader('content-type', asset.endsWith('.png') ? 'image/png' : asset.endsWith('.css') ? 'text/css' : asset.endsWith('.js') ? 'text/javascript' : 'text/html');
+  response.setHeader('content-type', asset.endsWith('.jpg') ? 'image/jpeg' : asset.endsWith('.css') ? 'text/css' : asset.endsWith('.js') ? 'text/javascript' : 'text/html');
   response.end(fs.readFileSync(asset));
 });
 try {
   fs.mkdirSync(output, { recursive: true });
   await require('esbuild').build({ entryPoints: [path.join(root, 'scripts/fixtures/group-mentions.tsx')], bundle: true,
     format: 'esm', jsx: 'automatic', nodePaths: [path.join(root, 'app/manage-ui/node_modules')],
-    loader: { '.woff2': 'dataurl', '.svg': 'dataurl', '.webp': 'dataurl' }, define: { 'process.env.NODE_ENV': '"production"' },
+    loader: { '.woff2': 'dataurl', '.svg': 'dataurl', '.webp': 'dataurl', '.png': 'dataurl' }, define: { 'process.env.NODE_ENV': '"production"' },
     outfile: path.join(temp, 'fixture.js'), logLevel: 'silent' });
   fs.writeFileSync(path.join(temp, 'index.html'), '<link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column}</style><div id="root" class="chat-shell"></div><script type="module" src="fixture.js"></script>');
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -49,7 +53,7 @@ try {
           await window.loadURL(${JSON.stringify(origin)}+'/?language='+language+'&theme='+theme);
           await window.webContents.executeJavaScript('new Promise((resolve,reject)=>{const end=Date.now()+6000;const timer=setInterval(()=>{if(window.fixtureReady){clearInterval(timer);resolve(true)}else if(Date.now()>end){clearInterval(timer);reject(Error("fixture startup"))}},20)})');
           const result={width,language,theme};
-          for(const stage of['verifyTimeline','showMember','showStatus']){
+          for(const stage of['verifyTimeline','verifyReadOnlyMentions','showDeletedTimeline','showDeletedMember']){
             Object.assign(result,await window.webContents.executeJavaScript('window.'+stage+'()'));
             fs.writeFileSync(${JSON.stringify(output)}+'/'+stage+'-'+width+'-'+language+'-'+theme+'.png',(await window.webContents.capturePage()).toPNG());
           }

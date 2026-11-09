@@ -20,6 +20,13 @@ test("runtime item crossing two card publications keeps text prefixes in canonic
   card(2); assert.equal(state.nativeContent.parts.length, 5);
   assert.ok(projectNativeContent(state.nativeContent, false).every(p => p.type === "text"));
 });
+test("the first delta keeps its runtime item phase without marking other items or runs", () => {
+  const buffer = new ChatUiTextProjection();
+  buffer.observe("run", "text", { method: "item/started", itemId: "answer", text: "", itemPhase: "final_answer" });
+  assert.equal(buffer.observe("run", "text.delta", { itemId: "answer", delta: "答" }).phase, "final_answer");
+  assert.equal(buffer.observe("run", "text.delta", { itemId: "later", delta: "说明" }).phase, undefined);
+  assert.equal(buffer.observe("another", "text.delta", { itemId: "answer", delta: "未分类" }).phase, undefined);
+});
 test("already committed commentary is not appended a second time on a publication", () => {
   const buffer = new ChatUiTextProjection(); buffer.observe("run", "text", { itemId: "first", text: "说明", phase: "commentary" });
   let count = 0; buffer.flush("run", "pub", () => { count++; }); assert.equal(count, 0);

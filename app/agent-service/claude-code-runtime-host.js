@@ -2236,6 +2236,8 @@ class ClaudeCodeRuntimeHost {
     env.CLAUDE_AGENT_SDK_CLIENT_APP = "shoggoth-desktop";
     env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
     env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = "false";
+    // Shoggoth Memory is the Agent's only memory; no second auto-memory copy.
+    env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
     env.DISABLE_AUTOUPDATER = "1";
     return env;
   }

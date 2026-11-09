@@ -2520,6 +2520,92 @@ test("memory_get explains exclusive references and range rules without dispatchi
   } finally { handler.close(); }
 });
 
+// 2026-11-07 Antigravity saved a user preference as classification=explicit
+// without sourceQuote, got only a generic combination error, guessed `quote`
+// and finally stored the preference as its own note.
+test("memory_save names the combination rule a rejected save broke without dispatching it", async () => {
+  const calls = [];
+  const handler = createMcpStdioHandler({
+    runtimeProfileId: "runtime-a", runtimeAccountId: runtimeAccountId("runtime-a"),
+    sessionToken: nonce(0x77), serviceVersion: "0.0.test",
+    paths: fixturePaths("shoggoth-memory-save-hints-"),
+    requestService: async (_paths, request) => { calls.push(request); return { saved: true }; },
+  });
+  try {
+    await handler({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "fixture", version: "1" },
+    } });
+    const base = { source: "chat", sourceId: "PRIVATE_SESSION", content: "Answer with a one-line conclusion first." };
+    const call = args => handler({ jsonrpc: "2.0", id: 2, method: "tools/call",
+      params: { name: "memory_save", arguments: { ...base, ...args } } });
+    for (const [args, expected] of [
+      [{ scope: "user", classification: "explicit", placement: "long-term" }, /classification=explicit requires sourceQuote/u],
+      [{ scope: "user", classification: "explicit", quote: "PRIVATE_QUOTE" }, /不支持参数 quote.*classification=explicit requires sourceQuote/u],
+      [{ scope: "user", classification: "observed" }, /classification=observed is only for scope=agent/u],
+      [{ scope: "user", classification: "explicit", sourceQuote: "PRIVATE_QUOTE", placement: "daily" }, /placement=daily is only for scope=agent/u],
+      [{ scope: "agent", classification: "observed", supersedes: "PRIVATE_ID" }, /supersedes requires expectedRevision/u],
+    ]) {
+      const response = await call(args);
+      assert.equal(response.result.isError, true);
+      assert.equal(response.result.structuredContent.error.code, "MCP_TOOL_INVALID_ARGUMENTS");
+      assert.match(response.result.structuredContent.error.problems.join(" "), expected);
+      assert.doesNotMatch(response.result.content[0].text, /参数组合不满足/u);
+      assert.doesNotMatch(JSON.stringify(response), /PRIVATE_/u);
+    }
+    assert.equal(calls.length, 0, "invalid combinations never reach Service");
+    for (const args of [{ scope: "user", classification: "explicit", sourceQuote: "one-line conclusion first" },
+      { scope: "agent", classification: "observed", placement: "daily" },
+      { scope: "agent", classification: "observed", placement: "daily", supersedes: "old-id", expectedRevision: 3 }]) {
+      const response = await call(args);
+      assert.equal(response.result.isError, false);
+    }
+    assert.equal(calls.length, 3, "legal saves still reach Service");
+  } finally { handler.close(); }
+});
+
+// A stale supersedes target or revision reached the model only as
+// "当前状态不允许该工具操作"; a memory write now says how to recover.
+test("a memory write state conflict tells the model to search again, other replies stay unchanged", async () => {
+  let code = "MCP_TOOL_STATE_CONFLICT";
+  const handler = createMcpStdioHandler({
+    runtimeProfileId: "runtime-a", runtimeAccountId: runtimeAccountId("runtime-a"),
+    sessionToken: nonce(0x79), serviceVersion: "0.0.test",
+    paths: fixturePaths("sg-mem-conflict-"),
+    requestService: async () => { throw Object.assign(new Error("PRIVATE_RAW"), { code }); },
+  });
+  try {
+    await handler({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "fixture", version: "1" },
+    } });
+    const source = { source: "chat", sourceId: "PRIVATE_SESSION" };
+    const call = (name, args) => handler({ jsonrpc: "2.0", id: 2, method: "tools/call",
+      params: { name, arguments: { ...source, ...args } } });
+    const save = { content: "Use pnpm", scope: "agent", classification: "observed", supersedes: "PRIVATE_ID", expectedRevision: 3 };
+    const forget = { id: "PRIVATE_ID", expectedRevision: 3, sourceQuote: "forget it" };
+    for (const [name, args] of [["memory_save", save], ["memory_forget", forget]]) {
+      const response = await call(name, args);
+      assert.equal(response.result.isError, true);
+      assert.equal(response.result.structuredContent.error.code, "MCP_TOOL_STATE_CONFLICT");
+      assert.match(response.result.content[0].text, /^当前状态不允许该工具操作（memory_(save|forget)）：.*Run memory_search again.*\(MCP_TOOL_STATE_CONFLICT\)$/u);
+      assert.doesNotMatch(JSON.stringify(response), /PRIVATE_/u);
+    }
+    assert.equal((await call("memory_search", { query: "pnpm" })).result.content[0].text,
+      "当前状态不允许该工具操作 (MCP_TOOL_STATE_CONFLICT)");
+    code = "MCP_TOOL_NOT_FOUND";
+    assert.equal((await call("memory_forget", forget)).result.content[0].text, "请求的资源不存在 (MCP_TOOL_NOT_FOUND)");
+    for (const [nextCode, tool, args, expected] of [
+      ["MEMORY_SOURCE_REVOKED", "memory_save", save, /source was withdrawn.*Do not retry.*supersedes/u],
+      ["MEMORY_DEFINITION_REVIEW_REQUIRED", "memory_forget", forget, /memory was withdrawn.*AGENTS.md.*agent_definition_update/u],
+    ]) {
+      code = nextCode;
+      const response = await call(tool, args);
+      assert.equal(response.result.structuredContent.error.code, code);
+      assert.match(response.result.content[0].text, expected);
+      assert.doesNotMatch(JSON.stringify(response), /PRIVATE_/u);
+    }
+  } finally { handler.close(); }
+});
+
 test("MCP helper 在重复结构化结果超过帧预算时保留完整文本结果", async () => {
   const payload = { content: "x".repeat(40 * 1024), sessionId: "browser-session-1" };
   const handler = createMcpStdioHandler({

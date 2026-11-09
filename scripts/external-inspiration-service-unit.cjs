@@ -103,11 +103,15 @@ test('Session execution reads and controls stay with the original Agent after a 
   assert.equal(f.service.view(idea.id).status, 'running');
 });
 
-test('a pinned Session run stays readable after a newer round in the same Session', async t => {
+test('a selected seed model reaches preparation and an older completed reply survives a newer failure and restart', async t => {
   const f = fixture(t), idea = await f.create();
-  const started = (await f.call('start', f.params(idea))).idea;
+  const modelSelection = { model: 'fixture-model', provider: 'fixture-provider' };
+  const start = { ...f.params(idea), modelSelection };
+  const started = (await f.call('start', start)).idea;
   await f.settle(started.latestExecution.runId);
   const original = f.service.view(idea.id).latestExecution;
+  assert.deepEqual(f.calls.find(call => call.method.endsWith('.prepare')).params.modelSelection, modelSelection);
+  assert.equal(f.calls.find(call => call.method.endsWith('.start')).params.modelSelection, undefined);
   f.snapshots.set(original.runId, { status: 'completed', resultSummary: 'Original reply', finishedAt: Date.now() });
   await f.reconcile(original.runId);
   const input = { backendId: original.backendId, agentId: original.agentId, sessionKey: original.sessionKey };
@@ -118,6 +122,19 @@ test('a pinned Session run stays readable after a newer round in the same Sessio
   assert.equal(pinned.runId, original.runId);
   assert.equal(pinned.status, 'completed');
   assert.equal(pinned.resultSummary, 'Original reply');
+  const adoption = { id: idea.id, operationId: id(), expectedRevision: next.revision, patch: { acceptedRunId: original.runId } };
+  await assert.rejects(f.call('update', adoption), { code: 'INSPIRATION_BUSY' });
+  f.snapshots.set(next.latestExecution.runId, { status: 'failed', errorCode: 'HERMES_EXECUTION_FAILED', finishedAt: Date.now() });
+  await f.reconcile(next.latestExecution.runId);
+  const chosen = (await f.call('update', adoption)).idea;
+  await assert.rejects(f.call('update', { id: idea.id, operationId: id(), expectedRevision: chosen.revision, patch: { archived: true } }),
+    { code: 'INSPIRATION_NOT_COMPLETED' });
+  await f.restart();
+  const recovered = await f.call('get', { id: idea.id });
+  assert.equal(recovered.idea.acceptedRunId, original.runId);
+  assert.equal(recovered.idea.latestExecution.runId, next.latestExecution.runId);
+  assert.equal(recovered.acceptedExecution.runId, original.runId);
+  assert.equal(recovered.acceptedExecution.resultSummary, 'Original reply');
 });
 
 test('external attachment-only notes receive saved media paths and retain a readable Session origin', async t => {

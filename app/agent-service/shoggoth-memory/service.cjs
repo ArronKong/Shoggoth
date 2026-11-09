@@ -8,6 +8,7 @@ const { AsyncLocalStorage } = require("node:async_hooks");
 const { RecallPolicyStore } = require("../recall-policy-store");
 const { validateMemoryItem } = require("../memory-store");
 const { hasSecret, hasPii, memoryTrust, matchesWorkspace, workspaceMemoryRefs, contentHash } = require("../memory-engine");
+const { isAgentHomeWorkspace } = require("../chat-workspace");
 const { serviceError } = require("../security");
 const { FileMemoryStore } = require("./file-store.cjs");
 const { MemoryDatabase } = require("./database.cjs");
@@ -18,6 +19,7 @@ const { MemorySearchIndex } = require("./search-index.cjs");
 const { ProductMemorySessions } = require("./session-source.cjs");
 const { readPrivateFile } = require("../private-file");
 const { MemoryMaintenance } = require("./maintenance.cjs");
+const { SessionCapture } = require("./session-capture.cjs");
 const { SharedReadService } = require("./shared-read-service.cjs");
 const { RecallSignals } = require("./recall-signals.cjs");
 const { OwnMemoryProvenance } = require("./own-memory-provenance.cjs");
@@ -42,7 +44,7 @@ const validate = item => validateMemoryItem(Object.fromEntries(FIELDS.map(key =>
 const fail = (code, message) => { throw serviceError(code, message); };
 
 class ShoggothMemoryService {
-  constructor({ paths, profiles, definitionStore, transcriptStore, chatSessionStore, candidateStore,
+  constructor({ paths, profiles, definitionStore, transcriptStore, chatSessionStore, candidateStore, productStore,
     now = Date.now, randomUUID = crypto.randomUUID, getConfig = () => ({}), logger = console, remoteProviderResources, projectEmbeddingInput, projectProviderMetadata, sharingConfig, resolveRun, initialization = "fresh" }) {
     this.paths = paths; this.profiles = profiles; this.definitionStore = definitionStore;
     this.transcriptStore = transcriptStore; this.chatSessionStore = chatSessionStore;
@@ -67,10 +69,12 @@ class ShoggothMemoryService {
       getHost: id => this.host(id), now });
     this.recallPolicy.memoryStore = this.legacy?.store || this.store;
     this.sharing = new SharedReadService(this, { config: sharingConfig });
+    this.sessionCapture = new SessionCapture(this);
     this.maintenance = new MemoryMaintenance(this);
     this.activeMemory = new ActiveMemory(this);
     this.recallSignals = new RecallSignals(this); this.signalCommits = new Set();
     this.ownMemory = new OwnMemoryProvenance(this);
+    this.definitionLinks = new (require("./definition-links.cjs").MemoryDefinitionLinks)(this, productStore);
     this.activeMemoryCommands = new ActiveMemoryCommands(this);
     this.localEmbeddingHost = new MemoryLocalEmbeddingHost({ getConfig: id => this.config(id),
       assertCurrent: id => this.assertProfile(id) });
@@ -320,7 +324,7 @@ class ShoggothMemoryService {
     if (!item || item.status !== "active" || item.validFrom > this.now() || item.validUntil !== null && item.validUntil <= this.now()
       || item.sensitivity === "restricted" || item.sensitivity === "private" && input.maxSensitivity !== "private"
       || hasSecret(item.content) || memoryTrust(item) === "untrusted"
-      || ["project", "workspace"].includes(item.scope) && !matchesWorkspace(item, input.workspace)
+      || ["project", "workspace"].includes(item.scope) && !this.matchesMemoryWorkspace(item, input.workspace)
       || !this.recallPolicy.isMemoryVisible(item.profileId, item)) return false;
     if (input.scopes && !input.scopes.includes(item.scope)) return false;
     const authorityText = item.authorityText || item.content;
@@ -329,12 +333,28 @@ class ShoggothMemoryService {
     if (item.sourceEvidence && !this.sourceEvidenceVisible(item.profileId, item.sourceEvidence, input.workspace)) return false;
     return this.sourceSessionsVisible(item.profileId, authorityText, input.workspace, { memoryItem: item });
   }
+  // Conversation-backed notes stay within their working directory, except
+  // that an Agent's own generated directories count as one home.
+  sameEvidenceWorkspace(profileId, left, right) {
+    return left === right || (isAgentHomeWorkspace(this.paths, profileId, left) && isAgentHomeWorkspace(this.paths, profileId, right));
+  }
+  matchesMemoryWorkspace(item, workspace) {
+    if (matchesWorkspace(item, workspace)) return true;
+    if (!isAgentHomeWorkspace(this.paths, item.profileId, workspace)) return false;
+    const home = path.join(this.paths.defaultWorkspaceDir, item.profileId);
+    return matchesWorkspace(item, home) || this.chatSessionStore.listSessions().some(session =>
+      session.profileId === item.profileId && isAgentHomeWorkspace(this.paths, item.profileId, session.workspace)
+      && matchesWorkspace(item, session.workspace));
+  }
+  conversationMemoryScope(profileId, scope, workspace) {
+    return ["workspace", "project"].includes(scope) && isAgentHomeWorkspace(this.paths, profileId, workspace) ? "agent" : scope;
+  }
   sourceEvidenceVisible(profileId, evidence, workspace) {
     const host = this.host(profileId);
     for (const source of evidence) {
       try {
         const session = host.sessions.current(profileId, source.sessionId);
-        if (session.workspace !== workspace) return false;
+        if (!this.sameEvidenceWorkspace(profileId, session.workspace, workspace)) return false;
         const page = this.conversationRecall.scanEligibleSession({ profileId, sessionId: source.sessionId, afterSeq: source.seq - 1, limit: 1, completedOnly: true });
         const event = page.events.find(item => item.seq === source.seq);
         if (!event || isBorrowedMemoryDerived(event) || sha256(`${event.kind === "user" ? "User" : "Assistant"}: ${event.text.replace(/\s+/gu, " ").trim()}`) !== source.hash) return false;
@@ -660,12 +680,24 @@ class ShoggothMemoryService {
       && JSON.stringify(old.sourceRefs.filter(ref => ref.startsWith("workspace:"))) === JSON.stringify(item.sourceRefs.filter(ref => ref.startsWith("workspace:")))
       && this.recallPolicy.isMemoryVisible(input.profileId, old));
     if (duplicate && !item.supersedes) return duplicate;
-    const records = [item];
+    const prior = item.supersedes ? all.find(old => old.id === item.supersedes) : null;
     if (item.supersedes) {
-      const prior = all.find(old => old.id === item.supersedes);
-      if (!prior || prior.status !== "active" || prior.scope !== item.scope || !this.recallPolicy.isMemoryVisible(input.profileId, prior)) fail("MEMORY_CONFLICT_INVALID", "替代的记忆已变化");
-      records.push({ ...prior, status: "superseded", updatedAt: now });
+      const homeCorrection = prior && ["workspace", "project"].includes(prior.scope) && item.scope === "agent"
+        && isAgentHomeWorkspace(this.paths, input.profileId, input.workspace) && this.matchesMemoryWorkspace(prior, input.workspace);
+      if (!prior || prior.status !== "active" || prior.scope !== item.scope && !homeCorrection
+        || !this.recallPolicy.isMemoryVisible(input.profileId, prior)) fail("MEMORY_CONFLICT_INVALID", "替代的记忆已变化");
+      // An unconfirmed replacement must never withdraw the confirmed fact.
+      if (item.status !== "active") fail("MEMORY_CONFLICT_INVALID", "更正内容尚未得到当前原话支持，原记忆保持有效");
     }
+    const daily = relative => typeof relative === "string" && /^memory\/\d{4}-\d{2}-\d{2}\.md$/u.test(relative);
+    if (input.dailyNotePath !== undefined && (item.scope !== "agent" || !daily(input.dailyNotePath)
+      || prior && !daily(prior.memoryPath))) fail("MEMORY_INVALID", "每日笔记只能新增或替换当前助理的每日笔记");
+    // Keep a corrected daily note in its original file even when placement is
+    // omitted or the correction arrives on a later day. Both records use the
+    // same durable transaction; no forget/source revocation precedes the save.
+    const memoryPath = daily(prior?.memoryPath) ? prior.memoryPath : input.dailyNotePath;
+    const records = [memoryPath === undefined ? item : { ...item, type: "episodic", memoryPath }];
+    if (prior) records.push({ ...prior, status: "superseded", updatedAt: now });
     return (await this.store.upsertMany(records, { expectedRevision: revision, assertCurrent: check }))[0];
   }
   async update(input) {
@@ -705,6 +737,7 @@ class ShoggothMemoryService {
       { assertCurrent: input.assertCurrent });
     this.sharing.withdraw(input.profileId, lineage);
     await this.sharing.reconcileConfig();
+    await this.definitionLinks.retract(input.profileId, lineage, input);
     return this.store.get(input.profileId, item.id);
   }
   forgetEverywhere(input) { return this.delete(input); }

@@ -118,7 +118,7 @@ for (const dreamingStorageMode of ["separate", "both"]) test(`real Product cross
     const source = await owner.propose({ profileId: B, content: `${MARKER} sapphire calibration`, scope: "agent", classification: "explicit", sourceRefs: ["user-edit:source-main"] });
     await owner.propose({ profileId: C, content: "telescope independent C calibration", scope: "agent", classification: "explicit", sourceRefs: ["user-edit:source-peer"] });
     const a = seed(service, A, workspace, "reader-first", "Find telescope information");
-    const found = await call(a.run, "memory_search", { query: "telescope", minScore: 0, maxResults: 20 });
+    const found = await call(a.run, "memory_search", { query: "telescope", memoryScope: "all", minScore: 0, maxResults: 20 });
     const borrowed = found.results.find(row => row.ownerProfileId === B && row.snippet.includes(MARKER)); assert.ok(borrowed, JSON.stringify(found));
     assert.equal(found.coverage, "complete"); assert.equal(modelCalls, 0); assert.ok(found.results.some(row => row.ownerProfileId === C));
     assert.deepEqual(owner.listShared(A).items, []);
@@ -200,7 +200,7 @@ for (const dreamingStorageMode of ["separate", "both"]) test(`real Product cross
     await service.stop({ notify: false }); service = null; await open(); owner = service.memoryEngine; call = controller(service);
     assert.equal(service.nativeMemorySharingConfig.read().config.enabled, true); assert.equal(owner.borrowedMemoryDependenciesCurrent(A, a.session.id, dep), true);
     const restored = next(service, service.chatSessionStore.getSession(a.session.sessionKey), "reader-restored", "Continue telescope");
-    assert.ok((await call(restored, "memory_search", { query: "telescope", minScore: 0 })).results.some(row => row.ownerProfileId === B));
+    assert.ok((await call(restored, "memory_search", { query: "telescope", memoryScope: "all", minScore: 0 })).results.some(row => row.ownerProfileId === B));
     service.workDispatcher.transition(restored.id, "completed"); await owner.finishActiveMemoryRun(restored);
     await apply(1, true, [B]); assert.equal(owner.borrowedMemoryDependenciesCurrent(A, a.session.id, dep), false);
     const excluded = next(service, service.chatSessionStore.getSession(a.session.sessionKey), "reader-excluded", "Find excluded source");

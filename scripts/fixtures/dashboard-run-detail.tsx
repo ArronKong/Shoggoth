@@ -12,7 +12,7 @@ import "../../app/manage-ui/src/manage-skin.css";
 
 const state = window as any, options = new URLSearchParams(location.search);
 const language = options.get("language") || "zh-CN", theme = options.get("theme") || "light";
-const now = Date.now(), startedAt = now - 42_000;
+const now = Date.now(), createdAt = now - 80_000, startedAt = now - 42_000;
 const runId = "preview-task", title = "Tibo 额度重置监测";
 let stage = options.get("state") === "completed" ? 4 : 0, outage = false, detailReads = 0, summaryReads = 0;
 const resultText = "### 监测结果\n\n官方公告与生效时区已核对，本次监测已完成。\n\n- **公告来源**：已核对\n- **生效时间**：已完成时区换算\n\n这是一条用于查看界面效果的示例任务。";
@@ -32,10 +32,10 @@ const events: any[] = [
   { type: "text.delta", delta: resultText.slice(20) },
 ].map((event, index) => ({ ...event, seq: index + 1 }));
 const detail = () => ({ id: `shoggoth:${runId}`, backendId: "shoggoth", runId, source: "cron", title, runtime: "Grok",
-  status: stage === 4 ? "completed" : stage === 5 ? "failed" : "running", agentId: "preview-grok", startedAt,
+  status: stage === 4 ? "completed" : stage === 5 ? "failed" : "running", agentId: "preview-grok", createdAt, startedAt,
   finishedAt: stage >= 4 ? now + 20_000 : undefined, error: stage === 5 ? "公告暂时无法读取，请稍后重试。" : undefined,
   events: events.slice(0, stage === 0 ? 5 : stage === 1 ? 8 : stage === 2 ? 11 : 12), artifacts: [] });
-const running = () => stage >= 4 ? [] : [{ id: `shoggoth:${runId}`, backendId: "shoggoth", runId, kind: "cron", title, agentId: "preview-grok", status: "running", startedAt }];
+const running = () => stage >= 4 ? [] : [{ id: `shoggoth:${runId}`, backendId: "shoggoth", runId, kind: "cron", title, agentId: "preview-grok", status: "running", createdAt, startedAt }];
 const resultRun = () => ({ backendId: "shoggoth", jobId: "shoggoth:preview-job", jobName: title, runId,
   agentId: "preview-grok", sessionKey: "preview-session", startedAt, finishedAt: now + 20_000,
   status: "ok", completionStatus: "succeeded", durationMs: 62_000, summary: resultText.split(reportEnding)[0] });
@@ -117,6 +117,9 @@ state.runFixture = async () => {
     .some(element => element.textContent === i18n.t("dashboardRun.status.completed")), "Completion did not update");
   await wait(() => document.querySelector('.dash-feed .dash-run') && !document.querySelector(`[data-run-id="${runId}"]`), "Completion did not refresh the existing card");
   if (body().includes("监测结果") || document.querySelector('[role="dialog"] .chat-md')) throw Error("Completed result appended to execution dialog");
+  const duration = [...document.querySelectorAll('[role="dialog"] dt')]
+    .find(node => node.textContent === i18n.t("dashboardRun.duration"))?.nextElementSibling;
+  if (duration?.textContent !== "1m 40s") throw Error(`Expected total time from request through completion, got ${duration?.textContent}`);
   const finishedSummaryReads = summaryReads;
   const finishedReads = detailReads;
   await new Promise(resolve => setTimeout(resolve, 2200));

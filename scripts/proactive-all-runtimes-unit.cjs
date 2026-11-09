@@ -48,8 +48,7 @@ async function fixture(t, runtime) {
         runtimeAccountId: DEFAULT_RUNTIME_ACCOUNTS.find(a => a.runtime === name).id }, { operationId: id() });
       state = products.getAgentRuntimeBindings(profileId); binding = state.bindings.find(b => b.runtime === name);
     }
-    products.setAgentDefaultBinding(profileId, binding.id, { revision: state.revision });
-    products.putAgentProfile({ ...products.getAgentProfile(profileId), defaultModel: model });
+    products.setAgentDefaultModel(profileId, binding.id, { revision: state.revision, model });
   }
   select(runtime);
   const call = (method, params) => service.proactiveService.handle(method, params);

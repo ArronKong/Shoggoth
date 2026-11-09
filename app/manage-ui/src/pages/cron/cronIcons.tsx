@@ -42,17 +42,6 @@ export function IconSliders() {
   );
 }
 
-// 搜索（7018:175）。放大镜的圆只有 ⌀10，摆在 16 的框里比同排 sliders(⌀12 满框)
-// 明显小一圈——收紧 viewBox 让图形填满，视觉重量对齐，尺寸仍是 16。
-export function IconSearch() {
-  return (
-    <svg {...BASE} viewBox="1 1 14 14">
-      <path d="M7 12C9.76142 12 12 9.76142 12 7C12 4.23858 9.76142 2 7 2C4.23858 2 2 4.23858 2 7C2 9.76142 4.23858 12 7 12Z" />
-      <path d="M10.667 11.1133L14.0537 14.5" />
-    </svg>
-  );
-}
-
 // 新建按钮的加号（7018:188）。
 export function IconPlus() {
   return (

@@ -79,7 +79,7 @@ export default function SettingsWeb() {
         <Field label={t("fetch")}><Select value={config.fetchProvider} disabled={disabled} onChange={value => change({ fetchProvider: value as WebProviderConfig["fetchProvider"] })}>
           <Option value="direct">{t("direct")}</Option>{providers.filter(provider => provider !== "brave").map(provider => <Option key={provider} value={provider}>{names[provider]}</Option>)}
         </Select></Field>
-        <div className={s.actions}><button className="ui-cbtn ui-cbtn--primary" type="submit" disabled={disabled || !configDirty}>{t("save")}</button></div>
+        <div className={s.actions}><button className="btn-dark btn-md" type="submit" disabled={disabled || !configDirty}>{t("save")}</button></div>
       </form>
       <p className="ui-hint">{t("scope")}</p><p className="ui-hint">{t("fetchHint")}</p>
       {missing && <p className="ui-hint" role="status">{t("missing")}</p>}
@@ -93,8 +93,8 @@ export default function SettingsWeb() {
             value={keys[provider]} placeholder={t("placeholder")} maxLength={4096} disabled={disabled} onChange={event => {
               if (!disabled && !inFlight.current) { const value = event.target.value; setKeys(previous => ({ ...previous, [provider]: value })); setSaved(false); }
             }}/></Field>
-          <div className={s.actions}><button type="submit" className="ui-cbtn ui-cbtn--sm" disabled={disabled || !keys[provider]}>{snapshot?.credentials[provider].configured ? t("replace") : t("saveKey")}</button>
-            <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={disabled || !snapshot?.credentials[provider].configured} onClick={() => {
+          <div className={s.actions}><button type="submit" className="btn-dark btn-sm" disabled={disabled || !keys[provider]}>{snapshot?.credentials[provider].configured ? t("replace") : t("saveKey")}</button>
+            <button type="button" className="btn-secondary btn-sm" disabled={disabled || !snapshot?.credentials[provider].configured} onClick={() => {
               if (snapshot) void mutate(() => clearWebProviderKey({ provider, expectedRevision: snapshot.credentials[provider].revision }), provider);
             }}>{t("clear")}</button></div>
         </form>)}<p className="ui-hint">{t("tinyfishHint")}</p>
@@ -102,7 +102,7 @@ export default function SettingsWeb() {
       <div className={s.feedback}>
         {error && <p role="alert" ref={errorRef}>{t(`errors.${error}`)}</p>}
         <p role="status">{busy ? t(snapshot ? "working" : "loading") : saved ? t("saved") : ""}</p>
-        <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={busy} onClick={() => void load()}>{t(dirty ? "reload" : "retry")}</button>
+        <button type="button" className="btn-secondary btn-sm" disabled={busy} onClick={() => void load()}>{t(dirty ? "reload" : "retry")}</button>
       </div>
     </div>
   </section>;

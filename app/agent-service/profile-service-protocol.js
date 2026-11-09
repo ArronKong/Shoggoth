@@ -159,13 +159,17 @@ function validateProfileServiceResult(method, result) {
       // selection token (absent = Profile default source) and its display name.
       const sourced = Object.hasOwn(model || {}, "modelProviderRef");
       const named = Object.hasOwn(model || {}, "sourceName");
+      const absoluteSource = Object.hasOwn(model || {}, "sourceProviderRef");
+      const validSource = value => typeof value === "string"
+        && /^(?:@chatgpt|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/u.test(value);
       const key = `${sourced ? model.modelProviderRef : ""}\0${model?.id}`;
       if (!exactObject(model, ["id", "displayName", "description", "isDefault",
         ...(Object.hasOwn(model || {}, "capabilities") ? ["capabilities"] : []),
-        ...(sourced ? ["modelProviderRef"] : []), ...(named ? ["sourceName"] : [])])
+        ...(sourced ? ["modelProviderRef"] : []), ...(named ? ["sourceName"] : []),
+        ...(absoluteSource ? ["sourceProviderRef"] : [])])
         || (Object.hasOwn(model || {}, "capabilities") && !validModelCapabilities(model.capabilities))
-        || (sourced && (typeof model.modelProviderRef !== "string"
-          || !/^(?:@chatgpt|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/u.test(model.modelProviderRef)))
+        || (sourced && !validSource(model.modelProviderRef))
+        || (absoluteSource && (!validSource(model.sourceProviderRef) || (sourced && model.sourceProviderRef !== model.modelProviderRef)))
         || (named && !validString(model.sourceName, 512))
         || !validString(model.id, 512) || !validString(model.displayName, 512)
         || !validText(model.description, 4096) || typeof model.isDefault !== "boolean"
@@ -181,6 +185,7 @@ function validateProfileServiceResult(method, result) {
         ...(model.capabilities ? { capabilities: structuredClone(model.capabilities) } : {}),
         ...(sourced ? { modelProviderRef: model.modelProviderRef } : {}),
         ...(named ? { sourceName: model.sourceName } : {}),
+        ...(absoluteSource ? { sourceProviderRef: model.sourceProviderRef } : {}),
       };
     });
     return { models, nextCursor: result.nextCursor, hasMore: result.hasMore };

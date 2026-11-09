@@ -372,7 +372,7 @@ async function verifyPackagedService(appPath) {
         for (const method of ["profile.capabilities.read", "profile.binding.capabilities.read"]) {
           assert.equal(PROFILE_SERVICE_METHODS.includes(method), true, "packaged v15 capability read method: " + method);
         }
-        assert.equal(STORE_SCHEMA_VERSION, 16, "packaged current Product16 reader is required");
+        assert.equal(STORE_SCHEMA_VERSION, 17, "packaged current Product17 reader is required");
         assert.equal(CHAT_SESSION_STORE_VERSION, 8, "packaged Chat8 reader is required");
         assert.equal(TOKEN_USAGE_STORE_VERSION, 2, "packaged usage attribution reader is required");
         assert.equal(validateDataAuthorityManifest(DATA_AUTHORITY_MANIFEST), true);

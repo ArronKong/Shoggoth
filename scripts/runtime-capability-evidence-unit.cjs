@@ -84,6 +84,23 @@ test("missing resume does not disable new chat or history, and policy proofs can
   assert.equal(result.code, "PERMISSION_ENFORCEMENT_UNPROVEN");
 });
 
+test("native catalog control instances describe supported session policies without pinning the catalog policy", () => {
+  for (const runtime of ["codex", "grok-build", "antigravity", "pi", "opencode", "deepseek-harness"]) {
+    const target = { ...binding, runtime, enabled: true };
+    const control = raw(); control.host.controlInstance = true;
+    const evidence = runtimeCapabilityEvidence(control, { ...binding, runtime }, "catalog-process");
+    for (const permissionMode of ["request-approval", "auto-review", "full-access"]) {
+      assert.deepEqual(supports({ binding: target,
+        facts: { installed: true, authenticated: true, permissionEnforcementProven: true, capabilityEvidence: evidence },
+        requirements: { permissionMode, permissionPolicy: policy, workspace: "/tmp/fixture" } }),
+      { supported: true }, `${runtime}: ${permissionMode}`);
+    }
+    if (runtime === "deepseek-harness") assert.equal(supports({ binding: target,
+      facts: { installed: true, authenticated: true, permissionEnforcementProven: true, capabilityEvidence: evidence },
+      requirements: { permissionMode: "read-only", permissionPolicy: policy } }).code, "PERMISSION_ENFORCEMENT_UNPROVEN");
+  }
+});
+
 test("V1 fences unsupported attachments and compaction before any native dispatch", async () => {
   const { runtimeHandleV1 } = require("../app/agent-service/runtime-handle-v1");
   let sends = 0, commands = 0;

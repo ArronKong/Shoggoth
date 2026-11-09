@@ -23,7 +23,8 @@ const helpers = ast.statements.filter(node => (ts.isFunctionDeclaration(node) &&
 assert.equal(helpers.length, functions.size + constants.size);
 // Media, cards and approval payloads are absent from these transcript fixtures.
 // Exercise the actual history normalizer and folding code, including run identity.
-const context = { ...preambles, stepsFromParts: exports.stepsFromParts, withoutPlanSteps: steps => steps.filter(s => s.kind !== "plan"),
+const context = { ...preambles, turnElapsedMs: exports.turnElapsedMs, stepsFromParts: exports.stepsFromParts,
+  mergeObservedTurnSteps: exports.mergeNativeTurnSteps, withoutPlanSteps: steps => steps.filter(s => s.kind !== "plan"),
   normalizeOpenClawMediaFacts: () => [], nativeChatMedia: () => ({ attachments: [], images: [], files: [] }),
   normalizeNativeUiPart: () => null, interruptedApprovalEntry: () => null, validPluginAppCallId: exports.validPluginAppCallId };
 vm.runInNewContext(ts.transpileModule(helpers.map(node => node.getText(ast)).join("\n"), {
@@ -164,3 +165,52 @@ assert.equal(timelines([...linkedLegacy, { role: "user", parts: [] }, ...linkedL
 const unmatched = absorbTurnTimelines([{ ...linkedLegacy[1], parts: [{ ...linkedLegacy[1].parts[0], toolCallId: "no-owner" }] }]);
 assert.equal(unmatched[0].role, "toolResult", "an unknown owner must stay inspectable rather than be attached to another turn");
 console.log("PASS linked legacy tool results and process ownership for unread navigation");
+
+// The reported Codex + third-party Responses turn: three public reasoning items,
+// two tools, two in-turn compactions, a steering input, then an intentional stop.
+// Exercise the native event -> durable history -> actual ChatPage projection.
+{
+  const { normalizeCodexEvent } = require(new URL("../app/agent-service/codex-event-normalizer.js", import.meta.url).pathname);
+  const { transcriptHistoryItem } = require(new URL("../app/agent-service/chat-service-controller.js", import.meta.url).pathname);
+  const events = [];
+  const add = (kind, content, extra = {}) => events.push({ id: `event-${events.length}`, seq: events.length + 1,
+    runId: "stopped-native", kind, occurredAt: 1000 + events.length * 1000, contextExcluded: false, content, ...extra });
+  const thought = index => {
+    const event = normalizeCodexEvent({ method: "item/completed", params: { threadId: "thread", turnId: "turn",
+      item: { id: `reason-${index}`, type: "reasoning", summary: [], content: [`Public investigation ${index}`] } } });
+    add("status", { transcriptType: "reasoning", ...event });
+  };
+  const tool = index => {
+    add("tool_call", { transcriptType: "tool.start", toolCallId: `call-${index}`, tool: { name: "search" } });
+    add("tool_result", { transcriptType: "tool.result", toolCallId: `call-${index}`, tool: { name: "search", status: "completed", resultSummary: "found", durationMs: 1000 } });
+  };
+  const compact = index => add("status", { transcriptType: "context.native.compacted", runtimeSessionId: "thread",
+    compactionId: `compact-${index}` }, { contextExcluded: true });
+  const note = index => add("assistant", { transcriptType: "text", phase: "commentary",
+    text: `Public note ${index}`, segmentId: `note-${index}` });
+  add("user", { text: "Show me examples" });
+  thought(1); note(1); tool(1); compact(1); thought(2); note(2); compact(2);
+  add("user", { transcriptType: "steer", text: "Links only" });
+  thought(3); note(3); tool(2); add("status", { transcriptType: "terminal", status: "canceled", errorCode: null });
+  add("status", { transcriptType: "context.native.compacted", runtimeSessionId: "thread" },
+    { runId: "separate-compact-command", contextExcluded: true });
+  const original = JSON.stringify(events);
+  const messages = events.map(event => transcriptHistoryItem(event)).filter(Boolean).map(item => normalize(item.payload.message));
+  const projected = absorbTurnTimelines(messages);
+  const cards = projected.flatMap(message => message.parts.filter(part => part.type === "timeline"));
+  assert.equal(cards.length, 1, "in-run compaction and steering keep a single activity card");
+  const steps = cards[0].steps;
+  assert.deepEqual(Array.from(steps.filter(step => step.kind === "thinking"), step => step.text),
+    ["Public investigation 1", "Public investigation 2", "Public investigation 3"],
+    "stopping and reloading must retain every public reasoning item");
+  assert.deepEqual(Array.from(steps.filter(step => step.kind === "tool"), step => step.toolCallId), ["call-1", "call-2"]);
+  assert.deepEqual(Array.from(steps.filter(step => step.kind === "status"), step => [step.statusKind, step.status]),
+    [["compacted", "ok"], ["compacted", "ok"]], "both completed cycles stay in the activity count");
+  assert.deepEqual(Array.from(projected.filter(message => message.notice === "contextCompacted"), message => message.nativeRunId),
+    ["separate-compact-command"], "an independent compaction retains its notice");
+  assert.equal(projected.filter(message => message.role === "user").length, 2);
+  const conversation = projected.flatMap(message => message.notice ? [] : message.parts.filter(part => part.type === "text").map(part => part.text));
+  assert.deepEqual(Array.from(conversation), ["Show me examples", "Public note 1", "Public note 2", "Links only", "Public note 3"]);
+  assert.equal(JSON.stringify(events), original);
+  console.log("PASS stopped native turn retains three public reasoning steps, two tools, compactions and steering input");
+}

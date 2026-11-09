@@ -16,6 +16,7 @@ const {
 
 const SKILL_REGISTRY_SCHEMA_VERSION = 2;
 const SKILL_PROFILE_SCHEMA_VERSION = 1;
+const SHARED_BUILTIN_ID = "shoggoth-skill-authoring";
 const MAX_PACKAGE_FILES = 256;
 const MAX_PACKAGE_BYTES = 16 * 1024 * 1024;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
@@ -297,6 +298,7 @@ function publicPackage(record, enabled = false, eligibility = null) {
     requiredRuntimeCapabilities: [...record.requiredRuntimeCapabilities],
     sourceCompatibility: [...record.sourceCompatibility],
     globalEnabled: record.globalEnabled === true,
+    ...(record.globalSettingRevision === undefined ? {} : { globalSettingRevision: record.globalSettingRevision }),
     enabled,
     eligible: eligibility ? eligibility.eligible : true,
     ineligibleReason: eligibility?.reason || null,
@@ -314,6 +316,7 @@ class NativeSkillStore {
       throw new TypeError("NativeSkillStore profileExists 必须是函数");
     }
     this.paths = options.paths;
+    this.builtinSettingsPath = path.join(this.paths.skillsDir, "builtin-authoring.json");
     this.builtinRoot = options.builtinRoot ? path.resolve(options.builtinRoot) : null;
     this.profileExists = options.profileExists || (() => true);
     this.now = options.now || Date.now;
@@ -331,6 +334,7 @@ class NativeSkillStore {
       packages: this._allPackages().map((item) => ({
         id: item.id, version: item.version, source: item.source, contentHash: item.contentHash,
         globalEnabled: item.globalEnabled === true,
+        ...(item.globalSettingRevision === undefined ? {} : { globalSettingRevision: item.globalSettingRevision }),
       })),
     }));
   }
@@ -371,8 +375,31 @@ class NativeSkillStore {
       if (!NAME_PATTERN.test(name)) throw skillError("SKILL_BUILTIN_INVALID", "内置 Skill 目录名无效");
       const scan = scanPackage(path.join(this.builtinRoot, name), { enforceOwner: false });
       if (scan.manifest.name !== name) throw skillError("SKILL_BUILTIN_INVALID", "内置 Skill 名称与目录不一致");
-      return this._recordFromScan(scan, "builtin");
+      const record = this._recordFromScan(scan, "builtin");
+      if (record.id !== SHARED_BUILTIN_ID) return record;
+      const { enabled, revision } = this._loadBuiltinSettings();
+      return Object.freeze({ ...record, globalEnabled: enabled, globalSettingRevision: revision });
     });
+  }
+  _loadBuiltinSettings() {
+    const recovery = recoverInterruptedPrivateFile(this.builtinSettingsPath, {
+      trustedRoot: this.paths.trustedRoot,
+    });
+    if (recovery === "uncertain") {
+      throw skillError("SKILL_REGISTRY_COMMIT_UNCERTAIN", "内置 Skill 开关上次提交状态不确定");
+    }
+    if (!lstatIfExists(this.builtinSettingsPath)) return { enabled: true, revision: 1 };
+    let value;
+    try {
+      value = JSON.parse(readPrivateFile(this.builtinSettingsPath, { maxBytes: 1024 }).toString("utf8"));
+    } catch {
+      throw skillError("SKILL_REGISTRY_CORRUPT", "内置 Skill 开关无法读取");
+    }
+    if (!exact(value, ["schemaVersion", "revision", "enabled"]) || value.schemaVersion !== 1
+      || !Number.isSafeInteger(value.revision) || value.revision < 1 || typeof value.enabled !== "boolean") {
+      throw skillError("SKILL_REGISTRY_CORRUPT", "内置 Skill 开关无效");
+    }
+    return value;
   }
   _validateRegistry(value) {
     if (!exact(value, ["schemaVersion", "revision", "updatedAt", "packages"])
@@ -449,6 +476,8 @@ class NativeSkillStore {
     const keys = value.selections.map((item) => item.skillId);
     if (new Set(keys).size !== keys.length) throw skillError("SKILL_PROFILE_CORRUPT", "Skill Profile 选择重复");
     for (const selection of value.selections) {
+      // Preserve old per-Agent selections on disk for rollback, but the shared setting owns this Skill now.
+      if (selection.source === "builtin" && this._sharedBuiltin(selection.skillId)) continue;
       if (!this._findPackage(selection.skillId, selection.source, selection.version)) {
         throw skillError("SKILL_PROFILE_CORRUPT", "Skill Profile 引用了不存在的包");
       }
@@ -510,6 +539,9 @@ class NativeSkillStore {
     return [...this.builtins, ...(this.registry?.packages || [])].find((item) => (
       item.id === id && item.source === source && item.version === version
     )) || null;
+  }
+  _sharedBuiltin(id) {
+    return this.builtins.find((record) => record.id === id && record.globalSettingRevision !== undefined);
   }
   _packageRoot(record) {
     if (record.source === "builtin") return path.join(this.builtinRoot, record.name);
@@ -799,6 +831,9 @@ class NativeSkillStore {
   _manifest(profileId) { return this.profileManifests.get(profileId) || this._loadProfile(profileId); }
   setProfileSkill(input) {
     this._assertOpen();
+    if (input.source === "builtin" && this._sharedBuiltin(input.skillId)) {
+      throw skillError("INVALID_PARAMS", "此内置 Skill 只能全局启停");
+    }
     const manifest = this._manifest(input.profileId);
     if (manifest.revision !== input.expectedRevision) {
       throw skillError("SKILL_PROFILE_REVISION_CONFLICT", "Skill Profile revision 已变化");
@@ -831,9 +866,14 @@ class NativeSkillStore {
   }
   setGlobalSkill(input) {
     this._assertOpen();
-    if (!input || input.source !== "user" || !ID_PATTERN.test(input.skillId)
+    if (!input || !["builtin", "user"].includes(input.source) || !ID_PATTERN.test(input.skillId)
       || !VERSION_PATTERN.test(input.version) || typeof input.enabled !== "boolean") {
       throw skillError("SKILL_NOT_FOUND", "Skill 包不存在");
+    }
+    if (input.source === "builtin") {
+      const record = this._sharedBuiltin(input.skillId);
+      if (!record || record.version !== input.version) throw skillError("SKILL_NOT_FOUND", "Skill 包不存在");
+      return this._setBuiltinSettings(record, input);
     }
     if (input.expectedRevision !== this.registry.revision) {
       throw skillError("SKILL_REGISTRY_REVISION_CONFLICT", "Skill Registry revision 已变化");
@@ -848,6 +888,31 @@ class NativeSkillStore {
     return { revision, skill: publicPackage(this._findPackage(input.skillId, "user", input.version),
       input.enabled) };
   }
+  _setBuiltinSettings(record, { expectedRevision, enabled }) {
+    if (expectedRevision !== record.globalSettingRevision) {
+      throw skillError("SKILL_REGISTRY_REVISION_CONFLICT", "内置 Skill 开关已变化");
+    }
+    if (enabled === record.globalEnabled) {
+      return { revision: this.registry.revision, skill: publicPackage(record, enabled) };
+    }
+    const revision = record.globalSettingRevision + 1;
+    if (!Number.isSafeInteger(revision)) throw skillError("SKILL_REGISTRY_CORRUPT", "内置 Skill 开关版本无效");
+    const next = Object.freeze({ ...record, globalEnabled: enabled, globalSettingRevision: revision });
+    let committed = false;
+    try {
+      atomicWritePrivateFile(this.builtinSettingsPath, `${JSON.stringify({ schemaVersion: 1, revision, enabled })}\n`, {
+        trustedRoot: this.paths.trustedRoot,
+      });
+      committed = true;
+    } catch (error) {
+      if (error?.committedUncertain) this.commitUncertain = true;
+      committed = error?.committed === true;
+      throw error;
+    } finally {
+      if (committed) this.builtins = this.builtins.map((item) => item === record ? next : item);
+    }
+    return { revision: this.registry.revision, skill: publicPackage(next, enabled) };
+  }
   list(profileId) {
     this._assertOpen();
     const manifest = this._manifest(profileId);
@@ -861,7 +926,7 @@ class NativeSkillStore {
       items: this._allPackages().map((record) => {
         const selected = selections.get(record.id);
         const enabled = record.globalEnabled === true
-          || (!globalIds.has(record.id) && selected?.enabled === true
+          || (record.globalSettingRevision === undefined && !globalIds.has(record.id) && selected?.enabled === true
             && selected.source === record.source && selected.version === record.version);
         return publicPackage(record, enabled);
       }),
@@ -960,11 +1025,13 @@ class NativeSkillStore {
   }
   _selected(profileId) {
     const manifest = this._manifest(profileId);
-    const byId = new Map(manifest.selections.filter((item) => item.enabled).map((selection) => {
+    const byId = new Map(this.builtins.filter((record) => record.globalEnabled).map((record) => [record.id, record]));
+    for (const selection of manifest.selections) {
+      if (!selection.enabled || (selection.source === "builtin" && this._sharedBuiltin(selection.skillId))) continue;
       const record = this._findPackage(selection.skillId, selection.source, selection.version);
       if (!record) throw skillError("SKILL_PROFILE_CORRUPT", "Skill Profile 引用丢失");
-      return [record.id, record];
-    }));
+      byId.set(record.id, record);
+    }
     for (const record of this.registry.packages) {
       if (record.globalEnabled) byId.set(record.id, record);
     }

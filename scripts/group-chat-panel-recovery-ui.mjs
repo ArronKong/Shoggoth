@@ -69,17 +69,17 @@ state.runFixture = async()=>{
   await wait(()=>document.body.innerText.includes('Fixture temporarily unavailable'),'initial failure missing');
   ready=true; // Retry must recover without any write or forced group event.
   await wait(()=>document.body.innerText.includes('Recovered message 1'),'first read never recovered');
-  await wait(()=>Boolean(document.querySelector('textarea')&&!document.querySelector<HTMLTextAreaElement>('textarea')!.disabled),'owned journal never became ready');
-  const box=document.querySelector('textarea')!;
-  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(box,'Keep this draft');
+  await wait(()=>Boolean(document.querySelector('[data-group-composer-input][contenteditable="plaintext-only"]')),'owned journal never became ready');
+  const box=document.querySelector('[data-group-composer-input]')!;
+  box.textContent='Keep this draft';
   box.dispatchEvent(new Event('input',{bubbles:true}));
   await new Promise(r=>setTimeout(r,20));
   ready=false; const before=reads; window.dispatchEvent(new Event('focus'));
   await wait(()=>reads>before,'refresh was not attempted'); await new Promise(r=>setTimeout(r,80));
-  if(!document.body.innerText.includes('Recovered message 1')||box.value!=='Keep this draft')throw Error('failed refresh erased content');
+  if(!document.body.innerText.includes('Recovered message 1')||box.textContent!=='Keep this draft')throw Error('failed refresh erased content');
   ready=true;seq=2;window.dispatchEvent(new Event('focus'));
   await wait(()=>document.body.innerText.includes('Recovered message 2'),'incremental recovery missing');
-  if(document.querySelector('textarea')?.value!=='Keep this draft'||writes)throw Error('draft or read-only boundary failed');
+  if(document.querySelector('[data-group-composer-input]')?.textContent!=='Keep this draft'||writes)throw Error('draft or read-only boundary failed');
   return {language,reads,writes,recovered:true,draftPreserved:true,messages:seq};
 };
 const stopButton=()=>document.querySelector<HTMLButtonElement>('button.chat-stop');
@@ -95,7 +95,7 @@ state.queueFixture=async(phase:string)=>{
     'healthy queued/running turn lost its normal bubble and Stop: '+phase);
   if(document.querySelector('[data-chat-composer] [role=status], [data-chat-composer] [role=alert]')||writes)
     throw Error('quiet composer or read-only boundary failed');
-  if(document.querySelector('textarea')?.value!=='Keep this draft')throw Error('queue transition erased draft');
+  if(document.querySelector('[data-group-composer-input]')?.textContent!=='Keep this draft')throw Error('queue transition erased draft');
   if(groupChatActivity(group)!==(phase==='queued'?'queued':'running'))throw Error('sidebar mislabels execution phase');
   if(phase==='queued'&&groupChatPreview(group,i18n.t.bind(i18n))!==i18n.t('groupChat.sidebar.queued'))throw Error('queue preview missing');
   return {[phase+'Verified']:true};
@@ -123,13 +123,13 @@ state.confirmStopFixture=async()=>{
   completeStop();
   await wait(()=>Boolean(stopButton()?.disabled),'persisted cancellation must keep its duplicate-stop guard');
   if(document.querySelector('[data-chat-composer] [role=status]'))throw Error('stop confirmation copy leaked into composer');
-  if(document.querySelector('textarea')?.value!=='Keep this draft')throw Error('stop erased draft');
+  if(document.querySelector('[data-group-composer-input]')?.textContent!=='Keep this draft')throw Error('stop erased draft');
   return {confirmationPending:true,draftPreserved:true};
 };
 state.finishStopFixture=async()=>{
   group.activeTurns=[];window.dispatchEvent(new Event('focus'));
   await wait(()=>!stopButton(),'stop remained after terminal view');
-  if(writes!==1||document.querySelector('textarea')?.value!=='Keep this draft')throw Error('stop boundary failed');
+  if(writes!==1||document.querySelector('[data-group-composer-input]')?.textContent!=='Keep this draft')throw Error('stop boundary failed');
   return {terminalConfirmed:true,stopWrites:writes};
 };
 state.deleteFixture=async()=>{
@@ -187,7 +187,7 @@ Object.assign(result,await w.webContents.executeJavaScript('window.queueFixture(
 for(const width of [1200,390]){w.setContentSize(width,800);await w.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
 await w.webContents.executeJavaScript("document.querySelector('[data-group-execution=owned-turn]').scrollIntoView({block:'center'})");
 await w.webContents.executeJavaScript('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');
-if(!await w.webContents.executeJavaScript("(()=>{const r=document.querySelector('[data-group-execution=owned-turn]').getBoundingClientRect();return r.top>=0&&r.bottom<=document.querySelector('textarea').getBoundingClientRect().top})()"))throw Error('execution phase is outside the visible chat area');
+if(!await w.webContents.executeJavaScript("(()=>{const r=document.querySelector('[data-group-execution=owned-turn]').getBoundingClientRect();return r.top>=0&&r.bottom<=document.querySelector('[data-group-composer-input]').getBoundingClientRect().top})()"))throw Error('execution phase is outside the visible chat area');
 fs.writeFileSync(${JSON.stringify(output)}+'/'+language+'-'+width+'-'+phase+'.png',(await w.webContents.capturePage()).toPNG());}}
 for(const phase of ['requesting','confirming']){
 Object.assign(result,await w.webContents.executeJavaScript(phase==='requesting'?'window.startStopFixture()':'window.confirmStopFixture()'));

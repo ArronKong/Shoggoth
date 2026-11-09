@@ -52,7 +52,7 @@ class FixtureSocket {
     if (frame.method === "agents.list") payload = { agents: [{ id: agentId,
       name: session.agentName, backendId }] };
     if (frame.method === "models.list") payload = { models: [] };
-    if (frame.method === "chat.history") payload = { messages: history };
+    if (frame.method === "chat.history") payload = { messages: history, hasMore: false, nextCursor: null, sourceId: physicalSessionId };
     setTimeout(() => this.emit({ type: "res", id: frame.id, ok: true, payload }), 0);
   }
   close() { this.readyState = 3; }
@@ -101,15 +101,13 @@ const wait = async (predicate: () => unknown, label: string) => {
   }
 };
 Object.assign(window, { runExternalApprovalPageFixture: async () => {
-  await wait(() => Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-    .some(button => button.textContent?.includes("助理实时动态")), "turn process");
-  if (scope.fixtureReads.some((query: string) => query.includes("stale-cached")))
-    throw Error("cached physical session ID was used as authority");
-  const process = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
-    .find(button => button.textContent?.includes("助理实时动态"))!;
-  if (process.getAttribute("aria-expanded") === "false") process.click();
+  const entry = () => document.querySelector<HTMLButtonElement>(`[aria-haspopup="dialog"][aria-label="${i18n.t("turnLab.processOpen")}"]`);
+  await wait(entry, "settled reply activity entry");
+  entry()!.click();
   await wait(() => !!document.querySelector('[data-testid="external-plugin-call-outcome"]'),
     "exact host approval in chat round");
+  if (scope.fixtureReads.some((query: string) => query.includes("stale-cached")))
+    throw Error("cached physical session ID was used as authority");
   const text = document.querySelector<HTMLElement>('[data-testid="external-plugin-call-outcome"]')!.textContent;
   if (!text?.includes("审批: 已允许一次") || !text.includes("Service 调用: 已完成"))
     throw Error(`inaccurate chat approval result: ${text}`);

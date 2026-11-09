@@ -34,14 +34,15 @@ const members = [member('a', 'Codex'), member('b', 'Antigravity'), member('c', '
 const message = (seq: number, author: any, body: string, extra = {}) => ({ id: 'm' + seq, groupId: 'g', seq, threadId: 'main', author,
   body, mentions: { memberIds: [], broadcast: false, unresolved: [] }, createdAt: seq, ...extra });
 const richBody = '@Antigravity、@虾长老 请与 **@Codex** 核对来源。\n\n' +
-  '代码 `@Neo`、邮箱 hello@codex.test、链接 [@default](https://example.invalid/@default) 保持原样。\n\n' +
+  '代码 `@Neo`、邮箱 hello@codex.test、链接 [@default](/fixture-link/@default) 保持原样。\n\n' +
   '```js\nconst literal = "@Neo";\n```\n\n- [x] 核对完成\n\n<span onclick="window.fixtureInjection=true">raw HTML</span>';
 const history = [message(1, { kind: 'user' }, '请 @Codex 安排三路采集。'),
   message(2, { kind: 'member', memberId: 'a' }, '@Antigravity 负责国际模型，@虾长老 负责国内模型，@default 负责产品与应用。'),
   message(3, { kind: 'member', memberId: 'e' }, richBody),
-  message(4, { kind: 'user' }, '@Codex 请核对最终附件。')];
+  message(4, { kind: 'user' }, '@Codex 请核对最终附件。'),
+  message(5, { kind: 'user' }, '请把对比结果整理成一张表。', { mentions: { memberIds: ['e'], broadcast: false, unresolved: [] } })];
 let view: any = { ownerScope: 'mention-owner', group: { id: 'g', name: '新闻协作 · 展示验收', status: 'active', purpose: '',
-  createdAt: 1, updatedAt: 1, metadataRevision: 1, rosterRevision: 1, directoryRevision: 1, controlEpoch: 0, lastSeq: 4, ownerMemberId: 'a' },
+  createdAt: 1, updatedAt: 1, metadataRevision: 1, rosterRevision: 1, directoryRevision: 1, controlEpoch: 0, lastSeq: 5, ownerMemberId: 'a' },
   currentOwnerId: 'a', members, round: null, activeTurns: [], queuedMemberIds: [], internalSessionKeys: [], pendingInteractions: [],
 };
 const originalHistory = JSON.stringify(history);
@@ -64,70 +65,98 @@ await i18n.changeLanguage(language);
 document.documentElement.setAttribute('data-theme', theme);
 const root = createRoot(document.getElementById('root')!);
 let mountRevision = 0;
-const mount = () => root.render(<MemoryRouter><UiProvider><GroupChatPanel key={mountRevision} groupId="g" onArchived={() => {}} /></UiProvider></MemoryRouter>);
+const mount = () => root.render(<MemoryRouter><UiProvider><section className="chat-conv" style={{ flex: 1 }}>
+  <GroupChatPanel key={mountRevision} groupId="g" onArchived={() => {}} />
+</section></UiProvider></MemoryRouter>);
 mount();
 const timeline = () => document.querySelector('[data-group-timeline]') as HTMLElement;
 const row = (seq: number) => timeline().querySelector('[data-seq="' + seq + '"]') as HTMLElement;
-const mention = (seq: number, id: string) => row(seq)?.querySelector('[data-group-mention="' + id + '"]') as HTMLButtonElement;
+const mention = (seq: number, id: string) => row(seq)?.querySelector('[data-group-mention="' + id + '"]') as HTMLElement;
 const dialog = () => document.querySelector('[role="dialog"]') as HTMLElement;
-const title = () => dialog()?.querySelector('[class*=cardTitle]')?.textContent;
-const close = async () => {
-  Array.from(dialog().querySelectorAll('button')).find(button => button.textContent === i18n.t('common.close'))!.click();
-  await wait(() => !dialog(), 'member dialog closes');
-};
 const layout = () => {
   check(document.documentElement.scrollWidth <= innerWidth + 1, 'no horizontal document overflow');
   const list = timeline().getBoundingClientRect();
   for (const bubble of timeline().querySelectorAll('.chat-bubble')) check(bubble.getBoundingClientRect().right <= list.right + 1, 'bubble fits the message viewport');
 };
-// 提及前后各放一个零宽参考点：其中一侧可能因换行落在别的行，取较近的一侧比较基线。
-const mentionBaseline = (button: HTMLButtonElement) => {
-  const inside = document.createElement('span'), before = document.createElement('span'), after = document.createElement('span');
-  for (const marker of [inside, before, after]) marker.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline;padding:0;margin:0;border:0';
-  button.lastElementChild!.prepend(inside); button.before(before); button.after(after);
-  try { const top = inside.getBoundingClientRect().top;
-    return Math.min(...[before, after].map(marker => Math.abs(top - marker.getBoundingClientRect().top))); }
-  finally { inside.remove(); before.remove(); after.remove(); }
+const centerY = (rect: DOMRect) => (rect.top + rect.bottom) / 2;
+const mentionCenterOffset = (chip: HTMLElement) => {
+  const adjacent = chip.nextSibling as Text;
+  const firstCharacter = adjacent.data.search(/\S/u);
+  check(firstCharacter >= 0, 'the alignment fixture has body text next to its chip');
+  const range = document.createRange();
+  range.setStart(adjacent, firstCharacter);
+  range.setEnd(adjacent, firstCharacter + 1);
+  const chipCenter = centerY(chip.getBoundingClientRect());
+  const avatar = chip.querySelector('[data-avatar-state]')!;
+  check(Math.abs(centerY(avatar.getBoundingClientRect()) - chipCenter) <= 0.5, 'the avatar is centered inside the chip');
+  return Math.abs(chipCenter - centerY(range.getBoundingClientRect()));
 };
 
 state.verifyTimeline = async () => {
-  await wait(() => row(4) && mention(2, 'd'), 'member mentions render in the timeline');
+  await wait(() => row(5) && mention(2, 'd') && document.querySelector('[data-group-prefill=e]'), 'member mentions and the prefill render');
   equal(Array.from(row(2).querySelectorAll('[data-group-mention]'), node => node.getAttribute('data-group-mention')), ['b', 'c', 'd'], 'a reply that calls peers shows each of them');
   equal(Array.from(row(3).querySelectorAll('[data-group-mention]'), node => node.getAttribute('data-group-mention')), ['b', 'c', 'a'], 'mentions render inside ordinary and emphasized text');
   equal(row(3).querySelectorAll('pre [data-group-mention], code [data-group-mention], a [data-group-mention]').length, 0, 'code and existing links remain literal');
-  equal(row(3).querySelector('a')?.getAttribute('href'), 'https://example.invalid/@default', 'existing link destination is intact');
+  equal(row(3).querySelector('a')?.getAttribute('href'), '/fixture-link/@default', 'existing link destination is intact');
   check(row(3).querySelector('button[data-code]')?.getAttribute('data-code')?.includes('"@Neo"'), 'code copy payload is intact');
   check((row(3).querySelector('input[type=checkbox]') as HTMLInputElement).checked, 'Markdown checklist is intact');
   equal(state.fixtureInjection, undefined, 'raw HTML remains escaped');
   await wait(() => mention(2, 'b').querySelector('[data-avatar-state=loaded]'), 'mention avatar actually loads');
-  equal(getComputedStyle(mention(2, 'b')).color, theme === 'dark' ? 'rgb(96, 165, 250)' : 'rgb(37, 99, 235)', 'member mention is blue');
-  equal(getComputedStyle(mention(4, 'a')).color, 'rgb(147, 197, 253)', 'user bubble mention stays readable blue');
-  for (const button of timeline().querySelectorAll('[data-group-mention]')) check(!button.textContent?.includes('@'), 'avatar mentions display only the member name');
-  const baselineOffset = Math.max(...['b', 'c', 'd'].map(id => mentionBaseline(mention(2, id))));
-  check(baselineOffset <= 0.5, 'mention text shares the body baseline: offset=' + baselineOffset);
+  const prefill = document.querySelector<HTMLButtonElement>('[data-group-prefill=e]');
+  check(prefill && mention(5, 'e'), 'the structured mention appears in both the composer and its sent bubble');
+  for (const chip of [prefill!, mention(5, 'e'), mention(2, 'b')]) {
+    const style = getComputedStyle(chip);
+    equal([style.backgroundColor, style.borderRadius, style.fontSize, style.padding, style.borderTopColor],
+      ['rgb(0, 0, 0)', '12px', '11px', '2px 6px 2px 4px', 'rgba(255, 255, 255, 0)'], 'composer, sent and received mentions share the exact pill');
+    equal(getComputedStyle(chip.lastElementChild!).color, 'rgb(255, 255, 255)', 'the mention name stays white');
+  }
+  prefill!.focus();
+  equal(getComputedStyle(prefill!).textDecorationLine, 'none', 'focus does not underline a composer mention');
+  prefill!.blur();
+  for (const chip of timeline().querySelectorAll('[data-group-mention]')) check(!chip.textContent?.includes('@'), 'avatar mentions display only the member name');
+  const centerOffset = Math.max(mentionCenterOffset(mention(2, 'b')), mentionCenterOffset(mention(4, 'a')));
+  check(centerOffset <= 0.5, 'the mention pill is centered on adjacent body text: offset=' + centerOffset);
   equal(writes, 0, 'rendering does not send group actions');
   equal(JSON.stringify(history), originalHistory, 'source messages are unchanged');
-  row(2).scrollIntoView({ block: 'start' }); await pause(); layout();
-  return { mentions: 3, literalCodeAndLinks: true, baselineOffset };
+  timeline().scrollTop = timeline().scrollHeight; await pause(); layout();
+  return { mentions: 3, literalCodeAndLinks: true, centerOffset };
 };
-state.showMember = async () => {
-  const button = mention(2, 'b'); button.focus(); button.click();
-  await wait(() => dialog()?.textContent?.includes('Shared profile for b'), 'mention opens existing member details');
-  equal(document.querySelectorAll('[role=dialog]').length, 1, 'only one member modal');
-  check(title()?.includes('Antigravity'), 'the mentioned member, not the speaker');
-  layout(); state.mentionDialogTitle = title();
-  return { memberDialog: true };
+state.verifyReadOnlyMentions = async () => {
+  const author = row(2).querySelector<HTMLElement>('[data-group-author]')!;
+  for (const identity of [mention(2, 'b'), mention(4, 'a'), author]) {
+    check(!identity.matches('button, [role="button"], [tabindex]'), 'message identity is not an interactive control');
+    identity.click();
+  }
+  await pause();
+  check(!dialog(), 'clicking a mention or author cannot open the member profile');
+  check(!reads.some(route => route.includes('/members/role')), 'message identities do not fetch a member profile');
+  layout();
+  return { readOnlyMentions: true };
 };
-state.showStatus = async () => {
-  await close();
-  const roster = Array.from(document.querySelectorAll('button')).find(button => !button.hasAttribute('data-group-mention')
-    && button.title === i18n.t('groupChat.card.open') && button.textContent === 'Antigravity')!;
-  roster.click(); await wait(() => dialog()?.textContent?.includes('Shared profile for b'), 'top member detail');
-  equal(title(), state.mentionDialogTitle, 'mention and top roster use the exact same modal title');
-  await close(); layout();
-  return { sameMemberModal: true };
+const verifyDeletedAvatar = async (scope: string) => {
+  const avatar = (id: string) => document.querySelector<HTMLImageElement>(scope + ' img[src="/avatar/agent-' + id + '"]')!;
+  await wait(() => avatar('b')?.naturalWidth && avatar('c')?.naturalWidth, 'original group avatar assets load');
+  await wait(() => getComputedStyle(avatar('b')).filter === 'grayscale(1)', 'deleted member is black and white');
+  equal(getComputedStyle(avatar('c')).filter, 'none', 'offline member remains in color');
+};
+state.showDeletedTimeline = async () => {
+  view = { ...view, members: members.map(item => item.id === 'b' ? { ...item, agentMissing: true }
+    : item.id === 'c' ? { ...item, card: { availability: 'offline', freshness: 'stale' } } : item) };
+  emitGroupChanged('g');
+  await verifyDeletedAvatar('[data-group-details-trigger]');
+  await verifyDeletedAvatar('[data-seq="2"]');
+  timeline().scrollTop = timeline().scrollHeight; await pause();
+  return { deletedAvatarInHistory: true, deletedAvatarInCollage: true };
+};
+state.showDeletedMember = async () => {
+  document.querySelector<HTMLButtonElement>('[data-group-details-trigger]')!.click();
+  await wait(() => document.querySelector('[data-group-details]'), 'group details open');
+  await verifyDeletedAvatar('[data-group-details]');
+  return { deletedAvatarInDetails: true, offlineAvatarInColor: true };
 };
 state.finish = async () => {
+  document.querySelector<HTMLButtonElement>('[data-group-details-action=close]')!.click();
+  await wait(() => !document.querySelector('[data-group-details]'), 'details close');
   view.activeTurns = [{ opportunityId: 'stream-a', memberId: 'a', discussionId: 'round', startedAt: 20, floor: true, released: false,
     draft: '正在与 @Antigravity 核对。' }];
   emitGroupChanged('g');
@@ -138,10 +167,9 @@ state.finish = async () => {
   await wait(() => !timeline().querySelector('[data-group-execution="stream-a"]'), 'stream settles');
   const oldTimeline = timeline(); mountRevision++; mount();
   await wait(() => timeline() !== oldTimeline && timeline()?.querySelectorAll('[data-group-mention]').length > 0 && mention(2, 'd'), 'history reopen restores mentions');
-  mention(2, 'b').click(); await wait(() => dialog(), 'member modal before owner transition');
   view = { ...view, ownerScope: 'mention-other-owner', members: [member('other', 'Other Member', 'other')], currentOwnerId: null };
   emitGroupChanged('g');
-  await wait(() => !dialog() && timeline()?.textContent?.includes('@Codex') && !timeline().querySelector('[data-group-mention]'), 'owner change removes stale identities and closes the old modal');
+  await wait(() => !dialog() && timeline()?.textContent?.includes('@Codex') && !timeline().querySelector('[data-group-mention]'), 'owner change removes stale identities');
   equal(writes, 0, 'all interactions only read member details');
   equal(JSON.stringify(history), originalHistory, 'inspection never changes the messages');
   equal(errors, [], 'no render errors');

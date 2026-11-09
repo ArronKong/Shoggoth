@@ -11,7 +11,7 @@ import styles from "./AgentModelSettings.module.css";
  * 状态来自 AgentsPage 持有的 useAgentModelSettings（与 AgentMainModelField 共用同一份
  * 快照）。主模型本身在信息栅格里，不在这里。
  */
-export default function AgentModelCards({ state }: { state: AgentModelSettingsState }) {
+export default function AgentModelCards({ state, hideCards = false }: { state: AgentModelSettingsState; hideCards?: boolean }) {
   const { t } = useTranslation();
   const {
     supported,
@@ -46,7 +46,7 @@ export default function AgentModelCards({ state }: { state: AgentModelSettingsSt
     commitFallbacks,
   } = state;
 
-  if (!supported) return null;
+  if (!supported || (hideCards && staleSlots.length === 0)) return null;
 
   return (
     <div className={styles.pane} data-testid="agent-model-cards">
@@ -71,7 +71,7 @@ export default function AgentModelCards({ state }: { state: AgentModelSettingsSt
       )}
 
       {/* 辅助模型（官方 8 任务行同款：Set to main / Change） */}
-      {aux.slots.length > 0 && (
+      {!hideCards && aux.slots.length > 0 && (
         <section className={styles.card}>
           <div className="ui-secthead">
             <span className="ui-secthead-title">{t("models.settings.auxTitle")}</span>
@@ -171,7 +171,7 @@ export default function AgentModelCards({ state }: { state: AgentModelSettingsSt
       )}
 
       {/* Mixture of Agents（官方预设编辑器同款） */}
-      {moa && currentMoaPreset && (
+      {!hideCards && moa && currentMoaPreset && (
         <section className={styles.card}>
           <div className="ui-secthead">
             <span className="ui-secthead-title">{t("models.settings.moaTitle")}</span>
@@ -383,7 +383,7 @@ export default function AgentModelCards({ state }: { state: AgentModelSettingsSt
       )}
 
       {/* 后备模型链（fallback_providers；官方 FallbackModelsField 同款） */}
-      <section className={styles.card}>
+      {!hideCards && <section className={styles.card}>
         <div className="ui-secthead">
           <span className="ui-secthead-title">{t("models.settings.fallbackTitle")}</span>
           {fallbackRows.length > 0 && <span className="ui-count">{fallbackRows.length}</span>}
@@ -441,7 +441,7 @@ export default function AgentModelCards({ state }: { state: AgentModelSettingsSt
             </button>
           </div>
         </div>
-      </section>
+      </section>}
     </div>
   );
 }

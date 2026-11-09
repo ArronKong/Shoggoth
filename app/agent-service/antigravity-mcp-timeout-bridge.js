@@ -12,7 +12,6 @@ const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 
 // This is a narrowly scoped compatibility adapter for the verified 1.4.3
 // protocol, not a user-configurable replacement for the official harness.
-const VERSION = "1.4.3";
 // The verified upstream contract requires a positive duration. Match the
 // portable runtime MCP limit; local task/approval waits have no total deadline.
 const TIMEOUT_SECONDS = require("./interactive-timeouts").DEFAULT_MCP_TOOL_TIMEOUT_SEC;
@@ -149,7 +148,7 @@ function frame(bytes) {
 
 class AntigravityMcpTimeoutBridge {
   constructor(options = {}) {
-    need(options.server?.version === VERSION, "VERSION_UNSUPPORTED");
+    need(options.server?.contracts?.mcpTimeout === 1, "CONTRACT_UNSUPPORTED");
     need(typeof options.getAcpPid === "function" && typeof options.onFatal === "function"
       && object(options.paths), "OPTIONS_INVALID");
     this.paths = options.paths;

@@ -4,8 +4,8 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 // 数据、过一遍加载态。这里是全站统一的 stale-while-revalidate：结果留在模块级
 // Map（键必须含 backend tab / filters / range 等一切影响结果的输入），重挂载命中
 // 即首帧渲染旧数据，effect 照常后台刷新并回写；fetch 完成时即使组件已卸载也落
-// 缓存（首次加载中途切走，扫完回来仍秒开）。refresh() 写穿缓存且不进加载态，
-// 供变更操作后与手动刷新键调用。
+// 缓存（首次加载中途切走，扫完回来仍秒开）。refresh() 写穿缓存，默认不进加载态；
+// 使用骨架屏的页面可选择在重试无缓存的资源时显示加载态。
 // 显式 staleTime 的重型资源在有效期内复用结果，并合并切页期间的在途读取；
 // 默认仍保持原先每次挂载后台刷新。refresh/replace 不受有效期限制。
 // 连接配置变化通过 invalidatePageCache 统一失效，不删除用户数据或草稿。
@@ -79,7 +79,8 @@ export type PageCache<T> = {
 export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>, {
   staleTime = 0,
   enabled = true,
-}: { staleTime?: number; enabled?: boolean } = {}): PageCache<T> {
+  loadingOnEmptyRefresh = false,
+}: { staleTime?: number; enabled?: boolean; loadingOnEmptyRefresh?: boolean } = {}): PageCache<T> {
   const revision = useSyncExternalStore(subscribeRevision, readRevision, readRevision);
   const key = `${revision}:${resourceKey}`;
   // fetcher 是每次渲染新建的闭包：走 ref 出依赖，只在 key 变化时重新拉。
@@ -159,7 +160,10 @@ export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>, 
     const requestKey = key;
     const requestFetcher = fetcherRef.current;
     const requestGeneration = advanceGeneration(requestKey);
-    if (mountedRef.current && keyRef.current === requestKey) setError(null);
+    if (mountedRef.current && keyRef.current === requestKey) {
+      setError(null);
+      if (loadingOnEmptyRefresh && !cache.has(requestKey)) setLoading(true);
+    }
     try {
       const result = await requestFetcher();
       if (generationOf(requestKey) !== requestGeneration) return;
@@ -174,7 +178,7 @@ export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>, 
       setError(e instanceof Error ? e.message : String(e));
       setLoading(false);
     }
-  }, [key]);
+  }, [key, loadingOnEmptyRefresh]);
 
   // apply 成功后的复合状态一次性替换，先递增 generation 再写缓存和 React state。
   const replace = useCallback((next: T) => {

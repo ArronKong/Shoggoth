@@ -118,27 +118,38 @@ async function loadInspirationActivity(registry, id, runId) {
     throw Object.assign(new Error("运行不属于这条灵感"), { code: "INSPIRATION_BINDING_INVALID" });
   }
   const backend = registry._activeGet(execution.backendId);
-  const empty = reason => ({ runId, trajectory: { supported: false, reason, parts: [], truncated: false },
+  const empty = reason => ({ runId, errorMessage: null, trajectory: { supported: false, reason, parts: [], truncated: false },
     artifacts: { supported: false, reason, items: [], hasMore: false } });
   if (!backend) return empty("backend-unavailable");
   if (!execution.sessionKey || !execution.workspace) return empty("preparing");
   let history, local = execution.backendId !== "openclaw" || backend._isLocalGateway?.() === true;
   try {
-    if (typeof backend.getInspirationHistory === "function") history = await backend.getInspirationHistory(execution);
-    else if (execution.backendId === "openclaw") {
+    history = await backend.getInspirationHistory?.(execution);
+    if (!history && execution.backendId === "openclaw") {
       const result = await backend.request("chat.history", { sessionKey: execution.sessionKey, limit: 200 }, 10000);
       history = { messages: result?.messages, exactRun: false, local };
-    } else if (execution.backendId === "hermes") {
+    } else if (!history && execution.backendId === "hermes") {
       history = { ...await backend.getHistory(execution.sessionKey), exactRun: false, local: true };
     }
   } catch { history = null; }
   const selected = selectExecutionMessages(history?.messages, execution, prompt, history?.exactRun, local);
+  let errorMessage = null;
+  if (selected.supported && ["failed", "interrupted"].includes(execution.status)) {
+    // Native adapters return Chat's canonical error text. Other histories must
+    // carry an explicit error marker inside the selected round, never a tool failure or quoted text.
+    const error = selected.messages.findLast(message => ["assistant", "system"].includes(message?.role)
+      && (typeof message.errorMessage === "string" && message.errorMessage.trim() || message.stopReason === "error"));
+    const message = typeof error?.errorMessage === "string" && error.errorMessage.trim()
+      ? error.errorMessage : contentText(error?.content);
+    errorMessage = history.exactRun && typeof history.errorMessage === "string" && history.errorMessage.trim()
+      ? history.errorMessage : message || null;
+  }
   const projected = activityParts(selected.messages);
   let artifacts = { supported: false, reason: local ? "unavailable" : "remote", items: [], hasMore: false };
   if (local) {
     try { artifacts = await executionArtifacts(execution, projected.parts, history?.runtimeHome); } catch { /* Keep trajectory available. */ }
   }
-  return { runId, trajectory: { supported: selected.supported, reason: selected.reason, ...projected }, artifacts };
+  return { runId, errorMessage, trajectory: { supported: selected.supported, reason: selected.reason, ...projected }, artifacts };
 }
 
 module.exports = { selectExecutionMessages, activityParts, executionArtifacts, loadInspirationActivity };

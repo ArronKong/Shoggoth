@@ -5837,6 +5837,8 @@ class OpenClawBackend extends AgentBackend {
     return out;
   }
 
+  getInspirationModels(agentId) { return this.getGroupMemberModels(agentId); }
+
   async getGroupMemberModels(agentId) {
     const { assertModelCatalog, modelError } = require("../group-member-model");
     await this._connect();
@@ -7537,9 +7539,13 @@ class OpenClawBackend extends AgentBackend {
   async getAgent(id) {
     await this._connect();
     const r = await this.request("agents.list", {}, 12000);
+    if (!Array.isArray(r?.agents)) throw new Error("openclaw: 无法读取 agent 列表");
     const defaultId = r?.defaultId;
-    const a = (Array.isArray(r?.agents) ? r.agents : []).find((x) => String(x?.id) === String(id));
-    if (!a) throw new Error(`openclaw: 未找到 agent ${id}`);
+    const a = r.agents.find((x) => String(x?.id) === String(id));
+    if (!a) {
+      if (r.agents.some(agent => typeof agent?.id !== "string" || !agent.id)) throw new Error("openclaw: agent 列表不完整");
+      throw Object.assign(new Error(`openclaw: 未找到 agent ${id}`), { code: "AGENT_NOT_FOUND" });
+    }
     let files = [];
     try {
       files = await this.listAgentFiles(id);

@@ -3,7 +3,8 @@
 const kind = { type: "string", enum: ["IDENTITY", "SOUL", "AGENTS"] };
 const text = (maxLength, minLength = 0) => ({ type: "string", minLength, maxLength });
 const integer = (minimum, maximum) => ({ type: "integer", minimum, ...(maximum === undefined ? {} : { maximum }) });
-const source = { source: { type: "string", enum: ["chat", "inspiration"] }, sourceId: text(512, 1) };
+const source = { source: { type: "string", enum: ["chat", "inspiration"], description: "Copy currentWorkSource from the trusted current work source in your instructions." },
+  sourceId: { ...text(512, 1), description: "Copy currentWorkSourceId from the same trusted current work source. It is not the Run ID." } };
 const object = (properties, required) => ({ type: "object", properties, required, additionalProperties: false });
 const DEFINITION_MCP_TOOL_DEFINITIONS = [
   { name: "agent_definition_read", inputSchema: object({ ...source, kind, revision: integer(1),

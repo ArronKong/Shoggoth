@@ -35,7 +35,7 @@ const safeStorage = {
 };
 const config = JSON.parse(fs.readFileSync(path.join(root, "worker.json"), "utf8"));
 if (config.root !== root) throw new Error("MCP_HELPER_FIXTURE_CONFIG_INVALID");
-const paths = config.suite === "repair"
+const paths = ["repair", "parity"].includes(config.suite)
   ? resolveCanonicalServicePaths({ userInfo: () => ({ homedir: root }) })
   : resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     cacheRoot: path.join(root, "cache"), profileRoot: path.join(root, "profile") });

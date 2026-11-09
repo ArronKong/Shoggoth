@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import Modal from "../components/Modal";
 import AgentAvatar from "../components/AgentAvatar";
+import GroupMemberAvatar from "./GroupMemberAvatar";
 import { addGroupChatMember, removeGroupChatMember } from "../api/client";
 import GroupChatRoleDocument from "./GroupChatRoleDocument";
 import GroupChatMemberModel from "./GroupChatMemberModel";
@@ -49,7 +50,7 @@ export default function GroupChatMemberModal({ groupId, member, view, onView, on
 
   return <Modal open width={640} onClose={onClose}
     title={<span className={styles.cardTitle}>
-      <AgentAvatar agentId={member.agentId} name={member.displayName} className={styles.authorAvatar} />
+      <GroupMemberAvatar member={member} className={styles.authorAvatar} />
       {member.displayName}
       <span className={styles.muted}>@{member.handle}{member.peerId ? ` · ${member.peerId}` : ""}</span>
     </span>}

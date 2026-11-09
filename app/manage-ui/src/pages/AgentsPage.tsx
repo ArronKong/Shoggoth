@@ -1,5 +1,4 @@
 import AgentAvatarView from "../components/AgentAvatar";
-import AgentDefaultRuntime from "../components/AgentDefaultRuntime";
 import {
   lazy,
   Suspense,
@@ -14,13 +13,12 @@ import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import { PageHead } from "../components/PageHead";
 import type {
-  DashboardArtifactItem,
+  AgentArtifactsResult,
   AgentDefinitionState,
   AgentTranscriptEvent,
   AgentTranscriptSession,
   AgentToolsState,
   RuntimeStatus,
-  ShoggothProviderSnapshot,
   UnifiedAgent,
   UnifiedAgentDetail,
   UnifiedCronJob,
@@ -36,7 +34,6 @@ import {
   getAgentFile,
   getModelCatalog,
   getRuntimeStatuses,
-  getShoggothProviders,
   importAgentDefinition,
   listAgentArtifacts,
   listAgents,
@@ -71,8 +68,8 @@ import { useNavigationGuard, useNavigationRequest } from "../lib/navigation-guar
 import { createTargetRequestGuard } from "../lib/lowUiLifecycle";
 import { classifyAgentCreateError, openclawWorkspacePlaceholder } from "../lib/agent-create-error";
 import { useConfirm, useToast } from "../components/ui";
-import { ShoggothProviderSetup } from "../components/ShoggothProviderSetup";
-import ShoggothCustomEndpointPanel from "./models/ShoggothCustomEndpointPanel";
+import ArtifactThumb from "../components/ArtifactThumb";
+import AgentDefaultModel from "./agents/AgentDefaultModel";
 import { useAgentModelSettings } from "./agents/useAgentModelSettings";
 import AgentMainModelField from "./agents/AgentMainModelField";
 import AgentModelCards from "./agents/AgentModelCards";
@@ -205,14 +202,11 @@ export default function AgentsPage() {
   const [transcriptRevision, setTranscriptRevision] = useState(0);
   const [harnessLoadingMore, setHarnessLoadingMore] = useState(false);
   const [toolsState, setToolsState] = useState<AgentToolsState | null>(null);
-  const [shoggothProviderSnapshot, setShoggothProviderSnapshot] = useState<ShoggothProviderSnapshot | null>(null);
   const harnessImportRef = useRef<HTMLInputElement>(null);
 
   // cron + 产出文件 (lazy)。
   const [agentCron, setAgentCron] = useState<UnifiedCronJob[] | null>(null);
-  const [artifacts, setArtifacts] = useState<
-    { supported: boolean; reason?: string; total?: number; items: DashboardArtifactItem[] } | null
-  >(null);
+  const [artifacts, setArtifacts] = useState<AgentArtifactsResult | null>(null);
 
   // 模型目录（Overview 的模型选择器）——与聊天页同一个共享 revision store
   const [models, setModels] = useState<UnifiedModel[]>([]);
@@ -291,7 +285,6 @@ export default function AgentsPage() {
     setTranscriptEventsCursor(0);
     setTranscriptEventsHasMore(false);
     setToolsState(null);
-    setShoggothProviderSnapshot(null);
     setAgentCron(null);
     setArtifacts(null);
     setDetailLoading(true);
@@ -357,7 +350,7 @@ export default function AgentsPage() {
   // 的 profile；后端不提供整合设置面时快照回报 supported:false，两个视图各自隐身。
   const modelSettings = useAgentModelSettings({
     backend,
-    profile: detail?.profile,
+    profile: hasAgentHarness ? undefined : detail?.profile,
     reloadToken: modelReload,
     onMainModelChanged: () => void reloadDetail(),
     // 凭证与自定义端点是跨 agent 的全局层 → 引导跳模型页对应区（走 guard，带未保存提醒）。
@@ -430,10 +423,10 @@ export default function AgentsPage() {
         .then((all) => { if (alive) setAgentCron(all.filter((j) => j.backendId === backend && j.agentId === agentId)); })
         .catch(() => { if (alive) setAgentCron([]); });
     }
-    if (tab === "artifacts" && artifacts === null) {
+    if (tab === "artifacts" && artifacts === null && detail.backendId === backend) {
       listAgentArtifacts(backend, agentId)
         .then((r) => { if (alive) setArtifacts(r); })
-        .catch(() => { if (alive) setArtifacts({ supported: true, items: [] }); });
+        .catch(() => { if (alive) setArtifacts({ supported: false, items: [] }); });
     }
     // 进 Setup 默认打开第一个 .md（agent 的人设/记忆文件都是 md，没有则退回第一个文件）。
     if (tab === "setup" && !activeFile) {
@@ -463,19 +456,6 @@ export default function AgentsPage() {
     }
     return () => { alive = false; };
   }, [tab, detail, backend, agentCron, artifacts, activeFile, hasAgentHarness, definition, transcriptSessions, toolsState]);
-
-  useEffect(() => {
-    const profileId = backend === "shoggoth" ? detail?.profile : undefined;
-    if (!profileId) {
-      setShoggothProviderSnapshot(null);
-      return;
-    }
-    let alive = true;
-    void getShoggothProviders(profileId)
-      .then((snapshot) => { if (alive) setShoggothProviderSnapshot(snapshot); })
-      .catch(() => { if (alive) setShoggothProviderSnapshot(null); });
-    return () => { alive = false; };
-  }, [backend, detail?.profile]);
 
   // 模型目录：与聊天页共用同一个 revision store（先同步首屏缓存、订阅 apply、再 revalidate）。
   // 只有能写回模型的后端才需要它。
@@ -942,21 +922,14 @@ export default function AgentsPage() {
   };
 
   const TABS: { key: Tab; label: string }[] = useMemo(
-    () => hasAgentHarness
-      ? [
-          { key: "overview", label: t("agents.tabOverview") },
-          { key: "setup", label: t("agents.tabSetup") },
-          { key: "cron", label: t("agents.tabCron") },
-          { key: "inspiration", label: t("agents.tabInspiration") },
-        ]
-      : [
-          { key: "overview", label: t("agents.tabOverview") },
-          { key: "setup", label: t("agents.tabSetup") },
-          { key: "cron", label: t("agents.tabCron") },
-          { key: "inspiration", label: t("agents.tabInspiration") },
-          { key: "artifacts", label: t("agents.tabArtifacts") },
-        ],
-    [hasAgentHarness, t],
+    () => [
+      { key: "overview", label: t("agents.tabOverview") },
+      { key: "setup", label: t("agents.tabSetup") },
+      { key: "cron", label: t("agents.tabCron") },
+      { key: "inspiration", label: t("agents.tabInspiration") },
+      { key: "artifacts", label: t("agents.tabArtifacts") },
+    ],
+    [t],
   );
 
   useEffect(() => {
@@ -964,10 +937,8 @@ export default function AgentsPage() {
   }, [TABS, setTab, savedTab]);
 
   useEffect(() => {
-    if (!hasAgentHarness) return;
-    setCreating(false);
-    if (tab === "artifacts") setTab("overview");
-  }, [hasAgentHarness, setTab, tab]);
+    if (hasAgentHarness) setCreating(false);
+  }, [hasAgentHarness]);
 
   // 已知 setup 文件的「作用」一句话（右上角文件名下方）；未知文件给通用描述。
   const fileDesc = (name: string): string => {
@@ -1457,6 +1428,7 @@ export default function AgentsPage() {
         <section
           className={morphActive ? `${s.panel} ${s.panelMorphing}` : s.panel}
           ref={panelRef}
+          data-agent-overview-panel
         >
           <header className={s.panelHead}>
             {/* 左上角头像：悬浮展开 agent 切换列表，移出收起 */}
@@ -1571,7 +1543,10 @@ export default function AgentsPage() {
                     />
                   </label>
 
-                  {hasAgentHarness && detail.model && (
+                  {activeBackendDescriptor?.surfaces.runtimeBindings ? (
+                    <AgentDefaultModel key={`${backend}:${detail.id}`} backend={backend} agentId={detail.id}
+                      model={detail.model} onChanged={() => { void reloadDetail(); void refresh(); }} />
+                  ) : hasAgentHarness && detail.model && (
                     <div className={s.ovField}>
                       <span className={s.ovLabel}>{t("agents.model")}</span>
                       <span className={s.ovValue}>{detail.model}</span>
@@ -1711,44 +1686,10 @@ export default function AgentsPage() {
                 </div>
               </div>
 
-              {/* 重设置（辅助模型 / MoA / 回退链）全宽摆在两列区之后：一眼先看到主模型，
-                  往下滚才是这些。与主模型区共用同一份快照，不各拉一次。 */}
-              {activeBackendDescriptor?.surfaces.runtimeBindings && <AgentDefaultRuntime key={`${backend}:${detail.id}`}
-                backend={backend} agentId={detail.id} onChanged={() => { void reloadDetail(); void refresh(); }} />}
               {hasAgentHarness ? (
                 <p className={s.dim}>{t("agents.managedReadOnly", { backend: backendName })}</p>
               ) : (
-                <AgentModelCards state={modelSettings} />
-              )}
-              {backend === "shoggoth" && detail.profile && (
-                <>
-                <ShoggothProviderSetup
-                  snapshot={shoggothProviderSnapshot}
-                  profileId={detail.profile}
-                  onConfigured={async () => {
-                    const [snapshot] = await Promise.all([
-                      getShoggothProviders(detail.profile || null),
-                      reloadDetail(),
-                      doRefresh(),
-                    ]);
-                    setShoggothProviderSnapshot(snapshot);
-                  }}
-                />
-                {shoggothProviderSnapshot?.profile?.id === detail.profile && (
-                  <ShoggothCustomEndpointPanel key={detail.profile}
-                    snapshot={shoggothProviderSnapshot}
-                    profileId={detail.profile}
-                    onConfigured={async () => {
-                      const [snapshot] = await Promise.all([
-                        getShoggothProviders(detail.profile || null),
-                        reloadDetail(),
-                        doRefresh(),
-                      ]);
-                      setShoggothProviderSnapshot(snapshot);
-                    }}
-                  />
-                )}
-                </>
+                <AgentModelCards state={modelSettings} hideCards />
               )}
               </div>
             )}
@@ -1803,7 +1744,9 @@ export default function AgentsPage() {
                   {activeFile && (
                     <>
                       <header className={s.suHead}>
-                        <MdFileIcon />
+                        <span className={s.suFileIcon} aria-hidden="true">
+                          <ArtifactThumb name={activeFile} />
+                        </span>
                         <div className={s.suHeadText}>
                           <div className={s.suFileName}>{activeFile}</div>
                           <div className={s.suFileDesc}>{fileDesc(activeFile)}</div>
@@ -1997,10 +1940,9 @@ export default function AgentsPage() {
               </div>
             )}
 
-            {detail && tab === "artifacts" && (
+            {detail?.backendId === backend && tab === "artifacts" && (
               <div className={s.tabPane}>
                 {artifacts?.supported && (artifacts.total ?? artifacts.items.length) > 0 && (
-                  // 总数 = 扫描到的全部产出；列表按 mtime 倒序截断时补一句实际显示条数。
                   <p className={s.paneNote}>
                     {t("agents.artifactsCount", { count: artifacts.total ?? artifacts.items.length })}
                     {artifacts.items.length < (artifacts.total ?? 0)
@@ -2008,12 +1950,20 @@ export default function AgentsPage() {
                       : ""}
                   </p>
                 )}
+                {artifacts?.partial && <p className={s.paneNote} role="status">{t("chat.agentArtifactsPartial")}</p>}
                 {artifacts === null ? (
                   <p className={s.dim}>{t("common.loading")}</p>
                 ) : !artifacts.supported ? (
-                  <p className={s.dim}>{t("agents.artifactsUnsupported")}</p>
+                  <>
+                    <p className={s.dim} role="status">
+                      {t(artifacts.reason === "remote" ? "agents.artifactsUnsupported" : "chat.agentArtifactsUnavailable")}
+                    </p>
+                    {artifacts.reason !== "remote" && (
+                      <button type="button" className={s.pillBtnGhost} onClick={() => setArtifacts(null)}>{t("common.retry")}</button>
+                    )}
+                  </>
                 ) : artifacts.items.length === 0 ? (
-                  <p className={s.dim}>{t("agents.artifactsEmpty")}</p>
+                  !artifacts.partial && <p className={s.dim}>{t("agents.artifactsEmpty")}</p>
                 ) : (
                   <div className={s.rowList}>
                     {artifacts.items.map((f) => (
@@ -2183,26 +2133,6 @@ function AgentCardFace({
 // Preserve the card/detail geometry and optional emoji fallback.
 function AgentAvatar({ id, emoji, className }: { id?: string; emoji?: string; className?: string }) {
   return <AgentAvatarView agentId={id} fallback={emoji} className={`${s.avatarBase} ${className || ""}`} loading="lazy" />;
-}
-
-// Setup 头部的黄色 MD 文档小图标（设计稿 7043-4418 的简化矢量版）。
-function MdFileIcon() {
-  return (
-    <span className={s.suFileIcon} aria-hidden="true">
-      <svg viewBox="0 0 48 48">
-        <rect x="10" y="9" width="28" height="29" rx="4" fill="#fff" stroke="rgba(0,0,0,0.08)" />
-        <rect x="14" y="13" width="20" height="2" rx="1" fill="rgba(0,0,0,0.08)" />
-        <rect x="14" y="17" width="15" height="2" rx="1" fill="rgba(0,0,0,0.08)" />
-        <path
-          d="M7 16 h34 a3 3 0 0 1 3 3 v14 a5 5 0 0 1 -5 5 h-30 a5 5 0 0 1 -5 -5 v-14 a3 3 0 0 1 3 -3 z"
-          fill="#FFDF80"
-        />
-        <text x="13" y="33" fontSize="7" fontWeight="800" fill="rgba(179,120,0,0.65)">
-          MD
-        </text>
-      </svg>
-    </span>
-  );
 }
 
 function fmtBytes(n: number): string {

@@ -3,12 +3,13 @@
 const crypto = require("node:crypto");
 const { runtimeBinding } = require("./runtime-adapter");
 const { serviceError } = require("./security");
-const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
+const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 
 const MAX_AGENT_RUNTIME_BINDINGS = 128;
 const MAX_BINDING_OPERATIONS = 2048;
 const BINDING_FIELDS = ["id", "profileId", "runtime", "runtimeProfileId", "runtimeAccountId",
   "label", "enabled", "revision", "createdAt", "updatedAt"];
+const BINDING_OPTIONAL_FIELDS = ["defaultModel"];
 const PROJECTED_RUNTIME_FIELDS = ["runtime", "runtimeProfileId", "runtimeAccountId"];
 const BINDING_STATE_FIELDS = ["defaultBindingId", "bindingsRevision", "bindings", "bindingOperations"];
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-8[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
@@ -35,18 +36,26 @@ function bindingId(profileId, runtimeProfileId) {
 function runtimeProfileIdForBinding(profileId, operationId) {
   return `shoggoth-runtime-${stableUuid("shoggoth-agent-runtime-profile-v1", `${profileId}\0${operationId}`)}`;
 }
+function validBindingModel(value) {
+  return typeof value === "string" && value.length > 0 && value.isWellFormed()
+    && !/[\u0000-\u001f\u007f]/u.test(value) && Buffer.byteLength(value, "utf8") <= 512;
+}
 function validateAgentRuntimeBinding(value) {
-  if (!exact(value, BINDING_FIELDS) || !UUID.test(value.id)
+  const hasModel = Object.hasOwn(value || {}, "defaultModel");
+  const fields = hasModel ? [...BINDING_FIELDS, ...BINDING_OPTIONAL_FIELDS] : BINDING_FIELDS;
+  if (!exact(value, fields) || !UUID.test(value.id)
     || typeof value.profileId !== "string" || !value.profileId || value.profileId.includes("\0")
     || value.id !== bindingId(value.profileId, value.runtimeProfileId)
     || !(value.label === null || (typeof value.label === "string" && value.label.length <= 256
       && value.label.length > 0 && value.label.isWellFormed() && !/[\u0000-\u001f]/u.test(value.label)))
     || typeof value.enabled !== "boolean" || !Number.isSafeInteger(value.revision) || value.revision < 1
     || !Number.isSafeInteger(value.createdAt) || value.createdAt < 0
-    || !Number.isSafeInteger(value.updatedAt) || value.updatedAt < value.createdAt) throw bindingError("INVALID");
+    || !Number.isSafeInteger(value.updatedAt) || value.updatedAt < value.createdAt
+    || (hasModel && (value.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
+      || !validBindingModel(value.defaultModel)))) throw bindingError("INVALID");
   try { runtimeBinding({ runtime: value.runtime, runtimeProfileId: value.runtimeProfileId,
     runtimeAccountId: value.runtimeAccountId }); } catch { throw bindingError("INVALID"); }
-  return Object.fromEntries(BINDING_FIELDS.map((key) => [key, value[key]]));
+  return Object.fromEntries(fields.map((key) => [key, value[key]]));
 }
 function initialBinding(profile) {
   const createdAt = profile.createdAt ?? 0;
@@ -89,10 +98,10 @@ function projectProfile(profile, selectedId = profile.defaultBindingId) {
   return { ...view, runtime: selected.runtime, runtimeProfileId: selected.runtimeProfileId,
     runtimeAccountId: selected.runtimeAccountId };
 }
-// Agent model settings belong to the bundled Harness. Native Codex keeps its
-// own model/provider in CODEX_HOME; only runtime views drop the Harness default,
-// so saving an Agent's management projection cannot erase that default.
-function runtimeModelProfile(profile) {
+// Explicit CLI defaults apply only to this Agent's binding. In particular,
+// Native Codex never inherits the Harness source or edits CODEX_HOME.
+function runtimeModelProfile(profile, binding) {
+  if (binding?.defaultModel !== undefined) return { ...profile, providerRef: null, defaultModel: binding.defaultModel };
   return profile.runtime === "codex" && profile.runtimeAccountId === NATIVE_CODEX_RUNTIME_ACCOUNT_ID
     ? { ...profile, providerRef: null, defaultModel: null } : profile;
 }
@@ -105,6 +114,6 @@ function profileWithoutBindingState(profile) {
     && field !== "selectedBindingId"));
 }
 
-module.exports = { BINDING_FIELDS, BINDING_STATE_FIELDS, PROJECTED_RUNTIME_FIELDS, MAX_AGENT_RUNTIME_BINDINGS, MAX_BINDING_OPERATIONS,
-  bindingError, bindingId, runtimeProfileIdForBinding, stableUuid, validateAgentRuntimeBinding, validateBindingState,
+module.exports = { BINDING_FIELDS, BINDING_OPTIONAL_FIELDS, BINDING_STATE_FIELDS, PROJECTED_RUNTIME_FIELDS, MAX_AGENT_RUNTIME_BINDINGS, MAX_BINDING_OPERATIONS,
+  bindingError, bindingId, runtimeProfileIdForBinding, stableUuid, validBindingModel, validateAgentRuntimeBinding, validateBindingState,
   withInitialBinding, projectProfile, runtimeModelProfile, profileToDisk, profileWithoutBindingState };

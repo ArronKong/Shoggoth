@@ -74,7 +74,7 @@ function fixture({ reduced = false, popover = true } = {}) {
     assert.equal(source.style.opacity, ''); assert.equal(source.style.userSelect, ''); assert.equal(source.style.webkitUserSelect, '');
     assert.equal(source.hasAttribute('data-inspiration-dragging'), false); assert.equal(source.hasPointerCapture(1), false);
     assert.equal(document.body.childNodes.length, 0); assert.equal(document.count() + window.count() + viewport.count(), 0);
-    for (const t of [target, defaultTarget]) { assert.equal(t.element.hasAttribute('data-inspiration-drop-over'), false); assert.equal(t.element.hasAttribute('data-inspiration-drop-ready'), false); }
+    for (const t of [target, defaultTarget]) assert.equal(t.element.hasAttribute('data-inspiration-drop-over'), false);
     assert.equal(timers.size + frames.size, 0);
     source.dispatch('pointerdown'); assert.equal(source.count(), 0, 'the next gesture clears the one-click guard');
   };

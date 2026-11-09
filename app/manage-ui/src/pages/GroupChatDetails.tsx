@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import AgentAvatar from "../components/AgentAvatar";
+import GroupMemberAvatar from "./GroupMemberAvatar";
 import { GROUP_MIN_MEMBERS, GROUP_MAX_MEMBERS } from "../lib/groupChat";
 import type { GroupChatMember, GroupChatView } from "../types";
 import GroupChatRoleDocument from "./GroupChatRoleDocument";
@@ -102,7 +102,7 @@ export default function GroupChatDetails({ view, onClose, onAddMember,
             openMemberMenu(member.id, event.clientX, event.clientY);
           }}
           onKeyDown={event => navigateMembers(event, index)}>
-          <AgentAvatar agentId={member.agentId} name={member.displayName} className={styles.avatar} />
+          <GroupMemberAvatar member={member} className={styles.avatar} />
           <span className={styles.memberName}>{member.displayName}</span>
         </button>;
       })}

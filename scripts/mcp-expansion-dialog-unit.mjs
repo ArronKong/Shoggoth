@@ -7,7 +7,7 @@ import { bundledBridgeVersions, loadConnectorDetails } from './fixtures/connecto
 const require=createRequire(new URL('../app/manage-ui/package.json',import.meta.url));
 const React=require('react'),Renderer=require('react-test-renderer');
 const recommendations=JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/mcp-featured-presets.json',import.meta.url),'utf8'));
-const ids=['chrome-devtools','context7','storybook','filesystem','fetch','time','n8n','variflight','stockmap','eastmoney','ifind','wind','12306','uber','uber-eats'];
+const ids=['chrome-devtools','context7','storybook','filesystem','fetch','time','n8n','variflight','stockmap','eastmoney','ifind','wind','uber','uber-eats'];
 const base={id:'fixture-expansion',name:'Fixture',enabled:true,source:{kind:'custom'},auth:{kind:'none'},transport:{kind:'remote',protocol:'streamable-http',url:'https://example.test/mcp'},disabledProfileIds:[],status:'ready',setup:{requiredFields:[],configuredFields:[]},lastCheck:{at:1,toolCount:1,errorCode:null}};
 const mutations=[],oauth=[];let current,records=[],language='en',revision=1,dialog;
 const api={listMcpSubjects:async()=>({items:[],unavailableBackends:[]}),listMcpConnectors:async()=>({revision,servers:records}),formatMcpError:e=>e.code||'error',

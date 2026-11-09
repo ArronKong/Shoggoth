@@ -42,6 +42,20 @@ function testTextReasoningAndPlan() {
     assert.equal(reasoning.delta, "thought");
   }
 
+  for (const summary of [[], ["", "  "], undefined]) {
+    const reasoning = normalizeCodexEvent({ method: "item/completed", params: { ...ids,
+      item: { type: "reasoning", id: "public-thought", summary, content: ["Already streamed public progress."] } } });
+    assert.deepEqual(reasoning.reasoning, ["Already streamed public progress."],
+      "an empty summary must not discard the public content shown during streaming");
+  }
+  const summarized = normalizeCodexEvent({ method: "item/completed", params: { ...ids,
+    item: { type: "reasoning", id: "summarized", summary: ["Public summary"], content: ["Public detail"] } } });
+  assert.deepEqual(summarized.reasoning, ["Public summary"], "a supplied summary remains the preferred display");
+  const redactedThought = normalizeCodexEvent({ method: "item/completed", params: { ...ids,
+    item: { type: "reasoning", id: "redacted-thought", summary: [], content: ["fixture-secret progress"] } } },
+  { registeredSecrets: ["fixture-secret"] });
+  assert.equal(JSON.stringify(redactedThought).includes("fixture-secret"), false);
+
   const plan = normalizeCodexEvent({
     method: "turn/plan/updated",
     params: { threadId: "thread-1", turnId: "turn-1", plan: [{ step: "inspect", status: "inProgress" }] },
@@ -106,6 +120,7 @@ function testCompletedMessagePhasesSealOnlyFinishedItems() {
     assert.equal(completed.phase, phase, "completed Codex message boundaries must reach the live chat bridge");
     const started = normalizeCodexEvent({ method: "item/started", params });
     assert.equal(started.phase, undefined, "an initial snapshot must not seal a still streaming item");
+    assert.equal(started.itemPhase, phase, "the next delta can use the initial item phase");
   }
   for (const phase of [undefined, null, "future-phase"]) {
     const message = normalizeCodexEvent({ method: "item/completed", params: {

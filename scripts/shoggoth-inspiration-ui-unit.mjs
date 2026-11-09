@@ -31,6 +31,12 @@ const loadModule = (file, { require: loadDependency = uiRequire, globals = {} } 
 };
 const execution = loadModule('pages/inspiration-execution.ts');
 const noteText = loadModule('pages/inspiration-note-text.ts');
+const gatewayErrors = loadModule('lib/gatewayErrors.ts');
+const chatI18n = uiRequire('i18next').createInstance();
+await chatI18n.init({ lng: 'zh-CN', fallbackLng: 'en', interpolation: { escapeValue: false }, resources: {
+  'zh-CN': { translation: loadUiSource('i18n/locales/zh-CN.ts').default },
+  en: { translation: loadUiSource('i18n/locales/en.ts').default },
+} });
 {
   const { inspirationNoteContent } = noteText;
   const plain = inspirationNoteContent({ title: null, body: 'Body', attachments: [] });
@@ -48,6 +54,8 @@ const agents = ['shoggoth', 'openclaw', 'hermes'].map((backendId) => ({
 let idea;
 let roster;
 let refreshes = 0;
+let activity = null;
+const activityReads = [];
 const starts = [];
 const cancellations = [];
 const updates = [];
@@ -64,11 +72,14 @@ const refresh = async () => { refreshes++; };
 const host = (type) => (props) => React.createElement(type, props, props.children);
 const passthrough = (props) => React.createElement(React.Fragment, {}, props.children);
 const stubs = {
-  'react-i18next': { useTranslation: () => ({ t: (key, options) => options?.returnObjects ? lists[key] ?? [] : errorLabel(key) || key,
+  'react-i18next': { useTranslation: () => ({ t: (key, options) => key.startsWith('chat.') ? chatI18n.t(key, options)
+    : options?.returnObjects ? lists[key] ?? [] : errorLabel(key) || key,
     i18n: { exists: (key) => Boolean(errorLabel(key)) } }) },
   'react-router-dom': { Link: host('a'), useSearchParams: () => [new URLSearchParams(), () => {}] },
   '@base-ui/react/popover': { Popover: { Root: passthrough, Portal: passthrough, Positioner: passthrough, Popup: host('div'),
     Trigger: (props) => React.createElement('button', { ...props, type: 'button' }, props.children) } },
+  '@base-ui/react/context-menu': { ContextMenu: { Root: passthrough, Trigger: host('div'), Portal: () => null,
+    Positioner: passthrough, Popup: host('div'), Item: host('button') } },
   '../components/Modal': (props) => React.createElement('dialog', {}, props.title, props.actions, props.children, props.footer),
   '../components/AgentAvatar': host('span'),
   '../components/ArtifactThumb': host('span'),
@@ -78,15 +89,18 @@ const stubs = {
   '../components/TurnTimeline/trajectoryIcons': { IconTrajectory: host('i') },
   '../components/ui': { useConfirm: () => async () => true, useToast: () => ({ error: assert.fail, success() {} }) },
   '../lib/usePageCache': { usePageCache: (key) => ({ refresh, data: key.startsWith('inspiration-agents') || key.startsWith('inspiration-idle')
-    ? { agents: roster } : { idea, history: { executions: idea.latestExecution ? [idea.latestExecution] : [], nextCursor: null,
+    ? { agents: roster } : key.startsWith('inspiration-models:') ? { defaultModel: 'fixture-default',
+      models: [{ id: 'custom-model', name: 'Custom model', provider: 'fixture' }] }
+      : { idea, history: { executions: idea.latestExecution ? [idea.latestExecution] : [], nextCursor: null,
       total: idea.latestExecution ? 1 : 0 } } }) },
   '../lib/navigation-guard': { useNavigationGuard() {} },
   '../lib/markdown': { toSanitizedMarkdownHtml: (text) => text },
+  '../lib/gatewayErrors': gatewayErrors,
   '../lib/inspiration-navigation': { rememberInspirationReturn() {} },
   '../lib/backends': { useBackendCatalog: () => [] },
   '../lib/useSessionRuntimeModels': { useSessionRuntimeModels: () => ({ data: undefined, loading: false, error: false, pending: false,
     refresh: async () => {}, select: async () => false }) },
-  '../lib/turnTimeline': { stepsFromParts: () => [] },
+  '../lib/turnTimeline': { stepsFromParts: () => [], turnElapsedMs: () => undefined, formatTurnElapsed: () => '' },
   '../api/client': {
     ApiError: class ApiError extends Error {},
     getInspiration: async () => ({ idea }),
@@ -102,12 +116,15 @@ const stubs = {
   './InspirationActionIcon': host('i'),
   './InspirationMedia': (props) => React.createElement('div', { 'data-media-editor': true }, React.createElement('textarea', {
     ...props.inputProps, value: props.body, disabled: props.disabled,
-    onChange: (event) => props.onChange((previous) => ({ ...previous, body: event.target.value })) })),
+    onChange: (event) => props.onChange((previous) => ({ ...previous, body: event.target.value })) }), props.children, props.footerActions),
   './InspirationContent': (props) => props.renderText(props.body, 0),
   './inspiration-draft': { draftBytes: (value) => Buffer.byteLength(JSON.stringify(value), 'utf8') },
   './inspiration-execution': execution,
   './inspiration-note-text': noteText,
-  './use-inspiration-activity': { useInspirationActivity: () => ({ activity: null, error: false, live: false, retry() {} }) },
+  './use-inspiration-activity': { useInspirationActivity: (_ideaId, run, enabled) => {
+    activityReads.push({ runId: run.runId, enabled });
+    return { activity, error: false, live: false, retry() {} };
+  } },
 };
 stubs['./inspiration-next-step'] = loadModule('pages/inspiration-next-step.ts', {
   require: (name) => name === './inspiration-execution' ? execution : stubs[name] ?? uiRequire(name),
@@ -169,8 +186,7 @@ const click = async (target) => { await act(async () => { target.props.onClick()
 
 for (const backendId of ['openclaw', 'hermes']) {
   const renderer = render();
-  await click(button(renderer, 'inspiration.thread.workspace'));
-  act(() => renderer.root.findAll((node) => node.type === 'input')[0].props.onChange({ target: { value: '/fixture/custom-native' } }));
+  assert.ok(!button(renderer, 'inspiration.thread.workspace'), 'The composer hides the workspace selector for native agents');
   await pick(renderer, backendId);
   assert.equal(renderer.root.findAll((node) => node.type === 'input').length, 0, 'External execution must not suggest a workspace override');
   type(renderer, 'Carry on');
@@ -179,7 +195,7 @@ for (const backendId of ['openclaw', 'hermes']) {
   assert.equal(start.input.backendId, backendId);
   assert.equal(start.input.agentId, `${backendId}-agent`);
   assert.equal(start.input.instruction, 'Carry on');
-  assert.equal(start.input.workspace, null, 'Switching from native must not leak the previous workspace override');
+  assert.equal(start.input.workspace, null, 'Switching from native uses the external Session workspace');
   act(() => renderer.unmount());
 }
 
@@ -210,20 +226,21 @@ for (const backendId of ['openclaw', 'hermes']) {
     sessionHref: sessionHref('archived'), reusableSession: false },
   { ...idea.latestExecution, id: 'alternate', runId: 'alternate-run', workspace: '/fixture/alternate',
     sessionHref: sessionHref('alternate') });
-  act(() => renderer.update(React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh })));
+  const refreshView = () => act(() => renderer.update(React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh })));
+  refreshView();
   assert.equal(reads.at(-1), 'current', 'The current workspace opens its reusable session');
-  await click(button(renderer, 'inspiration.thread.workspace'));
-  const changeWorkspace = value => act(() => renderer.root.findByType('input').props.onChange({ target: { value } }));
   const models = () => renderer.root.findAllByType(stubs['./ChatModelMenu']);
   const priorReads = reads.length;
-  changeWorkspace('/fixture/new-directory');
+  idea.latestExecution = { ...idea.latestExecution, reusableSession: false, workspace: '/fixture/new-directory' };
+  refreshView();
   assert.equal(models().length, 0, 'A new workspace never offers model writes to an older session');
   assert.equal(reads.length, priorReads);
-  changeWorkspace('/fixture/alternate');
+  idea.latestExecution = { ...idea.latestExecution, workspace: '/fixture/alternate' };
+  refreshView();
   assert.equal(reads.at(-1), 'alternate', 'The matching reusable session wins over an archived session in the same workspace');
   await act(async () => models()[0].props.onSelect('fixture-model', 'provider', 'binding'));
   assert.deepEqual(selections, ['alternate']);
-  type(renderer, 'Start in the chosen workspace');
+  type(renderer, 'Continue in the current workspace');
   await click(button(renderer, 'inspiration.thread.send'));
   assert.equal(starts.at(-1).input.workspace, '/fixture/alternate');
   act(() => renderer.unmount());
@@ -268,6 +285,7 @@ for (const backendId of ['openclaw', 'hermes']) {
 }
 {
   const renderer = render('running');
+  assert.ok(!button(renderer, 'inspiration.thread.harvestBlocked'), 'Rooting has no disabled harvest control');
   const startCount = starts.length;
   type(renderer, 'Next step');
   await enter(renderer);
@@ -343,13 +361,39 @@ for (const backendId of ['openclaw', 'hermes']) {
   assert.ok(primary?.includes('请先查看会话中的进度'));
   assert.ok(!primary.includes('DEMO_SERVICE_RESTARTED'), 'Known codes should not replace the explanation');
   assert.equal(errorLabels.SERVICE_RESTARTED, errorLabels.DEMO_SERVICE_RESTARTED);
-  await click(button(renderer, 'inspiration.thread.narrowRetry'));
-  assert.equal(starts.at(-1).input.instruction, 'inspiration.thread.narrowRetry', 'A failed round can retry with a smaller scope');
+  assert.ok(!button(renderer, 'inspiration.thread.narrowRetry'), 'An interrupted round does not offer a canned retry');
+  const agentPicker = () => renderer.root.findAllByType(stubs['@base-ui/react/popover'].Popover.Root)
+    .find((node) => typeof node.props.open === 'boolean');
+  const startCount = starts.length;
+  assert.equal(agentPicker().props.open, false);
+  await click(button(renderer, 'inspiration.thread.switchAgent'));
+  assert.equal(agentPicker().props.open, true, 'Switch Agent opens the picker');
+  assert.equal(starts.length, startCount, 'Opening the picker does not start a new round');
   act(() => renderer.unmount());
 }
 {
   const renderer = render('interrupted', 'UNMAPPED_SERVICE_CODE');
   assert.ok(textOf(renderer.toJSON()).includes('UNMAPPED_SERVICE_CODE'), 'Unknown codes stay visible for diagnosis');
+  act(() => renderer.unmount());
+}
+{
+  const code = 'RUNTIME_QUOTA_EXHAUSTED';
+  const renderer = render('failed', code);
+  assert.equal(activityReads.at(-1).enabled, true, 'A failed round loads its error with the trajectory folded');
+  assert.ok(textOf(renderer.toJSON()).includes(chatI18n.t('chat.gwErrors.runtimeQuotaExceeded')),
+    'Before history loads, the code already explains the same cause as Chat');
+  const raw = `错误：当前账号额度已用尽，本次请求已停止，不会继续排队。请等待额度恢复、补充额度或更换账号后重试\n上游原因：Quota exceeded. Check your plan and billing details.\n错误码：${code}`;
+  activity = { runId: 'run', errorMessage: raw, trajectory: { parts: [] }, artifacts: { items: [] } };
+  for (const language of ['zh-CN', 'en', 'zh-CN']) {
+    await chatI18n.changeLanguage(language);
+    act(() => renderer.update(React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh })));
+    const expected = gatewayErrors.translateGatewayError(raw, chatI18n.t.bind(chatI18n));
+    assert.ok(renderer.root.findAllByType('p').some(value => textOf(value) === `!${expected}`),
+      `The error matches Chat verbatim in ${language}, including the provider reason and code`);
+    assert.equal(textOf(renderer.toJSON()).split(code).length - 1, 1, 'The detailed message does not duplicate the code badge');
+    assert.ok(!textOf(renderer.toJSON()).includes('inspiration.runError'));
+  }
+  activity = null;
   act(() => renderer.unmount());
 }
 {
@@ -364,15 +408,34 @@ for (const backendId of ['openclaw', 'hermes']) {
   assert.ok(textOf(renderer.toJSON()).includes('inspiration.thread.seedHeading'));
   assert.equal(radio(renderer, 'shoggoth')[0].props['aria-checked'], true, 'The first capable agent is chosen');
   assert.equal(button(renderer, 'Develop').props['aria-pressed'], true, 'The seed opens with the first intent chosen');
+  assert.ok(button(renderer, 'inspiration.thread.mention'), 'The seed composer also offers an Agent picker');
+  const modelMenu = () => renderer.root.findByType(stubs['./ChatModelMenu']);
+  assert.equal(modelMenu().props.triggerLabel, 'fixture-default');
+  act(() => modelMenu().props.onSelect('custom-model', 'fixture'));
   await click(radio(renderer, 'hermes')[0]);
+  assert.equal(modelMenu().props.activeModel, '', 'Changing Agents resets the previous Agent’s model pick');
+  act(() => modelMenu().props.onSelect('custom-model', 'fixture'));
   await click(button(renderer, 'inspiration.thread.send'));
   assert.equal(starts.at(-1).input.agentId, 'hermes-agent');
   assert.equal(starts.at(-1).input.instruction, 'Develop', 'An intent chip on its own becomes the instruction');
+  assert.deepEqual({ ...starts.at(-1).input.modelSelection }, { model: 'custom-model', provider: 'fixture' });
   act(() => renderer.unmount());
 }
 {
   const renderer = render('completed');
+  idea = { ...idea, archivedAt: 1 };
+  act(() => renderer.update(React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh })));
+  assert.equal(buttons(renderer).filter(value => value.props['aria-label'] === 'inspiration.restore').length, 0,
+    'A harvested note keeps only the footer continuation');
+  await click(button(renderer, 'inspiration.restore'));
+  assert.equal(updates.at(-1).input.patch.archived, false);
+  act(() => renderer.unmount());
+}
+{
+  const renderer = render('completed');
+  assert.equal(renderer.root.findAllByType('time').length, 1);
   await click(button(renderer, 'inspiration.edit'));
+  assert.equal(renderer.root.findAllByType('time').length, 0, 'Editing hides the saved date');
   act(() => renderer.root.findAll((node) => node.type === 'textarea' && node.props['aria-label'] === 'inspiration.original')[0]
     .props.onChange({ target: { value: 'Plain note' } }));
   await click(button(renderer, 'inspiration.saveEdit'));
@@ -443,4 +506,4 @@ for (const backendId of ['openclaw', 'hermes']) {
     act(() => renderer.unmount());
   }
 }
-console.log('PASS Inspiration thread: chat rounds, external routes, workspace isolation, native continuation, combined intents, queued steps, offline guard, stopped failures, retries, seed lineup, plain-text notes, legacy titles and concurrent deep-link rosters');
+console.log('PASS Inspiration thread: chat rounds, external routes, workspace isolation, native continuation, combined intents, queued steps, offline guard, stopped failures, switching agents, seed lineup, plain-text notes, legacy titles and concurrent deep-link rosters');

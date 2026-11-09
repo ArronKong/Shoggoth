@@ -17,7 +17,7 @@ async function openHandoffFixture({ root: existingRoot, transport: existingTrans
   const root = fs.realpathSync(existingRoot || fs.mkdtempSync("/tmp/sghandoff-"));
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(workspace, { recursive: true });
-  const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
+  const paths = resolveServicePaths({ homeDir: root, trustedRoot: root, stateRoot: path.join(root, "state"),
     cacheRoot: path.join(root, "cache"), profileRoot: path.join(root, "profile") });
   const transport = existingTransport || { hosts: new Map(), handles: new Map(), acquisitions: [] };
   const mapSession = ({ threadSource, ...rest }) => ({ ...rest, source: threadSource });
@@ -92,7 +92,10 @@ async function openHandoffFixture({ root: existingRoot, transport: existingTrans
   };
   const facts = { read: async () => ({ installed: true, releaseEnabled: true, authenticated: true,
     models: ["fixture-model"], attachmentKinds: [], permissionEnforcementProven: true }) };
-  const service = createAgentService({ ...serviceOptions, paths, runtimeManager: manager, version: "handoff-fixture", builtinCliProfiles,
+  // A fixture's Codex Desktop inventory must never discover the real user's threads.
+  const service = createAgentService({ runtimeStorageHomedir: () => root,
+    parentEnv: { ...process.env, CODEX_HOME: path.join(root, ".codex") },
+    ...serviceOptions, paths, runtimeManager: manager, version: "handoff-fixture", builtinCliProfiles,
     builtinCliInstalledAccountIds: builtinCliProfiles ? DEFAULT_RUNTIME_ACCOUNTS
       .filter(account => account.kind === "native-user").map(account => account.id) : [],
     runtimeSupportDiscover: facts.read,

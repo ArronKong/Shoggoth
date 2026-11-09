@@ -239,9 +239,9 @@ const ROOT_CLASS_REQUIREMENTS = [
   ["pages/CronPage.tsx", "cron-root", 'className="cron-page management-page"'],
   ["pages/UsagePage.tsx", "usage-root", 'className="page management-page usage-page"'],
   ["pages/ModelsPage.tsx", "models-root", 'className="page management-page models-page"'],
-  ["pages/SkillsPage.tsx", "skills-root", 'className="page management-page skills-page"'],
+  ["pages/SkillsPage.tsx", "skills-root", 'className="page management-page management-page--scroll-card skills-page"'],
   ["pages/AgentsPage.tsx", "agents-root", 'className={`page management-page agents-page ${s.root}`}'],
-  ["pages/SettingsPage.tsx", "settings-root", 'className="page management-page settings-page"'],
+  ["pages/SettingsPage.tsx", "settings-root", 'className="page management-page management-page--scroll-card settings-page"'],
 ];
 
 // 新的统一页面 CSS 必须完整包在唯一批准的 marker 中，并覆盖批准的响应断点。
@@ -457,7 +457,7 @@ const CATALOG_PAGE_REQUIREMENTS = [
     id: "models-card-boundary",
     path: "manage-skin.css",
     selector: ".management-page.models-page .model-card",
-    declarations: ["background: var(--ui-surface-1);", "border: 1px solid var(--ui-hairline);", "border-radius: 16px;"],
+    declarations: ["background: var(--ui-surface-1);", "border: 0;", "border-radius: 16px;"],
   },
   {
     kind: "css-rule",
@@ -492,7 +492,7 @@ const CATALOG_PAGE_REQUIREMENTS = [
     id: "models-card-surface",
     path: "manage-skin.css",
     selector: ".management-page.models-page .model-card",
-    declarations: ["background: var(--ui-surface-1);", "border: 1px solid var(--ui-hairline);", "border-radius: 16px;", "padding: 16px;", "box-shadow: var(--ui-shadow-card);"],
+    declarations: ["background: var(--ui-surface-1);", "border: 0;", "border-radius: 16px;", "padding: 16px;", "box-shadow: var(--ui-shadow-card);"],
   },
   {
     kind: "css-rule",
@@ -542,28 +542,35 @@ const CATALOG_PAGE_REQUIREMENTS = [
     kind: "css-rule",
     id: "skills-list",
     path: "manage-skin.css",
-    selector: ".management-page.skills-page .skill-grid",
-    declarations: ["grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));", "gap: 16px;", "min-width: 0;"],
+    selector: ".management-catalog-grid,\n.management-page.skills-page .skill-grid",
+    declarations: ["grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));", "gap: 16px;", "min-width: 0;"],
   },
   {
     kind: "css-rule",
     id: "skills-row-surface",
     path: "manage-skin.css",
+    selector: ".management-catalog-card,\n.management-page.skills-page .skill-card",
+    declarations: ["background: var(--ui-surface-1);", "border: 0;", "border-radius: 24px;", "padding: 14px var(--management-catalog-inline-padding, 24px);", "--management-catalog-title-line-height: 20px;"],
+  },
+  {
+    kind: "css-rule",
+    id: "skills-card-layout",
+    path: "manage-skin.css",
     selector: ".management-page.skills-page .skill-card",
-    declarations: ["display: flex;", "background: var(--ui-surface-1);", "border: 0;", "border-radius: 24px;", "padding: 14px 24px;"],
+    declarations: ["display: flex;", "flex-direction: column;"],
   },
   {
     kind: "css-rule",
     id: "skills-name",
     path: "manage-skin.css",
-    selector: ".management-page.skills-page .skill-name",
-    declarations: ["color: var(--ui-text-1);", "font-size: 16px;", "line-height: 20px;", "font-weight: 400;"],
+    selector: ".management-catalog-open strong,\n.management-page.skills-page .skill-name",
+    declarations: ["color: var(--ui-text-1);", "font-size: 16px;", "line-height: var(--management-catalog-title-line-height);", "font-weight: 400;"],
   },
   {
     kind: "css-rule",
     id: "skills-description",
     path: "manage-skin.css",
-    selector: ".management-page.skills-page .skill-desc",
+    selector: ".management-catalog-open small,\n.management-page.skills-page .skill-desc",
     declarations: ["font-size: 12px;", "line-height: 18px;", "font-weight: 300;"],
   },
   {
@@ -805,7 +812,7 @@ const SHELL_PAGE_REQUIREMENTS = [
     kind: "css-rule",
     id: "settings-disabled-readable",
     path: "pages/SettingsPage.css",
-    selector: ".management-page.settings-page button:disabled:not(.ui-cbtn)",
+    selector: '.management-page.settings-page button[role="combobox"]:disabled',
     declarations: [
       "opacity: 1;",
       "cursor: not-allowed;",
@@ -1837,9 +1844,9 @@ function normalizeRootClass(source, relativePath) {
     ["pages/CronPage.tsx", ['className="cron-page management-page"', 'className="cron-page"']],
     ["pages/UsagePage.tsx", ['className="page management-page usage-page"', 'className="page usage-page"']],
     ["pages/ModelsPage.tsx", ['className="page management-page models-page"', 'className="page"']],
-    ["pages/SkillsPage.tsx", ['className="page management-page skills-page"', 'className="page"']],
+    ["pages/SkillsPage.tsx", ['className="page management-page management-page--scroll-card skills-page"', 'className="page"']],
     ["pages/AgentsPage.tsx", ['className="page management-page agents-page"', 'className="page agents-page"']],
-    ["pages/SettingsPage.tsx", ['className="page management-page settings-page"', 'className="page settings-page"']],
+    ["pages/SettingsPage.tsx", ['className="page management-page management-page--scroll-card settings-page"', 'className="page settings-page"']],
   ]);
   const replacement = replacements.get(relativePath);
   return replacement && source.includes(replacement[0]) ? source.replace(replacement[0], replacement[1]) : source;

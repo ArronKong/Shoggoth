@@ -1656,6 +1656,13 @@ class WorkRunCoordinator {
     return this.#generateModelText(input, "memory_text");
   }
 
+  // The nightly memory review takes the same memory text route, but asks the
+  // Runtime for its own verified model-only purpose (Grok/Antigravity verify
+  // tool-free generation per purpose; recall and Dreaming stay closed there).
+  generateMemoryReviewText(input) {
+    return this.#generateModelText(input, "memory_text", "memory_review");
+  }
+
   generateMemoryImportText(input) {
     return this.#generateModelText(input, "memory_extraction");
   }
@@ -1693,7 +1700,7 @@ class WorkRunCoordinator {
       } });
   }
 
-  #generateModelText(input, purpose) {
+  #generateModelText(input, purpose, modelOnlyPurpose = null) {
     this.#assertOpen();
     const fields = ["profileId", "operationId", "prompt", "maxOutputBytes", "timeoutMs",
       ...(input?.signal === undefined ? [] : ["signal"]),
@@ -1727,7 +1734,7 @@ class WorkRunCoordinator {
       }
       input.modelSelection.assertCurrent();
     }
-    if (profile.runtime !== "codex" && !this.runtimeManager.canGenerateModelOnly?.(profile.runtime)) {
+    if (profile.runtime !== "codex" && !this.runtimeManager.canGenerateModelOnly?.(profile.runtime, { purpose: modelOnlyPurpose })) {
       throw coordinatorError("MODEL_ONLY_UNSUPPORTED", "该模型通道尚不支持无工具生成；本地记忆仍可使用，可在记忆设置中选择独立模型");
     }
     return this.#startMemoryGenerationTask(input, route, false, purpose);
@@ -1951,12 +1958,15 @@ class WorkRunCoordinator {
           operationId: input.operationId, signal: task.controller.signal, fence, ...streaming })
         : await host.generateModelOnly({ prompt: input.prompt, model,
           modelSecretScope,
-          assertCurrent: fence,
+          assertCurrent: () => { fence(); host.assertExecutionProviderCurrent?.(); },
           ...(input.execution ? { execution: input.execution } : {}),
           operationId: input.operationId, signal: task.controller.signal, ...streaming });
       await textStream?.close();
       if (textStream?.error) throw textStream.error;
-      host.assertExecutionProviderCurrent?.();
+      // As in proactive checks: a dedicated model worker (Grok, Antigravity)
+      // has already stopped after replying, so its route was checked while it
+      // ran and a retired transport is not asked to prove it is still alive.
+      if (codex) host.assertExecutionProviderCurrent?.();
       fence();
       if (!output || typeof output.text !== "string" || !output.text.isWellFormed()
         || output.text.includes("\0") || Buffer.byteLength(output.text, "utf8") > input.maxOutputBytes) {
@@ -2424,7 +2434,7 @@ class WorkRunCoordinator {
     });
   }
 
-  #flushNativePublicProgress(runId, boundaryId) {
+  #flushNativePublicProgress(runId, boundaryId, { publish = true } = {}) {
     // A tool/request boundary proves that already-public text is an interim
     // segment. Do not infer progress from reasoning, titles or missing text.
     // The later full Runtime message remains the sole model-context source.
@@ -2434,7 +2444,7 @@ class WorkRunCoordinator {
         id: transcriptEventId("native-progress", runId, boundaryId, part.segmentId),
         kind: "assistant", content, runtimeRef: null, contextExcluded: true, occurredAt: this.now(),
       });
-      if (event) require("./chat-text-fragments").appendChatText(this.#streamFor(runId), "text", {
+      if (event && publish) require("./chat-text-fragments").appendChatText(this.#streamFor(runId), "text", {
         ...part, phase: "commentary", sourceEventId: event.id, transcriptSeq: event.seq,
       });
       return event;
@@ -2752,6 +2762,8 @@ class WorkRunCoordinator {
           || response?.turnId !== context.turnId) {
           throw coordinatorError("WORK_RUN_CONTROL_STALE", "turn/steer 返回后 Run binding 已变化");
         }
+        // Preserve the already visible prefix before the accepted user bubble.
+        this.#flushNativePublicProgress(run.id, `steer:${input.operationId}`);
         // Steering is a real user message inside the active turn. Persist it only
         // after the Runtime accepts the control request so chat.history can retain
         // every instruction without recording rejected steering attempts.
@@ -3902,9 +3914,10 @@ class WorkRunCoordinator {
       && (run.source === "kanban" || run.source === "cron" || (run.source === "inspiration"
         && this.resolveRunSession(run)?.inputSource !== "chat"))) {
       // Inspiration keeps its domain ownership when continued from Chat, but
-      // an explicit chat send must honor that conversation's selected Binding.
+      // a selected model or an explicit Chat send owns its conversation Binding.
       const sessionKey = this.getRunSessionKey(run);
-      if (sessionKey) {
+      const inspirationSession = run.source === "inspiration" && sessionKey ? this.chatSessionStore.getSession(sessionKey) : null;
+      if (sessionKey && !inspirationSession?.modelOverride && !inspirationSession?.nextRuntimeSelection) {
         await this.followDefaultSessionBinding(sessionKey, run.id);
       }
     }
@@ -4439,8 +4452,9 @@ class WorkRunCoordinator {
     if (!["inspiration", "proactive", "automation"].includes(run?.source) || run.status !== "queued") {
       throw coordinatorError("WORK_RUN_NOT_CONTROLLABLE", "灵感执行已开始，不能按未启动任务取消");
     }
-    const safeCode = errorCode ? Object.hasOwn(SESSION_RUNTIME_PUBLIC_MESSAGES, errorCode)
-      ? errorCode : publicStartErrorCode({ code: errorCode }) : null;
+    const knownCode = Object.hasOwn(SESSION_RUNTIME_PUBLIC_MESSAGES, errorCode)
+      || (run.source === "inspiration" && errorCode === "INSPIRATION_MODEL_UNAVAILABLE");
+    const safeCode = knownCode ? errorCode : errorCode ? publicStartErrorCode({ code: errorCode }) : null;
     const canceled = this.dispatcher.transition(runId, safeCode ? "failed" : "canceled", {
       resultSummary: safeCode ? `Execution could not start (${safeCode}).` : null,
       errorCode: safeCode,
@@ -4591,8 +4605,13 @@ class WorkRunCoordinator {
       } catch { failure = null; }
     }
     payload = { ...basePayload, ...(failure ? { failure } : {}) };
-    this.nativeUiTextProjection?.forget(runId);
     const run = this.dispatcher.getRun(runId);
+    // Stop can arrive before the Runtime completes its current text item.
+    // Retain its already published text for display, with context excluded.
+    if (run?.source === "chat" && payload.status === "canceled" && !payload.errorCode) {
+      this.#flushNativePublicProgress(runId, "terminal:canceled", { publish: false });
+    }
+    this.nativeUiTextProjection?.forget(runId);
     if (run?.source === "cron" && !this.getRunSessionKey(run)) {
       const command = this.domainCommands.get(runId);
       if (command && !this.chatSessionStore.getCronRunBinding?.(runId)) this.#ensureCronTranscript(run, command);
@@ -6156,8 +6175,8 @@ class WorkRunCoordinator {
     const projectDisplay = this.temporarySecrets ? text => projectTextOrOriginal(this.temporarySecrets, {
       profileId: displayRun.profileId, sessionId: this.getRunSessionKey(displayRun) || displayRun.sourceId }, text) : undefined;
     const payload = {
-      "text.delta": () => ({ ...common, delta: event.delta }),
-      text: () => ({ ...common, text: event.text, phase: event.phase, delivery: event.delivery }),
+      "text.delta": () => ({ ...common, delta: event.delta, phase: event.phase }),
+      text: () => ({ ...common, text: event.text, phase: event.phase, itemPhase: event.itemPhase, delivery: event.delivery }),
       "reasoning.delta": () => ({
         ...common,
         delta: event.delta,
@@ -6229,6 +6248,8 @@ class WorkRunCoordinator {
       const seed = session && !this.nativeUiTextProjection.runs.has(runId) ? (this.transcriptStore?.listEvents(currentRun.profileId, session.id) || [])
         .reduce((max, item) => Math.max(max, Number(item.content?.segmentId?.match(/:(\d+)$/)?.[1] || 0)), 0) : 0;
       publicPayload = this.nativeUiTextProjection.observe(runId, type, publicPayload, seed);
+      // The empty item-start observation only identifies the following deltas.
+      if (type === "text" && event.method === "item/started" && !originalText && event.itemPhase) return;
     }
     const borrowedMemoryRefs = mergeBorrowedMemoryRefs(this.contextCompiler?.memoryEngine?.sharing?.borrowedRefsForRun(runId) || [],
       this.runExecutionContracts.get(runId)?.borrowedMemoryRefs || [], extractBorrowedMemoryRefs(event));

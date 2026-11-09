@@ -465,6 +465,51 @@ test("每步说明只用于展示，不进入业务和 Hook 参数", async () =>
   assert.deepEqual(calls, [{ section: "cron", cursor: null, limit: 20 }]);
 });
 
+test("记忆与设定工具把对调用 Run 自身的错误来源纠正为真实来源，其他会话仍拒绝", async () => {
+  const IDEA_ID = "idea-current", SESSION_KEY = "agent:fixture:session-current";
+  const bound = [];
+  const conversationDefinitionService = {
+    bind(name, args, run) { bound.push([name, args.source, args.sourceId, run.id]); return { runId: run.id }; },
+    read() { return { kind: "IDENTITY", revision: 1, text: "" }; }, update() { throw new Error("unexpected update"); },
+  };
+  const conversationMemoryService = {
+    engine: { recallPolicy: { getRevision: () => "policy-1" }, isRecallCommitted: () => true },
+    store: { getRevision: () => 1 },
+    bind(name, args, run) { bound.push([name, args.source, args.sourceId, run.id]); return {}; },
+    search() { return { items: [] }; }, get() {}, explain() {}, write() {},
+  };
+  const f = makeFixture({ conversationDefinitionService, conversationMemoryService });
+  const scope = { runId: RUN_ID, assertCurrent() {} };
+  const fresh = () => authority({ callId: crypto.randomUUID() });
+  const cases = [
+    // Pi: an Inspiration conversation restated as "chat" plus the Run ID.
+    [{ source: "inspiration", sourceId: IDEA_ID }, { source: "chat", sourceId: RUN_ID }],
+    // OpenCode: the right source with the Run ID instead of the session.
+    [{ source: "chat", sourceId: SESSION_KEY }, { source: "chat", sourceId: RUN_ID }],
+    [{ source: "inspiration", sourceId: IDEA_ID }, { source: "chat", sourceId: IDEA_ID }],
+  ];
+  for (const [real, claimed] of cases) {
+    f.runs.set(RUN_ID, run({ ...real }));
+    f.runtimeContexts.clear();
+    f.runtimeContexts.set(`${PROFILE_ID}:${real.source}:${real.sourceId}`, { runId: RUN_ID, profileId: PROFILE_ID, ...real,
+      profileDefaultModel: "m", sessionModelOverride: null, effectiveModel: "m" });
+    bound.length = 0;
+    await f.controller.handle("agent_definition_read", { ...claimed, kind: "IDENTITY" }, fresh(), scope);
+    await f.controller.handle("memory_search", { ...claimed, query: "称呼" }, fresh(), scope);
+    assert.deepEqual(bound, [["agent_definition_read", real.source, real.sourceId, RUN_ID],
+      ["memory_search", real.source, real.sourceId, RUN_ID]]);
+    // Another conversation, or no calling Run, keeps the normal refusal.
+    await expectCode(() => f.controller.handle("memory_search", { source: "chat", sourceId: "agent:fixture:other", query: "x" },
+      fresh(), scope), "MCP_TOOL_NOT_FOUND");
+    await expectCode(() => f.controller.handle("agent_definition_read", { ...claimed, kind: "IDENTITY" }, fresh()),
+      "MCP_TOOL_NOT_FOUND");
+  }
+  // Only memory/definition tools are rewritten, and only for chat/Inspiration Runs.
+  f.runs.set(RUN_ID, run());
+  await expectCode(() => f.controller.handle("agent_definition_read", { source: "chat", sourceId: RUN_ID, kind: "IDENTITY" },
+    fresh(), scope), "MCP_TOOL_NOT_FOUND");
+});
+
 test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定，能力查询与目录一致", async () => {
   const f = makeFixture();
   const source = { source: "chat", sourceId: "current-user-conversation" };

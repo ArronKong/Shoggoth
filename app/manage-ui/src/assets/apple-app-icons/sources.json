@@ -1,6 +1,6 @@
 {
   "retrievedAt": "2026-11-01",
-  "normalization": "Actual macOS app bundle icons, converted with sips to 256 x 256 PNG preserving transparency.",
+  "normalization": "Official Apple app artwork, converted to 256 × 256 PNG. The origin is recorded per entry.",
   "assets": [
     {
       "id": "calendar",
@@ -16,11 +16,14 @@
       "id": "reminders",
       "asset": "reminders.png",
       "bundleIdentifier": "com.apple.reminders",
-      "appVersion": "7.0",
-      "appBuild": "3976",
-      "source": "/System/Applications/Reminders.app/Contents/Resources/AppIcon.icns",
-      "sourceSha256": "a29e827b9964b78b0e70cd2dedc752192a2a05b0e00a24bc2ed0ffd3f0196400",
-      "sha256": "6477699ac3a244f047553084c1359ddad51e48683e2dc8290e9c6d8ee6baf45f"
+      "page": "https://apps.apple.com/us/app/id1108187841",
+      "source": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/4b/b4/39/4bb43986-4714-adc7-459a-1b7c7aafff1d/remindersCalistoga-0-0-1x_U007epad-0-1-0-0-85-220.png/512x512bb.png",
+      "sourceSha256": "86fe8a6cfa214d909fabc857610bd328384cc1f53ee7538c9ba9776da2b7e79a",
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "sha256": "84b062a2cd6ad5dba711bfdf703d9bbe34262defb21bbb2a55bfd0e12c237b05",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 256 × 256."
     }
   ]
 }

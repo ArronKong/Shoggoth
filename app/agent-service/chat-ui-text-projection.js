@@ -13,15 +13,23 @@ class ChatUiTextProjection {
     const run = this.run(runId, seed), key = payload.itemId || "default";
     let item = run.items.get(key);
     if (!item) { item = { full: "", sealed: "", segmentId: `native-text:${runId}:${++run.serial}`, text: "", committed: false }; run.items.set(key, item); }
-    if (type === "text.delta") item.full += payload.delta;
-    else item.full = payload.text;
+    const { itemPhase, ...data } = payload;
+    const started = type === "text" && data.method === "item/started";
+    const phase = started ? itemPhase : data.phase;
+    if (["commentary", "final_answer"].includes(phase)) item.phase = phase;
+    if (started && !data.text && itemPhase) return data;
+    if (type === "text.delta") {
+      item.full += payload.delta;
+      if (payload.delta) item.committed = false;
+    } else item.full = payload.text;
     // A changed prefix is a correction, not authority to rewrite earlier
     // canonical segments. Keep the correction in a fresh visible segment.
     item.text = item.full.startsWith(item.sealed) ? item.full.slice(item.sealed.length) : item.full;
-    const value = { ...payload, segmentId: item.segmentId,
+    const value = { ...data, segmentId: item.segmentId,
+      ...(!started && item.phase ? { phase: item.phase } : {}),
       ...(type === "text" ? { text: item.text } : {}) };
     if (type === "text") item.committed = true;
-    if (type === "text" && payload.phase === "commentary") run.items.delete(key);
+    if (type === "text" && !started && item.phase === "commentary") run.items.delete(key);
     return value;
   }
   flush(runId, publicationId, append) {

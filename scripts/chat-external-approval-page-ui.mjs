@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,7 +14,7 @@ const requireUi = createRequire(path.join(uiRoot, "package.json"));
 const { build } = requireUi("esbuild");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-chat-approval-page-"));
 try {
-  await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-external-approval-page.tsx")],
+  await build({ plugins: [viteArtworkFixturePlugin(root)], entryPoints: [path.join(root, "scripts/fixtures/chat-external-approval-page.tsx")],
     bundle: true, format: "esm", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' },
     loader: { ".css": "empty", ".woff2": "dataurl", ".svg": "dataurl",
       ".webp": "dataurl", ".png": "dataurl" },
@@ -31,7 +32,6 @@ app.whenReady().then(async () => {
     const base = ${JSON.stringify(pathToFileURL(path.join(temp, "index.html")).href)};
     for (const backendId of ["openclaw", "hermes"]) {
       await w.loadURL(base + "?backend=" + backendId + "#/chat");
-      w.show(); w.focus();
       const result = await w.webContents.executeJavaScript("window.runExternalApprovalPageFixture()", true);
       console.log(JSON.stringify(result));
     }

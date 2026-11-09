@@ -2,6 +2,7 @@
 
 const { runtimeBinding, runtimeCapabilities } = require("./runtime-adapter");
 const { serviceError } = require("./security");
+const { runtimePermissionModeOptions, resolveRuntimePermissionMode } = require("./runtime-permission-modes");
 
 const EVIDENCE_VERSION = 1;
 const NATIVE_RUNTIMES = new Set(["codex", "grok-build", "antigravity", "pi", "claude-code", "opencode", "deepseek-harness"]);
@@ -80,6 +81,13 @@ function runtimeCapabilityEvidence(raw, bindingValue, instanceId) {
   observations["permission.enforcement"] = Object.freeze({
     state: native ? "supported" : "unverified", source: host?.effectivePermissionsVerified === true
       && binding.runtime === "opencode" ? "effective-permissions" : "adapter-contract",
+    // A catalog process never executes the selected conversation. Its adapter
+    // can configure a separate execution host for these explicit user modes.
+    // Execution-instance evidence remains tied to its exact acquired policy.
+    ...(native && host?.controlInstance === true ? { policies: Object.freeze(
+      runtimePermissionModeOptions(binding.runtime).map(option =>
+        resolveRuntimePermissionMode(binding.runtime, option.id).permissionPolicy),
+    ) } : {}),
   });
   return Object.freeze({ version: EVIDENCE_VERSION, contractVersion: 1, scope,
     observations: Object.freeze(observations) });

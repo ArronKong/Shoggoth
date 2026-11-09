@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
+import { loadConnectorAddButton, loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
 
 const require = createRequire(new URL("../app/manage-ui/package.json", import.meta.url));
 const React = require("react"), Renderer = require("react-test-renderer"), ts = require("typescript"), i18next = require("i18next");
@@ -165,6 +165,7 @@ const helper = load("../app/manage-ui/src/lib/mcpConnectorUi.ts");
 const shared = {
   "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator), i18n: translator }) },
   "../components/ConnectorDetails": loadConnectorDetails(translator.t.bind(translator)),
+  "../components/ConnectorAddButton": loadConnectorAddButton(translator.t.bind(translator)),
   "../components/ConnectorTools": { __esModule: true, default: props => { observedTools = props; return null; } },
   "../components/McpConnectorIcon": { __esModule: true, default: () => null },
   "../components/Modal": { __esModule: true, default: ({ children, footer, subtitle }) => React.createElement("section", {}, children, React.createElement("p", {}, subtitle), footer) },

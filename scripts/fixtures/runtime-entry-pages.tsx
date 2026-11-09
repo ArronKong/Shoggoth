@@ -2,11 +2,12 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import ChatPage from "../../app/manage-ui/src/pages/ChatPage";
-import AgentDefaultRuntime from "../../app/manage-ui/src/components/AgentDefaultRuntime";
+import AgentsPage from "../../app/manage-ui/src/pages/AgentsPage";
 import SettingsPage from "../../app/manage-ui/src/pages/SettingsPage";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
 import { FALLBACK_BACKEND_DESCRIPTORS } from "../../app/manage-ui/src/lib/backends";
+import { NavigationGuardProvider } from "../../app/manage-ui/src/lib/navigation-guard";
 import { applyConfiguredLocale } from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
@@ -23,12 +24,20 @@ const wait = async (predicate: () => unknown, message: string) => {
   const deadline = performance.now() + 8000;
   while (!predicate()) { if (performance.now() > deadline) throw Error(message); await pause(20); }
 };
+// Settings lists local CLIs in the Shoggoth card's dialog.
+const openLocalRuntimes = async () => {
+  await wait(() => document.querySelector('[data-manage="shoggoth"]'), "Shoggoth local tools entry");
+  if (!document.querySelector("#settings-local-runtimes")) document.querySelector<HTMLButtonElement>('[data-manage="shoggoth"]')!.click();
+};
 const agentId = "shoggoth-agent-ui-entry";
+const artifactPath = "/fixture/Agent output.pdf";
+let artifactReads = 0;
+let revealedPath: string | undefined;
 const sessionKey = `agent:${agentId}:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
 const first = "11111111-1111-8111-8111-111111111111", second = "22222222-2222-8222-8222-222222222222";
 const descriptors = FALLBACK_BACKEND_DESCRIPTORS.filter(item => item.id === "shoggoth").map(item => ({ ...item,
   surfaces: { ...item.surfaces, nativeCapacity: false } }));
-const row = () => ({ key: sessionKey, backendId: "codex", agentId, agentName: "独立 Agent", displayName: preview ? "模型与 Runtime" : "Runtime 入口验收",
+const row = () => ({ key: sessionKey, backendId: "shoggoth", agentId, agentName: "独立 Agent", displayName: preview ? "模型与 Runtime" : "Runtime 入口验收",
   kind: "direct", updatedAt: preview ? Date.now() : 123456, runtime: session.runtime, model: session.model });
 let session = { sessionKey, revision: 1, bindingId: first, runtime: "codex", model: preview ? "gpt-5.4" : "shared-model", canSwitch: true, contextUsage: null };
 const third = "33333333-3333-8333-8333-333333333333";
@@ -36,6 +45,7 @@ const bindings = [
   { id: first, runtime: "codex", name: "Codex" }, { id: second, runtime: "pi", name: "Pi" },
   { id: third, runtime: "deepseek-harness", name: "DeepSeek" },
 ].map(binding => ({ ...binding, runtimeAccountId: `native-${binding.runtime}-default-v1`, label: binding.name, enabled: true }));
+const expectedRuntimeRows = 5;
 const capabilities = { attachments: { image: {} }, slash: false, steer: false };
 const candidates = () => bindings.map(binding => ({ bindingId: binding.id, support: { supported: true },
   adjustments: { clearModelOverride: false, permissionMode: binding.id === second ? "auto" : null } }));
@@ -47,12 +57,30 @@ const previewModels: Record<string, string[]> = {
   "deepseek-harness": ["deepseek-v4-flash", "deepseek-v4-pro"],
 };
 const catalog = () => ({ selection: snapshot(), capabilities,
-  runtimes: bindings.map(binding => ({ runtime: binding.runtime, name: binding.name, available: true, capabilities })),
+  runtimes: bindings.map(binding => ({ runtime: binding.runtime, bindingId: binding.id, name: binding.name, available: true, capabilities })),
   models: bindings.flatMap(binding => (preview ? previewModels[binding.runtime] : ["shared-model", `${binding.runtime}-fast`, ...Array.from({ length: 18 }, (_, i) => `${binding.runtime}-model-${i}`)]).map((id, index) => ({
     id, name: id, provider: binding.runtime, backendId: "shoggoth", runtime: binding.runtime, runtimeName: binding.name,
     bindingId: binding.id, isDefault: index === 0, reasoning: preview,
   }))) });
 let bindingRevision = 1, defaultBindingId = first;
+let defaultModel = preview ? "gpt-5.4" : "shared-model";
+let defaultProvider: string | undefined = "@chatgpt", defaultReject = false, defaultReads = 0, defaultWrites = 0;
+const agentDetail = () => ({ id: agentId, name: "独立 Agent", backendId: "shoggoth", profile: agentId,
+  model: defaultModel, provider: defaultProvider === "@chatgpt" ? "ChatGPT" : defaultProvider ?? "pi",
+  runtime: bindings.find(binding => binding.id === defaultBindingId)!.runtime,
+  environmentKind: defaultBindingId === first ? "shoggoth-managed" : "native-user",
+  files: [], isDefault: true, protected: true, sharedAgentCount: 1 });
+const agentDefault = () => ({ bindingId: defaultBindingId, model: defaultModel, revision: bindingRevision,
+  ...(defaultProvider ? { modelProviderRef: defaultProvider } : {}) });
+const defaultCatalog = () => {
+  const { models, runtimes } = catalog();
+  const choices = models.map(item => item.bindingId === first
+    ? { ...item, name: `${item.name} · ChatGPT`, modelProviderRef: "@chatgpt" } : item);
+  const duplicate = choices.find(item => item.bindingId === first && item.id === (preview ? "gpt-5.4" : "shared-model"))!;
+  return { selection: agentDefault(),
+    models: [...choices, { ...duplicate, name: `${duplicate.id} · Fixture Endpoint`, modelProviderRef: "fixture-endpoint" }],
+    runtimes: runtimes.map(group => ({ ...group, name: group.runtime === "codex" ? "Codex Harness" : group.name })) };
+};
 let writes: string[] = [];
 const cfg = { disabledBackends: [] as string[], theme: "light", locale: "zh-CN", notifications: { chat: true, cron: true, task: true },
   gatewayUrl: "ws://127.0.0.1:1", token: "", hermesMode: "local", hermesRemotes: [], hermesKeepAlive: true, setupCompletedAt: 1 };
@@ -61,6 +89,18 @@ const bindingSnapshot = () => ({ bindings, revision: bindingRevision, defaultBin
 scope.fetch = async (input: string, init?: RequestInit) => {
   const url = new URL(String(input), "http://fixture.invalid");
   const route = url.pathname;
+  if (route === `/__api/agents/${agentId}/default-model`) {
+    if (init?.method !== "PUT") { defaultReads++; return Response.json(defaultCatalog()); }
+    const body = JSON.parse(String(init.body));
+    check(body.revision === bindingRevision, "Agent selection uses its binding revision");
+    const choice = defaultCatalog().models.find(item => item.id === body.model && item.bindingId === body.bindingId
+      && ("modelProviderRef" in item ? item.modelProviderRef : undefined) === body.modelProviderRef);
+    check(choice, "Agent selection preserves Runtime and source identity");
+    if (defaultReject) { defaultReject = false; return Response.json({ error: "unavailable", code: "PROFILE_MODEL_NOT_AVAILABLE" }, { status: 409 }); }
+    defaultBindingId = body.bindingId; defaultModel = body.model; defaultProvider = body.modelProviderRef;
+    bindingRevision++; defaultWrites++;
+    return Response.json(agentDefault());
+  }
   if (route.includes("runtime-bindings")) {
     if (preview && route.endsWith("/default") && init?.method === "POST") {
       const selected = bindings.find(binding => route.includes(binding.id)); check(selected, "known default Runtime");
@@ -101,7 +141,23 @@ scope.fetch = async (input: string, init?: RequestInit) => {
   if (route === "/__api/shoggoth/status") return Response.json({ error: "fixture service details unavailable" }, { status: 503 });
   if (route === "/__api/versions") return Response.json({ versions: [] });
   if (route === "/__api/self-updates") return Response.json({ backends: [] });
-  if (route === "/__api/agents") return Response.json({ agents: [{ id: agentId, name: "独立 Agent", backendId: "shoggoth" }] });
+  if (route === "/__api/agents") return Response.json({ agents: [agentDetail()] });
+  if (route === `/__api/agents/${agentId}`) return Response.json({ agent: agentDetail() });
+  if (route === `/__api/agents/${agentId}/artifacts`) {
+    check(url.searchParams.get("backend") === "shoggoth", "Agent files request uses the selected backend");
+    if (++artifactReads === 1) return Response.json({ error: "fixture unavailable" }, { status: 503 });
+    return Response.json({ artifacts: { supported: true, partial: true, total: 2, items: [
+      { path: artifactPath, name: "Agent output.pdf", kind: "doc", area: "session-output", mtimeMs: 123456, size: 2048 },
+    ] } });
+  }
+  if (route === "/__api/host/reveal-path") {
+    check(init?.method === "POST", "revealing a file uses the host action");
+    revealedPath = JSON.parse(String(init?.body)).path;
+    return Response.json({ ok: true });
+  }
+  if (route.startsWith("/__api/shoggoth/providers") && document.querySelector("[data-agent-overview-panel]")) {
+    throw Error("Agent Overview must not load legacy source or endpoint settings");
+  }
   if (route === "/__api/models") return Response.json({ models: [] });
   return Response.json({ supported: false, items: [], messages: [], grants: [], sources: [], commands: [] });
 };
@@ -123,8 +179,9 @@ scope.WebSocket = FixtureSocket;
 function Fixture() {
   const [settings, setSettings] = useState(false); scope.showSettings = setSettings;
   const [agentPage, setAgentPage] = useState(false);
+  scope.showAgents = (value: boolean) => { setSettings(false); setAgentPage(value); };
   const [theme, setTheme] = useState("light");
-  return <MemoryRouter initialEntries={[`/chat?backend=codex&session=${encodeURIComponent(sessionKey)}`]}><UiProvider>
+  return <MemoryRouter initialEntries={[`/chat?backend=shoggoth&session=${encodeURIComponent(sessionKey)}`]}><UiProvider><NavigationGuardProvider>
     <ScrollbarProvider />
     {preview && <nav style={{ height: 44, display: "flex", alignItems: "center", gap: 8, padding: "0 16px", borderBottom: "1px solid var(--border)", fontSize: 12 }}>
       <span style={{ color: "var(--muted)", marginRight: "auto" }}>交互预览 · 示例模型目录</span>
@@ -135,9 +192,8 @@ function Fixture() {
         cfg.theme = next; document.documentElement.dataset.theme = next; setTheme(next); }}>{theme === "light" ? "深色" : "浅色"}</button>
     </nav>}
     <main className="content" style={{ height: preview ? "calc(100vh - 44px)" : "100vh" }}>{settings ? <SettingsPage />
-      : agentPage ? <div style={{ padding: 32, maxWidth: 700 }}><h2>AI 助理 · 独立 Agent</h2>
-        <AgentDefaultRuntime backend="shoggoth" agentId={agentId} onChanged={() => {}} /></div> : <ChatPage />}</main>
-  </UiProvider></MemoryRouter>;
+      : agentPage ? <AgentsPage /> : <ChatPage />}</main>
+  </NavigationGuardProvider></UiProvider></MemoryRouter>;
 }
 await applyConfiguredLocale("zh-CN"); createRoot(document.getElementById("root")!).render(<Fixture />);
 const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent === text)!;
@@ -175,14 +231,14 @@ scope.runRuntimeEntryFixture = async () => {
   check(bindingSnapshot().defaultBindingId === first && bindings.length === 3, "Agent default and automatic bindings unchanged");
   check(writes.join(",") === "model-select,model-select,model-select", "only atomic model selections");
   await wait(() => document.body.textContent?.includes("独立 Agent") && document.body.textContent?.includes("保留这段历史"), "identity and transcript preserved");
-  cfg.disabledBackends = ["pi"]; scope.showSettings(true);
-  await wait(() => document.querySelectorAll('#settings-local-runtimes [data-runtime]').length === 6, "six CLIs in full Settings");
-  check(document.querySelector('[data-runtime="pi"]')!.textContent?.includes("已断开"), "Pi stays disabled");
-  check(document.querySelector('[data-runtime="claude-code"]')!.textContent?.includes("此版本暂未开放"), "release gate visible");
+  cfg.disabledBackends = ["pi"]; scope.showSettings(true); await openLocalRuntimes();
+  await wait(() => document.querySelectorAll('#settings-local-runtimes [data-runtime]').length === expectedRuntimeRows, "available CLIs in full Settings");
+  check(document.querySelector('[data-runtime="pi"]')!.textContent?.includes("未连接"), "Pi stays disabled");
+  check(!document.querySelector('[data-runtime="claude-code"]'), "release-disabled runtime hidden");
   check(document.querySelector('[data-runtime="grok-build"]')!.textContent?.includes("未安装"), "unavailable CLI visible");
   check(document.querySelector('[data-runtime="codex"]')!.textContent?.includes("已就绪"), "ready CLI visible");
   return { fullChatPage: true, fullSettingsPage: true, modelSelectsRuntime: true, agentDefaultUnchanged: true,
-    duplicateModelIdentity: true, conflictRetry: true, cliRows: 6, writes: writes.length };
+    duplicateModelIdentity: true, conflictRetry: true, cliRows: expectedRuntimeRows, writes: writes.length };
 };
 scope.checkRuntimeEntryGeometry = async (theme: string) => {
   cfg.theme = theme; document.documentElement.dataset.theme = theme; await pause(100);
@@ -204,7 +260,8 @@ scope.checkRuntimeEntryGeometry = async (theme: string) => {
   const list = document.querySelector<HTMLElement>(".model-menu__list")!;
   list.scrollTop = list.scrollHeight; check(list.scrollTop > 0, "model list scrolls");
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await pause(50);
-  scope.showSettings(true); await wait(() => document.querySelectorAll('#settings-local-runtimes [data-runtime]').length === 6, "Settings remount");
+  scope.showSettings(true); await openLocalRuntimes();
+  await wait(() => document.querySelectorAll('#settings-local-runtimes [data-runtime]').length === expectedRuntimeRows, "Settings remount");
   return { width: innerWidth, theme, overflow: false, modelMenuVisible: true, searchAndScroll: true };
 };
 scope.prepareChatCapture = async () => {
@@ -221,6 +278,91 @@ scope.checkImmersiveRuntime = async () => {
   await choose("pi"); await wait(() => session.runtime === "pi", "immersive uses same selection path");
   check(bindingSnapshot().defaultBindingId === first, "immersive selection preserves Agent default");
   return { immersiveModelPicker: true, selectionWorks: true, menuOnTop: true, escapeRetainsImmersive: true };
+};
+
+const openAgentOverview = async () => {
+  scope.showAgents(true);
+  const card = () => document.querySelector<HTMLButtonElement>(`button[data-agent-id="${agentId}"]`);
+  await wait(card, "Agent card");
+  card()!.click();
+  const trigger = () => document.querySelector<HTMLButtonElement>("[data-agent-overview-panel] .chat-model-menu > button");
+  await wait(trigger, "Agent Overview default model");
+  await pause(650);
+  return trigger()!;
+};
+const openDefaultMenu = async (trigger: HTMLButtonElement) => {
+  trigger.scrollIntoView({ block: "center" });
+  if (!document.querySelector(".model-menu")) trigger.click();
+  await wait(() => document.querySelector('.model-menu [role="option"]'), "Agent model catalog");
+  await wait(() => document.activeElement?.classList.contains("model-menu__search"), "Agent model search focus");
+  const menu = document.querySelector<HTMLElement>(".model-menu")!;
+  check(menu.parentElement?.hasAttribute("data-agent-overview-panel"), "menu escapes the scroll container");
+  await wait(() => {
+    const rect = menu.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth + 1 && rect.top >= 0 && rect.bottom <= innerHeight + 1
+      && menu.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+  }, "Agent menu fits viewport after resizing and scrolling");
+  return menu;
+};
+const modelOption = (menu: HTMLElement, name: string) => [...menu.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+  .find(option => option.textContent === name)!;
+scope.checkAgentDefaultModel = async () => {
+  const trigger = await openAgentOverview();
+  const overview = document.querySelector("[data-agent-overview-panel]")!;
+  check(overview.textContent?.includes("默认模型"), "Agent uses Default model label");
+  check(!["默认 Runtime", "模型来源", "自定义模型"].some(title => overview.textContent?.includes(title)), "legacy Agent overview controls hidden");
+  check(defaultReads === 0, "opening an Agent does not load the catalog");
+  const chatBefore = JSON.stringify(session);
+  let menu = await openDefaultMenu(trigger);
+  check(menu.querySelector('[aria-selected="true"].model-menu__item')?.textContent === "shared-model · ChatGPT", "select the precise current source");
+  modelOption(menu, "shared-model · Fixture Endpoint").click();
+  await wait(() => defaultWrites === 1 && trigger.textContent?.includes("Fixture Endpoint"), "save exact source");
+  check(document.activeElement === trigger, "selection restores trigger focus");
+  menu = await openDefaultMenu(trigger);
+  defaultReject = true;
+  modelOption(menu, "pi-fast").click();
+  await wait(() => document.body.textContent?.includes("所选模型或运行环境已不可用"), "save error is localized and visible");
+  check(defaultBindingId === first && trigger.textContent?.includes("Fixture Endpoint"), "failed save keeps the previous selection");
+  menu = await openDefaultMenu(trigger);
+  modelOption(menu, "pi-fast").click();
+  await wait(() => defaultWrites === 2 && trigger.textContent === "pi-fast", "Runtime and model changed together");
+  check(defaultBindingId === second && JSON.stringify(session) === chatBefore, "Agent save is separate from the conversation");
+  menu = await openDefaultMenu(trigger);
+  check(menu.querySelector('[aria-selected="true"].model-menu__item')?.textContent === "pi-fast", "saved selection is read back");
+  menu.querySelector("input")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await wait(() => !document.querySelector(".model-menu") && document.activeElement === trigger, "Escape closes and restores focus");
+  return { fullAgentsPage: true, exactSource: true, atomicSave: true, failedSave: true, sessionUntouched: true, defaultWrites };
+};
+scope.checkAgentDefaultGeometry = async (locale: string, theme: string) => {
+  await applyConfiguredLocale(locale);
+  document.documentElement.dataset.theme = theme;
+  const trigger = document.querySelector<HTMLButtonElement>("[data-agent-overview-panel] .chat-model-menu > button")!;
+  const menu = await openDefaultMenu(trigger);
+  await pause(250); // Wait for the shared filter tabs' theme transition before a screenshot.
+  check(menu.getAttribute("aria-labelledby") && menu.querySelector("input")?.placeholder, "label and search available");
+  const title = locale === "en" ? "Default model" : "默认模型";
+  check(document.getElementById(menu.getAttribute("aria-labelledby")!)?.textContent === title, "localized Default model label");
+  return { width: innerWidth, locale, theme, menuOnTop: true };
+};
+scope.checkAgentFiles = async () => {
+  document.querySelector(".model-menu input")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await wait(() => !document.querySelector(".model-menu"), "close the default model menu");
+  check(artifactReads === 0, "Agent files load only when selected");
+  const files = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(tab => tab.textContent === "Files");
+  check(files, "Shoggoth Agent shows the Files tab");
+  files!.click();
+  await wait(() => button("Retry"), "an unavailable file list can be retried");
+  check(files!.getAttribute("aria-selected") === "true", "the Files tab remains selected");
+  button("Retry").click();
+  const row = () => document.querySelector<HTMLButtonElement>(`button[title$="${artifactPath}"]`);
+  await wait(row, "Agent file from the shared artifact route");
+  check(artifactReads === 2 && row()!.textContent?.includes("Agent output.pdf"), "retry renders the Agent output");
+  check(document.body.textContent?.includes("2 total")
+    && [...document.querySelectorAll('[role="status"]')].some(status => status.textContent?.includes("Some sessions are unavailable")),
+    "confirmed files and partial results are visible");
+  row()!.click();
+  await wait(() => revealedPath === artifactPath, "file row reveals the exact output in Finder");
+  return { filesTab: true, artifactReads, reveal: true };
 };
 
 if (preview) {

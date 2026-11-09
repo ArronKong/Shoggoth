@@ -12,6 +12,8 @@ const note = "Memory core Electron fixture: violet telescope calibration.";
 const prompt = "Memory core isolated chat roundtrip.";
 const memorySettings = process.argv.includes("--memory-settings");
 const memoryStatus = process.argv.includes("--memory-status");
+const legacyMemoryList = process.argv.includes("--legacy-memory-list");
+const legacyExcerpt = "历史会话摘录字节兼容验证。".repeat(300);
 async function until(read, label, timeout = 15000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { const value = await read(); if (value) return value; await new Promise(resolve => setTimeout(resolve, 60)); }
@@ -99,8 +101,19 @@ async function parent() {
     }
     const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
     assert.match(JSON.stringify(await f.backend.getHistory(publicSessionKey)), /Memory core isolated chat roundtrip/);
+    if (legacyMemoryList) {
+      // Seed the historical on-disk format that predates the write byte cap.
+      // The normal write API must continue to reject this oversized content.
+      assert.ok(Buffer.byteLength(legacyExcerpt) > 8192);
+      const now = Date.now();
+      await f.service.memoryEngine.store.upsertMany([{ id: "session-excerpt-legacy-ui", profileId: DEFAULT_AGENT_PROFILE_ID,
+        scope: "agent", type: "episodic", content: legacyExcerpt, sourceRefs: ["user-edit:legacy-ui"], confidence: 0.5,
+        sensitivity: "normal", status: "active", validFrom: now, validUntil: null, supersedes: null,
+        createdAt: now, updatedAt: now, memoryPath: `memory/${new Date(now).toISOString().slice(0, 10)}.md` }]);
+    }
     const child = spawn(require("electron"), [__filename, "--renderer", "--url", f.url, "--session", publicSessionKey,
       "--profile", path.join(f.root, "electron"), "--output", output, "--service-node", process.versions.node,
+      ...(legacyMemoryList ? ["--legacy-memory-list", "--legacy-agent", profile.agentId] : []),
       ...(memorySettings ? ["--memory-settings", "--memory-profile", DEFAULT_AGENT_PROFILE_ID] : []),
       ...(memoryStatus ? ["--memory-status"] : [])], { env, stdio: "inherit" });
     const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
@@ -310,6 +323,14 @@ async function renderer() {
     await until(() => evaluate("!document.querySelector('[class*=panelMorphing]')"), "Agent panel animation");
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     fs.writeFileSync(path.join(output, "memory-page.png"), (await window.webContents.capturePage()).toPNG());
+    if (legacyMemoryList) {
+      const url = `/__api/agents/${encodeURIComponent(option("--legacy-agent"))}/memories?backend=shoggoth&status=active`;
+      const response = await evaluate(`(async () => { const response = await fetch(${JSON.stringify(url)});
+        return { status: response.status, value: await response.json() }; })()`);
+      assert.equal(response.status, 200);
+      const item = response.value.memories.items.find(item => item.id === "session-excerpt-legacy-ui");
+      assert.equal(item.content, legacyExcerpt, "Electron/REST/Service preserve the full historical excerpt");
+    }
     await window.loadURL(`${option("--url")}#/chat?backend=shoggoth&session=${encodeURIComponent(option("--session"))}`);
     await until(() => evaluate(`document.querySelector('main')?.innerText.includes(${JSON.stringify(prompt)})`), "chat history renderer");
     if (memoryStatus) {
@@ -341,6 +362,7 @@ async function renderer() {
     assert.deepEqual(errors, []);
     fs.writeFileSync(path.join(output, "electron-evidence.json"), JSON.stringify({ verified: true, electron: process.versions.electron,
       node: process.versions.node, routes: evidence, files, memoryRendered: true, chatHistoryRendered: true,
+      legacyMemoryList: legacyMemoryList ? { verified: true, contentBytes: Buffer.byteLength(legacyExcerpt), truncated: false } : null,
       memorySettings: memorySettings ? { saved: true, conflictPreserved: true, profileOverride: true, narrowLayout: true,
         modelAliases: { global: true, agent: true, duplicateRejected: true, clearAndRemove: true },
         diagnosticRetention: { enabledAndDisabled: true, directorySaved: true, narrowLayout: true } } : null,

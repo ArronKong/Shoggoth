@@ -92,6 +92,35 @@ assert.match(textOf(renderer.toJSON()), /dashboard.feedEmpty/);
 await settle(() => renderer.unmount());
 fetchPage = async () => empty;
 
+// A refreshed first page can overlap retained history and an older next page.
+const olderRound = { ...inspiration, summary: '旧轮回复' };
+const sameTitleNote = { ...olderRound, id: 'inspiration:distinct', occurredAt: 150, summary: '同名的另一张便签',
+  inspiration: { ...olderRound.inspiration, ideaId: 'distinct', runId: 'distinct' } };
+const latestRound = { ...olderRound, id: 'inspiration:next', occurredAt: 300, backendId: 'other', summary: '最新一轮回复',
+  inspiration: { ...olderRound.inspiration, runId: 'next', status: 'completed' } };
+await settle(() => { renderer = create(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [olderRound, sameTitleNote] },
+})); });
+fetchPage = async () => ({ ...empty, items: [olderRound, sameTitleNote] });
+let selectedRun;
+await settle(() => renderer.update(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [latestRound], hasMore: true, nextCursor: 'older-rounds' },
+  onOpenInspiration: row => { selectedRun = row.inspiration.runId; },
+})));
+assert.equal(rows(renderer).length, 2, 'A new round replaces the old one even when an older page arrives afterward');
+assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '2');
+assert.match(textOf(rows(renderer)[0]), /最新一轮回复/);
+assert.match(textOf(rows(renderer)[1]), /同名的另一张便签/);
+await settle(() => rows(renderer)[0].props.onClick());
+assert.equal(selectedRun, 'next');
+fetchPage = async () => ({ ...empty, items: [latestRound, olderRound] });
+await settle(() => tabs(renderer).props.onChange('inspiration'));
+assert.equal(rows(renderer).length, 1, 'Filtered results also collapse duplicate rounds from older servers');
+assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
+assert.match(textOf(rows(renderer)[0]), /最新一轮回复/);
+await settle(() => renderer.unmount());
+fetchPage = async () => empty;
+
 await settle(() => { renderer = create(React.createElement(Feed, props)); });
 assert.ok(tabs(renderer).props.items.some(item => item.value === 'inspiration' && item.label === 'dashboard.filterInspiration'));
 assert.equal(rows(renderer).length, 2);

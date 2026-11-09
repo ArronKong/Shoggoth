@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import FilterTabs from "../components/FilterTabs";
 import type { CodexDesktopWriterState } from "../lib/codexDesktopWriter";
 import { SESSION_CATEGORY_ORDER, isVisibleSession, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../lib/sessionKind";
+import { IconSearch } from "./chatIcons";
+import "./ChatModelMenu.css";
 
 export interface SessionMenuRow extends SessionCategoryRow {
   codexDesktopWriter?: CodexDesktopWriterState;
@@ -22,9 +24,7 @@ export interface SessionMenuRow extends SessionCategoryRow {
 //
 // 可见性由 isVisibleSession 统一决定；子代理过程归父对话，底层会话记录保留。
 //
-// 皮肤直接复用模型菜单的 `.model-menu*`（同一个弹层语言，避免第二份重复 CSS——
-// R264 刚清掉过一轮），只加 `.session-menu` 一个修饰类改定位：模型菜单从
-// composer 向上弹，这个从 header 向下弹。
+// 与模型菜单共用搜索、筛选和列表样式。会话菜单从聊天顶部向下展开。
 export default function ChatSessionMenu({
   sessions: allSessions,
   activeKey,
@@ -41,6 +41,7 @@ export default function ChatSessionMenu({
   // null = 全部；否则只显示该类型。与搜索框叠加生效。
   const [kindFilter, setKindFilter] = useState<SessionCategory | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [popupStyle, setPopupStyle] = useState<CSSProperties>();
 
@@ -50,10 +51,11 @@ export default function ChatSessionMenu({
     const position = (event?: Event) => {
       if (event?.target instanceof Node && rootRef.current?.contains(event.target)) return;
       const rect = rootRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const width = Math.min(520, window.innerWidth - 64);
+      const popup = popupRef.current;
+      if (!rect || !popup) return;
+      const width = popup.getBoundingClientRect().width;
       const left = Math.max(32, Math.min(rect.left, window.innerWidth - width - 32));
-      setPopupStyle({ width, left: left - rect.left, maxHeight: Math.max(0, window.innerHeight - rect.bottom - 40) });
+      setPopupStyle({ left: left - rect.left, maxHeight: Math.max(0, window.innerHeight - rect.bottom - 40) });
     };
     position();
     window.addEventListener("resize", position);
@@ -146,15 +148,25 @@ export default function ChatSessionMenu({
         {sessions.some(s => s.unread) && <span className="chat-agent__unread-dot session-menu__unread" role="img" aria-label={t("chat.unread")} />}
       </button>
       {open && (
-        <div className="model-menu session-menu" style={popupStyle} role="listbox" aria-label={t("chat.switchAgentSession")}>
+        <div
+          className="model-menu model-menu--catalog chat-composer-menu-surface session-menu"
+          ref={popupRef}
+          style={popupStyle}
+          role="listbox"
+          aria-label={t("chat.switchAgentSession")}
+        >
           <div className="model-menu__head">
-            <input
-              className="model-menu__search"
-              placeholder={t("chat.sessionSearchPlaceholder")}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              autoFocus
-            />
+            <div className="model-menu__search-field">
+              <span className="model-menu__search-icon" aria-hidden="true"><IconSearch /></span>
+              <input
+                className="model-menu__search"
+                aria-label={t("chat.sessionSearchPlaceholder")}
+                placeholder={t("chat.sessionSearchPlaceholder")}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                autoFocus
+              />
+            </div>
             {kinds.length > 1 && (
               <FilterTabs
                 className="model-menu__tabs"

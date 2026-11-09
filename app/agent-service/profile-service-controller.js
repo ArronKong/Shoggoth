@@ -320,7 +320,8 @@ function createProfileServiceController(options = {}) {
     const rows = [];
     const row = (model, providerRef, sourceName) => {
       const modelProviderRef = sourceRef(providerRef);
-      rows.push({ ...model, ...(modelProviderRef ? { modelProviderRef } : {}), sourceName });
+      rows.push({ ...model, ...(modelProviderRef ? { modelProviderRef } : {}), sourceName,
+        sourceProviderRef: codexSessionProvider.sourceToken(providerRef) });
     };
     let baseError = null;
     try {
@@ -474,29 +475,69 @@ function createProfileServiceController(options = {}) {
     return validateProfileServiceResult("profile.auth.read", { status: auth.status });
   }
 
-  async function assertAuthorityModelAvailable(profile, modelId, generation) {
+  async function assertCatalogModelAvailable(modelId, readPage) {
     let cursor = null;
     let items = 0;
     let bytes = 0;
     const cursors = new Set();
     for (let pageIndex = 0; pageIndex < MAX_MODEL_PAGES; pageIndex += 1) {
-      const page = await readAuthorityModelPage(profile, { cursor, limit: 100 }, generation);
+      const page = await readPage({ cursor, limit: 100 });
       for (const model of page.models) {
         items += 1;
         bytes += Buffer.byteLength(JSON.stringify(model), "utf8");
         if (items > MAX_MODEL_ITEMS || bytes > MAX_MODEL_BYTES) {
-          throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Codex model catalog exceeds safety limits");
+          throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog exceeds safety limits");
         }
         if (model.id === modelId) return;
       }
       if (!page.hasMore) break;
       if (page.nextCursor === null || page.nextCursor === cursor || cursors.has(page.nextCursor)) {
-        throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Codex model catalog cursor is invalid");
+        throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog cursor is invalid");
       }
       cursors.add(page.nextCursor);
       cursor = page.nextCursor;
     }
-    throw profileError("PROFILE_MODEL_NOT_AVAILABLE", "Selected model is not available for ChatGPT authority");
+    throw profileError("PROFILE_MODEL_NOT_AVAILABLE", "Selected model is not in the Runtime catalog");
+  }
+
+  function assertAuthorityModelAvailable(profile, modelId, generation) {
+    return assertCatalogModelAvailable(modelId, page => readAuthorityModelPage(profile, page, generation));
+  }
+
+  async function selectAgentDefaultModel({ profileId, bindingId, revision, model, modelProviderRef }, assertAvailable) {
+    const generation = lifecycleGeneration;
+    assertAccepting(generation);
+    const profile = loadEnabledProfile(profileId);
+    if (profile.backendId !== "shoggoth") throw profileError("AGENT_BINDING_NOT_FOUND", "Agent is not owned by this Service");
+    if (profile.bindingsRevision !== revision) throw profileError("AGENT_BINDING_REVISION_CONFLICT", "Binding changed");
+    const target = productStore.resolveAgentRuntimeProfile(profileId, bindingId);
+    const harness = codexSessionProvider.supportsSessionProviders(target);
+    if (!harness && modelProviderRef !== undefined) throw profileError("AGENT_BINDING_INVALID", "Unexpected model source");
+    assertAvailable();
+    let providerRef = null;
+    try {
+      if (harness) {
+        providerRef = codexSessionProvider.resolveProviderSelection(productStore, target, modelProviderRef);
+        if (providerRef === null) {
+          await assertAuthorityModelAvailable(target, model, generation);
+        } else {
+          const provider = loadReadyProvider(providerRef, model);
+          assertOpenAiProviderIsExclusive(profileId, provider);
+        }
+      } else {
+        await assertCatalogModelAvailable(model, page => readRuntimeModelPage(target, page, generation));
+      }
+      assertProfileStillCurrent(target, generation);
+    } catch (error) {
+      if (dataErrorCode(error) === "PROFILE_OPERATION_CONFLICT") {
+        throw profileError("AGENT_BINDING_REVISION_CONFLICT", "Profile changed during selection");
+      }
+      throw error;
+    }
+    assertAvailable();
+    // The Harness already declares all of the Profile's sources. A default
+    // change affects the next admission and does not need to stop a live host.
+    return productStore.setAgentDefaultModel(profileId, bindingId, { revision, model, providerRef });
   }
 
   function putBinding(profile, providerRef, defaultModel) {
@@ -711,6 +752,8 @@ function createProfileServiceController(options = {}) {
       state = "closed";
       return tail;
     },
+
+    selectAgentDefaultModel,
 
     handle(method, rawParams) {
       let params;

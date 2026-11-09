@@ -6,6 +6,7 @@ import AppleDeviceConnectors from "../../app/manage-ui/src/components/AppleDevic
 import en from "../../app/manage-ui/src/i18n/locales/en";
 import zhCN from "../../app/manage-ui/src/i18n/locales/zh-CN";
 import "../../app/manage-ui/src/styles.css";
+import "../../app/manage-ui/src/manage-skin.css";
 import pageStyle from "../../app/manage-ui/src/pages/ConnectorsPage.module.css";
 
 // Isolated rendering fixture: product component, CSS and API client; fixture-only REST data.
@@ -17,5 +18,5 @@ document.body.style.background = "var(--ui-canvas)";
 createRoot(document.getElementById("root")!).render(<I18nextProvider i18n={i18next}><main className={pageStyle.page} style={{ margin: "24px auto", width: "calc(100% - 32px)" }}>
   <h1 style={{ margin: "0 0 4px", fontSize: 24 }}>{locale === "en" ? "Connectors" : "连接器"}</h1>
   <p style={{ margin: 0, fontSize: 12, color: "var(--ui-text-2)" }}>{locale === "en" ? "Isolated component rendering fixture · synthetic data" : "独立组件渲染夹具 · 模拟数据"}</p>
-  <div className={pageStyle.contentCard}><AppleDeviceConnectors /></div>
+  <div className={`management-page__scroll-card ${pageStyle.contentCard}`}><AppleDeviceConnectors /></div>
 </main></I18nextProvider>);

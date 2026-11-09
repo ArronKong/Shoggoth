@@ -3,7 +3,9 @@ import '../i18n/groupComposerResources';
 import '../i18n/groupFilesResources';
 import { type ClipboardEvent, type KeyboardEvent, type MouseEvent, lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import AgentAvatar from "../components/AgentAvatar";
+import GroupMemberAvatar from "./GroupMemberAvatar";
+import { GroupMentionAvatarStack } from "./GroupChatMention";
+import GroupChatComposerInput, { type GroupComposerInputHandle, type GroupComposerSelection } from "./GroupChatComposerInput";
 import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
 import GroupChatMarkdown, { groupAttachmentsOutsideMarkdown } from "./GroupChatMarkdown";
 import FusionLoader from "../components/FusionLoader";
@@ -30,21 +32,21 @@ import GroupChatSettings from "./GroupChatSettings";
 import GroupChatReference from "./GroupChatReference";
 import GroupChatJournalRecovery from "./GroupChatJournalRecovery";
 import GroupChatSearch from "./GroupChatSearch";
-import { followLatestSpeaker, GroupChatSendTargetChip, GroupChatSendTargetMenu, type GroupSendTarget,
-  OWNER_TARGET, sameSendTarget, sendTargetMentions, validSendTarget } from "./GroupChatSendTarget";
+import { composerPrefill, composerSendTarget, followLatestSpeaker, OWNER_TARGET, sendTargetMentions } from "./GroupChatSendTarget";
+import { groupDraftBody, pasteGroupDraftText, replaceGroupDraftText, restoreDraftMentions, type GroupDraftMention, type GroupDraftText } from "../lib/groupMentions";
 import { appendGroupReference } from "../lib/groupReferenceExcerpt";
 import { boundGroupActivity } from "./GroupChatActivity";
 import type { GroupChatMember, GroupChatMessage, GroupChatView, InspirationAttachment } from "../types";
 import { groupReplyBody, groupReplyBubbles } from "../lib/groupReply";
 import { formatChatTime } from "../lib/chatTime";
 import { orderGroupTimeline } from "../lib/groupTimeline";
-import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconTrash, IconStopMessage, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
+import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconQuote, IconTrash, IconStopMessage, MESSAGE_DELETION_ENABLED, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
 import ChatResponseMetadata from "./ChatResponseMetadata";
 import { useGroupMessagePresentation } from "../lib/groupMessagePresentation";
+import "./ChatModelMenu.css";
 import styles from "./GroupChatPanel.module.css";
 
 const PAGE = 100;
-const GroupChatMemberModal = lazy(() => import('./GroupChatMemberModal'));
 const GroupChatAddMemberModal = lazy(() => import('./GroupChatMemberModal').then(module => ({ default: module.GroupChatAddMemberModal })));
 const GroupChatDetails = lazy(() => import('./GroupChatDetails'));
 const GroupChatFiles = lazy(() => import('./GroupChatFiles'));
@@ -68,14 +70,18 @@ function normalize(value: string) {
 }
 
 // 光标前正在输入的 @词：@ 前是行首、空白或标点，@ 到光标之间没有空白。
-function mentionAtCaret(text: string, caret: number): { start: number; query: string } | null {
+type MentionPicker = { kind: "typed" | "selected"; start: number; end: number; query: string }
+  | { kind: "prefill"; query: "" };
+
+function mentionAtCaret({ text, mentions }: GroupDraftText, caret: number): MentionPicker | null {
+  if (mentions.some(span => caret > span.start && caret <= span.end)) return null;
   const before = text.slice(0, caret);
   const at = before.lastIndexOf("@");
   if (at < 0) return null;
   const query = before.slice(at + 1);
   if (/\s/u.test(query) || query.length > 32) return null;
-  if (at > 0 && /[A-Za-z0-9_.+%/\\-]/u.test(before[at - 1])) return null;
-  return { start: at, query };
+  if (at > 0 && /[A-Za-z0-9_.+%/\\-]/u.test(before[at - 1]) && !mentions.some(span => span.end === at)) return null;
+  return { kind: "typed", start: at, end: caret, query };
 }
 
 const MAX_MEMBERS = GROUP_MAX_MEMBERS;
@@ -91,12 +97,14 @@ function excerptOf(text: string, max = 80) {
 }
 
 /** agents：可以加进群的 Agent（聊天页的 Agent 列表），用于「添加成员」。 */
-export default function GroupChatPanel({ groupId, agents = [], onArchived, cache, cacheScope }: {
+export default function GroupChatPanel({ groupId, agents = [], onArchived, cache, cacheScope, searchTarget, onSearchTargetHandled }: {
   groupId: string;
   agents?: GroupCandidateAgent[];
   onArchived(): void;
   cache?: GroupPanelCache;
   cacheScope?: string;
+  searchTarget?: { ownerScope: string; message?: GroupChatMessage };
+  onSearchTargetHandled?(): void;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
@@ -132,9 +140,12 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   useEffect(() => { if (!pins.length) setPinnedOnly(false); }, [pins.length]);
   const [messages, setMessages] = useState<GroupChatMessage[]>(cached?.messages ?? []);
   const [hasOlder, setHasOlder] = useState(cached?.hasOlder ?? false);
+  const [olderLoadState, setOlderLoadState] = useState<"idle" | "loading" | "error">("idle");
+  const olderRequestRef = useRef<symbol | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [mentionIds, setMentionIds] = useState<string[]>([]);
+  const [mentionSpans, setMentionSpans] = useState<GroupDraftMention[] | null>(null);
   const [sending, setSending] = useState(false);
   const [stoppingScope, setStoppingScope] = useState<string | null>(null);
   const stoppingScopeRef = useRef<string | null>(null);
@@ -144,16 +155,10 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const [deletingScope, setDeletingScope] = useState<string | null>(null);
   const removingMemberScopeRef = useRef<string | null>(null);
   const [removingMemberScope, setRemovingMemberScope] = useState<string | null>(null);
-  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
-  // 「发给」：null 时跟随最近发言的成员。手动选择或开始输入时锁定，输入中途不会被新发言改掉；
-  // 发出后保持到下一位成员发言（afterSeq），之后重新跟随。
+  const [mention, setMention] = useState<MentionPicker | null>(null);
+  // null follows the last speaker. An owner lock also records that a prefill was cleared.
   const [targetLock, setTargetLock] = useState<GroupSendTargetLock | null>(null);
-  const [targetMenuOpen, setTargetMenuOpen] = useState(false);
-  const [targetWidth, setTargetWidth] = useState(0);
-  const targetButtonRef = useRef<HTMLButtonElement>(null);
-  const composerFieldRef = useRef<HTMLDivElement>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
-  const [cardMemberId, setCardMemberId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [expandedPanel, setExpandedPanel] = useState<"members" | "files" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -164,6 +169,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const [sendRecordsOpen, setSendRecordsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [fullMessage, setFullMessage] = useState<GroupChatMessage | null>(null);
+  const [expiredSearchScope, setExpiredSearchScope] = useState<string | null>(null);
   const retryOps = useRef(new Map<number, string>());
   const [files, setFiles] = useState<PendingFile[]>([]);
   const filesRef = useRef(files);
@@ -199,9 +205,9 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const readingPositionRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerInput = useRef<GroupComposerInputHandle>(null);
+  const mentionList = useRef<HTMLDivElement>(null);
   const mentionMenuId = useId();
-  const targetMenuId = useId();
   useLayoutEffect(() => {
     if (!pinJumpTarget || pinJumpTarget.scope !== scopeKey || pinJumpTarget.jump !== pinJumpRef.current) return;
     const target = listRef.current?.querySelector(`[data-seq="${pinJumpTarget.seq}"]`);
@@ -212,38 +218,31 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
 
   const membersById = useMemo(() => new Map((view?.members ?? []).map((member) => [member.id, member])), [view]);
   const activeMembers = useMemo(() => (view?.members ?? []).filter((member) => member.state === "active"), [view]);
+  const mentionableMembers = useMemo(() => activeMembers.filter(member => !member.agentMissing), [activeMembers]);
+  const draftText = useMemo(() => ({ text: draft, mentions: mentionSpans ?? restoreDraftMentions(draft, mentionableMembers, mentionIds) }),
+    [draft, mentionSpans, mentionableMembers, mentionIds]);
   const messageAttachments = useMemo(() => new Map(messages.map(message => [message.id,
     message.author.kind === "member" && message.attachments?.length
       ? groupAttachmentsOutsideMarkdown(groupReplyBody(message), message.attachments) : message.attachments ?? []])), [messages]);
   const unavailableMembers = activeMembers.filter(member => member.card?.availability === "offline");
   const ownerId = view?.currentOwnerId ?? null;
-  const latestSpeaker = useMemo(() => followLatestSpeaker(messages, activeMembers), [messages, activeMembers]);
-  const targetExpired = (lock: typeof targetLock) => lock?.afterSeq != null && latestSpeaker.seq > lock.afterSeq;
-  const lockExpired = targetExpired(targetLock);
-  const resolvedTarget = (targetLock && !lockExpired ? validSendTarget(targetLock.target, activeMembers) : null) ?? latestSpeaker.target;
-  // Show the owner option without replacing the identity held by a draft or quote.
-  const sendTarget = resolvedTarget.kind === "member" && resolvedTarget.memberId === ownerId ? OWNER_TARGET : resolvedTarget;
+  const latestSpeaker = useMemo(() => followLatestSpeaker(messages, mentionableMembers), [messages, mentionableMembers]);
+  const { target: resolvedTarget, expired: lockExpired, invalid: lockInvalid } = composerSendTarget(targetLock, latestSpeaker, mentionableMembers, replyTo);
+  const prefill = composerPrefill(resolvedTarget, ownerId, replyTo, Boolean(targetLock?.manual && !lockExpired && !lockInvalid));
+  const prefillMember = prefill?.kind === "member" ? mentionableMembers.find(member => member.id === prefill.memberId) : undefined;
+  const prefillKey = prefillMember?.id ?? (prefill?.kind === "all" ? "all" : null);
+  const showPrefill = prefillKey !== null && journalReady && view?.group.status === "active";
   useEffect(() => {
     if (!targetLock) return;
-    const target = validSendTarget(targetLock.target, activeMembers) ?? latestSpeaker.target;
     if (lockExpired) setTargetLock(lock => lock === targetLock ? null : lock);
-    else if (!sameSendTarget(target, targetLock.target)) {
-      setTargetLock(lock => lock === targetLock ? { ...lock, target } : lock);
-    }
-  }, [targetLock, lockExpired, activeMembers, latestSpeaker]);
-  useEffect(() => {
-    if (!draft.length && !files.length && !replyTo) {
-      setTargetLock(lock => lock && !lock.manual && lock.afterSeq === null ? null : lock);
-    }
-  }, [draft, files.length, replyTo]);
-  // 开始写这条消息：锁定当前的「发给」。
-  const holdTarget = () => setTargetLock(lock => lock && !targetExpired(lock)
-    ? lock.afterSeq === null ? lock : { ...lock, afterSeq: null }
-    : { target: resolvedTarget, manual: false, afterSeq: null });
-  const pickTarget = (target: GroupSendTarget) => {
-    setTargetLock({ target, manual: true, afterSeq: null });
-    setTargetMenuOpen(false);
-    requestAnimationFrame(() => textareaRef.current?.focus());
+    else if (lockInvalid) setTargetLock(lock => lock === targetLock ? { ...lock, target: OWNER_TARGET, manual: false } : lock);
+  }, [targetLock, lockExpired, lockInvalid]);
+  const holdTarget = () => setTargetLock(lock => lock?.afterSeq === null ? lock : {
+    target: prefillKey !== null && prefill ? prefill : OWNER_TARGET,
+    manual: Boolean(lock?.manual && !lockExpired && !lockInvalid), afterSeq: null,
+  });
+  const removePrefill = () => {
+    setTargetLock({ target: OWNER_TARGET, manual: false, afterSeq: null });
   };
 
   const append = useCallback((incoming: GroupChatMessage[], updatesOnly = false) => {
@@ -269,6 +268,13 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const currentScope = useCallback(() => mountedRef.current && currentGroupRef.current === groupId
     && ownerScopeRef.current === (view?.ownerScope ?? null) && ownerEpochRef.current === ownerEpoch,
   [groupId, view?.ownerScope, ownerEpoch]);
+  useEffect(() => {
+    if (!searchTarget?.message || view?.group.id !== groupId || !currentScope()) return;
+    const matches = searchTarget.ownerScope === view.ownerScope && searchTarget.message.groupId === groupId;
+    setExpiredSearchScope(matches ? null : scopeKey);
+    if (matches) setFullMessage(searchTarget.message);
+    onSearchTargetHandled?.();
+  }, [groupId, view, currentScope, scopeKey, searchTarget, onSearchTargetHandled]);
   const applyView = (next: GroupChatView) => {
     if (!currentScope() || next.group.id !== groupId || (next.ownerScope ?? null) !== (view?.ownerScope ?? null)) return;
     mutationRevisionRef.current++;
@@ -289,6 +295,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     setView(cached?.view ?? null);
     setMessages(cached?.messages ?? []);
     setHasOlder(cached?.hasOlder ?? false);
+    olderRequestRef.current = null;
+    setOlderLoadState("idle");
     historyReadyRef.current = !!cached;
     setLoadError(null);
     setSyncError(null); setLastSyncAt(cached?.lastSyncAt ?? null); setJournalReady(false); setJournalError(null); setSendRecords([]); setForeignPending(0);
@@ -296,7 +304,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     setSending(false);
     setDraft("");
     setMentionIds([]);
-    setTargetLock(null); setTargetMenuOpen(false);
+    setMention(null);
+    setTargetLock(null); setMentionSpans(null);
     setReplyTo(null);
     setReferenceOpen(false); setSearchOpen(false); setJournalRecoveryOpen(false); setSendRecordsOpen(false);
     setFullMessage(null);
@@ -345,12 +354,14 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           mutationRevisionRef.current++;
           cache?.delete(groupId); historyReadyRef.current = false;
           observedOwnerRef.current = detail.ownerScope ?? null; lastSeqRef.current = 0; messageRevisionRef.current = 0; setMessages([]); setHasOlder(false);
+          olderRequestRef.current = null;
+          setOlderLoadState("idle");
           setFullMessage(null); setLightbox(null);
-          setSettingsOpen(false); setCardMemberId(null); setAdding(false); setExpandedPanel(null);
+          setSettingsOpen(false); setAdding(false); setExpandedPanel(null);
           setSearchOpen(false); setReferenceOpen(false); setJournalRecoveryOpen(false); setSendRecordsOpen(false);
           setJournalReady(false); draftSessionRef.current = null; setSendRecords([]); setForeignPending(0); setJournalError(null);
           setSending(false); setDraft(""); setMentionIds([]); setMention(null); setReplyTo(null);
-          setTargetLock(null); setTargetMenuOpen(false);
+          setTargetLock(null); setMentionSpans(null);
           for (const file of filesRef.current) if (file.preview) URL.revokeObjectURL(file.preview);
           setFiles([]); retryOps.current.clear(); respondOps.current.clear();
           setView(detail); void observer.invalidate(); return;
@@ -410,12 +421,11 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const stopPending = stoppingScope === scopeKey;
 
   const applyComposer = useCallback((composer: GroupComposer) => {
-    setDraft(composer.text); setMentionIds(composer.mentionIds); setReplyTo(composer.replyTo);
+    setDraft(composer.text); setMentionIds(composer.mentionIds); setMentionSpans(composer.mentionSpans ?? null); setReplyTo(composer.replyTo);
+    setMention(null);
     // Older drafts used ordinary owner routing or their quoted member. Keep that intent on upgrade.
-    const legacyTarget: GroupSendTarget = composer.replyTo?.author.kind === "member"
-      ? { kind: "member", memberId: composer.replyTo.author.memberId } : OWNER_TARGET;
     setTargetLock(composer.sendTarget ?? (composer.text.length || composer.files.length || composer.replyTo
-      ? { target: legacyTarget, manual: false, afterSeq: null } : null));
+      ? { target: OWNER_TARGET, manual: false, afterSeq: null } : null));
     setFiles(composer.files.map(file => ({ ...file, status: file.status === "uploading" ? "error" : file.status,
       preview: file.attachment?.mimeType.startsWith("image/") ? inspirationMediaUrl(file.attachment.id, true) : null })));
   }, []);
@@ -427,7 +437,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     mentions: replyTo.mentions, createdAt: replyTo.createdAt, origin: replyTo.origin, attachments: replyAttachments } : null,
     replyTask: null, requestRef: null, newRequest: false, summaryMemberId: "",
     files: files.map(({ id, name, status, attachment }) => ({ id, name, status, attachment })),
-    ...(targetLock ? { sendTarget: targetLock } : {}) };
+    ...(targetLock ? { sendTarget: targetLock } : {}),
+    ...(mentionSpans?.length ? { mentionSpans } : {}) };
   const composerSignature = JSON.stringify(composer);
   if (journalReady) draftSessionRef.current?.update(composer);
   useEffect(() => {
@@ -534,66 +545,110 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   };
 
   const loadOlder = async () => {
-    const generation = generationRef.current;
-    const scope = ownerScopeRef.current;
     const first = messages[0]?.seq;
-    if (first === undefined) return;
-    const list = listRef.current;
-    const previousHeight = list?.scrollHeight ?? 0;
+    if (!hasOlder || first === undefined || view?.group.id !== groupId || !currentScope() || olderRequestRef.current) return;
+    const generation = generationRef.current;
+    const request = Symbol();
+    const currentRequest = () => currentScope() && generation === generationRef.current && olderRequestRef.current === request;
+    olderRequestRef.current = request;
+    setOlderLoadState("loading");
     try {
       const page = await listGroupChatMessages(groupId, { beforeSeq: first, limit: PAGE });
-      if (!currentScope() || generation !== generationRef.current || ownerScopeRef.current !== scope) return;
+      if (!currentRequest()) return;
+      if (!Array.isArray(page?.messages) || typeof page.hasMore !== "boolean" || (page.hasMore && !page.messages.length)
+        || page.messages.some(message => message?.groupId !== groupId || !Number.isSafeInteger(message.seq) || message.seq <= 0 || message.seq >= first)) {
+        throw new Error("Invalid group chat response");
+      }
+      const list = listRef.current;
+      const previousHeight = list?.scrollHeight ?? 0;
+      const previousTop = list?.scrollTop ?? 0;
       stickToBottomRef.current = false;
       setHasOlder(page.hasMore);
-      setMessages((prev) => [...page.messages.filter((message) => message.seq < first), ...prev]);
-      requestAnimationFrame(() => { if (list) list.scrollTop = list.scrollHeight - previousHeight; });
-    } catch (cause) {
-      if (currentScope() && generation === generationRef.current && ownerScopeRef.current === scope) toast.error(cause instanceof Error ? cause.message : String(cause));
+      append(page.messages);
+      setOlderLoadState("idle");
+      requestAnimationFrame(() => {
+        if (list && listRef.current === list && currentScope() && generation === generationRef.current) {
+          list.scrollTop = previousTop + list.scrollHeight - previousHeight;
+        }
+      });
+    } catch {
+      if (currentRequest()) setOlderLoadState("error");
+    } finally {
+      if (olderRequestRef.current === request) olderRequestRef.current = null;
     }
   };
 
   const candidates = useMemo(() => {
     if (!mention) return [];
     const query = normalize(mention.query);
-    return activeMembers.filter((member) => normalize(member.handle).includes(query)
+    const members = mentionableMembers.filter(member => normalize(member.handle).includes(query)
       || normalize(member.displayName).includes(query));
-  }, [activeMembers, mention]);
+    const allName = t("groupChat.target.all");
+    return "all".includes(query) || normalize(allName).includes(query) ? [...members, null] : members;
+  }, [mentionableMembers, mention, t]);
+  const activeMentionIndex = Math.min(mentionIndex, candidates.length - 1);
+  const activeMentionId = activeMentionIndex < 0 ? undefined : `${mentionMenuId}-${candidates[activeMentionIndex]?.id ?? "all"}`;
+  useLayoutEffect(() => {
+    const list = mentionList.current;
+    const selected = list?.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (!list || !selected) return;
+    const viewport = list.getBoundingClientRect();
+    const row = selected.getBoundingClientRect();
+    if (row.top < viewport.top) list.scrollTop += row.top - viewport.top;
+    else if (row.bottom > viewport.bottom) list.scrollTop += row.bottom - viewport.bottom;
+  }, [activeMentionId, candidates.length]);
 
-  const updateDraft = (value: string, caret: number) => {
-    setDraft(value);
-    if (value.length) holdTarget();
-    else if (!filesRef.current.length && !replyTo) setTargetLock(lock => lock && !lock.manual ? null : lock);
-    const next = mentionAtCaret(value, caret);
-    setMention(next);
+  const writeDraftText = ({ text, mentions }: GroupDraftText) => {
+    setDraft(text);
+    setMentionSpans(mentions);
+    setMentionIds([...new Set(mentions.flatMap(span => span.memberId === null ? [] : [span.memberId]))]);
+  };
+  const updateDraft = (value: GroupDraftText, selection: GroupComposerSelection, removedPrefill: boolean, composing: boolean) => {
+    writeDraftText(value);
+    if (removedPrefill) removePrefill();
+    else if (value.text.length) holdTarget();
+    setMention(composing ? null : mentionAtCaret(value, selection.end));
     setMentionIndex(0);
+  };
+  const focusComposerAt = (position: number) => requestAnimationFrame(() => {
+    if (!currentScope()) return;
+    composerInput.current?.focus();
+    composerInput.current?.moveCaret(position);
+  });
+  const composerSelection = () => composerInput.current?.selection() ?? { start: draft.length, end: draft.length, includesPrefill: false };
+  const openTokenMention = (token: GroupDraftMention | "prefill") => {
+    if (!journalReady || !currentScope()) return;
+    const id = token === "prefill" ? prefillMember?.id ?? null : token.memberId;
+    const index = id === null ? mentionableMembers.length : mentionableMembers.findIndex(member => member.id === id);
+    setMentionIndex(Math.max(0, index));
+    setMention(token === "prefill" ? { kind: "prefill", query: "" } : { kind: "selected", start: token.start, end: token.end, query: "" });
   };
 
   const openMentions = () => {
-    const caret = textareaRef.current?.selectionStart ?? draft.length;
-    const end = textareaRef.current?.selectionEnd ?? caret;
-    const current = mentionAtCaret(draft, caret);
-    if (current) { setMention(current); setMentionIndex(0); textareaRef.current?.focus(); return; }
-    const insert = `${caret > 0 && !/\s/u.test(draft[caret - 1]) ? " " : ""}@`;
-    updateDraft(draft.slice(0, caret) + insert + draft.slice(end), caret + insert.length);
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(caret + insert.length, caret + insert.length);
-    });
+    const { start, end, includesPrefill } = composerSelection();
+    const current = start === end && !includesPrefill ? mentionAtCaret(draftText, start) : null;
+    if (current) { setMention(current); setMentionIndex(0); composerInput.current?.focus(); return; }
+    const insert = `${start > 0 && !/\s/u.test(draft[start - 1]) ? " " : ""}@`;
+    const caret = start + insert.length;
+    updateDraft(replaceGroupDraftText(draftText, start, end, insert), { start: caret, end: caret, includesPrefill: false }, includesPrefill, false);
+    focusComposerAt(caret);
   };
 
-  const pickMention = (member: GroupChatMember) => {
-    if (!mention) return;
-    const caret = textareaRef.current?.selectionStart ?? draft.length;
-    const insert = `@${member.handle} `;
-    const value = draft.slice(0, mention.start) + insert + draft.slice(caret);
-    setDraft(value);
-    setMentionIds((prev) => prev.includes(member.id) ? prev : [...prev, member.id]);
+  const pickMention = (member: GroupChatMember | null) => {
+    if (!mention || !currentScope()) return;
     setMention(null);
-    requestAnimationFrame(() => {
-      const position = mention.start + insert.length;
-      textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(position, position);
-    });
+    if (mention.kind === "prefill") {
+      setTargetLock({ target: member ? { kind: "member", memberId: member.id } : { kind: "all" }, manual: true, afterSeq: null });
+      focusComposerAt(0);
+      return;
+    }
+    const { start, end } = mention;
+    const handle = `@${member?.handle ?? "all"}`;
+    const hasSpace = draft[end] === " ";
+    const separator = mention.kind === "typed" && !/\s/u.test(draft[end] ?? "") ? " " : "";
+    holdTarget();
+    writeDraftText(replaceGroupDraftText(draftText, start, end, handle + separator, { length: handle.length, memberId: member?.id ?? null }));
+    focusComposerAt(start + handle.length + (separator || hasSpace ? 1 : 0));
   };
 
   const removeFile = (id: string) => setFiles((prev) => {
@@ -634,27 +689,40 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
       });
     }
   };
-  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    const pasted = Array.from(event.clipboardData?.items ?? []).filter((item) => item.kind === "file")
+  const onPaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const clipboard = event.clipboardData;
+    if (archived || !journalReady || !currentScope() || !clipboard) return;
+    const pasted = Array.from(clipboard.items).filter((item) => item.kind === "file")
       .map((item) => item.getAsFile()).filter((file): file is File => !!file);
-    if (pasted.length === 0) return;
+    if (pasted.length > 0) {
+      event.preventDefault();
+      addFiles(pasted);
+      return;
+    }
+    const text = clipboard.getData("text/plain").replace(/\r\n?/gu, "\n");
+    const { start, end, includesPrefill } = composerSelection();
+    const next = pasteGroupDraftText(draftText, start, end, text, mentionableMembers);
+    if (!next) return;
     event.preventDefault();
-    addFiles(pasted);
+    const caret = start + text.length;
+    updateDraft(next, { start: caret, end: caret, includesPrefill: false }, includesPrefill, false);
+    focusComposerAt(caret);
   };
   const filesBusy = files.some((file) => file.status !== "ready");
   const hasComposerContent = Boolean(draft.trim() || files.length);
   const sameDraftPending = sendRecords.some(record => record.draftId === draftSessionRef.current?.draftId
     && record.draftRevision === draftSessionRef.current?.revision);
   const send = async () => {
-    const body = draft.trim();
+    const body = groupDraftBody(draftText, mentionableMembers);
     const attachments = files.flatMap((file) => file.attachment ? [file.attachment] : []);
     const session = draftSessionRef.current;
     if (!currentScope() || (!body && attachments.length === 0) || filesBusy || sending || !view || view.group.status !== "active"
       || !journalReady || !session || !ownerScope || session.ownerScope !== ownerScope) return;
-    const mentions = [...new Set([...sendTargetMentions(sendTarget, activeMembers, ownerId, replyTo), ...mentionIds.filter((id) => {
-      const member = membersById.get(id);
-      return member && body.includes(`@${member.handle}`);
-    })])];
+    const typed = draftText.mentions.flatMap(span => {
+      const member = mentionableMembers.find(candidate => candidate.id === span.memberId);
+      return member && normalize(draft.slice(span.start + 1, span.end)) === normalize(member.handle) ? [member.id] : [];
+    });
+    const mentions = [...new Set([...sendTargetMentions(prefillKey !== null ? prefill : null, mentionableMembers, ownerId), ...typed])];
     const generation = generationRef.current;
     setSending(true);
     try {
@@ -793,8 +861,30 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     finally { if (currentScope() && generation === generationRef.current) { setSending(false); void refreshSendRecords(); } }
   };
 
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>, selection: GroupComposerSelection) => {
     if (event.nativeEvent.isComposing) return;
+    const { start, end, includesPrefill } = selection;
+    const edit = (from: number, to: number, insert: string, clearPrefill: boolean) => {
+      event.preventDefault();
+      const caret = from + insert.length;
+      updateDraft(replaceGroupDraftText(draftText, from, to, insert),
+        { start: caret, end: caret, includesPrefill: false }, clearPrefill, false);
+      focusComposerAt(caret);
+    };
+    if (event.key === "Backspace" || event.key === "Delete") {
+      if (includesPrefill || showPrefill && start === 0 && end === 0 && (event.key === "Backspace" || !draft)) {
+        edit(start, end, "", true);
+        return;
+      }
+      if (start === end) {
+        const token = draftText.mentions.find(span => event.key === "Delete" ? span.start === start
+          : span.end === start || span.end + 1 === start && draft[span.end] === " ");
+        if (token) {
+          edit(token.start, token.end + (draft[token.end] === " " ? 1 : 0), "", false);
+          return;
+        }
+      }
+    }
     if (mention && candidates.length > 0) {
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
@@ -803,12 +893,13 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
       }
       if (event.key === "Enter" || event.key === "Tab") {
         event.preventDefault();
-        pickMention(candidates[Math.min(mentionIndex, candidates.length - 1)]);
+        pickMention(candidates[activeMentionIndex]);
         return;
       }
       if (event.key === "Escape") { event.preventDefault(); setMention(null); return; }
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Enter") {
+      if (event.shiftKey) { edit(start, end, "\n", includesPrefill); return; }
       event.preventDefault();
       void send();
     }
@@ -978,12 +1069,10 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const quote = (message: GroupChatMessage) => {
     if (!journalReady || archived || !currentScope()) return;
     setReplyTo(message);
-    // 引用某位成员的话：「发给」换成这一位，与后端「引用谁就请谁回答」一致。
-    if (message.author.kind === "member") {
-      const target = validSendTarget({ kind: "member", memberId: message.author.memberId }, activeMembers);
-      if (target) setTargetLock({ target, manual: true, afterSeq: null });
-    }
-    requestAnimationFrame(() => { if (currentScope()) textareaRef.current?.focus(); });
+    // A member quote already provides its recipient; an explicit @ can still override it.
+    if (message.author.kind === "member") removePrefill();
+    else holdTarget();
+    requestAnimationFrame(() => { if (currentScope()) composerInput.current?.focus(); });
   };
   const jumpTo = (seq: number) => listRef.current?.querySelector(`[data-seq="${seq}"]`)
     ?.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
@@ -1019,13 +1108,15 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     return <div className="chat-group__footer" data-group-message-footer={message.id}>
       {message.createdAt ? <time data-group-message-time={message.id} dateTime={new Date(message.createdAt).toISOString()}>{formatChatTime(message.createdAt)}</time> : null}
       {message.author.kind === "member" && <ChatResponseMetadata metadata={message.responseMetadata} />}
-      {messageText(message).trim() && <button type="button" className="chat-copybtn" title={t("chat.copyAsMarkdown")}
+      {messageText(message).trim() && <button type="button" className="chat-copybtn" data-chat-footer-icon="" title={t("chat.copyAsMarkdown")}
         aria-label={t("chat.copyAsMarkdown")} onClick={() => void copyMessage(message)}><IconCopy /></button>}
+      {!archived && <button type="button" className="chat-copybtn" data-chat-footer-icon="" title={t("chat.quote")}
+        aria-label={t("chat.quote")} disabled={!journalReady} onClick={() => quote(message)}><IconQuote /></button>}
       {MESSAGE_PINNING_ENABLED && <button type="button" className={pinned ? "chat-copybtn is-pinned" : "chat-copybtn"}
         title={t(pinned ? "chat.unpin" : "chat.pin")} aria-label={t(pinned ? "chat.unpin" : "chat.pin")}
         aria-pressed={pinned} onClick={() => pinMessage(message)}><IconPin /></button>}
-      <button type="button" className="chat-copybtn" title={t("chat.deleteLocal")} aria-label={t("chat.deleteLocal")}
-        onClick={() => hideMessage(message)}><IconTrash /></button>
+      {MESSAGE_DELETION_ENABLED && <button type="button" className="chat-copybtn" title={t("chat.deleteLocal")} aria-label={t("chat.deleteLocal")}
+        onClick={() => hideMessage(message)}><IconTrash /></button>}
       {message.author.kind === "member" && message.origin?.opportunityId
         && stopMessageIds.get(message.origin.opportunityId) === message.id && memberStopButton(message.origin.opportunityId)}
     </div>;
@@ -1076,6 +1167,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
       && source.id === reply.messageId && source.seq === reply.seq)?.attachments;
     return <button type="button" className={styles.quoteBlock} title={t("groupChat.reply.jump")}
       onClick={() => jumpTo(reply.seq)}>
+      <IconQuote className="chat-quote-icon" />
       <span className={styles.quoteAuthor}>{authorName(reply.author)}</span>
       {quotePreview(reply.excerpt, attachments)}
     </button>;
@@ -1093,9 +1185,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
             .catch((cause) => toast.error(t("chat.artifactsRevealFailed", { msg: cause instanceof Error ? cause.message : String(cause) })))} />
       ))}
     </div>
-  );
-  const quoteButton = (message: GroupChatMessage) => !archived && (
-    <button type="button" className={`btn-sm ${styles.msgAction}`} disabled={!journalReady} onClick={() => quote(message)}>{t("groupChat.reply.action")}</button>
   );
   const stopMember = async (memberId: string, opportunityId: string) => {
     if (!currentScope()) return;
@@ -1136,12 +1225,10 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const unfinishedFooter = (opportunityId: string) => !stopMessageIds.has(opportunityId) && stoppableTurns.has(opportunityId)
     ? <div className="chat-group__footer">{memberStopButton(opportunityId)}</div> : null;
   const authorHeader = (member: GroupChatMember | undefined) => (
-    <button type="button" className={styles.author} data-group-author
-      onClick={() => member && setCardMemberId(member.id)} disabled={!member}
-      title={t("groupChat.card.open")}>
-      <AgentAvatar agentId={member?.agentId} name={member?.displayName} className={styles.authorAvatar} />
+    <span className={styles.author} data-group-author>
+      <GroupMemberAvatar member={member} className={styles.authorAvatar} />
       <span className={styles.authorName}>{member?.displayName ?? t("groupChat.someMember")}</span>
-    </button>
+    </span>
   );
   const expand = (panel: "members" | "files") => {
     readingPositionRef.current = listRef.current?.scrollTop ?? null;
@@ -1196,10 +1283,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         {!sendRecords.length && <p className={styles.muted}>{t("groupChat.sendJournal.empty")}</p>}
         </div>
       </Modal>}
-      {cardMemberId && membersById.get(cardMemberId) && (
-        <Suspense fallback={null}><GroupChatMemberModal key={`member:${scopeKey}:${cardMemberId}`} groupId={groupId} member={membersById.get(cardMemberId)!} view={view}
-          onView={applyView} isCurrentScope={currentScope} onClose={() => { if (currentScope()) setCardMemberId(null); }} /></Suspense>
-      )}
       {adding && (
         <Suspense fallback={null}><GroupChatAddMemberModal key={`add:${scopeKey}`} view={view} candidates={agents}
           onView={applyView} onClose={() => { if (currentScope()) setAdding(false); }} /></Suspense>
@@ -1236,6 +1319,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           </button>
         </div>
         {view.group.status === "deleting" && <p role="status" className={styles.muted}>{t("groupChat.deletingNotice")}</p>}
+        {expiredSearchScope === scopeKey && <p role="alert" className={styles.error}>{t("chat.globalSearchGroupLocateFailed")}</p>}
         {unavailableMembers.length > 0 && <div className={styles.availability} role="status">
           {t("groupChat.owner.offline", { names: unavailableMembers.map(member => member.displayName).join("、") })}
         </div>}
@@ -1258,18 +1342,26 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         if (!journalReady || archived || !currentScope()) return false;
         const next = appendGroupReference(draft, excerpt);
         if (next === null) { toast.error(t("groupChat.reference.tooLarge")); return false; }
-        setDraft(next); holdTarget(); textareaRef.current?.focus(); return true;
+        setDraft(next); holdTarget(); composerInput.current?.focus(); return true;
       }} />}
-      <div className={`chat-group-thread ${styles.timeline}`} data-group-timeline ref={listRef} onScroll={(event) => {
+      <div className={`chat-group-thread ${styles.timeline}`} data-group-timeline ref={listRef} onWheel={(event) => {
+        if (event.deltaY < 0 && event.currentTarget.scrollTop < 60) void loadOlder();
+      }} onScroll={(event) => {
         if (expandedPanel !== null || !event.currentTarget.clientHeight) return;
         const el = event.currentTarget;
         stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         setShowJump(!stickToBottomRef.current);
       }}>
       <div className="chat-thread__inner">
-        {hasOlder && (
-          <button type="button" className={`btn-sm ${styles.older}`} onClick={() => void loadOlder()}>{t("groupChat.loadOlder")}</button>
-        )}
+        {hasOlder && (olderLoadState === "loading" ? (
+          <div className="chat-archive-bar is-note is-loading">
+            <FusionLoader size="sm" label={t("chat.historyLoadingEarlier")} />
+          </div>
+        ) : (
+          <button type="button" className={`chat-archive-bar ${olderLoadState === "error" ? "is-retry" : "is-action"}`} onClick={() => void loadOlder()}>
+            {t(olderLoadState === "error" ? "groupChat.retryOlder" : "groupChat.loadOlder")}
+          </button>
+        ))}
         {messages.length === 0 && speaking.length === 0 && interactions.length === 0 && <div className={styles.empty}>{t("groupChat.emptyTimeline")}</div>}
         {timeline.map(entry => {
           if (entry.kind === "turn") {
@@ -1303,7 +1395,7 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
               {replyMessages.map(item => <div key={item.id} className={`chat-bubble${item.pending && canAnswer ? " is-streaming" : ""}`}
                 data-group-reply-message={item.id} data-activity-phase={phase} aria-live={item.pending && canAnswer ? "polite" : undefined}>
                 <GroupChatMarkdown text={item.text} className="chat-md" members={view.members}
-                  onMemberClick={setCardMemberId} streamingCursor={item.pending && canAnswer} />
+                  streamingCursor={item.pending && canAnswer} />
               </div>)}
               {(loading || notice) && <div className={`chat-bubble${loading ? " is-streaming" : ""}`} data-activity-phase={phase}>
                 {loading && <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
@@ -1372,11 +1464,10 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
                 onContextMenu={event => openMessageMenu(event, message)}>
                 <div className="chat-group__stack">
                   {quoteBlock(message)}
-                  {message.body.trim() && <GroupChatMarkdown text={message.body} className="chat-bubble chat-md"
-                    members={view.members} onMemberClick={setCardMemberId} />}
+                  {(message.body.trim() || message.mentions.memberIds.length > 0) && <GroupChatMarkdown text={message.body} className="chat-bubble chat-md"
+                    members={view.members} addressedMemberIds={message.mentions.memberIds} broadcast={message.mentions.broadcast} />}
                   {attachmentRow(message)}
                   {fullResultNote}
-                  <div className={styles.userAction}>{quoteButton(message)}</div>
                   {message.mentions.unresolved.length > 0 && (
                     <div className={styles.note}>{t("groupChat.unresolved", {
                       handles: message.mentions.unresolved.map((handle) => `@${handle}`).join("、") })}</div>
@@ -1399,11 +1490,10 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
                 {quoteBlock(message)}
                 {bubbles.map(item => <GroupChatMarkdown key={item.id} text={item.text}
                   className={`chat-bubble chat-md${streaming ? " is-streaming" : ""}`}
-                  members={view.members} onMemberClick={setCardMemberId} streamingCursor={streaming} />)}
+                  members={view.members} broadcast={message.mentions.broadcast} streamingCursor={streaming} />)}
                 {attachmentRow(message)}
                 {fullResultNote}
                 {messageFooter(message)}
-                <div className={styles.messageActions}>{quoteButton(message)}</div>
               </div>
             </div>
           );
@@ -1423,28 +1513,26 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
           if (event.dataTransfer.files.length === 0) return;
           event.preventDefault(); addFiles(Array.from(event.dataTransfer.files));
         }}>
-        {mention && candidates.length > 0 && (
-          <div className={styles.mentionMenu} id={mentionMenuId} role="listbox" aria-label={t("groupChat.composer.mention")}>
-            {candidates.map((member, index) => (
-              <button type="button" key={member.id} id={`${mentionMenuId}-${member.id}`} role="option" tabIndex={-1}
-                aria-selected={index === mentionIndex}
-                className={`${styles.mentionItem}${index === mentionIndex ? ` ${styles.isActive}` : ""}`}
-                onMouseDown={(event) => event.preventDefault()} onClick={() => pickMention(member)}>
-                <AgentAvatar agentId={member.agentId} name={member.displayName} className={styles.memberAvatar} />
-                <span>{member.displayName}</span>
-                <span className={styles.muted}>@{member.handle}</span>
-              </button>
-            ))}
+        {activeMentionId && (
+          <div className={`chat-composer-menu-surface chat-mention-menu ${styles.mentionMenu}`} id={mentionMenuId} role="listbox"
+            aria-label={t("groupChat.composer.mention")}>
+            <div className="model-menu__list" ref={mentionList}>
+              {candidates.map((member, index) => (
+                <button type="button" key={member?.id ?? "all"} id={`${mentionMenuId}-${member?.id ?? "all"}`} role="option" tabIndex={-1}
+                  aria-selected={index === activeMentionIndex} className={`model-menu__item${index === activeMentionIndex ? " is-active" : ""}`}
+                  onMouseDown={(event) => event.preventDefault()} onClick={() => pickMention(member)}>
+                  {member ? <GroupMemberAvatar member={member} className={styles.memberAvatar} />
+                    : <GroupMentionAvatarStack members={mentionableMembers} />}
+                  <span className="model-menu__name">{member?.displayName ?? t("groupChat.target.all")}</span>
+                  <span className={styles.mentionHandle}>@{member?.handle ?? "all"}</span>
+                </button>
+              ))}
+            </div>
           </div>
-        )}
-        {targetMenuOpen && !archived && journalReady && (
-          <GroupChatSendTargetMenu id={targetMenuId} target={sendTarget} active={activeMembers} ownerId={ownerId}
-            anchorRef={targetButtonRef} onPick={pickTarget}
-            onClose={() => { setTargetMenuOpen(false); textareaRef.current?.focus(); }} />
         )}
         {replyTo && (
           <div className={`chat-quote-bar ${styles.replyChip}`}>
-            <span className="chat-quote-bar__ico" aria-hidden="true">↩</span>
+            <IconQuote className="chat-quote-icon" />
             <span className={`chat-quote-bar__text ${styles.replyPreview}`} title={excerptOf(replyTo.body, 600)}>
               <strong>{t("groupChat.reply.to", { name: authorName(replyTo.author) })}</strong>
               {quotePreview(replyTo.body, replyAttachments)}
@@ -1470,24 +1558,11 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
             ))}
           </div>
         )}
-        <div className={styles.composerField} ref={composerFieldRef}>
-        {!archived && <GroupChatSendTargetChip target={sendTarget} active={activeMembers} ownerId={ownerId}
-          open={targetMenuOpen && journalReady} menuId={targetMenuId} disabled={!journalReady} buttonRef={targetButtonRef}
-          onToggle={() => { setMention(null); setTargetMenuOpen(open => !open); }} onWidth={setTargetWidth} />}
-        <textarea ref={textareaRef} className="chat-composer__input" value={draft} disabled={archived || !journalReady}
-          style={!archived && targetWidth ? { textIndent: targetWidth + 6 } : undefined}
-          onScroll={event => composerFieldRef.current?.style.setProperty("--group-send-target-shift", `${-event.currentTarget.scrollTop}px`)}
-          aria-label={t("groupChat.composer.message")}
-          role="combobox" aria-autocomplete="list" aria-haspopup="listbox"
-          aria-expanded={Boolean(mention && candidates.length > 0)}
-          aria-controls={mention && candidates.length > 0 ? mentionMenuId : undefined}
-          aria-activedescendant={mention && candidates.length > 0
-            ? `${mentionMenuId}-${candidates[Math.min(mentionIndex, candidates.length - 1)].id}` : undefined}
-          onChange={(event) => updateDraft(event.target.value, event.target.selectionStart)}
-          onKeyDown={onKeyDown}
-          onPaste={archived ? undefined : onPaste}
-          onBlur={() => setMention(null)} />
-        </div>
+        <GroupChatComposerInput ref={composerInput} value={draftText} members={membersById} mentionableMembers={mentionableMembers}
+          disabled={archived || !journalReady} label={t("groupChat.composer.message")} menuId={mentionMenuId}
+          prefill={showPrefill ? { memberId: prefillMember?.id ?? null, text: `@${prefillMember?.handle ?? "all"}` } : null}
+          activeOption={activeMentionId}
+          onChange={updateDraft} onOpenMention={openTokenMention} onKeyDown={onKeyDown} onPaste={onPaste} onDismissMenu={() => setMention(null)} />
         <input ref={fileInputRef} type="file" multiple hidden
           onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
         <div className="chat-composer__bar">
@@ -1522,7 +1597,8 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         </div>
       </div>
       </div>
-      {fullMessage && <GroupChatFullMessage key={`${scopeKey}:${fullMessage.id}`} groupId={groupId} message={fullMessage} onClose={() => { if (currentScope()) setFullMessage(null); }} />}
+      {fullMessage && <GroupChatFullMessage key={`${scopeKey}:${fullMessage.id}`} groupId={groupId} message={fullMessage} members={view.members}
+        onClose={() => { if (currentScope()) setFullMessage(null); }} />}
       {messageMenu?.scope === scopeKey && <ChatMessageContextMenu x={messageMenu.x} y={messageMenu.y}
         onClose={() => setMessageMenu(null)} onCopy={messageText(messageMenu.message) ? () => void copyMessage(messageMenu.message) : undefined}
         onQuote={() => quote(messageMenu.message)} quoteDisabled={archived || !journalReady}
@@ -1544,7 +1620,7 @@ export function GroupChatAvatar({ view, className }: { view: GroupChatView; clas
   return (
     <span className={`${styles.groupAvatar}${className ? ` ${className}` : ""}`} data-group-avatar-count={shown.length} aria-hidden="true">
       {shown.map((member) => (
-        <AgentAvatar key={member.id} agentId={member.agentId} name={member.displayName} className={styles.groupAvatarItem} />
+        <GroupMemberAvatar key={member.id} member={member} className={styles.groupAvatarItem} />
       ))}
     </span>
   );

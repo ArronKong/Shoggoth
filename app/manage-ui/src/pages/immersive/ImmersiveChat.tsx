@@ -2,6 +2,8 @@ import { anchorUnreadMessage } from "../../lib/chatUnread";
 import AgentAvatarView from "../../components/AgentAvatar";
 import { ChatRunWait } from "../../components/ChatRunWait";
 import ChatFileButton from "../../components/ChatFileButton";
+import FusionLoader from "../../components/FusionLoader";
+import { IconTrajectory } from "../../components/TurnTimeline/trajectoryIcons";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, WheelEvent } from "react";
 import { useTranslation } from "react-i18next";
@@ -9,6 +11,7 @@ import { useGlassRenderer } from "./useGlassRenderer";
 import FilterTabs from "../../components/FilterTabs";
 import { SESSION_CATEGORY_ORDER, isVisibleSession, sessionCategoryOf, type SessionCategory, type SessionCategoryRow } from "../../lib/sessionKind";
 import ChatModelMenu, { type ModelMenuChoice } from "../ChatModelMenu";
+import { IconQuote, MESSAGE_DELETION_ENABLED } from "../ChatMessageActions";
 import ChatPermissionMenu from "../ChatPermissionMenu";
 import type { ChatPermissionModeOption } from "../../types";
 import ChatPromptCard, { type ChatPromptEntry, type ChatPromptResponse } from "../ChatPromptCard";
@@ -49,7 +52,9 @@ export interface ImmersiveMessage {
   role: string; // "user" → 右侧气泡；其余 → 左侧折射玻璃卡
   kind?: "chat" | "injected" | "divider" | "error" | "local";
   content?: ReactNode[];
-  process?: ReactNode;
+  loadingReply?: boolean;
+  activityBubble?: ReactNode;
+  hideLiveStatus?: boolean;
   html: string; // 已 sanitize 的 markdown（injected = 展开后的全文；divider/error 不用）
   images: string[]; // user 自发图（base64）/ agent MEDIA 图（/__media 或 URL）
   // 非图附件（视频/PDF/文件）。带 src 的视频渲染成可点开灯箱的预览窗，其余是文件 chip。
@@ -70,6 +75,8 @@ export interface ImmersiveMessage {
   dividerTitle?: string; // kind=divider：hover 原文（模型切换标记）
   // 悬浮操作 / 右键（无参闭包捕获 Group，动作与普通模式同一套 handler）
   onCopy?: () => void;
+  onQuote?: () => void;
+  onOpenActivity?: () => void;
   onPin?: () => void;
   pinned?: boolean;
   onDelete?: () => void;
@@ -84,7 +91,7 @@ export interface ImmersiveBundle {
   onExit: () => void;
   /** agent 状态相位（未滞回原始值）——背景媒体层据此切素材，滞回在 Backdrop 内做。 */
   phase: ImmersivePhase;
-  /** 本轮流式过程（工具/思考）——轻量状态行的原料；无过程信息时 null（沿用三点等待）。 */
+  /** 本轮流式过程（工具/思考）——轻量状态行的原料；无过程信息时 null。 */
   live: ImmersiveLiveStatus | null;
   /** 本地发送单调计数：变化一次 = 触发一次「发送即锚定」（R280 mirror）。 */
   sendSeq: number;
@@ -472,11 +479,13 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     return () => document.removeEventListener("keydown", onKey);
   }, [lightboxOpen, slashOpen, overlay, pickerOpen, renameOpen, view, onExit]);
 
-  // 等待指示：已发出、assistant 还没吐出首个可见内容（thinking/工具阶段）时给个脉冲点，
-  // 否则发送后画面毫无反应。首个可见 assistant 内容（正文/审批卡）落地即消失；
-  // 末条是 divider/注入灰条时同样算「还没回应」。
+  // 有运行状态但还没有 pending 消息时，先在聊天尾部显示等待指示。
   const lastMsg = messages[messages.length - 1];
-  const waiting = sending && !(lastMsg && (lastMsg.kind ?? "chat") === "chat" && lastMsg.role !== "user");
+  const hasLoadingReply = messages.some(message => message.loadingReply);
+  const hasLiveActivity = messages.some(message => message.hideLiveStatus);
+  const waiting = sending
+    && !(lastMsg && (lastMsg.kind ?? "chat") === "chat" && lastMsg.role !== "user")
+    && !hasLoadingReply && !hasLiveActivity;
 
   const startRename = () => {
     setRenameDraft(sessionLabel);
@@ -490,13 +499,28 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     </div>
   ) : null;
 
-  // 消息悬浮操作条（复制/置顶/本地删除；重试在错误卡内）——hover 淡入，动作闭包来自 ChatPage
-  const actionsFor = (m: ImmersiveMessage) =>
-    m.onCopy || m.onPin || m.onDelete ? (
+  // 消息悬浮操作条，动作闭包来自 ChatPage。
+  const actionsFor = (m: ImmersiveMessage) => {
+    const onOpenActivity = m.footer && m.onCopy && !m.pending && !m.loadingReply ? m.onOpenActivity : undefined;
+    const onQuote = !m.pending && !m.loadingReply ? m.onQuote : undefined;
+    const onDelete = MESSAGE_DELETION_ENABLED ? m.onDelete : undefined;
+    return m.onCopy || onQuote || m.onPin || onDelete ? (
       <div className={styles.rowActions}>
+        {onOpenActivity && (
+          <button type="button" className={styles.actBtn} data-chat-footer-icon="" onClick={onOpenActivity}
+            aria-haspopup="dialog" aria-label={t("turnLab.processOpen")} title={t("turnLab.processOpen")}>
+            <IconTrajectory />
+          </button>
+        )}
         {m.onCopy && (
-          <button type="button" className={styles.actBtn} onClick={m.onCopy} title={t("chat.copy")}>
+          <button type="button" className={styles.actBtn} data-chat-footer-icon="" onClick={m.onCopy} title={t("chat.copy")}>
             <IconMiniCopy />
+          </button>
+        )}
+        {onQuote && (
+          <button type="button" className={styles.actBtn} data-chat-footer-icon="" onClick={onQuote}
+            aria-label={t("chat.quote")} title={t("chat.quote")}>
+            <IconQuote />
           </button>
         )}
         {m.onPin && (
@@ -509,13 +533,14 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             <IconMiniPin />
           </button>
         )}
-        {m.onDelete && (
-          <button type="button" className={`${styles.actBtn} ${styles.actBtnDanger}`} onClick={m.onDelete} title={t("chat.deleteLocal")}>
+        {onDelete && (
+          <button type="button" className={`${styles.actBtn} ${styles.actBtnDanger}`} onClick={onDelete} title={t("chat.deleteLocal")}>
             <IconMiniTrash />
           </button>
         )}
       </div>
     ) : null;
+  };
 
   return (
     <div data-testid="immersive-chat" data-native-ui-surface className={styles.root} style={colW != null ? ({ "--imm-col": `${colW}px` } as CSSProperties) : undefined}>
@@ -836,8 +861,10 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           }
           return (
             <div key={m.id} className={styles.asstRow} data-immersive-message={m.id} data-unread-start={m.unreadStart || undefined} onContextMenu={m.onCtx}>
-              {m.process && <div className={styles.processCard} data-glass-panel>{m.process}</div>}
               {attRow}
+              {(m.loadingReply || m.activityBubble) && <div className={m.activityBubble ? `${styles.asstCard} ${styles.activityBubble}` : styles.asstCard} data-glass-panel>
+                {m.activityBubble ?? <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
+              </div>}
               {m.content?.length ? (
                 <div className={`${styles.asstCard} ${styles.contentCard}`} data-glass-panel><div className={styles.md}>{m.content}</div></div>
               ) : m.html && (
@@ -865,14 +892,12 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             </div>
           </div>
         )}
-        {/* 轻量状态行：本轮有过程信息（思考/工具）时替代三点，点开看详情，完成自动收起 */}
-        <ImmersiveStatusLine phase={phase} live={live} />
+        {/* 轻量状态行可点开查看思考和工具，完成后自动收起。 */}
+        {!hasLoadingReply && !hasLiveActivity && <ImmersiveStatusLine phase={phase} live={live} />}
         {waiting && !live && (
-          <div className={styles.asstRow} aria-label={t("chat.generating")}>
-            <div className={styles.typing}>
-              <span className={styles.typingDot} />
-              <span className={styles.typingDot} />
-              <span className={styles.typingDot} />
+          <div className={styles.asstRow}>
+            <div className={styles.asstCard} data-glass-panel>
+              <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />
             </div>
           </div>
         )}
@@ -956,7 +981,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         {writerHint && <div role="status" className={input ? styles.writerHint : styles.writerHintEmpty}>{writerHint}</div>}
         {quoteText != null && (
           <div className={styles.quoteBar}>
-            <span className={styles.quoteIco}>↩</span>
+            <IconQuote className={`chat-quote-icon ${styles.quoteIco}`} />
             {/* title = 悬停核对将随消息发出的引用文本（显示层限长 300/600，payload 全文不受影响） */}
             <span
               className={styles.quoteText}

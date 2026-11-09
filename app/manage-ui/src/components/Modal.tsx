@@ -37,7 +37,7 @@ export default function Modal({
   dismissible?: boolean;
   className?: string;
   // report = 运行结果弹窗（设计稿 246:1193）：渐变底、24px 标题、右上角图标按钮。
-  variant?: "connector" | "report";
+  variant?: "connector" | "report" | "activity";
   // 标题行关闭键左侧的图标按钮。
   actions?: ReactNode;
   // report 变体出错时的红色渐变（设计稿 426:1071）。
@@ -95,7 +95,7 @@ export default function Modal({
         <Dialog.Backdrop className={styles.overlay} />
         <Dialog.Popup
           {...closingInteractionProps}
-          className={[styles.panel, variant === "connector" && styles.connector, variant === "report" && styles.report, className].filter(Boolean).join(' ')}
+          className={[styles.panel, variant && styles[variant], className].filter(Boolean).join(' ')}
           data-modal-variant={variant}
           data-tone={visibleContent.tone}
           style={{ width }}

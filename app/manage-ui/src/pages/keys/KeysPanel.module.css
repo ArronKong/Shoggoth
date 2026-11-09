@@ -13,7 +13,6 @@
    对齐（16px 圆角 + card 阴影）。 */
 .card {
   padding: 20px 24px 22px;
-  border: 1px solid var(--ui-hairline);
   border-radius: 16px;
   background: var(--ui-surface-1);
   box-shadow: var(--ui-shadow-card);

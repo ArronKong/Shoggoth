@@ -6,6 +6,8 @@ import { useConfirm, useToast } from "../../components/ui";
 import BackendTabIcon from "../../components/BackendTabIcon";
 import { applyDisabledBackends } from "../../lib/backends";
 import { usePageCache } from "../../lib/usePageCache";
+import { SkeletonShape, SkeletonStatus } from "../../components/Skeleton";
+import { OAuthRowsSkeleton } from "./ProviderSkeleton";
 import { useSlowPending } from "../models/useSlowPending";
 import OAuthLoginModal from "./OAuthLoginModal";
 import ProviderLogo from "./ProviderLogo";
@@ -232,8 +234,9 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
   const toast = useToast();
   const confirm = useConfirm();
   const { data, loading, error, refresh } = usePageCache(`models:oauth:${backend}`,
-    () => listOAuthProviders(backend), { staleTime: backend === "shoggoth" ? 0 : 30_000 });
+    () => listOAuthProviders(backend), { staleTime: backend === "shoggoth" ? 0 : 30_000, loadingOnEmptyRefresh: true });
   const providers = data?.providers ?? null;
+  const providersLoading = loading && providers === null;
   const [busyId, setBusyId] = useState<string | null>(null);
   const slowDisconnect = useSlowPending(Boolean(busyId && providers?.some(p => p.id === busyId && p.disconnectable && !p.connection)));
   const [loginFor, setLoginFor] = useState<OAuthProvider | null>(null);
@@ -358,13 +361,14 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
           </div>
         </div>
         <p className={styles.cardDesc}>
+          {providersLoading && <SkeletonShape style={{ width: "9em" }} />}
           {providers !== null && t("keys.oauthConnected", { connected, total: providers.length })}
         </p>
       </div>
 
       <div className={styles.cardBody}>
         {slowDisconnect && <p className="muted" role="status">{t("keys.oauthDisconnectSlow")}</p>}
-        {loading && providers === null && <p className="muted">{t("common.loading")}</p>}
+        {providersLoading && <SkeletonStatus><OAuthRowsSkeleton singleColumn={showActionLabels} /></SkeletonStatus>}
         {error && <div className="settings-actions" role="alert"><span>{t("settings.runtimeAuthUnavailable")}</span><button className="ui-cbtn ui-cbtn--sm" disabled={loading} onClick={() => void refresh()}>{t("settings.retry")}</button></div>}
         {!error && providers !== null && providers.length === 0 && <p className="muted">{t("keys.oauthNone")}</p>}
         {ordered.length > 0 && (

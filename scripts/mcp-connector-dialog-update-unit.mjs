@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {createRequire} from 'node:module';
 import ts from '../app/manage-ui/node_modules/typescript/lib/typescript.js';
-import { bundledBridgeVersions, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
+import { bundledBridgeVersions, loadConnectorAddButton, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 const uiRequire=createRequire(new URL('../app/manage-ui/package.json',import.meta.url));
 const React=uiRequire('react'),Renderer=uiRequire('react-test-renderer');
 const recommendations=JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/mcp-featured-presets.json',import.meta.url),'utf8'));
@@ -414,7 +414,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const {parseRegistryEntry}=rootRequire('./app/agent-service/mcp-registry-client');
  const featured=rootRequire('./app/agent-service/data/mcp-featured-servers.json');
  const hiddenIds=new Set(['gmail','google-calendar','google-contacts','google-docs','google-drive','google-sheets','google-slides','zoom','asana','box','dropbox','quickbooks','outlook-mail','outlook-calendar','strava','vercel','shop-pay','shopify','shopify-ucp','uber','uber-eats']);
- const chinesePresets=new Set(['12306','amap','didi','eastmoney','ifind','luckin','mcdonalds','mijia','variflight','wind']);
+ const chinesePresets=new Set(['amap','didi','eastmoney','ifind','luckin','mcdonalds','mijia','variflight','wind']);
  const chineseOfficial=new Set(['alipay','baidu-maps','fliggy','meituan-paotui','netease-music','quark-drive','rollinggo-hotel','weread']);
  const officialCatalog=rootRequire('./app/agent-service/data/official-skill-connectors.json');
  const presetVisible=id=>!hiddenIds.has(id)&&(currentLanguage==='zh-CN'||!chinesePresets.has(id));
@@ -439,9 +439,11 @@ console.log('PASS installed dialog identities: registry, eight official componen
   }
  };
  const cache=load('../app/manage-ui/src/lib/usePageCache.ts',uiRequire);
+ const connectorAddButton=loadConnectorAddButton();
  const page=load('../app/manage-ui/src/pages/ConnectorsPage.tsx',name=>{
   if(name==='react'||name==='react/jsx-runtime')return uiRequire(name);
   if(name==='../components/ConnectorDetails')return connectorDetails;
+  if(name==='../components/ConnectorAddButton')return connectorAddButton;
   if(name==='react-i18next')return {useTranslation:()=>({t:key=>key,i18n:{resolvedLanguage:currentLanguage}})};
   if(name==='react-router-dom')return {useLocation:()=>({search:''})};
   if(name==='../api/mcpConnectors')return pageApi;

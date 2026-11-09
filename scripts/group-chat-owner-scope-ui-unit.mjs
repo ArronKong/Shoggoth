@@ -103,13 +103,15 @@ function load(relative) {
       if (name === "@base-ui/react/menu") return { Menu: menuMock };
       if (name.endsWith("/api/client") || name.endsWith("/api/groupReads") || name.endsWith("/api/groupMemberModel")) return api;
       if (name.endsWith("/group-journal-recovery")) return require(path.resolve(ui, "../group-journal-recovery.js"));
+      if (name.endsWith("/agent-service/group-mentions")) return require(path.resolve(ui, "../agent-service/group-mentions.js"));
       if (name.endsWith("/lib/groupSendJournal")) return groupJournalMock;
       if (name.endsWith("/lib/groupPanelObserver")) return { createGroupPanelObserver(options) {
         observers.push(options); return load("src/lib/groupPanelObserver.ts").createGroupPanelObserver(options);
       } };
       if (name.endsWith("/lib/turnTimeline")) return load("src/lib/turnTimeline.ts");
-      if (name.endsWith("/lib/groupReferenceExcerpt")) return load("src/lib/groupReferenceExcerpt.ts");
+      if (name.endsWith("/groupReferenceExcerpt")) return load("src/lib/groupReferenceExcerpt.ts");
       if (name.endsWith("/lib/groupReply")) return load("src/lib/groupReply.ts");
+      if (name.endsWith("/lib/groupMentions")) return load("src/lib/groupMentions.ts");
       if (name.endsWith("/lib/groupTimeline")) return load("src/lib/groupTimeline.ts");
       if (name.endsWith("/lib/chatTime")) return load("src/lib/chatTime.ts");
       if (name.endsWith("/lib/groupMessagePresentation")) return load("src/lib/groupMessagePresentation.ts");
@@ -213,15 +215,23 @@ const buttons = (label) => renderer.root.findAllByType("button")
   .filter((node) => node.children.includes(label) || node.props["aria-label"] === label);
 const click = async (node) => { await act(async () => { await node.props.onClick({ preventDefault() {} }); }); };
 const groupAction = async action => {
-  if (action === "profile") {
-    await click(renderer.root.findAll(node => node.type === "button" && node.props["data-group-author"] !== undefined)[0]);
-    await act(async () => {});
-    return;
-  }
   const trigger = renderer.root.find(node => node.type === "button" && node.props["data-group-details-trigger"] !== undefined);
   if (!trigger.props["aria-expanded"]) { await click(trigger); await act(async () => {}); }
   const button = value => renderer.root.find(node => node.type === "button" && node.props["data-group-details-action"] === value);
   await click(button(action)); await act(async () => {});
+};
+let legacyMemberCard;
+const mountLegacyMemberCard = async (id = "a") => {
+  const MemberCard = load("src/pages/GroupChatMemberModal.tsx").default;
+  const openingView = view;
+  const effects = { views: [], closed: false };
+  await act(async () => {
+    legacyMemberCard = create(React.createElement(MemberCard, { groupId: "g", member: openingView.members.find(member => member.id === id),
+      view: openingView, isCurrentScope: () => view.ownerScope === openingView.ownerScope,
+      onView: next => effects.views.push(next), onClose: () => { effects.closed = true; } }));
+  });
+  await act(async () => {});
+  return { root: legacyMemberCard.root, effects };
 };
 const named = (name) => calls.filter((call) => call.name === name);
 const removeFromDetails = async (submit = true) => {
@@ -259,7 +269,11 @@ let passed = 0; const failures = [];
 const test = async (name, fn) => {
   try { await fn(); passed++; console.log(`ok ${passed} - ${name}`); }
   catch (error) { failures.push({ name, message: error.message }); console.error(`FAIL ${name}: ${error.stack}`); }
-  finally { if (renderer) { await act(async () => renderer.unmount()); renderer = null; } }
+  finally {
+    await act(async () => { legacyMemberCard?.unmount(); renderer?.unmount(); });
+    legacyMemberCard = null;
+    renderer = null;
+  }
 };
 
 await test("timeline full-message preview closes when owner changes", async () => {
@@ -315,8 +329,8 @@ await test("owner transition cancels a delayed delete confirmation before postin
   noWrites(); assert.equal(named("deleteGroup").length, 0); assert.equal(archived, 0);
 });
 await test("retired member-card removal cannot post after an owner transition", async () => {
-  await setup(); await groupAction("profile");
-  const remove = buttons("groupChat.members.remove")[0].props.onClick;
+  await setup(); const card = await mountLegacyMemberCard();
+  const remove = card.root.findAllByType("button").find(node => node.children.includes("groupChat.members.remove")).props.onClick;
   await changeOwner(); await act(async () => remove()); await flush(); noWrites();
 });
 await test("retired details-menu removal cannot post after an owner leaves and returns", async () => {
@@ -326,18 +340,17 @@ await test("retired details-menu removal cannot post after an owner leaves and r
   await act(async () => remove()); await flush(); noWrites();
   assert.equal(renderer.root.findAllByProps({ role: "menu" }).length, 0);
 });
-await test("late member-card removal cannot replace or close the new owner's card", async () => {
-  await setup(); await groupAction("profile");
+await test("late member-card removal cannot publish or close after an owner change", async () => {
+  await setup(); const card = await mountLegacyMemberCard();
   const pending = deferred(), old = plain(view); handler.set("remove", () => pending.promise);
-  const remove = buttons("groupChat.members.remove")[0].props.onClick;
+  const remove = card.root.findAllByType("button").find(node => node.children.includes("groupChat.members.remove")).props.onClick;
   await act(async () => { remove(); remove(); });
   assert.equal(named("remove").length, 1, "rapid clicks submit only once");
   assert.equal(named("confirm").length, 0);
   await changeOwner("owner-b", "OWNER_B", [message(3, { kind: "member", memberId: "b" }, "New owner reply")]);
-  await groupAction("profile");
   pending.resolve({ ...old, group: { ...old.group, name: "STALE_REMOVAL" } }); await flush();
   assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_REMOVAL"));
-  assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 1);
+  assert.deepEqual(card.effects, { views: [], closed: false });
 });
 await test("late details-menu removal cannot replace a new owner", async () => {
   await setup(); const pending = deferred(), old = plain(view);
@@ -353,23 +366,24 @@ await test("details removal checks the latest roster even from an older menu cal
   await refresh(); await act(async () => remove()); await flush(); noWrites();
 });
 await test("late member model saves cannot replace the current owner and retired controls cannot write", async () => {
-  await setup(); await groupAction("profile");
-  const choose = renderer.root.findByType("model-menu").props.onSelect;
+  await setup(); const card = await mountLegacyMemberCard();
+  const choose = card.root.findByType("model-menu").props.onSelect;
   const pending = deferred(); handler.set("modelSave", () => pending.promise);
   await act(async () => choose("model-b", "codex")); await flush();
   assert.equal(named("modelSave").length, 1);
   const stale = { ...view, group: { ...view.group, name: "STALE_MODEL_SAVE" } };
   await changeOwner(); pending.resolve(stale); await flush();
   assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_MODEL_SAVE"));
+  assert.equal(card.effects.views.length, 0, "a stale model save is not published");
   await act(async () => choose("model-b", "codex")); await flush();
   assert.equal(named("modelSave").length, 1, "a retired model control cannot post to a new owner");
 });
 await test("a visible model choice can be saved while its menu refreshes the catalog", async () => {
-  await setup(); await groupAction("profile");
+  await setup(); const card = await mountLegacyMemberCard();
   const pending = deferred(); handler.set("models", () => pending.promise);
-  await act(async () => renderer.root.findByType("model-menu").props.onRefresh()); await flush();
-  assert.equal(renderer.root.findByType("model-menu").props.loading, true);
-  await act(async () => renderer.root.findByType("model-menu").props.onSelect("model-b", "codex")); await flush();
+  await act(async () => card.root.findByType("model-menu").props.onRefresh()); await flush();
+  assert.equal(card.root.findByType("model-menu").props.loading, true);
+  await act(async () => card.root.findByType("model-menu").props.onSelect("model-b", "codex")); await flush();
   assert.equal(named("modelSave").length, 1, "refresh cannot silently discard a visible choice");
   assert.deepEqual(JSON.parse(JSON.stringify(named("modelSave")[0].args[1].modelSelection)), { model: "model-b", provider: "codex" });
   pending.resolve({ models: [], defaultModel: "model-a" }); await flush();

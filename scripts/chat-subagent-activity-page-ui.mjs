@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,7 +27,7 @@ try {
   await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-subagent-activity-page.tsx")],
     bundle: true, format: "esm", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' },
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
-    outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(uiRoot, "node_modules")], plugins, logLevel: "silent" });
+    outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(uiRoot, "node_modules")], plugins: [viteArtworkFixturePlugin(root), ...plugins], logLevel: "silent" });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><title>子代理进展 · 隔离测试</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
   if (preview) {
     const server = http.createServer((req, res) => {

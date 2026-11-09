@@ -7,6 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const menuPath = path.join(root, "app/manage-ui/src/pages/ChatModelMenu.tsx");
 const cssPath = path.join(root, "app/manage-ui/src/pages/ChatPage.css");
+const catalogCssPath = path.join(root, "app/manage-ui/src/pages/ChatModelMenu.css");
 
 // 读取文本文件，统一以 UTF-8 解析，保证脚本在任意当前目录下都能运行。
 function readText(file) {
@@ -77,6 +78,12 @@ const provisionalDeclarations = parseDeclarations(provisionalRule);
 assert.ok(
   provisionalDeclarations.has("color") && provisionalDeclarations.has("padding"),
   "目录后台校验提示不能只靠颜色表达，且需要与模型列表保持清晰间距",
+);
+const emptyRule = findRule(readText(catalogCssPath), ".model-menu--catalog .model-menu__empty");
+assert.equal(
+  parseDeclarations(emptyRule).get("--fusion-loader-color"),
+  "var(--model-menu-text)",
+  "双球融合滤镜需要不透明的菜单前景色",
 );
 
 const labelLeft = leftPaddingPx(parseDeclarations(labelRule));

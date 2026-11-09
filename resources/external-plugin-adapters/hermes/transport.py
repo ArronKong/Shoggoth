@@ -12,7 +12,7 @@ import sys
 import uuid
 from pathlib import Path
 
-VERSION = 28  # Kept in sync with Service by release-package-checks and registrar.
+VERSION = 31  # Kept in sync with Service by release-package-checks and registrar.
 MAX_FRAME = 64 * 1024
 ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 

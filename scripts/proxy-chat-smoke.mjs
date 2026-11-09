@@ -120,7 +120,7 @@ class MockChatBackend extends AgentBackend {
       return;
     }
     await new Promise((r) => setTimeout(r, 10));
-    hooks.delta?.("hi");
+    hooks.delta?.("hi", { replyPhase: "final_answer" });
     await new Promise((r) => setTimeout(r, 10));
     hooks.delta?.("hi there");
     await new Promise((r) => setTimeout(r, 10));
@@ -969,6 +969,7 @@ try {
   );
   check("delta has matching sessionKey", deltaEvt.payload.sessionKey === "agent:hermes-default:main");
   check("delta carries assistant text block", deltaEvt.payload.message?.content?.[0]?.type === "text");
+  check("delta preserves the runtime reply phase", deltaEvt.payload.replyPhase === "final_answer");
 
   const finalEvt = await waitFor(
     (f) => f.type === "event" && f.event === "chat" && f.payload?.state === "final" && f.payload?.runId === "run-zzz",

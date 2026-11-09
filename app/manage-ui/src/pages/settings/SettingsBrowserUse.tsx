@@ -4,6 +4,7 @@ import { Switch } from "../../components/Field";
 import { desktopBrowserAvailable, getDesktopBrowserState } from "../../api/client";
 import type { AppConfig, BrowserUseSettings, BrowserUseState } from "../../types";
 import s from "./SettingsBrowserUse.module.css";
+import { SettingsIcon } from "./SettingsIcons";
 
 // Session diagnostics remain available in code but are hidden in Settings.
 const SHOW_SESSION_DETAILS = false;
@@ -52,24 +53,24 @@ export default function SettingsBrowserUse({ cfg, onChange, disabled }: {
     <div className="settings-card settings-list-card">
       <div className="settings-list-row">
         <Switch checked={settings?.enabled === true} disabled={controlsDisabled} onChange={enabled => change({ enabled })}
-          label={t("settings.browserUse.enable")} />
+          label={<span className="settings-switch-label"><SettingsIcon name="cursor" /><span>{t("settings.browserUse.enable")}</span></span>} />
       </div>
       <div className="settings-list-row">
         <Switch checked={settings?.headless === true} disabled={controlsDisabled || !settings?.enabled}
-          onChange={headless => change({ headless })} label={<span className={s.copy}>
+          onChange={headless => change({ headless })} label={<span className="settings-switch-label"><SettingsIcon name="eyeOff" /><span className={s.copy}>
             <span>{t("settings.browserUse.headless")}</span><small>{t("settings.browserUse.headlessHint")}</small>
-          </span>} />
+          </span></span>} />
       </div>
       <div className="settings-list-row">
         <Switch checked={settings?.isolated === false} disabled={controlsDisabled || !settings?.enabled}
-          onChange={persistent => change({ isolated: !persistent })} label={<span className={s.copy}>
+          onChange={persistent => change({ isolated: !persistent })} label={<span className="settings-switch-label"><SettingsIcon name="key" /><span className={s.copy}>
             <span>{t("settings.browserUse.persistent")}</span><small>{t("settings.browserUse.persistentHint")}</small>
-          </span>} />
+          </span></span>} />
       </div>
       <div className={s.footer}>
         <div className={s.statusRow}>
           <p className="ui-hint" role="status" data-browser-state={reason}>{t(`settings.browserUse.${reason}`)}</p>
-          <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={!desktop || busy} onClick={() => void refresh()}>
+          <button type="button" className="btn-secondary btn-sm" disabled={!desktop || busy} onClick={() => void refresh()}>
             {busy ? t("settings.serviceWorking") : t("settings.browserUse.refresh")}
           </button>
         </div>

@@ -1,14 +1,16 @@
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import ChatPage from "../../app/manage-ui/src/pages/ChatPage";
+import { IdeaDetail } from "../../app/manage-ui/src/pages/InspirationThread";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
+import { NavigationGuardProvider } from "../../app/manage-ui/src/lib/navigation-guard";
 import i18n from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
 
-declare const __ERROR_FIXTURE__: { key: string; cases: { frame: any; history: any; expected: Record<string, string> }[] };
+declare const __ERROR_FIXTURE__: { key: string; cases: { frame: any; history: any; execution: any; activity: any; expected: Record<string, string> }[] };
 const { key, cases } = __ERROR_FIXTURE__;
 const state = window as any;
 const query = new URLSearchParams(location.search);
@@ -42,7 +44,14 @@ class FixtureSocket {
 state.WebSocket = FixtureSocket;
 state.fetch = async (url: unknown) => {
   const pathname = String(url);
-  const payload = pathname.includes("/__api/status") ? { backends: [{ id: "shoggoth", connected: true }] }
+  const payload = pathname.includes("/__api/inspirations/activity?") ? sample.activity
+    : pathname.includes("/__api/inspirations/executions?") ? { executions: [sample.execution], total: 1, hasMore: false, nextCursor: null }
+    : pathname.includes("/__api/inspirations/detail?") ? { idea: { id: 'error-idea', body: '想做一个实时新闻页面', title: null,
+      revision: 1, favorite: false, archivedAt: null, acceptedAt: null, createdAt: Date.now(), updatedAt: Date.now(),
+      status: 'failed', paperTone: 0, latestExecution: sample.execution } }
+    : /\/__api\/inspirations\/(?:agents|idle-agents)$/.test(pathname) ? { agents: [{ id: 'shoggoth-default', name: 'Shoggoth',
+      backendId: 'shoggoth', backendName: 'Shoggoth', capabilities: { execute: true, session: true, respond: true, cancel: true, reason: null } }] }
+    : pathname.includes("/__api/status") ? { backends: [{ id: "shoggoth", connected: true }] }
     : pathname.includes("/__api/backends") ? { backends: [] }
     : pathname.includes("/__api/connectors/mcp/requests") ? { items: [] }
     : pathname.includes("runtime-models") ? { selection: { bindingId: "fixture", runtime: "antigravity", model: null, canSwitch: false, candidates: [] }, capabilities: { attachments: {}, slash: false, steer: false }, models: [], runtimes: [] }
@@ -59,7 +68,14 @@ const wait = async (predicate: () => unknown, label: string) => {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 };
-createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
+function Fixture() {
+  const [inspiration, setInspiration] = useState(false);
+  state.openInspiration = () => setInspiration(true);
+  return <><ChatPage />{inspiration && <IdeaDetail id="error-idea" onClose={() => setInspiration(false)} onChange={async () => {}} />}</>;
+}
+createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><NavigationGuardProvider>
+  <ScrollbarProvider /><Fixture />
+</NavigationGuardProvider></UiProvider></HashRouter>);
 state.runFixture = async () => {
   await wait(() => document.querySelector(".chat-thread .chat-bubble")?.textContent?.trim() === user.content, "initial history");
   await new Promise(resolve => setTimeout(resolve, 200));
@@ -69,10 +85,20 @@ state.runFixture = async () => {
   if (bubble.textContent !== sample.expected[language]) throw Error(`Error details changed (${language}): ${bubble.textContent}`);
   if (document.querySelectorAll(".chat-bubble.is-error").length !== 1) throw Error("Duplicate terminal error");
   if (bubble.scrollWidth > bubble.clientWidth + 2) throw Error("Error details overflow the bubble");
+  state.openInspiration();
+  const inspirationError = () => document.querySelector<HTMLElement>('[data-inspiration-round] [class*="runFailureText"]');
+  await wait(() => inspirationError()?.textContent === sample.expected[language], "matching inspiration error with folded trajectory");
+  const error = inspirationError()!;
+  const actions = error.closest('p')!.parentElement!.querySelectorAll('button');
+  if (actions.length !== 1 || actions[0].textContent !== i18n.t('inspiration.thread.switchAgent')) {
+    throw Error('The failed round should only offer Switch Agent');
+  }
+  if (error.scrollWidth > error.clientWidth + 2) throw Error("Inspiration error details overflow the card");
+  if (getComputedStyle(error.querySelector('span')!).whiteSpace !== 'pre-wrap') throw Error("Inspiration error line breaks lost");
   const otherLanguage = language === "en" ? "zh-CN" : "en";
   await i18n.changeLanguage(otherLanguage);
-  await wait(() => bubble.textContent === sample.expected[otherLanguage], "live language switch");
+  await wait(() => bubble.textContent === sample.expected[otherLanguage] && error.textContent === sample.expected[otherLanguage], "live language switch");
   await i18n.changeLanguage(language);
-  await wait(() => bubble.textContent === sample.expected[language], "restore language");
-  return { fromHistory, languageSwitch: true, text: bubble.textContent };
+  await wait(() => bubble.textContent === sample.expected[language] && error.textContent === sample.expected[language], "restore language");
+  return { fromHistory, languageSwitch: true, text: bubble.textContent, inspiration: error.textContent };
 };

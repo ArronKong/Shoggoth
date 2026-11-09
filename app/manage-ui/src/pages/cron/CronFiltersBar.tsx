@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { CronListFilters } from "../../api/client";
 import type { UnifiedAgent } from "../../types";
 import CronFilterMenu from "./CronFilterMenu";
+import { CRON_SCHEDULE_TYPES } from "./CronFormLayout";
 import { IconAgent, IconSliders } from "./cronIcons";
 
 // Cron 列表筛选统一控制服务端查询参数，日历和列表共享结果集。
@@ -56,13 +57,7 @@ export default function CronFiltersBar({
         label={t("cronForm.filtersSchedules")}
         options={[
           { value: "all", label: t("cronForm.filtersAllSchedules") },
-          // 值仍是后端认的 "cron"，只把展示文案首字母大写，和同排其它标签统一。
-          { value: "cron", label: "Cron" },
-          { value: "rrule", label: t("codexAutomation.source") },
-          { value: "every", label: t("cronForm.filtersEvery") },
-          { value: "at", label: t("cronForm.filtersAt") },
-          { value: "on-exit", label: t("cronForm.filtersOnExit") },
-          { value: "stream", label: t("cronForm.filtersStream") },
+          ...CRON_SCHEDULE_TYPES.map((kind) => ({ value: kind, label: t(`cronForm.scheduleType_${kind}`) })),
         ]}
         value={filters.scheduleKind || "all"}
         onChange={(value) => set("scheduleKind", value as CronListFilters["scheduleKind"])}

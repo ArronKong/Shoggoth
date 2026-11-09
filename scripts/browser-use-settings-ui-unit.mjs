@@ -42,6 +42,7 @@ for (const language of ["zh-CN", "en"]) {
     "../../api/client": api, "../../components/Field": { Field, Switch, Select, Option },
     "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator), i18n: { language } }) },
     "./SettingsBrowserUse.module.css": { __esModule: true, default: new Proxy({}, { get: (_, key) => String(key) }) },
+    "./SettingsIcons": { SettingsIcon: () => null },
   }, { window: surface, document: surface, setInterval: () => 1, clearInterval() {} }).default;
   let cfg = { browserUse: { enabled: true, browser: "chrome", headless: false, isolated: true } }, tree;
   const change = patch => { cfg = { ...cfg, ...patch }; tree.update(React.createElement(Component, { cfg, onChange: change, disabled: false })); };

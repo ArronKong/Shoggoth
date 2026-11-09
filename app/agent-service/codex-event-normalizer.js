@@ -292,7 +292,8 @@ function normalizeCodexEvent(message, rawOptions = {}) {
   );
 
   if (method === "item/agentMessage/delta") {
-    return known("text_delta", { delta: typeof params.delta === "string" ? params.delta : "" });
+    return known("text_delta", { delta: typeof params.delta === "string" ? params.delta : "",
+      ...(["commentary", "final_answer"].includes(params.phase) ? { phase: params.phase } : {}) });
   }
   if (method === "item/reasoning/textDelta" || method === "item/reasoning/summaryTextDelta") {
     return known("reasoning_delta", { delta: typeof params.delta === "string" ? params.delta : "" });
@@ -312,7 +313,13 @@ function normalizeCodexEvent(message, rawOptions = {}) {
       return known("context_compacted", { compactionId: safeId(item.id, options) ?? identifiers.turnId });
     }
     if (item?.type === "reasoning") {
-      return known("reasoning", { itemId: safeId(item.id, options), reasoning: item.summary ?? item.content ?? [] });
+      // Some Responses providers stream public reasoning text but return an
+      // empty summary array. Prefer a real summary, then the native public
+      // content; [] must not erase the steps already shown during the turn.
+      const hasSummary = Array.isArray(item.summary)
+        && item.summary.some(text => typeof text === "string" && text.trim());
+      return known("reasoning", { itemId: safeId(item.id, options),
+        reasoning: hasSummary ? item.summary : item.content ?? item.summary ?? [] });
     }
     if (item?.type === "plan") {
       return known("plan", { itemId: safeId(item.id, options), text: item.text ?? "" });
@@ -325,8 +332,8 @@ function normalizeCodexEvent(message, rawOptions = {}) {
         // A completed commentary item seals the live bubble before the next
         // answer streams. Dropping this phase concatenates both until history
         // reloads on turn completion and suddenly splits the visible reply.
-        ...(method === "item/completed" && ["commentary", "final_answer"].includes(item.phase)
-          ? { phase: item.phase } : {}),
+        ...(["commentary", "final_answer"].includes(item.phase)
+          ? { [method === "item/started" ? "itemPhase" : "phase"]: item.phase } : {}),
       }), ...(full.contextTool ? { contextText: full.contextTool.text } : { contextIncomplete: true }) };
     }
     if (item && TOOL_ITEM_TYPES.has(item.type)) {

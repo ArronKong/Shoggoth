@@ -213,7 +213,7 @@ function decodeCursor(cursor) {
   }
 }
 
-// 统一分页：倒序 (occurredAt,id)、按 id 去重、opaque cursor、筛选校验。
+// 统一分页：倒序 (occurredAt,id)、按 id 去重、灵感每张便签只保留最新动态。
 // 非法 cursor / kind 抛错（路由层映射 400）。
 function buildActivityPage(entries, { limit, cursor, backend, kind, degradedSources = [] } = {}) {
   if (kind !== undefined && kind !== null && kind !== "" && !ACTIVITY_KINDS.has(kind)) {
@@ -226,14 +226,23 @@ function buildActivityPage(entries, { limit, cursor, backend, kind, degradedSour
   }
   const pageLimit = Math.max(1, Math.min(MAX_PAGE_LIMIT, Number.isFinite(limit) ? limit : DEFAULT_PAGE_LIMIT));
   const seen = new Set();
+  const latestByIdea = new Map();
   let list = [];
   for (const e of entries) {
     if (seen.has(e.id)) continue;
     seen.add(e.id);
-    if (backend && e.backendId !== backend) continue;
     if (kind && e.kind !== kind) continue;
-    list.push(e);
+    const ideaId = e.kind === "inspiration" ? e.inspiration.ideaId : undefined;
+    if (ideaId) {
+      const previous = latestByIdea.get(ideaId);
+      if (!previous || entryOrderDesc(e, previous) < 0) latestByIdea.set(ideaId, e);
+    } else {
+      list.push(e);
+    }
   }
+  // Select the latest round before filtering or paging so older rounds stay hidden.
+  list.push(...latestByIdea.values());
+  if (backend) list = list.filter((e) => e.backendId === backend);
   list.sort(entryOrderDesc);
   if (after) {
     list = list.filter((e) => e.occurredAt < after.occurredAt

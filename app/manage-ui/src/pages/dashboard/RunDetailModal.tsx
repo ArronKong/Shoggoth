@@ -4,7 +4,7 @@ import Modal from "../../components/Modal";
 import AgentAvatar from "../../components/AgentAvatar";
 import TurnTimeline from "../../components/TurnTimeline/TurnTimeline";
 import type { DashboardApprovalItem, DashboardRunningItem } from "../../types";
-import { fmtMs } from "../usage/charts";
+import { formatTurnElapsed, turnElapsedMs } from "../../lib/turnTimeline";
 import { dashboardRunPresentation, isTerminalRun } from "./runPresentation";
 import { useDashboardRunDetail } from "./useDashboardRunDetail";
 import "./runDetailResources";
@@ -36,9 +36,9 @@ export default function RunDetailModal({ item, agentName, open, onClose, onClose
   const title = detail?.title || (running.title && !["Cron", "Kanban", "Inspiration", item.id].includes(running.title) ? running.title : "")
     || t("dashboardRun.task");
   const status = view?.status || running.status || "unknown";
-  const startedAt = detail?.startedAt ?? running.startedAt;
+  const startedAt = detail?.createdAt ?? running.createdAt ?? detail?.startedAt ?? running.startedAt;
   const endedAt = detail?.finishedAt ?? (view?.live === false ? undefined : now);
-  const duration = startedAt != null && endedAt != null ? fmtMs(Math.max(0, endedAt - startedAt)) : "—";
+  const duration = formatTurnElapsed(turnElapsedMs(startedAt, endedAt));
 
   return <Modal open={open} onClose={onClose} onOpenChangeComplete={value => { if (!value) onClosed(); }}
     title={title} subtitle={t("dashboardRun.subtitle")} className={styles.modal}>

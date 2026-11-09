@@ -13,7 +13,7 @@ function agentRuntimeProfileViews(productStore, profileId = null) {
       ...profile, runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
       runtimeAccountId: binding.runtimeAccountId, selectedBindingId: binding.id,
       enabled: profile.enabled && binding.enabled,
-    }));
+    }, binding));
   });
 }
 

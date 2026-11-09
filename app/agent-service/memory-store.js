@@ -19,6 +19,9 @@ const MEMORY_STATUSES = Object.freeze(["candidate", "active", "superseded", "del
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_CONTENT_BYTES = 8 * 1024;
+// Older session capture bounded characters, not UTF-8 bytes (15 x 500 code
+// points). Read those entries intact; every write retains the 8 KiB limit.
+const MAX_READ_CONTENT_BYTES = 32 * 1024;
 const MAX_SOURCE_REFS = 64;
 const MAX_ITEMS = 100_000;
 const MAX_LOG_BYTES = 256 * 1024 * 1024;
@@ -43,7 +46,7 @@ function assertId(value, field) {
   }
   return value;
 }
-function validateMemoryItem(input, expectedProfileId = null) {
+function validateMemoryItem(input, expectedProfileId = null, { maxContentBytes = MAX_CONTENT_BYTES } = {}) {
   const fields = [
     "id", "profileId", "scope", "type", "content", "sourceRefs", "confidence",
     "sensitivity", "status", "validFrom", "validUntil", "supersedes", "createdAt", "updatedAt",
@@ -57,7 +60,7 @@ function validateMemoryItem(input, expectedProfileId = null) {
   if (!MEMORY_SCOPES.includes(input.scope) || !MEMORY_TYPES.includes(input.type)
     || typeof input.content !== "string" || !input.content.isWellFormed() || input.content.includes("\0")
     || Buffer.byteLength(input.content, "utf8") === 0
-    || Buffer.byteLength(input.content, "utf8") > MAX_CONTENT_BYTES
+    || Buffer.byteLength(input.content, "utf8") > maxContentBytes
     || !Array.isArray(input.sourceRefs) || input.sourceRefs.length === 0
     || input.sourceRefs.length > MAX_SOURCE_REFS
     || input.sourceRefs.some((ref) => typeof ref !== "string" || !ID_PATTERN.test(ref))
@@ -344,6 +347,7 @@ class MemoryStore {
 
 module.exports = {
   MAX_CONTENT_BYTES,
+  MAX_READ_CONTENT_BYTES,
   MEMORY_SCHEMA_VERSION,
   MEMORY_SCOPES,
   MEMORY_SENSITIVITIES,

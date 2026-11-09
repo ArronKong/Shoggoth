@@ -24,3 +24,7 @@
 .avatar[data-avatar-state="loading"] > img {
   visibility: hidden;
 }
+
+.avatar[data-avatar-grayscale] > img {
+  filter: grayscale(1);
+}

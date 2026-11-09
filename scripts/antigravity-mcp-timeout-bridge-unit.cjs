@@ -70,7 +70,7 @@ async function fixture(t, options = {}) {
   const fatal = new Promise((resolve) => { wakeFatal = resolve; });
   const bridge = new AntigravityMcpTimeoutBridge({
     paths: { trustedRoot: root, runtimeDir: path.join(root, "run") },
-    server: { version: "1.4.3", harnessPath, serverPath }, bootstrapPath,
+    server: { version: "nightly", harnessPath, serverPath, contracts: { mcpTimeout: 1 } }, bootstrapPath,
     getAcpPid: () => 10001,
     onFatal: (error) => { fatals.push(error); wakeFatal(error); },
     readProcessIdentity: (target) => identities.get(target) || "",
@@ -136,7 +136,7 @@ async function until(check) {
 }
 
 test("version pin and private bootstrap/control environment are enforced", async (t) => {
-  assert.throws(() => new AntigravityMcpTimeoutBridge({ server: { version: "1.2.1" } }), { code: CODE + "VERSION_UNSUPPORTED" });
+  assert.throws(() => new AntigravityMcpTimeoutBridge({ server: { version: "1.4.3" } }), { code: CODE + "CONTRACT_UNSUPPORTED" });
   const f = await fixture(t);
   assert.equal(fs.statSync(path.dirname(f.env.SHOGGOTH_AGY_TIMEOUT_SOCKET)).mode & 0o777, 0o700);
   assert.equal(fs.statSync(f.env.SHOGGOTH_AGY_TIMEOUT_SOCKET).mode & 0o777, 0o600);

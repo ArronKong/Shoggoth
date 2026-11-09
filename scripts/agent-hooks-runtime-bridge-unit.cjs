@@ -3,21 +3,21 @@ const test = require("node:test"), assert = require("node:assert/strict");
 const crypto = require("node:crypto"), path = require("node:path");
 const { PiRuntimeHost } = require("../app/agent-service/pi-runtime-host");
 const { RuntimeHookBridge, runtimeHookCapabilities, assertHookSupported, HOOK_RUNTIME_TARGETS } = require("../app/agent-service/runtime-hook-bridge");
-const { PI_HOOK_TITLE, PI_CALL_BINDING_TITLE, PI_HOOK_VERSION, piNativeHookCapabilities } = require("../app/agent-service/pi-hook-contract");
+const { PI_HOOK_TITLE, PI_CALL_BINDING_TITLE, PI_HOOK_CONTRACT_VERSION, piNativeHookCapabilities } = require("../app/agent-service/pi-hook-contract");
 const { bindingElicitation } = require("../app/agent-service/runtime-mcp-call-binding");
 const { openFixture, sendAndDrain, FakeHost, directRuntimeManager } = require("./shoggoth-work-run-coordinator-unit.cjs");
 
-test("Pi Hook integrity gate: shipped extension bytes and runtime version match the reviewed pin", () => {
+test("Pi Hook integrity gate checks the owned callback contract and shipped extension bytes", () => {
   const manifest = require("../app/agent-service/pi-hook-extension-manifest.json");
   const extension = require("node:fs").readFileSync(path.join(__dirname, "../resources/pi/shoggoth-pi-extension.mjs"));
   assert.equal(manifest.schemaVersion, 1);
-  assert.equal(manifest.runtimeVersion, PI_HOOK_VERSION, "Pi Hook manifest must match the reviewed runtime contract");
+  assert.equal(manifest.contractVersion, PI_HOOK_CONTRACT_VERSION, "Pi Hook manifest must match the owned callback contract");
   assert.equal(manifest.extensionSha256, crypto.createHash("sha256").update(extension).digest("hex"),
     "Pi native Hooks are disabled: extension bytes diverged from the reviewed pin. Review tool_call hooks, binding payloads and argument handling before updating pi-hook-extension-manifest.json; never auto-regenerate the pin.");
 });
 
 function routingHost() {
-  const host = Object.assign(Object.create(PiRuntimeHost.prototype), { state: "ready", cliVersion: [0, 84, 4],
+  const host = Object.assign(Object.create(PiRuntimeHost.prototype), { state: "ready", cliVersion: [0, 84, 4], protocolProbeVerified: true,
     extensionPath: path.join(__dirname, "../resources/pi/shoggoth-pi-extension.mjs"), serverRequestHandlers: new Map(),
     nativeHookScope: { runId: "run", snapshotId: "snapshot", toolNames: ["write"] }, now: Date.now });
   const active = { settled: false, sessionId: "session", turnId: "turn", promptTimer: null, promptTimeoutPaused: false };
@@ -37,7 +37,7 @@ test("Pi private input routes full Hook and MCP binding payloads without a user 
   assert.equal(binding.value, "accept"); assert.deepEqual(proof._meta, params._meta);
   assert.equal(proof.serverName, "shoggoth"); assert.equal(proof.sessionId, active.sessionId);
 });
-test("Pi private requests reject changed versions, inactive turns, undeclared tools, injected deadlines and oversized data", async () => {
+test("Pi private requests reject unverified protocols, inactive turns, undeclared tools, injected deadlines and oversized data", async () => {
   const { host, active } = routingHost(); let effects = 0;
   host.serverRequestHandlers.set("shoggoth/hooks/tool", () => { effects++; return {}; });
   const request = { id: "private", method: "input", title: PI_HOOK_TITLE,
@@ -48,8 +48,18 @@ test("Pi private requests reject changed versions, inactive turns, undeclared to
     assert.equal((await host._onExtensionRequest(active, value)).cancelled, true);
   }
   active.settled = true; assert.equal((await host._onExtensionRequest(active, request)).cancelled, true); active.settled = false;
-  host.cliVersion = [0, 84, 5]; assert.equal((await host._onExtensionRequest(active, request)).cancelled, true);
+  host.protocolProbeVerified = false; assert.equal((await host._onExtensionRequest(active, request)).cancelled, true);
   assert.equal(effects, 0);
+});
+
+test("Pi native Hooks use protocol and extension identity across old, current and nonstandard version labels", () => {
+  const { host } = routingHost();
+  for (const version of [[0, 84, 4], [1, 5, 0], [2, 0, 0], "nightly", null]) {
+    host.cliVersion = version;
+    assert.equal(piNativeHookCapabilities(host).runtime_builtin?.guard.status, "supported");
+  }
+  host.extensionPath = __filename;
+  assert.deepEqual(piNativeHookCapabilities(host), {}, "changed extension bytes never inherit the contract");
 });
 test("Coordinator binds the native Hook reverse request to its actual Pi Host, Run, turn and current lease", async () => {
   const rawHost = new FakeHost([]); let revision = "one", release, effects = 0;
@@ -78,7 +88,7 @@ test("Coordinator binds the native Hook reverse request to its actual Pi Host, R
     revision = "two"; release(); await assert.rejects(pending, { code: "HOST_CAPABILITY_REVOKED" }); assert.equal(effects, 0);
   } finally { await fixture.coordinator.close(); }
 });
-test("eight-entry capability matrix is explicit; only pinned Pi has a native tool bridge", () => {
+test("eight-entry capability matrix is explicit; only a verified Pi contract has a native tool bridge", () => {
   assert.equal(HOOK_RUNTIME_TARGETS.length, 8);
   const { host } = routingHost(), native = piNativeHookCapabilities(host);
   for (const runtime of HOOK_RUNTIME_TARGETS) {

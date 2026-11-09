@@ -47,16 +47,19 @@ function devWsProxy(): ProxyOptions {
 // Shared app modules stay CommonJS for the Service and Electron. The production
 // build converts them, but the dev server serves files as written, so there
 // their `module.exports = { ... }` names are re-exported as ES exports.
-const SHARED_COMMONJS = new Set([fileURLToPath(new URL("../group-journal-recovery.js", import.meta.url))]);
+const SHARED_COMMONJS = new Set([
+  fileURLToPath(new URL("../group-journal-recovery.js", import.meta.url)),
+  fileURLToPath(new URL("../agent-service/group-mentions.js", import.meta.url)),
+]);
 function sharedCommonJsDevExports(): Plugin {
   return {
     name: "shoggoth-shared-commonjs-dev",
     apply: "serve",
     transform(code, id) {
       if (!SHARED_COMMONJS.has(id.split("?")[0])) return null;
-      const match = /^module\.exports = \{ ([\w$, ]+) \};$/mu.exec(code);
+      const match = /^module\.exports = \{([\w$,\s]+)\};$/mu.exec(code);
       if (!match || /\brequire\(/u.test(code)) throw new Error(`${id} is not a plain shared CommonJS module`);
-      return { code: code.replace(match[0], `export { ${match[1]} };`), map: null };
+      return { code: code.replace(match[0], `export {${match[1]}};`), map: null };
     },
   };
 }

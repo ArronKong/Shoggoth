@@ -36,7 +36,7 @@ export default function RuntimeStatusList({ runtimes, loading, error, busy, onTo
             <span className={`settings-health ${tone === "is-off" ? "" : tone}`}><i />{t(`settings.${status}`)}</span>
             {runtime.enabled && runtime.serviceConnected && runtime.features && <RuntimeFeatureNotice features={runtime.features} />}
           </div>
-          {runtime.toggleable !== false && runtime.releaseEnabled && runtime.installation === "available" && <button className="ui-cbtn ui-cbtn--sm" disabled={busy} onClick={() => onToggle(runtime)}>
+          {runtime.toggleable !== false && runtime.releaseEnabled && runtime.installation === "available" && <button className="btn-secondary btn-sm" disabled={busy} onClick={() => onToggle(runtime)}>
             {t(runtime.enabled ? status === "runtimeReady" ? "settings.disconnect" : "agents.disable" : "settings.reconnect")}
           </button>}
         </article>;

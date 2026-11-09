@@ -434,11 +434,17 @@ function publicServiceErrorCode(error) {
     : "SERVICE_REQUEST_FAILED";
 }
 
-function toolFailureResponse(id, error) {
+// A stale revision or supersedes target reaches a memory write as a plain
+// state conflict; say how to recover without exposing the Service's message.
+const MEMORY_WRITE_CONFLICT_HINT = "Memory changed since your last memory_search, or the memory you named is no longer active or has a different scope. Run memory_search again, then retry with the current memory id and the returned expectedRevision; when correcting with supersedes, use that memory's own scope.";
+
+function toolFailureResponse(id, error, name = null) {
   const code = publicServiceErrorCode(error);
   const message = MCP_PRODUCT_PUBLIC_MESSAGES[code] || SECRET_PUBLIC_MESSAGES[code] || "Shoggoth Service request failed";
+  const hint = code === "MCP_TOOL_STATE_CONFLICT" && ["memory_save", "memory_forget"].includes(name)
+    ? MEMORY_WRITE_CONFLICT_HINT : null;
   return jsonRpcResult(id, {
-    content: [{ type: "text", text: `${message} (${code})` }],
+    content: [{ type: "text", text: hint ? `${message}（${name}）：${hint} (${code})` : `${message} (${code})` }],
     structuredContent: { error: { code } },
     isError: true,
   });
@@ -1376,7 +1382,7 @@ function createMcpStdioHandler(options = {}) {
         const paged = productToolResults.pagedResult(resultCache, message.params.name, result);
         return toolSuccessResponse(message.id, paged ?? result, message.params.name);
       } catch (error) {
-        return toolFailureResponse(message.id, error);
+        return toolFailureResponse(message.id, error, message.params.name);
       }
     }
     return hasId ? jsonRpcError(message.id, -32601, "Method not found") : null;

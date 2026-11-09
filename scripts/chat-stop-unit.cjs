@@ -19,7 +19,8 @@ for (const native of [false, true]) test(`intentional stop keeps partial ${nativ
   await backend._settleTerminal(context, state, terminal, { skipHistory: true });
   assert.equal(calls.length, 1, "exactly one terminal callback");
   if (native) assert.deepEqual(calls[0], ["native", "aborted", parts, { runId: "run-stop", displayId: "native-run:run-stop" }]);
-  else assert.deepEqual(calls[0], ["final", parts[0].text, false, { runId: "run-stop", stopReason: "aborted" }]);
+  else assert.deepEqual(calls[0], ["final", parts[0].text, false,
+    { runId: "run-stop", displayId: "native-run:run-stop", stopReason: "aborted" }]);
   assert.equal(backend._activeBySession.has(context.sessionKey), false);
 });
 

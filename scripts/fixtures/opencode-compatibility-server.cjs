@@ -10,6 +10,7 @@ else {
   if (scenario === "missing-route") delete paths["/permission/{requestID}/reply"];
   const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
   if (scenario === "unsafe-permission") config.permission["*"] = "allow";
+  if (scenario === "missing-plugin") config.plugin = [];
   const server = http.createServer((request, response) => {
     const allowed = scenario === "no-auth" || request.headers.authorization === authorization;
     response.writeHead(allowed ? 200 : 401, { "Content-Type": "application/json" });

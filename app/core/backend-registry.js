@@ -249,6 +249,18 @@ class BackendRegistry extends EventEmitter {
     return { agents: groups.flat() };
   }
 
+  async getInspirationModels({ backendId, agentId }) {
+    const protocol = require("../agent-service/inspiration-service-protocol");
+    if (!protocol.validInspirationAgentRef({ backendId, agentId })) {
+      throw Object.assign(new Error(protocol.PUBLIC_MESSAGES.INSPIRATION_INVALID), { code: "INSPIRATION_INVALID" });
+    }
+    const backend = this._activeGet(backendId);
+    if (backend?.getInspirationCapabilities().execute !== true) {
+      throw Object.assign(new Error(protocol.PUBLIC_MESSAGES.INSPIRATION_UNSUPPORTED), { code: "INSPIRATION_UNSUPPORTED" });
+    }
+    return backend.getInspirationModels(agentId);
+  }
+
   startInspiration(id, input) {
     const backend = this._activeGet(input.backendId);
     if (!backend || backend.getInspirationCapabilities().execute !== true) {
@@ -1613,9 +1625,10 @@ class BackendRegistry extends EventEmitter {
   }
 
   /** 群 owner 持有全部内部会话归属；按后端区分，避免误伤另一个后端的同名会话。 */
-  async _chatSearchExclusions() {
-    if (!this._inspirationOwner?.listGroupChats) return new Map();
-    const result = await this.listGroupChats({ includeArchived: true });
+  async _chatSearchScope(includeGroups = false) {
+    if (!this._inspirationOwner?.listGroupChats) return { exclusions: new Map() };
+    // internalSessions is complete even when the group list is limited to the sidebar scope.
+    const result = await this.listGroupChats({ includeArchived: !includeGroups });
     if (!Array.isArray(result?.internalSessions)) throw new Error("Group session scope unavailable");
     const byBackend = new Map();
     for (const session of result.internalSessions) {
@@ -1625,7 +1638,53 @@ class BackendRegistry extends EventEmitter {
       if (!byBackend.has(session.backendId)) byBackend.set(session.backendId, new Set());
       byBackend.get(session.backendId).add(session.key);
     }
-    return byBackend;
+    return { exclusions: byBackend, groups: result.groups };
+  }
+
+  async _searchGroupChatHits(groups, query) {
+    const results = [];
+    if (!Array.isArray(groups)) return { status: "unavailable", results };
+    const activeGroups = groups.filter(view => view?.group?.status === "active");
+    if (activeGroups.length === 0) return { status: "complete", results };
+    // group.search has a stricter query contract than direct chat search.
+    if (!query.isWellFormed() || query.includes("\0") || [...query].length > 200) {
+      return { status: "unavailable", results };
+    }
+    let searched = 0;
+    let incomplete = false;
+    await Promise.all(activeGroups.map(async ({ group, members, ownerScope }) => {
+      let cursor = null;
+      try {
+        if (!ownerScope) throw new Error("Missing group owner scope");
+        // Like direct search, use a fixed candidate budget across global offsets.
+        // A page with zero hits may still have a cursor over legacy excerpts.
+        for (let pageIndex = 0; pageIndex < 5; pageIndex++) {
+          const page = await this.searchGroupChatMessages(group.id, { query, cursor, limit: 20 });
+          if (pageIndex === 0) searched++;
+          if (page.partial) incomplete = true;
+          for (const { message, snippet, snippetOffset } of page.hits) {
+            const memberId = message.author.memberId;
+            const authorName = memberId ? members.find(member => member.id === memberId)?.displayName : undefined;
+            results.push({
+              kind: "group",
+              groupName: group.name,
+              ownerScope,
+              message,
+              ...(authorName ? { authorName } : {}),
+              snippet: snippetOffset > 0 ? `…${snippet}` : snippet,
+              ts: Number.isFinite(message.createdAt) ? message.createdAt : null,
+            });
+          }
+          if (!page.hasMore) return;
+          cursor = page.nextCursor;
+        }
+      } catch (error) {
+        console.error(`[registry] group chat search unavailable: ${error?.code || "UNAVAILABLE"}`);
+      }
+      incomplete = true;
+    }));
+    const status = searched === 0 ? "unavailable" : incomplete ? "partial" : "complete";
+    return { status, results };
   }
 
   /**
@@ -1641,7 +1700,8 @@ class BackendRegistry extends EventEmitter {
     const backend = this._activeGet(backendId);
     if (!backend) return { supported: false, results: [] };
     try {
-      const excluded = (await this._chatSearchExclusions()).get(backendId) ?? new Set();
+      const { exclusions } = await this._chatSearchScope();
+      const excluded = exclusions.get(backendId) ?? new Set();
       const result = await backend.searchChat(agentId, query,
         { ...opts, ...(excluded.size ? { excludeSessionKeys: [...excluded] } : {}) });
       return { ...result, results: (result.results ?? []).filter((hit) => !excluded.has(hit.key)) };
@@ -1652,17 +1712,17 @@ class BackendRegistry extends EventEmitter {
   }
 
   /**
-   * Global chat search across every active backend and agent. The backend-level
-   * primitive stays agent-scoped; aggregation belongs here so the renderer makes
-   * one request and one broken/unsupported agent cannot sink healthy results.
+   * Global chat search across active backends and optionally public group history.
+   * The renderer makes one request and a broken source cannot sink healthy results.
    * @param {string} query
-   * @param {{limit?: number, offset?: number}} [opts]
-   * @returns {Promise<{query:string,offset:number,searchedAgents:number,unsupportedAgents:number,failedAgents:number,truncated:boolean,hasMore:boolean,nextOffset?:number,results:Array<object>}>}
+   * @param {{limit?: number, offset?: number, includeGroups?: boolean}} [opts]
+   * @returns {Promise<{query:string,offset:number,searchedAgents:number,unsupportedAgents:number,failedAgents:number,groupSearch?:string,truncated:boolean,hasMore:boolean,nextOffset?:number,results:Array<object>}>}
    */
   async searchAllChat(query, opts = {}) {
     const q = String(query || "").trim().slice(0, 4096);
-    const limit = Number(opts.limit) > 0 ? Math.min(Math.floor(Number(opts.limit)), 100) : 50;
-    const offset = Number(opts.offset) >= 0 ? Math.min(Math.floor(Number(opts.offset)), 10000) : 0;
+    const limit = Number(opts.limit) > 0 ? Math.max(1, Math.min(Math.floor(Number(opts.limit)), 100)) : 50;
+    const maxOffset = 10_000;
+    const offset = Number(opts.offset) >= 0 ? Math.min(Math.floor(Number(opts.offset)), maxOffset) : 0;
     if (!q) {
       return {
         query: "",
@@ -1677,10 +1737,13 @@ class BackendRegistry extends EventEmitter {
     }
 
     // 群 owner 是内部会话归属的权威；无法核对时不把隐藏回合原文当成普通搜索结果返回。
-    const exclusionsPromise = this._chatSearchExclusions().catch((error) => {
+    const scopePromise = this._chatSearchScope(opts.includeGroups).catch((error) => {
       console.error(`[registry] group session scope for chat search unavailable: ${error?.code || "UNAVAILABLE"}`);
       return null;
     });
+    const groupSearchPromise = opts.includeGroups
+      ? scopePromise.then(scope => this._searchGroupChatHits(scope?.groups, q))
+      : null;
     const targetGroups = await Promise.all(this._activeBackends().map(async (backend) => {
       const seen = new Set();
       let listed = [];
@@ -1708,7 +1771,7 @@ class BackendRegistry extends EventEmitter {
       return targets;
     }));
     const targets = targetGroups.flat();
-    const exclusions = await exclusionsPromise;
+    const scope = await scopePromise;
 
     let searchedAgents = 0;
     let unsupportedAgents = 0;
@@ -1716,8 +1779,8 @@ class BackendRegistry extends EventEmitter {
     let truncated = false;
     const results = [];
     await Promise.all(targets.map(async ({ backend, agentId, agentName }) => {
-      if (exclusions === null) { failedAgents += 1; return; }
-      const excluded = exclusions.get(backend.id) ?? new Set();
+      if (scope === null) { failedAgents += 1; return; }
+      const excluded = scope.exclusions.get(backend.id) ?? new Set();
       let search;
       try {
         // Fetch the same bounded candidate pool for every page. Varying this by
@@ -1754,21 +1817,33 @@ class BackendRegistry extends EventEmitter {
       }
     }));
 
-    results.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)
-      || a.agentName.localeCompare(b.agentName)
-      || a.key.localeCompare(b.key)
-      || String(a.messageId || "").localeCompare(String(b.messageId || "")));
+    const groupSearch = await groupSearchPromise;
+    for (const hit of groupSearch?.results ?? []) results.push(hit);
+    results.sort((a, b) => {
+      const byTime = (b.ts ?? 0) - (a.ts ?? 0);
+      if (byTime) return byTime;
+      if (a.kind === "group" && b.kind === "group") {
+        return a.message.groupId.localeCompare(b.message.groupId) || b.message.seq - a.message.seq;
+      }
+      if (a.kind === "group") return 1;
+      if (b.kind === "group") return -1;
+      return a.agentName.localeCompare(b.agentName)
+        || a.key.localeCompare(b.key)
+        || String(a.messageId || "").localeCompare(String(b.messageId || ""));
+    });
     const page = results.slice(offset, offset + limit);
-    const hasMore = offset + page.length < results.length;
+    const nextOffset = offset + page.length;
+    const hasMore = nextOffset <= maxOffset && nextOffset < results.length;
     return {
       query: q,
       offset,
       searchedAgents,
       unsupportedAgents,
       failedAgents,
-      truncated,
+      ...(groupSearch ? { groupSearch: groupSearch.status } : {}),
+      truncated: truncated || (!hasMore && nextOffset < results.length),
       hasMore,
-      ...(hasMore ? { nextOffset: offset + page.length } : {}),
+      ...(hasMore ? { nextOffset } : {}),
       results: page,
     };
   }

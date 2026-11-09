@@ -67,7 +67,8 @@ scope.verifyRuntimeCompatibility = async (locale: string) => {
   const text = (runtime: string) => document.querySelector(`[data-runtime="${runtime}"]`)!.textContent!;
   check(text("codex").includes(zh ? "已就绪" : "Ready"), "only verified CLI is ready");
   check(text("codex").includes(zh ? "新建对话" : "start a new chat"), "missing resume preserves history with a new-chat direction");
-  check(text("codex").includes(zh ? "可用附件：文件" : "Available attachments: files"), "optional attachments are explicit without disabling chat");
+  check(text("codex").includes(zh ? "不支持原生压缩" : "Native compaction unavailable"), "unsupported compaction is explicit without disabling chat");
+  check(!text("codex").includes(zh ? "可用附件" : "Available attachments"), "Settings omits attachment details");
   check(text("grok-build").includes(zh ? "尚未验证" : "Not verified"), "unverified is explicit");
   check(text("opencode").includes(zh ? "需要登录" : "Sign-in required"), "signed out is distinct");
   check(text("ext-catalog").includes(zh ? "尚未验证" : "Not verified"), "installed extension stays unverified without instance proof");

@@ -126,9 +126,10 @@ const checks = [
   ["loader color inherits from its current surface", /fill:\s*var\(--fusion-loader-color,\s*currentColor\)/.test(styles)],
   ["gallery imports FusionLoader", /import FusionLoader from "\.\.\/components\/FusionLoader"/.test(gallery)],
   ["gallery renders only both fusion loader sizes", /data-gallery="fusion-loader"/.test(gallery) && !/data-gallery="dot-loader"/.test(gallery) && /<FusionLoader size="sm" label=\{t\("common\.loading"\)\}/.test(gallery) && /<FusionLoader label=\{t\("componentsGallery\.fusionLoaderLabel"\)\}/.test(gallery)],
-  // Agent / 群聊列表只显示逐字文案；消息首字节等待仍使用 FusionLoader。
-  ["chat keeps the small fusion loader only in the first-byte state", !/DotLoader/.test(chat) && (chat.match(/<FusionLoader(?:\s+size="sm")?/g) || []).length === 1],
+  // Agent / 群聊列表只显示逐字文案。首字节等待和封存历史加载复用 FusionLoader。
+  ["chat keeps fusion loaders scoped to first-byte and archive loading", !/DotLoader/.test(chat) && (chat.match(/<FusionLoader(?:\s+size="sm")?/g) || []).length === 2],
   ["first-byte chat loader announces its status without visible copy", /<FusionLoader size="sm" ariaLabel=\{t\("chat\.liveStatus\.running"\)\} \/>/.test(chat)],
+  ["archive loading shows the small fusion loader with a status label", /<FusionLoader size="sm" label=\{t\("chat\.archiveLoading"\)\} \/>/.test(chat)],
   ["agent-list no longer includes the fusion loader", !/chat-thinking-dots/.test(chat) && !/chat-thinking-dots/.test(chatStyles)],
   ["model menu uses the small fusion loader", !/DotLoader/.test(modelMenu) && /<FusionLoader size="sm" label=\{t\("chat\.loadingModels"\)\}/.test(modelMenu)],
   ["activity feed uses the small fusion loader", !/DotLoader/.test(activityFeed) && /<FusionLoader size="sm" label=\{t\("common\.loading"\)\}/.test(activityFeed)],

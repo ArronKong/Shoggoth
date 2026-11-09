@@ -89,7 +89,9 @@ test("OpenCode old/future/nonstandard labels use the actual private protocol and
   for (const [version, scenario, failure] of [["1.18.31", "valid"], ["2.0.0", "valid"], ["nightly", "valid"], ["2.0.0", "no-compact"],
     ["1.18.32", "missing-route", "OPENCODE_PROTOCOL_UNSUPPORTED"],
     ["1.18.32", "no-auth", "OPENCODE_HANDSHAKE_FAILED"],
-    ["1.18.32", "unsafe-permission", "OPENCODE_PERMISSION_UNSAFE"]]) {
+    ["1.18.32", "unsafe-permission", "OPENCODE_PERMISSION_UNSAFE"],
+    ["nightly", "missing-projection", "SECRET_MODEL_PROJECTION_UNAVAILABLE"],
+    ["nightly", "missing-plugin", "SECRET_MODEL_PROJECTION_UNAVAILABLE"]]) {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sg-opencode-contract-")));
     const account = "native-opencode-default-v1";
     const host = new OpenCodeRuntimeHost({ paths: { stateDir: path.join(root, "state"), trustedRoot: root },
@@ -97,7 +99,9 @@ test("OpenCode old/future/nonstandard labels use the actual private protocol and
       runtimeEnvironment: Object.freeze({ runtime: "opencode", runtimeAccountId: account, home: root,
         binaryPath: process.execPath, configurationMode: "native", configSourceHome: root,
         launchArgs: Object.freeze([]), spawnEnv: Object.freeze({ HOME: root, XDG_DATA_HOME: root }) }),
-      controlInstance: true, permissionPolicy: POLICY,
+      workspace: root, controlInstance: false, permissionPolicy: POLICY,
+      secretGateway: { bindLocalSessions: async () => ({ baseUrl: `http://127.0.0.1:9/${"a".repeat(64)}`,
+        ready: () => scenario !== "missing-projection", close() {} }) },
       spawnProcess(_binary, args, options) { return require("node:child_process").spawn(process.execPath,
         [path.join(__dirname, "fixtures/opencode-compatibility-server.cjs"), scenario, version, ...args], options); },
     });

@@ -75,10 +75,6 @@ const STDERR_SETTLE_MS = 100;
 const LOGIN_FLOW_PATTERN = /Credentials missing or invalid|Launching browser login flow|Open the following link to authenticate/u;
 const PROMPT_ERROR_PATTERN = /Antigravity SDK error processing prompt for session ([0-9A-Za-z-]{1,128})/u;
 const LIVE_UNKNOWN_TURNS = new WeakMap();
-// Both releases retain the managed tool filter and the same constrained native
-// result schema. 1.4.3 still broadcasts step errors across open tool calls.
-// Keep this explicit: a future distribution requires its own compatibility audit.
-const VERIFIED_COMPATIBILITY_VERSIONS = new Set(["1.2.1", "1.4.3"]);
 // 1.4.3's PromptResponse usage is a per-turn delta, unlike usage_update
 // (context occupancy). The native total excludes cached reads; normalize the
 // supplied counts to the product's inclusive input/output convention.
@@ -397,16 +393,16 @@ class AntigravityAcpRuntimeHost {
       workspaceShardId,
     }).open());
     this.server = await this.verifyServer({ paths: this.paths, fs: this.fs });
-    if (this.modelOnlyInstance && this.server.version !== "1.4.3"
-      || this.workspaceExecutionVersion === 1 && !VERIFIED_COMPATIBILITY_VERSIONS.has(this.server.version)) {
-      throw hostError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "This Antigravity ACP version has no verified managed tool boundary");
+    if (this.modelOnlyInstance && this.server.contracts?.modelOnly !== 1
+      || this.workspaceExecutionVersion === 1 && this.server.contracts?.workspaceExecution !== 1) {
+      throw hostError("WORKSPACE_RUNTIME_GUARD_UNAVAILABLE", "Antigravity ACP has no verified managed tool boundary");
     }
     if (path.resolve(this.runtimeEnvironment.binaryPath) !== path.resolve(this.server.serverPath)) {
       throw hostError("ANTIGRAVITY_ACP_INTEGRITY_FAILED", "Antigravity runtime binary does not match the verified ACP server");
     }
     if (this.state !== "starting") throw hostError("RUNTIME_HOST_TERMINATED", "Antigravity host stopped before keychain preparation");
-    if (this.credentialStorage === "file" && this.server.version !== "1.4.3") {
-      throw hostError("ANTIGRAVITY_CREDENTIAL_STORAGE_UNSUPPORTED", "This Antigravity version has no verified file credential storage");
+    if (this.credentialStorage === "file" && this.server.contracts?.fileCredentialStorage !== 1) {
+      throw hostError("ANTIGRAVITY_CREDENTIAL_STORAGE_UNSUPPORTED", "Antigravity has no verified file credential storage contract");
     }
     if (this.credentialStorage === "keychain") {
       this.keychainAbort = new AbortController();
@@ -428,8 +424,8 @@ class AntigravityAcpRuntimeHost {
       this.workspaceExecutionHome = prepareAntigravityWorkspaceExecution({ fs: this.fs,
         paths: this.paths, acpHome: this.acpHome });
     }
-    if (VERIFIED_COMPATIBILITY_VERSIONS.has(this.server.version)) this.nativeToolResults = new AntigravityNativeToolResults({ home: this.home });
-    if (this.server.version === "1.4.3") {
+    if (this.server.contracts?.nativeToolResults === 1) this.nativeToolResults = new AntigravityNativeToolResults({ home: this.home });
+    if (this.server.contracts?.mcpTimeout === 1) {
       const bootstrapPath = this.resolveMcpTimeoutBootstrap();
       this.mcpTimeoutBridge = this.createMcpTimeoutBridge({ paths: this.paths, server: this.server, bootstrapPath,
         getAcpPid: () => this.child?.pid,
@@ -1434,7 +1430,7 @@ class AntigravityAcpRuntimeHost {
         active.pendingToolResultBytes -= active.pendingToolResults.get(update.toolCallId)?.pendingBytes || 0;
         active.pendingToolResults.delete(update.toolCallId);
       }
-      if (update.status === "failed" && VERIFIED_COMPATIBILITY_VERSIONS.has(this.server.version)) {
+      if (update.status === "failed" && this.server.contracts?.nativeToolResults === 1) {
         this._publishUnverifiedToolResult(active, update, this.now());
       } else this._publishToolUpdate(active, update);
       return;
@@ -1706,7 +1702,7 @@ class AntigravityAcpRuntimeHost {
     this.activeTurns.delete(active.sessionId);
     if (active.timedOut) return;
     const common = { known: true, method: "session/update", sessionId: active.sessionId, turnId: active.turnId };
-    const usage = this.modelOnlyInstance && this.server.version === "1.4.3" ? modelOnlyTurnUsage(response.usage) : null;
+    const usage = this.modelOnlyInstance && this.server.contracts?.modelUsage === 1 ? modelOnlyTurnUsage(response.usage) : null;
     if (usage) this._publish({ ...common, type: "usage", usage, responseId: `antigravity-usage-${active.turnId}` });
     if (text.length > 0) {
       this._publish({ ...common, type: "text", itemId, text, phase: "final_answer", delivery: "local" });

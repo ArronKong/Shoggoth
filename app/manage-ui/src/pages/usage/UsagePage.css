@@ -112,6 +112,9 @@
 .management-page.usage-page .usage-row--hero > .usage-section {
   height: 320px;
 }
+.management-page.usage-page .usage-row--hero > :only-child {
+  grid-column: 1 / -1;
+}
 /* 537 只作上限：内容少（如 Hermes 4 行）卡随内容收，不再空一大块（R220）。
    同排两卡仍靠 grid stretch 等高（取较高者）。 */
 .management-page.usage-page .usage-row--split > .usage-section {

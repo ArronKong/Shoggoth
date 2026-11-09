@@ -97,8 +97,13 @@ class DeepSeekHarnessRuntimePool {
     const workspace = controlInstance ? null : normalizeDeepSeekHarnessWorkspace(options.workspace);
     let executionRunId;
     try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
-    const key = routeKey(id, accountId, controlInstance, workspace, executionRunId);
+    // Background memory/learning text is tool-free: like Antigravity and Grok,
+    // its host gets no product MCP server and its own pool key.
+    const modelOnlyInstance = options.modelOnly === true;
+    const key = JSON.stringify([routeKey(id, accountId, controlInstance, workspace, executionRunId), modelOnlyInstance]);
     const permissionPolicy = normalizeDeepSeekHarnessPermissionPolicy(options.permissionPolicy);
+    if (modelOnlyInstance && (controlInstance || workspace !== null || permissionPolicy.approvalPolicy !== "never"
+      || permissionPolicy.sandbox !== "read-only")) return Promise.reject(poolError("MODEL_ONLY_TOOLS_FORBIDDEN", "Model-only policy is invalid"));
     const workspaceExecutionVersion = require("./workspace-execution-tools").workspaceAutoExecution(options.executionContract) ? 1 : null;
     const policyFingerprint = JSON.stringify([deepSeekHarnessPermissionFingerprint(permissionPolicy), workspaceExecutionVersion]);
     if (this.blockedProfiles.has(id)) {
@@ -190,6 +195,7 @@ class DeepSeekHarnessRuntimePool {
       runtimeEnvironment,
       permissionPolicy,
       controlInstance,
+      modelOnlyInstance,
       workspace,
       profileState,
     });

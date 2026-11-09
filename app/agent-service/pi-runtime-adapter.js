@@ -65,8 +65,6 @@ class PiRuntimeHandle {
   closeSecretRoutes() { for (const route of this.secretRoutes.values()) route.close(); this.secretRoutes.clear(); this.host.modelSecretEndpoints.clear(); }
   async bindSecretScope(input, invoke) {
     if (!this.secretGateway || !input.modelSecretScope) return invoke();
-    const version = Array.isArray(this.host.cliVersion) ? this.host.cliVersion.join(".") : this.host.cliVersion;
-    if (version !== "1.3.0") throw adapterError("SECRET_MODEL_RUNTIME_UNSUPPORTED", "Pi model projection requires the verified 1.3.0 contract");
     const route = await this.secretGateway.bindLocal({ scope: input.modelSecretScope });
     try {
       const response = await invoke(), id = response.session.id;

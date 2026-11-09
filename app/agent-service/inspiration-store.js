@@ -11,7 +11,7 @@ const { validGrowthSettings, validGrowthJob } = require("./inspiration-growth");
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
 const { normalizeInteractiveRequestV1 } = require("../core/shoggoth-interaction-contract");
-const { validInspirationAttention, validInspirationPaperTone } = require("./inspiration-service-protocol");
+const { validInspirationAttention, validInspirationPaperTone, validInspirationModelSelection } = require("./inspiration-service-protocol");
 const { MEDIA_SCHEMA, InspirationMediaStore, validAttachments, attachmentFields, CHUNK_BYTES, ARCHIVE_MIME } = require("./inspiration-media");
 const { readInspirationArchive } = require("./inspiration-archive");
 const { EXTERNAL_BACKENDS, EXTERNAL_STATUSES, EXTERNAL_TERMINAL,
@@ -61,10 +61,16 @@ function externalObservation(value) {
   return Object.fromEntries(OBSERVATION_FIELDS.map((field) => [field, value[field]]));
 }
 
+function clearAdoption(idea) {
+  idea.acceptedAt = null;
+  delete idea.acceptedRunId;
+}
+
 function validIdea(value) {
   const hasTone = value && own(value, "paperTone");
   const fields = hasTone ? [...IDEA_FIELDS, "paperTone"] : [...IDEA_FIELDS];
   if (own(value || {}, "restoredAt")) fields.push("restoredAt");
+  if (own(value || {}, "acceptedRunId")) fields.push("acceptedRunId");
   return exact(value, attachmentFields(value, fields))
     && (!own(value, "restoredAt") || time(value.restoredAt))
     && (!own(value, "attachments") || validAttachments(value.attachments))
@@ -75,6 +81,7 @@ function validIdea(value) {
     && typeof value.favorite === "boolean" && time(value.createdAt) && time(value.updatedAt)
     && value.updatedAt >= value.createdAt
     && [value.archivedAt, value.acceptedAt, value.deletedAt].every((at) => at === null || time(at))
+    && (!own(value, "acceptedRunId") || (value.acceptedAt !== null && typeof value.acceptedRunId === "string" && UUID.test(value.acceptedRunId)))
     && (value.deletedAt === null || (value.body === "" && value.title === null && !value.favorite
       && value.archivedAt === null && value.acceptedAt === null && value.deletedAt === value.updatedAt));
 }
@@ -109,9 +116,11 @@ function validExecution(value) {
   if (own(value, "turnAttachments")) fields.push("turnAttachments");
   if (own(value, "inputSource")) fields.push("inputSource");
   if (own(value, "handoffContext")) fields.push("handoffContext");
+  if (own(value, "modelSelection")) fields.push("modelSelection");
   return exact(value, fields) && UUID.test(value.id) && UUID.test(value.ideaId)
     && (!own(value, "inputSource") || (value.inputSource === "chat" && value.sessionKey !== null))
     && (!own(value, "handoffContext") || (!own(value, "inputSource") && textValue(value.handoffContext, MAX_HANDOFF_BYTES)))
+    && (!own(value, "modelSelection") || (!own(value, "inputSource") && validInspirationModelSelection(value.modelSelection, external)))
     && (!own(value, "attachments") || validAttachments(value.attachments))
     && (!own(value, "turnAttachments") || validAttachments(value.turnAttachments))
     && UUID.test(value.runId) && validId(value.operationId)
@@ -272,7 +281,9 @@ class InspirationStore extends EventEmitter {
 
   #writeRecords(candidate) {
     for (const idea of Object.values(candidate.ideas)) {
-      if (!validIdea(idea)) fail("INSPIRATION_STORE_CORRUPT", "灵感记录无效");
+      if (!validIdea(idea) || (idea.acceptedRunId && this.executionForRun(idea.acceptedRunId)?.ideaId !== idea.id)) {
+        fail("INSPIRATION_STORE_CORRUPT", "灵感记录无效");
+      }
       this.#statement(`INSERT INTO ideas(id,sort_at,archived,favorite,deleted,bucket,search,data)
         VALUES (?,?,?,?,?,'saved',?,?) ON CONFLICT(id) DO UPDATE SET
         sort_at=excluded.sort_at,archived=excluded.archived,favorite=excluded.favorite,
@@ -342,8 +353,20 @@ class InspirationStore extends EventEmitter {
     const executions = this.#statement("SELECT id,idea_id,run_id FROM executions WHERE json_extract(data,'$.profileId')=?")
       .all(profileId);
     if (executions.length === 0) return;
+    const candidate = this.#draft();
+    candidate.revision += 1;
+    const removedRuns = new Set(executions.map(execution => execution.run_id));
+    for (const ideaId of new Set(executions.map(execution => execution.idea_id))) {
+      const idea = this.#record("ideas", ideaId);
+      const acceptedRun = idea.acceptedRunId ?? (idea.acceptedAt !== null ? this.latestExecution(ideaId)?.runId : null);
+      if (removedRuns.has(acceptedRun)) {
+        clearAdoption(idea);
+        idea.revision += 1;
+        candidate.ideas[ideaId] = idea;
+      }
+    }
     this.db.exec("PRAGMA secure_delete=ON");
-    this.#commit({ revision: this.revision + 1, ideas: {}, executions: {}, operations: {} }, () => {
+    this.#commit(candidate, () => {
       for (const execution of executions) {
         this.#statement("DELETE FROM operations WHERE type='executions' AND target_id=?").run(execution.id);
         this.#statement("DELETE FROM growth_jobs WHERE json_extract(data,'$.runId')=?").run(execution.run_id);
@@ -718,7 +741,9 @@ class InspirationStore extends EventEmitter {
       || !UUID.test(input.id) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
       || !input.patch || typeof input.patch !== "object" || Array.isArray(input.patch)
       || Object.keys(input.patch).length === 0
-      || Object.keys(input.patch).some((key) => !["body", "title", "favorite", "archived", "accepted", "attachments"].includes(key))
+      || Object.keys(input.patch).some((key) => !["body", "title", "favorite", "archived", "accepted", "acceptedRunId", "attachments"].includes(key))
+      || (own(input.patch, "acceptedRunId") && (Object.keys(input.patch).length !== 1
+        || (input.patch.acceptedRunId !== null && (typeof input.patch.acceptedRunId !== "string" || !UUID.test(input.patch.acceptedRunId)))))
       || (own(input.patch, "body") && !textValue(input.patch.body, MAX_BODY_BYTES, true))
       || (own(input.patch, "attachments") && !validAttachments(input.patch.attachments))
       || (own(input.patch, "title") && input.patch.title !== null && !textValue(input.patch.title, 512))
@@ -741,8 +766,16 @@ class InspirationStore extends EventEmitter {
         if (!input.patch.archived && idea.archivedAt !== null) idea.restoredAt = at;
         idea.archivedAt = input.patch.archived ? at : null;
       }
-      if (own(input.patch, "accepted")) idea.acceptedAt = input.patch.accepted ? at : null;
-      if (own(input.patch, "body") || own(input.patch, "attachments")) idea.acceptedAt = null;
+      if (own(input.patch, "accepted") || own(input.patch, "acceptedRunId")) {
+        clearAdoption(idea);
+        const runId = input.patch.acceptedRunId;
+        if (runId && this.executionForRun(runId)?.ideaId !== idea.id) {
+          fail("INSPIRATION_REPLY_UNAVAILABLE", "只能采用这条灵感中已完成的助理回复");
+        }
+        if (runId) idea.acceptedRunId = runId;
+        if (runId || input.patch.accepted) idea.acceptedAt = at;
+      }
+      if (own(input.patch, "body") || own(input.patch, "attachments")) clearAdoption(idea);
       // Favorites are a bookmark, not a content or growth update. Keep cursor
       // ordering stable when this is the only changed field.
       if (Object.keys(input.patch).some((key) => key !== "favorite")) idea.updatedAt = at;
@@ -768,6 +801,7 @@ class InspirationStore extends EventEmitter {
       const at = Math.max(this.#at(), idea.updatedAt);
       Object.assign(idea, { body: "", title: null, favorite: false, archivedAt: null,
         acceptedAt: null, deletedAt: at, updatedAt: at, revision: idea.revision + 1 });
+      delete idea.acceptedRunId;
       if (own(idea, "attachments")) idea.attachments = [];
       return { type: "ideas", id: idea.id };
     });
@@ -777,8 +811,10 @@ class InspirationStore extends EventEmitter {
     const fields = ["operationId", "id", "expectedRevision", "instruction", "agentId", "backendId", "profileId", "workspace"];
     if (own(input, "turnAttachments")) fields.push("turnAttachments");
     if (own(input, "inputSource")) fields.push("inputSource");
+    if (own(input, "modelSelection")) fields.push("modelSelection");
     if (!exact(input, fields)
       || (own(input, "inputSource") && (input.inputSource !== "chat" || sessionKey === null))
+      || (own(input, "modelSelection") && (sessionKey !== null || !validInspirationModelSelection(input.modelSelection, false)))
       || (own(input, "turnAttachments") && !validAttachments(input.turnAttachments))
       || !UUID.test(input.id) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
       || (sessionKey !== null && !UUID.test(sessionKey))
@@ -794,9 +830,10 @@ class InspirationStore extends EventEmitter {
       if (idea.revision !== input.expectedRevision) fail("INSPIRATION_REVISION_CONFLICT", "灵感已更新，请重新查看后开始");
       if (idea.archivedAt !== null) fail("INSPIRATION_ARCHIVED", "请先恢复这条灵感");
       const previous = this.executions(idea.id);
+      if (input.modelSelection && previous.length) fail("INSPIRATION_REVISION_CONFLICT", "这条灵感已开始，请刷新后继续");
       if (previous.some((execution) => (execution.external && !EXTERNAL_TERMINAL.has(execution.external.status))
         || !canStart(execution))) fail("INSPIRATION_BUSY", "这条灵感已有未结束的执行");
-      this.#safe({ body: idea.body, instruction: input.instruction });
+      this.#safe({ body: idea.body, instruction: input.instruction, modelSelection: input.modelSelection });
       const handoffContext = buildHandoff(previous, idea);
       if (handoffContext) this.#safe({ handoffContext });
       const id = this.randomUUID();
@@ -805,6 +842,7 @@ class InspirationStore extends EventEmitter {
       candidate.executions[id] = { id, ideaId: idea.id, operationId: input.operationId,
         ideaRevision: idea.revision, body: idea.body, title: idea.title, instruction: input.instruction,
         ...(input.inputSource ? { inputSource: input.inputSource } : {}),
+        ...(input.modelSelection ? { modelSelection: clone(input.modelSelection) } : {}),
         ...(handoffContext ? { handoffContext } : {}),
         ...(idea.attachments ? { attachments: clone(idea.attachments) } : {}),
         ...(input.turnAttachments?.length ? { turnAttachments: clone(input.turnAttachments) } : {}),
@@ -812,7 +850,7 @@ class InspirationStore extends EventEmitter {
         workspace: input.workspace, sessionKey, runId: this.randomUUID(),
         retryOf: previous.find((entry) => entry.preparationFailure === null)?.runId || null,
         createdAt: at, attention: null, preparationFailure: null, external: null };
-      idea.acceptedAt = null;
+      clearAdoption(idea);
       idea.updatedAt = at;
       idea.revision += 1;
       return { type: "executions", id };
@@ -835,8 +873,10 @@ class InspirationStore extends EventEmitter {
   prepareExternalExecution(input, canStart, sessionKey = null, buildHandoff = () => "") {
     const fields = ["operationId", "id", "expectedRevision", "instruction", "agentId", "backendId", "workspace"];
     if (own(input, "inputSource")) fields.push("inputSource");
+    if (own(input, "modelSelection")) fields.push("modelSelection");
     if (!exact(input, fields)
       || (own(input, "inputSource") && (input.inputSource !== "chat" || sessionKey === null))
+      || (own(input, "modelSelection") && !validInspirationModelSelection(input.modelSelection, true))
       || !UUID.test(input.id) || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
       || (sessionKey !== null && !textValue(sessionKey, 512)) || typeof canStart !== "function"
       || !textValue(input.instruction, MAX_BODY_BYTES, true) || !validId(input.agentId)
@@ -852,9 +892,10 @@ class InspirationStore extends EventEmitter {
       if (idea.revision !== input.expectedRevision) fail("INSPIRATION_REVISION_CONFLICT", "灵感已更新，请重新查看后开始");
       if (idea.archivedAt !== null) fail("INSPIRATION_ARCHIVED", "请先恢复这条灵感");
       const previous = this.executions(idea.id);
+      if (input.modelSelection && previous.length) fail("INSPIRATION_REVISION_CONFLICT", "这条灵感已开始，请刷新后继续");
       if (previous.some((execution) => (execution.external && !EXTERNAL_TERMINAL.has(execution.external.status))
         || !canStart(execution))) fail("INSPIRATION_BUSY", "这条灵感已有未结束的执行");
-      this.#safe({ body: idea.body, instruction: input.instruction });
+      this.#safe({ body: idea.body, instruction: input.instruction, modelSelection: input.modelSelection });
       const handoffContext = buildHandoff(previous, idea);
       if (handoffContext) this.#safe({ handoffContext });
       const id = this.randomUUID();
@@ -863,6 +904,7 @@ class InspirationStore extends EventEmitter {
       const execution = { id, ideaId: idea.id, operationId: input.operationId,
         ideaRevision: idea.revision, body: idea.body, title: idea.title, instruction: input.instruction,
         ...(input.inputSource ? { inputSource: input.inputSource } : {}),
+        ...(input.modelSelection ? { modelSelection: clone(input.modelSelection) } : {}),
         ...(handoffContext ? { handoffContext } : {}),
         ...(idea.attachments ? { attachments: clone(idea.attachments) } : {}),
         agentId: input.agentId, backendId: input.backendId, profileId: null,
@@ -874,7 +916,7 @@ class InspirationStore extends EventEmitter {
           cancelOperationId: null, reconcileFingerprint: null } };
       this.#assertExternalSessionOwner(execution, sessionKey, input.workspace);
       candidate.executions[id] = execution;
-      idea.acceptedAt = null;
+      clearAdoption(idea);
       idea.updatedAt = at;
       idea.revision += 1;
       return { type: "executions", id };

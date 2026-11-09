@@ -868,6 +868,8 @@ function startProxyGateway({
     let clientWatchersClosed = false;
 
     const createChatHooks = ({ sessionKey, runId, broadcastFinal, promptOwner }) => {
+      const replyPhase = (state, meta) => state === "delta" && ["commentary", "final_answer"].includes(meta?.replyPhase)
+        ? { replyPhase: meta.replyPhase } : {};
       const chatEvent = (state, payload, terminalRunId = null) => {
         const rawEvent = JSON.stringify({
           type: "event",
@@ -888,6 +890,7 @@ function startProxyGateway({
       };
       const emitMessage = (state, text, meta) =>
         chatEvent(state, {
+          ...replyPhase(state, meta),
           message: {
             role: "assistant",
             content: [{ type: "text", text,
@@ -904,7 +907,7 @@ function startProxyGateway({
       return {
         nativeContent: (state, parts, meta) => {
           if (!["delta", "final", "interim", "aborted"].includes(state) || !Array.isArray(parts)) return;
-          chatEvent(state, { message: { role: "assistant", content: parts,
+          chatEvent(state, { ...replyPhase(state, meta), message: { role: "assistant", content: parts,
             timestamp: Date.now(), shoggoth: { nativeUiVersion: 1, runId: meta.runId, displayId: meta.displayId },
             ...(meta.errorMessage ? { errorMessage: meta.errorMessage } : {}),
           } }, meta.runId);

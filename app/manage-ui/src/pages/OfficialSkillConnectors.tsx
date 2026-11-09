@@ -6,6 +6,7 @@ import { usePageCache } from "../lib/usePageCache";
 import { mcpRecommendationText, type McpRecommendation } from "../lib/mcpConnectorUi";
 import { mcpConnectorDeveloper, mcpConnectorName } from "../lib/mcpRecommendationCatalog";
 import ConnectorTools from "../components/ConnectorTools";
+import ConnectorAddButton from "../components/ConnectorAddButton";
 import { ConnectorConnectionHeading, ConnectorFooter, ConnectorInfo } from "../components/ConnectorDetails";
 import McpConnectorIcon from "../components/McpConnectorIcon";
 import Modal from "../components/Modal";
@@ -37,11 +38,11 @@ export function useOfficialSkillConnectors() {
 }
 type Model = ReturnType<typeof useOfficialSkillConnectors>;
 export function OfficialSkillRecommendation({ definition, model, onOpen, onAdd }: { definition: OfficialConnectorDefinition; model: Model; onOpen: () => void; onAdd?: () => void }) {
-  const { t, i18n } = useTranslation(); const data = model.data?.items.find(item => item.id === definition.id);
+  const { i18n } = useTranslation(); const data = model.data?.items.find(item => item.id === definition.id);
   return <div className={s.service} data-official-recommendation={definition.id}>
     <button type="button" className={s.serviceOpen} onClick={onOpen}><McpConnectorIcon name={definition.name} identity={definition.id} />
       <span className={s.serviceText}><strong>{definition.name}</strong><small>{mcpRecommendationText(definition.description, i18n.resolvedLanguage || i18n.language)}</small></span></button>
-    {!data?.canRemove && <button type="button" className="btn-secondary btn-sm" disabled={model.busy || !data || !!model.error} onClick={onAdd || onOpen}>{t("mcpConnectors.add")}</button>}
+    {!data?.canRemove && <ConnectorAddButton name={definition.name} disabled={model.busy || !data || !!model.error} onClick={onAdd || onOpen} />}
   </div>;
 }
 export function OfficialSkillInstalledRows({ model, servers, onOpen }: { model: Model; servers?: McpServer[]; onOpen: (id: OfficialConnectorId) => void }) {

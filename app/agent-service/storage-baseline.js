@@ -3,12 +3,11 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { readPrivateFile, statIfExists } = require("./private-file");
-const { STORE_SCHEMA_VERSION } = require("./product-store");
+const { STORE_SCHEMA_VERSION, READABLE_PRODUCT_SCHEMA_VERSIONS } = require("./product-store");
 const { serviceError } = require("./security");
 
 // Unsupported baselines are refused before writers, credentials or recovery.
-// Product15 alone has an explicit validated migration in JsonlProductStore;
-// accepting its version here does not validate, repair or reset its contents.
+// JsonlProductStore validates legacy sources before allowing any write.
 function assertCurrentStorageBaseline(paths) {
   const productSchemaVersion = paths.productSchemaVersion ?? STORE_SCHEMA_VERSION;
   const resetRequired = () => {
@@ -16,7 +15,7 @@ function assertCurrentStorageBaseline(paths) {
       "此版本需要全新的 Shoggoth 数据目录，请退出 App 后重置 Shoggoth 本地数据再启动");
   };
   if (productSchemaVersion !== STORE_SCHEMA_VERSION) resetRequired();
-  const readableProductSchemas = new Set([15, productSchemaVersion]);
+  const readableProductSchemas = new Set(READABLE_PRODUCT_SCHEMA_VERSIONS);
   if (statIfExists(fs, paths.stateSnapshotPath)) {
     const snapshot = JSON.parse(readPrivateFile(paths.stateSnapshotPath, { fs, maxBytes: Number.MAX_SAFE_INTEGER }).toString("utf8"));
     if (!readableProductSchemas.has(snapshot?.schemaVersion)) resetRequired();

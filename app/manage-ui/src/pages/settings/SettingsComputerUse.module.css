@@ -1,6 +1,6 @@
 .section { min-width: 0; container: computerUse / inline-size; }
 .card { gap: 0; }
-.permission { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 16px; }
+.permission { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto auto; align-items: center; gap: 16px; }
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--settings-muted-surface-1); font-size: 12px; white-space: nowrap; }
 .status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .granted { color: var(--ui-success); }
@@ -18,7 +18,8 @@
 .sessions li > :first-child { flex: 1 1 200px; overflow-wrap: anywhere; }
 .sessions small { color: var(--settings-muted-surface-1); }
 @container computerUse (max-width: 540px) {
-  .permission { grid-template-columns: minmax(0, 1fr) auto; gap: 10px 12px; }
-  .permission > :global(.settings-list-copy) { grid-column: 1 / -1; }
+  .permission { grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px 12px; }
+  .permission > :global(.settings-row-icon) { grid-row: 1 / span 2; align-self: start; }
+  .permission > :global(.settings-list-copy) { grid-column: 2 / -1; }
   .permission > button { justify-self: end; }
 }

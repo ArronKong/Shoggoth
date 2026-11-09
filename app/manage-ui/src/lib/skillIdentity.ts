@@ -4,7 +4,7 @@ import type { UnifiedSkill } from "../types";
 export function skillIdentity(skill: UnifiedSkill): string {
   return JSON.stringify([
     skill.backendId,
-    skill.agentId || skill.profileId || "",
+    skill.globalSettingRevision === undefined ? skill.agentId || skill.profileId || "" : "",
     skill.id || skill.name,
     skill.source || "",
     skill.version || "",

@@ -13,6 +13,8 @@ const { diagnosticCode } = require("./active-memory-diagnostics.cjs");
 const { transaction } = require("../inspiration-database");
 const MAX_DREAM_LATE_MS = 24 * 60 * 60_000;
 const DREAM_RETRY_DELAYS = [60_000, 5 * 60_000];
+// The nightly review is optional maintenance; it never holds Dreaming longer.
+const NIGHTLY_REVIEW_BUDGET_MS = 10 * 60_000;
 const RETRYABLE_DREAM_ERRORS = new Set(["EAGAIN", "EBUSY", "SQLITE_BUSY", "SQLITE_LOCKED",
   "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "TIMEOUT"]);
 
@@ -65,6 +67,7 @@ class MemoryMaintenance {
   constructor(service) { this.service = service; this.pending = new Map(); this.controller = null; }
   open() {
     this.controller = new AbortController();
+    this.service.sessionCapture?.start(this.controller.signal);
     this.service.database.db.exec(`
       CREATE TABLE IF NOT EXISTS memory_dream_schedule(profile_id TEXT PRIMARY KEY,config TEXT NOT NULL,next_at INTEGER,state TEXT NOT NULL,last_error TEXT) STRICT;
       CREATE TABLE IF NOT EXISTS memory_flush_runs(id TEXT PRIMARY KEY,profile_id TEXT NOT NULL,session_id TEXT NOT NULL,state TEXT NOT NULL,target TEXT NOT NULL,receipt TEXT) STRICT;
@@ -83,6 +86,7 @@ class MemoryMaintenance {
   }
   async close() {
     this.controller?.abort();
+    this.service.sessionCapture?.stop();
     await Promise.allSettled([...this.pending.values()]);
     this.pending.clear();
   }
@@ -172,6 +176,17 @@ class MemoryMaintenance {
         }));
     }
   }
+  // Nightly order: finish the day's session excerpts, then the daily review
+  // (the Service's beforeNightlyDream), then Dreaming reads the result. Both
+  // are best effort: only a Service stop interrupts Dreaming itself.
+  async beforeDream(profileId, signal) {
+    const service = this.service;
+    try { await service.sessionCapture?.captureProfile(profileId, { reason: "nightly", idleMs: 0, signal }); }
+    catch (error) { if (signal.aborted) throw error; service.logger?.warn?.(`memory: nightly session excerpt skipped: ${diagnosticCode(error)}`); }
+    if (typeof service.beforeNightlyDream !== "function") return;
+    try { await service.beforeNightlyDream(profileId, { signal: AbortSignal.any([signal, AbortSignal.timeout(NIGHTLY_REVIEW_BUDGET_MS)]) }); }
+    catch (error) { if (signal.aborted) throw error; service.logger?.warn?.(`memory: nightly review skipped: ${diagnosticCode(error)}`); }
+  }
   async runDream(profileId, config, due, attempt, next) {
     const db = this.service.database.db, signal = this.controller.signal;
     const identity = [profileId, config, due, attempt];
@@ -189,6 +204,7 @@ class MemoryMaintenance {
     };
     let state, error = null, retryAt = null;
     try {
+      await this.beforeDream(profileId, signal);
       const { outcome } = await this.service.dream(profileId, { signal, beforeWrite }) || {};
       state = outcome?.failed ? "failed" : outcome?.degraded ? "degraded"
         : !outcome ? "skipped" : outcome.candidates === 0 ? "empty" : "completed";

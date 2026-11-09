@@ -5482,13 +5482,17 @@ test("steer 只命中当前 assigned turn，并以 operationId 做同参并发�
     steerGate,
     transcriptStore: {
       appendEvent(input) {
-        transcriptEvents.push(clone(input));
-        return clone(input);
+        const saved = { ...clone(input), seq: transcriptEvents.length + 1 };
+        transcriptEvents.push(saved);
+        return clone(saved);
       },
+      listEvents: () => transcriptEvents,
     },
   });
   const { ack } = await sendAndDrain(value, { operationId: "steer-source" });
   const running = value.coordinator.getRun(ack.run.id);
+  value.host.emit({ known: true, type: "text_delta", method: "item/agentMessage/delta", itemId: "pre-steer-text",
+    threadId: running.runtimeTurnRef.sessionId, turnId: running.runtimeTurnRef.turnId, delta: "Visible before steering" });
   const input = {
     operationId: "steer-operation",
     sessionKey: SESSION_KEY,
@@ -5523,6 +5527,10 @@ test("steer 只命中当前 assigned turn，并以 operationId 做同参并发�
   assert.equal(steeringMessages[0].kind, "user");
   assert.equal(steeringMessages[0].content.text, input.message);
   assert.equal(steeringMessages[0].runtimeRef.turnId, running.runtimeTurnRef?.turnId);
+  const prefixes = transcriptEvents.filter(event => event.content.text === "Visible before steering");
+  assert.equal(prefixes.length, 1);
+  assert.equal(prefixes[0].contextExcluded, true);
+  assert.ok(prefixes[0].seq < steeringMessages[0].seq, "the live prefix remains before the accepted steering bubble");
   await assert.rejects(
     () => value.coordinator.steer({
       ...input,
@@ -5566,14 +5574,23 @@ test("steer RPC 在 Host terminate 后即使迟到成功也被 assignment fence 
 
 test("abort 精确 interrupt assigned turn，再以 durable canceled→terminal→Inbox tombstone 顺序收敛", async () => {
   const interruptGate = deferred();
+  const transcript = [];
   const value = await openFixture({
     sessionStatus: "ready",
     threadId: "thread-abort",
     threads: [{ id: "thread-abort", threadSource: null, turns: [] }],
     interruptGate,
+    transcriptStore: { appendEvent(event) {
+      const saved = { ...clone(event), seq: transcript.length + 1 };
+      transcript.push(saved);
+      return clone(saved);
+    }, listEvents: () => transcript },
   });
   const { ack, operationId } = await sendAndDrain(value, { operationId: "abort-source" });
   const running = value.coordinator.getRun(ack.run.id);
+  const item = { known: true, threadId: running.runtimeTurnRef.sessionId, turnId: running.runtimeTurnRef.turnId, itemId: "stopped-text" };
+  value.host.emit({ ...item, type: "text", method: "item/started", text: "" });
+  value.host.emit({ ...item, type: "text_delta", method: "item/agentMessage/delta", delta: "Visible before stopping" });
   const terminalEvents = [];
   value.coordinator.subscribeRun(
     running.id,
@@ -5606,6 +5623,11 @@ test("abort 精确 interrupt assigned turn，再以 durable canceled→terminal�
   assert.equal(result.status, "canceled");
   assert.equal(value.inbox.get(operationId).state, "canceled");
   assert.equal(terminalEvents.length, 1);
+  const savedPartial = transcript.filter(event => event.content.text === "Visible before stopping");
+  assert.equal(savedPartial.length, 1, "text already shown before Stop remains in chat history");
+  assert.equal(savedPartial[0].kind, "assistant");
+  assert.equal(savedPartial[0].contextExcluded, true, "an unfinished display segment is not model context");
+  assert.ok(transcript.indexOf(savedPartial[0]) < transcript.findIndex(event => event.content.transcriptType === "terminal"));
   assert.deepEqual(value.log.filter((entry) => [
     "host.turnInterrupt",
     "dispatcher.transition:canceled",

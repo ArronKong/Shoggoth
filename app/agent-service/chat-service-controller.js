@@ -304,25 +304,37 @@ function withoutLegacyCompactionDuplicates(events) {
   });
 }
 
-// Non-streaming providers make Codex emit item/started with the full text and
-// then item/completed; both land under one segmentId. Show only the last
-// non-empty snapshot of a Run's segment; distinct segments stay separate.
-function supersededTextSnapshotIds(events) {
+// Non-streaming providers can emit full text/reasoning in both lifecycle
+// events. Keep the last non-empty snapshot of that Run's exact segment/item;
+// a late empty completion must not erase the earlier public content.
+function supersededDisplaySnapshotIds(events) {
+  const identity = (event) => {
+    if (!event.runId) return null;
+    if (event.kind === "assistant" && typeof event.content?.segmentId === "string" && event.content.segmentId)
+      return JSON.stringify([event.runId, "text", event.content.segmentId]);
+    if (event.content?.transcriptType === "reasoning" && typeof event.content.itemId === "string" && event.content.itemId)
+      return JSON.stringify([event.runId, "reasoning", event.content.itemId]);
+    return null;
+  };
   const last = new Map();
-  for (const event of events) if (event.runId && event.kind === "assistant"
-    && typeof event.content?.segmentId === "string" && event.content.segmentId && transcriptMessageText(event)) {
-    last.set(JSON.stringify([event.runId, event.content.segmentId]), event.id);
+  for (const event of events) {
+    const key = identity(event);
+    if (!key) continue;
+    const text = event.content?.transcriptType === "reasoning"
+      ? transcriptStructuredText(event.content.reasoning) : transcriptMessageText(event);
+    if (text.trim()) last.set(key, event.id);
   }
   return new Set(events.filter(event => {
-    if (!event.runId || event.kind !== "assistant" || typeof event.content?.segmentId !== "string") return false;
-    const kept = last.get(JSON.stringify([event.runId, event.content.segmentId]));
+    const key = identity(event);
+    if (!key) return false;
+    const kept = last.get(key);
     return kept !== undefined && kept !== event.id;
   }).map(event => event.id));
 }
 
 function paginateTranscriptEvents(options) {
   const { params, responseId, cursorCodec } = options;
-  const superseded = supersededTextSnapshotIds(options.events);
+  const superseded = supersededDisplaySnapshotIds(options.events);
   // One footer per native response, even when it has several text/tool/UI
   // segments or the final message lives on a different history page.
   const finalTextByRun = new Map();
@@ -386,6 +398,8 @@ function paginateTranscriptEvents(options) {
       if (item && finalTextByRun.get(event.runId)?.id === event.id) {
         const metadata = savedMetadata.get(event.runId) ?? options.getResponseMetadata?.(event.runId);
         if (metadata) item.payload.message.responseMetadata = metadata;
+        const timing = options.getTurnTiming?.(event.runId);
+        if (timing) item.payload.message.shoggoth.turnTiming = timing;
       }
       return item ? fragmentHistoryItem(item).map((part, index) => ({ seq: event.seq, index, item: part })) : [];
     }).filter(entry => entry.seq < beforeSeq || entry.index < beforeIndex);
@@ -847,6 +861,13 @@ function createChatServiceController(options = {}) {
         : publicCronTranscript(withoutLegacyCompactionDuplicates(events), runId => coordinator.getCronOutput?.(runId, events)),
       resolveDisplay: event => transcriptStore.displayEvent(session.profileId, session.id, event),
       getRunSource: runId => coordinator.getRun(runId)?.source,
+      getTurnTiming: runId => {
+        const run = coordinator.getRun(runId);
+        if (!run || run.profileId !== session.profileId || runSessionKey(run) !== session.sessionKey
+          || !Number.isSafeInteger(run.createdAt) || !Number.isSafeInteger(run.finishedAt)
+          || run.createdAt < 0 || run.finishedAt < run.createdAt) return undefined;
+        return { startedAt: run.createdAt, finishedAt: run.finishedAt };
+      },
       getResponseMetadata: runId => coordinator.getRunMessageMetadata?.(runId, { profileId: session.profileId, sessionKey: session.sessionKey }, events),
     });
   }
@@ -1162,6 +1183,8 @@ function createChatServiceController(options = {}) {
         profileId: session.profileId,
         sessionId: session.id,
       });
+      // Opening a new conversation ends the Agent's others (memory excerpts).
+      try { options.onSessionCreated?.(session); } catch {}
       result = { session };
     } else if (method === "chat.session.model.set") {
       result = await setSessionModel(params, generation);

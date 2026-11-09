@@ -2,6 +2,7 @@
 
 const os = require("node:os");
 const path = require("node:path");
+const { STORE_SCHEMA_VERSION } = require("./product-store");
 
 function commonAncestor(paths) {
   const split = paths.map((target) => path.resolve(target).split(path.sep));
@@ -50,7 +51,7 @@ function resolveServicePaths(options = {}) {
   const runtimeSessionOwnershipDir = path.join(stateDir, "runtime-session-ownership");
   const computerDir = path.join(stateDir, "computer");
   return Object.freeze({
-    productSchemaVersion: 16,
+    productSchemaVersion: STORE_SCHEMA_VERSION,
     homeDir,
     stateDir,
     userDataRoot,

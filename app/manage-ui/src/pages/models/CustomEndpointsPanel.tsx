@@ -15,6 +15,7 @@ import {
 import { getModelOperationRecoverySnapshot, modelOperationRecoveryBlocks, subscribeModelOperationRecovery } from "./model-operation-recovery";
 import { useSlowPending } from "./useSlowPending";
 import { usePageCache } from "../../lib/usePageCache";
+import { SkeletonShape, SkeletonStatus } from "../../components/Skeleton";
 import { endpointMutationNotice } from "./endpoint-mutation-state";
 import { IconTrash } from "../keys/ProviderCredentialFields";
 import styles from "./CustomEndpointsPanel.module.css";
@@ -70,7 +71,7 @@ export default function CustomEndpointsPanel({
   const recoveryUnknown = recovery.required && (recovery.journal !== "ready" || !recovery.storageVerified);
 
   const { data: snapshot, loading, error: listError, refresh, replace } = usePageCache(
-    snapshotKey(controller), () => controller.list(), { staleTime: 30_000, enabled: active },
+    snapshotKey(controller), () => controller.list(), { staleTime: 30_000, enabled: active, loadingOnEmptyRefresh: true },
   );
   const [mutationNote, setMutationNote] = useState<string | null>(null);
   const [deleteBlocked, setDeleteBlocked] = useState<{ endpoint: CustomEndpoint; outcome: EndpointMutationOutcome } | null>(null);
@@ -295,7 +296,16 @@ export default function CustomEndpointsPanel({
       </div>
       <p className="ui-hint">{description ?? t(snapshot?.form?.configurationDraft
         ? "models.settings.endpoints.nativeSubtitle" : "models.settings.endpoints.subtitle")}</p>
-      {loading && !snapshot && <p className="ui-hint">{t("common.loading")}</p>}
+      {active && loading && !snapshot && (
+        <SkeletonStatus className={styles.subBlock}>
+          <div className={styles.endpointRow}>
+            <span className={styles.endpointMain}>
+              <SkeletonShape style={{ width: "8em", height: 12 }} />
+              <SkeletonShape style={{ width: "15em", height: 9 }} />
+            </span>
+          </div>
+        </SkeletonStatus>
+      )}
       {listError && <p className={styles.recoveryNote} role="status">{listError}</p>}
       {mutationNote && <p className={styles.recoveryNote} role="status">{mutationNote}</p>}
       {deleteBlocked && <div className={styles.recoveryNote} role="alert">

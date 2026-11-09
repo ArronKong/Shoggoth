@@ -4,7 +4,8 @@
 const text = (maxLength) => ({ type: "string", minLength: 1, maxLength });
 const id = { ...text(256), pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$" };
 const revision = { type: "integer", minimum: 0 };
-const source = { source: { type: "string", enum: ["chat", "inspiration"] }, sourceId: text(512) };
+const source = { source: { type: "string", enum: ["chat", "inspiration"], description: "Copy currentWorkSource from the trusted current work source in your instructions." },
+  sourceId: { ...text(512), description: "Copy currentWorkSourceId from the same trusted current work source. It is not the Run ID." } };
 const object = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 const nullable = (schema) => ({ anyOf: [schema, { type: "null" }] });
 const MEMORY_GET_ARGUMENT_HINT = "Use exactly one of id or path. Prefer the returned borrowed sourceRef as id, omitting path, from and lines. For a path read, copy the exact returned path; omit from and lines to use the original range, or keep both within that returned range.";
@@ -30,9 +31,11 @@ const DEFINITIONS = [
     classification: { type: "string", enum: ["explicit", "observed"] },
     sensitivity: { type: "string", enum: ["normal", "private"] },
     sourceQuote: text(2048), supersedes: nullable(id),
-    validUntil: nullable({ type: "integer", minimum: 0 }) },
-  // sourceQuote is required for classification=explicit (checked below).
-  ["source", "sourceId", "expectedRevision", "content", "scope", "classification"])],
+    validUntil: nullable({ type: "integer", minimum: 0 }),
+    placement: { type: "string", enum: ["long-term", "daily"] } },
+  // sourceQuote is required for classification=explicit, and expectedRevision
+  // for a correction (supersedes); both checked below.
+  ["source", "sourceId", "content", "scope", "classification"])],
   ["memory_forget", object({ ...source, id, expectedRevision: revision, sourceQuote: text(2048) })],
 ];
 const BY_NAME = new Map(DEFINITIONS);
@@ -72,7 +75,11 @@ function validateMemoryMcpArguments(name, args) {
     && (name !== "memory_get" || args.path || args.from === undefined && args.lines === undefined)
     && (name !== "memory_save" || args.classification !== "explicit" || args.sourceQuote?.trim())
     // An Agent's own observation is its private note, never a fact about the user.
-    && (name !== "memory_save" || args.classification !== "observed" || args.scope === "agent"));
+    && (name !== "memory_save" || args.classification !== "observed" || args.scope === "agent")
+    // A new fact may skip the revision read; a correction may not.
+    && (name !== "memory_save" || args.supersedes == null || args.expectedRevision !== undefined)
+    // Today's daily note holds the Agent's own working notes (OpenClaw "write it down").
+    && (name !== "memory_save" || args.placement !== "daily" || args.scope === "agent"));
 }
 
 module.exports = { MEMORY_MCP_TOOL_DEFINITIONS, MEMORY_MCP_WRITE_TOOLS, MEMORY_GET_ARGUMENT_HINT,

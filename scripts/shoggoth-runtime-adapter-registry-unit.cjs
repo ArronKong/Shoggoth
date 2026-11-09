@@ -103,6 +103,10 @@ test("主动检查专用能力不会自动启用摘要或记忆任务", async ()
     assert.equal(registry.canGenerateModelOnly(runtime), false);
     assert.equal(registry.canGenerateModelOnly(runtime, { purpose: "memory_extraction" }), false);
     assert.equal(registry.canGenerateModelOnly(runtime, { purpose: "proactive" }), true);
+    // 2026-11-07: the nightly memory review is the second verified purpose;
+    // recall and Dreaming text (memory_text) stay closed.
+    assert.equal(registry.canGenerateModelOnly(runtime, { purpose: "memory_review" }), true);
+    assert.equal(registry.canGenerateModelOnly(runtime, { purpose: "memory_text" }), false);
   }
   assert.equal(registry.canGenerateModelOnly("pi"), true);
   assert.equal(registry.canGenerateModelOnly("pi", { purpose: "proactive" }), true);

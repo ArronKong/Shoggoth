@@ -312,6 +312,33 @@ test("backend.status 同时返回原生后端真实连接和断开状态，写�
   } finally { await fixture.host.stop(); }
 });
 
+test("only a successful Agent roster lookup can confirm deletion across the Host boundary", async () => {
+  const fixture = createFixture();
+  const backend = fixture.registry.getBackend("openclaw");
+  const { OpenClawBackend } = require("../app/core/openclaw-backend");
+  let response;
+  backend.getAgent = id => OpenClawBackend.prototype.getAgent.call({
+    async _connect() {}, async request() {
+      if (response instanceof Error) throw response;
+      return response;
+    }, async listAgentFiles() { return []; },
+  }, id);
+  await fixture.host.start();
+  try {
+    const lookup = () => fixture.client.request("agent.get", { backendId: "openclaw", agentId: "agent-1" });
+    response = new Error("fixture-private-canary transport failure");
+    await expectCode(lookup, "AGENT_NOT_FOUND");
+    response = {};
+    await expectCode(lookup, "AGENT_NOT_FOUND");
+    response = { agents: [{}] };
+    await expectCode(lookup, "AGENT_NOT_FOUND");
+    response = { agents: [] };
+    await expectCode(lookup, "AGENT_CONFIRMED_MISSING");
+    response = { agents: [{ id: "agent-1", name: "One" }] };
+    assert.equal((await lookup()).agent.id, "agent-1");
+  } finally { await fixture.host.stop(); }
+});
+
 test("Agent 管理、文件、频道、产物与委派均做权威回读和 exact replay", async () => {
   const fixture = createFixture();
   await fixture.host.start();

@@ -103,7 +103,7 @@ test("a pending source-withdrawal interrupt filters late events and joins one na
     const session = f.createSession(), coordinator = f.service.workRunCoordinator;
     const run = await f.send(session.sessionKey, "borrowed-pending-interrupt", "Find telescope memory");
     assert.equal(run.status, "running", run.errorCode);
-    const found = await f.callTool(run, "memory_search", { query: "telescope", minScore: 0 });
+    const found = await f.callTool(run, "memory_search", { query: "telescope", memoryScope: "all", minScore: 0 });
     assert.ok(found.results.some(value => value.ownerProfileId === f.B && value.borrowed));
     const host = f.transport.hosts.get("codex"), events = [], before = host.turnInterruptCalls;
     subscription = coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));

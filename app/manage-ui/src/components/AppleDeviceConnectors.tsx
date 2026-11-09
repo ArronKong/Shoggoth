@@ -5,6 +5,7 @@ import s from "./AppleDeviceConnectors.module.css";
 import c from "../pages/ConnectorsPage.module.css";
 import Modal from "./Modal";
 import ConnectorTools from "./ConnectorTools";
+import ConnectorAddButton from "./ConnectorAddButton";
 import { ConnectorConnectionHeading, ConnectorFooter, ConnectorInfo } from "./ConnectorDetails";
 import { useConfirm } from "./ui";
 import { usePendingConnectors } from "../lib/usePendingConnectors";
@@ -111,7 +112,7 @@ export function AppleDeviceRows({ model, installed }: { model: Model; installed:
     if (added(entry) !== installed) return null;
     const entryName = tr(`resources.${id}.name`), ready = available && entry.enabled && entry.authorization === "fullAccess";
     return installed ? <li className={c.installedItem} key={id} data-device-installed={id}><button type="button" className={c.installedOpen} aria-label={`${t("mcpConnectors.manage")} ${entryName}`} onClick={() => setSelected(id)}><DeviceIcon resource={id} /><span className={c.installedLabel}><strong>{entryName}</strong>{!ready && <small className={c.connectionHint}>{t("mcpConnectors.flow.notConnected")}</small>}</span></button></li>
-      : <div className={c.service} key={id} data-device-recommendation={id}><button type="button" className={c.serviceOpen} onClick={() => setSelected(id)}><DeviceIcon resource={id} /><span className={c.serviceText}><strong>{entryName}</strong><small>{tr(`resources.${id}.description`)}</small></span></button><button type="button" className="btn-secondary btn-sm" onClick={() => stage(id)}>{t("mcpConnectors.add")}</button></div>;
+      : <div className={c.service} key={id} data-device-recommendation={id}><button type="button" className={c.serviceOpen} onClick={() => setSelected(id)}><DeviceIcon resource={id} /><span className={c.serviceText}><strong>{entryName}</strong><small>{tr(`resources.${id}.description`)}</small></span></button><ConnectorAddButton name={entryName} onClick={() => stage(id)} /></div>;
   })}
   {installed && resource && <Modal open title={<span className={c.dialogIdentity}><DeviceIcon resource={resource.id} />{name}</span>} onClose={() => setSelected(null)} dismissible={!busy} width={640} variant="connector" subtitle={tr(`resources.${resource.id}.description`)} footer={footer}>
     <article className={c.detail} data-resource={resource.id} aria-label={name}>

@@ -1,5 +1,8 @@
 import type { ChatBackendId } from "./chatBackend";
 
+const INITIAL_HISTORY_RETRY_WINDOW_MS = 30_000;
+const INITIAL_HISTORY_RETRY_INTERVAL_MS = 2_000;
+
 export interface ChatHistoryTicket {
   key: string;
   openGeneration: number;
@@ -96,6 +99,7 @@ export interface ChatHistoryController<TMessage> {
   bootstrap(key: string): Promise<void>;
   open(key: string): Promise<void>;
   load(key: string): Promise<void>;
+  cancelInitialReadRetry(): void;
   markSend(key: string, messages?: TMessage[]): void;
   updateLive(key: string, update: TMessage[] | ((previous: TMessage[]) => TMessage[])): void;
   markNeedsRevalidate(key: string): void;
@@ -125,6 +129,17 @@ export function createChatHistoryController<TMessage>(
   const pendingWrites = new Map<string, Set<Promise<void>>>();
   const cacheVisible = new Set<string>();
   const needsRevalidate = new Set<string>();
+  let initialReadDeadline = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearRetryTimer = () => {
+    if (retryTimer !== null) clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+  const cancelInitialReadRetry = () => {
+    initialReadDeadline = 0;
+    clearRetryTimer();
+  };
 
   type ScopeBinding = { scope: string; version: number };
 
@@ -181,6 +196,8 @@ export function createChatHistoryController<TMessage>(
   };
 
   const canonical = async (key: string, openGeneration = generation): Promise<void> => {
+    if (requestedKey !== key || currentKey !== key || generation !== openGeneration || deletedKeys.has(key)) return;
+    clearRetryTimer();
     const deleteVersion = deleteVersions.get(key) ?? 0;
     const backendId = deps.backendOfSession(key);
     const scopeBinding = await bindScope(backendId);
@@ -202,8 +219,10 @@ export function createChatHistoryController<TMessage>(
     };
     if (!ticketCurrent(ticket)) return;
     let candidate: unknown[] | undefined;
+    let readingHistory = true;
     try {
       const raw = await deps.requestCanonical(key);
+      readingHistory = false;
       if (!Array.isArray(raw)) throw new Error("chat.history returned no messages array");
       candidate = raw;
       const prepared = await deps.prepare(key, raw);
@@ -257,9 +276,26 @@ export function createChatHistoryController<TMessage>(
       cacheVisible.delete(key);
       needsRevalidate.delete(key);
       liveSnapshots.delete(key);
+      cancelInitialReadRetry();
       deps.commitCanonical(key, prepared, raw);
     } catch (error) {
       if (!ticketCurrent(ticket)) return;
+      const remaining = initialReadDeadline - performance.now();
+      // The restored view can precede socket open or Service readiness. Keep
+      // retrying the same read through the normal ownership check.
+      const temporarilyUnavailable = typeof error === "object" && error !== null && ("code" in error
+        ? error.code === "SERVICE_UNAVAILABLE"
+        : "requestNotSent" in error && error.requestNotSent === true);
+      if (readingHistory && remaining > 0 && temporarilyUnavailable) {
+        needsRevalidate.delete(key);
+        clearRetryTimer();
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          if (ticketCurrent(ticket)) void canonical(key, openGeneration);
+        }, Math.min(INITIAL_HISTORY_RETRY_INTERVAL_MS, remaining));
+        return;
+      }
+      cancelInitialReadRetry();
       needsRevalidate.add(key);
       deps.commitFailure(key, error, cacheVisible.has(key));
     } finally {
@@ -268,6 +304,8 @@ export function createChatHistoryController<TMessage>(
   };
 
   const open = async (key: string): Promise<void> => {
+    clearRetryTimer();
+    initialReadDeadline = performance.now() + INITIAL_HISTORY_RETRY_WINDOW_MS;
     requestedKey = key;
     const openGeneration = ++generation;
     deletedKeys.delete(key);
@@ -320,6 +358,7 @@ export function createChatHistoryController<TMessage>(
     },
     open,
     load: async (key) => canonical(key, currentKey === key ? generation : -1),
+    cancelInitialReadRetry,
     markSend: (key, messages) => {
       sendEpochs.set(key, (sendEpochs.get(key) ?? 0) + 1);
       if (Array.isArray(messages)) liveSnapshots.set(key, messages);
@@ -352,7 +391,10 @@ export function createChatHistoryController<TMessage>(
     },
     delete: async (key) => {
       deletedKeys.add(key);
-      if (requestedKey === key) requestedKey = null;
+      if (requestedKey === key) {
+        requestedKey = null;
+        cancelInitialReadRetry();
+      }
       deleteVersions.set(key, (deleteVersions.get(key) ?? 0) + 1);
       requestSequences.set(key, (requestSequences.get(key) ?? 0) + 1);
       if (currentKey === key) {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
@@ -21,6 +21,7 @@ import {
 import BackendBadge from "../components/BackendBadge";
 import BackendTabIcon from "../components/BackendTabIcon";
 import PillTabs from "../components/PillTabs";
+import SearchCapsule from "../components/SearchCapsule";
 import Modal, { DetailRow, ModalSection } from "../components/Modal";
 import { Switch } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
@@ -43,7 +44,8 @@ import CodexCronForm, { codexDraftFromJob, codexPatchFromDraft, emptyCodexCronDr
 import CodexCronRunResult from "./cron/CodexCronRunResult";
 import CronCreateForm from "./cron/CronCreateForm";
 import { cronAgentAvailable, cronCreateInputFromDraft, emptyCronCreateDraft } from "./cron/cronCreateDraft";
-import { IconPlus, IconSearch } from "./cron/cronIcons";
+import { CRON_SCHEDULE_TYPES } from "./cron/CronFormLayout";
+import { IconPlus } from "./cron/cronIcons";
 import CronRunHistoryPanel from "./cron/CronRunHistoryPanel";
 import CronRunReportModal, { ReportNote, runExecutionFailed } from "./cron/CronRunReportModal";
 import { formatCronTime, scheduleText } from "./cron/cronPresets";
@@ -143,7 +145,12 @@ export default function CronPage() {
   // 游标故意不持久化——重开 App 停在上周比回到今天更让人以为任务丢了。
   const [calCursor, setCalCursor] = useState<Date>(() => new Date());
   const [calMode, setCalMode] = useStickyState<CalendarMode>("cron.calMode", "week");
-  const [filters, setFilters] = useStickyState<CronListFilters>("cron.filters", DEFAULT_FILTERS);
+  const [savedFilters, setFilters] = useStickyState<CronListFilters>("cron.filters", DEFAULT_FILTERS);
+  // 兼容旧版保存的计划筛选，界面和查询从首帧起都回退到「全部计划」。
+  const filters = useMemo<CronListFilters>(() => ({
+    ...savedFilters,
+    scheduleKind: CRON_SCHEDULE_TYPES.find((kind) => kind === savedFilters.scheduleKind) ?? "all",
+  }), [savedFilters]);
   const [debouncedQuery, setDebouncedQuery] = useState(filters.query || "");
   // 搜索输入即时回显，但服务端查询短防抖，避免每个按键制造请求与缓存键。
   useEffect(() => {
@@ -280,22 +287,6 @@ export default function CronPage() {
     () => enabledBackends.flatMap((backendId) => agents[backendId] || []),
     [agents, enabledBackends],
   );
-
-  // 搜索框与「月|周|日」等宽。两者在不同 DOM 子树（页头 vs 工具栏），纯 CSS 绑不了，
-  // 而这组标签的宽度会随中英文文案变——实测它的边框盒宽度，写进页面级 CSS 变量。
-  // 切到列表视图时这组标签不存在，保留上一次的值，搜索框宽度不跳。
-  const calTabsRef = useRef<HTMLDivElement>(null);
-  const [calTabsWidth, setCalTabsWidth] = useState<number | null>(null);
-  useEffect(() => {
-    const el = calTabsRef.current;
-    if (!el) return;
-    const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.borderBoxSize?.[0]?.inlineSize ?? el.getBoundingClientRect().width;
-      if (width > 0) setCalTabsWidth(width);
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [view]);
 
   // 每次拉取领一个序号；只有最新一次的响应可以写状态。OpenClaw(本地 WS) 与
   // Hermes(HTTP，可能是远端) 延迟差很大，先点开的慢任务如果后返回，会把已经渲染好的
@@ -654,10 +645,7 @@ export default function CronPage() {
     : undefined;
 
   return (
-    <div
-      className="cron-page management-page"
-      style={calTabsWidth ? ({ "--cron-search-w": `${Math.round(calTabsWidth)}px` } as CSSProperties) : undefined}
-    >
+    <div className="cron-page management-page">
       <PageHead
         title={t("cron.pageTitle")}
         subtitle={
@@ -666,20 +654,6 @@ export default function CronPage() {
             <span>{t("cron.statEnabled", { n: stats.enabled })}</span>
             <span>{t("cron.statError", { n: stats.error })}</span>
           </span>
-        }
-        actions={
-          // 宽度跟着「月|周|日」走，放不下长文案：占位符用设计稿的短词，
-          // 「搜什么」的完整说明退到 title / aria-label 里。
-          <label className="cron-search-box" title={t("cronForm.filtersSearchPlaceholder")}>
-            <IconSearch />
-            <input
-              className="cron-search-input"
-              value={filters.query || ""}
-              onChange={(event) => setFilters({ ...filters, query: event.target.value })}
-              placeholder={t("cron.searchPlaceholder")}
-              aria-label={t("cronForm.filtersSearchPlaceholder")}
-            />
-          </label>
         }
       />
       <div className="toolbar cron-toolbar">
@@ -695,12 +669,31 @@ export default function CronPage() {
 
         <CronFiltersBar filters={filters} agents={filterAgents} onChange={setFilters} />
 
-        {createBackends.length > 0 && (
-          <button className="btn-primary cron-new" onClick={openCreate}>
-            <IconPlus />
-            {t("cron.newTask")}
-          </button>
-        )}
+        <div className="cron-actions">
+          <SearchCapsule
+            value={filters.query || ""}
+            onChange={(query) => setFilters((previous) => ({ ...previous, query }))}
+            placeholder={t("cron.searchPlaceholder")}
+            ariaLabel={t("cronForm.filtersSearchPlaceholder")}
+            collapsible
+          />
+          {createBackends.length > 0 && (
+            <button
+              className="btn-primary cron-new"
+              onMouseDown={(event) => {
+                // 等点击打开表单再转移焦点，避免空搜索框先收起而移走按钮。
+                if (event.button === 0 && !filters.query
+                  && event.currentTarget.parentElement?.querySelector('input[type="search"]:focus')) {
+                  event.preventDefault();
+                }
+              }}
+              onClick={openCreate}
+            >
+              <IconPlus />
+              {t("cron.newTask")}
+            </button>
+          )}
+        </div>
 
         {/* 日期导航只在日历视图有意义，列表视图下整组隐藏。 */}
         {view === "calendar" && (
@@ -740,7 +733,6 @@ export default function CronPage() {
                 { value: "day", label: t("cron.calDay") },
               ]}
               ariaLabel={t("cron.calModeToggle")}
-              listRef={calTabsRef}
             />
           </div>
         )}
@@ -760,55 +752,57 @@ export default function CronPage() {
           onModeChange={setCalMode}
           onJobClick={openJobFromCalendar}
         />
-      ) : jobs.length === 0 ? (
-        <p className="empty-hint">{t("cron.emptyHint")}</p>
       ) : (
         <div className="table-wrap">
-          <table className="cron-table cron-table-rich">
-            <thead>
-              <tr>
-                <th>{t("cron.colTask")}</th>
-                <th>{t("cron.colBackend")}</th>
-                <th>{t("cron.colSchedule")}</th>
-                <th>{t("cron.colLastStatus")}</th>
-                <th>{t("cron.colState")}</th>
-                <th>{t("cron.colActions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.map((job) => {
-                const backendLabel = backendDescriptors.get(job.backendId)?.name || job.backendId;
-                return (
-                  <tr key={job.id} className={`clickable ${job.enabled ? "" : "row-disabled"}`} onClick={() => openView(job)}>
-                    <td>
-                      <div className="job-name">{job.name}{job.origin === "codex-desktop" && <span className="codex-origin">{t("codexAutomation.source")}</span>}</div>
-                      {(job.description || job.prompt) && <div className="job-prompt">{job.description || job.prompt}</div>}
-                    </td>
-                    <td>
-                      <span className="cron-backend-icon" role="img" aria-label={backendLabel} title={backendLabel}>
-                        <BackendTabIcon backend={job.backendId} label={backendLabel} />
-                      </span>
-                    </td>
-                    <td>{scheduleText(job, t, locale)}</td>
-                    <td>
-                      {job.lastStatus ? <span className={`status status-${job.lastStatus}`}>{job.lastStatus}</span> : "—"}
-                      {job.lastError && <div className="status-error job-error">{job.lastError}</div>}
-                    </td>
-                    <td>{stateLabel(job, t)}</td>
-                    <td className="actions" onClick={(event) => event.stopPropagation()}>
-                      <button onClick={() => void runCronFromUi(job)} disabled={busyIds.has(job.id) || job.actions?.run === false}>
-                        {t(runWillResumePaused(job) ? "cron.runAndEnable" : "cron.run")}
-                      </button>
-                      <button onClick={() => openEdit(job)} disabled={job.actions?.edit === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>{t("common.edit")}</button>
-                      <button onClick={() => act(job.id, () => setCronEnabled(job.id, !job.enabled, job.revision))} disabled={busyIds.has(job.id) || job.actions?.toggle === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>
-                        {job.enabled ? t("cron.disable") : t("cron.enable")}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          {jobs.length === 0 ? (
+            <p className="empty-hint">{t("cron.emptyHint")}</p>
+          ) : (
+            <table className="cron-table cron-table-rich">
+              <thead>
+                <tr>
+                  <th>{t("cron.colTask")}</th>
+                  <th>{t("cron.colBackend")}</th>
+                  <th>{t("cron.colSchedule")}</th>
+                  <th>{t("cron.colLastStatus")}</th>
+                  <th>{t("cron.colState")}</th>
+                  <th>{t("cron.colActions")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {jobs.map((job) => {
+                  const backendLabel = backendDescriptors.get(job.backendId)?.name || job.backendId;
+                  return (
+                    <tr key={job.id} className={`clickable ${job.enabled ? "" : "row-disabled"}`} onClick={() => openView(job)}>
+                      <td>
+                        <div className="job-name">{job.name}{job.origin === "codex-desktop" && <span className="codex-origin">{t("codexAutomation.source")}</span>}</div>
+                        {(job.description || job.prompt) && <div className="job-prompt">{job.description || job.prompt}</div>}
+                      </td>
+                      <td>
+                        <span className="cron-backend-icon" role="img" aria-label={backendLabel} title={backendLabel}>
+                          <BackendTabIcon backend={job.backendId} label={backendLabel} />
+                        </span>
+                      </td>
+                      <td>{scheduleText(job, t, locale)}</td>
+                      <td>
+                        {job.lastStatus ? <span className={`status status-${job.lastStatus}`}>{job.lastStatus}</span> : "—"}
+                        {job.lastError && <div className="status-error job-error">{job.lastError}</div>}
+                      </td>
+                      <td>{stateLabel(job, t)}</td>
+                      <td className="actions" onClick={(event) => event.stopPropagation()}>
+                        <button onClick={() => void runCronFromUi(job)} disabled={busyIds.has(job.id) || job.actions?.run === false}>
+                          {t(runWillResumePaused(job) ? "cron.runAndEnable" : "cron.run")}
+                        </button>
+                        <button onClick={() => openEdit(job)} disabled={job.actions?.edit === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>{t("common.edit")}</button>
+                        <button onClick={() => act(job.id, () => setCronEnabled(job.id, !job.enabled, job.revision))} disabled={busyIds.has(job.id) || job.actions?.toggle === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>
+                          {job.enabled ? t("cron.disable") : t("cron.enable")}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 

@@ -9,7 +9,8 @@
   height: calc(100vh - 80px);
 }
 .modal.fit { height: auto; }
-.modal > div { overflow: visible; }
+.modal > div { min-height: 0; overflow: visible; }
+.modal :global(.btn-dark), .modal :global(.btn-subtle) { font-weight: 400; }
 .modal [data-tone] { --tone: var(--ui-text-2); }
 .modal [data-tone=seed] { --tone: color-mix(in srgb, var(--ui-text-2) 72%, var(--ui-warning)); }
 .modal [data-tone=live], .modal [data-tone=result] { --tone: var(--ui-success); }
@@ -39,31 +40,58 @@
 .headButton > svg, .headButton > [data-inspiration-icon] { width: 20px; height: 20px; }
 .headGlyph { width: 20px; height: 20px; }
 
-/* The scroller reaches into the dialog's side gutters so paper shadows stay visible. */
-.thread { display: flex; flex: 1 1 auto; flex-direction: column; gap: 20px; min-height: 0; margin: -8px -16px 0; padding: 8px 16px 20px; overflow-y: auto; overscroll-behavior: contain; }
-.thread > * { flex: none; min-width: 0; }
+/* Fit the scrollbar in the side gutter so the rounds align with the composer. */
+.thread {
+  --thread-fade-size: min(24px, 20%);
+  flex: 1 1 auto; min-height: 0;
+  margin-inline: -16px;
+  padding-block-end: 20px;
+  padding-inline: 16px calc(16px - var(--ui-scrollbar-track-size, 12px));
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  scroll-padding-block: var(--thread-fade-size);
+  overscroll-behavior: contain;
+}
+.thread:is([data-fade-top], [data-fade-bottom]) {
+  --thread-fade-top: 0px; --thread-fade-bottom: 0px;
+  mask-image: linear-gradient(transparent, #000 var(--thread-fade-top), #000 calc(100% - var(--thread-fade-bottom)), transparent), linear-gradient(#000, #000);
+  /* Keep the scrollbar fully opaque through both fades. */
+  mask-size: 100% 100%, var(--ui-scrollbar-track-size, 12px) 100%;
+  mask-position: left top, right top;
+  mask-repeat: no-repeat;
+}
+.thread[data-fade-top] { --thread-fade-top: var(--thread-fade-size); }
+.thread[data-fade-bottom] { --thread-fade-bottom: var(--thread-fade-size); }
+.threadContent { display: flex; flex-direction: column; gap: 20px; }
+.threadContent > * { flex: none; min-width: 0; }
 .loading { display: flex; flex-direction: column; gap: 24px; padding: 8px 0 24px; }
 .loading > span { display: block; height: 200px; border-radius: 24px; background: linear-gradient(100deg, light-dark(rgb(255 255 255 / 45%), rgb(255 255 255 / 6%)) 30%, light-dark(rgb(255 255 255 / 80%), rgb(255 255 255 / 14%)) 50%, light-dark(rgb(255 255 255 / 45%), rgb(255 255 255 / 6%)) 70%) 0 0 / 300% 100%; animation: shimmer 1.4s ease-in-out infinite; }
 .loading > span + span { height: 120px; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
 
 /* The note keeps the seed's height in every stage; editing happens on the text in place. */
-.notePaper { --note-ink: light-dark(rgb(0 0 0 / 90%), rgb(240 243 232 / 90%)); display: flex; flex-direction: column; gap: 16px; min-height: 200px; padding: 24px; border-radius: 24px; box-shadow: inset 1px 0 0 var(--note-edge-light), 0 6px 14px -8px light-dark(rgb(72 75 64 / 26%), rgb(8 12 6 / 45%)); }
+.notePaper { --note-ink: light-dark(rgb(0 0 0 / 90%), rgb(240 243 232 / 90%)); display: flex; flex-direction: column; gap: 16px; min-height: 200px; padding: 18px 24px; border-radius: 24px; box-shadow: inset 1px 0 0 var(--note-edge-light), 0 6px 14px -8px light-dark(rgb(72 75 64 / 26%), rgb(8 12 6 / 45%)); }
 .noteBody { display: flex; flex: 1; flex-direction: column; gap: 12px; min-width: 0; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
 .original { margin: 0; font-size: var(--note-font-size); line-height: var(--note-line-height); white-space: pre-wrap; overflow-wrap: anywhere; }
-.noteInline { display: flex; flex: 1; flex-direction: column; gap: 12px; min-width: 0; }
+.noteInline { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .noteInline :global(.field-textarea), .noteInline :global(.field-textarea):focus, .noteInline :global(.field-textarea):focus-visible, .noteInline :global(.field-textarea):hover {
   min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; outline: none;
   color: inherit; font-family: var(--note-font-family); font-size: var(--note-font-size); line-height: var(--note-line-height); caret-color: currentColor;
 }
-.noteFoot { display: flex; align-items: center; gap: 12px; min-height: 24px; margin-top: auto; }
+.noteFoot { display: flex; align-items: center; gap: 12px; height: 24px; margin-top: auto; }
 .noteGlyphSlot { display: inline-flex; }
 .noteGlyph { width: 16px; height: 16px; color: var(--note-ink); }
-.noteEdit { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; margin: 0; padding: 0 8px 0 4px; border: 0; border-radius: 999px; background: transparent; color: color-mix(in srgb, var(--note-ink) 56%, transparent); font-size: 12px; line-height: 16px; cursor: pointer; }
-.noteEdit svg { width: 16px; height: 16px; }
-.noteEdit:hover:not(:disabled) { color: var(--note-ink); background: color-mix(in srgb, var(--note-ink) 7%, transparent); border-color: transparent; }
-.noteEditFirst { margin-left: auto; }
-.noteDate { margin: 0; font-size: 12px; line-height: 16px; color: var(--note-ink); white-space: nowrap; }
+.noteEdit { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; margin: 0; padding: 0 8px 0 4px; border: 0; border-radius: 999px; background: transparent; color: light-dark(#000, var(--note-ink)); font: 400 12px/16px var(--note-font-family); white-space: nowrap; cursor: pointer; }
+.noteEdit svg { display: block; flex: none; width: 16px; height: 16px; }
+.noteEdit:hover:not(:disabled) { color: light-dark(#000, var(--note-ink)); background: color-mix(in srgb, var(--note-ink) 7%, transparent); border-color: transparent; }
+.noteEditTrigger, .noteEditActions { margin-inline-start: auto; }
+.noteEditActions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.noteDate { display: inline-flex; align-items: center; min-height: 24px; margin: 0; font-size: 12px; line-height: 16px; color: var(--note-ink); white-space: nowrap; }
+.noteEdit > span, .noteDate { translate: 0 1px; }
+@media (hover: hover) and (pointer: fine) {
+  .noteEditTrigger { opacity: 0; pointer-events: none; }
+  .notePaper:hover .noteEditTrigger, .notePaper:focus-within .noteEditTrigger { opacity: 1; pointer-events: auto; }
+}
 
 /* Seed start: the lineup, the chosen agent's greeting and the composer read as one step.
    144px from the greeting to the intent chips: this margin, the thread's 20px padding and the foot's 20px. */
@@ -87,7 +115,7 @@
 
 /* Rounds: the chat page's user bubble, and the agent's reply under its name. */
 .turnYou { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 80%; }
-.userBubble { padding: 12px 20px; border-radius: 24px 0 24px 24px; background: light-dark(#000, #fff); color: light-dark(#fff, #000); font-size: 14px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.userBubble { padding: 12px 20px; border-radius: 24px 0 24px 24px; background: light-dark(#000, #fff); color: light-dark(#fff, #000); font-size: 14px; font-weight: 400; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .queued .userBubble { background: light-dark(rgb(255 255 255 / 60%), rgb(255 255 255 / 8%)); color: var(--ui-text-1); outline: 1.5px dashed light-dark(rgb(0 0 0 / 45%), rgb(255 255 255 / 45%)); outline-offset: -1.5px; }
 .turnMeta { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; line-height: 18px; color: var(--ui-text-2); }
 .turnAi { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; }
@@ -107,7 +135,12 @@
 .trajectory { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px 16px; border-radius: 16px; background: light-dark(rgb(255 255 255 / 60%), rgb(255 255 255 / 6%)); }
 .timeline { max-height: calc(36px * 6 + 8px); overflow-y: auto; overscroll-behavior: contain; }
 .aiCard { display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 24px; border-radius: 0 24px 24px 24px; background: var(--detail-sheet); color: var(--detail-ink); }
-.aiCard[data-adopted] { box-shadow: 0 0 0 1.5px light-dark(#000, #fff); }
+.aiCard[data-adopted] { box-shadow: inset 0 0 0 1.5px light-dark(#000, #fff); }
+.replyMenuPositioner { z-index: 1200; }
+.replyMenu { min-width: 152px; padding: 4px; border-radius: 12px; background: var(--ui-surface-1); color: var(--ui-text-1); box-shadow: 0 12px 32px light-dark(rgb(43 52 55 / 12%), rgb(0 0 0 / 60%)); }
+.replyMenuItem { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+.replyMenuItem[data-highlighted] { background: var(--ui-surface-2); }
+.replyMenuItem svg { width: 16px; height: 16px; }
 .progressHint { margin: 0; font-size: 14px; font-weight: 300; line-height: 20px; color: var(--detail-ink); }
 .markdown { font-size: 14px; line-height: 1.75; color: var(--detail-ink); overflow-wrap: anywhere; }
 .markdown > :first-child { margin-top: 0; }
@@ -121,6 +154,7 @@
 .runFailure { display: flex; align-items: flex-start; gap: 10px; margin: 0; color: var(--ui-error); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
 .runFailureMark { display: grid; place-items: center; flex: none; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; background: var(--ui-error); color: var(--detail-sheet); font-size: 12px; font-weight: 700; line-height: 1; }
 .runFailureText { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; min-height: 20px; }
+.runFailureText > span { white-space: pre-wrap; }
 .runFailure code { padding: 0 6px; border-radius: 6px; background: color-mix(in srgb, var(--ui-error) 9%, transparent); font: 11px/18px var(--mono); }
 .aiActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 /* Choosing a version reads in black, like the composer's chosen chip. */
@@ -138,8 +172,8 @@
 .sectionHeading h3 { margin: 0; font-size: 12px; font-weight: 400; line-height: 20px; color: var(--detail-ink); }
 .sectionHeading span { font-size: 12px; color: var(--ui-text-2); }
 .artifactList { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
-.artifact { display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; padding: 6px 12px 6px 6px; border: 0; border-radius: 16px; background: var(--detail-field); color: var(--detail-ink); text-align: left; cursor: pointer; }
-.artifact:hover:not(:disabled) { background: color-mix(in srgb, var(--detail-ink) 7%, var(--detail-field)); color: var(--detail-ink); border-color: transparent; }
+.artifact { display: flex; align-items: center; gap: 12px; width: 100%; min-width: 0; padding: 6px 12px 6px 6px; border: 0; border-radius: 16px; background: transparent; color: var(--detail-ink); text-align: left; cursor: pointer; }
+.artifact:hover:not(:disabled) { background: color-mix(in srgb, var(--detail-ink) 7%, transparent); color: var(--detail-ink); border-color: transparent; }
 .artifactThumb { display: grid; place-items: center; flex: none; width: 56px; height: 56px; overflow: hidden; }
 .artifactThumb > [data-artifact-thumb] { zoom: .5; }
 .artifactName { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
@@ -159,10 +193,7 @@
 /* Composer: intent chips above the chat page's composer (ChatPage.css .chat-composer). */
 .foot { display: flex; flex-direction: column; gap: 10px; width: 100%; margin-top: -12px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.harvested { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-radius: 16px; background: light-dark(rgb(255 255 255 / 80%), rgb(255 255 255 / 6%)); color: var(--ui-text-2); font-size: 13px; line-height: 20px; }
-.workspaceRow { display: flex; align-items: center; gap: 10px; padding: 0 4px; color: var(--ui-text-2); font-size: 12px; }
-.workspaceRow > span { flex: none; }
-.workspaceRow input { flex: 1; min-width: 0; height: 32px; padding: 0 12px; border: 0; border-radius: 16px; background: light-dark(rgb(255 255 255 / 80%), rgb(255 255 255 / 6%)); color: var(--ui-text-1); font: inherit; font-size: 13px; }
+.harvested { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-radius: 40px; background: light-dark(rgb(255 255 255 / 80%), rgb(255 255 255 / 6%)); color: var(--ui-text-2); font-size: 13px; line-height: 20px; }
 .composer { position: relative; padding: 12px 12px 8px 10px; border-radius: 24px; border: 1px solid light-dark(#fff, rgb(255 255 255 / 10%));
   background: light-dark(linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0) 70.19%, rgba(255, 255, 255, .9) 100%), none),
     light-dark(linear-gradient(180deg, rgba(0, 0, 0, .05) 0%, rgba(51, 51, 51, 0) 49.52%, rgba(102, 102, 102, 0) 100%), none), light-dark(#fff, #2a2a30);
@@ -174,7 +205,7 @@
 .barLeft { display: flex; flex: 1 1 auto; align-items: center; gap: 6px; min-width: 0; }
 .barRight { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; margin-left: auto; }
 /* The chat page's 32px flat pills (ChatPage.css .chat-composer__bar .chat-pill); ChatModelMenu.css adds the model pill's own rules. */
-.bar :global(.chat-pill) { position: relative; display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; height: 32px; padding: 0 10px; border: 0; border-radius: 15px; background: transparent; box-shadow: none; color: var(--ui-text-1); font-family: var(--font-body, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif); font-size: 13px; font-weight: 400; white-space: nowrap; cursor: pointer; }
+.bar :global(.chat-pill) { position: relative; display: inline-flex; align-items: center; gap: 6px; flex: 0 1 auto; height: 32px; padding: 0 10px; border: 0; border-radius: 16px; background: transparent; box-shadow: none; color: var(--ui-text-1); font-family: var(--font-body, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif); font-size: 13px; font-weight: 400; white-space: nowrap; cursor: pointer; }
 .bar :global(.chat-pill):hover:not(:disabled) { background-color: light-dark(rgba(0, 0, 0, .04), rgba(255, 255, 255, .06)); color: var(--ui-text-1); }
 .bar :global(.chat-pill):disabled { cursor: default; opacity: 1; }
 .bar :global(.chat-pill--icon-label) { padding: 0 12px 0 32px; }
@@ -187,9 +218,6 @@
 .mentionAvatar { width: 24px; height: 24px; flex: 0 0 24px; font-size: 9px; }
 .mentionName { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 .mentionChevron { width: 14px; height: 14px; opacity: .55; }
-.workspacePill { padding: 0 8px; }
-.workspacePill svg { width: 16px; height: 16px; }
-.workspacePill[aria-pressed=true] { background: light-dark(rgba(0, 0, 0, .06), rgba(255, 255, 255, .1)); }
 .pickerPopup { width: 320px; }
 .pickerPanel { max-height: 440px; padding: 20px 24px 12px; }
 .pickerAgents { margin-bottom: 12px; }

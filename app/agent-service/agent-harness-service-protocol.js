@@ -1,7 +1,7 @@
 "use strict";
 
 const { serviceError } = require("./security");
-const { validateMemoryItem } = require("./memory-store");
+const { validateMemoryItem, MAX_READ_CONTENT_BYTES } = require("./memory-store");
 const { validCandidate } = require("./memory-candidate-store");
 const { validateEvent } = require("./transcript-store");
 
@@ -149,7 +149,7 @@ function validPage(value, itemValidator, withRevision = false) {
     && integer(value.nextCursor) && typeof value.hasMore === "boolean";
 }
 function validMemoryItem(value) {
-  try { validateMemoryItem(value); return true; } catch { return false; }
+  try { validateMemoryItem(value, null, { maxContentBytes: MAX_READ_CONTENT_BYTES }); return true; } catch { return false; }
 }
 function validSharedMemory(value) {
   return exact(value, ["items", "truncated"]) && typeof value.truncated === "boolean"
@@ -248,6 +248,8 @@ function validSkill(value) {
   return own(value) && id(value.id) && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(value.name)
     && text(value.version, 128, false) && text(value.description, 4096, false)
     && ["builtin", "user"].includes(value.source) && hash(value.contentHash)
+    && (value.globalSettingRevision === undefined
+      || (value.source === "builtin" && integer(value.globalSettingRevision, 1)))
     && Array.isArray(value.requiredTools) && value.requiredTools.every(id)
     && Array.isArray(value.requiredRuntimeCapabilities)
     && value.requiredRuntimeCapabilities.every(id)
@@ -328,7 +330,7 @@ function validateAgentHarnessParams(method, params) {
   } else if (method === "harness.skills.enable" || method === "harness.skills.global.set") {
     valid = exact(params, ["profileId", "skillId", "source", "version", "enabled", "expectedRevision"])
       && id(params.skillId) && (method === "harness.skills.global.set"
-        ? params.source === "user" : params.source === "builtin")
+        ? ["user", "builtin"].includes(params.source) : params.source === "builtin")
       && text(params.version, 128, false) && typeof params.enabled === "boolean"
       && integer(params.expectedRevision, 1);
   } else if (method === "harness.mcp.list") {

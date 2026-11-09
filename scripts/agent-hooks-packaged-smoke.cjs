@@ -24,6 +24,10 @@ test("actual " + (packagedApp ? "packaged Shoggoth" : "Electron") + " loads Hook
   else {
     fs.mkdirSync(path.dirname(directory), { recursive: true });
     fs.cpSync(path.join(repoRoot, "app", "agent-service"), directory, { recursive: true });
+    // Service paths load the product schema, whose built-in profiles read the release policy.
+    for (const file of ["runtime-availability.js", "release-policy.json"]) {
+      fs.copyFileSync(path.join(repoRoot, "app", file), path.join(source, "app", file));
+    }
     fs.copyFileSync(path.join(repoRoot, "package.json"), path.join(source, "package.json"));
     fs.mkdirSync(path.join(root, "pi"));
     fs.copyFileSync(path.join(repoRoot, "resources/pi/shoggoth-pi-extension.mjs"), path.join(root, "pi/shoggoth-pi-extension.mjs"));
@@ -44,11 +48,13 @@ const {resolveServicePaths}=load("paths.js"),{HookStore}=load("hook-store.js"),{
  assert.ok(process.versions.electron,"must run actual Electron");
  const {piNativeHookCapabilities,PI_BUILTIN_TOOLS}=load("pi-hook-contract.js");
  const piExtension=path.join(path.dirname(archive),"pi/shoggoth-pi-extension.mjs");
- const piHost={state:"ready",cliVersion:[0,84,4],extensionPath:piExtension};
+ const piHost={state:"ready",cliVersion:[0,84,4],protocolProbeVerified:true,extensionPath:piExtension};
  const piProof=piNativeHookCapabilities(piHost);assert.equal(piProof.runtime_builtin?.guard.status,"supported","packaged Pi extension must match the immutable ASAR integrity manifest");
  assert.deepEqual(piProof.runtime_builtin.guard.toolNames,PI_BUILTIN_TOOLS);
  const changed=path.join(root,"changed-pi-extension.mjs");fs.mkdirSync(root,{recursive:true});fs.writeFileSync(changed,fs.readFileSync(piExtension,"utf8")+"\\n// changed");
- assert.deepEqual(piNativeHookCapabilities({...piHost,extensionPath:changed}),{});assert.deepEqual(piNativeHookCapabilities({...piHost,cliVersion:[0,84,5]}),{});
+ assert.deepEqual(piNativeHookCapabilities({...piHost,extensionPath:changed}),{});
+ assert.equal(piNativeHookCapabilities({...piHost,cliVersion:[0,84,5]}).runtime_builtin?.guard.runtimeVersion,"0.84.5");
+ assert.deepEqual(piNativeHookCapabilities({...piHost,cliVersion:[0,84,5],protocolProbeVerified:false}),{});
  const paths=resolveServicePaths({trustedRoot:root,stateRoot:path.join(root,"state"),profileRoot:path.join(root,"profile"),cacheRoot:path.join(root,"cache")});
  const workspace=paths.defaultWorkspaceDir;fs.mkdirSync(workspace,{recursive:true,mode:0o700});
  const store=new HookStore({paths}).open(),host=new HookProcessHost({store,cacheDir:paths.hookEphemeralDir});
@@ -68,7 +74,7 @@ const {resolveServicePaths}=load("paths.js"),{HookStore}=load("hook-store.js"),{
   store.register("profile-one",crypto.randomUUID(),slow);await assert.rejects(host.run(slow,{...event,event:"tool.before"}),{code:"HOOK_TIMEOUT"});
   assert.equal(host.children.size,0);assert.ok(launched.some(args=>args[0]===path.join(archive.replace(/\\.asar$/,".asar.unpacked"),"app/agent-service/hook-worker.js")));
   store.close();store.open();assert.equal(store.list("profile-one").items.length,2);
-  process.stdout.write(JSON.stringify({verified:true,electron:process.versions.electron,node:process.versions.node,sqlite:"node:sqlite",workerSourceDigest:digest(script.handler.source),piExtensionProof:"ASAR integrity manifest matches; changed source/version rejected; no CLI turn",scope:${JSON.stringify(packagedApp ? "full packaged App; installation pending" : "focused ASAR; full App and installation pending")}})+"\\n");
+  process.stdout.write(JSON.stringify({verified:true,electron:process.versions.electron,node:process.versions.node,sqlite:"node:sqlite",workerSourceDigest:digest(script.handler.source),piExtensionProof:"ASAR integrity manifest matches, changed source and unprobed hosts rejected",scope:${JSON.stringify(packagedApp ? "full packaged App; installation pending" : "focused ASAR; full App and installation pending")}})+"\\n");
  } finally {await host.close();store.close();}
 })().catch(error=>{console.error((error.code||"HOOK_PACKAGED_PROOF_FAILED")+": "+String(error.message).slice(0,512));process.exitCode=1});
 `, { mode: 0o600 });
