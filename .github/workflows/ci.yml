@@ -18,7 +18,7 @@ jobs:
       - name: Install locked Hooks test runtime
         run: |
           npm ci --ignore-scripts
-          node node_modules/electron/install.js
+          node scripts/ci-install-electron.cjs
       - name: Headless Hooks source, real Service and Electron ASAR boundaries
         env:
           SHOGGOTH_CONNECTOR_HOOK_RUNTIME: source
@@ -65,7 +65,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node node_modules/electron/install.js
+          node scripts/ci-install-electron.cjs
           sudo chown root:root node_modules/electron/dist/chrome-sandbox
           sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
           Xvfb :99 -screen 0 1440x1000x24 > "$RUNNER_TEMP/shoggoth-xvfb.log" 2>&1 &
@@ -104,6 +104,7 @@ jobs:
           node scripts/app-update-release-contract-unit.cjs
           node --test scripts/release-draft-unit.cjs
           node --test scripts/release-automation-unit.cjs
+          node --test scripts/ci-install-electron-unit.cjs
           node --test scripts/release-stapler-unit.cjs
           node --test scripts/release-local-unit.cjs
           node scripts/check-release-private-keys-unit.cjs

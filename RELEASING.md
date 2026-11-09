@@ -120,6 +120,8 @@ gh workflow run release.yml --repo ArronKong/Shoggoth --ref v<VERSION> \
 
 ### 自动恢复与失败处理
 
+源码 CI 与签名前的准备步骤使用锁定版本的 Electron 官方安装器。官方安装包下载遇到 HTTP `502`、`503` 或 `504` 时，在同一步内最多重试三次，分别等待 15、45 和 120 秒。安装器继续校验下载内容，永久 HTTP 错误和校验失败会直接停止。
+
 `release-recovery.yml` 在发布运行结束后，使用默认分支上的受信控制器检查同一个运行。它不执行失败运行下载的代码或 artifacts，不读取 `macos-signing` Secrets，也不具有修改源码或 Release 的权限。
 
 - 只有同仓库、手动触发、版本标签仍指向审核源码，且失败的 Mac job **一个步骤都未开始**、GitHub 明确标注 hosted runner 未分配成功时，才自动恢复。第一次等待 1 分钟，第二次等待 3 分钟；同一运行最多三次尝试，包含首次执行和人工重跑。
