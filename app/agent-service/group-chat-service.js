@@ -58,6 +58,8 @@ function publicGroupView(view, productStore) {
 
 // 群聊 RPC：参数已由 group-chat-protocol 严格校验；成员身份由宿主解析，不信任客户端。
 class GroupChatService {
+  #cardRefreshes = new Map();
+
   constructor({ store, driver, directory = null, productStore, getFederationClient = () => null,
     getMediaStore = () => null, nativeExecutor = null, onChanged = () => {} }) {
     this.responsePages = new GroupResponsePages({ now: store.now ?? Date.now });
@@ -118,12 +120,22 @@ class GroupChatService {
     return assertModelCatalog(catalog);
   }
 
+  async #refreshCards(groupId) {
+    try {
+      const refreshed = await this.directory?.refresh(groupId);
+      if (refreshed?.changed) this.#changed(groupId);
+    } catch { /* 成员卡刷新失败时展示已有卡 */ }
+  }
+
   async #view(groupId, { refresh = false } = {}) {
-    if (refresh && this.store.groupLifecycle(groupId) === "active") {
-      try {
-        const refreshed = await this.directory?.refresh(groupId);
-        if (refreshed?.changed) this.#changed(groupId);
-      } catch { /* 成员卡刷新失败时展示已有卡 */ }
+    if (refresh && this.directory && this.store.groupLifecycle(groupId) === "active") {
+      const cards = this.store.getMemberCards(groupId);
+      // 成员都有卡就先返回已存的卡，后台刷新；有变化再发 group.changed。缺卡（新群、新成员）才等刷新。
+      if (this.store.getGroup(groupId).members.some(member => member.state === "active" && !cards.has(member.id))) {
+        await this.#refreshCards(groupId);
+      } else if (!this.#cardRefreshes.has(groupId)) {
+        this.#cardRefreshes.set(groupId, this.#refreshCards(groupId).finally(() => this.#cardRefreshes.delete(groupId)));
+      }
     }
     const view = publicGroupView(this.store.getGroup(groupId), this.productStore);
     if (view.group.status !== "active") return view;
