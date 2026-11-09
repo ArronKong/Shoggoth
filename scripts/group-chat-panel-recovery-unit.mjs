@@ -76,8 +76,10 @@ async function harness(t, detail, messages = id => page(id), options = {}) {
       if (name.endsWith('/lib/groupPanelObserver')) return importModule('src/lib/groupPanelObserver.ts');
       if (name.endsWith('/lib/groupSendJournal')) return groupJournal;
       if (name.endsWith('/lib/turnTimeline')) return importModule('src/lib/turnTimeline.ts');
-      if (name.endsWith('/lib/groupReferenceExcerpt')) return importModule('src/lib/groupReferenceExcerpt.ts');
+      if (name.endsWith('/groupReferenceExcerpt')) return importModule('src/lib/groupReferenceExcerpt.ts');
+      if (name.endsWith('/agent-service/group-mentions')) return require(path.resolve(ui, '../agent-service/group-mentions.js'));
       if (name.endsWith('/lib/groupReply')) return importModule('src/lib/groupReply.ts');
+      if (name.endsWith('/lib/groupMentions')) return importModule('src/lib/groupMentions.ts');
       if (name.endsWith('/lib/groupTimeline')) return importModule('src/lib/groupTimeline.ts');
       if (name.endsWith('/lib/groupMessagePresentation')) return importModule('src/lib/groupMessagePresentation.ts');
       if (name.endsWith('/i18n/groupCollaborationResources') || name.endsWith('/i18n/groupComposerResources')) return {};
@@ -89,6 +91,7 @@ async function harness(t, detail, messages = id => page(id), options = {}) {
       if (name === './GroupChatMarkdown') return { __esModule: true, default: props => React.createElement('p', null, props.lead, props.text),
         groupAttachmentsOutsideMarkdown: (_text, attachments) => attachments };
       if (name === './GroupChatSendTarget') return importModule('src/pages/GroupChatSendTarget.tsx');
+      if (['./GroupChatComposerInput', './GroupChatMention', './GroupMemberAvatar'].includes(name)) return importModule('src/pages/' + name.slice(2) + '.tsx');
       if (name === './ChatPromptCard') return { __esModule: true, default: props => React.createElement('section', { 'data-approval': props.entry.id }) };
       if (name === './inspiration-media') return { MAX_INSPIRATION_ATTACHMENTS: 8, inspirationMediaLimit: () => 0 };
       return stubs;
@@ -133,6 +136,10 @@ async function harness(t, detail, messages = id => page(id), options = {}) {
   };
 }
 
+const input = h => h.root().find(node => typeof node.props.onOpenMention === 'function');
+const typeInput = (h, text) => act(async () => input(h).props.onChange({ text, mentions: [] },
+  { start: text.length, end: text.length, includesPrefill: false }, false, false));
+
 test('stop gives immediate single-flight feedback and retains the draft until a confirmed terminal view', async t => {
   const pending = deferred(); let authority = group('a'), stops = 0;
   authority.round = round;
@@ -140,7 +147,7 @@ test('stop gives immediate single-flight feedback and retains the draft until a 
   const h = await harness(t, async () => authority, undefined, { api: {
     stopGroupChatDiscussion: async id => { assert.equal(id, 'a'); stops++; return pending.promise; },
   } });
-  await act(async () => h.root().findByType('textarea').props.onChange({ target: { value: 'preserve draft', selectionStart: 14 } }));
+  await typeInput(h, 'preserve draft');
   const stop = () => h.root().findAllByType('button').find(button => button.props.className?.includes('chat-stop'));
   let stopping;
   await act(async () => { stopping = stop().props.onClick(); });
@@ -157,7 +164,7 @@ test('stop gives immediate single-flight feedback and retains the draft until a 
   assert.equal(h.root().findByProps({ 'data-chat-composer': true }).findAll(node => node.props.role === 'status').length, 0,
     'background stop confirmation has no status copy inside the composer');
   assert.equal(stop().props.disabled, true);
-  assert.equal(h.root().findByType('textarea').props.value, 'preserve draft');
+  assert.equal(input(h).props.value.text, 'preserve draft');
   authority = { ...authority, activeTurns: [] };
   await h.event(h.window, 'focus');
   assert.equal(stop(), undefined, 'only a fresh terminal view removes the pending stop');
@@ -217,7 +224,7 @@ test('cached empty groups and a failed warm refresh remain usable without a full
     async () => ({ messages: [], hasMore: false }), { cache: true });
   await h.switch('b'); fail = true; await h.switch('a');
   assert.ok(h.text().includes('owned-a'));
-  assert.equal(h.root().findAllByType('textarea').length, 1);
+  assert.equal(h.root().findAllByProps({ 'data-group-composer-input': true }).length, 1);
   assert.deepEqual(h.calls.filter(c => c.method === 'messages').at(-1).query, { afterSeq: 0, limit: 200 });
   assert.ok(!h.text().includes('groupChat.sync.recovering'), 'background refresh does not add composer status copy');
 });
@@ -358,16 +365,16 @@ test('failed refresh preserves draft, messages, approval and live member draft, 
   let failing = false;
   const h = await harness(t, async () => { if (failing) throw Error('offline'); return authority; },
     async (id, query) => query.afterSeq ? page(id, 2) : page(id, 1));
-  await act(async () => h.root().findByType('textarea').props.onChange({ target: { value: 'owned-composer-draft', selectionStart: 20 } }));
+  await typeInput(h, 'owned-composer-draft');
   failing = true;
   await h.event(h.window, 'focus');
-  assert.equal(h.root().findByType('textarea').props.value, 'owned-composer-draft');
+  assert.equal(input(h).props.value.text, 'owned-composer-draft');
   assert.ok(h.text().includes('owned-message-1'));
   assert.ok(h.text().includes('owned-live-draft'));
   assert.equal(h.root().findAllByProps({ 'data-approval': 'owned-approval' }).length, 1);
   assert.ok(!h.text().includes('offline'));
   failing = false; await h.advance(1000);
-  assert.equal(h.root().findByType('textarea').props.value, 'owned-composer-draft');
+  assert.equal(input(h).props.value.text, 'owned-composer-draft');
   assert.ok(h.text().includes('owned-message-1') && h.text().includes('owned-message-2'));
   assert.deepEqual(h.calls.filter(c => c.method === 'messages').map(c => c.query),
     [{ limit: 100 }, { afterSeq: 1, limit: 200 }, { afterSeq: 1, limit: 200 }]);
@@ -422,6 +429,48 @@ test('first page preserves older pagination and incremental reads do not consume
   assert.ok(!h.text().includes('groupChat.loadOlder'));
   assert.deepEqual(h.calls.filter(c => c.method === 'messages').map(c => c.query),
     [{ limit: 100 }, { afterSeq: 101, limit: 200 }, { beforeSeq: 101, limit: 100 }]);
+});
+
+test('older history shows the small loader and retries in place on an upward wheel', async t => {
+  const first = deferred(), retry = deferred();
+  let attempts = 0;
+  const h = await harness(t, async id => group(id), async (id, query) => query.beforeSeq
+    ? (++attempts === 1 ? first.promise : retry.promise) : page(id, 101, true));
+  const button = label => h.root().findAllByType('button').find(node => node.children.includes(label));
+  const wheel = (deltaY, scrollTop) => h.root().findByProps({ 'data-group-timeline': true })
+    .props.onWheel({ deltaY, currentTarget: { scrollTop } });
+  const loaders = () => h.root().findAll(node => node.props.label === 'chat.historyLoadingEarlier' && node.props.size === 'sm');
+  await act(async () => { wheel(20, 0); wheel(-20, 80); });
+  assert.equal(attempts, 0);
+  await act(async () => { button('groupChat.loadOlder').props.onClick(); wheel(-20, 0); });
+  assert.equal(attempts, 1);
+  assert.equal(loaders().length, 1);
+  assert.ok(h.text().includes('owned-message-101'));
+  await act(async () => first.reject(Error('older page unavailable')));
+  assert.equal(loaders().length, 0);
+  assert.match(button('groupChat.retryOlder').props.className, /\bis-retry\b/);
+  await act(async () => { wheel(-20, 0); wheel(-20, 0); });
+  assert.equal(attempts, 2);
+  assert.equal(loaders().length, 1);
+  await act(async () => retry.resolve(page('a', 100)));
+  assert.equal(loaders().length, 0);
+  assert.ok(!button('groupChat.loadOlder') && !button('groupChat.retryOlder'));
+  assert.ok(h.text().includes('owned-message-100') && h.text().includes('owned-message-101'));
+});
+
+test('an older history response from a previous group cannot end the current loading state', async t => {
+  const previous = deferred(), current = deferred();
+  const h = await harness(t, async id => group(id), async (id, query) => query.beforeSeq
+    ? (id === 'a' ? previous.promise : current.promise) : page(id, id === 'a' ? 101 : 201, true));
+  const load = () => h.root().findAllByType('button').find(node => node.children.includes('groupChat.loadOlder')).props.onClick();
+  await act(async () => load());
+  await h.switch('b');
+  await act(async () => load());
+  await act(async () => previous.resolve(page('a', 100)));
+  assert.ok(!h.text().includes('owned-message-100'));
+  assert.equal(h.root().findAll(node => node.props.label === 'chat.historyLoadingEarlier').length, 1);
+  await act(async () => current.resolve(page('b', 200)));
+  assert.ok(h.text().includes('owned-message-200') && h.text().includes('owned-message-201'));
 });
 
 test('wrong group and malformed message response cannot replace authoritative content', async t => {

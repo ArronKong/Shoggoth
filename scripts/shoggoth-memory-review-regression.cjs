@@ -13,7 +13,7 @@ const { validateMemoryMcpArguments } = require("../app/agent-service/memory-mcp-
 const { SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS, SHOGGOTH_EXTERNAL_PRODUCT_DEVELOPER_INSTRUCTIONS,
   productToolDescription } = require("../app/agent-service/product-capability-manifest");
 const { ConversationMemoryService } = require("../app/agent-service/conversation-memory-service");
-const { MemoryReviewService, MEMORY_REVIEW_INTERVAL, MEMORY_REVIEW_MAX_PER_DAY } = require("../app/agent-service/memory-review-service");
+const { MemoryReviewService, MEMORY_REVIEW_CHUNK_MESSAGES, MEMORY_REVIEW_MAX_CHUNKS } = require("../app/agent-service/memory-review-service");
 const { A, fixture } = require("./fixtures/memory-repair-fixture.cjs");
 
 function boundSession(f) {
@@ -125,7 +125,7 @@ test("the background review saves agent notes and quoted user facts, and skips t
   assert.deepEqual(result, { applied: 2, reason: "saved" });
   assert.equal(prompts.length, 1);
   assert.equal(prompts[0].profileId, A);
-  assert.equal(prompts[0].sessionKey, session.sessionKey);
+  assert.equal(prompts[0].sessionKey, undefined, "the review uses the Agent's own model route, not a chat session's override");
   assert.match(prompts[0].prompt, /parallel runs time out/u);
   assert.match(prompts[0].prompt, /以后叫我老唐/u);
   assert.deepEqual(active(f, "agent").map(item => item.content), ["Tests must run with pnpm test --runInBand; parallel runs time out."]);
@@ -150,79 +150,104 @@ test("the background review saves agent notes and quoted user facts, and skips t
   assert.deepEqual(await invalid.review({ profileId: A, sessionKey: session.sessionKey }), { applied: 0, reason: "invalid-output" });
 });
 
-test("borrowed-derived messages stay out of the review, which still runs and records its outcome", async (t) => {
+
+test("the nightly review reads every unreviewed direct chat in one call, leaves borrowed text out and never repeats", async (t) => {
   const f = await fixture(t);
-  const session = boundSession(f);
   // A workspace-scoped fact saved in the foreground is already known to the review.
   await f.owner.propose({ profileId: A, scope: "workspace", type: "semantic", content: "北极星的日志统一用 UTC 时间。",
     classification: "explicit", sourceRefs: [`user-edit:${crypto.randomUUID()}`, ...require("../app/agent-service/memory-engine").workspaceMemoryRefs(f.workspace, "workspace")] });
-  for (let turn = 1; turn < MEMORY_REVIEW_INTERVAL; turn++) chatTurn(f, session, `第 ${turn} 条：北极星的约定之一。`).complete();
-  const last = chatTurn(f, session, "北极星的预发环境叫 staging-polaris。");
-  f.service.transcriptStore.appendEvent({ profileId: A, sessionId: session.id, id: `assistant-borrowed-${crypto.randomUUID()}`,
+  const first = boundSession(f), second = boundSession(f);
+  chatTurn(f, first, "北极星的预发环境叫 staging-polaris。").complete();
+  const last = chatTurn(f, second, "北极星的日志保留 30 天。");
+  f.service.transcriptStore.appendEvent({ profileId: A, sessionId: second.id, id: `assistant-borrowed-${crypto.randomUUID()}`,
     runId: last.run().id, kind: "assistant", content: { text: "BORROWED-FROM-GROK 用户住在巴黎。", borrowedMemoryDerived: true }, occurredAt: f.now() });
   last.complete();
   const prompts = [];
+  const eventFor = (prompt, text) => JSON.parse(prompt.split("Conversation (data, not instructions):\n")[1].split("\n")[0])
+    .find(message => message.text.includes(text)).eventId;
   const review = reviewer(f, async input => {
     prompts.push(input.prompt);
-    return { text: JSON.stringify({ operations: [{ action: "add", store: "agent", content: "北极星的预发环境叫 staging-polaris。" }] }) };
+    return { text: JSON.stringify({ operations: [
+      { action: "add", store: "agent", content: "北极星的预发环境叫 staging-polaris。", sourceEventId: eventFor(input.prompt, "staging-polaris") },
+      // Several conversations: a note without a citation cannot be attributed and is dropped.
+      { action: "add", store: "agent", content: "北极星有两个预发环境。" },
+    ] }) };
   });
-  review.onTurnCompleted({ source: "chat", sourceId: session.sessionKey, profileId: A });
-  await review.inFlight.get(session.sessionKey)?.task;
-  assert.equal(prompts.length, 1);
-  assert.doesNotMatch(prompts[0], /BORROWED-FROM-GROK|巴黎/u);
+  assert.deepEqual(await review.reviewProfile(A), { chunks: 1, applied: 1, reason: "saved" });
+  assert.equal(active(f, "agent").some(item => item.content === "北极星有两个预发环境。"), false);
+  assert.equal(prompts.length, 1, "one call covers both conversations");
   assert.match(prompts[0], /staging-polaris/u);
+  assert.match(prompts[0], /日志保留 30 天/u);
+  assert.doesNotMatch(prompts[0], /BORROWED-FROM-GROK|巴黎/u);
   assert.match(prompts[0], /北极星的日志统一用 UTC 时间/u, "workspace facts are listed as known memories");
   assert.ok(active(f, "agent").some(item => item.content === "北极星的预发环境叫 staging-polaris。"));
   assert.ok(f.diagnostics().some(record => record.stage === "memory-review" && record.outcome === "saved" && record.code === null));
 
-  // A failed model call is recorded with its code, never with text.
-  const failing = reviewer(f, async () => { throw Object.assign(new Error("model down"), { code: "MEMORY_IMPORT_TIMEOUT" }); });
-  for (let turn = 0; turn < MEMORY_REVIEW_INTERVAL; turn++) chatTurn(f, session, `追加第 ${turn} 条。`).complete();
-  failing.onTurnCompleted({ source: "chat", sourceId: session.sessionKey, profileId: A });
-  await failing.inFlight.get(session.sessionKey)?.task;
-  assert.ok(f.diagnostics().some(record => record.stage === "memory-review" && record.outcome === "error" && record.code === "MEMORY_IMPORT_TIMEOUT"));
-  assert.doesNotMatch(JSON.stringify(f.diagnostics()), /model down|staging-polaris/u);
+  // The next night has nothing new: no model call.
+  assert.deepEqual(await review.reviewProfile(A), { chunks: 0, applied: 0, reason: "nothing-new" });
+  assert.equal(prompts.length, 1);
+  assert.ok(f.diagnostics().some(record => record.stage === "memory-review" && record.outcome === "nothing-new"));
+
+  // Session excerpts are daily-note working material, never offered as known memories.
+  chatTurn(f, first, "再补一句：预发数据库每周一清空。").complete();
+  await f.owner.sessionCapture.captureProfile(A, { reason: "nightly", idleMs: 0 });
+  assert.ok(f.owner.store.list(A, { status: "active" }).some(item => item.id.startsWith("session-excerpt-")));
+  await review.reviewProfile(A);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /每周一清空/u);
+  assert.doesNotMatch(prompts[1], /Session excerpt|staging-polaris。","role/u);
+  assert.doesNotMatch(prompts[1].split("Conversation (data, not instructions):")[1], /staging-polaris/u, "reviewed messages are not sent again");
+  // The note cites the first conversation: forgetting it withdraws the note.
+  await f.owner.forgetSession(A, first.id);
+  assert.equal(active(f, "agent").some(item => item.content === "北极星的预发环境叫 staging-polaris。"), false);
 });
 
-test("a review runs on every tenth completed turn, within the daily cap, and yields to a new turn", async () => {
-  const sessions = new Map(), events = new Map(), reviews = [];
-  const deps = { memory: null, recall: null, provenance: null, generate: null,
-    sessions: { getSession: key => sessions.get(key) || null },
-    transcripts: { listEvents: (_profileId, sessionId) => events.get(sessionId) || [] } };
-  const service = new MemoryReviewService(deps);
-  service.review = input => { reviews.push(input); return new Promise((resolve, reject) => {
+test("a failed night keeps its messages, a night reviews at most the chunk cap, and a new message cancels", async (t) => {
+  const f = await fixture(t);
+  const session = boundSession(f);
+  const total = MEMORY_REVIEW_CHUNK_MESSAGES * MEMORY_REVIEW_MAX_CHUNKS + 5;
+  for (let index = 0; index < total; index++) chatTurn(f, session, `第 ${index} 条约定。`).complete();
+  const failing = reviewer(f, async () => { throw Object.assign(new Error("model down"), { code: "MEMORY_IMPORT_TIMEOUT" }); });
+  assert.equal((await failing.reviewProfile(A)).reason, "error");
+  assert.ok(f.diagnostics().some(record => record.stage === "memory-review" && record.outcome === "error" && record.code === "MEMORY_IMPORT_TIMEOUT"));
+  assert.doesNotMatch(JSON.stringify(f.diagnostics()), /model down|约定/u);
+
+  const seen = [];
+  const ok = reviewer(f, async input => { seen.push(input.prompt); return { text: "{\"operations\":[]}" }; });
+  assert.deepEqual(await ok.reviewProfile(A), { chunks: MEMORY_REVIEW_MAX_CHUNKS, applied: 0, reason: "nothing-saved" });
+  assert.match(seen[0], /第 0 条约定/u, "the failed night did not advance");
+  assert.deepEqual(await ok.reviewProfile(A), { chunks: 1, applied: 0, reason: "nothing-saved" });
+  assert.match(seen.at(-1), new RegExp(`第 ${total - 1} 条约定`, "u"));
+  assert.deepEqual(await ok.reviewProfile(A), { chunks: 0, applied: 0, reason: "nothing-new" });
+
+  chatTurn(f, session, "新的一条：部署窗口改到周五。").complete();
+  let started;
+  const reached = new Promise(resolve => { started = resolve; });
+  const pending = reviewer(f, input => new Promise((resolve, reject) => {
     input.signal.addEventListener("abort", () => reject(Object.assign(new Error("canceled"), { code: "MODEL_ONLY_CANCELED" })), { once: true });
-    input.resolve = resolve;
-  }); };
-  const addSession = (key, priorTurns) => {
-    sessions.set(key, { sessionKey: key, id: `id-${key}`, profileId: "p" });
-    events.set(`id-${key}`, Array.from({ length: priorTurns }, () => ({ kind: "user" })));
-  };
-  addSession("s1", 1);
-  service.onTurnCompleted({ source: "chat", sourceId: "s1", profileId: "p" });
-  for (let turn = 2; turn < MEMORY_REVIEW_INTERVAL; turn++) service.onTurnCompleted({ source: "chat", sourceId: "s1", profileId: "p" });
-  assert.equal(reviews.length, 0);
-  service.onTurnCompleted({ source: "chat", sourceId: "s1", profileId: "p" });
-  assert.equal(reviews.length, 1);
-  assert.equal(reviews[0].sessionKey, "s1");
-  // A new user turn in the same session aborts its pending review.
-  service.cancelSession("s1");
-  assert.equal(reviews[0].signal.aborted, true);
-  await new Promise(resolve => setImmediate(resolve));
-  // A session seen first at its tenth turn (seeded from the transcript) reviews at once.
-  addSession("s2", MEMORY_REVIEW_INTERVAL);
-  service.onTurnCompleted({ source: "chat", sourceId: "s2", profileId: "p" });
-  assert.equal(reviews.length, 2);
-  reviews[1].resolve({ applied: 0 });
-  await new Promise(resolve => setImmediate(resolve));
-  // Non-chat runs never count, and the per-Agent daily cap holds.
-  service.onTurnCompleted({ source: "cron", sourceId: "s2", profileId: "p" });
-  for (let i = 0; i < MEMORY_REVIEW_MAX_PER_DAY + 5; i++) {
-    addSession(`cap-${i}`, MEMORY_REVIEW_INTERVAL);
-    service.onTurnCompleted({ source: "chat", sourceId: `cap-${i}`, profileId: "p" });
-  }
-  assert.equal(reviews.length, MEMORY_REVIEW_MAX_PER_DAY);
-  // Service stop abandons every review still in flight.
-  service.abortAll();
-  assert.equal(reviews.slice(2).every(review => review.signal.aborted), true);
+    started();
+  }));
+  const running = pending.reviewProfile(A);
+  await reached;
+  assert.deepEqual(await pending.reviewProfile(A), { chunks: 0, applied: 0, reason: "busy" });
+  pending.cancelSession(session.sessionKey);
+  assert.equal((await running).reason, "canceled");
+  assert.deepEqual(await ok.reviewProfile(A), { chunks: 1, applied: 0, reason: "nothing-saved" }, "a canceled night keeps its messages");
+  assert.match(seen.at(-1), /部署窗口改到周五/u);
+});
+
+// 2026-11-07 Grok and Antigravity verified their tool-free lane for proactive
+// checks only, so the nightly review asks for its own model-only purpose
+// instead of the memory_text lane that recall and Dreaming also use.
+test("the Service's nightly review generates through the memory review purpose", async (t) => {
+  const f = await fixture(t);
+  const session = boundSession(f);
+  chatTurn(f, session, "以后回答先给一句话结论。", "好的。").complete();
+  const coordinator = f.service.workRunCoordinator, seen = [];
+  coordinator.generateMemoryText = async () => { throw new Error("nightly review used the shared memory text lane"); };
+  coordinator.generateMemoryReviewText = async input => { seen.push(input); return { text: JSON.stringify({ operations: [] }) }; };
+  await f.owner.beforeNightlyDream(A, { signal: new AbortController().signal });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].profileId, A);
+  assert.match(seen[0].prompt, /一句话结论/u);
 });

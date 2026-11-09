@@ -275,9 +275,10 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     }),
     product: Object.freeze({
       owner: "shoggoth",
-      schemaVersion: 16,
+      schemaVersion: 17,
       identity: "Agent id/agentId remain stable; backendId is always shoggoth; selected runtimes belong to Agent bindings",
-      pathRules: Object.freeze(["stateSnapshotPath", "eventLogPath", "stateDir/product-schema-migrations/15-to-16/<digest>/*"]),
+      pathRules: Object.freeze(["stateSnapshotPath", "eventLogPath", "stateDir/product-schema-migrations/15-to-16/<digest>/*",
+        "stateDir/product-schema-migrations/15-to-17/<digest>/*", "stateDir/product-schema-migrations/16-to-17/<digest>/*"]),
       records: Object.freeze({
         RuntimeAccount: recordAuthority({ authority: [...RUNTIME_ACCOUNT_FIELDS, "maxActive"] }),
         AgentProfile: recordAuthority({
@@ -290,7 +291,7 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
         }),
         AgentRuntimeBinding: recordAuthority({ authority: [
           "id", "profileId", "runtime", "runtimeProfileId", "runtimeAccountId",
-          "label", "enabled", "revision", "createdAt", "updatedAt",
+          "label", "enabled", "revision", "createdAt", "updatedAt", "defaultModel",
         ] }),
         AgentProfileRuntimeProjection: recordAuthority({ derived: [
           "runtime", "runtimeProfileId", "runtimeAccountId",
@@ -402,6 +403,7 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     source: "NativeSkillStore",
     packageStore: "skills/packages/<skillId>/<version>",
     registry: "skills/registry.json",
+    builtinSettings: "skills/builtin-authoring.json",
     profileSelection: "agents/<profileId>/skills/manifest.json",
     runtimeProjection: "ContextCompiler + authorized MCP injection (no Runtime Home materialization)",
   }),

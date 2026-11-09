@@ -139,10 +139,14 @@ import {
 } from "./chat-session-board/sessionBoardModel";
 import FusionLoader from "../components/FusionLoader";
 import ChatTypingText from "../components/ChatTypingText";
-import TurnProcess from "../components/TurnTimeline/TurnProcess";
+import { getTurnProcessStats, TurnProcessSummary } from "../components/TurnTimeline/TurnProcess";
 import TurnTimeline from "../components/TurnTimeline/TurnTimeline";
 import { IconTrajectory } from "../components/TurnTimeline/trajectoryIcons";
-import { createTimeline, reduceTimeline, stepsFromParts, mergeToolArgs, toolActivityTitle, toolResultFailed, type TimelinePartLike, type TurnEvent, type TurnStep, type TurnTimelineState } from "../lib/turnTimeline";
+import {
+  createTimeline, reduceTimeline, stepsFromParts, mergeNativeTurnSteps as mergeObservedTurnSteps,
+  mergeToolArgs, toolActivityTitle, toolResultFailed, turnElapsedMs,
+  type TurnTiming, type TimelinePartLike, type TurnEvent, type TurnStep, type TurnTimelineState,
+} from "../lib/turnTimeline";
 import { isBackgroundSession, isVisibleSession, sessionKindOf } from "../lib/sessionKind";
 import { createSubagentActivity } from "../lib/chatSubagentActivity";
 import { consumeCronChatHandoff } from "../lib/cronChatHandoff";
@@ -174,7 +178,7 @@ import { IconSend, IconClip, IconSearch, IconMic, IconStop } from "./chatIcons";
 import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
 import "./ChatPage.css";
 import GroupChatPanel, { GroupChatAvatar } from "./GroupChatPanel";
-import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconTrash, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
+import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconQuote, IconTrash, MESSAGE_DELETION_ENABLED, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
 import { createGroupPanelCache } from "../lib/groupPanelCache";
 import GroupChatCreateModal from "./GroupChatCreateModal";
 import { emitGroupConnection } from "../lib/groupSendJournal";
@@ -188,6 +192,8 @@ import type {
   ChatPermissionModeOption,
   GlobalChatSearchHit,
   GlobalChatSearchResult,
+  GlobalGroupChatSearchHit,
+  GroupChatMessage,
   OpenClawProgressCard,
   OpenClawQuestion,
   OpenClawQuestionPromptEntry,
@@ -310,7 +316,8 @@ interface PendingSearchJump extends GlobalChatSearchHit {
   token: number;
 }
 
-function globalSearchHitIdentity(hit: GlobalChatSearchHit): string {
+function globalSearchHitIdentity(hit: GlobalChatSearchHit | GlobalGroupChatSearchHit): string {
+  if ("kind" in hit) return JSON.stringify([hit.kind, hit.ownerScope, hit.message.groupId, hit.message.id]);
   return [
     hit.backendId,
     hit.agentId,
@@ -574,6 +581,9 @@ interface Part {
   pluginAppCallId?: string;
   isError?: boolean; // toolResult: the tool failed (→ "Tool error …" red card)
   steps?: TurnStep[]; // timeline part(R339): 回合过程步骤(吸收自 thinking/toolCall/toolResult/plan)
+  liveTimeline?: boolean;
+  turnTiming?: TurnTiming;
+  recoveredSteps?: TurnStep[];
 }
 interface Usage {
   totalTokens?: number;
@@ -634,6 +644,9 @@ interface ChatMsg {
   localSlashId?: string;
   idempotencyKey?: string;
   pending?: boolean;
+  finalReplyStreaming?: boolean;
+  interimActivityId?: number;
+  turnTiming?: TurnTiming;
   settledPending?: boolean; // stopped live tail awaiting its terminal frame or canonical history
   keepLiveLayout?: boolean; // this turn's rendered text keeps its layout through history replacement
   ephemeral?: "progressCard";
@@ -646,6 +659,19 @@ interface ChatMsg {
   // `divider`, NOT as the red system/error bubble. For model switches, `model`
   // carries the new model; `parts` keep the backend's raw text for the hover title.
   notice?: "modelSwitch" | "runInterrupted" | "contextCompacted";
+}
+
+type ChatTurnActivity = { steps: TurnStep[]; live?: boolean; runId?: string; timing?: TurnTiming; recoveredSteps?: TurnStep[] };
+
+function activityOwnerOf(message: ChatMsg) {
+  if (message.turnStartId) return `turn:${message.turnStartId}`;
+  const runId = message.nativeRunId ?? message.activityRunId;
+  return runId ? `run:${runId}` : message;
+}
+
+function renderActivityBubble(activity: ChatTurnActivity | undefined, openTimeline: (activity: ChatTurnActivity) => void) {
+  if (!activity?.steps.length) return null;
+  return <TurnTimeline steps={activity.steps} status={activity.live ? "running" : "done"} onOpenPreview={() => openTimeline(activity)} />;
 }
 
 // ---- pure helpers -------------------------------------------------------
@@ -1261,6 +1287,8 @@ function normalize(raw: any): ChatMsg {
     idempotencyKey: typeof raw?.idempotencyKey === "string" ? raw.idempotencyKey
       : typeof raw?.__openclaw?.idempotencyKey === "string" ? raw.__openclaw.idempotencyKey : undefined,
     ts: typeof raw?.timestamp === "number" ? raw.timestamp : undefined,
+    turnTiming: turnElapsedMs(raw?.shoggoth?.turnTiming?.startedAt, raw?.shoggoth?.turnTiming?.finishedAt) != null
+      ? { startedAt: raw.shoggoth.turnTiming.startedAt, finishedAt: raw.shoggoth.turnTiming.finishedAt } : undefined,
     model: raw?.model,
     provider: raw?.provider,
     usage: raw?.usage,
@@ -1497,16 +1525,16 @@ function composePendingParts(
   ];
 }
 
-function applyNativeUiDelta(prev: ChatMsg[], raw: any, tools: ToolEntry[], thinking: string, plan: PlanEntry[], prompts: ChatPromptEntry[]): ChatMsg[] {
+function applyNativeUiDelta(prev: ChatMsg[], raw: any, tools: ToolEntry[], thinking: string, plan: PlanEntry[], prompts: ChatPromptEntry[], finalReply?: boolean): ChatMsg[] {
   const norm = normalize({ ...raw, role: "assistant" });
   const process = composePendingParts(tools, "", thinking, plan, prompts).filter(part => part.type !== "text");
-  const message = { ...norm, parts: [...process, ...norm.parts], pending: true, keepLiveLayout: true };
+  const message = { ...norm, parts: [...process, ...norm.parts], pending: true, keepLiveLayout: true, finalReplyStreaming: finalReply };
   const out: ChatMsg[] = []; let inserted = false;
   let boundary = -1;
   for (let index = 0; index < prev.length; index++) if (prev[index].role === "user") boundary = index;
   prev.forEach((value, index) => {
     if (index > boundary && value.role === "assistant" && (value.pending || value.nativeRunId === norm.nativeRunId)) {
-      if (!inserted) { out.push({ ...message, ts: value.ts ?? norm.ts }); inserted = true; }
+      if (!inserted) { out.push({ ...message, ts: value.ts ?? norm.ts, finalReplyStreaming: finalReply ?? value.finalReplyStreaming }); inserted = true; }
     } else out.push(value);
   });
   if (!inserted) out.push(message); return out;
@@ -1526,6 +1554,7 @@ function applyDelta(
   plan: PlanEntry[] = [],
   prompts: ChatPromptEntry[] = [],
   canvas: Part[] = [],
+  finalReply?: boolean,
 ): ChatMsg[] {
   const out = prev.slice();
   for (let i = out.length - 1; i >= 0; i -= 1) {
@@ -1533,14 +1562,16 @@ function applyDelta(
       const cur = lastText(out[i].parts);
       const next = mergeLiveText(cur, text);
       const liveCanvas = canvas.length ? canvas : out[i].parts.filter((part) => part.type === "canvas");
-      out[i] = { ...out[i], parts: composePendingParts(tools, next, thinking, plan, prompts, liveCanvas) };
+      out[i] = { ...out[i], parts: composePendingParts(tools, next, thinking, plan, prompts, liveCanvas),
+        finalReplyStreaming: next.trim() ? finalReply ?? out[i].finalReplyStreaming : undefined };
       return out;
     }
   }
   for (let i = 0; i < out.length; i += 1) {
     if (out[i].keepLiveLayout) out[i] = { ...out[i], keepLiveLayout: false };
   }
-  return [...out, { role: "assistant", parts: composePendingParts(tools, text, thinking, plan, prompts, canvas), pending: true }];
+  return [...out, { role: "assistant", parts: composePendingParts(tools, text, thinking, plan, prompts, canvas), pending: true,
+    finalReplyStreaming: text.trim() ? finalReply : undefined }];
 }
 // A streamed tool lifecycle event mutated `tools`; re-render the pending assistant
 // (creating one if the turn started outside our own send), keeping its streamed text.
@@ -1562,7 +1593,7 @@ function applyToolStream(prev: ChatMsg[], tools: ToolEntry[], thinking = "", pla
   }
   return [...out, { role: "assistant", parts: composePendingParts(tools, "", thinking, plan, prompts), pending: true }];
 }
-function settlePendingAssistant(prev: ChatMsg[], liveSteps?: TurnStep[]): ChatMsg[] {
+function settlePendingAssistant(prev: ChatMsg[], liveSteps?: TurnStep[], nativeRunId?: string): ChatMsg[] {
   const terminalSteps = liveSteps ? withoutPlanSteps(liveSteps)
     .filter((step) => step.kind !== "user" && step.kind !== "final" && (step.kind !== "text" || step.activity))
     .map((step) => ["running", "pending"].includes(step.status) ? { ...step, status: "aborted" as const } : step) : undefined;
@@ -1579,8 +1610,11 @@ function settlePendingAssistant(prev: ChatMsg[], liveSteps?: TurnStep[]): ChatMs
       ...parts.filter((part) => !["thinking", "toolCall", "toolResult", "plan", "timeline"].includes(part.type))];
     // A stop receipt can arrive before the terminal event/history. Keep the
     // visible text and process in place while retiring prompts and empty cursors.
+    const owner = message.nativeRunId ?? nativeRunId;
+    const hasText = parts.some(part => part.type === "text");
     return parts.length || message.images?.length || message.files?.length
-      ? [{ ...message, parts, pending: false, settledPending: !steps?.some((step) => step.kind === "status"), keepLiveLayout: true }] : [];
+      ? [{ ...message, nativeRunId: owner, parts, pending: false,
+        settledPending: (!!owner && hasText) || !steps?.some(step => step.kind === "status"), keepLiveLayout: true }] : [];
   });
 }
 function retainLiveLayout(previous: ChatMsg[], history: ChatMsg[]): ChatMsg[] {
@@ -1614,13 +1648,15 @@ function retainLiveLayout(previous: ChatMsg[], history: ChatMsg[]): ChatMsg[] {
   const previousUserIndex = previousUser ? previous.indexOf(previousUser) : -1;
   if (sameUser) for (const message of previous.slice(previousUserIndex + 1)) {
     if (message.role === "assistant" && message.keepLiveLayout && !textOf(message).trim()
-      && message.parts.some((part) => part.type === "timeline" && part.steps?.some((step) => step.kind === "status"))) {
+      && message.parts.some((part) => part.type === "timeline" && part.steps?.some((step) => step.kind === "status"))
+      && (!message.nativeRunId || !history.some(item => item.nativeRunId === message.nativeRunId && item.role === "assistant" && !item.notice))) {
       next.push(message);
     }
   }
   return next;
 }
-function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?: string, preserveLiveProcess = false, terminal = false): ChatMsg[] {
+function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?: string, preserveLiveProcess = false, terminal = false,
+  { timing, interimActivityId }: { timing?: TurnTiming; interimActivityId?: number } = {}): ChatMsg[] {
   // Normalize the completed turn the SAME way loadHistory does, so a streamed reply
   // renders identically to a reloaded one. The old path flattened content via
   // contentToText into a single text part, which dropped the thinking/text split:
@@ -1636,6 +1672,8 @@ function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?
         : { ...finalMsg, role: "assistant" }
       : { role: "assistant", content: finalMsg };
   const norm = normalize(raw);
+  if (timing?.finishedAt != null) norm.turnTiming = timing;
+  if (interimActivityId !== undefined) norm.interimActivityId = interimActivityId;
   const out = prev.slice();
   const isProcess = (part: Part) => ["thinking", "toolCall", "toolResult", "plan", "timeline"].includes(part.type);
   // A durable terminal observation may load the saved answer before the final
@@ -1725,22 +1763,23 @@ function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?
   return norm.parts.length ? [...out, { ...norm, keepLiveLayout: true }] : out;
 }
 
-function appendSteeringMessage(prev: ChatMsg[], text: string): ChatMsg[] {
+function appendSteeringMessage(prev: ChatMsg[], text: string, nativeRunId?: string): ChatMsg[] {
   const out = prev.slice();
   for (let i = out.length - 1; i >= 0; i -= 1) {
     if (out[i].role === "assistant" && out[i].pending) {
       const hasContent = out[i].parts.some((part) => (
         part.type !== "text" || (part.text ?? "").length > 0
       ));
-      if (hasContent) out[i] = { ...out[i], pending: false };
+      if (hasContent) out[i] = { ...out[i], nativeRunId: out[i].nativeRunId ?? nativeRunId, pending: false,
+        keepLiveLayout: !!nativeRunId || out[i].keepLiveLayout };
       else out.splice(i, 1);
       break;
     }
   }
   return [
     ...out,
-    { role: "user", parts: [{ type: "text", text }], ts: Date.now() },
-    { role: "assistant", parts: composePendingParts([], ""), pending: true },
+    { role: "user", nativeRunId, parts: [{ type: "text", text }], ts: Date.now() },
+    { role: "assistant", nativeRunId, parts: composePendingParts([], ""), pending: true },
   ];
 }
 
@@ -1812,7 +1851,13 @@ function groupMessages(msgs: ChatMsg[]): Group[] {
     // toolResults (was excluded), so a turn's tool-output cards stack tightly in
     // one group with a single footer instead of each becoming a separate, spaced,
     // individually-footered group (matches OpenClaw's compact tool rendering).
-    if (last && last.role === m.role && !standalone(last.msgs[last.msgs.length - 1]) && !standalone(m)) {
+    const previous = last?.msgs.at(-1);
+    const run = m.nativeRunId ?? m.activityRunId;
+    const previousRun = previous?.nativeRunId ?? previous?.activityRunId;
+    // Identifiable assistant turns need their own activity footer even when no user message separates them.
+    const differentTurn = m.role === "assistant" && (run && previousRun ? run !== previousRun
+      : m.turnStartId && previous?.turnStartId && m.turnStartId !== previous.turnStartId);
+    if (last && previous && last.role === m.role && !differentTurn && !standalone(previous) && !standalone(m)) {
       last.msgs.push(m);
       // g.ts 保留组内 FIRST 条的时间，但只作 footer 的兜底：footer 实际显示组内最后一条
       // 「可见」消息的时间（见 footer 渲染处 footerTs）。被隐藏的 heartbeat 会让不同时间的
@@ -1834,9 +1879,27 @@ function groupMessages(msgs: ChatMsg[]): Group[] {
 // heartbeat 等隐藏项会让 cron/delivery-mirror 历史中的不同回合同 role 消息
 // 粘连,但同一个已知 Run 的慢工具/审批等待不能被间隙拆开。
 const TURN_GAP_MS = 90_000;
-function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[]): ChatMsg[] {
-  const isBoundary = (x: ChatMsg) => x.role === "user" || !!x.divider || !!x.notice || x.isProactiveNotice === true
-    || x.local === true || x.pending === true;
+type NativeTurnTimeline = TurnTimelineState & { nativeRunId?: string; timing?: TurnTiming; activityId?: number };
+function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], nativeTimeline?: NativeTurnTimeline): ChatMsg[] {
+  const observedRun = nativeTimeline?.nativeRunId;
+  if (observedRun) {
+    for (let index = msgs.length - 1; index >= 0; index -= 1) {
+      const message = msgs[index];
+      if (message.role === "user") break;
+      if (message.role !== "assistant" || !message.pending) continue;
+      if (!message.nativeRunId) {
+        msgs = msgs.slice();
+        msgs[index] = { ...message, nativeRunId: observedRun };
+      }
+      break;
+    }
+  }
+  const nativeReplies = new Set(msgs.filter(m => m.role === "assistant" && !m.notice && !m.divider && m.nativeRunId)
+    .map(m => m.nativeRunId));
+  const inlineCompaction = (m: ChatMsg) => m.notice === "contextCompacted" && !!m.nativeRunId && nativeReplies.has(m.nativeRunId);
+  const nativePending = (m: ChatMsg) => !!observedRun && m.nativeRunId === observedRun && m.pending === true;
+  const isBoundary = (x: ChatMsg) => x.role === "user" || !!x.divider || (!!x.notice && !inlineCompaction(x)) || x.isProactiveNotice === true
+    || x.local === true || (x.pending === true && !nativePending(x));
   const isProcessPart = (p: Part) => p.type === "thinking" || p.type === "toolCall" || p.type === "toolResult" || p.type === "plan"
     || (p.type === "text" && p.activity === true);
   const out: ChatMsg[] = [];
@@ -1854,14 +1917,21 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[]): ChatM
       continue;
     }
     // 连续产出先按已知 Run 归属分段,缺少身份才用时间间隙兜底。
+    const input = msgs[i - 1];
     const seg: ChatMsg[] = [msgs[i]];
     let runId = msgs[i].nativeRunId ?? msgs[i].activityRunId;
     const openToolIds = new Set<string>();
     trackCalls(openToolIds, msgs[i]);
     i += 1;
-    while (i < msgs.length && !isBoundary(msgs[i])) {
+    while (i < msgs.length) {
       const prev = seg[seg.length - 1];
-      const nextRunId = msgs[i].nativeRunId ?? msgs[i].activityRunId;
+      const next = msgs[i];
+      const nextRunId = next.nativeRunId ?? next.activityRunId;
+      // A confirmed native steering/input reply remains a user bubble at
+      // this position, but belongs to the same execution as its neighbors.
+      const inRunInput = next.role === "user" && !!next.nativeRunId && next.nativeRunId === runId
+        && !next.notice && !next.divider && !next.local;
+      if (isBoundary(next) && !inRunInput) break;
       if (runId && nextRunId && runId !== nextRunId) break;
       const sameRun = !!runId && runId === nextRunId;
       // Hermes persists real user boundaries (including Cron inputs). Tool
@@ -1875,12 +1945,23 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[]): ChatM
       seg.push(msgs[i]);
       i += 1;
     }
+    const snapshot = observedRun && runId === observedRun ? nativeTimeline : undefined;
+    const live = !!snapshot && snapshot.status !== "done" && snapshot.status !== "error" && seg.some(nativePending);
     // 带上「这个 part 属于哪条消息」的时间戳,供下面推算耗时(R350)。
     const partSeq: (TimelinePartLike & { ts?: number })[] = [];
-    for (const sm of seg) for (const p of sm.parts) if (isProcessPart(p)) partSeq.push({ ...(p as TimelinePartLike), ts: sm.ts });
-    const compactionSnapshot = seg.flatMap((message) => message.parts).find((part) => part.type === "timeline"
-      && part.steps?.some((step) => step.kind === "status"));
-    if ((!partSeq.length && !compactionSnapshot) || !seg.some((sm) => sm.role === "assistant")) {
+    for (const sm of seg) {
+      if (inlineCompaction(sm)) {
+        partSeq.push({ type: "contextCompacted", segmentId: sm.id, ts: sm.ts });
+      } else if (!snapshot || (!sm.pending && (!sm.keepLiveLayout || sm.id || sm.canonicalSourceEventId))) {
+        for (const p of sm.parts) if (isProcessPart(p)) partSeq.push({ ...(p as TimelinePartLike), ts: sm.ts });
+      }
+    }
+    // A stopped turn can have both older history and a retained live snapshot.
+    const settledSnapshot = seg.flatMap((message) => message.parts).find((part) => part.type === "timeline" && part.steps?.length);
+    const observed = (snapshot?.steps ?? settledSnapshot?.steps ?? []).filter(step => !["user", "final", "plan"].includes(step.kind)
+      && (step.kind !== "text" || (!snapshot && step.activity)))
+      .map(step => !live && ["running", "pending"].includes(step.status) ? { ...step, status: "aborted" as const } : step);
+    if ((!partSeq.length && !observed.length) || !seg.some(sm => sm.role === "assistant" && !sm.notice)) {
       out.push(...seg);
       continue;
     }
@@ -1901,15 +1982,31 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[]): ChatM
         }
       }
     }
-    const steps = compactionSnapshot?.steps ?? stepsFromParts(partSeq);
-    const turnStartId = seg.find(message => message.role === "assistant")?.actionId;
+    const recoveredSteps = snapshot || settledSnapshot ? stepsFromParts(partSeq, { live }) : undefined;
+    const steps = recoveredSteps ? mergeObservedTurnSteps(recoveredSteps, observed)
+      : stepsFromParts(partSeq);
+    // Legacy transports may only have message times. Use the input and reply
+    // at the boundaries of this same turn, never the first and last tool.
+    const reply = seg.at(-1);
+    const inputRunId = input?.nativeRunId ?? input?.activityRunId;
+    const startedAt = input?.role === "user" && (!inputRunId || inputRunId === runId) ? input.ts : undefined;
+    const finishedAt = reply?.role === "assistant" && !reply.pending && !reply.settledPending
+      && !reply.openclawPreambleKey && !msgs[i]?.pending
+      && reply.parts.some(part => part.type === "canvas" || part.type === "ui_artifact"
+        || (part.type === "text" && !part.activity && part.text?.trim())) ? reply.ts : undefined;
+    const timing = snapshot?.timing ?? seg.find(message => message.turnTiming)?.turnTiming ?? settledSnapshot?.turnTiming
+      ?? (startedAt != null && finishedAt != null && turnElapsedMs(startedAt, finishedAt) != null
+        ? { startedAt, finishedAt } : undefined);
+    const turnStartId = seg.find(message => message.role === "assistant" && !message.notice)?.actionId;
     let attached = false;
     for (const sm of seg) {
-      if (sm.role === "toolResult") continue; // 内容已进 steps
+      if (sm.role === "toolResult" || inlineCompaction(sm)) continue; // 内容已进 steps
       // Public commentary is both a process record and a durable chat message.
-      const rest = sm.parts.filter((p) => (p.type === "text" || !isProcessPart(p)) && (!compactionSnapshot || p.type !== "timeline"));
+      const rest = sm.parts.filter((p) => (p.type === "text" || !isProcessPart(p)) && (!(snapshot || settledSnapshot) || p.type !== "timeline"));
       if (!attached && sm.role === "assistant") {
-        out.push({ ...sm, turnStartId, parts: [{ type: "timeline", steps }, ...rest] });
+        out.push({ ...sm, turnStartId, parts: [{ type: "timeline", steps, liveTimeline: live, turnTiming: timing,
+          recoveredSteps: live ? recoveredSteps : undefined,
+          ...(sm.nativeRunId ? { segmentId: `native-activity:${sm.nativeRunId}` } : {}) }, ...rest] });
         attached = true;
       } else if (rest.length || sm.images?.length || sm.files?.length) {
         out.push({ ...sm, turnStartId, parts: rest });
@@ -1927,6 +2024,7 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[]): ChatM
       for (let j = out.length - 1; j >= 0; j--) {
         const ti = out[j].parts.findIndex((p) => p.type === "timeline");
         if (ti < 0) continue;
+        if (out[j].nativeRunId) break; // Native activity is reconciled only with its exact Run.
         const absorbed = out[j].parts[ti].steps ?? [];
         if (absorbed.filter((s) => s.kind === "tool").length === richTools) {
           const parts = out[j].parts.slice();
@@ -2005,6 +2103,17 @@ function quoteTextOfParts(parts: Part[]): string {
 }
 function groupQuoteText(g: Group): string {
   return quoteTextOfParts(g.msgs.flatMap((m) => m.parts));
+}
+
+// A footer follows the group's last text bubble, even after a multipart reply.
+function lastQuoteableBubble(g: Group): [messageIndex: number, partIndex: number] | undefined {
+  for (let messageIndex = g.msgs.length - 1; messageIndex >= 0; messageIndex--) {
+    const parts = g.msgs[messageIndex].parts;
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
+      const part = parts[partIndex];
+      if (part.type === "text" && part.text?.trim()) return [messageIndex, partIndex];
+    }
+  }
 }
 
 // 右键复制按气泡取原始 Markdown；没有气泡落点时才退到消息/整组。
@@ -2495,29 +2604,33 @@ function ChatPageApp() {
   const [activeKey, setActiveKey] = useState<string | null>(null);
   // 群聊：从 Agent 右键建群；打开的群面板替换右侧对话区（对话区只隐藏不卸载）。
   // 记下打开群时的 activeKey——任何入口切换到别的会话都会自动回到普通聊天。
-  const [openGroup, setOpenGroup] = useState<{ groupId: string; activeKey: string | null } | null>(null);
+  const [openGroup, setOpenGroup] = useState<{
+    groupId: string; activeKey: string | null; searchTarget?: { ownerScope: string; message?: GroupChatMessage };
+  } | null>(null);
   const [agentMenu, setAgentMenu] = useState<{ x: number; y: number; agent: GroupCandidateAgent } | null>(null);
   const [createGroupFor, setCreateGroupFor] = useState<GroupCandidateAgent | null>(null);
   const { groups: allGroupChats, enabled: groupChatEnabled, refresh: refreshGroupChats } = useGroupChats();
   const [groupPanelCache] = useState(createGroupPanelCache);
   // 群功能关闭时不显示群，但内部会话的排除仍按全部群计算（见 groupInternalKeys）。
   const groupChats = useMemo(() => (groupChatEnabled ? allGroupChats : []), [groupChatEnabled, allGroupChats]);
-  const activeGroupId = openGroup && openGroup.activeKey === activeKey
-    && groupChats.some((gc) => gc.group.id === openGroup.groupId) ? openGroup.groupId : null;
-  const groupCacheScope = groupChats.find(group => group.group.id === activeGroupId)?.ownerScope;
+  const currentGroup = openGroup?.activeKey === activeKey ? openGroup : null;
+  const groupRow = groupChats.find(group => group.group.id === currentGroup?.groupId);
+  const activeGroupId = currentGroup && groupChatEnabled && (groupRow || currentGroup.searchTarget)
+    ? currentGroup.groupId : null;
+  const activeGroupIdRef = useRef(activeGroupId);
+  activeGroupIdRef.current = activeGroupId;
+  const groupCacheScope = groupRow?.ownerScope ?? currentGroup?.searchTarget?.ownerScope;
   // Click-to-zoom overlay for chat media (agent MEDIA: images + user-sent images
   // and videos). Holds what to show full-size, null = closed. Videos play with
   // native controls; images render as before.
   const [lightbox, setLightbox] = useState<{ src: string; kind: "image" | "video" } | null>(null);
   // The expanded view follows the selected reducer instance through its terminal
   // event. A new turn may reuse step IDs, but must not replace the selected turn.
-  const [timelineModal, setTimelineModal] = useState<{
-    sessionKey: string; steps: TurnStep[]; ts?: number; runId?: string; timeline?: TurnTimelineState;
-  } | null>(null);
-  const openTimelineModal = (steps: TurnStep[], ts?: number, live = false, runId?: string) => {
+  const [timelineModal, setTimelineModal] = useState<(ChatTurnActivity & { sessionKey: string; timeline?: NativeTurnTimeline }) | null>(null);
+  const openTimelineModal = ({ steps, live, runId, timing, recoveredSteps }: ChatTurnActivity) => {
     const sessionKey = activeKeyRef.current;
     if (!sessionKey) return;
-    setTimelineModal({ sessionKey, steps, ts,
+    setTimelineModal({ sessionKey, steps, timing, recoveredSteps,
       runId: runId ?? (live ? observedRunBySessionRef.current.get(sessionKey) : undefined),
       timeline: live ? liveTimelinesRef.current.get(sessionKey) : undefined });
   };
@@ -2525,17 +2638,14 @@ function ChatPageApp() {
   // Chat already renders public progress as bubbles. Filter only this page's
   // timeline projection; shared timelines (Cron, dashboard, etc.) keep it.
   const visibleTimelineSteps = (steps: TurnStep[]) => withoutPlanSteps(steps).filter((s) =>
-    s.kind !== "user" && s.kind !== "final" && s.kind !== "text" && (showThinking || s.kind !== "thinking"));
-  // R343:进行中气泡的直播时间线步骤(过滤掉 user/final/text——正文另有气泡,
-  // 思考步随 💡 开关)。独立成函数是为了在消息层渲染一次、用固定 key:live parts
-  // 每个流事件都重建,若把 TurnProcess 键在 part 内容哈希上会整组件反复重挂,
-  // 行进场动画从 opacity 0 反复重播 → 时间线大面积空白/频闪(Hermes 思考流实测)。
+    s.kind !== "user" && s.kind !== "final" && s.kind !== "text" && (s.kind !== "thinking" || !!s.text?.trim()));
+  // A native Run already has a single projection across its user/assistant bubbles.
   const liveStepsFor = (m: ChatMsg): TurnStep[] => {
     if (!m.pending) return [];
     const key = activeKeyRef.current || "";
     const tl = liveTimelinesRef.current.get(key);
-    const steps = subagentActivity.project(key, visibleTimelineSteps(tl?.steps ?? []), observedRunBySessionRef.current.get(key));
-    return withStartupWait(steps, m.pending ? runWaitBySession[key] : undefined);
+    if (tl?.nativeRunId) return [];
+    return visibleTimelineSteps(tl?.steps ?? []);
   };
   useEffect(() => {
     if (!lightbox) return;
@@ -2585,6 +2695,7 @@ function ChatPageApp() {
     count?: number;
     hasMore?: boolean;
     error?: string;
+    retrying?: boolean;
   }>({ key: "", status: "idle" });
   // Set just before an archive prepend so the scroll handler keeps the prior
   // viewport anchored (older messages were inserted ABOVE) instead of jumping.
@@ -2816,7 +2927,6 @@ function ChatPageApp() {
   const [unreadAnchor, setUnreadAnchor] = useState<{ key: string; messageId: string | null; pending: boolean } | null>(null);
   const unreadScrollCleanupRef = useRef<(() => void) | null>(null);
   // Filled by the shared projection below before layout effects run.
-  const turnStartByMessageRef = useRef<ReadonlyMap<string, string>>(new Map());
   const unreadStateRef = useRef(unreadState);
   unreadStateRef.current = unreadState;
   const observeReply = useCallback((key: string, at: number) => {
@@ -2991,24 +3101,29 @@ function ChatPageApp() {
   // R339 直播时间线:per-session 当前回合的 reducer 状态(与上面三个 live 容器平行,
   // 不替代它们——immersive 派生仍读 parts)。final/error/aborted 时把过程步骤留档到
   // lastTurnStepsRef,供 reload 后最近一轮的降级时间线 stitch 回富数据(耗时/相位)。
-  const liveTimelinesRef = useRef<Map<string, TurnTimelineState>>(new Map());
+  const liveTimelinesRef = useRef<Map<string, NativeTurnTimeline>>(new Map());
+  const nextActivityId = useRef(0);
   const lastTurnStepsRef = useRef<Map<string, TurnStep[]>>(new Map());
-  const timelineFeed = useCallback((sk: string, ev: TurnEvent) => {
+  const timelineFeed = useCallback((sk: string, ev: TurnEvent, nativeRunId?: string, receivedAt = Date.now()) => {
     const map = liveTimelinesRef.current;
     let tl = map.get(sk);
     const terminal = ev.kind === "final" || ev.kind === "error" || ev.kind === "aborted";
     // 上一轮已终结、又来了新事件 → 新回合从零开始(外部发起的 turn 没有 user 事件)。
-    if (!tl || ((tl.status === "done" || tl.status === "error") && !terminal)) {
+    if (!tl || ((tl.status === "done" || tl.status === "error") && !terminal)
+      || (nativeRunId && tl.nativeRunId && nativeRunId !== tl.nativeRunId)) {
       tl = createTimeline();
       if (!terminal && stoppedScrollKeyRef.current === sk) stoppedScrollKeyRef.current = null;
     }
     const previous = tl;
-    tl = reduceTimeline(tl, ev, performance.now());
+    const timing = tl.timing ?? (ev.kind === "user" || ev.kind === "accepted" ? { startedAt: receivedAt } : undefined);
+    tl = { ...reduceTimeline(tl, ev, performance.now()), nativeRunId: nativeRunId ?? tl.nativeRunId,
+      activityId: tl.activityId ?? ++nextActivityId.current,
+      timing: terminal && timing && timing.finishedAt == null ? { ...timing, finishedAt: receivedAt } : timing };
     map.set(sk, tl);
     const timeline = tl;
     setTimelineModal(current => current?.sessionKey === sk && current.timeline === previous
       ? { ...current, timeline } : current);
-    if ((tl.status === "done" || tl.status === "error") && tl.steps.some((s) => s.kind === "tool" || s.kind === "thinking")) {
+    if (!tl.nativeRunId && (tl.status === "done" || tl.status === "error") && tl.steps.some((s) => s.kind === "tool" || s.kind === "thinking")) {
       lastTurnStepsRef.current.set(sk, tl.steps);
     }
   }, []);
@@ -3028,22 +3143,14 @@ function ChatPageApp() {
   const [slashItems, setSlashItems] = useState<SlashCommand[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
 
-  // Composer toolbar toggles (💡 thinking / 🔧 tool cards) — hide those parts when off.
-  // R353/R355:原「💡思考」「🔧工具」两个开关合并成一个 Agent Trajectory 开关
-  // (Figma node 7132:401),语义=整个 Agent Trajectory 的显示/隐藏(用户定案):
-  // 关 → 时间线卡(含摘要行)、直播实时卡、散排回退卡全部不渲染,只留正文;
-  // 开 → 完整过程(思考+工具)可见。下游读取点保留旧名作别名。
-  const [showTraj, setShowTraj] = useState(true);
-  const showThinking = showTraj;
-  const showTools = showTraj;
-  // Single page-level search entry: all active backends × all visible agents.
+  // Single page-level search entry for direct sessions and public group messages.
   // The modal owns no message filtering state, so closing it cannot leave the
   // active thread invisibly filtered.
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [globalSearch, setGlobalSearch] = useState<{
     status: "idle" | "loading" | "done" | "error";
-    data: GlobalChatSearchResult | null;
+    data: GlobalChatSearchResult<GlobalChatSearchHit | GlobalGroupChatSearchHit> | null;
     loadingMore: boolean;
     loadMoreError: boolean;
   }>({ status: "idle", data: null, loadingMore: false, loadMoreError: false });
@@ -3408,6 +3515,8 @@ function ChatPageApp() {
     },
   }), [clearArchiveForSource, commitCanonicalHistory, commitOpenedHistory, historyPager, prepareHistoryMessages]);
   historyControllerRef.current = chatHistoryController;
+
+  useEffect(() => () => chatHistoryController.cancelInitialReadRetry(), [chatHistoryController]);
 
   useLayoutEffect(() => {
     if (activeKey) chatHistoryController.updateLive(activeKey, messages);
@@ -4182,7 +4291,8 @@ function ChatPageApp() {
       }
       if (f.type === "event" && f.event === "agents.changed") {
         // Service 恢复不一定重连 Proxy，也不一定产生 group.changed。
-        void refreshGroupChats();
+        if (activeGroupIdRef.current) emitGroupChanged(activeGroupIdRef.current);
+        else void refreshGroupChats();
         // Backend topology changed: the proxy emits this when the gateway goes
         // degraded / comes back, and when a slow backend (Hermes) finishes
         // starting. Re-pull the list so agents appear/disappear without a reload.
@@ -4221,6 +4331,8 @@ function ChatPageApp() {
       if (f.type === "event" && f.event === "chat") {
         const p = f.payload || {};
         const sk: string | undefined = p.sessionKey;
+        const nativeRunId = p.message?.shoggoth?.nativeUiVersion === 1
+          && typeof p.message.shoggoth.runId === "string" ? p.message.shoggoth.runId : undefined;
         const isActive = sk === activeKeyRef.current;
         if (sk && typeof p.runId === "string"
           && ["accepted", "delta", "interim", "thinking", "plan", "prompt"].includes(p.state)) {
@@ -4237,6 +4349,7 @@ function ChatPageApp() {
           openclawPreamblesRef.current.finish(sk, p.runId);
         }
         if (sk && typeof p.runId === "string" && p.state === "accepted") {
+          timelineFeed(sk, { kind: "accepted" }, nativeRunId);
           const matched = acceptTrackedSend(sk, p.runId);
           if (matched && runStatusBySessionRef.current.get(sk) === "needs_verification") {
             void verifyPendingTrackedSends(sk);
@@ -4279,7 +4392,11 @@ function ChatPageApp() {
         }
         if (sk) {
           if (p.state === "status" && typeof p.statusKind === "string") {
-            runStatusBySessionRef.current.set(sk, p.statusKind);
+            // Compaction/recall are activity phases inside the same Run. Keep
+            // its last lifecycle state so an already running, steerable turn
+            // still receives new input through chat.steer during these phases.
+            if (!["compacting", "compacted", "recalling", "recalled"].includes(p.statusKind))
+              runStatusBySessionRef.current.set(sk, p.statusKind);
             if (p.statusKind === "needs_verification") {
               sendObservationEpochRef.current.set(sk, (sendObservationEpochRef.current.get(sk) ?? 0) + 1);
               setVerificationKeys((previous) => new Set(previous).add(sk));
@@ -4347,20 +4464,23 @@ function ChatPageApp() {
           }
         }
         if (p.state === "delta") {
+          const full = contentToText(p.message?.content) || contentToText(p.message);
+          // Unclassified text can still be sealed as commentary by a later interim event.
+          const finalReply = p.replyPhase === "final_answer" && full.trim() ? true
+            : p.replyPhase === "commentary" ? false : undefined;
           const nativeUi = p.message?.shoggoth?.nativeUiVersion === 1
             && p.message?.content?.some?.((part: unknown) => normalizeNativeUiPart(part));
           if (nativeUi) {
             for (const part of p.message.content) {
               if (sk && part?.type === "text" && part.activity === true && typeof part.segmentId === "string" && typeof part.text === "string")
-                timelineFeed(sk, { kind: "progress", text: part.text, activityId: part.segmentId });
+                timelineFeed(sk, { kind: "progress", text: part.text, activityId: part.segmentId }, nativeRunId);
             }
             if (sk) updateSessionMessages(sk, prev => applyNativeUiDelta(prev, p.message,
               (sk && liveToolsRef.current.get(sk)) || [], (sk && pendingThinkingRef.current.get(sk)) || "",
-              (sk && pendingPlanRef.current.get(sk)) || [], (sk && displayPromptsFor(sk)) || []));
+              (sk && pendingPlanRef.current.get(sk)) || [], (sk && displayPromptsFor(sk)) || [], finalReply));
             return;
           }
-          const full = contentToText(p.message?.content) || contentToText(p.message);
-          if (sk) timelineFeed(sk, { kind: "delta", text: full });
+          if (sk) timelineFeed(sk, { kind: "delta", text: full }, nativeRunId);
           const projected = sk
             ? projectSteeredLiveText(
                 liveTextRef.current.get(sk) || "",
@@ -4379,6 +4499,7 @@ function ChatPageApp() {
                 (sk && pendingPlanRef.current.get(sk)) || [],
                 (sk && displayPromptsFor(sk)) || [],
                 canvasPartsFromContent(p.message?.content ?? p.message),
+                projected.visible.trim() ? finalReply : undefined,
               ),
             );
         } else if (p.state === "interim") {
@@ -4394,11 +4515,12 @@ function ChatPageApp() {
             );
             const progress = p.message?.content?.find?.((part: any) => part?.type === "text" && part.activity === true);
             timelineFeed(sk, { kind: "interim", text: projected.visible,
-              ...(progress ? { activity: true, activityId: progress.segmentId } : {}) });
+              ...(progress ? { activity: true, activityId: progress.segmentId } : {}) }, nativeRunId);
             liveToolsRef.current.delete(sk);
             pendingThinkingRef.current.delete(sk);
+            const interimActivityId = liveTimelinesRef.current.get(sk)?.activityId;
             updateSessionMessages(sk, (prev) => [
-              ...finalizeAssistant(prev, p.message, wasSteered ? projected.visible : undefined, true),
+              ...finalizeAssistant(prev, p.message, wasSteered ? projected.visible : undefined, true, false, { interimActivityId }),
               { role: "assistant", parts: [{ type: "text", text: "" }], pending: true },
             ]);
             // Commentary/interim seals the current runtime text item. The next
@@ -4514,7 +4636,7 @@ function ChatPageApp() {
               kind: "final",
               text: finalText,
               meta: { usage: fu, model: typeof p.message?.model === "string" ? p.message.model : undefined },
-            });
+            }, nativeRunId, finishedAt);
             if (fu.contextMax || fu.contextUsed) {
               setSessions((prev) =>
                 prev.map((s) =>
@@ -4544,6 +4666,7 @@ function ChatPageApp() {
             wasSteered ? projectedFinal.visible : undefined,
             true,
             true,
+            { timing: liveTimelinesRef.current.get(sk)?.timing },
           ));
           if (isActive) {
             // Preserve the current reading position while the sealed bubbles
@@ -4592,7 +4715,7 @@ function ChatPageApp() {
           // 按「终止版 final」处理:落定局部文本(线上 message 只在有缓冲文本时存在)、
           // 清 in-flight、重载历史;时间线把仍在跑的步骤收敛为「中断」。
           if (sk) {
-            timelineFeed(sk, { kind: "aborted", message: typeof p.errorMessage === "string" && p.errorMessage ? p.errorMessage : undefined });
+            timelineFeed(sk, { kind: "aborted", message: typeof p.errorMessage === "string" && p.errorMessage ? p.errorMessage : undefined }, nativeRunId);
             markInFlight(sk, false);
             liveToolsRef.current.delete(sk);
             pendingThinkingRef.current.delete(sk);
@@ -4613,7 +4736,7 @@ function ChatPageApp() {
               : { accumulated: full, visible: full };
             updateSessionMessages(sk, (prev) => (p.message
               ? finalizeAssistant(prev, p.message, wasSteered ? projected.visible : undefined, true)
-              : settlePendingAssistant(prev, sk ? liveTimelinesRef.current.get(sk)?.steps : undefined)));
+              : settlePendingAssistant(prev, liveTimelinesRef.current.get(sk)?.steps, nativeRunId)));
           }
           if (isActive) {
             if (sk && progressCardsRef.current.has(sk)) renderLiveStateForSession(sk);
@@ -5017,8 +5140,7 @@ function ChatPageApp() {
         if (!earlierHistory.loading && !earlierHistory.error) void loadEarlierHistory();
         return;
       }
-      const replyId = first ? first.item.id || `local:${first.key}` : null;
-      const id = replyId && showTraj ? turnStartByMessageRef.current.get(replyId) || replyId : replyId;
+      const id = first ? first.item.id || `local:${first.key}` : null;
       landing.pending = false;
       setUnreadAnchor({ key: activeKey, messageId: id, pending: false });
       if (id) {
@@ -5027,10 +5149,7 @@ function ChatPageApp() {
         if (streamSpacerRef.current) streamSpacerRef.current.style.height = "0px";
         settledKeyRef.current = activeKey;
         const owner = el?.querySelector(`[data-chat-message-id="${CSS.escape(id)}"]`);
-        const reply = replyId ? el?.querySelector(`[data-chat-message-id="${CSS.escape(replyId)}"]`) : null;
-        const node = owner?.querySelector<HTMLElement>("[data-chat-process]")
-          ?? owner?.querySelector<HTMLElement>(".chat-bubble, .chat-att-row")
-          ?? reply?.querySelector<HTMLElement>(".chat-bubble, .chat-att-row");
+        const node = owner?.querySelector<HTMLElement>(".chat-bubble, .chat-att-row");
         if (el && node) unreadScrollCleanupRef.current = anchorUnreadMessage(el, node);
         return;
       }
@@ -5132,7 +5251,7 @@ function ChatPageApp() {
       else if (initialScrollFrameRef.current == null) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
       atBottomRef.current = true;
     }
-  }, [messages, activeKey, historyLoaded, unreadReady, unreadLoading, unreadState.installationId, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, scrollThreadToBottom, showTraj, runWaitBySession]);
+  }, [messages, activeKey, historyLoaded, unreadReady, unreadLoading, unreadState.installationId, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, scrollThreadToBottom, runWaitBySession]);
 
   // Scroll-up loads the sealed/reset archive: when the user reaches the
   // top of a settled OpenClaw thread, fetch it once. Found → prepend.
@@ -5568,7 +5687,11 @@ function ChatPageApp() {
       setArchive({ key, status: "unsupported" });
       return;
     }
-    setArchive({ key, status: "loading" });
+    setArchive(previous => ({
+      key,
+      status: "loading",
+      retrying: previous.key === key && previous.status === "error",
+    }));
     try {
       let pages = archivePagesRef.current;
       if (!pages || pages.key !== key) {
@@ -5788,8 +5911,9 @@ function ChatPageApp() {
     if (durableProgress) pendingPlanRef.current.set(key, progressCardPlan(durableProgress));
     else pendingPlanRef.current.delete(key);
     // R339:新回合的直播时间线从零开始(上一轮若悬空未终结,这里硬切)。
+    observedRunBySessionRef.current.delete(key);
     liveTimelinesRef.current.delete(key);
-    timelineFeed(key, { kind: "user", text: displayText });
+    timelineFeed(key, { kind: "user", text: displayText }, undefined, nowTs);
     setSending(true);
     // An explicit user message is real activity before the long-running reply
     // finishes. updatedAt alone cannot override an already learned realTimes entry.
@@ -5906,25 +6030,31 @@ function ChatPageApp() {
     const payloadBudget = inspectChatSteerPayload(key, text);
     if (!payloadBudget.allowed) {
       showPayloadLimit("chat.sendPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
-      return false;
+      return;
     }
     try {
-      await send("chat.steer", { sessionKey: key, message: text });
-      if (inFlightRef.current.has(key)) {
-        interactiveRunsRef.current.add(key);
-        setRunningKeys(new Set(inFlightRef.current));
+      const { payload } = await send("chat.steer", { sessionKey: key, message: text });
+      if (!inFlightRef.current.has(key)) {
+        if (activeKeyRef.current === key) void loadHistory(key, { refresh: true });
+        return;
       }
+      const timeline = liveTimelinesRef.current.get(key);
+      const nativeRunId = chatBackendDescriptors.get(backendOfSession(key))?.surfaces.agentHarness
+        && payload?.accepted === true && typeof payload.runId === "string" ? payload.runId : undefined;
+      if (nativeRunId && timeline?.nativeRunId && timeline.nativeRunId !== nativeRunId) return;
+      if (nativeRunId) liveTimelinesRef.current.set(key, { ...(timeline ?? createTimeline()), nativeRunId });
+      interactiveRunsRef.current.add(key);
+      setRunningKeys(new Set(inFlightRef.current));
       steerTextBaselineRef.current.set(key, liveTextRef.current.get(key) || "");
       liveToolsRef.current.delete(key);
       pendingThinkingRef.current.delete(key);
       pendingPlanRef.current.delete(key);
       advanceRealActivity(key, Date.now());
-      if (activeKeyRef.current !== key) return true;
-      const nextMessages = appendSteeringMessage(messagesRef.current, text);
+      if (activeKeyRef.current !== key) return;
+      const nextMessages = appendSteeringMessage(messagesRef.current, text, nativeRunId);
       messagesRef.current = nextMessages;
       setMessages(nextMessages);
       setImmersiveSendSeq((sequence) => sequence + 1);
-      return true;
     } catch (error) {
       if (activeKeyRef.current === key) {
         setInput((current) => current.trim() ? `${text}\n${current}` : text);
@@ -5939,7 +6069,6 @@ function ChatPageApp() {
         const current = draftsRef.current.get(key) || "";
         draftsRef.current.set(key, current.trim() ? `${text}\n${current}` : text);
       }
-      return false;
     }
   };
 
@@ -6330,13 +6459,12 @@ function ChatPageApp() {
             pushLocal(t("chat.steerUnavailable"));
             return true;
           }
-          if (await sendSteeringMessage(key, args)) pushLocal(t("chat.steerInjected"));
+          await sendSteeringMessage(key, args);
           return true;
         }
         echo();
         try {
           await send("chat.send", { sessionKey: key, message: args, deliver: false, idempotencyKey: crypto.randomUUID() });
-          pushLocal(t("chat.steerInjected"));
         } catch (e) {
           pushLocal(t("chat.steerFailed", { msg: e instanceof Error ? e.message : String(e) }));
         }
@@ -6707,7 +6835,7 @@ function ChatPageApp() {
       if (t instanceof HTMLElement) {
         if (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable) return;
         if (t.closest('[role="dialog"], [role="menu"], [role="listbox"]')) return; // don't steal focus from open popups
-        if (t.closest(".chat-header, .chat-plan-dock")) return; // retain native keyboard activation on header and plan controls
+        if (t.closest(".chat-header, .chat-plan-dock, .chat-archive-bar.is-retry")) return; // retain native keyboard activation
       }
       const el = visibleComposerEl();
       if (!el) return;
@@ -6886,7 +7014,8 @@ function ChatPageApp() {
     markInFlight(key, false);
     if (activeKeyRef.current === key) {
       setSending(false);
-      setMessages(settlePendingAssistant);
+      const timeline = liveTimelinesRef.current.get(key);
+      setMessages(prev => settlePendingAssistant(prev, timeline?.nativeRunId ? timeline.steps : undefined, timeline?.nativeRunId));
     }
   };
 
@@ -7082,7 +7211,7 @@ function ChatPageApp() {
     const key = activeKeyRef.current;
     if (!s || !key) return;
     setQuote({ key, text: s });
-    requestAnimationFrame(() => composerRef.current?.focus());
+    requestAnimationFrame(() => visibleComposerEl()?.focus());
   };
   // Scroll a pinned message into view (the carousel thumbnail click).
   const scrollToMessage = (id: string) => {
@@ -8187,6 +8316,7 @@ function ChatPageApp() {
           absorbTurnTimelines(
             chatMessagesWithoutPlans(actionableMessages.filter((m) => !(m.actionId && hiddenIds.has(m.actionId)) && !isHeartbeatNoise(m) && m.automation !== "continuation")),
             lastTurnStepsRef.current.get(activeKeyRef.current || ""),
+            liveTimelinesRef.current.get(activeKeyRef.current || ""),
           ),
         ),
       );
@@ -8202,8 +8332,6 @@ function ChatPageApp() {
     },
     [actionableMessages, hiddenIds],
   );
-  turnStartByMessageRef.current = useMemo(() => new Map(groups.flatMap(group => group.msgs.flatMap(message =>
-    message.actionId && message.turnStartId ? [[message.actionId, message.turnStartId] as const] : []))), [groups]);
   // The thread only has its explicit pinned-only filter. Global search lives in
   // a modal and never mutates the active message projection.
   const shownGroups = useMemo(
@@ -8212,14 +8340,92 @@ function ChatPageApp() {
       : groups,
     [groups, pinnedOnly, pinnedIds],
   );
-  // 先按稳定内容生成基础身份，再只对同级碰撞追加局部 occurrence；普通与沉浸模式共用同一份 key。
-  const keyedShownGroups = useMemo(() => keyedChatGroups(shownGroups), [shownGroups]);
+  const { activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn } = useMemo(() => {
+    type ActivityOwner = ReturnType<typeof activityOwnerOf>;
+    const activityByOwner = new Map<ActivityOwner, ChatTurnActivity>();
+    const activityFooterGroups = new Map<ActivityOwner, Group>();
+    const pendingActivityOwners = new Set<ActivityOwner>();
+    const pendingGroup = [...groups].reverse().find(group => group.role === "assistant" && group.msgs.some(message => message.pending));
+    const pending = pendingGroup?.msgs.find(message => message.pending);
+    const timeline = activeKey ? liveTimelinesRef.current.get(activeKey) : undefined;
+    const nativeRun = timeline?.nativeRunId ?? pending?.nativeRunId;
+    const observedRun = activeKey ? observedRunBySessionRef.current.get(activeKey) : undefined;
+    const liveSteps = pending ? liveStepsFor(pending) : [];
+    const liveToolIds = new Set(liveSteps.map(step => step.toolCallId).filter(Boolean));
+    const recoveredSteps: TurnStep[] = [];
+    let anchor: { group: Group; message: ChatMsg } | undefined;
+    for (const group of groups) {
+      if (group.role !== "assistant") continue;
+      const last = group.msgs[group.msgs.length - 1];
+      if (!last.pending && group.msgs.some(message => message.ts) && group.msgs.some(message => message.actionId)
+        && group.msgs.some(message => message.parts.some(part => part.type === "text" && part.text?.trim()))) {
+        activityFooterGroups.set(activityOwnerOf(last), group);
+      }
+      for (const message of group.msgs) {
+        const owner = activityOwnerOf(message);
+        const runId = message.activityRunId || message.nativeRunId;
+        // Sealing commentary creates a new pending message but keeps the same live turn.
+        // Legacy histories may lack a Run ID; use the original tool identity within the pending group.
+        const ownsLiveActivity = pending && !message.notice && !message.divider && !message.local && !message.isProactiveNotice && (message === pending
+          || (timeline?.activityId !== undefined && message.interimActivityId === timeline.activityId)
+          || (nativeRun && message.nativeRunId === nativeRun)
+          || (observedRun && message.activityRunId === observedRun)
+          || (!runId && group === pendingGroup && liveToolIds.size > 0 && message.parts.some(part =>
+            part.type === "timeline" && part.steps?.some(step => step.toolCallId && liveToolIds.has(step.toolCallId)))));
+        if (ownsLiveActivity) {
+          pendingActivityOwners.add(owner);
+          anchor ??= { group, message };
+        }
+        for (const part of message.parts) {
+          if (part.type !== "timeline" || !part.steps?.length) continue;
+          const visibleSteps = visibleTimelineSteps(part.steps);
+          if (!visibleSteps.length) continue;
+          // The reducer already has process data carried by local interim bubbles.
+          if (ownsLiveActivity && !nativeRun && (!message.keepLiveLayout || message.id || message.canonicalSourceEventId)) {
+            const prefix = message.actionId ?? recoveredSteps.length;
+            recoveredSteps.push(...visibleSteps.map(step => ({ ...step, id: `history:${prefix}:${step.id}` })));
+          }
+          const steps = subagentActivity.project(activeKey || "", visibleSteps, runId);
+          // A native turn's process can precede a steering user bubble.
+          if (!activityByOwner.has(owner) || part.liveTimeline) activityByOwner.set(owner, { steps, live: part.liveTimeline,
+            runId, timing: part.turnTiming, recoveredSteps: part.recoveredSteps && visibleTimelineSteps(part.recoveredSteps) });
+        }
+      }
+    }
+    const activity = liveSteps.length || recoveredSteps.length
+      ? { steps: subagentActivity.project(activeKey || "", mergeObservedTurnSteps(recoveredSteps, liveSteps), observedRun),
+        live: true, runId: observedRun, recoveredSteps }
+      : pending ? activityByOwner.get(activityOwnerOf(pending)) : undefined;
+    const liveTurn = pending && anchor ? { ...anchor, pending, activity, id: timeline?.activityId } : undefined;
+    return { activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn };
+  }, [groups, activeKey, subagentActivity, subagentRevision]);
+  // Keep the preview's React parent when the first pending message gets a canonical id.
+  const keyedShownGroups = useMemo(() => keyedChatGroups(shownGroups).map(group =>
+    group.item === liveTurn?.group && liveTurn.id !== undefined
+      ? { ...group, key: `group:live-activity:${liveTurn.id}` } : group
+  ), [shownGroups, liveTurn?.group, liveTurn?.id]);
+  const livePreview = liveTurn && !liveTurn.pending.finalReplyStreaming
+    ? renderActivityBubble(liveTurn.activity, openTimelineModal) : null;
+  const footerActivityFor = (group: Group, message: ChatMsg) => {
+    const owner = activityOwnerOf(message);
+    return activityFooterGroups.get(owner) === group && !pendingActivityOwners.has(owner) ? activityByOwner.get(owner) : undefined;
+  };
+  // Tool-only and stopped replies can have an activity record without an action footer.
+  const standaloneActivityFor = (message: ChatMsg) => {
+    const owner = activityOwnerOf(message);
+    return !activityFooterGroups.has(owner) && !pendingActivityOwners.has(owner) && message.parts.some(part => part.type === "timeline")
+      ? activityByOwner.get(owner) : undefined;
+  };
   const modalTimeline = timelineModal?.sessionKey === activeKey ? timelineModal : null;
+  const modalRecoveredSteps = modalTimeline?.timeline?.activityId !== undefined && modalTimeline.timeline.activityId === liveTurn?.id
+    ? liveTurn.activity?.recoveredSteps ?? modalTimeline.recoveredSteps : modalTimeline?.recoveredSteps;
   const modalSteps = modalTimeline ? subagentActivity.project(modalTimeline.sessionKey,
-    modalTimeline.timeline ? withStartupWait(visibleTimelineSteps(modalTimeline.timeline.steps),
+    modalTimeline.timeline ? withStartupWait(mergeObservedTurnSteps(modalRecoveredSteps ?? [], visibleTimelineSteps(modalTimeline.timeline.steps)),
       modalTimeline.timeline === liveTimelinesRef.current.get(modalTimeline.sessionKey)
         ? runWaitBySession[modalTimeline.sessionKey] : undefined) : visibleTimelineSteps(modalTimeline.steps), modalTimeline.runId) : [];
   const modalStatus = modalTimeline?.timeline?.status ?? "done";
+  const modalTiming = modalTimeline?.timeline?.timing ?? modalTimeline?.timing;
+  const modalStats = modalTimeline ? getTurnProcessStats(modalSteps) : null;
   // The native host shows one document per window. Restore the newest card
   // directly instead of letting older history mounts replace it asynchronously.
   const latestNativeUiSourceEventId = useMemo(() => {
@@ -8323,7 +8529,7 @@ function ChatPageApp() {
       if (frame !== null) cancelAnimationFrame(frame);
       latestMessagePartsRef.current = [];
     };
-  }, [activeKey, keyedThreadGroups, showThinking, showTools, showTraj, immersive, sessionBoardViewMode, updateJumpVisibility]);
+  }, [activeKey, keyedThreadGroups, immersive, sessionBoardViewMode, updateJumpVisibility]);
 
   useEffect(() => () => {
     if (searchTargetClearTimerRef.current) clearTimeout(searchTargetClearTimerRef.current);
@@ -8392,7 +8598,7 @@ function ChatPageApp() {
   // 沉浸模式消息流：把 shownGroups 预渲染成简单判别联合（ImmersiveMessage），避免 ImmersiveChat
   // 耦合 ChatPage 内部 Group/ChatMsg 类型。正文/图片/非图附件之外，错误泡（×N/hover 原文/重试）、
   // 注入灰条（per-message 判定——旧版整组丢弃会连累相邻真实消息一起消失）、封存/模型切换分隔线、
-  // 审批卡、流式光标及已保存回合动态随判别字段带过去；直播过程仍由轻量状态行呈现。
+  // 审批卡、流式光标、回合动态和加载内容随判别字段带过去。
   // 交互用无参闭包（onRetry），Group 本体不出 ChatPage；闭包不进 deps——memo 随 keyedShownGroups
   // （即 messages）重算，捕获的总是当轮的新函数。
   const immersiveMessages = useMemo(() => {
@@ -8434,7 +8640,7 @@ function ChatPageApp() {
                 : "chat";
         const lastSeg = segs[segs.length - 1];
         if (lastSeg && lastSeg.cls === "chat" && cls === "chat" && m.actionId !== unreadAnchor?.messageId
-          && !m.parts.some(part => part.type === "timeline")) lastSeg.msgs.push(m);
+          && m !== liveTurn?.message && !m.parts.some(part => part.type === "timeline")) lastSeg.msgs.push(m);
         else segs.push({ cls, msgs: [m] });
       }
       // 时间常显，模型随消息操作显隐；挂在组的最后一个保留段上。
@@ -8448,7 +8654,9 @@ function ChatPageApp() {
 
       const entries: ImmersiveMessage[] = [];
       segs.forEach((seg, si) => {
-        const segId = segs.length === 1 ? groupRenderKey : `${groupRenderKey}:s${si}`;
+        const isLiveAnchor = liveTurn?.group === g && seg.msgs.includes(liveTurn.message);
+        const segId = isLiveAnchor ? `${groupRenderKey}:activity`
+          : segs.length === 1 ? groupRenderKey : `${groupRenderKey}:s${si}`;
         const m0 = seg.msgs[0];
         const segText = seg.msgs
           .flatMap((m) => m.parts.filter((p) => p.type === "text").map((p) => p.text || ""))
@@ -8472,6 +8680,7 @@ function ChatPageApp() {
           if (!segText && !m0.errPrefix) return;
           // 与普通模式同一套渲染时翻译：已知网关错误串 i18n 化，英文原文留 hover
           const translated = segText ? translateGatewayError(segText, t) : "";
+          const activity = footerActivityFor(g, m0);
           entries.push({
             id: segId,
             role: String(m0.role),
@@ -8485,6 +8694,8 @@ function ChatPageApp() {
             errorRepeat: m0.repeat,
             onRetry: () => retryErrorGroup(g),
             onCopy: segText ? () => copyText(segText) : undefined,
+            onQuote: segText ? () => quoteGroup(g) : undefined,
+            onOpenActivity: activity && !activity.live ? () => openTimelineModal(activity) : undefined,
             onDelete: g.msgs.some((m) => m.actionId) ? () => deleteGroup(g) : undefined,
             onCtx: (e) => openMenu(e, g, segText),
           });
@@ -8498,27 +8709,24 @@ function ChatPageApp() {
           m.parts.filter((p) => p.type === "prompt" && p.promptEntry).map((p) => p.promptEntry as ChatPromptEntry),
         );
         const liveMessage = seg.msgs.find(message => message.pending);
-        const liveSteps = liveMessage ? liveStepsFor(liveMessage) : [];
-        const liveToolIds = new Set(liveSteps.map(step => step.toolCallId).filter(Boolean));
-        const processes = showTraj ? seg.msgs.flatMap(message => keyedChatChildren(message, "part", message.parts)
-          .flatMap(({ item: part, key }) => {
-            if (part.type !== "timeline" || !part.steps?.length) return [];
-            const tools = part.steps.filter(step => step.kind === "tool");
-            if (tools.length && tools.every(step => step.toolCallId && liveToolIds.has(step.toolCallId))) return [];
-            if (!tools.length && part.steps.every(step => step.activity && liveSteps.some(live => live.id === step.id))) return [];
-            const steps = subagentActivity.project(activeKey || "", visibleTimelineSteps(part.steps), message.activityRunId || message.nativeRunId);
-            if (!steps.length) return [];
-            return [<TurnProcess key={key} steps={steps} onOpenLargeView={() => openTimelineModal(steps, message.ts, false, message.activityRunId || message.nativeRunId)} />];
-          })) : [];
-        if (showTraj && liveSteps.length) processes.push(<TurnProcess key={`${segId}:live-trajectory`} steps={liveSteps}
-          live={liveMessage?.pending} defaultOpen onOpenLargeView={() => openTimelineModal(liveSteps, liveMessage?.ts, true)} />);
+        const activity = seg.cls === "chat" ? footerActivityFor(g, seg.msgs[seg.msgs.length - 1]) : undefined;
+        const awaitingPrompt = chatPromptAttentionOf(prompts);
+        const pendingTail = liveMessage?.parts.at(-1);
+        const loadingReply = !livePreview && !awaitingPrompt && pendingTail?.type === "text" && !pendingTail.text?.trim();
+        const standaloneBubbles = isLiveAnchor && livePreview ? [] : seg.msgs.flatMap((message, index) => {
+          const preview = renderActivityBubble(standaloneActivityFor(message), openTimelineModal);
+          return preview ? [<Fragment key={message.actionId ?? index}>{preview}</Fragment>] : [];
+        });
+        const activityBubble = isLiveAnchor && livePreview ? livePreview : standaloneBubbles.length ? standaloneBubbles : null;
         const hasId = g.msgs.some((m) => m.actionId);
         entries.push({
           id: segId,
           role: String(g.role),
           kind: seg.cls === "local" ? "local" : "chat",
           unreadStart: seg.msgs.some(m => m.actionId === unreadAnchor?.messageId),
-          process: processes.length ? processes : undefined,
+          loadingReply,
+          hideLiveStatus: (isLiveAnchor && !!livePreview) || liveMessage?.finalReplyStreaming,
+          activityBubble,
           html: media.text.trim() ? toSanitizedMarkdownHtml(media.text, true, imageContext,
             g.role === "assistant" && seg.cls === "chat" ? activeLegacyHtmlPolicy : "source") : "",
           images: [...segImages, ...media.srcs],
@@ -8541,10 +8749,12 @@ function ChatPageApp() {
                 ? nativeUiLegacySources(m).map(({ text, sourceEventId }) => <LegacyChatUi key={`legacy:${sourceEventId}`} text={text}
                   sourceEventId={sourceEventId} backend={activeBackend} agentId={agentOf(activeKey || "")} sessionKey={activeKey || ""} visible />) : []),
             ]) : undefined,
-          pending: (seg.msgs.some((m) => m.pending) && !chatPromptAttentionOf(prompts)) || undefined,
+          pending: (!!liveMessage && !awaitingPrompt && !loadingReply) || undefined,
           prompts: prompts.length ? prompts : undefined,
           // 悬浮操作/右键：无参闭包捕获 Group，动作与普通模式同一套 handler
           onCopy: segText ? () => copyText(segText) : undefined,
+          onQuote: segText ? () => quoteGroup(g) : undefined,
+          onOpenActivity: activity && !activity.live ? () => openTimelineModal(activity) : undefined,
           onPin: MESSAGE_PINNING_ENABLED && hasId ? () => pinGroup(g) : undefined,
           pinned: MESSAGE_PINNING_ENABLED && hasId ? g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) : undefined,
           onDelete: hasId ? () => deleteGroup(g) : undefined,
@@ -8555,13 +8765,13 @@ function ChatPageApp() {
       const kept = entries.filter((e) =>
         e.kind !== "chat" && e.kind !== "local"
           ? true
-          : !!e.process || !!e.html || !!e.content || e.images.length > 0 || (e.files?.length ?? 0) > 0 || (e.prompts?.length ?? 0) > 0,
+          : !!e.activityBubble || !!e.loadingReply || !!e.html || !!e.content || e.images.length > 0 || (e.files?.length ?? 0) > 0 || (e.prompts?.length ?? 0) > 0,
       );
       if (kept.length && (footer || footerModel)) kept[kept.length - 1] = { ...kept[kept.length - 1], footer, footerModel };
       out.push(...kept);
     }
     return out;
-  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, showTraj, subagentRevision, subagentActivity, runWaitBySession]);
+  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn, subagentRevision, subagentActivity, runWaitBySession]);
   // 沉浸模式的 agent 状态相位（背景媒体层 + 轻量状态行共用）。判据全部是「事件到没到」，
   // 零后端特判（铁律 1）：OpenClaw 不发 thinking/prompt 事件 → 对应相位自然不出现，由
   // 素材回退链兜退化。这是未滞回的原始相位——防抖/最短展示在 ImmersiveBackdrop 内做
@@ -8588,7 +8798,7 @@ function ChatPageApp() {
   }, [active, connected, connectedBackends, startingBackends, messages, sending]);
   // 轻量状态行的原料：末尾 pending 泡 parts 里的工具/思考流。liveToolsRef/
   // pendingThinkingRef 的每次变更都经 applyToolStream 回流进 messages，这里纯派生、
-  // 零新订阅。没有过程信息（OpenClaw 首包前）返回 null → 沉浸层继续用三点等待。
+  // 零新订阅。没有过程信息（OpenClaw 首包前）返回 null。
   const immersiveLive = useMemo((): ImmersiveLiveStatus | null => {
     if (activeKey && activeRunInFlight && runWaitBySession[activeKey]) {
       if (runWaitBySession[activeKey].kind === "queued") return null;
@@ -8685,6 +8895,7 @@ function ChatPageApp() {
     const timer = setTimeout(async () => {
       try {
         const data = await searchGlobalChats(q, {
+          includeGroups: true,
           limit: GLOBAL_SEARCH_PAGE_SIZE,
           offset: 0,
           signal: controller.signal,
@@ -8717,6 +8928,7 @@ function ChatPageApp() {
     setGlobalSearch((current) => ({ ...current, loadingMore: true, loadMoreError: false }));
     try {
       const page = await searchGlobalChats(q, {
+        includeGroups: true,
         limit: GLOBAL_SEARCH_PAGE_SIZE,
         offset: data.nextOffset,
         signal: controller.signal,
@@ -9230,14 +9442,24 @@ function ChatPageApp() {
     setGlobalSearch({ status: "idle", data: null, loadingMore: false, loadMoreError: false });
   };
   const historyControl = !historyLoaded && historyError ? (
-    activeRecoveryHint ? <div className="chat-archive-bar is-note">{activeRecoveryHint}</div> : <>
-      <div className="chat-archive-bar is-note">{t("chat.historyLoadFailed", { msg: historyError })}</div>
-      <button type="button" className="chat-archive-bar is-action" data-testid="chat-history-retry"
+    activeRecoveryHint ? <div className="chat-archive-bar is-note">{activeRecoveryHint}</div> : (
+      <button
+        type="button"
+        className="chat-archive-bar is-retry"
+        data-testid="chat-history-retry"
+        title={t("chat.historyRetry")}
         onClick={() => {
           setHistoryError(null);
           if (activeKeyRef.current) void loadHistory(activeKeyRef.current);
-        }}>{t("chat.historyRetry")}</button>
-    </>
+        }}
+      >
+        {t("chat.historyLoadFailed", { msg: historyError })}
+      </button>
+    )
+  ) : !historyLoaded && !historyVisible && activeKey ? (
+    <div className="chat-archive-bar is-note is-loading" data-testid="chat-history-loading">
+      <FusionLoader size="sm" label={t("chat.historyLoading")} />
+    </div>
   ) : historyLoaded && activeKey && searchHistoryWindowKeyRef.current !== activeKey ? <>
     {earlierHistory.key === activeKey && (earlierHistory.cursor ? (
       <button type="button" className="chat-archive-bar is-action" data-testid="chat-history-earlier"
@@ -9247,14 +9469,16 @@ function ChatPageApp() {
     ) : null)}
     {backendOfSession(activeKey) === "openclaw" && (() => {
       const st = archive.key === activeKey ? archive : { status: "idle" as const, hasMore: false, error: undefined };
-      // Empty chats stay blank while the archive probe distinguishes a fresh
-      // session from a reset transcript. Found history still restores normally;
-      // failures retain the retry entry even when the current transcript is empty.
-      if (messages.length === 0 && st.status !== "error") return null;
-      if (st.status === "idle" || (st.status === "loaded" && st.hasMore) || st.status === "error" || st.status === "loading")
-        return <button type="button" className="chat-archive-bar is-action" data-testid="chat-history-archive"
-          disabled={st.status === "loading"} onClick={maybeLoadArchive}>
-          {t(st.status === "loading" ? "chat.archiveLoading" : st.status === "error" ? "chat.archiveRetry" : "chat.archiveLoadEarlier")}
+      // Keep a fresh empty chat blank during the initial probe. An empty chat
+      // with a previous archive error still needs feedback when retried.
+      if (messages.length === 0 && st.status !== "error" && !(st.status === "loading" && st.retrying)) return null;
+      if (st.status === "loading")
+        return <div className="chat-archive-bar is-note is-loading" data-testid="chat-history-archive-loading">
+          <FusionLoader size="sm" label={t("chat.archiveLoading")} />
+        </div>;
+      if (st.status === "idle" || (st.status === "loaded" && st.hasMore) || st.status === "error")
+        return <button type="button" className="chat-archive-bar is-action" data-testid="chat-history-archive" onClick={maybeLoadArchive}>
+          {t(st.status === "error" ? "chat.archiveRetry" : "chat.archiveLoadEarlier")}
         </button>;
       if (historyBoundaryKey === activeKey && !earlierHistory.cursor && st.status === "unsupported" && st.error === "remote")
         return <div className="chat-archive-bar is-note">{t("chat.archiveRemote")}</div>;
@@ -9308,7 +9532,7 @@ function ChatPageApp() {
           )}
           {globalSearch.status === "done" && globalSearch.data && (() => {
             const data = { ...globalSearch.data, results: globalSearch.data.results.filter(hit =>
-              isVisibleSession(allSessions.find(row => row.key === hit.key) || { key: hit.key })) };
+              "kind" in hit || isVisibleSession(allSessions.find(row => row.key === hit.key) || { key: hit.key })) };
             const unavailable = data.unsupportedAgents + data.failedAgents;
             return (
               <>
@@ -9317,25 +9541,40 @@ function ChatPageApp() {
                     {t("chat.globalSearchPartial", { count: unavailable })}
                   </div>
                 )}
+                {data.groupSearch === "partial" && (
+                  <div className="chat-global-search__note">{t("chat.globalSearchGroupPartial")}</div>
+                )}
+                {data.groupSearch === "unavailable" && (
+                  <div className="chat-global-search__note">{t("chat.globalSearchGroupUnavailable")}</div>
+                )}
                 {data.results.length === 0 && (
                   <div className="chat-global-search__note">
-                    {data.searchedAgents === 0
+                    {data.searchedAgents === 0 && (!data.groupSearch || data.groupSearch === "unavailable")
                       ? t("chat.globalSearchUnavailable")
                       : t("chat.globalSearchEmpty")}
                   </div>
                 )}
                 {data.results.map((hit) => {
-                  const row = sessions.find((session) => session.key === hit.key);
-                  const label = row
-                    ? friendlySessionLabel(row, t)
-                    : hit.key.split(":").slice(2).join(":") || hit.key;
+                  const isGroup = "kind" in hit;
+                  const row = isGroup ? undefined : sessions.find((session) => session.key === hit.key);
+                  const label = isGroup
+                    ? hit.authorName || t(hit.message.author.kind === "user" ? "groupChat.you" : "groupChat.someMember")
+                    : row ? friendlySessionLabel(row, t) : hit.key.split(":").slice(2).join(":") || hit.key;
                   return (
                     <button
                       key={globalSearchHitIdentity(hit)}
                       type="button"
                       className="chat-global-search__item"
-                      title={hit.key}
+                      title={isGroup ? hit.groupName : hit.key}
                       onClick={() => {
+                        if (isGroup) {
+                          setOpenGroup({ groupId: hit.message.groupId, activeKey,
+                            searchTarget: { ownerScope: hit.ownerScope, message: hit.message } });
+                          closeGlobalSearch();
+                          if (!groupChats.some(group => group.group.id === hit.message.groupId)) void refreshGroupChats();
+                          return;
+                        }
+                        setOpenGroup(null);
                         const token = ++searchJumpTokenRef.current;
                         pendingSearchJumpKeyRef.current = hit.key;
                         searchJumpRequestTokenRef.current = null;
@@ -9352,7 +9591,7 @@ function ChatPageApp() {
                       }}
                     >
                       <span className="chat-global-search__identity">
-                        <span className="chat-global-search__agent">{hit.agentName}</span>
+                        <span className="chat-global-search__agent">{isGroup ? hit.groupName : hit.agentName}</span>
                         <span className="chat-global-search__session">{label}</span>
                       </span>
                       <span className="chat-global-search__snippet">{hit.snippet}</span>
@@ -9385,16 +9624,18 @@ function ChatPageApp() {
     <Modal
       open={!!modalTimeline}
       title={t("turnLab.processLabel")}
-      subtitle={modalTimeline?.ts ? absTime(modalTimeline.ts) : undefined}
+      subtitle={modalStats && <TurnProcessSummary stats={modalStats} timing={modalTiming} live={modalStatus === "running"} />}
       onClose={() => setTimelineModal(null)}
+      variant="activity"
       width={640}
     >
       {modalTimeline ? (
         <TurnTimeline
           steps={modalSteps}
           status={modalStatus}
-          showDurations={modalSteps.some((s) => typeof s.durationS === "number" && s.durationS > 0)}
+          showDurations={modalStats?.showDurations}
           autoFollow={modalStatus === "running"}
+          detail
           pluginConversation={activePluginConversation}
         />
       ) : null}
@@ -9538,6 +9779,11 @@ function ChatPageApp() {
           {recoveryCard && <div className="chat-status-notices">{recoveryCard}</div>}
           <GroupChatPanel key={`${groupCacheScope}:${activeGroupId}`} groupId={activeGroupId} cache={groupPanelCache} cacheScope={groupCacheScope}
             onArchived={() => { setOpenGroup(null); void refreshGroupChats(); }}
+            searchTarget={currentGroup?.searchTarget}
+            onSearchTargetHandled={() => setOpenGroup(previous =>
+              previous === currentGroup && previous?.searchTarget?.message
+                ? { ...previous, searchTarget: { ownerScope: previous.searchTarget.ownerScope } }
+                : previous)}
             agents={agents.map((g) => ({ backendId: backendOfKnownAgent(g.agentId), agentId: g.agentId,
               name: g.sessions[0].agentName || chatAgentDisplayName(g.agentId) }))} />
         </section>
@@ -9773,10 +10019,7 @@ function ChatPageApp() {
                   // A saved pin can belong to any message after groups merge.
                   const pinIds = g.msgs.map((m) => m.actionId).filter((id): id is string => !!id);
                   const metadata = [...g.msgs].reverse().find(message => message.responseMetadata)?.responseMetadata;
-                  // A group whose parts are ALL hidden by the 💡/🔧 toggles (a reasoning-only
-                  // or tool-only turn) would render an empty body but still show its footer
-                  // (time/model) — a dangling meta line in the thread. Skip the whole
-                  // group when nothing is visible. Pending turns + any non-blank text count.
+                  // Skip empty groups after folding their activity into a reply's footer.
                   const isMsgVisible = (m: ChatMsg) =>
                     m.pending ||
                     (m.images?.length ?? 0) > 0 ||
@@ -9786,26 +10029,25 @@ function ChatPageApp() {
                         ? true
                         : p.type === "prompt"
                         ? !!p.promptEntry
-                        : p.type === "thinking"
-                        ? showThinking && !!p.text?.trim()
                         : p.type === "toolCall" || p.type === "toolResult"
-                          ? showTools
+                          ? true
                           : p.type === "timeline"
-                            ? showTraj && !!visibleTimelineSteps(p.steps ?? []).length
+                            ? !!standaloneActivityFor(m)
                             : !!p.text?.trim(),
                     );
                   const hasVisible = g.msgs.some(isMsgVisible);
-                  if (!hasVisible) return null;
+                  if (!hasVisible && !(liveTurn?.group === g && livePreview)) return null;
                   // Footer 时间 = 组内最后一条可见消息的时间（不是组首 g.ts）：footer 渲染在组尾，
                   // 必须与用户看到的末条内容、以及列表/头部 badge 的 updatedAt 对齐。组首兜底仅在
                   // 全组消息都无 ts 时生效。
                   const footerTs = [...g.msgs].reverse().find((m) => isMsgVisible(m) && m.ts)?.ts ?? g.ts;
-                  // 直播时间线属于整轮 assistant 输出，不属于会被 Hermes interim 反复
-                  // 定稿/新建的 pending 消息。固定放在组顶部，后续中间回复只更新步骤内容，
-                  // 不再把卡片逐段推到最新 pending 消息下面。
                   const liveMessage = g.msgs.find((message) => message.pending);
-                  const groupLiveSteps = liveMessage ? liveStepsFor(liveMessage) : [];
-                  const groupLiveToolIds = new Set(groupLiveSteps.flatMap((step) => step.toolCallId ? [step.toolCallId] : []));
+                  const liveActivity = liveMessage && liveMessage === liveTurn?.pending ? liveTurn.activity : undefined;
+                  const waitingForPrompt = liveMessage?.parts.some(part => part.type === "prompt" && part.promptEntry
+                    && chatPromptAttentionOf([part.promptEntry]));
+                  const canCopy = !last.pending && g.msgs.some(m => m.parts.some(p => p.text?.trim()));
+                  const quoteTarget = canCopy ? lastQuoteableBubble(g) : undefined;
+                  const footerActivity = footerTs && canCopy ? footerActivityFor(g, last) : undefined;
                   return (
                     <div
                       key={groupRenderKey}
@@ -9824,19 +10066,11 @@ function ChatPageApp() {
                     >
                       <div className={`chat-group ${cls}${searchTargetGroupKey === groupRenderKey ? " is-search-target" : ""}`}>
                         <div className="chat-group__stack">
-                          {showTraj && groupLiveSteps.length ? (
-                            <TurnProcess
-                              key={`${groupRenderKey}:live-trajectory`}
-                              steps={groupLiveSteps}
-                              pluginConversation={activePluginConversation}
-                              live={liveMessage?.pending === true}
-                              defaultOpen
-                              onOpenLargeView={() => openTimelineModal(groupLiveSteps, liveMessage?.ts ?? g.ts, true)}
-                            />
-                          ) : null}
                           {/* display:contents 包装不产生盒子（stack 的 flex/gap 不受影响），
                               只为右键菜单提供 data-mi 落点定位（R154 按气泡引用） */}
-                          {keyedMessages.map(({ item: m, key: messageRenderKey, images: keyedImages, files: keyedFiles, parts: keyedParts }, mi) => (
+                          {keyedMessages.flatMap(({ item: m, key: messageRenderKey, images: keyedImages, files: keyedFiles, parts: keyedParts }, mi) => [
+                            m === liveTurn?.message && livePreview
+                              ? <div key="live-activity-preview" className="chat-bubble is-activity-loading">{livePreview}</div> : null,
                             <div key={messageRenderKey} data-mi={mi} data-message-key={messageRenderKey} data-chat-message-id={m.actionId} style={{ display: "contents" }}>
                               {m.images?.length ? (
                                 <div className="chat-att-row">
@@ -9900,18 +10134,9 @@ function ChatPageApp() {
                               )}
                               {keyedParts.map(({ item: p, key: k }, pi) => {
                               if (p.type === "timeline") {
-                                // R355:开关语义=整个 Agent Trajectory 的显示/隐藏(用户定案)。
-                                // 关 → 连摘要行都不渲染;开 → 摘要行+可展开,时间线含完整过程
-                                // (思考+工具,不再单独过滤思考步)。
-                                if (!showTraj || !p.steps?.length) return null;
-                                // Interim messages retain their process for settlement.
-                                // The current live trajectory already displays these calls.
-                                const tools = p.steps.filter((step) => step.kind === "tool");
-                                if (tools.length && tools.every((step) => step.toolCallId && groupLiveToolIds.has(step.toolCallId))) return null;
-                                if (!tools.length && p.steps.every(step => step.activity && groupLiveSteps.some(live => live.id === step.id))) return null;
-                                const steps = subagentActivity.project(activeKey || "", visibleTimelineSteps(p.steps), m.activityRunId || m.nativeRunId);
-                                if (!steps.length) return null;
-                                return <TurnProcess key={k} steps={steps} pluginConversation={activePluginConversation} onOpenLargeView={() => openTimelineModal(steps, m.ts, false, m.activityRunId || m.nativeRunId)} />;
+                                const preview = pi === m.parts.findIndex(part => part.type === "timeline")
+                                  ? renderActivityBubble(standaloneActivityFor(m), openTimelineModal) : null;
+                                return preview ? <div key={k} className="chat-bubble is-activity-loading">{preview}</div> : null;
                               }
                               if (p.type === "ui_artifact" && p.uiArtifact) {
                                 return <ChatUiArtifact key={k} part={p.uiArtifact} backend={activeBackend}
@@ -9935,16 +10160,14 @@ function ChatPageApp() {
                                 );
                               }
                               // Live thought/tool activity stays in the timeline; plans use the composer dock.
-                              if (m.pending && (p.type === "thinking" || p.type === "toolCall" || p.type === "toolResult")) {
-                                if (liveStepsFor(m).length) return null;
-                              }
+                              if (m === liveMessage && liveActivity && (p.type === "thinking" || p.type === "toolCall" || p.type === "toolResult")) return null;
                               if (p.type === "prompt") {
                                 if (!p.promptEntry) return null;
                                 return <ChatPromptCard key={k} entry={p.promptEntry} onRespond={respondPrompt}
                                   agentName={active ? sessionName(active) : undefined} />;
                               }
                               if (p.type === "thinking") {
-                                if (!showThinking || !p.text?.trim()) return null;
+                                if (!p.text?.trim()) return null;
                                 return (
                                   <div key={k} className="chat-thinking">
                                     <span className="chat-thinking__ico"><IconBulb /></span>
@@ -9956,7 +10179,6 @@ function ChatPageApp() {
                                 );
                               }
                               if (p.type === "toolCall") {
-                                if (!showTools) return null;
                                 const title = toolActivityTitle(p.toolName, p.toolArgs, t);
                                 // …and make the card expandable to reveal the raw input args
                                 // (OpenClaw's "TOOL INPUT" panel), like the output cards.
@@ -9976,7 +10198,6 @@ function ChatPageApp() {
                                 );
                               }
                               if (p.type === "toolResult") {
-                                if (!showTools) return null;
                                 // Per-part error flag (set by normalize/live), NOT the message's —
                                 // a failed tool renders the red "Tool error <name>" card, matching
                                 // OpenClaw; a success renders "Tool output <name>".
@@ -10019,10 +10240,8 @@ function ChatPageApp() {
                               // also render markdown (so code blocks/lists/bold take shape live), with
                               // the cursor trailing the rendered HTML.
                               if (m.pending) {
-                                const waitingForPrompt = m.parts.some(part => part.type === "prompt" && part.promptEntry
-                                  && chatPromptAttentionOf([part.promptEntry]));
-                                // Keep reply loading visible independently of the activity toggle.
-                                if (waitingForPrompt && !p.text?.trim()) return null;
+                                const isLoading = !p.text?.trim() && pi === m.parts.length - 1;
+                                if (!p.text?.trim() && (!isLoading || waitingForPrompt || (m === liveTurn?.pending && livePreview))) return null;
                                 return (
                                   <div key={k} className="chat-bubble is-streaming" data-qp={pi}>
                                     {p.text?.trim() ? (
@@ -10033,9 +10252,7 @@ function ChatPageApp() {
                                         streamingCursor={!waitingForPrompt && pi === m.parts.length - 1}
                                       />
                                     ) : null}
-                                    {/* 等待正文时显示双球加载动画，开始输出后切换为光标。 */}
-                                    {!p.text?.trim() && !waitingForPrompt && pi === m.parts.length - 1 &&
-                                      <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
+                                    {isLoading && <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
                                   </div>
                                 );
                               }
@@ -10083,7 +10300,7 @@ function ChatPageApp() {
                                         title={`${q.length > 600 ? `${q.slice(0, 600)}…` : q}\n\n${t("chat.jumpToQuoted")}`}
                                         onClick={() => jumpToQuoted(q)}
                                       >
-                                        <span className="chat-quote-ref__ico">↩</span>
+                                        <IconQuote className="chat-quote-icon" />
                                         <span className="chat-quote-ref__text">{q.length > 300 ? `${q.slice(0, 300)}…` : q}</span>
                                       </button>
                                     ))}
@@ -10134,8 +10351,8 @@ function ChatPageApp() {
                                 </Fragment>
                               );
                               })}
-                            </div>
-                          ))}
+                            </div>,
+                          ])}
                         </div>
                         {g.role !== "toolResult" && (
                         <div className="chat-group__footer">
@@ -10157,17 +10374,31 @@ function ChatPageApp() {
                               <IconRetry />
                             </button>
                           )}
-                          {!last.pending && g.msgs.some((m) => m.parts.some((p) => p.text?.trim())) && (
+                          {footerActivity && !footerActivity.live && (
+                            <button type="button" className="chat-copybtn" data-chat-footer-icon="" aria-haspopup="dialog"
+                              aria-label={t("turnLab.processOpen")} title={t("turnLab.processOpen")}
+                              onClick={() => openTimelineModal(footerActivity)}>
+                              <IconTrajectory />
+                            </button>
+                          )}
+                          {canCopy && (
                             <button
                               type="button"
                               className="chat-copybtn"
+                              data-chat-footer-icon=""
                               title={t("chat.copyAsMarkdown")}
                               onClick={() => copyText(groupCopyText(g))}
                             >
                               <IconCopy />
                             </button>
                           )}
-                          {!last.pending && g.msgs.some((m) => m.actionId) && (
+                          {quoteTarget && (
+                            <button type="button" className="chat-copybtn" data-chat-footer-icon=""
+                              aria-label={t("chat.quote")} title={t("chat.quote")} onClick={() => quoteGroup(g, ...quoteTarget)}>
+                              <IconQuote />
+                            </button>
+                          )}
+                          {(MESSAGE_PINNING_ENABLED || MESSAGE_DELETION_ENABLED) && !last.pending && pinIds.length > 0 && (
                             <>
                               {MESSAGE_PINNING_ENABLED && <button
                                 type="button"
@@ -10177,9 +10408,9 @@ function ChatPageApp() {
                               >
                                 <IconPin />
                               </button>}
-                              <button type="button" className="chat-copybtn" title={t("chat.deleteLocal")} onClick={() => deleteGroup(g)}>
+                              {MESSAGE_DELETION_ENABLED && <button type="button" className="chat-copybtn" title={t("chat.deleteLocal")} onClick={() => deleteGroup(g)}>
                                 <IconTrash />
-                              </button>
+                              </button>}
                             </>
                           )}
                         </div>
@@ -10282,7 +10513,7 @@ function ChatPageApp() {
               {activeCaps?.runtimeFeatures?.resume === "unsupported" && <RuntimeResumeNotice />}
               {quote && (
                 <div className="chat-quote-bar">
-                  <span className="chat-quote-bar__ico">↩</span>
+                  <IconQuote className="chat-quote-icon" />
                   {/* title = 悬停核对将随消息发出的引用文本（显示层限长 300/600，payload 全文不受影响） */}
                   <span
                     className="chat-quote-bar__text"
@@ -10413,15 +10644,6 @@ function ChatPageApp() {
                     onSelect={(option) => { void changePermissionMode(option); }}
                     disabled={!connected}
                   />
-                  <button
-                    type="button"
-                    className={showTraj ? "chat-iconbtn is-active" : "chat-iconbtn"}
-                    title={showTraj ? t("chat.hideTrajectory") : t("chat.showTrajectory")}
-                    aria-pressed={showTraj}
-                    onClick={() => setShowTraj((v) => !v)}
-                  >
-                    <IconTrajectory />
-                  </button>
                 </div>
                 <div className="chat-composer__right">
                   <button

@@ -399,10 +399,6 @@ const previews: Record<string, readonly Row[]> = {
     ["Query financial data", "查询金融数据", "Use the Wind data services authorized for your account.", "使用当前账号已授权的 Wind 数据服务。"],
     ["Analyze market data", "分析市场数据", "Use available financial analysis tools.", "使用可用的金融分析工具。"],
   ],
-  "12306": [
-    ["Find trains", "查询车次与余票", "Look up timetables and ticket availability.", "查询车次时刻表与余票。"],
-    ["Find transfers", "查询中转", "Look up connecting journeys and intermediate stops.", "查询中转方案与经停站。"],
-  ],
   "rollinggo-hotel": [
     ["hotel_tags", "hotel_tags", "Read available hotel filter tags.", "读取可用的酒店筛选标签。"],
     ["search_hotels", "search_hotels", "Find hotels using dates, tags, brands and budget.", "按日期、标签、品牌与预算查找酒店。"],

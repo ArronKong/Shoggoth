@@ -1,19 +1,7 @@
 {
   "retrievedAt": "2026-10-28",
-  "normalization": "128 × 128 transparent PNG; preserve aspect ratio and official colors. Exact sources and any brand-mark extraction are recorded per entry.",
+  "normalization": "128 × 128 PNG unless noted; preserve aspect ratio and official colors. Exact sources and any brand-mark extraction are recorded per entry.",
   "assets": [
-    {
-      "id": "12306",
-      "page": "https://github.com/Joooook/12306-mcp",
-      "asset": "12306.png",
-      "assetUrl": "https://www.12306.cn/index/images/favicon.ico",
-      "originalType": "image/x-icon",
-      "originalWidth": 48,
-      "originalHeight": 48,
-      "bytes": 30906,
-      "sha256": "29c637eb9c67ced275889e9232b03f351f27fd8719528345d63115f3cc054138",
-      "normalization": "Official 12306 service brand; the connected Joooook/12306-mcp implementation is community maintained, not an official China Railway server."
-    },
     {
       "id": "1password",
       "page": "https://1password.com/",
@@ -38,14 +26,16 @@
     },
     {
       "id": "alipay",
-      "page": "https://aipay.alipay.com/",
+      "page": "https://www.alipay.com/",
       "asset": "alipay.png",
-      "assetUrl": "https://i.alipayobjects.com/common/favicon/favicon.ico",
-      "originalType": "image/vnd.microsoft.icon",
-      "originalWidth": 32,
-      "originalHeight": 32,
-      "bytes": 10977,
-      "sha256": "f7a67d05189c8135ef33e132edea357de326600de44c7a3b253baa995db7af02"
+      "assetUrl": "https://mdn.alipayobjects.com/rms/afts/file/A*7EyORZxdNDkAAAAAAAAAAAAAARQnAQ",
+      "originalType": "image/png",
+      "originalWidth": 2600,
+      "originalHeight": 1950,
+      "bytes": 6265,
+      "sha256": "03dd6cb9093930816f07833a2f23857cc1e01c28226209e4e11424c14c38a0f1",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Extracted the 531 × 452 mark from the official transparent canvas and centered it at its original aspect ratio."
     },
     {
       "id": "amap",
@@ -104,15 +94,16 @@
     },
     {
       "id": "baidu-maps",
-      "page": "https://lbsyun.baidu.com/",
+      "page": "https://apps.apple.com/cn/app/id452186370",
       "asset": "baidu-maps.png",
-      "assetUrl": "https://mapopen-website-wiki.cdn.bcebos.com/statics%2Flogo%2Flbslogo_icon.ico",
-      "originalType": "image/x-icon",
-      "originalWidth": 32,
-      "originalHeight": 32,
-      "bytes": 15602,
-      "sha256": "5ea8bca26867a04034bab4ac165b147de84391e07cf3a481297340a7d81e8e63",
-      "normalization": "Official favicon enlarged from its original resolution; no additional detail was synthesized."
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/be/7c/ca/be7cca11-dd80-af01-9da8-534f8c7c3c9d/appIconLiquid-0-0-1x_U007epad-0-1-0-0-sRGB-85-220.png/512x512bb.png",
+      "originalType": "image/png",
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 8435,
+      "sha256": "595b37bd977cc7c4ba9e22483eb298c16e0f98155c971409647641e3af84c60c",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128."
     },
     {
       "id": "black-forest-labs",
@@ -239,14 +230,16 @@
     },
     {
       "id": "didi",
-      "page": "https://mcp.didichuxing.com/api",
+      "page": "https://apps.apple.com/cn/app/id554499054",
       "asset": "didi.png",
-      "assetUrl": "https://s3-yspu-cdn.didistatic.com/mcp-web/DDlogo.ico",
-      "originalType": "image/vnd.microsoft.icon",
-      "originalWidth": 44,
-      "originalHeight": 44,
-      "bytes": 6967,
-      "sha256": "34b387b82fa79a6eeab8ca2e3ea6ac90461c021137db0ee8a9cf8ccd28b6051a"
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/7c/e5/49/7ce5491b-3995-e441-16e8-40b447cb34ea/AppIcon_default-0-0-1x_U007emarketing-0-6-0-0-85-220.png/512x512bb.png",
+      "originalType": "image/png",
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 6683,
+      "sha256": "7fd22c4e85be3d5e690af798eb85d0c74bc70687b25bec495b6829eacf930f58",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128."
     },
     {
       "id": "doordash",
@@ -509,14 +502,16 @@
     },
     {
       "id": "highlevel",
-      "page": "https://www.gohighlevel.com/",
+      "page": "https://apps.apple.com/us/app/id1425004076",
       "asset": "highlevel.png",
-      "assetUrl": "https://storage.googleapis.com/msgsndr/knES3eSWYIsc5YSZ3YLl/media/62b48689c85eccb36ca941fc.png",
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/92/de/91/92de91cd-e41a-9841-ca70-37d48d1ef2c3/AppIcon-0-0-1x_U007emarketing-0-8-0-sRGB-85-220.png/512x512bb.png",
       "originalType": "image/png",
-      "originalWidth": 32,
-      "originalHeight": 32,
-      "bytes": 13989,
-      "sha256": "7293306f4117e6fa1425dd0f3a6e0fec1333e22ddc96aa36f6f671b3118ea8b1"
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 2893,
+      "sha256": "ea9945305159bba7601a3bea9c7fc83c584e36337941c3a103d128050b21dbd4",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128."
     },
     {
       "id": "home-assistant",
@@ -542,26 +537,29 @@
     },
     {
       "id": "ifind",
-      "page": "https://mcp.51ifind.com/",
+      "page": "https://apps.apple.com/cn/app/id717545196",
       "asset": "ifind.png",
-      "assetUrl": "https://s.thsi.cn/cd/ifind-java-ds-bff-web-container/ifind-mcp-web/favicon.ico",
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/13/3b/f1/133bf1c1-b9fa-b125-e96a-8d8ada286a0e/AppIcon-0-0-1x_U007emarketing-0-8-0-sRGB-85-220.png/512x512bb.png",
       "originalType": "image/png",
-      "originalWidth": 32,
-      "originalHeight": 32,
-      "bytes": 23495,
-      "sha256": "a90ce796dbf20db53bcf4867a76529de6ba3f81ba8ff8ef63ecaa309ba0b4c77",
-      "normalization": "Source favicon URL serves PNG bytes; recorded type follows the downloaded file format. Official favicon enlarged from its original resolution; no additional detail was synthesized."
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 6773,
+      "sha256": "3fbdd728d16c66a5167d49e5fe083c5c0f17dda8a267d45e2d29c44b9d5566ff",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128. Official iFinD app artwork, matching the Tonghuashun iFinD connector."
     },
     {
       "id": "intercom",
-      "page": "https://www.intercom.com/",
+      "page": "https://apps.apple.com/us/app/id739927601",
       "asset": "intercom.png",
-      "assetUrl": "https://www.intercom.com/intercom-marketing-site/favicons/favicon-32x32.png",
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/ad/b6/2e/adb62e41-6a9d-4bf5-cee3-7ce235839f34/AppIcon-0-0-1x_U007epad-0-1-85-220.png/512x512bb.png",
       "originalType": "image/png",
-      "originalWidth": 32,
-      "originalHeight": 32,
-      "bytes": 10064,
-      "sha256": "ee72f11b9efefb654ec0008d9007e6fd87a7f61494265f03a74ea519c1a830f5"
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 5149,
+      "sha256": "97369a580a7762c4197b35c4dd599c92761a24d35248e9f8b5705b68cc24b2e8",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Trimmed the white margin around the official 356 × 356 Intercom app icon tile, then downsampled to 128 × 128."
     },
     {
       "id": "kiwi",
@@ -631,14 +629,16 @@
     },
     {
       "id": "luckin",
-      "page": "https://www.lkcoffee.com/",
+      "page": "https://apps.apple.com/us/app/id6744305418",
       "asset": "luckin.png",
-      "assetUrl": "https://www.lkcoffee.com/favicon.ico",
-      "originalType": "image/vnd.microsoft.icon",
-      "originalWidth": 48,
-      "originalHeight": 48,
-      "bytes": 17374,
-      "sha256": "8b551014e7536a6afde13a10b9179de70a31eb300afbdb4c7dfdda2e979b9525"
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/62/c5/24/62c524c3-db39-1592-5bd1-5f26b739b511/AppIcon-0-0-1x_U007emarketing-0-6-0-85-220.png/512x512bb.png",
+      "originalType": "image/png",
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 8430,
+      "sha256": "778b6b2a71567eb507f2eb4178a7f520228d3ae5267847b01e54795ff539c67d",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128. Official Luckin Coffee USA app artwork, using the deer mark without a promotional caption."
     },
     {
       "id": "mcdonalds",
@@ -653,25 +653,29 @@
     },
     {
       "id": "meituan-paotui",
-      "page": "https://www.meituan.com/",
+      "page": "https://apps.apple.com/cn/app/id423084029",
       "asset": "meituan-paotui.png",
-      "assetUrl": "https://s3plus.meituan.net/v1/mss_e2821d7f0cfe4ac1bf9202ecf9590e67/cdn-prod/file:1040877d/favicon-mt.ico",
-      "originalType": "image/vnd.microsoft.icon",
-      "originalWidth": 48,
-      "originalHeight": 48,
-      "bytes": 10730,
-      "sha256": "30e59d1610d75146aa724c472b659ad60766d61c8239d68a86f66c51f81a3e8e"
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/cc/1f/5d/cc1f5dcb-92b6-0e0b-6f08-7a40e16e49d0/AppIcon-0-0-1x_U007emarketing-0-0-0-7-0-0-sRGB-85-220.png/512x512bb.png",
+      "originalType": "image/png",
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 4994,
+      "sha256": "21dacdc8f900b96104d8bd57c1b06c2d4e92a84c4375985d38cb7dd6b128fd82",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128. Official Meituan app artwork. Meituan Paotui is offered within that app."
     },
     {
       "id": "mijia",
-      "page": "https://home.mi.com/",
+      "page": "https://apps.apple.com/cn/app/id957323480",
       "asset": "mijia.png",
-      "assetUrl": "https://cdn.web-global.fds.api.mi-img.com/mijia/prod/home/favicon.ico",
-      "originalType": "image/vnd.microsoft.icon",
-      "originalWidth": 32,
-      "originalHeight": 32,
-      "bytes": 12037,
-      "sha256": "fc95d46a202d04b422a2368c24adb2dec66d034aaf5c4b91c682d800aa8ac905"
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/e8/a5/cc/e8a5cc32-b075-3ac1-47c8-47025d5e42ac/AppIcon-0-0-1x_U007emarketing-0-8-0-sRGB-0-85-220.png/512x512bb.png",
+      "originalType": "image/png",
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 7866,
+      "sha256": "e43d00c6a4dd2bdc3c58186547af632709aceb48c096165d3e83cdebc72a1d5f",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128."
     },
     {
       "id": "miro",
@@ -720,14 +724,16 @@
     },
     {
       "id": "netease-music",
-      "page": "https://music.163.com/",
+      "page": "https://apps.apple.com/cn/app/id590338362",
       "asset": "netease-music.png",
-      "assetUrl": "https://s1.music.126.net/style/favicon.ico?v20180823",
-      "originalType": "image/vnd.microsoft.icon",
-      "originalWidth": 32,
-      "originalHeight": 32,
-      "bytes": 18894,
-      "sha256": "ccee3d0c3deecd0001557c76ea89fedadfa39f3102f31c22f7ec4f2e9b7d9a95"
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/28/7b/a9/287ba9e3-751c-3994-cf3a-04a9ae2cbcac/appIconNew-0-0-1x_U007epad-0-1-0-85-220.png/512x512bb.png",
+      "originalType": "image/png",
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 13265,
+      "sha256": "f9ff5015ff982eaf8c9af94bd970eacbf535911a00c5b10c63ee02997facfb0d",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128."
     },
     {
       "id": "netlify",
@@ -830,14 +836,16 @@
     },
     {
       "id": "readwise",
-      "page": "https://readwise.io/",
+      "page": "https://apps.apple.com/us/app/id1476885528",
       "asset": "readwise.png",
-      "assetUrl": "https://d34adp677peecb.cloudfront.net/static/images/favicons/favicon-32x32.8706bd85b82f.png",
+      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/a9/cc/3d/a9cc3d06-038b-0212-1555-2a9fa1932acf/AppIcon-0-0-1x_U007epad-0-1-85-220.png/512x512bb.png",
       "originalType": "image/png",
-      "originalWidth": 32,
-      "originalHeight": 32,
-      "bytes": 9066,
-      "sha256": "08bff046f67c7a00d54fa58d79ef8863d8a7e088df2d05fbe528d3653f478759"
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 4090,
+      "sha256": "90c878b0ad8d219b493b6b8955c5e2a0d642824c7a1e7eec6222cfc17821ef44",
+      "retrievedAt": "2026-11-09",
+      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128."
     },
     {
       "id": "replit",

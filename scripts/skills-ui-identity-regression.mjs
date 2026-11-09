@@ -225,6 +225,24 @@ try {
         await act(async () => renderer.unmount());
         delete globalThis.window;
 
+        const authoring = { backendId: 'native-fixture', agentId: 'agent-a', agentName: 'Agent A',
+          id: 'shoggoth-skill-authoring', name: 'shoggoth-skill-authoring', version: '1.0.0',
+          source: 'builtin', description: 'Author skills', enabled: true, globalSettingRevision: 7,
+          registryVersion: 2, profileRevision: 3 };
+        globalThis.skills = [authoring];
+        await act(async () => { renderer = TestRenderer.create(<SkillsPage />); });
+        assert.equal(cards().length, 1);
+        assert.equal(cards()[0].findByType('switch-fixture').props.checked, true);
+        await act(async () => cards()[0].findByProps({ className: 'skill-card-open' }).props.onClick());
+        await act(async () => detail().findByType('switch-fixture').props.onChange(false));
+        assert.equal(globalThis.calls.findLast(call => call.method === 'update').patch.expectedRevision, 7);
+        assert.equal(cards()[0].findByType('switch-fixture').props.checked, false);
+        const scope = detail().findByProps({ className: 'skill-detail-meta' }).children.join('');
+        assert.ok(scope.includes(en.skills.globalScope));
+        assert.ok(!scope.includes(authoring.agentName), 'the global switch does not belong to its routing Agent');
+        assert.equal(skillIdentity(authoring), skillIdentity({ ...authoring, agentId: 'agent-b', enabled: false }));
+        await act(async () => renderer.unmount());
+
         globalThis.skills = Array.from({ length: 5000 }, (_, index) => ({
           backendId: 'native-fixture', agentId: 'agent-a', id: 'scale-' + String(index).padStart(4, '0'),
           name: 'scale-' + String(index).padStart(4, '0'), version: '1.0.0', source: 'user',
@@ -245,7 +263,7 @@ try {
         globalThis.pageFocus = [];
         const createNodeMock = element => {
           if (element.props.className === 'skill-load-more') return {};
-          if (element.props.className !== 'skill-main-content') return null;
+          if (!element.props.className?.split(' ').includes('skill-main-content')) return null;
           return { scrollTo() { globalThis.pageFocus.push('scroll'); } };
         };
         await act(async () => { renderer = TestRenderer.create(<SkillsPage />, { createNodeMock }); });

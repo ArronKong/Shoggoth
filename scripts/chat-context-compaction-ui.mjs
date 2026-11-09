@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const require = createRequire(path.join(root, "app/manage-ui/package.json"));
@@ -18,7 +19,8 @@ scenes.push({ backend: "hermes", language: "zh-CN", theme: "light", terminal: "a
 try {
   await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-tool-activity.tsx")], bundle: true, format: "esm",
     define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
-    outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent" });
+    outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")],
+    plugins: [viteArtworkFixturePlugin(root)], logLevel: "silent" });
   fs.writeFileSync(path.join(temp, "index.html"), `<!doctype html><meta charset="utf-8"><title>上下文压缩动态验证</title>
 <link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}</style>
 <div id="root"></div><script type="module" src="fixture.js"></script>`);

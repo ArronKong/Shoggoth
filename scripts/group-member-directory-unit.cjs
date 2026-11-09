@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { GroupChatStore } = require("../app/agent-service/group-chat-store");
+const { GroupChatService } = require("../app/agent-service/group-chat-service");
 const { GroupMemberDirectory, exportRoleDocuments, extractCard } = require("../app/agent-service/group-member-directory");
 const { createDefaultDocuments } = require("../app/agent-service/agent-definition-defaults");
 
@@ -49,6 +50,53 @@ function fixture(t, options = {}) {
   const ids = Object.fromEntries(store.getGroup(groupId).members.map((member) => [member.agentId, member.id]));
   return { store, directory, groupId, ids, profiles, definitions };
 }
+
+test("group list and detail distinguish native deletion or archive from a runtime going offline", async t => {
+  const f = fixture(t, { isRuntimeAvailable: () => false });
+  const service = new GroupChatService({ store: f.store, directory: f.directory, driver: {}, productStore: f.directory.productStore });
+  const member = (view, id) => view.members.find(item => item.agentId === id);
+  const detail = () => service.handle("group.get", { groupId: f.groupId });
+  const list = async () => (await service.handle("group.list", { includeArchived: false })).groups[0];
+  let view = await detail();
+  assert.equal(member(view, "b").card.availability, "offline");
+  assert.equal(member(view, "b").agentMissing, undefined);
+  assert.equal(member(view, "c").agentMissing, true, "an archived Agent still has a roster entry");
+  const profile = f.profiles.get("p-b");
+  f.profiles.delete("p-b");
+  assert.equal(member(await list(), "b").agentMissing, true, "sidebar can confirm deletion before reopening group details");
+  view = await detail();
+  assert.equal(member(view, "b").state, "active");
+  assert.equal(member(view, "b").agentMissing, true);
+  f.profiles.set("p-b", profile);
+  assert.equal(member(await list(), "b").agentMissing, undefined);
+});
+
+test("external deletion requires a confirmed missing Agent and survives an intervening transport failure", async t => {
+  let getError = "AGENT_NOT_FOUND";
+  const f = fixture(t, { getFederationClient: () => ({ async request(method) {
+    if (method === "agent.get") {
+      if (getError) throw Object.assign(new Error("fixture lookup failed"), { code: getError });
+      return { agent: { id: "external", name: "External" } };
+    }
+    if (method === "agent.file.read") throw new Error("fixture role temporarily unreadable");
+    return { groupTools: false };
+  } }) });
+  const { groupId } = f.store.createGroup({ operationId: "external-group", name: "External group", purpose: "", members: [
+    { backendId: "shoggoth", agentId: "r", profileId: "p-r", displayName: "研究员" },
+    { backendId: "openclaw", agentId: "external", profileId: null, displayName: "External" },
+  ] });
+  const service = new GroupChatService({ store: f.store, directory: f.directory, driver: {}, productStore: f.directory.productStore });
+  const detail = async () => (await service.handle("group.get", { groupId })).members.find(item => item.agentId === "external");
+  const refresh = async code => { getError = code; await f.directory.refresh(groupId, { fresh: true }); return detail(); };
+  assert.equal((await detail()).agentMissing, undefined, "older hosts used not found for an unreadable Agent too");
+  const missing = await refresh("AGENT_CONFIRMED_MISSING");
+  assert.equal(missing.agentMissing, true);
+  assert.equal(missing.displayName, "External");
+  assert.equal((await refresh("BACKEND_UNAVAILABLE")).agentMissing, true, "offline cannot erase confirmed deletion");
+  const restored = await refresh(null);
+  assert.equal(restored.agentMissing, undefined, "a successful identity lookup restores color even if role reads still fail");
+  assert.equal(restored.card.freshness, "stale");
+});
 
 test("extraction reads only grounded fields; defaults and missing settings are stated, not guessed", () => {
   const defaults = createDefaultDocuments("Codex");

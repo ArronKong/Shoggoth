@@ -28,6 +28,24 @@ vm.runInNewContext(compile("pages/cron/cronPresets.tsx"), {
   require: name => name === "../../lib/codexAutomationSchedule" ? codexSchedule.exports
     : name.endsWith("/Field") || name === "react-i18next" ? {} : require(name),
 });
+const translations = { useTranslation: () => ({
+  t: (key, params) => params?.n === undefined ? key : `${key}:${params.n}`,
+  i18n: { resolvedLanguage: "zh-CN" },
+}) };
+const scheduleTypes = { exports: {} };
+vm.runInNewContext(compile("pages/cron/CronFormLayout.tsx"), {
+  exports: scheduleTypes.exports, require: name => name === "react-i18next" ? translations : require(name),
+});
+const filtersBar = { exports: {} };
+const filterStubs = {
+  "react-i18next": translations,
+  "./CronFilterMenu": host("filter-menu"),
+  "./CronFormLayout": scheduleTypes.exports,
+  "./cronIcons": { IconAgent: host("i"), IconSliders: host("i") },
+};
+vm.runInNewContext(compile("pages/cron/CronFiltersBar.tsx"), {
+  exports: filtersBar.exports, require: name => filterStubs[name] || require(name),
+});
 const pageCode = compile("pages/CronPage.tsx");
 const flush = () => new Promise(setImmediate);
 const gate = () => {
@@ -40,19 +58,20 @@ const backends = [{ id: "openclaw", name: "OpenClaw", surfaces: { cron: { kind: 
 const jobs = ["A", "B", "System"].map(name => ({ id: name, name, backendId: "openclaw", enabled: true,
   schedule: { kind: "every", everyMs: 60000 }, actions: name === "System" ? { edit: false, toggle: false, delete: false, run: true, reason: "system-managed" } : {} }));
 
-async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: "Fixture", backendId: "openclaw" }], fixtureJobs = jobs) {
+async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: "Fixture", backendId: "openclaw" }], fixtureJobs = jobs, savedFilters) {
   const state = { updates: [], creates: [], refreshes: [], successes: [], errors: [], infos: [], gates: new Map(),
     allJobs: fixtureJobs, listRequests: [], runRequests: [] };
   const form = { __esModule: true, default: host("cron-form"), emptyOpenClawDraft: () => ({ name: "", backendId: "openclaw" }),
     openClawDraftFromJob: job => ({ name: job.name, backendId: job.backendId }), openClawInputFromDraft: draft => ({ ...draft }),
     validateOpenClawDraft: () => null };
   const stubs = {
-    "react-i18next": { useTranslation: () => ({ t: (key, params) => params?.n === undefined ? key : `${key}:${params.n}`, i18n: { resolvedLanguage: "zh-CN" } }) },
+    "react-i18next": translations,
     "react-router-dom": { useNavigate: () => () => {}, useSearchParams: () => {
       const pair = React.useState(new URLSearchParams()); state.setSearchParams = pair[1]; return pair;
     } },
     "../components/PageHead": { PageHead: host("header") },
     "../components/BackendBadge": host("backend-badge"), "../components/PillTabs": host("pill-tabs"),
+    "../components/SearchCapsule": host("search-capsule"),
     "../components/BackendTabIcon": host("backend-icon"),
     "../components/Field": { Switch: host("switch") },
     "../components/Modal": { __esModule: true,
@@ -64,19 +83,25 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     "../lib/markdown": { toSanitizedMarkdownHtml: text => text },
     "../lib/turnTimeline": { stepsFromParts: () => [] },
     "../lib/backends": { useBackendCatalog: () => backends, useEnabledBackends: () => backendIds, cronForceRunResumesPaused: () => false },
-    "../lib/usePageCache": { usePageCache: key => {
+    "../lib/usePageCache": { usePageCache: (key, fetcher) => {
+      state.fetchJobs = fetcher;
       const [error, setError] = React.useState(null);
       return { data: fixtureJobs, loading: false, error, setError, refresh: async () => { state.refreshes.push(key); } };
     } },
     "../lib/page-refresh": { useRegisterPageRefresh() {}, useRegisterPageLoading() {} },
-    "../lib/useStickyState": { useStickyState: (key, initial) => React.useState(key === "cron.view" ? "list" : initial) },
+    "../lib/useStickyState": { useStickyState: (key, initial) => {
+      const saved = { "cron.view": "list", "cron.filters": savedFilters };
+      return React.useState(saved[key] ?? initial);
+    } },
     "../lib/lowUiLifecycle": lifecycle.exports,
     "../lib/cronVisibility": visibility.exports,
     "../lib/cronChatHandoff": { canonicalCronSessionKey: () => null, firstNonBlankText: () => null, writeCronChatHandoff() {} },
     "../model-catalog-store": { readModelCatalog: () => ({ models: [] }), subscribeModelCatalog: () => () => {},
       revalidateModelCatalog: async backendId => ({ backendId, models: [] }) },
     "./CronCalendar": { __esModule: true, default: host("calendar"), calendarRangeTitle: () => "Calendar", shiftCalendarCursor: date => date, startOfMonth: date => date },
-    "./cron/CronFiltersBar": host("filters"), "./cron/cronIcons": { IconPlus: host("i"), IconSearch: host("i") },
+    "./cron/CronFiltersBar": filtersBar.exports,
+    "./cron/CronFormLayout": scheduleTypes.exports,
+    "./cron/cronIcons": { IconPlus: host("i") },
     "./cron/CronRunHistoryPanel": host("run-history"),
     "./cron/CronRunReportModal": { __esModule: true, default: props => React.createElement("report-modal", props,
       props.open ? props.children : null), ReportNote: host("report-note"), runExecutionFailed: () => false },
@@ -104,12 +129,12 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   const mod = { exports: {} };
   vm.runInNewContext(pageCode, { exports: mod.exports, URLSearchParams, Date, Error, setTimeout,
     window: { setTimeout: () => 1, clearTimeout() {} },
-    ResizeObserver: class { observe() {} disconnect() {} },
     require: name => stubs[name] || require(name),
   });
   let renderer;
   await act(async () => { renderer = create(React.createElement(mod.exports.default)); await flush(); });
   const buttons = scope => scope.findAllByType("button");
+  const filterMenu = label => renderer.root.findAllByType("filter-menu").find(menu => menu.props.label === label);
   const click = async button => { await act(async () => { button.props.onClick(); await flush(); }); };
   const row = id => renderer.root.findAllByType("tr").find(node => node.findAllByProps({ className: "job-name" })[0]?.children[0] === id);
   const edit = async id => click(buttons(row(id)).find(button => button.children.includes("common.edit")));
@@ -120,7 +145,36 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     state.setSearchParams(new URLSearchParams({ job: id, backend, notification: String(++notificationSequence) })); await flush();
   }); };
   const dispose = () => act(() => renderer.unmount());
-  return { state, renderer, buttons, click, row, edit, formModal, save, notify, dispose };
+  return { state, renderer, buttons, filterMenu, click, row, edit, formModal, save, notify, dispose };
+}
+
+{
+  const f = await fixture();
+  let form;
+  act(() => { form = create(React.createElement(scheduleTypes.exports.CronScheduleType, { value: "cron" })); });
+  const createLabels = form.root.findAllByType("button").map(button => button.children[0]);
+  const menu = () => f.filterMenu("cronForm.filtersSchedules");
+  assert.deepEqual(Array.from(menu().props.options, option => option.value), ["all", "cron", "every", "at"],
+    "the filter offers All and the three creation modes");
+  assert.deepEqual(Array.from(menu().props.options.slice(1), option => option.label), createLabels,
+    "the filter uses the same labels as the creation form");
+  for (const kind of ["cron", "every", "at", "all"]) {
+    act(() => menu().props.onChange(kind));
+    assert.equal(menu().props.value, kind);
+    await f.state.fetchJobs();
+    assert.equal(f.state.listRequests.at(-1).scheduleKind, kind);
+  }
+  act(() => form.unmount());
+  f.dispose();
+}
+for (const [stored, expected] of [["rrule", "all"], ["on-exit", "all"], ["stream", "all"], ["every", "every"]]) {
+  const savedFilters = { scheduleKind: stored, agentIds: ["fixture-agent"], enabled: "enabled", query: "saved search" };
+  const f = await fixture(undefined, jobs, savedFilters);
+  assert.equal(f.filterMenu("cronForm.filtersSchedules").props.value, expected);
+  await f.state.fetchJobs();
+  assert.deepEqual({ ...f.state.listRequests[0] }, { ...savedFilters, scheduleKind: expected },
+    "discarding an old schedule filter preserves the other saved filters");
+  f.dispose();
 }
 
 {
@@ -229,7 +283,7 @@ for (const rejectOld of [false, true]) {
 {
   const f = await fixture();
   await f.edit("A"); const pending = gate(); f.state.gates.set("A", pending); await f.save();
-  act(() => { const filter = f.renderer.root.findByType("filters"); filter.props.onChange({ ...filter.props.filters, enabled: "enabled" }); });
+  act(() => f.filterMenu("cronForm.filtersStatuses").props.onChange("enabled"));
   await act(async () => { pending.resolve(); await flush(); });
   assert.equal(f.state.refreshes.length, 0, "changing the list scope prevents an old-key/new-fetcher refresh");
   assert.equal(f.state.successes.length, 0);
@@ -310,4 +364,4 @@ for (const rejectOld of [false, true]) {
   assert.equal(f.renderer.root.findByType("create-form").props.agents.openclaw.length, 1);
   f.dispose();
 }
-console.log("PASS Cron save lifecycle and visibility: cached heartbeat list/calendar/counts, submit/dismiss lock, stale selection/filter/unmount results, direct create with required assistant, roster loading and retry, system-managed edit guard");
+console.log("PASS Cron filters, save lifecycle and visibility: creation modes and saved filter fallback, cached heartbeat list/calendar/counts, submit/dismiss lock, stale selection/filter/unmount results, direct create with required assistant, roster loading and retry, system-managed edit guard");

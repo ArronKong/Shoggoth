@@ -115,8 +115,8 @@ export default function BackgroundStopDialog({ onCancel, onStopped }: {
         </div>
         <div className={modal.modalFoot}>
           <button ref={cancelRef} className="btn-secondary btn-md" disabled={stopping} onClick={onCancel}>{t("common.cancel")}</button>
-          {error && !impact ? <button className="btn-primary btn-md" disabled={loading || stopping} onClick={() => void refresh(true)}>{t("settings.retry")}</button>
-            : <button className="btn-danger btn-md" disabled={!impact || loading || stopping} onClick={() => void stop()}>
+          {error && !impact ? <button className="btn-dark btn-md" disabled={loading || stopping} onClick={() => void refresh(true)}>{t("settings.retry")}</button>
+            : <button className="btn-dark btn-md" disabled={!impact || loading || stopping} onClick={() => void stop()}>
               {t(stopping ? "settings.stopInProgress" : impact?.availability === "unavailable" ? "settings.stopDespiteUnknown" : "settings.stopConfirmAction")}
             </button>}
         </div>

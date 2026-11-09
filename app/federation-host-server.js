@@ -27,7 +27,7 @@ const PUBLIC_ERROR_CODES = new Set([
   ...Object.keys(require("./core/apple-device-contract").APPLE_DEVICE_PUBLIC_MESSAGES),
   ...FEDERATION_RUN_ERROR_CODES,
   "APP_HOST_INVALID_REQUEST", "APP_HOST_UNAVAILABLE", "BACKEND_UNAVAILABLE",
-  "AGENT_NOT_FOUND", "AGENT_OPERATION_FAILED", "AGENT_RUN_TIMEOUT",
+  "AGENT_NOT_FOUND", "AGENT_CONFIRMED_MISSING", "AGENT_OPERATION_FAILED", "AGENT_RUN_TIMEOUT",
   "MCP_CONNECTION_HOST_UNAVAILABLE", "MCP_CONNECTION_OWNER_UNCONFIRMED", "MCP_CONNECTION_ACK_UNKNOWN", "MCP_CONNECTION_ACK_CAPACITY",
   "FEDERATION_OPERATION_CONFLICT", "FEDERATION_RESPONSE_INVALID",
   "FEDERATION_TASK_NOT_FOUND", "FEDERATION_TASK_STATE_CONFLICT",
@@ -279,7 +279,8 @@ function createFederationHostServer(options = {}) {
 
   const getAgent = async (backend, backendId, agentId) => {
     let value;
-    try { value = await backend.getAgent(agentId); } catch { throw hostError("AGENT_NOT_FOUND"); }
+    try { value = await backend.getAgent(agentId); }
+    catch (error) { throw hostError(error?.code === "AGENT_NOT_FOUND" ? "AGENT_CONFIRMED_MISSING" : "AGENT_NOT_FOUND"); }
     const agent = publicAgent(value, backendId, true);
     if (agent.id !== agentId) throw hostError("FEDERATION_RESPONSE_INVALID");
     return agent;

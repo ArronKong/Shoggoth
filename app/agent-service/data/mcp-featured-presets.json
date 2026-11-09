@@ -1551,26 +1551,6 @@
     ]
   },
   {
-    "id": "12306",
-    "name": "12306",
-    "docsUrl": "https://github.com/Joooook/12306-mcp",
-    "description": {
-      "zh-CN": "查询火车余票、车次、中转与经停站。",
-      "en": "Look up train availability, timetables, transfers and intermediate stops."
-    },
-    "note": {
-      "zh-CN": "Joooook 维护的社区 MCP，无需账号或 Key。需要本机 Node.js，仅提供铁路信息查询；购票请在官方渠道完成。",
-      "en": "A community MCP maintained by Joooook. Requires local Node.js, with no account or key needed. Provides rail information; complete bookings through official channels."
-    },
-    "setup": "none",
-    "transport": {
-      "kind": "stdio-package",
-      "registryType": "npm",
-      "identifier": "12306-mcp",
-      "version": "0.3.10"
-    }
-  },
-  {
     "id": "ticketmaster",
     "name": "Ticketmaster",
     "setup": "api-key",

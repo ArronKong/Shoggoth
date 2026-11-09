@@ -837,7 +837,9 @@ class AgentBackend {
    * Send a message and stream the response.
    *
    * Hooks (all optional; a backend emits what its transport can source):
-   *   delta(text)                 — FULL accumulated answer text so far
+   *   delta(text, meta?)          — FULL accumulated text for the current segment.
+   *                                 Optional meta.replyPhase is "commentary" or
+   *                                 "final_answer" when the runtime identifies the segment.
    *   interim(text, meta?)        — meta.activityId identifies public progress
    *                                 to show in the shared activity timeline;
    *                                 absent metadata keeps ordinary commentary.
@@ -1201,6 +1203,10 @@ class AgentBackend {
   async createInspiration(_input) { throw new Error(`${this.id}: Inspiration storage not supported`); }
   async updateInspiration(_id, _input) { throw new Error(`${this.id}: Inspiration storage not supported`); }
   async deleteInspiration(_id, _input) { throw new Error(`${this.id}: Inspiration deletion not supported`); }
+  /** Models available to an Agent before a seed has a conversation. */
+  async getInspirationModels(_agentId) {
+    throw Object.assign(new Error("所选助理暂不支持选择灵感模型"), { code: "INSPIRATION_UNSUPPORTED" });
+  }
   async startInspiration(id, input) {
     if (!["openclaw", "hermes"].includes(this.id) || input.backendId !== this.id
       || typeof this._inspirationOwner?.startExternalInspiration !== "function"
@@ -1214,6 +1220,12 @@ class AgentBackend {
   async respondInspiration(_id, _input) { throw new Error(`${this.id}: Inspiration response not supported`); }
   async cancelInspiration(_id, _input) { throw new Error(`${this.id}: Inspiration cancellation not supported`); }
   async getInspirationExecutions(_id, _query) { throw new Error(`${this.id}: Inspiration history not supported`); }
+  /**
+   * Optional run-scoped Chat history projection; null keeps the adapter's normal history path.
+   * errorMessage is the same display text as Chat, from a canonical error in this exact run.
+   * @returns {Promise<{messages: Array<object>, exactRun: boolean, errorMessage?: string | null, runtimeHome?: string} | null>}
+   */
+  async getInspirationHistory(_execution) { return null; }
 
   /**
    * 多 Agent 群聊（共享产品 owner 提供；群里的成员可以来自不同后端）。
@@ -1964,6 +1976,7 @@ class AgentBackend {
 
   /**
    * Full detail for one agent: identity, model, workspace, + the file list.
+   * AGENT_NOT_FOUND means the owning directory confirmed absence. A failed lookup cannot confirm deletion.
    * @param {string} id
    * @returns {Promise<object>} { id, name, model?, fallbacks?, workspace?, identity?, files?, ... }
    */
@@ -2049,6 +2062,10 @@ class AgentBackend {
   async updateAgentRuntimeBinding(_id, _bindingId, _patch, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async removeAgentRuntimeBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async setAgentDefaultBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
+  /** Read the Agent's saved default and its Runtime model choices. */
+  async getAgentDefaultModels(_id) { throw new Error(`${this.id}: agent default models not supported`); }
+  /** Save an Agent's default Runtime and model together, without switching a conversation. */
+  async selectAgentDefaultModel(_id, _input) { throw new Error(`${this.id}: agent default models not supported`); }
   async getSessionRuntime(_id, _key) { throw new Error(`${this.id}: session runtime switching not supported`); }
   /** Read the current session's memory recall state. Details require an explicit
    * includeTrace request and current source authorization; never starts a model.

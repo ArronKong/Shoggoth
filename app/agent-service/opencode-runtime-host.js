@@ -399,14 +399,11 @@ class OpenCodeRuntimeHost {
     if (this.state !== "new") throw error("OPENCODE_HOST_STATE_INVALID", "OpenCode host state is invalid");
     this.state = "initializing";
     try {
-      // Protocol checks below remain mandatory. Model-body interception also
-      // depends on the verified plugin/fetch contract of this exact release.
+      // Version labels are diagnostic. The private protocol, loaded protection
+      // plugin, readiness handshake and effective permissions are checked below.
       const versionText = await this.#controlVersion();
       this.cliVersion = parseOpenCodeVersion(versionText);
       if (this.state !== "initializing") throw error("MODEL_ONLY_CANCELED", "OpenCode initialization canceled");
-      if (this.secretGateway && versionText.trim() !== "1.19.3") {
-        throw error("SECRET_MODEL_RUNTIME_UNSUPPORTED", "This OpenCode version has no verified private-input protection");
-      }
       const shard = openCodeWorkspaceShardId({ controlInstance: this.controlInstance, workspace: this.workspace });
       if (!this.modelOnlyInstance) this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new OpenCodeRuntimeLedger({
         fs: this.fs, runtimeProfileId: this.runtimeProfileId, runtimeAccountId: this.runtimeAccountId,
@@ -1572,7 +1569,10 @@ class OpenCodeRuntimeHost {
         if (this.modelOnlyInstance) require("./opencode-model-only").assertOpenCodeModelConfiguration(configuration, protectionPlugin);
         if (protectedModel && JSON.stringify(configuration?.plugin)
           !== JSON.stringify([protectionPlugin])) {
-          throw error("SECRET_MODEL_RUNTIME_UNSUPPORTED", "OpenCode loaded an unexpected protection plugin configuration");
+          throw error("SECRET_MODEL_PROJECTION_UNAVAILABLE", "OpenCode loaded an unexpected protection plugin configuration");
+        }
+        if (protectedModel && !this.modelSecretRoute?.ready()) {
+          throw error("SECRET_MODEL_PROJECTION_UNAVAILABLE", "OpenCode protection plugin did not complete its readiness handshake");
         }
         if (configuration?.permission?.["*"] !== (this.workspaceExecutionVersion === 1
           || this.permissionPolicy.approvalPolicy === "never" ? "deny" : "ask")

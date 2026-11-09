@@ -90,12 +90,44 @@ test("borrowed model queries do not persist body text in the reader's own recall
     const session = f.createSession(), run = await f.send(session.sessionKey, "no-copy-query", "Find telescope notes");
     assert.equal(run.status, "running", run.errorCode);
     const before = ownerState(f), call = callFor(f, run);
-    const found = await call("memory_search", { query: "telescope", minScore: 0, maxResults: 20 });
+    const found = await call("memory_search", { query: "telescope", memoryScope: "all", minScore: 0, maxResults: 20 });
     assert.ok(found.results.some(value => value.borrowed && value.ownerProfileId === f.B));
     assert.ok(found.results.some(value => !value.borrowed), "an own hit exercises native recall logging");
-    const queried = await call("memory_search", { query: FACT, minScore: 0, maxResults: 20 });
+    const queried = await call("memory_search", { query: FACT, memoryScope: "all", minScore: 0, maxResults: 20 });
     assert.ok(queried.results.some(value => !value.borrowed), "body-bearing model query still completes its authorized own read");
     assertNoReaderBody(f); assert.deepEqual(ownerState(f), before);
     await f.complete(run, "Independent answer after an in-memory borrowed-context query");
+  } finally { await f.close(); }
+});
+
+test("memory_search reads only the Agent's own memory by default; an explicit shared search blocks a paraphrase", { timeout: 30000 }, async () => {
+  // 2026-11-07: guidance alone ("check your own memory first") did not stop
+  // Antigravity from searching every Agent, after which a borrowing turn may
+  // save only the user's exact words. Like OpenClaw, the default is now own.
+  const { PRODUCT_CAPABILITIES, SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS: guidance } = require("../app/agent-service/product-capability-manifest");
+  const search = PRODUCT_CAPABILITIES.find(item => item.tool === "memory_search");
+  assert.match(search.description, /^Search this Agent's own memory by default\. memoryScope=all also searches participating native Agents/u);
+  assert.match(guidance, /check your own memory first with memory_search/u);
+  assert.match(guidance, /add memoryScope=all only when the answer may be in another participating Agent's memory/u);
+  assert.match(guidance, /If memory_save returns MEMORY_BORROWED_READ_ONLY, save the user's exact words instead of a paraphrase/u);
+  const f = await fixture();
+  try {
+    const prompt = "From now on, start every answer about the telescope with a one-sentence conclusion.";
+    const paraphrase = { content: "Prefers every telescope answer to start with the conclusion.", scope: "user",
+      classification: "explicit", sourceQuote: prompt };
+    const ownRun = await f.send(f.createSession().sessionKey, "default-scope-check", prompt);
+    const own = await callFor(f, ownRun)("memory_search", { query: "telescope", minScore: 0, maxResults: 20 });
+    assert.equal(own.results.some(value => value.borrowed || value.ownerProfileId === f.B), false, "the default search reads no other Agent");
+    assert.equal(f.owner.sharing.borrowedRefsForRun(ownRun.id).length, 0, "a default search borrows nothing");
+    const saved = await callFor(f, ownRun)("memory_save", paraphrase);
+    assert.equal(saved.saved, true, "a paraphrase of the user's own words is saved after a default search");
+    await f.complete(ownRun, "Saved the preference");
+    const sharedRun = await f.send(f.createSession().sessionKey, "shared-scope-check", prompt);
+    const shared = await callFor(f, sharedRun)("memory_search", { query: "telescope", memoryScope: "all", minScore: 0, maxResults: 20 });
+    assert.ok(shared.results.some(value => value.ownerProfileId === f.B && value.borrowed), "memoryScope=all reads the other Agent");
+    await assert.rejects(callFor(f, sharedRun)("memory_save", { ...paraphrase, content: "Wants telescope answers to open with the conclusion." }),
+      { code: "MEMORY_BORROWED_READ_ONLY" }, "after borrowing, the same kind of paraphrase is refused");
+    assertNoReaderBody(f);
+    await f.complete(sharedRun, "Explained the refusal");
   } finally { await f.close(); }
 });

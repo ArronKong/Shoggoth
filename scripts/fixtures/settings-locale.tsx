@@ -139,11 +139,15 @@ function EnabledBackendsProbe() {
 }
 await applyConfiguredLocale(config.locale);
 const fixtureRoot = createRoot(document.getElementById("root")!);
-const renderSettings = () => fixtureRoot.render(
-  <React.StrictMode><HashRouter><NavigationGuardProvider><UiProvider>
-    {connections ? <EnabledBackendsProbe /> : <PersistentLabel />}{accounts ? <ModelsSettingsPreview /> : <SettingsPage />}
-  </UiProvider></NavigationGuardProvider></HashRouter></React.StrictMode>,
-);
+const renderSettings = () => {
+  const page = accounts ? <ModelsSettingsPreview /> : <SettingsPage />;
+  fixtureRoot.render(
+    <React.StrictMode><HashRouter><NavigationGuardProvider><UiProvider>
+      {connections ? <EnabledBackendsProbe /> : <PersistentLabel />}
+      {connections && !accounts ? <div className="app"><main className="content">{page}</main></div> : page}
+    </UiProvider></NavigationGuardProvider></HashRouter></React.StrictMode>,
+  );
+};
 
 renderSettings();
 const check = (value: unknown, message: string) => { if (!value) throw Error(message); };
@@ -164,6 +168,20 @@ const editInput = (input: HTMLInputElement, value: string) => {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 };
 const unloadBlocked = () => !window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
+// OpenClaw connection settings are edited in a dialog opened from its card.
+const gatewayInput = () => document.getElementById("settings-gateway-url") as HTMLInputElement | null;
+const openGatewayEditor = async () => {
+  if (!gatewayInput()) {
+    await wait(() => document.querySelector('[data-manage="openclaw"]'), "OpenClaw settings entry");
+    document.querySelector<HTMLButtonElement>('[data-manage="openclaw"]')!.click();
+  }
+  await wait(gatewayInput, "OpenClaw settings dialog");
+  return gatewayInput()!;
+};
+const closeGatewayEditor = async () => {
+  (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await wait(() => !document.getElementById("settings-openclaw"), "OpenClaw settings dialog closed");
+};
 state.fixtureReady = () => !!document.querySelector("#settings-appearance button[role=combobox]:not(:disabled)");
 const visibleLanguageOptions = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')]
   .filter(node => node.getBoundingClientRect().height > 0);
@@ -201,7 +219,7 @@ state.runBrowserSettingsFixture = async () => {
   const switches = () => [...section.querySelectorAll<HTMLElement>('[role="switch"]')];
   const checked = (index: number) => switches()[index].getAttribute("aria-checked") === "true";
   const status = () => section.querySelector<HTMLElement>("[data-browser-state]")?.dataset.browserState;
-  const refresh = () => section.querySelector<HTMLButtonElement>("button.ui-cbtn")!.click();
+  const refresh = () => section.querySelector<HTMLButtonElement>('button[type="button"]')!.click();
   check(document.getElementById("settings-computer-use")!.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING,
     "Browser Use must follow Computer Use in general settings");
   check(switches().length === 3 && checked(0) && !checked(1) && !checked(2), "Browser Use defaults must match its config");
@@ -280,31 +298,31 @@ state.runFixture = async () => {
   check(config.notifications.chat && switches()[0].getAttribute("aria-checked") === "true", "failure rollback must respect the latest edit");
   state.saveDelay = 0;
 
-  const editor = document.getElementById("settings-openclaw") as HTMLDetailsElement;
-  editor.open = true;
-  const input = document.getElementById("settings-gateway-url") as HTMLInputElement;
+  const editorOpen = () => !!document.getElementById("settings-openclaw");
+  const input = await openGatewayEditor();
   const beforeText = state.fixtureWrites;
   editInput(input, "ws://127.0.0.1:2"); await pause(50);
   editInput(input, "ws://127.0.0.1:3"); await pause(100);
   check(state.fixtureWrites === beforeText, "text input must debounce intermediate values");
   await wait(() => config.gatewayUrl === "ws://127.0.0.1:3", "debounced endpoint save");
-  check(state.fixtureWrites === beforeText + 1 && editor.open, "endpoint saves once and preserves its expanded editor");
+  check(state.fixtureWrites === beforeText + 1 && editorOpen(), "endpoint saves once and keeps its settings dialog open");
   editInput(input, "ws://"); await pause(550);
   check(config.gatewayUrl === "ws://127.0.0.1:3" && input.getAttribute("aria-invalid") === "true", "invalid endpoint must not overwrite the working connection");
+  await closeGatewayEditor();
   switches()[1].click();
   await wait(() => config.notifications.task && config.notifications.cron, "both merged notification categories save despite incomplete endpoint");
   check(config.gatewayUrl === "ws://127.0.0.1:3", "preference patch must exclude invalid endpoint");
 
   // Leaving immediately flushes a valid pending text edit and finishes queued writes.
   state.saveDelay = 120;
-  editInput(input, "ws://127.0.0.1:4"); await pause(10);
+  editInput(await openGatewayEditor(), "ws://127.0.0.1:4"); await pause(10);
   fixtureRoot.render(<div id="left-settings">Away</div>);
   await wait(() => document.getElementById("left-settings"), "left settings during debounce");
   renderSettings();
   await wait(state.fixtureReady, "settings reopened while save is pending");
   check(config.gatewayUrl === "ws://127.0.0.1:4", "immediate remount must await the pending save");
   state.saveDelay = 0;
-  check((document.getElementById("settings-gateway-url") as HTMLInputElement).value === config.gatewayUrl, "remount reads persisted settings");
+  check((await openGatewayEditor()).value === config.gatewayUrl, "remount reads persisted settings");
 
   fixtureRoot.render(<div>Reload</div>); await pause(10);
   const beforeLoadFailure = state.fixtureWrites;
@@ -312,7 +330,7 @@ state.runFixture = async () => {
   renderSettings();
   await wait(() => document.querySelector(".settings-page > .error"), "config load error");
   check(document.querySelector<HTMLButtonElement>("#settings-appearance [role=combobox]")?.disabled, "load failure disables preferences");
-  check(document.querySelector<HTMLInputElement>("#settings-gateway-url")?.disabled, "load failure disables connection inputs");
+  check((await openGatewayEditor()).disabled, "load failure disables connection inputs");
   check(state.fixtureWrites === beforeLoadFailure, "failed load must never overwrite settings with defaults");
   state.failConfigReads = false;
   check(state.fixtureConfigEvents === state.fixtureWrites, "successful autosaves must notify persistent components");
@@ -323,37 +341,40 @@ state.runConnectionsFixture = async () => {
   await wait(() => state.fixtureReady() && document.querySelectorAll(".settings-backend").length === FALLBACK_BACKEND_DESCRIPTORS.length, "all connections ready");
   check(!document.querySelector('.settings-page [role="tablist"], .settings-page [role="tabpanel"]'), "settings must not require category tabs");
   await wait(() => document.querySelector("#settings-shoggoth.settings-service-hero--ready"), "shared service card ready");
-  await wait(() => document.querySelectorAll("#settings-local-runtimes .settings-cli-tile").length === 3, "local CLI tiles ready");
+  check(!document.getElementById("settings-local-runtimes"), "local tools must stay inside their dialog");
+  const localToolsButton = document.querySelector<HTMLButtonElement>('[data-manage="shoggoth"]');
+  check(localToolsButton, "built-in connection must expose Local tools");
+  localToolsButton!.click();
+  await wait(() => document.querySelectorAll('[role="dialog"] #settings-local-runtimes .settings-cli-tile').length === 3,
+    "local CLI tiles ready in their dialog");
+  (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await wait(() => !document.getElementById("settings-local-runtimes"), "Local tools dialog closed");
   check(document.getElementById("settings-conn")?.nextElementSibling?.id === "settings-service",
     "connections must precede the background service");
   check(!document.getElementById("settings-native-capacity"), "native capacity must not appear in Settings");
   const groupsVisible = () => ["settings-general", "settings-connections"].every((id) => document.getElementById(id)!.getBoundingClientRect().height > 0);
   check(groupsVisible(), "preferences and connections must be displayed together");
   const heading = document.querySelector("h1");
-  const editor = document.getElementById("settings-openclaw") as HTMLDetailsElement;
-  editor.open = true;
-  const input = document.getElementById("settings-gateway-url") as HTMLInputElement;
+  const input = await openGatewayEditor();
   editInput(input, "ws://");
   await wait(() => input.getAttribute("aria-invalid") === "true", "incomplete endpoint");
+  await closeGatewayEditor();
   const reads = state.fixtureConfigReads;
-  const row = (id: string) => document.getElementById(`backend-detail-${id}`)!.closest("article")!;
+  const row = (id: string) => document.querySelector<HTMLElement>(`article[data-backend="${id}"]`)!;
   const action = (id: string) => [...row(id).querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => ["断开连接", "重新连接"].includes(button.textContent!.trim()))!;
-  const details = row("openclaw").querySelector<HTMLButtonElement>(".settings-detail-toggle")!;
-  details.click();
-  await wait(() => details.getAttribute("aria-expanded") === "true", "expanded backend details");
-  window.scrollTo(0, 180);
+  const scrollArea = document.querySelector<HTMLElement>(".settings-workspace > .settings-stack")!;
+  scrollArea.scrollTop = 180;
   await pause(50);
-  const scrollTop = document.scrollingElement!.scrollTop;
-  check(scrollTop > 0, "fixture must exercise a scrolled settings page");
+  const scrollTop = scrollArea.scrollTop;
+  check(scrollTop > 0, `fixture must scroll the settings card (${scrollArea.clientHeight}/${scrollArea.scrollHeight})`);
   const retained = () => {
     check(document.querySelector("h1") === heading, "document and settings must stay mounted");
     check(groupsVisible(), "preferences and connections must remain displayed together");
-    check(editor.open && details.getAttribute("aria-expanded") === "true", "expanded editors and backend details must remain open");
-    check(input.value === "ws://" && noSaveActions() && !unloadBlocked(), "incomplete text stays editable without manual save actions");
+    check(noSaveActions() && !unloadBlocked(), "incomplete endpoint draft needs no manual save actions");
     check(config.gatewayUrl === "ws://127.0.0.1:1", "connection toggles must not save the draft");
     check(state.fixtureConfigReads === reads, "connection toggles must not reload settings data");
-    check(Math.abs(document.scrollingElement!.scrollTop - scrollTop) <= 1, "scroll position must remain unchanged");
+    check(Math.abs(scrollArea.scrollTop - scrollTop) <= 1, "scroll position must remain unchanged");
   };
   const toggle = async (id: string, disconnect: boolean, fail = false) => {
     const before = state.fixtureWrites;
@@ -391,8 +412,10 @@ state.runConnectionsFixture = async () => {
   await toggle("openclaw", false, true);
   await pause(900);
   retained();
-  editInput(input, "ws://127.0.0.1:9");
-  await wait(() => config.gatewayUrl === input.value, "corrected endpoint auto-saved");
-  check(row("openclaw").textContent!.includes("已断开"), "endpoint save must keep the saved connection switch");
+  const draft = await openGatewayEditor();
+  check(draft.value === "ws://", "incomplete endpoint draft survives connection changes");
+  editInput(draft, "ws://127.0.0.1:9");
+  await wait(() => config.gatewayUrl === draft.value, "corrected endpoint auto-saved");
+  check(row("openclaw").textContent!.includes("未连接"), "endpoint save must keep the saved connection switch");
   return { disabledBackends: config.disabledBackends, writes: state.fixtureWrites, checks: "in-place disconnect / delayed reconnect / incomplete endpoint / automatic correction / stacked sections / expansion / scroll / failure / mounted selectors" };
 };

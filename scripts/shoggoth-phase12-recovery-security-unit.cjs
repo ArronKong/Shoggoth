@@ -482,7 +482,7 @@ test("UI host 边界日志不转发依赖错误、路径或 dev URL 原文", () 
 });
 
 test("旧版与未来版 snapshot 拒绝且原 snapshot/event log 不变", () => {
-  for (const schemaVersion of [1, 2, 3, 4, STORE_SCHEMA_VERSION - 1, STORE_SCHEMA_VERSION + 1]) {
+  for (const schemaVersion of [1, 2, 3, 4, 14, STORE_SCHEMA_VERSION + 1]) {
     const paths = fixturePaths(`shoggoth-phase12-reject-v${schemaVersion}-`);
     const initial = new JsonlProductStore({ paths, now: () => 100 });
     initial.open();

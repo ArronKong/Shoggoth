@@ -20,12 +20,13 @@ vm.runInNewContext(compiled, { module, exports: module.exports, require: name =>
   if (name === "react" || name.startsWith("react/")) return require(name);
   return {};
 } });
-const { sendTargetMentions } = module.exports;
+const { composerPrefill, sendTargetMentions } = module.exports;
 
-function send(fixture, target, body, quote = null) {
+function send(fixture, target, body, quote = null, manual = false) {
   const view = fixture.view();
   const input = { groupId: fixture.groupId, clientMessageId: crypto.randomUUID(), body,
-    mentions: [...sendTargetMentions(target, view.members.filter(member => member.state === "active"), view.currentOwnerId, quote)],
+    mentions: [...sendTargetMentions(composerPrefill(target, view.currentOwnerId, quote, manual),
+      view.members.filter(member => member.state === "active"), view.currentOwnerId)],
     replyTo: quote?.seq ?? null, attachments: [] };
   validateParams("group.send", input);
   return fixture.store.appendUserMessage({ ...input, mentionMemberIds: input.mentions, replyToSeq: input.replyTo });
@@ -60,7 +61,7 @@ test("choosing the owner after quoting another member keeps the quote and dispat
   f.store.recordRun({ opportunityId: claim.opportunity.id, sessionKey: "quote-session", runId: "quote-run", fence: f.fence });
   f.store.completeTurn({ opportunityId: claim.opportunity.id, fence: f.fence, status: "completed", text: "Source" });
   const quote = f.messages().at(-1);
-  const result = send(f, { kind: "owner" }, "Owner, please review this", quote);
+  const result = send(f, { kind: "owner" }, "Owner, please review this", quote, true);
   assert.equal(result.message.replyTo.seq, quote.seq);
   assert.equal(f.store.claimNext(f.groupId, f.fence).member.id, f.view().currentOwnerId);
 });
@@ -95,4 +96,13 @@ test("the default owner uses ordinary group routing", t => {
   const result = send(f, { kind: "owner" }, "Hello");
   assert.deepEqual(result.message.mentions.memberIds, []);
   assert.equal(f.store.claimNext(f.groupId, f.fence).member.id, f.view().currentOwnerId);
+});
+
+test("a manual @all reaches the owner and the rest of the roster in order", t => {
+  const f = createFixture(t), owner = f.roster[1];
+  f.store.updateGroup({ groupId: f.groupId, expectedMetadataRevision: f.view().group.metadataRevision,
+    patch: { ownerMemberId: owner.id } });
+  const result = send(f, { kind: "owner" }, "@all Please review");
+  assert.equal(result.message.mentions.broadcast, true);
+  assert.deepEqual(f.store.claimNext(f.groupId, f.fence).order.map(slot => slot.memberId), [owner.id, f.roster[0].id, f.roster[2].id]);
 });

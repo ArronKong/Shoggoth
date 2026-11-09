@@ -4,6 +4,7 @@ const fs = require("node:fs"), path = require("node:path");
 const { createHash } = require("node:crypto");
 const { projectJournalRecovery } = require("./group-journal-recovery");
 const { atomicWritePrivateFile, recoverInterruptedPrivateFile, statIfExists } = require("./agent-service/private-file");
+const { isBroadcastHandle } = require("./agent-service/group-mentions");
 const { groupSendPayloadDigest, canonicalGroupSendPayload } = require("./group-send-payload");
 const MAX_BYTES = 16 * 1024 * 1024, MAX_ENTRY_BYTES = 256 * 1024, MAX_SENDS = 1000, MAX_DRAFTS = 256;
 const RETENTION = 30 * 24 * 60 * 60 * 1000, activeStores = new Map();
@@ -54,7 +55,7 @@ function attachment(value) {
   return safeTree(row);
 }
 function composer(value) {
-  const row = closed(value, ["text", "mentionIds", "replyTo", "replyTask", "requestRef", "newRequest", "summaryMemberId", "files"], ["sendTarget"]);
+  const row = closed(value, ["text", "mentionIds", "replyTo", "replyTask", "requestRef", "newRequest", "summaryMemberId", "files"], ["sendTarget", "mentionSpans"]);
   if (typeof row.text !== "string" || !Array.isArray(row.mentionIds) || !row.mentionIds.every(part) || typeof row.newRequest !== "boolean"
     || typeof row.summaryMemberId !== "string" || !Array.isArray(row.files) || row.files.length > 8) throw failure("GROUP_JOURNAL_INVALID");
   if (row.sendTarget != null) {
@@ -64,6 +65,19 @@ function composer(value) {
       || !["owner", "all", "member"].includes(target.kind)
       || (target.kind === "member" ? !part(target.memberId) : Object.hasOwn(target, "memberId"))) throw failure("GROUP_JOURNAL_INVALID");
     row.sendTarget = { ...lock, target };
+  }
+  if (Object.hasOwn(row, "mentionSpans")) {
+    if (!Array.isArray(row.mentionSpans) || row.mentionSpans.length > 2048) throw failure("GROUP_JOURNAL_INVALID");
+    let end = 0;
+    row.mentionSpans = row.mentionSpans.map(value => {
+      const span = closed(value, ["start", "end", "memberId"]);
+      if (!number(span.start) || !number(span.end) || span.start < end || span.end <= span.start + 1 || span.end > row.text.length
+        || row.text[span.start] !== "@" || (span.memberId === null ? !isBroadcastHandle(row.text.slice(span.start + 1, span.end)) : !part(span.memberId))) {
+        throw failure("GROUP_JOURNAL_INVALID");
+      }
+      end = span.end;
+      return span;
+    });
   }
   row.files = row.files.map(value => {
     const file = closed(value, ["id", "name", "status", "attachment"]);

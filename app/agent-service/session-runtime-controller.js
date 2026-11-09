@@ -160,9 +160,11 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       }
     }
   }
-  async function switchSession(params, { excludingRunId = null } = {}) {
+  async function switchSession(params, { excludingRunId = null, freshSession = false } = {}) {
     auditPending();
     const before = sessionFor(params);
+    if (freshSession && (before.status !== "draft" || before.runtimeSessionId !== null
+      || before.runtimeBindingId !== params.bindingId)) throw serviceError("POLICY_REJECTED", "新会话的模型绑定已变化");
     if (isDesktop(before) && params.bindingId !== before.runtimeBindingId) {
       throw serviceError("CODEX_DESKTOP_RUNTIME_PINNED", "Codex Desktop 原对话需要使用原生 Codex CLI");
     }
@@ -231,7 +233,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     // A kept native session needs no fresh-session context (or summary) for the target.
     const keepsNativeSession = modelChanging && !providerChanging && reconciled.status === before.status
       && keepsNativeSessionOnModelChange(profile, target, before, modelProviderRef);
-    if (!isDesktop(before) && !keepsNativeSession) await currentCoordinator().prepareRuntimeHandoff?.(reconciled, target, {
+    if (!freshSession && !isDesktop(before) && !keepsNativeSession) await currentCoordinator().prepareRuntimeHandoff?.(reconciled, target, {
       model: params.model, clearModelOverride, permissionMode, excludingRunId,
     });
     // Nothing may yield between the last busy check and the CAS. A concurrent
@@ -246,7 +248,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       || latestProfile.defaultModel !== profile.defaultModel) throw serviceError("POLICY_REJECTED", "Binding 已变化");
     const saved = chatSessionStore.switchRuntime(params.sessionKey, { bindingId: target.id, revision: reconciled.revision,
       clearModelOverride, permissionMode, ...(params.model !== undefined ? { model: params.model, modelProviderRef: pinnedProviderRef,
-        renewSession: !isDesktop(before) && (providerChanging || (modelChanging && !keepsNativeSession)) } : {}) });
+        renewSession: !freshSession && !isDesktop(before) && (providerChanging || (modelChanging && !keepsNativeSession)) } : {}) });
     auditPending();
     try { onChanged({ profileId: profile.id, sessionKey: saved.sessionKey }); } catch {}
     return saved;
@@ -375,6 +377,11 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       // Background sources never silently clear a model or permission override.
       return switchSession({ profileId: profile.id, sessionKey, bindingId: profile.defaultBindingId,
         revision: session.revision, acceptAdjustments: false }, { excludingRunId });
+    },
+    selectInspirationModel({ profileId, sessionKey, modelSelection }, runId) {
+      const session = sessionFor({ profileId, sessionKey });
+      return switchSession({ profileId, sessionKey, ...modelSelection, revision: session.revision, acceptAdjustments: false },
+        { excludingRunId: runId, freshSession: true });
     },
     async handle(method, input) {
       const params = validateSessionRuntimeParams(method, input);

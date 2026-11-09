@@ -56,7 +56,7 @@ export default function ImmersiveStatusLine({ phase, live }: { phase: ImmersiveP
     return () => document.removeEventListener("keydown", onKey, true);
   }, [open]);
 
-  // Startup already lives in the shared activity timeline above the reply.
+  // The reply loader and retry feedback cover startup states.
   if (!shown || live?.wait || shown.wait) return null;
   const toolTitle = (tool: ImmersiveLiveTool) => tool.title || toolActivityTitle(tool.name, undefined, t);
   const runningTool = [...shown.tools].reverse().find((x) => !x.done);

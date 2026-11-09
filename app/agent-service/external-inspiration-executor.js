@@ -3,6 +3,7 @@
 const { serviceError } = require("./security");
 const { validateInteractiveResponseV1 } = require("../core/shoggoth-interaction-contract");
 const { EXTERNAL_TERMINAL, validateExternalInspirationResult } = require("../external-inspiration-protocol");
+const { isModelError } = require("../group-member-model");
 
 const fail = code => { throw serviceError(code, code); };
 const common = execution => ({ executionId: execution.id, runId: execution.runId,
@@ -101,6 +102,7 @@ class ExternalInspirationExecutor {
         }
         const prepared = await this.client.request("inspiration.external.prepare", {
           ...common(execution), operationId: execution.id,
+          ...(execution.modelSelection ? { modelSelection: execution.modelSelection } : {}),
         });
         if (!this.#alive(generation)) return;
         execution = this.store.bindExternalSession(execution.id, prepared);
@@ -132,7 +134,8 @@ class ExternalInspirationExecutor {
       execution = this.store.executionForRun(runId);
       if (!execution || this.terminal(execution)) return;
       if (execution.external.phase !== "dispatched") {
-        this.store.failPreparation(execution.id, typeof error?.code === "string" ? error.code : "EXTERNAL_PREPARATION_FAILED");
+        const code = isModelError(error?.code) ? "INSPIRATION_MODEL_UNAVAILABLE" : error?.code;
+        this.store.failPreparation(execution.id, typeof code === "string" ? code : "EXTERNAL_PREPARATION_FAILED");
       } else this.store.markExternalUnknown(execution.id, "EXTERNAL_EXECUTION_UNCONFIRMED");
     }
   }

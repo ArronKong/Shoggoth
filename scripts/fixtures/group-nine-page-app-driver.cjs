@@ -296,8 +296,7 @@ async function run() {
     .find(event => event.runId === run.id && event.content?.transcriptType === "terminal")?.content.responseMetadata,
     "native response metadata persisted at terminal");
   assert.deepEqual(metadata.models, ["fake-model"]);
-  // Message pinning is currently hidden in ChatMessageActions. Require the
-  // two available actions by name, along with the canonical Service metadata.
+  // Verify the Copy and Quote actions along with the canonical Service metadata.
   // Establish the no-interaction state before asserting its appearance. The
   // real cursor may still hover the reply after the navigation sweep.
   mainWindow.webContents.sendInputEvent({ type: "mouseMove", x: 1, y: 1 });
@@ -307,13 +306,13 @@ async function run() {
   report.chat.footer = await until(async () => await js(`(()=>{const group=Array.from(document.querySelectorAll('.chat-thread .chat-group.is-assistant')).find(group=>group.innerText.includes(${JSON.stringify(run.resultSummary)}));const footer=group?.querySelector('.chat-group__footer');
     const model=footer?.querySelector('.chat-response-model');const shortcuts=Array.from(footer?.querySelectorAll('.chat-copybtn')||[]).map(button=>button.title);
     const modelId=model?.lastElementChild?.textContent;
-    if(modelId!=='fake-model'||JSON.stringify(shortcuts)!==JSON.stringify(['复制为 Markdown','删除']))return null;
+    if(modelId!=='fake-model'||JSON.stringify(shortcuts)!==JSON.stringify(['复制为 Markdown','引用']))return null;
     if(/[↑↓]|\\b[RW]\\d|\\bctx\\b|\\btok\\b/.test(footer.textContent))throw Error('Message usage/context must stay hidden');
     const hidden=getComputedStyle(model).opacity==='0';if(!hidden)throw Error('Model must be hidden before message interaction');
     const copy=footer.querySelector('.chat-copybtn');copy.focus();const focused=getComputedStyle(model).opacity==='1'&&getComputedStyle(copy).opacity==='1';copy.blur();
     if(!focused)throw Error('Keyboard focus must reveal model and actions together');
     return {model:modelId,text:footer.innerText,modelHiddenByDefault:hidden,modelRevealedOnFocus:focused,shortcuts};})()`),
-    "canonical Service metadata and copy/delete actions reached the real React footer");
+    "canonical Service metadata and Copy/Quote reached the real React footer");
   report.chat.responseMetadata = metadata;
   const screenshot = path.join(root, "nine-page-chat-roundtrip.png"); fs.writeFileSync(screenshot, (await mainWindow.webContents.capturePage()).toPNG(), { mode: 0o600 }); report.screenshots.push(screenshot);
   if (connectorAcceptance) {

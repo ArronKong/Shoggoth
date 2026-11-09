@@ -11,6 +11,10 @@ const { ensurePrivateDirectoryTree, serviceError } = require("./security");
 // Shoggoth pins one verified release; upgrading means editing this manifest
 // and re-running the live acceptance, never following the registry silently.
 const ANTIGRAVITY_ACP_SERVER_VERSION = "1.4.3";
+// Adapter contracts belong to the hash/signature-verified distribution, not
+// to the release label reported by a user's CLI.
+const ANTIGRAVITY_ACP_CONTRACTS = Object.freeze({ workspaceExecution: 1, modelOnly: 1,
+  fileCredentialStorage: 1, nativeToolResults: 1, mcpTimeout: 1, modelUsage: 1 });
 const GOOGLE_TEAM_IDENTIFIER = "EQHXZ8M8AV";
 const googleRequirement = (identifier) => `identifier "${identifier}" and anchor apple generic`
   + " and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */"
@@ -20,6 +24,7 @@ const SERVER_FILE = "agy_acp_server.par";
 const HARNESS_FILE = "localharness_external";
 const RELEASES = Object.freeze({
   "darwin-arm64": Object.freeze({
+    contracts: ANTIGRAVITY_ACP_CONTRACTS,
     url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.4.3-darwin-arm64.zip",
     archiveBytes: 114_147_623,
     archiveSha256: "c57db0a9b8b712daa9c3c17cdb990a61842ea569f279e8bd79d7aa85a303b20b",
@@ -115,7 +120,8 @@ function resolveAntigravityAcpServer(options = {}) {
   if (!server || !harness) {
     throw distributionError("ANTIGRAVITY_ACP_NOT_INSTALLED", "The official Antigravity ACP server is incomplete");
   }
-  return Object.freeze({ version: ANTIGRAVITY_ACP_SERVER_VERSION, directory, serverPath, harnessPath });
+  return Object.freeze({ version: ANTIGRAVITY_ACP_SERVER_VERSION, directory, serverPath, harnessPath,
+    contracts: release.contracts });
 }
 
 function sha256File(fileSystem, target) {
@@ -248,6 +254,7 @@ async function installAntigravityAcpServer(options = {}) {
 
 module.exports = {
   ANTIGRAVITY_ACP_SERVER_VERSION,
+  ANTIGRAVITY_ACP_CONTRACTS,
   GOOGLE_TEAM_IDENTIFIER,
   antigravityAcpInstallState,
   installAntigravityAcpServer,

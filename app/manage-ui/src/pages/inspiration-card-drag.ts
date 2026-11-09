@@ -27,14 +27,14 @@ export function beginInspirationCardDrag(source: HTMLElement, pointer: {
   const sourceStyle = getComputedStyle(source);
   const radius = parseFloat(sourceStyle.borderTopLeftRadius) || 0;
   let over: InspirationDropTarget | undefined;
-  let marked: HTMLElement[] = [];
   const saved = { opacity: source.style.opacity, userSelect: source.style.userSelect, webkitUserSelect: source.style.webkitUserSelect };
   source.style.userSelect = 'none'; source.style.webkitUserSelect = 'none';
   const viewport = source.closest('main');
   const rect = source.getBoundingClientRect();
   const offsetX = x - rect.left, offsetY = y - rect.top;
   const contains = (r: DOMRect) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-  const locate = (targets = options.targets()) => {
+  const locate = () => {
+    const targets = options.targets();
     const strip = options.scrollContainer?.();
     const insideStrip = strip && contains(strip.getBoundingClientRect());
     return targets.find(target => {
@@ -44,12 +44,7 @@ export function beginInspirationCardDrag(source: HTMLElement, pointer: {
     });
   };
   const highlight = () => {
-    const targets = options.targets();
-    const elements = targets.map(target => target.element);
-    marked.filter(element => !elements.includes(element)).forEach(element => element.removeAttribute('data-inspiration-drop-ready'));
-    elements.filter(element => !marked.includes(element)).forEach(element => element.setAttribute('data-inspiration-drop-ready', ''));
-    marked = elements;
-    const next = locate(targets);
+    const next = locate();
     if (next?.element !== over?.element) {
       over?.element.removeAttribute('data-inspiration-drop-over');
       next?.element.setAttribute('data-inspiration-drop-over', '');
@@ -132,7 +127,7 @@ export function beginInspirationCardDrag(source: HTMLElement, pointer: {
     window.removeEventListener('blur', cancel);
     viewport?.removeEventListener('scroll', scroll);
     if (source.hasPointerCapture?.(pointer.pointerId)) source.releasePointerCapture(pointer.pointerId);
-    marked.forEach(element => { element.removeAttribute('data-inspiration-drop-ready'); element.removeAttribute('data-inspiration-drop-over'); });
+    over?.element.removeAttribute('data-inspiration-drop-over');
     ghost?.remove();
     Object.assign(source.style, saved); source.removeAttribute('data-inspiration-dragging');
     if (active) {

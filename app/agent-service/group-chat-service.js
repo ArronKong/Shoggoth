@@ -27,17 +27,26 @@ function publicMessage(message, preview = false) {
   return rest;
 }
 
-function publicMember(member) {
-  const { profileId: _profileId, ...rest } = member;
-  return { ...rest, modelSelection: member.modelSelection ?? null };
+function publicMember(member, productStore) {
+  const { profileId, card, ...rest } = member;
+  let agentMissing = card?.agentMissing === true;
+  if (profileId && typeof productStore?.getAgentProfile === "function") {
+    try {
+      const profile = productStore.getAgentProfile(profileId);
+      agentMissing = profile == null || profile.enabled === false;
+    } catch { /* An unavailable directory is not evidence of deletion. */ }
+  }
+  const { agentMissing: _presence, ...publicCard } = card ?? {};
+  return { ...rest, card: card ? publicCard : null, ...(agentMissing ? { agentMissing: true } : {}),
+    modelSelection: member.modelSelection ?? null };
 }
 
-function publicGroupView(view) {
+function publicGroupView(view, productStore) {
   return {
     ownerScope: view.ownerScope,
     group: { ...view.group, messageRevision: view.group.messageRevision ?? 0 },
     currentOwnerId: view.currentOwnerId,
-    members: view.members.map(publicMember),
+    members: view.members.map(member => publicMember(member, productStore)),
     round: view.round,
     activeTurns: view.activeTurns,
     queuedMemberIds: view.queuedMemberIds,
@@ -116,7 +125,7 @@ class GroupChatService {
         if (refreshed?.changed) this.#changed(groupId);
       } catch { /* 成员卡刷新失败时展示已有卡 */ }
     }
-    const view = publicGroupView(this.store.getGroup(groupId));
+    const view = publicGroupView(this.store.getGroup(groupId), this.productStore);
     if (view.group.status !== "active") return view;
     // 正在发言 / 在后台干活的成员：带上它们的草稿与活动（只在内存，不进群日志）。
     view.activeTurns = view.activeTurns.map((turn) => ({ ...turn, draft: this.driver.draftFor?.(turn.opportunityId) ?? null,
@@ -165,7 +174,7 @@ class GroupChatService {
       return { supported: true, items, truncated: result.truncated, partial };
     }
     if (method === "group.list") {
-      return { groups: this.store.listGroups({ includeArchived: params.includeArchived }).map(publicGroupView),
+      return { groups: this.store.listGroups({ includeArchived: params.includeArchived }).map(view => publicGroupView(view, this.productStore)),
         internalSessions: this.store.listInternalSessions() };
     }
     if (method === "group.get") return this.#view(params.groupId, { refresh: true });
@@ -225,7 +234,7 @@ class GroupChatService {
     }
     if (method === "group.update") {
       if (params.patch.status === "archived") {
-        const view = publicGroupView(this.store.getGroup(params.groupId));
+        const view = publicGroupView(this.store.getGroup(params.groupId), this.productStore);
         this.store.deleteGroup(params);
         await this.driver.deleteGroup(params.groupId);
         this.responsePages.deleteGroup(params.groupId);

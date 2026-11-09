@@ -90,6 +90,21 @@ async function checkHistoryBoundary(label: string, element: HTMLElement = thread
   }
 }
 const stats = async () => (await fetch("/fixture/stats")).json();
+state.runColdHistoryFixture = async () => {
+  const row = cases[0];
+  let unavailableReads = 0;
+  for (let attempt = 0; attempt < 150 && !unavailableReads; attempt++) {
+    unavailableReads = (await stats()).unavailableHistoryReads;
+    if (!unavailableReads) await pause();
+  }
+  check(unavailableReads > 0, "first history read encountered an unavailable Service");
+  await wait(() => !!thread()?.querySelector('[data-testid="chat-history-loading"]'), "cold start history loader");
+  check(!thread().querySelector('[data-testid="chat-history-retry"]'), "cold start does not show a history error");
+  await control(row.key, "service-ready");
+  await wait(() => count(row.id) === 50 && thread().dataset.historyLoaded === "true", "automatic history recovery");
+  check(!thread().querySelector('[data-testid="chat-history-loading"], [data-testid="chat-history-retry"]'), "loaded history clears startup UI");
+  return { unavailableReads, loaded: 50 };
+};
 const visibleAnchor = (element: HTMLElement, selector: string) => {
   const bounds = element.getBoundingClientRect();
   const node = Array.from(element.querySelectorAll<HTMLElement>(selector)).find(node => {
@@ -210,13 +225,36 @@ state.runHistoryFixture = async () => {
   select(openclaw.key);
   await wait(() => count(openclaw.id) === 50 && !!thread().querySelector('[data-testid="chat-history-retry"]'),
     "cached history survives a failed first canonical page with a retry entry");
+  const retry = thread().querySelector<HTMLButtonElement>('button[data-testid="chat-history-retry"]')!;
+  check(retry?.textContent?.startsWith("历史加载失败："), "history error text is the retry button");
+  check(thread().querySelectorAll(".chat-archive-bar").length === 1, "history failure shows one control");
+  check(getComputedStyle(retry).fontWeight === "400", "history retry text uses regular weight");
   check(!thread().querySelector('[data-testid="chat-history-complete"]'), "cached tail must not claim all history loaded");
   await control(openclaw.key, "retry");
-  thread().querySelector<HTMLButtonElement>('[data-testid="chat-history-retry"]')!.click();
+  retry.focus({ preventScroll: true });
+  retry.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+  check(document.activeElement === retry, "Space keeps focus on the retry text");
+  retry.click();
+  const archiveButton = () => thread().querySelector<HTMLButtonElement>('[data-testid="chat-history-archive"]');
+  const archiveLoading = () => thread().querySelector('[data-testid="chat-history-archive-loading"] [role="status"]');
   await wait(() => count(openclaw.id) === 50 && !!pageButton()
-    && !!thread().querySelector('[data-testid="chat-history-archive"]'), "archive session");
-  for (const expected of [50, 100, 123]) {
-    const button = thread().querySelector<HTMLButtonElement>('[data-testid="chat-history-archive"]')!;
+    && !!archiveButton(), "archive session");
+  await control(openclaw.key, "fail-archive-once");
+  archiveButton()!.click();
+  await wait(() => archiveButton()?.textContent?.includes("上滑重试"), "archive first attempt fails");
+  thread().scrollTop = 0;
+  wheel(thread(), -20);
+  await wait(() => !!archiveLoading(), "upward scroll shows archive retry loading");
+  check(archiveLoading()?.textContent === "载入封存历史…", "archive retry exposes its loading status");
+  const balls = archiveLoading()?.querySelector("svg");
+  check(balls?.querySelectorAll("circle").length === 2 && balls.getBoundingClientRect().width === 36,
+    "archive retry shows the small two-ball loader");
+  check(!archiveButton() && count(openclaw.id) === 50, "archive retry keeps current messages visible");
+  wheel(thread(), -20); wheel(thread(), -20);
+  await wait(() => count("archive") === 50 && !archiveLoading(), "archive retry restores the first page");
+  check((await stats()).archiveRequests === 2, "a wheel burst does not duplicate the archive retry");
+  for (const expected of [100, 123]) {
+    const button = archiveButton()!;
     check(!!button, `archive paging entry retained before ${expected}`); button.click();
     await wait(() => count("archive") === expected, `archive ${expected}`);
     check(count(openclaw.id) === 50, "archive paging changed current transcript size");

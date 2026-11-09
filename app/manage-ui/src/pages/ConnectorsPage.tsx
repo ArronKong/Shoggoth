@@ -6,6 +6,7 @@ import { usePendingConnectors } from "../lib/usePendingConnectors";
 import { useMcpConnectorRefresh } from "../lib/useMcpConnectorRefresh";
 import McpApprovalInbox from "../components/McpApprovalInbox";
 import { AppleDeviceRows, useAppleDeviceConnectors } from "../components/AppleDeviceConnectors";
+import ConnectorAddButton from "../components/ConnectorAddButton";
 import McpConnectorIcon from "../components/McpConnectorIcon";
 import { ConnectorInfo } from "../components/ConnectorDetails";
 import { PageHead } from "../components/PageHead";
@@ -106,14 +107,14 @@ export default function ConnectorsPage() {
     const content = cardContent(card);
     return <div className={s.service} key={card.id}>
       <button type="button" className={s.serviceOpen} onClick={() => openCard(card)}>{content.icon}<span className={s.serviceText}><strong>{content.name}</strong><small>{content.description}</small></span></button>
-      <button type="button" className="btn-secondary btn-sm" onClick={() => openCard(card, true)}>{tr("add")}</button>
+      <ConnectorAddButton name={content.name} onClick={() => openCard(card, true)} />
     </div>;
   })}</div>;
 
   const error = (message: string | null, retry: () => void) => message && <p className={s.error} role="alert">{tr("loadFailed")} <button type="button" className={s.textButton} onClick={retry}>{tr("retry")}</button></p>;
   const unavailableName = (id: string) => mcpConnectorName(id.slice(9), mcpRegistrySummary(id.slice(9))?.name || id.slice(9));
-  return <div className={`page management-page ${s.page}`}><PageHead title={tr("title")} subtitle={tr("subtitle")} />
-    <div className={s.contentCard}>
+  return <div className={`page management-page management-page--scroll-card ${s.page}`}><PageHead title={tr("title")} subtitle={tr("subtitle")} />
+    <div className={`management-page__scroll-card ${s.contentCard}`}>
     {new URLSearchParams(location.search).has("legacy") && <p className={s.notice}>{tr("retired")}</p>}
     <McpApprovalInbox embedded />
     <section className={s.section}><div className={s.sectionHeading}><h2>{tr("installed")}</h2>{(installed.data || lark.data || official.data) && <span className={s.count}>{devices.count + installedRows.length + pendingCards.length + unavailablePending.length + Number(Boolean(lark.data?.canRemove)) + (official.data?.items.filter(item => item.canRemove).length || 0)}</span>}</div>

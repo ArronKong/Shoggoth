@@ -103,8 +103,8 @@ export default function SettingsAppUpdate() {
   const installationBusy = state && ["preparing", "installing", "recovering"].includes(state.status);
 
   return (
-    <div className="settings-list-row settings-app-update-card" id="settings-app-update">
-      <div className="settings-update-heading">
+    <div id="settings-app-update">
+      <div className="settings-list-row settings-update-heading">
         <SettingsIcon name="update" />
         <div className="settings-list-copy">
           <h4>
@@ -114,25 +114,32 @@ export default function SettingsAppUpdate() {
         </div>
         <div className="settings-app-update-actions">
           {state?.canInstall && (
-            <button type="button" className="ui-cbtn ui-cbtn--sm ui-cbtn--gold" disabled={actionPending} onClick={() => void install()}>
+            <button type="button" className="btn-dark btn-sm" disabled={actionPending} onClick={() => void install()}>
               {t("settings.appUpdate.restart")}
             </button>
           )}
-          <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={actionPending || !state?.canCheck} onClick={() => void runCheck()}>
+          <button type="button" className="btn-secondary btn-sm" disabled={actionPending || !state?.canCheck} onClick={() => void runCheck()}>
             {t("settings.appUpdate.check")}
           </button>
         </div>
       </div>
       <div className="settings-app-update-copy">
-        <Switch
-          checked={state?.automaticUpdates === true}
-          disabled={!state?.supported || preferencePending || Boolean(installationBusy)}
-          onChange={(enabled) => void setAutomatic(enabled)}
-          label={<span className="settings-update-label">
-            <span>{t("settings.appUpdate.automatic")}</span>
-            {state?.supported && <small>{t("settings.appUpdate.automaticHint")}</small>}
-          </span>}
-        />
+        <div className="settings-switch-list">
+          <div className="settings-switch-row">
+            <Switch
+              checked={state?.automaticUpdates === true}
+              disabled={!state?.supported || preferencePending || Boolean(installationBusy)}
+              onChange={(enabled) => void setAutomatic(enabled)}
+              label={<span className="settings-switch-label">
+                <SettingsIcon name="schedule" />
+                <span className="settings-switch-copy">
+                  <span>{t("settings.appUpdate.automatic")}</span>
+                  {state?.supported && <small>{t("settings.appUpdate.automaticHint")}</small>}
+                </span>
+              </span>}
+            />
+          </div>
+        </div>
         {preferenceError && <p role="alert">{t("settings.appUpdate.preferenceError")}</p>}
         {statusText && <p className="ui-hint" role="status" aria-live="polite">{statusText}</p>}
         {progress !== null && (

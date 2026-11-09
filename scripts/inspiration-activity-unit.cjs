@@ -67,3 +67,64 @@ test('native trajectory reads the exact run before Chat has ever populated its s
   assert.deepEqual(history.messages, [message]); assert.equal(history.exactRun, true);
   assert.equal(backend._sessionsByKey.size, 0);
 });
+
+test('failed inspiration exposes the same canonical Chat error for its own round only', async () => {
+  const { ShoggothBackend } = require('../app/core/shoggoth-backend');
+  const { transcriptHistoryItem } = require('../app/agent-service/chat-service-controller');
+  const backend = new ShoggothBackend();
+  backend._profilesByAgent.set('agent-1', { id: 'profile-1', runtimeAccountId: 'account-1' });
+  const current = { ...execution, status: 'failed', backendId: 'shoggoth', agentId: 'agent-1',
+    profileId: 'profile-1', sessionKey: 'session-1', workspace: '/fixture/inspiration-error', errorCode: 'RUNTIME_QUOTA_EXHAUSTED' };
+  const error = (runId, code, message, seq) => transcriptHistoryItem({ id: `error-${runId}`, runId,
+    kind: 'error', seq, occurredAt: now, contextExcluded: false,
+    content: { transcriptType: 'terminal', status: 'failed', errorCode: code, resultSummary: null, failure: { message } } });
+  const items = [error('older-run', 'RUNTIME_AUTH_REQUIRED', 'An older login failure', 1),
+    error('run-1', current.errorCode, 'Quota exceeded. Check your plan and billing details.', 2),
+    error('later-run', 'RUNTIME_RATE_LIMITED', 'A later rate limit', 3)];
+  backend._page = async () => items;
+  backend._sessionTarget = () => ({ profile: { id: 'profile-1' }, sessionKey: 'session-1' });
+  backend._getHistoryItems = async () => items;
+  const registry = { _requireInspirationOwner: () => ({ getInspirationActivityBinding: async () => ({ execution: current, prompt: '' }) }),
+    _activeGet: () => backend };
+  const activity = await loadInspirationActivity(registry, current.ideaId, current.runId);
+  const chatError = (await backend.getHistory('agent:agent-1:session-1')).messages[1].content[0].text;
+  assert.equal(activity.errorMessage, chatError);
+  assert.match(activity.errorMessage, /当前账号额度已用尽/);
+  assert.match(activity.errorMessage, /上游原因：Quota exceeded\. Check your plan and billing details\./);
+  assert.match(activity.errorMessage, /错误码：RUNTIME_QUOTA_EXHAUSTED/);
+  assert.equal(activity.trajectory.parts.length, 0, 'A terminal error is not an assistant reply or a tool activity');
+  for (const status of ['completed', 'canceled', 'unknown']) {
+    current.status = status;
+    assert.equal((await loadInspirationActivity(registry, current.ideaId, current.runId)).errorMessage, null);
+  }
+  current.status = 'failed';
+  backend._page = async () => items.filter(item => item.runId !== current.runId);
+  assert.equal((await loadInspirationActivity(registry, current.ideaId, current.runId)).errorMessage, null,
+    'A missing error never borrows another round from the same Session');
+});
+
+test('external error projection keeps provider details and rejects tool errors, quotes and unscoped failures', async () => {
+  const { AgentBackend } = require('../app/core/agent-backend');
+  const backend = new AgentBackend();
+  backend._isLocalGateway = () => false;
+  const current = { ...execution, status: 'failed', backendId: 'openclaw', sessionKey: 'external', workspace: '/remote' };
+  let messages = [{ role: 'assistant', runId: current.runId, content: '', stopReason: 'error',
+    errorMessage: 'Quota exceeded for project example; request id fixture. Try again tomorrow.' }];
+  backend.request = async () => ({ messages });
+  const registry = { _requireInspirationOwner: () => ({ getInspirationActivityBinding: async () => ({ execution: current, prompt: '' }) }),
+    _activeGet: () => backend };
+  const read = () => loadInspirationActivity(registry, current.ideaId, current.runId);
+  assert.equal((await read()).errorMessage, messages[0].errorMessage);
+  messages = [{ role: 'assistant', runId: current.runId, content: [{ type: 'text', text: 'Provider failure with request id fixture' }], stopReason: 'error' }];
+  assert.equal((await read()).errorMessage, messages[0].content[0].text);
+  messages[0].errorMessage = { untrusted: 'not display text' };
+  assert.equal((await read()).errorMessage, messages[0].content[0].text, 'Malformed error fields never reach the UI');
+  messages = [{ role: 'tool', runId: current.runId, errorMessage: 'Tool failure', isError: true },
+    { role: 'assistant', runId: current.runId, content: 'The user quoted RUNTIME_QUOTA_EXHAUSTED' },
+    { role: 'assistant', runId: 'other-run', errorMessage: 'Unrelated provider failure' }];
+  assert.equal((await read()).errorMessage, null);
+  messages = [{ role: 'assistant', errorMessage: 'Unscoped remote error' }];
+  assert.equal((await read()).errorMessage, null);
+  backend.request = async () => { throw Error('History unavailable'); };
+  assert.equal((await read()).errorMessage, null);
+});

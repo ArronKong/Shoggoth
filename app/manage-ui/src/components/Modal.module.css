@@ -125,6 +125,11 @@
   flex-direction: column;
   gap: 0.9rem;
 }
+/* The first row adds its own inset below the summary. Leave room for the scrollbar beyond the row actions. */
+.activity .body {
+  margin-top: 8px;
+  margin-inline: -4px calc(-8px - var(--ui-scrollbar-track-size, 12px));
+}
 .foot {
   display: flex;
   justify-content: flex-end;

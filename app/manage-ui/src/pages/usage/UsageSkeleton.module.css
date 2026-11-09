@@ -1,0 +1,53 @@
+.plot {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 112px;
+}
+
+.bars,
+.lines {
+  position: absolute;
+  inset: 16px 8px 0;
+  display: flex;
+  justify-content: space-between;
+}
+
+.bars {
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.bar {
+  flex: 0 1 12px;
+  border-radius: 4px 4px 0 0;
+}
+
+.lines {
+  flex-direction: column;
+  justify-content: space-around;
+}
+
+.line {
+  height: 2px;
+}
+
+.ticks {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 0;
+}
+
+.rankBar {
+  display: block;
+  height: 100%;
+}
+
+.rankList {
+  width: 100%;
+}
+
+.ring {
+  aspect-ratio: 1;
+  mask-image: radial-gradient(closest-side, transparent 63%, black 65% 98%, transparent);
+}

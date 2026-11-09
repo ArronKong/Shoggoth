@@ -716,8 +716,13 @@ test("response metadata is frozen on the final text of its run across history pa
     content: { text, ...content }, occurredAt: 100 + index, contextExcluded: false }));
   const transcriptStore = { ensureSession() {}, importHistoryItems() {}, getSessionDerivedTitle() { return null; },
     listEvents: () => structuredClone(events) };
+  const runs = [
+    run({ id: "run-a", status: "completed", createdAt: 90, startedAt: 99, finishedAt: 180 }),
+    run({ id: "run-b", sourceId: "other-session", status: "completed", createdAt: 91, finishedAt: 185 }),
+    run({ id: "run-c", status: "completed", createdAt: 92, finishedAt: 190 }),
+  ];
   for (let restart = 0; restart < 2; restart++) {
-    const { controller } = fixture({ transcriptStore }); await controller.open();
+    const { controller } = fixture({ transcriptStore, runs }); await controller.open();
     const all = []; let cursor = null;
     do {
       const page = await controller.handle("chat.history", { sessionKey: SESSION_KEY, cursor, limit: 1 }, "metadata-history");
@@ -727,6 +732,9 @@ test("response metadata is frozen on the final text of its run across history pa
     assert.equal(decorated.length, 1);
     assert.equal(decorated[0].payload.message.content[0].text, "final answer");
     assert.deepEqual(decorated[0].payload.message.responseMetadata, metadata);
+    assert.deepEqual(decorated[0].payload.message.shoggoth.turnTiming, { startedAt: 90, finishedAt: 180 });
+    assert.equal(all.filter(item => item.payload.message.shoggoth.turnTiming).length, 1,
+      "timing belongs to the final reply of the same session and Run");
     await controller.close();
   }
 });
@@ -815,6 +823,31 @@ test("repeated full snapshots of one native text segment show once across histor
     } while (cursor);
     assert.deepEqual(messages.map(item => item.id), ["user-a", "a-completed", "a-second-segment", "user-b", "b-completed"]);
     assert.equal(JSON.stringify(events), before);
+  } finally { await controller.close(); }
+});
+
+test("native reasoning snapshots keep one non-empty record per Run and item across pages", async () => {
+  const reasoning = (id, runId, seq, itemId, text) => ({ id, runId, seq, kind: "status", contextExcluded: false,
+    occurredAt: 1000 + seq, content: { transcriptType: "reasoning", itemId, reasoning: [text] } });
+  const events = [
+    reasoning("started", "run-a", 1, "thought-1", "Public progress"),
+    reasoning("completed", "run-a", 2, "thought-1", "Public progress"),
+    reasoning("empty-late", "run-a", 3, "thought-1", ""),
+    reasoning("next-item", "run-a", 4, "thought-2", "Public progress"),
+    reasoning("other-run", "run-b", 5, "thought-1", "Public progress"),
+  ];
+  const before = JSON.stringify(events);
+  const transcriptStore = { ensureSession() {}, importHistoryItems() {}, getSessionDerivedTitle() { return null; },
+    listEvents: () => structuredClone(events) };
+  const { controller } = fixture({ transcriptStore }); await controller.open();
+  try {
+    const messages = []; let cursor = null;
+    do {
+      const page = await controller.handle("chat.history", { sessionKey: SESSION_KEY, cursor, limit: 1 }, "reasoning-snapshots");
+      messages.unshift(...page.messages); cursor = page.nextCursor;
+    } while (cursor);
+    assert.deepEqual(messages.map(item => item.id), ["completed", "next-item", "other-run"]);
+    assert.equal(JSON.stringify(events), before, "history projection preserves the source journal");
   } finally { await controller.close(); }
 });
 

@@ -202,6 +202,8 @@ class GroupMemberDirectory {
   async #source(member, fresh = false) {
     if (member.profileId) {
       const profile = this.productStore.getAgentProfile(member.profileId) ?? null;
+      const runtimeProfile = profile?.enabled && this.productStore.resolveAgentRuntimeProfile
+        ? this.productStore.resolveAgentRuntimeProfile(profile.id) : profile;
       const definition = profile ? this.definitionStore.get(profile.id) : null;
       const key = JSON.stringify([profile?.id, profile?.selectedBindingId, profile?.runtime, profile?.runtimeProfileId,
         profile?.runtimeAccountId, profile?.updatedAt, profile?.enabled]);
@@ -223,7 +225,7 @@ class GroupMemberDirectory {
         name: profile?.name ?? null,
         online: Boolean(profile?.enabled && this.isRuntimeAvailable(profile.runtime)),
         runtime: profile?.runtime ?? null,
-        model: profile?.defaultModel ?? null,
+        model: runtimeProfile?.defaultModel ?? null,
         revision: definition?.manifest?.revision ?? null,
         identity: definition?.documents?.IDENTITY ?? null,
         soul: definition?.documents?.SOUL ?? null,
@@ -242,7 +244,14 @@ class GroupMemberDirectory {
     if (client) {
       try {
         const ref = { backendId: member.backendId, agentId: member.agentId, ...(member.peerId ? { peerId: member.peerId } : {}) };
-        const { agent, document } = await client.request(member.peerId ? "group.external.member" : "agent.get", ref);
+        let result;
+        try { result = await client.request(member.peerId ? "group.external.member" : "agent.get", ref); }
+        catch (error) {
+          if (error?.code === "AGENT_CONFIRMED_MISSING" || error?.code === "GROUP_HOST_AGENT_MISSING") source.agentMissing = true;
+          throw error;
+        }
+        const { agent, document } = result;
+        source.agentMissing = false;
         let peerDocuments = null;
         if (member.peerId) {
           let offset = 0; const chunks = [];
@@ -287,7 +296,7 @@ class GroupMemberDirectory {
         };
         const [identity, soul, capabilities] = await Promise.all([read("IDENTITY.md"), read("SOUL.md"), tools()]);
         source = { name: agent.name || null, online: true, runtime: member.backendId, model: agent.model || null,
-          revision: null, identity, soul, readable: true, groupTools: capabilities.groupTools, capabilities };
+          revision: null, identity, soul, readable: true, groupTools: capabilities.groupTools, capabilities, agentMissing: false };
         source.identity = identity.text; source.soul = soul.text; source.readable = identity.available && soul.available;
         source.soulReadable = soul.available;
       } catch { /* 后端未连接或 Agent 不存在：离线 */ }
@@ -312,24 +321,28 @@ class GroupMemberDirectory {
     if (this.refreshGenerations.get(groupId) !== generation || this.store.groupLifecycle(groupId) !== "active") return { groupId, changed: false };
     for (const [index, member] of active.entries()) {
       const source = sources[index];
+      const prior = cards.get(member.id);
+      const withPresence = card => {
+        if (source.agentMissing ?? prior?.agentMissing) card.agentMissing = true;
+        else delete card.agentMissing;
+        return card;
+      };
       // 外部后端暂时读不到时沿用上一张卡的内容，只把可用状态标为离线。
-      if (!source.readable && cards.get(member.id) && !member.profileId
-        && cards.get(member.id).disclosurePolicyRevision === this.disclosurePolicyRevision) {
+      if (!source.readable && prior && !member.profileId && prior.disclosurePolicyRevision === this.disclosurePolicyRevision) {
         updates.push({ memberId: member.id, displayName: member.displayName,
-          card: { ...cards.get(member.id), availability: source.online ? "online" : "offline", freshness: "stale",
-            groupTools: source.groupTools, capabilities: source.capabilities } });
+          card: withPresence({ ...prior, availability: source.online ? "online" : "offline", freshness: "stale",
+            groupTools: source.groupTools, capabilities: source.capabilities }) });
         continue;
       }
       if (!source.readable && !member.profileId) {
         const empty = exportRoleDocuments({ identity: null, soul: null });
-        updates.push({ memberId: member.id, displayName: member.displayName, card: { ...extractCard(empty),
+        updates.push({ memberId: member.id, displayName: member.displayName, card: withPresence({ ...extractCard(empty),
           sourceDigest: empty.sourceDigest, exportDigest: empty.exportDigest, disclosure: "verbatim", extractorVersion: EXTRACTOR_VERSION,
           roleSnapshotId: null, disclosurePolicyRevision: this.disclosurePolicyRevision, freshness: "missing",
           availability: source.online ? "online" : "offline", runtime: source.runtime, model: source.model,
-          sourceRevision: null, groupTools: source.groupTools, capabilities: source.capabilities } });
+          sourceRevision: null, groupTools: source.groupTools, capabilities: source.capabilities }) });
         continue;
       }
-      const prior = cards.get(member.id);
       const exported = exportRoleDocuments(source);
       const sourceDigest = exported.sourceDigest;
       const snapshot = this.#snapshot(groupId, member.id, source, exported);
@@ -352,7 +365,7 @@ class GroupMemberDirectory {
       updates.push({
         memberId: member.id,
         displayName: source.name || member.displayName,
-        card: {
+        card: withPresence({
           ...content,
           availability: source.online ? "online" : "offline",
           runtime: source.runtime,
@@ -360,7 +373,7 @@ class GroupMemberDirectory {
           sourceRevision: source.revision,
           groupTools: source.groupTools,
           capabilities: source.capabilities,
-        },
+        }),
       });
     }
     return this.store.applyMemberCards({ groupId, updates });

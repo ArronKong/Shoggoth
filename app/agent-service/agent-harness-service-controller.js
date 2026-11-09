@@ -539,14 +539,13 @@ class AgentHarnessServiceController {
       const items = [];
       const shared = new Map();
       for (const { profile, value, learned } of catalogs) for (const skill of [...value.items, ...learned]) {
-        // Installed packages are shared. Built-ins and learned methods retain
-        // their owning Agent so their switches and details stay scoped.
-        const sharedKey = skill.source === "user" ? JSON.stringify([skill.id, skill.version]) : null;
+        const sharedKey = skill.source === "user" || skill.globalSettingRevision !== undefined
+          ? JSON.stringify([skill.source, skill.id, skill.version]) : null;
         if (allAgents && sharedKey && shared.has(sharedKey)) {
           shared.get(sharedKey).enabled ||= skill.enabled;
           continue;
         }
-        const scoped = skill.source === "learned" || (allAgents && skill.source === "builtin");
+        const scoped = skill.source === "learned" || (allAgents && !sharedKey);
         const usageCount = skill.source === "learned" ? skill.usageCount
           : scoped ? usageAgents.get(skill.name)?.[profile.agentId] || 0 : usage.get(skill.name) || 0;
         const item = {

@@ -1146,6 +1146,24 @@ for (const version of ["0.84.4", "0.85.0", "1.2.0", "2.0.0", "next-dev"]) test(`
   }
 });
 
+for (const version of ["1.2.0", "1.5.0", "2.0.0", "nightly"]) test(`Pi protection admits ${version} with its verified RPC contract`, async () => {
+  const value = rpcFixture({ version });
+  let routes = 0;
+  const adapter = new PiRuntimeAdapter({ runtimePool: value.pool, secretGateway: { bindLocal: async () => {
+    routes++;
+    return { baseUrl: "http://127.0.0.1:9/fixture", close() {} };
+  } } });
+  try {
+    const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    const runtime = await adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+    const { session } = await runtime.sessionStart({ source: "version-contract", cwd: value.workspace,
+      model: "openai/gpt-5.6", permissionPolicy, modelSecretScope: { profileId: "pi-fixture", sessionId: "owner" } });
+    assert.equal(runtime.host.protocolProbeVerified, true);
+    assert.equal(routes, 1);
+    assert.equal(runtime.host.modelSecretEndpoints.get(session.id), "http://127.0.0.1:9/fixture");
+  } finally { await adapter.stopAll(); value.cleanup(); }
+});
+
 test("incompatible Pi protocol fails before a turn or MCP reservation", async () => {
   const value = rpcFixture({ version: "0.84.4", incompatibleState: true });
   try {

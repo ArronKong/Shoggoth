@@ -90,6 +90,7 @@ class InspirationService {
     this.dispatcher = options.dispatcher;
     this.getCoordinator = options.getCoordinator;
     this.executor = options.executor;
+    this.applyModelSelection = options.applyModelSelection;
     this.externalExecutor = options.externalExecutor || null;
     this.readinessClient = options.readinessClient || this.externalExecutor?.client || null;
     this.paths = options.paths;
@@ -197,6 +198,10 @@ class InspirationService {
     let run = this.dispatcher.getRun(execution.runId);
     if (run) return { execution, run: this.#assertRun(execution, run) };
     if (execution.sessionKey === null) {
+      const bindingId = execution.modelSelection?.bindingId;
+      if (bindingId && !this.productStore.getAgentRuntimeBinding(execution.profileId, bindingId)?.enabled) {
+        fail("INSPIRATION_MODEL_UNAVAILABLE", "所选模型暂不可用，请重新选择");
+      }
       // Reuse only this idea's explicitly bound session with the same ownership.
       const previous = this.store.executions(execution.ideaId).find((candidate) => candidate.id !== execution.id
         && candidate.createdAt < execution.createdAt && candidate.profileId === execution.profileId
@@ -205,6 +210,7 @@ class InspirationService {
         : this.chatSessionStore.createSession({
           operationId: `inspiration-${execution.id}`, profileId: execution.profileId,
           permissionMode: "full-access",
+          ...(bindingId ? { defaultBindingId: bindingId } : {}),
           workspace: execution.workspace, createdAt: execution.createdAt,
         });
       if (session.profileId !== execution.profileId || session.workspace !== execution.workspace) {
@@ -243,8 +249,13 @@ class InspirationService {
     const { execution, run } = materialized;
     if (TERMINAL.has(run.status)) return;
     this.launched.add(run.id);
-    Promise.resolve().then(() => {
+    Promise.resolve().then(async () => {
       if (!this.opened || this.generation !== generation) return;
+      if (execution.modelSelection && run.status === "queued") {
+        try { await this.applyModelSelection(execution, run.id); }
+        catch { fail("INSPIRATION_MODEL_UNAVAILABLE", "所选模型暂不可用，请重新选择"); }
+        if (!this.opened || this.generation !== generation || this.dispatcher.getRun(run.id)?.status !== "queued") return;
+      }
       const payload = { run, execution, prompt: this.buildPrompt(execution, true), recovered };
       return this.executor[recovered ? "recover" : "schedule"](payload);
     }).catch((error) => {
@@ -342,6 +353,13 @@ class InspirationService {
     const { deletedAt, ...publicIdea } = idea;
     return { ...publicIdea, body: summary ? [...idea.body.trim()].slice(0, 240).join("") : idea.body,
       status: latestExecution?.status ?? "saved", latestExecution, rounds: this.store.executionRoster(id) };
+  }
+
+  #completedReply(ideaId, runId) {
+    const execution = runId && this.store.executionForRun(runId);
+    if (execution?.ideaId !== ideaId) return null;
+    const reply = this.#executionView(execution);
+    return reply.status === "completed" ? reply : null;
   }
 
   reminderView(id) {
@@ -594,13 +612,27 @@ class InspirationService {
         }
       }
       result = { execution: this.#executionView(execution), prompt: this.buildPrompt(execution) };
-    } else if (method === "inspiration.get") result = { idea: this.view(input.id) };
+    } else if (method === "inspiration.get") {
+      const idea = this.view(input.id);
+      const acceptedExecution = idea.acceptedRunId !== idea.latestExecution?.runId
+        ? this.#completedReply(idea.id, idea.acceptedRunId) : null;
+      result = { idea, ...(acceptedExecution ? { acceptedExecution } : {}) };
+    }
     else if (method === "inspiration.media.write") result = this.store.media.write(input);
     else if (method === "inspiration.media.read") result = input.preview ? await this.store.media.readPreview(input) : this.store.media.read(input);
     else if (method === "inspiration.create") result = { idea: this.view(this.store.create(input).id) };
     else if (method === "inspiration.import") result = { idea: this.view(this.store.importArchive(input).id) };
     else if (method === "inspiration.update") result = { idea: this.view(this.store.update(input, (idea) => {
-      if (input.patch.archived === true && this.view(idea.id).status !== "completed") {
+      const { patch } = input;
+      if (Object.hasOwn(patch, "acceptedRunId")) {
+        if (idea.archivedAt !== null) fail("INSPIRATION_ARCHIVED", "请先恢复这条灵感");
+        if (patch.acceptedRunId && !this.#completedReply(idea.id, patch.acceptedRunId)) {
+          fail("INSPIRATION_REPLY_UNAVAILABLE", "只能采用这条灵感中已完成的助理回复");
+        }
+        const latest = this.store.latestExecution(idea.id);
+        if (latest && !this.#terminal(latest)) fail("INSPIRATION_BUSY", "这条灵感已有未结束的执行");
+      }
+      if (patch.archived === true && this.view(idea.id).status !== "completed") {
         fail("INSPIRATION_NOT_COMPLETED", "灵感完成后才能归档");
       }
     }).id) };

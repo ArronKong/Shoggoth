@@ -92,6 +92,78 @@ test("Backend contract, owner Registry, RPC service and read-only configuration 
   assert.equal(result.hits.length, 1); assert.equal(calls, 1);
 });
 
+test("global REST search includes public group history and opens the exact saved message", async t => {
+  const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+  const { BackendRegistry } = require("../app/core/backend-registry");
+  const { startStaticServer } = require("../app/static-server");
+  const f = createFixture(t);
+  const phrase = "饭少的日子";
+  const body = "开头".repeat(1000) + phrase + "。全文结尾";
+  const answer = insert(f, 1, body);
+  for (let seq = 2; seq <= 502; seq++) insert(f, seq, "unrelated legacy", { full: false });
+  insert(f, 503, phrase + "（用户发言）", { full: false, author: { kind: "user" } });
+  insert(f, 504, phrase + "（内部系统事件）", { full: false, author: { kind: "system" } });
+  const archived = f.store.createGroup({ operationId: "archived", name: "归档群", purpose: "", members: f.roster }).groupId;
+  insert(f, 1, phrase + "（归档群）", { groupId: archived });
+  const archivedMember = f.store.getGroup(archived).members[0];
+  f.store.ensureMemberBinding({ groupId: archived, memberId: archivedMember.id });
+  f.store.bindSession({ groupId: archived, memberId: archivedMember.id, sessionKey: "hidden-archived-session" });
+  const hiddenKey = `agent:${archivedMember.agentId}:hidden-archived-session`;
+  f.store.updateGroup({ groupId: archived, expectedMetadataRevision: f.store.getGroup(archived).group.metadataRevision,
+    patch: { status: "archived" } });
+
+  const owner = Object.create(ShoggothBackend.prototype);
+  let groupSearchUnavailable = false;
+  owner._call = (method, params) => {
+    if (method === "group.search" && groupSearchUnavailable) throw new Error("Fixture group search offline");
+    return f.service.handle(method, params);
+  };
+  const registry = new BackendRegistry();
+  registry.setInspirationOwner(owner);
+  registry.register({ id: "shoggoth", listAgents: async () => [{ id: "agent", name: "Agent" }], getAgents: () => [],
+    searchChat: async (_agentId, _query, opts) => {
+      assert.deepEqual(opts.excludeSessionKeys, [hiddenKey], "archived internal sessions are still excluded");
+      return { supported: true, results: [
+        { key: hiddenKey, snippet: phrase + "（内部会话原文）", ts: 2000 },
+        { key: "agent:agent:direct", snippet: phrase + "（单聊）", ts: 1300 },
+      ] };
+    } });
+  const server = await startStaticServer(0, { registry, homeDir: f.root, userDataRoot: f.root });
+  t.after(() => server.close());
+  const get = async (path, params) => {
+    const response = await fetch(server.url + path + "?" + new URLSearchParams(params));
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const options = { q: phrase, includeGroups: "1", limit: "2" };
+  const { search: first } = await get("/__api/chat/search", options);
+  assert.deepEqual(first.results.map(hit => hit.message?.id ?? hit.key),
+    [`search-${f.groupId}-503`, "agent:agent:direct"]);
+  assert.equal(first.results[0].groupName, "群聊验收");
+  assert.equal(first.groupSearch, "partial", "older member messages may only have an excerpt");
+  assert.equal(first.nextOffset, 2);
+  const { search: next } = await get("/__api/chat/search", { ...options, offset: String(first.nextOffset) });
+  assert.equal(next.hasMore, false);
+  assert.equal(next.results.length, 1);
+  const [hit] = next.results;
+  assert.equal(hit.kind, "group");
+  assert.equal(hit.ownerScope, f.view().ownerScope);
+  assert.equal(hit.authorName, f.roster[0].displayName);
+  assert.equal(hit.message.id, answer.id);
+  assert.match(hit.snippet, new RegExp(phrase));
+  const { page } = await get("/__api/group-chats/messages/read", {
+    id: hit.message.groupId, seq: String(hit.message.seq), digest: hit.message.fullResult.digest,
+  });
+  assert.equal(page.text, body);
+  const { search: directOnly } = await get("/__api/chat/search", { q: phrase });
+  assert.deepEqual(directOnly.results.map(hit => hit.key), ["agent:agent:direct"],
+    "the existing private-session reference search keeps its scope");
+  groupSearchUnavailable = true;
+  const { search: degraded } = await get("/__api/chat/search", options);
+  assert.deepEqual(degraded.results, directOnly.results, "a failed group search leaves the direct results available");
+  assert.equal(degraded.groupSearch, "unavailable");
+});
+
 test("search carries the authoritative quote into saved-body reads without changing raw text or digest", t => {
   const f = createFixture(t);
   const quoted = insert(f, 1, "用户的问题", { author: { kind: "user" } });

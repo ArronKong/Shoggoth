@@ -19,6 +19,7 @@ const {
   BACKEND_ID_PATTERN,
   DEFAULT_AGENT_PROFILE_ID,
   JsonlProductStore,
+  STORE_SCHEMA_VERSION,
   validateModelProvider,
 } = require("./product-store");
 const { ACTIVE_WORK_RUN_STATUSES, createWorkDispatcher } = require("./work-run");
@@ -137,6 +138,7 @@ const { MemoryProvenanceService } = require("./memory-provenance-service");
 const { MemoryCandidateStore } = require("./memory-candidate-store");
 const { MemoryCandidateService } = require("./memory-candidate-service");
 const { MemoryReviewService } = require("./memory-review-service");
+const { importGrokMemory } = require("./shoggoth-memory/grok-memory-import.cjs");
 const { CodexMemoryImportStore } = require("./codex-memory-import-store");
 const { CodexMemoryImportService } = require("./codex-memory-import-service");
 const { readCodexMemorySource } = require("./codex-memory-source");
@@ -1560,7 +1562,7 @@ function createAgentService(options) {
   let memoryProviderOwnerRpc = null, memoryProviderOwnerGeneration = null;
   const shoggothMemory = options.memoryCore !== false && !options.memoryStore && !options.memoryEngine
     ? new (require("./shoggoth-memory/service.cjs").ShoggothMemoryService)({
-      paths, definitionStore: agentDefinitionStore, transcriptStore, chatSessionStore, sharingConfig: nativeMemorySharingConfig, resolveRun: id => workDispatcher.getRun(id),
+      paths, definitionStore: agentDefinitionStore, productStore, transcriptStore, chatSessionStore, sharingConfig: nativeMemorySharingConfig, resolveRun: id => workDispatcher.getRun(id),
       initialization: options.memoryCoreInitialization ?? "fresh",
       candidateStore: memoryCandidateStore, now: options.now, randomUUID: options.randomUUID,
       remoteProviderResources: options.memoryRemoteProviderResources || { secretStore,
@@ -2189,6 +2191,26 @@ function createAgentService(options) {
     }, delayMs);
     memoryCandidateBacklogTimer.unref?.();
   };
+  // Grok's own memory is off for Shoggoth runs (GROK_MEMORY=0). What it already
+  // kept for a Grok Agent is carried over once, like OpenClaw's memory import.
+  const GROK_MEMORY_IMPORT_DELAY_MS = 60_000;
+  let grokMemoryImportTimer = null;
+  const scheduleGrokMemoryImport = () => {
+    if (!shoggothMemory || options.grokMemoryImport === false || grokMemoryImportTimer) return;
+    grokMemoryImportTimer = setTimeout(() => {
+      grokMemoryImportTimer = null;
+      if (lifecycleState !== "started") return;
+      const grokHome = process.env.GROK_HOME || path.join(os.homedir(), ".grok");
+      for (const profile of productStore.listAgentProfiles()) {
+        let runtime;
+        try { runtime = productStore.resolveAgentRuntimeProfile(profile.id).runtime; } catch { continue; }
+        if (!profile.enabled || runtime !== "grok-build") continue;
+        void importGrokMemory(shoggothMemory, profile.id, { grokHome })
+          .catch(error => console.error(`[agent-service] Grok memory import skipped: ${error?.code || "UNKNOWN"}`));
+      }
+    }, GROK_MEMORY_IMPORT_DELAY_MS);
+    grokMemoryImportTimer.unref?.();
+  };
   const CODEX_MEMORY_IMPORT_DELAY_MS = 60_000;
   const CODEX_MEMORY_IMPORT_RETRY_MS = 30 * 60_000;
   let codexMemoryImportTimer = null;
@@ -2292,13 +2314,6 @@ function createAgentService(options) {
   const handleRunTerminal = (run, payload) => {
     queueMemoryConsolidation(run, payload);
     if (shoggothMemory && run) void shoggothMemory.finishActiveMemoryRun(run, payload?.status ?? run.status).catch(() => {});
-    if (memoryReviewService && (payload?.status ?? run?.status) === "completed" && run?.source === "chat"
-      && !isNativeFederationChatRun(run) && !isGroupChatRun(run)) {
-      setImmediate(() => {
-        if (lifecycleState !== "started") return;
-        try { memoryReviewService.onTurnCompleted(run); } catch {}
-      });
-    }
     if (!shoggothMemory && payload?.status === "completed" && ["chat", "inspiration"].includes(run?.source)
       && !isNativeFederationChatRun(run)) {
       // A completed direct user conversation triggers background consolidation
@@ -2492,6 +2507,7 @@ function createAgentService(options) {
     getInspirationService: () => inspirationService,
     getProactiveSessionOrigin: sessionKey => proactiveStore.sessionOrigin(sessionKey),
     isInternalSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey),
+    onSessionCreated: session => { void shoggothMemory?.sessionCapture.onSessionCreated(session.profileId, session.id); },
     getCodexDesktopSessionOrigin: sessionKey => codexDesktopSessionController?.origin(sessionKey),
     getCronJobName: (jobId) => nativeCronStore.getJob(jobId)?.name,
     runtimePool: runtimeManager,
@@ -2569,6 +2585,8 @@ function createAgentService(options) {
   if (shoggothMemory) shoggothMemory.onLearningSourcesChanged = profileId => {
     if (learningStore.db) learningService.reconcileSources(profileId);
   };
+  // Group-chat member sessions are not direct conversations for memory capture.
+  if (shoggothMemory) shoggothMemory.sessionCapture.isInternalSession = sessionKey => groupChatStore.isInternalSessionKey(sessionKey);
   if (!memoryCandidateService && shoggothMemory) {
     memoryCandidateService = {
       list: ({ profileId }) => ({ revision: memoryStore.getRevision(profileId), items: [],
@@ -2580,12 +2598,12 @@ function createAgentService(options) {
       excludeSession: ({ profileId, sessionId }) => shoggothMemory.forgetSession(profileId, sessionId),
     };
   }
-  // The memory core replaced the legacy candidate review; direct chats get a
-  // periodic background review instead (Hermes memory nudge).
+  // The memory core replaced the legacy candidate review; direct chats get one
+  // background review per night, just before Dreaming (Hermes-style review).
   if (shoggothMemory) {
     memoryReviewService = new MemoryReviewService({ memory: shoggothMemory, recall: conversationRecallService,
       transcripts: transcriptStore, sessions: chatSessionStore, provenance: memoryProvenanceService,
-      generate: input => workRunCoordinator.generateMemoryText(input), now: options.now,
+      generate: input => workRunCoordinator.generateMemoryReviewText(input), now: options.now,
       onError: error => {
         const code = typeof error?.code === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(error.code)
           ? error.code : error?.name === "AbortError" ? "ABORTED" : "MEMORY_REVIEW_FAILED";
@@ -2594,6 +2612,7 @@ function createAgentService(options) {
           console.error(`[agent-service] memory review skipped: ${code}`);
         }
       } });
+    shoggothMemory.beforeNightlyDream = (profileId, { signal }) => memoryReviewService.reviewProfile(profileId, { signal });
   }
   if (!memoryCandidateService) {
     memoryCandidateService = new MemoryCandidateService({
@@ -2666,6 +2685,7 @@ function createAgentService(options) {
   const inspirationService = new InspirationService({
     localAttachmentProjection: true,
     store: inspirationStore, productStore, chatSessionStore, transcriptStore, paths,
+    applyModelSelection: (execution, runId) => sessionRuntimeController.selectInspirationModel(execution, runId),
     dispatcher: workDispatcher, getCoordinator: () => workRunCoordinator,
     executor: domainWorkRunExecutor, now: options.now,
     externalExecutor: new ExternalInspirationExecutor({ store: inspirationStore,
@@ -3147,6 +3167,7 @@ function createAgentService(options) {
       chatUiController,
       conversationDefinitionService: new ConversationDefinitionService({
         definitionStore: agentDefinitionStore, productStore, transcriptStore, chatSessionStore,
+        memoryDefinitionLinks: memoryEngine.definitionLinks,
         agentLifecycleService: agentLifecycleServiceController,
         getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
         onProfileRenamed: (profileId) => {
@@ -4214,7 +4235,7 @@ function createAgentService(options) {
         serviceVersion,
         startedAt,
         instanceNonce,
-        productSchemaVersion: paths.productSchemaVersion || productStore.schemaVersion || 16,
+        productSchemaVersion: paths.productSchemaVersion || productStore.schemaVersion || STORE_SCHEMA_VERSION,
         maintenanceQuiesced,
         domainAvailability: domainAvailabilitySnapshot(),
         pendingCommandsLocked: typeof pendingCommandInbox.isLocked === "function"
@@ -4480,21 +4501,23 @@ function createAgentService(options) {
         errorResponse(socket, id, code, messages[code]);
         return;
       }
-    } else if (["agent.binding.list", "agent.binding.sync", "agent.binding.add", "agent.binding.update", "agent.binding.remove",
-      "agent.binding.setDefault"].includes(request.method)) {
+    } else if (require("./agent-runtime-binding-protocol").AGENT_BINDING_METHODS.includes(request.method)) {
       try {
         if (!exactObject(request, ["id", "token", "version", "method", "params"])) {
           throw serviceError("INVALID_PARAMS", "Binding request envelope is invalid");
         }
-        result = require("./agent-runtime-binding-controller").createAgentRuntimeBindingController({
+        result = await require("./agent-runtime-binding-controller").createAgentRuntimeBindingController({
           productStore, chatSessionStore, getNativeRuntimeConfig,
           policyStore: runtimeSelectionPolicyStore,
+          selectAgentDefaultModel: profileServiceController.selectAgentDefaultModel,
+          readAccountAdmission: accountId => runtimeAccountAdmission.read(accountId),
           canGenerateCheckpoint: runtime => runtimeManager.canGenerateModelOnly?.(runtime) === true,
           onChanged: payload => eventBuffer.append("agent.profile.changed", payload),
         }).handle(request.method, request.params);
       } catch (error) {
         const { AGENT_BINDING_PUBLIC_MESSAGES: PUBLIC_MESSAGES } = require("./agent-runtime-binding-protocol");
-        const code = Object.hasOwn(PUBLIC_MESSAGES, error?.code) ? error.code : "AGENT_BINDING_INVALID";
+        const code = Object.hasOwn(PUBLIC_MESSAGES, error?.code) ? error.code
+          : request.method === "agent.binding.setDefaultModel" ? "AGENT_DEFAULT_MODEL_UNAVAILABLE" : "AGENT_BINDING_INVALID";
         errorResponse(socket, id, code, PUBLIC_MESSAGES[code] || "Runtime Binding 操作失败");
         return;
       }
@@ -5478,6 +5501,7 @@ function createAgentService(options) {
           scheduleMemoryCandidateBacklog(15_000);
           codexMemoryImportAbortController = new AbortController();
           scheduleCodexMemoryImport(options.codexMemoryImportDelayMs ?? CODEX_MEMORY_IMPORT_DELAY_MS);
+          scheduleGrokMemoryImport();
           for (const profile of productStore.listAgentProfiles()) {
             if (profile.enabled) {
               nativeMemorySemanticService.scheduleMemory(profile.id);
@@ -5668,6 +5692,7 @@ function createAgentService(options) {
     for (const timer of memoryConsolidationTimers.values()) clearTimeout(timer);
     memoryConsolidationTimers.clear();
     if (codexMemoryImportTimer) clearTimeout(codexMemoryImportTimer);
+    if (grokMemoryImportTimer) { clearTimeout(grokMemoryImportTimer); grokMemoryImportTimer = null; }
     codexMemoryImportTimer = null;
     codexMemoryImportAbortController?.abort();
     codexMemoryImportAbortController = null;

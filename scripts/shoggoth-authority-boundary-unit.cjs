@@ -25,7 +25,7 @@ const {
   RUNTIME_SWITCH_FIELDS,
   CHAT_SESSION_STORE_VERSION,
 } = require(path.join(ROOT, "app", "agent-service", "chat-session-store.js"));
-const { BINDING_FIELDS: AGENT_BINDING_FIELDS, PROJECTED_RUNTIME_FIELDS } = require(
+const { BINDING_FIELDS: AGENT_BINDING_FIELDS, BINDING_OPTIONAL_FIELDS, PROJECTED_RUNTIME_FIELDS } = require(
   path.join(ROOT, "app", "agent-service", "agent-runtime-binding.js"),
 );
 const { RECORD_FIELDS, STORE_VERSION: USAGE_STORE_VERSION } = require(
@@ -115,7 +115,7 @@ test("Product、ChatSession、Usage 的必需及可选字段和权威清单逐�
   const actual = {
     RuntimeAccount: [...RUNTIME_ACCOUNT_FIELDS, ...RUNTIME_ACCOUNT_SCHEMA.optionalFields],
     AgentProfile: BINDING_AGENT_PROFILE_FIELDS,
-    AgentRuntimeBinding: AGENT_BINDING_FIELDS,
+    AgentRuntimeBinding: [...AGENT_BINDING_FIELDS, ...BINDING_OPTIONAL_FIELDS],
     AgentProfileRuntimeProjection: PROJECTED_RUNTIME_FIELDS,
     ModelProvider: [...MODEL_PROVIDER_FIELDS, "models", "revision"],
     WorkRun: WORK_RUN_FIELDS,

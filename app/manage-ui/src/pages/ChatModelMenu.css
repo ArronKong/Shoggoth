@@ -53,7 +53,7 @@
 .chat-pill__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-model-menu { position: relative; display: inline-flex; min-width: 0; }
 
-/* Model and connector menus share one surface, including theme variables. */
+/* Composer menus share one surface, including theme variables. */
 .chat-composer-menu-surface {
   --model-menu-ink: light-dark(#000, #fff);
   --model-menu-selected-text: light-dark(#fff, #171717);
@@ -63,7 +63,8 @@
 }
 .model-menu.chat-composer-menu-surface,
 .chat-connector-menu.chat-composer-menu-surface,
-.chat-plugin-menu.chat-composer-menu-surface {
+.chat-plugin-menu.chat-composer-menu-surface,
+.chat-mention-menu.chat-composer-menu-surface {
   width: min(424px, 84vw);
   height: min(84vh, 440px);
   padding: 24px;
@@ -76,7 +77,7 @@
   box-shadow: 0 25px 50px -12px light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.4));
 }
 
-/* Figma 336:1089. Keep the session-history menu's legacy layout separate. */
+/* Shared layout for the model catalog and session history (Figma 336:1089). */
 .model-menu.model-menu--catalog {
   position: absolute;
   left: 0;
@@ -90,6 +91,12 @@
 }
 
 .model-menu--catalog.model-menu--portal { bottom: auto; }
+.model-menu--catalog.session-menu {
+  top: calc(100% + 8px);
+  bottom: auto;
+  right: auto;
+  max-width: calc(100vw - 64px);
+}
 .model-menu--catalog .model-menu__head {
   display: flex;
   flex-direction: column;
@@ -132,13 +139,6 @@
   border-color: var(--model-menu-ink);
   background: transparent;
 }
-/* Session history reuses the legacy search class outside this catalog. */
-.model-menu:not(.model-menu--catalog) .model-menu__search:focus,
-:root[data-theme="dark"] .model-menu:not(.model-menu--catalog) .model-menu__search:focus {
-  outline: none;
-  box-shadow: none;
-  background: color-mix(in srgb, var(--bg-hover, var(--ui-surface-2)) 90%, var(--ui-text-1) 10%);
-}
 
 .model-menu--catalog .model-menu__tabs {
   --ft-color: var(--model-menu-text);
@@ -150,7 +150,7 @@
   gap: 0;
 }
 
-.model-menu--catalog .model-menu__list {
+:is(.model-menu--catalog, .chat-mention-menu) .model-menu__list {
   min-height: 0;
   overflow: hidden auto;
   display: flex;
@@ -202,7 +202,7 @@
   text-transform: none;
 }
 
-.model-menu--catalog .model-menu__item {
+:is(.model-menu--catalog, .chat-mention-menu) .model-menu__item {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
@@ -223,21 +223,21 @@
   cursor: pointer;
 }
 
-.model-menu--catalog .model-menu__item:hover:not(:disabled) {
+:is(.model-menu--catalog, .chat-mention-menu) .model-menu__item:hover:not(:disabled) {
   background: var(--model-menu-hover);
   color: var(--model-menu-text);
 }
-.model-menu--catalog .model-menu__item.is-active,
-.model-menu--catalog .model-menu__item.is-active:hover:not(:disabled) {
+:is(.model-menu--catalog, .chat-mention-menu) .model-menu__item.is-active,
+:is(.model-menu--catalog, .chat-mention-menu) .model-menu__item.is-active:hover:not(:disabled) {
   background: var(--model-menu-ink);
   color: var(--model-menu-selected-text);
 }
-.model-menu--catalog .model-menu__item:focus-visible {
+:is(.model-menu--catalog, .chat-mention-menu) .model-menu__item:focus-visible {
   outline: 2px solid var(--ui-focus);
   outline-offset: -2px;
 }
 .model-menu--catalog .model-menu__item:disabled { opacity: 0.5; cursor: not-allowed; }
-.model-menu--catalog .model-menu__name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(.model-menu--catalog, .chat-mention-menu) .model-menu__name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-menu--catalog .model-menu__tag {
   flex: 0 0 auto;
   font-size: 10px;
@@ -254,10 +254,17 @@
   color: inherit;
   background: color-mix(in srgb, currentColor 12%, transparent);
 }
-.model-menu--catalog .model-menu__empty { padding: 12px; color: var(--model-menu-muted); text-align: center; font-size: 13px; }
+.model-menu--catalog .model-menu__empty {
+  /* The fusion filter needs opaque balls even when the label uses muted text. */
+  --fusion-loader-color: var(--model-menu-text);
+  padding: 12px;
+  color: var(--model-menu-muted);
+  text-align: center;
+  font-size: 13px;
+}
 
 @media (max-width: 720px) {
-  .model-menu.model-menu--catalog:not(.model-menu--portal),
+  .model-menu.model-menu--catalog:not(.model-menu--portal, .session-menu),
   .chat-connector-menu.chat-composer-menu-surface,
   .chat-plugin-menu.chat-composer-menu-surface {
     position: fixed;

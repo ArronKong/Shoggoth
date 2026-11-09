@@ -210,14 +210,12 @@ export default function SkillsPage() {
     const target = loadMoreRef.current;
     if (!target || !hasMore || loading || error || typeof IntersectionObserver === "undefined") return;
     let requested = false;
-    // The viewport observer also respects both scroll containers: the grid on
-    // desktop and the whole page in narrow windows.
     const observer = new IntersectionObserver(entries => {
       if (requested || !entries.some(entry => entry.isIntersecting)) return;
       requested = true;
       observer.disconnect();
       setPage(value => value + 1);
-    }, { rootMargin: "200px 0px" });
+    }, { root: skillMainRef.current, rootMargin: "200px 0px" });
     observer.observe(target);
     return () => { requested = true; observer.disconnect(); };
   }, [hasMore, loading, error, visibleSkills.length, backend]);
@@ -232,6 +230,7 @@ export default function SkillsPage() {
   useEffect(() => { detailSnapshot.current = selected; }, [selected]);
   const learnedSelection = useMemo(() => selected?.source === "learned" && selected.id && selected.contentHash
     ? { id: selected.id, versionHash: selected.contentHash } : null, [selected]);
+  const selectedUsesGlobalSetting = selected?.globalSettingRevision !== undefined;
   const previewKey = isNativeSkills && selected && selected.source !== "learned"
     ? skillIdentity(selected) : null;
   const skillDocument = useMemo(() => splitSkillDocument(preview?.key === previewKey ? preview.content : ""), [preview, previewKey]);
@@ -275,8 +274,8 @@ export default function SkillsPage() {
         id: s.id,
         source: s.source,
         version: s.version,
-        expectedRevision: isNativeSkills && s.source === "user"
-          ? s.registryVersion : s.profileRevision,
+        expectedRevision: s.globalSettingRevision ?? (isNativeSkills && s.source === "user"
+          ? s.registryVersion : s.profileRevision),
       }, s.agentId);
       toast.success(
         enabled
@@ -373,7 +372,7 @@ export default function SkillsPage() {
   };
 
   return (
-    <div className="page management-page skills-page">
+    <div className="page management-page management-page--scroll-card skills-page">
       <PageHead
         title={t("skills.pageTitle")}
         subtitle={subtitle}
@@ -383,18 +382,17 @@ export default function SkillsPage() {
           setBackend(value); setPage(0); setSelectedIdentity(null); }} surface="skills" />
       </div>
 
-      {error && <div className="error">{t("skills.errorPrefix", { msg: error })}
-        {isNativeSkills && <button className="btn-secondary" onClick={() => setNativeRetry(value => value + 1)}>
-          {t("skills.retryLoad")}
-        </button>}
-      </div>}
-      {!loading && !error && totalCount === 0 && (
-        <p className="muted">{t("skills.empty")}</p>
-      )}
-
       {/* 详情独立弹出，卡片网格保持原来的列数和滚动位置。 */}
       <div className="skill-body">
-        <div className="skill-main-content" ref={skillMainRef}>
+        <div className="skill-main-content management-page__scroll-card" ref={skillMainRef}>
+          {error && <div className="error">{t("skills.errorPrefix", { msg: error })}
+            {isNativeSkills && <button className="btn-secondary" onClick={() => setNativeRetry(value => value + 1)}>
+              {t("skills.retryLoad")}
+            </button>}
+          </div>}
+          {!loading && !error && totalCount === 0 && (
+            <p className="muted">{t("skills.empty")}</p>
+          )}
           {visibleSkills.length > 0 && (
             <div className="skill-grid">
               {visibleSkills.map((s) => {
@@ -413,10 +411,6 @@ export default function SkillsPage() {
                     />
                     <div className="skill-card-top">
                       <span className="skill-name">{s.title || s.name}</span>
-                    </div>
-                    {/* 开关放介绍右下角，名称独占标题行。 */}
-                    <div className="skill-card-foot">
-                      <div className="skill-desc">{s.description || ""}</div>
                       <span className="skill-card-switch">
                         <Switch
                           checked={s.enabled}
@@ -426,6 +420,7 @@ export default function SkillsPage() {
                         />
                       </span>
                     </div>
+                    <div className="skill-desc">{s.description || ""}</div>
                   </article>
                 );
               })}
@@ -474,9 +469,11 @@ export default function SkillsPage() {
               <div className={styles.inspectorBody}>
                 <span className="skill-detail-meta">
                   {backendName}
-                  {isNativeSkills && selected.source !== "user" && selected.agentName !== backendName ? ` · ${selected.agentName || selected.agentId}` : ""}
+                  {isNativeSkills && selected.source !== "user" && !selectedUsesGlobalSetting
+                    && selected.agentName !== backendName ? ` · ${selected.agentName || selected.agentId}` : ""}
                   {selected.version ? ` · v${selected.version}` : ""}
-                  {isNativeSkills && selected.globalEnabled ? ` · ${t("skills.globalScope")}` : ""}
+                  {isNativeSkills && (selected.globalEnabled || selectedUsesGlobalSetting)
+                    ? ` · ${t("skills.globalScope")}` : ""}
                   {selected.category ? ` · ${selected.category}` : ""}
                 </span>
                 {isNativeSkills && selected.description && skillDocument.body && (

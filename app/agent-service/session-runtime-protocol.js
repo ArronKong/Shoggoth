@@ -85,4 +85,4 @@ function validateSessionRuntimeResult(value, params) {
 }
 
 module.exports = { SESSION_RUNTIME_METHODS, SESSION_RUNTIME_PUBLIC_MESSAGES, validateSessionRuntimeParams,
-  validateSessionRuntimeResult };
+  validateSessionRuntimeResult, validModelProviderSelection: providerSelection };

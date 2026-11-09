@@ -49,6 +49,9 @@ const stripMdMarks = (s: string): string => s.replace(/[*_`#]{1,}/g, "").replace
 const entryOrder = (a: DashboardActivityEntry, b: DashboardActivityEntry): number =>
   a.occurredAt !== b.occurredAt ? b.occurredAt - a.occurredAt : a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
 
+const activityKey = (entry: DashboardActivityEntry): string =>
+  entry.kind === "inspiration" && entry.inspiration.ideaId ? `idea:${entry.inspiration.ideaId}` : entry.id;
+
 function mergeEntries(base: DashboardActivityEntry[], incoming: DashboardActivityEntry[]): DashboardActivityEntry[] {
   const entries = [...base, ...incoming];
   const aliasExecutions = new Map<string, Set<string>>();
@@ -66,7 +69,7 @@ function mergeEntries(base: DashboardActivityEntry[], incoming: DashboardActivit
       aliasExecutions.set(scope, identities);
     }
   }
-  const byId = new Map<string, DashboardActivityEntry>();
+  const byKey = new Map<string, DashboardActivityEntry>();
   for (const e of entries) {
     // Older servers and persisted caches include startedAt in the activity id.
     // Reconcile those rows by execution identity, never by title or result text.
@@ -77,19 +80,22 @@ function mergeEntries(base: DashboardActivityEntry[], incoming: DashboardActivit
       if (identities) runId = identities.size === 1 ? [...identities][0] : runId || (identities.size === 0 ? alias : undefined);
     }
     const key = e.kind === "cron" && runId
-      ? executionScope(e, runId) : e.id;
+      ? executionScope(e, runId) : activityKey(e);
     // Retain proven identities and aliases across a downgrade, so subsequent
     // partial refreshes cannot split this row again.
-    const previous = byId.get(key);
+    const previous = byKey.get(key);
     if (e.kind === "cron" && runId) {
       const aliases = [...new Set([
         ...(previous?.kind === "cron" && Array.isArray(previous.run.runIdAliases) ? previous.run.runIdAliases : []),
         ...(Array.isArray(e.run.runIdAliases) ? e.run.runIdAliases : []),
       ])].filter(alias => typeof alias === "string" && alias);
-      byId.set(key, { ...e, run: { ...e.run, runId, ...(aliases.length ? { runIdAliases: aliases } : {}) } });
-    } else byId.set(key, e);
+      byKey.set(key, { ...e, run: { ...e.run, runId, ...(aliases.length ? { runIdAliases: aliases } : {}) } });
+    } else if (e.kind !== "inspiration" || !previous || entryOrder(e, previous) <= 0) {
+      // An older page must not replace the latest activity for this note.
+      byKey.set(key, e);
+    }
   }
-  return [...byId.values()].sort(entryOrder);
+  return [...byKey.values()].sort(entryOrder);
 }
 
 function mergeFirstPage(base: DashboardActivityEntry[], page?: DashboardActivityPage): DashboardActivityEntry[] {
@@ -336,7 +342,7 @@ export default function ActivityFeed({
         ) : (
           <div className="dash-feed">
             {visibleEntries.map((e) => (
-              <button key={e.id} className="dash-run" onClick={() => onRowClick(e)}>
+              <button key={activityKey(e)} className="dash-run" onClick={() => onRowClick(e)}>
                 {/* 无 agent 的行：用后端 id 当占位头像。 */}
                 <ActivityAgentAvatar
                   agentId={e.agentId || e.backendId}

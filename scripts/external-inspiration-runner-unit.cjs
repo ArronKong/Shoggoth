@@ -58,9 +58,14 @@ function attention(runId, requestId = "request-1", secret = false) {
 for (const backendId of ["openclaw", "hermes"]) {
   test(`${backendId}: preparation and repeated start preserve one execution`, async () => {
     const f = fixture(backendId);
-    const [a, b] = await Promise.all([f.runner.prepare(f.prepare), f.runner.prepare(f.prepare)]);
+    const modelSelection = { model: "fixture-model", provider: "fixture-provider" };
+    const input = { ...f.prepare, modelSelection };
+    await assert.rejects(f.runner.prepare({ ...input, sessionKey: f.binding.sessionKey }), { code: "INVALID_PARAMS" });
+    const [a, b] = await Promise.all([f.runner.prepare(input), f.runner.prepare(input)]);
     assert.deepEqual(a, b);
-    await assert.rejects(f.runner.prepare({ ...f.prepare, agentId: "another" }), { code: "INSPIRATION_OPERATION_CONFLICT" });
+    await assert.rejects(f.runner.prepare({ ...input, modelSelection: { ...modelSelection, model: "another" } }),
+      { code: "INSPIRATION_OPERATION_CONFLICT" });
+    assert.deepEqual(f.calls[0][1].modelSelection, modelSelection);
     await Promise.all([f.runner.start(f.start), f.runner.start(f.start)]);
     await tick();
     await f.runner.start(f.start);

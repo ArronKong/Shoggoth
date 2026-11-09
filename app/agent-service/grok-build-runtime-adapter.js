@@ -89,7 +89,7 @@ class GrokBuildRuntimeAdapter {
     }
     this.runtimePool = options.runtimePool;
     this.modelOnly = true;
-    this.modelOnlyPurposes = Object.freeze(["proactive"]);
+    this.modelOnlyPurposes = Object.freeze(["proactive", "memory_review"]);
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }

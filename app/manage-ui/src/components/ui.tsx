@@ -27,6 +27,7 @@ interface ConfirmOpts {
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  confirmVariant?: "dark";
 }
 
 // 带输入框的确认框（= window.prompt 的应用内版本）。取消返回 null；
@@ -264,7 +265,7 @@ function UiInner({ children }: { children: ReactNode }) {
               </button>
               <button
                 ref={confirmBtnRef}
-                className={`${confirmState?.danger ? "btn-danger" : "btn-primary"} btn-md`}
+                className={`btn-${confirmState?.confirmVariant ?? (confirmState?.danger ? "danger" : "primary")} btn-md`}
                 onClick={() => closeConfirm(confirmState?.requestId, true)}
               >
                 {confirmState?.confirmLabel || t("common.ok")}

@@ -111,7 +111,8 @@ async function main() {
     const before = requests.length; runtime.host.modelSecretScope = null;
     await turn(session.id, "No model call without a live owner.", true);
     assert.equal(requests.length, before); verified = true;
-    console.log(JSON.stringify({ verified, silentOriginalFallbackOnce: true, version: "1.0.73", modelRequests: requests.length, nativeExecutions: 1, title: true,
+    console.log(JSON.stringify({ verified, silentOriginalFallbackOnce: true, version: runtime.host.initializedResponse._meta?.agentVersion,
+      modelRequests: requests.length, nativeExecutions: 1, title: true,
       restartResume: true, immutableScope: true, failureProviderCalls: 0, evidence: root }));
   } finally {
     fs.writeFileSync(path.join(root, "synthetic-model-requests.json"), JSON.stringify(requests, null, 2), { mode: 0o600 });

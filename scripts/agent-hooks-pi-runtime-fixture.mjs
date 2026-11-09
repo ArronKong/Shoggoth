@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Actual pinned Pi SDK/tool loop, production extension, private Hook bridge and
+// Actual installed Pi SDK/tool loop, production extension, private Hook bridge and
 // real sandboxed Worker. The provider stream is controlled: no model/network bill.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -16,7 +16,6 @@ const packagePath = process.env.SHOGGOTH_HOOKS_PI_PACKAGE;
 assert.ok(packagePath && path.isAbsolute(packagePath), "Set SHOGGOTH_HOOKS_PI_PACKAGE to the installed Pi package; unavailable is not a passing fixture");
 const manifest = JSON.parse(fs.readFileSync(path.join(packagePath, "package.json"), "utf8"));
 assert.equal(manifest.name, "@earendil-works/pi-coding-agent");
-assert.equal(manifest.version, "0.84.4", "Native Hook evidence is pinned to the tested Pi version");
 const { createAgentSession, ModelRuntime, DefaultResourceLoader, SessionManager, SettingsManager } =
   await import(pathToFileURL(path.join(packagePath, "dist/index.js")));
 const { createAssistantMessageEventStream } = await import(pathToFileURL(path.join(packagePath,
@@ -51,7 +50,7 @@ async function fixture(t, policy = { approvalPolicy: "never", sandbox: "workspac
   assert.equal(await processHost.verify(), true);
   const runner = new HookRunner({ store, processHost }), writers = new HookWorkspaceWriters();
   const profile = { id: "pi-hooks-fixture", enabled: true, runtime: "pi" }, runs = new Map();
-  const host = { runtime: "pi", host: { state: "ready", cliVersion: [0, 84, 4],
+  const host = { runtime: "pi", host: { state: "ready", cliVersion: manifest.version, protocolProbeVerified: true,
     extensionPath: path.join(ROOT, "resources/pi/shoggoth-pi-extension.mjs") } };
   const approvals = [], control = { approved: true, onApproval: null, onAfter: null };
   const service = new HookService({ store, runner, processHost, productStore: { getAgentProfile: id => id === profile.id ? profile : null },

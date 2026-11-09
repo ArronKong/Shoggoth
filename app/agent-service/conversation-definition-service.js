@@ -20,7 +20,7 @@ function patchDocument(content, oldText, newText) {
 }
 
 class ConversationDefinitionService {
-  constructor({ definitionStore, productStore, agentLifecycleService, transcriptStore, chatSessionStore, getRunSessionKey, onProfileRenamed }) {
+  constructor({ definitionStore, productStore, agentLifecycleService, transcriptStore, chatSessionStore, getRunSessionKey, onProfileRenamed, memoryDefinitionLinks }) {
     this.definitions = definitionStore;
     this.products = productStore;
     this.lifecycle = agentLifecycleService;
@@ -28,6 +28,7 @@ class ConversationDefinitionService {
     this.sessions = chatSessionStore;
     this.getRunSessionKey = getRunSessionKey;
     this.onProfileRenamed = onProfileRenamed || (() => {});
+    this.memoryDefinitionLinks = memoryDefinitionLinks;
   }
   bind(name, args, run) {
     const source = bindConversationSource({ args, run, transcriptStore: this.transcripts, chatSessionStore: this.sessions,
@@ -78,6 +79,7 @@ class ConversationDefinitionService {
   async update(profileId, args, call) {
     const reason = `conversation-definition:${call.operationId}`;
     const binding = call.binding;
+    await this.memoryDefinitionLinks?.prepare(profileId, args, call);
     let current = this.definitions.get(profileId);
     const applied = current.manifest.revision > args.expectedRevision
       ? this.definitions.readRevision(profileId, args.expectedRevision + 1) : null;

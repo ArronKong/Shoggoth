@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import { PageHead } from "../components/PageHead";
+import { SkeletonShape } from "../components/Skeleton";
 import type {
   CustomModelProvider,
   ModelAuthProfile,
@@ -44,6 +45,7 @@ import Modal, { DetailRow, ModalSection } from "../components/Modal";
 import { Field, Option, Select, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
 import KeysPanel from "./keys/KeysPanel";
+import { ProviderPaneSkeleton } from "./keys/ProviderSkeleton";
 import styles from "./ModelsPage.module.css";
 import CustomEndpointsPanel from "./models/CustomEndpointsPanel";
 import { createHermesEndpointController } from "./models/endpoint-controller";
@@ -161,14 +163,15 @@ export default function ModelsPage() {
       pending,
       authProviders: authList.supported ? [...new Set(authList.profiles.map((p) => p.provider))] : [],
     };
-  }, { staleTime: 30_000 });
+  }, { staleTime: 30_000, loadingOnEmptyRefresh: true });
+  const modelsLoading = loading && !modelsData;
   const refreshAccountsAndModels = () => {
     setAccountRefreshKey((value) => value + 1);
     setProviderRecoveryRefreshKey((value) => value + 1);
     return refresh();
   };
   useRegisterPageRefresh("/models", refreshAccountsAndModels);
-  useRegisterPageLoading("/models", loading);
+  useRegisterPageLoading("/models", modelsLoading);
   const catalogError = modelsData?.catalogError ?? "";
   const models = modelsData?.models ?? [];
   const byScope: Record<string, string> = modelsData?.byScope ?? {};
@@ -1296,7 +1299,7 @@ export default function ModelsPage() {
       setEditor(null);
       setCredsOpen(false);
       // 形态（目录网格 vs 凭证层）跟着新后端的 capabilities 走：usePageCache 的 key
-      // 含 backend，切过去还没数据时 shapeReady=false，两种形态都不渲染。
+      // 含 backend，切过去还没数据时 shapeReady=false，先渲染占位。
       // 新后端不能继承旧请求的 loading 状态；旧请求 finally 也会被 epoch 拦截。
       setRemoving(false);
       setSetting(false);
@@ -1313,15 +1316,11 @@ export default function ModelsPage() {
       <PageHead
         title={t("models.pageTitle")}
         subtitle={
-          // 形态未知时只说「加载中」：这时报目录统计等于把旧形态的口径先亮出来。
-          // 配置卡片形态使用同一副标题，不再显示没有对应模型列表的目录统计。
-          !shapeReady
-            ? t("common.loading")
-            : !showModelsPane
-              ? t("models.providersSubtitle")
-              : loading && displayModels.length === 0
-                ? t("common.loading")
-                : t("models.statLine", { count: displayModels.length, providers: providerOptions.length })
+          modelsLoading
+            ? <SkeletonShape style={{ width: "12em" }} />
+            : showModelsPane
+              ? !catalogError && t("models.statLine", { count: displayModels.length, providers: providerOptions.length })
+              : shapeReady ? t("models.providersSubtitle") : undefined
         }
         actions={
           showModelsPane ? (
@@ -1363,6 +1362,7 @@ export default function ModelsPage() {
 
       {accountBackend && <ModelAccounts key={backend} backend={accountBackend} refreshKey={accountRefreshKey}
         onChanged={() => void refreshAccountsAndModels()} />}
+      {modelsLoading && !accountBackend && <ProviderPaneSkeleton />}
 
       {/* 目录写能力相关的两条横幅只对目录形态有意义（整合设置面里没有目录写入口）。 */}
       {showCatalog && capabilityReadOnlyReason && !providerManagedCatalog && (
@@ -1402,10 +1402,10 @@ export default function ModelsPage() {
       {(error || catalogError) && (
         <div className="error">{t("models.error", { msg: error || catalogError })}</div>
       )}
-      {showModelsPane && !loading && !error && displayModels.length === 0 && (
+      {showModelsPane && !error && !catalogError && displayModels.length === 0 && (
         <p className="muted">{t("models.empty")}</p>
       )}
-      {showModelsPane && !loading && !error && displayModels.length > 0 && visibleModels.length === 0 && (
+      {showModelsPane && !error && displayModels.length > 0 && visibleModels.length === 0 && (
         <div className="ui-empty">{t("models.noMatch")}</div>
       )}
 
@@ -1456,7 +1456,7 @@ export default function ModelsPage() {
         </div>
       )}
 
-      {showModelsPane && !loading &&
+      {showModelsPane &&
         groups.map(([provider, list]) => (
           <div key={provider} className="model-group">
             {/* 分组头走全站统一的 .ui-secthead：18/24·500 + 计数 chip，不再用 hairline 下划线分隔。 */}

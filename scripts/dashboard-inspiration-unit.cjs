@@ -62,6 +62,23 @@ test("Inspiration status updates preserve row identity and map severity", () => 
   assert.deepEqual(buildActivityPage([row], { kind: "cron" }).items, []);
 });
 
+test("Dashboard pages show only the latest activity per note, across Agents and backends", () => {
+  const older = inspirationExecutionToActivity({ ...execution("older"), finishedAt: 150 });
+  const latest = inspirationExecutionToActivity({ ...execution("latest", "hermes"),
+    agentId: "another-agent", createdAt: 200, finishedAt: 300 });
+  const sameTitle = inspirationExecutionToActivity({ ...execution("different-note"),
+    ideaId: "different-idea", createdAt: 250 });
+  const entries = [older, sameTitle, latest];
+  const first = buildActivityPage(entries, { kind: "inspiration", limit: 1 });
+  assert.deepEqual(first.items, [latest]);
+  assert.equal(first.hasMore, true);
+  const second = buildActivityPage(entries, { kind: "inspiration", limit: 1, cursor: first.nextCursor });
+  assert.deepEqual(second.items, [sameTitle], "Same title is not the same note");
+  assert.equal(second.hasMore, false, "An older round must not reappear on a later page");
+  assert.deepEqual(buildActivityPage(entries, { backend: "native" }).items, [sameTitle],
+    "Filtering by an older round's backend must not bring that round back");
+});
+
 test("Dashboard queries the shared owner once, filters disconnected backends and isolates failures", async () => {
   const registry = new BackendRegistry();
   const backend = id => ({ id, getAgents: () => [],

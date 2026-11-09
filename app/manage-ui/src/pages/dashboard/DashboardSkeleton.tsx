@@ -1,13 +1,9 @@
-import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
+import { SkeletonShape as Shape } from "../../components/Skeleton";
 import styles from "./DashboardSkeleton.module.css";
 
 // Dashboard owns its placeholder layout. These shapes use the same card/row CSS
 // as the page, without mounting data-fetching components or retaining content.
-function Shape({ className = "", style }: { className?: string; style?: CSSProperties }) {
-  return <span className={`${styles.shape} ${className}`} style={style} aria-hidden="true" />;
-}
-
 export function DashboardKpiValueSkeleton() {
   return <Shape className={styles.value} />;
 }

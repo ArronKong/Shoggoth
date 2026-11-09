@@ -58,7 +58,7 @@ test("Browser profile caches and process locks are excluded from authority backu
 });
 
 test("Browser settings default once; invalid or unreadable config stays disabled", t => {
-  assert.deepEqual(normalizeConfig({}).browserUse, { enabled: true, browser: "chrome", headless: false, isolated: true });
+  assert.deepEqual(normalizeConfig({}).browserUse, { enabled: true, browser: "chrome", headless: false, isolated: false });
   for (const raw of [null, true, {}, { enabled: "true", browser: "chrome", headless: false, isolated: true }]) {
     assert.equal(normalizeConfig({ browserUse: raw }).browserUse.enabled, false);
   }

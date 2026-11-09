@@ -81,7 +81,7 @@ const wait = async (predicate: () => unknown, label: string) => {
   const deadline = Date.now() + 8000;
   while (!predicate()) { if (state.fixtureError) throw Error(state.fixtureError); if (Date.now() > deadline) throw Error(`Timed out: ${label}`); await pause(15); }
 };
-const replies = () => Array.from(document.querySelectorAll(".chat-thread .is-assistant .chat-bubble"))
+const replies = () => Array.from(document.querySelectorAll(".chat-thread .is-assistant .chat-bubble:not(.is-activity-loading)"))
   .map(node => node.textContent?.replace(/●/g, "").trim()).filter(Boolean);
 const emit = async (payload: any) => { state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: key, runId: state.runId, ...payload } }); await frame(); await frame(); };
 const message = (text: string) => ({ role: "assistant", content: [{ type: "text", text }], timestamp: Date.now() });
@@ -193,7 +193,7 @@ state.runInterruptedTailFixture = async () => {
   await wait(() => !document.querySelector(".chat-stop"), "terminal receipt releases generation controls");
   await wait(() => !document.querySelector(".chat-thread .is-streaming"), "terminal receipt also retires the old bubble");
   check(replies().includes(firstText), "partial text survives without canonical history");
-  check(!document.querySelector(".chat-thread [data-chat-process] [data-live='1']"), "the interrupted process stops pulsing");
+  check(!document.querySelector(".chat-thread [data-chat-activity-preview][data-status='running']"), "the interrupted process stops pulsing");
   check(!document.querySelector(".chat-thread .chat-prompt"), "old prompts are not left actionable");
   state.runStatus = "running";
   await sendMessage("继续下一轮查询。");
@@ -202,7 +202,7 @@ state.runInterruptedTailFixture = async () => {
   check(document.querySelectorAll(".chat-thread .is-streaming").length === 1, "only the new turn has a streaming bubble");
   check(document.querySelector(".chat-stop"), "the new active turn retains its stop button");
   check(replies().filter(text => text === firstText).length === 1, "old partial text appears once");
-  check(document.querySelectorAll(".chat-thread [data-chat-process] [data-live='1']").length === 1,
+  check(document.querySelectorAll(".chat-thread [data-chat-activity-preview][data-status='running']").length === 1,
     "the current process cannot be mirrored into the old turn");
   return { backendId, missingTerminalEvent: true, unavailableHistory: true, oldBubbleRetired: true,
     partialTextPreserved: true, nextTurnHasOneBubble: true, nextTurnHasStop: true, errors: state.fixtureError || null };

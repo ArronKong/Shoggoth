@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -40,6 +40,7 @@ export default function ChatModelMenu({
   runtimeGroups,
   onSelect,
   disabled,
+  pending,
   loading,
   loadError,
   onRefresh,
@@ -47,6 +48,8 @@ export default function ChatModelMenu({
   triggerLabel,
   emptyLabel,
   portalInDialog,
+  portalTo,
+  labelledBy,
 }: {
   models: ModelMenuChoice[];
   activeModel: string;
@@ -57,6 +60,7 @@ export default function ChatModelMenu({
   /** Source of the active choice on activeBindingId (absent = the Binding's default source). */
   activeModelProviderRef?: string;
   disabled?: boolean;
+  pending?: boolean;
   loading?: boolean;
   loadError?: boolean;
   onRefresh?: () => void;
@@ -72,8 +76,13 @@ export default function ChatModelMenu({
   emptyLabel?: string;
   /** 表单位于可滚动 Modal 时，把菜单挂到 Dialog 面板，避免被 body overflow 裁掉。 */
   portalInDialog?: boolean;
+  /** A positioned ancestor outside the trigger's scrolling area. */
+  portalTo?: string;
+  /** ID of the surrounding field label. */
+  labelledBy?: string;
 }) {
   const { t } = useTranslation();
+  const triggerLabelId = useId();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   // null = 全部；否则只显示该 provider 的模型。与搜索框叠加生效。
@@ -85,7 +94,8 @@ export default function ChatModelMenu({
   const listRef = useRef<HTMLDivElement>(null);
   const [popupHost, setPopupHost] = useState<HTMLElement | null>(null);
   const [popupStyle, setPopupStyle] = useState<CSSProperties | undefined>();
-  const composerPopupStyle = useComposerPopupPosition(open && !portalInDialog, rootRef, popupRef);
+  const portalSelector = portalTo ?? (portalInDialog ? "[role=dialog]" : undefined);
+  const composerPopupStyle = useComposerPopupPosition(open && !portalSelector, rootRef, popupRef);
 
   // 打开（或菜单先开、模型后到）时把列表滚到当前选中模型（居中）——长目录里选中项
   // 多半在视口外，打开即见才对得上「查看/切换当前模型」的心智。手动算滚动量而非
@@ -138,50 +148,55 @@ export default function ChatModelMenu({
   }, [open]);
 
   // Chat keeps the popup in place and aligns it to the composer frame. Forms
-  // explicitly portal into their Dialog panel to escape the scrolling body.
+  // portal outside their scrolling body without leaving the owning panel.
   useLayoutEffect(() => {
     if (!open) {
       setPopupHost(null);
       setPopupStyle(undefined);
       return;
     }
-    if (!portalInDialog) {
+    if (!portalSelector) {
       setPopupHost(null);
       setPopupStyle(undefined);
       return;
     }
     const trigger = triggerRef.current;
-    const host = trigger?.closest<HTMLElement>("[role=dialog]");
+    const host = trigger?.closest<HTMLElement>(portalSelector);
     if (!trigger || !host) return;
     setPopupHost(host);
     const position = () => {
       const triggerRect = trigger.getBoundingClientRect();
       const hostRect = host.getBoundingClientRect();
-      const width = Math.min(424, window.innerWidth * 0.84);
       const preferredHeight = Math.min(440, window.innerHeight * 0.84);
       const viewportGap = 18;
       const popupGap = 8;
+      const boundaryLeft = Math.max(8, hostRect.left);
+      const boundaryRight = Math.min(window.innerWidth - 8, hostRect.right);
+      const width = Math.min(424, window.innerWidth * 0.84, Math.max(0, boundaryRight - boundaryLeft));
       const boundaryTop = Math.max(viewportGap, hostRect.top + viewportGap);
-      const boundaryBottom = Math.min(window.innerHeight - viewportGap, hostRect.bottom - viewportGap);
-      const spaceAbove = Math.max(0, triggerRect.top - boundaryTop - popupGap);
-      const spaceBelow = Math.max(0, boundaryBottom - triggerRect.bottom - popupGap);
+      const boundaryBottom = Math.max(boundaryTop, Math.min(window.innerHeight - viewportGap, hostRect.bottom - viewportGap));
+      const aboveEdge = Math.min(boundaryBottom, triggerRect.top - popupGap);
+      const belowEdge = Math.max(boundaryTop, triggerRect.bottom + popupGap);
+      const spaceAbove = Math.max(0, aboveEdge - boundaryTop);
+      const spaceBelow = Math.max(0, boundaryBottom - belowEdge);
       const opensUp = spaceAbove >= preferredHeight || spaceAbove > spaceBelow;
       const height = Math.min(preferredHeight, opensUp ? spaceAbove : spaceBelow);
-      const rawLeft = triggerRect.left - hostRect.left;
-      const left = Math.max(0, Math.min(rawLeft, hostRect.width - width));
-      const top = opensUp
-        ? triggerRect.top - hostRect.top - height - popupGap
-        : triggerRect.bottom - hostRect.top + popupGap;
+      const left = Math.max(boundaryLeft, Math.min(triggerRect.left, boundaryRight - width)) - hostRect.left;
+      const top = (opensUp ? aboveEdge - height : belowEdge) - hostRect.top;
       setPopupStyle({ position: "absolute", left, top, bottom: "auto", width, height, zIndex: 200 });
     };
     position();
+    const observer = new ResizeObserver(position);
+    observer.observe(host);
+    observer.observe(trigger);
     window.addEventListener("resize", position);
     document.addEventListener("scroll", position, true);
     return () => {
+      observer.disconnect();
       window.removeEventListener("resize", position);
       document.removeEventListener("scroll", position, true);
     };
-  }, [open, portalInDialog]);
+  }, [open, portalSelector]);
 
   // Preserve a known Provider identity even when its model has disappeared.
   // Bare-id compatibility is only for catalogues with no Provider identities.
@@ -239,26 +254,31 @@ export default function ChatModelMenu({
         type="button"
         className="chat-pill chat-pill--select chat-pill--icon-label chat-pill--model"
         onClick={() => {
+          if (pending) return;
           if (!open) onRefresh?.();
           setOpen(!open);
         }}
         disabled={disabled}
+        aria-disabled={pending || undefined}
+        aria-busy={pending || undefined}
+        aria-labelledby={labelledBy ? `${labelledBy} ${triggerLabelId}` : undefined}
         aria-haspopup="listbox"
         aria-expanded={open}
         title={active?.runtimeName ? `${active.runtimeName} / ${activeModel}`
           : activeProvider ? `${activeProvider} / ${activeModel}` : t("chat.switchModel")}
       >
         <span className="chat-pill__icon" aria-hidden="true"><IconModel /></span>
-        <span className="chat-pill__label">{activeLabel}</span>
+        <span className="chat-pill__label" id={labelledBy ? triggerLabelId : undefined}>{activeLabel}</span>
       </button>
       {open && (() => {
         const popup = (
         <div
           className={`model-menu model-menu--catalog chat-composer-menu-surface${popupHost ? " model-menu--portal" : ""}`}
           role="listbox"
-          aria-label={t("chat.switchModel")}
+          aria-label={labelledBy ? undefined : t("chat.switchModel")}
+          aria-labelledby={labelledBy}
           ref={popupRef}
-          style={portalInDialog ? popupStyle : composerPopupStyle}
+          style={portalSelector ? popupStyle : composerPopupStyle}
         >
           {/* 不滚动的头部：搜索框 + provider 筛选 Tab。占 grid 第一行(auto)，
               列表始终落在第二行(1fr)滚动——单一滚动条不受 Tab 有无影响。 */}
@@ -339,7 +359,10 @@ export default function ChatModelMenu({
                       onClick={() => {
                         if (m.bindingId) onSelect(m.id, m.provider, m.bindingId, m.modelProviderRef);
                         else onSelect(m.id, m.provider);
-                        if (!multi) setOpen(false); // 多选:留着菜单继续挑
+                        if (!multi) {
+                          setOpen(false); // 多选:留着菜单继续挑
+                          if (portalTo) triggerRef.current?.focus({ preventScroll: true });
+                        }
                       }}
                       title={m.id}
                     >

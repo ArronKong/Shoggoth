@@ -396,7 +396,7 @@ async function compileClient() {
     check("首启列表变成什么都没有时（持续一段时间）回到「没找到」页",
       /outcome !== "setup"[\s\S]{0,160}setTimeout\([\s\S]{0,120}if \(phase === "found"\) setPhase\("setup"\)[\s\S]{0,40}NOTHING_LEFT_MS/.test(setup));
     check("首启识别中视频静音循环播放", /<video[^>]*\bloop\b[^>]*\bmuted\b[^>]*\bplaysInline\b/.test(setup.replace(/\s+/g, " ")));
-    check("首启自定义配置不挂模型来源表单，设置页 / Agent 页的模型配置表单不受影响",
+    check("首启自定义配置不挂旧的模型来源表单",
       !/ShoggothProviderSetup/.test(setup) && !/onboarding/.test(providerSetup));
     check("首启自定义配置走自定义端点通道：填 URL 自动拉取模型，多选全部存进端点，第一个选中的绑定为默认",
       /validateCustomEndpoint\("shoggoth"/.test(setup)
@@ -448,13 +448,14 @@ async function compileClient() {
     "后台自动启动失败只记录固定诊断且返回 null",
     /const reportBackgroundStartupFailure = \(\) => \{\s*console\.error\(["']\[shoggoth\] background service auto-start unavailable["']\);\s*return null;\s*\};/.test(uiEntry),
   );
-  check("账号与模型迁出后设置只管理后台状态，助理页加载 Provider", !/getShoggothProviders|setShoggothProviders|RuntimeAccountsPanel/.test(settings)
-    && /getShoggothProviders/.test(agents));
+  check("设置只管理后台状态；助理概览不加载旧来源表单", !/getShoggothProviders|setShoggothProviders|RuntimeAccountsPanel/.test(settings)
+    && !/getShoggothProviders/.test(agents));
   check("后台动作返回失败后仍回读权威状态并保留启动/重连出口", /catch[\s\S]*getShoggothProductStatus\(\)[\s\S]*setShoggothStatus/.test(backgroundAction));
   check("后台启动响应的瞬时锁定状态会有界回读并自动收敛", /SHOGGOTH_POST_START_REFRESH_DELAYS_MS/.test(settings) && /for\s*\(const delayMs of SHOGGOTH_POST_START_REFRESH_DELAYS_MS\)/.test(backgroundAction));
   check("Provider 列表失败不会遮住后台启动修复状态", !/Promise\.all\(\[getShoggothProductStatus\(\), getShoggothProviders\(\)\]\)/.test(settings));
   check("所有后端的断开按钮遵循同一描述契约", /descriptor\.disconnectable/.test(settings) && /isDisconnectable\(b\)/.test(settings));
-  check("无权威发布源的 Shoggoth 只显示当前版本而不伪造官方比较", /comparisonSupported\s*!==\s*false/.test(settings) && /showVersionComparison/.test(settings));
+  const backendOverview = fs.readFileSync(path.join(UI_ROOT, "src/pages/settings/BackendOverview.tsx"), "utf8");
+  check("无权威发布源的 Shoggoth 只显示当前版本而不伪造官方比较", /updateAvailable && version\.comparisonSupported\s*!==\s*false/.test(backendOverview));
   check("Dashboard 审批可响应并刷新持久状态", /respondBackendPrompt/.test(approvalRow) && /await onResponded\(\)/.test(approvalRow));
   check("Dashboard 能读取原生通用 Run 详情", /getBackendRunDetail/.test(runDetailHook) && /BackendRunDetail/.test(runDetailHook));
   check("Notifier 聚合原生看板且保留逐后端失败隔离", /kanbanBackends/.test(notifier) && /if \(!board\) continue/.test(notifier));
@@ -478,7 +479,9 @@ async function compileClient() {
       && /changeChatGptAccount\(["']switch["']\)/.test(providerSetup)
       && /changeChatGptAccount\(["']logout["']\)/.test(providerSetup),
   );
-  check("非默认 Agent 的 Provider 使用 Profile 专属 ID 并显式携带 profileId", /profileProviderId/.test(providerSetup) && /profileId,/.test(providerSetup) && /ShoggothProviderSetup/.test(agents) && /profileId=\{detail\.profile\}/.test(agents));
+  check("旧来源表单保留 Profile 作用域；原生 Agent 概览改用独立默认模型选择器",
+    /profileProviderId/.test(providerSetup) && /profileId,/.test(providerSetup)
+    && /<AgentDefaultModel\b/.test(agents) && !/ShoggothProviderSetup|ShoggothCustomEndpointPanel/.test(agents));
   check("Agent Provider 清除走 profile-scoped Host mutation", /clearShoggothProvider/.test(providerSetup) && /profileId,/.test(providerSetup) && /providers\/clear/.test(fs.readFileSync(path.join(UI_ROOT, "src/api/client.ts"), "utf8")));
   check("Phase11 新产品文案中英文均已接入", /shoggothService/.test(zh) && /shoggothService/.test(en) && /approvalApprove/.test(zh) && /approvalApprove/.test(en));
 }

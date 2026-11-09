@@ -8,6 +8,7 @@ const { CHAT_PERMISSION_MODES: MODES, resolveRuntimePermissionMode, adapterPermi
   require("../app/agent-service/runtime-permission-modes");
 const { CodexRuntimeAdapter } = require("../app/agent-service/codex-runtime-adapter");
 const { createSessionRuntimeController } = require("../app/agent-service/session-runtime-controller");
+const { runtimeCapabilityEvidence } = require("../app/agent-service/runtime-capability-evidence");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-unified-permissions-"));
 async function fixture(runtime, permissionMode) {
@@ -105,10 +106,20 @@ async function mustAsk(value, method, extra = {}) {
     const session = { sessionKey: "11111111-1111-4111-8111-111111111111", profileId: profile.id,
       runtimeBindingId: bindings[0].id, revision: 1, workspace: root, permissionMode: MODES.auto };
     const controller = createSessionRuntimeController({
-      productStore: { getAgentProfile: () => profile, getAgentRuntimeBindings: () => ({ bindings }) },
+      productStore: { getAgentProfile: () => profile, getAgentRuntimeBindings: () => ({ bindings }),
+        resolveAgentRuntimeProfile: (_profileId, bindingId) => {
+          const target = bindings.find(binding => binding.id === bindingId);
+          return { ...profile, runtime: target.runtime, runtimeProfileId: target.runtimeProfileId,
+            runtimeAccountId: target.runtimeAccountId };
+        } },
       chatSessionStore: { getSession: () => session, getBinding: () => null },
       coordinator: { getRuntimeContext: () => null },
-      facts: { read: async () => ({ installed: true, authenticated: true, permissionEnforcementProven: true }) },
+      facts: { read: async binding => ({ installed: true, authenticated: true, permissionEnforcementProven: true,
+        capabilityEvidence: runtimeCapabilityEvidence({ capabilities: { "session.start": true, "session.list": true,
+          "session.read": true, "turn.start": true, "turn.interrupt": true, events: true },
+        host: { controlInstance: true, permissionPolicy: profile.permissionPolicy } },
+        { runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId, runtimeAccountId: binding.runtimeAccountId },
+        binding.id) }) },
       getNativeRuntimeConfig: () => ({ flags: { runtimeConversationHandoff: true } }),
     });
     const snapshot = () => controller.handle("chat.session.runtime.get",

@@ -4,6 +4,7 @@ import { changeLarkCli, getLarkCliStatus, LARK_CLI_CHANGE_EVENT, larkCliErrorKey
 import { usePageCache } from "../lib/usePageCache";
 import McpConnectorIcon from "../components/McpConnectorIcon";
 import ConnectorTools from "../components/ConnectorTools";
+import ConnectorAddButton from "../components/ConnectorAddButton";
 import { ConnectorConnectionHeading, ConnectorFooter, ConnectorInfo } from "../components/ConnectorDetails";
 import Modal from "../components/Modal";
 import { useConfirm } from "../components/ui";
@@ -40,10 +41,11 @@ type Model = ReturnType<typeof useLarkCliConnector>;
 
 export function LarkCliRecommendation({ model, onOpen, onAdd }: { model: Model; onOpen: () => void; onAdd?: () => void }) {
   const { t } = useTranslation();
+  const name = t("larkCli.name");
   return <div className={s.service} data-lark-recommendation>
-    <button type="button" className={s.serviceOpen} onClick={onOpen}><McpConnectorIcon name={t("larkCli.name")} identity="lark-cli" />
-      <span className={s.serviceText}><strong>{t("larkCli.name")}</strong><small>{t("larkCli.description")}</small></span></button>
-    {!model.data?.canRemove && <button type="button" className="btn-secondary btn-sm" disabled={model.busy || !model.data || !!model.error} onClick={onAdd || onOpen}>{t("mcpConnectors.add")}</button>}
+    <button type="button" className={s.serviceOpen} onClick={onOpen}><McpConnectorIcon name={name} identity="lark-cli" />
+      <span className={s.serviceText}><strong>{name}</strong><small>{t("larkCli.description")}</small></span></button>
+    {!model.data?.canRemove && <ConnectorAddButton name={name} disabled={model.busy || !model.data || !!model.error} onClick={onAdd || onOpen} />}
   </div>;
 }
 

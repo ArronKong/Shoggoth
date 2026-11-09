@@ -12,6 +12,10 @@
   box-shadow: var(--ui-shadow-card);
 }
 
+:global(.models-page) .card {
+  border: 0;
+}
+
 .subBlock {
   display: flex;
   flex-direction: column;

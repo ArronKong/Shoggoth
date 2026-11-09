@@ -85,17 +85,12 @@
   font-size: 12px;
 }
 
-/* 模型卡改用原生 button 后清除按钮默认排版，同时保留键盘 focus 可见性。 */
+/* 原生按钮沿用模型卡的文字排版。 */
 :global(.model-card-button) {
   width: 100%;
   text-align: left;
   color: inherit;
   font: inherit;
-}
-
-:global(.model-card-button:focus-visible) {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
 }
 
 @media (max-width: 560px) {

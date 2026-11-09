@@ -132,8 +132,10 @@ async function fixture(t, { withdraw = false, stageFirst = false, addCount = 1, 
   if (deleteReviewed) {
     await ShoggothMemoryService.prototype.delete.call({ assertProfile: id => assert.equal(id, profileId),
       recallPolicy: engine.recallPolicy, store: fileStore, now: () => 19000,
-      // This original delete transaction fixture has no running reader to revoke.
-      sharing: { withdraw() {}, async reconcileConfig() {} } }, { profileId, id: sources[0].item.id, operationId: "actual-native-delete" });
+      // This delete transaction fixture has no running reader or definition
+      // documents. Full Service definition cleanup has its own regression.
+      sharing: { withdraw() {}, async reconcileConfig() {} }, definitionLinks: { async retract() {} } },
+    { profileId, id: sources[0].item.id, operationId: "actual-native-delete" });
   }
   if (changeReviewed) await fileStore.upsert({ ...fileStore.get(profileId, sources[0].item.id), ...changeReviewed, updatedAt: 19000 });
   if (addPending || originalAcceptedDelta) {

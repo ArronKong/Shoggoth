@@ -9,6 +9,8 @@ const { performance } = require("node:perf_hooks");
 const { test } = require("node:test");
 const { querySkillManagementCatalog } = require("../app/agent-service/skill-management-query");
 const { AgentHarnessServiceController } = require("../app/agent-service/agent-harness-service-controller");
+const { NativeSkillStore } = require("../app/agent-service/native-skill-store");
+const { resolveServicePaths } = require("../app/agent-service/paths");
 const { validateAgentHarnessParams, validateAgentHarnessResult } = require(
   "../app/agent-service/agent-harness-service-protocol");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
@@ -231,4 +233,98 @@ test("5k native Service→Backend→REST query stays bounded and revisioned", as
     assert.equal((await request({ page: "1", revision: first.body.page.queryRevision })).status, 409);
     console.log(`5k REST first page ${bytes} bytes in ${elapsed.toFixed(1)} ms, ${first.body.page.skills.length} skills`);
   } finally { await server.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the bundled Skill authoring switch is shared, persists and applies to new Agents", async () => {
+  const name = "shoggoth-skill-authoring";
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-authoring-switch-"));
+  const paths = resolveServicePaths({ userDataRoot: root, trustedRoot: root });
+  const makeProfile = suffix => ({
+    id: `profile-${suffix}`, agentId: `agent-${suffix}`, backendId: "shoggoth", enabled: true,
+  });
+  const profiles = [makeProfile("a"), makeProfile("b")];
+  const store = new NativeSkillStore({ paths,
+    builtinRoot: path.join(__dirname, "../resources/shoggoth-skills"),
+    profileExists: id => profiles.some(profile => profile.id === id) });
+  let server;
+  try {
+    const legacyPath = path.join(paths.agentsDir, profiles[0].id, "skills/manifest.json");
+    const legacy = JSON.stringify({ schemaVersion: 1, revision: 9, updatedAt: 0,
+      selections: [{ skillId: name, source: "builtin", version: "1.0.0", enabled: true }] });
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(legacyPath, legacy, { mode: 0o600 });
+    store.open(profiles.map(profile => profile.id));
+    const controller = Object.assign(Object.create(AgentHarnessServiceController.prototype), {
+      memoryEngine: { owner: "fixture" }, skillStore: store,
+      productStore: { listAgentProfiles: () => profiles,
+        getAgentProfile: id => profiles.find(profile => profile.id === id) },
+    });
+    const backend = new ShoggothBackend();
+    backend._assertDomainReady = () => {};
+    backend._profileForSkills = ({ agentId }) => profiles.find(profile => profile.agentId === agentId);
+    backend._call = async (method, input) => validateAgentHarnessResult(method,
+      controller.handle(method, validateAgentHarnessParams(method, input)), input);
+    const registry = {
+      getBackend: () => backend, _activeGet: () => backend, getSkillsPage: BackendRegistry.prototype.getSkillsPage,
+    };
+    server = await startStaticServer(0, { registry, homeDir: root, userDataRoot: root });
+    const page = async (status = "") => {
+      const response = await fetch(`${server.url}/__api/skills?backend=shoggoth&paged=1&status=${status}`);
+      assert.equal(response.status, 200);
+      return (await response.json()).page;
+    };
+    const toggle = async (skill, enabled, agentId) => {
+      const response = await fetch(`${server.url}/__api/skills?backend=shoggoth&agentId=${agentId}&name=${name}`, {
+        method: "PUT", headers: { "Content-Type": "application/json", Origin: server.url },
+        body: JSON.stringify({ id: skill.id, source: skill.source, version: skill.version,
+          enabled, expectedRevision: skill.globalSettingRevision }),
+      });
+      const body = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.equal(body.skill.enabled, enabled);
+    };
+    const assertAvailability = enabled => {
+      for (const profile of profiles) {
+        assert.equal(store.catalog(profile.id).items.some(item => item.name === name), enabled);
+        const read = () => store.read({ profileId: profile.id, name });
+        if (enabled) assert.match(read().content, /Shoggoth Skill Authoring/);
+        else assert.throws(read, { code: "SKILL_NOT_ENABLED" });
+      }
+    };
+    const initial = await page("on");
+    assert.equal(initial.enabledCount, 1);
+    assert.deepEqual(initial.skills.map(item => [item.name, item.source]), [[name, "builtin"]]);
+    assertAvailability(true);
+
+    await toggle(initial.skills[0], false, profiles[1].agentId);
+    const off = await page("off");
+    assert.deepEqual(off.skills.map(item => item.name), [name]);
+    assert.equal(off.enabledCount, 0);
+    assert.notEqual(off.queryRevision, initial.queryRevision);
+    const skill = off.skills[0];
+    const update = { id: skill.id, source: skill.source, version: skill.version, enabled: true };
+    await assert.rejects(backend.updateSkill(name, { ...update,
+      expectedRevision: initial.skills[0].globalSettingRevision }, { agentId: profiles[0].agentId }),
+    { code: "SKILL_REGISTRY_REVISION_CONFLICT" });
+    assert.throws(() => controller.handle("harness.skills.enable", {
+      profileId: profiles[0].id, skillId: skill.id, source: skill.source, version: skill.version,
+      enabled: true, expectedRevision: 9,
+    }), { code: "INVALID_PARAMS" });
+    profiles.push(makeProfile("c"));
+    assertAvailability(false);
+    store.close();
+    store.open(profiles.map(profile => profile.id));
+    assertAvailability(false);
+    assert.equal((await page("off")).skills.length, 1);
+
+    await toggle(skill, true, profiles[2].agentId);
+    profiles.push(makeProfile("d"));
+    assertAvailability(true);
+    assert.equal((await page("on")).skills.length, 1);
+    assert.equal(fs.readFileSync(legacyPath, "utf8"), legacy);
+  } finally {
+    await server?.close();
+    store.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

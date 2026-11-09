@@ -46,6 +46,6 @@ backend._call = async (method, params) => {
   assert.equal(calls[2].params.expectedRevision, 7);
   assert.equal(calls[2].params.sourcePath, "/trusted/skill-package");
   assert.throws(() => validateAgentHarnessParams("harness.skills.global.set", {
-    ...calls[0].params, source: "builtin" }), { code: "INVALID_PARAMS" });
+    ...calls[0].params, source: "learned" }), { code: "INVALID_PARAMS" });
   console.log("Shoggoth Skill Backend routes user Skill state globally: PASS");
 })().catch(error => { console.error(error); process.exitCode = 1; });

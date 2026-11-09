@@ -2302,8 +2302,11 @@ class HermesBackend extends AgentBackend {
     } catch {
       return;
     }
-    if (generation !== this._lifecycleGeneration) return;
-    const profiles = Array.isArray(parsed.profiles) ? parsed.profiles : [];
+    const profiles = parsed?.profiles;
+    if (generation !== this._lifecycleGeneration || !Array.isArray(profiles) || profiles.some(row => {
+      const name = typeof row === "string" ? row : row?.name;
+      return typeof name !== "string" || !name.trim();
+    })) return;
     this._installProfileRows(profiles);
     if (this._localRuntime.isManaged()) {
       this._localRuntime.assertDashboard(dash);
@@ -2316,6 +2319,7 @@ class HermesBackend extends AgentBackend {
         this.dashboards.delete(profile);
       }
     }
+    return true;
   }
 
   // ---- sessions ----
@@ -6645,8 +6649,17 @@ class HermesBackend extends AgentBackend {
   }
 
   async getAgent(id) {
+    let confirmed = false;
+    if (!this.profileById.has(id) && this._defaultDash() && this._getConfig().hermesMode !== "remote") {
+      // Only a fresh, successful profile list can confirm absence. A failed
+      // dashboard, a restart or an ambiguous normalized ID is not deletion.
+      confirmed = await this._refreshAgentsFor(this._defaultDash());
+    }
     const a = this.agents.find((x) => x.id === id);
     const profile = this.profileById.get(id);
+    if ((!a || !profile) && confirmed && !this.profileIdentityCollisions.some(row => row.agentId === id)) {
+      throw Object.assign(new Error(`hermes: 未找到 agent ${id}`), { code: "AGENT_NOT_FOUND" });
+    }
     if (!a || !profile) throw new Error(`hermes: 未找到 agent ${id}`);
     const dash = this._requireDashboard(this.dashboards.get(profile), "读取模型");
     const info = await this._settingsGet(dash, "/api/model/info");
@@ -7101,6 +7114,7 @@ class HermesBackend extends AgentBackend {
     return { catalog: assertModelCatalog({ models, defaultModel: info.model }), info, providers, assertCurrent };
   }
 
+  getInspirationModels(agentId) { return this.getGroupMemberModels(agentId); }
   async getGroupMemberModels(agentId) { return (await this._groupMemberModelState(agentId)).catalog; }
 
   async applyGroupSessionModel(agentId, sessionKey, selection) {
@@ -8830,7 +8844,8 @@ class HermesBackend extends AgentBackend {
     switch (type) {
       case "message.delta":
         turn.accumulated += String(payload.text ?? "");
-        hooks.delta?.(turn.accumulated);
+        hooks.delta?.(turn.accumulated, ["commentary", "final_answer"].includes(payload.phase)
+          ? { replyPhase: payload.phase } : undefined);
         break;
       case "message.interim": {
         // Interim = the server sealing the current streaming buffer as its own

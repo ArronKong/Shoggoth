@@ -47,7 +47,8 @@ export default function InspirationActivity({ ideaId, execution }: { ideaId: str
   const unrecorded = Boolean(activity && !live && !error && !steps.length && !activity.trajectory.reason);
   return <div className={styles.activity} data-inspiration-run={execution.runId}>
     {!unrecorded && <section aria-label={t('turnLab.processLabel')}>
-      {steps.length ? <TurnProcess steps={steps} live={live} defaultOpen={live} /> : <div className={styles.trajectoryEmpty}>
+      {steps.length ? <TurnProcess steps={steps} live={live} defaultOpen={live}
+        timing={{ startedAt: execution.createdAt, finishedAt: execution.finishedAt ?? undefined }} /> : <div className={styles.trajectoryEmpty}>
         <span className={styles.trajectoryLabel}><IconTrajectory />{t('turnLab.processLabel')}</span>
         <p className={styles.meta} role="status">{t(error ? 'inspiration.activityUnavailable'
           : !activity ? 'common.loading' : live && (!activity.trajectory.reason || activity.trajectory.reason === 'preparing')

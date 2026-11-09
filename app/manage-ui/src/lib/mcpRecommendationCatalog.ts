@@ -13,7 +13,7 @@ export const mcpRecommendationOrder = [
   "shopify-ucp", "sentry", "netlify", "tailscale", "lovable", "plaid", "withings", "kiwi",
   "posthog", "amplitude", "neon", "highlevel", "granola", "readwise", "raindrop", "fantastical",
   "day-one", "attio", "link-by-stripe", "tessie", "pocket", "healthex", "composio",
-  "chrome-devtools", "context7", "storybook", "filesystem", "fetch", "time", "n8n", "baidu-maps", "variflight", "stockmap", "eastmoney", "ifind", "wind", "12306", "rollinggo-hotel",
+  "chrome-devtools", "context7", "storybook", "filesystem", "fetch", "time", "n8n", "baidu-maps", "variflight", "stockmap", "eastmoney", "ifind", "wind", "rollinggo-hotel",
 ] as const;
 
 export const mcpRegistryBrands: Record<string, string> = {
@@ -44,7 +44,7 @@ export function mcpBrandId(identity: string): string {
 
 // Recommendations for apps aimed primarily at Chinese-language users.
 const chineseRecommendationIds = new Set([
-  "12306", "alipay", "amap", "baidu-maps", "didi", "eastmoney", "fliggy", "ifind",
+  "alipay", "amap", "baidu-maps", "didi", "eastmoney", "fliggy", "ifind",
   "luckin", "mcdonalds", "meituan-paotui", "mijia", "netease-music",
   "quark-drive", "rollinggo-hotel", "variflight", "weread", "wind",
 ]);
@@ -88,7 +88,7 @@ const connectorDevelopers: Record<string, string> = {
   shop: "Shopify", shopify: "Shopify", "shop-pay": "Shopify", "shopify-ucp": "Shopify",
   "uber-eats": "Uber", quickbooks: "Intuit", "blender-lab": "Blender Foundation", "chrome-devtools": "Google",
   context7: "Upstash", filesystem: "Model Context Protocol", fetch: "Model Context Protocol", time: "Model Context Protocol",
-  "12306": "Joooook", n8n: "Romuald Czlonkowski", flightaware: "Shoggoth", ticketmaster: "Shoggoth",
+  n8n: "Romuald Czlonkowski", flightaware: "Shoggoth", ticketmaster: "Shoggoth",
   amap: "高德", "baidu-maps": "百度", didi: "滴滴出行", luckin: "瑞幸咖啡", mcdonalds: "麦当劳",
   mijia: "小米", "meituan-paotui": "美团", "netease-music": "网易", weread: "腾讯", "quark-drive": "夸克",
   "rollinggo-hotel": "RollingGo", wind: "万得", variflight: "飞常准", eastmoney: "东方财富", ifind: "同花顺",

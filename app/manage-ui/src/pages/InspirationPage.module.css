@@ -36,8 +36,7 @@
 .capture textarea:focus::placeholder { opacity: .3; }
 .captureError { width: min(var(--typewriter-paper-width), 486px); margin: 18px auto 0; }
 .wall { flex: 1; padding-top: 64px; min-width: 0; }
-.row, .toolbar, .cardFoot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.row > * { min-width: 0; }
+.toolbar, .cardFoot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .toolbarAnchor { height: 1px; margin-bottom: -1px; }
 .filterGroup { display: flex; align-items: center; gap: 12px; min-width: 0; max-width: 100%; }
 .growthNoticeSlot { display: flex; flex: none; }
@@ -48,15 +47,8 @@
 .page .filterTabs { --ui-text-1: light-dark(#000, #fff); --ft-color: light-dark(#000, #fff); --ui-surface-1: light-dark(#fff, #000); flex-wrap: nowrap; flex-shrink: 0; padding: 7px; gap: 0; }
 .filterTabs [role=tab] { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; min-height: 32px; padding: 8px; }
 .filterTabs [role=tab] > span { display: flex; width: 16px; height: 16px; }
-.filterTabs [data-inspiration-drop-ready] { box-shadow: inset 0 0 0 1px var(--studio-muted); }
 .filterTabs [data-inspiration-drop-over] { box-shadow: 0 0 0 3px var(--studio-line); background: var(--studio-paper); }
 .filterIcon { width: 16px; height: 16px; }
-.wallControls .search { --search-w: 204px; min-width: 0; }
-.wallControls .search > svg { flex-shrink: 0; }
-.page .search:is(:focus, :focus-visible, :focus-within) {
-  outline: none; border-color: light-dark(#fff, #ffffff14); box-shadow: 0 8px 10px #00000005;
-}
-.page .search input:is(:focus, :focus-visible) { outline: none; box-shadow: none; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); column-gap: 32px; row-gap: 32px; align-items: start; padding: 0 0 26px; }
 .card {
   position: relative; display: flex; flex-direction: column; gap: 32px; min-width: 0; min-height: 232px; padding: 24px 24px 20px;
@@ -76,10 +68,12 @@
 .card .cardActions :is(.iconButton, .deleteButton) { color: color-mix(in srgb, var(--note-ink) 72%, transparent); }
 .card .cardActions :is(.iconButton, .deleteButton):hover:not(:disabled) { color: var(--note-ink); background: color-mix(in srgb, var(--note-ink) 7%, transparent); }
 .card .cardActions .iconButton[aria-pressed=true] { color: var(--note-ink); }
-.cardRounds { font-size: 10px; line-height: 16px; white-space: nowrap; color: var(--note-ink); opacity: .6; }
-.cardStack { display: inline-flex; min-width: 0; }
+/* Center the paper font's visible glyphs alongside the footer icons. */
+.cardRounds { display: inline-flex; align-items: center; min-height: 16px; font-size: 10px; line-height: 16px; letter-spacing: 0; white-space: nowrap; color: var(--note-ink); opacity: .6; translate: 0 2px; }
+.cardStack { display: inline-flex; align-items: center; min-width: 0; }
 .cardStackAvatar { width: 16px; height: 16px; flex: 0 0 16px; margin-left: -4px; font-size: 6.5px; box-shadow: 0 0 0 1.5px var(--note-paper); }
 .cardStackAvatar:first-child { margin-left: 0; }
+.cardStackAvatar + .cardRounds { margin-inline-start: 8px; }
 @media (hover: hover) and (pointer: fine) {
   .card:hover { transform: translateY(-3px); box-shadow: inset 1px 0 0 var(--note-edge-light), 4px 20px 28px -12px var(--studio-shadow); }
   .cardActions { opacity: 0; pointer-events: none; transition: opacity 140ms ease; }
@@ -109,7 +103,7 @@
 .card .cardFoot { margin-top: auto; border: 0; padding: 0; gap: 8px; min-height: 16px; }
 .card .cardTools { gap: 8px; margin: 0; }
 .card .cardTools:empty { display: none; }
-.cardDate { color: var(--note-ink); font-size: 12px; font-weight: 400; line-height: 16px; white-space: nowrap; }
+.cardDate { color: var(--note-ink); font-size: 12px; font-weight: 400; line-height: 16px; white-space: nowrap; translate: 0 1px; }
 .card .link { color: var(--note-ink); font-size: 10px; }
 .card .meta { font-size: 10px; }
 .iconButton { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; font-size: 23px; border: 0; background: transparent; color: var(--ui-text-2); cursor: pointer; flex: 0 0 auto; }

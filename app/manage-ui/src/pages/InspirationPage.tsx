@@ -26,7 +26,7 @@ import InspirationAutoGrowth from './InspirationAutoGrowth';
 import InspirationAgentChatter from './InspirationAgentChatter';
 import InspirationAgentDock, { type InspirationAgentDockHandle } from './InspirationAgentDock';
 import { prepareInspirationPaperFlight, type InspirationPaperFlight } from './inspiration-paper-motion';
-import { readInspirationWallPages } from './inspiration-wall-pages';
+import { readAllAgentInspirationPages, readInspirationWallPages } from './inspiration-wall-pages';
 import { beginInspirationCardDrag, type InspirationDropTarget } from './inspiration-card-drag';
 import { attachInspirationScrollStages } from './inspiration-scroll-stages';
 import { canStartInspiration, defaultInspirationAgent, inspirationStartFields } from './inspiration-execution';
@@ -163,12 +163,12 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, roster, onOpen
     </div>
     <div className={styles.cardFoot}>
       <RunStatus status={idea.status} accepted={idea.acceptedAt !== null} archived={idea.archivedAt !== null} execution={execution} />
-      {rounds > 0 && <>
-        <span className={styles.cardRounds}>{t('inspiration.thread.rounds', { count: rounds })}</span>
-        <span className={styles.cardStack}>{workers.map(value => <AgentAvatarView key={`${value.backendId}/${value.agentId}`}
+      {rounds > 0 && <span className={styles.cardStack}>
+        {workers.map(value => <AgentAvatarView key={`${value.backendId}/${value.agentId}`}
           agentId={value.agentId} name={nameOf(value)} className={styles.cardStackAvatar}
-          fallback={Array.from(nameOf(value)).slice(0, 2).join('').toUpperCase()} />)}</span>
-      </>}
+          fallback={Array.from(nameOf(value)).slice(0, 2).join('').toUpperCase()} />)}
+        <span className={styles.cardRounds}>{t('inspiration.thread.rounds', { count: rounds })}</span>
+      </span>}
       {/* The date gives way to the card's tools on hover, in the same place. */}
       <span className={styles.footEnd}>
         <time className={styles.cardDate} dateTime={new Date(idea.updatedAt).toISOString()}>
@@ -190,13 +190,12 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, roster, onOpen
 
 export function AgentInspirationPanel({ backendId, agentId }: { backendId: string; agentId: string }) {
   const { t } = useTranslation();
-  const [filter, setFilter] = useState<InspirationFilter>('all');
   const [detailId, setDetailId] = useState<string | null>(null);
-  const viewKey = JSON.stringify([backendId, agentId, filter]);
+  const viewKey = JSON.stringify([backendId, agentId]);
   const requestedPages = useRef({ key: viewKey, count: 1 });
   if (requestedPages.current.key !== viewKey) requestedPages.current = { key: viewKey, count: 1 };
   const page = usePageCache(`agent-inspirations:${viewKey}`, async () => ({
-    ...await readInspirationWallPages('', filter, requestedPages.current.count, { backendId, agentId }), viewKey,
+    ...await readAllAgentInspirationPages(requestedPages.current.count, { backendId, agentId }), viewKey,
   }));
   if (page.data?.viewKey === viewKey) requestedPages.current.count = Math.max(requestedPages.current.count, page.data.pageCount);
   const roster = usePageCache('inspiration-agents:agent-panel', getInspirationAgents);
@@ -220,16 +219,10 @@ export function AgentInspirationPanel({ backendId, agentId }: { backendId: strin
   };
   useEffect(() => { moreRequest.current = null; setLoadingMore(false); }, [viewKey]);
   return <section className={styles.agentPanel} aria-label={t('agents.tabInspiration')}>
-    <div className={styles.row}>
-      <FilterTabs value={filter} onChange={value => setFilter(value as InspirationFilter)}
-        ariaLabel={t('inspiration.filter')} items={(['all', 'archived'] as const)
-          .map(value => ({ value, label: t(`inspiration.filters.${value}`) }))} scrollable />
-      <button type="button" className="btn-subtle" onClick={() => { void refresh(); }}>{t('common.refresh')}</button>
-    </div>
     {page.loading && <p className={styles.meta} role="status">{t('common.loading')}</p>}
     {page.error && <p className={styles.error} role="alert">{page.error}</p>}
     {!page.loading && !page.error && page.data?.items.length === 0 && <p className={styles.meta}>
-      {t(filter === 'archived' ? 'agents.inspirationArchivedEmpty' : 'agents.inspirationEmpty')}
+      {t('agents.inspirationEmpty')}
     </p>}
     <div className={styles.grid}>{page.data?.items.map(idea => <IdeaCard key={idea.id} idea={idea} roster={roster.data?.agents}
       agent={roster.data?.agents.find(agent => agent.id === idea.latestExecution?.agentId && agent.backendId === idea.latestExecution?.backendId)}
@@ -520,7 +513,7 @@ export default function InspirationPage() {
           status={value === 'saved' ? 'saved' : value === 'active' ? 'running' : 'completed'} archived={value === 'archived'} /></span> }))} ariaLabel={t('inspiration.filter')} scrollable showTooltips />
       <div ref={setGrowthNoticeTarget} className={styles.growthNoticeSlot} data-inspiration-notices-slot /></div>
       <div className={styles.wallControls}>
-        <SearchCapsule className={styles.search} value={search} onChange={setSearch} placeholder={t('inspiration.search')} collapsible />
+        <SearchCapsule value={search} onChange={setSearch} placeholder={t('inspiration.search')} collapsible />
         <InspirationAutoGrowth noticeTarget={growthNoticeTarget} onOpen={openIdea} onChange={refresh} />
       </div></div>
     {page.loading && <p role="status" className={styles.meta}>{t('common.loading')}</p>}

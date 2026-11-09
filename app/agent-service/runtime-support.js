@@ -31,9 +31,11 @@ function supports({ binding, facts, requirements = {} }) {
     permission = resolveRuntimePermissionMode(binding.runtime, requirements.permissionMode ?? null,
       requirements.permissionPolicy);
   } catch { return unsupported("PERMISSION_ENFORCEMENT_UNPROVEN"); }
+  const matchesPolicy = candidate => candidate && ["approvalPolicy", "sandbox"].every(key =>
+    candidate[key] === permission.permissionPolicy[key]);
   if (facts.permissionEnforcementProven !== true
-    || (facts.capabilityEvidence?.scope.permissionPolicy && ["approvalPolicy", "sandbox"].some(key =>
-      facts.capabilityEvidence.scope.permissionPolicy[key] !== permission.permissionPolicy[key]))
+    || (facts.capabilityEvidence?.scope.permissionPolicy && !matchesPolicy(facts.capabilityEvidence.scope.permissionPolicy)
+      && !facts.capabilityEvidence.observations?.["permission.enforcement"]?.policies?.some(matchesPolicy))
     || (binding.runtime === "deepseek-harness" && permission.permissionPolicy.sandbox === "read-only")
     || (binding.runtime === "opencode" && permission.permissionPolicy.sandbox !== "danger-full-access")) {
     return unsupported("PERMISSION_ENFORCEMENT_UNPROVEN");

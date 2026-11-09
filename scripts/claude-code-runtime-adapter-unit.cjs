@@ -705,6 +705,7 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
     assert.ok(turnSpawn);
     assert.equal(turnSpawn.options.env.ANTHROPIC_API_KEY, undefined);
     assert.match(turnSpawn.options.env.CLAUDE_CONFIG_DIR, /claude-code/u);
+    assert.equal(turnSpawn.options.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1", "Claude Code auto memory stays off");
   } finally {
     await ctx.close();
   }

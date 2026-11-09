@@ -519,6 +519,27 @@
   background: transparent;
   border-color: transparent;
 }
+.chat-archive-bar.is-loading {
+  --fusion-loader-color: var(--ui-text-1);
+  font-weight: 400;
+  text-align: center;
+  pointer-events: none;
+}
+.chat-archive-bar.is-retry {
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.chat-archive-bar.is-retry:hover:not(:disabled) {
+  background: transparent;
+  color: var(--muted-strong);
+}
+.chat-archive-bar.is-retry:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
 .chat-reset-divider {
   display: flex;
   align-items: center;
@@ -954,6 +975,7 @@
   pointer-events: auto;
 }
 .chat-toast__dismiss:hover { background: var(--bg-hover); }
+.chat-toast--success { border: 0; }
 .chat-toast--pending { color: var(--muted-fg); }
 .chat-toast--error { border-color: #c0392b; color: #c0392b; }
 @keyframes chat-toast-in {
@@ -1270,6 +1292,10 @@
 .chat-cursor { color: var(--chat-text); animation: chat-blink 1s step-start infinite; }
 /* Keep the inline loader within the same line height as the first reply text. */
 .chat-bubble.is-streaming > [role="status"] { vertical-align: top; }
+.chat-bubble.is-activity-loading {
+  width: min(100%, 520px);
+  padding: 0;
+}
 /* Reserve the gap and dot beside the final grapheme. They wrap together, and
    the inline anchor's font box centers the dot on that character. */
 .chat-cursor-tail {
@@ -1502,18 +1528,6 @@
 }
 /* dark theme (driven by data-theme, was prefers-color-scheme) */
 /* dark: the legacy brain select icon is baked into a data-URI. */
-  :root[data-theme="dark"] .model-menu:not(.model-menu--catalog) {
-    background: rgba(28, 31, 38, 0.96);
-    box-shadow: 0 24px 56px -28px rgba(0, 0, 0, 0.72);
-  }
-  :root[data-theme="dark"] .model-menu:not(.model-menu--catalog) .model-menu__search {
-    background: var(--bg-elevated);
-    border-color: rgba(255, 255, 255, 0.2);
-  }
-  :root[data-theme="dark"] .model-menu:not(.model-menu--catalog) .model-menu__item:hover, :root[data-theme="dark"] .model-menu:not(.model-menu--catalog) .model-menu__item.is-active, :root[data-theme="dark"] .model-menu:not(.model-menu--catalog) .model-menu__tag, :root[data-theme="dark"] .model-menu:not(.model-menu--catalog) .model-menu__price {
-    background: rgba(255, 255, 255, 0.08);
-  }
-
   :root[data-theme="dark"] .chat-composer__bar .chat-pill--think {
     background-image:
       url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='15' height='15' viewBox='0 0 16 16' fill='none' stroke='%23e4e6eb' stroke-width='1.28' stroke-linecap='round' stroke-linejoin='round'><path d='M4.66699 9.33301C3.56243 9.33301 2.66699 10.2284 2.66699 11.333C2.66699 12.4376 3.56243 13.333 4.66699 13.333C4.90075 13.333 5.12514 13.2929 5.33366 13.2192'/><path d='M2.84226 10.4032C1.94918 9.97231 1.33301 9.05817 1.33301 8.00017C1.33301 7.19237 1.69216 6.46851 2.2595 5.97949'/><path d='M2.28035 5.92514C2.10327 5.6604 2 5.34209 2 4.99967C2 4.0792 2.74619 3.33301 3.66667 3.33301C4.04194 3.33301 4.38825 3.45703 4.66683 3.66634'/><path d='M4.82545 3.70989C4.72382 3.49444 4.66699 3.25369 4.66699 2.99967C4.66699 2.0792 5.41319 1.33301 6.33366 1.33301C7.25413 1.33301 8.00033 2.0792 8.00033 2.99967V13.333'/><path d='M5.33301 13.333C5.33301 14.0694 5.92996 14.6663 6.66634 14.6663C7.40274 14.6663 7.99967 14.0694 7.99967 13.333'/><path d='M8 4.66699C8 5.77156 8.8954 6.66699 10 6.66699'/><path d='M11.3337 9.33301C12.4383 9.33301 13.3337 10.2284 13.3337 11.333C13.3337 12.4376 12.4383 13.333 11.3337 13.333C11.0999 13.333 10.8755 13.2929 10.667 13.2192'/><path d='M13.1572 10.4032C14.0503 9.97231 14.6665 9.05817 14.6665 8.00017C14.6665 7.19237 14.3073 6.46851 13.74 5.97949'/><path d='M13.7195 5.92514C13.8965 5.6604 13.9998 5.34209 13.9998 4.99967C13.9998 4.0792 13.2536 3.33301 12.3331 3.33301C11.9579 3.33301 11.6115 3.45703 11.333 3.66634'/><path d='M8 2.99967C8 2.0792 8.7462 1.33301 9.66667 1.33301C10.5871 1.33301 11.3333 2.0792 11.3333 2.99967C11.3333 3.25369 11.2765 3.49444 11.1749 3.70989'/><path d='M10.6667 13.333C10.6667 14.0694 10.0697 14.6663 9.33333 14.6663C8.59693 14.6663 8 14.0694 8 13.333'/></svg>"),
@@ -1890,12 +1904,13 @@
   gap: 8px;
   margin: 0 0 8px;
   padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--bg-muted);
+  border-radius: 20px;
+  background-color: light-dark(#ebebeb, var(--bg-muted));
   color: var(--muted-strong);
   font-size: 12px;
 }
-.chat-quote-bar__ico { flex: 0 0 auto; color: var(--accent); }
+.chat-quote-icon { flex: none; width: 14px; height: 14px; color: var(--muted-fg); }
+.chat-quote-icon path { vector-effect: non-scaling-stroke; stroke-width: 1; }
 .chat-quote-bar__text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-quote-bar__x {
   flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 6px;
@@ -1955,7 +1970,6 @@
   cursor: pointer;
 }
 .chat-quote-ref:hover { background: var(--bg-hover); }
-.chat-quote-ref__ico { flex: 0 0 auto; color: var(--accent); }
 .chat-quote-ref__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .is-user .chat-quote-ref { align-self: flex-end; text-align: right; }
 
@@ -2163,43 +2177,25 @@
   border-style: solid;
 }
 
-/* ── 会话切换弹层（ChatSessionMenu，R266）─────────────────────────────────
-   皮肤整套复用模型菜单的 `.model-menu*`（同一种弹层语言，不再写第二份——R264 刚
-   清掉过一轮重复），这里只覆盖定位/尺寸与单行排版。
-   **必须放在文件最末**：`.model-menu` 在本文件里有两块（R264 记录的历史重复），
-   同特异性下后写的胜，写在它们前面这些覆盖会被整片吃掉。 */
+/* 会话切换器的触发器和会话专属行信息。 */
 .chat-session-menu { position: relative; min-width: 0; }
 .session-menu__unread { display: inline-block; margin-left: 8px; vertical-align: middle; }
 .chat-session-menu .chat-session-select { display: flex; align-items: center; max-width: min(320px, 100%); white-space: nowrap; overflow: hidden; }
 .session-menu__selected-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* 模型菜单从 composer 向上弹（bottom: 100%），会话菜单从 header 的会话行向下弹。
-   高度是模型菜单的两倍（420 → 840）：会话数是模型数的量级之上，一屏能扫完才不用一直滚；
-   84vh 兜住矮屏（弹层顶边在 header 下方，再高就顶出视口了）。 */
-.session-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  bottom: auto;
-  right: auto;
-  width: min(520px, 84vw);
-  height: min(84vh, 840px);
-  /* 从页面里「浮起来」：白底弹层压在同样是白的聊天页上，只靠玻璃边框几乎看不出边界。
-     这里给一层更实的底 + 两段式投影（近处收紧的接触阴影 + 远处扩散的悬浮阴影）。 */
-  background: light-dark(rgba(255, 255, 255, 0.98), rgba(28, 28, 32, 0.98));
-  box-shadow:
-    0 32px 72px -18px light-dark(rgba(15, 23, 42, 0.34), rgba(0, 0, 0, 0.66)),
-    0 10px 26px -12px light-dark(rgba(15, 23, 42, 0.2), rgba(0, 0, 0, 0.52));
-}
+/* 会话列表没有模型分组标题，给结果与筛选胶囊留出间距。 */
+.session-menu .model-menu__list { margin-top: 12px; }
 /* 类型、标题和时间保持单行、垂直居中；长标题省略。 */
 .session-menu__name { min-width: 0; }
 .session-menu__title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-menu .model-menu__item { position: relative; flex-shrink: 0; align-items: center; padding-right: 30px; }
+.model-menu.session-menu .model-menu__item { position: relative; padding-right: 30px; }
 /* 每行只预留固定红点位置，未读出现/清除时不推移时间。 */
 .session-menu .chat-agent__unread-dot { position: absolute; right: 14px; }
-.session-menu .model-menu__item.is-active { border-radius: 999px; background: #000; color: #fff; }
+.session-menu .model-menu__price {
+  background: var(--model-menu-hover);
+  line-height: 16px;
+}
 .session-menu .is-active .session-menu__kind,
-.session-menu .is-active .session-menu__writer-state,
-.session-menu .is-active .model-menu__price { color: #fff; }
-.session-menu .is-active .model-menu__price { background: transparent; }
+.session-menu .is-active .session-menu__writer-state { color: inherit; }
 /* 类型标记：不分组之后，它是「这条属于哪一类」的唯一线索。定宽让名字列对齐成一条竖线，
    扫列表时不会被长短不一的标记推得参差。 */
 .session-menu__kind {
@@ -2208,7 +2204,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--muted-fg);
+  color: var(--model-menu-muted);
   font-size: 10px;
   font-weight: 400;
   text-transform: uppercase;

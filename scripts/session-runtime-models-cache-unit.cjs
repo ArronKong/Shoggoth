@@ -8,6 +8,7 @@ const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { requestService } = require("../app/agent-service/client");
 const { DEFAULT_RUNTIME_ACCOUNTS, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
 const { createConfigStore, projectNativeRuntimeConfig } = require("../app/core/config-store");
+const { createRuntimeModelCacheStore } = require("../app/core/runtime-model-cache-store");
 
 const PI = "native-pi-default-v1";
 const HARNESS = SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID;
@@ -37,16 +38,21 @@ async function run() {
       }
       return null;
     };
-    const backend = new ShoggothBackend({ paths: f.paths, runtimeCliAuth: cli, requestService: async (paths, request, options) => {
+    const transport = async (paths, request, options) => {
       if (request.method === "profile.binding.models.list") {
         const rule = rules.get(accountOf(request.params.bindingId));
         if (rule?.delayMs) await delay(rule.delayMs);
         if (rule?.fail) throw Object.assign(new Error("fixture catalog failure"), { code: "PROFILE_MODEL_CATALOG_UNAVAILABLE" });
       }
       return requestService(paths, request, options);
-    } });
-    backend.setDisabledBackendsProvider(() => ["grok-build", "antigravity"]);
-    backend._state = "started";
+    };
+    const makeBackend = (options = {}) => {
+      const value = new ShoggothBackend({ paths: f.paths, runtimeCliAuth: cli, requestService: transport, ...options });
+      value.setDisabledBackendsProvider(() => ["grok-build", "antigravity"]);
+      value._state = "started";
+      return value;
+    };
+    const backend = makeBackend();
     const session = f.createSession();
     const sessionFor = agentId => {
       const profile = f.service.productStore.listAgentProfiles().find(entry => entry.agentId === agentId);
@@ -56,9 +62,9 @@ async function run() {
     const piAgentSession = sessionFor("shoggoth-pi");
     const openCodeAgentSession = sessionFor("shoggoth-opencode");
     await backend._refreshManagedProfiles();
-    const read = async (agentId = f.profile.agentId, sessionKey = session.sessionKey) => {
+    const read = async (agentId = f.profile.agentId, sessionKey = session.sessionKey, facade = backend) => {
       const started = Date.now();
-      const result = await backend.getSessionRuntimeModels(agentId, `agent:${agentId}:${sessionKey}`);
+      const result = await facade.getSessionRuntimeModels(agentId, `agent:${agentId}:${sessionKey}`);
       return { result, ms: Date.now() - started };
     };
     const group = (result, runtimeAccountId) => {
@@ -151,7 +157,62 @@ async function run() {
     assert.ok(ms >= SLOW - 50, `a Harness catalog is loaded for its own Agent (${ms}ms)`);
     assert.equal(group(result, HARNESS).available, true);
     await settle(); rules.clear();
-    console.log("PASS Runtime model menu cache: concurrent cold load, cached slow refresh, fresh budget, failures never hidden, write/connection/generation invalidation, account-shared native catalogs and per-Agent Harness.");
+
+    // 8. Last good catalogs persist: a restarted facade and a new Service
+    //    generation show them while refreshing. Start-cycle writes keep them;
+    //    a user write after start and a failed refresh drop them.
+    const cache = createRuntimeModelCacheStore({ trustedRoot: f.root });
+    const restarted = async () => { const value = makeBackend({ runtimeModelCache: cache }); await value._refreshManagedProfiles(); return value; };
+    const own = (facade) => read(undefined, undefined, facade);
+    let facade = await restarted();
+    await own(facade); await settle();
+    facade = await restarted();
+    rules.set(PI, { delayMs: SLOW });
+    ({ result, ms } = await own(facade));
+    assert.ok(ms < SLOW - 100, `a restarted facade shows the persisted catalog (${ms}ms)`);
+    assert.deepEqual(group(result, PI).ids, ["fixture-model", "pi-newer"]);
+    await settle();
+    facade._generation += 1;
+    ({ result, ms } = await own(facade));
+    assert.ok(ms < SLOW - 100, `a new Service generation shows the persisted catalog (${ms}ms)`);
+    await settle(); rules.clear();
+    facade._state = "starting";
+    await facade._call("agent.binding.update", { profileId: f.profile.id, bindingId: piBinding.id,
+      patch: { label: "Pi start cycle" }, revision: f.service.productStore.getAgentRuntimeBindings(f.profile.id).revision });
+    facade._state = "started";
+    facade = await restarted();
+    rules.set(PI, { delayMs: SLOW });
+    ({ ms } = await own(facade));
+    assert.ok(ms < SLOW - 100, `a start-cycle write keeps persisted catalogs (${ms}ms)`);
+    await settle(); rules.clear();
+    await facade.updateAgentRuntimeBinding(f.profile.agentId, piBinding.id, { label: "Pi user write" },
+      { revision: f.service.productStore.getAgentRuntimeBindings(f.profile.id).revision });
+    facade = await restarted();
+    rules.set(PI, { delayMs: SLOW });
+    ({ ms } = await own(facade));
+    assert.ok(ms >= SLOW - 50, `a user write drops persisted catalogs (${ms}ms)`);
+    rules.set(PI, { fail: true });
+    ({ result } = await own(facade));
+    assert.equal(group(result, PI).available, false);
+    facade = await restarted();
+    rules.set(PI, { delayMs: SLOW });
+    ({ result, ms } = await own(facade));
+    assert.ok(ms >= SLOW - 50, `a failed refresh drops the persisted catalog (${ms}ms)`);
+    assert.equal(group(result, PI).available, true);
+    rules.clear();
+
+    // 9. Prewarm loads the most recent conversation's menu after a start.
+    const warm = makeBackend();
+    await warm._refreshManagedProfiles();
+    let latest = null;
+    for (const value of warm._sessionsByKey.values()) if (!latest || value.updatedAt > latest.updatedAt) latest = value;
+    const latestAgent = warm._profilesById.get(latest.profileId).agentId;
+    await warm._prewarmSessionRuntimeModels(warm._generation);
+    rules.set(PI, { delayMs: SLOW });
+    ({ ms } = await read(latestAgent, latest.sessionKey, warm));
+    assert.ok(ms < SLOW - 100, `a prewarmed menu opens from cache (${ms}ms)`);
+    await settle(); rules.clear();
+    console.log("PASS Runtime model menu cache: concurrent cold load, cached slow refresh, fresh budget, failures never hidden, write/connection/generation invalidation, account-shared native catalogs, per-Agent Harness, persisted catalogs across restarts and start prewarm.");
   } finally { await f.close(); }
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

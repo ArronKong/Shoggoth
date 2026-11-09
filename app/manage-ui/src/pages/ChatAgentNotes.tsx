@@ -2,8 +2,7 @@ import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import ChatMarkdown from "../components/ChatMarkdown";
 import { usePageCache } from "../lib/usePageCache";
-import { INSPIRATION_WALL_PAGE_SIZE, readInspirationWallPages } from "./inspiration-wall-pages";
-import type { InspirationIdea } from "../types";
+import { readAllAgentInspirationPages } from "./inspiration-wall-pages";
 import { inspirationContentParts } from "./inspiration-content";
 import { inspirationNoteContent } from "./inspiration-note-text";
 import InspirationStatusIcon from "./InspirationStatusIcon";
@@ -13,24 +12,8 @@ import styles from "./ChatAgentPanel.module.css";
 export default function ChatAgentNotes({ backendId, agentId }: { backendId: string; agentId: string }) {
   const { t } = useTranslation();
   const pages = useRef(1);
-  const page = usePageCache(`chat-agent-notes:${JSON.stringify([backendId, agentId])}`, async () => {
-    const pageCount = pages.current;
-    const scope = { backendId, agentId };
-    // The API's "all" excludes notes marked as results. The newest N rows
-    // from each cursor chain are sufficient to render the combined top N.
-    const [notes, results] = await Promise.all([
-      readInspirationWallPages("", "all", pageCount, scope),
-      readInspirationWallPages("", "archived", pageCount, scope),
-    ]);
-    const byId = new Map<string, InspirationIdea>();
-    for (const idea of [...notes.items, ...results.items]) {
-      const previous = byId.get(idea.id);
-      if (!previous || idea.revision > previous.revision) byId.set(idea.id, idea);
-    }
-    const ordered = [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
-    const limit = pageCount * INSPIRATION_WALL_PAGE_SIZE;
-    return { items: ordered.slice(0, limit), hasMore: notes.hasMore || results.hasMore || ordered.length > limit, pageCount };
-  });
+  const page = usePageCache(`chat-agent-notes:${JSON.stringify([backendId, agentId])}`,
+    () => readAllAgentInspirationPages(pages.current, { backendId, agentId }));
   if (page.data) pages.current = Math.max(pages.current, page.data.pageCount);
   const [loadingMore, setLoadingMore] = useState(false);
   const moreRequest = useRef<Promise<void> | null>(null);

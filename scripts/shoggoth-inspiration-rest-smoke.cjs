@@ -8,7 +8,7 @@ const id = () => crypto.randomUUID();
 async function runInspirationRestSmoke() {
   const approvalCommand = `echo ${'x'.repeat(24 * 1024 - 64)}`;
   const fixture = await startInspirationFixture({ isolatedHome: true, permissionMode: 'request-approval',
-    codexFakeEnv: { CODEX_FAKE_INSPIRATION_APPROVAL_COMMAND: approvalCommand } });
+    codexFakeEnv: { CODEX_FAKE_INSPIRATION_APPROVAL_COMMAND: approvalCommand, CODEX_FAKE_MODEL_CATALOG: '1' } });
   const request = async (route = '', method = 'GET', body) => {
     const response = await fetch(`${fixture.url}/__api/inspirations${route}`, { method,
       ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
@@ -35,15 +35,23 @@ async function runInspirationRestSmoke() {
     const { agents } = (await request('/agents')).data;
     const agent = agents.find(value => value.capabilities.execute);
     assert.ok(agent);
+    const scope = new URLSearchParams({ backendId: agent.backendId, agentId: agent.id });
+    const sessionsBefore = fixture.service.chatSessionStore.listSessions().length;
+    const models = await request(`/models?${scope}`);
+    assert.equal(models.status, 200, JSON.stringify(models.data));
+    const choice = models.data.models.find(model => model.id === 'fake-model' && model.bindingId === models.data.defaultBindingId);
+    assert.ok(choice, JSON.stringify(models.data));
+    assert.equal(fixture.service.chatSessionStore.listSessions().length, sessionsBefore, 'The seed model menu must not create a Session');
+    assert.equal(fixture.service.productStore.listWorkRuns().length, 0, 'The seed model menu must not run the note');
     assert.equal((await request('/agent-dock')).data.agents.find(value => value.id === agent.id).executionCount, 0);
-    const start = { operationId: id(), expectedRevision: idea.revision, agentId: agent.id, backendId: agent.backendId, workspace: null, instruction: '' };
+    const start = { operationId: id(), expectedRevision: idea.revision, agentId: agent.id, backendId: agent.backendId, workspace: null, instruction: '',
+      modelSelection: { model: choice.id, bindingId: choice.bindingId } };
     const first = await request(`/start?id=${idea.id}`, 'POST', start);
     assert.equal(first.status, 200, JSON.stringify(first.data));
     idea = first.data.idea;
     assert.match(idea.latestExecution.sessionHref, /^\/chat\?backend=/);
     assert.equal((await request(`/start?id=${idea.id}`, 'POST', start)).data.idea.latestExecution.runId, idea.latestExecution.runId);
     assert.equal((await request('/agent-dock')).data.agents.find(value => value.id === agent.id).executionCount, 1);
-    const scope = new URLSearchParams({ backendId: agent.backendId, agentId: agent.id });
     const scoped = await request(`?${scope}`);
     assert.equal(scoped.status, 200, JSON.stringify(scoped.data));
     assert.deepEqual(scoped.data.items.map(item => item.id), [idea.id]);
@@ -59,6 +67,9 @@ async function runInspirationRestSmoke() {
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     assert.equal(execution.status, 'waiting_input', JSON.stringify(execution));
+    assert.equal(fixture.service.chatSessionStore.getSession(execution.sessionKey).modelOverride, choice.id);
+    assert.equal(fixture.service.chatSessionStore.getSession(execution.sessionKey).runtimeBindingId, choice.bindingId);
+    assert.equal(fixture.service.workRunCoordinator.getRuntimeContextForSource(execution.profileId, 'inspiration', idea.id).effectiveModel, choice.id);
     const dashboard = async (query = '') => {
       fixture.registry._activityCache = null;
       const response = await fetch(`${fixture.url}/__api/dashboard/activities?kind=inspiration${query}`);
@@ -121,16 +132,26 @@ async function runInspirationRestSmoke() {
       sessionKey: execution.sessionKey, cursor: null, limit: 100,
     })), /从 Session 输入框继续完善/);
     idea = (await request(detail)).data.idea;
+    const adopt = { operationId: id(), expectedRevision: idea.revision, patch: { acceptedRunId: execution.runId } };
+    const rejected = await request(detail, 'PATCH', { ...adopt, patch: { acceptedRunId: id() } });
+    assert.equal(rejected.data.code, 'INSPIRATION_REPLY_UNAVAILABLE');
+    const chosen = await request(detail, 'PATCH', adopt);
+    assert.equal(chosen.status, 200, JSON.stringify(chosen.data));
+    idea = chosen.data.idea;
+    assert.equal(idea.acceptedRunId, execution.runId);
+    assert.equal((await request(detail, 'PATCH', adopt)).data.idea.revision, idea.revision, 'Adopting again with the same operation ID must not write');
+    const newestPage = await request(`/executions?id=${idea.id}&limit=1`);
+    assert.equal(newestPage.data.executions[0].runId, approval.runId);
+    assert.equal((await request(detail)).data.acceptedExecution.runId, execution.runId, 'The older reply is readable outside the current history page');
     const patch = { operationId: id(), expectedRevision: idea.revision, patch: { archived: true } };
     idea = (await request(detail, 'PATCH', patch)).data.idea;
+    assert.equal((await request(detail)).data.acceptedExecution.runId, execution.runId, 'Archiving keeps the chosen reply');
     activities = await dashboard('&limit=1');
     assert.equal(activities.items.length, 1);
-    assert.equal(activities.hasMore, true, 'Dashboard includes both rounds of archived inspirations');
-    const secondPage = await dashboard(`&limit=1&cursor=${encodeURIComponent(activities.nextCursor)}`);
-    assert.equal(secondPage.items.length, 1);
-    assert.notEqual(secondPage.items[0].id, activities.items[0].id);
-    assert.equal(secondPage.items[0].inspiration.runId, execution.runId);
-    assert.equal(secondPage.items[0].inspiration.status, 'completed');
+    assert.equal(activities.items[0].inspiration.ideaId, idea.id);
+    assert.equal(activities.items[0].inspiration.runId, approval.runId, 'Dashboard shows the latest round of the archived note');
+    assert.equal(activities.hasMore, false, 'Older rounds do not create another Dashboard page');
+    assert.equal(activities.nextCursor, undefined);
     assert.equal((await request()).data.total, 0);
     assert.equal((await request('?filter=archived')).data.total, 1);
     assert.equal((await request(`/start?id=${idea.id}`, 'POST', { ...start, operationId: id(), expectedRevision: idea.revision })).status, 409);
@@ -145,7 +166,31 @@ async function runInspirationRestSmoke() {
     assert.equal((await request('/agent-dock')).data.agents.find(value => value.id === agent.id).executionCount, 2);
     assert.equal((await request(`/start?id=${idea.id}`, 'POST', start)).status, 404);
     assert.match(JSON.stringify(await fixture.ipc('chat.history', { sessionKey: execution.sessionKey, cursor: null, limit: 100 })), /从 Session 输入框继续完善/);
+    // Seed a terminal provider failure in this isolated Service. The public
+    // activity route must expose the same bounded Chat projection without opening Chat first.
+    const { inspirationStore, chatSessionStore, transcriptStore, workDispatcher } = fixture.service;
+    const failedIdea = inspirationStore.create({ operationId: id(), body: '想做一个实时新闻页面' });
+    let failed = inspirationStore.prepareExecution({ id: failedIdea.id, operationId: id(), expectedRevision: failedIdea.revision,
+      instruction: '', agentId: agent.id, backendId: agent.backendId, profileId: execution.profileId, workspace: execution.workspace }, () => true);
+    const failedSession = chatSessionStore.createSession({ operationId: id(), profileId: execution.profileId,
+      workspace: execution.workspace, createdAt: Date.now() });
+    transcriptStore.ensureSession({ profileId: execution.profileId, sessionId: failedSession.id });
+    failed = inspirationStore.bindSession(failed.id, failedSession.sessionKey);
+    workDispatcher.enqueue({ id: failed.runId, source: 'inspiration', sourceId: failedIdea.id,
+      idempotencyKey: `inspiration:${failed.operationId}`, profileId: failed.profileId, workspace: failed.workspace });
+    workDispatcher.admit(failed.runId);
+    workDispatcher.transition(failed.runId, 'running');
+    workDispatcher.transition(failed.runId, 'failed', { errorCode: 'RUNTIME_QUOTA_EXHAUSTED' });
+    transcriptStore.appendEvent({ id: id(), profileId: failed.profileId, sessionId: failedSession.id, runId: failed.runId,
+      kind: 'error', content: { transcriptType: 'terminal', status: 'failed', errorCode: 'RUNTIME_QUOTA_EXHAUSTED',
+        resultSummary: null, failure: { message: 'Quota exceeded. Check your plan and billing details.' } } });
+    const failureActivity = await request(`/activity?id=${failedIdea.id}&runId=${failed.runId}`);
+    assert.equal(failureActivity.status, 200, JSON.stringify(failureActivity.data));
+    assert.equal(failureActivity.data.errorMessage, '错误：当前账号额度已用尽，本次请求已停止，不会继续排队。请等待额度恢复、补充额度或更换账号后重试\n'
+      + '上游原因：Quota exceeded. Check your plan and billing details.\n错误码：RUNTIME_QUOTA_EXHAUSTED');
+    assert.equal((await request(`/activity?id=${failedIdea.id}&runId=${execution.runId}`)).status, 400);
     console.log('PASS Inspiration REST save/edit/filter/start/respond/session/archive/delete; archive gating and deletion preserve Session history');
+    console.log('PASS Inspiration REST failure details match Chat before opening its Session, with exact round ownership');
   } finally { await fixture.close(); }
 }
 module.exports = { runInspirationRestSmoke };

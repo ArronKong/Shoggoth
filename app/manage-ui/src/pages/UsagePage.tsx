@@ -2,6 +2,7 @@ import AgentAvatarView from "../components/AgentAvatar";
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
+import { SkeletonShape } from "../components/Skeleton";
 import { animate } from "animejs";
 import "./usage/UsagePage.css";
 import type { SessionPreview, SessionPreviewMessage, UsageDailyPoint, UsageTopSession } from "../types";
@@ -15,6 +16,7 @@ import { useStickyState } from "../lib/useStickyState";
 import { usePageCache } from "../lib/usePageCache";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { createAgentNameIndex, resolveAgentDisplayName } from "../lib/agentDisplay";
+import { UsageChartSkeleton, UsageRankSkeleton } from "./usage/UsageSkeleton";
 import {
   fmtCost,
   fmtTokens,
@@ -220,10 +222,10 @@ export default function UsagePage() {
   }, [storedRange, range, setRange]);
   // Each source keeps its own failure boundary while sharing connection invalidation.
   const { data: series, loading: seriesLoading, error: seriesError, refresh: refreshSeries } = usePageCache(
-    `usage:series:${backend}:${range}`, () => getUsageSeries(backend, range),
+    `usage:series:${backend}:${range}`, () => getUsageSeries(backend, range), { loadingOnEmptyRefresh: true },
   );
   const { data: breakdown, loading: bdLoading, error: breakdownError, refresh: refreshBreakdown } = usePageCache(
-    `usage:breakdown:${backend}:${range}`, () => getUsageBreakdown(backend, range),
+    `usage:breakdown:${backend}:${range}`, () => getUsageBreakdown(backend, range), { loadingOnEmptyRefresh: true },
   );
   const { data: agents, refresh: refreshAgents } = usePageCache(
     `usage:agents:${backend}`, () => listAgents(backend),
@@ -232,6 +234,13 @@ export default function UsagePage() {
     (agents || []).map(agent => ({ ...agent, backendId: backend })),
   ), [agents, backend]);
   const err = seriesError || breakdownError;
+  const usageUnavailable = series?.availability === "unavailable";
+  const seriesScanning = series?.cacheStatus === "refreshing";
+  const breakdownScanning = breakdown?.cacheStatus === "refreshing";
+  const seriesPending = !seriesError && ((series === undefined && seriesLoading) || seriesScanning);
+  const breakdownPending = !breakdownError && ((breakdown === undefined && bdLoading) || breakdownScanning);
+  const showSeries = !usageUnavailable && (seriesPending || (series !== undefined && !seriesScanning));
+  const showBreakdown = !usageUnavailable && (breakdownPending || (breakdown !== undefined && !breakdownScanning));
   // Top 会话行点击的 transcript 预览抽屉（offset 分页，滑动逐步加载）
   const [previewFor, setPreviewFor] = useState<UsageTopSession | null>(null);
   const [preview, setPreview] = useState<SessionPreview | null>(null);
@@ -330,11 +339,11 @@ export default function UsagePage() {
     await Promise.all([refreshSeries(), refreshBreakdown(), refreshAgents()]);
   }, [refreshSeries, refreshBreakdown, refreshAgents]);
   useRegisterPageRefresh("/token", refresh);
-  useRegisterPageLoading("/token", seriesLoading || bdLoading);
+  useRegisterPageLoading("/token", !usageUnavailable && (seriesPending || breakdownPending));
 
-  // 网关冷扫描(refreshing)返回全零快照：提示 + 15s 后自动重拉
+  // 网关冷扫描(refreshing)返回全零快照：对应区块保留骨架，15s 后自动重拉
   //（openclaw-backend 已对 refreshing 结果跳过缓存，重拉能拿到新数据）。
-  const refreshing = series?.cacheStatus === "refreshing" || breakdown?.cacheStatus === "refreshing";
+  const refreshing = (seriesScanning && !seriesError) || (breakdownScanning && !breakdownError);
   useEffect(() => {
     if (!refreshing) return;
     const timer = window.setTimeout(() => { void refresh(); }, 15_000);
@@ -395,7 +404,6 @@ export default function UsagePage() {
 
   // —— hero 统计（缓存=读+写合并，设计稿口径）——
   const tot = series?.totals;
-  const usageUnavailable = series?.availability === "unavailable";
   const cacheTotal = (tot?.cacheReadTokens ?? 0) + (tot?.cacheWriteTokens ?? 0);
   const cacheDen = (tot?.inputTokens ?? 0) + (tot?.cacheReadTokens ?? 0);
   const cacheHit = cacheDen > 0 ? (tot?.cacheReadTokens ?? 0) / cacheDen : null;
@@ -473,48 +481,47 @@ export default function UsagePage() {
 
       {err && <div className="error">{t("usage.error", { msg: err })}</div>}
       {usageUnavailable && <div className="error" role="alert">{t(series?.availabilityReason === "unsupported-range" ? "usage.rangeUnavailable" : "usage.dataUnavailable")}</div>}
-      {refreshing && <div className="usage-hint">{t("usage.refreshing")}</div>}
+      {refreshing && !usageUnavailable && <div className="usage-hint">{t("usage.refreshing")}</div>}
 
-      {!usageUnavailable && <>
-      <div className="usage-row usage-row--hero">
-        <section className="usage-section usage-hero">
+      {(showSeries || showBreakdown) && <div className="usage-row usage-row--hero">
+        {showSeries && <section className="usage-section usage-hero">
           <div className="usage-hero-stats">
             <div className="usage-stat-label">{t("usage.totalTokens")}</div>
             <div className="usage-stat-big">
-              {seriesLoading ? "…" : <CountUp value={tot?.totalTokens ?? 0} fmt={fmtTokens} />}
+              {seriesPending ? <SkeletonShape style={{ width: "4.5ch" }} /> : <CountUp value={tot?.totalTokens ?? 0} fmt={fmtTokens} />}
             </div>
             <div className="usage-cost-summary">
               <div className="usage-stat-label">{t("usage.totalCost")}</div>
               <div className="usage-cost-value">
-                {seriesLoading ? "…" : <CountUp value={tot?.totalCost ?? 0} fmt={fmtCost} />}
+                {seriesPending ? <SkeletonShape style={{ width: "4em" }} /> : <CountUp value={tot?.totalCost ?? 0} fmt={fmtCost} />}
               </div>
             </div>
-            {!seriesLoading && (
-              <div className="usage-stat-grid">
-                <Stat label={t("usage.input")} value={<CountUp value={tot?.inputTokens ?? 0} fmt={fmtTokens} />} />
-                <Stat label={t("usage.output")} value={<CountUp value={tot?.outputTokens ?? 0} fmt={fmtTokens} />} />
-                {cacheTotal > 0 && <Stat label={t("usage.cache")} value={<CountUp value={cacheTotal} fmt={fmtTokens} />} />}
-                {cacheHit != null && cacheTotal > 0 && (
-                  <Stat label={t("usage.cacheHitRate")} value={<CountUp value={cacheHit * 100} fmt={fmtPct} />} />
-                )}
-              </div>
-            )}
+            <div className="usage-stat-grid">
+              <Stat label={t("usage.input")} value={seriesPending
+                ? <SkeletonShape style={{ width: "3.5em" }} /> : <CountUp value={tot?.inputTokens ?? 0} fmt={fmtTokens} />} />
+              <Stat label={t("usage.output")} value={seriesPending
+                ? <SkeletonShape style={{ width: "3em" }} /> : <CountUp value={tot?.outputTokens ?? 0} fmt={fmtTokens} />} />
+              {!seriesPending && cacheTotal > 0 && <Stat label={t("usage.cache")} value={<CountUp value={cacheTotal} fmt={fmtTokens} />} />}
+              {!seriesPending && cacheHit != null && cacheTotal > 0 && (
+                <Stat label={t("usage.cacheHitRate")} value={<CountUp value={cacheHit * 100} fmt={fmtPct} />} />
+              )}
+            </div>
           </div>
           <div className="usage-hero-chart">
-            {seriesLoading ? (
-              <p className="muted">{t("usage.loadingChart")}</p>
+            {seriesPending ? (
+              <UsageChartSkeleton bars />
             ) : (
               <StackedBars buckets={trend.rows} series={trend.cols} w={600} h={280} minSeg={4} contentShiftY={14} />
             )}
           </div>
-        </section>
+        </section>}
 
-        <section className="usage-section usage-agents">
+        {showBreakdown && <section className="usage-section usage-agents">
           <div className="usage-section-head">
             <h3>{t("usage.agentRankTitle")}</h3>
           </div>
-          {bdLoading ? (
-            <p className="muted">{t("usage.counting")}</p>
+          {breakdownPending ? (
+            <UsageRankSkeleton kind="agent" />
           ) : sources.length === 0 ? (
             <p className="muted">{t("usage.noData")}</p>
           ) : (
@@ -540,10 +547,10 @@ export default function UsagePage() {
               ))}
             </div>
           )}
-        </section>
-      </div>
+        </section>}
+      </div>}
 
-      {modelStack && (
+      {showBreakdown && !breakdownPending && modelStack && (
         <section className="usage-section">
           <div className="usage-section-head">
             <h3>{t("usage.modelDailyTitle")}</h3>
@@ -559,13 +566,13 @@ export default function UsagePage() {
         </section>
       )}
 
-      <div className="usage-row usage-row--split">
+      {showBreakdown && <div className="usage-row usage-row--split">
         <section className="usage-section">
           <div className="usage-section-head">
             <h3>{t("usage.modelRankTitle")}</h3>
           </div>
-          {bdLoading ? (
-            <p className="muted">{t("usage.scanning")}</p>
+          {breakdownPending ? (
+            <UsageRankSkeleton kind="model" />
           ) : (
             // 设计稿：左环图（top5+其他占比）+ 右排行列表
             <div className="usage-rank-split">
@@ -584,21 +591,21 @@ export default function UsagePage() {
           <div className="usage-section-head">
             <h3>{t("usage.toolsTitle")}</h3>
           </div>
-          {bdLoading ? (
-            <p className="muted">{t("usage.counting")}</p>
+          {breakdownPending ? (
+            <UsageRankSkeleton kind="tool" />
           ) : (
             <RankBars rows={toolRows} totalValue={toolTotal} fmt={(n) => t("usage.toolCallsFmt", { count: Math.round(n) })} />
           )}
         </section>
-      </div>
+      </div>}
 
-      {(bdLoading || breakdown?.dailyActivity !== undefined) && (
+      {showBreakdown && (breakdownPending || breakdown?.dailyActivity !== undefined) && (
         <section className="usage-section">
           <div className="usage-section-head">
             <h3>{t("usage.activityTitle")}</h3>
           </div>
-          {bdLoading ? (
-            <p className="muted">{t("usage.scanning")}</p>
+          {breakdownPending ? (
+            <UsageChartSkeleton />
           ) : (
             <MultiLine
               points={activityLine}
@@ -615,7 +622,7 @@ export default function UsagePage() {
         </section>
       )}
 
-      {sessions.length > 0 && (
+      {showBreakdown && !breakdownPending && sessions.length > 0 && (
         <section className="usage-section">
           <div className="usage-section-head">
             <h3>{t("usage.sessionsTitle")}</h3>
@@ -678,7 +685,6 @@ export default function UsagePage() {
         </section>
       )}
 
-      </>}
       <Modal
         open={!!previewFor}
         onClose={() => setPreviewFor(null)}

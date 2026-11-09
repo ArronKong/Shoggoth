@@ -97,14 +97,16 @@ function load(relative) {
       if (name === "react-dom") return { createPortal: children => children };
       if (name.endsWith("/api/client") || name.endsWith("/api/groupReads") || name.endsWith("/api/groupMemberModel")) return api;
       if (name.endsWith("/group-journal-recovery")) return require(path.resolve(ui, "../group-journal-recovery.js"));
+      if (name.endsWith("/agent-service/group-mentions")) return require(path.resolve(ui, "../agent-service/group-mentions.js"));
       if (name.endsWith("/lib/groupSendJournal")) return groupJournalMock;
       if (name.endsWith("/groupReply")) return load("src/lib/groupReply.ts");
+      if (name.endsWith("/lib/groupMentions")) return load("src/lib/groupMentions.ts");
       if (name.endsWith("/lib/groupTimeline")) return load("src/lib/groupTimeline.ts");
       if (name.endsWith("/lib/chatTime")) return load("src/lib/chatTime.ts");
       if (name.endsWith("/lib/groupMessagePresentation")) return load("src/lib/groupMessagePresentation.ts");
       if (name.endsWith("/lib/groupPanelObserver")) return load("src/lib/groupPanelObserver.ts");
       if (name.endsWith("/lib/turnTimeline")) return load("src/lib/turnTimeline.ts");
-      if (name.endsWith("/lib/groupReferenceExcerpt")) return load("src/lib/groupReferenceExcerpt.ts");
+      if (name.endsWith("/groupReferenceExcerpt")) return load("src/lib/groupReferenceExcerpt.ts");
       if (name.endsWith("/i18n/groupCollaborationResources") || name.endsWith("/i18n/groupComposerResources")) return {};
       if (/\/i18n\/group(?:Reference|Search|Execution|Model|Files)Resources$/u.test(name)) return {};
       if (name.endsWith("/components/ui")) return { useToast: () => ({ error: (value) => calls.push({ name: "toast", args: [value] }) }),
@@ -146,13 +148,18 @@ function load(relative) {
 const journalModule = load("src/lib/groupSendJournal.ts");
 const journalDrafts = new Map(), journalSends = new Map();
 const clone = value => JSON.parse(JSON.stringify(value));
+const emptyDraft = JSON.stringify(journalModule.emptyGroupComposer());
+const draftFor = (ownerScope, groupId) => [...journalDrafts.values()].reverse()
+  .filter(row => row.ownerScope === ownerScope && row.groupId === groupId)
+  .sort((a, b) => Number(JSON.stringify(a.composer) === emptyDraft) - Number(JSON.stringify(b.composer) === emptyDraft)
+    || b.updatedAt - a.updatedAt)[0] ?? null;
 const journal = {
   async read(ownerScope, groupId) { return { sends: clone([...journalSends.values()].filter(row => row.ownerScope === ownerScope && row.groupId === groupId)),
-    draft: clone([...journalDrafts.values()].filter(row => row.ownerScope === ownerScope && row.groupId === groupId).at(-1) ?? null) }; },
+    draft: clone(draftFor(ownerScope, groupId)), foreignPending: 0 }; },
   async saveComposer(ownerScope, groupId, draftId, revision, composer, expectedStorageRevision) {
     const key = JSON.stringify([ownerScope, groupId, draftId]);
     const snapshot = { version: 1, key, ownerScope, groupId, draftId, revision, storageRevision: expectedStorageRevision + 1, composer: clone(composer), updatedAt: Date.now() };
-    journalDrafts.set(key, snapshot); return clone(snapshot);
+    journalDrafts.delete(key); journalDrafts.set(key, snapshot); return clone(snapshot);
   },
   async prepare(ownerScope, groupId, inputSnapshot, draft) {
     const row = { journalVersion: 1, key: JSON.stringify([ownerScope, groupId, inputSnapshot.clientMessageId]), ownerScope, groupId,
@@ -171,6 +178,7 @@ const journal = {
 groupJournalMock = { ...journalModule, groupSendJournal: journal,
   GroupDraftSession: class extends journalModule.GroupDraftSession { constructor(scope, groupId, snapshot) { super(scope, groupId, snapshot, journal); } } };
 const Panel = load("src/pages/GroupChatPanel.tsx").default;
+const ComposerInput = load("src/pages/GroupChatComposerInput.tsx").default;
 
 const member = (id, displayName, backendId = "shoggoth") => ({ id, groupId: "g", backendId, agentId: `agent-${id}`, displayName,
   handle: id, state: "active", position: 1, joinedSeq: 0, leftSeq: null, card: null });
@@ -208,6 +216,11 @@ const agents = [{ backendId: "shoggoth", agentId: "agent-a", name: "Alpha" }, { 
   { backendId: "other", agentId: "x", name: "Unsupported" }];
 
 let renderer;
+const input = () => renderer.root.findByType(ComposerInput);
+const selection = (start = input().props.value.text.length, end = start) => ({ start, end, includesPrefill: false });
+const typeInput = (text, caret = text.length) => act(async () => {
+  input().props.onChange({ text, mentions: [] }, selection(caret), false, false);
+});
 const mount = async (candidateAgents = agents) => {
   calls.length = 0;
   sentSeq = 98;
@@ -245,11 +258,14 @@ const openMemberMenu = async (id, keyboard = false) => {
   assert.equal(prevented, true, "the app menu suppresses the browser image menu");
   return renderer.root.find(node => node.type === "button" && node.props["data-group-member-remove"] === id);
 };
-const openMember = async (name) => {
-  const author = renderer.root.findAll(node => node.type === "button" && node.props["data-group-author"] !== undefined)
-    .find(node => node.findAllByType("span").some(span => span.children.includes(name)));
-  assert.ok(author, `member ${name} has a visible author entry`);
-  await click(author);
+const mountMemberCard = async (id) => {
+  const MemberCard = load("src/pages/GroupChatMemberModal.tsx").default;
+  await act(async () => renderer.unmount());
+  await act(async () => {
+    renderer = create(React.createElement(MemberCard, { groupId: "g", view, member: view.members.find(item => item.id === id),
+      onView() {}, onClose() {} }));
+  });
+  await act(async () => {});
 };
 const named = (name) => calls.filter((call) => call.name === name);
 // 组件在独立的 vm 环境里运行，它创建的对象原型与这里不同：比较前先转成普通对象。
@@ -306,7 +322,7 @@ await clickDetailAction("delete");
 assert.equal(named("deleteGroup").length, 1);
 assert.deepEqual(plain(named("deleteGroup")[0].args), ["g", 1]);
 assert.equal(detailActions("delete")[0].props.disabled, true, "pending deletion cannot be resubmitted");
-assert.equal(renderer.root.findByType("textarea").props.disabled, true);
+assert.equal(input().props.disabled, true);
 assert.equal(detailActions("rename")[0].props.disabled, true, "pending deletion disables title renaming");
 
 // ---- 群名点击改名；设置和删除直接显示为图标按钮 ----
@@ -337,19 +353,18 @@ assert.equal(named("update").length, 1, "cancelling title renaming does not writ
 view = base(); messages = timeline();
 await mount();
 assert.equal(renderer.root.findAll((node) => node.props.className === "quoteBlock").length, 1, "a reply shows what it quotes");
-const quoteButtons = buttons("groupChat.reply.action");
+const quoteButtons = buttons("chat.quote");
 assert.equal(quoteButtons.length, 4, "every user and member message can be quoted; system rows cannot");
 await click(quoteButtons[1]);
 const chip = renderer.root.findAll((node) => node.props.className === "chat-quote-bar replyChip");
 assert.equal(chip.length, 1);
 assert.ok(chip[0].findAllByType("span").flatMap((node) => node.children.filter((child) => typeof child === "string"))
   .join("").includes("Alpha 的回答"));
-const textarea = renderer.root.findByType("textarea");
-await act(async () => { textarea.props.onChange({ target: { value: "展开说说", selectionStart: 4 } }); });
+await typeInput("展开说说");
 await click(buttons("groupChat.send")[0]);
 assert.deepEqual([named("send")[0].args[1].body, named("send")[0].args[1].replyTo], ["展开说说", 2]);
 assert.equal(renderer.root.findAll((node) => node.props.className === "chat-quote-bar replyChip").length, 0, "the quote is cleared after sending");
-await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value: "普通消息", selectionStart: 4 } }); });
+await typeInput("普通消息");
 await click(buttons("groupChat.send")[0]);
 assert.equal(named("send")[1].args[1].replyTo, null);
 
@@ -467,7 +482,10 @@ for (const guarded of [{ ...base(), members: [member("a", "Alpha"), member("b", 
 view = base(); messages = timeline();
 messages.push(message(7, { kind: "member", memberId: "b" }, "Beta 的回答"));
 await mount();
-await openMember("Beta");
+const authorEntries = renderer.root.findAll(node => node.props["data-group-author"] !== undefined);
+assert.ok(authorEntries.length > 0 && authorEntries.every(node => node.type === "span" && !node.props.onClick),
+  "message authors do not open the legacy member card");
+await mountMemberCard("b");
 confirmAnswer = false;
 await click(buttons("groupChat.members.remove")[0]);
 assert.deepEqual(plain(named("remove")[0].args), ["g", { expectedRosterRevision: 7, memberId: "b" }]);
@@ -475,7 +493,7 @@ assert.equal(named("confirm").length, 0, "the member card also removes without c
 confirmAnswer = true;
 view = { ...base(), members: [member("a", "Alpha"), member("b", "Beta")] };
 await mount();
-await openMember("Alpha");
+await mountMemberCard("a");
 assert.equal(buttons("groupChat.members.remove").length, 0, "the member card retains two members");
 
 // ---- 图片与附件：样式沿用单聊（chat-att-*），传完才能发，可以只发附件 ----
@@ -507,7 +525,7 @@ view = base(); messages = [message(1, { kind: "user" }, "", { attachments: [imag
 await mount();
 assert.deepEqual(byClass("quoteBlock").map(node => node.findAllByType("img").map(img => img.props.src)),
   [[media.inspirationMediaUrl(image.id, true)], [media.inspirationMediaUrl(image.id, true)]], "new and existing image quotes show thumbnails");
-await click(buttons("groupChat.reply.action")[0]);
+await click(buttons("chat.quote")[0]);
 assert.equal(byClass("chat-quote-bar replyChip")[0].findAllByType("img")[0].props.src, media.inspirationMediaUrl(image.id, true));
 assert.deepEqual(plain([...journalDrafts.values()].at(-1).composer.replyTo.attachments), [image, report]);
 await act(async () => { renderer.unmount(); });
@@ -554,7 +572,7 @@ assert.deepEqual(plain(named("toast").map((call) => call.args[0])), ["groupChat.
 // 粘贴图片也进同一条待发送列表（先移掉一个腾出位置）。
 await click(pendingRow().findAllByType("button")[0]);
 let prevented = false;
-await act(async () => { renderer.root.findByType("textarea").props.onPaste({ preventDefault() { prevented = true; },
+await act(async () => { input().props.onPaste({ preventDefault() { prevented = true; },
   clipboardData: { items: [{ kind: "file", getAsFile: () => ({ name: "粘贴.png", type: "image/png", size: 512 }) }, { kind: "string" }] } }); });
 assert.deepEqual([prevented, uploads.length, uploads.at(-1).file.name], [true, 9, "粘贴.png"]);
 
@@ -563,21 +581,21 @@ assert.deepEqual([prevented, uploads.length, uploads.at(-1).file.name], [true, 9
   view = base(); messages = [];
   await mount();
   await click(buttons("groupChat.composer.mention")[0]);
-  let input = renderer.root.findByType("textarea");
-  assert.equal(input.props.value, "@");
-  assert.equal(input.props["aria-expanded"], true);
-  assert.equal(renderer.root.findAllByProps({ role: "option" }).length, 3);
+  assert.equal(input().props.value.text, "@");
+  assert.equal(Boolean(input().props.activeOption), true);
+  assert.equal(renderer.root.findAllByProps({ role: "option" }).length, 4);
   const key = (key, extra = {}) => ({ key, shiftKey: false, nativeEvent: { isComposing: false }, preventDefault() {}, ...extra });
-  await act(async () => input.props.onKeyDown(key("ArrowDown")));
-  await act(async () => renderer.root.findByType("textarea").props.onKeyDown(key("Enter")));
-  input = renderer.root.findByType("textarea");
-  assert.equal(input.props.value, "@b ");
-  assert.equal(input.props["aria-expanded"], false);
+  const press = (name, extra) => act(async () => input().props.onKeyDown(key(name, extra), selection()));
+  await press("ArrowDown");
+  await press("Enter");
+  assert.equal(input().props.value.text, "@b ");
+  assert.deepEqual(plain(input().props.value.mentions), [{ start: 0, end: 2, memberId: "b" }]);
+  assert.equal(Boolean(input().props.activeOption), false);
   assert.equal(named("send").length, 0);
-  await act(async () => input.props.onKeyDown(key("Enter", { nativeEvent: { isComposing: true } })));
-  await act(async () => input.props.onKeyDown(key("Enter", { shiftKey: true })));
+  await press("Enter", { nativeEvent: { isComposing: true } });
+  await press("Enter", { shiftKey: true });
   assert.equal(named("send").length, 0);
-  await act(async () => input.props.onKeyDown(key("Enter")));
+  await press("Enter");
   assert.deepEqual(plain(named("send")[0].args[1].mentions), ["b"]);
   uploads.length = 0;
   await act(async () => renderer.root.findByProps({ "data-chat-composer": true }).props.onDrop({
@@ -618,7 +636,7 @@ assert.deepEqual([prevented, uploads.length, uploads.at(-1).file.name], [true, 9
 view = base(); messages = timeline();
 roleSource = "公开角色🙂协作方式。\n".repeat(3000) + "角色全文尾部";
 await mount();
-await openMember("Alpha");
+await mountMemberCard("a");
 for (let n = 0; n < 15 && !JSON.stringify(renderer.toJSON()).includes("groupChat.fullResult.verified"); n++) {
   if (buttons("groupChat.fullResult.more")[0]) await click(buttons("groupChat.fullResult.more")[0]);
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
@@ -679,12 +697,12 @@ assert.deepEqual(byClass("resultTag"), [], "reply type labels are hidden from th
 assert.equal(messages[1].origin.late, true, "hiding the label preserves the saved reply identity");
 assert.equal(buttons("groupChat.stop").length, 1, "a running discussion keeps its stop action");
 assert.equal(buttons("groupChat.send").length, 0, "send and stop actions are mutually exclusive");
-await act(async () => renderer.root.findByType("textarea").props.onChange({ target: { value: "继续补充方向" } }));
+await typeInput("继续补充方向");
 assert.equal(buttons("groupChat.send").length, 1, "new input exposes Send during a running discussion");
 assert.equal(buttons("groupChat.send")[0].props.disabled, false, "a running agent does not block a new message");
-await act(async () => renderer.root.findByType("textarea").props.onKeyDown({
+await act(async () => input().props.onKeyDown({
   key: "Enter", shiftKey: false, nativeEvent: { isComposing: false }, preventDefault() {},
-}));
+}, selection()));
 assert.equal(named("send").length, 1, "Enter and the visible Send button use the same send path");
 assert.equal(named("stop").length, 0, "sending with Enter does not stop the discussion");
 await act(async () => renderer.unmount());
@@ -801,7 +819,7 @@ assert.equal(buttons("groupChat.send").length, 1, "background cleanup does not k
 assert.equal(buttons("groupChat.stop").length, 0);
 await act(async () => renderer.unmount());
 
-// Stop follows the last visible message of the bound active turn, after Copy/Delete.
+// Stop follows Copy and Quote on the last visible message of the bound active turn.
 view = { ...base(), activeTurns: [{ opportunityId: "live", memberId: "a", startedAt: 1, floor: true,
   released: false, individualMessages: true }] };
 messages = [message(1, { kind: "member", memberId: "a" }, "旧回合", { origin: { opportunityId: "old" } }),
@@ -810,11 +828,11 @@ messages = [message(1, { kind: "member", memberId: "a" }, "旧回合", { origin:
 await mount();
 const liveStops = renderer.root.findAll(node => node.type === "button" && node.props["data-group-stop-turn"] === "live");
 assert.equal(liveStops.length, 1);
-assert.equal(liveStops[0].props.className, "chat-copybtn", "Stop shares the exact copy/delete dimensions and hover/focus rules");
+assert.equal(liveStops[0].props.className, "chat-copybtn", "Stop shares the exact Copy dimensions and hover/focus rules");
 assert.equal(liveStops[0].children.some(child => typeof child === "string"), false, "Stop is icon-only");
 assert.equal(liveStops[0].parent.props["data-group-message-footer"], messages[2].id);
 assert.deepEqual(liveStops[0].parent.findAllByType("button").map(node => node.props["aria-label"]),
-  ["chat.copyAsMarkdown", "chat.deleteLocal", "groupChat.status.stop Alpha"]);
+  ["chat.copyAsMarkdown", "chat.quote", "groupChat.status.stop Alpha"]);
 assert.equal(renderer.root.findByProps({ "data-chat-composer": true }).findAll(node => node.props["data-group-stop-member"]).length, 0);
 await click(liveStops[0]); assert.deepEqual(plain(named("stopMember")[0].args), ["g", "a"]);
 await act(async () => renderer.unmount());
@@ -849,126 +867,14 @@ await mount();
 assert.deepEqual(order(), [9, 11, 14, "turn:next-maya"], "final result clears only its exact turn and stale interaction");
 await act(async () => renderer.unmount());
 
-// ---- 「发给」：默认跟随最后发言的成员，可换人、选所有人，不选就交给群主 ----
+// A prefill is part of the draft: it can be removed and must never route invisibly.
 {
-  const chip = () => renderer.root.findAll(node => node.type === "button" && node.props["data-group-send-target"] !== undefined)[0];
-  const options = () => renderer.root.findAll(node => node.type === "button" && node.props["data-group-send-target-option"] !== undefined);
-  const option = key => options().find(node => node.props["data-group-send-target-option"] === key);
-  const type = async value => { await act(async () => { renderer.root.findByType("textarea").props.onChange({ target: { value, selectionStart: value.length } }); }); };
-  const sendNow = async () => { await click(buttons("groupChat.send")[0]); };
-  const lastSend = () => plain(named("send").at(-1).args[1]);
-  const pick = async key => { await click(chip()); await click(option(key)); };
-  const arrive = async (...incoming) => {
-    newerMessages = [...newerMessages, ...incoming];
-    // 变更通知会合并 150ms 后再读取。
-    await act(async () => { for (const listener of [...groupChangedListeners]) listener("g"); await new Promise(resolve => setTimeout(resolve, 200)); });
-    await act(async () => {});
-  };
-
-  // 还没有成员发言：交给群主，正文不加 @。
-  view = base(); messages = [message(1, { kind: "user" }, "大家好")]; newerMessages = [];
-  await mount();
-  assert.equal(chip().props["data-group-send-target"], "owner");
-  assert.ok(chip().props["aria-label"].startsWith("groupChat.target.label Alpha"), "the owner chip names the owner");
-  assert.equal(chip().props["aria-haspopup"], "listbox");
-  await type("在吗");
-  await sendNow();
-  assert.deepEqual([lastSend().body, lastSend().mentions], ["在吗", []]);
-  await act(async () => renderer.unmount());
-
-  // 最后发言的是群主本人：同样不加 @，保留群主离线时顺延的规则。
-  view = base(); messages = [message(1, { kind: "user" }, "大家好"), message(2, { kind: "member", memberId: "a" }, "我是群主")];
-  await mount();
-  assert.equal(chip().props["data-group-send-target"], "owner");
-  await act(async () => renderer.unmount());
-
-  // 跟随最后发言的成员；菜单里群主在最前，其次其他成员，最后是所有人。
-  view = base(); messages = timeline(); newerMessages = [];
-  await mount();
-  assert.equal(chip().props["data-group-send-target"], "c", "the last member who spoke is preselected");
-  await click(chip());
-  assert.equal(chip().props["aria-expanded"], true);
-  assert.deepEqual(options().map(node => node.props["data-group-send-target-option"]), ["owner", "b", "c", "all"]);
-  assert.deepEqual(options().map(node => node.props["aria-selected"]), [false, false, true, false]);
-  await click(chip());
-  assert.equal(options().length, 0, "clicking the chip again closes the menu");
-  await type("继续");
-  await sendNow();
-  assert.deepEqual([lastSend().body, lastSend().mentions], ["继续", ["c"]], "the preselected member is addressed through structured mentions");
-
-  // 发出后保持到下一位成员发言，然后跟随新的发言者。
-  assert.equal(chip().props["data-group-send-target"], "c");
-  await arrive(message(100, { kind: "member", memberId: "b" }, "Beta 接着说"));
-  assert.equal(chip().props["data-group-send-target"], "b", "the chip follows the newest speaker");
-
-  // 输入中途有人发言，「发给」不变，避免按回车前被改掉。
-  await type("问 Beta");
-  await arrive(message(101, { kind: "member", memberId: "c" }, "Gamma 插话"));
-  assert.equal(chip().props["data-group-send-target"], "b", "typing holds the current recipient");
-  await type("");
-  assert.equal(chip().props["data-group-send-target"], "c", "clearing the draft follows the newest speaker again");
-
-  // All recipients use the existing structured field, owner first.
-  await pick("all");
-  assert.equal(chip().props["data-group-send-target"], "all");
-  assert.equal(options().length, 0, "picking closes the menu");
-  await type("都来看看");
-  await sendNow();
-  assert.deepEqual([lastSend().body, lastSend().mentions], ["都来看看", ["a", "b", "c"]]);
-
-  // 手动选群主：不加 @；手动选择在清空输入后也保留。
-  await pick("owner");
-  await type("x"); await type("");
-  assert.equal(chip().props["data-group-send-target"], "owner", "a manual choice survives an emptied draft");
-  await type("交给群主");
-  await sendNow();
-  assert.deepEqual([lastSend().body, lastSend().mentions], ["交给群主", []]);
-
-  // 手动选某位成员，再在正文里 @ 另一位：两位都会收到；正文已经以同一个 @ 开头时不重复。
-  await pick("b");
-  await type("@c 一起看");
-  await sendNow();
-  assert.deepEqual([lastSend().body, lastSend().mentions], ["@c 一起看", ["b"]]);
-  await pick("b");
-  await type("@b 只问你");
-  await sendNow();
-  assert.equal(lastSend().body, "@b 只问你");
-  await act(async () => renderer.unmount());
-
-  // 引用某位成员的话：「发给」换成被引用的那位。
-  view = base(); messages = timeline(); newerMessages = [];
-  await mount();
-  assert.equal(chip().props["data-group-send-target"], "c");
-  await click(buttons("groupChat.reply.action")[1]);
-  assert.equal(chip().props["data-group-send-target"], "owner", "quoting the owner sends without an @");
-  await click(buttons("groupChat.reply.action")[2]);
-  assert.equal(chip().props["data-group-send-target"], "c", "quoting a member addresses that member");
-  await act(async () => renderer.unmount());
-
-  // 最后发言的成员已移出：顺延到更早一位仍在群里的发言者。
-  view = { ...base(), members: [member("a", "Alpha"), member("b", "Beta"), { ...member("c", "Gamma"), state: "removed" }] };
-  messages = [message(1, { kind: "member", memberId: "b" }, "Beta"), message(2, { kind: "member", memberId: "c" }, "Gamma")];
-  await mount();
-  assert.equal(chip().props["data-group-send-target"], "b");
-  await act(async () => renderer.unmount());
-
-  // 归档的群不显示「发给」。
-  view = { ...base(), group: { ...base().group, status: "archived" } }; messages = timeline();
-  await mount();
-  assert.equal(chip(), undefined);
-  await act(async () => renderer.unmount());
-  newerMessages = [];
-}
-
-// Draft target persistence, quote overrides and raw-body regressions.
-{
-  const chip = () => renderer.root.find(node => node.type === "button" && node.props["data-group-send-target"] !== undefined);
-  const target = () => chip().props["data-group-send-target"];
-  const pick = async key => {
-    await click(chip());
-    await click(renderer.root.find(node => node.type === "button" && node.props["data-group-send-target-option"] === key));
-  };
-  const type = async value => act(async () => renderer.root.findByType("textarea").props.onChange({ target: { value, selectionStart: value.length } }));
+  const chip = () => renderer.root.findAll(node => node.type === "button" && node.props["data-group-prefill"] !== undefined)[0];
+  const target = () => chip()?.props["data-group-prefill"];
+  const type = typeInput;
+  const key = (value, start, end = start) => act(async () => input().props.onKeyDown({
+    key: value, nativeEvent: {}, preventDefault() {},
+  }, selection(start, end)));
   const remount = async () => {
     await act(async () => renderer.unmount());
     await act(async () => { renderer = create(React.createElement(Panel, { groupId: "g", agents, onArchived() {} })); });
@@ -979,86 +885,77 @@ await act(async () => renderer.unmount());
     newerMessages.push(...incoming);
     await act(async () => { for (const listener of [...groupChangedListeners]) listener("g"); await new Promise(resolve => setTimeout(resolve, 200)); });
   };
+  const selectMention = async (query, option) => {
+    await type("@" + query);
+    await click(renderer.root.find(node => node.type === "button" && node.props.role === "option"
+      && node.props.id.endsWith("-" + option)));
+  };
+
+  view = base(); messages = [message(1, { kind: "member", memberId: "a" }, "Owner spoke")]; newerMessages = [];
+  await mount();
+  assert.equal(target(), undefined, "the current owner is implicit");
+  assert.equal(input().props.value.text, "");
+  await type("default owner");
+  assert.deepEqual((await sendNow()).mentions, []);
+  await act(async () => renderer.unmount());
+
   view = base(); messages = [message(1, { kind: "member", memberId: "b" }, "Beta"), message(2, { kind: "member", memberId: "c" }, "Gamma")];
   newerMessages = [];
   await mount();
-  await pick("b"); await type("只给 Beta 的草稿");
+  assert.equal(target(), "c", "the most recent non-owner is prefilled");
+  assert.equal(buttons("groupChat.send")[0].props.disabled, true, "a prefill alone cannot be submitted");
+  await type("a draft");
   await remount();
-  assert.equal(target(), "b", "restoring text also restores the chosen recipient");
-  assert.equal(renderer.root.findByType("textarea").props.value, "只给 Beta 的草稿");
-  await arrive(message(3, { kind: "member", memberId: "a" }, "Owner interrupts"));
-  assert.equal(target(), "b", "a restored draft remains locked when another member speaks");
-  assert.deepEqual((await sendNow()).mentions, ["b"]);
-  assert.equal(target(), "b", "accepted send keeps its recipient even though the latest previous speaker differs");
-  await remount();
-  assert.equal(target(), "b", "the post-send hold survives reopening an empty composer");
-  await arrive(message(100, { kind: "member", memberId: "c" }, "Gamma next"));
-  assert.equal(target(), "c", "the next member message releases the post-send hold");
-
-  await type(" ");
-  await arrive(message(101, { kind: "member", memberId: "b" }, "Beta next"));
-  assert.equal(target(), "c", "whitespace is still composer content and holds the recipient");
-  await type("");
-  assert.equal(target(), "b");
-
-  await click(buttons("groupChat.reply.action")[0]);
-  await remount();
-  assert.equal(target(), "b", "a quote's target survives remount");
-  await pick("owner"); await type("请群主判断");
-  const override = await sendNow();
-  assert.deepEqual([override.body, override.mentions, override.replyTo], ["请群主判断", ["a"], 1], "manual owner overrides the quoted member while keeping the quote");
-
-  await pick("c");
+  assert.equal(input().props.value.text, "a draft");
+  await arrive(message(3, { kind: "member", memberId: "b" }, "Beta interrupts"));
+  assert.equal(target(), "c", "restored prefill holds during editing");
   for (const body of ["```text\n@not-a-member\n```", "> @b quoted example", "# Heading\n\ntext", "x".repeat(32768)]) {
     await type(body);
     const input = await sendNow();
-    assert.equal(input.body, body, "recipient selection preserves Markdown and the entire 32 KiB body budget");
+    assert.equal(input.body, body, "prefill preserves Markdown and the entire body budget");
     assert.deepEqual(input.mentions, ["c"]);
   }
-  await act(async () => renderer.unmount());
+  await remount();
+  assert.equal(target(), "c", "accepted prefill survives reopening until a new member speaks");
+  await arrive(message(200, { kind: "member", memberId: "b" }, "Beta next"));
+  assert.equal(target(), "b");
 
-  // A removed locked member falls back once, then the existing draft holds that replacement.
-  view = base(); messages = [message(1, { kind: "member", memberId: "b" }, "Beta"), message(2, { kind: "member", memberId: "c" }, "Gamma")]; newerMessages = [];
-  await mount(); await type("draft");
-  view = { ...view, members: view.members.map(member => member.id === "c" ? { ...member, state: "removed" } : member) };
-  await arrive();
-  assert.equal(target(), "b", "a removed target falls back to the previous active speaker");
-  await arrive(message(3, { kind: "member", memberId: "a" }, "Owner"));
-  assert.equal(target(), "b", "the replacement remains locked while the draft exists");
-  await act(async () => renderer.unmount());
+  await type("leave the text");
+  await key("Backspace", 0);
+  assert.equal(target(), undefined);
+  assert.equal(input().props.value.text, "leave the text");
+  assert.equal(draftFor("fixture-owner", "g").composer.sendTarget?.target.kind, "owner", "the saved draft records the cleared prefill");
+  await remount();
+  assert.equal(target(), undefined, "removing a prefill survives draft restoration");
+  assert.deepEqual((await sendNow()).mentions, []);
+  await arrive(message(201, { kind: "member", memberId: "a" }, "Owner again"));
+  assert.equal(target(), undefined);
 
-  // Automatic selection follows a member's identity even when that member is the owner.
-  view = base(); messages = [message(1, { kind: "member", memberId: "b" }, "Beta"),
-    message(2, { kind: "member", memberId: "c" }, "Gamma"), message(3, { kind: "member", memberId: "a" }, "Owner")]; newerMessages = [];
-  await mount(); await type("draft for the last speaker");
-  view = { ...view, currentOwnerId: "b" };
-  await arrive(); await remount();
-  assert.equal(target(), "a", "changing the owner preserves the last speaker's identity in the restored draft");
-  view = { ...view, members: view.members.map(member => member.id === "a" ? { ...member, state: "removed" } : member) };
-  await arrive();
-  assert.equal(target(), "c", "removing the last speaker who was owner falls back to the previous active speaker");
-  assert.deepEqual((await sendNow()).mentions, ["c"]);
+  await click(buttons("chat.quote")[0]);
+  assert.equal(target(), undefined, "the quote carries its own implicit recipient");
+  await selectMention("a", "a");
+  const override = await sendNow();
+  assert.deepEqual([override.body, override.mentions, override.replyTo], ["@a", ["a"], 1], "an explicit owner mention overrides the quote");
+  await selectMention("all", "all");
+  assert.deepEqual(await sendNow().then(input => [input.body, input.mentions]), ["@all", []], "broadcast is the ordinary @all text");
   await act(async () => renderer.unmount());
 
   view = base(); messages = timeline(); newerMessages = [];
-  await mount(); await click(buttons("groupChat.reply.action")[1]);
-  view = { ...view, currentOwnerId: "b" };
-  await arrive(); await remount();
-  assert.equal(target(), "a", "a quote follows its author after ownership changes");
-  await type("answer the quoted message");
-  const quotedOwner = await sendNow();
-  assert.deepEqual([quotedOwner.replyTo, quotedOwner.mentions], [2, []], "the original quote still controls routing");
+  await mount(); await type("draft");
+  view = { ...view, members: view.members.map(member => member.id === "c" ? { ...member, agentMissing: true } : member) };
+  await arrive();
+  assert.equal(target(), undefined, "deleted targets clear without switching the draft to another member");
+  assert.deepEqual((await sendNow()).mentions, []);
   await act(async () => renderer.unmount());
 
-  // Upgrade restores the routing intent of a pre-feature draft.
   view = base(); messages = timeline(); newerMessages = [];
   await mount(); await type("legacy draft");
-  const saved = [...journalDrafts.values()].at(-1);
+  const saved = draftFor("fixture-owner", "g");
   delete saved.composer.sendTarget;
   await remount();
-  assert.equal(target(), "owner", "old ordinary drafts keep default owner routing");
+  assert.equal(target(), undefined, "older ordinary drafts retain implicit owner routing");
   assert.deepEqual((await sendNow()).mentions, []);
   await act(async () => renderer.unmount());
 }
 
-console.log("PASS group chat panel UI: send target chip, retry, quote, compact and expanded roster, member tabs, owner settings, attachments, automatic recovery, immutable pages, role versions, bubble Stop actions, published result ordering and exact turn settlement");
+console.log("PASS group chat panel UI: removable mention prefill, retry, quote, compact and expanded roster, member tabs, owner settings, attachments, automatic recovery, immutable pages, role versions, bubble Stop actions, published result ordering and exact turn settlement");

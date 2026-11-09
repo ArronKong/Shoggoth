@@ -27,7 +27,6 @@ const {
   parseDeepSeekHarnessVersion,
   prepareDeepSeekHarnessRuntimeAccountIntegration,
   resolveDeepSeekHarnessLaunch,
-  supportsDeepSeekHarnessVersion,
 } = require("./deepseek-harness-runtime-paths");
 
 const PARENT_ENV_ALLOWLIST = Object.freeze([
@@ -226,6 +225,7 @@ class DeepSeekHarnessRuntimeHost {
     this.permissionPolicy = normalizeDeepSeekHarnessPermissionPolicy(options.permissionPolicy);
     this.controlInstance = options.controlInstance === true;
     this.workspace = this.controlInstance ? null : normalizeDeepSeekHarnessWorkspace(options.workspace);
+    this.modelOnlyInstance = options.modelOnlyInstance === true;
     this.binaryCandidate = options.binaryPath;
     this.bridgeCandidate = options.bridgePath;
     this.parentEnv = options.parentEnv || process.env;
@@ -320,17 +320,9 @@ class DeepSeekHarnessRuntimeHost {
         fs: this.fs,
       });
       const versionResult = await this._runControl(["--version"], { timeoutMs: 5_000 });
-      const version = parseDeepSeekHarnessVersion(versionResult.stdout);
-      if (versionResult.code !== 0 || !supportsDeepSeekHarnessVersion(version)) {
-        throw hostError(
-          "DEEPSEEK_HARNESS_VERSION_UNSUPPORTED",
-          "DeepSeek CLI 0.1.1 or newer is required",
-        );
-      }
-      if (this.secretGateway && versionResult.stdout.trim() !== "0.1.1-rc.2") {
-        throw hostError("SECRET_MODEL_RUNTIME_UNSUPPORTED", "This DeepSeek version has no verified private-input protection");
-      }
-      this.cliVersion = version;
+      // The bridge protocol and projection readiness establish compatibility;
+      // an older, newer or nonstandard CLI label is only diagnostic metadata.
+      this.cliVersion = versionResult.code === 0 ? parseDeepSeekHarnessVersion(versionResult.stdout) : null;
       this.ledger = await openRuntimeLedger(this.ledgerSlot, () => new DeepSeekHarnessRuntimeLedger({
         fs: this.fs,
         stateRoot: path.join(this.paths.stateDir, "runtime-ledgers", DEEPSEEK_HARNESS_RUNTIME),
@@ -1176,7 +1168,9 @@ class DeepSeekHarnessRuntimeHost {
   _spawnBridge() {
     // Catalog/auth/command discovery has no execution authority. A locked MCP
     // helper must not prevent those reads from reaching the native CLI.
-    const reservation = this.controlInstance ? null : this.mcpGateIssuer.reserveMcpServer({
+    // A model-only host is tool-free and also runs without the MCP helper.
+    const withoutMcp = this.controlInstance || this.modelOnlyInstance;
+    const reservation = withoutMcp ? null : this.mcpGateIssuer.reserveMcpServer({
       runtimeProfileId: this.runtimeProfileId,
       runtimeAccountId: this.runtimeAccountId,
       executionRunId: this.mcpExecutionRunId,
@@ -1201,7 +1195,7 @@ class DeepSeekHarnessRuntimeHost {
       DSH_PERMISSION_MODE: this.permissionPolicy.sandbox,
       SHOGGOTH_DSH_APPROVAL_POLICY: this.permissionPolicy.approvalPolicy === "never"
         ? "never" : "ask",
-      SHOGGOTH_DSH_CONTROL_INSTANCE: this.controlInstance ? "1" : "0",
+      SHOGGOTH_DSH_CONTROL_INSTANCE: withoutMcp ? "1" : "0",
       ...(this.modelSecretRoute ? { SHOGGOTH_DSH_SECRET_PROJECTION: this.modelSecretRoute.baseUrl } : {}),
       SHOGGOTH_DSH_WORKSPACE_EXECUTION_VERSION: this.workspaceExecutionVersion === 1 ? "1" : "0",
       ...(this.launch.argsPrefix[0] ? { SHOGGOTH_DSH_ENTRYPOINT: this.launch.argsPrefix[0] } : {}),
@@ -1576,7 +1570,7 @@ class DeepSeekHarnessRuntimeHost {
 
   _assertExecutionInstance() {
     this._assertReady();
-    if (this.controlInstance) {
+    if (this.controlInstance || this.modelOnlyInstance) {
       throw hostError(
         "RUNTIME_CAPABILITY_UNSUPPORTED",
         "DeepSeek control hosts cannot run sessions",

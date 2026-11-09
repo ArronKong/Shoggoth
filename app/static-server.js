@@ -1197,6 +1197,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           await registry.createInspiration(await readJsonBody(req)));
         if (segs.length === 2 && segs[1] === "agents" && method === "GET") return sendJson(res, 200,
           await registry.getInspirationAgents());
+        if (segs.length === 2 && segs[1] === "models" && method === "GET") return sendJson(res, 200,
+          await registry.getInspirationModels({ backendId: requestUrl?.searchParams.get("backendId"),
+            agentId: requestUrl?.searchParams.get("agentId") }));
         if (segs.length === 2 && segs[1] === "agent-dock" && method === "GET") return sendJson(res, 200,
           await registry.getInspirationAgentDock());
         if (segs.length === 2 && segs[1] === "idle-agents" && method === "GET") return sendJson(res, 200,
@@ -3312,6 +3315,25 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           return sendJson(res, code === "MEMORY_STATUS_INVALID" ? 400 : 409, { code, error: protocol.MESSAGES[code] });
         }
       }
+      if (segs[2] === "default-model" && segs.length === 3) {
+        if (backend.getBackendDescriptor?.().surfaces?.runtimeBindings !== true) return sendJson(res, 501, { error: "Agent default models unavailable" });
+        if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
+        if (method === "PUT" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
+        try {
+          if (method === "GET") return sendJson(res, 200, await backend.getAgentDefaultModels(id));
+          const body = await readJsonBody(req);
+          if (!body || Object.hasOwn(body, "profileId")) throw Object.assign(Error("Invalid input"), { code: "AGENT_BINDING_INVALID" });
+          const { profileId: _profileId, ...input } = validateAgentBindingParams("agent.binding.setDefaultModel", { ...body, profileId: "rest" });
+          return sendJson(res, 200, await backend.selectAgentDefaultModel(id, input));
+        } catch (error) {
+          const messages = { ...AGENT_BINDING_PUBLIC_MESSAGES, ...SESSION_RUNTIME_PUBLIC_MESSAGES,
+            NATIVE_RUNTIME_DISABLED: "该运行环境已停用，请先恢复连接" };
+          const code = Object.hasOwn(messages, error?.code) ? error.code
+            : method === "GET" ? "AGENT_BINDING_UNAVAILABLE" : "AGENT_DEFAULT_MODEL_UNAVAILABLE";
+          return sendJson(res, code === "AGENT_BINDING_INVALID" ? 400 : code === "AGENT_BINDING_NOT_FOUND" ? 404 : 409,
+            { code, error: messages[code] });
+        }
+      }
       if (segs[2] === "runtime-models" && segs.length === 3) {
         if (backend.getBackendDescriptor?.().surfaces?.sessionRuntimeSwitch !== true) return sendJson(res, 501, { error: "Runtime model selection unavailable" });
         if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
@@ -3439,8 +3461,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
               ? undefined : Number(expectedUpdatedAtValue),
             createdAt: createdAtValue === null ? undefined : Number(createdAtValue),
           });
-          // Native deletion archives a restorable identity; external deletions remove it.
-          if (backendId !== "shoggoth") avatarPool?.release(id);
+          // Group history still shows the deleted Agent with its original avatar.
           return sendJson(res, 200, { ok: true });
         }
         return sendJson(res, 405, { error: "method not allowed" });
@@ -3781,8 +3802,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (!isSingleSegmentAgentId(agentId)) return sendJson(res, 400, { error: "invalid agent id" });
       return sendJson(res, 200, { preview: await registry.getSessionPreview(backendId, agentId, key, { sessionId, offset, limit }) });
     }
-    // Global chat search across every active backend and agent. The registry
-    // owns fan-out/fail-soft aggregation; the renderer makes one bounded call.
+    // Global chat search. The chat page includes public groups; references
+    // continue to search direct sessions only.
     if (segs[0] === "chat" && segs[1] === "search" && segs.length === 2) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
       const url = new URL(req.url, "http://127.0.0.1");
@@ -3790,7 +3811,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       const limit = Number(url.searchParams.get("limit")) || undefined;
       const offset = Number(url.searchParams.get("offset")) || 0;
       if (!isBoundedApiString(q) || !q.trim()) return sendJson(res, 400, { error: "missing or invalid ?q=" });
-      return sendJson(res, 200, { search: await registry.searchAllChat(q, { limit, offset }) });
+      const includeGroups = url.searchParams.get("includeGroups") === "1";
+      return sendJson(res, 200, { search: await registry.searchAllChat(q, { limit, offset, includeGroups }) });
     }
     if (segs[0] === "status" && segs.length === 1) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });

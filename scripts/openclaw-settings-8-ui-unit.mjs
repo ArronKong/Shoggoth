@@ -13,8 +13,6 @@ const pagePath = path.join(root, "app/manage-ui/src/pages/SettingsPage.tsx");
 const source = fs.readFileSync(pagePath, "utf8");
 const ast = ts.createSourceFile(pagePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const pureNames = new Set([
-  "updateActionForCapabilityReview",
-  "isActionableUpdatePhase",
   "standingGrantView",
 ]);
 const pureSource = ast.statements
@@ -37,12 +35,6 @@ vm.runInNewContext(`(function(module, exports) { ${compiled}\n})(module, module.
 });
 const helpers = module.exports;
 
-assert.equal(helpers.updateActionForCapabilityReview({ operation: "repair" }), "repair");
-assert.equal(helpers.updateActionForCapabilityReview({ operation: "update" }), "update");
-assert.equal(helpers.isActionableUpdatePhase({ phase: "repair_required" }), true);
-assert.equal(helpers.isActionableUpdatePhase({ phase: "capability_review_required" }), true);
-assert.equal(helpers.isActionableUpdatePhase({ phase: "failed" }), false);
-
 const secretCommand = "curl -H 'Authorization: Bearer top-secret'"; // gitleaks:allow -- synthetic test fixture; not a usable credential
 const secretCwd = "/private/top-secret";
 const grantView = helpers.standingGrantView({
@@ -64,17 +56,9 @@ const grantView = helpers.standingGrantView({
 assert.equal(JSON.stringify(grantView).includes("top-secret"), false,
   "standing-grant UI projection must omit command and cwd");
 
-const updaterStart = source.indexOf("const startUpdate = async (");
-const updaterEnd = source.indexOf("\n\n  const revokeGrant", updaterStart);
-assert.ok(updaterStart >= 0 && updaterEnd > updaterStart);
-const updaterSource = source.slice(updaterStart, updaterEnd);
-assert.match(updaterSource, /runSelfUpdate\(target\.id, \{ action, acceptCapabilities \}\)/);
-assert.match(source, /startUpdate\(target, reviewAction, true\)/,
-  "capability widening requires the separate review action");
-assert.match(source, /u\.actions\?\.includes\("update"\)/,
-  "ordinary updates must be capability-driven");
-assert.match(source, /update\.actions\?\.includes\("repair"\)/,
-  "repair must be capability-driven");
+// Settings shows Hermes/OpenClaw versions and update notices only; updating is not offered here.
+assert.doesNotMatch(source, /runSelfUpdate|getSelfUpdates|startUpdate/,
+  "Settings must not start backend self-updates");
 assert.match(source, /listStandingGrants\(backend\.id\)/);
 assert.match(source, /revokeStandingGrant\(backend\.id, grant\.grantId\)/);
 assert.doesNotMatch(source, /standingGrantView\(grant\)[\s\S]{0,1200}view\.(command|cwd)/,

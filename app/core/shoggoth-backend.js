@@ -78,6 +78,7 @@ const {
 } = require("../agent-service/agent-lifecycle-service-protocol");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../agent-service/product-store");
 const { runtimeModelProfile } = require("../agent-service/agent-runtime-binding");
+const { sourceToken, supportsSessionProviders } = require("../agent-service/codex-session-provider");
 const { DEFAULT_RUNTIME_ACCOUNTS, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../agent-service/runtime-account");
 const { GREETING_LOCALES } = require("../agent-service/agent-greeting");
 const {
@@ -124,9 +125,14 @@ const MODEL_CATALOG_TIMEOUT_MS = 45_000;
 // fits catalogs the Service already holds (a few ms), not a CLI round trip.
 const RUNTIME_MODEL_GROUP_FRESH_BUDGET_MS = 80;
 const RUNTIME_MODEL_GROUP_MAX_STALE_MS = 30 * 60_000;
+// Last good catalogs also persist (options.runtimeModelCache), so the first menu
+// after a launch or Service recovery shows them while each Runtime refreshes.
+const RUNTIME_MODEL_GROUP_PERSISTED_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+const RUNTIME_MODEL_GROUP_PERSISTED_REWRITE_MS = 60 * 60_000;
+const RUNTIME_MODEL_GROUP_PERSISTED_MAX_ENTRIES = 64;
 // Facade writes that can change a Runtime's catalog or capabilities. A menu
 // read after one of them waits for a fresh catalog.
-const RUNTIME_MODEL_CATALOG_MUTATION = /^(?:agent\.binding\.(?:add|update|remove|setDefault)$|agent\.update$|profile\.(?:bind|configure|clear)$|provider\.endpoints\.(?:save|delete)$|runtime\.account\.(?:login\.|logout$)|runtime\.config\.apply$)/u;
+const RUNTIME_MODEL_CATALOG_MUTATION = /^(?:agent\.binding\.(?:add|update|remove|setDefault|setDefaultModel)$|agent\.update$|profile\.(?:bind|configure|clear)$|provider\.endpoints\.(?:save|delete)$|runtime\.account\.(?:login\.|logout$)|runtime\.config\.apply$)/u;
 const DEFAULT_READINESS_TIMEOUT_MS = 70_000;
 const DEFAULT_READINESS_INTERVAL_MS = 500;
 const DEFAULT_SERVICE_STATUS_TIMEOUT_MS = 1_000;
@@ -1208,6 +1214,11 @@ function modelRowProvider(profile, model) {
   return model.modelProviderRef || profile.providerRef || profile.runtime;
 }
 
+function profileAtRuntimeBinding(profile, binding) {
+  return runtimeModelProfile(binding ? { ...profile, runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
+    runtimeAccountId: binding.runtimeAccountId } : profile, binding);
+}
+
 function sessionToRow(profile, value, backendId) {
   const next = value.nextRuntimeSelection;
   const modelSettings = next?.modelSettings ?? value.modelSettings;
@@ -1455,6 +1466,8 @@ class ShoggothBackend extends AgentBackend {
       throw new TypeError("ShoggothBackend getRuntimeCliAuth must be a function");
     }
     this.getRuntimeCliAuth = options.getRuntimeCliAuth || null;
+    this.runtimeModelCache = options.runtimeModelCache || null;
+    this.prewarmRuntimeModels = options.prewarmRuntimeModels === true;
     if (options.getLocale !== undefined && typeof options.getLocale !== "function") {
       throw new TypeError("ShoggothBackend getLocale must be a function");
     }
@@ -1478,6 +1491,7 @@ class ShoggothBackend extends AgentBackend {
     this._generation = 0;
     this._runtimeModelGroups = new Map();
     this._runtimeModelsEpoch = 0;
+    this._persistedRuntimeModelGroups = null;
     this._startPromise = null;
     this._queuedStartPromise = null;
     this._stopPromise = null;
@@ -1746,6 +1760,7 @@ class ShoggothBackend extends AgentBackend {
   // A CLI connected again in Settings may need its built-in Agent.
   onConnectionsChanged() {
     this._runtimeModelsEpoch += 1;
+    this._dropPersistedRuntimeModels();
     if (this._state !== "started") return;
     void this._refreshManagedProfiles().catch(() => {});
   }
@@ -1760,10 +1775,13 @@ class ShoggothBackend extends AgentBackend {
     return this._rememberBindings(profileId, await this._call("agent.binding.sync", { profileId, runtimeAccountIds }));
   }
 
+  _profileForBinding(profile, bindingId = profile.defaultBindingId) {
+    const binding = this._bindingsByProfile?.get(profile.id)?.find(entry => entry.id === bindingId);
+    return profileAtRuntimeBinding(profile, binding);
+  }
+
   _profileForSession(profile, session) {
-    const binding = this._bindingsByProfile?.get(profile.id)?.find(entry => entry.id === session.runtimeBindingId);
-    return runtimeModelProfile(binding ? { ...profile, runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
-      runtimeAccountId: binding.runtimeAccountId } : profile);
+    return this._profileForBinding(profile, session.runtimeBindingId ?? profile.defaultBindingId);
   }
 
   _acceptsProfileBackend(backendId) {
@@ -2405,7 +2423,7 @@ class ShoggothBackend extends AgentBackend {
       const profiles = [...this._profilesByAgent.values()].sort(compareNativeAgentProfiles);
       const accountCounts = runtimeAccountReferenceCounts(profiles);
       return profiles.map((profile) => ({
-        ...profileToAgent(profile, this.id, accountCounts.get(profile.runtimeAccountId), this._codexAutomationOwnerId),
+        ...profileToAgent(this._profileForBinding(profile), this.id, accountCounts.get(profile.runtimeAccountId), this._codexAutomationOwnerId),
         isDefault: profile.isDefault === true,
       }));
     }
@@ -2499,7 +2517,7 @@ class ShoggothBackend extends AgentBackend {
       this._sessionsByKey = sessionsByKey;
       const accountCounts = runtimeAccountReferenceCounts(profiles);
       this._agents = profiles.map((profile) => profileToAgent(
-        profile,
+        this._profileForBinding(profile),
         this.id,
         accountCounts.get(profile.runtimeAccountId),
         this._codexAutomationOwnerId,
@@ -2618,7 +2636,8 @@ class ShoggothBackend extends AgentBackend {
 
   async getAgent(id) {
     this._assertDomainReady();
-    const profile = this._profilesByAgent.get(id);
+    const rawProfile = this._profilesByAgent.get(id);
+    const profile = rawProfile && this._profileForBinding(rawProfile);
     if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
     const definition = await this._call("harness.definition.meta", { profileId: profile.id });
     // The daily review has one saved owner. Other agents retain their own
@@ -2831,7 +2850,12 @@ class ShoggothBackend extends AgentBackend {
     const profile = this._profileForManagedAgent(id);
     const params = validateAgentBindingParams(method, { profileId: profile.id, ...input });
     const result = await this._call(method, params);
-    if (method !== "agent.binding.list") await this._refreshManagedProfiles();
+    if (method === "agent.binding.setDefaultModel") {
+      this._rememberBindings(profile.id, result);
+      // The write is durable even if another Agent's refresh fails.
+      if (this._profileRefreshPromise) await this._profileRefreshPromise.catch(() => {});
+      await this._refreshManagedProfiles().catch(() => {});
+    } else if (method !== "agent.binding.list") await this._refreshManagedProfiles();
     if (result.bindings.some(binding => binding.runtime.startsWith("ext-"))) await this._refreshExtensionRuntimeStatuses();
     return { ...result, availability: result.bindings.map((binding) => ({ bindingId: binding.id,
       ...this._bindingAvailability(id, binding.runtime, binding.runtimeAccountId) })) };
@@ -2926,18 +2950,25 @@ class ShoggothBackend extends AgentBackend {
   async _runtimeModelGroup(profile, binding) {
     const nativeAccount = DEFAULT_RUNTIME_ACCOUNTS.some(account => account.id === binding.runtimeAccountId
       && account.kind === "native-user");
-    const key = nativeAccount ? `account:${binding.runtimeAccountId}` : `binding:${profile.id}:${binding.id}`;
+    // Old Harness snapshots lack the absolute provider identity needed when
+    // the Agent changes its default source; CLI catalogs can still be reused.
+    const prefix = binding.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID ? "binding-sources" : "binding";
+    const key = nativeAccount ? `account:${binding.runtimeAccountId}` : `${prefix}:${profile.id}:${binding.id}`;
     const generation = this._generation, epoch = this._runtimeModelsEpoch;
     let entry = this._runtimeModelGroups.get(key);
     if (!entry) this._runtimeModelGroups.set(key, entry = { snapshot: null, at: 0, stamp: null, refresh: null, refreshStamp: null });
     const stamp = `${generation}:${epoch}`;
-    const cached = entry.snapshot && entry.stamp === stamp
-      && this.now() - entry.at <= RUNTIME_MODEL_GROUP_MAX_STALE_MS ? entry.snapshot : null;
+    const cached = (entry.snapshot && entry.stamp === stamp
+      && this.now() - entry.at <= RUNTIME_MODEL_GROUP_MAX_STALE_MS ? entry.snapshot : null)
+      ?? this._persistedRuntimeModelGroup(key);
     if (!entry.refresh || entry.refreshStamp !== stamp) {
       const refresh = this._loadRuntimeModelGroup(profile, binding).then(snapshot => {
         const current = this._runtimeModelGroups.get(key) === entry
           && `${this._generation}:${this._runtimeModelsEpoch}` === stamp;
-        if (current) Object.assign(entry, snapshot.models ? { snapshot, at: this.now(), stamp } : { snapshot: null });
+        if (current) {
+          Object.assign(entry, snapshot.models ? { snapshot, at: this.now(), stamp } : { snapshot: null });
+          this._persistRuntimeModelGroup(key, snapshot.models ? snapshot : null);
+        }
         return snapshot;
       }).finally(() => { if (entry.refresh === refresh) entry.refresh = null; });
       Object.assign(entry, { refresh, refreshStamp: stamp });
@@ -2948,46 +2979,108 @@ class ShoggothBackend extends AgentBackend {
     try { return (await Promise.race([entry.refresh, budget])) ?? cached; } finally { clearTimeout(timer); }
   }
 
-  async getSessionRuntimeModels(id, key) {
-    const profile = this._profileForManagedAgent(id);
-    if (this._sessionTarget(key).profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
-    const bindings = await this.getAgentRuntimeBindings(id);
-    const selection = await this._sessionRuntimeRequest("chat.session.runtime.state", id, key);
+  _loadPersistedRuntimeModels() {
+    if (!this.runtimeModelCache) return null;
+    if (!this._persistedRuntimeModelGroups) {
+      let stored = {};
+      try { stored = this.runtimeModelCache.read() || {}; } catch { /* disposable cache */ }
+      this._persistedRuntimeModelGroups = new Map(Object.entries(stored).filter(([, value]) => Number.isSafeInteger(value?.at)
+        && value.snapshot && typeof value.snapshot.features === "object" && Array.isArray(value.snapshot.models)));
+    }
+    return this._persistedRuntimeModelGroups;
+  }
+  _writePersistedRuntimeModels() {
+    try { this.runtimeModelCache.write(Object.fromEntries(this._persistedRuntimeModelGroups)); } catch { /* disposable cache */ }
+  }
+  _persistedRuntimeModelGroup(key) {
+    const value = this._loadPersistedRuntimeModels()?.get(key);
+    return value && this.now() - value.at <= RUNTIME_MODEL_GROUP_PERSISTED_MAX_AGE_MS ? value.snapshot : null;
+  }
+  // A failed refresh drops the persisted catalog too, as it does in memory.
+  _persistRuntimeModelGroup(key, snapshot) {
+    const groups = this._loadPersistedRuntimeModels();
+    if (!groups) return;
+    const previous = groups.get(key);
+    if (!snapshot) {
+      if (groups.delete(key)) this._writePersistedRuntimeModels();
+      return;
+    }
+    if (previous && this.now() - previous.at < RUNTIME_MODEL_GROUP_PERSISTED_REWRITE_MS
+      && JSON.stringify(previous.snapshot) === JSON.stringify(snapshot)) return;
+    groups.delete(key);
+    groups.set(key, { at: this.now(), snapshot });
+    while (groups.size > RUNTIME_MODEL_GROUP_PERSISTED_MAX_ENTRIES) groups.delete(groups.keys().next().value);
+    this._writePersistedRuntimeModels();
+  }
+  _dropPersistedRuntimeModels() {
+    const groups = this._loadPersistedRuntimeModels();
+    if (!groups?.size) return;
+    groups.clear();
+    this._writePersistedRuntimeModels();
+  }
+
+  // Loads the most recent conversation's model menu in the background after a
+  // start, so the first menu does not wait for every Runtime's cold CLI.
+  async _prewarmSessionRuntimeModels(generation) {
+    let latest = null;
+    for (const session of this._sessionsByKey.values()) {
+      if (session.source === "codex-desktop") continue;
+      if (!latest || (session.updatedAt || 0) > (latest.updatedAt || 0)) latest = session;
+    }
+    const profile = latest && this._profilesById.get(latest.profileId);
+    if (!profile || generation !== this._generation || this._state !== "started") return;
+    try { await this.getSessionRuntimeModels(profile.agentId, gatewaySessionKey(profile.agentId, latest.sessionKey)); }
+    catch { /* the menu loads on demand */ }
+  }
+
+  async _agentRuntimeModelGroups(profile, bindings, activeBindingId, onlyActiveBinding = false, absoluteSources = false) {
+    const id = profile.agentId;
     const accounts = new Set(await this._connectedCliAccounts());
     accounts.add(SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
     if (this._extensionRuntimeStatusesGeneration === this._generation) {
       for (const entry of this._extensionRuntimeStatuses?.values() || []) if (entry.availability === "available") accounts.add(entry.runtimeAccountId);
     }
     const names = new Map(require("../runtime-cli-auth").AUTH_SPECS.map(spec => [spec.runtimeAccountId, spec.name]));
-    const desktop = this._sessionTarget(key).session.source === "codex-desktop";
-    const candidates = bindings.bindings.filter(binding => (!desktop || binding.id === selection.bindingId) && binding.enabled
+    const candidates = bindings.bindings.filter(binding => (!onlyActiveBinding || binding.id === activeBindingId) && binding.enabled
       && this._bindingAvailability(id, binding.runtime, binding.runtimeAccountId).available
       && accounts.has(binding.runtimeAccountId));
     // Prefer the conversation's existing Binding for duplicate runtime/accounts;
     // historical Binding rows remain durable but never create duplicate options.
-    candidates.sort((a, b) => Number(b.id === selection.bindingId) - Number(a.id === selection.bindingId)
+    candidates.sort((a, b) => Number(b.id === activeBindingId) - Number(a.id === activeBindingId)
       || Number(b.id === bindings.defaultBindingId) - Number(a.id === bindings.defaultBindingId));
     const unique = candidates.filter((binding, index) => candidates.findIndex(entry =>
       entry.runtimeAccountId === binding.runtimeAccountId) === index);
     unique.sort((a, b) => DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === a.runtime)
       - DEFAULT_RUNTIME_ACCOUNTS.findIndex(account => account.runtime === b.runtime));
     // All candidates load together: a cold CLI must not queue behind another.
-    const groups = await mapBounded(unique, Math.max(1, unique.length), async binding => {
+    return mapBounded(unique, Math.max(1, unique.length), async binding => {
       const runtimeName = names.get(binding.runtimeAccountId) || binding.runtime;
       const { features, models } = await this._runtimeModelGroup(profile, binding);
+      const runtimeProfile = { ...profile, runtime: binding.runtime, runtimeAccountId: binding.runtimeAccountId };
       const capabilities = this._chatCapabilitiesForProfile({ ...profile, ...binding, id: profile.id }, features);
       if (!models) return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: false, capabilities, models: [] };
       return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: true, capabilities, models: models.map(model => ({
         id: model.id, name: model.sourceName ? `${model.displayName} · ${model.sourceName}` : model.displayName,
         backendId: this.id, provider: binding.runtime === "codex"
-          ? modelRowProvider({ ...profile, runtime: binding.runtime, runtimeAccountId: binding.runtimeAccountId }, model) : binding.runtime,
-        ...(model.modelProviderRef ? { modelProviderRef: model.modelProviderRef } : {}),
+          ? modelRowProvider(runtimeProfile, model) : binding.runtime,
+        ...(absoluteSources && supportsSessionProviders(runtimeProfile)
+          ? { modelProviderRef: model.sourceProviderRef ?? model.modelProviderRef ?? sourceToken(null) }
+          : model.modelProviderRef ? { modelProviderRef: model.modelProviderRef } : {}),
         runtime: binding.runtime, runtimeName, bindingId: binding.id, isDefault: model.isDefault,
         ...(model.capabilities ? { thinkingOptions: model.capabilities.thinkingOptions,
           thinkingDefault: model.capabilities.thinkingDefault, reasoning: model.capabilities.thinkingOptions.length > 0,
           fast: model.capabilities.fastTier !== null } : {}),
       })) };
     });
+  }
+
+  async getSessionRuntimeModels(id, key) {
+    const profile = this._profileForManagedAgent(id);
+    if (this._sessionTarget(key).profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
+    const bindings = await this.getAgentRuntimeBindings(id);
+    const selection = await this._sessionRuntimeRequest("chat.session.runtime.state", id, key);
+    const groups = await this._agentRuntimeModelGroups(profile, bindings, selection.bindingId,
+      this._sessionTarget(key).session.source === "codex-desktop");
     const currentBinding = bindings.bindings.find(binding => binding.id === selection.bindingId);
     const currentCapabilities = groups.find(group => group.bindingId === selection.bindingId)?.capabilities
       ?? this._chatCapabilitiesForProfile(currentBinding ? { ...profile, ...currentBinding, id: profile.id } : profile,
@@ -2996,6 +3089,46 @@ class ShoggothBackend extends AgentBackend {
     return { selection, models: groups.flatMap(group => group.models),
       runtimes: groups.map(({ models: _models, ...group }) => group),
       capabilities: { ...currentCapabilities, steer: activeCapabilities?.steer === true } };
+  }
+
+  async getAgentDefaultModels(id) {
+    const bindings = await this.getAgentRuntimeBindings(id);
+    const profile = this._profileForManagedAgent(id);
+    const binding = bindings.bindings.find(entry => entry.id === bindings.defaultBindingId);
+    if (!binding) throw safeError(null, "AGENT_BINDING_NOT_FOUND");
+    const groups = await this._agentRuntimeModelGroups(profile, bindings, binding.id, !bindings.canAdd, true);
+    const modelProviderRef = supportsSessionProviders(binding) ? sourceToken(profile.providerRef) : undefined;
+    const model = profileAtRuntimeBinding(profile, binding).defaultModel
+      ?? groups.find(group => group.bindingId === binding.id)?.models.find(entry => entry.isDefault)?.id ?? null;
+    return { selection: { bindingId: binding.id, model, revision: bindings.revision,
+      ...(modelProviderRef ? { modelProviderRef } : {}) },
+    models: groups.flatMap(group => group.models),
+    runtimes: groups.map(({ models: _models, ...group }) => group) };
+  }
+
+  async selectAgentDefaultModel(id, input) {
+    const profile = this._profileForManagedAgent(id);
+    const method = "agent.binding.setDefaultModel";
+    const { profileId: _profileId, ...selection } = validateAgentBindingParams(method, { ...input, profileId: profile.id });
+    const state = await this._agentRuntimeBindings("agent.binding.list", id);
+    if (state.revision !== selection.revision) throw safeError(null, "AGENT_BINDING_REVISION_CONFLICT");
+    const binding = state.bindings.find(entry => entry.id === selection.bindingId);
+    if (!binding) throw safeError(null, "AGENT_BINDING_NOT_FOUND");
+    this._assertRuntimeEnabled({ agentId: id, ...binding });
+    const result = await this._agentRuntimeBindings(method, id, selection);
+    return { bindingId: result.defaultBindingId, revision: result.revision, model: selection.model,
+      ...(selection.modelProviderRef ? { modelProviderRef: selection.modelProviderRef } : {}) };
+  }
+
+  async getInspirationModels(id) {
+    const profile = this._profileForManagedAgent(id);
+    const bindings = await this.getAgentRuntimeBindings(id);
+    const { defaultBindingId } = bindings;
+    const groups = await this._agentRuntimeModelGroups(profile, bindings, defaultBindingId);
+    const binding = bindings.bindings.find(entry => entry.id === defaultBindingId);
+    return { defaultBindingId, defaultModel: profileAtRuntimeBinding(profile, binding).defaultModel ?? null,
+      models: groups.flatMap(group => group.models),
+      runtimes: groups.map(({ models: _models, ...group }) => group) };
   }
 
   async selectSessionRuntimeModel(id, key, input) {
@@ -3324,6 +3457,7 @@ class ShoggothBackend extends AgentBackend {
       version: skill.version,
       source: skill.source,
       globalEnabled: skill.globalEnabled,
+      globalSettingRevision: skill.globalSettingRevision,
       contentHash: skill.contentHash,
       requiredTools: skill.requiredTools,
       requiredRuntimeCapabilities: skill.requiredRuntimeCapabilities,
@@ -3388,15 +3522,15 @@ class ShoggothBackend extends AgentBackend {
     if (typeof patch.enabled !== "boolean") throw safeError(null, "INVALID_PARAMS");
     const current = await this._nativeSkills(profile);
     const skill = this._resolveNativeSkill(current.items, name, patch);
-    const global = skill.source === "user";
+    const global = skill.source === "user" || skill.globalSettingRevision !== undefined;
     const result = await this._call(global ? "harness.skills.global.set" : "harness.skills.enable", {
       profileId: profile.id,
       skillId: skill.id,
       source: skill.source,
       version: skill.version,
       enabled: patch.enabled,
-      expectedRevision: global ? patch.expectedRevision ?? current.registryVersion
-        : patch.expectedRevision ?? current.profileRevision,
+      expectedRevision: patch.expectedRevision ?? skill.globalSettingRevision
+        ?? (global ? current.registryVersion : current.profileRevision),
     });
     return { ...skill, ...result.skill, backendId: this.id,
       profileRevision: global ? current.profileRevision : result.profileRevision,
@@ -3620,6 +3754,9 @@ class ShoggothBackend extends AgentBackend {
     // keeps a catalog loaded before the write settled.
     const catalogMutation = RUNTIME_MODEL_CATALOG_MUTATION.test(method);
     if (catalogMutation) this._runtimeModelsEpoch += 1;
+    // Start cycles re-apply the same configuration; only a write after start
+    // (a user change) retires the catalogs persisted by earlier launches.
+    if (catalogMutation && this._state === "started") this._dropPersistedRuntimeModels();
     let token;
     try {
       let timeoutMs = ENCRYPTED_MUTATION_METHODS.has(method)
@@ -3655,7 +3792,7 @@ class ShoggothBackend extends AgentBackend {
       if (method === "profile.auth.read" || method === "profile.binding.auth.read"
         || method === "profile.models.list" || method === "profile.binding.models.list"
         || method === "profile.capabilities.read" || method === "profile.binding.capabilities.read"
-        || method === "chat.session.runtime.model.set" || method === "group.member.models"
+        || method === "chat.session.runtime.model.set" || method === "agent.binding.setDefaultModel" || method === "group.member.models"
         || method === "group.members.model" && params.modelSelection !== null) timeoutMs = MODEL_CATALOG_TIMEOUT_MS;
       if (method === "inspiration.media.read" && params.preview === true) timeoutMs = 610_000;
       if (options.timeoutMs !== undefined) {
@@ -4416,7 +4553,7 @@ class ShoggothBackend extends AgentBackend {
       this._sessionsByKey = sessionsByKey;
       const accountCounts = runtimeAccountReferenceCounts(enabled);
       this._agents = enabled.map((profile) => profileToAgent(
-        profile,
+        this._profileForBinding(profile),
         this.id,
         accountCounts.get(profile.runtimeAccountId),
         this._codexAutomationOwnerId,
@@ -4434,6 +4571,7 @@ class ShoggothBackend extends AgentBackend {
       try { this._readyNotifier?.(); } catch { /* registry listener failures are isolated */ }
       this._serviceEventCursor = 0;
       this._scheduleServiceEventPoll(generation, 0);
+      if (this.prewarmRuntimeModels) void this._prewarmSessionRuntimeModels(generation);
       return true;
     } catch (error) {
       this._observeServiceRecovery(error, generation);
@@ -5463,6 +5601,7 @@ class ShoggothBackend extends AgentBackend {
         ["openclaw", "hermes"].includes(execution.backendId) ? execution.sessionKey
           : gatewaySessionKey(execution.agentId, execution.sessionKey))}` : null });
     if (result.idea) result.idea.latestExecution = decorate(result.idea.latestExecution);
+    if (result.acceptedExecution) result.acceptedExecution = decorate(result.acceptedExecution);
     if (result.items) for (const idea of result.items) idea.latestExecution = decorate(idea.latestExecution);
     if (result.executions) result.executions = result.executions.map(decorate);
     return result;
@@ -5503,8 +5642,13 @@ class ShoggothBackend extends AgentBackend {
     const items = (await this._page("chat.history", { sessionKey: execution.sessionKey }, "messages", {
       newestFirst: true, maxBytes: MAX_HISTORY_BYTES, maxItems: MAX_HISTORY_ITEMS,
     })).filter(item => item.runId === execution.runId);
+    const messages = reassembleHistory(items);
+    const errorIds = new Set(items.filter(item => item.type === "error" && item.role === "system")
+      .map(item => item.fragment?.messageId || item.payload?.message?.id));
+    const error = messages.findLast(message => errorIds.has(message.id) && message.role === "system");
     const descriptor = this.runtimeCliAuth.get(profile.runtimeAccountId);
-    return { messages: reassembleHistory(items), exactRun: true, local: true,
+    return { messages, exactRun: true, local: true,
+      errorMessage: error ? error.content.filter(part => part.type === "text").map(part => part.text).join("") : null,
       runtimeHome: descriptor?.processHome || os.homedir() };
   }
   respondInspiration(id, input) { return this._inspirationCall("inspiration.respond", { ...input, id }); }
@@ -6112,6 +6256,7 @@ class ShoggothBackend extends AgentBackend {
       status: run.status,
       agentId: profile.agentId,
       runId: run.id,
+      createdAt: run.createdAt,
       ...(run.startedAt !== null ? { startedAt: run.startedAt } : {}),
       ...(run.resultSummary ? { progressSummary: run.resultSummary } : {}),
     };
@@ -6424,6 +6569,7 @@ class ShoggothBackend extends AgentBackend {
       runtime: profile.runtime,
       status: run.status,
       agentId: profile.agentId,
+      createdAt: run.createdAt,
       ...(run.startedAt !== null ? { startedAt: run.startedAt } : {}),
       ...(run.finishedAt !== null ? { finishedAt: run.finishedAt } : {}),
       ...(run.resultSummary ? { summary: run.resultSummary } : {}),
@@ -7400,19 +7546,25 @@ class ShoggothBackend extends AgentBackend {
     if (["approval", "prompt"].includes(event.type) && Number.isSafeInteger(event.seq)
       && Number.isSafeInteger(state.replayThroughSeq) && event.seq <= state.replayThroughSeq
       && payload.requestId !== state.replayWaitingRequestId) return false;
+    const fragment = event.type === "text.delta" ? payload.delta : payload.text;
+    const replyPhase = payload.phase === "commentary"
+      || (payload.phase === "final_answer" && typeof fragment === "string" && fragment.trim()) ? payload.phase : undefined;
+    const textMeta = { runId: context.run.id, displayId: `native-run:${context.run.id}`, replyPhase };
     if (["text.delta", "text", "ui_artifact"].includes(event.type)) {
       const view = reduceNativeContent(state, context.run.id, event);
-      if (view.hasUi) this._emitNativeContent(context, state, "delta");
+      if (view.hasUi) this._emitNativeContent(context, state, "delta", { replyPhase });
     }
     if (event.type === "text.delta" && safeString(payload.delta, MAX_HISTORY_BYTES)) {
       state.text += payload.delta;
-      if (!state.nativeContent?.hasUi) this._invokeHook(context.hooks, "delta", state.text, { runId: context.run.id, displayId: `native-run:${context.run.id}` });
+      if (!state.nativeContent?.hasUi) this._invokeHook(context.hooks, "delta", state.text, textMeta);
     } else if (event.type === "text" && safeString(payload.text, MAX_HISTORY_BYTES)) {
       const previous = state.text;
       if (!state.text) state.text = payload.text;
       else if (payload.text.startsWith(state.text)) state.text = payload.text;
       else if (!state.text.endsWith(payload.text)) state.text += payload.text;
-      if (state.text !== previous && !state.nativeContent?.hasUi) this._invokeHook(context.hooks, "delta", state.text, { runId: context.run.id, displayId: `native-run:${context.run.id}` });
+      // Completion can identify a previously unmarked streaming segment.
+      if (state.text && !state.nativeContent?.hasUi && (state.text !== previous || replyPhase === "final_answer"))
+        this._invokeHook(context.hooks, "delta", state.text, textMeta);
       if (textKey && ["commentary", "final_answer"].includes(payload.phase)) {
         (state.sealedTextItems ||= new Set()).add(textKey);
       }
@@ -7681,7 +7833,7 @@ class ShoggothBackend extends AgentBackend {
       if (context.poll.consumerCancelled) return;
       if (!this._emitNativeContent(context, state, "aborted", { runId: terminal.id })) {
         this._invokeHook(context.hooks, "final", state.text || "", false,
-          { runId: terminal.id, stopReason: "aborted" });
+          { runId: terminal.id, displayId: `native-run:${terminal.id}`, stopReason: "aborted" });
       }
       return;
     }

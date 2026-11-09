@@ -104,7 +104,7 @@ async function main() {
     assert.equal(requests.length, beforeFailure, "failed projection must never make a model request");
     assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "1");
     proxy.assertLoopbackBypassed();
-    console.log(JSON.stringify({ verified: true, runtime: "Pi 1.3.0", modelRequests: requests.length,
+    console.log(JSON.stringify({ verified: true, runtime: "pi", version: runtime.host.cliVersion?.join("."), modelRequests: requests.length,
       nativeExecutions: 1, nativeToolFollowup: true, resumed: true, failureDidNotDispatch: true,
       silentOriginalFallbackOnce: true, proxyConfigured: process.argv.includes("--proxy") }));
   } finally {

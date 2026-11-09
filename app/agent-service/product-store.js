@@ -17,11 +17,12 @@ const {
 } = require("./runtime-account");
 const {
   BINDING_STATE_FIELDS, PROJECTED_RUNTIME_FIELDS, MAX_AGENT_RUNTIME_BINDINGS, MAX_BINDING_OPERATIONS,
-  bindingError, bindingId, runtimeProfileIdForBinding, validateAgentRuntimeBinding, validateBindingState,
+  bindingError, bindingId, runtimeProfileIdForBinding, validBindingModel, validateAgentRuntimeBinding, validateBindingState,
   withInitialBinding, projectProfile, runtimeModelProfile, profileToDisk, profileWithoutBindingState,
 } = require("./agent-runtime-binding");
 
-const STORE_SCHEMA_VERSION = 16;
+const STORE_SCHEMA_VERSION = 17;
+const READABLE_PRODUCT_SCHEMA_VERSIONS = Object.freeze([15, 16, STORE_SCHEMA_VERSION]);
 const DEFAULT_AGENT_PROFILE_UUID = "f8a76c25-bd49-4c12-9d63-7b7d1eb1d0a4";
 const DEFAULT_AGENT_PROFILE_ID = DEFAULT_AGENT_PROFILE_UUID;
 const DEFAULT_AGENT_BACKEND_ID = "shoggoth";
@@ -336,9 +337,12 @@ function runtimeAccountFromDisk(record, code, location) {
   }
 }
 
-function agentProfileFromDisk(record) {
+function agentProfileFromDisk(record, schemaVersion) {
   const canonical = pickExact(record, BINDING_AGENT_PROFILE_FIELDS, "AgentProfile");
   const state = validateBindingState(canonical);
+  if (schemaVersion < 17 && state.bindings.some(binding => binding.defaultModel !== undefined)) {
+    throw storeError("STORE_INVALID_RECORD", "旧版 Binding 不包含默认模型");
+  }
   const selected = state.bindings.find(binding => binding.id === state.defaultBindingId);
   return { profile: validateAgentProfile({ ...canonical, runtime: selected.runtime,
     runtimeProfileId: selected.runtimeProfileId, runtimeAccountId: selected.runtimeAccountId }) };
@@ -730,6 +734,7 @@ class ProductStore {
   listAgentProfiles() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.listAgentProfiles 未实现"); }
   getAgentProfile() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.getAgentProfile 未实现"); }
   putAgentProfile() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.putAgentProfile 未实现"); }
+  setAgentDefaultModel() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.setAgentDefaultModel 未实现"); }
   listRuntimeAccounts() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.listRuntimeAccounts 未实现"); }
   getRuntimeAccount() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.getRuntimeAccount 未实现"); }
   putRuntimeAccount() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.putRuntimeAccount 未实现"); }
@@ -833,7 +838,7 @@ class JsonlProductStore extends ProductStore {
     this.commitUncertain = false;
     this.commitError = null;
     this.lastEventSeq = 0;
-    this.legacySourceFiles = new Map(); this.sawLegacySchema = false;
+    this.legacySourceFiles = new Map(); this.legacyProductVersion = null; this.snapshotSchemaVersion = null;
     this.modelProviders = new Map();
     this.runtimeAccounts = new Map();
     this.runtimeAccountTombstones = new Map();
@@ -872,15 +877,16 @@ class JsonlProductStore extends ProductStore {
     this.lastEventSeq = 0;
     this.commitUncertain = false;
     this.commitError = null;
-    this.legacySourceFiles = new Map(); this.sawLegacySchema = false;
+    this.legacySourceFiles = new Map(); this.legacyProductVersion = null; this.snapshotSchemaVersion = null;
     this.#readSnapshot();
     this.#ensureDefaultRuntimeAccounts();
     this.#replayEventLog(() => {
       this.#assertAllReferences();
       // Validate and retain the exact legacy sources before any journal repair.
       // A failed backup or invalid reference must leave the original bytes intact.
-      if (this.sawLegacySchema) require("./product-schema-migration").preserveLegacyProduct({
-        paths: this.paths, fs: this.fs, sources: this.legacySourceFiles, from: 15, to: STORE_SCHEMA_VERSION });
+      if (this.legacyProductVersion) require("./product-schema-migration").preserveLegacyProduct({
+        paths: this.paths, fs: this.fs, sources: this.legacySourceFiles,
+        from: this.legacyProductVersion, to: this.schemaVersion });
       this.legacySourceFiles.clear();
     });
     this.opened = true;
@@ -1069,7 +1075,7 @@ class JsonlProductStore extends ProductStore {
     const binding = profile.bindings.find((entry) => entry.id === id);
     if (!binding) throw bindingError("NOT_FOUND");
     if (!binding.enabled || !profile.enabled) throw bindingError("DISABLED");
-    return clone(runtimeModelProfile({ ...projectProfile(profile, id), selectedBindingId: id }));
+    return clone(runtimeModelProfile({ ...projectProfile(profile, id), selectedBindingId: id }, binding));
   }
 
   addAgentRuntimeBinding(profileId, spec, options = {}) {
@@ -1118,7 +1124,10 @@ class JsonlProductStore extends ProductStore {
       if ((patch.enabled === false || (patch.runtimeAccountId !== undefined && patch.runtimeAccountId !== current.runtimeAccountId))
         && this.#bindingInUse(profileId, current)) throw bindingError("IN_USE");
       if (patch.enabled === false && profile.defaultBindingId === selectedId) throw bindingError("DEFAULT_PROTECTED");
-      const binding = validateAgentRuntimeBinding({ ...current, ...patch, revision: profile.bindingsRevision + 1,
+      const { defaultModel, ...identity } = current;
+      const keepModel = defaultModel !== undefined && (patch.runtimeAccountId ?? current.runtimeAccountId) === current.runtimeAccountId;
+      const binding = validateAgentRuntimeBinding({ ...identity, ...patch, ...(keepModel ? { defaultModel } : {}),
+        revision: profile.bindingsRevision + 1,
         updatedAt: Math.max(this.now(), current.updatedAt + 1) });
       return this.#commitProfileBindings(profile, { bindings: profile.bindings.map((entry) => entry.id === selectedId ? binding : entry),
         defaultBindingId: profile.defaultBindingId, bindingOperations: profile.bindingOperations }, binding);
@@ -1150,6 +1159,32 @@ class JsonlProductStore extends ProductStore {
       if (profile.defaultBindingId === selectedId) return { binding: clone(binding), ...this.getAgentRuntimeBindings(profileId) };
       return this.#commitProfileBindings(profile, { bindings: profile.bindings,
         defaultBindingId: selectedId, bindingOperations: profile.bindingOperations }, binding);
+    });
+  }
+
+  setAgentDefaultModel(profileId, selectedId, { revision, model, providerRef = null } = {}) {
+    return this.#withSensitiveValueMatcher(() => {
+      this.#assertOpen();
+      const profile = this.agentProfiles.get(profileId);
+      const current = profile?.bindings.find(binding => binding.id === selectedId);
+      if (!current) throw bindingError("NOT_FOUND");
+      this.#assertBindingRevision(profile, revision);
+      if (!profile.enabled || !current.enabled) throw bindingError("DISABLED");
+      const harness = current.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID;
+      if (!validBindingModel(model) || (providerRef !== null && (!harness || !this.modelProviders.has(providerRef)))) {
+        throw bindingError("INVALID");
+      }
+      if (profile.defaultBindingId === selectedId && (harness
+        ? profile.defaultModel === model && profile.providerRef === providerRef : current.defaultModel === model)) {
+        return { binding: clone(current), ...this.getAgentRuntimeBindings(profileId) };
+      }
+      const binding = validateAgentRuntimeBinding({ ...current, ...(harness ? {} : { defaultModel: model }),
+        revision: profile.bindingsRevision + 1, updatedAt: Math.max(this.now(), current.updatedAt + 1) });
+      // One durable profile event; there is no intermediate Runtime/model pair.
+      return this.#commitProfileBindings(profile, {
+        defaultBindingId: selectedId, bindings: profile.bindings.map(entry => entry.id === selectedId ? binding : entry),
+        ...(harness ? { defaultModel: model, providerRef } : {}),
+      }, binding);
     });
   }
 
@@ -1667,7 +1702,7 @@ class JsonlProductStore extends ProductStore {
     } catch (error) {
       throw storeError("STORE_CORRUPT_SNAPSHOT", `无法读取 ProductStore snapshot: ${error.message}`);
     } finally { this.fs.closeSync(fd); }
-    if (![15, this.schemaVersion].includes(snapshot?.schemaVersion)) {
+    if (!READABLE_PRODUCT_SCHEMA_VERSIONS.includes(snapshot?.schemaVersion)) {
       throw storeError(
         "STORE_SCHEMA_UNSUPPORTED",
         `不支持 ProductStore snapshot schemaVersion: ${String(snapshot?.schemaVersion)}`,
@@ -1682,7 +1717,8 @@ class JsonlProductStore extends ProductStore {
       || typeof snapshot.checksum !== "string" || snapshot.checksum !== snapshotChecksum(snapshot)) {
       throw storeError("STORE_CORRUPT_SNAPSHOT", "ProductStore snapshot 结构无效");
     }
-    if (snapshot.schemaVersion === 15) this.sawLegacySchema = true;
+    this.snapshotSchemaVersion = snapshot.schemaVersion;
+    if (snapshot.schemaVersion < this.schemaVersion) this.legacyProductVersion = snapshot.schemaVersion;
     this.#assertNoSensitiveFields(snapshot, false);
     for (const raw of snapshot.modelProviders || []) {
       const provider = modelProviderFromDisk(raw, snapshot.schemaVersion);
@@ -1796,7 +1832,7 @@ class JsonlProductStore extends ProductStore {
   }
 
   #validateEnvelope(event, line) {
-    if (![15, this.schemaVersion].includes(event?.schemaVersion)) {
+    if (!READABLE_PRODUCT_SCHEMA_VERSIONS.includes(event?.schemaVersion)) {
       throw storeError(
         "STORE_SCHEMA_UNSUPPORTED",
         `不支持 events.jsonl 第 ${line} 行 schemaVersion: ${String(event?.schemaVersion)}`,
@@ -1809,7 +1845,9 @@ class JsonlProductStore extends ProductStore {
       || typeof event.checksum !== "string" || event.checksum !== eventChecksum(event)) {
       throw storeError("STORE_CORRUPT_EVENT_LOG", `events.jsonl 第 ${line} 行 envelope/校验和无效`);
     }
-    if (event.schemaVersion === 15) this.sawLegacySchema = true;
+    if (this.snapshotSchemaVersion !== this.schemaVersion && event.schemaVersion < this.schemaVersion) {
+      this.legacyProductVersion = Math.max(this.legacyProductVersion ?? 0, event.schemaVersion);
+    }
     this.#assertNoSensitiveFields(event.payload, false);
   }
 
@@ -2442,6 +2480,7 @@ module.exports = {
   ProductStore,
   RUN_NOTE_FIELDS,
   STORE_SCHEMA_VERSION,
+  READABLE_PRODUCT_SCHEMA_VERSIONS,
   WORK_RUN_FIELDS,
   assertNoSensitiveFields,
   defaultAgentProfile,

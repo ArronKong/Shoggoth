@@ -1,7 +1,7 @@
 // TurnTimeline —— 「一次 agent 回合」的竖向步骤时间线(纯展示,只吃 TurnStep[])。
 // 数据从 lib/turnTimeline.ts 的 reducer 来;本组件不关心事件从哪产生(剧本播放 /
 // 历史回放 / 将来聊天页的实时流都一样)。
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { deriveRelations, formatDuration, toolActivityTitles, toolLabelKey, type StepStatus, type TurnStep, type TurnTimelineState } from "../../lib/turnTimeline";
 import { TrajChevron, TrajGlyph } from "./trajectoryIcons";
@@ -20,6 +20,8 @@ export interface TurnTimelineProps {
   status: TurnTimelineState["status"];
   showDurations?: boolean; // 历史回放没有可信时序 → false,工具耗时一律「—」
   autoFollow?: boolean;
+  detail?: boolean;
+  onOpenPreview?: () => void; // Turns the three-row loading preview into a dialog trigger.
   onUserScrollAway?: () => void;
   emptyHint?: ReactNode;
   className?: string;
@@ -86,17 +88,19 @@ function SubagentActivity({ progress }: { progress: SubagentProgress }) {
   </section>;
 }
 
-export default function TurnTimeline({ steps, status, showDurations = true, autoFollow = true, onUserScrollAway, emptyHint, className, pluginConversation }: TurnTimelineProps) {
+export default function TurnTimeline({ steps, status, showDurations = true, autoFollow = true, detail = false, onOpenPreview, onUserScrollAway, emptyHint, className, pluginConversation }: TurnTimelineProps) {
   const { t } = useTranslation();
+  const preview = !!onOpenPreview;
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   const wrapRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLOListElement>(null);
   const rowRefs = useRef<Map<string, HTMLLIElement>>(new Map());
   const enteredRef = useRef<Set<string>>(new Set());
   const prevLenRef = useRef(0);
   const followedStepsRef = useRef<TurnStep[]>([]);
   const followedAutoRef = useRef(false);
 
-  const relations = useMemo(() => deriveRelations(steps), [steps]);
+  const relations = useMemo(() => preview ? null : deriveRelations(steps), [steps, preview]);
   const activityTitles = useMemo(() => toolActivityTitles(steps, t), [steps, t]);
   const duplicateStepCallIds = useMemo(() => {
     const seen = new Set<string>();
@@ -118,6 +122,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
 
   // 新步进入动画(WAAPI,家法;连接线随行一起长出来)。
   useEffect(() => {
+    if (preview) return;
     for (const s of steps) {
       if (enteredRef.current.has(s.id)) continue;
       enteredRef.current.add(s.id);
@@ -127,14 +132,18 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
       const rail = el.querySelector(`.${styles.rail}`);
       if (rail instanceof HTMLElement) rail.animate([{ transform: "scaleY(0)" }, { transform: "scaleY(1)" }], { duration: ENTER_MS, easing: ENTER_EASE });
     }
-  }, [steps]);
+  }, [steps, preview]);
 
   // 只滚动时间线自身，避免嵌套在聊天流时带动外层滚动容器。ChatPage 每次
   // render 都会 filter 出新数组，因此按 step 对象逐项比较：真实 reducer 更新会
   // 替换发生变化的 step，纯父级重渲染仍复用原对象，不会把用户无故拽回底部。
   useEffect(() => {
     const prevSteps = followedStepsRef.current;
-    const stepsChanged = prevSteps.length !== steps.length || steps.some((step, index) => step !== prevSteps[index]);
+    // The loading preview follows new steps; partial output updates within a row
+    // leave its scroll position alone.
+    const stepsChanged = prevSteps.length !== steps.length || (preview
+      ? prevSteps.at(-1)?.id !== steps.at(-1)?.id
+      : steps.some((step, index) => step !== prevSteps[index]));
     const autoFollowEnabled = autoFollow && !followedAutoRef.current;
     followedStepsRef.current = steps;
     followedAutoRef.current = autoFollow;
@@ -142,6 +151,31 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
     const el = wrapRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   });
+
+  const hasSteps = steps.length > 0;
+  useLayoutEffect(() => {
+    const viewport = wrapRef.current;
+    const list = listRef.current;
+    if (!detail || !viewport || !list) return;
+    const updateFade = () => {
+      // Entrance transforms can extend scrollHeight without changing the layout.
+      const style = getComputedStyle(viewport);
+      const overflow = list.offsetHeight + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) - viewport.clientHeight;
+      viewport.toggleAttribute("data-scrolled", overflow > 1 && viewport.scrollTop > 1);
+      viewport.toggleAttribute("data-more", overflow > 1 && viewport.scrollTop < overflow - 1);
+    };
+    updateFade();
+    const observer = new ResizeObserver(updateFade);
+    observer.observe(viewport);
+    observer.observe(list);
+    viewport.addEventListener("scroll", updateFade, { passive: true });
+    return () => {
+      observer.disconnect();
+      viewport.removeEventListener("scroll", updateFade);
+      viewport.removeAttribute("data-scrolled");
+      viewport.removeAttribute("data-more");
+    };
+  }, [detail, hasSteps]);
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -308,15 +342,25 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
     return !!s.text?.trim();
   };
 
-  if (!steps.length) return <div ref={wrapRef} className={`${styles.wrap} ${className ?? ""}`}>{emptyHint ?? null}</div>;
+  if (!hasSteps) return <div ref={wrapRef} className={`${styles.wrap} ${className ?? ""}`}>{emptyHint ?? null}</div>;
 
+  const StepHead = preview ? "div" : "button";
+  const timelineClassName = [styles.wrap, preview && styles.preview, detail && styles.detailTimeline, className].filter(Boolean).join(" ");
   return (
-    <div ref={wrapRef} className={`${styles.wrap} ${className ?? ""}`} data-status={status}>
-      <ol className={styles.list}>
+    <div ref={wrapRef} className={timelineClassName} data-status={status}
+      data-chat-activity-preview={preview || undefined} tabIndex={preview ? 0 : undefined}
+      role={preview ? "button" : undefined} aria-label={preview ? t("turnLab.processOpen") : undefined}
+      aria-haspopup={preview ? "dialog" : undefined} onClick={onOpenPreview}
+      onKeyDown={onOpenPreview && (event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        if (!event.repeat) onOpenPreview();
+      })}>
+      <ol ref={detail ? listRef : undefined} className={styles.list}>
         {steps.map((s, i) => {
-          const expandable = hasBody(s);
+          const expandable = !preview && hasBody(s);
           const isOpen = open.has(s.id);
-          const rel = relations.get(s.id);
+          const rel = relations?.get(s.id);
           const running = s.status === "running" || s.status === "pending";
           const actionTitle = s.kind === "tool" ? titleFor(s) : "";
           const isTextStep = s.kind === "text" || s.kind === "thinking";
@@ -344,7 +388,11 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                     {rel.type === "retry" ? t("turnLab.retryBadge") : t("turnLab.switchBadge")}
                   </span>
                 ) : null}
-                <button type="button" className={styles.head} data-startup={s.startupWait ? "1" : undefined} onClick={expandable ? () => setOpen((prev) => { const n = new Set(prev); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); return n; }) : undefined} disabled={!expandable} aria-expanded={expandable ? isOpen : undefined}>
+                <StepHead className={styles.head} data-startup={s.startupWait ? "1" : undefined}
+                  {...(!preview && {
+                    type: "button" as const, disabled: !expandable, "aria-expanded": expandable ? isOpen : undefined,
+                    onClick: expandable ? () => setOpen((prev) => { const n = new Set(prev); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); return n; }) : undefined,
+                  })}>
                   {!s.startupWait && !actionTitle && !isTextStep ? <span
                     className={styles.name}
                     data-mono={s.kind === "tool" && /^[\w.:-]+$/.test(kindLabel(s)) ? "1" : undefined}
@@ -361,10 +409,10 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                   <span className={styles.dur}>{s.kind === "tool" ? (showDurations ? formatDuration(s.durationS) : "—") : ""}</span>
                   {!s.startupWait && <span className={styles.chip} data-st={s.kind === "prompt" && s.promptOutcome === "expired" ? "aborted" : s.status}
                     data-external-plugin={s.kind === "tool" && s.toolName === "shoggoth_plugin_call" ? "1" : undefined}>{chipLabel(s)}</span>}
-                  <span className={styles.chev} data-show={expandable ? "1" : undefined} data-open={isOpen ? "1" : undefined}><TrajChevron /></span>
-                </button>
-                {s.subagent ? <SubagentActivity key={s.subagent.key} progress={s.subagent} /> : null}
-                {s.kind === "tool" && s.toolName === "shoggoth_plugin_call"
+                  {!preview && <span className={styles.chev} data-show={expandable ? "1" : undefined} data-open={isOpen ? "1" : undefined}><TrajChevron /></span>}
+                </StepHead>
+                {!preview && s.subagent ? <SubagentActivity key={s.subagent.key} progress={s.subagent} /> : null}
+                {!preview && s.kind === "tool" && s.toolName === "shoggoth_plugin_call"
                   && s.toolCallId && pluginConversation?.agentId && pluginConversation.sessionId
                   && !pluginConversation.duplicateToolCallIds?.has(s.toolCallId)
                   && !duplicateStepCallIds.has(s.toolCallId)
@@ -375,9 +423,9 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                       sessionId: pluginConversation.sessionId,
                       toolCallId: s.toolCallId,
                     }} running={running} /> : null}
-                <div className={styles.bodyClip} data-open={isOpen ? "1" : undefined}>
+                {!preview && <div className={styles.bodyClip} data-open={isOpen ? "1" : undefined}>
                   <div className={styles.bodyInner}>{isOpen ? <div className={styles.body}>{bodyFor(s)}</div> : <div className={styles.body} />}</div>
-                </div>
+                </div>}
               </div>
             </li>
           );

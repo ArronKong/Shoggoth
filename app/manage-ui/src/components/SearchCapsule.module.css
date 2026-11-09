@@ -61,6 +61,28 @@
   appearance: none;
 }
 
+.collapsible {
+  width: var(--search-w, 204px);
+  min-width: 0;
+}
+
+.collapsible > svg {
+  flex-shrink: 0;
+}
+
+/* 可折叠搜索聚焦时仍保留工具栏的玻璃表面。 */
+.box.collapsible:focus-within,
+button.box.collapsed:focus {
+  outline: none;
+  border-color: light-dark(#fff, #ffffff14);
+  box-shadow: 0 8px 10px #00000005;
+}
+
+.box.collapsible .input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
 .collapsed {
   width: 48px;
   min-width: 48px;
@@ -68,11 +90,6 @@
   justify-content: center;
   padding: 0;
   cursor: pointer;
-}
-
-.collapsed:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 3px;
 }
 
 @media (prefers-reduced-motion: reduce) {

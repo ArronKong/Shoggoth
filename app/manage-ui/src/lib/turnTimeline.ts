@@ -23,6 +23,7 @@ export type TurnPrompt = {
 };
 
 export type TurnEvent =
+  | { kind: "accepted" }
   | { kind: "user"; text: string } // 合成:开启本回合的用户消息
   | { kind: "delta"; text: string } // 全量累积的回答文本
   | { kind: "interim"; text: string; activity?: boolean; activityId?: string } // 封存当前回答段
@@ -557,10 +558,29 @@ export function toolActivityTitle(name: string | undefined, args: unknown, t: Ac
   return short(label && (label !== tool || tool === "kanban" || tool === "workboard") ? label : action("tool"));
 }
 
+export type TurnTiming = { startedAt: number; finishedAt?: number };
+
+export function turnElapsedMs(startedAt: number | null | undefined, finishedAt: number | null | undefined): number | undefined {
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt < 0
+    || typeof finishedAt !== "number" || !Number.isFinite(finishedAt) || finishedAt < startedAt) return undefined;
+  return finishedAt - startedAt;
+}
+
 // 与 ChatPage 工具卡耗时 chip 同规则:≥10s 取整,否则一位小数。
 export function formatDuration(s?: number): string {
   if (typeof s !== "number" || !(s > 0)) return "—";
   return s >= 10 ? `${Math.round(s)}s` : `${s.toFixed(1)}s`;
+}
+
+export function formatTurnElapsed(ms?: number): string {
+  if (ms === undefined) return "—";
+  if (ms === 0) return "0s";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return formatDuration(ms / 1000);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return [hours && `${hours}h`, minutes && `${minutes}m`, remainder && `${remainder}s`].filter(Boolean).join(" ");
 }
 
 // ---- reducer ---------------------------------------------------------------
@@ -587,6 +607,7 @@ const STATUS_STEP_DONE: Record<string, string> = { compacting: "compacted", reca
 const STATUS_STEP_RUNNING: Record<string, string> = { compacted: "compacting", recalled: "recalling" };
 
 export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: number): TurnTimelineState {
+  if (ev.kind === "accepted") return state;
   // 运行生命周期不属于过程步骤，也不能打断思考/回答分段或提前结束上下文压缩/记忆回忆。
   if (ev.kind === "status" && !STATUS_STEP_DONE[ev.status.kind] && !STATUS_STEP_RUNNING[ev.status.kind]) return state;
 
@@ -839,7 +860,7 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
 // ChatPage 的 normalize() 产物里与过程有关的 part 子集(结构型输入,避免依赖
 // ChatPage 内部类型)。
 export interface TimelinePartLike {
-  type: string; // thinking | toolCall | toolResult | plan
+  type: string; // thinking | toolCall | toolResult | plan | contextCompacted
   activity?: boolean;
   segmentId?: string;
   text?: string;
@@ -868,7 +889,10 @@ export function stepsFromParts(seq: TimelinePartLike[], options: { live?: boolea
   let plan: TurnStep | null = null;
   for (const p of seq) {
     ts += 1;
-    if (p.type === "text" && p.activity === true) {
+    if (p.type === "contextCompacted") {
+      steps.push({ id: p.segmentId ? `compact:${p.segmentId}` : `h${n++}`,
+        kind: "status", statusKind: "compacted", status: "ok", startTs: ts, endTs: ts });
+    } else if (p.type === "text" && p.activity === true) {
       if (p.text?.trim()) steps.push({ id: p.segmentId ? `progress:${p.segmentId}` : `h${n++}`, kind: "text", activity: true,
         status: "ok", startTs: ts, endTs: ts, text: p.text });
     } else if (p.type === "thinking") {
@@ -929,6 +953,43 @@ export function stepsFromParts(seq: TimelinePartLike[], options: { live?: boolea
   }
   for (const st of open) st.status = options.live ? "running" : "aborted";
   return steps;
+}
+
+// Called only after establishing ownership of the same turn. Keep the order already seen live, and
+// place history-only steps before the next matching observation when possible.
+export function mergeNativeTurnSteps(saved: TurnStep[], observed: TurnStep[]): TurnStep[] {
+  if (!observed.length) return saved;
+  const live = observed.slice();
+  const matched = new Set<number>();
+  const before = new Map<number, TurnStep[]>();
+  let unobserved: TurnStep[] = [];
+  for (const step of saved) {
+    const index = live.findIndex((candidate, i) => {
+      if (matched.has(i) || step.kind !== candidate.kind) return false;
+      if (step.kind === "tool") return !!step.toolCallId && step.toolCallId === candidate.toolCallId;
+      if (step.kind === "status") return step.statusKind === candidate.statusKind;
+      return !!step.text?.trim() && step.text.trim() === candidate.text?.trim();
+    });
+    if (index < 0) { unobserved.push(step); continue; }
+    matched.add(index);
+    before.set(index, unobserved);
+    unobserved = [];
+    if (step.kind !== "tool") continue;
+    const seen = live[index];
+    const savedName = step.toolName && (!seen.toolName || seen.toolName === "tool");
+    const tool = { ...seen,
+      ...(savedName ? { toolName: step.toolName, canonicalName: step.canonicalName, category: step.category } : {}),
+      args: mergeToolArgs(step.args, seen.args), diff: seen.diff ?? step.diff, diffText: seen.diffText ?? step.diffText };
+    // A result saved before the last history read can settle a tool whose
+    // result frame did not reach this renderer. A start-only record cannot.
+    live[index] = step.status === "ok" || step.status === "error"
+      ? { ...tool, status: step.status, isError: step.isError,
+        output: step.output || seen.output, durationS: step.durationS ?? seen.durationS,
+        endTs: seen.endTs ?? seen.startTs, pluginAppCallId: step.pluginAppCallId ?? seen.pluginAppCallId }
+      : tool;
+  }
+  return matched.size ? [...live.flatMap((step, index) => [...(before.get(index) ?? []), step]), ...unobserved]
+    : [...saved, ...live];
 }
 
 // Only already-public fields of known tools can identify an activity's target.

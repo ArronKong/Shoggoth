@@ -412,6 +412,52 @@
   padding-inline: 0;
   overflow-y: auto;
 }
+.detailTimeline {
+  padding-inline: 0;
+  scrollbar-gutter: stable;
+  scroll-padding-block: 24px;
+}
+.detailTimeline:is([data-scrolled], [data-more]) {
+  --fade-top: 0px;
+  --fade-bottom: 0px;
+  mask-image: linear-gradient(transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent), linear-gradient(#000, #000);
+  /* Keep the native scrollbar visible through both fades. */
+  mask-size: 100% 100%, var(--ui-scrollbar-track-size, 12px) 100%;
+  mask-position: left top, right top;
+  mask-repeat: no-repeat;
+}
+.detailTimeline[data-scrolled] { --fade-top: 24px; }
+.detailTimeline[data-more] { --fade-bottom: 24px; }
+.detailTimeline > .list > .row { padding-inline: 4px 2px; }
+.detailTimeline > .list > .row > .gutter { margin-inline-start: 0; }
+
+.preview {
+  --trajectory-wrap-padding-block: 0px;
+  --preview-inset: 8px;
+  /* The trigger fills the bubble; its border keeps the scrollport exactly three rows tall. */
+  padding: 0;
+  border-block: var(--preview-inset) solid transparent;
+  border-inline: 12px solid transparent;
+  border-radius: inherit;
+  max-height: calc(3 * var(--trajectory-row-height) + 2 * var(--preview-inset));
+  overflow-x: hidden;
+  scrollbar-gutter: stable both-edges;
+  overscroll-behavior-y: contain;
+  cursor: pointer;
+  user-select: none;
+}
+.preview:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.preview .row { padding-inline: 4px; }
+.preview .row:hover { background: transparent; }
+.preview .gutter { margin-left: 0; }
+.preview .head { cursor: inherit; }
+.preview .name {
+  max-width: 35%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preview .dur:empty { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .node[data-running="1"] { animation: none; }

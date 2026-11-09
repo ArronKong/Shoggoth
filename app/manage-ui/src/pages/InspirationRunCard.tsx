@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import AgentAvatarView from '../components/AgentAvatar';
 import TurnTimeline from '../components/TurnTimeline/TurnTimeline';
 import { TrajChevron, TrajGlyph } from '../components/TurnTimeline/trajectoryIcons';
-import { stepsFromParts, toolActivityTitle, type TurnStep } from '../lib/turnTimeline';
+import { formatTurnElapsed, stepsFromParts, toolActivityTitle, turnElapsedMs, type TurnStep } from '../lib/turnTimeline';
 import type { InspirationExecution } from '../types';
 import { InspirationArtifacts } from './InspirationActivity';
 import { inspirationRunTone, latestInspirationStep } from './inspiration-run-status';
@@ -11,7 +11,6 @@ import { useInspirationActivity } from './use-inspiration-activity';
 import styles from './InspirationRunCard.module.css';
 
 const oneLine = (text?: string) => text?.replace(/\s+/gu, ' ').trim() || '';
-const elapsedOf = (seconds: number) => seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
 
 // The round's run card in the idea detail: a black bar that opens into the full trajectory, below the
 // Session's own prompt card while a live approval / input request waits. `children` sits between the
@@ -52,7 +51,7 @@ export default function InspirationRunCard({ ideaId, execution, agentName, atten
   const line = error ? t('inspiration.activityUnavailable') : live ? detail || status
     : tone === 'error' ? (steps.length ? `${status} · ${summary}` : status)
       : steps.length ? `${t('turnLab.processLabel')} · ${summary}` : status;
-  const elapsed = elapsedOf(Math.max(0, Math.floor(((execution.finishedAt ?? now) - execution.createdAt) / 1000)));
+  const elapsed = formatTurnElapsed(turnElapsedMs(execution.createdAt, execution.finishedAt ?? (live ? now : undefined)));
   const glyph = (value: TurnStep) => value.kind === 'tool' ? value.category ?? 'execute' : value.kind;
   const showDurations = steps.some(value => typeof value.durationS === 'number' && value.durationS > 0);
   const emptyText = t(error ? 'inspiration.activityUnavailable' : !activity ? 'common.loading'

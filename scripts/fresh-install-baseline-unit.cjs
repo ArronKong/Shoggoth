@@ -55,7 +55,7 @@ test("event-only old state is refused before crash-tail repair", t => {
   const f = fixture(t); const store = f.open();
   const events = fs.readFileSync(f.paths.eventLogPath, "utf8").trim().split("\n").map(JSON.parse);
   store.close(); fs.unlinkSync(f.paths.stateSnapshotPath);
-  for (const event of events) { event.schemaVersion = STORE_SCHEMA_VERSION - 1; event.checksum = eventChecksum(event); }
+  for (const event of events) { event.schemaVersion = 14; event.checksum = eventChecksum(event); }
   const bytes = Buffer.from(events.map(JSON.stringify).join("\n") + '\n{"partial":');
   fs.writeFileSync(f.paths.eventLogPath, bytes);
   assert.throws(() => assertCurrentStorageBaseline(f.paths), { code: "SHOGGOTH_DATA_RESET_REQUIRED" });

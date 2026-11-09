@@ -48,6 +48,7 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
           </div>
           <AppIconPicker value={cfg.appIcon} disabled={disabled} onChange={(appIcon) => onChange({ appIcon })} />
           <SettingsDesktopPrinter disabled={disabled} />
+          <SettingsAppUpdate />
         </div>
       </section>
 
@@ -64,7 +65,10 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
                 disabled={disabled}
                 checked={cfg.notifications.chat}
                 onChange={(v) => onChange({ notifications: { ...cfg.notifications, chat: v } })}
-                label={<span className="settings-notification-label"><SettingsIcon name="chat" /><span className="settings-notification-copy"><span>{t("settings.notifChat")}</span><small>{t("settings.notifChatDesc")}</small></span></span>}
+                label={<span className="settings-switch-label">
+                  <SettingsIcon name="chat" />
+                  <span className="settings-switch-copy"><span>{t("settings.notifChat")}</span><small>{t("settings.notifChatDesc")}</small></span>
+                </span>}
               />
             </div>
             <div className="settings-switch-row">
@@ -72,19 +76,16 @@ export default function SettingsPreferences({ cfg, onChange, disabled, themeLoad
                 disabled={disabled}
                 checked={cfg.notifications.cron && cfg.notifications.task}
                 onChange={(v) => onChange({ notifications: { ...cfg.notifications, cron: v, task: v } })}
-                label={<span className="settings-notification-label"><SettingsIcon name="task" /><span className="settings-notification-copy"><span>{t("settings.notifTask")}</span><small>{t("settings.notifTaskDesc")}</small></span></span>}
+                label={<span className="settings-switch-label">
+                  <SettingsIcon name="task" />
+                  <span className="settings-switch-copy"><span>{t("settings.notifTask")}</span><small>{t("settings.notifTaskDesc")}</small></span>
+                </span>}
               />
             </div>
           </div>
           <div className="settings-notification-footer">
             <p className="ui-hint">{t("settings.notifHint")}</p>
           </div>
-        </div>
-      </section>
-
-      <section className="settings-section" id="settings-updates" aria-label={t("settings.appUpdate.title")}>
-        <div className="settings-card settings-list-card">
-          <SettingsAppUpdate />
         </div>
       </section>
     </div>

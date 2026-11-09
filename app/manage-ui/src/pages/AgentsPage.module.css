@@ -677,10 +677,14 @@
   max-width: 100%;
 }
 
+.modelPicker :global(.chat-model-menu) {
+  max-width: 100%;
+}
+
 .modelPicker :global(.chat-pill--model) {
   appearance: none;
   height: auto;
-  max-width: none;
+  max-width: 100%;
   padding: 0 0 1px;
   border: 0;
   border-bottom: 1px dashed transparent;
@@ -696,10 +700,46 @@
   cursor: pointer;
 }
 
+.modelPicker :global(.chat-pill__icon) {
+  position: static;
+  flex-shrink: 0;
+  transform: none;
+}
+
+.modelPicker :global(.chat-pill__label) {
+  white-space: inherit;
+}
+
 .modelPicker :global(.chat-pill--model:hover) {
   color: light-dark(#000000, #f4f4f5);
   border-bottom-color: light-dark(rgba(0, 0, 0, 0.35), rgba(255, 255, 255, 0.4));
   background: none;
+}
+
+.defaultModelPicker :global(.chat-pill--model) {
+  gap: 9px;
+  min-width: 0;
+  padding-inline-end: 4px;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.defaultModelPicker :global(.chat-pill__icon) {
+  display: none;
+}
+
+.defaultModelPicker :global(.chat-pill--model)::after {
+  content: "";
+  flex: 0 0 6px;
+  height: 6px;
+  border-right: 1px solid var(--muted);
+  border-bottom: 1px solid var(--muted);
+  transform: translateY(-2px) rotate(45deg);
+}
+
+.defaultModelPicker :global(.chat-pill--model[aria-busy="true"]) {
+  cursor: progress;
+  opacity: 0.65;
 }
 
 /* 降级链 chips */
@@ -792,7 +832,7 @@
   /* 阅读区与编辑器共用剩余高度；矮窗或长版本历史时仍在 tabPane 内滚动。 */
   flex: 1 0 240px;
   min-height: 0;
-  padding: 56px 24px 4px 8px;
+  padding: 0 24px 4px 8px;
   gap: 0;
 }
 
@@ -870,28 +910,23 @@
 
 .suHead {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   flex-shrink: 0;
   gap: 8px;
   padding-bottom: 20px;
 }
 
 .suFileIcon {
-  flex: 0 0 auto;
-  width: 48px;
-  height: 48px;
+  flex: none;
 }
 
-.suFileIcon svg {
-  display: block;
-  width: 100%;
-  height: 100%;
+.suFileIcon > [data-artifact-thumb] {
+  zoom: .5;
 }
 
 .suHeadText {
   flex: 1;
   min-width: 0;
-  padding-top: 2px;
 }
 
 .suFileName {
@@ -992,7 +1027,8 @@
   transition: background-color 0.15s ease;
 }
 
-.rowClickable:hover {
+.rowClickable:is(:hover, :focus) {
+  border-bottom-color: transparent;
   background: light-dark(rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.04));
   color: light-dark(#000000, #f4f4f5);
 }
@@ -1226,9 +1262,7 @@
 /* 图标描边并入全站 1.2 CSS px 口径（R376）。类名经 CSS module 哈希，全局样式表选不到。
    `vector-effect` 不可继承，故连子元素一起选。 */
 .panelClose svg,
-.panelClose svg *,
-.suFileIcon svg,
-.suFileIcon svg * {
+.panelClose svg * {
   vector-effect: non-scaling-stroke;
   stroke-width: 1.2;
 }

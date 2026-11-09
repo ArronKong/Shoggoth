@@ -2,7 +2,7 @@
 const test = require("node:test"), assert = require("node:assert/strict"), fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
 const Module = require("node:module");
 const repo = path.resolve(__dirname, ".."), core = path.join(repo, "app/agent-service");
-const { JsonlProductStore, DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
+const { JsonlProductStore, DEFAULT_AGENT_PROFILE_ID, STORE_SCHEMA_VERSION } = require("../app/agent-service/product-store");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { createWorkDispatcher } = require("../app/agent-service/work-run");
 const { runtimeHandleV1 } = require("../app/agent-service/runtime-handle-v1");
@@ -160,7 +160,7 @@ function legacyRun(id, profileId, status = "queued") {
     waitingRequestId: null, startedAt: active ? 100 : null, finishedAt: status === "completed" ? 101 : null,
     resultSummary: status === "completed" ? "retained legacy answer" : null, errorCode: null, retryOf: null };
 }
-test("v15 source bytes and receipts survive a v16 mixed journal without synthesized attempts or acceptance", t => {
+test("v15 source bytes and receipts survive a mixed journal without synthesized attempts or acceptance", t => {
   const root = privateRoot(t, "migration-"), paths = pathsAt(root);
   const legacy = oldModule("product-store.js"); assert.equal(legacy.STORE_SCHEMA_VERSION, 15);
   const legacyPaths = { ...paths, productSchemaVersion: 15 };
@@ -174,7 +174,7 @@ test("v15 source bytes and receipts survive a v16 mixed journal without synthesi
     assert.equal(run.runtimeAttemptRef, null); assert.equal(run.runtimeSessionRef, null); assert.equal(run.runtimeTurnRef, null); assert.equal(run.status, status);
   }
   assert.deepEqual(fs.readFileSync(paths.stateSnapshotPath), sourceSnapshot); assert.deepEqual(fs.readFileSync(paths.eventLogPath), sourceJournal);
-  const migrationRoot = path.join(paths.stateDir, "product-schema-migrations/15-to-16");
+  const migrationRoot = path.join(paths.stateDir, `product-schema-migrations/15-to-${STORE_SCHEMA_VERSION}`);
   const directories = fs.readdirSync(migrationRoot); assert.equal(directories.length, 1);
   const retained = path.join(migrationRoot, directories[0]), receipt = JSON.parse(fs.readFileSync(path.join(retained, "receipt.json")));
   assert.deepEqual(fs.readFileSync(path.join(retained, "snapshot.v15-source")), sourceSnapshot);
@@ -184,7 +184,7 @@ test("v15 source bytes and receipts survive a v16 mixed journal without synthesi
   const dispatcher = createWorkDispatcher({ store: current });
   dispatcher.enqueue({ id: "current-queued", source: "chat", sourceId: "current-session", idempotencyKey: "current-send", profileId: DEFAULT_AGENT_PROFILE_ID, workspace: null });
   const mixedBytes = fs.readFileSync(paths.eventLogPath), mixed = mixedBytes.toString().trim().split("\n").map(line => JSON.parse(line));
-  assert.equal(mixed[0].schemaVersion, 15); assert.equal(mixed.at(-1).schemaVersion, 16); assert(mixedBytes.subarray(0, sourceJournal.length).equals(sourceJournal));
+  assert.equal(mixed[0].schemaVersion, 15); assert.equal(mixed.at(-1).schemaVersion, STORE_SCHEMA_VERSION); assert(mixedBytes.subarray(0, sourceJournal.length).equals(sourceJournal));
   const readonly = new JsonlProductStore({ paths, readOnly: true }); readonly.openReadOnly();
   assert.equal(readonly.getWorkRun("legacy-journal").runtimeAttemptRef, null); assert.equal(readonly.getWorkRun("current-queued").runtimeAttemptRef, null); readonly.close();
   current.close(); const finalSnapshot = fs.readFileSync(paths.stateSnapshotPath), finalJournal = fs.readFileSync(paths.eventLogPath);
@@ -251,7 +251,7 @@ function legacyPartialJournal(t, suffix) {
   return { root, paths, sourceSnapshot, sourceJournal: Buffer.concat([prefix, tail]), prefix };
 }
 function migrationReceipt(f) {
-  const root = path.join(f.paths.stateDir, "product-schema-migrations/15-to-16"), directories = fs.readdirSync(root);
+  const root = path.join(f.paths.stateDir, `product-schema-migrations/15-to-${STORE_SCHEMA_VERSION}`), directories = fs.readdirSync(root);
   assert.equal(directories.length, 1);
   const directory = path.join(root, directories[0]), file = path.join(directory, "receipt.json");
   const receipt = JSON.parse(fs.readFileSync(file));
@@ -376,12 +376,12 @@ function legacyStartupService(f) {
   return { service, nativeAcquireAttempts: () => nativeAcquireAttempts };
 }
 
-test("real Service startup accepts validated v15 snapshot plus journal, preserves raw receipt, then reopens v16", { timeout: 25000 }, async t => {
+test("real Service startup accepts validated v15 snapshot plus journal, preserves raw receipt, then reopens the current schema", { timeout: 25000 }, async t => {
   const f = legacyPartialJournal(t, "service-startup"); assert(f.prefix.length > 0);
   const first = legacyStartupService(f); let second;
   try {
     await first.service.start();
-    assert.equal(first.service.productStore.schemaVersion, 16);
+    assert.equal(first.service.productStore.schemaVersion, STORE_SCHEMA_VERSION);
     const retained = migrationReceipt(f), receiptBytes = fs.readFileSync(retained.file);
     for (const id of ["tail-snapshot-run", "tail-journal-run"]) {
       const run = first.service.productStore.getWorkRun(id);
@@ -390,7 +390,7 @@ test("real Service startup accepts validated v15 snapshot plus journal, preserve
     }
     assert.equal(first.nativeAcquireAttempts(), 0); assert.equal(first.service.runtimeManager.statistics().hosts, 0);
     await first.service.stop({ notify: false });
-    assert.equal(JSON.parse(fs.readFileSync(f.paths.stateSnapshotPath)).schemaVersion, 16);
+    assert.equal(JSON.parse(fs.readFileSync(f.paths.stateSnapshotPath)).schemaVersion, STORE_SCHEMA_VERSION);
     assert.deepEqual(fs.readFileSync(retained.file), receiptBytes);
     second = legacyStartupService(f); await second.service.start();
     for (const id of ["tail-snapshot-run", "tail-journal-run"]) assert(second.service.productStore.getWorkRun(id));
@@ -424,16 +424,16 @@ for (const corrupt of ["snapshot", "journal"]) test(`real Service refuses corrup
   } finally { await current.service.stop({ notify: false }); }
 });
 
-test("current authority manifest classifies Product16, encrypted RunExecution3 and ACP ledger2 without treating attempts as cache", () => {
+test("current authority manifest classifies Product, encrypted RunExecution3 and ACP ledger2 without treating attempts as cache", () => {
   const { DATA_AUTHORITY_MANIFEST: manifest, flattenRecordFields, validateDataAuthorityManifest } = require("../app/agent-service/data-authority-manifest");
-  const { WORK_RUN_FIELDS, STORE_SCHEMA_VERSION } = require("../app/agent-service/product-store");
+  const { WORK_RUN_FIELDS } = require("../app/agent-service/product-store");
   assert.equal(validateDataAuthorityManifest(manifest), true);
-  assert.equal(manifest.stores.product.schemaVersion, 16); assert.equal(manifest.stores.product.schemaVersion, STORE_SCHEMA_VERSION);
+  assert.equal(manifest.stores.product.schemaVersion, STORE_SCHEMA_VERSION);
   assert.equal(manifest.stores.runExecution.schemaVersion, 3); assert.equal(manifest.stores.runtimeAcpLedger.schemaVersion, 2);
   assert(manifest.stores.runExecution.records.RunExecutionBinding.authority.includes("attempt"));
   assert(!manifest.stores.runExecution.records.RunExecutionBinding.runtimeCache.includes("attempt"));
   const workRun = manifest.stores.product.records.WorkRun, fields = flattenRecordFields(workRun);
   assert.deepEqual([...fields].sort(), [...WORK_RUN_FIELDS].sort()); assert.equal(new Set(fields).size, fields.length);
   assert(workRun.authority.includes("runtimeAttemptRef")); assert(!workRun.runtimeCache.includes("runtimeAttemptRef"));
-  assert(manifest.stores.product.pathRules.some(rule => rule.includes("product-schema-migrations/15-to-16")));
+  assert(manifest.stores.product.pathRules.some(rule => rule.includes(`product-schema-migrations/15-to-${STORE_SCHEMA_VERSION}`)));
 });

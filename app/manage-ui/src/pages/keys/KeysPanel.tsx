@@ -5,6 +5,8 @@ import type { EnvVar } from "../../types";
 import { deleteEnvVar, listEnvVars, revealEnvVar, setEnvVar, validateProviderCredential } from "../../api/client";
 import { useConfirm, useToast } from "../../components/ui";
 import OAuthProvidersCard from "./OAuthProvidersCard";
+import { SkeletonShape, SkeletonStatus } from "../../components/Skeleton";
+import { ProviderRowsSkeleton } from "./ProviderSkeleton";
 import ProviderLogo from "./ProviderLogo";
 import { ProviderCredentialFields } from "./ProviderCredentialFields";
 import { SHOW_TOOL_KEYS, ToolKeysCard, type ToolKeyItem } from "./ToolKeysCard";
@@ -195,7 +197,8 @@ export default function KeysPanel({
   const toast = useToast();
   const confirm = useConfirm();
   const { data: vars, error: loadFailed, loading, refresh } = usePageCache("models:keys:hermes",
-    () => listEnvVars("hermes"), { staleTime: 30_000 });
+    () => listEnvVars("hermes"), { staleTime: 30_000, loadingOnEmptyRefresh: true });
+  const providersLoading = loading && !vars;
   const [busy, setBusy] = useState<string | null>(null);
   const [showAllProviders, setShowAllProviders] = useState(false); // 未配置的 provider 默认折起
 
@@ -380,11 +383,12 @@ export default function KeysPanel({
             ) : null}
           </div>
           <p className={styles.cardDesc}>
-            {t("keys.providersConfigured", { configured: configured.length, total: providerGroups.length })}
+            {providersLoading ? <SkeletonShape style={{ width: "10em" }} />
+              : vars && t("keys.providersConfigured", { configured: configured.length, total: providerGroups.length })}
           </p>
         </div>
         <div className={`${styles.cardBody} ${styles.cardBodyFlush}`}>
-          {loading && !vars && <p className="muted">{t("common.loading")}</p>}
+          {providersLoading && <SkeletonStatus><ProviderRowsSkeleton /></SkeletonStatus>}
           {loadFailed && <p className="status-error" role="alert">{t("keys.loadFailed")}</p>}
           {visibleGroups.map((g) => (
             <ProviderGroupCard key={g.name} group={g} rowProps={rowProps} />

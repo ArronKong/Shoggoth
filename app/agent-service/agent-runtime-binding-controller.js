@@ -5,7 +5,7 @@ const { DEFAULT_RUNTIME_ACCOUNTS, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } =
 const { isRuntimeAvailable } = require("../runtime-availability");
 
 function createAgentRuntimeBindingController({ productStore, chatSessionStore, getNativeRuntimeConfig,
-  canGenerateCheckpoint, policyStore, onChanged = () => {} }) {
+  canGenerateCheckpoint, policyStore, selectAgentDefaultModel, readAccountAdmission, onChanged = () => {} }) {
   function assertUnused(profileId, bindingId, { disabling = false } = {}) {
     const policy = policyStore?.get(profileId);
     if (policy && (policy.allowedBindingIds.includes(bindingId) || policy.compactionBindingId === bindingId)) {
@@ -28,6 +28,32 @@ function createAgentRuntimeBindingController({ productStore, chatSessionStore, g
       if (!profile) throw serviceError("AGENT_BINDING_NOT_FOUND", "Agent 不存在");
       const state = productStore.getAgentRuntimeBindings(params.profileId);
       const enabled = getNativeRuntimeConfig().flags.runtimeMultiBinding;
+      const finish = result => {
+        const output = protocol.validateAgentBindingResult(method, { ...result, canAdd: getNativeRuntimeConfig().flags.runtimeMultiBinding,
+          ...(canGenerateCheckpoint ? { checkpointBindingIds: result.bindings.filter(binding => binding.enabled
+            && canGenerateCheckpoint(binding.runtime)).map(binding => binding.id) } : {}) }, params);
+        if (method !== "agent.binding.list" && result.revision !== state.revision) {
+          try { onChanged({ profileId: profile.id, backendId: profile.backendId }); } catch {}
+        }
+        return output;
+      };
+      if (method === "agent.binding.setDefaultModel") {
+        const target = state.bindings.find(binding => binding.id === params.bindingId);
+        if (!target) throw serviceError("AGENT_BINDING_NOT_FOUND", "Binding does not exist");
+        if (typeof selectAgentDefaultModel !== "function") throw serviceError("AGENT_DEFAULT_MODEL_UNAVAILABLE", "Default model configuration unavailable");
+        const accountGeneration = readAccountAdmission?.(target.runtimeAccountId)?.generation;
+        const assertAvailable = () => {
+          if (!target.enabled || !isRuntimeAvailable(target.runtime)) throw serviceError("AGENT_BINDING_DISABLED", "Binding is unavailable");
+          if (target.id !== state.defaultBindingId && !getNativeRuntimeConfig().flags.runtimeMultiBinding) {
+            throw serviceError("AGENT_BINDING_FEATURE_DISABLED", "Multiple Runtime bindings are disabled");
+          }
+          const account = readAccountAdmission?.(target.runtimeAccountId);
+          if (account?.mutationActive || account?.generation !== accountGeneration) {
+            throw serviceError("AGENT_BINDING_REVISION_CONFLICT", "Runtime account changed");
+          }
+        };
+        return selectAgentDefaultModel(params, assertAvailable).then(finish);
+      }
       let result;
       if (method === "agent.binding.list") result = state;
       else if (method === "agent.binding.sync") {
@@ -70,13 +96,7 @@ function createAgentRuntimeBindingController({ productStore, chatSessionStore, g
       } else {
         result = productStore.setAgentDefaultBinding(params.profileId, params.bindingId, { revision: params.revision });
       }
-      const output = protocol.validateAgentBindingResult(method, { ...result, canAdd: enabled,
-        ...(canGenerateCheckpoint ? { checkpointBindingIds: result.bindings.filter(binding => binding.enabled
-          && canGenerateCheckpoint(binding.runtime)).map(binding => binding.id) } : {}) }, params);
-      if (method !== "agent.binding.list" && result.revision !== state.revision) {
-        try { onChanged({ profileId: profile.id, backendId: "shoggoth" }); } catch {}
-      }
-      return output;
+      return finish(result);
     },
   };
 }

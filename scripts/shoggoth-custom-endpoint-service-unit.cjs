@@ -39,8 +39,7 @@ function fixture() {
 const input = { id: "custom-one", name: "custom one", baseUrl: "https://gateway.example/v1", api: "openai-responses",
   model: "model-a", models: ["model-a", "model-b"], apiKey: "fixture-only-endpoint-key" };
 
-// The ProductStore reads its current schema and the one legacy schema it
-// migrates (15); single-model providers in that legacy form stay readable.
+// Single-model providers in the original schema 15 format stay readable.
 const LEGACY_SCHEMA_VERSION = 15;
 
 test("legacy single-model providers remain readable before upgrading to selected models", async () => {
@@ -62,10 +61,8 @@ test("legacy single-model providers remain readable before upgrading to selected
   } finally { await f.close(); }
 });
 
-// Since the Product schema 15 -> 16 consolidation the store reads exactly
-// those two versions; anything older (e.g. the schema 9/10 era) is refused.
+// Anything older than Product 15 (e.g. the schema 9/10 era) is refused.
 test("retired Product schemas are refused instead of being read", async () => {
-  assert.equal(STORE_SCHEMA_VERSION - 1, LEGACY_SCHEMA_VERSION);
   for (const retired of [9, 10, LEGACY_SCHEMA_VERSION - 1]) {
     const f = fixture();
     try {

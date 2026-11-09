@@ -33,7 +33,7 @@ for (const backendId of interruptedOnly ? ["shoggoth"] : baseline ? ["hermes"] :
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1200,height:900,webPreferences:{backgroundThrottling:false}});const timeout=setTimeout(()=>app.exit(2),45000);let passed=false;
 w.webContents.on("console-message",event=>{if(event.level==="error")console.error("[fixture renderer] "+event.message);});
-try{await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{hash:"/chat"});w.show();w.focus();
+try{await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{hash:"/chat"});
 const result=await w.webContents.executeJavaScript(${JSON.stringify(interruptedOnly ? "window.runInterruptedTailFixture()" : "window.runLiveRecoveryFixture()")});const geometry=[];
 if(!${interruptedOnly})for(const width of [1200,390]){w.setContentSize(width,900);for(const theme of ['light','dark']){geometry.push(await w.webContents.executeJavaScript('window.captureMcpApproval('+JSON.stringify(theme)+')'));fs.writeFileSync(${JSON.stringify(out)}+'/'+${JSON.stringify(backendId)}+'-'+width+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());}}
 if(${JSON.stringify(backendId)}==='shoggoth'){w.setContentSize(1200,900);if(!${interruptedOnly})result.interruptedTail=await w.webContents.executeJavaScript('window.runInterruptedTailFixture()');fs.writeFileSync(${JSON.stringify(out)}+'/shoggoth-interrupted-tail.png',(await w.webContents.capturePage()).toPNG());}

@@ -9,9 +9,9 @@ import { groupReplyBody } from "../lib/groupReply";
 import styles from "./GroupChatPanel.module.css";
 
 /** 按不可变消息读取正文，每次最多一页；最后一页校验全文，跨群切换会废弃在途响应。 */
-export default function GroupChatFullMessage({ groupId, message, onClose = () => {}, members, onMemberClick }: {
+export default function GroupChatFullMessage({ groupId, message, onClose = () => {}, members }: {
   groupId: string; message: GroupChatMessage; onClose?(): void;
-  members?: GroupChatMember[]; onMemberClick?(memberId: string): void;
+  members?: GroupChatMember[];
 }) {
   const { t } = useTranslation();
   const [result, setResult] = useState<{ page: GroupResultPage; text: string } | null>(null);
@@ -57,7 +57,7 @@ export default function GroupChatFullMessage({ groupId, message, onClose = () =>
     footer={<button type="button" className="btn" onClick={onClose}>{t("common.close")}</button>}>
     {error && <p className={styles.error}>{error}</p>}
     {result && <div className={styles.artifactBox}><GroupChatMarkdown text={groupReplyBody(message, result.text)}
-      className="chat-md" members={members} onMemberClick={onMemberClick} /></div>}
+      className="chat-md" members={members} broadcast={message.mentions.broadcast} /></div>}
     {loading ? <FusionLoader size="sm" /> : result?.page.nextOffset != null && !error && (
       <button type="button" className="btn" onClick={() => setOffset(result.page.nextOffset!)}>{t("groupChat.fullResult.more")}</button>
     )}

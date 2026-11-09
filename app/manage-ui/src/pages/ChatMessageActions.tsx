@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 
 // Temporarily hide message pinning in every chat view; keep saved pins for later.
 export const MESSAGE_PINNING_ENABLED = false;
+// Hide local message deletion controls while preserving existing hidden messages.
+export const MESSAGE_DELETION_ENABLED = false;
 
 export function IconCopy() {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -30,8 +32,8 @@ function IconFilter() {
     <path d="M4 5h16l-6 8v6l-4-2v-4z" />
   </svg>;
 }
-function IconQuote() {
-  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+export function IconQuote({ className }: { className?: string }) {
+  return <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M9 14L4 9l5-5M4 9h11a5 5 0 015 5v4" />
   </svg>;
 }
@@ -43,6 +45,8 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onQuote, quoteDi
   onPin?: () => void; pinned?: boolean; onDelete?: () => void; extra?: ReactNode;
 }) {
   const { t } = useTranslation();
+  const deleteMessage = MESSAGE_DELETION_ENABLED ? onDelete : undefined;
+  const hasActions = !!(onCopy || onQuote || extra || (MESSAGE_PINNING_ENABLED && onPin) || deleteMessage);
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose); closeRef.current = onClose;
   const [position, setPosition] = useState({ left: x, top: y });
@@ -56,12 +60,13 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onQuote, quoteDi
     const previous = document.activeElement;
     (menu.querySelector<HTMLButtonElement>("button:not(:disabled)") ?? menu).focus();
     return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true }); };
-  }, [x, y]);
+  }, [x, y, hasActions]);
   useEffect(() => {
     const dismiss = () => closeRef.current();
     window.addEventListener("resize", dismiss);
     return () => window.removeEventListener("resize", dismiss);
   }, []);
+  if (!hasActions) return null;
   const select = (action: () => void) => { onClose(); action(); };
   return createPortal(<>
     <div className="chat-ctxmenu__backdrop" onClick={onClose} onWheel={onClose}
@@ -81,7 +86,7 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onQuote, quoteDi
       {onQuote && <button type="button" role="menuitem" className="chat-ctxmenu__item" disabled={quoteDisabled} onClick={() => select(onQuote)}><IconQuote /><span>{t("chat.quote")}</span></button>}
       {extra}
       {MESSAGE_PINNING_ENABLED && onPin && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onPin)}><IconPin /><span>{t(pinned ? "chat.unpin" : "chat.pin")}</span></button>}
-      {onDelete && <button type="button" role="menuitem" className="chat-ctxmenu__item is-danger" onClick={() => select(onDelete)}><IconTrash /><span>{t("chat.deleteLocal")}</span></button>}
+      {deleteMessage && <button type="button" role="menuitem" className="chat-ctxmenu__item is-danger" onClick={() => select(deleteMessage)}><IconTrash /><span>{t("chat.deleteLocal")}</span></button>}
     </div>
   </>, document.body);
 }

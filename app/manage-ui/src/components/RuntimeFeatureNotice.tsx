@@ -9,10 +9,11 @@ export function RuntimeResumeNotice() {
 
 export function RuntimeFeatureNotice({ features }: { features: RuntimeFeatures }) {
   const { t } = useTranslation("runtimeFeatures");
+  const resumeUnavailable = features.resume === "unsupported";
+  const compactUnavailable = features.compact === "unsupported";
+  if (!resumeUnavailable && !compactUnavailable) return null;
   return <div className="ui-hint" data-runtime-features>
-    {features.resume === "unsupported" && <RuntimeResumeNotice />}
-    {features.compact === "unsupported" && <p>{t("compactUnavailable")}</p>}
-    <p>{t("availableAttachments", { kinds: features.attachments.length
-      ? features.attachments.map(kind => t(kind)).join(" / ") : t("attachmentsUnverified") })}</p>
+    {resumeUnavailable && <RuntimeResumeNotice />}
+    {compactUnavailable && <p>{t("compactUnavailable")}</p>}
   </div>;
 }

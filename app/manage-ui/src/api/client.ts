@@ -83,7 +83,9 @@ import type {
   SessionArchive,
   SessionArtifactsResult,
   AgentArtifactsResult,
+  GlobalChatSearchHit,
   GlobalChatSearchResult,
+  GlobalGroupChatSearchHit,
   SessionPreview,
   EnvironmentInventory,
   SessionAdvancedDescription,
@@ -1887,6 +1889,15 @@ export async function getAgentDefinition(backend: string, id: string): Promise<i
 export function getAgentRuntimeBindings(backend: string, id: string): Promise<import("../types").AgentRuntimeBindingsSnapshot> {
   return jsonFetch(agentUrl(backend, id, "/runtime-bindings"));
 }
+export function getAgentDefaultModels(backend: string, id: string): Promise<import("../types").AgentDefaultModels> {
+  return jsonFetch(agentUrl(backend, id, "/default-model"));
+}
+export function selectAgentDefaultModel(backend: string, id: string,
+  input: import("../types").AgentDefaultModelSelection & { model: string }): Promise<import("../types").AgentDefaultModelSelection> {
+  return jsonFetch(agentUrl(backend, id, "/default-model"), {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+  });
+}
 export function getAgentRuntimePolicy(backend: string, id: string): Promise<import("../types").RuntimeSelectionPolicy> {
   return jsonFetch(agentUrl(backend, id, "/runtime-policy"));
 }
@@ -2181,16 +2192,27 @@ export async function getSessionArchive(
   return archive;
 }
 
+type GlobalChatSearchOptions = { limit?: number; offset?: number; signal?: AbortSignal };
+
+export function searchGlobalChats(
+  query: string,
+  opts: GlobalChatSearchOptions & { includeGroups: true },
+): Promise<GlobalChatSearchResult<GlobalChatSearchHit | GlobalGroupChatSearchHit>>;
+export function searchGlobalChats(
+  query: string,
+  opts?: GlobalChatSearchOptions & { includeGroups?: false },
+): Promise<GlobalChatSearchResult>;
 export async function searchGlobalChats(
   query: string,
-  opts: { limit?: number; offset?: number; signal?: AbortSignal } = {},
-): Promise<GlobalChatSearchResult> {
+  opts: GlobalChatSearchOptions & { includeGroups?: boolean } = {},
+): Promise<GlobalChatSearchResult<GlobalChatSearchHit | GlobalGroupChatSearchHit>> {
   const q = new URLSearchParams({
     q: query,
     limit: String(opts.limit ?? 50),
     offset: String(opts.offset ?? 0),
   });
-  const { search } = await jsonFetch<{ search: GlobalChatSearchResult }>(
+  if (opts.includeGroups) q.set("includeGroups", "1");
+  const { search } = await jsonFetch<{ search: GlobalChatSearchResult<GlobalChatSearchHit | GlobalGroupChatSearchHit> }>(
     `/__api/chat/search?${q.toString()}`,
     { signal: opts.signal },
   );
@@ -2862,10 +2884,14 @@ export function listInspirations(query: { query: string; filter: import('../type
   return jsonFetch<import('../types').InspirationPageResult>(`/__api/inspirations?${params}`);
 }
 export function getInspiration(id: string, signal?: AbortSignal) {
-  return jsonFetch<{ idea: import('../types').InspirationIdea }>(`/__api/inspirations/detail?id=${encodeURIComponent(id)}`, { signal });
+  return jsonFetch<{ idea: import('../types').InspirationIdea; acceptedExecution?: import('../types').InspirationExecution }>(
+    `/__api/inspirations/detail?id=${encodeURIComponent(id)}`, { signal });
 }
 export function getInspirationAgents() {
   return jsonFetch<{ agents: import('../types').InspirationAgent[] }>('/__api/inspirations/agents');
+}
+export function getInspirationModels(backendId: string, agentId: string) {
+  return jsonFetch<import('../types').InspirationModels>(`/__api/inspirations/models?${new URLSearchParams({ backendId, agentId })}`);
 }
 export function getInspirationAgentDock(signal?: AbortSignal) {
   return jsonFetch<{ agents: import('../types').InspirationDockAgent[] }>('/__api/inspirations/agent-dock', { signal });

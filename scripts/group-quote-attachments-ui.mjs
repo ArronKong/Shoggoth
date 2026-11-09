@@ -82,7 +82,7 @@ const named = (label: string, parent: ParentNode = window.document) => Array.fro
   .find(button => button.textContent === i18n.t(label) || button.getAttribute("aria-label") === i18n.t(label));
 const type = async (value: string) => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea(), value);
   textarea()!.dispatchEvent(new Event("input", { bubbles: true })); await pause(); };
-const selectQuote = async (seq: number) => { const button = named("groupChat.reply.action", row(seq)!); check(button && !button.disabled, "quote action enabled");
+const selectQuote = async (seq: number) => { const button = named("chat.quote", row(seq)!); check(button && !button.disabled, "quote action enabled");
   button!.click(); await wait(() => composer(), "composer quote visible"); };
 const loaded = (images: HTMLImageElement[]) => images.length > 0 && images.every(image => image.complete && image.naturalWidth > 0);
 mount();
@@ -141,7 +141,7 @@ let server, serving = false;
 try {
   await build({ stdin: { contents: fixture, loader: "tsx", resolveDir: root }, bundle: true, format: "esm", jsx: "automatic",
     nodePaths: [path.join(root, "app/manage-ui/node_modules")], define: { "process.env.NODE_ENV": '"production"' },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" }, outfile: path.join(temp, "fixture.js"), logLevel: "silent",
+    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"), logLevel: "silent",
     plugins: process.env.GROUP_QUOTE_BASELINE_PANEL ? [{ name: "baseline-panel", setup(builder) {
       builder.onLoad({ filter: /\/GroupChatPanel\.tsx$/ }, ({ path: file }) => ({ contents: fs.readFileSync(process.env.GROUP_QUOTE_BASELINE_PANEL, "utf8"), loader: "tsx", resolveDir: path.dirname(file) }));
     } }] : [] });

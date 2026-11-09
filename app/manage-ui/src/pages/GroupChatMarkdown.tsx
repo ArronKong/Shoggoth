@@ -1,4 +1,4 @@
-import { createElement, memo, useContext, useMemo, type ReactNode } from "react";
+import { cloneElement, createElement, isValidElement, memo, useContext, useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import GroupChatMention from "./GroupChatMention";
 import { ChatMediaContext } from "../components/ChatMediaContext";
@@ -7,6 +7,7 @@ import { groupMentionCandidates, splitGroupMentions } from "../lib/groupMentions
 import type { GroupChatMember, InspirationAttachment } from "../types";
 
 const NO_MENTIONS = new Set(["a", "pre", "code", "button", "img"]);
+const NO_ADDRESSEES: string[] = [];
 const ATTR_NAMES: Record<string, string> = { class: "className", referrerpolicy: "referrerPolicy" };
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -42,15 +43,17 @@ export function groupAttachmentsOutsideMarkdown(text: string, attachments: Inspi
 }
 
 /** Decorate only sanitized visible text. Links, code and their copy/preview controls stay intact. */
-const GroupChatMarkdown = memo(function GroupChatMarkdown({ text, className, members = [], onMemberClick, lead, streamingCursor = false }: {
-  text: string; className: string; members?: GroupChatMember[]; onMemberClick?(memberId: string): void; lead?: ReactNode; streamingCursor?: boolean;
+const GroupChatMarkdown = memo(function GroupChatMarkdown({ text, className, members = [],
+  addressedMemberIds = NO_ADDRESSEES, broadcast = false, streamingCursor = false }: {
+  text: string; className: string; members?: GroupChatMember[];
+  addressedMemberIds?: string[]; broadcast?: boolean; streamingCursor?: boolean;
 }) {
   const { i18n } = useTranslation();
   const imageContext = useContext(ChatMediaContext);
   const html = useMemo(() => toSanitizedMarkdownHtml(text, true, imageContext), [text, imageContext, i18n.language, i18n.resolvedLanguage]);
-  const candidates = useMemo(() => groupMentionCandidates(members), [members]);
+  const candidates = useMemo(() => groupMentionCandidates(members, broadcast), [members, broadcast]);
   const content = useMemo(() => {
-    if (!lead && !streamingCursor && (!onMemberClick || !candidates.length || !html.includes("@"))) return null;
+    if (!streamingCursor && !addressedMemberIds.length && (!candidates.length || !html.includes("@"))) return null;
     const template = document.createElement("template");
     template.innerHTML = html;
     const cursorText = streamingCursor ? document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT, { acceptNode(node) {
@@ -59,14 +62,20 @@ const GroupChatMarkdown = memo(function GroupChatMarkdown({ text, className, mem
       const closed = parent?.closest("details:not([open])");
       return closed && !closed.querySelector("summary")?.contains(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
     } }).lastChild() : null;
-    let matched = false, leadPlaced = false;
+    const matched = new Set<string>();
+    const everyone = broadcast ? members.filter(member => member.state === "active" && !member.agentMissing) : [];
+    let matchedBroadcast = false;
     const render = (node: Node, key: number, blocked = false): ReactNode => {
       if (node.nodeType === Node.TEXT_NODE) {
         const value = node.textContent ?? "";
-        const parts: ReactNode[] = blocked || !onMemberClick ? [value] : splitGroupMentions(value, candidates).map((part, index) => {
+        const parts: ReactNode[] = blocked ? [value] : splitGroupMentions(value, candidates).map((part, index) => {
+          if (part.member === null) {
+            matchedBroadcast = true;
+            return <GroupChatMention key={index} everyone={everyone} />;
+          }
           if (!part.member) return part.text;
-          matched = true;
-          return <GroupChatMention key={index} member={part.member} text={part.text} onOpen={onMemberClick} />;
+          matched.add(part.member.id);
+          return <GroupChatMention key={index} member={part.member} />;
         });
         if (node === cursorText) {
           const last = parts.pop();
@@ -85,15 +94,23 @@ const GroupChatMarkdown = memo(function GroupChatMarkdown({ text, className, mem
       for (const { name, value } of element.attributes) props[ATTR_NAMES[name] ?? name] = name === "disabled" ? true : value;
       if (tag === "input") { props.checked = element.hasAttribute("checked"); props.readOnly = true; }
       const children = Array.from(element.childNodes, (child, index) => render(child, index, blocked || NO_MENTIONS.has(tag)));
-      if (lead && tag === "p" && element === template.content.firstElementChild) {
-        children.unshift(lead); leadPlaced = true;
-      }
       return createElement(tag, props, ...children);
     };
     const result = Array.from(template.content.childNodes, (node, index) => render(node, index));
-    if (lead && !leadPlaced) result.unshift(<p key="assignment-target">{lead}</p>);
-    return matched || lead || streamingCursor ? result : null;
-  }, [html, candidates, onMemberClick, lead, streamingCursor]);
+    // Structured addressees have no source text. Put their pills before the body without changing its Markdown.
+    const lead = addressedMemberIds.flatMap(id => {
+      const member = matched.has(id) ? undefined : members.find(candidate => candidate.id === id);
+      return member ? [<GroupChatMention key={`addressee:${id}`} member={member} />, " "] : [];
+    });
+    if (lead.length) {
+      const index = result.findIndex(isValidElement);
+      const paragraph = result[index];
+      if (isValidElement<{ children?: ReactNode }>(paragraph) && paragraph.type === "p") {
+        result[index] = cloneElement(paragraph, undefined, ...lead, paragraph.props.children);
+      } else result.unshift(<p key="addressees">{lead}</p>);
+    }
+    return matched.size || matchedBroadcast || lead.length || streamingCursor ? result : null;
+  }, [html, candidates, members, addressedMemberIds, broadcast, streamingCursor]);
   return content ? <div className={className}>{content}</div>
     : <div className={className} dangerouslySetInnerHTML={{ __html: html }} />;
 });

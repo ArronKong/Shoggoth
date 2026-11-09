@@ -25,13 +25,13 @@ export default function ServiceSettings({ status, error, busy, onRetry, onAction
   const domainsReady = !!status && status.service.domainAvailability.kanban && status.service.domainAvailability.cron;
   const backgroundText = t(!background?.supported ? "settings.serviceUnsupported" : background.needsRepair ? "settings.serviceNeedsRepair" : background.loaded ? "settings.serviceEnabled" : background.installed ? "settings.serviceNotRunning" : "settings.serviceNotInstalled");
   const action = (name: ServiceAction, key: string, primary = false) => <button
-    className={`ui-cbtn ui-cbtn--sm${primary ? " ui-cbtn--gold" : ""}`} disabled={busy !== null} onClick={() => onAction(name)}>
+    className={`${primary ? "btn-dark" : "btn-secondary"} btn-sm`} disabled={busy !== null} onClick={() => onAction(name)}>
     {busy === name ? t("settings.serviceWorking") : t(key)}
   </button>;
   return <section
     className={`settings-service-hero${ready ? " settings-service-hero--ready" : attention ? " settings-service-hero--attention" : ""}`}
     id="settings-shoggoth" tabIndex={-1} aria-busy={busy !== null} aria-label={t("settings.serviceSubsection")}>
-    {error && !recoveryRequired ? <div className="settings-inline-state" role="alert"><div><strong>{t("settings.shoggothUnavailable")}</strong><p>{t("settings.serviceRetryHint")}</p></div><button className="ui-cbtn ui-cbtn--sm" onClick={onRetry}>{t("settings.retry")}</button></div>
+    {error && !recoveryRequired ? <div className="settings-inline-state" role="alert"><div><strong>{t("settings.shoggothUnavailable")}</strong><p>{t("settings.serviceRetryHint")}</p></div><button className="btn-secondary btn-sm" onClick={onRetry}>{t("settings.retry")}</button></div>
       : !status ? <p className="ui-hint">{t("settings.serviceWorking")}</p> : <>
         <div className="settings-service-top">
           <div className={`settings-service-icon ${ready ? "is-healthy" : ""}`} aria-hidden="true">

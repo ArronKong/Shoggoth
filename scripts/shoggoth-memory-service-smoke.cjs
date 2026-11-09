@@ -580,7 +580,9 @@ test("Dreaming schedule is durable, dispatches one run per occurrence, and does 
     await new Promise(resolve => { release = resolve; });
     return { outcome: { candidates: 1, applied: 1, failed: 0, degraded: 0 } };
   };
-  maintenance.tick(due); maintenance.tick(due); await Promise.resolve();
+  maintenance.tick(due); maintenance.tick(due);
+  // The occurrence first finishes session excerpts and the nightly review.
+  for (let turn = 0; turn < 100 && calls === 0; turn++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls, 1); assert.ok(maintenance.nextDueAt() > due);
   release(); await Promise.all([...maintenance.pending.values()]);
   assert.equal(service.memoryEngine.database.db.prepare("SELECT state FROM memory_dream_schedule WHERE profile_id=?").get(profileId).state, "completed");

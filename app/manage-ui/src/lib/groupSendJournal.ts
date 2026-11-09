@@ -1,4 +1,6 @@
 import type { GroupChatMessage, InspirationAttachment } from "../types";
+import type { GroupDraftMention } from "./groupMentions";
+import { isBroadcastHandle } from "../../../agent-service/group-mentions";
 import { projectJournalRecovery, type GroupJournalRecoveryPage } from "../../../group-journal-recovery";
 export type { GroupJournalRecoveryPage } from "../../../group-journal-recovery";
 
@@ -12,7 +14,8 @@ export type GroupSendTarget = { kind: "owner" } | { kind: "all" } | { kind: "mem
 export type GroupSendTargetLock = { target: GroupSendTarget; manual: boolean; afterSeq: number | null };
 export type GroupComposer = { text: string; mentionIds: string[]; replyTo: GroupChatMessage | null;
   replyTask: { id: string; objective: string } | null; requestRef: { id: string; label: string; mode: "append" | "replace" } | null;
-  newRequest: boolean; summaryMemberId: string; files: ComposerFile[]; sendTarget?: GroupSendTargetLock | null };
+  newRequest: boolean; summaryMemberId: string; files: ComposerFile[]; sendTarget?: GroupSendTargetLock | null;
+  mentionSpans?: GroupDraftMention[] };
 export type ComposerSnapshot = { version: 1; key: string; ownerScope: string; groupId: string; draftId: string;
   revision: number; storageRevision: number; composer: GroupComposer; updatedAt: number; detached?: true };
 export type SendPhase = "prepared" | "submitting" | "accepted_awaiting_echo" | "observed" | "rejected" | "needs_verification";
@@ -51,6 +54,10 @@ function validAttachment(value: unknown): value is InspirationAttachment {
 function validComposer(value: unknown): value is GroupComposer {
   const item = value as GroupComposer;
   return !!item && typeof item.text === "string" && Array.isArray(item.mentionIds) && item.mentionIds.every(part)
+    && (item.mentionSpans === undefined || Array.isArray(item.mentionSpans) && item.mentionSpans.length <= 2048
+      && item.mentionSpans.every((span, index, spans) => span && Number.isSafeInteger(span.start) && Number.isSafeInteger(span.end)
+        && span.start >= (index ? spans[index - 1].end : 0) && span.end > span.start + 1 && span.end <= item.text.length
+        && item.text[span.start] === "@" && (span.memberId === null ? isBroadcastHandle(item.text.slice(span.start + 1, span.end)) : part(span.memberId))))
     && (item.sendTarget == null || typeof item.sendTarget.manual === "boolean"
       && (item.sendTarget.afterSeq === null || Number.isSafeInteger(item.sendTarget.afterSeq) && item.sendTarget.afterSeq >= 0)
       && (item.sendTarget.target?.kind === "owner" || item.sendTarget.target?.kind === "all"

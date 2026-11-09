@@ -8,6 +8,7 @@ type AgentAvatarProps = {
   className?: string;
   version?: number;
   loading?: "eager" | "lazy";
+  grayscale?: boolean;
 };
 
 export default function AgentAvatar(props: AgentAvatarProps) {
@@ -18,7 +19,7 @@ export default function AgentAvatar(props: AgentAvatarProps) {
   return <AvatarImage key={src} {...props} src={src} />;
 }
 
-function AvatarImage({ className, loading, src }: AgentAvatarProps & { src: string }) {
+function AvatarImage({ className, loading, grayscale, src }: AgentAvatarProps & { src: string }) {
   const [state, setState] = useState<"loading" | "loaded" | "fallback">(src ? "loading" : "fallback");
   const imageRef = useRef<HTMLImageElement>(null);
   useLayoutEffect(() => {
@@ -31,6 +32,7 @@ function AvatarImage({ className, loading, src }: AgentAvatarProps & { src: stri
     <span
       className={`${styles.avatar}${className ? ` ${className}` : ""}`}
       data-avatar-state={state}
+      data-avatar-grayscale={grayscale || undefined}
       style={{ background: loaded ? "transparent" : undefined }}
       aria-hidden="true"
     >

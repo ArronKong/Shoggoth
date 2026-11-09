@@ -6,7 +6,7 @@ import AgentAvatarView from "../../components/AgentAvatar";
 import { approvalOptionIsVisible } from "../../lib/approvalOptions";
 import type { DashboardApprovalItem, DashboardRunningItem, InteractiveApprovalChoice, InteractiveRequestV1 } from "../../types";
 import ChatPromptCard, { type ChatPromptEntry, type ChatPromptResponse } from "../ChatPromptCard";
-import { fmtMs } from "../usage/charts";
+import { formatTurnElapsed, turnElapsedMs } from "../../lib/turnTimeline";
 import { isDashboardTaskSource } from "./activityStatusRows";
 import styles from "./ApprovalRow.module.css";
 
@@ -106,7 +106,8 @@ export default function ApprovalRow({ item, running, agentName, canRespond, onRe
   const kind = t(source === "cron" ? "dashboard.kindCron" : source === "kanban" ? "dashboard.kindKanban"
     : source === "inspiration" ? "dashboard.kindInspiration" : "dashboard.kindTask");
   const runningSummary = running?.progressSummary || (running?.title && !["Cron", "Kanban", "Inspiration"].includes(running.title) ? running.title : kind);
-  const runningStatus = t("dashboard.runningNow", { kind, time: typeof running?.startedAt === "number" ? fmtMs(Math.max(0, Date.now() - running.startedAt)) : "" });
+  const elapsed = turnElapsedMs(running?.createdAt ?? running?.startedAt, Date.now());
+  const runningStatus = t("dashboard.runningNow", { kind, time: elapsed === undefined ? "" : formatTurnElapsed(elapsed) });
   const status = waiting ? attentionStatus : runningStatus;
   const summary = waiting ? attentionSummary : runningSummary;
 

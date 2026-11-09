@@ -129,3 +129,42 @@ test("an explicitly selected Codex account from another Agent keeps provider aut
   const result = await f.service.workRunCoordinator.prepareMemoryModelContext({ profileId: f.profile.id }, "memory_text");
   assert.equal(calls, 1); assert.equal(result.runtime, "codex"); assert.equal(result.selectedModel, "fixture-model");
 });
+
+test("the nightly review purpose opens only review generation on a purpose-limited Runtime", async t => {
+  const f = await fixture(t), coordinator = f.service.workRunCoordinator;
+  // Like Grok/Antigravity: tool-free generation verified for named purposes only.
+  f.service.runtimeManager.canGenerateModelOnly = (runtime, { purpose = null } = {}) => runtime === "pi" && purpose === "memory_review";
+  const request = id => ({ profileId: f.profile.id, operationId: id, prompt: "Synthetic input", timeoutMs: 1000, maxOutputBytes: 1024 });
+  await assert.rejects(async () => coordinator.generateMemoryText(request("shared-text")), { code: "MODEL_ONLY_UNSUPPORTED" });
+  assert.equal(f.calls.length, 0, "recall and Dreaming text stay gated before Runtime acquisition");
+  const output = await coordinator.generateMemoryReviewText(request("nightly-review"));
+  assert.match(output.text, /synthetic fact/u);
+  assert.equal(f.calls.filter(call => call.prompt).length, 1);
+  assert.equal(f.calls[0].binding.runtime, "pi", "the review keeps the configured memory text route");
+});
+
+// 11-08 03:00: Grok answered the nightly review, then a liveness check of its
+// dedicated worker, already stopped by design, discarded the answer.
+test("a nightly review keeps the answer of a dedicated worker that stopped after replying", async t => {
+  const f = await fixture(t), coordinator = f.service.workRunCoordinator;
+  const { runtimeHandleV1 } = require("../app/agent-service/runtime-handle-v1");
+  f.service.runtimeManager.canGenerateModelOnly = (runtime, { purpose = null } = {}) => runtime === "pi" && purpose === "memory_review";
+  let checkedWhileAlive = 0;
+  f.service.runtimeManager.acquire = async binding => {
+    let stopped;
+    const terminated = new Promise(resolve => { stopped = resolve; });
+    const raw = { ...binding, capabilities: { "model.generate.toolFree": true }, terminated,
+      modelOnlyStopsHost: true, host: { modelOnlyInstance: true, state: "ready" }, subscribe: () => () => {},
+      authenticationState: async () => ({ status: "authenticated" }),
+      async generateModelOnly(request) {
+        request.assertCurrent(); checkedWhileAlive++;
+        raw.host.state = "stopped"; stopped(); await Promise.resolve();
+        return { text: '{"operations":[]}' };
+      } };
+    return runtimeHandleV1(raw, binding);
+  };
+  const output = await coordinator.generateMemoryReviewText({ profileId: f.profile.id, operationId: "nightly-review-stopped-worker",
+    prompt: "Synthetic input", timeoutMs: 1000, maxOutputBytes: 1024 });
+  assert.equal(output.text, '{"operations":[]}');
+  assert.equal(checkedWhileAlive, 1, "the review still checks its route while the worker is alive");
+});

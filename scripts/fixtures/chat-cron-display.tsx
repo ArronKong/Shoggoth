@@ -162,39 +162,31 @@ state.runCronDisplayFixture = async () => {
     check(!thread().textContent?.includes("HIDDEN_CRON_PROMPT"), row.name + " scheduler input was rendered");
     check(!thread().textContent?.includes("previous response was cut off"), "continuation injection was rendered");
     const top = visibleStart(row.name + "_BEGIN");
-    const label = i18n.t("turnLab.processLabel");
-    const cards = Array.from(thread().querySelectorAll<HTMLElement>("button[aria-expanded]")).filter(button => button.textContent?.includes(label));
-    check(cards.length === 1, row.name + " task rendered " + cards.length + " process cards");
-    const processBounds = cards[0].getBoundingClientRect(), viewport = thread().getBoundingClientRect();
-    const dock = immersive ? null : document.querySelector(".chat-topdock")?.getBoundingClientRect();
-    check(processBounds.top >= Math.max(viewport.top, dock?.bottom ?? 0) - 3 && processBounds.bottom < viewport.bottom - 80,
-      row.name + " unread process start is not visible: " + JSON.stringify({ top: processBounds.top, viewport: viewport.top, header: dock?.bottom }));
-    check(top > processBounds.top, row.name + " body must follow its process");
+    const activities = Array.from(thread().querySelectorAll<HTMLButtonElement>(
+      `button[aria-haspopup="dialog"][aria-label="${i18n.t("turnLab.processOpen")}"]`));
+    check(activities.length === 1, row.name + " task rendered " + activities.length + " activity shortcuts");
+    check(!thread().querySelector("[data-chat-process]"), row.name + " task duplicated its activity in the message flow");
     if (!immersive) check(thread().querySelectorAll(".chat-group.is-tool").length === 0, row.name + " orphan tool result escaped process");
     if (row.backendId === "hermes") check(thread().textContent?.includes("Owl_LATEST_CONTINUATION"), "continuation output missing");
     await wait(() => readState().read[row.key] >= since + (row.name === "Legacy" ? 153000 : 310000), row.name + " read acknowledgement");
     const position = thread().scrollTop;
     await runPageRefresh("/chat"); await pause(400); await frame();
     check(Math.abs(thread().scrollTop - position) < 5, row.name + " refresh pulled the reader to the end");
-    const process = cards[0].closest<HTMLElement>("[data-chat-process]")!;
-    cards[0].click();
-    await wait(() => cards[0].getAttribute("aria-expanded") === "true", row.name + " process did not expand");
-    const tool = Array.from(process.querySelectorAll<HTMLButtonElement>("button[aria-expanded]")).find(button => button !== cards[0]);
-    check(tool, row.name + " process lacks its tool"); tool!.click();
-    await wait(() => process.textContent?.includes("Fixture search result"), row.name + " tool result missing from process details");
-    const zoom = process.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("turnLab.processLargeView")}"]`);
-    check(zoom, row.name + " process lacks large view"); zoom!.click();
+    activities[0].click();
     await wait(() => {
       const dialog = document.querySelector<HTMLElement>('[role="dialog"]:not([inert])');
       if (!dialog) return false;
       const r = dialog.getBoundingClientRect();
       return dialog.contains(document.elementFromPoint(r.left + r.width / 2, Math.max(r.top + 20, 20)));
-    }, row.name + " process large view is covered");
+    }, row.name + " activity dialog is visible");
+    const activityDialog = document.querySelector<HTMLElement>('[role="dialog"]:not([inert])')!;
+    const tool = activityDialog.querySelector<HTMLButtonElement>('button[aria-expanded="false"]');
+    check(tool, row.name + " activity lacks its tool"); tool!.click();
+    await wait(() => activityDialog.textContent?.includes("Fixture search result"), row.name + " tool result missing from activity details");
     document.querySelector<HTMLButtonElement>(`[role="dialog"] button[aria-label="${i18n.t("common.close")}"]`)!.click();
     await wait(() => !document.querySelector('[role="dialog"]:not([inert])'), row.name + " process large view did not close");
-    cards[0].click();
-    await wait(() => cards[0].getAttribute("aria-expanded") === "false", row.name + " process did not collapse");
-    result.push({ backend: row.backendId, name: row.name, hiddenPrompt: true, startTop: top, processTop: Math.round(processBounds.top), processCards: cards.length, detailsAndZoom: true, fullText: true, refreshStable: true });
+    result.push({ backend: row.backendId, name: row.name, hiddenPrompt: true, startTop: top, activityShortcuts: activities.length,
+      activityDetails: true, fullText: true, refreshStable: true });
   }
   select(cases[3].key);
   await wait(() => thread()?.textContent?.includes("PAGED_002"), "unread boundary beyond initial 50 messages");

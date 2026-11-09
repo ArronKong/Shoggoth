@@ -13,8 +13,13 @@ const { build, context } = createRequire(path.join(uiRoot, "package.json"))("esb
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-runtime-entry-ui-"));
 try {
   const buildOptions = { entryPoints: [path.join(root, "scripts/fixtures/runtime-entry-pages.tsx")],
-    bundle: true, format: "esm", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
+    bundle: true, format: "esm", jsx: "automatic",
+    define: { "process.env.NODE_ENV": '"production"', "import.meta.glob": "fixtureAssetGlob" },
+    banner: { js: "const fixtureAssetGlob=()=>({});" },
+    plugins: [{ name: "public-fonts", setup(builder) {
+      builder.onResolve({ filter: /^\/fonts\// }, args => ({ path: path.join(uiRoot, "public", args.path) }));
+    } }],
+    loader: { ".woff2": "dataurl", ".ttf": "dataurl", ".otf": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
     nodePaths: [path.join(uiRoot, "node_modules")], logLevel: "silent" };
   await build(buildOptions);
   const page = path.join(temp, "index.html");
@@ -47,6 +52,7 @@ try {
   } else {
     const main = path.join(temp, "main.cjs");
     const screenshot = process.argv.find((value) => value.startsWith("--screenshot="))?.slice("--screenshot=".length);
+    const agentScreenshot = process.argv.find((value) => value.startsWith("--agent-screenshot="))?.slice("--agent-screenshot=".length);
     fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron");
 const assert=require("node:assert/strict");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
@@ -80,13 +86,23 @@ app.whenReady().then(async()=>{
     require("node:fs").writeFileSync(${JSON.stringify(path.resolve(screenshot).replace(/\.png$/u, "-preview.png"))},(await w.webContents.capturePage()).toPNG());
     require("node:fs").writeFileSync(${JSON.stringify(path.resolve(screenshot).replace(/\.png$/u, "-menu.png"))},(await w.webContents.capturePage(bounds)).toPNG());
     ` : ""}
-    console.log(JSON.stringify({...result,geometry,immersive,verified:true}));
+    w.setContentSize(1100,950);
+    const agentDefaultModel = await w.webContents.executeJavaScript("window.checkAgentDefaultModel()",true);
+    const agentGeometry = [await w.webContents.executeJavaScript('window.checkAgentDefaultGeometry("zh-CN","light")')];
+    ${agentScreenshot ? `
+    const agentCrop = await w.webContents.executeJavaScript('(()=>{const menu=document.querySelector(".model-menu").getBoundingClientRect();const trigger=document.querySelector("[data-agent-overview-panel] .chat-model-menu > button").getBoundingClientRect();const left=Math.floor(Math.min(menu.left,trigger.left)-16),top=Math.floor(Math.min(menu.top,trigger.top-24)-12);return {x:left,y:top,width:Math.ceil(menu.right-left+16),height:Math.ceil(menu.bottom-top+16)};})()');
+    require("node:fs").writeFileSync(${JSON.stringify(path.resolve(agentScreenshot))},(await w.webContents.capturePage(agentCrop)).toPNG());
+    ` : ""}
+    w.setContentSize(390,780);
+    agentGeometry.push(await w.webContents.executeJavaScript('window.checkAgentDefaultGeometry("en","dark")'));
+    const agentFiles = await w.webContents.executeJavaScript("window.checkAgentFiles()",true);
+    console.log(JSON.stringify({...result,geometry,immersive,agentDefaultModel,agentGeometry,agentFiles,verified:true}));
     passed=true;
   } catch(error) {console.error(error); console.error(await w.webContents.executeJavaScript("JSON.stringify({errors:window.fixtureErrors,text:document.body.innerText.slice(0,2500)})")); require("node:fs").writeFileSync("/tmp/shoggoth-runtime-entry-failure.png", (await w.webContents.capturePage()).toPNG());}
   finally {w.destroy();app.exit(passed?0:1);}
 }).catch(error=>{console.error(error);app.exit(1)});`);
     const result = spawnSync(createRequire(path.join(root, "package.json"))("electron"), [main], {
-      encoding: "utf8", timeout: 45_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
+      encoding: "utf8", timeout: 55_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" },
     });
     process.stdout.write(result.stdout || "");
     if (result.status !== 0) process.stderr.write(result.stderr || String(result.error || ""));

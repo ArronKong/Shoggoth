@@ -62,7 +62,7 @@ export default function SettingsDesktopPrinter({ disabled }: { disabled: boolean
           : t('settings.desktopPrinter.hint')}</p>}
     </div>
     <div className="settings-shortcut-row">
-      <button type="button" className="ui-cbtn settings-shortcut" disabled={disabled || !host?.setShortcut} aria-busy={busy || undefined}
+      <button type="button" className="btn-secondary btn-sm settings-shortcut" disabled={disabled || !host?.setShortcut} aria-busy={busy || undefined}
         aria-label={t(capturing ? 'settings.desktopPrinter.recording' : 'settings.desktopPrinter.change')}
         data-shortcut-capturing={capturing || undefined} onClick={() => { void begin(); }} onBlur={() => { if (capture.current) endCapture(); }}
         onKeyDown={event => {
@@ -75,7 +75,7 @@ export default function SettingsDesktopPrinter({ disabled }: { disabled: boolean
         }}>
         {capturing ? t('settings.desktopPrinter.recording') : <kbd>{displayShortcut(state.accelerator)}</kbd>}
       </button>
-      <button type="button" className="ui-cbtn ui-cbtn--sm" disabled={disabled || busy || !host?.setShortcut || state.accelerator === 'Alt+S'}
+      <button type="button" className="btn-secondary btn-sm" disabled={disabled || busy || !host?.setShortcut || state.accelerator === 'Alt+S'}
         onClick={() => { void apply('Alt+S'); }}>{t('settings.desktopPrinter.reset')}</button>
     </div>
   </div>;

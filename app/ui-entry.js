@@ -1199,6 +1199,8 @@ if (!gotLock) {
       getNativeMemorySharingConfig: () => require("./core/config-store").projectNativeMemorySharingConfig(configStore.read()),
       updateNativeMemoryConfig: input => memoryCommandConfigController.update(input),
       getLocale: () => resolveLocale(readConfig().locale),
+      runtimeModelCache: require("./core/runtime-model-cache-store").createRuntimeModelCacheStore({ trustedRoot: app.getPath("userData") }),
+      prewarmRuntimeModels: true,
       id: "shoggoth",
       name: "Shoggoth",
       connectionMode: "builtin-service",

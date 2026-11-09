@@ -1198,6 +1198,7 @@ export interface UnifiedSkill {
   source?: "builtin" | "user" | "learned";
   learnedRevision?: number;
   globalEnabled?: boolean;
+  globalSettingRevision?: number;
   contentHash?: string;
   requiredTools?: string[];
   requiredRuntimeCapabilities?: string[];
@@ -1807,6 +1808,8 @@ export interface SessionArtifactsResult {
 }
 export interface InspirationActivity {
   runId: string;
+  /** The same error text shown by Chat, scoped to this run; absent on older hosts. */
+  errorMessage?: string | null;
   trajectory: {
     supported: boolean;
     reason: string | null;
@@ -1826,16 +1829,26 @@ export interface GlobalChatSearchHit {
   ts: number | null;
   role?: string;
 }
-export interface GlobalChatSearchResult {
+export interface GlobalGroupChatSearchHit {
+  kind: "group";
+  groupName: string;
+  ownerScope: string;
+  authorName?: string;
+  message: GroupChatMessage;
+  snippet: string;
+  ts: number | null;
+}
+export interface GlobalChatSearchResult<Hit = GlobalChatSearchHit> {
   query: string;
   offset: number;
   searchedAgents: number;
   unsupportedAgents: number;
   failedAgents: number;
+  groupSearch?: "complete" | "partial" | "unavailable";
   truncated: boolean;
   hasMore: boolean;
   nextOffset?: number;
-  results: GlobalChatSearchHit[];
+  results: Hit[];
 }
 // Usage Top 会话行点击的 transcript 头部预览（GET /__api/sessions/preview）。
 export interface SessionPreviewMessage {
@@ -3083,6 +3096,8 @@ export interface AgentRuntimeBinding {
   revision: number;
   createdAt: number;
   updatedAt: number;
+  /** Optional Agent-specific model for this CLI binding. */
+  defaultModel?: string;
 }
 export interface AgentRuntimeBindingsSnapshot {
   checkpointBindingIds?: string[];
@@ -3127,6 +3142,19 @@ export interface SessionRuntimeModels {
   models: SessionRuntimeModel[];
   runtimes: Array<{ runtime: string; bindingId?: string; name: string; available: boolean; capabilities: ChatCapabilities }>;
   capabilities: ChatCapabilities;
+}
+
+export interface AgentDefaultModelSelection {
+  bindingId: string;
+  model: string | null;
+  revision: number;
+  /** Absolute source within the built-in Harness. */
+  modelProviderRef?: string;
+}
+export interface AgentDefaultModels {
+  selection: AgentDefaultModelSelection;
+  models: SessionRuntimeModel[];
+  runtimes: SessionRuntimeModels["runtimes"];
 }
 
 export interface RuntimeAccountCardSnapshot extends RuntimeAccountSummary {
@@ -3254,6 +3282,7 @@ export interface BackendRunDetail {
   runtime?: string;
   status: string;
   agentId?: string;
+  createdAt?: number;
   startedAt?: number;
   finishedAt?: number;
   summary?: string;
@@ -3449,6 +3478,8 @@ export interface InspirationIdea {
   paperTone?: number;
   attachments?: InspirationAttachment[];
   archivedAt: number | null; acceptedAt: number | null; createdAt: number; updatedAt: number;
+  /** The chosen reply. Older notes may have only acceptedAt. */
+  acceptedRunId?: string;
   restoredAt?: number;
   status: InspirationStatus; latestExecution: InspirationExecution | null;
   /** Every round of this idea and the agents that ran them, in first-use order. */
@@ -3467,7 +3498,8 @@ export interface InspirationAgent {
 export interface InspirationDockAgent extends InspirationAgent {
   executionCount: number;
 }
-export type InspirationPatch = Partial<{ body: string; title: string | null; favorite: boolean; archived: boolean; accepted: boolean; attachments: InspirationAttachment[] }>;
+export type InspirationPatch = Partial<{ body: string; title: string | null; favorite: boolean; archived: boolean;
+  accepted: boolean; acceptedRunId: string | null; attachments: InspirationAttachment[] }>;
 export interface InspirationGrowthSettings {
   revision: number; enabled: boolean; executors: Array<{ agentId: string; backendId: string }>;
 }
@@ -3479,6 +3511,15 @@ export interface InspirationGrowthResult {
 export interface InspirationStartInput {
   operationId: string; expectedRevision: number; agentId: string; backendId: string;
   instruction: string; workspace: string | null;
+  modelSelection?: InspirationModelSelection;
+}
+export type InspirationModelSelection = { model: string; bindingId: string; modelProviderRef?: string }
+  | { model: string; provider: string | null };
+export interface InspirationModels {
+  defaultModel: string | null;
+  defaultBindingId?: string;
+  models: Array<SessionRuntimeModel | { id: string; name: string; provider: string | null }>;
+  runtimes?: SessionRuntimeModels['runtimes'];
 }
 export interface RuntimeSelectionPolicy {
   version: 1;
@@ -3612,6 +3653,8 @@ export interface GroupChatMember {
   modelSelection?: GroupChatModelSelection | null;
   peerId?: string;
   card?: GroupChatMemberCard | null;
+  /** The owning directory confirmed that this Agent was deleted or archived. */
+  agentMissing?: boolean;
   id: string;
   groupId: string;
   backendId: string;

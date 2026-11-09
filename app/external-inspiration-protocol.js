@@ -75,10 +75,11 @@ function validateExternalInspirationParams(rawMethod, value) {
   const group = typeof rawMethod === "string" && rawMethod.startsWith("group.external.");
   const contextFields = group && Object.hasOwn(value ?? {}, "context") ? ["context"] : [];
   const remoteFields = group && Object.hasOwn(value ?? {}, "remote") ? ["remote"] : [];
-  const modelFields = group && Object.hasOwn(value ?? {}, "modelSelection") ? ["modelSelection"] : [];
+  const modelFields = Object.hasOwn(value ?? {}, "modelSelection") ? ["modelSelection"] : [];
   const stopFields = group && rawMethod === "group.external.cancel" && Object.hasOwn(value ?? {}, "stopGroup") ? ["stopGroup"] : [];
   if (stopFields.length && value.stopGroup !== true) return false;
-  if (modelFields.length && (!method?.endsWith(".prepare") || !validModelSelection(value.modelSelection))) return false;
+  if (modelFields.length && (!method?.endsWith(".prepare") || !validModelSelection(value.modelSelection)
+    || (!group && (value.sessionKey !== null || value.modelSelection === null)))) return false;
   if (contextFields.length && (!method?.endsWith(".prepare") || !validPreparationContext(value.context))) return false;
   if (remoteFields.length && !validRemoteBinding(value.remote)) return false;
   if (!method || !validIdentity(value)) return false;

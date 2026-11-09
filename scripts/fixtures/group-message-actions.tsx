@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import GroupChatPanel from "../../app/manage-ui/src/pages/GroupChatPanel";
+import { MESSAGE_DELETION_ENABLED } from "../../app/manage-ui/src/pages/ChatMessageActions";
 import { UiProvider } from "../../app/manage-ui/src/components/ui";
 import ScrollbarProvider from "../../app/manage-ui/src/components/ScrollbarProvider";
 import { emitGroupChanged } from "../../app/manage-ui/src/lib/groupChat";
@@ -184,9 +185,11 @@ state.runTimelineFixture = async () => {
     "new results do not move a reader viewing earlier messages");
   await publish(15, "member-1", "maya");
   check(order() === "9,10,11,12,13,14,15", "Maya final follows DeepSeek in published order");
-  await actOn(15, "chat.deleteLocal");
-  check(!row(15) && !execution("maya"), "hiding a final never revives its stale execution card");
-  await undo();
+  if (MESSAGE_DELETION_ENABLED) {
+    await actOn(15, "chat.deleteLocal");
+    check(!row(15) && !execution("maya"), "hiding a final never revives its stale execution card");
+    await undo();
+  }
   timelineTurns.push({ ...timelineTurns[1], opportunityId: "maya-next", startedAt: started + 1 });
   timelineInteractions = [{ opportunityId: "maya", memberId: "member-1", status: "pending", occurredAt: started,
     request: { version: 1, requestId: "stale-approval", kind: "runtime_approval", title: "Stale approval", fields: [], approvalChoices: ["once", "deny"] } }];
@@ -194,7 +197,7 @@ state.runTimelineFixture = async () => {
   check(order() === "9,10,11,12,13,14,15,maya-next", "settlement clears exact turn and stale approval, preserving next turn");
   check(writes.length === 0, "timeline updates perform no server writes");
   return { passed: true, language, theme, checks: ["published results before pending cards", "stable card order and DOM identity",
-    "exact turn settlement and partial speech", "bottom following and earlier reading position", "hidden results and stale approvals"], apiWrites: writes.length, providerCalls: 0 };
+    "exact turn settlement and partial speech", "bottom following and earlier reading position", "stale approvals"], apiWrites: writes.length, providerCalls: 0 };
 };
 state.runDesignFixture = async () => {
   await wait(() => ready() && row(12), "design group ready");
@@ -261,6 +264,7 @@ state.runDesignFixture = async () => {
 };
 state.runFixture = async () => {
   const checks: string[] = [];
+  const menuActions = ["chat.copy", "chat.quote", ...(MESSAGE_DELETION_ENABLED ? ["chat.deleteLocal"] : [])];
   await wait(() => ready() && row(12), "initial group ready");
   const model = row(10)!.querySelector<HTMLElement>(".chat-response-model")!;
   check(model && getComputedStyle(model).opacity === "0", "group model is hidden by default");
@@ -271,25 +275,31 @@ state.runFixture = async () => {
   for (const seq of [9,10]) {
     const footer = () => row(seq)!.querySelector<HTMLElement>("[data-group-message-footer]")!;
     const buttons = () => footer().querySelectorAll<HTMLButtonElement>("button");
-    check(buttons().length === 2, "user and member have copy and delete footer shortcuts");
+    check(buttons().length === (MESSAGE_DELETION_ENABLED ? 3 : 2), "user and member share the same visible footer actions");
+    check(buttons()[1].getAttribute("aria-label") === i18n.t("chat.quote"), "quote follows copy");
+    for (const button of [buttons()[0], buttons()[1]]) {
+      check(getComputedStyle(button.querySelector("svg *")!).strokeWidth === "1px", "copy and quote share a 1px stroke");
+    }
     check(!footer().querySelector(`button[title="${i18n.t("chat.pin")}"], button[title="${i18n.t("chat.unpin")}"]`), "footer hides pin and unpin shortcuts");
     buttons()[0].focus(); await pause();
     check(document.activeElement === buttons()[0], "footer shortcuts accept keyboard focus");
     check(getComputedStyle(buttons()[0]).opacity === "1", "keyboard focus reveals footer shortcuts");
     buttons()[0].click(); await pause();
     check(state.clipboardText === allMessages.g[seq-1].body, "footer copies exact selected Markdown");
-    buttons()[1].click(); await wait(() => !row(seq), "footer locally hides selected message");
-    await undo(); await wait(() => row(seq), "footer hide supports undo");
+    if (MESSAGE_DELETION_ENABLED) {
+      buttons()[2].click(); await wait(() => !row(seq), "footer locally hides selected message");
+      await undo(); await wait(() => row(seq), "footer hide supports undo");
+    }
   }
   const footer = row(10)!.querySelector<HTMLElement>("[data-group-message-footer]")!;
   check(footer.textContent?.includes("native-actual-model") && !/[↑↓]|\b[RW]\d|\bctx\b|\btok\b/.test(footer.textContent), "group footer keeps only the response model and time");
   check(!row(12)!.querySelector(".chat-response-model"), "missing metadata remains absent");
   check(footer.getBoundingClientRect().right <= innerWidth + 1, "footer remains inside narrow viewport");
-  checks.push("hidden usage/context and model focus visibility; copy and delete shortcuts for both authors; pinning hidden; undo; missing metadata and narrow layout");
+  checks.push("model and copy reveal on focus for both authors; pinning hidden; missing metadata and narrow layout");
   for (const seq of [9,10]) {
     await open(seq, true);
     const labels = Array.from(document.querySelectorAll(".chat-ctxmenu button")).map(button => button.textContent);
-    check(JSON.stringify(labels) === JSON.stringify(["chat.copy","chat.quote","chat.deleteLocal"].map(key => i18n.t(key))), "both authors share three actions with pinning hidden");
+    check(JSON.stringify(labels) === JSON.stringify(menuActions.map(key => i18n.t(key))), "both authors share the available menu actions");
     const bounds = document.querySelector(".chat-ctxmenu")!.getBoundingClientRect();
     check(bounds.left >= 0 && bounds.top >= 0 && bounds.right <= innerWidth + 1 && bounds.bottom <= innerHeight + 1, "menu stays inside viewport");
     await menuAction("chat.copy");
@@ -309,29 +319,37 @@ state.runFixture = async () => {
   check(!document.querySelector(".chat-pinbar"), "pin bar stays hidden after remount");
   check(JSON.stringify(JSON.parse(localStorage.getItem(presentationKey)!).pins) === JSON.stringify(savedPins), "saved pins survive local actions and remount");
   checks.push("pin bar and filter hidden; full message stream; saved pins preserved across local actions and remount");
-  await actOn(10,"chat.deleteLocal"); await wait(() => !row(10), "member message locally hidden");
+  if (MESSAGE_DELETION_ENABLED) {
+    await actOn(10,"chat.deleteLocal"); await wait(() => !row(10), "member message locally hidden");
+  } else {
+    localStorage.setItem(presentationKey, JSON.stringify({ pins: savedPins, hidden: [allMessages.g[9].id] }));
+  }
   await remount(); check(!row(10), "hidden message persists after remount");
   check(allMessages.g.some(message => message.seq === 10), "canonical message retained");
-  await actOn(9,"chat.deleteLocal"); await wait(() => !row(9), "user message locally hidden");
-  await undo(); await wait(() => row(9), "user deletion undone");
-  check(!row(10), "undo does not reveal another hidden message");
+  if (MESSAGE_DELETION_ENABLED) {
+    await actOn(9,"chat.deleteLocal"); await wait(() => !row(9), "user message locally hidden");
+    await undo(); await wait(() => row(9), "user deletion undone");
+    check(!row(10), "undo does not reveal another hidden message");
+  }
   check(writes.length === 0, "local message actions make no API writes");
-  checks.push("both authors hide locally; exact undo and persistent hidden state; no server writes");
+  checks.push("saved local hidden state persists; no server writes");
   const olderButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent === i18n.t("groupChat.loadOlder"));
   check(olderButton, "older history entry exists"); olderButton!.click();
   await wait(() => row(2), "older messages loaded");
   await open(7);
-  check(!Array.from(document.querySelectorAll(".chat-ctxmenu button")).some(button => button.textContent === i18n.t("chat.copy")), "attachment-only messages do not copy empty text");
-  check(!Array.from(document.querySelectorAll(".chat-ctxmenu button")).some(button => [i18n.t("chat.pin"), i18n.t("chat.unpin")].includes(button.textContent || "")), "attachment-only menu also hides pinning");
+  const attachmentMenu = Array.from(document.querySelectorAll(".chat-ctxmenu button")).map(button => button.textContent);
+  check(JSON.stringify(attachmentMenu) === JSON.stringify(menuActions.slice(1).map(key => i18n.t(key))), "attachment-only menu keeps quote without offering empty copy");
   document.querySelector(".chat-ctxmenu")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await wait(() => !document.querySelector(".chat-ctxmenu"), "attachment-only menu dismissed");
-  await actOn(4,"chat.deleteLocal"); await wait(() => !row(4), "one duplicate hidden"); check(row(6), "identical neighboring reply remains");
-  await undo(); await wait(() => row(4), "exact duplicate restored");
+  if (MESSAGE_DELETION_ENABLED) {
+    await actOn(4,"chat.deleteLocal"); await wait(() => !row(4), "one duplicate hidden"); check(row(6), "identical neighboring reply remains");
+    await undo(); await wait(() => row(4), "exact duplicate restored");
+  }
   await remount(); check(!row(2), "older message initially outside retained page");
   Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent === i18n.t("groupChat.loadOlder"))!.click();
   await wait(() => row(2), "normal pagination still loads saved older pinned message");
   check(historyReads.some(read => read.before === 9), "older messages use normal beforeSeq pagination");
-  checks.push("attachment-only menu hides pinning; duplicate identity; older messages remain accessible through pagination");
+  checks.push("attachment-only menu; older messages remain accessible through pagination");
   mount("h"); await wait(() => ready() && row(10) && document.body.textContent?.includes("Group h"), "other group ready");
   check(!document.querySelector(".chat-pinbar"), "same message IDs in another group do not inherit pins");
   mount("g"); await wait(() => ready() && document.body.textContent?.includes("Group g") && !row(10), "original group presentation restored");
@@ -346,14 +364,23 @@ state.runFixture = async () => {
   check(!row(2), "late history cannot enter replacement owner");
   check(JSON.stringify(JSON.parse(localStorage.getItem(presentationKey)!).pins) === JSON.stringify(savedPins), "owner switch retains original saved pins");
   checks.push("owner isolation; stale menu and delayed history read fenced; original saved pins retained");
-  await actOn(10,"chat.quote");
-  check(document.querySelector(".chat-quote-bar__text")?.textContent?.includes("New owner:"), "quote uses existing group reply chip");
+  const quoteButton = row(10)!.querySelector<HTMLButtonElement>(`[data-group-message-footer] button[aria-label="${i18n.t("chat.quote")}"]`)!;
+  quoteButton.click();
+  await wait(() => document.activeElement === document.querySelector("[data-chat-composer] textarea"), "footer quote focuses the composer");
+  const chip = document.querySelector(".chat-quote-bar")!;
+  check(chip?.querySelector(".chat-quote-bar__text")?.textContent?.includes("New owner:"), "quote uses existing group reply chip");
+  const marker = chip.querySelector(".chat-quote-icon path")!;
+  const arrow = quoteButton.querySelector("svg path")!;
+  check(marker.getAttribute("d") === arrow.getAttribute("d") && getComputedStyle(marker).stroke === getComputedStyle(arrow).stroke,
+    "composer quote uses the same arrow and color as the footer");
+  check(getComputedStyle(chip).borderRadius === "20px", "composer quote has 20px corners");
+  if (theme === "light") check(getComputedStyle(chip).backgroundColor === "rgb(235, 235, 235)", "light composer quote uses #ebebeb");
   await type("Reply to the selected group message");
   document.querySelector<HTMLButtonElement>(".chat-send")!.click();
   await wait(() => sends.length === 1 && row(13), "intentional quoted send acknowledged");
   check(sends[0].input.replyTo === 10 && sends[0].input.ownerScope === "owner-b", "quoted send retains selected seq and current owner");
   check(writes.length === 1, "only the intentional test send writes to the API");
-  checks.push("quote submission preserves canonical sequence and current owner");
+  checks.push("footer quote icon and chip styling; quote submission preserves canonical sequence and current owner");
   await state.showDesignState("members");
   const memberButton = document.querySelector<HTMLButtonElement>('[data-group-details-member="member-1"]')!;
   const nativeMenuSuppressed = !memberButton.dispatchEvent(new MouseEvent("contextmenu", {

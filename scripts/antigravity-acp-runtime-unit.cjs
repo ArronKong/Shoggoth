@@ -14,7 +14,7 @@ const {
   modelCatalogFromConfig,
 } = require("../app/agent-service/antigravity-acp-runtime-host");
 const { AntigravityRuntimeAdapter } = require("../app/agent-service/antigravity-runtime-adapter");
-const { ANTIGRAVITY_ACP_SERVER_VERSION } = require("../app/agent-service/antigravity-acp-distribution");
+const { ANTIGRAVITY_ACP_SERVER_VERSION, ANTIGRAVITY_ACP_CONTRACTS } = require("../app/agent-service/antigravity-acp-distribution");
 const {
   antigravityUsedOnThisMac,
   prepareAntigravityKeychainContext,
@@ -105,7 +105,9 @@ async function until(predicate, label, timeout = 5_000) {
   throw new Error(`Timed out: ${label}`);
 }
 
-function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, serverVersion = ANTIGRAVITY_ACP_SERVER_VERSION, reportedVersion = serverVersion } = {}) {
+function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, serverVersion = ANTIGRAVITY_ACP_SERVER_VERSION,
+  reportedVersion = serverVersion, contracts = serverVersion === ANTIGRAVITY_ACP_SERVER_VERSION ? ANTIGRAVITY_ACP_CONTRACTS
+    : serverVersion === "1.2.1" ? { workspaceExecution: 1, nativeToolResults: 1 } : {} } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agy-acp-host-")));
   fs.chmodSync(root, 0o700);
   const paths = { stateDir: path.join(root, "state"), runtimeDir: path.join(root, "run"), trustedRoot: root };
@@ -146,7 +148,7 @@ function fixture(t, { env = {}, authType = "oauth-personal", permissionPolicy, s
       workspace,
       platform: "linux",
       parentEnv: { PATH: process.env.PATH, HTTPS_PROXY: "http://127.0.0.1:7897", SECRET_TOKEN: "leak" },
-      verifyServer: async () => ({ version: serverVersion, serverPath, harnessPath }),
+      verifyServer: async () => ({ version: serverVersion, serverPath, harnessPath, contracts }),
       resolveMcpTimeoutBootstrap: () => path.join(bin, "harness-bootstrap"),
       createMcpTimeoutBridge: (options) => {
         const bridge = { options, descriptors: [], removed: [], closed: false,
@@ -396,10 +398,21 @@ test("managed ACP rejects an unexpected native tool without another approval car
     { outcome: { outcome: "selected", optionId: "once" } }, "the Service retains product tool confirmation");
 });
 
-test("an unverified ACP version cannot silently start managed workspace execution", async t => {
+test("ACP without a verified tool-boundary contract cannot silently start managed workspace execution", async t => {
   const f = fixture(t, { serverVersion: "1.2.2" });
   await assert.rejects(f.create({ workspaceExecutionVersion: 1 }).initialize(), { code: "WORKSPACE_RUNTIME_GUARD_UNAVAILABLE" });
   assert.equal(f.records().length, 0);
+});
+
+for (const serverVersion of ["1.2.2", "2.0.0", "nightly"]) test(`Antigravity ${serverVersion} uses verified distribution contracts rather than release labels`, async t => {
+  const f = fixture(t, { serverVersion, contracts: ANTIGRAVITY_ACP_CONTRACTS });
+  const host = f.create({ workspaceExecutionVersion: 1, credentialStorage: "file" });
+  await host.initialize();
+  assert.ok(host.workspaceExecutionHome);
+  assert.equal(f.timeoutBridges.length, 1);
+  const { session } = await host.sessionStart({ source: "contract-version", cwd: f.workspace });
+  assert.ok(session.id);
+  assert.equal(f.spawns[0].options.env.AGY_ACP_FORCE_FILE_STORAGE, "1");
 });
 
 test("the verified 1.4.3 distribution retains the managed workspace boundary", async t => {

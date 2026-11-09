@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "serviceProtocolVersion": 28,
+  "serviceProtocolVersion": 31,
   "sharedSkillTools": [
     {
       "name": "shoggoth_capability_search",
@@ -118,7 +118,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -175,7 +175,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -220,7 +220,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -281,7 +281,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -321,7 +321,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -346,7 +346,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -414,7 +414,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -457,7 +457,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -499,7 +499,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -536,7 +536,7 @@
         "openWorldHint": true
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     }
   ],
@@ -564,7 +564,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -619,7 +619,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -652,7 +652,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -718,7 +718,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -811,7 +811,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -859,7 +859,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -885,7 +885,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -930,7 +930,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -963,7 +963,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -1022,7 +1022,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -1105,7 +1105,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     },
     {
@@ -1145,7 +1145,7 @@
         "openWorldHint": false
       },
       "_meta": {
-        "shoggoth/toolRegistryRevision": "4bab9ffaf478c5092fd40e1f78acde7f5630c148d8dfcedbc97201e99d365f02"
+        "shoggoth/toolRegistryRevision": "315d56711575df5e9c69a36fe6af35760e5055e517a2262ecc0756c4695e80de"
       }
     }
   ]

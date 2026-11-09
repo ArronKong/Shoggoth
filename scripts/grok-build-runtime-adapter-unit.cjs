@@ -225,6 +225,25 @@ function standardServer(extra) {
   };
 }
 
+for (const version of ["1.0.72", "1.0.78", "2.0.0", "nightly", undefined]) test(`Grok protection admits ACP contract with version ${version}`, async t => {
+  const server = standardServer();
+  const routes = [];
+  const f = fixtureOptions((message, child) => {
+    const response = server(message, child);
+    if (message.method === "initialize") response.result._meta.agentVersion = version;
+    return response;
+  }, { secretGateway: { bindGrokSession: async input => {
+    routes.push(input.providerKind);
+    return { baseUrl: "http://127.0.0.1:9/fixture", close() {} };
+  } } });
+  t.after(async () => { await f.adapter.stopAll(); f.cleanup(); });
+  const handle = await f.adapter.acquire({ runtime: "grok-build", runtimeProfileId: "version-contract",
+    runtimeAccountId: NATIVE_GROK_BUILD_RUNTIME_ACCOUNT_ID });
+  assert.equal(handle.host.state, "ready");
+  assert.deepEqual(routes, ["grok-cli", "grok-api-key"]);
+  assert.equal(f.children[0].messages.some(message => message.method === "session/prompt"), false);
+});
+
 test("model-only Grok isolates configuration, removes native/MCP tools and closes its dedicated process", async t => {
   const server = standardServer((message, child) => {
     if (message.method === "session/prompt") {
@@ -235,7 +254,7 @@ test("model-only Grok isolates configuration, removes native/MCP tools and close
   });
   const f = fixtureOptions((message, child) => {
     const response = server(message, child);
-    if (message.method === "initialize") response.result._meta.agentVersion = "1.0.73";
+    if (message.method === "initialize") response.result._meta.agentVersion = "nightly";
     return response;
   });
   t.after(async () => { await f.adapter.stopAll(); f.cleanup(); });
@@ -2778,7 +2797,7 @@ test("MCP descriptors require executable commands and safe env/header names", as
 
 test("reserved native HOME/GROK_HOME and compatibility switches cannot be overridden", async () => {
   for (const name of [
-    "HOME", "GROK_HOME", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "HOME", "GROK_HOME", "GROK_MEMORY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy", ...GROK_COMPAT_DISABLE_ENV,
   ]) {
     const fixture = fixtureOptions(standardServer(), { spawnEnv: { [name]: "/tmp/unsafe" } });
@@ -2798,6 +2817,7 @@ test("reserved native HOME/GROK_HOME and compatibility switches cannot be overri
     const runtimeHome = fixture.nativeHome;
     assert.equal(fixture.spawns[0].options.env.HOME, fixture.userHome);
     assert.equal(fixture.spawns[0].options.env.GROK_HOME, runtimeHome);
+    assert.equal(fixture.spawns[0].options.env.GROK_MEMORY, "0", "Grok's own memory stays off");
     assert.equal(GROK_COMPAT_DISABLE_ENV.every(
       (key) => fixture.spawns[0].options.env[key] === "false",
     ), true);

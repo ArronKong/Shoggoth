@@ -106,16 +106,9 @@ const check=(cond:unknown,label:string)=>{if(!cond)throw Error(label);};
 
 const tick=()=>new Promise(r=>setTimeout(r,60));
 const waitNode=()=>visible<HTMLElement>('[data-testid="chat-run-wait"]');
-const checkThinkingCopy=(label:string)=>{
-  const node=waitNode()!;
-  const timer=node.querySelector('[aria-hidden="true"]')?.textContent||"";
-  check(node.textContent===i18n.t("chat.runWait.thinking")+timer,`unified thinking copy for ${label}`);
-  check(node.title===node.textContent,`thinking tooltip follows its displayed timer for ${label}`);
-  if(timer)check(i18n.language==="zh-CN"?/^ · \d+ (秒|分钟)$/.test(timer):/^ · \d+[sm]$/.test(timer),`localized thinking timer for ${label}`);
-};
-const loadingSelector='.chat-thread .chat-bubble.is-streaming [role="status"]';
+const loadingSelector = (immersive ? '[data-testid="immersive-chat"]' : '.chat-thread .chat-bubble.is-streaming')
+  + ` [role="status"][aria-label="${i18n.t("chat.liveStatus.running")}"]`;
 const checkLoadingBubble=()=>{
-  if(immersive)return;
   const loader=visible<HTMLElement>(loadingSelector);
   check(!!loader,"pending reply must show its loading bubble");
   check(document.querySelectorAll(loadingSelector).length===1,"only one reply loading animation is shown");
@@ -125,17 +118,18 @@ const checkLoadingBubble=()=>{
 };
 const stage=async(value:string,statusKind="starting")=>{
   emit({state:"status",statusKind,stage:value});
-  await wait(()=>waitNode()?.dataset.stage===value,`stage ${value}`);
-  checkThinkingCopy(value);
-  const process=waitNode()!.closest('[data-chat-process]');
-  check(!!process && process.textContent?.includes(i18n.t("turnLab.processLabel")),"startup is outside the activity timeline");
-  check(!waitNode()!.closest('.chat-bubble'),"startup appears in a reply bubble");
+  await tick();
+  check(!waitNode(), "startup stages do not create a separate card");
   checkLoadingBubble();
-  const r=waitNode()!.getBoundingClientRect();
-  check(r.left>=0&&r.right<=innerWidth+1,"startup label overflows viewport");
-  if(!immersive){const thread=document.querySelector<HTMLElement>(".chat-thread")!,style=getComputedStyle(thread);
-    const visibleBottom=thread.getBoundingClientRect().bottom-parseFloat(style.getPropertyValue("--chat-fade-bottom"))-parseFloat(style.getPropertyValue("--chat-fade"));
-    check(r.bottom<=visibleBottom+1,`startup label is hidden under the composer fade: ${JSON.stringify({bottom:r.bottom,visibleBottom,thread:thread.getBoundingClientRect().toJSON(),process:process!.getBoundingClientRect().toJSON(),sent:Array.from(document.querySelectorAll('.chat-thread .chat-group.is-user')).at(-1)?.getBoundingClientRect().toJSON()})}`);}
+  const bounds = visible<HTMLElement>(loadingSelector)!.getBoundingClientRect();
+  check(bounds.left >= 0 && bounds.right <= innerWidth + 1, "the loader fits the viewport");
+  if (!immersive) {
+    const thread = document.querySelector<HTMLElement>(".chat-thread")!;
+    const style = getComputedStyle(thread);
+    const visibleBottom = thread.getBoundingClientRect().bottom - parseFloat(style.getPropertyValue("--chat-fade-bottom"))
+      - parseFloat(style.getPropertyValue("--chat-fade"));
+    check(bounds.bottom <= visibleBottom + 1, "the loader is visible above the composer fade");
+  }
 };
 const send=async()=>{
   await wait(()=>{const input=visible<HTMLTextAreaElement>("textarea");return input&&!input.disabled&&sockets.size;},"composer ready");
@@ -148,9 +142,8 @@ const send=async()=>{
   const count=requests.filter(r=>r.method==="chat.send").length;
   input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
   await wait(()=>requests.filter(r=>r.method==="chat.send").length>count,"actual send");
-  await wait(()=>waitNode()?.dataset.stage==="preparing","immediate preparing before receipt");
-  check(waitNode()?.textContent===i18n.t("chat.runWait.thinking"),"immediate unified thinking copy");
-  check(!!waitNode()!.closest('[data-chat-process]'),"activity timeline must appear before acceptance");
+  await wait(() => visible(loadingSelector), "immediate loader before receipt");
+  check(!document.querySelector('[data-chat-process]') && !waitNode(), "startup only shows the reply loader");
   checkLoadingBubble();
   check(!!releaseSend,"request must still await acceptance");releaseSend!();releaseSend=null;
   emit({state:"accepted",backendId:backend,agentId});await tick();
@@ -159,37 +152,26 @@ const finish=async(state="final")=>{
   currentRunStatus=state==="final"?"completed":state==="aborted"?"canceled":"failed";
   if(state==="final")history.push({role:"assistant",content:"这次检查已完成。",timestamp:Date.now()});
   emit({state,message:state==="final"?{role:"assistant",content:[{type:"text",text:"这次检查已完成。"}]}:undefined,errorMessage:state==="error"?"Fixture failure":undefined});
-  await wait(()=>!waitNode(),"terminal clears waiting");await tick();
+  await wait(() => !document.querySelector(loadingSelector) && !waitNode(), "terminal clears waiting"); await tick();
   check(!document.querySelector(loadingSelector),"terminal removes the reply loading animation");
   check(!document.querySelector('.chat-thread .chat-cursor'),"terminal removes the reply cursor");
 };
 const preview=async()=>{await send();if(!query.has("all-stages"))await stage("restoring");};
 Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests,preview},runStartupFeedbackFixture:async()=>{
   await send();
-  check(!waitNode()?.textContent?.includes("0s")&&!waitNode()?.textContent?.includes("0 秒"),"hide immediate zero counter");
   for(const value of ["context","capabilities","compacting","connecting","restoring","opening"])await stage(value);
   check(!document.querySelector('.chat-header .chat-status__label')?.textContent?.includes(i18n.t("chat.liveStatus.queued")),"context maintenance must not claim a queue");
   await stage("waiting","running");
-  if(runtime==="codex"&&!immersive&&i18n.language==="zh-CN") {
-    const zoom=visible<HTMLButtonElement>('button[title="'+i18n.t("turnLab.processLargeView")+'"]')!;
-    zoom.click();
-    await wait(()=>visible('[role="dialog"] [data-testid="chat-run-wait"]'),"expanded activity shows startup");
-    emit({state:"status",statusKind:"running",stage:"waiting"});
-    await wait(()=>visible<HTMLElement>('[role="dialog"] [data-testid="chat-run-wait"]')?.dataset.stage==="waiting","expanded activity follows actual stage");
-    document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));
-    await wait(()=>!document.querySelector('[role="dialog"]'),"close expanded activity");
-  }
   emit({state:"delta",message:{role:"assistant",content:[{type:"text",text:""}]}});await tick();
-  check(waitNode()?.dataset.stage==="waiting","empty event erased startup");
+  checkLoadingBubble();
   emit({state:"thinking",thinking:"   "});await tick();
   emit({state:"plan",plan:[]});await tick();
   emit({state:"status",statusKind:"running",stage:"waiting"});await tick();
-  check(waitNode()?.dataset.stage==="waiting","empty thinking/plan erased startup");
+  check(!document.querySelector('[data-chat-activity-preview]'), "empty thinking and plan do not create activity");
   checkLoadingBubble();
-  if(runtime==="antigravity"&&!immersive){
-    await new Promise(r=>setTimeout(r,3200));
-    checkThinkingCopy("long startup");
-    check(!!waitNode()?.querySelector('[aria-hidden="true"]'),"startup retains its original elapsed counter");
+  if (runtime === "antigravity" && !immersive) {
+    await new Promise(resolve => setTimeout(resolve, 3_200));
+    checkLoadingBubble();
   }
   const sentBubble=()=>Array.from(document.querySelectorAll<HTMLElement>(".chat-thread .chat-group.is-user")).at(-1);
   const measure=()=>{const thread=document.querySelector<HTMLElement>(".chat-thread")!;return {top:sentBubble()?.getBoundingClientRect().top,
@@ -199,9 +181,9 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
   const before=immersive?null:measure();
   const anchorBefore=sentBubble()?.getBoundingClientRect().top;
   emit({state:"delta",message:{role:"assistant",content:[{type:"text",text:"正在查看相关文件。"}]}});
-  await wait(()=>!waitNode(),"first text replaces waiting");
+  await wait(() => !document.querySelector(loadingSelector) && !waitNode(), "first text replaces waiting");
+  check(!document.querySelector(loadingSelector),"first text replaces the loading animation");
   if(!immersive){
-    check(!document.querySelector(loadingSelector),"first text replaces the loading animation");
     check(document.querySelectorAll('.chat-thread .chat-cursor').length===1,"streaming text has one output cursor");
   }
   if(!immersive)check(Math.abs(sentBubble()!.getBoundingClientRect().top-anchorBefore!)<=1,`first output moved the sent message on screen: ${JSON.stringify({before,after:measure()})}`);
@@ -214,17 +196,9 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
     await wait(()=>thread.textContent?.includes("继续核对项目状态。"),"more reply text arrives after manual scroll");
     check(Math.abs(sentBubble()!.getBoundingClientRect().top-readingTop)<=1,"output moved the user's manually chosen reading position");
   }
-  emit({state:"status",statusKind:"running",stage:"waiting"});await tick();check(!waitNode(),"late running revives startup");
+  emit({state:"status",statusKind:"running",stage:"waiting"});await tick();check(!waitNode() && !document.querySelector(loadingSelector), "late running cannot revive the loader");
   await finish();
   await send();
-  if(!immersive){
-    visible<HTMLButtonElement>('button[title="'+i18n.t("chat.hideTrajectory")+'"]')!.click();
-    await wait(()=>!waitNode(),"hide activity timeline");
-    checkLoadingBubble();
-    visible<HTMLButtonElement>('button[title="'+i18n.t("chat.showTrajectory")+'"]')!.click();
-    await wait(()=>waitNode()?.dataset.stage==="preparing","restore activity timeline");
-    checkLoadingBubble();
-  }
   const sendsBeforeQueue = requests.filter(r=>r.method==="chat.send").length;
   emit({state:"status",statusKind:"queued",reason:"RUNTIME_ACCOUNT_ACTIVE_LIMIT",queuedAt:Date.now()});
   await wait(()=>!waitNode(),"queue keeps its state internal");
@@ -243,8 +217,10 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
   checkLoadingBubble();
   await stage("connecting");
   sockets.forEach(s=>s.emit({type:"event",event:"session.tool",payload:{sessionKey:key,runId:currentRunId,data:{toolCallId:"fixture-tool",name:"read_file",phase:"start",args:{path:"README.md"}}}}));
-  await wait(()=>!waitNode(),"tool activity replaces waiting");
-  emit({state:"status",statusKind:"running",stage:"waiting"});await tick();check(!waitNode(),"late status hides tool");
+  const activity = () => visible('[data-chat-activity-preview]');
+  await wait(() => activity() && !document.querySelector(loadingSelector), "tool activity replaces waiting");
+  emit({state:"status",statusKind:"running",stage:"waiting"}); await tick();
+  check(activity() && !waitNode() && !document.querySelector(loadingSelector), "late status cannot hide the activity bubble");
   await finish();
   for(const kind of ["approval","clarify"]){
     await send();
@@ -260,7 +236,7 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
   visible<HTMLButtonElement>('button[title="'+i18n.t("chat.stopGenerating")+'"]')!.click();
   await wait(()=>requests.some(r=>r.method==="chat.abort"),"stop request");await finish("aborted");
   await send();await finish("error");
-  return {runtime,immersive,lang:i18n.language,width:innerWidth,immediate:true,insideActivity:true,replyLoadingBubble:!immersive,loadingWithoutTrajectory:!immersive,manualScrollPreserved:!immersive,stages:true,emptyEvents:true,firstOutput:true,lateStatus:true,queueHidden:true,retry:true,blockingPrompts:true,stopQueued:true,error:true};
+  return {runtime,immersive,lang:i18n.language,width:innerWidth,immediate:true,replyLoadingBubble:true,activityReplacesLoader:true,manualScrollPreserved:!immersive,stages:true,emptyEvents:true,firstOutput:true,lateStatus:true,queueHidden:true,retry:true,blockingPrompts:true,stopQueued:true,error:true};
 }});
 // Preview-only comparison: reuse the real activity renderer without inventing
 // completed phases in the product's live event stream.
@@ -268,8 +244,8 @@ function AllStartupStages() {
   const [target, setTarget] = useState<Element | null>(null);
   useEffect(() => {
     const locate = () => {
-      const process = document.querySelector('.chat-thread [data-chat-process]');
-      if (process) setTarget(process.parentElement);
+      const bubble = document.querySelector('.chat-thread .chat-bubble.is-streaming');
+      if (bubble) setTarget(bubble.closest(".chat-group__stack"));
     };
     const observer = new MutationObserver(locate);
     observer.observe(document.getElementById("root")!, { childList: true, subtree: true });
@@ -282,7 +258,6 @@ function AllStartupStages() {
   if (!target) return null;
   return createPortal(<div className="startup-stage-comparison" data-preview-stages>
     <style>{`
-      .chat-thread .chat-group__stack:has(> .startup-stage-comparison) > [data-chat-process] { display: none; }
       .startup-stage-comparison { width: 100%; }
       .startup-stage-comparison__note { margin: 0 0 12px; color: var(--ui-text-2); font-size: 12px; line-height: 1.7; }
       .startup-stage-comparison [data-testid="chat-run-wait"] > [aria-hidden="true"] { display: none; }

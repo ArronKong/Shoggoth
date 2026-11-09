@@ -31,7 +31,7 @@
 }
 .management-page.settings-page .settings-backend--card { padding: 20px; }
 .management-page.settings-page .settings-backend-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.management-page.settings-page .settings-backend-mark {
+:is(.management-page.settings-page, .settings-manage-modal) .settings-backend-mark {
   --backend-tab-icon-size: 22px;
   display: flex;
   align-items: center;
@@ -53,17 +53,17 @@
 .management-page.settings-page .settings-service-copy p,
 .management-page.settings-page .settings-debug-card p { margin: 2px 0 0; font-size: 12px; line-height: 18px; color: var(--settings-muted-surface-1); }
 .management-page.settings-page .settings-backend-state { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex-shrink: 0; }
-.management-page.settings-page .settings-health { display: inline-flex; align-items: center; gap: 6px; color: var(--settings-muted-surface-1); font-size: 12px; white-space: nowrap; }
-.management-page.settings-page .settings-health i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-.management-page.settings-page .settings-health.is-healthy { color: var(--ui-success); }
+:is(.management-page.settings-page, .settings-manage-modal) .settings-health { display: inline-flex; align-items: center; gap: 6px; color: var(--settings-muted-surface-1); font-size: 12px; white-space: nowrap; }
+:is(.management-page.settings-page, .settings-manage-modal) .settings-health i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+:is(.management-page.settings-page, .settings-manage-modal) .settings-health.is-healthy { color: var(--ui-success); }
 .management-page.settings-page .settings-version-short { font-size: 11px; color: var(--settings-muted-surface-1); }
 .management-page.settings-page .settings-backend-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.management-page.settings-page .settings-detail-toggle {
+.management-page.settings-page .settings-backend--local .settings-detail-toggle {
   display: flex; align-items: center; justify-content: center;
   width: 32px; height: 32px; flex: 0 0 32px;
   padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--ui-text-2); cursor: pointer;
 }
-.management-page.settings-page .settings-detail-toggle:hover { background: var(--ui-surface-2); }
+.management-page.settings-page .settings-backend--local .settings-detail-toggle:hover { background: var(--ui-surface-2); }
 .management-page.settings-page .settings-detail-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
 .management-page.settings-page .settings-backend--card .settings-backend-row { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; row-gap: 0; }
 .management-page.settings-page .settings-backend--card .settings-backend-mark { grid-row: 1 / 3; }
@@ -83,7 +83,6 @@
 .management-page.settings-page .settings-backend-details { padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--ui-hairline); }
 .management-page.settings-page .settings-backend-details[hidden] { display: none; }
 .management-page.settings-page .settings-backend-details .status-version { margin-top: 0; padding-top: 0; border-top: 0; }
-.management-page.settings-page .settings-update-link { border: 0; background: none; padding: 8px 0 0; color: var(--ui-warning); cursor: pointer; font-size: 12px; }
 .management-page.settings-page .settings-section,
 .management-page.settings-page .settings-connection-editor { scroll-margin-top: 80px; }
 .management-page.settings-page .settings-connection-editor { display: block; border: 0; border-radius: 24px; background: var(--ui-surface-1); box-shadow: var(--ui-shadow-card); }
@@ -111,7 +110,7 @@
 .management-page.settings-page .settings-debug-guide { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 16px; border-top: 1px solid var(--ui-hairline); }
 .management-page.settings-page .settings-debug-guide p { margin: 0; }
 .management-page.settings-page .settings-debug-guide kbd { border: 1px solid var(--ui-hairline); border-radius: 4px; padding: 2px 4px; font: inherit; background: var(--ui-surface-2); }
-.management-page.settings-page :is(.settings-detail-toggle, .settings-update-link, .settings-connection-editor > summary):focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 4px; }
+.management-page.settings-page :is(.settings-detail-toggle, .settings-connection-editor > summary):focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 4px; }
 @container settings (min-width: 860px) {
   .management-page.settings-page .settings-backend-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }

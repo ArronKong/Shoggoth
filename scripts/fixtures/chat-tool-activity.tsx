@@ -95,17 +95,26 @@ const wait = async (fn: () => unknown, label: string) => {
 };
 const check = (condition: unknown, message: string) => { if (!condition) throw Error(message); };
 const thread = () => document.querySelector<HTMLElement>(".chat-thread")!;
-const titles = () => Array.from(thread().querySelectorAll<HTMLElement>('[data-action="1"]')).map(element => element.textContent);
-const outcome = (title: string) => Array.from(thread().querySelectorAll<HTMLElement>('[data-action="1"]'))
+const details = () => document.querySelector<HTMLElement>('[role="dialog"]');
+const titles = () => Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]')).map(element => element.textContent);
+const outcome = (title: string) => Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]'))
   .find(element => element.textContent === title)?.closest("button")?.querySelector<HTMLElement>("[data-st]")?.dataset.st;
 const tool = (id: string, name: string, phase: string, data: object = {}) => state.socket.emit({ type: "event", event: "session.tool",
   payload: { sessionKey: key, runId: "activity-run", data: { toolCallId: id, name, phase, ...data } } });
-const processButton = () => Array.from(thread().querySelectorAll<HTMLButtonElement>("button"))
-  .find(button => button.textContent?.includes(i18n.t("turnLab.processLabel")))!;
+const activityEntries = () => Array.from(
+  (document.querySelector('[data-testid="immersive-chat"]') ?? thread()).querySelectorAll<HTMLElement>(
+    `[aria-haspopup="dialog"][aria-label="${i18n.t("turnLab.processOpen")}"]`));
+const entry = () => activityEntries().find(node => node.dataset.status === "running") ?? activityEntries().at(-1);
 const expand = async () => {
-  await wait(() => processButton(), "process header");
-  if (processButton().getAttribute("aria-expanded") !== "true") processButton().click();
-  await wait(() => titles().length, "tool activity rows");
+  if (!details()) {
+    await wait(entry, "activity entry");
+    entry()!.click();
+  }
+  await wait(() => details()?.querySelector("li"), "activity dialog rows");
+};
+const closeDetails = async () => {
+  details()?.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("common.close")}"]`)?.click();
+  await wait(() => !details(), "close activity dialog");
 };
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
 
@@ -136,21 +145,19 @@ state.runNativeProgressFixture = async () => {
     `${calls[1].arguments.activityTitle} · example.com/docs`,
   ];
   const notes = [sample[1].content[0], sample[4].content[0]];
-  const summaries = () => Array.from(thread().querySelectorAll<HTMLButtonElement>("button[aria-expanded]"))
-    .filter(button => button.textContent?.includes(i18n.t("turnLab.processLabel")));
   const verify = async () => {
     await expand();
-    check(summaries().length === 1, `public progress must share one activity timeline, got ${summaries().length}`);
+    check(activityEntries().length === 1, `public progress must share one activity timeline, got ${activityEntries().length}`);
     check(JSON.stringify(titles()) === JSON.stringify(expectedTitles), "equal model titles show each parallel call's own target");
     for (const note of notes) {
-      const rows = Array.from(thread().querySelectorAll<HTMLButtonElement>("button")).filter(b => b.querySelector("[data-st]") && b.textContent?.includes(note.text));
-      check(rows.length === 1, `progress appears once inside the timeline: ${note.text}; got ${rows.length}`);
+      check(!details()!.textContent?.includes(note.text), "public progress stays in its message bubble");
       check(Array.from(thread().querySelectorAll(".chat-bubble.chat-md")).filter(p => p.textContent?.trim() === note.text).length === 1,
         "each completed public progress message remains in its own bubble");
     }
     check(outcome(expectedTitles[0]) === "ok" && outcome(expectedTitles[1]) === "error", "labels cannot change result statuses");
   };
   const reload = async (messages: any[]) => {
+    await closeDetails();
     const reads = state.requests.filter((r: any) => r.method === "chat.history").length;
     history = messages;
     state.socket.emit({ type: "event", event: "session.message", payload: { sessionKey: key } });
@@ -176,7 +183,7 @@ state.runNativeProgressFixture = async () => {
       title: zh ? "需要补充信息" : "More information needed", message: requestMessage,
       fields: [{ id: "scope", label: requestMessage, type: "text", required: true }], approvalChoices: [], expiresAt: null } } });
   await expand();
-  await wait(() => Array.from(thread().querySelectorAll("button")).some(button => button.querySelector("[data-st]")
+  await wait(() => Array.from(details()!.querySelectorAll("button")).some(button => button.querySelector("[data-st]")
     && button.textContent?.includes(requestMessage)), "approval activity uses the card's public message");
   check(Array.from(thread().querySelectorAll(".chat-bubble.chat-md")).filter(p => p.textContent?.trim() === notes[0].text).length === 1,
     "the first public progress bubble survives the approval card");
@@ -188,15 +195,17 @@ state.runNativeProgressFixture = async () => {
   progress(notes[1]);
   await pause(100); await verify();
   if (innerWidth >= 1000) {
+    await closeDetails();
     const enter = Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-headbtn")).find(b => b.title === i18n.t("chat.immersiveEnter"))!;
     enter.click(); await wait(() => document.querySelector('[data-testid="immersive-chat"]'), "progress immersive view");
     const immersive = () => document.querySelector('[data-testid="immersive-chat"]')!;
     await wait(() => immersive().textContent?.includes(notes[1].text), "immersive activity keeps progress notes");
-    for (const note of notes) check(Array.from(immersive().querySelectorAll("button")).filter(b => b.querySelector("[data-st]") && b.textContent?.includes(note.text)).length === 1,
-      "immersive progress appears once inside its timeline");
     for (const note of notes) check(Array.from(immersive().querySelectorAll(".chat-md")).some(p => p.textContent?.trim() === note.text),
-      "immersive progress bubbles remain alongside the timeline");
-    check(immersive().querySelectorAll('[data-action="1"]').length === 2, "immersive activity keeps per-call titles");
+      "immersive progress bubbles remain alongside the activity preview");
+    await expand();
+    for (const note of notes) check(!details()!.textContent?.includes(note.text), "immersive detail omits duplicate commentary");
+    check(titles().length === 2, "immersive activity keeps per-call titles");
+    await closeDetails();
     document.querySelector<HTMLButtonElement>("[data-exit-immersive]")?.click();
     if (document.querySelector('[data-testid="immersive-chat"]')) document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await wait(() => !document.querySelector('[data-testid="immersive-chat"]'), "return from progress immersive view");
@@ -219,16 +228,18 @@ state.prepareActivityFixture = async () => {
   await expand();
   await wait(() => titles().includes(text.command), "late command description");
   check(outcome(text.command) === "running", "partial output keeps the tool running");
-  check(!thread().textContent?.includes("npm test"), "raw command stays out of the collapsed headline");
+  check(!details()!.textContent?.includes("npm test"), "raw command stays out of the collapsed headline");
   if (innerWidth >= 1000) {
+    await closeDetails();
     const enter = Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-headbtn"))
       .find(button => button.title === i18n.t("chat.immersiveEnter"))!;
     check(enter, "immersive entry exists"); enter.click();
     await wait(() => document.querySelector('[data-testid="immersive-chat"]'), "immersive view");
-    const detail = () => document.querySelector<HTMLButtonElement>(`button[title="${i18n.t("chat.liveDetail")}"]`);
-    await wait(() => detail()?.textContent?.includes(text.command), "immersive keeps partial output running");
+    await expand();
+    await wait(() => outcome(text.command) === "running", "immersive keeps partial output running");
     tool("command", "Bash", "result", { args: { command: "npm test" }, isError: false });
-    await wait(() => detail()?.textContent?.includes("2"), "empty result completes immersive tool");
+    await wait(() => outcome(text.command) === "ok", "empty result completes immersive tool");
+    await closeDetails();
     document.querySelector<HTMLButtonElement>("[data-exit-immersive]")?.click();
     if (document.querySelector('[data-testid="immersive-chat"]')) document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await wait(() => thread(), "return from immersive");
@@ -250,20 +261,21 @@ state.prepareActivityFixture = async () => {
   for (const title of Object.values(text)) check(titles().includes(title), `readable action: ${title}`);
   check(outcome(text.command) === "ok" && outcome(text.empty) === "ok", "empty output still completes a tool");
   check(outcome(text.cron) === "ok" && outcome(text.failed) === "error", "actual and nested errors stay distinct");
-  check(!thread().textContent?.includes("federation_agent") && !titles().includes("Bash"), "technical identities stay in details");
-  const commandButton = Array.from(thread().querySelectorAll<HTMLElement>('[data-action="1"]'))
+  check(!details()!.textContent?.includes("federation_agent") && !titles().includes("Bash"), "technical identities stay in details");
+  const commandButton = Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]'))
     .find(element => element.textContent === text.command)!.closest("button")!;
-  commandButton.click(); await wait(() => thread().textContent?.includes("npm test"), "original command detail");
+  commandButton.click(); await wait(() => details()!.textContent?.includes("npm test"), "original command detail");
   commandButton.click(); await pause();
-  const threadButton = Array.from(thread().querySelectorAll<HTMLElement>('[data-action="1"]'))
+  const threadButton = Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]'))
     .find(element => element.textContent === text.xThread)!.closest("button")!;
   check(!threadButton.disabled, "X receipt input enables details even without output text");
-  threadButton.click(); await wait(() => thread().textContent?.includes("post_id"), "X post details");
+  threadButton.click(); await wait(() => details()!.textContent?.includes("post_id"), "X post details");
   threadButton.click(); await pause();
   return { backend, runtime, language, titles: titles(), outcomes: Object.fromEntries(Object.values(text).map(title => [title, outcome(title)])) };
 };
 state.runActivityFixture = async () => {
   const live = await state.prepareActivityFixture();
+  await closeDetails();
   const definitions = [
     ["directory", "shoggoth/app_state_get", { section: "agents" }, { agents: [] }, false],
     ["command", "Bash", { command: "npm test", description: text.command }, "", false],
@@ -291,7 +303,7 @@ state.runActivityFixture = async () => {
   check(outcome(text.empty) === "ok", "empty history output stays complete");
   check(state.requests.every((request: any) => request.method !== "chat.send"), "the fixture never dispatches work");
   check(document.documentElement.scrollWidth <= innerWidth + 1, "no horizontal viewport overflow");
-  Array.from(thread().querySelectorAll<HTMLElement>('[data-action="1"]'))
+  Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]'))
     .find(element => element.textContent === text.xThread)?.scrollIntoView({ block: "nearest" });
   await pause();
   return { ...live, historyTitles: titles(), providerCalls: 0 };
@@ -332,9 +344,8 @@ function nestedToolHistory(): any[] {
 
 state.runNestedToolHistoryFixture = async () => {
   const sample = nestedToolHistory();
-  const summaries = () => Array.from(thread().querySelectorAll<HTMLButtonElement>("button[aria-expanded]"))
-    .filter(button => button.textContent?.includes(i18n.t("turnLab.processLabel")));
   const reload = async (messages: any[]) => {
+    await closeDetails();
     const reads = state.requests.filter((r: any) => r.method === "chat.history").length;
     history = messages;
     state.socket.emit({ type: "event", event: "session.message", payload: { sessionKey: key } });
@@ -342,10 +353,10 @@ state.runNestedToolHistoryFixture = async () => {
     await pause(100);
   };
   const checkSingleTurn = async () => {
-    check(summaries().length === 1, `nested metadata must keep one timeline; got ${summaries().length}`);
+    check(activityEntries().length === 1, `nested metadata must keep one timeline; got ${activityEntries().length}`);
     await expand();
     check(titles().length === 4, `four outer calls, without duplicate result steps; got ${titles().length}`);
-    const statuses = Array.from(thread().querySelectorAll<HTMLElement>('[data-action="1"]'))
+    const statuses = Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]'))
       .map(element => element.closest("button")?.querySelector<HTMLElement>("[data-st]")?.dataset.st);
     check(JSON.stringify(statuses) === JSON.stringify(["error", "ok", "ok", "ok"]), `preserve failure/retry outcomes: ${statuses}`);
     check(thread().querySelectorAll(".chat-group.is-user").length === 1, "nested receipts are not user bubbles");
@@ -365,7 +376,7 @@ state.runNestedToolHistoryFixture = async () => {
       tool(message.toolCallId, message.toolName, "result", { result: message.content, isError: message.isError === true });
     }
   }
-  await wait(() => summaries().length === 1, "single live process");
+  await wait(() => activityEntries().length === 1, "single live process");
   history = sample;
   state.socket.emit({ type: "event", event: "chat", payload: {
     sessionKey: key, runId: "activity-run", state: "final", message: sample.at(-1),
@@ -382,7 +393,7 @@ state.runNestedToolHistoryFixture = async () => {
     { id: "next-final", role: "assistant", content: nextReply, timestamp: now + 87300 },
   ]);
   await wait(() => thread()?.textContent?.includes(nextReply), "next user turn");
-  check(summaries().length === 2, "a real user input must still separate the two timelines");
+  check(activityEntries().length === 2, "a real user input must still separate the two timelines");
   check(thread().querySelectorAll(".chat-group.is-user").length === 2, "only real user inputs render as user bubbles");
   check(!thread().textContent?.includes("fixture-hidden-context"), "custom display:false stays hidden");
   check(thread().textContent?.includes("Verification note."), "visible custom text is preserved");
@@ -408,25 +419,24 @@ state.runCompactionFixture = async () => {
     "a compaction receipt is not fabricated model output");
   const status = (statusKind: string, message?: string, sessionKey = key) => state.socket.emit({ type: "event", event: "chat",
     payload: { sessionKey, backendId: backend, runId: "compaction-run", state: "status", statusKind, text: message } });
-  const rows = () => Array.from(thread().querySelectorAll<HTMLButtonElement>("button"))
+  const rows = () => Array.from(details()?.querySelectorAll<HTMLButtonElement>("button") ?? [])
     .filter(button => button.querySelector("[data-st]") && button.textContent?.includes(i18n.t("turnLab.stepStatus")));
   const chips = () => rows().map(button => button.querySelector<HTMLElement>("[data-st]")!.dataset.st);
   const noToast = () => check(!document.querySelector(".chat-toast"), "automatic compaction must not create a floating toast");
   status("compacting", "Background compaction", "agent:background-fixture:main");
   await pause();
   noToast();
-  check(!processButton(), "background compaction must not appear in the active conversation");
+  check(!entry(), "background compaction must not appear in the active conversation");
 
   const rawStart = "Compacting context — summarizing earlier conversation so I can continue...";
   status("compacting", rawStart);
-  await wait(() => processButton(), "status-only compaction activity");
+  await expand();
   noToast();
-  if (processButton().getAttribute("aria-expanded") !== "true") processButton().click();
   await wait(() => rows().length === 1 && chips()[0] === "running", "running compaction row");
   check(rows()[0].textContent?.includes(i18n.t("chat.compactingCtx")), "compaction progress uses the UI language");
   check(!rows()[0].textContent?.includes(rawStart), "raw backend wording stays in details");
   rows()[0].click();
-  await wait(() => thread().textContent?.includes(rawStart), "raw progress detail");
+  await wait(() => details()?.textContent?.includes(rawStart), "raw progress detail");
   rows()[0].click();
   status("compacting", "Summarizing the remaining messages");
   await pause();
@@ -440,7 +450,7 @@ state.runCompactionFixture = async () => {
   await pause();
   check(rows().length === 1 && chips()[0] === "ok", "duplicate completion keeps a single row");
   rows()[0].click();
-  await wait(() => thread().textContent?.includes("128k → 48k"), "completion receipt detail");
+  await wait(() => details()?.textContent?.includes("128k → 48k"), "completion receipt detail");
   rows()[0].click();
 
   status("compacting", "A new compaction cycle");
@@ -451,8 +461,7 @@ state.runCompactionFixture = async () => {
   const terminal = options.get("terminal") || "error";
   state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: key, backendId: backend,
     runId: "compaction-run", state: terminal, errorMessage: terminal === "error" ? "Fixture compaction failed" : undefined } });
-  await wait(() => processButton(), "terminal compaction activity");
-  if (processButton().getAttribute("aria-expanded") !== "true") processButton().click();
+  await wait(entry, "terminal compaction activity");
   await wait(() => chips()[1] === (terminal === "error" ? "error" : "aborted"), "terminal compaction state");
   check(chips()[0] === "ok", "later failure must preserve confirmed completion");
   check(!rows()[1].textContent?.includes(i18n.t("chat.compactedCtx")), "interrupted compression cannot claim completion");
@@ -460,28 +469,23 @@ state.runCompactionFixture = async () => {
   check(state.requests.every((request: any) => request.method !== "chat.send" && request.method !== "sessions.compact"),
     "automatic status display must not send or replay work");
   const terminalOutcomes = chips();
-  // The terminal snapshot survives history refresh, respects the visibility
-  // toggle, and cannot become the live activity of a later user turn.
+  // The terminal snapshot survives history refresh and stays separate from the next turn.
   if (terminal === "aborted") {
     await wait(() => state.requests.filter((request: any) => request.method === "chat.history").length > 2, "terminal history refresh");
     await pause(100);
-    if (processButton().getAttribute("aria-expanded") !== "true") processButton().click();
+    await closeDetails();
+    await expand();
     await wait(() => chips()[1] === "aborted", "refreshed terminal receipt");
   }
-  const toggle = () => document.querySelector<HTMLButtonElement>(`button[title="${i18n.t("chat.hideTrajectory")}"]`);
-  check(toggle(), "trajectory toggle exists"); toggle()!.click();
-  await wait(() => !processButton(), "hidden compaction activity");
+  await closeDetails();
   noToast();
-  document.querySelector<HTMLButtonElement>(`button[title="${i18n.t("chat.showTrajectory")}"]`)!.click();
-  await wait(() => processButton(), "restored compaction activity");
 
   const nextInput = language === "en" ? "Continue with the next task." : "继续下一个任务。";
   history = [intro, { id: "compaction-next-user", role: "user", content: nextInput, timestamp: now + 1000 }];
   state.socket.emit({ type: "event", event: "session.message", payload: { sessionKey: key } });
   await wait(() => thread().textContent?.includes(nextInput), "next canonical user turn");
   status("compacting", "Next turn compaction");
-  await wait(() => processButton(), "next turn process");
-  if (processButton().getAttribute("aria-expanded") !== "true") processButton().click();
+  await expand();
   await wait(() => rows().length === 1 && chips()[0] === "running", "next turn owns one fresh compaction row");
   noToast();
   thread().scrollTop = thread().scrollHeight;
@@ -531,9 +535,8 @@ state.runOpenClawLongHistoryFixture = state.runNativeLongHistoryFixture = async 
   const external = options.get("scenario") === "openclaw-long";
   const makeHistory = external ? openClawLongToolHistory : nativeLongToolHistory;
   const sample = makeHistory();
-  const summaries = () => Array.from(thread().querySelectorAll<HTMLButtonElement>("button[aria-expanded]"))
-    .filter(button => button.textContent?.includes(i18n.t("turnLab.processLabel")));
   const reload = async (messages: any[]) => {
+    await closeDetails();
     const reads = state.requests.filter((r: any) => r.method === "chat.history").length;
     history = messages;
     state.socket.emit({ type: "event", event: "session.message", payload: { sessionKey: key } });
@@ -543,10 +546,10 @@ state.runOpenClawLongHistoryFixture = state.runNativeLongHistoryFixture = async 
   const expected = [i18n.t("turnLab.activity.listDirectory"), i18n.t("turnLab.activity.runScript", { language: "Python" }),
     `${i18n.t("turnLab.activity.readFile")} · report.md`, i18n.t("turnLab.appStateSections.agents"), i18n.t("turnLab.activity.externalTool")];
   const checkSingle = async () => {
-    check(summaries().length === 1, `one canonical Run must keep one timeline; got ${summaries().length}`);
+    check(activityEntries().length === 1, `one canonical Run must keep one timeline; got ${activityEntries().length}`);
     await expand();
     check(JSON.stringify(titles()) === JSON.stringify(expected), `native command and MCP titles: ${JSON.stringify(titles())}`);
-    const statuses = Array.from(thread().querySelectorAll<HTMLElement>('[data-action="1"]'))
+    const statuses = Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]'))
       .map(element => element.closest("button")?.querySelector<HTMLElement>("[data-st]")?.dataset.st);
     check(statuses.join() === "ok,error,ok,ok,ok", `exact completed outcomes: ${statuses}`);
     check(thread().querySelectorAll(".chat-group.is-user").length === 1, "one actual user message");
@@ -559,16 +562,18 @@ state.runOpenClawLongHistoryFixture = state.runNativeLongHistoryFixture = async 
     if (part.type === "toolCall") tool(part.toolCallId, part.toolName, "start", { args: part.arguments });
     if (part.type === "toolResult") tool(part.toolCallId, part.name, "result", { args: part.arguments, result: part.content, isError: part.is_error, durationS: part.durationS });
   }
-  await wait(() => summaries().length === 1, "one live native timeline");
+  await wait(() => activityEntries().length === 1, "one live native timeline");
   await expand();
   check(JSON.stringify(titles()) === JSON.stringify(expected), "live titles match completed history");
   if (external && innerWidth >= 1000) {
+    await closeDetails();
     const enter = Array.from(document.querySelectorAll<HTMLButtonElement>(".chat-headbtn"))
       .find(button => button.title === i18n.t("chat.immersiveEnter"))!;
     check(enter, "immersive entry exists"); enter.click();
     await wait(() => document.querySelector('[data-testid="immersive-chat"]'), "long-turn immersive view");
-    const detail = () => document.querySelector<HTMLButtonElement>(`button[title="${i18n.t("chat.liveDetail")}"]`);
-    await wait(() => detail()?.textContent?.includes("5"), "immersive retains five tools in the live activity");
+    await expand();
+    await wait(() => titles().length === 5, "immersive retains five tools in the live activity");
+    await closeDetails();
   }
   history = sample;
   state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: key, runId: "activity-run", state: "final", message: sample.at(-1) } });
@@ -582,13 +587,13 @@ state.runOpenClawLongHistoryFixture = state.runNativeLongHistoryFixture = async 
   await reload(sample); await checkSingle();
   const next = makeHistory("next-run", sample.at(-1).timestamp + 1000);
   await reload([...sample, ...next.slice(1)]);
-  check(summaries().length === 2, "different native Runs remain separate even without an intervening user message");
+  check(activityEntries().length === 2, "different native Runs remain separate even without an intervening user message");
   await reload([...sample, ...next]);
-  check(summaries().length === 2 && thread().querySelectorAll(".chat-group.is-user").length === 2, "next user retains its own activity");
+  check(activityEntries().length === 2 && thread().querySelectorAll(".chat-group.is-user").length === 2, "next user retains its own activity");
   await reload(sample); await checkSingle();
-  const firstRow = thread().querySelector<HTMLElement>('[data-action="1"]')!.closest("button")!;
+  const firstRow = details()!.querySelector<HTMLElement>('[data-action="1"]')!.closest("button")!;
   firstRow.click();
-  await wait(() => thread().textContent?.includes("ls -la /tmp/report"), "raw command remains available in details");
+  await wait(() => details()!.textContent?.includes("ls -la /tmp/report"), "raw command remains available in details");
   firstRow.click();
   check(state.requests.every((r: any) => r.method !== "chat.send"), "native history fixture never dispatches work");
   thread().scrollTop = thread().scrollHeight;

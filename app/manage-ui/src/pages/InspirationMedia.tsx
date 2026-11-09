@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type TextareaHTMLAttributes } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { InspirationAttachment } from '../types';
 import { TextArea } from '../components/Field';
@@ -20,10 +20,12 @@ function MediaIcon({ name }: { name: 'image' | 'mic' | 'stop' | 'remove' }) {
 }
 
 type Upload = { file: File; id: string; point: InspirationInsertionPoint };
-export default function InspirationMediaEditor({ body, attachments, onChange, onBusyChange, disabled = false, inputProps, capture = false }: {
+export default function InspirationMediaEditor({ body, attachments, onChange, onBusyChange, disabled = false, inputProps,
+  capture = false, footerActions, children }: {
   body: string; attachments: InspirationAttachment[]; onChange: (update: (previous: InspirationContentValue) => InspirationContentValue) => void;
   onBusyChange: (busy: boolean) => void; disabled?: boolean; capture?: boolean;
   inputProps?: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'onChange'>;
+  footerActions?: ReactNode; children?: ReactNode;
 }) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<'idle' | 'uploading' | 'permission' | 'recording' | 'stopping'>('idle');
@@ -187,7 +189,12 @@ export default function InspirationMediaEditor({ body, attachments, onChange, on
     }
   };
   const busy = mode !== 'idle' || failed;
-  return <div className={styles.editor} data-capture={capture || undefined} data-busy={busy || undefined} data-drag-over={dragOver || undefined}
+  const feedback = error && <div className={styles.error} role="alert">{error}{failed && <span className={styles.retry}>
+    <button type="button" onClick={() => { void uploadPending(); }}>{t('inspiration.media.retry')}</button>
+    <button type="button" onClick={() => { pending.current = []; setFailed(false); setError(''); transition('idle'); }}>{t('inspiration.media.discard')}</button>
+  </span>}</div>;
+  return <div className={styles.editor} data-capture={capture || undefined} data-inline-edit={Boolean(footerActions) || undefined}
+    data-busy={busy || undefined} data-drag-over={dragOver || undefined}
     onPaste={event => {
       const files = event.clipboardData.files?.length ? Array.from(event.clipboardData.files)
         : Array.from(event.clipboardData.items).filter(item => item.kind === 'file').map(item => item.getAsFile()).filter((file): file is File => Boolean(file));
@@ -223,6 +230,8 @@ export default function InspirationMediaEditor({ body, attachments, onChange, on
             if (target) { event.preventDefault(); target.focus(); const offset = atStart ? next.text.length : 0; target.setSelectionRange(offset, offset); }
           }} />)}
     </div>
+    {children}
+    {footerActions && feedback}
     <div className={styles.toolbar}>
       <input ref={fileInput} type="file" multiple accept={INSPIRATION_MEDIA_ACCEPT} hidden aria-label={t('inspiration.media.choose')}
         disabled={disabled || busy} onChange={event => { addFiles(Array.from(event.target.files || [])); event.target.value = ''; }} />
@@ -235,11 +244,9 @@ export default function InspirationMediaEditor({ body, attachments, onChange, on
         <MediaIcon name={mode === 'recording' ? 'stop' : 'mic'} />
       </button>
       <span className={styles.hint} role="status">{mode === 'recording' ? `${t('inspiration.media.recording')} ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
-        : mode !== 'idle' ? t(`inspiration.media.${mode}`) : capture ? '' : t('inspiration.media.hint')}</span>
+        : mode !== 'idle' ? t(`inspiration.media.${mode}`) : capture || footerActions ? '' : t('inspiration.media.hint')}</span>
+      {footerActions}
     </div>
-    {error && <div className={styles.error} role="alert">{error}{failed && <span className={styles.retry}>
-      <button type="button" onClick={() => { void uploadPending(); }}>{t('inspiration.media.retry')}</button>
-      <button type="button" onClick={() => { pending.current = []; setFailed(false); setError(''); transition('idle'); }}>{t('inspiration.media.discard')}</button>
-    </span>}</div>}
+    {!footerActions && feedback}
   </div>;
 }

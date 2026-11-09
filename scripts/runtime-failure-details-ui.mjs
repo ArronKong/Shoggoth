@@ -11,6 +11,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const require = createRequire(import.meta.url);
 const { build, transformSync } = createRequire(path.join(root, "app/manage-ui/package.json"))("esbuild");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { loadInspirationActivity } = require("../app/core/inspiration-activity");
 const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
 const module = { exports: {} };
 vm.runInNewContext(transformSync(fs.readFileSync(path.join(root, "app/manage-ui/src/lib/gatewayErrors.ts"), "utf8"),
@@ -68,10 +69,20 @@ for (const [code, failure, englishSummary, englishDetail] of [
   assert.equal(history.content[0].text, `错误：${frames[0].payload.errorMessage}`);
   const status = failure ? [failure.httpStatus ? `HTTP ${failure.httpStatus}` : null, failure.upstreamCode].filter(Boolean).join(" · ") : "";
   const expectedEnglish = `Error: ${englishSummary}${failure ? `\nProvider error: ${englishDetail || failure.message}${status ? `\n${status}` : ""}\nError code: ${code}` : ""}`;
-  cases.push({ frame: frames[0], history, expected: { "zh-CN": history.content[0].text, en: expectedEnglish } });
+  const execution = { id: runId, ideaId: 'error-idea', runId, profileId: 'fixture', agentId: 'shoggoth-default',
+    backendId: 'shoggoth', workspace: '/fixture', sessionKey: 'failure-fixture', status: 'failed',
+    createdAt: 100, finishedAt: 200, errorCode: code, resultSummary: null, attention: null };
+  backend._profilesByAgent.set(execution.agentId, { id: execution.profileId });
+  backend._page = async () => [item];
+  const activity = await loadInspirationActivity({
+    _requireInspirationOwner: () => ({ getInspirationActivityBinding: async () => ({ execution, prompt: '' }) }),
+    _activeGet: () => backend,
+  }, execution.ideaId, execution.runId);
+  assert.equal(activity.errorMessage, history.content[0].text);
+  cases.push({ frame: frames[0], history, execution, activity, expected: { "zh-CN": history.content[0].text, en: expectedEnglish } });
 }
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-error-ui-"));
-const output = path.join(root, ".artifacts/runtime-failure-details-20261029/ui-bilingual");
+const output = path.resolve(process.env.RUNTIME_FAILURE_UI_OUTPUT || path.join(root, ".artifacts/runtime-failure-details-20261029/ui-bilingual"));
 fs.mkdirSync(output, { recursive: true });
 try {
   await build({ entryPoints: [path.join(root, "scripts/fixtures/runtime-failure-details.tsx")], bundle: true, format: "esm",
@@ -79,7 +90,10 @@ try {
     // logo globs use their normal empty-artwork fallback under esbuild.
     define: { "process.env.NODE_ENV": '"production"', "import.meta.glob": "fixtureAssetGlob", __ERROR_FIXTURE__: JSON.stringify({ key, cases }) },
     banner: { js: "const fixtureAssetGlob=()=>({});" },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
+    plugins: [{ name: 'public-fonts', setup(build) {
+      build.onResolve({ filter: /^\/fonts\// }, args => ({ path: path.join(root, 'app/manage-ui/public', args.path) }));
+    } }],
+    loader: { ".woff2": "dataurl", ".ttf": "dataurl", ".otf": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
     nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent" });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
   const main = path.join(temp, "main.cjs");
@@ -92,7 +106,7 @@ w.setContentSize(width,900);await w.loadFile(${JSON.stringify(path.join(temp, "i
 const checked=await w.webContents.executeJavaScript('(async()=>{try{return{ok:true,value:await window.runFixture()}}catch(error){return{ok:false,error:String(error.stack||error)}}})()');
 if(!checked.ok)throw Error(JSON.stringify({language,width,mode,sample,error:checked.error}));
 results.push({language,width,sample,...checked.value});
-if(sample===0)fs.writeFileSync(${JSON.stringify(output)}+'/'+language+'-'+width+'-'+mode+'.png',(await w.webContents.capturePage()).toPNG());
+if(sample<=1)fs.writeFileSync(${JSON.stringify(output)}+'/'+language+'-'+width+'-'+mode+'-'+sample+'.png',(await w.webContents.capturePage()).toPNG());
 }console.log(JSON.stringify({passed:true,results}));passed=true;}catch(error){console.error(error.stack||error);}finally{w.destroy();app.exit(passed?0:1);}});`);
   const result = spawnSync(path.join(root, "node_modules/.bin/electron"), [main], { encoding: "utf8", timeout: 60_000,
     env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" } });
@@ -100,5 +114,5 @@ if(sample===0)fs.writeFileSync(${JSON.stringify(output)}+'/'+language+'-'+width+
   if (result.status !== 0) process.stderr.write(result.stderr || String(result.error));
   assert.equal(result.status, 0, "isolated error UI fixture failed");
   assert.match(result.stdout, /"passed":true/);
-  console.log(`PASS: bilingual error details, ${cases.length} causes × 2 widths × 2 modes × 2 languages; live language switching and original provider details preserved`);
+  console.log(`PASS: matching Chat and Inspiration error details, ${cases.length} causes × 2 widths × 2 modes × 2 languages; live language switching and original provider details preserved`);
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

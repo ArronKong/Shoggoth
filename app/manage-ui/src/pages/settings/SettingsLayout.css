@@ -31,31 +31,21 @@
   justify-content: space-between;
 }
 
-.management-page.settings-page .settings-app-update-card {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 18px;
-}
-
 .management-page.settings-page .settings-app-update-copy {
   display: flex;
-  flex: 1 1 auto;
-  min-width: 0;
   flex-direction: column;
   gap: 10px;
-  padding-top: 18px;
   border-top: 1px solid var(--ui-hairline);
 }
 
-.management-page.settings-page .settings-app-update-label,
 .management-page.settings-page .settings-app-update-copy p {
+  margin: 0;
   color: var(--settings-muted-surface-1);
   font-size: 12px;
   line-height: 18px;
 }
 
-.management-page.settings-page .settings-app-update-copy p { margin: 0; }
+.management-page.settings-page .settings-app-update-copy > :last-child:not(.settings-switch-list) { margin-bottom: 16px; }
 .management-page.settings-page .settings-app-update-copy progress { width: min(100%, 360px); }
 .management-page.settings-page .settings-project-repository a {
   color: var(--ui-text-1);
@@ -137,10 +127,17 @@
   border-bottom: 0;
 }
 
-.management-page.settings-page .settings-notification-copy {
+.management-page.settings-page .settings-switch-copy {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.management-page.settings-page .settings-switch-copy small {
+  color: var(--settings-muted-surface-1);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 300;
 }
 
 .management-page.settings-page .settings-notification-footer {
@@ -177,12 +174,6 @@
 .management-page.settings-page .settings-advanced-summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; border-radius: 8px; }
 .management-page.settings-page .settings-advanced-summary:hover .settings-h { color: var(--ui-text-2); }
 
-.management-page.settings-page .settings-notification-copy small {
-  color: var(--settings-muted-surface-1);
-  font-size: 12px;
-  line-height: 18px;
-  font-weight: 300;
-}
 .management-page.settings-page .settings-themes input:focus-visible {
   outline: none;
   box-shadow: none;

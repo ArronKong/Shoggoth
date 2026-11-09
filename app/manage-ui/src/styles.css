@@ -549,12 +549,6 @@ button {
   color: var(--fg);
   cursor: pointer;
 }
-/* 悬停只加深描边，**不再把字和边翻成 accent 蓝**（R318）。旧规则的 (0,2,1) 会
-   压过任何单类变体的基线描边色，全项目十几处组件因此各写一遍「重申 color 防蓝」；
-   设计语言里根本没有蓝，去掉它比继续到处打补丁便宜。 */
-button:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--ui-text-1) 35%, transparent);
-}
 button:disabled {
   opacity: 0.5;
   cursor: default;
@@ -707,13 +701,10 @@ button:disabled {
   color: #000;
 }
 
-/* cron calendar */
-/* Calendar fills the content height: the day/week hour-grid scrolls inside
-   instead of being capped at a fixed height, so there's no dead space below.
-   Scoped via :has(.cal) to the cron route + calendar view — the shared .page
-   wrapper used by every other page, and the cron list view, stay untouched. */
-.page:has(.cal),
-.cron-page:has(> .cal),
+/* Cron cards fill the available height below the toolbar. The list and the
+   day/week time grid scroll inside their cards when content overflows. */
+.page:has(> .cron-page),
+.cron-page,
 .cron-page > .cal,
 .cal-tg {
   flex: 1;
@@ -722,6 +713,13 @@ button:disabled {
   flex-direction: column;
 }
 
+.cron-page > .table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* cron calendar */
 .cal-grid {
   flex: 1;
   min-height: 0;
@@ -3127,7 +3125,7 @@ button:disabled {
    控件而非图标，也不收编。
    ══════════════════════════════════════════════════════════════════════════════ */
 
-/* 轨迹图标自行保持 1px 描边，不参与下方通用图标的 1.2px 归一。 */
+/* 时间线里的轨迹图标保持自己的线宽。 */
 :is(.nav-icon, .cli-path-icon,
     .chat-headbtn svg, .chat-pill--ghost svg, .chat-iconbtn svg,
     .chat-copybtn svg, .chat-ctxmenu__item svg,
@@ -3135,7 +3133,7 @@ button:disabled {
     .chat-thinking__ico svg, .chat-card__ico svg, .slash-menu__icon svg,
     .wb-card-updated svg, .wb-card-iconbtn svg, .wb-move svg,
     .ui-toggle svg, .ui-cbtn svg,
-    .cron-search-box svg, .btn-primary svg):not([data-trajectory-icon]),
+    .btn-primary svg):not([data-trajectory-icon]),
 :is(.nav-icon, .cli-path-icon,
     .chat-headbtn svg, .chat-pill--ghost svg, .chat-iconbtn svg,
     .chat-copybtn svg, .chat-ctxmenu__item svg,
@@ -3143,9 +3141,15 @@ button:disabled {
     .chat-thinking__ico svg, .chat-card__ico svg, .slash-menu__icon svg,
     .wb-card-updated svg, .wb-card-iconbtn svg, .wb-move svg,
     .ui-toggle svg, .ui-cbtn svg,
-    .cron-search-box svg, .btn-primary svg):not([data-trajectory-icon]) * {
+    .btn-primary svg):not([data-trajectory-icon]) * {
   vector-effect: non-scaling-stroke;
   stroke-width: 1.2;
+}
+/* 气泡下方的实时动态和复制使用 1 CSS px 描边。 */
+:is(.chat-group__footer, [data-immersive-message]) [data-chat-footer-icon] svg,
+:is(.chat-group__footer, [data-immersive-message]) [data-chat-footer-icon] svg * {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1;
 }
 /* 代理双眼保留现有描边设置。 */
 .nav-icon .ni-eye {

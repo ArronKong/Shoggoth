@@ -3,6 +3,8 @@
 const { serviceError } = require("./security");
 const { INSPIRATION_HISTORY_MAX_RESPONSE_BYTES } = require("./service-protocol-version");
 const path = require("node:path");
+const { validModelSelection } = require("../group-member-model");
+const { validModelProviderSelection } = require("./session-runtime-protocol");
 const { validExecutors, validGrowthSettings } = require("./inspiration-growth");
 const {
   validInteractiveApprovalDetails, validInteractiveApprovalChoice,
@@ -46,6 +48,8 @@ const PUBLIC_MESSAGES = Object.freeze({
   INSPIRATION_REQUEST_EXPIRED: "这个请求已失效，请查看最新执行状态",
   INSPIRATION_ARCHIVED: "请先恢复这条灵感",
   INSPIRATION_NOT_COMPLETED: "灵感发芽后才能标记为结果",
+  INSPIRATION_REPLY_UNAVAILABLE: "只能采用这条灵感中已完成的助理回复",
+  INSPIRATION_MODEL_UNAVAILABLE: "所选模型暂不可用，请重新选择",
   INSPIRATION_CAPACITY: "灵感存储已达到容量上限",
   INSPIRATION_SENSITIVE_CONTENT: "请移除凭据后保存灵感",
   INSPIRATION_COMMIT_UNCERTAIN: "灵感保存状态需要恢复核对，请重新连接服务",
@@ -56,6 +60,7 @@ const PUBLIC_MESSAGES = Object.freeze({
 });
 const FILTERS = new Set(["all", "saved", "active", "result", "favorite", "archived"]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const publicId = (value) => typeof value === "string" && ID.test(value);
 const uuid = (value) => typeof value === "string"
   && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value);
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
@@ -68,12 +73,23 @@ const string = (value, max, empty = true) => typeof value === "string" && value.
 const invalid = (code = "INSPIRATION_INVALID") => { throw serviceError(code, PUBLIC_MESSAGES[code]); };
 const validInspirationPaperTone = (value) => Number.isInteger(value) && value >= 0 && value < 8;
 const paperFields = (value, fields) => value && own(value, "paperTone") ? [...fields, "paperTone"] : fields;
+const validInspirationAgentRef = ({ backendId, agentId }) => publicId(backendId) && publicId(agentId);
+
+function validInspirationModelSelection(value, external) {
+  if (!value) return false;
+  if (external) return validModelSelection(value);
+  const sourced = own(value, "modelProviderRef");
+  return exact(value, ["model", "bindingId", ...(sourced ? ["modelProviderRef"] : [])])
+    && uuid(value.bindingId) && string(value.model, 512, false)
+    && (!sourced || validModelProviderSelection(value.modelProviderRef));
+}
 
 function validateInspirationServiceParams(method, input) {
   const fields = method === "inspiration.create" ? attachmentFields(input, paperFields(input, METHODS[method]))
     : method === "inspiration.list" && input && (own(input, "backendId") || own(input, "agentId"))
       ? [...METHODS[method], "backendId", "agentId"]
-    : method === "inspiration.media.read" && input && own(input, "preview") ? [...METHODS[method], "preview"] : METHODS[method];
+    : method === "inspiration.media.read" && input && own(input, "preview") ? [...METHODS[method], "preview"]
+    : method === "inspiration.start" && input && own(input, "modelSelection") ? [...METHODS[method], "modelSelection"] : METHODS[method];
   if (!fields || !exact(input, fields) || Buffer.byteLength(JSON.stringify(input)) > 48 * 1024) invalid();
   if (method === "inspiration.agent-stats" && (!Array.isArray(input.agents) || input.agents.length > 50
     || !input.agents.every(agent => exact(agent, ["backendId", "agentId"])
@@ -107,12 +123,15 @@ function validateInspirationServiceParams(method, input) {
   if (fields.includes("sessionKey") && (!string(input.sessionKey, 512, false)
     || !["openclaw", "hermes"].includes(input.backendId))) invalid();
   if (fields.includes("workspace") && input.workspace !== null && !string(input.workspace, 4096, false)) invalid();
+  if (fields.includes("modelSelection")
+    && !validInspirationModelSelection(input.modelSelection, ["openclaw", "hermes"].includes(input.backendId))) invalid();
   if (fields.includes("query") && !string(input.query, 1024)) invalid();
   if (fields.includes("filter") && !FILTERS.has(input.filter)) invalid();
   if (fields.includes("patch")) {
     const patch = input.patch;
     if (!patch || typeof patch !== "object" || Array.isArray(patch) || Object.keys(patch).length === 0
-      || Object.keys(patch).some((key) => !["body", "title", "favorite", "archived", "accepted", "attachments"].includes(key))
+      || Object.keys(patch).some((key) => !["body", "title", "favorite", "archived", "accepted", "acceptedRunId", "attachments"].includes(key))
+      || (own(patch, "acceptedRunId") && (Object.keys(patch).length !== 1 || (patch.acceptedRunId !== null && !uuid(patch.acceptedRunId))))
       || (own(patch, "body") && !string(patch.body, 16 * 1024))
       || (own(patch, "attachments") && !validAttachments(patch.attachments))
       || (own(patch, "title") && patch.title !== null && !string(patch.title, 512, false))
@@ -128,7 +147,6 @@ const STATUSES = new Set(["saved", "queued", "starting", "running", "waiting_inp
 const at = (value) => Number.isSafeInteger(value) && value >= 0;
 const optionalAt = (value) => value === null || at(value);
 const optionalText = (value, max) => value === null || string(value, max);
-const publicId = (value) => typeof value === "string" && ID.test(value);
 const VIEW_FIELDS = ["id", "body", "title", "revision", "favorite", "archivedAt", "acceptedAt", "createdAt", "updatedAt", "status", "latestExecution", "rounds"];
 const EXECUTION_VIEW_FIELDS = ["id", "ideaId", "runId", "profileId", "agentId", "backendId", "workspace", "sessionKey", "ideaRevision", "createdAt", "retryOf", "status", "resultSummary", "errorCode", "finishedAt", "attention"];
 function validRequest(request, runId) {
@@ -186,7 +204,7 @@ function validateExecution(execution, history = false) {
   if (!validInspirationAttention(execution.attention, execution.runId)) invalid("INSPIRATION_RESPONSE_INVALID");
 }
 function validateView(value) {
-  const fields = own(value || {}, "restoredAt") ? [...VIEW_FIELDS, "restoredAt"] : VIEW_FIELDS;
+  const fields = [...VIEW_FIELDS, ...["restoredAt", "acceptedRunId"].filter(key => own(value || {}, key))];
   if (!exact(value, attachmentFields(value, paperFields(value, fields))) || !uuid(value.id) || !string(value.body, 16 * 1024, Boolean(value.attachments?.length))
     || (own(value, "restoredAt") && !at(value.restoredAt))
     || (own(value, "attachments") && !validAttachments(value.attachments))
@@ -196,6 +214,7 @@ function validateView(value) {
     || typeof value.favorite !== "boolean" || !STATUSES.has(value.status)
     || !at(value.createdAt) || !at(value.updatedAt) || value.updatedAt < value.createdAt
     || !optionalAt(value.archivedAt) || !optionalAt(value.acceptedAt)
+    || (own(value, "acceptedRunId") && (value.acceptedAt === null || !uuid(value.acceptedRunId)))
     || !exact(value.rounds, ["count", "agents"]) || !at(value.rounds.count) || !Array.isArray(value.rounds.agents)
     || value.rounds.agents.length > 8 || !value.rounds.agents.every(agent => exact(agent, ["backendId", "agentId"])
       && publicId(agent.backendId) && publicId(agent.agentId))) invalid("INSPIRATION_RESPONSE_INVALID");
@@ -267,11 +286,19 @@ function validateInspirationServiceResult(method, result) {
   } else if (method === "inspiration.delete") {
     if (!exact(result, ["id", "deleted"]) || !uuid(result.id) || result.deleted !== true) invalid("INSPIRATION_RESPONSE_INVALID");
   } else {
-    if (!exact(result, ["idea"])) invalid("INSPIRATION_RESPONSE_INVALID");
+    const hasAccepted = method === "inspiration.get" && own(result, "acceptedExecution");
+    if (!exact(result, hasAccepted ? ["idea", "acceptedExecution"] : ["idea"])) invalid("INSPIRATION_RESPONSE_INVALID");
     validateView(result.idea);
+    if (hasAccepted) {
+      validateExecution(result.acceptedExecution);
+      if (result.acceptedExecution.ideaId !== result.idea.id || result.acceptedExecution.status !== "completed"
+        || result.acceptedExecution.runId !== result.idea.acceptedRunId
+        || result.acceptedExecution.ideaRevision > result.idea.revision) invalid("INSPIRATION_RESPONSE_INVALID");
+    }
   }
   return structuredClone(result);
 }
 
 module.exports = { INSPIRATION_SERVICE_METHODS, INSPIRATION_HISTORY_MAX_RESULT_BYTES, PUBLIC_MESSAGES,
-  validateInspirationServiceParams, validateInspirationServiceResult, validInspirationAttention, validInspirationPaperTone };
+  validateInspirationServiceParams, validateInspirationServiceResult, validInspirationAttention, validInspirationPaperTone,
+  validInspirationAgentRef, validInspirationModelSelection };

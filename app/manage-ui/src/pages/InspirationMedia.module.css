@@ -10,13 +10,17 @@
 .editor[data-capture]:hover .toolbar, .editor[data-capture]:focus-within .toolbar, .editor[data-capture][data-busy] .toolbar { opacity: 1; }
 .editor[data-drag-over] { outline: 2px dashed currentColor; outline-offset: 12px; }
 .toolbar { display: flex; align-items: center; gap: 4px; margin-top: 20px; min-height: 32px; font-family: var(--font-sans, sans-serif); }
+.editor[data-inline-edit] { display: flex; flex: 1; flex-direction: column; gap: 8px; }
+.editor[data-inline-edit] .toolbar { margin-top: auto; margin-inline-start: -7px; min-height: 24px; flex-wrap: wrap; }
 .tool { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.editor[data-inline-edit] .tool { height: 24px; }
 .tool:hover:not(:disabled) { background: color-mix(in srgb, currentColor 8%, transparent); }
 .tool[data-recording] { color: #000; background: color-mix(in srgb, currentColor 10%, transparent); }
 .stopIcon { width: 9px; height: 9px; border-radius: 2px; background: currentColor; }
 .tool:disabled { opacity: .4; cursor: default; }
 .tool:focus-visible, .remove:focus-visible, .attachment a:focus-visible, .filenameButton:focus-visible, .playbackButton:focus-visible, .videoPlay:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 .hint { flex: 1; min-width: 0; padding: 0 8px; font-size: 11px; line-height: 1.5; opacity: .65; }
+.editor[data-inline-edit] .hint:empty { padding: 0; }
 .editor[data-capture] .hint { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .attachments { display: flex; flex-direction: column; min-width: 0; }
 .attachments[data-files] { gap: 8px; margin-block: 8px; }

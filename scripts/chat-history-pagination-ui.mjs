@@ -23,6 +23,19 @@ const hello = { type: "hello-ok", protocol: 4, server: { version: "2026.9.9" },
 const listen = server => new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const close = server => new Promise(resolve => server.close(resolve));
 const json = (response, value, status = 200) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value)); };
+let archiveRetryKey = null;
+let archiveRequests = 0;
+let serviceReady = true;
+let unavailableHistoryReads = 0;
+fixture.registry.setInspirationOwner({
+  async getExternalInspirationSessionRoute({ sessionKey }) {
+    if (!serviceReady && sessionKey === fixture.cases[0].key) {
+      unavailableHistoryReads++;
+      throw Object.assign(new Error("Service not ready"), { code: "SERVICE_UNAVAILABLE" });
+    }
+    return null;
+  },
+});
 const upstreamHttp = createServer(), upstream = new WebSocketServer({ server: upstreamHttp }), forwarded = [];
 upstream.on("connection", socket => {
   socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "fixture" } }));
@@ -44,16 +57,24 @@ const server = createServer(async (request, response) => {
     if (!fixture.histories.has(key)) return json(response, { error: "unknown fixture" }, 400);
     if (action === "fail") fixture.controls.fail.add(key);
     if (action === "retry") fixture.controls.fail.delete(key);
+    if (action === "service-ready") serviceReady = true;
     if (action === "append") fixture.append(key);
     if (action === "slow") fixture.controls.delay = 160;
     if (action === "fast") fixture.controls.delay = 20;
+    if (action === "fail-archive-once") { archiveRetryKey = key; archiveRequests = 0; }
     return json(response, { ok: true });
   }
   if (url.pathname === "/fixture/stats") return json(response, {
-    requests: fixture.controls.requests, watches: fixture.controls.watches, created: fixture.controls.created,
+    requests: fixture.controls.requests, watches: fixture.controls.watches, created: fixture.controls.created, archiveRequests,
+    unavailableHistoryReads,
   });
   if (url.pathname.startsWith("/__api/")) {
     const p = url.pathname;
+    if (p === "/__api/sessions/archive" && url.searchParams.get("key") === archiveRetryKey) {
+      const attempt = ++archiveRequests;
+      await new Promise(resolve => setTimeout(resolve, 450));
+      if (attempt === 1) return json(response, { error: "Fixture archive unavailable" }, 503);
+    }
     const value = p.includes("cache-scope") ? { backendId: url.searchParams.get("backend"), cacheScope: "isolated-history" }
       : p.includes("runtime-models") ? { selection: { bindingId: "fixture-binding", runtime: "codex", model: null, canSwitch: false, candidates: [] },
         capabilities: { nativeUiArtifactsV1: true, attachments: {}, slash: false, steer: false }, models: [], runtimes: [] }
@@ -124,16 +145,18 @@ try {
   if (process.argv.includes("--serve")) {
     await new Promise(resolve => { process.once("SIGINT", resolve); process.once("SIGTERM", resolve); });
   } else {
+    serviceReady = false;
     const output = process.env.CHAT_HISTORY_PREVIEW_DIR ? path.resolve(process.env.CHAT_HISTORY_PREVIEW_DIR) : null;
     if (output) fs.mkdirSync(output, { recursive: true });
     fs.writeFileSync(path.join(temp, "electron.cjs"), `const {app,BrowserWindow}=require("electron");const fs=require("node:fs");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1360,height:950,webPreferences:{backgroundThrottling:false}});let ok=false;
 w.webContents.on('console-message', (_event, ...details) => console.error('Renderer:', ...details));
-try{await w.loadURL(${JSON.stringify(url)});const fresh=await w.webContents.executeJavaScript("window.runNewSessionHistoryFixture()");
+try{await w.loadURL(${JSON.stringify(url)});const cold=await w.webContents.executeJavaScript("window.runColdHistoryFixture()");
+const fresh=await w.webContents.executeJavaScript("window.runNewSessionHistoryFixture()");
 const result=await w.webContents.executeJavaScript("window.runHistoryFixture()");
 if(${!!output})fs.writeFileSync(${JSON.stringify(output ? path.join(output, "history-final.png") : "")},(await w.webContents.capturePage()).toPNG());
-console.log(JSON.stringify({fresh,...result}));ok=true;}catch(error){console.error(error.stack||error);}finally{w.destroy();app.exit(ok?0:1);}});`);
+console.log(JSON.stringify({cold,fresh,...result}));ok=true;}catch(error){console.error(error.stack||error);}finally{w.destroy();app.exit(ok?0:1);}});`);
     const child = spawn(path.join(root, "node_modules/.bin/electron"), [path.join(temp, "electron.cjs")],
       { env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" }, stdio: ["ignore", "pipe", "pipe"] });
     const timer = setTimeout(() => child.kill(), 120000);

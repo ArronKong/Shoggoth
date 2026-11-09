@@ -26,10 +26,6 @@ window.fetch = async (input: RequestInfo | URL, options: RequestInit = {}) => {
   if (url === "/__api/config") {
     if (options.method === "PUT") config = { ...config, ...JSON.parse(String(options.body)) };
     payload = { config };
-  } else if (url === "/__api/web-settings" && (!options.method || options.method === "GET")) {
-    payload = { revision: 1, config: { searchProvider: "exa", fetchProvider: "direct" },
-      credentials: Object.fromEntries(["exa", "brave", "tavily", "tinyfish"].map(provider =>
-        [provider, { configured: false, revision: null }])) };
   } else if (url === "/__api/backends") payload = { backends: FALLBACK_BACKEND_DESCRIPTORS.map(descriptor =>
     descriptor.id === "shoggoth" ? { ...descriptor, surfaces: { ...descriptor.surfaces, nativeMemoryConfig: true } } : descriptor) };
   else if (url === "/__api/status") payload = { backends: ["openclaw", "hermes"].map(id => ({ id, name: id === "openclaw" ? "OpenClaw" : "Hermes", connected: true,
@@ -53,6 +49,9 @@ async function wait(condition: () => unknown, name: string) { const deadline = p
 const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
 const editor = () => document.querySelector<HTMLInputElement>("#settings-gateway-url");
 const writes = () => scope.fixtureRequests.filter((row: any) => row.method !== "GET");
+const backendIds = ["openclaw", "hermes"];
+const backendCard = (id: string) => document.querySelector(`article[data-backend="${id}"]`);
+const cardsReady = () => backendIds.every(id => backendCard(id)?.querySelector(".settings-health.is-healthy"));
 scope.runManagedSettingsFixture = async () => {
   const checks: string[] = [];
   const hiddenTitles = ["多 Agent 群聊", "记忆设置", "OpenClaw 运行环境", "Hermes 运行环境"];
@@ -62,17 +61,27 @@ scope.runManagedSettingsFixture = async () => {
     }
     assert(!scope.fixtureRequests.some((row: any) => row.url.startsWith("/__api/plugins/host-runtime/")),
       "hidden runtime panels must not fetch host status");
+    assert(!document.querySelector("#settings-web, #settings-web-title"), "standalone Web settings must stay hidden");
+    assert(!scope.fixtureRequests.some((row: any) => row.url.startsWith("/__api/web-settings")),
+      "hidden Web settings must not fetch settings or credentials");
   };
+  // OpenClaw connection settings live in a dialog opened from its card.
+  await wait(() => cardsReady() && backendIds.every(id => backendCard(id)?.querySelector(".settings-backend-version"))
+    && document.querySelector('[data-manage="openclaw"]:enabled'), "existing backend cards and versions ready");
+  assert(!editor(), "legacy connection editor stays closed until requested");
+  document.querySelector<HTMLButtonElement>('[data-manage="openclaw"]')!.click();
   await wait(() => editor() && !editor()!.disabled, "legacy controls ready");
-  await wait(() => document.querySelector("#settings-web input[type=password]:enabled"), "web settings loaded");
-  assert(document.querySelector("#settings-web-title")?.textContent === "联网搜索与网页读取", "web settings title is visible");
+  assert(editor()?.closest('[role="dialog"]') && editor()?.value === config.gatewayUrl, "existing gateway address is available inside its dialog");
   checkHiddenModules();
   assert(writes().length === 0, "initial render must never write settings");
-  checks.push("web settings and existing connection settings are usable while the other modules stay hidden");
+  checks.push("existing connection dialog is usable while the standalone Web settings and other modules stay hidden");
   config = { ...config, openclawPluginHostMode: "managed", hermesPluginHostMode: "managed" };
   scope.remountSettings();
   await wait(() => scope.fixtureRequests.filter((row: any) => row.url === "/__api/versions").length >= 2
-    && !document.querySelector("#settings-openclaw") && !document.querySelector("#settings-hermes"), "saved managed modes hide legacy editors");
+    && cardsReady() && backendIds.every(id => backendCard(id)?.querySelector(".settings-backend-actions button:enabled")),
+    "saved managed backend cards ready");
+  assert(!document.querySelector("#settings-openclaw, #settings-hermes, [data-manage=openclaw], [data-manage=hermes]"),
+    "saved managed modes hide legacy editors and their entry buttons");
   checkHiddenModules();
   assert(config.token === "retained-legacy-value" && config.hermesRemotes[0].profile === "retained", "legacy config values are preserved");
   assert(!Array.from(document.querySelectorAll("button")).some(node => node.textContent?.trim() === "立即更新"), "managed global updater actions must be hidden");

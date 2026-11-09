@@ -63,7 +63,7 @@ const GROK_COMPAT_DISABLE_ENV = Object.freeze(
   )),
 );
 const RESERVED_ENV = new Set([
-  "GROK_HOME", "HOME", "PATH", "TMPDIR", ...PROXY_ENV_KEYS, ...GROK_COMPAT_DISABLE_ENV,
+  "GROK_HOME", "HOME", "PATH", "TMPDIR", "GROK_MEMORY", ...PROXY_ENV_KEYS, ...GROK_COMPAT_DISABLE_ENV,
 ]);
 const STOP_REASONS = new Set(["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"]);
 const PERMISSION_KINDS = new Set(["allow_once", "allow_always", "reject_once", "reject_always"]);
@@ -599,6 +599,10 @@ async function buildSpawnEnv(runtimeEnvironment, options) {
   env.HOME = runtimeEnvironment.spawnEnv.HOME;
   env.GROK_HOME = runtimeEnvironment.spawnEnv.GROK_HOME;
   for (const key of GROK_COMPAT_DISABLE_ENV) env[key] = "false";
+  // Shoggoth Memory is the Agent's only memory; Grok's own cross-session
+  // memory would keep a second, unmanaged copy (forget, sharing and recall
+  // would never see it).
+  env.GROK_MEMORY = "0";
   return Object.freeze(env);
 }
 
@@ -855,9 +859,6 @@ class GrokBuildRuntimeHost {
       clientInfo: { name: "shoggoth", version: this.packageVersion },
     }, { timeoutMs: this.initializeTimeoutMs });
     this._acceptInitialize(response);
-    if ((this.secretGateway || this.modelOnlyInstance) && response._meta?.agentVersion !== "1.0.73") {
-      throw hostError("SECRET_MODEL_RUNTIME_UNSUPPORTED", "This Grok version has not been verified for local credential processing");
-    }
     await this._refreshAuthenticationIfChanged();
     this.initializedResponse = response;
     this.startupStage = "running";

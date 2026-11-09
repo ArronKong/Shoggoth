@@ -14,7 +14,7 @@ const load = relative => {
   vm.runInNewContext(bundle, { module, exports: module.exports });
   return module.exports;
 };
-const { createTimeline, reduceTimeline, stepsFromParts } = load("../app/manage-ui/src/lib/turnTimeline.ts");
+const { createTimeline, reduceTimeline, stepsFromParts, mergeNativeTurnSteps, turnElapsedMs } = load("../app/manage-ui/src/lib/turnTimeline.ts");
 const { withoutPlanSteps } = load("../app/manage-ui/src/lib/chatPlan.ts");
 const source = fs.readFileSync(new URL("../app/manage-ui/src/pages/ChatPage.tsx", import.meta.url), "utf8");
 const ast = ts.createSourceFile("ChatPage.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -27,7 +27,7 @@ const functions = names.map(name => {
 const gap = ast.statements.find(statement => ts.isVariableStatement(statement)
   && statement.declarationList.declarations.some(declaration => declaration.name.getText(ast) === "TURN_GAP_MS"));
 assert.ok(gap);
-const context = { withoutPlanSteps, stepsFromParts };
+const context = { withoutPlanSteps, stepsFromParts, mergeObservedTurnSteps: mergeNativeTurnSteps, turnElapsedMs };
 vm.runInNewContext(ts.transpileModule([...functions, gap.getText(ast)].join("\n"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText, context);

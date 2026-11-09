@@ -1,10 +1,13 @@
 "use strict";
 
 const { serviceError } = require("./security");
-const { validateAgentRuntimeBinding, MAX_AGENT_RUNTIME_BINDINGS } = require("./agent-runtime-binding");
+const { BINDING_FIELDS, BINDING_OPTIONAL_FIELDS, validBindingModel, validateAgentRuntimeBinding,
+  MAX_AGENT_RUNTIME_BINDINGS } = require("./agent-runtime-binding");
+const { validProviderSelection } = require("./codex-session-provider");
 
 const AGENT_BINDING_METHODS = Object.freeze([
-  "agent.binding.list", "agent.binding.sync", "agent.binding.add", "agent.binding.update", "agent.binding.remove", "agent.binding.setDefault",
+  "agent.binding.list", "agent.binding.sync", "agent.binding.add", "agent.binding.update", "agent.binding.remove",
+  "agent.binding.setDefault", "agent.binding.setDefaultModel",
 ]);
 const AGENT_BINDING_PUBLIC_MESSAGES = Object.freeze({
   AGENT_BINDING_INVALID: "Agent 运行绑定请求无效",
@@ -19,6 +22,12 @@ const AGENT_BINDING_PUBLIC_MESSAGES = Object.freeze({
   AGENT_BINDING_PROJECTION_READONLY: "请通过运行绑定设置修改运行环境",
   AGENT_BINDING_REVISION_CONFLICT: "运行绑定已更新，请刷新后重试",
   AGENT_BINDING_UNAVAILABLE: "暂时无法读取运行绑定",
+  AGENT_DEFAULT_MODEL_UNAVAILABLE: "暂时无法保存默认模型，请稍后重试",
+  PROFILE_MODEL_NOT_AVAILABLE: "所选模型不在当前运行环境的可用目录中",
+  PROFILE_MODEL_CATALOG_UNAVAILABLE: "暂时无法读取当前运行环境的模型目录",
+  PROFILE_AUTH_REQUIRED: "ChatGPT 尚未登录",
+  SESSION_MODEL_PROVIDER_UNAVAILABLE: "所选模型的提供方已不可用，请重新选择",
+  STORE_COMMIT_UNCERTAIN: "暂时无法确认默认模型是否已保存，请在服务恢复后重新查看",
 });
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-8[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -48,11 +57,13 @@ function changes(value, adding) {
 function validateAgentBindingParams(method, value) {
   try {
     if (!AGENT_BINDING_METHODS.includes(method)) throw invalid();
+    const selecting = method === "agent.binding.setDefaultModel";
     const fields = method === "agent.binding.list" ? ["profileId"]
       : method === "agent.binding.sync" ? ["profileId", "runtimeAccountIds"]
       : method === "agent.binding.add" ? ["profileId", "spec", "operationId", "revision"]
-        : ["profileId", "bindingId", "revision", ...(method === "agent.binding.update" ? ["patch"] : [])];
-    const data = record(value, fields);
+        : ["profileId", "bindingId", "revision", ...(method === "agent.binding.update" ? ["patch"] : []),
+          ...(selecting ? ["model"] : [])];
+    const data = record(value, fields, selecting ? ["modelProviderRef"] : []);
     opaque(data.profileId);
     if (method === "agent.binding.sync") {
       const values = data.runtimeAccountIds;
@@ -73,6 +84,8 @@ function validateAgentBindingParams(method, value) {
     if (method === "agent.binding.add") { opaque(data.operationId); data.spec = changes(data.spec, true); }
     else if (method !== "agent.binding.list" && (typeof data.bindingId !== "string" || !UUID.test(data.bindingId))) throw invalid();
     if (method === "agent.binding.update") data.patch = changes(data.patch, false);
+    if (selecting && (!validBindingModel(data.model)
+      || (Object.hasOwn(data, "modelProviderRef") && !validProviderSelection(data.modelProviderRef)))) throw invalid();
     return Object.freeze(data);
   } catch { throw invalid(); }
 }
@@ -91,8 +104,7 @@ function validateAgentBindingResult(method, value, params) {
       const field = Object.getOwnPropertyDescriptor(data.bindings, String(index));
       if (!field?.enumerable || !Object.hasOwn(field, "value")) throw invalid();
       // Clone only data properties before calling the Product validator.
-      const raw = record(field.value, ["id", "profileId", "runtime", "runtimeProfileId", "runtimeAccountId",
-        "label", "enabled", "revision", "createdAt", "updatedAt"]);
+      const raw = record(field.value, BINDING_FIELDS, BINDING_OPTIONAL_FIELDS);
       const binding = Object.freeze(validateAgentRuntimeBinding(raw));
       if (ids.has(binding.id) || binding.revision > data.revision || (params && binding.profileId !== params.profileId)
         || (bindings.length && binding.profileId !== bindings[0].profileId)) throw invalid();
@@ -103,13 +115,13 @@ function validateAgentBindingResult(method, value, params) {
     if (mutation) {
       if (method === "agent.binding.remove") { if (data.binding !== null || ids.has(params?.bindingId)) throw invalid(); selected = null; }
       else {
-        const raw = record(data.binding, ["id", "profileId", "runtime", "runtimeProfileId", "runtimeAccountId",
-          "label", "enabled", "revision", "createdAt", "updatedAt"]);
+        const raw = record(data.binding, BINDING_FIELDS, BINDING_OPTIONAL_FIELDS);
         const binding = validateAgentRuntimeBinding(raw);
         selected = bindings.find((entry) => entry.id === binding.id);
         if (!selected || JSON.stringify(selected) !== JSON.stringify(binding)
           || (params?.bindingId && selected.id !== params.bindingId)
-          || (method === "agent.binding.setDefault" && selected.id !== data.defaultBindingId)) throw invalid();
+          || (["agent.binding.setDefault", "agent.binding.setDefaultModel"].includes(method)
+            && selected.id !== data.defaultBindingId)) throw invalid();
       }
     }
     if (data.checkpointBindingIds !== undefined && (!Array.isArray(data.checkpointBindingIds)

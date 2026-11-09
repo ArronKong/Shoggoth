@@ -3,14 +3,12 @@ import { useTranslation } from "react-i18next";
 import { filterLegacyHostSettings, type ManagedPluginHostModes } from "../lib/managedPluginHostSettings";
 import type {
   AppConfig,
-  BackendSelfUpdate,
   BackendStatus,
   BackendVersionStatus,
   RuntimeStatus,
   ConnTestResult,
   HermesRemote,
   LanDiscoveryState,
-  SelfUpdateRun,
   ShoggothProductStatus,
   StandingGrant,
   StandingGrantList,
@@ -18,14 +16,12 @@ import type {
 import {
   getConfig,
   getLanDiscovery,
-  getSelfUpdates,
   getShoggothProductStatus,
   getStatus,
   getRuntimeStatuses,
   getVersions,
   listStandingGrants,
   revokeStandingGrant,
-  runSelfUpdate,
   runShoggothBackgroundAction,
   setLanDiscovery,
   testConnection,
@@ -43,6 +39,7 @@ import {
 } from "../lib/shoggothStartupRecovery";
 import { setDebugEnabled, useDebugEnabled } from "../components/debug/store";
 import { PageHead } from "../components/PageHead";
+import Modal from "../components/Modal";
 import SettingsPreferences from "./settings/SettingsPreferences";
 import SettingsProject from "./settings/SettingsProject";
 import SettingsComputerUse from "./settings/SettingsComputerUse";
@@ -65,14 +62,6 @@ const SHOW_WEB_SETTINGS = false;
 const SHOGGOTH_POST_START_REFRESH_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
 // Keep writes ordered even when Settings is left and reopened before a response.
 let settingsSaveQueue: Promise<void> = Promise.resolve();
-
-export function updateActionForCapabilityReview(status?: SelfUpdateRun): "update" | "repair" {
-  return status?.operation === "repair" ? "repair" : "update";
-}
-
-export function isActionableUpdatePhase(status?: SelfUpdateRun): boolean {
-  return status?.phase === "repair_required" || status?.phase === "capability_review_required";
-}
 
 // REST 已把 standing grants 白名单化；组件再只取展示所需身份与生命周期字段，
 // 防止未来扩展 API 字段时被无意渲染。
@@ -156,8 +145,7 @@ export default function SettingsPage() {
   const cfgRef = useRef(cfg);
   cfgRef.current = cfg;
   const [versions, setVersions] = useState<BackendVersionStatus[]>([]);
-  const [versionError, setVersionError] = useState<string | null>(null);
-  const [selfUpdates, setSelfUpdates] = useState<BackendSelfUpdate[]>([]);
+  const [manageId, setManageId] = useState<string | null>(null);
   const [standingGrants, setStandingGrants] = useState<Record<string, StandingGrantList>>({});
   const [revokingGrant, setRevokingGrant] = useState<string | null>(null);
   const [shoggothStatus, setShoggothStatus] = useState<ShoggothProductStatus | null>(null);
@@ -199,7 +187,6 @@ export default function SettingsPage() {
   const confirm = useConfirm();
   const debugOn = useDebugEnabled();
   const versionsById = useMemo(() => new Map(versions.map((v) => [v.id, v])), [versions]);
-  const selfUpdatesById = useMemo(() => new Map(selfUpdates.map((u) => [u.id, u])), [selfUpdates]);
 
   // Only write edited fields, in order. A slow response must not replace a newer
   // choice or another control's independently persisted configuration.
@@ -356,13 +343,8 @@ export default function SettingsPage() {
       .catch(() => {
         if (isCurrentRefresh()) setShoggothError(true);
       });
-    setVersionError(null);
     getVersions()
       .then((next) => { if (isCurrentRefresh()) setVersions(next); })
-      .catch((e) => { if (isCurrentRefresh()) setVersionError(e instanceof Error ? e.message : String(e)); });
-    // 找回切页前仍在跑的更新（轮询 effect 见下），失败静默——按钮降级为不显示进度。
-    getSelfUpdates()
-      .then((next) => { if (isCurrentRefresh()) setSelfUpdates(next); })
       .catch(() => {});
   }, [flushConnectionChanges, lifecycleGuard]);
 
@@ -456,92 +438,13 @@ export default function SettingsPage() {
   useRegisterPageRefresh("/settings", refresh);
   useRegisterPageLoading("/settings", loading);
 
-  // 自更新是后台长操作：有 running 时轮询进度；跑完的那一沿弹结果并刷新版本号。
-  const prevUpdatingRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const running = new Set(selfUpdates.filter((u) => u.status?.running).map((u) => u.id));
-    for (const id of prevUpdatingRef.current) {
-      if (running.has(id)) continue;
-      const u = selfUpdatesById.get(id);
-      if (!u?.status) continue;
-      const name = u.name || id;
-      if (isActionableUpdatePhase(u.status)) {
-        // Repair/capability review are deliberate user decision points rendered
-        // inline below. Do not misreport them as a terminal update failure.
-        continue;
-      } else if (!u.status.ok) {
-        // exitCode 0 + postUpdateError = 更新命令成功但服务没回来（健康检查失败）。
-        const serviceDown = !!u.status.postUpdateError && u.status.exitCode === 0;
-        const msg = u.status.postUpdateError || u.status.error || `exit ${u.status.exitCode}`;
-        toast.error(t(serviceDown ? "settings.updateRestartFailed" : "settings.updateFailed", { name, msg }));
-      } else {
-        toast.success(t("settings.updateDone", { name }));
-      }
-      getVersions().then(setVersions).catch(() => {});
-      getStatus().then(setBackends).catch(() => {});
-    }
-    prevUpdatingRef.current = running;
-    if (running.size === 0) return;
-    const timer = setInterval(() => {
-      getSelfUpdates().then(setSelfUpdates).catch(() => {});
-    }, 2500);
-    return () => clearInterval(timer);
-  }, [selfUpdates, selfUpdatesById, toast, t]);
-
-  // Every updater action is backend-advertised. Capability widening can only
-  // enter through the explicit second confirmation rendered after review.
-  const startUpdate = async (
-    target: Pick<BackendVersionStatus, "id" | "name">,
-    action: "update" | "repair" = "update",
-    acceptCapabilities = false,
-  ) => {
-    if (isManagedPluginHost(target.id)) return;
-    const okToRun = await confirm({
-      title: t(
-        acceptCapabilities
-          ? "settings.capabilityReviewConfirmTitle"
-          : action === "repair"
-            ? "settings.repairConfirmTitle"
-            : "settings.updateConfirmTitle",
-        { name: target.name },
-      ),
-      message: t(
-        acceptCapabilities
-          ? "settings.capabilityReviewConfirmMessage"
-          : action === "repair"
-            ? "settings.repairConfirmMessage"
-            : "settings.updateConfirmMessage",
-      ),
-      confirmLabel: t(
-        acceptCapabilities
-          ? "settings.acceptCapabilities"
-          : action === "repair"
-            ? "settings.repairNow"
-            : "settings.updateNow",
-      ),
-      danger: acceptCapabilities,
-    });
-    if (!okToRun || isManagedPluginHost(target.id)) return;
-    try {
-      const r = await runSelfUpdate(target.id, { action, acceptCapabilities });
-      if (!r.supported) {
-        toast.error(t("settings.updateUnsupportedRemote"));
-        return;
-      }
-      setSelfUpdates((prev) => [...prev.filter((u) => u.id !== r.id), r]);
-      toast.success(t(action === "repair" ? "settings.repairStarted" : "settings.updateStarted", { name: target.name }));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    }
-  };
-
   const revokeGrant = async (backend: Pick<BackendStatus, "id" | "name">, grant: StandingGrant) => {
     const view = standingGrantView(grant);
     const ok = await confirm({
       title: t("settings.revokeGrantConfirmTitle"),
       message: t("settings.revokeGrantConfirmMessage", { name: view.title }),
       confirmLabel: t("settings.revokeGrant"),
-      danger: true,
+      confirmVariant: "dark",
     });
     if (!ok) return;
     const busyKey = `${backend.id}:${grant.grantId}`;
@@ -674,6 +577,7 @@ export default function SettingsPage() {
         message: t(mode === "builtin-service" ? "settings.disconnectBuiltinConfirmMessage"
           : mode === "native-runtime" ? "settings.copy.disconnectNativeConfirmMessage" : "settings.disconnectConfirmMessage", { name: b.name }),
         confirmLabel: t("settings.disconnect"),
+        confirmVariant: "dark",
       });
       if (!ok) return;
     }
@@ -687,6 +591,7 @@ export default function SettingsPage() {
       title: t("settings.disconnectConfirmTitle", { name: runtime.name }),
       message: t("settings.copy.disconnectNativeConfirmMessage", { name: runtime.name }),
       confirmLabel: t("settings.disconnect"),
+      confirmVariant: "dark",
     })) return;
     await applyBackendConnection({ id: runtime.runtime, name: runtime.name }, runtime.enabled);
   };
@@ -750,142 +655,6 @@ export default function SettingsPage() {
     );
   };
 
-  // 版本为空时用统一占位，避免不同后端失败时出现空白行。
-  const formatVersion = (value?: string) => value || t("settings.versionUnknown");
-
-  // 根据后端返回的比较结果生成状态文案；无法比较时不误报更新。
-  const versionStateText = (v?: BackendVersionStatus) => {
-    if (!v) return versionError ? t("settings.versionCheckFailed") : t("settings.versionUnknown");
-    if (v.updateAvailable === true) return t("settings.updateAvailable");
-    if (v.updateAvailable === false) return t("settings.upToDate");
-    if (v.error) return t("settings.versionCheckFailed");
-    return t("settings.versionUnableToCompare");
-  };
-
-  // 状态颜色只表达确定结论：有更新=告警，已最新=绿色，其它保持弱提示。
-  const versionStateClass = (v?: BackendVersionStatus) => {
-    if (v?.updateAvailable === true) return "status-version-warn";
-    if (v?.updateAvailable === false) return "status-ok";
-    if (v?.error || versionError) return "status-error";
-    return "muted";
-  };
-
-  const updatePhaseText = (status: SelfUpdateRun) => {
-    switch (status.phase) {
-      case "updating": return t("settings.updatePhaseUpdating");
-      case "finalizing": return t("settings.updatePhaseFinalizing");
-      case "restart_pending": return t("settings.updatePhaseRestartPending");
-      case "verifying": return t("settings.updatePhaseVerifying");
-      case "repair_required": return t("settings.updatePhaseRepairRequired");
-      case "capability_review_required": return t("settings.updatePhaseCapabilityReview");
-      case "completed": return t("settings.updatePhaseCompleted");
-      case "failed": return t("settings.updatePhaseFailed");
-      default: return status.running ? t("settings.updating") : t("settings.versionUnknown");
-    }
-  };
-
-  const updateOperationText = (operation?: SelfUpdateRun["operation"]) => {
-    switch (operation) {
-      case "update": return t("settings.updateOperationUpdate");
-      case "repair": return t("settings.updateOperationRepair");
-      case "doctor": return t("settings.updateOperationDoctor");
-      case "gateway_status": return t("settings.updateOperationGatewayStatus");
-      default: return t("settings.versionUnknown");
-    }
-  };
-
-  // 「立即更新」动作只消费后端声明的 actions；不存在能力时不猜、不显示。
-  const renderUpdateAction = (v?: BackendVersionStatus) => {
-    if (!v || isManagedPluginHost(v.id)) return null;
-    const u = selfUpdatesById.get(v.id);
-    if (u?.status?.running) return null;
-    if (v.updateAvailable !== true || !u?.supported || !u.actions?.includes("update")) return null;
-    return (
-      <button className="ui-cbtn ui-cbtn--sm" onClick={() => startUpdate(v, "update")}>
-        {t("settings.updateNow")}
-      </button>
-    );
-  };
-
-  const renderUpdaterStatus = (target: Pick<BackendVersionStatus, "id" | "name">) => {
-    if (isManagedPluginHost(target.id)) return null;
-    const update = selfUpdatesById.get(target.id);
-    const status = update?.status;
-    if (!status) return null;
-    const reviewAction = updateActionForCapabilityReview(status);
-    const canContinueReview = !!update?.supported && !!update.actions?.includes(reviewAction);
-    const canRepair = !!update?.supported && !!update.actions?.includes("repair");
-    const failure = !status.running && status.ok === false && !isActionableUpdatePhase(status);
-    const at = status.finishedAt ? new Date(status.finishedAt).toLocaleString() : "";
-    const reason = [status.error, status.postUpdateError, status.reason].filter(Boolean).join("; ");
-    return (
-      <div className={`update-state update-state--${status.phase || "unknown"}`}>
-        <div className="status-row">
-          <span className="status-label">{t("settings.updateProgress")}</span>
-          <span className={failure ? "status-error" : "muted"}>
-            {updatePhaseText(status)} · {updateOperationText(status.operation)}
-          </span>
-        </div>
-        {failure && (
-          <div className="update-failure">
-            <div className="status-error">
-              {status.interrupted
-                ? t("settings.lastUpdateInterrupted")
-                : t("settings.lastUpdateFailed", { at })}
-            </div>
-            {!status.interrupted && !!reason && <div className="update-failure-reason">{reason}</div>}
-          </div>
-        )}
-        {!!status.progressTail && (
-          <details className="update-log" open={status.running}>
-            <summary>{t("settings.updateProgressTail")}</summary>
-            <pre>{status.progressTail}</pre>
-          </details>
-        )}
-        {status.phase === "repair_required" && (
-          <div className="update-decision">
-            <p>{t("settings.updateRepairRequired")}</p>
-            {(status.findings?.length || status.pluginWarnings?.length || status.pluginVersionDrift?.length) ? (
-              <p className="muted">
-                {t("settings.updateRepairIssueCount", {
-                  count: (status.findings?.length || 0)
-                    + (status.pluginWarnings?.length || 0)
-                    + (status.pluginVersionDrift?.length || 0),
-                })}
-              </p>
-            ) : null}
-            {canRepair && (
-              <button className="ui-cbtn ui-cbtn--sm" onClick={() => startUpdate(target, "repair")}>
-                {t("settings.repairNow")}
-              </button>
-            )}
-          </div>
-        )}
-        {status.phase === "capability_review_required" && (
-          <div className="update-decision update-decision--warning">
-            <p>{t("settings.capabilityReviewRequired")}</p>
-            <ul className="update-capability-list">
-              {(status.capabilityReviews || []).map((review, index) => (
-                <li key={`${review.pluginId || "plugin"}-${index}`}>
-                  <strong>{review.pluginId || t("settings.unknownPlugin")}</strong>
-                  {review.message && <span>{review.message}</span>}
-                </li>
-              ))}
-            </ul>
-            {canContinueReview && (
-              <button
-                className="ui-cbtn ui-cbtn--sm ui-cbtn--danger"
-                onClick={() => startUpdate(target, reviewAction, true)}
-              >
-                {t("settings.acceptCapabilities")}
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
-
   const renderStandingGrants = (backend: Pick<BackendStatus, "id" | "name">) => {
     const result = standingGrants[backend.id];
     if (!result?.supported) return null;
@@ -916,7 +685,7 @@ export default function SettingsPage() {
                     </span>
                   </div>
                   <button
-                    className="ui-cbtn ui-cbtn--sm ui-cbtn--danger"
+                    className="btn-secondary btn-sm"
                     disabled={revokingGrant === busyKey}
                     onClick={() => void revokeGrant(backend, grant)}
                   >
@@ -931,84 +700,20 @@ export default function SettingsPage() {
     );
   };
 
-  // 后端级版本行：OpenClaw 显示当前+最新；Hermes 多实例时当前版本放在实例行里。
-  const renderBackendVersion = (
-    v: BackendVersionStatus | undefined,
-    backend: Pick<BackendStatus, "id" | "name">,
-  ) => {
-    if (isManagedPluginHost(backend.id) || (!v && !versionError && !selfUpdatesById.get(backend.id)?.status)) return null;
-    const hasDashboardVersions = !!v?.dashboards?.length;
-    const showVersionComparison = v?.comparisonSupported !== false;
-    // 三行 label/value 压成一条版本条：左边「当前 · 最新」，右边状态 + 更新动作。
-    return (
-      <>
-        {(v || versionError) && <div className="status-version">
-          <span className="status-version-nums">
-            {(!hasDashboardVersions || v?.current) && (
-              <span className="status-version-pair">
-                <span className="status-version-label">{t("settings.currentVersion")}</span>
-                <span className="mono">{formatVersion(v?.current)}</span>
-              </span>
-            )}
-            {showVersionComparison && (
-              <span className="status-version-pair">
-                <span className="status-version-label">{t("settings.latestVersion")}</span>
-                <span className="mono">{formatVersion(v?.latest)}</span>
-              </span>
-            )}
-          </span>
-          {showVersionComparison && (
-            <span className="status-version-state">
-              <span className={versionStateClass(v)}>{versionStateText(v)}</span>
-              {/* 有更新时给出 GitHub 更新日志入口，让用户先看清这版改了什么再点更新。 */}
-              {v?.updateAvailable === true && !!v.releaseNotesUrl && (
-                <a className="status-release-notes" href={v.releaseNotesUrl} target="_blank" rel="noreferrer">
-                  {t("settings.releaseNotes")}
-                </a>
-              )}
-              {renderUpdateAction(v)}
-            </span>
-          )}
-        </div>}
-        {renderUpdaterStatus(backend)}
-      </>
-    );
-  };
-
   const gatewayUrlError = !REMOTE_CONNECTIONS_ENABLED && !loading && !configFailed && !isLocalGatewayUrl(cfg.gatewayUrl)
     ? t("settings.localGatewayUrlRequired") : null;
   const openclawBackend = backends.find((b) => b.id === "openclaw");
   const openclawNeedsAttention = !!gatewayUrlError
     || (!!openclawBackend && !openclawBackend.disabled && !openclawBackend.connected && !openclawBackend.info.starting);
-  // Open the gateway editor when it needs attention; otherwise the user's own
-  // open/closed choice is left alone (the <details> element stays uncontrolled).
-  const gatewayEditorRef = useRef<HTMLDetailsElement | null>(null);
-  useEffect(() => {
-    if (openclawNeedsAttention && gatewayEditorRef.current) gatewayEditorRef.current.open = true;
-  }, [openclawNeedsAttention]);
   const isBuiltinBackend = (b: Pick<BackendStatus, "id" | "info">) =>
     (backendDescriptors.get(b.id)?.connectionMode || b.info.connectionMode) === "builtin-service";
   const hasOpenclawCard = !!openclawBackend;
   const hasShoggothCard = backends.some(isBuiltinBackend);
   const hasHermesCard = backends.some((b) => b.id === "hermes");
 
-  // OpenClaw gateway address and authentication, shown inside the OpenClaw card.
+  // OpenClaw gateway address and authentication, edited in the OpenClaw dialog.
   const renderOpenclawGateway = () => (
-    <details className="settings-subsection settings-disclosure" id="settings-openclaw" ref={gatewayEditorRef}>
-      <summary className="settings-disclosure-summary">
-        <div className="settings-subsection-head">
-          <div><h5>{t("settings.openclawGateway")}</h5><p>{t("settings.openclawGatewayDesc")}</p></div>
-        </div>
-        <dl className="settings-kv">
-          <div><dt>{t("settings.gatewayUrl")}</dt><dd className="mono" title={cfg.gatewayUrl}>{cfg.gatewayUrl || "—"}</dd></div>
-          <div><dt>{t("settings.gatewayAuth")}</dt><dd>{t(cfg.token ? "settings.gatewayAuthToken" : "settings.deviceIdentity")}</dd></div>
-        </dl>
-        <span className="settings-disclosure-action" aria-hidden="true">
-          <span className="settings-disclosure-edit">{t("common.edit")}</span>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m5 6 3 3 3-3" /></svg>
-        </span>
-      </summary>
-      <div className="settings-disclosure-body">
+    <div className="settings-manage-form" id="settings-openclaw">
       <Field label={t("settings.gatewayUrl")} hint={t("settings.gatewayUrlHint")}
         error={gatewayUrlError} errorId="settings-gateway-url-error">
         <TextInput
@@ -1042,7 +747,7 @@ export default function SettingsPage() {
       </Field>
       <div className="settings-actions">
         <button
-          className="ui-cbtn ui-cbtn--sm"
+          className="btn-secondary btn-sm"
           disabled={loading || configFailed || !!gatewayUrlError}
           onClick={() => runTest("openclaw", { backend: "openclaw", gatewayUrl: cfg.gatewayUrl })}
         >
@@ -1073,23 +778,12 @@ export default function SettingsPage() {
         <span className="mono"> ws://127.0.0.1:18792</span>
         {t("settings.tunnelNote3")}
       </p>}
-      </div>
-    </details>
+    </div>
   );
 
   // Remote Hermes dashboards (only when remote connections are released).
   const renderHermesRemotes = () => (
-    <details className="settings-subsection settings-disclosure" id="settings-hermes">
-      <summary className="settings-disclosure-summary">
-        <div className="settings-subsection-head">
-          <div><h5>{t("settings.hermesConn")}</h5><p>{t("settings.hermesConnDesc")}</p></div>
-        </div>
-        <span className="settings-disclosure-action" aria-hidden="true">
-          <span className="settings-disclosure-edit">{t("common.edit")}</span>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m5 6 3 3 3-3" /></svg>
-        </span>
-      </summary>
-      <div className="settings-disclosure-body">
+    <div className="settings-manage-form" id="settings-hermes">
       {validateRemotes() && (
         <div className="error" role="alert">{validateRemotes()}</div>
       )}
@@ -1135,7 +829,7 @@ export default function SettingsPage() {
                 </Field>
                 <div className="settings-actions">
                   <button
-                    className="ui-cbtn ui-cbtn--sm"
+                    className="btn-secondary btn-sm"
                     onClick={() => {
                       // Empty URL → the backend would silently probe the LOCAL
                       // default dashboard and could report a misleading ✓. Refuse.
@@ -1152,18 +846,17 @@ export default function SettingsPage() {
                     {t("common.test")}
                   </button>
                   {renderTest(testKey)}
-                  <button className="ui-cbtn ui-cbtn--sm ui-cbtn--danger" onClick={() => removeRemote(i)}>
+                  <button className="btn-secondary btn-sm" onClick={() => removeRemote(i)}>
                     {t("common.remove")}
                   </button>
                 </div>
               </div>
             );
           })}
-          <button className="ui-cbtn ui-cbtn--sm" onClick={addRemote}>{t("settings.addRemote")}</button>
+          <button className="btn-dark btn-sm" onClick={addRemote}>{t("settings.addRemote")}</button>
         </div>
       )}
-      </div>
-    </details>
+    </div>
   );
 
   // Local CLIs run through the built-in Shoggoth backend, so they live in its card.
@@ -1183,28 +876,41 @@ export default function SettingsPage() {
     </li>)}
   </ul> : undefined;
 
-  const renderBackendBody = (b: BackendStatus) => {
-    if (isManagedPluginHost(b.id)) return null;
-    if (b.id === "openclaw") return renderOpenclawGateway();
-    if (REMOTE_CONNECTIONS_ENABLED && b.id === "hermes") return renderHermesRemotes();
+  // Backend-owned settings open in a dialog so every connection card stays compact.
+  const manageEntry = (id: string): { title: string; body: ReactNode; label: string; attention?: boolean } | null => {
+    if (isManagedPluginHost(id)) return null;
+    if (id === "openclaw") return { title: openclawBackend?.name || "OpenClaw", label: t("common.edit"),
+      attention: openclawNeedsAttention,
+      body: <>{renderOpenclawGateway()}{renderStandingGrants({ id, name: openclawBackend?.name || "OpenClaw" })}</> };
+    if (REMOTE_CONNECTIONS_ENABLED && id === "hermes") return { title: "Hermes", label: t("common.edit"), body: renderHermesRemotes() };
     // Local CLIs run inside the built-in backend; nothing to switch while it is disconnected.
-    if (isBuiltinBackend(b)) return b.disabled ? null : renderShoggothBody();
+    const builtin = backends.find((b) => b.id === id && isBuiltinBackend(b));
+    if ((builtin ? !builtin.disabled : id === "shoggoth" && !hasShoggothCard) && showRuntimeStatus) {
+      return { title: builtin?.name || "Shoggoth", label: t("settings.localRuntimes"), body: renderShoggothBody() };
+    }
     return null;
   };
+  const renderManage = (id: string) => {
+    const entry = manageEntry(id);
+    return entry && <button type="button" className={`btn-secondary btn-sm${entry.attention ? " settings-manage-attention" : ""}`}
+      data-manage={id} onClick={() => setManageId(id)}>{entry.label}</button>;
+  };
+  const openManage = manageId ? manageEntry(manageId) : null;
+  const closeManage = () => { flushConnectionChanges(); setManageId(null); };
 
   // Until (or unless) status reports a backend, its settings still need a home.
-  const renderFallbackCard = (id: string, name: string, body: ReactNode) => (
-    <section className="settings-backend-fallback" key={`fallback:${id}`}>
+  const renderFallbackCard = (id: string, name: string) => (
+    <section className="settings-backend-fallback" key={`fallback:${id}`} data-backend={id}>
       <div className="settings-backend-row">
         <BackendMark id={id} name={name} />
         <div className="settings-backend-copy"><h4>{name}</h4></div>
+        <div className="settings-backend-actions">{renderManage(id)}</div>
       </div>
-      <div className="settings-backend-body">{body}</div>
     </section>
   );
 
   return (
-    <div className="page management-page settings-page">
+    <div className="page management-page management-page--scroll-card settings-page">
       <PageHead
         title={t("settings.pageTitle")}
         subtitle={
@@ -1221,31 +927,24 @@ export default function SettingsPage() {
       )}
 
       <div className="settings-workspace">
-        <div className="settings-stack">
-          <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} />
+        <div className="settings-stack management-page__scroll-card">
           <div className="settings-group" id="settings-connections">
             <BackendOverview
               backends={backends} descriptors={backendDescriptors}
               versions={new Map([...versionsById].filter(([id]) => !isManagedPluginHost(id)))} loading={loading || saving || togglingBackend}
-              attention={(id) => {
-                if (isManagedPluginHost(id)) return false;
-                const status = selfUpdatesById.get(id)?.status;
-                return !!status && (status.running || status.ok === false || isActionableUpdatePhase(status));
-              }}
-              renderDetails={(b) => <>{renderBackendVersion(versionsById.get(b.id), b)}{renderStandingGrants(b)}</>}
-              renderBody={renderBackendBody}
+              renderManage={(b) => renderManage(b.id)}
               isDisconnectable={isDisconnectable} enabledCount={enabledCount} configFailed={configFailed}
               onToggle={(b) => void toggleBackendConnection(b)}
             />
-            {REMOTE_CONNECTIONS_ENABLED && !managedModes.hermes && !hasHermesCard && renderFallbackCard("hermes", "Hermes", renderHermesRemotes())}
-            {!managedModes.openclaw && !hasOpenclawCard && renderFallbackCard("openclaw", "OpenClaw", renderOpenclawGateway())}
-            {!hasShoggothCard && showRuntimeStatus && renderFallbackCard("shoggoth", "Shoggoth", renderShoggothBody())}
+            {REMOTE_CONNECTIONS_ENABLED && !managedModes.hermes && !hasHermesCard && renderFallbackCard("hermes", "Hermes")}
+            {!managedModes.openclaw && !hasOpenclawCard && renderFallbackCard("openclaw", "OpenClaw")}
+            {!hasShoggothCard && showRuntimeStatus && renderFallbackCard("shoggoth", "Shoggoth")}
 
             {backendCatalog.filter((descriptor) => descriptor.aliases?.length).flatMap((descriptor) =>
               [descriptor.id, ...(descriptor.surfaces.runtimeStatus ? [] : descriptor.aliases!)].filter((id) => cfg.disabledBackends.includes(id)).map((id) => (
                 <div className="settings-inline-state" key={`legacy-disabled:${id}`}>
                   <div><strong>{t("settings.legacyRuntimeDisabled", { name: id })}</strong><p>{t("settings.legacyRuntimeDisabledHint")}</p></div>
-                  <button className="ui-cbtn ui-cbtn--sm" disabled={loading || saving || togglingBackend || configFailed}
+                  <button className="btn-secondary btn-sm" disabled={loading || saving || togglingBackend || configFailed}
                     onClick={() => void applyBackendConnection({ id, name: id }, false)}>{t("settings.reconnect")}</button>
                 </div>
               ))) }
@@ -1262,6 +961,8 @@ export default function SettingsPage() {
               />
             </section>
           </div>
+
+          <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} />
 
           <div className="settings-tools-grid" id="settings-tools">
             <SettingsComputerUse onServiceRestarted={shoggothRetry} />
@@ -1291,6 +992,10 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+
+      <Modal open={!!openManage} title={openManage?.title} onClose={closeManage} width={640} className="settings-manage-modal">
+        {openManage?.body}
+      </Modal>
 
       {stopDialogOpen && <BackgroundStopDialog
         onCancel={() => setStopDialogOpen(false)}
