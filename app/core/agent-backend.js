@@ -1,6 +1,16 @@
 "use strict";
 
 const fs = require("node:fs");
+const path = require("node:path");
+
+function existingLocalDirectory(target) {
+  if (typeof target !== "string" || !path.isAbsolute(target)) return undefined;
+  try {
+    return fs.statSync(target).isDirectory() ? target : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Birth time of a local agent/profile directory, in epoch ms. */
 function dirCreatedAtMs(dir) {
@@ -316,13 +326,14 @@ class AgentBackend {
   /** Service-wide native execution capacity; expose only with surfaces.nativeCapacity. */
   async getNativeCapacity() { throw new Error(`${this.id}: getNativeCapacity() not supported`); }
 
-  /** Local CLI inventory, separate from backend/Agent ownership. Read-only;
-   * ready means executable available and Service connected, not verified login.
-   * Never starts a CLI, model turn, auth flow, or scans runtime Home contents.
+  /** Local CLI inventory, separate from backend/Agent ownership. The creation
+   * view uses installed executables and existing readiness evidence without
+   * requesting Service or account probes. The full view can refresh readiness.
    * `installsOnSignIn` marks a runtime whose sign-in installs it when missing.
+   * @param {{forAgentCreation?:boolean}} [_options]
    * @returns {Promise<Array<{runtime:string,name:string,runtimeAccountId:string,enabled:boolean,releaseEnabled:boolean,installation:"available"|"unavailable"|"unknown",installsOnSignIn:boolean,serviceConnected:boolean}>>}
    */
-  async getRuntimeStatuses() { return []; }
+  async getRuntimeStatuses(_options) { return []; }
 
   /**
    * Called after Settings saved a change to the disconnected backends or local
@@ -1249,6 +1260,7 @@ class AgentBackend {
   /** ownerMemberId：群主（没有 @ 的消息先交给它）。
    * @param {{expectedMetadataRevision: number, patch: {name?: string, purpose?: string, status?: "active"|"archived", ownerMemberId?: string}}} _input */
   async updateGroupChat(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** @param {{expectedMetadataRevision: number, force?: true, ownerScope?: string}} _input Force is only for a confirmed, pending deletion. */
   async deleteGroupChat(_id, _input) { throw groupChatUnsupported(this.id); }
   /** @param {{expectedRosterRevision: number, member: {backendId: string, agentId: string}}} _input */
   async addGroupChatMember(_id, _input) { throw groupChatUnsupported(this.id); }
@@ -1976,9 +1988,10 @@ class AgentBackend {
 
   /**
    * Full detail for one agent: identity, model, workspace, + the file list.
+   * setupFiles, when provided, is the ordered list for the Settings tab.
    * AGENT_NOT_FOUND means the owning directory confirmed absence. A failed lookup cannot confirm deletion.
    * @param {string} id
-   * @returns {Promise<object>} { id, name, model?, fallbacks?, workspace?, identity?, files?, ... }
+   * @returns {Promise<object>} { id, name, model?, fallbacks?, workspace?, identity?, files?, setupFiles?, ... }
    */
   async getAgent(id) { throw new Error(`${this.id}: getAgent() not supported`); }
 
@@ -2018,6 +2031,13 @@ class AgentBackend {
    *   name: string, area: string, size: number, mtimeMs: number, ext?: string, kind: string}>}>}
    */
   async listAgentArtifacts(_agentId, _opts) { return { supported: false, reason: "unsupported", items: [] }; }
+
+  // Managed files are owned by the backend's Agent. Workspace references
+  // returned by listAgentArtifacts do not grant mutation rights.
+  async agentFiles(_agentId, _action, _input) {
+    throw Object.assign(new Error("Agent file library is unavailable"), { code: "AGENT_FILE_UNSUPPORTED" });
+  }
+  async listRunArtifacts(_agentId, _runId) { return []; }
 
   /**
    * AI output files attributable to one chat session's successful write events.
@@ -2096,7 +2116,8 @@ class AgentBackend {
    * @param {string} file e.g. "soul.md"
    * Operational review documents use this same editor contract. A backend lists
    * them only on their owning agent; writes carry the revision returned by read.
-   * @returns {Promise<{name: string, content: string, revision?: string, readOnly?: boolean}>}
+   * localDirectory is the existing folder that contains this document on this host.
+   * @returns {Promise<{name: string, content: string, revision?: number|string, readOnly?: boolean, localDirectory?: string}>}
    */
   async getAgentFile(id, file) { throw new Error(`${this.id}: getAgentFile() not supported`); }
 
@@ -2332,6 +2353,7 @@ class AgentBackend {
 
 module.exports = {
   AgentBackend,
+  existingLocalDirectory,
   dirCreatedAtMs,
   sortAgentsByCreatedAt,
   WIDGET_RESOURCE_MAX_BYTES,

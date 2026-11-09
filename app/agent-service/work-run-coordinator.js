@@ -12,7 +12,7 @@ const { inspirationUserText, inspirationUserAttachments } = require("../core/ins
 const { validAttachments, attachmentFields } = require("./inspiration-media");
 
 const { prepareChatAttachments, chatAttachmentDirectory, attachmentPrompt } = require("./chat-attachments");
-const { canUseOriginal, prepareForSend, projectTextOrOriginal } = require("../core/chat-secret-fallback");
+const { prepareForSend, projectTextOrOriginal } = require("../core/chat-secret-fallback");
 const { setChatSendDiagnosticPhase } = require("./chat-send-diagnostics");
 const { createRunEventStream } = require("./run-event-stream");
 const { createMemoryModelTextStream } = require("./memory-model-text-stream");
@@ -1011,7 +1011,6 @@ class WorkRunCoordinator {
     this.verifyMemoryExtractionSource = options.verifyMemoryExtractionSource || null;
     this.contextCompiler = options.contextCompiler || null;
     this.temporarySecrets = options.temporarySecrets || null;
-    this.secretMedia = options.secretMedia || null;
     this.hookService = options.hookService || null;
     this.hookWorkspaceWriters = options.hookWorkspaceWriters || null;
     this.conversationCheckpointStore = options.conversationCheckpointStore || null;
@@ -1392,49 +1391,12 @@ class WorkRunCoordinator {
     return attachments.map(attachment => {
       const media = this.getMediaStore?.();
       if (!media) return { ...attachment, unavailable: true };
-      try { return this.#safeChatAttachments([attachment], sessionKey)[0]; }
+      try { return prepareChatAttachments(media, [attachment], sessionKey)[0]; }
       catch (error) {
         if (/^UNSAFE_/u.test(error?.code || "")) throw error;
         return { ...attachment, unavailable: true };
       }
     });
-  }
-
-  #safeChatAttachments(attachments, sessionKey) {
-    if (!this.secretMedia) return prepareChatAttachments(this.getMediaStore(), attachments, sessionKey);
-    const session = this.chatSessionStore.getSession(sessionKey);
-    if (!session) throw coordinatorError("CHAT_SESSION_NOT_FOUND", "附件所属会话不存在");
-    const scope = { profileId: session.profileId, sessionId: sessionKey };
-    return attachments.map(attachment => {
-      try {
-        const safe = this.secretMedia.read(scope, attachment);
-        if (safe) return safe;
-      } catch (error) { if (!canUseOriginal(error)) throw error; }
-      // Original delivery still uses the regular attachment ownership and file
-      // checks. No raw path is accepted from a processing error or cache record.
-      return prepareChatAttachments(this.getMediaStore(), [attachment], sessionKey)[0];
-    });
-  }
-
-  async #prepareSecretMedia(session, current = []) {
-    if (!this.secretMedia || !session?.sessionKey) return;
-    const scope = { profileId: session.profileId, sessionId: session.sessionKey };
-    const media = this.getMediaStore();
-    for (const attachment of current) {
-      try { await this.secretMedia.prepare(scope, attachment, media); }
-      catch (error) { if (!canUseOriginal(error)) throw error; }
-    }
-    // Original records and IDs stay untouched. Historical attachment failures
-    // use the same current-request fallback and normal attachment validation.
-    const seen = new Set(current.map(item => item.id));
-    for (const event of this.transcriptStore?.listEvents?.(session.profileId, session.id, { includeContextExcluded: false }) || []) {
-      for (const attachment of event.content?.attachments || []) {
-        if (seen.has(attachment.id)) continue;
-        seen.add(attachment.id);
-        try { await this.secretMedia.prepare(scope, attachment, media); }
-        catch (error) { if (/^UNSAFE_/u.test(error?.code || "")) throw error; }
-      }
-    }
   }
 
   #modelContextKey(session, profile) {
@@ -2474,6 +2436,7 @@ class WorkRunCoordinator {
     if (run.source === "proactive") {
       if (kind !== "mcp") throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查只能返回裁决");
       this.assertProactiveRunCurrent(run);
+      this.#assertProactiveMemoryCurrent(this.runExecutionContracts.get(runId));
     }
     const lease = this.runCapabilityLeases.get(runId);
     const scope = { kind, identity: { runId, runtimeAccountId } };
@@ -3376,9 +3339,8 @@ class WorkRunCoordinator {
       const targetConfiguration = this.#contextConfigurationKey(shadow, profile);
       const operationId = pendingOperationId ?? `handoff-preview-${session.revision}`;
       const waitingCommand = restorePolicy && excludingRunId ? this.#commandForRun(this.dispatcher.getRun(excludingRunId))?.command : null;
-      await this.#prepareSecretMedia(session, waitingCommand?.attachments || []);
       const currentAttachments = waitingCommand?.attachments?.length
-        ? this.#safeChatAttachments(waitingCommand.attachments, key) : [];
+        ? prepareChatAttachments(this.getMediaStore(), waitingCommand.attachments, key) : [];
       const currentPrompt = attachmentPrompt(waitingCommand?.prompt ?? "", currentAttachments);
       let previousCoverage = null;
       let transportLimited = false;
@@ -6947,9 +6909,8 @@ class WorkRunCoordinator {
       return execution?.inputSource === "chat" ? execution.turnAttachments || []
         : [...(execution?.attachments || []), ...(execution?.turnAttachments || [])];
     })() : command?.attachments || [];
-    await this.#prepareSecretMedia(boundSession, mediaAttachments);
     const currentAttachments = mediaAttachments.length && boundSessionKey
-      ? this.#safeChatAttachments(mediaAttachments, boundSessionKey) : mediaAttachments;
+      ? prepareChatAttachments(this.getMediaStore(), mediaAttachments, boundSessionKey) : mediaAttachments;
     const currentPrompt = attachmentPrompt(command?.prompt ?? "", currentAttachments);
     const hookPreparation = this.hookService && !["compaction", "proactive", "automation"].includes(run.source)
       ? await this.hookService.prepareRun(run, profile, () => {
@@ -6959,9 +6920,9 @@ class WorkRunCoordinator {
           throw coordinatorError("HOOK_REVOKED", "Hook 准入范围已失效");
         }
       }, resolvedPermission.permissionPolicy) : null;
-    const nativeMemoryVersion = ["compaction", "proactive", "automation"].includes(run.source) ? null
+    const nativeMemoryVersion = ["compaction", "automation"].includes(run.source) ? null
       : this.conversationCheckpointStore?.nativeMemoryVersion?.(profile.id) ?? null;
-    const snapshot = this.contextCompiler && !["compaction", "proactive", "automation"].includes(run.source) ? this.contextCompiler.compile({
+    const snapshot = this.contextCompiler && !["compaction", "automation"].includes(run.source) ? this.contextCompiler.compile({
       profile,
       run,
       hookPreparation,
@@ -7574,6 +7535,13 @@ class WorkRunCoordinator {
     } finally { this.manualCompactions.delete(runId); }
   }
 
+  #assertProactiveMemoryCurrent(contract) {
+    if (contract?.nativeMemoryVersion && JSON.stringify(contract.nativeMemoryVersion) !== JSON.stringify(
+      this.conversationCheckpointStore?.nativeMemoryVersion?.(contract.profileId))) {
+      throw coordinatorError("CONTEXT_SOURCE_STALE", "主动检查的记忆或撤回状态已变化");
+    }
+  }
+
   async #driveProactiveModelReview(run, command, host, contract, token) {
     if (host.capabilities?.["model.generate.toolFree"] !== true || typeof host.generateModelOnly !== "function") {
       throw coordinatorError("PROACTIVE_RUNTIME_UNVERIFIED", "当前 Runtime 没有受限检查能力");
@@ -7588,6 +7556,7 @@ class WorkRunCoordinator {
         throw coordinatorError("PROACTIVE_SCOPE_INVALID", "Agent 默认模型或 Runtime 已变化");
       }
       this.assertProactiveRunCurrent(this.dispatcher.getRun(run.id));
+      this.#assertProactiveMemoryCurrent(contract);
       if (checkHost) host.assertExecutionProviderCurrent?.();
       if (contract.providerFence) this.assertExecutionProviderRouteCurrent?.(contract);
     };
@@ -7603,13 +7572,15 @@ class WorkRunCoordinator {
       assertCurrent();
       if (auth.status === "unauthenticated") throw runtimeAuthRequiredError();
       const modelSecretScope = this.#modelSecretScope(contract, {});
-      const text = `${contract.developerInstructions}\n\n${command.prompt}`;
+      const text = [contract.developerInstructions, contract.dynamicContext, command.prompt].filter(Boolean).join("\n\n");
       const prompt = this.temporarySecrets ? projectTextOrOriginal(this.temporarySecrets, modelSecretScope, text) : text;
       assertCurrent();
-      this.proactiveModelUsage?.(run, false); dispatched = true;
-      const input = { prompt, model: contract.defaultModel ?? null, modelSecretScope,
+      const { validateModelOnlyInput, runBoundedModelOnly } = require("./runtime-model-only");
+      const input = { purpose: "proactive", prompt, model: contract.defaultModel ?? null, modelSecretScope,
         operationId: command.operationId, signal: token.controller.signal, assertCurrent };
-      const output = await require("./runtime-model-only").runBoundedModelOnly(input,
+      validateModelOnlyInput(input);
+      this.proactiveModelUsage?.(run, false); dispatched = true;
+      const output = await runBoundedModelOnly(input,
         signal => host.generateModelOnly({ ...input, signal }));
       // Record actual usage even when a changed rule/default invalidates the
       // verdict. Unknown usage retains a durable budget barrier, never zero.
@@ -7629,6 +7600,9 @@ class WorkRunCoordinator {
       assertCurrent(false);
       let response;
       try { response = JSON.parse(output.text); } catch { throw coordinatorError("PROACTIVE_RESPONSE_INVALID", "检查结果不是结构化 JSON"); }
+      if (this.assertSecretSafe(response, { runId: run.id, kind: "proactiveResponse" }) !== true) {
+        throw coordinatorError("RUN_EVENT_SECRET_REJECTED", "主动检查结果包含敏感信息");
+      }
       this.submitProactiveResponse(this.dispatcher.getRun(run.id), response);
     } catch (error) {
       if (error?.code === "RUNTIME_STOP_UNCONFIRMED" || error?.code === "STORE_COMMIT_UNCERTAIN") {
@@ -9107,7 +9081,7 @@ class WorkRunCoordinator {
           const params = this.#turnStartParams(threadId, profile, session, command, fresh);
           if (this.temporarySecrets) {
             const secretScope = this.#modelSecretScope(profile, session);
-            for (const key of ["prompt", "context", "turnDeveloperInstructions"]) if (typeof params[key] === "string") {
+            for (const key of ["context", "turnDeveloperInstructions"]) if (typeof params[key] === "string") {
               params[key] = projectTextOrOriginal(this.temporarySecrets, secretScope, params[key]);
             }
             require("./context-request-budget").assertContextTransport({ runtime: profile.runtime,
@@ -9254,15 +9228,17 @@ class WorkRunCoordinator {
   }
 
   #turnStartParams(threadId, profile, session, command, fresh = false) {
-    const attachments = command.attachments?.length
-      ? this.#safeChatAttachments(command.attachments, session.sessionKey) : [];
+    const media = this.getMediaStore?.();
+    const attachments = command.attachments?.length ? prepareChatAttachments(media, command.attachments, session.sessionKey) : [];
+    // Protect the chat text before appending the original file input.
+    const prompt = this.temporarySecrets && typeof command.prompt === "string"
+      ? projectTextOrOriginal(this.temporarySecrets, this.#modelSecretScope(profile, session), command.prompt) : command.prompt;
     const params = { ...definedProperties({
       sessionId: threadId,
       operationId: command.operationId,
-      prompt: attachmentPrompt(command.prompt, attachments),
+      prompt: attachmentPrompt(prompt, attachments),
       ...(profile.turnDeveloperInstructions ? { turnDeveloperInstructions: profile.turnDeveloperInstructions } : {}),
-      ...(attachments.length ? { attachments } : {}),
-      attachmentDirectory: this.secretMedia ? undefined : chatAttachmentDirectory(this.getMediaStore?.(), session.sessionKey),
+      ...(attachments.length ? { attachments, attachmentDirectory: chatAttachmentDirectory(media, session.sessionKey) } : {}),
       context: profile.contextLifecycleV1 && !fresh && !profile.contextFresh
         ? profile.dynamicContextWithoutTranscript : profile.dynamicContext,
       observeContextUsage: profile.contextLifecycleV1 === true,

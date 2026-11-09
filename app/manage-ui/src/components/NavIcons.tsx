@@ -92,12 +92,20 @@ function TasksIcon({ className }: IconProps) {
 // 时针 ease-in 全程落后，详见 styles.css 的 ni-hand 段。
 // 原文件里两根针是**一条折线** `M20 15V20L23 23`——要给两根不同速度曲线就必须拆开。
 // 交点仍在表心 (20,20)，两个 round cap 叠在一起，与原本的 round join 视觉无异。
-function CronIcon({ className }: IconProps) {
+export function CronClockGlyph() {
   return (
-    <Frame className={className}>
+    <>
       <path d="M20 29C24.9706 29 29 24.9706 29 20C29 15.0294 24.9706 11 20 11C15.0294 11 11 15.0294 11 20C11 24.9706 15.0294 29 20 29Z" />
       <path className="ni-minute" d="M20 20V15" />
       <path className="ni-hour" d="M20 20L23 23" />
+    </>
+  );
+}
+
+function CronIcon({ className }: IconProps) {
+  return (
+    <Frame className={className}>
+      <CronClockGlyph />
     </Frame>
   );
 }

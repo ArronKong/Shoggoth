@@ -59,8 +59,9 @@ const api = {
   stopGroupChatDiscussion: record("stop", () => view),
   stopGroupChatMember: record("stopMember", () => view),
   updateGroupChat: record("update", () => view),
-  deleteGroupChat: record("deleteGroup", () => {
-    view = { ...view, group: { ...view.group, status: "deleting" } };
+  deleteGroupChat: record("deleteGroup", (_id, _revision, options) => {
+    if (options?.force) return { groupId: "g", status: "deleted" };
+    view = { ...view, group: { ...view.group, status: "deleting", metadataRevision: view.group.metadataRevision + 1 } };
     return { groupId: "g", status: "deleting" };
   }),
   testGroupChatHost: record("testPeer", peer => ({ ...peer, groupTools: true, workspaces: true, artifacts: true })),
@@ -103,6 +104,7 @@ function load(relative) {
       if (name.endsWith("/lib/groupMentions")) return load("src/lib/groupMentions.ts");
       if (name.endsWith("/lib/groupTimeline")) return load("src/lib/groupTimeline.ts");
       if (name.endsWith("/lib/chatTime")) return load("src/lib/chatTime.ts");
+      if (name.endsWith("/lib/chatClipboard")) return load("src/lib/chatClipboard.ts");
       if (name.endsWith("/lib/groupMessagePresentation")) return load("src/lib/groupMessagePresentation.ts");
       if (name.endsWith("/lib/groupPanelObserver")) return load("src/lib/groupPanelObserver.ts");
       if (name.endsWith("/lib/turnTimeline")) return load("src/lib/turnTimeline.ts");
@@ -126,6 +128,8 @@ function load(relative) {
           disabled: props.disabled, onChange: event => props.onChange(event.target.checked) })),
       };
       if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader")) return passthrough("i");
+      if (name.endsWith("/components/TurnTimeline/TurnTimeline")) return passthrough("ol");
+      if (name.endsWith("/components/TurnTimeline/TurnProcess")) return { getTurnProcessStats: () => ({}), TurnProcessSummary: () => null };
       if (name.endsWith("/components/AgentSoulDocument")) return load("src/components/AgentSoulDocument.tsx");
       if (name.endsWith("/components/ChatMarkdown") || name === "./ChatMarkdown") return passthrough("p");
       if (name.endsWith("/components/ChatFileButton")) return load("src/components/ChatFileButton.tsx");
@@ -225,7 +229,8 @@ const mount = async (candidateAgents = agents) => {
   calls.length = 0;
   sentSeq = 98;
   journalDrafts.clear(); journalSends.clear();
-  await act(async () => { renderer = create(React.createElement(Panel, { groupId: "g", agents: candidateAgents, onArchived() {} })); });
+  await act(async () => { renderer = create(React.createElement(Panel, { groupId: "g", agents: candidateAgents,
+    onArchived() { calls.push({ name: "archived", args: [] }); } })); });
   await act(async () => {});
 };
 const buttons = (label) => renderer.root.findAllByType("button")
@@ -321,15 +326,28 @@ assert.equal(detailActions("rename")[0].props.disabled, true, "an archived group
 await clickDetailAction("delete");
 assert.equal(named("deleteGroup").length, 1);
 assert.deepEqual(plain(named("deleteGroup")[0].args), ["g", 1]);
-assert.equal(detailActions("delete")[0].props.disabled, true, "pending deletion cannot be resubmitted");
+assert.equal(detailActions("delete").length, 0, "pending deletion is replaced by the explicit force action");
+assert.equal(detailActions("force-delete")[0].props.disabled, false);
 assert.equal(input().props.disabled, true);
 assert.equal(detailActions("rename")[0].props.disabled, true, "pending deletion disables title renaming");
+confirmAnswer = false;
+await clickDetailAction("force-delete");
+assert.equal(named("deleteGroup").length, 1, "canceling force deletion submits no request");
+assert.deepEqual(plain(named("confirm").at(-1).args[0]), {
+  title: "groupChat.forceDelete", message: "groupChat.forceDeleteConfirm", danger: true,
+  confirmLabel: "groupChat.forceDelete", focusCancel: true,
+});
+confirmAnswer = true;
+await clickDetailAction("force-delete");
+assert.deepEqual(plain(named("deleteGroup").at(-1).args), ["g", 2, { force: true, ownerScope: "fixture-owner" }]);
+assert.equal(named("archived").length, 1, "a force-delete receipt closes the group");
 
 // ---- 群名点击改名；设置和删除直接显示为图标按钮 ----
 view = base(); messages = timeline();
 await mount();
 await openDetails();
 assert.equal(detailActions("menu").length, 0, "no overflow menu remains");
+assert.equal(detailActions("force-delete").length, 0, "active groups offer ordinary deletion only");
 for (const [action, label] of [["settings", "groupChat.strategy.settings"], ["delete", "groupChat.delete"]]) {
   const button = detailActions(action)[0];
   assert.equal(button.props["aria-label"], label);

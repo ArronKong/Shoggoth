@@ -540,7 +540,8 @@ test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定�
     assert.equal(f.mcpCalls.size, 0, "refused external access must not create native durable writes");
     assert.equal(f.calls.length, beforeCalls);
     const projection = await f.controller.handle("app_capabilities", {}, trusted);
-    assert.equal(projection.capabilities.length, 105);
+    assert.equal(projection.capabilities.length, 104);
+    assert.equal(projection.capabilities.some(item => item.tool === "artifact_publish"), false);
     for (const tool of ["mcp_server_add", "mcp_server_import"]) assert.ok(projection.capabilities.some(item => item.tool === tool));
     for (const name of ["group_task", "group_collaborate"]) {
       assert.equal(projection.capabilities.some((item) => item.tool === name), false);
@@ -685,7 +686,7 @@ test("固定 162 个模型可见产品工具及 strict object schemas，不暴�
   for (const phrase of ["native Agent", "Kanban", "Cron", "Token usage", "OpenClaw/Hermes",
     "mcp__shoggoth", "host product name",
     "backend_status", "uiTarget.href", "App-internal", "absolute http(s)", "UI-only", "skill_catalog", "skill_read",
-    "current WorkRun workspace", "~/Downloads", "absolute path of every deliverable",
+    "current WorkRun workspace", "~/Downloads", "absolute workspace path", "artifact_publish",
     "finder_open_folder", "macOS open command", ".app/Contents/MacOS",
     "Computer Use", "user takeover", "federation_agent_list",
     "owner-bound handle"]) {

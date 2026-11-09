@@ -1028,9 +1028,16 @@ class GroupChatStore {
 
   groupLifecycle(groupId) { this.#ready(); return this.#group(groupId)?.status ?? null; }
 
+  groupNeedsDeletionStop(groupId) {
+    this.#ready();
+    const group = this.#group(groupId);
+    return group?.status === "deleting" || (group?.status === "deleted" && group.forceDeletePending === true);
+  }
+
   groupsPendingDeletion() {
     this.#ready();
-    return this.db.prepare("SELECT id FROM groups WHERE status IN ('archived','deleting') ORDER BY id").all().map(row => row.id);
+    return this.db.prepare(`SELECT id FROM groups WHERE status IN ('archived','deleting')
+      OR (status='deleted' AND json_extract(data,'$.forceDeletePending')=1) ORDER BY id`).all().map(row => row.id);
   }
 
   #stopMemberTurns(groupId, memberId, reason) {
@@ -1122,11 +1129,18 @@ class GroupChatStore {
 
   // ---- 删除 ----
 
-  deleteGroup({ groupId, expectedMetadataRevision = null }) {
+  deleteGroup({ groupId, expectedMetadataRevision = null, force = false, ownerScope = null }) {
     return this.#write(() => {
       const group = this.#group(groupId);
       if (!group) fail("GROUP_CHAT_NOT_FOUND");
+      if (force === true && ownerScope !== this.getOwnerScope()) fail("GROUP_CHAT_OWNER_CHANGED");
       if (group.status === "deleted") return { groupId, status: "deleted" };
+      if (force === true) {
+        if (group.status !== "deleting") fail("GROUP_CHAT_FORCE_DELETE_CONFLICT");
+        if (group.metadataRevision !== expectedMetadataRevision) fail("GROUP_CHAT_REVISION_CONFLICT");
+        this.#stopGroup(groupId, "GROUP_DELETED");
+        return this.#finishGroupDeletion(groupId, true);
+      }
       if (group.status === "deleting") return { groupId, status: "deleting" };
       if (expectedMetadataRevision !== null && group.metadataRevision !== expectedMetadataRevision) fail("GROUP_CHAT_REVISION_CONFLICT");
       Object.assign(group, { status: "deleting", deletionRequestedAt: this.now(),
@@ -1137,14 +1151,20 @@ class GroupChatStore {
     });
   }
 
-  #finishGroupDeletion(groupId) {
+  #finishGroupDeletion(groupId, force = false) {
     const group = this.#group(groupId);
     if (!group || !["deleting", "deleted"].includes(group.status)) fail("GROUP_CHAT_INVALID");
+    if (group.status === "deleted" && !group.forceDeletePending) return { groupId, status: "deleted" };
     const pendingTurns = this.#turns("group_id=? AND state IN ('running','waiting')", groupId).length;
     const hosts = this.groupDeletionTargets(groupId);
-    if (group.status === "deleting" && !pendingTurns
-      && (!hosts.targets.length || group.deletionHostsDigest === hosts.digest)) {
-      // 执行身份与内部会话排除记录留着供恢复核对；公开内容在所有执行停下后才删。
+    const waiting = pendingTurns > 0 || hosts.targets.length > 0 && group.deletionHostsDigest !== hosts.digest;
+    if (group.status === "deleted" && !waiting) {
+      delete group.forceDeletePending;
+      this.#putGroup(group);
+    }
+    if (group.status === "deleting" && (force || !waiting)) {
+      // Keep the original execution and session bindings for reconciliation after force deletion.
+      if (waiting) group.forceDeletePending = true;
       this.db.prepare("DELETE FROM message_results WHERE message_id IN (SELECT id FROM messages WHERE group_id=?)").run(groupId);
       if (this.tables.has("invitations")) {
         this.db.prepare("DELETE FROM invitations WHERE cause_message_id IN (SELECT id FROM messages WHERE group_id=?)").run(groupId);
@@ -1195,7 +1215,8 @@ class GroupChatStore {
   confirmGroupDeletionHosts(groupId, targetsDigest) {
     return this.#write(() => {
       const group = this.#group(groupId);
-      if (group?.status !== "deleting" || this.groupDeletionTargets(groupId).digest !== targetsDigest) return false;
+      if (group?.status !== "deleting" && !(group?.status === "deleted" && group.forceDeletePending === true)) return false;
+      if (this.groupDeletionTargets(groupId).digest !== targetsDigest) return false;
       group.deletionHostsDigest = targetsDigest; this.#putGroup(group); return true;
     });
   }
@@ -1211,7 +1232,7 @@ class GroupChatStore {
     if (!validText(text) || sha256(text) !== metadata.exportDigest) fail("GROUP_RESULT_INVALID");
     return this.#write(() => {
       const member = this.#member(memberId);
-      if (!member || member.groupId !== groupId || member.state !== "active") return null;
+      if (!member || member.groupId !== groupId || member.state !== "active" || this.#group(groupId)?.status === "deleted") return null;
       const id = digest([groupId, memberId, metadata]);
       const prior = this.getRoleSnapshot({ groupId, memberId, id });
       if (prior) return prior;
@@ -1795,6 +1816,10 @@ class GroupChatStore {
     return this.#write(() => {
       const turn = this.#turn(opportunityId);
       if (!turn || turn.state !== "running" || turn.runId) return null;
+      if (["deleting", "deleted"].includes(this.#group(turn.groupId)?.status)) {
+        this.#cancelTurn(turn, turn.abortReason ?? "GROUP_DELETED");
+        return null;
+      }
       Object.assign(turn, { state: "queued", fence: null, startedAt: null, inputThroughSeq: null, floor: false });
       this.#putTurn(turn);
       const round = this.#round(turn.discussionId);

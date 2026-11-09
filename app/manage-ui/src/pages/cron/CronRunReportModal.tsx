@@ -8,6 +8,7 @@ import Modal from "../../components/Modal";
 import AgentAvatar from "../../components/AgentAvatar";
 import { fmtMs } from "../usage/charts";
 import { formatCronTime } from "./cronPresets";
+import ManagedRunFiles from "../agents/ManagedRunFiles";
 import styles from "./CronRunReportModal.module.css";
 
 // 图标与导航图标同一语言：1.2 描边、圆头圆角，32 盒子里约 14px 的字形。
@@ -42,6 +43,8 @@ export default function CronRunReportModal({
   title,
   failed,
   agentId,
+  backendId,
+  runId,
   agentName,
   startedAt,
   durationMs,
@@ -58,6 +61,8 @@ export default function CronRunReportModal({
   title: ReactNode;
   failed: boolean;
   agentId?: string;
+  backendId?: string;
+  runId?: string;
   agentName?: string;
   startedAt?: number | null;
   durationMs?: number;
@@ -118,6 +123,7 @@ export default function CronRunReportModal({
       <section className={styles.card}>
         {bodyLabel && <h4 className={styles.cardLabel}>{bodyLabel}</h4>}
         {children}
+        {open && backendId && agentId && runId && <ManagedRunFiles backend={backendId} agentId={agentId} runId={runId} />}
       </section>
     </Modal>
   );

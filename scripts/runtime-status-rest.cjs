@@ -32,7 +32,7 @@ async function run() {
     backend.setDisabledBackendsProvider(() => ["pi"]);
     server = await startStaticServer(0, { registry, homeDir: home, userDataRoot: path.join(home, "data"),
       configStore: createConfigStore(path.join(home, "config.json")) });
-    const read = async () => (await (await fetch(`${server.url}/__api/runtime-status`)).json()).runtimes;
+    const read = async (query = "", options) => (await (await fetch(`${server.url}/__api/runtime-status${query}`, options)).json()).runtimes;
     const rows = await read();
     assert.equal(rows.length, 7);
     assert.ok(rows.every(row => row.backendId === "shoggoth"));
@@ -63,7 +63,41 @@ async function run() {
     assert.deepEqual(backend._statusResult().info.readyAgentIds, ["shoggoth-default"]);
     assert.ok(refreshed.every(row => row.serviceConnected === false));
     assert.equal((await fetch(`${server.url}/__api/runtime-status`, { method: "POST" })).status, 405);
-    console.log("Runtime status REST passed: seven runtimes, one facade, disabled/release/missing/offline, refreshed detection, no credentials or runtime calls.");
+
+    installed = true;
+    const calls = [];
+    const probeStarted = Promise.withResolvers();
+    const releaseProbe = Promise.withResolvers();
+    backend.getStatus = async () => { calls.push("health"); return { connected: true }; };
+    backend.listOAuthProviders = async () => {
+      calls.push("accounts");
+      probeStarted.resolve();
+      await releaseProbe.promise;
+      return { providers: [{ id: NATIVE_CODEX_RUNTIME_ACCOUNT_ID, status: { readiness: "ready" } }] };
+    };
+    backend._ensureBuiltinAgents = async () => { calls.push("builtin-agents"); return null; };
+    backend._refreshExtensionRuntimeStatuses = async () => {
+      calls.push("extensions");
+      return [{ runtime: "ext-fixture", runtimeAccountId: "fixture-extension", enabled: true, availability: "available" }];
+    };
+    const full = read("", { signal: AbortSignal.timeout(5_000) });
+    try {
+      await Promise.race([probeStarted.promise, full.then(() => assert.fail("Settings must run the readiness probe"))]);
+      const choices = await read("?view=agent-create", { signal: AbortSignal.timeout(2_000) });
+      assert.deepEqual(calls, ["health", "accounts"], "creating must not join the probes, read the Service or provision Agents");
+      assert.equal(choices.length, 7);
+      assert.equal(choices.find(row => row.runtime === "codex").installation, "available");
+      assert.equal(choices.find(row => row.runtime === "codex").readiness, "unverified");
+      assert.equal(choices.find(row => row.runtime === "pi").enabled, false);
+    } finally {
+      releaseProbe.resolve();
+      await full;
+    }
+    const detailed = await full;
+    assert.deepEqual(calls, ["health", "accounts", "builtin-agents", "extensions"]);
+    assert.equal(detailed.find(row => row.runtime === "codex").readiness, "ready");
+    assert.equal(detailed.find(row => row.runtime === "ext-fixture").installation, "available");
+    console.log("Runtime status REST passed: inventory, release/connection filtering, fresh detection, and creation while Settings probes are pending.");
   } finally { await server?.close(); fs.rmSync(home, { recursive: true, force: true }); }
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

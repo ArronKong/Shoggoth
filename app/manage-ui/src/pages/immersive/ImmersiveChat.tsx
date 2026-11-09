@@ -81,6 +81,7 @@ export interface ImmersiveMessage {
   pinned?: boolean;
   onDelete?: () => void;
   onCtx?: (e: ReactMouseEvent<HTMLDivElement>) => void;
+  onAttachmentContextMenu?: (e: ReactMouseEvent, kind: "image" | "file", index: number) => void;
 }
 
 // 沉浸模式：fixed 覆盖层，盖在普通聊天 `.chat-shell` 之上。底下 ChatPage 原样保活
@@ -153,6 +154,7 @@ export interface ImmersiveBundle {
   attachments: { id: string; dataUrl: string; name: string; kind?: string }[];
   removeAttachment: (id: string) => void;
   quoteText: string | null;
+  quoteImages?: ReactNode;
   clearQuote: () => void;
   // 左上角身份 + 会话切换
   sessionTitle: string;
@@ -187,7 +189,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
-    attachments, removeAttachment, quoteText, clearQuote,
+    attachments, removeAttachment, quoteText, quoteImages, clearQuote,
     sessionTitle, sessionMeta, liveStatusKind, recoveryNotice, statusNotices, activeAgentId, activeBackendId, avatarVersion, sessions: allSessions, openSession,
     onRefresh, sessionLabel, onRenameSubmit, onDelete,
     openLightbox, revealAttachmentFile, lightboxOpen, onRespondPrompt,
@@ -827,18 +829,21 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             m.images.length > 0 || files.length > 0 ? (
               <div className={styles.attRow}>
                 {m.images.map((src, i) => (
-                  <img key={`i${i}`} className={styles.attThumb} src={src} alt="" onClick={() => openLightbox(src)} />
+                  <img key={`i${i}`} className={styles.attThumb} src={src} alt="" onClick={() => openLightbox(src)}
+                    onContextMenu={event => m.onAttachmentContextMenu?.(event, "image", i)} />
                 ))}
                 {files.map((f, i) =>
                   // 视频（带 src）= 可播放预览窗，点击进灯箱；其余 = 文件 chip（与普通模式同规则）
                   f.kind === "video" && f.src ? (
-                    <span key={`f${i}`} className={styles.attVideo} title={f.name} onClick={() => openLightbox(f.src as string, "video")}>
+                    <span key={`f${i}`} className={styles.attVideo} title={f.name} onClick={() => openLightbox(f.src as string, "video")}
+                      onContextMenu={event => m.onAttachmentContextMenu?.(event, "file", i)}>
                       <video className={styles.attThumb} src={f.src} preload="metadata" muted playsInline />
                       <span className={styles.attPlay}>▶</span>
                     </span>
                   ) : (
                     <ChatFileButton key={`f${i}`} name={f.name}
                       title={`${t("chat.artifactsRevealInFolder")} · ${f.name}`}
+                      onContextMenu={event => m.onAttachmentContextMenu?.(event, "file", i)}
                       onClick={() => revealAttachmentFile?.(f)} disabled={!revealAttachmentFile} />
                   ),
                 )}
@@ -982,6 +987,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         {quoteText != null && (
           <div className={styles.quoteBar}>
             <IconQuote className={`chat-quote-icon ${styles.quoteIco}`} />
+            {quoteImages}
             {/* title = 悬停核对将随消息发出的引用文本（显示层限长 300/600，payload 全文不受影响） */}
             <span
               className={styles.quoteText}

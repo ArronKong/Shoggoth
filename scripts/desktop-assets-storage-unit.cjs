@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -102,6 +103,16 @@ async function bytes(url, options) {
   const fresh = await startStaticServer(0, { homeDir: freshHome });
   const isolated = await startStaticServer(0, { homeDir: isolatedHome });
   try {
+    const library = `${fresh.url}/avatar/library/`;
+    const { presets } = await (await fetch(library)).json();
+    assert.equal(presets.length, 149);
+    assert.equal(new Set(presets).size, presets.length, "the catalog deduplicates identical JPEGs");
+    const preview = await bytes(library + presets[0]);
+    assert.equal(preview.response.headers.get("content-type"), "image/jpeg");
+    assert.equal(createHash("sha256").update(preview.body).digest("hex"), presets[0]);
+    assert.equal((await fetch(library + "%2e%2e%2f..%2fpackage.json")).status, 404);
+    assert.equal((await fetch(library + presets[0], { method: "PUT", body: png })).status, 405);
+    assert.equal(fs.existsSync(freshHome), false, "browsing the gallery does not touch avatar storage");
     assert.equal((await fetch(`${fresh.url}/avatar/main`, { method: "PUT", body: png })).status, 200);
     assert.deepEqual(fs.readFileSync(resolveDesktopAssetPaths({ homeDir: freshHome }).avatarDir + "/main.png"), png);
     assert.equal(fs.existsSync(path.join(freshHome, ".openclaw")), false);

@@ -8,6 +8,7 @@ import { NavigationGuardProvider } from "../../app/manage-ui/src/lib/navigation-
 import i18n, { applyConfiguredLocale } from "../../app/manage-ui/src/i18n";
 import { toSanitizedMarkdownHtml } from "../../app/manage-ui/src/lib/markdown";
 import { FALLBACK_BACKEND_DESCRIPTORS, useEnabledBackends } from "../../app/manage-ui/src/lib/backends";
+import { runPageRefresh } from "../../app/manage-ui/src/lib/page-refresh";
 import { installModelAccountsFixture, ModelsSettingsPreview, runModelAccountsFixture } from "./model-accounts";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
@@ -65,6 +66,17 @@ state.fixtureRequests = [];
 state.activeWrites = 0;
 state.maxActiveWrites = 0;
 const readyAt = new Map<string, number>();
+let statusReads = 0;
+let statusGate: Promise<void> | undefined;
+let blockVersionReads = false;
+let failStatusReads = false;
+let disconnectedFixtureBackend: string | undefined;
+function holdConnectionStatus() {
+  let release!: () => void;
+  statusGate = new Promise<void>((resolve) => { release = resolve; });
+  return () => { statusGate = undefined; release(); };
+}
+const releaseInitialStatus = connections && !accounts ? holdConnectionStatus() : undefined;
 window.addEventListener("openclaw:config-changed", () => state.fixtureConfigEvents++);
 window.addEventListener("error", (event) => { state.fixtureError = event.error?.stack || event.message; });
 window.addEventListener("unhandledrejection", (event) => { state.fixtureError = String(event.reason?.stack || event.reason); });
@@ -101,12 +113,19 @@ state.fetch = async (input: unknown, init?: RequestInit) => {
   } else if (connections && url.pathname === "/__api/backends") {
     payload = { backends: FALLBACK_BACKEND_DESCRIPTORS };
   } else if (connections && url.pathname === "/__api/status") {
+    statusReads++;
+    await statusGate;
+    if (failStatusReads) return new Response("{}", { status: 503 });
     payload = { backends: FALLBACK_BACKEND_DESCRIPTORS.map((backend) => ({
       id: backend.id, name: backend.name,
-      connected: !config.disabledBackends.includes(backend.id) && Date.now() >= (readyAt.get(backend.id) || 0),
+      connected: backend.id !== disconnectedFixtureBackend && !config.disabledBackends.includes(backend.id)
+        && Date.now() >= (readyAt.get(backend.id) || 0),
       disabled: config.disabledBackends.includes(backend.id),
       info: { connectionMode: backend.connectionMode, agents: 1 },
     })) };
+  } else if (connections && !accounts && url.pathname === "/__api/versions") {
+    if (blockVersionReads) await statusGate;
+    payload = { versions: FALLBACK_BACKEND_DESCRIPTORS.map(({ id, name }) => ({ id, name, current: "1.0.0" })) };
   } else if (connections && url.pathname === "/__api/shoggoth/status") {
     payload = { service: { healthy: true, serviceVersion: "0.8.151",
       domainAvailability: { kanban: true, cron: true }, pendingCommandsLocked: false,
@@ -202,11 +221,12 @@ state.checkLocale = async (locale: string, title: string, configuredLocale = loc
   await wait(() => document.querySelector("h1")?.textContent === title, `visible ${locale} translation`);
   check(!unloadBlocked(), "automatic preferences must not require a discard confirmation");
   check(i18n.language === locale && document.documentElement.lang === locale, "active locale and html lang must agree");
+  check(document.title === (locale === "en" ? "Shoggoth Dashboard" : "管理 · Shoggoth"), "window title must follow the interface language");
   check(document.querySelector("#persistent-label")?.textContent === title, "already-mounted components must translate");
   check(document.querySelector("#persistent-markdown .code-block-copy__idle")?.textContent === (locale === "en" ? "Copy" : "复制"), "cached Markdown controls must translate");
   const notificationText = document.querySelector("#settings-notif")?.textContent || "";
-  check(notificationText.includes(locale === "en" ? "Task and inspiration notifications" : "任务动态"), "merged notification label must translate");
-  check(notificationText.includes(locale === "en" ? "Get notified when a task or inspiration changes status." : "定时、任务或灵感有变化时提醒"), "merged notification description must translate");
+  check(notificationText.includes(locale === "en" ? "Task activity" : "任务动态"), "merged notification label must translate");
+  check(notificationText.includes(locale === "en" ? "Get notified about scheduled runs, task updates, and Spark Notes activity." : "定时、任务或灵感有变化时提醒"), "merged notification description must translate");
   check(!notificationText.includes(locale === "en" ? "Scheduled job runs" : "定时任务运行"), "scheduled jobs must not have a separate switch");
   check(!document.querySelector("#settings-notif .settings-notification-footer button"), "test notification button must stay absent");
   check(!document.body.textContent?.includes(locale === "en" ? "Change this shortcut in the Shoggoth desktop app settings." : "请在 Shoggoth 桌面 App 的设置中更改快捷键。"), "desktop-only shortcut guidance must stay absent");
@@ -338,7 +358,58 @@ state.runFixture = async () => {
 };
 
 state.runConnectionsFixture = async () => {
-  await wait(() => state.fixtureReady() && document.querySelectorAll(".settings-backend").length === FALLBACK_BACKEND_DESCRIPTORS.length, "all connections ready");
+  const cards = () => [...document.querySelectorAll<HTMLElement>("#settings-conn article[data-backend]")];
+  const count = () => document.querySelector("#settings-conn .settings-count")?.textContent;
+  const loadError = () => document.querySelector("#settings-conn .ui-hint[role=status]");
+  const position = () => JSON.stringify(cards().map((card) => {
+    const { x, y, width, height } = card.getBoundingClientRect();
+    return { x, y, width, height };
+  }));
+  const checkOrder = () => check(cards().map((card) => card.dataset.backend).join(",") === "shoggoth,hermes,openclaw",
+    "connections must appear in Shoggoth, Hermes, OpenClaw order");
+  await wait(() => state.fixtureReady() && statusReads > 0 && cards().length === 3, "connection slots during the first read");
+  checkOrder();
+  check(!count() && !loadError(), "a pending read must not show an empty count or failure");
+  check(cards().every((card) => card.querySelector(".settings-health")?.textContent === "加载中…"), "cold status must be pending");
+  check(!document.getElementById("settings-debug"), "UI Polish must be hidden in Settings");
+  await wait(() => document.querySelectorAll("#settings-conn .settings-backend-version").length === 3, "initial versions ready");
+  const initialPosition = position();
+  const initialCards = cards();
+  releaseInitialStatus!();
+  await wait(() => count() === "已连接 3 / 3", "all connections ready");
+  checkOrder();
+  check(position() === initialPosition && cards().every((card, index) => card === initialCards[index]),
+    "the first status response must update the existing cards in place");
+
+  const beforeReopen = statusReads;
+  const releaseStatus = holdConnectionStatus();
+  blockVersionReads = true;
+  fixtureRoot.render(<div id="left-settings" />);
+  await wait(() => document.getElementById("left-settings"), "left settings");
+  renderSettings();
+  await wait(() => statusReads > beforeReopen && cards().length === 3, "reopened settings during background refresh");
+  checkOrder();
+  check(count() === "已连接 3 / 3" && !loadError() && position() === initialPosition,
+    "a background read must preserve the previously visible cards and count");
+  check(cards().every((card) => card.querySelector(".settings-backend-version")?.textContent === "v1.0.0"),
+    "previous versions must remain visible while refreshing");
+  check(!document.querySelector('#settings-conn button:not([data-manage]):enabled'),
+    "connection changes must wait for a current status read");
+
+  failStatusReads = true;
+  blockVersionReads = false;
+  releaseStatus();
+  await wait(loadError, "actual status failure");
+  checkOrder();
+  check(!count() && document.querySelector('[data-manage="openclaw"]:enabled'),
+    "a failed read keeps the editor available without reporting a stale count");
+  failStatusReads = false;
+  disconnectedFixtureBackend = "hermes";
+  await runPageRefresh("/settings");
+  await wait(() => count() === "已连接 2 / 3" && !loadError(), "fresh connection status after retry");
+  disconnectedFixtureBackend = undefined;
+  await runPageRefresh("/settings");
+  await wait(() => count() === "已连接 3 / 3", "all connection statuses restored");
   check(!document.querySelector('.settings-page [role="tablist"], .settings-page [role="tabpanel"]'), "settings must not require category tabs");
   await wait(() => document.querySelector("#settings-shoggoth.settings-service-hero--ready"), "shared service card ready");
   check(!document.getElementById("settings-local-runtimes"), "local tools must stay inside their dialog");
@@ -417,5 +488,5 @@ state.runConnectionsFixture = async () => {
   editInput(draft, "ws://127.0.0.1:9");
   await wait(() => config.gatewayUrl === draft.value, "corrected endpoint auto-saved");
   check(row("openclaw").textContent!.includes("未连接"), "endpoint save must keep the saved connection switch");
-  return { disabledBackends: config.disabledBackends, writes: state.fixtureWrites, checks: "in-place disconnect / delayed reconnect / incomplete endpoint / automatic correction / stacked sections / expansion / scroll / failure / mounted selectors" };
+  return { disabledBackends: config.disabledBackends, writes: state.fixtureWrites, checks: "hidden UI Polish / connection order / stable first paint and reopen / failed read and recovery / in-place disconnect / delayed reconnect / incomplete endpoint / automatic correction / stacked sections / expansion / scroll / failure / mounted selectors" };
 };

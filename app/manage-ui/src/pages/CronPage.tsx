@@ -3,26 +3,23 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { PageHead } from "../components/PageHead";
 import type { TFunction } from "i18next";
-import type { CronDelivery, CronRun, UnifiedAgent, UnifiedCronJob } from "../types";
+import type { CronDelivery, UnifiedAgent, UnifiedCronJob } from "../types";
 import {
   createCronJob,
   deleteCronJob,
   getCronJobDetail,
   getCronLatestDelivery,
-  getCronRuns, getCronRunsPage, runCodexAutomation,
   listAgents,
   listCronJobs,
   runCronJob,
   setCronEnabled,
   updateCronJob,
   type CronListFilters,
-  type CronRunsFilters,
 } from "../api/client";
-import BackendBadge from "../components/BackendBadge";
 import BackendTabIcon from "../components/BackendTabIcon";
 import PillTabs from "../components/PillTabs";
 import SearchCapsule from "../components/SearchCapsule";
-import Modal, { DetailRow, ModalSection } from "../components/Modal";
+import Modal from "../components/Modal";
 import { Switch } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
 import { toSanitizedMarkdownHtml } from "../lib/markdown";
@@ -31,7 +28,7 @@ import { usePageCache } from "../lib/usePageCache";
 import { isVisibleCronJob } from "../lib/cronVisibility";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { useStickyState } from "../lib/useStickyState";
-import { createAsyncRequestController, createCronSelectionController, type AsyncRequestTicket } from "../lib/lowUiLifecycle";
+import { createAsyncRequestController, type AsyncRequestTicket } from "../lib/lowUiLifecycle";
 import { canonicalCronSessionKey, firstNonBlankText, writeCronChatHandoff } from "../lib/cronChatHandoff";
 import CronCalendar, {
   calendarRangeTitle,
@@ -41,14 +38,13 @@ import CronCalendar, {
 } from "./CronCalendar";
 import CronFiltersBar from "./cron/CronFiltersBar";
 import CodexCronForm, { codexDraftFromJob, codexPatchFromDraft, emptyCodexCronDraft } from "./cron/CodexCronForm";
-import CodexCronRunResult from "./cron/CodexCronRunResult";
+import { CronAssignedAgent } from "./cron/CronAgentPicker";
 import CronCreateForm from "./cron/CronCreateForm";
 import { cronAgentAvailable, cronCreateInputFromDraft, emptyCronCreateDraft } from "./cron/cronCreateDraft";
 import { CRON_SCHEDULE_TYPES } from "./cron/CronFormLayout";
-import { IconPlus } from "./cron/cronIcons";
-import CronRunHistoryPanel from "./cron/CronRunHistoryPanel";
+import { IconCalendarChevron, IconPlus } from "./cron/cronIcons";
 import CronRunReportModal, { ReportNote, runExecutionFailed } from "./cron/CronRunReportModal";
-import { formatCronTime, scheduleText } from "./cron/cronPresets";
+import { scheduleText } from "./cron/cronPresets";
 import HermesCronForm, {
   emptyHermesDraft,
   hermesDraftFromJob,
@@ -71,9 +67,9 @@ import NativeCronForm, {
   type NativeCronDraft,
 } from "./cron/ShoggothCronForm";
 
-type ModalMode = "view" | "create"
+type ModalMode = "create"
   | "edit-openclaw" | "edit-hermes" | "edit-native" | "edit-codex" | null;
-type CronSaveOperation = { ticket: AsyncRequestTicket; scope: string };
+type CronFormOperation = { action: "save" | "delete"; ticket: AsyncRequestTicket; scope: string };
 
 // 工具栏只暴露 agent/状态/计划三个筛选，排序保持固定的「下次运行升序」。
 const DEFAULT_FILTERS: CronListFilters = {
@@ -83,40 +79,12 @@ const DEFAULT_FILTERS: CronListFilters = {
   sortDir: "asc",
 };
 
-const DEFAULT_RUN_FILTERS: CronRunsFilters = {
-  sortDir: "desc",
-  limit: 25,
-};
-
 // 状态空值使用更明确的中文文案，减少列表里裸露的 undefined。
 function stateLabel(job: UnifiedCronJob, t: TFunction): string {
   if (job.connectorMigrationRequired) return t("connectors.cronMigrationRequired");
   if (!job.enabled) return t("cron.disabled");
   if (job.stateLabel && !["ok", "error", "skipped", "scheduled", "disabled"].includes(job.stateLabel)) return job.stateLabel;
   return t("cron.enabled");
-}
-
-// 能力标签来自后端归一化，也兼容 rawCapabilities 的旧字段。
-function capabilityTags(job: UnifiedCronJob): string[] {
-  const tags = job.backendDetails?.capabilityTags || job.rawCapabilities || [];
-  return Array.from(new Set(tags.filter(Boolean)));
-}
-
-// 投递信息优先显示高级 delivery，再回落到老字段 deliver。
-function deliveryText(job: UnifiedCronJob): string {
-  if (job.delivery?.mode) return job.delivery.mode;
-  if (job.deliver) return job.deliver;
-  return "none";
-}
-
-// 详情里展示结构化字段时限制长度，避免抽屉被大对象撑爆。
-function jsonPreview(value: unknown): string {
-  if (value === undefined || value === null) return "—";
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
 }
 
 // 页头统计基于当前服务端结果（含筛选），不额外猜测后端全量数据。
@@ -176,11 +144,6 @@ export default function CronPage() {
 
   const [mode, setMode] = useState<ModalMode>(null);
   const [selected, setSelected] = useState<UnifiedCronJob | null>(null);
-  const selectionControllerRef = useRef<ReturnType<typeof createCronSelectionController<UnifiedCronJob, CronRunsFilters>> | null>(null);
-  if (!selectionControllerRef.current) {
-    selectionControllerRef.current = createCronSelectionController<UnifiedCronJob, CronRunsFilters>(DEFAULT_RUN_FILTERS);
-  }
-  const selectionController = selectionControllerRef.current;
   const detailIntentControllerRef = useRef<ReturnType<typeof createAsyncRequestController> | null>(null);
   if (!detailIntentControllerRef.current) {
     detailIntentControllerRef.current = createAsyncRequestController();
@@ -198,20 +161,15 @@ export default function CronPage() {
   const [agents, setAgents] = useState<Record<string, UnifiedAgent[]>>({});
   const [agentsLoading, setAgentsLoading] = useState(false);
   const [failedAgentBackends, setFailedAgentBackends] = useState<string[]>([]);
-  const [saveOperation, setSaveOperation] = useState<CronSaveOperation | null>(null);
-  const saveOperationRef = useRef<CronSaveOperation | null>(null);
-  const isCurrentSave = (operation: CronSaveOperation) =>
+  const [formOperation, setFormOperation] = useState<CronFormOperation | null>(null);
+  const formOperationRef = useRef<CronFormOperation | null>(null);
+  const isCurrentFormOperation = (operation: CronFormOperation) =>
     pageScopeRef.current === operation.scope
     && detailIntentController.isCurrent(operation.ticket, operation.ticket.context);
-  const saving = Boolean(saveOperation && isCurrentSave(saveOperation));
+  const isFormBusy = () => Boolean(formOperationRef.current && isCurrentFormOperation(formOperationRef.current));
+  const formBusy = Boolean(formOperation && isCurrentFormOperation(formOperation));
+  const saving = formBusy && formOperation?.action === "save";
   const [codexDraft, setCodexDraft] = useState(emptyCodexCronDraft);
-  const [codexResultRun, setCodexResultRun] = useState<CronRun | null>(null);
-  const [runsError, setRunsError] = useState<string | null>(null);
-  const [runsNextOffset, setRunsNextOffset] = useState<number | null>(null);
-  const codexRunIntents = useRef(new Map<string, { revision: string; operationId: string }>());
-  const [runs, setRuns] = useState<CronRun[] | null>(null);
-  const [runsLoading, setRunsLoading] = useState(false);
-  const [runsFilters, setRunsFilters] = useState<CronRunsFilters>(DEFAULT_RUN_FILTERS);
   const [deliveryJob, setDeliveryJob] = useState<UnifiedCronJob | null>(null);
   const [delivery, setDelivery] = useState<CronDelivery | null>(null);
 
@@ -219,7 +177,6 @@ export default function CronPage() {
   const confirm = useConfirm();
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage || i18n.language;
-  const fmtTime = (value?: number | null) => formatCronTime(value, locale);
   const backendCatalog = useBackendCatalog("cron");
   const enabledBackends = useEnabledBackends("cron");
   const backendDescriptors = useMemo(
@@ -234,14 +191,11 @@ export default function CronPage() {
   }, [backendDescriptors]);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  // 仅由 Cron 桌面通知写入；普通访问不会携带该参数。
-  const notificationJobId = searchParams.get("job");
-  const notificationBackendId = searchParams.get("backend");
+  const linkedJobId = searchParams.get("job");
+  const linkedBackendId = searchParams.get("backend");
+  const linkedLatestRun = searchParams.get("run") === "latest" && searchParams.get("edit") !== "1";
   const notificationRequest = searchParams.get("notification");
-  // Dashboard 运行结果弹窗的编辑图标带 edit=1：直接进编辑表单，与本页弹窗一致。
-  const notificationEdit = searchParams.get("edit") === "1";
-  // 打开后保留消费标记，用户手动关闭详情时不应因同一深链再次自动弹出。
-  const openedNotificationJobId = useRef<string | null>(null);
+  const openedJobLink = useRef<string | null>(null);
   const stats = useMemo(() => countJobs(jobs), [jobs]);
 
   // 全场下一个要触发的任务：nextRunAt 已在未来且最小的那条（停用的不排队）。
@@ -283,15 +237,11 @@ export default function CronPage() {
     void loadAgents();
   }, [loadAgents]);
 
-  const filterAgents = useMemo(
-    () => enabledBackends.flatMap((backendId) => agents[backendId] || []),
-    [agents, enabledBackends],
+  const cronBackends = useMemo(
+    () => backendCatalog.filter((descriptor) => enabledBackends.includes(descriptor.id)),
+    [backendCatalog, enabledBackends],
   );
 
-  // 每次拉取领一个序号；只有最新一次的响应可以写状态。OpenClaw(本地 WS) 与
-  // Hermes(HTTP，可能是远端) 延迟差很大，先点开的慢任务如果后返回，会把已经渲染好的
-  // 另一个任务的运行历史覆盖掉。
-  const runsReqRef = useRef(0);
   const deliveryReqRef = useRef(0);
   useEffect(() => {
     detailIntentController.mount();
@@ -299,55 +249,12 @@ export default function CronPage() {
     return () => {
       detailIntentController.unmount();
       agentsRequestController.unmount();
-      runsReqRef.current += 1;
       deliveryReqRef.current += 1;
     };
   }, [agentsRequestController, detailIntentController]);
 
-  const authoritativeJob = useCallback(async (
-    job: UnifiedCronJob,
-    ticket: ReturnType<typeof detailIntentController.begin>,
-  ): Promise<UnifiedCronJob | null> => {
-    if (!isVisibleCronJob(job)) return null;
-    if (cronKindFor(job.backendId) !== "native") {
-      return detailIntentController.isCurrent(ticket, ticket.context) ? job : null;
-    }
-    try {
-      const detail = await getCronJobDetail(job.id);
-      return detailIntentController.isCurrent(ticket, ticket.context) ? detail : null;
-    } catch (error) {
-      if (detailIntentController.isCurrent(ticket, ticket.context)) {
-        toast.error(error instanceof Error ? error.message : String(error));
-      }
-      return null;
-    }
-  }, [cronKindFor, detailIntentController, toast]);
-
-  const loadRunsFor = useCallback(async (job: UnifiedCronJob, nextFilters: CronRunsFilters) => {
-    const seq = ++runsReqRef.current;
-    setRunsLoading(true);
-    try {
-      const page = job.origin === "codex-desktop" ? await getCronRunsPage(job.id, nextFilters)
-        : { runs: await getCronRuns(job.id, nextFilters), nextOffset: null, sourceError: null };
-      if (seq !== runsReqRef.current) return;
-      setRuns(page.runs); setRunsNextOffset(page.nextOffset);
-      setRunsError(page.sourceError ? t(`codexAutomation.errors.${page.sourceError}`, { defaultValue: page.sourceError }) : null);
-    } catch (error) {
-      if (seq !== runsReqRef.current) return;
-      setRuns(null); setRunsNextOffset(null); setRunsError(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (seq === runsReqRef.current) setRunsLoading(false);
-    }
-  }, [t]);
-
-  const refreshRuns = useCallback(async () => {
-    const current = selectionController.current();
-    if (!current) return;
-    await loadRunsFor(current.job, current.filters);
-  }, [loadRunsFor, selectionController]);
-
   // 通用任务动作封装 busy/error/toast，并在动作后刷新当前列表。
-  const act = async (id: string, fn: () => Promise<void>, reloadRuns = false) => {
+  const act = async (id: string, fn: () => Promise<void>) => {
     if (busyIdsRef.current.has(id)) return;
     busyIdsRef.current.add(id);
     setBusyIds(new Set(busyIdsRef.current));
@@ -355,10 +262,6 @@ export default function CronPage() {
     try {
       await fn();
       await refresh();
-      if (reloadRuns) {
-        const current = selectionController.currentForAction(id);
-        if (current) await loadRunsFor(current.job, current.filters);
-      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
@@ -369,7 +272,7 @@ export default function CronPage() {
     }
   };
 
-  const runCronFromUi = async (job: UnifiedCronJob, reloadRuns = false) => {
+  const runCronFromUi = async (job: UnifiedCronJob) => {
     if (job.actions?.run === false) return;
     if (runWillResumePaused(job)) {
       const okToRun = await confirm({
@@ -379,91 +282,99 @@ export default function CronPage() {
       });
       if (!okToRun) return;
     }
-    if (job.origin === "codex-desktop" && job.revision) {
-      const viewIntent = `run:${job.backendId}:${job.id}`;
-      const viewTicket = detailIntentController.begin("detail", viewIntent);
-      await act(job.id, async () => {
-        const intent = codexRunIntents.current.get(job.id) || { revision: job.revision!, operationId: crypto.randomUUID() };
-        codexRunIntents.current.set(job.id, intent);
-        const receipt = await runCodexAutomation(job.id, intent.revision, intent.operationId);
-        codexRunIntents.current.delete(job.id);
-        if (!detailIntentController.isCurrent(viewTicket, viewIntent)) return;
-        if (await openView(job)) setCodexResultRun({ runId: receipt.runId, executionOrigin: "shoggoth", executionStatus: receipt.status });
-      }, true);
-    } else await act(job.id, () => runCronJob(job.id, "force"), reloadRuns);
+    await act(job.id, () => runCronJob(job.id, "force"));
   };
 
-  // 统一复用列表行和通知深链的详情打开行为，确保运行历史也会同步加载。
-  const openView = useCallback(async (job: UnifiedCronJob) => {
-    const intent = `view:${job.backendId}:${job.id}`;
-    const ticket = detailIntentController.begin("detail", intent);
-    const target = await authoritativeJob(job, ticket);
-    if (!target || !detailIntentController.isCurrent(ticket, intent)) return;
-    selectionController.select(target);
-    setSelected(target);
-    setCodexResultRun(null);
-    setMode("view");
-    setRuns(null);
-    selectionController.setFilters(DEFAULT_RUN_FILTERS);
-    setRunsFilters(DEFAULT_RUN_FILTERS);
-    await loadRunsFor(target, DEFAULT_RUN_FILTERS);
-    if (!detailIntentController.isCurrent(ticket, intent)) return;
-    return target;
-  }, [authoritativeJob, detailIntentController, loadRunsFor, selectionController]);
+  const openEdit = useCallback(async (job: UnifiedCronJob) => {
+    if (!isVisibleCronJob(job)) return;
+    const ticket = detailIntentController.begin("detail", `edit:${job.backendId}:${job.id}`);
+    const kind = cronKindFor(job.backendId);
+    try {
+      // Native list rows can carry only a prompt preview. Edit with the full definition.
+      const target = kind === "native" ? await getCronJobDetail(job.id) : job;
+      if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
+      if (!target || target.id !== job.id || target.backendId !== job.backendId || !isVisibleCronJob(target)) {
+        toast.info(t("notif.cronUnavailable"));
+        return;
+      }
+      if (target.actions?.edit === false) {
+        toast.info(t(target.actions.reason === "system-managed" ? "cron.systemManaged" : "cron.editUnavailable"));
+        return;
+      }
+      await ensureAgents();
+      if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
+      setDeliveryJob(null);
+      setDelivery(null);
+      setSelected(target);
+      if (target.origin === "codex-desktop") {
+        setCodexDraft(codexDraftFromJob(target));
+        setMode("edit-codex");
+      } else if (kind === "openclaw") {
+        setOpenClawDraft(openClawDraftFromJob(target));
+        setMode("edit-openclaw");
+      } else if (kind === "hermes") {
+        setHermesDraft(hermesDraftFromJob(target));
+        setMode("edit-hermes");
+      } else {
+        setNativeDraft(nativeCronDraftFromJob(target));
+        setMode("edit-native");
+      }
+    } catch (error) {
+      if (detailIntentController.isCurrent(ticket, ticket.context)) {
+        toast.error(error instanceof Error ? error.message : String(error));
+      }
+    }
+  }, [cronKindFor, detailIntentController, ensureAgents, t, toast]);
 
-  // 通知可定位当前筛选之外的任务；notification 区分同一任务的再次点击。
+  const openRunReport = useCallback(async (job: UnifiedCronJob, occurrenceMs?: number) => {
+    if (!isVisibleCronJob(job)) return;
+    const intent = `delivery:${job.backendId}:${job.id}:${occurrenceMs ?? "latest"}`;
+    const ticket = detailIntentController.begin("detail", intent);
+    const seq = ++deliveryReqRef.current;
+    setDeliveryJob(null);
+    setDelivery(null);
+    try {
+      const latest = await getCronLatestDelivery(job.id, occurrenceMs);
+      if (seq !== deliveryReqRef.current || !detailIntentController.isCurrent(ticket, intent)) return;
+      setMode(null);
+      setSelected(null);
+      setDelivery(latest);
+      setDeliveryJob(job);
+    } catch (error) {
+      if (seq !== deliveryReqRef.current || !detailIntentController.isCurrent(ticket, intent)) return;
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }, [detailIntentController, toast]);
+
+  // 通知和任务链接可定位当前筛选之外的任务。通知序号让同一任务能再次打开。
   useEffect(() => {
-    if (!notificationJobId || loading) return;
-    const identity = JSON.stringify([notificationBackendId, notificationJobId, notificationRequest]);
-    if (openedNotificationJobId.current === identity) return;
-    openedNotificationJobId.current = identity;
-    const notificationJob = jobs.find((job) =>
-      job.id === notificationJobId
-      && (!notificationBackendId || job.backendId === notificationBackendId));
-    if (notificationJob) {
-      void (notificationEdit ? openEdit(notificationJob) : openView(notificationJob));
+    if (!linkedJobId || loading) return;
+    const identity = JSON.stringify([linkedBackendId, linkedJobId, linkedLatestRun, notificationRequest]);
+    if (openedJobLink.current === identity) return;
+    openedJobLink.current = identity;
+    const matchesLink = (job: UnifiedCronJob) =>
+      job.id === linkedJobId && (!linkedBackendId || job.backendId === linkedBackendId);
+    const linkedJob = jobs.find(matchesLink);
+    if (linkedJob && !linkedLatestRun) {
+      void openEdit(linkedJob);
       return;
     }
-    const ticket = detailIntentController.begin("detail", `notification:${identity}`);
-    void listCronJobs(notificationBackendId ? { backend: notificationBackendId } : {}).then(allJobs => {
+    // A cached list row can predate the first run. Check the current task before choosing a report or editor.
+    const ticket = detailIntentController.begin("detail", `link:${identity}`);
+    void listCronJobs(linkedBackendId ? { backend: linkedBackendId } : {}).then(allJobs => {
       if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
-      const job = allJobs.find(item => isVisibleCronJob(item) && item.id === notificationJobId
-        && (!notificationBackendId || item.backendId === notificationBackendId));
-      if (job) void (notificationEdit ? openEdit(job) : openView(job));
-      else toast.info(t("notif.cronUnavailable"));
+      const job = allJobs.find(item => isVisibleCronJob(item) && matchesLink(item));
+      if (!job) {
+        toast.info(t("notif.cronUnavailable"));
+      } else if (linkedLatestRun && job.lastRunAt) {
+        void openRunReport(job);
+      } else {
+        void openEdit(job);
+      }
     }).catch(error => {
       if (detailIntentController.isCurrent(ticket, ticket.context)) toast.error(error instanceof Error ? error.message : String(error));
     });
-  }, [jobs, loading, notificationBackendId, notificationJobId, notificationRequest, openView, detailIntentController, t, toast]);
-
-  const openEdit = async (job: UnifiedCronJob) => {
-    const intent = `edit:${job.backendId}:${job.id}`;
-    const ticket = detailIntentController.begin("detail", intent);
-    const target = await authoritativeJob(job, ticket);
-    if (!target || !detailIntentController.isCurrent(ticket, intent)) return;
-    if (target.actions?.edit === false) {
-      await openView(target);
-      return;
-    }
-    await ensureAgents();
-    if (!detailIntentController.isCurrent(ticket, intent)) return;
-    selectionController.select(target);
-    setSelected(target);
-    const kind = cronKindFor(target.backendId);
-    setCodexResultRun(null);
-    if (target.origin === "codex-desktop") {
-      setCodexDraft(codexDraftFromJob(target)); setMode("edit-codex");
-    } else if (kind === "openclaw") {
-      setOpenClawDraft(openClawDraftFromJob(target));
-      setMode("edit-openclaw");
-    } else if (kind === "hermes") {
-      setHermesDraft(hermesDraftFromJob(target));
-      setMode("edit-hermes");
-    } else {
-      setNativeDraft(nativeCronDraftFromJob(target));
-      setMode("edit-native");
-    }
-  };
+  }, [jobs, loading, linkedBackendId, linkedJobId, linkedLatestRun, notificationRequest, openEdit, openRunReport, detailIntentController, t, toast]);
 
   // Calendar chip click: a PAST occurrence that has already run → show THAT
   // occurrence's delivered content (resolved server-side from occurrenceMs, so
@@ -479,26 +390,7 @@ export default function CronPage() {
       await openEdit(job);
       return;
     }
-    const intent = `delivery:${job.backendId}:${job.id}:${occurrenceMs ?? "latest"}`;
-    const detailTicket = detailIntentController.begin("detail", intent);
-    const seq = ++deliveryReqRef.current;
-    // 没有可复用的稳定摘要时不要先打开一行 loading 的矮弹窗；先关闭旧详情，
-    // 等正文完整就绪后再一次提交，保证首帧就是最终详情几何。
-    setDeliveryJob(null);
-    setDelivery(null);
-    try {
-      const latest = await getCronLatestDelivery(job.id, occurrenceMs);
-      if (seq !== deliveryReqRef.current) return;
-      if (!detailIntentController.isCurrent(detailTicket, intent)) return;
-      setDelivery(latest);
-      setDeliveryJob(job);
-    } catch (err) {
-      // 迟到的失败不能关掉用户当前正在看的那个弹窗。
-      if (seq !== deliveryReqRef.current) return;
-      if (!detailIntentController.isCurrent(detailTicket, intent)) return;
-      toast.error(err instanceof Error ? err.message : String(err));
-      setDeliveryJob(null);
-    }
+    await openRunReport(job, occurrenceMs);
   };
 
   const closeDelivery = () => {
@@ -523,7 +415,6 @@ export default function CronPage() {
 
   const openCreate = () => {
     detailIntentController.begin("detail", "create");
-    selectionController.clear();
     setSelected(null);
     setCreateDraft(emptyCronCreateDraft());
     setMode("create");
@@ -532,97 +423,100 @@ export default function CronPage() {
 
   const closeModal = () => {
     detailIntentController.invalidate();
-    runsReqRef.current += 1;
-    selectionController.clear();
     setMode(null);
     setSelected(null);
-    setRuns(null);
-    setCodexResultRun(null);
-    setRunsError(null);
-    setRunsLoading(false);
   };
-  const dismissForm = () => {
-    if (saveOperationRef.current && isCurrentSave(saveOperationRef.current)) return;
+  const dismissModal = () => {
+    if (isFormBusy()) return;
     closeModal();
   };
 
-  const saveForm = async () => {
-    if (!mode || mode === "view" || (saveOperationRef.current && isCurrentSave(saveOperationRef.current))) return;
-    const operation = {
-      ticket: detailIntentController.begin("detail", `save:${mode}:${selected?.backendId ?? ""}:${selected?.id ?? "new"}`),
+  const mutateForm = async (
+    action: CronFormOperation["action"],
+    target: string,
+    submit: (operation: CronFormOperation) => Promise<string | undefined>,
+  ) => {
+    if (isFormBusy()) return;
+    const operation: CronFormOperation = {
+      action,
+      ticket: detailIntentController.begin("detail", `${action}:${target}`),
       scope: pageScope,
     };
-    saveOperationRef.current = operation;
-    setSaveOperation(operation);
+    formOperationRef.current = operation;
+    setFormOperation(operation);
     try {
-      let successMessage = "";
+      const message = await submit(operation);
+      // A newer notification, filter, or unmount owns the UI now.
+      if (!message || !isCurrentFormOperation(operation)) return;
+      toast.success(message);
+      setFormOperation(null);
+      closeModal();
+      await refresh();
+    } catch (err) {
+      if (isCurrentFormOperation(operation)) toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (formOperationRef.current === operation) formOperationRef.current = null;
+      if (isCurrentFormOperation(operation)) setFormOperation(null);
+    }
+  };
+
+  const saveForm = async () => {
+    if (!mode) return;
+    await mutateForm("save", `${mode}:${selected?.backendId ?? ""}:${selected?.id ?? "new"}`, async () => {
       if (mode === "create") {
         if (!selectedCreateAgent) throw new Error(t("cronForm.nativeValidateAgent"));
         const kind = backendDescriptors.get(createDraft.backendId)?.surfaces.cron?.kind;
         if (!kind) throw new Error(t("cronForm.nativeValidateAgent"));
         await createCronJob(cronCreateInputFromDraft(createDraft, kind, t));
-        successMessage = t("cron.createdTask");
-      } else if (mode === "edit-openclaw" && selected) {
+        return t("cron.createdTask");
+      }
+      if (!selected) return;
+      if (mode === "edit-openclaw") {
         const validation = validateOpenClawDraft(openClawDraft);
         if (validation) throw new Error(t(validation));
         const input = openClawInputFromDraft(openClawDraft);
         requireName(input.name, t);
         await updateCronJob(selected.id, input);
-        successMessage = t("cron.savedOpenClaw");
-      } else if (mode === "edit-hermes" && selected) {
+        return t("cron.savedOpenClaw");
+      }
+      if (mode === "edit-hermes") {
         const validation = validateHermesDraft(hermesDraft);
         if (validation) throw new Error(validation);
         const input = hermesInputFromDraft(hermesDraft);
         requireName(input.name, t);
         await updateCronJob(selected.id, input);
-        successMessage = t("cron.savedHermes");
-      } else if (mode === "edit-codex" && selected) {
-        await updateCronJob(selected.id, codexPatchFromDraft(codexDraft, selected));
-        successMessage = t("codexAutomation.saved");
-      } else if (mode === "edit-native" && selected) {
-        const validation = validateNativeCronDraft(nativeDraft);
-        if (validation) throw new Error(t(validation));
-        const plan = nativeCronEditPlan(nativeDraft, selected);
-        await updateCronJob(selected.id, plan.patch);
-        if (plan.enabled !== null) await setCronEnabled(selected.id, plan.enabled);
-        successMessage = t("cron.savedNative", { backend: backendDescriptors.get(nativeDraft.backendId)?.name || nativeDraft.backendId });
+        return t("cron.savedHermes");
       }
-      // A newer notification/selection, filter scope, or page unmount owns the
-      // UI now. Finish the captured mutation but do not close or refresh its UI.
-      if (!isCurrentSave(operation)) return;
-      if (successMessage) toast.success(successMessage);
-      setSaveOperation(null);
-      closeModal();
-      await refresh();
-    } catch (err) {
-      if (isCurrentSave(operation)) toast.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (saveOperationRef.current === operation) saveOperationRef.current = null;
-      if (isCurrentSave(operation)) setSaveOperation(null);
-    }
+      if (mode === "edit-codex") {
+        await updateCronJob(selected.id, codexPatchFromDraft(codexDraft, selected));
+        return t("codexAutomation.saved");
+      }
+      const validation = validateNativeCronDraft(nativeDraft);
+      if (validation) throw new Error(t(validation));
+      const plan = nativeCronEditPlan(nativeDraft, selected);
+      await updateCronJob(selected.id, plan.patch);
+      if (plan.enabled !== null) await setCronEnabled(selected.id, plan.enabled);
+      return t("cron.savedNative", { backend: backendDescriptors.get(nativeDraft.backendId)?.name || nativeDraft.backendId });
+    });
   };
 
   const doDelete = async (job: UnifiedCronJob) => {
-    if (job.actions?.delete === false) return;
-    const okToDelete = await confirm({
-      title: t("cron.deleteTitle"),
-      message: t("cron.deleteConfirm", { name: job.name }),
-      confirmLabel: t("common.delete"),
-      danger: true,
-    });
-    if (!okToDelete) return;
-    try {
+    if (job.actions?.delete === false || busyIdsRef.current.has(job.id)) return;
+    await mutateForm("delete", `${job.backendId}:${job.id}`, async (operation) => {
+      const okToDelete = await confirm({
+        title: t("cron.deleteTitle"),
+        message: t("cron.deleteConfirm", { name: job.name }),
+        confirmLabel: t("common.delete"),
+        danger: true,
+        focusCancel: true,
+      });
+      if (!okToDelete || !isCurrentFormOperation(operation)) return;
       await deleteCronJob(job.id);
-      toast.success(t("cron.deleted"));
-      closeModal();
-      await refresh();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
-    }
+      return t("cron.deleted");
+    });
   };
 
-  const formOpen = mode === "create"
-    || mode === "edit-openclaw" || mode === "edit-hermes" || mode === "edit-native" || mode === "edit-codex";
+  const formOpen = mode !== null;
   const formTitle =
     mode === "create"
       ? t("cron.createTitle")
@@ -639,10 +533,15 @@ export default function CronPage() {
   // 筛选条连同搜索框一起卸载，焦点和后续按键全丢；只让内容区进加载态（同 TasksPage）。
   const showLoading = loading && jobs.length === 0;
 
-  const createBackends = backendCatalog.filter((descriptor) => enabledBackends.includes(descriptor.id));
-  const selectedCreateAgent = createBackends.some((descriptor) => descriptor.id === createDraft.backendId)
+  const selectedCreateAgent = cronBackends.some((descriptor) => descriptor.id === createDraft.backendId)
     ? agents[createDraft.backendId]?.find((agent) => agent.id === createDraft.agentId && cronAgentAvailable(agent))
     : undefined;
+  const assignedAgent = formOpen && selected && <CronAssignedAgent
+    agentId={selected.agentId}
+    agentName={agents[selected.backendId]?.find((agent) => agent.id === selected.agentId)?.name}
+    backendName={backendDescriptors.get(selected.backendId)?.name || selected.backendId}
+    noAgent={selected.noAgent}
+  />;
 
   return (
     <div className="cron-page management-page">
@@ -667,7 +566,7 @@ export default function CronPage() {
           ariaLabel={t("cron.viewToggle")}
         />
 
-        <CronFiltersBar filters={filters} agents={filterAgents} onChange={setFilters} />
+        <CronFiltersBar filters={filters} agents={agents} backends={cronBackends} onChange={setFilters} />
 
         <div className="cron-actions">
           <SearchCapsule
@@ -677,7 +576,7 @@ export default function CronPage() {
             ariaLabel={t("cronForm.filtersSearchPlaceholder")}
             collapsible
           />
-          {createBackends.length > 0 && (
+          {cronBackends.length > 0 && (
             <button
               className="btn-primary cron-new"
               onMouseDown={(event) => {
@@ -703,7 +602,7 @@ export default function CronPage() {
               onClick={() => setCalCursor(shiftCalendarCursor(calCursor, calMode, -1))}
               aria-label={t("cron.calPrev")}
             >
-              ‹
+              <IconCalendarChevron direction="left" />
             </button>
             <span className="cron-cal-title">{calendarRangeTitle(calCursor, calMode, t)}</span>
             <button
@@ -711,7 +610,7 @@ export default function CronPage() {
               onClick={() => setCalCursor(shiftCalendarCursor(calCursor, calMode, 1))}
               aria-label={t("cron.calNext")}
             >
-              ›
+              <IconCalendarChevron direction="right" />
             </button>
             <button
               className="cron-cal-today"
@@ -771,8 +670,10 @@ export default function CronPage() {
               <tbody>
                 {jobs.map((job) => {
                   const backendLabel = backendDescriptors.get(job.backendId)?.name || job.backendId;
+                  const canEdit = job.actions?.edit !== false;
                   return (
-                    <tr key={job.id} className={`clickable ${job.enabled ? "" : "row-disabled"}`} onClick={() => openView(job)}>
+                    <tr key={job.id} className={`${canEdit ? "clickable" : ""} ${job.enabled ? "" : "row-disabled"}`}
+                      onClick={canEdit ? () => void openEdit(job) : undefined}>
                       <td>
                         <div className="job-name">{job.name}{job.origin === "codex-desktop" && <span className="codex-origin">{t("codexAutomation.source")}</span>}</div>
                         {(job.description || job.prompt) && <div className="job-prompt">{job.description || job.prompt}</div>}
@@ -792,7 +693,7 @@ export default function CronPage() {
                         <button onClick={() => void runCronFromUi(job)} disabled={busyIds.has(job.id) || job.actions?.run === false}>
                           {t(runWillResumePaused(job) ? "cron.runAndEnable" : "cron.run")}
                         </button>
-                        <button onClick={() => openEdit(job)} disabled={job.actions?.edit === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>{t("common.edit")}</button>
+                        <button onClick={() => void openEdit(job)} disabled={!canEdit} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>{t("common.edit")}</button>
                         <button onClick={() => act(job.id, () => setCronEnabled(job.id, !job.enabled, job.revision))} disabled={busyIds.has(job.id) || job.actions?.toggle === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>
                           {job.enabled ? t("cron.disable") : t("cron.enable")}
                         </button>
@@ -807,131 +708,9 @@ export default function CronPage() {
       )}
 
       <Modal
-        open={mode === "view" && !!selected}
-        onClose={closeModal}
-        title={selected?.name}
-        subtitle={selected && cronKindFor(selected.backendId) === "native" ? undefined : selected?.id}
-        width={680}
-        footer={selected && (
-          <>
-            <button className="foot-left btn-danger" disabled={selected.actions?.delete === false} onClick={() => doDelete(selected)}>{t("common.delete")}</button>
-            {cronKindFor(selected.backendId) === "openclaw" && (
-              <button className="btn-secondary" disabled={busyIds.has(selected.id) || selected.actions?.run === false} onClick={() => act(selected.id, () => runCronJob(selected.id, "due"), true)}>{t("cron.dueRun")}</button>
-            )}
-            <button className="btn-secondary" disabled={busyIds.has(selected.id) || selected.actions?.run === false} onClick={() => void runCronFromUi(selected, true)}>
-              {t(runWillResumePaused(selected) ? "cron.runAndEnable" : "cron.runNow")}
-            </button>
-            <button className="btn-primary" disabled={selected.actions?.edit === false} onClick={() => openEdit(selected)}>{t("common.edit")}</button>
-          </>
-        )}
-      >
-        {selected && (
-          <>
-              {selected.origin === "codex-desktop" && codexResultRun && <CodexCronRunResult key={`${selected.id}:${codexResultRun.runId}`} job={selected} run={codexResultRun}
-                onClose={() => setCodexResultRun(null)} onChanged={() => { void refreshRuns(); void refresh(); }} />}
-            <ModalSection title={t("cron.overview")}>
-              {selected.actions?.reason === "system-managed" && <p className="muted">{t("cron.systemManaged")}</p>}
-              <DetailRow label={t("cron.colBackend")}><BackendBadge backendId={selected.backendId} /></DetailRow>
-              {selected.agentId && (
-                <DetailRow label={t("cron.agentLabel")}>{selected.agentId}</DetailRow>
-              )}
-              <DetailRow label={t("cron.colSchedule")}>{scheduleText(selected, t, locale)}</DetailRow>
-              <DetailRow label={t("cron.colState")}>{stateLabel(selected, t)}</DetailRow>
-              <DetailRow label={t("cron.fieldEnabled")}>{selected.enabled ? t("cron.yes") : t("cron.no")}</DetailRow>
-              <DetailRow label={t("cron.colNextRun")}>{fmtTime(selected.nextRunAt)}</DetailRow>
-              <DetailRow label={t("cron.lastRun")}>{fmtTime(selected.lastRunAt)}</DetailRow>
-              {selected.origin !== "codex-desktop" && <DetailRow label={t("cron.colDelivery")}>{selected.deliver === "chat" ? t("nav.chat") : deliveryText(selected)}</DetailRow>}
-              {capabilityTags(selected).length > 0 && (
-                <DetailRow label={t("cron.capabilities")}>
-                  <span className="tag-list">
-                    {capabilityTags(selected).map((tag) => <span key={tag} className="tag">{tag}</span>)}
-                  </span>
-                </DetailRow>
-              )}
-              {selected.lastStatus && <DetailRow label={t("cron.colLastStatus")}><span className={`status status-${selected.lastStatus}`}>{selected.lastStatus}</span></DetailRow>}
-              {selected.lastError && <DetailRow label={t("cron.lastError")}><span className="status-error">{selected.lastError}</span></DetailRow>}
-            </ModalSection>
-
-            {selected.prompt && (
-              <ModalSection title={t("cron.promptMessage")}>
-                <pre className="detail-pre">{selected.prompt}</pre>
-              </ModalSection>
-            )}
-
-            {selected.origin === "codex-desktop" ? (
-              <ModalSection title={t("codexAutomation.source")}>
-                <p className="codex-source-note">{t("codexAutomation.definitionNote")}</p>
-                <DetailRow label={t("codexAutomation.kind")}>{t(selected.codex?.kind === "heartbeat" ? "codexAutomation.heartbeat" : "codexAutomation.independent")}</DetailRow>
-                <DetailRow label={t("cron.model")}>{selected.model || t("codexAutomation.modelDefault")}</DetailRow>
-                <DetailRow label={t("codexAutomation.reasoning")}>{selected.reasoningEffort ? t(`codexAutomation.efforts.${selected.reasoningEffort}`, { defaultValue: selected.reasoningEffort }) : t("codexAutomation.reasoningDefault")}</DetailRow>
-                <DetailRow label={t("cronForm.shoggothWorkspace")}>{selected.codex?.cwds.join(", ") || "—"}</DetailRow>
-                {selected.runReason && <p className="codex-source-note">{t(`codexAutomation.errors.${selected.runReason}`, { defaultValue: selected.runReason })}</p>}
-                {selected.sourceReason && <p className="codex-source-error">{t(`codexAutomation.errors.${selected.sourceReason}`, { defaultValue: selected.sourceReason })}</p>}
-              </ModalSection>
-            ) : cronKindFor(selected.backendId) === "openclaw" ? (
-              <ModalSection title={t("cron.openClawConfig")}>
-                <DetailRow label={t("cron.payload")}>{selected.payload?.kind || "—"}</DetailRow>
-                <DetailRow label={t("cron.runTarget")}>{selected.sessionTarget || "—"}</DetailRow>
-                <DetailRow label={t("cron.wake")}>{selected.wakeMode || "—"}</DetailRow>
-                <DetailRow label={t("cron.deleteAfterRun")}>{selected.deleteAfterRun ? t("cron.yes") : t("cron.no")}</DetailRow>
-                <DetailRow label={t("cron.colDelivery")}><pre className="detail-pre detail-pre-compact">{jsonPreview(selected.delivery)}</pre></DetailRow>
-                <DetailRow label={t("cron.failureAlert")}><pre className="detail-pre detail-pre-compact">{jsonPreview(selected.failureAlert)}</pre></DetailRow>
-              </ModalSection>
-            ) : cronKindFor(selected.backendId) === "hermes" ? (
-              <ModalSection title={t("cron.hermesConfig")}>
-                <DetailRow label={t("cron.mode")}>{selected.noAgent ? t("cron.scriptTask") : t("cron.agentTask")}</DetailRow>
-                {selected.script && <DetailRow label={t("common.script")}>{selected.script}</DetailRow>}
-                {selected.workdir && <DetailRow label={t("common.workdir")}>{selected.workdir}</DetailRow>}
-                {selected.profile && <DetailRow label={t("common.profile")}>{selected.profile}</DetailRow>}
-                {selected.model && <DetailRow label={t("cron.model")}>{selected.model}</DetailRow>}
-                {selected.provider && <DetailRow label={t("models.providerField")}>{selected.provider}</DetailRow>}
-                {selected.baseUrl && <DetailRow label={t("models.baseUrl")}>{selected.baseUrl}</DetailRow>}
-                {selected.skills?.length ? <DetailRow label={t("common.skills")}>{selected.skills.join(", ")}</DetailRow> : null}
-                {selected.contextFrom?.length ? <DetailRow label={t("common.contextFrom")}>{selected.contextFrom.join(", ")}</DetailRow> : null}
-                {selected.enabledToolsets?.length ? <DetailRow label={t("common.toolsets")}>{selected.enabledToolsets.join(", ")}</DetailRow> : null}
-                {selected.repeat && <DetailRow label={t("cronForm.hermesRepeat")}>{jsonPreview(selected.repeat)}</DetailRow>}
-              </ModalSection>
-            ) : (
-              <ModalSection title={t("cron.nativeConfig", { backend: backendDescriptors.get(selected.backendId)?.name || selected.backendId })}>
-                <DetailRow label={t("cronForm.shoggothWorkspace")}>
-                  {typeof selected.backendDetails?.raw?.workspace === "string" ? selected.backendDetails.raw.workspace : "—"}
-                </DetailRow>
-                <DetailRow label={t("cronForm.shoggothMisfire")}>{String(selected.backendDetails?.raw?.misfirePolicy || "—")}</DetailRow>
-                <DetailRow label={t("cronForm.shoggothMaxCatchUp")}>{String(selected.backendDetails?.raw?.maxCatchUp || "—")}</DetailRow>
-                <DetailRow label={t("cronForm.shoggothOverlap")}>{String(selected.backendDetails?.raw?.overlapPolicy || "—")}</DetailRow>
-                <DetailRow label={t("cronForm.shoggothThreadPolicy")}>{String(selected.backendDetails?.raw?.threadPolicy || "—")}</DetailRow>
-              </ModalSection>
-            )}
-
-            <ModalSection title={t("cron.runHistory")}>
-              <CronRunHistoryPanel
-                kind={cronKindFor(selected.backendId)}
-                runs={runs}
-                loading={runsLoading}
-                filters={runsFilters}
-                setFilters={(nextFilters) => {
-                  selectionController.setFilters(nextFilters);
-                  setRunsFilters(nextFilters);
-                  loadRunsFor(selected, nextFilters);
-                }}
-                isCodex={selected.origin === "codex-desktop"} error={runsError} nextOffset={runsNextOffset}
-                onOpenResult={setCodexResultRun}
-                onPage={offset => {
-                  const next = { ...runsFilters, offset, limit: 20 }; setRunsFilters(next); selectionController.setFilters(next); void loadRunsFor(selected, next);
-                }}
-                onRefresh={refreshRuns}
-                onOpenChat={(sessionKey) => navigate(`/chat?backend=${encodeURIComponent(selected.backendId)}&session=${encodeURIComponent(sessionKey)}`)}
-              />
-
-            </ModalSection>
-          </>
-        )}
-      </Modal>
-
-      <Modal
         open={formOpen}
-        onClose={dismissForm}
-        dismissible={!saving}
+        onClose={dismissModal}
+        dismissible={!formBusy}
         title={formTitle}
         width={720}
         className="cron-form-modal"
@@ -947,23 +726,27 @@ export default function CronPage() {
                   else if (mode === "edit-hermes") setHermesDraft({ ...hermesDraft, enabled });
                   else setNativeDraft({ ...nativeDraft, enabled });
                 }}
-                disabled={saving}
+                disabled={formBusy}
                 label={t("cronForm.taskEnabled")}
               />
             </div>
-            <button className="btn-secondary" onClick={dismissForm} disabled={saving}>{t("common.cancel")}</button>
-            <button className="btn-primary" onClick={saveForm} disabled={saving || (mode === "create" && !selectedCreateAgent)}>{saving ? t("common.saving") : mode === "create" ? t("cronForm.createAction") : t("common.save")}</button>
+            {mode === "create"
+              ? <button className="btn-secondary" onClick={dismissModal} disabled={formBusy}>{t("common.cancel")}</button>
+              : selected && <button className="btn-danger" onClick={() => doDelete(selected)}
+                disabled={formBusy || busyIds.has(selected.id) || selected.actions?.delete === false}>{t("common.delete")}</button>}
+            <button className="btn-primary" onClick={saveForm} disabled={formBusy || (mode === "create" && !selectedCreateAgent)}>{saving ? t("common.saving") : mode === "create" ? t("cronForm.createAction") : t("common.save")}</button>
           </>
         }
       >
         {mode === "create" && <CronCreateForm draft={createDraft} setDraft={setCreateDraft}
-          backends={createBackends} agents={agents} loading={agentsLoading} failedBackends={failedAgentBackends}
-          onRetry={() => { void loadAgents(); }} disabled={saving} />}
+          backends={cronBackends} agents={agents} loading={agentsLoading} failedBackends={failedAgentBackends}
+          onRetry={() => { void loadAgents(); }} disabled={formBusy} />}
         {mode === "edit-openclaw" && (
           <OpenClawCronForm
             key={`${mode}:${selected?.id || "new"}`}
             draft={openClawDraft}
             setDraft={setOpenClawDraft}
+            assistant={assignedAgent}
           />
         )}
         {mode === "edit-hermes" && (
@@ -971,16 +754,18 @@ export default function CronPage() {
             key={`${mode}:${selected?.id || "new"}`}
             draft={hermesDraft}
             setDraft={setHermesDraft}
+            assistant={assignedAgent}
           />
         )}
-        {mode === "edit-codex" && selected && <CodexCronForm key={selected.id} draft={codexDraft} setDraft={setCodexDraft} backendId={selected.backendId}
+        {mode === "edit-codex" && selected && <CodexCronForm key={selected.id} draft={codexDraft} setDraft={setCodexDraft} assistant={assignedAgent} backendId={selected.backendId}
           timeZone={selected.schedule.kind === "rrule" ? selected.schedule.tz : undefined}
-          targetEditable={!!selected.codex?.cwd && selected.codex?.target?.type === "projectless"} disabled={saving} />}
+          targetEditable={!!selected.codex?.cwd && selected.codex?.target?.type === "projectless"} disabled={formBusy} />}
         {mode === "edit-native" && (
           <NativeCronForm
             key={`${mode}:${selected?.id || "new"}`}
             draft={nativeDraft}
             setDraft={setNativeDraft}
+            assistant={assignedAgent}
           />
         )}
       </Modal>
@@ -991,6 +776,8 @@ export default function CronPage() {
         title={deliveryJob?.name}
         failed={runExecutionFailed(delivery?.status)}
         agentId={deliveryJob?.agentId}
+        backendId={deliveryJob?.backendId}
+        runId={delivery?.runId}
         agentName={deliveryAgent?.name}
         startedAt={delivery?.startedAt}
         durationMs={delivery?.durationMs}

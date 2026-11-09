@@ -6,10 +6,29 @@
 // 原值 256 只有四成分辨率、被放大 2.5 倍 → 肉眼可见的糊。768 覆盖到 DPR3 的多数
 // 场景，且按实测最坏样本外推仍在 static-server 的 3MB 上限内（1024 会顶到线上）。
 const AVATAR_SIZE = 768;
+const AVATAR_LIBRARY_URL = "/avatar/library/";
+
+export async function listAvatarPresets(signal: AbortSignal): Promise<string[]> {
+  const res = await fetch(AVATAR_LIBRARY_URL, { signal });
+  if (!res.ok) throw new Error(String(res.status));
+  const { presets } = await res.json() as { presets: string[] };
+  return presets;
+}
+
+export function avatarPresetUrl(id: string): string {
+  return `${AVATAR_LIBRARY_URL}${encodeURIComponent(id)}`;
+}
+
+export async function avatarPresetPng(id: string): Promise<Blob> {
+  const res = await fetch(avatarPresetUrl(id));
+  if (!res.ok) throw new Error(String(res.status));
+  // Keep the library's native resolution and use the existing avatar write path.
+  return resizeToSquarePng(await res.blob(), 640);
+}
 
 // Center-crop `file` to a square and downscale to `size` px, returning a PNG
 // blob. 聊天列表的小圆头像用同一份文件，靠浏览器缩放，不再单独出一份。
-export async function resizeToSquarePng(file: File, size = AVATAR_SIZE): Promise<Blob> {
+export async function resizeToSquarePng(file: Blob, size = AVATAR_SIZE): Promise<Blob> {
   const bitmap = await createImageBitmap(file);
   try {
     const side = Math.min(bitmap.width, bitmap.height);

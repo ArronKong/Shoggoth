@@ -25,16 +25,12 @@ assert.match(
 assert.match(
   notifier,
   /#\/cron\?job=\$\{encodeURIComponent\(jobId\)\}/,
-  "Cron 通知点击后必须跳转到携带编码 job 参数的详情深链",
+  "Cron 通知点击后必须跳转到携带编码 job 参数的任务深链",
 );
 
-// Cron 页面应读取深链参数，在列表加载后寻找并打开现有详情弹窗。
+// Cron 页面读取深链参数，任务匹配行为由 cron-save-lifecycle-ui-unit 覆盖。
 assert.match(cronPage, /useSearchParams\(\)/, "Cron 页面必须读取通知深链中的 job 参数");
-assert.match(
-  cronPage,
-  /jobs\.find\(\(job\)\s*=>\s*job\.id\s*===\s*notificationJobId\s*&&\s*\(!notificationBackendId\s*\|\|\s*job\.backendId\s*===\s*notificationBackendId\)\)/,
-  "Cron 页面必须按通知目标定位任务",
-);
-assert.match(cronPage, /void openView\(notificationJob\)/, "定位到任务后必须复用现有详情弹窗打开逻辑");
+assert.match(cronPage, /searchParams\.get\("job"\)/);
+assert.match(cronPage, /searchParams\.get\("backend"\)/);
 
 console.log("cron notification navigation regression: PASS");

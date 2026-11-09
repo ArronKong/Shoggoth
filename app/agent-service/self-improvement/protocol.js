@@ -18,15 +18,7 @@ const METHODS = new Set(["learning.status", "learning.configure", "learning.requ
   "learning.proposal.read", "learning.proposal.resolve"]);
 const TERMINAL = new Set(["applied", "pending_review", "noop", "failed", "canceled", "interrupted",
   "outcome_unknown", "rejected", "withdrawn"]);
-const PUBLIC_ERRORS = Object.freeze({
-  LEARNING_INVALID: "自动学习请求无效", LEARNING_UNAVAILABLE: "自动学习服务不可用",
-  LEARNING_CONFLICT: "自动学习记录已变化，请刷新后重试", LEARNING_SOURCE_UNAVAILABLE: "原任务来源已不可用",
-  LEARNING_SOURCE_REVOKED: "原任务来源已撤回或变化",
-  LEARNING_PROFILE_UNAVAILABLE: "当前 Agent 不可用", LEARNING_UNSUPPORTED: "当前 Runtime 不支持无工具复盘",
-  LEARNING_BUDGET: "单次复盘已达到迭代上限", LEARNING_INPUT_BUDGET: "单次复盘已达到输入预算", LEARNING_PROTECTED: "该技能当前不允许自动修改",
-  LEARNING_OUTPUT_INVALID: "复盘结果格式或内容未通过检查", LEARNING_STORE_CORRUPT: "自动学习存储校验失败",
-  LEARNING_VERSION_UNAVAILABLE: "技能版本已撤回或不可用", LEARNING_BUSY: "当前 Agent 正忙",
-});
+const PUBLIC_ERRORS = Object.freeze(require("../chat-error-messages.json").learning);
 function fail(code = "LEARNING_INVALID") { throw serviceError(code, PUBLIC_ERRORS[code] || "自动学习操作未能完成"); }
 const digest = value => crypto.createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
 const object = value => !!value && Object.getPrototypeOf(value) === Object.prototype

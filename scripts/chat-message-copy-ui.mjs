@@ -6,6 +6,7 @@ import path from "node:path";
 import http from "node:http";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const { build } = createRequire(path.join(root, "app/manage-ui/package.json"))("esbuild");
@@ -14,14 +15,14 @@ let serving = false;
 try {
   await build({
     entryPoints: [path.join(root, "scripts/fixtures/chat-message-copy.tsx")], bundle: true, format: "esm",
-    define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" },
+    define: { "process.env.NODE_ENV": '"production"' }, loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
-    plugins: process.env.CHAT_COPY_SOURCE_REF ? [{ name: "baseline", setup(builder) {
+    plugins: [viteArtworkFixturePlugin(root), ...(process.env.CHAT_COPY_SOURCE_REF ? [{ name: "baseline", setup(builder) {
       builder.onLoad({ filter: /\/ChatPage\.tsx$/ }, ({ path: file }) => ({
         contents: execFileSync("git", ["show", `${process.env.CHAT_COPY_SOURCE_REF}:${path.relative(root, file)}`],
           { cwd: root, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }), loader: "tsx", resolveDir: path.dirname(file),
       }));
-    } }] : [],
+    } }] : [])],
   });
   fs.writeFileSync(path.join(temp, "index.html"), `<!doctype html><meta charset="utf-8"><title>聊天气泡复制检查</title>
 <link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}#fixture-controls{position:fixed;right:12px;top:12px;z-index:2000;background:white;padding:8px;max-width:280px;font-size:12px}#clipboard-output{white-space:pre-wrap;overflow-wrap:anywhere}</style>

@@ -23,6 +23,15 @@ for (const entry of manifest.entries) {
 }
 const groups = [...groupsByHash].map(([sha256, files]) => ({ sha256, files }));
 
+function listAgentAvatarPresets() {
+  return [...groupsByHash.keys()];
+}
+
+function resolveAgentAvatarPreset(id) {
+  const file = groupsByHash.get(id)?.[0];
+  return file ? resolveDesktopAssetFile(LIBRARY_DIR, file) : null;
+}
+
 function createDefaultAgentAvatarPool(assetPaths, { choose = randomInt, warn = console.warn, hasCustomAvatar = () => false } = {}) {
   const selectionsPath = path.join(assetPaths.avatarDir, SELECTIONS_FILE);
   let selections;
@@ -111,4 +120,4 @@ function createDefaultAgentAvatarPool(assetPaths, { choose = randomInt, warn = c
   return { select, release, move };
 }
 
-module.exports = { createDefaultAgentAvatarPool };
+module.exports = { createDefaultAgentAvatarPool, listAgentAvatarPresets, resolveAgentAvatarPreset };

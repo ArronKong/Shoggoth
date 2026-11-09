@@ -1,7 +1,9 @@
 import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useTranslation } from "react-i18next";
 import { chatUiRequest } from "../api/client";
 import { normalizeNativeUiPart, type NativeUiArtifactPart } from "../lib/chatUiContent";
 import { legacyHtmlBlocks } from "../lib/chatUiLegacy.mjs";
+import { translateProductError } from "../lib/gatewayErrors";
 import ChatUiArtifact from "./ChatUiArtifact";
 
 type LegacyEntry = { parts: Record<number, NativeUiArtifactPart>; listeners: Set<() => void> };
@@ -14,6 +16,7 @@ function entryFor(key: string): LegacyEntry {
 export default function LegacyChatUi({ text, sourceEventId, backend, agentId, sessionKey, visible }: {
   text: string; sourceEventId: string; backend: string; agentId: string; sessionKey: string; visible: boolean;
 }) {
+  const { t } = useTranslation();
   const blocks = useMemo(() => legacyHtmlBlocks(text).filter(block => block.runnable), [text]);
   const entry = useMemo(() => entryFor(`${backend}:${agentId}:${sessionKey}:${sourceEventId}`), [backend, agentId, sessionKey, sourceEventId]);
   const parts = useSyncExternalStore(useCallback(listener => { entry.listeners.add(listener); return () => { entry.listeners.delete(listener); }; }, [entry]), () => entry.parts);
@@ -32,6 +35,7 @@ export default function LegacyChatUi({ text, sourceEventId, backend, agentId, se
   return <div className="chat-ui-legacy">{blocks.map(block => parts[block.blockIndex]
     ? <ChatUiArtifact key={block.blockIndex} part={parts[block.blockIndex]} backend={backend} agentId={agentId} sessionKey={sessionKey} visible={visible} autoActivate />
     : <button type="button" key={block.blockIndex} disabled={busy !== null} onClick={() => void preview(block.blockIndex)}>
-      {busy === block.blockIndex ? "正在读取历史界面…" : `预览历史界面${blocks.length > 1 ? ` ${block.blockIndex + 1}` : ""}`}</button>)}
-    {error && <p role="status">{error}</p>}</div>;
+      {busy === block.blockIndex ? t("chat.nativeUi.loadingHistory")
+        : t("chat.nativeUi.previewHistory", { number: blocks.length > 1 ? ` ${block.blockIndex + 1}` : "" })}</button>)}
+    {error && <p role="status">{translateProductError(error, t)}</p>}</div>;
 }

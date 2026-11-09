@@ -26,6 +26,7 @@ interface ConfirmOpts {
   message?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
+  focusCancel?: boolean;
   danger?: boolean;
   confirmVariant?: "dark";
 }
@@ -147,6 +148,7 @@ function UiInner({ children }: { children: ReactNode }) {
   const confirmRequestId = useRef(0);
   const settledConfirmIds = useRef(new Set<number>());
   const confirmBtnRef = useRef<HTMLButtonElement>(null);
+  const cancelConfirmBtnRef = useRef<HTMLButtonElement>(null);
 
   const confirm = useCallback(
     (opts: ConfirmOpts) =>
@@ -248,7 +250,7 @@ function UiInner({ children }: { children: ReactNode }) {
           <AlertDialog.Backdrop className={styles.modalOverlay} />
           <AlertDialog.Popup
             className={styles.modalPanel}
-            initialFocus={confirmBtnRef}
+            initialFocus={confirmState?.focusCancel ? cancelConfirmBtnRef : confirmBtnRef}
             {...confirmInertProps}
           >
             <AlertDialog.Title className={styles.modalTitle}>
@@ -258,6 +260,7 @@ function UiInner({ children }: { children: ReactNode }) {
             <div className={styles.modalFoot}>
               {/* 文字小弹窗的动作是 Medium 40 档（设计稿 7111:428/430），比内容弹窗矮一档。 */}
               <button
+                ref={cancelConfirmBtnRef}
                 className="btn-secondary btn-md"
                 onClick={() => closeConfirm(confirmState?.requestId, false)}
               >

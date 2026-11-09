@@ -34,12 +34,15 @@ async function send(route, body, headers = {}, suffix = "/responses") {
 }
 test("actual upstream body is protected while original auth stays on the approved route", async () => fixture(async ({ gateway, received }) => {
   const route = await gateway.bind({ scope: SCOPE, providerKind: "openai-api-key" });
+  const file = { type: "input_file", filename: "original.pages", file_data: "data:application/octet-stream;base64,AAECA/8=" };
   const result = await send(route, { model: "fixture", instructions: "password: 123456", input: [
-    { type: "function_call_output", call_id: "call-123456", output: "123456\nPublic receipt" }] }, { cookie: "must-not-forward", "x-arbitrary-secret": "must-not-forward" });
+    { type: "function_call_output", call_id: "call-123456", output: "123456\nPublic receipt" },
+    { type: "message", role: "user", content: [file] }] }, { cookie: "must-not-forward", "x-arbitrary-secret": "must-not-forward" });
   assert.equal(result.status, 200); assert.equal(result.text, "data: public-result\n\n");
   assert.equal(received.length, 1); assert.equal(received[0].path, "/v1/responses");
   assert.equal(received[0].headers.authorization, SYNTHETIC_AUTH);
   assert.equal(received[0].headers["chatgpt-account-id"], "synthetic-account");
+  assert.deepEqual(received[0].body.input[1].content, [file]);
   assert.equal(received[0].headers.cookie, undefined); assert.equal(received[0].headers["x-arbitrary-secret"], undefined);
   assert(!received[0].body.input[0].output.includes("123456")); assert(received[0].body.input[0].output.includes("Public receipt"));
   assert.equal(received[0].body.input[0].call_id, "call-123456"); assert(!result.text.includes(SYNTHETIC_AUTH));

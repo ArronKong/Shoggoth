@@ -6,10 +6,10 @@ const { promisify } = require("node:util");
 const { execFile } = require("node:child_process");
 const { atomicWritePrivateFile, openExistingPrivateFile, preparePrivateParent, readPrivateFile } = require("./private-file");
 const { serviceError } = require("./security");
-const { CHUNK_BYTES, MAX_MEDIA_BYTES, MAX_VIDEO_BYTES } = require("./inspiration-media");
+const { ATTACHMENT_FILES_DIRECTORY, CHUNK_BYTES, MAX_MEDIA_BYTES, MAX_VIDEO_BYTES } = require("./inspiration-media");
 const run = promisify(execFile);
 const isVideo = attachment => attachment.mimeType.startsWith("video/");
-const previewPath = (paths, attachment) => path.join(paths.stateDir, "inspiration-media", `${attachment.id}.preview-v1.${isVideo(attachment) ? "m4v" : "jpg"}`);
+const previewPath = (paths, attachment) => path.join(paths.stateDir, ATTACHMENT_FILES_DIRECTORY, `${attachment.id}.preview-v1.${isVideo(attachment) ? "m4v" : "jpg"}`);
 
 function readPreviewChunk(file, original, offset) {
   let fd;

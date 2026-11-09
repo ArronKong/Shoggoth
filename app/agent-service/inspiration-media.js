@@ -71,6 +71,7 @@ CREATE TABLE inspiration_media_chunks (media_id TEXT NOT NULL REFERENCES inspira
   data BLOB NOT NULL, PRIMARY KEY(media_id, offset));
 PRAGMA user_version=3;
 `;
+const ATTACHMENT_FILES_DIRECTORY = "attachment-files";
 
 class InspirationMediaStore {
   constructor(db, paths) { this.db = db; this.paths = paths; this.previewTasks = new Map(); this.previewQueue = Promise.resolve(); }
@@ -145,7 +146,7 @@ class InspirationMediaStore {
   }
 
   filePath(attachment) {
-    return path.join(this.paths.stateDir, "inspiration-media", `${attachment.id}.${MIME_EXTENSIONS[attachment.mimeType]}`);
+    return path.join(this.paths.stateDir, ATTACHMENT_FILES_DIRECTORY, `${attachment.id}.${MIME_EXTENSIONS[attachment.mimeType]}`);
   }
 
   materialize(attachment) {
@@ -162,5 +163,5 @@ class InspirationMediaStore {
 }
 
 module.exports = { CHUNK_BYTES, MAX_MEDIA_BYTES, MAX_VIDEO_BYTES, MAX_ATTACHMENTS, MEDIA_SCHEMA, InspirationMediaStore,
-  ARCHIVE_MIME, MAX_ARCHIVE_BYTES, isDocumentType, matchesMediaType,
+  ATTACHMENT_FILES_DIRECTORY, ARCHIVE_MIME, MAX_ARCHIVE_BYTES, isDocumentType, matchesMediaType,
   validAttachment, validAttachments, attachmentFields, mediaId, decodeChunk };

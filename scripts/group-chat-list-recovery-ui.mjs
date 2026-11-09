@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const require = createRequire(path.join(root, "app/manage-ui/package.json"));
@@ -19,6 +20,7 @@ import { HashRouter } from "react-router-dom";
 import ChatPage from "./app/manage-ui/src/pages/ChatPage";
 import { UiProvider } from "./app/manage-ui/src/components/ui";
 import ScrollbarProvider from "./app/manage-ui/src/components/ScrollbarProvider";
+import { applyDisabledBackends } from "./app/manage-ui/src/lib/backends";
 import { runPageRefresh } from "./app/manage-ui/src/lib/page-refresh";
 import i18n from "./app/manage-ui/src/i18n";
 import "./app/manage-ui/src/styles.css";
@@ -29,10 +31,11 @@ const key = "agent:fixture:main", now = Date.now();
 const sessions = [{ key, agentId: "fixture", agentName: "Fixture Agent", backendId: "openclaw", updatedAt: now }];
 const makeGroup = (id: string) => ({ group: { id, name: "Saved group " + id, purpose: "", status: "active", createdAt: now,
   updatedAt: now, metadataRevision: 1, rosterRevision: 1, directoryRevision: 1, controlEpoch: 0, lastSeq: 0 },
-  members: [{ id: "a", backendId: "shoggoth", agentId: "a", displayName: "Alpha", handle: "a", state: "active" },
-    { id: "b", backendId: "hermes", agentId: "b", displayName: "Beta", handle: "b", state: "active" }],
+  members: [{ id: "a", backendId: "shoggoth", agentId: "a", displayName: "Alpha", handle: "a", state: "active", card: { availability: "offline" } },
+    { id: "b", backendId: "hermes", agentId: "b", displayName: "Beta", handle: "b", state: "active", card: { availability: "online" } }],
   discussion: null, activeTurns: [], queuedMemberIds: [], internalSessionKeys: [], pendingInteractions: [], tasks: [] });
 let groups = [1, 2, 3, 4, 5].map(id => makeGroup(String(id))), ready = false, enabled = true, reads = 0, writes = 0;
+let hermesStatus = { id: "hermes", connected: true, info: { readyAgentIds: ["b"] } };
 state.fetch = async (url: unknown, init: RequestInit = {}) => {
   if (init.method && init.method !== "GET") { writes++; throw Error("Unexpected write: " + url); }
   const pathname = String(url);
@@ -43,7 +46,9 @@ state.fetch = async (url: unknown, init: RequestInit = {}) => {
     payload = { groups, enabled };
   } else if (pathname.startsWith("/__api/group-chats/detail")) payload = groups[0];
   else if (pathname.startsWith("/__api/group-chats/messages")) payload = { messages: [], hasMore: false };
-  else if (pathname.startsWith("/__api/status")) payload = { backends: [{ id: "openclaw", connected: true }] };
+  else if (pathname.startsWith("/__api/status")) payload = { backends: [
+    { id: "openclaw", connected: true }, { id: "shoggoth", connected: true }, hermesStatus,
+  ] };
   else if (pathname.includes("/__api/backends")) payload = { backends: [] };
   else if (pathname.includes("/archive")) payload = { archive: { supported: true, segments: [] } };
   else if (pathname.includes("runtime-models")) payload = { selection: { canSwitch: false, candidates: [] }, capabilities: {}, models: [], runtimes: [] };
@@ -57,7 +62,8 @@ class FixtureSocket {
     const request = JSON.parse(data);
     const payload = request.method === "sessions.list" ? { sessions, hasMore: false }
       : request.method === "agents.list" ? { agents: [{ id: "fixture", name: "Fixture Agent", backendId: "openclaw" }] }
-      : request.method === "chat.history" ? { messages: [{ role: "user", content: "Existing direct chat", timestamp: now }] } : {};
+      : request.method === "chat.history" ? { messages: [{ role: "user", content: "Existing direct chat", timestamp: now }],
+        hasMore: false, nextCursor: null, sourceId: "group-list-fixture" } : {};
     setTimeout(() => this.emit({ type: "res", id: request.id, ok: true, payload }), 0);
   }
   close() { this.readyState = 3; }
@@ -100,6 +106,34 @@ state.runGroupListFixture = async () => {
     await wait(() => rows().length === 0, "disabled groups remain visible");
     enabled = true; window.dispatchEvent(new Event("focus"));
     await wait(() => rows().length === 5, "re-enabled groups did not return");
+
+    (rows()[0] as HTMLButtonElement).click();
+    await wait(() => document.querySelector("[data-group-details-trigger]"), "group did not open");
+    document.querySelector<HTMLButtonElement>("[data-group-details-trigger]")!.click();
+    const detailAvatar = (id: string) => document.querySelector('[data-group-details-member="' + id + '"] [data-avatar-state]');
+    const listAvatars = () => rows()[0]?.querySelectorAll('[data-avatar-state]');
+    const gray = (avatar: Element | undefined | null) => avatar?.hasAttribute("data-avatar-grayscale");
+    const colorsAre = (offline: boolean) => gray(detailAvatar("a")) === false && gray(listAvatars()?.[0]) === false
+      && gray(detailAvatar("b")) === offline && gray(listAvatars()?.[1]) === offline;
+    await wait(() => colorsAre(false), "live connections should show color even with an offline cached card");
+
+    hermesStatus = { ...hermesStatus, connected: false };
+    window.dispatchEvent(new Event("focus"));
+    await wait(() => colorsAre(true), "a disconnected backend should gray its member in the open details and sidebar");
+    hermesStatus = { ...hermesStatus, connected: true };
+    window.dispatchEvent(new Event("focus"));
+    await wait(() => colorsAre(false), "a reconnected backend should restore color without reopening the group");
+    hermesStatus = { ...hermesStatus, info: { readyAgentIds: ["other"] } };
+    window.dispatchEvent(new Event("focus"));
+    await wait(() => colorsAre(true), "a member should gray when its profile disconnects while another profile is ready");
+    hermesStatus = { ...hermesStatus, info: { readyAgentIds: ["b"] } };
+    window.dispatchEvent(new Event("focus"));
+    await wait(() => colorsAre(false), "a reconnected profile should regain color");
+
+    applyDisabledBackends(["hermes"]);
+    await wait(() => colorsAre(true), "disconnecting in settings should gray the member despite the last live status");
+    applyDisabledBackends([]);
+    await wait(() => colorsAre(false), "reconnecting in settings should restore the member's color");
   }
   if (writes !== 0) throw Error("recovery required a write");
   return { scenario, language, visibleGroups: rows().length, reads, writes, passed: true };
@@ -108,16 +142,19 @@ state.runGroupListFixture = async () => {
 try {
   await build({ stdin: { contents: fixture, loader: "tsx", resolveDir: root }, bundle: true, format: "esm", jsx: "automatic",
     nodePaths: [path.join(root, "app/manage-ui/node_modules")], define: { "process.env.NODE_ENV": '"production"' },
-    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl" }, outfile: path.join(temp, "fixture.js"), logLevel: "silent" });
+    loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
+    plugins: [viteArtworkFixturePlugin(root)], outfile: path.join(temp, "fixture.js"), logLevel: "silent" });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
   if (output) fs.mkdirSync(output, { recursive: true });
   const main = path.join(temp, "main.cjs");
   fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron"),fs=require("node:fs");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1200,height:850,webPreferences:{backgroundThrottling:false}});let passed=false;
+w.webContents.on("console-message",event=>{if(event.level==="error")console.error(event.message);});
 try{const results=[];for(const scenario of ["retry","service-ready","manual","reconnect"]){for(const language of ["zh-CN","en"]){
 await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{scenario,language},hash:"/chat"});
-const result=await w.webContents.executeJavaScript("window.runGroupListFixture()");results.push(result);console.log(JSON.stringify(result));
+const result=await w.webContents.executeJavaScript("window.runGroupListFixture().catch(error => ({ failure: error.stack || String(error) }))");
+if(result.failure)throw Error(result.failure);results.push(result);console.log(JSON.stringify(result));
 if(${Boolean(output)}&&scenario==="retry")fs.writeFileSync(${JSON.stringify(output)}+"/recovered-"+language+".png",(await w.webContents.capturePage()).toPNG());
 }}if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/results.json",JSON.stringify(results,null,2));passed=true;
 }catch(error){console.error(error.stack||error);console.error(await w.webContents.executeJavaScript("document.body.innerText.slice(0,1500)"));}finally{w.destroy();app.exit(passed?0:1);}});`);

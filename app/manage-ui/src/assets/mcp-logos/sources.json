@@ -536,6 +536,19 @@
       "sha256": "810c24af9d8f826cc944a303646f8f2ad8ed308c0ff7cd13eb4851f0ca461213"
     },
     {
+      "id": "hyperframes",
+      "page": "https://github.com/heygen-com/hyperframes/blob/main/assets/icon.png",
+      "asset": "hyperframes.png",
+      "assetUrl": "https://raw.githubusercontent.com/heygen-com/hyperframes/main/assets/icon.png",
+      "originalType": "image/png",
+      "originalWidth": 512,
+      "originalHeight": 512,
+      "bytes": 6528,
+      "sha256": "f5ecdf483a0a954327e7eb5d4187afa5cd445eabf4f4f166b6631ee5440657a2",
+      "retrievedAt": "2026-11-10",
+      "normalization": "Official 512 × 512 icon downsampled to 128 × 128."
+    },
+    {
       "id": "ifind",
       "page": "https://apps.apple.com/cn/app/id717545196",
       "asset": "ifind.png",

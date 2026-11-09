@@ -12,12 +12,12 @@ function validAttachmentName(name) {
 }
 
 // Browser-picked files have bytes rather than an OS path. Keep private copies
-// for the lifetime of the UI server so Finder can reveal them.
-function createChatAttachmentRevealer(revealPath) {
+// for the lifetime of the desktop surface that stages them.
+function createChatAttachmentStaging() {
   let directory;
   const files = new Map();
   return {
-    async reveal(name, bytes) {
+    stage(name, bytes) {
       if (!validAttachmentName(name) || !Buffer.isBuffer(bytes) || bytes.length > MAX_OPEN_ATTACHMENT_BYTES) {
         throw new Error("Invalid attachment");
       }
@@ -28,10 +28,11 @@ function createChatAttachmentRevealer(revealPath) {
         const target = path.join(directory, key);
         fs.mkdirSync(target, { mode: 0o700 });
         file = path.join(target, name);
-        fs.writeFileSync(file, bytes, { mode: 0o600, flag: "wx" });
+        try { fs.writeFileSync(file, bytes, { mode: 0o600, flag: "wx" }); }
+        catch (error) { fs.rmSync(target, { recursive: true, force: true }); throw error; }
         files.set(key, file);
       }
-      return revealPath(file);
+      return file;
     },
     dispose() {
       if (directory) fs.rmSync(directory, { recursive: true, force: true });
@@ -41,4 +42,9 @@ function createChatAttachmentRevealer(revealPath) {
   };
 }
 
-module.exports = { createChatAttachmentRevealer, validAttachmentName, MAX_OPEN_ATTACHMENT_BYTES };
+function createChatAttachmentRevealer(revealPath) {
+  const staging = createChatAttachmentStaging();
+  return { async reveal(name, bytes) { return revealPath(staging.stage(name, bytes)); }, dispose: staging.dispose };
+}
+
+module.exports = { createChatAttachmentRevealer, createChatAttachmentStaging, validAttachmentName, MAX_OPEN_ATTACHMENT_BYTES };

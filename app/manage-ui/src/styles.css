@@ -2667,22 +2667,11 @@ button:disabled {
 }
 .chip-state-off { color: var(--muted); }
 
-/* cron run history list (detail drawer) */
+/* Task history and diagnostics. */
 .run-list {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-}
-.run-history-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-.run-history-tools {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(7rem, 1fr));
-  gap: 0.45rem;
-  align-items: center;
 }
 .run-row {
   display: flex;
@@ -2699,40 +2688,6 @@ button:disabled {
   text-transform: uppercase;
   font-size: 0.7rem;
 }
-.run-row-rich {
-  align-items: flex-start;
-  flex-direction: column;
-}
-.run-outcomes {
-  display: grid;
-  width: 100%;
-  gap: 0.35rem;
-}
-.run-outcome {
-  display: grid;
-  grid-template-columns: minmax(6.5rem, auto) auto minmax(0, 1fr);
-  align-items: baseline;
-  gap: 0.5rem;
-}
-.run-outcome__label {
-  color: var(--muted);
-  font-size: 0.72rem;
-}
-.run-outcome__detail {
-  min-width: 0;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-.run-outcome--error .run-outcome__detail { color: var(--ui-error); }
-.run-outcome--warning .run-outcome__detail { color: light-dark(#92400e, #fbbf24); }
-.run-row__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-}
-.run-row__summary {
-  overflow-wrap: anywhere;
-}
 .status-ok { color: light-dark(#047857, #34d399); }
 .status-succeeded { color: light-dark(#047857, #34d399); }
 .status-skipped { color: light-dark(#b45309, #f59e0b); }
@@ -2741,25 +2696,10 @@ button:disabled {
 .status-not-requested,
 .status-unknown { color: light-dark(#64748b, #94a3b8); }
 
-@media (max-width: 1100px) {
-  .run-history-tools {
-    grid-template-columns: repeat(2, minmax(8rem, 1fr));
-  }
-}
-
 @media (max-width: 720px) {
-  .run-history-tools {
-    grid-template-columns: 1fr;
-  }
   .actions {
     flex-wrap: wrap;
     white-space: normal;
-  }
-  .run-outcome {
-    grid-template-columns: 1fr auto;
-  }
-  .run-outcome__detail {
-    grid-column: 1 / -1;
   }
 }
 

@@ -201,25 +201,6 @@
   white-space: normal;
 }
 
-/* 每个讨论回合 / 任务尝试独立展示，详细工具数据留在折叠层。 */
-.executionActivity { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 12px; line-height: 18px; }
-.executionActivityHead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
-.executionContext { flex: 0 1 auto; min-width: 0; max-width: 100%; color: var(--muted-fg); overflow-wrap: anywhere; }
-.executionTitle { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.executionProgress { margin-left: auto; color: var(--muted-fg); white-space: nowrap; font-size: 11px; }
-.executionFallback { margin: 0; color: var(--muted-fg); font-size: 11px; }
-.executionDetails > summary { cursor: pointer; color: var(--muted-fg); }
-.executionToolList { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
-.executionTool { padding: 4px 8px; border-left: 2px solid var(--skin-hairline); }
-.executionTool > summary { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; cursor: pointer; }
-.executionTool > summary > span:first-child { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.executionToolDetail { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
-.executionToolDetail strong { color: var(--muted-fg); font-size: 11px; font-weight: 500; }
-.executionToolDetail pre { max-height: 160px; overflow: auto; margin: 0; padding: 6px 8px; border-radius: 6px;
-  background: var(--bg-hover); white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/16px ui-monospace, monospace; }
-.executionActivity[data-activity-phase="failed"] .executionTitle { color: var(--danger, #d33); }
-.executionTool[data-tool-status="failed"] { border-left-color: var(--danger, #d33); }
-
 .member:focus-visible, .tasksToggle:focus-visible, .memoryNote summary:focus-visible,
 .composer button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .retry { margin-left: 8px; }

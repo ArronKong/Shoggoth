@@ -49,6 +49,9 @@ const activity = (id: string): any => ({ groupId: "g", discussionId: "d", member
 const turns = scene === "files" ? [] : ["alpha", "maya"].map((id, index) => ({ opportunityId: id + "-turn", memberId: id,
   discussionId: "d", startedAt: now + index, floor: index === 0, released: index !== 0, activity: activity(id),
   ...(scene === "streaming" && index === 0 ? { draft: "建议把群聊中的每条回复呈现为普通消息。\n\n等待时使用与单聊一致的加载动画，让阅读更连贯。" } : {}) }));
+if (scene === "waiting" && !GROUP_QUIET_BASELINE) {
+  for (const turn of turns) turn.activity = { ...turn.activity, phase: "running", tool: null };
+}
 if (scene === "streaming") {
   turns[0].activity.phase = "text";
   turns[0].activity.textMessages = turns[0].draft!.split("\n\n").map((text, index) => ({ id: index ? "two" : "one", text,
@@ -111,10 +114,10 @@ const runScrollFixture = async (timeline: HTMLElement) => {
   await wait(() => timeline.querySelector('[data-seq="124"]'), "next group message arrives");
   await paint();
   check(gap() <= 2 && !jump(), "jumping to latest restores automatic following");
-  const textarea = composer.querySelector<HTMLTextAreaElement>("textarea")!;
+  const editor = composer.querySelector<HTMLElement>("[data-group-composer-input]")!;
   const setDraft = (value: string) => {
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    editor.innerText = value;
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
   };
   const composerHeight = composer.offsetHeight;
   setDraft("输入框增高后，最新回复仍完整显示。\n".repeat(12));
@@ -144,11 +147,11 @@ const runScrollFixture = async (timeline: HTMLElement) => {
 };
 
 const runFixture = async () => {
-  await wait(() => document.querySelector('[data-seq="2"]') && document.querySelector('[data-chat-composer] textarea:not(:disabled)'), "panel ready");
+  await wait(() => document.querySelector('[data-seq="2"]')
+    && document.querySelector('[data-group-composer-input][contenteditable="plaintext-only"], [data-chat-composer] textarea:not(:disabled)'), "panel ready");
   const timeline = document.querySelector<HTMLElement>("[data-group-timeline]")!;
   if (!GROUP_QUIET_BASELINE) {
-    check(!timeline.querySelector("[data-group-activity]"), "discussion and tool activity stay out of message bubbles");
-    check(!timeline.textContent?.includes("node scripts/check-chat-ui.mjs"), "tool arguments stay out of the quiet conversation");
+    check(!timeline.textContent?.includes("node scripts/check-chat-ui.mjs"), "raw tool arguments stay in activity details");
     if (scene === "scroll") {
       await runScrollFixture(timeline);
     } else if (scene === "waiting") {
@@ -161,7 +164,8 @@ const runFixture = async () => {
       check(draft.textContent?.includes("让阅读更连贯"), "streaming reply keeps its Markdown body");
       check(getComputedStyle(draft).opacity === "1", "reply text has normal message contrast");
       check(draft.querySelectorAll(".chat-cursor").length === 1, "reply uses the single-chat streaming cursor");
-      check(timeline.querySelectorAll('[data-group-execution="maya-turn"] [role="status"]').length === 1, "background member retains its loader");
+      check(timeline.querySelectorAll('[data-group-execution="maya-turn"] [data-chat-activity-preview]').length === 1,
+        "the background member shows its own activity beside another member's reply");
       const initial = turns[0].activity.textMessages[1].text;
       for (const text of ["检查 **消息气泡**", "请 @Maya", "状态 👩🏽‍💻", "正在检查 `README.md`", "- 检查配置\n- 核对文档"]) {
         turns[0].activity.textMessages[1].text = text; turns[0].activity.eventSeq++; emitGroupChanged("g");
@@ -171,7 +175,9 @@ const runFixture = async () => {
         if (text.includes("@Maya")) check(Boolean(timeline.querySelector('[data-group-execution="alpha-turn"] button')), "streaming member mention remains interactive");
       }
       turns[0].activity.phase = "tool"; turns[0].activity.textMessages[1].pending = false; turns[0].activity.eventSeq++; emitGroupChanged("g");
-      await wait(() => timeline.querySelectorAll('[data-group-execution="alpha-turn"] .chat-bubble').length === 3, "a tool stage keeps the two replies and adds a separate loading bubble");
+      await wait(() => timeline.querySelectorAll('[data-group-execution="alpha-turn"] .chat-bubble').length === 3
+        && timeline.querySelector('[data-group-execution="alpha-turn"] [data-chat-activity-preview]'),
+      "a tool stage keeps the two replies and adds a separate activity bubble");
       check(first.textContent === firstText, "tool stage preserves earlier reply text");
       turns[0].activity.textMessages[1].text = initial; turns[0].activity.textMessages[1].pending = true;
       turns[0].activity.phase = "text"; turns[0].activity.eventSeq++; emitGroupChanged("g");

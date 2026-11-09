@@ -89,8 +89,10 @@ function validateInspirationServiceParams(method, input) {
     : method === "inspiration.list" && input && (own(input, "backendId") || own(input, "agentId"))
       ? [...METHODS[method], "backendId", "agentId"]
     : method === "inspiration.media.read" && input && own(input, "preview") ? [...METHODS[method], "preview"]
+    : method === "inspiration.session.messages" && input && own(input, "includeChatSend") ? [...METHODS[method], "includeChatSend"]
     : method === "inspiration.start" && input && own(input, "modelSelection") ? [...METHODS[method], "modelSelection"] : METHODS[method];
   if (!fields || !exact(input, fields) || Buffer.byteLength(JSON.stringify(input)) > 48 * 1024) invalid();
+  if (fields.includes("includeChatSend") && (input.includeChatSend !== true || input.backendId !== "openclaw")) invalid();
   if (method === "inspiration.agent-stats" && (!Array.isArray(input.agents) || input.agents.length > 50
     || !input.agents.every(agent => exact(agent, ["backendId", "agentId"])
       && publicId(agent.backendId) && publicId(agent.agentId))
@@ -268,9 +270,13 @@ function validateInspirationServiceResult(method, result) {
       || (result.hasMore ? !string(result.nextCursor, 256, false) : result.nextCursor !== null)) invalid("INSPIRATION_RESPONSE_INVALID");
     if (method === "inspiration.session.messages") {
       for (const item of result.items) {
-        if (!exact(item, ["id", "createdAt", "promptHash", "text", "attachments"])
+        const fields = ["id", "createdAt", "promptHash", "text", "attachments"];
+        if (item && own(item, "chatSend")) fields.push("chatSend");
+        if (!exact(item, fields)
           || !uuid(item.id) || !at(item.createdAt) || !/^[a-f0-9]{64}$/u.test(item.promptHash)
           || !string(item.text, 34 * 1024) || !validAttachments(item.attachments)) invalid("INSPIRATION_RESPONSE_INVALID");
+        if (own(item, "chatSend") && (!exact(item.chatSend, ["runId", "operationId"])
+          || !uuid(item.chatSend.runId) || !publicId(item.chatSend.operationId))) invalid("INSPIRATION_RESPONSE_INVALID");
       }
     } else if (method === "inspiration.activities") {
       for (const item of result.items) {

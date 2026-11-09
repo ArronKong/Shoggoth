@@ -34,14 +34,15 @@ const translations = { useTranslation: () => ({
 }) };
 const scheduleTypes = { exports: {} };
 vm.runInNewContext(compile("pages/cron/CronFormLayout.tsx"), {
-  exports: scheduleTypes.exports, require: name => name === "react-i18next" ? translations : require(name),
+  exports: scheduleTypes.exports, require: name => name === "react-i18next" ? translations
+    : name === "../../components/Field" ? { Field: host("field"), TextInput: host("input") } : require(name),
 });
 const filtersBar = { exports: {} };
 const filterStubs = {
   "react-i18next": translations,
-  "./CronFilterMenu": host("filter-menu"),
+  "./CronFilterMenu": { __esModule: true, default: host("filter-menu"), CronAgentFilter: host("agent-filter") },
   "./CronFormLayout": scheduleTypes.exports,
-  "./cronIcons": { IconAgent: host("i"), IconSliders: host("i") },
+  "./cronIcons": { IconSchedule: host("i"), IconSliders: host("i") },
 };
 vm.runInNewContext(compile("pages/cron/CronFiltersBar.tsx"), {
   exports: filtersBar.exports, require: name => filterStubs[name] || require(name),
@@ -53,14 +54,19 @@ const gate = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
-const backendIds = ["openclaw"];
-const backends = [{ id: "openclaw", name: "OpenClaw", surfaces: { cron: { kind: "openclaw" } } }];
 const jobs = ["A", "B", "System"].map(name => ({ id: name, name, backendId: "openclaw", enabled: true,
   schedule: { kind: "every", everyMs: 60000 }, actions: name === "System" ? { edit: false, toggle: false, delete: false, run: true, reason: "system-managed" } : {} }));
+const nativeJob = { ...jobs[0], id: "shoggoth:native/fixture", name: "Native", backendId: "shoggoth", prompt: "Preview" };
 
 async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: "Fixture", backendId: "openclaw" }], fixtureJobs = jobs, savedFilters) {
-  const state = { updates: [], creates: [], refreshes: [], successes: [], errors: [], infos: [], gates: new Map(),
-    allJobs: fixtureJobs, listRequests: [], runRequests: [] };
+  const backends = [{ id: "openclaw", name: "OpenClaw", surfaces: { cron: { kind: "openclaw" } } }];
+  if (fixtureJobs.some(job => job.backendId === "shoggoth")) {
+    backends.push({ id: "shoggoth", name: "Shoggoth", surfaces: { cron: { kind: "native" } } });
+  }
+  const backendIds = backends.map(({ id }) => id);
+  const state = { updates: [], creates: [], deletes: [], confirmations: [], refreshes: [], successes: [], errors: [], infos: [], gates: new Map(),
+    allJobs: fixtureJobs, listRequests: [], runRequests: [], detailRequests: [], deliveryRequests: [],
+    details: new Map(fixtureJobs.map(job => [job.id, job])) };
   const form = { __esModule: true, default: host("cron-form"), emptyOpenClawDraft: () => ({ name: "", backendId: "openclaw" }),
     openClawDraftFromJob: job => ({ name: job.name, backendId: job.backendId }), openClawInputFromDraft: draft => ({ ...draft }),
     validateOpenClawDraft: () => null };
@@ -70,14 +76,16 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
       const pair = React.useState(new URLSearchParams()); state.setSearchParams = pair[1]; return pair;
     } },
     "../components/PageHead": { PageHead: host("header") },
-    "../components/BackendBadge": host("backend-badge"), "../components/PillTabs": host("pill-tabs"),
+    "../components/PillTabs": host("pill-tabs"),
     "../components/SearchCapsule": host("search-capsule"),
     "../components/BackendTabIcon": host("backend-icon"),
     "../components/Field": { Switch: host("switch") },
     "../components/Modal": { __esModule: true,
-      default: props => React.createElement("modal", props, props.open ? props.children : null, props.open ? props.footer : null),
-      DetailRow: host("detail-row"), ModalSection: host("section") },
-    "../components/ui": { useConfirm: () => async () => true,
+      default: props => React.createElement("modal", props, props.open ? props.children : null, props.open ? props.footer : null) },
+    "../components/ui": { useConfirm: () => async opts => {
+      state.confirmations.push(opts);
+      return state.gates.get("confirm")?.promise ?? true;
+    },
       useToast: () => ({ success: message => state.successes.push(message), error: message => state.errors.push(message), info: message => state.infos.push(message) }) },
     "../components/TurnTimeline/TurnProcess": host("timeline"),
     "../lib/markdown": { toSanitizedMarkdownHtml: text => text },
@@ -101,14 +109,13 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     "./CronCalendar": { __esModule: true, default: host("calendar"), calendarRangeTitle: () => "Calendar", shiftCalendarCursor: date => date, startOfMonth: date => date },
     "./cron/CronFiltersBar": filtersBar.exports,
     "./cron/CronFormLayout": scheduleTypes.exports,
-    "./cron/cronIcons": { IconPlus: host("i") },
-    "./cron/CronRunHistoryPanel": host("run-history"),
+    "./cron/cronIcons": { IconPlus: host("i"), IconCalendarChevron: host("i") },
     "./cron/CronRunReportModal": { __esModule: true, default: props => React.createElement("report-modal", props,
       props.open ? props.children : null), ReportNote: host("report-note"), runExecutionFailed: () => false },
     "./cron/cronPresets": scheduleDisplay.exports,
     "./cron/OpenClawCronForm": form,
     "./cron/CodexCronForm": { __esModule: true, default: host("codex-form"), emptyCodexCronDraft: () => ({}) },
-    "./cron/CodexCronRunResult": host("codex-result"),
+    "./cron/CronAgentPicker": { CronAssignedAgent: host("assigned-agent") },
     "./cron/CronCreateForm": { __esModule: true, default: host("create-form") },
     "./cron/cronCreateDraft": {
       emptyCronCreateDraft: () => ({ name: "", prompt: "", backendId: "", agentId: "", enabled: true }),
@@ -116,14 +123,21 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
       cronCreateInputFromDraft: draft => ({ ...draft }),
     },
     "./cron/HermesCronForm": { __esModule: true, default: host("hermes-form"), emptyHermesDraft: () => ({}), hermesDraftFromJob: () => ({}), hermesInputFromDraft: () => ({}), validateHermesDraft: () => null },
-    "./cron/ShoggothCronForm": { __esModule: true, default: host("native-form"), emptyNativeCronDraft: () => ({}), nativeCronDraftFromJob: () => ({}), nativeCronEditPlan: () => ({}), nativeCronInputFromDraft: () => ({}), validateNativeCronDraft: () => null },
+    "./cron/ShoggothCronForm": { __esModule: true, default: host("native-form"), emptyNativeCronDraft: () => ({}),
+      nativeCronDraftFromJob: job => ({ ...job }), nativeCronEditPlan: () => ({}), validateNativeCronDraft: () => null },
     "../api/client": {
       listAgents: agentsLoader, getCronRuns: async id => { state.runRequests.push(id); return []; },
       listCronJobs: async filters => { state.listRequests.push(filters); await state.gates.get('list')?.promise; return state.allJobs; },
-      getCronJobDetail: async id => fixtureJobs.find(job => job.id === id),
+      getCronJobDetail: async id => {
+        state.detailRequests.push(id);
+        await state.gates.get(`detail:${id}`)?.promise;
+        return state.details.get(id);
+      },
+      getCronLatestDelivery: async (id, at) => { state.deliveryRequests.push({ id, at }); return { fullText: "Report" }; },
       getModelCatalog: async () => ({}),
       updateCronJob: async (id, input) => { state.updates.push({ id, input }); await state.gates.get(id)?.promise; },
       createCronJob: async input => { state.creates.push(input); await state.gates.get("new")?.promise; },
+      deleteCronJob: async id => { state.deletes.push(id); await state.gates.get(`delete:${id}`)?.promise; },
     },
   };
   const mod = { exports: {} };
@@ -138,7 +152,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   const click = async button => { await act(async () => { button.props.onClick(); await flush(); }); };
   const row = id => renderer.root.findAllByType("tr").find(node => node.findAllByProps({ className: "job-name" })[0]?.children[0] === id);
   const edit = async id => click(buttons(row(id)).find(button => button.children.includes("common.edit")));
-  const formModal = () => renderer.root.findAllByType("modal").find(modal => modal.props.open && (String(modal.props.title).includes("OpenClawTitle") || modal.props.title === "cron.createTitle"));
+  const formModal = () => renderer.root.findAllByType("modal").find(modal => modal.props.open);
   const save = async () => click(buttons(formModal()).find(button => button.children.includes("common.save") || button.children.includes("cronForm.createAction")));
   let notificationSequence = 0;
   const notify = async (id, backend = "openclaw") => { await act(async () => {
@@ -178,21 +192,49 @@ for (const [stored, expected] of [["rrule", "all"], ["on-exit", "all"], ["stream
 }
 
 {
+  const f = await fixture(undefined, [nativeJob, jobs[0]]);
+  f.state.details.set(nativeJob.id, { ...nativeJob, prompt: "Full saved prompt" });
+  const pending = gate(); f.state.gates.set(`detail:${nativeJob.id}`, pending);
+  await f.click(f.row("Native"));
+  assert.equal(f.formModal(), undefined, "native editing waits for the complete definition");
+  await f.click(f.row("A"));
+  await act(async () => { pending.resolve(); await flush(); });
+  assert.equal(f.formModal().props.title, "cron.editOpenClawTitle", "a late row lookup cannot replace a newer editor");
+  act(() => f.formModal().props.onClose());
+  await f.click(f.row("Native"));
+  assert.equal(f.formModal().props.title, "cron.editNativeTitle");
+  assert.equal(f.renderer.root.findByType("native-form").props.draft.prompt, "Full saved prompt");
+  assert.deepEqual(f.state.detailRequests, [nativeJob.id, nativeJob.id]);
+  assert.deepEqual(f.state.runRequests, [], "opening a list row edits the job without loading the old run history");
+  f.dispose();
+}
+{
+  const job = { ...nativeJob, actions: { edit: false, delete: false, reason: "system-managed" } };
+  const f = await fixture(undefined, [job]);
+  assert.equal(f.row("Native").props.onClick, undefined, "protected rows are not editable");
+  await f.notify(job.id, job.backendId);
+  assert.equal(f.formModal(), undefined, "a protected deep link must not open an editor or the old details");
+  assert.equal(f.state.infos.at(-1), "cron.systemManaged");
+  f.dispose();
+}
+{
   const f = await fixture(undefined, [jobs[0]]);
   f.state.allJobs = jobs;
   await f.notify('B');
-  let detail = f.renderer.root.findAllByType('modal').find(modal => modal.props.open);
-  assert.equal(detail.props.title, 'B', 'A notification opens a task outside the current list filter');
+  assert.equal(f.formModal().props.title, 'cron.editOpenClawTitle');
+  assert.equal(f.renderer.root.findByType('cron-form').props.draft.name, 'B', 'A notification edits a task outside the current list filter');
   assert.equal(f.state.listRequests[0].backend, 'openclaw');
   assert.equal(Object.keys(f.state.listRequests[0]).join(), 'backend', 'Notification lookup must ignore saved search/status filters');
-  assert.equal(f.state.runRequests.at(-1), 'B', 'Notification details load the selected task history');
-  act(() => detail.props.onClose());
-  assert.equal(f.renderer.root.findAllByType('modal').filter(modal => modal.props.open).length, 0);
+  act(() => f.formModal().props.onClose());
+  assert.equal(f.formModal(), undefined);
   await f.notify('B');
-  detail = f.renderer.root.findAllByType('modal').find(modal => modal.props.open);
-  assert.equal(detail.props.title, 'B', 'Clicking another notification for the same task reopens its details');
+  assert.equal(f.renderer.root.findByType('cron-form').props.draft.name, 'B', 'Clicking another notification for the same task reopens its editor');
   await f.notify('B', 'wrong-backend');
   assert.equal(f.state.infos.at(-1), 'notif.cronUnavailable', 'A same-ID task from another backend must not be opened');
+  await act(async () => { f.state.setSearchParams(new URLSearchParams({ job: 'A', backend: 'openclaw' })); await flush(); });
+  assert.equal(f.renderer.root.findByType('cron-form').props.draft.name, 'A', 'A plain task link still edits directly');
+  await act(async () => { f.state.setSearchParams(new URLSearchParams({ job: 'B', edit: '1' })); await flush(); });
+  assert.equal(f.renderer.root.findByType('cron-form').props.draft.name, 'B', 'Existing Dashboard edit links still work');
   f.dispose();
 }
 {
@@ -202,9 +244,46 @@ for (const [stored, expected] of [["rrule", "all"], ["on-exit", "all"], ["stream
   await f.notify('B');
   await f.notify('A');
   await act(async () => { pending.resolve(); await flush(); });
-  assert.equal(f.renderer.root.findAllByType('modal').find(modal => modal.props.open).props.title, 'A',
+  assert.equal(f.renderer.root.findByType('cron-form').props.draft.name, 'A',
     'A slow filtered-task lookup cannot replace a later notification target');
-  assert.deepEqual(f.state.runRequests, ['A']);
+  f.dispose();
+}
+{
+  const unrun = { ...nativeJob, id: "shoggoth:unrun", name: "Never run" };
+  const f = await fixture(undefined, [nativeJob, unrun]);
+  f.state.allJobs = [{ ...nativeJob, lastRunAt: Date.now() - 60000 }, unrun];
+  const openFromChat = async job => act(async () => {
+    f.state.setSearchParams(new URLSearchParams({ backend: job.backendId, job: job.id, run: "latest" }));
+    await flush();
+  });
+  await openFromChat(nativeJob);
+  const report = () => f.renderer.root.findByType("report-modal");
+  assert.equal(report().props.open, true, "a run found in the fresh task lookup opens its result even when the cached list predates it");
+  assert.equal(report().props.title, nativeJob.name);
+  assert.deepEqual(f.state.deliveryRequests, [{ id: nativeJob.id, at: undefined }], "chat requests the latest run without a calendar timestamp");
+  assert.equal(f.formModal(), undefined);
+  await act(async () => { report().props.onEdit(); await flush(); });
+  assert.equal(report().props.open, false);
+  assert.equal(f.renderer.root.findByType("native-form").props.draft.id, nativeJob.id, "the result's edit button opens the same task");
+  await openFromChat(unrun);
+  assert.equal(f.renderer.root.findByType("native-form").props.draft.id, unrun.id, "a task that has never run opens its editor");
+  assert.equal(f.state.deliveryRequests.length, 1, "no report lookup is made for a task without a run");
+  f.dispose();
+}
+{
+  const past = Date.now() - 3600000;
+  const job = { ...nativeJob, lastRunAt: past };
+  const f = await fixture(undefined, [job]);
+  act(() => f.renderer.root.findByProps({ ariaLabel: "cron.viewToggle" }).props.onChange("calendar"));
+  const calendar = f.renderer.root.findByType("calendar");
+  await act(async () => { await calendar.props.onJobClick(job, past); });
+  const report = f.renderer.root.findByType("report-modal");
+  assert.equal(report.props.open, true, "a past run still opens its report");
+  assert.deepEqual(f.state.deliveryRequests, [{ id: job.id, at: past }]);
+  assert.equal(f.formModal(), undefined);
+  act(() => report.props.onClose());
+  await act(async () => { await calendar.props.onJobClick(job, Date.now() + 60000); });
+  assert.equal(f.formModal().props.title, "cron.editNativeTitle", "a future slot opens the editor");
   f.dispose();
 }
 {
@@ -254,6 +333,53 @@ for (const [stored, expected] of [["rrule", "all"], ["on-exit", "all"], ["stream
   assert.equal(f.formModal(), undefined);
   assert.deepEqual(f.state.successes, ["cron.savedOpenClaw"]);
   assert.equal(f.state.refreshes.length, 1);
+  f.dispose();
+}
+{
+  const f = await fixture();
+  await f.edit("A");
+  const form = f.renderer.root.findByType("cron-form");
+  act(() => form.props.setDraft({ ...form.props.draft, name: "Unsaved edit" }));
+  const remove = () => f.buttons(f.formModal()).find(button => button.children.includes("common.delete"));
+  const cancel = gate(); f.state.gates.set("confirm", cancel);
+  await f.click(remove());
+  assert.deepEqual(f.state.deletes, [], "opening confirmation must not delete");
+  await act(async () => { cancel.resolve(false); await flush(); });
+  assert.equal(f.renderer.root.findByType("cron-form").props.draft.name, "Unsaved edit", "canceling deletion keeps the draft");
+  assert.deepEqual(f.state.deletes, []);
+
+  const confirm = gate(); f.state.gates.set("confirm", confirm);
+  const pending = gate(); f.state.gates.set("delete:A", pending);
+  const deleteButton = remove();
+  const saveButton = f.buttons(f.formModal()).find(button => button.children.includes("common.save"));
+  await act(async () => {
+    deleteButton.props.onClick(); deleteButton.props.onClick(); await flush();
+    confirm.resolve(true); await flush();
+    saveButton.props.onClick(); await flush();
+  });
+  assert.equal(f.state.confirmations.length, 2, "each deletion intent opens at most one confirmation");
+  assert.deepEqual(f.state.deletes, ["A"], "only the confirmed job is deleted");
+  assert.deepEqual(f.state.updates, [], "save cannot race a pending deletion");
+  await act(async () => { pending.resolve(); await flush(); });
+  assert.equal(f.formModal(), undefined);
+  assert.deepEqual(f.state.successes, ["cron.deleted"]);
+  assert.equal(f.state.refreshes.length, 1);
+  f.dispose();
+}
+{
+  const f = await fixture(undefined, [{ ...jobs[0], actions: { delete: false } }, jobs[1]]);
+  await f.edit("A");
+  const button = f.buttons(f.formModal()).find(item => item.children.includes("common.delete"));
+  assert.equal(button.props.disabled, true, "jobs without delete permission cannot be removed from the edit form");
+  await f.click(button);
+  assert.deepEqual(f.state.confirmations, []);
+  assert.deepEqual(f.state.deletes, []);
+  await f.edit("B");
+  const confirm = gate(); f.state.gates.set("confirm", confirm);
+  await f.click(f.buttons(f.formModal()).find(item => item.children.includes("common.delete")));
+  await f.notify("A");
+  await act(async () => { confirm.resolve(true); await flush(); });
+  assert.deepEqual(f.state.deletes, [], "a stale confirmation cannot delete after a newer selection takes over");
   f.dispose();
 }
 for (const rejectOld of [false, true]) {
@@ -322,7 +448,7 @@ for (const rejectOld of [false, true]) {
   assert.equal(f.state.creates[0].enabled, false, "the footer toggle updates the draft submitted on creation");
   await f.notify("B");
   await act(async () => { pending.resolve(); await flush(); });
-  assert.equal(f.renderer.root.findAllByType("modal").find(modal => modal.props.open)?.props.title, "B");
+  assert.equal(f.renderer.root.findByType("cron-form").props.draft.name, "B");
   assert.equal(f.state.creates.length, 1); assert.equal(f.state.refreshes.length, 0);
   f.dispose();
 }
@@ -364,4 +490,4 @@ for (const rejectOld of [false, true]) {
   assert.equal(f.renderer.root.findByType("create-form").props.agents.openclaw.length, 1);
   f.dispose();
 }
-console.log("PASS Cron filters, save lifecycle and visibility: creation modes and saved filter fallback, cached heartbeat list/calendar/counts, submit/dismiss lock, stale selection/filter/unmount results, direct create with required assistant, roster loading and retry, system-managed edit guard");
+console.log("PASS Cron editor navigation, calendar reports, filters, visibility, and form mutation lifecycle");

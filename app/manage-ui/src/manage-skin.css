@@ -669,8 +669,10 @@ header.page-head {
   color: inherit;
 }
 
-/* 日期前后翻页是裸箭头，不带胶囊背景；字号/色值取自设计稿 6888:839。 */
+/* 箭头与日期标题共用中线，图标在点击区域内居中。 */
 .management-page.cron-page .cron-cal-arrow {
+  display: grid;
+  place-items: center;
   width: 32px;
   height: 48px;
   padding: 0;
@@ -678,9 +680,6 @@ header.page-head {
   background: none;
   box-shadow: none;
   color: light-dark(#1b1f27, #e4e4e7);
-  font-size: 23px;
-  font-weight: 300;
-  line-height: 36px;
 }
 
 .management-page.cron-page .cron-cal-arrow:hover:not(:disabled) {

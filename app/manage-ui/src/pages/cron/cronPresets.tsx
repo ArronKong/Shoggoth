@@ -29,12 +29,12 @@ export function cronToHuman(expr: string, t: Translate): string {
   const inRange = (s: string, max: number, min = 0) => /^\d+$/.test(s) && Number(s) >= min && Number(s) <= max;
   const hhmm = `${String(hour).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
   if (hour === "*" && dom === "*" && mon === "*" && dow === "*") {
-    if (min === "*") return t("cronForm.humanEveryNMin", { n: 1 });
+    if (min === "*") return t("cronForm.intervalMinutes", { count: 1 });
     if (/^\*\/\d+$/.test(min) && inRange(min.slice(2), 59, 1)) {
       const step = Number(min.slice(2));
       // Cron steps restart each hour, so */7 is not a fixed seven-minute interval.
       return 60 % step === 0
-        ? t("cronForm.humanEveryNMin", { n: step })
+        ? t("cronForm.intervalMinutes", { count: step })
         : t("cronForm.humanMinuteSteps", { n: step });
     }
     if (inRange(min, 59)) return t("cronForm.humanHourlyAt", { m: min.padStart(2, "0") });
@@ -99,7 +99,8 @@ export function scheduleText(job: UnifiedCronJob, t: Translate, locale: string):
     }
   }
   if (schedule.staggerMs && schedule.staggerMs > 0) {
-    text += ` · ${t("cron.staggerUpTo", { seconds: schedule.staggerMs / 1000 })}`;
+    const seconds = schedule.staggerMs / 1000;
+    text += ` · ${t("cron.staggerUpTo", { seconds, count: seconds })}`;
   }
   return text;
 }

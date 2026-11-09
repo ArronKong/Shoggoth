@@ -22,14 +22,15 @@ function compile(f, extra = {}) {
 
 test("parts follow what Shoggoth delivers: resumed sessions keep history, Skill bodies leave the rules", () => {
   const blocks = [{ kind: "skill", estimatedTokens: 40 }, { kind: "skill-catalog", estimatedTokens: 7 },
-    { kind: "user", estimatedTokens: 5 }, { kind: "memory", estimatedTokens: 11 }, { kind: "hook-data", estimatedTokens: 3 },
+    { kind: "user", estimatedTokens: 5 }, { kind: "user-profile", estimatedTokens: 31 },
+    { kind: "memory", estimatedTokens: 11 }, { kind: "hook-data", estimatedTokens: 3 },
     { kind: "transcript", estimatedTokens: 300 }, { kind: "checkpoint", estimatedTokens: 20 }, { kind: "handoff", estimatedTokens: 2 }];
   const input = { stableInstructions: "s".repeat(400), turnInstructions: "t".repeat(200), definitionText: "d".repeat(80),
     tools: [{ name: "lookup" }], toolExposure: "resident", blocks, historyDelivered: true, prompt: "hello",
     attachments: [{ name: "a.txt", mimeType: "text/plain", id: "a" }] };
   const fresh = measureComposition(input);
   assert.equal(fresh.version, 1);
-  assert.equal(fresh.definitionTokens, 20);
+  assert.equal(fresh.definitionTokens, 51, "USER preferences belong to role and working rules");
   assert.equal(fresh.rulesTokens, 100 + 50 - 20 - 40, "definition files and Skill bodies are not counted as rules");
   assert.equal(fresh.skillTokens, 47);
   assert.equal(fresh.memoryTokens, 19);

@@ -6,6 +6,7 @@ const zh = {
   promptConfirmChoice: "确认选择",
   promptOptional: "选填",
   promptOtherPlaceholder: "或填写其他答案…",
+  promptOtherAnswer: "其他回答",
   promptCustomAnswer: "或填写自己的回答",
   promptCustomPlaceholder: "输入你的想法或具体要求…",
 };
@@ -14,6 +15,7 @@ const en = {
   promptConfirmChoice: "Confirm selection",
   promptOptional: "Optional",
   promptOtherPlaceholder: "Or write another answer…",
+  promptOtherAnswer: "Other answer",
   promptCustomAnswer: "Or write your own answer",
   promptCustomPlaceholder: "Share your answer or specific requirements…",
 } satisfies typeof zh;

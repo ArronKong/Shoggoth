@@ -143,6 +143,7 @@ function transcriptMessage(event, role, content) {
       sourceEventId: event.id,
       ...(event.runId ? { runId: event.runId, displayId: `native-run:${event.runId}`, nativeUiVersion: 1 } : {}),
       contextExcluded: event.contextExcluded,
+      ...(role === "user" && event.content?.transcriptType === "interaction.response" ? { promptResponse: true } : {}),
       ...(role === "user" && event.content?.attachments?.length
         ? { attachments: structuredClone(event.content.attachments) } : {}),
       ...(role === "user" && event.content?.connectorSelection?.length
@@ -1351,6 +1352,11 @@ function createChatServiceController(options = {}) {
     const profiles = productStore.listAgentProfiles().filter((profile) => profile.enabled
       && (profileIds === null || profileIds.includes(profile.id)));
     for (const profile of profiles) {
+      const main = options.ensureMainSession?.(profile.id);
+      if (main) {
+        transcriptStore?.ensureSession({ profileId: main.profileId, sessionId: main.id });
+        continue;
+      }
       // 群内部会话不算用户可见私聊：先入群的 Agent 仍要有默认私聊（群聊计划 §3.2 第 3 条）。
       const hasSession = chatSessionStore.listSessions()
         .some((session) => session.profileId === profile.id && !isInternalSession(session.sessionKey));

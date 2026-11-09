@@ -22,6 +22,7 @@ try {
   const { sessionDisplayPreview, sessionDisplayTitle } = await import(pathToFileURL(outfile).href);
   const t = (key, opts = {}) => ({
     "chat.sessionKindMain": "主会话",
+    "chat.nativeMainSession": "主会话",
     "chat.sessionKindWeb": "App",
     "chat.sessionKindTgDirect": `TG 私聊 ${opts.id ?? ""}`,
     "chat.sessionKindTgGroup": `TG 群 ${opts.id ?? ""}`,
@@ -49,6 +50,9 @@ try {
   }, t), "原生 Agent 第一条消息", "原生 Agent 使用 Service 派生标题");
   assert.equal(sessionDisplayPreview({ ...app, lastMessagePreview: appTitle }, appTitle), "", "副标题不重复主标题");
   assert.equal(sessionDisplayTitle({ key: "agent:main:main" }, t), "主会话");
+  const nativeMain = { key: "agent:shoggoth-codex:11111111-1111-4111-8111-111111111111", mainSession: true, derivedTitle: "提醒" };
+  assert.equal(sessionDisplayTitle(nativeMain, t), "主会话");
+  assert.equal(sessionDisplayTitle({ ...nativeMain, label: "手动改名" }, t), "手动改名");
 
   const chatPage = await readFile(path.join(root, "app/manage-ui/src/pages/ChatPage.tsx"), "utf8");
   const sessionMenu = await readFile(path.join(root, "app/manage-ui/src/pages/ChatSessionMenu.tsx"), "utf8");
@@ -59,6 +63,8 @@ try {
   assert.match(sessionMenu, /\$\{s\.title\} \$\{s\.sub\} \$\{s\.key\}/, "隐藏的原始 key 仍须可搜索");
   assert.match(zhCN, /sessionKindWeb:\s*"App"/);
   assert.match(en, /sessionKindWeb:\s*"App"/);
+  assert.match(zhCN, /nativeMainSession:\s*"主会话"/);
+  assert.match(en, /nativeMainSession:\s*"Main session"/);
 
   console.log("chat session display unit: PASS");
 } finally {

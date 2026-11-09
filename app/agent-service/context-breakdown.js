@@ -15,20 +15,23 @@ const blockTokens = (blocks, kinds) => blocks.filter(block => kinds.includes(blo
 
 // `definitionText` is the exact AGENTS/IDENTITY/SOUL text inside the stable
 // instructions. Selected Skill bodies are `skill` blocks inside the turn text.
+// USER preferences travel at user authority in dynamic context, but belong to
+// the role/working-rules category. Do not subtract them from stable rules.
 // History counts only when Shoggoth sends it; a resumed native session keeps
 // its own history, which then belongs to the Runtime's remainder. Only
 // "resident" Runtimes are known to load every listed tool definition.
 function measureComposition({ stableInstructions, turnInstructions, definitionText, tools, toolExposure, blocks,
   historyDelivered, prompt = "", attachments = [] }) {
-  const definitionTokens = estimateContextTokens(definitionText);
+  const instructionDefinitionTokens = estimateContextTokens(definitionText);
+  const definitionTokens = instructionDefinitionTokens + blockTokens(blocks, ["user-profile"]);
   const skillBodyTokens = blockTokens(blocks, ["skill"]);
-  const noticeTokens = blockTokens(blocks, ["notice"]);
+  const noticeTokens = blockTokens(blocks, ["notice", "proactive-history"]);
   return {
     version: COMPOSITION_VERSION,
     historyDelivered: historyDelivered || noticeTokens > 0,
     toolExposure,
     rulesTokens: Math.max(0, estimateContextTokens(stableInstructions) + estimateContextTokens(turnInstructions)
-      - definitionTokens - skillBodyTokens),
+      - instructionDefinitionTokens - skillBodyTokens),
     definitionTokens,
     toolTokens: estimateContextTokens(JSON.stringify(tools)),
     memoryTokens: blockTokens(blocks, ["user", "memory", "hook-data"]),

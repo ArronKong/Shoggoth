@@ -44,7 +44,7 @@ const HERMES_CLI_TOOLS = new Set(["terminal", "bash", "shell", "exec"]);
 // Hermes 的技能加载工具（args {name}）。`skills_list`/`skill_manage` 是浏览与
 // 增删，不算「用过」。
 const HERMES_SKILL_VIEW_TOOL = "skill_view";
-const { AgentBackend, dirCreatedAtMs, sortAgentsByCreatedAt } = require("./agent-backend");
+const { AgentBackend, dirCreatedAtMs, existingLocalDirectory, sortAgentsByCreatedAt } = require("./agent-backend");
 const { SelfUpdater } = require("./self-updater");
 const { createHermesLocalRuntimeScope } = require("./hermes-local-runtime-scope");
 const {
@@ -6770,6 +6770,7 @@ class HermesBackend extends AgentBackend {
   async getAgentFile(id) {
     const profile = this.profileById.get(id);
     if (!profile) throw new Error(`hermes: 未找到 agent ${id}`);
+    const local = this._getConfig().hermesMode !== "remote";
     const dash = this._requireDashboard(
       this.dashboards.get(profile) || this._defaultDash(),
       "读取 agent 文件",
@@ -6780,7 +6781,13 @@ class HermesBackend extends AgentBackend {
     );
     if (status !== 200) return { name: "SOUL.md", content: "", missing: true };
     const j = JSON.parse(body);
-    return { name: "SOUL.md", content: j.content || "", missing: j.exists === false };
+    let localDirectory;
+    if (local && this._getConfig().hermesMode !== "remote" && this.profileById.get(id) === profile
+      && (this.dashboards.get(profile) || this._defaultDash()) === dash) {
+      try { localDirectory = existingLocalDirectory(this._hermesHomeForProfile(profile)); }
+      catch { /* Keep the file readable if its local folder cannot be resolved. */ }
+    }
+    return { name: "SOUL.md", content: j.content || "", missing: j.exists === false, localDirectory };
   }
 
   async setAgentFile(id, _file, content) {

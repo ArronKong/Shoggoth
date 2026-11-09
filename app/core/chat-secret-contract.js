@@ -6,30 +6,7 @@ const SECRET_REFERENCE_VERSION = 1;
 const SECRET_REFERENCE_PATTERN = /\{\{SHOGGOTH_SECRET_([a-f0-9]{32})\}\}/gu;
 const SECRET_KINDS = Object.freeze(["password", "api_key", "token", "private_key", "secret"]);
 const SECRET_METHODS = Object.freeze(["prepare", "list", "revoke", "result", "results", "capabilities", "disclosures", "decide"].map(action => `chat.secret.${action}`));
-const SECRET_MESSAGES = Object.freeze({
-  SECRET_INPUT_INVALID: "这条消息暂时无法发送，请检查填写的内容",
-  SECRET_INPUT_REVIEW_REQUIRED: "消息中可能包含密码或密钥，请选中完整内容后再发送",
-  SECRET_PROCESSING_UNAVAILABLE: "这条消息暂时无法安全发送，请稍后重试。内容已为你保留",
-  SECRET_REFERENCE_INVALID: "无法使用之前提供的密码或密钥，请重新填写",
-  SECRET_REFERENCE_EXPIRED: "之前提供的密码或密钥已过期，请重新填写",
-  SECRET_REFERENCE_FORBIDDEN: "这份密码或密钥属于另一个会话，请在当前会话重新填写",
-  SECRET_OPERATION_CONFLICT: "原消息身份已用于不同内容，请核对原消息",
-  SECRET_STORE_UNCERTAIN: "暂时无法确认密码或密钥是否保存成功，消息尚未发送，请稍后查看",
-  SECRET_TOOL_OUTCOME_UNKNOWN: "操作可能已执行，请核对结果；不会自动重复执行",
-  SECRET_TOOL_NOT_SUPPORTED: "这个工具暂时无法代你填写密码或密钥，请手动完成这一步",
-  SECRET_MODEL_PROJECTION_UNAVAILABLE: "暂时无法隐藏这次发送内容中的私密信息，对话已暂停。已完成的操作不会重复执行",
-  SECRET_MODEL_RUNTIME_UNSUPPORTED: "当前助理版本暂时无法保护消息中的私密信息，请更新或切换助理后重试。内容已为你保留",
-  SECRET_MODEL_IDENTITY_UNAVAILABLE: "暂时无法确认这次内容属于哪个对话，发送已暂停。请稍后重试，已完成的操作不会重复执行",
-  SECRET_MODEL_SCOPE_INVALID: "这次对话暂时无法安全继续，发送已暂停。内容已为你保留",
-  SECRET_DISCLOSURE_EXPIRED: "这次发送已结束或确认已过期，请查看对话的最新状态",
-  SECRET_DISCLOSURE_CANCELED: "已取消这次发送，已完成的操作不受影响",
-  SECRET_MEDIA_UNAVAILABLE: "暂时无法隐藏附件中的私密信息，附件尚未发送",
-  SECRET_MEDIA_SPEECH_UNAVAILABLE: "暂时无法在这台设备上识别语音，附件尚未发送",
-  SECRET_MEDIA_INVALID: "暂时无法读取这个附件，请检查文件后重新添加。附件尚未发送",
-  SECRET_MEDIA_CAPACITY: "这个附件暂时无法在本机处理，请缩小文件或改用文字。附件尚未发送",
-  SECRET_MEDIA_TIMEOUT: "处理这个附件花费了较长时间，请稍后重试。附件尚未发送",
-  SECRET_MEDIA_CANCELED: "已取消附件处理，附件尚未发送",
-});
+const SECRET_MESSAGES = Object.freeze(require("../agent-service/chat-error-messages.json").chatSecrets);
 
 function secretReference(id) {
   if (typeof id !== "string" || !/^[a-f0-9]{32}$/u.test(id)) throw new TypeError("Invalid secret reference id");

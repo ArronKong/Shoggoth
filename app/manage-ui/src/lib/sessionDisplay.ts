@@ -9,6 +9,7 @@ export interface SessionDisplayRow {
   name?: string;
   subject?: string;
   lastMessagePreview?: string;
+  mainSession?: boolean;
 }
 
 type TFn = (key: string, opts?: Record<string, unknown>) => string;
@@ -19,7 +20,7 @@ function oneLine(value: unknown): string {
 
 function contentTitle(row: SessionDisplayRow): string {
   const tail = sessionTail(row.key);
-  for (const value of [row.label, row.title, row.displayName, row.derivedTitle, row.name, row.subject]) {
+  for (const value of [row.label, row.title, row.displayName, row.mainSession ? undefined : row.derivedTitle, row.name, row.subject]) {
     const text = oneLine(value);
     if (text && text !== row.key && text !== tail) return text;
   }
@@ -30,6 +31,7 @@ function contentTitle(row: SessionDisplayRow): string {
 export function sessionDisplayTitle(row: SessionDisplayRow, t: TFn): string {
   const content = contentTitle(row);
   if (content) return content;
+  if (row.mainSession) return t("chat.nativeMainSession");
 
   const tail = sessionTail(row.key);
   if (!tail || tail === "main") return t("chat.sessionKindMain");

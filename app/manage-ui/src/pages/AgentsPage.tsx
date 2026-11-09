@@ -3,6 +3,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -13,12 +14,10 @@ import { useTranslation } from "react-i18next";
 import { useSearchParams } from "react-router-dom";
 import { PageHead } from "../components/PageHead";
 import type {
-  AgentArtifactsResult,
   AgentDefinitionState,
   AgentTranscriptEvent,
   AgentTranscriptSession,
   AgentToolsState,
-  RuntimeStatus,
   UnifiedAgent,
   UnifiedAgentDetail,
   UnifiedCronJob,
@@ -35,13 +34,11 @@ import {
   getModelCatalog,
   getRuntimeStatuses,
   importAgentDefinition,
-  listAgentArtifacts,
   listAgents,
   listCronJobs,
   listAgentTools,
   listAgentTranscripts,
   openPath,
-  revealPath,
   restoreAgentDefinition,
   runCronJob,
   setAgentFile,
@@ -81,6 +78,7 @@ import s from "./AgentsPage.module.css";
 
 const HeartbeatSettings = lazy(() => import("./agents/HeartbeatSettings"));
 const AgentInspirationPanel = lazy(() => import("./InspirationPage").then(module => ({ default: module.AgentInspirationPanel })));
+const AgentFilesPanel = lazy(() => import("./agents/AgentFilesPanel"));
 
 type Tab = "overview" | "setup" | "memory" | "history" | "tools" | "computer" | "cron" | "inspiration" | "artifacts";
 const HIDDEN_NATIVE_TABS = new Set<Tab>(["memory", "history", "tools", "computer"]);
@@ -152,8 +150,10 @@ export default function AgentsPage() {
   const activeBackendDescriptor = backendDescriptors.get(backend);
   const backendName = activeBackendDescriptor?.name || backend;
   const hasAgentHarness = activeBackendDescriptor?.surfaces.agentHarness === true;
+  const hasManagedFiles = activeBackendDescriptor?.surfaces.agentFiles === true;
   const agentLifecycle = activeBackendDescriptor?.agentLifecycle;
   const canCreateAgent = agentLifecycle?.create === true;
+  const canChooseCreateRuntime = canCreateAgent && activeBackendDescriptor?.surfaces.runtimeBindings === true;
   const canUpdateAgent = agentLifecycle?.update === true;
   const canRemoveAgent = agentLifecycle?.remove === true;
   const canArchiveAgent = agentLifecycle?.archive === true;
@@ -163,6 +163,7 @@ export default function AgentsPage() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<UnifiedAgentDetail | null>(null);
+  const setupFiles = useMemo(() => detail?.setupFiles ?? visibleAgentFiles(detail?.files), [detail]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [savedTab, setTab] = useStickyState<Tab>("agents.tab", "overview");
   // 旧缓存也先回到概览，避免隐藏页签的内容闪现或触发数据加载。
@@ -176,6 +177,9 @@ export default function AgentsPage() {
     fallbacks: [],
   });
   const [savingOverview, setSavingOverview] = useState(false);
+  const [overviewNameConflict, setOverviewNameConflict] = useState<string | null>(null);
+  const overviewNameErrorId = useId();
+  const overviewNameInvalid = overviewNameConflict === form.name;
 
   // files（Setup 页签）。阅读态点击进入编辑态，Esc 放弃、Save 写回。
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -184,6 +188,8 @@ export default function AgentsPage() {
   const [savingFile, setSavingFile] = useState(false);
   const [fileEditing, setFileEditing] = useState(false);
   const [fileReadOnly, setFileReadOnly] = useState(false);
+  const [fileCanOpenFolder, setFileCanOpenFolder] = useState(false);
+  const FileHeading = fileCanOpenFolder ? "button" : "div";
   const fileOrigRef = useRef("");
   const fileRevisionRef = useRef<number | string | undefined>(undefined);
   const fileTargetRef = useRef<string | null>(null);
@@ -204,9 +210,8 @@ export default function AgentsPage() {
   const [toolsState, setToolsState] = useState<AgentToolsState | null>(null);
   const harnessImportRef = useRef<HTMLInputElement>(null);
 
-  // cron + 产出文件 (lazy)。
+  // 定时任务按需加载。
   const [agentCron, setAgentCron] = useState<UnifiedCronJob[] | null>(null);
-  const [artifacts, setArtifacts] = useState<AgentArtifactsResult | null>(null);
 
   // 模型目录（Overview 的模型选择器）——与聊天页同一个共享 revision store
   const [models, setModels] = useState<UnifiedModel[]>([]);
@@ -215,8 +220,18 @@ export default function AgentsPage() {
   // create
   const [creating, setCreating] = useState(false);
   const [createDraft, setCreateDraft] = useState(emptyCreateDraft);
-  // Connected local CLIs offered as the new Agent's default runtime.
-  const [createRuntimes, setCreateRuntimes] = useState<RuntimeStatus[]>([]);
+  const [createNameConflict, setCreateNameConflict] = useState<string | null>(null);
+  const createNameErrorId = useId();
+  const createNameInvalid = createNameConflict === createDraft.name;
+  const runtimeOptions = usePageCache(
+    `agents:create-runtimes:${backend}`,
+    () => getRuntimeStatuses({ forAgentCreation: true }),
+    { enabled: creating && canChooseCreateRuntime, staleTime: 5_000 },
+  );
+  const createRuntimes = (runtimeOptions.data ?? []).filter(runtime => runtime.enabled && runtime.releaseEnabled
+    && runtime.installation === "available" && runtime.readiness !== "incompatible");
+  const createRuntimeUnavailable = canChooseCreateRuntime && createDraft.runtimeAccountId !== ""
+    && !createRuntimes.some(runtime => runtime.runtimeAccountId === createDraft.runtimeAccountId);
   const [savingCreate, setSavingCreate] = useState(false);
   const createOperationRef = useRef<LifecycleRetryOperation | null>(null);
   const archiveOperationRef = useRef<LifecycleRetryOperation | null>(null);
@@ -267,6 +282,7 @@ export default function AgentsPage() {
 
   const openDetail = async (id: string) => {
     const seq = ++detailReqRef.current;
+    setOverviewNameConflict(null);
     fileRequestGuard.invalidate();
     fileTargetRef.current = null;
     fileOrigRef.current = "";
@@ -286,7 +302,6 @@ export default function AgentsPage() {
     setTranscriptEventsHasMore(false);
     setToolsState(null);
     setAgentCron(null);
-    setArtifacts(null);
     setDetailLoading(true);
     try {
       const d = await getAgent(backend, id);
@@ -332,7 +347,7 @@ export default function AgentsPage() {
   }, [requestedBackend, requestedAgent, backend, availableBackends, loading, agentsData]);
 
   // 主模型改完后只把 detail 的服务端真值刷新一遍（左侧卡片的模型/提供方跟着变）。
-  // 故意不复用 openDetail：那会 setDetail(null) 并清空 kanban/cron/artifacts/文件缓存，
+  // 故意不复用 openDetail：那会 setDetail(null) 并清空其他页签状态，
   // 面板闪一下还丢掉其他页签已加载的数据。也故意不回写 form —— form 是用户的编辑
   // 草稿（改名），覆写会冲掉未保存的输入并让 overviewDirty 误判。
   const reloadDetail = async () => {
@@ -423,15 +438,9 @@ export default function AgentsPage() {
         .then((all) => { if (alive) setAgentCron(all.filter((j) => j.backendId === backend && j.agentId === agentId)); })
         .catch(() => { if (alive) setAgentCron([]); });
     }
-    if (tab === "artifacts" && artifacts === null && detail.backendId === backend) {
-      listAgentArtifacts(backend, agentId)
-        .then((r) => { if (alive) setArtifacts(r); })
-        .catch(() => { if (alive) setArtifacts({ supported: false, items: [] }); });
-    }
     // 进 Setup 默认打开第一个 .md（agent 的人设/记忆文件都是 md，没有则退回第一个文件）。
     if (tab === "setup" && !activeFile) {
-      const files = visibleAgentFiles(detail.files);
-      const first = files.find((f) => /\.md$/i.test(f.name)) || files[0];
+      const first = setupFiles.find((f) => /\.md$/i.test(f.name)) || setupFiles[0];
       if (first) void openFile(first.name);
     }
     if (hasAgentHarness && tab === "setup" && definition === null) {
@@ -455,7 +464,7 @@ export default function AgentsPage() {
         .catch(() => { if (alive) setToolsState({ supported: true, registryRevision: "", revision: 1, tools: [] }); });
     }
     return () => { alive = false; };
-  }, [tab, detail, backend, agentCron, artifacts, activeFile, hasAgentHarness, definition, transcriptSessions, toolsState]);
+  }, [tab, detail, backend, agentCron, activeFile, setupFiles, hasAgentHarness, definition, transcriptSessions, toolsState]);
 
   // 模型目录：与聊天页共用同一个 revision store（先同步首屏缓存、订阅 apply、再 revalidate）。
   // 只有能写回模型的后端才需要它。
@@ -493,11 +502,13 @@ export default function AgentsPage() {
     setFileEditing(false);
     setFileLoading(true);
     setFileContent("");
+    setFileCanOpenFolder(false);
     try {
       const f = await getAgentFile(backend, detail.id, name);
       if (!fileRequestGuard.isCurrent(ticket, target)) return;
       setFileContent(f.content || "");
       setFileReadOnly(f.readOnly === true);
+      setFileCanOpenFolder(!!f.localDirectory);
       fileRevisionRef.current = f.revision ?? undefined;
       fileOrigRef.current = f.content || "";
       fileTargetRef.current = target;
@@ -741,6 +752,7 @@ export default function AgentsPage() {
     dirty: overviewDirty || fileDirty,
     busy: savingOverview || savingFile,
     onDiscard: () => {
+      setOverviewNameConflict(null);
       if (detail) {
         setForm({
           name: detail.name || "",
@@ -756,6 +768,7 @@ export default function AgentsPage() {
 
   const saveOverview = async () => {
     if (!detail || !canUpdateAgent) return;
+    const detailSeq = detailReqRef.current;
     setSavingOverview(true);
     try {
       // workspace 已改为只读展示，不再随保存写回。model+fallbacks 同属一个配置
@@ -773,6 +786,10 @@ export default function AgentsPage() {
       setSelectedId(nextId);
       await openDetail(nextId);
     } catch (e) {
+      if (e instanceof ApiError && e.code === "AGENT_NAME_CONFLICT") {
+        if (detailSeq === detailReqRef.current) setOverviewNameConflict(form.name);
+        return;
+      }
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSavingOverview(false);
@@ -816,13 +833,8 @@ export default function AgentsPage() {
   const openCreate = () => {
     if (!canCreateAgent) return;
     createOperationRef.current = null;
+    setCreateNameConflict(null);
     setCreateDraft(emptyCreateDraft());
-    setCreateRuntimes([]);
-    if (activeBackendDescriptor?.surfaces.runtimeBindings) {
-      // Without the list the dialog still offers the built-in harness.
-      void getRuntimeStatuses().then((items) => setCreateRuntimes(items.filter((runtime) => runtime.enabled
-        && runtime.releaseEnabled && runtime.installation === "available" && runtime.readiness !== "incompatible"))).catch(() => {});
-    }
     setCreating(true);
   };
 
@@ -872,6 +884,10 @@ export default function AgentsPage() {
       }
     } catch (e) {
       if (!hasAgentHarness || !retainLifecycleOperation(e)) createOperationRef.current = null;
+      if (e instanceof ApiError && e.code === "AGENT_NAME_CONFLICT") {
+        setCreateNameConflict(createDraft.name);
+        return;
+      }
       const message = e instanceof Error ? e.message : String(e);
       const kind = classifyAgentCreateError(backend, createDraft.name, message);
       toast.error(kind ? t(`agents.createError.${kind}`) : message);
@@ -888,12 +904,26 @@ export default function AgentsPage() {
     }));
   };
 
-  const openHostPath = async (target: string, reveal = false) => {
+  const openHostPath = async (target: string) => {
     try {
-      if (reveal) await revealPath(target);
-      else await openPath(target);
+      await openPath(target);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const openFileFolder = async (name: string) => {
+    if (!detail) return;
+    const target = fileTargetKey(backend, detail, name);
+    if (fileTargetRef.current !== target) return;
+    try {
+      // Native definitions get a new directory on each save.
+      const { localDirectory } = await getAgentFile(backend, detail.id, name);
+      if (fileTargetRef.current !== target) return;
+      if (localDirectory) await openHostPath(localDirectory);
+      else toast.error(t("agents.fileFolderUnavailable"));
+    } catch (e) {
+      if (fileTargetRef.current === target) toast.error(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -1538,9 +1568,17 @@ export default function AgentsPage() {
                     <input
                       className={s.ovInput}
                       value={form.name}
-                      onChange={(e) => setForm({ ...form, name: e.target.value })}
+                      onChange={(e) => {
+                        setOverviewNameConflict(null);
+                        setForm({ ...form, name: e.target.value });
+                      }}
                       readOnly={!canUpdateAgent}
+                      aria-invalid={overviewNameInvalid || undefined}
+                      aria-describedby={overviewNameInvalid ? overviewNameErrorId : undefined}
                     />
+                    {overviewNameInvalid && (
+                      <span className={s.nameError} id={overviewNameErrorId} role="alert">{t("agents.nameConflict")}</span>
+                    )}
                   </label>
 
                   {activeBackendDescriptor?.surfaces.runtimeBindings ? (
@@ -1722,8 +1760,8 @@ export default function AgentsPage() {
                 )}
               <div className={s.suLayout}>
                 <nav className={s.suList}>
-                  {visibleAgentFiles(detail.files).length === 0 && <p className={s.dim}>{t("agents.noFiles")}</p>}
-                  {visibleAgentFiles(detail.files).map((f) => (
+                  {setupFiles.length === 0 && <p className={s.dim}>{t("agents.noFiles")}</p>}
+                  {setupFiles.map((f) => (
                     <button
                       key={f.name}
                       type="button"
@@ -1744,13 +1782,20 @@ export default function AgentsPage() {
                   {activeFile && (
                     <>
                       <header className={s.suHead}>
-                        <span className={s.suFileIcon} aria-hidden="true">
-                          <ArtifactThumb name={activeFile} />
-                        </span>
-                        <div className={s.suHeadText}>
-                          <div className={s.suFileName}>{activeFile}</div>
-                          <div className={s.suFileDesc}>{fileDesc(activeFile)}</div>
-                        </div>
+                        <FileHeading
+                          className={s.suFileHeading}
+                          type={fileCanOpenFolder ? "button" : undefined}
+                          aria-label={fileCanOpenFolder ? t("agents.openFileFolder", { name: activeFile }) : undefined}
+                          onClick={fileCanOpenFolder ? () => void openFileFolder(activeFile) : undefined}
+                        >
+                          <span className={s.suFileIcon} aria-hidden="true">
+                            <ArtifactThumb name={activeFile} />
+                          </span>
+                          <span className={s.suHeadText}>
+                            <span className={s.suFileName}>{activeFile}</span>
+                            <span className={s.suFileDesc}>{fileDesc(activeFile)}</span>
+                          </span>
+                        </FileHeading>
                         {fileEditing && !fileReadOnly && (
                           <button
                             type="button"
@@ -1942,51 +1987,10 @@ export default function AgentsPage() {
 
             {detail?.backendId === backend && tab === "artifacts" && (
               <div className={s.tabPane}>
-                {artifacts?.supported && (artifacts.total ?? artifacts.items.length) > 0 && (
-                  <p className={s.paneNote}>
-                    {t("agents.artifactsCount", { count: artifacts.total ?? artifacts.items.length })}
-                    {artifacts.items.length < (artifacts.total ?? 0)
-                      ? t("agents.artifactsShown", { shown: artifacts.items.length })
-                      : ""}
-                  </p>
-                )}
-                {artifacts?.partial && <p className={s.paneNote} role="status">{t("chat.agentArtifactsPartial")}</p>}
-                {artifacts === null ? (
-                  <p className={s.dim}>{t("common.loading")}</p>
-                ) : !artifacts.supported ? (
-                  <>
-                    <p className={s.dim} role="status">
-                      {t(artifacts.reason === "remote" ? "agents.artifactsUnsupported" : "chat.agentArtifactsUnavailable")}
-                    </p>
-                    {artifacts.reason !== "remote" && (
-                      <button type="button" className={s.pillBtnGhost} onClick={() => setArtifacts(null)}>{t("common.retry")}</button>
-                    )}
-                  </>
-                ) : artifacts.items.length === 0 ? (
-                  !artifacts.partial && <p className={s.dim}>{t("agents.artifactsEmpty")}</p>
-                ) : (
-                  <div className={s.rowList}>
-                    {artifacts.items.map((f) => (
-                      // 点一行 = 在 Finder 中定位产物文件。
-                      <button
-                        key={f.path}
-                        type="button"
-                        className={`${s.row} ${s.rowClickable}`}
-                        title={`${t("chat.artifactsRevealInFolder")} · ${f.path}`}
-                        onClick={() => openHostPath(f.path, true)}
-                      >
-                        <span className={`${s.rowTitle} ${s.rowMonoTitle}`}>{f.name}</span>
-                        <span className={s.chip}>{f.kind}</span>
-                        <span className={s.rowSpacer} />
-                        <span className={s.rowMeta}>
-                          {[f.size != null ? fmtBytes(f.size) : null, new Date(f.mtimeMs).toLocaleDateString()]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <Suspense fallback={<p className={s.dim}>{t("common.loading")}</p>}>
+                  <AgentFilesPanel key={`${backend}:${detail.id}:${hasManagedFiles}`} backend={backend} agentId={detail.id}
+                    hasManagedFiles={hasManagedFiles} />
+                </Suspense>
               </div>
             )}
           </div>
@@ -2005,17 +2009,26 @@ export default function AgentsPage() {
             <button className="btn-secondary" onClick={() => setCreating(false)} disabled={savingCreate}>
               {t("common.cancel")}
             </button>
-            <button className="btn-primary" onClick={saveCreate} disabled={savingCreate}>
+            <button className="btn-primary" onClick={saveCreate} disabled={savingCreate || createRuntimeUnavailable}>
               {savingCreate ? t("agents.creating") : t("agents.create")}
             </button>
           </>
         }
       >
-        <Field label={t("agents.name")}>
+        <Field
+          label={t("agents.name")}
+          error={createNameInvalid ? <span className={s.nameError}>{t("agents.nameConflict")}</span> : undefined}
+          errorId={createNameErrorId}
+        >
           <TextInput
             value={createDraft.name}
-            onChange={(e) => setCreateDraft({ ...createDraft, name: e.target.value })}
+            onChange={(e) => {
+              setCreateNameConflict(null);
+              setCreateDraft({ ...createDraft, name: e.target.value });
+            }}
             placeholder={backend === "hermes" ? t("agents.profileNamePlaceholder") : t("agents.agentNamePlaceholder")}
+            aria-invalid={createNameInvalid || undefined}
+            aria-describedby={createNameInvalid ? createNameErrorId : undefined}
           />
         </Field>
         {hasAgentHarness || backend === "openclaw" ? (
@@ -2033,14 +2046,21 @@ export default function AgentsPage() {
                   : openclawWorkspacePlaceholder(createDraft.name)}
               />
             </Field>
-            {activeBackendDescriptor?.surfaces.runtimeBindings && (
-              <Field label={t("agents.defaultRuntime")} hint={t("agents.createRuntimeHint")}>
+            {canChooseCreateRuntime && (
+              <Field label={t("agents.defaultRuntime")} hint={<span role="status">
+                {runtimeOptions.loading ? t("common.loading") : runtimeOptions.error
+                  ? t("agents.sessionRuntimeLoadFailed") : t("agents.createRuntimeHint")}
+              </span>}>
                 <Select
                   title={t("agents.defaultRuntime")}
                   value={createDraft.runtimeAccountId}
+                  invalid={createRuntimeUnavailable}
                   onChange={(runtimeAccountId) => setCreateDraft({ ...createDraft, runtimeAccountId })}
                 >
                   <Option value="">{t("agents.codexHarnessRuntime")}</Option>
+                  {createRuntimeUnavailable && <Option value={createDraft.runtimeAccountId} disabled>
+                    {t(runtimeOptions.loading ? "common.loading" : "settings.runtimeUnavailable")}
+                  </Option>}
                   {createRuntimes.map((runtime) => (
                     <Option key={runtime.runtimeAccountId} value={runtime.runtimeAccountId}>{runtime.name}</Option>
                   ))}
@@ -2133,10 +2153,4 @@ function AgentCardFace({
 // Preserve the card/detail geometry and optional emoji fallback.
 function AgentAvatar({ id, emoji, className }: { id?: string; emoji?: string; className?: string }) {
   return <AgentAvatarView agentId={id} fallback={emoji} className={`${s.avatarBase} ${className || ""}`} loading="lazy" />;
-}
-
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1048576).toFixed(1)} MB`;
 }

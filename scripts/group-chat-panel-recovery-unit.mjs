@@ -80,6 +80,7 @@ async function harness(t, detail, messages = id => page(id), options = {}) {
       if (name.endsWith('/agent-service/group-mentions')) return require(path.resolve(ui, '../agent-service/group-mentions.js'));
       if (name.endsWith('/lib/groupReply')) return importModule('src/lib/groupReply.ts');
       if (name.endsWith('/lib/groupMentions')) return importModule('src/lib/groupMentions.ts');
+      if (name.endsWith('/lib/chatClipboard')) return importModule('src/lib/chatClipboard.ts');
       if (name.endsWith('/lib/groupTimeline')) return importModule('src/lib/groupTimeline.ts');
       if (name.endsWith('/lib/groupMessagePresentation')) return importModule('src/lib/groupMessagePresentation.ts');
       if (name.endsWith('/i18n/groupCollaborationResources') || name.endsWith('/i18n/groupComposerResources')) return {};
@@ -91,6 +92,7 @@ async function harness(t, detail, messages = id => page(id), options = {}) {
       if (name === './GroupChatMarkdown') return { __esModule: true, default: props => React.createElement('p', null, props.lead, props.text),
         groupAttachmentsOutsideMarkdown: (_text, attachments) => attachments };
       if (name === './GroupChatSendTarget') return importModule('src/pages/GroupChatSendTarget.tsx');
+      if (name === './GroupChatActivity') return importModule('src/pages/GroupChatActivity.tsx');
       if (['./GroupChatComposerInput', './GroupChatMention', './GroupMemberAvatar'].includes(name)) return importModule('src/pages/' + name.slice(2) + '.tsx');
       if (name === './ChatPromptCard') return { __esModule: true, default: props => React.createElement('section', { 'data-approval': props.entry.id }) };
       if (name === './inspiration-media') return { MAX_INSPIRATION_ATTACHMENTS: 8, inspirationMediaLimit: () => 0 };

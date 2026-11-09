@@ -3,6 +3,7 @@
 // Real static REST -> Backend -> authenticated local socket -> Product15/Chat8.
 // Only runtime transports and encryption are fakes; no external backend starts.
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
@@ -35,13 +36,43 @@ async function run() {
       registry, homeDir: f.root, userDataRoot: path.join(f.root, "ui"),
     });
     const base = `/__api/agents/${encodeURIComponent(f.profile.agentId)}`;
-    const request = async (method, route, body) => {
-      const response = await fetch(`${server.url}${base}${route}`, {
+    const request = async (method, route, body, agentPath = base) => {
+      const response = await fetch(`${server.url}${agentPath}${route}`, {
         method, headers: { "Content-Type": "application/json", Origin: server.url },
         ...(body ? { body: JSON.stringify(body) } : {}),
       });
       return { status: response.status, body: await response.json() };
     };
+
+    const links = path.join(f.paths.userDataRoot, "agents-by-name");
+    const link = (name) => path.join(links, name);
+    const data = (profile) => path.join(f.paths.agentsDir, profile.id);
+    assert.equal(fs.realpathSync(link(f.profile.name)), data(f.profile));
+    const agentCollection = "/__api/agents";
+    const backendQuery = "?backend=shoggoth";
+    const duplicate = await request("POST", backendQuery, { name: ` ${f.profile.name.toUpperCase()} ` }, agentCollection);
+    assert.equal(duplicate.status, 409, JSON.stringify(duplicate.body));
+    assert.equal(duplicate.body.code, "AGENT_NAME_CONFLICT");
+    assert.equal(duplicate.body.field, "name");
+
+    const { profile: named } = await f.service.agentLifecycleServiceController.handle("agent.create", {
+      operationId: "crud-name-links-create", backendId: "shoggoth", name: "文档助理",
+      defaultCwd: null, createdAt: Date.now(),
+    });
+    await backend._refreshManagedProfiles();
+    assert.equal(fs.realpathSync(link(named.name)), data(named));
+    const namedPath = `${agentCollection}/${encodeURIComponent(named.agentId)}`;
+    // Discovering CLI bindings during refresh can advance the Profile revision.
+    const expectedUpdatedAt = f.service.productStore.getAgentProfile(named.id).updatedAt;
+    const renameConflict = await request("PUT", backendQuery, { name: f.profile.name, expectedUpdatedAt }, namedPath);
+    assert.equal(renameConflict.status, 409, JSON.stringify(renameConflict.body));
+    assert.equal(renameConflict.body.code, "AGENT_NAME_CONFLICT");
+    assert.equal(fs.realpathSync(link(named.name)), data(named));
+    const renamed = await request("PUT", backendQuery, { name: "资料助理", expectedUpdatedAt }, namedPath);
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.body));
+    assert.equal(renamed.body.result.id, named.agentId);
+    assert.equal(fs.realpathSync(link("资料助理")), data(named));
+    assert.equal(fs.lstatSync(link(named.name), { throwIfNoEntry: false }), undefined);
 
     // A Service started without the production option never imports; the
     // status still travels REST -> Backend -> socket -> Harness.

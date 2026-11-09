@@ -309,7 +309,8 @@ class ShoggothMemoryService {
   readCanonical(profileId, kind) {
     this.assertProfile(profileId);
     if (!["MEMORY", "USER"].includes(kind)) fail("MEMORY_PATH_NOT_ALLOWED", "不是核心记忆文件");
-    return { kind, content: this.store.readFile(profileId, `${kind}.md`), revision: this.store.getRevision(profileId), readOnly: true };
+    return { kind, content: this.store.readFile(profileId, `${kind}.md`), revision: this.store.getRevision(profileId),
+      readOnly: true, localDirectory: this.store.workspace(profileId) };
   }
   isReviewCommitted(profileId, item) { return item?.profileId === profileId && this.isRecallCommitted(profileId, item); }
   isReviewReceipted(profileId, item) { return this.isReviewCommitted(profileId, item)

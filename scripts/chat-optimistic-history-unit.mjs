@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +15,7 @@ try {
     path.join(root, "app/manage-ui/src/lib/chatOptimisticHistory.ts"),
     "--bundle", "--platform=node", "--format=esm", `--outfile=${output}`,
   ], { stdio: "pipe" });
-  const { createOptimisticChatHistory } = await import(pathToFileURL(output));
+  const { createOptimisticChatHistory, openClawInspirationSendOperationId } = await import(pathToFileURL(output));
   const history = createOptimisticChatHistory();
   const key = "agent:main:main", other = "agent:other:main";
   const text = "你再随便创建 3 个";
@@ -43,6 +44,22 @@ try {
   history.forget(key);
   assert.deepEqual(history.merge(key, []), [], "reset/delete clear unresolved local prompts");
   assert.deepEqual(history.merge(other, []), [prompts[1]], "reset does not clear another session's prompt");
+
+  const inspiration = "agent:main:dashboard:inspiration-fixture";
+  const operation = id => `send-${createHash("sha256").update(`shoggoth-chat-send\0openclaw:${inspiration}\0${id}`).digest("hex")}`;
+  const firstPrompt = { role: "user", text, localSendId: "client-first" };
+  const secondPrompt = { role: "user", text, localSendId: "client-second" };
+  history.remember(inspiration, firstPrompt, operation(firstPrompt.localSendId));
+  history.remember(inspiration, secondPrompt, operation(secondPrompt.localSendId));
+  assert.deepEqual(history.merge(inspiration, older), [...older, firstPrompt, secondPrompt]);
+  const persisted = [{ role: "user", text, idempotencyKey: "execution-first:user",
+    inspirationSendOperationId: operation(firstPrompt.localSendId) }, { role: "assistant", text: "reply" }];
+  assert.deepEqual(history.merge(inspiration, persisted), [...persisted, secondPrompt],
+    "a persisted Inspiration Run confirms only its own renderer send");
+  const both = [...persisted, { ...persisted[0], idempotencyKey: "execution-second:user",
+    inspirationSendOperationId: operation(secondPrompt.localSendId) }];
+  assert.equal(history.merge(inspiration, both), both);
+  assert.equal(await openClawInspirationSendOperationId(inspiration, firstPrompt.localSendId), operation(firstPrompt.localSendId));
   console.log("chat optimistic history unit: PASS");
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });

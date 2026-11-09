@@ -60,6 +60,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   GROUP_CHAT_NOT_FOUND: "群聊不存在",
   GROUP_CHAT_ARCHIVED: "群聊已归档",
   GROUP_CHAT_DELETED: "群聊已删除或正在停止执行，不能再进行新动作",
+  GROUP_CHAT_FORCE_DELETE_CONFLICT: "只有正在删除的群才能强制删除",
   GROUP_CHAT_REVISION_CONFLICT: "群聊已被更新，请刷新后重试",
   GROUP_CHAT_OPERATION_CONFLICT: "同一次操作的内容发生了变化",
   GROUP_CHAT_MESSAGE_CONFLICT: "这条消息的重传内容与原消息不一致",
@@ -138,6 +139,7 @@ function executionTarget(target) {
 function validateParams(method, params) {
   const optional = method === "group.member.role" ? ["revision", "cursor", "document"]
     : method === "group.history" ? ["afterRevision"]
+    : method === "group.delete" ? ["force", "ownerScope"]
     : method === "group.send" ? ["taskId", "requestMode", "discussionId", "summaryMemberId", "ownerScope", "expectedPolicyVersion"]
       : method === "group.send.lookup" ? ["payloadDigest", "ownerScope"] : [];
   const fields = METHODS[method] && [...METHODS[method], ...optional.filter(key => plainObject(params) && Object.hasOwn(params, key))];
@@ -166,7 +168,9 @@ function validateParams(method, params) {
       && text(params.purpose, MAX_GROUP_PURPOSE_CHARS, { allowEmpty: true })
       && Array.isArray(params.members) && params.members.length <= MAX_GROUP_MEMBERS
       && params.members.every(agentRef),
-    "group.delete": () => opaqueId(params.groupId) && revision(params.expectedMetadataRevision),
+    "group.delete": () => opaqueId(params.groupId) && revision(params.expectedMetadataRevision)
+      && (!Object.hasOwn(params, "force") && !Object.hasOwn(params, "ownerScope")
+        || params.force === true && text(params.ownerScope, 256)),
     "group.update": () => opaqueId(params.groupId) && revision(params.expectedMetadataRevision)
       && plainObject(params.patch) && Object.keys(params.patch).length > 0
       && Object.keys(params.patch).every((key) => ["name", "purpose", "status", "ownerMemberId"].includes(key))
@@ -244,7 +248,8 @@ function validateResult(method, result, params = null) {
         && (!params || params.backendIds.includes(item.backendId)))) fail("GROUP_CHAT_UNAVAILABLE");
   }
   if (method === "group.delete" && (!exact(result, ["groupId", "status"]) || !opaqueId(result.groupId)
-    || !["deleting", "deleted"].includes(result.status) || params && result.groupId !== params.groupId)) fail("GROUP_CHAT_UNAVAILABLE");
+    || !["deleting", "deleted"].includes(result.status) || params && result.groupId !== params.groupId
+    || params?.force === true && result.status !== "deleted")) fail("GROUP_CHAT_UNAVAILABLE");
   if (method === "group.member.models" && !validModelCatalog(result)) fail("GROUP_CHAT_MODEL_CATALOG_UNAVAILABLE");
   if (method === "group.execution.receipt"
     && !require("../external-inspiration-protocol").validateGroupExecutionReceiptResult(result, params)) fail("GROUP_CHAT_UNAVAILABLE");

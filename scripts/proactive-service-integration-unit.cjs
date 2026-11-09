@@ -13,10 +13,12 @@ const productRoot = packagedApp === undefined ? path.resolve(__dirname, "../app"
   : path.join(packagedApp, "Contents/Resources/app.asar/app");
 const { createAgentService, PROTOCOL_VERSION } = require(path.join(productRoot, "agent-service/server.js"));
 const { resolveServicePaths } = require(path.join(productRoot, "agent-service/paths.js"));
+const { isImplicitChatWorkspace } = require(path.join(productRoot, "agent-service/chat-workspace.js"));
 const { readClientToken, requestService } = require(path.join(productRoot, "agent-service/client.js"));
 const { DEFAULT_AGENT_PROFILE_ID } = require(path.join(productRoot, "agent-service/product-store.js"));
 const { ShoggothBackend } = require(path.join(productRoot, "core/shoggoth-backend.js"));
 const { InspirationRuntime } = require("./fixtures/inspiration-runtime.cjs");
+const { seedProactiveAgentContext } = require("./helpers/proactive-native-closure.cjs");
 const { DAY_MS } = require(path.join(productRoot, "agent-service/proactive-service-protocol.js"));
 const { createMcpStdioHandler, authenticateMcpSession, MCP_STDIO_PROTOCOL_VERSION } = require(path.join(productRoot, "shoggoth-mcp-helper.js"));
 const { normalizeCodexEvent } = require(path.join(productRoot, "agent-service/codex-event-normalizer.js"));
@@ -49,6 +51,11 @@ class ReviewRuntime extends InspirationRuntime {
       throw Object.assign(new Error("Ephemeral review has no native history"), { code: "EPHEMERAL_HISTORY_DISABLED" });
     }
     return super.threadRead(params);
+  }
+  async threadInjectItems(params) {
+    if (!this.ephemeralThreads.has(params.threadId)) return super.threadInjectItems(params);
+    this.lastInjectedItems = structuredClone(params);
+    return {};
   }
   complete(run, text) {
     super.complete(run, text);
@@ -122,8 +129,51 @@ test("Service schedules defaults for every existing and newly created native Age
   assert.equal(f.service.proactiveStore.getMonitor(created.config.id).revision, 1);
   assert.equal(f.host.turnStarts, 0);
 });
-test("a scoped real WorkRun uses admission, read-only contract and structured MCP response; no ordinary chat is created", async t => {
+test("a legacy reminder keeps its history as Main, and a new Agent sends its first message in Main", async t => {
+  const f = await fixture(t);
+  const binding = f.service.proactiveStore.getTarget(DEFAULT_AGENT_PROFILE_ID);
+  const { session: legacy } = await f.ipc("chat.session.create", { operationId: id(), profileId: DEFAULT_AGENT_PROFILE_ID,
+    workspace: null, createdAt: f.clock.value });
+  f.service.proactiveStore.setTarget(DEFAULT_AGENT_PROFILE_ID, { ...binding, sessionKey: legacy.sessionKey });
+  const oldText = "Reminder from before Main sessions";
+  const oldEventId = id();
+  f.service.transcriptStore.appendEvent({ profileId: DEFAULT_AGENT_PROFILE_ID, sessionId: legacy.id, id: oldEventId,
+    runId: null, kind: "assistant", occurredAt: f.clock.value, contextExcluded: false, content: { text: oldText } });
+  await f.service.stop({ notify: false });
+  await f.service.start();
+  const rows = await f.sessions();
+  assert.deepEqual(rows.filter(row => row.proactiveTarget).map(row => row.sessionKey), [legacy.sessionKey]);
+  assert.ok(rows.some(row => row.sessionKey === binding.sessionKey), "The earlier direct session is retained");
+  const history = await f.ipc("chat.history", { sessionKey: legacy.sessionKey, cursor: null, limit: 100 });
+  assert.match(JSON.stringify(history.messages), new RegExp(oldText, "u"));
+  assert.ok(f.service.transcriptStore.listEvents(DEFAULT_AGENT_PROFILE_ID, legacy.id).some(event => event.id === oldEventId));
+
+  const { profile } = await f.ipc("agent.create", { operationId: id(), backendId: "shoggoth", name: "First Main message",
+    defaultCwd: null, createdAt: f.clock.value });
+  const list = async () => (await f.ipc("chat.session.list", { profileId: profile.id, includeArchived: false, cursor: null, limit: 100 })).sessions;
+  const initialSessions = await list();
+  assert.equal(initialSessions.length, 1);
+  const [main] = initialSessions;
+  assert.equal(main.proactiveTarget, true);
+  assert.ok(isImplicitChatWorkspace(f.paths, profile, main.workspace));
+  const greetings = await f.ipc("agent.builtin.ensure", { runtimeAccountIds: [], locale: "zh-CN" });
+  assert.ok(greetings.greetedProfileIds.includes(profile.id));
+  assert.deepEqual(f.service.transcriptStore.listEvents(profile.id, main.id).map(event => event.id), ["agent-greeting"]);
+  const accepted = await f.ipc("chat.send", { operationId: id(), sessionKey: main.sessionKey, prompt: "Hello Main", createdAt: f.clock.value });
+  assert.equal(accepted.run.sourceId, main.sessionKey);
+  await until(() => f.service.workDispatcher.getRun(accepted.run.id).status === "running");
+  f.host.complete(f.service.workDispatcher.getRun(accepted.run.id), "Hello from Main");
+  await until(() => f.service.workDispatcher.getRun(accepted.run.id).status === "completed");
+  const { session: other } = await f.ipc("chat.session.create", { operationId: id(), profileId: profile.id,
+    workspace: null, parentSessionKey: main.sessionKey, createdAt: f.clock.value });
+  assert.notEqual(other.sessionKey, main.sessionKey);
+  assert.notEqual(other.workspace, main.workspace);
+  assert.deepEqual((await list()).filter(row => row.proactiveTarget).map(row => row.sessionKey), [main.sessionKey]);
+});
+test("a scoped real WorkRun uses Agent context, read-only admission and a structured MCP response", async t => {
   const f = await fixture(t), { monitor } = await f.monitor();
+  const expected = await seedProactiveAgentContext(f.service, DEFAULT_AGENT_PROFILE_ID, f.root, f.clock.value);
+  const mainKey = f.service.proactiveStore.getTarget(DEFAULT_AGENT_PROFILE_ID).sessionKey;
   const config = { ...monitor.config, enabled: true, activeHours: null,
     checklist: [{ id: "review-state", instruction: "Review only the supplied local state", enabled: true, mode: "review" }] };
   await f.save(config); f.clock.value += 30 * 60000; await f.service.proactiveScheduler.tick();
@@ -132,6 +182,10 @@ test("a scoped real WorkRun uses admission, read-only contract and structured MC
   assert.equal(run.sourceId, config.id); assert.equal((await f.sessions()).length, f.baselineSessions);
   assert.equal(f.host.lastStart.sandbox, "read-only"); assert.equal(f.host.lastStart.approvalPolicy, "on-request"); assert.equal(f.host.lastStart.ephemeral, true);
   assert.deepEqual(f.host.lastStart.config["mcp_servers.shoggoth.enabled_tools"], ["proactive_respond"]);
+  for (const definition of Object.values(expected.definitions)) assert.ok(f.host.lastStart.developerInstructions.includes(definition));
+  const injected = JSON.stringify(f.host.lastInjectedItems);
+  for (const memory of [expected.user, expected.agent, expected.daily]) assert.ok(injected.includes(memory));
+  assert.ok(!injected.includes(expected.project));
   await assert.rejects(async () => f.host.approve(run), { code: "PROACTIVE_SCOPE_INVALID" });
   await assert.rejects(async () => f.host.ask(run), { code: "PROACTIVE_SCOPE_INVALID" });
   for (const method of ["item/fileChange/requestApproval", "item/permissions/requestApproval"]) {
@@ -168,12 +222,46 @@ test("a scoped real WorkRun uses admission, read-only contract and structured MC
   assert.equal(result.result.structuredContent.accepted, true);
   f.host.complete(run, "Plain text is not a separate notification"); await f.service.proactiveScheduler.waitForIdle();
   const rows = (await f.sessions()).filter(row => row.proactiveTarget); assert.equal(rows.length, 1);
+  assert.equal(rows[0].sessionKey, mainKey);
   const history = await f.ipc("chat.history", { sessionKey: rows[0].sessionKey, cursor: null, limit: 100 });
+  assert.ok(history.messages.every(row => row.role === "assistant"), "The system trigger stays out of public chat history");
+  assert.doesNotMatch(JSON.stringify(history.messages), /SYSTEM-INITIATED CHECK|Plain text is not a separate notification/u);
   assert.equal(history.messages.filter(row => row.payload.message.shoggoth?.proactiveNotice).length, 1);
   assert.equal(f.sent.length, 1);
   assert.equal(f.host.ephemeralHistoryReads, 0);
   await f.service.proactiveScheduler.tick(); await f.service.proactiveScheduler.waitForIdle(); assert.equal(f.host.turnStarts, 1);
 });
+test("a main-history source hidden after review prevents both late responses and notice publication", async t => {
+  const f = await fixture(t), profileId = DEFAULT_AGENT_PROFILE_ID;
+  const sessionKey = f.service.proactiveStore.getTarget(profileId).sessionKey;
+  const accepted = await f.ipc("chat.send", { operationId: id(), sessionKey,
+    prompt: "The amber telescope review is complete.", createdAt: f.clock.value });
+  await until(() => f.service.workDispatcher.getRun(accepted.run.id).status === "running");
+  f.host.complete(f.service.workDispatcher.getRun(accepted.run.id), "The completed review is noted.");
+  await until(() => f.service.workDispatcher.getRun(accepted.run.id).status === "completed");
+  const { monitor } = await f.monitor();
+  await f.save({ ...monitor.config, enabled: true, activeHours: null,
+    checklist: [{ id: "review-state", instruction: "Review only the supplied local state", enabled: true, mode: "review" }] });
+  f.clock.value += 30 * 60000; await f.service.proactiveScheduler.tick();
+  await until(() => f.service.workDispatcher.listRuns({ source: "proactive" })[0]?.status === "running");
+  const run = f.service.workDispatcher.listRuns({ source: "proactive" })[0];
+  const source = f.service.contextCompiler.snapshotStore.get(profileId, run.contextSnapshotId).report.proactiveConversation;
+  assert.ok(source.events.length >= 2);
+  const occurrence = f.service.proactiveStore.occurrenceForRun(run.id), candidate = occurrence.candidates[0];
+  const response = { runId: run.id, outcome: "notice", reason: "Scoped review complete", body: "A stale reminder must not publish",
+    candidates: [{ id: candidate.id, evidenceVersion: candidate.evidenceVersion }] };
+  assert.equal(f.service.proactiveService.respond(run, response).accepted, true);
+  f.service.transcriptStore.setContextExcluded({ profileId, sessionId: source.sessionId,
+    eventId: source.events[0].eventId, contextExcluded: true });
+  assert.throws(() => f.service.proactiveService.respond(run, response), { code: "PROACTIVE_SCOPE_INVALID" });
+  f.host.complete(run, "Review finished"); await f.service.proactiveScheduler.waitForIdle();
+  assert.equal(f.service.proactiveStore.getOccurrence(occurrence.id).state, "skipped");
+  assert.equal(f.service.proactiveStore.noticeForOccurrence(occurrence.id), null);
+  assert.equal(f.sent.length, 0);
+  const history = await f.ipc("chat.history", { sessionKey, cursor: null, limit: 100 });
+  assert.doesNotMatch(JSON.stringify(history), /A stale reminder must not publish/u);
+});
+
 test("SparkNotes model reviews a pending approval in a separate session without answering it", async t => {
   const f = await fixture(t);
   const { idea } = await f.ipc("inspiration.create", { operationId: id(), body: "灵感种子" });

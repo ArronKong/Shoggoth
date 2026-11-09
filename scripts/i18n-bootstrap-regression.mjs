@@ -47,14 +47,23 @@ try {
   ]);
   const runtime = createRequire(import.meta.url)(outfile);
   assert.equal(typeof runtime.applyConfiguredLocale, "function");
+  assert.equal(globalThis.document.title, "Shoggoth Dashboard");
 
   await runtime.applyConfiguredLocale("zh-CN");
   assert.equal(runtime.default.language, "zh-CN", "config.locale 应覆盖陈旧 localStorage");
   assert.equal(values.get("openclaw.i18n.locale"), "zh-CN");
   assert.equal(globalThis.document.documentElement.lang, "zh-CN");
+  assert.equal(globalThis.document.title, "管理 · Shoggoth");
+  assert.equal(runtime.default.t("common.loadMore"), "加载更多");
+  assert.equal(runtime.default.t("cronForm.intervalHours", { count: 1 }), "每 1 小时");
 
   await runtime.applyConfiguredLocale("");
   assert.equal(runtime.default.language, "en", "follow-system 应回落 navigator.language");
+  assert.equal(globalThis.document.title, "Shoggoth Dashboard");
+  assert.equal(runtime.default.t("common.loadMore"), "Load more");
+  assert.equal(runtime.default.t("cronForm.intervalHours", { count: 1 }), "Every hour");
+  assert.equal(runtime.default.t("cronForm.intervalHours", { count: 2 }), "Every 2 hours");
+  assert.equal(runtime.default.t("mcpConnectors.toolCount", { count: 1 }), "1 tool");
   assert.equal(values.has("openclaw.i18n.locale"), false);
 
   assert.match(mainSource, /await getConfig\(\)[\s\S]{0,220}await applyConfiguredLocale/);

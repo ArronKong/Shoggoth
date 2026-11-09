@@ -3,8 +3,11 @@
 const { serviceError } = require("./security");
 const fail = code => serviceError(code, "无工具模型任务未能完成");
 function validateModelOnlyInput(input) {
+  // Proactive requests carry the check plus a bounded Agent context. Other
+  // model-only tasks keep their original input limit.
+  const maxPromptBytes = (input?.purpose === "proactive" ? 256 : 128) * 1024;
   if (!input || typeof input.prompt !== "string" || !input.prompt.isWellFormed() || input.prompt.includes("\0")
-    || !input.prompt.length || Buffer.byteLength(input.prompt) > 128 * 1024
+    || !input.prompt.length || Buffer.byteLength(input.prompt) > maxPromptBytes
     || (input.model !== null && (typeof input.model !== "string" || !input.model.length || input.model.length > 512
       || !input.model.isWellFormed() || /[\u0000-\u001f\u007f]/u.test(input.model)))
     || typeof input.operationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(input.operationId)

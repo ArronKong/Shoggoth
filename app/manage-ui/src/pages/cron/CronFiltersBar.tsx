@@ -1,19 +1,20 @@
-import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { CronListFilters } from "../../api/client";
-import type { UnifiedAgent } from "../../types";
-import CronFilterMenu from "./CronFilterMenu";
+import type { BackendDescriptor, UnifiedAgent } from "../../types";
+import CronFilterMenu, { CronAgentFilter } from "./CronFilterMenu";
 import { CRON_SCHEDULE_TYPES } from "./CronFormLayout";
-import { IconAgent, IconSliders } from "./cronIcons";
+import { IconSchedule, IconSliders } from "./cronIcons";
 
 // Cron 列表筛选统一控制服务端查询参数，日历和列表共享结果集。
 export default function CronFiltersBar({
   filters,
   agents,
+  backends,
   onChange,
 }: {
   filters: CronListFilters;
-  agents: UnifiedAgent[];
+  agents: Record<string, UnifiedAgent[]>;
+  backends: BackendDescriptor[];
   onChange: (filters: CronListFilters) => void;
 }) {
   const { t } = useTranslation();
@@ -21,25 +22,14 @@ export default function CronFiltersBar({
   const set = <K extends keyof CronListFilters>(key: K, value: CronListFilters[K]) => {
     onChange({ ...filters, [key]: value });
   };
-  // 两个后端可能有同 id 的 agent，按 id 去重后再列。
-  const agentOptions = useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const agent of agents) {
-      if (!seen.has(agent.id)) seen.set(agent.id, agent.name || agent.id);
-    }
-    return Array.from(seen, ([value, label]) => ({ value, label }));
-  }, [agents]);
-
   return (
     <div className="cron-filters">
-      <CronFilterMenu
-        multiple
-        icon={<IconAgent />}
-        label={t("cronForm.filtersAgent")}
-        options={agentOptions}
-        emptyHint={t("cronForm.filtersNoAgents")}
-        value={filters.agentIds || []}
-        onChange={(value) => set("agentIds", value)}
+      <CronAgentFilter
+        backends={backends}
+        agents={agents}
+        value={filters.agentScopes}
+        legacyAgentIds={filters.agentIds}
+        onChange={(agentScopes) => onChange({ ...filters, agentIds: undefined, agentScopes })}
       />
       <CronFilterMenu
         icon={<IconSliders />}
@@ -53,7 +43,7 @@ export default function CronFiltersBar({
         onChange={(value) => set("enabled", value as CronListFilters["enabled"])}
       />
       <CronFilterMenu
-        icon={<IconSliders />}
+        icon={<IconSchedule />}
         label={t("cronForm.filtersSchedules")}
         options={[
           { value: "all", label: t("cronForm.filtersAllSchedules") },

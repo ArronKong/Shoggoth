@@ -242,11 +242,10 @@ check("Dashboard 正文与 session 共用同运行 handoff selector", () => {
   assert.match(dashboard, /runSessionKey && visibleRunText && visibleRunText\.trim\(\)/);
   assert.match(dashboard, /askInChat\(openRun\.backendId, runSessionKey, visibleRunText\)/);
   assert.match(dashboard, /navigate\(`\/cron\?job=\$\{encodeURIComponent\(openRun\.jobId\)\}&edit=1`\)/);
-  assert.match(cron, /notificationEdit \? openEdit\(notificationJob\) : openView\(notificationJob\)/);
 });
 
 const deepLinkEffect = chat.match(
-  /useEffect\(\(\) => \{\s*if \(routerLocation\.pathname !== "\/chat"\)([\s\S]*?)\n  \}, \[routerLocation, routerNavigate\]\);/,
+  /useEffect\(\(\) => \{\s*if \(routerLocation\.pathname !== "\/chat"\)([\s\S]*?)\n  \}, \[routerLocation, routerNavigate, connected\]\);/,
 )?.[1] || "";
 check("Chat 深链同步 location guard 且复用 consume helper", () => {
   assert.ok(deepLinkEffect, "必须找到 Chat session 深链 effect");
@@ -256,11 +255,13 @@ check("Chat 深链同步 location guard 且复用 consume helper", () => {
   );
   assert.match(deepLinkEffect, /locationIdentity[\s\S]*?handledSessionLocationRef\.current === locationIdentity/);
   assert.match(deepLinkEffect, /handledSessionLocationRef\.current = locationIdentity/);
-  assert.match(deepLinkEffect, /consumeCronChatHandoff\(deepLinkBackend \|\| backendOfSession\(key\), key\)/);
+  assert.match(deepLinkEffect, /=== "shoggoth" && !connected\) return;[\s\S]*?const locationIdentity/);
+  assert.match(deepLinkEffect, /isCurrent: \(\) => handledSessionLocationRef\.current === locationIdentity && activeKeyRef\.current === key/);
+  assert.match(deepLinkEffect, /consumeCronChatHandoff\(rawDeepLinkBackend \|\| backendOfSession\(key\), key\)/);
   assert.doesNotMatch(deepLinkEffect, /sessionStorage\.(?:getItem|removeItem)/);
   assert.match(deepLinkEffect, /setQuote\(\{ key, text: handoff\.report \}\)/);
   assert.match(deepLinkEffect, /openChatSessionLink\(key, \{/);
-  assert.match(deepLinkEffect, /ensureSession: \(\) => ensure\(key, undefined, deepLinkBackend \? \{ backendId: deepLinkBackend \} : undefined\)/);
+  assert.match(deepLinkEffect, /ensureSession: \(\) => ensure\(key, undefined, seed \|\| \(deepLinkBackend \? \{ backendId: deepLinkBackend \} : undefined\)\)/);
   assert.match(deepLinkEffect, /openSession: \(targetKey\) => openSessionDeepRef\.current\(targetKey\)/);
   assert.match(deepLinkEffect, /refreshSessions: refreshList/);
   assert.match(deepLinkEffect, /onOpened: \(\) => \{/);

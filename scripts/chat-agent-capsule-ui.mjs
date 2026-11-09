@@ -10,17 +10,28 @@ import { viteArtworkFixturePlugin } from "./fixtures/vite-artwork-esbuild.cjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const uiRoot = path.join(root, "app/manage-ui");
+const require = createRequire(path.join(root, "package.json"));
+const { startStaticServer } = require("./app/static-server");
 const { build } = createRequire(path.join(uiRoot, "package.json"))("esbuild");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agent-capsule-"));
+const avatarPreview = process.argv.includes("--avatar-preview");
 let serving = false;
 let server;
+let assetServer;
 try {
   await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-agent-capsule.tsx")], bundle: true,
     format: "esm", external: ["/fonts/*"], define: { "process.env.NODE_ENV": '"production"' },
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(uiRoot, "node_modules")], logLevel: "silent",
     plugins: [viteArtworkFixturePlugin(root)] });
-  fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><title>Agent 胶囊交互 · 隔离预览</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>');
+  const title = avatarPreview ? "更换头像 · Shoggoth 预览" : "Agent 胶囊交互 · 隔离预览";
+  fs.writeFileSync(path.join(temp, "index.html"), `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>`);
+  const userDataRoot = path.join(temp, "app-data");
+  const avatarDir = path.join(userDataRoot, "agent-avatars");
+  fs.mkdirSync(avatarDir, { recursive: true });
+  const defaultAvatar = require("./app/assets/agent-avatars/builtin/manifest.json").entries[0].file;
+  fs.copyFileSync(path.join(root, "app/assets/agent-avatars/builtin", defaultAvatar), path.join(avatarDir, "capsule-shrimp.jpg"));
+  assetServer = await startStaticServer(0, { homeDir: path.join(temp, "home"), userDataRoot });
   server = http.createServer((req, res) => {
     const pathname = new URL(req.url, "http://fixture").pathname;
     if (pathname.startsWith("/fonts/")) {
@@ -30,8 +41,13 @@ try {
       res.end(fs.readFileSync(font)); return;
     }
     if (pathname.startsWith("/avatar/")) {
-      res.writeHead(200, { "Content-Type": "image/svg+xml" });
-      res.end('<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" rx="48" fill="#d6e8dc"/><circle cx="48" cy="49" r="28" fill="#eef5e3"/><circle cx="38" cy="43" r="4" fill="#244d46"/><circle cx="58" cy="43" r="4" fill="#244d46"/><path d="M38 59Q48 69 58 59" fill="none" stroke="#244d46" stroke-width="3" stroke-linecap="round"/></svg>');
+      const upstream = http.request({ hostname: "127.0.0.1", port: assetServer.port, path: req.url,
+        method: req.method, headers: req.headers }, incoming => {
+        res.writeHead(incoming.statusCode, incoming.headers);
+        incoming.pipe(res);
+      });
+      upstream.on("error", () => res.destroy());
+      req.pipe(upstream);
       return;
     }
     const file = ({ "/": "index.html", "/fixture.js": "fixture.js", "/fixture.css": "fixture.css" })[pathname];
@@ -40,11 +56,14 @@ try {
     res.end(fs.readFileSync(path.join(temp, file)));
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
-  const url = `http://127.0.0.1:${server.address().port}/#/chat`;
-  if (process.argv.includes("--serve")) {
+  const url = `http://127.0.0.1:${server.address().port}/${avatarPreview ? "?avatar-preview" : ""}#/chat`;
+  if (process.argv.includes("--serve") || avatarPreview) {
     serving = true;
     console.log(`PREVIEW ${url}`);
-    const close = () => { server.close(); server.closeAllConnections(); fs.rmSync(temp, { recursive: true, force: true }); process.exit(); };
+    const close = async () => {
+      server.close(); server.closeAllConnections(); await assetServer.close();
+      fs.rmSync(temp, { recursive: true, force: true }); process.exit();
+    };
     process.on("SIGTERM", close);
     process.on("SIGINT", close);
   } else {
@@ -72,7 +91,15 @@ app.whenReady().then(async () => {
     console.log(JSON.stringify(await window.webContents.executeJavaScript("window.runCapsuleMotionFixture(true)", true)));
     await window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", { features: [] });
     window.webContents.debugger.detach();
-    for (const [view, theme, width, height] of [["profile", "light", 1380, 900], ["artifacts", "light", 1360, 950], ["cron", "light", 1360, 950], ["inspiration", "light", 1360, 950], ["profile", "dark", 1360, 950], ["profile", "light", 600, 800], ["inspiration", "light", 600, 800], ["profile", "light", 390, 844], ["inspiration", "light", 390, 844]]) {
+    console.log(JSON.stringify(await window.webContents.executeJavaScript("window.runAvatarPickerFixture()", true)));
+    const shots = [
+      ["profile", "light", 1380, 900], ["artifacts", "light", 1360, 950], ["cron", "light", 1360, 950],
+      ["inspiration", "light", 1360, 950], ["profile", "dark", 1360, 950], ["profile", "light", 600, 800],
+      ["inspiration", "light", 600, 800], ["profile", "light", 390, 844], ["inspiration", "light", 390, 844],
+      ["avatar-picker", "light", 1380, 1240], ["avatar-picker", "light", 1100, 800],
+      ["avatar-picker", "light", 600, 800], ["avatar-picker", "dark", 390, 844],
+    ];
+    for (const [view, theme, width, height] of shots) {
       window.setSize(width, height);
       await window.webContents.executeJavaScript("window.prepareCapsuleShot(" + JSON.stringify(view) + "," + JSON.stringify(theme) + ")", true);
       if (view === "profile" && width <= 600) {
@@ -100,7 +127,7 @@ app.whenReady().then(async () => {
     console.error(await window.webContents.executeJavaScript("JSON.stringify({ text: document.body.innerText.slice(0, 2500), error: window.fixtureError, requests: window.requests?.slice(-8) })").catch(String));
   } finally { window.destroy(); app.exit(passed ? 0 : 1); }
 });`);
-    const child = createRequire(path.join(root, "package.json"))("electron");
+    const child = require("electron");
     const result = await new Promise(resolve => {
       // Keep the loopback server responsive while Electron executes the fixture.
       const childProcess = spawn(child, [main], { env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" } });
@@ -118,5 +145,8 @@ app.whenReady().then(async () => {
     assert.match(result.stdout, /"passed":true/);
   }
 } finally {
-  if (!serving) { server?.close(); server?.closeAllConnections(); fs.rmSync(temp, { recursive: true, force: true }); }
+  if (!serving) {
+    server?.close(); server?.closeAllConnections(); await assetServer?.close();
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 }

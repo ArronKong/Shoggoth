@@ -1,69 +1,76 @@
 import { useTranslation } from "react-i18next";
-import { formatDuration, toolActivityTitle } from "../lib/turnTimeline";
+import Modal from "../components/Modal";
+import TurnTimeline from "../components/TurnTimeline/TurnTimeline";
+import { getTurnProcessStats, TurnProcessSummary } from "../components/TurnTimeline/TurnProcess";
+import { canonicalToolName, capText, categorizeTool, type TurnStep } from "../lib/turnTimeline";
 import type { GroupActivity, GroupActivityTool } from "../types";
-import styles from "./GroupChatPanel.module.css";
 
-export type GroupActivityBinding = { groupId: string; memberId: string; opportunityId?: string; taskId?: string; attemptId?: string };
-const TERMINAL = new Set(["completed", "failed", "cancelled"]);
-const PHASES = new Set(["preparing", "queued", "running", "retrying", "tool", "text", "waiting_approval", "waiting_input", "compacting", "compacted", "stopping", "reconciling", ...TERMINAL]);
-/** Presentation never transfers a previous execution's activity to a new opportunity or task attempt. */
+type GroupActivityBinding = { groupId: string; memberId: string; opportunityId: string };
+const TERMINAL_PHASES = new Set(["completed", "failed", "cancelled"]);
+const PHASES = new Set(["preparing", "queued", "running", "retrying", "tool", "text", "waiting_approval", "waiting_input", "compacting", "compacted", "stopping", "reconciling", ...TERMINAL_PHASES]);
+
+export function groupActivityEnded(phase: GroupActivity["phase"]) {
+  return TERMINAL_PHASES.has(phase);
+}
+
+/** Only a snapshot for this member's discussion turn may appear in its bubble. */
 export function boundGroupActivity(activity: GroupActivity | null | undefined, binding: GroupActivityBinding): GroupActivity | null {
   if (!activity || activity.groupId !== binding.groupId || activity.memberId !== binding.memberId || !PHASES.has(activity.phase)
     || !Number.isSafeInteger(activity.eventSeq) || activity.eventSeq < 0 || !Array.isArray(activity.recentTools)
-    || binding.opportunityId !== undefined && (activity.opportunityId !== binding.opportunityId || activity.taskId !== null || activity.attemptId !== null)
-    || binding.taskId !== undefined && (activity.taskId !== binding.taskId || activity.attemptId !== binding.attemptId || activity.opportunityId !== null)) return null;
+    || activity.opportunityId !== binding.opportunityId || activity.taskId !== null || activity.attemptId !== null) return null;
   return activity;
 }
-function detailText(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  try { return (typeof value === "string" ? value : JSON.stringify(value, null, 2)).slice(0, 4096); }
-  catch { return null; }
+
+/** Group detail already carries bounded, redacted snapshots. Text and prompts have their own bubbles. */
+export function groupActivitySteps(activity: GroupActivity): TurnStep[] {
+  const tools = new Map<string, GroupActivityTool>();
+  for (const tool of activity.recentTools) {
+    if (typeof tool?.id === "string") tools.set(tool.id, tool);
+  }
+  if (typeof activity.tool?.id === "string") tools.set(activity.tool.id, activity.tool);
+  const steps = Array.from(tools.values(), (tool): TurnStep => {
+    const name = tool.name || undefined;
+    const output = capText(tool.error ?? tool.output ?? tool.progress);
+    return {
+      id: `tool:${tool.id}`,
+      toolCallId: tool.id,
+      kind: "tool",
+      status: tool.status === "failed" ? "error" : tool.status === "completed" ? "ok" : "running",
+      startTs: tool.startedAt ?? tool.updatedAt ?? 0,
+      endTs: tool.finishedAt ?? undefined,
+      durationS: tool.durationMs == null ? undefined : tool.durationMs / 1000,
+      toolName: name,
+      canonicalName: name ? canonicalToolName(name) : undefined,
+      category: name ? categorizeTool(name) : undefined,
+      args: tool.input ?? undefined,
+      output: output.text,
+      outputTruncated: output.truncated,
+    };
+  });
+  if (activity.compaction) {
+    const { status, observedAt } = activity.compaction;
+    steps.push({ id: "context-compaction", kind: "status", statusKind: status,
+      startTs: observedAt ?? 0, status: status === "compacted" ? "ok" : "running" });
+  }
+  if (activity.phase === "retrying") {
+    const since = activity.lastProgressAt ?? activity.observedAt;
+    if (since != null) steps.push({ id: "provider-retry", kind: "status", status: "running", startTs: since,
+      startupWait: { kind: "retrying", reason: null, since } });
+  }
+  return steps.sort((a, b) => a.startTs - b.startTs);
 }
-export default function GroupChatActivity({ activity: provided, binding, fallbackPhase = "running", context }: {
-  activity?: GroupActivity | null; binding: GroupActivityBinding; fallbackPhase?: "running" | "preparing" | "queued" | "stopping" | "reconciling";
-  context?: string;
+
+export default function GroupChatActivityDialog({ activity, memberName, startedAt, onClose }: {
+  activity: GroupActivity | null; memberName?: string; startedAt?: number | null; onClose(): void;
 }) {
   const { t } = useTranslation();
-  const activity = boundGroupActivity(provided, binding);
-  const phase = activity?.phase ?? fallbackPhase;
-  const tools = new Map<string, GroupActivityTool>();
-  for (const tool of activity?.recentTools ?? []) if (tool && typeof tool.id === "string") tools.set(tool.id, tool);
-  if (activity?.tool) tools.set(activity.tool.id, activity.tool);
-  const currentTitle = activity?.phase === "tool" && activity.tool
-    ? toolActivityTitle(activity.tool.name || undefined, activity.tool.input, t) : t(`groupChat.activity.phase.${phase}`);
-  return <div className={styles.executionActivity} data-group-activity={binding.opportunityId ?? binding.attemptId}
-    data-activity-kind={binding.opportunityId ? "turn" : "task"} data-activity-phase={phase}>
-    <div className={styles.executionActivityHead}>
-      {context && <span className={styles.executionContext}>{context}</span>}
-      <span className={styles.executionTitle}>{currentTitle}</span>
-      {phase === "tool" && <span className={styles.muted}>{t("groupChat.activity.phase.tool")}</span>}
-      {activity?.lastProgressAt != null && <time className={styles.executionProgress} dateTime={new Date(activity.lastProgressAt).toISOString()}>
-        {t("groupChat.activity.lastProgress", { time: new Date(activity.lastProgressAt).toLocaleTimeString() })}</time>}
-    </div>
-    {!activity && <p className={styles.executionFallback}>{t("groupChat.activity.detailUnavailable")}</p>}
-    {activity?.compaction && <details className={styles.executionDetails} data-group-compaction={activity.compaction.status}>
-      <summary>{t("groupChat.activity.compactionDetails")}</summary>
-      <p>{t(TERMINAL.has(phase) && activity.compaction.status === "compacting"
-        ? "groupChat.activity.lastCompacting" : `groupChat.activity.phase.${activity.compaction.status}`)}</p>
-    </details>}
-    {tools.size > 0 && <details className={styles.executionDetails}>
-      <summary>{t("groupChat.activity.details", { count: tools.size })}</summary>
-      <div className={styles.executionToolList}>
-        {[...tools.values()].slice(-8).map(tool => <details key={tool.id} className={styles.executionTool} data-tool-status={tool.status}>
-          <summary><span>{toolActivityTitle(tool.name || undefined, tool.input, t)}</span>
-            <span className={styles.taskStatus}>{t(TERMINAL.has(phase) && tool.status === "running"
-              ? "groupChat.activity.lastRunning" : `groupChat.activity.toolStatus.${tool.status}`)}</span>
-            {tool.durationMs !== null && <span className={styles.muted}>{tool.durationMs === 0 ? "0ms" : formatDuration(tool.durationMs / 1000)}</span>}
-          </summary>
-          {tool.name && <p className={styles.muted}>{t("groupChat.activity.toolName", { name: tool.name })}</p>}
-          {(["input", "progress", "output", "error"] as const).map(field => {
-            const text = detailText(tool[field]);
-            return text === null ? null : <div key={field} className={styles.executionToolDetail}>
-              <strong>{t(`groupChat.activity.${field}`)}</strong><pre>{text}</pre>
-            </div>;
-          })}
-        </details>)}
-      </div>
-    </details>}
-  </div>;
+  const steps = activity ? groupActivitySteps(activity) : [];
+  const title = t("turnLab.processLabel");
+  return <Modal open={steps.length > 0} width={640} variant="activity"
+    title={memberName ? `${title} · ${memberName}` : title}
+    subtitle={steps.length > 0 && <TurnProcessSummary stats={getTurnProcessStats(steps)}
+      timing={startedAt == null ? undefined : { startedAt }} live />}
+    onClose={onClose} onOpenChangeComplete={open => { if (!open) onClose(); }}>
+    {steps.length > 0 && <TurnTimeline steps={steps} status="running" detail />}
+  </Modal>;
 }

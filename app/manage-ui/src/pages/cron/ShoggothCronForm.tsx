@@ -1,8 +1,9 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { Field, TextArea, TextInput } from "../../components/Field";
+import { Field, TextArea } from "../../components/Field";
 import type { NativeCronJobInput, UnifiedCronJob } from "../../types";
 import { CronExpressionPicker, DateTimePicker, IntervalPicker } from "./CronSchedulePicker";
-import { CronScheduleType } from "./CronFormLayout";
+import { CronScheduleType, CronTaskNameRow } from "./CronFormLayout";
 
 type ScheduleKind = "cron" | "every" | "at";
 
@@ -163,17 +164,16 @@ export const shoggothInputFromDraft = nativeCronInputFromDraft;
 export const shoggothDraftWithThreadPolicy = nativeCronDraftWithThreadPolicy;
 export const shoggothEditPlan = nativeCronEditPlan;
 
-export default function NativeCronForm({ draft, setDraft }: {
+export default function NativeCronForm({ draft, setDraft, assistant }: {
   draft: NativeCronDraft;
   setDraft: (draft: NativeCronDraft) => void;
+  assistant: ReactNode;
 }) {
   const { t } = useTranslation();
   const set = <K extends keyof NativeCronDraft>(key: K, value: NativeCronDraft[K]) => setDraft({ ...draft, [key]: value });
   // Existing hidden options stay in the draft and continue through the original serializers.
   return <div className="cron-form">
-    <Field label={t("cronForm.taskNameLabel")}>
-      <TextInput value={draft.name} onChange={(event) => set("name", event.target.value)} placeholder={t("cronForm.taskNamePlaceholder")} />
-    </Field>
+    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} assistant={assistant} />
     <Field label={t("cronForm.taskPromptLabel")}>
       <TextArea value={draft.prompt} onChange={(event) => set("prompt", event.target.value)} rows={4} placeholder={t("cronForm.taskPromptPlaceholder")} />
     </Field>

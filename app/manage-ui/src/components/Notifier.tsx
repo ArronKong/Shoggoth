@@ -58,7 +58,7 @@ async function navigateForTarget(category: NotifyCategory, target: NotifyTarget 
   } else if (category === "cron") {
     const jobId = typeof target === "string" ? target : target?.kind === "cron" ? target.jobId : null;
     const backendId = typeof target === "object" && target?.kind === "cron" ? target.backendId : null;
-    // Each click can reopen the same task after its detail modal was dismissed.
+    // Each click can reopen the same task editor after it was dismissed.
     window.location.hash = jobId ? `#/cron?job=${encodeURIComponent(jobId)}${backendId ? `&backend=${encodeURIComponent(backendId)}` : ""}&notification=${sequence}` : "#/cron";
   } else if (category === "task") {
     if (typeof target === "string" && target.startsWith("inspiration:")) {
@@ -225,9 +225,9 @@ export default function Notifier() {
           seen.add(key); if (seen.size > 200) seen.delete(seen.values().next().value as string);
           window.dispatchEvent(new CustomEvent("shoggoth:skills-changed", { detail: f.payload }));
           if (prefsReadyRef.current && prefsRef.current.proactive && f.payload.attention) {
-            toastRef.current.info(f.payload.change === "pending_review" ? "自动学习生成了一条待审核提案，可在技能页查看。"
-              : ["failed", "outcome_unknown"].includes(f.payload.change ?? "") ? "后台复盘未完成，可在技能页查看原因。"
-                : "自动学习技能已更新，可在技能页查看来源和版本。");
+            toastRef.current.info(tRef.current(f.payload.change === "pending_review" ? "skills.learningProposalNotice"
+              : ["failed", "outcome_unknown"].includes(f.payload.change ?? "") ? "skills.learningFailedNotice"
+                : "skills.learningUpdatedNotice"));
           }
           return;
         }

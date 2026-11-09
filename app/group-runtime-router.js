@@ -16,22 +16,31 @@ class GroupRuntimeRouter {
     this.legacyArtifacts = new Map(); this.pollingTools = new Set(); this.closed = false;
     this.readTerminalReceipt = readTerminalReceipt;
   }
-  async #local(backendId, agentId) {
+  async #local(backendId, agentId, stopBinding = null) {
+    if (!this.paths) return null;
     const peerId = `local-${backendId}-${crypto.createHash("sha256").update(agentId).digest("hex").slice(0, 16)}`;
-    if (!this.paths || !await this.isLocal({ backendId, agentId })) return null;
-    if (this.localHosts.has(peerId)) return this.localHosts.get(peerId);
-    const host = new GroupRuntimeHost({ paths: { stateDir: path.join(this.paths.stateDir, "group-runtime-hosts", peerId), trustedRoot: this.paths.trustedRoot },
-      registry: this.registry, agent: { backendId, agentId }, ownerToken: crypto.randomBytes(32).toString("base64url"),
-      runtimeToken: crypto.randomBytes(32).toString("base64url"), readTerminalReceipt: this.readTerminalReceipt }).open();
-    const peer = { id: peerId, backendId, agentId, hostId: host.hostId, local: host };
-    this.localHosts.set(peerId, peer); return peer;
+    const runtimeIsLocal = await this.isLocal({ backendId, agentId });
+    if (this.closed) p.fail("GROUP_HOST_UNAVAILABLE");
+    if (!runtimeIsLocal && (stopBinding?.peerId !== peerId || !p.uuid(stopBinding.hostId))) return null;
+    let peer = this.localHosts.get(peerId);
+    if (!peer) {
+      const host = new GroupRuntimeHost({ paths: { stateDir: path.join(this.paths.stateDir, "group-runtime-hosts", peerId), trustedRoot: this.paths.trustedRoot },
+        registry: this.registry, agent: { backendId, agentId }, ownerToken: crypto.randomBytes(32).toString("base64url"),
+        runtimeToken: crypto.randomBytes(32).toString("base64url"), readTerminalReceipt: this.readTerminalReceipt })
+        .open({ expectedHostId: runtimeIsLocal ? null : stopBinding.hostId });
+      peer = { id: peerId, backendId, agentId, hostId: host.hostId, local: host };
+      this.localHosts.set(peerId, peer);
+    }
+    return runtimeIsLocal ? peer : { ...peer, offline: true };
   }
-  async #peer(input) {
+  async #peer(input, stopGroup = false) {
     const peers = this.allowRemote ? p.normalizePeers(this.getPeers()) : [];
     if (!this.allowRemote && ((input.peerId ?? input.context?.peerId) || (input.remote && !input.remote.peerId.startsWith("local-")))) p.fail("GROUP_HOST_REMOTE_DISABLED");
     if (input.remote) {
       let peer = peers.find(value => value.id === input.remote.peerId);
-      if (!peer && input.remote.peerId.startsWith("local-")) peer = await this.#local(input.backendId, input.agentId);
+      if (!peer && input.remote.peerId.startsWith("local-")) {
+        peer = await this.#local(input.backendId, input.agentId, stopGroup ? input.remote : null);
+      }
       if (!peer || peer.backendId !== input.backendId || peer.agentId !== input.agentId || peer.hostId !== input.remote.hostId) p.fail("GROUP_HOST_IDENTITY_MISMATCH");
       return peer;
     }
@@ -115,21 +124,23 @@ class GroupRuntimeRouter {
   }
   async #action(method, input) {
     const { stopGroup, ...bound } = input;
+    const groupStop = method === "cancel" && stopGroup === true;
     if (!input.remote) {
-      if (method === "cancel" && stopGroup) {
+      if (groupStop) {
         const result = await this.localRunner.cancel({ ...bound, hostId: this.localRunner.hostId }, { groupDeleted: true });
         return { ...result, groupStopped: require("./external-inspiration-protocol").EXTERNAL_TERMINAL.has(result.snapshot.status) };
       }
       return this.localRunner[method](bound);
     }
-    const peer = await this.#peer(input);
+    const peer = await this.#peer(input, groupStop);
     const { remote, ...execution } = bound;
     const authority = { groupId: remote.groupId, ownerId: remote.ownerId, epoch: remote.epoch };
-    if (method === "cancel" && stopGroup) await this.#request(peer, "host.group.stop", {}, authority);
+    if (peer.offline) return peer.local.stopGroupFromJournal(execution, authority);
+    if (groupStop) await this.#request(peer, "host.group.stop", {}, authority);
     const wire = method === "get" ? "host.execution" : `group.external.${method}`;
     const result = await this.#request(peer, wire, execution, authority);
     if (method === "get" || method === "start") void this.#tools(peer, authority).catch(() => {});
-    if (method === "cancel" && stopGroup) {
+    if (groupStop) {
       const stopped = await this.#request(peer, "host.group.stop", {}, authority);
       return { ...result, groupStopped: stopped.pending === 0 };
     }

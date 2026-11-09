@@ -13,6 +13,8 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-chat-send-recovery-
 const outputIndex = process.argv.indexOf("--output"), output = outputIndex < 0 ? null : process.argv[outputIndex + 1];
 const screenshotIndex = process.argv.indexOf("--screenshot"), screenshot = screenshotIndex < 0 ? null : process.argv[screenshotIndex + 1];
 const bufferedOnly = process.argv.includes("--buffered-only");
+const bufferedCases = ["ordinary-buffered", "inspiration-buffered"].flatMap(kind => ["", "-immersive"]
+  .map(suffix => [`${kind}${suffix}`, "openclaw"]));
 const observationCases = [["native-active-recovery", "shoggoth"], ["native-active-recovery-immersive", "shoggoth"],
   ["legacy-observer-loop", "shoggoth"], ["legacy-observer-loop-immersive", "shoggoth"],
   ["native-active-stale", "shoggoth"], ["native-active-storage-failure", "shoggoth"],
@@ -116,7 +118,7 @@ try {
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const window=new BrowserWindow({show:false,width:1080,height:920,webPreferences:{backgroundThrottling:false}});
 window.webContents.on("console-message",event=>{if(event.level==="error") console.error(event.message);});
-const cases=${JSON.stringify(inspirationObservationOnly ? inspirationObservationCases : ordinaryRecoveryOnly ? ordinaryRecoveryCases : slashOnly ? slashCases : upstreamOnly ? upstreamCases : observationOnly ? observationCases : bufferedOnly ? [["ordinary-buffered", "openclaw"], ["ordinary-buffered-immersive", "openclaw"]] : [["uncertain", "openclaw"], ["uncertain", "hermes"], ["uncertain", "shoggoth"], ["started", "openclaw"], ["restored", "openclaw"], ["restored", "hermes"], ["newer", "openclaw"], ["rejected", "openclaw"], ["rejected", "hermes"], ["ordinary", "hermes"], ["ordinary", "openclaw"], ["ordinary", "shoggoth"], ["accepted-error", "openclaw"], ["accepted-uncertain", "hermes"], ["stale-query", "openclaw"], ["reselect", "shoggoth"], ["terminal-race", "openclaw"], ["terminal-timeout", "hermes"], ["terminal-reload", "openclaw"], ["ordinary-upstream", "openclaw"], ["ordinary-receipt", "openclaw"], ["ordinary-buffered", "openclaw"], ["ordinary-buffered-immersive", "openclaw"], ...observationCases, ...inspirationObservationCases, ...upstreamCases, ...slashCases, ...ordinaryRecoveryCases])};
+const cases=${JSON.stringify(inspirationObservationOnly ? inspirationObservationCases : ordinaryRecoveryOnly ? ordinaryRecoveryCases : slashOnly ? slashCases : upstreamOnly ? upstreamCases : observationOnly ? observationCases : bufferedOnly ? bufferedCases : [["uncertain", "openclaw"], ["uncertain", "hermes"], ["uncertain", "shoggoth"], ["started", "openclaw"], ["restored", "openclaw"], ["restored", "hermes"], ["newer", "openclaw"], ["rejected", "openclaw"], ["rejected", "hermes"], ["ordinary", "hermes"], ["ordinary", "openclaw"], ["ordinary", "shoggoth"], ["accepted-error", "openclaw"], ["accepted-uncertain", "hermes"], ["stale-query", "openclaw"], ["reselect", "shoggoth"], ["terminal-race", "openclaw"], ["terminal-timeout", "hermes"], ["terminal-reload", "openclaw"], ["ordinary-upstream", "openclaw"], ["ordinary-receipt", "openclaw"], ...bufferedCases, ...observationCases, ...inspirationObservationCases, ...upstreamCases, ...slashCases, ...ordinaryRecoveryCases])};
 const rows=[];try{for(const [scenario,backend] of cases) {
   const testUrl=${JSON.stringify(url)}+"?scenario="+scenario+"&backend="+backend+"#/chat";
   await window.loadURL(testUrl);let row;

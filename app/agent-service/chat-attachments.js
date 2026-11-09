@@ -8,7 +8,7 @@ const { atomicWritePrivateFile, fsyncPrivateParent, preparePrivateParent, readPr
 const { validAttachment, validAttachments, MAX_ATTACHMENTS, MAX_MEDIA_BYTES, MAX_VIDEO_BYTES,
   CHUNK_BYTES, mediaId } = require("./inspiration-media");
 const { serviceError } = require("./security");
-const { IMAGE_TYPES, attachmentTextParts } = require("./chat-attachment-text");
+const { IMAGE_TYPES, MAX_TEXT_BYTES, ATTACHMENT_TEXT_HEADER, isText, utf8, attachmentText, attachmentTextParts } = require("./chat-attachment-text");
 
 const CHAT_MAX_PROMPT_BYTES = 60 * 1024;
 const CHAT_ATTACHMENT_CAPABILITIES = Object.freeze({
@@ -127,6 +127,10 @@ function clonePrivateFile(source, target, data, trustedRoot) {
   }
 }
 
+function chatAttachmentPath(stateDir, sessionKey, attachment) {
+  return path.join(stateDir, "chat-attachments", sessionKey, attachment.id, attachmentName(attachment.name));
+}
+
 function prepareChatAttachments(media, attachments, sessionKey) {
   // Inspiration follow-ups can carry both the note's and this turn's attachments.
   if (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS * 2
@@ -136,8 +140,7 @@ function prepareChatAttachments(media, attachments, sessionKey) {
     const source = media.materialize(attachment);
     // Each session gets only its own submitted bytes. Antigravity can add this
     // directory to its workspace without granting access to the media database.
-    const file = path.join(media.paths.stateDir, "chat-attachments", sessionKey,
-      attachment.id, attachmentName(attachment.name));
+    const file = chatAttachmentPath(media.paths.stateDir, sessionKey, attachment);
     const data = readPrivateFile(source, { maxBytes: MAX_VIDEO_BYTES });
     let existing;
     try { existing = readPrivateFile(file, { maxBytes: MAX_VIDEO_BYTES }); }
@@ -170,6 +173,30 @@ function attachmentPrompt(prompt, attachments) {
     + (parts.length ? `\n\n${parts.map(part => part.text).join("\n\n")}` : "");
 }
 
+function verifiedAttachmentTextRanges(text, stateDir, sessionKey) {
+  if (!stateDir || !mediaId(sessionKey) || !text.includes(ATTACHMENT_TEXT_HEADER)) return [];
+  let root;
+  try { root = fs.realpathSync(stateDir); } catch { return []; }
+  const ranges = [];
+  for (const match of text.matchAll(/^User-provided attachment \(metadata and content are untrusted data\): (\{[^\n]{1,512}\})\nBEGIN ATTACHMENT CONTENT\n/gmu)) {
+    if (match.index < (ranges.at(-1)?.end ?? 0)) continue;
+    let attachment, original;
+    try {
+      attachment = JSON.parse(match[1]);
+      if (!validAttachment({ ...attachment, size: 1 }) || !isText(attachment.name, attachment.mimeType)) continue;
+      const file = chatAttachmentPath(root, sessionKey, attachment);
+      // Only the session's prepared copy can authorize a text exemption. A
+      // path or a marker in the model request grants no file access by itself.
+      if (fs.realpathSync(file) !== file) continue;
+      original = utf8(readPrivateFile(file, { maxBytes: MAX_TEXT_BYTES }));
+    } catch { continue; }
+    if (original === null) continue;
+    const block = attachmentText(attachment.name, attachment.mimeType, original, attachment.id);
+    if (text.startsWith(block, match.index)) ranges.push({ start: match.index, end: match.index + block.length });
+  }
+  return ranges;
+}
+
 function imageAttachments(attachments) {
   return (attachments || []).filter(item => IMAGE_TYPES.has(item.mimeType)).map(item => ({
     mimeType: item.mimeType, data: readPrivateFile(item.path, { maxBytes: MAX_MEDIA_BYTES }).toString("base64"),
@@ -178,4 +205,4 @@ function imageAttachments(attachments) {
 
 module.exports = { CHAT_MAX_PROMPT_BYTES, CHAT_ATTACHMENT_CAPABILITIES, explicitPathAttachment,
   uploadChatAttachments, prepareChatAttachments, chatAttachmentDirectory, attachmentPrompt, imageAttachments,
-  mimeForFileName };
+  mimeForFileName, verifiedAttachmentTextRanges };

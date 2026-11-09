@@ -1,5 +1,5 @@
 import AgentAvatarView from "../components/AgentAvatar";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { Popover } from '@base-ui/react/popover';
@@ -7,6 +7,7 @@ import { Switch } from '../components/Field';
 import BackendTabIcon, { sortBackendTabs } from '../components/BackendTabIcon';
 import LiquidPill from '../components/LiquidPill';
 import { usePageCache } from '../lib/usePageCache';
+import { useScrollFade } from '../lib/useScrollFade';
 import { useBackendCatalog } from '../lib/backends';
 import { getInspirationAgents, getInspirationGrowth, getStatus, updateInspirationGrowth } from '../api/client';
 import type { InspirationGrowthSettings } from '../types';
@@ -42,28 +43,6 @@ function GrowthPanel({ page, active, layout, onHeight, children }: {
   const inertProps: { inert?: '' } = { inert: active ? undefined : '' };
   return <div ref={panel} className={styles.panel} data-page={page} data-active={active} data-layout={layout}
     {...inertProps} aria-hidden={!active}>{children}</div>;
-}
-
-function useScrollFade(active: boolean, itemCount: number, resetKey?: string) {
-  // A callback ref also covers lists mounted after the popover portal opens.
-  const [element, setElement] = useState<HTMLDivElement | null>(null);
-  const [earlier, setEarlier] = useState(false);
-  const [more, setMore] = useState(false);
-  const checkOverflow = useCallback(() => {
-    setEarlier(Boolean(element && element.scrollTop > 1));
-    setMore(Boolean(element && element.scrollHeight - element.scrollTop > element.clientHeight + 1));
-  }, [element]);
-  useLayoutEffect(() => {
-    if (active && element) element.scrollTop = 0;
-  }, [active, element, resetKey]);
-  useLayoutEffect(() => {
-    if (!active || !element) return;
-    checkOverflow();
-    const observer = new ResizeObserver(checkOverflow);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [active, element, itemCount, resetKey, checkOverflow]);
-  return { ref: setElement, onScroll: checkOverflow, 'data-scrolled': earlier || undefined, 'data-more': more || undefined };
 }
 
 export default function InspirationAutoGrowth({ onOpen, onChange, noticeTarget }: {
@@ -238,7 +217,7 @@ export default function InspirationAutoGrowth({ onOpen, onChange, noticeTarget }
             </div>
             {hasRuntimeTabs && <div className={styles.runtimes} role="group" aria-label={t('inspiration.growth.filterBackend')}>
               <LiquidPill key={JSON.stringify(runtimes.map(runtime => runtime.id))} value={activeBackend || ''}
-                activeSelector={`.${styles.runtime}[aria-pressed="true"]`} className={styles.runtimePill} />
+                activeSelector='[aria-pressed="true"]' className={styles.runtimePill} />
               {runtimes.map(runtime => <button key={runtime.id} type="button" className={styles.runtime}
                 aria-label={runtime.name} title={runtime.name} aria-pressed={runtime.id === activeBackend}
                 data-runtime={runtime.id} disabled={busy} onClick={() => setBackend(runtime.id)}>
@@ -257,7 +236,7 @@ export default function InspirationAutoGrowth({ onOpen, onChange, noticeTarget }
                   }}>
                   <AgentAvatar value={choice.value} name={choice.name} />
                   <span className={styles.agentName}>{choice.name}</span>
-                  {checked && <span className={styles.glyph + ' ' + styles.check} aria-hidden="true" />}
+                  {checked && <span className={styles.check} aria-hidden="true" />}
                 </button>;
               })}
               {visibleAgents.length === 0 && <p className={styles.empty} role="status">{t(roster.loading ? 'common.loading' : 'inspiration.growth.noBackendAgents')}</p>}
@@ -268,7 +247,7 @@ export default function InspirationAutoGrowth({ onOpen, onChange, noticeTarget }
                 if (selectionChanged || !settings) return;
                 // Adding agents changes the roster; the switch controls new assignments.
                 void save(settings.enabled && selected.length > 0, selected, editRevision ?? settings.revision);
-              }}><span className={styles.glyph + ' ' + styles.check} aria-hidden="true" /></button>
+              }}><span className={styles.check} aria-hidden="true" /></button>
             {view === 'picker' && feedback}
           </GrowthPanel>
         </Popover.Popup>

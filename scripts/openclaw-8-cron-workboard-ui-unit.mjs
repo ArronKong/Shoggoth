@@ -125,14 +125,6 @@ try {
     "成功执行后的送达失败仍需独立提示",
   );
 
-  const runPanel = fs.readFileSync(path.join(uiRoot, "src/pages/cron/CronRunHistoryPanel.tsx"), "utf8");
-  assert.match(runPanel, /data-outcome="execution"/);
-  assert.match(runPanel, /data-outcome="delivery"/);
-  assert.ok(runPanel.indexOf('data-outcome="execution"') < runPanel.indexOf('data-outcome="delivery"'),
-    "运行历史必须先显示执行结果，再独立显示送达结果");
-  assert.doesNotMatch(runPanel, /backendId\s*===/,
-    "运行结果展示不能按 backend id 特判");
-
   const workboardView = fs.readFileSync(path.join(uiRoot, "src/pages/workboard/WorkboardView.tsx"), "utf8");
   assert.match(workboardView, /taskStatusKey\(taskLine\)/,
     "Workboard 卡片必须消费 terminalOutcome-aware 状态文案");

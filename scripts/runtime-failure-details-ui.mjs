@@ -3,20 +3,42 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import vm from "node:vm";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 
 const root = path.resolve(import.meta.dirname, "..");
 const require = createRequire(import.meta.url);
-const { build, transformSync } = createRequire(path.join(root, "app/manage-ui/package.json"))("esbuild");
+const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
+const { build } = uiRequire("esbuild");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { loadInspirationActivity } = require("../app/core/inspiration-activity");
 const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
-const module = { exports: {} };
-vm.runInNewContext(transformSync(fs.readFileSync(path.join(root, "app/manage-ui/src/lib/gatewayErrors.ts"), "utf8"),
-  { loader: "ts", format: "cjs" }).code, { module, exports: module.exports });
-const translate = module.exports.translateGatewayError;
+const { load } = require("./fixtures/load-ui-typescript.cjs");
+const { translateGatewayError: translate, translateProductError } = load("lib/gatewayErrors.ts");
+const catalog = require("../app/agent-service/chat-error-messages.json");
+const i18n = uiRequire("i18next").createInstance();
+await i18n.init({
+  lng: "en", fallbackLng: false, interpolation: { escapeValue: false },
+  resources: {
+    "zh-CN": { translation: load("i18n/locales/zh-CN.ts").default, chatErrors: catalog },
+    en: { translation: load("i18n/locales/en.ts").default, chatErrors: load("i18n/chatErrorMessages.en.ts").default },
+  },
+});
+const tEn = i18n.getFixedT("en");
+const tZh = i18n.getFixedT("zh-CN");
+let catalogCount = 0;
+for (const [group, messages] of Object.entries(catalog)) {
+  for (const [code, message] of Object.entries(messages)) {
+    assert.ok(i18n.exists(`chatErrors:${group}.${code}`), `missing English copy for ${group}.${code}`);
+    assert.equal(translateProductError(message, tZh), message);
+    assert.equal(translateProductError(`错误：${message}`, tZh), `错误：${message}`);
+    assert.doesNotMatch(translate(message, tEn), /\p{Script=Han}/u, code);
+    assert.doesNotMatch(translate(`错误：${message}`, tEn), /\p{Script=Han}/u, code);
+    assert.equal(translate(`${message}\nProvider request ID: fixture`, tEn), `${message}\nProvider request ID: fixture`);
+    catalogCount++;
+  }
+}
+assert.equal(translate("Shoggoth 请求失败 (UNKNOWN_FIXTURE)", tEn), "The Shoggoth request failed (UNKNOWN_FIXTURE).");
 for (const reason of ["Invalid API key for project example; request id abc", "You exceeded your current quota; daily limit 100, reset tomorrow",
   "OAuth session expired for workspace example; request id abc", "LLM idle timeout after 45s during tool execution"]) {
   assert.equal(translate(reason, () => "统一文案"), reason);
@@ -55,6 +77,10 @@ for (const [code, failure, englishSummary, englishDetail] of [
   ["ANTIGRAVITY_REGION_UNSUPPORTED", null, englishRegion],
   ["RUNTIME_QUOTA_EXHAUSTED", null, "The account's quota is exhausted and the request has stopped. Wait for the quota to reset, add quota, or switch accounts before retrying."],
   ["RUNTIME_AUTH_REQUIRED", null, "Agent authentication failed. Check the account under Models or sign in again before retrying."],
+  ["RUNTIME_WORKSPACE_UNAVAILABLE", { message: "Working directory cannot be read.", upstreamCode: "ENOENT" },
+    "This session’s working directory is missing or inaccessible. Restore it or start a new session with the default workspace. The message was not sent."],
+  ["PI_TOOL_DESCRIPTION_TOO_LARGE", { message: "Tool description is 200 bytes over its limit." },
+    "Pi could not load the Shoggoth tools because a tool description exceeded the size limit. The message was not sent. Update Shoggoth and try again."],
 ]) {
   const frames = [], runId = "run-fixture";
   backend._getHistoryItems = async () => [];
@@ -68,7 +94,10 @@ for (const [code, failure, englishSummary, englishDetail] of [
   const history = (await backend.getHistory(key)).messages[0];
   assert.equal(history.content[0].text, `错误：${frames[0].payload.errorMessage}`);
   const status = failure ? [failure.httpStatus ? `HTTP ${failure.httpStatus}` : null, failure.upstreamCode].filter(Boolean).join(" · ") : "";
-  const expectedEnglish = `Error: ${englishSummary}${failure ? `\nProvider error: ${englishDetail || failure.message}${status ? `\n${status}` : ""}\nError code: ${code}` : ""}`;
+  const detailLabel = code === "PI_TOOL_DESCRIPTION_TOO_LARGE" ? "Startup details" : "Provider error";
+  const expectedEnglish = `Error: ${englishSummary}${failure ? `\n${detailLabel}: ${englishDetail || failure.message}${status ? `\n${status}` : ""}\nError code: ${code}` : ""}`;
+  assert.equal(translate(history.content[0].text, tEn), expectedEnglish);
+  assert.equal(translate(history.content[0].text, tZh), history.content[0].text);
   const execution = { id: runId, ideaId: 'error-idea', runId, profileId: 'fixture', agentId: 'shoggoth-default',
     backendId: 'shoggoth', workspace: '/fixture', sessionKey: 'failure-fixture', status: 'failed',
     createdAt: 100, finishedAt: 200, errorCode: code, resultSummary: null, attention: null };
@@ -81,6 +110,8 @@ for (const [code, failure, englishSummary, englishDetail] of [
   assert.equal(activity.errorMessage, history.content[0].text);
   cases.push({ frame: frames[0], history, execution, activity, expected: { "zh-CN": history.content[0].text, en: expectedEnglish } });
 }
+console.log(`PASS: ${catalogCount} fixed errors and ${cases.length} live/history cases in both languages`);
+if (process.argv.includes("--unit-only")) process.exit(0);
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-error-ui-"));
 const output = path.resolve(process.env.RUNTIME_FAILURE_UI_OUTPUT || path.join(root, ".artifacts/runtime-failure-details-20261029/ui-bilingual"));
 fs.mkdirSync(output, { recursive: true });

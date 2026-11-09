@@ -61,6 +61,7 @@ const Component = load('pages/InspirationAutoGrowth.tsx', {
   '../components/Field': { Switch: props => React.createElement('button', { role: 'switch',
     'aria-checked': props.checked, disabled: props.disabled, onClick: () => props.onChange(!props.checked) }) },
   '../lib/usePageCache': cache,
+  '../lib/useScrollFade': load('lib/useScrollFade.ts', {}),
   '../lib/backends': { useBackendCatalog: () => catalog },
   './InspirationGrowthIcon': props => React.createElement('i', { 'data-growth-enabled': props.enabled }),
   './use-inspiration-notice-badge': noticeBadge,

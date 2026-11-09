@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import '../i18n/chatErrorResources';
 import { Popover } from '@base-ui/react/popover';
 import { ContextMenu } from '@base-ui/react/context-menu';
 import Modal from '../components/Modal';
@@ -20,7 +21,7 @@ import { useBackendCatalog } from '../lib/backends';
 import { useSessionRuntimeModels } from '../lib/useSessionRuntimeModels';
 import { formatTurnElapsed, stepsFromParts, turnElapsedMs } from '../lib/turnTimeline';
 import { getInspiration, getInspirationAgents, getIdleInspirationAgents, getInspirationExecutions, getInspirationModels, updateInspiration,
-  startInspiration, respondInspiration, cancelInspiration, revealPath } from '../api/client';
+  startInspiration, respondInspiration, cancelInspiration, revealPath, revealManagedAgentFile } from '../api/client';
 import type { InspirationAgent, InspirationAttachment, InspirationExecution, InspirationIdea, InspirationModelSelection } from '../types';
 import ChatPromptCard, { type ChatPromptResponse } from './ChatPromptCard';
 import ChatModelMenu from './ChatModelMenu';
@@ -217,7 +218,7 @@ function AgentPicker({ agents, current, used, busyKeys, disabled, open, onOpenCh
             </div>
             {runtimes.length > 1 && <div className={pickerStyles.runtimes} role="group" aria-label={t('inspiration.growth.filterBackend')}>
               <LiquidPill key={runtimes.map(runtime => runtime.id).join()} value={activeBackend || ''}
-                activeSelector={`.${pickerStyles.runtime}[aria-pressed="true"]`} className={pickerStyles.runtimePill} />
+                activeSelector='[aria-pressed="true"]' className={pickerStyles.runtimePill} />
               {runtimes.map(runtime => <button key={runtime.id} type="button" className={pickerStyles.runtime}
                 aria-label={runtime.name} title={runtime.name} aria-pressed={runtime.id === activeBackend}
                 data-runtime={runtime.id} onClick={() => setBackend(runtime.id)}>
@@ -234,7 +235,7 @@ function AgentPicker({ agents, current, used, busyKeys, disabled, open, onOpenCh
                   <AgentAvatarView agentId={agent.id} name={agent.name} className={pickerStyles.avatar}
                     fallback={Array.from(agent.name).slice(0, 2).join('').toUpperCase()} />
                   <span className={pickerStyles.agentName}>{agent.name}</span>
-                  {checked && <span className={`${pickerStyles.glyph} ${pickerStyles.check}`} aria-hidden="true" />}
+                  {checked && <span className={pickerStyles.check} aria-hidden="true" />}
                 </button>;
               })}
               {rows.length === 0 && <p className={pickerStyles.empty} role="status">{t('inspiration.growth.noBackendAgents')}</p>}
@@ -289,10 +290,13 @@ function Round({ ideaId, execution, number, agentName, latest, archived, busy, a
       : execution.errorCode || failed ? t('inspiration.runError') : null);
   const code = !chatError && execution.status !== 'canceled' && execution.errorCode && !(known && i18n?.exists?.(known)) ? execution.errorCode : null;
   const trajectoryLabel = t(showTrajectory ? 'inspiration.thread.hideTrajectory' : 'inspiration.thread.showTrajectory');
-  const reveal = async (file: string) => {
+  const reveal = async (file: { path: string; fileId?: string }) => {
     if (revealing) return;
-    setRevealing(file);
-    try { await revealPath(file); }
+    setRevealing(file.fileId || file.path);
+    try {
+      if (file.fileId) await revealManagedAgentFile(execution.backendId, execution.agentId, file.fileId);
+      else await revealPath(file.path);
+    }
     catch (failure) { toast.error(t('chat.artifactsRevealFailed', { msg: messageOf(failure) })); }
     finally { setRevealing(null); }
   };
@@ -340,9 +344,9 @@ function Round({ ideaId, execution, number, agentName, latest, archived, busy, a
             : <p className={styles.progressHint}>{t('inspiration.progressHint.completed')}</p>}
           {files.length > 0 && <section aria-label={t('inspiration.artifacts')} className={styles.artifacts}>
             <div className={styles.sectionHeading}><h3>{t('inspiration.artifacts')}</h3><span>{t('chat.artifactsRevealInFolder')}</span></div>
-            <ul className={styles.artifactList}>{files.map(file => <li key={file.path}>
+            <ul className={styles.artifactList}>{files.map(file => <li key={file.fileId || file.path}>
               <button type="button" className={styles.artifact} disabled={revealing !== null} title={file.path}
-                aria-label={t('inspiration.revealArtifact', { name: file.name })} onClick={() => { void reveal(file.path); }}>
+                aria-label={t('inspiration.revealArtifact', { name: file.name })} onClick={() => { void reveal(file); }}>
                 <span className={styles.artifactThumb}><ArtifactThumb name={file.name} /></span>
                 <span className={styles.artifactName}><strong>{file.name}</strong><span>{file.path}</span></span>
               </button>

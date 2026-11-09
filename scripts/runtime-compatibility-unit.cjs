@@ -108,6 +108,13 @@ test("native account readiness requires protocol, auth and catalog proof; rechec
   const piId = row("pi").runtimeAccountId;
   assert.deepEqual(backend._bindingAvailability("", "pi", piId), { available: false, reason: "runtime-incompatible" });
   assert.throws(() => backend._assertRuntimeEnabled({ runtime: "pi", runtimeAccountId: piId }), { code: "RUNTIME_INCOMPATIBLE" });
+  const beforeChoices = calls.length;
+  const choices = await backend.getRuntimeStatuses({ forAgentCreation: true });
+  assert.equal(choices.find(item => item.runtime === "pi").readiness, "incompatible");
+  assert.equal(calls.length, beforeChoices, "the chooser consumes existing compatibility evidence without probing");
+  backend._runtimeExecutableStamp = binary => `replaced:${binary}`;
+  const replaced = await backend.getRuntimeStatuses({ forAgentCreation: true });
+  assert.equal(replaced.find(item => item.runtime === "pi").readiness, "unverified", "an old binary's proof cannot hide the replacement");
   const provider = (await backend.listOAuthProviders()).providers.find(item => item.id === piId);
   assert.equal(provider.status.loggedIn, false);
   assert.equal(provider.status.verification, "incompatible");

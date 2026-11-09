@@ -8,6 +8,29 @@ const { resolveServicePaths } = require("../../app/agent-service/paths");
 const { RuntimeAdapterRegistry } = require("../../app/agent-service/runtime-adapter-registry");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../../app/agent-service/product-store");
 const { DEFAULT_RUNTIME_ACCOUNTS } = require("../../app/agent-service/runtime-account");
+const { workspaceMemoryRefs } = require("../../app/agent-service/memory-engine");
+
+async function seedProactiveAgentContext(service, profileId, workspace, at) {
+  const current = service.agentDefinitionStore.get(profileId);
+  const definitions = {
+    IDENTITY: "# Identity\n\nYou are the observatory's patient guide.\n",
+    AGENTS: "# Operating rules\n\nPresent the observation before the interpretation.\n",
+    SOUL: "# Soul\n\n" + "Use calm language when reporting an observation.\n".repeat(360)
+      + "Close each actionable reminder with a gentle next step.\n",
+  };
+  service.agentDefinitionStore.update({ profileId, expectedRevision: current.manifest.revision,
+    actor: "user", documents: definitions });
+  const user = "The user prefers a brief, friendly opening in reminders.";
+  const agent = "The observatory team reviews the amber telescope after dark.";
+  const daily = "Today's observation found the lens cover was closed.";
+  const project = "The private project uses a different telescope.";
+  for (const [content, input] of [[user, { scope: "user", sensitivity: "private" }], [agent, { scope: "agent" }],
+    [daily, { scope: "agent", dailyNotePath: `memory/${new Date(at).toISOString().slice(0, 10)}.md` }],
+    [project, { scope: "project", sourceRefs: ["user-edit:review-fixture", ...workspaceMemoryRefs(workspace, "project")] }]]) {
+    await service.memoryEngine.propose({ profileId, classification: "explicit", content, sourceRefs: ["user-edit:review-fixture"], ...input });
+  }
+  return { definitions, user, agent, daily, project };
+}
 
 async function verifyProactiveNativeClosure({ root, adapter, runtime, model, setResponse }) {
   const registry = new RuntimeAdapterRegistry(); registry.register(runtime, adapter);
@@ -77,4 +100,4 @@ async function verifyProactiveNativeClosure({ root, adapter, runtime, model, set
       actualProviderCalls: 0, physicalOsNotifications: 0 };
   } finally { setResponse(null); await service.stop({ notify: false }); }
 }
-module.exports = { verifyProactiveNativeClosure };
+module.exports = { verifyProactiveNativeClosure, seedProactiveAgentContext };

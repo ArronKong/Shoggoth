@@ -191,11 +191,12 @@ class GroupChatDriver {
         if (current?.state === "running") void this.#abort(current);
         return;
       }
-      this.drafts?.watch(current.id);
       if (current.abortReason) void this.#abort(current);
+      else this.drafts?.watch(current.id);
     } catch (error) {
       // 成员原来的群内部会话续接不上：换新会话，回合回到原位置；下一次认领给它看最近的群消息。
       if (error?.code === "GROUP_EXTERNAL_SESSION_LOST"
+        && this.store.groupLifecycle(binding.groupId) === "active"
         && this.store.resetSession({ groupId: binding.groupId, memberId: binding.memberId })
         && this.store.requeue({ opportunityId: opportunity.id })) {
         this.drafts?.forget(opportunity.id);
@@ -393,7 +394,7 @@ class GroupChatDriver {
     }
     recorded = this.store.getOpportunity(opportunityId);
     this.#armInactivity(recorded);
-    this.drafts?.watch(opportunityId);
+    if (!recorded.abortReason || this.store.groupLifecycle(recorded.groupId) !== "deleted") this.drafts?.watch(opportunityId);
     if (recorded.abortReason) void this.#abort(recorded);
     if (TERMINAL_STATUSES.has(current.status)) this.onRunTerminal(current);
     else if (WAITING_STATUSES.has(current.status)) this.onRunInteraction(current, null);
@@ -474,14 +475,18 @@ class GroupChatDriver {
   async deleteGroup(groupId) {
     if (this.fence === null) return;
     this.directory?.cancelGroup?.(groupId);
-    if (this.store.groupLifecycle(groupId) === "deleted") return;
-    await this.abortAll(this.store.runningOpportunities().filter(turn => turn.groupId === groupId));
+    if (!this.store.groupNeedsDeletionStop(groupId)) return;
+    const listed = this.store.groupLifecycle(groupId) === "deleting";
+    const opportunities = this.store.runningOpportunities().filter(turn => turn.groupId === groupId);
+    if (!listed) for (const opportunity of opportunities) this.drafts?.forget(opportunity.id);
+    await this.abortAll(opportunities);
     if (this.externalExecutor?.stopGroup && !this.deletionChecks.has(groupId)) {
       const fence = this.fence;
       const check = Promise.resolve().then(() => this.externalExecutor.stopGroup(groupId)).then(result => {
         if (this.fence !== fence || this.store.getDriverFence() !== fence || !result.confirmed) return;
         if (this.store.confirmGroupDeletionHosts(groupId, result.digest)) {
-          this.store.finishGroupDeletion(groupId); this.onChanged(groupId);
+          this.store.finishGroupDeletion(groupId);
+          if (listed) this.onChanged(groupId);
         }
       }).catch(error => this.onError(error)).finally(() => {
         if (this.deletionChecks.get(groupId) === check) this.deletionChecks.delete(groupId);
@@ -490,9 +495,9 @@ class GroupChatDriver {
     }
     const key = `delete:${groupId}`;
     this.#cancelTimer(key);
-    const result = this.store.finishGroupDeletion(groupId);
-    this.onChanged(groupId);
-    if (result.status === "deleting") this.#timer(key, this.reconcileMs, () => void this.deleteGroup(groupId).catch(error => this.onError(error)));
+    this.store.finishGroupDeletion(groupId);
+    if (listed) this.onChanged(groupId);
+    if (this.store.groupNeedsDeletionStop(groupId)) this.#timer(key, this.reconcileMs, () => void this.deleteGroup(groupId).catch(error => this.onError(error)));
   }
 
   async #abort(opportunity) {
@@ -625,14 +630,15 @@ class GroupChatDriver {
       const adopted = this.store.adopt({ opportunityId: opportunity.id, fence: this.fence });
       if (!adopted) continue;
       this.#armInactivity(adopted);
-      const member = this.store.getGroup(adopted.groupId).members.find((item) => item.id === adopted.memberId);
-      if (member && !member.profileId) {
+      const deleted = this.store.groupLifecycle(adopted.groupId) === "deleted";
+      const member = deleted ? null : this.store.getGroup(adopted.groupId).members.find((item) => item.id === adopted.memberId);
+      if (adopted.runKind === "external" || (member && !member.profileId)) {
         // 外部回合：已登记执行身份就按原身份继续核对；从未登记说明启动请求没发出，回到原位置。
         if (adopted.external && this.externalExecutor) {
           this.externalExecutor.resume(adopted);
           if (adopted.abortReason) void this.#abort(adopted);
           else this.#armInactivity(adopted);
-          this.drafts?.watch(adopted.id);
+          if (!deleted) this.drafts?.watch(adopted.id);
         } else this.store.requeue({ opportunityId: adopted.id });
         continue;
       }

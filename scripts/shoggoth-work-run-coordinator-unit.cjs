@@ -813,7 +813,6 @@ function fixture(options = {}) {
     ...(options.runExecutionStore ? { runExecutionStore: options.runExecutionStore } : {}),
     ...(options.transcriptStore ? { transcriptStore: options.transcriptStore } : {}),
     temporarySecrets: options.temporarySecrets,
-    secretMedia: options.secretMedia,
     getMediaStore: options.getMediaStore,
     verifyMemoryExtractionSource: options.verifyMemoryExtractionSource || (() => true),
     chatSessionStore: sessions,

@@ -1,5 +1,6 @@
 "use strict";
 
+const path = require("node:path");
 const { serviceError } = require("./security");
 const { validateMemoryItem, MAX_READ_CONTENT_BYTES } = require("./memory-store");
 const { validCandidate } = require("./memory-candidate-store");
@@ -442,7 +443,8 @@ function validateAgentHarnessResult(method, result, params = null) {
     valid = KINDS.has(result.kind) && (result.revision === null
       || integer(result.revision, ["MEMORY", "TOOLS"].includes(result.kind) ? 0 : 1)
       || hash(result.revision))
-      && text(result.content) && typeof result.readOnly === "boolean";
+      && text(result.content) && typeof result.readOnly === "boolean"
+      && (result.localDirectory === undefined || (text(result.localDirectory, 4096, false) && path.isAbsolute(result.localDirectory)));
   } else if (["harness.definition.update", "harness.definition.restore", "harness.definition.import.commit"].includes(method)) {
     valid = validDefinitionSummary(result.current);
   } else if (method === "harness.definition.import.stage") {

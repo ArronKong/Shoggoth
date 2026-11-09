@@ -1921,7 +1921,11 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
                   {detail.artifacts.map((a) => (
                     <div key={a.id} className="run-row">
                       <span>{isNativeBoard ? (a.label || t("tasks.untitled")) : (a.label || a.path || a.url || a.id)}</span>
-                      {!isNativeBoard && a.url && <a href={a.url} target="_blank" rel="noreferrer">↗</a>}
+                      {a.url && (isNativeBoard
+                        ? <a href={a.url} download>{t("agents.managedFiles.download")}</a>
+                        : <a href={a.url} target="_blank" rel="noreferrer">↗</a>)}
+                      {a.status === "deleted" && <span>{t("agents.managedFiles.deleted")}</span>}
+                      {a.status === "missing" && <span>{t("agents.managedFiles.missing")}</span>}
                     </div>
                   ))}
                 </div>

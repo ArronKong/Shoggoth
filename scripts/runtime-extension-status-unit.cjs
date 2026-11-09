@@ -137,11 +137,8 @@ test("an extension status response cannot cross a Backend Service generation", a
 });
 
 test("trusted terminal reasons have distinct product messages and exact localized UI mappings", async () => {
-  const fs = require("node:fs"), path = require("node:path"), vm = require("node:vm");
-  const ts = require("../app/manage-ui/node_modules/typescript");
-  const source = fs.readFileSync(path.join(__dirname, "../app/manage-ui/src/lib/gatewayErrors.ts"), "utf8");
-  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const mapped = { exports: {} }; vm.runInNewContext(`(function(module,exports){${compiled}\n})(module,module.exports)`, { module: mapped });
+  const { translateGatewayError } = require("./fixtures/load-ui-typescript.cjs").load("lib/gatewayErrors.ts");
+  const renderKey = (key, vars) => key === "chat.errorPrefix" ? `错误：${vars.msg}` : key;
   const cases = [
     ["RUNTIME_MAX_TOKENS", "runtimeMaxTokens", "Agent 已达到本轮输出长度限制，本轮未完成；请缩小任务范围后继续"],
     ["RUNTIME_MAX_TURN_REQUESTS", "runtimeMaxTurnRequests", "Agent 已达到本轮请求次数限制，本轮已停止；请缩小任务范围后继续"],
@@ -152,8 +149,9 @@ test("trusted terminal reasons have distinct product messages and exact localize
     const errors = [], run = { id: "terminal-probe", source: "chat", status: "failed", errorCode: code };
     await backend._settleTerminal({ sessionKey: "terminal-session", run, hooks: { error: value => errors.push(value) }, poll: { cancelled: false } }, { settled: false }, run);
     assert.deepEqual(errors, [message]);
-    for (const raw of [code, message, `错误：${message}`]) assert.equal(mapped.exports.translateGatewayError(raw, value => value), `chat.gwErrors.${key}`);
+    for (const raw of [code, message]) assert.equal(translateGatewayError(raw, renderKey), `chat.gwErrors.${key}`);
+    assert.equal(translateGatewayError(`错误：${message}`, renderKey), `错误：chat.gwErrors.${key}`);
     const detailed = `${code}: provider detail must stay visible`;
-    assert.equal(mapped.exports.translateGatewayError(detailed, value => value), detailed);
+    assert.equal(translateGatewayError(detailed, value => value), detailed);
   }
 });

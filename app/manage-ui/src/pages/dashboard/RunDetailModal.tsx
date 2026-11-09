@@ -60,6 +60,12 @@ export default function RunDetailModal({ item, agentName, open, onClose, onClose
       <button type="button" className="btn-subtle btn-sm" onClick={refresh}>{t("dashboardRun.retry")}</button>
     </div>}
     {detail?.error && <p className={styles.failure} role="alert">{detail.error}</p>}
+    {!!detail?.artifacts.length && <section aria-label={t("agents.managedFiles.title")}>
+      <h3>{t("agents.managedFiles.title")}</h3>
+      <ul>{detail.artifacts.map(file => <li key={file.id}>
+        {file.url ? <a href={file.url} download>{file.name}</a> : file.name}
+      </li>)}</ul>
+    </section>}
     {(detail || !error) && <section className={styles.activity} aria-label={t("turnLab.processLabel")}>
       <div className={styles.activityHead}>
         <h3>{t("turnLab.processLabel")}</h3>

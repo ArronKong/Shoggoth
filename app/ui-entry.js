@@ -8,7 +8,7 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
-const { app, BrowserWindow, WebContentsView, webContents, Menu, shell, ipcMain, dialog, Notification, nativeTheme, powerMonitor, Tray, nativeImage, globalShortcut, screen, session, systemPreferences, clipboard } = require("electron");
+const { app, BrowserWindow, WebContentsView, webContents, Menu, shell, ipcMain, dialog, Notification, nativeTheme, powerMonitor, Tray, nativeImage, globalShortcut, screen, session, systemPreferences, clipboard, ClipboardItem } = require("electron");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const os = require("node:os");
@@ -1427,6 +1427,7 @@ if (!gotLock) {
           isLocal: ({ backendId, agentId }) => {
             const backend = registry.getBackend(backendId);
             if (backendId === "hermes") {
+              if (!backend) return false;
               if (backend._localRuntime.isManaged()) return true;
               const profile = backend.profileById.get(agentId), dash = backend.dashboards.get(profile);
               return !!dash && backend._getConfig().hermesMode !== "remote" && require("./group-local-runtime-proof").verifyLocalGroupRuntime({ backendId, url: dash.baseUrl });
@@ -1495,7 +1496,7 @@ if (!gotLock) {
       audioPath: app.isPackaged
         ? path.join(process.resourcesPath, "app.asar.unpacked", "app", "manage-ui", "public", "audio", "typewriter-loop.wav")
         : path.join(__dirname, "manage-ui", "public", "audio", "typewriter-loop.wav") });
-    disposeChatClipboardIpc = registerDesktopChatClipboardIpc({ ipcMain, clipboard,
+    disposeChatClipboardIpc = registerDesktopChatClipboardIpc({ ipcMain, clipboard, ClipboardItem,
       getWindows: () => [mainWindow], getUiOrigin: () => serverOrigin });
     const appInstallPreparation = createDesktopAppInstallPreparation({
       launchAgent: shoggothLaunchAgent,

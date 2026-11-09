@@ -26,15 +26,26 @@ function inspirationHistoryText(message) {
 // upstream transcript remains intact for model context and run attribution.
 function projectInspirationHistory(history, projections) {
   const byHash = new Map(projections.map(value => [value.promptHash, value]));
+  const sendsByUserKey = new Map(projections.filter(value => value.chatSend)
+    .map(({ chatSend }) => [`${chatSend.runId}:user`, chatSend.operationId]));
   return { ...history, messages: history.messages.map(message => {
     const text = inspirationHistoryText(message);
-    const projection = text === null ? null : byHash.get(inspirationPromptHash(text));
-    if (!projection) return message;
-    const otherParts = Array.isArray(message.content)
-      ? message.content.filter(part => part?.type !== "text") : [];
-    return { ...message, content: [{ type: "text", text: projection.text }, ...otherParts],
-      ...(projection.attachments.length ? { shoggoth: { ...message.shoggoth,
-        attachments: structuredClone(projection.attachments) } } : {}) };
+    if (text === null) return message;
+    const projection = byHash.get(inspirationPromptHash(text));
+    const operationId = sendsByUserKey.get(message.idempotencyKey ?? message.__openclaw?.idempotencyKey);
+    if (!projection && !operationId) return message;
+    const next = { ...message };
+    if (projection) {
+      const otherParts = Array.isArray(message.content) ? message.content.filter(part => part?.type !== "text") : [];
+      next.content = [{ type: "text", text: projection.text }, ...otherParts];
+    }
+    if (projection?.attachments.length || operationId) {
+      next.shoggoth = { ...message.shoggoth,
+        ...(projection?.attachments.length ? { attachments: structuredClone(projection.attachments) } : {}),
+        ...(operationId ? { inspirationSendOperationId: operationId } : {}),
+      };
+    }
+    return next;
   }) };
 }
 

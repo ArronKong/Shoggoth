@@ -114,6 +114,7 @@ function load(relative) {
       if (name.endsWith("/lib/groupMentions")) return load("src/lib/groupMentions.ts");
       if (name.endsWith("/lib/groupTimeline")) return load("src/lib/groupTimeline.ts");
       if (name.endsWith("/lib/chatTime")) return load("src/lib/chatTime.ts");
+      if (name.endsWith("/lib/chatClipboard")) return load("src/lib/chatClipboard.ts");
       if (name.endsWith("/lib/groupMessagePresentation")) return load("src/lib/groupMessagePresentation.ts");
       if (name.endsWith("/i18n/groupCollaborationResources") || name.endsWith("/i18n/groupComposerResources")) return {};
       if (/\/i18n\/group(?:Reference|Search|Execution|Model|Files)Resources$/u.test(name)) return {};
@@ -134,6 +135,8 @@ function load(relative) {
           disabled: props.disabled, onChange: event => props.onChange(event.target.checked) })),
       };
       if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader")) return passthrough("i");
+      if (name.endsWith("/components/TurnTimeline/TurnTimeline")) return passthrough("ol");
+      if (name.endsWith("/components/TurnTimeline/TurnProcess")) return { getTurnProcessStats: () => ({}), TurnProcessSummary: () => null };
       if (name.endsWith("/components/ChatFileButton")) return load("src/components/ChatFileButton.tsx");
       if (name.endsWith("/components/AgentSoulDocument")) return load("src/components/AgentSoulDocument.tsx");
       if (name.endsWith("/components/ChatMarkdown") || name === "./ChatMarkdown") return passthrough("p");

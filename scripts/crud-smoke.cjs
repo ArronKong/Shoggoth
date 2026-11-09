@@ -223,6 +223,7 @@ function installSmokeModelAdapter(backend) {
 
 async function main() {
   if (WHICH === "all" || WHICH === "isolated") {
+    await require("./shoggoth-agent-files-rest-smoke.cjs").run();
     await require("./apple-device-service-e2e.cjs").run();
     await require("./mcp-connector-service-smoke.cjs").run();
     await require("./shoggoth-self-improvement-rest-smoke.cjs").run();

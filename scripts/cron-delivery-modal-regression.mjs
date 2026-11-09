@@ -10,10 +10,10 @@ const cronPage = fs.readFileSync(
 );
 
 const openDeliveryBody = cronPage.match(
-  /const openJobFromCalendar = async \(job: UnifiedCronJob, occurrenceMs\?: number\) => \{([\s\S]*?)\n  \};/,
+  /const openRunReport = useCallback\(async \(job: UnifiedCronJob, occurrenceMs\?: number\) => \{([\s\S]*?)\n  \},/,
 )?.[1] || "";
 
-assert.ok(openDeliveryBody, "必须找到 Cron 日历产出详情打开流程");
+assert.ok(openDeliveryBody, "必须找到共享的 Cron 运行结果打开流程");
 
 const deliveryRequestIndex = openDeliveryBody.indexOf(
   "await getCronLatestDelivery(job.id, occurrenceMs)",
@@ -32,7 +32,7 @@ assert.doesNotMatch(
 assert.doesNotMatch(openDeliveryBody, /getCronRunTrajectory/);
 assert.match(
   openDeliveryBody,
-  /if \(seq !== deliveryReqRef\.current\) return;[\s\S]*?setDelivery\(latest\);\s*setDeliveryJob\(job\);/,
+  /if \(seq !== deliveryReqRef\.current \|\| !detailIntentController\.isCurrent\(ticket, intent\)\) return;[\s\S]*?setDelivery\(latest\);\s*setDeliveryJob\(job\);/,
   "只有最新请求可以一次提交正文和打开状态",
 );
 assert.match(

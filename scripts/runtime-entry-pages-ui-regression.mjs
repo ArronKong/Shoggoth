@@ -96,7 +96,8 @@ app.whenReady().then(async()=>{
     w.setContentSize(390,780);
     agentGeometry.push(await w.webContents.executeJavaScript('window.checkAgentDefaultGeometry("en","dark")'));
     const agentFiles = await w.webContents.executeJavaScript("window.checkAgentFiles()",true);
-    console.log(JSON.stringify({...result,geometry,immersive,agentDefaultModel,agentGeometry,agentFiles,verified:true}));
+    const agentNameConflicts = await w.webContents.executeJavaScript("window.checkAgentNameConflicts()",true);
+    console.log(JSON.stringify({...result,geometry,immersive,agentDefaultModel,agentGeometry,agentFiles,agentNameConflicts,verified:true}));
     passed=true;
   } catch(error) {console.error(error); console.error(await w.webContents.executeJavaScript("JSON.stringify({errors:window.fixtureErrors,text:document.body.innerText.slice(0,2500)})")); require("node:fs").writeFileSync("/tmp/shoggoth-runtime-entry-failure.png", (await w.webContents.capturePage()).toPNG());}
   finally {w.destroy();app.exit(passed?0:1);}

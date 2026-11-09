@@ -37,7 +37,7 @@ import {
   recoverShoggothStartup,
   shouldRecoverShoggothStartup,
 } from "../lib/shoggothStartupRecovery";
-import { setDebugEnabled, useDebugEnabled } from "../components/debug/store";
+import { setDebugEnabled, SHOW_UI_TOOLS, useDebugEnabled } from "../components/debug/store";
 import { PageHead } from "../components/PageHead";
 import Modal from "../components/Modal";
 import SettingsPreferences from "./settings/SettingsPreferences";
@@ -45,7 +45,7 @@ import SettingsProject from "./settings/SettingsProject";
 import SettingsComputerUse from "./settings/SettingsComputerUse";
 import SettingsBrowserUse from "./settings/SettingsBrowserUse";
 import SettingsWeb from "./settings/SettingsWeb";
-import BackendOverview, { BackendMark } from "./settings/BackendOverview";
+import BackendOverview, { BackendMark, type ConnectionStatusState } from "./settings/BackendOverview";
 import ServiceSettings from "./settings/ServiceSettings";
 import RuntimeStatusList from "./settings/RuntimeStatusList";
 import BackgroundStopDialog from "./settings/BackgroundStopDialog";
@@ -62,6 +62,10 @@ const SHOW_WEB_SETTINGS = false;
 const SHOGGOTH_POST_START_REFRESH_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
 // Keep writes ordered even when Settings is left and reopened before a response.
 let settingsSaveQueue: Promise<void> = Promise.resolve();
+// Reopening Settings paints the last connection snapshot while a fresh read runs.
+let lastBackends: BackendStatus[] = [];
+let lastVersions: BackendVersionStatus[] = [];
+let lastConnectionModes: Pick<AppConfig, "hermesPluginHostMode" | "openclawPluginHostMode"> = {};
 
 // REST 已把 standing grants 白名单化；组件再只取展示所需身份与生命周期字段，
 // 防止未来扩展 API 字段时被无意渲染。
@@ -131,11 +135,12 @@ export default function SettingsPage() {
     () => new Map(backendCatalog.map((descriptor) => [descriptor.id, descriptor])),
     [backendCatalog],
   );
-  const [backends, setBackends] = useState<BackendStatus[]>([]);
+  const [backends, setBackends] = useState(() => lastBackends);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatusState>("loading");
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
   const [runtimesLoading, setRuntimesLoading] = useState(true);
   const [runtimesError, setRuntimesError] = useState(false);
-  const [cfg, setCfg] = useState<AppConfig>(EMPTY);
+  const [cfg, setCfg] = useState<AppConfig>(() => ({ ...EMPTY, ...lastConnectionModes }));
   const managedModes: ManagedPluginHostModes = {
     openclaw: cfg.openclawPluginHostMode === "managed",
     hermes: cfg.hermesPluginHostMode === "managed",
@@ -144,7 +149,7 @@ export default function SettingsPage() {
   const isManagedPluginHost = (backendId: string) => (backendId === "openclaw" || backendId === "hermes") && managedModesRef.current[backendId];
   const cfgRef = useRef(cfg);
   cfgRef.current = cfg;
-  const [versions, setVersions] = useState<BackendVersionStatus[]>([]);
+  const [versions, setVersions] = useState(() => lastVersions);
   const [manageId, setManageId] = useState<string | null>(null);
   const [standingGrants, setStandingGrants] = useState<Record<string, StandingGrantList>>({});
   const [revokingGrant, setRevokingGrant] = useState<string | null>(null);
@@ -187,6 +192,7 @@ export default function SettingsPage() {
   const confirm = useConfirm();
   const debugOn = useDebugEnabled();
   const versionsById = useMemo(() => new Map(versions.map((v) => [v.id, v])), [versions]);
+  useEffect(() => { lastBackends = backends; }, [backends]);
 
   // Only write edited fields, in order. A slow response must not replace a newer
   // choice or another control's independently persisted configuration.
@@ -281,6 +287,7 @@ export default function SettingsPage() {
     // 每个异步分支落状态前都复用同一判定，避免旧实例覆盖新页面。
     const isCurrentRefresh = () => lifecycleGuard.isRefreshCurrent(refreshTicket);
     setLoading(true);
+    setConnectionStatus("loading");
     setError(null);
     setConfigFailed(false);
     // Config is a local file read (instant) — load it FIRST and unblock the form,
@@ -294,6 +301,7 @@ export default function SettingsPage() {
       const c = await getConfig();
       if (!isCurrentRefresh()) return;
       const nextConfig = { ...EMPTY, ...c };
+      lastConnectionModes = { hermesPluginHostMode: c.hermesPluginHostMode, openclawPluginHostMode: c.openclawPluginHostMode };
       savedConfigRef.current = cloneConfig(nextConfig);
       setThemeLoaded(true);
       setTheme(nextConfig.theme);
@@ -322,6 +330,7 @@ export default function SettingsPage() {
           disabled: backendDescriptors.get(backend.id)?.disconnectable !== false && cfgRef.current.disabledBackends.includes(backend.id),
           connected: (backendDescriptors.get(backend.id)?.disconnectable === false || !cfgRef.current.disabledBackends.includes(backend.id)) && backend.connected,
         })));
+        setConnectionStatus("ready");
         void Promise.all(next.filter((backend) => !backend.disabled).map(async (backend) => {
           try {
             return [backend.id, await listStandingGrants(backend.id)] as const;
@@ -333,7 +342,7 @@ export default function SettingsPage() {
           setStandingGrants(Object.fromEntries(items.filter((item): item is readonly [string, StandingGrantList] => !!item)));
         });
       })
-      .catch(() => { if (isCurrentRefresh()) setBackends([]); });
+      .catch(() => { if (isCurrentRefresh()) setConnectionStatus("failed"); });
     getShoggothProductStatus()
       .then((nextStatus) => {
         if (!isCurrentRefresh()) return;
@@ -344,7 +353,11 @@ export default function SettingsPage() {
         if (isCurrentRefresh()) setShoggothError(true);
       });
     getVersions()
-      .then((next) => { if (isCurrentRefresh()) setVersions(next); })
+      .then((next) => {
+        if (!isCurrentRefresh()) return;
+        lastVersions = next;
+        setVersions(next);
+      })
       .catch(() => {});
   }, [flushConnectionChanges, lifecycleGuard]);
 
@@ -567,7 +580,7 @@ export default function SettingsPage() {
   }, [backendDescriptors]);
   const enabledCount = backends.filter((b) => !b.disabled).length;
   const toggleBackendConnection = async (b: BackendStatus) => {
-    if (!isDisconnectable(b) || loading || configFailed || saving || backendConnectionBusy.current) return;
+    if (!isDisconnectable(b) || connectionStatus !== "ready" || loading || configFailed || saving || backendConnectionBusy.current) return;
     const disconnect = !b.disabled;
     if (disconnect && enabledCount <= 1) return;
     if (disconnect) {
@@ -600,7 +613,7 @@ export default function SettingsPage() {
     if (saving || backendConnectionBusy.current) return;
     const current = cfgRef.current.disabledBackends || [];
     const next = disconnect ? [...new Set([...current, b.id])] : current.filter((id) => id !== b.id);
-    if (disconnect && !backends.some((backend) => !next.includes(backend.id))) return;
+    if (disconnect && (connectionStatus !== "ready" || !backends.some((backend) => !next.includes(backend.id)))) return;
     backendConnectionBusy.current = true;
     setTogglingBackend(true);
     try {
@@ -898,16 +911,12 @@ export default function SettingsPage() {
   const openManage = manageId ? manageEntry(manageId) : null;
   const closeManage = () => { flushConnectionChanges(); setManageId(null); };
 
-  // Until (or unless) status reports a backend, its settings still need a home.
-  const renderFallbackCard = (id: string, name: string) => (
-    <section className="settings-backend-fallback" key={`fallback:${id}`} data-backend={id}>
-      <div className="settings-backend-row">
-        <BackendMark id={id} name={name} />
-        <div className="settings-backend-copy"><h4>{name}</h4></div>
-        <div className="settings-backend-actions">{renderManage(id)}</div>
-      </div>
-    </section>
-  );
+  // Keep the editors available when their backends do not report status.
+  const fallbackBackends = [
+    ...(REMOTE_CONNECTIONS_ENABLED && !managedModes.hermes && !hasHermesCard ? [{ id: "hermes", name: "Hermes" }] : []),
+    ...(!managedModes.openclaw && !hasOpenclawCard ? [{ id: "openclaw", name: "OpenClaw" }] : []),
+    ...(!hasShoggothCard && showRuntimeStatus ? [{ id: "shoggoth", name: "Shoggoth" }] : []),
+  ];
 
   return (
     <div className="page management-page management-page--scroll-card settings-page">
@@ -930,15 +939,12 @@ export default function SettingsPage() {
         <div className="settings-stack management-page__scroll-card">
           <div className="settings-group" id="settings-connections">
             <BackendOverview
-              backends={backends} descriptors={backendDescriptors}
+              backends={backends} descriptors={backendDescriptors} fallbackBackends={fallbackBackends} statusState={connectionStatus}
               versions={new Map([...versionsById].filter(([id]) => !isManagedPluginHost(id)))} loading={loading || saving || togglingBackend}
-              renderManage={(b) => renderManage(b.id)}
+              renderManage={renderManage}
               isDisconnectable={isDisconnectable} enabledCount={enabledCount} configFailed={configFailed}
               onToggle={(b) => void toggleBackendConnection(b)}
             />
-            {REMOTE_CONNECTIONS_ENABLED && !managedModes.hermes && !hasHermesCard && renderFallbackCard("hermes", "Hermes")}
-            {!managedModes.openclaw && !hasOpenclawCard && renderFallbackCard("openclaw", "OpenClaw")}
-            {!hasShoggothCard && showRuntimeStatus && renderFallbackCard("shoggoth", "Shoggoth")}
 
             {backendCatalog.filter((descriptor) => descriptor.aliases?.length).flatMap((descriptor) =>
               [descriptor.id, ...(descriptor.surfaces.runtimeStatus ? [] : descriptor.aliases!)].filter((id) => cfg.disabledBackends.includes(id)).map((id) => (
@@ -970,8 +976,7 @@ export default function SettingsPage() {
           </div>
           {SHOW_WEB_SETTINGS && <SettingsWeb />}
           <SettingsProject />
-          <div className="settings-advanced-group">
-            {/* Developer-only switches; hidden in release builds, so they stay last and collapsed. */}
+          {SHOW_UI_TOOLS && <div className="settings-advanced-group">
             <details className="settings-advanced" id="settings-debug">
               <summary className="settings-advanced-summary">
                 <div><h3 className="settings-h">{t("settings.copy.debug.section")}</h3><p className="settings-sech">{t("settings.debugSectionDesc")}</p></div>
@@ -989,7 +994,7 @@ export default function SettingsPage() {
                 {debugOn && <p className="ui-hint" role="status">{t("settings.copy.debug.toggleHint")}</p>}
               </div>
             </details>
-          </div>
+          </div>}
         </div>
       </div>
 

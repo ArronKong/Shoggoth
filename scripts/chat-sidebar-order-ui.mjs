@@ -51,7 +51,7 @@ try {
         for (const test of scenario ? scenario.split(",") : ["session", "restored", "mixed", "unread", "unread-running", "unread-baseline",
           "cron-results-openclaw", "cron-results-hermes", "cron-results-shoggoth",
           "cron-results-openclaw-immersive", "cron-results-hermes-immersive", "cron-results-shoggoth-immersive",
-          "sending-openclaw", "sending-hermes", "sending-shoggoth",
+          "sending-openclaw", "sending-hermes", "sending-shoggoth", "sending-shoggoth-main", "sending-shoggoth-main-immersive",
           "sending-openclaw-immersive", "sending-hermes-immersive", "sending-shoggoth-immersive",
           "steering-native", "steering-native-immersive", "queued-native", "queued-native-immersive", "events-user", "events-assistant", "events-string-time"]) {
           for (const [language, width, height] of [["zh-CN", 1200, 850], ["en", 600, 800]]) {

@@ -1,0 +1,73 @@
+import i18n from "./index";
+import "./chatErrorResources";
+
+const zh = {
+  regenerate: "请重新生成交互卡片",
+  collapse: "收起",
+  expand: "展开",
+  reading: "读取中…",
+  source: "源码",
+  view: "界面",
+  exportHtml: "导出 HTML",
+  reload: "重新加载",
+  expired: "来源已失效，请重新生成",
+  loading: "正在加载交互内容…",
+  inactive: "交互内容暂未显示",
+  desktopOnly: "在桌面应用中可操作这张卡片",
+  activate: "显示交互卡片",
+  readOnly: "这张卡片当前仅供查看",
+  legacyPrompt: "卡片提供的待提交内容",
+  copy: "复制内容",
+  cancel: "取消这次操作",
+  summary: "[交互卡片：{{title}}] {{summary}}",
+  previewHistory: "预览历史界面{{number}}",
+  loadingHistory: "正在读取历史界面…",
+  operation: {
+    verifying: "正在查询原操作的结果",
+    pending: "正在确认当前参数…",
+    queued: "已排队",
+    running: "正在分析",
+    completed: "已完成",
+    failed: "操作未完成",
+    cancelled: "已取消",
+    expired: "原操作已过期",
+    accepted: "操作已受理",
+  },
+};
+
+const en = {
+  regenerate: "Generate the interactive card again.",
+  collapse: "Collapse",
+  expand: "Expand",
+  reading: "Reading…",
+  source: "View source",
+  view: "View card",
+  exportHtml: "Export HTML",
+  reload: "Reload",
+  expired: "The source is no longer available. Generate the card again.",
+  loading: "Loading interactive content…",
+  inactive: "Interactive content is not displayed yet.",
+  desktopOnly: "Open this card in the desktop app to use it.",
+  activate: "Show interactive card",
+  readOnly: "This card is currently view only.",
+  legacyPrompt: "Text from the card ready to submit",
+  copy: "Copy text",
+  cancel: "Cancel action",
+  summary: "[Interactive card: {{title}}] {{summary}}",
+  previewHistory: "Preview previous card{{number}}",
+  loadingHistory: "Loading the previous card…",
+  operation: {
+    verifying: "Checking the original action’s result",
+    pending: "Checking the current settings…",
+    queued: "Queued",
+    running: "Analyzing",
+    completed: "Completed",
+    failed: "Action did not finish",
+    cancelled: "Canceled",
+    expired: "The original action expired",
+    accepted: "Action accepted",
+  },
+} satisfies typeof zh;
+
+i18n.addResourceBundle("zh-CN", "translation", { chat: { nativeUi: zh } }, true, true);
+i18n.addResourceBundle("en", "translation", { chat: { nativeUi: en } }, true, true);

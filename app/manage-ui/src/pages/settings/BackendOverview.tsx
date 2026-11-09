@@ -1,7 +1,11 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { BackendDescriptor, BackendStatus, BackendVersionStatus } from "../../types";
-import BackendTabIcon from "../../components/BackendTabIcon";
+import BackendTabIcon, { sortBackendTabs } from "../../components/BackendTabIcon";
+
+export type ConnectionStatusState = "loading" | "ready" | "failed";
+type BackendIdentity = Pick<BackendStatus, "id" | "name">;
+type ConnectionCard = BackendIdentity & { status?: BackendStatus };
 
 export function BackendMark({ id, name }: { id: string; name: string }) {
   return <span className="settings-backend-mark" aria-hidden="true">
@@ -11,9 +15,10 @@ export function BackendMark({ id, name }: { id: string; name: string }) {
 
 // One compact row per backend: identity, connection state, version and actions.
 // Backend-owned settings (gateway, local CLIs) open in a dialog from `manage`.
-function BackendRow({ backend: b, descriptor, version, manage, canToggle, toggleDisabled, lastEnabled, onToggle }: {
-  backend: BackendStatus;
-  descriptor?: BackendDescriptor;
+function BackendRow({ card, cli, statusState, version, manage, canToggle, toggleDisabled, lastEnabled, onToggle }: {
+  card: ConnectionCard;
+  cli: boolean;
+  statusState: ConnectionStatusState;
   version?: BackendVersionStatus;
   manage?: ReactNode;
   canToggle: boolean;
@@ -22,21 +27,26 @@ function BackendRow({ backend: b, descriptor, version, manage, canToggle, toggle
   onToggle: () => void;
 }) {
   const { t } = useTranslation();
-  const cli = (descriptor?.connectionMode || b.info.connectionMode) === "native-runtime";
-  const status = b.disabled ? t("settings.backendDisabled") : b.info.starting ? t("settings.serviceWorking")
-    : b.connected ? t("common.connected") : t("common.disconnected");
+  const b = card.status;
+  const visibleStatus = statusState === "failed" ? undefined : b;
+  const status = visibleStatus
+    ? t(visibleStatus.disabled ? "settings.backendDisabled" : visibleStatus.info.starting ? "settings.serviceWorking"
+      : visibleStatus.connected ? "common.connected" : "common.disconnected")
+    : t(statusState === "loading" ? "common.loading" : "settings.connectionStatusUnavailable");
+  const healthClass = !visibleStatus || visibleStatus.disabled ? "" : visibleStatus.connected ? " is-healthy"
+    : visibleStatus.info.starting ? " is-pending" : " is-down";
   const toggleButton = canToggle && <button className="btn-secondary btn-sm" onClick={onToggle} disabled={toggleDisabled}
     title={lastEnabled ? t("settings.disconnectLastHint") : undefined}>
-    {t(b.disabled ? "settings.reconnect" : "settings.disconnect")}
+    {t(b?.disabled ? "settings.reconnect" : "settings.disconnect")}
   </button>;
-  const health = <span className={`settings-health ${b.connected && !b.disabled ? "is-healthy" : b.disabled ? "" : b.info.starting ? "is-pending" : "is-down"}`}><i />{status}</span>;
+  const health = <span className={`settings-health${healthClass}`}><i />{status}</span>;
   return (
-    <article className={`settings-backend ${cli ? "settings-backend--local" : "settings-backend--card"}`} data-backend={b.id}>
+    <article className={`settings-backend ${cli ? "settings-backend--local" : "settings-backend--card"}`} data-backend={card.id}>
       <div className="settings-backend-row">
-        <BackendMark id={b.id} name={b.name} />
+        <BackendMark id={card.id} name={card.name} />
         <div className="settings-backend-copy">
           <div className="settings-backend-title">
-            <h4>{b.name}</h4>{health}
+            <h4>{card.name}</h4>{health}
             {version?.current && <span className="settings-backend-version mono">v{version.current}</span>}
             {/* Read-only notice, styled like the current-version chip. */}
             {version?.updateAvailable && version.comparisonSupported !== false && <span className="settings-backend-version mono">
@@ -46,19 +56,21 @@ function BackendRow({ backend: b, descriptor, version, manage, canToggle, toggle
         </div>
         <div className="settings-backend-actions">{manage}{toggleButton}</div>
       </div>
-      {b.disabled && <p className="settings-backend-notice">{t("settings.backendDisabledNote")}</p>}
-      {b.info.error && <p className="settings-backend-notice status-error" role="status">{b.info.error}</p>}
+      {b?.disabled && <p className="settings-backend-notice">{t("settings.backendDisabledNote")}</p>}
+      {visibleStatus?.info.error && <p className="settings-backend-notice status-error" role="status">{visibleStatus.info.error}</p>}
     </article>
   );
 }
 
-export default function BackendOverview({ backends, descriptors, versions, loading, renderManage, isDisconnectable, enabledCount, configFailed, onToggle }: {
+export default function BackendOverview({ backends, descriptors, fallbackBackends = [], statusState = "ready", versions, loading, renderManage, isDisconnectable, enabledCount, configFailed, onToggle }: {
   backends: BackendStatus[];
   descriptors: Map<string, BackendDescriptor>;
+  fallbackBackends?: BackendIdentity[];
+  statusState?: ConnectionStatusState;
   versions: Map<string, BackendVersionStatus>;
   loading: boolean;
   /** Optional action that opens the backend's own settings dialog. */
-  renderManage?: (backend: BackendStatus) => ReactNode;
+  renderManage?: (id: string) => ReactNode;
   isDisconnectable: (backend: BackendStatus) => boolean;
   enabledCount: number;
   configFailed: boolean;
@@ -67,19 +79,29 @@ export default function BackendOverview({ backends, descriptors, versions, loadi
   onConfigure?: (id: string) => void;
 }) {
   const { t } = useTranslation();
-  const isCli = (b: BackendStatus) => (descriptors.get(b.id)?.connectionMode || b.info.connectionMode) === "native-runtime";
-  const cliBackends = backends.filter(isCli);
-  const serviceBackends = backends.filter((b) => !isCli(b));
-  const row = (b: BackendStatus) => <BackendRow key={b.id} backend={b} descriptor={descriptors.get(b.id)} version={versions.get(b.id)}
-    manage={renderManage?.(b)} canToggle={isDisconnectable(b)}
-    toggleDisabled={loading || configFailed || (!b.disabled && enabledCount <= 1)}
-    lastEnabled={!b.disabled && enabledCount <= 1} onToggle={() => onToggle(b)} />;
+  const byId = new Map<string, ConnectionCard>(fallbackBackends.map((card) => [card.id, card]));
+  if (backends.length === 0 && statusState !== "ready") {
+    for (const descriptor of descriptors.values()) byId.set(descriptor.id, descriptor);
+  }
+  for (const b of backends) byId.set(b.id, { id: b.id, name: b.name, status: b });
+  const cards = sortBackendTabs([...byId.values()]);
+  const isCli = (card: ConnectionCard) => (descriptors.get(card.id)?.connectionMode || card.status?.info.connectionMode) === "native-runtime";
+  const cliBackends = cards.filter(isCli);
+  const serviceBackends = cards.filter((card) => !isCli(card));
+  const row = (card: ConnectionCard) => {
+    const b = card.status;
+    const lastEnabled = statusState === "ready" && !!b && !b.disabled && enabledCount <= 1;
+    return <BackendRow key={card.id} card={card} cli={isCli(card)} statusState={statusState} version={versions.get(card.id)}
+      manage={renderManage?.(card.id)} canToggle={!!b && isDisconnectable(b)}
+      toggleDisabled={statusState !== "ready" || loading || configFailed || lastEnabled}
+      lastEnabled={lastEnabled} onToggle={() => { if (b) onToggle(b); }} />;
+  };
   return <section className="settings-section" id="settings-conn">
     <header className="settings-section-head settings-heading-row">
       <div><h3 className="settings-h">{t("settings.connectionsTitle")}</h3><p className="settings-sech">{t("settings.connStatusDesc")}</p></div>
-      <span className="settings-count">{t("settings.backendsConnected", { connected: backends.filter((b) => b.connected && !b.disabled).length, total: backends.length })}</span>
+      {backends.length > 0 && statusState !== "failed" && <span className="settings-count">{t("settings.backendsConnected", { connected: backends.filter((b) => b.connected && !b.disabled).length, total: backends.length })}</span>}
     </header>
-    {backends.length === 0 && <div className="settings-card"><p className="ui-hint">{t(loading ? "settings.serviceWorking" : "settings.backendsEmpty")}</p></div>}
+    {(statusState === "failed" || (statusState === "ready" && backends.length === 0)) && <p className="ui-hint" role="status">{t("settings.backendsEmpty")}</p>}
     {serviceBackends.length > 0 && <div className="settings-backend-stack">{serviceBackends.map(row)}</div>}
     {cliBackends.length > 0 && <div className="settings-native-list">
       <div className="settings-list-heading"><strong>{t("settings.localRuntimes")}</strong><span>{t("settings.localRuntimesHint")}</span></div>

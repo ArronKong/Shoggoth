@@ -17,7 +17,9 @@ const { GroupChatStore } = require("../app/agent-service/group-chat-store");
 const { GroupChatService } = require("../app/agent-service/group-chat-service");
 const { GroupChatDriver } = require("../app/agent-service/group-chat-driver");
 const { GroupExternalExecutor } = require("../app/agent-service/group-external-executor");
+const { openDatabase } = require("../app/agent-service/inspiration-database");
 const { ExternalInspirationRunner } = require("../app/external-inspiration-runner");
+const { validateFederationResult } = require("../app/federation-host-protocol");
 const { validateParams, validateResult } = require("../app/agent-service/group-chat-protocol");
 const p = require("../app/group-runtime-host-protocol");
 const { resultPage } = require("../app/group-result-content");
@@ -194,6 +196,80 @@ test("Service deletion waits for the scoped Router and Host proof while another 
   assert.equal(store.getGroup(b.groupId).activeTurns[0].stopping, false);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM messages WHERE group_id=?").get(a.groupId).n, 0);
 });
+
+for (const pending of [null, "a running execution", "an unsealed worktree"]) {
+  test(`disconnected local Hermes deletion ${pending ? `waits for ${pending}` : "finishes from durable terminal receipts"}`, async t => {
+    const f = await fixture(t);
+    const { execution } = await f.prepare();
+    const run = f.runs.get(execution.runId);
+    run.status = "completed";
+    run.onUpdate({ status: "completed", resultSummary: "done" });
+    const other = { ...f.authority, groupId: crypto.randomUUID() };
+    const remaining = await f.prepare({ owner: pending ? f.authority : other });
+    if (pending === "an unsealed worktree") {
+      const row = f.host.db.prepare("SELECT data FROM executions WHERE id=?").get(remaining.execution.executionId);
+      const record = JSON.parse(row.data);
+      record.snapshot = { ...record.snapshot, status: "completed", finishedAt: 10_000 };
+      record.isolation = { sealed: false };
+      f.host.db.prepare("UPDATE executions SET data=? WHERE id=?").run(JSON.stringify(record), remaining.execution.executionId);
+    }
+    const hostId = f.host.hostId;
+    await f.host.close();
+
+    const peerId = `local-hermes-${crypto.createHash("sha256").update(f.agent.agentId).digest("hex").slice(0, 16)}`;
+    const hosts = path.join(f.root, "group-runtime-hosts");
+    fs.mkdirSync(hosts, { mode: 0o700 });
+    fs.renameSync(path.join(f.root, "state"), path.join(hosts, peerId));
+    const file = path.join(hosts, peerId, "group-host.sqlite");
+    const unused = () => assert.fail("offline deletion cannot call a runtime");
+    const router = new GroupRuntimeRouter({ paths: { stateDir: f.root, trustedRoot: f.root },
+      registry: { getBackend: unused }, localRunner: { cancel: unused, reset() {} }, isLocal: () => false });
+    const params = { ...execution, remote: { peerId, hostId, ...f.authority, epoch: 2 },
+      operationId: "offline-delete", stopGroup: true };
+    try {
+      if (pending) {
+        await assert.rejects(router.cancel(params), { code: "GROUP_HOST_UNAVAILABLE" });
+      } else {
+        const missingAgent = "hermes-missing";
+        const missingPeer = `local-hermes-${crypto.createHash("sha256").update(missingAgent).digest("hex").slice(0, 16)}`;
+        await assert.rejects(router.cancel({ ...params, agentId: missingAgent, remote: { ...params.remote, peerId: missingPeer } }),
+          { code: "GROUP_HOST_IDENTITY_MISMATCH" });
+        await assert.rejects(router.cancel({ ...params, agentId: missingAgent,
+          remote: { ...params.remote, peerId: missingPeer, hostId: undefined } }), { code: "GROUP_HOST_IDENTITY_MISMATCH" });
+        assert.equal(fs.existsSync(path.join(hosts, missingPeer)), false, "offline deletion cannot create a Host");
+        await assert.rejects(router.cancel({ ...params, remote: { ...params.remote, hostId: crypto.randomUUID() } }),
+          { code: "GROUP_HOST_IDENTITY_MISMATCH" });
+        await assert.rejects(router.cancel({ ...params, remote: { ...params.remote, peerId: "local-hermes-other" } }),
+          { code: "GROUP_HOST_IDENTITY_MISMATCH" });
+        await assert.rejects(router.cancel({ ...params, sessionKey: "wrong-session" }), { code: "GROUP_HOST_BINDING_INVALID" });
+        await assert.rejects(router.cancel({ ...params, remote: { ...params.remote, ownerId: crypto.randomUUID() } }),
+          { code: "GROUP_HOST_OWNER_CHANGED" });
+        const { stopGroup: _stopGroup, ...ordinaryCancel } = params;
+        await assert.rejects(router.cancel(ordinaryCancel), { code: "GROUP_HOST_IDENTITY_MISMATCH" });
+        const result = await router.cancel(params);
+        assert.equal(validateFederationResult("group.external.cancel", result, params), true);
+        assert.equal(result.groupStopped, true);
+        assert.equal(result.snapshot.status, "completed");
+        assert.deepEqual(await router.cancel(params), result);
+        await assert.rejects(router.cancel({ ...params, remote: { ...params.remote, epoch: 1 } }),
+          { code: "GROUP_HOST_OWNER_CHANGED" });
+      }
+    } finally { await router.reset(); }
+
+    const db = openDatabase(file, { readOnly: true });
+    try {
+      const owner = id => JSON.parse(db.prepare("SELECT data FROM owners WHERE group_id=?").get(id).data);
+      const record = JSON.parse(db.prepare("SELECT data FROM executions WHERE id=?").get(remaining.execution.executionId).data);
+      assert.equal(owner(f.authority.groupId).stopped, pending ? undefined : true);
+      if (!pending) {
+        assert.equal(owner(f.authority.groupId).epoch, 2);
+        assert.equal(owner(other.groupId).stopped, undefined);
+        assert.equal(record.snapshot.status, "running", "another group's running execution was untouched");
+      }
+    } finally { db.close(); }
+    assert.equal(f.starts.length, 2, "the offline checks dispatched nothing");
+  });
+}
 
 test("legacy deletion rechecks only the original dedicated session under the current App generation without starting a turn", async () => {
   const seen = [];

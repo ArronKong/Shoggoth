@@ -405,6 +405,85 @@ class ConversationRecallService {
         occurredAt: row.occurredAt, contentHash: row.contentHash })) };
   }
 
+  // Service-only context for a background check. It does not authorize an
+  // Agent conversation tool or bind the check to the foreground native thread.
+  recentContext(profileId, sessionKey) {
+    this.policy.assertReady(profileId);
+    const session = this.sessions.getSession(sessionKey);
+    if (!session || session.profileId !== profileId || !["draft", "ready"].includes(session.status)
+      || !this._isRecallableSession(profileId, session) || this.sessions.getCronSessionOrigin?.(sessionKey)) return null;
+    const lastSeq = this.transcripts.getLastEventSeq(profileId, session.id);
+    const scoped = { ...session, lastSeq }, policy = this._policyView(profileId), runs = new Map();
+    const view = this._outdatedView(profileId), rows = [], unfinishedRunIds = new Set();
+    let cursor = Math.max(0, lastSeq - 200);
+    while (cursor < lastSeq) {
+      const page = this._loadPage(profileId, scoped, cursor, 100, policy, runs);
+      for (const row of page.rows) {
+        const event = this.transcripts.getEvent(profileId, session.id, row.eventId);
+        if (row.runId && this.runs.getRun(row.runId)?.status !== "completed") {
+          unfinishedRunIds.add(row.runId); continue;
+        }
+        if (this._outdatedForEvent(view, event) || this._historicalRunNotice(view, profileId, session, event)) continue;
+        rows.push(row);
+      }
+      if (page.throughSeq <= cursor) break;
+      cursor = page.throughSeq;
+    }
+    const selected = [], sources = [];
+    let size = 0;
+    for (const row of rows.slice(-24).reverse()) {
+      const line = JSON.stringify({ role: row.kind, occurredAt: row.occurredAt, text: row.text });
+      const nextSize = Buffer.byteLength(line) + 1;
+      if (size + nextSize > 24 * 1024) continue;
+      selected.unshift(line); sources.unshift({ eventId: row.eventId, seq: row.seq, runId: row.runId, contentHash: row.contentHash });
+      size += nextSize;
+    }
+    const truncated = lastSeq > 200 || selected.length < rows.length;
+    return { revision: this.transcripts.getRevision(profileId, session.id), truncated,
+      content: selected.length ? selected.join("\n") + (truncated ? "\n[Earlier or oversized conversation entries omitted.]" : "") : "",
+      source: { sessionId: session.id, sessionKey, workspace: session.workspace, throughSeq: lastSeq, events: sources,
+        unfinishedRunIds: [...unfinishedRunIds], selectedCount: sources.length, truncated } };
+  }
+
+  contextSourcesCurrent(profileId, source) {
+    try {
+      this.policy.assertReady(profileId);
+      const session = this.sessions.getSession(source.sessionKey);
+      if (!session || session.profileId !== profileId || session.id !== source.sessionId
+        || session.workspace !== source.workspace || !["draft", "ready"].includes(session.status)
+        || !this._isRecallableSession(profileId, session) || this.sessions.getCronSessionOrigin?.(session.sessionKey)
+        || !Array.isArray(source.events) || source.events.length > 24) return false;
+      const policy = this._policyView(profileId), view = this._outdatedView(profileId);
+      const sourcesVisible = source.events.every(row => {
+        const value = this._event(profileId, session, row.eventId, {
+          seq: row.seq, run_id: row.runId, content_hash: row.contentHash,
+        }, policy);
+        return value && (!row.runId || this.runs.getRun(row.runId)?.status === "completed")
+          && !this._outdatedForEvent(view, value.event)
+          && !this._historicalRunNotice(view, profileId, session, value.event);
+      });
+      if (!sourcesVisible || source.unfinishedRunIds?.some(runId => this.runs.getRun(runId)?.status === "completed")) return false;
+      const lastSeq = this.transcripts.getLastEventSeq(profileId, session.id);
+      if (!Number.isSafeInteger(source.throughSeq) || source.throughSeq < 0
+        || lastSeq < source.throughSeq || lastSeq - source.throughSeq > 200) return false;
+      // A newly completed exchange can make the review obsolete. Public
+      // notices may be appended by this very delivery and do not invalidate it.
+      let cursor = source.throughSeq;
+      const scoped = { ...session, lastSeq }, runs = new Map();
+      while (cursor < lastSeq) {
+        const page = this._loadPage(profileId, scoped, cursor, 100, policy, runs);
+        for (const row of page.rows) {
+          if (!row.runId || this.runs.getRun(row.runId)?.status !== "completed") continue;
+          const event = this.transcripts.getEvent(profileId, session.id, row.eventId);
+          if (!this._outdatedForEvent(view, event) && !this._historicalRunNotice(view, profileId, session, event)) return false;
+        }
+        if (page.throughSeq <= cursor) break;
+        cursor = page.throughSeq;
+      }
+      return true;
+    } catch { return false; }
+  }
+
   _verifiedRun(profileId, session, runId, events, knownUserEvent = false) {
     if (!runId) return null;
     const run = this.runs.getRun(runId);
