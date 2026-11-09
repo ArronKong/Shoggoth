@@ -71,6 +71,42 @@ test("group list and detail distinguish native deletion or archive from a runtim
   assert.equal(member(await list(), "b").agentMissing, undefined);
 });
 
+test("group detail returns stored member cards without waiting for a slow refresh, then announces the change", async t => {
+  let clock = 1_000_000, gate = null, name = "External", agentGets = 0;
+  const f = fixture(t, { now: () => clock, getFederationClient: () => ({ async request(method) {
+    if (method === "agent.get") agentGets++;
+    if (gate) await gate;
+    if (method === "agent.get") return { agent: { name, model: null } };
+    if (method === "agent.file.read") return { file: { missing: true, content: "" } };
+    return { groupTools: false };
+  } }) });
+  const { groupId } = f.store.createGroup({ operationId: "slow-refresh", name: "Slow", purpose: "", members: [
+    { backendId: "shoggoth", agentId: "r", profileId: "p-r", displayName: "研究员" },
+    { backendId: "openclaw", agentId: "external", profileId: null, displayName: "External" },
+  ] });
+  const changed = [];
+  const service = new GroupChatService({ store: f.store, directory: f.directory, driver: {}, productStore: f.directory.productStore,
+    onChanged: id => changed.push(id) });
+  const detail = async () => (await service.handle("group.get", { groupId })).members.find(item => item.agentId === "external");
+  const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); };
+  assert.equal((await detail()).card.availability, "online", "a member without a card waits for the first refresh");
+  assert.equal(agentGets, 1);
+
+  let release; gate = new Promise(resolve => { release = resolve; });
+  clock += 61_000; name = "Renamed"; changed.length = 0;
+  const stale = await Promise.race([detail(), new Promise((_, reject) => setTimeout(() => reject(new Error("detail waited for the member refresh")), 1000))]);
+  assert.equal(stale.displayName, "External", "the stored card is shown while the refresh runs");
+  await detail();
+  assert.equal(agentGets, 2, "one background refresh per group at a time");
+  assert.deepEqual(changed, []);
+
+  release(); await settle();
+  assert.deepEqual(changed, [groupId], "a changed card is announced after the background refresh");
+  assert.equal((await detail()).displayName, "Renamed");
+  await settle();
+  assert.deepEqual(changed, [groupId], "an unchanged refresh does not announce again");
+});
+
 test("external deletion requires a confirmed missing Agent and survives an intervening transport failure", async t => {
   let getError = "AGENT_NOT_FOUND";
   const f = fixture(t, { getFederationClient: () => ({ async request(method) {
