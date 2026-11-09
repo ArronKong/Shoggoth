@@ -127,14 +127,15 @@ test("5/15/30/50 rounds retain newest dialogue within bytes despite tool-heavy h
   }
 });
 
-test("Cron handoff carries prior dialogue and shares the total byte budget with frozen definitions", () => {
+test("Cron handoff bounds prior dialogue and retains full frozen definitions", () => {
   const f = contextFixture();
   try {
     const definition = f.definitions.get(f.profile.id);
     const rules = "Retain these safety rules. ".repeat(1200);
+    const identity = "Agent identity. ".repeat(800);
+    const soul = "Agent style. ".repeat(1200);
     f.definitions.update({ profileId: f.profile.id, expectedRevision: definition.manifest.revision,
-      actor: "user", reason: "full-definition-handoff", documents: { AGENTS: rules,
-        IDENTITY: "Agent identity. ".repeat(800), SOUL: "Agent style. ".repeat(1200) } });
+      actor: "user", reason: "full-definition-handoff", documents: { AGENTS: rules, IDENTITY: identity, SOUL: soul } });
     for (let i = 0; i < 50; i++) {
       f.append({ id: `cron-${i}`, kind: "user", content: { text: `earlier-cron-${i} ${"原文".repeat(160)}` } });
       f.append({ id: `cron-answer-${i}`, kind: "assistant", content: { text: `completed-cron-${i}` } });
@@ -144,10 +145,12 @@ test("Cron handoff carries prior dialogue and shares the total byte budget with 
       transcriptSessionId: f.transcriptSessionId, contextLifecycleV1: true, currentOperationId: "current",
       transcriptBudget: 48 * 1024, handoffSeed: "Continue the same Conversation using a fresh Runtime session." });
     const prior = snapshot.blocks.find(item => item.kind === "transcript");
-    assert.ok(snapshot.report.totalBytes <= 96 * 1024);
+    assert.ok(snapshot.report.totalBytes <= 96 * 1024 + Buffer.byteLength(identity + soul));
     assert.ok(prior.byteLength < 48 * 1024);
     assert.equal(prior.truncated, true);
     assert.equal(snapshot.blocks.find(item => item.kind === "rules").content, rules);
+    assert.equal(snapshot.blocks.find(item => item.kind === "identity").content, identity);
+    assert.equal(snapshot.blocks.find(item => item.kind === "soul").content, soul);
     assert.match(prior.content, /completed-cron-49/);
     assert.doesNotMatch(prior.content, /current-cron-prompt/);
     assert.ok(prior.content.endsWith("END UNTRUSTED PRIOR TRANSCRIPT DATA"));

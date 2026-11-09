@@ -27,7 +27,13 @@ test("prepared semantic hot memory is consumed synchronously, bounded and frozen
     assert.equal(typeof prepared.then, "undefined");
     assert.ok(prepared.report.memoryMatches.includes(target.id));
     assert.match(prepared.dynamicContext, /八倍/u);
-    assert.ok(prepared.blocks.find(row => row.id === "user").byteLength <= 8*1024);
+    const userBlock = prepared.blocks.find(row => row.id === "user");
+    const userProfile = prepared.report.hotMemory.user;
+    assert.equal(userProfile.budgetBytes, null);
+    assert.ok(userBlock.byteLength > 8 * 1024, "the visible USER profile keeps its full content");
+    assert.equal(userProfile.actualBytes, userBlock.byteLength);
+    assert.equal(userProfile.selectedCount, userProfile.candidateCount);
+    assert.ok(userProfile.candidateCount <= 40, "the merged USER search still bounds candidate count");
     assert.equal(f.compiler.preparedRelated.size, 0);
     assert.ok(!f.compiler.compile(input).report.memoryMatches.includes(target.id), "candidate preparation is consumed once");
     await f.compiler.prepareRelated(input);
