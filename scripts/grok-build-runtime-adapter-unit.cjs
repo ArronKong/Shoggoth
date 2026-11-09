@@ -1703,7 +1703,7 @@ test("unproven prompt acceptance ignores auxiliary updates, remains unknown, and
 });
 
 for (const [stopReason, status] of [["cancelled", "canceled"], ["end_turn", "completed"]]) {
-  test(`late ${stopReason} receipt releases a timed-out session without replay`, async () => {
+  test(`late ${stopReason} receipt releases a timed-out session without replay`, { timeout: 15_000 }, async (t) => {
     let firstPrompt;
     let promptCount = 0;
     const fixture = fixtureOptions(standardServer((message) => {
@@ -1715,7 +1715,9 @@ for (const [stopReason, status] of [["cancelled", "canceled"], ["end_turn", "com
       }
       return rpcResult({ stopReason: "end_turn" });
     }), { acceptanceTimeoutMs: 20 });
-    const keepAlive = setTimeout(() => {}, 1_000);
+    // The in-memory child has no process handle to keep unref'ed shutdown timers alive.
+    const keepAlive = setInterval(() => {}, 1_000);
+    t.after(() => clearInterval(keepAlive));
     try {
       const runtime = await acquire(fixture);
       await startSession(runtime);
@@ -1752,7 +1754,6 @@ for (const [stopReason, status] of [["cancelled", "canceled"], ["end_turn", "com
       assert.equal(promptCount, 2, "the reconciled receipt must survive restart");
       await fixture.adapter.stopAll();
     } finally {
-      clearTimeout(keepAlive);
       fixture.cleanup();
     }
   });
