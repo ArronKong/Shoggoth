@@ -110,7 +110,7 @@ const scenes = [
     step("查询异常未满两分钟", "虾长老的原任务状态持续无法查询，已经 1 分 59 秒；系统自动查询原任务。只有状态异常才进入这段计时，正常慢任务不会进入。",
       snapshot(context(), [turn("shrimp", { activity: activity("shrimp", "reconciling"),
         recovery: { type: "execution", reason: "GROUP_EXTERNAL_RUN_LOST", since: now + 300_000, cancelRequested: false } })], defaultQueue)),
-    step("异常满两分钟，Maya 开始", "状态异常持续满两分钟且没有有效进展，才让位给 Maya。异常说明和没有正文的头像名称占位都不显示；原任务后台查询，不中止、不重发。有真实回复时，停止图标保留在原消息下。",
+    step("异常满两分钟，Maya 开始", "状态异常持续满两分钟且没有有效进展，才让位给 Maya。原任务继续在后台核对，已发出的回复保留在群聊里。",
       snapshot(context(), [idleTurn("shrimp"), turn("maya")], ["default", "opencode", "deepseek"])),
     step("后台自动查询", "这里无法确认虾长老是否还在执行，所以不会宣称它正常运行。Maya 已收到前一任务状态不明的说明，先处理不依赖缺失结果的部分；无需人工核对。",
       snapshot(flowing("maya", "技术核对的原任务暂时无法查询，我先汇总不依赖它结果的其他部分。"),
@@ -131,9 +131,9 @@ const scenes = [
     step("完整结果后再交棒", "虾长老完成并发出完整结果后，Maya 才开始，启动上下文包含刚才的结果。正常慢任务不会显示异常让位提示。",
       snapshot([...context(), message(3, "shrimp", "技术核对已完成，以下是完整结论。@Maya 请接着汇总。")], [turn("maya")], ["default", "opencode", "deepseek"])),
   ] },
-  { id: "member-stop", title: "只停虾长老", caption: "气泡底部的停止图标", steps: [
-    step("气泡聚焦后点击停止图标", "鼠标移到虾长老的当前气泡上，复制、删除之后会出现同尺寸的停止图标；没有“停止”文字。键盘焦点进入气泡时也显示。没有文字的加载气泡同样保留图标入口。输入框里不再显示成员状态条。", snapshot(context(), [turn("shrimp")], defaultQueue)),
-    step("点击后立即让位", "停止被受理就结束虾长老本次发言，Maya 立即开始。没有“等待确认停止”的气泡；系统在后台取消和查询原任务，其他成员队列保留。",
+  { id: "member-stop", title: "旧版单成员停止记录", caption: "历史消息的展示", steps: [
+    step("发言进行中", "虾长老正在处理请求。群聊的停止入口位于输入框右下角。", snapshot(context(), [turn("shrimp")], defaultQueue)),
+    step("已保存的停止记录", "旧版停止记录显示虾长老的发言已结束，Maya 正在接着处理。系统在后台核对虾长老的原任务。",
       snapshot(memberStopped(), [stoppedSpeechTurn("shrimp"), turn("maya")], ["default", "opencode", "deepseek"])),
     step("后台清理不挡发言", "即使取消回执还没到，Maya 也已开始输出。虾长老的旧任务在后台自动处理，不显示停止确认卡，也不会把停止后才到的内容补进群聊。",
       snapshot([...memberStopped(), message(4, "maya", "我继续处理汇总部分，先按现有材料往下整理。", { partial: true, streaming: true })],
@@ -142,8 +142,8 @@ const scenes = [
       snapshot([...memberStopped(), message(4, "maya", "我继续处理汇总部分，先按现有材料往下整理。", { partial: true, streaming: true })],
         [turn("maya", { phase: "text" })], ["default", "opencode", "deepseek"])),
   ] },
-  { id: "background-stop", title: "停止后台原任务", caption: "下一位继续当前回合", steps: [
-    step("Maya 发言，后台自动查询", "虾长老因状态异常持续两分钟已让位。点击虾长老气泡下方的“停止”，只停止这条原任务。",
+  { id: "background-stop", title: "旧版后台任务停止记录", caption: "下一位继续当前回合", steps: [
+    step("Maya 发言，后台自动查询", "虾长老因状态异常持续两分钟已让位，原任务仍在后台核对。",
       snapshot(backgroundMessages(), [idleTurn("shrimp"), turn("maya", { phase: "text" })], ["default", "opencode", "deepseek"])),
     step("停止后移除状态气泡", "虾长老的停止确认转到后台自动处理，原来的异常气泡立即消失。只保留结束本次发言的轻提示；Maya 当前回合和其他成员队列保持不变。",
       snapshot(backgroundStopped(), [stoppedSpeechTurn("shrimp"),
@@ -154,14 +154,14 @@ const scenes = [
   ] },
   { id: "group-stop", title: "停止整轮群聊", caption: "右下角大停止按钮", steps: [
     step("点击大停止按钮", "这里有虾长老当前发言、OpenCode 之前因状态异常已让位，另外三位正在排队。可以直接点击右下角的大停止按钮。", bothWorking()),
-    step("正在提交停止", "点击后按钮置灰，界面显示“正在请求停止讨论…”。这一帧模拟停止接口尚未返回，后面的队列还可能暂时留在画面里。",
+    step("正在提交停止", "点击后按钮置灰，悬停时提示“正在请求停止全部运行…”。这一帧模拟停止接口尚未返回。",
       { ...bothWorking(), pendingRequest: true }),
     step("后台确认退出", "停止已受理，队列清空。系统在后台确认原运行退出；聊天区保留已有消息，不显示逐成员停止确认气泡，也不留下单独头像名称。", stoppingGroup()),
     step("整轮已停止", "运行全部确认结束后，加载和停止提示消失，输入框恢复发送按钮。现有消息保留，不会自动启动下一位，也不会额外插入一个当前产品没有的“停止成功”气泡。",
       snapshot(bothWorking().messages)),
   ] },
-  { id: "stop-pending", title: "停止异常也不占位", caption: "单成员清理留在后台", steps: [
-    step("准备停止", "这一条演示单成员取消接口暂时失联或迟迟不返回。", snapshot(context(), [turn("shrimp")], defaultQueue)),
+  { id: "stop-pending", title: "旧版取消回执待确认", caption: "历史回合在后台清理", steps: [
+    step("原回合运行中", "这一帧显示旧版历史回合开始清理之前的状态。", snapshot(context(), [turn("shrimp")], defaultQueue)),
     step("回执未到，下一位已开始", "即使原运行还没确认停止，发言位也已经释放。不显示停止确认气泡，系统自动查询原身份，不重发任务，不把取消失败误报为模型已退出。",
       snapshot(memberStopped(), [stoppedSpeechTurn("shrimp", "GROUP_EXTERNAL_RUN_LOST"), turn("maya")], ["default", "opencode", "deepseek"])),
     step("自动处理，群聊继续", "原任务清理不占群发言位，也不显示人工核对按钮。同一成员的新任务仍按实际运行状态排队，避免旧任务未退出时重叠写入；其他可运行成员继续。",
@@ -170,7 +170,7 @@ const scenes = [
   ] },
   { id: "start-pending", title: "启动状态不明", caption: "让位并继续核对原运行", steps: [
     step("等待启动结果", "如果发生断线或回执丢失，系统还不知道请求有没有被接受，就不能按明确拒绝处理。", snapshot(context(), [turn("shrimp")], defaultQueue)),
-    step("后台查询启动结果", "启动回执可能在断线中丢失。系统按原身份后台查询，聊天中不显示启动回执说明、空白气泡或单独头像名称。有真实回复时保留原消息下的停止图标；不直接判断失败，也不重发任务。",
+    step("后台查询启动结果", "启动回执可能在断线中丢失。系统按原身份在后台查询，聊天区保留已发出的真实回复。",
       snapshot(context(), [turn("shrimp", { activity: activity("shrimp", "reconciling"),
         recovery: { type: "execution", reason: "GROUP_EXTERNAL_START_UNCONFIRMED", since: now + 390_000, cancelRequested: false } })], defaultQueue)),
     step("异常满两分钟后让位", "启动回执不明持续两分钟，且没有新的有效进展，才让位给 Maya；正常运行只是慢不会走到这里。系统后台自动查询原任务，后来读到原结果时正常交回，不自动重发。共享工作区仍遵守资源排队。",

@@ -34,15 +34,23 @@ async function main() {
     const owner = { backendId: "shoggoth", agentId: profile.id, sessionKey: session.sessionKey };
     await f.backend._refreshManagedProfiles();
     const gatewayKey = `agent:${profile.agentId}:${session.sessionKey}`;
-    const uiPrepared = await rest("chat/secrets/prepare", { sessionKey: gatewayKey, operationId: uuid(), text: "Password: ui-contract-fixture" });
+    const labelled = "Password: ui-contract-fixture";
+    const ordinary = await rest("chat/secrets/prepare", { sessionKey: gatewayKey, operationId: uuid(), text: labelled });
+    assert.equal(ordinary.text, labelled);
+    assert.deepEqual(ordinary.references, []);
+    const uiPrepared = await rest("chat/secrets/prepare", { sessionKey: gatewayKey, operationId: uuid(), text: labelled,
+      selections: [{ start: labelled.indexOf("ui-contract-fixture"), end: labelled.length, kind: "password" }] });
     assert.equal(uiPrepared.references.length, 1);
     assert((await rest("chat/secrets/list", { sessionKey: gatewayKey })).items.some(item => item.reference === uiPrepared.references[0].reference));
     assert.deepEqual((await rest("chat/secrets/results", { sessionKey: gatewayKey })).items, []);
     assert.equal((await rest("chat/secrets/capabilities", { sessionKey: gatewayKey })).nativeTools, false);
     assert.equal((await rest("chat/secrets/revoke", { sessionKey: gatewayKey, reference: uiPrepared.references[0].reference })).revoked, 1);
-    const raw = "Open a new page. 密码是 123456，订单号：666777";
+    const example = "Example syntax: password: ordinary-example.";
+    const raw = `Open a new page. 密码是 123456，订单号：666777\n${example}`;
     const operationId = uuid();
-    const prepared = await f.ipc("chat.secret.prepare", { ...owner, operationId, text: raw, selections: [] });
+    const start = raw.indexOf("123456");
+    const prepared = await f.ipc("chat.secret.prepare", { ...owner, operationId, text: raw,
+      selections: [{ start, end: start + 6, kind: "password" }] });
     assert.equal(prepared.references.length, 1); assert(!prepared.text.includes("123456"));
     assert(prepared.text.includes("666777"));
     const ref = prepared.references[0].reference;
@@ -50,6 +58,7 @@ async function main() {
     const context = await until(() => f.service.workRunCoordinator.runContexts.get(sent.run.id), value => value?.turnId, "credential turn");
     await until(() => requests, value => value.some(request => request.method === "turn/start"), "mock model request");
     assert(!JSON.stringify(requests).includes("123456")); assert(JSON.stringify(requests).includes(ref));
+    assert(JSON.stringify(requests).includes(example));
     assert(!JSON.stringify(requests).includes(CANARY));
     const control = async (action, params) => {
       const id = uuid(), dir = path.join(f.root, "group-control"), responseFile = path.join(dir, id + ".response.json");
@@ -93,7 +102,8 @@ async function main() {
     assert(!JSON.stringify(history).includes("123456")); assert(history.messages.length > 0);
     assert(!JSON.stringify(requests).includes("123456")); assert(!JSON.stringify(requests).includes(CANARY));
     console.log(JSON.stringify({ pass: true, mockModelRequests: requests.length, actualMcpCalls: provider.state.calls,
-      input: "redacted-before-model", execution: "received-original", localResult: "original-without-replay", foreignScope: "denied", history: "retained", providerAuth: "unchanged" }));
+      automaticDetection: "off", explicitInput: "redacted-before-model", execution: "received-original",
+      localResult: "original-without-replay", foreignScope: "denied", history: "retained", providerAuth: "unchanged" }));
   } finally {
     await helper?.close(); auth?.close?.(); await f?.close(); await provider.close(); model.closeAllConnections(); await new Promise(resolve => model.close(resolve));
   }

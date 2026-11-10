@@ -107,14 +107,25 @@ function recordChatSendFailure({ paths, method, phase, input, error, startedAt =
 }
 function setChatSendDiagnosticPhase(phase) {
   const current = context.getStore();
-  if (current && PHASES.has(phase)) current.phase = phase;
+  if (current && PHASES.has(phase) && current.phase !== phase) {
+    finishPhase(current, "success");
+    current.phase = phase; current.phaseAt = Date.now(); current.phaseMono = performance.now();
+  }
 }
-function withChatSendDiagnostics({ paths, method, input }, action) {
+function finishPhase(current, outcome) {
+  try { current.latency?.record({ stage: current.phase, outcome, operationId: current.input?.operationId,
+    sessionKey: current.input?.sessionKey, startedAt: current.phaseAt, finishedAt: Date.now(),
+    durationMs: performance.now() - current.phaseMono }); } catch {}
+}
+function withChatSendDiagnostics({ paths, method, input, latency }, action) {
   if (!["chat.send", "chat.secret.prepare"].includes(method)) return action();
-  const current = { paths, method, input, phase: "request_validation", startedAt: Date.now() };
+  const current = { paths, method, input, latency, phase: "request_validation", startedAt: Date.now(),
+    phaseAt: Date.now(), phaseMono: performance.now() };
   return context.run(current, async () => {
+    let outcome = "success";
     try { return await action(); }
-    catch (error) { recordChatSendFailure({ ...current, error }); throw error; }
+    catch (error) { outcome = "error"; recordChatSendFailure({ ...current, error }); throw error; }
+    finally { finishPhase(current, outcome); current.latency = null; }
   });
 }
 

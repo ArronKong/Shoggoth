@@ -52,8 +52,25 @@ const capabilities = { execute: true, session: true, respond: true, cancel: true
 const agents = ['shoggoth', 'openclaw', 'hermes'].map((backendId) => ({
   backendId, backendName: backendId, id: `${backendId}-agent`, name: backendId, capabilities: { ...capabilities },
 }));
+const modelCatalogs = {
+  shoggoth: { defaultModel: 'fixture-default', defaultBindingId: 'binding-a', models: [
+    { id: 'fixture-default', name: 'Other runtime', provider: 'pi', bindingId: 'binding-b' },
+    { id: 'fixture-default', name: 'Other source', provider: 'custom', bindingId: 'binding-a', modelProviderRef: 'custom' },
+    { id: 'fixture-default', name: 'Native default', provider: 'codex', bindingId: 'binding-a' },
+  ] },
+  openclaw: { defaultModel: 'fixture/org/default', models: [
+    { id: 'fixture/org/default', name: 'Same raw reference', provider: 'other' },
+    { id: 'org/default', name: 'OpenClaw default', provider: 'fixture' },
+  ] },
+  hermes: { defaultModel: 'hermes-default', defaultProvider: 'fixture', models: [
+    { id: 'hermes-default', name: 'Other Hermes source', provider: 'other' },
+    { id: 'hermes-default', name: 'Hermes default', provider: 'fixture' },
+  ] },
+};
 let idea;
 let roster;
+let presence;
+let presenceError = null;
 let refreshes = 0;
 let activity = null;
 const activityReads = [];
@@ -89,11 +106,14 @@ const stubs = {
   '../components/TurnTimeline/TurnTimeline': host('ol'),
   '../components/TurnTimeline/trajectoryIcons': { IconTrajectory: host('i') },
   '../components/ui': { useConfirm: () => async () => true, useToast: () => ({ error: assert.fail, success() {} }) },
-  '../lib/usePageCache': { usePageCache: (key) => ({ refresh, data: key.startsWith('inspiration-agents') || key.startsWith('inspiration-idle')
-    ? { agents: roster } : key.startsWith('inspiration-models:') ? { defaultModel: 'fixture-default',
-      models: [{ id: 'custom-model', name: 'Custom model', provider: 'fixture' }] }
+  '../lib/usePageCache': { usePageCache: (key) => ({ refresh, error: key.startsWith('inspiration-idle') ? presenceError : null,
+    data: key.startsWith('inspiration-idle') ? presence : key.startsWith('inspiration-agents')
+    ? { agents: roster } : key.startsWith('inspiration-models:') ? modelCatalogs[key.slice('inspiration-models:'.length).split('/')[0]]
       : { idea, history: { executions: idea.latestExecution ? [idea.latestExecution] : [], nextCursor: null,
       total: idea.latestExecution ? 1 : 0 } } }) },
+  '../lib/useAgentModelCatalog': { useAgentModelCatalog: (backend, _agentId, options) => ({
+    data: options.enabled ? modelCatalogs[backend] : undefined, loading: false, error: null, refresh,
+  }) },
   '../lib/navigation-guard': { useNavigationGuard() {} },
   '../lib/markdown': { toSanitizedMarkdownHtml: (text) => text },
   '../lib/gatewayErrors': gatewayErrors,
@@ -171,11 +191,48 @@ const render = (status = 'completed', errorCode = null, title = null, latestExec
       agentId: 'shoggoth-agent', profileId: 'profile', workspace: '/fixture/native', createdAt: 1, finishedAt: 2,
       sessionKey: 'session', status, attention: null, errorCode, resultSummary: null, instruction: 'Earlier ask' } : null };
   roster = structuredClone(agents);
+  presence = { agents: roster, busyAgents: [] };
+  presenceError = null;
   let renderer;
   act(() => { renderer = create(React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh })); });
   return renderer;
 };
 const click = async (target) => { await act(async () => { target.props.onClick(); await new Promise(setImmediate); }); };
+
+{
+  const renderer = render('saved', null, null, false);
+  const refreshView = () => act(() => renderer.update(React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh })));
+  const busyRadios = () => renderer.root.findAll(node => node.type === 'button' && node.props.role === 'radio'
+    && node.props['aria-label']?.includes('inspiration.thread.busyHint'));
+  for (const snapshot of [{ agents: [] }, { agents: [], busyAgents: [] }]) {
+    presence = snapshot;
+    refreshView();
+    assert.equal(busyRadios().length, 0, 'An absent idle result must not mark the lineup or picker busy');
+    assert.ok(!textOf(renderer.toJSON()).includes('inspiration.thread.busy'));
+  }
+  presence = { agents: [roster[0]], busyAgents: [roster[1]] };
+  refreshView();
+  assert.ok(busyRadios().length > 0);
+  assert.ok(busyRadios().every(node => node.props['aria-label'].startsWith('openclaw')),
+    'Only the explicitly busy Agent gets a badge and picker hint');
+  assert.ok(busyRadios().every(node => !node.props.disabled), 'Busy remains a hint and does not disable selection');
+  presenceError = 'status read failed';
+  refreshView();
+  assert.equal(busyRadios().length, 0, 'A failed refresh cannot retain a stale busy badge');
+  presenceError = null;
+  presence = { agents: roster, busyAgents: [] };
+  refreshView();
+  assert.equal(busyRadios().length, 0, 'The next idle snapshot clears a busy badge');
+  act(() => renderer.unmount());
+}
+{
+  const renderer = render('running');
+  presence = { agents: [], busyAgents: [roster[0], roster[1]] };
+  act(() => renderer.update(React.createElement(IdeaDetail, { id: 'idea', onClose() {}, onChange: refresh })));
+  assert.ok(radio(renderer, 'shoggoth').every(node => !node.props['aria-label'].includes('inspiration.thread.busyHint')),
+    'The Agent running this idea is not shown as occupied elsewhere');
+  act(() => renderer.unmount());
+}
 
 {
   // Each round reads as a chat exchange: what was asked, then the agent's reply.
@@ -412,15 +469,33 @@ for (const backendId of ['openclaw', 'hermes']) {
   assert.equal(button(renderer, 'Develop').props['aria-pressed'], true, 'The seed opens with the first intent chosen');
   assert.ok(button(renderer, 'inspiration.thread.mention'), 'The seed composer also offers an Agent picker');
   const modelMenu = () => renderer.root.findByType(stubs['./ChatModelMenu']);
-  assert.equal(modelMenu().props.triggerLabel, 'fixture-default');
-  act(() => modelMenu().props.onSelect('custom-model', 'fixture'));
+  assert.equal(modelMenu().props.emptyLabel, undefined, 'The menu only contains model rows');
+  assert.equal(modelMenu().props.activeModel, 'fixture-default');
+  assert.equal(modelMenu().props.activeBindingId, 'binding-a');
+  assert.equal(modelMenu().props.activeModelProviderRef, undefined);
+  act(() => modelMenu().props.onSelect('fixture-default', 'custom', 'binding-a', 'custom'));
+  assert.equal(modelMenu().props.activeModelProviderRef, 'custom', 'The same model id on another source can be selected');
   await click(radio(renderer, 'hermes')[0]);
-  assert.equal(modelMenu().props.activeModel, '', 'Changing Agents resets the previous Agent’s model pick');
-  act(() => modelMenu().props.onSelect('custom-model', 'fixture'));
+  assert.equal(modelMenu().props.activeModel, 'hermes-default', 'Changing Agents selects the new Agent’s configured model');
+  assert.equal(modelMenu().props.activeProvider, 'fixture', 'Identical model ids on other providers are distinct');
+  act(() => modelMenu().props.onSelect('hermes-default', 'other'));
   await click(button(renderer, 'inspiration.thread.send'));
   assert.equal(starts.at(-1).input.agentId, 'hermes-agent');
   assert.equal(starts.at(-1).input.instruction, 'Develop', 'An intent chip on its own becomes the instruction');
-  assert.deepEqual({ ...starts.at(-1).input.modelSelection }, { model: 'custom-model', provider: 'fixture' });
+  assert.deepEqual({ ...starts.at(-1).input.modelSelection }, { model: 'hermes-default', provider: 'other' });
+  act(() => renderer.unmount());
+}
+{
+  const renderer = render('saved', null, null, false);
+  await click(radio(renderer, 'openclaw')[0]);
+  const modelMenu = () => renderer.root.findByType(stubs['./ChatModelMenu']);
+  assert.equal(modelMenu().props.activeModel, 'org/default', 'A provider-qualified reference selects the exact catalog row');
+  act(() => modelMenu().props.onSelect('fixture/org/default', 'other'));
+  assert.equal(modelMenu().props.activeProvider, 'other');
+  act(() => modelMenu().props.onSelect('org/default', 'fixture'));
+  await click(button(renderer, 'inspiration.thread.send'));
+  assert.equal(starts.at(-1).input.agentId, 'openclaw-agent');
+  assert.equal(Object.hasOwn(starts.at(-1).input, 'modelSelection'), false, 'Picking the default row restores inheritance');
   act(() => renderer.unmount());
 }
 {

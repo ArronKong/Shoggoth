@@ -104,7 +104,7 @@ export function IconFast() {
 export function IconStop() {
   return (
     <svg viewBox="0 0 12 12" width="12" height="12" fill="currentColor" stroke="none" aria-hidden="true">
-      <rect width="12" height="12" rx="2" />
+      <rect width="12" height="12" rx="4" />
     </svg>
   );
 }

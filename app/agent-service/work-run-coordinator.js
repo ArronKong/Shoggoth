@@ -43,6 +43,7 @@ const {
   runtimeStageFromError,
 } = require("./runtime-stage-error");
 const { transcriptEventId } = require("./transcript-store");
+const { readEvents } = require("./transcript-read");
 const { SESSION_RUNTIME_PUBLIC_MESSAGES } = require("./session-runtime-protocol");
 const { resolveRuntimePermissionMode, adapterPermissionMode, isUnifiedPermissionMode, runtimePermissionModeOptions } = require("./runtime-permission-modes");
 const { automaticRuntimeApproval } = require("./runtime-automatic-approval");
@@ -1036,7 +1037,6 @@ class WorkRunCoordinator {
     this.getMediaStore = options.getMediaStore;
     this.resolveRunSession = options.resolveRunSession || (() => null);
     this.assertProactiveRunCurrent = options.assertProactiveRunCurrent || (() => { throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查的授权不可用"); });
-    this.submitProactiveResponse = options.submitProactiveResponse;
     this.proactiveModelUsage = options.proactiveModelUsage;
     this.inbox = options.inbox;
     this.runtimeManager = options.runtimeManager
@@ -1049,6 +1049,7 @@ class WorkRunCoordinator {
     this.pendingSessionSends = new Map();
     this.sessionBindingReconciliations = new Set();
     this.beforeSessionSend = options.beforeSessionSend || (() => {});
+    this.prepareChatRuntime = options.prepareChatRuntime || null;
     this.validateUiAction = options.validateUiAction || (() => null);
 
     this.onRuntimeMcpRequest = options.onRuntimeMcpRequest || null;
@@ -2371,7 +2372,7 @@ class WorkRunCoordinator {
     if (!session || session.profileId !== profileId) throw coordinatorError("UI_SCOPE_MISMATCH", "交互卡片归属无效");
     const borrowedMemoryRefs = mergeBorrowedMemoryRefs(this.contextCompiler?.memoryEngine?.sharing?.borrowedRefsForRun(runId) || [],
       this.runExecutionContracts.get(runId)?.borrowedMemoryRefs || []);
-    const events = this.transcriptStore?.listEvents(profileId, session.id) || [];
+    const events = this.transcriptStore ? readEvents(this.transcriptStore, profileId, session.id) : [];
     const borrowedMemoryDerived = borrowedMemoryRefs.length > 0 || events.some(event => event.content?.borrowedMemoryDerived === true);
     return { run, identity, session, owner: { profileId, sessionKey, transcriptSessionId: session.id },
       provenance: { origin: "assistant_generated_ui", borrowedMemoryRefs,
@@ -2434,9 +2435,7 @@ class WorkRunCoordinator {
     }
     const run = this.dispatcher.getRun(runId);
     if (run.source === "proactive") {
-      if (kind !== "mcp") throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查只能返回裁决");
       this.assertProactiveRunCurrent(run);
-      this.#assertProactiveMemoryCurrent(this.runExecutionContracts.get(runId));
     }
     const lease = this.runCapabilityLeases.get(runId);
     const scope = { kind, identity: { runId, runtimeAccountId } };
@@ -2648,7 +2647,7 @@ class WorkRunCoordinator {
 
   getRuntimeContextForSource(profileId, source, sourceId) {
     this.#assertOpen();
-    if (!validOpaqueId(profileId) || !["chat", "kanban", "cron", "inspiration"].includes(source)
+    if (!validOpaqueId(profileId) || !["chat", "kanban", "cron", "inspiration", "proactive"].includes(source)
       || typeof sourceId !== "string" || sourceId.length === 0 || sourceId.length > 512
       || !sourceId.isWellFormed() || sourceId.includes("\0")) return null;
     const matches = this.dispatcher.listRuns({ source, sourceId }).filter(
@@ -3105,7 +3104,7 @@ class WorkRunCoordinator {
         throw coordinatorError("EXECUTION_BINDING_INVALID", "Execution session changed during restart");
       }
       const borrowedMemoryRefs = mergeBorrowedMemoryRefs(contract.borrowedMemoryRefs || [],
-        refsFromEvents(this.transcriptStore?.listEvents(run.profileId, session.id).filter(event => event.runId === run.id) || []),
+        refsFromEvents(this.transcriptStore ? readEvents(this.transcriptStore, run.profileId, session.id).filter(event => event.runId === run.id) : []),
         (runtimeSessionIdOf(session) && contract.bindingId
           ? this.conversationCheckpointStore?.nativeSessionBorrowedMemoryRefs?.(run.profileId, session.id, runtimeSessionIdOf(session), contract.bindingId) : []) || []);
       if (borrowedMemoryRefs.length) {
@@ -3168,7 +3167,7 @@ class WorkRunCoordinator {
       }
       if (command.conversationPolicy) {
         const { sourceConversationPolicy, sourcePolicyForRun } = require("./source-conversation-policy");
-        const expected = run.source === "kanban" ? this.sourceConversationStore?.get(run.id)?.policy
+        const expected = ["kanban", "proactive"].includes(run.source) ? this.sourceConversationStore?.get(run.id)?.policy
           : sourcePolicyForRun(run, { threadPolicy: input.threadSource === domainThreadSource(run, "continue") ? "continue" : "new",
             sessionKey: run.source === "inspiration" ? this.getRunSessionKey(run) : null });
         if (!expected || JSON.stringify(sourceConversationPolicy(command.conversationPolicy)) !== JSON.stringify(expected)) {
@@ -3470,7 +3469,8 @@ class WorkRunCoordinator {
     let plan = this.#planConversationCompaction(session, { force, requestPlan, currentOperationId, advisory, restorePolicy });
     if (!plan) return null;
     if (this.beforeMemoryCompaction && !memoryPrepared) {
-      await this.beforeMemoryCompaction({ profileId: session.profileId, sessionId: session.id });
+      await this.beforeMemoryCompaction({ profileId: session.profileId, sessionId: session.id,
+        deadlineAt: this.now() + 60_000 });
       this.#assertOpen();
       session = this.chatSessionStore.getSession(session.sessionKey);
       if (!session || !sendableSession(session)) return null;
@@ -3504,7 +3504,7 @@ class WorkRunCoordinator {
 
   #nativeCompactedSince(session, since) {
     const runtimeSessionId = session && runtimeSessionIdOf(session);
-    return Boolean(runtimeSessionId && this.transcriptStore?.listEvents(session.profileId, session.id)
+    return Boolean(runtimeSessionId && this.transcriptStore && readEvents(this.transcriptStore, session.profileId, session.id)
       .some(event => event.content?.transcriptType === "context.native.compacted"
         && event.content.runtimeSessionId === runtimeSessionId && event.occurredAt > since));
   }
@@ -3522,7 +3522,8 @@ class WorkRunCoordinator {
     const sourceConfiguration = advisory ? currentConfiguration() : null;
     const summaryIdentity = advisory ? JSON.stringify(this.#summaryIdentity(session)) : null;
     if (this.beforeMemoryCompaction) {
-      await this.beforeMemoryCompaction({ profileId: session.profileId, sessionId: session.id });
+      await this.beforeMemoryCompaction({ profileId: session.profileId, sessionId: session.id,
+        deadlineAt: this.now() + 60_000 });
       this.#assertOpen();
     }
     if (advisory && (this.dispatcher.getRun(waitingRunId)?.status !== "queued"
@@ -3558,7 +3559,7 @@ class WorkRunCoordinator {
 
   #maintenanceState(session, contract, action) {
     const helpers = require("./context-transfer");
-    const events = this.transcriptStore?.listEvents?.(session.profileId, session.id) ?? [];
+    const events = this.transcriptStore?.listEvents ? readEvents(this.transcriptStore, session.profileId, session.id) : [];
     const records = helpers.maintenanceRecords(events);
     const scope = helpers.maintenanceScope(session, contract);
     const latest = [...records.values()].findLast(item => item.action === action && helpers.sameMaintenanceScope(item.scope, scope));
@@ -3578,7 +3579,8 @@ class WorkRunCoordinator {
     const barrier = { error: null };
     this.workingContextBarriers.set(session.sessionKey, barrier);
     const action = async () => {
-      if (this.beforeMemoryCompaction) await this.beforeMemoryCompaction({ profileId: session.profileId, sessionId: session.id });
+      if (this.beforeMemoryCompaction) await this.beforeMemoryCompaction({ profileId: session.profileId, sessionId: session.id,
+        deadlineAt: this.now() + 60_000 });
       this.#fenceLifecycle(lifecycle);
       const current = this.chatSessionStore.getSession(session.sessionKey);
       if (current?.revision !== session.revision || this.dispatcher.getRun(run.id)?.status !== "queued") {
@@ -3600,7 +3602,7 @@ class WorkRunCoordinator {
       if (!checkpoint || checkpoint.partial || checkpoint.contentHash !== prepared.revisions.checkpoint
         || currentConfiguration() !== sourceConfiguration
         || this.contextCompiler.memoryStore.getRevision(session.profileId) !== prepared.revisions.memory
-        || this.transcriptStore.listEvents(session.profileId, session.id)
+        || readEvents(this.transcriptStore, session.profileId, session.id)
           .some(event => event.seq > prepared.revisions.transcript && !event.contextExcluded)) {
         throw coordinatorError("CHECKPOINT_STALE", "Prepared working context changed before renewal");
       }
@@ -3762,8 +3764,9 @@ class WorkRunCoordinator {
     }
     setChatSendDiagnosticPhase("transcript_append");
     const userEventId = transcriptEventId("chat-user", input.operationId);
-    const previousUser = existingCommand && this.transcriptStore?.listEvents?.(session.profileId, session.id)
-      .find(event => event.id === userEventId);
+    const previousUser = existingCommand && (this.transcriptStore?.getEvent
+      ? this.transcriptStore.getEvent(session.profileId, session.id, userEventId)
+      : this.transcriptStore?.listEvents?.(session.profileId, session.id).find(event => event.id === userEventId));
     const selectionSnapshot = previousUser
       ? previousUser.content?.connectorSelectionSnapshot
       : resolvedSelection?.length ? resolvedSelection : undefined;
@@ -3853,6 +3856,17 @@ class WorkRunCoordinator {
       return { disposition: "completed", reason: null, run };
     }
     if (run.source === "proactive") this.assertProactiveRunCurrent(run);
+    if (run.source === "proactive") {
+      const sessionKey = this.getRunSessionKey(run);
+      const session = sessionKey && this.chatSessionStore.getSession(sessionKey);
+      if (!session || !sendableSession(session)) throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查的主会话不可用");
+      // Store provenance without impersonating a user message. This record is
+      // excluded from display, recall and transcript replay.
+      this.transcriptStore?.appendEvent({ profileId: run.profileId, sessionId: session.id,
+        id: transcriptEventId("proactive-trigger", run.id), runId: run.id, kind: "status",
+        contextExcluded: true, runtimeRef: null, occurredAt: this.sourceConversationStore.get(run.id).createdAt,
+        content: { transcriptType: "proactive.trigger", inputOrigin: "system", text: input.prompt, operationId: input.operationId } });
+    }
     if (run.source === "kanban" && this.sourceConversationStore) {
       const session = this.sourceConversationStore.ensure(run);
       if (!session) throw coordinatorError("CHAT_SESSION_DELETED", "任务对应的会话已删除");
@@ -3906,7 +3920,7 @@ class WorkRunCoordinator {
         kind: "domain",
         ...structuredClone(input),
         createdAt: this.sourceConversationStore?.get(run.id)?.createdAt ?? this.now(),
-        conversationPolicy: require("./source-conversation-policy").sourcePolicyForRun(run, {
+        conversationPolicy: this.sourceConversationStore?.get(run.id)?.policy ?? require("./source-conversation-policy").sourcePolicyForRun(run, {
           threadPolicy: input.threadSource === domainThreadSource(run, "continue") ? "continue" : "new",
           sessionKey: run.source === "inspiration" ? this.getRunSessionKey(run) : null,
         }),
@@ -4199,8 +4213,19 @@ class WorkRunCoordinator {
     return state;
   }
 
+  #recordLatencyMilestone(runId, stage, startedAt, outcome, extra = {}, finishedAt = this.now()) {
+    try {
+      const run = this.dispatcher.getRun(runId);
+      // Read the small durable Run identity, never clone the encrypted command
+      // (including its entire prompt/attachments) once for every timing span.
+      this.telemetry.record("runtime.stage", { runId, stage, outcome, startedAt, finishedAt,
+        operationId: run && this.#operationIdForRun(run), source: this.runExecutionContracts.get(runId)?.runtime,
+        durationMs: Math.max(0, finishedAt - startedAt), ...extra });
+    } catch { /* Diagnostics cannot change an execution outcome. */ }
+  }
+
   #appendPerformanceStage(runId, stage, startedAt, outcome, extra = {}, finishedAt = this.now()) {
-    this.telemetry.record("runtime.stage", { runId, stage, outcome, durationMs: Math.max(0, finishedAt - startedAt) });
+    this.#recordLatencyMilestone(runId, stage, startedAt, outcome, extra, finishedAt);
     if (outcome === "error" && ["runtime_acquire", "runtime_authentication", "session_start_or_resume"].includes(stage))
       this.telemetry.record("runtime.preflight.failed", { runId, reason: stage });
     if (!Number.isSafeInteger(startedAt) || startedAt < 0
@@ -4274,7 +4299,7 @@ class WorkRunCoordinator {
     const run = typeof runOrId === "string" ? this.dispatcher.getRun(runOrId) : runOrId;
     if (!run) return null;
     if (run.source === "chat" || run.source === "compaction") return run.sourceId;
-    if (run.source === "kanban") {
+    if (["kanban", "proactive"].includes(run.source)) {
       const binding = this.sourceConversationStore?.get(run.id);
       if (!binding) return null;
       if (["source", "sourceId", "profileId", "workspace"].some(key => binding[key] !== run[key])) {
@@ -4311,6 +4336,35 @@ class WorkRunCoordinator {
 
   listSessionRuns(sessionKey, query = {}) {
     return this.dispatcher.listRuns(query).filter((run) => this.getRunSessionKey(run) === sessionKey);
+  }
+
+  getProactiveFinalReply(runOrId) {
+    const run = typeof runOrId === "string" ? this.dispatcher.getRun(runOrId) : runOrId;
+    if (run?.source !== "proactive" || run.status !== "completed") return null;
+    const { proactiveTranscriptId } = require("./notice-delivery-controller");
+    const events = this.transcriptStore?.listEvents(run.profileId, proactiveTranscriptId(run.id)) || [];
+    const messages = events.filter(event => event.runId === run.id && event.kind === "assistant"
+      && event.content?.delivery !== "async" && typeof event.content?.text === "string" && event.content.text.trim());
+    const final = [...messages].reverse().find(event => event.content.phase === "final_answer")
+      || [...messages].reverse().find(event => event.content.phase == null);
+    if (!final) return run.resultSummary;
+    try {
+      const source = this.transcriptStore.contextEvent(run.profileId, proactiveTranscriptId(run.id), final);
+      const text = this.sanitizeSummary(source.content.text, Object.freeze({ runId: run.id }));
+      if (typeof text !== "string" || !text.trim()) return null;
+      assertNoSensitiveFields({ resultSummary: text });
+      if (this.assertSecretSafe({ resultSummary: text }, { kind: "proactiveResponse", runId: run.id }) !== true) return null;
+      return text;
+    } catch { return null; }
+  }
+
+  getProactiveTriggerPrompt(run) {
+    if (run?.source !== "proactive") return null;
+    const key = this.getRunSessionKey(run), session = key && this.chatSessionStore.getSession(key);
+    if (!session) return null;
+    const event = this.transcriptStore?.getEvent(run.profileId, session.id, transcriptEventId("proactive-trigger", run.id));
+    return event?.runId === run.id && event.kind === "status" && event.contextExcluded
+      && event.content?.inputOrigin === "system" ? event.content.text : null;
   }
 
   getRunMessageMetadata(runId, scope = {}, transcriptEvents = null) {
@@ -4382,7 +4436,7 @@ class WorkRunCoordinator {
     this.transcriptStore?.ensureSession?.({ profileId: run.profileId, sessionId: session.id });
     const eventId = transcriptEventId("cron-user", command.operationId);
     // Re-admission/recovery must not upgrade an older run or change its input.
-    if (this.transcriptStore?.listEvents(run.profileId, session.id).some(item => item.id === eventId)) return session;
+    if (this.transcriptStore && readEvents(this.transcriptStore, run.profileId, session.id).some(item => item.id === eventId)) return session;
     const event = { id: eventId, kind: "user",
       content: { text: command.prompt, operationId: command.operationId, cronOutputVersion: CRON_OUTPUT_VERSION },
       // TranscriptStore preserves the first timestamp on an idempotent append;
@@ -4504,6 +4558,30 @@ class WorkRunCoordinator {
   #appendTranscript(runId, event) {
     if (!this.transcriptStore) return null;
     const run = this.dispatcher.getRun(runId);
+    if (run?.source === "proactive") {
+      if (event.kind === "assistant") {
+        const { proactiveTranscriptId } = require("./notice-delivery-controller");
+        const project = text => projectTextOrOriginal(this.temporarySecrets,
+          { profileId: run.profileId, sessionId: this.getRunSessionKey(run) || run.sourceId }, text);
+        const { projectTranscriptContent } = require("./chat-event-projection");
+        return this.transcriptStore.appendEvent({ ...event, profileId: run.profileId,
+          sessionId: proactiveTranscriptId(run.id), runId, contextExcluded: true,
+          content: this.temporarySecrets ? projectTranscriptContent(event.content, project) : event.content,
+          ...(event.contextContent === undefined ? {} : { contextContent: this.temporarySecrets
+            ? projectTranscriptContent(event.contextContent, project) : event.contextContent }) });
+      }
+      // The response receipt uses the usual tool event format. The private
+      // review input, model drafts, scratch and tool payloads stay out of it.
+      const tool = event.content?.tool;
+      if (!["tool_call", "tool_result"].includes(event.kind)
+        || !/^(?:shoggoth[/.]|mcp__shoggoth__)?proactive_respond$/u.test(tool?.name ?? "")) return null;
+      const { proactiveTranscriptId } = require("./notice-delivery-controller");
+      return this.transcriptStore.appendEvent({ profileId: run.profileId, sessionId: proactiveTranscriptId(run.id),
+        id: event.id, runId, kind: event.kind, runtimeRef: event.runtimeRef, occurredAt: event.occurredAt,
+        contextExcluded: true, content: { transcriptType: event.content.transcriptType,
+          toolCallId: event.content.toolCallId ?? event.content.itemId ?? event.id,
+          tool: { name: "proactive_respond", status: tool.status ?? null, durationMs: tool.durationMs ?? null } } });
+    }
     const sessionKey = this.getRunSessionKey(run);
     if (!sessionKey) return null;
     const session = this.chatSessionStore.getSession(sessionKey);
@@ -5005,9 +5083,6 @@ class WorkRunCoordinator {
     if (method === "mcpServer/elicitation/request") {
       const proof = parseBindingElicitation(params);
       if (proof) {
-        if (run.source === "proactive" && proof.name !== "proactive_respond") {
-          throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查不能调用这个工具");
-        }
         const contract = this.runExecutionContracts.get(runId);
         if (!["codex", "pi"].includes(assignment.runtime) || !contract) {
           throw coordinatorError("WORK_RUN_REQUEST_UNROUTABLE", "Runtime call binding requires verified assigned native execution");
@@ -5030,7 +5105,6 @@ class WorkRunCoordinator {
       }
     }
     if (method === "shoggoth/hooks/tool") {
-      if (run.source === "proactive") throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查不能调用原生工具 Hook");
       if (assignment.runtime !== "pi" || !this.hookService?.runtimeBridge
         || !exactObject(params, ["sessionId", "turnId", "request"])) throw coordinatorError("WORK_RUN_REQUEST_UNROUTABLE", "Native Hook request is invalid");
       const contract = this.runExecutionContracts.get(runId);
@@ -5040,9 +5114,6 @@ class WorkRunCoordinator {
         { ...scope, host, bindingId: contract.runtimeProfileId }));
     }
     if (method === "shoggoth/mcp.call") {
-      if (run.source === "proactive" && params?.name !== "proactive_respond") {
-        throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查不能调用这个工具");
-      }
       if (!this.onRuntimeMcpRequest || !exactObject(params, ["sessionId", "turnId", "callId", "name", "arguments",
         ...(Object.hasOwn(params, "confirmation") ? ["confirmation"] : [])])
         || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(params.callId)
@@ -5056,7 +5127,6 @@ class WorkRunCoordinator {
       return this.invokeRuntimeCapability({ runId, runtimeProfileId: contract.runtimeProfileId,
         runtimeAccountId: contract.runtimeAccountId, kind }, scope => this.onRuntimeMcpRequest(contract.profileId, params, scope));
     }
-    if (run.source === "proactive") throw coordinatorError("PROACTIVE_SCOPE_INVALID", "主动检查不能请求审批、输入或扩权");
     this.hostCapabilityIssuer.assert(this.runCapabilityLeases.get(runId), {
       kind: method === "mcpServer/elicitation/request" ? "input" : "approval",
       sessionId: context.threadId, turnId: context.turnId,
@@ -5112,6 +5182,7 @@ class WorkRunCoordinator {
 
   #requestInteraction({ host, method, params, requestContext, run, runId, context,
     assignment, sessionApprovalRule = null, approvalTimeoutMs }) {
+    if (run.source === "proactive") throw coordinatorError("PROACTIVE_SCOPE_INVALID", "本次检查需要用户操作，请在最终提醒中说明");
     if (requestContext.signal?.aborted) {
       throw coordinatorError("HOST_CAPABILITY_REVOKED", "交互请求的执行已失效");
     }
@@ -5923,7 +5994,7 @@ class WorkRunCoordinator {
     const cycle = event.compactionId ?? event.contextUsage?.observedAt;
     const scope = event.compactionId ? JSON.stringify([session.runtimeBindingId ?? null, nativeId]) : runId ?? nativeId;
     const id = transcriptEventId("native-context-compacted", scope, cycle);
-    if (this.transcriptStore.listEvents(profileId, session.id).some(entry => entry.id === id)) return false;
+    if (readEvents(this.transcriptStore, profileId, session.id).some(entry => entry.id === id)) return false;
     const record = { id, kind: "status", contextExcluded: true,
       content: { transcriptType: "context.native.compacted", runtimeSessionId: nativeId,
         ...(event.compactionId ? { compactionId: event.compactionId, runtimeBindingId: session.runtimeBindingId ?? null } : {}) }, occurredAt: this.now() };
@@ -6019,12 +6090,12 @@ class WorkRunCoordinator {
     if (context.cancelRequested && event.type !== "complete") return;
     if (!context.firstEventRecorded) {
       context.firstEventRecorded = true;
-      this.telemetry.record("runtime.stage", { runId, stage: "first_event", outcome: "success", count: 1 });
+      this.#recordLatencyMilestone(runId, "first_event", this.#commandForRun(run)?.command?.createdAt ?? run.createdAt, "success");
     }
-    const firstKind = ["text_delta", "text"].includes(event.type) ? "first_text"
+    const firstKind = ["text_delta", "text"].includes(event.type) && (event.delta || event.text) ? "first_text"
       : ["tool_start", "tool_update", "tool_result"].includes(event.type) ? "first_tool" : null;
     if (firstKind && !context[firstKind]) { context[firstKind] = true;
-      this.telemetry.record("runtime.stage", { runId, stage: firstKind, outcome: "success", count: 1 }); }
+      this.#recordLatencyMilestone(runId, firstKind, this.#commandForRun(run)?.command?.createdAt ?? run.createdAt, "success"); }
     if (contextEvent) {
       // Message presentation observes the matched turn independently of the
       // optional context-management feature. Never reuse a later session value.
@@ -6082,6 +6153,9 @@ class WorkRunCoordinator {
           createdAt: Number.isSafeInteger(event.createdAt) && event.createdAt >= (run.startedAt ?? run.createdAt)
             && event.createdAt <= this.now() ? event.createdAt : this.now(),
         });
+        if (run.source === "proactive" && Number.isSafeInteger(event.usage.totalTokens) && event.usage.totalTokens > 0) {
+          this.proactiveModelUsage?.(run, true);
+        }
       } catch {
         // 用量统计是旁路观测，落盘故障不得反向中断已被模型接受的对话。
         // TokenUsageStore 对 commit-uncertain 会自行 fail closed，管理页不会伪报零值。
@@ -6099,7 +6173,6 @@ class WorkRunCoordinator {
         && ["completed", "failed", "interrupted", "canceled"].includes(terminal.status)) {
         context.nativeTerminal ??= Object.freeze(structuredClone(terminal));
       }
-      if (run.source === "proactive" && !context.nativeTerminal) return;
       this.#chainRunTask(runId, async () => {
         this.lastErrors.delete(runId);
         try {
@@ -6207,7 +6280,7 @@ class WorkRunCoordinator {
       this.nativeUiTextProjection ||= new (require("./chat-ui-text-projection").ChatUiTextProjection)();
       const currentRun = this.dispatcher.getRun(runId), sessionKey = this.getRunSessionKey(currentRun);
       const session = sessionKey && this.chatSessionStore.getSession(sessionKey);
-      const seed = session && !this.nativeUiTextProjection.runs.has(runId) ? (this.transcriptStore?.listEvents(currentRun.profileId, session.id) || [])
+      const seed = session && !this.nativeUiTextProjection.runs.has(runId) ? (this.transcriptStore ? readEvents(this.transcriptStore, currentRun.profileId, session.id) : [])
         .reduce((max, item) => Math.max(max, Number(item.content?.segmentId?.match(/:(\d+)$/)?.[1] || 0)), 0) : 0;
       publicPayload = this.nativeUiTextProjection.observe(runId, type, publicPayload, seed);
       // The empty item-start observation only identifies the following deltas.
@@ -6272,7 +6345,7 @@ class WorkRunCoordinator {
         });
       }
     }
-    require("./chat-text-fragments").appendChatText(this.#streamFor(runId), type, publicPayload);
+    if (run.source !== "proactive") require("./chat-text-fragments").appendChatText(this.#streamFor(runId), type, publicPayload);
   }
 
   #flushPendingHostEvents(host, context) {
@@ -6436,6 +6509,11 @@ class WorkRunCoordinator {
       this.#fenceLifecycle(lifecycle);
       const existing = this.#existingAdmission(runId);
       return existing || this.dispatcher.admit(runId, { writable: false });
+    }
+    // Process preparation overlaps complete recall, without owning a Run,
+    // native session, account admission or workspace writer.
+    if (run?.source === "chat" && !this.admissionsQuiesced && this.prepareChatRuntime) {
+      Promise.resolve().then(() => this.prepareChatRuntime({ profileId, sessionKey: run.sourceId })).catch(() => {});
     }
     if (run && profile && this.contextCompiler?.semanticSearch && run.source === "chat") {
       // Renew stale native history before recall captures the Product session
@@ -6645,7 +6723,7 @@ class WorkRunCoordinator {
       const eligible = session && (selfManagedRuntime || (automaticNative && !this.#summaryProfile(session)))
         && !this.conversationCheckpointStore?.hasRevocations?.(session.profileId)
         && !this.conversationCheckpointStore?.hasHistoricalSource?.(session.profileId,
-          this.transcriptStore.listEvents(session.profileId, session.id));
+          readEvents(this.transcriptStore, session.profileId, session.id));
       if (eligible && requestPlan.estimatedTokens >= workingTarget
         && (selfManagedRuntime || !requestPlan.exceedsBudget)) {
         const { latest } = this.#maintenanceState(session, executionContract, action);
@@ -6714,7 +6792,7 @@ class WorkRunCoordinator {
         && !this.#summaryProfile(session)
         && !this.conversationCheckpointStore?.hasRevocations?.(session.profileId)
         && !this.conversationCheckpointStore?.hasHistoricalSource?.(session.profileId,
-          this.transcriptStore.listEvents(session.profileId, session.id))) {
+          readEvents(this.transcriptStore, session.profileId, session.id))) {
         this.#admissionPreparation(run, "CONTEXT_COMPACTING");
         const compact = await this.#prepareNativeConversationCompaction(session, executionContract, run.id);
         if (compact.status === "completed") {
@@ -6871,9 +6949,7 @@ class WorkRunCoordinator {
       modelSettings = { thinkingLevel: config.reasoningEffort, serviceTier: null };
     }
     if (run.source === "proactive") this.assertProactiveRunCurrent(run);
-    const resolvedPermission = run.source === "proactive"
-      ? { mode: null, nativeMode: null, permissionPolicy: Object.freeze({ approvalPolicy: profile.runtime === "codex" ? "on-request" : "never", sandbox: "read-only" }) }
-      : run.source === "compaction"
+    const resolvedPermission = run.source === "compaction"
       ? { mode: null, nativeMode: null, permissionPolicy: Object.freeze({ approvalPolicy: "never", sandbox: "read-only" }) }
       : resolveRuntimePermissionMode(
       profile.runtime || "codex",
@@ -6912,7 +6988,7 @@ class WorkRunCoordinator {
     const currentAttachments = mediaAttachments.length && boundSessionKey
       ? prepareChatAttachments(this.getMediaStore(), mediaAttachments, boundSessionKey) : mediaAttachments;
     const currentPrompt = attachmentPrompt(command?.prompt ?? "", currentAttachments);
-    const hookPreparation = this.hookService && !["compaction", "proactive", "automation"].includes(run.source)
+    const hookPreparation = this.hookService && !["compaction", "automation"].includes(run.source)
       ? await this.hookService.prepareRun(run, profile, () => {
         if (!["opening", "open"].includes(this.state)
           || this.productStore.getAgentProfile(run.profileId)?.enabled !== true
@@ -6985,7 +7061,7 @@ class WorkRunCoordinator {
       toolPermissionRevision: snapshot?.revisions?.permission ?? null,
       turnDeveloperInstructions: [snapshot?.turnDeveloperInstructions, workspaceInstructions, cronInstructions].filter(Boolean).join("\n\n") || null,
       developerInstructions: [snapshot?.stableDeveloperInstructions ?? snapshot?.developerInstructions
-        ?? (run.source === "proactive" ? require("./proactive-service").proactiveDeveloperInstructions(run, profile.runtime !== "codex")
+        ?? (run.source === "proactive" ? require("./proactive-service").proactiveDeveloperInstructions(run)
           : run.source === "compaction" ? "Summarize conversation data without tools or side effects."
           : run.source === "automation" ? "Execute this Codex automation prompt in its configured workspace using the native Codex configuration. Report the actual result and any failures."
           : shoggothProductDeveloperInstructions({
@@ -7146,7 +7222,7 @@ class WorkRunCoordinator {
     if (this.hostObservers.get(host)?.pendingEvents.some(event => (event.sessionId ?? event.threadId) === renewal.sessionId
       && ["tool_start", "tool_result", "text", "text_delta", "complete"].includes(event.type))) return false;
     const marker = transcriptEventId("instruction-context-renewal", runId);
-    if (this.transcriptStore.listEvents(session.profileId, session.id).some(event => event.id === marker)) return false;
+    if (readEvents(this.transcriptStore, session.profileId, session.id).some(event => event.id === marker)) return false;
     const target = this.productStore.getAgentRuntimeBindings(session.profileId).bindings
       .find(binding => binding.id === session.runtimeBindingId && binding.enabled);
     if (!target) return false;
@@ -7211,7 +7287,7 @@ class WorkRunCoordinator {
     const sessionKey = this.getRunSessionKey(run), session = sessionKey && this.chatSessionStore.getSession(sessionKey);
     if (!session) return false;
     const marker = transcriptEventId("context-capacity-retry", runId);
-    if (this.transcriptStore.listEvents(session.profileId, session.id).some(event => event.id === marker)) return false;
+    if (readEvents(this.transcriptStore, session.profileId, session.id).some(event => event.id === marker)) return false;
     const profile = this.productStore.resolveAgentRuntimeProfile?.(session.profileId, session.runtimeBindingId)
       || this.productStore.getAgentProfile(session.profileId);
     const previous = this.#conversationContextState(session, profile).budget.tokens;
@@ -7391,8 +7467,7 @@ class WorkRunCoordinator {
         ?? `${token.lifecycle}:${token.run}:${this.randomUUID()}`, workspace: contract.workspace,
       toolRevision: contract.toolRegistryRevision, permissionRevision: contract.toolPermissionRevision,
       accountGeneration: contract.runtimeAccountGeneration,
-    }, expiresAt: null, grants: contract.source === "compaction"
-      || contract.source === "proactive" && contract.runtime !== "codex" ? [] : undefined, signal: token.controller.signal,
+    }, expiresAt: null, grants: contract.source === "compaction" ? [] : undefined, signal: token.controller.signal,
     validate: () => {
       if (token.lifecycle !== this.lifecycleGeneration || this.runGenerations.get(token.runId) !== token.run) return false;
       const profile = this.productStore.resolveAgentRuntimeProfile
@@ -7535,94 +7610,6 @@ class WorkRunCoordinator {
     } finally { this.manualCompactions.delete(runId); }
   }
 
-  #assertProactiveMemoryCurrent(contract) {
-    if (contract?.nativeMemoryVersion && JSON.stringify(contract.nativeMemoryVersion) !== JSON.stringify(
-      this.conversationCheckpointStore?.nativeMemoryVersion?.(contract.profileId))) {
-      throw coordinatorError("CONTEXT_SOURCE_STALE", "主动检查的记忆或撤回状态已变化");
-    }
-  }
-
-  async #driveProactiveModelReview(run, command, host, contract, token) {
-    if (host.capabilities?.["model.generate.toolFree"] !== true || typeof host.generateModelOnly !== "function") {
-      throw coordinatorError("PROACTIVE_RUNTIME_UNVERIFIED", "当前 Runtime 没有受限检查能力");
-    }
-    const assertCurrent = (checkHost = true) => {
-      this.#fence(token);
-      if (token.controller.signal.aborted) throw coordinatorError("MODEL_ONLY_CANCELED", "主动检查已取消");
-      this.#fenceRuntimeAccount(token);
-      const current = this.productStore.resolveAgentRuntimeProfile(run.profileId);
-      if (current.selectedBindingId !== contract.bindingId || current.runtime !== contract.runtime
-        || current.runtimeAccountId !== contract.runtimeAccountId || current.defaultModel !== contract.profileDefaultModel) {
-        throw coordinatorError("PROACTIVE_SCOPE_INVALID", "Agent 默认模型或 Runtime 已变化");
-      }
-      this.assertProactiveRunCurrent(this.dispatcher.getRun(run.id));
-      this.#assertProactiveMemoryCurrent(contract);
-      if (checkHost) host.assertExecutionProviderCurrent?.();
-      if (contract.providerFence) this.assertExecutionProviderRouteCurrent?.(contract);
-    };
-    assertCurrent();
-    // This durable boundary precedes every provider call. Recovery never
-    // replays a running model-only review, even without a native session ID.
-    this.dispatcher.transition(run.id, "running");
-    this.startupGate?.release(run.id);
-    this.#streamFor(run.id).append("status", { status: "running" });
-    let errorCode = null, dispatched = false;
-    try {
-      const auth = await readRuntimeAuthenticationState(host, { allowDeferred: true });
-      assertCurrent();
-      if (auth.status === "unauthenticated") throw runtimeAuthRequiredError();
-      const modelSecretScope = this.#modelSecretScope(contract, {});
-      const text = [contract.developerInstructions, contract.dynamicContext, command.prompt].filter(Boolean).join("\n\n");
-      const prompt = this.temporarySecrets ? projectTextOrOriginal(this.temporarySecrets, modelSecretScope, text) : text;
-      assertCurrent();
-      const { validateModelOnlyInput, runBoundedModelOnly } = require("./runtime-model-only");
-      const input = { purpose: "proactive", prompt, model: contract.defaultModel ?? null, modelSecretScope,
-        operationId: command.operationId, signal: token.controller.signal, assertCurrent };
-      validateModelOnlyInput(input);
-      this.proactiveModelUsage?.(run, false); dispatched = true;
-      const output = await runBoundedModelOnly(input,
-        signal => host.generateModelOnly({ ...input, signal }));
-      // Record actual usage even when a changed rule/default invalidates the
-      // verdict. Unknown usage retains a durable budget barrier, never zero.
-      if (Number.isSafeInteger(output.usage?.totalTokens) && output.usage.totalTokens > 0 && this.usageStore) {
-        const profile = this.productStore.getAgentProfile(run.profileId);
-        this.usageStore.record({ profileId: run.profileId, agentId: profile.agentId || profile.id,
-          agentName: profile.name || profile.id, runId: run.id, source: "proactive", sourceId: run.sourceId,
-          runtime: contract.runtime, runtimeAccountId: contract.runtimeAccountId,
-          threadId: `model-only:${run.id}`, turnId: run.id, responseId: command.operationId,
-          model: output.model || contract.defaultModel, provider: output.provider || null,
-          usage: output.usage, createdAt: this.now() });
-        this.proactiveModelUsage?.(run, true);
-      }
-      // Dedicated model workers have already confirmed their process exit.
-      // Recheck account/default/rules/runtime identity and provider route,
-      // without asking a retired transport to prove that it is still alive.
-      assertCurrent(false);
-      let response;
-      try { response = JSON.parse(output.text); } catch { throw coordinatorError("PROACTIVE_RESPONSE_INVALID", "检查结果不是结构化 JSON"); }
-      if (this.assertSecretSafe(response, { runId: run.id, kind: "proactiveResponse" }) !== true) {
-        throw coordinatorError("RUN_EVENT_SECRET_REJECTED", "主动检查结果包含敏感信息");
-      }
-      this.submitProactiveResponse(this.dispatcher.getRun(run.id), response);
-    } catch (error) {
-      if (error?.code === "RUNTIME_STOP_UNCONFIRMED" || error?.code === "STORE_COMMIT_UNCERTAIN") {
-        this.#poison(error); throw error;
-      }
-      this.#fence(token);
-      errorCode = token.controller.signal.aborted ? "PROACTIVE_REVIEW_STOPPED"
-        : ["PROACTIVE_SCOPE_INVALID", "PROACTIVE_RESPONSE_INVALID", "MODEL_ONLY_ACCEPTANCE_UNKNOWN"].includes(error?.code)
-          ? error.code : publicStartErrorCode(error);
-      if (!dispatched) this.proactiveModelUsage?.(run, true);
-    }
-    this.#fence(token);
-    const status = errorCode === "PROACTIVE_REVIEW_STOPPED" ? "interrupted" : errorCode ? "failed" : "completed";
-    const terminal = this.dispatcher.transition(run.id, status, { errorCode });
-    this.#appendTerminal(run.id, { status, resultSummary: null, errorCode });
-    await this.#completeCommandForRun(terminal, () => this.#fence(token));
-    this.#releaseTerminalRun(run.id);
-    await this.#drainQueuedRuns(token.lifecycle);
-  }
-
   async #driveProductCompaction(run, command, host, contract, token) {
     if (host.capabilities?.["model.generate.toolFree"] !== true || typeof host.generateModelOnly !== "function") {
       throw coordinatorError("MODEL_ONLY_UNSUPPORTED", "当前运行环境没有经过验证的无工具摘要能力");
@@ -7640,7 +7627,8 @@ class WorkRunCoordinator {
       // correction or newly appended source may have landed while it waited
       // for a model-only Runtime; reject before sending old source text.
       const currentMemory = this.conversationCheckpointStore.memoryState(run.profileId);
-      if (this.conversationCheckpointStore.hasRevocations(run.profileId)
+      const revocations = require("./conversation-checkpoint-store").revocationVisibility(this.conversationCheckpointStore, run.profileId);
+      if (revocations === false || revocations !== (command.plan.expectedRevocationVisibility ?? null)
         || currentMemory.revision !== command.plan.expectedMemoryRevision
         || currentMemory.freshUntil !== command.plan.expectedMemoryFreshUntil
         || this.transcriptStore.getRevision(run.profileId, command.plan.sessionId)
@@ -7804,14 +7792,14 @@ class WorkRunCoordinator {
       );
     }
     if (commandRecord.kind === "chat" && command.state === "pending") {
-      command = await this.inbox.transition(operationId, "dispatching");
+      command = await this.#timedPerformanceStage(runId, "inbox_transition", () => this.inbox.transition(operationId, "dispatching"));
     }
     if (this.runExecutionStore && !this.recoveringRuns.has(runId)) {
       try {
-        await this.runExecutionStore.put(run, executionContract,
+        await this.#timedPerformanceStage(runId, "execution_persist", () => this.runExecutionStore.put(run, executionContract,
           { ...command, kind: commandRecord.kind, operationId }, () => this.#fence(token), {
             waitForCapacity: true, signal: token.controller.signal,
-          });
+          }));
       } catch (error) {
         this.#fence(token);
         if (error?.code === "STORE_COMMIT_UNCERTAIN") { this.#poison(error); throw error; }
@@ -7835,17 +7823,21 @@ class WorkRunCoordinator {
         token,
         async () => {
           try {
-            return await this.runtimeManager.acquire(binding, {
+            const acquireOptions = {
               // These pools isolate execution processes by runId. Codex uses
               // a shared app-server and applies policy on thread/turn instead.
-              permissionPolicy: (executionContract.source === "proactive" || isUnifiedPermissionMode(executionContract.permissionMode))
+              permissionPolicy: isUnifiedPermissionMode(executionContract.permissionMode)
                 && executionContract.runtime !== "codex"
                 ? executionContract.permissionPolicy : executionContract.runtimeHostPermissionPolicy,
               workspace: executionContract.workspace,
               executionContract,
-              ...(executionContract.source === "proactive" && executionContract.runtime !== "codex" ? { modelOnly: true } : {}),
               ...(this.hookService ? { nativeHookScope: this.hookService.nativeRunScope?.(runId) ?? null } : {}),
-            });
+            };
+            const observed = this.runtimeManager.acquireObserved
+              ? await this.runtimeManager.acquireObserved(binding, acquireOptions)
+              : { handle: await this.runtimeManager.acquire(binding, acquireOptions), hostState: "unknown" };
+            this.#recordLatencyMilestone(runId, "runtime_host", this.now(), "success", { hostState: observed.hostState });
+            return observed.handle;
           } catch (error) {
             if (ownDataErrorCode(error) === "RUNTIME_HOST_CAPACITY") token.hostCapacity = true;
             throw error;
@@ -7855,15 +7847,6 @@ class WorkRunCoordinator {
       "connecting",
     );
     this.#fence(token);
-    if (run.source === "proactive" && executionContract.runtime !== "codex") {
-      if (recoveringActive) {
-        await this.#interruptForLostExecutionContract(runId, token.lifecycle, "RUNTIME_RECOVERY_UNAVAILABLE");
-        return;
-      }
-      this.#issueRunCapability(token, executionContract);
-      await this.#driveProactiveModelReview(run, command, host, executionContract, token);
-      return;
-    }
     if (run.source === "compaction" && !manualCompact) {
       this.#issueRunCapability(token, executionContract);
       await this.#driveProductCompaction(run, command, host, executionContract, token);
@@ -7889,6 +7872,7 @@ class WorkRunCoordinator {
     if (authState.status === "unauthenticated"
       && codexSessionProvider.routeRequiresOpenaiAuth(this.productStore, executionContract)) throw runtimeAuthRequiredError();
     this.#fenceRuntimeAccount(token);
+    this.runtimeManager.keepWarm?.(binding);
     this.#issueRunCapability(token, executionContract);
     this.runHostAssignments.set(runId, Object.freeze({
       host,
@@ -7962,7 +7946,7 @@ class WorkRunCoordinator {
       // same historical-source gate must apply before either Codex or Pi sends
       // that command, including a user-forced compaction.
       if (this.conversationCheckpointStore?.hasHistoricalSource?.(run.profileId,
-        this.transcriptStore.listEvents(run.profileId, executionSession.id))) {
+        readEvents(this.transcriptStore, run.profileId, executionSession.id))) {
         throw coordinatorError("CONTEXT_COMPACTION_REQUIRED",
           "当前会话含已替代或过期记忆的原话，无法安全摘要");
       }
@@ -8107,12 +8091,20 @@ class WorkRunCoordinator {
   }
 
   async #retryablePreTurnCall(stage, token, task) {
+    let attempt = 1;
+    const call = async () => {
+      const startedAt = this.now(); let outcome = "success";
+      try { return await this.#runtimeStageCall(stage, token, task); }
+      catch (error) { outcome = "error"; throw error; }
+      finally { this.#recordLatencyMilestone(token.runId, `${stage}_attempt`, startedAt, outcome, { attempt }); }
+    };
     try {
-      return await this.#runtimeStageCall(stage, token, task);
+      return await call();
     } catch (error) {
       if (!this.#claimPreTurnRetry(token, error)) throw error;
       this.#fenceRuntimeAccount(token);
-      return this.#runtimeStageCall(stage, token, task);
+      attempt = 2;
+      return call();
     }
   }
 
@@ -8131,7 +8123,7 @@ class WorkRunCoordinator {
       || runtimeSessionIdOf(run) !== context.threadId
       || runtimeTurnIdOf(run) !== context.turnId) return run;
     let turn;
-    if (run.source === "proactive" || useNativeTerminal) {
+    if (useNativeTerminal) {
       // Ephemeral sessions have no rollout. Persistent sessions reach this
       // branch only after bounded history observation. Explicit native proof
       // is bound to the accepted Host/session/turn and Coordinator generation;
@@ -8194,7 +8186,7 @@ class WorkRunCoordinator {
     if (!mapping) return run;
     // Native proof carries status, not answer text. Streamed answers remain in
     // the product Transcript; do not invent a summary from a status-only signal.
-    let resultSummary = mapping.status === "completed" && run.source !== "proactive" && !useNativeTerminal
+    let resultSummary = mapping.status === "completed" && !useNativeTerminal
       ? this.#resultSummary(turn, runId) : null;
     if (mapping.status === "completed") {
       const session = run.source === "cron" && this.chatSessionStore?.getSession(this.getRunSessionKey(run));
@@ -8776,7 +8768,7 @@ class WorkRunCoordinator {
         "旧 Runtime session 无法恢复，且 Shoggoth Transcript 尚未具备可验证的语义续接历史",
       );
     }
-    const events = this.transcriptStore.listEvents(session.profileId, session.id);
+    const events = readEvents(this.transcriptStore, session.profileId, session.id);
     if (events.some((event) => event.runId !== token.runId
       && (event.kind === "user" || event.kind === "assistant"))) return;
     throw coordinatorError(
@@ -9092,6 +9084,7 @@ class WorkRunCoordinator {
             nativeMemoryVersion: profile.nativeMemoryVersion ?? null });
           this.contextCompiler?.memoryEngine?.stageFastRecallDelivery?.(
             this.dispatcher.getRun(token.runId), profile.contextSnapshotId, params.context);
+          if (profile.source === "proactive") this.proactiveModelUsage?.(this.dispatcher.getRun(token.runId), false);
           return host.turnStart(params, this.#turnPreparationObserver(host, threadId, profile, command, token));
         },
       );
@@ -9202,8 +9195,7 @@ class WorkRunCoordinator {
       ...(this.temporarySecrets && ["codex", "pi", "opencode", "deepseek-harness", "grok-build"].includes(profile.runtime)
         ? { modelSecretScope: this.#modelSecretScope(profile, session) } : {}),
       source: threadSource,
-      persistent: profile.source !== "proactive",
-      ...(profile.source === "proactive" ? { proactiveReview: true } : {}),
+      persistent: true,
       developerInstructions: profile.developerInstructions,
       model: profile.defaultModel,
       cwd: session.workspace,
@@ -9223,7 +9215,6 @@ class WorkRunCoordinator {
       cwd: session.workspace,
       permissionPolicy: profile.permissionPolicy,
       permissionMode: adapterPermissionMode(profile.runtime, profile.permissionMode),
-      ...(profile.source === "proactive" ? { proactiveReview: true } : {}),
     });
   }
 

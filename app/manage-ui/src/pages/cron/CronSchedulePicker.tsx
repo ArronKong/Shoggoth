@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { Option, Select, TextInput } from "../../components/Field";
+import { Option, Select } from "../../components/Field";
+import CronDatePicker from "./CronDatePicker";
 import { intervalLabel } from "./cronPresets";
 
 type CronPatternMode = "minutes" | "hourly" | "daily" | "weekdays" | "weekly" | "monthly" | "custom";
@@ -102,7 +103,7 @@ function NumberSelect({ values, value, onChange, pad = false, className = "cron-
 }) {
   return (
     <div className={className}>
-      <Select value={String(value)} onChange={(next) => onChange(Number(next))}>
+      <Select value={String(value)} onChange={(next) => onChange(Number(next))} popupClassName="cron-time-select-popup">
         {values.map((option) => (
           <Option key={option} value={String(option)}>{pad ? String(option).padStart(2, "0") : option}</Option>
         ))}
@@ -123,6 +124,7 @@ export function CronExpressionPicker({ value, onChange }: { value: string; onCha
       <div className="cron-pattern-select">
         <Select
           value={pattern.mode}
+          popupClassName="cron-time-select-popup"
           onChange={(mode) => {
             if (mode === "custom") return;
             onChange(cronExpressionFromPattern(nextPattern(mode as Exclude<CronPatternMode, "custom">, pattern)));
@@ -237,11 +239,7 @@ export function DateTimePicker({ value, onChange, optional = false, label }: {
   return (
     <div className="cron-time-controls">
       {label && <span className="cron-time-inline-label">{label}</span>}
-      <TextInput
-        type="date"
-        value={parts.date}
-        onChange={(event) => compose(event.target.value, parts.hour, parts.minute)}
-      />
+      <CronDatePicker value={parts.date} onChange={(date) => compose(date, parts.hour, parts.minute)} />
       <NumberSelect values={HOURS} value={parts.hour} onChange={(hour) => compose(parts.date, hour, parts.minute)} pad />
       <span className="cron-time-separator">:</span>
       <NumberSelect values={MINUTES} value={parts.minute} onChange={(minute) => compose(parts.date, parts.hour, minute)} pad />

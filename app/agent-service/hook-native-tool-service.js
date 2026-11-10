@@ -28,7 +28,7 @@ class HookNativeToolService {
     const request = safeJson(input, 65536);
     if (!["before", "approve", "after"].includes(request.phase) || !text(request.toolCallId, 256)) fail("HOOK_AUTHORITY_INVALID");
     const run = this.getRun(scope.runId), profile = run && this.getProfile(run.profileId);
-    if (!run || !profile?.enabled || !["chat", "cron", "kanban", "inspiration"].includes(run.source)) fail("HOOK_FORBIDDEN");
+    if (!run || !profile?.enabled || !["chat", "cron", "kanban", "inspiration", "proactive"].includes(run.source)) fail("HOOK_FORBIDDEN");
     const snapshot = this.service.store.snapshotForRun(run.id);
     if (!snapshot) fail("HOOK_SNAPSHOT_REQUIRED");
     this.check(scope, snapshot);

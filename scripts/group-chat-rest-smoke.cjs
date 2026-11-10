@@ -47,9 +47,73 @@ function scriptedExecutor(state) {
 
 const quiet = (detail) => !detail.round && detail.activeTurns.length === 0 && detail.queuedMemberIds.length === 0;
 
+async function checkMemberBatch(api, refs) {
+  const created = await api("POST", "", { operationId: "member-batch", name: "Batch membership", purpose: "", members: refs.slice(0, 2) });
+  assert.equal(created.status, 200);
+  const groupId = created.body.group.id;
+  const detail = `/detail?id=${groupId}`;
+  const endpoint = `/members?id=${groupId}`;
+  const revision = created.body.group.rosterRevision;
+  const request = { expectedRosterRevision: revision, members: refs.slice(2) };
+  assert.equal((await api("POST", endpoint, { ...request, members: [] })).body.code, "GROUP_CHAT_INVALID");
+  assert.equal((await api("POST", endpoint, { ...request, member: refs[2] })).body.code, "GROUP_CHAT_INVALID");
+  assert.equal((await api("POST", endpoint, { ...request, members: [refs[2], refs[0]] })).body.code, "GROUP_CHAT_MEMBER_DUPLICATE");
+  const afterFailure = (await api("GET", detail)).body;
+  assert.equal(afterFailure.group.rosterRevision, revision);
+  assert.deepEqual(afterFailure.members.map(member => member.id), created.body.members.map(member => member.id));
+  const history = async () => (await api("GET", `/messages?id=${groupId}`)).body.messages;
+  assert.deepEqual(await history(), [], "a failed batch publishes no member-added events");
+
+  const added = await api("POST", endpoint, request);
+  assert.equal(added.status, 200);
+  assert.equal(added.body.group.rosterRevision, revision + 2);
+  assert.deepEqual(added.body.members.map(member => member.agentId), refs.map(ref => ref.agentId));
+  const events = await history();
+  assert.deepEqual(events.map(message => message.system), added.body.members.slice(2)
+    .map(member => ({ eventType: "member_added", memberId: member.id })));
+  assert.equal((await api("POST", endpoint, request)).body.code, "GROUP_CHAT_REVISION_CONFLICT");
+  assert.deepEqual(await history(), events, "a stale submission cannot append events");
+
+  const removed = await api("DELETE", endpoint, { expectedRosterRevision: added.body.group.rosterRevision,
+    memberId: added.body.members[2].id });
+  assert.equal(removed.status, 200);
+  const legacy = await api("POST", endpoint, { expectedRosterRevision: removed.body.group.rosterRevision, member: refs[2] });
+  assert.equal(legacy.status, 200, "legacy single-member clients can still add");
+  assert.equal(legacy.body.members.filter(member => member.state === "active").length, 4);
+  assert.equal((await api("DELETE", detail, { expectedMetadataRevision: legacy.body.group.metadataRevision })).status, 200);
+  console.log("PASS group member batch REST: one request, rollback, stale revision refusal and legacy single add");
+}
+
+async function checkRosterUpdate(api, refs) {
+  const created = await api("POST", "", { operationId: "member-update", name: "Manage members", purpose: "", members: refs.slice(0, 2) });
+  assert.equal(created.status, 200);
+  const { group, members, ownerScope } = created.body;
+  const endpoint = `/members?id=${group.id}`;
+  const detail = `/detail?id=${group.id}`;
+  const request = { ownerScope, expectedRosterRevision: group.rosterRevision,
+    addMembers: [refs[2]], removeMemberIds: [members[0].id] };
+  assert.equal((await api("PATCH", endpoint, { ...request, ownerScope: "different-owner" })).body.code, "GROUP_CHAT_OWNER_CHANGED");
+  assert.equal((await api("PATCH", endpoint, { ...request, removeMemberIds: [members[0].id, members[0].id] })).body.code, "GROUP_CHAT_INVALID");
+  assert.equal((await api("PATCH", endpoint, { ...request, addMembers: [] })).body.code, "GROUP_CHAT_MEMBER_LIMIT");
+  assert.equal((await api("PATCH", endpoint, { ...request, addMembers: [refs[1]] })).body.code, "GROUP_CHAT_MEMBER_DUPLICATE");
+  assert.equal((await api("GET", detail)).body.group.rosterRevision, group.rosterRevision);
+  const history = async () => (await api("GET", `/messages?id=${group.id}`)).body.messages;
+  assert.deepEqual(await history(), [], "a rejected edit publishes neither change");
+
+  const results = await Promise.all([api("PATCH", endpoint, request), api("PATCH", endpoint, request)]);
+  const updated = results.find(result => result.status === 200);
+  assert.equal(results.find(result => result.status === 409)?.body.code, "GROUP_CHAT_REVISION_CONFLICT");
+  assert.equal(updated?.body.group.rosterRevision, group.rosterRevision + 2);
+  assert.deepEqual(updated.body.members.filter(member => member.state === "active").map(member => member.agentId),
+    refs.slice(1, 3).map(ref => ref.agentId));
+  assert.deepEqual((await history()).map(message => message.system.eventType), ["member_removed", "member_added"]);
+  assert.equal((await api("DELETE", detail, { expectedMetadataRevision: updated.body.group.metadataRevision })).status, 200);
+  console.log("PASS group roster REST: atomic replacement at the minimum, owner and revision checks, rollback and concurrent confirmation");
+}
+
 async function run() {
   const state = { fixture: null, calls: [], aborted: [], reply: () => null };
-  const f = await startInspirationFixture({ agentCount: 3,
+  const f = await startInspirationFixture({ agentCount: 4,
     serviceOptions: { groupChatExecutor: scriptedExecutor(state), prewarmMcpAuth: false } });
   state.fixture = f;
   const activities = [];
@@ -69,11 +133,13 @@ async function run() {
   };
   const history = async (groupId) => (await api("GET", `/messages?id=${groupId}&limit=200`)).body.messages;
   try {
-    const profiles = f.service.productStore.listAgentProfiles().filter((profile) => profile.enabled).slice(0, 3);
-    assert.equal(profiles.length, 3);
+    const profiles = f.service.productStore.listAgentProfiles().filter((profile) => profile.enabled).slice(0, 4);
+    assert.equal(profiles.length, 4);
     const [a, b, c] = profiles;
     assert.equal(a.id, DEFAULT_AGENT_PROFILE_ID, "the fixture lists the built-in Shoggoth first");
     const refs = profiles.map((profile) => ({ backendId: "shoggoth", agentId: profile.agentId }));
+    await checkMemberBatch(api, refs);
+    await checkRosterUpdate(api, refs);
 
     assert.equal((await api("POST", "", { operationId: "g0", name: "x", purpose: "",
       members: [refs[0], { backendId: "elsewhere", agentId: "default" }] })).body.code, "GROUP_CHAT_MEMBER_UNSUPPORTED");
@@ -539,6 +605,38 @@ async function runNative() {
     assert.equal(f.service.chatSessionStore.getSession(selectedSession).modelOverride, null, "the next turn clears the prior override and inherits the Agent default");
     assert.deepEqual(afterMoney.map((message) => [message.author.kind, message.system?.eventType ?? null]),
       [["member", null], ["member", null]], "both native members answer; nobody fails on the dollar amounts");
+    // Both replies used the same member session; the history read must select the old Run.
+    const earlier = (await f.ipc("group.history", { groupId: groups[0], afterSeq: null, beforeSeq: money.message.seq, limit: 10 })).messages;
+    const savedReply = earlier.find(message => message.author.memberId === selectedMember.id);
+    const laterReply = afterMoney.find(message => message.author.memberId === selectedMember.id);
+    const activitySession = f.service.chatSessionStore.getSession(selectedSession);
+    const event = (message, kind, content, contextContent) => f.service.transcriptStore.appendEvent({
+      id: crypto.randomUUID(), profileId: activitySession.profileId, sessionId: activitySession.id,
+      runId: message.origin.runId, kind, content, contextContent,
+    });
+    event(savedReply, "tool_call", { toolCallId: "reused-id", tool: { name: "read_file", displayArgs: { path: "first.md", apiKey: "activity-fixture-canary" } } },
+      { tool: { arguments: { text: "private-context-canary" } } });
+    event(savedReply, "tool_result", { toolCallId: "reused-id", tool: { status: "completed", resultSummary: "First result", durationMs: 25 } });
+    event(laterReply, "tool_result", { toolCallId: "reused-id", tool: { name: "read_file", resultSummary: "Later result" } });
+    const readActivity = async (message, overrides = {}) => {
+      const params = new URLSearchParams({ id: groups[0], part: "activity", ownerScope: current.ownerScope,
+        seq: String(message.seq), messageId: message.id, ...overrides });
+      const response = await fetch(`${f.url}/__api/group-chats/messages/read?${params}`);
+      return { status: response.status, body: await response.json() };
+    };
+    const savedActivity = await readActivity(savedReply);
+    assert.equal(savedActivity.status, 200);
+    assert.equal(savedActivity.body.activity.runId, savedReply.origin.runId);
+    assert.equal(savedActivity.body.activity.phase, "completed");
+    assert.deepEqual(savedActivity.body.activity.recentTools.map(tool => [tool.output, tool.durationMs]), [["First result", 25]]);
+    assert.doesNotMatch(JSON.stringify(savedActivity.body), /private-context-canary|activity-fixture-canary|Later result/u);
+    assert.equal((await readActivity(earlier[0])).body.activity, null, "user messages have no saved execution");
+    assert.equal((await readActivity(savedReply, { messageId: laterReply.id })).body.code, "GROUP_CHAT_REPLY_NOT_FOUND");
+    assert.equal((await readActivity(savedReply, { id: groups[1] })).body.code, "GROUP_CHAT_REPLY_NOT_FOUND");
+    assert.equal((await readActivity(savedReply, { ownerScope: "stale-owner" })).body.code, "GROUP_CHAT_OWNER_CHANGED");
+    assert.equal((await readActivity(savedReply, { part: "unknown" })).body.code, "GROUP_CHAT_INVALID");
+    assert.equal(f.service.workDispatcher.listRuns().length, 6, "reading history never creates a run");
+    console.log("PASS saved native group activity REST: original message/run, redacted display fields, owner and group isolation");
     // 直接聊天里写了不存在的技能：只有这一条运行失败并给出原因，后面的运行照常，服务保持可用。
     const skillChat = await f.ipc("chat.session.create", { operationId: "skill-miss", profileId: profiles[0].id, workspace: null, createdAt: Date.now() });
     const missed = (await f.ipc("chat.send", { operationId: "skill-miss-send", sessionKey: skillChat.session.sessionKey,

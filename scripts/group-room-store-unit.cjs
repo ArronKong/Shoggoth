@@ -33,6 +33,18 @@ function fixture(t, names = ["Chief", "写手", "程序员"]) {
   return { store, groupId, view, memberId, fence, send, claim, run, finish, bodies, tick: (ms) => { clock += ms; } };
 }
 
+test("adding a batch with one free slot rolls back the roster, revision and history", t => {
+  const f = fixture(t, Array.from({ length: 31 }, (_, i) => `Member ${i}`));
+  const before = f.view(), history = f.bodies();
+  assert.throws(() => f.store.addMembers({ groupId: f.groupId, expectedRosterRevision: before.group.rosterRevision,
+    members: [
+      { backendId: "openclaw", agentId: "claw", profileId: null, displayName: "OpenClaw" },
+      { backendId: "hermes", agentId: "hermes", profileId: null, displayName: "Hermes" },
+    ] }), { code: "GROUP_CHAT_MEMBER_LIMIT" });
+  assert.deepEqual(f.view(), before);
+  assert.deepEqual(f.bodies(), history);
+});
+
 test("member removal retains two active members and stale revisions cannot bypass the minimum", t => {
   const f = fixture(t), revision = f.view().group.rosterRevision;
   f.store.removeMember({ groupId: f.groupId, memberId: f.memberId("程序员"), expectedRosterRevision: revision });
@@ -60,6 +72,30 @@ test("refusing removal from a two-member group leaves the owner's running turn u
   assert.deepEqual(f.bodies(), messages);
   f.finish(turn, "工作已完成");
   assert.equal(f.bodies().at(-1), "Chief: 工作已完成");
+});
+
+test("a full group can replace its owner in one roster transaction", t => {
+  const f = fixture(t, Array.from({ length: 32 }, (_, i) => `Member ${i}`));
+  f.send("Continue the current work"); const turn = f.claim(); f.run(turn);
+  const before = f.view(), history = f.bodies(), opportunity = f.store.getOpportunity(turn.opportunity.id);
+  const request = { groupId: f.groupId, ownerScope: before.ownerScope, expectedRosterRevision: before.group.rosterRevision,
+    removeMemberIds: [turn.member.id] };
+  assert.throws(() => f.store.updateMembers({ ...request, addMembers: [before.members[1]] }), { code: "GROUP_CHAT_MEMBER_DUPLICATE" });
+  assert.deepEqual(f.view(), before);
+  assert.deepEqual(f.store.getOpportunity(turn.opportunity.id), opportunity, "rollback also restores the original turn");
+  assert.deepEqual(f.bodies(), history);
+
+  const addMembers = [{ backendId: "openclaw", agentId: "replacement", profileId: null, displayName: "Replacement" }];
+  const result = f.store.updateMembers({ ...request, addMembers });
+  const after = f.view();
+  assert.deepEqual(result.aborts.map(item => item.id), [turn.opportunity.id]);
+  assert.equal(after.members.filter(member => member.state === "active").length, 32);
+  assert.equal(after.group.ownerMemberId, before.members[1].id);
+  assert.equal(after.group.rosterRevision, before.group.rosterRevision + 2);
+  assert.deepEqual(f.bodies(), [...history, "[member_removed]", "[member_added]"]);
+  assert.throws(() => f.store.updateMembers({ ...request, addMembers }), { code: "GROUP_CHAT_REVISION_CONFLICT" });
+  f.store.close(); f.store.open();
+  assert.deepEqual(f.view(), after, "only the complete replacement persists");
 });
 
 test("a plain message goes to the owner alone; members speak one at a time", (t) => {

@@ -1,0 +1,21 @@
+[
+  "shoggoth-work-run-coordinator-unit.cjs",
+  "shoggoth-transcript-store-unit.cjs",
+  "shoggoth-context-compiler-unit.cjs",
+  "conversation-context-budget-unit.cjs",
+  "context-request-budget-unit.cjs",
+  "conversation-checkpoint-unit.cjs",
+  "conversation-compaction-unit.cjs",
+  "shoggoth-memory-checkpoint-freshness-unit.cjs",
+  "shoggoth-recall-policy-unit.cjs",
+  "native-service-memory-hot-path-unit.cjs",
+  "native-send-latency-unit.cjs",
+  "native-send-memory-latency-unit.cjs",
+  "native-send-startup-unit.cjs",
+  "runtime-idle-reaper-unit.cjs",
+  "memory-content-unit.cjs",
+  "shoggoth-memory-flush-entries-regression.cjs",
+  "shoggoth-memory-flush-deadline-unit.cjs",
+  "shoggoth-memory-review-regression.cjs",
+  "core-test-runner-unit.cjs"
+]

@@ -212,9 +212,8 @@ mac:
     CFBundleLocalizations:
       - en
       - zh_CN
-  # ZIP-only：DMG 路径上 electron-builder 双架构共用卷名 `/Volumes/Shoggoth`，
-  # hdiutil detach 在被 Spotlight/Finder 占用 + 磁盘紧张时确定性失败（实测两次重试
-  # 都炸在 arm64 dmg 的 detach），故仅出 zip 即可装的 .app。
+  # 此处保留自动更新所需的双架构 ZIP。create-macos-dmg.mjs 再按架构分别
+  # 使用已签名 App 和 build/dmg 的设计资源制作 DMG，避免共用卷名。
   target:
     - target: zip
       arch:

@@ -1,5 +1,6 @@
 // Loaded with group history and execution details, preserving the initial UI budget.
 import { jsonFetch } from './client';
+import type { GroupActivity, GroupResultPage } from '../types';
 export interface GroupChatSearchResult {
   groupId: string; query: string; discussionId: string | null; authorKind: 'user' | 'member' | null; memberId: string | null;
   upperSeq: number; hits: Array<{ message: import('../types').GroupChatMessage; snippet: string; snippetOffset: number; partial: boolean }>;
@@ -25,4 +26,18 @@ export async function readGroupChatMessage(id: string, input: { seq: number; off
     await new Promise(resolve => setTimeout(resolve, 250));
     return jsonFetch<{ page: import('../types').GroupResultPage }>(url);
   }
+}
+
+type SavedGroupActivity = { activity: GroupActivity | null; startedAt: number | null; finishedAt: number | null };
+
+export async function readGroupChatMessageActivity(id: string, input: { seq: number; ownerScope: string; messageId: string }, signal: AbortSignal): Promise<SavedGroupActivity | "unsupported"> {
+  const params = new URLSearchParams({ id, seq: String(input.seq), part: "activity", ownerScope: input.ownerScope, messageId: input.messageId });
+  const reply = await jsonFetch<SavedGroupActivity | { page: GroupResultPage }>(
+    `/__api/group-chats/messages/read?${params}`, { signal });
+  if (reply && typeof reply === "object") {
+    if ("activity" in reply) return reply;
+    // Older desktop builds ignore part=activity and return the first page of the reply text.
+    if (reply.page?.offset === 0 && typeof reply.page.text === "string" && typeof reply.page.digest === "string") return "unsupported";
+  }
+  throw new Error("Invalid saved activity response");
 }

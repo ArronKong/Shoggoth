@@ -51,6 +51,12 @@ function variants(value) {
   return [...values].filter(Boolean);
 }
 function knownMatchBoundary(text, start, value, original = value) {
+  if (original === "/" && value === "/") {
+    // Old conversations may already contain a slash registered as a secret.
+    // Mask a standalone echo without rewriting the slashes in URLs and paths.
+    const delimiter = /[\s"'“”‘’「」,;，；]/u;
+    return delimiter.test(text[start - 1] ?? " ") && delimiter.test(text[start + value.length] ?? " ");
+  }
   // Short word-like credentials still match as complete tokens, including
   // their encoded echoes. A coincidental substring in "stories" or a filename
   // is not an echo of the two-letter password "to".
@@ -112,7 +118,12 @@ function detectSecrets(text, options = {}) {
   if (!textValue(text)) fail();
   const known = (options.known || []).filter(entry => textValue(entry.value, MAX_SECRET_BYTES) && entry.value.length
     && SECRET_KINDS.includes(entry.kind || "secret"));
-  const matches = [], ambiguous = [], occupied = secretReferences(text);
+  const autoDetect = options.autoDetect !== false;
+  const selections = options.selections || [];
+  if (!Array.isArray(selections) || selections.length > 64) fail();
+  const matches = [], ambiguous = [];
+  if (!autoDetect && !known.length && !selections.length) return { matches, ambiguous };
+  const occupied = secretReferences(text);
   const add = (start, end, value, kind, source, extra = {}) => {
     if (start < 0 || end <= start || !textValue(value, MAX_SECRET_BYTES) || !value.length
       || !["selection", "known"].includes(source) && isPlaceholder(value)) return;
@@ -120,9 +131,7 @@ function detectSecrets(text, options = {}) {
     matches.push({ start, end, value, kind, source, ...extra });
     if (matches.length > MAX_MATCHES) fail();
   };
-  const selections = options.selections || [];
   const leaves = options.structured === false ? null : jsonLeaves(text);
-  if (!Array.isArray(selections) || selections.length > 64) fail();
   for (const item of selections) {
     if (!item || !Number.isSafeInteger(item.start) || !Number.isSafeInteger(item.end) || item.start < 0
       || item.end > text.length || item.start >= item.end || !SECRET_KINDS.includes(item.kind || "secret")) fail();
@@ -135,9 +144,9 @@ function detectSecrets(text, options = {}) {
   if (leaves) {
     for (const leaf of leaves) {
       const kind = leaf.name && fieldKind(leaf.name);
-      if (kind && !isPlaceholder(leaf.value)) add(leaf.start, leaf.end, leaf.value, kind, "field", { json: true });
+      if (autoDetect && kind && !isPlaceholder(leaf.value)) add(leaf.start, leaf.end, leaf.value, kind, "field", { json: true });
       else {
-        const nested = detectSecrets(leaf.value, { known, structured: false });
+        const nested = detectSecrets(leaf.value, { known, structured: false, autoDetect });
         if (nested.matches.length || nested.ambiguous.length) {
           // A JSON value may have multiple references; its original logical
           // string is reconstructed by replaceSecrets and escaped exactly once.
@@ -155,6 +164,8 @@ function detectSecrets(text, options = {}) {
           transform: value === entry.value ? "plain" : value === encodeURIComponent(entry.value) ? "url" : "base64" });
       }
     }
+  }
+  if (!leaves && autoDetect) {
     for (const [kind, re] of FORMATS) for (const match of text.matchAll(new RegExp(re))) {
       add(match.index, match.index + match[0].length, match[0], kind, "format");
     }
@@ -177,14 +188,15 @@ function detectSecrets(text, options = {}) {
         || !linkFieldKind(match[1]))) continue;
       if (match.index > 0 && /[A-Za-z0-9_]/u.test(text[match.index - 1])) continue;
       const kind = fieldKind(match[1]);
-      if (!kind || kind !== "password" && /^\s+$/u.test(match[2])) continue;
+      const implicitLabel = /^\s+$/u.test(match[2]);
+      if (!kind || kind !== "password" && implicitLabel) continue;
       let start = match.index + match[0].length, end = start, value;
       const quote = text[start], close = { '"': '"', "'": "'", "“": "”", "「": "」" }[quote];
+      const cliFlag = /^--?[A-Za-z]/u.test(match[1]);
       // In English prose, "email and password to enjoy ..." does not declare
       // the password "to". Require a separator (colon, equals, "is", etc.), a
       // quoted value or a CLI flag; Chinese labels keep their natural forms.
-      if (/^\s+$/u.test(match[2]) && /^[A-Za-z0-9_.-]+$/u.test(match[1])
-        && !/^--?[A-Za-z]/u.test(match[1]) && !close) continue;
+      if (implicitLabel && /^[A-Za-z0-9_.-]+$/u.test(match[1]) && !cliFlag && !close) continue;
       if (close) {
         start++; end = start;
         while (end < text.length && text[end] !== close && text[end] !== "\n") {
@@ -197,6 +209,8 @@ function detectSecrets(text, options = {}) {
       } else {
         while (end < text.length && !/[\s,;，；。！？!?<>"'`]/u.test(text[end])) end++;
         value = text.slice(start, end);
+        // Headlines such as "低碳密码 / 11-10" use a column separator.
+        if (implicitLabel && !cliFlag && value === "/") continue;
         if (/^(?:是|为|為)$/u.test(value)) continue;
         if (value.endsWith(".")) { ambiguous.push({ start, end, reason: "value-boundary" }); continue; }
       }

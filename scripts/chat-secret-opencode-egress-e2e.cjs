@@ -12,10 +12,13 @@ const { ModelSecretGateway } = require("../app/agent-service/model-secret-gatewa
 const { rejectingModelProxy } = require("./fixtures/rejecting-model-proxy.cjs");
 async function main() {
   let originalMode = false;
+  const autoDetect = !process.argv.includes("--manual-secrets");
   const root = fs.mkdtempSync("/private/tmp/sg-opencode-secret-"), paths = { trustedRoot: root, stateDir: path.join(root, "state") };
   for (const name of ["home", "workspace", "state", "data", "config", "config/opencode"]) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
   const workspace = path.join(root, "workspace"), outputSecret = "SyntheticNativeOutput987", requests = [], approvals = [];
-  const secrets = await new TemporarySecretStore({ paths, cryptoBroker: {
+  const newsRow = "] / 解开谷物保存的低碳密码 / 11-10 11:08";
+  const ordinaryExample = "Example syntax: password: ordinary-example.";
+  const secrets = await new TemporarySecretStore({ paths, autoDetect, cryptoBroker: {
     encrypt: async bytes => Buffer.from(bytes).reverse(), decrypt: async bytes => Buffer.from(bytes).reverse(),
   } }).open();
   const gateway = new ModelSecretGateway({ projection: new ModelSecretProjection({ secrets }) });
@@ -25,7 +28,14 @@ async function main() {
     if (originalMode) throw Object.assign(Error("synthetic masking failure"), { code: "SECRET_MEDIA_UNAVAILABLE" });
     return strictProjection(...args);
   };
-  fs.writeFileSync(path.join(workspace, "fixture.cjs"), `const fs=require('node:fs');fs.appendFileSync('count','1');console.log('password: ${outputSecret}');console.log('Public receipt: receipt-17');`);
+  fs.writeFileSync(path.join(workspace, "fixture.cjs"), `
+const fs = require("node:fs");
+fs.appendFileSync("count", "1");
+console.log(${JSON.stringify(`password: ${outputSecret}`)});
+console.log("Public receipt: receipt-17");
+console.log(${JSON.stringify(newsRow)});
+console.log(${JSON.stringify(ordinaryExample)});
+`);
   let providerError, noTool = false, host, adapter, followup = false, verified = false, proxy;
   const modelServer = http.createServer(async (req, res) => {
     try {
@@ -35,10 +45,16 @@ async function main() {
       if (!originalMode) assert(!raw.includes(outputSecret), "native tool output reached provider");
       if (originalMode) assert(raw.includes("FallbackInput852"), "original reaches the custom model URL");
       if (!originalMode && !raw.includes("session-b-public")) assert(!raw.includes("123456"), "session credential reached provider");
-      const isToolRequest = body.tools?.some(tool => tool.function?.name === "bash");
+      const bash = body.tools?.find(tool => tool.function?.name === "bash");
       const hasResult = body.messages.some(message => message.role === "tool");
-      if (hasResult) { assert(raw.includes("Public receipt: receipt-17")); followup = true; }
-      const execute = isToolRequest && !hasResult && !noTool;
+      if (hasResult) {
+        assert(raw.includes("Public receipt: receipt-17"));
+        assert(raw.includes(newsRow), "a public news row reached the model with rewritten separators");
+        if (!autoDetect) assert(raw.includes(ordinaryExample), "unselected example text was rewritten");
+        assert(!bash?.function.parameters?.$schema?.includes("SHOGGOTH_SECRET_"), "the Bash schema dialect was rewritten");
+        followup = true;
+      }
+      const execute = bash && !hasResult && !noTool;
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       const send = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: `fixture-${requests.length}`,
         object: "chat.completion.chunk", created: 1, model: "fixture", choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
@@ -75,6 +91,9 @@ async function main() {
     adapter = new OpenCodeRuntimeAdapter({ runtimePool: { get: async () => host, stop: () => host.stop(), stopAll: () => host.stop() } });
     const runtime = await adapter.acquire(binding);
     const scope = { profileId: "fixture-agent", sessionId: "product-session-a" };
+    if (!autoDetect) for (const text of ["123456", outputSecret]) {
+      await secrets.prepare({ scope, operationId: randomUUID(), text, selections: [{ start: 0, end: text.length }] });
+    }
     const options = { model, cwd: workspace, permissionPolicy, modelSecretScope: scope };
     const { session } = await runtime.sessionStart({ ...options, source: "secret-session-a" });
     const run = async (sessionId, prompt, failure = false) => {
@@ -111,7 +130,7 @@ async function main() {
     proxy.assertLoopbackBypassed();
     console.log(JSON.stringify({ verified: true, runtime: `OpenCode ${host.cliVersion.join(".")}`, modelRequests: requests.length,
       nativeExecutions: 1, toolFollowup: true, resumed: true, separateScopes: true, failureProviderCalls: 0,
-      silentOriginalFallbackOnce: true, proxyConfigured: process.argv.includes("--proxy") }));
+      silentOriginalFallbackOnce: true, autoDetect, proxyConfigured: process.argv.includes("--proxy") }));
     verified = true;
   } finally {
     await adapter?.stopAll(); await host?.stop(); await gateway.close(); await secrets.close();

@@ -82,6 +82,7 @@ class PackagedMcpCryptoBroker {
       this.requestTimeoutMs = options.requestTimeoutMs;
       this.termGraceMs = options.termGraceMs;
       this.killConfirmMs = options.killConfirmMs;
+      this.persistent = options.persistent === true;
       this.fs = options.fs;
     } catch {
       throw cryptoError();
@@ -319,6 +320,7 @@ class PackagedMcpCryptoBroker {
           requestTimeoutMs: this.requestTimeoutMs,
           termGraceMs: this.termGraceMs,
           killConfirmMs: this.killConfirmMs,
+          persistent: this.persistent,
         });
       } else {
         throw cryptoError();

@@ -1,7 +1,7 @@
-import type { DashboardSummary } from "../types";
+import type { DashboardSections } from "../types";
 
 /** Merge local files and published group attachments before the shared 20-row limit. */
-export function recentDashboardArtifacts(data: DashboardSummary | undefined) {
+export function recentDashboardArtifacts(data: DashboardSections["artifacts"] | undefined) {
   const files = (data?.artifacts || []).flatMap(section => section.supported ? section.items.map(item => ({
     ...item, backend: section.backend, key: item.fileId ? `file:${item.fileId}` : `path:${item.path}`, groupName: null, attachment: null,
   })) : []);

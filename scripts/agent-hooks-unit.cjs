@@ -251,12 +251,12 @@ test("unknown action receipt survives reopen and is never replayed", async t => 
   assert.equal(launched, 0); assert.equal(f.store.execution(f.profile.id, execution.id).state, "needs_verification");
   f.store.prune(); assert.equal(f.store.execution(f.profile.id, execution.id).state, "needs_verification");
 });
-test("required native rule is refused for an unverified Runtime; special sources have zero hooks", async t => {
+test("required native rule needs verification; Main checks inherit chat hooks and compaction stays isolated", async t => {
   const f = await fixture(t), caps = runtimeHookCapabilities("pi");
   const rule = validateDefinition(definition(builtin("guard.block", { reason: "停" }), { scopes: ["runtime_builtin"], tools: ["bash"] }), f.workspace);
   assert.throws(() => assertHookSupported(rule, caps, f.processHost), { code: "HOOK_RUNTIME_UNSUPPORTED" });
   await f.enable(definition(builtin("guard.block", { reason: "停" })));
-  assert.equal(f.service.freezeRun(f.run("proactive"), f.profile).entries.length, 0);
+  assert.equal(f.service.freezeRun(f.run("proactive"), f.profile).entries.length, 1);
   assert.equal(f.service.freezeRun(f.run("compaction"), f.profile).entries.length, 0);
 });
 test("50 ToolExecution rounds, 1000 isolated tool interactions across four sources", async t => {

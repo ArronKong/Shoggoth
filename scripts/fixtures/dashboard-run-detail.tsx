@@ -39,7 +39,7 @@ const running = () => stage >= 4 ? [] : [{ id: `shoggoth:${runId}`, backendId: "
 const resultRun = () => ({ backendId: "shoggoth", jobId: "shoggoth:preview-job", jobName: title, runId,
   agentId: "preview-grok", sessionKey: "preview-session", startedAt, finishedAt: now + 20_000,
   status: "ok", completionStatus: "succeeded", durationMs: 62_000, summary: resultText.split(reportEnding)[0] });
-const summary = () => ({ generatedAt: Date.now(), sinceMs: now - 60_000,
+const summary = () => ({ generatedAt: Date.now(), sinceMs: new Date().setHours(0, 0, 0, 0),
   status: [{ id: "shoggoth", name: "Shoggoth", connected: true, info: {} }], runs: stage >= 4 ? [resultRun()] : [],
   running: [{ backend: "shoggoth", supported: true, items: running() }], approvals: [],
   usage: [{ backend: "shoggoth", today: { totalCost: 0.86, totalTokens: 640_000 }, yesterday: { totalCost: 1.2, totalTokens: 820_000 }, availability: "complete" }],

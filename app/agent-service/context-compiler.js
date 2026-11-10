@@ -7,15 +7,15 @@ const { isGroupChatRun } = require("./group-chat-run");
 const { HistoricalMemoryAnnotations } = require("./historical-memory-annotations");
 const { shoggothProductDeveloperInstructions } = require("./product-capability-manifest");
 const { serviceError } = require("./security");
-const { estimateContextTokens } = require("./conversation-context-budget");
+const { estimateContextTokens, estimateCodePointTokens } = require("./conversation-context-budget");
 const { contextTransportLimits, requestBudget, assertContextTransport } = require("./context-request-budget");
 const { systemInstructions, historyInstructions, instructionDelivery, runIdInstruction } = require("./native-instruction-delivery");
 const productToolExposure = require("./product-tool-exposure");
 const { measureComposition } = require("./context-breakdown");
 const { selectFileMemory } = require("./context-memory-bootstrap");
+const { readEvents, contextReader } = require("./transcript-read");
 const { isPublishedNoticeEvent } = require("./notice-delivery-controller");
 const { proactiveDeveloperInstructions } = require("./proactive-service");
-const { PROACTIVE_RESPONSE_TOOL } = require("./proactive-response-tools");
 const { normalizeBorrowedMemoryRefs, mergeBorrowedMemoryRefs, extractBorrowedMemoryRefs,
   refsFromEvents, borrowedMemoryPlaceholder } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 
@@ -27,7 +27,6 @@ const DEFAULT_BUDGETS = Object.freeze({
 });
 const MAX_TOTAL_CONTEXT_BYTES = 96 * 1024;
 // Three full Agent definition files plus bounded memory; USER is counted separately.
-const MAX_PROACTIVE_CONTEXT_BYTES = 128 * 1024;
 const MAX_HOT_MEMORY_CANDIDATES = 100;
 const HOT_MEMORY_SCAN_BYTES = 128 * 1024;
 const HOT_MEMORY_SCOPE_LIMITS = Object.freeze({
@@ -428,7 +427,7 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
       let bytes = 0, tokens = 0, suffix = "";
       for (const point of [...text].reverse()) {
         const size = Buffer.byteLength(point);
-        const cost = point.codePointAt(0) < 128 ? 0.25 : 2;
+        const cost = estimateCodePointTokens(point);
         if (bytes + size > available || tokens + cost > availableTokens) break;
         suffix = point + suffix; bytes += size; tokens += cost;
       }
@@ -475,7 +474,6 @@ class ContextCompiler {
     this.shouldOfferIntroduction = options.shouldOfferIntroduction || (() => false);
     this.runtimeCapabilitiesForProfile = options.runtimeCapabilitiesForProfile || (() => []);
     this.snapshotStore = options.snapshotStore;
-    this.defaultWorkspaceDir = options.defaultWorkspaceDir;
     this.proactiveConversation = options.proactiveConversation || null;
     this.memoryBootstrapMaxBytes = options.budgets?.memory ?? 64 * 1024;
     this.checkpointStore = options.checkpointStore || null;
@@ -505,7 +503,9 @@ class ContextCompiler {
   }
   compile(input) {
     const proactive = input.run.source === "proactive";
-    const proactiveModelOnly = proactive && (input.profile.runtime ?? "codex") !== "codex";
+    // Keep a revocable receipt of the main history used by the check. The
+    // conversation itself comes through the ordinary transcript/native session.
+    const proactiveConversationSource = proactive ? this.proactiveConversation?.read(input.profile.id)?.source : null;
     if (input.restorePolicy != null && !require("./context-transfer").validRestorePolicy(input.restorePolicy)) {
       throw contextError("CONTEXT_BUDGET_INVALID", "Invalid working-context restore policy");
     }
@@ -527,24 +527,19 @@ class ContextCompiler {
         throw contextError("CONTEXT_SECRET_REJECTED", `Agent ${kind} 包含敏感信息`);
       }
     }
-    const directUserChat = input.run.source === "chat"
+    const directUserChat = ["chat", "proactive"].includes(input.run.source)
       && !/^shoggoth:chat-send:(?:federation-(?:send|message)|group-(?:turn|task))-/u.test(input.run.idempotencyKey || "");
     // Identity and personality are complete in every work source. The model
     // request budget remains authoritative; the base byte allowance covers
     // product policy, AGENTS and the bounded contextual blocks.
     const definitionBytes = Buffer.byteLength(definition.documents.IDENTITY) + Buffer.byteLength(definition.documents.SOUL);
-    // A system check can use the owning Agent's home memory, even though its
-    // read-only execution has no filesystem workspace. Its main conversation
-    // is a separately verified, bounded context source, never an execution binding.
-    const memoryWorkspace = proactive && this.defaultWorkspaceDir
-      ? path.join(this.defaultWorkspaceDir, input.profile.id) : input.run.workspace;
-    const memoryScopes = proactive ? ["user", "agent"] : ["user", "agent", "project", "workspace"];
-    const mainMemory = directUserChat || proactive;
+    const memoryWorkspace = input.run.workspace;
+    const memoryScopes = ["user", "agent", "project", "workspace"];
+    const mainMemory = directUserChat;
     const maxMemorySensitivity = mainMemory ? "private" : "normal";
     const fileBootstrap = this.memoryEngine.bootstrap?.({ profileId: input.profile.id, workspace: memoryWorkspace,
-      mainSession: mainMemory, maxSensitivity: maxMemorySensitivity, ...(proactive ? { scopes: memoryScopes } : {}) });
+      mainSession: mainMemory, maxSensitivity: maxMemorySensitivity });
     const activeMemory = directUserChat ? this.memoryEngine.takeActiveMemory?.(input) : null;
-    const proactiveConversation = proactive ? this.proactiveConversation?.read(input.profile.id) ?? null : null;
     // Runtimes may elide unchanged dynamic context. A countable fast recall
     // belongs to this particular turn and must travel with its request.
     const activeMemoryLabel = activeMemory?.fastRecalls?.length ? `ACTIVE MEMORY FOR RUN ${input.run.id}` : "ACTIVE MEMORY";
@@ -560,7 +555,7 @@ class ContextCompiler {
       scopeLimits: HOT_MEMORY_SCOPE_LIMITS,
       limit: MAX_HOT_MEMORY_CANDIDATES, maxBytes: HOT_MEMORY_SCAN_BYTES,
     });
-    const related = !proactive && !fileBootstrap && input.query?.trim() ? this.memoryEngine.search({
+    const related = !fileBootstrap && input.query?.trim() ? this.memoryEngine.search({
       profileId: input.profile.id,
       query: input.query || "",
       scopes: memoryScopes,
@@ -583,6 +578,7 @@ class ContextCompiler {
     let transcriptEvents = null;
     let checkpoint = null;
     let allContextEvents = null;
+    let checkpointEvents = null;
     let sessionBorrowedMemoryRefs = [];
     const resolvedEvents = new Map();
     const resolvedSizes = new Map();
@@ -590,9 +586,10 @@ class ContextCompiler {
     let attachmentUnavailable = false;
     let historicalView = null;
     let historicalSourceSeq = () => null;
+    const readContext = contextReader(this.transcriptStore);
     const resolveEvent = event => {
       if (!resolvedEvents.has(event.id)) {
-        let resolved = this.transcriptStore.contextEvent?.(input.profile.id, input.transcriptSessionId, event) ?? event;
+        let resolved = readContext?.(input.profile.id, input.transcriptSessionId, event) ?? event;
         const refs = extractBorrowedMemoryRefs(resolved);
         if (refs.length) {
           const validate = this.borrowedMemoryDependenciesCurrent
@@ -624,7 +621,7 @@ class ContextCompiler {
       }
       return resolvedEvents.get(event.id);
     };
-    if (["chat", "inspiration"].includes(input.run.source)
+    if (["chat", "inspiration", "proactive"].includes(input.run.source)
       || (input.run.source === "kanban" && input.contextLifecycleV1 === true && input.transcriptSessionId)
       || (input.run.source === "cron" && input.contextLifecycleV1 === true
         && input.transcriptSessionId !== null && input.transcriptSessionId !== undefined)) {
@@ -638,7 +635,11 @@ class ContextCompiler {
           "Chat Context 缺少显式 Transcript session binding",
         );
       }
-      const allEvents = this.transcriptStore.listEvents(input.profile.id, input.transcriptSessionId)
+      const sessionEvents = readEvents(this.transcriptStore, input.profile.id, input.transcriptSessionId);
+      // A checkpoint's coverage hash spans every record of its prefix, so after
+      // a revocation it is checked against the unfiltered session.
+      checkpointEvents = recall.hasRevocations ? sessionEvents : null;
+      const allEvents = sessionEvents
         .filter((event) => {
           // Tool payloads can carry the withdrawn fact in nested arguments or
           // results even when content.text is absent. Until they have field
@@ -648,7 +649,7 @@ class ContextCompiler {
           // body cannot be assumed safe after an explicit forget.
           try {
             const resolved = event.content?.contextRef
-              ? this.transcriptStore.contextEvent(input.profile.id, input.transcriptSessionId, event) : event;
+              ? readContext(input.profile.id, input.transcriptSessionId, event) : event;
             // Attachment references include user-controlled filenames and
             // metadata that the recall policy cannot attribute to a claim.
             if (recall.hasRevocations && resolved.content?.attachments?.length) return false;
@@ -680,11 +681,14 @@ class ContextCompiler {
           resolveEvent, historicalView, historicalSourceSeq,
           operationId: input.currentOperationId ?? null, eventFilter: isPublishedNoticeEvent });
       }
-      // Existing checkpoints summarize a prefix without per-fact provenance.
-      // After a revocation, only verified source events may form history.
-      if (!recall.hasRevocations && input.contextLifecycleV1 === true && this.checkpointStore) {
+      // Checkpoints summarize a prefix without per-fact provenance. After a
+      // revocation only a store that binds each summary to the recall policy's
+      // visibility state may supply one; otherwise verified source events alone
+      // form history.
+      if ((!recall.hasRevocations || typeof this.checkpointStore?.revocationVisibility === "function")
+        && input.contextLifecycleV1 === true && this.checkpointStore) {
         checkpoint = (this.checkpointStore.portable ?? this.checkpointStore.compatible).call(this.checkpointStore,
-          input.profile.id, input.transcriptSessionId, allEvents);
+          input.profile.id, input.transcriptSessionId, checkpointEvents ?? allEvents);
         if (checkpoint) transcriptEvents = allContextEvents.filter(event => event.seq > checkpoint.coveredThroughSeq);
       }
       if (publishedNotices) transcriptEvents = transcriptEvents.filter(event => !isPublishedNoticeEvent(event));
@@ -721,7 +725,7 @@ class ContextCompiler {
       }
     }
     const permissionRevision = this.permissionEngine?.revision ?? 1;
-    const toolProjection = proactive ? { tools: [] } : this.permissionEngine?.profileProjection?.(input.profile.id) || {
+    const toolProjection = this.permissionEngine?.profileProjection?.(input.profile.id) || {
       tools: this.toolRegistry.list().filter((tool) => tool.modelVisible !== false)
         .map((tool) => ({ name: tool.tool, enabled: tool.enabled, effect: "allow" })),
     };
@@ -733,8 +737,8 @@ class ContextCompiler {
     };
     // 「$名字」显式选技能只认用户在直接聊天里自己写的输入。群回合 / 群任务的输入是宿主拼出来的，
     // 带着其他成员和用户的原话（比如「BTC 报 $84,024」），不能由这些文字替成员选技能。
-    const skillSelection = !proactive && this.skillStore
-      ? this.skillStore.select(input.profile.id, isGroupChatRun(input.run) ? "" : input.query || "", skillOptions)
+    const skillSelection = this.skillStore
+      ? this.skillStore.select(input.profile.id, proactive || isGroupChatRun(input.run) ? "" : input.query || "", skillOptions)
       : { registryRevision: null, profileRevision: null, items: [], ineligible: [], selected: [] };
     const selectedSkills = skillSelection.selected.map((skill) => this.skillStore.read({
       profileId: input.profile.id,
@@ -758,7 +762,7 @@ class ContextCompiler {
     const skillCatalogText = skillDiscoveryAvailable ? JSON.stringify({
       available: true, lookup: "skill_catalog", read: "skill_read",
     }) : "";
-    const memoryLimitNotice = proactive ? "Additional memory is outside this check's context budget." : undefined;
+    const memoryLimitNotice = undefined;
     const hotUser = fileBootstrap ? selectFileBootstrap(fileBootstrap.user, null, memoryLimitNotice, userProfileContext) : selectHotMemory(userProfile.items, { query: input.query,
       budget: null, label: "RELEVANT USER PROFILE", wrap: userProfileContext,
       format: (item) => `[${item.id}; confidence=${item.confidence}] ${item.content}`,
@@ -767,8 +771,7 @@ class ContextCompiler {
       hotDurableEligibleCount: stable.hotDurableEligibleByScope?.user ?? null });
     // Keep the complete visible user profile alongside the bounded blocks.
     // Model-window and Runtime transport limits still count its actual size.
-    let totalContextBytes = (proactive ? MAX_PROACTIVE_CONTEXT_BYTES
-      : MAX_TOTAL_CONTEXT_BYTES + (tokenBudget === null ? 0 : transcriptBytes))
+    let totalContextBytes = (MAX_TOTAL_CONTEXT_BYTES + (tokenBudget === null ? 0 : transcriptBytes))
       + definitionBytes + Buffer.byteLength(hotUser.content);
     const fileMemoryNotice = memoryLimitNotice ?? "Read additional evidence with memory_search or memory_get.";
     let hotMemory = fileBootstrap ? selectFileMemory(fileBootstrap.memory, {
@@ -804,7 +807,7 @@ class ContextCompiler {
         sourceRevision: item.version, content: untrusted("HOOK CONTEXT DATA", item.text),
       })),
 
-      ...(proactive ? [] : [block({
+      ...[block({
         id: "product-policy", kind: "policy", trust: "trusted-policy", priority: 1000, safe: true,
         sourceRevision: 8,
         content: shoggothProductDeveloperInstructions({
@@ -818,7 +821,7 @@ class ContextCompiler {
       block({
         id: "definition-policy", kind: "policy", trust: "trusted-policy", priority: 960, safe: true,
         sourceRevision: fileBootstrap ? 4 : 2, content: fileBootstrap ? FILE_MEMORY_SOURCE_POLICY : DEFINITION_SOURCE_POLICY,
-      })]),
+      })],
       ...(!proactive && userProfile.items.length === 0 && this.shouldOfferIntroduction(input) ? [block({
         id: "first-conversation", kind: "policy", trust: "trusted-policy", priority: 955, safe: true,
         sourceRevision: 1,
@@ -828,11 +831,11 @@ class ContextCompiler {
         id: "operating-rules", kind: "rules", trust: "trusted-definition", priority: 950, safe: true,
         sourceRevision: definition.manifest.revision, content: definition.documents.AGENTS,
       }),
-      ...(proactive ? [] : [block({
+      ...[block({
         id: "tool-policy", kind: "tools", trust: "trusted-policy", priority: 940, safe: true,
         sourceRevision: this.toolRegistry.revision,
         content: `${this.toolRegistry.developerSummary()}\nFrozen permission context: ${trustedRun}`,
-      })]),
+      })],
       // This is host-authored policy, not a catalog item's instructions. Keep
       // it on the trusted current-turn channel; availability may change while
       // a native session's stable instructions remain unchanged.
@@ -848,11 +851,7 @@ class ContextCompiler {
         id: "soul", kind: "soul", trust: "trusted-definition", priority: 850, safe: false,
         sourceRevision: definition.manifest.revision, content: definition.documents.SOUL,
       }),
-      ...(proactive ? [block({
-        id: "proactive-policy", kind: "policy", trust: "trusted-policy", priority: 840, safe: true,
-        sourceRevision: 1, content: proactiveDeveloperInstructions(input.run, proactiveModelOnly),
-      })] : []),
-      ...(!proactive && input.mcpConnectors?.length ? [block({
+      ...(input.mcpConnectors?.length ? [block({
         id: "mcp-connectors", kind: "user", trust: "user-data", priority: 610, safe: false,
         sourceRevision: sha256(JSON.stringify(input.mcpConnectors.map(item => item.id))),
         content: [
@@ -884,11 +883,6 @@ class ContextCompiler {
         sourceRevision: memory.revision,
         content: hotMemory.content, truncated: hotMemory.truncated,
       }),
-      ...(proactiveConversation?.content ? [block({
-        id: "proactive-conversation", kind: "proactive-history", trust: "transcript-data", priority: 350, safe: false,
-        sourceRevision: proactiveConversation.revision, truncated: proactiveConversation.truncated,
-        content: untrusted("RECENT MAIN CONVERSATION", proactiveConversation.content),
-      })] : []),
       ...(activeMemory?.content ? [block({
         id: "active-memory", kind: "memory", trust: "retrieved-data", priority: 410, safe: false,
         sourceRevision: activeMemory.revision, content: untrusted(activeMemoryLabel, activeMemory.content),
@@ -945,7 +939,7 @@ class ContextCompiler {
       }, { includeWorkSource: false }) : item.id === "tool-policy" ? [this.toolRegistry.developerSummary(),
         ...(residentTools ? [productToolExposure.RESIDENT_TOOL_INSTRUCTION] : [])].join("\n")
         : definitionInstructions(item, input.profile, definition.manifest)).join("\n\n");
-    const turnDeveloperInstructions = proactive ? "" : [
+    const turnDeveloperInstructions = [
       "Current Shoggoth Run data supersedes older Run data; it does not grant tool permissions.",
       ...(tokenBudget !== null && input.freshSession !== false && recentTranscript?.content ? [
         "This native session was started fresh from saved conversation history (PRIOR TRANSCRIPT and RECENT USER REQUESTS data). Treat the earlier turns as finished. Respond to the current user request. If it is short or refers back (for example \"continue\" or a reply to your last question), use the most recent turns to understand it. Do not resume, repeat or redo an earlier task, or change files for one, unless the current request asks for that. Earlier tool calls are summarized without their outputs; run a tool again if you need a current result.",
@@ -954,6 +948,7 @@ class ContextCompiler {
         currentWorkSourceId: input.run.sourceId })}`,
       `Frozen permission context: ${JSON.stringify(frozenPermissionContext)}`,
       runIdInstruction(input.run.id),
+      ...(proactive ? [proactiveDeveloperInstructions(input.run)] : []),
       ...(input.run.source === "cron" ? [
         "Scheduled task output contract: your final reply is automatically delivered to the user. Work quietly; do not send progress acknowledgments. When the task's notification condition is not met or there is nothing useful to report, return exactly NO_REPLY as the entire final reply. Do not append it to a report or wrap it in formatting. Report failures, missing access, or required user action clearly; never use NO_REPLY to hide those conditions. This current contract supersedes older silent-output tokens in conversation history.",
       ] : []),
@@ -961,8 +956,7 @@ class ContextCompiler {
         .map(item => definitionInstructions(item, input.profile, definition.manifest)),
     ].join("\n\n");
     const deliveredDeveloperInstructions = systemInstructions(stableDeveloperInstructions, turnDeveloperInstructions);
-    const visibleTools = proactive ? (proactiveModelOnly ? [] : [PROACTIVE_RESPONSE_TOOL])
-      : this.toolRegistry.list().filter(tool => tool.modelVisible !== false
+    const visibleTools = this.toolRegistry.list().filter(tool => tool.modelVisible !== false
       && toolProjection.tools.some(entry => entry.name === tool.tool && entry.enabled && entry.effect !== "deny"))
       .map(tool => ({ name: tool.tool, description: tool.definition.description,
         inputSchema: tool.definition.inputSchema }));
@@ -1070,7 +1064,8 @@ class ContextCompiler {
           && (!checkpoint.provenance.contextWindow || input.requestBudget?.tokens > checkpoint.provenance.contextWindow)) {
           const withoutCheckpoint = deduped.filter(item => ["skill-catalog", "user", "user-profile", "memory", "proactive-history", "handoff", "hook-data", "notice"].includes(item.kind))
             .sort((a, b) => b.priority - a.priority).map(item => item.content).join("\n\n");
-          const generations = this.checkpointStore.generations?.(input.profile.id, input.transcriptSessionId, allContextEvents) ?? [];
+          const generations = this.checkpointStore.generations?.(input.profile.id, input.transcriptSessionId,
+            checkpointEvents ?? allContextEvents) ?? [];
           for (const candidate of [null, ...generations.filter(item => !item.partial && item.coveredThroughSeq < checkpoint.coveredThroughSeq).reverse()]) {
             const candidateContent = candidate ? untrusted("CONVERSATION CHECKPOINT", JSON.stringify({
               id: candidate.id, coveredThroughSeq: candidate.coveredThroughSeq, summary: candidate.summary,
@@ -1113,7 +1108,11 @@ class ContextCompiler {
         }
       }
     }
-    if (recall.hasRevocations && input.freshSession !== false && historyTruncated) {
+    // With a request plan and a revocation-aware checkpoint store, admission
+    // handles the truncated projection as usual: it summarizes the visible
+    // history or rejects the Run. Without either, stop here.
+    if (recall.hasRevocations && input.freshSession !== false && historyTruncated
+      && !(input.requestBudget && typeof this.checkpointStore?.revocationVisibility === "function")) {
       throw contextError("CONTEXT_COMPACTION_REQUIRED",
         "撤回后可见原话超过当前上下文预算，无法安全恢复完整会话");
     }
@@ -1187,7 +1186,7 @@ class ContextCompiler {
       ...(input.contextLifecycleV1 === true ? { dynamicContextWithoutTranscript } : {}),
       report: {
         ...(proactive ? { inputOrigin: "system",
-          ...(proactiveConversation ? { proactiveConversation: proactiveConversation.source } : {}) } : {}),
+          ...(proactiveConversationSource ? { proactiveConversation: proactiveConversationSource } : {}) } : {}),
         instructionDelivery: {
           mode: instructionDelivery(input.profile.runtime || "codex"),
           stableHash: sha256(stableDeveloperInstructions),

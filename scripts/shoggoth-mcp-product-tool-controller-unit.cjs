@@ -623,9 +623,9 @@ test("外部管理的未知结果冻结在原调用回执，后续同 callId 不
   assert.equal(writes, 1); assert.equal(f.controller.poisonError, null);
 });
 
-test("固定 162 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 162);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 162);
+test("固定 166 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 166);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 166);
   for (const name of ["group_task", "group_collaborate"]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(name), false);
   for (const required of [
     "workspace_execute",
@@ -633,7 +633,7 @@ test("固定 162 个模型可见产品工具及 strict object schemas，不暴�
     "apple_reminders_lists", "apple_reminders_search", "apple_reminders_get", "apple_reminders_create", "apple_reminders_update", "apple_reminders_delete",
     "app_capabilities", "app_help_search", "app_help_get", "app_state_get", "app_manage", "runtime_context_get", "usage_get", "kanban_board_create", "kanban_run_dispatch",
     "cron_create", "cron_delete", "backend_status", "external_cron_list", "web_search", "web_fetch", "web_settings_get", "web_settings_set", "web_defaults_set",
-    "heartbeat_settings_get", "heartbeat_settings_set",
+    "heartbeat_settings_get", "heartbeat_settings_set", "heartbeat_rules_read", "heartbeat_rules_update", "memory_file_read", "memory_file_update",
     "federation_agent_list", "federation_agent_get", "federation_agent_run",
     "federation_agent_message", "federation_task_get", "federation_task_cancel",
     "skill_catalog", "skill_read", "skill_file_read", "skill_learn", "skill_install_global",
@@ -860,7 +860,7 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     },
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.capabilities.length, 149);
+  assert.equal(capabilities.capabilities.length, 153);
   for (const name of ["group_task", "group_collaborate"]) {
     assert.equal(capabilities.capabilities.some((item) => item.tool === name), false);
   }
@@ -2643,9 +2643,13 @@ test("skill_learn only signals its active native owner and replays no second wri
   await expectCode(() => f.controller.handle("skill_learn", {}, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
 });
 test("心跳设置仅当前活跃原生 Run 可改，受限心跳、外部会话和撤权不能改", async () => {
-  const calls = [], f = makeFixture({ proactiveService: { async handleSettingsTool(name, profileId, args, context) {
-    context.assertCurrent(); calls.push({ name, profileId, args, operationId: context.operationId }); return { revision: calls.length };
-  } } });
+  const calls = [], checkedProactiveRuns = [];
+  const f = makeFixture({ proactiveService: {
+    assertRunCurrent(run) { checkedProactiveRuns.push(run.id); },
+    async handleSettingsTool(name, profileId, args, context) {
+      context.assertCurrent(); calls.push({ name, profileId, args, operationId: context.operationId }); return { revision: calls.length };
+    },
+  } });
   const scope = { runId: RUN_ID, assertCurrent() {} }, args = { expectedRevision: 1, config: { intervalMinutes: 15 } };
   await expectCode(() => f.controller.handle("heartbeat_settings_get", {}, authority()), "MCP_TOOL_FORBIDDEN");
   await expectCode(() => f.controller.handle("heartbeat_settings_get", {}, authority({ profileId: OTHER_PROFILE_ID }), scope), "MCP_TOOL_NOT_FOUND");
@@ -2659,6 +2663,7 @@ test("心跳设置仅当前活跃原生 Run 可改，受限心跳、外部会话
   assert.match(calls.at(-1).operationId, /^heartbeat-mcp-[a-f0-9]{64}$/u);
   f.runs.set(RUN_ID, run({ source: "proactive" }));
   await expectCode(() => f.controller.handle("heartbeat_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  assert.deepEqual(checkedProactiveRuns, [RUN_ID]);
   f.runs.set(RUN_ID, run({ status: "completed" }));
   await expectCode(() => f.controller.handle("heartbeat_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
   f.runs.set(RUN_ID, run());

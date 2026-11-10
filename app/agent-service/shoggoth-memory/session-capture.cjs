@@ -14,7 +14,7 @@
 
 const { core } = require("./host.cjs");
 const { sha256 } = require("./migration.cjs");
-const { hasSecret, hasPii } = require("../memory-engine");
+const { hasSecret, hasPii } = require("../memory-content");
 const { serviceError } = require("../security");
 const { MAX_CONTENT_BYTES } = require("../memory-store");
 const { diagnosticCode } = require("./active-memory-diagnostics.cjs");

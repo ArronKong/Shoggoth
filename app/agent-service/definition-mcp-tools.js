@@ -3,14 +3,28 @@
 const kind = { type: "string", enum: ["IDENTITY", "SOUL", "AGENTS"] };
 const text = (maxLength, minLength = 0) => ({ type: "string", minLength, maxLength });
 const integer = (minimum, maximum) => ({ type: "integer", minimum, ...(maximum === undefined ? {} : { maximum }) });
-const source = { source: { type: "string", enum: ["chat", "inspiration"], description: "Copy currentWorkSource from the trusted current work source in your instructions." },
+const source = { source: { type: "string", enum: ["chat", "inspiration", "proactive"], description: "Copy currentWorkSource from the trusted current work source in your instructions." },
   sourceId: { ...text(512, 1), description: "Copy currentWorkSourceId from the same trusted current work source. It is not the Run ID." } };
+const heartbeatRevision = { type: "string", pattern: "^[a-f0-9]{64}$" };
+const memoryKind = { type: "string", enum: ["USER", "MEMORY"] };
 const object = (properties, required) => ({ type: "object", properties, required, additionalProperties: false });
 const DEFINITION_MCP_TOOL_DEFINITIONS = [
   { name: "agent_definition_read", inputSchema: object({ ...source, kind, revision: integer(1),
     offset: integer(0, 32768), limit: integer(1, 4096) }, ["source", "sourceId", "kind"]) },
   { name: "agent_definition_update", inputSchema: object({ ...source, kind, expectedRevision: integer(1),
     oldText: text(32 * 1024), newText: text(32 * 1024), sourceQuote: text(2048, 1), newName: text(128, 1) },
+  ["source", "sourceId", "kind", "expectedRevision", "oldText", "newText", "sourceQuote"]) },
+  // HEARTBEAT.md lives in the proactive store, whose revision is a content hash.
+  { name: "heartbeat_rules_read", inputSchema: object({ ...source, offset: integer(0, 16384), limit: integer(1, 4096) },
+    ["source", "sourceId"]) },
+  { name: "heartbeat_rules_update", inputSchema: object({ ...source, expectedRevision: heartbeatRevision,
+    oldText: text(16 * 1024), newText: text(16 * 1024), sourceQuote: text(2048, 1) },
+  ["source", "sourceId", "expectedRevision", "oldText", "newText", "sourceQuote"]) },
+  // USER.md and MEMORY.md are the file memory source; revision is a content hash.
+  { name: "memory_file_read", inputSchema: object({ ...source, kind: memoryKind, offset: integer(0, 1024 * 1024),
+    limit: integer(1, 4096) }, ["source", "sourceId", "kind"]) },
+  { name: "memory_file_update", inputSchema: object({ ...source, kind: memoryKind, expectedRevision: heartbeatRevision,
+    oldText: text(32 * 1024), newText: text(32 * 1024), sourceQuote: text(2048, 1) },
   ["source", "sourceId", "kind", "expectedRevision", "oldText", "newText", "sourceQuote"]) },
 ];
 
@@ -31,7 +45,8 @@ function validateDefinitionMcpArguments(name, args) {
       return typeof value === "string" && value.isWellFormed() && !value.includes("\0")
         && (!rule.minLength || value.trim().length > 0)
         && Buffer.byteLength(value, "utf8") <= (rule.maxLength ?? Infinity)
-        && (!rule.enum || rule.enum.includes(value));
+        && (!rule.enum || rule.enum.includes(value))
+        && (!rule.pattern || new RegExp(rule.pattern, "u").test(value));
     })) return false;
   return (!Object.hasOwn(args, "newName") || args.kind === "IDENTITY")
     && Buffer.byteLength(JSON.stringify(args), "utf8") <= 48 * 1024;

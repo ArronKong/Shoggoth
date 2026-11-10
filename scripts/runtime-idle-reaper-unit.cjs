@@ -20,6 +20,7 @@ function harness(extra = {}) {
     // This fixture tests queue retirement with generation-only sentinel handles.
     validateHandles: false,
     idleTimeoutMs: 120,
+    now: () => now,
     isIdle: () => true,
     setTimer(fn, delay) { const id = ++serial; timers.set(id, { at: now + delay, fn }); return id; },
     clearTimer(id) { timers.delete(id); },
@@ -56,6 +57,30 @@ test("all enabled runtime adapters retire only after the full idle window, then 
   const cold = await h.registry.acquire(binding());
   assert.equal(cold.generation, 6);
   await h.registry.stopAll();
+});
+
+test("only the two most recent Codex profiles keep their single reusable host warm", async () => {
+  const h = harness({ warmTimeoutMs: 900 });
+  for (const id of ["first", "second", "third"]) {
+    await h.registry.acquire(binding("codex", id)); h.registry.keepWarm(binding("codex", id));
+  }
+  await h.registry.acquire(binding("pi", "per-run")); h.registry.keepWarm(binding("pi", "per-run"));
+  await h.advance(120);
+  assert.deepEqual(h.stops.map(row => row.runtimeProfileId).sort(), ["first", "per-run"]);
+  await h.advance(779); assert.equal(h.stops.length, 2);
+  await h.advance(1); assert.equal(h.stops.length, 4);
+  await h.registry.stopAll();
+});
+
+test("actual host identity distinguishes creation from reuse even without elapsed idle time", async () => {
+  let host = {}, states = [];
+  const registry = new RuntimeAdapterRegistry({ validateHandles: false });
+  registry.register("codex", { acquire: async () => host, stop: async () => {}, stopAll: async () => {} });
+  states.push((await registry.acquireObserved(binding())).hostState);
+  states.push((await registry.acquireObserved(binding())).hostState);
+  host = {};
+  states.push((await registry.acquireObserved(binding())).hostState);
+  assert.deepEqual(states, ["created", "reused", "created"]);
 });
 
 test("active work, approvals, login or unverified activity prevent retirement", async () => {

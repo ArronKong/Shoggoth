@@ -53,3 +53,7 @@ output/
 
 # Desktop QA creates an independent, temporary Git workspace here.
 docs/reports/2026-09-13-shoggoth-0.8.94-cua/agent-workspace/
+
+# Harness architecture and progress indexes.
+!/docs/native-agent-memory.md
+!/docs/progress/

@@ -1,6 +1,6 @@
 "use strict";
 
-const { DAY_MS, digest, at, boundedCandidates } = require("./proactive-service-protocol");
+const { DAY_MS, digest, at, boundedCandidates, boundedJsonText } = require("./proactive-service-protocol");
 const BUCKETS = Object.freeze({ seed: "saved", attention: "active", sprouted: "result" });
 const UNKNOWN_ERRORS = /(?:UNKNOWN|NEEDS_VERIFICATION|RECOVERY_UNAVAILABLE|ACCEPTANCE_UNCERTAIN)/u;
 
@@ -51,6 +51,28 @@ function inspirationReminderCandidate(idea, config, now) {
 class InspirationReminderService {
   constructor({ inspirationStore, inspirationService, proactiveStore, now = Date.now }) {
     this.ideas = inspirationStore; this.inspiration = inspirationService; this.store = proactiveStore; this.now = now;
+  }
+  heartbeatStatus() {
+    // Use the same unarchived list and live execution status as Spark Notes.
+    // The notification shortlist and its cooldowns are unrelated to counts.
+    let cursor = null, total = 0;
+    const counts = {}, notes = [];
+    for (let pageIndex = 0; pageIndex < 50; pageIndex++) {
+      const page = this.ideas.listPage({ filter: "all", query: "", cursor, limit: 50 });
+      total = page.total;
+      for (const idea of page.rows) {
+        const execution = this.ideas.latestExecution(idea.id);
+        const status = execution ? this.inspiration.executionStatus(execution).status : "saved";
+        counts[status] = (counts[status] ?? 0) + 1;
+        const title = boundedJsonText(idea.title || idea.body.trim().split(/\r?\n/u)[0] || "", 180);
+        notes.push({ id: idea.id, status, executionId: execution?.id ?? null, title });
+      }
+      if (!page.hasMore) break;
+      const last = page.rows.at(-1);
+      cursor = `${last.updatedAt}:${last.id}`;
+    }
+    notes.sort((a, b) => a.id.localeCompare(b.id));
+    return { state: notes.length === total ? "complete" : "partial", checked: notes.length, total, counts, notes };
   }
   scopedRunCandidate(run, config) {
     // Explicitly selecting an Inspiration Run must still use the note's global

@@ -192,6 +192,10 @@ class AgentHarnessServiceController {
       if (["harness.memory.create", "harness.memory.update", "harness.memory.delete", "harness.memory.undo", "harness.memory.forgetSession"].includes(method)) {
         return this._writeFileMemory(method, params);
       }
+      if (method === "harness.memory.document.write") return this.memoryEngine.writeDocument(params);
+    }
+    if (method === "harness.memory.document.write") {
+      throw harnessError("DEFINITION_WRITE_FORBIDDEN", "派生文档不可直接编辑");
     }
     if (method.startsWith("harness.skills.") && !this.skillStore) {
       throw harnessError("HARNESS_SERVICE_CLOSED", "Skill management is unavailable");
@@ -270,6 +274,7 @@ class AgentHarnessServiceController {
       })();
     }
     if (method === "harness.definition.meta") {
+      const fileMemory = this.memoryEngine.owner === "shoggoth-memory-core";
       const current = this.definitionStore.get(params.profileId);
       const history = this.definitionStore.history(params.profileId);
       return {
@@ -277,8 +282,9 @@ class AgentHarnessServiceController {
         history: history.slice(0, 32).map(summary),
         historyHasMore: history.length > 32,
         files: [
-          ...DOCUMENT_KINDS.map((kind) => ({ kind, name: `${kind}.md`, readOnly: kind === "USER" })),
-          ...["TOOLS", "MEMORY"].map((kind) => ({ kind, name: `${kind}.md`, readOnly: true })),
+          // With file memory, USER.md and MEMORY.md are the editable memory source.
+          ...DOCUMENT_KINDS.map((kind) => ({ kind, name: `${kind}.md`, readOnly: kind === "USER" && !fileMemory })),
+          ...["TOOLS", "MEMORY"].map((kind) => ({ kind, name: `${kind}.md`, readOnly: kind === "TOOLS" || !fileMemory })),
         ],
       };
     }

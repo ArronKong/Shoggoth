@@ -35,9 +35,9 @@ export function DashboardActivitySkeleton() {
   );
 }
 
-function ArtifactSkeleton() {
+export function DashboardArtifactSkeleton() {
   return (
-    <div className="dash-art-list">
+    <div className="dash-art-list" aria-hidden="true">
       {[78, 62, 86].map((width, index) => (
         <div className="dash-art" key={index}>
           <span className={styles.thumbnail}><Shape className={styles.fileIcon} /></span>
@@ -51,6 +51,31 @@ function ArtifactSkeleton() {
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+export function DashboardTaskBoardSkeleton() {
+  const { t } = useTranslation();
+  return (
+    <div className="kpi kpi-taskboard" aria-busy="true">
+      <div className="tb-head">
+        <span className="kpi-label">{t("dashboard.taskBoard")}</span>
+        <span className="tb-badges"><Shape className={styles.badge} /><Shape className={styles.badge} /></span>
+      </div>
+      <div className="tb-cols" aria-hidden="true">
+        {[0, 1].map(column => (
+          <div className="tb-col" key={column}>
+            {[0, 1, 2].map(row => (
+              <div className="tb-row" key={row}>
+                <Shape className={`tb-avatar ${styles.avatar}`} />
+                <Shape className={styles.rankingName} style={{ width: `${64 - row * 10}%` }} />
+                <Shape className={`tb-count ${styles.rankCount}`} />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -70,25 +95,7 @@ export default function DashboardSkeleton({ backendCount }: { backendCount: numb
             </div>
           </div>
         ))}
-        <div className="kpi kpi-taskboard">
-          <div className="tb-head">
-            <span className="kpi-label">{t("dashboard.taskBoard")}</span>
-            <span className="tb-badges"><Shape className={styles.badge} /><Shape className={styles.badge} /></span>
-          </div>
-          <div className="tb-cols">
-            {[0, 1].map(column => (
-              <div className="tb-col" key={column}>
-                {[0, 1, 2].map(row => (
-                  <div className="tb-row" key={row}>
-                    <Shape className={`tb-avatar ${styles.avatar}`} />
-                    <Shape className={styles.rankingName} style={{ width: `${64 - row * 10}%` }} />
-                    <Shape className={`tb-count ${styles.rankCount}`} />
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
+        <DashboardTaskBoardSkeleton />
       </div>
       <div className="dash-columns" aria-hidden="true">
         <section className="dash-section">
@@ -118,7 +125,7 @@ export default function DashboardSkeleton({ backendCount }: { backendCount: numb
         </section>
         <section className="dash-section dash-artifacts">
           <h2 className="dash-section-title">{t("dashboard.artifactsTitle")}</h2>
-          <ArtifactSkeleton />
+          <DashboardArtifactSkeleton />
         </section>
       </div>
     </div>

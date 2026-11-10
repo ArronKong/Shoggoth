@@ -2,16 +2,17 @@ import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import Modal from "../components/Modal";
-import AgentAvatar from "../components/AgentAvatar";
+import { useConfirm } from "../components/ui";
 import GroupMemberAvatar from "./GroupMemberAvatar";
-import { addGroupChatMember, removeGroupChatMember } from "../api/client";
+import { updateGroupChatMembers } from "../api/client";
 import GroupChatRoleDocument from "./GroupChatRoleDocument";
 import GroupChatMemberModel from "./GroupChatMemberModel";
-import { GROUP_MEMBER_BACKEND_IDS, GROUP_NATIVE_BACKEND_ID, GROUP_MIN_MEMBERS, GROUP_MAX_MEMBERS, type GroupCandidateAgent } from "../lib/groupChat";
+import { GROUP_MEMBER_BACKEND_IDS, GROUP_MIN_MEMBERS, GROUP_MAX_MEMBERS, type GroupCandidateAgent } from "../lib/groupChat";
 import type { GroupChatMember, GroupChatView } from "../types";
+import GroupChatFormModal from "./GroupChatFormModal";
+import GroupChatMemberPicker, { groupCandidateKey } from "./GroupChatMemberPicker";
+import formStyles from "./GroupChatFormModal.module.css";
 import styles from "./GroupChatPanel.module.css";
-
-const MAX_MEMBERS = GROUP_MAX_MEMBERS;
 
 /** 群成员卡：从成员自己的 IDENTITY/SOUL 派生的角色资料，以及同伴能读到的共享原文。 */
 export default function GroupChatMemberModal({ groupId, member, view, onView, onClose, isCurrentScope = () => true }: {
@@ -23,19 +24,24 @@ export default function GroupChatMemberModal({ groupId, member, view, onView, on
   isCurrentScope?(): boolean;
 }) {
   const { t } = useTranslation();
+  const confirm = useConfirm();
   const [error, setError] = useState<string | null>(null);
   const [removing, setRemoving] = useState(false);
   const removingRef = useRef(false);
   // 与服务端一致：群聊至少保留两位活跃成员。
-  const canRemove = view.group.status === "active" && member.state === "active"
+  const canRemove = !!view.ownerScope && view.group.status === "active" && member.state === "active"
     && view.members.filter((item) => item.state === "active").length > GROUP_MIN_MEMBERS;
   const remove = async () => {
-    if (!canRemove || removingRef.current || !isCurrentScope()) return;
+    if (!canRemove || !view.ownerScope || removingRef.current || !isCurrentScope()) return;
     removingRef.current = true;
     setRemoving(true);
     setError(null);
     try {
-      const next = await removeGroupChatMember(groupId, { expectedRosterRevision: view.group.rosterRevision, memberId: member.id });
+      const ok = await confirm({ title: t("groupChat.members.remove"), confirmLabel: t("common.confirm"), danger: true, focusCancel: true,
+        message: t("groupChat.members.removeConfirm", { name: member.displayName }) });
+      if (!ok || !isCurrentScope()) return;
+      const next = await updateGroupChatMembers(groupId, { ownerScope: view.ownerScope,
+        expectedRosterRevision: view.group.rosterRevision, addMembers: [], removeMemberIds: [member.id] });
       if (!isCurrentScope()) return;
       onView(next);
       onClose();
@@ -94,55 +100,89 @@ export default function GroupChatMemberModal({ groupId, member, view, onView, on
   </Modal>;
 }
 
-/** 给已有的群加一位成员：列出还不在群里的 Agent，点一下就加入。 */
-export function GroupChatAddMemberModal({ view, candidates, onView, onClose }: {
+/** 以打开弹窗时的名单为基准，确认后一次提交增删。 */
+export function GroupChatAddMemberModal({ view, candidates, backends, onView, onRefresh, onClose, isCurrentScope }: {
   view: GroupChatView;
   candidates: GroupCandidateAgent[];
+  backends: readonly { id: string; name: string }[];
   onView(view: GroupChatView): void;
+  onRefresh(): void;
   onClose(): void;
+  isCurrentScope(): boolean;
 }) {
   const { t } = useTranslation();
-  const [busy, setBusy] = useState<string | null>(null);
+  const [roster] = useState(() => ({ revision: view.group.rosterRevision,
+    members: view.members.filter(member => member.state === "active") }));
+  const [selectedKeys, setSelectedKeys] = useState(() => roster.members.map(groupCandidateKey));
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const keyOf = (agent: { backendId: string; agentId: string; peerId?: string }) => `${agent.backendId}\0${agent.peerId ?? ""}\0${agent.agentId}`;
-  const active = view.members.filter((member) => member.state === "active");
-  const taken = new Set(active.map(keyOf));
-  const available = candidates.filter((agent) => !taken.has(keyOf(agent)));
-  const full = active.length >= MAX_MEMBERS;
-  const add = async (agent: GroupCandidateAgent) => {
-    if (busy) return;
-    setBusy(keyOf(agent));
+  const submitting = useRef(false);
+  const rosterKeys = new Set(roster.members.map(groupCandidateKey));
+  const available = candidates.filter(agent => !rosterKeys.has(groupCandidateKey(agent)));
+  const eligible = new Map(available.filter(agent => GROUP_MEMBER_BACKEND_IDS.has(agent.backendId))
+    .map(agent => [groupCandidateKey(agent), agent]));
+  const agents = [...roster.members.map(({ backendId, agentId, peerId, displayName }) => ({ backendId, agentId, peerId, name: displayName })),
+    ...available];
+  const additions = selectedKeys.map(key => eligible.get(key)).filter((agent): agent is GroupCandidateAgent => !!agent);
+  const removals = roster.members.filter(member => !selectedKeys.includes(groupCandidateKey(member)));
+  const count = roster.members.length + additions.length - removals.length;
+  const changed = additions.length > 0 || removals.length > 0;
+  const stale = view.group.rosterRevision !== roster.revision;
+  const disabled = busy || stale || !view.ownerScope || view.group.status !== "active";
+  const canSave = !disabled && changed && count >= GROUP_MIN_MEMBERS && count <= GROUP_MAX_MEMBERS;
+  const close = () => { if (!submitting.current) onClose(); };
+  const toggle = (agent: GroupCandidateAgent) => {
+    const key = groupCandidateKey(agent);
+    if (disabled || submitting.current || (!rosterKeys.has(key) && !eligible.has(key))) return;
+    setSelectedKeys(previous => {
+      const current = previous.filter(item => rosterKeys.has(item) || eligible.has(item));
+      if (current.includes(key)) return current.filter(item => item !== key);
+      return current.length < GROUP_MAX_MEMBERS ? [...current, key] : current;
+    });
+    setError(null);
+  };
+  const save = async () => {
+    if (!canSave || !view.ownerScope || submitting.current || !isCurrentScope()) return;
+    submitting.current = true;
+    setBusy(true);
     setError(null);
     try {
-      onView(await addGroupChatMember(view.group.id, { expectedRosterRevision: view.group.rosterRevision,
-        member: { backendId: agent.backendId, agentId: agent.agentId, ...(agent.peerId ? { peerId: agent.peerId } : {}) } }));
+      const next = await updateGroupChatMembers(view.group.id, {
+        ownerScope: view.ownerScope, expectedRosterRevision: roster.revision,
+        addMembers: additions.map(({ backendId, agentId, peerId }) => ({ backendId, agentId, ...(peerId ? { peerId } : {}) })),
+        removeMemberIds: removals.map(member => member.id),
+      });
+      if (isCurrentScope()) {
+        onView(next);
+        onClose();
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (isCurrentScope()) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+        onRefresh();
+      }
     } finally {
-      setBusy(null);
+      submitting.current = false;
+      if (isCurrentScope()) setBusy(false);
     }
   };
-  return <Modal open width={460} className={styles.addMemberModal} dismissible={!busy} onClose={onClose} title={t("groupChat.members.addTitle")}
-    subtitle={t("groupChat.members.count", { count: active.length })}>
-    <div className={`${styles.createMembers} ${styles.addMemberList}`}>
-      {full && <p className={styles.muted}>{t("groupChat.members.full", { max: MAX_MEMBERS })}</p>}
-      {!full && available.length === 0 && <p className={styles.muted}>{t("groupChat.members.noneToAdd")}</p>}
-      {!full && available.map((agent) => {
-        const supported = GROUP_MEMBER_BACKEND_IDS.has(agent.backendId);
-        return (
-          <div key={keyOf(agent)} className={`${styles.createMember}${supported ? "" : ` ${styles.isDisabled}`}`}
-            title={supported ? undefined : t("groupChat.unsupportedBackend")}>
-            <AgentAvatar agentId={agent.agentId} name={agent.name} className={styles.createAvatar} />
-            <span className={styles.createMemberName}>{agent.name}</span>
-            {agent.peerId && <span className={styles.muted}>{agent.peerId}</span>}
-            {agent.backendId !== GROUP_NATIVE_BACKEND_ID && <span className={styles.muted}>
-              {supported ? agent.backendId === "hermes" ? "Hermes" : "OpenClaw" : t("groupChat.unsupportedShort")}</span>}
-            <button type="button" className="btn-secondary btn-sm" disabled={!supported || !!busy} onClick={() => void add(agent)}>
-              {t(busy === keyOf(agent) ? "groupChat.members.adding" : "groupChat.members.add")}</button>
-          </div>
-        );
-      })}
-      {error && <p className={styles.error} role="alert">{error}</p>}
-    </div>
-  </Modal>;
+  return <GroupChatFormModal open dismissible={!busy} onClose={close} title={t("groupChat.members.manageTitle")}
+    subtitle={t("groupChat.members.count", { count: roster.members.length })}
+    footer={<>
+      <button type="button" className="btn-secondary" disabled={busy} onClick={close}>{t("common.cancel")}</button>
+      <button type="button" className="btn-primary" disabled={!canSave} onClick={() => void save()}>
+        {t(busy ? "common.saving" : "common.confirm")}
+      </button>
+    </>}>
+    <GroupChatMemberPicker agents={agents} backends={backends} rosterKeys={rosterKeys}
+      selectedKeys={selectedKeys} selectionStatus={t("groupChat.membersCount", { count, max: GROUP_MAX_MEMBERS })}
+      emptyLabel={t("groupChat.noCandidates")} disabled={disabled}
+      selectionFull={count >= GROUP_MAX_MEMBERS} onToggle={toggle} />
+    {changed && <p className={formStyles.empty} role="status">
+      {t("groupChat.members.changes", { add: additions.length, remove: removals.length })}</p>}
+    {count < GROUP_MIN_MEMBERS && <p className={formStyles.empty} role="status">
+      {t("groupChat.members.minSelection", { min: GROUP_MIN_MEMBERS })}</p>}
+    {stale && !busy && <p className={formStyles.error} role="status">{t("groupChat.members.rosterChanged")}</p>}
+    {error && <p className={formStyles.error} role="alert">{error}</p>}
+  </GroupChatFormModal>;
 }

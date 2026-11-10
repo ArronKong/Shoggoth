@@ -4,6 +4,7 @@ const { CodexAutomationBackend, isCodexAutomationId, isCodexAutomationOwner } = 
 const codexAutomationProtocol = require("../agent-service/codex-automation-protocol");
 const codexDesktopProtocol = require("../agent-service/codex-desktop-session-protocol");
 const { isImplicitChatWorkspace } = require("../agent-service/chat-workspace");
+const { describeAgentDirectory } = require("../agent-service/agent-name-links");
 const { claimsNativeAgentId,
   isNativeBindingDisabled } = require("../agent-service/native-backend-identity");
 const { isRuntimeAvailable } = require("../runtime-availability");
@@ -219,6 +220,7 @@ const ACTIVE_DOMAIN_RUN_STATUSES = new Set([
 const ACTIVE_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
 ]);
+const DASHBOARD_ACTIVE_RUN_STATUSES = ["starting", "running", "waiting_approval", "waiting_input"];
 const TERMINAL_RUN_STATUSES = new Set([
   "completed", "failed", "canceled", "interrupted", "skipped",
 ]);
@@ -962,6 +964,11 @@ function validateServiceEventPage(value, params) {
 
 function validateServiceResult(method, value, params) {
   try {
+    if (method === "chat.session.prewarm") {
+      if (!exactObject(value, ["supported", "state"]) || typeof value.supported !== "boolean"
+        || !["ready", "scheduled", "busy", "unavailable", "unsupported"].includes(value.state)) throw new TypeError("Invalid preparation response");
+      return { ...value };
+    }
     if (require("./chat-secret-contract").SECRET_METHODS.includes(method)) return require("./chat-secret-contract").validateSecretResult(method, value);
     if (method === "runtime.extension.status.get") return require("../agent-service/runtime-extension-status-protocol").validateResult(value);
     if (codexDesktopProtocol.METHODS.includes(method)) return codexDesktopProtocol.validateResult(method, value);
@@ -1314,6 +1321,8 @@ class ShoggothBackend extends AgentBackend {
     this._claimsAgentId = options.claimsAgentId || claimsNativeAgentId;
     this._getDisabledBackendIds = null;
     this.paths = options.paths || resolveServicePaths();
+    this._sendLatency = options.sendLatencyDiagnostics || new (require("../agent-service/send-latency-diagnostics").SendLatencyDiagnostics)({
+      paths: this.paths, fileName: "send-latency-client.json", version: options.version || require("../../package.json").version });
     this.requestService = options.requestService || requestService;
     this.readToken = options.readToken || readClientToken;
     this.getNativeRuntimeConfig = options.getNativeRuntimeConfig || null;
@@ -1381,6 +1390,7 @@ class ShoggothBackend extends AgentBackend {
     this._modelsRefreshing = null;
     this._modelsRefreshingGeneration = null;
     this._profileRefreshPromise = null;
+    this._dashboardRunRead = null;
     this._complete = false;
     this._state = "stopped";
     this._generation = 0;
@@ -2549,6 +2559,7 @@ class ShoggothBackend extends AgentBackend {
     const sharedAgentCount = [...this._profilesByAgent.values()].filter(
       (candidate) => candidate.runtimeAccountId === profile.runtimeAccountId,
     ).length;
+    const managedWorkspace = describeAgentDirectory(this.paths, profile);
     return {
       id: profile.agentId,
       name: profile.name,
@@ -2562,6 +2573,7 @@ class ShoggothBackend extends AgentBackend {
       sharedAgentCount,
       profile: profile.id,
       ...(profile.defaultCwd ? { workspace: profile.defaultCwd } : {}),
+      ...(managedWorkspace ? { managedWorkspace } : {}),
       isDefault: profile.isDefault === true,
       protected: profile.isDefault === true || PROTECTED_NATIVE_PROFILE_IDS.has(profile.id),
       archived: false,
@@ -2921,6 +2933,14 @@ class ShoggothBackend extends AgentBackend {
     return result;
   }
   getSessionRuntime(id, key) { return this._sessionRuntimeRequest("chat.session.runtime.get", id, key); }
+  async prewarmChatSession(id, key) {
+    try {
+      if (this._state !== "started") return { supported: true, state: "unavailable" };
+      const profile = this._profileForManagedAgent(id), target = this._sessionTarget(key);
+      if (target.profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
+      return await this._call("chat.session.prewarm", { profileId: profile.id, sessionKey: target.sessionKey });
+    } catch { return { supported: true, state: "unavailable" }; }
+  }
   async getSessionMemoryStatus(id, key, includeTrace = false) {
     const profile = this._profileForManagedAgent(id), target = this._sessionTarget(key);
     if (target.profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
@@ -3194,6 +3214,13 @@ class ShoggothBackend extends AgentBackend {
     if (file === "HEARTBEAT.md") {
       const result = await this.proactiveCall("proactive.document.set", { profileId: profile.id, content, expectedRevision: options.expectedRevision });
       return { id, fileRevision: result.document.revision };
+    }
+    if (file === "USER.md" || file === "MEMORY.md") {
+      // File memory: these are the memory source itself, revisioned by content hash.
+      const result = await this._call("harness.memory.document.write", {
+        profileId: profile.id, kind: file.slice(0, -3), content, expectedRevision: options.expectedRevision,
+      });
+      return { id, fileRevision: result.revision };
     }
     const match = /^([A-Z]+)\.md$/u.exec(file);
     if (!match) throw safeError(null, "INVALID_PARAMS");
@@ -3650,6 +3677,7 @@ class ShoggothBackend extends AgentBackend {
       ...(features ? { runtimeFeatures: structuredClone(features) } : {}),
       maxPromptBytes: CHAT_MAX_PROMPT_BYTES,
       nativeUiArtifactsV1: this._nativeUiAvailable,
+      prewarm: true,
       maxAttachmentBytes: 50 * 1024 * 1024,
       maxAttachments: 8,
       slash: this._activeMemoryCommands || NATIVE_SLASH_RUNTIMES.has(profile.runtime),
@@ -4466,6 +4494,7 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async _runStartCycle() {
+    this._sendLatency.open?.();
     const recovering = this._state === "recovering";
     const generation = ++this._generation;
     this._state = recovering ? "recovering" : "starting";
@@ -4651,6 +4680,7 @@ class ShoggothBackend extends AgentBackend {
     const pendingStart = this._startPromise;
     const stopping = Promise.resolve().then(async () => {
       if (pendingStart) await Promise.allSettled([pendingStart]);
+      await this._sendLatency.close();
       this._state = "stopped";
     }).finally(() => {
       if (this._stopPromise === stopping) this._stopPromise = null;
@@ -5540,7 +5570,13 @@ class ShoggothBackend extends AgentBackend {
   }
   addGroupChatMember(groupId, input) {
     return this._groupChatCall("group.members.add", { groupId,
-      expectedRosterRevision: input?.expectedRosterRevision, member: input?.member });
+      expectedRosterRevision: input?.expectedRosterRevision,
+      ...(Object.hasOwn(input ?? {}, "member") ? { member: input.member } : {}),
+      ...(Object.hasOwn(input ?? {}, "members") ? { members: input.members } : {}) });
+  }
+  updateGroupChatMembers(groupId, input) {
+    return this._groupChatCall("group.members.update", { groupId, ownerScope: input?.ownerScope,
+      expectedRosterRevision: input?.expectedRosterRevision, addMembers: input?.addMembers, removeMemberIds: input?.removeMemberIds });
   }
   getGroupChatMemberModels(groupId, memberId) {
     return this._groupChatCall("group.member.models", { groupId, memberId });
@@ -5568,7 +5604,9 @@ class ShoggothBackend extends AgentBackend {
   }
   readGroupChatMessage(groupId, input) {
     return this._groupChatCall("group.message.read", { groupId, seq: input?.seq,
-      offset: input?.offset ?? 0, digest: input?.digest ?? null });
+      offset: input?.offset ?? 0, digest: input?.digest ?? null,
+      ...Object.fromEntries(["part", "ownerScope", "messageId"].filter(key => input?.[key] !== undefined)
+        .map(key => [key, input[key]])) });
   }
   searchGroupChatMessages(groupId, query = {}) {
     return this._groupChatCall("group.search", { groupId, query: query.query,
@@ -6174,31 +6212,50 @@ class ShoggothBackend extends AgentBackend {
 
   async getRecentCronRuns({ sinceMs = 0, limit = 50 } = {}) {
     const profiles = await this._dashboardProfiles();
-    const rows = [];
-    let aggregate = { bytes: 0, items: 0 };
-    for (const profile of profiles) {
-      const [jobs, runs] = await Promise.all([
-        this._domainPage("cron.job.list", { profileId: profile.id, enabled: null }, "jobs"),
-        this._page("run.list", { profileId: profile.id, sessionKey: null, status: null }, "runs", {
-          maxBytes: MAX_DOMAIN_AGGREGATE_BYTES, maxItems: MAX_DOMAIN_AGGREGATE_ITEMS,
-        }),
-      ]);
-      aggregate = this._assertDomainAggregate(runs, aggregate.bytes, aggregate.items);
-      const byId = new Map(jobs.map(job => [job.id, job]));
-      const recent = runs.filter(value => value.source === "cron"
-        && (value.finishedAt ?? value.startedAt ?? value.createdAt) >= sinceMs);
-      const descriptions = new Map();
-      await Promise.all([...new Set(recent.map(value => value.sourceId))].map(async jobId => {
-        for (const value of await this._cronRunsForJob(jobId, profile)) descriptions.set(value.run.id, value);
-      }));
-      for (const value of runs) {
-        if (value.profileId !== profile.id) throw safeError(null, "CRON_PROFILE_MISMATCH");
-        if (value.source !== "cron" || (value.finishedAt ?? value.startedAt ?? value.createdAt) < sinceMs) continue;
-        const run = this._mapCronRun(descriptions.get(value.id) || { run: value, createdAt: value.createdAt });
-        rows.push({ backendId: this.id, jobId: `${this.id}:${value.sourceId}`,
-          jobName: byId.get(value.sourceId)?.name, agentId: profile.agentId, runId: value.id, ...run });
+    const pageBudget = { maxBytes: MAX_DOMAIN_AGGREGATE_BYTES, maxItems: MAX_DOMAIN_AGGREGATE_ITEMS };
+    const isRecentCron = run => run.source === "cron"
+      && (run.finishedAt ?? run.startedAt ?? run.createdAt) >= sinceMs;
+    let scopedRuns;
+    if (profiles.length && Number.isSafeInteger(sinceMs) && sinceMs >= 0) {
+      try {
+        scopedRuns = await this._page("run.list", {
+          profileId: null, sessionKey: null, status: null,
+          scope: { backendId: this.id, source: "cron", sinceMs },
+        }, "runs", pageBudget);
+      } catch (error) {
+        // Older Services on the same wire version reject the optional scope.
+        if (error?.code !== "INVALID_PARAMS") throw error;
       }
+      if (scopedRuns?.some(run => !isRecentCron(run))) throw safeError(null, "CHAT_RESPONSE_INVALID");
     }
+    const runsByProfile = new Map();
+    for (const run of scopedRuns || []) {
+      if (!runsByProfile.has(run.profileId)) runsByProfile.set(run.profileId, []);
+      runsByProfile.get(run.profileId).push(run);
+    }
+    let aggregate = { bytes: 0, items: 0 };
+    const grouped = await mapBounded(profiles, MAX_PROFILE_SESSION_CONCURRENCY, async profile => {
+      const runs = scopedRuns ? runsByProfile.get(profile.id) || [] : await this._page("run.list", {
+        profileId: profile.id, sessionKey: null, status: null,
+      }, "runs", pageBudget);
+      if (!scopedRuns) aggregate = this._assertDomainAggregate(runs, aggregate.bytes, aggregate.items);
+      if (runs.some(run => run.profileId !== profile.id)) throw safeError(null, "CRON_PROFILE_MISMATCH");
+      const recent = scopedRuns ? runs : runs.filter(isRecentCron);
+      if (!recent.length) return [];
+      const [jobs, descriptionsByJob] = await Promise.all([
+        this._domainPage("cron.job.list", { profileId: profile.id, enabled: null }, "jobs"),
+        mapBounded([...new Set(recent.map(run => run.sourceId))], MAX_PROFILE_SESSION_CONCURRENCY,
+          jobId => this._cronRunsForJob(jobId, profile)),
+      ]);
+      const byId = new Map(jobs.map(job => [job.id, job]));
+      const descriptions = new Map(descriptionsByJob.flat().map(value => [value.run.id, value]));
+      return recent.map(value => {
+        const run = this._mapCronRun(descriptions.get(value.id) || { run: value, createdAt: value.createdAt });
+        return { backendId: this.id, jobId: `${this.id}:${value.sourceId}`,
+          jobName: byId.get(value.sourceId)?.name, agentId: profile.agentId, runId: value.id, ...run };
+      });
+    });
+    const rows = grouped.flat();
     rows.sort((left, right) => (right.finishedAt ?? right.startedAt ?? 0) - (left.finishedAt ?? left.startedAt ?? 0));
     const cap = Number.isSafeInteger(limit) && limit > 0 ? limit : 50;
     return { runs: rows.slice(0, cap), ...(rows.length > cap ? { truncated: true } : {}) };
@@ -6242,24 +6299,38 @@ class ShoggothBackend extends AgentBackend {
 
   async _dashboardRuns() {
     this._assertDomainReady();
-    const runs = [];
-    let aggregate = { bytes: 0, items: 0 };
-    for (const profile of this._profilesById.values()) {
-      const scoped = await this._page("run.list", {
-        profileId: profile.id,
-        sessionKey: null,
-        status: null,
-      }, "runs", {
-        maxBytes: MAX_DOMAIN_AGGREGATE_BYTES,
-        maxItems: MAX_DOMAIN_AGGREGATE_ITEMS,
+    if (this._profilesById.size === 0) return [];
+    const generation = this._generation;
+    if (this._dashboardRunRead?.generation === generation) return this._dashboardRunRead.promise;
+    const params = { profileId: null, sessionKey: null, status: null };
+    const pageBudget = { maxBytes: MAX_DOMAIN_AGGREGATE_BYTES, maxItems: MAX_DOMAIN_AGGREGATE_ITEMS };
+    const tracked = { generation, promise: null };
+    tracked.promise = this._page("run.list", { ...params, scope: { backendId: this.id, activeOnly: true } }, "runs", pageBudget)
+      .catch(async error => {
+        if (error?.code !== "INVALID_PARAMS") throw error;
+        const pages = await Promise.all(DASHBOARD_ACTIVE_RUN_STATUSES.map(status =>
+          this._page("run.list", { ...params, status }, "runs", pageBudget)));
+        return pages.flat();
+      })
+      .then(runs => {
+        if (this._generation !== generation) throw safeError(null, "BACKEND_NOT_READY");
+        this._assertDomainReady();
+        this._assertDomainAggregate(runs);
+        const owned = new Map();
+        for (const run of runs) {
+          if (!DASHBOARD_ACTIVE_RUN_STATUSES.includes(run.status)) throw safeError(null, "CHAT_RESPONSE_INVALID");
+          if (!this._profilesById.has(run.profileId)) continue;
+          // Legacy state reads can overlap a transition of the same run.
+          const previous = owned.get(run.id);
+          if (!previous || run.eventSeq > previous.eventSeq) owned.set(run.id, run);
+        }
+        return [...owned.values()];
+      })
+      .finally(() => {
+        if (this._dashboardRunRead === tracked) this._dashboardRunRead = null;
       });
-      for (const run of scoped) {
-        if (run.profileId !== profile.id) throw safeError(null, "PROFILE_NOT_FOUND");
-      }
-      aggregate = this._assertDomainAggregate(scoped, aggregate.bytes, aggregate.items);
-      runs.push(...scoped);
-    }
-    return runs;
+    this._dashboardRunRead = tracked;
+    return tracked.promise;
   }
 
   _dashboardRunningItem(run) {
@@ -6284,8 +6355,7 @@ class ShoggothBackend extends AgentBackend {
   async getRunningWork() {
     const runs = await this._dashboardRuns();
     const items = runs
-      .filter((run) => ["cron", "kanban", "inspiration"].includes(run.source)
-        && ["starting", "running", "waiting_approval", "waiting_input"].includes(run.status))
+      .filter((run) => ["cron", "kanban", "inspiration"].includes(run.source))
       .map((run) => this._dashboardRunningItem(run))
       .sort((left, right) => (
         (right.startedAt || 0) - (left.startedAt || 0) || left.id.localeCompare(right.id)
@@ -7070,6 +7140,11 @@ class ShoggothBackend extends AgentBackend {
     if (Object.hasOwn(opts,"connectorSelection")) throw Object.assign(new Error("OpenConnector 已退役，不能发送旧账号选择"), {code:"OPEN_CONNECTOR_RETIRED",receiptUncertain:true});
     const diagnosticStartedAt = Date.now();
     let diagnosticPhase = "app_preflight";
+    let phaseAt = diagnosticStartedAt, phaseMono = performance.now(), diagnosticOperation = runId;
+    let diagnosticOutcome = "success";
+    const finishPhase = () => this._sendLatency.record({ stage: `client_${diagnosticPhase}`, outcome: diagnosticOutcome,
+      operationId: diagnosticOperation, sessionKey: key, startedAt: phaseAt, finishedAt: Date.now(), durationMs: performance.now() - phaseMono });
+    const phase = value => { finishPhase(); diagnosticPhase = value; phaseAt = Date.now(); phaseMono = performance.now(); };
     let target;
     try {
       if (this._statusUncertain) {
@@ -7089,6 +7164,7 @@ class ShoggothBackend extends AgentBackend {
       const enabled = this._assertSessionRuntimeEnabled(target);
       if (enabled) await enabled;
     } catch (error) {
+      diagnosticOutcome = "error"; finishPhase();
       recordChatSendFailure({ paths: this.paths, method: "chat.send", phase: diagnosticPhase,
         input: { operationId: runId, sessionKey: key }, error, startedAt: diagnosticStartedAt, client: true });
       // No chat.send was attempted. Preserve this fact through the broker so
@@ -7097,6 +7173,7 @@ class ShoggothBackend extends AgentBackend {
     }
     const { sessionKey } = target;
     const operationId = sendOperationId(sessionKey, runId, this.randomUUID);
+    diagnosticOperation = operationId;
     let generation = this._generation;
     let resolveConsumerCancellation;
     const poll = {
@@ -7153,7 +7230,7 @@ class ShoggothBackend extends AgentBackend {
       const supplied = opts.attachments ?? [];
       const pathAttachment = supplied.length ? null : explicitPathAttachment(message);
       const items = pathAttachment ? [pathAttachment] : supplied;
-      diagnosticPhase = "attachment_upload";
+      phase("attachment_upload");
       const attachments = items.length || !Array.isArray(items)
         ? await uploadChatAttachments((method, params) => {
           if (poll.cancelled) throw Object.assign(new Error("附件上传已取消"), { code: "ABORT_ERR" });
@@ -7161,10 +7238,10 @@ class ShoggothBackend extends AgentBackend {
         }, items, operationId) : [];
       if (poll.cancelled) return;
       let sent;
-      diagnosticPhase = "recall_observation";
+      phase("recall_observation");
       recall = this._watchAdmissionRecall(target, observerHooks, poll);
       try {
-        diagnosticPhase = "service_request";
+        phase("service_request");
         sent = await this._call("chat.send", {
           operationId,
           sessionKey,
@@ -7185,7 +7262,7 @@ class ShoggothBackend extends AgentBackend {
       }
       acceptedOrUncertain = true;
       recall.stop(true);
-      diagnosticPhase = "receipt_validation";
+      phase("receipt_validation");
       this._assertRunBinding(target, sent.run);
       opts.onAccepted?.();
       const currentSession = this._sessionsByKey.get(sessionKey);
@@ -7203,10 +7280,11 @@ class ShoggothBackend extends AgentBackend {
       this._emitRunStatus(observerHooks, state, sent.run.status, {
         reason: sent.reason, queuedAt: this.now(),
       });
-      diagnosticPhase = "run_observation";
+      phase("run_observation");
       await this._observeAcceptedRun({ key, sessionKey, target, run: sent.run,
         hooks: observerHooks, poll, generation, state });
     } catch (error) {
+      diagnosticOutcome = "error";
       recordChatSendFailure({ paths: this.paths, method: "chat.send", phase: diagnosticPhase,
         input: { operationId, sessionKey }, error, startedAt: diagnosticStartedAt, client: true });
       if (!terminalObserved && !opts.signal?.aborted) {
@@ -7222,6 +7300,7 @@ class ShoggothBackend extends AgentBackend {
         }
       }
     } finally {
+      finishPhase();
       recall?.stop(false);
       removeAbort?.();
       this._polls.delete(poll);

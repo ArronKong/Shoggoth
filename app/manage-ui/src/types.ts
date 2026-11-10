@@ -300,6 +300,9 @@ export interface UnifiedModel {
   name: string;
   provider: string;
   backendId: string; // "openclaw" | "hermes"
+  available?: boolean;
+  unavailableReason?: string;
+  unavailableUntil?: number;
   contextWindow?: number;
   reasoning?: boolean;
   thinkingOptions?: string[];
@@ -322,9 +325,15 @@ export interface UnifiedModel {
   defaultModelScopes?: string[];
 }
 
+export interface AgentModelCatalog {
+  models: UnifiedModel[];
+  defaultModel: string | null;
+}
+
 // 聊天面能力（GET /__api/chat/capabilities?agent=）：composer 按此渲染附件
 // accept 列表与大小预检。image 是兼容底线；pdf/file 由真实可传输的后端声明。
 export interface ChatCapabilities {
+  prewarm?: boolean;
   runtimeFeatures?: RuntimeFeatures;
   nativeUiArtifactsV1?: boolean;
   attachments: {
@@ -2062,6 +2071,7 @@ export interface UnifiedAgentDetail {
   model?: string;
   fallbacks?: string[];
   workspace?: string;
+  managedWorkspace?: { path: string; exists: boolean };
   emoji?: string;
   provider?: string;
   runtime?: string;
@@ -3490,6 +3500,20 @@ export interface DashboardSummary {
 
 export type DashboardLiveWork = Pick<DashboardSummary, "generatedAt" | "running" | "approvals">;
 
+export interface DashboardSectionScope {
+  generatedAt: number;
+  sinceMs: number;
+  status: Array<Pick<BackendStatus, "id" | "name" | "disabled">>;
+}
+
+export type DashboardSections = {
+  activity: DashboardSectionScope & Pick<DashboardSummary, "runs" | "activityPage" | "runStats" | "taskStats">;
+  usage: DashboardSectionScope & Pick<DashboardSummary, "usage"> & { trends?: Array<Pick<UsageSeries, "daily">> };
+  artifacts: DashboardSectionScope & Pick<DashboardSummary, "artifacts" | "groupArtifacts">;
+};
+
+export type DashboardSnapshot = Omit<DashboardSummary, "status"> & DashboardSectionScope;
+
 export type InspirationStatus = 'saved' | 'queued' | 'starting' | 'running' | 'waiting_input' | 'waiting_approval' | 'completed' | 'failed' | 'canceled' | 'interrupted' | 'skipped' | 'unknown';
 export type InspirationFilter = 'all' | 'saved' | 'active' | 'result' | 'favorite' | 'archived';
 export interface InspirationExecution {
@@ -3554,7 +3578,8 @@ export type InspirationModelSelection = { model: string; bindingId: string; mode
 export interface InspirationModels {
   defaultModel: string | null;
   defaultBindingId?: string;
-  models: Array<SessionRuntimeModel | { id: string; name: string; provider: string | null }>;
+  defaultProvider?: string;
+  models: Array<SessionRuntimeModel | Pick<UnifiedModel, "id" | "name" | "available" | "pricing" | "reasoning"> & { provider: string | null }>;
   runtimes?: SessionRuntimeModels['runtimes'];
 }
 export interface RuntimeSelectionPolicy {

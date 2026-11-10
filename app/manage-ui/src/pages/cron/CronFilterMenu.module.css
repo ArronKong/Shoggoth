@@ -93,7 +93,7 @@
   width: 240px;
   max-height: min(22rem, var(--available-height, 22rem));
   overflow: hidden;
-  padding: 20px 32px;
+  padding: 32px;
   animation: cronFilterPopIn var(--ui-motion-popover) cubic-bezier(0.22, 1, 0.36, 1);
 }
 .popup[data-agent-picker] {

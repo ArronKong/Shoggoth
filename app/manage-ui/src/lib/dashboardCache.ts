@@ -1,4 +1,4 @@
-import type { DashboardSummary } from "../types";
+import type { DashboardSectionScope, DashboardSnapshot } from "../types";
 
 /** Dashboard 摘要缓存只使用一个稳定 key，后续写入会原位覆盖。 */
 export const DASHBOARD_CACHE_KEY = "shoggoth.dashboard.summary";
@@ -9,6 +9,8 @@ export const DASHBOARD_CACHE_VERSION = 2;
 
 /** 原始 JSON 的最大 UTF-8 字节数，避免解析异常大的本地缓存。 */
 export const DASHBOARD_CACHE_MAX_BYTES = 1024 * 1024;
+
+export const DASHBOARD_REFRESH_INTERVAL_MS = 45_000;
 
 /** Dashboard 缓存所需的最小 Storage 接口，便于测试和其它宿主注入。 */
 export interface DashboardCacheStorage {
@@ -24,8 +26,8 @@ export interface DashboardCacheOptions {
 }
 
 /** Dashboard 渲染层只消费这一份统一状态，避免缓存首帧被实时 loading/error 覆盖。 */
-export interface DashboardViewState {
-  data: DashboardSummary | undefined;
+export interface DashboardViewState<T> {
+  data: T | undefined;
   showLoading: boolean;
   blockingError: string | null;
   nonBlockingError: string | null;
@@ -34,7 +36,7 @@ export interface DashboardViewState {
 interface DashboardCacheEnvelope {
   version: number;
   savedAt: number;
-  data: DashboardSummary;
+  data: DashboardSnapshot;
 }
 
 /** 判断值是否为非 null、非数组的普通记录形状。 */
@@ -73,21 +75,21 @@ function hasOptionalBoolean(record: Record<string, unknown>, key: string): boole
   return record[key] === undefined || typeof record[key] === "boolean";
 }
 
-/** 校验 Dashboard 健康状态行会直接读取的字段。 */
+/** 分区响应只含后端标识与名称。旧快照里的健康字段仍可读取。 */
 function isBackendStatus(value: unknown): boolean {
   if (
     !isRecord(value) ||
     typeof value.id !== "string" ||
     typeof value.name !== "string" ||
-    typeof value.connected !== "boolean" ||
-    !isRecord(value.info)
+    !hasOptionalBoolean(value, "disabled") ||
+    !hasOptionalBoolean(value, "connected")
   ) {
     return false;
   }
 
-  return ["agents", "cronJobs", "profiles"].every((key) =>
-    hasOptionalFiniteNumber(value.info as Record<string, unknown>, key),
-  );
+  if (value.info === undefined) return true;
+  const info = value.info;
+  return isRecord(info) && ["agents", "cronJobs", "profiles"].every(key => hasOptionalFiniteNumber(info, key));
 }
 
 /** 校验运行记录的必需键和 Dashboard/弹窗会消费的所有可选字段。 */
@@ -303,7 +305,7 @@ function isTaskStats(value: unknown): boolean {
  * 递归校验 DashboardSummary 的最低安全形状。
  * 仅约束当前读取方会直接访问的结构，并允许额外字段以维持前后兼容。
  */
-function isDashboardSummary(value: unknown, todayStart: number): value is DashboardSummary {
+function isDashboardSummary(value: unknown, todayStart: number): value is DashboardSnapshot {
   if (!isRecord(value)) return false;
   if (!isFiniteNumber(value.generatedAt) || value.sinceMs !== todayStart) return false;
   if (!Array.isArray(value.status) || !value.status.every(isBackendStatus)) return false;
@@ -335,7 +337,7 @@ function resolveTodayStart(now: number): number | null {
  * 将原始缓存字符串解码为当天 DashboardSummary。
  * 任意大小、语法、版本、时间或递归形状异常都返回 null，绝不向外抛错。
  */
-export function decodeDashboardCache(raw: string, now: number): DashboardSummary | null {
+export function decodeDashboardCache(raw: string, now: number): DashboardSnapshot | null {
   try {
     const todayStart = resolveTodayStart(now);
     if (todayStart === null || typeof raw !== "string") return null;
@@ -356,7 +358,7 @@ export function decodeDashboardCache(raw: string, now: number): DashboardSummary
  * 将当天 DashboardSummary 编码为单版本信封。
  * 写入前同样校验日期和递归形状，避免把昨日数据或不安全结构持久化。
  */
-export function encodeDashboardCache(summary: DashboardSummary, now: number): string | null {
+export function encodeDashboardCache(summary: DashboardSnapshot, now: number): string | null {
   try {
     const todayStart = resolveTodayStart(now);
     if (todayStart === null || !isDashboardSummary(summary, todayStart)) return null;
@@ -384,7 +386,7 @@ function resolveDependencies(options: DashboardCacheOptions): { storage: Dashboa
 /**
  * 从单 key 读取缓存；坏缓存会尽力清理，storage 的 getter/get/remove 异常均被吞掉。
  */
-export function readDashboardCache(options: DashboardCacheOptions = {}): DashboardSummary | null {
+export function readDashboardCache(options: DashboardCacheOptions = {}): DashboardSnapshot | null {
   try {
     const { storage, now } = resolveDependencies(options);
     const raw = storage.getItem(DASHBOARD_CACHE_KEY);
@@ -408,7 +410,7 @@ export function readDashboardCache(options: DashboardCacheOptions = {}): Dashboa
  * 校验并覆盖写入单 key；默认 storage getter 或 setItem 抛错时返回 false。
  */
 export function writeDashboardCache(
-  summary: DashboardSummary,
+  summary: DashboardSnapshot,
   options: DashboardCacheOptions = {},
 ): boolean {
   try {
@@ -424,37 +426,42 @@ export function writeDashboardCache(
 
 /** 比较实时摘要版本与最近成功持久化版本，避免 StrictMode 和路由重挂重复序列化。 */
 export function shouldWriteDashboardCache(
-  liveData: DashboardSummary,
+  liveData: DashboardSectionScope,
   cachedGeneratedAt: number | undefined,
 ): boolean {
   return liveData.generatedAt !== cachedGeneratedAt;
 }
 
 /**
- * 合并实时摘要与持久缓存：实时结果优先，有数据时 loading 和 error 都不得遮挡主体。
- * error 在有数据时降级为非阻塞提示，无数据时才作为阻塞错误展示。
+ * 重进页面时只立即复用近期快照。过期的同日快照留给读取失败时兜底，
+ * 当前页面已展示的数据可在后台轮询期间继续使用。
  */
-export function resolveDashboardViewState(
-  liveData: DashboardSummary | undefined,
-  persistedData: DashboardSummary | null,
+export function resolveDashboardViewState<T extends DashboardSectionScope>(
+  liveData: T | undefined,
+  persistedData: T | null,
   loading: boolean,
   error: string | null,
   enabledBackendIds?: readonly string[],
-): DashboardViewState {
+  freshness?: { openedAt: number; now?: number },
+): DashboardViewState<T> {
+  const dayStart = freshness ? getLocalDayStart(freshness.now ?? Date.now()) : undefined;
   // Aggregate task totals cannot be safely subtracted from a paginated snapshot.
   // Reuse the whole summary only when it belongs to the current connection scope.
-  const inScope = (summary: DashboardSummary | null | undefined) => {
-    if (!summary || !enabledBackendIds) return summary;
+  const inScope = (summary: T | null | undefined) => {
+    if (!summary || (dayStart !== undefined && summary.sinceMs !== dayStart)) return undefined;
+    if (!enabledBackendIds) return summary;
     const active = summary.status.filter(backend => !backend.disabled).map(backend => backend.id);
     return active.length === enabledBackendIds.length && active.every(id => enabledBackendIds.includes(id))
       ? summary : undefined;
   };
-  const data = inScope(liveData) ?? inScope(persistedData) ?? undefined;
+  const snapshot = inScope(liveData) ?? inScope(persistedData);
+  const data = !freshness || error || (snapshot && snapshot.generatedAt >= freshness.openedAt - DASHBOARD_REFRESH_INTERVAL_MS)
+    ? snapshot : undefined;
   const hasData = data !== undefined;
 
   return {
     data,
-    showLoading: loading && !hasData,
+    showLoading: !hasData && !error && (loading || !!freshness),
     blockingError: hasData ? null : error,
     nonBlockingError: hasData ? error : null,
   };

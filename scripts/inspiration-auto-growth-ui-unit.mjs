@@ -18,7 +18,7 @@ const load = (file, stubs, globals = {}) => {
     esModuleInterop: true, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
   vm.runInNewContext(code, { module, exports: module.exports,
-    require: name => name.endsWith('.css') ? { __esModule: true, default: styles } : stubs[name] || uiRequire(name),
+    require: name => name.endsWith('.css') ? { __esModule: true, default: styles } : name.endsWith('.svg') ? name : stubs[name] || uiRequire(name),
     window: { setInterval: () => 1, clearInterval() {}, addEventListener() {}, removeEventListener() {} },
     document: { hidden: false }, Error, ResizeObserver: class { observe() {} disconnect() {} },
     requestAnimationFrame: callback => setImmediate(callback), ...globals });
@@ -51,13 +51,19 @@ const noticeStorage = new Map();
 const localStorage = { getItem: key => noticeStorage.get(key) ?? null, setItem: (key, value) => noticeStorage.set(key, value) };
 const loadNoticeBadge = () => load('pages/use-inspiration-notice-badge.ts', {}, { localStorage });
 let noticeBadge = loadNoticeBadge();
+const backendTabIcon = load('components/BackendTabIcon.tsx', {});
+const agentPicker = load('components/AgentPicker.tsx', {
+  './AgentAvatar': avatarModule,
+  './BackendTabIcon': backendTabIcon,
+  './LiquidPill': load('components/LiquidPill.tsx', {}),
+});
 const Component = load('pages/InspirationAutoGrowth.tsx', {
   'react-i18next': { useTranslation: () => ({ t }) },
   'react-dom': { createPortal: children => children },
   '@base-ui/react/popover': { Popover },
-  '../components/BackendTabIcon': load('components/BackendTabIcon.tsx', {}),
+  '../components/BackendTabIcon': backendTabIcon,
+  '../components/AgentPicker': agentPicker,
   '../components/AgentAvatar': avatarModule,
-  '../components/LiquidPill': load('components/LiquidPill.tsx', {}),
   '../components/Field': { Switch: props => React.createElement('button', { role: 'switch',
     'aria-checked': props.checked, disabled: props.disabled, onClick: () => props.onChange(!props.checked) }) },
   '../lib/usePageCache': cache,

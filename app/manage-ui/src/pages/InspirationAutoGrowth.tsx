@@ -4,8 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 import { Popover } from '@base-ui/react/popover';
 import { Switch } from '../components/Field';
-import BackendTabIcon, { sortBackendTabs } from '../components/BackendTabIcon';
-import LiquidPill from '../components/LiquidPill';
+import { AgentPickerOption, AgentPickerTabs } from '../components/AgentPicker';
+import { sortBackendTabs } from '../components/BackendTabIcon';
 import { usePageCache } from '../lib/usePageCache';
 import { useScrollFade } from '../lib/useScrollFade';
 import { useBackendCatalog } from '../lib/backends';
@@ -215,29 +215,18 @@ export default function InspirationAutoGrowth({ onOpen, onChange, noticeTarget }
               </h2>
               {selected.length > 0 && <span className={styles.count} role="status" aria-label={t('inspiration.growth.selectedCount', { count: selected.length })}>{selected.length}</span>}
             </div>
-            {hasRuntimeTabs && <div className={styles.runtimes} role="group" aria-label={t('inspiration.growth.filterBackend')}>
-              <LiquidPill key={JSON.stringify(runtimes.map(runtime => runtime.id))} value={activeBackend || ''}
-                activeSelector='[aria-pressed="true"]' className={styles.runtimePill} />
-              {runtimes.map(runtime => <button key={runtime.id} type="button" className={styles.runtime}
-                aria-label={runtime.name} title={runtime.name} aria-pressed={runtime.id === activeBackend}
-                data-runtime={runtime.id} disabled={busy} onClick={() => setBackend(runtime.id)}>
-                <BackendTabIcon backend={runtime.id} label={runtime.name} />
-              </button>)}
-            </div>}
+            {hasRuntimeTabs && <AgentPickerTabs items={runtimes} value={activeBackend} onChange={setBackend}
+              label={t('inspiration.growth.filterBackend')} disabled={busy} />}
             <div id="inspiration-growth-executors" className={styles.agents + ' ' + styles.scrollFade} {...pickerScroll}
               role="group" aria-label={t('inspiration.growth.executors')}>
               {visibleAgents.map(choice => {
                 const checked = selected.some(value => keyOf(value) === keyOf(choice.value));
                 const label = choice.name + ' · ' + choice.backendName + (choice.available ? '' : ' · ' + t('inspiration.unavailable'));
-                return <button key={keyOf(choice.value)} type="button" className={styles.agent} role="checkbox" aria-checked={checked}
-                  aria-label={label} title={label} disabled={busy || (!choice.available && !checked)} onClick={() => {
+                return <AgentPickerOption key={keyOf(choice.value)} agentId={choice.value.agentId} name={choice.name}
+                  label={label} checked={checked} disabled={busy || (!choice.available && !checked)} onClick={() => {
                     if (saving.current || (!choice.available && !checked)) return;
                     setSelected(values => checked ? values.filter(value => keyOf(value) !== keyOf(choice.value)) : [...values, choice.value]);
-                  }}>
-                  <AgentAvatar value={choice.value} name={choice.name} />
-                  <span className={styles.agentName}>{choice.name}</span>
-                  {checked && <span className={styles.check} aria-hidden="true" />}
-                </button>;
+                  }} />;
               })}
               {visibleAgents.length === 0 && <p className={styles.empty} role="status">{t(roster.loading ? 'common.loading' : 'inspiration.growth.noBackendAgents')}</p>}
             </div>

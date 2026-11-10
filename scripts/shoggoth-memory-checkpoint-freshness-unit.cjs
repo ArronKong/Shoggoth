@@ -440,3 +440,121 @@ test("legacy fresh native context restores all visible history after a withdrawa
       "超过预算且不能安全摘要时必须拒绝向新 native 线程发送截断历史");
   } finally { f.cleanup(); }
 });
+
+function commitPlan(store, plan, text) {
+  const { prompt: _prompt, targetThroughSeq: _target, windowTokens: _window, ...coverage } = plan;
+  return store.commit({ ...coverage, summary: summary(text), provenance: { runId: "summary", bindingId: "binding",
+    runtime: "pi", model: "model", method: "model" } });
+}
+
+test("after a forget the visible history is summarized again and the older summary is never used", () => {
+  const f = contextFixture();
+  const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts,
+    memoryStore: f.memoryStore, recallPolicy: f.memoryEngine.recallPolicy });
+  store.open(); f.compiler.checkpointStore = store;
+  const plan = () => planConversationCompaction({ profileId: f.profile.id, sessionId: f.transcriptSessionId,
+    transcriptStore: f.transcripts, checkpointStore: store, force: true, targetThroughSeq: 4 });
+  try {
+    f.append({ id: "private-1", runId: "run-private", kind: "user", content: { text: "请记住我的私人代号是蓝鲸" } });
+    f.append({ id: "project-1", runId: "run-project", kind: "user", content: { text: "项目代号是海豚，按周五交付推进" } });
+    f.append({ id: "tool-1", runId: "run-project", kind: "tool_result",
+      content: { transcriptType: "tool_result", result: { detail: "目录列表 alpha beta" } } });
+    f.append({ id: "attachment-1", runId: "run-project", kind: "user",
+      content: { text: "这是附件", attachments: [{ name: "计划表.txt" }] } });
+    const item = f.memoryEngine.propose({ profileId: f.profile.id, scope: "user", type: "semantic",
+      content: "私人代号是蓝鲸", sourceRefs: ["private-1", "run-private"], classification: "explicit" });
+    assert.equal(store.revocationVisibility(f.profile.id), null);
+    const before = plan();
+    assert.match(before.prompt, /蓝鲸/u);
+    assert.match(before.prompt, /目录列表/u);
+    assert.equal(before.expectedRevocationVisibility, null);
+    const old = commitPlan(store, before, "私人代号是蓝鲸；项目代号是海豚");
+    assert.equal(store.compatible(f.profile.id, f.transcriptSessionId)?.id, old.id);
+
+    f.memoryEngine.delete({ profileId: f.profile.id, id: item.id, reason: "forgotten", operationId: "forget-code-name" });
+    const visibility = store.revocationVisibility(f.profile.id);
+    assert.equal(typeof visibility, "string");
+    assert.equal(store.compatible(f.profile.id, f.transcriptSessionId), null, "a summary made before the forget is retired");
+    assert.throws(() => commitPlan(store, before, "私人代号是蓝鲸；项目代号是海豚"), { code: "CHECKPOINT_STALE" },
+      "a plan made before the forget cannot commit");
+
+    // One forget no longer disables summaries for the Profile: what is still
+    // visible is summarized again, without the forgotten source, tool payloads
+    // or attachment references.
+    const after = plan();
+    assert.ok(after, "the session can be summarized again");
+    assert.match(after.prompt, /海豚/u);
+    assert.doesNotMatch(after.prompt, /蓝鲸/u);
+    assert.doesNotMatch(after.prompt, /目录列表|计划表/u);
+    assert.equal(after.previousId, null, "the retired summary is not merged into the new one");
+    assert.equal(after.expectedRevocationVisibility, visibility);
+    assert.equal(after.throughSeq, 4, "coverage still spans the omitted records");
+    const current = commitPlan(store, after, "项目代号是海豚，周五交付");
+    assert.equal(store.compatible(f.profile.id, f.transcriptSessionId)?.id, current.id);
+    const anchor = JSON.parse(fs.readFileSync(path.join(f.paths.agentsDir, f.profile.id, "conversation-checkpoints",
+      `${current.id}.memory-anchor.json`), "utf8"));
+    assert.equal(anchor.version, 3);
+    assert.equal(anchor.revocationVisibility, visibility);
+
+    f.append({ id: "current", runId: "run-current", kind: "user", content: { text: "继续", operationId: "current" } });
+    const compiled = compile(f);
+    assert.equal(compiled.blocks.some((block) => block.id === "conversation-checkpoint"), true);
+    assert.match(compiled.dynamicContext, /周五交付/u);
+    assert.doesNotMatch(compiled.dynamicContext, /蓝鲸/u);
+
+    // A later forget changes the visibility state and retires this summary too.
+    const second = f.memoryEngine.propose({ profileId: f.profile.id, scope: "agent", type: "semantic",
+      content: "临时代号白鲸", sourceRefs: ["user-edit:manual"], classification: "explicit" });
+    f.memoryEngine.delete({ profileId: f.profile.id, id: second.id, reason: "forgotten", operationId: "forget-second" });
+    assert.notEqual(store.revocationVisibility(f.profile.id), visibility);
+    assert.equal(store.compatible(f.profile.id, f.transcriptSessionId), null);
+    assert.throws(() => commitPlan(store, after, "项目代号是海豚，周五交付"), { code: "CHECKPOINT_STALE" });
+    const rebuilt = compile(f);
+    assert.equal(rebuilt.blocks.some((block) => block.id === "conversation-checkpoint"), false,
+      "the retired summary leaves the context");
+    assert.match(rebuilt.dynamicContext, /USER: 项目代号是海豚，按周五交付推进/u, "the visible original returns instead");
+    assert.doesNotMatch(rebuilt.dynamicContext, /蓝鲸|白鲸/u);
+  } finally { store.close(); f.cleanup(); }
+});
+
+test("a recall policy that cannot report visibility keeps summaries off after a forget", () => {
+  const f = contextFixture();
+  const policy = f.memoryEngine.recallPolicy;
+  const limited = { getRevision: (id) => policy.getRevision(id), hasRevocations: (id) => policy.hasRevocations(id) };
+  const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts,
+    memoryStore: f.memoryStore, recallPolicy: limited });
+  store.open();
+  try {
+    f.append({ id: "project-1", runId: "run-project", kind: "user", content: { text: "项目代号是海豚" } });
+    const item = f.memoryEngine.propose({ profileId: f.profile.id, scope: "agent", type: "semantic",
+      content: "临时代号蓝鲸", sourceRefs: ["user-edit:manual"], classification: "explicit" });
+    f.memoryEngine.delete({ profileId: f.profile.id, id: item.id, reason: "forgotten", operationId: "forget-limited" });
+    assert.equal(store.revocationVisibility(f.profile.id), false);
+    assert.equal(planConversationCompaction({ profileId: f.profile.id, sessionId: f.transcriptSessionId,
+      transcriptStore: f.transcripts, checkpointStore: store, force: true, targetThroughSeq: 1 }), null);
+  } finally { store.close(); f.cleanup(); }
+});
+
+test("a truncated fresh projection after a forget reaches admission when summaries are available", () => {
+  const f = contextFixture();
+  const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts,
+    memoryStore: f.memoryStore, recallPolicy: f.memoryEngine.recallPolicy });
+  store.open(); f.compiler.checkpointStore = store;
+  try {
+    const item = f.memoryEngine.propose({ profileId: f.profile.id, scope: "agent", type: "semantic",
+      content: "不再使用临时代号蓝鲸", sourceRefs: ["user-edit:manual"], classification: "explicit" });
+    f.memoryEngine.delete({ profileId: f.profile.id, id: item.id, reason: "forgotten", operationId: "forget-long-history" });
+    for (let index = 0; index < 60; index++) {
+      f.append({ id: `long-${index}`, runId: `run-long-${index}`, kind: "user",
+        content: { text: `较长的可见历史 ${index}：${"详细资料".repeat(400)}` } });
+    }
+    f.append({ id: "current", runId: "run-current", kind: "user", content: { text: "继续", operationId: "current" } });
+    const compiled = compile(f);
+    assert.equal(compiled.report.request.historyTruncated, true, "admission sees the truncation and can summarize");
+    const next = planConversationCompaction({ profileId: f.profile.id, sessionId: f.transcriptSessionId,
+      transcriptStore: f.transcripts, checkpointStore: store, freshSession: true,
+      requestPlan: compiled.report.request, currentOperationId: "current" });
+    assert.ok(next, "the visible history that did not fit is planned for a summary");
+    assert.match(next.prompt, /较长的可见历史 0/u);
+  } finally { store.close(); f.cleanup(); }
+});

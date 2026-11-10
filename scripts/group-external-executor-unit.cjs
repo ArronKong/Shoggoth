@@ -10,6 +10,7 @@ const { GroupChatStore } = require("../app/agent-service/group-chat-store");
 const { GroupChatDriver } = require("../app/agent-service/group-chat-driver");
 const { GroupDraftTracker } = require("../app/agent-service/group-drafts");
 const { GroupExternalExecutor } = require("../app/agent-service/group-external-executor");
+const { GroupActivityProjection } = require("../app/agent-service/group-activity");
 const { normalizeInteractiveRequestV1 } = require("../app/core/shoggoth-interaction-contract");
 
 const { resultPage } = require("../app/group-result-content");
@@ -125,6 +126,38 @@ test("external group replies retain verified response facts and optional unsuppo
     assert.equal(f.client.calls.filter(call => call.method === "group.external.start").length, 1);
     driver.stop();
   });
+});
+
+test("a completed external reply keeps bounded activity after reopening the group store", async t => {
+  const f = fixture(t), driver = f.make(), request = f.client.request.bind(f.client);
+  f.client.request = (method, params) => {
+    if (method !== "group.external.activity") return request(method, params);
+    const projection = new GroupActivityProjection({ runId: params.runId, executionGeneration: HOST }, { now: () => 100 });
+    projection.observeEvents([
+      { seq: 1, type: "tool.start", payload: { toolCallId: "saved", tool: { name: "read_file", input: { token: "external-canary" } } } },
+      { seq: 2, type: "tool.result", payload: { toolCallId: "saved", tool: { output: "Verified" } } },
+      { seq: 3, type: "tool.start", payload: { toolCallId: "no-result", tool: { name: "write_file" } } },
+    ], "host-stream");
+    projection.observeStatus("completed");
+    return { hostId: HOST, activity: projection.snapshot() };
+  };
+  await driver.start();
+  f.send("Read the fixture"); driver.wake(f.groupId); await f.settle(); await f.tick();
+  const reply = f.messages().find(message => message.author.kind === "member");
+  assert.ok(reply, "activity collection does not change the reply");
+  driver.stop(); f.reopen();
+  const source = { groupId: f.groupId, seq: reply.seq, messageId: reply.id, ownerScope: f.store.getOwnerScope() };
+  const activity = f.store.getMessageActivityTurn(source).turn.completedActivity;
+  assert.deepEqual([activity.groupId, activity.memberId, activity.opportunityId, activity.runId],
+    [reply.groupId, reply.author.memberId, reply.origin.opportunityId, reply.origin.runId]);
+  assert.deepEqual(activity.recentTools.map(tool => [tool.id, tool.output]), [["saved", "Verified"]]);
+  assert.doesNotMatch(JSON.stringify(activity), /external-canary|host-stream|textMessages/u);
+  const revision = f.store.getGroup(f.groupId).group.metadataRevision;
+  f.store.deleteGroup({ groupId: f.groupId, expectedMetadataRevision: revision });
+  assert.equal(f.store.confirmGroupDeletionHosts(f.groupId, f.store.groupDeletionTargets(f.groupId).digest), true);
+  assert.equal(f.store.finishGroupDeletion(f.groupId).status, "deleted");
+  assert.equal(f.store.getOpportunity(reply.origin.opportunityId).completedActivity, undefined, "deletion erases the saved detail");
+  assert.throws(() => f.store.getMessageActivityTurn(source), { code: "GROUP_CHAT_DELETED" });
 });
 
 test("a persisted stop retries the same cancel operation after a temporary bridge failure", async t => {

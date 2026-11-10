@@ -54,9 +54,16 @@ const wait = async (predicate: () => unknown, label: string) => {
   }
   await frame();
 };
-const pageButton = (element: Element = thread()) => element.querySelector<HTMLButtonElement>('[data-testid="chat-history-earlier"]');
+const pageRetry = () => thread().querySelector<HTMLButtonElement>('[data-testid="chat-history-earlier-retry"]');
 const boundaryNote = (element: Element = thread()) => element.querySelector<HTMLElement>('[data-testid="chat-history-complete"]');
 const wheel = (element: HTMLElement, deltaY: number) => element.dispatchEvent(new WheelEvent("wheel", { deltaY, bubbles: true }));
+const scrollToTop = async (element: HTMLElement = thread()) => {
+  element.scrollTo({ top: 0, behavior: "instant" });
+  await frame();
+};
+const checkQuiet = (label: string, element: Element = thread()) => {
+  check(!element.querySelector(".chat-archive-bar"), `${label}: unexpected history control before user input`);
+};
 async function checkHistoryBoundary(label: string, element: HTMLElement = thread()) {
   check(!boundaryNote(element), `${label}: boundary hidden before user overscroll`);
   if (element.scrollHeight > element.clientHeight + 50) {
@@ -113,14 +120,18 @@ const visibleAnchor = (element: HTMLElement, selector: string) => {
   });
   return node ? { marker: node.textContent!.match(/HIST_\w+_\d{3}/)![0], top: node.getBoundingClientRect().top } : null;
 };
-async function earlier(id: string, expected: number, element: HTMLElement = thread(), immersive = false) {
-  const button = pageButton(element)!;
-  check(!!button && !button.disabled, `${id}: earlier button available`);
-  button.scrollIntoView({ block: "start" }); await frame(); await pause(80);
+async function earlier(id: string, expected: number, element: HTMLElement = thread(), immersive = false, keyboard = false) {
+  await pause(160); await scrollToTop(element);
+  check(element.scrollTop < 60, `${id}: scrolled to the history boundary (scrollTop=${element.scrollTop})`);
   const selector = immersive ? "[data-immersive-message]" : ".chat-bubble";
   const anchor = visibleAnchor(element, selector);
-  button.click();
-  await wait(() => count(id, element) === expected && !pageButton(element)?.disabled, `${id}: ${expected} visible messages`);
+  if (keyboard) {
+    element.focus({ preventScroll: true });
+    check(document.activeElement === element, `${id}: keyboard can focus the message list`);
+    element.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+  } else if (pageRetry() && !immersive) pageRetry()!.click();
+  else wheel(element, -20);
+  await wait(() => count(id, element) === expected, `${id}: ${expected} visible messages`);
   await pause(120); await frame();
   if (anchor) {
     const node = Array.from(element.querySelectorAll<HTMLElement>(selector)).find(node => node.textContent?.includes(anchor.marker));
@@ -133,7 +144,7 @@ state.runNewSessionHistoryFixture = async () => {
   const results = [];
   for (const row of cases.slice(0, 3)) {
     select(row.key);
-    await wait(() => count(row.id) === 50 && !!pageButton(), `${row.id}: parent history`);
+    await wait(() => count(row.id) === 50 && thread().dataset.historyLoaded === "true", `${row.id}: parent history`);
     const input = document.querySelector<HTMLTextAreaElement>(".chat-composer textarea")!;
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "/new");
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -167,11 +178,26 @@ state.runNewSessionHistoryFixture = async () => {
     if (row.id === "hermes") check(!(await stats()).requests.some((request: any) => request.key === created.key),
       "fresh Hermes history must not query its unpersisted transcript");
     await control(created.key, "append");
-    await wait(() => count(row.id) === 1 && !pageButton(),
+    await wait(() => count(row.id) === 1 && thread().dataset.historyLoaded === "true",
       `${row.id}: first persisted message loads normally`);
-    check(!thread().querySelector('[data-testid="chat-history-complete"]'),
-      `${row.id}: opening a short session must not show a history boundary note`);
+    checkQuiet(`${row.id}: short session`);
     await checkHistoryBoundary(`${row.id}: short session`);
+    if (row.id === "openclaw") {
+      await control(created.key, "short-archive");
+      const before = (await stats()).archiveRequests;
+      select(row.key); await wait(() => count(row.id) === 50, "open a long thread before reopening the short one");
+      select(created.key);
+      await wait(() => count(row.id) === 1 && thread().dataset.historyLoaded === "true", "reopen a short reset thread");
+      await pause(400);
+      checkQuiet("short reset thread");
+      check(count("archive") === 0 && (await stats()).archiveRequests === before, "opening a short reset thread must not probe its archive");
+      wheel(thread(), 20); await frame();
+      checkQuiet("downward input on short reset thread");
+      check((await stats()).archiveRequests === before, "downward input must not probe the archive");
+      wheel(thread(), -20); wheel(thread(), -20);
+      await wait(() => count("archive") === 50, "upward input loads archive from non-overflowing reset thread");
+      check((await stats()).archiveRequests === before + 1 && !boundaryNote(), "an upward burst loads one archive page");
+    }
     results.push({ backend: row.backendId, newSession: true, empty: true, immersive: true, reopened: true, firstMessage: true });
   }
   return results;
@@ -185,15 +211,18 @@ state.runHistoryFixture = async () => {
   const results = [];
   for (const row of cases) {
     select(row.key);
-    await wait(() => count(row.id) === 50 && !!pageButton() && !pageButton()!.disabled, `${row.id}: initial 50`);
+    await wait(() => count(row.id) === 50 && thread().dataset.historyLoaded === "true", `${row.id}: initial 50`);
     await pause(150);
+    await scrollToTop();
+    checkQuiet(`${row.id}: programmatic scroll to top`);
+    check(count(row.id) === 50, `${row.id}: programmatic scroll did not page`);
     const initialWatches = (await stats()).watches.filter((key: string) => key === row.key).length;
     const anchored = await earlier(row.id, 100);
     check((await stats()).watches.filter((key: string) => key === row.key).length === initialWatches,
       `${row.id}: older page restarted a live watcher`);
     await control(row.key, "fail");
-    pageButton()!.click();
-    await wait(() => pageButton()?.textContent?.includes("重试"), `${row.id}: retry state`);
+    await scrollToTop(); wheel(thread(), -20);
+    await wait(() => pageRetry()?.textContent?.includes("重试"), `${row.id}: retry state`);
     check(count(row.id) === 100, `${row.id}: failed page erased existing messages`);
     await control(row.key, "retry");
     await earlier(row.id, 150);
@@ -202,20 +231,17 @@ state.runHistoryFixture = async () => {
     await wait(() => count(row.id) === 151 && thread().textContent?.includes(`HIST_${row.id}_999`), `${row.id}: new arrival preserves expansion`);
     check(thread().textContent?.includes(oldest), `${row.id}: refresh lost expanded prefix`);
     await earlier(row.id, 182);
-    check(!boundaryNote() && !pageButton(), `${row.id}: exhausted history stays quiet by default`);
+    checkQuiet(`${row.id}: exhausted current history`);
     if (row.backendId !== "openclaw") await checkHistoryBoundary(row.id);
-    else {
-      thread().scrollTop = 0; wheel(thread(), -20); await frame();
-      check(!boundaryNote(), "available archive must not claim there are no earlier messages");
-    }
+    else check(count("archive") === 0, "current history paging must not load the reset archive");
     const other = cases.find(item => item.key !== row.key)!;
     select(other.key); await wait(() => count(other.id) === 50, "switch away");
     const observed: number[] = [];
     const observer = new MutationObserver(() => { if (thread()) observed.push(count(row.id)); });
     observer.observe(document.getElementById("root")!, { subtree: true, childList: true, characterData: true });
     select(row.key);
-    await wait(() => count(row.id) === 50 && !!pageButton(), `${row.id}: reopen 50`);
-    check(!boundaryNote(), `${row.id}: reopening hides the boundary`);
+    await wait(() => count(row.id) === 50 && thread().dataset.historyLoaded === "true", `${row.id}: reopen 50`);
+    checkQuiet(`${row.id}: reopening`);
     await pause(400); observer.disconnect();
     check(observed.every(value => value === 0 || value <= 50), `${row.id}: cached reopen flashed expanded history`);
     results.push({ reader: row.name, initial: 50, pages: [100, 150], afterArrival: 151, all: 182, reopen: 50, anchored });
@@ -237,47 +263,49 @@ state.runHistoryFixture = async () => {
   retry.click();
   const archiveButton = () => thread().querySelector<HTMLButtonElement>('[data-testid="chat-history-archive"]');
   const archiveLoading = () => thread().querySelector('[data-testid="chat-history-archive-loading"] [role="status"]');
-  await wait(() => count(openclaw.id) === 50 && !!pageButton()
-    && !!archiveButton(), "archive session");
+  await wait(() => count(openclaw.id) === 50 && thread().dataset.historyLoaded === "true", "archive session");
+  checkQuiet("archive session first paint");
+  const beforeArchive = (await stats()).archiveRequests;
+  for (const expected of [100, 150, 182]) await earlier(openclaw.id, expected);
+  check((await stats()).archiveRequests === beforeArchive, "archive read waits for another upward gesture after current history");
   await control(openclaw.key, "fail-archive-once");
-  archiveButton()!.click();
+  await scrollToTop(); wheel(thread(), -20);
   await wait(() => archiveButton()?.textContent?.includes("上滑重试"), "archive first attempt fails");
-  thread().scrollTop = 0;
-  wheel(thread(), -20);
+  check(!boundaryNote(), "failed archive read must not claim the history is exhausted");
+  await scrollToTop(); wheel(thread(), -20);
   await wait(() => !!archiveLoading(), "upward scroll shows archive retry loading");
   check(archiveLoading()?.textContent === "载入封存历史…", "archive retry exposes its loading status");
   const balls = archiveLoading()?.querySelector("svg");
   check(balls?.querySelectorAll("circle").length === 2 && balls.getBoundingClientRect().width === 36,
     "archive retry shows the small two-ball loader");
-  check(!archiveButton() && count(openclaw.id) === 50, "archive retry keeps current messages visible");
+  check(!archiveButton() && count(openclaw.id) === 182, "archive retry keeps current messages visible");
   wheel(thread(), -20); wheel(thread(), -20);
   await wait(() => count("archive") === 50 && !archiveLoading(), "archive retry restores the first page");
-  check((await stats()).archiveRequests === 2, "a wheel burst does not duplicate the archive retry");
+  check((await stats()).archiveRequests === beforeArchive + 2, "a wheel burst does not duplicate the archive retry");
   for (const expected of [100, 123]) {
-    const button = archiveButton()!;
-    check(!!button, `archive paging entry retained before ${expected}`); button.click();
-    await wait(() => count("archive") === expected, `archive ${expected}`);
-    check(count(openclaw.id) === 50, "archive paging changed current transcript size");
-    check(!boundaryNote(), "unread current history must not show an exhausted boundary");
+    await earlier("archive", expected);
+    check(count(openclaw.id) === 182, "archive paging changed current transcript size");
+    checkQuiet(`archive ${expected} after prepend`);
   }
-  for (const expected of [100, 150, 182]) await earlier(openclaw.id, expected);
+  check((await stats()).archiveRequests === beforeArchive + 2, "the remaining archive pages use the cached segments");
   await checkHistoryBoundary("OpenClaw current history and archive exhausted");
   const native = cases[2];
-  select(native.key); await wait(() => count(native.id) === 50 && !!pageButton(), "immersive source");
+  select(native.key); await wait(() => count(native.id) === 50 && thread().dataset.historyLoaded === "true", "immersive source");
   document.querySelector<HTMLButtonElement>('[data-testid="chat-immersive-enter"]')!.click();
-  await wait(() => !!document.querySelector("[data-glass-clip] [data-testid=chat-history-earlier]"), "immersive history control");
+  await wait(() => !!document.querySelector("[data-glass-clip]"), "immersive thread");
   const immersiveThread = document.querySelector<HTMLElement>("[data-glass-clip]")!;
   check(count(native.id, immersiveThread) === 50, "immersive first page");
-  await earlier(native.id, 100, immersiveThread, true);
+  checkQuiet("immersive initial history", immersiveThread);
+  await earlier(native.id, 100, immersiveThread, true, true);
   await earlier(native.id, 150, immersiveThread, true);
   await earlier(native.id, 182, immersiveThread, true);
   await checkHistoryBoundary("immersive", immersiveThread);
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   await wait(() => !document.querySelector("[data-glass-clip]"), "exit immersive");
   // A deliberately slow page completes after a session switch; it must not leak.
-  select(native.key); await wait(() => count(native.id) === 50 && !!pageButton(), "race source reopened");
+  select(native.key); await wait(() => count(native.id) === 50 && thread().dataset.historyLoaded === "true", "race source reopened");
   await control(native.key, "slow");
-  pageButton()!.click();
+  await scrollToTop(); wheel(thread(), -20);
   select(cases[1].key);
   await wait(() => count("hermes") === 50, "switch during older read");
   await pause(1800);

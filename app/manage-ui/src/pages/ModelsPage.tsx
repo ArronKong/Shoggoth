@@ -36,11 +36,12 @@ import {
 import { usePageCache } from "../lib/usePageCache";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { publishAppliedModelCatalog, revalidateModelCatalog } from "../model-catalog-store";
+import { sortBackendTabs } from "../components/BackendTabIcon";
 import BackendTabs, { type BackendId } from "../components/BackendTabs";
 import FilterTabs from "../components/FilterTabs";
 import SearchCapsule from "../components/SearchCapsule";
 import { useStickyState } from "../lib/useStickyState";
-import { useBackendCatalog, useBackendState } from "../lib/backends";
+import { resolveBackendAlias, SHOGGOTH_BACKEND, useBackendCatalog, useEnabledBackends } from "../lib/backends";
 import Modal, { DetailRow, ModalSection } from "../components/Modal";
 import { Field, Option, Select, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
@@ -107,8 +108,15 @@ const KEYS_ANCHOR = "models-provider-keys";
 const ENDPOINTS_ANCHOR = "models-provider-endpoints";
 
 export default function ModelsPage() {
-  const [backend, setBackend] = useBackendState("models", undefined, { surface: "models" });
+  const location = useLocation();
   const backendCatalog = useBackendCatalog("models");
+  const availableBackends = useEnabledBackends("models");
+  const [selectedBackend, setBackend] = useState(() => new URLSearchParams(location.search).get("backend"));
+  const preferredBackend = selectedBackend && resolveBackendAlias(selectedBackend, backendCatalog);
+  const firstBackend = sortBackendTabs(backendCatalog).find(({ id }) => availableBackends.includes(id));
+  const backend = preferredBackend && availableBackends.includes(preferredBackend)
+    ? preferredBackend
+    : firstBackend?.id ?? SHOGGOTH_BACKEND.id;
   const accountBackend = backendCatalog.find((item) => item.id === backend && item.surfaces.oauth
     && (item.connectionMode === "builtin-service" || item.connectionMode === "native-runtime"));
   const [accountRefreshKey, setAccountRefreshKey] = useState(0);
@@ -1065,9 +1073,8 @@ export default function ModelsPage() {
     ? (capabilities.blockers || ["unsupported"]).map(capabilityBlockerMessage).join(" ")
     : "";
 
-  // 「代理」页概览的设置引导跳过来时带 ?section=keys|endpoints：滚到对应区。
+  // 「代理」页概览的设置引导带上后端和目标区块，加载后滚到对应区块。
   // 一次性消费掉（replace 掉 query），否则页内再导航会重复滚动。
-  const location = useLocation();
   const navigate = useNavigate();
   useEffect(() => {
     const section = new URLSearchParams(location.search).get("section");

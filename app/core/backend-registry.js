@@ -168,6 +168,7 @@ class BackendRegistry extends EventEmitter {
   updateGroupChat(id, input) { return this._requireGroupChatOwner().updateGroupChat(id, input); }
   deleteGroupChat(id, input) { return this._requireGroupChatOwner().deleteGroupChat(id, input); }
   addGroupChatMember(id, input) { return this._requireGroupChatOwner().addGroupChatMember(id, input); }
+  updateGroupChatMembers(id, input) { return this._requireGroupChatOwner().updateGroupChatMembers(id, input); }
   getGroupChatMemberModels(id, memberId) { return this._requireGroupChatOwner().getGroupChatMemberModels(id, memberId); }
   setGroupChatMemberModel(id, input) { return this._requireGroupChatOwner().setGroupChatMemberModel(id, input); }
   removeGroupChatMember(id, input) { return this._requireGroupChatOwner().removeGroupChatMember(id, input); }
@@ -1919,6 +1920,29 @@ class BackendRegistry extends EventEmitter {
     return { generatedAt: Date.now(), running, approvals };
   }
 
+  // The page renders these independently. Backend identity is enough to
+  // scope a snapshot; probing connection health belongs to the status API.
+  async getDashboardSection(section, { sinceMs, runsLimit = 50, artifactsLimit = 20 } = {}) {
+    const since = Number.isFinite(sinceMs) ? sinceMs : new Date().setHours(0, 0, 0, 0);
+    const backends = this._activeBackends();
+    const status = backends.map(({ id, name }) => ({ id, name }));
+    let snapshot;
+    switch (section) {
+      case "activity":
+        snapshot = await this._dashboardActivitySummary({ since, runsLimit, backends, fresh: true });
+        break;
+      case "usage":
+        snapshot = await this._dashboardUsage(backends, { waitMs: null });
+        break;
+      case "artifacts":
+        snapshot = await this._dashboardArtifacts({ since, artifactsLimit, backends });
+        break;
+      default:
+        throw new Error("invalid dashboard section");
+    }
+    return { ...snapshot, sinceMs: since, status, generatedAt: Date.now() };
+  }
+
   /**
    * One-shot aggregate for the dashboard page. Every section is fetched
    * per-backend behind its own try/catch (铁律 4) — this method never throws;
@@ -1933,63 +1957,79 @@ class BackendRegistry extends EventEmitter {
   async getDashboardSummary({ sinceMs, runsLimit = 50, artifactsLimit = 20 } = {}) {
     const since = Number.isFinite(sinceMs) ? sinceMs : new Date().setHours(0, 0, 0, 0);
     const backends = this._activeBackends();
-    const section = (label, fn) => this._dashboardSection(label, fn, backends);
+    const [status, { running, approvals }, artifacts, { usage }, activity] = await Promise.all([
+      this.getStatus(),
+      this.getDashboardLiveWork(),
+      this._dashboardArtifacts({ since, artifactsLimit, backends }),
+      this._dashboardUsage(backends),
+      this._dashboardActivitySummary({ since, runsLimit, backends }),
+    ]);
+    return { generatedAt: Date.now(), sinceMs: since, status, running, approvals, ...artifacts, usage, ...activity };
+  }
+
+  async _dashboardArtifacts({ since, artifactsLimit, backends }) {
+    const [artifacts, groupArtifacts] = await Promise.all([
+      this._dashboardSection("getRecentArtifacts",
+        backend => backend.getRecentArtifacts({ limit: artifactsLimit, sinceMs: since }), backends),
+      this._dashboardGroupArtifacts({ sinceMs: since, limit: artifactsLimit, backends }),
+    ]);
+    return { artifacts, groupArtifacts };
+  }
+
+  async _dashboardUsage(backends, { waitMs = DASHBOARD_USAGE_WAIT_MS } = {}) {
+    const results = await Promise.all(backends.map(async (backend) => {
+      let timer;
+      try {
+        // Today and yesterday have separate failure boundaries. A failed
+        // trend query must not discard a valid full today's total.
+        const read = Promise.allSettled([
+          backend.getUsageSeries("today"),
+          backend.getUsageSeries("7d"),
+        ]);
+        const series = waitMs === null ? await read : await Promise.race([
+          read,
+          new Promise(resolve => { timer = setTimeout(() => resolve(null), waitMs); }),
+        ]);
+        if (!series) return { entry: { backend: backend.id, error: "pending" } };
+        const [todayResult, weekResult] = series;
+        const todaySeries = todayResult.status === "fulfilled" ? todayResult.value : null;
+        const series7d = weekResult.status === "fulfilled" ? weekResult.value : null;
+        const now = Date.now();
+        const yesterdayKey = this._localDateStr(now - 86_400_000);
+        const daily = Array.isArray(series7d?.daily) ? series7d.daily : [];
+        if (todayResult.status !== "fulfilled") {
+          return { entry: { backend: backend.id, error: "unavailable", availability: "unavailable" }, trend: { daily } };
+        }
+        const yesterday = daily.find(d => d?.date === yesterdayKey);
+        const tt = todaySeries?.totals;
+        const valid = tt && Number.isFinite(tt.totalTokens) && Number.isFinite(tt.totalCost);
+        const availability = !valid ? "unavailable" : todaySeries.availability
+          || (todaySeries.cacheStatus === "refreshing" ? "partial" : "complete");
+        return {
+          entry: {
+            backend: backend.id, availability,
+            ...(valid ? { today: { date: this._localDateStr(now), ...tt } } : { error: "unavailable" }),
+            ...(yesterday ? { yesterday } : {}),
+            yesterdayComplete: !!series7d && !["partial", "unavailable"].includes(series7d.availability),
+          },
+          trend: { daily },
+        };
+      } catch (err) {
+        return { entry: { backend: backend.id, error: err?.message || String(err) } };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }));
+    return { usage: results.map(({ entry }) => entry), trends: results.flatMap(({ trend }) => trend ? [trend] : []) };
+  }
+
+  async _dashboardActivitySummary({ since, runsLimit, backends, fresh = false }) {
     // 活动聚合会拉取当天 cron 全量；与其余 section 同时启动，并让 summary 复用
     // 其中的原始 runs，避免首屏再逐后端重复请求一次 getRecentCronRuns。
-    const activityPromise = this.getDashboardActivityData({ sinceMs: since }).catch((err) => {
+    const activity = await this.getDashboardActivityData({ sinceMs: since, fresh }).catch((err) => {
       console.error("[registry] dashboard activity aggregation failed:", err?.message || err);
       return null;
     });
-    const [status, running, approvals, artifacts, usage, activity, groupArtifacts] = await Promise.all([
-      this.getStatus(), // already fail-soft per backend
-      section("getRunningWork", (b) => b.getRunningWork()),
-      section("getPendingApprovals", (b) => b.getPendingApprovals()),
-      section("getRecentArtifacts", (b) => b.getRecentArtifacts({ limit: artifactsLimit, sinceMs: since })),
-      Promise.all(
-        backends.map(async (backend) => {
-          let timer;
-          try {
-            // Today and yesterday have separate failure boundaries. A failed
-            // trend query must not discard a valid full today's total.
-            const usage = Promise.allSettled([
-              backend.getUsageSeries("today"),
-              backend.getUsageSeries("7d"),
-            ]);
-            const result = await Promise.race([
-              usage.then((series) => ({ series })),
-              new Promise((resolve) => {
-                timer = setTimeout(() => resolve(null), DASHBOARD_USAGE_WAIT_MS);
-              }),
-            ]);
-            if (!result) return { backend: backend.id, error: "pending" };
-            const [todayResult, weekResult] = result.series;
-            if (todayResult.status !== "fulfilled") return { backend: backend.id, error: "unavailable", availability: "unavailable" };
-            const todaySeries = todayResult.value;
-            const series7d = weekResult.status === "fulfilled" ? weekResult.value : null;
-            const now = Date.now();
-            const yesterdayKey = this._localDateStr(now - 86_400_000);
-            const daily = Array.isArray(series7d?.daily) ? series7d.daily : [];
-            const yesterday = daily.find(d => d?.date === yesterdayKey);
-            const tt = todaySeries?.totals;
-            const valid = tt && Number.isFinite(tt.totalTokens) && Number.isFinite(tt.totalCost);
-            const availability = !valid ? "unavailable" : todaySeries.availability
-              || (todaySeries.cacheStatus === "refreshing" ? "partial" : "complete");
-            return {
-              backend: backend.id, availability,
-              ...(valid ? { today: { date: this._localDateStr(now), ...tt } } : { error: "unavailable" }),
-              ...(yesterday ? { yesterday } : {}),
-              yesterdayComplete: !!series7d && !["partial", "unavailable"].includes(series7d.availability),
-            };
-          } catch (err) {
-            return { backend: backend.id, error: err?.message || String(err) };
-          } finally {
-            if (timer) clearTimeout(timer);
-          }
-        }),
-      ),
-      activityPromise,
-      this._dashboardGroupArtifacts({ sinceMs: since, limit: artifactsLimit, backends }),
-    ]);
     let activityRuns = Array.isArray(activity?.runs) ? activity.runs.slice() : null;
     // 只在活动层整体失败/旧桩未提供 runs 时回退，保持 summary 的 fail-soft 契约。
     if (!activityRuns) {
@@ -2021,7 +2061,7 @@ class BackendRegistry extends EventEmitter {
       }
     }
     return {
-      generatedAt: Date.now(), sinceMs: since, status, runs, running, approvals, artifacts, groupArtifacts, usage,
+      runs,
       ...(activityPage ? { activityPage } : {}),
       ...(runStats ? { runStats } : {}),
       ...(activity?.taskStats ? { taskStats: activity.taskStats } : {}),
@@ -2042,18 +2082,16 @@ class BackendRegistry extends EventEmitter {
   }
 
   /**
-   * 统一活动流数据（cron/kanban/inspiration/health 聚合）。30 秒 TTL + 单飞（照
-   * _cliUsageCache 的 SWR 惯例简化为 TTL 单飞）：45s 轮询、首屏与
-   * /activities 分页共享一份计算。绝不 throw 之外的失败留给 collectActivities
-   * 内部逐源降级（铁律 4）。
-   * @param {{sinceMs: number}} opts
+   * 活动首屏重新取数，分页复用同一计算（30 秒 TTL）。同范围在途读取共享。
+   * @param {{sinceMs: number, fresh?: boolean}} opts
    */
-  async getDashboardActivityData({ sinceMs }) {
+  async getDashboardActivityData({ sinceMs, fresh = false }) {
     const now = Date.now();
     // 断开集合进缓存键：断开/重连后 30s TTL 内不能回吐旧后端集的活动流。
     const disabledKey = [...this._disabledSet()].sort().join(",");
     const cached = this._activityCache;
-    if (cached && cached.sinceMs === sinceMs && cached.disabledKey === disabledKey && now - cached.at < 30_000) {
+    if (cached && cached.sinceMs === sinceMs && cached.disabledKey === disabledKey
+      && (!cached.settled || (!fresh && now - cached.at < 30_000))) {
       return cached.promise;
     }
     const promise = collectActivities({
@@ -2062,11 +2100,15 @@ class BackendRegistry extends EventEmitter {
       sinceMs,
       healthEvents: this._dashboardJournal ? this._dashboardJournal.getHealthEvents() : [],
     });
-    this._activityCache = { sinceMs, at: now, promise, disabledKey };
+    const entry = { sinceMs, at: now, promise, disabledKey, settled: false };
+    this._activityCache = entry;
     try {
-      return await promise;
+      const result = await promise;
+      entry.at = Date.now();
+      entry.settled = true;
+      return result;
     } catch (err) {
-      this._activityCache = null; // 失败不缓存
+      if (this._activityCache === entry) this._activityCache = null;
       throw err;
     }
   }

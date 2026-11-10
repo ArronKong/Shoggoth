@@ -20,8 +20,8 @@ function sourcePolicyForRun(run, { threadPolicy = "new", sessionKey = null } = {
     : { mode: run.source === "inspiration" || (run.source === "cron" && threadPolicy === "continue") ? "dedicated" : "new-each-run" });
 }
 
-// Cron and Inspiration keep their existing authoritative associations. This
-// store supplies the missing Kanban association without re-owning those records.
+// Cron and Inspiration keep their existing authoritative associations. Kanban
+// and system-initiated checks pin their conversation here before admission.
 class SourceConversationStore {
   constructor({ paths, chatSessionStore, now = Date.now }) {
     this.paths = paths; this.sessions = chatSessionStore; this.now = now;
@@ -37,10 +37,11 @@ class SourceConversationStore {
         || !data.records || Object.getPrototypeOf(data.records) !== Object.prototype || Object.keys(data.records).length > 65536) fail();
       for (const [id, item] of Object.entries(data.records)) {
         if (!item || Object.keys(item).sort().join() !== "createdAt,policy,profileId,runId,sessionKey,source,sourceId,workspace"
-          || item.runId !== id || ![id, item.profileId, item.sourceId, item.sessionKey].every(text) || item.source !== "kanban"
+          || item.runId !== id || ![id, item.profileId, item.sourceId, item.sessionKey].every(text) || !["kanban", "proactive"].includes(item.source)
           || !(item.workspace === null || (typeof item.workspace === "string" && path.isAbsolute(item.workspace)))
           || !Number.isSafeInteger(item.createdAt) || item.createdAt < 0) fail();
         sourceConversationPolicy(item.policy);
+        if (item.source === "proactive" && item.policy.mode !== "explicit") fail();
       }
       records = data.records;
     }
@@ -49,7 +50,8 @@ class SourceConversationStore {
   get(runId) { this.#load(); return structuredClone(this.records[runId] || null); }
   ensure(run, policy = sourcePolicyForRun(run)) {
     this.#load(); policy = sourceConversationPolicy(policy);
-    if (run.source !== "kanban" || ![run.id, run.profileId, run.sourceId].every(text)) fail();
+    if (!["kanban", "proactive"].includes(run.source) || ![run.id, run.profileId, run.sourceId].every(text)
+      || (run.source === "proactive" && policy.mode !== "explicit")) fail();
     const prior = this.get(run.id);
     if (prior) {
       if (["source", "sourceId", "profileId", "workspace"].some(key => prior[key] !== run[key]) || !isDeepStrictEqual(policy, prior.policy)) fail();

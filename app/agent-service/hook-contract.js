@@ -35,7 +35,7 @@ const HOOK_PUBLIC_ERROR_CODES = Object.freeze([
   "HOOK_WORKER_UNAVAILABLE", "HOOK_WORKSPACE_BUSY", "HOOK_WORKSPACE_FORBIDDEN", "HOOK_WORKSPACE_INVALID",
   "HOOK_WORKSPACE_REQUIRED", "HOOK_WRITE_FORBIDDEN",
 ]);
-const HOOK_SOURCES = Object.freeze(["chat", "cron", "kanban", "inspiration"]);
+const HOOK_SOURCES = Object.freeze(["chat", "cron", "kanban", "inspiration", "proactive"]);
 const HOOK_TOOL_SCOPES = Object.freeze(["product", "native_mcp", "plugin_mcp", "connector", "runtime_builtin", "runtime_mcp"]);
 const BUILTINS = Object.freeze({
   "guard.block": ["guard"], "guard.require_approval": ["guard"], "guard.condition": ["guard"],
@@ -200,7 +200,8 @@ function glob(pattern, value) {
   return new RegExp("^" + pattern.split("*").map(part => part.replace(/[.*+?^\x24{}()|[\]\\]/gu, "\\$&")).join(".*") + "$", "u").test(value);
 }
 function matches(definition, event) {
-  if (definition.event !== event.event || !definition.scope.sources.includes(event.source)
+  if (definition.event !== event.event || !(definition.scope.sources.includes(event.source)
+    || event.source === "proactive" && definition.scope.sources.includes("chat"))
     || definition.scope.workspace !== null && definition.scope.workspace !== event.workspace) return false;
   const matcher = definition.matcher;
   if (!event.event.startsWith("tool.")) return true;

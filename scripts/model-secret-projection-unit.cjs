@@ -46,12 +46,53 @@ test("a whole text value that is valid JSON cannot hide a known short credential
 }));
 test("short credentials do not corrupt protocol keys or JSON tool schemas", async () => fixture(async ({ secrets, projection }) => {
   await secrets.prepare({ scope: SCOPE, operationId: "known", text: 'password: "string"' });
-  const result = await projection.project(SCOPE, { model: "fixture", tools: [{ type: "function", name: "safe_tool",
-    parameters: { type: "object", properties: { text: { type: "string", description: "Use string for the password" } } } }],
-    input: "The value is string" });
+  await secrets.prepare({ scope: SCOPE, operationId: "known-schema", text: 'password: "schema"' });
+  const dialect = "https://json-schema.org/draft/2020-12/schema";
+  const result = await projection.project(SCOPE, {
+    model: "fixture",
+    tools: [
+      { type: "function", name: "safe_tool", parameters: {
+        $schema: dialect, type: "object",
+        properties: { text: { type: "string", description: "Use string for the password" } },
+      } },
+      { type: "function", name: "custom_tool", parameters: { $schema: "https://example.invalid/schema", type: "object" } },
+    ],
+    input: "The values are string and schema",
+  });
+  assert.equal(result.tools[0].parameters.$schema, dialect);
+  assert.match(result.tools[1].parameters.$schema, /SHOGGOTH_SECRET_/u);
   assert.equal(result.tools[0].parameters.properties.text.type, "string");
   assert.equal(result.tools[0].name, "safe_tool"); assert(!result.input.includes("string"));
   assert(!result.tools[0].parameters.properties.text.description.includes("string"));
+}));
+test("scraped news separators leave the next Chat Completions tool request intact", async () => fixture(async ({ secrets, projection }) => {
+  const request = {
+    model: "fixture", tools: [{ type: "function", function: { name: "bash", parameters: {
+      $schema: "https://json-schema.org/draft/2020-12/schema", type: "object",
+      properties: { command: { type: "string" } }, required: ["command"],
+    } } }],
+    messages: [
+      { role: "user", content: "Collect the headlines." },
+      { role: "assistant", tool_calls: [{ id: "call-1", type: "function", function: {
+        name: "bash", arguments: '{"command":"curl https://example.invalid/news"}',
+      } }] },
+      { role: "tool", tool_call_id: "call-1", content: "] / 解开谷物保存的低碳密码 / 11-10 11:08" },
+    ],
+  };
+  assert.deepEqual(await projection.project(SCOPE, request), request);
+  assert.deepEqual(secrets.list(SCOPE), []);
+}));
+test("a stored slash masks standalone echoes while preserving paths and URLs", async () => fixture(async ({ secrets, projection }) => {
+  const pathText = "HTTP/HTTPS https://example.invalid/news /tmp/news.txt";
+  const prepared = await secrets.prepare({ scope: SCOPE, operationId: "slash-password", text: "密码: /" });
+  const { reference } = prepared.references[0];
+  await secrets.close();
+  await secrets.open();
+  assert.equal(secrets.resolve(SCOPE, reference), "/");
+  const result = await projection.project(SCOPE, { input: [pathText, "echo / %2F Lw=="] });
+  assert.deepEqual(result.input, [pathText, `echo ${reference} ${reference} ${reference}`]);
+  assert.equal(secrets.projectText(SCOPE, pathText), pathText);
+  assert.equal(secrets.redactKnown(SCOPE, pathText), pathText);
 }));
 test("nested JSON arguments retain escaping and bind newly detected credentials", async () => fixture(async ({ projection }) => {
   const result = await projection.project(SCOPE, { input: [{ type: "function_call", name: "example", call_id: "c",

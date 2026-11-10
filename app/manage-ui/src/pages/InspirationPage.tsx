@@ -517,8 +517,6 @@ export default function InspirationPage() {
         <InspirationAutoGrowth noticeTarget={growthNoticeTarget} onOpen={openIdea} onChange={refresh} />
       </div></div>
     {page.loading && <p role="status" className={styles.meta}>{t('common.loading')}</p>}
-    {page.data && visibleIdeas.length === 0 && <div className={styles.empty}><span className={styles.emptyMark} aria-hidden="true"><InspirationStatusIcon status="saved" /></span>
-      <h2>{t(query || filter !== 'saved' ? 'inspiration.noMatches' : 'inspiration.empty')}</h2><p>{t(query || filter !== 'saved' ? 'inspiration.noMatchesHint' : 'inspiration.emptyHint')}</p></div>}
     <div className={styles.grid}>{visibleIdeas.map((idea) => <IdeaCard key={idea.id} idea={idea} execution={page.data?.executions[idea.id]}
       agent={roster.data?.agents.find(agent => agent.id === idea.latestExecution?.agentId && agent.backendId === idea.latestExecution?.backendId)}
       roster={roster.data?.agents} onPress={pressIdea} onSend={sendIdea} starting={startingIdeas.has(idea.id)}

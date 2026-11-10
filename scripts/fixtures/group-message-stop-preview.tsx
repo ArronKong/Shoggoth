@@ -45,13 +45,6 @@ state.fetch = async (url: unknown, init: RequestInit = {}) => {
       notify("action", { action: "stop-group" });
       return new Response(JSON.stringify(view), { headers: { "Content-Type": "application/json" } });
     }
-    if (pathname.endsWith("/members/stop")) {
-      const body = JSON.parse(String(init.body || "{}"));
-      if (body.memberId === "shrimp") notify("action", { action: view.activeTurns.some((turn: any) => turn.memberId === "shrimp" && turn.released)
-        ? "stop-background" : "stop-member" });
-      else notify("notice", { text: "单成员停止流程使用虾长老作为示例，请点虾长老气泡下方的“停止”。" });
-      return new Response(JSON.stringify(view), { headers: { "Content-Type": "application/json" } });
-    }
     return new Response(JSON.stringify({ message: "这是界面预览，请使用外层流程控件查看状态。" }), { status: 409,
       headers: { "Content-Type": "application/json" } });
   }
@@ -73,7 +66,8 @@ createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><Scr
 </UiProvider></HashRouter>);
 
 state.previewPromise = (async () => {
-  await wait(() => document.querySelector("[data-group-timeline]") && document.querySelector("[data-chat-composer] textarea:not(:disabled)"), "production group panel ready");
+  await wait(() => document.querySelector("[data-group-timeline]")
+    && document.querySelector('[data-group-composer-input][contenteditable="plaintext-only"]'), "production group panel ready");
   if (snapshot.pendingRequest) {
     (document.querySelector("button.chat-stop") as HTMLButtonElement).click();
     await wait(() => document.querySelector('button.chat-stop[aria-busy="true"]'), "stop request busy state");
@@ -90,6 +84,13 @@ state.inspectPreview = () => {
   check(!document.body.textContent?.includes("GROUP_JOURNAL_FULL") && !document.body.textContent?.includes("发送日志暂不可写"),
     "preview journal is isolated and writable");
   check(!document.querySelector("[data-group-status]"), "composer contains no member execution status strip");
+  check(!timeline.querySelector("[data-group-stop-turn], button.chat-stop"), "the timeline has no stop button");
+  const stopButtons = document.querySelectorAll<HTMLButtonElement>("button.chat-stop");
+  check(stopButtons.length <= 1 && [...stopButtons].every(button => button.closest("[data-chat-composer]")),
+    "the composer is the only stop entry point");
+  if (!snapshot.pendingRequest && view.activeTurns.some((turn: any) => !turn.stopping && !turn.recovery?.cancelRequested)) {
+    check(stopButtons.length === 1 && !stopButtons[0].disabled, "running turns can be stopped from the composer");
+  }
   check(!document.querySelector("[data-chat-composer] [role=status], [data-chat-composer] [role=alert], [data-chat-composer] [data-group-send-journal]"),
     "composer contains no operational status or send recovery records");
   check(!timeline.textContent?.includes("接下来："), "queued speaker names stay out of the message area");
@@ -104,7 +105,6 @@ state.inspectPreview = () => {
     } else check(Boolean(timeline.querySelector(`[data-seq="${item.seq}"]`)), "message survives projection: " + item.seq);
   }
   for (const item of view.activeTurns.filter((turn: any) => !quietTurn(turn))) check(Boolean(timeline.querySelector(`[data-group-execution="${item.opportunityId}"]`))
-    || Boolean(timeline.querySelector(`[data-group-stop-turn="${item.opportunityId}"]`))
     || Boolean(timeline.querySelector(`[data-seq] .is-streaming`)), "active reply or recovery remains visible");
   const bubbles = [...timeline.querySelectorAll<HTMLElement>(".chat-md")].map(item => item.textContent?.trim());
   if (scene === "messages") {
@@ -116,24 +116,12 @@ state.inspectPreview = () => {
     check(!timeline.querySelector("[data-group-execution]"), "whole-group stop leaves no next speaker");
   }
   for (const turn of view.activeTurns) {
-    const stopping = turn.stopping || turn.recovery?.cancelRequested || turn.releasedReason === "stopped";
     if (quietTurn(turn)) {
       check(!timeline.querySelector(`[data-group-execution="${turn.opportunityId}"]`), "quiet recovery and stopping leave no bubble or orphan author row");
       check(!/原任务状态异常已持续|启动回执暂未收到|暂时无法获取原任务状态|正在停止原任务/.test(timeline.textContent || ""), "execution recovery copy stays out of the timeline");
     }
     if (turn.releasedReason === "stopped") {
       check(!document.querySelector("[data-chat-composer]")!.textContent?.includes("正在确认任务是否已退出"), "member cleanup does not create a composer confirmation notice");
-    }
-    const published = messages.some((message: any) => message.author.kind === "member" && message.author.memberId === turn.memberId
-      && message.origin?.opportunityId === turn.opportunityId);
-    const expectedStops = stopping || quietTurn(turn) && !published ? 0 : 1;
-    const stops = document.querySelectorAll(`[data-group-stop-turn="${turn.opportunityId}"]`);
-    check(stops.length === expectedStops, "Stop belongs to real content or a normal loading bubble, without an empty placeholder");
-    if (stops.length) {
-      check(stops[0].parentElement?.classList.contains("chat-group__footer"), "Stop follows the agent bubble");
-      check(stops[0].className === "chat-copybtn" && !stops[0].textContent?.trim(), "Stop shares copy/delete styling and has no text");
-      const rect = stops[0].getBoundingClientRect();
-      check(rect.width === 22 && rect.height === 22, "Stop has the same 22px copy/delete button size");
     }
   }
   if (scene === "failure" && step > 0) {

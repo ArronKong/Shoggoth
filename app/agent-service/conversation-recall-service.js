@@ -107,7 +107,7 @@ function semanticSnippet(text, range) {
 class ConversationRecallService {
   constructor({ paths, transcriptStore, chatSessionStore, workDispatcher, getRunSessionKey,
     getInspirationOrigin = null, recallPolicy, memoryStore = null, index = null, now = Date.now,
-    semanticSearch = null }) {
+    semanticSearch = null, isProactiveRunCurrent = () => false }) {
     if (!transcriptStore?.listEvents || !transcriptStore?.getRevision || !chatSessionStore?.listSessions
       || !chatSessionStore?.getSession || !workDispatcher?.getRun
       || typeof getRunSessionKey !== "function" || !recallPolicy?.assertReady
@@ -121,6 +121,7 @@ class ConversationRecallService {
     this.runs = workDispatcher;
     this.getRunSessionKey = getRunSessionKey;
     this.getInspirationOrigin = getInspirationOrigin;
+    this.isProactiveRunCurrent = isProactiveRunCurrent;
     this.policy = recallPolicy;
     this.memories = memoryStore;
     this.now = now;
@@ -315,8 +316,8 @@ class ConversationRecallService {
         : null);
   }
 
-  // Shared with memory_get/explain: one authoritative direct-user gate, also
-  // excluding automatic Inspiration growth and generic idea-card executions.
+  // Shared with memory_get/explain. System checks require a current Main
+  // binding; automatic Inspiration growth and generic idea runs stay excluded.
   assertCaller({ profileId, run }) { return this._caller(profileId,
     { source: run?.source, sourceId: run?.sourceId }, run); }
 
@@ -330,7 +331,8 @@ class ConversationRecallService {
   _caller(profileId, args, run) {
     this.policy.assertReady(profileId);
     if (!run || run.profileId !== profileId || args.source !== run.source
-      || args.sourceId !== run.sourceId || !["chat", "inspiration"].includes(run.source)
+      || args.sourceId !== run.sourceId || !["chat", "inspiration", "proactive"].includes(run.source)
+      || (run.source === "proactive" && this.isProactiveRunCurrent(run) !== true)
       || NON_DIRECT_CHAT.test(run.idempotencyKey || "")
       || !this._directInspiration(run)) {
       throw recallError("MCP_TOOL_FORBIDDEN", "该工具仅供当前原生用户对话使用");
@@ -347,7 +349,7 @@ class ConversationRecallService {
       ?? this.transcripts.listEvents(profileId, session.id).some((event) => event.runId === run.id
         && event.kind === "user" && !event.contextExcluded
         && typeof event.content?.text === "string");
-    if (!hasUser) throw recallError("CONVERSATION_SOURCE_INVALID", "当前执行没有用户消息");
+    if (!hasUser && run.source !== "proactive") throw recallError("CONVERSATION_SOURCE_INVALID", "当前执行没有用户消息");
     return session;
   }
 

@@ -25,8 +25,9 @@ function load(file) {
   vm.runInNewContext(code, { module: mod, exports: mod.exports, Intl, Date,
     require: name => {
       if (name.endsWith(".css")) return {};
+      if (name.endsWith(".svg")) return name;
       if (name.endsWith("/api/client")) return { getCodexAutomationModels: async () => ({ models: [] }) };
-      if (name === "react-i18next") return { useTranslation: () => ({ t: key => key }) };
+      if (name === "react-i18next") return { useTranslation: () => ({ t: key => key, i18n: { resolvedLanguage: "en" } }) };
       if (name.endsWith("/Field")) return fields;
       if (name.endsWith("/i18n")) return { t: key => key };
       if (name === "./CronAgentPicker") return { __esModule: true, default: host("agent-picker") };

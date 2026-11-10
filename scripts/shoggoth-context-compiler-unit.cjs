@@ -7,6 +7,30 @@ const path = require("node:path");
 const { contextFixture } = require("./fixtures/shoggoth-context-fixture.cjs");
 const { estimateContextTokens } = require("../app/agent-service/conversation-context-budget");
 
+// Exercise the real compile path, not just the store's cache methods.
+{
+  const cached = contextFixture();
+  try {
+    cached.append({ id: "cached-user", runId: "past-run", kind: "user", content: { text: "Previous calibration question" } });
+    cached.append({ id: "cached-answer", runId: "past-run", kind: "assistant", content: { text: "preview" },
+      contextContent: { text: "FULL_CACHED_CALIBRATION_BODY" } });
+    cached.append({ id: "cache-current", kind: "user", content: { text: "continue calibration", operationId: "cache-current" } });
+    let bodyReads = 0;
+    cached.transcripts.fs = { ...fs, readFileSync: (file, ...args) => {
+      bodyReads++;
+      return fs.readFileSync(file, ...args);
+    } };
+    cached.transcripts.listEvents = () => assert.fail("compiler deep-copied the transcript");
+    const input = { profile: cached.profile, run: cached.run, transcriptSessionId: cached.transcriptSessionId,
+      currentOperationId: "cache-current", query: "continue calibration" };
+    assert.match(cached.compiler.compile(input).dynamicContext, /FULL_CACHED_CALIBRATION_BODY/u);
+    assert.equal(bodyReads, 1);
+    assert.match(cached.compiler.compile(input).dynamicContext, /FULL_CACHED_CALIBRATION_BODY/u);
+    assert.equal(bodyReads, 1, "a second compile does not reread unchanged context bodies");
+    console.log("PASS compiler reads shared transcript views and reuses verified context bodies");
+  } finally { cached.cleanup(); }
+}
+
 const value = contextFixture();
 try {
   value.memoryEngine.propose({

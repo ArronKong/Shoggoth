@@ -1,9 +1,10 @@
 "use strict";
 
-const { coveredTranscript, SUMMARY_FIELDS, validateSummary } = require("./conversation-checkpoint-store");
+const { coveredTranscript, SUMMARY_FIELDS, validateSummary, revocationVisibility } = require("./conversation-checkpoint-store");
 const { serviceError } = require("./security");
 const { conversationContextBudget, estimateContextTokens } = require("./conversation-context-budget");
 const { contextTransportLimits } = require("./context-request-budget");
+const { readEvents, contextReader } = require("./transcript-read");
 const crypto = require("node:crypto");
 const MAX_SOURCE_BYTES = 96 * 1024;
 
@@ -14,11 +15,14 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
   maxSourceBytes = MAX_SOURCE_BYTES, maxSourceTokens = Infinity, requestPlan = null,
   currentOperationId = null, transportBytes = contextTransportLimits().contextBytes, advisory = false,
   restorePolicy = null }) {
-  // A checkpoint can carry statements without event-level provenance. Until
-  // compaction has a revocation-aware source and summary format, do not send
-  // any of this Profile's history to the model after a forget or UI deletion.
-  if (checkpointStore.hasRevocations?.(profileId)) return null;
-  const events = transcriptStore.listEvents(profileId, sessionId);
+  // A checkpoint carries statements without event-level provenance. After a
+  // forget or UI deletion, summarize only the messages the recall policy still
+  // shows and bind the result to that visibility state. A store that cannot
+  // tell which messages are visible sends none of this Profile's history.
+  const revocations = revocationVisibility(checkpointStore, profileId);
+  if (revocations === false) return null;
+  const allowed = revocations === null ? () => true : checkpointStore.compactionSourceFilter(profileId, sessionId);
+  const events = readEvents(transcriptStore, profileId, sessionId);
   const memory = checkpointStore.memoryState?.(profileId) ?? { revision: null, freshUntil: null };
   const previous = checkpointStore.compatible(profileId, sessionId, events);
   const pending = events.filter(event => event.seq > (previous?.coveredThroughSeq ?? 0)
@@ -26,10 +30,11 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
   const projected = new Map();
   const project = event => {
     if (!projected.has(event.seq)) projected.set(event.seq, checkpointStore.projectCompactionEvent?.(profileId, sessionId, event)
-      ?? { seq: event.seq, kind: event.kind, content: transcriptStore.contextEvent?.(profileId, sessionId, event)?.content ?? event.content });
+      ?? { seq: event.seq, kind: event.kind, content: contextReader(transcriptStore)?.(profileId, sessionId, event)?.content ?? event.content });
     return projected.get(event.seq);
   };
-  const visible = event => !event.contextExcluded && ["user", "assistant", "tool_call", "tool_result"].includes(event.kind);
+  const visible = event => !event.contextExcluded && ["user", "assistant", "tool_call", "tool_result"].includes(event.kind)
+    && allowed(event);
   // Descriptors let planning count large bodies without loading every blob.
   const size = event => visible(event) ? (event.content?.contextRef?.bytes ?? Buffer.byteLength(JSON.stringify(event.content))) + 64 : 0;
   const tokens = event => visible(event) ? (event.content?.contextRef?.estimatedTokens ?? estimateContextTokens(JSON.stringify(event.content))) + 32 : 0;
@@ -123,6 +128,7 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
   const schema = Object.fromEntries(SUMMARY_FIELDS.map(field => [field, ["concise factual statement"]]));
   return Object.freeze({ profileId, sessionId, expectedRevision: transcriptStore.getRevision(profileId, sessionId),
     expectedMemoryRevision: memory.revision, expectedMemoryFreshUntil: memory.freshUntil,
+    expectedRevocationVisibility: revocations,
     throughSeq, partial, windowTokens: budget.tokens, targetThroughSeq: target, advisory: restorePolicy ? advisory : !required,
     coveredHash: coveredTranscript(events, partial?.seq ?? throughSeq).hash, previousId: previous?.id ?? null,
     ...(sourceProjection ? { sourceProjection } : {}),

@@ -130,7 +130,7 @@ test("Definition 管理使用 expected revision，派生 USER/TOOLS 只读且 re
     });
     assert.equal(saved.current.revision, 2);
     const profileDirectory = path.join(value.paths.agentsDir, "profile-1");
-    for (const [kind, directory] of [["SOUL", ["definition", "revisions", "2"]], ["TOOLS", ["generated"]]]) {
+    for (const [kind, directory] of [["SOUL", []], ["TOOLS", ["generated"]]]) {
       const input = { profileId: "profile-1", kind, revision: null };
       const file = validateAgentHarnessResult("harness.definition.read",
         value.controller.handle("harness.definition.read", input), input);

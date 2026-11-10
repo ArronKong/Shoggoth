@@ -89,6 +89,7 @@ async function createHarness({
   viewport = { width: 1280, height: 800 },
   reducedMotion = "no-preference",
   locale = "zh-CN",
+  entryBackend = "openclaw",
   ...overrides
 } = {}) {
   const context = await browser.newContext({ locale, viewport, reducedMotion });
@@ -223,6 +224,10 @@ async function createHarness({
       await route.fulfill({ json: { config: { gatewayUrl: "", token: "test", locale: "zh-CN", theme: "light", disabledBackends: [], notifications: {}, setupCompletedAt: 1 } } });
       return;
     }
+    if (url.pathname === "/__api/skills") {
+      await route.fulfill({ json: { skills: [] } });
+      return;
+    }
     if (url.pathname === "/__api/models/config/capabilities") {
       await route.fulfill({ json: state.capabilities });
       return;
@@ -338,16 +343,19 @@ async function createHarness({
     await route.fulfill({ json: {} });
   });
 
-  const recoveryRead = page.waitForResponse((response) => {
+  const recoveryRead = entryBackend === "openclaw" ? page.waitForResponse((response) => {
     const url = new URL(response.url());
     return url.pathname === "/__api/models/config/pending-identities"
       && url.searchParams.get("backend") === "openclaw" && response.status() === 200;
-  });
-  await page.goto(`${baseUrl}/#/models`, { waitUntil: "domcontentloaded" });
-  await recoveryRead;
-  await page.locator(".models-page .model-card").first().waitFor();
-  await page.locator("[data-model-recovery-unknown]").waitFor({ state: "hidden" });
-  assert.ok(state.pendingIdentityReads.includes("openclaw"), "模型操作恢复必须读取当前 backend 的清单");
+  }) : null;
+  const query = entryBackend ? `?backend=${entryBackend}` : "";
+  await page.goto(`${baseUrl}/#/models${query}`, { waitUntil: "domcontentloaded" });
+  if (recoveryRead) {
+    await recoveryRead;
+    await page.locator(".models-page .model-card").first().waitFor();
+    await page.locator("[data-model-recovery-unknown]").waitFor({ state: "hidden" });
+    assert.ok(state.pendingIdentityReads.includes("openclaw"), "模型操作恢复必须读取当前 backend 的清单");
+  }
   return { context, page, state };
 }
 
@@ -372,6 +380,35 @@ try {
     try { return (await fetch(baseUrl)).ok; } catch { return false; }
   }, "Vite 服务启动", 10_000);
   browser = await chromium.launch({ channel: "chrome" });
+
+  {
+    const { context, page } = await createHarness({ entryBackend: "" });
+    const tabs = page.getByRole("tablist", { name: "后端切换" });
+    const shoggoth = tabs.getByRole("tab", { name: "Shoggoth", selected: true });
+    await shoggoth.waitFor();
+    assert.equal(await tabs.getByRole("tab").first().getAttribute("aria-label"), "Shoggoth");
+
+    await page.addInitScript(() => {
+      localStorage.setItem("shoggoth.ui.v1", JSON.stringify({ version: 1, values: { "backend.models": "openclaw" } }));
+    });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await shoggoth.waitFor();
+
+    await tabs.getByRole("tab", { name: "OpenClaw" }).click();
+    await tabs.getByRole("tab", { name: "OpenClaw", selected: true }).waitFor();
+    await page.getByRole("link", { name: "技能", exact: true }).click();
+    await page.locator(".skills-page").waitFor();
+    await page.getByRole("link", { name: "模型", exact: true }).click();
+    await shoggoth.waitFor();
+
+    await page.route("**/__api/backends", (route) => route.fulfill({ json: { backends: [
+      { id: "openclaw", name: "OpenClaw", disconnectable: true, surfaces: { models: true } },
+      { id: "hermes", name: "Hermes", disconnectable: true, surfaces: { models: true } },
+    ] } }));
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await tabs.getByRole("tab", { name: "Hermes", selected: true }).waitFor();
+    await context.close();
+  }
 
   // 新增与编辑使用同一 Drawer；保存后必须经过 preview/apply 并立即出现新卡片。
   {
@@ -760,6 +797,7 @@ try {
   // 原生卡片支持 Enter；dirty 时切 backend 必须先确认，取消保留表单。
   {
     const { context, page } = await createHarness();
+    const entryUrl = page.url();
     const card = page.locator(".model-card").filter({ hasText: "Builtin" });
     await card.focus();
     await page.keyboard.press("Enter");
@@ -780,7 +818,7 @@ try {
     page.once("dialog", refuseNavigation);
     await page.locator('a[aria-label="设置"]').evaluate((node) => node.click());
     assert.equal(navigationConfirmations, 2, "路由切换必须触发放弃草稿确认");
-    assert.match(page.url(), /#\/models$/);
+    assert.equal(page.url(), entryUrl);
     await context.close();
   }
 

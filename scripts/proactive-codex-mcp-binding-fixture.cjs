@@ -19,6 +19,7 @@ const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root
 const safeStorage = { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value).reverse(), decryptString: value => Buffer.from(value).reverse().toString() };
 const clock = { value: Date.now() }, bindings = [], starts = [], cases = [];
 let service, pool, activeCase, nativeHost, expected, providerRequests = 0, serial = 0;
+let automaticHeartbeat = false;
 const provider = http.createServer((req, res) => {
   const chunks = []; req.on("data", data => chunks.push(data)); req.on("end", () => {
     try {
@@ -48,6 +49,13 @@ const provider = http.createServer((req, res) => {
           for (const memory of [expected.user, expected.agent, expected.daily]) assert.ok(user.includes(memory), memory);
           assert.ok(!user.includes(expected.project));
           assert.match(user, /SYSTEM-INITIATED CHECK/u);
+          if (activeCase.mode === "HEARTBEAT") {
+            const snapshot = JSON.parse(user.match(/Fresh unarchived Spark Notes status[^\n]+: (\{[^\n]+\})/u)?.[1] ?? "null");
+            assert.deepEqual(snapshot?.counts, { saved: 2 });
+            assert.equal(snapshot.total, 2);
+            assert.ok(snapshot.notes.some(note => note.title === "本轮新增的未归档便签"));
+            activeCase.checkedNotes = snapshot.checked;
+          }
           const run = service.workDispatcher.listRuns({ source: "proactive" }).find(row => row.status === "running");
           const snapshot = service.contextCompiler.snapshotStore.get(run.profileId, run.contextSnapshotId);
           const main = snapshot.blocks.find(block => block.id === "proactive-conversation");
@@ -72,7 +80,8 @@ const provider = http.createServer((req, res) => {
         assert.ok(tool || codeMode, `Missing fixture tool ${name}: ${JSON.stringify(tools.map(item => item.name))}`);
         const run = activeCase.proactive ? service.workDispatcher.listRuns({ source: "proactive" }).find(item => item.status === "running") : null;
         const occurrence = run ? service.proactiveStore.occurrenceForRun(run.id) : null;
-        const args = activeCase.proactive ? { runId: run.id, outcome: "notice", reason: "This idea has a useful next step", body: "这个灵感值得再看一次。",
+        const args = activeCase.proactive ? { runId: run.id, outcome: "notice", reason: "This check has a useful result",
+          body: activeCase.mode === "HEARTBEAT" ? `本轮已只读核对 ${activeCase.checkedNotes} 条未归档灵感便签，均为已保存。` : "这个灵感值得再看一次。",
           candidates: occurrence.candidates.slice(0, 1).map(({ id, evidenceVersion }) => ({ id, evidenceVersion })),
           ...(activeCase.mode === "HEARTBEAT" ? { scratch: "Verified native heartbeat." } : {}) } : {};
         activeCase.toolSent = true;
@@ -129,7 +138,9 @@ async function until(predicate) {
     prewarmMcpAuth: false, parentEnv: {}, proactiveProfileAvailable: () => true,
     modelSecretRequest: () => assert.fail("The fixture model must use the loopback provider"),
     proactiveRuntimeCapability: () => ({ semanticVerified: true, reason: null }),
-    setProactiveTimer: () => 1, clearProactiveTimer() {}, notificationSender: async () => ({ state: "submitted" }) });
+    setProactiveTimer: (callback, delay) => automaticHeartbeat ? setTimeout(callback, delay) : 1,
+    clearProactiveTimer(timer) { if (timer !== 1) clearTimeout(timer); },
+    notificationSender: async () => ({ state: "submitted" }) });
   await service.start();
   const route = service.productStore.putModelProvider({ id: "fixture-loopback", kind: "custom-responses", name: "Loopback fixture",
     baseUrl: `http://127.0.0.1:${provider.address().port}/v1`, model: "gpt-4.1", models: ["gpt-4.1"],
@@ -203,21 +214,47 @@ async function until(predicate) {
   assert.doesNotMatch(JSON.stringify(history), /SYSTEM-INITIATED CHECK/u);
   const event = history.find(item => item.content?.proactiveNotice?.id === notice.id);
   assert.ok(event.content.text.includes("#/inspirations?id="));
+  const dailyActivity = (await ipc("proactive.notice.activity", { id: notice.id, sessionKey: mainKey })).activity;
+  assert.equal(dailyActivity.runId, result.runId);
+  assert.ok(dailyActivity.messages.some(message => message.content[0].type === "toolResult"));
   assert.equal(service.proactiveStore.getNote(notice.items[0].ideaId).lastRemindedAt, clock.value);
   cases.push({ mode: "SparkNotes", bindingForwarded: true, toolSucceeded: true, noticePublished: true });
   activeCase = { mode: "HEARTBEAT", proactive: true, toolSent: false,
     userProfile: service.memoryEngine.readCanonical(profile.id, "USER").content };
   const document = await service.proactiveService.handle("proactive.document.get", { profileId: profile.id });
   await service.proactiveService.handle("proactive.document.set", { profileId: profile.id, expectedRevision: document.document.revision,
-    content: "# Check\nReview the supplied check and record working notes. Notify once for this acceptance." });
+    content: "# Check\n\n## 灵感便签状态检查与合并汇报\n核对并汇报用户未归档灵感便签的最新状态。记录检查笔记。" });
   const heartbeat = { ...defaultConfig("heartbeat", profile.id, clock.value, "UTC"), enabled: true, activeHours: null };
-  service.proactiveStore.setMonitor({ operationId: id(), expectedRevision: service.proactiveStore.getMonitor(heartbeat.id)?.revision ?? 0, config: heartbeat });
-  const heartbeatOccurrence = service.proactiveStore.claimOccurrence(heartbeat.id, clock.value, clock.value);
-  const heartbeatResult = await service.proactiveService.check(heartbeatOccurrence);
+  const { monitor } = await ipc("proactive.monitor.set", { operationId: id(), expectedRevision: service.proactiveStore.getMonitor(heartbeat.id)?.revision ?? 0, config: heartbeat });
+  assert.equal(monitor.config.scopes.inspiration, false);
+  clock.value = monitor.nextRunAt;
+  service.inspirationStore.create({ operationId: id(), body: "本轮新增的未归档便签" });
+  const ideasBefore = service.inspirationStore.exportSnapshot();
+  automaticHeartbeat = true;
+  service.proactiveScheduler.wake();
+  await until(() => ["published", "failed", "silent", "skipped", "needs_verification"]
+    .includes(service.proactiveStore.history(heartbeat.id)[0]?.state));
+  await service.proactiveScheduler.waitForIdle();
+  const heartbeatResult = service.proactiveStore.history(heartbeat.id)[0];
   assert.equal(heartbeatResult.state, "published", JSON.stringify(heartbeatResult));
+  assert.equal(heartbeatResult.scheduledAt, monitor.nextRunAt);
+  assert.deepEqual(service.inspirationStore.exportSnapshot(), ideasBefore, "HEARTBEAT only reads note state");
+  const heartbeatNotice = service.proactiveStore.noticeForOccurrence(heartbeatResult.id);
+  assert.match(heartbeatNotice.body, /已只读核对 2 条/u);
+  const activityParams = { id: heartbeatNotice.id, sessionKey: mainKey };
+  const activity = (await ipc("proactive.notice.activity", activityParams)).activity;
+  assert.equal(activity.runId, heartbeatResult.runId);
+  assert.deepEqual(activity.inspiration, { state: "complete", checked: 2, total: 2 });
+  assert.ok(activity.messages.some(message => message.content[0].type === "toolResult"));
+  assert.doesNotMatch(JSON.stringify(activity), /SYSTEM-INITIATED CHECK|Verified native heartbeat|本轮新增的未归档便签/u);
+  await assert.rejects(() => ipc("proactive.notice.activity", { ...activityParams, sessionKey: fullSession.sessionKey }), { code: "PROACTIVE_NOT_FOUND" });
+  const newHistory = service.transcriptStore.listEvents(profile.id, main.id).filter(item => !mainHistoryIds.has(item.id));
+  assert.deepEqual(newHistory.map(item => item.content?.proactiveNotice?.kind), ["inspiration", "heartbeat"]);
+  assert.doesNotMatch(JSON.stringify(newHistory), /SYSTEM-INITIATED CHECK|Verified native heartbeat|Fixture complete/u);
   assert.equal(service.proactiveStore.heartbeatScratch(profile.id).content, "Verified native heartbeat.");
   assert.equal(bindings.length, 6);
-  cases.push({ mode: "HEARTBEAT", bindingForwarded: true, toolSucceeded: true, noticePublished: true, scratchPersisted: true });
+  cases.push({ mode: "HEARTBEAT", schedulerTriggered: true, bindingForwarded: true, toolSucceeded: true,
+    notesChecked: activity.inspiration.checked, trajectorySteps: activity.messages.length, noticePublished: true, scratchPersisted: true });
   assert.ok(cases.every(item => item.bindingForwarded));
   console.log(JSON.stringify({ verified: true, runtimeVersion: nativeHost.runtimeVersion, actualProviderCalls: 0, provider: "synthetic-loopback", providerRequests, cases }));
 })().catch(error => { console.error(error.stack || error); console.error(JSON.stringify({fixtureError:activeCase?.error,modelTools:activeCase?.modelTools,providerRequests,caseRequests:activeCase?.providerRequests})); process.exitCode = 1; }).finally(async () => {

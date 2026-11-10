@@ -34,12 +34,14 @@ app.whenReady().then(async () => {
     })`);
     assert.deepEqual(timestamps, [1, 2, 1, 1].map((count, index) => [count, expectedTimes[index]]),
       'Each proactive reminder has its own footer and the two ordinary assistant bubbles stay grouped');
+    assert.equal(await run(`document.querySelectorAll('button[aria-label="查看助理实时动态"]').length`), 0, 'Reminders show no hidden-check activity button');
     await screenshot('sparknotes-chat-zh.png');
     await run(`document.querySelector('button[title="沉浸模式"]').click()`);
     await wait('button[aria-label="退出沉浸模式"]');
     const immersive = await run(`(()=>{if(document.querySelectorAll('a[href*="original-task-session"]').length<2)throw Error('Ordinary message not rendered in immersive chat');return true;})()`);
     const immersiveTimes = await run(`Array.from(document.querySelectorAll('[data-immersive-message-footer] > span'), footer => footer.textContent)`);
     assert.deepEqual(immersiveTimes, expectedTimes, 'Immersive chat also shows each reminder timestamp');
+    assert.equal(await run(`document.querySelectorAll('button[aria-label="查看助理实时动态"]').length`), 0, 'Immersive reminders also hide check activity');
     await screenshot('sparknotes-immersive-zh.png');
     await run(`document.querySelector('button[aria-label="退出沉浸模式"]').click()`);
     window.setContentSize(700, 1000);

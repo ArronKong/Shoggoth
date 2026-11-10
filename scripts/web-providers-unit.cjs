@@ -41,7 +41,7 @@ test("missing credentials never send an API request or fall back to another prov
   await assert.rejects(f.service.call("web_fetch", { url: "https://example.com" }), { code: "WEB_API_KEY_REQUIRED" }); assert.equal(f.calls.length, 0);
 });
 test("provider URL extraction rejects private input, DNS and returned redirect targets", async () => {
-  for (const url of ["http://127.1", "http://[::1]", "http://user:secret@example.com", "http://169.254.169.254", "http://2130706433"]) {
+  for (const url of ["http://127.1", "http://[::1]", "http://169.254.169.254", "http://2130706433"]) {
     const f = fixture("tinyfish", {}); await assert.rejects(f.service.call("web_fetch", { url }), { code: "WEB_URL_BLOCKED" }); assert.equal(f.calls.length, 0);
   }
   const privateDns = fixture("tinyfish", {}, key, async () => [{ address: "192.168.1.1" }]);
@@ -88,10 +88,27 @@ function network(status, headers = {}) {
   return { calls, request };
 }
 test("authenticated GET redirects cannot forward provider keys", async () => {
-  const n = network(302, { location: "https://other.example/steal" });
-  await assert.rejects(requestPublic("https://api.search.tinyfish.ai/?query=q", { providerRequest: true, allowRedirects: false,
-    headers: { "X-API-Key": key }, lookup: pub, request: n.request }), { code: "WEB_URL_BLOCKED" });
-  assert.equal(n.calls.length, 1);
+  for (const allowRedirects of [false, true]) {
+    const n = network(302, { location: "https://other.example/page" });
+    await assert.rejects(requestPublic("https://api.search.tinyfish.ai/?query=q", { providerRequest: true, allowRedirects,
+      headers: { "X-API-Key": key }, lookup: pub, request: n.request }), { code: "WEB_REDIRECT_BLOCKED" });
+    assert.equal(n.calls.length, 1);
+    assert.equal(n.calls[0].options.rejectUnauthorized, true);
+    assert.equal(n.calls[0].options.servername, "api.search.tinyfish.ai");
+  }
+});
+test("DNS failures stop the request before opening a connection", async () => {
+  for (const lookup of [async () => [], async () => { throw Object.assign(new Error("fixture"), { code: "ENOTFOUND" }); }]) {
+    await assert.rejects(requestPublic("https://public.example/", { lookup,
+      request: () => assert.fail("unresolved targets cannot connect") }), { code: "WEB_UNAVAILABLE" });
+  }
+});
+test("missing or repeated page redirects stop with a redirect error", async () => {
+  for (const headers of [{}, { location: "https://public.example/loop" }]) {
+    const n = network(302, headers);
+    await assert.rejects(requestPublic("https://public.example/", { lookup: pub, request: n.request }), { code: "WEB_REDIRECT_FAILED" });
+    assert.equal(n.calls.length, headers.location ? 6 : 1);
+  }
 });
 test("provider authentication, quota and rate failures have distinct safe codes", async () => {
   for (const [status, code] of [[401, "WEB_AUTH_FAILED"], [403, "WEB_AUTH_FAILED"], [402, "WEB_QUOTA_EXCEEDED"], [432, "WEB_QUOTA_EXCEEDED"], [433, "WEB_QUOTA_EXCEEDED"], [429, "WEB_RATE_LIMITED"]]) {

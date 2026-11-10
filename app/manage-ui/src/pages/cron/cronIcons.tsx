@@ -63,6 +63,15 @@ export function IconPlus() {
   );
 }
 
+export function IconCalendar() {
+  return (
+    <svg {...BASE} strokeWidth="1.25">
+      <rect x="2.5" y="3.5" width="11" height="10" rx="1.5" />
+      <path d="M5 2.5v2M11 2.5v2M2.5 6.5h11" />
+    </svg>
+  );
+}
+
 export function IconCalendarChevron({ direction }: { direction: "left" | "right" }) {
   const path = direction === "left" ? "M9.75 4 6.25 8 9.75 12" : "M6.25 4 9.75 8 6.25 12";
   return (

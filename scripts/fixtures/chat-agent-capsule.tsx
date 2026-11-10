@@ -111,7 +111,7 @@ window.fetch = async (input, init) => {
   }
   if (url.pathname === "/__api/cron/jobs") {
     if (state.failCron) return new Response(JSON.stringify({ error: "Cron fixture unavailable" }), { status: 503 });
-    payload = { jobs: [
+    const jobs = [
       { id: "capsule-daily", backendId: alpha.backendId, agentId: alpha.id, name: "每天早上的灵感整理",
         description: "把昨晚留下的零散想法整理成一份清晰的创作清单。", enabled: true,
         schedule: { kind: "cron", expr: "0 9 * * *" }, scheduleDisplay: "每天 09:00",
@@ -122,10 +122,17 @@ window.fetch = async (input, init) => {
         lastStatus: "error", lastError: "Fixture previous run failed" },
       { id: "foreign-agent", backendId: alpha.backendId, agentId: "someone-else", name: "其他 Agent 的任务", enabled: true },
       { id: "foreign-backend", backendId: beta.backendId, agentId: alpha.id, name: "其他后端的同名 Agent 任务", enabled: true },
-    ] };
+    ];
+    const job = jobs.find(value => value.id === url.searchParams.get("id"));
+    payload = url.searchParams.get("action") === "delivery"
+      ? { fullText: "今天整理出了三个创作方向，可以从清晨散步的声音开始。", status: "ok",
+        startedAt: job?.lastRunAt, durationMs: 2500, source: "transcript", model: "fixture-model" }
+      : url.searchParams.get("action") === "detail" ? { job } : { jobs };
   }
   if (url.pathname === "/__api/inspirations/agents") payload = { agents: agents.map(agent => ({ ...agent,
     backendName: agent.backendId, capabilities: { execute: true, session: true, respond: true, cancel: true, reason: null } })) };
+  if (url.pathname === "/__api/inspirations/idle-agents") payload = { agents: [], busyAgents: [] };
+  if (url.pathname === "/__api/inspirations/models") payload = { defaultModel: null, models: [] };
   if (url.pathname === "/__api/inspirations") {
     const isAlpha = url.searchParams.get("agentId") === alpha.id && url.searchParams.get("backendId") === alpha.backendId;
     const isArchived = url.searchParams.get("filter") === "archived";
@@ -417,12 +424,11 @@ state.runCapsuleFixture = async () => {
   await settle();
   check(Math.abs(header().getBoundingClientRect().height - collapsedHeight) < 2, "capsule returns to its original height");
   clickPanel("cron");
-  await wait(() => region().querySelectorAll("a[href^='#/cron']").length === 2, "scoped Cron jobs");
-  const cronLinks = Array.from(region().querySelectorAll<HTMLAnchorElement>("a[href^='#/cron']"))
-    .map(link => new URLSearchParams(link.hash.split("?")[1]));
-  check(cronLinks.every(params => params.get("run") === "latest" && params.get("backend") === alpha.backendId)
-    && cronLinks.map(params => params.get("job")).join(",") === "capsule-daily,capsule-weekly",
-  "chat task links request current run results for the exact tasks");
+  await wait(() => region().querySelectorAll("button[data-cron-id]").length === 2, "scoped Cron jobs");
+  const cronRows = Array.from(region().querySelectorAll<HTMLButtonElement>("button[data-cron-id]"));
+  check(cronRows.every(row => row.getAttribute("aria-haspopup") === "dialog")
+    && cronRows.map(row => row.dataset.cronId).join(",") === "capsule-daily,capsule-weekly",
+  "chat task rows open dialogs for the exact tasks");
   check(Math.abs(header().getBoundingClientRect().height - fullHeight) < 2, "Cron uses the same full-height surface as the profile");
   check(tools()[1].title === i18n.t("common.close") && tools()[1].querySelector("img"), "Cron trigger becomes close");
   check(!region().textContent?.includes("其他"), "other Agent/backend jobs are excluded");
@@ -435,6 +441,34 @@ state.runCapsuleFixture = async () => {
   "scheduled task rows omit run errors and manual refresh");
   const cronRequest = new URL(requests.find(url => url.startsWith("/__api/cron/jobs?"))!, location.origin);
   check(cronRequest.searchParams.get("backend") === alpha.backendId && cronRequest.searchParams.get("agentIds") === alpha.id, "Cron request carries backend and Agent");
+  const cronChatHref = location.href;
+  const cronDialog = () => document.querySelector<HTMLElement>("[role='dialog']");
+  cronRows[0].focus();
+  cronRows[0].click();
+  await wait(() => cronDialog()?.textContent?.includes("今天整理出了三个创作方向"), "latest Cron result opens in chat");
+  check(location.href === cronChatHref && !document.querySelector(".cron-page"), "the task page is not mounted or navigated to");
+  check(requests.some(url => {
+    const parsed = new URL(url, location.origin);
+    return parsed.pathname === "/__api/cron/jobs" && parsed.searchParams.get("action") === "delivery"
+      && parsed.searchParams.get("id") === "capsule-daily" && !parsed.searchParams.has("at");
+  }), "the current task's latest result is fetched");
+  cronDialog()!.querySelector<HTMLButtonElement>(`button[aria-label='${i18n.t("common.edit")}']`)!.click();
+  await wait(() => document.querySelector(".cron-form-modal")?.textContent?.includes("每天早上的灵感整理"), "edit the same task from its result");
+  await wait(() => document.querySelectorAll("[role='dialog']").length === 1, "report finishes closing before editor dismissal");
+  document.querySelector(".cron-form-modal")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await wait(() => !cronDialog(), "Cron editor closed");
+  check(header().dataset.agentPanel === "cron" && location.href === cronChatHref, "closing the editor preserves the chat task list");
+  await wait(() => document.activeElement === cronRows[0], "Cron dialog restores focus to its row");
+  const deliveriesBeforeUnrun = requests.filter(url => url.includes("action=delivery")).length;
+  cronRows[1].focus();
+  cronRows[1].click();
+  await wait(() => document.querySelector(".cron-form-modal")?.textContent?.includes("周末阅读回顾"), "a task without runs opens its editor in chat");
+  check(requests.filter(url => url.includes("action=delivery")).length === deliveriesBeforeUnrun,
+    "an unrun task does not request a result");
+  cronDialog()!.querySelector<HTMLButtonElement>(`button[aria-label='${i18n.t("common.close")}']`)!.click();
+  await wait(() => !cronDialog(), "unrun task editor closed");
+  check(location.href === cronChatHref && header().dataset.agentPanel === "cron", "both task dialogs stay in the current chat");
+  await wait(() => document.activeElement === cronRows[1], "unrun task restores focus to its row");
   clickPanel("inspiration");
   await wait(() => region().querySelector("[data-inspiration-id='capsule-note-1']"), "Agent notes loaded");
   check(region().querySelector("[data-inspiration-id='capsule-archived']"), "results and ordinary notes are shown together");
@@ -446,21 +480,39 @@ state.runCapsuleFixture = async () => {
   const loadMore = Array.from(region().querySelectorAll<HTMLButtonElement>("button")).find(button => button.textContent?.trim() === i18n.t("dashboard.loadMore"))!;
   loadMore.click();
   await wait(() => region().querySelectorAll("[data-inspiration-id]").length === 3, "combined notes pagination");
-  const attachmentNote = region().querySelector<HTMLDetailsElement>("[data-inspiration-id='capsule-note-2']")!;
-  attachmentNote.querySelector<HTMLElement>("summary")!.click();
-  check(Array.from(attachmentNote.querySelectorAll("a")).some(link => link.textContent?.includes("设计参考.pdf")
-    && link.href.includes("id=capsule-note-2")), "note attachments retain their detail link");
-  attachmentNote.querySelector<HTMLElement>("summary")!.click();
   check(requests.filter(url => url.startsWith("/__api/inspirations?")).every(url => {
     const params = new URL(url, location.origin).searchParams;
     return params.get("backendId") === alpha.backendId && params.get("agentId") === alpha.id;
   }), "every notes page carries the Agent scope");
-  const firstNote = region().querySelector<HTMLDetailsElement>("[data-inspiration-id='capsule-note-1']")!;
-  firstNote.querySelector<HTMLElement>("summary")!.click();
-  check(firstNote.open && firstNote.querySelector("[data-note-content]")?.textContent?.includes(notes[0].body), "note details expand inside the capsule");
-  check(firstNote.querySelector("a")?.href.includes("id=capsule-note-1"), "the note links to its existing detail page");
-  firstNote.querySelector<HTMLElement>("summary")!.click();
-  check(!firstNote.open && header().dataset.agentPanel === "inspiration", "closing a note keeps the capsule expanded");
+  check(!region().querySelector("details, summary, [data-note-content]"), "note rows no longer expand inline");
+  const noteDialog = () => document.querySelector<HTMLElement>("[role='dialog'][data-modal-variant='report']");
+  const chatHref = location.href;
+  for (const note of [...notes, archived]) {
+    const row = region().querySelector<HTMLButtonElement>(`button[data-inspiration-id='${note.id}']`)!;
+    check(row.getAttribute("aria-haspopup") === "dialog", "note rows announce the dialog");
+    row.focus();
+    row.click();
+    await wait(() => noteDialog()?.textContent?.includes(note.body), `open the exact note ${note.id}`);
+    check(requests.some(url => url === `/__api/inspirations/detail?id=${note.id}`), "the dialog reads the selected note");
+    if (note.id === notes[1].id) {
+      check(noteDialog()?.textContent?.includes("设计参考.pdf"), "note attachments appear in the shared detail dialog");
+      await settle();
+      const backdrop = document.elementFromPoint(2, 2) as HTMLElement;
+      check(backdrop && !noteDialog()!.contains(backdrop), "the backdrop is outside the note dialog");
+      backdrop.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", button: 0 }));
+      backdrop.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "mouse", button: 0 }));
+      backdrop.click();
+    } else {
+      const close = noteDialog()!.querySelector<HTMLButtonElement>(`button[aria-label='${i18n.t("common.close")}']`)!;
+      if (note.id === notes[0].id) close.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      else close.click();
+    }
+    await wait(() => !noteDialog(), "note dialog closed");
+    check(header().dataset.agentPanel === "inspiration" && location.href === chatHref,
+      "closing the note keeps the current chat and Agent notes panel");
+    check(region().querySelectorAll("[data-inspiration-id]").length === 3, "closing a note retains loaded pages");
+    await wait(() => document.activeElement === row, "focus returns to the selected note");
+  }
   await closePanel();
   check(document.activeElement === tools()[2], "Escape returns focus to the trigger");
   const noteReadsBeforeReopen = requests.length;

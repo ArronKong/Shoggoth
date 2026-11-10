@@ -1,7 +1,7 @@
 "use strict";
 
 const source = {
-  source: { type: "string", enum: ["chat", "kanban", "cron", "inspiration"] },
+  source: { type: "string", enum: ["chat", "kanban", "cron", "inspiration", "proactive"] },
   sourceId: { type: "string", minLength: 1, maxLength: 512 },
 };
 const session = { ...source, sessionId: { type: "string", minLength: 1, maxLength: 128 } };

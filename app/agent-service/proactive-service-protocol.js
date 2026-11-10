@@ -27,6 +27,7 @@ const METHODS = Object.freeze({
   "proactive.monitor.history": ["id", "cursor", "limit"],
   "proactive.preview": ["config"],
   "proactive.notice.get": ["id"],
+  "proactive.notice.activity": ["id", "sessionKey"],
   "proactive.note.get": ["id"],
   "proactive.note.set": ["operationId", "id", "expectedRevision", "patch"],
   "proactive.notification-context": ["focused"],
@@ -135,6 +136,7 @@ function validateParams(method, value) {
   if (method === "proactive.runtime.verify" && !id(value.profileId)) fail();
   if (["proactive.targets.list", "proactive.runs.list"].includes(method) && !id(value.profileId)) fail();
   for (const field of ["id", "operationId"]) if (Object.hasOwn(value, field) && !id(value[field])) fail();
+  if (method === "proactive.notice.activity" && (!/^notice-[a-f0-9]{64}$/u.test(value.id) || !id(value.sessionKey))) fail();
   if (Object.hasOwn(value, "expectedRevision") && (["proactive.document.set", "proactive.review-document.set"].includes(method)
     ? typeof value.expectedRevision !== "string" || !/^[a-f0-9]{64}$/u.test(value.expectedRevision) : !at(value.expectedRevision))) fail();
   if (/^proactive\.(?:document|review-document|scratch)\./u.test(method) && !id(value.profileId)) fail();
@@ -328,6 +330,26 @@ function validateResult(method, result) {
     for (const item of result.items) if (!id(item.id) || typeof item.actionable !== "boolean" || !text(item.href, 1024)) bad();
     validateNotice(result.notice);
     for (const { actionable, ...item } of result.items) validateCandidate(item);
+  } else if (method === "proactive.notice.activity") {
+    if (!exact(result, ["activity"])) bad();
+    const a = result.activity;
+    if (a !== null) {
+      if (!exact(a, ["runId", "scheduledAt", "startedAt", "finishedAt", "publishedAt", "candidateCount", "inspiration", "web", "messages"])
+        || !id(a.runId) || ![a.startedAt, a.finishedAt, a.publishedAt].every(at)
+        || ![a.scheduledAt, a.candidateCount].every(value => value === null || at(value))
+        || !Array.isArray(a.messages) || a.messages.length > 32 || Buffer.byteLength(JSON.stringify(a.messages)) > 24 * 1024) bad();
+      if (a.inspiration !== null && (!exact(a.inspiration, ["state", "checked", "total"])
+        || !["complete", "partial", "unavailable"].includes(a.inspiration.state) || !at(a.inspiration.checked)
+        || !(a.inspiration.total === null || at(a.inspiration.total)))) bad();
+      if (a.web !== null && (!exact(a.web, ["checked", "failed"]) || !at(a.web.checked) || !at(a.web.failed)
+        || a.web.checked > 4 || a.web.failed > a.web.checked)) bad();
+      for (const message of a.messages) {
+        const part = message?.content?.[0];
+        if (message?.shoggoth?.runId !== a.runId || !Array.isArray(message.content) || message.content.length !== 1
+          || !(part?.type === "toolCall" && part.toolName === "proactive_respond"
+            || part?.type === "toolResult" && part.name === "proactive_respond")) bad();
+      }
+    }
   } else bad();
   return structuredClone(result);
 }

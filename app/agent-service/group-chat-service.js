@@ -233,7 +233,15 @@ class GroupChatService {
       }
       return history;
     }
-    if (method === "group.message.read") return this.store.readMessage(params);
+    if (method === "group.message.read") {
+      if (params.part !== "activity") return this.store.readMessage(params);
+      const source = this.store.getMessageActivityTurn(params);
+      if (!source) return { activity: null, startedAt: null, finishedAt: null };
+      const { turn, member } = source;
+      const activity = (turn.runKind === "external" ? turn.completedActivity
+        : this.nativeExecutor?.readCompletedActivity?.(turn, member)) ?? null;
+      return { activity, startedAt: turn.startedAt ?? null, finishedAt: turn.finishedAt ?? null };
+    }
     if (method === "group.search") return require("./group-message-search").searchGroupMessages(this.store, params);
     if (method === "group.execution.reconcile") {
       const opportunity = this.store.getOpportunity(params.target.opportunityId);
@@ -265,11 +273,23 @@ class GroupChatService {
       return this.#view(params.groupId);
     }
     if (method === "group.members.add") {
-      this.store.addMember({ groupId: params.groupId, expectedRosterRevision: params.expectedRosterRevision,
-        member: await this.#resolveMember(params.member) });
+      const members = await Promise.all((params.members ?? [params.member]).map(ref => this.#resolveMember(ref)));
+      if (params.members && members.some(member => member.backendId === NATIVE_BACKEND_ID)) {
+        this.assertAgentAccessMembersCurrent(members);
+      }
+      this.store.addMembers({ groupId: params.groupId, expectedRosterRevision: params.expectedRosterRevision, members });
       this.#changed(params.groupId);
       this.driver.wake(params.groupId);
       return this.#view(params.groupId, { refresh: true });
+    }
+    if (method === "group.members.update") {
+      const addMembers = await this.resolveAgentAccessMembers(params.addMembers);
+      if (addMembers.some(member => member.backendId === NATIVE_BACKEND_ID)) this.assertAgentAccessMembersCurrent(addMembers);
+      const { aborts } = this.store.updateMembers({ ...params, addMembers });
+      await this.driver.abortAll(aborts);
+      this.#changed(params.groupId);
+      this.driver.wake(params.groupId);
+      return this.#view(params.groupId, { refresh: addMembers.length > 0 });
     }
     if (method === "group.member.models") return this.#memberModels(params.groupId, params.memberId);
     if (method === "group.members.model") {

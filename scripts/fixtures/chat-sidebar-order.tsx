@@ -34,6 +34,7 @@ const mainKey = "agent:" + alpha + ":main";
 const oldKey = "agent:" + alpha + ":old";
 const cronKey = "agent:" + alpha + ":cron:fixture:run:1";
 const betaKey = "agent:" + beta + ":" + (nativeMain ? "11111111-1111-4111-8111-111111111111" : "main");
+const betaAppKey = "agent:" + beta + ":22222222-2222-4222-8222-222222222222";
 const internalKey = "agent:order-internal:main";
 const session = (key: string, agentId: string, name: string, age: number, kind = "main") =>
   ({ key, agentId, agentName: name, backendId: agentId === beta ? betaBackend : alphaBackend,
@@ -46,7 +47,7 @@ const sessions = [
   session(internalKey, "order-internal", "Internal member", 0),
 ];
 if (queued) sessions.push(session(betaKey + "-other", beta, "Beta", 25));
-if (nativeMain) sessions.push(session("agent:" + beta + ":22222222-2222-4222-8222-222222222222", beta, "Beta", 10));
+if (nativeMain) sessions.push(session(betaAppKey, beta, "Beta", 10));
 const agents = [alpha, beta, "order-internal"].map(id => ({
   id, name: id === alpha ? "Alpha" : id === beta ? "Beta" : "Internal member",
   backendId: id === beta ? betaBackend : alphaBackend,
@@ -346,12 +347,18 @@ state.runSidebarOrderFixture = async () => {
 async function runSendingFixture() {
   await wait(() => rows().length === 2 && document.querySelector(".chat-thread")?.textContent?.includes("History for " + mainKey), "sidebar did not load");
   expectOrder(directOrder, "cached activity ordering");
-  rows().find(row => row.title === beta)!.click();
-  await wait(() => document.querySelector(".chat-thread")?.textContent?.includes("History for " + betaKey), "older Agent did not open");
+  const openBeta = () => rows().find(row => row.title === beta)!.click();
+  const sendKey = nativeMain ? betaAppKey : betaKey;
+  const showSendSession = () => document.querySelector(".chat-thread")?.textContent?.includes("History for " + sendKey);
+  openBeta();
+  await wait(showSendSession, "Agent click must open its latest session, even when it has a Main session");
   if (nativeMain && !immersive) {
+    await select(betaKey);
     const mainTitle = language === "zh-CN" ? "主会话" : "Main session";
     await wait(() => document.querySelector(".session-menu__selected-title")?.textContent?.split(" · ")[0] === mainTitle,
       "localized Main title missing");
+    openBeta();
+    await wait(showSendSession, "clicking the current Agent must leave an older Main session for the latest conversation");
   }
   expectOrder(directOrder, "opening an older Agent must not promote it");
   const input = () => Array.from(document.querySelectorAll<HTMLTextAreaElement>("textarea"))
@@ -365,10 +372,10 @@ async function runSendingFixture() {
   await wait(() => button() && !button()!.disabled, "send button unavailable");
   button()!.click();
   await wait(() => sent.length === 1, "message not sent");
-  check(sent[0].sessionKey === betaKey && sent[0].message === text, "wrong send target");
+  check(sent[0].sessionKey === sendKey && sent[0].message === text, "wrong send target");
   await wait(() => names()[0] === "Beta", "a sent user message must promote its Agent before the reply completes");
   const activity = JSON.parse(localStorage.getItem("shoggoth.chat.activity.v2")!);
-  check(activity[betaKey] >= sentAt, "sent activity must survive reload");
+  check(activity[sendKey] >= sentAt, "sent activity must survive reload");
   check(document.querySelector(".chat-stop"), "regression must be verified while the turn is still running");
   check(rows().filter(row => row.classList.contains("is-active")).length === 1, "sending must keep a single selected Agent");
   if (steering) {
@@ -790,32 +797,51 @@ async function runUnreadBaselineFixture() {
 async function runQueuedFixture() {
   await wait(() => rows().length === 2 && state.socket, "sidebar did not load");
   const row = () => rows().find(item => item.title === beta)!;
+  const neighborKey = betaKey + "-other";
   row().click();
-  await wait(() => document.querySelector(".chat-thread")?.textContent?.includes("History for " + betaKey), "queued session did not open");
+  const showsSession = (key: string) => localStorage.getItem("shoggoth.chat.lastActive.v1") === key
+    && document.querySelector(".chat-thread")?.textContent?.includes("History for " + key);
+  await wait(() => showsSession(betaKey), "queued session did not open");
   const emit = (key: string, runId: string, kind: string) => state.socket.emit({ type: "event", event: "chat", payload: {
     sessionKey: key, runId, state: kind === "failed" ? "error" : "status", statusKind: kind,
     ...(kind === "queued" ? { reason: "RUNTIME_HOST_CAPACITY", queuedAt: Date.now() } : {}),
     ...(kind === "failed" ? { errorCode: "RUNTIME_PERMISSION_POLICY_CONFLICT", errorMessage: "Fixture permission conflict" } : {}),
   } });
   const text = () => row().querySelector(".chat-agent__subtext")?.textContent;
+  const time = () => row().querySelector(".chat-agent__time")?.textContent;
   const queueLabel = i18n.t("chat.liveStatus.queued"), runningLabel = i18n.t("chat.liveStatus.running");
-  const normalPreview = text(), previousOrder = names();
+  const normalPreview = text(), latestTime = time(), previousOrder = names();
   emit(betaKey, "queue-one", "queued");
   await wait(() => text() === normalPreview, "queued Agent must keep its normal preview");
   check(!row().querySelector('.chat-agent__subtext [aria-hidden="true"]'), "queued Agent must not animate typing");
   check(!text()?.includes(queueLabel), "internal queue state must not replace the sidebar preview");
   check(JSON.stringify(names()) === JSON.stringify(previousOrder), "queue admission must not promote the Agent");
   check(!document.querySelector(".chat-status--queued"), "internal queue state must not appear in the header");
-  emit(betaKey + "-other", "running-neighbor", "running");
+  emit(neighborKey, "running-neighbor", "running");
   await wait(() => text()?.includes(runningLabel), "another running session must take precedence over a queued session");
-  emit(betaKey + "-other", "running-neighbor", "failed");
+  row().click();
+  await wait(() => showsSession(neighborKey) && document.querySelector(".chat-stop"),
+    "clicking the typing Agent must open the running sibling, even when another session is newer");
+  emit(betaKey, "queue-one", "running");
+  await wait(() => time() === latestTime, "when both sessions are running the row must represent the newer one");
+  row().click();
+  await wait(() => showsSession(betaKey), "clicking the typing Agent must open the newer of two running sessions");
+  emit(betaKey, "queue-one", "idle");
+  emit(betaKey, "queue-two", "queued");
+  await wait(() => time() !== latestTime && text()?.includes(runningLabel), "a newer queued session must give way to the running sibling");
+  row().click();
+  await wait(() => showsSession(neighborKey), "the running sibling must reopen");
+  emit(neighborKey, "running-neighbor", "failed");
+  await wait(() => !text()?.includes(runningLabel), "terminal status must clear the typing indicator");
+  row().click();
+  await wait(() => showsSession(betaKey), "after the sibling ends the latest session must open again");
   await wait(() => text() === normalPreview, "remaining queued session must restore the normal preview after its neighbor ends");
   check(!row().querySelector('.chat-agent__subtext [aria-hidden="true"]'), "queued sibling must not keep the typing animation");
-  emit(betaKey, "queue-one", "failed");
+  emit(betaKey, "queue-two", "failed");
   await wait(() => !text()?.includes(queueLabel) && !text()?.includes(runningLabel), "failed preparation left a stale activity indicator");
   check(writes === 0, "observing queue transitions must not send or retry a message");
   // Leave the preview on the state whose label changed.
   emit(betaKey, "queue-preview", "queued");
   await wait(() => text() === normalPreview, "queue preview did not settle");
-  return { scenario, language, result: "PASS", checks: ["queue preserves preview and order", "queue has no typing or header status", "running sibling priority", "terminal clears activity", "no replay"], writes };
+  return { scenario, language, result: "PASS", checks: ["queue preserves preview and order", "queue has no typing or header status", "click opens latest running session", "terminal restores latest-session navigation", "no replay"], writes };
 }

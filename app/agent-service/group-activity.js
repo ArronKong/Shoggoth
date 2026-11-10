@@ -297,4 +297,26 @@ function validGroupActivity(value) {
   } catch { return false; }
 }
 
-module.exports = { GroupActivityProjection, PHASES, BINDING_FIELDS, safeValue, toolTitle, phaseFor, validGroupActivity };
+/** History uses the saved turn identity, without internal session or stream identifiers. */
+function groupTurnActivityBinding(turn) {
+  return { groupId: turn.groupId, discussionId: turn.discussionId, memberId: turn.memberId,
+    opportunityId: turn.id, runId: turn.runId };
+}
+
+function completedGroupActivity(projection) {
+  const { textMessages: _textMessages, compaction, ...activity } = projection.snapshot();
+  if (activity.phase !== "completed") return null;
+  const tools = new Map();
+  for (const tool of [...activity.recentTools, activity.tool]) {
+    if (!tool || tool.status === "running") continue;
+    const { id, name, input, output, error, status, startedAt, updatedAt, finishedAt, durationMs } = tool;
+    tools.set(id, { id, name, title: toolTitle(name, input), input, output, error, status, startedAt, updatedAt, finishedAt, durationMs });
+  }
+  const recentTools = [...tools.values()].slice(-8);
+  if (!recentTools.length && compaction?.status !== "compacted") return null;
+  const saved = { ...activity, tool: null, recentTools, ...(compaction?.status === "compacted" ? { compaction } : {}) };
+  return validGroupActivity(saved) ? saved : null;
+}
+
+module.exports = { GroupActivityProjection, PHASES, BINDING_FIELDS, safeValue, toolTitle, phaseFor, validGroupActivity,
+  groupTurnActivityBinding, completedGroupActivity };

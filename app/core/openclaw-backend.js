@@ -5688,7 +5688,9 @@ class OpenClawBackend extends AgentBackend {
       contextWindowDefault: typeof m?.contextWindowDefault === "string" ? m.contextWindowDefault : undefined,
       reasoning: m?.reasoning === true,
       thinkingLevels: Array.isArray(m?.thinkingLevels) ? m.thinkingLevels : undefined,
+      thinkingOptions: Array.isArray(m?.thinkingOptions) ? m.thinkingOptions : undefined,
       thinkingDefault: typeof m?.thinkingDefault === "string" ? m.thinkingDefault : undefined,
+      fast: typeof m?.fast === "boolean" ? m.fast : undefined,
       effectiveFastMode: m?.effectiveFastMode,
       supportsTools: typeof m?.supportsTools === "boolean" ? m.supportsTools : undefined,
       available: typeof m?.available === "boolean" ? m.available : undefined,
@@ -5838,17 +5840,31 @@ class OpenClawBackend extends AgentBackend {
     return out;
   }
 
-  getInspirationModels(agentId) { return this.getGroupMemberModels(agentId); }
+  getInspirationModels(agentId) { return this.getAgentModels(agentId); }
 
-  async getGroupMemberModels(agentId) {
-    const { assertModelCatalog, modelError } = require("../group-member-model");
+  // Chat, Agent settings and Inspiration use the same Agent-scoped catalog.
+  // Keep availability and capability metadata; presentation decides how to
+  // explain unavailable choices, while execution still validates them below.
+  async getAgentModels(agentId) {
     await this._connect();
     const generation = this._connectionGeneration;
     const [result, agent] = await Promise.all([this.request("models.list", { agentId, view: "configured" }), this.getAgent(agentId)]);
-    if (generation !== this._connectionGeneration || !Array.isArray(result?.models)) throw modelError("GROUP_CHAT_MODEL_CATALOG_UNAVAILABLE");
-    const models = this._mapRuntimeModels(result.models).filter(item => item.available !== false)
+    if (generation !== this._connectionGeneration || !Array.isArray(result?.models)) {
+      throw Object.assign(new Error("Agent model catalog unavailable"), { code: "AGENT_MODEL_CATALOG_UNAVAILABLE" });
+    }
+    return { models: this._mapRuntimeModels(result.models),
+      defaultModel: typeof agent.model === "string" && agent.model ? agent.model : null };
+  }
+
+  async getGroupMemberModels(agentId) {
+    const { assertModelCatalog, modelError } = require("../group-member-model");
+    const catalog = await this.getAgentModels(agentId).catch(error => {
+      if (error?.code === "AGENT_MODEL_CATALOG_UNAVAILABLE") throw modelError("GROUP_CHAT_MODEL_CATALOG_UNAVAILABLE");
+      throw error;
+    });
+    const models = catalog.models.filter(item => item.available !== false)
       .map(item => ({ id: item.id, name: item.name, provider: item.provider || null }));
-    return assertModelCatalog({ models, defaultModel: typeof agent.model === "string" && agent.model ? agent.model : null });
+    return assertModelCatalog({ models, defaultModel: catalog.defaultModel });
   }
 
   async applyGroupSessionModel(agentId, sessionKey, selection) {

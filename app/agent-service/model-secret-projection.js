@@ -9,6 +9,7 @@ const plain = value => value && Object.getPrototypeOf(value) === Object.prototyp
 const fail = code => { throw serviceError(code, "模型输入的本地凭据处理未完成，内容未发送"); };
 const FIXED_STRING = new Set(["role", "type", "id", "call_id", "tool_call_id", "item_id", "model", "name",
   "status", "object", "finish_reason", "reasoning_effort", "service_tier", "encoding_format", "detail"]);
+const JSON_SCHEMA_DIALECT = /^https?:\/\/json-schema\.org\/(?:schema|draft-0[3467]\/schema|draft\/(?:2019-09|2020-12)\/schema)#?$/u;
 const OPAQUE = new Set(["signature", "encrypted_content", "thoughtSignature", "thought_signature"]);
 const CONTENT_FIELDS = new Set(["input", "messages", "contents", "system", "systemInstruction", "instructions",
   "prompt", "text", "content", "output", "arguments", "args", "parts", "description", "summary", "thinking",
@@ -90,7 +91,8 @@ class ModelSecretProjection {
       // and results cannot opt out by declaring a message role or media type.
       const attachmentMessage = depth === 2 && MESSAGE_LIST_FIELDS.has(field) && ATTACHMENT_ROLES.has(value.role);
       for (const [key, child] of Object.entries(value)) {
-        const fixed = FIXED_STRING.has(key) && typeof child === "string";
+        const fixed = typeof child === "string"
+          && (FIXED_STRING.has(key) || (key === "$schema" && JSON_SCHEMA_DIALECT.test(child)));
         const selected = !fixed && (business || CONTENT_FIELDS.has(key));
         const fileContent = attachmentMessage && (key === "content" || key === "parts");
         const fileText = attachmentPart && key === "text" && [undefined, "text", "input_text", "output_text"].includes(value.type);

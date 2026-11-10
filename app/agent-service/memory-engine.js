@@ -6,67 +6,17 @@ const path = require("node:path");
 const { serviceError } = require("./security");
 const { VIEW_HEADERS, EMPTY_VIEW_MESSAGES } = require("./agent-definition-defaults");
 const { RecallPolicyStore } = require("./recall-policy-store");
+const { contentHash, hasPii, hasSecret, lexicalTerms, memoryTrust, normalizeContent, quoteSupportsContent,
+  CONSOLIDATED_REF, UNTRUSTED_REF_PREFIX, REVIEWED_MEMORY_ID } = require("./memory-content");
+const { matchesWorkspace, workspaceMemoryRef, workspaceMemoryRefs } = require("./memory-workspace");
 
-const SECRET_PATTERNS = Object.freeze([
-  /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/iu,
-  /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/iu,
-  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u,
-  /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/u,
-  /\b\d{6}\b.*(?:验证码|verification code|otp)|(?:验证码|verification code|otp).*\b\d{6}\b/iu,
-]);
-const ASSIGNED_SECRET = /\b(?:token|api[_-]?key|secret|password|authorization)\s*[:=]\s*([^\r\n]{8,})/giu;
-const ENV_NAME = String.raw`(?:"[^"\r\n]+"|'[^'\r\n]+')`;
-const ENV_LOOKUP = String.raw`(?:os\.environ\[${ENV_NAME}\]|os\.environ\.get\(${ENV_NAME}\)|os\.getenv\(${ENV_NAME}\)|process\.env(?:\.[A-Za-z_][A-Za-z0-9_]*|\[${ENV_NAME}\])|Deno\.env\.get\(${ENV_NAME}\)|System\.getenv\(${ENV_NAME}\)|getenv\(${ENV_NAME}\))`;
-const ENV_REFERENCE = new RegExp(
-  String.raw`^${ENV_LOOKUP}(?:\s*(?:\bor\b|\|\||\?\?)\s*${ENV_LOOKUP})*(?:;)?$`,
-  "u",
-);
-const ARG_REFERENCE = /^(?:argv|process\.argv)\[[A-Za-z_][A-Za-z0-9_]*\];?$/u;
-// The one audited frozen GWAS helper derives this token from a response row.
-// Pin the entire file so a different script cannot use the same expression to
-// conceal an embedded credential through an alias or fallback.
-const GWAS_EFFECT_TOKEN = /^token\s*=\s*str\(effect\[0\]\)$/iu;
-const FROZEN_GWAS_HELPER_SHA256 = "9844fcad187346a045712ef2975691f20028308349c9f772b5c13065248cb543";
-function isAuditedGwasEffectToken(value, match) {
-  return GWAS_EFFECT_TOKEN.test(match[0].trim())
-    && crypto.createHash("sha256").update(value).digest("hex") === FROZEN_GWAS_HELPER_SHA256;
-}
-// A plugin's `${secret:NAME}` reference names a credential and is never a value;
-// documentation placeholders such as `Bearer <token>` cannot carry one either.
-// The assignment pattern consumes the rest of the line, so whatever follows a
-// placeholder is checked again rather than exempted with it.
-const SECRET_REFERENCE_TAIL = /^secret:[A-Z][A-Z0-9_]{0,63}\}/u;
-const PLACEHOLDER_VALUE = /^["'`]?(?:Bearer\s+)?(?:\$\{secret:[A-Z][A-Z0-9_]{0,63}\}|<[A-Za-z][A-Za-z _-]{0,40}>|\*{3,}|x{3,}(?:\.{2,}y{3,})?|X{3,})["'`]?(?=$|[\s,;)，。、；：）])/u;
-function placeholderRest(value, match) {
-  if (value.slice(Math.max(0, match.index - 2), match.index) === "${") {
-    const tail = SECRET_REFERENCE_TAIL.exec(value.slice(match.index));
-    if (tail) return match[0].slice(tail[0].length);
-  }
-  const assigned = match[1].trimStart();
-  const placeholder = PLACEHOLDER_VALUE.exec(assigned);
-  return placeholder ? assigned.slice(placeholder[0].length) : null;
-}
-function isRegexKeyAlternative(value, match) {
-  // `/...token=|.../` matches a query-string key, not an assigned value.
-  // Only skip an empty regex alternative; a literal after `token=` remains
-  // subject to the ordinary secret-assignment check.
-  const lineStart = value.lastIndexOf("\n", match.index) + 1;
-  return /\/\(\?:[^/]*$/u.test(value.slice(lineStart, match.index))
-    && match[1].trimStart().startsWith("|");
-}
-const PII_PATTERNS = Object.freeze([
-  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
-  /(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)/u,
-]);
 const CLASSIFICATIONS = new Set(["explicit", "imported"]);
 const SENSITIVITY_RANK = Object.freeze({ normal: 0, private: 1, restricted: 2 });
 // Facts about the user and their projects are shared by every Agent of the
 // same owner; "agent" scope stays private to the Agent that saved it.
 const SHARED_SCOPES = new Set(["user", "project", "workspace"]);
-const REVIEWED_MEMORY_ID = /^reviewed-(mc-[a-f0-9]{64})$/u;
 
 function engineError(code, message) { return serviceError(code, message); }
-function normalizeContent(value) { return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase(); }
 function boundedImportContent(value, maxBytes = 8 * 1024) {
   let bytes = 0;
   let result = "";
@@ -76,14 +26,6 @@ function boundedImportContent(value, maxBytes = 8 * 1024) {
     result += character; bytes += size;
   }
   return result.trim();
-}
-function contentHash(value) { return crypto.createHash("sha256").update(normalizeContent(value)).digest("hex"); }
-function lexicalTerms(value) {
-  const normalized = normalizeContent(value);
-  const words = normalized.match(/[\p{L}\p{N}_-]+/gu) || [];
-  const cjk = [...normalized.replace(/[^\p{Script=Han}]/gu, "")];
-  const bigrams = cjk.length <= 1 ? cjk : cjk.slice(0, -1).map((char, index) => `${char}${cjk[index + 1]}`);
-  return new Set([...words, ...bigrams]);
 }
 const HOT_PREFERENCE_PATTERN = /偏好|喜欢|希望|习惯|称呼|回复风格|prefer|preference|usually|always/iu;
 const HOT_AGREEMENT_PATTERN = /约定|决定|现阶段|必须|规则|agreement|decision|must/iu;
@@ -103,85 +45,6 @@ function hotPriorityFlags(item) {
 const CONDITIONAL_PATTERN = /^(?:用户)?(?:如果|假如|每当|当(?!前).{0,40}?(?:的时候|时))|(?:的时候|时)[，,、]|^(?:the user,?\s+)?(?:when|whenever|if)\b/iu;
 function isConditionalMemory(item) { return CONDITIONAL_PATTERN.test(item.content); }
 const TRUST_RANK = Object.freeze({ owner: 3, system: 2, agent: 1, untrusted: 0 });
-function hasSecret(value) {
-  if (SECRET_PATTERNS.some((pattern) => pattern.test(value))) return true;
-  // A helper that reads an environment variable or a CLI argument does not
-  // embed its runtime value. Keep rejecting literal/fallback assignments while
-  // allowing verified Skill scripts to name external credential inputs.
-  return [...value.matchAll(ASSIGNED_SECRET)].some((match) => {
-    const assigned = match[1].trim();
-    if (isRegexKeyAlternative(value, match) || ENV_REFERENCE.test(assigned) || ARG_REFERENCE.test(assigned)
-      || isAuditedGwasEffectToken(value, match)) return false;
-    const rest = placeholderRest(value, match);
-    return rest === null || hasSecret(rest);
-  });
-}
-function hasPii(value) { return PII_PATTERNS.some((pattern) => pattern.test(value)); }
-// Trust tier of a stored fact, derived only from source refs the Service sets.
-// owner: written or confirmed by the user; system: imported, or consolidated
-// by Shoggoth in the background from the user's own words; agent: saved by an
-// Agent in a direct conversation; untrusted: kept for the user to confirm, and
-// never recalled by Agents, injected or shared.
-const UNTRUSTED_REF_PREFIX = "untrusted:";
-const CONSOLIDATED_REF = "consolidated:auto";
-function memoryTrust(item) {
-  const refs = item.sourceRefs;
-  if (refs.some((ref) => ref.startsWith(UNTRUSTED_REF_PREFIX))) return "untrusted";
-  if (refs.includes(CONSOLIDATED_REF)) return "system";
-  if (REVIEWED_MEMORY_ID.test(item.id) || refs.some((ref) => ref.startsWith("user-edit:"))) return "owner";
-  if (refs.some((ref) => ref.startsWith("codex-memory:"))) return "system";
-  return "agent";
-}
-// An Agent's saved fact must reuse at least one word of the user's quoted
-// message; otherwise the quote does not support it. English words also match
-// by a shared stem of four or more letters ("prefer" ~ "prefers").
-function quoteSupportsContent(quote, content) {
-  const quoted = [...lexicalTerms(quote)];
-  return [...lexicalTerms(content)].some((term) => quoted.some((word) => word === term
-    || (/^[a-z]{4,}$/u.test(word) && /^[a-z]{4,}$/u.test(term) && (word.startsWith(term) || term.startsWith(word)))));
-}
-function workspaceMemoryRef(workspace) {
-  return `workspace:${crypto.createHash("sha256").update(workspace || "").digest("hex")}`;
-}
-// A project is the git repository a workspace belongs to, so every worktree
-// and subdirectory of one clone shares its project memory. The key is the
-// repository's common git directory; a directory outside git has none.
-const repositoryKeys = new Map();
-function repositoryKey(workspace) {
-  if (typeof workspace !== "string" || !path.isAbsolute(workspace)) return null;
-  if (repositoryKeys.has(workspace)) return repositoryKeys.get(workspace);
-  let key = null;
-  try {
-    for (let dir = workspace; ; dir = path.dirname(dir)) {
-      const marker = path.join(dir, ".git");
-      const stat = fs.lstatSync(marker, { throwIfNoEntry: false });
-      if (stat?.isDirectory()) { key = fs.realpathSync(marker); break; }
-      if (stat?.isFile()) {
-        const gitdir = /^gitdir:\s*(.+)$/mu.exec(fs.readFileSync(marker, "utf8"))?.[1]?.trim();
-        if (!gitdir) break;
-        const resolved = path.resolve(dir, gitdir);
-        const common = fs.readFileSync(path.join(resolved, "commondir"), { encoding: "utf8", flag: "r" }).trim();
-        key = fs.realpathSync(path.resolve(resolved, common));
-        break;
-      }
-      if (path.dirname(dir) === dir) break;
-    }
-  } catch { key = null; }
-  if (repositoryKeys.size >= 256) repositoryKeys.clear();
-  repositoryKeys.set(workspace, key);
-  return key;
-}
-// Refs a new fact of this scope carries: a project fact also names its
-// repository; a workspace fact stays with its exact directory.
-function workspaceMemoryRefs(workspace, scope) {
-  const key = scope === "project" ? repositoryKey(workspace) : null;
-  return [workspaceMemoryRef(workspace), ...(key ? [workspaceMemoryRef(`git:${key}`)] : [])];
-}
-// A project/workspace fact belongs to the current workspace when it carries
-// the directory's ref or, for older and newer facts alike, its repository's.
-function matchesWorkspace(item, workspace) {
-  return workspaceMemoryRefs(workspace, "project").some((ref) => item.sourceRefs.includes(ref));
-}
 // The same fact held by two Agents: scope, normalized content and workspace.
 function sameFactKey(item) {
   return JSON.stringify([item.scope, contentHash(item.content),

@@ -68,7 +68,7 @@ class SharedReadService {
     const hashes = [evidence.sourceHash];
     const items = this.service.store.list(evidence.ownerProfileId, { status: "active" }).filter(item => item.memoryPath === evidence.canonicalRelativePath
       && item.startLine <= evidence.endLine && item.endLine >= evidence.startLine);
-    for (const item of items) hashes.push(require("../memory-engine").contentHash(item.content));
+    for (const item of items) hashes.push(require("../memory-content").contentHash(item.content));
     if (hashes.some(hash => db.prepare("SELECT 1 FROM memory_borrowed_suppressions WHERE profile_id=? AND source_hash=?").get(profileId, hash))) return true;
     const rows = db.prepare("SELECT content_hash,text_length FROM memory_borrowed_content_suppressions WHERE profile_id=?").all(profileId);
     if (!rows.length) return false;
@@ -329,7 +329,7 @@ class SharedReadService {
     if (this.service.store.getRevision(input.profileId) !== input.expectedRevision) fail("MEMORY_REVISION_CONFLICT", "记忆已经变化，请重新读取");
     const hashes = [current.sourceHash];
     for (const item of this.service.store.list(current.ownerProfileId, { status: "active" })) if (item.memoryPath === current.canonicalRelativePath
-      && item.startLine <= current.endLine && item.endLine >= current.startLine) hashes.push(require("../memory-engine").contentHash(item.content));
+      && item.startLine <= current.endLine && item.endLine >= current.startLine) hashes.push(require("../memory-content").contentHash(item.content));
     const texts = suppressionTexts(current.snippet);
     for (const item of this.service.store.list(current.ownerProfileId, { status: "active" })) if (item.memoryPath === current.canonicalRelativePath
       && item.startLine <= current.endLine && item.endLine >= current.startLine) texts.push(...suppressionTexts(item.content));

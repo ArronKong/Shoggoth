@@ -1,8 +1,8 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import GroupMemberAvatar from "./GroupMemberAvatar";
-import { GROUP_MIN_MEMBERS, GROUP_MAX_MEMBERS } from "../lib/groupChat";
+import { GROUP_MIN_MEMBERS } from "../lib/groupChat";
 import type { GroupChatMember, GroupChatView } from "../types";
 import GroupChatRoleDocument from "./GroupChatRoleDocument";
 import { ChatMessageContextMenu, IconTrash } from "./ChatMessageActions";
@@ -38,12 +38,27 @@ export default function GroupChatDetails({ view, onClose, onAddMember,
   const preferred = members.find(member => member.id === view.currentOwnerId) ?? members[0];
   const selected = (selection?.groupId === view.group.id
     ? members.find(member => member.id === selection.memberId) : undefined) ?? preferred;
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const onWheel = (event: WheelEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey
+        || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? list.clientWidth : 1;
+      const before = list.scrollLeft;
+      list.scrollLeft += event.deltaY * unit;
+      if (list.scrollLeft !== before) event.preventDefault();
+    };
+    list.addEventListener("wheel", onWheel, { passive: false });
+    return () => list.removeEventListener("wheel", onWheel);
+  }, []);
   useLayoutEffect(() => {
     listRef.current?.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [selected?.id, view.group.id]);
   const active = view.group.status === "active" && !deleting;
-  const canAdd = active && members.length < GROUP_MAX_MEMBERS && Boolean(onAddMember);
+  const canAdd = active && Boolean(onAddMember);
   const canRemove = active && !removingMember && members.length > GROUP_MIN_MEMBERS;
   const selectMember = (memberId: string) => setSelection({ groupId: view.group.id, memberId });
   const openMemberMenu = (memberId: string, x: number, y: number) => {

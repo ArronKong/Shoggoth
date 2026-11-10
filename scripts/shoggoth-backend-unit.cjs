@@ -1430,7 +1430,12 @@ test("missing managed CLI remains discoverable with docs and no runnable command
   await value.backend.stop();
 });
 
-test("management agent list and detail expose enabled Shoggoth profiles", async () => {
+test("management agent list and detail expose enabled Shoggoth profiles", async (t) => {
+  const userDataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agent-workspace-detail-"));
+  t.after(() => fs.rmSync(userDataRoot, { recursive: true, force: true }));
+  const agentsDir = path.join(userDataRoot, "shoggoth-core", "agents");
+  const agentDir = path.join(agentsDir, "profile-default");
+  const nameLinks = path.join(userDataRoot, "agents-by-name");
   const { backend } = await readyBackend((request) => {
     assert.equal(request.method, "harness.definition.meta");
     return {
@@ -1450,7 +1455,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
         { kind: "USER", name: "USER.md", readOnly: true },
       ],
     };
-  });
+  }, { paths: { tokenPath: "/private/client.token", userDataRoot, agentsDir } });
   assert.deepEqual(await backend.listAgents(), [{
     id: "shoggoth-default",
     name: "Shoggoth",
@@ -1475,6 +1480,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
     environmentKind: undefined,
     sharedAgentCount: 1,
     profile: "profile-default",
+    managedWorkspace: { path: agentDir, exists: false },
     isDefault: true,
     protected: true,
     archived: false,
@@ -1487,6 +1493,15 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
     ],
     definitionRevision: 3,
     backendId: "shoggoth",
+  });
+  assert.equal(fs.existsSync(agentDir), false, "reading the detail does not create the directory");
+  fs.mkdirSync(agentDir, { recursive: true });
+  assert.deepEqual((await backend.getAgent("shoggoth-default")).managedWorkspace, { path: agentDir, exists: true });
+  fs.mkdirSync(nameLinks);
+  const link = path.join(nameLinks, "Shoggoth");
+  fs.symlinkSync(path.relative(nameLinks, agentDir), link, "dir");
+  assert.deepEqual((await backend.getAgent("shoggoth-default")).managedWorkspace, {
+    path: link, exists: true,
   });
   await assert.rejects(
     () => backend.getAgent("shoggoth-missing"),

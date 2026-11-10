@@ -62,7 +62,7 @@ function assertDomainPayload(payload, run) {
     && typeof payload.recovered === "boolean";
   const validDomain = run.source === "proactive"
     ? payload.monitor?.id === run.sourceId && payload.monitor.profileId === run.profileId
-      && Number.isSafeInteger(payload.scheduledAt) && payload.scheduledAt >= 0 && run.workspace === null
+      && Number.isSafeInteger(payload.scheduledAt) && payload.scheduledAt >= 0
     : run.source === "inspiration"
     ? payload.execution && payload.execution.ideaId === run.sourceId
       && payload.execution.runId === run.id && payload.execution.profileId === run.profileId

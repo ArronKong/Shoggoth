@@ -3,14 +3,18 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync } from "node:fs";
+import { createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runStapler } from "./release-stapler.cjs";
+import { assertDmgBackgrounds, dmgBuildSettings } from "./macos-dmg-layout.cjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const require = createRequire(import.meta.url);
+const { downloadBuilderToolset } = require("app-builder-lib/out/util/electronGet");
 const usage = "Usage: node scripts/create-macos-dmg.mjs --arch arm64|x64 --distribution internal|official [--dist path]";
 
 function option(name) {
@@ -34,6 +38,7 @@ if (process.platform !== "darwin" || !["arm64", "x64"].includes(arch)
 
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 assert.match(packageJson.version, /^\d+\.\d+\.\d+$/u);
+assertDmgBackgrounds(path.join(root, "build", "dmg"));
 const dist = distOption ? path.resolve(distOption) : path.join(root, "dist");
 const app = path.join(dist, arch === "arm64" ? "mac-arm64" : "mac", "Shoggoth.app");
 const executable = path.join(app, "Contents", "MacOS", "Shoggoth");
@@ -57,6 +62,19 @@ const dmgName = `Shoggoth-${version}-${arch}.dmg`;
 const destination = path.join(dist, dmgName);
 assert.equal(existsSync(destination), false, `${dmgName} already exists`);
 
+// Use the same checksum-pinned headless tool as the locked dmg-builder package.
+// Calling it directly preserves explicit Finder window bounds: the builder's
+// wrapper otherwise replaces them with the background image dimensions.
+const toolArch = process.arch === "arm64" ? "arm64" : "x86_64";
+const toolDirectory = await downloadBuilderToolset({
+  releaseName: "dmg-builder@1.2.5",
+  filenameWithExt: `dmgbuild-bundle-${toolArch}-75c8a6c.tar.gz`,
+  checksums: {
+    "dmgbuild-bundle-arm64-75c8a6c.tar.gz": "793404d0c96687e27d5ee40a668d498c92e36a64d6c2906df511031adb33cbeb",
+    "dmgbuild-bundle-x86_64-75c8a6c.tar.gz": "1664972f9cc2d6e8fce3b63e42cd30078aff602669c5856939c4519921200433",
+  },
+});
+
 const scratch = mkdtempSync(path.join(os.tmpdir(), "shoggoth-dmg-"));
 try {
   const payload = path.join(scratch, "payload");
@@ -74,12 +92,19 @@ try {
   if (distribution === "official") {
     runStapler("validate", payloadApp);
   }
-  symlinkSync("/Applications", path.join(payload, "Applications"));
   const temporaryDmg = path.join(scratch, dmgName);
-  execFileSync("/usr/bin/hdiutil", [
-    "create", "-format", "UDZO", "-volname", `Shoggoth ${arch}`,
-    "-srcfolder", payload, temporaryDmg,
-  ], { stdio: "inherit", timeout: 20 * 60_000 });
+  const settings = dmgBuildSettings({ root, app: payloadApp, arch });
+  const configFile = path.join(scratch, "dmg-settings.json");
+  writeFileSync(configFile, `${JSON.stringify(settings, null, 2)}\n`);
+  // The locked headless dmgbuild tool writes Finder layout metadata without
+  // controlling Finder. Keep architecture-specific volume names and serialize
+  // each image; ZIP/update metadata and official notarization stay upstream.
+  execFileSync(path.join(toolDirectory, "dmgbuild"), [
+    "-s", configFile, settings.title, temporaryDmg,
+  ], { cwd: root, stdio: "inherit", timeout: 20 * 60_000, env: { ...process.env, PYTHONIOENCODING: "utf8" } });
+  execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", payloadApp], {
+    stdio: "inherit", timeout: 180_000,
+  });
   execFileSync("/usr/bin/hdiutil", ["verify", temporaryDmg], {
     stdio: "inherit", timeout: 10 * 60_000,
   });

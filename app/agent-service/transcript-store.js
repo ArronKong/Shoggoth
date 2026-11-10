@@ -31,6 +31,9 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_EVENT_BYTES = 64 * 1024;
 const MAX_CONTEXT_CONTENT_BYTES = 8 * 1024 * 1024;
 const MAX_LOG_BYTES = 256 * 1024 * 1024;
+// In-memory caches only; a dropped entry is read and verified again from disk.
+const MAX_CACHED_JOURNAL_BYTES = 256 * 1024 * 1024;
+const MAX_CACHED_CONTEXT_CONTENT_BYTES = 64 * 1024 * 1024;
 const MAX_USAGE_TOOL_ROWS = 32;
 const MAX_USAGE_ACTIVITY_ROWS = 240;
 const { normalizeBorrowedMemoryRefs, extractBorrowedMemoryRefs, mergeBorrowedMemoryRefs, refsFromEvents,
@@ -60,6 +63,15 @@ function stableJson(value) {
     )).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+// Journal events and saved context bodies are plain JSON trees.
+function deepFreeze(value) {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const item of Object.values(value)) deepFreeze(item);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function cloneJson(value, code = "TRANSCRIPT_EVENT_INVALID") {
@@ -200,9 +212,17 @@ class TranscriptStore {
     this.now = options.now || Date.now;
     this.assertSecretSafe = options.assertSecretSafe || (() => true);
     this.maxLogBytes = options.maxLogBytes ?? MAX_LOG_BYTES;
+    this.maxCachedJournalBytes = options.maxCachedJournalBytes ?? MAX_CACHED_JOURNAL_BYTES;
+    this.maxCachedContextContentBytes = options.maxCachedContextContentBytes ?? MAX_CACHED_CONTEXT_CONTENT_BYTES;
     this.readOnly = options.readOnly === true;
     this.opened = false;
+    // Least recently used first; see _load.
     this.sessions = new Map();
+    // Aggregate scans still cover every opened session after its body is
+    // evicted. Keep only identity here, never another copy of its events.
+    this.sessionIdentities = new Map();
+    this.contextContents = new Map();
+    this.contextContentBytes = 0;
     this.changeRevisions = new Map();
     // Only records that can withdraw content already returned to a caller.
     this.invalidationRevisions = new Map();
@@ -274,7 +294,9 @@ class TranscriptStore {
   openReadOnly() {
     if (!this.readOnly) throw transcriptError("TRANSCRIPT_READ_ONLY_REQUIRED", "只读打开必须显式声明");
     if (this.opened) return this;
-    this.sessions.clear(); this.changeRevisions.clear(); this.invalidationRevisions.clear(); this.poisonError = null;
+    this.sessions.clear(); this.sessionIdentities.clear();
+    this.changeRevisions.clear(); this.invalidationRevisions.clear(); this.poisonError = null;
+    this._clearContextContents();
     this.opened = true;
     return this;
   }
@@ -284,6 +306,8 @@ class TranscriptStore {
     if (this.opened) return;
     ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot);
     this.sessions.clear();
+    this.sessionIdentities.clear();
+    this._clearContextContents();
     this.changeRevisions.clear();
     this.invalidationRevisions.clear();
     this.poisonError = null;
@@ -293,6 +317,8 @@ class TranscriptStore {
   close() {
     for (const subscription of this.changeSubscriptions) subscription.unsubscribe();
     this.sessions.clear();
+    this.sessionIdentities.clear();
+    this._clearContextContents();
     this.changeRevisions.clear();
     this.invalidationRevisions.clear();
     this.poisonError = null;
@@ -349,6 +375,15 @@ class TranscriptStore {
     for (const [key, session] of this.sessions) {
       if (session.profileId === profileId) this.sessions.delete(key);
     }
+    for (const [key, session] of this.sessionIdentities) {
+      if (session.profileId === profileId) this.sessionIdentities.delete(key);
+    }
+    this._clearContextContents();
+  }
+
+  _clearContextContents() {
+    this.contextContents.clear();
+    this.contextContentBytes = 0;
   }
 
   getChangeRevision(profileId) {
@@ -434,6 +469,8 @@ class TranscriptStore {
       // review. Project that initial flag without rewriting source records.
       // Later explicit context operations below retain their full authority.
       if (isPublishedNoticeEvent(event)) event.contextExcluded = false;
+      // Cached events are shared with read-only views and never change in place.
+      deepFreeze(event);
       state.events.push(event);
       state.byId.set(event.id, event);
       state.lastEventSeq = event.seq;
@@ -445,11 +482,14 @@ class TranscriptStore {
         || typeof record.payload.contextExcluded !== "boolean") {
         throw transcriptError("TRANSCRIPT_LOG_CORRUPT", "Transcript context operation 无效");
       }
-      const event = state.byId.get(record.payload.eventId);
-      if (!event) throw transcriptError("TRANSCRIPT_LOG_CORRUPT", "Transcript context event 不存在");
-      this._updateVisibleUserRun(state, event, -1);
-      if (isPublishedNoticeEvent(event) && !event.contextExcluded) state.visibleNoticeCount--;
-      event.contextExcluded = record.payload.contextExcluded;
+      const previous = state.byId.get(record.payload.eventId);
+      if (!previous) throw transcriptError("TRANSCRIPT_LOG_CORRUPT", "Transcript context event 不存在");
+      this._updateVisibleUserRun(state, previous, -1);
+      if (isPublishedNoticeEvent(previous) && !previous.contextExcluded) state.visibleNoticeCount--;
+      // A view handed out earlier keeps the event it saw; the cache gets a new one.
+      const event = Object.freeze({ ...previous, contextExcluded: record.payload.contextExcluded });
+      state.events[event.seq - 1] = event;
+      state.byId.set(event.id, event);
       this._updateVisibleUserRun(state, event, 1);
       if (isPublishedNoticeEvent(event) && !event.contextExcluded) state.visibleNoticeCount++;
     }
@@ -524,6 +564,7 @@ class TranscriptStore {
     const cached = this.sessions.get(key);
     if (cached) {
       this._assertCachedFilesCurrent(cached);
+      if (this.sessions.size > 1) { this.sessions.delete(key); this.sessions.set(key, cached); }
       return cached;
     }
     const targets = this._paths(profileId, sessionId);
@@ -564,8 +605,24 @@ class TranscriptStore {
     }
     state.journalIdentity = this._fileIdentity(targets.log);
     state.manifestIdentity = this._fileIdentity(targets.manifest);
+    state.journalBytes = buffer.length;
     this.sessions.set(key, state);
+    this.sessionIdentities.set(key, { profileId, sessionId });
+    this._evictIdleSessions(key);
     return state;
+  }
+
+  // The journal on disk is the authority, so an idle session's cached events
+  // can be dropped and loaded again. The session just loaded always stays.
+  _evictIdleSessions(keepKey) {
+    let total = 0;
+    for (const session of this.sessions.values()) total += session.journalBytes;
+    for (const [key, session] of this.sessions) {
+      if (total <= this.maxCachedJournalBytes) break;
+      if (key === keepKey) continue;
+      this.sessions.delete(key);
+      total -= session.journalBytes;
+    }
   }
 
   ensureSession(input) {
@@ -628,6 +685,7 @@ class TranscriptStore {
       throw failure;
     }
     this._validateRecord(record, state.revision + 1, state);
+    state.journalBytes += Buffer.byteLength(line, "utf8");
     this._bumpChangeRevision(state.profileId);
     if (type !== "event.append") this._bumpInvalidationRevision(state.profileId);
     try {
@@ -644,6 +702,7 @@ class TranscriptStore {
       this.poisonError = error;
       throw error;
     }
+    this._evictIdleSessions(this._sessionKey(state.profileId, state.sessionId));
     this._queueChange(state, record);
     return record;
   }
@@ -767,9 +826,23 @@ class TranscriptStore {
     const includeExcluded = options.includeContextExcluded !== false;
     return state.events
       .filter((event) => (includeExcluded || !event.contextExcluded)
+        && (options.runId === undefined || event.runId === options.runId)
         && (options.afterSeq === undefined || event.seq > options.afterSeq)
         && (options.throughSeq === undefined || event.seq <= options.throughSeq))
       .map((event) => structuredClone(event));
+  }
+
+  // Read-only snapshot of the whole session for hot paths (context compile,
+  // compaction planning, per-turn scans). The frozen events are shared with
+  // the cache, so nothing is copied; listEvents still returns private copies.
+  eventsView(profileId, sessionId) {
+    this._assertOpen();
+    const state = this._load(profileId, sessionId);
+    if (state.viewRevision !== state.revision) {
+      state.view = Object.freeze(state.events.slice());
+      state.viewRevision = state.revision;
+    }
+    return state.view;
   }
 
   listEventsPage(profileId, sessionId, afterSeq = 0, limit = 256) {
@@ -847,20 +920,49 @@ class TranscriptStore {
     return this._contentEvent(profileId, sessionId, event, event.content?.contextRef);
   }
 
-  _contentEvent(profileId, sessionId, event, ref) {
+  // Read-only counterpart of contextEvent for hot paths. The body is frozen
+  // and reused while its file is unchanged, instead of being read, hashed and
+  // parsed on every call. A removed or modified file is read and verified again.
+  contextEventView(profileId, sessionId, event) {
+    if (event.contextExcluded) return event;
+    return this._contentEvent(profileId, sessionId, event, event.content?.contextRef, true);
+  }
+
+  _contentEvent(profileId, sessionId, event, ref, shared = false) {
     if (!ref) return event;
     if (ref.version !== 1 || !HASH_PATTERN.test(ref.hash) || !Number.isSafeInteger(ref.bytes)
       || ref.bytes < 1 || ref.bytes > MAX_CONTEXT_CONTENT_BYTES) {
       throw transcriptError("CONTEXT_CONTENT_CORRUPT", "可迁移正文引用无效");
     }
     const file = path.join(this._sessionDir(profileId, sessionId), "context-content", `${ref.hash}.json`);
+    let identity = null;
+    if (shared) {
+      try { identity = this._fileIdentity(file); } catch { /* the verified read below reports it */ }
+      const cached = this.contextContents.get(file);
+      if (cached && identity !== null && cached.identity === identity && cached.bytes === ref.bytes) {
+        this.contextContents.delete(file); this.contextContents.set(file, cached);
+        return { ...event, content: cached.content };
+      }
+    }
     let bytes;
     try { bytes = readPrivateFile(file, { fs: this.fs, maxBytes: MAX_CONTEXT_CONTENT_BYTES }); }
     catch { throw transcriptError("CONTEXT_CONTENT_UNAVAILABLE", "可迁移正文缺失，无法完整续接"); }
     if (bytes.length !== ref.bytes || sha256(bytes) !== ref.hash) {
       throw transcriptError("CONTEXT_CONTENT_CORRUPT", "可迁移正文校验失败");
     }
-    return { ...event, content: JSON.parse(bytes.toString("utf8")) };
+    const content = JSON.parse(bytes.toString("utf8"));
+    if (shared) deepFreeze(content);
+    if (shared && identity !== null && ref.bytes <= this.maxCachedContextContentBytes) {
+      const previous = this.contextContents.get(file);
+      if (previous) { this.contextContents.delete(file); this.contextContentBytes -= previous.bytes; }
+      this.contextContents.set(file, { identity, bytes: ref.bytes, content });
+      this.contextContentBytes += ref.bytes;
+      for (const [key, entry] of this.contextContents) {
+        if (this.contextContentBytes <= this.maxCachedContextContentBytes) break;
+        this.contextContents.delete(key); this.contextContentBytes -= entry.bytes;
+      }
+    }
+    return { ...event, content };
   }
 
   summarizeUsageActivity(rawRange = "30d", profileIds) {
@@ -873,8 +975,9 @@ class TranscriptStore {
     const toolCounts = new Map();
     const daily = new Map();
     const messages = { total: 0, user: 0, assistant: 0, toolCalls: 0, errors: 0 };
-    for (const state of this.sessions.values()) {
-      if (!profileIds.has(state.profileId)) continue;
+    for (const { profileId, sessionId } of this.sessionIdentities.values()) {
+      if (!profileIds.has(profileId)) continue;
+      const state = this._load(profileId, sessionId);
       for (const event of state.events) {
         if (event.occurredAt < cutoff) continue;
         const date = usageTimelineDate(event.occurredAt, range);

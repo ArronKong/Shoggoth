@@ -132,6 +132,8 @@ jobs:
         run: |
           node scripts/fetch-e5-model.mjs
           npm run check:memory-core
+      - name: Native Service, transcript, context and memory core gate
+        run: npm run test:core
       - name: Native CLI capability and upgrade contracts
         run: |
           node --test scripts/runtime-capability-evidence-unit.cjs scripts/runtime-executable-identity-unit.cjs scripts/runtime-pool-upgrade-unit.cjs scripts/runtime-compatibility-unit.cjs scripts/runtime-support-unit.cjs
@@ -141,7 +143,6 @@ jobs:
       - name: Native Agent Computer Use and Browser Use path
         run: |
           node scripts/shoggoth-runtime-adapter-contract.cjs
-          node scripts/shoggoth-work-run-coordinator-unit.cjs
           node --test scripts/chat-send-diagnostics-unit.cjs
           node --test scripts/runtime-execution-context-unit.cjs
           node --test scripts/runtime-mcp-bridge-isolation-unit.cjs

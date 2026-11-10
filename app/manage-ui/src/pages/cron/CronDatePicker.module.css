@@ -1,0 +1,62 @@
+.control {
+  position: relative;
+  flex: 0 1 164px;
+  min-width: 0;
+}
+
+.control .input {
+  box-sizing: border-box;
+  padding-inline-end: 36px;
+}
+
+/* Keep the date segments editable. The calendar button opens our popover. */
+.input::-webkit-calendar-picker-indicator { display: none; }
+.control:has(.toggle[data-popup-open]) .input { border-color: light-dark(#000, #fff); }
+
+.toggle, .toggleMonth, .action, .day {
+  composes: option from '../../components/Picker.module.css';
+  justify-content: center;
+}
+
+.control .toggle {
+  position: absolute;
+  inset-inline-end: 4px;
+  inset-block-start: 4px;
+  width: 32px;
+  padding: 0;
+}
+
+.positioner { z-index: 300; }
+
+.popup {
+  composes: surface from '../../components/Picker.module.css';
+  width: 292px;
+  max-height: min(calc(100dvh - 24px), var(--available-height, 100dvh));
+  padding: 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.header, .footer { display: flex; justify-content: space-between; align-items: center; }
+.title { font-weight: 500; }
+.navigation { display: flex; gap: 4px; }
+.navigation .toggleMonth { width: 32px; padding: 0; }
+.footer .action { width: auto; padding-inline: 12px; }
+.popup button:disabled { cursor: default; opacity: .4; }
+.popup button:focus-visible, .toggle:focus-visible {
+  outline: 2px solid light-dark(#707070, #858585);
+  outline-offset: -2px;
+}
+
+.calendar {
+  width: 100%;
+  margin-block: 8px;
+  border-spacing: 2px;
+  table-layout: fixed;
+}
+
+.calendar th { color: var(--ui-text-3); font-size: 12px; font-weight: 400; }
+.calendar td { padding: 0; }
+.calendar .day { padding: 0; }
+.day[data-adjacent]:not([data-checked]) { color: var(--ui-text-3); }
+.day[aria-current="date"] { font-weight: 600; }

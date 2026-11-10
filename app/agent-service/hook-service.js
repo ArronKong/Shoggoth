@@ -37,7 +37,7 @@ class HookService {
     scope.assertCurrent();
     const profile = this.productStore.getAgentProfile(authority.profileId), run = this.getRun(scope.runId);
     if (!profile?.enabled || !run || run.profileId !== profile.id || !["starting", "running", "waiting_approval", "waiting_input"].includes(run.status)
-      || !["chat", "cron", "kanban", "inspiration"].includes(run.source)) fail("HOOK_FORBIDDEN");
+      || !["chat", "cron", "kanban", "inspiration", "proactive"].includes(run.source)) fail("HOOK_FORBIDDEN");
     return { profile, run, assertCurrent: scope.assertCurrent, signal: scope.signal,
       confirmed: authority.confirmation === true, operationId: "hook-op-" + digest(authority.callId) };
   }
@@ -236,7 +236,7 @@ class HookService {
   }
   observeSkippedRun(run) {
     try {
-      if (!this.store.db || run.status !== "skipped" || !["chat", "cron", "kanban", "inspiration"].includes(run.source)
+      if (!this.store.db || run.status !== "skipped" || !["chat", "cron", "kanban", "inspiration", "proactive"].includes(run.source)
         || !Number.isSafeInteger(run.finishedAt) || run.finishedAt < this.now() - HOOK_LIMITS.retentionMs) return;
       const profile = this.productStore.getAgentProfile(run.profileId);
       if (!profile?.enabled) return;

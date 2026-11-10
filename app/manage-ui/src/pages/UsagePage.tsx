@@ -103,65 +103,6 @@ const RANGE_KEY: Record<RangeKey, string> = {
   all: "usage.rankAll",
 };
 
-// 模型占比环图的六段配色（设计稿：品牌黄领衔 + 黑 + 灰阶递减；值在 UsagePage.css）
-const DONUT_COLORS = [
-  "var(--uc-d0)",
-  "var(--uc-d1)",
-  "var(--uc-d2)",
-  "var(--uc-d3)",
-  "var(--uc-d4)",
-  "var(--uc-d5)",
-];
-
-// 模型占比环图（Figma 6994-135 左槽）：top5 + 其他，中心是第一名占比。
-// 纯 SVG stroke-dasharray 弧段，从 12 点顺时针；段上带原生 title 提示。
-function ModelDonut({ slices, centerPct }: { slices: { label: string; frac: number }[]; centerPct: number }) {
-  const R = 40;
-  const C = 2 * Math.PI * R;
-  const svgRef = useRef<SVGSVGElement>(null);
-  const growCls = useGrow(svgRef, slices.map((s) => `${s.label}:${s.frac.toFixed(4)}`).join(","));
-  let acc = 0;
-  return (
-    <svg ref={svgRef} className="usage-donut-svg" viewBox="0 0 100 100" role="img">
-      {slices.map((s, i) => {
-        const deg = acc * 360;
-        const before = acc; // 本段之前的累积占比 = 它该等多久才轮到自己
-        acc += s.frac;
-        if (s.frac <= 0) return null;
-        return (
-          <circle
-            key={`${s.label}-${i}`}
-            className={growCls("arc")}
-            cx="50"
-            cy="50"
-            r={R}
-            fill="none"
-            stroke={DONUT_COLORS[i % DONUT_COLORS.length]}
-            strokeWidth="17"
-            strokeDasharray={`${(s.frac * C).toFixed(2)} ${C.toFixed(2)}`}
-            transform={`rotate(${(deg - 90).toFixed(2)} 50 50)`}
-            // 每段延迟/时长都按占比分摊总时长 → 各段接力扫成连续一圈（故用 linear，
-            // 逐段 easeOut 会一顿一顿）。
-            style={
-              {
-                "--len": (s.frac * C).toFixed(2),
-                "--c": C.toFixed(2),
-                "--d": before.toFixed(4),
-                "--f": s.frac.toFixed(4),
-              } as CSSProperties
-            }
-          >
-            <title>{`${s.label} · ${(s.frac * 100).toFixed(1)}%`}</title>
-          </circle>
-        );
-      })}
-      <text x="50" y="57" textAnchor="middle" className="usage-donut-num">
-        {Math.round(centerPct)}%
-      </text>
-    </svg>
-  );
-}
-
 const fmtPct = (n: number): string => `${n.toFixed(1)}%`;
 
 // anime.js 数字滚动：挂载从 0 滚入，值变化（切范围/后端命中缓存）从当前显示值滚到新值。
@@ -438,16 +379,6 @@ export default function UsagePage() {
   // Agent 用量条自己实现（.arank-*，没走 RankBars），生长得单独挂一份（R238）。
   const arankRef = useRef<HTMLDivElement>(null);
   const arankGrow = useGrow(arankRef, sources.map((s) => `${s.backendId}:${s.id}`).join(","));
-  // 环图切片：完整 byModel 的 top5 + 其他（分母=全量，与排行占比同口径）
-  const donut = useMemo(() => {
-    const all = breakdown?.byModel ?? [];
-    const total = all.reduce((s, m) => s + m.totalTokens, 0);
-    if (total <= 0) return null;
-    const top = all.slice(0, 5).map((m) => ({ label: m.model, frac: m.totalTokens / total }));
-    const rest = 1 - top.reduce((s, x) => s + x.frac, 0);
-    const slices = rest > 0.0005 ? [...top, { label: t("usage.otherModels"), frac: rest }] : top;
-    return { slices, centerPct: (top[0]?.frac ?? 0) * 100 };
-  }, [breakdown, t]);
   // 任一行带 errors 字段才画错误线：无错误信号的后端（Hermes）契约上省略该
   // 字段，整条线（图例/tooltip 同步）删除，不画恒 0 贴地线（R211 用户拍板）。
   const hasErrorLine = (breakdown?.dailyActivity ?? []).some((d) => d.errors != null);
@@ -521,7 +452,7 @@ export default function UsagePage() {
             <h3>{t("usage.agentRankTitle")}</h3>
           </div>
           {breakdownPending ? (
-            <UsageRankSkeleton kind="agent" />
+            <UsageRankSkeleton agent />
           ) : sources.length === 0 ? (
             <p className="muted">{t("usage.noData")}</p>
           ) : (
@@ -572,19 +503,9 @@ export default function UsagePage() {
             <h3>{t("usage.modelRankTitle")}</h3>
           </div>
           {breakdownPending ? (
-            <UsageRankSkeleton kind="model" />
+            <UsageRankSkeleton />
           ) : (
-            // 设计稿：左环图（top5+其他占比）+ 右排行列表
-            <div className="usage-rank-split">
-              {donut && (
-                <div className="usage-donut">
-                  <ModelDonut slices={donut.slices} centerPct={donut.centerPct} />
-                </div>
-              )}
-              <div className="usage-rank-list">
-                <RankBars rows={modelRows} totalValue={modelTotal} />
-              </div>
-            </div>
+            <RankBars rows={modelRows} totalValue={modelTotal} />
           )}
         </section>
         <section className="usage-section">
@@ -592,7 +513,7 @@ export default function UsagePage() {
             <h3>{t("usage.toolsTitle")}</h3>
           </div>
           {breakdownPending ? (
-            <UsageRankSkeleton kind="tool" />
+            <UsageRankSkeleton />
           ) : (
             <RankBars rows={toolRows} totalValue={toolTotal} fmt={(n) => t("usage.toolCallsFmt", { count: Math.round(n) })} />
           )}

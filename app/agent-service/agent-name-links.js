@@ -5,6 +5,7 @@ const path = require("node:path");
 const { assertPrivateDirectory, serviceError } = require("./security");
 
 const PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const LINKS_DIRECTORY = "agents-by-name";
 const filenameKey = (name) => name.normalize("NFKC").toLocaleLowerCase("und");
 
 function contains(root, target) {
@@ -34,10 +35,34 @@ function suffixedName(entry, used, bases) {
   return name;
 }
 
+function describeAgentDirectory(paths, profile) {
+  if (typeof paths?.agentsDir !== "string" || !path.isAbsolute(paths.agentsDir)
+    || typeof profile?.id !== "string" || !PROFILE_ID.test(profile.id)) return undefined;
+  const agentDir = path.join(paths.agentsDir, profile.id);
+  const fallback = { path: agentDir, exists: false };
+  try {
+    fallback.exists = fs.lstatSync(agentDir, { throwIfNoEntry: false })?.isDirectory() === true;
+    if (!fallback.exists || !paths.userDataRoot) return fallback;
+    const directory = path.join(paths.userDataRoot, LINKS_DIRECTORY);
+    if (!fs.lstatSync(directory, { throwIfNoEntry: false })?.isDirectory()) return fallback;
+    const target = path.relative(directory, agentDir);
+    const matches = (name) => {
+      try { return fs.readlinkSync(path.join(directory, name)) === target; }
+      catch { return false; }
+    };
+    // A collision can give this profile a suffixed name on disk.
+    const preferred = typeof profile.name === "string" ? folderName(profile.name) : "";
+    const name = preferred && matches(preferred) ? preferred
+      : fs.readdirSync(directory, { withFileTypes: true }).find(item => item.isSymbolicLink() && matches(item.name))?.name;
+    if (name) return { path: path.join(directory, name), exists: true };
+  } catch { /* A link can disappear while the Service refreshes the names. */ }
+  return fallback;
+}
+
 // Finder links are derived from the roster. Keep them outside the Service
 // state tree so its readers and backups only encounter the real ID directories.
 function syncAgentNameLinks(paths, profiles) {
-  const directory = path.join(paths.userDataRoot, "agents-by-name");
+  const directory = path.join(paths.userDataRoot, LINKS_DIRECTORY);
   if (!contains(paths.trustedRoot, directory) || contains(paths.stateDir, directory)
     || fs.realpathSync(paths.userDataRoot) !== paths.userDataRoot
     || fs.realpathSync(paths.agentsDir) !== paths.agentsDir) {
@@ -105,4 +130,4 @@ function syncAgentNameLinks(paths, profiles) {
   return directory;
 }
 
-module.exports = { syncAgentNameLinks };
+module.exports = { describeAgentDirectory, syncAgentNameLinks };

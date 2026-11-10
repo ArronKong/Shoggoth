@@ -38,5 +38,42 @@ const { ShoggothBackend } = require("../app/core/shoggoth-backend");
   const activities = await native.getRecentKanbanActivities({ sinceMs: 100 });
   assert.equal(activities.items.length, 4);
   assert.deepEqual(computeTaskStats(activities.items).total, { ok: 2, error: 2 });
+
+  const overnight = { id: "overnight", profileId: "p1", source: "cron", sourceId: "job",
+    createdAt: 80, startedAt: 90, finishedAt: 101, status: "completed", resultSummary: "report" };
+  const silent = { ...overnight, id: "silent", finishedAt: 110 };
+  const calls = [];
+  let legacy = false;
+  native._page = async (method, params) => {
+    assert.equal(method, "run.list");
+    calls.push(params.scope ? "scoped" : params.profileId);
+    if (params.scope) {
+      assert.deepEqual(params.scope, { backendId: "native", source: "cron", sinceMs: 100 });
+      if (legacy) throw Object.assign(Error("Legacy Service"), { code: "INVALID_PARAMS" });
+      return [overnight, silent];
+    }
+    return params.profileId === "p1" ? [overnight, silent,
+      { ...overnight, id: "past", finishedAt: 99 },
+      { ...overnight, id: "chat", source: "chat" }] : [];
+  };
+  native._domainPage = async (method, params) => {
+    assert.equal(method, "cron.job.list");
+    calls.push(`jobs:${params.profileId}`);
+    return [{ id: "job", name: "Overnight report" }];
+  };
+  native._cronRunsForJob = async (jobId, profile) => {
+    assert.equal(jobId, "job");
+    assert.equal(profile.id, "p1");
+    return [{ run: silent, createdAt: silent.createdAt, cronOutput: { disposition: "silent", reason: "no-output" } }];
+  };
+  const current = await native.getRecentCronRuns({ sinceMs: 100 });
+  assert.deepEqual(calls.splice(0), ["scoped", "jobs:p1"]);
+  assert.deepEqual(current.runs.map(row => row.runId), ["silent", "overnight"]);
+  assert.equal(current.runs[0].outputDisposition, "silent");
+  assert.equal(current.runs[1].summary, "report");
+  assert.equal(current.runs[1].jobName, "Overnight report");
+  legacy = true;
+  assert.deepEqual(await native.getRecentCronRuns({ sinceMs: 100 }), current);
+  assert.deepEqual(calls.sort(), ["jobs:p1", "p1", "p2", "scoped"], "Legacy fallback keeps the same visible runs");
   console.log("PASS Dashboard full terminal totals, distinct tasks, all native Agents and archived task completions");
 })().catch(error => { console.error(error); process.exitCode = 1; });

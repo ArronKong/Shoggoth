@@ -304,6 +304,7 @@ async function run() {
     },
   });
   service = createAgentService({ paths, parentEnv, runtimeMcpGateIssuer, runtimeStorageHomedir: () => isolatedHome,
+    autoDetectChatSecrets: true,
     modelSecretGateway: disclosureGateway,
     mcpRegistryClient,
     runtimePool: blockedNativePool("codex"), grokBuildRuntimePool: blockedNativePool("grok-build"),

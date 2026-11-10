@@ -102,7 +102,7 @@ async function main() {
         });
         return child;
       } }); hosts.push(host); return host; } });
-  service = createAgentService({ paths, safeStorage, prewarmMcpAuth: false, runtimePool: pool, parentEnv: {}, repoRoot: repo,
+  service = createAgentService({ paths, safeStorage, prewarmMcpAuth: false, autoDetectChatSecrets: true, runtimePool: pool, parentEnv: {}, repoRoot: repo,
     modelSecretRequest: (url, options, callback) => {
       assert.equal(url.origin, "https://api.openai.com");
       return http.request(new URL(url.pathname, `http://127.0.0.1:${provider.address().port}`), options, callback);

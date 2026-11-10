@@ -232,6 +232,7 @@ async function main() {
     await require("./session-runtime-models-rest.cjs").run();
     await require("./agent-default-model-rest.cjs").run();
     await require("./session-memory-status-rest.cjs").run();
+    await require("./native-chat-prewarm-rest.cjs").run();
     await require("./session-context-breakdown-rest.cjs").run();
     await require("./group-chat-rest-smoke.cjs").run();
   }

@@ -21,9 +21,9 @@ i18n.addResourceBundle('en', 'translation', { groupChat: {
   queueBlocked: 'An earlier execution in this workspace is still being checked. This turn has not started.',
 } }, true, true);
 
-i18n.addResourceBundle('zh-CN', 'translation', { groupChat: { stopState: { requesting: '正在请求停止讨论…', confirming: '停止请求已发出，正在确认任务是否已退出。' }, search: { open: '搜索群历史' },
+i18n.addResourceBundle('zh-CN', 'translation', { groupChat: { stopState: { requesting: '正在请求停止全部运行…', confirming: '停止请求已发出，正在确认任务是否已退出。' }, search: { open: '搜索群历史' },
   reference: { open: '引用会话摘录', tooLarge: '当前草稿加上摘录超过消息大小限制，原草稿已保留。' } } }, true, true);
-i18n.addResourceBundle('en', 'translation', { groupChat: { stopState: { requesting: 'Requesting discussion stop…', confirming: 'Stop requested. Checking whether the tasks have exited.' }, search: { open: 'Search group history' },
+i18n.addResourceBundle('en', 'translation', { groupChat: { stopState: { requesting: 'Requesting stop for all runs…', confirming: 'Stop requested. Checking whether the tasks have exited.' }, search: { open: 'Search group history' },
   reference: { open: 'Quote conversation excerpt', tooLarge: 'The combined message exceeds the size limit. Your original draft is kept.' } } }, true, true);
 
 i18n.addResourceBundle('zh-CN', 'translation', { groupChat: { target: { all: '所有人' },

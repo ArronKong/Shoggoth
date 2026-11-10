@@ -1,7 +1,7 @@
 "use strict";
 
 const { serviceError } = require("../security");
-const normalize = text => text.normalize("NFKC").replace(/[\s`*_]/gu, "");
+const { factWasPresent, hashLine, normalizeRule: normalize } = require("../agent-definition-provenance");
 // A correction often appends a separate retirement clause after a comma
 // ("new code ..., 旧短语 ... 已作废"). Keep it separate from the new fact.
 const clauses = text => text.split(/[。；;.!?！？\n]|[，,]\s*(?=(?:旧|原先|此前|the old\b|old\b|previous\b))/iu)
@@ -9,7 +9,7 @@ const clauses = text => text.split(/[。；;.!?！？\n]|[，,]\s*(?=(?:旧|原�
 const matchesFact = (line, facts) => facts.some(fact => normalize(line).includes(fact));
 
 // Keep source-to-revision receipts independently of the bounded MCP replay
-// cache. The definition revisions remain the only source of document text.
+// cache. Current rules and compact provenance survive bounded file backups.
 class MemoryDefinitionLinks {
   constructor(owner, products) { this.owner = owner; this.products = products; }
   store(profileId) {
@@ -30,7 +30,8 @@ class MemoryDefinitionLinks {
     for (const call of this.products?.listMcpToolCalls({ profileId, name: "agent_definition_update" }) || []) {
       const result = call.result?.ok && call.result.result;
       if (result?.saved !== true || result.file !== "AGENTS.md" || !call.binding?.source?.eventId) continue;
-      const value = definitions.readRevision(profileId, result.revision);
+      const value = definitions.readReceipt?.(profileId, result.revision)
+        || definitions.readRevision(profileId, result.revision);
       if (value?.manifest.reason !== `conversation-definition:${call.operationId}`
         || value.manifest.documents.AGENTS.contentHash !== call.binding.resultHash) continue;
       await store.registerIfAbsent(call.operationId, { revision: result.revision,
@@ -45,10 +46,35 @@ class MemoryDefinitionLinks {
     assertCurrent?.();
     if (!links.length) return;
     const current = definitions.get(profileId), original = current.documents.AGENTS;
+    const births = definitions.ruleProvenance?.(profileId);
     let content = original, review = false;
     for (const { key, value: link } of links) {
       let facts = items.filter(item => item.sourceRefs.includes(link.eventId)).flatMap(item => clauses(item.content));
       if (!facts.length || link.revision < 2) continue;
+      if (births) {
+        const receipt = definitions.readReceipt(profileId, link.revision);
+        if (receipt?.manifest.reason !== `conversation-definition:${key}`
+          || receipt.manifest.documents.AGENTS.contentHash !== link.resultHash) continue;
+        let missing = false;
+        const reintroduced = new Set();
+        for (const rule of receipt.rules) {
+          const lines = content.split("\n"), matching = lines.filter(line => hashLine(line) === rule.hash);
+          if (matching.length !== 1) { missing = true; continue; }
+          const line = matching[0];
+          if (births[rule.hash] !== link.revision) { reintroduced.add(line); continue; }
+          const owned = facts.filter(fact => normalize(line).includes(fact)
+            && !factWasPresent(line, fact, rule.priorCoverage));
+          review ||= facts.some(fact => factWasPresent(line, fact, rule.priorCoverage));
+          if (!owned.length) continue;
+          const parts = line.match(/[^。；;.!?！？]+(?:[。；;.!?！？]+|$)/gu) || [line];
+          const retained = parts.filter(part => !matchesFact(part, owned)).join("");
+          content = lines.flatMap(value => value !== line ? [value] : retained.trim() ? [retained] : []).join("\n");
+        }
+        // An edited copy needs review; an exact line removed and later added
+        // again belongs to the later user decision, not this old source.
+        review ||= missing && content.split("\n").some(line => !reintroduced.has(line) && matchesFact(line, facts));
+        continue;
+      }
       const applied = definitions.readRevision(profileId, link.revision);
       if (applied?.manifest.reason !== `conversation-definition:${key}`
         || applied.manifest.documents.AGENTS.contentHash !== link.resultHash) continue;

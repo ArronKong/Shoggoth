@@ -96,7 +96,7 @@ const DURABLE_WRITE_TOOL_NAMES = new Set([
   ...CHAT_UI_MCP_WRITE_TOOLS,
   ...INSPIRATION_MCP_WRITE_TOOLS,
   ...MEMORY_MCP_WRITE_TOOLS,
-  "agent_definition_update",
+  "agent_definition_update", "heartbeat_rules_update", "memory_file_update",
   "kanban_update_progress", "kanban_add_comment", "kanban_request_complete",
   "kanban_board_create", "kanban_board_update", "kanban_card_create",
   "kanban_card_update", "kanban_card_move", "kanban_run_dispatch", "kanban_run_retry",
@@ -247,7 +247,7 @@ const nullableString = (maxLength) => ({
 });
 
 const interactiveWorkSourceSchema = () => ({
-  source: { type: "string", enum: ["chat", "kanban", "cron", "inspiration"] },
+  source: { type: "string", enum: ["chat", "kanban", "cron", "inspiration", "proactive"] },
   sourceId: { type: "string", maxLength: 512 },
 });
 
@@ -576,7 +576,7 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        source: { type: "string", enum: ["chat", "kanban", "cron", "inspiration"] },
+        source: { type: "string", enum: ["chat", "kanban", "cron", "inspiration", "proactive"] },
         sourceId: { type: "string", maxLength: 512 },
       },
       required: ["source", "sourceId"],
@@ -1446,7 +1446,7 @@ function validateProductOperationArguments(name, args) {
     const fields = ["source", "sourceId", "backendId", "name", "workspace"];
     if (Object.hasOwn(args, "identity")) fields.push("identity");
     return exactObject(args, fields) && NATIVE_AGENT_BACKENDS.has(args.backendId)
-      && ["chat", "kanban", "cron", "inspiration"].includes(args.source) && validText(args.sourceId, 512)
+      && ["chat", "kanban", "cron", "inspiration", "proactive"].includes(args.source) && validText(args.sourceId, 512)
       && validText(args.name, 128) && Boolean(args.name.trim())
       && validText(args.workspace, 2048, { nullable: true })
       && (args.workspace === null || path.isAbsolute(args.workspace))
@@ -1466,7 +1466,7 @@ function validateProductOperationArguments(name, args) {
     }
     return exactObject(args, fields) && NATIVE_AGENT_BACKENDS.has(args.backendId)
       && validOpaqueId(args.agentId, 128)
-      && (name === "native_agent_get" || (["chat", "kanban", "cron", "inspiration"].includes(args.source)
+      && (name === "native_agent_get" || (["chat", "kanban", "cron", "inspiration", "proactive"].includes(args.source)
         && validText(args.sourceId, 512) && Number.isSafeInteger(args.expectedUpdatedAt) && args.expectedUpdatedAt >= 0));
   }
   if (["app_capabilities", "app_status", "profile_get", "backend_status"].includes(name)) {
@@ -1485,7 +1485,7 @@ function validateProductOperationArguments(name, args) {
   if (name === "app_manage") return validAppManageArguments(args, validateProductOperationArguments);
   if (name === "runtime_context_get") {
     return (exactObject(args, ["source", "sourceId"])
-        && ["chat", "kanban", "cron", "inspiration"].includes(args.source)
+        && ["chat", "kanban", "cron", "inspiration", "proactive"].includes(args.source)
         && validText(args.sourceId, 512));
   }
   if (name === "usage_get") {
@@ -1575,7 +1575,7 @@ function validateProductOperationArguments(name, args) {
   if (COMPUTER_TOOL_NAMES.has(name)) {
     if (name === "computer_status") return exactObject(args, []);
     const source = ["source", "sourceId"];
-    if (!["chat", "kanban", "cron", "inspiration"].includes(args.source) || !validText(args.sourceId, 512)) {
+    if (!["chat", "kanban", "cron", "inspiration", "proactive"].includes(args.source) || !validText(args.sourceId, 512)) {
       return false;
     }
     if (name === "computer_session_open") {
@@ -2445,7 +2445,9 @@ class McpProductToolController {
         if (name.startsWith("inspiration_")) return !!this.inspirationService;
         if (name.startsWith("native_agent_")) return !!this.agentLifecycleService;
         if (isMemoryMcpTool(name)) return name.startsWith("conversation_") ? !!this.conversationRecallService : !!this.conversationMemoryService;
-        if (isDefinitionMcpTool(name)) return !!this.conversationDefinitionService;
+        if (isDefinitionMcpTool(name)) return !!this.conversationDefinitionService
+          && (!name.startsWith("heartbeat_rules_") || !!this.conversationDefinitionService.heartbeatRules)
+          && (!name.startsWith("memory_file_") || !!this.conversationDefinitionService.memoryFiles);
         if (name === "skill_install_global") return typeof this.skillStore?.installGlobalFromDirectory === "function";
         if (name === "skill_file_read") return typeof this.skillStore?.readFile === "function";
         if (name.startsWith("mcp_server_")) return !!this.nativeMcpStore
@@ -2473,7 +2475,7 @@ class McpProductToolController {
     const scope = this.executionContext.getStore();
     const run = scope?.mcpRun || (scope?.runId ? this.workDispatcher.getRun(scope.runId) : null);
     rawArgs = this.#callingRunSource(name, rawArgs, run, authority);
-    if (this.hookToolExecution && run && !authority.federationClient && !["compaction", "proactive"].includes(run.source)
+    if (this.hookToolExecution && run && !authority.federationClient && run.source !== "compaction" && name !== "proactive_respond"
       && !HOOK_TOOL_NAMES.includes(name) && name !== "mcp_server_call") {
       const profile = this.#requireProfile(authority.profileId);
       this.permissionEngine.authorize({ name, profileId: profile.id, profile, run, workspace: run.workspace,
@@ -2507,7 +2509,10 @@ class McpProductToolController {
     if (this.poisonError) throw this.poisonError;
     const scope = this.executionContext.getStore();
     const scopedRun = scope?.runId ? this.workDispatcher.getRun(scope.runId) : null;
-    if (scopedRun?.source === "proactive" && name !== "proactive_respond") throw toolError("MCP_TOOL_FORBIDDEN");
+    if (scopedRun?.source === "proactive") {
+      if (!this.proactiveService || isChatUiMcpTool(name) || name === "notification_send") throw toolError("MCP_TOOL_FORBIDDEN");
+      this.proactiveService.assertRunCurrent(scopedRun);
+    }
     if (name === "proactive_respond") {
       if (!scopedRun || scopedRun.source !== "proactive" || scopedRun.profileId !== authority.profileId
         || rawArgs.runId !== scopedRun.id || !this.proactiveService) throw toolError("MCP_TOOL_FORBIDDEN");
@@ -2945,7 +2950,8 @@ class McpProductToolController {
     const run = this.#requireRun(scope.runId, authority.profileId);
     const contract = this.getExecutionContract(run.id);
     if (!ACTIVE_RUN_STATUSES.has(run.status) || !workspaceAutoExecution(contract)
-      || contract.runId !== run.id || contract.profileId !== authority.profileId || contract.workspace !== run.workspace) throw toolError("MCP_TOOL_FORBIDDEN");
+      || contract.runId !== run.id || contract.profileId !== authority.profileId
+      || contract.source !== run.source || contract.workspace !== run.workspace) throw toolError("MCP_TOOL_FORBIDDEN");
     this.permissionEngine.authorize({ name: "workspace_execute", profileId: authority.profileId,
       profile: this.#requireProfile(authority.profileId), run, workspace: run.workspace });
     return { runId: run.id, profileId: authority.profileId, workspace: run.workspace };
@@ -2957,7 +2963,7 @@ class McpProductToolController {
   // rewritten to its real source. Any other value keeps the normal lookup.
   #callingRunSource(name, args, run, authority) {
     if ((!isMemoryMcpTool(name) && !isDefinitionMcpTool(name)) || authority.federationClient
-      || !run || run.profileId !== authority.profileId || !["chat", "inspiration"].includes(run.source)
+      || !run || run.profileId !== authority.profileId || !["chat", "inspiration", "proactive"].includes(run.source)
       || typeof run.sourceId !== "string" || typeof args?.sourceId !== "string"
       || ![run.id, run.sourceId].includes(args.sourceId)
       || (args.source === run.source && args.sourceId === run.sourceId)) return args;
@@ -3437,12 +3443,17 @@ class McpProductToolController {
     if (isDefinitionMcpTool(name)) {
       if (!this.conversationDefinitionService) throw toolError("MCP_TOOL_UNAVAILABLE");
       this.#assertSecretSafe(JSON.stringify(args));
-      if (name === "agent_definition_read") {
+      const service = this.conversationDefinitionService;
+      if (["agent_definition_read", "heartbeat_rules_read", "memory_file_read"].includes(name)) {
         const run = await this.#currentInteractiveRun(args, authority);
-        this.conversationDefinitionService.bind(name, args, run);
-        return this.conversationDefinitionService.read(authority.profileId, args);
+        service.bind(name, args, run);
+        if (name === "heartbeat_rules_read") return service.readHeartbeat(authority.profileId, args);
+        if (name === "memory_file_read") return service.readMemoryFile(authority.profileId, args);
+        return service.read(authority.profileId, args);
       }
-      return this.conversationDefinitionService.update(authority.profileId, args, call);
+      if (name === "heartbeat_rules_update") return service.updateHeartbeat(authority.profileId, args, call);
+      if (name === "memory_file_update") return service.updateMemoryFile(authority.profileId, args, call);
+      return service.update(authority.profileId, args, call);
     }
     if (isMemoryMcpTool(name)) {
       if (name === "conversation_search" || name === "conversation_get") {

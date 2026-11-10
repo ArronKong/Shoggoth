@@ -9,18 +9,22 @@
 // settings choose another, read-only, no tools). Messages that carry or echo
 // another Agent's borrowed memory are left out, so nothing borrowed is written
 // back. Progress per session is shared with the session excerpts and only
-// moves after a chunk was reviewed. Best effort: a failure leaves the rest for
-// the next night and never touches chat; each outcome leaves a text-free
+// moves after a chunk was reviewed, or after the same chunk produced invalid
+// output on three different days. Other failures leave the rest for the
+// next night and never touch chat; each outcome leaves a text-free
 // diagnostic record.
 
 const crypto = require("node:crypto");
-const { quoteSupportsContent, matchesWorkspace } = require("./memory-engine");
+const { matchesWorkspace } = require("./memory-workspace");
+const { quoteSupportsContent, lexicalTerms } = require("./memory-content");
 const { memoryThreatPattern } = require("./memory-threat-scan");
 const { isBorrowedMemoryDerived, extractBorrowedMemoryRefs } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 const { recallDiagnostics, diagnosticCode } = require("./shoggoth-memory/active-memory-diagnostics.cjs");
+const { readEvents } = require("./transcript-read");
 
 const MAX_CHUNK_MESSAGES = 40;
 const MAX_CHUNKS_PER_NIGHT = 3;
+const MAX_INVALID_NIGHTS = 3;
 const TAIL_MESSAGES = 24;
 const SCAN_SEQ_WINDOW = 400;
 const MAX_PROMPT_MESSAGE_CHARS = 2000;
@@ -88,15 +92,41 @@ class MemoryReviewService {
     const diagnose = this.diagnostics(profileId);
     let chunks = 0, applied = 0;
     try {
+      const failures = this.memory.host(profileId).database.openKeyedStore({ namespace: "memory-review-failures", maxEntries: 1 },
+        () => combined.throwIfAborted());
+      const day = this.memory.sessionCapture.day(profileId, this.now()).day;
+      const dayNumber = Date.parse(`${day}T00:00:00Z`) / 86_400_000;
       for (const chunk of await this.pendingChunks(profileId)) {
         if (chunks >= MAX_CHUNKS_PER_NIGHT) break;
         combined.throwIfAborted();
         for (const row of chunk.rows) sessionKeys.add(row.sessionKey);
-        const result = await this.reviewRows({ profileId, workspace: chunk.workspace, rows: chunk.rows, signal: combined });
+        // Bind retries to the exact visible input, never to an array offset.
+        // A withdrawal or edited chunk starts a new count; no text is stored.
+        const key = sha256(JSON.stringify([chunk.workspace, chunk.rows.map(row => [row.sessionId, row.eventId, row.seq, row.text])]));
+        const previous = await failures.lookup("chunk");
+        let skip = previous?.key === key && previous.count >= MAX_INVALID_NIGHTS;
+        const result = skip ? { applied: 0, reason: "invalid-output" }
+          : await this.reviewRows({ profileId, workspace: chunk.workspace, rows: chunk.rows, signal: combined });
+        combined.throwIfAborted();
         chunks++; applied += result.applied;
-        diagnose(result.reason);
-        if (result.reason === "invalid-output") break;
-        for (const [sessionId, seq] of chunk.throughSeq) await this.memory.sessionCapture.advance(profileId, sessionId, { reviewedSeq: seq });
+        if (result.reason === "invalid-output" && !skip) {
+          let count;
+          await failures.update("chunk", current => {
+            const same = current?.key === key;
+            // Count the days this exact input failed, consecutive or not: a
+            // night the Mac was off must not give a poison chunk a fresh start.
+            count = !same ? 1 : dayNumber > current.day ? current.count + 1 : current.count;
+            return { key, day: same ? Math.max(current.day, dayNumber) : dayNumber, count };
+          });
+          skip = count >= MAX_INVALID_NIGHTS;
+        }
+        diagnose(skip ? "skipped-invalid-output" : result.reason, skip ? "MEMORY_REVIEW_INVALID_OUTPUT_LIMIT" : null);
+        if (result.reason === "invalid-output" && !skip) break;
+        for (const [sessionId, seq] of chunk.throughSeq) {
+          combined.throwIfAborted();
+          await this.memory.sessionCapture.advance(profileId, sessionId, { reviewedSeq: seq });
+        }
+        await failures.delete("chunk");
       }
       if (!chunks) diagnose("nothing-new");
       return { chunks, applied, reason: chunks ? (applied ? "saved" : "nothing-saved") : "nothing-new" };
@@ -142,7 +172,7 @@ class MemoryReviewService {
   // The session's recallable user/assistant messages after a sequence, without
   // the ones derived from borrowed memory.
   rowsAfter(profileId, sessionId, afterSeq) {
-    const borrowed = new Set(this.transcripts.listEvents(profileId, sessionId)
+    const borrowed = new Set(readEvents(this.transcripts, profileId, sessionId)
       .filter(event => isBorrowedMemoryDerived(event) || extractBorrowedMemoryRefs(event.content).length)
       .map(event => event.id));
     const rows = [];
@@ -185,7 +215,7 @@ class MemoryReviewService {
 
   async reviewRows({ profileId, workspace, rows, signal }) {
     if (!rows.some(row => row.kind === "user")) return { applied: 0, reason: "no-user-message" };
-    const known = this.knownMemories(profileId, workspace);
+    const known = this.knownMemories(profileId, workspace, rows);
     const messages = rows.map(row => ({ role: row.kind, eventId: row.eventId,
       text: row.text.length > MAX_PROMPT_MESSAGE_CHARS ? `${row.text.slice(0, MAX_PROMPT_MESSAGE_CHARS)}…` : row.text }));
     signal?.throwIfAborted();
@@ -213,12 +243,15 @@ class MemoryReviewService {
   // profile, and project/workspace facts for the current workspace. Daily
   // notes (session excerpts, compaction notes) are working material, not
   // curated memory, and stay out.
-  knownMemories(profileId, workspace) {
+  knownMemories(profileId, workspace, rows = []) {
+    const terms = lexicalTerms(rows.map(row => row.text).join("\n"));
     return this.memory.store.list(profileId, { status: "active" })
       .filter(item => !String(item.memoryPath || "").startsWith("memory/")
         && (["user", "agent"].includes(item.scope) || ["project", "workspace"].includes(item.scope) && matchesWorkspace(item, workspace))
         && this.memory.recallPolicy.isMemoryVisible(profileId, item))
-      .slice(-MAX_KNOWN_MEMORIES);
+      .map((item, index) => ({ item, index, overlap: [...lexicalTerms(item.content)].filter(term => terms.has(term)).length }))
+      .sort((a, b) => b.overlap - a.overlap || b.index - a.index)
+      .slice(0, MAX_KNOWN_MEMORIES).map(row => row.item);
   }
 
   // Every saved fact cites the message it came from, so forgetting that

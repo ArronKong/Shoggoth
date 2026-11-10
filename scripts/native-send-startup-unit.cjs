@@ -119,6 +119,7 @@ test("pre-admission context and capability work is preparation, while capacity w
 
 test("slow admission preparation reports its actual stage without consuming execution capacity", async () => {
   const contextGate = deferred(), hooksGate = deferred(), contextEntered = deferred(), hooksEntered = deferred();
+  let prewarmed = false;
   const value = await openFixture({ getNativeRuntimeConfig: () => ({ maxActive: 32, startupConcurrency: 8,
     flags: { runtimeAdmissionV1: true } }), contextCompiler: {
     semanticSearch: {},
@@ -129,15 +130,19 @@ test("slow admission preparation reports its actual stage without consuming exec
     async prepareRun() { hooksEntered.resolve(); await hooksGate.promise; return null; },
     observeRun() {}, observeSession() {}, releaseRun() {}, runner: { cancelRun: async () => {} },
   };
+  value.coordinator.prepareChatRuntime = async () => { prewarmed = true; };
   const sending = value.coordinator.send({ operationId: "slow-admission-preparation", sessionKey: SESSION_KEY, prompt: "hello" });
   try {
     await contextEntered.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(prewarmed, true, "process preparation overlaps complete recall");
     const run = value.dispatcher.listRuns().find(row => row.status === "queued");
     assert.ok(run);
     const read = () => value.coordinator.getRunSnapshot(run.id);
     assert.equal(read().queue?.reason, "CONTEXT_PREPARING");
     assert.equal(read().run.status, "queued", "public preparation does not change durable admission");
     assert.equal(value.host.turnStartCalls, 0);
+    assert.equal(value.host.threadStartCalls, 0, "preparation never creates a session before context is complete");
     contextGate.resolve();
     await hooksEntered.promise;
     assert.equal(read().queue?.reason, "RUNTIME_PREPARING");

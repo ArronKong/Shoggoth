@@ -108,6 +108,9 @@ test("Hermes reads one profile and applies custom/provider identity and fresh de
   backend._sessionTarget = key => ({ agentId: key.split(":")[1] });
   const writes = []; backend.setSessionModel = async (key, input) => { writes.push({ key, ...input }); return { scope: "session" }; };
   assert.equal((await backend.getGroupMemberModels("a")).models.length, 2);
+  const inspirationCatalog = await backend.getInspirationModels("a");
+  assert.equal(inspirationCatalog.defaultModel, "default-a");
+  assert.equal(inspirationCatalog.defaultProvider, "official");
   await assert.rejects(backend.getGroupMemberModels("b"));
   await backend.applyGroupSessionModel("a", "agent:a:group", { model: "model-b", provider: "mine" });
   assert.deepEqual(writes[0], { key: "agent:a:group", model: "model-b", provider: "mine", acpProviderRef: "custom:mine", scope: "session" });

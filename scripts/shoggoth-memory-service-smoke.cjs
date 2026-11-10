@@ -1024,7 +1024,17 @@ test("new owner works through REST file view, MCP file/search/save, and actual C
     body: JSON.stringify({ action: "create", content: "Nightly amber telescope calibration is required.", scope: "agent", expectedRevision: service.memoryStore.getRevision(profileId) }) });
   assert.equal(post.status, 200, await post.clone().text());
   const read = await (await fetch(`${url}/file?file=MEMORY.md&backend=shoggoth`)).json();
-  assert.match(read.file.content, /Nightly amber telescope/); assert.equal(read.file.readOnly, true);
+  assert.match(read.file.content, /Nightly amber telescope/); assert.equal(read.file.readOnly, false);
+  // The settings page saves the file memory source through the same REST route.
+  const editedText = read.file.content + "\nThe dome motor needs oil every spring.\n";
+  const put = await fetch(`${url}/file?file=MEMORY.md&backend=shoggoth`, { method: "PUT", headers: { "Content-Type": "application/json", Origin: new URL(f.url).origin },
+    body: JSON.stringify({ content: editedText, expectedRevision: read.file.revision }) });
+  assert.equal(put.status, 200, await put.clone().text());
+  const reread = await (await fetch(`${url}/file?file=MEMORY.md&backend=shoggoth`)).json();
+  assert.equal(reread.file.content, editedText); assert.equal((await put.json()).result.fileRevision, reread.file.revision);
+  const stale = await fetch(`${url}/file?file=MEMORY.md&backend=shoggoth`, { method: "PUT", headers: { "Content-Type": "application/json", Origin: new URL(f.url).origin },
+    body: JSON.stringify({ content: editedText + "x", expectedRevision: read.file.revision }) });
+  assert.notEqual(stale.status, 200);
   const { session, workspace } = seedSession({ root: f.root, profileId }, service);
   const run = { ...service.workDispatcher.getRun("flush-run-fixture"), status: "running" };
   const memory = new ConversationMemoryService({ memoryEngine: service.memoryEngine, memoryStore: service.memoryStore,

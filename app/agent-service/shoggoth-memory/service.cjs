@@ -7,7 +7,8 @@ const crypto = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 const { RecallPolicyStore } = require("../recall-policy-store");
 const { validateMemoryItem } = require("../memory-store");
-const { hasSecret, hasPii, memoryTrust, matchesWorkspace, workspaceMemoryRefs, contentHash } = require("../memory-engine");
+const { matchesWorkspace, workspaceMemoryRefs } = require("../memory-workspace");
+const { hasSecret, hasPii, memoryTrust, contentHash } = require("../memory-content");
 const { isAgentHomeWorkspace } = require("../chat-workspace");
 const { serviceError } = require("../security");
 const { FileMemoryStore } = require("./file-store.cjs");
@@ -54,6 +55,7 @@ class ShoggothMemoryService {
     this.owner = "shoggoth-memory-core"; this.opened = false; this.hosts = new Map(); this.blockedProfiles = new Set();
     this.searchScope = new AsyncLocalStorage(); this.sourceAuthority = new AsyncLocalStorage(); this.jobs = new Map();
     this.profileControllers = new Map();
+    this.indexWarmTimers = new Map(); this.indexWarmFlights = new Map();
     this.remoteProviderResourcesInput = remoteProviderResources;
     this.remoteEmbeddingResources = this.createRemoteProviderResources();
     this.database = new MemoryDatabase({ paths, now });
@@ -66,7 +68,7 @@ class ShoggothMemoryService {
       readLegacy: id => this.legacy.read(id), assertLegacyCurrent: (...args) => this.legacy.assertCurrent(...args) }) : null;
     this.initialization = this.legacy ? null : new (require("./fresh-initialization.cjs").FreshMemoryInitialization)({ paths, database: this.database, now, randomUUID });
     this.store = new FileMemoryStore({ paths, database: this.database, migration: this.migration, initialization: this.initialization,
-      getHost: id => this.host(id), now });
+      getHost: id => this.host(id), now, onChanged: id => this.scheduleIndexWarm(id) });
     this.recallPolicy.memoryStore = this.legacy?.store || this.store;
     this.sharing = new SharedReadService(this, { config: sharingConfig });
     this.sessionCapture = new SessionCapture(this);
@@ -182,6 +184,8 @@ class ShoggothMemoryService {
     } catch (error) { this.opened = false; throw error; }
   }
   async close() {
+    for (const timer of this.indexWarmTimers.values()) clearTimeout(timer);
+    this.indexWarmTimers.clear();
     this.sharing.close();
     this.ownMemory.close();
     this.opened = false;
@@ -197,6 +201,7 @@ class ShoggothMemoryService {
       Promise.resolve().then(() => this.activeMemory.close()),
       Promise.allSettled([...this.jobs.values()]),
       Promise.allSettled([...this.signalCommits]),
+      Promise.allSettled([...this.indexWarmFlights.values()]),
     ]);
     const resources = await Promise.allSettled([
       remoteClosing, Promise.resolve().then(() => this.localEmbeddingHost.close()),
@@ -208,16 +213,34 @@ class ShoggothMemoryService {
     this.hosts.clear(); this.legacy?.close(); this.recallPolicy.close(); this.store.close(); this.database.close();
     this.profileControllers.clear();
   }
+  scheduleIndexWarm(profileId) {
+    if (!this.opened || this.profileControllers.get(profileId)?.signal.aborted
+      || this.indexWarmTimers.has(profileId) || this.indexWarmTimers.size >= 32) return;
+    const timer = setTimeout(() => {
+      this.indexWarmTimers.delete(profileId);
+      if (!this.opened || this.profileControllers.get(profileId)?.signal.aborted) return;
+      if (this.indexWarmFlights.size >= 2 || this.indexWarmFlights.has(profileId)) {
+        this.scheduleIndexWarm(profileId); return;
+      }
+      const work = Promise.resolve().then(() => core.runInMemoryBackgroundContext(() => {
+        this.assertProfile(profileId);
+        return this.host(profileId).searchIndex.sync({ signal: this.profileSignal(profileId) });
+      })).catch(() => {}).finally(() => this.indexWarmFlights.delete(profileId));
+      this.indexWarmFlights.set(profileId, work);
+    }, 500);
+    timer.unref?.(); this.indexWarmTimers.set(profileId, timer);
+  }
   profileSignal(profileId) {
     if (!this.profileControllers.has(profileId)) this.profileControllers.set(profileId, new AbortController());
     return this.profileControllers.get(profileId).signal;
   }
   async stopProfile(profileId) {
+    clearTimeout(this.indexWarmTimers.get(profileId)); this.indexWarmTimers.delete(profileId);
     this.profileSignal(profileId); this.profileControllers.get(profileId).abort();
     this.recallSignals.discardProfile(profileId);
     this.ownMemory.stopProfile(profileId);
     await this.sharing.reconcileConfig();
-    await Promise.allSettled([this.jobs.get(profileId),
+    await Promise.allSettled([this.jobs.get(profileId), this.indexWarmFlights.get(profileId),
       this.activeMemory.stopProfile(profileId),
       ...[...this.maintenance.pending].filter(([key]) => key === `dream:${profileId}` || key.startsWith(`flush:${profileId}:`)).map(([, task]) => task),
       ...[...this.activeMemory.pending].filter(([key]) => JSON.parse(key)[0] === profileId).map(([, task]) => task)].filter(Boolean));
@@ -306,11 +329,24 @@ class ShoggothMemoryService {
     return { stale: false, revision: this.store.getRevision(profileId), owner: this.owner,
     workspace: this.store.workspace(profileId), upstreamRevision: "c10679395819ede78bb073f979f95c157e165bfa" }; }
   rebuildViews(profileId) { this.assertProfile(profileId); return this.viewStatus(profileId); }
+  // USER.md and MEMORY.md are the file authority. Their editable revision is
+  // the file's content hash, so unrelated memory writes do not conflict.
   readCanonical(profileId, kind) {
     this.assertProfile(profileId);
     if (!["MEMORY", "USER"].includes(kind)) fail("MEMORY_PATH_NOT_ALLOWED", "不是核心记忆文件");
-    return { kind, content: this.store.readFile(profileId, `${kind}.md`), revision: this.store.getRevision(profileId),
-      readOnly: true, localDirectory: this.store.workspace(profileId) };
+    const content = this.store.readFile(profileId, `${kind}.md`);
+    return { kind, content, revision: sha256(content), readOnly: false, localDirectory: this.store.workspace(profileId) };
+  }
+  async writeDocument({ profileId, kind, content, expectedRevision }) {
+    this.assertProfile(profileId); this.recallPolicy.assertReady(profileId);
+    if (!["MEMORY", "USER"].includes(kind)) fail("MEMORY_PATH_NOT_ALLOWED", "不是核心记忆文件");
+    if (hasSecret(content)) fail("MEMORY_SECRET_REJECTED", "记忆文件不能包含凭据");
+    const written = await this.store.writeDocument(profileId, `${kind}.md`, content, expectedRevision);
+    // Borrowed reads of the old text in other Agents' running turns are stale now.
+    this.sharing.withdraw(profileId, written.previous);
+    await this.sharing.reconcileConfig();
+    this.onLearningSourcesChanged?.(profileId);
+    return { kind, name: `${kind}.md`, revision: written.revision, memoryRevision: this.store.getRevision(profileId) };
   }
   isReviewCommitted(profileId, item) { return item?.profileId === profileId && this.isRecallCommitted(profileId, item); }
   isReviewReceipted(profileId, item) { return this.isReviewCommitted(profileId, item)

@@ -5,233 +5,204 @@ const { createAgentService } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
 const { DEFAULT_RUNTIME_ACCOUNTS } = require("../app/agent-service/runtime-account");
-const { DAY_MS } = require("../app/agent-service/proactive-service-protocol");
 const { seedProactiveAgentContext } = require("./helpers/proactive-native-closure.cjs");
-const RUNTIMES = ["grok-build", "pi", "opencode", "deepseek-harness", "antigravity"];
+const { InspirationRuntime } = require("./fixtures/inspiration-runtime.cjs");
+const RUNTIMES = ["grok-build", "pi", "opencode", "deepseek-harness", "antigravity", "claude-code"];
 const id = () => crypto.randomUUID();
-
+async function until(predicate, describe = () => "") {
+  const deadline = Date.now() + 5000;
+  while (!predicate()) {
+    if (Date.now() > deadline) assert.fail("Native turn did not start: " + describe());
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
 async function fixture(t, runtime) {
-  const root = fs.mkdtempSync("/private/tmp/sg-heartbeat-runtime-");
+  const root = fs.mkdtempSync("/private/tmp/sg-heartbeat-native-");
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
-  const clock = { value: Date.UTC(2026, 9, 30, 10) }, calls = [], sent = [];
-  let service, generate;
+  const clock = { value: Date.UTC(2026, 9, 30, 10) }, calls = [], sent = [], hosts = new Map();
+  const mapSession = ({ threadSource, ...thread }) => ({ ...thread, source: threadSource });
   const manager = {
-    canGenerateModelOnly: (name, options) => {
-      assert.equal(options?.purpose, "proactive");
-      return RUNTIMES.includes(name);
-    },
     runtimeIdentityKey: binding => `fixture:${binding.runtime}:1`,
     async acquire(binding, options) {
-      return { ...binding, capabilities: { "model.generate.toolFree": true },
-        authenticationState: async () => ({ authenticated: true, credentialPresent: true }),
-        async generateModelOnly(input) {
-          assert.equal(options.modelOnly, true);
-          assert.deepEqual(options.permissionPolicy, { approvalPolicy: "never", sandbox: "read-only" });
-          assert.equal(options.workspace, null);
-          calls.push({ binding, options, input });
-          return generate(input);
-        } };
+      assert.notEqual(options?.modelOnly, true, "Proactive checks must use ordinary Agent sessions");
+      if (!hosts.has(binding.runtime)) {
+        const host = new InspirationRuntime(); host.starts = [];
+        const handle = { ...binding, capabilities: Object.fromEntries([
+          "session.start", "session.resume", "session.read", "session.list", "turn.start", "turn.interrupt", "events", "serverRequests",
+        ].map(name => [name, true])), terminated: host.terminated, registeredSecrets: [],
+          authenticationState: async () => ({ authenticated: true, credentialPresent: true }),
+          subscribe: listener => host.subscribe(listener),
+          registerServerRequestHandler: (method, handler) => host.registerServerRequestHandler(method, handler),
+          async sessionList(input) { const result = await host.threadList(input); return { ...result, data: result.data.map(mapSession) }; },
+          async sessionStart(input) {
+            host.starts.push(structuredClone(input));
+            return { session: mapSession((await host.threadStart({ ...input, threadSource: input.source })).thread) };
+          },
+          async sessionResume(input) { return { session: mapSession((await host.threadResume({ ...input, threadId: input.sessionId })).thread) }; },
+          async sessionRead(input) { return { session: mapSession((await host.threadRead({ ...input, threadId: input.sessionId })).thread) }; },
+          async turnStart(input) {
+            calls.push({ binding, input: { ...input } });
+            return host.turnStart({ ...input, threadId: input.sessionId, clientUserMessageId: input.operationId });
+          },
+          turnInterrupt: input => host.turnInterrupt(input),
+        };
+        hosts.set(binding.runtime, { host, handle });
+      }
+      return hosts.get(binding.runtime).handle;
     }, async stopAll() {}, async stop() {},
   };
-  service = createAgentService({ paths, runtimeManager: manager, now: () => clock.value, autoSparkNotes: false, proactiveReviewTimeoutMs: 3000,
+  const service = createAgentService({ paths, runtimeManager: manager, now: () => clock.value, autoSparkNotes: false,
+    runtimePool: { get() { assert.fail("The isolated fixture must never acquire a real Codex host"); }, async stopAll() {} },
+    proactiveReviewTimeoutMs: 10_000,
     safeStorage: { isEncryptionAvailable: () => true, encryptString: s => Buffer.from(s), decryptString: b => b.toString() },
     setCronTimer: () => 1, clearCronTimer() {}, setProactiveTimer: () => 1, clearProactiveTimer() {},
     proactiveProfileAvailable: () => true, notificationSender: async input => { sent.push(input); return { state: "submitted" }; } });
+  service.proactiveScheduler.onError = error => t.diagnostic(error.stack);
   t.after(async () => { await service.stop({ notify: false }); fs.rmSync(root, { recursive: true, force: true }); });
   await service.start();
   const products = service.productStore, profileId = DEFAULT_AGENT_PROFILE_ID;
-  function select(name, model = `${name}-chosen-model`) {
-    let state = products.getAgentRuntimeBindings(profileId);
-    let binding = state.bindings.find(b => b.runtime === name);
+  function select(name) {
+    let state = products.getAgentRuntimeBindings(profileId), binding = state.bindings.find(b => b.runtime === name);
     if (!binding) {
       products.addAgentRuntimeBinding(profileId, { runtime: name,
         runtimeAccountId: DEFAULT_RUNTIME_ACCOUNTS.find(a => a.runtime === name).id }, { operationId: id() });
       state = products.getAgentRuntimeBindings(profileId); binding = state.bindings.find(b => b.runtime === name);
     }
-    products.setAgentDefaultModel(profileId, binding.id, { revision: state.revision, model });
+    products.setAgentDefaultModel(profileId, binding.id, { revision: state.revision, model: `${name}-default-model` });
+    return binding;
   }
-  select(runtime);
+  const binding = select(runtime);
+  const mainKey = service.proactiveStore.getTarget(profileId).sessionKey;
+  const main = service.chatSessionStore.getSession(mainKey);
+  service.chatSessionStore.switchRuntime(mainKey, { bindingId: binding.id, revision: main.revision, model: `${runtime}-main-model` });
   const call = (method, params) => service.proactiveService.handle(method, params);
   const get = async (kind = "heartbeat") => (await call("proactive.monitor.get", { kind, profileId })).monitor;
-  const save = async config => call("proactive.monitor.set", { operationId: id(),
+  const save = config => call("proactive.monitor.set", { operationId: id(),
     expectedRevision: service.proactiveStore.getMonitor(config.id)?.revision ?? 0, config });
-  const rules = "# HEARTBEAT\n\nCheck the supplied state. Notify only on a meaningful change; retain short working notes.\n";
   const document = (await call("proactive.document.get", { profileId })).document;
-  await call("proactive.document.set", { profileId, content: rules, expectedRevision: document.revision });
+  await call("proactive.document.set", { profileId, content: "# HEARTBEAT\n\nCheck current state and report meaningful changes.\n", expectedRevision: document.revision });
   await save({ ...(await get()).config, enabled: true, activeHours: null });
-  const tick = async (ms = 30 * 60_000) => {
-    clock.value += ms; await service.proactiveScheduler.tick();
-    await service.proactiveScheduler.waitForIdle();
-    return service.proactiveStore.history((await get()).config.id)[0];
+  const tick = async (ms = 30 * 60_000) => { clock.value += ms; await service.proactiveScheduler.tick(); };
+  const start = async (kind = "heartbeat", ms = 30 * 60_000) => {
+    const config = (await get(kind)).config;
+    await tick(ms);
+    await until(() => service.workDispatcher.listRuns({ source: "proactive" }).some(run => run.sourceId === config.id && run.status === "running"),
+      () => JSON.stringify({ checks: service.proactiveStore.history(config.id), runs: service.workDispatcher.listRuns({ source: "proactive" }),
+        errors: [...service.workRunCoordinator.lastErrors.values()].map(error => ({ code: error.code, message: error.message })) }));
+    return service.workDispatcher.listRuns({ source: "proactive" }).find(run => run.sourceId === config.id && run.status === "running");
   };
-  const reply = (input, outcome = "notice") => {
-    const runId = /Run ID: ([a-f0-9-]{36})/u.exec(input.prompt)?.[1];
-    const occurrence = service.proactiveStore.occurrenceForRun(runId);
-    assert.ok(occurrence, "the durable run must precede generation");
-    const candidate = occurrence.candidates[0];
-    return { text: JSON.stringify({ runId, outcome, candidates: outcome === "silent" ? [] : [
-      { id: candidate.id, evidenceVersion: candidate.evidenceVersion }], reason: "需要关注的变化", body: outcome === "silent" ? "" : "请检查本次结果。",
-      ...(occurrence.heartbeat ? { scratch: "已检查：状态 A" } : {}) }), model: input.model,
-      usage: { totalTokens: 20, inputTokens: 12, outputTokens: 8, cachedInputTokens: 0, cacheWriteInputTokens: 0, reasoningOutputTokens: 0 } };
+  const response = (run, body, scratch) => ({ runId: run.id, outcome: "notice", reason: "Meaningful change", body,
+    candidates: service.proactiveStore.occurrenceForRun(run.id).candidates.slice(0, 5).map(({ id, evidenceVersion }) => ({ id, evidenceVersion })),
+    ...(scratch === undefined ? {} : { scratch }) });
+  const complete = async (run, text, usage = 20) => {
+    const { host } = hosts.get(run.runtimeSessionRef.runtime);
+    if (usage !== null) host.emit({ known: true, type: "usage", method: "fixture/usage", threadId: run.runtimeSessionRef.sessionId,
+      turnId: run.runtimeTurnRef.turnId, responseId: `usage-${run.id}`, model: `${runtime}-main-model`,
+      usage: { inputTokens: Math.max(0, usage - 8), outputTokens: Math.min(8, usage), totalTokens: usage,
+        cachedInputTokens: 0, cacheWriteInputTokens: 0, reasoningOutputTokens: 0 } });
+    host.complete(run, text); await service.proactiveScheduler.waitForIdle();
+    return service.proactiveStore.occurrenceForRun(run.id);
   };
-  generate = input => reply(input);
-  return { service, root, clock, calls, sent, select, call, get, save, tick, reply, rules, profileId,
-    setGenerate(fn) { generate = fn; } };
-}
-
-for (const runtime of RUNTIMES) test(`${runtime}: nonempty HEARTBEAT, notes, notice, default model, dedup and daily inspiration`, async t => {
-  const f = await fixture(t, runtime);
-  const expected = await seedProactiveAgentContext(f.service, f.profileId, f.root, f.clock.value);
-  const assertModelInput = occurrence => {
-    const { input } = f.calls.at(-1);
-    assert.match(input.prompt, /SYSTEM-INITIATED CHECK/u);
-    for (const [name, content] of Object.entries(expected.definitions)) {
-      assert.ok(input.prompt.includes(content), `${name}.md must reach the model in full`);
-    }
-    for (const memory of [expected.user, expected.agent, expected.daily]) assert.ok(input.prompt.includes(memory), memory);
-    assert.ok(!input.prompt.includes(expected.project));
-    assert.doesNotMatch(input.prompt, /Frozen permission context|Skills are available/u);
-    const run = f.service.workDispatcher.getRun(occurrence.runId);
-    const snapshot = f.service.contextSnapshotStore.get(f.profileId, run.contextSnapshotId);
-    assert.equal(snapshot.report.inputOrigin, "system");
-    assert.equal(f.service.workRunCoordinator.getRunSessionKey(run), null);
-  };
-  const check = await f.tick();
-  assert.equal(check.state, "published", JSON.stringify({ reason: check.reason, calls: f.calls.length,
-    runs: f.service.workDispatcher.listRuns({ source: "proactive" }),
-    errors: [...f.service.workRunCoordinator.lastErrors.values()].map(e => ({ code: e.code, message: e.message, stack: e.stack })) }));
-  assert.equal(f.calls.length, 1);
-  assert.equal(f.calls[0].binding.runtime, runtime);
-  assertModelInput(check);
-  assert.equal(f.calls[0].input.model, `${runtime}-chosen-model`);
-  assert.deepEqual(f.calls[0].input.modelSecretScope, { profileId: f.profileId, sessionId: check.monitorId });
-  assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).content, "已检查：状态 A");
-  assert.equal((await f.call("proactive.document.get", { profileId: f.profileId })).document.content, f.rules);
-  assert.equal(f.sent.length, 1);
-  assert.equal(f.service.tokenUsageStore.list({ profileId: f.profileId }).filter(x => x.source === "proactive")[0].runtime, runtime);
-  await f.service.proactiveScheduler.tick(); await f.service.proactiveScheduler.waitForIdle();
-  assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 1);
-  f.select(runtime, `${runtime}-changed-model`);
-  f.setGenerate(input => { assert.match(input.prompt, /已检查：状态 A/u); return f.reply(input, "silent"); });
-  assert.equal((await f.tick()).state, "silent");
-  assert.equal(f.calls[1].input.model, `${runtime}-changed-model`);
-  assert.equal(f.sent.length, 1);
-  f.clock.value -= 2 * DAY_MS;
-  await f.service.inspirationService.handle("inspiration.create", { operationId: id(), body: "值得回顾的灵感" });
-  f.clock.value += 2 * DAY_MS;
-  const daily = await f.get("inspiration");
-  await f.save({ ...daily.config, enabled: true, timezone: "UTC", schedule: { kind: "cron", expr: "0 12 * * *", tz: "UTC" } });
-  f.setGenerate(input => f.reply(input));
-  await f.tick(60 * 60_000);
-  const review = f.service.proactiveStore.history(daily.config.id)[0];
-  assert.equal(review.state, "published", review.reason); assert.equal(f.sent.length, 2);
-  assertModelInput(review);
-  assert.equal(f.service.proactiveService.status(f.service.proactiveStore.getMonitor(daily.config.id)).totalTokens, 20,
-    "daily review has its own budget even after same-day HEARTBEAT runs");
-  assert.equal(f.service.proactiveStore.history(check.monitorId)[0].reason, "duplicate_notice");
-  await f.service.stop({ notify: false }); await f.service.start(); await f.service.proactiveScheduler.waitForIdle();
-  assert.equal(f.sent.length, 2); assert.equal(f.calls.length, 4);
-  assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).content, "已检查：状态 A");
-});
-
-test("empty rules remain silent on every default Runtime without verification or inference", async t => {
-  for (const runtime of RUNTIMES) await t.test(runtime, async t => {
-    const f = await fixture(t, runtime);
-    const document = (await f.call("proactive.document.get", { profileId: f.profileId })).document;
-    await f.call("proactive.document.set", { profileId: f.profileId, content: "# HEARTBEAT\n\n<!-- no active rules -->\n", expectedRevision: document.revision });
-    const check = await f.tick(); assert.equal(check.state, "silent"); assert.equal(check.reason, "empty_checklist");
-    assert.equal(f.calls.length, 0); assert.equal(f.sent.length, 0);
-    assert.equal(f.service.proactiveStore.getCursor(`capability:${f.profileId}`), null);
-  });
-});
-
-async function until(predicate) {
-  const deadline = Date.now() + 3000;
-  while (!predicate()) { if (Date.now() > deadline) throw new Error("dispatch did not start");
-    await new Promise(resolve => setTimeout(resolve, 10)); }
+  return { service, root, clock, calls, hosts, sent, select, call, get, save, tick, start, response, complete, profileId, mainKey };
 }
 
 for (const runtime of RUNTIMES) {
-  test(`${runtime}: restart never replays a dispatched sessionless review`, async t => {
+  test(`${runtime}: heartbeat and daily review reuse Main, its selected model, full context and ordinary turn API`, async t => {
     const f = await fixture(t, runtime);
-    f.setGenerate(input => new Promise((_, reject) => input.signal.addEventListener("abort", () =>
-      reject(Object.assign(new Error("fixture process stopped"), { code: "MODEL_ONLY_CANCELED" })), { once: true })));
-    const pending = f.tick(); pending.catch(() => {}); await until(() => f.calls.length);
-    const run = f.service.workDispatcher.listRuns({ source: "proactive" })[0];
-    assert.equal(run.status, "running"); assert.equal(run.runtimeSessionRef, null);
-    await f.service.stop({ notify: false }); await pending.catch(() => {});
-    f.setGenerate(() => { throw new Error("Recovery must not send another model request"); });
-    await f.service.start(); await f.service.proactiveScheduler.waitForIdle();
-    const recovered = f.service.workDispatcher.getRun(run.id);
-    assert.equal(recovered.status, "interrupted"); assert.equal(recovered.errorCode, "SERVICE_RESTARTED");
-    assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 0);
-    assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).revision, 0);
-  });
-  test(`${runtime}: disabled review aborts, waits for cleanup and discards late notes/notice`, async t => {
-    const f = await fixture(t, runtime); let cleaned = false;
-    f.setGenerate(input => new Promise(resolve => input.signal.addEventListener("abort", () => {
-      setTimeout(() => { cleaned = true; resolve(f.reply(input)); }, 30);
-    }, { once: true })));
-    const pending = f.tick(); await until(() => f.calls.length);
+    const expected = await seedProactiveAgentContext(f.service, f.profileId, f.root, f.clock.value);
+    const first = await f.start();
+    const main = f.service.chatSessionStore.getSession(f.mainKey), host = f.hosts.get(runtime).host;
+    assert.equal(f.service.workRunCoordinator.getRunSessionKey(first), f.mainKey);
+    assert.equal(first.runtimeSessionRef.sessionId, main.runtimeSessionId);
+    assert.equal(first.workspace, main.workspace);
+    assert.equal(f.calls[0].input.model, `${runtime}-main-model`);
+    assert.equal(host.starts[0].persistent, true);
+    const context = host.starts[0].developerInstructions + f.calls[0].input.turnDeveloperInstructions
+      + f.calls[0].input.context + f.calls[0].input.prompt;
+    for (const text of Object.values(expected.definitions)) assert.ok(context.includes(text));
+    for (const text of [expected.user, expected.agent, expected.daily]) assert.ok(context.includes(text));
+    assert.match(context, /Frozen permission context/u);
+    assert.equal(f.service.contextSnapshotStore.get(f.profileId, first.contextSnapshotId).report.inputOrigin, "system");
+    f.service.proactiveService.respond(first, f.response(first, "A useful reminder.", "Reviewed state A."));
+    assert.equal((await f.complete(first, "Private structured response acknowledgement")).state, "published");
+    assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).content, "Reviewed state A.");
+    const second = await f.start();
+    assert.equal(second.runtimeSessionRef.sessionId, first.runtimeSessionRef.sessionId);
+    assert.equal((await f.complete(second, "A useful reminder.")).reason, "duplicate_notice");
+    const third = await f.start();
+    assert.equal((await f.complete(third, "NO_REPLY")).state, "silent");
+    assert.equal(host.threads.length, 1); assert.equal(f.sent.length, 1);
     await f.save({ ...(await f.get()).config, enabled: false });
-    const check = await pending;
-    assert.equal(cleaned, true); assert.notEqual(check.state, "published");
-    assert.equal(f.sent.length, 0); assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).revision, 0);
-    assert.equal(f.service.workDispatcher.getRun(check.runId).status, "interrupted");
-    assert.equal(f.service.workDispatcher.getRun(check.runId).errorCode, "PROACTIVE_REVIEW_STOPPED");
-    assert.equal(f.service.workRunCoordinator.lastErrors.size, 0);
+    await f.service.inspirationService.handle("inspiration.create", { operationId: id(), body: "A saved idea worth reviewing." });
+    const daily = await f.get("inspiration");
+    await f.save({ ...daily.config, enabled: true, timezone: "UTC", schedule: { kind: "cron", expr: "0 12 * * *", tz: "UTC" } });
+    const review = await f.start("inspiration", 24 * 60 * 60_000 + 30 * 60_000);
+    assert.equal(review.runtimeSessionRef.sessionId, first.runtimeSessionRef.sessionId);
+    assert.equal((await f.complete(review, "Please revisit the saved idea.")).state, "published");
+    assert.equal(f.sent.length, 2);
+    const events = f.service.transcriptStore.listEvents(f.profileId, main.id);
+    assert.equal(events.filter(event => event.content.proactiveNotice).length, 2);
+    assert.equal(events.filter(event => event.kind === "user").length, 0);
+    assert.equal(f.service.tokenUsageStore.list({ profileId: f.profileId }).filter(row => row.source === "proactive").length, 4);
+    await f.service.stop({ notify: false }); await f.service.start(); await f.service.proactiveScheduler.waitForIdle();
+    assert.equal(f.calls.length, 4); assert.equal(f.sent.length, 2);
   });
-  test(`${runtime}: defaults changed in flight invalidate the result; next check selects the new Runtime`, async t => {
-    const f = await fixture(t, runtime); let finish;
-    f.setGenerate(input => new Promise(resolve => { finish = () => resolve(f.reply(input)); }));
-    const pending = f.tick(); await until(() => f.calls.length);
-    const next = RUNTIMES[(RUNTIMES.indexOf(runtime) + 1) % RUNTIMES.length]; f.select(next);
-    finish(); const check = await pending;
-    assert.equal(check.reason, "PROACTIVE_SCOPE_INVALID"); assert.equal(f.sent.length, 0);
-    assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).revision, 0);
-    f.setGenerate(input => f.reply(input)); assert.equal((await f.tick()).state, "published");
-    assert.equal(f.calls[1].binding.runtime, next); assert.equal(f.calls[1].input.model, `${next}-chosen-model`);
+  test(`${runtime}: disabled and restarted active checks never publish or dispatch again`, async t => {
+    const f = await fixture(t, runtime), run = await f.start();
+    await f.save({ ...(await f.get()).config, enabled: false });
+    await f.service.proactiveScheduler.waitForIdle();
+    assert.equal(f.service.workDispatcher.getRun(run.id).status, "interrupted");
+    assert.throws(() => f.service.proactiveService.respond(run, f.response(run, "Late reply")), { code: "PROACTIVE_SCOPE_INVALID" });
+    await f.service.stop({ notify: false }); await f.service.start(); await f.service.proactiveScheduler.waitForIdle();
+    assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 0);
   });
 }
-
-test("a changed HEARTBEAT document cancels in-flight notes and notice", async t => {
-  const f = await fixture(t, "pi");
-  f.setGenerate(input => new Promise(resolve => input.signal.addEventListener("abort", () =>
-    setTimeout(() => resolve(f.reply(input)), 30), { once: true })));
-  const pending = f.tick(); await until(() => f.calls.length);
-  const document = (await f.call("proactive.document.get", { profileId: f.profileId })).document;
-  await f.call("proactive.document.set", { profileId: f.profileId, content: "# HEARTBEAT\nNew rules\n", expectedRevision: document.revision });
-  const check = await pending;
-  assert.equal(check.reason, "PROACTIVE_REVIEW_STOPPED"); assert.equal(f.sent.length, 0);
-  assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).revision, 0);
+test("empty rules avoid runtime verification and model calls", async t => {
+  for (const runtime of RUNTIMES) await t.test(runtime, async t => {
+    const f = await fixture(t, runtime), document = (await f.call("proactive.document.get", { profileId: f.profileId })).document;
+    await f.call("proactive.document.set", { profileId: f.profileId, content: "# HEARTBEAT\n", expectedRevision: document.revision });
+    await f.tick(); await f.service.proactiveScheduler.waitForIdle();
+    assert.equal(f.calls.length, 0); assert.equal(f.sent.length, 0);
+    assert.equal(f.service.proactiveStore.history((await f.get()).config.id)[0].reason, "empty_checklist");
+  });
 });
-
-test("daily budgets prevent extra runs, include actual tokens and survive restart with unknown usage", async t => {
+test("normal native usage keeps durable run, token and unknown-usage budget barriers", async t => {
   for (const boundary of ["runs", "tokens", "unknown", "zero"]) await t.test(boundary, async t => {
     const f = await fixture(t, "pi");
-    const monitor = await f.get();
-    await f.save({ ...monitor.config, budget: { maxRunsPerDay: boundary === "runs" ? 1 : 24, maxTokensPerDay: 1024 } });
-    f.setGenerate(input => { const output = f.reply(input);
-      if (boundary === "tokens") output.usage = { ...output.usage, inputTokens: 1200, totalTokens: 1208 };
-      if (boundary === "unknown") output.usage = null;
-      if (boundary === "zero") output.usage.totalTokens = 0; return output; });
-    assert.equal((await f.tick()).state, "published");
+    await f.save({ ...(await f.get()).config, budget: { maxRunsPerDay: boundary === "runs" ? 1 : 5, maxTokensPerDay: 1024 } });
+    const run = await f.start();
+    await f.complete(run, "A budgeted reminder.", boundary === "tokens" ? 1208 : boundary === "unknown" ? null : boundary === "zero" ? 0 : 20);
     await f.service.stop({ notify: false }); await f.service.start();
-    const second = await f.tick();
-    assert.equal(second.reason, ["unknown", "zero"].includes(boundary) ? "usage_unverified" : "budget_exhausted");
-    assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 1);
+    await f.tick(); await f.service.proactiveScheduler.waitForIdle();
+    assert.equal(f.service.proactiveStore.history((await f.get()).config.id)[0].reason,
+      ["unknown", "zero"].includes(boundary) ? "usage_unverified" : "budget_exhausted");
+    assert.equal(f.calls.length, 1);
   });
 });
+test("structured replies retain cross-run and candidate validation in the normal channel", async t => {
+  const f = await fixture(t, "deepseek-harness"), run = await f.start();
+  const response = f.response(run, "A validated reply.");
+  assert.throws(() => f.service.proactiveService.respond(run, { ...response, runId: id() }), { code: "PROACTIVE_RESPONSE_INVALID" });
+  assert.throws(() => f.service.proactiveService.respond(run, { ...response, candidates: [{ ...response.candidates[0], evidenceVersion: "0".repeat(64) }] }), { code: "PROACTIVE_RESPONSE_INVALID" });
+  assert.equal(f.service.proactiveStore.occurrenceForRun(run.id).response, null);
+  await f.complete(run, "NO_REPLY"); assert.equal(f.sent.length, 0);
+});
 
-test("malformed and cross-run responses never commit notes or notices", async t => {
-  for (const kind of ["malformed", "wrong-run", "wrong-candidate"]) await t.test(kind, async t => {
-    const f = await fixture(t, "deepseek-harness");
-    f.setGenerate(input => { const output = f.reply(input), parsed = JSON.parse(output.text);
-      if (kind === "wrong-run") parsed.runId = id();
-      if (kind === "wrong-candidate") parsed.candidates[0].evidenceVersion = "0".repeat(64);
-      output.text = kind === "malformed" ? "```json\n" + output.text + "\n```" : JSON.stringify(parsed); return output; });
-    const check = await f.tick(); assert.equal(check.reason, "PROACTIVE_RESPONSE_INVALID");
-    assert.equal(f.sent.length, 0); assert.equal(f.service.proactiveStore.heartbeatScratch(f.profileId).revision, 0);
-  });
+test("the Main binding stays authoritative when the Agent default changes", async t => {
+  const f = await fixture(t, "pi"), first = await f.start();
+  f.select("opencode");
+  assert.equal(f.service.proactiveService.capabilities(f.profileId).semanticVerified, true);
+  assert.equal((await f.complete(first, "Main still uses the selected model.")).state, "published");
+  const next = await f.start();
+  assert.equal(next.runtimeSessionRef.runtime, "pi");
+  assert.equal(next.runtimeSessionRef.sessionId, first.runtimeSessionRef.sessionId);
+  assert.equal(f.calls.at(-1).input.model, "pi-main-model");
+  await f.complete(next, "NO_REPLY");
+});
+test("a Service restart does not replay an already dispatched normal proactive turn", async t => {
+  const f = await fixture(t, "pi"), run = await f.start();
+  await f.service.stop({ notify: false }); await f.service.start(); await f.service.proactiveScheduler.waitForIdle();
+  assert.ok(["interrupted", "failed"].includes(f.service.workDispatcher.getRun(run.id).status));
+  assert.equal(f.calls.length, 1); assert.equal(f.sent.length, 0);
 });

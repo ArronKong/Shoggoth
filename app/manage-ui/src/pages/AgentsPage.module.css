@@ -79,6 +79,23 @@
   overscroll-behavior-x: contain;
 }
 
+.deck:is([data-fade-left], [data-fade-right]) {
+  --deck-fade-size: clamp(24px, 4vw, 40px);
+  /* The solid bottom strip keeps the horizontal scrollbar visible. */
+  mask-image: linear-gradient(to right,
+    transparent var(--deck-clip-left),
+    #000 calc(var(--deck-clip-left) + var(--deck-fade-left, 0px)),
+    #000 calc(100% - var(--deck-clip-right) - var(--deck-fade-right, 0px)),
+    transparent calc(100% - var(--deck-clip-right))),
+    linear-gradient(#000, #000);
+  mask-size: 100% 100%, 100% var(--ui-scrollbar-track-size, 12px);
+  mask-position: left top, left bottom;
+  mask-repeat: no-repeat;
+}
+
+.deck[data-fade-left] { --deck-fade-left: var(--deck-fade-size); }
+.deck[data-fade-right] { --deck-fade-right: var(--deck-fade-size); }
+
 /* 3D 悬浮倾斜（首页卡与 Overview 内卡共用）：mousemove 把指针相对卡心的位置写进
    --tiltX/--tiltY（TSX 里直接 set style，不走 React 渲染），这里只负责把变量装进
    transform。纯 CSS 3D，无需 three.js。transition 同时充当阻尼，指针快扫时柔性跟随。 */
@@ -126,8 +143,8 @@
 
 .cardArt {
   position: relative;
-  width: 320px;
-  height: 320px;
+  width: 100%;
+  aspect-ratio: 1;
   border-radius: 12px 12px 0 0;
   overflow: hidden;
 }
@@ -163,7 +180,6 @@
   font-weight: 200;
   line-height: 44px;
   letter-spacing: 0.02em;
-  text-transform: uppercase;
   color: light-dark(#000000, #f4f4f5);
   white-space: nowrap;
   overflow: hidden;
@@ -192,8 +208,14 @@
 }
 
 .cardBrand {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  display: block;
+  flex: none;
+  /* Figma 272:728: original 70.5008 × 10.0001 mark, 16px right / 18px bottom. */
+  transform: translateY(-4px);
+}
+
+:global(:root[data-theme="dark"]) .cardBrand {
+  filter: invert(1);
 }
 
 /* 末尾的「+ 新建」幽灵卡 */
@@ -532,20 +554,41 @@
 .ovPane {
   flex: 1;
   min-height: 0;
+  container-type: inline-size;
   overflow-y: auto;
   overscroll-behavior-y: contain;
+  /* 模型设置的高度因后端而异，预留滚动条位置以保持两列的水平对齐。 */
+  scrollbar-gutter: stable;
 }
 
 .ovLayout {
-  display: flex;
-  align-items: flex-start;
-  gap: 64px;
-  padding: 72px 48px 32px 56px;
+  --ov-offset-x: 16px;
+  --ov-offset-y: -16px;
+  --ov-pad-block: clamp(32px, 5cqi, 64px);
+  --ov-pad-inline: clamp(16px, 3cqi, 40px);
+  display: grid;
+  grid-template-columns: clamp(200px, 30cqi, 320px) minmax(0, 600px);
+  align-items: center;
+  align-content: center;
+  justify-content: center;
+  gap: clamp(24px, 5cqi, 72px);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1120px;
+  min-height: 100%;
+  margin-inline: auto;
+  padding-block: calc(var(--ov-pad-block) + var(--ov-offset-y))
+    calc(var(--ov-pad-block) - var(--ov-offset-y));
+  padding-inline: calc(var(--ov-pad-inline) + var(--ov-offset-x))
+    calc(var(--ov-pad-inline) - var(--ov-offset-x));
 }
 
 .ovCardWrap {
   position: relative;
-  flex: 0 0 auto;
+}
+
+.ovCardWrap .cardFace {
+  width: 100%;
 }
 
 /* 悬浮卡片出现删除按钮（删除功能移到这里） */
@@ -578,15 +621,49 @@
   color: #ffffff;
 }
 
-.ovFields {
+.ovDetails {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+
+.ovSection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding-bottom: 28px;
+}
+
+.ovSection + .ovSection {
+  padding-top: 28px;
+}
+
+.ovSection:last-of-type {
+  padding-bottom: 0;
+}
+
+.ovSectionTitle {
+  margin: 0;
+  color: light-dark(#000000, #f4f4f5);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+}
+
+.ovSectionBody {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 36px 32px;
-  align-content: start;
-  flex: 1;
+  align-items: start;
+  gap: 20px 16px;
   min-width: 0;
-  max-width: 720px;
-  padding-top: 16px;
+}
+
+.ovActions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  padding-top: 24px;
 }
 
 .ovField {
@@ -604,7 +681,7 @@
   font-size: 12px;
   font-weight: 300;
   line-height: 18px;
-  color: light-dark(rgba(0, 0, 0, 0.5), rgba(255, 255, 255, 0.5));
+  color: var(--muted);
 }
 
 .ovValue {
@@ -612,7 +689,7 @@
   font-weight: 300;
   line-height: 24px;
   color: light-dark(#000000, #f4f4f5);
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .ovValueNote {
@@ -621,32 +698,45 @@
   color: var(--muted);
 }
 
-/* 可编辑值：外观即纯文本，聚焦时出现下划线 */
+/* 名称与默认模型、工作区共用 40px 高的圆角线框。 */
 .ovInput {
-  width: 100%;
-  padding: 0 0 1px;
-  border: 0;
-  border-bottom: 1px solid transparent;
-  border-radius: 0;
+  box-sizing: border-box;
+  align-self: flex-start;
+  field-sizing: content;
+  width: auto;
+  min-width: min(100%, 120px);
+  max-width: 100%;
+  min-height: 40px;
+  padding: 7px 16px;
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  border-radius: 999px;
   background: transparent;
-  color: light-dark(#000000, #f4f4f5);
+  color: var(--ui-text-1);
   font: inherit;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 300;
   line-height: 24px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
 .ovInput:hover {
-  border-bottom-color: light-dark(rgba(0, 0, 0, 0.15), rgba(255, 255, 255, 0.2));
+  border-color: light-dark(rgba(0, 0, 0, 0.22), rgba(255, 255, 255, 0.3));
+  background: light-dark(rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.04));
 }
 
 .ovInput:focus {
   outline: none;
-  border-bottom-color: light-dark(#000000, #ffffff);
+  border-color: var(--ui-text-1);
+}
+
+/* 名称已有描边焦点态，覆盖管理页通用的蓝色外圈。 */
+.root:global(.management-page) .ovInput:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .ovInput[aria-invalid="true"] {
-  border-bottom-color: var(--ui-error);
+  border-color: var(--ui-error);
 }
 
 .nameError {
@@ -655,21 +745,44 @@
 }
 
 .ovLink {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: light-dark(#000000, #f4f4f5);
-  font-size: 16px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  gap: 12px;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 16px;
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ui-text-1);
+  font-size: 14px;
   font-weight: 300;
-  line-height: 24px;
+  line-height: 22px;
   text-align: left;
-  word-break: break-all;
   cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
-.ovLink:hover {
-  color: var(--accent);
-  text-decoration: underline;
+.ovLink:hover:not(:disabled) {
+  border-color: light-dark(rgba(0, 0, 0, 0.22), rgba(255, 255, 255, 0.3));
+  background: light-dark(rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.04));
+  color: var(--ui-text-1);
+}
+
+.ovWorkspacePath {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.ovWorkspaceArrow {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
 }
 
 .ovHint {
@@ -677,6 +790,10 @@
   font-size: 12px;
   line-height: 18px;
   color: var(--muted);
+}
+
+.ovFallbackHint {
+  font-weight: 300;
 }
 
 /* 模型触发器：把聊天页胶囊皮成设计稿里的纯文本值，悬浮出现虚线下划线 */
@@ -705,7 +822,7 @@
   line-height: 24px;
   text-align: left;
   white-space: normal;
-  word-break: break-all;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
@@ -726,11 +843,21 @@
 }
 
 .defaultModelPicker :global(.chat-pill--model) {
-  gap: 9px;
+  box-sizing: border-box;
+  gap: 12px;
   min-width: 0;
-  padding-inline-end: 4px;
-  word-break: normal;
-  overflow-wrap: anywhere;
+  min-height: 40px;
+  padding: 7px 16px;
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  border-radius: 20px;
+  font-size: 15px;
+}
+
+.defaultModelPicker :global(.chat-pill--model:hover:not(:disabled)),
+.defaultModelPicker :global(.chat-pill--model[aria-expanded="true"]) {
+  border-color: light-dark(rgba(0, 0, 0, 0.22), rgba(255, 255, 255, 0.3));
+  background: light-dark(rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.04));
+  color: var(--ui-text-1);
 }
 
 .defaultModelPicker :global(.chat-pill__icon) {
@@ -739,11 +866,11 @@
 
 .defaultModelPicker :global(.chat-pill--model)::after {
   content: "";
-  flex: 0 0 6px;
-  height: 6px;
-  border-right: 1px solid var(--muted);
-  border-bottom: 1px solid var(--muted);
-  transform: translateY(-2px) rotate(45deg);
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  background: var(--muted);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4' fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 .defaultModelPicker :global(.chat-pill--model[aria-busy="true"]) {
@@ -756,13 +883,28 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 4px;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.fallbackEntry {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .fallbackChip {
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 7px 12px 7px 16px;
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  border-radius: 999px;
   font-size: 15px;
   font-weight: 300;
   line-height: 24px;
@@ -770,7 +912,7 @@
 }
 
 .fallbackArrow {
-  margin-right: 6px;
+  flex: none;
   color: var(--muted);
 }
 
@@ -779,8 +921,14 @@
 }
 
 .fallbackX {
-  padding: 0 4px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border: 0;
+  border-radius: 50%;
   background: none;
   color: var(--muted);
   font-size: 14px;
@@ -1011,6 +1159,13 @@
   outline: none;
 }
 
+/* 焦点环用黑色描边（深色模式白色），压过 manage-skin.css 的通配蓝色焦点环 (0,3,0) */
+:global(.management-page) .suMain .suEditor:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--ui-surface-1),
+    0 0 0 4px light-dark(#000000, #ffffff);
+}
+
 /* ---------- Cron / Inspiration / Files 列表 ---------- */
 
 .tabPane {
@@ -1235,22 +1390,20 @@
 
 /* ---------- 响应式 ---------- */
 
-@media (max-width: 1180px) {
+@container (max-width: 560px) {
   .ovLayout {
-    gap: 40px;
-    padding: 40px 32px 24px;
+    --ov-offset-x: 0px;
+    --ov-offset-y: 0px;
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .ovFields {
-    grid-template-columns: minmax(0, 1fr);
+  .ovCardWrap {
+    width: min(100%, 264px);
+    justify-self: center;
   }
 }
 
 @media (max-width: 900px) {
-  .ovLayout {
-    flex-direction: column;
-  }
-
   .suLayout {
     padding-left: 0;
   }

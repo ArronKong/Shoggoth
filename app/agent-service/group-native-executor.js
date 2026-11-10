@@ -5,6 +5,7 @@ const { validText } = require("../group-result-content");
 const { isPassReply } = require("./group-mentions");
 const { redactGrantTokens } = require("./group-tool-grant");
 const { GROUP_SESSION_OPERATION_PREFIX } = require("./group-chat-run");
+const { GroupActivityProjection, groupTurnActivityBinding, completedGroupActivity } = require("./group-activity");
 const { normalizeInteractiveRequestV1 } = require("../core/shoggoth-interaction-contract");
 const { nativeCapabilities, groupCapabilities } = require("./group-capabilities");
 const { isRuntimeAvailable } = require("../runtime-availability");
@@ -212,6 +213,33 @@ class GroupNativeExecutor {
   /** 原生运行的事件流（按游标读取），用于群里的回复草稿。 */
   async readEvents({ runId, streamId, afterSeq }) {
     return this.getChatServiceController().handle("run.subscribe", { runId, streamId, afterSeq, limit: 100 });
+  }
+
+  /** The Store resolves the completed reply to its original turn. Reuse only display-safe transcript facts. */
+  readCompletedActivity(turn, member) {
+    if (!turn.sessionKey || !turn.runId || !member?.profileId) return null;
+    const session = this.chatSessionStore.getSession(turn.sessionKey);
+    if (!session || session.profileId !== member.profileId) return null;
+    const projection = new GroupActivityProjection(groupTurnActivityBinding(turn), { now: this.now });
+    const events = this.transcriptStore.listEvents(session.profileId, session.id, { runId: turn.runId }).flatMap(event => {
+      const fact = { seq: event.seq, runId: event.runId, occurredAt: event.occurredAt };
+      if (event.kind === "tool_call" || event.kind === "tool_result") {
+        let payload = event.content;
+        if (payload.displayRef) {
+          try { payload = this.transcriptStore.displayEvent(session.profileId, session.id, event).content; }
+          catch { return []; }
+        }
+        return [{ ...fact, type: event.kind === "tool_call" ? "tool.start" : "tool.result", payload }];
+      }
+      if (event.kind !== "status") return [];
+      const { transcriptType, status } = event.content;
+      if (transcriptType === "context.native.compacted") return [{ ...fact, type: "status", payload: { status: "compacted" } }];
+      return transcriptType === "status" && ["compacting", "compacted"].includes(status)
+        ? [{ ...fact, type: "status", payload: { status } }] : [];
+    });
+    projection.observeEvents(events, "history");
+    projection.observeStatus("completed", { at: turn.finishedAt ?? this.now() });
+    return completedGroupActivity(projection);
   }
 
   getRun(runId) {

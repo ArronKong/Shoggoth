@@ -22,8 +22,7 @@ export function UsageChartSkeleton({ bars = false }: { bars?: boolean }) {
   );
 }
 
-export function UsageRankSkeleton({ kind }: { kind: "agent" | "model" | "tool" }) {
-  const agent = kind === "agent";
+export function UsageRankSkeleton({ agent = false }: { agent?: boolean }) {
   const rows = (agent ? [46, 37, 52, 31] : [52, 39, 46]).map((width, index) => (
     <div key={index}>
       <div className={agent ? "arank-head" : "rank-head"}>
@@ -36,15 +35,5 @@ export function UsageRankSkeleton({ kind }: { kind: "agent" | "model" | "tool" }
       </div>
     </div>
   ));
-  if (kind === "model") {
-    return (
-      <SkeletonStatus className="usage-rank-split">
-        <div className="usage-donut">
-          <SkeletonShape className={`usage-donut-svg ${styles.ring}`} />
-        </div>
-        <div className={`usage-rank-list ${styles.rankList}`}><div className="rank">{rows}</div></div>
-      </SkeletonStatus>
-    );
-  }
   return <SkeletonStatus className={agent ? "arank" : "rank"}>{rows}</SkeletonStatus>;
 }

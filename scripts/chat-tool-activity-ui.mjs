@@ -16,6 +16,8 @@ const output = process.env.CHAT_ACTIVITY_UI_OUTPUT ? path.resolve(process.env.CH
 const progressOnly = process.argv.includes("--progress-only");
 const nestedOnly = process.argv.includes("--nested-only");
 const openClawLongOnly = process.argv.includes("--openclaw-long-only");
+const proactiveOnly = process.argv.includes("--proactive-only");
+const runCommonScenes = !nestedOnly && !openClawLongOnly && !progressOnly && !proactiveOnly;
 let serving = false;
 try {
   await build({ plugins: [viteArtworkFixturePlugin(root)], entryPoints: [path.join(root, "scripts/fixtures/chat-tool-activity.tsx")], bundle: true, format: "esm",
@@ -43,35 +45,40 @@ try {
     fs.writeFileSync(main, `const {app,BrowserWindow}=require("electron"),fs=require("node:fs");
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});app.whenReady().then(async()=>{
 const w=new BrowserWindow({show:false,width:1280,height:900,webPreferences:{backgroundThrottling:false}});let passed=false;
-try{const results=[],nestedResults=[],nativeResults=[],openClawLongResults=[],progressResults=[];for(const [backend,runtime] of ${JSON.stringify(nestedOnly || openClawLongOnly || progressOnly ? [] : scenes)}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280]]){
+try{const results=[],nestedResults=[],nativeResults=[],openClawLongResults=[],progressResults=[],proactiveResults=[];for(const [backend,runtime] of ${JSON.stringify(runCommonScenes ? scenes : [])}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280]]){
 w.setContentSize(width,900);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{backend,runtime,language,theme},hash:"/chat"});
 const result=await w.webContents.executeJavaScript('window.runActivityFixture()');results.push(result);console.log(JSON.stringify({backend,runtime,language,passed:true}));
 if(${Boolean(output)}&&(runtime==="external"||runtime==="grok-build"))fs.writeFileSync(${JSON.stringify(output)}+"/"+backend+"-"+runtime+"-"+language+".png",(await w.webContents.capturePage()).toPNG());
-}}if(!${nestedOnly || openClawLongOnly || progressOnly}){w.setContentSize(600,800);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{backend:"hermes",language:"zh-CN"},hash:"/chat"});results.push(await w.webContents.executeJavaScript('window.runActivityFixture()'));
+}}if(${runCommonScenes}){w.setContentSize(600,800);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{backend:"hermes",language:"zh-CN"},hash:"/chat"});results.push(await w.webContents.executeJavaScript('window.runActivityFixture()'));
 if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/narrow.png",(await w.webContents.capturePage()).toPNG());}
-if(!${openClawLongOnly || progressOnly}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280],["zh-CN","light",600]]){
+if(!${openClawLongOnly || progressOnly || proactiveOnly}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280],["zh-CN","light",600]]){
 w.setContentSize(width,900);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{backend:"openclaw",language,theme,scenario:"nested"},hash:"/chat"});
 nestedResults.push(await w.webContents.executeJavaScript('window.runNestedToolHistoryFixture()'));
 if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/nested-"+language+"-"+width+".png",(await w.webContents.capturePage()).toPNG());}}
-if(!${nestedOnly || openClawLongOnly || progressOnly}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280],["zh-CN","light",600]]){
+if(${runCommonScenes}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280],["zh-CN","light",600]]){
 w.setContentSize(width,900);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{backend:"shoggoth",runtime:"antigravity",language,theme,scenario:"native-long"},hash:"/chat"});
 nativeResults.push(await w.webContents.executeJavaScript('window.runNativeLongHistoryFixture()'));
 if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/native-long-"+language+"-"+width+".png",(await w.webContents.capturePage()).toPNG());}}
-if(!${nestedOnly || progressOnly}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280],["zh-CN","light",600]]){
+if(!${nestedOnly || progressOnly || proactiveOnly}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280],["zh-CN","light",600]]){
 w.setContentSize(width,900);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{backend:"openclaw",runtime:"external",language,theme,scenario:"openclaw-long"},hash:"/chat"});
 openClawLongResults.push(await w.webContents.executeJavaScript('window.runOpenClawLongHistoryFixture()'));
 if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/openclaw-long-"+language+"-"+width+".png",(await w.webContents.capturePage()).toPNG());}}
-if(!${nestedOnly || openClawLongOnly}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280],["zh-CN","light",600]]){
+if(!${nestedOnly || openClawLongOnly || proactiveOnly}){for(const [language,theme,width] of [["zh-CN","light",1280],["en","dark",1280],["zh-CN","light",600]]){
 for(const scenario of ["native-progress-cold","native-progress","native-progress-approval"]){w.setContentSize(width,900);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{backend:"shoggoth",runtime:"codex",language,theme,scenario},hash:"/chat"});
 progressResults.push(await w.webContents.executeJavaScript('window.runNativeProgressFixture()'));
 if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/"+scenario+"-"+language+"-"+width+".png",(await w.webContents.capturePage()).toPNG());}}}
-if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/result.json",JSON.stringify({passed:true,results,nestedResults,nativeResults,openClawLongResults,progressResults},null,2));console.log(JSON.stringify({passed:true,scenes:results.length,nestedScenes:nestedResults.length,nativeScenes:nativeResults.length,openClawLongScenes:openClawLongResults.length,progressScenes:progressResults.length,providerCalls:0}));passed=true;
+if(${proactiveOnly || runCommonScenes})for(const [language,immersive] of [["zh-CN","0"],["en","0"],["zh-CN","1"]]){
+w.setContentSize(1280,900);await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{backend:"shoggoth",language,immersive,scenario:"proactive"},hash:"/chat"});
+proactiveResults.push(await w.webContents.executeJavaScript('window.runProactiveActivityFixture()'));
+if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/proactive-"+language+"-"+immersive+".png",(await w.webContents.capturePage()).toPNG());}
+if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/result.json",JSON.stringify({passed:true,results,nestedResults,nativeResults,openClawLongResults,progressResults,proactiveResults},null,2));console.log(JSON.stringify({passed:true,scenes:results.length,nestedScenes:nestedResults.length,nativeScenes:nativeResults.length,openClawLongScenes:openClawLongResults.length,progressScenes:progressResults.length,proactiveScenes:proactiveResults.length,providerCalls:0}));passed=true;
 }catch(error){console.error(error.stack||error);console.error(JSON.stringify(await w.webContents.executeJavaScript('({error:window.fixtureError,text:document.body.innerText.slice(-3500),requests:window.requests.slice(-8)})')));if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+"/failure.png",(await w.webContents.capturePage()).toPNG());}finally{w.destroy();app.exit(passed?0:1);}});`);
     const result = spawnSync(path.join(root, "node_modules/.bin/electron"), [main], {
       encoding: "utf8", timeout: 180_000, env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: "true" } });
     process.stdout.write(result.stdout || "");
     if (result.status !== 0) process.stderr.write(result.stderr || String(result.error));
     assert.equal(result.status, 0, "ChatPage activity wire fixture failed");
-    assert.match(result.stdout, new RegExp(`"passed":true,"scenes":${nestedOnly || openClawLongOnly || progressOnly ? 0 : 19},"nestedScenes":${openClawLongOnly || progressOnly ? 0 : 3},"nativeScenes":${nestedOnly || openClawLongOnly || progressOnly ? 0 : 3},"openClawLongScenes":${nestedOnly || progressOnly ? 0 : 3}`));
+    assert.match(result.stdout, new RegExp(`"passed":true,"scenes":${runCommonScenes ? 19 : 0},"nestedScenes":${openClawLongOnly || progressOnly || proactiveOnly ? 0 : 3},"nativeScenes":${runCommonScenes ? 3 : 0},"openClawLongScenes":${nestedOnly || progressOnly || proactiveOnly ? 0 : 3}`));
+    if (proactiveOnly || runCommonScenes) assert.match(result.stdout, /"proactiveScenes":3/u);
   }
 } finally { if (!serving) fs.rmSync(temp, { recursive: true, force: true }); }

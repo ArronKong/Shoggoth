@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const { serviceError } = require("./security");
 const { hasSecret } = require("./memory-engine");
 const { bindConversationSource } = require("./conversation-source");
+const { parseHeartbeat } = require("./heartbeat-document");
 
 const hash = (text) => crypto.createHash("sha256").update(text).digest("hex");
 const normalizeName = (name) => name.normalize("NFKC").trim();
@@ -20,7 +21,7 @@ function patchDocument(content, oldText, newText) {
 }
 
 class ConversationDefinitionService {
-  constructor({ definitionStore, productStore, agentLifecycleService, transcriptStore, chatSessionStore, getRunSessionKey, onProfileRenamed, memoryDefinitionLinks }) {
+  constructor({ definitionStore, productStore, agentLifecycleService, transcriptStore, chatSessionStore, getRunSessionKey, onProfileRenamed, memoryDefinitionLinks, heartbeatRules, memoryFiles }) {
     this.definitions = definitionStore;
     this.products = productStore;
     this.lifecycle = agentLifecycleService;
@@ -29,12 +30,21 @@ class ConversationDefinitionService {
     this.getRunSessionKey = getRunSessionKey;
     this.onProfileRenamed = onProfileRenamed || (() => {});
     this.memoryDefinitionLinks = memoryDefinitionLinks;
+    // { read(profileId), write(profileId, content, expectedRevision) } over the
+    // proactive Service, which owns HEARTBEAT.md and stops stale checks on save.
+    this.heartbeatRules = heartbeatRules || null;
+    // { read(profileId, kind), write({ profileId, kind, content, expectedRevision }) }
+    // over file memory; absent when an Agent's memory is not file-authoritative.
+    this.memoryFiles = memoryFiles || null;
   }
   bind(name, args, run) {
     const source = bindConversationSource({ args, run, transcriptStore: this.transcripts, chatSessionStore: this.sessions,
-      getRunSessionKey: this.getRunSessionKey, requireQuote: name === "agent_definition_update" });
+      getRunSessionKey: this.getRunSessionKey,
+      requireQuote: ["agent_definition_update", "heartbeat_rules_update", "memory_file_update"].includes(name) });
     if (hasSecret(JSON.stringify(args))) throw serviceError("DEFINITION_SECRET_REJECTED", "设定不能包含凭据");
-    if (name === "agent_definition_read") return source;
+    if (["agent_definition_read", "heartbeat_rules_read", "memory_file_read"].includes(name)) return source;
+    if (name === "heartbeat_rules_update") return this.bindHeartbeat(run.profileId, args, source);
+    if (name === "memory_file_update") return this.bindMemoryFile(run.profileId, args, source);
     const current = this.definitions.get(run.profileId);
     if (!current || current.manifest.revision !== args.expectedRevision) {
       throw serviceError("DEFINITION_REVISION_CONFLICT", "设定已经变化，请重新读取");
@@ -82,7 +92,8 @@ class ConversationDefinitionService {
     await this.memoryDefinitionLinks?.prepare(profileId, args, call);
     let current = this.definitions.get(profileId);
     const applied = current.manifest.revision > args.expectedRevision
-      ? this.definitions.readRevision(profileId, args.expectedRevision + 1) : null;
+      ? (this.definitions.readRevision(profileId, args.expectedRevision + 1)
+        || this.definitions.readReceipt?.(profileId, args.expectedRevision + 1)) : null;
     if (applied?.manifest.reason === reason
       && applied.manifest.documents[args.kind].contentHash === binding.resultHash) {
       return this.result(profileId, args.kind, applied, current, binding);
@@ -103,7 +114,8 @@ class ConversationDefinitionService {
       try { this.onProfileRenamed(profileId); } catch { /* Observers cannot undo a committed name. */ }
       current = this.definitions.get(profileId);
       if (current.manifest.revision !== args.expectedRevision) {
-        const committed = this.definitions.readRevision(profileId, args.expectedRevision + 1);
+        const committed = this.definitions.readRevision(profileId, args.expectedRevision + 1)
+          || this.definitions.readReceipt?.(profileId, args.expectedRevision + 1);
         if (committed?.manifest.reason === reason
           && committed.manifest.documents[args.kind].contentHash === binding.resultHash) {
           return this.result(profileId, args.kind, committed, current, binding);
@@ -125,6 +137,101 @@ class ConversationDefinitionService {
       throw error;
     }
     return this.result(profileId, args.kind, saved, saved, binding);
+  }
+  async heartbeatDocument(profileId) {
+    if (!this.heartbeatRules) throw serviceError("DEFINITION_UNAVAILABLE", "心跳规则暂不可用");
+    return this.heartbeatRules.read(profileId);
+  }
+  async bindHeartbeat(profileId, args, source) {
+    const current = await this.heartbeatDocument(profileId);
+    if (current.revision !== args.expectedRevision) {
+      throw serviceError("DEFINITION_REVISION_CONFLICT", "心跳规则已经变化，请重新读取");
+    }
+    const content = patchDocument(current.content, args.oldText, args.newText);
+    parseHeartbeat(content);
+    if (hasSecret(content)) throw serviceError("DEFINITION_SECRET_REJECTED", "设定不能包含凭据");
+    return { ...source, resultHash: hash(content) };
+  }
+  async readHeartbeat(profileId, args) {
+    const current = await this.heartbeatDocument(profileId);
+    if (hasSecret(current.content)) throw serviceError("DEFINITION_SECRET_REJECTED", "设定包含凭据");
+    const points = [...current.content];
+    const offset = args.offset || 0;
+    if (offset > points.length) throw serviceError("DEFINITION_OFFSET_INVALID", "读取位置超出文件");
+    const end = Math.min(offset + (args.limit || 4096), points.length);
+    return { file: "HEARTBEAT.md", revision: current.revision, missing: current.missing === true,
+      content: points.slice(offset, end).join(""), offset, nextOffset: end < points.length ? end : null,
+      truncated: offset > 0 || end < points.length };
+  }
+  async updateHeartbeat(profileId, args, call) {
+    const binding = call.binding;
+    const current = await this.heartbeatDocument(profileId);
+    // A pending receipt replayed after its write already landed.
+    if (hash(current.content) === binding.resultHash) return this.heartbeatResult(current);
+    if (current.revision !== args.expectedRevision) return this.heartbeatConflict(current);
+    const content = patchDocument(current.content, args.oldText, args.newText);
+    if (hash(content) !== binding.resultHash) throw serviceError("DEFINITION_PATCH_CONFLICT", "心跳规则已变化");
+    let saved;
+    try { saved = await this.heartbeatRules.write(profileId, content, args.expectedRevision); }
+    catch (error) {
+      if (error?.code === "PROACTIVE_REVISION_CONFLICT") return this.heartbeatConflict(await this.heartbeatDocument(profileId));
+      throw error;
+    }
+    return this.heartbeatResult(saved);
+  }
+  heartbeatConflict(current) {
+    return { saved: false, status: "heartbeat-conflict", file: "HEARTBEAT.md", currentRevision: current.revision,
+      instruction: "Read HEARTBEAT.md again with heartbeat_rules_read, preserve concurrent changes, and retry the requested edit. Nothing was saved by this call." };
+  }
+  heartbeatResult(document) {
+    return { saved: true, status: "updated", file: "HEARTBEAT.md", revision: document.revision,
+      effective: "next-heartbeat-check" };
+  }
+  memoryFile(profileId, kind) {
+    if (!this.memoryFiles) throw serviceError("DEFINITION_UNAVAILABLE", "记忆文件暂不可用");
+    return this.memoryFiles.read(profileId, kind);
+  }
+  bindMemoryFile(profileId, args, source) {
+    const current = this.memoryFile(profileId, args.kind);
+    if (current.revision !== args.expectedRevision) {
+      throw serviceError("DEFINITION_REVISION_CONFLICT", "记忆文件已经变化，请重新读取");
+    }
+    const content = patchDocument(current.content, args.oldText, args.newText);
+    if (hasSecret(content)) throw serviceError("DEFINITION_SECRET_REJECTED", "记忆文件不能包含凭据");
+    return { ...source, resultHash: hash(content) };
+  }
+  readMemoryFile(profileId, args) {
+    const current = this.memoryFile(profileId, args.kind);
+    const points = [...current.content];
+    const offset = args.offset || 0;
+    if (offset > points.length) throw serviceError("DEFINITION_OFFSET_INVALID", "读取位置超出文件");
+    const end = Math.min(offset + (args.limit || 4096), points.length);
+    return { file: `${args.kind}.md`, revision: current.revision,
+      content: points.slice(offset, end).join(""), offset, nextOffset: end < points.length ? end : null,
+      truncated: offset > 0 || end < points.length };
+  }
+  async updateMemoryFile(profileId, args, call) {
+    const binding = call.binding;
+    const current = this.memoryFile(profileId, args.kind);
+    // A pending receipt replayed after its write already landed.
+    if (current.revision === binding.resultHash) return this.memoryFileResult(args.kind, current.revision);
+    if (current.revision !== args.expectedRevision) return this.memoryFileConflict(args.kind, current.revision);
+    const content = patchDocument(current.content, args.oldText, args.newText);
+    if (hash(content) !== binding.resultHash) throw serviceError("DEFINITION_PATCH_CONFLICT", "记忆文件已变化");
+    let saved;
+    try { saved = await this.memoryFiles.write({ profileId, kind: args.kind, content, expectedRevision: args.expectedRevision }); }
+    catch (error) {
+      if (error?.code === "MEMORY_REVISION_CONFLICT") return this.memoryFileConflict(args.kind, this.memoryFile(profileId, args.kind).revision);
+      throw error;
+    }
+    return this.memoryFileResult(args.kind, saved.revision);
+  }
+  memoryFileConflict(kind, currentRevision) {
+    return { saved: false, status: "memory-file-conflict", file: `${kind}.md`, currentRevision,
+      instruction: "Read the file again with memory_file_read, preserve concurrent changes, and retry the requested edit. Nothing was saved by this call." };
+  }
+  memoryFileResult(kind, revision) {
+    return { saved: true, status: "updated", file: `${kind}.md`, revision, effective: "memory-recall-now" };
   }
   conflict(profileId, current, binding, status = "definition-conflict") {
     const profileName = this.products.getAgentProfile(profileId).name;

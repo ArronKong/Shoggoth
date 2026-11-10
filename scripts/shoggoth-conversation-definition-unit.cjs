@@ -11,6 +11,7 @@ const { createAgentLifecycleServiceController } = require("../app/agent-service/
 const { AgentHarnessServiceController } = require("../app/agent-service/agent-harness-service-controller");
 const { ConversationDefinitionService } = require("../app/agent-service/conversation-definition-service");
 const { McpProductToolController, validateMcpProductToolArguments } = require("../app/agent-service/mcp-product-tool-controller");
+const { HeartbeatDocumentStore } = require("../app/agent-service/heartbeat-document");
 
 async function fixture(t) {
   const f = contextFixture();
@@ -25,7 +26,21 @@ async function fixture(t) {
   const run = { ...f.run, status: "running" };
   const source = { source: run.source, sourceId: run.sourceId };
   const renames = [];
-  const definitions = new ConversationDefinitionService({ definitionStore: f.definitions, productStore: products,
+  const heartbeatDocuments = new HeartbeatDocumentStore({ paths: f.paths, productStore: products });
+  const heartbeatRules = { read: async (id) => heartbeatDocuments.read(id),
+    write: async (id, content, expected) => heartbeatDocuments.write(id, content, expected) };
+  // File memory stand-in: content-hash revisions like the real file store.
+  const memoryText = { USER: "# User\n\n", MEMORY: "# Memory\n\n- 旧的实验室地址。\n" };
+  const memoryWrites = [];
+  const memoryFiles = {
+    read: (id, kind) => ({ content: memoryText[kind], revision: crypto.createHash("sha256").update(memoryText[kind]).digest("hex") }),
+    write: async ({ profileId: id, kind, content, expectedRevision }) => {
+      if (memoryFiles.read(id, kind).revision !== expectedRevision) throw Object.assign(new Error("conflict"), { code: "MEMORY_REVISION_CONFLICT" });
+      memoryWrites.push(kind); memoryText[kind] = content;
+      return { revision: memoryFiles.read(id, kind).revision };
+    },
+  };
+  const definitions = new ConversationDefinitionService({ definitionStore: f.definitions, productStore: products, heartbeatRules, memoryFiles,
     agentLifecycleService: lifecycle, transcriptStore: f.transcripts,
     getRunSessionKey: () => run.sourceId, onProfileRenamed: (id) => renames.push(id),
     chatSessionStore: { getSession: (key) => key === run.sourceId ? {
@@ -45,7 +60,7 @@ async function fixture(t) {
     memoryStore: f.memoryStore, memoryEngine: f.memoryEngine, chatSessionStore: { listSessions: () => [] },
     transcriptStore: f.transcripts, toolRegistry: f.permissions.toolRegistry, permissionEngine: f.permissions });
   f.append({ id: "user-request", kind: "user", content: { text:
-    "以后你叫小墨，改得更温和一点，把先查证再回答加到长期工作规则中。把你的身份改成研究助理。也可以叫已占用。" } });
+    "以后你叫小墨，改得更温和一点，把先查证再回答加到长期工作规则中。把你的身份改成研究助理。也可以叫已占用。心跳时检查发布页有没有新版本。把记忆里的实验室地址改成三楼。" } });
   const authority = () => ({ profileId: "profile-1", callId: crypto.randomUUID() });
   const call = (name, args, auth = authority()) => controller.handle(name, { ...source, ...args }, auth);
   const revision = () => f.definitions.get("profile-1").manifest.revision;
@@ -54,7 +69,7 @@ async function fixture(t) {
   const compile = () => f.compiler.compile({ profile: products.getAgentProfile("profile-1"), run,
     transcriptSessionId: f.transcriptSessionId, query: "介绍一下自己" });
   t.after(async () => { await lifecycle.close(); products.close(); f.cleanup(); });
-  return { ...f, products, run, source, definitionService: definitions, lifecycle, harness, renames, authority, call, revision, prepare,
+  return { ...f, products, run, source, heartbeatDocuments, memoryText, memoryWrites, definitionService: definitions, lifecycle, harness, renames, authority, call, revision, prepare,
     compile, resetController() { controller = createController(); } };
 }
 const rejects = (fn, code) => assert.rejects(fn, (error) => error.code === code);
@@ -229,3 +244,86 @@ for (const checkpoint of ["revision-installed", "manifest-committed"]) {
     assert.equal((await f.call("agent_definition_read", { kind: "IDENTITY" })).content, "- Name: 小墨\n");
   });
 }
+
+test("conversation edits HEARTBEAT.md rules through the settings-page store", async (t) => {
+  const f = await fixture(t);
+  const quote = "心跳时检查发布页有没有新版本";
+  const read = await f.call("heartbeat_rules_read", {});
+  assert.equal(read.file, "HEARTBEAT.md");
+  assert.equal(read.missing, true);
+  assert.equal(read.content, f.heartbeatDocuments.read("profile-1").content);
+  const rule = "# Heartbeat\n\n- 检查发布页是否出现新版本，有新版本才提醒。\n";
+  const args = { expectedRevision: read.revision, oldText: read.content, newText: rule, sourceQuote: quote };
+  const auth = f.authority();
+  const saved = await f.call("heartbeat_rules_update", args, auth);
+  assert.equal(saved.saved, true);
+  assert.equal(saved.effective, "next-heartbeat-check");
+  const shown = f.heartbeatDocuments.read("profile-1");
+  assert.equal(shown.content, rule);
+  assert.equal(shown.revision, saved.revision);
+  assert.equal(fs.readFileSync(path.join(f.paths.agentsDir, "profile-1", "HEARTBEAT.md"), "utf8"), rule);
+  // An exact retry replays the receipt instead of patching again.
+  assert.deepEqual(await f.call("heartbeat_rules_update", args, auth), saved);
+  assert.equal(f.heartbeatDocuments.read("profile-1").content, rule);
+
+  const next = { expectedRevision: saved.revision, oldText: "有新版本才提醒", newText: "有新版本才提醒并附上版本号", sourceQuote: quote };
+  await rejects(() => f.call("heartbeat_rules_update", { ...next, sourceQuote: "用户没有说过" }), "MCP_TOOL_INVALID_ARGUMENTS");
+  await rejects(() => f.call("heartbeat_rules_update", { ...next, expectedRevision: "0".repeat(64) }), "MCP_TOOL_STATE_CONFLICT");
+  await rejects(() => f.call("heartbeat_rules_update", { ...next, oldText: "不存在的文字" }), "MCP_TOOL_STATE_CONFLICT");
+  await rejects(() => f.call("heartbeat_rules_update", { ...next, newText: "password=fixture-password-value" }), "MCP_TOOL_SECRET_REJECTED");
+  await rejects(() => f.call("heartbeat_rules_update", { ...next, oldText: "# Heartbeat",
+    newText: "---\nweb:\n  - kind: shell\n    url: https://example.com\n---\n# Heartbeat" }), "PROACTIVE_DOCUMENT_INVALID");
+  assert.equal(validateMcpProductToolArguments("heartbeat_rules_update", { ...f.source, ...next, expectedRevision: "abc" }), false);
+  assert.equal(f.heartbeatDocuments.read("profile-1").content, rule);
+
+  const edited = await f.call("heartbeat_rules_update", next);
+  assert.equal(edited.saved, true);
+  assert.match(f.heartbeatDocuments.read("profile-1").content, /并附上版本号/u);
+
+  // A settings-page save between binding and commit is reported, not overwritten.
+  const current = f.heartbeatDocuments.read("profile-1");
+  const binding = await f.definitionService.bindHeartbeat("profile-1", { expectedRevision: current.revision,
+    oldText: "版本号", newText: "版本号和链接" }, {});
+  f.heartbeatDocuments.write("profile-1", current.content + "\n- 页面编辑。\n", current.revision);
+  const conflict = await f.definitionService.updateHeartbeat("profile-1", { expectedRevision: current.revision,
+    oldText: "版本号", newText: "版本号和链接" }, { binding });
+  assert.equal(conflict.saved, false);
+  assert.equal(conflict.status, "heartbeat-conflict");
+  assert.match(f.heartbeatDocuments.read("profile-1").content, /页面编辑/u);
+});
+
+test("conversation edits USER.md and MEMORY.md text through file memory", async (t) => {
+  const f = await fixture(t);
+  const quote = "把记忆里的实验室地址改成三楼";
+  const read = await f.call("memory_file_read", { kind: "MEMORY" });
+  assert.equal(read.file, "MEMORY.md");
+  assert.equal(read.content, f.memoryText.MEMORY);
+  const args = { kind: "MEMORY", expectedRevision: read.revision, oldText: "旧的实验室地址", newText: "实验室在三楼", sourceQuote: quote };
+  const auth = f.authority();
+  const saved = await f.call("memory_file_update", args, auth);
+  assert.equal(saved.saved, true);
+  assert.equal(saved.file, "MEMORY.md");
+  assert.match(f.memoryText.MEMORY, /实验室在三楼/u);
+  assert.equal((await f.call("memory_file_read", { kind: "MEMORY" })).revision, saved.revision);
+  assert.deepEqual(await f.call("memory_file_update", args, auth), saved);
+  assert.deepEqual(f.memoryWrites, ["MEMORY"]);
+
+  const next = { kind: "USER", expectedRevision: (await f.call("memory_file_read", { kind: "USER" })).revision,
+    oldText: "", newText: "x", sourceQuote: quote };
+  await rejects(() => f.call("memory_file_update", { ...next, sourceQuote: "用户没有说过" }), "MCP_TOOL_INVALID_ARGUMENTS");
+  await rejects(() => f.call("memory_file_update", { ...next, expectedRevision: "0".repeat(64) }), "MCP_TOOL_STATE_CONFLICT");
+  await rejects(() => f.call("memory_file_update", next), "MCP_TOOL_STATE_CONFLICT"); // empty oldText on a non-empty file
+  await rejects(() => f.call("memory_file_update", { ...next, oldText: "# User", newText: "password=fixture-password-value" }), "MCP_TOOL_SECRET_REJECTED");
+  assert.equal(validateMcpProductToolArguments("memory_file_update", { ...f.source, ...next, kind: "TOOLS" }), false);
+  assert.deepEqual(f.memoryWrites, ["MEMORY"]);
+
+  // A settings-page save between binding and commit is reported, not overwritten.
+  const current = f.definitionService.memoryFile("profile-1", "USER");
+  const edit = { kind: "USER", expectedRevision: current.revision, oldText: "# User", newText: "# 用户" };
+  const binding = f.definitionService.bindMemoryFile("profile-1", edit, {});
+  f.memoryText.USER += "- 页面编辑。\n";
+  const conflict = await f.definitionService.updateMemoryFile("profile-1", edit, { binding });
+  assert.equal(conflict.saved, false);
+  assert.equal(conflict.status, "memory-file-conflict");
+  assert.match(f.memoryText.USER, /页面编辑/u);
+});

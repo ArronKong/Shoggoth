@@ -830,13 +830,9 @@ async function createHarness(browser, baseUrl, backend, options = {}) {
     reducedMotion: "reduce",
     ...(options.storageState ? { storageState: options.storageState } : {}),
   });
-  await context.addInitScript((selectedBackend) => {
+  await context.addInitScript(() => {
     localStorage.setItem("openclaw.i18n.locale", "zh-CN");
-    localStorage.setItem(
-      "shoggoth.ui.v1",
-      JSON.stringify({ version: 1, values: { "backend.models": selectedBackend } }),
-    );
-  }, backend);
+  });
   const page = await context.newPage();
   page.setDefaultTimeout(7_000);
   const state = options.state ?? createState(backend);
@@ -869,7 +865,7 @@ async function createHarness(browser, baseUrl, backend, options = {}) {
   await installNativeRecoveryFixture(page, state, options.nativeMode ?? "normal");
   await installApiFake(page, state);
   if (options.initScript) await page.addInitScript(options.initScript);
-  await page.goto(`${baseUrl}/#/models`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl}/#/models?backend=${encodeURIComponent(backend)}`, { waitUntil: "domcontentloaded" });
 
   if (!options.skipProviderReady) {
   const providerTitle = backend === "hermes" ? "模型 Provider" : "模型 Provider（API Key）";

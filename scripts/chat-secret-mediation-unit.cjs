@@ -51,8 +51,8 @@ async function fixture(action) {
   const paths = { stateDir: path.join(root, "state"), trustedRoot: root };
   const broker = encryptedBroker(); let now = new Date(2026, 9, 29, 12).getTime();
   let store;
-  const open = async () => {
-    store = new TemporarySecretStore({ paths, cryptoBroker: broker, now: () => now });
+  const open = async (options = {}) => {
+    store = new TemporarySecretStore({ paths, cryptoBroker: broker, now: () => now, ...options });
     await store.open(); return store;
   };
   try { await open(); await action({ store, open, paths, broker, setNow: value => { now = value; }, now: () => now }); }
@@ -316,6 +316,30 @@ test("model projection masks new tool credentials and every known short echo wit
   assert.equal(value.content[0].text, "echo 123456; API_KEY=new-value", "display original is not mutated");
   const structured = await store.project(SCOPE, { password: "short", access_token: "opaque", Authorization: "Bearer other-value" });
   for (const value of Object.values(structured)) assert.equal(secretReferences(value).length, 1);
+}));
+test("pausing discovery preserves ordinary content, existing references and explicit selections", async () => fixture(async ({ store, open }) => {
+  const legacy = await store.prepare({ scope: SCOPE, operationId: "legacy", text: "password: 123456" });
+  const oldReference = legacy.references[0].reference;
+  await store.close();
+  const paused = await open({ autoDetect: false, getKnownSecrets: () => [{ value: "ConnectorFixture777", kind: "token" }] });
+  const ordinary = "See an example of password: ordinary-value. Authorization: Bearer unmarked-value";
+  const fresh = await paused.prepare({ scope: SCOPE, operationId: "ordinary", text: ordinary });
+  assert.equal(fresh.text, ordinary);
+  assert.deepEqual(fresh.references, []);
+  assert.equal(paused.projectText(SCOPE, ordinary), ordinary);
+  const output = { password: "public-sample", nested: { access_token: "unmarked-value" }, content: ordinary };
+  assert.deepEqual(await paused.project(SCOPE, output, { keys: true, model: true }), output);
+  assert.deepEqual(await paused.prepare({ scope: SCOPE, operationId: "legacy", text: legacy.text }), legacy);
+  assert.equal(paused.resolve(SCOPE, oldReference), "123456");
+  assert.equal(await paused.project(SCOPE, "echo 123456 and ConnectorFixture777"),
+    `echo ${oldReference} and [CONNECTED_CREDENTIAL_REDACTED]`);
+  const selected = await paused.prepare({ scope: SCOPE, operationId: "explicit", text: "select 987654",
+    selections: [{ start: 7, end: 13, kind: "password" }] });
+  const newReference = selected.references[0].reference;
+  assert.equal(selected.text, `select ${newReference}`);
+  assert.equal(paused.resolve(SCOPE, newReference), "987654");
+  assert.equal(paused.projectText(SCOPE, "echo 987654"), `echo ${newReference}`);
+  assert.equal(paused.list(SCOPE).length, 2);
 }));
 test("cancellation is checked at actual injection, without granting read capabilities", async () => fixture(async ({ store }) => {
   const a = await store.prepare({ scope: SCOPE, operationId: "m", text: "密码是 123456" });

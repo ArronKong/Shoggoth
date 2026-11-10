@@ -96,10 +96,8 @@ export interface ImmersiveBundle {
   live: ImmersiveLiveStatus | null;
   /** 本地发送单调计数：变化一次 = 触发一次「发送即锚定」（R280 mirror）。 */
   sendSeq: number;
-  /** 滚近顶部时触发加载封存历史（幂等/节流由 ChatPage 的 archive 状态机自守）。 */
-  onNearTop: () => void;
-  /** User overscroll at the top; leaving the top dismisses the boundary note. */
-  onHistoryBoundaryChange?: (atTop: boolean) => void;
+  onHistoryInput?: (event: WheelEvent<HTMLDivElement> | KeyboardEvent<HTMLDivElement>, captureAnchor: () => void) => void;
+  onLeaveHistoryTop?: () => void;
   historyControl?: ReactNode;
   unreadAnchor?: { key: string; messageId: string | null; pending: boolean };
   /** 拖拽文件到 composer 上传（与普通模式同一 handler）。 */
@@ -184,7 +182,7 @@ export interface ImmersiveBundle {
 
 export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
-    onExit, phase, live, sendSeq, onNearTop, onHistoryBoundaryChange, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
+    onExit, phase, live, sendSeq, onHistoryInput, onLeaveHistoryTop, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
     submit, sending, abortActive, abortDisabled, hasActiveSession, canSend, writerHint, slashMenu, slashOpen, connectionRequests, planDock,
     models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
@@ -295,7 +293,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     setShowJump(false);
   };
   const jumpToLatest = () => {
-    onHistoryBoundaryChange?.(false);
+    onLeaveHistoryTop?.();
     clearAnchor();
     stickRef.current = true;
     const el = threadRef.current;
@@ -304,7 +302,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   const onThreadScroll = () => {
     const el = threadRef.current;
     if (el) {
-      if (el.scrollTop > 1) onHistoryBoundaryChange?.(false);
+      if (el.scrollTop > 1) onLeaveHistoryTop?.();
       const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
       if (nearBottom && anchoredRef.current) {
         // 用户自己滚过预留区到底 = 解除锚定，回到贴底跟随
@@ -314,12 +312,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         stickRef.current = nearBottom && !anchoredRef.current;
       }
     }
-  };
-  // 滚轮到顶继续上滚 → 触发封存历史加载（前插补偿在下方 layout effect）
-  const onThreadWheel = (e: WheelEvent<HTMLDivElement>) => {
-    const el = threadRef.current;
-    if (el && e.deltaY !== 0) onHistoryBoundaryChange?.(e.deltaY < 0 && el.scrollTop <= 1);
-    if (el && e.deltaY < 0 && el.scrollTop < 400) { captureHistoryAnchor(); onNearTop(); }
   };
   useLayoutEffect(() => {
     const dock = composerDockRef.current;
@@ -755,11 +747,15 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
       <div
         className={styles.thread}
         ref={threadRef}
+        tabIndex={0}
+        role="region"
+        aria-label={t("chat.historyLabel")}
         onScroll={onThreadScroll}
-        onWheel={onThreadWheel}
+        onWheel={event => onHistoryInput?.(event, captureHistoryAnchor)}
+        onKeyDown={event => onHistoryInput?.(event, captureHistoryAnchor)}
         data-glass-clip
       >
-        <div onClickCapture={captureHistoryAnchor}>{historyControl}</div>
+        {historyControl && <div onClickCapture={captureHistoryAnchor}>{historyControl}</div>}
         {!hasActiveSession && messages.length === 0 && (
           <div className={styles.empty}>
             {t("chat.emptySelect")}

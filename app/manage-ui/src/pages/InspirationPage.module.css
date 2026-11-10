@@ -31,6 +31,7 @@
 }
 .capture textarea { display: block; width: 100%; resize: none; min-height: 40px; overflow: hidden; background: transparent; border: 0; padding: 0; border-radius: 0; font-family: var(--note-font-family); font-size: var(--note-font-size); font-weight: 400; letter-spacing: 0; line-height: var(--note-line-height); color: inherit; caret-color: currentColor; box-shadow: none; }
 .capture textarea[data-inline-text] { min-height: 20px; }
+.capture textarea:disabled { background: transparent; }
 .capture textarea::placeholder { color: inherit; opacity: 1; }
 .capture textarea:focus, .capture textarea:focus-visible { outline: none; box-shadow: none; border: 0; }
 .capture textarea:focus::placeholder { opacity: .3; }
@@ -128,11 +129,6 @@
 .deleteAction > svg { width: 16px; height: 16px; }
 .link { color: var(--ui-text-1); text-decoration: none; font-size: 12px; white-space: nowrap; }
 .link:hover { text-decoration: underline; }
-.empty { position: relative; max-width: 460px; padding: 32px 28px; margin: 16px auto 24px; text-align: center; color: var(--studio-muted); border: 1px dashed var(--studio-line); transform: rotate(-1deg); background: light-dark(#f5f2e857, #dbe9c205); }
-.emptyMark { display: inline-flex; width: 38px; height: 38px; color: var(--studio-muted); }
-.emptyMark > [data-growth] { width: 100%; height: 100%; }
-.empty h2 { font-size: 16px; color: var(--studio-ink); font-weight: 450; margin: 14px 0 8px; }
-.empty p { font-size: 12px; line-height: 1.8; }
 .error { color: var(--ui-error); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .loadMore { min-height: 1px; text-align: center; }
 .loadMore button { margin-left: 12px; }

@@ -1296,26 +1296,6 @@
     ]
   },
   {
-    "id": "fetch",
-    "name": "Fetch",
-    "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
-    "description": {
-      "zh-CN": "抓取公开网页并提取适合阅读的内容。",
-      "en": "Fetch public web pages and extract readable content."
-    },
-    "note": {
-      "zh-CN": "MCP 官方参考服务器，无需账号。需要本机 uv；保存时以 uvx 运行固定版本 Python 包。",
-      "en": "An official MCP reference server without an account requirement. Requires local uv; saving runs the pinned Python package with uvx."
-    },
-    "setup": "none",
-    "transport": {
-      "kind": "stdio-package",
-      "registryType": "pypi",
-      "identifier": "mcp-server-fetch",
-      "version": "2026.10.24"
-    }
-  },
-  {
     "id": "time",
     "name": "Time",
     "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/time",
