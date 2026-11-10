@@ -11,6 +11,16 @@ test("empty templates skip; explicit web declarations are bounded and validated"
  assert.equal(value.web.length,2);assert.equal(value.empty,false);
  for(const source of ["---\nweb: !!js/function 'oops'\n---\n", "---\nweb:\n - kind: fetch\n   url: file:///etc/passwd\n---\n", "---\nweb:\n - kind: shell\n   command: rm\n---\n"])assert.throws(()=>parseHeartbeat(source));
 });
+test("only a declared Spark Notes status source is collected", () => {
+ const section = "## 灵感便签状态检查与合并汇报\n检查未归档便签。";
+ assert.equal(parseHeartbeat(section).inspiration, true);
+ assert.equal(parseHeartbeat("---\ninspiration: true\n---\n").empty, false);
+ assert.equal(parseHeartbeat(`---\ninspiration: false\n---\n${section}`).inspiration, false);
+ assert.equal(parseHeartbeat(`<!--\n${section}\n-->`).inspiration, false);
+ assert.equal(parseHeartbeat(`\`\`\`md\n${section}\n\`\`\``).inspiration, false);
+ assert.equal(parseHeartbeat("Review the service status. Spark Notes are out of scope.").inspiration, false);
+ assert.throws(() => parseHeartbeat("---\ninspiration: [true]\n---\n"), { code: "PROACTIVE_DOCUMENT_INVALID" });
+});
 test("documents are per-Agent, optimistic and do not initialize files on read",t=>{
  const root=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),"sg-heartbeat-doc-"));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const paths=resolveServicePaths({trustedRoot:root,stateRoot:path.join(root,"state"),profileRoot:path.join(root,"profile"),cacheRoot:path.join(root,"cache")});

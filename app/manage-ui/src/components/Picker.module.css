@@ -21,7 +21,7 @@
   align-items: center;
   flex: none;
   min-height: 32px;
-  margin-bottom: 16px;
+  margin-bottom: var(--picker-tab-spacing, 16px);
   overflow-x: auto;
   overflow-y: hidden;
 }
@@ -52,6 +52,7 @@
   color: light-dark(#fff, #000);
 }
 .backendTab[aria-pressed="true"] { transition: background-color var(--ui-motion-state) ease, color 120ms ease 40ms; }
+.backendTab:disabled { opacity: .4; cursor: not-allowed; }
 
 @media (prefers-reduced-motion: reduce) {
   .backendTab[aria-pressed] { transition: none; }
@@ -101,6 +102,26 @@
   background: light-dark(#171717, #e9e9e9);
 }
 
+.agentOption { composes: option; }
+.agentOption[aria-checked="false"]:hover:not(:disabled) { color: inherit; }
+.agentOption[aria-checked="true"]:hover:not(:disabled) { color: light-dark(#fff, #000); }
+.agentOption:disabled { opacity: var(--picker-disabled-opacity, .35); cursor: not-allowed; }
+.agentOption:focus-visible,
+.backendTab:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: -2px;
+}
+
+.optionDetail {
+  max-width: 50%;
+  overflow: hidden;
+  padding-inline-end: 8px;
+  opacity: .7;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .label {
   flex: 1;
   min-width: 0;
@@ -121,6 +142,11 @@
   width: 16px;
   height: 16px;
   flex: none;
+}
+
+.agentCheck {
+  composes: check;
+  margin-inline: 8px;
 }
 
 /* Figma 205:1165 rotates the vector inside a fixed 16px frame. */

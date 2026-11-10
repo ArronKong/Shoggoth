@@ -1214,7 +1214,7 @@ class AgentBackend {
   async createInspiration(_input) { throw new Error(`${this.id}: Inspiration storage not supported`); }
   async updateInspiration(_id, _input) { throw new Error(`${this.id}: Inspiration storage not supported`); }
   async deleteInspiration(_id, _input) { throw new Error(`${this.id}: Inspiration deletion not supported`); }
-  /** Models available to an Agent before a seed has a conversation. */
+  /** Models and configured default identity before an inspiration seed has a conversation. */
   async getInspirationModels(_agentId) {
     throw Object.assign(new Error("所选助理暂不支持选择灵感模型"), { code: "INSPIRATION_UNSUPPORTED" });
   }
@@ -1262,8 +1262,12 @@ class AgentBackend {
   async updateGroupChat(_id, _input) { throw groupChatUnsupported(this.id); }
   /** @param {{expectedMetadataRevision: number, force?: true, ownerScope?: string}} _input Force is only for a confirmed, pending deletion. */
   async deleteGroupChat(_id, _input) { throw groupChatUnsupported(this.id); }
-  /** @param {{expectedRosterRevision: number, member: {backendId: string, agentId: string}}} _input */
+  /** Supply either a legacy single member or a batch that must join together.
+   * @param {{expectedRosterRevision: number, member?: {backendId: string, agentId: string, peerId?: string},
+   * members?: Array<{backendId: string, agentId: string, peerId?: string}>}} _input */
   async addGroupChatMember(_id, _input) { throw groupChatUnsupported(this.id); }
+  /** Apply the confirmed additions and removals together against one roster revision. */
+  async updateGroupChatMembers(_id, _input) { throw groupChatUnsupported(this.id); }
   /** Read the member-scoped catalog; never create a session or start a turn. */
   async getGroupChatMemberModels(_id, _memberId) { throw groupChatUnsupported(this.id); }
   /** Persist a group-only {model, provider} override. null follows the Agent default. */
@@ -1282,7 +1286,7 @@ class AgentBackend {
   async listGroupChatMessages(_id, _query) { throw groupChatUnsupported(this.id); }
   /** Search saved public group history; opaque cursor pins scope and maximum seq. */
   async searchGroupChatMessages(_id, _query) { throw groupChatUnsupported(this.id); }
-  /** 读取一条公共消息的完整正文；offset 为 UTF-8 字节位置，续页固定 digest。 */
+  /** Read public message text (UTF-8 offset + digest), or `part: "activity"` for a saved reply (ownerScope + messageId). */
   async readGroupChatMessage(_id, _query) { throw groupChatUnsupported(this.id); }
   /** 核对原执行或重新读取其结果，不启动新的执行。target 与交互回应使用同一身份格式。 */
   async reconcileGroupChatExecution(_id, _input) { throw groupChatUnsupported(this.id); }
@@ -2084,9 +2088,14 @@ class AgentBackend {
   async setAgentDefaultBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   /** Read the Agent's saved default and its Runtime model choices. */
   async getAgentDefaultModels(_id) { throw new Error(`${this.id}: agent default models not supported`); }
+  /** Configured choices for one Agent, including temporarily unavailable models. */
+  async getAgentModels(_id) { throw Object.assign(new Error(`${this.id}: agent model catalog not supported`), { statusCode: 501 }); }
   /** Save an Agent's default Runtime and model together, without switching a conversation. */
   async selectAgentDefaultModel(_id, _input) { throw new Error(`${this.id}: agent default models not supported`); }
   async getSessionRuntime(_id, _key) { throw new Error(`${this.id}: session runtime switching not supported`); }
+  /** Best-effort preparation without creating a Run, session or model turn.
+   * Capabilities advertise support; callers must never wait for this to send. */
+  async prewarmChatSession(_id, _key) { return { supported: false, state: "unsupported" }; }
   /** Read the current session's memory recall state. Details require an explicit
    * includeTrace request and current source authorization; never starts a model.
    * Unsupported backends return supported:false through this shared contract. */

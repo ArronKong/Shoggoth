@@ -25,8 +25,7 @@ const translate = (key) => key;
 const calls = [];
 let view;
 let messages;
-let addMemberResult = () => view;
-let removeMemberResult = () => view;
+let updateMembersResult = () => view;
 let confirmAnswer = true;
 let promptAnswer = null;
 const record = (name, result) => (...args) => { calls.push({ name, args }); return Promise.resolve(result(...args)); };
@@ -45,8 +44,7 @@ const api = {
   readGroupChatMessage: record("readFull", (_id, input) => ({ page: resultPage(fullAnswer, input) })),
   reconcileGroupChatExecution: record("reconcile", () => view),
   retryGroupChatTurn: record("retry", () => view),
-  addGroupChatMember: record("add", (...args) => addMemberResult(...args)),
-  removeGroupChatMember: record("remove", (...args) => removeMemberResult(...args)),
+  updateGroupChatMembers: record("roster", (...args) => updateMembersResult(...args)),
   getGroupChatMemberRole: record("role", (_id, _memberId, query = {}) => {
     const id = query.cursor?.split(":")[0] ?? (query.revision === "old" ? "old" : "current");
     const text = query.document === "SOUL.md" ? soulSource : id === "old" ? oldRoleSource : roleSource;
@@ -57,7 +55,6 @@ const api = {
   getGroupChatMemberRoleHistory: record("roleHistory", () => ({ snapshots: [{ id: "old", sourceRevision: 1 }], hasMore: false, nextCursor: null })),
   respondGroupChatInteraction: record("respond", () => view),
   stopGroupChatDiscussion: record("stop", () => view),
-  stopGroupChatMember: record("stopMember", () => view),
   updateGroupChat: record("update", () => view),
   deleteGroupChat: record("deleteGroup", (_id, _revision, options) => {
     if (options?.force) return { groupId: "g", status: "deleted" };
@@ -107,6 +104,7 @@ function load(relative) {
       if (name.endsWith("/lib/chatClipboard")) return load("src/lib/chatClipboard.ts");
       if (name.endsWith("/lib/groupMessagePresentation")) return load("src/lib/groupMessagePresentation.ts");
       if (name.endsWith("/lib/groupPanelObserver")) return load("src/lib/groupPanelObserver.ts");
+      if (name.endsWith("/lib/useScrollFade")) return load("src/lib/useScrollFade.ts");
       if (name.endsWith("/lib/turnTimeline")) return load("src/lib/turnTimeline.ts");
       if (name.endsWith("/groupReferenceExcerpt")) return load("src/lib/groupReferenceExcerpt.ts");
       if (name.endsWith("/i18n/groupCollaborationResources") || name.endsWith("/i18n/groupComposerResources")) return {};
@@ -128,8 +126,11 @@ function load(relative) {
           disabled: props.disabled, onChange: event => props.onChange(event.target.checked) })),
       };
       if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader")) return passthrough("i");
+      if (name.endsWith("/components/AgentPicker")) return load("src/components/AgentPicker.tsx");
+      if (name.endsWith("/components/BackendTabIcon")) return load("src/components/BackendTabIcon.tsx");
       if (name.endsWith("/components/TurnTimeline/TurnTimeline")) return passthrough("ol");
       if (name.endsWith("/components/TurnTimeline/TurnProcess")) return { getTurnProcessStats: () => ({}), TurnProcessSummary: () => null };
+      if (name.endsWith("/components/TurnTimeline/trajectoryIcons")) return load("src/components/TurnTimeline/trajectoryIcons.tsx");
       if (name.endsWith("/components/AgentSoulDocument")) return load("src/components/AgentSoulDocument.tsx");
       if (name.endsWith("/components/ChatMarkdown") || name === "./ChatMarkdown") return passthrough("p");
       if (name.endsWith("/components/ChatFileButton")) return load("src/components/ChatFileButton.tsx");
@@ -386,54 +387,126 @@ await typeInput("普通消息");
 await click(buttons("groupChat.send")[0]);
 assert.equal(named("send")[1].args[1].replyTo, null);
 
-// ---- 添加成员 ----
+// ---- 管理成员 ----
 view = base(); messages = timeline();
 const additionAgents = [...agents, { backendId: "openclaw", agentId: "owl", name: "Owl" }];
-let finishAdd;
-let failAdd = false;
-addMemberResult = async (_id, input) => {
-  assert.equal(input.expectedRosterRevision, view.group.rosterRevision, "each add uses the latest roster revision");
-  if (failAdd) throw new Error("ADD_MEMBER_FAILED");
-  await new Promise(resolve => { finishAdd = resolve; });
-  view = { ...view, group: { ...view.group, rosterRevision: view.group.rosterRevision + 1 },
-    members: [...view.members, { ...member(`added-${input.member.agentId}`, input.member.agentId), ...input.member }] };
+view.members.push({ ...member("remote", "Remote Owl", "openclaw"), agentId: "owl", peerId: "remote-host" });
+const applyRosterUpdate = (_id, input) => {
+  assert.equal(input.ownerScope, view.ownerScope);
+  assert.equal(input.expectedRosterRevision, view.group.rosterRevision, "the request uses the reviewed roster revision");
+  const removed = view.members.map(item => input.removeMemberIds.includes(item.id) ? { ...item, state: "removed" } : item);
+  view = { ...view, group: { ...view.group, rosterRevision: view.group.rosterRevision + input.addMembers.length + input.removeMemberIds.length },
+    members: [...removed, ...input.addMembers.map(ref => ({ ...member(`added-${ref.agentId}`, ref.agentId), ...ref }))] };
   return view;
+};
+let finishAdd;
+let failSave = true;
+updateMembersResult = async (id, input) => {
+  if (failSave) throw new Error("ROSTER_UPDATE_FAILED");
+  await new Promise(resolve => { finishAdd = resolve; });
+  return applyRosterUpdate(id, input);
 };
 await mount(additionAgents);
 await openDetails();
 await click(detailActions("add")[0]);
-const addRows = buttons("groupChat.members.add");
-assert.equal(addRows.length, 3, "agents already in the group are not offered (Alpha), the others are listed");
-assert.deepEqual(addRows.map((node) => node.props.disabled), [false, true, false], "an unsupported backend cannot be added");
-await click(addRows[0]);
-assert.deepEqual(plain(named("add")[0].args), ["g", { expectedRosterRevision: 7, member: { backendId: "hermes", agentId: "bull" } }]);
-assert.equal(buttons("groupChat.members.adding").length, 1, "the submitted row reports progress");
-assert.ok(buttons("groupChat.members.add").every(node => node.props.disabled), "other rows cannot submit while one add is pending");
+const addDialog = () => renderer.root.findByProps({ role: "dialog" });
+const addRows = () => addDialog().findAllByType("button").filter(node => node.props.role === "checkbox");
+const addRow = name => addRows().find(node => node.props["aria-label"].startsWith(`${name} · `));
+const addTabs = () => addDialog().findAllByType("button").filter(node => node.props["data-runtime"] !== undefined);
+const chooseBackend = id => click(addTabs().find(node => node.props["data-runtime"] === id));
+const addButton = () => buttons("common.confirm")[0];
+assert.deepEqual(addTabs().map(node => node.props["data-runtime"]), ["shoggoth", "hermes", "openclaw", "other"],
+  "the backend tab stays visible when all of its agents are already members");
+assert.equal(addRows().length, 3, "the roster supplies existing agents missing from the candidate directory");
+assert.ok(addRows().every(node => node.props["aria-checked"]), "the current roster starts selected");
+assert.equal(addButton().props.disabled, true);
+await click(addRow("Beta"));
+assert.match(addRow("Beta").props["aria-label"], /groupChat\.members\.pendingRemoval$/u);
+assert.equal(addRow("Beta").props["aria-checked"], false);
+assert.equal(detailMembers().length, 4, "unchecking a member changes only the draft");
+await click(buttons("common.cancel")[0]);
+assert.equal(named("roster").length, 0, "cancelling discards the changes without a request");
+await click(detailActions("add")[0]);
+assert.equal(addRow("Beta").props["aria-checked"], true);
+await click(addRow("Beta"));
+await chooseBackend("hermes");
+await click(addRows()[0]);
+assert.equal(addRows()[0].props["aria-checked"], true);
+await chooseBackend("openclaw");
+assert.equal(addRow("Remote Owl").props["aria-checked"], true, "remote roster member appears even without a matching candidate");
+assert.equal(addRow("Owl").props["aria-checked"], false, "a local agent with the same ID is a separate candidate");
+await click(addRow("Owl"));
+assert.equal(addRow("Owl").props["aria-checked"], true);
+assert.equal(named("roster").length, 0, "additions and removals wait for confirmation");
+await chooseBackend("other");
+assert.equal(addRows()[0].props.disabled, true, "an unsupported backend cannot be added");
+await chooseBackend("hermes");
+assert.equal(addRows()[0].props["aria-checked"], true, "the pending selection survives a backend switch");
+const batch = { ownerScope: "fixture-owner", expectedRosterRevision: 7, addMembers: [{ backendId: "hermes", agentId: "bull" },
+  { backendId: "openclaw", agentId: "owl" }], removeMemberIds: ["b"] };
+await click(addButton());
+assert.deepEqual(plain(named("roster")[0].args), ["g", batch]);
+assert.equal(renderer.root.findByProps({ role: "alert" }).children.join(""), "ROSTER_UPDATE_FAILED");
+assert.equal(detailMembers().length, 4);
+assert.equal(addRows()[0].props["aria-checked"], true);
+await chooseBackend("openclaw");
+assert.equal(addRow("Owl").props["aria-checked"], true, "a failed batch keeps the selections");
+await chooseBackend("shoggoth");
+assert.equal(addRow("Beta").props["aria-checked"], false, "a failed batch keeps the pending removal");
+failSave = false;
+const addSelected = addButton().props.onClick;
+await act(async () => { addSelected(); addSelected(); });
+assert.equal(named("roster").length, 2, "rapid confirmation submits one retry");
+assert.deepEqual(plain(named("roster")[1].args), ["g", batch]);
+assert.equal(buttons("common.saving")[0].props.disabled, true, "the footer reports progress");
+assert.ok([...addRows(), ...addTabs()].every(node => node.props.disabled), "the picker locks while confirmation is pending");
 await act(async () => { finishAdd(); });
-assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 1, "adding a member keeps the dialog open");
-assert.equal(detailMembers().length, 4, "the roster updates without reopening the dialog");
-assert.deepEqual(buttons("groupChat.members.add").map(node => node.props.disabled), [true, false],
-  "the added row disappears and the next supported member is immediately available");
-assert.equal(buttons("groupChat.members.adding").length, 0, "success releases the busy state");
-failAdd = true;
-await click(buttons("groupChat.members.add").find(node => !node.props.disabled));
-assert.equal(renderer.root.findByProps({ role: "alert" }).children.join(""), "ADD_MEMBER_FAILED");
-assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 1, "a failed add also keeps the dialog open");
-assert.ok(buttons("groupChat.members.add").some(node => !node.props.disabled), "a failed add can be retried");
-failAdd = false;
-await click(buttons("groupChat.members.add").find(node => !node.props.disabled));
-await act(async () => { finishAdd(); });
-assert.deepEqual(plain(named("add").map(call => call.args[1].expectedRosterRevision)), [7, 8, 8]);
-assert.equal(detailMembers().length, 5, "two different members can be added during one dialog session");
-assert.equal(renderer.root.findAllByProps({ role: "alert" }).length, 0, "successful retry clears the error");
-assert.equal(buttons("groupChat.members.add").length, 1, "both newly added agents are excluded from the candidate list");
-assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 1);
+assert.equal(renderer.root.findAllByProps({ role: "dialog" }).length, 0, "successful confirmation closes the dialog");
+assert.deepEqual(detailMembers().map(node => node.props["data-group-details-member"]), ["a", "c", "remote", "added-bull", "added-owl"]);
+await click(detailActions("add")[0]);
+await chooseBackend("hermes");
+assert.equal(addRow("bull").props["aria-checked"], true, "reopening uses the confirmed roster");
+assert.equal(addButton().props.disabled, true);
 await act(async () => renderer.unmount());
-addMemberResult = () => view;
+updateMembersResult = () => view;
+
+view = { ...base(), members: base().members.slice(0, 2) };
+await mount(additionAgents);
+await openDetails();
+await click(detailActions("add")[0]);
+await click(addRow("Alpha"));
+assert.equal(addButton().props.disabled, true, "a draft below the minimum cannot be saved");
+await chooseBackend("hermes");
+await click(addRows()[0]);
+assert.equal(addButton().props.disabled, false, "a replacement can be saved at the two-member minimum");
+await act(async () => renderer.unmount());
+
+view = { ...base(), members: [...base().members, ...Array.from({ length: 28 }, (_, i) => member(`member-${i}`, `成员 ${i}`))] };
+await mount(additionAgents);
+await openDetails();
+await click(detailActions("add")[0]);
+await chooseBackend("hermes");
+await click(addRows()[0]);
+await chooseBackend("openclaw");
+assert.equal(addRows()[0].props.disabled, true, "one remaining slot caps selections across tabs");
+await chooseBackend("hermes");
+assert.ok(!addRows()[0].props.disabled, "a checked row can still be deselected");
+await click(addRows()[0]);
+await chooseBackend("openclaw");
+assert.ok(!addRows()[0].props.disabled, "deselecting frees the last slot");
+await act(async () => renderer.unmount());
+
 view = { ...base(), members: Array.from({ length: 32 }, (_, i) => member(`member-${i}`, `成员 ${i}`)) };
 await mount();
 await openDetails();
-assert.equal(detailActions("add").length, 0, "a full group has no add entry");
+await click(detailActions("add")[0]);
+await chooseBackend("hermes");
+assert.equal(addRow("bull").props.disabled, true, "a full roster starts with no capacity for additions");
+await chooseBackend("shoggoth");
+await click(addRow("成员 0"));
+await chooseBackend("hermes");
+assert.equal(addRow("bull").props.disabled, false, "a full roster can stage a replacement");
+await click(buttons("common.cancel")[0]);
 assert.equal(detailMembers().length, 32, "the expanded details expose the complete roster");
 await selectDetailMember("member-31");
 assert.equal(detailMembers().at(-1).props["aria-selected"], true, "the selected member is exposed as the active tab");
@@ -451,19 +524,19 @@ await click(buttons("groupChat.strategy.save")[0]);
 assert.deepEqual(plain(named("update")[0].args), ["g", { expectedMetadataRevision: 1, patch: { ownerMemberId: "c" } }]);
 await act(async () => renderer.unmount());
 
-// ---- 群详情右键移出成员：直接移除、立即刷新、失败重试、两人下限 ----
+// ---- 群详情右键移出成员：先确认、失败重试、两人下限 ----
 view = base(); messages = timeline();
 await mount(); await openDetails();
 confirmAnswer = false;
 await selectDetailMember("b");
-removeMemberResult = (_id, input) => {
-  view = { ...view, group: { ...view.group, rosterRevision: view.group.rosterRevision + 1 },
-    members: view.members.map(item => item.id === input.memberId ? { ...item, state: "removed" } : item) };
-  return view;
-};
+updateMembersResult = applyRosterUpdate;
 await click(await openMemberMenu("b", true));
-assert.deepEqual(plain(named("remove")[0].args), ["g", { expectedRosterRevision: 7, memberId: "b" }]);
-assert.equal(named("confirm").length, 0, "member removal is immediate without a confirmation dialog");
+assert.equal(named("confirm").length, 1, "the context menu opens a confirmation dialog");
+assert.equal(named("roster").length, 0, "cancelling a context-menu removal keeps the roster");
+confirmAnswer = true;
+await click(await openMemberMenu("b"));
+const removeBeta = { ownerScope: "fixture-owner", expectedRosterRevision: 7, addMembers: [], removeMemberIds: ["b"] };
+assert.deepEqual(plain(named("roster")[0].args), ["g", removeBeta]);
 assert.equal(renderer.root.findAllByProps({ role: "menu" }).length, 0, "choosing an action dismisses the context menu");
 assert.deepEqual(detailMembers().map(node => node.props["data-group-details-member"]), ["a", "c"]);
 assert.equal(detailMembers()[0].props["aria-selected"], true, "removing the selected member switches SOUL to the owner");
@@ -472,18 +545,18 @@ assert.equal((await openMemberMenu("a")).props.disabled, true, "the refreshed tw
 
 view = base(); await mount(); await openDetails();
 let finishRemoval;
-removeMemberResult = () => new Promise(resolve => { finishRemoval = resolve; });
+updateMembersResult = () => new Promise(resolve => { finishRemoval = resolve; });
 await click(await openMemberMenu("b"));
 assert.equal((await openMemberMenu("b")).props.disabled, true, "a pending removal cannot be submitted twice");
 await act(async () => { finishRemoval(view); });
 assert.equal((await openMemberMenu("b")).props.disabled, false, "the removal action unlocks after the request settles");
-removeMemberResult = () => { throw new Error("REMOVE_FAILED"); };
+updateMembersResult = () => { throw new Error("REMOVE_FAILED"); };
 await click(await openMemberMenu("b"));
 assert.equal(named("toast").at(-1).args[0], "REMOVE_FAILED");
 assert.equal(detailMembers().length, 3, "a failed removal preserves the member");
-removeMemberResult = () => view;
+updateMembersResult = () => view;
 await click(await openMemberMenu("b"));
-assert.equal(named("remove").length, 3, "a failed removal can be retried explicitly");
+assert.equal(named("roster").length, 3, "a failed removal can be retried explicitly");
 
 for (const guarded of [{ ...base(), members: [member("a", "Alpha"), member("b", "Beta")] },
   { ...base(), members: [member("a", "Alpha")] },
@@ -493,7 +566,7 @@ for (const guarded of [{ ...base(), members: [member("a", "Alpha"), member("b", 
   const action = await openMemberMenu("a");
   assert.equal(action.props.disabled, true, "two-member, legacy one-member and inactive-group removal is disabled");
   await click(action);
-  assert.equal(named("remove").length, 0);
+  assert.equal(named("roster").length, 0);
 }
 
 // ---- 成员资料弹窗的原移出入口 ----
@@ -506,9 +579,10 @@ assert.ok(authorEntries.length > 0 && authorEntries.every(node => node.type === 
 await mountMemberCard("b");
 confirmAnswer = false;
 await click(buttons("groupChat.members.remove")[0]);
-assert.deepEqual(plain(named("remove")[0].args), ["g", { expectedRosterRevision: 7, memberId: "b" }]);
-assert.equal(named("confirm").length, 0, "the member card also removes without confirmation");
+assert.equal(named("roster").length, 0, "the member card also waits for confirmation");
 confirmAnswer = true;
+await click(buttons("groupChat.members.remove")[0]);
+assert.deepEqual(plain(named("roster")[0].args), ["g", removeBeta]);
 view = { ...base(), members: [member("a", "Alpha"), member("b", "Beta")] };
 await mount();
 await mountMemberCard("a");
@@ -689,11 +763,12 @@ assert.equal(presentReply(messages[0], "回复 #11\n正常编号不同"), "回�
 assert.equal(presentReply(messages[0], "回复 #1 是正文中的解释"), "回复 #1 是正文中的解释");
 await act(async () => renderer.unmount());
 
-// ---- 群主、状态条与单独停下：发言中 / 在后台干活 / 等审批，每位都能单独停下；结果类型不在作者栏显示 ----
+// ---- 发言中、后台工作和待审批共用输入框的停止按钮 ----
 view = { ...base(), activeTurns: [
   { opportunityId: "speak", memberId: "a", startedAt: 1, floor: true, released: false, releasedReason: null },
   { opportunityId: "work", memberId: "b", startedAt: 1, floor: false, released: true, releasedReason: "working" },
   { opportunityId: "approve", memberId: "c", startedAt: 1, floor: false, released: true, releasedReason: "approval" }],
+  queuedMemberIds: ["a"],
   pendingInteractions: [{ opportunityId: "approve", memberId: "c", status: "pending", request: { requestId: "q" }, context: null, occurredAt: 1 }] };
 messages = [message(1, { kind: "user" }, "大家看看"),
   message(2, { kind: "member", memberId: "b" }, "后台做完了", { origin: { opportunityId: "earlier", runId: "r", discussionId: "d", late: true } })];
@@ -703,26 +778,29 @@ assert.equal(renderer.root.find(node => node.props.className === "headerMembers"
 const status = renderer.root.findAll(node => node.props["data-group-status-member"]);
 assert.equal(status.length, 0, "composer no longer contains member execution labels");
 assert.equal(renderer.root.findAll(node => node.props["data-group-status"]).length, 0);
-assert.equal(buttons("groupChat.status.stop").length, 3);
-const betaStop = renderer.root.find(node => node.type === "button" && node.props["data-group-stop-member"] === "b");
-assert.equal(betaStop.parent.props.className, "chat-group__footer", "Stop lives below the current agent bubble");
-await click(betaStop);
-assert.deepEqual(plain(named("stopMember")[0].args), ["g", "b"], "stopping one member leaves the others running");
-assert.equal(named("stop").length, 0);
+assert.equal(renderer.root.findAllByType("button").filter(node => node.props["data-group-stop-member"] !== undefined).length, 0);
 assert.equal(byClass("muted").filter(node => node.children.includes("groupChat.turn.working")).length, 0,
   "background work uses the same quiet loading bubble as a speaking member");
 assert.deepEqual(byClass("resultTag"), [], "reply type labels are hidden from the message author footer");
 assert.equal(messages[1].origin.late, true, "hiding the label preserves the saved reply identity");
 assert.equal(buttons("groupChat.stop").length, 1, "a running discussion keeps its stop action");
-assert.equal(buttons("groupChat.send").length, 0, "send and stop actions are mutually exclusive");
+assert.ok(renderer.root.findByProps({ "data-chat-composer": true }).findAllByType("button").includes(buttons("groupChat.stop")[0]));
+assert.equal(buttons("groupChat.send").length, 0, "an empty running composer shows only Stop as its primary action");
 await typeInput("继续补充方向");
-assert.equal(buttons("groupChat.send").length, 1, "new input exposes Send during a running discussion");
-assert.equal(buttons("groupChat.send")[0].props.disabled, false, "a running agent does not block a new message");
+assert.equal(buttons("groupChat.stop").length, 1, "the group stop stays available while composing");
+assert.equal(buttons("groupChat.send").length, 0, "a draft keeps Send hidden during a running discussion");
 await act(async () => input().props.onKeyDown({
   key: "Enter", shiftKey: false, nativeEvent: { isComposing: false }, preventDefault() {},
 }, selection()));
-assert.equal(named("send").length, 1, "Enter and the visible Send button use the same send path");
+assert.equal(named("send").length, 1, "Enter submits the draft while only Stop is visible");
 assert.equal(named("stop").length, 0, "sending with Enter does not stop the discussion");
+view = base();
+await click(buttons("groupChat.stop")[0]);
+assert.deepEqual(named("stop").map(call => plain(call.args)), [["g"]], "one click stops the selected group");
+assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] !== undefined).length, 0);
+assert.equal(renderer.root.findAll(node => node.props["data-group-interaction"] !== undefined).length, 0);
+assert.equal(buttons("groupChat.stop").length, 0);
+assert.equal(buttons("groupChat.send").length, 1);
 await act(async () => renderer.unmount());
 
 // Quiet recovery has no status bubble or orphan author row; the next member still speaks.
@@ -734,7 +812,7 @@ assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] ==
   "a hidden status does not leave an avatar/name/Stop-only placeholder");
 assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.turn.idle"));
 assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "next").length, 1);
-assert.equal(buttons("groupChat.status.stop").length, 1, "the next member's genuine loading bubble retains Stop");
+assert.equal(buttons("groupChat.stop").length, 1, "quiet recovery still allows a whole-group stop");
 assert.ok(!JSON.stringify(renderer.toJSON()).includes('groupChat.queued'), "queued speaker lists are hidden from the timeline");
 assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.status.working"));
 assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.status.speaking"));
@@ -745,7 +823,7 @@ view = { ...base(), activeTurns: [{ opportunityId: "start-receipt", memberId: "a
 messages = [message(1, { kind: "user" }, "等待原启动结果")]; await mount();
 assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "start-receipt").length, 0);
 assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.start"));
-assert.equal(buttons("groupChat.status.stop").length, 0, "there is no synthetic empty row just to host an action");
+assert.equal(buttons("groupChat.stop").length, 1, "uncertain startup can still be cancelled from the composer");
 assert.equal(named("reconcile").length, 0, "automatic reconciliation remains a service concern");
 await act(async () => renderer.unmount());
 
@@ -756,14 +834,13 @@ assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] ==
 assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.execution"));
 await act(async () => renderer.unmount());
 
-// Already published real text stays visible and keeps its current turn's Stop after recovery UI is hidden.
+// Already published text stays visible when recovery UI is hidden.
 view.activeTurns[0].released = true; view.activeTurns[0].releasedReason = "idle";
 messages.push(message(2, { kind: "member", memberId: "a" }, "已经发出的真实内容", { origin: { opportunityId: "unavailable", partial: true } }));
 await mount();
 assert.ok(JSON.stringify(renderer.toJSON()).includes("已经发出的真实内容"));
 assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "unavailable").length, 0);
-assert.equal(buttons("groupChat.status.stop").length, 1);
-assert.equal(buttons("groupChat.status.stop")[0].parent.props["data-group-message-footer"], messages[1].id);
+assert.equal(buttons("groupChat.stop").length, 1);
 await act(async () => renderer.unmount());
 
 // Whole-group stopping also has no per-member confirmation bubble or author-only placeholder.
@@ -772,7 +849,6 @@ view = { ...base(), activeTurns: [{ opportunityId: "stopping", memberId: "a", st
 messages = [message(1, { kind: "user" }, "停止")]; await mount();
 assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.status.speaking"));
 assert.equal(buttons("groupChat.recovery.reconcile").length, 0, "stop confirmation is automatic");
-assert.equal(buttons("groupChat.status.stop").length, 0);
 assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "stopping").length, 0);
 assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.cancel"));
 assert.equal(byClass("muted").filter(node => node.children.includes("groupChat.activity.phase.stopping")).length, 0,
@@ -787,37 +863,7 @@ assert.equal(renderer.root.findByProps({ "data-seq": 2 }).findAll(node => String
   "whole-group stopping freezes the existing visible response instead of leaving its cursor active");
 await act(async () => renderer.unmount());
 
-// The click hides speech immediately; a slow HTTP response never opens a confirmation bubble or duplicate request.
-view = { ...base(), activeTurns: [{ opportunityId: "stop-click", memberId: "a", startedAt: 1, floor: true, released: false }] };
-messages = [message(1, { kind: "user" }, "停下这一位")];
-const savedStopMember = api.stopGroupChatMember;
-let acceptMemberStop;
-api.stopGroupChatMember = record("stopMember", () => new Promise(resolve => { acceptMemberStop = resolve; }));
-await mount();
-const immediateStop = renderer.root.find(node => node.type === "button" && node.props["data-group-stop-turn"] === "stop-click");
-const stopClick = immediateStop.props.onClick;
-await act(async () => { stopClick(); stopClick(); });
-assert.equal(named("stopMember").length, 1, "repeated clicks do not duplicate a pending member stop");
-assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "stop-click").length, 0);
-assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.recovery.cancel"));
-assert.ok(!JSON.stringify(renderer.toJSON()).includes("groupChat.stopState.confirming"));
-view = { ...view, round: null, activeTurns: [{ ...view.activeTurns[0], floor: false, released: true, releasedReason: "stopped", stopping: true }] };
-await act(async () => { acceptMemberStop(view); });
-assert.equal(buttons("groupChat.send").length, 1);
-api.stopGroupChatMember = savedStopMember;
-await act(async () => renderer.unmount());
-
-view = { ...base(), activeTurns: [{ opportunityId: "stop-rejected", memberId: "a", startedAt: 1, floor: true, released: false }] };
-api.stopGroupChatMember = record("stopMember", () => Promise.reject(new Error("stop request not accepted")));
-await mount();
-await click(renderer.root.find(node => node.type === "button" && node.props["data-group-stop-turn"] === "stop-rejected"));
-assert.equal(renderer.root.findAll(node => node.props["data-group-execution"] === "stop-rejected").length, 1,
-  "a rejected stop restores the original speech instead of pretending it was accepted");
-assert.equal(renderer.root.findAll(node => node.type === "button" && node.props["data-group-stop-turn"] === "stop-rejected").length, 1);
-api.stopGroupChatMember = savedStopMember;
-await act(async () => renderer.unmount());
-
-// A member's stopped speech has no confirmation bubble or composer hint, while its original run is still tracked.
+// Existing member-stop records can remain under cleanup without a confirmation bubble or composer hint.
 view = { ...base(), activeTurns: [
   { opportunityId: "old", memberId: "a", startedAt: 1, floor: false, released: true, releasedReason: "stopped", stopping: true,
     recovery: { type: "execution", cancelRequested: true, since: 1, reason: "GROUP_EXTERNAL_RUN_LOST" } },
@@ -837,22 +883,18 @@ assert.equal(buttons("groupChat.send").length, 1, "background cleanup does not k
 assert.equal(buttons("groupChat.stop").length, 0);
 await act(async () => renderer.unmount());
 
-// Stop follows Copy and Quote on the last visible message of the bound active turn.
+// Message footers keep Copy and Quote, including the newest bubble in a live turn.
 view = { ...base(), activeTurns: [{ opportunityId: "live", memberId: "a", startedAt: 1, floor: true,
   released: false, individualMessages: true }] };
 messages = [message(1, { kind: "member", memberId: "a" }, "旧回合", { origin: { opportunityId: "old" } }),
   message(2, { kind: "member", memberId: "a" }, "当前第一段", { origin: { opportunityId: "live", partial: true } }),
   message(3, { kind: "member", memberId: "a" }, "当前第二段", { origin: { opportunityId: "live", partial: true, streaming: true } })];
 await mount();
-const liveStops = renderer.root.findAll(node => node.type === "button" && node.props["data-group-stop-turn"] === "live");
-assert.equal(liveStops.length, 1);
-assert.equal(liveStops[0].props.className, "chat-copybtn", "Stop shares the exact Copy dimensions and hover/focus rules");
-assert.equal(liveStops[0].children.some(child => typeof child === "string"), false, "Stop is icon-only");
-assert.equal(liveStops[0].parent.props["data-group-message-footer"], messages[2].id);
-assert.deepEqual(liveStops[0].parent.findAllByType("button").map(node => node.props["aria-label"]),
-  ["chat.copyAsMarkdown", "chat.quote", "groupChat.status.stop Alpha"]);
-assert.equal(renderer.root.findByProps({ "data-chat-composer": true }).findAll(node => node.props["data-group-stop-member"]).length, 0);
-await click(liveStops[0]); assert.deepEqual(plain(named("stopMember")[0].args), ["g", "a"]);
+for (const message of messages) {
+  const footer = renderer.root.findByProps({ "data-group-message-footer": message.id });
+  assert.deepEqual(footer.findAllByType("button").map(node => node.props["aria-label"]), ["chat.copyAsMarkdown", "chat.quote"]);
+}
+assert.equal(buttons("groupChat.stop").length, 1);
 await act(async () => renderer.unmount());
 
 // Published results precede older unfinished turns. A lagging view must not
@@ -976,4 +1018,4 @@ await act(async () => renderer.unmount());
   await act(async () => renderer.unmount());
 }
 
-console.log("PASS group chat panel UI: removable mention prefill, retry, quote, compact and expanded roster, member tabs, owner settings, attachments, automatic recovery, immutable pages, role versions, bubble Stop actions, published result ordering and exact turn settlement");
+console.log("PASS group chat panel UI: removable mention prefill, retry, quote, compact and expanded roster, member tabs, owner settings, attachments, automatic recovery, immutable pages, role versions, composer group Stop, published result ordering and exact turn settlement");

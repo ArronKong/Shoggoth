@@ -13,6 +13,7 @@ import TurnTimeline from '../components/TurnTimeline/TurnTimeline';
 import { IconTrajectory } from '../components/TurnTimeline/trajectoryIcons';
 import { useConfirm, useToast } from '../components/ui';
 import { usePageCache } from '../lib/usePageCache';
+import { useAgentModelCatalog } from '../lib/useAgentModelCatalog';
 import { useNavigationGuard } from '../lib/navigation-guard';
 import { toSanitizedMarkdownHtml } from '../lib/markdown';
 import { translateGatewayError } from '../lib/gatewayErrors';
@@ -22,7 +23,7 @@ import { useSessionRuntimeModels } from '../lib/useSessionRuntimeModels';
 import { formatTurnElapsed, stepsFromParts, turnElapsedMs } from '../lib/turnTimeline';
 import { getInspiration, getInspirationAgents, getIdleInspirationAgents, getInspirationExecutions, getInspirationModels, updateInspiration,
   startInspiration, respondInspiration, cancelInspiration, revealPath, revealManagedAgentFile } from '../api/client';
-import type { InspirationAgent, InspirationAttachment, InspirationExecution, InspirationIdea, InspirationModelSelection } from '../types';
+import type { InspirationAgent, InspirationAttachment, InspirationExecution, InspirationIdea, InspirationModels, InspirationModelSelection } from '../types';
 import ChatPromptCard, { type ChatPromptResponse } from './ChatPromptCard';
 import ChatModelMenu from './ChatModelMenu';
 import { IconModel, IconSend, IconStop } from './chatIcons';
@@ -31,7 +32,7 @@ import InspirationActionIcon from './InspirationActionIcon';
 import InspirationMediaEditor from './InspirationMedia';
 import InspirationContent from './InspirationContent';
 import { draftBytes as bytes } from './inspiration-draft';
-import { defaultInspirationAgent, inspirationStartFields } from './inspiration-execution';
+import { defaultInspirationAgent, defaultInspirationModel, inspirationStartFields } from './inspiration-execution';
 import { clearQueuedInspirationStep, queueInspirationStep, useQueuedInspirationStep } from './inspiration-next-step';
 import { inspirationNoteContent } from './inspiration-note-text';
 import { useInspirationActivity } from './use-inspiration-activity';
@@ -168,26 +169,33 @@ function SeedModelPill({ agent, selection, onSelect, disabled }: {
   onSelect: (selection: InspirationModelSelection | null) => void; disabled: boolean;
 }) {
   const { t } = useTranslation();
-  const { data, loading, error, refresh } = usePageCache(`inspiration-models:${keyOf(agent)}`,
-    () => getInspirationModels(agent.backendId, agent.id), { enabled: agent.capabilities.execute, staleTime: 15_000 });
-  const defaultLabel = t('inspiration.thread.defaultModel');
-  const defaultModel = data?.defaultModel ?? data?.models.find(model => 'bindingId' in model && model.isDefault
-    && !model.modelProviderRef && model.bindingId === data.defaultBindingId)?.id;
-  const defaultChoice = data?.models.find(model => 'bindingId' in model
-    ? model.id === defaultModel && model.bindingId === data.defaultBindingId && !model.modelProviderRef
-    : model.id === defaultModel || (model.provider && `${model.provider}/${model.id}` === defaultModel));
+  const agentCatalog = useAgentModelCatalog(agent.backendId, agent.id,
+    { enabled: agent.backendId === 'openclaw' && agent.capabilities.execute });
+  const inspirationCatalog = usePageCache(`inspiration-models:${keyOf(agent)}`,
+    () => getInspirationModels(agent.backendId, agent.id),
+    { enabled: agent.backendId !== 'openclaw' && agent.capabilities.execute, staleTime: 15_000 });
+  const { loading, error, refresh } = agent.backendId === 'openclaw' ? agentCatalog : inspirationCatalog;
+  const data: InspirationModels | undefined = agent.backendId === 'openclaw' ? agentCatalog.data : inspirationCatalog.data;
+  const defaultChoice = defaultInspirationModel(data);
+  const active = selection ? { ...selection, id: selection.model } : defaultChoice;
   return <ChatModelMenu portalInDialog
     models={data?.models.map(model => ({ ...model, provider: model.provider ?? undefined })) ?? []}
-    activeModel={selection?.model ?? ''}
-    activeBindingId={selection && 'bindingId' in selection ? selection.bindingId : undefined}
-    activeModelProviderRef={selection && 'bindingId' in selection ? selection.modelProviderRef : undefined}
-    activeProvider={selection && 'provider' in selection ? selection.provider ?? undefined : undefined}
-    triggerLabel={selection ? undefined : defaultChoice?.name || defaultModel || (loading ? t('common.loading') : defaultLabel)}
-    emptyLabel={defaultLabel} runtimeGroups={data?.runtimes}
-    onSelect={(model, provider, bindingId, modelProviderRef) => onSelect(!model ? null : bindingId
-      ? { model, bindingId, ...(modelProviderRef ? { modelProviderRef } : {}) } : { model, provider: provider ?? null })}
+    activeModel={active?.id ?? ''}
+    activeBindingId={active && 'bindingId' in active ? active.bindingId : undefined}
+    activeModelProviderRef={active && 'modelProviderRef' in active ? active.modelProviderRef : undefined}
+    activeProvider={active && 'provider' in active ? active.provider ?? undefined : undefined}
+    triggerLabel={active ? undefined : data?.defaultModel || (loading ? t('common.loading') : undefined)}
+    runtimeGroups={data?.runtimes}
+    onSelect={(model, provider, bindingId, modelProviderRef) => {
+      const isDefault = defaultChoice?.id === model && ('bindingId' in defaultChoice
+        ? defaultChoice.bindingId === bindingId && defaultChoice.modelProviderRef === modelProviderRef
+        : !bindingId && (defaultChoice.provider ?? undefined) === provider);
+      // Picking the default row restores inheritance instead of saving an override.
+      onSelect(isDefault ? null : bindingId
+        ? { model, bindingId, ...(modelProviderRef ? { modelProviderRef } : {}) } : { model, provider: provider ?? null });
+    }}
     loading={loading && agent.capabilities.execute} loadError={Boolean(error)}
-    onRefresh={() => { void refresh(); }} disabled={disabled || !agent.capabilities.execute} />;
+    onRefresh={() => { void refresh().catch(() => {}); }} disabled={disabled || !agent.capabilities.execute} />;
 }
 
 // Single choice, on the auto-nurture popover's "add an agent" page.
@@ -467,10 +475,11 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
   const canAdopt = !archived && !running && !queued;
   const displayStatus = idea ? displayStatusOf(idea.status, latest) : 'saved';
   const tone = toneOf(displayStatus, archived);
-  // Agents working on another idea; the one running this idea is not "busy" here.
-  const busyKeys = new Set(idle.data ? candidates.filter(agent => agent.capabilities.execute
-    && !idle.data!.agents.some(value => keyOf(value) === keyOf(agent))
-    && !(running && latest && ownerOf(latest) === keyOf(agent))).map(keyOf) : []);
+  // Only confirmed work is busy. Missing idle evidence can also mean a failed
+  // or unsupported status query; the agent running this idea is excluded here.
+  const busyKeys = new Set((idle.error ? [] : idle.data?.busyAgents || [])
+    .filter(agent => agent.capabilities.execute
+      && !(running && latest && ownerOf(latest) === keyOf(agent))).map(keyOf));
   const fallbackAgent = defaultInspirationAgent(candidates, idea);
   const chosen = candidates.find(value => keyOf(value) === agentKey) || (!agentKey ? fallbackAgent : undefined);
   const chosenKey = chosen ? keyOf(chosen) : '';

@@ -19,11 +19,19 @@ function conversationContextBudget(contextWindow, source = "runtime") {
 
 // Local planning estimate only. CJK and other non-ASCII text must not be
 // counted as English characters / 4. Native observations take precedence.
+// A non-ASCII code point counts as 1.5 tokens (2 until 2026-11-10): current
+// tokenizers produce about one token per Chinese character, so 2 compacted
+// Chinese conversations at roughly half of the window they could use.
+const TOKEN_UNITS = 4, WIDE_CODE_POINT_UNITS = 6;
+const codePointUnits = point => point.codePointAt(0) < 128 ? 1 : WIDE_CODE_POINT_UNITS;
 function estimateContextTokens(text) {
   let units = 0;
-  for (const point of text) units += point.codePointAt(0) < 128 ? 1 : 8;
-  return Math.ceil(units / 4);
+  for (const point of text) units += codePointUnits(point);
+  return Math.ceil(units / TOKEN_UNITS);
 }
+// The same estimate for one code point, for a caller that fills a budget
+// character by character.
+function estimateCodePointTokens(point) { return codePointUnits(point) / TOKEN_UNITS; }
 
 function documentedModelWindow(runtime, model) {
   // Verified 2026-09-24: https://developers.openai.com/api/docs/models/compare
@@ -38,4 +46,4 @@ function documentedModelWindow(runtime, model) {
 }
 
 module.exports = { UNKNOWN_WINDOW_BUDGET, RETAINED_TAIL_TOKENS,
-  validWindow, conversationContextBudget, estimateContextTokens, documentedModelWindow };
+  validWindow, conversationContextBudget, estimateContextTokens, estimateCodePointTokens, documentedModelWindow };

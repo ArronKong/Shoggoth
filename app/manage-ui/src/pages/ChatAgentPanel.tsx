@@ -1,6 +1,7 @@
-import { lazy, Suspense, useLayoutEffect, useRef, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { getAgent, getAgentFile, listCronJobs } from "../api/client";
+import type { UnifiedCronJob } from "../types";
 import AgentAvatar from "../components/AgentAvatar";
 import AgentSoulDocument from "../components/AgentSoulDocument";
 import BackendTabIcon from "../components/BackendTabIcon";
@@ -9,6 +10,7 @@ import ChatAvatarPicker from "./ChatAvatarPicker";
 import styles from "./ChatAgentPanel.module.css";
 
 const AgentInspirationPanel = lazy(() => import("./ChatAgentNotes"));
+const AgentCronDialog = lazy(() => import("./CronPage").then(module => ({ default: module.CronJobDialog })));
 
 export type ChatAgentPanelKind = "profile" | "avatar" | "cron" | "inspiration" | "artifacts";
 
@@ -61,6 +63,12 @@ function Profile({ backendId, backendName, agentId, name, avatarVersion, editing
 
 function Cron({ backendId, agentId }: { backendId: string; agentId: string }) {
   const { t } = useTranslation();
+  const [selectedJob, setSelectedJob] = useState<UnifiedCronJob | null>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const closeDialog = useCallback(() => {
+    setSelectedJob(null);
+    trigger.current?.focus({ preventScroll: true });
+  }, []);
   const jobs = usePageCache(`chat-agent-cron:${JSON.stringify([backendId, agentId])}`, async () =>
     (await listCronJobs({ backend: backendId, agentIds: [agentId], sortBy: "nextRunAt", sortDir: "asc" }))
       .filter(job => job.backendId === backendId && job.agentId === agentId));
@@ -73,20 +81,25 @@ function Cron({ backendId, agentId }: { backendId: string; agentId: string }) {
     {jobs.error && <p className={styles.note} role="status">{t("chat.panelCronUnavailable")}</p>}
     {!jobs.loading && !jobs.error && jobs.data?.length === 0 && <p className={styles.note}>{t("chat.panelCronEmpty")}</p>}
     <div className={styles.jobs}>
-      {jobs.data?.map(job => <a key={job.id} className={styles.job}
-        href={`#/cron?${new URLSearchParams({ backend: job.backendId, job: job.id, run: "latest" })}`}>
-        <div className={styles.jobHead}>
+      {jobs.data?.map(job => <button key={job.id} type="button" className={styles.job}
+        data-cron-id={job.id} aria-haspopup="dialog"
+        onClick={event => { trigger.current = event.currentTarget; setSelectedJob(job); }}>
+        <span className={styles.jobHead}>
           <span className={styles.jobName}>{job.name || job.id}</span>
           <span className={styles.state}>{t(job.enabled ? "cron.enabled" : "cron.disabled")}</span>
-        </div>
-        {(job.description || job.prompt) && <p className={styles.prompt}>{job.description || job.prompt}</p>}
-        <div className={styles.schedule}>
+        </span>
+        {(job.description || job.prompt) && <span className={styles.prompt}>{job.description || job.prompt}</span>}
+        <span className={styles.schedule}>
           {job.scheduleDisplay && <span>{job.scheduleDisplay}</span>}
           {job.nextRunAt != null && <span>{t("chat.panelNextRun", { time: when(job.nextRunAt) })}</span>}
           {job.lastRunAt != null && <span>{t("chat.panelLastRun", { time: when(job.lastRunAt) })}</span>}
-        </div>
-      </a>)}
+        </span>
+      </button>)}
     </div>
+    {selectedJob && <Suspense fallback={<p className={styles.note} role="status">{t("common.loading")}</p>}>
+      <AgentCronDialog key={JSON.stringify([selectedJob.backendId, selectedJob.id])} job={selectedJob}
+        onClose={closeDialog} onChange={jobs.refresh} />
+    </Suspense>}
   </>;
 }
 

@@ -2,6 +2,8 @@
 const WEB_TOOL_NAMES = new Set(["web_search", "web_fetch"]);
 const WEB_PUBLIC_MESSAGES = Object.freeze({
   WEB_INVALID: "联网工具参数无效", WEB_URL_BLOCKED: "只允许访问公开 HTTP/HTTPS 网页",
+  WEB_REDIRECT_BLOCKED: "联网服务接口发生重定向，已停止请求以避免转发凭据",
+  WEB_REDIRECT_FAILED: "网页重定向无效或次数过多",
   WEB_UNAVAILABLE: "联网服务暂不可用，请稍后重试", WEB_RATE_LIMITED: "联网服务限流，请稍后重试",
   WEB_BUSY: "联网请求过多，请稍后重试", WEB_TIMEOUT: "联网请求超时", WEB_CANCELED: "联网请求已取消", WEB_TOO_LARGE: "网页响应超过容量限制",
   WEB_CONTENT_UNSUPPORTED: "此内容需要浏览器或专用文件工具读取", WEB_RESPONSE_INVALID: "联网服务返回了无效结果",

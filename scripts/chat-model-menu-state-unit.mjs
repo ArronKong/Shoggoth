@@ -39,6 +39,23 @@ const triggerLabel = renderer => trigger(renderer).findByProps({ className: "cha
 const contents = renderer => JSON.stringify(renderer.toJSON());
 const choice = { id: "native-default", name: "Native Default", provider: "native" };
 
+test("unavailable configured models stay visible and selected but cannot be chosen", () => {
+  let renderer;
+  act(() => { renderer = create(React.createElement(Menu, {
+    models: [{ ...choice, available: false }, { ...choice, id: "ready", available: true }],
+    activeModel: choice.id, activeProvider: choice.provider, onSelect() {},
+  })); });
+  try {
+    act(() => trigger(renderer).props.onClick());
+    const options = renderer.root.findAllByProps({ role: "option" });
+    assert.equal(options.length, 2);
+    assert.equal(options[0].props["aria-selected"], true);
+    assert.equal(options[0].props.disabled, true);
+    assert.equal(options[1].props.disabled, false);
+    assert.equal(triggerLabel(renderer), choice.name);
+  } finally { act(() => renderer.unmount()); }
+});
+
 test("model discovery distinguishes loading, failure with retry, and an empty catalog", () => {
   let refreshes = 0;
   let renderer;

@@ -765,44 +765,165 @@ header.page-head {
 }
 
 .management-page.cron-page .cron-table {
-  min-width: 1040px;
+  --cron-secondary: color-mix(in srgb, var(--ui-text-1) 66%, var(--ui-surface-1));
+  width: 100%;
+  min-width: 930px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
   color: var(--ui-text-1);
   font-size: 14px;
   line-height: 20px;
+}
+
+.cron-table .cron-col-backend { width: 132px; }
+.cron-table .cron-col-schedule { width: 14%; }
+.cron-table .cron-col-result { width: 24%; }
+.cron-table .cron-col-state { width: 104px; }
+.cron-table .cron-col-actions { width: 216px; }
+.management-page.cron-page .cron-table:lang(en) { min-width: 1000px; }
+.cron-table:lang(en) .cron-col-state { width: 124px; }
+.cron-table:lang(en) .cron-col-actions { width: 248px; }
+
+.management-page.cron-page .cron-table :is(th, td) {
+  padding-inline: 14px;
+  text-align: start;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--ui-hairline);
 }
 
 .management-page.cron-page .cron-table th {
-  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-block: 11px;
+  background: var(--ui-surface-1);
+  color: var(--cron-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.management-page.cron-page .cron-table td {
+  height: 60px;
+  padding-block: 8px;
+}
+
+.management-page.cron-page .cron-table tbody tr:last-child td { border-bottom: 0; }
+.management-page.cron-page .cron-table tbody tr:hover { background: transparent; }
+.management-page.cron-page .cron-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--ui-surface-2) 55%, var(--ui-surface-1));
+}
+
+.cron-table :is(.job-name, .job-prompt, .job-error, .cron-cell-text) {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cron-table .cron-cell-text { display: block; }
+.cron-table .job-name { font-weight: 600; }
+.cron-table :is(.job-prompt, .job-error) {
+  margin-top: 3px;
+  color: var(--cron-secondary);
   font-size: 12px;
   line-height: 16px;
 }
 
-.management-page.cron-page .cron-backend-icon {
-  --backend-tab-icon-size: 20px;
-  display: inline-flex;
-  vertical-align: middle;
-}
-
-.management-page.cron-page .cron-table .actions button {
-  border-radius: 999px;
-}
-
-.management-page.cron-page .job-name {
-  color: var(--ui-text-1);
-  font-size: 14px;
-  line-height: 20px;
+.cron-table .cron-backend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--cron-secondary);
+  font-size: 12px;
   font-weight: 500;
 }
 
-.management-page.cron-page .job-prompt {
-  display: -webkit-box;
-  overflow: hidden;
-  margin-top: 4px;
-  color: color-mix(in srgb, var(--ui-text-1) 68%, var(--ui-surface-1));
+.cron-table .cron-backend-icon {
+  --backend-tab-icon-size: 16px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--ui-surface-2);
+  color: var(--ui-text-1);
+}
+
+.cron-table .cron-schedule {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cron-table .cron-result {
+  --result-color: var(--cron-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--result-color) 9%, var(--ui-surface-1));
+  color: var(--result-color);
   font-size: 12px;
+  font-weight: 500;
   line-height: 16px;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+}
+
+.cron-result[data-tone="success"] { --result-color: var(--ui-success); }
+.cron-result[data-tone="error"] { --result-color: var(--ui-error); }
+.cron-result[data-tone="skipped"] { --result-color: var(--ui-warning); }
+
+.cron-table .cron-schedule-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--cron-secondary);
+  font-size: 13px;
+}
+
+.cron-result::before,
+.cron-schedule-state::before {
+  content: "";
+  flex: 0 0 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.cron-schedule-state[data-state="enabled"] { color: var(--ui-text-1); }
+.cron-schedule-state[data-state="enabled"]::before { background: var(--ui-success); }
+.cron-schedule-state[data-state="disabled"]::before { border: 1px solid currentColor; background: transparent; }
+.cron-schedule-state[data-state="attention"] { color: var(--ui-warning); }
+
+.cron-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.cron-table .cron-row-actions .btn-sm {
+  min-width: 44px;
+  padding-inline: 9px;
+  border-radius: 999px;
+  font-weight: 500;
+}
+
+.cron-table .cron-row-actions .cron-quiet-action {
+  background: transparent;
+  color: var(--cron-secondary);
+}
+
+.cron-table .cron-row-actions .cron-quiet-action:hover:not(:disabled) {
+  background: var(--ui-surface-2);
+  color: var(--ui-text-1);
+}
+
+.cron-row-actions button:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
 }
 
 .management-page.cron-page .cal {

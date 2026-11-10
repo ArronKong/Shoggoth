@@ -513,6 +513,9 @@ test("真实 Service 空 workspace Cron 使用托管目录并通过权威 DTO �
     assert.equal(host.lastThreadStartParams.cwd, managedWorkspace);
     assert.equal(host.lastTurnStartParams.cwd, managedWorkspace);
     assert.equal(host.turnStartCalls, 1);
+    const active = { profileId: null, sessionKey: null, status: null, cursor: null, limit: 25,
+      scope: { backendId: "shoggoth", activeOnly: true } };
+    assert.deepEqual((await ipc(paths, "run.list", active)).runs.map(row => row.id), [run.id]);
 
     host.complete("managed workspace completed");
     await waitFor(() => service.workDispatcher.getRun(run.id)?.status === "completed");
@@ -522,8 +525,21 @@ test("真实 Service 空 workspace Cron 使用托管目录并通过权威 DTO �
     assert.equal(page.runs.length, 1);
     assert.equal(page.runs[0].run.status, "completed");
     assert.equal(page.runs[0].run.resultSummary, "managed workspace completed");
-    assert.equal(page.runs[0].run.codexThreadId, "service-domain-thread");
-    assert.equal(page.runs[0].run.codexTurnId, "service-domain-turn");
+    assert.equal(page.runs[0].run.runtimeSessionRef?.sessionId, "service-domain-thread");
+    assert.equal(page.runs[0].run.runtimeTurnRef?.turnId, "service-domain-turn");
+
+    const terminal = page.runs[0].run;
+    assert.deepEqual((await ipc(paths, "run.list", active)).runs, []);
+    const scoped = { profileId: null, sessionKey: null, status: null, cursor: null, limit: 1,
+      scope: { backendId: "shoggoth", source: "cron", sinceMs: terminal.finishedAt } };
+    const recent = await ipc(paths, "run.list", scoped);
+    assert.deepEqual(recent.runs.map(row => row.id), [run.id]);
+    for (const patch of [{ sinceMs: terminal.finishedAt + 1 }, { source: "chat" }, { backendId: "another" }]) {
+      const other = await ipc(paths, "run.list", { ...scoped, scope: { ...scoped.scope, ...patch } });
+      assert.deepEqual(other.runs, []);
+    }
+    await assert.rejects(ipc(paths, "run.list", { ...scoped, profileId: DEFAULT_AGENT_PROFILE_ID }), { code: "INVALID_PARAMS" });
+    await assert.rejects(ipc(paths, "run.list", { ...scoped, scope: { ...scoped.scope, sinceMs: -1 } }), { code: "INVALID_PARAMS" });
   } finally {
     await service.stop({ notify: false }).catch(() => {});
     fs.rmSync(root, { recursive: true, force: true });

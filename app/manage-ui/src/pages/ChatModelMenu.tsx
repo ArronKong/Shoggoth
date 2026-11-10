@@ -18,6 +18,7 @@ export interface ModelMenuChoice {
   runtime?: string;
   runtimeName?: string;
   disabled?: boolean;
+  available?: boolean;
   reasoning?: boolean;
   pricing?: { input?: string; output?: string; cache?: string | null; free?: boolean };
 }
@@ -37,6 +38,7 @@ export default function ChatModelMenu({
   activeProvider,
   activeBindingId,
   activeModelProviderRef,
+  providerNames,
   runtimeGroups,
   onSelect,
   disabled,
@@ -55,6 +57,8 @@ export default function ChatModelMenu({
   activeModel: string;
   activeProvider?: string;
   activeBindingId?: string;
+  /** Display names only; Provider identities are preserved in selections. */
+  providerNames?: Record<string, string>;
   runtimeGroups?: Array<{ runtime: string; bindingId?: string; name: string; available: boolean }>;
   onSelect: (id: string, provider?: string, bindingId?: string, modelProviderRef?: string) => void;
   /** Source of the active choice on activeBindingId (absent = the Binding's default source). */
@@ -149,6 +153,7 @@ export default function ChatModelMenu({
 
   // Chat keeps the popup in place and aligns it to the composer frame. Forms
   // portal outside their scrolling body without leaving the owning panel.
+  // Adding or removing fallback chips can move the trigger without resizing it.
   useLayoutEffect(() => {
     if (!open) {
       setPopupHost(null);
@@ -196,7 +201,7 @@ export default function ChatModelMenu({
       window.removeEventListener("resize", position);
       document.removeEventListener("scroll", position, true);
     };
-  }, [open, portalSelector]);
+  }, [open, portalSelector, selectedRefs?.length]);
 
   // Preserve a known Provider identity even when its model has disappeared.
   // Bare-id compatibility is only for catalogues with no Provider identities.
@@ -222,7 +227,7 @@ export default function ChatModelMenu({
     for (const m of models) set.add((m.provider || "").trim() || OTHER);
     return [...set].sort((a, b) => (a === OTHER ? 1 : b === OTHER ? -1 : a.localeCompare(b)));
   }, [models, OTHER, runtimeGroups]);
-  const groupName = (id: string) => runtimeGroups?.find(group => (group.bindingId || group.runtime) === id)?.name || id;
+  const groupName = (id: string) => runtimeGroups?.find(group => (group.bindingId || group.runtime) === id)?.name || providerNames?.[id] || id;
   // 只点名失败的 Runtime：一个分组失败不应让其它已加载的分组看起来也失败了。
   const failedGroups = runtimeGroups?.filter(group => !group.available
     && (!providerFilter || (group.bindingId || group.runtime) === providerFilter)) ?? [];
@@ -354,7 +359,7 @@ export default function ChatModelMenu({
                       type="button"
                       role="option"
                       aria-selected={isActive}
-                      disabled={disabled || m.disabled}
+                      disabled={disabled || m.disabled || m.available === false}
                       className={isActive ? "model-menu__item is-active" : "model-menu__item"}
                       onClick={() => {
                         if (m.bindingId) onSelect(m.id, m.provider, m.bindingId, m.modelProviderRef);

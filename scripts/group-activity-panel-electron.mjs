@@ -37,7 +37,7 @@ const state=window as any,options=new URLSearchParams(location.search),language=
 const pause=(ms=20)=>new Promise(resolve=>setTimeout(resolve,ms)),equal=(a:any,b:any,label:string)=>{if(JSON.stringify(a)!==JSON.stringify(b))throw Error(label+': '+JSON.stringify(a)+' != '+JSON.stringify(b))};
 window.addEventListener('error',event=>state.fixtureError=event.error?.stack||event.message);window.addEventListener('unhandledrejection',event=>state.fixtureError=String(event.reason));
 const wait=async(check:()=>unknown,label:string)=>{const until=Date.now()+6000;while(!check()){if(state.fixtureError)throw Error(state.fixtureError);if(Date.now()>until)throw Error(label);await pause()}};
-let writes=0,reads=0;const responses:any[]=[];
+let writes=0,reads=0,activityReads=0,savedActivityResponse:'ready'|'error'|'empty'|'legacy'='ready';const responses:any[]=[];
 // History, live execution bubbles and interaction cards share the same scroll viewport.
 const history=Array.from({length:40},(_,index)=>({id:'history-'+index,groupId:'g',seq:index+1,threadId:'main',author:{kind:'member',memberId:'a'},
  body:('Saved group response '+index+' — 已保存的群聊消息。\n\n').repeat(10),mentions:{memberIds:[],broadcast:false,unresolved:[]},createdAt:Date.now()-1000*(40-index)}));
@@ -56,7 +56,17 @@ state.fetch=async(url:any,init:any={})=>{
    view.pendingInteractions=view.pendingInteractions.map((item:any)=>item.request.requestId===input.requestId?{...item,status:'responded'}:item);
    return new Response(JSON.stringify(view));
  }
- reads++;const result=pathname.includes('/detail')?view:pathname.includes('/messages')?{messages:history,hasMore:false}:{};
+ reads++;
+ const params=new URL(pathname,location.href).searchParams;
+ if(params.get('part')==='activity'){
+   activityReads++;
+   equal(Object.fromEntries(params),{id:'g',seq:'41',part:'activity',ownerScope:'fixture-owner',messageId:'final-alpha'},'only the selected saved message is read');
+   if(savedActivityResponse==='error')return new Response('{}',{status:503});
+   if(savedActivityResponse==='legacy')return new Response(JSON.stringify({page:{offset:0,nextOffset:null,totalBytes:12,digest:'0'.repeat(64),text:'Legacy reply'}}));
+   return new Response(JSON.stringify({activity:savedActivityResponse==='empty'?null:data.completed,
+     startedAt:data.initial.alpha.recentTools[0].startedAt,finishedAt:data.completed.lastProgressAt}));
+ }
+ const result=pathname.includes('/detail')?view:pathname.includes('/messages')?{messages:history,hasMore:false}:{};
  return new Response(JSON.stringify(result));
 };
 await i18n.changeLanguage(language);document.documentElement.setAttribute('data-theme',theme);
@@ -145,7 +155,8 @@ state.runActivityFixture=async()=>{
  equal(turn.textContent?.includes('node check.js'),false,'raw command stays inside tool details');
  equal(document.body.textContent?.includes('activity-canary-secret'),false,'redaction survives UI');
  equal(Boolean(turn.querySelector('[role="status"] svg')),false,'the activity preview replaces the loader in place');
- equal(timeline().querySelectorAll('[data-group-stop-turn="alpha"]').length,1,'the activity bubble keeps the existing Stop action');
+ equal(timeline().querySelectorAll('[data-group-stop-turn],button.chat-stop').length,0,'the timeline has no Stop action');
+ equal(document.querySelectorAll('[data-chat-composer] button.chat-stop:not(:disabled)').length,1,'the composer offers one group Stop action');
  view.activeTurns[0].draft='Current streamed answer — 同一气泡里的流式正文。';emitGroupChanged('g');
  await wait(()=>activity('alpha')?.querySelector('.chat-md')?.textContent?.includes('Current streamed answer'),'draft replaces the loading bubble');
  turn=activity('alpha');
@@ -290,9 +301,12 @@ state.settleActivity=async()=>{
  view.activeTurns[0]={...view.activeTurns[0],individualMessages:true,activity:data.initial.alpha};
  const reply={id:'final-alpha',groupId:'g',seq:41,threadId:'main',author:{kind:'member',memberId:'a'},
    body:'Streaming saved answer',mentions:{memberIds:[],broadcast:false,unresolved:[]},createdAt:Date.now(),revision:1,
-   origin:{opportunityId:'alpha',textItemId:'text-alpha',partial:true,streaming:true}};
+   origin:{opportunityId:'alpha',runId:'run-alpha',discussionId:'d',textItemId:'text-alpha',partial:true,streaming:true}};
+ const activityButton=(seq:number)=>Array.from(timeline().querySelectorAll<HTMLButtonElement>('[data-seq="'+seq+'"] [data-group-message-footer] button'))
+   .find(button=>button.getAttribute('aria-label')===i18n.t('turnLab.processOpen'));
  history.push(reply);view.group.lastSeq=41;emitGroupChanged('g');
  await wait(()=>timeline().querySelector('[data-seq="41"] .chat-cursor')&&!activity('alpha'),'published streaming text replaces the activity preview');
+ equal(Boolean(activityButton(41)),false,'a streaming reply has no history activity action');
  history[history.length-1]={...reply,body:'Final saved answer',revision:2,origin:{...reply.origin,partial:false,streaming:false}};
  emitGroupChanged('g');
  await wait(()=>timeline().querySelector('[data-seq="41"]')?.textContent?.includes('Final saved answer'),'streaming text settles in place');
@@ -300,10 +314,38 @@ state.settleActivity=async()=>{
  equal(timeline().querySelectorAll('[data-seq="41"]').length,1,'final message appears once');
  equal(timeline().textContent?.includes('Current streamed answer'),false,'streaming draft does not survive settlement');
  equal(document.documentElement.scrollWidth<=innerWidth+1,true,'the final answer fits narrow windows');
+ equal(Boolean(activityButton(40)),false,'a user message has no activity action');
+ const button=activityButton(41);
+ equal(Boolean(button),true,'the settled member reply can reopen activity from its footer');
+ equal(activityReads,0,'history does not load saved activity before it is opened');
+ await reveal(button!);button!.focus();
+ equal(getComputedStyle(button!).opacity,'1','keyboard focus reveals the activity action');
+ button!.click();
+ await wait(()=>activityDialog()?.textContent?.includes('Verify collaboration'),'the saved steps open for the completed reply');
+ equal(activityDialog()?.textContent?.includes(i18n.t('turnLab.processLabel')+' · Alpha'),true,'the saved activity belongs to the replying member');
+ equal(Boolean(activityDialog()?.querySelector('[data-st="running"]')),false,'saved tool steps are not shown as running');
+ const closeActivity=()=>activityDialog()!.querySelector<HTMLButtonElement>('button[aria-label="'+i18n.t('common.close')+'"]')!.click();
+ closeActivity();
+ await wait(()=>!activityDialog(),'closing saved activity restores the thread');
+ if(theme==='light'&&innerWidth===1200){
+   savedActivityResponse='legacy';button!.click();
+   await wait(()=>activityDialog()?.querySelector('[role="status"]')?.textContent===i18n.t('groupChat.activity.updateRequired'),'a legacy text page asks for an app update');
+   equal([...activityDialog()!.querySelectorAll('button')].some(item=>item.textContent===i18n.t('common.retry')),false,'an unsupported backend does not offer a retry');
+   closeActivity();await wait(()=>!activityDialog(),'closing the update notice restores the thread');
+ }
+ if(language==='zh-CN'&&theme==='light'&&innerWidth===1200){
+   savedActivityResponse='error';button!.click();
+   await wait(()=>activityDialog()?.querySelector('[role="alert"]')?.textContent===i18n.t('groupChat.activity.error'),'a failed activity read is visible');
+   savedActivityResponse='empty';
+   [...activityDialog()!.querySelectorAll<HTMLButtonElement>('button')].find(item=>item.textContent===i18n.t('common.retry'))!.click();
+   await wait(()=>activityDialog()?.querySelector('[role="status"]')?.textContent===i18n.t('groupChat.activity.empty'),'retry can show a reply without retained steps');
+   equal(Boolean(activityDialog()?.querySelector('[data-status="done"]')),false,'missing activity does not create a fake timeline');
+   closeActivity();await wait(()=>!activityDialog(),'closing the empty state restores the thread');
+ }
  timeline().querySelector('[data-seq="41"]')!.scrollIntoView({block:'center'});await pause();
  await wait(()=>!document.body.textContent?.includes('Fixture response temporarily unavailable'),'previous fixture error notice expires');
  await pause(80); // Give the compositor a frame after the notice is removed before capture.
- equal(writes,3,'settlement does not send additional responses');return{settled:true};
+ equal(writes,3,'settlement and reading saved activity do not send additional responses');return{settled:true,savedActivity:true};
 };`;
 try{
   await build({stdin:{contents:fixture.replace("FIXTUREDATA",JSON.stringify({initial,retrying,compacting,compacted,toolCompleted,completed,late})),loader:"tsx",resolveDir:root},bundle:true,format:"esm",jsx:"automatic",nodePaths:[path.join(root,"app/manage-ui/node_modules")],loader:{".woff2":"dataurl",".svg":"dataurl",".webp":"dataurl",".png":"dataurl"},define:{"process.env.NODE_ENV":'"production"'},outfile:path.join(temp,"fixture.js"),logLevel:"silent"});

@@ -309,9 +309,11 @@ class HookStore {
       for (const item of prior.entries) { assertSupported(item.definition); this.assertCurrent(prior, item); }
       return prior;
     }
-    let entries = ["compaction", "proactive"].includes(run.source) ? [] : this.db.prepare("SELECT * FROM hooks WHERE profile_id=? AND active IS NOT NULL AND removed=0 ORDER BY id")
+    let entries = run.source === "compaction" ? [] : this.db.prepare("SELECT * FROM hooks WHERE profile_id=? AND active IS NOT NULL AND removed=0 ORDER BY id")
       .all(run.profileId).map(row => ({ ...this.version(row.id, row.active), hookId: row.id, version: row.active, epoch: row.epoch }))
-      .filter(item => item.definition.scope.sources.includes(run.source) && (item.definition.scope.workspace === null || item.definition.scope.workspace === run.workspace))
+      .filter(item => (item.definition.scope.sources.includes(run.source)
+        || run.source === "proactive" && item.definition.scope.sources.includes("chat"))
+        && (item.definition.scope.workspace === null || item.definition.scope.workspace === run.workspace))
       .filter(item => onlyEvent === null || item.definition.kind === "observe" && item.definition.event === onlyEvent)
       .filter(item => onlyEvent === null || this.row(run.profileId, item.hookId).updated_at <= run.finishedAt);
     if (entries.length > HOOK_LIMITS.perProfile) fail("HOOK_CAPACITY");

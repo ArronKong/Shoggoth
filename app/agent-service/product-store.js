@@ -1324,6 +1324,11 @@ class JsonlProductStore extends ProductStore {
     for (const field of ["source", "sourceId", "profileId", "workspace", "status", "retryOf"]) {
       if (query[field] !== undefined) runs = runs.filter((run) => run[field] === query[field]);
     }
+    if (query.profileIds !== undefined) runs = runs.filter(run => query.profileIds.has(run.profileId));
+    if (query.sinceMs !== undefined) {
+      runs = runs.filter(run => (run.finishedAt ?? run.startedAt ?? run.createdAt) >= query.sinceMs);
+    }
+    if (query.activeOnly === true) runs = runs.filter(run => ACTIVE_WORK_RUN_STATUSES.has(run.status));
     if (query.runtimeSessionId !== undefined) {
       runs = runs.filter((run) => run.runtimeSessionRef?.sessionId === query.runtimeSessionId);
     }

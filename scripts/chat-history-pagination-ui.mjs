@@ -24,6 +24,8 @@ const listen = server => new Promise(resolve => server.listen(0, "127.0.0.1", re
 const close = server => new Promise(resolve => server.close(resolve));
 const json = (response, value, status = 200) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value)); };
 let archiveRetryKey = null;
+let archiveRetryAttempts = 0;
+let shortArchiveKey = null;
 let archiveRequests = 0;
 let serviceReady = true;
 let unavailableHistoryReads = 0;
@@ -61,7 +63,8 @@ const server = createServer(async (request, response) => {
     if (action === "append") fixture.append(key);
     if (action === "slow") fixture.controls.delay = 160;
     if (action === "fast") fixture.controls.delay = 20;
-    if (action === "fail-archive-once") { archiveRetryKey = key; archiveRequests = 0; }
+    if (action === "fail-archive-once") { archiveRetryKey = key; archiveRetryAttempts = 0; }
+    if (action === "short-archive") shortArchiveKey = key;
     return json(response, { ok: true });
   }
   if (url.pathname === "/fixture/stats") return json(response, {
@@ -70,10 +73,17 @@ const server = createServer(async (request, response) => {
   });
   if (url.pathname.startsWith("/__api/")) {
     const p = url.pathname;
-    if (p === "/__api/sessions/archive" && url.searchParams.get("key") === archiveRetryKey) {
-      const attempt = ++archiveRequests;
-      await new Promise(resolve => setTimeout(resolve, 450));
-      if (attempt === 1) return json(response, { error: "Fixture archive unavailable" }, 503);
+    const key = url.searchParams.get("key");
+    if (p === "/__api/sessions/archive") {
+      archiveRequests++;
+      if (key === archiveRetryKey) {
+        const attempt = ++archiveRetryAttempts;
+        await new Promise(resolve => setTimeout(resolve, 450));
+        if (attempt === 1) return json(response, { error: "Fixture archive unavailable" }, 503);
+      }
+      const segments = key !== shortArchiveKey && fixture.controls.created.some(row => row.key === key) ? []
+        : [{ sealedAt: 1700000000000, fromReset: true, messages: transcript("archive", 123) }];
+      return json(response, { archive: { supported: true, segments } });
     }
     const value = p.includes("cache-scope") ? { backendId: url.searchParams.get("backend"), cacheScope: "isolated-history" }
       : p.includes("runtime-models") ? { selection: { bindingId: "fixture-binding", runtime: "codex", model: null, canSwitch: false, candidates: [] },
@@ -82,9 +92,6 @@ const server = createServer(async (request, response) => {
         info: { readyAgentIds: fixture.cases.filter(row => row.backendId === id).map(row => row.agentId) } })) }
       : p === "/__api/backends" ? { backends: [] }
       : p === "/__api/connectors/mcp/requests" ? { items: [] }
-      : p.includes("/archive") ? { archive: { supported: true,
-        segments: fixture.controls.created.some(row => row.key === url.searchParams.get("key")) ? []
-          : [{ sealedAt: 1700000000000, fromReset: true, messages: transcript("archive", 123) }] } }
       : p.includes("/groups") ? { groups: [] } : {};
     return json(response, value);
   }

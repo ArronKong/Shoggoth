@@ -15,11 +15,17 @@ test("unscoped shared projection preserves MCP structure, redacts cross-field ec
   const result = { content: [{ type: "text", text: "SharedFixture987 and public receipt" },
     { type: "image", data: "private-pixels", mimeType: "image/png" }],
     structuredContent: { count: 32, echo: "123456", password: 123456, api_key: "SharedFixture987" }, isError: false };
-  const before = JSON.stringify(result), safe = await projectUnscopedResult(result);
+  const before = JSON.stringify(result), safe = await projectUnscopedResult(result, { autoDetect: true });
   assert.equal(safe.structuredContent.count, 32); assert.equal(safe.content[0].type, "text");
   assert.equal(safe.isError, false); assert.match(safe.content[0].text, /public receipt/u);
   for (const value of ["SharedFixture987", "123456", "private-pixels", "SHOGGOTH_SECRET_"]) assert(!JSON.stringify(safe).includes(value));
   assert.equal(JSON.stringify(result), before);
+  const paused = await projectUnscopedResult(result);
+  assert.equal(paused.structuredContent.password, result.structuredContent.password);
+  assert.equal(paused.content[0].text, result.content[0].text);
+  assert(!JSON.stringify(paused).includes("private-pixels"));
+  assert.equal(await projectUnscopedResult("{{SHOGGOTH_SECRET_00000000000000000000000000000000}}"),
+    "[LOCAL_CREDENTIAL_REDACTED]");
   await assert.rejects(projectUnscopedResult({ a: undefined }), { code: "SECRET_INPUT_INVALID" });
 });
 async function mcpFixture(t, fixtureOptions) {

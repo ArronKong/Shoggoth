@@ -1,7 +1,7 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  ApiError, getManagedAgentFile, importManagedAgentFile, listAgentArtifacts, listManagedAgentFiles, managedAgentFileUrl,
+  ApiError, getManagedAgentFile, listAgentArtifacts, listManagedAgentFiles, managedAgentFileUrl,
   mutateManagedAgentFile, revealManagedAgentFile, revealPath,
 } from "../../api/client";
 import type { AgentManagedFile, AgentManagedFilesPage } from "../../types";
@@ -23,7 +23,6 @@ export default function AgentFilesPanel({ backend, agentId, hasManagedFiles }: {
   const { t, i18n } = useTranslation();
   const toast = useToast();
   const confirm = useConfirm();
-  const input = useRef<HTMLInputElement>(null);
   const errorId = useId();
   const workspace = usePageCache(`agent-artifacts:${backend}:${agentId}:${hasManagedFiles}`,
     () => listAgentArtifacts(backend, agentId, undefined, hasManagedFiles), { loadingOnEmptyRefresh: true });
@@ -36,7 +35,6 @@ export default function AgentFilesPanel({ backend, agentId, hasManagedFiles }: {
   const [preview, setPreview] = useState<string | null>(null);
   const [previewFailed, setPreviewFailed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [pendingUpload, setPendingUpload] = useState<{ file: File; operationId: string } | null>(null);
 
   const errorText = (failure: unknown) => {
     const code = failure instanceof ApiError ? failure.code : undefined;
@@ -90,18 +88,6 @@ export default function AgentFilesPanel({ backend, agentId, hasManagedFiles }: {
       setError(null);
     } catch (failure) { toast.error(errorText(failure)); }
     finally { setBusy(false); }
-  };
-  const upload = async (value: { file: File; operationId: string }) => {
-    setBusy(true);
-    setPendingUpload(null);
-    try {
-      await importManagedAgentFile(backend, agentId, value.file, value.operationId);
-      toast.success(t("agents.managedFiles.saved"));
-      await refreshManagedFiles();
-    } catch (failure) {
-      if (!(failure instanceof ApiError) || failure.status >= 500) setPendingUpload(value);
-      toast.error(errorText(failure));
-    } finally { setBusy(false); }
   };
   const rename = async () => {
     if (!selected || busy) return;
@@ -165,24 +151,11 @@ export default function AgentFilesPanel({ backend, agentId, hasManagedFiles }: {
 
   return (
     <>
-      {(hasManagedFiles || count > 0) && <div className={styles.head}>
+      {count > 0 && <div className={styles.head}>
         <p className={styles.summary}>
-          {count > 0 && t(incomplete ? "agents.filesShown" : "agents.artifactsCount", { count })}
+          {t(incomplete ? "agents.filesShown" : "agents.artifactsCount", { count })}
           {!hasManagedFiles && workspaceTruncated && t("agents.artifactsShown", { shown: workspaceFiles.length })}
         </p>
-        {hasManagedFiles && <div className={styles.actions}>
-          <button type="button" className="btn-subtle btn-sm" disabled={busy || loading}
-            onClick={() => void refreshFiles()}>{t("common.refresh")}</button>
-          {pendingUpload && <button type="button" className="btn-secondary btn-sm" disabled={busy}
-            onClick={() => void upload(pendingUpload)}>{t("common.retry")}</button>}
-          <button type="button" className="btn-secondary btn-sm" disabled={busy} title={t("agents.managedFiles.importLimit")}
-            onClick={() => input.current?.click()}>{t("agents.managedFiles.import")}</button>
-          <input ref={input} type="file" hidden onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            event.currentTarget.value = "";
-            if (file) void upload({ file, operationId: crypto.randomUUID() });
-          }} />
-        </div>}
       </div>}
       {workspaceUnavailable && <p className={`${s.paneNote} ${styles.state}`} role="status">
         {t(remote ? "agents.artifactsUnsupported" : "chat.agentArtifactsUnavailable")}

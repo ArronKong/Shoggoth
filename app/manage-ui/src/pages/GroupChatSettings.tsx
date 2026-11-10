@@ -1,10 +1,10 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import Modal from "../components/Modal";
 import { Field, Option, Select, TextArea } from "../components/Field";
 import { updateGroupChat } from "../api/client";
 import type { GroupChatView } from "../types";
-import styles from "./GroupChatPanel.module.css";
+import GroupChatFormModal from "./GroupChatFormModal";
+import styles from "./GroupChatFormModal.module.css";
 
 /** 群设置：群主（没有 @ 的消息先交给它）与群用途（成员每次发言前都会看到）。 */
 export default function GroupChatSettings({ view, onView, onClose }: {
@@ -30,8 +30,8 @@ export default function GroupChatSettings({ view, onView, onClose }: {
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { sending.current = false; setBusy(false); }
   };
-  return <Modal open width={440} title={t("groupChat.strategy.settings")} dismissible={!busy} onClose={onClose}
-    footer={<><button type="button" className="btn" disabled={busy} onClick={onClose}>{t("common.cancel")}</button>
+  return <GroupChatFormModal open title={t("groupChat.strategy.settings")} dismissible={!busy} onClose={onClose}
+    footer={<><button type="button" className="btn-secondary" disabled={busy} onClick={onClose}>{t("common.cancel")}</button>
       <button type="button" className="btn-primary" disabled={busy} onClick={() => void save()}>{t("groupChat.strategy.save")}</button></>}>
     <Field label={t("groupChat.owner.label")} hint={t("groupChat.owner.hint")}>
       <Select value={ownerId} disabled={busy || members.length === 0} onChange={value => setOwnerId(value)}>
@@ -42,5 +42,5 @@ export default function GroupChatSettings({ view, onView, onClose }: {
       <TextArea value={purpose} maxLength={1000} rows={3} disabled={busy} onChange={event => setPurpose(event.target.value)} />
     </Field>
     {error && <p className={styles.error} role="alert">{error}</p>}
-  </Modal>;
+  </GroupChatFormModal>;
 }

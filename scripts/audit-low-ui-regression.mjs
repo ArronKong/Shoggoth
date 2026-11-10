@@ -178,7 +178,10 @@ check("BUG-002 Agent 文件读取绑定目标代际", /fileRequestGuardRef/.test
 check("BUG-002 Agent 保存前复核加载目标", /saveFile[\s\S]{0,500}fileTargetKey\(/.test(source.agents));
 check("BUG-018 默认参数回滚使用 profile 与逐字段 confirmed baseline", /defaultMutationGuardRef/.test(source.agentModelHook) && /confirm\([^)]*field/.test(source.agentModelHook) && /rollbackValue\([^)]*field/.test(source.agentModelHook));
 check("BUG-020 主模型 provider 切换校验目录 membership", /selectMainProvider/.test(source.agentModelHook) && /models\.includes\(prev\)/.test(source.agentModelHook) && /mainSelectionValid/.test(source.agentModelHook));
-check("BUG-020 Apply 同时受目录 membership 门控", /disabled=\{[^}]*!mainSelectionValid/.test(source.agentMainModel));
+check("BUG-020 模型菜单保留不可用项禁选及保存时目录校验",
+  /disabled: provider\.unavailableModels\?\.includes\(id\)/.test(source.agentMainModel)
+    && /!row\?\.models\.includes\(model\)/.test(source.agentModelHook)
+    && /row\.unavailableModels\?\.includes\(model\)/.test(source.agentModelHook));
 check("BUG-021 API key 激活用独立 activation token 跨 load 提交", /activationSeqRef/.test(source.agentModelHook) && /activationSeq\s*===\s*activationSeqRef\.current/.test(source.agentModelHook));
 
 // #35：客户端保存前必须按 Hermes 最终 agent id 识别大小写、空格与标点碰撞。

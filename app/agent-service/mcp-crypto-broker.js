@@ -264,6 +264,8 @@ class McpCryptoBroker {
     this.appRoot = path.resolve(options.appRoot);
     this.callerRole = options.callerRole;
     this.defaultApp = options.defaultApp === true;
+    this.persistent = options.persistent === true && options.callerRole === "agent-service";
+    this.persistentWorker = null;
     this.parentEnv = options.parentEnv || process.env;
     this.spawn = options.spawn || spawn;
     this.signalProcess = options.signalProcess || process.kill.bind(process);
@@ -341,6 +343,10 @@ class McpCryptoBroker {
       this.requestQueue,
       ...[...this.active].map((entry) => entry.terminate()),
     ]);
+    if (this.persistentWorker) {
+      this.active.delete(this.persistentWorker.entry);
+      this.persistentWorker = null;
+    }
     if (results.some((result) => result.status === "rejected") || this.residualGroups.size > 0) {
       throw cryptoError();
     }
@@ -489,6 +495,28 @@ class McpCryptoBroker {
     const args = this.defaultApp
       ? [this.appRoot, "--shoggoth-internal-role=mcp-crypto"]
       : ["--shoggoth-internal-role=mcp-crypto"];
+    if (this.persistent && ["safeStorage.encrypt", "safeStorage.decrypt"].includes(operation)) {
+      try {
+        if (!this.persistentWorker) {
+          const worker = new (require("./persistent-crypto-worker").PersistentCryptoWorker)({
+            broker: this, gate, args, env: workerEnvironment(this.parentEnv),
+          });
+          worker.entry = { terminate: () => worker.close() };
+          this.active.add(worker.entry); this.persistentWorker = worker;
+        }
+        const worker = this.persistentWorker;
+        return worker.request({ gate, request, payload, responseOptions }).then(async result => {
+          // Periodic retirement bounds the lifetime of native crypto state.
+          // Never replay a request when worker completion is unknown.
+          if (worker.sequence >= 128) {
+            try { await worker.close(); } catch (error) { result.fill(0); throw error; }
+            this.active.delete(worker.entry);
+            if (this.persistentWorker === worker) this.persistentWorker = null;
+          }
+          return result;
+        });
+      } catch { return Promise.reject(cryptoError()); }
+    }
     let child;
     try {
       child = this.spawn(this.executablePath, args, {

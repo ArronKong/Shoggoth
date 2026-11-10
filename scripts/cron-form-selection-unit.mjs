@@ -18,6 +18,7 @@ function compile(relativePath, name) {
     "--bundle",
     "--platform=node",
     "--format=cjs",
+    "--loader:.svg=dataurl",
     `--outfile=${outfile}`,
   ], { stdio: "pipe" });
   return { mod: createRequire(outfile)(outfile), dir };

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { mock } from "node:test";
 import path from "node:path";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -86,15 +87,67 @@ boundedRegistry.register({
   getRecentCronRuns: async () => ({ runs: [] }),
   getUsageSeries: () => slowUsage,
 });
-const boundedStartedAt = Date.now();
-const bounded = await boundedRegistry.getDashboardSummary({ sinceMs });
-const boundedElapsed = Date.now() - boundedStartedAt;
-assert.ok(boundedElapsed < 2_200, `慢 usage 不应阻塞首屏，实际 ${boundedElapsed}ms`);
-assert.deepEqual(bounded.usage, [{ backend: "slow-usage", error: "pending" }]);
+mock.timers.enable({ apis: ["setTimeout"] });
+try {
+  let settled = false;
+  const bounded = boundedRegistry.getDashboardSummary({ sinceMs }).then(value => { settled = true; return value; });
+  mock.timers.tick(4_999);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, "旧聚合接口应给慢用量保留 5 秒预算");
+  mock.timers.tick(1);
+  assert.deepEqual((await bounded).usage, [{ backend: "slow-usage", error: "pending" }]);
+} finally {
+  mock.timers.reset();
+}
 releaseSlowUsage({ totals: { totalTokens: 7, totalCost: 1 }, daily: [] });
 await slowUsage;
 const warmed = await boundedRegistry.getDashboardSummary({ sinceMs });
 assert.equal(warmed.usage[0]?.today?.totalTokens, 7, "后台预热完成后下一轮 summary 返回权威 usage");
+
+let finishUsage;
+let finishFiles;
+const heldUsage = new Promise(resolve => { finishUsage = resolve; });
+const heldFiles = new Promise(resolve => { finishFiles = resolve; });
+const isolated = new BackendRegistry();
+const calls = [];
+let latestJob = "old";
+isolated.register({
+  ...backend,
+  getStatus: async () => { calls.push("status"); return new Promise(() => {}); },
+  getRunningWork: async () => { calls.push("running"); return new Promise(() => {}); },
+  getPendingApprovals: async () => { calls.push("approvals"); return new Promise(() => {}); },
+  getRecentCronRuns: async () => {
+    calls.push("cron");
+    return { runs: [{ backendId: backend.id, jobId: latestJob, startedAt: sinceMs + 1, status: "ok" }] };
+  },
+  getUsageSeries: range => { calls.push(range); return heldUsage; },
+  getRecentArtifacts: () => { calls.push("files"); return heldFiles; },
+});
+await isolated.getDashboardActivityPage({ sinceMs });
+assert.deepEqual(calls.splice(0), ["cron"]);
+latestJob = "new";
+const usageSection = isolated.getDashboardSection("usage", { sinceMs });
+const filesSection = isolated.getDashboardSection("artifacts", { sinceMs });
+const [freshActivity, sameRead] = await Promise.all([
+  isolated.getDashboardSection("activity", { sinceMs }),
+  isolated.getDashboardSection("activity", { sinceMs }),
+]);
+assert.deepEqual(calls, ["today", "7d", "files", "cron"],
+  "活动分区重读并共享在途计算，分区接口不探测状态、运行记录或审批");
+assert.deepEqual(freshActivity.status, [{ id: backend.id, name: backend.name }]);
+assert.equal(freshActivity.activityPage.items[0].run.jobId, "new");
+assert.deepEqual(sameRead.activityPage.items, freshActivity.activityPage.items);
+assert.equal(freshActivity.taskStats.total.ok, 1);
+const firstPage = await isolated.getDashboardActivityPage({ sinceMs });
+assert.deepEqual(firstPage.items, freshActivity.activityPage.items, "分页共享新首屏的活动快照");
+assert.equal(calls.filter(value => value === "cron").length, 1);
+const trend = { date: "2026-11-09", totalTokens: 13, totalCost: 1 };
+finishUsage({ totals: { totalTokens: 19, totalCost: 2 }, daily: [trend] });
+const metrics = await usageSection;
+assert.equal(metrics.usage[0].today.totalTokens, 19, "文件未完成时仍可返回真实用量");
+assert.deepEqual(metrics.trends, [{ daily: [trend] }]);
+finishFiles({ supported: true, items: [] });
+assert.equal((await filesSection).artifacts[0].supported, true);
 
 const liveRegistry = new BackendRegistry();
 const liveCalls = [];
@@ -115,4 +168,4 @@ liveRegistry.register({ ...backend, id: 'failing', getRunningWork: async () => {
 const partialLive = await liveRegistry.getDashboardLiveWork();
 assert.equal(partialLive.running.find(section => section.backend === 'failing').reason, 'error');
 assert.equal(partialLive.running.find(section => section.backend === 'live').items.length, 1);
-console.log("PASS dashboard summary concurrency, cron reuse, bounded usage and lightweight live-state isolation");
+console.log("PASS dashboard summary, independent sections, activity freshness, usage trends and live-state isolation");

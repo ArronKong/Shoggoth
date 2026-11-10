@@ -212,7 +212,7 @@
 .bar :global(.chat-pill__icon) { position: absolute; left: 9px; top: 50%; display: grid; width: 15px; height: 15px; transform: translateY(-50%); pointer-events: none; }
 .bar :global(.chat-pill__icon) svg { width: 100%; height: 100%; }
 .bar :global(.chat-pill__label) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mention { padding: 0 8px 0 4px; }
+.bar .mention { padding-inline-start: 4px; }
 .mention[data-popup-open] { background: light-dark(#000, #fff); color: light-dark(#fff, #000); }
 .mention[data-popup-open]:hover:not(:disabled) { background: light-dark(#000, #fff); color: light-dark(#fff, #000); }
 .mentionAvatar { width: 24px; height: 24px; flex: 0 0 24px; font-size: 9px; }

@@ -23,11 +23,12 @@ function turnIn(f, session, text) {
     runId: id, id: `user-${id}`, kind: "user", content: { text }, occurredAt: f.now() });
   return { profile: f.service.productStore.getAgentProfile(A), session, run: dispatcher.getRun(id), query: text, event };
 }
-function compile(f, input, window = 500000) {
+function compile(f, input, window = 500000, freshSession = true) {
   const budget = conversationContextBudget(window);
-  return f.service.contextCompiler.compile({ profile: input.profile, run: { ...input.run, source: "proactive", workspace: null },
-    contextLifecycleV1: true, requestBudget: budget, transcriptTokenBudget: budget.triggerTokens, freshSession: true,
-    currentPrompt: "SYSTEM-INITIATED CHECK", query: "check" });
+  return f.service.contextCompiler.compile({ profile: input.profile, run: { ...input.run, source: "proactive" },
+    transcriptSessionId: input.session.id,
+    contextLifecycleV1: true, requestBudget: budget, transcriptTokenBudget: budget.triggerTokens, freshSession,
+    currentOperationId: `system-check:${input.run.id}`, currentPrompt: "SYSTEM-INITIATED CHECK", query: "check" });
 }
 
 test("proactive context uses only the owning main conversation and validates sources through publication/restart", async t => {
@@ -42,12 +43,13 @@ test("proactive context uses only the owning main conversation and validates sou
   const other = f.turn("Unrelated private conversation", ready(f, f.session())); await f.finish(other);
   const pending = turnIn(f, main, "Unfinished foreground task");
   append(f, pending, "Partial answer still running");
-  const snapshot = compile(f, input), history = snapshot.blocks.find(block => block.id === "proactive-conversation");
+  const snapshot = compile(f, input), history = snapshot.blocks.find(block => block.kind === "transcript");
   assert.match(history.content, /Main user:.*Main assistant:/su);
-  assert.doesNotMatch(history.content, /Hidden internal|Borrowed source|Tool output|Unrelated private|Unfinished foreground|Partial answer/u);
+  assert.doesNotMatch(history.content, /Hidden internal|Unrelated private/u);
   assert.equal(snapshot.report.proactiveConversation.sessionId, main.id);
   assert.equal(snapshot.report.proactiveConversation.selectedCount, 2);
-  assert.equal(snapshot.report.composition.historyTokens, history.estimatedTokens);
+  assert.ok(snapshot.report.composition.historyTokens > 0);
+  assert.equal(snapshot.blocks.some(block => block.id === "proactive-conversation"), false, "No second bounded history replaces the normal transcript");
   const run = { profileId: A, contextSnapshotId: snapshot.id };
   assert.equal(f.service.proactiveService.isContextCurrent(run), true);
   await f.finish(pending);
@@ -63,7 +65,7 @@ test("proactive context uses only the owning main conversation and validates sou
   append(f, input, "Published reminder", { id: `proactive-${noticeId}`, runId: null,
     content: { text: "Published reminder", proactiveNotice: { id: noticeId, kind: "heartbeat", items: [{ id: "check" }] } } });
   assert.equal(f.service.proactiveService.isContextCurrent(run), true, "publishing its own notice does not invalidate a review");
-  assert.match(compile(f, input).blocks.find(block => block.id === "proactive-conversation").content, /Published reminder/u);
+  assert.match(compile(f, input, 500000, false).blocks.find(block => block.id === "published-notices").content, /Published reminder/u);
   f.service.transcriptStore.setContextExcluded({ profileId: A, sessionId: main.id,
     eventId: input.event.id, contextExcluded: true });
   assert.equal(f.service.proactiveService.isContextCurrent(run), false, "hidden sources cannot authorize a pending notice");
@@ -76,9 +78,9 @@ test("a wrong-owner or deleted main binding provides no conversation context", a
   const foreign = f.service.chatSessionStore.createSession({ profileId: f.B, workspace: f.workspace,
     operationId: crypto.randomUUID(), createdAt: f.now() });
   f.service.proactiveStore.setTarget(A, { ...target, sessionKey: foreign.sessionKey });
-  assert.equal(compile(f, input).blocks.some(block => block.id === "proactive-conversation"), false);
+  assert.equal(compile(f, input).report.proactiveConversation, undefined);
   f.service.proactiveStore.setTarget(A, { ...target, deleted: true });
-  assert.equal(compile(f, input).blocks.some(block => block.id === "proactive-conversation"), false);
+  assert.equal(compile(f, input).report.proactiveConversation, undefined);
   await f.finish(input);
 });
 

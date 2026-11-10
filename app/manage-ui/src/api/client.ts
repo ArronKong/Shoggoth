@@ -104,7 +104,7 @@ import type {
   StandingGrantRevokeResult,
   AppConfig,
   ConnTestResult,
-  DashboardSummary,
+  DashboardSections,
   DashboardLiveWork,
   DashboardActivityPage,
   OpenclawHostInfo,
@@ -1814,6 +1814,20 @@ export async function getAgent(backend: string, id: string): Promise<UnifiedAgen
   const { agent } = await jsonFetch<{ agent: UnifiedAgentDetail }>(agentUrl(backend, id));
   return agent;
 }
+export async function getAgentModels(backend: string, id: string): Promise<import("../types").AgentModelCatalog> {
+  const catalog = await jsonFetch<import("../types").AgentModelCatalog>(agentUrl(backend, id, "/models"));
+  if (!Array.isArray(catalog?.models) || (catalog.defaultModel !== null && typeof catalog.defaultModel !== "string")) {
+    throw new Error("Agent model catalog response is invalid");
+  }
+  return { ...catalog, models: catalog.models.map(model => {
+    if (!model || typeof model.id !== "string" || !model.id.trim()
+      || typeof model.name !== "string" || !model.name.trim()
+      || typeof model.provider !== "string" || !model.provider.trim()) {
+      throw new Error("Agent model catalog contains an invalid choice");
+    }
+    return { ...model, backendId: backend };
+  }) };
+}
 export async function createAgent(backend: string, spec: AgentInput): Promise<unknown> {
   const request = {
     ...spec,
@@ -1826,8 +1840,8 @@ export async function createAgent(backend: string, spec: AgentInput): Promise<un
   );
   return result;
 }
-// Resolves to the agent's id AFTER the update. Renaming a Hermes profile re-keys
-// its agent, so the caller must re-select on this id, not the one it passed in.
+// Use the confirmed ID after an update: a Hermes default display-name change
+// keeps its ID, while renaming a named profile re-keys it.
 export async function updateAgent(backend: string, id: string, patch: AgentInput): Promise<string> {
   const request = {
     ...patch,
@@ -1926,6 +1940,9 @@ export function setAgentRuntimePolicy(backend: string, id: string, policy: impor
 }
 export function getSessionRuntime(backend: string, id: string, key: string): Promise<import("../types").SessionRuntimeSnapshot> {
   return jsonFetch(`${agentUrl(backend, id, "/session-runtime")}&sessionKey=${encodeURIComponent(key)}`);
+}
+export function prewarmChatSession(backend: string, id: string, key: string, signal?: AbortSignal): Promise<{ supported: boolean; state: string }> {
+  return jsonFetch(`${agentUrl(backend, id, "/chat-prewarm")}&sessionKey=${encodeURIComponent(key)}`, { method: "POST", signal });
 }
 export function getSessionMemoryStatus(backend: string, id: string, key: string, includeTrace = false, signal?: AbortSignal): Promise<import("../types").SessionMemoryStatus> {
   return jsonFetch(`${agentUrl(backend, id, "/memory-status")}&sessionKey=${encodeURIComponent(key)}&trace=${includeTrace ? "1" : "0"}`, { signal });
@@ -2552,9 +2569,9 @@ export async function setLanDiscovery(
   });
 }
 
-// Dashboard 总览一把抓（registry 聚合，fail-soft）。无参 = 服务端取本地 0 点。
-export async function getDashboardSummary(): Promise<DashboardSummary> {
-  const { summary } = await jsonFetch<{ summary: DashboardSummary }>(`/__api/dashboard`);
+// Each section uses the server's local day and refreshes independently.
+export async function getDashboardSection<K extends keyof DashboardSections>(section: K): Promise<DashboardSections[K]> {
+  const { summary } = await jsonFetch<{ summary: DashboardSections[K] }>(`/__api/dashboard?section=${section}`);
   return summary;
 }
 
@@ -2958,7 +2975,8 @@ export function getInspirationAgentDock(signal?: AbortSignal) {
   return jsonFetch<{ agents: import('../types').InspirationDockAgent[] }>('/__api/inspirations/agent-dock', { signal });
 }
 export function getIdleInspirationAgents(signal?: AbortSignal) {
-  return jsonFetch<{ agents: import('../types').InspirationAgent[] }>('/__api/inspirations/idle-agents', { signal });
+  return jsonFetch<{ agents: import('../types').InspirationAgent[]; busyAgents: import('../types').InspirationAgent[] }>(
+    '/__api/inspirations/idle-agents', { signal });
 }
 async function filterInspirationGrowthFailures(result: import('../types').InspirationGrowthResult) {
   // A saved blocked assignment can outlive its failed run, especially while
@@ -3044,15 +3062,9 @@ export function updateGroupChat(id: string, input: { expectedMetadataRevision: n
   patch: { name?: string; purpose?: string; status?: import('../types').GroupChatStatus; ownerMemberId?: string } }) {
   return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/detail", id), { method: "PATCH", body: JSON.stringify(input) });
 }
-export function addGroupChatMember(id: string, input: { expectedRosterRevision: number;
-  member: { backendId: string; agentId: string; peerId?: string } }) {
-  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/members", id), { method: "POST", body: JSON.stringify(input) });
-}
-export function stopGroupChatMember(id: string, memberId: string) {
-  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/members/stop", id), { method: "POST", body: JSON.stringify({ memberId }) });
-}
-export function removeGroupChatMember(id: string, input: { expectedRosterRevision: number; memberId: string }) {
-  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/members", id), { method: "DELETE", body: JSON.stringify(input) });
+export function updateGroupChatMembers(id: string, input: { ownerScope: string; expectedRosterRevision: number;
+  addMembers: Array<{ backendId: string; agentId: string; peerId?: string }>; removeMemberIds: string[] }) {
+  return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/members", id), { method: "PATCH", body: JSON.stringify(input) });
 }
 export function getGroupChatMemberRole(id: string, memberId: string, query: { revision?: string; cursor?: string; document?: "SOUL.md" } = {}) {
   const params = new URLSearchParams({ id, memberId });

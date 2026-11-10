@@ -58,7 +58,7 @@ const jobs = ["A", "B", "System"].map(name => ({ id: name, name, backendId: "ope
   schedule: { kind: "every", everyMs: 60000 }, actions: name === "System" ? { edit: false, toggle: false, delete: false, run: true, reason: "system-managed" } : {} }));
 const nativeJob = { ...jobs[0], id: "shoggoth:native/fixture", name: "Native", backendId: "shoggoth", prompt: "Preview" };
 
-async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: "Fixture", backendId: "openclaw" }], fixtureJobs = jobs, savedFilters) {
+async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: "Fixture", backendId: "openclaw" }], fixtureJobs = jobs, savedFilters, options = {}) {
   const backends = [{ id: "openclaw", name: "OpenClaw", surfaces: { cron: { kind: "openclaw" } } }];
   if (fixtureJobs.some(job => job.backendId === "shoggoth")) {
     backends.push({ id: "shoggoth", name: "Shoggoth", surfaces: { cron: { kind: "native" } } });
@@ -66,7 +66,9 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   const backendIds = backends.map(({ id }) => id);
   const state = { updates: [], creates: [], deletes: [], confirmations: [], refreshes: [], successes: [], errors: [], infos: [], gates: new Map(),
     allJobs: fixtureJobs, listRequests: [], runRequests: [], detailRequests: [], deliveryRequests: [],
+    pageRegistrations: [], dialogCloses: 0, dialogChanges: 0,
     details: new Map(fixtureJobs.map(job => [job.id, job])) };
+  options.configure?.(state);
   const form = { __esModule: true, default: host("cron-form"), emptyOpenClawDraft: () => ({ name: "", backendId: "openclaw" }),
     openClawDraftFromJob: job => ({ name: job.name, backendId: job.backendId }), openClawInputFromDraft: draft => ({ ...draft }),
     validateOpenClawDraft: () => null };
@@ -96,7 +98,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
       const [error, setError] = React.useState(null);
       return { data: fixtureJobs, loading: false, error, setError, refresh: async () => { state.refreshes.push(key); } };
     } },
-    "../lib/page-refresh": { useRegisterPageRefresh() {}, useRegisterPageLoading() {} },
+    "../lib/page-refresh": { useRegisterPageRefresh(path) { state.pageRegistrations.push(path); }, useRegisterPageLoading() {} },
     "../lib/useStickyState": { useStickyState: (key, initial) => {
       const saved = { "cron.view": "list", "cron.filters": savedFilters };
       return React.useState(saved[key] ?? initial);
@@ -146,7 +148,14 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     require: name => stubs[name] || require(name),
   });
   let renderer;
-  await act(async () => { renderer = create(React.createElement(mod.exports.default)); await flush(); });
+  await act(async () => {
+    renderer = create(options.dialogJob ? React.createElement(mod.exports.CronJobDialog, {
+      job: options.dialogJob,
+      onClose: () => { state.dialogCloses++; },
+      onChange: async () => { state.dialogChanges++; },
+    }) : React.createElement(mod.exports.default));
+    await flush();
+  });
   const buttons = scope => scope.findAllByType("button");
   const filterMenu = label => renderer.root.findAllByType("filter-menu").find(menu => menu.props.label === label);
   const click = async button => { await act(async () => { button.props.onClick(); await flush(); }); };
@@ -160,6 +169,54 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   }); };
   const dispose = () => act(() => renderer.unmount());
   return { state, renderer, buttons, filterMenu, click, row, edit, formModal, save, notify, dispose };
+}
+
+{
+  const f = await fixture(undefined, jobs, undefined, { dialogJob: jobs[0] });
+  assert.equal(f.renderer.root.findAllByProps({ className: "cron-page management-page" }).length, 0);
+  assert.deepEqual(f.state.pageRegistrations, [], "a chat dialog does not register or render the task page");
+  assert.deepEqual(f.state.listRequests.map(value => ({ ...value })), [{ backend: "openclaw" }]);
+  assert.equal(f.renderer.root.findByType("cron-form").props.draft.name, "A");
+  await f.save();
+  assert.deepEqual(f.state.updates.map(({ id }) => id), ["A"]);
+  assert.equal(f.state.dialogChanges, 1, "saving refreshes the owning chat list");
+  assert.deepEqual(f.state.refreshes, [], "saving does not refresh an unmounted task page");
+  assert.equal(f.state.dialogCloses, 0, "the dialog host stays mounted for its exit transition");
+  act(() => f.renderer.root.findByType("modal").props.onOpenChangeComplete(false));
+  assert.equal(f.state.dialogCloses, 1);
+  f.dispose();
+}
+{
+  const f = await fixture(undefined, [nativeJob], undefined, { dialogJob: nativeJob, configure: state => {
+    state.allJobs = [{ ...nativeJob, lastRunAt: Date.now() - 60000 }];
+    state.details.set(nativeJob.id, { ...nativeJob, prompt: "Complete native task prompt" });
+  } });
+  const report = () => f.renderer.root.findByType("report-modal");
+  assert.equal(report().props.open, true, "a chat dialog checks fresh run state before choosing the result");
+  assert.equal(report().props.title, nativeJob.name);
+  await act(async () => { report().props.onEdit(); await flush(); });
+  assert.equal(f.renderer.root.findByType("native-form").props.draft.prompt, "Complete native task prompt");
+  act(() => report().props.onOpenChangeComplete(false));
+  assert.equal(f.state.dialogCloses, 0, "switching from report to editor keeps the same dialog host");
+  f.dispose();
+}
+{
+  const f = await fixture(undefined, jobs, undefined, { dialogJob: jobs[0], configure: state => {
+    state.allJobs = [{ ...jobs[0], backendId: "hermes" }];
+  } });
+  assert.equal(f.formModal(), undefined);
+  assert.equal(f.state.infos.at(-1), "notif.cronUnavailable");
+  assert.equal(f.state.dialogCloses, 1, "an unavailable or wrong-backend task releases the chat selection for retry");
+  f.dispose();
+}
+{
+  const pending = gate();
+  const f = await fixture(undefined, jobs, undefined, { dialogJob: jobs[0], configure: state => state.gates.set("list", pending) });
+  f.dispose();
+  await act(async () => { pending.resolve(); await flush(); });
+  assert.equal(f.state.dialogCloses, 0, "a late response cannot dismiss a newer chat dialog");
+  assert.deepEqual(f.state.deliveryRequests, []);
+  assert.deepEqual(f.state.detailRequests, []);
 }
 
 {

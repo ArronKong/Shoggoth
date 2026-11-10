@@ -24,7 +24,7 @@ const definition = schema({
   schemaVersion: { type: "integer", const: 1 }, name: { type: "string", minLength: 1, maxLength: 128 },
   event: { type: "string", enum: Object.keys(HOOK_EVENTS) }, kind: { type: "string", enum: ["observe", "guard", "transform", "action"] },
   scope: schema({ workspace: { type: "string", enum: ["current", "profile"] },
-    sources: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: { type: "string", enum: ["chat", "cron", "kanban", "inspiration"] } } }, ["workspace", "sources"]),
+    sources: { type: "array", minItems: 1, maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["chat", "cron", "kanban", "inspiration", "proactive"] } } }, ["workspace", "sources"]),
   matcher: schema({ toolScopes: { type: "array", minItems: 1, maxItems: 5,
     items: { type: "string", enum: ["product", "native_mcp", "plugin_mcp", "connector", "runtime_builtin", "runtime_mcp"] } },
     toolNames: { type: "array", minItems: 1, maxItems: 32, items: { type: "string", maxLength: 128 } },

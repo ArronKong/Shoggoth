@@ -19,12 +19,16 @@ function isPublishedNoticeEvent(event) {
     && Array.isArray(notice.items) && notice.items.length > 0;
 }
 
+const proactiveTranscriptId = runId => `proactive-run-${digest(runId)}`;
+
 class NoticeDeliveryController {
   constructor({ store, productStore, chatSessionStore, transcriptStore, readConfig, sendSystemNotice,
-    isFocused = () => false, validateNotice, onPublished = () => {}, resolveWorkspace = () => null, now = Date.now }) {
+    isFocused = () => false, validateNotice, onPublished = () => {}, resolveWorkspace = () => null,
+    resolveRunSession = () => null, now = Date.now }) {
     this.store = store; this.products = productStore; this.sessions = chatSessionStore; this.transcripts = transcriptStore;
     this.readConfig = readConfig; this.sendSystemNotice = sendSystemNotice; this.isFocused = isFocused;
     this.validateNotice = validateNotice; this.onPublished = onPublished; this.resolveWorkspace = resolveWorkspace;
+    this.resolveRunSession = resolveRunSession;
     this.now = now; this.tails = new Map(); this.closed = false;
   }
   open() { this.closed = false; }
@@ -60,11 +64,25 @@ class NoticeDeliveryController {
     return session;
   }
   #target(notice) {
+    const runId = this.store.getOccurrence(notice.occurrenceId)?.runId;
+    const sessionKey = runId && this.resolveRunSession(runId);
+    if (sessionKey) {
+      const session = this.sessions.getSession(sessionKey);
+      if (!session || session.profileId !== notice.profileId || !["draft", "ready"].includes(session.status)) fail("PROACTIVE_TARGET_INVALID");
+      return session;
+    }
     const explicit = notice.target.mode === "explicit";
     const target = explicit ? this.sessions.getSession(notice.target.sessionKey) : this.ensureMainSession(notice.profileId);
     if (!explicit && !target) fail("PROACTIVE_TARGET_DELETED");
     if (!target || target.profileId !== notice.profileId || !["draft", "ready"].includes(target.status)) fail("PROACTIVE_TARGET_INVALID");
     return target;
+  }
+  publishedEvent(noticeId, sessionKey) {
+    const session = this.sessions.getSession(sessionKey);
+    if (!session) fail("PROACTIVE_TARGET_INVALID");
+    const event = this.transcripts.getEvent(session.profileId, session.id, `proactive-${noticeId}`);
+    if (!isPublishedNoticeEvent(event)) fail("PROACTIVE_NOT_FOUND");
+    return { event, profileId: session.profileId };
   }
   deliver(noticeId) {
     const prior = this.tails.get(noticeId) || Promise.resolve();
@@ -94,9 +112,11 @@ class NoticeDeliveryController {
             return this.store.updateNotice(notice.id, { appState: "suppressed", systemState: "suppressed", systemReason: "source_or_monitor_changed" });
           }
           notice = this.store.updateNotice(notice.id, { appState: "publishing", sessionKey: session.sessionKey });
+          const runId = this.store.getOccurrence(notice.occurrenceId)?.runId;
           this.transcripts.appendEvent({ profileId: notice.profileId, sessionId: session.id, id: eventId,
             runId: null, kind: "assistant", occurredAt: notice.createdAt, contextExcluded: false,
-            content: { text: noticeMessage(notice), proactiveNotice: { id: notice.id, kind: notice.kind, title: notice.title, items: notice.items } } });
+            content: { text: noticeMessage(notice), proactiveNotice: { id: notice.id, kind: notice.kind, title: notice.title, items: notice.items,
+              ...(runId ? { reviewRunId: runId } : {}) } } });
         }
         this.sessions.touchSession(session.sessionKey, notice.createdAt);
         notice = this.store.updateNotice(notice.id, { appState: "published", sessionKey: session.sessionKey });
@@ -131,4 +151,4 @@ class NoticeDeliveryController {
   }
   async recover() { for (const notice of this.store.outbox()) await this.deliver(notice.id); }
 }
-module.exports = { NoticeDeliveryController, noticeMessage, isPublishedNoticeEvent };
+module.exports = { NoticeDeliveryController, noticeMessage, isPublishedNoticeEvent, proactiveTranscriptId };

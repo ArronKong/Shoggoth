@@ -641,8 +641,9 @@ function fakeProc() {
           error = e;
         }
         ok(
-          "dashboard 起不来 → 明确报错（profile 已建、重启会重试）",
-          /profile「cssssss」已创建.*dashboard 启动失败（hermes dashboard 进程退出（exit 1））.*重启 App 会重试/.test(error?.message || ""),
+          "dashboard 起不来 → profile 已保存并提示重启重试",
+          be.profileById.get("hermes-cssssss") === "cssssss"
+            && /profile「cssssss」已保存.*dashboard 启动失败（hermes dashboard 进程退出（exit 1））.*重启 App 会重试/.test(error?.message || ""),
           error?.message,
         );
         ok("单个 profile 失败不把整个后端标成故障", be.lastError === null, String(be.lastError));

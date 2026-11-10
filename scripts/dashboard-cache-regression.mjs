@@ -480,6 +480,24 @@ test("持久缓存遇到网络错误时保留数据并显示非阻塞错误", ()
   assert.equal(view.nonBlockingError, "network failed");
 });
 
+test("重进总览时，过期的内存和同日持久快照只用于失败回退", () => {
+  const old = makeSummary({ generatedAt: TODAY_NOON - 120_000 });
+  const fresh = makeSummary({ generatedAt: TODAY_NOON - 1_000, status: [{ id: "openclaw", name: "OpenClaw" }] });
+  const freshness = { openedAt: TODAY_NOON, now: TODAY_NOON };
+  for (const [live, persisted] of [[old, null], [undefined, old]]) {
+    const loading = resolveDashboardViewState(live, persisted, false, null, ["openclaw"], freshness);
+    assert.equal(loading.data, undefined);
+    assert.equal(loading.showLoading, true);
+    assert.equal(resolveDashboardViewState(live, persisted, false, "offline", ["openclaw"], freshness).data, old);
+  }
+  assert.equal(resolveDashboardViewState(fresh, old, true, null, ["openclaw"], freshness).data, fresh);
+  assert.equal(resolveDashboardViewState(fresh, null, true, null, ["openclaw"],
+    { ...freshness, now: TODAY_NOON + 120_000 }).data, fresh, "页内后台刷新保留已展示内容");
+  assert.equal(resolveDashboardViewState(fresh, old, false, "offline", ["openclaw"],
+    { ...freshness, now: TODAY_NOON + 86_400_000 }).data, undefined, "跨日禁止恢复旧快照");
+  assert.deepEqual(decodeDashboardCache(encodeDashboardCache(fresh, TODAY_NOON), TODAY_NOON), fresh);
+});
+
 test("无可用数据时网络错误保持阻塞", () => {
   const view = resolveDashboardViewState(undefined, null, false, "network failed");
 
@@ -548,21 +566,13 @@ test("Dashboard 页面接入持久缓存并按统一视图状态渲染", () => {
   );
   assert.match(source, /const\s*\[persistedData\]\s*=\s*useState\(\(\)\s*=>\s*readDashboardCache\(\)\)/);
   assert.match(source, /useRef\(persistedData\?\.generatedAt\)/);
-  assert.match(source, /data:\s*liveData/);
-  assert.match(
-    source,
-    /resolveDashboardViewState\(\s*liveData,\s*persistedData,\s*loading,\s*error,\s*enabledBackendIds,?\s*\)/,
-  );
-  assert.match(source, /usePageCache\(`dashboard:\$\{backendScopeKey\}`/);
-  assert.match(source, /shouldWriteDashboardCache\(liveData,\s*cachedGeneratedAtRef\.current\)/);
-  assert.match(
-    source,
-    /if\s*\(writeDashboardCache\(liveData\)\)\s*cachedGeneratedAtRef\.current\s*=\s*liveData\.generatedAt/,
-  );
-  assert.match(source, /\},\s*\[liveData\]\s*\)/);
+  for (const section of ["activity", "usage", "artifacts"]) {
+    assert.ok(source.includes(`usePageCache(\`dashboard:${section}:\${backendScopeKey}\``));
+  }
+  assert.match(source, /shouldWriteDashboardCache\(snapshot,\s*cachedGeneratedAtRef\.current\)\s*&&\s*writeDashboardCache\(snapshot\)/);
+  assert.match(source, /generatedAt: Math\.min\(activityData\.generatedAt, usageData\.generatedAt, artifactData\.generatedAt\)/);
   assert.match(source, /blockingError\s*&&[\s\S]*?<div\s+className=["']dash-error["']\s+role=["']alert["']/);
   assert.match(source, /nonBlockingError\s*&&/);
-  assert.match(source, /const initialLoading = !data && !blockingError && \(showLoading \|\| refreshing\)/);
   assert.match(source, /initialLoading\s*&&\s*<DashboardSkeleton/);
 });
 

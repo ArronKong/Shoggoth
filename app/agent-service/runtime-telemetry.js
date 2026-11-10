@@ -11,7 +11,7 @@ class RuntimeTelemetry {
   record(name, input = {}) {
     if (!EVENTS.has(name)) return;
     const event = { name, at: this.now() };
-    for (const key of ["runId", "sessionKey", "bindingId"]) if (typeof input[key] === "string") event[key + "Hash"] = crypto.createHash("sha256").update(input[key]).digest("hex");
+    for (const key of ["runId", "operationId", "sessionKey", "bindingId"]) if (typeof input[key] === "string") event[key + "Hash"] = crypto.createHash("sha256").update(input[key]).digest("hex");
     if (name === "session.runtime.switched" && event.sessionKeyHash) {
       this.pendingSwitches.add(event.sessionKeyHash);
       while (this.pendingSwitches.size > 4096) this.pendingSwitches.delete(this.pendingSwitches.values().next().value);
@@ -20,6 +20,8 @@ class RuntimeTelemetry {
     if (typeof input.code === "string" && /^[A-Z][A-Z0-9_]{0,79}$/u.test(input.code)) event.code = input.code;
     if (Number.isSafeInteger(input.count) && input.count >= 0 && input.count <= 1_000_000_000) event.count = input.count;
     if (Number.isSafeInteger(input.durationMs) && input.durationMs >= 0) event.durationMs = input.durationMs;
+    for (const key of ["startedAt", "finishedAt", "attempt"]) if (Number.isSafeInteger(input[key]) && input[key] >= 0) event[key] = input[key];
+    if (["created", "reused", "unknown"].includes(input.hostState)) event.hostState = input.hostState;
     this.counters[name] = Math.min(Number.MAX_SAFE_INTEGER, (this.counters[name] || 0) + 1);
     if (name === "runtime.switch.first_turn") {
       const metric = input.outcome === "error" ? "switchFirstTurnFailed" : input.outcome === "success" ? "switchFirstTurnSucceeded" : "switchFirstTurnUnknown";

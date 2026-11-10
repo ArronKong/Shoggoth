@@ -11,7 +11,7 @@
   /* —— 按模型堆叠八色序列（Usage by model = 100% 堆叠面积，用户拍板形态+配色）：
      品牌黄领衔 + 黑次席 + 暖色阶递深（金橙→橙→珊瑚→砖红→深红褐），固定
      顺序不循环；名次即颜色（1 黄 / 2 黑 / 3-6 暖色渐深 / 「其他」深红褐），
-     与环图 d* 同板。暖色实色两主题同值，明度递减保证相邻面积带可辨，
+     暖色实色两主题同值，明度递减保证相邻面积带可辨，
      另有图例 hover 聚焦 + tooltip 兜底。 —— */
   /* 生长动效节拍（R238）：与 UsagePage.tsx 里 CountUp 的 900ms / anime out(3)
      同参，数字滚动和图表生长踩同一拍；缓动是 easeOutCubic 的标准贝塞尔。 */
@@ -46,14 +46,6 @@
   --uc-ink-80: color-mix(in srgb, var(--ui-text-1) 80%, transparent);
   --uc-ink-50: color-mix(in srgb, var(--ui-text-1) 50%, transparent);
 
-  /* 模型占比环图六段：与堆叠面积同板（黄/黑/暖色阶），top5 + 其他。
-     引用 c* 单一色源，改配色只动上面一处。 */
-  --uc-d0: var(--uc-c0);
-  --uc-d1: var(--uc-c1);
-  --uc-d2: var(--uc-c2);
-  --uc-d3: var(--uc-c3);
-  --uc-d4: var(--uc-c4);
-  --uc-d5: var(--uc-c6); /* 「其他」，对齐面积图 c6 */
 }
 
 /* 注意：本页不能再加 overflow-x:hidden——那会把 .usage-page 变成裁剪容器,
@@ -477,34 +469,6 @@
   background: var(--ui-text-1);
   border-radius: 8px;
 }
-/* 模型占比卡：左环图（设计稿左槽 208/614）+ 右排行列表 */
-.management-page.usage-page .usage-rank-split {
-  display: flex;
-  align-items: center;
-  gap: 28px;
-  min-width: 0;
-}
-.management-page.usage-page .usage-donut {
-  flex: 0 0 30%;
-  max-width: 208px;
-  min-width: 0;
-}
-.management-page.usage-page .usage-donut-svg {
-  display: block;
-  width: 100%;
-  max-width: 190px;
-  height: auto;
-  margin: 0 auto;
-}
-.management-page.usage-page .usage-donut-num {
-  fill: var(--ui-text-1);
-  font-size: 20px;
-  font-weight: 200;
-}
-.management-page.usage-page .usage-rank-list {
-  flex: 1 1 auto;
-  min-width: 0;
-}
 
 /* —— 提示 / 表格 —— */
 .usage-page .usage-hint {
@@ -688,13 +652,6 @@
   .management-page.usage-page .usage-row--split {
     grid-template-columns: minmax(0, 1fr);
   }
-  .management-page.usage-page .usage-rank-split {
-    flex-direction: column;
-  }
-  .management-page.usage-page .usage-donut {
-    flex: none;
-    width: 100%;
-  }
   /* 单列后 agent 卡不再与 hero 同排，列表恢复自然高度 */
   .management-page.usage-page .usage-agents .arank {
     flex: none;
@@ -702,11 +659,7 @@
   }
   /* 单列堆叠后「同排等高」不再成立：释放 R212 的固定卡高，卡随内容自然长，
      否则列表(Agent/占比/工具)超出固定高又无滚动裁剪,溢出叠进下一张卡。
-     纯图表卡(:has(>.uc-box))不在此列——svg 靠 flex 撑高,保持固定 320。
-     R238：`max-height` 必须一起放开——只写 height:auto 时 --split 基础规则的
-     `max-height: 537px` 仍然生效，卡就卡在 537 不长，正是上面这段注释要防的
-     溢出（实测 980px 断点下 .usage-rank-split 转 column 后内容 684px，
-     模型占比排名的列表溢出 208px 压在「工具调用」卡上）。 */
+     纯图表卡(:has(>.uc-box))不在此列——svg 靠 flex 撑高,保持固定 320。 */
   .management-page.usage-page .usage-row--hero > .usage-section,
   .management-page.usage-page .usage-row--split > .usage-section {
     height: auto;
@@ -851,25 +804,6 @@
   }
   to {
     transform: scaleX(1);
-  }
-}
-
-/* 环图：每段的延迟与时长都按自己的占比分摊总时长，首尾相接扫成连续一圈。
-   故用 linear——逐段各自 easeOut 会在每个色段边界顿一下。 */
-.usage-page .uc-wait-arc {
-  stroke-dasharray: 0 var(--c);
-}
-.usage-page .uc-grow-arc {
-  animation: uc-arc var(--uc-grow-dur) linear both;
-  animation-delay: calc(var(--d) * var(--uc-grow-dur));
-  animation-duration: calc(var(--f) * var(--uc-grow-dur));
-}
-@keyframes uc-arc {
-  from {
-    stroke-dasharray: 0 var(--c);
-  }
-  to {
-    stroke-dasharray: var(--len) var(--c);
   }
 }
 

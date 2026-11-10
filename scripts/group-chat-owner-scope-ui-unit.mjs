@@ -52,8 +52,7 @@ const api = {
   readGroupChatMessage: record("readFull", (_id, input) => ({ page: resultPage(fullAnswer, input) })),
   reconcileGroupChatExecution: record("reconcile", () => view),
   retryGroupChatTurn: record("retry", () => view),
-  addGroupChatMember: record("add", () => view),
-  removeGroupChatMember: record("remove", () => view),
+  updateGroupChatMembers: record("roster", () => view),
   getGroupChatMemberRole: record("role", (_id, _memberId, query = {}) => {
     const id = query.cursor?.split(":")[0] ?? (query.revision === "old" ? "old" : "current");
     const text = id === "old" ? oldRoleSource : roleSource;
@@ -64,7 +63,6 @@ const api = {
   getGroupChatMemberRoleHistory: record("roleHistory", () => ({ snapshots: [{ id: "old", sourceRevision: 1 }], hasMore: false, nextCursor: null })),
   respondGroupChatInteraction: record("respond", () => view),
   stopGroupChatDiscussion: record("stop", () => view),
-  stopGroupChatMember: record("stopMember", () => view),
   updateGroupChat: record("update", () => view),
   deleteGroupChat: record("deleteGroup", () => ({ groupId: "g", status: "deleting" })),
   testGroupChatHost: record("testPeer", peer => ({ ...peer, groupTools: true, workspaces: true, artifacts: true })),
@@ -108,6 +106,7 @@ function load(relative) {
       if (name.endsWith("/lib/groupPanelObserver")) return { createGroupPanelObserver(options) {
         observers.push(options); return load("src/lib/groupPanelObserver.ts").createGroupPanelObserver(options);
       } };
+      if (name.endsWith("/lib/useScrollFade")) return load("src/lib/useScrollFade.ts");
       if (name.endsWith("/lib/turnTimeline")) return load("src/lib/turnTimeline.ts");
       if (name.endsWith("/groupReferenceExcerpt")) return load("src/lib/groupReferenceExcerpt.ts");
       if (name.endsWith("/lib/groupReply")) return load("src/lib/groupReply.ts");
@@ -135,8 +134,11 @@ function load(relative) {
           disabled: props.disabled, onChange: event => props.onChange(event.target.checked) })),
       };
       if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader")) return passthrough("i");
+      if (name.endsWith("/components/AgentPicker")) return load("src/components/AgentPicker.tsx");
+      if (name.endsWith("/components/BackendTabIcon")) return load("src/components/BackendTabIcon.tsx");
       if (name.endsWith("/components/TurnTimeline/TurnTimeline")) return passthrough("ol");
       if (name.endsWith("/components/TurnTimeline/TurnProcess")) return { getTurnProcessStats: () => ({}), TurnProcessSummary: () => null };
+      if (name.endsWith("/components/TurnTimeline/trajectoryIcons")) return load("src/components/TurnTimeline/trajectoryIcons.tsx");
       if (name.endsWith("/components/ChatFileButton")) return load("src/components/ChatFileButton.tsx");
       if (name.endsWith("/components/AgentSoulDocument")) return load("src/components/AgentSoulDocument.tsx");
       if (name.endsWith("/components/ChatMarkdown") || name === "./ChatMarkdown") return passthrough("p");
@@ -267,7 +269,7 @@ const changeOwner = async (owner = "owner-b", name = "OWNER_B", nextMessages = [
   await refresh();
   assert.ok(text().includes(name), "authoritative view observed the new owner");
 };
-const noWrites = () => assert.equal(calls.filter(call => ["send", "stop", "stopMember", "update", "respond", "retry", "remove", "add", "modelSave"].includes(call.name)).length, 0);
+const noWrites = () => assert.equal(calls.filter(call => ["send", "stop", "update", "respond", "retry", "roster", "modelSave"].includes(call.name)).length, 0);
 let passed = 0; const failures = [];
 const test = async (name, fn) => {
   try { await fn(); passed++; console.log(`ok ${passed} - ${name}`); }
@@ -287,11 +289,14 @@ await test("timeline full-message preview closes when owner changes", async () =
 });
 await test("late stop response cannot replace a newly observed owner", async () => {
   await setup(); await act(async () => renderer.unmount()); renderer = null;
-  view.round = { id: "round", causeMessageId: "m1", order: [] }; await mount();
+  view.activeTurns = [{ opportunityId: "op", memberId: "a", startedAt: 1, floor: true, released: false }]; await mount();
   const pending = deferred(), old = plain(view); handler.set("stop", () => pending.promise);
   await click(buttons("groupChat.stop")[0]); await changeOwner();
+  assert.equal(buttons("groupChat.stop")[0].props.disabled, false, "the new owner can stop its own active turns");
   handler.set("getGroupChat", () => new Promise(() => {}));
-  pending.resolve({ ...old, group: { ...old.group, name: "STALE_CONTROL" } }); await flush();
+  pending.resolve({ ...old, group: { ...old.group, name: "STALE_CONTROL" }, activeTurns: [] }); await flush();
+  assert.equal(buttons("groupChat.stop")[0].props.disabled, false);
+  assert.equal(renderer.root.findAllByProps({ "data-group-execution": "op" }).length, 1);
   assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_CONTROL")); assert.equal(named("stop").length, 1); assert.equal(named("send").length, 0);
 });
 await test("late Panel run response is fenced even after owner A to B to A", async () => {
@@ -343,13 +348,30 @@ await test("retired details-menu removal cannot post after an owner leaves and r
   await act(async () => remove()); await flush(); noWrites();
   assert.equal(renderer.root.findAllByProps({ role: "menu" }).length, 0);
 });
+await test("a delayed member removal confirmation cannot write after an owner transition", async () => {
+  await setup();
+  const pending = deferred(); handler.set("confirm", () => pending.promise);
+  await removeFromDetails(); await flush();
+  assert.equal(named("confirm").length, 1); noWrites();
+  await changeOwner(); pending.resolve(true); await flush(); noWrites();
+});
+await test("a roster change while editing requires a fresh review before saving", async () => {
+  await setup(); await groupAction("add");
+  await click(renderer.root.findAllByType("button").find(node => node.props.role === "checkbox"));
+  assert.equal(buttons("common.confirm")[0].props.disabled, false);
+  view = { ...view, group: { ...view.group, rosterRevision: 8 } };
+  await refresh();
+  assert.ok(text().includes("groupChat.members.rosterChanged"));
+  assert.equal(buttons("common.confirm")[0].props.disabled, true);
+  await click(buttons("common.confirm")[0]); noWrites();
+});
 await test("late member-card removal cannot publish or close after an owner change", async () => {
   await setup(); const card = await mountLegacyMemberCard();
-  const pending = deferred(), old = plain(view); handler.set("remove", () => pending.promise);
+  const pending = deferred(), old = plain(view); handler.set("roster", () => pending.promise);
   const remove = card.root.findAllByType("button").find(node => node.children.includes("groupChat.members.remove")).props.onClick;
   await act(async () => { remove(); remove(); });
-  assert.equal(named("remove").length, 1, "rapid clicks submit only once");
-  assert.equal(named("confirm").length, 0);
+  assert.equal(named("roster").length, 1, "rapid clicks submit only once");
+  assert.equal(named("confirm").length, 1);
   await changeOwner("owner-b", "OWNER_B", [message(3, { kind: "member", memberId: "b" }, "New owner reply")]);
   pending.resolve({ ...old, group: { ...old.group, name: "STALE_REMOVAL" } }); await flush();
   assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_REMOVAL"));
@@ -357,8 +379,8 @@ await test("late member-card removal cannot publish or close after an owner chan
 });
 await test("late details-menu removal cannot replace a new owner", async () => {
   await setup(); const pending = deferred(), old = plain(view);
-  handler.set("remove", () => pending.promise); await removeFromDetails(); await flush();
-  assert.equal(named("remove").length, 1);
+  handler.set("roster", () => pending.promise); await removeFromDetails(); await flush();
+  assert.equal(named("roster").length, 1);
   await changeOwner(); handler.set("getGroupChat", () => new Promise(() => {}));
   pending.resolve({ ...old, group: { ...old.group, name: "STALE_REMOVAL" } }); await flush();
   assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_REMOVAL"));
@@ -390,24 +412,6 @@ await test("a visible model choice can be saved while its menu refreshes the cat
   assert.equal(named("modelSave").length, 1, "refresh cannot silently discard a visible choice");
   assert.deepEqual(JSON.parse(JSON.stringify(named("modelSave")[0].args[1].modelSelection)), { model: "model-b", provider: "codex" });
   pending.resolve({ models: [], defaultModel: "model-a" }); await flush();
-});
-await test("late member-stop response cannot overwrite the current owner or hide its current turn", async () => {
-  await setup(); await act(async () => renderer.unmount()); renderer = null;
-  view.activeTurns = [{ opportunityId: "op", memberId: "a", startedAt: 1,
-    floor: true, released: false,
-    recovery: { type: "execution", reason: "GROUP_TURN_EXECUTION_UNCONFIRMED", since: 1, cancelRequested: false } }];
-  messages = [message(7, { kind: "member", memberId: "a" }, "OLD_OWNER_PARTIAL", { origin: { opportunityId: "op", partial: true } })];
-  await mount(); const old = plain(view), pending = deferred(); handler.set("stopMember", () => pending.promise);
-  await click(renderer.root.find(node => node.type === "button" && node.props["data-group-stop-turn"] === "op"));
-  view = { ...plain(view), ownerScope: "owner-b", group: { ...view.group, name: "OWNER_B" } };
-  messages = [message(7, { kind: "member", memberId: "a" }, "NEW_OWNER_PARTIAL", { origin: { opportunityId: "op", partial: true } })];
-  await refresh();
-  assert.ok(text().includes("NEW_OWNER_PARTIAL"));
-  assert.equal(renderer.root.findAll(node => node.type === "button" && node.props["data-group-stop-turn"] === "op").length, 1,
-    "an old owner's pending stop cannot hide the new owner's action on real content");
-  pending.resolve({ ...old, group: { ...old.group, name: "STALE_STOP" } }); await flush();
-  assert.ok(text().includes("OWNER_B")); assert.ok(!text().includes("STALE_STOP")); assert.equal(named("stopMember").length, 1);
-  assert.equal(named("reconcile").length, 0, "reconciliation no longer depends on a manual UI action");
 });
 await test("late settings save cannot close settings reopened by the new owner", async () => {
   await setup(); await groupAction("settings"); const pending = deferred(), old = plain(view);

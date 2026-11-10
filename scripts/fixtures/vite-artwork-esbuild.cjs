@@ -12,6 +12,8 @@ function viteArtworkFixturePlugin(root) {
   const ts = createRequire(path.join(ui, "package.json"))("typescript");
   const assetRoot = path.join(ui, "src/assets") + path.sep;
   return { name: "vite-local-artwork-fixture", setup(builder) {
+    // Vite serves these CSS font URLs from public/ at runtime.
+    builder.onResolve({ filter: /^\/fonts\// }, ({ path, kind }) => kind === "url-token" ? { path, external: true } : undefined);
     builder.onLoad({ filter: /[/\\](?:bundledMcpIcons\.ts|ProviderLogo\.tsx)$/ }, ({ path: file }) => {
       const source = fs.readFileSync(file, "utf8");
       const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);

@@ -3,7 +3,8 @@
 const crypto = require("node:crypto");
 const { core } = require("./host.cjs");
 const { ActiveMemoryRuntime } = require("./active-memory-runtime.cjs");
-const { workspaceMemoryRefs, hasSecret } = require("../memory-engine");
+const { workspaceMemoryRefs } = require("../memory-workspace");
+const { hasSecret } = require("../memory-content");
 const { sha256 } = require("./migration.cjs");
 const { serviceError } = require("../security");
 const { TurnMemo } = require("../turn-memo");
@@ -100,8 +101,8 @@ class ActiveMemory {
     return { session, messages, recentTurns: core.extractActiveMemoryRecentTurns(messages) };
   }
   queryProvenance(input, session) {
-    const user = this.service.transcriptStore.listEvents(input.profile.id, session.id)
-      .filter(event => event.kind === "user" && event.runId === input.run.id).at(-1);
+    const events = require("../transcript-read").readEvents(this.service.transcriptStore, input.profile.id, session.id);
+    const user = events.findLast(event => event.kind === "user" && event.runId === input.run.id);
     const event = user?.content?.contextRef
       ? this.service.transcriptStore.contextEvent(input.profile.id, session.id, user) : user;
     this.service.transcriptStore.assertJournalCurrent?.(input.profile.id, session.id);

@@ -23,17 +23,116 @@
   white-space: nowrap;
 }
 
-/* 主模型行：provider / model 两级 + 应用；未配置态换成 Key 粘贴或设置按钮 */
+/* 主模型复用原生菜单；提供方设置按需展开，避免占用默认选择路径。 */
 .mainRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  margin: 0.4rem 0 0.2rem;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
 }
-/* Field 的 Select 根是 width:100%（表单纵排场景）；这里是横排工具行，按内容
-   自适应收窄。锚 role=combobox 是 base-ui Select 的 ARIA 契约，不锚 hash 类名。 */
+
+.mainProvider,
+.mainSelection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mainSelection {
+  flex-wrap: nowrap;
+}
+
+.mainSetup {
+  flex-wrap: wrap;
+}
+
+.providerSetup {
+  flex-basis: 100%;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.providerSetup > summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.providerSetupBody {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+/* 概览选择框与名称、默认模型共用按内容收拢的 40px 全圆角线框。 */
 .mainRow [role="combobox"],
+.overviewDefaults [role="combobox"] {
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 40px;
+  gap: 12px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  background: transparent;
+  font-size: 15px;
+  line-height: 24px;
+}
+
+.mainRow [role="combobox"]:hover:not(:disabled),
+.overviewDefaults [role="combobox"]:hover:not(:disabled) {
+  border-color: light-dark(rgba(0, 0, 0, 0.22), rgba(255, 255, 255, 0.3));
+  background: light-dark(rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.04));
+}
+
+.mainRow [role="combobox"]::after,
+.overviewDefaults [role="combobox"]::after {
+  content: "";
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  background: var(--muted);
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4' fill='none' stroke='black' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.mainRow [role="combobox"]:focus-visible,
+.overviewDefaults [role="combobox"]:focus-visible {
+  outline: none;
+  border-color: var(--ui-text-1);
+  box-shadow: none;
+}
+
+.mainRow .mainSelection > :global(.ui-cbtn) {
+  flex: none;
+  height: auto;
+  min-height: 40px;
+  padding: 7px 20px;
+  border-radius: 999px;
+  font-size: 15px;
+  line-height: 24px;
+}
+
+.overviewDefaults {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  gap: 16px 28px;
+  min-width: 0;
+}
+
+.reasoningField,
+.fastField {
+  gap: 8px;
+}
+
 .auxEdit [role="combobox"],
 .moaToolbar [role="combobox"],
 .moaSlotRow [role="combobox"] {
@@ -43,11 +142,15 @@
 }
 .keyInput {
   flex: 1 1 16rem;
-  min-width: 12rem;
+  min-width: min(100%, 12rem);
+  max-width: 100%;
+  min-height: 40px;
+  border-radius: 999px;
+  background: transparent;
 }
-.currentNote {
-  font-size: 0.78rem;
-  color: var(--muted);
+.fastField > label {
+  align-self: flex-start;
+  min-height: 40px;
 }
 
 .defaultsRow {

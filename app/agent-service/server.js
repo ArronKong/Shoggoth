@@ -818,11 +818,12 @@ function createAgentService(options) {
   let lifecycleState = "stopped";
   // Records loop blocks long enough for the App to report a lost Service.
   const stallMonitor = options.stallMonitor || createServiceStallMonitor({ paths });
+  const sendLatency = options.sendLatencyDiagnostics || new (require("./send-latency-diagnostics").SendLatencyDiagnostics)({ paths, version: serviceVersion });
   let activeRuntimeRequests = 0;
   let lifecycleGeneration = 0;
   let mcpTransportReady = false;
   const runtimeTelemetry = new (require("./runtime-telemetry").RuntimeTelemetry)({ now: options.now,
-    sink: event => eventBuffer.append(event.name, event) });
+    sink: event => { eventBuffer.append(event.name, event); if (event.name === "runtime.stage") sendLatency.record(event); } });
   const externalCryptoBroker = options.cryptoBroker || options.mcpCryptoBroker || null;
   const mcpAuthSecretStore = options.mcpAuthSecretStore || (externalCryptoBroker ? null
     : new McpAuthSecretStore({
@@ -844,6 +845,8 @@ function createAgentService(options) {
   });
   const temporarySecrets = options.temporarySecrets || new (require("./temporary-secret-store").TemporarySecretStore)({
     paths, cryptoBroker: mcpCryptoBroker, now: options.now,
+    // Pause heuristic discovery in chat while preserving explicit selections and known values.
+    autoDetect: options.autoDetectChatSecrets === true,
     getKnownSecrets: scope => {
       if (!nativeMcpStoreOpened || typeof secretStore.sensitiveValues !== "function") return [];
       const refs = nativeMcpStore.list().servers.filter(server => nativeMcpStore.isAvailable(server.id, scope.profileId))
@@ -1148,6 +1151,7 @@ function createAgentService(options) {
     const registry = new RuntimeAdapterRegistry({
       // Retire a proven-idle Binding after 120 seconds; 0 keeps hosts until stopped.
       idleTimeoutMs: options.runtimeIdleTimeoutMs ?? 120_000,
+      now: options.now,
       onProtocolViolation: event => runtimeTelemetry.record("runtime.handle.violation", {
         source: event.runtime, reason: event.code, stage: event.type }),
       onCapabilityDifference: event => runtimeTelemetry.record("runtime.capability.difference", {
@@ -1959,7 +1963,6 @@ function createAgentService(options) {
     projectText: (input, text) => require("../core/chat-secret-fallback").projectTextOrOriginal(temporarySecrets, { profileId: input.profile.id,
       sessionId: workRunCoordinator?.getRunSessionKey(input.run) || input.transcriptSessionId
         || (input.run.source === "proactive" ? input.run.sourceId : `${input.run.source}:${input.run.sourceId}`) }, text),
-    defaultWorkspaceDir: paths.defaultWorkspaceDir,
     proactiveConversation: { read: profileId => {
       const target = proactiveStore.getTarget(profileId);
       return target?.sessionKey && !target.deleted
@@ -2392,7 +2395,42 @@ function createAgentService(options) {
   const runtimeExtensionStatusController = createRuntimeExtensionStatusController({
     productStore, extensionCatalog, extensionRuntimeAdapters, runtimeManager,
   });
+  const chatPreparation = new (require("./native-chat-preparation").NativeChatPreparation)({
+    runtimeManager, now: options.now, telemetry: runtimeTelemetry,
+    warmMemory: profileId => shoggothMemory?.scheduleIndexWarm(profileId),
+    resolve: ({ profileId, sessionKey }) => {
+      if (lifecycleState !== "started") return null;
+      const session = chatSessionStore.getSession(sessionKey);
+      if (!session || profileId && session.profileId !== profileId || !["draft", "ready"].includes(session.status)) return null;
+      const profile = productStore.resolveAgentRuntimeProfile(session.profileId, session.runtimeBindingId ?? undefined);
+      if (!profile.enabled) return null;
+      const binding = runtimeBinding({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
+        runtimeAccountId: profile.runtimeAccountId });
+      const account = runtimeAccountAdmission.read(binding.runtimeAccountId);
+      if (account.mutationActive || account.backoffUntil > (options.now || Date.now)() || runtimeLoginActive(binding.runtimeAccountId)) return null;
+      const providerRef = session.modelProviderRef
+        ? require("./codex-session-provider").resolveProviderSelection(productStore, profile, session.modelProviderRef) : undefined;
+      const route = captureExecutionProviderRoute({ productStore, secretStore, profile,
+        modelRef: session.modelOverride ?? profile.defaultModel, providerRef });
+      const generation = lifecycleGeneration;
+      const assertCurrent = () => {
+        if (lifecycleState !== "started" || lifecycleGeneration !== generation
+          || chatSessionStore.getSession(sessionKey)?.revision !== session.revision) throw serviceError("SESSION_BUSY", "Preparation expired");
+        const current = runtimeAccountAdmission.read(binding.runtimeAccountId);
+        if (current.mutationActive || current.backoffUntil > (options.now || Date.now)()
+          || current.generation !== account.generation || runtimeLoginActive(binding.runtimeAccountId)) {
+          throw serviceError("SESSION_BUSY", "Account changed");
+        }
+        assertExecutionProviderRouteCurrent(route, { productStore, secretStore });
+      };
+      return { profileId: profile.id, binding, assertCurrent,
+        identity: [route, session.revision, account.generation],
+        options: { permissionPolicy: profile.permissionPolicy,
+          executionContract: Object.freeze({ ...route, ...binding, profileId: profile.id }) } };
+    },
+  });
   const createDefaultWorkRunCoordinator = () => createWorkRunCoordinator({
+    prepareChatRuntime: input => chatPreparation.prepare(input),
     temporarySecrets,
     ...(shoggothMemory ? { beforeMemoryCompaction: input => shoggothMemory.flushBeforeCompaction(input) } : {}),
     hookService, hookWorkspaceWriters,
@@ -2438,7 +2476,6 @@ function createAgentService(options) {
     }),
     resolveRunSession: (run) => inspirationStore.executionForRun(run.id),
     assertProactiveRunCurrent: run => proactiveService.assertRunCurrent(run),
-    submitProactiveResponse: (run, response) => proactiveService.respond(run, response),
     proactiveModelUsage: (run, measured) => proactiveService.modelUsage(run, measured),
     productMcpApprovalPolicy,
     onRunInteraction: handleRunInteraction,
@@ -2447,6 +2484,7 @@ function createAgentService(options) {
     validateRunCompletion: (run, report) => codexMemoryImportService?.completionError(run, report) ?? null,
     onTranscriptCommitted: (_event, run) => {
       conversationRecallService.scheduleWarm(run.profileId);
+      if (["user", "assistant"].includes(_event?.kind)) shoggothMemory?.scheduleIndexWarm(run.profileId);
     },
     verifyMemoryExtractionSource: ({ profileId, sessionId, events }) => {
       // Candidate prompts are frozen before a Runtime is acquired. A forget,
@@ -2477,6 +2515,7 @@ function createAgentService(options) {
       if (!ownActive) await codexDesktopSessionController?.assertSendable(input.sessionKey);
       setChatSendDiagnosticPhase("runtime_selection");
       const selected = await sessionRuntimeController.selectForSend(input);
+      void chatPreparation.prepare(input).catch(() => {});
       if (shoggothMemory && !workRunCoordinator.listSessionRuns(input.sessionKey).some(run =>
         ["starting", "running", "waiting_approval", "waiting_input"].includes(run.status))) {
         const session = chatSessionStore.getSession(input.sessionKey);
@@ -2586,6 +2625,14 @@ function createAgentService(options) {
   }
   const conversationRecallService = options.conversationRecallService || new ConversationRecallService({
     paths, transcriptStore, chatSessionStore, workDispatcher, memoryStore,
+    isProactiveRunCurrent: run => {
+      try {
+        const current = workDispatcher.getRun(run.id);
+        if (current?.source !== "proactive" || !["starting", "running"].includes(current.status)
+          || current.profileId !== run.profileId || current.sourceId !== run.sourceId) return false;
+        proactiveService.assertRunCurrent(current); return !!sourceConversationStore.get(current.id);
+      } catch { return false; }
+    },
     getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
     recallPolicy: memoryEngine.recallPolicy,
     semanticSearch: nativeMemorySemanticService,
@@ -2719,7 +2766,11 @@ function createAgentService(options) {
   const inspirationReminders = new InspirationReminderService({ inspirationStore, inspirationService,
     proactiveStore, now: options.now });
   const proactiveVerifier = new (require("./proactive-runtime-verifier").ProactiveRuntimeVerifier)({ store: proactiveStore,
-    productStore, codexAdapter: codexRuntimeAdapter, runtimeManager, now: options.now });
+    productStore, codexAdapter: codexRuntimeAdapter, runtimeManager, now: options.now,
+    getMainSession: profileId => {
+      const target = proactiveStore.getTarget(profileId);
+      return target?.sessionKey && !target.deleted ? chatSessionStore.getSession(target.sessionKey) : null;
+    } });
   let proactiveCliFacts = { at: -Infinity, rows: [] };
   const proactiveProfileAvailable = profile => {
     if (options.proactiveProfileAvailable) return options.proactiveProfileAvailable(profile);
@@ -2732,6 +2783,7 @@ function createAgentService(options) {
     return proactiveCliFacts.rows.some(row => row.runtimeAccountId === profile.runtimeAccountId && row.binaryPath !== null);
   };
   const noticeDelivery = new NoticeDeliveryController({ store: proactiveStore, productStore, chatSessionStore, transcriptStore,
+    resolveRunSession: runId => workRunCoordinator.getRunSessionKey(runId),
     resolveWorkspace: (profileId, sessionOperationId) => resolveProfileWorkspace({ paths,
       profile: productStore.getAgentProfile(profileId), requested: null, sessionOperationId, errorCode: "PROACTIVE_PROFILE_UNAVAILABLE" }),
     readConfig: () => browserConfigStore.read(), isFocused: async () => {
@@ -2747,7 +2799,14 @@ function createAgentService(options) {
   const heartbeatDocuments = new HeartbeatDocumentStore({ paths, productStore });
   const dailyReviewDocuments = new DailyReviewDocumentStore({ paths, productStore });
   const proactiveService = new ProactiveService({ store: proactiveStore, productStore, dispatcher: workDispatcher,
+    sourceConversationStore,
     isContextCurrent: run => {
+      const binding = sourceConversationStore.get(run.id);
+      if (binding) {
+        const target = proactiveStore.getTarget(run.profileId), session = chatSessionStore.getSession(binding.sessionKey);
+        if (!session || !["draft", "binding", "ready"].includes(session.status) || session.profileId !== run.profileId
+          || session.workspace !== run.workspace || target?.deleted || target?.sessionKey !== binding.sessionKey) return false;
+      }
       if (!run.contextSnapshotId) return true;
       try {
         const snapshot = contextSnapshotStore.get(run.profileId, run.contextSnapshotId);
@@ -3205,6 +3264,15 @@ function createAgentService(options) {
       conversationDefinitionService: new ConversationDefinitionService({
         definitionStore: agentDefinitionStore, productStore, transcriptStore, chatSessionStore,
         memoryDefinitionLinks: memoryEngine.definitionLinks,
+        heartbeatRules: {
+          read: async (profileId) => (await proactiveService.handle("proactive.document.get", { profileId })).document,
+          write: async (profileId, content, expectedRevision) => (await proactiveService.handle("proactive.document.set",
+            { profileId, content, expectedRevision })).document,
+        },
+        ...(memoryEngine.owner === "shoggoth-memory-core" ? { memoryFiles: {
+          read: (profileId, kind) => memoryEngine.readCanonical(profileId, kind),
+          write: (input) => memoryEngine.writeDocument(input),
+        } } : {}),
         agentLifecycleService: agentLifecycleServiceController,
         getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
         onProfileRenamed: (profileId) => {
@@ -4470,7 +4538,7 @@ function createAgentService(options) {
       } catch { errorResponse(socket, id, "RUNTIME_EXTENSION_STATUS_INVALID", "Runtime extension status is unavailable"); return; }
     } else if (require("./chat-secret-service").METHODS.includes(request.method)) {
       try {
-        result = await withChatSendDiagnostics({ paths, method: request.method, input: request.params }, async () => {
+        result = await withChatSendDiagnostics({ paths, method: request.method, input: request.params, latency: sendLatency }, async () => {
           if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("SECRET_INPUT_INVALID", "Invalid envelope");
           setChatSendDiagnosticPhase("secret_preparation");
           return chatSecretService.handle(request.method, request.params);
@@ -4481,6 +4549,12 @@ function createAgentService(options) {
         writeResponse(socket, { id: id ?? null, ok: false, error: { code, message: messages[code],
           ...(code === "SECRET_INPUT_REVIEW_REQUIRED" ? { ranges: error.ranges } : {}) } }); return;
       }
+    } else if (request.method === "chat.session.prewarm") {
+      try {
+        if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("INVALID_PARAMS", "Invalid preparation request");
+        const params = require("./session-runtime-protocol").validateSessionRuntimeParams("chat.session.runtime.get", request.params);
+        result = await chatPreparation.prepare(params);
+      } catch { result = { supported: true, state: "unavailable" }; }
     } else if (request.method === "runtime.observability.get") {
       if (!exactObject(request, ["id", "token", "version", "method", "params"]) || !exactObject(request.params, [])) {
         errorResponse(socket, id, "INVALID_PARAMS", "Invalid diagnostics request"); return;
@@ -4773,7 +4847,7 @@ function createAgentService(options) {
       }
     } else if (CHAT_SERVICE_METHOD_SET.has(request.method)) {
       try {
-        result = await withChatSendDiagnostics({ paths, method: request.method, input: request.params }, async () => {
+        result = await withChatSendDiagnostics({ paths, method: request.method, input: request.params, latency: sendLatency }, async () => {
           const canonical = validateChatServiceRequest(request);
           setChatSendDiagnosticPhase("controller");
           const handled = await chatServiceController.handle(canonical.method, canonical.params, canonical.id);
@@ -5084,6 +5158,8 @@ function createAgentService(options) {
       if (lifecycleState === "stop_failed") return stopping;
 
       lifecycleState = "starting";
+      chatPreparation.open();
+      sendLatency.open?.();
       recoveryDiagnosticWritten = false;
       const generation = ++lifecycleGeneration;
       // 先发布 singleflight promise，再在下一个 microtask 进入 startup；这样即使
@@ -5689,6 +5765,7 @@ function createAgentService(options) {
 
   async function cleanupService(stopOptions = {}) {
     stallMonitor.stop();
+    await chatPreparation.close();
     chatUiController.stopLifecycle();
     const errors = [];
     // Admission is already fenced by stop(). Revoke long-lived MCP channels
@@ -6020,6 +6097,7 @@ function createAgentService(options) {
     } catch (error) {
       errors.push(error);
     }
+    await sendLatency.close();
     ownedTokenIdentity = null;
     try {
       const socketStat = cleanupLstatIfExists(paths.socketPath);

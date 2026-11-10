@@ -1,4 +1,5 @@
 import AgentAvatarView from "../components/AgentAvatar";
+import agentCardBrand from "../assets/agent-card-brand.svg";
 import {
   lazy,
   Suspense,
@@ -21,7 +22,6 @@ import type {
   UnifiedAgent,
   UnifiedAgentDetail,
   UnifiedCronJob,
-  UnifiedModel,
 } from "../types";
 import {
   ApiError,
@@ -31,7 +31,6 @@ import {
   getAgent,
   getAgentDefinition,
   getAgentFile,
-  getModelCatalog,
   getRuntimeStatuses,
   importAgentDefinition,
   listAgents,
@@ -47,18 +46,21 @@ import {
   setCronEnabled,
   updateAgent,
 } from "../api/client";
-import {
-  readModelCatalog,
-  revalidateModelCatalog,
-  subscribeModelCatalog,
-} from "../model-catalog-store";
 import ChatModelMenu from "./ChatModelMenu";
+import { sortBackendTabs } from "../components/BackendTabIcon";
 import BackendTabs from "../components/BackendTabs";
 import FilterTabs from "../components/FilterTabs";
-import { cronForceRunResumesPaused, useBackendCatalog, useBackendState } from "../lib/backends";
+import {
+  cronForceRunResumesPaused,
+  resolveBackendAlias,
+  SHOGGOTH_BACKEND,
+  useBackendCatalog,
+  useEnabledBackends,
+} from "../lib/backends";
 import Modal, { ModalSection } from "../components/Modal";
 import { Field, Option, Select, Switch, TextInput } from "../components/Field";
 import { usePageCache } from "../lib/usePageCache";
+import { useAgentModelCatalog } from "../lib/useAgentModelCatalog";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { useStickyState } from "../lib/useStickyState";
 import { useNavigationGuard, useNavigationRequest } from "../lib/navigation-guard";
@@ -70,9 +72,7 @@ import AgentDefaultModel from "./agents/AgentDefaultModel";
 import { useAgentModelSettings } from "./agents/useAgentModelSettings";
 import AgentMainModelField from "./agents/AgentMainModelField";
 import AgentModelCards from "./agents/AgentModelCards";
-import EmojiField from "./agents/EmojiField";
 import AgentMemoryEditor from "./agents/AgentMemoryEditor";
-import { visibleAgentFiles } from "../lib/agentFiles";
 import { codexScheduleLabel } from "../lib/codexAutomationSchedule";
 import s from "./AgentsPage.module.css";
 
@@ -84,6 +84,14 @@ type Tab = "overview" | "setup" | "memory" | "history" | "tools" | "computer" | 
 const HIDDEN_NATIVE_TABS = new Set<Tab>(["memory", "history", "tools", "computer"]);
 // Keep definition persistence and editing available while hiding version management.
 const SHOW_DEFINITION_MANAGEMENT = false;
+// Keep the saved fallback chain while showing only the primary model in overview.
+const SHOW_OVERVIEW_FALLBACKS = false;
+const SHOW_HEARTBEAT_SETTINGS = false;
+const SETUP_FILE_ORDER = new Map([
+  ["SOUL.MD", 0],
+  ["USER.MD", 1],
+  ["HEARTBEAT.MD", 2],
+]);
 
 type LifecycleRetryOperation = { target: string; operationId: string; createdAt: number };
 const RETRYABLE_LIFECYCLE_CODES = new Set([
@@ -141,8 +149,15 @@ export default function AgentsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedBackend = searchParams.get("backend") || undefined;
   const requestedAgent = searchParams.get("agent");
-  const [backend, setBackend, availableBackends] = useBackendState("agents", requestedBackend, { surface: "agents" });
   const backendCatalog = useBackendCatalog("agents");
+  const availableBackends = useEnabledBackends("agents");
+  // Backend selection lasts for this visit. A plain /agents entry starts at the first visible tab.
+  const [selectedBackend, setBackend] = useState(requestedBackend);
+  const preferredBackend = selectedBackend && resolveBackendAlias(selectedBackend, backendCatalog);
+  const firstBackend = sortBackendTabs(backendCatalog).find(({ id }) => availableBackends.includes(id));
+  const backend = preferredBackend && availableBackends.includes(preferredBackend)
+    ? preferredBackend
+    : firstBackend?.id ?? SHOGGOTH_BACKEND.id;
   const backendDescriptors = useMemo(
     () => new Map(backendCatalog.map((descriptor) => [descriptor.id, descriptor])),
     [backendCatalog],
@@ -150,10 +165,11 @@ export default function AgentsPage() {
   const activeBackendDescriptor = backendDescriptors.get(backend);
   const backendName = activeBackendDescriptor?.name || backend;
   const hasAgentHarness = activeBackendDescriptor?.surfaces.agentHarness === true;
+  const hasRuntimeBindings = activeBackendDescriptor?.surfaces.runtimeBindings === true;
   const hasManagedFiles = activeBackendDescriptor?.surfaces.agentFiles === true;
   const agentLifecycle = activeBackendDescriptor?.agentLifecycle;
   const canCreateAgent = agentLifecycle?.create === true;
-  const canChooseCreateRuntime = canCreateAgent && activeBackendDescriptor?.surfaces.runtimeBindings === true;
+  const canChooseCreateRuntime = canCreateAgent && hasRuntimeBindings;
   const canUpdateAgent = agentLifecycle?.update === true;
   const canRemoveAgent = agentLifecycle?.remove === true;
   const canArchiveAgent = agentLifecycle?.archive === true;
@@ -163,22 +179,24 @@ export default function AgentsPage() {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<UnifiedAgentDetail | null>(null);
-  const setupFiles = useMemo(() => detail?.setupFiles ?? visibleAgentFiles(detail?.files), [detail]);
+  const setupFiles = useMemo(() => (detail?.setupFiles ?? detail?.files ?? [])
+    .filter((file) => SETUP_FILE_ORDER.has(file.name.toUpperCase()))
+    .sort((left, right) => SETUP_FILE_ORDER.get(left.name.toUpperCase())! - SETUP_FILE_ORDER.get(right.name.toUpperCase())!), [detail]);
   const [detailLoading, setDetailLoading] = useState(false);
   const [savedTab, setTab] = useStickyState<Tab>("agents.tab", "overview");
   // 旧缓存也先回到概览，避免隐藏页签的内容闪现或触发数据加载。
   const tab = HIDDEN_NATIVE_TABS.has(savedTab) ? "overview" : savedTab;
 
   // overview edit
-  const [form, setForm] = useState<{ name: string; model: string; emoji: string; fallbacks: string[] }>({
+  const [form, setForm] = useState<{ name: string; model: string; fallbacks: string[] }>({
     name: "",
     model: "",
-    emoji: "",
     fallbacks: [],
   });
   const [savingOverview, setSavingOverview] = useState(false);
   const [overviewNameConflict, setOverviewNameConflict] = useState<string | null>(null);
   const overviewNameErrorId = useId();
+  const overviewModelLabelId = useId();
   const overviewNameInvalid = overviewNameConflict === form.name;
 
   // files（Setup 页签）。阅读态点击进入编辑态，Esc 放弃、Save 写回。
@@ -212,10 +230,6 @@ export default function AgentsPage() {
 
   // 定时任务按需加载。
   const [agentCron, setAgentCron] = useState<UnifiedCronJob[] | null>(null);
-
-  // 模型目录（Overview 的模型选择器）——与聊天页同一个共享 revision store
-  const [models, setModels] = useState<UnifiedModel[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
 
   // create
   const [creating, setCreating] = useState(false);
@@ -253,6 +267,7 @@ export default function AgentsPage() {
   const toast = useToast();
   const confirm = useConfirm();
   const { t } = useTranslation();
+  const createLabel = t(backend === "hermes" ? "agents.newProfile" : "agents.newAgent");
   const requestNavigation = useNavigationRequest();
 
   // Hermes 的 updateAgent 只支持改名（模型等配置属于 profile，由本页概览的
@@ -268,9 +283,11 @@ export default function AgentsPage() {
   // 刷新同时重拉 per-agent 模型设置面快照（同 ModelsPage 的 doRefresh 口径）。
   // 回传 refresh 的 promise：导航栏刷新要等数据落地才弹 toast。
   const [modelReload, setModelReload] = useState(0);
+  const agentModelCatalog = useAgentModelCatalog(backend, detail?.id || "", { enabled: modelEditable });
+  const { models, loading: modelsLoading } = agentModelCatalog;
   const doRefresh = () => {
     setModelReload((n) => n + 1);
-    return refresh().then(() => undefined);
+    return Promise.all([refresh(), agentModelCatalog.refresh()]).then(() => undefined);
   };
   useRegisterPageRefresh("/agents", doRefresh);
   useRegisterPageLoading("/agents", loading);
@@ -310,7 +327,6 @@ export default function AgentsPage() {
       setForm({
         name: d.name || "",
         model: d.model || "",
-        emoji: d.emoji || "",
         fallbacks: d.fallbacks || [],
       });
     } catch (e) {
@@ -370,9 +386,14 @@ export default function AgentsPage() {
     onMainModelChanged: () => void reloadDetail(),
     // 凭证与自定义端点是跨 agent 的全局层 → 引导跳模型页对应区（走 guard，带未保存提醒）。
     onNavigate: (section) => {
-      requestNavigation(`/models?section=${section}`);
+      requestNavigation(`/models?${new URLSearchParams({ backend, section })}`);
     },
   });
+  const hasOverviewModelDetails = hasRuntimeBindings || modelEditable || (hasAgentHarness
+    ? Boolean(detail?.model)
+    : modelSettings.loading || modelSettings.supported);
+  const workspace = hasAgentHarness ? detail?.managedWorkspace?.path : detail?.workspace;
+  const canOpenWorkspace = !hasAgentHarness || detail?.managedWorkspace?.exists === true;
 
   // 真正收起（不带动效）。反向形变跑完后、以及无动效场景直接调它。
   const hardClose = () => {
@@ -411,12 +432,26 @@ export default function AgentsPage() {
     const el = deckRef.current;
     const page = el?.parentElement;
     if (!el || !page) return;
+    const syncFade = () => {
+      const { scrollLeft, scrollWidth, clientWidth } = el;
+      el.toggleAttribute("data-fade-left", scrollLeft > 1);
+      el.toggleAttribute("data-fade-right", scrollWidth - clientWidth - scrollLeft > 1);
+    };
     const sync = () => {
-      const above = el.getBoundingClientRect().top - page.getBoundingClientRect().top;
+      const deckBounds = el.getBoundingClientRect();
+      const pageBounds = page.getBoundingClientRect();
+      const above = deckBounds.top - pageBounds.top;
       el.style.setProperty("--deck-above", `${Math.max(0, Math.round(above))}px`);
       el.style.setProperty("--deck-below", getComputedStyle(page).paddingBottom || "0px");
+      // The deck extends into the page gutters. Start the fade at the visible clip edge.
+      const clipLeft = pageBounds.left + page.clientLeft;
+      const clipRight = clipLeft + page.clientWidth;
+      el.style.setProperty("--deck-clip-left", `${Math.max(0, clipLeft - deckBounds.left)}px`);
+      el.style.setProperty("--deck-clip-right", `${Math.max(0, deckBounds.right - clipRight)}px`);
+      syncFade();
     };
     sync();
+    el.addEventListener("scroll", syncFade, { passive: true });
     // 必须观察 deck 的**前置兄弟**（页头、toolbar）——推动 deck 上沿的是它们的高度。
     // 只观察 page 不行：page 是 main 的 flex item，高度恒等于视口，toolbar 从 0 长到
     // 48px 时它纹丝不动，回调根本不触发（实踩）。page 仍要观察，窗口缩放时同步下内边距。
@@ -425,8 +460,11 @@ export default function AgentsPage() {
     const ro = new ResizeObserver(sync);
     ro.observe(page);
     for (const sib of page.children) if (sib !== el) ro.observe(sib);
-    return () => ro.disconnect();
-  }, [selectedId, closing, loading, agents.length]);
+    return () => {
+      ro.disconnect();
+      el.removeEventListener("scroll", syncFade);
+    };
+  }, [selectedId, closing, loading, agents.length, canCreateAgent]);
 
   // lazy-load per-tab data。切走 agent 后迟到的响应不能写进新 agent 的面板。
   useEffect(() => {
@@ -465,33 +503,6 @@ export default function AgentsPage() {
     }
     return () => { alive = false; };
   }, [tab, detail, backend, agentCron, activeFile, setupFiles, hasAgentHarness, definition, transcriptSessions, toolsState]);
-
-  // 模型目录：与聊天页共用同一个 revision store（先同步首屏缓存、订阅 apply、再 revalidate）。
-  // 只有能写回模型的后端才需要它。
-  useEffect(() => {
-    if (!modelEditable) return;
-    let alive = true;
-    const cached = readModelCatalog(backend);
-    setModels(cached?.models || []);
-    setModelsLoading(!cached || !!cached.legacyPlaceholder);
-    const unsubscribe = subscribeModelCatalog(backend, (snapshot) => {
-      if (!alive || snapshot.backendId !== backend || snapshot.legacyPlaceholder) return;
-      setModels(snapshot.models);
-      setModelsLoading(false);
-    });
-    void revalidateModelCatalog(backend, (knownRevision) => getModelCatalog(backend, knownRevision))
-      .then((snapshot) => {
-        if (!alive || snapshot.backendId !== backend || snapshot.legacyPlaceholder) return;
-        setModels(snapshot.models);
-        setModelsLoading(false);
-      })
-      // 瞬时失败保留已有快照，不清空选择器。
-      .catch(() => {});
-    return () => {
-      alive = false;
-      unsubscribe();
-    };
-  }, [backend, modelEditable]);
 
   const openFile = async (name: string) => {
     if (!detail) return;
@@ -739,7 +750,6 @@ export default function AgentsPage() {
     (form.name !== (detail.name || "") ||
       (modelEditable &&
         (form.model !== (detail.model || "") ||
-          form.emoji !== (detail.emoji || "") ||
           form.fallbacks.join("\n") !== (detail.fallbacks || []).join("\n"))));
   const fileDirty =
     fileEditing &&
@@ -757,7 +767,6 @@ export default function AgentsPage() {
         setForm({
           name: detail.name || "",
           model: detail.model || "",
-          emoji: detail.emoji || "",
           fallbacks: detail.fallbacks || [],
         });
       }
@@ -777,10 +786,10 @@ export default function AgentsPage() {
         ? { name: form.name, expectedUpdatedAt: detail.updatedAt }
         : backend === "hermes"
           ? { name: form.name }
-          : { name: form.name, model: form.model, emoji: form.emoji, fallbacks: form.fallbacks };
-      // 后端返回**更新后**的 id：Hermes 改名会让 agent id 跟着 profile 名变，
-      // 继续用旧 id 重载详情必然 404。
+          : { name: form.name, model: form.model, fallbacks: form.fallbacks };
+      // 使用后端确认的 id：Hermes default 仅改展示名，普通 profile 改名才会变 id。
       const nextId = await updateAgent(backend, detail.id, patch);
+      agentModelCatalog.invalidate();
       toast.success(t("agents.saved"));
       await refresh();
       setSelectedId(nextId);
@@ -1378,11 +1387,6 @@ export default function AgentsPage() {
       <PageHead
         title={t("agents.pageTitle")}
         subtitle={t("agents.pageSubtitle")}
-        actions={
-          <span className="muted">
-            {loading ? t("common.loading") : t("agents.count", { count: agents.length })}
-          </span>
-        }
       />
       <div className="toolbar">
         <BackendTabs
@@ -1407,7 +1411,7 @@ export default function AgentsPage() {
           <p>{t(hasAgentHarness ? "agents.emptyHintManaged" : backend === "hermes" ? "agents.emptyHintHermes" : "agents.emptyHintOpenclaw", { backend: backendName })}</p>
           {canCreateAgent ? (
             <button className="btn-primary" onClick={openCreate}>
-              {backend === "hermes" ? t("agents.newProfile") : t("agents.newAgent")}
+              + {createLabel}
             </button>
           ) : (
             <button className="btn-primary" onClick={() => void refresh()}>{t("common.retry")}</button>
@@ -1432,7 +1436,7 @@ export default function AgentsPage() {
               onMouseMove={tiltMove}
               onMouseLeave={tiltReset}
             >
-              <AgentCardFace agent={a} no={agentNo(i)} defaultLabel={t("agents.default")} brand={backendName} />
+              <AgentCardFace agent={a} no={agentNo(i)} defaultLabel={t("agents.default")} />
             </button>
           ))}
           {canCreateAgent && (
@@ -1440,14 +1444,12 @@ export default function AgentsPage() {
               type="button"
               className={s.cardNew}
               onClick={openCreate}
-              title={backend === "hermes" ? t("agents.newProfile") : t("agents.newAgent")}
+              title={createLabel}
             >
               <span className={s.cardNewPlus} aria-hidden="true">
                 +
               </span>
-              <span className={s.cardNewLabel}>
-                {backend === "hermes" ? t("agents.newProfile") : t("agents.newAgent")}
-              </span>
+              <span className={s.cardNewLabel}>{createLabel}</span>
             </button>
           )}
         </div>
@@ -1528,9 +1530,7 @@ export default function AgentsPage() {
                 </span>
                 <span className={s.cardFoot}>
                   <span>{selectedIndex >= 0 ? agentNo(selectedIndex) : "#—"}</span>
-                  <span className={s.cardBrand}>
-                    {backendName.toUpperCase()} <span aria-hidden="true">✦</span>
-                  </span>
+                  <img className={s.cardBrand} src={agentCardBrand} alt="Shoggoth" />
                 </span>
               </span>
             );
@@ -1541,194 +1541,165 @@ export default function AgentsPage() {
 
             {detail && tab === "overview" && (
               <div className={s.ovPane}>
-              <div className={s.ovLayout}>
-                {/* 左：与首页同款卡片（含同款 3D 悬浮倾斜）；悬浮出现删除按钮 */}
-                <div
-                  className={`${s.ovCardWrap} ${s.tilt3d}`}
-                  onMouseMove={tiltMove}
-                  onMouseLeave={tiltReset}
-                >
-                  <AgentCardFace
-                    agent={detail}
-                    no={selectedIndex >= 0 ? agentNo(selectedIndex) : "#—"}
-                    defaultLabel={t("agents.default")}
-                    brand={backendName}
-                  />
-                  {(canRemoveAgent || canArchiveAgent) && !detail.protected && (
-                    <button type="button" className={s.ovDelete} onClick={doDelete}>
-                      {t(canArchiveAgent ? "agents.archive" : "common.delete")}
-                    </button>
-                  )}
-                </div>
-
-                {/* 右：信息栅格 */}
-                <div className={s.ovFields}>
-                  <label className={s.ovField}>
-                    <span className={s.ovLabel}>{t("agents.name")}</span>
-                    <input
-                      className={s.ovInput}
-                      value={form.name}
-                      onChange={(e) => {
-                        setOverviewNameConflict(null);
-                        setForm({ ...form, name: e.target.value });
-                      }}
-                      readOnly={!canUpdateAgent}
-                      aria-invalid={overviewNameInvalid || undefined}
-                      aria-describedby={overviewNameInvalid ? overviewNameErrorId : undefined}
+                <div className={s.ovLayout}>
+                  <div
+                    className={`${s.ovCardWrap} ${s.tilt3d}`}
+                    onMouseMove={tiltMove}
+                    onMouseLeave={tiltReset}
+                  >
+                    <AgentCardFace
+                      agent={detail}
+                      no={selectedIndex >= 0 ? agentNo(selectedIndex) : "#—"}
+                      defaultLabel={t("agents.default")}
                     />
-                    {overviewNameInvalid && (
-                      <span className={s.nameError} id={overviewNameErrorId} role="alert">{t("agents.nameConflict")}</span>
-                    )}
-                  </label>
-
-                  {activeBackendDescriptor?.surfaces.runtimeBindings ? (
-                    <AgentDefaultModel key={`${backend}:${detail.id}`} backend={backend} agentId={detail.id}
-                      model={detail.model} onChanged={() => { void reloadDetail(); void refresh(); }} />
-                  ) : hasAgentHarness && detail.model && (
-                    <div className={s.ovField}>
-                      <span className={s.ovLabel}>{t("agents.model")}</span>
-                      <span className={s.ovValue}>{detail.model}</span>
-                    </div>
-                  )}
-
-                  {hasAgentHarness && detail.provider && (
-                    <div className={s.ovField}>
-                      <span className={s.ovLabel}>{t("agents.provider")}</span>
-                      <span className={s.ovValue}>{detail.provider}</span>
-                    </div>
-                  )}
-
-                  {detail.environmentKind && (
-                    <div className={`${s.ovField} ${s.ovFieldWide}`}>
-                      <span className={s.ovLabel}>{t("agents.runtimeEnvironment")}</span>
-                      <span className={s.ovValue}>
-                        {t(
-                          detail.environmentKind === "native-user"
-                            ? "agents.nativeRuntimeEnvironment"
-                            : "agents.shoggothRuntimeEnvironment",
-                          {
-                            runtime: detail.runtime === "codex"
-                              ? detail.environmentKind === "native-user" ? "Codex CLI" : "Codex Harness"
-                              : detail.runtime || detail.provider || "CLI",
-                            count: detail.sharedAgentCount || 1,
-                          },
-                        )}
-                      </span>
-                    </div>
-                  )}
-
-                  {modelEditable && (
-                    <label className={s.ovField}>
-                      <span className={s.ovLabel}>{t("agents.emoji")}</span>
-                      <EmojiField
-                        className={s.ovInput}
-                        value={form.emoji}
-                        onChange={(emoji) => setForm({ ...form, emoji })}
-                        placeholder="🤖"
-                      />
-                    </label>
-                  )}
-
-                  {detail.isDefault && (
-                    <div className={s.ovField}>
-                      <span className={s.ovLabel}>{t("agents.defaultAgent")}</span>
-                      <span className={s.ovValue}>{t("agents.yes")}</span>
-                    </div>
-                  )}
-
-                  {detail.workspace && (
-                    <div className={`${s.ovField} ${s.ovFieldWide}`}>
-                      <span className={s.ovLabel}>{t("agents.workspace")}</span>
-                      {/* 只读——点一下用系统文件管理器打开该目录（Electron 宿主能力）。 */}
-                      <button
-                        type="button"
-                        className={s.ovLink}
-                        title={t("agents.openWorkspace")}
-                        onClick={() => openHostPath(detail.workspace as string)}
-                      >
-                        {detail.workspace}
+                    {(canRemoveAgent || canArchiveAgent) && !detail.protected && (
+                      <button type="button" className={s.ovDelete} onClick={doDelete}>
+                        {t("common.delete")}
                       </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
 
-                  {modelEditable && (
-                    <div className={`${s.ovField} ${s.ovFieldWide}`}>
-                      <span className={s.ovLabel}>{t("agents.model")}</span>
-                      {/* 聊天页那个模型浮层原样复用（搜索 + provider 筛选 + 价格/推理标签）。
-                          触发器被皮肤化成设计稿里的纯文本值；选中只改表单，Save 才写回。 */}
-                      <div className={`agents-model-picker ${s.modelPicker}`}>
-                        <ChatModelMenu
-                          models={models}
-                          activeModel={splitModelRef(form.model).id}
-                          activeProvider={splitModelRef(form.model).provider}
-                          triggerLabel={form.model || undefined}
-                          onSelect={(id, provider) =>
-                            setForm({ ...form, model: provider ? `${provider}/${id}` : id })
-                          }
-                          loading={modelsLoading}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {/* per-agent 模型设置面的主模型区：provider/model 就地可改 + 默认参数。
-                      有整合设置面的后端（Hermes）在此接管「模型」字段；没有的返回
-                      supported:false 自行隐身，模型选择留给上面的 updateAgent 表单。 */}
-                  {!hasAgentHarness && <AgentMainModelField state={modelSettings} />}
-
-                  {modelEditable && (
-                    <div className={`${s.ovField} ${s.ovFieldWide}`}>
-                      <span className={s.ovLabel}>{t("agents.fallbackModels")}</span>
-                      {/* 降级链：有序 chip（× 移除）+「+ 添加」多选浮层，序号即尝试顺序。 */}
-                      <div className={s.fallbacks}>
-                        {form.fallbacks.map((ref, i) => (
-                          <span key={ref} className={s.fallbackChip}>
-                            {i > 0 && (
-                              <span className={s.fallbackArrow} aria-hidden="true">
-                                →
-                              </span>
-                            )}
-                            <span className={s.fallbackRef}>{ref}</span>
-                            <button
-                              type="button"
-                              className={s.fallbackX}
-                              title={t("agents.fallbackRemove", { model: ref })}
-                              onClick={() => toggleFallback(ref)}
-                            >
-                              ×
-                            </button>
-                          </span>
-                        ))}
-                        <div className={`agents-model-picker ${s.modelPicker}`}>
-                          <ChatModelMenu
-                            models={models}
-                            activeModel=""
-                            selectedRefs={form.fallbacks}
-                            triggerLabel={t("agents.fallbackAdd")}
-                            onSelect={(id, provider) => toggleFallback(provider ? `${provider}/${id}` : id)}
-                            loading={modelsLoading}
+                  <div className={s.ovDetails}>
+                    <section className={s.ovSection}>
+                      <h2 className={s.ovSectionTitle}>{t("agents.name")}</h2>
+                      <div className={s.ovSectionBody}>
+                        <div className={`${s.ovField} ${s.ovFieldWide}`}>
+                          <input
+                            className={s.ovInput}
+                            aria-label={t("agents.name")}
+                            value={form.name}
+                            onChange={(e) => {
+                              setOverviewNameConflict(null);
+                              setForm({ ...form, name: e.target.value });
+                            }}
+                            readOnly={!canUpdateAgent}
+                            aria-invalid={overviewNameInvalid || undefined}
+                            aria-describedby={overviewNameInvalid ? overviewNameErrorId : undefined}
                           />
+                          {overviewNameInvalid && (
+                            <span className={s.nameError} id={overviewNameErrorId} role="alert">{t("agents.nameConflict")}</span>
+                          )}
                         </div>
                       </div>
-                      <span className={s.ovHint}>{t("agents.fallbackHint")}</span>
-                    </div>
-                  )}
+                    </section>
 
-                  {(overviewDirty || savingOverview) && (
-                    <div className={s.ovFieldWide}>
-                      <button className={s.saveBtn} onClick={saveOverview} disabled={savingOverview}>
-                        {savingOverview ? t("common.saving") : t("common.save")}
-                      </button>
-                    </div>
-                  )}
+                    <section className={s.ovSection}>
+                      <h2 id={overviewModelLabelId} className={s.ovSectionTitle}>{t("agents.defaultModel")}</h2>
+                      <div className={s.ovSectionBody}>
+                        {!hasOverviewModelDetails && (
+                          <span className={`${s.ovFieldWide} muted`}>{t("agents.overviewModelsEmpty")}</span>
+                        )}
+                        {hasRuntimeBindings ? (
+                          <AgentDefaultModel key={`${backend}:${detail.id}`} backend={backend} agentId={detail.id}
+                            model={detail.model} labelId={overviewModelLabelId}
+                            onChanged={() => { void reloadDetail(); void refresh(); }} />
+                        ) : hasAgentHarness && detail.model && (
+                          <div className={`${s.ovField} ${s.ovFieldWide}`}>
+                            <span className={s.ovValue}>{detail.model}</span>
+                          </div>
+                        )}
+                        {modelEditable && (
+                          <div className={`${s.ovField} ${s.ovFieldWide}`}>
+                            {/* 选择写入表单草稿，保存时与回退链一起提交。 */}
+                            <div className={`${s.modelPicker} ${s.defaultModelPicker}`}>
+                              <ChatModelMenu
+                                labelledBy={overviewModelLabelId}
+                                portalTo="[data-agent-overview-panel]"
+                                models={models}
+                                activeModel={splitModelRef(form.model).id}
+                                activeProvider={splitModelRef(form.model).provider}
+                                triggerLabel={form.model || undefined}
+                                onSelect={(id, provider) =>
+                                  setForm({ ...form, model: provider ? `${provider}/${id}` : id })
+                                }
+                                loading={modelsLoading}
+                                loadError={!!agentModelCatalog.error}
+                                onRefresh={() => { void agentModelCatalog.refresh().catch(() => {}); }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {!hasAgentHarness && <AgentMainModelField key={`${backend}:${detail.id}`} state={modelSettings} labelId={overviewModelLabelId} />}
+
+                        {SHOW_OVERVIEW_FALLBACKS && modelEditable && (
+                          <div className={`${s.ovField} ${s.ovFieldWide}`}>
+                            <span className={s.ovLabel}>{t("agents.fallbackModels")}</span>
+                            <div className={s.fallbacks}>
+                              {form.fallbacks.map((ref, i) => (
+                                <span key={ref} className={s.fallbackEntry}>
+                                  {i > 0 && (
+                                    <span className={s.fallbackArrow} aria-hidden="true">
+                                      →
+                                    </span>
+                                  )}
+                                  <span className={s.fallbackChip}>
+                                    <span className={s.fallbackRef}>{ref}</span>
+                                    <button
+                                      type="button"
+                                      className={s.fallbackX}
+                                      title={t("agents.fallbackRemove", { model: ref })}
+                                      onClick={() => toggleFallback(ref)}
+                                    >
+                                      ×
+                                    </button>
+                                  </span>
+                                </span>
+                              ))}
+                              <div className={`${s.modelPicker} ${s.defaultModelPicker}`}>
+                                <ChatModelMenu
+                                  portalTo="[data-agent-overview-panel]"
+                                  models={models}
+                                  activeModel=""
+                                  selectedRefs={form.fallbacks}
+                                  triggerLabel={t("agents.fallbackAdd")}
+                                  onSelect={(id, provider) => toggleFallback(provider ? `${provider}/${id}` : id)}
+                                  loading={modelsLoading}
+                                  loadError={!!agentModelCatalog.error}
+                                  onRefresh={() => { void agentModelCatalog.refresh().catch(() => {}); }}
+                                />
+                              </div>
+                            </div>
+                            <span className={`${s.ovHint} ${s.ovFallbackHint}`}>{t("agents.fallbackHint")}</span>
+                          </div>
+                        )}
+                      </div>
+                    </section>
+
+                    <section className={s.ovSection}>
+                      <h2 className={s.ovSectionTitle}>{t("agents.workspace")}</h2>
+                      <div className={s.ovSectionBody}>
+                        {workspace && canOpenWorkspace ? (
+                          <button
+                            type="button"
+                            className={`${s.ovFieldWide} ${s.ovLink}`}
+                            title={t("agents.openWorkspace")}
+                            onClick={() => void openHostPath(workspace)}
+                          >
+                            <span className={s.ovWorkspacePath}>{workspace}</span>
+                            <svg className={s.ovWorkspaceArrow} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                              <path d="M7 17 17 7M7 7h10v10" />
+                            </svg>
+                          </button>
+                        ) : (
+                          <span className={`${s.ovFieldWide} ${s.ovValue}`}>
+                            {workspace || t("agents.overviewWorkspaceEmpty")}
+                          </span>
+                        )}
+                      </div>
+                    </section>
+
+                    {(overviewDirty || savingOverview) && (
+                      <div className={s.ovActions}>
+                        <button className={s.saveBtn} onClick={saveOverview} disabled={savingOverview}>
+                          {savingOverview ? t("common.saving") : t("common.save")}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
 
-              {hasAgentHarness ? (
-                <p className={s.dim}>{t("agents.managedReadOnly", { backend: backendName })}</p>
-              ) : (
-                <AgentModelCards state={modelSettings} hideCards />
-              )}
+                {!hasAgentHarness && <AgentModelCards state={modelSettings} hideCards />}
               </div>
             )}
 
@@ -1807,7 +1778,7 @@ export default function AgentsPage() {
                           </button>
                         )}
                       </header>
-                      {hasAgentHarness && activeFile === "HEARTBEAT.md" && detail.profile && (
+                      {SHOW_HEARTBEAT_SETTINGS && hasAgentHarness && activeFile === "HEARTBEAT.md" && detail.profile && (
                         <Suspense fallback={null}><HeartbeatSettings key={detail.profile} profileId={detail.profile} /></Suspense>
                       )}
                       {fileLoading ? (
@@ -2122,12 +2093,10 @@ function AgentCardFace({
   agent,
   no,
   defaultLabel,
-  brand,
 }: {
   agent: Pick<UnifiedAgent, "id" | "name" | "isDefault"> & { emoji?: string };
   no: string;
   defaultLabel: string;
-  brand: string;
 }) {
   return (
     <span className={s.cardFace}>
@@ -2141,9 +2110,7 @@ function AgentCardFace({
         </span>
         <span className={s.cardFoot}>
           <span>{no}</span>
-          <span className={s.cardBrand}>
-            {brand.toUpperCase()} <span aria-hidden="true">✦</span>
-          </span>
+          <img className={s.cardBrand} src={agentCardBrand} alt="Shoggoth" />
         </span>
       </span>
     </span>

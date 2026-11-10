@@ -259,7 +259,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
           return s.status === "running" ? t("chat.recallingMemory") : s.statusKind === "recalled" ? t("chat.recalledMemory") : "";
         }
         return s.status === "running" ? t("chat.compactingCtx")
-          : s.statusKind === "compacted" ? t("chat.compactedCtx") : "";
+          : s.statusKind === "compacted" ? t("chat.compactedCtx") : oneLine(s.text, 90);
       case "final": {
         const u = s.usage;
         const meta = [s.model, u ? `↑${fmtK(u.input)} ↓${fmtK(u.output)}` : ""].filter(Boolean).join(" · ");
@@ -362,7 +362,7 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
           const isOpen = open.has(s.id);
           const rel = relations?.get(s.id);
           const running = s.status === "running" || s.status === "pending";
-          const actionTitle = s.kind === "tool" ? titleFor(s) : "";
+          const actionTitle = s.kind === "tool" || s.statusKind === "proactive" ? titleFor(s) : "";
           const isTextStep = s.kind === "text" || s.kind === "thinking";
           return (
             <li
@@ -402,11 +402,12 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                   </span> : null}
                   <span className={styles.title} data-action={actionTitle ? "1" : undefined}
                     data-progress={isTextStep ? "1" : undefined}
-                    title={actionTitle ? `${actionTitle} (${s.toolName})` : isTextStep ? s.text : undefined}>{s.startupWait ? <ChatRunWait state={s.startupWait} /> : titleFor(s)}</span>
+                    title={actionTitle && s.kind === "tool" ? `${actionTitle} (${s.toolName})` : isTextStep || actionTitle ? s.text : undefined}>{s.startupWait ? <ChatRunWait state={s.startupWait} /> : titleFor(s)}</span>
                   {s.kind === "tool" && s.status === "running" && s.updateCount ? (
                     <span className={styles.updates}>{t("turnLab.updates", { count: s.updateCount })}</span>
                   ) : null}
-                  <span className={styles.dur}>{s.kind === "tool" ? (showDurations ? formatDuration(s.durationS) : "—") : ""}</span>
+                  <span className={styles.dur}>{s.kind === "tool" || s.kind === "status" && !!s.durationS
+                    ? (showDurations ? formatDuration(s.durationS) : "—") : ""}</span>
                   {!s.startupWait && <span className={styles.chip} data-st={s.kind === "prompt" && s.promptOutcome === "expired" ? "aborted" : s.status}
                     data-external-plugin={s.kind === "tool" && s.toolName === "shoggoth_plugin_call" ? "1" : undefined}>{chipLabel(s)}</span>}
                   {!preview && <span className={styles.chev} data-show={expandable ? "1" : undefined} data-open={isOpen ? "1" : undefined}><TrajChevron /></span>}

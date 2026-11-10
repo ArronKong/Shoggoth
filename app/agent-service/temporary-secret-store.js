@@ -74,10 +74,11 @@ async function projectValue(value, { keys = false, model = false }, redact) {
   if (Buffer.byteLength(JSON.stringify(result) || "") > MAX_FILE_BYTES) fail("SECRET_INPUT_INVALID");
   return result;
 }
-async function projectUnscopedResult(value) {
+async function projectUnscopedResult(value, { autoDetect = false } = {}) {
   const known = [];
   const redact = async input => {
     const text = input.replace(/\{\{SHOGGOTH_SECRET_[a-f0-9]{32}\}\}/gu, "[LOCAL_CREDENTIAL_REDACTED]");
+    if (!autoDetect) return text;
     const detection = detectSecrets(text, { known });
     for (const range of detection.ambiguous) if (range.end > range.start
       && !detection.matches.some(match => range.start < match.end && range.end > match.start)) {
@@ -93,10 +94,12 @@ async function projectUnscopedResult(value) {
 }
 
 class TemporarySecretStore {
-  constructor({ paths, cryptoBroker, now = Date.now, endOfDay = endOfLocalDay, getKnownSecrets = () => [], onError = () => {} } = {}) {
+  constructor({ paths, cryptoBroker, now = Date.now, endOfDay = endOfLocalDay,
+    getKnownSecrets = () => [], autoDetect = true, onError = () => {} } = {}) {
     if (!paths?.stateDir || !paths?.trustedRoot || !cryptoBroker?.encrypt || !cryptoBroker?.decrypt) throw new TypeError("Temporary secrets need private paths and a crypto broker");
     this.paths = paths; this.cryptoBroker = cryptoBroker; this.now = now; this.endOfDay = endOfDay;
     this.getKnownSecrets = getKnownSecrets; this.onError = onError;
+    this.autoDetect = autoDetect;
     this.directory = path.join(paths.stateDir, "temporary-secrets");
     this.file = path.join(this.directory, "state-v1.json");
     this.identityFile = path.join(this.directory, "identity-v1.key");
@@ -261,7 +264,7 @@ class TemporarySecretStore {
     try { supplied = await this.getKnownSecrets(scope); } catch { fail("SECRET_PROCESSING_UNAVAILABLE"); }
     if (!Array.isArray(supplied) || !Array.isArray(extraKnown)) fail("SECRET_PROCESSING_UNAVAILABLE");
     const external = [...supplied, ...extraKnown];
-    const detection = detectSecrets(text, { selections, known: [...known, ...external] });
+    const detection = detectSecrets(text, { selections, known: [...known, ...external], autoDetect: this.autoDetect });
     const protectedValue = match => [...known, ...external].some(entry => variants(entry.value).includes(match.value));
     const removeOrdinary = (matches, inherited = false) => matches.filter(match => {
       const explicitlyOrdinary = inherited || ordinary.some(range => range.start <= match.start && range.end >= match.end
@@ -302,7 +305,7 @@ class TemporarySecretStore {
     });
     // A labelled value may be discovered after an earlier, unlabelled echo
     // in this same string. Apply the newly known values before persisting it.
-    const echoes = detectSecrets(result, { known: [...this._known(scope, pending), ...external] });
+    const echoes = detectSecrets(result, { known: [...this._known(scope, pending), ...external], autoDetect: this.autoDetect });
     const knownOnly = matches => matches.flatMap(match => {
       if (match.nested) { const nested = knownOnly(match.nested); return nested.length ? [{ ...match, nested }] : []; }
       return match.source === "known" ? [match] : [];
@@ -386,7 +389,7 @@ class TemporarySecretStore {
     try { external = this.getKnownSecrets(scope); } catch { fail("SECRET_PROCESSING_UNAVAILABLE"); }
     if (!Array.isArray(external)) fail("SECRET_PROCESSING_UNAVAILABLE");
     const known = [...this._known(scope), ...external];
-    const detection = detectSecrets(text, { known });
+    const detection = detectSecrets(text, { known, autoDetect: this.autoDetect });
     for (const range of detection.ambiguous) if (!detection.matches.some(match => range.start < match.end && range.end > match.start)) {
       detection.matches.push({ ...range, value: text.slice(range.start, range.end) });
     }

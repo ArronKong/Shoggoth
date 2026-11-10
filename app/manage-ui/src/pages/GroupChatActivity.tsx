@@ -1,4 +1,6 @@
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { readGroupChatMessageActivity } from "../api/groupReads";
 import Modal from "../components/Modal";
 import TurnTimeline from "../components/TurnTimeline/TurnTimeline";
 import { getTurnProcessStats, TurnProcessSummary } from "../components/TurnTimeline/TurnProcess";
@@ -6,6 +8,9 @@ import { canonicalToolName, capText, categorizeTool, type TurnStep } from "../li
 import type { GroupActivity, GroupActivityTool } from "../types";
 
 type GroupActivityBinding = { groupId: string; memberId: string; opportunityId: string };
+export type GroupMessageActivitySource = GroupActivityBinding & {
+  ownerScope: string; messageId: string; seq: number; runId: string; discussionId: string;
+};
 const TERMINAL_PHASES = new Set(["completed", "failed", "cancelled"]);
 const PHASES = new Set(["preparing", "queued", "running", "retrying", "tool", "text", "waiting_approval", "waiting_input", "compacting", "compacted", "stopping", "reconciling", ...TERMINAL_PHASES]);
 
@@ -60,17 +65,47 @@ export function groupActivitySteps(activity: GroupActivity): TurnStep[] {
   return steps.sort((a, b) => a.startTs - b.startTs);
 }
 
-export default function GroupChatActivityDialog({ activity, memberName, startedAt, onClose }: {
-  activity: GroupActivity | null; memberName?: string; startedAt?: number | null; onClose(): void;
+export default function GroupChatActivityDialog({ activity, memberName, startedAt, finishedAt, history = false, notice, onClose }: {
+  activity: GroupActivity | null; memberName?: string; startedAt?: number | null; finishedAt?: number | null;
+  history?: boolean; notice?: ReactNode; onClose(): void;
 }) {
   const { t } = useTranslation();
   const steps = activity ? groupActivitySteps(activity) : [];
   const title = t("turnLab.processLabel");
-  return <Modal open={steps.length > 0} width={640} variant="activity"
+  return <Modal open={history || steps.length > 0} width={640} variant="activity"
     title={memberName ? `${title} · ${memberName}` : title}
     subtitle={steps.length > 0 && <TurnProcessSummary stats={getTurnProcessStats(steps)}
-      timing={startedAt == null ? undefined : { startedAt }} live />}
+      timing={startedAt == null ? undefined : { startedAt, finishedAt: finishedAt ?? undefined }} live={!history} />}
     onClose={onClose} onOpenChangeComplete={open => { if (!open) onClose(); }}>
-    {steps.length > 0 && <TurnTimeline steps={steps} status="running" detail />}
+    {steps.length > 0 ? <TurnTimeline steps={steps} status={history ? "done" : "running"} autoFollow={!history} detail /> : notice}
   </Modal>;
+}
+
+export function GroupChatMessageActivityDialog({ source, memberName, onClose }: {
+  source: GroupMessageActivitySource; memberName?: string; onClose(): void;
+}) {
+  const { t } = useTranslation();
+  const [result, setResult] = useState<Awaited<ReturnType<typeof readGroupChatMessageActivity>> | "error" | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    void readGroupChatMessageActivity(source.groupId, source, controller.signal).then(reply => {
+      if (controller.signal.aborted) return;
+      if (reply !== "unsupported") {
+        const { activity } = reply;
+        if (activity !== null && (!boundGroupActivity(activity, source) || activity.runId !== source.runId
+          || activity.discussionId !== source.discussionId || activity.phase !== "completed")) throw new Error("Mismatched saved activity");
+      }
+      setResult(reply);
+    }).catch(() => { if (!controller.signal.aborted) setResult("error"); });
+    return () => controller.abort();
+  }, [source, attempt]);
+  const saved = typeof result === "string" ? null : result;
+  return <GroupChatActivityDialog activity={saved?.activity ?? null} memberName={memberName} history
+    startedAt={saved?.startedAt} finishedAt={saved?.finishedAt} onClose={onClose}
+    notice={result === "error" ? <div>
+      <p role="alert">{t("groupChat.activity.error")}</p>
+      <button type="button" className="btn-sm" onClick={() => { setResult(null); setAttempt(value => value + 1); }}>{t("common.retry")}</button>
+    </div> : <p role="status">{t(result === "unsupported" ? "groupChat.activity.updateRequired"
+      : result ? "groupChat.activity.empty" : "groupChat.activity.loading")}</p>} />;
 }

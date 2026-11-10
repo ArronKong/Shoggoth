@@ -247,8 +247,11 @@ state.runPanelFixture=async()=>{
  // An unresolved old receipt and a pending whole-group stop do not block a fresh message.
  views.h.activeTurns=[{opportunityId:'still-stopping',memberId:'a',startedAt:1,stopping:true,recovery:{type:'execution',reason:'unconfirmed',since:1,cancelRequested:true}}];emitGroupChanged('h');
  await wait(()=>document.querySelector('.chat-stop'),'pending old stop');await type('new message while old receipt is pending');
+ equal(document.querySelectorAll('[data-chat-composer] .chat-send').length,1,'only Stop is visible while a stop is pending and a draft exists');
  equal(Boolean(document.querySelector('[data-chat-composer] [role=status], [data-chat-composer] [role=alert], [data-chat-composer] [data-group-send-journal]')),false,'all operational composer statuses stay hidden');
- const beforeFresh=sends.length;send();await wait(()=>sends.length===beforeFresh+1,'new message despite uncertain old receipt');equal(sends.at(-1).input.body,'new message while old receipt is pending','fresh draft submitted without a manual check');pending.shift().success();await wait(()=>bodyText()==='','fresh message accepted');
+ const beforeFresh=sends.length;
+ editor().dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+ await wait(()=>sends.length===beforeFresh+1,'Enter sends a new message despite uncertain old receipt');equal(sends.at(-1).input.body,'new message while old receipt is pending','fresh draft submitted without a manual check');pending.shift().success();await wait(()=>bodyText()==='','fresh message accepted');
  await pause(150);await type('draft while background receipt recovers');const postsBeforePoll=sends.length,checksBeforePoll=lookups.length;sends[4].result=result('h',sends[4].input);
  await wait(()=>lookups.length>checksBeforePoll&&Array.from(document.querySelectorAll('.chat-group.is-user')).some(el=>el.textContent?.includes('unconfirmed request F')),'uncertain receipt recovers by timer without an event');
  equal(sends.length,postsBeforePoll,'automatic recovery is lookup only');equal(bodyText(),'draft while background receipt recovers','automatic receipt keeps newer draft');checks.push('fresh sends during stop and uncertain receipt; automatic no-replay polling');

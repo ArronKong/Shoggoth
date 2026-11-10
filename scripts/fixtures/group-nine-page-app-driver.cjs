@@ -127,7 +127,7 @@ async function run() {
         binaryPath: process.execPath, launchArgs: Object.freeze(["app-server"]), spawnEnv: Object.freeze({ HOME: isolatedHome, CODEX_HOME: home }), configurationMode: "overlay" });
     } },
     hostFactory: hostOptions => new CodexRuntimeHost({ ...hostOptions, repoRoot: snapshot, packageVersion: require(path.join(snapshot, "package.json")).version,
-      probeBinary: async () => {}, spawnEnv: { ELECTRON_RUN_AS_NODE: "1", CODEX_FAKE_BEHAVIOR: "mcp-elicitation", CODEX_FAKE_ELICITATION_RESPONSE_PATH: path.join(root, "responses.jsonl"), CODEX_FAKE_AUTOCOMPLETE_ALL: "1", CODEX_FAKE_INDEPENDENT_IDS: "1", CODEX_FAKE_ID_NAMESPACE: "nine-pages", CODEX_FAKE_PROFILE: "nine-pages" },
+      probeBinary: async () => {}, spawnEnv: { ELECTRON_RUN_AS_NODE: "1", CODEX_FAKE_MODEL_CATALOG: "1", CODEX_FAKE_BEHAVIOR: "mcp-elicitation", CODEX_FAKE_ELICITATION_RESPONSE_PATH: path.join(root, "responses.jsonl"), CODEX_FAKE_AUTOCOMPLETE_ALL: "1", CODEX_FAKE_INDEPENDENT_IDS: "1", CODEX_FAKE_ID_NAMESPACE: "nine-pages", CODEX_FAKE_PROFILE: "nine-pages" },
       spawnProcess(_command, _args, options) { return spawn(process.execPath, [path.join(snapshot, "scripts/fixtures/codex-app-server-fake.cjs")], options); },
       requestTimeoutMs: 2000, initializeTimeoutMs: 2000, shutdownGraceMs: 100, killGraceMs: 100 }) });
   // Exercise the actual Registry client with deterministic public metadata.
@@ -267,6 +267,13 @@ async function run() {
   // Wait for this session's authoritative saved body before entering the draft.
   await js("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))");
   await until(async () => await js(`location.hash==='#/chat'&&localStorage.getItem('shoggoth.chat.lastActive.v1')===${JSON.stringify(key)}&&!!document.querySelector('.chat-conv textarea:not(:disabled)')&&document.querySelector('.chat-thread')?.dataset.historyLoaded==='true'&&document.querySelector('.chat-thread')?.innerText.includes(${JSON.stringify(historyAnchor)})`), "target Chat session committed, canonical saved history loaded and composer ready");
+  await until(() => report.requests.some(request => request.pathname.endsWith("/chat-prewarm") && request.statusCode === 200),
+    "Chat opening triggers the generic prewarm REST contract");
+  await until(() => service.workRunCoordinator.getRuntimeObservability().events.some(event => event.stage === "runtime_prewarm"
+    && event.outcome === "success" && event.sessionKeyHash === crypto.createHash("sha256").update(chat.sessionKey).digest("hex")),
+    "the opened Chat prepares its process without sending a turn");
+  assert.equal(service.productStore.listWorkRuns().length, 0);
+  report.prewarm = { rest: true, runtimeReady: true, workRunsBeforeSend: 0 };
   if (connectorAcceptance) {
     await until(async () => await js("!!document.querySelector('.chat-conv .chat-pill--plugin:not(:disabled)')"), "Connector selection capability ready");
     await js("document.querySelector('.chat-conv .chat-pill--plugin').click();void 0");

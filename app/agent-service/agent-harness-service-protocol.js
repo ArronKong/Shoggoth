@@ -25,6 +25,7 @@ const AGENT_HARNESS_METHODS = Object.freeze([
   "harness.memory.delete",
   "harness.memory.undo",
   "harness.memory.forgetSession",
+  "harness.memory.document.write",
   "harness.memory.import.status",
   "harness.memory.import.report",
   "harness.transcript.sessions",
@@ -69,6 +70,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   MEMORY_SOURCE_SESSION_NOT_FOUND: "来源对话不存在",
   MEMORY_SECRET_REJECTED: "记忆拒绝保存敏感信息",
   MEMORY_INVALID: "记忆内容无效，请填写不超过 8 KB 的有效文本",
+  MEMORY_DOCUMENT_INVALID: "记忆文件内容无效或超过 1 MB",
   MEMORY_COMMIT_UNCERTAIN: "记忆写入结果不确定；请重启 Shoggoth 后核对记忆状态，确认前不要重试",
   MEMORY_CANDIDATE_UNAVAILABLE: "候选审核暂不可用",
   MEMORY_CANDIDATE_CORRUPT: "候选审核数据需要修复",
@@ -399,6 +401,9 @@ function validateAgentHarnessParams(method, params) {
     valid = exact(params, ["profileId", "content", "scope", "expectedRevision"])
       && text(params.content, 8 * 1024, false) && params.content.trim().length > 0
       && ["user", "agent"].includes(params.scope) && integer(params.expectedRevision, 0);
+  } else if (method === "harness.memory.document.write") {
+    valid = exact(params, ["profileId", "kind", "content", "expectedRevision"])
+      && ["USER", "MEMORY"].includes(params.kind) && text(params.content, 1024 * 1024) && hash(params.expectedRevision);
   } else if (method === "harness.memory.delete" || method === "harness.memory.undo") {
     valid = exact(params, ["profileId", "id", "expectedRevision"])
       && id(params.id) && integer(params.expectedRevision, 0);
@@ -519,6 +524,10 @@ function validateAgentHarnessResult(method, result, params = null) {
     valid = exact(result, ["revision", "item", "restored"]) && integer(result.revision)
       && validMemoryItem(result.item) && result.item.status === "deleted"
       && (result.restored === null || (validMemoryItem(result.restored) && result.restored.status === "active"));
+  } else if (method === "harness.memory.document.write") {
+    valid = exact(result, ["kind", "name", "revision", "memoryRevision"])
+      && ["USER", "MEMORY"].includes(result.kind) && result.name === `${result.kind}.md`
+      && hash(result.revision) && integer(result.memoryRevision);
   } else if (method === "harness.memory.forgetSession") {
     valid = exact(result, ["revision", "forgotten"]) && integer(result.revision) && integer(result.forgotten);
   } else if (["harness.memory.create", "harness.memory.update", "harness.memory.delete"].includes(method)) {

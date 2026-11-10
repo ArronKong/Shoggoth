@@ -7,7 +7,7 @@ const { ensurePrivateDirectoryTree, serviceError } = require("../security");
 const { openDatabase } = require("../inspiration-database");
 const { MemoryStore, validateMemoryItem } = require("../memory-store");
 const { RecallPolicyStore } = require("../recall-policy-store");
-const { contentHash, hasSecret } = require("../memory-engine");
+const { contentHash, hasSecret } = require("../memory-content");
 const { splitEntries } = require("./file-store.cjs");
 const { renderMemoryEntry, sha256 } = require("./migration.cjs");
 const { captureLegacyAuthorizationSnapshot, captureLegacyAuthorizationAuxiliaryAuthority, needsLegacyAuthorization,

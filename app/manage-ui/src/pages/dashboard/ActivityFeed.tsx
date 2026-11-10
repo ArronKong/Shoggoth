@@ -3,11 +3,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getDashboardActivities } from "../../api/client";
 import type {
-  BackendStatus,
   DashboardActivityEntry,
   DashboardActivityPage,
   DashboardApprovalItem,
   DashboardRunningItem,
+  DashboardSectionScope,
 } from "../../types";
 import BackendBadge from "../../components/BackendBadge";
 import BackendTabIcon, { sortBackendTabs } from "../../components/BackendTabIcon";
@@ -115,6 +115,8 @@ export default function ActivityFeed({
   status,
   firstPage,
   sinceMs,
+  loading = false,
+  unavailable = false,
   running,
   approvals = [],
   canRespondToApproval,
@@ -127,9 +129,11 @@ export default function ActivityFeed({
   onOpenTask,
   onOpenInspiration,
 }: {
-  status: BackendStatus[];
+  status: DashboardSectionScope["status"];
   firstPage?: DashboardActivityPage;
   sinceMs: number;
+  loading?: boolean;
+  unavailable?: boolean;
   running: DashboardRunningItem[];
   approvals?: DashboardApprovalItem[];
   canRespondToApproval?: (entry: DashboardApprovalItem) => boolean;
@@ -164,8 +168,8 @@ export default function ActivityFeed({
 
   // 无筛选时以 summary 首屏为基底；有筛选时以服务端筛选页为基底。
   const [entries, setEntries] = useState<DashboardActivityEntry[]>(() => mergeEntries([], firstPage?.items || []));
-  const visibleEntries = useMemo(() => entries.filter(isVisibleDashboardActivity)
-    .filter(entry => activeBackendIds.has(entry.backendId)), [entries, activeBackendIds]);
+  const visibleEntries = useMemo(() => (loading || unavailable ? [] : entries.filter(isVisibleDashboardActivity)
+    .filter(entry => activeBackendIds.has(entry.backendId))), [entries, activeBackendIds, loading, unavailable]);
   const [hasMore, setHasMore] = useState(!!firstPage?.hasMore);
   const [nextCursor, setNextCursor] = useState<string | undefined>(firstPage?.nextCursor);
   const [busy, setBusy] = useState(false);
@@ -198,7 +202,12 @@ export default function ActivityFeed({
     loadedScope.current = queryScope;
     let cancelled = false;
     setFetchError(false);
-    if (!filtered) {
+    if (loading || unavailable) {
+      setBusy(false);
+      setEntries([]);
+      setHasMore(false);
+      setNextCursor(undefined);
+    } else if (!filtered) {
       setBusy(false);
       setEntries(prev => mergeFirstPage(scopeChanged ? [] : prev, firstPage));
       setHasMore(!!firstPage?.hasMore);
@@ -217,10 +226,10 @@ export default function ActivityFeed({
     }
     return () => { cancelled = true; if (requestGeneration.current === generation) requestGeneration.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendFilter, kindFilter, firstPage, queryScope]);
+  }, [backendFilter, kindFilter, firstPage, queryScope, loading, unavailable]);
 
   const loadMore = async () => {
-    if (!nextCursor || busy) return;
+    if (!nextCursor || busy || loading || unavailable) return;
     const generation = requestGeneration.current;
     setBusy(true);
     setFetchError(false);
@@ -245,7 +254,7 @@ export default function ActivityFeed({
   useEffect(() => {
     if (hasMore && nextCursor && !busy && !fetchError) void loadMore();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasMore, nextCursor, busy, fetchError]);
+  }, [hasMore, nextCursor, busy, fetchError, loading, unavailable]);
 
   const kanbanActionLabel = (action: string): string =>
     t(`dashboard.activityAction.${action}`, { defaultValue: action });
@@ -275,11 +284,11 @@ export default function ActivityFeed({
           : t("dashboard.filterInspiration");
 
   return (
-    <section className="dash-section" aria-busy={busy || undefined}>
+    <section className="dash-section" aria-busy={loading || busy || undefined}>
       <div className="dash-feed-head">
         <h2 className="dash-section-title">
           {t("dashboard.feedTitle")}
-          <span className="dash-section-count">{visibleEntries.length}</span>
+          {!loading && !unavailable && <span className="dash-section-count">{visibleEntries.length}</span>}
         </h2>
         <div className="dash-feed-filters" role="group" aria-label={t("dashboard.filterAria")}>
           <FilterTabs
@@ -338,7 +347,8 @@ export default function ActivityFeed({
         {fetchError && <div className="dash-degraded-note">{t("dashboard.activityFetchFailed")}</div>}
 
         {visibleEntries.length === 0 ? (
-          busy ? <DashboardActivitySkeleton /> : <div className="dash-empty">{t("dashboard.feedEmpty")}</div>
+          loading || busy ? <DashboardActivitySkeleton />
+            : !unavailable && <div className="dash-empty">{t("dashboard.feedEmpty")}</div>
         ) : (
           <div className="dash-feed">
             {visibleEntries.map((e) => (

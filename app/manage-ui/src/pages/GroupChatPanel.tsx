@@ -14,7 +14,7 @@ import Modal from "../components/Modal";
 import { useConfirm, usePrompt, useToast } from "../components/ui";
 import {
   getGroupChat, listGroupChatMessages, lookupGroupChatSend, revealAttachment, respondGroupChatInteraction, retryGroupChatTurn,
-  sendGroupChatMessage, stopGroupChatDiscussion, stopGroupChatMember, updateGroupChat, deleteGroupChat, removeGroupChatMember,
+  sendGroupChatMessage, stopGroupChatDiscussion, updateGroupChat, deleteGroupChat, updateGroupChatMembers,
 } from "../api/client";
 import ChatPromptCard, { type ChatPromptResponse } from "./ChatPromptCard";
 import { IconClip, IconSend, IconStop } from "./chatIcons";
@@ -22,7 +22,7 @@ import groupFilesTrigger from "../assets/figma/group-chat/group-files-trigger.sv
 import {
   inspirationMediaLimit, inspirationMediaUrl, MAX_INSPIRATION_ATTACHMENTS, normalizeMediaType, uploadInspirationMedia,
 } from "./inspiration-media";
-import { onGroupChanged, GROUP_MIN_MEMBERS, GROUP_MAX_MEMBERS, type GroupCandidateAgent } from "../lib/groupChat";
+import { onGroupChanged, GROUP_MIN_MEMBERS, type GroupCandidateAgent } from "../lib/groupChat";
 import { createGroupPanelObserver } from "../lib/groupPanelObserver";
 import type { GroupPanelCache } from "../lib/groupPanelCache";
 import { emptyGroupComposer, GroupDraftSession, groupSendJournal, GROUP_CONNECTION_EVENT, GROUP_JOURNAL_CHANGED,
@@ -36,12 +36,14 @@ import GroupChatSearch from "./GroupChatSearch";
 import { composerPrefill, composerSendTarget, followLatestSpeaker, OWNER_TARGET, sendTargetMentions } from "./GroupChatSendTarget";
 import { groupDraftBody, pasteGroupDraftText, replaceGroupDraftText, restoreDraftMentions, type GroupDraftMention, type GroupDraftText } from "../lib/groupMentions";
 import { appendGroupReference } from "../lib/groupReferenceExcerpt";
-import GroupChatActivityDialog, { boundGroupActivity, groupActivityEnded, groupActivitySteps } from "./GroupChatActivity";
+import GroupChatActivityDialog, { boundGroupActivity, groupActivityEnded, groupActivitySteps,
+  GroupChatMessageActivityDialog, type GroupMessageActivitySource } from "./GroupChatActivity";
+import { IconTrajectory } from "../components/TurnTimeline/trajectoryIcons";
 import type { GroupChatMember, GroupChatMessage, GroupChatView, InspirationAttachment } from "../types";
 import { groupReplyBody, groupReplyBubbles } from "../lib/groupReply";
 import { formatChatTime } from "../lib/chatTime";
 import { orderGroupTimeline } from "../lib/groupTimeline";
-import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconQuote, IconTrash, IconStopMessage, MESSAGE_DELETION_ENABLED, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
+import { ChatMessageContextMenu, ChatPinnedMessages, IconCopy, IconPin, IconQuote, IconTrash, MESSAGE_DELETION_ENABLED, MESSAGE_PINNING_ENABLED } from "./ChatMessageActions";
 import { clipboardFile, desktopChatClipboard, writeChatClipboard, type ChatClipboardAttachment } from "../lib/chatClipboard";
 import ChatResponseMetadata from "./ChatResponseMetadata";
 import { useGroupMessagePresentation } from "../lib/groupMessagePresentation";
@@ -86,8 +88,6 @@ function mentionAtCaret({ text, mentions }: GroupDraftText, caret: number): Ment
   return { kind: "typed", start: at, end: caret, query };
 }
 
-const MAX_MEMBERS = GROUP_MAX_MEMBERS;
-
 // 待发送的附件：选中或粘贴后立刻上传到媒体库，传完才能发送。
 type PendingFile = { id: string; name: string; preview: string | null; status: "uploading" | "ready" | "error";
   attachment: InspirationAttachment | null };
@@ -99,9 +99,10 @@ function excerptOf(text: string, max = 80) {
 }
 
 /** agents：可以加进群的 Agent（聊天页的 Agent 列表），用于「添加成员」。 */
-export default function GroupChatPanel({ groupId, agents = [], onArchived, cache, cacheScope, searchTarget, onSearchTargetHandled }: {
+export default function GroupChatPanel({ groupId, agents = [], backends = [], onArchived, cache, cacheScope, searchTarget, onSearchTargetHandled }: {
   groupId: string;
   agents?: GroupCandidateAgent[];
+  backends?: readonly { id: string; name: string }[];
   onArchived(): void;
   cache?: GroupPanelCache;
   cacheScope?: string;
@@ -129,12 +130,13 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const [messageMenu, setMessageMenu] = useState<{ scope: string; x: number; y: number; message: GroupChatMessage;
     attachment?: ChatClipboardAttachment } | null>(null);
   const [selectedActivityKey, setSelectedActivityKey] = useState<string | null>(null);
+  const [messageActivity, setMessageActivity] = useState<{ scope: string; source: GroupMessageActivitySource } | null>(null);
   const [messageUndo, setMessageUndo] = useState<{ scope: string; id: string } | null>(null);
   const [pinnedOnly, setPinnedOnly] = useState(false);
   const [pinIndex, setPinIndex] = useState(0);
   const pinJumpRef = useRef(0);
   const [pinJumpTarget, setPinJumpTarget] = useState<{ scope: string; jump: number; seq: number } | null>(null);
-  useEffect(() => { setMessageMenu(null); setSelectedActivityKey(null); setMessageUndo(null); setPinnedOnly(false); setPinIndex(0); setPinJumpTarget(null); pinJumpRef.current++; }, [scopeKey]);
+  useEffect(() => { setMessageMenu(null); setSelectedActivityKey(null); setMessageActivity(null); setMessageUndo(null); setPinnedOnly(false); setPinIndex(0); setPinJumpTarget(null); pinJumpRef.current++; }, [scopeKey]);
   useEffect(() => {
     if (!messageUndo) return;
     const timer = setTimeout(() => setMessageUndo(previous => previous === messageUndo ? null : previous), 6000);
@@ -153,8 +155,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const [sending, setSending] = useState(false);
   const [stoppingScope, setStoppingScope] = useState<string | null>(null);
   const stoppingScopeRef = useRef<string | null>(null);
-  const [memberStopPending, setMemberStopPending] = useState<Set<string>>(() => new Set());
-  const memberStopPendingRef = useRef(new Set<string>());
   const deletingScopeRef = useRef<string | null>(null);
   const [deletingScope, setDeletingScope] = useState<string | null>(null);
   const removingMemberScopeRef = useRef<string | null>(null);
@@ -416,13 +416,12 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
   const discussionRunning = view?.group.status === "deleting" || Boolean(view?.round) || (view?.activeTurns ?? []).length > 0
     || (view?.queuedMemberIds ?? []).length > 0 || (view?.pendingInteractions ?? []).length > 0;
   discussionRunningRef.current = discussionRunning;
-  const memberStopKey = (opportunityId: string) => `${scopeKey}:${opportunityId}`;
-  const stoppedSpeech = (turn: GroupChatView["activeTurns"][number]) => turn.releasedReason === "stopped"
-    || memberStopPending.has(memberStopKey(turn.opportunityId));
-  const stoppingTurns = (view?.activeTurns ?? []).filter(turn => !stoppedSpeech(turn) && (turn.stopping || turn.recovery?.cancelRequested));
+  const stoppedSpeech = (turn: GroupChatView["activeTurns"][number]) => turn.releasedReason === "stopped";
+  const awaitingStop = (view?.activeTurns ?? []).some(turn => !stoppedSpeech(turn) && (turn.stopping || turn.recovery?.cancelRequested));
   const canStopDiscussion = Boolean(view?.round) || (view?.queuedMemberIds.length ?? 0) > 0
     || (view?.activeTurns ?? []).some(turn => !turn.stopping && !turn.recovery?.cancelRequested);
   const stopPending = stoppingScope === scopeKey;
+  const showStop = canStopDiscussion || stopPending || awaitingStop;
 
   const applyComposer = useCallback((composer: GroupComposer) => {
     setDraft(composer.text); setMentionIds(composer.mentionIds); setMentionSpans(composer.mentionSpans ?? null); setReplyTo(composer.replyTo);
@@ -729,7 +728,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     if (insertText(text)) event.preventDefault();
   };
   const filesBusy = files.some((file) => file.status !== "ready");
-  const hasComposerContent = Boolean(draft.trim() || files.length);
   const sameDraftPending = sendRecords.some(record => record.draftId === draftSessionRef.current?.draftId
     && record.draftRevision === draftSessionRef.current?.revision);
   const send = async () => {
@@ -994,9 +992,13 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     if (!canRemove() || removingMemberScopeRef.current === scopeKey) return;
     removingMemberScopeRef.current = scopeKey; setRemovingMemberScope(scopeKey);
     try {
+      const ok = await confirm({ title: t("groupChat.members.remove"), confirmLabel: t("common.confirm"), danger: true, focusCancel: true,
+        message: t("groupChat.members.removeConfirm", { name: member.displayName }) });
+      const latest = latestViewRef.current;
+      if (!ok || !latest?.ownerScope || !canRemove()) return;
       mutationRevisionRef.current++;
-      applyView(await removeGroupChatMember(groupId, {
-        expectedRosterRevision: latestViewRef.current!.group.rosterRevision, memberId: member.id,
+      applyView(await updateGroupChatMembers(groupId, { ownerScope: latest.ownerScope,
+        expectedRosterRevision: latest.group.rosterRevision, addMembers: [], removeMemberIds: [member.id],
       }));
     } catch (cause) {
       if (currentScope()) { toast.error(cause instanceof Error ? cause.message : String(cause)); void pull(); }
@@ -1155,9 +1157,20 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
     const pinned = presentation.pins.some(pin => pin.id === message.id);
     const hasAttachments = !!messageAttachments.get(message.id)?.length;
     const copyLabel = t(hasAttachments ? "chat.copy" : "chat.copyAsMarkdown");
+    const origin = message.origin;
+    const activitySource = ownerScope && message.author.kind === "member" && origin?.opportunityId && origin.runId
+      && origin.discussionId && !origin.partial && !origin.streaming ? {
+        ownerScope, groupId, messageId: message.id, seq: message.seq, memberId: message.author.memberId,
+        opportunityId: origin.opportunityId, runId: origin.runId, discussionId: origin.discussionId,
+      } : null;
     return <div className="chat-group__footer" data-group-message-footer={message.id}>
       {message.createdAt ? <time data-group-message-time={message.id} dateTime={new Date(message.createdAt).toISOString()}>{formatChatTime(message.createdAt)}</time> : null}
       {message.author.kind === "member" && <ChatResponseMetadata metadata={message.responseMetadata} />}
+      {activitySource && <button type="button" className="chat-copybtn" data-chat-footer-icon="" aria-haspopup="dialog"
+        title={t("turnLab.processOpen")} aria-label={t("turnLab.processOpen")}
+        onClick={() => { if (currentScope()) { setSelectedActivityKey(null); setMessageActivity({ scope: scopeKey, source: activitySource }); } }}>
+        <IconTrajectory />
+      </button>}
       {(messageText(message).trim() || hasAttachments) && <button type="button" className="chat-copybtn" data-chat-footer-icon=""
         title={copyLabel} aria-label={copyLabel} onClick={() => void copyMessage(message)}><IconCopy /></button>}
       {!archived && <button type="button" className="chat-copybtn" data-chat-footer-icon="" title={t("chat.quote")}
@@ -1167,8 +1180,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         aria-pressed={pinned} onClick={() => pinMessage(message)}><IconPin /></button>}
       {MESSAGE_DELETION_ENABLED && <button type="button" className="chat-copybtn" title={t("chat.deleteLocal")} aria-label={t("chat.deleteLocal")}
         onClick={() => hideMessage(message)}><IconTrash /></button>}
-      {message.author.kind === "member" && message.origin?.opportunityId
-        && stopMessageIds.get(message.origin.opportunityId) === message.id && memberStopButton(message.origin.opportunityId)}
     </div>;
   };
   const jumpToPin = async (id: string) => {
@@ -1238,44 +1249,10 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
       ))}
     </div>
   );
-  const stopMember = async (memberId: string, opportunityId: string) => {
-    if (!currentScope()) return;
-    const key = memberStopKey(opportunityId);
-    if (memberStopPendingRef.current.has(key)) return;
-    memberStopPendingRef.current.add(key);
-    setMemberStopPending(new Set(memberStopPendingRef.current));
-    mutationRevisionRef.current++;
-    try { applyView(await stopGroupChatMember(groupId, memberId)); }
-    catch (cause) {
-      if (currentScope()) { toast.error(cause instanceof Error ? cause.message : String(cause)); void pull(); }
-    } finally {
-      memberStopPendingRef.current.delete(key);
-      setMemberStopPending(new Set(memberStopPendingRef.current));
-    }
-  };
-  // 与原状态条使用相同的停止资格；入口只放在当前回合最后一个可见气泡下。
-  const stoppableTurns = new Map(speaking.filter(({ turn }) => !archived && !turn.stopping && !turn.recovery?.cancelRequested)
-    .map(item => [item.turn.opportunityId, item]));
-  const stopMessageIds = new Map<string, string>();
   const visibleMessageIds = new Set<string>();
   for (const entry of timeline) {
-    if (entry.kind !== "message") continue;
-    const message = entry.message;
-    visibleMessageIds.add(message.id);
-    if (message.author.kind === "member" && message.origin?.opportunityId
-      && stoppableTurns.get(message.origin.opportunityId)?.member.id === message.author.memberId) {
-      stopMessageIds.set(message.origin.opportunityId, message.id);
-    }
+    if (entry.kind === "message") visibleMessageIds.add(entry.message.id);
   }
-  const memberStopButton = (opportunityId: string) => {
-    const item = stoppableTurns.get(opportunityId);
-    return item ? <button type="button" className="chat-copybtn"
-      title={`${t("groupChat.status.stop")} ${item.member.displayName}`} aria-label={`${t("groupChat.status.stop")} ${item.member.displayName}`}
-      data-group-stop-member={item.member.id} data-group-stop-turn={opportunityId}
-      onClick={() => void stopMember(item.member.id, opportunityId)}><IconStopMessage /></button> : null;
-  };
-  const unfinishedFooter = (opportunityId: string) => !stopMessageIds.has(opportunityId) && stoppableTurns.has(opportunityId)
-    ? <div className="chat-group__footer">{memberStopButton(opportunityId)}</div> : null;
   const authorHeader = (member: GroupChatMember | undefined) => (
     <span className={styles.author} data-group-author>
       <GroupMemberAvatar member={member} className={styles.authorAvatar} />
@@ -1293,6 +1270,9 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
       <GroupChatActivityDialog key={scopeKey} activity={selectedActivity?.activity ?? null}
         memberName={selectedActivity?.member.displayName} startedAt={selectedActivity?.turn.startedAt}
         onClose={() => setSelectedActivityKey(key => key === selectedActivityKey ? null : key)} />
+      {messageActivity?.scope === scopeKey && <GroupChatMessageActivityDialog key={messageActivity.source.messageId}
+        source={messageActivity.source} memberName={membersById.get(messageActivity.source.memberId)?.displayName}
+        onClose={() => setMessageActivity(current => current === messageActivity ? null : current)} />}
       {settingsOpen && <GroupChatSettings key={`settings:${scopeKey}`} view={view} onView={applyView} onClose={() => { if (currentScope()) setSettingsOpen(false); }} />}
       {sendRecordsOpen && <Modal open width={680} title={t("groupChat.sendJournal.open")} onClose={() => setSendRecordsOpen(false)}>
         <div data-group-send-records>
@@ -1339,13 +1319,13 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
         </div>
       </Modal>}
       {adding && (
-        <Suspense fallback={null}><GroupChatAddMemberModal key={`add:${scopeKey}`} view={view} candidates={agents}
-          onView={applyView} onClose={() => { if (currentScope()) setAdding(false); }} /></Suspense>
+        <Suspense fallback={null}><GroupChatAddMemberModal key={`add:${scopeKey}`} view={view} candidates={agents} backends={backends} isCurrentScope={currentScope}
+          onView={applyView} onRefresh={pull} onClose={() => { if (currentScope()) setAdding(false); }} /></Suspense>
       )}
       {expandedPanel && <Suspense fallback={<div className={styles.expandedLoading} role="status"><FusionLoader size="sm" /></div>}>
         {expandedPanel === "members" ? <GroupChatDetails key={`details:${scopeKey}`} view={view}
           onClose={() => setExpandedPanel(null)}
-          onAddMember={!archived && activeMembers.length < MAX_MEMBERS ? () => setAdding(true) : undefined}
+          onAddMember={!archived ? () => setAdding(true) : undefined}
           onRemoveMember={member => void removeMember(member)} removingMember={removingMemberScope === scopeKey}
           onRename={() => void rename()} onSettings={() => setSettingsOpen(true)}
           onDelete={() => void removeGroup()} deleting={deletingScope === scopeKey} />
@@ -1441,7 +1421,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
               && !groupActivityEnded(phase);
             const steps = loading && activity ? groupActivitySteps(activity) : [];
             const notice = !quietRecovery && (turn.recovery?.type === "result" || turn.queueReason === "execution_unconfirmed");
-            const footer = !waitingForInteraction ? unfinishedFooter(turn.opportunityId) : null;
             if (!replyMessages.length && !loading && !notice) return null;
             return (
           <div key={`turn:${turn.opportunityId}`} className="chat-group is-assistant"
@@ -1461,7 +1440,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
                 {turn.queueReason === "execution_unconfirmed" && <p className={styles.muted}>{t("groupChat.queueBlocked")}</p>}
                 {turn.recovery && <GroupChatRecovery recovery={turn.recovery} />}
               </div>}
-              {footer}
             </div>
           </div>
         );
@@ -1489,7 +1467,6 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
               <div className="chat-group__stack">
                 {authorHeader(member)}
                 {approval ? prompt : <div className={`chat-bubble ${styles.liveBubble}`}>{prompt}</div>}
-                {unfinishedFooter(item.opportunityId)}
               </div>
             </div>
           );
@@ -1639,14 +1616,14 @@ export default function GroupChatPanel({ groupId, agents = [], onArchived, cache
               disabled={archived || !journalReady || files.length >= MAX_INSPIRATION_ATTACHMENTS} onClick={() => fileInputRef.current?.click()}>
               <IconClip />
             </button>
-            {(canStopDiscussion || stopPending || stoppingTurns.length > 0) && (
+            {showStop && (
               <button type="button" className="chat-iconbtn chat-send chat-stop"
                 title={t(stopPending ? "groupChat.stopState.requesting" : !canStopDiscussion ? "groupChat.stopState.confirming" : "groupChat.stop")}
                 aria-label={t(stopPending ? "groupChat.stopState.requesting" : !canStopDiscussion ? "groupChat.stopState.confirming" : "groupChat.stop")}
                 disabled={stopPending || !canStopDiscussion} aria-busy={stopPending}
                 onClick={() => void stopDiscussion()}><IconStop /></button>
             )}
-            {(hasComposerContent || !(canStopDiscussion || stopPending || stoppingTurns.length > 0)) && (
+            {!showStop && (
               <button type="button" className="chat-iconbtn chat-send" title={t("groupChat.send")} aria-label={t("groupChat.send")}
                 onClick={() => void send()} disabled={(!draft.trim() && files.length === 0) || filesBusy || sending || archived || !journalReady || !!journalError || sameDraftPending}>
                 <IconSend />

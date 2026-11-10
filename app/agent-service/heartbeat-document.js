@@ -5,7 +5,31 @@ const { serviceError } = require("./security");
 const { publicUrl } = require("./web-service");
 const MAX_DOCUMENT_BYTES = 16384, MAX_SCRATCH_BYTES = 4096;
 const EMPTY_REVISION = "0".repeat(64);
-const DEFAULT_HEARTBEAT = "# Heartbeat\n\n<!-- Write recurring checks and notification conditions here. Headings, comments, or empty content alone do not invoke a model.\nAn optional YAML web list at the start can declare public pages or search queries:\n---\nweb:\n  - kind: fetch\n    url: https://example.com/status\n  - kind: search\n    query: project release updates\n---\nThe settings above control frequency, active hours, and notifications. -->\n";
+const DEFAULT_HEARTBEAT = `# Heartbeat
+
+<!--
+Write recurring checks in plain language. For each check, describe:
+- What to check and where the evidence comes from.
+- Which change or condition is worth a reminder.
+- When to stay quiet, and when to stop repeating a reminder after it is handled.
+
+Example only: Check the project's release page. Remind me when a new stable release appears, explain the relevant changes, and do not repeat a release already reported. Stay quiet when nothing changed.
+
+Use current evidence. Missing access or a failed check is not proof that everything is fine. Keep reminders useful and actionable.
+Frequency, active hours, and notifications are controlled by the heartbeat settings.
+Headings, comments, or empty content alone do not invoke a model; this example is inactive.
+
+Optional source collection: YAML front matter can request a read-only snapshot of unarchived Spark Notes and public web sources. To use it, place the needed fields at the very start of this file, outside this comment and before the heading, then add your actual checks below:
+---
+inspiration: true
+web:
+  - kind: fetch
+    url: https://example.com/status
+  - kind: search
+    query: project release updates
+---
+-->
+`;
 function error(code) { throw serviceError(code, code === "PROACTIVE_REVISION_CONFLICT" ? "文件已更新，请重新读取" : "检查规则文件内容或路径无效"); }
 function revision(content) { return crypto.createHash("sha256").update(content).digest("hex"); }
 function meaningful(content) {
@@ -13,17 +37,33 @@ function meaningful(content) {
     const value = line.trim(); return value && !/^(?:#{1,6}(?:\s|$)|```|~~~|[-*+]\s*(?:\[[ xX]\])?\s*$)/u.test(value);
   });
 }
+function hasInspirationSection(body) {
+  const rules = body.replace(/<!--[\s\S]*?(?:-->|$)/gu, "");
+  const heading = /^ {0,3}#{1,6}[ \t]+(?:灵感便签状态检查(?:与合并汇报)?|Spark[ \t]*Notes status check)[ \t]*#*[ \t]*$/iu;
+  let fence = null;
+  for (const line of rules.split(/\r?\n/u)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = null;
+    } else if (marker) fence = marker[1];
+    else if (heading.test(line)) return true;
+  }
+  return false;
+}
 function parseHeartbeat(content) {
   if (typeof content !== "string" || !content.isWellFormed() || content.includes("\0") || Buffer.byteLength(content) > MAX_DOCUMENT_BYTES
     || Buffer.byteLength(JSON.stringify(content)) > 20 * 1024) error("PROACTIVE_DOCUMENT_INVALID");
-  let body = content, web = [];
+  let body = content, web = [], inspiration;
   if (/^\uFEFF?---\r?\n/u.test(content)) {
     const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(content);
     if (!match) error("PROACTIVE_DOCUMENT_INVALID");
     let data; try { data = yaml.load(match[1], { schema: yaml.JSON_SCHEMA }); } catch { error("PROACTIVE_DOCUMENT_INVALID"); }
-    if (!data || Object.getPrototypeOf(data) !== Object.prototype || Object.keys(data).some(k => k !== "web")
-      || !Array.isArray(data.web) || data.web.length > 4) error("PROACTIVE_DOCUMENT_INVALID");
-    web = data.web.map(source => {
+    if (!data || Object.getPrototypeOf(data) !== Object.prototype || !Object.keys(data).length
+      || Object.keys(data).some(k => !["web", "inspiration"].includes(k))
+      || (Object.hasOwn(data, "web") && (!Array.isArray(data.web) || data.web.length > 4))
+      || (Object.hasOwn(data, "inspiration") && typeof data.inspiration !== "boolean")) error("PROACTIVE_DOCUMENT_INVALID");
+    inspiration = data.inspiration;
+    web = (data.web ?? []).map(source => {
       const field = source?.kind === "fetch" ? "url" : source?.kind === "search" ? "query" : null;
       if (!field || !source || Object.getPrototypeOf(source) !== Object.prototype || Object.keys(source).sort().join() !== [field, "kind"].sort().join()
         || typeof source[field] !== "string" || !source[field].trim() || source[field].length > (field === "url" ? 4096 : 2000)) error("PROACTIVE_DOCUMENT_INVALID");
@@ -32,7 +72,10 @@ function parseHeartbeat(content) {
     });
     body = content.slice(match[0].length);
   }
-  return { body, web, empty: !meaningful(body) && web.length === 0 };
+  // The saved status-check section predates the YAML opt-in. A reference in a
+  // paragraph, example, or comment doesn't declare a source for other checks.
+  inspiration ??= hasInspirationSection(body);
+  return { body, web, inspiration, empty: !meaningful(body) && web.length === 0 && !inspiration };
 }
 class HeartbeatDocumentStore {
   constructor({ paths, productStore, documentName = "HEARTBEAT.md", defaultContent = DEFAULT_HEARTBEAT, parseContent = parseHeartbeat }) {

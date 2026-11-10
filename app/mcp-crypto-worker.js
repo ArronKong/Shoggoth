@@ -402,6 +402,19 @@ async function startMcpCryptoWorker(options = {}) {
     electronApp.setName(usesLocalFileCrypto
       ? SHOGGOTH_AGENT_SERVICE_NAME : keychainServiceNameForIdentity(identity));
   }
+  if (options.persistent === true || process.env.SHOGGOTH_CRYPTO_PERSISTENT === "1") {
+    return require("./agent-service/persistent-crypto-session").runPersistentCryptoSession({
+      gate, electronApp, input: options.input || process.stdin, output: options.output || process.stdout,
+      ...(options.getParentPid ? { getParentPid: options.getParentPid } : {}),
+      testStallMs: options.testCryptoStallMs ?? (process.env.NODE_ENV === "test"
+        ? Number.parseInt(process.env.SHOGGOTH_TEST_CRYPTO_STALL_MS || "", 10) : 0),
+      createStorage: paths => cryptoStorageForIdentity(identity, {
+        paths, electron, safeStorage: options.safeStorage, createLocalFileSafeStorage: options.createLocalFileSafeStorage,
+        fs: options.mcpAuthFs, randomBytes: options.localCryptoRandomBytes, readOnly: false,
+      }),
+      perform: input => performWorkerOperation({ ...input, fs: options.mcpAuthFs }), writeFrame,
+    });
+  }
   const decodedRequest = options.request
     ? { request: validateWorkerRequest(options.request, gate), payload: options.payload || Buffer.alloc(0) }
     : await readWorkerRequest(options.input || process.stdin, gate);

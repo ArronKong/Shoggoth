@@ -300,6 +300,16 @@ function validatePageParams(params, fields, extraCheck) {
     || !validLimit(params.limit) || !extraCheck(params)) failParams();
 }
 
+function validRunListScope(scope) {
+  if (!ownDataObject(scope) || !validString(scope.backendId, 64)
+    || !BACKEND_ID_PATTERN.test(scope.backendId)) return false;
+  if (Object.hasOwn(scope, "activeOnly")) {
+    return exactObject(scope, ["backendId", "activeOnly"]) && scope.activeOnly === true;
+  }
+  return exactObject(scope, ["backendId", "source", "sinceMs"])
+    && WORK_RUN_SOURCES.has(scope.source) && validTimestamp(scope.sinceMs);
+}
+
 function validateOperationBase(params, fields) {
   return exactObject(params, fields) && validOpaqueId(params.operationId)
     && validTimestamp(params.createdAt);
@@ -379,12 +389,14 @@ function validateChatServiceParams(method, params) {
     if (!validateOperationBase(params, ["operationId", "sessionKey", "runId", "createdAt"])
       || !validUuid(params.sessionKey) || !validNullableOpaqueId(params.runId)) failParams();
   } else if (method === "run.list") {
+    const scoped = Object.hasOwn(params || {}, "scope");
     validatePageParams(
       params,
-      ["profileId", "sessionKey", "status", "cursor", "limit"],
+      ["profileId", "sessionKey", "status", "cursor", "limit", ...(scoped ? ["scope"] : [])],
       (value) => validNullableOpaqueId(value.profileId)
         && (value.sessionKey === null || validUuid(value.sessionKey))
-        && (value.status === null || WORK_RUN_STATUSES.has(value.status)),
+        && (value.status === null || WORK_RUN_STATUSES.has(value.status))
+        && (!scoped || (value.profileId === null && value.sessionKey === null && validRunListScope(value.scope))),
     );
   } else if (method === "run.get") {
     if (!exactObject(params, ["runId"]) || !validOpaqueId(params.runId)) failParams();

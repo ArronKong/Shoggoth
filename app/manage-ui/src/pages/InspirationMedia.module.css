@@ -82,7 +82,8 @@
 }
 .fileRow { display: flex; align-items: center; gap: 4px; min-width: 0; width: 100%; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
 .fileRow:disabled { cursor: wait; }
-.fileRow > svg { flex: none; }
+/* The paper typeface draws the filename slightly above the center of its line box. */
+.fileRow > svg { flex: none; translate: 0 -1px; }
 .fileRow .filename { margin: 0; flex: 1; min-width: 0; }
 .fileRow:hover { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 .fileRow:focus-visible { outline: 1px solid var(--ui-focus); outline-offset: 4px; border-radius: 2px; }

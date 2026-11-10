@@ -4,7 +4,7 @@
 const text = (maxLength) => ({ type: "string", minLength: 1, maxLength });
 const id = { ...text(256), pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$" };
 const revision = { type: "integer", minimum: 0 };
-const source = { source: { type: "string", enum: ["chat", "inspiration"], description: "Copy currentWorkSource from the trusted current work source in your instructions." },
+const source = { source: { type: "string", enum: ["chat", "inspiration", "proactive"], description: "Copy currentWorkSource from the trusted current work source in your instructions." },
   sourceId: { ...text(512), description: "Copy currentWorkSourceId from the same trusted current work source. It is not the Run ID." } };
 const object = (properties, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 const nullable = (schema) => ({ anyOf: [schema, { type: "null" }] });

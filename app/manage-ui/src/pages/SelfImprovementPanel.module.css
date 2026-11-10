@@ -65,7 +65,7 @@
 .editor { padding: 8px 0; }
 .editor textarea { min-height: 300px; font-size: 13px; line-height: 1.8; border-radius: 12px; }
 .actions.detailActions { gap: 6px; margin: 0; padding-top: 0; }
-.detailActions :global(button) { min-height: 36px; padding: 8px 12px; border: 0; border-radius: 9px; background: transparent; color: var(--ui-text-2); box-shadow: none; font-size: 12px; font-weight: 400; }
+.detailActions :global(button) { min-height: 36px; padding: 8px 12px; border: 0; border-radius: 999px; background: transparent; color: var(--ui-text-2); box-shadow: none; font-size: 12px; font-weight: 400; }
 .detailActions :global(button:hover:not(:disabled)) { background: var(--ui-surface-2); color: var(--ui-text-1); }
 .detailActions .editButton { margin-left: auto; padding-right: 16px; padding-left: 16px; background: var(--ui-text-1); color: var(--ui-surface-1); }
 .detailActions .editButton:hover:not(:disabled) { background: color-mix(in srgb, var(--ui-text-1) 85%, var(--ui-surface-1)); color: var(--ui-surface-1); }

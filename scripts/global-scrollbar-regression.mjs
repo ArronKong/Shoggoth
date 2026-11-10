@@ -1191,14 +1191,9 @@ function runMigrationContracts() {
       && compact(anchorBranch?.[2]) === "stickRef.current=nearBottom&&!anchoredRef.current;",
     onThreadScrollBlock ? "function block found" : "onThreadScroll block missing",
   );
-  const onThreadWheelBlock = withoutComments(variableFunctionBlock(immersive.source, immersivePath, "onThreadWheel"));
   check(
-    "Immersive chat retains near-top wheel history loading",
-    /onWheel\s*=\s*\{onThreadWheel\}/.test(immersive.source)
-      && /e\.deltaY\s*<\s*0/.test(onThreadWheelBlock)
-      && /el\.scrollTop\s*<\s*400/.test(onThreadWheelBlock)
-      && /onNearTop\(\s*\)/.test(onThreadWheelBlock),
-    onThreadWheelBlock ? "function block found" : "onThreadWheel block missing",
+    "Immersive chat forwards wheel input and the prepend anchor to the history handler",
+    /onWheel\s*=\s*\{event\s*=>\s*onHistoryInput\?\.\(event,\s*captureHistoryAnchor\)\}/.test(immersive.source),
   );
 }
 

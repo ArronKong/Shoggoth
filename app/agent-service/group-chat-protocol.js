@@ -24,7 +24,8 @@ const METHODS = Object.freeze({
   "group.create": ["operationId", "name", "purpose", "members"],
   "group.update": ["groupId", "expectedMetadataRevision", "patch"],
   "group.delete": ["groupId", "expectedMetadataRevision"],
-  "group.members.add": ["groupId", "expectedRosterRevision", "member"],
+  "group.members.add": ["groupId", "expectedRosterRevision"],
+  "group.members.update": ["groupId", "ownerScope", "expectedRosterRevision", "addMembers", "removeMemberIds"],
   "group.members.remove": ["groupId", "expectedRosterRevision", "memberId"],
   "group.members.stop": ["groupId", "memberId"],
   "group.member.models": ["groupId", "memberId"],
@@ -139,7 +140,9 @@ function executionTarget(target) {
 function validateParams(method, params) {
   const optional = method === "group.member.role" ? ["revision", "cursor", "document"]
     : method === "group.history" ? ["afterRevision"]
+    : method === "group.message.read" && Object.hasOwn(params ?? {}, "part") ? ["part", "ownerScope", "messageId"]
     : method === "group.delete" ? ["force", "ownerScope"]
+    : method === "group.members.add" ? ["member", "members"]
     : method === "group.send" ? ["taskId", "requestMode", "discussionId", "summaryMemberId", "ownerScope", "expectedPolicyVersion"]
       : method === "group.send.lookup" ? ["payloadDigest", "ownerScope"] : [];
   const fields = METHODS[method] && [...METHODS[method], ...optional.filter(key => plainObject(params) && Object.hasOwn(params, key))];
@@ -180,7 +183,15 @@ function validateParams(method, params) {
       && (!Object.hasOwn(params.patch, "status") || ["active", "archived"].includes(params.patch.status))
       && (!Object.hasOwn(params.patch, "ownerMemberId") || opaqueId(params.patch.ownerMemberId)),
     "group.members.add": () => opaqueId(params.groupId) && revision(params.expectedRosterRevision)
-      && agentRef(params.member),
+      && (Object.hasOwn(params, "members")
+        ? !Object.hasOwn(params, "member") && Array.isArray(params.members)
+          && params.members.length >= 1 && params.members.length <= MAX_GROUP_MEMBERS && params.members.every(agentRef)
+        : agentRef(params.member)),
+    "group.members.update": () => opaqueId(params.groupId) && text(params.ownerScope, 256) && revision(params.expectedRosterRevision)
+      && Array.isArray(params.addMembers) && params.addMembers.length <= MAX_GROUP_MEMBERS && params.addMembers.every(agentRef)
+      && Array.isArray(params.removeMemberIds) && params.removeMemberIds.length <= MAX_GROUP_MEMBERS
+      && params.removeMemberIds.every(opaqueId) && new Set(params.removeMemberIds).size === params.removeMemberIds.length
+      && params.addMembers.length + params.removeMemberIds.length > 0,
     "group.members.remove": () => opaqueId(params.groupId) && revision(params.expectedRosterRevision)
       && opaqueId(params.memberId),
     "group.members.stop": () => opaqueId(params.groupId) && opaqueId(params.memberId),
@@ -211,8 +222,11 @@ function validateParams(method, params) {
     "group.send.lookup": () => opaqueId(params.groupId) && opaqueId(params.clientMessageId)
       && (!Object.hasOwn(params, "payloadDigest") || validDigest(params.payloadDigest))
       && (!Object.hasOwn(params, "ownerScope") || text(params.ownerScope, 256)),
-    "group.message.read": () => opaqueId(params.groupId) && revision(params.seq) && validOffset(params.offset)
-      && (params.digest === null ? params.offset === 0 : validDigest(params.digest)),
+    "group.message.read": () => opaqueId(params.groupId) && revision(params.seq)
+      && (Object.hasOwn(params, "part")
+        ? params.part === "activity" && params.offset === 0 && params.digest === null
+          && text(params.ownerScope, 256) && opaqueId(params.messageId)
+        : validOffset(params.offset) && (params.digest === null ? params.offset === 0 : validDigest(params.digest))),
     "group.execution.reconcile": () => opaqueId(params.groupId) && executionTarget(params.target),
     "group.history": () => opaqueId(params.groupId) && seq(params.afterSeq) && seq(params.beforeSeq)
       && Number.isSafeInteger(params.limit) && params.limit >= 1 && params.limit <= MAX_HISTORY_LIMIT
@@ -237,6 +251,11 @@ function validateParams(method, params) {
 
 function validateResult(method, result, params = null) {
   if (!METHODS[method] || !plainObject(result)) fail("GROUP_CHAT_UNAVAILABLE");
+  if (method === "group.message.read" && params?.part === "activity"
+    && (!exact(result, ["activity", "startedAt", "finishedAt"]) || !seq(result.startedAt) || !seq(result.finishedAt)
+      || result.activity !== null && (!require("./group-activity").validGroupActivity(result.activity)
+        || result.activity.groupId !== params.groupId || result.activity.phase !== "completed"
+        || Object.hasOwn(result.activity, "textMessages")))) fail("GROUP_CHAT_UNAVAILABLE");
   if (method === "group.artifacts.list") {
     if (!exact(result, ["supported", "items", "truncated", "partial"]) || result.supported !== true
       || typeof result.truncated !== "boolean" || typeof result.partial !== "boolean"
@@ -250,6 +269,9 @@ function validateResult(method, result, params = null) {
   if (method === "group.delete" && (!exact(result, ["groupId", "status"]) || !opaqueId(result.groupId)
     || !["deleting", "deleted"].includes(result.status) || params && result.groupId !== params.groupId
     || params?.force === true && result.status !== "deleted")) fail("GROUP_CHAT_UNAVAILABLE");
+  if (method === "group.members.update" && (!text(result.ownerScope, 256) || !opaqueId(result.group?.id)
+    || !revision(result.group.rosterRevision) || !Array.isArray(result.members)
+    || params && (result.ownerScope !== params.ownerScope || result.group.id !== params.groupId))) fail("GROUP_CHAT_UNAVAILABLE");
   if (method === "group.member.models" && !validModelCatalog(result)) fail("GROUP_CHAT_MODEL_CATALOG_UNAVAILABLE");
   if (method === "group.execution.receipt"
     && !require("../external-inspiration-protocol").validateGroupExecutionReceiptResult(result, params)) fail("GROUP_CHAT_UNAVAILABLE");

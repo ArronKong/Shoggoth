@@ -1342,6 +1342,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           await registry.deleteGroupChat(id, await readJsonBody(req)));
         if (segs.length === 2 && segs[1] === "members" && method === "POST") return sendJson(res, 200,
           await registry.addGroupChatMember(id, await readJsonBody(req)));
+        if (segs.length === 2 && segs[1] === "members" && method === "PATCH") return sendJson(res, 200,
+          await registry.updateGroupChatMembers(id, await readJsonBody(req)));
         if (segs.length === 2 && segs[1] === "members" && method === "DELETE") return sendJson(res, 200,
           await registry.removeGroupChatMember(id, await readJsonBody(req)));
         if (segs.length === 3 && segs[1] === "members" && segs[2] === "stop" && method === "POST") return sendJson(res, 200,
@@ -1372,7 +1374,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         }
         if (segs.length === 3 && segs[1] === "messages" && segs[2] === "read" && method === "GET") {
           return sendJson(res, 200, await registry.readGroupChatMessage(id, {
-            seq: seqParam("seq"), offset: seqParam("offset") ?? 0, digest: requestUrl?.searchParams.get("digest") ?? null }));
+            seq: seqParam("seq"), offset: seqParam("offset") ?? 0, digest: requestUrl?.searchParams.get("digest") ?? null,
+            ...Object.fromEntries(["part", "ownerScope", "messageId"].filter(key => requestUrl?.searchParams.has(key))
+              .map(key => [key, requestUrl.searchParams.get(key)])) }));
         }
         if (segs.length === 3 && segs[1] === "messages" && segs[2] === "search" && method === "GET") {
           return sendJson(res, 200, await registry.searchGroupChatMessages(id, {
@@ -3391,8 +3395,24 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       if (!backend) return sendJson(res, 400, { error: `unknown backend ${backendId}` });
       const id = segs[1]; // agent ids are [a-z0-9-]; safe as a path segment
+      if (segs[2] === "models" && segs.length === 3) {
+        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        try { return sendJson(res, 200, await backend.getAgentModels(id)); }
+        catch (error) {
+          return sendJson(res, error?.statusCode === 501 ? 501 : 503,
+            { code: "AGENT_MODEL_CATALOG_UNAVAILABLE", error: "Agent model catalog unavailable" });
+        }
+      }
       if (segs[2] === "managed-files" && segs.length <= 5) {
         return handleManagedAgentFiles(req, res, backend, id, segs.slice(3), url.searchParams);
+      }
+      if (segs[2] === "chat-prewarm" && segs.length === 3) {
+        if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+        const key = url.searchParams.get("sessionKey");
+        if (typeof key !== "string" || !key || key.length > 1024 || !key.isWellFormed() || key.includes("\0")) {
+          return sendJson(res, 400, { error: "invalid sessionKey" });
+        }
+        return sendJson(res, 200, await backend.prewarmChatSession(id, key));
       }
       if (segs[2] === "memory-status" && segs.length === 3) {
         if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
@@ -3930,11 +3950,18 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         const n = Number(raw);
         return Number.isFinite(n) ? n : undefined;
       };
-      const summary = await registry.getDashboardSummary({
+      const section = url.searchParams.get("section");
+      if (section !== null && !["activity", "usage", "artifacts"].includes(section)) {
+        return sendJson(res, 400, { error: "invalid dashboard section" });
+      }
+      const options = {
         sinceMs: num("sinceMs"),
         ...(num("runsLimit") != null ? { runsLimit: num("runsLimit") } : {}),
         ...(num("artifactsLimit") != null ? { artifactsLimit: num("artifactsLimit") } : {}),
-      });
+      };
+      const summary = section === null
+        ? await registry.getDashboardSummary(options)
+        : await registry.getDashboardSection(section, options);
       return sendJson(res, 200, { summary });
     }
     // Dashboard 文件缩略图：由对应 backend 重验证（realpath 落在允许根内 +

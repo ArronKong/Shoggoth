@@ -326,6 +326,7 @@ test("chat history and Runtime state both remain readable after transcript metad
     const session = { profileId: profile.id, id: "session-1", sessionKey: "22222222-2222-4222-8222-222222222222",
       runtimeBindingId: binding.id, revision: 1, runtimeSessionId: null, status: "draft", permissionMode: null };
     const productStore = { listAgentProfiles: () => [], getAgentProfile: () => profile,
+      resolveAgentRuntimeProfile: () => profile,
       getAgentRuntimeBindings: () => ({ bindings: [binding] }) };
     const chatSessionStore = { listSessions: () => [session], getSession: () => session, getBinding: () => null,
       listPendingRemoteOperations: () => [], createSession: () => { throw new Error("must not create a session"); } };
@@ -487,6 +488,163 @@ test("用量活动按 Profile 与区间汇总 tool_call，且不重复计算 too
       () => store.summarizeUsageActivity("30d", new Set(["bad profile"])),
       (error) => error.code === "TRANSCRIPT_USAGE_SCOPE_INVALID",
     );
+  } finally { value.cleanup(); }
+});
+
+test("usage aggregation includes evicted sessions and retains profile scope across reopening", () => {
+  const value = fixture({ maxCachedJournalBytes: 1 });
+  try {
+    const store = value.create(); store.open();
+    for (const sessionId of ["session-1", "session-2"]) store.appendEvent({
+      profileId: "profile-1", sessionId, id: "user", kind: "user",
+      content: { text: "calibration" }, runtimeRef: null,
+    });
+    store.appendEvent({ profileId: "profile-2", sessionId: "session-3", id: "other", kind: "user",
+      content: { text: "other profile" }, runtimeRef: null });
+    assert.equal(store.sessions.size, 1);
+    const scope = new Set(["profile-1"]);
+    assert.equal(store.summarizeUsageActivity("all", scope).messages.user, 2);
+    assert.equal(store.summarizeUsageActivity("all", scope).messages.user, 2, "repeat scans never lose or duplicate an evicted session");
+    assert.equal(store.sessions.size, 1);
+    store.close(); store.open();
+    // The Service reopens its catalog's sessions before accepting usage reads.
+    for (const sessionId of ["session-1", "session-2"]) store.ensureSession({ profileId: "profile-1", sessionId });
+    assert.equal(store.summarizeUsageActivity("all", scope).messages.user, 2);
+    store.forgetProfile("profile-1");
+    assert.equal(store.summarizeUsageActivity("all", scope).messages.user, 0);
+    store.ensureSession({ profileId: "profile-1", sessionId: "session-1" });
+    assert.equal(store.summarizeUsageActivity("all", scope).messages.user, 1);
+  } finally { value.cleanup(); }
+});
+
+test("read-only view shares frozen events without copying", () => {
+  const value = fixture();
+  try {
+    const store = value.create(); store.open();
+    const first = append(store, { id: "event-1", text: "one" });
+    append(store, { id: "event-2", kind: "assistant", text: "two" });
+    const view = store.eventsView("profile-1", "session-1");
+    assert.equal(view.length, 2);
+    assert.ok(Object.isFrozen(view) && Object.isFrozen(view[0]) && Object.isFrozen(view[0].content));
+    assert.equal(store.eventsView("profile-1", "session-1"), view, "an unchanged session reuses its snapshot");
+    assert.throws(() => { view[0].content.text = "changed"; }, TypeError);
+    assert.throws(() => { view.push(first); }, TypeError);
+
+    // listEvents keeps returning private copies that callers may modify.
+    const copies = store.listEvents("profile-1", "session-1");
+    assert.notEqual(copies[0], view[0]);
+    copies[0].content.text = "changed";
+    assert.equal(store.eventsView("profile-1", "session-1")[0].content.text, "one");
+
+    append(store, { id: "event-3", text: "three" });
+    const afterAppend = store.eventsView("profile-1", "session-1");
+    assert.equal(view.length, 2, "an earlier snapshot does not grow");
+    assert.equal(afterAppend.length, 3);
+    assert.equal(afterAppend[0], view[0], "unchanged events keep their identity");
+
+    store.setContextExcluded({ profileId: "profile-1", sessionId: "session-1", eventId: "event-1", contextExcluded: true });
+    const afterExclusion = store.eventsView("profile-1", "session-1");
+    assert.equal(afterAppend[0].contextExcluded, false, "an earlier snapshot keeps the flag it saw");
+    assert.equal(afterExclusion[0].contextExcluded, true);
+    assert.equal(afterExclusion[0].content, afterAppend[0].content, "the body is shared, only the flag is new");
+    assert.equal(afterExclusion[1], afterAppend[1]);
+    assert.equal(store.hasUserEventForRun("profile-1", "session-1", "run-1"), true, "event-3 is still a visible user event");
+    assert.deepEqual(store.listEvents("profile-1", "session-1"), structuredClone(afterExclusion));
+
+    const reopened = value.create(); reopened.open();
+    assert.deepEqual(reopened.eventsView("profile-1", "session-1"), afterExclusion);
+  } finally { value.cleanup(); }
+});
+
+test("context body view is reused until its file changes", () => {
+  let reads = 0;
+  const counting = { ...fs, readFileSync: (...args) => { reads += 1; return fs.readFileSync(...args); } };
+  const value = fixture({ fs: counting });
+  try {
+    const store = value.create(); store.open();
+    const saved = store.appendEvent({ profileId: "profile-1", sessionId: "session-1", id: "event-1", runId: "run-1",
+      kind: "tool_result", content: { text: "short" }, contextContent: { text: "full body" }, runtimeRef: null });
+    assert.ok(saved.content.contextRef);
+    const event = store.eventsView("profile-1", "session-1")[0];
+    reads = 0;
+    const first = store.contextEventView("profile-1", "session-1", event);
+    assert.equal(first.content.text, "full body");
+    assert.ok(Object.isFrozen(first.content));
+    assert.equal(reads, 1);
+    const second = store.contextEventView("profile-1", "session-1", event);
+    assert.equal(second.content, first.content, "the verified body is shared");
+    assert.equal(reads, 1, "an unchanged file is not read again");
+
+    // The copying reader is unchanged: a fresh, modifiable body on every call.
+    const copy = store.contextEvent("profile-1", "session-1", event);
+    assert.equal(reads, 2);
+    copy.content.text = "changed";
+    assert.equal(store.contextEventView("profile-1", "session-1", event).content.text, "full body");
+
+    const file = path.join(value.paths.agentsDir, "profile-1", "transcripts", "session-1", "context-content",
+      `${saved.content.contextRef.hash}.json`);
+    const original = fs.readFileSync(file);
+    fs.writeFileSync(file, Buffer.from(original.toString("utf8").replace("full", "FULL")), { mode: 0o600 });
+    assert.throws(() => store.contextEventView("profile-1", "session-1", event),
+      (error) => error.code === "CONTEXT_CONTENT_CORRUPT", "a modified body is verified again");
+    fs.rmSync(file);
+    assert.throws(() => store.contextEventView("profile-1", "session-1", event),
+      (error) => error.code === "CONTEXT_CONTENT_UNAVAILABLE", "a removed body is not served from memory");
+    fs.writeFileSync(file, original, { mode: 0o600 });
+    assert.equal(store.contextEventView("profile-1", "session-1", event).content.text, "full body");
+  } finally { value.cleanup(); }
+});
+
+test("context body cache and idle sessions are bounded", () => {
+  const value = fixture({ maxCachedContextContentBytes: 64, maxCachedJournalBytes: 1 });
+  try {
+    const store = value.create(); store.open();
+    for (const sessionId of ["session-1", "session-2", "session-3"]) {
+      for (const id of ["event-1", "event-2"]) {
+        store.appendEvent({ profileId: "profile-1", sessionId, id, runId: "run-1", kind: "tool_result",
+          content: { text: "short" }, contextContent: { text: `${sessionId} ${id} ${"x".repeat(24)}` }, runtimeRef: null });
+      }
+    }
+    assert.deepEqual([...store.sessions.keys()], ["profile-1\0session-3"], "only the session just used stays loaded");
+    const expected = store.listEvents("profile-1", "session-1");
+    assert.equal(expected.length, 2);
+    assert.deepEqual([...store.sessions.keys()], ["profile-1\0session-1"]);
+    assert.deepEqual(store.eventsView("profile-1", "session-1"), expected, "a dropped session loads again from its journal");
+
+    for (const sessionId of ["session-1", "session-2", "session-3"]) {
+      for (const event of store.eventsView("profile-1", sessionId)) {
+        assert.match(store.contextEventView("profile-1", sessionId, event).content.text, new RegExp(`^${sessionId} ${event.id} `));
+      }
+    }
+    assert.ok(store.contextContentBytes <= 64 && store.contextContents.size < 6, "older bodies leave the cache");
+    assert.ok(store.contextContents.size > 0);
+  } finally { value.cleanup(); }
+});
+
+test("growing a loaded journal evicts older sessions without waiting for a new session load", () => {
+  const value = fixture({ maxCachedJournalBytes: 3000 });
+  try {
+    const store = value.create(); store.open();
+    for (const sessionId of ["session-1", "session-2"]) store.appendEvent({ profileId: "profile-1", sessionId,
+      id: "first", kind: "user", content: { text: "seed" }, runtimeRef: null });
+    assert.equal(store.sessions.size, 2);
+    store.appendEvent({ profileId: "profile-1", sessionId: "session-2", id: "growth", kind: "assistant",
+      content: { text: "x".repeat(2400) }, runtimeRef: null });
+    assert.deepEqual([...store.sessions.keys()], ["profile-1\0session-2"]);
+    assert.equal(store.eventsView("profile-1", "session-1")[0].content.text, "seed");
+  } finally { value.cleanup(); }
+});
+
+test("shared context bodies stay frozen when the body cache is disabled", () => {
+  const value = fixture({ maxCachedContextContentBytes: 0 });
+  try {
+    const store = value.create(); store.open();
+    const event = store.appendEvent({ profileId: "profile-1", sessionId: "session-1", id: "uncached", kind: "assistant",
+      content: { text: "preview" }, contextContent: { text: "uncached full body", nested: { values: [1, 2] } }, runtimeRef: null });
+    const view = store.contextEventView("profile-1", "session-1", event);
+    assert.ok(Object.isFrozen(view.content.nested.values));
+    assert.throws(() => view.content.nested.values.push(3), TypeError);
+    assert.equal(store.contextContents.size, 0);
   } finally { value.cleanup(); }
 });
 

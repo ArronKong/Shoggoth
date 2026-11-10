@@ -2,6 +2,7 @@
 
 const { validResponseMetadata } = require("../chat-response-metadata");
 const { groupReplyMessages } = require("../group-reply-messages");
+const { GroupActivityProjection, groupTurnActivityBinding, completedGroupActivity } = require("./group-activity");
 
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -765,6 +766,20 @@ class GroupChatStore {
     return { page: resultPage(full?.body ?? message.body, { offset, digest: expected }) };
   }
 
+  getMessageActivityTurn({ groupId, seq, messageId, ownerScope }) {
+    this.#ready();
+    if (ownerScope !== this.getOwnerScope()) fail("GROUP_CHAT_OWNER_CHANGED");
+    this.#requireGroup(groupId);
+    const message = parse(this.db.prepare("SELECT data FROM messages WHERE group_id=? AND seq=? AND id=?").get(groupId, seq, messageId));
+    if (!message) fail("GROUP_CHAT_REPLY_NOT_FOUND");
+    const origin = message.origin;
+    if (message.author.kind !== "member" || !origin?.runId || !origin.opportunityId || origin.partial || origin.streaming) return null;
+    const turn = this.#turn(origin.opportunityId);
+    if (turn?.state !== "replied" || turn.resultMessageId !== message.id || turn.groupId !== groupId
+      || turn.memberId !== message.author.memberId || turn.runId !== origin.runId || turn.discussionId !== origin.discussionId) return null;
+    return { turn, member: this.#member(turn.memberId) };
+  }
+
   /** 截至某个 seq 的最近一条用户消息。 */
   latestUserMessage(groupId, throughSeq) {
     this.#ready();
@@ -857,6 +872,19 @@ class GroupChatStore {
     return this.#write(() => this.#addMember(args));
   }
 
+  addMembers(args) {
+    return this.#write(() => this.#addMembers(args));
+  }
+
+  #addMembers({ groupId, expectedRosterRevision, members }) {
+    if (members.length < 1 || members.length > MAX_GROUP_MEMBERS) fail("GROUP_CHAT_MEMBER_LIMIT");
+    // Use the same checks and public history event as a single addition. The
+    // caller owns the transaction so a later failure rolls back every write.
+    return members.map((member, index) => this.#addMember({
+      groupId, expectedRosterRevision: expectedRosterRevision + index, member,
+    }).memberId);
+  }
+
   #addMember({ groupId, expectedRosterRevision, member: input }) {
       const group = this.#requireGroup(groupId, { active: true });
       if (group.rosterRevision !== expectedRosterRevision) fail("GROUP_CHAT_REVISION_CONFLICT");
@@ -905,10 +933,7 @@ class GroupChatStore {
         const group = this.#requireGroup(groupId, { active: true });
         if (group.rosterRevision !== rosterRevision) fail("GROUP_CHAT_REVISION_CONFLICT");
         if ((group.policyVersion ?? 1) !== policyVersion) fail("GROUP_CHAT_POLICY_CONFLICT");
-        // One transaction includes every member and the receipt. Any duplicate,
-        // capacity failure or write failure rolls back the entire batch.
-        addedMemberIds = members.map((member, index) => this.#addMember({ groupId,
-          expectedRosterRevision: rosterRevision + index, member }).memberId);
+        addedMemberIds = this.#addMembers({ groupId, expectedRosterRevision: rosterRevision, members });
       }
       const group = this.#requireGroup(groupId);
       return { ok: true, status: request.action === "create" ? "created" : "members_added",
@@ -917,24 +942,55 @@ class GroupChatStore {
     });
   }
 
-  removeMember({ groupId, expectedRosterRevision, memberId }) {
+  updateMembers({ groupId, ownerScope, expectedRosterRevision, addMembers, removeMemberIds }) {
     return this.#write(() => {
-      const group = this.#requireGroup(groupId);
+      if (ownerScope !== this.getOwnerScope()) fail("GROUP_CHAT_OWNER_CHANGED");
+      const group = this.#requireGroup(groupId, { active: true });
       if (group.rosterRevision !== expectedRosterRevision) fail("GROUP_CHAT_REVISION_CONFLICT");
-      const member = this.#member(memberId);
-      if (!member || member.groupId !== groupId || member.state !== "active") fail("GROUP_CHAT_MEMBER_NOT_FOUND");
-      if (this.#members(groupId).filter(item => item.state === "active").length <= MIN_GROUP_MEMBERS) fail("GROUP_CHAT_MEMBER_LIMIT");
-      const aborts = this.#stopMemberTurns(groupId, memberId, "GROUP_MEMBER_REMOVED");
-      Object.assign(member, { state: "removed", leftSeq: group.lastSeq });
-      this.#putMember(member);
-      this.#systemMessage(group, { eventType: "member_removed", memberId });
-      group.rosterRevision += 1;
-      if (group.ownerMemberId === memberId) {
-        group.ownerMemberId = defaultOwner(this.#members(groupId), DEFAULT_AGENT_PROFILE_ID)?.id ?? null;
+      const finalCount = this.#members(groupId, { activeOnly: true }).length - removeMemberIds.length + addMembers.length;
+      if (finalCount < MIN_GROUP_MEMBERS || finalCount > MAX_GROUP_MEMBERS) fail("GROUP_CHAT_MEMBER_LIMIT");
+
+      // Make room for replacements first. The final size is checked above and
+      // the transaction hides the intermediate roster and rolls back its events.
+      const aborts = [];
+      let revision = expectedRosterRevision;
+      for (const memberId of removeMemberIds) {
+        const removed = this.#removeMember({ groupId, expectedRosterRevision: revision, memberId }, 0);
+        aborts.push(...removed.aborts);
+        revision += 1;
       }
-      this.#putGroup(group);
+      if (addMembers.length) {
+        this.#addMembers({ groupId, expectedRosterRevision: revision, members: addMembers });
+        if (removeMemberIds.includes(group.ownerMemberId)) {
+          const updated = this.#requireGroup(groupId);
+          updated.ownerMemberId = defaultOwner(this.#members(groupId), DEFAULT_AGENT_PROFILE_ID)?.id ?? null;
+          this.#putGroup(updated);
+        }
+      }
       return { groupId, aborts };
     });
+  }
+
+  removeMember(args) {
+    return this.#write(() => this.#removeMember(args));
+  }
+
+  #removeMember({ groupId, expectedRosterRevision, memberId }, minimum = MIN_GROUP_MEMBERS) {
+    const group = this.#requireGroup(groupId);
+    if (group.rosterRevision !== expectedRosterRevision) fail("GROUP_CHAT_REVISION_CONFLICT");
+    const member = this.#member(memberId);
+    if (!member || member.groupId !== groupId || member.state !== "active") fail("GROUP_CHAT_MEMBER_NOT_FOUND");
+    if (this.#members(groupId, { activeOnly: true }).length <= minimum) fail("GROUP_CHAT_MEMBER_LIMIT");
+    const aborts = this.#stopMemberTurns(groupId, memberId, "GROUP_MEMBER_REMOVED");
+    Object.assign(member, { state: "removed", leftSeq: group.lastSeq });
+    this.#putMember(member);
+    this.#systemMessage(group, { eventType: "member_removed", memberId });
+    group.rosterRevision += 1;
+    if (group.ownerMemberId === memberId) {
+      group.ownerMemberId = defaultOwner(this.#members(groupId), DEFAULT_AGENT_PROFILE_ID)?.id ?? null;
+    }
+    this.#putGroup(group);
+    return { groupId, aborts };
   }
 
   // ---- 用户发言 ----
@@ -1176,8 +1232,9 @@ class GroupChatStore {
         this.db.prepare(`DELETE FROM ${table} WHERE group_id=?`).run(groupId);
       }
       for (const turn of this.#turns("group_id=?", groupId)) {
-        if (turn.postedText || turn.publicProgress || turn.collaborationSnapshot) {
-          turn.postedText = null; delete turn.publicProgress; delete turn.collaborationSnapshot; this.#putTurn(turn);
+        if (turn.postedText || turn.publicProgress || turn.collaborationSnapshot || turn.completedActivity) {
+          turn.postedText = null; delete turn.publicProgress; delete turn.collaborationSnapshot; delete turn.completedActivity;
+          this.#putTurn(turn);
         }
       }
       if (this.tables.has("tasks")) {
@@ -1891,7 +1948,8 @@ class GroupChatStore {
    *   attachments?: object[], replyToSeq?: number|null}} input attachments / replyToSeq：成员随回复发的文件
    *   （已存进媒体库）与它引用的消息序号，由驱动从回复文本里解析并核对
    */
-  completeTurn({ opportunityId, fence, status, text = null, errorCode = null, attachments = [], replyToSeq = null, responseMetadata = null, replyMessages = [] }) {
+  completeTurn({ opportunityId, fence, status, text = null, errorCode = null, attachments = [], replyToSeq = null, responseMetadata = null,
+    replyMessages = [], activity = null }) {
     return this.#write(() => {
       const turn = this.#turn(opportunityId);
       if (!turn || !ACTIVE_TURN.includes(turn.state) || turn.fence !== fence || fence !== this.getDriverFence()) {
@@ -1950,6 +2008,16 @@ class GroupChatStore {
           authoritative: groupReplyMessages(replyMessages).some(item => item.id === finalItemId && item.final) })
           : this.#publish(group, turn, member, text ?? "", { attachments, replyToSeq, responseMetadata });
         finish("replied", { resultMessageId: message.id });
+        // Native turns have a durable transcript. Keep only the bounded, display-safe
+        // terminal facts for external turns, whose live Host activity can expire.
+        if (turn.runKind === "external" && turn.runId && activity?.runId === turn.runId && activity.phase === "completed") {
+          const projection = new GroupActivityProjection(groupTurnActivityBinding(turn), { now: this.now });
+          const { textMessages: _textMessages, ...details } = activity;
+          if (projection.adopt({ ...details, streamGeneration: "history" })) {
+            const saved = completedGroupActivity(projection);
+            if (saved) turn.completedActivity = saved;
+          }
+        }
       }
       if (["replied", "passed"].includes(turn.state)) turn.recovery = null;
       if (turn.state === "passed" && turn.postedText && validResponseMetadata(responseMetadata)) {

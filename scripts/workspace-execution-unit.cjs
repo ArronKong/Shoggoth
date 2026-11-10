@@ -26,7 +26,8 @@ const test = async (name, action) => { await action(); tests.push(name); console
   try {
     await test("contract grants only new frozen auto runs of the four runtimes", async () => {
       for (const runtime of ["antigravity", "pi", "opencode", "deepseek-harness"]) assert.equal(workspaceAutoExecution({ ...contract, runtime }), true);
-      for (const update of [{ permissionMode: "request-approval" }, { permissionMode: "full-access" }, { runtime: "codex" }, { source: "proactive" },
+      assert.equal(workspaceAutoExecution({ ...contract, source: "proactive" }), true);
+      for (const update of [{ permissionMode: "request-approval" }, { permissionMode: "full-access" }, { runtime: "codex" }, { source: "compaction" },
         { workspaceExecutionVersion: undefined }, { permissionPolicy: { sandbox: "read-only" } }]) {
         assert.equal(workspaceAutoExecution({ ...contract, ...update }), false);
       }

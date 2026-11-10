@@ -7,7 +7,7 @@ const FILE_PAGE_SIZE = 20;
 const FILE_ID = /^[a-f0-9]{64}$/u;
 const UPLOAD_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const RUN_SOURCES = Object.freeze(["chat", "cron", "kanban", "inspiration"]);
+const RUN_SOURCES = Object.freeze(["chat", "cron", "kanban", "inspiration", "proactive"]);
 const MESSAGES = Object.freeze({
   AGENT_FILE_INVALID: "Invalid file information.",
   AGENT_FILE_NOT_FOUND: "This file could not be found.",

@@ -13,7 +13,7 @@ export const mcpRecommendationOrder = [
   "shopify-ucp", "sentry", "netlify", "tailscale", "lovable", "plaid", "withings", "kiwi",
   "posthog", "amplitude", "neon", "highlevel", "granola", "readwise", "raindrop", "fantastical",
   "day-one", "attio", "link-by-stripe", "tessie", "pocket", "healthex", "composio",
-  "chrome-devtools", "context7", "storybook", "filesystem", "fetch", "time", "n8n", "baidu-maps", "variflight", "stockmap", "eastmoney", "ifind", "wind", "rollinggo-hotel",
+  "chrome-devtools", "context7", "storybook", "filesystem", "time", "n8n", "baidu-maps", "variflight", "stockmap", "eastmoney", "ifind", "wind", "rollinggo-hotel",
 ] as const;
 
 export const mcpRegistryBrands: Record<string, string> = {

@@ -12,10 +12,11 @@ import ChatContextUsage from "../components/ChatContextUsage";
 import ChatServiceRecoveryNotice from "../components/ChatServiceRecoveryNotice";
 import ChatStatusNotice from "../components/ChatStatusNotice";
 import { useSessionRuntimeModels } from "../lib/useSessionRuntimeModels";
+import { useAgentModelCatalog } from "../lib/useAgentModelCatalog";
 import type { RuntimeContextUsage, RuntimeContextCapabilities, ProductContextState, ChatResponseMetadata as ResponseMetadata } from "../types";
 import ChatResponseMetadata from "./ChatResponseMetadata";
 import { compactConversation, runShoggothBackgroundAction, getShoggothProductStatus } from "../api/client";
-import { prepareChatInputForSend } from "../api/client";
+import { prepareChatInputForSend, prewarmChatSession } from "../api/client";
 import { setInspirationChatSession } from "../lib/inspiration-navigation";
 import { toSanitizedMarkdownHtml, formatReasoningMarkdown } from "../lib/markdown";
 import ChatMarkdown from "../components/ChatMarkdown";
@@ -174,7 +175,7 @@ import ChatThinkFastMenu from "./ChatThinkFastMenu";
 import { localizePermissionMode } from "../lib/permissionModeText";
 import type { ImmersivePhase } from "./immersive/immersiveBg";
 import type { ImmersiveLiveStatus, ImmersiveLiveTool } from "./immersive/ImmersiveStatusLine";
-import { IconSend, IconClip, IconSearch, IconMic, IconStop } from "./chatIcons";
+import { IconSend, IconClip, IconSearch, IconStop } from "./chatIcons";
 import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
 import "./ChatPage.css";
 import GroupChatPanel, { GroupChatAvatar } from "./GroupChatPanel";
@@ -260,7 +261,6 @@ const SHOW_CHAT_CONTEXT_USAGE = false;
 // 首次连接与已连接后的中断分开呈现；后端曾就绪的证据只保留在本次页面生命周期。
 // Hermes 的精确就绪状态仍只用于 composer 门禁，不占用 Agent 行的缓存预览。
 type LiveStatus = "running" | "online" | "offline" | "connecting" | "reconnecting";
-type AgentListStatus = LiveStatus | ChatPromptAttention;
 
 interface SessionRow {
   spawnedBy?: string;
@@ -622,7 +622,7 @@ interface ChatMsg {
   openclawLivePreamble?: boolean;
   historySource?: "hermes";
   automation?: "cron" | "continuation";
-  isProactiveNotice?: boolean;
+  proactiveNoticeId?: string;
   sourceEventIds?: string[];
   canonicalSourceEventId?: string;
   id?: string; // canonical gateway identity — kept separate from local UI actions
@@ -671,6 +671,7 @@ interface ChatMsg {
 
 type ChatTurnActivity = { steps: TurnStep[]; live?: boolean; runId?: string; timing?: TurnTiming; recoveredSteps?: TurnStep[] };
 
+
 function activityOwnerOf(message: ChatMsg) {
   if (message.turnStartId) return `turn:${message.turnStartId}`;
   const runId = message.nativeRunId ?? message.activityRunId;
@@ -689,22 +690,6 @@ function agentOf(key: string): string {
   const segs = String(key || "").split(":");
   return segs[1] || segs[0] || key;
 }
-function openClawChatModels(raw: unknown): UnifiedModel[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((entry) => {
-    if (!entry || typeof entry !== "object") return [];
-    const model = entry as Partial<UnifiedModel>;
-    const id = typeof model.id === "string" ? model.id.trim() : "";
-    if (!id) return [];
-    return [{
-      ...model,
-      id,
-      name: typeof model.name === "string" && model.name.trim() ? model.name : id,
-      provider: typeof model.provider === "string" ? model.provider : "",
-      backendId: "openclaw",
-    }];
-  });
-}
 function inheritedModelChoice(
   models: UnifiedModel[],
   modelId: string | null | undefined,
@@ -716,8 +701,6 @@ function inheritedModelChoice(
   if (provider) return candidates.find((m) => m.provider === provider);
   return candidates.length === 1 ? candidates[0] : undefined;
 }
-// 刚发生 reset 的会话通常只剩极短的新尾巴；此时自动补回归档，其余会话仍按上滑按需加载。
-const AUTO_ARCHIVE_MESSAGE_LIMIT = 5;
 // 双发去重窗口：同一会话内相同正文在此窗口内再次发送 → 判为一次逻辑发送被双触发
 // （重连清 inFlight / 一次 Enter 走了两条 submit 路径），复用同一 idempotencyKey 让网关折叠。
 // 取 15s 覆盖已观测到的 ~13s 重连间隔；代价仅是 15s 内故意重发的同一句会被并成一条。
@@ -1284,7 +1267,7 @@ function normalize(raw: any): ChatMsg {
     historySource: raw?.historySource === "hermes" ? "hermes" : undefined,
     automation: raw?.automation === "continuation" ? "continuation"
       : raw?.automation === "cron" || role === "user" && raw?.shoggoth?.source === "cron" ? "cron" : undefined,
-    isProactiveNotice: typeof raw?.shoggoth?.proactiveNotice?.id === "string",
+    proactiveNoticeId: typeof raw?.shoggoth?.proactiveNotice?.id === "string" ? raw.shoggoth.proactiveNotice.id : undefined,
     nativeDisplayId: raw?.shoggoth?.nativeUiVersion === 1 && typeof raw.shoggoth.displayId === "string" ? raw.shoggoth.displayId : undefined,
     nativeRunId: raw?.shoggoth?.nativeUiVersion === 1 && typeof raw.shoggoth.runId === "string" ? raw.shoggoth.runId : undefined,
     promptResponse: role === "user" && raw?.shoggoth?.promptResponse === true ? true : undefined,
@@ -1854,7 +1837,7 @@ function collapseErrorRuns(msgs: ChatMsg[]): ChatMsg[] {
 function groupMessages(msgs: ChatMsg[]): Group[] {
   const groups: Group[] = [];
   // Published reminders are assistant bubbles with their own timestamp and actions.
-  const standalone = (m: ChatMsg) => !!(m.divider || m.notice || m.isProactiveNotice
+  const standalone = (m: ChatMsg) => !!(m.divider || m.notice || m.proactiveNoticeId
     || (m.role === "user" && (m.images?.length || m.files?.length)));
   for (const m of msgs) {
     const last = groups[groups.length - 1];
@@ -1909,7 +1892,7 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], native
     .map(m => m.nativeRunId));
   const inlineCompaction = (m: ChatMsg) => m.notice === "contextCompacted" && !!m.nativeRunId && nativeReplies.has(m.nativeRunId);
   const nativePending = (m: ChatMsg) => !!observedRun && m.nativeRunId === observedRun && m.pending === true;
-  const isBoundary = (x: ChatMsg) => x.role === "user" || !!x.divider || (!!x.notice && !inlineCompaction(x)) || x.isProactiveNotice === true
+  const isBoundary = (x: ChatMsg) => x.role === "user" || !!x.divider || (!!x.notice && !inlineCompaction(x)) || !!x.proactiveNoticeId
     || x.local === true || (x.pending === true && !nativePending(x));
   const isProcessPart = (p: Part) => p.type === "thinking" || p.type === "toolCall" || p.type === "toolResult" || p.type === "plan"
     || (p.type === "text" && p.activity === true);
@@ -2624,7 +2607,8 @@ function ChatPageApp() {
   const [lightbox, setLightbox] = useState<{ src: string; kind: "image" | "video" } | null>(null);
   // The expanded view follows the selected reducer instance through its terminal
   // event. A new turn may reuse step IDs, but must not replace the selected turn.
-  const [timelineModal, setTimelineModal] = useState<(ChatTurnActivity & { sessionKey: string; timeline?: NativeTurnTimeline }) | null>(null);
+  const [timelineModal, setTimelineModal] = useState<(ChatTurnActivity & { sessionKey: string; timeline?: NativeTurnTimeline;
+    noticeState?: "loading" | "unavailable" | "empty" }) | null>(null);
   const openTimelineModal = ({ steps, live, runId, timing, recoveredSteps }: ChatTurnActivity) => {
     const sessionKey = activeKeyRef.current;
     if (!sessionKey) return;
@@ -2693,7 +2677,6 @@ function ChatPageApp() {
     count?: number;
     hasMore?: boolean;
     error?: string;
-    retrying?: boolean;
   }>({ key: "", status: "idle" });
   // Set just before an archive prepend so the scroll handler keeps the prior
   // viewport anchored (older messages were inserted ABOVE) instead of jumping.
@@ -2775,8 +2758,7 @@ function ChatPageApp() {
   const archiveGenerationRef = useRef(0);
   // 已加载的归档段（含 reset 分隔线）。归档只存在于 messages 里，而 loadHistory 成功时
   // 会用 chat.history 的结果整体替换 messages —— 活跃会话任何一次刷新（final / session.message）
-  // 都会把归档静默抹掉，且 archive.status 还停在 "loaded"，既不再显示「加载更早历史」入口，
-  // maybeLoadArchive 也拒绝重载。把归档前缀单独记下来，每次刷新后重新贴回去。
+  // 都会把归档静默抹掉，且 archive.status 还停在 "loaded"。把归档前缀单独记下来，每次刷新后重新贴回去。
   const archivePrefixRef = useRef<{ key: string; msgs: ChatMsg[] }>({ key: "", msgs: [] });
   const archivePagesRef = useRef<{ key: string; raw: any[]; start: number } | null>(null);
   const [input, setInput] = useState("");
@@ -2956,21 +2938,27 @@ function ChatPageApp() {
     };
   }, [unreadReady, activeKey, activeGroupId, historyVisible, historyLoaded, messages, routerLocation.pathname, unreadState.replies, unreadAnchor]);
   const [error, setError] = useState<string | null>(null);
-  const [models, setModels] = useState<UnifiedModel[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState(false);
+  const [backendModels, setModels] = useState<UnifiedModel[]>([]);
+  const [backendModelsLoading, setModelsLoading] = useState(false);
+  const [backendModelsError, setModelsError] = useState(false);
   // Which backend the current `models` belong to, so an agent switch can clear a
   // stale other-backend list before the new fetch lands (avoids cross-backend bleed).
   const modelsBackendRef = useRef<string>("");
-  // OpenClaw's configured catalog is agent-scoped. Keep it out of the backend-wide
-  // management cache so switching agents cannot reuse another agent's choices.
-  const openClawModelCacheRef = useRef<Map<string, UnifiedModel[]>>(new Map());
   const refreshActiveModelsRef = useRef<(() => Promise<void>) | null>(null);
-  const runtimeModelsBackend = activeKey ? backendOfSession(activeKey) : "";
+  const activeModelsBackend = activeKey ? backendOfSession(activeKey) : "";
+  const activeModelsAgentId = activeKey ? agentOf(activeKey) : "";
+  const runtimeModelsBackend = activeModelsBackend;
   const usesRuntimeModelPicker = chatBackendDescriptors.get(runtimeModelsBackend)?.surfaces.sessionRuntimeSwitch === true;
   // Backend recovery can leave the browser's Proxy socket open. Retire its old
   // catalog on a ready event independently of attachment-capability retries.
   const [runtimeModelsEpoch, setRuntimeModelsEpoch] = useState(0);
+  const agentModelCatalog = useAgentModelCatalog(activeModelsBackend, activeModelsAgentId, {
+    enabled: activeModelsBackend === "openclaw", connected,
+    reloadToken: runtimeModelsEpoch,
+  });
+  const models = activeModelsBackend === "openclaw" ? agentModelCatalog.models : backendModels;
+  const modelsLoading = activeModelsBackend === "openclaw" ? agentModelCatalog.loading : backendModelsLoading;
+  const modelsError = activeModelsBackend === "openclaw" ? !!agentModelCatalog.error : backendModelsError;
   const runtimeModels = useSessionRuntimeModels(runtimeModelsBackend, activeKey ? agentOf(activeKey) : "",
     activeKey, usesRuntimeModelPicker,
     connected && (connectedBackends === null || connectedBackends.has(runtimeModelsBackend)), runtimeModelsEpoch);
@@ -4032,7 +4020,7 @@ function ChatPageApp() {
       const selectedModel = inheritedModelChoice(
         scopedModels,
         modelId,
-        modelsBackendRef.current,
+        backendOfSession(key),
         requestedProvider,
       );
       const provider = requestedProvider ?? selectedModel?.provider;
@@ -5086,16 +5074,26 @@ function ChatPageApp() {
 
   const capturePrependAnchor = useCallback(() => {
     const thread = threadRef.current;
-    const bounds = thread?.getBoundingClientRect();
-    const node = thread && bounds ? Array.from(thread.querySelectorAll<HTMLElement>(".chat-bubble")).find(bubble => {
-      const rect = bubble.getBoundingClientRect();
-      return rect.bottom > bounds.top && rect.top < bounds.bottom;
-    }) : undefined;
-    const messageNode = node?.closest<HTMLElement>("[data-message-key]");
-    prependAnchorRef.current = {
-      height: thread?.scrollHeight ?? 0, node, top: node?.getBoundingClientRect().top,
-      messageKey: messageNode?.dataset.messageKey,
-      bubbleIndex: node && messageNode ? Array.from(messageNode.querySelectorAll(".chat-bubble")).indexOf(node) : undefined,
+    const readAnchor = () => {
+      const bounds = thread?.getBoundingClientRect();
+      const node = thread && bounds ? Array.from(thread.querySelectorAll<HTMLElement>(".chat-bubble")).find(bubble => {
+        const rect = bubble.getBoundingClientRect();
+        return rect.bottom > bounds.top && rect.top < bounds.bottom;
+      }) : undefined;
+      const messageNode = node?.closest<HTMLElement>("[data-message-key]");
+      return {
+        height: thread?.scrollHeight ?? 0, node, top: node?.getBoundingClientRect().top,
+        messageKey: messageNode?.dataset.messageKey,
+        bubbleIndex: node && messageNode ? Array.from(messageNode.querySelectorAll(".chat-bubble")).indexOf(node) : undefined,
+      };
+    };
+    const before = readAnchor();
+    const scrollTop = thread?.scrollTop;
+    return () => {
+      // The loader temporarily adds height above the bubbles. Keep the original
+      // position unless the viewport moved while the older page was in flight.
+      if (thread !== threadRef.current) return;
+      prependAnchorRef.current = before.node?.isConnected && thread?.scrollTop === scrollTop ? before : readAnchor();
     };
   }, []);
 
@@ -5103,6 +5101,7 @@ function ChatPageApp() {
     const state = earlierHistoryRef.current;
     const key = activeKeyRef.current;
     if (!key || state.key !== key || !state.cursor || state.loading) return;
+    const preserveAnchor = unreadLandingRef.current?.pending ? undefined : capturePrependAnchor();
     setHistoryBoundaryKey(null);
     const loading = { ...state, loading: true, error: false };
     earlierHistoryRef.current = loading; setEarlierHistory(loading);
@@ -5115,7 +5114,7 @@ function ChatPageApp() {
       const index = sameSource && anchor ? raw.findIndex(message => rawHistoryId(message) === rawHistoryId(anchor)) : -1;
       const prepared = await prepareHistoryMessages(key, index >= 0 ? raw.slice(0, index) : raw);
       if (activeKeyRef.current !== key || earlierHistoryRef.current !== loading || !historyPager.commit(raw)) return;
-      if (!unreadLandingRef.current?.pending) capturePrependAnchor();
+      if (!unreadLandingRef.current?.pending) preserveAnchor?.();
       cancelInitialScroll(); atBottomRef.current = false;
       if (!sameSource) clearArchiveForSource(key);
       if (index < 0) commitCanonicalHistory(key, prepared);
@@ -5277,36 +5276,19 @@ function ChatPageApp() {
     }
   }, [messages, activeKey, historyLoaded, unreadReady, unreadLoading, unreadState.installationId, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, scrollThreadToBottom, runWaitBySession]);
 
-  // Scroll-up loads the sealed/reset archive: when the user reaches the
-  // top of a settled OpenClaw thread, fetch it once. Found → prepend.
-  // Gated by status (idle/error only) + a sync ref so a scroll burst fires it once.
   const maybeLoadArchive = () => {
     const key = activeKeyRef.current;
-    if (!key || backendOfSession(key) !== "openclaw") return;
-    // Initial-load gate. NOT settledKeyRef — that ref is only written for
-    // sessions with ≥1 message, so a wiped/phantom (0-message) session — the
-    // exact case the explicit entry button exists for — would never pass it.
-    if (!historyLoaded) return;
-    if (archiveLoadingRef.current) return;
+    if (!key || !historyLoadedRef.current || backendOfSession(key) !== "openclaw" || archiveLoadingRef.current) return false;
     if (archive.key === key && archive.status !== "idle" && archive.status !== "error"
-      && !(archive.status === "loaded" && archive.hasMore)) return;
+      && !(archive.status === "loaded" && archive.hasMore)) return false;
     archiveLoadingRef.current = true;
     const generation = archiveGenerationRef.current;
     void loadArchive().finally(() => {
       if (generation === archiveGenerationRef.current) archiveLoadingRef.current = false;
     });
+    return true;
   };
 
-  // 短尾 reset 会话无需用户先上滑就恢复旧历史。只在 idle 自动尝试一次；失败后保留
-  // 既有滚轮上滑重试入口，避免临时网络错误触发无限请求循环。
-  useEffect(() => {
-    if (!historyLoaded || messages.length >= AUTO_ARCHIVE_MESSAGE_LIMIT || archive.status !== "idle") return;
-    maybeLoadArchive();
-  }, [activeKey, archive.status, historyLoaded, messages.length]);
-
-  const onHistoryBoundaryChange = (atTop: boolean) => {
-    setHistoryBoundaryKey(atTop && historyLoaded ? activeKeyRef.current : null);
-  };
   const onThreadScroll = () => {
     const el = threadRef.current;
     if (!el) return;
@@ -5315,23 +5297,43 @@ function ChatPageApp() {
       const sent = groups[groups.length - 1];
       if (sent) anchoredUserOffsetRef.current = sent.getBoundingClientRect().top - el.getBoundingClientRect().top;
     }
-    if (!immersive && el.scrollTop > 1) onHistoryBoundaryChange(false);
+    if (!immersive && el.scrollTop > 1) setHistoryBoundaryKey(null);
     updateJumpVisibility();
     if (initialScrollFrameRef.current != null) return;
     const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     atBottomRef.current = near;
   };
-  // Archive load fires on WHEEL (genuine user "scroll up"), NOT on the scroll event:
-  // switching a tall→short thread clamps scrollTop to 0 and fires a spurious scroll,
-  // which would auto-load on open. Wheel only fires on real input, so it cleanly means
-  // "the user pulled up". Works for short (non-overflowing) threads too — they emit no
-  // scroll event but still emit wheel. Triggers near the top while pulling upward.
-  const onThreadWheel = (e: WheelEvent<HTMLDivElement>) => {
+  // A short thread can already be at the top when opened, with no room to scroll.
+  // Use the input itself to distinguish browsing from a layout or navigation scroll.
+  const onThreadHistoryInput = (event: WheelEvent<HTMLDivElement> | ReactKeyboardEvent<HTMLDivElement>, captureAnchor?: () => void) => {
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+    let upward: boolean;
+    if ("deltaY" in event) {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      upward = event.deltaY < 0;
+    } else {
+      if (event.target !== event.currentTarget) return;
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key)) upward = true;
+      else if (["ArrowDown", "PageDown", "End"].includes(event.key)) upward = false;
+      else return;
+    }
     cancelInitialScroll();
     stoppedScrollKeyRef.current = null;
-    const el = threadRef.current;
-    if (el && e.deltaY !== 0) onHistoryBoundaryChange(e.deltaY < 0 && el.scrollTop <= 1);
-    if (el && e.deltaY < 0 && el.scrollTop < 60) maybeLoadArchive();
+    const { scrollTop } = event.currentTarget;
+    if (!upward || scrollTop >= 60) {
+      setHistoryBoundaryKey(null);
+      return;
+    }
+    const key = activeKeyRef.current;
+    const earlier = earlierHistoryRef.current;
+    if (!key || !historyLoadedRef.current || searchHistoryWindowKeyRef.current === key || earlier.key !== key || earlier.loading) return;
+    if (earlier.cursor) {
+      captureAnchor?.();
+      void loadEarlierHistory();
+      return;
+    }
+    setHistoryBoundaryKey(scrollTop <= 1 ? key : null);
+    if (maybeLoadArchive()) captureAnchor?.();
   };
   const jumpToLatest = () => {
     setHistoryBoundaryKey(null);
@@ -5495,12 +5497,7 @@ function ChatPageApp() {
     return () => document.removeEventListener("click", onClick);
   }, []);
 
-  const activeModelsBackend = activeKey ? backendOfSession(activeKey) : "";
-  const activeModelsAgentId = activeKey
-    ? agentOf(activeKey)
-    : "";
-
-  // OpenClaw 官方聊天面读取当前 agent 的 configured catalog；管理页才读取全量 all。
+  // OpenClaw shares its configured Agent catalog with Agent settings/Inspiration.
   // 其它后端继续消费 backend-scoped revision store，保持既有模型目录与缓存语义。
   useEffect(() => {
     if (!activeModelsBackend || usesRuntimeModelPicker) return;
@@ -5509,33 +5506,9 @@ function ChatPageApp() {
     setModelsError(false);
 
     if (backend === "openclaw") {
-      const agentId = activeModelsAgentId;
-      if (!agentId) return;
-      const cached = openClawModelCacheRef.current.get(agentId);
-      modelsBackendRef.current = backend;
-      setModels(cached || []);
-      setModelsLoading(!cached);
-      let requestGeneration = 0;
-      const refreshModels = async () => {
-        const generation = ++requestGeneration;
-        const result = await send("models.list", { view: "configured", agentId });
-        if (!active || generation !== requestGeneration) return;
-        const next = openClawChatModels(result?.payload?.models);
-        openClawModelCacheRef.current.set(agentId, next);
-        setModels(next);
-        setModelsLoading(false);
-      };
+      const refreshModels = agentModelCatalog.refresh;
       refreshActiveModelsRef.current = refreshModels;
-      // 管理目录的 revision 只使当前 agent 快照失效；不能把 all 目录写进聊天菜单。
-      const unsubscribe = subscribeModelCatalog(backend, (snapshot) => {
-        if (!active || !connected || snapshot.backendId !== backend || snapshot.legacyPlaceholder) return;
-        void refreshModels().catch(() => {});
-      });
-      // 瞬时失败保留当前 agent 快照；没有快照时继续显示既有 loading 状态。
-      if (connected) void refreshModels().catch(() => {});
       return () => {
-        active = false;
-        unsubscribe();
         if (refreshActiveModelsRef.current === refreshModels) refreshActiveModelsRef.current = null;
       };
     }
@@ -5578,7 +5551,7 @@ function ChatPageApp() {
       unsubscribe();
       if (refreshActiveModelsRef.current === refreshModels) refreshActiveModelsRef.current = null;
     };
-  }, [activeModelsAgentId, activeModelsBackend, usesRuntimeModelPicker, connected, send]);
+  }, [activeModelsAgentId, activeModelsBackend, usesRuntimeModelPicker, connected, agentModelCatalog.refresh]);
 
   const sessionOpenIntentRef = useRef(0);
   const openSession = useCallback((key: string) => {
@@ -5709,11 +5682,8 @@ function ChatPageApp() {
       setArchive({ key, status: "unsupported" });
       return;
     }
-    setArchive(previous => ({
-      key,
-      status: "loading",
-      retrying: previous.key === key && previous.status === "error",
-    }));
+    const preserveAnchor = capturePrependAnchor();
+    setArchive({ key, status: "loading" });
     try {
       let pages = archivePagesRef.current;
       if (!pages || pages.key !== key) {
@@ -5748,7 +5718,7 @@ function ChatPageApp() {
       const prepend = await prepareHistoryMessages(key, selected);
       if (activeKeyRef.current !== key || generation !== archiveGenerationRef.current) return;
       setHistoryBoundaryKey(null);
-      capturePrependAnchor();
+      preserveAnchor();
       const previousLength = archivePrefixRef.current.key === key ? archivePrefixRef.current.msgs.length : 0;
       archivePagesRef.current = { ...pages, start };
       archivePrefixRef.current = { key, msgs: prepend }; // 供后续 loadHistory 刷新后贴回
@@ -7441,6 +7411,13 @@ function ChatPageApp() {
   // Negotiated transport limits already arrive through the generic capability;
   // the composer never branches on a concrete backend to apply them.
   const activeCaps: ChatCapabilities | undefined = runtimeModels.data?.capabilities ?? (activeKey ? chatCaps[agentOf(activeKey)] : undefined);
+  useEffect(() => {
+    if (!activeKey || !activeCaps?.prewarm || !connected) return;
+    const controller = new AbortController();
+    // Rapid navigation should not start a process for every visited row.
+    const timer = setTimeout(() => { void prewarmChatSession(activeBackend, agentOf(activeKey), activeKey, controller.signal).catch(() => {}); }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [activeKey, activeBackend, activeCaps?.prewarm, connected, runtimeModels.data?.selection.bindingId]);
   const selectableModels = useMemo(
     () => usesRuntimeModelPicker ? runtimeModels.data?.models ?? [] : activeCaps?.modelScope
       ? models.filter((model) => model.modelScopes?.includes(activeCaps.modelScope!))
@@ -8058,15 +8035,17 @@ function ChatPageApp() {
   }, [activeKey, activeBackend, immersive]);
   useEffect(() => {
     if (!activeAgentHeaderPanel) return;
+    // Base UI traps dialog focus without adding aria-modal to the popup.
+    const hasOpenDialog = () => document.querySelector("[role='dialog']:not([hidden]), [role='alertdialog']:not([hidden])");
     const outside = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest(".chat-header, [role='dialog']")) return;
+      if (target?.closest(".chat-header, [role='dialog']") || hasOpenDialog()) return;
       setAgentHeaderInstant(false);
       setAgentHeaderPanel(null);
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented
-        || document.querySelector("[role='dialog'][aria-modal='true'], .session-menu")) return;
+        || hasOpenDialog() || document.querySelector(".session-menu")) return;
       if (agentAvatarEditing) {
         event.preventDefault();
         if (!agentAvatarSaving) backToAgentProfile();
@@ -8287,6 +8266,9 @@ function ChatPageApp() {
     setPickedModel(null);
   }, [lastAssistantModel, activeKey]);
 
+  // Queue admission remains internal; a queued conversation keeps its normal preview.
+  const isSessionRunning = useCallback((key: string) =>
+    runningKeys.has(key) && runStatusBySessionRef.current.get(key) !== "queued", [runningKeys]);
   // A cached session is not evidence that this backend has connected in this page.
   // Only a successful status sample can distinguish cold startup from a later loss.
   // Confirmed storage faults keep their separate recovery notice and send gate.
@@ -8297,17 +8279,9 @@ function ChatPageApp() {
     if (startingBackends.has(backend) || !connectedBackends?.has(backend)) {
       return connectedOnceBackendsRef.current.has(backend) ? "reconnecting" : "connecting";
     }
-    // Queue admission remains internal; a queued conversation keeps its normal preview.
-    return runningKeys.has(key) && runStatusBySessionRef.current.get(key) !== "queued" ? "running" : "online";
+    return isSessionRunning(key) ? "running" : "online";
   };
   const activeHeaderStatus = active ? statusOf(active.key) : null;
-  // Agent-level (left rail): any foreground or user-initiated turn can be running.
-  const agentStatusOf = (rows: SessionRow[]): LiveStatus => {
-    if (!rows.length) return "offline";
-    const activeRows = rows.filter((s) => runningKeys.has(s.key));
-    if (activeRows.some((s) => runStatusBySessionRef.current.get(s.key) !== "queued")) return "running";
-    return statusOf(rows[0].key);
-  };
   // Pretty label for a thinking level (off→Off, xhigh→Extra high, …); unknown
   // levels fall back to capitalized raw so a newer gateway level still renders.
   const thinkLabel = (lvl: string) =>
@@ -8446,7 +8420,7 @@ function ChatPageApp() {
         const runId = message.activityRunId || message.nativeRunId;
         // Sealing commentary creates a new pending message but keeps the same live turn.
         // Legacy histories may lack a Run ID; use the original tool identity within the pending group.
-        const ownsLiveActivity = pending && !message.notice && !message.divider && !message.local && !message.isProactiveNotice && (message === pending
+        const ownsLiveActivity = pending && !message.notice && !message.divider && !message.local && !message.proactiveNoticeId && (message === pending
           || (timeline?.activityId !== undefined && message.interimActivityId === timeline.activityId)
           || (nativeRun && message.nativeRunId === nativeRun)
           || (observedRun && message.activityRunId === observedRun)
@@ -8793,6 +8767,7 @@ function ChatPageApp() {
         );
         const liveMessage = seg.msgs.find(message => message.pending);
         const activity = seg.cls === "chat" ? footerActivityFor(g, seg.msgs[seg.msgs.length - 1]) : undefined;
+        const proactiveNoticeId = seg.cls === "chat" ? seg.msgs[0].proactiveNoticeId : undefined;
         const awaitingPrompt = chatPromptAttentionOf(prompts);
         const pendingTail = liveMessage?.parts.at(-1);
         const loadingReply = !livePreview && !awaitingPrompt && pendingTail?.type === "text" && !pendingTail.text?.trim();
@@ -8837,7 +8812,7 @@ function ChatPageApp() {
           // 悬浮操作/右键：无参闭包捕获 Group，动作与普通模式同一套 handler
           onCopy: segText || segmentMedia.length ? () => copyText(segText, segmentMedia) : undefined,
           onQuote: segText || segmentMedia.length ? () => quoteGroup(g) : undefined,
-          onOpenActivity: activity && !activity.live ? () => openTimelineModal(activity) : undefined,
+          onOpenActivity: !proactiveNoticeId && activity && !activity.live ? () => openTimelineModal(activity) : undefined,
           onPin: MESSAGE_PINNING_ENABLED && hasId ? () => pinGroup(g) : undefined,
           pinned: MESSAGE_PINNING_ENABLED && hasId ? g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) : undefined,
           onDelete: hasId ? () => deleteGroup(g) : undefined,
@@ -9165,7 +9140,7 @@ function ChatPageApp() {
       return Math.max(foregroundTime, ...g.sessions.filter(s => sessionKindOf(s.key, s.kind) === "cron")
         .map(s => unreadState.replies[s.key] ?? 0));
     };
-    // Clicking an Agent returns to its latest result, even after its unread badge clears.
+    // Idle rows return to their latest result even after its unread badge clears.
     // Explicit selection in the session menu remains stable until the user clicks again.
     const latestKeyOf = (g: { agentId: string; sessions: SessionRow[]; foreground: SessionRow[] }) =>
       g.sessions.filter(s => supportsSessionUnread(s.key, s.kind)
@@ -9189,14 +9164,16 @@ function ChatPageApp() {
       const inputKey = g.statusSessions.find((s) => promptAttentionByKey[s.key] === "input")?.key;
       const attentionKey = approvalKey || inputKey || "";
       const attention = attentionKey ? promptAttentionByKey[attentionKey] : undefined;
+      const runningKey = g.statusSessions.filter((s) => isSessionRunning(s.key))
+        .sort((a, b) => activityOf(b) - activityOf(a) || a.key.localeCompare(b.key))[0]?.key;
       const unreadKey = g.sessions.filter(showSessionUnread)
         .sort((a, b) => (unreadState.replies[b.key] ?? 0) - (unreadState.replies[a.key] ?? 0))[0]?.key;
-      const mainKey = g.sessions.find(session => session.mainSession)?.key;
-      const targetKey = attentionKey || mainKey || unreadKey || latestKey;
-      const previewKey = g.agentId === aAgent && !activeGroupId && activeKey
-        && g.sessions.some(s => s.key === activeKey) ? activeKey : targetKey;
-      return { ...g, rank, previewKey, targetKey, attentionKey, attention,
-        rowTime: rowTimeOf(g, previewKey, rank), unread: !!unreadKey, unreadKey };
+      const liveKey = attentionKey || runningKey;
+      const targetKey = liveKey || unreadKey || latestKey;
+      const previewKey = liveKey || (g.agentId === aAgent && !activeGroupId && activeKey
+        && g.sessions.some(s => s.key === activeKey) ? activeKey : targetKey);
+      return { ...g, rank, previewKey, targetKey, runningKey, attention,
+        rowTime: rowTimeOf(g, previewKey, rank), unread: !!unreadKey };
     });
     ranked.sort((a, b) => b.rank - a.rank || a.agentId.localeCompare(b.agentId));
     // 只隐藏用户在设置页**主动断开**的后端——那是明确意图，留一堆灰行反而碍事。
@@ -9205,7 +9182,7 @@ function ChatPageApp() {
     // 网关一重启整组 agent 当场蒸发，是「聊着聊着 AI 全没了」的最后一刀。
     // 正在启动（startingBackends）本来就不该隐藏，现在天然涵盖。
     return disabledBackends.size ? ranked.filter((g) => !disabledBackends.has(backendOfKnownAgent(g.agentId))) : ranked;
-  }, [sessions, agentRoster, groupInternalKeys, disabledBackends, realTimes, realTimeBounds, activeKey, activeGroupId, previewTimes, activeRealPreview, chosenSessions, unreadState, promptAttentionByKey, showSessionUnread, runningKeys]);
+  }, [sessions, agentRoster, groupInternalKeys, disabledBackends, realTimes, realTimeBounds, activeKey, activeGroupId, previewTimes, activeRealPreview, chosenSessions, unreadState, promptAttentionByKey, showSessionUnread, isSessionRunning]);
   // 单聊与群聊共用按最新消息倒序的列表。群资料修改不推进排序；无消息的群以创建时间兜底。
   const chatList = useMemo(() => [
     ...groupChats.map((group) => ({ kind: "group" as const, group, key: "group:" + group.group.id,
@@ -9531,6 +9508,38 @@ function ChatPageApp() {
     setGlobalSearchQuery("");
     setGlobalSearch({ status: "idle", data: null, loadingMore: false, loadMoreError: false });
   };
+  const renderOlderHistoryControl = () => {
+    if (!historyLoaded || !activeKey || earlierHistory.key !== activeKey || searchHistoryWindowKeyRef.current === activeKey) return null;
+    if (earlierHistory.cursor) {
+      if (earlierHistory.error)
+        return <button type="button" className="chat-archive-bar is-retry" data-testid="chat-history-earlier-retry" onClick={loadEarlierHistory}>
+          {t("chat.historyRetryEarlier")}
+        </button>;
+      return earlierHistory.loading && !unreadAnchor?.pending ? (
+        <div className="chat-archive-bar is-note is-loading" data-testid="chat-history-earlier-loading">
+          <FusionLoader size="sm" label={t("chat.historyLoadingEarlier")} />
+        </div>
+      ) : null;
+    }
+    const atBoundary = historyBoundaryKey === activeKey;
+    if (backendOfSession(activeKey) === "openclaw") {
+      if (archive.key !== activeKey) return null;
+      if (archive.status === "loading")
+        return <div className="chat-archive-bar is-note is-loading" data-testid="chat-history-archive-loading">
+          <FusionLoader size="sm" label={t("chat.archiveLoading")} />
+        </div>;
+      if (archive.status === "error")
+        return <button type="button" className="chat-archive-bar is-retry" data-testid="chat-history-archive" onClick={maybeLoadArchive}>
+          {t("chat.archiveRetry")}
+        </button>;
+      if (atBoundary && archive.status === "unsupported" && archive.error === "remote")
+        return <div className="chat-archive-bar is-note" role="status">{t("chat.archiveRemote")}</div>;
+      if (archive.status !== "empty" && (archive.status !== "loaded" || archive.hasMore)) return null;
+    }
+    return atBoundary
+      ? <div className="chat-archive-bar is-note" data-testid="chat-history-complete" role="status">{t("chat.historyStartReached")}</div>
+      : null;
+  };
   const historyControl = !historyLoaded && historyError ? (
     activeRecoveryHint ? <div className="chat-archive-bar is-note">{activeRecoveryHint}</div> : (
       <button
@@ -9550,36 +9559,7 @@ function ChatPageApp() {
     <div className="chat-archive-bar is-note is-loading" data-testid="chat-history-loading">
       <FusionLoader size="sm" label={t("chat.historyLoading")} />
     </div>
-  ) : historyLoaded && activeKey && searchHistoryWindowKeyRef.current !== activeKey ? <>
-    {earlierHistory.key === activeKey && (earlierHistory.cursor ? (
-      <button type="button" className="chat-archive-bar is-action" data-testid="chat-history-earlier"
-        disabled={earlierHistory.loading} onClick={loadEarlierHistory}>
-        {t(earlierHistory.loading ? "chat.historyLoadingEarlier" : earlierHistory.error ? "chat.historyRetryEarlier" : "chat.historyLoadEarlier")}
-      </button>
-    ) : null)}
-    {backendOfSession(activeKey) === "openclaw" && (() => {
-      const st = archive.key === activeKey ? archive : { status: "idle" as const, hasMore: false, error: undefined };
-      // Keep a fresh empty chat blank during the initial probe. An empty chat
-      // with a previous archive error still needs feedback when retried.
-      if (messages.length === 0 && st.status !== "error" && !(st.status === "loading" && st.retrying)) return null;
-      if (st.status === "loading")
-        return <div className="chat-archive-bar is-note is-loading" data-testid="chat-history-archive-loading">
-          <FusionLoader size="sm" label={t("chat.archiveLoading")} />
-        </div>;
-      if (st.status === "idle" || (st.status === "loaded" && st.hasMore) || st.status === "error")
-        return <button type="button" className="chat-archive-bar is-action" data-testid="chat-history-archive" onClick={maybeLoadArchive}>
-          {t(st.status === "error" ? "chat.archiveRetry" : "chat.archiveLoadEarlier")}
-        </button>;
-      if (historyBoundaryKey === activeKey && !earlierHistory.cursor && st.status === "unsupported" && st.error === "remote")
-        return <div className="chat-archive-bar is-note">{t("chat.archiveRemote")}</div>;
-      return null;
-    })()}
-    {historyBoundaryKey === activeKey && messages.length > 0 && earlierHistory.key === activeKey
-      && !earlierHistory.cursor && !earlierHistory.loading
-      && (backendOfSession(activeKey) !== "openclaw" || (archive.key === activeKey
-        && (archive.status === "empty" || (archive.status === "loaded" && !archive.hasMore))))
-      ? <div className="chat-archive-bar is-note" data-testid="chat-history-complete" role="status">{t("chat.historyStartReached")}</div> : null}
-  </> : null;
+  ) : renderOlderHistoryControl();
 
   return (
     <ChatMediaContext.Provider value={imageContext}>
@@ -9719,7 +9699,7 @@ function ChatPageApp() {
       variant="activity"
       width={640}
     >
-      {modalTimeline ? (
+      {modalTimeline?.noticeState ? <p role="status">{t(`turnLab.proactiveActivity.${modalTimeline.noticeState}`)}</p> : modalTimeline ? (
         <TurnTimeline
           steps={modalSteps}
           status={modalStatus}
@@ -9808,13 +9788,10 @@ function ChatPageApp() {
             const rep = g.sessions[0];
             const name = rep.agentName || chatAgentDisplayName(g.agentId);
             const isActive = !activeGroupId && g.agentId === activeAgentId;
-            // 当前助理显示正在阅读的会话。其他行显示点击后将打开的会话。
+            // 有实时状态时显示其对应会话。空闲时当前助理预览正在阅读的会话。
             // 点击统一使用 g.targetKey，列表位置独立按真实消息时间排序。
             const previewKey = g.previewKey || rep.key;
             const rowTime = g.rowTime;
-            // User follow-ups count even in a Cron session; automatic background
-            // runs retain their normal preview and unread behavior.
-            const st: AgentListStatus = g.attention ?? agentStatusOf(g.statusSessions);
             return (
               <button
                 key={item.key}
@@ -9843,12 +9820,12 @@ function ChatPageApp() {
                     )}
                   </span>
                   <span className="chat-agent__sub">
-                    {st === "approval" || st === "input" ? (
+                    {g.attention ? (
                       <>
                         <span className="chat-agent__attention-dot" aria-hidden="true" />
-                        <span className="chat-agent__subtext is-attention">{t(`chat.liveStatus.${st}`)}</span>
+                        <span className="chat-agent__subtext is-attention">{t(`chat.liveStatus.${g.attention}`)}</span>
                       </>
-                    ) : st === "running" ? (
+                    ) : g.runningKey ? (
                       <ChatTypingText className="chat-agent__subtext" text={t("chat.liveStatus.running")} />
                     ) : (
                       <span className="chat-agent__subtext">
@@ -9867,6 +9844,7 @@ function ChatPageApp() {
         <section className="chat-conv">
           {recoveryCard && <div className="chat-status-notices">{recoveryCard}</div>}
           <GroupChatPanel key={`${groupCacheScope}:${activeGroupId}`} groupId={activeGroupId} cache={groupPanelCache} cacheScope={groupCacheScope}
+            backends={chatBackendCatalog}
             onArchived={() => { setOpenGroup(null); void refreshGroupChats(); }}
             searchTarget={currentGroup?.searchTarget}
             onSearchTargetHandled={() => setOpenGroup(previous =>
@@ -10086,8 +10064,9 @@ function ChatPageApp() {
             </div>
 
             <div className="chat-thread" ref={threadRef} data-history-loaded={historyLoaded}
+              tabIndex={0} role="region" aria-label={t("chat.historyLabel")}
               {...(activeAgentHeaderPanel ? { inert: "", "aria-hidden": true } : {})}
-              onScroll={onThreadScroll} onWheel={onThreadWheel}
+              onScroll={onThreadScroll} onWheel={onThreadHistoryInput} onKeyDown={onThreadHistoryInput}
               onPointerDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}
               onKeyDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}>
               <div className="chat-thread__inner">
@@ -10484,10 +10463,10 @@ function ChatPageApp() {
                               <IconRetry />
                             </button>
                           )}
-                          {footerActivity && !footerActivity.live && (
+                          {(!last.proactiveNoticeId && footerActivity && !footerActivity.live) && (
                             <button type="button" className="chat-copybtn" data-chat-footer-icon="" aria-haspopup="dialog"
                               aria-label={t("turnLab.processOpen")} title={t("turnLab.processOpen")}
-                              onClick={() => openTimelineModal(footerActivity)}>
+                              onClick={() => footerActivity && openTimelineModal(footerActivity)}>
                               <IconTrajectory />
                             </button>
                           )}
@@ -10757,15 +10736,6 @@ function ChatPageApp() {
                   />
                 </div>
                 <div className="chat-composer__right">
-                  <button
-                    className={listening ? "chat-iconbtn is-active" : "chat-iconbtn"}
-                    onClick={toggleTalk}
-                    disabled={!sttSupported}
-                    aria-pressed={listening}
-                    title={sttSupported ? (listening ? t("chat.stopTalk") : t("chat.startTalk")) : t("chat.sttUnsupported")}
-                  >
-                    <IconMic />
-                  </button>
                   {supportsActiveAttachments && (
                     <button
                       className="chat-iconbtn"
@@ -10827,6 +10797,7 @@ function ChatPageApp() {
     {createGroupFor && (
       <GroupChatCreateModal
         initial={createGroupFor}
+        backends={chatBackendCatalog}
         agents={agents.map((g) => ({ backendId: backendOfKnownAgent(g.agentId), agentId: g.agentId,
           name: g.sessions[0].agentName || chatAgentDisplayName(g.agentId) }))}
         onClose={() => setCreateGroupFor(null)}
@@ -10851,8 +10822,8 @@ function ChatPageApp() {
           phase={immersivePhase}
           live={immersiveLive}
           sendSeq={immersiveSendSeq}
-          onNearTop={maybeLoadArchive}
-          onHistoryBoundaryChange={onHistoryBoundaryChange}
+          onHistoryInput={onThreadHistoryInput}
+          onLeaveHistoryTop={() => setHistoryBoundaryKey(null)}
           historyControl={historyControl}
           unreadAnchor={unreadAnchor ?? undefined}
           onDropFiles={onDropFiles}
@@ -10997,7 +10968,6 @@ function ChatPageHistoryFixture({ deps }: { deps: ChatPageTestDeps }) {
           phase="offline"
           live={null}
           sendSeq={0}
-          onNearTop={() => {}}
           onDropFiles={(event) => event.preventDefault()}
           messages={[]}
           input={send.draft}

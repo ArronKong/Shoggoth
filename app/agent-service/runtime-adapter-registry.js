@@ -22,6 +22,8 @@ class RuntimeAdapterRegistry {
   #hosts = new Set();
   #retired = 0;
   #activity = new AsyncLocalStorage();
+  #warm = new Map();
+  #seenHosts = new WeakSet();
 
   constructor(options = {}) {
     this.validateHandles = options.validateHandles !== false;
@@ -29,6 +31,8 @@ class RuntimeAdapterRegistry {
     this.onCapabilityDifference = options.onCapabilityDifference || (() => {});
     this.isIdle = options.isIdle;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 0;
+    this.now = options.now || Date.now;
+    this.warmTimeoutMs = options.warmTimeoutMs ?? 15 * 60_000;
     this.setTimer = options.setTimer || setTimeout;
     this.clearTimer = options.clearTimer || clearTimeout;
     this.onIdleError = options.onIdleError || (() => {});
@@ -54,17 +58,24 @@ class RuntimeAdapterRegistry {
   }
 
   async acquire(value, options = {}) {
+    return (await this.acquireObserved(value, options)).handle;
+  }
+
+  async acquireObserved(value, options = {}) {
     const binding = runtimeBinding(value);
     const adapter = this.#adapter(binding.runtime);
     const raw = await (!this.isIdle ? adapter.acquire(binding, options) : this.#acquireManaged(binding, options, adapter));
-    if (!this.validateHandles) return raw;
+    const objectHost = raw !== null && ["object", "function"].includes(typeof raw);
+    const hostState = objectHost ? this.#seenHosts.has(raw) ? "reused" : "created" : "unknown";
+    if (objectHost) this.#seenHosts.add(raw);
+    if (!this.validateHandles) return { handle: raw, hostState };
     if (!this.#facades.has(raw)) {
       const facade = require("./runtime-handle-v1").runtimeHandleV1(raw, binding, {
         onViolation: this.onProtocolViolation, onCapabilityDifference: this.onCapabilityDifference });
       this.#facades.set(raw, facade); this.#hosts.add(facade);
       facade.terminated.finally(() => { if (this.#hosts.delete(facade)) this.#retired++; }).catch(() => {});
     }
-    return this.#facades.get(raw);
+    return { handle: this.#facades.get(raw), hostState };
   }
 
   // Read only: never acquire a transport or wait for a pending startup. The
@@ -91,6 +102,19 @@ class RuntimeAdapterRegistry {
   }
 
   statistics() { return { hosts: this.#hosts.size, retiredHosts: this.#retired, adapters: this.#adapters.size }; }
+
+  keepWarm(value) {
+    const binding = runtimeBinding(value);
+    if (binding.runtime !== "codex" || this.#closing || this.idleTimeoutMs === 0) return;
+    const key = this.#key(binding);
+    this.#warm.delete(key); this.#warm.set(key, this.now() + this.warmTimeoutMs);
+    while (this.#warm.size > 2) {
+      const evicted = this.#warm.keys().next().value;
+      this.#warm.delete(evicted);
+      const entry = this.#idle.get(evicted); if (entry) this.#schedule(evicted, entry);
+    }
+    const entry = this.#idle.get(key); if (entry) this.#schedule(key, entry);
+  }
 
   runtimeIdentityKey(value) {
     const binding = runtimeBinding(value);
@@ -223,11 +247,12 @@ class RuntimeAdapterRegistry {
       try { idle = entry.pending === 0 && entry.requests.size === 0 && this.isIdle(entry.binding) === true; } catch {}
       if (!idle) { this.#schedule(key, entry); return; }
       void this.stop(entry.binding).catch((error) => this.onIdleError(error));
-    }, this.idleTimeoutMs);
+    }, Math.max(this.idleTimeoutMs, (this.#warm.get(key) || 0) - this.now()));
     entry.timer?.unref?.();
   }
 
   #forget(key) {
+    this.#warm.delete(key);
     const entry = this.#idle.get(key);
     if (entry) this.clearTimer(entry.timer);
     this.#idle.delete(key);

@@ -10,8 +10,11 @@ const { core } = require("./host.cjs");
 const { canonicalSharedPath, documentKind } = require("./shared-document.cjs");
 const { databaseChangeStamp } = require("../turn-memo");
 
-const ENTRY = /<!-- shoggoth-memory-entry:([A-Za-z0-9][A-Za-z0-9._:-]{0,255}) -->\n([\s\S]*?)\n<!-- \/shoggoth-memory-entry -->/g;
+// A block body never contains another opening marker (rendered content escapes
+// it), so a hand-left unpaired marker cannot swallow the next entry.
+const ENTRY = /<!-- shoggoth-memory-entry:([A-Za-z0-9][A-Za-z0-9._:-]{0,255}) -->\n((?:(?!<!-- shoggoth-memory-entry:)[\s\S])*?)\n<!-- \/shoggoth-memory-entry -->/g;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const MAX_DOCUMENT_BYTES = 1024 * 1024;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_file_profiles (profile_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,fingerprint TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS memory_file_records (profile_id TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)),PRIMARY KEY(profile_id,id)) STRICT;
@@ -67,18 +70,26 @@ function splitEntries(text) {
   const expression = new RegExp(ENTRY.source, "g");
   while ((match = expression.exec(text))) {
     const startLine = text.slice(0, match.index).split("\n").length;
-    output.push({ id: match[1], content: textContent(match[2]), start: match.index, end: expression.lastIndex,
+    output.push({ id: match[1], content: textContent(match[2]), raw: match[2], start: match.index, end: expression.lastIndex,
       startLine, endLine: startLine + match[0].split("\n").length - 1 });
   }
   return output;
+}
+// Turn every block with this ID back into its plain text.
+function unmarkEntries(text, id) {
+  for (const entry of splitEntries(text).filter(value => value.id === id).toReversed()) {
+    text = text.slice(0, entry.start) + entry.raw + text.slice(entry.end);
+  }
+  return text;
 }
 
 // Metadata carries provenance, revocation and compatibility IDs. Every active
 // fact's content is read from the Markdown source, never from the metadata row.
 class FileMemoryStore {
-  constructor({ paths, database, migration, initialization = null, getHost, now = Date.now }) {
+  constructor({ paths, database, migration, initialization = null, getHost, now = Date.now, onChanged = () => {} }) {
     this.paths = paths; this.database = database; this.migration = migration; this.initialization = initialization; this.getHost = getHost; this.now = now;
     this.opened = false; this.ready = new Set(); this.snapshots = new Map();
+    this.onChanged = onChanged;
   }
   open() { if (this.opened) return; this.database.open(); this.database.db.exec(SCHEMA); this.opened = true; }
   close() { this.opened = false; this.ready.clear(); this.snapshots.clear(); }
@@ -202,12 +213,16 @@ class FileMemoryStore {
     return value;
   }
   _readSnapshot(profileId) {
-    const files = this._files(profileId), metadata = this._metadata(profileId), items = [], ids = new Set();
+    const files = this._files(profileId), metadata = this._metadata(profileId), items = [], ids = new Set(), copies = new Map();
     for (const file of files) {
-      const entries = splitEntries(file.content);
+      // Files are edited by hand. Only the first block with an ID is that
+      // memory; a copied block stays readable as hand-written text below.
+      const entries = splitEntries(file.content).filter(entry => {
+        if (!ids.has(entry.id)) return ids.add(entry.id);
+        copies.set(entry.id, (copies.get(entry.id) || new Set()).add(file.path));
+        return false;
+      });
       for (const entry of entries) {
-        if (ids.has(entry.id)) throw serviceError("MEMORY_DUPLICATE_ID", "记忆文件含重复标识");
-        ids.add(entry.id);
         const previous = metadata.get(entry.id), unchanged = previous?.contentHash === sha256(entry.content);
         items.push({ ...(unchanged ? previous : this._newItem(profileId, entry.id, entry.content, file.path)),
           id: entry.id, content: entry.content, status: "active", memoryPath: file.path,
@@ -242,7 +257,7 @@ class FileMemoryStore {
       this.database.db.prepare("UPDATE memory_file_profiles SET fingerprint=?,revision=revision+1 WHERE profile_id=?").run(fingerprint, profileId);
     }
     const revision = current.revision + Number(current.fingerprint !== fingerprint);
-    return { items, metadata, revision, invalidationRevision: this._invalidationRevision(profileId, files, fingerprint, revision) };
+    return { items, metadata, copies, revision, invalidationRevision: this._invalidationRevision(profileId, files, fingerprint, revision) };
   }
   // The last revision that changed or removed existing memory text. This row
   // tracks its own fingerprint, so an interrupted update is evaluated again.
@@ -370,6 +385,7 @@ class FileMemoryStore {
       if (plan.invalidating !== false) db.prepare("UPDATE memory_file_invalidation SET revision=? WHERE profile_id=?").run(revision, profileId);
       db.prepare("DELETE FROM memory_file_pending WHERE profile_id=?").run(profileId);
     });
+    try { this.onChanged(profileId); } catch {}
   }
   recover(profileId) {
     const row = this.database.db.prepare("SELECT data FROM memory_file_pending WHERE profile_id=?").get(profileId);
@@ -431,6 +447,12 @@ class FileMemoryStore {
           if (old.fileHash !== sha256(file.after)) throw serviceError("MEMORY_REVISION_CONFLICT", "记忆文件已变化");
           lines.splice(old.startLine - 1, old.endLine - old.startLine + 1); file.after = lines.join("\n");
         }
+        // Once the original block moves, a hand-copied block with the same ID
+        // would take over this memory. Keep those copies as hand-written text.
+        for (const memoryPath of snapshot.copies.get(input.id) || []) {
+          const copy = contentFor(memoryPath);
+          copy.after = unmarkEntries(copy.after, input.id);
+        }
         if (entry.status === "active") file.after = file.after.trimEnd() + "\n\n" + renderMemoryEntry(entry);
         newRecords.push(entry);
       }
@@ -450,6 +472,26 @@ class FileMemoryStore {
     }));
   }
   async upsert(item, options) { return (await this.upsertMany([item], options))[0]; }
+  // A whole-file edit of USER.md or MEMORY.md from the settings page or a
+  // conversation. Reads accept any hand-edited text; this only serializes the
+  // write with memory transactions and checks the expected file hash.
+  async writeDocument(profileId, relative, content, expectedHash) {
+    if (!["USER.md", "MEMORY.md"].includes(relative)) throw serviceError("MEMORY_PATH_NOT_ALLOWED", "不是核心记忆文件");
+    if (typeof content !== "string" || !content.isWellFormed() || content.includes("\0")
+      || Buffer.byteLength(content, "utf8") > MAX_DOCUMENT_BYTES) throw serviceError("MEMORY_DOCUMENT_INVALID", "记忆文件内容无效或过大");
+    if (typeof expectedHash !== "string" || !/^[a-f0-9]{64}$/u.test(expectedHash)) throw serviceError("MEMORY_REVISION_CONFLICT", "记忆文件已变化，请重新读取");
+    const host = this.getHost(profileId);
+    return host.run(() => core.withMemoryWorkspaceLock(this.workspace(profileId), async () => {
+      this._check(profileId); host.assertCurrent();
+      if (sha256(this._read(profileId, relative)) !== expectedHash) throw serviceError("MEMORY_REVISION_CONFLICT", "记忆文件已变化，请重新读取");
+      const previous = this._snapshot(profileId).items.filter(item => item.memoryPath === relative);
+      host.assertCurrent();
+      atomicWritePrivateFile(path.join(this.workspace(profileId), relative), content, { trustedRoot: this.paths.trustedRoot });
+      this.snapshots.delete(profileId);
+      try { this.onChanged(profileId); } catch {}
+      return { content, revision: sha256(content), previous };
+    }));
+  }
 }
 
 module.exports = { FileMemoryStore, splitEntries };

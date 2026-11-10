@@ -97,7 +97,7 @@ state.runFixture = async()=>{
   if(document.querySelector('[data-group-composer-input]')?.textContent!=='Keep this draft'||writes)throw Error('draft or read-only boundary failed');
   return {language,reads,writes,recovered:true,draftPreserved:true,messages:seq};
 };
-const stopButton=()=>document.querySelector<HTMLButtonElement>('button.chat-stop');
+const stopButton=()=>document.querySelector<HTMLButtonElement>('[data-chat-composer] button.chat-stop');
 state.queueFixture=async(phase:string)=>{
   group.members=[{id:'member',groupId:'owned',backendId:'hermes',agentId:'helper',displayName:'Hermes Helper',handle:'helper',
     state:'active',position:0,joinedSeq:0,leftSeq:null,card:null}];
@@ -106,8 +106,9 @@ state.queueFixture=async(phase:string)=>{
     activity:{groupId:'owned',memberId:'member',opportunityId:'owned-turn',taskId:null,attemptId:null,
       runId:'original-run',executionGeneration:'host-generation',phase,eventSeq:0,recentTools:[],tool:null,lastProgressAt:1}}];
   window.dispatchEvent(new Event('focus'));
-  await wait(()=>Boolean(document.querySelector('[data-group-execution="owned-turn"] [data-group-stop-turn="owned-turn"]')),
-    'healthy queued/running turn lost its normal bubble and Stop: '+phase);
+  await wait(()=>Boolean(document.querySelector('[data-group-execution="owned-turn"] .chat-bubble')&&stopButton()&&!stopButton()!.disabled),
+    'healthy queued/running turn lost its bubble or composer Stop: '+phase);
+  if(document.querySelector('[data-group-stop-turn]'))throw Error('member bubble has its own Stop');
   if(document.querySelector('[data-chat-composer] [role=status], [data-chat-composer] [role=alert]')||writes)
     throw Error('quiet composer or read-only boundary failed');
   if(document.querySelector('[data-group-composer-input]')?.textContent!=='Keep this draft')throw Error('queue transition erased draft');
@@ -117,12 +118,18 @@ state.queueFixture=async(phase:string)=>{
 };
 state.startStopFixture=async()=>{
   stopMode=true;
-  group.members=[{id:'member',groupId:'owned',backendId:'hermes',agentId:'helper',displayName:'Hermes Helper',handle:'helper',
-    state:'active',position:0,joinedSeq:0,leftSeq:null,card:null}];
-  group.discussion={id:'owned-discussion',status:'running',publicReplyCount:0,opportunityCount:1,deferredMemberIds:[]};
-  group.activeTurns=[{opportunityId:'owned-turn',memberId:'member',startedAt:Date.now(),inputThroughSeq:2}];
+  group.members=[...group.members,...['worker','queued'].map((id,position)=>({
+    id,groupId:'owned',backendId:'shoggoth',agentId:id,displayName:id,handle:id,state:'active',position:position+1,joinedSeq:0,leftSeq:null,card:null,
+  }))];
+  group.activeTurns=[{opportunityId:'owned-turn',memberId:'member',startedAt:Date.now(),inputThroughSeq:2,floor:true},
+    {opportunityId:'background-turn',memberId:'worker',startedAt:Date.now(),inputThroughSeq:2,floor:false,released:true,releasedReason:'working'}];
+  group.queuedMemberIds=['queued'];
   window.dispatchEvent(new Event('focus'));
-  await wait(()=>Boolean(stopButton()&&!stopButton()!.disabled),'stop button did not become available');
+  await wait(()=>Boolean(document.querySelector('[data-group-execution="background-turn"]')&&stopButton()&&!stopButton()!.disabled),
+    'stop button did not become available for both runs');
+  if(document.querySelectorAll('button.chat-stop').length!==1 || document.querySelector('[data-group-stop-turn]'))
+    throw Error('the composer must be the only stop entry point');
+  if(stopButton()!.getAttribute('aria-label')!==i18n.t('groupChat.stop'))throw Error('the stop button must identify its group scope');
   stopButton()!.click();
   await wait(()=>writes===1&&Boolean(stopButton()?.disabled)&&Boolean(stopButton()?.getAttribute('aria-busy')),
     'stop did not enter the immediate pending button state');
@@ -132,11 +139,13 @@ state.startStopFixture=async()=>{
   return {requesting:true,stopWrites:writes};
 };
 state.confirmStopFixture=async()=>{
-  group.discussion.status='cancelled';
-  group.activeTurns=[{...group.activeTurns[0],stopping:true,recovery:{type:'execution',reason:'GROUP_EXECUTION_STOP_UNCONFIRMED',since:1,cancelRequested:true}}];
+  group.queuedMemberIds=[];
+  group.activeTurns=group.activeTurns.map(turn=>({...turn,stopping:true,
+    recovery:{type:'execution',reason:'GROUP_EXECUTION_STOP_UNCONFIRMED',since:1,cancelRequested:true}}));
   if(!completeStop)throw Error('stop request missing');
   completeStop();
-  await wait(()=>Boolean(stopButton()?.disabled),'persisted cancellation must keep its duplicate-stop guard');
+  await wait(()=>Boolean(stopButton()?.disabled&&stopButton()?.getAttribute('aria-busy')==='false'&&!document.querySelector('[data-group-execution]')),
+    'persisted cancellation must clear both running bubbles and keep its duplicate-stop guard');
   if(document.querySelector('[data-chat-composer] [role=status]'))throw Error('stop confirmation copy leaked into composer');
   if(document.querySelector('[data-group-composer-input]')?.textContent!=='Keep this draft')throw Error('stop erased draft');
   return {confirmationPending:true,draftPreserved:true};

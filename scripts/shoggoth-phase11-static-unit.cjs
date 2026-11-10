@@ -95,6 +95,10 @@ async function request(base, path, options = {}) {
       calls.push(["dashboard.live"]);
       return { generatedAt: 42, running: [{ backend: "codex", supported: true, items: [{ id: "run:codex", kind: "inspiration" }] }], approvals: [] };
     },
+    async getDashboardSection(section, options) {
+      calls.push(["dashboard.section", section, options]);
+      return { section, sinceMs: options.sinceMs };
+    },
     async listAgents(id, options) { return this.getBackend(id)?.listAgents(options) || []; },
     async resolveResourceOwner(kind) {
       return kind === "dashboard-run" ? shoggoth : null;
@@ -286,6 +290,14 @@ async function request(base, path, options = {}) {
     assert.equal(result.body.generatedAt, 42);
     result = await request(server.url, "/__api/dashboard/live", { method: "POST", headers });
     assert.equal(result.status, 405);
+    for (const section of ["activity", "usage", "artifacts"]) {
+      result = await request(server.url, `/__api/dashboard?section=${section}&sinceMs=0`, { headers });
+      assert.equal(result.status, 200);
+      assert.deepEqual(result.body.summary, { section, sinceMs: 0 });
+    }
+    result = await request(server.url, "/__api/dashboard?section=invalid", { headers });
+    assert.equal(result.status, 400);
+    assert.equal(calls.filter(([kind]) => kind === "dashboard.section").length, 3);
 
     result = await request(server.url, "/__api/dashboard/shoggoth/runs/run%3Asafe", { headers });
     assert.equal(result.status, 200);

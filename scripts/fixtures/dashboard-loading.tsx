@@ -19,16 +19,17 @@ let mode = scenario;
 const now = Date.now();
 const pendingSummary: Array<() => void> = [];
 const pendingUsage: Array<() => void> = [];
+const pendingArtifacts: Array<() => void> = [];
 const pendingActivities: Array<() => void> = [];
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
   status, headers: { "Content-Type": "application/json" },
 });
 const isEmpty = () => mode === "empty" || scenario === "filter";
 const summary = () => ({
-  generatedAt: Date.now(), sinceMs: new Date().setHours(0, 0, 0, 0),
+  generatedAt: Date.now(), sinceMs: new Date(Date.now()).setHours(0, 0, 0, 0),
   status: FALLBACK_BACKEND_DESCRIPTORS.map(backend => ({ id: backend.id, name: backend.name, connected: true, info: {} })),
   runs: [], running: [], approvals: [],
-  usage: [{ backend: "shoggoth", ...(mode === "pending" ? { error: "pending", availability: "unavailable" } : mode === "unavailable"
+  usage: [{ backend: "shoggoth", ...(mode === "unavailable"
     ? { error: "offline", availability: "unavailable" } : { availability: "complete",
       today: { date: "today", totalTokens: 128000, totalCost: 1.25 },
       yesterday: { date: "yesterday", totalTokens: 64000, totalCost: 0.8 } }) }],
@@ -38,7 +39,8 @@ const summary = () => ({
   })) }],
   activityPage: { items: isEmpty() ? [] : Array.from({ length: 5 }, (_, index) => ({
     id: `fixture-${index}`, kind: "cron", backendId: "shoggoth", agentId: "writer",
-    occurredAt: now - index * 1000, severity: "ok", title: `Daily report ${index + 1}`, summary: "Completed dashboard fixture report",
+    occurredAt: now - index * 1000, severity: "ok", title: `${mode === "refreshed" ? "Updated" : "Daily"} report ${index + 1}`,
+    summary: "Completed dashboard fixture report",
     run: { backendId: "shoggoth", jobId: `job-${index}`, status: "ok", runId: `run-${index}` },
   })), hasMore: false, degradedSources: [] },
   taskStats: { total: { ok: 12, error: 1 }, byKind: { cron: { ok: 12, error: 1 }, kanban: { ok: 0, error: 0 }, inspiration: { ok: 0, error: 0 } },
@@ -48,12 +50,21 @@ const summary = () => ({
 state.fetch = async (input: unknown, init: RequestInit = {}) => {
   if (init.method && init.method !== "GET") throw Error(`Unexpected write: ${init.method} ${String(input)}`);
   const url = new URL(String(input), location.href);
-  if (url.pathname === "/__api/dashboard") return new Promise(resolve => pendingSummary.push(() =>
-    resolve(mode === "failed" ? response({ error: "Fixture unavailable" }, 503) : response({ summary: summary() }))));
+  if (url.pathname === "/__api/dashboard") {
+    const section = url.searchParams.get("section");
+    const queue = section === "usage" ? pendingUsage : section === "artifacts" ? pendingArtifacts : pendingSummary;
+    return new Promise(resolve => queue.push(() => {
+      if (mode === "failed") { resolve(response({ error: "Fixture unavailable" }, 503)); return; }
+      const { status, sinceMs, generatedAt, usage, artifacts, activityPage, runs, taskStats } = summary();
+      const scope = { status, sinceMs, generatedAt };
+      resolve(response({ summary: section === "usage" ? { ...scope, usage }
+        : section === "artifacts" ? { ...scope, artifacts } : { ...scope, activityPage, runs, taskStats } }));
+    }));
+  }
   if (url.pathname === "/__api/dashboard/activities") return new Promise(resolve => pendingActivities.push(() =>
     resolve(mode === "failed" ? response({ error: "Activity unavailable" }, 503)
       : response({ items: [], hasMore: false, degradedSources: [] }))));
-  if (url.pathname === "/__api/usage") return new Promise(resolve => pendingUsage.push(() => resolve(response({ series: null }))));
+  if (url.pathname === "/__api/usage") throw Error("Dashboard duplicated its usage series request");
   if (url.pathname === "/__api/dashboard/live") return response({ generatedAt: now, running: [], approvals: [] });
   if (url.pathname === "/__api/config") return response({ config: { disabledBackends: [], locale: language } });
   if (url.pathname === "/__api/backends") return response({ backends: FALLBACK_BACKEND_DESCRIPTORS });
@@ -65,12 +76,19 @@ window.addEventListener("unhandledrejection", event => { state.fixtureError = St
 
 // This document runs only in a private renderer profile or its dedicated preview origin.
 localStorage.clear();
-if (scenario === "cache") localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify({
-  version: DASHBOARD_CACHE_VERSION, savedAt: now, data: summary(),
-}));
+if (scenario === "cache" || scenario === "stale") {
+  const data = summary();
+  if (scenario === "stale") {
+    data.generatedAt = now - 120_000;
+    data.activityPage.items[0].title = "Old dashboard report";
+  }
+  localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify({ version: DASHBOARD_CACHE_VERSION, savedAt: now, data }));
+}
 await i18n.changeLanguage(language);
 document.documentElement.dataset.theme = theme;
-createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><DashboardPage /></UiProvider></HashRouter>);
+const root = createRoot(document.getElementById("root")!);
+const mountDashboard = (key: number) => root.render(<HashRouter><UiProvider><DashboardPage key={key} /></UiProvider></HashRouter>);
+mountDashboard(0);
 
 const check = (condition: unknown, label: string) => { if (!condition) throw Error(label); };
 const wait = async (predicate: () => unknown, label: string) => {
@@ -83,6 +101,8 @@ const wait = async (predicate: () => unknown, label: string) => {
 };
 const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 const release = (queue: Array<() => void>) => { for (const done of queue.splice(0)) done(); };
+const allRequested = () => pendingSummary.length && pendingUsage.length && pendingArtifacts.length;
+const releaseAll = () => { release(pendingSummary); release(pendingUsage); release(pendingArtifacts); };
 const pageSkeleton = () => document.querySelector('[data-dashboard-skeleton="page"]');
 const activitySkeleton = () => document.querySelector('[data-dashboard-skeleton="activity"]');
 const boxes = () => Array.from(document.querySelectorAll(".kpi, .dash-columns")).map(element => {
@@ -97,7 +117,11 @@ const verifyLayout = () => {
 };
 
 state.prepareScreenshot = async () => {
-  await wait(() => pendingSummary.length > 0 && (pageSkeleton() || scenario === "cache"), "Initial request/loading state missing");
+  if (scenario === "stale") {
+    await wait(() => pendingSummary.length > 0, "Initial summary request missing");
+    check(!document.body.textContent?.includes("Old dashboard report"), "Dashboard showed an expired snapshot as current");
+  }
+  await wait(() => allRequested() && (pageSkeleton() || scenario === "cache"), "Initial request/loading state missing");
   await wait(() => document.querySelector('.kpi [aria-hidden="true"]'), "Placeholder did not mount");
   if (scenario !== "cache") {
     await wait(() => Array.from(pageSkeleton()!.querySelectorAll("span")).some(element =>
@@ -124,24 +148,47 @@ state.runFixture = async () => {
   }
 
   if (scenario === "failure") {
-    mode = "failed"; release(pendingSummary);
+    mode = "failed"; releaseAll();
     await wait(() => document.querySelector('[role="alert"]'), "Initial failure missing");
     check(!pageSkeleton(), "Failed request left an endless skeleton");
     document.querySelector<HTMLButtonElement>(".dash-error button")!.click();
-    await wait(() => pageSkeleton() && pendingSummary.length > 0, "Retry did not restore loading skeleton");
-    mode = "empty"; release(pendingSummary);
+    await wait(() => pageSkeleton() && allRequested(), "Retry did not restore loading skeleton");
+    mode = "empty"; releaseAll();
     await wait(() => document.querySelectorAll(".dash-empty").length === 2, "Successful empty response missing");
     check(!pageSkeleton(), "Empty response kept loading skeleton");
   } else {
-    release(pendingSummary);
-    await wait(() => !pageSkeleton() && document.querySelectorAll(".kpi").length === 3, "Summary did not replace the skeleton");
     if (scenario === "pending") {
-      check(document.querySelectorAll('.kpi[aria-busy="true"]').length === 2, "Pending usage needs two metric placeholders");
-      check(document.querySelectorAll(".dash-art").length === 3, "Pending usage hid ready content");
-      mode = "ready"; release(pendingUsage);
-      await wait(() => pendingSummary.length > 0, "Completed usage did not refresh summary");
       release(pendingSummary);
+      await wait(() => document.querySelector(".dash-run-name")?.textContent === "Daily report 1",
+        "Ready activity waited for the usage and file reads");
+      check(document.querySelectorAll('.kpi[aria-busy="true"]').length === 2, "Pending usage needs two metric placeholders");
+      check(document.querySelector('.dash-artifacts[aria-busy="true"]'), "Pending files lack a placeholder");
+      release(pendingUsage);
       await wait(() => !document.querySelector('.kpi[aria-busy="true"]'), "Usage metric skeleton did not settle");
+      check(document.querySelector('.kpi-val')?.textContent === "128.0K", "Usage did not show the fresh total immediately");
+      check(document.querySelector('.dash-artifacts[aria-busy="true"]'), "Files settled before their request completed");
+      release(pendingArtifacts);
+      await wait(() => document.querySelectorAll("button.dash-art").length === 3, "Files did not replace their placeholder");
+    } else if (scenario === "usage-first") {
+      release(pendingUsage);
+      await wait(() => document.querySelector('.kpi-val')?.textContent === "128.0K", "Ready usage waited for activity");
+      check(activitySkeleton() && document.querySelector('.kpi-taskboard[aria-busy="true"]'), "Pending activity or task board lacks a placeholder");
+      release(pendingSummary); release(pendingArtifacts);
+      await wait(() => document.querySelector(".dash-run-name") && document.querySelector("button.dash-art"), "Activity or files did not settle");
+    } else {
+      releaseAll();
+      await wait(() => !pageSkeleton() && document.querySelectorAll(".kpi").length === 3, "Summary did not replace the skeleton");
+    }
+    if (scenario === "stale") {
+      await wait(() => document.querySelector(".dash-run-name")?.textContent === "Daily report 1", "New snapshot did not replace expired disk data");
+      const realNow = Date.now;
+      Date.now = () => realNow() + 120_000;
+      mode = "refreshed";
+      mountDashboard(1);
+      await wait(() => allRequested() && pageSkeleton(), "Re-entry did not expire the in-memory snapshot");
+      check(!document.querySelector("button.dash-run"), "Re-entry rendered old activity before the new read");
+      releaseAll();
+      await wait(() => document.querySelector(".dash-run-name")?.textContent === "Updated report 1", "Re-entry did not reveal new activity");
     }
     if (scenario === "unavailable") check(!document.querySelector('.kpi[aria-busy="true"]'), "Unavailable usage is not an in-flight load");
     if (scenario === "filter") {
@@ -165,9 +212,9 @@ state.runFixture = async () => {
       }
       if (innerWidth > 900) check(Math.abs(before[3].height - after[3].height) <= 1, "Two-column area moved on reveal");
       const refresh = runPageRefresh("/dashboard");
-      await wait(() => pendingSummary.length > 0, "Refresh did not request summary");
+      await wait(allRequested, "Refresh did not request each section");
       check(!pageSkeleton() && document.querySelectorAll(".dash-art").length === 3, "Background refresh hid existing data");
-      mode = "failed"; release(pendingSummary); await refresh;
+      mode = "failed"; releaseAll(); await refresh;
       await wait(() => document.querySelector(".dash-error"), "Refresh error missing");
       check(!pageSkeleton() && document.querySelectorAll(".dash-art").length === 3, "Refresh error discarded existing data");
     }

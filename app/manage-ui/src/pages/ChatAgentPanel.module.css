@@ -68,9 +68,10 @@ button.avatarEdit, button.avatarEdit:hover:not(:disabled) {
 .count { margin: -8px 0 4px; }
 .note { margin: 6px 0 14px; }
 .jobs { display: flex; flex-direction: column; }
-.job { display: block; min-width: 0; padding: 14px 6px; border-radius: 12px; color: inherit; text-decoration: none; }
+.job { display: block; width: 100%; min-width: 0; padding: 14px 6px; border: 0; border-radius: 12px;
+  background: transparent; color: inherit; text-align: left; }
 .job + .job { border-top: 1px solid var(--skin-hairline); }
-.job:hover { background: var(--bg-hover); }
+.job:hover { background: var(--bg-hover); color: inherit; }
 .jobHead { display: flex; align-items: baseline; gap: 12px; }
 .jobName { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; line-height: 22px; }
 .state { color: var(--muted-fg); font-size: 11px; white-space: nowrap; }
@@ -79,28 +80,14 @@ button.avatarEdit, button.avatarEdit:hover:not(:disabled) {
 .schedule { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted-fg); font-size: 11px; line-height: 18px; }
 .error { margin: 6px 0; color: var(--ui-error); font-size: 12px; line-height: 20px; overflow-wrap: anywhere; }
 .idea + .idea { border-top: 1px solid var(--skin-hairline); }
-.ideaSummary { display: flex; align-items: center; gap: 10px; padding: 14px 6px; border-radius: 12px; list-style: none; cursor: pointer; }
-.ideaSummary::-webkit-details-marker { display: none; }
-.ideaSummary:hover { background: var(--bg-hover); }
-.ideaSummary:focus-visible, .noteLink:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
-.ideaPreview, .ideaOpenTitle { flex: 1; min-width: 0; font-size: 13px; line-height: 22px; overflow-wrap: anywhere; }
+.ideaButton { display: flex; align-items: center; gap: 10px; width: 100%; padding: 14px 6px; border: 0;
+  border-radius: 12px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.ideaButton:hover { background: var(--bg-hover); color: inherit; }
+.ideaButton:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.ideaPreview { flex: 1; min-width: 0; font-size: 13px; line-height: 22px; overflow-wrap: anywhere; }
 .ideaPreview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
-.ideaOpenTitle { display: none; }
-.idea[open] .ideaPreview { display: none; }
-.idea[open] .ideaOpenTitle { display: block; }
 .chevron { flex: none; width: 16px; height: 16px; color: var(--muted-fg); }
-.idea[open] .chevron { transform: rotate(180deg); }
-.ideaContents { display: flex; flex-direction: column; gap: 14px; padding: 0 6px 18px 32px; }
-.noteLink { align-self: flex-start; color: var(--ui-focus); font-size: 12px; text-decoration: none; }
-.noteLink:hover { text-decoration: underline; }
 .more { margin-top: 14px; }
-.attachments { display: flex; flex-wrap: wrap; gap: 8px; }
-.attachment { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%;
-  padding: 6px 10px; border-radius: 999px; background: var(--bg-hover); color: var(--muted-fg); font-size: 12px; text-decoration: none; }
-.attachment svg { width: 14px; height: 14px; flex: none; }
-.attachment > span:first-of-type { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.attachment:hover { color: var(--chat-text); }
-.attachment:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 @container (max-width: 640px) {
   .expansion {
     --chat-profile-avatar-max: 96px;

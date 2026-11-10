@@ -24,9 +24,8 @@ assert.equal(chatPage.includes("function readModelCache("), false, "ChatPage 不
 assert.equal(chatPage.includes("function writeModelCache("), false, "ChatPage 不得直接写模型 localStorage");
 has(chatPage, 'backend === "openclaw"', "OpenClaw 聊天模型必须走 agent-scoped 分支");
 has(chatPage, "const activeModelsAgentId = activeKey", "切换同后端的原生 Agent 也必须重新加载模型目录");
-has(chatPage, 'send("models.list", { view: "configured", agentId })', "OpenClaw 聊天必须读取当前 agent 的 configured 模型");
-has(chatPage, "openClawModelCacheRef.current.get(agentId)", "OpenClaw 聊天模型缓存必须按 agentId 读取");
-has(chatPage, "openClawModelCacheRef.current.set(agentId", "OpenClaw 聊天模型缓存必须按 agentId 写入");
+has(chatPage, "useAgentModelCatalog(activeModelsBackend, activeModelsAgentId", "OpenClaw 聊天必须使用共享的 Agent 目录");
+assert.equal(chatPage.includes("openClawModelCacheRef"), false, "Chat 不得维护另一份 Agent 模型缓存");
 assert.equal(/send\("models\.list",\s*\{[^}]*view:\s*"all"/s.test(chatPage), false,
   "ChatPage 不得请求管理面使用的全量 all 模型目录");
 
@@ -40,7 +39,7 @@ has(chatPage, "snapshot.backendId !== backend", "事件必须校验当前 backen
 
 // 请求还没返回且没有缓存时，菜单应显示 loading，而不是误报“无匹配模型”。
 has(chatPage, "modelsLoading", "ChatPage 需要维护模型加载状态");
-has(chatPage, "loading={modelsLoading}", "ChatPage 需要把 provisional 加载态传给模型菜单");
+has(chatPage, "loading={usesRuntimeModelPicker ? runtimeModels.loading : modelsLoading}", "ChatPage 需要把 provisional 加载态传给模型菜单");
 has(menu, "loading?: boolean", "ChatModelMenu 需要接收 loading 属性");
 has(menu, 't("chat.loadingModels")', "ChatModelMenu 需要使用 loading 文案");
 has(menu, "model-menu__provisional", "已有 placeholder 模型时也要显示 provisional 状态");

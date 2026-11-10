@@ -38,8 +38,12 @@ test("unknown capacity uses the requested 500K budget, and native current pressu
     "native compaction already reduced pressure; old transcript totals must not cause another summary");
   assert.ok(plan(history(10), { budget, usage: { usedTokens: 450_000, observedAt: 101 } }),
     "hidden native tool/system context can cause pressure with a shorter transcript");
-  assert.equal(estimateContextTokens("中文"), 4);
+  assert.equal(estimateContextTokens("中文"), 3, "a non-ASCII character counts as 1.5 tokens");
   assert.equal(estimateContextTokens("abcd"), 1);
+  const { estimateCodePointTokens } = require("../app/agent-service/conversation-context-budget");
+  const mixed = "历史 history 记录😀";
+  assert.equal(Math.ceil([...mixed].reduce((sum, point) => sum + estimateCodePointTokens(point), 0)),
+    estimateContextTokens(mixed), "the per-character estimate is the same estimate");
 });
 
 test("Gemini's documented input limit is not its 64k output limit or a fabricated runtime observation", () => {

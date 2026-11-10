@@ -202,7 +202,8 @@ test("100 次重启和提交保持 revision 单调且最终内容不丢", () => 
     const final = value.store.get("profile-1");
     assert.equal(final.manifest.revision, 101);
     assert.match(final.documents.SOUL, /Revision 101/);
-    assert.equal(value.store.history("profile-1").length, 101);
+    assert.equal(value.store.history("profile-1").length, 4, "current plus three backups");
+    assert.equal(value.store.readRevision("profile-1", 97), null);
   } finally { value.cleanup(); }
 });
 

@@ -1265,7 +1265,9 @@ class HermesBackend extends AgentBackend {
       this.profileById.set(id, profile.name);
       this.agents.push({
         id,
-        name: profile.name,
+        // rename API 仅对 default 写 display_name，普通 profile 仍编辑 canonical name。
+        name: (profile.name === "default" && typeof profile.display_name === "string"
+          && profile.display_name.trim()) || profile.name,
         model: typeof profile.model === "string" ? profile.model : undefined,
         provider: typeof profile.provider === "string" ? profile.provider : undefined,
       });
@@ -6724,7 +6726,7 @@ class HermesBackend extends AgentBackend {
     if (dash && (await this._commitStartedDashboard(profile, dash, generation))) return;
     if (generation !== this._lifecycleGeneration) return;
     const detail = String(reason || "").split("\n")[0];
-    throw new Error(`hermes: profile「${profile}」已创建，但它的 dashboard 启动失败${detail ? `（${detail}）` : ""}，重启 App 会重试`);
+    throw new Error(`hermes: profile「${profile}」已保存，但它的 dashboard 启动失败${detail ? `（${detail}）` : ""}，重启 App 会重试`);
   }
 
   // Hermes profiles support rename here; model is set via the 模型 page, SOUL via files.
@@ -6732,8 +6734,11 @@ class HermesBackend extends AgentBackend {
     const profile = this.profileById.get(id);
     if (!profile) throw new Error(`hermes: 未找到 agent ${id}`);
     const newName = typeof patch?.name === "string" ? patch.name.trim() : "";
-    if (newName && newName !== profile) {
-      this._assertProfileIdentityAvailable(newName, profile);
+    const currentName = this.agents.find(agent => agent.id === id)?.name || profile;
+    if (newName && newName !== currentName) {
+      // default 只改 display_name，底层身份仍是 default；展示名不参与 ID 碰撞校验。
+      if (profile !== "default") this._assertProfileIdentityAvailable(newName, profile);
+      const generation = this._lifecycleGeneration;
       const dash = this._requireDashboard(this._defaultDash(), "重命名 profile");
       const { status, body } = await this._httpRequest(
         "PATCH",
@@ -6741,10 +6746,41 @@ class HermesBackend extends AgentBackend {
         { token: dash.token, body: { new_name: newName } }, dash,
       );
       if (status >= 300) throw new Error(`hermes rename profile failed: ${status} ${body}`);
-      await this._refreshAgentsFor(dash).catch(() => {});
-      // The agent id is derived from the profile name, so a rename re-keys it.
-      // Hand the new id back — the old one no longer resolves.
-      return { ok: true, id: agentIdForProfile(newName) };
+      const result = body ? JSON.parse(body) : {};
+      // Hermes 返回 canonical name；default 改名不会移动目录或改变会话身份。
+      // 兼容旧版未返回 name 的回执，也不能把展示名当成新的 profile ID。
+      const nextProfile = (typeof result?.name === "string" && result.name.trim())
+        || (profile === "default" ? profile : newName);
+      const nextId = agentIdForProfile(nextProfile);
+      const refreshed = await this._refreshAgentsFor(dash, generation).catch(() => false);
+      if (generation !== this._lifecycleGeneration) {
+        throw new Error("hermes: profile 已改名，但连接配置已变化，请刷新后重试");
+      }
+      if (this._getConfig().hermesMode !== "remote") {
+        if (!refreshed || !this.profileById.has(nextId)) {
+          throw new Error("hermes: profile 已改名，但重新读取列表失败，请刷新后重试");
+        }
+        const confirmedProfile = this.profileById.get(nextId);
+        if (confirmedProfile !== profile) {
+          // 本地普通 profile 改名后，旧 dashboard 仍绑定旧目录，不能直接改 Map key。
+          // 受管模式已由 refresh 绑定新路由；本地模式按创建 profile 的流程拉起新服务。
+          const previousDashboard = this.dashboards.get(profile);
+          this.dashboards.delete(profile);
+          try { this.gwSockets.get(profile)?.close(); } catch { /* already closed */ }
+          this.gwSockets.delete(profile);
+          try { this.acpClients.get(profile)?.stop(); } catch { /* already stopped */ }
+          this.acpClients.delete(profile);
+          await this._discardStartedDashboard(previousDashboard);
+          await this._ensureCreatedProfileDashboard(confirmedProfile, generation);
+        }
+      }
+      const publishReady = this._makeReadyPublisher(this._startHooks, generation);
+      publishReady();
+      await publishReady.drain();
+      if (generation !== this._lifecycleGeneration) {
+        throw new Error("hermes: profile 已改名，但连接配置已变化，请刷新后重试");
+      }
+      return { ok: true, id: nextId };
     }
     return { ok: true, id };
   }
@@ -7121,7 +7157,10 @@ class HermesBackend extends AgentBackend {
     return { catalog: assertModelCatalog({ models, defaultModel: info.model }), info, providers, assertCurrent };
   }
 
-  getInspirationModels(agentId) { return this.getGroupMemberModels(agentId); }
+  async getInspirationModels(agentId) {
+    const { catalog, info } = await this._groupMemberModelState(agentId);
+    return typeof info.provider === "string" && info.provider ? { ...catalog, defaultProvider: info.provider } : catalog;
+  }
   async getGroupMemberModels(agentId) { return (await this._groupMemberModelState(agentId)).catalog; }
 
   async applyGroupSessionModel(agentId, sessionKey, selection) {
@@ -10149,6 +10188,9 @@ class HermesBackend extends AgentBackend {
       (Array.isArray(jobs) ? jobs : []).map(async (job) => {
         const profile = this.profileById.get(job.agentId);
         const hasLedger = ledgerProfiles.has(profile);
+        // Session history only enriches runs already found in the local ledger.
+        const ledger = hasLedger ? out.filter(run => run.jobId === job.id) : null;
+        if (ledger?.length === 0) return;
         const dash = profile ? this.dashboards.get(profile) : null;
         if (!dash) { if (!hasLedger) incomplete = true; return; }
         const unified = String(job.id || "");
@@ -10162,7 +10204,6 @@ class HermesBackend extends AgentBackend {
             // Preserve trajectory/assistant summaries without counting the
             // session-backed rows again. Only link an unambiguous owned run.
             if (status !== 200 || !Array.isArray(json?.runs)) return;
-            const ledger = out.filter(run => run.jobId === job.id);
             const sessions = json.runs.map(normalizeHermesRunRow).filter(Boolean);
             linkHermesCronSessions(ledger, sessions);
             return;

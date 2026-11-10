@@ -31,6 +31,11 @@ export function invalidatePageCache(): void {
   for (const listener of revisionListeners) listener();
 }
 
+// Other scoped UI caches use the same connection generation as page data.
+export function usePageCacheRevision(): number {
+  return useSyncExternalStore(subscribeRevision, readRevision, readRevision);
+}
+
 // generation 让同 key 的本地 mutation 可以淘汰更早发出的迟到 GET。
 function generationOf(key: string): number {
   return generations.get(key) || 0;
@@ -81,7 +86,7 @@ export function usePageCache<T>(resourceKey: string, fetcher: () => Promise<T>, 
   enabled = true,
   loadingOnEmptyRefresh = false,
 }: { staleTime?: number; enabled?: boolean; loadingOnEmptyRefresh?: boolean } = {}): PageCache<T> {
-  const revision = useSyncExternalStore(subscribeRevision, readRevision, readRevision);
+  const revision = usePageCacheRevision();
   const key = `${revision}:${resourceKey}`;
   // fetcher 是每次渲染新建的闭包：走 ref 出依赖，只在 key 变化时重新拉。
   const fetcherRef = useRef(fetcher);

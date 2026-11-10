@@ -42,7 +42,7 @@ app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,width:1280,
 const bounded=(promise,label)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(Error("Timed out: "+label)),12000))]);
 try{const results=[];
 const cases=[["cold","zh-CN","light",1280],["cold","en","dark",1280],["cold","zh-CN","light",760],["cold","en","dark",390],
-["pending","zh-CN","light",1280],["failure","en","light",1280],["cache","zh-CN","light",1280],["filter","en","light",760],
+["stale","zh-CN","light",1280],["pending","zh-CN","light",1280],["usage-first","en","light",1280],["failure","en","light",1280],["cache","zh-CN","light",1280],["filter","en","light",760],
 ["unavailable","zh-CN","dark",1280],["cold","zh-CN","light",1280,"reduce"]];
 for(const [scenario,language,theme,width,motion] of cases){w.setContentSize(width,900);console.log("CHECK",scenario,language,theme,width,motion||"motion");
 await bounded(w.loadURL(${JSON.stringify(url)}+"/?"+new URLSearchParams({scenario,language,theme})),"navigation");

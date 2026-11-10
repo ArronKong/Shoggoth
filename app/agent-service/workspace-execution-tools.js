@@ -31,7 +31,7 @@ function workspaceAutoExecution(contract) {
     && WORKSPACE_AUTO_RUNTIMES.has(contract.runtime)
     && ["workspace-write", "danger-full-access"].includes(contract.permissionPolicy?.sandbox)
     && contract.permissionPolicy?.approvalPolicy === "on-request"
-    && !["compaction", "proactive", "memory_extraction"].includes(contract.source);
+    && !["compaction", "memory_extraction"].includes(contract.source);
 }
 function workspaceExecutionInstructions(contract) {
   return workspaceAutoExecution(contract) ? [

@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ApiError, getAgentDefaultModels, selectAgentDefaultModel } from "../../api/client";
 import { useToast } from "../../components/ui";
@@ -6,15 +6,15 @@ import { usePageCache } from "../../lib/usePageCache";
 import ChatModelMenu from "../ChatModelMenu";
 import styles from "../AgentsPage.module.css";
 
-export default function AgentDefaultModel({ backend, agentId, model, onChanged }: {
+export default function AgentDefaultModel({ backend, agentId, model, labelId, onChanged }: {
   backend: string;
   agentId: string;
   model?: string;
+  labelId: string;
   onChanged(): void;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
-  const labelId = useId();
   const cache = usePageCache(`agent:default-models:${backend}:${agentId}`,
     () => getAgentDefaultModels(backend, agentId), { enabled: false });
   const { data } = cache;
@@ -62,8 +62,7 @@ export default function AgentDefaultModel({ backend, agentId, model, onChanged }
   };
   const activeModel = data ? data.selection.model ?? "" : model ?? "";
   return (
-    <div className={styles.ovField}>
-      <span id={labelId} className={styles.ovLabel}>{t("agents.defaultModel")}</span>
+    <div className={`${styles.ovField} ${styles.ovFieldWide}`}>
       <div className={`${styles.modelPicker} ${styles.defaultModelPicker}`}>
         <ChatModelMenu labelledBy={labelId} portalTo="[data-agent-overview-panel]"
           models={cache.error ? [] : data?.models ?? []} runtimeGroups={data?.runtimes ?? []}

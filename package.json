@@ -1,7 +1,7 @@
 {
   "name": "shoggoth-desktop",
   "productName": "Shoggoth",
-  "version": "0.8.300",
+  "version": "0.8.307",
   "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
   "private": true,
   "license": "Apache-2.0",
@@ -21,6 +21,7 @@
     "test:plugins:bundled": "npm run test:connectors:package",
     "test:plugins": "npm run test:connectors",
     "test:opencode-model-only": "node --test scripts/opencode-model-only-regression.cjs",
+    "test:core": "node scripts/core-tests.cjs",
     "test:runtime-baseline": "node scripts/runtime-framework-v2-baseline-unit.cjs",
     "test:hooks": "node --test --test-concurrency=1 scripts/agent-hooks-unit.cjs scripts/connector-retirement-unit.cjs scripts/agent-hooks-recovery-security-fixture.cjs scripts/agent-hooks-runtime-bridge-unit.cjs scripts/agent-hooks-mcp-service-fixture.cjs scripts/agent-hooks-packaged-smoke.cjs",
     "test:hooks:pi": "node --test scripts/agent-hooks-pi-runtime-fixture.mjs",

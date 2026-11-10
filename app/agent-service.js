@@ -194,13 +194,15 @@ async function startAgentService(options, paths, detachFailureHandler) {
     }
     activateHandler = null;
   };
-  // 真实 packaged Service 先按当前 App 身份选择本地文件或一次性 worker；
+  // 真实 packaged Service 按 App 身份选择本地文件或外部 worker；外部分支的
+  // encrypt/decrypt 复用隔离进程，认证加载和 helper 读取仍使用单次 worker。
   // 显式 paths/source/defaultApp 与 Node 单测继续沿用原有可注入路径。
   if (!mcpCryptoBroker && !options.safeStorage && electronApp && !options.paths
     && typeof electronApp.getAppPath === "function") {
     const cryptoOptions = {
       paths,
       callerRole: "agent-service",
+      persistent: true,
       executablePath: process.execPath,
       appRoot: electronApp.getAppPath(),
       defaultApp: process.defaultApp === true,

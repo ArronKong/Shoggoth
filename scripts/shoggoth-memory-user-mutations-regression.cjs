@@ -60,6 +60,12 @@ async function definition(f, t, content, { legacy = false } = {}) {
     binding: service.bind("agent_definition_update", args, t.run()), createdAt: f.now() });
   const result = await service.update(A, args, call);
   f.service.productStore.completeMcpToolCall({ id: call.id, outcome: { ok: true, result } });
+  // All linked-forget cases must still work after the source files age out of
+  // the three-backup window, including legacy MCP receipts and reintroduced rules.
+  const store = f.service.agentDefinitionStore;
+  for (let index = 0; index < 4; index++) store.update({ profileId: A, actor: "user",
+    expectedRevision: store.get(A).manifest.revision, documents: { SOUL: `Later unrelated edit ${index}` } });
+  assert.equal(store.readRevision(A, result.revision), null);
   return result;
 }
 const agents = f => f.service.agentDefinitionStore.get(A).documents.AGENTS;

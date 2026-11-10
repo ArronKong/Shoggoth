@@ -203,6 +203,26 @@ async function testHermesRunsRealRowsSecondsAndMerge() {
   assert.ok(!r.latestOnly);
 }
 
+async function testHermesEnrichesOnlyJobsWithLedgerRows() {
+  const idle = { ...H_JOB, id: "hermes-default:idle" };
+  const legacy = { ...H_JOB, id: "hermes-bull:legacy", agentId: "hermes-bull" };
+  const startedAt = T0 + 1000;
+  const b = mkHermes({
+    jobs: [H_JOB, idle, legacy],
+    runsByLocalId: { "5ec8": [{ id: "matched-session", started_at: startedAt + 1000 }] },
+  });
+  b._readCronExecutionHistory = async profile => {
+    if (profile !== "default") throw Error("No ledger on older dashboard");
+    return { items: [{ id: "ledger-run", jobId: "5ec8", startedAt, finishedAt: startedAt + 3000, status: "error" }] };
+  };
+  const result = await b.getRecentCronRuns({ sinceMs: T0 });
+  assert.deepEqual(b.calls.map(call => new URL(call.url).pathname), [
+    "/api/cron/jobs/5ec8/runs", "/api/cron/jobs/legacy/runs",
+  ], "Only matching ledger rows and profiles without a ledger need the session lookup");
+  assert.equal(result.runs.find(run => run.runId === "ledger-run").sessionKey, "matched-session");
+  assert.ok(result.runs.some(run => run.jobId === legacy.id), "The older dashboard still synthesizes its latest run");
+}
+
 async function testHermesDashboardUsesFinalAssistantAsSummaryAndCachesIt() {
   const sessionId = "cron_5ec8_success";
   const prompt = "[IMPORTANT: You are running as a scheduled cron job. DELIVER...]";
@@ -582,6 +602,7 @@ const tests = [
   testOcPagesUntilMidnightBoundary, testOcLimitTruncates, testOcStopsWhenNoMore,
   testOcRpcFailureIsFailSoft, testOcKanbanActivities, testOcKanbanUnavailableOnRpcFailure,
   testHermesRunsRealRowsSecondsAndMerge, testHermes404FallsBackSynthesizedLatestOnly,
+  testHermesEnrichesOnlyJobsWithLedgerRows,
   testHermesDashboardUsesFinalAssistantAsSummaryAndCachesIt,
   testHermesDashboardNeverFallsBackToPromptPreview,
   testHermesDashboardCapsSummaryFanoutAtFirstHundred,

@@ -47,7 +47,7 @@ const trends = aggregateKpiTrendPoints([
 assert.deepEqual(Array.from(trends.tokens), [20, 30, 40, 50, 60, 77, 88], "Tokens 曲线只保留最近 7 天并跨后端求和");
 assert.deepEqual(Array.from(trends.costs), [2, 3, 4, 5, 6, 7.7, 8.8], "Cost 曲线必须与 Tokens 共用最近 7 天窗口");
 
-assert.match(page, /getUsageSeries\(id,\s*"7d"\)/, "趋势请求必须保持 7d");
+assert.match(page, /aggregateKpiTrendPoints\(usageData\?\.trends/, "趋势必须复用用量分区的数据");
 assert.doesNotMatch(page, /function KpiCostBars\(/, "Today's cost 不应保留独立柱状趋势组件");
 assert.match(page, /function KpiSpark\(\{ points, gradientId \}/, "Token 与 Cost 必须复用同一个曲线组件");
 assert.match(page, /chart=\{<KpiSpark points=\{trendPoints\.tokens\} gradientId="kpi-token-spark-fill" \/>\}/, "Token 卡必须使用独立渐变 ID 的 KpiSpark");

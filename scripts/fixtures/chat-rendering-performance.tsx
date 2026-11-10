@@ -106,6 +106,7 @@ const wait = async (predicate: () => unknown, label: string) => {
 };
 const check = (value: unknown, message: string) => { if (!value) throw Error(message); };
 const thread = () => document.querySelector<HTMLDivElement>(".chat-thread")!;
+const browseEarlier = () => thread().dispatchEvent(new WheelEvent("wheel", { deltaY: -20, bubbles: true }));
 const bubbles = () => document.querySelectorAll<HTMLElement>(".chat-thread .chat-bubble:not(.is-activity-loading)");
 const entries: any[] = [];
 for (const type of ["longtask", "long-animation-frame"]) {
@@ -167,16 +168,17 @@ state.runFixture = async () => {
   entries.length = 0;
   const start = performance.now();
   document.querySelector<HTMLButtonElement>('.chat-agent[title="perf"]')!.click();
-  await wait(() => bubbles().length === 50, "first long-history page");
+  await wait(() => bubbles().length === 50 && thread().dataset.historyLoaded === "true", "first long-history page");
   const initialPageMs = Math.round(performance.now() - start);
   let earlierPages = 0;
   while (bubbles().length < historyCount) {
     const count = bubbles().length;
-    await wait(() => {
-      const button = document.querySelector<HTMLButtonElement>('[data-testid="chat-history-earlier"]');
-      return button && !button.disabled;
-    }, "earlier-history control ready");
-    document.querySelector<HTMLButtonElement>('[data-testid="chat-history-earlier"]')!.click();
+    const legacyButton = thread().querySelector<HTMLButtonElement>('[data-testid="chat-history-earlier"]');
+    if (state.baseline && legacyButton) legacyButton.click();
+    else {
+      thread().scrollTo({ top: 0, behavior: "instant" });
+      browseEarlier();
+    }
     await wait(() => bubbles().length > count, "earlier-history page loaded");
     earlierPages++;
   }
@@ -269,12 +271,16 @@ state.runFixture = async () => {
   }
 
   // Archive prepend must preserve the actual bubble, not just scrollHeight.
-  const archiveIndex = state.archiveAtTop ? 0 : 55;
-  bubbles()[archiveIndex].scrollIntoView({ block: "center", behavior: "instant" });
+  const legacyArchiveButton = state.baseline && thread().querySelector<HTMLButtonElement>(".chat-archive-bar.is-action");
+  const archiveIndex = legacyArchiveButton && !state.archiveAtTop ? 55 : 0;
+  if (legacyArchiveButton) bubbles()[archiveIndex].scrollIntoView({ block: "center", behavior: "instant" });
+  else thread().scrollTo({ top: 0, behavior: "instant" });
   await frame(); await frame(); await pause(100);
+  if (!legacyArchiveButton) thread().scrollTo({ top: 0, behavior: "instant" });
   const archiveAnchor = bubbles()[archiveIndex];
   const archiveTop = archiveAnchor.getBoundingClientRect().top;
-  document.querySelector<HTMLButtonElement>(".chat-archive-bar.is-action")!.click();
+  if (legacyArchiveButton) legacyArchiveButton.click();
+  else browseEarlier();
   await wait(() => bubbles().length === historyCount + 1, "archive prepend");
   await frame(); await frame(); await pause(100);
   const archiveRestored = bubbles()[archiveIndex + 1];
@@ -300,7 +306,8 @@ state.runFixture = async () => {
   check(bubbles().length === historyCount + 2, "no history may be dropped");
   if (!state.baseline) check(replacements === 0, "streaming must update, not remount, the pending bubble");
   const streamMarkdownCalls = (state.markdownCalls || 0) - streamCallsBefore;
-  if (!state.baseline) check(streamMarkdownCalls >= 20 && streamMarkdownCalls <= 22, "streaming must parse the changed reply, not the settled transcript");
+  if (!state.baseline) check(streamMarkdownCalls >= 20 && streamMarkdownCalls <= 22,
+    `streaming must parse the changed reply, not the settled transcript (${streamMarkdownCalls} Markdown calls)`);
 
   // Reload canonical history, then exercise the real composer against our fake
   // socket. Sending must preserve the user-bubble anchor as the reply grows.

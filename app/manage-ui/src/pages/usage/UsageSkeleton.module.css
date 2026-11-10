@@ -42,12 +42,3 @@
   display: block;
   height: 100%;
 }
-
-.rankList {
-  width: 100%;
-}
-
-.ring {
-  aspect-ratio: 1;
-  mask-image: radial-gradient(closest-side, transparent 63%, black 65% 98%, transparent);
-}

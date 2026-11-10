@@ -7,8 +7,7 @@ import { animate } from "animejs";
 import {
   getCronLatestDelivery,
   getNativeCronRunDelivery,
-  getDashboardSummary,
-  getUsageSeries,
+  getDashboardSection,
   listAgents,
   revealCli,
   revealAttachment,
@@ -22,6 +21,7 @@ import type {
   DashboardRunningItem,
 } from "../types";
 import {
+  DASHBOARD_REFRESH_INTERVAL_MS,
   readDashboardCache,
   resolveDashboardViewState,
   shouldWriteDashboardCache,
@@ -37,7 +37,8 @@ import { selectCronRunHandoffSource, writeCronChatHandoff } from "../lib/cronCha
 import { fmtCost, fmtTokens } from "./usage/charts";
 import { cronDeliveryView, cronExecutionView } from "./cron/runPresentation";
 import ActivityFeed from "./dashboard/ActivityFeed";
-import DashboardSkeleton, { DashboardKpiSubSkeleton, DashboardKpiValueSkeleton } from "./dashboard/DashboardSkeleton";
+import DashboardSkeleton, { DashboardArtifactSkeleton, DashboardKpiSubSkeleton,
+  DashboardKpiValueSkeleton, DashboardTaskBoardSkeleton } from "./dashboard/DashboardSkeleton";
 import { useDashboardLiveWork } from "./dashboard/useDashboardLiveWork";
 import RunDetailModal from "./dashboard/RunDetailModal";
 import CronRunReportModal, { ReportNote, runExecutionFailed } from "./cron/CronRunReportModal";
@@ -53,14 +54,14 @@ const InspirationDetail = lazy(() => import("./InspirationPage").then(module => 
 // —— CountUp/Kpi 复制自 UsagePage 的私有实现（那里的 .kpi 样式被 .usage-page
 // 前缀锁死，抽共享要动 usage 页引用链）；出现第三个消费者时再抽到 components/。
 
-// anime.js 数字滚动：挂载从 0 滚入，值变化从当前显示值滚到新值。
+// 首次显示直接使用已加载的数值，后续变化从当前显示值滚到新值。
 // fmt 必须传模块级稳定引用，否则 effect 每次渲染都重跑动画。
 function CountUp({ value, fmt }: { value: number; fmt: (n: number) => string }) {
   const ref = useRef<HTMLSpanElement>(null);
-  const shown = useRef(0);
+  const shown = useRef(value);
   useEffect(() => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || shown.current === value) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       shown.current = value;
       el.textContent = fmt(value);
@@ -282,17 +283,32 @@ export default function DashboardPage() {
   );
   const [persistedData] = useState(() => readDashboardCache());
   const cachedGeneratedAtRef = useRef(persistedData?.generatedAt);
-  const { data: liveData, loading, error, refresh: refreshDashboard } = usePageCache(`dashboard:${backendScopeKey}`, getDashboardSummary);
-  const { data, showLoading, blockingError, nonBlockingError } = resolveDashboardViewState(
-    liveData,
-    persistedData,
-    loading,
-    error,
-    enabledBackendIds,
+  const [openedAt, setOpenedAt] = useState(Date.now);
+  const activity = usePageCache(`dashboard:activity:${backendScopeKey}`, () => getDashboardSection("activity"));
+  const usage = usePageCache(`dashboard:usage:${backendScopeKey}`, () => getDashboardSection("usage"));
+  const artifacts = usePageCache(`dashboard:artifacts:${backendScopeKey}`, () => getDashboardSection("artifacts"));
+  const freshness = { openedAt, now: Date.now() };
+  const activityView = resolveDashboardViewState(
+    activity.data, persistedData, activity.loading, activity.error, enabledBackendIds, freshness,
   );
-  const { work: liveWork, refresh: refreshLiveWork } = useDashboardLiveWork(data, backendScopeKey);
-  const currentWork = liveWork || data;
-  // Agent 目录与 Dashboard summary 并行加载，避免名称展示形成二次请求瀑布。
+  const usageView = resolveDashboardViewState(
+    usage.data, persistedData, usage.loading, usage.error, enabledBackendIds, freshness,
+  );
+  const artifactView = resolveDashboardViewState(
+    artifacts.data, persistedData, artifacts.loading, artifacts.error, enabledBackendIds, freshness,
+  );
+  const { data: activityData } = activityView;
+  const { data: usageData } = usageView;
+  const { data: artifactData } = artifactView;
+  const visibleSnapshot = activityData ?? usageData ?? artifactData;
+  const initialLoading = !visibleSnapshot && (activityView.showLoading || usageView.showLoading || artifactView.showLoading);
+  const error = activity.error || usage.error || artifacts.error;
+  const blockingError = !visibleSnapshot && !initialLoading ? error : null;
+  const nonBlockingError = visibleSnapshot ? error : null;
+  const { work: currentWork, refresh: refreshLiveWork } = useDashboardLiveWork(
+    activityData === persistedData ? persistedData : undefined, backendScopeKey,
+  );
+  // Agent 目录并行加载，避免名称展示形成二次请求瀑布。
   const agentBackendIds = useEnabledBackends("agents");
   const agentDirectoryKey = agentBackendIds.join(",");
   const { data: agentDirectory, refresh: refreshAgentDirectory } = usePageCache(
@@ -311,26 +327,32 @@ export default function DashboardPage() {
     ),
     [agentNames],
   );
-  const [refreshing, setRefreshing] = useState(false);
-  const pendingRefreshes = useRef(0);
+  const { refresh: refreshActivity } = activity;
+  const { refresh: refreshUsage } = usage;
+  const { refresh: refreshArtifacts } = artifacts;
   const refresh = useCallback(async () => {
-    pendingRefreshes.current++;
-    setRefreshing(true);
-    try {
-      await Promise.all([refreshDashboard(), refreshAgentDirectory(), refreshLiveWork()]);
-    } finally {
-      if (--pendingRefreshes.current === 0) setRefreshing(false);
-    }
-  }, [refreshAgentDirectory, refreshDashboard, refreshLiveWork]);
-  const initialLoading = !data && !blockingError && (showLoading || refreshing);
+    await Promise.all([refreshActivity(), refreshUsage(), refreshArtifacts(), refreshAgentDirectory(), refreshLiveWork()]);
+  }, [refreshActivity, refreshUsage, refreshArtifacts, refreshAgentDirectory, refreshLiveWork]);
   useRegisterPageRefresh("/dashboard", refresh);
   useRegisterPageLoading("/dashboard", initialLoading);
 
-  // 只持久化服务端实时结果；缓存首帧本身不回写，避免延长陈旧数据寿命。
+  // 持久化同日、同范围的完整快照。最早完成的分区决定首帧缓存年龄。
   useEffect(() => {
-    if (!liveData || !shouldWriteDashboardCache(liveData, cachedGeneratedAtRef.current)) return;
-    if (writeDashboardCache(liveData)) cachedGeneratedAtRef.current = liveData.generatedAt;
-  }, [liveData]);
+    if (!activityData || !usageData || !artifactData
+      || activityData !== activity.data || usageData !== usage.data || artifactData !== artifacts.data) return;
+    const snapshot = {
+      ...activityData,
+      usage: usageData.usage,
+      artifacts: artifactData.artifacts,
+      groupArtifacts: artifactData.groupArtifacts,
+      running: [],
+      approvals: [],
+      generatedAt: Math.min(activityData.generatedAt, usageData.generatedAt, artifactData.generatedAt),
+    };
+    if (shouldWriteDashboardCache(snapshot, cachedGeneratedAtRef.current) && writeDashboardCache(snapshot)) {
+      cachedGeneratedAtRef.current = snapshot.generatedAt;
+    }
+  }, [activity.data, activityData, usage.data, usageData, artifacts.data, artifactData]);
 
   // 页面可见时 45s 轮询 + 切回标签页立刻补一拍。refreshRef 防闭包过期
   // （TasksPage 的既有手法）；refresh() 写穿缓存、不进 loading，无闪烁。
@@ -342,18 +364,23 @@ export default function DashboardPage() {
     const tick = () => {
       if (document.visibilityState === "visible") void refreshRef.current();
     };
-    const iv = window.setInterval(tick, 45_000);
-    document.addEventListener("visibilitychange", tick);
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      setOpenedAt(Date.now());
+      tick();
+    };
+    const iv = window.setInterval(tick, DASHBOARD_REFRESH_INTERVAL_MS);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       window.clearInterval(iv);
-      document.removeEventListener("visibilitychange", tick);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 
   const usageAgg = useMemo(() => {
     const z = { todayCost: 0, todayTokens: 0, yCost: 0, yTokens: 0, missing: 0, incomplete: false,
       ready: 0, yesterdayReady: false };
-    for (const u of data?.usage || []) {
+    for (const u of usageData?.usage || []) {
       z.todayCost += u.today?.totalCost || 0;
       z.todayTokens += u.today?.totalTokens || 0;
       z.yCost += u.yesterday?.totalCost || 0;
@@ -364,39 +391,22 @@ export default function DashboardPage() {
       if (u.yesterday || u.yesterdayComplete) z.yesterdayReady = true;
     }
     return z;
-  }, [data]);
+  }, [usageData]);
   // Authoritative totals/rankings are computed before activity pagination.
-  const runStats = data?.taskStats?.total;
-  const agentRanking = useMemo(() => (data?.taskStats?.byAgent || [])
+  const runStats = activityData?.taskStats?.total;
+  const agentRanking = useMemo(() => (activityData?.taskStats?.byAgent || [])
     .filter(row => row.ok > 0)
     .map(row => ({ ...row, count: row.ok, displayName: currentAgentName(row.agentId, row.backendId) }))
     .sort((a, b) => b.count - a.count || a.agentId.localeCompare(b.agentId))
-    .slice(0, 6), [currentAgentName, data?.taskStats]);
+    .slice(0, 6), [currentAgentName, activityData?.taskStats]);
   const costReady = usageAgg.ready > 0 && !(usageAgg.missing > 0 && usageAgg.todayCost === 0);
   const costDelta = costReady && usageAgg.yesterdayReady && !usageAgg.incomplete && !usageAgg.missing ? deltaPct(usageAgg.todayCost, usageAgg.yCost) : null;
   const tokenDelta = usageAgg.ready && usageAgg.yesterdayReady && !usageAgg.incomplete ? deltaPct(usageAgg.todayTokens, usageAgg.yTokens) : null;
 
-  // Trends use the same enabled backend scope as the summary and its caches.
-  const [trend, setTrend] = useState<{ scope: string; tokens: number[]; costs: number[] }>({ scope: "", tokens: [], costs: [] });
-  const trendPoints = trend.scope === backendScopeKey ? trend : { tokens: [], costs: [] };
-  const usagePending = (data?.usage || []).some((entry) => entry.error === "pending");
-  const usageLoading = usagePending && usageAgg.ready === 0;
-  useEffect(() => {
-    if (!backendScopeKey) return;
-    let cancelled = false;
-    const ids = backendScopeKey.split(",");
-    void Promise.all(
-      ids.map((id) => getUsageSeries(id, "7d").catch(() => null)),
-    ).then((series) => {
-      if (cancelled) return;
-      const points = aggregateKpiTrendPoints(series);
-      setTrend({ scope: backendScopeKey, ...points });
-      // 首屏 usage 因冷扫描超时只返回 pending 时，此处已复用/完成同一单飞扫描；
-      // 立刻补刷 summary，让 KPI 获得权威 today/7d 口径，无需等 45s 轮询。
-      if (usagePending) void refreshRef.current();
-    });
-    return () => { cancelled = true; };
-  }, [backendScopeKey, usagePending]);
+  // Today, yesterday and the chart reuse the same usage section response.
+  const trendPoints = useMemo(() => aggregateKpiTrendPoints(usageData?.trends || []), [usageData?.trends]);
+  const usageLoading = usageView.showLoading
+    || (!usage.error && usageAgg.ready === 0 && !!usageData?.usage.some(entry => entry.error === "pending"));
 
   const [openInspirationId, setOpenInspirationId] = useState<string | null>(null);
   const [inspirationModalOpen, setInspirationModalOpen] = useState(false);
@@ -482,7 +492,7 @@ export default function DashboardPage() {
     }
   };
 
-  const statusRows = data?.status || [];
+  const statusRows = visibleSnapshot?.status || [];
   // delivery 端点可能只能给“最新一次”结果；只有 startedAt 精确一致时才允许覆盖
   // 用户点开的历史 run，否则正文与 session 始终一起回退 openRun。
   const runHandoff = selectCronRunHandoffSource(openRun, delivery);
@@ -507,8 +517,8 @@ export default function DashboardPage() {
     [currentWork],
   );
   // 文件目录与群聊已发布附件共用最近 20 条；远程目录保持原有降级提示。
-  const artifactSections = data?.artifacts || [];
-  const artifactItems = useMemo(() => recentDashboardArtifacts(data), [data]);
+  const artifactSections = artifactData?.artifacts || [];
+  const artifactItems = useMemo(() => recentDashboardArtifacts(artifactData), [artifactData]);
   const artifactRemotes = artifactSections.filter((s) => !s.supported && s.reason === "remote");
 
   return (
@@ -533,7 +543,7 @@ export default function DashboardPage() {
       )}
       {initialLoading && <DashboardSkeleton backendCount={enabledBackendIds.length} />}
 
-      {data && (
+      {visibleSnapshot && (
         <>
           {/* KPI 行（Figma 25:507 三卡等宽）：今日 Tokens / 今日成本共用 7 天折线，
               Task Board 使用纯白双列排行。 */}
@@ -565,14 +575,14 @@ export default function DashboardPage() {
               )}
               chart={<KpiSpark points={trendPoints.costs} gradientId="kpi-cost-spark-fill" />}
             />
-            <TaskBoardCard
+            {activityView.showLoading ? <DashboardTaskBoardSkeleton /> : <TaskBoardCard
               label={t("dashboard.taskBoard")}
               ok={runStats?.ok ?? null}
               fail={runStats?.error ?? null}
               okLabel={t("dashboard.kpiRunsOk")}
               failLabel={t("dashboard.kpiRunsFail")}
               ranking={agentRanking}
-            />
+            />}
           </div>
 
           {/* 主体两栏（照设计）：左「今日动态」活动面板 : 右「最近产出」≈ 2:1。 */}
@@ -580,8 +590,10 @@ export default function DashboardPage() {
             {/* 今日动态：统一活动流（cron/kanban/inspiration），独立组件承载筛选与分页。 */}
             <ActivityFeed
               status={statusRows}
-              firstPage={data.activityPage}
-              sinceMs={data.sinceMs}
+              firstPage={activityData?.activityPage}
+              sinceMs={visibleSnapshot.sinceMs}
+              loading={activityView.showLoading}
+              unavailable={!!activity.error && !activityData}
               running={runningItems}
               approvals={approvalItems}
               canRespondToApproval={(item) => !!item.backendId && dashboardRunBackends.has(item.backendId)}
@@ -603,17 +615,17 @@ export default function DashboardPage() {
             />
 
             {/* 最近产出（右栏）：本机文件与群成员发送的文件，点击 Finder 定位。 */}
-            <section className="dash-section dash-artifacts">
+            <section className="dash-section dash-artifacts" aria-busy={artifactView.showLoading || undefined}>
               <h2 className="dash-section-title">
                 {t("dashboard.artifactsTitle")}
-                <span className="dash-section-count" title={t("dashboard.artifactsCountHint")}>{artifactItems.length}</span>
+                {artifactData && <span className="dash-section-count" title={t("dashboard.artifactsCountHint")}>{artifactItems.length}</span>}
               </h2>
               {artifactRemotes.map((s) => (
                 <div key={s.backend} className="dash-remote-note">
                   {t("dashboard.artifactsRemote", { backend: s.backend })}
                 </div>
               ))}
-              {(data?.groupArtifacts?.reason === "unavailable" || data?.groupArtifacts?.partial) && (
+              {(artifactData?.groupArtifacts?.reason === "unavailable" || artifactData?.groupArtifacts?.partial) && (
                 <div className="dash-remote-note">{t("dashboard.artifactsGroupUnavailable")}</div>
               )}
               {artifactSections.filter(s => s.partial || (!s.supported && s.reason !== "unsupported" && s.reason !== "remote")).map(s => (
@@ -621,8 +633,8 @@ export default function DashboardPage() {
                   {t("dashboard.artifactsUnavailable", { backend: statusRows.find(row => row.id === s.backend)?.name || s.backend })}
                 </div>
               ))}
-              {artifactItems.length === 0 ? (
-                <div className="dash-empty">{t("dashboard.artifactsEmpty")}</div>
+              {artifactView.showLoading ? <DashboardArtifactSkeleton /> : artifactItems.length === 0 ? (
+                artifactData && <div className="dash-empty">{t("dashboard.artifactsEmpty")}</div>
               ) : (
                 <div className="dash-art-list">
                   {artifactItems.map((a) => (

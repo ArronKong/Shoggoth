@@ -3,9 +3,10 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import type { IncomingMessage } from "node:http";
 import type { Plugin, ProxyOptions } from "vite";
+import { devAgentWorkspace } from "./dev-agent-workspace.ts";
 import { debugInspectorSource } from "./debug-inspector-source.ts";
 
-const DEV_WS_TARGET = "http://127.0.0.1:18799";
+const DESKTOP_TARGET = "http://127.0.0.1:18799";
 
 // rewriteWsOrigin is only safe after proving the browser came from this exact
 // Vite origin. Vite 5 does not run bypass() for WebSocket upgrades, so the
@@ -29,7 +30,7 @@ function isAllowedDevWsUpgrade(req: IncomingMessage): boolean {
 
 function devWsProxy(): ProxyOptions {
   return {
-    target: DEV_WS_TARGET,
+    target: DESKTOP_TARGET,
     ws: true,
     changeOrigin: true,
     rewriteWsOrigin: true,
@@ -68,13 +69,13 @@ function sharedCommonJsDevExports(): Plugin {
 // static-server.js.
 export default defineConfig({
   base: "/",
-  plugins: [react(), debugInspectorSource(), sharedCommonJsDevExports()],
+  plugins: [react(), debugInspectorSource(), devAgentWorkspace(DESKTOP_TARGET), sharedCommonJsDevExports()],
   server: {
     host: "127.0.0.1",
     proxy: {
-      "/__api": "http://127.0.0.1:18799",
-      "/__widget": "http://127.0.0.1:18799",
-      "/avatar": "http://127.0.0.1:18799",
+      "/__api": DESKTOP_TARGET,
+      "/__widget": DESKTOP_TARGET,
+      "/avatar": DESKTOP_TARGET,
       "/__chatws": devWsProxy(),
       "/__kanbanws": devWsProxy(),
     }

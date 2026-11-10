@@ -12,7 +12,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { sha256 } = require("./migration.cjs");
-const { hasSecret, hasPii } = require("../memory-engine");
+const { hasSecret, hasPii } = require("../memory-content");
 const { memoryThreatPattern } = require("../memory-threat-scan");
 
 const STATE_NAMESPACE = "native-memory-import";

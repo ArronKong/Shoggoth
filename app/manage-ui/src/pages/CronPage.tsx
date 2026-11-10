@@ -70,6 +70,22 @@ import NativeCronForm, {
 type ModalMode = "create"
   | "edit-openclaw" | "edit-hermes" | "edit-native" | "edit-codex" | null;
 type CronFormOperation = { action: "save" | "delete"; ticket: AsyncRequestTicket; scope: string };
+type CronJobDialogProps = {
+  job: Pick<UnifiedCronJob, "id" | "backendId">;
+  onClose: () => void;
+  onChange: () => Promise<void>;
+};
+
+// Chat uses the same report, editor and mutation lifecycle without mounting the task page.
+export function CronJobDialog(props: CronJobDialogProps) {
+  return <CronPage dialog={props} />;
+}
+
+function CronPageRegistration({ refresh, loading }: { refresh: () => Promise<void>; loading: boolean }) {
+  useRegisterPageRefresh("/cron", refresh);
+  useRegisterPageLoading("/cron", loading);
+  return null;
+}
 
 // 工具栏只暴露 agent/状态/计划三个筛选，排序保持固定的「下次运行升序」。
 const DEFAULT_FILTERS: CronListFilters = {
@@ -85,6 +101,15 @@ function stateLabel(job: UnifiedCronJob, t: TFunction): string {
   if (!job.enabled) return t("cron.disabled");
   if (job.stateLabel && !["ok", "error", "skipped", "scheduled", "disabled"].includes(job.stateLabel)) return job.stateLabel;
   return t("cron.enabled");
+}
+
+function lastRunResult(status: string | undefined, t: TFunction) {
+  const label = status?.trim();
+  const value = label?.toLowerCase();
+  if (runExecutionFailed(value)) return { tone: "error", label: t("cron.resultError") };
+  if (value === "ok" || value === "succeeded") return { tone: "success", label: t("cron.resultSuccess") };
+  if (value === "skipped") return { tone: "skipped", label: t("cron.resultSkipped") };
+  return { tone: "neutral", label: label || t("cron.resultNone") };
 }
 
 // 页头统计基于当前服务端结果（含筛选），不额外猜测后端全量数据。
@@ -104,7 +129,7 @@ function requireName(name: string | undefined, t: TFunction): void {
   if (!name?.trim()) throw new Error(t("cron.nameRequired"));
 }
 
-export default function CronPage() {
+export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {}) {
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
   // ref 负责同步互斥，避免同一 job 在 React 下一次渲染前被连续触发。
   const busyIdsRef = useRef<Set<string>>(new Set());
@@ -130,17 +155,19 @@ export default function CronPage() {
     [filters, debouncedQuery],
   );
   // 键含全部筛选项：换筛选=换键（未命中才进加载态），同筛选切回=秒开。
-  const pageScope = `cron:${JSON.stringify(requestFilters)}`;
+  const pageScope = dialog ? `cron-dialog:${JSON.stringify([dialog.job.backendId, dialog.job.id])}`
+    : `cron:${JSON.stringify(requestFilters)}`;
   const pageScopeRef = useRef(pageScope);
   pageScopeRef.current = pageScope;
-  const { data: jobsData, loading, error, setError, refresh } = usePageCache(
+  const { data: jobsData, loading: pageLoading, error, setError, refresh: refreshPage } = usePageCache(
     pageScope,
     () => listCronJobs(requestFilters),
+    { enabled: !dialog },
   );
+  const loading = !dialog && pageLoading;
+  const refresh = dialog?.onChange ?? refreshPage;
   // 缓存首帧也遵循同一规则，列表、日历、统计及下次运行共用可见任务。
   const jobs = useMemo(() => (jobsData ?? []).filter(isVisibleCronJob), [jobsData]);
-  useRegisterPageRefresh("/cron", refresh);
-  useRegisterPageLoading("/cron", loading);
 
   const [mode, setMode] = useState<ModalMode>(null);
   const [selected, setSelected] = useState<UnifiedCronJob | null>(null);
@@ -191,10 +218,11 @@ export default function CronPage() {
   }, [backendDescriptors]);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const linkedJobId = searchParams.get("job");
-  const linkedBackendId = searchParams.get("backend");
-  const linkedLatestRun = searchParams.get("run") === "latest" && searchParams.get("edit") !== "1";
-  const notificationRequest = searchParams.get("notification");
+  const linkedJobId = dialog?.job.id ?? searchParams.get("job");
+  const linkedBackendId = dialog?.job.backendId ?? searchParams.get("backend");
+  const linkedLatestRun = Boolean(dialog) || searchParams.get("run") === "latest" && searchParams.get("edit") !== "1";
+  const notificationRequest = dialog ? null : searchParams.get("notification");
+  const onDialogClose = dialog?.onClose;
   const openedJobLink = useRef<string | null>(null);
   const stats = useMemo(() => countJobs(jobs), [jobs]);
 
@@ -286,7 +314,7 @@ export default function CronPage() {
   };
 
   const openEdit = useCallback(async (job: UnifiedCronJob) => {
-    if (!isVisibleCronJob(job)) return;
+    if (!isVisibleCronJob(job)) return false;
     const ticket = detailIntentController.begin("detail", `edit:${job.backendId}:${job.id}`);
     const kind = cronKindFor(job.backendId);
     try {
@@ -295,11 +323,11 @@ export default function CronPage() {
       if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
       if (!target || target.id !== job.id || target.backendId !== job.backendId || !isVisibleCronJob(target)) {
         toast.info(t("notif.cronUnavailable"));
-        return;
+        return false;
       }
       if (target.actions?.edit === false) {
         toast.info(t(target.actions.reason === "system-managed" ? "cron.systemManaged" : "cron.editUnavailable"));
-        return;
+        return false;
       }
       await ensureAgents();
       if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
@@ -319,15 +347,17 @@ export default function CronPage() {
         setNativeDraft(nativeCronDraftFromJob(target));
         setMode("edit-native");
       }
+      return true;
     } catch (error) {
       if (detailIntentController.isCurrent(ticket, ticket.context)) {
         toast.error(error instanceof Error ? error.message : String(error));
+        return false;
       }
     }
   }, [cronKindFor, detailIntentController, ensureAgents, t, toast]);
 
   const openRunReport = useCallback(async (job: UnifiedCronJob, occurrenceMs?: number) => {
-    if (!isVisibleCronJob(job)) return;
+    if (!isVisibleCronJob(job)) return false;
     const intent = `delivery:${job.backendId}:${job.id}:${occurrenceMs ?? "latest"}`;
     const ticket = detailIntentController.begin("detail", intent);
     const seq = ++deliveryReqRef.current;
@@ -340,9 +370,11 @@ export default function CronPage() {
       setSelected(null);
       setDelivery(latest);
       setDeliveryJob(job);
+      return true;
     } catch (error) {
       if (seq !== deliveryReqRef.current || !detailIntentController.isCurrent(ticket, intent)) return;
       toast.error(error instanceof Error ? error.message : String(error));
+      return false;
     }
   }, [detailIntentController, toast]);
 
@@ -361,20 +393,23 @@ export default function CronPage() {
     }
     // A cached list row can predate the first run. Check the current task before choosing a report or editor.
     const ticket = detailIntentController.begin("detail", `link:${identity}`);
-    void listCronJobs(linkedBackendId ? { backend: linkedBackendId } : {}).then(allJobs => {
+    void listCronJobs(linkedBackendId ? { backend: linkedBackendId } : {}).then(async allJobs => {
       if (!detailIntentController.isCurrent(ticket, ticket.context)) return;
       const job = allJobs.find(item => isVisibleCronJob(item) && matchesLink(item));
       if (!job) {
         toast.info(t("notif.cronUnavailable"));
-      } else if (linkedLatestRun && job.lastRunAt) {
-        void openRunReport(job);
+        onDialogClose?.();
       } else {
-        void openEdit(job);
+        const opened = linkedLatestRun && job.lastRunAt ? await openRunReport(job) : await openEdit(job);
+        if (opened === false) onDialogClose?.();
       }
     }).catch(error => {
-      if (detailIntentController.isCurrent(ticket, ticket.context)) toast.error(error instanceof Error ? error.message : String(error));
+      if (detailIntentController.isCurrent(ticket, ticket.context)) {
+        toast.error(error instanceof Error ? error.message : String(error));
+        onDialogClose?.();
+      }
     });
-  }, [jobs, loading, linkedBackendId, linkedJobId, linkedLatestRun, notificationRequest, openEdit, openRunReport, detailIntentController, t, toast]);
+  }, [jobs, loading, linkedBackendId, linkedJobId, linkedLatestRun, notificationRequest, openEdit, openRunReport, detailIntentController, onDialogClose, t, toast]);
 
   // Calendar chip click: a PAST occurrence that has already run → show THAT
   // occurrence's delivered content (resolved server-side from occurrenceMs, so
@@ -404,6 +439,7 @@ export default function CronPage() {
   // 引用草稿放入该次运行的真实会话，不会自动发送。
   const askInChat = (backendId: string, sessionKey: string, report: string) => {
     writeCronChatHandoff(backendId, sessionKey, report);
+    if (dialog) closeDelivery();
     navigate(`/chat?backend=${encodeURIComponent(backendId)}&session=${encodeURIComponent(sessionKey)}`);
   };
 
@@ -517,6 +553,9 @@ export default function CronPage() {
   };
 
   const formOpen = mode !== null;
+  const handleDialogOpenChangeComplete = (open: boolean) => {
+    if (!open && !mode && !deliveryJob) onDialogClose?.();
+  };
   const formTitle =
     mode === "create"
       ? t("cron.createTitle")
@@ -544,7 +583,9 @@ export default function CronPage() {
   />;
 
   return (
-    <div className="cron-page management-page">
+    <>
+    {!dialog && <div className="cron-page management-page">
+      <CronPageRegistration refresh={refresh} loading={loading} />
       <PageHead
         title={t("cron.pageTitle")}
         subtitle={
@@ -656,47 +697,69 @@ export default function CronPage() {
           {jobs.length === 0 ? (
             <p className="empty-hint">{t("cron.emptyHint")}</p>
           ) : (
-            <table className="cron-table cron-table-rich">
+            <table className="cron-table">
+              <colgroup>
+                <col />
+                <col className="cron-col-backend" />
+                <col className="cron-col-schedule" />
+                <col className="cron-col-result" />
+                <col className="cron-col-state" />
+                <col className="cron-col-actions" />
+              </colgroup>
               <thead>
                 <tr>
-                  <th>{t("cron.colTask")}</th>
-                  <th>{t("cron.colBackend")}</th>
-                  <th>{t("cron.colSchedule")}</th>
-                  <th>{t("cron.colLastStatus")}</th>
-                  <th>{t("cron.colState")}</th>
-                  <th>{t("cron.colActions")}</th>
+                  <th scope="col">{t("cron.colTask")}</th>
+                  <th scope="col">{t("cron.colBackend")}</th>
+                  <th scope="col">{t("cron.colSchedule")}</th>
+                  <th scope="col">{t("cron.colLastStatus")}</th>
+                  <th scope="col">{t("cron.colState")}</th>
+                  <th scope="col">{t("cron.colActions")}</th>
                 </tr>
               </thead>
               <tbody>
                 {jobs.map((job) => {
                   const backendLabel = backendDescriptors.get(job.backendId)?.name || job.backendId;
                   const canEdit = job.actions?.edit !== false;
+                  const schedule = scheduleText(job, t, locale);
+                  const result = lastRunResult(job.lastStatus, t);
+                  const state = stateLabel(job, t);
                   return (
-                    <tr key={job.id} className={`${canEdit ? "clickable" : ""} ${job.enabled ? "" : "row-disabled"}`}
+                    <tr key={job.id} className={canEdit ? "clickable" : undefined}
                       onClick={canEdit ? () => void openEdit(job) : undefined}>
                       <td>
-                        <div className="job-name">{job.name}{job.origin === "codex-desktop" && <span className="codex-origin">{t("codexAutomation.source")}</span>}</div>
+                        <div className="job-name" title={job.name}>{job.name}{job.origin === "codex-desktop" && <span className="codex-origin">{t("codexAutomation.source")}</span>}</div>
                         {(job.description || job.prompt) && <div className="job-prompt">{job.description || job.prompt}</div>}
                       </td>
                       <td>
-                        <span className="cron-backend-icon" role="img" aria-label={backendLabel} title={backendLabel}>
-                          <BackendTabIcon backend={job.backendId} label={backendLabel} />
+                        <span className="cron-backend" title={backendLabel}>
+                          <span className="cron-backend-icon" aria-hidden="true">
+                            <BackendTabIcon backend={job.backendId} label={backendLabel} />
+                          </span>
+                          <span className="cron-cell-text">{backendLabel}</span>
                         </span>
                       </td>
-                      <td>{scheduleText(job, t, locale)}</td>
+                      <td><span className="cron-schedule cron-cell-text" title={schedule}>{schedule}</span></td>
                       <td>
-                        {job.lastStatus ? <span className={`status status-${job.lastStatus}`}>{job.lastStatus}</span> : "—"}
-                        {job.lastError && <div className="status-error job-error">{job.lastError}</div>}
+                        <span className="cron-result" data-tone={result.tone}>
+                          <span className="cron-cell-text">{result.label}</span>
+                        </span>
+                        {job.lastError && <div className="job-error" title={job.lastError}>{job.lastError}</div>}
                       </td>
-                      <td>{stateLabel(job, t)}</td>
-                      <td className="actions" onClick={(event) => event.stopPropagation()}>
-                        <button onClick={() => void runCronFromUi(job)} disabled={busyIds.has(job.id) || job.actions?.run === false}>
-                          {t(runWillResumePaused(job) ? "cron.runAndEnable" : "cron.run")}
-                        </button>
-                        <button onClick={() => void openEdit(job)} disabled={!canEdit} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>{t("common.edit")}</button>
-                        <button onClick={() => act(job.id, () => setCronEnabled(job.id, !job.enabled, job.revision))} disabled={busyIds.has(job.id) || job.actions?.toggle === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>
-                          {job.enabled ? t("cron.disable") : t("cron.enable")}
-                        </button>
+                      <td>
+                        <span className="cron-schedule-state" data-state={job.connectorMigrationRequired ? "attention" : job.enabled ? "enabled" : "disabled"} title={state}>
+                          <span className="cron-cell-text">{state}</span>
+                        </span>
+                      </td>
+                      <td onClick={(event) => event.stopPropagation()}>
+                        <div className="cron-row-actions">
+                          <button type="button" className="btn-subtle btn-sm" onClick={() => void runCronFromUi(job)} disabled={busyIds.has(job.id) || job.actions?.run === false}>
+                            {t(runWillResumePaused(job) ? "cron.runAndEnable" : "cron.run")}
+                          </button>
+                          <button type="button" className="btn-subtle btn-sm cron-quiet-action" onClick={() => void openEdit(job)} disabled={!canEdit} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>{t("common.edit")}</button>
+                          <button type="button" className="btn-subtle btn-sm cron-quiet-action" onClick={() => act(job.id, () => setCronEnabled(job.id, !job.enabled, job.revision))} disabled={busyIds.has(job.id) || job.actions?.toggle === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>
+                            {job.enabled ? t("cron.disable") : t("cron.enable")}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -707,9 +770,12 @@ export default function CronPage() {
         </div>
       )}
 
+    </div>}
+
       <Modal
         open={formOpen}
         onClose={dismissModal}
+        onOpenChangeComplete={dialog ? handleDialogOpenChangeComplete : undefined}
         dismissible={!formBusy}
         title={formTitle}
         width={720}
@@ -773,6 +839,7 @@ export default function CronPage() {
       <CronRunReportModal
         open={!!deliveryJob && !!delivery}
         onClose={closeDelivery}
+        onOpenChangeComplete={dialog ? handleDialogOpenChangeComplete : undefined}
         title={deliveryJob?.name}
         failed={runExecutionFailed(delivery?.status)}
         agentId={deliveryJob?.agentId}
@@ -794,8 +861,7 @@ export default function CronPage() {
         onEdit={() => {
           const job = deliveryJob;
           if (!job) return;
-          closeDelivery();
-          openEdit(job);
+          void openEdit(job);
         }}
       >
         {delivery?.error && <ReportNote error>{delivery.error}</ReportNote>}
@@ -812,6 +878,6 @@ export default function CronPage() {
           <ReportNote>{t("cron.deliveryNone")}</ReportNote>
         )}
       </CronRunReportModal>
-    </div>
+    </>
   );
 }

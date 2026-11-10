@@ -99,22 +99,36 @@ async function testRunningWorkUsesAuthoritativeRunsAndProfileBinding() {
     return page([
       run("run-running", "running", { source: "kanban", sourceId: "card-safe" }),
       run("run-waiting", "waiting_input"),
-      run("run-queued", "queued"),
-      run("run-done", "completed"),
     ]);
   });
-  const result = await backend.getRunningWork();
+  const [result, snapshot] = await Promise.all([backend.getRunningWork(), backend._dashboardRuns()]);
   assert.equal(result.supported, true);
   assert.deepEqual(result.items.map((item) => item.runId), ["run-running"]);
   assert.ok(result.items.every((item) => item.backendId === "shoggoth"));
   assert.ok(result.items.every((item) => item.agentId === AGENT_ID));
   assert.equal(calls.length, 1);
+  assert.equal(snapshot.length, 2);
   assert.deepEqual(calls[0].params, {
-    profileId: PROFILE_ID, sessionKey: null, status: null, cursor: null, limit: 100,
+    profileId: null, sessionKey: null, status: null, cursor: null, limit: 100,
+    scope: { backendId: "shoggoth", activeOnly: true },
   });
 
   backend._call = async () => page([run("run-foreign", "running", { profileId: "foreign" })]);
-  await assert.rejects(() => backend.getRunningWork(), (error) => error.code === "PROFILE_NOT_FOUND");
+  assert.deepEqual((await backend.getRunningWork()).items, []);
+
+  const states = [];
+  backend._call = async (method, params) => {
+    assert.equal(method, "run.list");
+    if (params.scope) throw Object.assign(Error("Legacy Service"), { code: "INVALID_PARAMS" });
+    states.push(params.status);
+    return page(["running", "waiting_input"].includes(params.status) ? [
+      run("transition", params.status, { source: "kanban", eventSeq: params.status === "waiting_input" ? 2 : 1 }),
+    ] : []);
+  };
+  const fallback = await backend.getRunningWork();
+  assert.deepEqual(states, ["starting", "running", "waiting_approval", "waiting_input"]);
+  assert.equal(fallback.items.length, 1);
+  assert.equal(fallback.items[0].status, "waiting_input");
 }
 
 async function testPendingPromptProjectionIsSafeAndPersistent() {

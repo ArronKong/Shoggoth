@@ -19,7 +19,7 @@ const {
   JsonlProductStore,
 } = require(path.join(ROOT, "app", "agent-service", "product-store.js"));
 const { resolveServicePaths } = require(path.join(ROOT, "app", "agent-service", "paths.js"));
-const { syncAgentNameLinks } = require("../app/agent-service/agent-name-links");
+const { describeAgentDirectory, syncAgentNameLinks } = require("../app/agent-service/agent-name-links");
 const {
   BUILTIN_CLI_AGENT_PROFILES,
 } = require(path.join(ROOT, "app", "agent-service", "builtin-cli-profiles.js"));
@@ -240,12 +240,18 @@ function testAgentNameLinks() {
     assert.equal(resolve("资料-助理--12345678-2"), data(profiles[1].id));
     assert.equal(resolve("产品助手"), data(profiles[2].id));
     assert.equal(resolve("资料-助理--33333333"), data(profiles[3].id));
+    assert.deepEqual(describeAgentDirectory(paths, profiles[1]), {
+      path: path.join(links, "资料-助理--12345678-2"), exists: true,
+    });
     fs.writeFileSync(path.join(links, "新名称"), "unmanaged");
     const renamed = { ...profiles[2], name: "新名称" };
     syncAgentNameLinks(paths, [renamed, profiles[0]]);
     syncAgentNameLinks(paths, [profiles[0], renamed]);
     assert.equal(resolve("资料-助理"), data(profiles[0].id));
     assert.equal(resolve("新名称--87654321"), data(renamed.id));
+    assert.deepEqual(describeAgentDirectory(paths, renamed), {
+      path: path.join(links, "新名称--87654321"), exists: true,
+    });
     assert.deepEqual(fs.readdirSync(links).sort(), ["新名称", "新名称--87654321", "资料-助理"].sort());
     assert.equal(fs.readFileSync(path.join(links, "新名称"), "utf8"), "unmanaged");
     assert.equal(fs.readFileSync(path.join(data(profiles[0].id), "SOUL.md"), "utf8"), "unchanged");

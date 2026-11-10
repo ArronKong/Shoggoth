@@ -6,6 +6,7 @@ const { HistoricalMemoryAnnotations } = require("./historical-memory-annotations
 const { atomicWritePrivateFile, readPrivateFile, recoverInterruptedPrivateFile } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 const { hasSecret } = require("./memory-engine");
+const { readEvents, contextReader } = require("./transcript-read");
 const { normalizeBorrowedMemoryRefs, mergeBorrowedMemoryRefs, refsFromEvents, extractBorrowedMemoryRefs,
   borrowedMemoryPlaceholder } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 
@@ -15,6 +16,9 @@ const CHECKPOINT_VERSION = 2;
 // Version 3 adds memoryInvalidationRevision; version 2 is still accepted.
 const NATIVE_MEMORY_ANCHOR_VERSION = 3;
 const CHECKPOINT_MEMORY_ANCHOR_VERSION = 2;
+// Written only for a Profile that has a forget or deletion: also records the
+// recall policy's visibility state the summary was made under.
+const CHECKPOINT_REVOCATION_ANCHOR_VERSION = 3;
 const MAX_CHECKPOINT_BYTES = 32 * 1024;
 const SUMMARY_FIELDS = Object.freeze([
   "goal", "state", "decisions", "constraints", "rejectedApproaches", "files", "commands",
@@ -65,6 +69,14 @@ function coveredTranscript(events, throughSeq) {
   const prefix = events.filter(event => event.seq <= throughSeq);
   if (!prefix.length || prefix.at(-1).seq !== throughSeq) fail("CHECKPOINT_SOURCE_MISSING");
   return { events: prefix, hash: sha256(stable(prefix)) };
+}
+
+// null: this Profile has no forget or deletion. false: the store cannot tell
+// which messages are still visible, so no summary may be made or used.
+// Otherwise the recall policy's visibility state; see the store method.
+function revocationVisibility(checkpointStore, profileId) {
+  if (typeof checkpointStore?.revocationVisibility === "function") return checkpointStore.revocationVisibility(profileId);
+  return checkpointStore?.hasRevocations?.(profileId) ? false : null;
 }
 
 function validateCheckpoint(record) {
@@ -124,6 +136,40 @@ class ConversationCheckpointStore {
   open() { ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot); this.opened = true; }
   close() { this.opened = false; this.memoryStates.clear(); this.historicalMemory?.clear(); }
   hasRevocations(profileId) { return this.recallPolicy?.hasRevocations(profileId) === true; }
+  // A summary has no per-fact provenance, so it is tied to the recall policy's
+  // complete visibility state instead: made from the messages visible in one
+  // state, it is usable only while exactly that state holds. Any later forget,
+  // deletion or reauthorization retires it and the session is summarized again
+  // from what is then visible.
+  revocationVisibility(profileId) {
+    if (!this.hasRevocations(profileId)) return null;
+    const policy = this.recallPolicy;
+    return this.memoryStore && typeof policy.getHistoricalVisibilityRevision === "function"
+      && typeof policy.snapshot === "function" ? String(policy.getHistoricalVisibilityRevision(profileId)) : false;
+  }
+  // After a forget or deletion only messages the recall policy still shows are
+  // summarized. Tool payloads and attachment references have no per-field
+  // provenance and stay out, the same rule the context compiler applies.
+  compactionSourceFilter(profileId, sessionId) {
+    if (this.revocationVisibility(profileId) === null) return () => true;
+    const recall = this.recallPolicy.snapshot(profileId), read = contextReader(this.transcriptStore), decided = new Map();
+    const allowed = event => {
+      if (["tool_call", "tool_result"].includes(event.kind)) return false;
+      let resolved = event;
+      try { if (event.content?.contextRef && read) resolved = read(profileId, sessionId, event); }
+      catch (error) {
+        // A revoked source is left out without its body; a visible message
+        // with a damaged body must stop the summary instead of vanishing.
+        if (!recall.isEventVisible(event)) return false;
+        throw error;
+      }
+      return !resolved.content?.attachments?.length && recall.isEventVisible(resolved);
+    };
+    return event => {
+      if (!decided.has(event.id)) decided.set(event.id, allowed(event));
+      return decided.get(event.id);
+    };
+  }
   hasHistoricalSource(profileId, events, { fromSeq = 0, throughSeq = Infinity } = {}) {
     if (!this.historicalMemory) return false;
     const view = this.historicalMemory.view(profileId);
@@ -173,12 +219,13 @@ class ConversationCheckpointStore {
       } };
     }
     return { seq: event.seq, kind: event.kind,
-      content: this.transcriptStore.contextEvent?.(profileId, sessionId, event)?.content ?? event.content,
+      content: contextReader(this.transcriptStore)?.(profileId, sessionId, event)?.content ?? event.content,
       ...(refs.length ? { borrowedMemoryRefs: refs } : {}) };
   }
   #projectCompactionSource(profileId, sessionId, events, descriptor) {
+    const allowed = this.compactionSourceFilter(profileId, sessionId);
     const projected = events.filter(event => event.seq > descriptor.fromSeq && event.seq <= descriptor.throughSeq
-      && !event.contextExcluded && ["user", "assistant", "tool_call", "tool_result"].includes(event.kind))
+      && !event.contextExcluded && ["user", "assistant", "tool_call", "tool_result"].includes(event.kind) && allowed(event))
       .map(event => this.projectCompactionEvent(profileId, sessionId, event));
     const refs = mergeBorrowedMemoryRefs(...projected.map(extractBorrowedMemoryRefs));
     if (!descriptor.fragment) return { source: projected, refs };
@@ -209,7 +256,7 @@ class ConversationCheckpointStore {
   }
   assertSourceProjectionCurrent(plan) {
     const { profileId, sessionId, throughSeq, partial, coveredHash, previousId = null, sourceProjection } = plan;
-    const events = this.transcriptStore.listEvents(profileId, sessionId);
+    const events = readEvents(this.transcriptStore, profileId, sessionId);
     if (coveredTranscript(events, partial?.seq ?? throughSeq).hash !== coveredHash) fail("CHECKPOINT_STALE");
     // Older persisted commands and direct commits cannot drop provenance.
     if (!sourceProjection) {
@@ -231,13 +278,15 @@ class ConversationCheckpointStore {
     return refs;
   }
   sessionBorrowedMemoryRefs(profileId, sessionId) {
-    return refsFromEvents(this.transcriptStore.listEvents(profileId, sessionId));
+    return refsFromEvents(readEvents(this.transcriptStore, profileId, sessionId));
   }
   #memoryCompatible(profileId, record) {
     if (!this.borrowedDependenciesCurrent(profileId, record.sessionId, record.borrowedMemoryRefs)) return false;
-    // Compaction has no per-fact provenance, so any revocation invalidates a
-    // summary and prevents it from carrying a forgotten utterance forward.
-    if (this.hasRevocations(profileId)) return false;
+    // Compaction has no per-fact provenance, so a summary made before the
+    // latest forget, deletion or reauthorization cannot carry a forgotten
+    // utterance forward: its anchor must name the current visibility state.
+    const visibility = this.revocationVisibility(profileId);
+    if (visibility === false) return false;
     if (!this.memoryStore) return true;
     const current = this.memoryState(profileId);
     if (current.freshUntil !== null && this.now() >= current.freshUntil) return false;
@@ -247,10 +296,14 @@ class ConversationCheckpointStore {
     try { anchor = JSON.parse(readPrivateFile(file, { maxBytes: 4096 })); }
     catch { fail("CHECKPOINT_STORE_CORRUPT"); }
     const { checksum: anchorChecksum, ...anchorBody } = anchor || {};
-    const tracked = anchor?.version === CHECKPOINT_MEMORY_ANCHOR_VERSION;
+    const anchored = anchor?.version === CHECKPOINT_REVOCATION_ANCHOR_VERSION;
+    const tracked = anchored || anchor?.version === CHECKPOINT_MEMORY_ANCHOR_VERSION;
     if (!exact(anchor, ["version", "profileId", "checkpointId", "memoryRevision",
-      ...(tracked ? ["memoryInvalidationRevision"] : []), "memoryFreshUntil", "checksum"])
-      || ![1, CHECKPOINT_MEMORY_ANCHOR_VERSION].includes(anchor.version) || anchor.profileId !== profileId
+      ...(tracked ? ["memoryInvalidationRevision"] : []), "memoryFreshUntil",
+      ...(anchored ? ["revocationVisibility"] : []), "checksum"])
+      || ![1, CHECKPOINT_MEMORY_ANCHOR_VERSION, CHECKPOINT_REVOCATION_ANCHOR_VERSION].includes(anchor.version)
+      || anchor.profileId !== profileId
+      || (anchored ? anchor.revocationVisibility : null) !== visibility
       || (tracked && !validRevision(anchor.memoryInvalidationRevision))
       || anchor.checkpointId !== record.id
       || !memoryRevisionCurrent(anchor, current.revision, current.invalidationRevision)
@@ -366,7 +419,7 @@ class ConversationCheckpointStore {
     if (record.profileId !== profileId || record.sessionId !== sessionId) fail("CHECKPOINT_STORE_CORRUPT");
     return record;
   }
-  compatible(profileId, sessionId, events = this.transcriptStore.listEvents(profileId, sessionId)) {
+  compatible(profileId, sessionId, events = readEvents(this.transcriptStore, profileId, sessionId)) {
     const record = this.get(profileId, sessionId);
     if (!record || !this.#memoryCompatible(profileId, record)) return null;
     const throughSeq = record.partial?.seq ?? record.coveredThroughSeq;
@@ -374,7 +427,7 @@ class ConversationCheckpointStore {
     try { return coveredTranscript(events, throughSeq).hash === record.coveredHash ? record : null; }
     catch { return null; }
   }
-  generations(profileId, sessionId, events = this.transcriptStore.listEvents(profileId, sessionId)) {
+  generations(profileId, sessionId, events = readEvents(this.transcriptStore, profileId, sessionId)) {
     const records = [];
     let record = this.compatible(profileId, sessionId, events);
     while (record && records.length < 512) {
@@ -396,7 +449,7 @@ class ConversationCheckpointStore {
   invalidation(profileId, sessionId, nativeSessionId, bindingId) {
     const checkpoint = this.get(profileId, sessionId);
     if (!checkpoint || this.compatible(profileId, sessionId)) return null;
-    const events = this.transcriptStore.listEvents(profileId, sessionId);
+    const events = readEvents(this.transcriptStore, profileId, sessionId);
     const coverageHash = coveredTranscript(events, checkpoint.partial?.seq ?? checkpoint.coveredThroughSeq).hash;
     const guarded = Boolean(this.memoryStore || this.recallPolicy);
     const memory = this.memoryState(profileId);
@@ -427,13 +480,17 @@ class ConversationCheckpointStore {
   }
   commit({ profileId, sessionId, expectedRevision, expectedMemoryRevision = null,
     expectedMemoryFreshUntil = null, throughSeq, coveredHash, previousId = null,
-    partial = null, summary, provenance, borrowedMemoryRefs = [], sourceProjection = null }) {
+    partial = null, summary, provenance, borrowedMemoryRefs = [], sourceProjection = null,
+    expectedRevocationVisibility = null }) {
     const file = this.#file(profileId, sessionId);
-    if (this.hasRevocations(profileId)) fail("CHECKPOINT_STALE");
+    // The source was selected under the planned visibility state; a forget or
+    // deletion since then may have withdrawn part of it.
+    const visibility = this.revocationVisibility(profileId);
+    if (visibility === false || visibility !== expectedRevocationVisibility) fail("CHECKPOINT_STALE");
     const memory = this.memoryState(profileId);
     if (this.memoryStore && (expectedMemoryRevision !== memory.revision
       || expectedMemoryFreshUntil !== memory.freshUntil)) fail("CHECKPOINT_STALE");
-    const events = this.transcriptStore.listEvents(profileId, sessionId);
+    const events = readEvents(this.transcriptStore, profileId, sessionId);
     if (this.hasHistoricalSource(profileId, events,
       { throughSeq: partial?.seq ?? throughSeq })) fail("CHECKPOINT_STALE");
     const current = this.compatible(profileId, sessionId, events);
@@ -467,9 +524,10 @@ class ConversationCheckpointStore {
     if (!lstatIfExists(historyFile)) atomicWritePrivateFile(historyFile, `${stable(record)}\n`, { trustedRoot: this.paths.trustedRoot });
     if (this.memoryStore) {
       const anchorFile = this.#memoryAnchorFile(profileId, sessionId, record.id);
-      const anchor = { version: CHECKPOINT_MEMORY_ANCHOR_VERSION, profileId, checkpointId: record.id,
+      const anchor = { version: visibility === null ? CHECKPOINT_MEMORY_ANCHOR_VERSION : CHECKPOINT_REVOCATION_ANCHOR_VERSION,
+        profileId, checkpointId: record.id,
         memoryRevision: memory.revision, memoryInvalidationRevision: memory.invalidationRevision,
-        memoryFreshUntil: memory.freshUntil };
+        memoryFreshUntil: memory.freshUntil, ...(visibility === null ? {} : { revocationVisibility: visibility }) };
       anchor.checksum = sha256(stable(anchor));
       if (lstatIfExists(anchorFile)) {
         let saved;
@@ -484,4 +542,4 @@ class ConversationCheckpointStore {
 }
 
 module.exports = { ConversationCheckpointStore, CHECKPOINT_VERSION, SUMMARY_FIELDS, MAX_CHECKPOINT_BYTES,
-  validateSummary, validateCheckpoint, coveredTranscript };
+  validateSummary, validateCheckpoint, coveredTranscript, revocationVisibility };

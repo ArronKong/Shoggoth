@@ -375,6 +375,7 @@ function paginateTranscriptEvents(options) {
   }
   const available = options.events
     .filter((event) => event.seq <= beforeSeq && !superseded.has(event.id))
+    .filter(event => !event.runId || options.getRunSource?.(event.runId) !== "proactive")
     .filter((event) => !isApproval(event)
       && !(event.content?.transcriptType === "interaction.response" && approvalRequests.has(requestKey(event))))
     .flatMap((event) => {
@@ -767,7 +768,13 @@ function createChatServiceController(options = {}) {
       throw error;
     }
     const mapper = getHistoryMapper();
-    const handle = mapper.validateCodexThreadRead(response);
+    // A scheduled turn lives in the same native thread. Filter by its durable
+    // turn binding before pagination/fragmentation, never by prompt text.
+    const hiddenTurns = new Set(runs.filter(run => run.source === "proactive")
+      .map(run => run.runtimeTurnRef?.turnId).filter(Boolean));
+    const visibleResponse = hiddenTurns.size && Array.isArray(response?.thread?.turns)
+      ? { ...response, thread: { ...response.thread, turns: response.thread.turns.filter(turn => !hiddenTurns.has(turn.id)) } } : response;
+    const handle = mapper.validateCodexThreadRead(visibleResponse);
     let limit = params.limit;
     while (limit >= 1) {
       const page = mapper.createCodexChatHistoryPage(handle, {
@@ -1284,7 +1291,15 @@ function createChatServiceController(options = {}) {
       const query = {};
       if (params.profileId !== null) query.profileId = params.profileId;
       if (params.status !== null) query.status = params.status;
-      const runs = params.sessionKey !== null ? sessionRuns(params.sessionKey, query) : coordinator.listRuns(query);
+      if (params.scope) {
+        const { backendId, source, sinceMs, activeOnly } = params.scope;
+        query.profileIds = new Set(productStore.listAgentProfiles()
+          .filter(profile => profile.backendId === backendId).map(profile => profile.id));
+        query.source = source;
+        query.sinceMs = sinceMs;
+        query.activeOnly = activeOnly;
+      }
+      const runs = params.sessionKey !== null ? sessionRuns(params.sessionKey, query).filter(run => run.source !== "proactive") : coordinator.listRuns(query);
       return paginateChatServiceItems({
         method,
         params,

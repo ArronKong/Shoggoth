@@ -14,15 +14,21 @@ const options = new URLSearchParams(location.search);
 const backend = options.get("backend") || "openclaw";
 const language = options.get("language") || "zh-CN";
 const runtime = options.get("runtime") || "codex";
+const proactive = options.get("scenario") === "proactive";
+const heartbeatId = `notice-${"1".repeat(64)}`, reviewId = `notice-${"2".repeat(64)}`;
 const agentId = backend === "openclaw" ? "main" : `${backend}-activity`;
-const key = `agent:${agentId}:main`;
+const sessionKey = proactive ? "da0087b1-1407-4806-bf91-fde0580a007f" : "main";
+const key = `agent:${agentId}:${sessionKey}`;
 const now = Date.now();
 const sessions = [{ key, agentId, agentName: `${backend} · ${runtime}`, backendId: backend, updatedAt: now }];
 const intro = { id: "activity-user", role: "user", content: language === "en" ? "Check Agents and scheduled tasks." : "核对助理与定时任务。", timestamp: now - 1000 };
 let history: any[] = options.get("scenario") === "openclaw-long" ? openClawLongToolHistory()
   : options.get("scenario") === "native-progress-cold" ? nativeProgressHistory()
   : options.get("scenario") === "native-long" ? nativeLongToolHistory()
-  : options.get("scenario") === "nested" ? nestedToolHistory() : [intro];
+  : options.get("scenario") === "nested" ? nestedToolHistory()
+  : proactive ? [intro, ...[heartbeatId, reviewId].map((id, index) => ({ id: `proactive-${id}`, role: "assistant",
+    content: [{ type: "text", text: index === 0 ? "Scheduled heartbeat report" : "Daily Spark Notes report" }],
+    timestamp: now + index, shoggoth: { proactiveNotice: { id, kind: index === 0 ? "heartbeat" : "inspiration" } } }))] : [intro];
 const zh = language === "zh-CN";
 const text = {
   directory: zh ? "查看助理列表" : "View the Agent directory",
@@ -43,7 +49,7 @@ const xCalls = [
 localStorage.clear();
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
 localStorage.setItem("shoggoth.chat.lastActive.v1", key);
-localStorage.setItem("shoggoth.chat.immersive.v1", "0");
+localStorage.setItem("shoggoth.chat.immersive.v1", options.get("immersive") === "1" ? "1" : "0");
 void i18n.changeLanguage(language);
 document.documentElement.setAttribute("data-theme", options.get("theme") || "light");
 state.requests = [];
@@ -71,8 +77,17 @@ class FixtureSocket {
   close() { this.readyState = 3; }
 }
 state.WebSocket = FixtureSocket;
-state.fetch = async (url: unknown) => {
+state.fetch = async (url: unknown, init?: RequestInit) => {
   const path = String(url);
+  if (path === "/__api/proactive") {
+    const request = JSON.parse(String(init?.body));
+    state.proactiveRequests.push(request);
+    const id = request.params.id, runId = id === heartbeatId ? "heartbeat-run" : "spark-notes-run";
+    const activity = { runId, scheduledAt: now - 3000, startedAt: now - 2000, finishedAt: now - 500, publishedAt: now,
+      candidateCount: 1, inspiration: id === heartbeatId ? { state: "complete", checked: 31, total: 31 } : null, web: null,
+      messages: [{ role: "toolResult", content: [{ type: "toolResult", name: "proactive_respond", toolCallId: "receipt", content: "" }] }] };
+    return new Response(JSON.stringify({ activity }), { headers: { "Content-Type": "application/json" } });
+  }
   const payload = path.includes("/__api/status") ? { backends: [{ id: backend, connected: true }] }
     : path.includes("/__api/backends") ? { backends: [] }
     : path.includes("/__api/group-chats") ? { groups: [], enabled: true, internalSessions: [] }
@@ -96,14 +111,14 @@ const wait = async (fn: () => unknown, label: string) => {
 const check = (condition: unknown, message: string) => { if (!condition) throw Error(message); };
 const thread = () => document.querySelector<HTMLElement>(".chat-thread")!;
 const details = () => document.querySelector<HTMLElement>('[role="dialog"]');
-const titles = () => Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]')).map(element => element.textContent);
+const titles = () => Array.from(details()?.querySelectorAll<HTMLElement>('[data-action="1"]') ?? []).map(element => element.textContent);
 const outcome = (title: string) => Array.from(details()!.querySelectorAll<HTMLElement>('[data-action="1"]'))
   .find(element => element.textContent === title)?.closest("button")?.querySelector<HTMLElement>("[data-st]")?.dataset.st;
 const tool = (id: string, name: string, phase: string, data: object = {}) => state.socket.emit({ type: "event", event: "session.tool",
   payload: { sessionKey: key, runId: "activity-run", data: { toolCallId: id, name, phase, ...data } } });
 const activityEntries = () => Array.from(
-  (document.querySelector('[data-testid="immersive-chat"]') ?? thread()).querySelectorAll<HTMLElement>(
-    `[aria-haspopup="dialog"][aria-label="${i18n.t("turnLab.processOpen")}"]`));
+  (document.querySelector('[data-testid="immersive-chat"]') ?? thread())?.querySelectorAll<HTMLElement>(
+    `[aria-haspopup="dialog"][aria-label="${i18n.t("turnLab.processOpen")}"]`) ?? []);
 const entry = () => activityEntries().find(node => node.dataset.status === "running") ?? activityEntries().at(-1);
 const expand = async () => {
   if (!details()) {
@@ -115,6 +130,27 @@ const expand = async () => {
 const closeDetails = async () => {
   details()?.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("common.close")}"]`)?.click();
   await wait(() => !details(), "close activity dialog");
+};
+state.proactiveRequests = [];
+state.runProactiveActivityFixture = async () => {
+  await wait(() => activityEntries().length === 2, "one activity button on each proactive notice");
+  const immersive = options.get("immersive") === "1";
+  check(Boolean(document.querySelector('[data-testid="immersive-chat"]')) === immersive, "wrong chat presentation");
+  check(state.proactiveRequests.length === 0, "background process was loaded before opening the notice");
+  const notesStep = i18n.t("turnLab.proactiveNotes.complete", { count: 31 });
+  check(!document.body.innerText.includes(notesStep), "background steps leaked into normal chat");
+  activityEntries()[0].click();
+  await wait(() => details()?.innerText.includes(notesStep), "heartbeat read-only step");
+  check(details()?.querySelector('[title="proactive_respond"], [title$="(proactive_respond)"]'),
+    "the shared trajectory did not show the native response receipt");
+  check(state.proactiveRequests[0].params.id === heartbeatId && state.proactiveRequests[0].params.sessionKey === sessionKey,
+    "heartbeat requested the wrong notice or session");
+  await closeDetails();
+  activityEntries()[1].click();
+  await wait(() => details()?.innerText.includes(i18n.t("turnLab.proactivePublished", { time: new Date(now).toLocaleTimeString() })), "daily review publication step");
+  check(!details()?.innerText.includes(notesStep), "daily review reused another run's heartbeat steps");
+  check(state.proactiveRequests[1].params.id === reviewId, "daily review requested the wrong notice");
+  return { language, immersive, activityRequests: state.proactiveRequests.length };
 };
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider /><ChatPage /></UiProvider></HashRouter>);
 

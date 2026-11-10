@@ -116,6 +116,7 @@ export function useAgentModelSettings({
   const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [applying, setApplying] = useState(false);
+  const applyingRef = useRef(false);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [activating, setActivating] = useState(false);
   const [switchStaleAux, setSwitchStaleAux] = useState<StaleAuxSlot[]>([]);
@@ -188,6 +189,7 @@ export function useAgentModelSettings({
     // 兜底归零：hook 不随 agent 重挂，任何原因残留的 busy 都会把新 agent 的按钮
     // 钉在禁用态（各写操作自身的清除见 doApplyMain 处 profileEpoch 的说明）。
     setApplying(false);
+    applyingRef.current = false;
     setActivating(false);
     setAuxBusy(false);
     setMoaBusy(false);
@@ -262,17 +264,23 @@ export function useAgentModelSettings({
 
   // ---- 主模型 ----
 
-  const doApplyMain = async () => {
-    if (!mainSelectionValid || applying) return;
+  // The menu supplies both identities together; do not read a just-scheduled React selection.
+  const doApplyMain = async (provider = selectedProvider, model = selectedModel) => {
+    const row = providers.find((candidate) => candidate.slug === provider);
+    if (!profile || profile !== profileProp || error || applyingRef.current || activating || !row?.models.includes(model)
+      || row.unavailableModels?.includes(model)) return;
+    if (provider === main.provider && model === main.model) return;
     const actionEpoch = epoch.current;
     // epoch 判「这次响应还新鲜吗」，profileEpoch 判「还是同一个 agent 吗」。UI 反馈
     // （busy 标志/报错）必须用后者：本函数成功路径自己会 load()，那会顶掉 epoch，
     // 拿 epoch 守 finally 等于永远不清 busy，控件就此永久禁用。
     const actionProfileEpoch = profileEpoch.current;
+    applyingRef.current = true;
     setApplying(true);
     try {
-      const r = await applyMainModel(backend, profile, selectedProvider, selectedModel);
+      const r = await applyMainModel(backend, profile, provider, model);
       if (actionEpoch !== epoch.current) return;
+      setSnapshot((current) => current ? { ...current, main: { provider: r.provider, model: r.model } } : current);
       setSwitchStaleAux(r.staleAux || []);
       toast.success(t("models.settings.appliedOk", { provider: r.provider, model: r.model }));
       onMainModelChanged();
@@ -280,7 +288,10 @@ export function useAgentModelSettings({
     } catch (e) {
       if (actionProfileEpoch === profileEpoch.current) toast.error(e instanceof Error ? e.message : String(e));
     } finally {
-      if (actionProfileEpoch === profileEpoch.current) setApplying(false);
+      if (actionProfileEpoch === profileEpoch.current) {
+        applyingRef.current = false;
+        setApplying(false);
+      }
     }
   };
 

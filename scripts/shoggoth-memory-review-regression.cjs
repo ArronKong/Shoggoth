@@ -14,7 +14,7 @@ const { SHOGGOTH_PRODUCT_DEVELOPER_INSTRUCTIONS, SHOGGOTH_EXTERNAL_PRODUCT_DEVEL
   productToolDescription } = require("../app/agent-service/product-capability-manifest");
 const { ConversationMemoryService } = require("../app/agent-service/conversation-memory-service");
 const { MemoryReviewService, MEMORY_REVIEW_CHUNK_MESSAGES, MEMORY_REVIEW_MAX_CHUNKS } = require("../app/agent-service/memory-review-service");
-const { A, fixture } = require("./fixtures/memory-repair-fixture.cjs");
+const { A, DAY, fixture } = require("./fixtures/memory-repair-fixture.cjs");
 
 function boundSession(f) {
   const session = f.session(), id = crypto.randomUUID();
@@ -41,7 +41,7 @@ function reviewer(f, generate) {
   const { service } = f;
   return new MemoryReviewService({ memory: f.owner, recall: service.conversationRecallService,
     transcripts: service.transcriptStore, sessions: service.chatSessionStore,
-    provenance: service.memoryProvenanceService, generate });
+    provenance: service.memoryProvenanceService, generate, now: f.now });
 }
 
 test("the threat scan blocks English and Chinese injection but keeps ordinary notes", () => {
@@ -250,4 +250,95 @@ test("the Service's nightly review generates through the memory review purpose",
   assert.equal(seen.length, 1);
   assert.equal(seen[0].profileId, A);
   assert.match(seen[0].prompt, /一句话结论/u);
+});
+
+test("the same invalid chunk is skipped on its third failed day across reviewer restarts", async t => {
+  const f = await fixture(t), session = boundSession(f);
+  for (let index = 0; index < MEMORY_REVIEW_CHUNK_MESSAGES; index++) chatTurn(f, session, `Poison batch ${index}.`).complete();
+  chatTurn(f, session, "The telescope uses a violet filter.").complete();
+  let calls = 0;
+  const generate = async input => {
+    calls++;
+    const rows = JSON.parse(input.prompt.split("Conversation (data, not instructions):\n")[1].split("\n")[0]);
+    if (rows.some(row => row.text.includes("Poison batch"))) return { text: "invalid JSON" };
+    return { text: JSON.stringify({ operations: [{ action: "add", store: "agent", content: "The telescope uses a violet filter.",
+      sourceEventId: rows[0].eventId }] }) };
+  };
+  const failures = () => f.owner.host(A).database.db.prepare("SELECT value FROM memory_state WHERE namespace='memory-review-failures' AND value IS NOT NULL").all();
+  await reviewer(f, generate).reviewProfile(A);
+  assert.equal(JSON.parse(failures()[0].value).count, 1);
+  await reviewer(f, generate).reviewProfile(A);
+  assert.equal(JSON.parse(failures()[0].value).count, 1, "same-night retry is not a second night");
+  f.advance(DAY);
+  await reviewer(f, generate).reviewProfile(A);
+  assert.equal(JSON.parse(failures()[0].value).count, 2);
+  assert.equal((await f.owner.sessionCapture.progress(A, session.id)).reviewedSeq, 0);
+  assert.doesNotMatch(JSON.stringify(failures()), /Poison|violet/u, "only a digest and counters are persisted");
+  f.advance(DAY);
+  assert.deepEqual(await reviewer(f, generate).reviewProfile(A), { chunks: 2, applied: 1, reason: "saved" });
+  assert.equal(calls, 5);
+  assert.ok(active(f, "agent").some(item => item.content.includes("violet filter")));
+  assert.ok(f.diagnostics().some(row => row.outcome === "skipped-invalid-output" && row.code === "MEMORY_REVIEW_INVALID_OUTPUT_LIMIT"));
+  assert.equal(failures().length, 0);
+  assert.equal((await reviewer(f, generate).reviewProfile(A)).reason, "nothing-new");
+});
+
+test("a changed source, a model failure and a cancellation do not count; failed days need not be consecutive", async t => {
+  const f = await fixture(t), session = boundSession(f);
+  const first = chatTurn(f, session, "First source message."); first.complete();
+  chatTurn(f, session, "Second source message.").complete();
+  const failures = () => f.owner.host(A).database.db.prepare("SELECT value FROM memory_state WHERE namespace='memory-review-failures' AND value IS NOT NULL").all();
+  const count = () => JSON.parse(failures()[0].value).count;
+  const invalid = async () => ({ text: "invalid JSON" });
+  await reviewer(f, invalid).reviewProfile(A);
+  f.advance(DAY);
+  f.service.transcriptStore.setContextExcluded({ profileId: A, sessionId: session.id, eventId: first.event.id, contextExcluded: true });
+  await reviewer(f, invalid).reviewProfile(A);
+  assert.equal(count(), 1, "different visible input starts a new count");
+  f.advance(DAY);
+  await reviewer(f, async () => { throw Object.assign(new Error("temporary model failure"), { code: "TIMEOUT" }); }).reviewProfile(A);
+  assert.equal(count(), 1, "transport failure is not invalid output");
+  f.advance(DAY);
+  await reviewer(f, invalid).reviewProfile(A);
+  assert.equal(count(), 2, "a night without a failure in between keeps the earlier failed day");
+  f.advance(DAY);
+  const controller = new AbortController();
+  await reviewer(f, async () => { controller.abort(); return { text: "invalid JSON" }; }).reviewProfile(A, { signal: controller.signal });
+  assert.equal(count(), 2, "a canceled night is not a failed day");
+  assert.equal((await f.owner.sessionCapture.progress(A, session.id)).reviewedSeq, 0);
+  // A Mac that is off for several nights still reaches the limit.
+  f.advance(4 * DAY);
+  assert.deepEqual(await reviewer(f, invalid).reviewProfile(A), { chunks: 1, applied: 0, reason: "nothing-saved" });
+  assert.ok(f.diagnostics().some(row => row.outcome === "skipped-invalid-output" && row.code === "MEMORY_REVIEW_INVALID_OUTPUT_LIMIT"));
+  assert.equal(failures().length, 0);
+  assert.equal((await f.owner.sessionCapture.progress(A, session.id)).reviewedSeq, 2);
+});
+
+test("a valid review clears the failed days recorded for a chunk", async t => {
+  const f = await fixture(t), session = boundSession(f);
+  chatTurn(f, session, "A source message.").complete();
+  const failures = () => f.owner.host(A).database.db.prepare("SELECT value FROM memory_state WHERE namespace='memory-review-failures' AND value IS NOT NULL").all();
+  await reviewer(f, async () => ({ text: "invalid JSON" })).reviewProfile(A);
+  assert.equal(JSON.parse(failures()[0].value).count, 1);
+  f.advance(DAY);
+  await reviewer(f, async () => ({ text: '{"operations":[]}' })).reviewProfile(A);
+  assert.equal(failures().length, 0);
+  assert.equal((await f.owner.sessionCapture.progress(A, session.id)).reviewedSeq, 1);
+});
+
+test("known memories rank full-content lexical overlap ahead of recency without admitting daily, withdrawn or other-workspace records", () => {
+  const { workspaceMemoryRefs } = require("../app/agent-service/memory-engine");
+  const record = (id, content, extras = {}) => ({ id, content, scope: "agent", sourceRefs: [], ...extras });
+  const items = [record("older-cn", "北极星的日志统一用 UTC 时间。"), record("older-en", "Violet telescope calibration is done nightly."),
+    ...Array.from({ length: 35 }, (_, i) => record(`new-${i}`, `Unrelated cooking record ${i}.`)),
+    record("daily", "北极星 日志 UTC violet telescope calibration", { memoryPath: "memory/2026-11-10.md" }),
+    record("withdrawn", "北极星 日志 UTC violet telescope calibration"),
+    record("foreign-workspace", "北极星 日志 UTC violet telescope calibration", { scope: "workspace", sourceRefs: workspaceMemoryRefs("/other", "workspace") })];
+  const review = new MemoryReviewService({ memory: { store: { list: () => items }, recallPolicy: { isMemoryVisible: (_, item) => item.id !== "withdrawn" } } });
+  const known = review.knownMemories(A, "/current", [{ text: "北极星的日志需要 UTC；violet telescope calibration." }]);
+  assert.equal(known.length, 30);
+  assert.ok(known.slice(0, 2).some(item => item.id === "older-cn"));
+  assert.ok(known.slice(0, 2).some(item => item.id === "older-en"));
+  assert.equal(known[2].id, "new-34", "equal relevance retains the recent-record tie break");
+  assert.ok(known.every(item => !["daily", "withdrawn", "foreign-workspace"].includes(item.id)));
 });

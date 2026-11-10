@@ -17,10 +17,11 @@ function isPublicAddress(address) {
 }
 function publicUrl(value) {
   let url; try { url = new URL(value); } catch { fail("WEB_INVALID"); }
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password
-    || !url.hostname || /(?:^|\.)(?:localhost|local|internal|home|lan|onion)\.?$/iu.test(url.hostname)) fail("WEB_URL_BLOCKED");
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || !url.hostname) fail("WEB_INVALID");
   if (url.href.length > 8192) fail("WEB_INVALID");
-  if (isIP(url.hostname.replace(/^\[|\]$/gu, "")) && !isPublicAddress(url.hostname.replace(/^\[|\]$/gu, ""))) fail("WEB_URL_BLOCKED");
+  const host = url.hostname.replace(/^\[|\]$/gu, "");
+  if (/(?:^|\.)(?:localhost|local|internal|home|lan|onion)\.*$/iu.test(host)
+    || isIP(host) && !isPublicAddress(host)) fail("WEB_URL_BLOCKED");
   url.hash = ""; return url;
 }
 function abortError(signal) { fail(signal?.reason?.name === "TimeoutError" ? "WEB_TIMEOUT" : "WEB_CANCELED"); }
@@ -42,10 +43,13 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
     let addresses;
     try { addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await raceAbort(lookup(host, { all: true, verbatim: true }), signal); }
     catch (e) { if (signal.aborted) abortError(signal); fail(e.code?.startsWith("WEB_") ? e.code : "WEB_UNAVAILABLE"); }
-    if (!addresses.length || addresses.some(row => !isPublicAddress(row.address))) fail("WEB_URL_BLOCKED");
+    if (!addresses.length) fail("WEB_UNAVAILABLE");
+    if (addresses.some(row => !isPublicAddress(row.address))) fail("WEB_URL_BLOCKED");
     const pinned = addresses[0];
     const response = await new Promise((resolve, reject) => {
       const req = request(url, { method, agent: false, signal,
+        // Authenticate the original HTTPS hostname even over a fake-IP route.
+        ...(url.protocol === "https:" ? { rejectUnauthorized: true, ...(!isIP(host) ? { servername: host } : {}) } : {}),
         lookup: (_hostname, options, callback) => callback(null, options?.all ? [pinned] : pinned.address, pinned.family),
         headers: { "User-Agent": "Shoggoth/1.0 (+public-web-reader)", "Accept-Encoding": "identity",
           Accept: "text/html, text/plain, application/json;q=0.9, text/markdown;q=0.9", ...headers } }, res => {
@@ -65,8 +69,9 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
       req.end(body);
     });
     if ([301,302,303,307,308].includes(response.status)) {
-      // Never redirect a provider POST or forward its protocol headers.
-      if (!allowRedirects || method !== "GET" || !response.headers.location || hop === 5) fail("WEB_URL_BLOCKED");
+      // Credential forwarding is independent of the public-network target policy.
+      if (providerRequest || !allowRedirects || method !== "GET") fail("WEB_REDIRECT_BLOCKED");
+      if (!response.headers.location || hop === 5) fail("WEB_REDIRECT_FAILED");
       url = publicUrl(new URL(response.headers.location, url).href); continue;
     }
     if (response.status === 429) fail("WEB_RATE_LIMITED");
@@ -223,8 +228,8 @@ class WebService {
     return url.href;
   }
   async providerFetch({ provider, apiKey }, { url, maxChars = 12000 }, signal) {
-    // Validate the target before sending it to a remote extractor. The provider
-    // owns its network/redirect execution; Shoggoth validates its final URL too.
+    // Apply the public target policy before handing off to the extractor.
+    // The provider owns execution, so validate its reported final URL too.
     if (!apiKey) fail("WEB_API_KEY_REQUIRED");
     const target = await this.publicTarget(url, signal);
     let value;
