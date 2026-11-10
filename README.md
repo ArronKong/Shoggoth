@@ -4,8 +4,9 @@
 
 <h1 align="center">Shoggoth</h1>
 
-<p align="center"><strong>A local workspace for AI agents on macOS</strong></p>
-<p align="center">Chat with your agents, bring them into one conversation, and schedule recurring work.</p>
+<p align="center"><strong>Shoggoth is a personal AI agent for macOS.</strong></p>
+<p align="center">Runs on the built-in Codex harness by default. Sign in with your ChatGPT account to get started.</p>
+<p align="center">Also works with OpenClaw, Hermes, Codex CLI, Grok, DeepSeek, Pi, OpenCode, and Antigravity. Use your existing accounts or API keys without a separate Shoggoth subscription.</p>
 
 <p align="center">
   <a href="https://github.com/ArronKong/Shoggoth/releases/latest"><strong>Download for macOS</strong></a>
@@ -16,45 +17,55 @@
 
 <p align="center">macOS 13+ · Apple Silicon and Intel · <a href="LICENSE">Apache-2.0</a></p>
 
-<p align="center">
-  <a href=".github/readme-assets/dashboard.png"><img src=".github/readme-assets/dashboard.png" width="100%" alt="Shoggoth Dashboard showing token usage, cost, agent activity, and recent files" /></a>
-</p>
+## Product tour
+
+<table>
+<tr>
+<td width="50%" align="center" valign="top">
+  <a href=".github/readme-assets/dashboard.png">
+    <img src=".github/readme-assets/dashboard.png" width="100%" alt="Shoggoth Dashboard showing token usage, cost, agent activity, and recent files" />
+  </a><br />
+  <strong>Dashboard</strong>
+</td>
+<td width="50%" align="center" valign="top">
+  <a href=".github/readme-assets/chat.png">
+    <img src=".github/readme-assets/chat.png" width="100%" alt="Agent chat showing a daily digest" />
+  </a><br />
+  <strong>Chat</strong>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" valign="top">
+  <a href=".github/readme-assets/cron.png">
+    <img src=".github/readme-assets/cron.png" width="100%" alt="Weekly calendar of scheduled jobs in Shoggoth" />
+  </a><br />
+  <strong>Cron</strong>
+</td>
+<td width="50%" align="center" valign="top">
+  <a href=".github/readme-assets/spark-notes.png">
+    <img src=".github/readme-assets/spark-notes.png" width="100%" alt="Spark Notes composer and a grid of saved notes" />
+  </a><br />
+  <strong>Spark Notes</strong>
+</td>
+</tr>
+</table>
+
+## A better way to manage your agents
+
+- **Dashboard.** See daily usage, agent activity, and recent outputs at a glance.
+- **Cron.** Schedule recurring work and see when tasks will run in the calendar.
+- **Spark Notes.** Capture ideas as they come and develop them when you're ready.
+- **Token Usage.** Track token usage and costs in one place.
+
+Chat with agents one-on-one or bring them together in a group. Manage models, skills, and MCP connectors from the same app.
+
+The desktop app runs a local agent service. Model requests and connected tools may use external services, depending on what you configure.
 
 ## Get started
 
 1. Open the [latest release](https://github.com/ArronKong/Shoggoth/releases/latest) and download the DMG for your Mac. In **About This Mac**, **Chip** means Apple Silicon (arm64); an Intel **Processor** means Intel (x64).
 2. Open the DMG and drag Shoggoth into Applications.
-3. In Shoggoth, configure a model and account in **Models**, then open **Chat**. To use an existing OpenClaw or Hermes installation, connect it in **Settings**.
-
-## What you can do
-
-- **Work with several agents.** Use individual chats for focused work, or enable group chat to bring multiple agents into one conversation.
-- **Run recurring tasks.** Set a schedule and review past runs from the desktop.
-- **Manage models and tools.** Configure models and accounts, connect supported runtimes, and manage skills and MCP connectors from the same app.
-
-The desktop app runs a local agent service. Model requests and connected tools may use external services, depending on what you configure.
-
-## Product tour
-
-<table>
-<tr>
-<td width="33%" valign="top">
-<a href=".github/readme-assets/chat.png"><img src=".github/readme-assets/chat.png" width="100%" alt="Chat with an agent and read a daily digest" /></a><br />
-<strong>Chat</strong><br />
-<sub>Switch between agents and revisit their conversations.</sub>
-</td>
-<td width="33%" valign="top">
-<a href=".github/readme-assets/cron.png"><img src=".github/readme-assets/cron.png" width="100%" alt="Weekly calendar of scheduled jobs in Shoggoth" /></a><br />
-<strong>Cron</strong><br />
-<sub>See when recurring jobs are scheduled to run.</sub>
-</td>
-<td width="33%" valign="top">
-<a href=".github/readme-assets/spark-notes.png"><img src=".github/readme-assets/spark-notes.png" width="100%" alt="Spark Notes composer and a grid of saved notes" /></a><br />
-<strong>Spark Notes</strong><br />
-<sub>Capture ideas and come back to them later.</sub>
-</td>
-</tr>
-</table>
+3. Open Shoggoth and sign in with ChatGPT to start chatting. Manage models and accounts in **Models**, or connect an existing OpenClaw or Hermes installation in **Settings**.
 
 ## Build from source
 

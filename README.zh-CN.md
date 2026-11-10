@@ -4,8 +4,9 @@
 
 <h1 align="center">Shoggoth</h1>
 
-<p align="center"><strong>macOS 上的本地 AI Agent 工作台</strong></p>
-<p align="center">和 Agent 对话，把多个 Agent 拉进同一个群聊，也能把重复工作设成定时任务。</p>
+<p align="center"><strong>Shoggoth 是一款 macOS 上的个人 AI Agent。</strong></p>
+<p align="center">Shoggoth 默认使用内置的 Codex Harness，登录 ChatGPT 账号即可开始使用。</p>
+<p align="center">也支持 OpenClaw、Hermes、Codex CLI、Grok、DeepSeek、Pi、OpenCode 和 Antigravity。按需使用现有账号或 API Key，无需单独订阅 Shoggoth。</p>
 
 <p align="center">
   <a href="https://github.com/ArronKong/Shoggoth/releases/latest"><strong>下载 macOS 版</strong></a>
@@ -16,45 +17,55 @@
 
 <p align="center">macOS 13 或更新版本 · Apple 芯片与 Intel · <a href="LICENSE">Apache-2.0</a></p>
 
-<p align="center">
-  <a href=".github/readme-assets/dashboard.png"><img src=".github/readme-assets/dashboard.png" width="100%" alt="Shoggoth 仪表盘，显示 Token 用量、成本、Agent 活动和最近产物" /></a>
-</p>
+## 产品导览
+
+<table>
+<tr>
+<td width="50%" align="center" valign="top">
+  <a href=".github/readme-assets/dashboard.png">
+    <img src=".github/readme-assets/dashboard.png" width="100%" alt="Shoggoth 仪表盘，显示 Token 用量、成本、Agent 活动和最近产物" />
+  </a><br />
+  <strong>仪表盘</strong>
+</td>
+<td width="50%" align="center" valign="top">
+  <a href=".github/readme-assets/chat.png">
+    <img src=".github/readme-assets/chat.png" width="100%" alt="Agent 聊天界面，展示一份每日简报" />
+  </a><br />
+  <strong>聊天</strong>
+</td>
+</tr>
+<tr>
+<td width="50%" align="center" valign="top">
+  <a href=".github/readme-assets/cron.png">
+    <img src=".github/readme-assets/cron.png" width="100%" alt="Shoggoth 定时任务的周历视图" />
+  </a><br />
+  <strong>定时任务</strong>
+</td>
+<td width="50%" align="center" valign="top">
+  <a href=".github/readme-assets/spark-notes.png">
+    <img src=".github/readme-assets/spark-notes.png" width="100%" alt="灵感便签的输入区和已保存的便签" />
+  </a><br />
+  <strong>灵感便签</strong>
+</td>
+</tr>
+</table>
+
+## 更轻松地管理你的 Agent
+
+- **仪表盘。** 一览每日用量、Agent 活动和最近产物。
+- **定时任务。** 设置重复任务，在日历里查看接下来的运行安排。
+- **灵感便签。** 随手记下想法，等有时间再展开。
+- **Token 用量。** 集中查看 Token 消耗和费用。
+
+你可以和 Agent 单独聊天，也可以把多个 Agent 拉进同一个群聊。模型、Skills 和 MCP 连接器都可以在应用里管理。
+
+Agent 服务在本机运行。根据你的配置，模型请求和连接的工具可能访问外部服务。
 
 ## 快速上手
 
 1. 在[最新发布](https://github.com/ArronKong/Shoggoth/releases/latest)里下载对应的 DMG。打开「关于本机」：显示 Apple 芯片就选 arm64，显示 Intel 处理器就选 x64。
 2. 打开 DMG，将 Shoggoth 拖入「应用程序」。
-3. 在 Shoggoth 的「模型」页配置模型和账号，然后打开「聊天」。如果已经安装了 OpenClaw 或 Hermes，可以在「设置」里连接。
-
-## 可以做什么
-
-- **和多个 Agent 协作。** 在单聊里处理具体任务，也可以启用群聊，让多个 Agent 在同一个会话里协作。
-- **安排定时任务。** 给重复工作设置执行时间，并在桌面应用里回看运行记录。
-- **管理模型和工具。** 集中配置模型和账号、连接支持的运行时，并管理 Skills 和 MCP 连接器。
-
-Agent 服务在本机运行。根据你的配置，模型请求和连接的工具可能访问外部服务。
-
-## 产品导览
-
-<table>
-<tr>
-<td width="33%" valign="top">
-<a href=".github/readme-assets/chat.png"><img src=".github/readme-assets/chat.png" width="100%" alt="Agent 聊天界面，展示一份每日简报" /></a><br />
-<strong>聊天</strong><br />
-<sub>切换 Agent，回看各自的对话。</sub>
-</td>
-<td width="33%" valign="top">
-<a href=".github/readme-assets/cron.png"><img src=".github/readme-assets/cron.png" width="100%" alt="Shoggoth 定时任务的周历视图" /></a><br />
-<strong>定时任务</strong><br />
-<sub>在周历上查看重复任务的执行时间。</sub>
-</td>
-<td width="33%" valign="top">
-<a href=".github/readme-assets/spark-notes.png"><img src=".github/readme-assets/spark-notes.png" width="100%" alt="灵感便签的输入区和已保存的便签" /></a><br />
-<strong>灵感便签</strong><br />
-<sub>随手记录想法，之后再回来整理。</sub>
-</td>
-</tr>
-</table>
+3. 打开 Shoggoth，登录 ChatGPT 账号即可开始聊天。你可以在「模型」里管理模型和账号，也可以在「设置」里连接已安装的 OpenClaw 或 Hermes。
 
 ## 从源码运行
 
