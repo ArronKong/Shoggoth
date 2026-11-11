@@ -1,3 +1,4 @@
+import { measureTelemetry } from '../lib/productTelemetry';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -546,7 +547,8 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
     if (queued || !agent?.capabilities.execute || !idea || ACTIVE.has(idea.status) || idea.archivedAt !== null) return false;
     const fields = { ...inspirationStartFields(idea, agent, instruction), ...(modelSelection ? { modelSelection } : {}) };
     pinned.current = true;
-    return act(['start', fields], (operationId) => startInspiration(id, { ...fields, operationId }), () => {
+    return act(['start', fields], (operationId) => measureTelemetry('inspiration_cultivate', agent.backendId,
+      () => startInspiration(id, { ...fields, operationId })), () => {
       setMore([]); setLoadedMore(false);
     });
   };
@@ -683,9 +685,10 @@ export function IdeaDetail({ id, open = true, onClose, onOpenChangeComplete, onC
                   <button type="button" className={styles.noteEdit} disabled={busy || mediaBusy} onClick={() => setEdit(null)}><span>{t('common.cancel')}</span></button>
                   <button type="button" className={styles.noteEdit}
                     disabled={busy || mediaBusy || (!edit.body.trim() && !edit.attachments.length) || bytes(edit.body) > 16 * 1024 || editConflict}
-                    onClick={() => { void act(['edit', edit], (operationId) => updateInspiration(id, { operationId, expectedRevision: edit.revision,
+                    onClick={() => { void act(['edit', edit], (operationId) => measureTelemetry('inspiration_update', 'shoggoth',
+                      () => updateInspiration(id, { operationId, expectedRevision: edit.revision,
                       // The editor held a legacy title as the text's first line, so saving folds it into the text.
-                      patch: { body: edit.body, attachments: edit.attachments, ...(idea.title ? { title: null } : {}) } }), () => setEdit(null)); }}>
+                      patch: { body: edit.body, attachments: edit.attachments, ...(idea.title ? { title: null } : {}) } })), () => setEdit(null)); }}>
                     <InspirationActionIcon name="check" /><span>{t('inspiration.saveEdit')}</span></button>
                 </div>}>
                 {editConflict && <>

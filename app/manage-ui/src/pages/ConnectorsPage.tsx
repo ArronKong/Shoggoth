@@ -1,3 +1,5 @@
+import { telemetryCount, telemetryList, useTelemetrySnapshot } from "../lib/productTelemetry";
+import telemetryCatalog from "../../../core/data/product-telemetry-catalog.json";
 import { useState } from "react";
 import { useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -39,6 +41,28 @@ export default function ConnectorsPage() {
   const lark = useLarkCliConnector();
   const [larkDialog, setLarkDialog] = useState(false);
   const official = useOfficialSkillConnectors();
+  useTelemetrySnapshot("connector", installed.data && official.data && !installed.error && !official.error
+    ? { servers: installed.data.servers, official: official.data.items } : null, ({ servers, official }) => {
+    const ids: string[] = [];
+    const kinds = { official_skill: 0, featured_mcp: 0, custom_mcp: 0, other: 0 };
+    for (const server of servers) {
+      if (!server.enabled || server.status === "disabled") continue;
+      const skill = official.find(item => item.serverId === server.id && item.state === "installed");
+      if (skill && telemetryCatalog.officialConnectorIds.includes(skill.id)) {
+        ids.push("official/" + skill.id);
+        kinds.official_skill++;
+        continue;
+      }
+      const preset = recommendations.find(item => telemetryCatalog.featuredConnectorIds.includes(item.id)
+        && mcpRecommendationMatchesServer(item, server));
+      if (preset) { ids.push("featured/" + preset.id); kinds.featured_mcp++; }
+      else if (server.source.kind === "custom") kinds.custom_mcp++;
+      else kinds.other++;
+    }
+    return { ...telemetryList("enabled_connector_ids", ids),
+      ...telemetryCount("enabled_connector_count", Object.values(kinds).reduce((sum, count) => sum + count, 0)),
+      ...Object.assign({}, ...Object.entries(kinds).map(([kind, count]) => telemetryCount("connector_kind_" + kind + "_count", count))) };
+  });
   const [officialDialog, setOfficialDialog] = useState<OfficialConnectorId | null>(null);
   const officialServerIds = new Set(official.data?.items.flatMap(item => item.serverId ? [item.serverId] : []) || []);
   const unmanagedServers = installed.data?.servers.filter(server => !officialServerIds.has(server.id));

@@ -11,7 +11,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const { createContext, repoRoot } = require('./fixtures/codex-security-native-factory-context.cjs');
 const { CodexSecurityNativeJobStore } = require('../app/agent-service/codex-security-native-job-store');
 const { CODEX_SECURITY_NATIVE_ENV_INVENTORY } = require('../app/agent-service/codex-security-native-host-plan');
-const EXPECTED_BINARY_SHA = '16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704';
+const EXPECTED_BINARY_SHA = 'ebabe5f0d79145a9e61274ce9ecf7c02c9021b7b04bfa59b7e61ad4461c32b0b';
 const SOURCES = ['app/agent-service/codex-security-native-host-plan.js','app/agent-service/codex-security-native-job-store.js',
   'app/agent-service/codex-runtime-host.js','app/agent-service/codex-schema-contract.js','app/agent-service/codex-jsonl-rpc.js',
   'app/agent-service/codex-rpc-safety.js','app/agent-service/codex-runtime-paths.js','app/agent-service/runtime-account-resolver.js',
@@ -23,9 +23,9 @@ const SOURCES = ['app/agent-service/codex-security-native-host-plan.js','app/age
   'resources/bundled-plugins/packages/codex-security/.mcp.json','resources/bundled-plugins/packages/codex-security/.codex-plugin/plugin.json',
   'resources/bundled-plugins/packages/codex-security/scripts/launch_codex_security_mcp',
   'resources/bundled-plugins/packages/codex-security/mcp/server.mjs',
-  'schemas/codex-app-server/0.159.2/schema-manifest.json',
-  'schemas/codex-app-server/0.159.2/json/codex_app_server_protocol.schemas.json',
-  'schemas/codex-app-server/0.159.2/json/codex_app_server_protocol.v2.schemas.json'];
+  'schemas/codex-app-server/0.167.1/schema-manifest.json',
+  'schemas/codex-app-server/0.167.1/json/codex_app_server_protocol.schemas.json',
+  'schemas/codex-app-server/0.167.1/json/codex_app_server_protocol.v2.schemas.json'];
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 const hashes = () => Object.fromEntries(SOURCES.map(file => [file, sha(fs.readFileSync(path.join(repoRoot, file)))]));
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -110,7 +110,7 @@ async function main() {
     monitor=setInterval(observeMcp,30);
     const started=await c.factory.startMetadata(plan,c.lease); observeMcp();
     assert.equal(started.state,'native_ready'); assert.equal(started.hasNativeThread,true);
-    assert.equal(nativeChildren.length,1); assert.equal(host.runtimeVersion,'0.159.2');
+    assert.equal(nativeChildren.length,1); assert.equal(host.runtimeVersion,'0.167.1');
     assert.deepEqual(await host.accountRead({refreshToken:false}),{account:null,requiresOpenaiAuth:true});
     assert.equal(fs.existsSync(path.join(host.runtimeEnvironment.home,'auth.json')),false);
     const recordFile=fs.readdirSync(c.jobs.directory).find(name=>/^[a-f0-9]{64}\.json$/.test(name));
@@ -171,7 +171,7 @@ async function main() {
     const after=hashes(); assert.deepEqual(after,before); success=true;
     // Cleanup must finish before PASS evidence, and uses only this owned exact root.
     await c.close(); c=null;
-    const result={version:1,verified:true,scope:'Service factory -> pinned0.159.2 -> unchanged original0.1.24 stdio metadata only',
+    const result={version:1,verified:true,scope:'Service factory -> pinned0.167.1 -> unchanged original0.1.24 stdio metadata only',
       checks,count:checks.length,codeHashesBefore:before,codeHashesAfter:after,nativeBinarySha256:EXPECTED_BINARY_SHA,
       naturalMainExitRequired:true,fullPluginUsable:false,originalToolsUnlocked:false,pluginConversionCountUnchanged:'29/31',
       modelTurnCount:0,originalToolBusinessCount:0,scanCount:0,registeredOriginalComponent:true,remaining:['Binding/Connection/Grant and dispatcher egress',

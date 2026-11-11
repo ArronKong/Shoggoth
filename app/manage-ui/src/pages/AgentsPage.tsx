@@ -1,3 +1,4 @@
+import { measureTelemetry, runtimeTelemetryType, telemetryCount, telemetryList, telemetryModel, useTelemetrySnapshot } from "../lib/productTelemetry";
 import AgentAvatarView from "../components/AgentAvatar";
 import agentCardBrand from "../assets/agent-card-brand.svg";
 import {
@@ -47,15 +48,12 @@ import {
   updateAgent,
 } from "../api/client";
 import ChatModelMenu from "./ChatModelMenu";
-import { sortBackendTabs } from "../components/BackendTabIcon";
 import BackendTabs from "../components/BackendTabs";
 import FilterTabs from "../components/FilterTabs";
 import {
   cronForceRunResumesPaused,
-  resolveBackendAlias,
-  SHOGGOTH_BACKEND,
   useBackendCatalog,
-  useEnabledBackends,
+  useBackendState,
 } from "../lib/backends";
 import Modal, { ModalSection } from "../components/Modal";
 import { Field, Option, Select, Switch, TextInput } from "../components/Field";
@@ -150,14 +148,7 @@ export default function AgentsPage() {
   const requestedBackend = searchParams.get("backend") || undefined;
   const requestedAgent = searchParams.get("agent");
   const backendCatalog = useBackendCatalog("agents");
-  const availableBackends = useEnabledBackends("agents");
-  // Backend selection lasts for this visit. A plain /agents entry starts at the first visible tab.
-  const [selectedBackend, setBackend] = useState(requestedBackend);
-  const preferredBackend = selectedBackend && resolveBackendAlias(selectedBackend, backendCatalog);
-  const firstBackend = sortBackendTabs(backendCatalog).find(({ id }) => availableBackends.includes(id));
-  const backend = preferredBackend && availableBackends.includes(preferredBackend)
-    ? preferredBackend
-    : firstBackend?.id ?? SHOGGOTH_BACKEND.id;
+  const [backend, setBackend, availableBackends] = useBackendState("agents", requestedBackend, { surface: "agents" });
   const backendDescriptors = useMemo(
     () => new Map(backendCatalog.map((descriptor) => [descriptor.id, descriptor])),
     [backendCatalog],
@@ -280,6 +271,21 @@ export default function AgentsPage() {
     () => listAgents(backend),
   );
   const agents = agentsData ?? [];
+  useTelemetrySnapshot("runtime", hasAgentHarness && !error ? agentsData : null,
+    rows => telemetryList("configured_runtime_types", rows.map(row => runtimeTelemetryType(row.runtime))));
+  const nativeAgentConfiguration = hasAgentHarness && !error ? agentsData : null;
+  useTelemetrySnapshot("provider", nativeAgentConfiguration, rows => {
+    const providers = new Set(rows.flatMap(row => row.model && row.provider ? [row.provider] : []));
+    return providers.size ? { ...telemetryList("configured_provider_ids",
+      [...providers].map(provider => telemetryModel(provider, null).providerId)),
+    ...telemetryCount("configured_provider_count", providers.size) } : null;
+  });
+  useTelemetrySnapshot("model", nativeAgentConfiguration, rows => {
+    const models = new Map(rows.flatMap(row => row.model
+      ? [[JSON.stringify([row.provider, row.model]), telemetryModel(row.provider, row.model).modelId] as const] : []));
+    return models.size ? { ...telemetryList("configured_model_ids", models.values()),
+      ...telemetryCount("configured_model_count", models.size) } : null;
+  });
   // 刷新同时重拉 per-agent 模型设置面快照（同 ModelsPage 的 doRefresh 口径）。
   // 回传 refresh 的 promise：导航栏刷新要等数据落地才弹 toast。
   const [modelReload, setModelReload] = useState(0);
@@ -788,7 +794,7 @@ export default function AgentsPage() {
           ? { name: form.name }
           : { name: form.name, model: form.model, fallbacks: form.fallbacks };
       // 使用后端确认的 id：Hermes default 仅改展示名，普通 profile 改名才会变 id。
-      const nextId = await updateAgent(backend, detail.id, patch);
+      const nextId = await measureTelemetry("agent_update", backend, () => updateAgent(backend, detail.id, patch));
       agentModelCatalog.invalidate();
       toast.success(t("agents.saved"));
       await refresh();
@@ -824,11 +830,13 @@ export default function AgentsPage() {
       ? archiveOperationRef.current : lifecycleOperation("agent-archive", target);
     archiveOperationRef.current = operation;
     try {
-      await deleteAgent(backend, detail.id, {
+      const remove = () => deleteAgent(backend, detail.id, {
         expectedUpdatedAt: detail.updatedAt,
         operationId: operation.operationId,
         createdAt: operation.createdAt,
       });
+      if (archiving) await measureTelemetry("agent_archive", backend, remove);
+      else await remove();
       archiveOperationRef.current = null;
       toast.success(t(archiving ? "agents.archived" : "agents.deleted"));
       hardClose(); // 卡片马上要从列表消失，别做缩回它的反向形变
@@ -873,11 +881,11 @@ export default function AgentsPage() {
             cloneFromDefault: createDraft.cloneFromDefault,
             noSkills: createDraft.noSkills,
           };
-      const created = await createAgent(backend, {
+      const created = await measureTelemetry("agent_create", backend, () => createAgent(backend, {
         ...spec,
         operationId: operation.operationId,
         createdAt: operation.createdAt,
-      });
+      }));
       createOperationRef.current = null;
       toast.success(t("agents.created"));
       if (created && typeof created === "object" && "runtimeSwitchFailed" in created) {
@@ -1592,7 +1600,11 @@ export default function AgentsPage() {
                         {hasRuntimeBindings ? (
                           <AgentDefaultModel key={`${backend}:${detail.id}`} backend={backend} agentId={detail.id}
                             model={detail.model} labelId={overviewModelLabelId}
-                            onChanged={() => { void reloadDetail(); void refresh(); }} />
+                            onChanged={(model) => {
+                              setDetail(current => current?.id === detail.id ? { ...current, model } : current);
+                              void reloadDetail();
+                              void refresh();
+                            }} />
                         ) : hasAgentHarness && detail.model && (
                           <div className={`${s.ovField} ${s.ovFieldWide}`}>
                             <span className={s.ovValue}>{detail.model}</span>

@@ -1879,7 +1879,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         // 它打开那一刻的旧值，放行会把用户刚拖出来的尺寸覆盖回去。
         // The shortcut is committed by trusted desktop IPC only, after the OS
         // accepts the new binding. A stale Settings form must not revert it.
-        const { windowBounds: _ignoredWindowBounds, inspirationShortcut: _ignoredInspirationShortcut,
+        const { windowBounds: _ignoredWindowBounds, inspirationShortcut: _ignoredInspirationShortcut, telemetry: _ignoredTelemetry,
           nativeConcurrency: _ignoredNativeConcurrency, runtimeFrameworkFlags: _ignoredRuntimeFlags,
           nativeMemory: _ignoredNativeMemory, nativeMemorySharing: _ignoredNativeMemorySharing,
           openclawPluginHostMode: _ignoredPluginHostMode, hermesPluginHostMode: _ignoredHermesPluginHostMode, ...writable } = body;
@@ -3434,7 +3434,11 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         if (!["GET", "PUT"].includes(method)) return sendJson(res, 405, { error: "method not allowed" });
         if (method === "PUT" && !hasShoggothMutationOrigin(req)) return sendJson(res, 403, { error: "Forbidden" });
         try {
-          if (method === "GET") return sendJson(res, 200, await backend.getAgentDefaultModels(id));
+          if (method === "GET") {
+            const scope = url.searchParams.get("scope");
+            if (scope !== null && scope !== "default") return sendJson(res, 400, { error: "invalid model scope" });
+            return sendJson(res, 200, await backend.getAgentDefaultModels(id, { defaultBindingOnly: scope === "default" }));
+          }
           const body = await readJsonBody(req);
           if (!body || Object.hasOwn(body, "profileId")) throw Object.assign(Error("Invalid input"), { code: "AGENT_BINDING_INVALID" });
           const { profileId: _profileId, ...input } = validateAgentBindingParams("agent.binding.setDefaultModel", { ...body, profileId: "rest" });

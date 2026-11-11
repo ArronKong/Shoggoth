@@ -1,3 +1,4 @@
+import { measureTelemetry } from "../../lib/productTelemetry";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ApiError, getAgentDefaultModels, selectAgentDefaultModel } from "../../api/client";
@@ -11,16 +12,22 @@ export default function AgentDefaultModel({ backend, agentId, model, labelId, on
   agentId: string;
   model?: string;
   labelId: string;
-  onChanged(): void;
+  onChanged(model: string): void;
 }) {
   const { t } = useTranslation();
   const toast = useToast();
+  const current = usePageCache(
+    `agent:default-model:${backend}:${agentId}`,
+    async () => (await getAgentDefaultModels(backend, agentId, { defaultBindingOnly: true })).selection,
+    { enabled: !model },
+  );
   const cache = usePageCache(`agent:default-models:${backend}:${agentId}`,
     () => getAgentDefaultModels(backend, agentId), { enabled: false });
   const { data } = cache;
   const mounted = useRef(false);
   const reading = useRef(false), writing = useRef(false);
   const [refreshing, setRefreshing] = useState(false), [saving, setSaving] = useState(false);
+  const [catalogRead, setCatalogRead] = useState(false);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -33,7 +40,10 @@ export default function AgentDefaultModel({ backend, agentId, model, labelId, on
     try { await cache.refresh(); }
     finally {
       reading.current = false;
-      if (mounted.current) setRefreshing(false);
+      if (mounted.current) {
+        setRefreshing(false);
+        setCatalogRead(true);
+      }
     }
   };
   const choose = async (model: string, _provider?: string, bindingId?: string, modelProviderRef?: string) => {
@@ -41,10 +51,12 @@ export default function AgentDefaultModel({ backend, agentId, model, labelId, on
     writing.current = true;
     setSaving(true);
     try {
-      const selection = await selectAgentDefaultModel(backend, agentId, { model, bindingId,
-        revision: data.selection.revision, ...(modelProviderRef ? { modelProviderRef } : {}) });
+      const selection = await measureTelemetry("model_switch", backend,
+        () => selectAgentDefaultModel(backend, agentId, { model, bindingId,
+          revision: data.selection.revision, ...(modelProviderRef ? { modelProviderRef } : {}) }));
       cache.replace({ ...data, selection });
-      if (mounted.current) onChanged();
+      current.replace(selection);
+      if (mounted.current) onChanged(selection.model ?? model);
     } catch (error) {
       if (mounted.current) {
         const code = error instanceof ApiError ? error.code : undefined;
@@ -60,15 +72,17 @@ export default function AgentDefaultModel({ backend, agentId, model, labelId, on
       if (mounted.current) setSaving(false);
     }
   };
-  const activeModel = data ? data.selection.model ?? "" : model ?? "";
+  const selection = (catalogRead && !cache.error ? data?.selection : undefined) ?? current.data ?? data?.selection;
+  const activeModel = model || selection?.model || "";
+  const active = selection?.model === activeModel ? selection : undefined;
   return (
     <div className={`${styles.ovField} ${styles.ovFieldWide}`}>
       <div className={`${styles.modelPicker} ${styles.defaultModelPicker}`}>
         <ChatModelMenu labelledBy={labelId} portalTo="[data-agent-overview-panel]"
           models={cache.error ? [] : data?.models ?? []} runtimeGroups={data?.runtimes ?? []}
-          activeModel={activeModel} activeBindingId={data?.selection.bindingId}
-          activeModelProviderRef={data?.selection.modelProviderRef}
-          triggerLabel={activeModel ? undefined : t("agents.chooseDefaultModel")}
+          activeModel={activeModel} activeBindingId={active?.bindingId}
+          activeModelProviderRef={active?.modelProviderRef}
+          triggerLabel={activeModel ? undefined : t("agents.followRuntimeDefaultModel")}
           loading={cache.loading || refreshing} loadError={!!cache.error}
           pending={saving} onRefresh={() => void refresh()} onSelect={choose} />
       </div>

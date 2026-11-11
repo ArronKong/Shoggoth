@@ -159,7 +159,7 @@ md.inline.ruler.before("emphasis", "cjk-strong", (state, silent) => {
   state.pos += 2;
   return true;
 });
-md.renderer.rules.link_open = (tokens, index, options, _env, renderer) => {
+md.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
   const token = tokens[index];
   const href = token.attrGet("href") || "";
   const localPath = localFilePathFromHref(href);
@@ -171,7 +171,7 @@ md.renderer.rules.link_open = (tokens, index, options, _env, renderer) => {
   const opening = renderer.renderToken(tokens, index, options);
   // Image-only links already have a visual label. Keep local files, App routes,
   // mail links and anchors as they are; only decorate absolute web destinations.
-  if (localPath || token.attrGet("data-local-path") || tokens[index + 1]?.type === "link_close"
+  if (env?.showLinkIcons === false || localPath || token.attrGet("data-local-path") || tokens[index + 1]?.type === "link_close"
     || (tokens[index + 1]?.type === "image" && tokens[index + 2]?.type === "link_close")) return opening;
   try {
     const url = new URL(href, typeof window === "undefined" ? undefined : window.location.href);
@@ -443,11 +443,12 @@ function renderEscapedPlainTextHtml(value: string): string {
   return `<div class="markdown-plain-text-fallback">${escapeHtml(value.replace(/\r\n?/g, "\n"))}</div>`;
 }
 
-export function toSanitizedMarkdownHtml(markdown: string, localFiles = false, imageContext?: AgentMediaContext, htmlArtifactPolicy: HtmlArtifactPolicy = "source"): string {
+export function toSanitizedMarkdownHtml(markdown: string, localFiles = false, imageContext?: AgentMediaContext,
+  htmlArtifactPolicy: HtmlArtifactPolicy = "source", showLinkIcons = true): string {
   const input = markdown.trim();
   if (!input) return "";
   installHooks();
-  const cacheKey = `${localFiles ? "local:" : "standard:"}${JSON.stringify(imageContext ?? null)}:${JSON.stringify(htmlArtifactPolicy)}:${input}`;
+  const cacheKey = `${localFiles ? "local:" : "standard:"}${JSON.stringify(imageContext ?? null)}:${JSON.stringify(htmlArtifactPolicy)}:${showLinkIcons}:${input}`;
   if (input.length <= MARKDOWN_CACHE_MAX_CHARS) {
     const cached = getCachedMarkdown(cacheKey);
     if (cached !== null) return cached;
@@ -464,7 +465,7 @@ export function toSanitizedMarkdownHtml(markdown: string, localFiles = false, im
   }
   let rendered: string;
   try {
-    const env = { localFiles, imageContext, htmlArtifactPolicy, qrPreviews: [] as [string, string][] };
+    const env = { localFiles, imageContext, htmlArtifactPolicy, showLinkIcons, qrPreviews: [] as [string, string][] };
     rendered = md.render(`${truncated.text}${suffix}`, env);
     for (const [src, label] of env.qrPreviews) rendered += `<img class="markdown-inline-image markdown-qr-preview" src="${escapeHtml(src)}" alt="${escapeHtml(label)}" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
   } catch (err) {

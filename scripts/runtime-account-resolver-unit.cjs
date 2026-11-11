@@ -157,11 +157,13 @@ test("native Codex uses the installed CLI while managed Codex keeps its bundled 
       0o700,
     );
     regularFile(path.join(packageRoot, "bin", "codex-code-mode-host"), "#!/bin/sh\nexit 0\n", 0o700);
+    regularFile(path.join(packageRoot, "bin", "codex-exec-server"), "#!/bin/sh\nexit 0\n", 0o700);
     regularFile(path.join(packageRoot, "codex-package.json"), JSON.stringify({
       layoutVersion: 1,
       version: CODEX_VERSION,
       variant: "codex",
       entrypoint: "bin/codex",
+      execServer: "bin/codex-exec-server",
     }));
     regularFile(path.join(resourcesPath, "codex", "runtime-manifest.json"), JSON.stringify({
       schemaVersion: 1,

@@ -1,3 +1,4 @@
+import { measureTelemetry } from "../lib/productTelemetry";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -310,7 +311,7 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
       });
       if (!okToRun) return;
     }
-    await act(job.id, () => runCronJob(job.id, "force"));
+    await act(job.id, () => measureTelemetry("cron_run", job.backendId, () => runCronJob(job.id, "force")));
   };
 
   const openEdit = useCallback(async (job: UnifiedCronJob) => {
@@ -503,7 +504,8 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
         if (!selectedCreateAgent) throw new Error(t("cronForm.nativeValidateAgent"));
         const kind = backendDescriptors.get(createDraft.backendId)?.surfaces.cron?.kind;
         if (!kind) throw new Error(t("cronForm.nativeValidateAgent"));
-        await createCronJob(cronCreateInputFromDraft(createDraft, kind, t));
+        const input = cronCreateInputFromDraft(createDraft, kind, t);
+        await measureTelemetry("cron_create", createDraft.backendId, () => createCronJob(input));
         return t("cron.createdTask");
       }
       if (!selected) return;
@@ -756,7 +758,7 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
                             {t(runWillResumePaused(job) ? "cron.runAndEnable" : "cron.run")}
                           </button>
                           <button type="button" className="btn-subtle btn-sm cron-quiet-action" onClick={() => void openEdit(job)} disabled={!canEdit} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>{t("common.edit")}</button>
-                          <button type="button" className="btn-subtle btn-sm cron-quiet-action" onClick={() => act(job.id, () => setCronEnabled(job.id, !job.enabled, job.revision))} disabled={busyIds.has(job.id) || job.actions?.toggle === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>
+                          <button type="button" className="btn-subtle btn-sm cron-quiet-action" onClick={() => act(job.id, () => measureTelemetry("cron_toggle", job.backendId, () => setCronEnabled(job.id, !job.enabled, job.revision)))} disabled={busyIds.has(job.id) || job.actions?.toggle === false} title={job.actions?.reason === "system-managed" ? t("cron.systemManaged") : undefined}>
                             {job.enabled ? t("cron.disable") : t("cron.enable")}
                           </button>
                         </div>

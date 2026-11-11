@@ -22,7 +22,7 @@ if (!process.versions.electron) {
       if (child.stdout) process.stdout.write(child.stdout);
       if (child.status !== 0) throw new Error(`Electron ${phase} failed: ${child.stderr || child.error || child.status}`);
     }
-    console.log("Product telemetry Electron smoke: fresh/legacy setup, no idle or synthetic activity, real input, private persistence, restart, UTC and disabled build passed");
+    console.log("Product telemetry Electron smoke: preferences, bilingual privacy, real feature use, two-level opt-out, restart, UTC and disabled build passed");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 } else {
   const http = require("node:http");
@@ -75,10 +75,11 @@ if (!process.versions.electron) {
         app.setActivationPolicy("regular");
         await app.dock.show();
       }
-      if (phase !== "restart") configStore.write({ locale: "en", setupCompletedAt: 0, gatewayUrl: "", token: "", notifications: { chat: false, cron: false, task: false } });
-      else configStore.write({ setupCompletedAt: 1, token: "synthetic-local-token" });
+      if (phase !== "restart") configStore.write({ locale: "en", setupCompletedAt: 1, gatewayUrl: "", token: "", notifications: { chat: false, cron: false, task: false } });
+      else configStore.write({ locale: "zh-CN", theme: "dark", setupCompletedAt: 1, token: "synthetic-local-token" });
       const clock = fakeClock(phase === "restart" ? "2026-09-11T02:00:00Z" : "2026-09-10T23:59:59.999Z");
       const batches = [];
+      const notes = [];
       sink = await listen((req, res) => {
         let body = "";
         req.on("data", (chunk) => { body += chunk; });
@@ -105,6 +106,22 @@ if (!process.versions.electron) {
           return json({ config: configStore.read() });
         }
         if (["/__api/backends", "/__api/status", "/__api/versions", "/__api/self-updates"].includes(url.pathname)) return json({ backends: [] });
+        if (url.pathname === "/__api/inspirations") {
+          if (req.method === "POST") {
+            let body = "";
+            req.on("data", chunk => { body += chunk; });
+            req.on("end", () => {
+              const input = JSON.parse(body);
+              const note = { id: `fixture-${notes.length + 1}`, body: input.body, title: null, attachments: [],
+                status: "saved", revision: 1, paperTone: 0, createdAt: clock.now(), updatedAt: clock.now(),
+                archivedAt: null, favorite: false, latestExecution: null };
+              notes.push(note);
+              json({ idea: note });
+            });
+            return;
+          }
+          return json({ items: notes, total: notes.length, nextCursor: null });
+        }
         if (url.pathname.startsWith("/__api/")) return json({ error: "synthetic backend unavailable" }, 501);
         const file = path.resolve(uiDir, `.${url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname)}`);
         if (!file.startsWith(`${uiDir}${path.sep}`) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return json({ error: "fixture resource missing" }, 404);
@@ -112,7 +129,7 @@ if (!process.versions.electron) {
         res.writeHead(200, { "Content-Type": type });
         fs.createReadStream(file).pipe(res);
       });
-      telemetry = createProductTelemetry({ statePath, readConfigStatus: configStore.getReadStatus, clock,
+      telemetry = createProductTelemetry({ statePath, configStore, clock,
         buildConfig: { ...BUILD, exportEnabled: phase !== "disabled" },
         transport: createPostHogTransport({ projectToken: BUILD.projectToken, region: "us", fetchImpl(url, options) {
           assert.equal(url, ENDPOINTS.us);
@@ -124,7 +141,7 @@ if (!process.versions.electron) {
       power.getSystemIdleState = (threshold) => powerMonitor.getSystemIdleState(threshold);
       dispose = registerDesktopTelemetryIpc({ ipcMain, getMainWindow: () => w, getUiOrigin: () => ui.url,
         powerMonitor: power, telemetry, now: clock.now });
-      ipcMain.on("openclaw:get-config", (event) => { event.returnValue = { ...configStore.read(), effectiveLocale: "en" }; });
+      ipcMain.on("openclaw:get-config", (event) => { event.returnValue = { ...configStore.read(), effectiveLocale: configStore.read().locale }; });
       w = new BrowserWindow({ show: true, width: 1200, height: 850, title: "Shoggoth telemetry isolated test",
         webPreferences: { preload: path.join(__dirname, "../app/preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: false, backgroundThrottling: false } });
       const blocked = [];
@@ -156,13 +173,51 @@ if (!process.versions.electron) {
         }
       };
       const input = async () => {
+        // The previous step may leave focus inside the excluded statistics UI.
+        await w.webContents.executeJavaScript("document.activeElement?.blur()");
         w.webContents.sendInputEvent({ type: "keyDown", keyCode: "Shift" });
         w.webContents.sendInputEvent({ type: "keyUp", keyCode: "Shift" });
         await delay(100);
       };
+      const evalUi = source => w.webContents.executeJavaScript(source);
+      const checked = selector => evalUi(`document.querySelector(${JSON.stringify(selector)})?.getAttribute('aria-checked')`);
+      const master = '[aria-labelledby="settings-telemetry-enabled"]';
+      const detail = '[aria-labelledby="settings-telemetry-detailed"]';
+      const settingsSection = "#settings-telemetry";
+      const click = async selector => {
+        const position = await evalUi(`(() => {
+          const node = document.querySelector(${JSON.stringify(selector)});
+          if (!node) return null;
+          node.scrollIntoView({block:'center', behavior:'instant'});
+          const r = node.getBoundingClientRect();
+          return { x: Math.round(r.left+r.width/2), y: Math.round(r.top+r.height/2) };
+        })()`);
+        assert.ok(position, `fixture missing ${selector}`);
+        w.webContents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: 1, ...position });
+        w.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...position });
+      };
+      const press = keyCode => {
+        w.webContents.sendInputEvent({ type: "keyDown", keyCode });
+        w.webContents.sendInputEvent({ type: "keyUp", keyCode });
+      };
       await w.loadURL(page); await ready(); await focus();
       const previousId = phase === "restart" ? readState().distinctId : null;
       const before = phase === "restart" ? fs.readFileSync(statePath, "utf8") : null;
+      await waitUntil(async () => await checked(master) === (phase === "restart" ? "false" : "true"), "saved master setting");
+      assert.equal(await checked(detail), phase === "restart" ? "false" : "true");
+      await click(`${settingsSection} button.btn-secondary`);
+      await waitUntil(() => evalUi(`document.querySelector('.product-telemetry-privacy')?.textContent.includes(${JSON.stringify(phase === "restart" ? "采集内容" : "What we collect")})`), "bundled localized privacy notice");
+      assert.equal(await evalUi(`Boolean(document.querySelector('.product-telemetry-privacy a[href^="https://posthog.com/"]'))`), true);
+      assert.equal(await evalUi(`Boolean(document.querySelector('.product-telemetry-privacy .markdown-link-icon'))`), false);
+      if (phase === "first") {
+        const position = await evalUi(`(() => {
+          const modal = document.querySelector('.product-telemetry-privacy');
+          return { x: Math.round(modal.getBoundingClientRect().left / 2), y: Math.round(window.innerHeight / 2) };
+        })()`);
+        w.webContents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: 1, ...position });
+        w.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...position });
+      } else press("Escape");
+      await waitUntil(() => evalUi("!document.querySelector('.product-telemetry-privacy[data-open]')"), "notice closed");
       await w.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent("keydown", {key:"SECRET_CANARY",bubbles:true}));
         document.dispatchEvent(new Event("scroll", {bubbles:true}));
         window.scrollTo(0,200);`);
@@ -177,6 +232,10 @@ if (!process.versions.electron) {
         assert.equal(fs.existsSync(statePath), false, "lab activity is excluded");
         await w.webContents.executeJavaScript('location.hash="/settings?probe=SECRET_CANARY"');
         await delay(250);
+        await click(detail);
+        await waitUntil(async () => await checked(detail) === "false", "detailed opt-out saved");
+        assert.equal(configStore.getTelemetryPreferences().preferences.enabled, true);
+        assert.equal(fs.existsSync(statePath), false, "privacy controls do not create activity");
       }
       await input();
       if (phase === "disabled") {
@@ -187,38 +246,81 @@ if (!process.versions.electron) {
         await telemetry.flush();
         assert.equal(readState().distinctId, previousId);
         assert.equal(readState().outbox.length, 0);
-        assert.equal(batches.length, 0, "same-day app restart must not duplicate activity");
+        assert.equal(batches.length, 0, "restart preserves master opt-out");
+        await click(master);
+        await waitUntil(async () => await checked(master) === "true", "re-enable master");
+        assert.equal(await checked(detail), "false", "the detailed opt-out survives restart and master re-enable");
+        await input();
+        await telemetry.flush();
+        assert.equal(batches.length, 0, "same-day re-enable cannot duplicate activity");
       } else {
         await waitUntil(() => fs.existsSync(statePath), "first trusted activity");
         const first = readState().outbox[0].event;
         assert.equal(first.properties.report_day, "2026-09-10");
         assert.equal(readState().outbox.length, 1);
+        assert.equal(readState().detail.draft, null);
         // Host may flush already-recorded events while the window is hidden.
         w.hide(); await telemetry.flush();
         assert.equal(batches.length, 1);
         assert.deepEqual(batches[0].batch, [first]);
+        await focus();
+        await click(detail);
+        await waitUntil(async () => await checked(detail) === "true", "detailed re-enable saved");
+        await evalUi('location.hash="/inspirations"');
+        await waitUntil(() => evalUi(`!!document.querySelector('textarea[aria-keyshortcuts="Enter"]')`), "production Inspiration composer");
+        await focus();
+        await evalUi(`document.querySelector('textarea[aria-keyshortcuts="Enter"]').focus()`);
+        await w.webContents.insertText("SECRET_CANARY synthetic Inspiration note");
+        await waitUntil(() => evalUi(`document.querySelector('textarea[aria-keyshortcuts="Enter"]')?.value.startsWith('SECRET_CANARY')`), "real Inspiration input");
+        press("Enter");
+        await waitUntil(() => notes.length === 1, "real Inspiration action reached local fixture");
+        await delay(120);
+        await telemetry.flush();
+        assert.equal(batches.length, 1, "current-day details are not sent individually");
         clock.advance(1);
-        await w.webContents.executeJavaScript(`window.__fixtureNow=${clock.now()};window.openclawDesktop.productTelemetry.recordActivity();`);
+        const epoch = telemetry.getSettings().basicEpoch;
+        const signal = `window.openclawDesktop.productTelemetry.record(${JSON.stringify({ kind: "activity", collectionEpoch: epoch, payload: {} })});`;
+        w.hide();
+        await w.webContents.executeJavaScript(`window.__fixtureNow=${clock.now()};${signal}`);
         await delay(100);
         assert.equal(readState().outbox.length, 0, "even a forged bridge call fails while hidden");
         await focus();
         power.emit("suspend");
-        await w.webContents.executeJavaScript("window.openclawDesktop.productTelemetry.recordActivity()");
+        await w.webContents.executeJavaScript(signal);
         await delay(100);
         power.emit("resume");
         assert.equal(readState().outbox.length, 0);
         await input();
-        await waitUntil(() => readState().outbox.length === 1, "next-day activity");
+        await waitUntil(() => readState().outbox.length === 2, "next-day activity and sealed previous-day details");
         assert.equal(readState().distinctId, first.distinct_id);
-        assert.equal(readState().outbox[0].event.properties.report_day, "2026-09-11");
+        assert.ok(readState().outbox.some(row => row.event.event === "shoggoth_app_active" && row.event.properties.report_day === "2026-09-11"));
         await telemetry.flush();
-        assert.equal(batches.length, 2);
+        await telemetry.flush();
+        assert.equal(batches.length, 3);
         assert.equal(batches[1].batch.length, 1);
         assert.equal(batches[1].batch[0].properties.$geoip_disable, true);
         assert.equal(batches[1].batch[0].properties.$process_person_profile, false);
+        const daily = batches[2].batch[0];
+        assert.equal(daily.event, "shoggoth_daily_feature_usage");
+        assert.equal(daily.properties.report_day, "2026-09-10");
+        assert.equal(daily.properties.used_inspiration, true);
+        assert.equal(daily.properties.inspiration_create_attempt_count, 1);
+        assert.equal(daily.properties.inspiration_create_success_count, 1);
+        await evalUi('location.hash="/settings"');
+        await waitUntil(async () => await checked(master) === "true", "settings after navigation");
+        await click(detail);
+        await waitUntil(async () => await checked(detail) === "false", "detailed opt-out retained");
+        await click(master);
+        await waitUntil(async () => await checked(master) === "false", "total opt-out saved");
+        clock.advance(86_400_000);
+        await evalUi(`window.__fixtureNow=${clock.now()}`);
+        await input(); await telemetry.flush();
+        assert.equal(readState().outbox.length, 0);
+        assert.equal(readState().detail.draft, null);
+        assert.equal(batches.length, 3);
         assert.equal(JSON.stringify(readState()).includes("SECRET_CANARY"), false);
       }
-      assert.equal(blocked.filter((origin) => origin.includes("posthog")).length, 0, "renderer never attempts PostHog");
+      assert.equal(blocked.filter(origin => origin.includes("posthog")).length, 0, "renderer never attempts PostHog");
       console.log(`Electron telemetry ${phase}: PASS (${batches.length} synthetic local batches; zero live telemetry)`);
       passed = true;
     } catch (error) { console.error(error.stack); }

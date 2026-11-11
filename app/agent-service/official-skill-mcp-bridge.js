@@ -73,8 +73,11 @@ async function serve({ input = process.stdin, output = process.stdout, argv = pr
         if (message.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: `official-${providerId}`, version: getOfficialSkillProvider(providerId).version } };
         if (message.method === "ping") return {};
         if (message.method === "tools/list") return { tools: runtime.tools };
-        if (message.method === "tools/call") return { content: [{ type: "text", text: JSON.stringify(await runtime.call(message.params?.name, message.params?.arguments || {},
-          { signal: abort.signal, officialSessionId: message.params?._meta?.["shoggoth/official-session-id"] })) }] };
+        if (message.method === "tools/call") {
+          const result = await runtime.call(message.params?.name, message.params?.arguments || {},
+            { signal: abort.signal, officialSessionId: message.params?._meta?.["shoggoth/official-session-id"] });
+          return { content: [{ type: "text", text: JSON.stringify(result) }] };
+        }
         throw Object.assign(new Error("Unknown method"), { rpcCode: -32601 });
       }).then(result => write({ jsonrpc: "2.0", id: message.id, result }), error => write({ jsonrpc: "2.0", id: message.id,
         error: { code: error.rpcCode || -32000, message: bridgeErrorCode(error) } }))

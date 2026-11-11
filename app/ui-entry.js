@@ -184,7 +184,7 @@ const NATIVE_STRINGS = {
     "proxy.failed.title": "本地安全代理启动失败",
     "proxy.failed.body": "Shoggoth 无法安全连接后端。应用将退出，请重启后再试。",
     "appUpdate.ready.title": "Shoggoth 更新已就绪",
-    "appUpdate.ready.body": "版本 {version} 已下载。打开设置即可重新启动并安装。",
+    "appUpdate.ready.body": "版本 {version} 已下载。可在 Shoggoth 中重启更新。",
   },
   en: {
     "menu.gateway": "Gateway",
@@ -204,7 +204,7 @@ const NATIVE_STRINGS = {
     "proxy.failed.title": "Local security proxy failed",
     "proxy.failed.body": "Shoggoth cannot connect to backends safely. The app will quit; please restart it and try again.",
     "appUpdate.ready.title": "Shoggoth update ready",
-    "appUpdate.ready.body": "Version {version} is downloaded. Open Settings to restart and install it.",
+    "appUpdate.ready.body": "Version {version} is downloaded. Restart and update from Shoggoth.",
   },
 };
 
@@ -270,8 +270,8 @@ function readConfig() {
 
 // First run: drop an editable config.json so the user only ever fills the
 // token once (URL is pre-filled). Token intentionally not shipped in the app.
-function ensureConfigFile() {
-  configStore.ensure();
+function ensureConfigFile({ telemetryDisabled = false } = {}) {
+  configStore.ensure({ telemetryDisabled });
   try { chatReadStateStore.ensure(); }
   catch { console.warn("[chat] shared read state unavailable; unread badges wait for recovery"); }
 }
@@ -665,13 +665,13 @@ function openGatewaySettings() {
 }
 
 function showUpdateReadyNotification(state) {
-  if (!Notification.isSupported()) return;
+  if (!Notification.isSupported() || mainWindow?.isFocused()) return;
   const locale = resolveLocale(readConfig().locale);
   const version = state?.availableVersion || "";
   showNativeNotification(Notification, {
     title: nativeT(locale, "appUpdate.ready.title"),
     body: nativeT(locale, "appUpdate.ready.body", { version }),
-  }, openGatewaySettings);
+  }, showMainWindow);
 }
 
 function setLocaleAndApply(localeRaw) {
@@ -976,10 +976,11 @@ if (!gotLock) {
     const startupGeneration = ++hostGeneration;
     // UI role + single-instance owner only. Inspect config BEFORE ensure() so a
     // lost config alongside existing telemetry state is not mistaken for setup.
+    const telemetryStateDir = path.join(app.getPath("userData"), "product-telemetry");
     try {
       productTelemetry = createProductTelemetry({
-        statePath: path.join(app.getPath("userData"), "product-telemetry", "state.json"),
-        readConfigStatus: configStore.getReadStatus,
+        statePath: path.join(telemetryStateDir, "state.json"),
+        configStore,
         buildConfig: { ...productTelemetryBuildConfig, isPackaged: app.isPackaged,
           appVersion: APP_VERSION, platform: process.platform, arch: process.arch },
       });
@@ -991,7 +992,9 @@ if (!gotLock) {
       productTelemetry?.close();
       productTelemetry = null;
     }
-    ensureConfigFile();
+    // A lost config alongside an existing statistics directory must not
+    // silently reset a prior opt-out when business setup recreates the file.
+    ensureConfigFile({ telemetryDisabled: fs.existsSync(telemetryStateDir) });
     // Seed the applied-config snapshot so the first save diffs against reality
     // (see applyConfigChange) instead of reconnecting everything unconditionally.
     appliedConfig = configStore.read();
@@ -1548,6 +1551,8 @@ if (!gotLock) {
     if ([managedOpenClawProductHost, managedHermesProductHost].some(host => host?.isManaged()) && !managedQuitGate.complete()) return;
     if (appUpdateController?.handleBeforeQuit(event)) return;
     appIsQuitting = true;
+    disposeTelemetryIpc?.();
+    productTelemetry?.close();
     groupSendJournalIpc.dispose();
     const sendJournalStore = groupSendJournalStore;
     groupSendJournalStore = null; groupSendJournalOpening = null;
@@ -1565,8 +1570,6 @@ if (!gotLock) {
     disposeTypewriterSoundIpc?.(); disposeTypewriterSoundIpc = null;
     disposeChatClipboardIpc?.(); disposeChatClipboardIpc = null;
     appUpdateController?.dispose(); appUpdateController = null;
-    disposeTelemetryIpc?.();
-    productTelemetry?.close();
     systemIssues.dispose();
     desktopSystemIssues = null;
     hostStopping = true;

@@ -1,3 +1,4 @@
+import { measureTelemetry, retainTelemetryOperation, startTelemetryOperation, useTelemetryOperations } from "../lib/productTelemetry";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import Modal from "../components/Modal";
@@ -86,20 +87,29 @@ function McpServiceGroupDialog({ recommendation, server, initialUrl, catalogEntr
       if (!/^[\x21-\x7e]{1,16384}$/u.test(token)) throw { code: "MCP_SECRET_INVALID" };
       credentials.headers = { ...credentials.headers, Authorization: `Bearer ${token}` };
     }
-    for (const endpoint of endpoints) {
-      if (!mounted.current) return;
-      const snapshot = await load();
-      if (!mounted.current) return;
-      const group = mcpServiceGroupSummary(recommendation, snapshot.servers);
-      // Multiple accounts at one URL must be resolved explicitly, never guessed.
-      if (group.ambiguous) throw { code: "MCP_REGISTRY_REVISION_CONFLICT" };
-      const existing = group.members.find(value => value.transport.kind === "remote" && mcpRemoteUrlsMatch(value.transport.url, endpoint.url));
-      if (existing && (!existing.enabled || existing.status === "disabled")) continue;
-      remember(existing
-        ? await saveMcpCredentials(existing.id, credentials, snapshot.revision)
-        : await addMcpConnector({ source: { kind: "custom" }, option: { kind: "remote", protocol: "streamable-http", url: endpoint.url },
-          name: `${recommendation.name} · ${mcpRecommendationText(endpoint.label, language)}`, fields: credentials, expectedRevision: snapshot.revision }));
-    }
+    const feature = servers.length ? "connector_auth" : "connector_add";
+    await measureTelemetry<"success" | "error" | null>(feature, "shoggoth", async () => {
+      const statuses: McpServer["status"][] = [];
+      for (const endpoint of endpoints) {
+        if (!mounted.current) return null;
+        const snapshot = await load();
+        if (!mounted.current) return null;
+        const group = mcpServiceGroupSummary(recommendation, snapshot.servers);
+        // Multiple accounts at one URL must be resolved explicitly, never guessed.
+        if (group.ambiguous) throw { code: "MCP_REGISTRY_REVISION_CONFLICT" };
+        const existing = group.members.find(value => value.transport.kind === "remote" && mcpRemoteUrlsMatch(value.transport.url, endpoint.url));
+        if (existing && (!existing.enabled || existing.status === "disabled")) continue;
+        const result = existing
+          ? await saveMcpCredentials(existing.id, credentials, snapshot.revision)
+          : await addMcpConnector({ source: { kind: "custom" }, option: { kind: "remote", protocol: "streamable-http", url: endpoint.url },
+            name: `${recommendation.name} · ${mcpRecommendationText(endpoint.label, language)}`, fields: credentials, expectedRevision: snapshot.revision });
+        statuses.push(result.server.status);
+        remember(result);
+      }
+      if (feature === "connector_add") return statuses.length ? "success" : null;
+      if (statuses.includes("failed")) return "error";
+      return statuses.length && statuses.every(status => status === "ready") ? "success" : null;
+    }, outcome => outcome);
     if (mounted.current) { setEditing(false); try { onUnstage?.(); } catch { setError(tr("flow.storageError")); } }
   }, true);
   const verify = () => run(async () => {
@@ -112,15 +122,18 @@ function McpServiceGroupDialog({ recommendation, server, initialUrl, catalogEntr
   }, true);
   const remove = () => run(async () => {
     if (!await confirm({ title: tr("group.remove"), message: t("mcpConnectors.group.removeConfirm", { count: servers.length }), confirmLabel: tr("flow.remove"), danger: true })) return;
-    for (const member of servers) {
-      if (!mounted.current) return;
-      const snapshot = await load(), current = snapshot.servers.find(value => value.id === member.id);
-      if (!mounted.current) return;
-      if (!current) continue;
-      if (!mcpRecommendationMatchesServer(recommendation, current)) throw { code: "MCP_REGISTRY_REVISION_CONFLICT" };
-      await removeMcpConnector(current.id, snapshot.revision);
-      if (mounted.current) { setServers(previous => previous.filter(value => value.id !== current.id)); onChanged(); }
-    }
+    if (servers.length) await measureTelemetry("connector_remove", "shoggoth", async () => {
+      for (const member of servers) {
+        if (!mounted.current) return false;
+        const snapshot = await load(), current = snapshot.servers.find(value => value.id === member.id);
+        if (!mounted.current) return false;
+        if (!current) continue;
+        if (!mcpRecommendationMatchesServer(recommendation, current)) throw { code: "MCP_REGISTRY_REVISION_CONFLICT" };
+        await removeMcpConnector(current.id, snapshot.revision);
+        if (mounted.current) { setServers(previous => previous.filter(value => value.id !== current.id)); onChanged(); }
+      }
+      return true;
+    }, completed => completed ? "success" : null);
     if (mounted.current) { onUnstage?.(); onChanged(); onClose(); }
   });
   if (selected) return <McpSingleConnectorDialog key={selected.id} server={selected} recommendation={recommendation} onClose={() => { setSelected(undefined); reload(); }} onChanged={() => { onChanged(); reload(); }} />;
@@ -250,8 +263,16 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
   const option = item?.options.find(value => value.id === optionId);
   const clearValues = () => { setValues(previous => Object.fromEntries(Object.entries(previous).filter(([name]) => option?.fields.some(field => `${field.location}:${field.name}` === name && !field.secret && ["argument", "variable"].includes(field.location))))); setAccessToken(""); setHeaders(""); setEnv(""); setClientSecret(""); setClientId(""); setConfig(""); setShowSecrets(false); setMeteredChanged(false); };
   const accept = (result: McpMutation) => { if (!mounted.current) return; setServer(result.server); setEditing(false); try { onUnstage?.(); } catch { setError(tr("flow.storageError")); } onChanged(); if (result.server.status === "ready") onReady?.(result.server); };
+  const telemetrySignIns = useTelemetryOperations();
   const signin = async (id: string) => {
-    const result = await startMcpSignIn(id); if (!mounted.current) { void cancelMcpSignIn(result.signInId).catch(() => {}); return; }
+    const telemetry = startTelemetryOperation("connector_auth", "shoggoth");
+    const result = await startMcpSignIn(id).catch(error => { telemetry?.finish("error", error); throw error; });
+    if (!mounted.current) { void cancelMcpSignIn(result.signInId).catch(() => {}); return; }
+    const status = result.status || result.phase || "";
+    if (["completed", "authorized"].includes(status)) telemetry?.finish("success");
+    else if (["failed", "expired"].includes(status)) telemetry?.finish("error", result.errorCode);
+    else if (status === "cancelled") telemetry?.finish("canceled");
+    else retainTelemetryOperation(telemetrySignIns, result.signInId, telemetry);
     setClientRequired(false);
     setSignIn(result);
     const href = result.authorizationUrl || result.url; if (href && /^https?:\/\//i.test(href)) window.open(href, "_blank", "noopener,noreferrer");
@@ -260,6 +281,12 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     if (!signIn || ["completed", "authorized", "cancelled", "failed", "expired"].includes(signIn.status || signIn.phase || "")) return;
     let active = true, polling = false; const timer = setInterval(() => { if (polling) return; polling = true; void getMcpSignIn(signIn.signInId).then(async result => {
       if (!active) return;
+      const status = result.status || result.phase || "";
+      if (["completed", "authorized", "cancelled", "failed", "expired"].includes(status)) {
+        telemetrySignIns.get(signIn.signInId)?.finish(status === "cancelled" ? "canceled"
+          : ["completed", "authorized"].includes(status) ? "success" : "error", result.errorCode);
+        telemetrySignIns.delete(signIn.signInId);
+      }
       if (["completed", "authorized"].includes(result.status || result.phase || "") && server) { setVerifying(true); try { const check = await verifyMcpConnector(server.id); if (active) accept(check); } finally { if (active) setVerifying(false); } }
       if (active) setSignIn(result);
     }).catch(error => { if (active) setError(formatMcpError(error, t)); }).finally(() => { polling = false; }); }, 1500);
@@ -273,11 +300,11 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     if (current) {
       if (!isFigmaDesktopConnector(current)) throw { code: "MCP_REGISTRY_REVISION_CONFLICT" };
       accept(current.status === "disabled"
-        ? await rebindMcpConnector(current.id, current.transport, snapshot.revision)
+        ? await measureTelemetry("connector_toggle", "shoggoth", () => rebindMcpConnector(current.id, current.transport, snapshot.revision))
         : await verifyMcpConnector(current.id));
     } else {
-      accept(await addMcpConnector({ source: { kind: "custom" }, name: tr("figmaDesktop.name"),
-        option: { kind: "remote", protocol: "streamable-http", url: FIGMA_DESKTOP_URL }, expectedRevision: snapshot.revision }));
+      accept(await measureTelemetry("connector_add", "shoggoth", () => addMcpConnector({ source: { kind: "custom" }, name: tr("figmaDesktop.name"),
+        option: { kind: "remote", protocol: "streamable-http", url: FIGMA_DESKTOP_URL }, expectedRevision: snapshot.revision })));
     }
   });
   const fieldValues = (): McpFields => {
@@ -296,7 +323,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     if (recommendation?.setup === "restricted") return;
     if (recommendationMissingSetup) throw Object.assign(new Error("MCP_SETUP_REQUIRED"), { code: "MCP_SETUP_REQUIRED" });
     const snapshot = await listMcpConnectors();
-    if (!server && !item && mode === "paste") { const result = await importMcpConnectors(config, snapshot.revision); clearValues(); onChanged(); if (result.errors?.length) setError(result.errors.map(value => formatMcpError({ code: value.errorCode }, t)).join(" · ")); else onClose(); return; }
+    if (!server && !item && mode === "paste") { const result = await measureTelemetry("connector_add", "shoggoth", () => importMcpConnectors(config, snapshot.revision), result => result.errors?.length ? "error" : "success"); clearValues(); onChanged(); if (result.errors?.length) setError(result.errors.map(value => formatMcpError({ code: value.errorCode }, t)).join(" · ")); else onClose(); return; }
     const fields = fieldValues();
     const packageArgumentsChanged = !!presetPackage && Object.keys(fields.arguments || {}).length > 0;
     const resolvedPackage = presetPackage && (!server || packageArgumentsChanged)
@@ -334,7 +361,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     else if (presetPackage) transport = resolvedPackage!;
     else if (mode === "remote") transport = { kind: "remote", protocol: "streamable-http", url };
     else { const parsed = parseMcpArguments(args); transport = { kind: "stdio-command", command, args: parsed, cwd }; }
-    const result = await addMcpConnector({ source: item ? { kind: "registry", registryName: item.registryName, version: item.version } : { kind: "custom" }, option: transport, fields, expectedRevision: snapshot.revision, ...(name.trim() ? { name: name.trim() } : {}) });
+    const result = await measureTelemetry("connector_add", "shoggoth", () => addMcpConnector({ source: item ? { kind: "registry", registryName: item.registryName, version: item.version } : { kind: "custom" }, option: transport, fields, expectedRevision: snapshot.revision, ...(name.trim() ? { name: name.trim() } : {}) }));
     clearValues(); accept(result); if (result.server.status === "signedOut" && canSignIn) await signin(result.server.id);
   });
   const input = (label: string, value: string, set: (value: string) => void, secret = false, multiline = false) => <label className={s.field}><span>{label}</span>{multiline ? <textarea className={secret && !showSecrets ? s.masked : undefined} rows={4} value={value} disabled={locked} autoComplete="off" spellCheck={false} onChange={event => set(event.target.value)} /> : <input type={secret && !showSecrets ? "password" : "text"} value={value} disabled={locked} autoComplete="off" spellCheck={false} onChange={event => set(event.target.value)} />}</label>;
@@ -397,9 +424,9 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     }
     const snapshot = await listMcpConnectors();
     const transport: McpTransport | { id: string } = item ? { id: optionId } : presetPackage || presetCommand || { kind: "remote", protocol: "streamable-http", url };
-    accept(await addMcpConnector({ source: item ? { kind: "registry", registryName: item.registryName, version: item.version } : { kind: "custom" },
+    accept(await measureTelemetry("connector_add", "shoggoth", () => addMcpConnector({ source: item ? { kind: "registry", registryName: item.registryName, version: item.version } : { kind: "custom" },
       option: transport, expectedRevision: snapshot.revision, ...(name.trim() ? { name: name.trim() } : {}),
-      ...(recommendation?.defaults?.env ? { fields: { env: recommendation.defaults.env } } : {}) }));
+      ...(recommendation?.defaults?.env ? { fields: { env: recommendation.defaults.env } } : {}) })));
   });
   useEffect(() => {
     if (autoAdd && preAdd && !initialAdd.current) { initialAdd.current = true; void add(); }
@@ -411,7 +438,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
   };
   const remove = () => act(async () => {
     if (!await confirm({ title: tr("flow.remove"), message: tr("removeConfirm"), confirmLabel: tr("flow.remove"), danger: true })) return;
-    if (server) { const current = await listMcpConnectors(); await removeMcpConnector(server.id, current.revision); }
+    if (server) { const current = await listMcpConnectors(); await measureTelemetry("connector_remove", "shoggoth", () => removeMcpConnector(server.id, current.revision)); }
     onUnstage?.(); onChanged(); onClose();
   });
   const primaryAction = <button type="button" className="btn-dark btn-sm" disabled={locked || recommendationMissingSetup || !server && !!item && (!optionId || option?.available === false)} onClick={() => void (managed && server ? act(async () => accept(await verifyMcpConnector(server.id))) : primary())}>{tr(verifying ? "flow.verifying" : signingIn ? "flow.waiting" : busy ? "working" : needsForm || editing ? "flow.saveConnect" : isRemote && canSignIn ? "flow.authorize" : "flow.checkConnect")}</button>;

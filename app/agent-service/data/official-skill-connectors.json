@@ -141,40 +141,6 @@
     }
   },
   {
-    "id": "netease-music",
-    "name": "网易云音乐",
-    "description": {
-      "zh-CN": "授权后搜索音乐、查看收藏歌单并创建歌单。",
-      "en": "Authorize to search music, view collected playlists and create playlists."
-    },
-    "docsUrl": "https://developer.music.163.com/st/developer/apply/account?type=INDIVIDUAL",
-    "version": "0.1.7",
-    "fields": [
-      {
-        "name": "NCM_APP_ID",
-        "required": true,
-        "secret": true,
-        "label": {
-          "zh-CN": "开放平台 App ID",
-          "en": "Developer App ID"
-        }
-      },
-      {
-        "name": "NCM_PRIVATE_KEY",
-        "required": true,
-        "secret": true,
-        "label": {
-          "zh-CN": "开放平台 Private Key",
-          "en": "Developer private key"
-        }
-      }
-    ],
-    "note": {
-      "zh-CN": "先申请开放平台凭据，再用网易云音乐 App 授权。当前支持搜索与歌单，暂不提供播放控制。",
-      "en": "Apply for developer credentials, then authorize with the NetEase Music app. This connector supports search and playlists; playback controls are not available."
-    }
-  },
-  {
     "id": "baidu-maps",
     "name": "百度地图 / Baidu Maps",
     "description": {

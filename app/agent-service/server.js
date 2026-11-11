@@ -227,7 +227,7 @@ const {
 } = require("./agent-lifecycle-service-controller");
 const { AgentArchiveRetention } = require("./agent-archive-retention");
 const { AgentHarnessServiceController } = require("./agent-harness-service-controller");
-const { CodexSchemaContract } = require("./codex-schema-contract");
+const { CODEX_VERSION, CodexSchemaContract } = require("./codex-schema-contract");
 const {
   CHAT_SERVICE_METHODS,
   mapChatServiceError,
@@ -589,7 +589,7 @@ function validatedProviderResult(method, result) {
       if (!exactObject(result, ["providerId", "validationStatus", "parsedBy"])
         || !validBoundedString(result.providerId, 128)
         || result.validationStatus !== "protocol_valid"
-        || result.parsedBy !== "codex-0.159.2") throw new Error("invalid validation result");
+        || result.parsedBy !== `codex-${CODEX_VERSION}`) throw new Error("invalid validation result");
       return { ...result };
     }
     if (method === "provider.delete" && result === null) return null;
@@ -5321,6 +5321,7 @@ function createAgentService(options) {
           nativeMcpClientManager.open?.(); mcpOAuthClient.open?.();
           mcpConnectorController.open();
           officialSkillConnectorController.open();
+          await officialSkillConnectorController.retireRemovedProviders();
           appleDeviceApprovalBroker.open(generation);
           appleDeviceController.open();
           browserUseControllerOpened = true;

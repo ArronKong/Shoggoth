@@ -897,7 +897,7 @@ export function getDesktopProductTelemetry(): DesktopProductTelemetryBridge | nu
   if (typeof window === "undefined") return null;
   const bridge = (window as unknown as { openclawDesktop?: { productTelemetry?: DesktopProductTelemetryBridge } })
     .openclawDesktop?.productTelemetry;
-  return typeof bridge?.recordActivity === "function" ? bridge : null;
+  return typeof bridge?.record === "function" && typeof bridge.getSettings === "function" ? bridge : null;
 }
 
 type DesktopSecretEnvelope<T> =
@@ -1918,8 +1918,10 @@ export async function getAgentDefinition(backend: string, id: string): Promise<i
 export function getAgentRuntimeBindings(backend: string, id: string): Promise<import("../types").AgentRuntimeBindingsSnapshot> {
   return jsonFetch(agentUrl(backend, id, "/runtime-bindings"));
 }
-export function getAgentDefaultModels(backend: string, id: string): Promise<import("../types").AgentDefaultModels> {
-  return jsonFetch(agentUrl(backend, id, "/default-model"));
+export function getAgentDefaultModels(backend: string, id: string,
+  { defaultBindingOnly = false } = {}): Promise<import("../types").AgentDefaultModels> {
+  const url = agentUrl(backend, id, "/default-model");
+  return jsonFetch(defaultBindingOnly ? `${url}&scope=default` : url);
 }
 export function selectAgentDefaultModel(backend: string, id: string,
   input: import("../types").AgentDefaultModelSelection & { model: string }): Promise<import("../types").AgentDefaultModelSelection> {

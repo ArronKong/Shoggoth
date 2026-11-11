@@ -39,7 +39,7 @@ async function waitFor(predicate) {
 }
 test('pinned non-experimental schema maps the direct native MCP API', () => {
   const schema = new CodexSchemaContract({ repoRoot: REPO });
-  assert.equal(schema.version, '0.159.2');
+  assert.equal(schema.version, '0.167.1');
   assert.equal(schema.operations.mcpServerToolCall.method, 'mcpServer/tool/call');
   schema.validateParams('mcpServerToolCall', PARAMS);
   schema.validateResponse('mcpServerToolCall', { content: [], isError: false, structuredContent: { marker: 'unit' } });

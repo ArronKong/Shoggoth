@@ -1585,7 +1585,7 @@ test("Provider IPC 严格分派 list/save/delete/secret set-clear/protocol valid
     async clearSecret(value) { calls.push(["clearSecret", value]); return provider; },
     async validate(value) {
       calls.push(["validate", value]);
-      return { providerId: provider.id, validationStatus: "protocol_valid", parsedBy: "codex-0.159.2" };
+      return { providerId: provider.id, validationStatus: "protocol_valid", parsedBy: "codex-0.167.1" };
     },
   };
   const service = createAgentService({ paths, version: "provider-ipc", providerService });
@@ -1632,7 +1632,7 @@ test("Provider IPC 严格分派 list/save/delete/secret set-clear/protocol valid
       method: "provider.validate",
       params: { providerId: provider.id, level: "protocol" },
     }), {
-      providerId: provider.id, validationStatus: "protocol_valid", parsedBy: "codex-0.159.2",
+      providerId: provider.id, validationStatus: "protocol_valid", parsedBy: "codex-0.167.1",
     });
     const response = await rawJsonRequest(paths.socketPath, {
       id: "provider-invalid",

@@ -203,9 +203,12 @@ function resolveCodexRuntimeLayout(options) {
   }
   assertRegularExecutable(runtimePath, "Codex runtime");
   assertRegularExecutable(hostPath, "Codex code mode host");
+  const execServer = "bin/codex-exec-server";
+  assertRegularExecutable(path.join(packageRoot, execServer), "Codex exec server");
   const packageMetadata = readJsonFile(path.join(packageRoot, "codex-package.json"), "CODEX_RUNTIME_PACKAGE_INVALID");
   if (packageMetadata.layoutVersion !== 1 || packageMetadata.version !== CODEX_VERSION
-    || packageMetadata.variant !== "codex" || packageMetadata.entrypoint !== "bin/codex") {
+    || packageMetadata.variant !== "codex" || packageMetadata.entrypoint !== "bin/codex"
+    || packageMetadata.execServer !== execServer) {
     throw runtimeError("CODEX_RUNTIME_VERSION_MISMATCH", "Codex package metadata is incompatible");
   }
   if (!packaged) {

@@ -1,0 +1,22 @@
+.footer > :last-child {
+  flex: none;
+}
+.notice {
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.notice table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.notice th,
+.notice td {
+  padding: 8px;
+  border-bottom: 1px solid var(--ui-hairline);
+  text-align: start;
+  vertical-align: top;
+}
+.notice th:first-child,
+.notice td:first-child {
+  width: 24%;
+}

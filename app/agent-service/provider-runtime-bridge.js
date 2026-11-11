@@ -151,8 +151,10 @@ class ProviderRuntimeBridge {
       productStore: this.productStore, secretStore: this.secretStore,
     });
     assertRouteCurrent();
-    // The host's own RuntimeAccount decides; a Profile may also bind native Codex.
-    if (supportsSessionProviders({ runtime: "codex", runtimeAccountId })
+    // Management keeps a ChatGPT app-server. An execution app-server starts
+    // on its frozen source so Codex can admit both new and saved threads.
+    const harness = supportsSessionProviders({ runtime: "codex", runtimeAccountId });
+    if (executionContract === null && harness
       && typeof this.productStore.listModelProviders === "function") {
       return this.#prepareSessionProviderRuntime({ runtimeProfileId, runtimeAccountId,
         profileId: executionProviderRoute.providerFence.profileId, executionProviderRoute, assertRouteCurrent });
@@ -199,7 +201,7 @@ class ProviderRuntimeBridge {
           kind: provider.kind,
           name: provider.name,
           baseUrl: provider.baseUrl,
-          model: route.modelRef,
+          model: harness ? provider.model : route.modelRef,
           headers: provider.headers,
           awsRegion: provider.awsRegion,
           awsProfile: provider.awsProfile,
@@ -227,11 +229,8 @@ class ProviderRuntimeBridge {
     }
   }
 
-  // The built-in Codex Harness: the process default is always ChatGPT, so its
-  // sign-in and live catalog stay visible, and every other source of the
-  // Profile (presets, custom endpoints) is declared next to it; each native
-  // thread names its own provider. The host stays current only while that
-  // whole source set and its credentials are.
+  // Management keeps the ChatGPT sign-in and live catalog. Its configured
+  // source set remains current only while its providers and credentials are.
   #sessionProviderSet(profileId) {
     const profile = this.productStore.getAgentProfile(profileId);
     if (!profile?.enabled) throw bridgeError("EXECUTION_CONTRACT_STALE", "Runtime profile changed");

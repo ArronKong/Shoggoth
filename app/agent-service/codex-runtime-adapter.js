@@ -10,6 +10,7 @@ const { runtimeStageError } = require("./runtime-stage-error");
 const { normalizeRuntimeCommands } = require("./runtime-commands");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
 const { codexRuntimeContextUsage, unknownRuntimeContextUsage } = require("./runtime-context-usage");
+const { modelSecretProviderConfig } = require("./codex-runtime-config");
 const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID, NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 
 const CODEX_COMMANDS = normalizeRuntimeCommands([
@@ -287,9 +288,7 @@ class CodexRuntimeHandle {
     return mapThreadEnvelope(response);
   }
 
-  // The built-in Codex Harness declares several sources next to a ChatGPT
-  // process default, so its model work always names one: an omitted source
-  // fails here instead of silently reaching ChatGPT.
+  // Built-in model work explicitly names the source of its execution host.
   _namesProviderRequired() {
     return this.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID;
   }
@@ -300,8 +299,7 @@ class CodexRuntimeHandle {
     }
   }
 
-  // `modelProvider` names the provider a conversation selected; the process
-  // declares it (codex-runtime-config). Omitted keeps the process default.
+  // `modelProvider` names the provider a conversation selected.
   _threadProviderKind(input) {
     const selected = input?.modelProvider;
     if (selected === undefined) return this.host.modelProviderKind;
@@ -353,24 +351,7 @@ class CodexRuntimeHandle {
         assertCurrent: () => this.host.assertExecutionProviderCurrent?.() });
       this.secretRoutes.set(key, route);
     }
-    const provider = "shoggoth_local_projection";
-    return {
-      model_provider: provider,
-      [`model_providers.${provider}.name`]: "OpenAI",
-      [`model_providers.${provider}.base_url`]: route.baseUrl,
-      [`model_providers.${provider}.wire_api`]: "responses",
-      [`model_providers.${provider}.supports_websockets`]: false,
-      // A failed local projection/response proof must not resubmit the model
-      // request behind the Product's turn and operation ownership boundary.
-      [`model_providers.${provider}.request_max_retries`]: 0,
-      [`model_providers.${provider}.stream_max_retries`]: 0,
-      [`model_providers.${provider}.requires_openai_auth`]: providerKind === "chatgpt",
-      ...(providerKind === "openai-api-key" ? { [`model_providers.${provider}.env_key`]: "OPENAI_API_KEY" } : {}),
-      // The local projection boundary accepts bounded JSON, not native zstd.
-      "features.enable_request_compression": false,
-      "features.responses_websockets": false,
-      "features.responses_websockets_v2": false,
-    };
+    return modelSecretProviderConfig(providerKind, route.baseUrl);
   }
 
   async _sessionStartOrResumeRequest(request) {
@@ -854,18 +835,21 @@ class CodexRuntimeAdapter {
     if (binding.runtime !== "codex") {
       throw adapterError("RUNTIME_UNSUPPORTED", `Codex adapter cannot run ${binding.runtime}`);
     }
-    const host = await this.runtimePool.get(binding, options);
-    const key = JSON.stringify([binding.runtimeProfileId, binding.runtimeAccountId]);
-    const existing = this.handles.get(key);
-    if (existing?.host === host) return existing.handle;
+    const { modelSecretProviderKind, ...acquireOptions } = options;
+    const host = await this.runtimePool.get(binding, {
+      ...acquireOptions,
+      ...(this.secretGateway && ["chatgpt", "openai-api-key"].includes(modelSecretProviderKind)
+        ? { modelSecretProviderKind } : {}),
+    });
+    const existing = this.handles.get(host);
+    if (existing?.runtimeProfileId === binding.runtimeProfileId
+      && existing.runtimeAccountId === binding.runtimeAccountId) return existing;
     const handle = Object.freeze(new CodexRuntimeHandle(binding, host, this.secretGateway));
-    const entry = { host, handle };
-    this.handles.set(key, entry);
+    this.handles.set(host, handle);
     if (host.terminated && typeof host.terminated.then === "function") {
-      Promise.resolve(host.terminated).then(
-        () => { if (this.handles.get(key) === entry) this.handles.delete(key); },
-        () => { if (this.handles.get(key) === entry) this.handles.delete(key); },
-      );
+      Promise.resolve(host.terminated).finally(() => {
+        if (this.handles.get(host) === handle) this.handles.delete(host);
+      }).catch(() => {});
     }
     return handle;
   }
@@ -885,8 +869,8 @@ class CodexRuntimeAdapter {
       }
       runtimeProfileId = binding.runtimeProfileId;
     }
-    for (const [key, entry] of this.handles) {
-      if (entry.handle.runtimeProfileId === runtimeProfileId) this.handles.delete(key);
+    for (const [host, handle] of this.handles) {
+      if (handle.runtimeProfileId === runtimeProfileId) this.handles.delete(host);
     }
     if (typeof this.runtimePool.stop !== "function") {
       throw adapterError("RUNTIME_STOP_UNAVAILABLE", "Codex RuntimePool does not support targeted stop");

@@ -50,6 +50,7 @@ async function main() {
     await controller.close();
     const legacy = JSON.parse(fs.readFileSync(controller.recordPath, "utf8"));
     legacy.items = legacy.items.filter(item => legacyIds.includes(item.id));
+    legacy.items.push({ id: "netease-music", revision: 0, state: "notInstalled", stage: null, installation: null, errorCode: null });
     const original = JSON.stringify(legacy); fs.writeFileSync(controller.recordPath, original, { mode: 0o600 });
     controller.open();
     const upgraded = await rest("status");
@@ -63,7 +64,7 @@ async function main() {
       const state = await rest("install", { id, expectedRevision: 0 });
       assert.equal(state.state, "installed"); assert.equal(state.skillCount, 1); installed.push(state);
     }
-    assert.deepEqual(JSON.parse(fs.readFileSync(controller.recordPath, "utf8")).items.filter(item => legacyIds.includes(item.id)), legacy.items);
+    assert.deepEqual(JSON.parse(fs.readFileSync(controller.recordPath, "utf8")).items.filter(item => legacyIds.includes(item.id)), legacy.items.filter(item => item.id !== "netease-music"));
     const weread = installed.find(item => item.id === "weread");
     assert.equal(f.service.nativeMcpStore.get(weread.serverId).status, "needsSetup");
     const profileId = f.service.productStore.listAgentProfiles()[0].id;

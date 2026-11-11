@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { changeLarkCli, getLarkCliStatus, LARK_CLI_CHANGE_EVENT, larkCliErrorKey } from "../api/larkCliConnector";
 import { usePageCache } from "../lib/usePageCache";
+import { measureTelemetry } from "../lib/productTelemetry";
 import McpConnectorIcon from "../components/McpConnectorIcon";
 import ConnectorTools from "../components/ConnectorTools";
 import ConnectorAddButton from "../components/ConnectorAddButton";
@@ -29,9 +30,11 @@ export function useLarkCliConnector() {
     return () => clearInterval(timer);
   }, [busy, cache.refresh]);
   const change = async (action: "install" | "remove") => {
-    if (!cache.data || busy || locked.current) return;
+    const current = cache.data;
+    if (!current || busy || locked.current) return;
     locked.current = true; setPendingAction(action); setActionError("");
-    try { cache.replace(await changeLarkCli(action, cache.data.revision)); }
+    try { cache.replace(await measureTelemetry(action === "install" ? "connector_add" : "connector_remove", "shoggoth",
+      () => changeLarkCli(action, current.revision))); }
     catch (error) { setActionError(larkCliErrorKey(error)); }
     finally { locked.current = false; setPendingAction(null); await cache.refresh(); }
   };

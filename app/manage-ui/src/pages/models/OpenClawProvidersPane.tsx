@@ -1,3 +1,4 @@
+import { measureTelemetry, telemetryCount, telemetryList, telemetryModel, useTelemetrySnapshot } from "../../lib/productTelemetry";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import type { EnvVar, ModelChangeApplyResult, ModelChangeOperation, ProviderDirectoryEntry } from "../../types";
@@ -146,7 +147,9 @@ function ProviderRow({
         toast.error(t("models.dirManagedRecoveryStorage")); return false;
       }
       if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
-      const result = await request(operationId);
+      const result = await measureTelemetry("model_save", backend, () => request(operationId), result =>
+        "status" in result ? result.status === "applied" || result.configSaved === true ? "success"
+          : result.needsVerification ? null : "error" : result.ok ? "success" : "error");
       if (!activeRef.current || backendRef.current !== backend || epoch !== lifecycleEpoch.current) return false;
       if (managed && (!operationId || !("status" in result) || result.operationId !== operationId
         || result.receiptIdentityVerified !== true
@@ -608,6 +611,11 @@ export default function OpenClawProvidersPane({
   const { data: directory, loading, error, refresh } = usePageCache(`models:providers:${backend}`,
     () => getProviderDirectory(backend), { staleTime: 30_000, enabled: active, loadingOnEmptyRefresh: true });
   const entries = directory ? (directory.supported ? directory.providers ?? [] : []) : null;
+  useTelemetrySnapshot("provider", active && directory?.supported && !error ? directory.providers : null, rows => {
+    const configured = rows.filter(row => row.configured || row.inConfig);
+    return { ...telemetryList("configured_provider_ids", configured.map(row => row.custom ? "custom" : telemetryModel(row.id, null).providerId)),
+      ...telemetryCount("configured_provider_count", configured.length) };
+  });
   const directoryLoading = active && loading && !directory;
   const [expanded, setExpanded] = useState(false);
   const [providerWriteRevision, setProviderWriteRevision] = useState(0);

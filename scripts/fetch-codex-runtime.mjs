@@ -41,12 +41,11 @@ const expectedPackageDirectories = [
   "codex-resources/voice/lib",
   "codex-resources/voice/licenses",
   "codex-resources/voice/plugins",
-  "codex-resources/zsh",
-  "codex-resources/zsh/bin"
 ];
 const expectedPackageExecutables = [
   "bin/codex",
   "bin/codex-code-mode-host",
+  "bin/codex-exec-server",
   "codex-path/rg",
   "codex-resources/voice/bin/codex-voice-host",
   "codex-resources/voice/lib/libffi.8.dylib",
@@ -74,7 +73,6 @@ const expectedPackageExecutables = [
   "codex-resources/voice/plugins/libgstopus.dylib",
   "codex-resources/voice/plugins/libgstrtp.dylib",
   "codex-resources/voice/plugins/libgstrtpmanager.dylib",
-  "codex-resources/zsh/bin/zsh"
 ];
 const expectedPackageRegularFiles = [
   "codex-package.json",
@@ -724,6 +722,7 @@ async function verifyExtractedPackage(stagingPackage, platform, packageEntries, 
     target: platformTargets[platform],
     variant: "codex",
     entrypoint: "bin/codex",
+    execServer: "bin/codex-exec-server",
     resourcesDir: "codex-resources",
     pathDir: "codex-path",
   };

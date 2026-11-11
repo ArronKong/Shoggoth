@@ -26,7 +26,7 @@ function fixture() {
     getCredentialRevision: (id) => (secrets.has(id) ? 1 : undefined),
   };
   const providerService = new ProviderService({ productStore, secretStore,
-    protocolValidator: async () => ({ parsedBy: "codex-0.159.2" }), runtimePool: { stop: async () => {} } });
+    protocolValidator: async () => ({ parsedBy: "codex-0.167.1" }), runtimePool: { stop: async () => {} } });
   const profileServiceController = createProfileServiceController({ productStore,
     providerBootstrap: providerService.profileBootstrapCapability,
     runtimeManager: { stop: async () => {}, acquire: async () => { throw new Error("custom catalog must not start ChatGPT"); } },

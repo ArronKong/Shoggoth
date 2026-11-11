@@ -111,44 +111,6 @@ test("Meituan timeout clears authorization, and prices above 100 yuan require a 
   assert.equal(sent[sent.indexOf("--delivery-fee") + 1], "150");
   await assert.rejects(f.runtime.call("submit_order", { previewId: preview.previewId, confirmed: true, highValueConfirmed: true }));
 });
-test("NetEase config uses secret stdin and the verified playlistName flag; unrelated environment is absent", async t => {
-  const appId = "fixture-app-private", key = "fixture-private-key-value";
-  const f = fixture(t, "netease-music", call => call.child.finish({ success: true }), { NCM_APP_ID: appId, NCM_PRIVATE_KEY: key, OTHER_SECRET: "must-not-forward", NODE_OPTIONS: "--eval=evil" });
-  await f.runtime.call("create_playlist", { name: "跑步", confirmed: true });
-  assert.equal(f.calls.length, 3);
-  assert.equal(f.calls[0].input, JSON.stringify(appId)); assert.equal(f.calls[1].input, JSON.stringify(key));
-  assert.equal(f.calls.some(call => call.args.includes(key) || call.args.includes(appId)), false);
-  assert.ok(f.calls[2].argv.includes("--playlistName")); assert.equal(f.calls[2].options.env.OTHER_SECRET, undefined); assert.equal(f.calls[2].options.env.NODE_OPTIONS, undefined);
-  await assert.rejects(f.runtime.call("update_playlist_tracks", {}), { code: "OFFICIAL_SKILL_INVALID_ARGUMENT" });
-});
-test("NetEase trims saved credential boundaries before authorization and preserves private-key line breaks", async t => {
-  const appId = "fixture-app-private", key = "-----BEGIN PRIVATE KEY-----\nfixture-private-key-value\n-----END PRIVATE KEY-----";
-  const env = { NCM_APP_ID: ` ${appId}\t`, NCM_PRIVATE_KEY: `\r\n${key}\r\n` };
-  const f = fixture(t, "netease-music", call => {
-    if (call.argv.includes("--field")) return call.child.finish({ success: true });
-    call.child.finish({ verification_url: "https://music.163.com/authorize/fixture" });
-  }, env);
-  const result = await f.runtime.call("account_start", {});
-  assert.equal(f.calls[0].input, JSON.stringify(appId));
-  assert.equal(f.calls[1].input, JSON.stringify(key));
-  assert.equal(f.calls[2].options.env.NETEASE_APP_ID, appId);
-  assert.equal(f.calls[2].options.env.NETEASE_PRIVATE_KEY, key);
-  assert.equal(result.state, "authorizing");
-  assert.equal(result.verificationUrl, "https://music.163.com/authorize/fixture");
-  assert.equal(env.NCM_APP_ID, ` ${appId}\t`, "normalization does not mutate the shared environment");
-  assert.equal(env.NCM_PRIVATE_KEY, `\r\n${key}\r\n`);
-  assert.equal(JSON.stringify(f.calls.map(call => call.args)).includes(appId), false);
-  assert.equal(JSON.stringify(result).includes("fixture-private-key-value"), false);
-});
-test("NetEase whitespace-only credentials cannot start a provider process", async t => {
-  for (const env of [{ NCM_APP_ID: " \t", NCM_PRIVATE_KEY: "fixture-key" }, { NCM_APP_ID: "fixture-app", NCM_PRIVATE_KEY: "\r\n " }]) {
-    const f = fixture(t, "netease-music", call => call.child.finish({ success: true }), env);
-    const result = await f.runtime.call("account_start", {});
-    assert.equal(result.state, "signedOut");
-    assert.equal(result.errorCode, "OFFICIAL_SKILL_AUTH_UNSUPPORTED");
-    assert.equal(f.calls.length, 0);
-  }
-});
 const paymentContext = { officialSessionId: "1b250e6c-534b-43cf-82fa-edfbd91d098e" };
 const payment = suffix => ({ cashierLink: `https://cashier.alipay.com/fixture-${suffix}`, amountYuan: 12, payee: "Fixture merchant", purpose: "Fixture order", confirmed: true });
 test("Alipay rejects missing or invalid trusted session context and model-supplied session arguments before dispatch", async t => {
@@ -235,6 +197,35 @@ test("Alipay locates the macOS PayGuard helper independently of its private wall
   assert.equal(env.PAYGUARD_INSTALL_DIR, "/untrusted-helper", "the caller's shared environment is unchanged");
 });
 
+test("Alipay distinguishes an existing authorization request from a completed bind", async t => {
+  const f = fixture(t, "alipay", call => {
+    const responses = {
+      "apply-wallet": { alreadyExists: true, alreadyPending: true, status: "unbound" },
+      "check-wallet": { code: 200, message: "已申请开通，等待授权", status: "unbound" },
+      "bind-wallet": { boundAt: "2026-11-11T08:00:00Z", status: "bound" },
+    };
+    call.child.finish(responses[call.argv[0]]);
+  });
+  for (const action of ["account_start", "account_status"]) {
+    const result = await f.runtime.call(action, {});
+    assert.equal(result.state, "authorizing");
+    assert.equal(result.verificationUrl, null);
+    assert.equal(result.errorCode, null);
+  }
+  const bound = await f.runtime.call("account_bind", { code: "123456" });
+  assert.equal(bound.state, "ready");
+  assert.equal(bound.verificationUrl, null);
+});
+
+test("Alipay ignores diagnostic links and rejects non-official authorization URLs", async t => {
+  const diagnostic = JSON.stringify({ event: "http response", accessUrl: "https://u.alipay.cn/diagnostic-only" });
+  const invalid = { alreadyExists: false, alreadyPending: false, status: "unbound", accessUrl: "https://u.alipay.cn.fixture.invalid/authorize" };
+  const f = fixture(t, "alipay", call => call.child.finish(`${diagnostic}\n${JSON.stringify(invalid, null, 2)}`));
+  const result = await f.runtime.call("account_start", {});
+  assert.equal(result.state, "unknown");
+  assert.equal(result.verificationUrl, null);
+});
+
 test("PayGuard discovery is restricted to the native Alipay CLI", () => {
   const { commandEnvironment } = require("../app/agent-service/official-skill-runtime");
   for (const [providerId, native] of [["fliggy", true], ["alipay", false], ["doordash", true]]) {
@@ -262,7 +253,10 @@ async function alipayStdio(t, { vendorState = false, trusted = true, unsafe, mis
 if(process.platform==='darwin')require('node:assert/strict').equal(process.env.PAYGUARD_INSTALL_DIR,path.join(require('node:os').userInfo().homedir,'Library','Application Support','com.alipay.agent.payguard','PayGuard.app'));
 fs.appendFileSync(path.join(process.env.HOME,'provider-invoked'), '1', {mode:0o600});
 (${alipayVendorState.toString()})(process.env.HOME);
-console.log(JSON.stringify(process.argv[2]==='apply-wallet'?{code:200,message:'已申请开通，等待授权',access_url:'https://u.alipay.cn/fixture-wallet'}:{code:200,message:'ready',access_url:''}));\n`;
+console.log(JSON.stringify({event:'http response',accessUrl:'https://u.alipay.cn/diagnostic-only'}));
+console.log(JSON.stringify(process.argv[2]==='apply-wallet'
+  ?{alreadyExists:false,alreadyPending:false,invalidCredentialCleared:false,status:'unbound',accessUrl:'https://u.alipay.cn/fixture-wallet'}
+  :{code:200,message:'ready',status:'bound'},null,2));\n`;
   fs.writeFileSync(executable, source, { mode: 0o700 });
   fs.writeFileSync(path.join(f.root, "payload-manifest.json"), JSON.stringify({ schemaVersion: 1, providerId: "alipay", files: [{ path: "runtime/alipay-bot", sha256: crypto.createHash("sha256").update(source).digest("hex") }] }), { mode: 0o600 });
   const { StdioMcpClient } = require("../app/agent-service/native-mcp-client-manager");

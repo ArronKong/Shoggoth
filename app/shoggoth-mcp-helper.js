@@ -814,10 +814,10 @@ function jsonRpcResult(id, result) {
 
 function toolSuccessResponse(id, result, toolName) {
   const content = [{ type: "text", text: JSON.stringify(result) }];
-  // Browser calls and workspace commands return an execution outcome inside a
-  // successful Service RPC. Preserve their real failure in the MCP envelope.
+  // Tool execution outcomes can arrive inside a successful Service RPC.
   const isError = (toolName === "browser_tool_call" && result?.isError === true)
     || (toolName === "connector_execute_action" && result?.isError === true)
+    || (toolName === "mcp_server_call" && result?.result?.isError === true)
     || (toolName === "workspace_execute" && Number.isInteger(result?.exitCode) && result.exitCode !== 0);
   let response = jsonRpcResult(id, { content, structuredContent: result, isError });
   if (Buffer.byteLength(JSON.stringify(response), "utf8") <= MCP_MAX_FRAME_BYTES) return response;

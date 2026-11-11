@@ -736,19 +736,6 @@
       "sha256": "1c8e6d542d5798e057d4586ff42679b0b23a2671206cec5ad7b9a79047574136"
     },
     {
-      "id": "netease-music",
-      "page": "https://apps.apple.com/cn/app/id590338362",
-      "asset": "netease-music.png",
-      "assetUrl": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/28/7b/a9/287ba9e3-751c-3994-cf3a-04a9ae2cbcac/appIconNew-0-0-1x_U007epad-0-1-0-85-220.png/512x512bb.png",
-      "originalType": "image/png",
-      "originalWidth": 512,
-      "originalHeight": 512,
-      "bytes": 13265,
-      "sha256": "f9ff5015ff982eaf8c9af94bd970eacbf535911a00c5b10c63ee02997facfb0d",
-      "retrievedAt": "2026-11-09",
-      "normalization": "Official 512 × 512 App Store artwork downsampled to 128 × 128."
-    },
-    {
       "id": "netlify",
       "page": "https://www.netlify.com/",
       "asset": "netlify.png",

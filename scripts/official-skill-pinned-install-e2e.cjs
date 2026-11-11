@@ -17,7 +17,6 @@ const { prepareOfficialSkill, RELEASES } = require("../app/agent-service/officia
 const { OFFICIAL_SKILL_IDS } = require("../app/core/official-skill-connector-dto");
 const { PROVIDERS } = require("../app/agent-service/official-skill-providers");
 const { createMcpFetch } = require("../app/agent-service/mcp-http-fetch");
-const { runNeteaseOfflineSmoke } = require("./official-skill-cli-offline-smoke.cjs");
 const { runDoorDashOfflineSmoke } = require("./doordash-cli-offline-smoke.cjs");
 
 async function main() {
@@ -48,12 +47,12 @@ async function main() {
   const urlFiles = new Map();
   for (const [id, release] of Object.entries(RELEASES)) {
     if (!release.mcp && !release.native && !release.quark && !release.baidu) urlFiles.set(`https://codeload.github.com/${release.repo}/zip/${release.ref}`, `${id}-repository.zip`);
-    if (release.runtime) urlFiles.set(release.runtime.url, { fliggy: "flyai-cli-1.0.16.tgz", "netease-music": "ncm-cli-0.1.7.tgz", alipay: "alipay-runtime-darwin-0.4.8.tgz" }[id]);
+    if (release.runtime) urlFiles.set(release.runtime.url, { fliggy: "flyai-cli-1.0.16.tgz", alipay: "alipay-runtime-darwin-0.4.8.tgz" }[id]);
   }
   for (const archive of Object.values(require("../app/agent-service/data/doordash-cli-release.json").archives)) urlFiles.set(archive.url, path.basename(new URL(archive.url).pathname));
   const quarkRelease = require("../app/agent-service/quark-skill-installer").RELEASE;
   urlFiles.set(quarkRelease.url, `quarkclouddrive-${quarkRelease.version}.zip`);
-  const dependencies = require("../app/agent-service/data/ncm-locked-js-dependencies.json");
+  const dependencies = require("../app/agent-service/data/rollinggo-locked-js-dependencies.json");
   const downloads = [], originalArchives = [], npmArchives = [], network = createMcpFetch();
   const fetch = async (url, options) => {
     const shopFixture = archiveDir && path.join(archiveDir, "shop-mcp.json");
@@ -84,7 +83,7 @@ async function main() {
       try { return await prepareOfficialSkill({ ...options, fetch }); }
       catch (error) { console.error(JSON.stringify({ stage: "prepare", provider: options.providerId, lastPublicDownload: downloads.at(-1) || null })); throw error; }
     } });
-  const expectedBusiness = { doordash: "search_stores", shop: "search_catalog", "quark-drive": "search_files", "rollinggo-hotel": "search_hotels", "baidu-maps": "place", fliggy: "travel_search", weread: "bookshelf", "meituan-paotui": "delivery_preview", alipay: "submit_payment", "netease-music": "search_songs" };
+  const expectedBusiness = { doordash: "search_stores", shop: "search_catalog", "quark-drive": "search_files", "rollinggo-hotel": "search_hotels", "baidu-maps": "place", fliggy: "travel_search", weread: "bookshelf", "meituan-paotui": "delivery_preview", alipay: "submit_payment" };
   const receipts = [];
   try {
     skills.open(["profile-a"]); store.open(); manager.open(); mcp.open(); controller.open();
@@ -143,7 +142,7 @@ async function main() {
       assert.equal(repaired.serverId, installed.serverId); assert.equal(store.get(installed.serverId).enabled, true);
       if (accountFixture) { assert.equal(fs.readFileSync(accountFixture, "utf8"), "isolated-private-fixture"); assert.deepEqual(store.get(installed.serverId).disabledProfileIds, ["profile-a"]); }
       const count = item.files.length, runtimeRoot = controller._root(id);
-      const cliSmoke = id === "netease-music" ? runNeteaseOfflineSmoke(runtimeRoot, path.join(runtimeRoot, "home")) : doordashOfflineSmoke ? await runDoorDashOfflineSmoke(runtimeRoot, path.join(runtimeRoot, "home")) : null;
+      const cliSmoke = doordashOfflineSmoke ? await runDoorDashOfflineSmoke(runtimeRoot, path.join(runtimeRoot, "home")) : null;
       if (id === "shop") assert.equal(item.files.some(file => file.path.startsWith("runtime/")), false, "Shop uses its remote MCP, with no CLI payload");
       let liveSearch = null;
       if (liveShopSearch) {

@@ -1830,10 +1830,10 @@
     {
       "name": "OpenAI Codex",
       "license": "Apache-2.0",
-      "source": "https://github.com/openai/codex/tree/rust-v0.159.2",
-      "revision": "0.159.2",
+      "source": "https://github.com/openai/codex/tree/rust-v0.167.1",
+      "revision": "0.167.1",
       "localFiles": [
-        "schemas/codex-app-server/0.159.2",
+        "schemas/codex-app-server/0.167.1",
         "build/codex-runtime-manifest.json"
       ],
       "licenseFiles": [
@@ -1845,8 +1845,8 @@
     {
       "name": "Codex native voice libraries",
       "license": "LGPL-2.1-or-later AND MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib",
-      "source": "https://github.com/openai/codex/tree/rust-v0.159.2/third_party/voice",
-      "revision": "Codex 0.159.2; library versions and source archive hashes in codex-voice/sources.json",
+      "source": "https://github.com/openai/codex/tree/rust-v0.167.1/third_party/voice",
+      "revision": "Codex 0.167.1; library versions and source archive hashes in codex-voice/sources.json",
       "localFiles": [
         ".vendor/codex/arm64/package/codex-resources/voice",
         ".vendor/codex/x64/package/codex-resources/voice"
@@ -1928,19 +1928,6 @@
         "licenses/source/PCRE2.txt"
       ],
       "notes": "Bundled through ripgrep; full upstream notice includes the contributed-file notices."
-    },
-    {
-      "name": "zsh (Codex bundled shell)",
-      "license": "LicenseRef-Zsh",
-      "source": "https://github.com/zsh-users/zsh/tree/zsh-5.9",
-      "revision": "binary reports 5.9.0.3-test; 5.9 upstream license reference",
-      "localFiles": [
-        "build/codex-runtime-manifest.json"
-      ],
-      "licenseFiles": [
-        "licenses/source/ZSH.txt"
-      ],
-      "notes": "Preserved zsh upstream redistribution terms. Shell shipped unchanged as part of the pinned Codex package; upstream package does not identify a separate zsh source commit."
     },
     {
       "name": "Codex inline visualization stylesheet",

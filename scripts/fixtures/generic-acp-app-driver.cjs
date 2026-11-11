@@ -387,7 +387,7 @@ async function run() {
         // Public MCP registrations can arrive before separate ownership status.
         // Disabled bridges exercise presentation without launching any CLI.
         const { ensurePrivateDirectoryTree } = require(path.join(moduleRoot, "agent-service/security"));
-        const displayRegistrations = ["alipay", "fliggy", "netease-music", "shop"].map((id, index) => {
+        const displayRegistrations = ["alipay", "fliggy", "shop"].map((id, index) => {
           const runtimeRoot = path.join(paths.stateDir, "runtime-bin/official-skills", id, crypto.randomUUID());
           ensurePrivateDirectoryTree(path.join(runtimeRoot, "home"), paths.trustedRoot);
           return { id: `official-${id}-a0b0c0d${index}`, name: officialSkills.find(item => item.id === id).name, source: { kind: "custom" }, enabled: false,
@@ -401,7 +401,7 @@ async function run() {
         const iconRows = await until(async () => await js(`(() => {
           const ids=${JSON.stringify(displayRegistrations.map(server => server.id))};
           const rows=ids.map(id=>{const image=document.querySelector('[data-mcp-icon="'+id+'"] img');return image?.complete&&image.naturalWidth>0?{id,src:image.getAttribute('src')}:null});
-          const duplicate=${JSON.stringify(["alipay", "fliggy", "netease-music", "shop"])}.some(id=>document.querySelector('[data-official-recommendation="'+id+'"]'));
+          const duplicate=${JSON.stringify(["alipay", "fliggy", "shop"])}.some(id=>document.querySelector('[data-official-recommendation="'+id+'"]'));
           return rows.every(Boolean)&&!duplicate?rows:null;
         })()`), "installed official artwork loads and duplicate Add recommendations disappear");
         await js(`document.querySelector('[data-mcp-icon="${displayRegistrations[0].id}"]').scrollIntoView({block:'center'});void 0`);

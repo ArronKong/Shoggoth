@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.307",
+      "version": "0.8.311",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.307",
-      "purl": "pkg:generic/shoggoth@0.8.307",
+      "bom-ref": "pkg:generic/shoggoth@0.8.311",
+      "purl": "pkg:generic/shoggoth@0.8.311",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -100,12 +100,12 @@
     {
       "type": "application",
       "name": "OpenAI Codex",
-      "version": "0.159.2",
-      "bom-ref": "pkg:generic/openai-codex@0.159.2?platform=darwin-arm64",
+      "version": "0.167.1",
+      "bom-ref": "pkg:generic/openai-codex@0.167.1?platform=darwin-arm64",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "38aaf6dce63099fd10988948d03bbc6c0474253aef6961fcbe60f8d154b39101"
+          "content": "5bcbc5866cbca19f9299f7884e9b39b9ccb5469969c170b1f2d2cd6fc4b1ee72"
         }
       ],
       "licenses": [
@@ -115,11 +115,11 @@
           }
         }
       ],
-      "purl": "pkg:generic/openai-codex@0.159.2?platform=darwin-arm64",
+      "purl": "pkg:generic/openai-codex@0.167.1?platform=darwin-arm64",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://releases.openai.com/codex/releases/0.159.2/codex-package-aarch64-apple-darwin.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.167.1/codex-package-aarch64-apple-darwin.tar.gz"
         }
       ],
       "properties": [
@@ -132,12 +132,12 @@
     {
       "type": "application",
       "name": "OpenAI Codex",
-      "version": "0.159.2",
-      "bom-ref": "pkg:generic/openai-codex@0.159.2?platform=darwin-x64",
+      "version": "0.167.1",
+      "bom-ref": "pkg:generic/openai-codex@0.167.1?platform=darwin-x64",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "6b9b38bfad6ac8019aa6a243ee3ab11d3e22889eafd5458b0344cf20e797e680"
+          "content": "ade991ce7fef5b4f4af884c154b9455d493cd0caf13789fc3ff9f842897b55d3"
         }
       ],
       "licenses": [
@@ -147,11 +147,11 @@
           }
         }
       ],
-      "purl": "pkg:generic/openai-codex@0.159.2?platform=darwin-x64",
+      "purl": "pkg:generic/openai-codex@0.167.1?platform=darwin-x64",
       "externalReferences": [
         {
           "type": "distribution",
-          "url": "https://releases.openai.com/codex/releases/0.159.2/codex-package-x86_64-apple-darwin.tar.gz"
+          "url": "https://releases.openai.com/codex/releases/0.167.1/codex-package-x86_64-apple-darwin.tar.gz"
         }
       ],
       "properties": [
@@ -13278,7 +13278,7 @@
     {
       "type": "library",
       "name": "Codex native voice libraries",
-      "version": "Codex 0.159.2; library versions and source archive hashes in codex-voice/sources.json",
+      "version": "Codex 0.167.1; library versions and source archive hashes in codex-voice/sources.json",
       "bom-ref": "source:Codex native voice libraries",
       "licenses": [
         {
@@ -13443,7 +13443,7 @@
     {
       "type": "library",
       "name": "OpenAI Codex",
-      "version": "0.159.2",
+      "version": "0.167.1",
       "bom-ref": "source:OpenAI Codex",
       "licenses": [
         {
@@ -13455,7 +13455,7 @@
       "properties": [
         {
           "name": "shoggoth:local-files",
-          "value": "schemas/codex-app-server/0.159.2,build/codex-runtime-manifest.json"
+          "value": "schemas/codex-app-server/0.167.1,build/codex-runtime-manifest.json"
         }
       ]
     },
@@ -13585,35 +13585,16 @@
           "value": "build/shoggoth-memory/dependencies/undici"
         }
       ]
-    },
-    {
-      "type": "library",
-      "name": "zsh (Codex bundled shell)",
-      "version": "binary reports 5.9.0.3-test; 5.9 upstream license reference",
-      "bom-ref": "source:zsh (Codex bundled shell)",
-      "licenses": [
-        {
-          "license": {
-            "name": "LicenseRef-Zsh"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "shoggoth:local-files",
-          "value": "build/codex-runtime-manifest.json"
-        }
-      ]
     }
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.307",
+      "ref": "pkg:generic/shoggoth@0.8.311",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",
-        "pkg:generic/openai-codex@0.159.2?platform=darwin-arm64",
-        "pkg:generic/openai-codex@0.159.2?platform=darwin-x64",
+        "pkg:generic/openai-codex@0.167.1?platform=darwin-arm64",
+        "pkg:generic/openai-codex@0.167.1?platform=darwin-x64",
         "pkg:npm/%40babel/runtime@7.29.7",
         "pkg:npm/%40base-ui/react@1.5.0",
         "pkg:npm/%40base-ui/utils@0.2.9",
@@ -14066,8 +14047,7 @@
         "source:PCRE2 (ripgrep embedded library)",
         "source:Source Han Serif CN",
         "source:Undici bundled in the memory core",
-        "source:ripgrep (Codex bundled program)",
-        "source:zsh (Codex bundled shell)"
+        "source:ripgrep (Codex bundled program)"
       ]
     },
     {

@@ -48,11 +48,6 @@ const TOOL_DEFS = {
     ["submit_payment", "Submit an Alipay cashier payment after explicit user approval in a supported current session. The application supplies the actual session identity; callers cannot choose or invent it. The amount, payee and purpose are the caller's current order summary; this tool does not verify that they match the cashier URL. Present the provider's actual confirmation, never claim the summary was independently verified. This may perform a payment; never use it for a connection test.", object({ cashierLink: string(8192), amountYuan: { type: "number", minimum: 0.01, maximum: 1000000, description: "Amount from the current order, explicitly confirmed by the user." }, payee: { ...string(200), description: "Payee from the current order, explicitly confirmed by the user." }, purpose: string(500), confirmed: confirm }, ["cashierLink", "amountYuan", "payee", "purpose", "confirmed"]), true],
     ["payment_status", "Query only a payment initiated by this connector using the returned receiptId. A receiptId is valid only during this connection process. After restart or if it is unavailable, the payment outcome is unknown: check the actual status in Alipay and do not resubmit the payment.", object({ receiptId: id }, ["receiptId"])],
   ],
-  "netease-music": [
-    ["search_songs", "Search songs with the official NetEase Music CLI.", object({ keyword: string(500) }, ["keyword"])],
-    ["my_playlists", "List the authorized user's collected playlists.", object()],
-    ["create_playlist", "Create a playlist only after the user requests and confirms this change.", object({ name: string(200), confirmed: confirm }, ["name", "confirmed"]), true],
-  ],
 };
 const ACCOUNT_DEFS = [
   ["account_status", "Check the actual account or service state without creating an order or payment.", object()],
@@ -82,7 +77,6 @@ function commandEnvironment(providerId, home, env, extra = {}, native = false) {
   for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"]) if (env[key]) safe[key] = env[key];
   if (!native) safe.ELECTRON_RUN_AS_NODE = "1";
   if (providerId === "fliggy" && env.FLYAI_API_KEY) safe.FLYAI_API_KEY = env.FLYAI_API_KEY;
-  if (providerId === "netease-music") { if (env.NCM_APP_ID) safe.NETEASE_APP_ID = env.NCM_APP_ID; if (env.NCM_PRIVATE_KEY) safe.NETEASE_PRIVATE_KEY = env.NCM_PRIVATE_KEY; }
   if (providerId === "meituan-paotui") safe.PT_PASSPORT_AUTH_FILE = path.join(home, "passport-auth.json");
   if (providerId === "doordash") safe.PYTHON_KEYRING_BACKEND = "keyring.backends.null.Keyring";
   // The macOS package installs PayGuard in the OS user's Library. Point only
@@ -140,12 +134,9 @@ function assertManagedHome(home, { repairAlipayPermissions = false } = {}) {
 
 function createOfficialSkillRuntime({ providerId, root, home, env = process.env, spawn: spawnImpl = spawn, fetch: fetchImpl, validate = () => {}, now = Date.now } = {}) {
   if (!TOOL_DEFS[providerId]) fail("OFFICIAL_SKILL_INVALID_ARGUMENT");
-  // Also normalize credentials saved by older UI versions before configuring
-  // the official CLI. Preserve every newline inside a PEM private key.
-  if (providerId === "netease-music") env = { ...env, NCM_APP_ID: env.NCM_APP_ID?.trim(), NCM_PRIVATE_KEY: env.NCM_PRIVATE_KEY?.trim() };
   if (providerId === "baidu-maps") env = { ...env, BAIDU_MAP_AUTH_TOKEN: env.BAIDU_MAP_AUTH_TOKEN?.trim() };
   const fetch = fetchImpl || createMcpFetch({ env }), children = new Set(), previews = new Map(), payments = new Map(), secrets = [];
-  for (const key of ["FLYAI_API_KEY", "WEREAD_API_KEY", "NCM_APP_ID", "NCM_PRIVATE_KEY", "BAIDU_MAP_AUTH_TOKEN"]) if (env[key]) secrets.push(env[key]);
+  for (const key of ["FLYAI_API_KEY", "WEREAD_API_KEY", "BAIDU_MAP_AUTH_TOKEN"]) if (env[key]) secrets.push(env[key]);
   const accountDefinitions = providerId === "quark-drive" ? ACCOUNT_DEFS.map(([name, description, schema, write]) => [name,
     name === "account_bind" ? "Finish Quark authorization with the code entered only in the connector's private window. Never request it in chat." : description,
     name === "account_bind" ? object({ code: string(4096) }, ["code"]) : schema, write]) : providerId === "doordash" ? ACCOUNT_DEFS.map(([name, description, schema, write]) => [name,
@@ -157,7 +148,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
   const validators = new Map(definitions.map(([name, , schema]) => [name, ajv.compile(schema)]));
   const tools = definitions.map(([name, description, inputSchema, write = false]) => ({ name, description, inputSchema,
     annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true } }));
-  let authorization = null, ncmAuthorization = null, chain = Promise.resolve(), ncmConfigured = false, poisoned = false, closed = false;
+  let authorization = null, chain = Promise.resolve(), poisoned = false, closed = false;
   const account = (state, fields = {}) => validateOfficialAccountResult({ id: providerId, state, verificationUrl: null, qrCode: null, userCode: null, userName: null, errorCode: null, ...fields });
   const stable = value => value && typeof value === "object" ? Array.isArray(value) ? value.map(stable) : Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
   async function guardedWrite(kind, payload, operation, { sessionId = null, keepCompleted = false } = {}) {
@@ -186,7 +177,6 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
   function officialUrl(value) { return typeof value === "string" && validOfficialVerificationUrl(providerId, value) ? value : null; }
   function resultUrl(result, text) {
     const candidates = [result?.verification_url, result?.verificationUrl, result?.auth_link, result?.direct_auth_link, result?.auth_url, result?.authUrl, result?.url, result?.access_url, result?.shortUrl, result?.data?.access_url, result?.data?.url];
-    if (providerId === "netease-music") candidates.unshift(result?.clickableUrl, result?.qrCodeUrl, result?.data?.qrCodeUrl);
     for (const value of candidates) { const checked = officialUrl(value); if (checked) return checked; }
     for (const line of String(text).split(/\r?\n/u).filter(line => !/(?:http request|http response|traceId|costTime|accessUrl|extInfo)/iu.test(line))) {
       for (const value of line.match(/https:\/\/[^\s<>"')\]]+/gu) || []) { const checked = officialUrl(value); if (checked) return checked; }
@@ -206,7 +196,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
       terminate(child);
     })));
   }
-  function run(relative, args, { signal, extraEnv = {}, native = false, timeoutMs = 100_000, onAuthorization, onExit, credentialInput, rawInput, applicationHelper = false, sideEffect = false } = {}) {
+  function run(relative, args, { signal, extraEnv = {}, native = false, timeoutMs = 100_000, onAuthorization, onExit, rawInput, applicationHelper = false, sideEffect = false } = {}) {
     validate(); signal?.throwIfAborted();
     if (poisoned || closed) fail("OFFICIAL_SKILL_OPERATION_UNCERTAIN");
     assertManagedHome(home, { repairAlipayPermissions: providerId === "alipay" });
@@ -221,11 +211,11 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
       else if (readPrivateFile(guard, { maxBytes: 1024 }).toString() !== marker) fail("OFFICIAL_SKILL_INTEGRITY_FAILED");
     }
     return new Promise((resolve, reject) => {
-      const executable = applicationHelper ? path.join(__dirname, providerId === "quark-drive" ? "quark-skill-cli-helper.js" : providerId === "rollinggo-hotel" ? "rollinggo-skill-cli-helper.js" : "official-skill-cli-helper.js") : path.join(root, relative);
+      const executable = applicationHelper ? path.join(__dirname, providerId === "quark-drive" ? "quark-skill-cli-helper.js" : "rollinggo-skill-cli-helper.js") : path.join(root, relative);
       const child = spawnImpl(native ? executable : process.execPath, native ? args : ["--require", path.join(__dirname, "official-skill-child-bootstrap.js"), executable, ...args], {
-        cwd: home, env: commandEnvironment(providerId, home, env, extraEnv, native), stdio: [credentialInput === undefined && rawInput === undefined ? "ignore" : "pipe", "pipe", "pipe"], shell: false, detached: process.platform !== "win32", windowsHide: true,
+        cwd: home, env: commandEnvironment(providerId, home, env, extraEnv, native), stdio: [rawInput === undefined ? "ignore" : "pipe", "pipe", "pipe"], shell: false, detached: process.platform !== "win32", windowsHide: true,
       });
-      if (credentialInput !== undefined || rawInput !== undefined) { child.stdin.on("error", () => {}); child.stdin.end(rawInput === undefined ? JSON.stringify(credentialInput) : rawInput); }
+      if (rawInput !== undefined) { child.stdin.on("error", () => {}); child.stdin.end(rawInput); }
       children.add(child); let stdout = "", stderr = "", done = false, handedOff = false, limit = 0, stopError, killTimer, endTimer;
       const finish = (error, result) => {
         if (done) return; done = true;
@@ -286,17 +276,6 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
     const token = await meituanToken(signal), operation = async () => successful(await run("runtime/paotui.js", args, { signal, extraEnv: { MCP_ACCESS_TOKEN: token }, sideEffect: args[0] === "submit_order" }));
     return guardPayload ? guardedWrite("delivery", guardPayload, operation) : operation();
   }
-  async function ncm(args, options) {
-    if (!ncmConfigured) {
-      if (!env.NCM_APP_ID || !env.NCM_PRIVATE_KEY) fail("OFFICIAL_SKILL_AUTH_UNSUPPORTED");
-      for (const [field, value] of [["appId", env.NCM_APP_ID], ["privateKey", env.NCM_PRIVATE_KEY]]) {
-        successful(await run(null, ["--root", root, "--home", home, "--field", field], { ...options, onAuthorization: undefined, onExit: undefined, sideEffect: false, applicationHelper: true, credentialInput: value }));
-      }
-      ncmConfigured = true;
-    }
-    if (options?.sideEffect) return guardedWrite("playlist", args, async () => { const result = await run("runtime/dist/index.js", args, options); successful(result); return result; });
-    return run("runtime/dist/index.js", args, options);
-  }
   const alipay = (args, options) => run("runtime/alipay-bot", [...args, "--json"], { ...options, native: true });
 
   const shopAuth = providerId === "shop" ? require("./shop-skill-auth").createShopAuth({ root, home, fetch, now }) : null;
@@ -348,41 +327,30 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
       try { await paotui(["login"], signal); authorization = null; return account("ready"); }
       catch (error) { if (signal?.aborted) throw error; return account("unknown", { errorCode: "OFFICIAL_SKILL_AUTH_STATUS_FAILED" }); }
     }
-    if (providerId === "netease-music") {
-      if (!env.NCM_APP_ID || !env.NCM_PRIVATE_KEY) return account("signedOut", { errorCode: "OFFICIAL_SKILL_AUTH_UNSUPPORTED" });
-      if (action === "logout") { authorization = null; ncmAuthorization = null; await stopActiveChildren(); successful(await ncm(["logout"], { signal })); return account("signedOut"); }
-      if (action === "start") {
-        authorization = null;
-        await stopActiveChildren();
-        const session = { active: true, errorCode: null }; ncmAuthorization = session;
-        try {
-          const result = await ncm(["login"], { signal, timeoutMs: 300_000,
-            onAuthorization: stdout => { const value = parseJson(stdout); return value && value.success !== false && value.isError !== true ? resultUrl(value, stdout) : null; },
-            onExit: error => { if (session.active) { session.active = false; session.errorCode = error?.code || null; } },
-          });
-          const parsed = parseJson(result.stdout);
-          if (parsed?.success === false || parsed?.isError === true) throw failure();
-          const url = result.authorization || (parsed && resultUrl(parsed, result.stdout));
-          if (url) { authorization = url; return account("authorizing", { verificationUrl: url }); }
-          successful(result);
-        } catch (error) { if (ncmAuthorization === session) ncmAuthorization = null; throw error; }
-      }
-      const result = await ncm(["login", "--check"], { signal }), parsed = parseJson(result.stdout), text = result.stdout;
-      if (result.code === 0 && parsed?.success !== false && (parsed?.authenticated === true || parsed?.loggedIn === true || parsed?.isLoggedIn === true || /(?:已登录|登录有效|登录状态有效|logged in|login valid)/iu.test(text)) && !/(?:未登录|未授权|登录已过期|not logged)/iu.test(text)) { authorization = null; ncmAuthorization = null; await stopActiveChildren(); return account("ready"); }
-      if (ncmAuthorization && !ncmAuthorization.active) {
-        const errorCode = ncmAuthorization.errorCode || "OFFICIAL_SKILL_AUTH_FAILED";
-        authorization = null; ncmAuthorization = null; return account("signedOut", { errorCode });
-      }
-      return authorization ? account("authorizing", { verificationUrl: authorization }) : account("signedOut");
-    }
     const commands = { status: ["check-wallet"], start: ["apply-wallet", "--agent-name", "Shoggoth"], bind: ["bind-wallet", "-c", args.code || ""], logout: ["close-wallet"] };
     if (action === "bind" && !args.code) fail("OFFICIAL_SKILL_INVALID_ARGUMENT");
-    const result = await alipay(commands[action], { signal }), parsed = parseJson(result.stdout), text = result.stdout;
+    const result = await alipay(commands[action], { signal });
     if (result.code !== 0) throw failure();
+    const text = result.stdout.trim();
+    // Alipay 0.4.8 pretty-prints the final result after its diagnostic output.
+    let parsed;
+    try { parsed = JSON.parse(text.slice(text.lastIndexOf("\n{") + 1)); } catch {}
+    if (action === "start" && typeof parsed?.alreadyExists === "boolean" && typeof parsed.alreadyPending === "boolean") {
+      if (parsed.status === "bound" && !parsed.localPersistenceFailed) return account("ready");
+      if (parsed.status === "unbound") {
+        const verificationUrl = officialUrl(parsed.accessUrl);
+        if (verificationUrl || parsed.alreadyPending) return account("authorizing", { verificationUrl });
+      }
+      return account("unknown", { errorCode: "OFFICIAL_SKILL_AUTH_STATUS_FAILED" });
+    }
+    if (action === "bind" && parsed?.status === "bound" && typeof parsed.boundAt === "string" && !parsed.localPersistenceFailed) return account("ready");
     const url = resultUrl(parsed, text);
     if (action === "logout") return account("authorizing", { verificationUrl: url, errorCode: url ? null : "OFFICIAL_SKILL_AUTH_STATUS_FAILED" });
-    if (parsed?.code === 200 && parsed.message !== "已申请开通，等待授权" && parsed.access_url === "" || /(?:✓\s*支付功能已开启|\[开启成功\]|支付宝支付功能已开启成功)/u.test(text)) return account("ready");
+    const pending = parsed?.code === 200 && (parsed.status === "unbound" || parsed.message === "已申请开通，等待授权");
+    const ready = parsed?.code === 200 && !pending && (parsed.status === "bound" || parsed.access_url === "");
+    if (ready || /(?:✓\s*支付功能已开启|\[开启成功\]|支付宝支付功能已开启成功)/u.test(text)) return account("ready");
     if (url) return account("authorizing", { verificationUrl: url });
+    if (action === "status" && pending) return account("authorizing");
     if (parsed?.code === 500 || /(?:未开通|未授权|未绑定)/u.test(text)) return account("signedOut");
     return account("unknown", { errorCode: "OFFICIAL_SKILL_AUTH_STATUS_FAILED" });
   }
@@ -442,13 +410,6 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
         else if (url) payments.set(receiptId, ["-p", url]);
         result = { ...result, receiptId: payments.has(receiptId) ? receiptId : null };
       } else { const query = payments.get(args.receiptId); if (!query) fail("OFFICIAL_SKILL_OPERATION_UNCERTAIN"); result = successful(await alipay(["query-payment-status", ...query], { signal })); }
-    } else {
-      const commands = {
-        search_songs: ["search", "song", "--keyword", args.keyword, "--userInput", `搜索歌曲：${args.keyword}`],
-        my_playlists: ["playlist", "collected", "--userInput", "查看我收藏的歌单"],
-        create_playlist: ["playlist", "create", "--playlistName", args.name, "--userInput", `创建歌单：${args.name}`],
-      };
-      result = successful(await ncm(commands[name], { signal, sideEffect: name === "create_playlist" }));
     }
     if (result === undefined) fail("OFFICIAL_SKILL_INVALID_ARGUMENT");
     return publicOutput(result, secrets);
@@ -458,7 +419,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
       closed = true;
       baidu?.close();
       await stopActiveChildren();
-      authorization = null; ncmAuthorization = null;
+      authorization = null;
       children.clear(); previews.clear(); payments.clear();
     },
   };

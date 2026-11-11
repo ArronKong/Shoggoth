@@ -1,7 +1,7 @@
 {
   "name": "shoggoth-desktop",
   "productName": "Shoggoth",
-  "version": "0.8.307",
+  "version": "0.8.311",
   "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
   "private": true,
   "license": "Apache-2.0",
@@ -111,7 +111,7 @@
     "test:quark": "node --test scripts/quark-connector-unit.cjs scripts/official-skill-connector-unit.cjs scripts/official-skill-runtime-unit.cjs scripts/official-skill-mcp-launch-unit.cjs && node scripts/official-skill-connectors-ui-unit.mjs",
     "test:rollinggo": "node --test --test-concurrency=1 scripts/rollinggo-connector-unit.cjs scripts/official-skill-connector-unit.cjs scripts/official-skill-runtime-unit.cjs scripts/official-skill-mcp-launch-unit.cjs && node scripts/official-skill-connectors-ui-unit.mjs && node scripts/mcp-expansion-dialog-unit.mjs && node scripts/connector-tool-previews-ui-unit.mjs",
     "test:baidu-map": "node --test --test-concurrency=1 scripts/baidu-map-skill-unit.cjs scripts/official-skill-connector-unit.cjs scripts/official-skill-runtime-unit.cjs scripts/official-skill-mcp-launch-unit.cjs && node scripts/official-skill-connectors-ui-unit.mjs && node scripts/connector-tool-previews-ui-unit.mjs",
-    "test:netease": "node --test scripts/netease-auth-unit.cjs scripts/official-skill-connector-unit.cjs scripts/official-skill-runtime-unit.cjs scripts/official-skill-mcp-launch-unit.cjs && node scripts/official-skill-connectors-ui-unit.mjs",
+    "test:official-connectors": "node --test scripts/official-skill-connector-unit.cjs scripts/official-skill-runtime-unit.cjs scripts/official-skill-mcp-launch-unit.cjs && node scripts/official-skill-connectors-ui-unit.mjs",
     "audit:release": "node scripts/dependency-audit-policy.cjs && node scripts/dependency-audit-policy.cjs --directory app/manage-ui"
   },
   "dependencies": {

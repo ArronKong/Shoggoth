@@ -1,21 +1,20 @@
 "use strict";
-// Per-conversation model sources for the built-in Codex Harness: one process,
-// whose own default is always ChatGPT, declares every preset configured for
-// the Profile and every Shoggoth custom endpoint, and each native thread names
-// its own provider. Fixtures only; no real credentials or model requests.
+// Per-conversation model sources for the built-in Codex Harness.
+// Fixtures only; no real credentials or model requests.
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const readline = require("node:readline");
 const zlib = require("node:zlib");
-const { spawn } = require("node:child_process");
 const provider = require("../app/agent-service/codex-session-provider");
 const route = require("../app/agent-service/execution-provider-route");
 const config = require("../app/agent-service/codex-runtime-config");
 const { CodexRuntimeAdapter } = require("../app/agent-service/codex-runtime-adapter");
+const { CodexRuntimePool } = require("../app/agent-service/codex-runtime-pool");
+const { ProviderRuntimeBridge } = require("../app/agent-service/provider-runtime-bridge");
+const { RuntimeAccountResolver, defaultRuntimeAccountLookup } = require("../app/agent-service/runtime-account-resolver");
 const { ChatSessionStore } = require("../app/agent-service/chat-session-store");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
@@ -39,7 +38,7 @@ function store({ providerRef = null, defaultModel = "gpt-default", runtimeAccoun
     ["provider-ollama", preset("provider-ollama", "ollama", "qwen3")],
     [secondOpenRouter, preset(secondOpenRouter, "openrouter", "other/model")],
     ["stray-preset", preset("stray-preset", "lmstudio", "local")]]);
-  const foreignOwner = { ...profile, id: "profile-hermes", backendId: "hermes", isDefault: false, providerRef: "foreign" };
+  const foreignOwner = { ...profile, id: "profile-hermes", runtimeProfileId: "runtime-foreign", backendId: "hermes", isDefault: false, providerRef: "foreign" };
   return {
     profile, second, providers,
     listAgentProfiles: () => [profile, second, foreignOwner],
@@ -154,8 +153,7 @@ test("one ChatGPT process declares every other source; Bedrock and OpenAI keys a
   assert.throws(() => config.validateRuntimeConfig({ provider: null }), { code: "CODEX_RUNTIME_CONFIG_INVALID" });
 });
 
-test("the bridge keeps ChatGPT as the process default and declares every usable source", async () => {
-  const { ProviderRuntimeBridge } = require("../app/agent-service/provider-runtime-bridge");
+test("management keeps ChatGPT while an execution host loads only its selected provider", async () => {
   const s = store({ providerRef: "provider-openrouter", defaultModel: "openai/gpt-5" });
   s.providers.set("provider-openrouter", { ...s.providers.get("provider-openrouter"), baseUrl: "https://openrouter.ai/api/v1",
     headers: { "HTTP-Referer": "https://product.test/shoggoth", "X-OpenRouter-Title": "Shoggoth" } });
@@ -170,21 +168,21 @@ test("the bridge keeps ChatGPT as the process default and declares every usable 
     configWriter: { overlay: () => ({ args: [] }) } });
   const contract = (providerRef, modelRef) => ({ ...route.captureExecutionProviderRoute({ productStore: s, secretStore: secrets$,
     profile: s.profile, modelRef, providerRef }), runtimeProfileId: "runtime-1", runtimeAccountId: INTERNAL });
-  const prepared = await bridge.prepareRuntime({ runtimeProfileId: "runtime-1", runtimeAccountId: INTERNAL,
-    executionContract: contract(undefined, "openai/gpt-5") });
-  assert.equal(prepared.runtimeConfig.provider, null, "ChatGPT stays the process default whatever the Profile default is");
-  assert.deepEqual(prepared.runtimeConfig.extraProviders.map((entry) => entry.id),
+  const management = await bridge.prepareRuntime({ runtimeProfileId: "runtime-1", runtimeAccountId: INTERNAL });
+  assert.equal(management.runtimeConfig.provider, null);
+  assert.deepEqual(management.runtimeConfig.extraProviders.map((entry) => entry.id),
     ["provider-openrouter", "provider-ollama", "provider-amazon-bedrock", "custom-one"],
     "custom-two has no stored key and is left out instead of failing the others");
-  const envs = prepared.runtimeConfig.extraProviders.map((entry) => entry.credentialEnv).filter(Boolean);
-  assert.deepEqual(envs.map((name) => prepared.spawnEnv[name]).sort(), ["one-key-fixture", "or-key-fixture"]);
-  assert.equal(prepared.spawnEnv.AWS_REGION, "us-east-1");
-  assert.equal(prepared.spawnEnv.AWS_PROFILE, "dev");
-  assert.ok(["one-key-fixture", "or-key-fixture"].every((value) => prepared.registeredSecrets.includes(value)));
+  const prepared = await bridge.prepareRuntime({ runtimeProfileId: "runtime-1", runtimeAccountId: INTERNAL,
+    executionContract: contract(undefined, "openai/gpt-5") });
+  assert.equal(prepared.runtimeConfig.provider.id, "provider-openrouter");
+  assert.deepEqual(Object.values(prepared.spawnEnv), ["or-key-fixture"]);
+  assert.deepEqual(prepared.registeredSecrets, ["or-key-fixture"]);
   await assert.rejects(bridge.prepareRuntime({ runtimeProfileId: "runtime-1", runtimeAccountId: INTERNAL,
     executionContract: contract("custom-two", "two-a") }), { code: "credentials_missing" }, "a run on the broken source fails");
   s.providers.delete("provider-ollama");
-  assert.throws(() => prepared.assertCurrent(), { code: "EXECUTION_CONTRACT_STALE" }, "removing a source retires the process");
+  prepared.assertCurrent();
+  assert.throws(() => management.assertCurrent(), { code: "EXECUTION_CONTRACT_STALE" });
 });
 
 test("each native thread names its provider and keeps the endpoint's own reasoning settings", async () => {
@@ -330,8 +328,8 @@ test("a native session's source is recorded with its id, survives restart and is
 });
 
 // Real bundled Codex: ChatGPT and two other sources run at the same time in
-// one process whose default is ChatGPT; each request reaches its own server
-// with its own credential, and the model catalog is ChatGPT's live one.
+// provider-specific app-servers with the same managed Home. Each request
+// reaches its own server with its own credential.
 const CODEX = path.join(__dirname, "..", ".vendor", "codex", process.arch === "arm64" ? "arm64" : "x64", "package", "bin", "codex");
 test("bundled Codex routes concurrent threads to their own provider and credential", { skip: !fs.existsSync(CODEX) && "bundled Codex not prepared", timeout: 240_000 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "csp-codex-"));
@@ -368,67 +366,112 @@ test("bundled Codex routes concurrent threads to their own provider and credenti
   });
   server.on("upgrade", (_req, socket) => socket.destroy());
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const port = server.address().port;
-  const extra = { id: "custom-two", kind: "custom-responses", name: "custom two", baseUrl: `http://127.0.0.1:${port}/custom/v1`,
-    model: "two-a", headers: null, awsRegion: null, awsProfile: null, credentialEnv: "SHOGGOTH_PROVIDER_0123456789ABCDEF_API_KEY" };
-  const second = { ...extra, id: "custom-three", name: "custom three", baseUrl: `http://127.0.0.1:${port}/second/v1`,
-    model: "three-a", credentialEnv: "SHOGGOTH_PROVIDER_FEDCBA9876543210_API_KEY" };
-  const overrides = [...config.configOverridesFor(config.validateRuntimeConfig({ provider: null, extraProviders: [extra, second] })),
-    `openai_base_url="http://127.0.0.1:${port}/chatgpt"`, `chatgpt_base_url="http://127.0.0.1:${port}/backend"`];
-  const dead = "http://127.0.0.1:9";
-  for (const dir of ["home", "codex", "work"]) fs.mkdirSync(path.join(root, dir));
-  const child = spawn(CODEX, [...overrides.flatMap(value => ["-c", value]), "app-server", "--listen", "stdio://"], {
-    cwd: path.join(root, "work"), stdio: ["pipe", "pipe", "ignore"],
-    env: { PATH: "/usr/bin:/bin", HOME: path.join(root, "home"), CODEX_HOME: path.join(root, "codex"), TMPDIR: root,
-      [extra.credentialEnv]: endpointKey, [second.credentialEnv]: secondKey, HTTPS_PROXY: dead, HTTP_PROXY: dead, ALL_PROXY: dead,
-      NO_PROXY: "127.0.0.1,localhost" } });
-  const childClosed = new Promise(resolve => child.once("close", resolve));
-  let nextId = 1; const pending = new Map(); const listeners = new Set();
-  readline.createInterface({ input: child.stdout }).on("line", line => {
-    let message; try { message = JSON.parse(line); } catch { return; }
-    if (message.id !== undefined && message.method) {
-      child.stdin.write(`${JSON.stringify({ id: message.id, error: { code: -32601, message: "fixture" } })}\n`); return;
-    }
-    if (message.id !== undefined) { const entry = pending.get(message.id); pending.delete(message.id);
-      return message.error ? entry?.reject(new Error(message.error.message)) : entry?.resolve(message.result); }
-    for (const listener of listeners) listener(message);
-  });
-  const rpc = (method, params) => new Promise((resolve, reject) => {
-    const id = nextId++; pending.set(id, { resolve, reject });
-    child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
-  });
-  const completed = threadId => new Promise(resolve => {
-    const listener = message => { if (message.method === "turn/completed" && message.params?.threadId === threadId) {
-      listeners.delete(listener); resolve(message.params.turn.status); } };
-    listeners.add(listener);
-  });
-  try {
-    await rpc("initialize", { clientInfo: { name: "shoggoth", title: "Shoggoth", version: "fixture" }, capabilities: { experimentalApi: true } });
-    child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
-    await rpc("account/login/start", { type: "chatgptAuthTokens", accessToken: chatgptToken, chatgptAccountId: "acct-fixture", chatgptPlanType: "plus" });
-    await rpc("model/list", { limit: 100, includeHidden: false });
-    assert.ok(gets.includes("/chatgpt/models"), "a ChatGPT process default reads the account's live catalog");
-    const base = { cwd: path.join(root, "work"), approvalPolicy: "never", sandbox: "read-only" };
-    const chat = await rpc("thread/start", { ...base, model: "gpt-fixture", config: { model_provider: "openai" } });
-    const custom = await rpc("thread/start", { ...base, model: "two-a", config: { model_provider: config.providerConfigAlias(extra) } });
-    const other = await rpc("thread/start", { ...base, model: "three-a", config: { model_provider: config.providerConfigAlias(second) } });
-    const done = [chat, custom, other].map(thread => completed(thread.thread.id));
-    await Promise.all([chat, custom, other].map(thread => rpc("turn/start", { threadId: thread.thread.id, input: [{ type: "text", text: "hi", text_elements: [] }] })));
-    assert.deepEqual(await Promise.all(done), ["completed", "completed", "completed"]);
-    assert.deepEqual(seen.map(entry => [entry.route, entry.model, entry.auth]).sort(),
-      [["chatgpt", "gpt-fixture", "chatgpt"], ["custom", "two-a", "endpoint"], ["second", "three-a", "second"]]);
-  } finally {
-    let closeTimer;
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const productStore = store({ providerRef: "custom-two", defaultModel: "two-a" });
+  productStore.providers.set("custom-two", { ...productStore.providers.get("custom-two"), baseUrl: `${origin}/custom/v1` });
+  productStore.providers.set("custom-three", { ...endpoint("custom-three", ["three-a"]), baseUrl: `${origin}/second/v1` });
+  const credentials = new Map([["secret-custom-two", endpointKey], ["secret-custom-three", secondKey]]);
+  const fixtureSecrets = {
+    listMetadata: () => [...credentials.keys()].map(credentialRef => ({ credentialRef, kind: "custom-responses" })),
+    get: async ref => credentials.get(ref),
+    getCredentialRevision: () => 1,
+  };
+  const bridge = new ProviderRuntimeBridge({ productStore, secretStore: fixtureSecrets,
+    configWriter: { overlay({ runtimeConfig }) {
+      const overrides = [...config.configOverridesFor(runtimeConfig),
+        `openai_base_url="${origin}/chatgpt"`, `chatgpt_base_url="${origin}/backend"`,
+        'cli_auth_credentials_store="file"'];
+      return { args: overrides.flatMap(value => ["-c", value]) };
+    } } });
+  const workspace = path.join(root, "work");
+  fs.mkdirSync(workspace);
+  const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
+    profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
+  const deadProxy = "http://127.0.0.1:9";
+  const parentEnv = { HOME: root, PATH: "/usr/bin:/bin", TMPDIR: root,
+    HTTPS_PROXY: deadProxy, HTTP_PROXY: deadProxy, ALL_PROXY: deadProxy, NO_PROXY: "127.0.0.1,localhost" };
+  const repoRoot = path.join(__dirname, "..");
+  const resolver = new RuntimeAccountResolver({ paths, homedir: root, parentEnv, repoRoot });
+  const binding = { runtime: "codex", runtimeProfileId: "runtime-1", runtimeAccountId: INTERNAL };
+  const runtime = resolver.resolve(binding, defaultRuntimeAccountLookup(INTERNAL));
+  fs.writeFileSync(path.join(runtime.home, "auth.json"), JSON.stringify({
+    auth_mode: "chatgpt", OPENAI_API_KEY: null,
+    tokens: { access_token: chatgptToken, id_token: chatgptToken, refresh_token: "fixture-refresh", account_id: "acct-fixture" },
+    last_refresh: new Date().toISOString(),
+  }), { mode: 0o600 });
+  const pool = new CodexRuntimePool({ paths, parentEnv, runtimeAccountResolver: resolver, repoRoot,
+    hostOptions: { repoRoot, prepareRuntime: bridge.prepareRuntime.bind(bridge) } });
+  const adapter = new CodexRuntimeAdapter({ runtimePool: pool, secretGateway: {
+    async bind() { return { baseUrl: `${origin}/chatgpt`, close() {} }; },
+  } });
+  const contract = (providerRef, modelRef) => ({ ...route.captureExecutionProviderRoute({
+    productStore, secretStore: fixtureSecrets, profile: productStore.profile, modelRef, providerRef,
+  }), ...binding });
+  async function selection(providerRef, model, projected = false) {
+    const modelProvider = provider.codexModelProvider(productStore, providerRef);
+    const host = await adapter.acquire(binding, { executionContract: contract(providerRef, model),
+      ...(projected ? { modelSecretProviderKind: modelProvider.kind } : {}) });
+    return { host, params: { model, modelProvider, cwd: workspace,
+      permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" },
+      ...(projected ? { modelSecretScope: { profileId: productStore.profile.id, sessionId: "fixture-projected" } } : {}) } };
+  }
+  async function turn(host, sessionId) {
+    let unsubscribe;
+    let timeout;
     try {
-      child.kill("SIGTERM");
-      await Promise.race([childClosed, new Promise((_, reject) => {
-        closeTimer = setTimeout(() => reject(new Error("fixture Codex exit was not confirmed; private root retained")), 5000);
-      })]);
+      const done = new Promise((resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("fixture turn did not finish")), 15_000);
+        timeout.unref();
+        unsubscribe = host.subscribe(event => {
+          if (event.type === "complete" && event.sessionId === sessionId) resolve(event.status);
+        });
+      });
+      done.catch(() => {});
+      await host.turnStart({ sessionId, prompt: "hi" });
+      assert.equal(await done, "completed");
     } finally {
-      clearTimeout(closeTimer);
-      await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
+      clearTimeout(timeout);
+      unsubscribe?.();
     }
-    // The thread writer can still create its lock until native exit completes.
-    fs.rmSync(root, { recursive: true, force: true });
+  }
+  try {
+    const [chat, custom, other, projected] = await Promise.all([
+      selection(null, "gpt-fixture"),
+      selection("custom-two", "two-a"),
+      selection("custom-three", "three-a"),
+      selection(null, "gpt-fixture", true),
+    ]);
+    assert.equal(new Set([chat.host, custom.host, other.host, projected.host]).size, 4);
+    assert.equal((await selection("custom-two", "two-a")).host, custom.host);
+    await (await adapter.acquire(binding)).modelsList({ limit: 100, includeHidden: false });
+    assert.ok(gets.includes("/chatgpt/models"), "ChatGPT management reads the live catalog");
+
+    const sessions = await Promise.all([chat, custom, other, projected].map(async ({ host, params }) => {
+      const started = await host.sessionStart({ ...params, persistent: true });
+      await turn(host, started.session.id);
+      return started.session;
+    }));
+    assert.deepEqual(seen.map(entry => [entry.route, entry.model, entry.auth]).sort(), [
+      ["chatgpt", "gpt-fixture", "chatgpt"], ["chatgpt", "gpt-fixture", "chatgpt"],
+      ["custom", "two-a", "endpoint"], ["second", "three-a", "second"],
+    ]);
+
+    await adapter.stop(binding);
+    for (const [index, providerRef, model, projection] of [[1, "custom-two", "two-a", false], [3, null, "gpt-fixture", true]]) {
+      const { host, params } = await selection(providerRef, model, projection);
+      const sessionId = sessions[index].id;
+      const resumed = await host.sessionResume({ ...params, sessionId });
+      assert.equal(resumed.session.id, sessionId);
+      await turn(host, sessionId);
+    }
+    assert.deepEqual(seen.slice(4).map(entry => [entry.route, entry.model, entry.auth]), [
+      ["custom", "two-a", "endpoint"], ["chatgpt", "gpt-fixture", "chatgpt"],
+    ]);
+  } finally {
+    try { await adapter.stopAll(); }
+    finally {
+      await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   }
 });

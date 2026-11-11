@@ -82,8 +82,8 @@ function rejectsCode(action, code) {
 
 function testGeneratedMethodMappingAndContracts() {
   const contract = new CodexSchemaContract({ repoRoot: REPO_ROOT });
-  assert.equal(contract.version, "0.159.2");
-  assert.equal(CODEX_VERSION, "0.159.2");
+  assert.equal(contract.version, "0.167.1");
+  assert.equal(CODEX_VERSION, "0.167.1");
   assert.deepEqual(Object.fromEntries(Object.entries(contract.operations).map(([name, operation]) => [name, operation.method])), {
     initialize: "initialize",
     threadStart: "thread/start",
@@ -122,7 +122,7 @@ function testGeneratedMethodMappingAndContracts() {
     capabilities: null,
   });
   contract.validateResponse("initialize", {
-    userAgent: "codex/0.159.2",
+    userAgent: `codex/${CODEX_VERSION}`,
     codexHome: "/tmp/codex-home",
     platformFamily: "unix",
     platformOs: "macos",
@@ -559,6 +559,7 @@ function writeRuntimeFixture(root) {
   const hostPath = path.join(bin, "codex-code-mode-host");
   fs.copyFileSync(path.join(REPO_ROOT, "scripts", "fixtures", "codex-app-server-fake.cjs"), runtimePath);
   fs.writeFileSync(hostPath, "#!/bin/sh\nexit 0\n");
+  fs.writeFileSync(path.join(bin, "codex-exec-server"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   fs.chmodSync(runtimePath, 0o755);
   fs.chmodSync(hostPath, 0o755);
   fs.writeFileSync(path.join(packageRoot, "codex-package.json"), `${JSON.stringify({
@@ -567,6 +568,7 @@ function writeRuntimeFixture(root) {
     target: process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin",
     variant: "codex",
     entrypoint: "bin/codex",
+    execServer: "bin/codex-exec-server",
   })}\n`);
   fs.mkdirSync(path.join(root, "build"), { recursive: true });
   fs.writeFileSync(path.join(root, "build", "codex-runtime-manifest.json"), `${JSON.stringify({
@@ -591,11 +593,12 @@ function testPackagedRuntimeUsesResourcesLayout() {
     const packageRoot = path.join(resources, "codex", "package");
     const bin = path.join(packageRoot, "bin");
     fs.mkdirSync(bin, { recursive: true });
-    for (const name of ["codex", "codex-code-mode-host"]) {
+    for (const name of ["codex", "codex-code-mode-host", "codex-exec-server"]) {
       fs.writeFileSync(path.join(bin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     }
     fs.writeFileSync(path.join(packageRoot, "codex-package.json"), `${JSON.stringify({
       layoutVersion: 1, version: CODEX_VERSION, variant: "codex", entrypoint: "bin/codex",
+      execServer: "bin/codex-exec-server",
     })}\n`);
     fs.copyFileSync(
       path.join(REPO_ROOT, "build", "codex-runtime-manifest.json"),
@@ -608,6 +611,9 @@ function testPackagedRuntimeUsesResourcesLayout() {
       repoRoot: "/must/not/be/used",
     });
     assert.equal(layout.runtimePath, path.join(resources, "codex", "package", "bin", "codex"));
+    fs.unlinkSync(path.join(bin, "codex-exec-server"));
+    rejectsCode(() => resolveCodexRuntimeLayout({ packaged: true, platform: "darwin", resourcesPath: resources }),
+      "CODEX_RUNTIME_INVALID");
     const builder = fs.readFileSync(path.join(REPO_ROOT, "electron-builder.yml"), "utf8");
     assert.match(builder, /from: build\/codex-runtime-manifest\.json[\s\S]*to: codex\/runtime-manifest\.json/);
   } finally {
@@ -737,7 +743,7 @@ async function testPackagedHostUsesPhysicalCodexHomeAsProcessCwd() {
   const packageRoot = path.join(resourcesPath, "codex", "package");
   const binPath = path.join(packageRoot, "bin");
   fs.mkdirSync(binPath, { recursive: true });
-  for (const name of ["codex", "codex-code-mode-host"]) {
+  for (const name of ["codex", "codex-code-mode-host", "codex-exec-server"]) {
     fs.writeFileSync(path.join(binPath, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   }
   fs.writeFileSync(path.join(packageRoot, "codex-package.json"), `${JSON.stringify({
@@ -745,6 +751,7 @@ async function testPackagedHostUsesPhysicalCodexHomeAsProcessCwd() {
     version: CODEX_VERSION,
     variant: "codex",
     entrypoint: "bin/codex",
+    execServer: "bin/codex-exec-server",
   })}\n`);
   fs.copyFileSync(
     path.join(REPO_ROOT, "build", "codex-runtime-manifest.json"),
@@ -982,7 +989,7 @@ async function testBinaryVersionProbeIsStrictBoundedAndSanitized() {
   assert.deepEqual(calls[0].options.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(calls[0].options.windowsHide, true);
 
-  for (const version of [CODEX_VERSION, "0.160.0", "0.161.0-alpha.2", "0.160.0+build.1", "0.159.1", "0.159.2-alpha.1", "nightly", "2.0.0"]) {
+  for (const version of [CODEX_VERSION, "0.168.0", "0.168.0-alpha.2", "0.167.1+build.1", "0.159.2", "0.167.1-alpha.1", "nightly", "2.0.0"]) {
     const result = await probeCodexBinaryVersion("/safe/system-codex", {
       installationKind: "system",
       env: safeEnv,
@@ -1504,7 +1511,9 @@ async function testAccountWorkspaceRoutingIsValidatedAndKeptPrivate() {
   const routing = { chatgptAccountId: "private-routing-account", backendOrigin: "https://routing.example.test",
     accountRoutingOverride: "us" };
   for (const workspaceRouting of [null, routing]) {
-    for (const account of [null, { type: "apiKey" }, { type: "chatgpt", email: "private@example.test", planType: "plus" }]) {
+    for (const account of [null, { type: "apiKey" },
+      { type: "chatgpt", email: "private@example.test", planType: "plus" },
+      { type: "chatgpt", email: "private@example.test", planType: "plus", workspaceName: "private workspace" }]) {
       const fixture = hostFixture({ childOptions: { accountResponse: { account, requiresOpenaiAuth: true, workspaceRouting } } });
       try {
         await fixture.host.initialize();
@@ -1957,11 +1966,15 @@ async function testPoolSingleFlightIsolationAndCircuitBreaker() {
   const first = pool.get("profile-a");
   const second = pool.get("profile-a");
   const isolated = pool.get("profile-b");
-  await waitFor(() => starts.length === 2, 1000, "both identities captured before host initialization");
-  assert.deepEqual(starts.sort(), ["profile-a", "profile-b"]);
-  release();
+  try {
+    await waitFor(() => starts.length > 0, 1000, "first bundled host initializing");
+    assert.deepEqual(starts, ["profile-a"], "a second host waits for shared Home initialization");
+  } finally {
+    release();
+  }
   assert.equal(await first, await second);
   assert.notEqual(await first, await isolated);
+  assert.deepEqual(starts, ["profile-a", "profile-b"]);
   await pool.stop("profile-a");
   await pool.stopAll();
   assert.deepEqual(stops.sort(), ["profile-a", "profile-b"]);
@@ -2286,7 +2299,7 @@ async function runRealBinarySmoke() {
     maxBuffer: 16 * 1024,
   });
   assert.equal(version.status, 0, "real Codex --version failed");
-  assert.match(version.stdout, /0\.159\.2/);
+  assert.equal(version.stdout.trim(), `codex-cli ${CODEX_VERSION}`);
   const host = new CodexRuntimeHost({
     ...codexHostRuntimeOptions({
       paths: fixture.paths,

@@ -146,6 +146,73 @@
   font-weight: inherit;
 }
 
+.toastPositioner {
+  width: max-content;
+  max-width: min(420px, var(--available-width, calc(100vw - 84px)));
+}
+
+.toastPositioner[data-anchor-hidden] { visibility: hidden; }
+
+.toastPositioner .toast {
+  max-width: 100%;
+  transform-origin: var(--transform-origin, left center);
+  animation-name: toastFromAnchor;
+}
+
+.toastPositioner .info {
+  --toast-ink: #1a1a1a;
+  background: #ffffff;
+  color: var(--toast-ink);
+}
+
+@keyframes toastFromAnchor {
+  from { transform: translateX(-4px) scale(0.98); opacity: 0; }
+  to { transform: translateX(0) scale(1); opacity: 1; }
+}
+
+.toastArrow {
+  width: 8px;
+  height: 8px;
+  background: inherit;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.toastArrow[data-side="right"] { left: -4px; }
+
+.toastWithAction {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(420px, calc(100vw - 2.5rem));
+  padding: 8px 8px 8px 16px;
+  border-radius: 18px;
+}
+
+.toastAction {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 16%, transparent);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.toastAction:hover { background: color-mix(in srgb, currentColor 26%, transparent); }
+.toastAction:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+.toastPositioner .info .toastAction {
+  background: #000000;
+  color: #ffffff;
+}
+
+.toastPositioner .info .toastAction:hover { background: var(--toast-ink); }
+.toastPositioner .info .toastAction:focus-visible { outline-color: var(--toast-ink); }
+
 /* 减少动态效果时保留 modal 的居中几何，并清除 toast 的位移状态。 */
 @media (prefers-reduced-motion: reduce) {
   .modalOverlay,
@@ -175,4 +242,6 @@
   .toast {
     transform: none;
   }
+
+  .toastPositioner .toast { animation-name: none; }
 }

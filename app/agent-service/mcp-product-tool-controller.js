@@ -7,6 +7,7 @@ const { WEB_TOOL_NAMES, WEB_TOOL_DEFINITIONS, WEB_PUBLIC_MESSAGES, validateWebAr
 const { MCP_CONNECTOR_TOOL_NAMES, MCP_CONNECTOR_TOOL_DEFINITIONS, validateMcpConnectorToolArguments, RETIRED_CONNECTOR_TOOLS } = require("./mcp-connector-tools");
 const { RETIRED_PLUGIN_TOOLS } = require("../core/legacy-plugin-dependency");
 const { CONNECTOR_PUBLIC_MESSAGES } = require("../core/connector-errors");
+const { SECRET_MESSAGES: SECRET_PUBLIC_MESSAGES } = require("../core/chat-secret-contract");
 const { OFFICIAL_SKILL_PUBLIC_MESSAGES } = require("../core/official-skill-connector-dto");
 const { TOOL_DEFINITIONS: APPLE_DEVICE_TOOL_DEFINITIONS, isAppleDeviceTool,
   validateAppleDeviceArguments } = require("./apple-device-tools");
@@ -159,6 +160,7 @@ const COMPUTER_MODIFIERS = new Set(["cmd", "shift", "option", "alt", "ctrl", "fn
 const PUBLIC_MESSAGES = Object.freeze({
   ...APPLE_DEVICE_PUBLIC_MESSAGES,
   ...CONNECTOR_PUBLIC_MESSAGES,
+  ...SECRET_PUBLIC_MESSAGES,
   ...OFFICIAL_SKILL_PUBLIC_MESSAGES,
   WORKSPACE_EXECUTION_UNAVAILABLE: "工作区执行沙箱不可用，本次没有扩大执行权限",
   WORKSPACE_EXECUTION_SCOPE_INVALID: "工作区命令不属于当前已授权的执行范围",
@@ -2248,8 +2250,8 @@ function requireMethods(value, methods, label) {
 
 function mapToolError(error) {
   const codeProbe = ownValue(error, "code");
-  if (codeProbe.ok && Object.hasOwn(require("../core/chat-secret-contract").SECRET_MESSAGES, codeProbe.value || "")) {
-    return serviceError(codeProbe.value, require("../core/chat-secret-contract").SECRET_MESSAGES[codeProbe.value]);
+  if (codeProbe.ok && Object.hasOwn(SECRET_PUBLIC_MESSAGES, codeProbe.value || "")) {
+    return serviceError(codeProbe.value, SECRET_PUBLIC_MESSAGES[codeProbe.value]);
   }
   if (codeProbe.ok && /^HOOK_[A-Z_]+$/u.test(codeProbe.value || "")) return serviceError(codeProbe.value, "Hook 规则或执行状态需要核对");
   // 依赖即使伪造了公开 code，也绝不能借此透传自带 message/stack/cause。

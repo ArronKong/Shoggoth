@@ -1,3 +1,4 @@
+import { measureTelemetry } from "../lib/productTelemetry";
 import AgentAvatarView from "../components/AgentAvatar";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -562,14 +563,16 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
     setSaving(true);
     try {
       const patch = buildPatch();
-      if (isNativeBoard) {
-        if (!canMoveTo(patch.column || detail.column)) throw new Error(t("tasks.moveTargetNotAllowed"));
-        for (const step of nativeTaskEditPlan(patch, detail)) {
-          await updateTask(backend, detail.id, step, boardArg);
-        }
-      } else {
-        await updateTask(backend, detail.id, patch, boardArg);
-      }
+      const update = async () => {
+        if (isNativeBoard) {
+          if (!canMoveTo(patch.column || detail.column)) throw new Error(t("tasks.moveTargetNotAllowed"));
+          for (const step of nativeTaskEditPlan(patch, detail)) {
+            await updateTask(backend, detail.id, step, boardArg);
+          }
+        } else await updateTask(backend, detail.id, patch, boardArg);
+      };
+      if (patch.column && patch.column !== detail.column) await measureTelemetry("task_move", backend, update);
+      else await update();
       toast.success(t("tasks.savedToast"));
       close();
       await refresh();
@@ -589,11 +592,11 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
         : undefined;
       if (isNativeBoard && !nativeBoardId) throw new Error(t("tasks.nativeBoardRequired"));
       const spec = buildPatch();
-      await createTask(
+      await measureTelemetry("task_create", backend, () => createTask(
         backend,
         isNativeBoard ? nativeTaskCreateSpec(spec) : spec,
         isNativeBoard ? nativeBoardId || undefined : boardArg,
-      );
+      ));
       toast.success(t("tasks.createdToast"));
       close();
       await refresh();
@@ -696,7 +699,8 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
     const done = await askCompletion(column);
     if (done === null) return;
     try {
-      await updateTask(backend, id, { column, ...(done === "skip" ? {} : done) }, boardArg);
+      await measureTelemetry("task_move", backend,
+        () => updateTask(backend, id, { column, ...(done === "skip" ? {} : done) }, boardArg));
       toast.success(t("tasks.movedToast"));
       // 弹窗打开时其 detail.column 是旧值 → 同步刷新（KAN-008）。
       if (detail?.id === id) await reloadDetail();
@@ -772,7 +776,8 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
     const tag = `${engine ?? "default"}:${mode}`;
     setRunBusy(tag);
     try {
-      const r = await runTask(backend, detail.id, engine, mode, options);
+      const r = await measureTelemetry("task_run", backend, () => runTask(backend, detail.id, engine, mode, options),
+        result => mode !== "manual" && result.runStarted === false ? "error" : "success");
       if (mode !== "manual" && r.runStarted === false) toast.info(t("tasks.runFailedToast"));
       else toast.success(t("tasks.runStartedToast"));
       await reloadDetail();
@@ -837,7 +842,8 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
     const colTasks = columns.find((c) => c.id === colId)?.tasks ?? [];
     const maxPos = colTasks.reduce((m, tk) => Math.max(m, tk.position ?? 0), 0);
     try {
-      await moveTask(backend, id, colId, maxPos + 1000, boardArg, done === "skip" ? undefined : done);
+      await measureTelemetry("task_move", backend,
+        () => moveTask(backend, id, colId, maxPos + 1000, boardArg, done === "skip" ? undefined : done));
       await refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));

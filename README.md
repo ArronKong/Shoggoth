@@ -12,6 +12,7 @@
   <a href="https://github.com/ArronKong/Shoggoth/releases/latest"><strong>Download for macOS</strong></a>
   · <a href="#product-tour">Product tour</a>
   · <a href="#build-from-source">Build from source</a>
+  · <a href="docs/privacy.en.md">Privacy</a>
   · <a href="README.zh-CN.md">简体中文</a>
 </p>
 

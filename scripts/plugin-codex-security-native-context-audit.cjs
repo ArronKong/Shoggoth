@@ -26,7 +26,7 @@ const env={HOME:home,CODEX_HOME:home,XDG_CONFIG_HOME:home,XDG_CACHE_HOME:path.jo
 const version=spawnSync(binary,['--version'],{cwd,env,encoding:'utf8',timeout:10000});
 try{
  if(version.status!==0)throw Error('version failed: '+version.stderr);
- assert.equal(version.stdout.trim(),'codex-cli 0.159.2','This audit is pinned to 0.159.2');
+ assert.equal(version.stdout.trim(),'codex-cli 0.167.1','This audit is pinned to 0.167.1');
 }catch(error){fs.rmSync(root,{recursive:true,force:true});throw error}
 const child=spawn(binary,['app-server','--stdio'],{cwd,env,stdio:['pipe','pipe','pipe']});
 const pending=new Map();let next=1,stderr='',timer;

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Switch } from "../../components/Field";
-import { appUpdateBridge, type AppUpdateState } from "../../lib/appUpdate";
+import { APP_UPDATE_SECTION_ID, appUpdateBridge, observeAppUpdateState, type AppUpdateState } from "../../lib/appUpdate";
 import { SettingsIcon } from "./SettingsIcons";
 
 const fallbackState: AppUpdateState = {
@@ -21,6 +22,8 @@ const fallbackState: AppUpdateState = {
 
 export default function SettingsAppUpdate() {
   const { t } = useTranslation();
+  const { hash, key } = useLocation();
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const [state, setState] = useState<AppUpdateState | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [preferencePending, setPreferencePending] = useState(false);
@@ -32,13 +35,18 @@ export default function SettingsAppUpdate() {
       setState(fallbackState);
       return undefined;
     }
-    let mounted = true;
-    const dispose = bridge.onState((next) => { if (mounted) setState(next); });
-    void bridge.getState()
-      .then((next) => { if (mounted) setState(next || fallbackState); })
-      .catch(() => { if (mounted) setState({ ...fallbackState, reason: "updater-unavailable" }); });
-    return () => { mounted = false; dispose(); };
+    return observeAppUpdateState(bridge,
+      (next) => setState(next || fallbackState),
+      () => setState({ ...fallbackState, reason: "updater-unavailable" }),
+    );
   }, []);
+
+  useEffect(() => {
+    if (hash !== `#${APP_UPDATE_SECTION_ID}`) return;
+    const heading = headingRef.current;
+    heading?.focus({ preventScroll: true });
+    heading?.scrollIntoView({ block: "center" });
+  }, [hash, key]);
 
   const statusText = useMemo(() => {
     if (!state) return t("settings.appUpdate.loading");
@@ -48,7 +56,9 @@ export default function SettingsAppUpdate() {
     });
     switch (state.status) {
       case "checking": return t("settings.appUpdate.checking");
-      case "available": return t("settings.appUpdate.available", { version: state.availableVersion || "" });
+      case "available": return t(state.canCheck ? "settings.appUpdate.available" : "settings.appUpdate.startingDownload", {
+        version: state.availableVersion || "",
+      });
       case "downloading": return t("settings.appUpdate.downloading", { progress: Math.round(state.progress || 0) });
       case "downloaded": return state.installBlockReason
         ? t(`settings.appUpdate.installBlocked.${state.installBlockReason}`, {
@@ -101,13 +111,14 @@ export default function SettingsAppUpdate() {
     ? Math.round(state.progress || 0)
     : null;
   const installationBusy = state && ["preparing", "installing", "recovering"].includes(state.status);
+  const canDownload = state?.status === "available" && state.canCheck;
 
   return (
-    <div id="settings-app-update">
+    <div id={APP_UPDATE_SECTION_ID}>
       <div className="settings-list-row settings-update-heading">
         <SettingsIcon name="update" />
         <div className="settings-list-copy">
-          <h4>
+          <h4 ref={headingRef} tabIndex={-1}>
             {t("settings.appUpdate.title")}
             <span className="settings-app-update-version mono" aria-label={t("settings.appUpdate.currentVersion")}>{state?.currentVersion || "—"}</span>
           </h4>
@@ -119,7 +130,7 @@ export default function SettingsAppUpdate() {
             </button>
           )}
           <button type="button" className="btn-secondary btn-sm" disabled={actionPending || !state?.canCheck} onClick={() => void runCheck()}>
-            {t("settings.appUpdate.check")}
+            {t(canDownload ? "settings.appUpdate.download" : "settings.appUpdate.check")}
           </button>
         </div>
       </div>

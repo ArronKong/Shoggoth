@@ -12,7 +12,7 @@ import {
   runCodexSchema,
 } from "./generate-codex-app-server-schema.mjs";
 
-const VERSION = "0.159.2";
+const VERSION = "0.167.1";
 const GENERATOR_PATH = path.join(path.dirname(new URL(import.meta.url).pathname), "generate-codex-app-server-schema.mjs");
 
 function sha256(contents) {

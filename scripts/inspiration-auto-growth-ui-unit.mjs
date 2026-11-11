@@ -51,7 +51,9 @@ const noticeStorage = new Map();
 const localStorage = { getItem: key => noticeStorage.get(key) ?? null, setItem: (key, value) => noticeStorage.set(key, value) };
 const loadNoticeBadge = () => load('pages/use-inspiration-notice-badge.ts', {}, { localStorage });
 let noticeBadge = loadNoticeBadge();
-const backendTabIcon = load('components/BackendTabIcon.tsx', {});
+const backendTabIcon = load('components/BackendTabIcon.tsx', {
+  '../lib/backendTabOrder': load('lib/backendTabOrder.ts', {}),
+});
 const agentPicker = load('components/AgentPicker.tsx', {
   './AgentAvatar': avatarModule,
   './BackendTabIcon': backendTabIcon,

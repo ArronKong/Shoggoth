@@ -14,6 +14,10 @@ const HASH = /^[a-f0-9]{64}$/u;
 const VERSION = /^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/u;
 const ID = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const DEADLINE_MS = 90 * 60 * 1000;
+// Retired identities are accepted only in old ownership records, never by the
+// public API or executable bridge. Keep them until owned cleanup succeeds.
+const RETIRED_SKILL_IDS = ["netease-music"];
+const STORED_SKILL_IDS = [...OFFICIAL_SKILL_IDS, ...RETIRED_SKILL_IDS];
 const fail = code => { throw serviceError(code, OFFICIAL_SKILL_PUBLIC_MESSAGES[code]); };
 const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
 const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === "object"
@@ -24,10 +28,11 @@ const relative = value => typeof value === "string" && value.length <= 1024 && !
   && !/[\\\0]/u.test(value) && value.split("/").every(part => part && part !== "." && part !== "..")
   && value.split("/")[0] !== "home";
 function validRecord(record) {
-  if (!record || !OFFICIAL_SKILL_IDS.includes(record.id) || !Number.isSafeInteger(record.revision) || record.revision < 0
+  if (!record || !STORED_SKILL_IDS.includes(record.id) || !Number.isSafeInteger(record.revision) || record.revision < 0
     || !["notInstalled", "installing", "installed", "removing", "failed"].includes(record.state)
     || ![null, "download", "verify", "installSkills", "registerMcp"].includes(record.stage)
-    || record.errorCode !== null && !Object.hasOwn(OFFICIAL_SKILL_PUBLIC_MESSAGES, record.errorCode)) return false;
+    || record.errorCode !== null && !Object.hasOwn(OFFICIAL_SKILL_PUBLIC_MESSAGES, record.errorCode)
+      && !(record.id === "netease-music" && record.errorCode === "OFFICIAL_SKILL_NETEASE_COMMAND_UNAVAILABLE")) return false;
   const item = record.installation;
   if (item === null) return ["notInstalled", "failed"].includes(record.state);
   return item && UUID.test(item.id) && typeof item.version === "string" && item.version.length <= 128
@@ -71,24 +76,48 @@ class OfficialSkillConnectorController {
       if (recoverInterruptedPrivateFile(this.recordPath, { trustedRoot: this.paths.trustedRoot }) === "uncertain") throw new Error();
       if (lstatIfExists(this.recordPath)) {
         const stored = JSON.parse(readPrivateFile(this.recordPath, { maxBytes: 2 * 1024 * 1024 }));
-        const previousIds = OFFICIAL_SKILL_IDS.filter(id => !["rollinggo-hotel", "baidu-maps"].includes(id));
+        const previousIds = STORED_SKILL_IDS.filter(id => !["rollinggo-hotel", "baidu-maps"].includes(id));
         const baseIds = previousIds.filter(id => !["shop", "doordash"].includes(id));
         // Quark was added after Shop and DoorDash. Preserve the accepted catalogs
         // and also recognize each release's complete pre-Quark ownership record.
         const acceptedCatalogs = [baseIds, [...baseIds, "shop"], previousIds]
           .flatMap(ids => [ids, ids.filter(id => id !== "quark-drive")]);
-        acceptedCatalogs.push(OFFICIAL_SKILL_IDS.filter(id => id !== "baidu-maps"), OFFICIAL_SKILL_IDS);
+        acceptedCatalogs.push(STORED_SKILL_IDS.filter(id => id !== "baidu-maps"), STORED_SKILL_IDS, OFFICIAL_SKILL_IDS);
         if (stored?.schemaVersion !== 1 || !Array.isArray(stored.items)
           || new Set(stored.items.map(item => item.id)).size !== stored.items.length || !stored.items.every(validRecord)
           || !acceptedCatalogs.some(ids => ids.length === stored.items.length && ids.every(id => stored.items.some(item => item.id === id)))) throw new Error();
         // Add newly introduced, uninstalled providers in memory. Preserve every existing
         // ownership record and persist the expanded catalog only on a mutation.
         this.records = new Map(OFFICIAL_SKILL_IDS.map(id => [id, stored.items.find(record => record.id === id) || initial(id)]));
+        for (const record of stored.items) if (RETIRED_SKILL_IDS.includes(record.id)) this.records.set(record.id, record);
         for (const record of this.records.values()) {
           if (["installing", "removing"].includes(record.state)) this._write(record.id, { state: "failed", stage: null, errorCode: "OFFICIAL_SKILL_INTERRUPTED" });
         }
       }
     } catch { this.blocked = true; }
+  }
+  async retireRemovedProviders() {
+    if (this.closed || this.blocked) return;
+    for (const id of RETIRED_SKILL_IDS) {
+      const item = this.records.get(id)?.installation;
+      if (!item) continue;
+      try {
+        // Revoke the exact owned registration before validating removable files.
+        // Modified payloads remain on disk, but cannot remain ready for Agents.
+        await this.mcp.mutate(async () => {
+          const server = this._ownedServer(id, item);
+          this.mcp.invalidate(item.serverId); this.mcp.revokeRuns(item.serverId);
+          if (server?.enabled) this.mcp.store.update({ id: item.serverId, expectedRevision: this.mcp.store.revision,
+            patch: { enabled: false, status: "disabled", lastCheck: null } });
+          await this.mcp.manager.closeServer(item.serverId);
+        });
+        await this._remove(id);
+      } catch (error) {
+        // A retired or damaged component must not block unrelated connectors.
+        if (!this.blocked) this._write(id, { state: "failed", stage: null,
+          errorCode: officialSkillPublicError(error, "OFFICIAL_SKILL_REMOVE_FAILED").code });
+      }
+    }
   }
   stopAdmission() { this.closed = true; for (const abort of this.aborts.values()) abort.abort(); }
   async close() {
@@ -103,7 +132,7 @@ class OfficialSkillConnectorController {
   }
   _provider(id) { const provider = this.providers[id]; if (!provider) fail("OFFICIAL_SKILL_INVALID_ARGUMENT"); return provider; }
   _root(id, item = this.records.get(id)?.installation) {
-    if (!OFFICIAL_SKILL_IDS.includes(id) || !item || !UUID.test(item.id)) fail("OFFICIAL_SKILL_STATE_UNAVAILABLE");
+    if (!STORED_SKILL_IDS.includes(id) || !item || !UUID.test(item.id)) fail("OFFICIAL_SKILL_STATE_UNAVAILABLE");
     return path.join(this.runtimeRoot, id, item.id);
   }
   _fixedTransport(id, item) {
@@ -117,7 +146,8 @@ class OfficialSkillConnectorController {
     if (this.blocked) fail("OFFICIAL_SKILL_STATE_UNAVAILABLE");
     const next = { ...this.records.get(id), ...patch, revision: this.records.get(id).revision + 1 };
     if (!validRecord(next)) fail("OFFICIAL_SKILL_STATE_UNAVAILABLE");
-    const items = OFFICIAL_SKILL_IDS.map(key => key === id ? next : this.records.get(key));
+    const items = [...this.records.keys()].map(key => key === id ? next : this.records.get(key))
+      .filter(record => !RETIRED_SKILL_IDS.includes(record.id) || record.installation);
     try { atomicWritePrivateFile(this.recordPath, JSON.stringify({ schemaVersion: 1, items }), { trustedRoot: this.paths.trustedRoot }); }
     catch { this.blocked = true; fail("OFFICIAL_SKILL_STATE_UNAVAILABLE"); }
     this.records.set(id, next);

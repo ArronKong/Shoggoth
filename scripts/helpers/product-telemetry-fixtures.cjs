@@ -32,12 +32,14 @@ function tempProfile() {
 
 function fakeClock(start = "2026-09-10T02:00:00.000Z") {
   let now = Date.parse(start);
+  let mono = 0;
   let seq = 0;
   const timers = new Map();
   return {
     now: () => now,
+    monotonic: () => mono,
     set: (value) => { now = typeof value === "number" ? value : Date.parse(value); },
-    advance: (ms) => { now += ms; },
+    advance: (ms) => { now += ms; mono += Math.max(0, ms); },
     setTimeout(fn, ms) { const id = ++seq; timers.set(id, { fn, at: now + ms }); return id; },
     clearTimeout(id) { timers.delete(id); },
     timers,

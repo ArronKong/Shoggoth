@@ -4,7 +4,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const test = require("node:test");
 const { event, BUILD, tempProfile } = require("./helpers/product-telemetry-fixtures.cjs");
-const { validateTelemetryEvent, getUtcDay, isEligibleBuild } = require("../app/core/product-telemetry-schema");
+const { validateTelemetryEvent, validateTelemetrySignal, createTelemetryEvent, DAILY_EVENT, getUtcDay,
+  isEligibleBuild } = require("../app/core/product-telemetry-schema");
 const { createConfigStore } = require("../app/core/config-store");
 
 test("UTC calendar days, including leap/month boundaries, reject invalid time", () => {
@@ -58,10 +59,10 @@ test("config health distinguishes first-run absence, errors and invalid root wit
     store.ensure();
     assert.equal(store.getReadStatus(), "ok");
     const original = store.read();
-    assert.equal(Object.hasOwn(original, "telemetry"), false, "detailed preference schema is deferred");
+    assert.deepEqual(original.telemetry, { enabled: true, detailedEnabled: true, policyVersion: 2 });
     store.write({ locale: "en", telemetry: { basicEnabled: false, detailedEnabled: true } });
     assert.equal(store.read().locale, "en");
-    assert.equal(Object.hasOwn(store.read(), "telemetry"), false);
+    assert.deepEqual(store.read().telemetry, original.telemetry);
     fs.writeFileSync(profile.configPath, '{"token":"SECRET_CANARY",');
     assert.equal(store.getReadStatus(), "parse_error");
     assert.equal(fs.readFileSync(profile.configPath, "utf8"), '{"token":"SECRET_CANARY",');
@@ -75,4 +76,61 @@ test("config health distinguishes first-run absence, errors and invalid root wit
     fs.mkdirSync(profile.configPath);
     assert.equal(store.getReadStatus(), "read_error");
   } finally { profile.cleanup(); }
+});
+
+test("migration preserves opt-outs and distinguishes absent, invalid, and future preferences", () => {
+  const p = tempProfile();
+  const store = createConfigStore(p.configPath);
+  const put = telemetry => fs.writeFileSync(p.configPath, JSON.stringify({ locale: "zh-CN", telemetry }));
+  try {
+    put(undefined);
+    assert.deepEqual(store.getTelemetryPreferences(), {
+      status: "ok", preferences: { enabled: true, detailedEnabled: true, policyVersion: 2 }, needsMigration: true,
+    });
+    put({ enabled: true, basicEnabled: false, detailedEnabled: false, policyVersion: 1 });
+    assert.deepEqual(store.writeTelemetryPreferences(), { enabled: false, detailedEnabled: false, policyVersion: 2 });
+    store.write({ theme: "dark", telemetry: { enabled: true, detailedEnabled: true } });
+    assert.equal(store.getTelemetryPreferences().preferences.enabled, false);
+    assert.equal(store.getTelemetryPreferences().preferences.detailedEnabled, false);
+    assert.equal(store.read().theme, "dark");
+    assert.throws(() => store.writeTelemetryPreferences("detailedEnabled", "true"));
+    put({ detailedEnabled: "true" });
+    assert.deepEqual(store.writeTelemetryPreferences(), { enabled: true, detailedEnabled: false, policyVersion: 2 });
+    for (const invalid of [null, [], { enabled: "true" }, { basicEnabled: null }, { policyVersion: 3 }]) {
+      put(invalid);
+      assert.equal(store.getTelemetryPreferences().status, "invalid");
+      assert.throws(() => store.writeTelemetryPreferences("enabled", true));
+      store.write({ locale: "en" });
+      assert.deepEqual(JSON.parse(fs.readFileSync(p.configPath)).telemetry, invalid);
+    }
+  } finally { p.cleanup(); }
+});
+
+test("detailed schema admits only catalog IDs, fixed counters and complete configuration projections", () => {
+  const { uuid, distinct_id: distinctId, timestamp } = event();
+  const daily = createTelemetryEvent(DAILY_EVENT, { uuid, distinctId, nowMs: Date.parse(timestamp), build: BUILD }, {
+    catalog_version: 1, used_inspiration: true, inspiration_create_attempt_count: 2,
+    observed_model: true, configured_model_ids: ["openai/gpt-6.1-sol"], configured_model_count: 1,
+  });
+  assert.equal(validateTelemetryEvent(daily), true);
+  for (const mutation of [
+    { used_model_ids: ["SECRET_CANARY"] }, { configured_model_ids: ["openai/gpt-6.1-sol", "openai/gpt-6.1-sol"] },
+    { configured_model_ids: ["provider/private-model"] }, { configured_model_count: Infinity },
+    { used_chat: "true" }, { used_dashboard: false }, { inspiration_create_attempt_count: -1 },
+    { enabled_connector_ids: ["featured/cloudflare"] }, { catalog_version: 99 }, { path: "/SECRET_CANARY" },
+  ]) assert.equal(validateTelemetryEvent({ ...daily, properties: { ...daily.properties, ...mutation } }), false);
+  assert.equal(validateTelemetryEvent({ ...daily, timestamp }), false);
+  const snapshot = { kind: "configuration_snapshot", collectionEpoch: uuid,
+    payload: { dimension: "provider", values: { configured_provider_ids: ["anthropic", "custom"], configured_provider_count: 3 } } };
+  assert.equal(validateTelemetrySignal(snapshot), true);
+  snapshot.payload.values.secret = "SECRET_CANARY";
+  assert.equal(validateTelemetrySignal(snapshot), false);
+  const end = { kind: "feature_end", collectionEpoch: uuid, payload: {
+    operationId: distinctId, outcome: "success", errorKind: null, usage: {
+      runtimeType: "codex", providerId: "openai", modelId: "openai/gpt-6.1-sol",
+    },
+  } };
+  assert.equal(validateTelemetrySignal(end), true);
+  end.payload.usage.sessionId = "SECRET_CANARY";
+  assert.equal(validateTelemetrySignal(end), false);
 });

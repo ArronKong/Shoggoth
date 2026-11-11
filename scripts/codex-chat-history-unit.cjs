@@ -106,7 +106,7 @@ test("mapper 构造只接受 pinned 0.149 CodexSchemaContract 与至少 32B curs
   assert.equal(typeof history.createCodexChatHistoryMapper, "function");
   assert.throws(
     () => history.createCodexChatHistoryMapper({
-      schemaContract: { version: "0.159.2", validateResponse() {} },
+      schemaContract: { version: "0.167.1", validateResponse() {} },
       cursorSecret: Buffer.alloc(32, 1),
     }),
     (error) => error.code === "CODEX_HISTORY_VALIDATOR_REQUIRED",
@@ -189,7 +189,7 @@ test("mapper 构造只接受 pinned 0.149 CodexSchemaContract 与至少 32B curs
     cursorSecret: Buffer.alloc(32, 2),
   };
   const capturedMapper = history.createCodexChatHistoryMapper(mutableOptions);
-  mutableOptions.schemaContract = { version: "0.159.2", validateResponse() {} };
+  mutableOptions.schemaContract = { version: "0.167.1", validateResponse() {} };
   assert.throws(
     () => capturedMapper.validateCodexThreadRead({
       thread: { id: "invalid", modelProvider: "openai", turns: [] },

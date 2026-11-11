@@ -23,8 +23,6 @@ const RELEASES = Object.freeze({
     runtime: { url: "https://registry.npmjs.org/@fly-ai/flyai-cli/-/flyai-cli-1.0.16.tgz", sha256: "aa133fe4e627ddab07916ec3afca1d51d5a9ac5f8bd71a4219d5e8d8c30fda40", kind: "tar" } },
   "meituan-paotui": { repo: "meituan/MT-Paotui-For-Client", ref: "05ead232ae2b94b9b55b2a1e126e039a1cb6db00", sha256: "e3fb4b9facda07f3a83d266daa1bbfff074f6efe7fea1fb38da40e3d693eab96", docs: [""] },
   weread: { repo: "Tencent/WeChatReading", ref: "d98e66ee60a8c7bcd35da549d0643c4470439643", sha256: "4f076e11460c9c9af5a248607c6e491daac23d2032218d179e7dcebcab87d532", docs: ["skills/"] },
-  "netease-music": { repo: "NetEase/skills", ref: "58ff0771d6977feb847d6bfe322280eec4bec004", sha256: "5ed5001414fa6872712f16fed81b098c86c765c3344f9efd56fb1cab7095f5c1", docs: ["ncm-cli-setup/", "netease-music-cli/", "netease-music-assistant/"],
-    runtime: { url: "https://registry.npmjs.org/@music163/ncm-cli/-/ncm-cli-0.1.7.tgz", sha256: "d9679fa2a2271ad025f2dd5a1110d1d5ea65c9c4b36b5ad70a755be75fe05bb9", kind: "tar" } },
   alipay: { repo: "alipay/payment-skills", ref: "abdd97a527e8dae4ba8d661f524359f6440433a0", sha256: "3dc84c3784d9e849c4c06584269134556c4648d8696a249fd03fe2e090d62fab", docs: ["alipay-authenticate-wallet/", "alipay-payment-skill/"],
     runtime: { url: "https://mdn.alipayobjects.com/aipay_assets/afts/file/wrLmTK0jLngAAAAAgVAAAAgAeoh5AQJr", sha256: "e764f0fb88e889967a70ea3bdfa6cc7e2a28e526f7defe963982b73863a95aee", kind: "zip" } },
 });
@@ -118,7 +116,6 @@ function adapterInstructions(provider, serverId) {
     fliggy: "使用 travel_search 搜索旅行商品。无 API Key 的成功结果是试用服务可用，不表示已登录个人账号。",
     "rollinggo-hotel": "使用官方 rollinggo-hotel-booking Skill 与固定版本 @rollinggo/hotel 组件，无需申请或填写 API Key。账号在连接器窗口通过 RollingGo 官方网页授权，不在聊天中索要令牌。先确认目的地、入住离店日期、房间数与人数；用 hotel_tags 查标签，search_hotels 搜索，hotel_detail 看真实房型和退改政策。保留标签与品牌筛选，不擅自放宽用户硬条件。搜索价格仅为参考价。用户选定房型后，明确确认才可 price_confirm 锁价；展示锁定总价、币种、日期和完整取消政策，确认入住人和联系邮箱后，才用本连接器返回的 confirmationId 与 confirmed:true 调用 book。价格凭证过期须重新锁价并确认。订单创建只表示待支付，提供服务实际返回的支付链接，由用户完成付款；不得编造支付方式或支付成功。用 orders/order_detail 核对实际订单。取消前必须 pre_cancel 展示罚金和退款依据，用户再次明确同意后才用返回的 confirmationId 调用 confirm_cancel；不得编造到账时间。下单或取消结果不明仅查原订单或交给官方客服，不得重复提交或创建替代订单。退出或移除只清除本地授权，不等于撤销服务端权限。上游全局安装、自动更新、终端与任意网络示例均由本连接器的固定工具代替。",
     weread: "按上游文档字段口径使用 search_books、bookshelf、book_info、notebooks、book_notes、reading_stats、recommend_books。所有请求只读；阅读时长单位为秒。书架数量包含 books、albums 和 mp。",
-    "netease-music": "使用 search_songs 搜索、my_playlists 查看收藏歌单、create_playlist 创建歌单。创建须用户确认。本连接器不安装播放器，不支持音乐播放；其他歌单编辑命令未暴露。",
     "meituan-paotui": "必须先调用 delivery_preview 展示费用、地址及物品，再在用户明确确认后调用 submit_order。提交只接受本次 previewId；金额超过100元必须再次明确确认。不得凭连接授权提交订单。使用 order_status 查询状态。",
     alipay: "仅支持支付宝官方收银台付款及本次支付状态查询，不支持个人历史账单、退款或任意URL的402支付。用户明确要求付款后调用 submit_payment，展示金额、收款方和支付目的并走工具审批；真实当前会话ID由应用提供，不得编造。使用 payment_status 查询本次支付返回的凭证；凭证仅在本连接进程内有效，重启或凭证丢失后应去支付宝核对实际状态，不得据此重新付款。不得在连接测试中调用付款。",
   }[provider.id];
@@ -178,15 +175,6 @@ async function prepareOfficialSkill({ providerId, root, homeDir, signal, onStage
     const passport = content["passport-auth/scripts/mtuser-pt-passport-1.0.5.tgz"];
     if (!passport || sha256(passport) !== "284b0b5dedd72b2f7fd13693facae53060d6e5fe1a4d8ea3c47654e07761e464") fail();
     for (const [name, bytes] of Object.entries(readTar(passport))) { if (!name.startsWith("package/")) fail(); put(`runtime/passport/${name.slice(8)}`, bytes); }
-  }
-  if (providerId === "netease-music") {
-    // Only the dependency closure needed by auth/search/playlist commands is
-    // installed. No npm lifecycle scripts, ffprobe binaries or player packages.
-    for (const dependency of require("./data/ncm-locked-js-dependencies.json")) {
-      const bytes = await downloadPinned(dependency, options);
-      const archiveRoot = dependency.archiveRoot || "package/";
-      for (const [name, value] of Object.entries(readTar(bytes))) { if (!name.startsWith(archiveRoot)) fail(); put(`runtime/${dependency.path}/${name.slice(archiveRoot.length)}`, value); }
-    }
   }
   if (providerId === "rollinggo-hotel") {
     for (const dependency of require("./data/rollinggo-locked-js-dependencies.json")) {

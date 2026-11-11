@@ -2,10 +2,11 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { LIMITS, exactObject, isUtcDay, isUuid, getUtcDay, validateTelemetryEvent } = require("./product-telemetry-schema");
+const { LIMITS, EVENT_NAME, DAILY_EVENT, STEP_EVENT, catalog, boundedList, exactObject,
+  isUtcDay, isUuid, getUtcDay, validateTelemetryEvent } = require("./product-telemetry-schema");
 
 const PAUSE_REASONS = new Set([null, "http_rejected", "protocol_error", "quota_limited"]);
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 const ownUid = typeof process.getuid === "function" ? process.getuid() : null;
 const safeOwner = (stat) => ownUid === null || stat.uid === ownUid;
 const sameFile = (a, b) => a && b && a.dev === b.dev && a.ino === b.ino;
@@ -13,20 +14,28 @@ const fail = () => { throw new Error("TELEMETRY_STATE_UNSAFE"); };
 
 function validateState(state) {
   try {
-    if (!exactObject(state, ["version", "distinctId", "lastActiveDay", "transportFingerprint", "pausedReason", "outbox"])
-      || state.version !== STATE_VERSION || !isUuid(state.distinctId) || !isUtcDay(state.lastActiveDay)
+    const keys = ["version", "distinctId", "lastActiveDay", "transportFingerprint", "pausedReason", "outbox"];
+    const legacy = exactObject(state, keys) && state.version === 1;
+    if (!legacy) keys.push("detail");
+    if (!exactObject(state, keys) || (!legacy && state.version !== STATE_VERSION)
+      || !isUuid(state.distinctId) || !isUtcDay(state.lastActiveDay)
       || typeof state.transportFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(state.transportFingerprint)
-      || !PAUSE_REASONS.has(state.pausedReason) || !Array.isArray(state.outbox)
-      || Object.getPrototypeOf(state.outbox) !== Array.prototype
-      || Reflect.ownKeys(state.outbox).length !== state.outbox.length + 1
-      || state.outbox.length > LIMITS.events) return false;
-    const days = new Set();
+      || !PAUSE_REASONS.has(state.pausedReason) || !boundedList(state.outbox, LIMITS.events, () => true)) return false;
+    const detail = state.detail;
+    if (!legacy && (!exactObject(detail, ["lastSealedDay", "draft", "steps"])
+      || (detail.lastSealedDay !== null && !isUtcDay(detail.lastSealedDay))
+      || !boundedList(detail.steps, catalog.steps.length, step => catalog.steps.includes(step))
+      || new Set(detail.steps).size !== detail.steps.length
+      || (detail.draft !== null && (!validateTelemetryEvent(detail.draft) || detail.draft.event !== DAILY_EVENT
+        || detail.draft.distinct_id !== state.distinctId
+        || (detail.lastSealedDay && detail.draft.properties.report_day <= detail.lastSealedDay))))) return false;
+    const receipts = new Set();
     const ids = new Set();
+    if (detail?.draft) ids.add(detail.draft.uuid);
     for (const row of state.outbox) {
       if (!exactObject(row, ["event", "attemptsTotal", "attemptDay", "attemptsToday", "nextAttemptAt"])
         || !validateTelemetryEvent(row.event) || row.event.distinct_id !== state.distinctId
-        || row.event.properties.report_day > state.lastActiveDay
-        || days.has(row.event.properties.report_day) || ids.has(row.event.uuid)
+        || ids.has(row.event.uuid)
         || !Number.isInteger(row.attemptsTotal) || row.attemptsTotal < 0 || row.attemptsTotal > LIMITS.attemptsTotal
         || !Number.isInteger(row.attemptsToday) || row.attemptsToday < 0
         || row.attemptsToday > LIMITS.attemptsPerDay || row.attemptsToday > row.attemptsTotal
@@ -36,7 +45,13 @@ function validateState(state) {
       } else if (!isUtcDay(row.attemptDay) || row.attemptDay < row.event.properties.report_day || row.attemptsToday === 0) {
         return false;
       }
-      days.add(row.event.properties.report_day);
+      const { event, properties: { report_day: day, step } } = row.event;
+      const receipt = event + ":" + (event === STEP_EVENT ? step : day);
+      if (receipts.has(receipt) || (event === EVENT_NAME && day > state.lastActiveDay)
+        || (legacy && event !== EVENT_NAME)
+        || (event === DAILY_EVENT && (!detail?.lastSealedDay || day > detail.lastSealedDay))
+        || (event === STEP_EVENT && !detail?.steps.includes(step))) return false;
+      receipts.add(receipt);
       ids.add(row.event.uuid);
     }
     return Buffer.byteLength(JSON.stringify(state), "utf8") <= LIMITS.stateBytes;

@@ -1,3 +1,4 @@
+import { measureTelemetry } from "../../lib/productTelemetry";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
 import type { CustomEndpoint, CustomEndpointInput, CustomEndpointsSnapshot } from "../../types";
@@ -353,7 +354,10 @@ export default function EndpointModal({
             recoverySession,
             recoveryNeedsSecret ? { apiKey: apiKey.trim() } : undefined,
           )
-        : await controller.save(inputForRequest(), saveSession.current, mutationOutcome?.recovery?.baseline ?? endpoint ?? undefined);
+        : await measureTelemetry("model_save", controller.backend,
+          () => controller.save(inputForRequest(), saveSession.current, mutationOutcome?.recovery?.baseline ?? endpoint ?? undefined),
+          result => result.status === "applied" || result.configSaved === true ? "success"
+            : result.recovery?.locked ? null : "error");
       if (epoch !== mutationEpoch.current || activeController !== controller) return;
       const { outcome, cancelled } = recoverySession.kind === "clear-key"
         ? { outcome: first, cancelled: false }

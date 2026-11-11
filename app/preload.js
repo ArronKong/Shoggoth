@@ -178,10 +178,12 @@ contextBridge.exposeInMainWorld("openclawDesktop", {
   },
   saveInspirationArchive: input => ipcRenderer.invoke("shoggoth:inspiration:save-archive", input),
   getConfig: () => ({ ...currentConfig }),
-  // Empty activity signal only. Main owns identity, timestamp, health/release
-  // gates and collection; detailed statistics are not implemented in phase A.
+  // Main validates frame ownership, preferences, epochs and the signal schema.
   productTelemetry: {
-    recordActivity: () => ipcRenderer.send("shoggoth:telemetry:activity"),
+    record: signal => ipcRenderer.send("shoggoth:telemetry:signal", signal),
+    getSettings: () => ipcRenderer.invoke("shoggoth:telemetry:get-settings"),
+    setEnabled: enabled => ipcRenderer.invoke("shoggoth:telemetry:set-enabled", enabled),
+    setDetailedEnabled: enabled => ipcRenderer.invoke("shoggoth:telemetry:set-detailed-enabled", enabled),
   },
   appUpdate: {
     getState: () => ipcRenderer.invoke("shoggoth:app-update:get-state"),

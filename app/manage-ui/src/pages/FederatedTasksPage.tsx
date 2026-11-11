@@ -1,3 +1,4 @@
+import { measureTelemetry } from "../lib/productTelemetry";
 import AgentAvatarView from "../components/AgentAvatar";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -240,9 +241,10 @@ export default function FederatedTasksPage() {
     if (!createTitle.trim() || !createAgent) return;
     setCreating(true);
     try {
-      await createFederatedTask(projectKey, createAgent, {
-        title: createTitle.trim(), body: createBody, status: createStatus,
-      });
+      await measureTelemetry("task_create", board?.agents.find(agent => agent.agentKey === createAgent)?.backendId,
+        () => createFederatedTask(projectKey, createAgent, {
+          title: createTitle.trim(), body: createBody, status: createStatus,
+        }));
       setCreateModal(false);
       await refresh();
       toast.success(t("tasks.createdToast"));
@@ -299,7 +301,7 @@ export default function FederatedTasksPage() {
     replace(optimistic);
     setSelectedTask((current) => current && current.taskKey === task.taskKey ? { ...current, column: status } : current);
     try {
-      await moveFederatedTask(task, status, undefined, completion);
+      await measureTelemetry("task_move", task.backendId, () => moveFederatedTask(task, status, undefined, completion));
       await refresh();
       toast.success(t("tasks.movedToast"));
     } catch (cause) {

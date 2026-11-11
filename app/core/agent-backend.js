@@ -2086,8 +2086,8 @@ class AgentBackend {
   async updateAgentRuntimeBinding(_id, _bindingId, _patch, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async removeAgentRuntimeBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
   async setAgentDefaultBinding(_id, _bindingId, _options) { throw new Error(`${this.id}: runtime bindings not supported`); }
-  /** Read the Agent's saved default and its Runtime model choices. */
-  async getAgentDefaultModels(_id) { throw new Error(`${this.id}: agent default models not supported`); }
+  /** Read the Agent's effective default and model choices. `defaultBindingOnly` limits the read to its current Runtime. */
+  async getAgentDefaultModels(_id, _options) { throw new Error(`${this.id}: agent default models not supported`); }
   /** Configured choices for one Agent, including temporarily unavailable models. */
   async getAgentModels(_id) { throw Object.assign(new Error(`${this.id}: agent model catalog not supported`), { statusCode: 501 }); }
   /** Save an Agent's default Runtime and model together, without switching a conversation. */

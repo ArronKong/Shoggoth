@@ -37,6 +37,7 @@ const ARTIFACT_ROOT = configuredArtifactRoot === undefined
   ? path.join(REPO_ROOT, "dist")
   : path.normalize(configuredArtifactRoot);
 const require = createRequire(import.meta.url);
+const { CODEX_VERSION } = require("../app/agent-service/codex-schema-contract.js");
 const { SERVICE_PROTOCOL_VERSION: EXPECTED_SERVICE_PROTOCOL_VERSION } = require(path.join(REPO_ROOT, "app/agent-service/service-protocol-version.js"));
 assert.equal(Number.isSafeInteger(EXPECTED_SERVICE_PROTOCOL_VERSION) && EXPECTED_SERVICE_PROTOCOL_VERSION > 0, true);
 const { extractFile: extractAsarFile, listPackage: listAsarFiles } = require("@electron/asar");
@@ -53,12 +54,11 @@ const EXPECTED_DIRECTORIES = [
   "codex-resources/voice/lib",
   "codex-resources/voice/licenses",
   "codex-resources/voice/plugins",
-  "codex-resources/zsh",
-  "codex-resources/zsh/bin"
 ];
 const EXPECTED_FILES = [
   "bin/codex",
   "bin/codex-code-mode-host",
+  "bin/codex-exec-server",
   "codex-package.json",
   "codex-path/rg",
   "codex-resources/voice/NOTICE.md",
@@ -98,7 +98,6 @@ const EXPECTED_FILES = [
   "codex-resources/voice/plugins/libgstrtpmanager.dylib",
   "codex-resources/voice/runtime.json",
   "codex-resources/voice/sources.json",
-  "codex-resources/zsh/bin/zsh"
 ];
 const MACHO_MAGIC = new Set([
   "cafebabe", "bebafeca", "cafebabf", "bfbafeca",
@@ -746,14 +745,15 @@ async function verifyPackage(packageRoot, expected) {
   const metadata = JSON.parse(await readFile(path.join(packageRoot, "codex-package.json"), "utf8"));
   assert.deepEqual(metadata, {
     layoutVersion: 1,
-    version: "0.159.2",
+    version: CODEX_VERSION,
     target: expected.target,
     variant: "codex",
     entrypoint: "bin/codex",
+    execServer: "bin/codex-exec-server",
     resourcesDir: "codex-resources",
     pathDir: "codex-path",
   });
-  for (const executable of ["bin/codex", "bin/codex-code-mode-host", "codex-path/rg", "codex-resources/zsh/bin/zsh"]) {
+  for (const executable of ["bin/codex", "bin/codex-code-mode-host", "bin/codex-exec-server", "codex-path/rg"]) {
     const executableStat = await stat(path.join(packageRoot, executable));
     assert.equal((executableStat.mode & 0o111) !== 0, true, `${executable} must be executable`);
   }
@@ -1032,7 +1032,7 @@ async function verifySourceContract(onlyArch = null) {
     "com.apple.security.cs.disable-library-validation",
   ]) assert.match(entitlements, new RegExp(`<key>${entitlement.replaceAll(".", "\\.")}</key>\\s*<true/>`));
   const manifest = JSON.parse(await readFile(path.join(REPO_ROOT, "build", "codex-runtime-manifest.json"), "utf8"));
-  assert.equal(manifest.runtime.version, "0.159.2");
+  assert.equal(manifest.runtime.version, CODEX_VERSION);
   const cuaManifest = JSON.parse(await readFile(path.join(REPO_ROOT, "build", "cua-driver-manifest.json"), "utf8"));
   assert.equal(cuaManifest.version, "0.22.0");
   assert.equal(cuaManifest.nodePackages.length, 4);
@@ -1331,7 +1331,7 @@ async function verifyLaunchAgent(runtimePath, scratchPath) {
       }
       throw new Error("LaunchAgent output timed out");
     })();
-    assert.equal(output, "codex-cli 0.159.2");
+    assert.equal(output, `codex-cli ${CODEX_VERSION}`);
   } catch (error) {
     primaryError = error;
     throw error;
@@ -1386,11 +1386,11 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   }
   await access(path.join(appPath, "Contents", "Resources", "app-update.yml"));
   const schemaManifest = JSON.parse(extractAsarFile(
-    archivePath, "schemas/codex-app-server/0.159.2/schema-manifest.json",
+    archivePath, `schemas/codex-app-server/${CODEX_VERSION}/schema-manifest.json`,
   ).toString("utf8"));
-  assert.equal(schemaManifest.codexVersion, "0.159.2", "packaged schema contract is missing");
+  assert.equal(schemaManifest.codexVersion, CODEX_VERSION, "packaged schema contract is missing");
   assert.doesNotThrow(() => extractAsarFile(
-    archivePath, "schemas/codex-app-server/0.159.2/json/ClientRequest.json",
+    archivePath, `schemas/codex-app-server/${CODEX_VERSION}/json/ClientRequest.json`,
   ));
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: cua-sdk`);
   await verifyPackagedCua(appPath, archivePath, electronExecutable, expected);
@@ -1404,7 +1404,8 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   await verifyPackage(packageRoot, expected);
   const runtimePath = path.join(packageRoot, "bin", "codex");
   const hostPath = path.join(packageRoot, "bin", "codex-code-mode-host");
-  for (const signedPath of [runtimePath, hostPath]) {
+  const execServerPath = path.join(packageRoot, "bin", "codex-exec-server");
+  for (const signedPath of [runtimePath, hostPath, execServerPath]) {
     const signature = await runCaptured("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", signedPath]);
     assert.equal(signature.code, 0, `${signedPath} code signature is invalid`);
     const signatureDetails = await runCaptured("/usr/bin/codesign", ["-d", "--verbose=4", signedPath]);
@@ -1428,7 +1429,7 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
       env: { CODEX_HOME: scratchPath, HOME: scratchPath, PATH: process.env.PATH ?? "", TMPDIR: scratchPath },
     });
     assert.equal(version.code, 0);
-    assert.equal(version.stdout.trim(), "codex-cli 0.159.2");
+    assert.equal(version.stdout.trim(), `codex-cli ${CODEX_VERSION}`);
     console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: app-server`);
     await verifyPackagedAppServer(runtimePath, scratchPath);
     if (runLaunchAgent) {

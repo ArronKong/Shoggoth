@@ -83,7 +83,7 @@ function safeAccountUrl(value) {
 function normalizeAccountReadResponse(response) {
   if (!exactObject(response, ["account", "requiresOpenaiAuth", "workspaceRouting"], ["requiresOpenaiAuth"])
     || typeof response.requiresOpenaiAuth !== "boolean") throw accountProtocolError();
-  // 0.159.2 emits this experimental field even without experimentalApi.
+  // Codex can emit this experimental field even without experimentalApi.
   // Its generated definition is checked by the contract; keep it Host-private.
   const routing = response.workspaceRouting;
   if (routing !== undefined && routing !== null && (!exactObject(routing,
@@ -97,7 +97,8 @@ function normalizeAccountReadResponse(response) {
   if (account.type === "apiKey" && exactObject(account, ["type"])) {
     return { account: { type: "apiKey" }, requiresOpenaiAuth: response.requiresOpenaiAuth };
   }
-  if (account.type === "chatgpt" && exactObject(account, ["type", "email", "planType"], ["type", "planType"])) {
+  if (account.type === "chatgpt"
+    && exactObject(account, ["type", "email", "planType", "workspaceName"], ["type", "planType"])) {
     return {
       account: { type: "chatgpt", planType: account.planType },
       requiresOpenaiAuth: response.requiresOpenaiAuth,
@@ -317,6 +318,17 @@ class CodexRuntimeHost {
       throw runtimeError("CODEX_RUNTIME_PREPARE_INVALID", "Codex app-server launch is invalid");
     }
     launchArgs.splice(commandIndex, 0, ...(prepared?.configArgs || []));
+    const projectionKind = this.options.modelSecretProviderKind;
+    if (projectionKind != null) {
+      if (projectionKind !== this.modelProviderKind || !["chatgpt", "openai-api-key"].includes(projectionKind)) {
+        throw runtimeError("CODEX_RUNTIME_PREPARE_INVALID", "Codex model projection does not match the execution provider");
+      }
+      // The app-server admits the saved projection provider. Each thread
+      // supplies its own loopback URL before it can send a model request.
+      const projection = require("./codex-runtime-config").modelSecretProviderConfig(projectionKind, "http://127.0.0.1:0");
+      launchArgs.splice(commandIndex + (prepared?.configArgs?.length ?? 0), 0,
+        ...Object.entries(projection).flatMap(([name, value]) => ["-c", `${name}=${JSON.stringify(value)}`]));
+    }
     this.groupMcpBootstrap = require("./codex-runtime-config").validMcpBootstrapReceipt(prepared?.mcpBootstrap, {
       binding: this.binding, configArgs: prepared?.configArgs ?? [],
     }) ? prepared.mcpBootstrap : null;

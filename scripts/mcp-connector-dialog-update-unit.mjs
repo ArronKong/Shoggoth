@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {createRequire} from 'node:module';
 import ts from '../app/manage-ui/node_modules/typescript/lib/typescript.js';
-import { bundledBridgeVersions, loadConnectorAddButton, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
+import { bundledBridgeVersions, connectorTelemetryFixture, loadConnectorAddButton, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 const uiRequire=createRequire(new URL('../app/manage-ui/package.json',import.meta.url));
 const React=uiRequire('react'),Renderer=uiRequire('react-test-renderer');
 const recommendations=JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/mcp-featured-presets.json',import.meta.url),'utf8'));
@@ -20,6 +20,7 @@ let currentLanguage='en';
 const authorizations=[];
 const mod=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
 
+ if(name==='../lib/productTelemetry')return connectorTelemetryFixture;
  if(name==='../components/McpConnectorIcon')return {__esModule:true,default:props=>React.createElement('i',{'data-dialog-icon':props.iconId||props.identity})};
  if(name==='../components/ConnectorTools')return {__esModule:true,default:()=>null};
  if(name==='../components/ConnectorDetails')return connectorDetails;
@@ -415,7 +416,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const featured=rootRequire('./app/agent-service/data/mcp-featured-servers.json');
  const hiddenIds=new Set(['gmail','google-calendar','google-contacts','google-docs','google-drive','google-sheets','google-slides','zoom','asana','box','dropbox','quickbooks','outlook-mail','outlook-calendar','strava','vercel','shop-pay','shopify','shopify-ucp','uber','uber-eats']);
  const chinesePresets=new Set(['amap','didi','eastmoney','ifind','luckin','mcdonalds','mijia','variflight','wind']);
- const chineseOfficial=new Set(['alipay','baidu-maps','fliggy','meituan-paotui','netease-music','quark-drive','rollinggo-hotel','weread']);
+ const chineseOfficial=new Set(['alipay','baidu-maps','fliggy','meituan-paotui','quark-drive','rollinggo-hotel','weread']);
  const officialCatalog=rootRequire('./app/agent-service/data/official-skill-connectors.json');
  const presetVisible=id=>!hiddenIds.has(id)&&(currentLanguage==='zh-CN'||!chinesePresets.has(id));
  const github=parseRegistryEntry(rootRequire('./scripts/fixtures/mcp-registry/io.github.github__github-mcp-server.json'));
@@ -442,6 +443,8 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const connectorAddButton=loadConnectorAddButton();
  const page=load('../app/manage-ui/src/pages/ConnectorsPage.tsx',name=>{
   if(name==='react'||name==='react/jsx-runtime')return uiRequire(name);
+  if(name==='../lib/productTelemetry')return connectorTelemetryFixture;
+  if(name==='../../../core/data/product-telemetry-catalog.json')return {__esModule:true,default:JSON.parse(fs.readFileSync(new URL('../app/core/data/product-telemetry-catalog.json',import.meta.url),'utf8'))};
   if(name==='../components/ConnectorDetails')return connectorDetails;
   if(name==='../components/ConnectorAddButton')return connectorAddButton;
   if(name==='react-i18next')return {useTranslation:()=>({t:key=>key,i18n:{resolvedLanguage:currentLanguage}})};
@@ -549,7 +552,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
   currentLanguage='en';
   console.log('PASS service groups: one compact app entry, connected groups omit status, partial groups show not connected, no duplicate Add and legacy management in both languages');
   officialDefinitions.push(...officialCatalog);
-  const installedOfficialIds=['alipay','fliggy','netease-music','shop'];
+  const installedOfficialIds=['alipay','fliggy','shop'];
   installedServers=installedOfficialIds.map((id,index)=>({...installed,id:`official-${id}-a0b0c0d${index}`,name:`Renamed ${id}`,source:{kind:'custom'},transport:{kind:'stdio-command',command:'/Applications/Shoggoth.app/Contents/MacOS/Shoggoth'}}));
   const officialRecommendations=()=>section('recommended').findAll(node=>node.props['data-official-recommendation']).map(node=>node.props['data-official-recommendation']);
   const availableOfficial=officialDefinitions.filter(item=>!installedOfficialIds.includes(item.id)).sort((a,b)=>catalog.mcpRecommendationRank(a.id)-catalog.mcpRecommendationRank(b.id)).map(item=>item.id);
@@ -566,9 +569,13 @@ console.log('PASS installed dialog identities: registry, eight official componen
   await unmount();
   installedServers=[{...installed,id:'custom-alipay',name:'支付宝',transport:{kind:'stdio-command',command:'/custom/node'}}];
   await mount();
+  assert.equal(officialRecommendations().includes('netease-music'),false,'NetEase is absent from the Chinese catalog even without an existing installation');
   assert.equal(section('recommended').findAll(node=>node.props['data-official-recommendation']==='alipay').length,1,'a custom display name cannot hide the real recommendation');
   await unmount();
   currentLanguage='en';
+  await mount();
+  assert.equal(officialRecommendations().includes('netease-music'),false,'NetEase is absent from the English catalog');
+  await unmount();
   officialDefinitions.length=0;officialModel={data:{items:[]},refresh:async()=>{},loading:false};
   console.log('PASS installed official connectors: stable icons and no duplicate Add during loading, missing metadata or service errors; custom names retain recommendations');
   const clickup=recommendations.find(value=>value.id==='clickup');

@@ -192,7 +192,7 @@ body {
   width: 40px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 6px;
 }
 .nav-link {
   position: relative; /* 压在 .nav-blob 上面 */
@@ -488,6 +488,9 @@ body[data-immersive] .nav-link:hover:not(.active) {
     padding-top: 72px;
     gap: 8px;
   }
+}
+@media (max-height: 600px) {
+  .nav-primary { gap: 4px; }
 }
 .page {
   /* 顶部统一 36px，与聊天页栏头（chat-aside__head）同一起点 */

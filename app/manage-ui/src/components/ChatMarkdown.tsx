@@ -9,16 +9,18 @@ const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 // Keep settled HTML with its mounted message. The shared Markdown LRU can evict
 // old entries, but typing, opening a menu or streaming another reply must not
 // reparse the entire transcript. Locale changes still refresh code-block controls.
-const ChatMarkdown = memo(function ChatMarkdown({ text, className, htmlArtifactPolicy = "source", streamingCursor = false, "data-qp": quotePart }: {
+const ChatMarkdown = memo(function ChatMarkdown({ text, className, htmlArtifactPolicy = "source", showLinkIcons = true, streamingCursor = false, "data-qp": quotePart }: {
   text: string;
   className: string;
   "data-qp"?: number;
   htmlArtifactPolicy?: HtmlArtifactPolicy;
+  showLinkIcons?: boolean;
   streamingCursor?: boolean;
 }) {
   const { i18n } = useTranslation();
   const imageContext = useContext(ChatMediaContext);
-  const html = useMemo(() => toSanitizedMarkdownHtml(text, true, imageContext, htmlArtifactPolicy), [text, imageContext, htmlArtifactPolicy, i18n.language, i18n.resolvedLanguage]);
+  const html = useMemo(() => toSanitizedMarkdownHtml(text, true, imageContext, htmlArtifactPolicy, showLinkIcons),
+    [text, imageContext, htmlArtifactPolicy, showLinkIcons, i18n.language, i18n.resolvedLanguage]);
   const rootRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const root = rootRef.current;

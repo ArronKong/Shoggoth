@@ -466,11 +466,6 @@ const previews: Record<string, readonly Row[]> = {
     ["submit_payment", "submit_payment", "Submit an Alipay cashier payment after explicit confirmation.", "明确确认后提交支付宝收银台付款。"],
     ["payment_status", "payment_status", "Check a payment initiated by this connection using its receipt; historical statements are not supported.", "通过收据查询本次连接发起的支付；不支持历史账单查询。"],
   ],
-  "netease-music": [
-    ["search_songs", "search_songs", "Search songs.", "搜索歌曲。"],
-    ["my_playlists", "my_playlists", "List the authorized user's collected playlists.", "查看已授权用户收藏的歌单。"],
-    ["create_playlist", "create_playlist", "Create a playlist after confirmation; playback controls are not supported.", "确认后创建歌单；不支持播放控制。"],
-  ],
   ticketmaster: [
     ["ticketmaster_search_events", "ticketmaster_search_events", "Find concerts, sports and other public events.", "搜索演唱会、赛事与其他公开活动。"],
     ["ticketmaster_get_event_details", "ticketmaster_get_event_details", "Read event details, public price ranges and official links.", "查看活动详情、公开票价区间与官方链接。"],

@@ -11,6 +11,14 @@ const compiledDetails = compileComponent("ConnectorDetails");
 const compiledAddButton = compileComponent("ConnectorAddButton");
 
 export const bundledBridgeVersions = { __esModule: true, default: require("../agent-service/data/mcp-bundled-bridge-versions.json") };
+export const connectorTelemetryFixture = {
+  measureTelemetry: (_feature, _backend, run) => run(),
+  startTelemetryOperation: () => undefined,
+  useTelemetryOperations: () => require("react").useRef(new Map()).current,
+  retainTelemetryOperation: () => undefined,
+  useTelemetrySnapshot: () => undefined,
+};
+
 function loadComponent(compiled, t) {
   const module = { exports: {} };
   vm.runInNewContext(compiled, { module, exports: module.exports, require: name => {
