@@ -1864,10 +1864,11 @@ class WorkRunCoordinator {
       // turn are read-only, never ask for approval and have no tools.
       const host = modelHost = await this.runtimeManager.acquire(binding, codex
         ? { workspace: null, permissionPolicy: profile.permissionPolicy,
-          ...(route.independent ? { executionContract: { ...providerRoute,
+          ...(providerRoute ? { executionContract: { ...providerRoute,
             profileId: providerRoute?.providerFence.profileId ?? profile.id,
             runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
-            runtimeAccountId: binding.runtimeAccountId } } : {}) }
+            runtimeAccountId: binding.runtimeAccountId } } : {}),
+          ...(!resolveOnly && this.temporarySecrets && modelProvider ? { modelSecretProviderKind: modelProvider.kind } : {}) }
         : { workspace: null, permissionPolicy: isolated, modelOnly: true,
           executionContract: { runId: input.operationId, source: purpose, profileId: input.profileId,
             runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
@@ -7831,6 +7832,8 @@ class WorkRunCoordinator {
                 ? executionContract.permissionPolicy : executionContract.runtimeHostPermissionPolicy,
               workspace: executionContract.workspace,
               executionContract,
+              ...(this.temporarySecrets && codexSessionProvider.supportsSessionProviders(executionContract)
+                ? { modelSecretProviderKind: this.#routeModelProvider(executionContract)?.kind } : {}),
               ...(this.hookService ? { nativeHookScope: this.hookService.nativeRunScope?.(runId) ?? null } : {}),
             };
             const observed = this.runtimeManager.acquireObserved
@@ -9175,8 +9178,8 @@ class WorkRunCoordinator {
     return codexSessionProvider.resolveProviderSelection(this.productStore, profile, session.modelProviderRef);
   }
 
-  // The built-in Codex process declares several providers; every native
-  // thread names the one its frozen route uses, including resumed threads.
+  // Each built-in Codex execution uses the source named by its frozen route,
+  // including when resuming a native thread.
   // Without a frozen route (no captureExecutionProviderRoute injected) it
   // names the Profile default source; if even that cannot be resolved the
   // source stays unnamed and the adapter refuses the model work.

@@ -20,4 +20,8 @@ for (const file of ['docs/private.md', 'resources/bundled-plugins/packages/tempo
   assert.equal(isPublicSourcePath(file), false);
 }
 assert.equal(isPublicSourcePath('LICENSE'), true);
+for (const file of ['docs/privacy.md', 'docs/privacy.en.md']) {
+  assert.equal(isPublicSourcePath(file), true);
+  assert.ok(fs.statSync(new URL('../' + file, import.meta.url)).size > 0);
+}
 console.log('Public source export policy: PASS');

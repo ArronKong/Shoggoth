@@ -1,6 +1,6 @@
 "use strict";
 
-const OFFICIAL_SKILL_IDS = Object.freeze(["doordash", "shop", "quark-drive", "rollinggo-hotel", "fliggy", "meituan-paotui", "weread", "alipay", "netease-music", "baidu-maps"]);
+const OFFICIAL_SKILL_IDS = Object.freeze(["doordash", "shop", "quark-drive", "rollinggo-hotel", "fliggy", "meituan-paotui", "weread", "alipay", "baidu-maps"]);
 const OFFICIAL_SKILL_METHODS = Object.freeze(["connector.official.status", "connector.official.install", "connector.official.remove", "connector.official.account"]);
 const OFFICIAL_SKILL_PUBLIC_MESSAGES = Object.freeze({
   OFFICIAL_SKILL_INVALID_ARGUMENT: "官方连接器参数无效",
@@ -78,7 +78,6 @@ const VERIFICATION_HOSTS = Object.freeze({
   fliggy: ["open.fly.ai", "flyai.open.fliggy.com"],
   "meituan-paotui": ["dpurl.cn", "passport.meituan.com", "waimai.meituan.com", "i.meituan.com", "e.meituan.com"], weread: ["weread.qq.com"],
   alipay: ["u.alipay.cn", "u.alipay.com", "render.alipay.com", "aipay.alipay.com"],
-  "netease-music": ["music.163.com", "interface.music.163.com", "developer.music.163.com", "163cn.tv"],
 });
 function validOfficialVerificationUrl(providerId, value) {
   if (!id(providerId) || !text(value, 8192)) return false;

@@ -6,6 +6,10 @@ const { NativeSkillStore } = require("../app/agent-service/native-skill-store");
 const { OfficialSkillConnectorController } = require("../app/agent-service/official-skill-connector-controller");
 const { prepareOfficialFixture } = require("./fixtures/official-skill-connector-fixture.cjs");
 const dto = require("../app/core/official-skill-connector-dto");
+const { randomUUID } = require("node:crypto");
+const { spawnSync } = require("node:child_process");
+
+const retiredRecord = () => ({ id: "netease-music", revision: 0, state: "notInstalled", stage: null, installation: null, errorCode: null });
 
 function fixture(t, options = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shg-official-")));
@@ -158,6 +162,7 @@ test("public DTO rejects extra input and never exposes raw provider errors", () 
 test("existing five-provider records gain uninstalled Shop, DoorDash and Quark without changing ownership or reconnecting", async t => {
   const f = fixture(t); const installed = await f.change("install"); await f.controller.close();
   const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
+  stored.items.push(retiredRecord());
   stored.items = stored.items.filter(item => !["shop", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id));
   assert.equal(stored.items.length, 5);
   const original = JSON.stringify(stored); fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
@@ -170,12 +175,13 @@ test("existing five-provider records gain uninstalled Shop, DoorDash and Quark w
   assert.equal(fs.readFileSync(f.controller.recordPath, "utf8"), original, "reading legacy records never rewrites them");
   await restarted.handle("connector.official.install", { id: "shop", expectedRevision: 0 });
   const expanded = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
-  assert.deepEqual(expanded.items.filter(item => !["shop", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items);
+  assert.deepEqual(expanded.items.filter(item => !["shop", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
 });
 
 test("the six-provider catalog gains DoorDash and Quark without rewriting existing account or ownership records", async t => {
   const f = fixture(t); const installed = await f.change("install"); await f.controller.close();
   const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
+  stored.items.push(retiredRecord());
   stored.items = stored.items.filter(item => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id));
   assert.equal(stored.items.length, 6);
   const original = JSON.stringify(stored); fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
@@ -187,7 +193,7 @@ test("the six-provider catalog gains DoorDash and Quark without rewriting existi
   assert.equal(fs.readFileSync(f.controller.recordPath, "utf8"), original);
   await restarted.handle("connector.official.install", { id: "doordash", expectedRevision: 0 });
   const expanded = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
-  assert.deepEqual(expanded.items.filter(item => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items);
+  assert.deepEqual(expanded.items.filter(item => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
 });
 
 test("the seven-provider catalog preserves Alipay installation, private home, credentials and access while adding uninstalled Quark", async t => {
@@ -199,6 +205,7 @@ test("the seven-provider catalog preserves Alipay installation, private home, cr
   f.secretValues.set(installed.serverId, "private-key-canary");
   await f.controller.close();
   const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
+  stored.items.push(retiredRecord());
   stored.items = stored.items.filter(item => !["quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id));
   assert.equal(stored.items.length, 7);
   const original = JSON.stringify(stored); fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
@@ -215,7 +222,7 @@ test("the seven-provider catalog preserves Alipay installation, private home, cr
   await restarted.handle("connector.official.install", { id: "quark-drive", expectedRevision: 0 });
   const expanded = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
   assert.deepEqual(expanded.items.map(item => item.id), dto.OFFICIAL_SKILL_IDS);
-  assert.deepEqual(expanded.items.filter(item => !["quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items);
+  assert.deepEqual(expanded.items.filter(item => !["quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
   assert.equal(fs.readFileSync(accountPath, "utf8"), "private-account-canary");
   assert.equal(server.secretRef, `mcp-connector:${installed.serverId}`);
   assert.deepEqual(server.disabledProfileIds, ["profile-a"]);
@@ -225,6 +232,7 @@ test("the seven-provider catalog preserves Alipay installation, private home, cr
 for (const omitted of [["shop", "doordash"], ["doordash"], []]) test(`previously accepted Quark catalog without ${omitted.join("/") || "any original provider"} remains readable after adding RollingGo`, async t => {
   const f = fixture(t); const installed = await f.change("install"); await f.controller.close();
   const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
+  stored.items.push(retiredRecord());
   stored.items = stored.items.filter(item => ![...omitted, "rollinggo-hotel", "baidu-maps"].includes(item.id));
   const original = JSON.stringify(stored); fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
   const restarted = f.make(); restarted.open(); t.after(() => restarted.close());
@@ -245,4 +253,79 @@ for (const corruption of ["missing-provider", "duplicate-provider", "unknown-pro
   assert.equal(restarted.status("alipay").errorCode, "OFFICIAL_SKILL_STATE_UNAVAILABLE");
   assert.throws(() => restarted.handle("connector.official.install", { id: "alipay", expectedRevision: 0 }), { code: "OFFICIAL_SKILL_STATE_UNAVAILABLE" });
   assert.equal(fs.readFileSync(f.controller.recordPath, "utf8"), original);
+});
+
+async function seedRetiredInstallation(f) {
+  const id = "netease-music", installationId = randomUUID(), serverId = "official-netease-music-aabbccdd";
+  const root = path.join(f.controller.runtimeRoot, id, installationId), home = path.join(root, "home");
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  const prepared = await prepareOfficialFixture({ providerId: id, root, homeDir: home,
+    signal: new AbortController().signal, onStage() {}, serverId });
+  fs.writeFileSync(path.join(root, "payload-manifest.json"), JSON.stringify({ schemaVersion: 1, providerId: id, files: prepared.files }), { mode: 0o600 });
+  fs.writeFileSync(path.join(home, "account.json"), "retired-account-canary", { mode: 0o600 });
+  const skill = prepared.skills[0];
+  f.skills.installBatchFromDirectories({ operationId: `official-${installationId}`, expectedRevision: f.skills.revision,
+    items: [{ sourcePath: skill.sourcePath, globalEnabled: true }] });
+  f.skills.setProfileSkill({ profileId: "profile-a", skillId: skill.id, source: "user", version: skill.version,
+    enabled: true, expectedRevision: f.skills.list("profile-a").profileRevision });
+  f.mcp.store.register({ expectedRevision: f.mcp.store.revision, server: { id: serverId, name: "Retired connector",
+    source: { kind: "custom" }, transport: prepared.transport, enabled: true, status: "ready", auth: { kind: "none" },
+    setup: { requiredFields: [], configuredFields: [] }, secretRef: `mcp-connector:${serverId}`, lastCheck: null, disabledProfileIds: [] } });
+  f.secretValues.set(serverId, "retired-key-canary");
+  const record = { ...retiredRecord(), revision: 7, state: "installed", installation: {
+    id: installationId, serverId, version: "1.0.0", transport: prepared.transport, files: prepared.files,
+    skills: prepared.skills.map(({ sourcePath, ...value }) => value),
+  } };
+  const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8")); stored.items.push(record);
+  fs.writeFileSync(f.controller.recordPath, JSON.stringify(stored), { mode: 0o600 });
+  return { root, home, serverId, record };
+}
+
+test("retired NetEase rejects installation, account actions and execution, and removes only its owned legacy installation", async t => {
+  const f = fixture(t), retained = await f.change("install", "weread");
+  const retainedServer = structuredClone(f.servers.get(retained.serverId));
+  f.secretValues.set(retained.serverId, "retained-key-canary");
+  const legacy = await seedRetiredInstallation(f); await f.controller.close();
+  const original = fs.readFileSync(f.controller.recordPath, "utf8");
+  const restarted = f.make(); restarted.open(); t.after(() => restarted.close());
+  assert.deepEqual(restarted.handle("connector.official.status", {}).items.map(item => item.id), dto.OFFICIAL_SKILL_IDS);
+  assert.equal(fs.readFileSync(f.controller.recordPath, "utf8"), original, "reading the old catalog is non-destructive");
+  for (const action of ["install", "remove", "account"]) assert.throws(() => restarted.handle(`connector.official.${action}`,
+    { id: "netease-music", expectedRevision: 7, ...(action === "account" ? { action: "start" } : {}) }), { code: "OFFICIAL_SKILL_INVALID_ARGUMENT" });
+  assert.equal(require("../app/agent-service/official-skill-providers").getOfficialSkillProvider("netease-music"), null);
+  assert.throws(() => require("../app/agent-service/official-skill-runtime").createOfficialSkillRuntime({ providerId: "netease-music" }), { code: "OFFICIAL_SKILL_INVALID_ARGUMENT" });
+  await assert.rejects(require("../app/agent-service/official-skill-installer").prepareOfficialSkill({ providerId: "netease-music",
+    root: legacy.root, homeDir: legacy.home, serverId: legacy.serverId, fetch() { assert.fail("retired integrations never download"); } }), { code: "OFFICIAL_SKILL_INVALID_ARGUMENT" });
+  const transport = legacy.record.installation.transport;
+  assert.equal(require("../app/agent-service/official-skill-mcp-launch").matchOfficialSkillBridgeLaunch(transport.command, transport.args, { paths: f.paths }), null);
+  const bridge = spawnSync(process.execPath, transport.args, { encoding: "utf8", timeout: 5000,
+    input: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\n" });
+  assert.equal(bridge.status, 1); assert.equal(bridge.stdout, "", "even an old valid payload cannot expose tools");
+  await restarted.retireRemovedProviders();
+  assert.equal(f.servers.has(legacy.serverId), false); assert.equal(f.secretValues.has(legacy.serverId), false);
+  assert.equal(fs.existsSync(legacy.root), false);
+  assert.equal(f.skills.registry.packages.some(item => item.id === "official-netease-music"), false);
+  assert.ok(f.closed.includes(legacy.serverId)); assert.ok(f.revoked.includes(legacy.serverId));
+  assert.deepEqual(restarted.status("weread"), retained); assert.deepEqual(f.servers.get(retained.serverId), retainedServer);
+  assert.equal(f.secretValues.get(retained.serverId), "retained-key-canary");
+  assert.deepEqual(JSON.parse(fs.readFileSync(restarted.recordPath, "utf8")).items.map(item => item.id), dto.OFFICIAL_SKILL_IDS);
+  await restarted.retireRemovedProviders();
+  const next = f.make(); next.open(); t.after(() => next.close()); assert.deepEqual(next.status("weread"), retained);
+});
+
+test("modified retired payloads are disabled and preserved without blocking other official connectors", async t => {
+  const f = fixture(t), retained = await f.change("install", "weread"), legacy = await seedRetiredInstallation(f);
+  const payload = path.join(legacy.root, "payload.txt"); fs.appendFileSync(payload, "user modification");
+  await f.controller.close();
+  const restarted = f.make(); restarted.open(); t.after(() => restarted.close());
+  await restarted.retireRemovedProviders();
+  assert.equal(f.servers.get(legacy.serverId).enabled, false); assert.equal(f.servers.get(legacy.serverId).status, "disabled");
+  assert.ok(f.closed.includes(legacy.serverId)); assert.ok(f.revoked.includes(legacy.serverId));
+  assert.match(fs.readFileSync(payload, "utf8"), /user modification$/u);
+  assert.deepEqual(restarted.status("weread"), retained);
+  await restarted.handle("connector.official.install", { id: "alipay", expectedRevision: 0 });
+  const stored = JSON.parse(fs.readFileSync(restarted.recordPath, "utf8"));
+  assert.equal(stored.items.find(item => item.id === "netease-music").errorCode, "OFFICIAL_SKILL_OWNERSHIP_CONFLICT");
+  const next = f.make(); next.open(); t.after(() => next.close());
+  assert.equal(next.status("alipay").state, "installed"); assert.equal(next.status("weread").state, "installed");
 });

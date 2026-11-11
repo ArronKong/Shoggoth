@@ -1,7 +1,7 @@
 /* Figma 196:357, 187:1005, 204:184. Reuse the toolbar's glass surface. */
 .trigger {
-  composes: box from '../components/SearchCapsule.module.css';
-  position: relative; justify-content: center; flex: none; width: 48px; height: 48px; padding: 0; border-radius: 50%; cursor: pointer;
+  composes: surface from '../components/SearchCapsule.module.css';
+  position: relative; justify-content: center; flex: none; width: 48px; padding: 0; border-radius: 50%; cursor: pointer;
 }
 .trigger[data-popup-open] { background: light-dark(#000, #fff); color: light-dark(#fff, #000); border-color: transparent; box-shadow: none; }
 :global(:root[data-theme="dark"]) .trigger[data-popup-open] { background: #fff; color: #000; border-color: transparent; }

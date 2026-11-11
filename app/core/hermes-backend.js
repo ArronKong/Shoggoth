@@ -16,8 +16,9 @@ const https = require("node:https");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { execFile, spawn } = require("node:child_process");
 const { createHash, randomUUID, randomBytes } = require("node:crypto");
+const { promisify } = require("node:util");
 const { WebSocket } = require("ws");
 const {
   annotateFederationPrompt,
@@ -59,6 +60,8 @@ const { readHermesUsageHistory } = require("./hermes-usage-history");
 const { estimateUsageCost } = require("./usage-cost");
 const { readHermesCronHistory } = require("./hermes-cron-history");
 const { syncHermesSharedAdapter } = require("./hermes-shared-adapter-sync");
+
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_PORT = 9119;
 const HERMES_CATALOG_UNAVAILABLE_CODE = "ERR_HERMES_CATALOG_UNAVAILABLE";
@@ -1964,7 +1967,7 @@ class HermesBackend extends AgentBackend {
           // 重启 app 不会换掉它（这个复用分支会把它接回来），必须主动重拉。
           const rootCwd = await this._dashboardCwdIsRoot(port);
           if (!versionStale && !rootCwd) {
-            return { profile, port, baseUrl, token: existing, proc: null, spawned: false };
+            return { profile, port, baseUrl, token: existing, proc: null, spawned: false, reused: true };
           }
           const why = versionStale ? `v${ident.version} ≠ CLI v${installed}` : "工作目录为 /（附件目录不可写）";
           const reaped = await this._reapStaleDashboard(port, profile, why);
@@ -6729,6 +6732,44 @@ class HermesBackend extends AgentBackend {
     throw new Error(`hermes: profile「${profile}」已保存，但它的 dashboard 启动失败${detail ? `（${detail}）` : ""}，重启 App 会重试`);
   }
 
+  async _renameProfile(dash, profile, newName, generation) {
+    if (dash.reused) {
+      // A retained dashboard can outlive its stdout pipe. Hermes prints inside
+      // rename_profile, including between the directory move and identity migration.
+      // Run the same operation with fresh stdio before any HTTP write can partially apply it.
+      const ident = await this._dashboardIdentity(dash.baseUrl, dash.token);
+      if (generation !== this._lifecycleGeneration || this._getConfig().hermesMode === "remote" || this._defaultDash() !== dash) {
+        throw new Error("hermes: 重命名前连接配置已变化，请刷新后重试");
+      }
+      this._localRuntime.assertLegacyProcess();
+      if (!ident || !samePath(ident.home, this._hermesHomeForProfile(dash.profile))) {
+        throw new Error("hermes: 无法确认 dashboard 对应的本地 profile，请重新连接后重试");
+      }
+      try {
+        await execFileAsync(this.bin, ["--profile", "default", "profile", "rename", "--", profile, newName], {
+          cwd: os.homedir(),
+          env: { ...process.env, HERMES_HOME: this._hermesHomeForProfile("default") },
+          timeout: 60_000,
+        });
+        return { name: profile === "default" ? profile : newName.toLowerCase() };
+      } catch (error) {
+        // A dashboard can still be reachable after its local launcher was removed.
+        // Fall back to HTTP only when exec failed before starting the command.
+        if (error.code !== "ENOENT") {
+          const detail = String(error.stderr || error.stdout || error.message).trim().split("\n").at(-1).slice(-400);
+          throw new Error(`hermes rename profile failed: ${detail}`);
+        }
+      }
+    }
+    const { status, body } = await this._httpRequest(
+      "PATCH",
+      `${dash.baseUrl}/api/profiles/${encodeURIComponent(profile)}`,
+      { token: dash.token, body: { new_name: newName } }, dash,
+    );
+    if (status >= 300) throw new Error(`hermes rename profile failed: ${status} ${body}`);
+    return body ? JSON.parse(body) : {};
+  }
+
   // Hermes profiles support rename here; model is set via the 模型 page, SOUL via files.
   async updateAgent(id, patch) {
     const profile = this.profileById.get(id);
@@ -6740,13 +6781,7 @@ class HermesBackend extends AgentBackend {
       if (profile !== "default") this._assertProfileIdentityAvailable(newName, profile);
       const generation = this._lifecycleGeneration;
       const dash = this._requireDashboard(this._defaultDash(), "重命名 profile");
-      const { status, body } = await this._httpRequest(
-        "PATCH",
-        `${dash.baseUrl}/api/profiles/${encodeURIComponent(profile)}`,
-        { token: dash.token, body: { new_name: newName } }, dash,
-      );
-      if (status >= 300) throw new Error(`hermes rename profile failed: ${status} ${body}`);
-      const result = body ? JSON.parse(body) : {};
+      const result = await this._renameProfile(dash, profile, newName, generation);
       // Hermes 返回 canonical name；default 改名不会移动目录或改变会话身份。
       // 兼容旧版未返回 name 的回执，也不能把展示名当成新的 profile ID。
       const nextProfile = (typeof result?.name === "string" && result.name.trim())
@@ -6761,6 +6796,10 @@ class HermesBackend extends AgentBackend {
           throw new Error("hermes: profile 已改名，但重新读取列表失败，请刷新后重试");
         }
         const confirmedProfile = this.profileById.get(nextId);
+        if ((profile === "default" && !this.agents.some(agent => agent.id === id && agent.name === newName))
+          || (dash.reused && confirmedProfile !== nextProfile)) {
+          throw new Error("hermes: 无法确认 profile 的新名称，请刷新后重试");
+        }
         if (confirmedProfile !== profile) {
           // 本地普通 profile 改名后，旧 dashboard 仍绑定旧目录，不能直接改 Map key。
           // 受管模式已由 refresh 绑定新路由；本地模式按创建 profile 的流程拉起新服务。

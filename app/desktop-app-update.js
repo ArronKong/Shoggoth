@@ -100,6 +100,7 @@ function createDesktopAppUpdateController(options = {}) {
   };
   let updater = null;
   let checkPromise = null;
+  let manualCheckRequested = false;
   let installRecoveryPromise = null;
   let initialTimer = null;
   let intervalTimer = null;
@@ -143,13 +144,22 @@ function createDesktopAppUpdateController(options = {}) {
     updaterListeners.push([name, handler]);
   };
 
-  const check = () => {
+  const check = ({ manual = true } = {}) => {
     if (disposed || !updater || !state.supported || state.canInstall
       || ["preparing", "installing", "recovering"].includes(state.status)) {
       return Promise.resolve(publicState());
     }
-    if (checkPromise) return checkPromise.then(publicState);
+    if (checkPromise) {
+      // A manual request can join a background check and authorize its download.
+      if (manual) {
+        manualCheckRequested = true;
+        updater.autoDownload = true;
+      }
+      return checkPromise.then(publicState);
+    }
     if (!state.canCheck) return Promise.resolve(publicState());
+    manualCheckRequested = manual;
+    updater.autoDownload = manual || state.automaticUpdates;
     updateState({ status: "checking", progress: null, canCheck: false, canInstall: false });
     checkPromise = Promise.resolve(updater.checkForUpdates())
       .then((result) => { void result?.downloadPromise?.catch(() => {}); })
@@ -167,14 +177,13 @@ function createDesktopAppUpdateController(options = {}) {
     initialTimer = intervalTimer = null;
   };
   const schedule = () => {
-    if (!updater || !state.automaticUpdates) return;
-    const automaticCheck = () => { if (state.automaticUpdates) void check(); };
+    const backgroundCheck = () => { void check({ manual: false }); };
     initialTimer = setTimeoutFn(() => {
       initialTimer = null;
-      automaticCheck();
+      backgroundCheck();
     }, INITIAL_CHECK_DELAY_MS);
     initialTimer?.unref?.();
-    intervalTimer = setIntervalFn(automaticCheck, CHECK_INTERVAL_MS);
+    intervalTimer = setIntervalFn(backgroundCheck, CHECK_INTERVAL_MS);
     intervalTimer?.unref?.();
   };
 
@@ -186,6 +195,7 @@ function createDesktopAppUpdateController(options = {}) {
       || ["preparing", "installing", "recovering"].includes(state.status)) return null;
     if (enabled !== state.automaticUpdates) {
       saveAutomaticUpdates(enabled);
+      if (checkPromise) updater.autoDownload = manualCheckRequested || enabled;
       updateState({ automaticUpdates: enabled });
       clearSchedule();
       schedule();
@@ -227,7 +237,7 @@ function createDesktopAppUpdateController(options = {}) {
   if (support.supported) {
     try {
       updater = loadUpdater();
-      updater.autoDownload = true;
+      updater.autoDownload = state.automaticUpdates;
       updater.autoInstallOnAppQuit = false;
       updater.allowPrerelease = false;
       updater.logger = {
@@ -242,8 +252,8 @@ function createDesktopAppUpdateController(options = {}) {
         availableVersion: typeof info.version === "string" ? info.version : null,
         releaseName: typeof info.releaseName === "string" ? info.releaseName : null,
         releaseDate: typeof info.releaseDate === "string" ? info.releaseDate : null,
-        progress: 0,
-        canCheck: false,
+        progress: updater.autoDownload ? 0 : null,
+        canCheck: !updater.autoDownload,
         canInstall: false,
       }));
       bind("download-progress", (info = {}) => updateState({

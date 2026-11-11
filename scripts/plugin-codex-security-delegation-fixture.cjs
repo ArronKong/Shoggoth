@@ -43,7 +43,7 @@ const checks = [];
   try {
     ensurePrivateDirectoryTree(homeRoot, root);
     const runtimeVersion = execFileSync(binary, ["--version"], { encoding: "utf8", env: { HOME: root, PATH: "/usr/bin:/bin", TMPDIR: root } }).trim();
-    assert.equal(runtimeVersion, "codex-cli 0.159.2");
+    assert.equal(runtimeVersion, "codex-cli 0.167.1");
     productStore = new JsonlProductStore({ paths }); productStore.open();
     const firstProfile = productStore.listAgentProfiles()[0];
     const secondId = crypto.randomUUID();
@@ -178,7 +178,7 @@ const checks = [];
     assert.equal(ownershipStore.assertOwned({ binding: targetBindingForOwner(receipt.owner),
       profileId: receipt.owner.profileId, sessionId: receipt.runtimeSessionRef.sessionId, workspace: runA.workspace }).status, "active");
     assert.deepEqual(await controller.inspect({ operationId: "own-a" }, leaseA), receipt);
-    checks.push("actual 0.159.2 thread/start and thread/read; empty turns; account=null; persisted owning Agent");
+    checks.push("actual 0.167.1 thread/start and thread/read; empty turns; account=null; persisted owning Agent");
 
     const rpcBefore = rpcMethods.length;
     for (const foreign of [leaseB, leaseC, issue(runA, ["mcp"], "different-attempt")]) {

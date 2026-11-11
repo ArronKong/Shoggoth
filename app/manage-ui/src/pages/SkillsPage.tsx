@@ -1,3 +1,4 @@
+import { startTelemetryOperation, telemetryCount, useTelemetrySnapshot } from "../lib/productTelemetry";
 import AgentAvatarView from "../components/AgentAvatar";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -133,6 +134,17 @@ export default function SkillsPage() {
   }, [backend, isNativeSkills, nativeKey, nativeRequestKey, page]);
   const nativeSnapshot = nativePageState?.key === nativeKey ? nativePageState : null;
   const nativePage = nativeSnapshot?.page;
+  const completeSkills = isNativeSkills
+    ? nativePage && nativeSnapshot?.skills.length === nativePage.total ? nativeSnapshot.skills : null
+    : externalError ? null : skillsData;
+  useTelemetrySnapshot("skill", completeSkills, rows => {
+    const enabled = rows.filter(skill => skill.enabled);
+    const bundled = enabled.filter(skill => skill.source === "builtin").length;
+    const custom = enabled.filter(skill => skill.source === "user" || skill.source === "learned").length;
+    return { ...telemetryCount("enabled_skill_count", enabled.length), ...telemetryCount("skill_source_bundled_count", bundled),
+      skill_source_public_catalog_count: 0, ...telemetryCount("skill_source_custom_count", custom),
+      ...telemetryCount("skill_source_unknown_count", enabled.length - bundled - custom) };
+  });
   const skills = isNativeSkills ? nativeSnapshot?.skills ?? [] : skillsData ?? [];
   const nativeError = nativeErrorState?.key === nativeRequestKey ? nativeErrorState.error : null;
   const loading = isNativeSkills ? nativePage?.pageIndex !== page && !nativeError : externalLoading;
@@ -261,6 +273,7 @@ export default function SkillsPage() {
 
   const toggle = async (s: UnifiedSkill, enabled: boolean) => {
     setBusy(skillIdentity(s));
+    const telemetry = startTelemetryOperation("skill_toggle", backend);
     try {
       if (s.source === "learned") {
         if (!s.agentId) throw new Error(t("skills.errorPrefix", { msg: "Agent unavailable" }));
@@ -277,6 +290,7 @@ export default function SkillsPage() {
         expectedRevision: s.globalSettingRevision ?? (isNativeSkills && s.source === "user"
           ? s.registryVersion : s.profileRevision),
       }, s.agentId);
+      telemetry?.finish("success");
       toast.success(
         enabled
           ? t("skills.enabledToast", { name: s.title || s.name })
@@ -284,6 +298,7 @@ export default function SkillsPage() {
       );
       await refresh();
     } catch (e) {
+      telemetry?.finish("error", e);
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);

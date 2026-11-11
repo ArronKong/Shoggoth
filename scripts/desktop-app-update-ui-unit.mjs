@@ -35,6 +35,7 @@ function load(file, stubs = {}) {
 
 const dictionaries = Object.fromEntries(["zh-CN", "en"].map((language) => [language,
   load(`app/manage-ui/src/i18n/locales/${language}.ts`).default]));
+const appUpdate = load("app/manage-ui/src/lib/appUpdate.ts");
 const downloaded = { supported: true, reason: null, status: "downloaded", currentVersion: "0.8.152",
   availableVersion: "0.8.153", releaseName: null, releaseDate: null, progress: 100,
   canCheck: false, canInstall: true, installBlockReason: null, automaticUpdates: false };
@@ -57,7 +58,8 @@ for (const language of ["zh-CN", "en"]) {
   };
   const Page = load("app/manage-ui/src/pages/settings/SettingsAppUpdate.tsx", {
     "react-i18next": { useTranslation: () => ({ t: translator.t.bind(translator) }) },
-    "../../lib/appUpdate": { appUpdateBridge: () => bridge },
+    "react-router-dom": { useLocation: () => ({ hash: "", key: "default" }) },
+    "../../lib/appUpdate": { ...appUpdate, appUpdateBridge: () => bridge },
     "../../components/Field": { Switch: ({ checked, disabled, onChange, label }) =>
       React.createElement("input", { role: "switch", checked, disabled, onChange, "aria-label": label }) },
     "./SettingsIcons": { SettingsIcon: () => null },
@@ -68,6 +70,15 @@ for (const language of ["zh-CN", "en"]) {
   const buttons = () => renderer.root.findAllByType("button");
   assert.equal(hint().children.join(""), translator.t("settings.appUpdate.downloaded", { version: "0.8.153" }));
   assert.equal(hint().props["aria-live"], "polite");
+  const available = { ...downloaded, status: "available", canCheck: true, canInstall: false, progress: null };
+  await act(async () => { listener(available); });
+  assert.equal(hint().children.join(""), translator.t("settings.appUpdate.available", { version: "0.8.153" }));
+  assert.equal(buttons()[0].children.join(""), translator.t("settings.appUpdate.download"));
+  assert.equal(buttons()[0].props.disabled, false);
+  await act(async () => { listener({ ...available, canCheck: false }); });
+  assert.equal(hint().children.join(""), translator.t("settings.appUpdate.startingDownload", { version: "0.8.153" }));
+  assert.equal(buttons()[0].props.disabled, true);
+  await act(async () => { listener(downloaded); });
   const toggle = () => renderer.root.findByProps({ role: "switch" });
   assert.equal(toggle().props.checked, false);
   await act(async () => { toggle().props.onChange(true); });

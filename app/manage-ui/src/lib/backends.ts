@@ -3,6 +3,7 @@ import { getBackendDescriptors, getConfig } from "../api/client";
 import type { BackendDescriptor, UnifiedCronJob } from "../types";
 import { useStickyState } from "./useStickyState";
 import { invalidatePageCache } from "./usePageCache";
+import { sortBackendTabs } from "./backendTabOrder";
 import releasePolicy from "../../../release-policy.json";
 
 const isAvailableBackend = (descriptor: BackendDescriptor) =>
@@ -194,9 +195,12 @@ export function useBackendState(
 ): [BackendId, (id: BackendId) => void, BackendId[]] {
   const available = useEnabledBackends(options?.surface);
   const catalog = useBackendCatalog(options?.surface);
-  const [selected, setSelected] = useStickyState<BackendId>(`backend.${key}`, "openclaw", initial);
+  // An empty preference follows the first visible tab as the catalog/config loads.
+  // Only an explicit selection or deep link pins a backend in the page's cache.
+  const [selected, setSelected] = useStickyState<BackendId>(`backend.${key}`, "", initial);
   const resolved = resolveBackendAlias(selected, catalog);
+  const firstBackend = sortBackendTabs(catalog).find(({ id }) => available.includes(id));
   const backend = available.includes(resolved) ? resolved
-    : resolved !== selected ? resolved : (available[0] ?? "openclaw");
+    : (firstBackend?.id ?? SHOGGOTH_BACKEND.id);
   return [backend, (id) => setSelected(resolveBackendAlias(id, catalog)), available];
 }

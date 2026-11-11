@@ -51,6 +51,7 @@ class CodexRuntimePool {
     this.failureWindowMs = options.failureWindowMs ?? 60_000;
     this.cooldownMs = options.cooldownMs ?? 30_000;
     this.entries = new Map();
+    this.startingHomes = new Map();
     this.circuits = new Map();
     this.stoppingProfiles = new Set();
     this.stopPromises = new Map();
@@ -83,10 +84,12 @@ class CodexRuntimePool {
     if (this.closing || this.stoppingProfiles.has(runtimeProfileId)) {
       return Promise.reject(runtimeError("CODEX_POOL_STOPPING", "Codex runtime pool is stopping"));
     }
-    const key = JSON.stringify([runtimeProfileId, runtimeAccountId]);
-    const conflicting = [...this.entries.values()].find((entry) => (
-      entry.runtimeProfileId === runtimeProfileId && entry.runtimeAccountId !== runtimeAccountId
-    ));
+    const bundled = runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID;
+    const providerRef = bundled ? options.executionContract?.provider?.providerRef ?? null : null;
+    const modelSecretProviderKind = bundled ? options.modelSecretProviderKind ?? null : null;
+    const key = JSON.stringify([runtimeProfileId, runtimeAccountId, providerRef, modelSecretProviderKind]);
+    const siblings = [...this.entries.values()].filter((entry) => entry.runtimeProfileId === runtimeProfileId);
+    const conflicting = siblings.some((entry) => entry.runtimeAccountId !== runtimeAccountId);
     if (conflicting) {
       return Promise.reject(runtimeError(
         "RUNTIME_ACCOUNT_BINDING_CONFLICT",
@@ -95,17 +98,18 @@ class CodexRuntimePool {
     }
     const existing = this.entries.get(key);
     const permissionKey = permissionFingerprint(options.permissionPolicy);
+    if (permissionKey !== null && siblings.some((entry) => entry.permissionKey !== null && entry.permissionKey !== permissionKey)) {
+      return Promise.reject(runtimeError("RUNTIME_PERMISSION_POLICY_CONFLICT", "Stop the existing Runtime before changing permissions"));
+    }
     if (existing) {
-      if (permissionKey !== null && existing.permissionKey !== null && permissionKey !== existing.permissionKey) {
-        return Promise.reject(runtimeError("RUNTIME_PERMISSION_POLICY_CONFLICT", "Stop the existing Runtime before changing permissions"));
-      }
       if (permissionKey !== null) existing.permissionKey = permissionKey;
       return reusePoolHost(this, existing, options, () => this.get(value, options)).then(async (host) => {
         try { host.assertExecutionProviderCurrent?.(); }
         catch (error) {
           if (error?.code !== "EXECUTION_CONTRACT_STALE"
             || this.options.canRetireStaleHost?.(binding, host, options.executionContract?.runId) !== true) throw error;
-          await this.stop(runtimeProfileId);
+          existing.retiring ??= cleanupFailedPoolHost(this, existing, runtimeProfileId);
+          await existing.retiring;
           return this.get(value, options);
         }
         return host;
@@ -145,10 +149,15 @@ class CodexRuntimePool {
       spawnEnv: options.spawnEnv,
       nativeAuth: this.options.nativeAuth,
       executionContract: options.executionContract,
+      modelSecretProviderKind,
     });
     this.options.nativeAuth?.open();
     const entry = { host, key, runtimeEnvironment, runtimeProfileId, runtimeAccountId, permissionKey, promise: null };
-    entry.promise = Promise.resolve().then(async () => {
+    // Several provider hosts can share one Home. Serialize their startup so
+    // Codex's SQLite initialization completes before the next process opens it.
+    const home = bundled ? runtimeEnvironment.home : null;
+    const previousStartup = home === null ? null : this.startingHomes.get(home);
+    entry.promise = Promise.resolve(previousStartup).catch(() => {}).then(async () => {
       await preparePoolHostIdentity(this, entry, binding, options);
       await host.initialize();
       host.assertRuntimeIdentityCurrent?.();
@@ -183,6 +192,12 @@ class CodexRuntimePool {
       );
     });
     this.entries.set(key, entry);
+    if (home !== null) {
+      this.startingHomes.set(home, entry.promise);
+      entry.promise.finally(() => {
+        if (this.startingHomes.get(home) === entry.promise) this.startingHomes.delete(home);
+      }).catch(() => {});
+    }
     return entry.promise;
   }
 

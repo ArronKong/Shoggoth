@@ -2,24 +2,24 @@
   "schemaVersion": 1,
   "runtime": {
     "name": "codex",
-    "version": "0.159.2",
-    "tag": "rust-v0.159.2",
-    "releaseUrl": "https://github.com/openai/codex/releases/tag/rust-v0.159.2",
-    "publishedAt": "2026-09-29T23:57:16Z",
+    "version": "0.167.1",
+    "tag": "rust-v0.167.1",
+    "releaseUrl": "https://github.com/openai/codex/releases/tag/rust-v0.167.1",
+    "publishedAt": "2026-11-10T21:32:01Z",
     "license": "Apache-2.0"
   },
   "schema": {
-    "version": "0.159.2",
-    "directory": "schemas/codex-app-server/0.159.2",
+    "version": "0.167.1",
+    "directory": "schemas/codex-app-server/0.167.1",
     "includeExperimental": false
   },
   "platforms": {
     "darwin-arm64": {
       "arch": "arm64",
       "assetName": "codex-package-aarch64-apple-darwin.tar.gz",
-      "archiveUrl": "https://releases.openai.com/codex/releases/0.159.2/codex-package-aarch64-apple-darwin.tar.gz",
-      "archiveSha256": "38aaf6dce63099fd10988948d03bbc6c0474253aef6961fcbe60f8d154b39101",
-      "archiveSize": 129522674,
+      "archiveUrl": "https://releases.openai.com/codex/releases/0.167.1/codex-package-aarch64-apple-darwin.tar.gz",
+      "archiveSha256": "5bcbc5866cbca19f9299f7884e9b39b9ccb5469969c170b1f2d2cd6fc4b1ee72",
+      "archiveSize": 166615534,
       "archiveEntry": "bin/codex",
       "destination": ".vendor/codex/arm64/package/bin/codex",
       "packageDestination": ".vendor/codex/arm64/package",
@@ -33,13 +33,12 @@
           "codex-resources/voice/bin",
           "codex-resources/voice/lib",
           "codex-resources/voice/licenses",
-          "codex-resources/voice/plugins",
-          "codex-resources/zsh",
-          "codex-resources/zsh/bin"
+          "codex-resources/voice/plugins"
         ],
         "executableFiles": [
           "bin/codex",
           "bin/codex-code-mode-host",
+          "bin/codex-exec-server",
           "codex-path/rg",
           "codex-resources/voice/bin/codex-voice-host",
           "codex-resources/voice/lib/libffi.8.dylib",
@@ -66,8 +65,7 @@
           "codex-resources/voice/plugins/libgstcoreelements.dylib",
           "codex-resources/voice/plugins/libgstopus.dylib",
           "codex-resources/voice/plugins/libgstrtp.dylib",
-          "codex-resources/voice/plugins/libgstrtpmanager.dylib",
-          "codex-resources/zsh/bin/zsh"
+          "codex-resources/voice/plugins/libgstrtpmanager.dylib"
         ],
         "regularFiles": [
           "codex-package.json",
@@ -88,9 +86,9 @@
     "darwin-x64": {
       "arch": "x64",
       "assetName": "codex-package-x86_64-apple-darwin.tar.gz",
-      "archiveUrl": "https://releases.openai.com/codex/releases/0.159.2/codex-package-x86_64-apple-darwin.tar.gz",
-      "archiveSha256": "6b9b38bfad6ac8019aa6a243ee3ab11d3e22889eafd5458b0344cf20e797e680",
-      "archiveSize": 140813958,
+      "archiveUrl": "https://releases.openai.com/codex/releases/0.167.1/codex-package-x86_64-apple-darwin.tar.gz",
+      "archiveSha256": "ade991ce7fef5b4f4af884c154b9455d493cd0caf13789fc3ff9f842897b55d3",
+      "archiveSize": 180452942,
       "archiveEntry": "bin/codex",
       "destination": ".vendor/codex/x64/package/bin/codex",
       "packageDestination": ".vendor/codex/x64/package",
@@ -104,13 +102,12 @@
           "codex-resources/voice/bin",
           "codex-resources/voice/lib",
           "codex-resources/voice/licenses",
-          "codex-resources/voice/plugins",
-          "codex-resources/zsh",
-          "codex-resources/zsh/bin"
+          "codex-resources/voice/plugins"
         ],
         "executableFiles": [
           "bin/codex",
           "bin/codex-code-mode-host",
+          "bin/codex-exec-server",
           "codex-path/rg",
           "codex-resources/voice/bin/codex-voice-host",
           "codex-resources/voice/lib/libffi.8.dylib",
@@ -137,8 +134,7 @@
           "codex-resources/voice/plugins/libgstcoreelements.dylib",
           "codex-resources/voice/plugins/libgstopus.dylib",
           "codex-resources/voice/plugins/libgstrtp.dylib",
-          "codex-resources/voice/plugins/libgstrtpmanager.dylib",
-          "codex-resources/zsh/bin/zsh"
+          "codex-resources/voice/plugins/libgstrtpmanager.dylib"
         ],
         "regularFiles": [
           "codex-package.json",

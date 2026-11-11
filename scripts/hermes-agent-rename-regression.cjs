@@ -5,8 +5,8 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { createFixture } = require("./fixtures/hermes-agent-rename.cjs");
 
-async function fixture(t) {
-  const f = await createFixture();
+async function fixture(t, options) {
+  const f = await createFixture(options);
   t.after(() => f.close());
   return f;
 }
@@ -64,6 +64,31 @@ test("a default rename with an older receipt still keeps the default ID", async 
   assert.deepEqual((await f.request("/hermes-default", "PUT", { name: "Assistant" })).body.result,
     { ok: true, id: "hermes-default" });
   assert.equal((await f.request()).body.agent.name, "Assistant");
+});
+
+test("a reused dashboard with a broken output pipe can still rename default and named profiles", async t => {
+  const f = await fixture(t, { reused: true });
+  const name = "--中文助理";
+  const renamedDefault = await f.request("/hermes-default", "PUT", { name });
+  assert.deepEqual(renamedDefault.body.result, { ok: true, id: "hermes-default" });
+  assert.equal((await f.request()).body.agent.name, name);
+  const renamedWriter = await f.request("/hermes-writer", "PUT", { name: "Editor" });
+  assert.deepEqual(renamedWriter.body.result, { ok: true, id: "hermes-editor" });
+  assert.equal((await f.request("/hermes-editor")).body.agent.profile, "editor");
+  assert.deepEqual(f.state.startedProfiles, ["editor"]);
+  assert.equal(f.backend.dashboards.has("writer"), false);
+  assert.equal(f.state.notifications, 2);
+  assert.deepEqual(f.writes, []);
+});
+
+test("a started rename command that fails is reported without retrying the mutation over HTTP", async t => {
+  const f = await fixture(t, { reused: true });
+  const response = await f.request("/hermes-default", "PUT", { name: "a".repeat(65) });
+  assert.notEqual(response.status, 200);
+  assert.match(response.body.error, /Display name too long/);
+  assert.equal((await f.request()).body.agent.name, "default");
+  assert.equal(f.state.notifications, 0);
+  assert.deepEqual(f.writes, []);
 });
 
 test("ordinary profile rename retains canonical re-keying and rejects identity collisions", async t => {

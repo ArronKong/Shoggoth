@@ -1,0 +1,60 @@
+.button {
+  --button-bg: light-dark(#fff1d9, #392c1b);
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  align-self: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid light-dark(#e7c38f, #725332);
+  border-radius: 999px;
+  background: var(--button-bg);
+  color: light-dark(#80460d, #ffd294);
+  cursor: pointer;
+  transition: transform 120ms ease-out;
+}
+
+.button[data-phase="downloading"] { border-color: transparent; }
+.button[data-phase="ready"] {
+  --button-bg: light-dark(#e2f3e7, #1d3729);
+  border-color: light-dark(#a4d1b0, #437a58);
+  color: light-dark(#246644, #92dfb0);
+}
+
+.button[aria-disabled="true"] { cursor: progress; }
+
+@media (hover: hover) and (pointer: fine) {
+  .button:hover:not([aria-disabled="true"]) {
+    background: color-mix(in srgb, var(--button-bg), currentColor 8%);
+  }
+}
+
+.button:active:not([aria-disabled="true"]) { transform: scale(0.97); }
+
+.button:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+
+.ring {
+  position: absolute;
+  inset: -1px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.track { stroke-opacity: 0.22; }
+.fill { transition: stroke-dashoffset 180ms linear; }
+
+:global(body[data-immersive]) .button {
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button, .fill { transition: none; }
+  .button:active:not([aria-disabled="true"]) { transform: none; }
+}

@@ -34,6 +34,28 @@ export type DesktopAppUpdateBridge = {
   onState: (listener: (state: AppUpdateState) => void) => () => void;
 };
 
+export const APP_UPDATE_SECTION_ID = "settings-app-update";
+
 export const appUpdateBridge = () => (window as unknown as {
   openclawDesktop?: { appUpdate?: DesktopAppUpdateBridge };
 }).openclawDesktop?.appUpdate;
+
+export function observeAppUpdateState(
+  bridge: DesktopAppUpdateBridge,
+  onState: (state: AppUpdateState | null) => void,
+  onReadError?: () => void,
+) {
+  let active = true;
+  let receivedEvent = false;
+  const dispose = bridge.onState((state) => {
+    if (!active) return;
+    receivedEvent = true;
+    onState(state);
+  });
+  // A push received while the initial snapshot is in flight is already newer.
+  void bridge.getState().then(
+    (state) => { if (active && !receivedEvent) onState(state); },
+    () => { if (active && !receivedEvent) onReadError?.(); },
+  );
+  return () => { active = false; dispose(); };
+}

@@ -41,6 +41,7 @@ import { setDebugEnabled, SHOW_UI_TOOLS, useDebugEnabled } from "../components/d
 import { PageHead } from "../components/PageHead";
 import Modal from "../components/Modal";
 import SettingsPreferences from "./settings/SettingsPreferences";
+import SettingsTelemetry from "./settings/SettingsTelemetry";
 import SettingsProject from "./settings/SettingsProject";
 import SettingsComputerUse from "./settings/SettingsComputerUse";
 import SettingsBrowserUse from "./settings/SettingsBrowserUse";
@@ -969,6 +970,7 @@ export default function SettingsPage() {
           </div>
 
           <SettingsPreferences cfg={cfg} onChange={changeSettings} disabled={loading || configFailed} themeLoaded={themeLoaded} />
+          <SettingsTelemetry />
 
           <div className="settings-tools-grid" id="settings-tools">
             <SettingsComputerUse onServiceRestarted={shoggothRetry} />

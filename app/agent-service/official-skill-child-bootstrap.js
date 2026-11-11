@@ -31,15 +31,5 @@ childProcess.spawn = function managedSpawn(command, args, options = {}) {
   if (!Array.isArray(args)) { options = args || {}; args = []; }
   const child = spawn.call(this, command, args, { ...options, detached: false, cwd: home,
     env: { ...(options.env || process.env), HOME: home, NODE_OPTIONS: `--require=${JSON.stringify(__filename)}`, ELECTRON_RUN_AS_NODE: "1" } });
-  const ncmEntry = path.join(path.dirname(home), "runtime", "dist", "index.js");
-  if (path.basename(path.dirname(path.dirname(home))) === "netease-music"
-    && process.argv[1] === ncmEntry && command === process.execPath && options.env?.NETEASE_BG_WORKER === "1"
-    && args.length === 5 && args[0] === ncmEntry && args.slice(1).join("\0") === "login\0--background\0--output\0json") {
-    // The pinned CLI unrefs its login poller after printing the link. Keep only
-    // that worker referenced so the command remains the group's live owner
-    // until authorization ends; the bridge still cancels/reaps the whole group.
-    child.unref = () => child;
-    child.once("exit", (code, signal) => { if (code !== 0 || signal) process.exitCode = code || 1; });
-  }
   return child;
 };

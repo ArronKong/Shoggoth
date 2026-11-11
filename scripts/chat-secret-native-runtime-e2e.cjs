@@ -110,7 +110,16 @@ async function main() {
     version: "chat-secret-native-fixture", autoSparkNotes: false, setCronTimer: () => 1, clearCronTimer() {}, setProactiveTimer: () => 1, clearProactiveTimer() {} });
   await service.start();
   const ipc = (method, params) => requestService(paths, { id: uuid(), token: readClientToken(paths), version: PROTOCOL_VERSION, method, params });
-  const profile = service.productStore.listAgentProfiles().find(item => item.enabled);
+  const providerId = "provider-openai-api-key";
+  const credentialRef = "fixture-provider-credential";
+  await service.secretStore.put(credentialRef, "synthetic-fixture-key", { kind: "openai-api-key" });
+  service.productStore.putModelProvider({ id: providerId, kind: "openai-api-key", name: "OpenAI fixture",
+    baseUrl: null, model: "gpt-4.1", credentialRef, headers: null, awsRegion: null, awsProfile: null,
+    validationStatus: "protocol_valid" });
+  const profile = service.productStore.putAgentProfile({
+    ...service.productStore.listAgentProfiles().find(item => item.enabled),
+    providerRef: providerId, defaultModel: "gpt-4.1",
+  });
   const helper = path.join(root, "helper.cjs");
   fs.writeFileSync(helper, `const {startShoggothMcpHelper}=require(${JSON.stringify(path.join(app, "shoggoth-mcp-helper.js"))});
 startShoggothMcpHelper({paths:${JSON.stringify(paths)},electronApp:{whenReady:async()=>{},quit(){}},runtimeProfileId:${JSON.stringify(profile.runtimeProfileId)},runtimeAccountId:${JSON.stringify(profile.runtimeAccountId)},safeStorage:{isEncryptionAvailable:()=>true,encryptString:s=>Buffer.from(s).reverse(),decryptString:b=>Buffer.from(b).reverse().toString()},serviceVersion:"fixture"}).catch(e=>{console.error(e.code);process.exitCode=1});`, { mode: 0o600 });

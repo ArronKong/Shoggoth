@@ -108,7 +108,16 @@ async function main() {
       });
       const initial = fromStore();
       assert.equal(initial.controller.getState().automaticUpdates, false);
-      assert.equal(initial.timeouts.length + initial.intervals.length, 0);
+      assert.equal(initial.timeouts[0].ms, INITIAL_CHECK_DELAY_MS);
+      assert.equal(initial.intervals[0].ms, CHECK_INTERVAL_MS);
+      initial.timeouts[0].callback();
+      assert.equal(initial.updater.checks, 1);
+      assert.equal(initial.updater.autoDownload, false, "reminders only check release metadata");
+      initial.updater.emit("update-available", { version: "0.8.126" });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(initial.controller.getState().availableVersion, "0.8.126");
+      assert.equal(initial.controller.getState().canCheck, true, "a detected update can be downloaded manually");
+      assert.equal(initial.notifications.length, 0);
       const set = initial.handlers.get(CHANNELS.setAutomatic);
       assert.equal(set({ ...initial.event, senderFrame: {} }, true), null);
       assert.equal(set(initial.event, "true"), null);
@@ -118,13 +127,18 @@ async function main() {
       const reopened = fromStore();
       assert.equal(reopened.controller.getState().automaticUpdates, true);
       assert.equal(reopened.intervals[0].ms, CHECK_INTERVAL_MS);
+      reopened.intervals[0].callback();
+      assert.equal(reopened.updater.autoDownload, true);
       const disable = reopened.handlers.get(CHANNELS.setAutomatic);
       assert.equal(disable(reopened.event, false).automaticUpdates, false);
       assert.equal(reopened.timeouts[0].cleared && reopened.intervals[0].cleared, true);
-      reopened.intervals[0].callback();
-      assert.equal(reopened.updater.checks, 0);
+      assert.equal(reopened.updater.autoDownload, false, "turning off automatic updates applies to an in-flight background check");
+      assert.equal(reopened.intervals[1].ms, CHECK_INTERVAL_MS);
+      reopened.updater.emit("update-available", { version: "0.8.126" });
+      await new Promise((resolve) => setImmediate(resolve));
       await reopened.handlers.get(CHANNELS.check)(reopened.event);
-      assert.equal(reopened.updater.checks, 1, "turning off automatic updates preserves manual checking");
+      assert.equal(reopened.updater.checks, 2, "turning off automatic updates preserves manual checking");
+      assert.equal(reopened.updater.autoDownload, true, "a manual check starts the download");
       reopened.updater.emit("update-downloaded", { version: "0.8.126" });
       assert.equal(reopened.controller.handleBeforeQuit({ preventDefault: assert.fail }), false);
       assert.equal(await reopened.handlers.get(CHANNELS.install)(reopened.event), true);
@@ -133,6 +147,18 @@ async function main() {
       assert.equal(createConfigStore(file).read().autoAppUpdates, false);
       reopened.controller.dispose();
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+
+  {
+    const item = fixture({ automaticUpdates: false });
+    item.timeouts[0].callback();
+    assert.equal(item.updater.autoDownload, false);
+    const manual = item.handlers.get(CHANNELS.check)(item.event);
+    assert.equal(item.updater.checks, 1, "a manual request shares the in-flight check");
+    assert.equal(item.updater.autoDownload, true);
+    item.updater.emit("update-available", { version: "0.8.126" });
+    assert.equal((await manual).canCheck, false, "the download disables further checks");
+    item.controller.dispose();
   }
 
   for (const outcome of ["ready", "busy", "installer-error"]) {

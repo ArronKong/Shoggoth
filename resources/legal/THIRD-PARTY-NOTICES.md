@@ -223,17 +223,17 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 ### OpenAI Codex
 
 - License: Apache-2.0.
-- Source: https://github.com/openai/codex/tree/rust-v0.159.2
-- Revision / evidence: 0.159.2.
-- Local files: `schemas/codex-app-server/0.159.2`, `build/codex-runtime-manifest.json`.
+- Source: https://github.com/openai/codex/tree/rust-v0.167.1
+- Revision / evidence: 0.167.1.
+- Local files: `schemas/codex-app-server/0.167.1`, `build/codex-runtime-manifest.json`.
 - Full text: [CODEX-LICENSE.txt](CODEX-LICENSE.txt), [CODEX-NOTICE.txt](CODEX-NOTICE.txt).
 - Changes / provenance: Pinned unmodified runtime; generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately.
 
 ### Codex native voice libraries
 
 - License: LGPL-2.1-or-later AND MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib.
-- Source: https://github.com/openai/codex/tree/rust-v0.159.2/third_party/voice
-- Revision / evidence: Codex 0.159.2; library versions and source archive hashes in codex-voice/sources.json.
+- Source: https://github.com/openai/codex/tree/rust-v0.167.1/third_party/voice
+- Revision / evidence: Codex 0.167.1; library versions and source archive hashes in codex-voice/sources.json.
 - Local files: `.vendor/codex/arm64/package/codex-resources/voice`, `.vendor/codex/x64/package/codex-resources/voice`.
 - Full text: [NOTICE.md](licenses/source/codex-voice/NOTICE.md), [LGPL-2.1.txt](licenses/source/codex-voice/LGPL-2.1.txt), [Opus.txt](licenses/source/codex-voice/Opus.txt), [PCRE2.md](licenses/source/codex-voice/PCRE2.md), [libffi.txt](licenses/source/codex-voice/libffi.txt), [proxy-libintl.txt](licenses/source/codex-voice/proxy-libintl.txt), [sljit.txt](licenses/source/codex-voice/sljit.txt), [zlib.txt](licenses/source/codex-voice/zlib.txt).
 - Changes / provenance: Unmodified upstream dynamic libraries and selected GStreamer plugins. Complete upstream notices and licenses are retained here and in the runtime package. Corresponding source archive URLs, versions and SHA-256 digests are retained in codex-voice/sources.json; build source and commit are identified in codex-voice/manifest.json. Build tools in sources.json are not bundled runtime libraries.
@@ -282,15 +282,6 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 - Local files: `build/codex-runtime-manifest.json`.
 - Full text: [PCRE2.txt](licenses/source/PCRE2.txt).
 - Changes / provenance: Bundled through ripgrep; full upstream notice includes the contributed-file notices.
-
-### zsh (Codex bundled shell)
-
-- License: LicenseRef-Zsh.
-- Source: https://github.com/zsh-users/zsh/tree/zsh-5.9
-- Revision / evidence: binary reports 5.9.0.3-test; 5.9 upstream license reference.
-- Local files: `build/codex-runtime-manifest.json`.
-- Full text: [ZSH.txt](licenses/source/ZSH.txt).
-- Changes / provenance: Preserved zsh upstream redistribution terms. Shell shipped unchanged as part of the pinned Codex package; upstream package does not identify a separate zsh source commit.
 
 ### Codex inline visualization stylesheet
 

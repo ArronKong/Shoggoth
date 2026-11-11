@@ -11,7 +11,7 @@ const { resolveCodexRuntimeLayout } = require("../app/agent-service/codex-runtim
 const { namedPermissionConfig, ownedShellEnvironmentConfig, boundedLocalFeatureConfig, assertOwnedFeatureInventory,
   permissionConfigArgs, wrapOwnedPermissionHost } = require("./codex-owned-permissions-fixture.cjs");
 const REPO = path.resolve(__dirname, ".."), MAIN = process.env.SHOGGOTH_TEST_RUNTIME_REPO || REPO;
-const EXPECTED_BINARY_SHA = "16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704";
+const EXPECTED_BINARY_SHA = "ebabe5f0d79145a9e61274ce9ecf7c02c9021b7b04bfa59b7e61ad4461c32b0b";
 const hash = file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const quote = value => "'" + value.replace(/'/g, "'\"'\"'") + "'";
 const beforeSource = Object.fromEntries(["app/agent-service/codex-runtime-host.js", "app/agent-service/codex-runtime-adapter.js", "app/agent-service/codex-schema-contract.js"].map(relative => [relative, hash(path.join(REPO, relative))]));

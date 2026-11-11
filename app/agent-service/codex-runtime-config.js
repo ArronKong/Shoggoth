@@ -83,6 +83,26 @@ function runtimeProviderBaseUrl(provider) {
   return provider.kind === "openai-api-key" ? OPENAI_RESPONSES_BASE_URL : provider.baseUrl;
 }
 
+function modelSecretProviderConfig(providerKind, baseUrl) {
+  const provider = "shoggoth_local_projection";
+  const prefix = `model_providers.${provider}`;
+  return {
+    model_provider: provider,
+    [`${prefix}.name`]: "OpenAI",
+    [`${prefix}.base_url`]: baseUrl,
+    [`${prefix}.wire_api`]: "responses",
+    [`${prefix}.supports_websockets`]: false,
+    // A projection failure must not replay an unconfirmed model request.
+    [`${prefix}.request_max_retries`]: 0,
+    [`${prefix}.stream_max_retries`]: 0,
+    [`${prefix}.requires_openai_auth`]: providerKind === "chatgpt",
+    ...(providerKind === "openai-api-key" ? { [`${prefix}.env_key`]: OPENAI_API_KEY_ENV } : {}),
+    "features.enable_request_compression": false,
+    "features.responses_websockets": false,
+    "features.responses_websockets_v2": false,
+  };
+}
+
 // Config table of one extra source. Custom kinds use the same keys the
 // process-default custom provider writes; Bedrock is Codex's built-in
 // provider and only takes its AWS location.
@@ -554,10 +574,8 @@ function validateRuntimeProvider(input) {
   };
 }
 
-// `extraProviders` are the other model sources declared next to the process
-// default (`provider`, null = ChatGPT): presets, custom Responses endpoints
-// and at most one Bedrock. A native thread selects one through its own
-// `model_provider`; the process default never changes.
+// `extraProviders` are supplemental declarations alongside the app-server's
+// default source (`provider`, null = ChatGPT).
 function validateRuntimeConfig(input) {
   if (input === null) return null;
   try {
@@ -654,6 +672,7 @@ module.exports = {
   validMcpBootstrapReceipt,
   managedConfigFor,
   importedCodexPreferences,
+  modelSecretProviderConfig,
   providerConfigAlias,
   normalizeMcpHelperLaunch,
   safelyDecodeUrlPathname,

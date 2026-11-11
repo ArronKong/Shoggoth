@@ -259,6 +259,19 @@ function normalizeGroupRuntimeHosts(value) {
   try { return require("../group-runtime-host-protocol").normalizePeers(value); } catch { return []; }
 }
 
+const TELEMETRY_POLICY_VERSION = 2;
+
+function normalizeTelemetryPreferences(raw) {
+  if (raw !== undefined && (!raw || Object.getPrototypeOf(raw) !== Object.prototype
+    || ![undefined, 1, TELEMETRY_POLICY_VERSION].includes(raw.policyVersion)
+    || [raw.enabled, raw.basicEnabled].some(value => value !== undefined && typeof value !== "boolean"))) return null;
+  return {
+    enabled: raw?.enabled !== false && raw?.basicEnabled !== false,
+    detailedEnabled: raw?.detailedEnabled === undefined || raw.detailedEnabled === true,
+    policyVersion: TELEMETRY_POLICY_VERSION,
+  };
+}
+
 function normalizeConfig(parsed) {
   const p = parsed && typeof parsed === "object" ? parsed : {};
   const localeRaw = typeof p.locale === "string" ? p.locale : "";
@@ -272,6 +285,7 @@ function normalizeConfig(parsed) {
     theme: p.theme === "dark" || p.theme === "system" ? p.theme : "light",
     appIcon: APP_ICON_IDS.includes(p.appIcon) ? p.appIcon : DEFAULT_APP_ICON,
     autoAppUpdates: p.autoAppUpdates === true,
+    telemetry: normalizeTelemetryPreferences(p.telemetry),
     hermesMode: p.hermesMode === "remote" ? "remote" : "local",
     hermesRemotes: sanitizeRemotes(p.hermesRemotes),
     hermesKeepAlive: typeof p.hermesKeepAlive === "boolean"
@@ -321,7 +335,7 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
     try {
       const parsed = JSON.parse(raw);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
-      return { config: normalizeConfig(parsed), corrupt: false };
+      return { config: normalizeConfig(parsed), telemetry: parsed.telemetry, corrupt: false };
     } catch {
       return { config: normalizeConfig({ runtimeFrameworkFlags: DEFAULT_RUNTIME_FRAMEWORK_FLAGS, browserUse: null, nativeChatUi: null, nativeMemory: null, nativeMemorySharing: null }), corrupt: true };
     }
@@ -331,35 +345,61 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
     return readParsed().config;
   }
 
-  // Read-only health projection for optional desktop telemetry. Keep the normal
-  // config/default/write semantics unchanged, but never confuse a failed read
-  // with a new install. No configuration values cross this interface.
-  function getReadStatus() {
+  // Use a bounded, no-follow read before deriving any telemetry preference.
+  function readTelemetryConfig() {
     let fd;
     try {
       fd = fs.openSync(configPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
       const before = fs.fstatSync(fd);
-      if (!before.isFile() || before.nlink !== 1) return "read_error";
-      if (before.size > 1024 * 1024) return "invalid";
+      if (!before.isFile() || before.nlink !== 1) return { status: "read_error" };
+      if (before.size > 1024 * 1024) return { status: "invalid" };
       const bytes = Buffer.alloc(before.size + 1);
       const length = fs.readSync(fd, bytes, 0, bytes.length, 0);
       const after = fs.fstatSync(fd);
-      if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) return "read_error";
+      const current = fs.lstatSync(configPath);
+      if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs
+        || current.dev !== after.dev || current.ino !== after.ino) return { status: "read_error" };
       let parsed;
       try { parsed = JSON.parse(bytes.subarray(0, length).toString("utf8")); }
-      catch { return "parse_error"; }
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? "ok" : "invalid";
+      catch { return { status: "parse_error" }; }
+      if (!parsed || Object.getPrototypeOf(parsed) !== Object.prototype) return { status: "invalid" };
+      return { status: "ok", parsed };
     } catch (error) {
-      return error?.code === "ENOENT" ? "missing" : "read_error";
+      return { status: error?.code === "ENOENT" && fd === undefined ? "missing" : "read_error" };
     } finally {
       if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* health-only read */ } }
     }
   }
 
+  function getReadStatus() { return readTelemetryConfig().status; }
+
+  function getTelemetryPreferences() {
+    const { status, parsed } = readTelemetryConfig();
+    const preferences = status === "ok" ? normalizeTelemetryPreferences(parsed.telemetry) : null;
+    const raw = parsed?.telemetry;
+    const needsMigration = !!preferences && (raw?.policyVersion !== TELEMETRY_POLICY_VERSION
+      || Object.hasOwn(raw, "basicEnabled") || typeof raw.enabled !== "boolean" || typeof raw.detailedEnabled !== "boolean");
+    return { status: status === "ok" && !preferences ? "invalid" : status, preferences, needsMigration };
+  }
+
+  // The desktop telemetry IPC owns this writer. Ordinary settings saves retain
+  // the file's preference, including an unfamiliar future policy version.
+  function writeTelemetryPreferences(field, enabled) {
+    const { status, parsed } = readTelemetryConfig();
+    const preferences = status === "ok" ? normalizeTelemetryPreferences(parsed.telemetry) : null;
+    if (!preferences || (field !== undefined
+      && (!["enabled", "detailedEnabled"].includes(field) || typeof enabled !== "boolean"))) {
+      throw new Error("TELEMETRY_PREFERENCES_UNAVAILABLE");
+    }
+    if (field !== undefined) preferences[field] = enabled;
+    persist({ ...parsed, telemetry: preferences });
+    return preferences;
+  }
+
   // Partial update: provided fields override current, everything else persists.
   function write(patch) {
     if (patch && Object.hasOwn(patch, "groupRuntimeHosts")) require("../group-runtime-host-protocol").normalizePeers(patch.groupRuntimeHosts);
-    const { config: current, corrupt } = readParsed();
+    const { config: current, telemetry: storedTelemetry, corrupt } = readParsed();
     if (corrupt) {
       // The values may still be recoverable by hand; discarding a user's operator
       // token because one byte got truncated is worse than an orphaned backup.
@@ -371,8 +411,14 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
         /* best-effort */
       }
     }
-    const next = normalizeConfig({ ...current, ...(patch || {}) });
+    const telemetry = corrupt ? { enabled: false, detailedEnabled: false, policyVersion: TELEMETRY_POLICY_VERSION } : storedTelemetry;
+    const next = normalizeConfig({ ...current, ...(patch || {}), telemetry });
     next.gatewayUrl = next.gatewayUrl.trim();
+    persist(telemetry === undefined ? next : { ...next, telemetry });
+    return next;
+  }
+
+  function persist(next) {
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     // Atomic: write-then-rename. A crash or ENOSPC mid-write leaves the previous
     // file intact rather than a truncated one that reads back as "unconfigured"
@@ -385,7 +431,6 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
       try { fs.unlinkSync(tmp); } catch { /* nothing to clean up */ }
       throw err;
     }
-    return next;
   }
 
   function writeNativeRuntimeConfig(input) {
@@ -439,26 +484,29 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
   }
 
   // First run: drop an editable file with the default gateway pre-filled.
-  function ensure() {
+  function ensure({ telemetryDisabled = false } = {}) {
     if (fs.existsSync(configPath)) return;
     try {
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.writeFileSync(
         configPath,
-        JSON.stringify(normalizeConfig({ gatewayUrl: defaultGatewayUrl }), null, 2),
-        { mode: 0o600 },
+        JSON.stringify(normalizeConfig({ gatewayUrl: defaultGatewayUrl,
+          telemetry: telemetryDisabled ? { enabled: false, detailedEnabled: false } : undefined }), null, 2),
+        { mode: 0o600, flag: "wx" },
       );
     } catch {
       /* best-effort */
     }
   }
 
-  return { read, write, writeNativeRuntimeConfig, writeNativeMemoryConfig, writeNativeMemorySharingConfig, ensure, getReadStatus, path: configPath };
+  return { read, write, writeNativeRuntimeConfig, writeNativeMemoryConfig, writeNativeMemorySharingConfig,
+    ensure, getReadStatus, getTelemetryPreferences, writeTelemetryPreferences, path: configPath };
 }
 
 module.exports = {
   createConfigStore,
   normalizeConfig,
+  TELEMETRY_POLICY_VERSION,
   remoteProfileIdentity,
   sanitizeRemotes,
   sanitizeNotifications,

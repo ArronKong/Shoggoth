@@ -22,6 +22,8 @@ const initial = id => ({ id, revision: 0, state: 'notInstalled', stage: null, ve
 let assertions = 0;
 for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
  const serviceOnly = ['fliggy', 'baidu-maps'].includes(definition.id);
+ const alipay = definition.id === 'alipay';
+ const opensAuthorizationPage = alipay;
  const translator = i18next.createInstance(); await translator.init({ lng: language, resources: { [language]: { translation: { officialConnectors: resources[language], mcpConnectors: mcpResources[language] } } } });
  const t = translator.t.bind(translator), events = new EventTarget(), document = new EventTarget(); document.visibilityState = 'visible';
  const openedUrls = [], qrInputs = []; events.open = (...args) => { openedUrls.push(args); return null; };
@@ -44,6 +46,7 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
  assert.equal(api.officialConnectorErrorKey({ code: 'OFFICIAL_SKILL_CONFLICT' }), 'skillConflict');
  const cache = load('../app/manage-ui/src/lib/usePageCache.ts', {}, { window: events, document });
  const component = load('../app/manage-ui/src/pages/OfficialSkillConnectors.tsx', {
+  '../lib/productTelemetry': { measureTelemetry: (_feature, _backend, run) => run(), startTelemetryOperation: () => undefined },
   'qrcode-generator': (...args) => { const qr = require('qrcode-generator')(...args), addData = qr.addData; qr.addData = value => { qrInputs.push(value); addData(value); }; return qr; },
   'react-i18next': { useTranslation: () => ({ t, i18n: translator }) }, '../api/officialSkillConnectors': api, '../lib/usePageCache': cache, '../lib/mcpConnectorUi': helpers, '../lib/mcpRecommendationCatalog': branding,
   '../api/mcpConnectors': { listMcpConnectors: async () => ({ revision: 9, servers: [serverSnapshot()] }), saveMcpCredentials: async (...args) => { credentialCalls.push(plain(args)); const saved = () => { configuredFields = Object.keys(args[1].env).map(name => `env:${name}`); return { server: serverSnapshot() }; }; if (holdCredentials) return new Promise(resolve => { settleCredentials = () => resolve(saved()); }); return saved(); } },
@@ -60,7 +63,8 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
  });
  let model, rendered;
  function Harness() { model = component.useOfficialSkillConnectors(); return React.createElement(component.default, { id: definition.id, model, onClose() {}, onChanged() {} }); }
- const button = key => rendered.root.findAllByType('button').find(node => node.props.children === t(({ install: 'mcpConnectors.add', credentials: 'mcpConnectors.flow.saveConnect', login: 'mcpConnectors.flow.authorize', remove: 'mcpConnectors.flow.remove', ...(serviceOnly ? { check: 'officialConnectors.checkService' } : {}) })[key] || 'officialConnectors.' + key));
+ const button = key => rendered.root.findAllByType('button').find(node => node.props.children === t(({ install: 'mcpConnectors.add', credentials: 'mcpConnectors.flow.saveConnect', login: 'mcpConnectors.flow.authorize', done: 'mcpConnectors.flow.done', remove: 'mcpConnectors.flow.remove', ...(serviceOnly ? { check: 'officialConnectors.checkService' } : {}) })[key] || 'officialConnectors.' + key));
+ const credentialForm = () => rendered.root.findAllByType('details')[0];
  const click = async target => Renderer.act(async () => { target.props.onClick(); await flush(); });
  try {
   await Renderer.act(async () => { rendered = Renderer.create(React.createElement(Harness)); await flush(); });
@@ -99,7 +103,8 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   await Renderer.act(async () => { settleInstall(); await flush(); });
   assert.equal(rendered.root.findByProps({ 'data-connector-footer': true }).findAllByType('button').filter(node => node.props.children === t('mcpConnectors.flow.remove')).length, 1, 'official components use the shared footer Delete action');
   assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === definition.docsUrl), 'the same guide is available after adding');
-  assert.equal(accountCalls.length, 0); assert.ok(JSON.stringify(rendered.toJSON()).includes(t(serviceOnly ? definition.fields.some(field => field.required) ? 'officialConnectors.serviceNeedsCredentials' : 'officialConnectors.serviceUnknown' : 'officialConnectors.accountStates.unknown')), `${definition.id}: local installation reports missing required credentials without claiming account ready`);
+  assert.equal(accountCalls.length, 0);
+  assert.ok(JSON.stringify(rendered.toJSON()).includes(t(serviceOnly ? definition.fields.some(field => field.required) ? 'officialConnectors.serviceNeedsCredentials' : 'officialConnectors.serviceUnknown' : 'officialConnectors.accountStates.unknown')), `${definition.id}: local installation reports missing required credentials without claiming account ready`);
   let installedRows, opened;
   const rowProps = { model, servers: [{ id: 'mcp-fixture', status: 'signedOut' }], onOpen: id => { opened = id; } };
   try {
@@ -124,8 +129,7 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
    await Renderer.act(async () => { button('credentials').props.onClick(); button('credentials').props.onClick(); await flush(); });
    assert.equal(credentialCalls.length, 1); assert.equal(credentialCalls[0][0], 'mcp-fixture'); assert.equal(credentialCalls[0][2], 9);
    assert.deepEqual(Object.keys(credentialCalls[0][1]), ['env']); assert.deepEqual(Object.keys(credentialCalls[0][1].env), definition.fields.map(field => field.name));
-   definition.fields.forEach((field, index) => assert.equal(credentialCalls[0][1].env[field.name], definition.id === 'netease-music' ? entered[index].trim() : entered[index], 'only NetEase credential boundaries are normalized'));
-   if (definition.id === 'netease-music') assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.neteaseSavedCredentials')), 'saving explains the separate authorization step');
+   definition.fields.forEach((field, index) => assert.equal(credentialCalls[0][1].env[field.name], entered[index], 'saved credentials preserve their entered values'));
    if (serviceOnly) {
     assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.serviceChecking')), 'connection progress starts while the credential save is pending');
     assert.equal(accountCalls.length, 0, 'service check waits for the new credential to be saved');
@@ -179,8 +183,21 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   statusFails = true; await click(button('check')); assert.ok(!JSON.stringify(rendered.toJSON()).includes(t(serviceOnly ? 'officialConnectors.serviceReady' : 'officialConnectors.accountStates.ready')), 'failed check clears stale ready');
   assert.ok(!JSON.stringify(rendered.toJSON()).includes('private-secret-error')); statusFails = false;
   if (button('login')) {
-   account = { ...account, state: 'authorizing', userName: null, verificationUrl: definition.id === 'meituan-paotui' ? 'https://dpurl.cn/official-auth-fixture' : 'https://provider.example/authorize', userCode: 'ABC123' };
-   await click(button('login')); assert.equal(accountCalls.at(-1).action, 'start'); assert.ok(rendered.root.findAllByType('a').some(a => a.props.href === account.verificationUrl));
+   const login = button('login');
+   const verificationUrl = alipay ? 'https://u.alipay.cn/fixtureAuth'
+    : definition.id === 'meituan-paotui' ? 'https://dpurl.cn/official-auth-fixture' : 'https://provider.example/authorize';
+   account = { ...account, state: 'authorizing', userName: null, verificationUrl, userCode: opensAuthorizationPage ? null : 'ABC123' };
+   if (opensAuthorizationPage) {
+    const callsBeforeLogin = accountCalls.length;
+    holdStatus = true;
+    await Renderer.act(async () => { login.props.onClick(); login.props.onClick(); await flush(); });
+    assert.equal(accountCalls.length, callsBeforeLogin + 1, 'duplicate clicks do not start another authorization');
+    assert.equal(openedUrls.length, 0, 'the dialog waits for the official authorization URL');
+    await Renderer.act(async () => { holdStatus = false; settleAccount(); await flush(); });
+    assert.deepEqual(openedUrls, [[verificationUrl, '_blank', 'noopener,noreferrer']], 'one login click opens the official page');
+   } else await click(login);
+   assert.equal(accountCalls.at(-1).action, 'start');
+   assert.equal(rendered.root.findAllByType('a').some(a => a.props.href === verificationUrl), !alipay, 'Alipay uses the footer as its login entry point');
    if (definition.id === 'meituan-paotui') {
     assert.equal(openedUrls.length, 0, 'Meituan app-only links are shown as a QR code instead of opening a broken desktop page');
     assert.match(rendered.root.findByType('img').props.src, /^data:image\/gif;base64,R0lGOD/);
@@ -194,9 +211,108 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
     assert.ok(rendered.root.findAllByType('a').some(a => a.props.href === account.verificationUrl), 'the official link remains available beside the QR code');
     assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.accountStates.authorizing')));
     assert.ok(!JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.errors.auth')));
-   } else assert.equal(openedUrls.length, 0, 'other provider authorization behavior is preserved');
+   } else if (!opensAuthorizationPage) assert.equal(openedUrls.length, 0, 'other provider authorization behavior is preserved');
    if (definition.id === 'rollinggo-hotel') assert.equal(authorizationTimers.size, 1, 'RollingGo schedules status checks only during explicit authorization');
-   if (definition.id === 'alipay') { const code = rendered.root.findAllByType('input').find(input => input.props.maxLength === 32); await Renderer.act(async () => code.props.onChange({ target: { value: '123456' } })); await click(button('bind')); assert.equal(accountCalls.at(-1).code, '123456'); }
+   if (alipay) {
+    const authorization = { ...account };
+    const reopen = async (target = button('login'), url = authorization.verificationUrl) => {
+     const callsBefore = accountCalls.length, opensBefore = openedUrls.length;
+     await click(target);
+     assert.equal(accountCalls.length, callsBefore, 'reopening does not start a second authorization');
+     assert.equal(openedUrls.length, opensBefore + 1);
+     assert.deepEqual(openedUrls.at(-1), [url, '_blank', 'noopener,noreferrer']);
+    };
+    const poll = async () => {
+     assert.equal(authorizationTimers.size, 1, 'Alipay schedules only one account check');
+     const [id, check] = authorizationTimers.entries().next().value;
+     authorizationTimers.delete(id);
+     await Renderer.act(async () => { check(); await flush(); });
+    };
+    assert.equal(rendered.root.findAllByType('input').length, 0, 'Alipay authorization needs no code input');
+    assert.equal(button('bind'), undefined);
+    assert.equal(button('check').props.className, 'btn-secondary btn-sm', 'the manual status check uses the smallest outlined button');
+    const start = accountCalls.length - 1;
+
+    await click(button('check'));
+    assert.equal(openedUrls.length, 1, 'checking a pending authorization does not reopen its page');
+    await reopen();
+    account = { ...account, verificationUrl: null };
+    await click(button('check'));
+    await reopen();
+    statusFails = true;
+    await poll();
+    statusFails = false;
+    await reopen();
+    account = { ...account, state: 'unknown', errorCode: 'OFFICIAL_SKILL_AUTH_STATUS_FAILED' };
+    await poll();
+    await reopen();
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.accountStates.authorizing')));
+
+    const opensBeforeReady = openedUrls.length;
+    holdStatus = true;
+    await poll();
+    assert.equal(rendered.root.findByProps({ role: 'dialog' }).props['data-dismissible'], true);
+    assert.equal(button('check').props.disabled, true, 'a pending check cannot be duplicated');
+    assert.equal(authorizationTimers.size, 0);
+    account = { ...account, state: 'ready', errorCode: null };
+    await Renderer.act(async () => { holdStatus = false; settleAccount(); await flush(); });
+    assert.ok(rendered.root.findAllByType('button').some(node => node.props.children === t('mcpConnectors.flow.done')), 'scan confirmation updates the open dialog to ready');
+    assert.equal(authorizationTimers.size, 0, 'polling stops after authorization succeeds');
+    assert.deepEqual(accountCalls.slice(start).map(call => call.action), ['start', 'status', 'status', 'status', 'status', 'status']);
+    assert.equal(openedUrls.length, opensBeforeReady, 'polling does not open another page');
+
+    const reauthorize = () => rendered.root.findAllByType('button').find(node => node.props.children === t('mcpConnectors.flow.reconnect'));
+    const callsBeforeReauthorize = accountCalls.length;
+    const revocationUrl = 'https://u.alipay.cn/fixtureReauthorize';
+    account = { ...authorization, verificationUrl: null, errorCode: 'OFFICIAL_SKILL_AUTH_STATUS_FAILED' };
+    await click(reauthorize());
+    assert.deepEqual(accountCalls.slice(callsBeforeReauthorize).map(call => call.action), ['logout'], 'reauthorization requests its page directly');
+    assert.ok(button('done'), 'a missing revocation page preserves the last verified ready state');
+    assert.equal(openedUrls.length, opensBeforeReady);
+
+    account = { ...authorization, verificationUrl: revocationUrl };
+    await click(reauthorize());
+    assert.equal(accountCalls.at(-1).action, 'logout', 'reauthorization requests the official revocation page');
+    assert.deepEqual(openedUrls.at(-1), [revocationUrl, '_blank', 'noopener,noreferrer']);
+    assert.equal(openedUrls.length, opensBeforeReady + 1);
+    assert.ok(!rendered.root.findAllByType('a').some(link => link.props.href === revocationUrl), 'the footer can reopen the revocation page');
+    account = { ...authorization, state: 'ready', verificationUrl: null };
+    await poll();
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.alipayWaitingRevocation')));
+    await reopen(button('alipayOpenRevocation'), revocationUrl);
+    account = { ...account, state: 'signedOut' };
+    await poll();
+    assert.equal(authorizationTimers.size, 0, 'revocation completes before the next explicit login');
+    assert.ok(button('login'));
+    assert.equal(openedUrls.length, opensBeforeReady + 2);
+
+    account = authorization;
+    await click(button('login'));
+    assert.equal(accountCalls.at(-1).action, 'start');
+    assert.deepEqual(openedUrls.at(-1), [authorization.verificationUrl, '_blank', 'noopener,noreferrer']);
+    const openedAfterRestart = openedUrls.length;
+    holdStatus = true;
+    await poll();
+    await Renderer.act(async () => rendered.unmount());
+    await Renderer.act(async () => { holdStatus = false; settleAccount(); await flush(); });
+    assert.equal(authorizationTimers.size, 0, 'closing during an in-flight check stops further checks');
+    await Renderer.act(async () => { rendered = Renderer.create(React.createElement(Harness)); await flush(); });
+    assert.equal(authorizationTimers.size, 0, 'reopening without starting authorization does not poll');
+    await click(button('check'));
+    assert.equal(openedUrls.length, openedAfterRestart, 'finding a pending login does not open its page automatically');
+    await reopen();
+
+    account = { ...authorization, verificationUrl: 'https://u.alipay.cn/fixtureRevoke' };
+    const callsBeforeLogout = accountCalls.length;
+    await click(button('logout'));
+    assert.equal(accountCalls.length, callsBeforeLogout, 'the separate local logout action still requires confirmation');
+    allowRemove = true;
+    await click(button('logout'));
+    allowRemove = false;
+    assert.equal(accountCalls.at(-1).action, 'logout');
+    assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === account.verificationUrl), 'revocation still has its own confirmation link');
+    assert.equal(authorizationTimers.size, 0, 'the login poll does not handle revocation');
+   }
    if (definition.id === 'doordash') {
     const callback = 'http://localhost:4180/oauth2/callback?code=private-callback-canary&state=fixture';
     const input = rendered.root.findByProps({ maxLength: 8192 }); assert.equal(input.props.type, 'password'); assert.equal(input.props.autoComplete, 'off');

@@ -90,6 +90,7 @@ const refresh = async () => { refreshes++; };
 const host = (type) => (props) => React.createElement(type, props, props.children);
 const passthrough = (props) => React.createElement(React.Fragment, {}, props.children);
 const stubs = {
+  '../lib/productTelemetry': { measureTelemetry: (_feature, _backend, run) => run() },
   'react-i18next': { useTranslation: () => ({ t: (key, options) => key.startsWith('chat.') || key.startsWith('chatErrors:') ? chatI18n.t(key, options)
     : options?.returnObjects ? lists[key] ?? [] : errorLabel(key) || key,
     i18n: { exists: (key) => Boolean(errorLabel(key)) } }) },

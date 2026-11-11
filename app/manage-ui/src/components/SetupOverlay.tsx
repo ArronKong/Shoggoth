@@ -8,6 +8,7 @@
 // 仅当 config.setupCompletedAt===0 且 token==="" 时出现一次；token 已配置
 // 的老安装升级后不会看到它。
 
+import { measureTelemetry, telemetryOnboardingStep } from "../lib/productTelemetry";
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -129,7 +130,7 @@ function fetchableUrl(raw: string): boolean {
 // 自动拉取模型列表，可多选也可手动添加；选中的都存进端点，第一个选中的设为 Shoggoth 的默认模型。
 function CustomEndpointForm({ profileId, onConfigured }: {
   profileId: string | null;
-  onConfigured: () => Promise<void>;
+  onConfigured: () => Promise<boolean>;
 }) {
   const { t } = useTranslation();
   const [baseUrl, setBaseUrl] = useState("");
@@ -214,6 +215,7 @@ function CustomEndpointForm({ profileId, onConfigured }: {
 
   const submit = async () => {
     if (!canSubmit) return;
+    const telemetryEpoch = telemetryOnboardingStep("configuration_started");
     setBusy(true);
     setMessage(null);
     try {
@@ -226,24 +228,26 @@ function CustomEndpointForm({ profileId, onConfigured }: {
       const base = host.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^[-_]+|[-_]+$/g, "").toLowerCase() || "custom-endpoint";
       let id = existing?.id ?? base;
       for (let n = 2; !existing && endpoints.some((entry) => entry.id === id); n += 1) id = `${base}-${n}`;
-      await saveCustomEndpoint("shoggoth", profileId ?? undefined, {
-        id,
-        name: host || id,
-        baseUrl: url,
-        api: "openai-responses",
-        model: selected[0],
-        models: [...selected, ...(existing?.models ?? []).filter((entry) => !selected.includes(entry))],
-        discoverModels: false,
-        ...(key ? { apiKey: key } : {}),
+      await measureTelemetry("model_save", "shoggoth", async () => {
+        await saveCustomEndpoint("shoggoth", profileId ?? undefined, {
+          id,
+          name: host || id,
+          baseUrl: url,
+          api: "openai-responses",
+          model: selected[0],
+          models: [...selected, ...(existing?.models ?? []).filter((entry) => !selected.includes(entry))],
+          discoverModels: false,
+          ...(key ? { apiKey: key } : {}),
+        });
+        await bindShoggothEndpoint({
+          profileId,
+          operationId: providerOperationId("endpoint-bind"),
+          providerRef: id,
+          defaultModel: selected[0],
+          createdAt: Date.now(),
+        });
       });
-      await bindShoggothEndpoint({
-        profileId,
-        operationId: providerOperationId("endpoint-bind"),
-        providerRef: id,
-        defaultModel: selected[0],
-        createdAt: Date.now(),
-      });
-      await onConfigured();
+      if (await onConfigured()) telemetryOnboardingStep("connection_verified", telemetryEpoch);
     } catch (error) {
       setMessage(error instanceof ApiError && error.code === "CUSTOM_ENDPOINT_REJECTED" && error.message
         ? error.message
@@ -482,7 +486,15 @@ export default function SetupOverlay() {
 
   // 一键启动:成功后什么都不用做——轮询会自动转绿;失败给第二级
   // 「安装服务并启动」(首装机器还没有 launchd 服务时的正路)。
-  const runStart = useCallback(async (mode: "start" | "install") => {
+  const pendingConnection = useRef<{ epoch: string; target: "native" | "openclaw" } | null>(null);
+  const beginConnection = useCallback((target: "native" | "openclaw") => {
+    const epoch = telemetryOnboardingStep("configuration_started");
+    const pending = epoch ? { epoch, target } : null;
+    pendingConnection.current = pending;
+    return pending;
+  }, []);
+  const runStart = useCallback(async (mode: "start" | "install", userInitiated = false) => {
+    const pending = userInitiated ? beginConnection("openclaw") : null;
     setStartState("starting");
     setStartOutput("");
     try {
@@ -491,13 +503,15 @@ export default function SetupOverlay() {
         setStartState("idle");
         return;
       }
+      if (pending && pendingConnection.current === pending) pendingConnection.current = null;
       setStartState("failed");
       setStartOutput(r.output);
     } catch (e) {
+      if (pending && pendingConnection.current === pending) pendingConnection.current = null;
       setStartState("failed");
       setStartOutput(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [beginConnection]);
 
   // OpenClaw 新版会在 token 模式缺少持久 token 时用一次性的 runtime token
   // 启动：端口是通的，但任何外部客户端都会被拒绝。仅对明确的本机缺-token
@@ -530,6 +544,7 @@ export default function SetupOverlay() {
   };
 
   const startLogin = async () => {
+    const pending = nativeReady ? null : beginConnection("native");
     setLoginFailed(false);
     setLoginUrl(null);
     setPhase("login");
@@ -538,12 +553,20 @@ export default function SetupOverlay() {
       setLoginUrl(login.authUrl);
       window.open(login.authUrl, "_blank", "noopener,noreferrer");
     } catch {
+      if (pending && pendingConnection.current === pending) pendingConnection.current = null;
       setLoginFailed(true);
     }
   };
 
   const serviceHealthy = shoggothStatus?.service.healthy === true;
   const nativeReady = serviceHealthy && shoggothProviders?.profile?.ready === true;
+  const openClawReady = statuses?.some(row => row.id === "openclaw" && row.connected === true) === true;
+  useEffect(() => {
+    const pending = pendingConnection.current;
+    if (!pending || !(pending.target === "native" ? nativeReady : openClawReady)) return;
+    pendingConnection.current = null;
+    telemetryOnboardingStep("connection_verified", pending.epoch);
+  }, [nativeReady, openClawReady]);
   const externals = sortBackendTabs((statuses ?? []).filter((b) => !(b.id === "shoggoth")));
   // 没装的不显示：OpenClaw 以本机侦察为准，其余后端以「找不到命令」为准。
   const installed = (b: BackendStatus) =>
@@ -683,7 +706,7 @@ export default function SetupOverlay() {
       return {
         desc: t("setup.row.ocStartFailed"),
         title: startOutput || undefined,
-        mark: rowButton(t("setup.installAndStart"), () => void runStart("install")),
+        mark: rowButton(t("setup.installAndStart"), () => void runStart("install", true)),
       };
     }
     // localGatewayRunning=true 说明网关其实在跑只是端口不对——自动采用在途,别劝启动。
@@ -693,7 +716,7 @@ export default function SetupOverlay() {
     if (stoppable) {
       return {
         desc: t("setup.ocNotRunning", { version: ocHost?.version ? ` ${ocHost.version}` : "" }),
-        mark: rowButton(t("setup.startGateway"), () => void runStart("start")),
+        mark: rowButton(t("setup.startGateway"), () => void runStart("start", true)),
       };
     }
     if (ocHost?.gatewayRunning && (AUTH_REASONS.has(b.info.reason || "") || AUTH_ERR.test(err))) {
@@ -764,7 +787,7 @@ export default function SetupOverlay() {
               <span className={styles.gptIcon} aria-hidden="true" />
               {t("setup.chatgptLogin")}
             </button>
-            <button type="button" className={`btn-dark btn-md ${styles.cta} ${styles.ctaWide}`} onClick={() => setPhase("custom")}>
+            <button type="button" className={`btn-dark btn-md ${styles.cta} ${styles.ctaWide}`} onClick={() => { telemetryOnboardingStep("configuration_started"); setPhase("custom"); }}>
               {t("setup.customModel")}
             </button>
           </div>
@@ -795,6 +818,7 @@ export default function SetupOverlay() {
               onConfigured={async () => {
                 const next = await getShoggothProviders();
                 setShoggothProviders(next);
+                return next.profile?.ready === true;
               }}
             />
           )}

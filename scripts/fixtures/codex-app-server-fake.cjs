@@ -7,7 +7,7 @@ const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 
 if (process.argv.includes("--version")) {
-  process.stdout.write("codex-cli 0.159.2\n");
+  process.stdout.write("codex-cli 0.167.1\n");
   process.exit(0);
 }
 
@@ -77,7 +77,7 @@ function thread(id, threadSource = null) {
     ephemeral: true,
     turns: [],
     cwd: process.cwd(),
-    cliVersion: "0.159.2",
+    cliVersion: "0.167.1",
     source: "appServer",
     sessionId: `session-${id}`,
     projectId: null,
@@ -270,7 +270,7 @@ process.stdin.on("data", (chunk) => {
       send({
         id: message.id,
         result: {
-          userAgent: "codex/0.159.2",
+          userAgent: "codex/0.167.1",
           codexHome: process.env.CODEX_HOME,
           platformFamily: "unix",
           platformOs: process.platform === "darwin" ? "macos" : process.platform,

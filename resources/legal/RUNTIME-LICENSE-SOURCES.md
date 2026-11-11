@@ -4,24 +4,24 @@ Shoggoth-authored source code is Apache-2.0 licensed. The components below retai
 own licenses. This index records the runtime license documents added on
 2026-09-18; it is not the complete inventory of all application dependencies.
 
-## OpenAI Codex 0.159.2
+## OpenAI Codex 0.167.1
 
 The pinned runtime version is recorded in `build/codex-runtime-manifest.json` in
 the source repository and `codex/runtime-manifest.json` in the application.
-The generated protocol files under `schemas/codex-app-server/0.159.2` originate
+The generated protocol files under `schemas/codex-app-server/0.167.1` originate
 from that version of Codex.
 
-- Source: <https://github.com/openai/codex/tree/rust-v0.159.2>
+- Source: <https://github.com/openai/codex/tree/rust-v0.167.1>
 - [CODEX-LICENSE.txt](CODEX-LICENSE.txt): unmodified copy of
-  <https://raw.githubusercontent.com/openai/codex/rust-v0.159.2/LICENSE>
+  <https://raw.githubusercontent.com/openai/codex/rust-v0.167.1/LICENSE>
 - [CODEX-NOTICE.txt](CODEX-NOTICE.txt): unmodified copy of
-  <https://raw.githubusercontent.com/openai/codex/rust-v0.159.2/NOTICE>, including
+  <https://raw.githubusercontent.com/openai/codex/rust-v0.167.1/NOTICE>, including
   the upstream Ratatui attribution.
 
 The [third-party index](THIRD-PARTY-NOTICES.md) also preserves the upstream
-ripgrep, PCRE2 and zsh license texts. Their versions were read from the pinned
+ripgrep and PCRE2 license texts. Their versions were read from the pinned
 package binaries. The two Codex documents above do not replace those texts.
-Codex 0.159.2 also bundles a native voice host, dynamically linked GStreamer,
+Codex 0.167.1 also bundles a native voice host, dynamically linked GStreamer,
 GLib and their dependencies. Their unmodified notices and complete license texts
 are retained under `licenses/source/codex-voice/` and inside the runtime package
 at `codex-resources/voice/`. The exact versions, corresponding source archive URLs

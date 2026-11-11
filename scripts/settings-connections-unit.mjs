@@ -24,6 +24,7 @@ function load(file, stubs = {}, desktop = { getConfig: () => ({ disabledBackends
   const mod = { exports: {} };
   vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})(require, module, module.exports);`, {
     module: mod, require: name => stubs[name] || (name === "./usePageCache" ? { invalidatePageCache() {} }
+      : name.endsWith("/backendTabOrder") ? load("app/manage-ui/src/lib/backendTabOrder.ts")
       : name === "../../../release-policy.json" ? releasePolicy : require(name)),
     window: { openclawDesktop: desktop },
   });

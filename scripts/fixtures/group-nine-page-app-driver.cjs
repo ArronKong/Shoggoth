@@ -63,7 +63,9 @@ app.whenReady().then(() => {
     callback({ cancel: false });
   });
   session.defaultSession.webRequest.onCompleted(details => {
-    const url = new URL(details.url); if (url.pathname.startsWith("/__api/")) report.requests.push({ method: details.method, pathname: url.pathname, statusCode: details.statusCode });
+    const url = new URL(details.url);
+    if (url.pathname.startsWith("/__api/")) report.requests.push({ method: details.method, pathname: url.pathname,
+      statusCode: details.statusCode, ...(url.pathname.endsWith("/default-model") ? { scope: url.searchParams.get("scope") } : {}) });
   });
 });
 app.on("will-quit", event => {
@@ -141,9 +143,9 @@ async function run() {
     version: require(path.join(snapshot, "package.json")).version, prewarmMcpAuth: false,
     safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value), decryptString: value => Buffer.from(value).toString() } });
   report.stage = "service-start";
-  await service.start(); const originalProfile = service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
-  const profile = originalProfile.defaultModel === "fake-model" ? originalProfile
-    : service.productStore.putAgentProfile({ ...originalProfile, defaultModel: "fake-model" });
+  await service.start();
+  const profile = service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
+  assert.equal(profile.defaultModel, null);
   if (connectorAcceptance) {
     const page = await service.connectorController.handle("connector.apps.list", { offset: 0, limit: 50 });
     assert.equal(page.total, 1667);
@@ -212,6 +214,28 @@ async function run() {
       return value.href === link.href && !value.loading && value.rendered ? value : false;
     }, `route ${link.href} rendered`);
     assert.equal(page.resourceError, false); report.pages.push({ ...link, ...page });
+    if (link.href === "#/agents") {
+      const card = `[data-agent-id="${profile.agentId}"]`;
+      const trigger = "[data-agent-overview-panel] button.chat-pill--model";
+      const modelRoute = `/__api/agents/${profile.agentId}/default-model`;
+      const modelRequests = () => report.requests.filter(request => request.pathname === modelRoute);
+      await until(() => js(`!!document.querySelector(${JSON.stringify(card)})`), "fresh Agent card");
+      await js(`document.querySelector(${JSON.stringify(card)}).click();void 0`);
+      await until(() => js(`(()=>{const model=document.querySelector(${JSON.stringify(trigger)});
+        return model?.getAttribute("aria-expanded")==="false"&&model.textContent.includes("fake-model");})()`), "inherited model appears before opening picker");
+      assert.deepEqual(modelRequests().map(({ method, scope }) => [method, scope]), [["GET", "default"]]);
+      await js(`document.querySelector(${JSON.stringify(trigger)}).click();void 0`);
+      const selectedOption = '[role="option"][title="fake-model"][aria-selected="true"]';
+      await until(() => js(`!!document.querySelector(${JSON.stringify(selectedOption)})`), "full picker includes the inherited model");
+      assert.deepEqual(modelRequests().map(({ method, scope }) => [method, scope]), [["GET", "default"], ["GET", null]]);
+      assert.equal(service.productStore.resolveAgentRuntimeProfile(profile.id).defaultModel, null);
+      assert.equal(service.productStore.listWorkRuns().length, 0);
+      report.inheritedDefaultModel = "fake-model";
+      // Save an explicit model for the following chat footer checks.
+      await js(`document.querySelector(${JSON.stringify(selectedOption)}).click();void 0`);
+      await until(() => modelRequests().some(request => request.method === "PUT" && request.statusCode === 200), "manual model selection saved");
+      assert.equal(service.productStore.resolveAgentRuntimeProfile(profile.id).defaultModel, "fake-model");
+    }
     if (dailyReviewAcceptance && link.href === "#/agents") {
       const rpc = (method, params) => requestService(paths, { token: readClientToken(paths), version: SERVICE_PROTOCOL_VERSION, method, params });
       const before = (await rpc("proactive.review-document.get", { profileId: profile.id })).document;

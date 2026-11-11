@@ -9,6 +9,7 @@ import { createRequire } from 'node:module';
 const { RETIRED_RESOURCES } = createRequire(import.meta.url)('./connector-package-checks.cjs');
 const root = path.resolve(import.meta.dirname, '..');
 const privateDirectories = new Set(['docs', 'tasks', '.preview-specs', '.superpowers', '.vscode']);
+const publicDocuments = new Set(['docs/privacy.md', 'docs/privacy.en.md']);
 const privateFiles = new Set([
   'AGENT_RUNTIME_REPAIR_PLAN.md', 'ARCHITECTURE.md', 'BUG_REPORT.md',
   'CLAUDE.md', 'PROGRESS.md', 'prd.md',
@@ -19,7 +20,7 @@ const privateFiles = new Set([
 ]);
 // Check tracked files too: .gitignore alone does not exclude already tracked notes.
 export function isPublicSourcePath(relative) {
-  return !privateDirectories.has(relative.split('/')[0])
+  return (publicDocuments.has(relative) || !privateDirectories.has(relative.split('/')[0]))
     && !privateFiles.has(relative)
     && !RETIRED_RESOURCES.some(name => relative === `resources/${name}` || relative.startsWith(`resources/${name}/`))
     && !relative.split('/').includes('.DS_Store');

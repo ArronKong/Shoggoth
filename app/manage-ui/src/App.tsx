@@ -12,6 +12,7 @@ import pluginsIcon from "./assets/nav-icons/plugins.svg";
 import settingsIcon from "./assets/nav-icons/settings.svg";
 import skillsIcon from "./assets/nav-icons/skills.svg";
 import tokenIcon from "./assets/nav-icons/token.svg";
+import AppUpdateReminder from "./components/AppUpdateReminder";
 import DebugInspector from "./components/debug/DebugInspector";
 import FusionLoader from "./components/FusionLoader";
 import Notifier from "./components/Notifier";
@@ -382,7 +383,10 @@ export default function App() {
         <nav className="nav" aria-label={t("a11y.mainNav")}>
           <NavActiveBlob />
           <div className="nav-primary">{PRIMARY_NAV.map((entry) => <GuardedNavLink key={entry.to} entry={entry} label={t(entry.labelKey)} />)}</div>
-          <div className="nav-bottom">{BOTTOM_NAV.map((entry) => <GuardedNavLink key={entry.to} entry={entry} label={t(entry.labelKey)} />)}</div>
+          <div className="nav-bottom">
+            <AppUpdateReminder />
+            {BOTTOM_NAV.map((entry) => <GuardedNavLink key={entry.to} entry={entry} label={t(entry.labelKey)} />)}
+          </div>
         </nav>
       </aside>
       <Suspense fallback={null}><McpApprovalInbox /></Suspense>

@@ -1,6 +1,6 @@
 "use strict";
 
-const { LIMITS, isProjectToken, validateTelemetryEvent } = require("./product-telemetry-schema");
+const { LIMITS, isProjectToken, validateTelemetryEvent, telemetryTier, boundedList } = require("./product-telemetry-schema");
 const ENDPOINTS = Object.freeze({ us: "https://us.i.posthog.com/batch/", eu: "https://eu.i.posthog.com/batch/" });
 const MAX_RESPONSE_BYTES = 2048;
 
@@ -36,9 +36,10 @@ function createPostHogTransport({ projectToken, region, fetchImpl = globalThis.f
   }
 
   async function sendBatch(events, { signal } = {}) {
-    if (!Array.isArray(events) || Object.getPrototypeOf(events) !== Array.prototype
-      || Reflect.ownKeys(events).length !== events.length + 1 || events.length === 0 || events.length > LIMITS.batch
-      || !events.every(validateTelemetryEvent)) return { kind: "pause", code: "protocol_error" };
+    if (!boundedList(events, LIMITS.batch, validateTelemetryEvent) || !events.length
+      || events.some(event => telemetryTier(event.event) !== telemetryTier(events[0].event))) {
+      return { kind: "pause", code: "protocol_error" };
+    }
     if (signal?.aborted) return { kind: "canceled" };
     // Build our own envelope; neither a renderer nor a disk record can add
     // headers, flags, a destination, credentials or fields around the batch.

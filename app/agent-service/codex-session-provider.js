@@ -6,9 +6,8 @@
 // default for new conversations, HEARTBEAT and other sessionless work. A chat
 // session may select any other source of this Profile: ChatGPT, a preset the
 // Models page configured for it (OpenAI API Key, OpenRouter, Ollama, LM
-// Studio, Bedrock) or any Shoggoth custom endpoint. One Codex process, whose
-// own default is always ChatGPT, declares all of them; each native thread
-// names its provider (codex-runtime-config, codex-runtime-adapter).
+// Studio, Bedrock) or any Shoggoth custom endpoint. Execution app-servers
+// are reused by source; the management app-server defaults to ChatGPT.
 
 const { serviceError } = require("./security");
 const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");

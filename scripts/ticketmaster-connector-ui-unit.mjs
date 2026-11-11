@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { bundledBridgeVersions, loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
+import { bundledBridgeVersions, connectorTelemetryFixture, loadConnectorDetails } from "./fixtures/connector-details-ui.mjs";
 import ts from "../app/manage-ui/node_modules/typescript/lib/typescript.js";
 
 const uiRequire = createRequire(new URL("../app/manage-ui/package.json", import.meta.url));
@@ -35,6 +35,7 @@ for (const language of ["zh-CN", "en"]) {
     startMcpSignIn: async () => assert.fail("Ticketmaster must not attempt OAuth"),
   };
   const component = load("../app/manage-ui/src/pages/McpConnectorDialog.tsx", name => {
+    if (name === "../lib/productTelemetry") return connectorTelemetryFixture;
     if (name === "../components/ConnectorDetails") return connectorDetails;
     if (name === "../../../agent-service/data/mcp-bundled-bridge-versions.json") return bundledBridgeVersions;
 

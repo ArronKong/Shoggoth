@@ -403,6 +403,7 @@ test("Service 仅在真实 packaged 四条件成立时选择共享 selector 并�
     assert.deepEqual(selectorOptions[0], {
       paths,
       callerRole: "agent-service",
+      persistent: true,
       executablePath: process.execPath,
       appRoot,
       resourcesPath,
@@ -1543,6 +1544,11 @@ test("Service mcp.tool.call 固定映射工具错误，并拒绝 hostile/超限 
             code: "MCP_TOOL_STATE_CONFLICT",
           });
         }
+        if (mode === "secret-outcome") {
+          throw Object.assign(new Error("fixture-secret-canary raw downstream failure"), {
+            code: "SECRET_TOOL_OUTCOME_UNKNOWN",
+          });
+        }
         if (mode === "hostile-error") {
           const error = {};
           Object.defineProperty(error, "code", {
@@ -1585,6 +1591,10 @@ test("Service mcp.tool.call 固定映射工具错误，并拒绝 hostile/超限 
     };
     await assert.rejects(invoke(), (error) => error.code === "MCP_TOOL_STATE_CONFLICT"
       && error.message === "当前状态不允许该工具操作"
+      && !JSON.stringify(error, Object.getOwnPropertyNames(error)).includes("fixture-secret-canary"));
+    mode = "secret-outcome";
+    await assert.rejects(invoke(), (error) => error.code === "SECRET_TOOL_OUTCOME_UNKNOWN"
+      && error.message === require("../app/core/chat-secret-contract").SECRET_MESSAGES.SECRET_TOOL_OUTCOME_UNKNOWN
       && !JSON.stringify(error, Object.getOwnPropertyNames(error)).includes("fixture-secret-canary"));
     mode = "hostile-error";
     await assert.rejects(invoke(), (error) => error.code === "MCP_AUTH_FAILED"
@@ -2603,6 +2613,29 @@ test("a memory write state conflict tells the model to search again, other repli
       assert.match(response.result.content[0].text, expected);
       assert.doesNotMatch(JSON.stringify(response), /PRIVATE_/u);
     }
+  } finally { handler.close(); }
+});
+
+test("MCP helper preserves a downstream MCP tool failure", async () => {
+  const args = { serverId: "fixture-read-server", toolName: "list_records", arguments: {} };
+  const result = { serverId: args.serverId, toolName: args.toolName,
+    result: { isError: true, structuredContent: { error: { code: "PROVIDER_READ_UNAVAILABLE" } } } };
+  const handler = createMcpStdioHandler({
+    runtimeProfileId: "runtime-a", runtimeAccountId: runtimeAccountId("runtime-a"), sessionToken: nonce(0x76),
+    serviceVersion: "0.0.test", paths: fixturePaths("shoggoth-mcp-downstream-error-"),
+    randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    requestService: async (_paths, request) => {
+      assert.equal(request.params.name, "mcp_server_call");
+      assert.deepEqual(request.params.arguments, args);
+      return result;
+    },
+  });
+  try {
+    await handler({ jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: "fixture", version: "1" } } });
+    const response = await handler({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mcp_server_call", arguments: args } });
+    assert.equal(response.result.isError, true);
+    assert.deepEqual(response.result.structuredContent, result);
   } finally { handler.close(); }
 });
 

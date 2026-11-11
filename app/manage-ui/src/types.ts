@@ -1,9 +1,38 @@
 // Mirrors the UnifiedCronJob shape produced by the Node backends
 // (see app/core/hermes-backend.js normalizeHermesCronJob).
 
-// Desktop-only empty signal: no event payload, identity or basic toggle API.
+import type telemetryCatalog from "../../core/data/product-telemetry-catalog.json";
+
+export type TelemetryFeature = keyof typeof telemetryCatalog.features;
+export type TelemetryStep = "configuration_started" | "connection_verified";
+export type TelemetryOutcome = "success" | "error" | "canceled";
+export type TelemetryDimension = "backend" | "runtime" | "provider" | "model" | "connector" | "skill" | "agent";
+export interface TelemetryUsage { runtimeType: string; providerId: string; modelId: string }
+export interface TelemetrySettings {
+  available: boolean;
+  collectionAvailable: boolean;
+  enabled: boolean;
+  detailedEnabled: boolean;
+  basicEpoch: string | null;
+  detailedEpoch: string | null;
+}
+export type TelemetrySettingError = "unavailable" | "not_saved" | "paused_not_saved" | "cleanup_pending";
+export interface TelemetrySettingResult { error: TelemetrySettingError | null; settings: TelemetrySettings }
+
+export type TelemetryPayload =
+  | { kind: "activity"; payload: Record<string, never> }
+  | { kind: "page_used"; payload: { page: string } }
+  | { kind: "feature_start"; payload: { feature: TelemetryFeature; operationId: string; backendType: string } }
+  | { kind: "feature_end"; payload: { operationId: string; outcome: TelemetryOutcome; errorKind: string | null; usage: TelemetryUsage | null } }
+  | { kind: "configuration_snapshot"; payload: { dimension: TelemetryDimension; values: Record<string, number | true | string[]> } }
+  | { kind: "onboarding_step"; payload: { step: TelemetryStep } };
+export type TelemetrySignal = TelemetryPayload & { collectionEpoch: string };
+
 export interface DesktopProductTelemetryBridge {
-  recordActivity: () => void;
+  record: (signal: TelemetrySignal) => void;
+  getSettings: () => Promise<TelemetrySettings | null>;
+  setEnabled: (enabled: boolean) => Promise<TelemetrySettingResult | null>;
+  setDetailedEnabled: (enabled: boolean) => Promise<TelemetrySettingResult | null>;
 }
 
 // The backends pass OpenClaw's CronSchedule through as a superset, so a few

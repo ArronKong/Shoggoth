@@ -44,6 +44,21 @@ async function run() {
       }, ...(body ? { body: JSON.stringify(body) } : {}) });
       return { status: response.status, body: await response.json() };
     };
+    const nativePi = store.listAgentProfiles().find(profile => profile.agentId === "shoggoth-pi");
+    const nativeBindings = await backend.getAgentRuntimeBindings(nativePi.agentId);
+    assert.ok(nativeBindings.bindings.length > 1);
+    assert.equal(store.resolveAgentRuntimeProfile(nativePi.id).defaultModel, null);
+    const startAcquisitions = f.transport.acquisitions.length;
+    const overview = await fetch(`${server.url}/__api/agents/${nativePi.agentId}/default-model?backend=shoggoth&scope=default`);
+    assert.equal(overview.status, 200);
+    const inherited = await overview.json();
+    assert.deepEqual(inherited.selection, { bindingId: nativeBindings.defaultBindingId,
+      revision: nativeBindings.revision, model: "fixture-model" });
+    assert.deepEqual(inherited.runtimes.map(runtime => runtime.bindingId), [nativeBindings.defaultBindingId]);
+    assert.deepEqual(new Set(f.transport.acquisitions.slice(startAcquisitions).map(({ binding }) => binding.runtime)), new Set(["pi"]));
+    assert.equal(store.resolveAgentRuntimeProfile(nativePi.id).defaultModel, null, "reading the inherited default does not pin it");
+    assert.equal(store.getAgentRuntimeBindings(nativePi.id).revision, nativeBindings.revision);
+
     const existing = f.createSession();
     sessions.setModelOverride(existing.sessionKey, "codex-only");
     const existingState = sessions.getSession(existing.sessionKey);

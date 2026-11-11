@@ -12,7 +12,7 @@ const { CodexSchemaContract } = require('../app/agent-service/codex-schema-contr
 const { RuntimeAccountResolver, defaultRuntimeAccountLookup } = require('../app/agent-service/runtime-account-resolver');
 const { resolveServicePaths } = require('../app/agent-service/paths');
 const REPO = path.resolve(__dirname, '..');
-const EXPECTED_BINARY_SHA = '16593cc2f422d5f398a8e40f550ebbaf1245392528957be342c295920a300704';
+const EXPECTED_BINARY_SHA = 'ebabe5f0d79145a9e61274ce9ecf7c02c9021b7b04bfa59b7e61ad4461c32b0b';
 const SOURCE_FILES = [
   'app/agent-service/codex-schema-contract.js', 'app/agent-service/codex-runtime-host.js',
   'app/agent-service/codex-jsonl-rpc.js', 'app/agent-service/codex-rpc-safety.js',
@@ -21,9 +21,9 @@ const SOURCE_FILES = [
   'app/agent-service/runtime-account-resolver.js', 'app/agent-service/runtime-account.js',
   'app/agent-service/runtime-adapter.js', 'app/agent-service/paths.js',
   'scripts/codex-mcp-tool-call-native-fixture.cjs', 'scripts/fixtures/codex-mcp-thread-echo.cjs',
-  'schemas/codex-app-server/0.159.2/schema-manifest.json',
-  'schemas/codex-app-server/0.159.2/json/codex_app_server_protocol.schemas.json',
-  'schemas/codex-app-server/0.159.2/json/codex_app_server_protocol.v2.schemas.json',
+  'schemas/codex-app-server/0.167.1/schema-manifest.json',
+  'schemas/codex-app-server/0.167.1/json/codex_app_server_protocol.schemas.json',
+  'schemas/codex-app-server/0.167.1/json/codex_app_server_protocol.v2.schemas.json',
 ];
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const hashes = () => Object.fromEntries(SOURCE_FILES.map(file => [file, hash(path.join(REPO, file))]));
@@ -55,7 +55,7 @@ async function main() {
   const binary = environment.binaryPath;
   assert.equal(hash(binary), EXPECTED_BINARY_SHA);
   const version = spawnSync(binary, ['--version'], { cwd: root, env: { ...parentEnv, CODEX_HOME: environment.home }, encoding: 'utf8', timeout: 5000 });
-  assert.equal(version.status, 0); assert.equal(version.signal, null); assert.match(version.stdout, /^codex-cli 0\.159\.2\s*$/);
+  assert.equal(version.status, 0); assert.equal(version.signal, null); assert.match(version.stdout, /^codex-cli 0\.167\.1\s*$/);
   checks.push({ name: 'pinned binary and two empty isolated homes', passed: true });
   let host, child, exitReceipt, closingPromise;
   const outgoing = [], kills = [], diagnostics = [];
@@ -81,7 +81,7 @@ async function main() {
       },
     });
     await host.initialize();
-    assert.equal(host.runtimeVersion, '0.159.2');
+    assert.equal(host.runtimeVersion, '0.167.1');
     assert.deepEqual(await host.accountRead({ refreshToken: false }), { account: null, requiresOpenaiAuth: true });
     assert.equal(fs.existsSync(path.join(environment.home, 'auth.json')), false);
     const started = await host.threadStart({ cwd: work, ephemeral: true, approvalPolicy: 'never', sandbox: 'read-only',
@@ -159,7 +159,7 @@ async function main() {
   let removed = false;
   if (success && frozen) { fs.rmSync(root, { recursive: true }); removed = !fs.existsSync(root); }
   const evidence = { version: 1, generatedAt: new Date().toISOString(), verified: success && frozen && removed,
-    scope: { productionNodeHost: true, pinnedCodexVersion: '0.159.2', binarySha256: EXPECTED_BINARY_SHA,
+    scope: { productionNodeHost: true, pinnedCodexVersion: '0.167.1', binarySha256: EXPECTED_BINARY_SHA,
       realNativeThread: true, realLocalMcpTool: true, serviceApiExposed: false, rendererExecuted: false,
       modelTurnExecuted: false, authenticated: false, originalSecurityPluginExecuted: false, fullPluginUsable: false },
     checkCount: checks.length, checks, nativeProcesses: { version: { code: version.status, signal: version.signal }, appServer: exitReceipt || null, echoExits },

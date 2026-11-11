@@ -5,7 +5,7 @@ import type { McpServer } from "../api/mcpConnectors";
 export const mcpRecommendationOrder = [
   "gmail", "google-drive", "outlook-mail", "google-calendar", "google-docs", "google-sheets",
   "google-slides", "google-places", "amap", "outlook-calendar", "zoom", "canva", "github",
-  "google-contacts", "lark-cli", "mijia", "didi", "uber", "luckin", "mcdonalds", "doordash", "uber-eats", "fliggy", "meituan-paotui", "weread", "alipay", "netease-music", "quark-drive", "dropbox", "notion", "figma", "blender-lab", "runway", "higgsfield",
+  "google-contacts", "lark-cli", "mijia", "didi", "uber", "luckin", "mcdonalds", "doordash", "uber-eats", "fliggy", "meituan-paotui", "weread", "alipay", "quark-drive", "dropbox", "notion", "figma", "blender-lab", "runway", "higgsfield",
   "hyperframes", "ticketmaster", "flightaware", "black-forest-labs", "fal-ai", "shop", "shopify", "stripe", "evernote",
   "atlassian", "asana", "box", "strava", "quickbooks", "monday", "miro", "airtable", "calendly",
   "clickup", "todoist", "1password", "cloudflare", "zapier", "replit", "vercel", "supabase",
@@ -45,7 +45,7 @@ export function mcpBrandId(identity: string): string {
 // Recommendations for apps aimed primarily at Chinese-language users.
 const chineseRecommendationIds = new Set([
   "alipay", "amap", "baidu-maps", "didi", "eastmoney", "fliggy", "ifind",
-  "luckin", "mcdonalds", "meituan-paotui", "mijia", "netease-music",
+  "luckin", "mcdonalds", "meituan-paotui", "mijia",
   "quark-drive", "rollinggo-hotel", "variflight", "weread", "wind",
 ]);
 
@@ -90,7 +90,7 @@ const connectorDevelopers: Record<string, string> = {
   context7: "Upstash", filesystem: "Model Context Protocol", fetch: "Model Context Protocol", time: "Model Context Protocol",
   n8n: "Romuald Czlonkowski", flightaware: "Shoggoth", ticketmaster: "Shoggoth",
   amap: "高德", "baidu-maps": "百度", didi: "滴滴出行", luckin: "瑞幸咖啡", mcdonalds: "麦当劳",
-  mijia: "小米", "meituan-paotui": "美团", "netease-music": "网易", weread: "腾讯", "quark-drive": "夸克",
+  mijia: "小米", "meituan-paotui": "美团", weread: "腾讯", "quark-drive": "夸克",
   "rollinggo-hotel": "RollingGo", wind: "万得", variflight: "飞常准", eastmoney: "东方财富", ifind: "同花顺",
   airtable: "Airtable", amplitude: "Amplitude", canva: "Canva", miro: "Miro", monday: "monday.com",
   neon: "Neon", sentry: "Sentry", todoist: "Doist", webflow: "Webflow",
@@ -107,7 +107,7 @@ export function mcpConnectorDeveloper(identity: string | undefined, catalogName?
 // authority; those operations still require the official controller's record.
 export function mcpOfficialSkillBrand(server?: McpServer): string | undefined {
   if (server?.source.kind !== "custom" || server.transport.kind !== "stdio-command") return undefined;
-  return /^official-(alipay|baidu-maps|doordash|fliggy|meituan-paotui|netease-music|quark-drive|rollinggo-hotel|shop|weread)-[a-f0-9]{8}$/u.exec(server.id)?.[1];
+  return /^official-(alipay|baidu-maps|doordash|fliggy|meituan-paotui|quark-drive|rollinggo-hotel|shop|weread)-[a-f0-9]{8}$/u.exec(server.id)?.[1];
 }
 
 export function mcpRecommendationRank(identity: string): number {

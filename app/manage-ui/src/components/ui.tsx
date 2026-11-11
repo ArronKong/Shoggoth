@@ -91,15 +91,25 @@ function ToastList() {
   const { toasts } = Toast.useToastManager();
   return (
     <>
-      {toasts.map((t) => (
-        <Toast.Root
-          key={t.id}
-          toast={t}
-          className={`${styles.toast} ${TOAST_KIND[t.type ?? "info"] ?? styles.info}`}
-        >
-          <Toast.Title className={styles.toastTitle} />
-        </Toast.Root>
-      ))}
+      {toasts.map((t) => {
+        const anchored = Boolean(t.positionerProps?.anchor);
+        const content = (
+          <Toast.Root
+            key={t.id}
+            toast={t}
+            className={`${styles.toast} ${TOAST_KIND[t.type ?? "info"] ?? styles.info}${t.actionProps ? ` ${styles.toastWithAction}` : ""}`}
+          >
+            {anchored && <Toast.Arrow className={styles.toastArrow} />}
+            <Toast.Title className={styles.toastTitle} />
+            {t.actionProps && <Toast.Action className={styles.toastAction} />}
+          </Toast.Root>
+        );
+        return anchored ? (
+          <Toast.Positioner key={t.id} toast={t} className={styles.toastPositioner}>
+            {content}
+          </Toast.Positioner>
+        ) : content;
+      })}
     </>
   );
 }

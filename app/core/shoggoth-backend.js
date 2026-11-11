@@ -3110,12 +3110,14 @@ class ShoggothBackend extends AgentBackend {
       capabilities: { ...currentCapabilities, steer: activeCapabilities?.steer === true } };
   }
 
-  async getAgentDefaultModels(id) {
-    const bindings = await this.getAgentRuntimeBindings(id);
+  async getAgentDefaultModels(id, { defaultBindingOnly = false } = {}) {
+    const bindings = defaultBindingOnly
+      ? await this._agentRuntimeBindings("agent.binding.list", id)
+      : await this.getAgentRuntimeBindings(id);
     const profile = this._profileForManagedAgent(id);
     const binding = bindings.bindings.find(entry => entry.id === bindings.defaultBindingId);
     if (!binding) throw safeError(null, "AGENT_BINDING_NOT_FOUND");
-    const groups = await this._agentRuntimeModelGroups(profile, bindings, binding.id, !bindings.canAdd, true);
+    const groups = await this._agentRuntimeModelGroups(profile, bindings, binding.id, defaultBindingOnly || !bindings.canAdd, true);
     const modelProviderRef = supportsSessionProviders(binding) ? sourceToken(profile.providerRef) : undefined;
     const model = profileAtRuntimeBinding(profile, binding).defaultModel
       ?? groups.find(group => group.bindingId === binding.id)?.models.find(entry => entry.isDefault)?.id ?? null;

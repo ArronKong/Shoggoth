@@ -100,7 +100,8 @@ async function makeHandle() {
   assert.deepEqual(fs.readFileSync(path.join(runtimeRepo, "build/codex-runtime-manifest.json")), fs.readFileSync(path.join(repo, "build/codex-runtime-manifest.json")));
   const binary = resolveCodexRuntimeLayout({ repoRoot: runtimeRepo, packaged: false }).runtimePath;
   const host = new CodexRuntimeHost({ paths, repoRoot: repo, cwd: root, ...binding,
-    runtimeBinding: binding, parentEnv: { HOME: root, PATH: process.env.PATH, TMPDIR: root,
+    runtimeBinding: binding, modelSecretProviderKind: providerKind,
+    parentEnv: { HOME: root, PATH: process.env.PATH, TMPDIR: root,
       ...(useProxy ? { HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`,
         HTTPS_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: "", no_proxy: "" } : {}) },
     runtimeEnvironment: Object.freeze({ runtime: "codex", runtimeAccountId: binding.runtimeAccountId,

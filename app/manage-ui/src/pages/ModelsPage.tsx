@@ -1,3 +1,4 @@
+import { measureTelemetry, telemetryCount, telemetryList, telemetryModel, useTelemetrySnapshot } from "../lib/productTelemetry";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -36,12 +37,11 @@ import {
 import { usePageCache } from "../lib/usePageCache";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { publishAppliedModelCatalog, revalidateModelCatalog } from "../model-catalog-store";
-import { sortBackendTabs } from "../components/BackendTabIcon";
 import BackendTabs, { type BackendId } from "../components/BackendTabs";
 import FilterTabs from "../components/FilterTabs";
 import SearchCapsule from "../components/SearchCapsule";
 import { useStickyState } from "../lib/useStickyState";
-import { resolveBackendAlias, SHOGGOTH_BACKEND, useBackendCatalog, useEnabledBackends } from "../lib/backends";
+import { useBackendCatalog, useBackendState } from "../lib/backends";
 import Modal, { DetailRow, ModalSection } from "../components/Modal";
 import { Field, Option, Select, TextInput } from "../components/Field";
 import { useConfirm, useToast } from "../components/ui";
@@ -110,13 +110,8 @@ const ENDPOINTS_ANCHOR = "models-provider-endpoints";
 export default function ModelsPage() {
   const location = useLocation();
   const backendCatalog = useBackendCatalog("models");
-  const availableBackends = useEnabledBackends("models");
-  const [selectedBackend, setBackend] = useState(() => new URLSearchParams(location.search).get("backend"));
-  const preferredBackend = selectedBackend && resolveBackendAlias(selectedBackend, backendCatalog);
-  const firstBackend = sortBackendTabs(backendCatalog).find(({ id }) => availableBackends.includes(id));
-  const backend = preferredBackend && availableBackends.includes(preferredBackend)
-    ? preferredBackend
-    : firstBackend?.id ?? SHOGGOTH_BACKEND.id;
+  const requestedBackend = new URLSearchParams(location.search).get("backend") || undefined;
+  const [backend, setBackend] = useBackendState("models", requestedBackend, { surface: "models" });
   const accountBackend = backendCatalog.find((item) => item.id === backend && item.surfaces.oauth
     && (item.connectionMode === "builtin-service" || item.connectionMode === "native-runtime"));
   const [accountRefreshKey, setAccountRefreshKey] = useState(0);
@@ -144,10 +139,10 @@ export default function ModelsPage() {
     // 账号与提供方页面有独立的数据源，不读取不会显示的模型目录、主模型和配置。
     if (capabilities.providerDirectory || capabilities.perAgentModelSettings || capabilities.providerManagedCatalog) return {
       models: [] as UnifiedModel[], catalogRevision: "", catalogError: "",
-      byScope: {}, providerByScope: {}, config: { providers: [] } as ModelConfig,
+      byScope: {}, providerByScope: {}, config: { providers: [] } as ModelConfig, configObserved: false,
       capabilities, pending: [] as PendingModelChange[], authProviders: [] as string[],
     };
-    const [catalogResult, active, config, pending, authList] = await Promise.all([
+    const [catalogResult, active, configResult, pending, authList] = await Promise.all([
       // 目录读挂不连坐整页（铁律 4 的 UI 侧同款）：提供方/设置面根本不依赖目录，
       // 一个 profile 的运行时目录读不全时它们必须照常可用，失败原因单独成行显示。
       revalidateModelCatalog(backend, (knownRevision) => getModelCatalog(backend, knownRevision))
@@ -155,7 +150,7 @@ export default function ModelsPage() {
         .catch((e) => ({ ok: false as const, message: e instanceof Error ? e.message : String(e) })),
       getActiveModel(backend).catch(() => ({ byScope: {}, providerByScope: {} })),
       // 自定义模型配置读挂时降级为空（页面照常渲染目录，只是失去增删能力）
-      getModelConfig(backend).catch(() => ({ providers: [] }) as ModelConfig),
+      getModelConfig(backend).catch(() => null),
       getPendingModelChanges(backend).catch(() => [] as PendingModelChange[]),
       // 组头判断「config + 授权 profile 共存」用；失败静默为空（授权入口只会少不会错）
       listModelAuthProfiles(backend).catch(() => ({ supported: false, profiles: [] })),
@@ -166,13 +161,22 @@ export default function ModelsPage() {
       catalogError: catalogResult.ok ? "" : catalogResult.message,
       byScope: active.byScope || {},
       providerByScope: active.providerByScope || {},
-      config,
+      config: configResult ?? { providers: [] }, configObserved: Array.isArray(configResult?.providers),
       capabilities,
       pending,
       authProviders: authList.supported ? [...new Set(authList.profiles.map((p) => p.provider))] : [],
     };
   }, { staleTime: 30_000, loadingOnEmptyRefresh: true });
   const modelsLoading = loading && !modelsData;
+  const observedProviders = modelsData?.configObserved && !error ? modelsData.config.providers : null;
+  useTelemetrySnapshot("provider", observedProviders, providers => ({
+    ...telemetryList("configured_provider_ids", providers.map(provider => telemetryModel(provider.key, null).providerId)),
+    ...telemetryCount("configured_provider_count", providers.length),
+  }));
+  useTelemetrySnapshot("model", observedProviders, providers => {
+    const models = providers.flatMap(provider => provider.models.map(model => telemetryModel(provider.key, model.id).modelId));
+    return { ...telemetryList("configured_model_ids", models), ...telemetryCount("configured_model_count", models.length) };
+  });
   const refreshAccountsAndModels = () => {
     setAccountRefreshKey((value) => value + 1);
     setProviderRecoveryRefreshKey((value) => value + 1);
@@ -432,7 +436,9 @@ export default function ModelsPage() {
               ...(op.maxTokens ? { maxTokens: op.maxTokens } : {}),
               ...(op.reasoning ? { reasoning: true } : {}),
             } });
-      const r = await applyModelBatch(actionBackend, items, operationId);
+      const r = await measureTelemetry("model_save", actionBackend, () => applyModelBatch(actionBackend, items, operationId),
+        result => result.status === "applied" || result.configSaved === true ? "success"
+          : result.needsVerification ? null : "error");
       if (actionEpoch !== backendEpoch.current) return;
       if (!(await syncMutationResult(r))) return;
       draftOperationId.current = null;
@@ -556,6 +562,7 @@ export default function ModelsPage() {
         byScope: active.byScope || {},
         providerByScope: active.providerByScope || {},
         config: nextConfig,
+        configObserved: Array.isArray(nextConfig.providers),
         capabilities,
         pending: nextPending,
         authProviders: authList
@@ -939,7 +946,7 @@ export default function ModelsPage() {
     try {
       const renameTo = providerNameChanged ? editProviderName.trim() : undefined;
       // auth 类(内置端点+auth-profiles 凭证)只有 Key 可写,端点字段不进请求
-      const r = await updateModelProvider(actionBackend, p.key, p.source === "auth" ? {
+      const r = await measureTelemetry("model_save", actionBackend, () => updateModelProvider(actionBackend, p.key, p.source === "auth" ? {
         apiKey: editApiKey.trim() || undefined,
       } : {
         baseUrl: editBaseUrl.trim() || undefined,
@@ -948,7 +955,8 @@ export default function ModelsPage() {
         // env 类端点被清空 ⇒ 显式移除覆盖（否则「留空=不改」会保住脏值）
         clearBaseUrl: baseUrlWillClear || undefined,
         renameTo,
-      }, operationId);
+      }, operationId), result => result.status === "applied" || result.configSaved === true ? "success"
+        : result.needsVerification ? null : "error");
       if (actionEpoch !== backendEpoch.current) return;
       if (!(await syncMutationResult(r))) {
         const resumable = RESUMABLE_MUTATION_STATUSES.has(r.status) || r.status === "applied";
@@ -1039,10 +1047,10 @@ export default function ModelsPage() {
     const actionEpoch = backendEpoch.current;
     setSetting(true);
     try {
-      await setActiveModel(actionBackend, model.id, {
+      await measureTelemetry("model_switch", actionBackend, () => setActiveModel(actionBackend, model.id, {
         scope: actionScope,
         provider: model.provider,
-      });
+      }));
       if (actionEpoch !== backendEpoch.current) return;
       toast.success(t("models.setActiveOk", { scope: actionScope || "default" }));
       await refresh();

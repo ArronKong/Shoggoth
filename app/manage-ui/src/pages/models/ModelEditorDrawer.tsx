@@ -1,3 +1,4 @@
+import { measureTelemetry } from "../../lib/productTelemetry";
 import { useEffect, useId, useMemo, useReducer, useState } from "react";
 import { useTranslation } from "react-i18next";
 import Modal, { ModalSection } from "../../components/Modal";
@@ -281,12 +282,13 @@ export default function ModelEditorDrawer({
     dispatch({ type: "apply-started", operationId });
     setRequestError("");
     try {
-      const result = await applyModelChange(
+      const result = await measureTelemetry("model_save", backend, () => applyModelChange(
         backend,
         toModelChangeSpec(state),
         preview.previewToken,
         operationId,
-      );
+      ), result => result.status === "applied" || result.configSaved === true ? "success"
+        : result.needsVerification ? null : "error");
       if (result.status === "applied") await finishApplied(result);
       else dispatch({ type: "apply-result", result });
     } catch (error) {

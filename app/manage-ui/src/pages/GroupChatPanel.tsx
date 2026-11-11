@@ -1,3 +1,4 @@
+import { retainTelemetryOperation, startTelemetryOperation, useTelemetryOperations } from "../lib/productTelemetry";
 import '../i18n/groupCollaborationResources';
 import '../i18n/groupComposerResources';
 import '../i18n/groupFilesResources';
@@ -175,6 +176,7 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
   const [fullMessage, setFullMessage] = useState<GroupChatMessage | null>(null);
   const [expiredSearchScope, setExpiredSearchScope] = useState<string | null>(null);
   const retryOps = useRef(new Map<number, string>());
+  const telemetrySends = useTelemetryOperations();
   const [files, setFiles] = useState<PendingFile[]>([]);
   const filesRef = useRef(files);
   filesRef.current = files;
@@ -752,6 +754,7 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
       const input: GroupSendInput = { clientMessageId: crypto.randomUUID(), body, mentions,
         replyTo: replyTo?.seq ?? null, attachments, ownerScope, expectedPolicyVersion: view.group.policyVersion };
       const record = await groupSendJournal.prepare(ownerScope, groupId, input, snapshot);
+      retainTelemetryOperation(telemetrySends, record.key, startTelemetryOperation("group_chat_send", "shoggoth"));
       await dispatchRecord(record, session, generation);
     } catch (cause) {
       if (currentScope() && generation === generationRef.current) { setJournalError(cause instanceof Error ? cause.message : String(cause)); toast.error(cause instanceof Error ? cause.message : String(cause)); }
@@ -762,6 +765,8 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
 
   const acceptRecord = async (record: GroupSendRecord, message: GroupChatMessage, discussionId: string | null,
     session: GroupDraftSession | null, generation: number) => {
+    telemetrySends.get(record.key)?.finish("success");
+    telemetrySends.delete(record.key);
     const consumed = session?.ownerScope === record.ownerScope && session.groupId === record.groupId
       ? await session.accepted(record, message, discussionId)
       : (await groupSendJournal.accepted(record, message, discussionId), false);
@@ -792,6 +797,10 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
         const refused = ["GROUP_CHAT_INVALID", "GROUP_CHAT_NOT_FOUND", "GROUP_CHAT_ARCHIVED", "GROUP_CHAT_MESSAGE_CONFLICT",
           "GROUP_CHAT_POLICY_CONFLICT", "GROUP_CHAT_POLICY_CHANGED", "GROUP_CHAT_OWNER_CHANGED", "GROUP_CHAT_REPLY_NOT_FOUND",
           "GROUP_CHAT_MEMBER_NOT_FOUND"].includes(code ?? "");
+        if (refused) {
+          telemetrySends.get(record.key)?.finish("error", cause);
+          telemetrySends.delete(record.key);
+        }
         await groupSendJournal.update(submitting, { phase: refused ? "rejected" : "needs_verification",
           lastError: cause instanceof Error ? cause.message : String(cause), lastCheckedAt: Date.now() });
         if (currentScope() && generation === generationRef.current) toast.error(refused
@@ -874,6 +883,7 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
       const { taskId: _taskId, discussionId: _discussionId, requestMode: _requestMode, summaryMemberId: _summary, ...original } = record.inputSnapshot;
       const input: GroupSendInput = { ...original, clientMessageId: crypto.randomUUID(), expectedPolicyVersion: view.group.policyVersion };
       const prepared = await groupSendJournal.prepare(record.ownerScope, record.groupId, input, snapshot);
+      retainTelemetryOperation(telemetrySends, prepared.key, startTelemetryOperation("group_chat_send", "shoggoth"));
       await dispatchRecord(prepared, null, generation);
     } catch (cause) { if (currentScope() && generation === generationRef.current) setJournalError(cause instanceof Error ? cause.message : String(cause)); }
     finally { if (currentScope() && generation === generationRef.current) { setSending(false); void refreshSendRecords(); } }

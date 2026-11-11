@@ -1,3 +1,4 @@
+import { measureTelemetry } from '../lib/productTelemetry';
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -130,7 +131,8 @@ const IdeaCard = memo(function IdeaCard({ idea, execution, agent, roster, onOpen
     if (pending.current) return;
     pending.current = true; setBusy(true);
     try {
-      await updateInspiration(idea.id, { operationId: crypto.randomUUID(), expectedRevision: idea.revision, patch: value });
+      await measureTelemetry('inspiration_update', 'shoggoth',
+        () => updateInspiration(idea.id, { operationId: crypto.randomUUID(), expectedRevision: idea.revision, patch: value }));
       await onChange();
     } catch (error) { toast.error(messageOf(error)); await onChange(); }
     finally { pending.current = false; setBusy(false); }
@@ -400,7 +402,8 @@ export default function InspirationPage() {
       if (operation?.input !== input) {
         operation = { input, operationId: crypto.randomUUID() }; startOperations.current.set(idea.id, operation);
       }
-      await startInspiration(idea.id, { ...fields, operationId: operation.operationId });
+      await measureTelemetry('inspiration_cultivate', agent.backendId,
+        () => startInspiration(idea.id, { ...fields, operationId: operation.operationId }));
       startOperations.current.delete(idea.id);
       await refreshRef.current();
     } catch (error) { toast.error(messageOf(error)); await refreshRef.current(); }
@@ -468,7 +471,7 @@ export default function InspirationPage() {
     savingRef.current = true; setSaving(true);
     const submitted = draftRef.current;
     try {
-      const { idea } = await createInspiration(submitted);
+      const { idea } = await measureTelemetry('inspiration_create', 'shoggoth', () => createInspiration(submitted));
       paperFlight.current = draftRef.current.operationId === submitted.operationId
         ? prepareInspirationPaperFlight(paperElement.current, pageElement.current) : null;
       setPrinting(Boolean(paperFlight.current));
