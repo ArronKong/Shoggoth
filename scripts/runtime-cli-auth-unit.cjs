@@ -52,7 +52,7 @@ test("catalog exposes seven available account-scoped environments without creati
     const nativeCodex = catalog.find((entry) => (
       entry.runtimeAccountId === NATIVE_CODEX_RUNTIME_ACCOUNT_ID
     ));
-    assert.equal(internal.name, "Codex Harness");
+    assert.equal(internal.name, "Shoggoth");
     assert.equal(nativeCodex.name, "Codex CLI");
     assert.deepEqual(value.create({ nativeOnly: true }).map((entry) => entry.runtimeAccountId),
       catalog.filter((entry) => entry.accountKind === "native-user").map((entry) => entry.runtimeAccountId));

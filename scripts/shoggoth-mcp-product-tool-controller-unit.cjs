@@ -525,6 +525,9 @@ test("外部联邦身份不能读取或修改原生 Profile 的记忆与设定�
     ["agent_definition_read", { ...source, kind: "IDENTITY" }],
     ["agent_definition_update", { ...source, kind: "IDENTITY", expectedRevision: 1,
       oldText: "Shoggoth", newText: "Other", sourceQuote: "改名字" }],
+    ["native_agent_file_read", { ...source, kind: "SOUL", agentId: "target-agent", sourceQuote: "修改 target-agent 的 SOUL" }],
+    ["native_agent_file_update", { ...source, kind: "SOUL", agentId: "target-agent", sourceQuote: "修改 target-agent 的 SOUL",
+      expectedRevision: "1", oldText: "Old", newText: "New" }],
     ["computer_status", {}],
     ["native_agent_get", { backendId: "shoggoth", agentId: "target-agent" }],
     ["native_agent_update", { ...source, backendId: "shoggoth", agentId: "target-agent", name: "新名称", expectedUpdatedAt: 1 }],
@@ -623,9 +626,9 @@ test("外部管理的未知结果冻结在原调用回执，后续同 callId 不
   assert.equal(writes, 1); assert.equal(f.controller.poisonError, null);
 });
 
-test("固定 166 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 166);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 166);
+test("固定 168 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 168);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 168);
   for (const name of ["group_task", "group_collaborate"]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(name), false);
   for (const required of [
     "workspace_execute",
@@ -648,7 +651,7 @@ test("固定 166 个模型可见产品工具及 strict object schemas，不暴�
     "memory_search", "memory_get", "memory_explain", "conversation_search", "conversation_get",
     "memory_save", "memory_forget",
     "agent_definition_read", "agent_definition_update",
-    "native_agent_create", "native_agent_get", "native_agent_update", "native_agent_archive",
+    "native_agent_create", "native_agent_get", "native_agent_update", "native_agent_archive", "native_agent_file_read", "native_agent_file_update",
   ]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(required), true, required);
   for (const hidden of ["memory_confirm", "external_agent_list", "external_agent_get", "external_agent_run"]) {
     assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(hidden), false, hidden);
@@ -860,7 +863,7 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     },
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.capabilities.length, 153);
+  assert.equal(capabilities.capabilities.length, 155);
   for (const name of ["group_task", "group_collaborate"]) {
     assert.equal(capabilities.capabilities.some((item) => item.tool === name), false);
   }
@@ -2380,6 +2383,10 @@ test("本地 Agent 管理拒绝空更新、越界目标、额外字段和非数�
   const create = { backendId: "shoggoth", name: "测试", workspace: null, source: "chat", sourceId: "session-a",
     identity: "辅助助理，协助完成任务。" };
   assert.equal(validateMcpProductToolArguments("native_agent_create", create), true);
+  assert.equal(validateMcpProductToolArguments("native_agent_create", { ...create, soul: "# SOUL.md\n\n" + "温和。".repeat(500) }), true);
+  for (const soul of [null, "", "  ", "bad\0text", "\uD800", "温".repeat(11000)]) {
+    assert.equal(validateMcpProductToolArguments("native_agent_create", { ...create, soul }), false);
+  }
   for (const args of [{ ...create, name: " " }, { ...create, identity: " " }, { ...create, identity: "x".repeat(8193) },
     { ...create, runtimeAccountId: "secret-account" }, { ...create, workspace: "../escape" },
     { ...create, backendId: "hermes" }, { ...create, backendId: "codex" },

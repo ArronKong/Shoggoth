@@ -7,7 +7,14 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function bindConversationSource({ args, run, transcriptStore, chatSessionStore, getRunSessionKey, requireQuote = false }) {
+function latestConversationUserEvent(transcriptStore, profileId, sessionId, runId) {
+  const events = transcriptStore.eventsView?.(profileId, sessionId) ?? transcriptStore.listEvents(profileId, sessionId);
+  const event = events.findLast(item => item.runId === runId && item.kind === "user");
+  return event && !event.contextExcluded ? event : null;
+}
+
+function bindConversationSource({ args, run, transcriptStore, chatSessionStore, getRunSessionKey,
+  requireQuote = false, latestUserOnly = false }) {
   if (!["chat", "inspiration"].includes(run.source)
     || /^shoggoth:chat-send:federation-(?:send|message)-/u.test(run.idempotencyKey || "")) {
     throw serviceError("MCP_TOOL_FORBIDDEN", "该操作需要当前用户对话");
@@ -18,9 +25,11 @@ function bindConversationSource({ args, run, transcriptStore, chatSessionStore, 
     throw serviceError("CONVERSATION_SOURCE_INVALID", "对话来源不存在或归属不匹配");
   }
   // Product session keys route requests; transcripts are stored under the distinct session ID.
-  const events = transcriptStore.listEvents(run.profileId, session.id)
-    .filter((event) => event.runId === run.id && event.kind === "user"
-      && !event.contextExcluded)
+  const sourceEvents = latestUserOnly
+    ? [latestConversationUserEvent(transcriptStore, run.profileId, session.id, run.id)].filter(Boolean)
+    : transcriptStore.listEvents(run.profileId, session.id)
+      .filter(event => event.runId === run.id && event.kind === "user" && !event.contextExcluded);
+  const events = sourceEvents
     .map((event) => {
       if (!event.content?.contextRef) return event;
       // Large user messages keep only a display excerpt in the journal. Both
@@ -55,4 +64,4 @@ function bindConversationSource({ args, run, transcriptStore, chatSessionStore, 
   };
 }
 
-module.exports = { bindConversationSource };
+module.exports = { bindConversationSource, latestConversationUserEvent };

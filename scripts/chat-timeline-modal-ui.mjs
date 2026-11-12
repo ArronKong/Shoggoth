@@ -85,6 +85,10 @@ app.whenReady().then(async () => {
       await w.loadURL(${JSON.stringify(pathToFileURL(path.join(temp, "index.html")).href)} + "?recovered=1&terminal=aborted&backend=" + backend + "#/chat");
       console.log(JSON.stringify(await w.webContents.executeJavaScript("window.runRecoveredActivityFixture()", true)));
     }
+    for (const immersive of [0, 1]) {
+      await w.loadURL(${JSON.stringify(pathToFileURL(path.join(temp, "index.html")).href)} + "?backend=shoggoth&immersive=" + immersive + "#/chat");
+      console.log(JSON.stringify(await w.webContents.executeJavaScript("window.runRenameRetryFixture()", true)));
+    }
     w.setSize(1200, 850);
     await w.loadURL(previewUrl);
     console.log(JSON.stringify(await w.webContents.executeJavaScript("window.runConversationPreviewFixture()", true)));

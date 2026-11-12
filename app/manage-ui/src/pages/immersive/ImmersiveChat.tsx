@@ -865,7 +865,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           return (
             <div key={m.id} className={styles.asstRow} data-immersive-message={m.id} data-unread-start={m.unreadStart || undefined} onContextMenu={m.onCtx}>
               {attRow}
-              {m.liveActivity && <ChatLiveActivityBubble className={styles.asstCard} glass {...m.liveActivity} />}
               {((m.loadingReply && !m.liveActivity) || m.activityBubble) && <div className={m.activityBubble ? `${styles.asstCard} ${styles.activityBubble}` : styles.asstCard} data-glass-panel>
                 {m.activityBubble ?? <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
               </div>}
@@ -884,6 +883,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
                   ))}
                 </div>
               )}
+              {m.liveActivity && <ChatLiveActivityBubble className={styles.asstCard} glass {...m.liveActivity} />}
               {footerFor(m)}
               {actionsFor(m)}
             </div>

@@ -7,7 +7,11 @@ const MAX_ACTIVITY_TITLE_LENGTH = 120;
 const ACTIVITY_TITLE_SCHEMA = Object.freeze({
   type: "string", minLength: 1, maxLength: MAX_ACTIVITY_TITLE_LENGTH,
 });
-const NATIVE_ACTIVITY_INSTRUCTION = "For tool-based work, send brief public progress in the user's language before starting, when changing major stages, and before asking for a decision. Use public assistant text (commentary when supported), separate from the final answer. For every tool operation, explain its concrete purpose and target in the user's language. Supply activityTitle on each Shoggoth tool call, including each call in a parallel batch. Name that call's specific subject, source, page or search topic; different targets need distinguishable titles, never one generic title copied across a batch (for example, 'Search Reuters AI news' versus 'Read OpenAI's Uber announcement'). For native tools use their action title/description when supported, otherwise give one short public progress sentence immediately before the operation. Keep it concise, exclude secrets and hidden reasoning, and describe the intended action without claiming success before its result. Do not invent unsupported tool arguments.";
+const NATIVE_ACTIVITY_INSTRUCTION = [
+  "For tool-based work, send brief public progress in the user's language at the start, at major milestones, and when asking for a decision. Use public assistant text (commentary when supported), separate from the final answer.",
+  "Keep routine operations, argument corrections, and repeated attempts in tool activity. Use activityTitle on each Shoggoth tool call and the runtime's own action title or description for native tools when supported. A parallel batch can have a distinct title for each concrete subject, source, page or search topic.",
+  "Keep updates concise. Exclude secrets and hidden reasoning, use only supported tool arguments, and claim success after a verified result.",
+].join(" ");
 
 function withActivityTitle(definition) {
   return { ...definition, inputSchema: { ...definition.inputSchema,

@@ -44,6 +44,7 @@ function fixture() {
   const effects = { initialized: [], activated: [], stopped: [], profileChanges: [], failInitialize: 0, failStop: 0 };
   const controller = createAgentLifecycleServiceController({
     productStore,
+    paths,
     runtimeManager: {
       async stop(binding) {
         effects.stopped.push(structuredClone(binding));
@@ -264,17 +265,32 @@ function testAgentNameLinks() {
 async function testPendingRecovery() {
   const value = fixture();
   try {
+    const params = { ...createParams("create-recover", "Recoverable"),
+      initialIdentity: "角色说明".repeat(500), initialSoul: "# SOUL.md\n\n" + "温和并先查证。\n".repeat(400) };
+    const stagedDirectory = path.join(value.paths.stateDir, "agent-create-definitions");
     value.effects.failInitialize = 1;
     await assert.rejects(
-      () => value.controller.handle("agent.create", createParams("create-recover", "Recoverable", "shoggoth")),
+      () => value.controller.handle("agent.create", params),
       (error) => error.code === "AGENT_INITIALIZATION_FAILED",
     );
     const pending = value.productStore.listMcpToolCalls().find((call) => call.name === "agent.create");
     assert.equal(pending.status, "pending");
+    assert.equal(Object.hasOwn(pending.binding, "initialSoul"), false);
+    assert.match(pending.binding.initialDefinitionHash, /^[0-9a-f]{64}$/u);
+    assert.equal(fs.readdirSync(stagedDirectory).length, 1);
     assert.equal(value.productStore.getAgentProfile(pending.binding.targetProfileId).enabled, false);
-    const recovered = await value.controller.handle(
-      "agent.create", createParams("create-recover", "Recoverable", "shoggoth"),
-    );
+    await value.controller.close();
+    value.productStore.close();
+    value.productStore.open();
+    value.controller.open();
+    await value.controller.runMaintenance(() => {});
+    assert.equal(value.productStore.getAgentProfile(pending.binding.targetProfileId).enabled, true);
+    assert.deepEqual(value.effects.lastInitialization, { initialIdentity: params.initialIdentity, initialSoul: params.initialSoul });
+    assert.deepEqual(fs.readdirSync(stagedDirectory), []);
+    const recovered = await value.controller.handle("agent.create", params);
+    assert.equal(value.effects.initialized.length, 2, "completed retries must not reinitialize the Agent");
+    await assert.rejects(() => value.controller.handle("agent.create", { ...params, initialSoul: "Changed payload" }),
+      { code: "AGENT_OPERATION_CONFLICT" });
     assert.equal(recovered.profile.enabled, true);
     assert.match(recovered.profile.agentId, /^shoggoth-agent-/u);
 

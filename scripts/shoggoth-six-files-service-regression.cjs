@@ -62,11 +62,11 @@ function runtimePool() {
       },
       async threadStart(input) {
         const { session } = await this.sessionStart({ ...input, source: input.threadSource });
-        return { thread: { ...session, threadSource: session.source } };
+        return { thread: { ...session, threadSource: session.source }, approvalsReviewer: input.approvalsReviewer };
       },
       async threadResume(input) {
         const { session } = await this.sessionResume({ ...input, sessionId: input.threadId });
-        return { thread: { ...session, threadSource: session.source } };
+        return { thread: { ...session, threadSource: session.source }, approvalsReviewer: input.approvalsReviewer };
       },
       async threadInjectItems(input) {
         assert.ok(sessions.has(input.threadId));
@@ -101,8 +101,8 @@ function runtimePool() {
   return { hosts, get, async stop() {}, async stopAll() {} };
 }
 
-async function waitForRun(service, runId) {
-  const deadline = Date.now() + 5000;
+async function waitForRun(service, runId, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const run = service.workRunCoordinator.getRun(runId);
     if (run.status === "running") return run;
@@ -112,26 +112,199 @@ async function waitForRun(service, runId) {
   assert.fail(`Runtime did not start: ${runId}`);
 }
 
-async function verifySixFiles() {
+async function verifyAgentCreationWithSoul(service, caller, ipc, read) {
+  const session = service.chatSessionStore.listSessions().find(item => item.profileId === caller.id);
+  const sent = await ipc("chat.send", { operationId: uuid(), sessionKey: session.sessionKey,
+    prompt: "创建一个育儿顾问，帮我写好完整的 SOUL。", createdAt: Date.now() });
+  const parent = await waitForRun(service, sent.run.id);
+  const call = (run, name, args, callId = uuid()) => service.mcpProductToolController.handle(name, args,
+    { profileId: run.profileId, callId }, { runId: run.id, assertCurrent() {} });
+  const source = run => ({ source: run.source, sourceId: run.sourceId });
+  const soul = "# SOUL.md\n\n" + "保持温和，先查证，再给出建议。\n".repeat(120);
+  assert.ok(Buffer.byteLength(soul, "utf8") > 4096, "exercise a draft larger than the receipt binding");
+  const args = { ...source(parent), backendId: "shoggoth", name: "育儿顾问", workspace: null,
+    identity: "为家长提供易于落实的建议。", soul };
+  const callId = uuid();
+  const created = await call(parent, "native_agent_create", args, callId);
+  assert.equal(created.soulSaved, true);
+  assert.equal(created.identitySaved, true);
+  assert.deepEqual(await call(parent, "native_agent_create", args, callId), created);
+  const profile = service.productStore.listAgentProfiles().find(item => item.agentId === created.agent.agentId);
+  const saved = await read(profile.id, "SOUL");
+  assert.equal(saved.content, soul);
+  const delegated = await call(parent, "federation_agent_run", { backendId: profile.backendId,
+    agentId: profile.agentId, prompt: "Describe your role." });
+  const child = await waitForRun(service, delegated.task.taskId);
+  const snapshot = service.contextSnapshotStore.get(profile.id, child.contextSnapshotId);
+  assert.ok(snapshot.developerInstructions.includes(soul.trim()), "the first turn must receive the initial SOUL");
+  await assert.rejects(() => call(child, "agent_definition_read", { ...source(child), kind: "SOUL" }),
+    { code: "MCP_TOOL_FORBIDDEN" });
+  await assert.rejects(() => call(child, "native_agent_create", { ...args, ...source(child), name: "未授权创建" }),
+    { code: "MCP_TOOL_FORBIDDEN" });
+  for (const run of [child, parent]) {
+    await ipc("chat.abort", { operationId: uuid(), sessionKey: run.sourceId, runId: run.id, createdAt: Date.now() });
+  }
+  console.log("PASS a single native create saves the full SOUL for the first turn; delegation remains scoped");
+  return { profileId: profile.id, soul };
+}
+
+async function verifyManagedAgentFiles(service, caller, ipc, read) {
+  const rename = async (from, name) => {
+    const current = service.productStore.listAgentProfiles().find(profile => profile.name === from);
+    return (await ipc("agent.update", { operationId: uuid(), profileId: current.id, name, defaultCwd: current.defaultCwd,
+      expectedUpdatedAt: current.updatedAt, createdAt: Date.now() })).profile;
+  };
+  const target = await rename("Codex", "育儿专家");
+  const shortName = await rename("Grok", "育儿");
+  const mainKey = service.proactiveStore.getTarget(caller.id).sessionKey;
+  const quote = "把育儿专家的 SOUL、AGENTS、USER、MEMORY、HEARTBEAT 和 DAILY_REVIEW 改成指定内容，再把 IDENTITY 的名字改成亲子顾问。";
+  const send = async (sessionKey, prompt = quote, operationId = uuid()) => {
+    const sent = await ipc("chat.send", { operationId, sessionKey, prompt, createdAt: Date.now() });
+    return waitForRun(service, sent.run.id, 15_000);
+  };
+  const abort = run => ipc("chat.abort", { operationId: uuid(), sessionKey: run.sourceId, runId: run.id, createdAt: Date.now() });
+  const call = (run, name, args, callId = uuid()) => service.mcpProductToolController.handle(name,
+    { source: run.source, sourceId: run.sourceId, ...args }, { profileId: run.profileId, callId }, { runId: run.id, assertCurrent() {} });
+  const file = (kind, agentId = target.agentId, sourceQuote = quote) => ({ kind, agentId, sourceQuote });
+  const readFile = (run, kind, agentId, sourceQuote) => call(run, "native_agent_file_read", file(kind, agentId, sourceQuote));
+  const parent = await send(mainKey);
+  await assert.rejects(() => readFile(parent, "SOUL", shortName.agentId), { code: "MCP_AGENT_FILE_TARGET_REQUIRED" });
+  await assert.rejects(() => readFile(parent, "SOUL", target.agentId, "育儿专家"), { code: "MCP_AGENT_FILE_TARGET_REQUIRED" });
+  await assert.rejects(() => readFile(parent, "SOUL", target.agentId, "并不存在的用户授权"), { code: "MCP_TOOL_INVALID_ARGUMENTS" });
+  await assert.rejects(() => readFile(parent, "TOOLS"), { code: "MCP_TOOL_INVALID_ARGUMENTS" });
+  await assert.rejects(() => readFile(parent, "DAILY_REVIEW"), { code: "PROACTIVE_SCOPE_INVALID" });
+  const { monitor } = await ipc("proactive.monitor.get", { kind: "inspiration", profileId: null });
+  await ipc("proactive.monitor.set", { operationId: uuid(), expectedRevision: monitor.revision,
+    config: { ...monitor.config, profileId: target.id, enabled: false } });
+
+  const sourceFiles = new Map([
+    ["SOUL", "# SOUL.md\n\n温和地回应，并给出可执行的下一步。\n"],
+    ["AGENTS", "# AGENTS.md\n\n- 先查证再回答。\n"],
+    ["USER", "# User\n\n- 偏好简洁的建议。\n"],
+    ["MEMORY", "# Memory\n\n- 保存对话偏好时保留原意。\n"],
+    ["HEARTBEAT", "# Heartbeat\n\n- 只提醒已核实的变化。\n"],
+    ["DAILY_REVIEW", "# Daily Review\n\n- 汇总需要复查的条目。\n"],
+    ["IDENTITY", "# IDENTITY.md\n\n- Name: 亲子顾问\n- Role: 育儿咨询。\n"],
+  ]);
+  const stale = await readFile(parent, "SOUL");
+  await ipc("harness.definition.update", { profileId: target.id, kind: "SOUL", content: `${stale.content}\n并发页面编辑。\n`,
+    expectedRevision: Number(stale.revision), reason: "fixture-ui" });
+  await assert.rejects(() => call(parent, "native_agent_file_update", { ...file("SOUL"), expectedRevision: stale.revision,
+    oldText: stale.content, newText: sourceFiles.get("SOUL") }), { code: "MCP_TOOL_STATE_CONFLICT" });
+  assert.match((await read(target.id, "SOUL")).content, /并发页面编辑/u);
+
+  const firstCallId = uuid();
+  let firstArgs;
+  for (const [kind, newText] of sourceFiles) {
+    const before = await readFile(parent, kind);
+    assert.equal(before.agentId, target.agentId);
+    let oldText = before.content;
+    for (let offset = before.nextOffset; offset !== null;) {
+      const page = await call(parent, "native_agent_file_read", { ...file(kind), offset });
+      assert.equal(page.revision, before.revision);
+      oldText += page.content;
+      offset = page.nextOffset;
+    }
+    const callId = kind === "SOUL" ? firstCallId : uuid();
+    const args = { ...file(kind), expectedRevision: before.revision, oldText, newText,
+      ...(kind === "IDENTITY" ? { newName: "亲子顾问" } : {}) };
+    if (kind === "SOUL") firstArgs = args;
+    const saved = await call(parent, "native_agent_file_update", args, callId);
+    assert.equal(saved.saved, true, `${kind} was saved`);
+    assert.equal(saved.agentId, target.agentId);
+    assert.deepEqual(await call(parent, "native_agent_file_update", args, callId), saved);
+    let actual;
+    if (kind === "HEARTBEAT" || kind === "DAILY_REVIEW") {
+      const method = kind === "HEARTBEAT" ? "proactive.document.get" : "proactive.review-document.get";
+      actual = (await ipc(method, { profileId: target.id })).document.content;
+    } else actual = (await read(target.id, kind)).content;
+    assert.equal(actual, newText, `${kind} is visible through the settings reader`);
+  }
+  assert.equal(service.productStore.getAgentProfile(target.id).name, "亲子顾问");
+  assert.notEqual((await read(shortName.id, "SOUL")).content, sourceFiles.get("SOUL"));
+  service.transcriptStore.appendEvent({ profileId: caller.id, sessionId: service.chatSessionStore.getSession(mainKey).id,
+    id: uuid(), runId: parent.id, kind: "user", runtimeRef: null, occurredAt: Date.now(),
+    content: { text: "停止修改助理设定。" } });
+  await assert.rejects(() => call(parent, "native_agent_file_update", firstArgs, firstCallId), { code: "MCP_TOOL_INVALID_ARGUMENTS" });
+  await abort(parent);
+
+  const next = await send(mainKey);
+  await assert.rejects(() => call(next, "native_agent_file_update", firstArgs, firstCallId), { code: "MCP_TOOL_FORBIDDEN" });
+  await abort(next);
+  const otherKey = service.proactiveStore.getTarget(target.id).sessionKey;
+  const other = await send(otherKey, "把育儿的 SOUL 改成随和风格。");
+  const snapshot = service.contextSnapshotStore.get(target.id, other.contextSnapshotId);
+  assert.ok(snapshot.developerInstructions.includes(sourceFiles.get("SOUL").trim()));
+  await assert.rejects(() => readFile(other, "SOUL", shortName.agentId, "把育儿的 SOUL 改成随和风格。"),
+    { code: "MCP_AGENT_FILE_SHOGGOTH_CHAT_REQUIRED" });
+  await abort(other);
+  const { session } = await ipc("chat.session.create", { operationId: uuid(), profileId: caller.id, workspace: null, createdAt: Date.now() });
+  assert.notEqual(session.sessionKey, mainKey);
+  const secondaryQuote = "把亲子顾问的 SOUL 补上一句：先询问孩子的年龄。";
+  const secondary = await send(session.sessionKey, secondaryQuote);
+  const before = await readFile(secondary, "SOUL", target.agentId, secondaryQuote);
+  const capabilities = await service.mcpProductToolController.handle("app_capabilities", {},
+    { profileId: caller.id, callId: uuid() }, { runId: secondary.id, assertCurrent() {} });
+  for (const tool of ["native_agent_file_read", "native_agent_file_update"]) {
+    assert.equal(capabilities.currentAgent.tools.find(item => item.tool === tool)?.availability, "available");
+  }
+  await assert.rejects(() => readFile(secondary, "SOUL"), { code: "MCP_TOOL_INVALID_ARGUMENTS" });
+  const soul = `${before.content}\n先询问孩子的年龄。\n`;
+  const edit = { ...file("SOUL", target.agentId, secondaryQuote), expectedRevision: before.revision,
+    oldText: before.content, newText: soul };
+  await assert.rejects(() => call(secondary, "native_agent_file_update", { ...edit, sourceId: mainKey }),
+    { code: "MCP_AGENT_FILE_SHOGGOTH_CHAT_REQUIRED" });
+  assert.equal((await call(secondary, "native_agent_file_update", edit)).saved, true);
+  assert.equal((await read(target.id, "SOUL")).content, soul);
+  await abort(secondary);
+  for (const origin of ["federation-send", "group-turn"]) {
+    const indirect = await send(session.sessionKey, secondaryQuote, `${origin}-${uuid()}`);
+    await assert.rejects(() => readFile(indirect, "SOUL", target.agentId, secondaryQuote), { code: "MCP_AGENT_FILE_SHOGGOTH_CHAT_REQUIRED" });
+    await abort(indirect);
+  }
+  console.log("PASS Shoggoth edits named Agent settings in its default and additional direct chats, with exact replay and scoped denials");
+  return { profileId: target.id, soul };
+}
+
+async function verifySixFiles({ createWithSoul = false, editNamedAgent = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shg-six-")));
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profiles"), cacheRoot: path.join(root, "cache") });
   const pool = runtimePool();
-  const create = () => createAgentService({ paths, safeStorage, builtinCliProfiles: true,
+  const create = () => createAgentService({ paths, safeStorage, runtimeStorageHomedir: () => root, builtinCliProfiles: true,
     builtinCliInstalledAccountIds: ["native-codex-default-v1", "native-grok-build-default-v1",
       "native-antigravity-default-v1", "native-pi-default-v1", "native-deepseek-harness-default-v1"],
     version: "six-files-regression", runtimePool: pool, grokBuildRuntimePool: pool,
-    antigravityRuntimePool: pool, piRuntimePool: pool, deepSeekHarnessRuntimePool: pool });
+    antigravityRuntimePool: pool, piRuntimePool: pool, deepSeekHarnessRuntimePool: pool,
+    ...(createWithSoul ? { federationHostClient: { async request(method) {
+      assert.equal(method, "backend.status");
+      return { backends: [{ id: "shoggoth", connected: true, disabled: false }] };
+    } } } : {}) });
   let service = create();
   const backends = [];
   const report = [];
-  const ipc = (method, params) => requestService(paths, { version: PROTOCOL_VERSION,
-    token: readClientToken(paths), id: uuid(), method, params });
+  const ipc = async (method, params) => {
+    try {
+      return await requestService(paths, { version: PROTOCOL_VERSION, token: readClientToken(paths), id: uuid(), method, params },
+        editNamedAgent ? { timeoutMs: 15_000 } : undefined);
+    }
+    catch (error) { error.fixtureMethod = method; throw error; }
+  };
   const read = (profileId, kind) => ipc("harness.definition.read", { profileId, kind, revision: null });
   try {
     await service.start();
     const profiles = service.productStore.listAgentProfiles();
     assert.deepEqual(profiles.map((profile) => profile.name), EXPECTED_NAMES);
+    if (createWithSoul || editNamedAgent) {
+      const verify = editNamedAgent ? verifyManagedAgentFiles : verifyAgentCreationWithSoul;
+      const created = await verify(service, profiles.find(profile => profile.isDefault), ipc, read);
+      await service.stop();
+      service = create();
+      await service.start();
+      assert.equal((await read(created.profileId, "SOUL")).content, created.soul);
+      console.log("PASS restart preserves the target Agent's SOUL exactly");
+      return;
+    }
     const remembered = [];
     for (const profile of profiles) {
       console.log(`CHECK ${profile.name}: read and mutate six files`);
@@ -313,6 +486,8 @@ async function verifySixFiles() {
   }
 }
 
-verifySixFiles().then((report) => {
-  if (process.argv[2]) fs.writeFileSync(process.argv[2], `${JSON.stringify(report, null, 2)}\n`);
+const createWithSoul = process.argv[2] === "--create-with-soul";
+const editNamedAgent = process.argv[2] === "--edit-named-agent";
+verifySixFiles({ createWithSoul, editNamedAgent }).then((report) => {
+  if (process.argv[2] && !createWithSoul && !editNamedAgent) fs.writeFileSync(process.argv[2], `${JSON.stringify(report, null, 2)}\n`);
 }).catch((error) => { console.error(error); process.exitCode = 1; });

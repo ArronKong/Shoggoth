@@ -15,7 +15,7 @@ const { OpenClawBackend } = require("../app/core/openclaw-backend");
 const { BackendRegistry } = require("../app/core/backend-registry");
 const { startProxyGateway } = require("../app/core/proxy-gateway");
 const { startStaticServer } = require("../app/static-server");
-const { createConfigStore } = require("../app/core/config-store");
+const { createConfigStore, DEFAULT_GATEWAY_URL } = require("../app/core/config-store");
 const { createDashboardJournal } = require("../app/core/dashboard-journal");
 const { createModelChangeJournal } = require("../app/core/model-change-journal");
 const { ModelChangeCoordinator } = require("../app/core/model-change-coordinator");
@@ -27,7 +27,7 @@ const { createHermesModelMutationGate } = require("../app/core/hermes-model-muta
 const { createHermesModelChange } = require("../app/core/hermes-model-change");
 
 const PORT = Number(process.env.MANAGE_SERVE_PORT || 18801);
-const GATEWAY_URL = "ws://127.0.0.1:18792"; // the real OpenClaw gateway
+const GATEWAY_URL = DEFAULT_GATEWAY_URL;
 // Dev-only proxy port (the Electron app owns 18790; avoid EADDRINUSE if it runs).
 const PROXY_PORT = Number(process.env.MANAGE_PROXY_PORT || 18795);
 // Dev config so the 设置 page is editable without Electron.
@@ -110,12 +110,17 @@ async function main() {
     workAdmissionGate,
   });
 
+  const refreshHostConnections = require("../app/openclaw-gateway-discovery").createOpenclawGatewayDiscovery({
+    configStore, onConfigChanged: async () => { await openclawBackend.stop(); proxy.invalidateOpenClawUpstream?.(); },
+  });
+  void refreshHostConnections().catch(() => {});
   const server = await startStaticServer(PORT, {
     registry,
     chatUpstreamUrl: `ws://127.0.0.1:${PROXY_PORT}`,
     chatOrigin: "http://127.0.0.1",
     configStore,
     authResolver,
+    refreshHostConnections,
     modelChangeCoordinator,
     workAdmissionGate,
     // Dev: reconnect Hermes/OpenClaw on config save (no window to reload).

@@ -1,6 +1,6 @@
 "use strict";
 
-const { validateChatServiceResult } = require("./chat-service-protocol");
+const { MAX_FRAME_BYTES, validateChatServiceResult } = require("./chat-service-protocol");
 const { GREETING_LOCALES } = require("./agent-greeting");
 
 const AGENT_LIFECYCLE_METHODS = Object.freeze([
@@ -19,6 +19,7 @@ const LIFECYCLE_STATES = Object.freeze([
 const LIFECYCLE_STATE_SET = new Set(LIFECYCLE_STATES);
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const BACKEND_ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
+const MAX_INITIAL_SOUL_BYTES = 32 * 1024;
 
 const PUBLIC_MESSAGES = Object.freeze({
   INVALID_PARAMS: "请求参数无效",
@@ -90,6 +91,10 @@ function validIdList(value) {
     && value.every((id) => validOpaqueId(id)) && new Set(value).size === value.length;
 }
 
+function initialDefinitionPayload(params) {
+  return JSON.stringify({ initialIdentity: params.initialIdentity, initialSoul: params.initialSoul });
+}
+
 function validateAgentLifecycleParams(method, params) {
   if (!AGENT_LIFECYCLE_METHOD_SET.has(method)) throw protocolError("INVALID_PARAMS");
   if (method === "agent.builtin.ensure") {
@@ -104,12 +109,18 @@ function validateAgentLifecycleParams(method, params) {
   }
   if (method === "agent.create") {
     const fields = ["operationId", "backendId", "name", "defaultCwd", "createdAt"];
-    if (ownDataObject(params) && Object.hasOwn(params, "initialIdentity")) fields.push("initialIdentity");
+    if (ownDataObject(params)) {
+      if (Object.hasOwn(params, "initialIdentity")) fields.push("initialIdentity");
+      if (Object.hasOwn(params, "initialSoul")) fields.push("initialSoul");
+    }
     if (!exactObject(params, fields)
       || !validMutationEnvelope(params) || !BACKEND_ID_PATTERN.test(params.backendId)
       || !validString(params.name, 128) || !validString(params.defaultCwd, 4096, true)
       || (Object.hasOwn(params, "initialIdentity")
-        && (!validString(params.initialIdentity, 8192) || !params.initialIdentity.trim()))) {
+        && (!validString(params.initialIdentity, 8192) || !params.initialIdentity.trim()))
+      || (Object.hasOwn(params, "initialSoul")
+        && (!validString(params.initialSoul, MAX_INITIAL_SOUL_BYTES) || !params.initialSoul.trim()
+          || Buffer.byteLength(initialDefinitionPayload(params), "utf8") > MAX_FRAME_BYTES))) {
       throw protocolError("INVALID_PARAMS");
     }
     return cloneParams(params);
@@ -182,7 +193,9 @@ function mapAgentLifecycleError(error) {
 module.exports = {
   AGENT_LIFECYCLE_METHODS,
   LIFECYCLE_STATES,
+  MAX_INITIAL_SOUL_BYTES,
   PUBLIC_MESSAGES,
+  initialDefinitionPayload,
   mapAgentLifecycleError,
   validateAgentLifecycleParams,
   validateAgentLifecycleResult,

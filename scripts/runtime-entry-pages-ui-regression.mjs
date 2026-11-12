@@ -19,7 +19,7 @@ try {
     plugins: [{ name: "public-fonts", setup(builder) {
       builder.onResolve({ filter: /^\/fonts\// }, args => ({ path: path.join(uiRoot, "public", args.path) }));
     } }],
-    loader: { ".woff2": "dataurl", ".ttf": "dataurl", ".otf": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
+    loader: { ".md": "text", ".woff2": "dataurl", ".ttf": "dataurl", ".otf": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" }, outfile: path.join(temp, "fixture.js"),
     nodePaths: [path.join(uiRoot, "node_modules")], logLevel: "silent" };
   await build(buildOptions);
   const page = path.join(temp, "index.html");

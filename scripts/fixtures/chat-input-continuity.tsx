@@ -18,8 +18,10 @@ const notes = ["先查询门店。", "已找到候选门店。", "请确认具�
 const toolTitles = ["检查候选门店", "核对商品规格", "核对订单状态"];
 const answer = "订单已创建，待付款。[微信支付二维码](https://qr.fixture/transfer/qrcode?token=fixture-only)";
 const canonical: any[] = [user];
+// Exercise public progress on either side of each input within the inline progress limit.
+const interactionNotes = new Set([2, 3, 5, 6]);
 const rawNote = (index: number) => ({ id: `note-${index}`, role: "assistant", timestamp: now + index + 1,
-  content: [{ type: "text", text: notes[index], activity: true, segmentId: `note-${index}` }],
+  content: [{ type: "text", text: notes[index], activity: interactionNotes.has(index), segmentId: `note-${index}` }],
   shoggoth: { nativeUiVersion: 1, runId, displayId: `native-run:${runId}` } });
 notes.forEach((_, index) => { canonical.push(rawNote(index)); if (index === 2) canonical.push(...receipts[0]); if (index === 5) canonical.push(...receipts[1]); });
 const finalMessage = { id: "answer", role: "assistant", content: answer, timestamp: now + 100 };
@@ -121,8 +123,8 @@ state.runFixture = async () => {
     const [preview] = previews();
     check(previews().length === 1 && precedes(answerBubble, preview),
       `one live activity bubble follows accepted input ${promptIndex + 1}`);
-    if (promptIndex === 1) check(precedes(preview, bodies()[rows.indexOf(notes[6])]),
-      "the relocated activity appears before the early resumed progress bubble");
+    if (promptIndex === 1) check(precedes(bodies()[rows.indexOf(notes[6])], preview),
+      "the early resumed progress bubble appears above the live activity");
   }
   const scroller = thread();
   scroller.scrollTop = scroller.scrollHeight;

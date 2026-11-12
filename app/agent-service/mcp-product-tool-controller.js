@@ -45,8 +45,9 @@ const { GROUP_CHAT_AGENT_TOOL_DEFINITIONS, GROUP_CHAT_AGENT_READ_TOOLS, GROUP_CH
 const { isGroupChatRun } = require("./group-chat-run");
 const { fileIdFor, readWorkspaceOutput, sha256: artifactDigest } = require("./agent-file-store");
 const { RUN_SOURCES: FILE_RUN_SOURCES, filename: managedFilename, fileMimeType, contentUrl: managedFileUrl } = require("./agent-file-protocol");
-const { DEFINITION_MCP_TOOL_DEFINITIONS, isDefinitionMcpTool,
+const { DEFINITION_MCP_TOOL_DEFINITIONS, isDefinitionMcpTool, isManagedDefinitionMcpTool,
   validateDefinitionMcpArguments } = require("./definition-mcp-tools");
+const { MAX_INITIAL_SOUL_BYTES } = require("./agent-lifecycle-service-protocol");
 const { BROWSER_MCP_TOOL_DEFINITIONS, BROWSER_MCP_TOOL_NAMES,
   validateBrowserMcpArguments } = require("./browser-mcp-tools");
 const { CHAT_UI_MCP_TOOL_DEFINITIONS, CHAT_UI_MCP_WRITE_TOOLS, isChatUiMcpTool,
@@ -98,6 +99,7 @@ const DURABLE_WRITE_TOOL_NAMES = new Set([
   ...INSPIRATION_MCP_WRITE_TOOLS,
   ...MEMORY_MCP_WRITE_TOOLS,
   "agent_definition_update", "heartbeat_rules_update", "memory_file_update",
+  "native_agent_file_update",
   "kanban_update_progress", "kanban_add_comment", "kanban_request_complete",
   "kanban_board_create", "kanban_board_update", "kanban_card_create",
   "kanban_card_update", "kanban_card_move", "kanban_run_dispatch", "kanban_run_retry",
@@ -184,6 +186,9 @@ const PUBLIC_MESSAGES = Object.freeze({
   APP_STATE_CURSOR_EXPIRED: "状态快照已过期，请从 cursor=null 重新读取",
   APP_STATE_RESPONSE_TOO_LARGE: "状态快照超过读取上限，请缩小查询范围",
   MCP_TOOL_INVALID_ARGUMENTS: "工具参数无效",
+  MCP_TOOL_DEFINITION_NEW_NAME_REQUIRED: "修改助理名称时缺少 newName。请传入与 IDENTITY.md 中更新后的 - Name: 行一致的名称，同一次调用会更新助理资料名和身份文件。",
+  MCP_AGENT_FILE_SHOGGOTH_CHAT_REQUIRED: "请直接向 Shoggoth 主 Agent 提出这次设定请求。",
+  MCP_AGENT_FILE_TARGET_REQUIRED: "当前用户原话需要准确点名该助理并包含操作要求。存在同名时请使用确切的 Agent ID。",
   MCP_TOOL_NOT_FOUND: "请求的资源不存在",
   MCP_TOOL_STATE_CONFLICT: "当前状态不允许该工具操作",
   MCP_TOOL_CAPACITY: "工具持久化容量已满",
@@ -257,7 +262,7 @@ const interactiveWorkSourceSchema = () => ({
 const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
   {
     name: "native_agent_create",
-    description: "Create a local Agent with its name and user-requested identity using the native lifecycle service.",
+    description: "Create a local Agent with its name and initial identity and personality using the native lifecycle service.",
     inputSchema: {
       type: "object",
       properties: {
@@ -266,6 +271,8 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
         name: { type: "string", minLength: 1, maxLength: 128 },
         workspace: nullableString(2048),
         identity: { type: "string", minLength: 1, maxLength: 8192 },
+        soul: { type: "string", minLength: 1, maxLength: MAX_INITIAL_SOUL_BYTES,
+          description: "The complete initial SOUL.md in Markdown. Compose it here when the current user asks you to create an Agent and write its personality or tone." },
       },
       required: ["source", "sourceId", "backendId", "name", "workspace"],
       additionalProperties: false,
@@ -1451,12 +1458,14 @@ function validateProductOperationArguments(name, args) {
     if (!ownDataObject(args)) return false;
     const fields = ["source", "sourceId", "backendId", "name", "workspace"];
     if (Object.hasOwn(args, "identity")) fields.push("identity");
+    if (Object.hasOwn(args, "soul")) fields.push("soul");
     return exactObject(args, fields) && NATIVE_AGENT_BACKENDS.has(args.backendId)
       && ["chat", "kanban", "cron", "inspiration", "proactive"].includes(args.source) && validText(args.sourceId, 512)
       && validText(args.name, 128) && Boolean(args.name.trim())
       && validText(args.workspace, 2048, { nullable: true })
       && (args.workspace === null || path.isAbsolute(args.workspace))
-      && (!Object.hasOwn(args, "identity") || (validText(args.identity, 8192) && Boolean(args.identity.trim())));
+      && (!Object.hasOwn(args, "identity") || (validText(args.identity, 8192) && Boolean(args.identity.trim())))
+      && (!Object.hasOwn(args, "soul") || (validText(args.soul, MAX_INITIAL_SOUL_BYTES) && Boolean(args.soul.trim())));
   }
   if (["native_agent_get", "native_agent_update", "native_agent_archive"].includes(name)) {
     if (!ownDataObject(args)) return false;
@@ -1947,9 +1956,17 @@ function collectSchemaProblems(schema, value, path, problems) {
 
 function explainMcpProductToolArguments(name, args) {
   if (isGroupMcpTool(name)) return explainGroupMcpArguments(name, args);
-  const definition = MCP_PRODUCT_TOOL_DEFINITIONS.find((entry) => entry.name === name);
+  const definition = MCP_TOOL_DEFINITION_BY_NAME.get(name);
   const problems = [];
-  if (definition) collectSchemaProblems(definition.inputSchema, args, "", problems);
+  if (name === "native_agent_update" && ownDataObject(args)) {
+    const { anyOf, ...schema } = definition.inputSchema;
+    if (!anyOf.some(({ required }) => required.every(key => Object.hasOwn(args, key)))) {
+      problems.push("缺少 name 或 workspace；改名时请提供 name");
+    }
+    collectSchemaProblems(schema, args, "", problems);
+  } else if (definition) {
+    collectSchemaProblems(definition.inputSchema, args, "", problems);
+  }
   if (name === "memory_get" && ownDataObject(args)) {
     if (Object.hasOwn(args, "id") === Object.hasOwn(args, "path")) {
       problems.push("Supply exactly one of id or path.");
@@ -1973,6 +1990,8 @@ function explainMcpProductToolArguments(name, args) {
   }
   const hints = [
     ...(name === "memory_get" ? [MEMORY_GET_ARGUMENT_HINT] : []),
+    ...(name === "native_agent_update" && ownDataObject(args) && !Object.hasOwn(args, "expectedUpdatedAt")
+      ? ["先调用 native_agent_get，将返回的 updatedAt 作为 expectedUpdatedAt。"] : []),
     ...(COMPUTER_ARGUMENT_HINTS[name] ? [COMPUTER_ARGUMENT_HINTS[name]] : []),
     ...(COMPUTER_ACTION_TOOLS.has(name) ? ["snapshotRevision、pid、windowId 必须来自同一次 computer_snapshot。"] : []),
   ];
@@ -2451,6 +2470,10 @@ class McpProductToolController {
         if (name === "app_state_get") return !!this.appStateService;
         if (name === "runtime_context_get") return !!this.getRuntimeContext;
         if (name.startsWith("inspiration_")) return !!this.inspirationService;
+        if (isManagedDefinitionMcpTool(name)) {
+          const runId = this.executionContext.getStore()?.runId;
+          return !!runId && this.conversationDefinitionService?.canManageFiles?.(this.workDispatcher.getRun(runId)) === true;
+        }
         if (name.startsWith("native_agent_")) return !!this.agentLifecycleService;
         if (isMemoryMcpTool(name)) return name.startsWith("conversation_") ? !!this.conversationRecallService : !!this.conversationMemoryService;
         if (isDefinitionMcpTool(name)) return !!this.conversationDefinitionService
@@ -2643,7 +2666,9 @@ class McpProductToolController {
         }
       } else {
         this.#requireProfile(authority.profileId);
-        result = await this.#handleEphemeral(name, rawArgs, authority, fingerprint, readVisibilityKey);
+        // A managed file read must verify the current user source on every call.
+        result = name === "native_agent_file_read" ? await this.#route(name, rawArgs, authority, null)
+          : await this.#handleEphemeral(name, rawArgs, authority, fingerprint, readVisibilityKey);
       }
       if (readPolicy && readPolicy.getRevision(authority.profileId) !== readPolicyRevision) {
         throw toolError("MCP_TOOL_STATE_CONFLICT");
@@ -2799,6 +2824,9 @@ class McpProductToolController {
     }
     const lookup = { profileId: authority.profileId, callId: authority.callId, name, fingerprint };
     let call = this.productStore.lookupMcpToolCall(lookup);
+    if (name === "native_agent_file_update" && call) {
+      this.#bindManagedFile(args, authority, call.binding);
+    }
     if (["mcp_server_add", "mcp_server_import"].includes(name) && call && call.status !== "completed") {
       // Package preparation or a child probe may already have started. A lost
       // receipt must never cause an executable configuration to be replayed.
@@ -2845,6 +2873,9 @@ class McpProductToolController {
         if (call.status !== "completed" && !this.workspaceExecutionCalls.has(call.id)) this.workspaceExecutionCalls.set(call.id, null);
       }
       if (memoryBinding && canonicalJson(call.binding) !== canonicalJson(memoryBinding)) {
+        throw toolError("MCP_TOOL_FORBIDDEN");
+      }
+      if (name === "native_agent_file_update" && canonicalJson(call.binding) !== canonicalJson(binding)) {
         throw toolError("MCP_TOOL_FORBIDDEN");
       }
       if (call.status === "completed") return this.#replayOutcome(call.result);
@@ -2996,6 +3027,34 @@ class McpProductToolController {
     return run;
   }
 
+  #managedFileRun(args, authority) {
+    const scope = this.executionContext.getStore();
+    if (authority.federationClient || !scope?.runId || typeof scope.assertCurrent !== "function") {
+      throw toolError("MCP_AGENT_FILE_SHOGGOTH_CHAT_REQUIRED");
+    }
+    scope.assertCurrent();
+    const run = this.#requireRun(scope.runId, authority.profileId);
+    if (!ACTIVE_RUN_STATUSES.has(run.status) || run.source !== args.source || run.sourceId !== args.sourceId) {
+      throw toolError("MCP_AGENT_FILE_SHOGGOTH_CHAT_REQUIRED");
+    }
+    return run;
+  }
+
+  #bindManagedFile(args, authority, previous) {
+    const service = this.conversationDefinitionService;
+    if (typeof service?.bindManagedTarget !== "function") throw toolError("MCP_TOOL_UNAVAILABLE");
+    this.#assertSecretSafe(JSON.stringify(args));
+    return service.bindManagedTarget(args, this.#managedFileRun(args, authority), previous);
+  }
+
+  #assertManagedFileCurrent(name, args, authority, profileId, source) {
+    const run = this.#managedFileRun(args, authority);
+    this.permissionEngine.authorize({ name, profileId: authority.profileId, profile: this.#requireProfile(authority.profileId),
+      run, workspace: run.workspace, confirmed: false });
+    this.conversationDefinitionService.assertManagedSourceCurrent(run, source);
+    this.conversationDefinitionService.requireManagedProfile(profileId, args.agentId);
+  }
+
   async #groupDispatchRun(args, authority) {
     if (authority.federationClient) {
       if (args.source !== undefined || args.sourceId !== undefined) throw toolError("MCP_TOOL_FORBIDDEN");
@@ -3134,11 +3193,14 @@ class McpProductToolController {
       return { ...target, innerBinding };
     }
     if (name === "native_agent_create") {
-      await this.#currentInteractiveRun(args, authority);
+      const run = await this.#currentInteractiveRun(args, authority);
       if (!this.agentLifecycleService) throw toolError("AGENT_SERVICE_CLOSED");
       this.#assertSecretSafe(JSON.stringify(args));
-      return { backendId: args.backendId, name: args.name, defaultCwd: args.workspace,
-        ...(args.identity !== undefined ? { initialIdentity: args.identity } : {}) };
+      if (args.soul !== undefined) {
+        if (typeof this.conversationDefinitionService?.bindUserConversation !== "function") throw toolError("MCP_TOOL_UNAVAILABLE");
+        this.conversationDefinitionService.bindUserConversation(args, run);
+      }
+      return { backendId: args.backendId, name: args.name, defaultCwd: args.workspace };
     }
     if (name === "native_agent_update" || name === "native_agent_archive") {
       await this.#currentInteractiveRun(args, authority);
@@ -3155,6 +3217,10 @@ class McpProductToolController {
           defaultCwd: Object.hasOwn(args, "workspace") ? args.workspace : profile.defaultCwd,
         } : {}),
       };
+    }
+    if (name === "native_agent_file_update") {
+      const { profile, source } = this.#bindManagedFile(args, authority);
+      return this.conversationDefinitionService.bindManagedUpdate(profile, args, source);
     }
     if (isDefinitionMcpTool(name)) {
       if (!this.conversationDefinitionService) throw toolError("MCP_TOOL_UNAVAILABLE");
@@ -3342,11 +3408,14 @@ class McpProductToolController {
       if (!this.agentLifecycleService || !call?.binding) throw toolError("AGENT_SERVICE_CLOSED");
       const result = await this.agentLifecycleService.handle("agent.create", {
         ...call.binding, operationId: call.operationId, createdAt: call.createdAt,
+        ...(args.identity !== undefined ? { initialIdentity: args.identity } : {}),
+        ...(args.soul !== undefined ? { initialSoul: args.soul } : {}),
       });
       const profile = result?.profile;
       if (!profile || profile.backendId !== args.backendId || profile.name !== args.name.normalize("NFKC").trim()
         || profile.enabled !== true || profile.isDefault !== false) throw toolError("MCP_TOOL_RESPONSE_INVALID");
-      return { agent: this.#nativeAgentDto(profile, "active"), identitySaved: args.identity !== undefined };
+      return { agent: this.#nativeAgentDto(profile, "active"), identitySaved: args.identity !== undefined,
+        ...(args.soul !== undefined ? { soulSaved: true } : {}) };
     }
     if (name === "native_agent_get") {
       const entry = await this.#nativeAgent(args);
@@ -3448,6 +3517,18 @@ class McpProductToolController {
       }
       this.#assertSecretSafe(JSON.stringify(result));
       return result;
+    }
+    if (name === "native_agent_file_read") {
+      const { profile, source } = this.#bindManagedFile(args, authority);
+      const result = await this.conversationDefinitionService.readManagedFile(profile, args);
+      this.#assertManagedFileCurrent(name, args, authority, profile.id, source.source);
+      return result;
+    }
+    if (name === "native_agent_file_update") {
+      const { targetProfileId, source } = call.binding;
+      const assertCurrent = () => this.#assertManagedFileCurrent(name, args, authority, targetProfileId, source);
+      assertCurrent();
+      return this.conversationDefinitionService.updateManagedFile(args, call, assertCurrent);
     }
     if (isDefinitionMcpTool(name)) {
       if (!this.conversationDefinitionService) throw toolError("MCP_TOOL_UNAVAILABLE");

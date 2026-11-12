@@ -10,6 +10,7 @@ const { createAgentService } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { importPath } = require("../app/agent-service/agent-file-store");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
 const { AgentArchiveRetention, AGENT_ARCHIVE_RETENTION_MS: WEEK,
   AGENT_ARCHIVE_RETRY_DELAY_MS: RETRY } = require("../app/agent-service/agent-archive-retention");
 
@@ -297,6 +298,9 @@ async function main() {
     assert.equal((await getFile(a, fileA)).path, privatePayload);
     assert.equal(service.agentArchiveRetention.entries[a.id], undefined);
     assert.equal(service.agentArchiveRetention.timer, null, "real lifecycle restore cancels the last timer");
+    const interruptedEdit = service.productStore.beginMcpToolCall({ profileId: DEFAULT_AGENT_PROFILE_ID,
+      callId: crypto.randomUUID(), name: "native_agent_file_update", fingerprint: "a".repeat(64),
+      binding: { targetProfileId: a.id }, createdAt: time });
     await archive(a);
     assert.ok(service.agentArchiveRetention.entries[a.id].deleteAfter > firstDeadline);
     console.log("PASS seven-day boundary, restore cancellation and re-archive deadline");
@@ -313,6 +317,7 @@ async function main() {
     await start();
     await sweep();
     assert.equal(service.productStore.getAgentProfile(a.id), null);
+    assert.equal(service.productStore.getMcpToolCall(interruptedEdit.id), null);
     assert.equal(fs.existsSync(dir(a)), false);
     assert.equal(fs.lstatSync(finderLink(a), { throwIfNoEntry: false }), undefined);
     assert.equal(fs.realpathSync(finderLink(b)), dir(b));

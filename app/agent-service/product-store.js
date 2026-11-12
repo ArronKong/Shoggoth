@@ -616,6 +616,13 @@ function mcpToolOperationId(profileId, callId, name, fingerprint) {
     .update("\0").update(fingerprint).digest("hex").slice(0, 48)}`;
 }
 
+function blocksArchivedProfilePurge(call, profileId) {
+  if (call.status !== "pending") return false;
+  if (call.profileId === profileId || call.binding?.profileId === profileId) return true;
+  // Managed file edits require a live, enabled target immediately before each write.
+  return call.binding?.targetProfileId === profileId && call.name !== "native_agent_file_update";
+}
+
 function validateMcpToolCall(record) {
   const call = pickExact(record, MCP_TOOL_CALL_FIELDS, "McpToolCall");
   for (const field of ["id", "profileId", "callId", "name", "fingerprint", "operationId", "status"]) {
@@ -930,7 +937,7 @@ class JsonlProductStore extends ProductStore {
       || call.binding?.profileId === profileId || call.binding?.targetProfileId === profileId;
     if ([...this.workRuns.values()].some((run) => runs.has(run.id)
       ? (run.status === "queued" || ACTIVE_WORK_RUN_STATUSES.has(run.status)) : runs.has(run.retryOf))
-      || [...this.mcpToolCalls.values()].some((call) => ownsCall(call) && call.status === "pending")) {
+      || [...this.mcpToolCalls.values()].some((call) => blocksArchivedProfilePurge(call, profileId))) {
       throw storeError("AGENT_OPERATION_BUSY", "Agent 仍有未完成或被引用的操作");
     }
     this.agentProfiles.delete(profileId);
@@ -2488,6 +2495,7 @@ module.exports = {
   READABLE_PRODUCT_SCHEMA_VERSIONS,
   WORK_RUN_FIELDS,
   assertNoSensitiveFields,
+  blocksArchivedProfilePurge,
   defaultAgentProfile,
   eventChecksum,
   snapshotChecksum,

@@ -44,7 +44,7 @@ const NATIVE_HOME_SEGMENTS = Object.freeze({
 const AUTH_SPECS = Object.freeze([
   Object.freeze({
     runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
-    name: "Codex Harness",
+    name: "Shoggoth",
     homeEnv: "CODEX_HOME",
     credentialFile: "auth.json",
     credentialProbe: "file",

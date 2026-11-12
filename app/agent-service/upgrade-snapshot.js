@@ -35,6 +35,7 @@ function sha256(value) { return crypto.createHash("sha256").update(value).digest
 function componentFor(relativePath) {
   if (relativePath === "state.snapshot.json" || relativePath === "events.jsonl"
     || relativePath === "chat-sessions.json" || relativePath === "runtime-switch.json"
+    || relativePath.startsWith("agent-create-definitions/")
     || relativePath.startsWith("kanban/")
     || relativePath.startsWith("cron/")) return "product";
   if (/^agents\/[^/]+\/(?:manifest\.json|definition\/|generated\/|proposals\/)/u.test(relativePath)) return "definition";

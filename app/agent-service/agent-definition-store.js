@@ -251,32 +251,50 @@ class AgentDefinitionStore {
   ensureProfile(input) {
     this._assertOpen();
     const profileId = assertProfileId(input?.profileId);
+    const { initialIdentity, initialSoul } = input;
     const defaults = createDefaultDocuments(input.profileName);
-    const defaultIdentity = defaults.IDENTITY;
-    if (input.initialIdentity !== undefined) {
-      if (typeof input.initialIdentity !== "string" || !input.initialIdentity.trim()
-        || !input.initialIdentity.isWellFormed() || input.initialIdentity.includes("\0")
-        || Buffer.byteLength(input.initialIdentity, "utf8") > 8192) {
+    const { IDENTITY: defaultIdentity, SOUL: defaultSoul } = defaults;
+    if (initialIdentity !== undefined) {
+      if (typeof initialIdentity !== "string" || !initialIdentity.trim()
+        || !initialIdentity.isWellFormed() || initialIdentity.includes("\0")
+        || Buffer.byteLength(initialIdentity, "utf8") > 8192) {
         throw definitionError("DEFINITION_DOCUMENT_INVALID", "Initial Agent identity is invalid");
       }
-      defaults.IDENTITY += `\n## User-provided identity and responsibilities\n\n${input.initialIdentity}\n`;
+      defaults.IDENTITY += `\n## User-provided identity and responsibilities\n\n${initialIdentity}\n`;
+    }
+    if (initialSoul !== undefined) {
+      assertContent(initialSoul, "SOUL", this.maxDocumentBytes);
+      if (!initialSoul.trim()) throw definitionError("DEFINITION_DOCUMENT_INVALID", "Initial Agent SOUL is empty");
+      defaults.SOUL = initialSoul;
     }
     const existing = lstatIfExists(this._rootManifestPath(profileId));
     if (existing) {
       const current = this.get(profileId);
-      if (input.initialIdentity !== undefined) {
-        const legacyIdentity = createLegacyV4Identity(input.profileName);
-        if (current.documents.IDENTITY === defaults.IDENTITY
-          || current.documents.IDENTITY === legacyIdentity + LEGACY_INITIAL_IDENTITY_HEADING + input.initialIdentity + "\n") return current;
-        // Startup may bootstrap the default after a crash between Profile
-        // creation and definition initialization. Complete only an untouched
-        // default; never overwrite a user's intervening identity edit/restore.
-        const untouchedDefault = [defaultIdentity, legacyIdentity].find(value => value === current.documents.IDENTITY);
-        if (!untouchedDefault || !this._wasUntouched(profileId, "IDENTITY", sha256(untouchedDefault))) {
-          throw definitionError("DEFINITION_REVISION_CONFLICT", "Initial Agent identity conflicts with saved changes");
+      if (initialIdentity !== undefined || initialSoul !== undefined) {
+        // Startup can bootstrap defaults before a pending create resumes.
+        // Apply the requested documents together, after checking each default.
+        const documents = {};
+        if (initialIdentity !== undefined && current.documents.IDENTITY !== defaults.IDENTITY) {
+          const legacyIdentity = createLegacyV4Identity(input.profileName);
+          const legacyInitial = legacyIdentity + LEGACY_INITIAL_IDENTITY_HEADING + initialIdentity + "\n";
+          const currentIdentity = current.documents.IDENTITY;
+          if (currentIdentity !== legacyInitial) {
+            if (![defaultIdentity, legacyIdentity].includes(currentIdentity)
+              || !this._wasUntouched(profileId, "IDENTITY", sha256(currentIdentity))) {
+              throw definitionError("DEFINITION_REVISION_CONFLICT", "Initial Agent identity conflicts with saved changes");
+            }
+            documents.IDENTITY = defaults.IDENTITY;
+          }
         }
+        if (initialSoul !== undefined && current.documents.SOUL !== initialSoul) {
+          if (current.documents.SOUL !== defaultSoul || !this._wasUntouched(profileId, "SOUL", sha256(defaultSoul))) {
+            throw definitionError("DEFINITION_REVISION_CONFLICT", "Initial Agent SOUL conflicts with saved changes");
+          }
+          documents.SOUL = initialSoul;
+        }
+        if (Object.keys(documents).length === 0) return current;
         return this._commit({ profileId, expectedRevision: current.manifest.revision,
-          documents: { IDENTITY: defaults.IDENTITY }, actor: "bootstrap", reason: "agent-create-identity" });
+          documents, actor: "bootstrap", reason: initialSoul === undefined ? "agent-create-identity" : "agent-create-definition" });
       }
       if (profileId === DEEPSEEK_BUILTIN_PROFILE.id && input.profileName === DEEPSEEK_BUILTIN_PROFILE.name) {
         const previousNameLine = `- Name: ${PREVIOUS_DEEPSEEK_NAME}`;

@@ -66,6 +66,39 @@ test("创建身份在 bootstrap 后恢复，保留其他文件，拒绝覆盖已
   } finally { value.cleanup(); }
 });
 
+test("初始 SOUL 和身份一起恢复，用户编辑过的 SOUL 保留", () => {
+  const value = fixture();
+  try {
+    value.store.open();
+    const input = { profileId: "profile-soul", profileName: "测试",
+      initialIdentity: "根据用户要求担任助理。", initialSoul: "# SOUL.md\n\n温和，先查证再回答。\n" };
+    const fresh = value.store.ensureProfile({ ...input, profileId: "profile-fresh" });
+    assert.equal(fresh.manifest.revision, 1);
+    assert.equal(fresh.documents.SOUL, input.initialSoul);
+    assert.ok(fresh.documents.IDENTITY.includes(input.initialIdentity));
+    const bootstrap = value.store.ensureProfile({ profileId: input.profileId, profileName: input.profileName });
+    const agents = "# AGENTS.md\n\nRetain this independent edit.\n";
+    const updated = value.store.update({ profileId: input.profileId, expectedRevision: bootstrap.manifest.revision,
+      actor: "user", documents: { AGENTS: agents } });
+    value.store.close(); value.store.open();
+    const recovered = value.store.ensureProfile(input);
+    assert.equal(recovered.manifest.revision, updated.manifest.revision + 1);
+    assert.equal(recovered.documents.SOUL, input.initialSoul);
+    assert.ok(recovered.documents.IDENTITY.includes(input.initialIdentity));
+    assert.equal(recovered.documents.AGENTS, agents);
+    assert.deepEqual(value.store.ensureProfile(input), recovered);
+
+    const editedInput = { ...input, profileId: "profile-user-edited-soul" };
+    const original = value.store.ensureProfile({ profileId: editedInput.profileId, profileName: input.profileName });
+    const change = value.store.update({ profileId: editedInput.profileId, expectedRevision: original.manifest.revision,
+      actor: "user", documents: { SOUL: "A user-edited personality." } });
+    const restored = value.store.update({ profileId: editedInput.profileId, expectedRevision: change.manifest.revision,
+      actor: "user", documents: { SOUL: original.documents.SOUL } });
+    assert.throws(() => value.store.ensureProfile(editedInput), { code: "DEFINITION_REVISION_CONFLICT" });
+    assert.deepEqual(value.store.get(editedInput.profileId), restored);
+  } finally { value.cleanup(); }
+});
+
 test("用户提交使用 expected revision，Agent 只能 proposal 不能 commit", () => {
   const value = fixture();
   try {

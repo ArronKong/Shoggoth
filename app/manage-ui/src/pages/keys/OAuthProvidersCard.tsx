@@ -13,6 +13,8 @@ import OAuthLoginModal from "./OAuthLoginModal";
 import ProviderLogo from "./ProviderLogo";
 import styles from "./KeysPanel.module.css";
 
+const INTERNAL_CODEX_ACCOUNT_ID = "shoggoth-internal-codex-default-v1";
+
 // OAuth 登录卡。布局照设计稿 7093-366：两列网格，一行 = logo + 名称 + 一句状态，
 // 操作图标平时藏起来，指到那一行（或键盘聚焦到行内）才浮出来。
 //
@@ -118,7 +120,7 @@ function OAuthRow({
   const expired = exp === "expired";
   const isExternal = p.flow === "external";
   const title = providerTitle(p, backend);
-  const runtimeIcon = p.connection?.id;
+  const runtimeIcon = p.connection?.id ?? (p.id === INTERNAL_CODEX_ACCOUNT_ID ? "openai-api" : undefined);
   // A disconnected native CLI keeps its login; the row only offers to reconnect.
   const off = p.connection?.enabled === false;
   const incompatible = p.status.verification === "incompatible";
@@ -350,7 +352,11 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
   };
 
   const connected = providers?.filter((p) => p.status.loggedIn).length ?? 0;
-  const ordered = sortProviders(providers ?? [], backend);
+  const ordered = sortProviders(providers ?? [], backend).map((provider) =>
+    backend === "shoggoth" && provider.id === INTERNAL_CODEX_ACCOUNT_ID
+      ? { ...provider, name: t("models.shoggothOAuthName") }
+      : provider,
+  );
 
   return (
     <section className={styles.card} id={id}>

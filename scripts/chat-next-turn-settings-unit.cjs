@@ -11,6 +11,27 @@ const select = (f, session, runtime, model) => rpc(f, "chat.session.runtime.mode
   profileId: f.profile.id, sessionKey: session.sessionKey, bindingId: f.binding(runtime).id,
   model, revision: f.service.chatSessionStore.getSession(session.sessionKey).revision, acceptAdjustments: true,
 });
+const setThinking = (f, session, thinkingLevel) => rpc(f, "chat.session.settings.set", {
+  sessionKey: session.sessionKey, patch: { thinkingLevel },
+});
+const highCapable = { thinkingOptions: ["low", "high"], thinkingDefault: "low", fastTier: "priority" };
+
+async function setCatalogCapabilities(f, runtime, capabilitiesFor) {
+  await rpc(f, "profile.binding.models.list", {
+    profileId: f.profile.id, bindingId: f.binding(runtime).id, cursor: null, limit: 100,
+  });
+  const handle = [...f.transport.handles.values()].find(entry => entry.runtime === runtime);
+  const owner = runtime === "codex" ? handle.host : handle;
+  const method = runtime === "codex" ? "modelList" : "modelsList";
+  const list = owner[method].bind(owner);
+  owner[method] = async params => {
+    const page = await list(params);
+    return { ...page, data: page.data.map(model => {
+      const capabilities = capabilitiesFor(model.model);
+      return { ...model, capabilities, defaultReasoningEffort: capabilities.thinkingDefault };
+    }) };
+  };
+}
 
 for (const runtime of ["codex", "pi", "deepseek-harness"]) test(`${runtime}: streaming picks leave current contract frozen and apply to the next turn`, async () => {
   const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", "next-model"],
@@ -21,18 +42,13 @@ for (const runtime of ["codex", "pi", "deepseek-harness"]) test(`${runtime}: str
     const first = await f.send(session.sessionKey, `first-${runtime}`);
     const frozen = structuredClone(f.service.workRunCoordinator.runExecutionContracts.get(first.id));
     const identity = f.service.chatSessionStore.getSession(session.sessionKey).runtimeSessionId;
-    for (const handle of f.transport.handles.values()) {
-      const owner = handle.runtime === "codex" ? handle.host : handle;
-      const method = handle.runtime === "codex" ? "modelList" : "modelsList";
-      const list = owner[method];
-      owner[method] = async params => { const page = await list(params); return { ...page, data: page.data.map(model => ({ ...model,
-        capabilities: { thinkingOptions: ["low", "high"], thinkingDefault: "low", fastTier: "priority" } })) }; };
-    }
+    await setCatalogCapabilities(f, runtime, () => highCapable);
+    await setThinking(f, session, "high");
     await select(f, session, runtime, "next-model");
     await rpc(f, "chat.session.permission.set", { sessionKey: session.sessionKey,
       mode: runtime === "pi" ? "full" : runtime === "deepseek-harness" ? "danger-full-access" : "full" });
     await rpc(f, "chat.session.settings.set", { sessionKey: session.sessionKey,
-      patch: { thinkingLevel: "high", fastMode: true } });
+      patch: { fastMode: true } });
     assert.deepEqual(f.service.workRunCoordinator.runExecutionContracts.get(first.id), frozen);
     assert.equal(f.service.workRunCoordinator.getRun(first.id).status, "running");
     assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).runtimeSessionId, identity);
@@ -42,8 +58,39 @@ for (const runtime of ["codex", "pi", "deepseek-harness"]) test(`${runtime}: str
     const next = f.service.workRunCoordinator.runExecutionContracts.get(second.id);
     assert.equal(next.defaultModel, "next-model");
     assert.deepEqual(next.modelSettings, { thinkingLevel: "high", serviceTier: "priority" });
+    const turn = f.transport.hosts.get(runtime).lastTurnStartParams;
+    assert.equal(runtime === "codex" ? turn.effort : turn.thinkingLevel, "high");
     assert.notEqual(next.permissionMode, frozen.permissionMode);
     await f.complete(second);
+  } finally { await f.close(); }
+});
+
+test("an idle model change uses the closest lower effort and inherits when no compatible level exists", async () => {
+  const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model", "next-model", "no-effort", "higher-only"] } });
+  try {
+    const session = f.createSession();
+    const capabilities = {
+      "fixture-model": { ...highCapable, thinkingOptions: ["low", "high", "xhigh"] },
+      "next-model": { ...highCapable, thinkingOptions: ["low", "medium", "high"] },
+      "no-effort": { thinkingOptions: [], thinkingDefault: null, fastTier: null },
+      "higher-only": { thinkingOptions: ["xhigh"], thinkingDefault: "xhigh", fastTier: null },
+    };
+    await setCatalogCapabilities(f, "codex", model => capabilities[model]);
+    const savedLevel = () => f.service.chatSessionStore.getSession(session.sessionKey).modelSettings.thinkingLevel;
+    await setThinking(f, session, "xhigh");
+    await select(f, session, "codex", "next-model");
+    assert.equal(savedLevel(), "high");
+    await setThinking(f, session, "low");
+    const legacyPick = model => rpc(f, "chat.session.model.set", { sessionKey: session.sessionKey, model });
+    await legacyPick("fixture-model");
+    assert.equal(savedLevel(), "low", "an explicit low choice is also preserved");
+    await legacyPick("higher-only");
+    assert.equal(savedLevel(), null, "let the runtime supply the default when no lower effort is available");
+    await setThinking(f, session, "xhigh");
+    await select(f, session, "codex", "no-effort");
+    assert.equal(savedLevel(), null);
+    await select(f, session, "codex", "next-model");
+    assert.equal(savedLevel(), null, "inherited effort remains inherited");
   } finally { await f.close(); }
 });
 
@@ -51,6 +98,9 @@ test("cross-Runtime model choice and later permission settings survive restart, 
   let f = await openHandoffFixture({ catalogs: { codex: ["fixture-model"], pi: ["fixture-model", "pi-next", "pi-later"] } });
   try {
     const session = f.createSession();
+    await setCatalogCapabilities(f, "codex", () => highCapable);
+    await setCatalogCapabilities(f, "pi", () => highCapable);
+    await setThinking(f, session, "high");
     const first = await f.send(session.sessionKey, "cross-first", "PRESERVE THIS HISTORY");
     const frozen = structuredClone(f.service.workRunCoordinator.runExecutionContracts.get(first.id));
     const selection = await select(f, session, "pi", "pi-next");
@@ -59,6 +109,7 @@ test("cross-Runtime model choice and later permission settings survive restart, 
     assert.equal(saved.runtimeBindingId, f.binding("codex").id);
     assert.equal(saved.runtimeSessionId, first.runtimeSessionRef.sessionId);
     assert.equal(saved.nextRuntimeSelection.model, "pi-next");
+    assert.equal(saved.nextRuntimeSelection.modelSettings.thinkingLevel, "high");
     await rpc(f, "chat.session.permission.set", { sessionKey: session.sessionKey, mode: "full" });
     saved = f.service.chatSessionStore.getSession(session.sessionKey);
     assert.equal(saved.nextRuntimeSelection.permissionMode, "full");
@@ -77,6 +128,8 @@ test("cross-Runtime model choice and later permission settings survive restart, 
     const next = f.service.workRunCoordinator.runExecutionContracts.get(second.id);
     assert.equal(next.runtime, "pi"); assert.equal(next.defaultModel, "pi-later");
     assert.equal(next.permissionMode, "full");
+    assert.equal(next.modelSettings.thinkingLevel, "high");
+    assert.equal(f.transport.hosts.get("pi").lastTurnStartParams.thinkingLevel, "high");
     assert.match(next.dynamicContext, /PRESERVE THIS HISTORY/u);
     assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).nextRuntimeSelection, undefined);
     await f.complete(second);

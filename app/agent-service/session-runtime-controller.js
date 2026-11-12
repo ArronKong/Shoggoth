@@ -6,6 +6,7 @@ const { serviceError } = require("./security");
 const { validateSessionRuntimeParams, validateSessionRuntimeResult } = require("./session-runtime-protocol");
 const { transcriptEventId } = require("./transcript-store");
 const { isDesktopBinding } = require("./codex-desktop-session-store");
+const { settingsForModelSwitch } = require("./chat-model-settings");
 const codexSessionProvider = require("./codex-session-provider");
 
 function createSessionRuntimeController({ productStore, chatSessionStore, transcriptStore, coordinator, getCoordinator,
@@ -102,18 +103,20 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       observed = { ...observed, authenticated: true };
     }
     const mode = permissionAdjustment(profile, session, binding);
+    let model;
     if (selectedModel !== undefined && listBindingModels) {
-      let cursor = null, found = false;
+      let cursor = null;
       const cursors = new Set();
       for (let pageIndex = 0; pageIndex < 16; pageIndex++) {
         const page = await listBindingModels({ profileId: profile.id, bindingId: binding.id, cursor, limit: 100 });
-        if (page.models.some(model => model.id === selectedModel
-          && (model.modelProviderRef ?? null) === (selectedProvider ?? null))) { found = true; break; }
+        model = page.models.find(entry => entry.id === selectedModel
+          && (entry.modelProviderRef ?? null) === (selectedProvider ?? null));
+        if (model) break;
         if (!page.hasMore) break;
         if (!page.nextCursor || cursors.has(page.nextCursor)) break;
         cursors.add(page.nextCursor); cursor = page.nextCursor;
       }
-      if (!found) throw serviceError("MODEL_ROUTE_UNSUPPORTED", "模型不在所选运行环境目录中");
+      if (!model) throw serviceError("MODEL_ROUTE_UNSUPPORTED", "模型不在所选运行环境目录中");
     }
     const clearModelOverride = selectedModel === undefined && !!session.modelOverride && !observed.models?.includes(session.modelOverride);
     const support = supports({ binding, facts: observed, requirements: {
@@ -122,7 +125,8 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       permissionMode: mode, permissionPolicy: profile.permissionPolicy, workspace: session.workspace,
     } });
     return { bindingId: binding.id, support,
-      adjustments: { clearModelOverride, permissionMode: mode } };
+      adjustments: { clearModelOverride, permissionMode: mode },
+      ...(model?.capabilities ? { modelCapabilities: model.capabilities } : {}) };
   }
   async function snapshot(params, { preflight = true } = {}) {
     const session = sessionFor(params);
@@ -196,6 +200,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     if ((clearModelOverride || permissionMode !== (preferences.permissionMode ?? null)) && !params.acceptAdjustments) {
       throw serviceError("SESSION_RUNTIME_CONFIRMATION_REQUIRED", "需要确认模型或权限设置的变化");
     }
+    const modelSettings = params.model === undefined ? undefined : settingsForModelSwitch(before, preflight.modelCapabilities);
     if (selectingCurrentModel && !providerChanging && !before.nextRuntimeSelection
       && (isBusy(before, excludingRunId) || isDesktop(before))) {
       // A model pick is a next-turn default. Keep the current native session and
@@ -209,7 +214,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
         || JSON.stringify(latestProfile.permissionPolicy) !== JSON.stringify(profile.permissionPolicy)
         || latestProfile.defaultModel !== profile.defaultModel) throw serviceError("POLICY_REJECTED", "Binding 已变化");
       const saved = chatSessionStore.switchRuntime(params.sessionKey, { bindingId: target.id,
-        revision: before.revision, model: params.model, modelProviderRef: pinnedProviderRef, permissionMode });
+        revision: before.revision, model: params.model, modelProviderRef: pinnedProviderRef, permissionMode, modelSettings });
       try { onChanged({ profileId: profile.id, sessionKey: saved.sessionKey }); } catch {}
       return saved;
     }
@@ -222,7 +227,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       if (!latestProfile.enabled || !latest?.enabled || latest.revision !== target.revision
         || JSON.stringify(latestProfile.permissionPolicy) !== JSON.stringify(profile.permissionPolicy)) throw serviceError("POLICY_REJECTED", "Binding 已变化");
       const saved = chatSessionStore.queueRuntimeSelection(params.sessionKey, { bindingId: target.id,
-        model: params.model, modelProviderRef: pinnedProviderRef, permissionMode, revision: before.revision });
+        model: params.model, modelProviderRef: pinnedProviderRef, permissionMode, modelSettings, revision: before.revision });
       try { onChanged({ profileId: profile.id, sessionKey: saved.sessionKey }); } catch {}
       return saved;
     }
@@ -247,7 +252,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       || JSON.stringify(latestProfile.permissionPolicy) !== JSON.stringify(profile.permissionPolicy)
       || latestProfile.defaultModel !== profile.defaultModel) throw serviceError("POLICY_REJECTED", "Binding 已变化");
     const saved = chatSessionStore.switchRuntime(params.sessionKey, { bindingId: target.id, revision: reconciled.revision,
-      clearModelOverride, permissionMode, ...(params.model !== undefined ? { model: params.model, modelProviderRef: pinnedProviderRef,
+      clearModelOverride, permissionMode, ...(params.model !== undefined ? { model: params.model, modelProviderRef: pinnedProviderRef, modelSettings,
         renewSession: !freshSession && !isDesktop(before) && (providerChanging || (modelChanging && !keepsNativeSession)) } : {}) });
     auditPending();
     try { onChanged({ profileId: profile.id, sessionKey: saved.sessionKey }); } catch {}
@@ -320,8 +325,8 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
           throw serviceError("CHAT_SESSION_REVISION_CONFLICT", "下一轮选择依据已变化");
         }
         session = chatSessionStore.switchRuntime(session.sessionKey, { bindingId: target.id, revision: session.revision,
-          model: next.model, modelProviderRef: next.modelProviderRef ?? null, permissionMode: next.permissionMode, renewSession: true });
-        session = chatSessionStore.setModelSettings(session.sessionKey, next.modelSettings);
+          model: next.model, modelProviderRef: next.modelProviderRef ?? null, permissionMode: next.permissionMode,
+          modelSettings: next.modelSettings, renewSession: true });
         auditPending();
         onChanged({ profileId: profile.id, sessionKey: session.sessionKey });
         return; // Respect this explicit next-turn choice before automatic selection.

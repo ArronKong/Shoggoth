@@ -4,6 +4,7 @@ const own = (value, key) => Object.getOwnPropertyDescriptor(value || {}, key)?.v
 const plain = value => value && Object.getPrototypeOf(value) === Object.prototype;
 const level = value => typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/u.test(value);
 const tier = value => value === null || ["fast", "priority"].includes(value);
+const ORDERED_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 function validModelSettings(value) {
   return plain(value) && Object.keys(value).length === 2
@@ -44,4 +45,22 @@ function modelCapabilities(model) {
     fastTier: ids.includes("fast") ? "fast" : ids.includes("priority") ? "priority" : null };
 }
 
-module.exports = { modelCapabilities, validModelCapabilities, validModelSettings, validModelSettingsPatch };
+function settingsForModelSwitch(session, capabilities) {
+  const previous = (session.nextRuntimeSelection?.modelSettings ?? session.modelSettings)?.thinkingLevel;
+  const options = capabilities?.thinkingOptions ?? [];
+  let thinkingLevel = null;
+  if (options.includes(previous)) {
+    thinkingLevel = previous;
+  } else if (previous === "off" && options.includes("none")) {
+    thinkingLevel = "none";
+  } else if (previous === "none" && options.includes("off")) {
+    thinkingLevel = "off";
+  } else {
+    // Only comparable effort levels can be stepped down. Leave inheritance to the runtime.
+    const rank = ORDERED_EFFORTS.indexOf(previous);
+    if (rank > 0) thinkingLevel = ORDERED_EFFORTS.slice(0, rank).findLast(option => options.includes(option)) ?? null;
+  }
+  return { thinkingLevel, serviceTier: null };
+}
+
+module.exports = { modelCapabilities, settingsForModelSwitch, validModelCapabilities, validModelSettings, validModelSettingsPatch };

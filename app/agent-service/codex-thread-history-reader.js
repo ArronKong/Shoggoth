@@ -1,6 +1,12 @@
 "use strict";
 
+const fs = require("node:fs");
+const path = require("node:path");
 const { serviceError } = require("./security");
+const { productToolRisk } = require("./product-capability-manifest");
+const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
+const { transcriptEventId } = require("./transcript-store");
+const { isLegacyBorrowedToolContent, sanitizeBorrowedToolContent } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 const MAX_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_HISTORY_ITEMS = 20_000;
 const MAX_HISTORY_TURNS = 4_096;
@@ -68,4 +74,72 @@ async function readCodexOperationThread(host, response, { operationId, turnId = 
     historyScope: { operationId, complete: true, turnId } } };
 }
 
-module.exports = { readCodexHistoryTurns, readCodexHistoryItems, readCodexPaginatedThread, readCodexOperationThread, MAX_HISTORY_BYTES };
+function readLegacyTurnToolMetadata(paths, { sessionId, turnId }) {
+  if (!paths.runtimeAccountsDir) return [];
+  const relative = path.relative(paths.trustedRoot, paths.runtimeAccountsDir);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return [];
+  let db;
+  try {
+    const file = path.join(fs.realpathSync(paths.trustedRoot), relative, "codex",
+      SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID, "home", "thread_history_1.sqlite");
+    if (fs.realpathSync(file) !== file || !fs.lstatSync(file).isFile()) return [];
+    db = new (require("node:sqlite").DatabaseSync)(file, { readOnly: true });
+    return db.prepare(
+      "SELECT item_id AS id, item_type AS kind, "
+      + "CASE item_type "
+      + "WHEN 'mcpToolCall' THEN json_extract(item_json, '$.server') || '/' || json_extract(item_json, '$.tool') "
+      + "WHEN 'dynamicToolCall' THEN COALESCE(NULLIF(json_extract(item_json, '$.namespace'), '') || '/', '') || json_extract(item_json, '$.tool') "
+      + "WHEN 'commandExecution' THEN 'command' WHEN 'fileChange' THEN 'fileChange' END AS name, "
+      + "CASE WHEN json_extract(item_json, '$.result.isError') = 1 OR json_extract(item_json, '$.success') = 0 "
+      + "OR json_extract(item_json, '$.exitCode') <> 0 THEN 'failed' ELSE json_extract(item_json, '$.status') END AS status, "
+      + "completed_at_ms - started_at_ms AS durationMs "
+      + "FROM thread_items WHERE thread_id = ? AND turn_id = ? "
+      + "AND item_type IN ('mcpToolCall', 'dynamicToolCall', 'commandExecution', 'fileChange') AND length(item_json) <= 262144 "
+      + "ORDER BY rollout_ordinal DESC LIMIT 128",
+    ).all(sessionId, turnId);
+  } catch {
+    // Missing, older or busy history storage cannot block Product history.
+    return [];
+  } finally { db?.close(); }
+}
+
+// Read-only compatibility for the already-selected page. The Product event ID
+// commits to the native item ID even when the old redaction discarded it.
+// Expose only tool identity and outcome when that exact proof matches.
+function createLegacyBorrowedToolProjector(paths) {
+  const turns = new Map();
+  let proofBytesRemaining = 2 * 1024 * 1024;
+  return (event) => {
+    const { content, runtimeRef: ref } = event;
+    if (!isLegacyBorrowedToolContent(content) || ref?.runtime !== "codex"
+      || ref.runtimeAccountId !== SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
+      || !event.runId || !ref.sessionId || !ref.turnId || proofBytesRemaining <= 0) return event;
+    const result = event.kind === "tool_result";
+    if (!result && event.kind !== "tool_call") return event;
+    const key = JSON.stringify([ref.sessionId, ref.turnId]);
+    if (!turns.has(key)) {
+      if (turns.size >= 16) return event;
+      turns.set(key, readLegacyTurnToolMetadata(paths, ref));
+    }
+    const method = result ? "item/completed" : "item/started";
+    const transcriptType = result ? "tool.result" : "tool.start";
+    const proofBytes = Buffer.byteLength(JSON.stringify(content));
+    for (const row of turns.get(key)) {
+      if (typeof row.name !== "string" || row.name.length > 256 || typeof row.id !== "string" || row.id.length > 256) continue;
+      if ((proofBytesRemaining -= proofBytes) < 0) break;
+      const receipt = { method, itemId: row.id, toolCallId: row.id, ...content };
+      if (event.id !== transcriptEventId("runtime-event", event.runId, transcriptType, row.id, row.id, receipt)) continue;
+      let name = content.tool.name;
+      if (name === "memory_read") {
+        if (!row.name.startsWith("shoggoth/") || !productToolRisk(row.name.slice("shoggoth/".length))) return event;
+        name = row.name;
+      }
+      const tool = { kind: row.kind, name, ...(result ? { status: row.status, durationMs: row.durationMs } : {}) };
+      return { ...event, content: sanitizeBorrowedToolContent({ tool, toolCallId: row.id, transcriptType }, content.borrowedMemoryRefs) };
+    }
+    return event;
+  };
+}
+
+module.exports = { readCodexHistoryTurns, readCodexHistoryItems, readCodexPaginatedThread, readCodexOperationThread,
+  createLegacyBorrowedToolProjector, MAX_HISTORY_BYTES };

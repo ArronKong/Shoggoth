@@ -169,12 +169,12 @@ state.runFixture = async () => {
   await wait(() => guided, "a running turn must steer during compaction instead of queueing the message");
   await wait(() => document.querySelector(chatSurface)?.textContent?.includes(seed.steer.content[0].text), "accepted steering bubble");
   check(!document.querySelector(".chat-toast--success"), "accepted steering appears without a success toast");
-  await wait(() => state.afterGuide, "continued native activity");
-  const firstNote = [...document.querySelector(chatSurface)!.querySelectorAll("p")]
-    .find(node => node.textContent?.includes(seed.note1.content[0].text));
+  const latestNote = () => [...document.querySelector(chatSurface)!.querySelectorAll("p")]
+    .find(node => node.textContent?.includes(seed.partial.content[0].text));
+  await wait(() => state.afterGuide && latestNote(), "continued native activity");
   check(previews().length === 1 && previews()[0] === previewBeforeGuide
-    && firstNote && (previewBeforeGuide.compareDocumentPosition(firstNote) & Node.DOCUMENT_POSITION_FOLLOWING),
-  "steering updates the original activity preview above the first assistant note");
+    && (latestNote()!.compareDocumentPosition(previewBeforeGuide) & Node.DOCUMENT_POSITION_FOLLOWING),
+  "steering keeps the original activity preview below resumed assistant progress");
   const beforeStop = await inspectActivity(true);
   document.querySelector<HTMLButtonElement>(`[role="dialog"] button[aria-label="${i18n.t("common.close")}"]`)!.click();
   await wait(() => !document.querySelector('[role="dialog"]'), "close the details before stopping");

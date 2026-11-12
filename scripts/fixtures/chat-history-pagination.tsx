@@ -208,6 +208,20 @@ state.runHistoryFixture = async () => {
   boundary.splice(5, 0, { id: "process" , role: "assistant", content: [{ type: "thinking", thinking: "process" }] } as any);
   const window = chatHistoryWindow(boundary, 50, cases[0].key);
   check(window.count === 55 && window.start === 5, "counting retains process before the first selected answer");
+  const renameRun = { nativeUiVersion: 1, runId: "rename-history" };
+  const rename = [
+    { id: "rename-user", role: "user", content: "改名", shoggoth: renameRun },
+    ...Array.from({ length: 53 }, (_, i) => ({ id: `rename-note-${i}`, role: "assistant", shoggoth: renameRun,
+      content: [{ type: "text", text: `进度 ${i}`, activity: true, segmentId: `note-${i}` }] })),
+    { id: "rename-confirm", role: "user", content: "确认", shoggoth: { ...renameRun, promptResponse: true } },
+    { id: "rename-final", role: "assistant", content: "已改名", shoggoth: renameRun },
+  ];
+  const completeRun = chatHistoryWindow(rename, 1, cases[0].key);
+  check(completeRun.count === 3 && completeRun.start === 0 && !completeRun.needsEarlier,
+    "a long run keeps the opening and activity with the final reply without counting its progress as messages");
+  const partialRun = chatHistoryWindow(rename.slice(1), 2, cases[0].key);
+  check(partialRun.count === 2 && partialRun.start === 0 && partialRun.needsEarlier,
+    "an in-run confirmation at the page edge still loads the preceding part of its run");
   const results = [];
   for (const row of cases) {
     select(row.key);

@@ -21,6 +21,7 @@ const { resolveServicePaths } = require(path.join(ROOT, "app", "agent-service", 
 
 const CRASH_EXIT_CODE = 86;
 const CLOCK = 1_000_000;
+const INITIAL_SOUL = "# SOUL.md\n\n" + "先查证，再给建议。\n".repeat(200);
 const CREATE_POINTS = new Set([
   "ledger-pending", "disabled-profile", "resource-init", "enabled-publish", "completed-outcome",
 ]);
@@ -59,9 +60,9 @@ function cleanupMarker(root, profileId) {
   return path.join(root, "runtime-cleanup", profileId);
 }
 
-function writeMarker(target) {
+function writeMarker(target, content = "ok\n") {
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(target, "ok\n", { mode: 0o600 });
+  fs.writeFileSync(target, content, { mode: 0o600 });
 }
 
 function crash() {
@@ -93,6 +94,7 @@ function controllerFor({ root, store, point = null, crashEnabled = false }) {
   }
   return createAgentLifecycleServiceController({
     productStore: storeFacade(store, overrides),
+    paths: store.paths,
     runtimeManager: {
       async stop(binding) {
         if (crashEnabled && point === "archive-disabled") crash();
@@ -100,9 +102,10 @@ function controllerFor({ root, store, point = null, crashEnabled = false }) {
         if (crashEnabled && point === "runtime-cleanup") crash();
       },
     },
-    async initializeProfile(profile) {
+    async initializeProfile(profile, { initialSoul }) {
       if (crashEnabled && point === "disabled-profile") crash();
-      writeMarker(resourceMarker(root, profile.id));
+      assert.equal(initialSoul, INITIAL_SOUL);
+      writeMarker(resourceMarker(root, profile.id), initialSoul);
       if (crashEnabled && point === "resource-init") crash();
     },
     async activateProfile() {},
@@ -117,6 +120,7 @@ function createParams(round, point) {
     // a separate binding; removed backend aliases cannot reach a crash point.
     backendId: "shoggoth",
     name: `Recovery ${round} ${point}`,
+    initialSoul: INITIAL_SOUL,
     defaultCwd: null,
     createdAt: CLOCK,
   };
@@ -150,6 +154,7 @@ function paramsFromCall(call) {
       operationId: binding.operationId,
       backendId: binding.backendId,
       name: binding.name,
+      initialSoul: INITIAL_SOUL,
       defaultCwd: binding.defaultCwd,
       createdAt: binding.createdAt,
     };
@@ -174,6 +179,8 @@ async function recover(root, point, round) {
   const controller = controllerFor({ root, store });
   controller.open();
   try {
+    await controller.runMaintenance(() => {});
+    assert.equal(store.getMcpToolCall(call.id).status, "completed", "startup must finish without resending the request");
     const params = paramsFromCall(call);
     const result = await controller.handle(call.name, params);
     const replay = await controller.handle(call.name, params);
@@ -186,8 +193,9 @@ async function recover(root, point, round) {
       `${profile.runtime}\0${profile.runtimeProfileId}`
     ))).size, 1);
     const profile = userProfiles[0];
-    assert.equal(fs.existsSync(resourceMarker(root, profile.id)), true,
-      `${point}: profile resources must exist after recovery`);
+    assert.equal(fs.readFileSync(resourceMarker(root, profile.id), "utf8"), INITIAL_SOUL,
+      `${point}: the initial SOUL must survive recovery`);
+    assert.deepEqual(fs.readdirSync(path.join(store.paths.stateDir, "agent-create-definitions")), []);
     assert.equal(profile.enabled, CREATE_POINTS.has(point));
     if (ARCHIVE_POINTS.has(point)) {
       assert.equal(fs.existsSync(cleanupMarker(root, profile.runtimeProfileId)), true,

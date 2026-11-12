@@ -70,7 +70,7 @@ async function run() {
     const group = (result, runtimeAccountId) => {
       const runtime = DEFAULT_RUNTIME_ACCOUNTS.find(account => account.id === runtimeAccountId).runtime;
       const groups = result.runtimes.filter(entry => entry.runtime === runtime);
-      const found = runtime === "codex" ? groups.find(entry => entry.name === "Codex Harness") : groups[0];
+      const found = runtime === "codex" ? groups.find(entry => entry.name === "Shoggoth") : groups[0];
       return { ...found, ids: result.models.filter(model => model.bindingId === found.bindingId).map(model => model.id) };
     };
     const settle = () => delay(SLOW + 200);

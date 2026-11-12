@@ -194,13 +194,19 @@ const checkEdgeFade = async (viewport: HTMLElement, top: boolean, bottom: boolea
 };
 const activityPreviews = () => [...surface().querySelectorAll<HTMLElement>("[data-chat-activity-preview]")];
 const loadingPreview = () => activityPreviews().find(preview => preview.dataset.status === "running");
-const checkPinnedPreview = (preview: HTMLElement, commentary: string) => {
+const checkActivityAfterCommentary = (bubble: Element | null | undefined, commentary: string) => {
+  const note = [...surface().querySelectorAll("p")]
+    .find(node => !node.closest("[data-chat-activity-preview]") && node.textContent?.includes(commentary));
+  expect(bubble && note && (note.compareDocumentPosition(bubble) & Node.DOCUMENT_POSITION_FOLLOWING)
+    && note.getBoundingClientRect().bottom <= bubble.getBoundingClientRect().top,
+  "the commentary appears above the live activity bubble");
+};
+const checkLivePreview = (preview: HTMLElement, commentary: string) => {
   const cards = activityPreviews();
-  const note = [...surface().querySelectorAll("p")].find(node => node.textContent?.includes(commentary));
+  const bubble = preview.closest("[data-live-activity-bubble]");
   expect(cards.length === 1 && cards[0] === preview, "an interim must keep one activity bubble and its original DOM node");
-  expect(note && (preview.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING),
-    "the original bubble stays above the commentary");
-  expect(preview.closest("[data-live-activity-bubble]")?.contains(replyLoader()),
+  checkActivityAfterCommentary(bubble, commentary);
+  expect(bubble?.contains(replyLoader()),
     "the active preview keeps one loader above its scrolling timeline");
 };
 const replyLoader = () => surface().querySelector(`[role="status"][aria-label="${i18n.t("chat.liveStatus.running")}"]`);
@@ -237,7 +243,7 @@ scope.runRecoveredActivityFixture = async () => {
   tool("result", "replayed", { result: "重连后收到的结果" }, recoveredRun);
   await wait(() => loadingPreview()?.textContent?.includes(replayedTitle), "the result-only replay retains the saved tool title");
   const preview = loadingPreview()!;
-  checkPinnedPreview(preview, recoveredNote);
+  checkLivePreview(preview, recoveredNote);
   expect(preview.textContent?.includes(recoveredTitle), "the bubble preserves steps received through history only");
   preview.click();
   await wait(dialog, "recovered activity dialog");
@@ -248,7 +254,7 @@ scope.runRecoveredActivityFixture = async () => {
   tool("start", "continued", { args: { activityTitle: continuedTitle } }, recoveredRun);
   await wait(() => titles().some(title => title.includes(continuedTitle)), "the open dialog receives new live steps");
   checkRecovered();
-  checkPinnedPreview(preview, recoveredNote);
+  checkLivePreview(preview, recoveredNote);
   scope.historyUnavailable = true;
   if (stopped) chat("aborted", {}, recoveredRun);
   else chat("final", { message: message("recovered-final", "assistant", recoveredFinal, recoveredRun) }, recoveredRun);
@@ -268,6 +274,71 @@ const close = async () => {
     .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
   await wait(() => !dialog(), "close modal");
   expect(surface(), "closing the modal leaves the chat view open");
+};
+
+scope.runRenameRetryFixture = async () => {
+  await wait(() => surface()?.textContent?.includes("检查任务进展") && scope.fixtureSocket?.onmessage, "chat ready");
+  const runId = "rename-retry";
+  const opening = "我会更新助理资料和身份设定。";
+  const milestone = "名称已保存，正在读回核对。";
+  const reply = "已改名为 Gemini。";
+  const firstRetry = "重试改名第 1 次。";
+  const lastRetry = "重试改名第 51 次。";
+  const update = "mcp__shoggoth__agent_definition_update";
+  const read = "mcp__shoggoth__agent_definition_read";
+  const note = (id: string, text: string) => {
+    const item = message(`event-${id}`, "assistant", [{ type: "text", activity: true, text, segmentId: id }], runId);
+    history.push(item);
+    chat("interim", { message: item }, runId);
+  };
+  const attempt = (id: string, name: string, activityTitle: string, isError: boolean) => {
+    const args = { kind: "IDENTITY", activityTitle };
+    const result = isError ? "缺少 newName" : "已完成";
+    history.push(message(`start-${id}`, "assistant", [{ type: "toolCall", id, name, arguments: args }], runId),
+      message(`result-${id}`, "toolResult", [{ type: "toolResult", toolCallId: id, name, text: result, is_error: isError }], runId));
+    tool("start", id, { name, args }, runId);
+    tool("result", id, { name, result, isError }, runId);
+  };
+  const threadHas = (text: string) => [...surface().querySelectorAll("p")]
+    .some(node => !node.closest("[data-chat-activity-preview]") && node.textContent?.includes(text));
+  const checkDetails = () => {
+    const steps = [...dialog()!.querySelectorAll("li button")];
+    expect(steps.filter(step => step.textContent?.includes("重试改名第 ")).length === 51, "all retry notes are available in activity");
+    expect(!dialog()?.textContent?.includes(opening) && !dialog()?.textContent?.includes(milestone), "key notes appear only in the thread");
+    expect(!threadHas(firstRetry) && !threadHas(lastRetry), "retry notes have no standalone bubble");
+  };
+  chat("accepted", { message: native(runId) }, runId);
+  note("opening", opening);
+  attempt("rename-first", update, "更新助理名称", true);
+  await openLive("更新助理名称");
+  note("retry-1", firstRetry);
+  attempt("rename-retry-1", update, "重试更新助理名称", true);
+  await wait(() => dialog()?.textContent?.includes(firstRetry), "an open dialog receives the retry note");
+  expect(!threadHas(firstRetry), "a verified retry folds before the inline budget is exhausted");
+  for (let i = 2; i <= 51; i += 1) {
+    note(`retry-${i}`, `重试改名第 ${i} 次。`);
+    attempt(`rename-retry-${i}`, update, "重试更新助理名称", i < 51);
+  }
+  note("milestone", milestone);
+  attempt("verify", read, "读回身份设定", false);
+  await wait(() => threadHas(milestone) && dialog()?.textContent?.includes(lastRetry), "live progress is split between chat and activity");
+  checkDetails();
+  const final = message("rename-final", "assistant", reply, runId);
+  history.push(final);
+  chat("final", { message: final }, runId);
+  await wait(() => dialog()?.querySelector('[data-status="done"]') && !loadingPreview(), "the reply closes the live preview");
+  checkDetails();
+  await close();
+  window.dispatchEvent(new CustomEvent("openclaw:open-chat-session", { detail: otherKey }));
+  await wait(() => threadHas(untimedReply), "left the session");
+  window.dispatchEvent(new CustomEvent("openclaw:open-chat-session", { detail: key }));
+  await wait(() => shortcut(reply), "saved reply has the activity shortcut");
+  expect(threadHas(opening) && threadHas(milestone) && threadHas(reply), "reloaded chat shows milestones and final reply");
+  shortcut(reply)!.click();
+  await wait(() => dialog()?.textContent?.includes(lastRetry), "saved retry notes are visible in activity");
+  checkDetails();
+  expect(scope.fixtureErrors.length === 0, `browser errors: ${scope.fixtureErrors}`);
+  return { backendId, immersive, renameProgress: 53, retryNotesInActivity: 51, liveAndReloaded: true };
 };
 
 scope.runTimelineModalFixture = async () => {
@@ -319,6 +390,7 @@ scope.runTimelineModalFixture = async () => {
   ], timestamp: Date.now(), ...native("run-one") } });
   await wait(() => surface().textContent?.includes("工具执行前的阶段说明"), "commentary-only live bubble remains");
   expect(!loadingPreview(), "commentary stays in its message, and does not start a loading preview");
+  checkActivityAfterCommentary(waitingLoader?.closest("[data-live-activity-bubble]"), "工具执行前的阶段说明");
   tool("start", "first", { args: { command: "printf live-first", activityTitle: "检查第一项" } });
   await wait(() => loadingPreview()?.textContent?.includes("检查第一项"), "live activity appears in the loading bubble");
   expect(replyLoader() === waitingLoader, "the same two-ball loader stays mounted through expansion");
@@ -326,7 +398,7 @@ scope.runTimelineModalFixture = async () => {
   expect(!surface().querySelector("[data-chat-process]") && surface().querySelectorAll('[data-chat-activity-preview][data-status="running"]').length === 1,
     "the activity bubble is the single live activity surface in the thread");
   const trigger = loadingPreview()!;
-  checkPinnedPreview(trigger, "工具执行前的阶段说明");
+  checkLivePreview(trigger, "工具执行前的阶段说明");
   expect(trigger.getAttribute("role") === "button" && trigger.getAttribute("aria-haspopup") === "dialog"
     && trigger.tabIndex === 0, "the preview is a focusable dialog trigger");
   trigger.querySelector("li")!.click();
@@ -347,19 +419,19 @@ scope.runTimelineModalFixture = async () => {
   await wait(() => dialog()?.textContent?.includes("弹窗打开后追加的思考"), "thinking updates");
   chat("delta", { replyPhase: "commentary", message: { role: "assistant", content: "弹窗打开后公开" } });
   await wait(() => surface().textContent?.includes("弹窗打开后公开") && loadingPreview(), "streamed commentary keeps the live activity");
-  checkPinnedPreview(trigger, "弹窗打开后公开");
+  checkLivePreview(trigger, "弹窗打开后公开");
   chat("interim", { message: { role: "assistant", content: [
     { type: "text", text: "弹窗打开后公开进展", activity: true, segmentId: "progress-one" },
   ], timestamp: Date.now(), ...native("run-one") } });
   await wait(() => surface().textContent?.includes("弹窗打开后公开进展"), "live commentary remains in chat bubbles");
-  checkPinnedPreview(trigger, "弹窗打开后公开进展");
+  checkLivePreview(trigger, "弹窗打开后公开进展");
   expect(!dialog()?.textContent?.includes("弹窗打开后公开进展"), "live modal omits duplicate commentary");
   expect(!loadingPreview()?.textContent?.includes("弹窗打开后公开进展"), "live bubble omits duplicate commentary");
   await wait(() => dialogSummary()?.startsWith("2 步 · 1 工具 ·"), "live step count excludes commentary");
   tool("start", "second", { args: { command: "printf live-second", activityTitle: "检查第二项" } });
   await wait(() => dialog()?.textContent?.includes("检查第二项") && loadingPreview()?.textContent?.includes("检查第二项"),
     "a later tool updates the open dialog and the existing bubble");
-  checkPinnedPreview(trigger, "弹窗打开后公开进展");
+  checkLivePreview(trigger, "弹窗打开后公开进展");
   tool("result", "first", { result: "第一项最终输出", durationS: 1.25 });
   tool("result", "second", { result: "第二项失败", isError: true, durationS: 2.5 });
   await wait(() => dialog()?.textContent?.includes("第一项最终输出") && dialog()?.querySelector('[data-st="error"]'), "tool result and failure update");
@@ -556,7 +628,7 @@ if (previewMode) {
     await openLive(sampleSteps[0]);
     await wait(() => surface().textContent?.includes(sampleProgress) && loadingPreview()?.textContent?.includes(sampleSteps[2]),
       "the next tool arrives after the preview's commentary segment");
-    checkPinnedPreview(original, sampleProgress);
+    checkLivePreview(original, sampleProgress);
     await wait(() => dialog()?.textContent?.includes(sampleSteps.at(-1)!), "an open dialog receives the remaining steps");
     await close();
     await wait(() => surface().querySelector(".chat-bubble.is-streaming")?.textContent?.includes("建议把周五"),

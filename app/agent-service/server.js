@@ -2120,6 +2120,8 @@ function createAgentService(options) {
       && methods.every((method) => typeof value[method] === "function"))
       ? createAgentLifecycleServiceController({
         productStore,
+        paths,
+        isSensitiveValue,
         archiveRetention: agentArchiveRetention,
         hasActiveExternalRuns: (profileId) => automationWorkRunStore.listWorkRuns({ profileId })
           .some((run) => run.status === "queued" || ACTIVE_WORK_RUN_STATUSES.has(run.status)),
@@ -2142,10 +2144,10 @@ function createAgentService(options) {
             return runtimeManager.stop(binding);
           },
         },
-        async initializeProfile(profile, { initialIdentity } = {}) {
+        async initializeProfile(profile, { initialIdentity, initialSoul } = {}) {
           shoggothMemory?.resumeProfile(profile.id);
           nativeSkillStore.ensureProfile(profile.id);
-          agentDefinitionStore.ensureProfile({ profileId: profile.id, profileName: profile.name, initialIdentity });
+          agentDefinitionStore.ensureProfile({ profileId: profile.id, profileName: profile.name, initialIdentity, initialSoul });
           agentFileStore.ensureProfile(profile.id);
           if (typeof toolRegistry.toolsMarkdown === "function"
             && typeof toolRegistry.revision === "string") {
@@ -3270,6 +3272,11 @@ function createAgentService(options) {
         heartbeatRules: {
           read: async (profileId) => (await proactiveService.handle("proactive.document.get", { profileId })).document,
           write: async (profileId, content, expectedRevision) => (await proactiveService.handle("proactive.document.set",
+            { profileId, content, expectedRevision })).document,
+        },
+        dailyReviewRules: {
+          read: async (profileId) => (await proactiveService.handle("proactive.review-document.get", { profileId })).document,
+          write: async (profileId, content, expectedRevision) => (await proactiveService.handle("proactive.review-document.set",
             { profileId, content, expectedRevision })).document,
         },
         ...(memoryEngine.owner === "shoggoth-memory-core" ? { memoryFiles: {

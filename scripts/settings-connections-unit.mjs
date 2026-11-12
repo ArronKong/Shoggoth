@@ -188,4 +188,45 @@ config = { ...config, hermesMode: "remote" };
 calls.length = 0;
 await context.applyConfigChange();
 assert.deepEqual(calls, [["hermes", "reconfigure"]]);
+
+// Execute the production discovery reconciliation effect with controlled
+// status samples. It must refresh a stale form without overwriting a draft.
+const settingsSource = fs.readFileSync(path.join(root, "app/manage-ui/src/pages/SettingsPage.tsx"), "utf8");
+const settingsAst = ts.createSourceFile("SettingsPage.tsx", settingsSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+let discoveryEffect;
+function visit(node) {
+  if (ts.isCallExpression(node) && node.expression.getText(settingsAst) === "useEffect"
+    && node.arguments[0]?.getText(settingsAst).includes("!cfg.gatewayAutoDiscover")) discoveryEffect = node.getText(settingsAst);
+  ts.forEachChild(node, visit);
+}
+visit(settingsAst);
+assert.ok(discoveryEffect);
+const discoveryJs = ts.transpileModule(discoveryEffect, { compilerOptions: {
+  module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+} }).outputText;
+function reconcileDiscovery({ connected = true, automatic = true, edited = false, disabled = false, managed = false } = {}) {
+  const cfg = { gatewayUrl: "ws://127.0.0.1:18792", gatewayAutoDiscover: automatic,
+    disabledBackends: disabled ? ["openclaw"] : [] };
+  const state = { cfg, reconnecting: [], writes: 0 };
+  const bindings = { cfg, cfgRef: { current: cfg }, savedConfigRef: { current: { ...cfg } },
+    managedModes: { openclaw: managed }, editVersionsRef: { current: edited ? { gatewayUrl: 1 } : {} },
+    backends: [{ id: "openclaw", connected, disabled, info: { gatewayUrl: "ws://127.0.0.1:18789" } }],
+    useEffect: fn => fn(), setCfg: next => { state.cfg = next; },
+    setReconnectingBackends: update => { state.reconnecting = update(state.reconnecting); },
+    updateConfig: () => { state.writes++; },
+  };
+  vm.runInNewContext(discoveryJs, bindings);
+  return { ...state, saved: bindings.savedConfigRef.current };
+}
+let reconciled = reconcileDiscovery();
+assert.equal(reconciled.cfg.gatewayUrl, "ws://127.0.0.1:18789");
+assert.equal(reconciled.saved.gatewayUrl, reconciled.cfg.gatewayUrl);
+assert.equal(reconciled.writes, 0, "discovery was already saved by the Host");
+assert.deepEqual(Array.from(reconcileDiscovery({ connected: false }).reconnecting), ["openclaw"]);
+for (const options of [{ edited: true }, { automatic: false }, { disabled: true }, { managed: true }]) {
+  reconciled = reconcileDiscovery(options);
+  assert.equal(reconciled.cfg.gatewayUrl, "ws://127.0.0.1:18792");
+  assert.equal(reconciled.writes, 0);
+}
 console.log(`PASS settings: ${toggleIds.length} disconnectable backend controls, built-in service kept running when hidden, final connection guard, reconnect, backend filtering and live endpoint changes`);
+console.log("PASS settings: automatic discovery refreshes the saved address and retries while preserving manual drafts and managed/disabled connections");

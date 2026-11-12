@@ -46,7 +46,7 @@ const DETECT_MAX_MS = 10000; // 仍在启动的后端到点后在列表里显示
 const POLL_MS = 1500;
 const FADE_MS = 600; // 区块淡出后再卸载
 const NOTHING_LEFT_MS = 3000; // 列表变空要持续这么久（约两轮轮询）才回到「没找到」页
-const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
+const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18789";
 // 本机标记：完成过首启的窗口不再先盖白屏 Logo；没有标记时先盖上，避免
 // 读配置期间闪出主界面。读不到 storage 时按「已完成」处理，宁可不打扰。
 const SEEN_KEY = "shoggoth.setup.seen";
@@ -467,22 +467,12 @@ export default function SetupOverlay() {
     }
   }, [toast]);
 
-  // R125:本机网关真实端口与配置不一致(版本间默认端口漂移,如 2026.5.x 的
-  // 18789)→ 自动采用检测到的地址,配置落盘后 backend 懒重连,轮询自动转绿。
-  const adoptedUrl = useRef<string | null>(null);
+  // The host owns discovery for both first-run and existing installs. Only
+  // mirror its current address here; the renderer must not overwrite a manual URL.
   useEffect(() => {
     const oc = statuses?.find((b) => b.id === "openclaw");
-    const localUrl = ocHost?.localGatewayUrl;
-    if (!oc || oc.connected || !localUrl) return;
-    const configured = (oc.info.gatewayUrl || "").trim();
-    if (!isLoopback(configured) || configured === localUrl || adoptedUrl.current === localUrl) return;
-    adoptedUrl.current = localUrl;
-    void updateConfig({ gatewayUrl: localUrl })
-      .then(() => setOcUrl(localUrl))
-      .catch(() => {
-        adoptedUrl.current = null; // 写失败允许下一轮重试
-      });
-  }, [statuses, ocHost]);
+    if (oc?.info.gatewayUrl) setOcUrl(oc.info.gatewayUrl);
+  }, [statuses]);
 
   // 一键启动:成功后什么都不用做——轮询会自动转绿;失败给第二级
   // 「安装服务并启动」(首装机器还没有 launchd 服务时的正路)。

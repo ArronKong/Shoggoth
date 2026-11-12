@@ -475,7 +475,7 @@ class FileMemoryStore {
   // A whole-file edit of USER.md or MEMORY.md from the settings page or a
   // conversation. Reads accept any hand-edited text; this only serializes the
   // write with memory transactions and checks the expected file hash.
-  async writeDocument(profileId, relative, content, expectedHash) {
+  async writeDocument(profileId, relative, content, expectedHash, assertCurrent) {
     if (!["USER.md", "MEMORY.md"].includes(relative)) throw serviceError("MEMORY_PATH_NOT_ALLOWED", "不是核心记忆文件");
     if (typeof content !== "string" || !content.isWellFormed() || content.includes("\0")
       || Buffer.byteLength(content, "utf8") > MAX_DOCUMENT_BYTES) throw serviceError("MEMORY_DOCUMENT_INVALID", "记忆文件内容无效或过大");
@@ -485,6 +485,7 @@ class FileMemoryStore {
       this._check(profileId); host.assertCurrent();
       if (sha256(this._read(profileId, relative)) !== expectedHash) throw serviceError("MEMORY_REVISION_CONFLICT", "记忆文件已变化，请重新读取");
       const previous = this._snapshot(profileId).items.filter(item => item.memoryPath === relative);
+      assertCurrent?.();
       host.assertCurrent();
       atomicWritePrivateFile(path.join(this.workspace(profileId), relative), content, { trustedRoot: this.paths.trustedRoot });
       this.snapshots.delete(profileId);

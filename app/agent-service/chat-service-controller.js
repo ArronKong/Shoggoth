@@ -7,6 +7,7 @@ const { validResponseMetadata } = require("../chat-response-metadata");
 const { publicCronTranscript } = require("./cron-output-policy");
 const { runtimeFailureDetail } = require("./runtime-failure-detail");
 const { managedChatWorkspace } = require("./chat-workspace");
+const { settingsForModelSwitch } = require("./chat-model-settings");
 const {
   federationInputProvenanceForOperationId,
 } = require("../federation-chat-provenance");
@@ -19,8 +20,10 @@ const {
   validateChatServiceResult,
 } = require("./chat-service-protocol");
 const { createCodexChatHistoryMapper } = require("./codex-chat-history");
+const { createLegacyBorrowedToolProjector } = require("./codex-thread-history-reader");
 const { adaptCodexChatHistoryPage, fragmentHistoryItem } = require("./chat-history-adapter");
 const { ensurePrivateDirectoryTree, serviceError } = require("./security");
+const { isLegacyBorrowedToolContent } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 const { resolveRuntimePermissionMode } = require("./runtime-permission-modes");
 const activeMemoryCommand = require("./active-memory-command-protocol");
 const { normalizeInteractiveRequestV1, mcpElicitationUsesApprovalWait } = require("../core/shoggoth-interaction-contract");
@@ -159,6 +162,13 @@ function transcriptMessage(event, role, content) {
   };
 }
 
+function transcriptToolName(content) {
+  const tool = content?.tool;
+  if (tool?.name === "memory_read" && isLegacyBorrowedToolContent(content)) return "tool";
+  return typeof tool?.name === "string" && tool.name
+    ? tool.name : typeof tool?.kind === "string" && tool.kind ? tool.kind : "tool";
+}
+
 function transcriptHistoryItem(event, runSource) {
   if (event.content?.importedFrom === "codex" && event.content.historyItem) {
     const item = structuredClone(event.content.historyItem), message = item.payload?.message;
@@ -218,8 +228,7 @@ function transcriptHistoryItem(event, runSource) {
     message = transcriptMessage(event, role, [{ type: "plan", planEntries }]);
   } else if (event.kind === "tool_call") {
     const tool = event.content?.tool;
-    const toolName = typeof tool?.name === "string" && tool.name
-      ? tool.name : typeof tool?.kind === "string" && tool.kind ? tool.kind : "tool";
+    const toolName = transcriptToolName(event.content);
     const args = tool?.displayArgs && typeof tool.displayArgs === "object"
       && !Array.isArray(tool.displayArgs) ? structuredClone(tool.displayArgs) : undefined;
     role = "assistant";
@@ -231,8 +240,7 @@ function transcriptHistoryItem(event, runSource) {
     }]);
   } else if (event.kind === "tool_result") {
     const tool = event.content?.tool;
-    const toolName = typeof tool?.name === "string" && tool.name
-      ? tool.name : typeof tool?.kind === "string" && tool.kind ? tool.kind : "tool";
+    const toolName = transcriptToolName(event.content);
     const failed = tool?.status === "failed";
     const result = typeof tool?.resultSummary === "string" && tool.resultSummary
       ? tool.resultSummary : typeof tool?.errorCode === "string" ? tool.errorCode : "";
@@ -403,9 +411,18 @@ function paginateTranscriptEvents(options) {
         const timing = options.getTurnTiming?.(event.runId);
         if (timing) item.payload.message.shoggoth.turnTiming = timing;
       }
-      return item ? fragmentHistoryItem(item).map((part, index) => ({ seq: event.seq, index, item: part })) : [];
+      const legacyTool = ["tool_call", "tool_result"].includes(display.kind)
+        && isLegacyBorrowedToolContent(display.content) ? display : null;
+      return item ? fragmentHistoryItem(item).map((part, index) => ({ seq: event.seq, index, item: part, legacyTool })) : [];
     }).filter(entry => entry.seq < beforeSeq || entry.index < beforeIndex);
   let selected = available.slice(Math.max(0, available.length - params.limit));
+  // Legacy tool receipts contain no body. Restore only the selected page and
+  // keep the original sequence and cursor even when the native store is gone.
+  for (const entry of selected) {
+    if (!entry.legacyTool || entry.item.fragment !== null) continue;
+    const display = options.projectLegacyTool(entry.legacyTool);
+    if (display !== entry.legacyTool) entry.item = transcriptHistoryItem(display, options.getRunSource?.(display.runId));
+  }
   while (selected.length > 0) {
     const hasMore = available.length > selected.length;
     const nextCursor = hasMore ? cursorCodec.encode({
@@ -868,6 +885,7 @@ function createChatServiceController(options = {}) {
       events: params.auditRunId ? events.filter(event => event.runId === params.auditRunId)
         : publicCronTranscript(withoutLegacyCompactionDuplicates(events), runId => coordinator.getCronOutput?.(runId, events)),
       resolveDisplay: event => transcriptStore.displayEvent(session.profileId, session.id, event),
+      projectLegacyTool: createLegacyBorrowedToolProjector(options.paths),
       getRunSource: runId => coordinator.getRun(runId)?.source,
       getTurnTiming: runId => {
         const run = coordinator.getRun(runId);
@@ -903,7 +921,7 @@ function createChatServiceController(options = {}) {
 
     let cursor = null;
     const cursors = new Set();
-    let available = false;
+    let model;
     try {
       for (let pageIndex = 0; pageIndex < 32; pageIndex += 1) {
         const listModels = settingsBindingId && options.listBindingModels ? options.listBindingModels : options.listProfileModels;
@@ -914,10 +932,9 @@ function createChatServiceController(options = {}) {
           limit: 100,
         });
         fence(generation);
-        if (page.models.some((model) => model.id === params.model)) {
-          available = true;
-          break;
-        }
+        // This older endpoint selects from the Binding's default model source.
+        model = page.models.find(item => item.id === params.model && !item.modelProviderRef);
+        if (model) break;
         if (!page.hasMore) break;
         if (page.nextCursor === null || page.nextCursor === cursor || cursors.has(page.nextCursor)) {
           throw controllerError("BACKEND_NOT_READY", "Agent model catalog 游标无效");
@@ -933,7 +950,7 @@ function createChatServiceController(options = {}) {
       if (error?.code === "BACKEND_NOT_READY") throw error;
       throw controllerError("BACKEND_NOT_READY", "无法读取当前 Agent 的模型目录");
     }
-    if (!available) {
+    if (!model) {
       throw controllerError("CHAT_SESSION_MODEL_NOT_AVAILABLE", "该模型不在当前账号目录中");
     }
     fence(generation);
@@ -941,7 +958,8 @@ function createChatServiceController(options = {}) {
     if (!current || current.runtimeBindingId !== session.runtimeBindingId || current.revision !== session.revision) {
       throw controllerError("CHAT_SESSION_NOT_READY", "会话已变化，请重试");
     }
-    return { session: chatSessionStore.setModelOverride(params.sessionKey, params.model) };
+    const modelSettings = settingsForModelSwitch(current, model.capabilities);
+    return { session: chatSessionStore.setModelOverride(params.sessionKey, params.model, modelSettings) };
   }
 
   async function setSessionSettings(params, generation) {

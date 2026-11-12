@@ -20,7 +20,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
 const { resolveOpenclawBin, resolveOpenclawProgram } = require("../cli-runtime/openclaw");
 
-const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
+const { DEFAULT_GATEWAY_URL } = require("./config-store");
 const CLIENT_ID = "openclaw-control-ui";
 const CLIENT_MODE = "webchat";
 const CLIENT_ROLE = "operator";
