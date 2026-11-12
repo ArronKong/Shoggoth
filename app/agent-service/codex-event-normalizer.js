@@ -446,7 +446,9 @@ function normalizeCodexEvent(message, rawOptions = {}) {
     if (retryAt !== null) return known("account_backoff", { retryAt });
     return known(accountRateLimitsAvailable(params.rateLimits) ? "account_available" : "account_rate_limits");
   }
-  if (method === "error") {
+  // The native retry notice is diagnostic. The turn/completed event carries
+  // the final failure if the request never recovers.
+  if (method === "error" && params.willRetry !== true) {
     return known("error", {
       errorCode: safeId(params.error?.code ?? params.code ?? "CODEX_ERROR", options),
       error: params.error ?? params,

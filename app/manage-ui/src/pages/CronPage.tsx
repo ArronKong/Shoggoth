@@ -56,7 +56,7 @@ import HermesCronForm, {
 import OpenClawCronForm, {
   emptyOpenClawDraft,
   openClawDraftFromJob,
-  openClawInputFromDraft,
+  openClawPatchFromDraft,
   validateOpenClawDraft,
   type OpenClawCronDraft,
 } from "./cron/OpenClawCronForm";
@@ -512,9 +512,9 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
       if (mode === "edit-openclaw") {
         const validation = validateOpenClawDraft(openClawDraft);
         if (validation) throw new Error(t(validation));
-        const input = openClawInputFromDraft(openClawDraft);
-        requireName(input.name, t);
-        await updateCronJob(selected.id, input);
+        requireName(openClawDraft.name, t);
+        const patch = openClawPatchFromDraft(openClawDraft, selected);
+        if (Object.keys(patch).length > 0) await updateCronJob(selected.id, patch);
         return t("cron.savedOpenClaw");
       }
       if (mode === "edit-hermes") {

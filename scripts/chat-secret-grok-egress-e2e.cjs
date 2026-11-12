@@ -8,6 +8,7 @@ const { GrokBuildRuntimeAdapter } = require("../app/agent-service/grok-build-run
 const { TemporarySecretStore } = require("../app/agent-service/temporary-secret-store");
 const { ModelSecretProjection } = require("../app/agent-service/model-secret-projection");
 const { ModelSecretGateway, TARGETS } = require("../app/agent-service/model-secret-gateway");
+const { ModelSecretProvenance } = require("../app/agent-service/model-secret-provenance");
 async function main() {
   let originalMode = false;
   const root = fs.realpathSync(fs.mkdtempSync("/private/tmp/sg-grok-secret-")), workspace = path.join(root, "workspace"), home = path.join(root, ".grok");
@@ -22,6 +23,7 @@ async function main() {
   const requests = [], outputSecret = "GrokNativeFixture987", scope = { profileId: "grok-fixture", sessionId: "grok-session-a" };
   fs.writeFileSync(path.join(workspace, "fixture.cjs"), `const fs=require('fs');fs.appendFileSync('count','1');console.log('password: ${outputSecret}');console.log('Public receipt: receipt-17');`);
   let failure, noTool = false, followup = false, adapter, runtime, title = false, verified = false, serial = 0;
+  let nextFollowupFailure;
   const provider = http.createServer(async (req, res) => {
     try {
       if (req.method === "GET") {
@@ -37,6 +39,12 @@ async function main() {
       if (isTitle) title = true;
       const result = body.input.some(item => item.type === "function_call_output");
       if (result) { assert(raw.includes("Public receipt: receipt-17")); followup = true; }
+      const injected = result && Array.isArray(body.tools) && !isTitle ? nextFollowupFailure : undefined;
+      if (injected) nextFollowupFailure = undefined;
+      if (injected === "502") {
+        res.writeHead(502, { "content-type": "application/json" }).end('{"error":"synthetic upstream failure"}');
+        return;
+      }
       const n = ++serial, responseId = `fixture-${n}`;
       let item;
       if (isTitle) item = { id: `fc-${n}`, type: "function_call", name: "session_title", call_id: `title-${n}`,
@@ -53,12 +61,17 @@ async function main() {
       res.writeHead(200, { "content-type": "text/event-stream" }); let sequence = 0;
       const event = (type, extra) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...extra })}\n\n`);
       event("response.created", { response: { ...response, status: "in_progress", output: [] } });
+      if (injected === "disconnect") {
+        setTimeout(() => res.destroy(), 50);
+        return;
+      }
       event("response.output_item.added", { output_index: 0, item: { ...item, status: "in_progress" } });
       event("response.output_item.done", { output_index: 0, item });
       event("response.completed", { response }); res.end();
     } catch (error) { failure = error; res.writeHead(400); res.end("synthetic provider rejected request"); }
   });
-  const gateway = new ModelSecretGateway({ projection: new ModelSecretProjection({ secrets }), request(url, options, cb) {
+  const gateway = new ModelSecretGateway({ projection: new ModelSecretProjection({ secrets }),
+    provenance: new ModelSecretProvenance({ paths, secrets }), request(url, options, cb) {
     assert([TARGETS["grok-cli"], TARGETS["grok-api-key"]].some(target => url.href.startsWith(target)));
     return http.request(new URL(url.pathname, `http://127.0.0.1:${provider.address().port}`), options, cb);
   } });
@@ -108,12 +121,23 @@ async function main() {
     assert.equal(originalRequests.filter(body => Array.isArray(body.tools)).length, 1);
     assert.equal(originalRequests.filter(body => !body.tools && body.input[0]?.content?.startsWith("Write an ultra-short dashboard line")).length, 1);
     originalMode = false;
+    for (const mode of ["502", "disconnect"]) {
+      const beforeRetry = requests.length;
+      nextFollowupFailure = mode;
+      await turn(session.id, "Use the saved receipt after a temporary model-service interruption.");
+      assert.equal(nextFollowupFailure, undefined, "the fixture interrupted the main request");
+      const attempts = requests.slice(beforeRetry).filter(body => Array.isArray(body.tools));
+      assert.equal(attempts.length, 2, "Grok retried the same request once");
+      assert.deepEqual(attempts[0].input, attempts[1].input);
+      assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "1");
+    }
     const before = requests.length; runtime.host.modelSecretScope = null;
     await turn(session.id, "No model call without a live owner.", true);
     assert.equal(requests.length, before); verified = true;
     console.log(JSON.stringify({ verified, silentOriginalFallbackOnce: true, version: runtime.host.initializedResponse._meta?.agentVersion,
       modelRequests: requests.length, nativeExecutions: 1, title: true,
-      restartResume: true, immutableScope: true, failureProviderCalls: 0, evidence: root }));
+      restartResume: true, immutableScope: true, recovered502: true, recoveredBeforeStreamOutput: true,
+      failureProviderCalls: 0, evidence: root }));
   } finally {
     fs.writeFileSync(path.join(root, "synthetic-model-requests.json"), JSON.stringify(requests, null, 2), { mode: 0o600 });
     if (!verified) console.error(JSON.stringify({ retainedFailure: root, providerCalls: requests.length }));

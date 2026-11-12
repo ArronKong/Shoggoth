@@ -20,6 +20,7 @@ async function compile(relativePath, name) {
     bundle: true,
     platform: "node",
     format: "cjs",
+    loader: { ".svg": "dataurl" },
     logLevel: "silent",
   });
   return { mod: createRequire(outfile)(outfile), dir };

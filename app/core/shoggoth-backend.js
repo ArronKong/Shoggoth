@@ -30,7 +30,7 @@ const { recordChatSendFailure } = require("../agent-service/chat-send-diagnostic
 const { resolveServicePaths } = require("../agent-service/paths");
 const { SERVICE_PROTOCOL_VERSION } = require("../agent-service/service-protocol-version");
 const agentFileProtocol = require("../agent-service/agent-file-protocol");
-const { importPath, payloadPath, readBoundedFile, sha256, fileIdFromStorageKey } = require("../agent-service/agent-file-store");
+const { importPath, payloadPath, readBoundedFile, readWorkspaceOutput, sha256, fileIdFromStorageKey } = require("../agent-service/agent-file-store");
 const { ensurePrivateDirectoryTree } = require("../agent-service/security");
 const { artifactKind } = require("./artifact-scan");
 const {
@@ -2767,13 +2767,28 @@ class ShoggothBackend extends AgentBackend {
     const descriptor = this.runtimeCliAuth.get(target.profile.runtimeAccountId);
     const runtimeHome = descriptor?.runtime === target.profile.runtime
       ? descriptor.processHome : os.homedir();
+    const profileId = target.profile.id;
+    const workspace = target.session.workspace;
     const files = await collectSessionOutputArtifacts({
       events,
       runs,
-      workspace: target.session.workspace,
+      workspace,
       runtimeHome,
       sessionCreatedAt: sinceMs,
       agentId: target.agentId,
+      isPublishedCopy: async (item, { fileId, runId }) => {
+        if (!agentFileProtocol.FILE_ID.test(fileId) || item.size > agentFileProtocol.MAX_FILE_BYTES) return false;
+        try {
+          const { file, path: savedPath } = await this._call("agent.files.get", { profileId, fileId });
+          if (file.source.kind !== "cron" || file.source.runId !== runId || file.source.sessionKey !== target.sessionKey
+            || file.sizeBytes !== item.size || savedPath !== payloadPath(this.paths, profileId, fileId, file.name)) return false;
+          const source = await readWorkspaceOutput(this.paths, { profileId, workspace, relativePath: path.relative(workspace, item.path) });
+          if (sha256(source) !== file.sha256) return false;
+          return source.equals(await readBoundedFile(savedPath, { privateFile: true }));
+        } catch {
+          return false;
+        }
+      },
     });
     // Private files are resolved only through their owner-scoped catalog.
     return files.filter(item => !item.path.startsWith(this.paths.agentsDir + path.sep));

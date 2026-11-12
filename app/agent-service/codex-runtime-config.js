@@ -92,9 +92,10 @@ function modelSecretProviderConfig(providerKind, baseUrl) {
     [`${prefix}.base_url`]: baseUrl,
     [`${prefix}.wire_api`]: "responses",
     [`${prefix}.supports_websockets`]: false,
-    // A projection failure must not replay an unconfirmed model request.
+    // The gateway reports local rejections as permanent. Let Codex own the
+    // single retry budget for the current sampling request.
     [`${prefix}.request_max_retries`]: 0,
-    [`${prefix}.stream_max_retries`]: 0,
+    [`${prefix}.stream_max_retries`]: 5,
     [`${prefix}.requires_openai_auth`]: providerKind === "chatgpt",
     ...(providerKind === "openai-api-key" ? { [`${prefix}.env_key`]: OPENAI_API_KEY_ENV } : {}),
     "features.enable_request_compression": false,

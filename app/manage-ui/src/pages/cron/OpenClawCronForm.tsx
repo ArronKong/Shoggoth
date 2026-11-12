@@ -15,7 +15,6 @@ import { CronExpressionPicker, DateTimePicker, IntervalPicker } from "./CronSche
 import { CronScheduleType, CronTaskNameRow } from "./CronFormLayout";
 
 type SchedKind = CronSchedule["kind"];
-type PayloadKind = "agentTurn" | "systemEvent";
 
 export interface OpenClawCronDraft {
   backendId: "openclaw";
@@ -38,9 +37,11 @@ export interface OpenClawCronDraft {
   streamMatch: string;
   streamBatchMs: number;
   streamMaxBatchBytes: number;
-  payloadKind: PayloadKind;
+  payloadKind: OpenClawCronPayload["kind"];
   prompt: string;
   systemText: string;
+  commandFormat: "shell" | "argv";
+  commandText: string;
   model: string;
   fallbacks: string;
   thinking: string;
@@ -128,9 +129,28 @@ function scheduleFromDraft(draft: OpenClawCronDraft): CronSchedule {
   };
 }
 
-// payload 是 OpenClaw 的核心控制面，agentTurn/systemEvent 分开构建。
+function commandArgvFromDraft(draft: OpenClawCronDraft): string[] | null {
+  if (draft.commandFormat === "shell") {
+    return draft.commandText.length > 0 ? ["sh", "-lc", draft.commandText] : null;
+  }
+  try {
+    const argv: unknown = JSON.parse(draft.commandText);
+    if (Array.isArray(argv) && argv.length > 0 && argv.every((arg) => typeof arg === "string" && arg.length > 0)) {
+      return argv;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function payloadFromDraft(draft: OpenClawCronDraft): OpenClawCronPayload {
   if (draft.payloadKind === "systemEvent") return { kind: "systemEvent", text: draft.systemText };
+  if (draft.payloadKind === "command") {
+    const argv = commandArgvFromDraft(draft);
+    if (!argv) throw new Error("Invalid OpenClaw command arguments");
+    return { kind: "command", argv };
+  }
   const fallbacks = listFromText(draft.fallbacks);
   const toolsAllow = listFromText(draft.toolsAllow);
   return {
@@ -204,6 +224,8 @@ export function emptyOpenClawDraft(): OpenClawCronDraft {
     payloadKind: "agentTurn",
     prompt: "",
     systemText: "",
+    commandFormat: "argv",
+    commandText: "",
     model: "",
     fallbacks: "",
     thinking: "",
@@ -231,6 +253,9 @@ export function openClawDraftFromJob(job: UnifiedCronJob): OpenClawCronDraft {
   const base = emptyOpenClawDraft();
   const schedule = job.schedule;
   const payload = job.payload;
+  const argv = payload?.kind === "command" && Array.isArray(payload.argv) ? payload.argv : [];
+  // OpenClaw's --command option stores shell text as exactly ["sh", "-lc", text].
+  const shellCommand = argv.length === 3 && argv[0] === "sh" && argv[1] === "-lc";
   const delivery = job.delivery;
   const failure = job.failureAlert;
   return {
@@ -254,9 +279,11 @@ export function openClawDraftFromJob(job: UnifiedCronJob): OpenClawCronDraft {
     streamMatch: schedule.kind === "stream" ? schedule.match || "" : "",
     streamBatchMs: schedule.kind === "stream" ? schedule.batchMs || 0 : 0,
     streamMaxBatchBytes: schedule.kind === "stream" ? schedule.maxBatchBytes || 0 : 0,
-    payloadKind: payload?.kind === "systemEvent" ? "systemEvent" : "agentTurn",
+    payloadKind: payload?.kind === "command" || payload?.kind === "systemEvent" ? payload.kind : "agentTurn",
     prompt: payload?.kind === "agentTurn" ? payload.message || "" : job.prompt || "",
     systemText: payload?.kind === "systemEvent" ? payload.text || "" : "",
+    commandFormat: shellCommand ? "shell" : "argv",
+    commandText: shellCommand ? argv[2] : argv.length > 0 ? JSON.stringify(argv, null, 2) : "",
     model: payload?.kind === "agentTurn" ? payload.model || "" : job.model || "",
     fallbacks: payload?.kind === "agentTurn" ? textFromList(payload.fallbacks) : "",
     thinking: payload?.kind === "agentTurn" ? payload.thinking || "" : "",
@@ -281,6 +308,7 @@ export function openClawDraftFromJob(job: UnifiedCronJob): OpenClawCronDraft {
 
 // 表单草稿转为 REST 输入，兼容旧 prompt/model 字段和新 payload 字段。
 export function openClawInputFromDraft(draft: OpenClawCronDraft): OpenClawCronJobInput {
+  const payload = payloadFromDraft(draft);
   return {
     backendId: "openclaw",
     agentId: draft.agentId || undefined,
@@ -289,9 +317,11 @@ export function openClawInputFromDraft(draft: OpenClawCronDraft): OpenClawCronJo
     enabled: draft.enabled,
     deleteAfterRun: draft.deleteAfterRun,
     schedule: scheduleFromDraft(draft),
-    payload: payloadFromDraft(draft),
-    prompt: draft.payloadKind === "agentTurn" ? draft.prompt : draft.systemText,
-    model: draft.model || undefined,
+    payload,
+    ...(payload.kind !== "command" ? {
+      prompt: payload.kind === "agentTurn" ? draft.prompt : draft.systemText,
+      model: draft.model || undefined,
+    } : {}),
     sessionTarget: draft.sessionTarget,
     wakeMode: draft.wakeMode,
     delivery: deliveryFromDraft(draft),
@@ -300,9 +330,29 @@ export function openClawInputFromDraft(draft: OpenClawCronDraft): OpenClawCronJo
   };
 }
 
+export function openClawPatchFromDraft(draft: OpenClawCronDraft, job: UnifiedCronJob): Partial<OpenClawCronJobInput> {
+  const input = openClawInputFromDraft(draft);
+  const { payload, schedule } = input;
+  if (payload?.kind !== "command") return input;
+
+  // Only patch the edited fields. The gateway merges argv into the command
+  // payload and retains its working directory, environment and other options.
+  const originalSchedule = scheduleFromDraft(openClawDraftFromJob(job));
+  const originalArgv = job.payload?.kind === "command" ? job.payload.argv : undefined;
+  return {
+    ...(draft.name !== job.name ? { name: draft.name } : {}),
+    ...(draft.enabled !== job.enabled ? { enabled: draft.enabled } : {}),
+    ...(JSON.stringify(schedule) !== JSON.stringify(originalSchedule) ? { schedule } : {}),
+    ...(JSON.stringify(payload.argv) !== JSON.stringify(originalArgv) ? { payload } : {}),
+  };
+}
+
 // 2026.8.1 的 on-exit/stream schema 都要求非空命令。提前在表单层拦截，
 // 避免把空字符串/空 argv 交给网关后才得到难以定位的 schema 错误。
 export function validateOpenClawDraft(draft: OpenClawCronDraft): string | null {
+  if (draft.payloadKind === "command" && !commandArgvFromDraft(draft)) {
+    return draft.commandFormat === "shell" ? "cronForm.openclawValidateCommand" : "cronForm.openclawValidateCommandArgv";
+  }
   if (draft.schedKind === "at") {
     const date = new Date(draft.atLocal);
     if (!Number.isFinite(date.getTime()) || isoToLocalInput(date.toISOString()) !== draft.atLocal) {
@@ -329,12 +379,21 @@ export default function OpenClawCronForm({ draft, setDraft, assistant }: {
 }) {
   const { t } = useTranslation();
   const set = <K extends keyof OpenClawCronDraft>(key: K, value: OpenClawCronDraft[K]) => setDraft({ ...draft, [key]: value });
+  const editsArgv = draft.commandFormat === "argv";
   // Existing hidden options stay in the draft and continue through the original serializers.
   return <div className="cron-form">
     <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} assistant={assistant} />
-    <Field label={draft.payloadKind === "agentTurn" ? t("cronForm.taskPromptLabel") : t("cronForm.openclawSystemEventText")}>
-      <TextArea value={draft.payloadKind === "agentTurn" ? draft.prompt : draft.systemText} onChange={(event) => set(draft.payloadKind === "agentTurn" ? "prompt" : "systemText", event.target.value)} rows={4} placeholder={t("cronForm.taskPromptPlaceholder")} />
-    </Field>
+    {draft.payloadKind === "command" ? (
+      <Field label={t(editsArgv ? "cronForm.openclawCommandArgv" : "cronForm.openclawCommand")}
+        hint={editsArgv ? t("cronForm.openclawCommandArgvHint") : undefined}>
+        <TextArea value={draft.commandText} onChange={(event) => set("commandText", event.target.value)}
+          rows={editsArgv ? 5 : 4} spellCheck={false} autoCapitalize="none" autoCorrect="off" />
+      </Field>
+    ) : (
+      <Field label={draft.payloadKind === "agentTurn" ? t("cronForm.taskPromptLabel") : t("cronForm.openclawSystemEventText")}>
+        <TextArea value={draft.payloadKind === "agentTurn" ? draft.prompt : draft.systemText} onChange={(event) => set(draft.payloadKind === "agentTurn" ? "prompt" : "systemText", event.target.value)} rows={4} placeholder={t("cronForm.taskPromptPlaceholder")} />
+      </Field>
+    )}
     <div className="field">
       <span className="field-label">{t("cronForm.scheduleLabel")}</span>
       <CronScheduleType value={draft.schedKind} onChange={(value) => set("schedKind", value)} />

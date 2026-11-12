@@ -62,6 +62,7 @@ export type OpenClawCronWakeMode = "next-heartbeat" | "now";
 
 export type OpenClawCronPayload =
   | { kind: "systemEvent"; text: string }
+  | { kind: "command"; argv: string[] }
   | {
       kind: "agentTurn";
       message: string;

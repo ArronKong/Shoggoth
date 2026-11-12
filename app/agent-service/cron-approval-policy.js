@@ -10,7 +10,10 @@ function stable(value) {
 }
 function digest(value) { return crypto.createHash("sha256").update(JSON.stringify(stable(value))).digest("hex"); }
 
-const CRON_INSTRUCTIONS = "This is an unattended scheduled task. Execute within its granted permissions without asking ordinary clarification questions. A denied action did not execute: try an allowed alternative, and never bypass a denied tool or ownership boundary. If the task cannot be completed, end this run with a clear failure report; do not wait for chat input or return a silence marker. The host may ask the user once for an additional approval and remember that exact operation for this task. A saved approval does not authorize other tasks or changed operations.";
+const CRON_INSTRUCTIONS = [
+  "This is an unattended scheduled task. Execute within its granted permissions without asking ordinary clarification questions. A denied action did not execute: try an allowed alternative, and never bypass a denied tool or ownership boundary. If the task cannot be completed, end this run with a clear failure report; do not wait for chat input or return a silence marker. The host may ask the user once for an additional approval and remember that exact operation for this task. A saved approval does not authorize other tasks or changed operations.",
+  "When delivering a newly generated text report as an attachment, write it once using artifact_publish with the complete report as content. Omit relativePath and use the returned URL in your final reply. Use a workspace file when the task calls for an existing file or explicitly requires saving to a particular location.",
+].join("\n\n");
 const SCOPE_NOTICE = "本次批准将记住为此定时任务的授权，后续相同操作不再询问。任务内容、操作参数或权限范围改变后需重新确认。";
 const PRODUCT_CONFIRMATION_META = "shoggoth/product-confirmation";
 
