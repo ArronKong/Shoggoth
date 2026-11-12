@@ -59,10 +59,18 @@ const provider = http.createServer(async (req, res) => {
     assert.equal(body.stream, true, "native Responses requests explicitly declare streaming");
     if (stage.invalidStream) {
       res.writeHead(200, { "Content-Type": "text/event-stream" });
-      res.end("data: synthetic-invalid-json\n\n"); return;
+      res.write('data: {"type":"response.created","response":{"id":"fixture-invalid"}}\n\n');
+      res.write("data: synthetic-invalid");
+      setTimeout(() => res.end("-json\n\n"), 50);
+      return;
     }
     if (stage.protected) assert(!data.includes("654321"), "native file output leaked to the actual model request");
     else assert(data.includes("654321"), "another session must not borrow this session's credential scope");
+    if (stage.disconnectBeforeHeaders && !stage.disconnected) {
+      stage.disconnected = true;
+      res.destroy();
+      return;
+    }
     const outputs = body.input.filter(item => ["function_call_output", "custom_tool_call_output"].includes(item.type));
     const received = stage.callId && outputs.find(item => item.call_id === stage.callId);
     if (received) { stage.output = received.output; assert(JSON.stringify(received).includes("Public completion marker")); }
@@ -85,12 +93,23 @@ const provider = http.createServer(async (req, res) => {
     res.writeHead(200, missingResponseType ? {} : { "Content-Type": "text/event-stream" }); let sequence = 0;
     const event = (type, extra) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...extra })}\n\n`);
     event("response.created", { response: { id: responseId, object: "response", status: "in_progress", output: [] } });
+    if (stage.endWithoutTerminal) { res.end(); return; }
+    if (stage.disconnectAlways || (received && stage.disconnectFollowup && !stage.disconnected)) {
+      stage.disconnected = true;
+      setTimeout(() => res.destroy(), 50);
+      return;
+    }
     const reasoning = { id: `rs-${n}`, type: "reasoning", summary: [{ type: "summary_text", text: "Use the existing receipt." }],
       encrypted_content: `opaque-synthetic-reasoning-${n}` };
     event("response.output_item.added", { output_index: 0, item: reasoning });
     event("response.output_item.done", { output_index: 0, item: reasoning });
     event("response.output_item.added", { output_index: 1, item: { ...item, status: "in_progress" } });
     event("response.output_item.done", { output_index: 1, item });
+    if (stage.disconnectToolResponse && !received && !stage.disconnectedToolResponse) {
+      stage.disconnectedToolResponse = true;
+      setTimeout(() => res.destroy(), 50);
+      return;
+    }
     event("response.completed", { response: { id: responseId, object: "response", status: "completed", output: [reasoning, item],
       usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } }); res.end();
   } catch (error) { failures.push(error.message); res.writeHead(500); res.end("fixture assertion failed"); }
@@ -116,16 +135,22 @@ async function makeHandle() {
   return { host, handle: await adapter.acquire(binding) };
 }
 async function turn(handle, sessionId, prompt, expectedStatus = "completed") {
+  const notices = [];
   let remove; const completed = new Promise((resolve, reject) => {
     const timer = setTimeout(() => { remove?.(); reject(new Error("Native fixture did not complete within 40 seconds")); }, 40_000);
     remove = handle.subscribe(event => {
-      if (event.method === "turn/completed" && event.sessionId === sessionId) { clearTimeout(timer); remove(); resolve(event); }
+      if (event.sessionId !== sessionId) return;
+      if (event.method === "error") notices.push(event);
+      if (event.method === "turn/completed") { clearTimeout(timer); remove(); resolve(event); }
     });
   });
   try {
     await handle.turnStart({ sessionId, operationId: crypto.randomUUID(), prompt, cwd: workspace });
     const event = await completed; assert.equal(event.status, expectedStatus, JSON.stringify({ status: event.status, errorCode: event.errorCode }));
     assert.deepEqual(failures, []);
+    assert(!notices.some(notice => notice.type === "error" && /Reconnecting/iu.test(notice.error?.message)),
+      "a reconnect notice must not be published as an error");
+    return { event, reconnects: notices.filter(notice => notice.type === "diagnostic").length };
   } finally { remove?.(); }
 }
 async function main() {
@@ -160,7 +185,13 @@ async function main() {
     developerInstructions: "Use the synthetic local fixture only. Do not repeat a completed command. Answer in the user's language." };
   let { handle, host } = await makeHandle();
   const first = await handle.sessionStart({ ...sessionOptions, modelSecretScope: scope });
-  stage = { protected: true }; await turn(handle, first.session.id, "Run the local fixture once and report the completion marker.");
+  stage = { protected: true, disconnectToolResponse: true, disconnectFollowup: true };
+  const recovered = await turn(handle, first.session.id, "Run the local fixture once and report the completion marker.");
+  assert(stage.disconnectedToolResponse, "the tool response was interrupted after the tool event");
+  assert(stage.disconnected, "the provider dropped the stream after receiving the command result");
+  assert(recovered.reconnects >= 1, "Codex reported the interrupted follow-up as a diagnostic");
+  assert.equal(requests.length, 3, "the initial tool request and both follow-up attempts reached the provider");
+  assert.deepEqual(requests[1].input, requests[2].input, "the retry carries the existing command result");
   assert(stage.output); assert.equal(fs.readFileSync(path.join(workspace, "count.txt"), "utf8"), "1");
   const second = await handle.sessionStart({ ...sessionOptions, modelSecretScope: { ...scope, sessionId: "other-session" } });
   stage = { noTool: true, protected: false }; await turn(handle, second.session.id, "The order number is 654321. Answer without tools.");
@@ -176,9 +207,22 @@ async function main() {
   assert.equal(secretStore.list(scope).length, 1);
   assert(requests.slice(1).some(body => body.input.some(item => item.encrypted_content)), "real native follow-ups must carry the recorded opaque block");
   assert(!fs.readFileSync(provenance.file(scope), "utf8").includes("opaque-synthetic-reasoning"));
+  const beforeConnectFailure = requests.length;
+  stage = { noTool: true, protected: true, disconnectBeforeHeaders: true };
+  const reconnected = await turn(handle, first.session.id, "Use the existing result after a connection failure.");
+  assert.equal(requests.length, beforeConnectFailure + 2);
+  assert.equal(reconnected.reconnects, 1);
+  const beforeExhausted = requests.length;
+  stage = { noTool: true, protected: true, disconnectAlways: true };
+  const exhausted = await turn(handle, first.session.id, "Keep the existing result during a sustained outage.", "failed");
+  assert.equal(requests.length, beforeExhausted + 6, "one initial attempt plus five native retries");
+  assert.equal(exhausted.reconnects, 5);
+  assert.match(exhausted.event.failure?.message, /stream disconnected|error decoding response body/iu);
   const beforeInvalid = requests.length;
   stage = { noTool: true, protected: true, invalidStream: true };
-  await turn(handle, first.session.id, "Reject an invalid response without retrying or repeating the command.", "failed");
+  const rejected = await turn(handle, first.session.id, "Reject an invalid response without retrying or repeating the command.", "failed");
+  assert.equal(rejected.reconnects, 0);
+  assert.match(rejected.event.failure?.message, /SECRET_MODEL_RESPONSE_INVALID/u);
   assert.equal(requests.length, beforeInvalid + 1, "a rejected response must not trigger native model retries");
   assert.equal(fs.readFileSync(path.join(workspace, "count.txt"), "utf8"), "1");
   const beforeFallback = requests.length, beforeProjection = projectionCalls;
@@ -187,19 +231,28 @@ async function main() {
   await turn(handle, first.session.id, "Continue from the existing receipt without repeating any command.");
   assert.equal(projectionCalls, beforeProjection + 1, "failed local processing must not repeat the model call");
   assert.equal(requests.length, beforeFallback + 1); assert.deepEqual(disclosures.list(scope), []);
+  for (const interruption of [{ disconnectBeforeHeaders: true }, { disconnectAlways: true }, { endWithoutTerminal: true }]) {
+    const beforeInterruptedFallback = requests.length;
+    stage = { noTool: true, protected: false, ...interruption };
+    const failed = await turn(handle, first.session.id, "Use the existing receipt while the upstream is unavailable.", "failed");
+    assert.equal(failed.reconnects, 0);
+    assert.equal(requests.length, beforeInterruptedFallback + 1, "an original-content send must not be retried");
+  }
   failProjection = false;
   // A response to original input has no protected-input provenance. Its opaque
   // history therefore uses the same original fallback on this subsequent call.
+  const beforeNextInput = requests.length;
   stage = { noTool: true, protected: false };
   await turn(handle, first.session.id, "This is a new input. Continue from the saved result without repeating the command.");
-  assert.equal(requests.length, beforeFallback + 2);
+  assert.equal(requests.length, beforeNextInput + 1);
   assert.equal(fs.readFileSync(path.join(workspace, "count.txt"), "utf8"), "1");
   assert.deepEqual(failures, []);
   assert(!proxyRequests.some(request => request.loopback), "loopback projection and synthetic account metadata must bypass the proxy");
   console.log(JSON.stringify({ pass: true, runtime: "real pinned Codex", providerKind, requests: requests.length,
-    nativeCommandExecutions: 1, protectedNativeFollowup: true, twoSessionsIsolated: true,
+    nativeCommandExecutions: 1, protectedNativeFollowup: true, disconnectedFollowupRecovered: true, twoSessionsIsolated: true,
+    disconnectedToolResponseNoReplay: true, recoveredBeforeHeaders: true, exhaustedAttempts: 6, reconnectNoticesAreDiagnostic: true,
     resumedTwiceWithoutReplay: true, opaqueHistoryVerifiedAcrossRestart: true,
-    invalidResponseNoRetry: true, silentOriginalFallbackOnce: true, newInputAfterFallback: true,
+    invalidResponseNoRetry: true, silentOriginalFallbackOnce: true, disconnectedOriginalFallbackNoRetry: true, newInputAfterFallback: true,
     missingResponseType, realAccountUsed: false, proxyConfigured: useProxy }));
 }
 main().catch(error => {

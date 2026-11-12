@@ -168,9 +168,12 @@ const SESSION_KEY = `agent:codex-default:${SESSION_ID}`;
     assert.equal(limited.total, 2);
     assert.equal(limited.items.length, 1);
     await assert.rejects(native.listSessionArtifacts("foreign-agent", SESSION_KEY), { code: "CHAT_SESSION_INVALID" });
-    native._call = async (method) => method === "run.list"
-      ? { runs: [], hasMore: false, nextCursor: null }
-      : { items: [], hasMore: true, nextCursor: 0 };
+    native._call = async (method) => {
+      if (method === "agent.files.list") return { items: [], nextCursor: null };
+      if (method === "run.list") return { runs: [], hasMore: false, nextCursor: null };
+      assert.equal(method, "harness.transcript.events");
+      return { items: [], hasMore: true, nextCursor: 0 };
+    };
     assert.deepEqual(await native.listSessionArtifacts("codex-default", SESSION_KEY), {
       supported: false, reason: "provenance-unavailable", items: [],
     }, "Incomplete history cannot enable unscoped fallback");

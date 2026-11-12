@@ -70,6 +70,7 @@ const [
   legacyStyles,
   gallery,
   chat,
+  liveBubble,
   chatStyles,
   modelMenu,
   activityFeed,
@@ -86,6 +87,7 @@ const [
   read("app/manage-ui/src/components/DotLoader.module.css"),
   read("app/manage-ui/src/pages/ComponentsPage.tsx"),
   read("app/manage-ui/src/pages/ChatPage.tsx"),
+  read("app/manage-ui/src/components/ChatLiveActivityBubble.tsx"),
   read("app/manage-ui/src/pages/ChatPage.css"),
   read("app/manage-ui/src/pages/ChatModelMenu.tsx"),
   read("app/manage-ui/src/pages/dashboard/ActivityFeed.tsx"),
@@ -126,11 +128,12 @@ const checks = [
   ["loader color inherits from its current surface", /fill:\s*var\(--fusion-loader-color,\s*currentColor\)/.test(styles)],
   ["gallery imports FusionLoader", /import FusionLoader from "\.\.\/components\/FusionLoader"/.test(gallery)],
   ["gallery renders only both fusion loader sizes", /data-gallery="fusion-loader"/.test(gallery) && !/data-gallery="dot-loader"/.test(gallery) && /<FusionLoader size="sm" label=\{t\("common\.loading"\)\}/.test(gallery) && /<FusionLoader label=\{t\("componentsGallery\.fusionLoaderLabel"\)\}/.test(gallery)],
-  // Agent / 群聊列表只显示逐字文案。首字节等待、首屏历史和封存历史复用 FusionLoader。
-  ["chat keeps fusion loaders scoped to first-byte, initial history and archive loading", !/DotLoader/.test(chat)
-    && (chat.match(/<FusionLoader(?:\s+size="sm")?/g) || []).length === 3
+  ["chat uses a shared bubble for the live turn and small loaders for history", !/DotLoader/.test(chat)
+    && /<ChatLiveActivityBubble\b/.test(chat)
     && /<FusionLoader size="sm" label=\{t\("chat\.historyLoading"\)\} \/>/.test(chat)],
-  ["first-byte chat loader announces its status without visible copy", /<FusionLoader size="sm" ariaLabel=\{t\("chat\.liveStatus\.running"\)\} \/>/.test(chat)],
+  ["live chat bubble has one shared loader with a status announcement and full ball edges",
+    (liveBubble.match(/<FusionLoader\b/g) || []).length === 1
+    && /<FusionLoader size="sm" ariaLabel=\{t\("chat\.liveStatus\.running"\)\} preserveBallEdges \/>/.test(liveBubble)],
   ["archive loading shows the small fusion loader with a status label", /<FusionLoader size="sm" label=\{t\("chat\.archiveLoading"\)\} \/>/.test(chat)],
   ["agent-list no longer includes the fusion loader", !/chat-thinking-dots/.test(chat) && !/chat-thinking-dots/.test(chatStyles)],
   ["model menu uses the small fusion loader", !/DotLoader/.test(modelMenu) && /<FusionLoader size="sm" label=\{t\("chat\.loadingModels"\)\}/.test(modelMenu)],

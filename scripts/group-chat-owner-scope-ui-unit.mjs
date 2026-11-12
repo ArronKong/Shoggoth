@@ -133,10 +133,15 @@ function load(relative) {
         Switch: props => React.createElement("label", null, props.label, React.createElement("input", { type: "checkbox", checked: props.checked,
           disabled: props.disabled, onChange: event => props.onChange(event.target.checked) })),
       };
-      if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader")) return passthrough("i");
+      if (name.endsWith("/components/AgentAvatar") || name.endsWith("/components/FusionLoader") || name === "./FusionLoader") return passthrough("i");
+      if (name.endsWith("/components/ChatLiveActivityBubble")) return load("src/components/ChatLiveActivityBubble.tsx");
       if (name.endsWith("/components/AgentPicker")) return load("src/components/AgentPicker.tsx");
       if (name.endsWith("/components/BackendTabIcon")) return load("src/components/BackendTabIcon.tsx");
       if (name.endsWith("/lib/backendTabOrder")) return load("src/lib/backendTabOrder.ts");
+      if (name.endsWith("/lib/productTelemetry")) return {
+        useTelemetryOperations: () => React.useRef(new Map()).current,
+        startTelemetryOperation: () => undefined, retainTelemetryOperation: () => {},
+      };
       if (name.endsWith("/components/TurnTimeline/TurnTimeline")) return passthrough("ol");
       if (name.endsWith("/components/TurnTimeline/TurnProcess")) return { getTurnProcessStats: () => ({}), TurnProcessSummary: () => null };
       if (name.endsWith("/components/TurnTimeline/trajectoryIcons")) return load("src/components/TurnTimeline/trajectoryIcons.tsx");

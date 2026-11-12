@@ -44,6 +44,16 @@ function toolName(tool) {
   return String(tool?.name || tool?.kind || "").split(/(?:__|[./])/u).at(-1).replace(/[_-]/gu, "").toLowerCase();
 }
 
+function publishedFile(tool) {
+  if (toolName(tool) !== "artifactpublish" || typeof tool.resultSummary !== "string") return null;
+  try {
+    const file = JSON.parse(tool.resultSummary)?.file;
+    return typeof file?.fileId === "string" && typeof file.name === "string" ? file : null;
+  } catch {
+    return null;
+  }
+}
+
 function shellOutputTargets(command) {
   if (typeof command !== "string" || /\$\(|`/u.test(command)) return [];
   const tokens = command.split(/\r?\n/u)[0]
@@ -158,7 +168,7 @@ function sessionArtifactHistory(messages, sessionCreatedAt) {
 }
 
 async function collectSessionOutputArtifacts(options) {
-  const { workspace, runtimeHome, sessionCreatedAt } = options;
+  const { workspace, runtimeHome, sessionCreatedAt, isPublishedCopy } = options;
   let events = options.events || [];
   let runs = options.runs || [];
   const imported = events.filter((event) => event.content?.historyItem);
@@ -202,6 +212,7 @@ async function collectSessionOutputArtifacts(options) {
     if (event.kind === "tool_call" && toolKey(event)) calls.set(toolKey(event), event);
   }
   const outputs = [];
+  const publications = [];
   const opaqueWrites = new Map();
   const emit = (event, files) => {
     for (const file of files) {
@@ -223,6 +234,10 @@ async function collectSessionOutputArtifacts(options) {
       for (const file of pathsIn(tool.displayArgs)) rememberInput(inputs, file, event);
     }
     if (!successful(tool)) continue;
+    if (isPublishedCopy && event.runId && Number.isSafeInteger(event.occurredAt)) {
+      const file = publishedFile(tool);
+      if (file) publications.push({ fileId: file.fileId, name: file.name, runId: event.runId, at: event.occurredAt });
+    }
     emit(event, targets);
     if (produces && !targets.length && event.runId) opaqueWrites.set(event.runId,
       Math.min(opaqueWrites.get(event.runId) ?? Infinity, event.occurredAt ?? sessionCreatedAt));
@@ -235,8 +250,31 @@ async function collectSessionOutputArtifacts(options) {
       emit(event, pathsIn(event.content?.text).filter((file) => !wasInput(inputs, file, event)));
     }
   }
-  return collectTranscriptReferencedArtifacts({ ...options, runs, events: outputs,
+  const items = await collectTranscriptReferencedArtifacts({ ...options, runs, events: outputs,
     allowDirectories: false, mtimeOnly: true });
+  if (!publications.length || !items.length) return items;
+
+  // Older publish traces can omit the relative path. Require a unique output
+  // with that name from the same Run before checking its contents.
+  const byPath = new Map(items.map(item => [item.path, item]));
+  const pathsByRunAndName = new Map();
+  for (const event of outputs) {
+    const item = byPath.get(canonical(event.content.path));
+    if (!item || !event.runId) continue;
+    const key = `${event.runId}\0${item.name}`;
+    const paths = pathsByRunAndName.get(key) ?? new Set();
+    paths.add(item.path);
+    pathsByRunAndName.set(key, paths);
+  }
+  for (const publication of publications) {
+    const paths = pathsByRunAndName.get(`${publication.runId}\0${publication.name}`);
+    if (paths?.size !== 1) continue;
+    const item = byPath.get(paths.values().next().value);
+    if (item && Math.floor(item.mtimeMs) <= publication.at && await isPublishedCopy(item, publication)) {
+      byPath.delete(item.path);
+    }
+  }
+  return [...byPath.values()];
 }
 
 module.exports = { collectSessionOutputArtifacts, sessionArtifactHistory };

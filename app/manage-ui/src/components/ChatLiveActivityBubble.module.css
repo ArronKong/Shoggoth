@@ -1,0 +1,67 @@
+.bubble[data-live-activity-bubble] {
+  --waiting-width: 84px;
+  --waiting-height: 68px;
+  --waiting-loader-x: 24px;
+  --waiting-loader-y: 25px;
+  --activity-width: 520px;
+  --activity-loader-y: 14px;
+  --timeline-top: 29px;
+  --morph-duration: 200ms;
+  --morph-easing: cubic-bezier(.23, 1, .32, 1);
+  position: relative;
+  width: min(100%, var(--waiting-width));
+  height: var(--waiting-height);
+  padding: 0;
+  overflow: clip;
+  transition: width var(--morph-duration) var(--morph-easing),
+    height var(--morph-duration) var(--morph-easing);
+}
+
+.bubble[data-glass-panel] {
+  --waiting-width: 76px;
+  --waiting-height: 52px;
+  --waiting-loader-x: 20px;
+  --waiting-loader-y: 17px;
+  --activity-width: 100%;
+}
+
+.bubble[data-live-activity-bubble="activity"] {
+  width: min(100%, var(--activity-width));
+  height: calc(var(--timeline-top) + var(--activity-height, 0px));
+  cursor: pointer;
+}
+
+.indicator {
+  position: absolute;
+  z-index: 1;
+  inset: 0 auto auto 0;
+  display: flex;
+  transform: translate(var(--waiting-loader-x), var(--waiting-loader-y));
+  transition: transform var(--morph-duration) var(--morph-easing);
+}
+
+.bubble[data-live-activity-bubble="activity"] .indicator {
+  transform: translate(18px, var(--activity-loader-y));
+}
+
+.timeline {
+  position: absolute;
+  inset: var(--timeline-top) 0 auto;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 140ms ease-out 60ms;
+}
+
+.bubble[data-live-activity-bubble="activity"] .timeline {
+  opacity: 1;
+}
+
+.timeline :global([data-chat-activity-preview]):focus-visible {
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bubble[data-live-activity-bubble], .indicator, .timeline {
+    transition: none;
+  }
+}

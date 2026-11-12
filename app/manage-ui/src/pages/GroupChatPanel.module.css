@@ -79,6 +79,12 @@
   font-size: 11px;
   text-decoration: none; user-select: text;
 }
+/* Reserve space between mentions on consecutive message lines. */
+.inlineMention[data-group-mention] {
+  margin-block: 2px;
+  padding-block: 4px;
+  line-height: 16px;
+}
 .inlineMention > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 .inlineMentionAvatar { width: 16px; height: 16px; flex: 0 0 auto; }
 .inlineMention:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }

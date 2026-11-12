@@ -200,7 +200,8 @@ const checkPinnedPreview = (preview: HTMLElement, commentary: string) => {
   expect(cards.length === 1 && cards[0] === preview, "an interim must keep one activity bubble and its original DOM node");
   expect(note && (preview.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING),
     "the original bubble stays above the commentary");
-  expect(!replyLoader(), "the active preview replaces the waiting animation after an interim");
+  expect(preview.closest("[data-live-activity-bubble]")?.contains(replyLoader()),
+    "the active preview keeps one loader above its scrolling timeline");
 };
 const replyLoader = () => surface().querySelector(`[role="status"][aria-label="${i18n.t("chat.liveStatus.running")}"]`);
 const shortcut = (text: string) => [...surface().querySelectorAll<HTMLButtonElement>('button[aria-haspopup="dialog"]')]
@@ -311,6 +312,7 @@ scope.runTimelineModalFixture = async () => {
   chat("accepted");
   chat("delta", { message: { role: "assistant", content: "" } });
   await wait(() => replyLoader()?.querySelectorAll("circle").length === 2, "the reply starts with the two-ball loader");
+  const waitingLoader = replyLoader();
   expect(!loadingPreview() && !shortcut("检查任务进展"), "there is no preview or standalone activity icon while waiting");
   chat("interim", { message: { role: "assistant", content: [
     { type: "text", text: "工具执行前的阶段说明", activity: true, segmentId: "progress-before-tools" },
@@ -319,7 +321,7 @@ scope.runTimelineModalFixture = async () => {
   expect(!loadingPreview(), "commentary stays in its message, and does not start a loading preview");
   tool("start", "first", { args: { command: "printf live-first", activityTitle: "检查第一项" } });
   await wait(() => loadingPreview()?.textContent?.includes("检查第一项"), "live activity appears in the loading bubble");
-  expect(!replyLoader(), "the preview replaces the two-ball loader");
+  expect(replyLoader() === waitingLoader, "the same two-ball loader stays mounted through expansion");
   expect(!shortcut("检查第一项"), "the loading bubble has no footer activity button");
   expect(!surface().querySelector("[data-chat-process]") && surface().querySelectorAll('[data-chat-activity-preview][data-status="running"]').length === 1,
     "the activity bubble is the single live activity surface in the thread");
@@ -448,7 +450,7 @@ scope.runTimelineModalFixture = async () => {
   expect(scope.fixtureErrors.length === 0, `browser errors: ${scope.fixtureErrors}`);
   return { backendId, immersive, liveUpdates: true, terminalStates: ["done", "error", "aborted"], nextTurnIsolated: true,
     sessionSwitch: true, chatCommentaryHidden: true, commentaryBubblesPreserved: true, sharedCommentaryPreserved: true,
-    bubbleOpensDialog: true, exclusiveLoader: true, groupedFooterActions: true, loadingPreviewRows: 3, balancedInsets: true, edgeFade: true, noDuplicateCardOrToggle: true };
+    bubbleOpensDialog: true, continuousLoader: true, groupedFooterActions: true, loadingPreviewRows: 3, balancedInsets: true, edgeFade: true, noDuplicateCardOrToggle: true };
 };
 const sampleProgress = "我先核对需求和模板，再把剩下的安排整理成可执行的步骤。";
 const samplePrompt = "帮我安排周五的团队分享会，给我一份可执行的议程。";
@@ -542,8 +544,14 @@ if (previewMode) {
     await scope.previewSendSample();
     await wait(() => surface().textContent?.includes(samplePrompt) && replyLoader()?.querySelectorAll("circle").length === 2,
       "sending from the actual composer shows the user bubble and two-ball loader");
+    const waitingLoader = replyLoader()!;
+    const bubble = waitingLoader.closest<HTMLElement>("[data-live-activity-bubble]")!;
+    expect(bubble.getBoundingClientRect().width === 84, "the waiting bubble starts at its original width");
     await wait(() => loadingPreview()?.textContent?.includes(sampleSteps[0]), "mock provider sends its first activity");
-    expect(!replyLoader(), "the simulated conversation switches from loader to activity");
+    expect(replyLoader() === waitingLoader && bubble.contains(loadingPreview()!), "the same bubble and loader persist into the first activity");
+    await wait(() => !bubble.getAnimations().length, "the bubble completes its expansion");
+    const loaderTop = waitingLoader.querySelector("svg")!.getBoundingClientRect().top - bubble.getBoundingClientRect().top;
+    expect(Math.abs(loaderTop - 14) < 0.1, "the expanded loader keeps the approved visual inset");
     const original = loadingPreview()!;
     await openLive(sampleSteps[0]);
     await wait(() => surface().textContent?.includes(sampleProgress) && loadingPreview()?.textContent?.includes(sampleSteps[2]),

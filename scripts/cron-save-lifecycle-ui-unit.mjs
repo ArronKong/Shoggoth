@@ -37,6 +37,16 @@ vm.runInNewContext(compile("pages/cron/CronFormLayout.tsx"), {
   exports: scheduleTypes.exports, require: name => name === "react-i18next" ? translations
     : name === "../../components/Field" ? { Field: host("field"), TextInput: host("input") } : require(name),
 });
+const openClawForm = { exports: {} };
+const openClawFormStubs = {
+  "react-i18next": translations,
+  "../../components/Field": { Field: host("field"), TextArea: host("textarea") },
+  "./CronFormLayout": scheduleTypes.exports,
+  "./CronSchedulePicker": { CronExpressionPicker: host("cron-expression") },
+};
+vm.runInNewContext(compile("pages/cron/OpenClawCronForm.tsx"), {
+  exports: openClawForm.exports, require: name => openClawFormStubs[name] || require(name),
+});
 const filtersBar = { exports: {} };
 const filterStubs = {
   "react-i18next": translations,
@@ -70,7 +80,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     details: new Map(fixtureJobs.map(job => [job.id, job])) };
   options.configure?.(state);
   const form = { __esModule: true, default: host("cron-form"), emptyOpenClawDraft: () => ({ name: "", backendId: "openclaw" }),
-    openClawDraftFromJob: job => ({ name: job.name, backendId: job.backendId }), openClawInputFromDraft: draft => ({ ...draft }),
+    openClawDraftFromJob: job => ({ name: job.name, backendId: job.backendId }), openClawPatchFromDraft: draft => ({ ...draft }),
     validateOpenClawDraft: () => null };
   const stubs = {
     "react-i18next": translations,
@@ -99,6 +109,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
       return { data: fixtureJobs, loading: false, error, setError, refresh: async () => { state.refreshes.push(key); } };
     } },
     "../lib/page-refresh": { useRegisterPageRefresh(path) { state.pageRegistrations.push(path); }, useRegisterPageLoading() {} },
+    "../lib/productTelemetry": { measureTelemetry: (_event, _backend, action) => action() },
     "../lib/useStickyState": { useStickyState: (key, initial) => {
       const saved = { "cron.view": "list", "cron.filters": savedFilters };
       return React.useState(saved[key] ?? initial);
@@ -115,7 +126,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     "./cron/CronRunReportModal": { __esModule: true, default: props => React.createElement("report-modal", props,
       props.open ? props.children : null), ReportNote: host("report-note"), runExecutionFailed: () => false },
     "./cron/cronPresets": scheduleDisplay.exports,
-    "./cron/OpenClawCronForm": form,
+    "./cron/OpenClawCronForm": options.useOpenClawForm ? openClawForm.exports : form,
     "./cron/CodexCronForm": { __esModule: true, default: host("codex-form"), emptyCodexCronDraft: () => ({}) },
     "./cron/CronAgentPicker": { CronAssignedAgent: host("assigned-agent") },
     "./cron/CronCreateForm": { __esModule: true, default: host("create-form") },
@@ -169,6 +180,51 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
   }); };
   const dispose = () => act(() => renderer.unmount());
   return { state, renderer, buttons, filterMenu, click, row, edit, formModal, save, notify, dispose };
+}
+
+for (const command of [
+  {
+    label: "cronForm.openclawCommand",
+    argv: ["sh", "-lc", "printf '%s\\n' 'original value'"],
+    editedArgv: ["sh", "-lc", "  printf '%s\\n' 'edited value'\n"],
+    display: argv => argv[2],
+    invalid: "",
+    error: "cronForm.openclawValidateCommand",
+  },
+  {
+    label: "cronForm.openclawCommandArgv",
+    argv: ["/fixtures/command with spaces", "--value", "line 1\nline 2"],
+    editedArgv: ["/fixtures/command with spaces", "--value", "  a \"quoted\" value\n  "],
+    display: argv => JSON.stringify(argv, null, 2),
+    invalid: '["/fixtures/command", 42]',
+    error: "cronForm.openclawValidateCommandArgv",
+  },
+]) {
+  const job = {
+    id: "openclaw:command-fixture", backendId: "openclaw", name: "Command fixture", enabled: true,
+    schedule: { kind: "cron", expr: "0 2 * * *", staggerMs: 1_234 },
+    payload: { kind: "command", argv: command.argv, cwd: "/fixtures/workspace", timeoutSeconds: 120 },
+    delivery: { mode: "announce", channel: "telegram", threadId: "fixture-thread" },
+  };
+  const f = await fixture(undefined, [job], undefined, { useOpenClawForm: true });
+  const commandField = () => f.formModal().findByProps({ label: command.label }).findByType("textarea");
+  await f.edit(job.name);
+  assert.equal(commandField().props.value, command.display(command.argv), "the command editor shows the saved command");
+  await f.save();
+  assert.deepEqual(f.state.updates, [], "saving an unchanged command job does not rewrite its definition");
+
+  await f.edit(job.name);
+  act(() => commandField().props.onChange({ target: { value: command.invalid } }));
+  await f.save();
+  assert.equal(f.state.errors.at(-1), command.error);
+  assert.deepEqual(f.state.updates, [], "invalid command input stays in the editor");
+
+  act(() => commandField().props.onChange({ target: { value: command.display(command.editedArgv) } }));
+  await f.save();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.state.updates)), [
+    { id: job.id, input: { payload: { kind: "command", argv: command.editedArgv } } },
+  ], "saving a command only patches its argv and retains argument boundaries");
+  f.dispose();
 }
 
 {

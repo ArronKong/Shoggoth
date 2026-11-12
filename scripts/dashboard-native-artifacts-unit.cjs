@@ -7,6 +7,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { BackendRegistry } = require("../app/core/backend-registry");
+const { resolveServicePaths } = require("../app/agent-service/paths");
+const { payloadPath, sha256 } = require("../app/agent-service/agent-file-store");
 
 function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "dashboard-native-files-")));
@@ -53,7 +55,7 @@ function fixture(t) {
       event("tool_result", { toolCallId: id, tool: { success, status: success ? "completed" : "failed" } }));
     events.set(sessionId, rows);
   };
-  return { backend, profiles, sessions, calls, events, file, output, sinceMs, now,
+  return { root, backend, profiles, sessions, calls, events, file, output, sinceMs, now,
     advance: ms => { clock += ms; } };
 }
 
@@ -142,6 +144,42 @@ test("Agent outputs include only that Agent across paginated live and archived s
   assert.ok(!f.calls.some(call => call.params.profileId === "b" || call.params.profileId === "archived"));
   await assert.rejects(() => f.backend.listAgentArtifacts("agent-archived"), /AGENT_NOT_FOUND/);
   await assert.rejects(() => f.backend.listAgentArtifacts("missing-agent"), /AGENT_NOT_FOUND/);
+});
+
+test("legacy Cron copies count once only while the workspace and published versions match", async t => {
+  const f = fixture(t);
+  const profile = f.profiles[0];
+  f.backend.paths = resolveServicePaths({ homeDir: f.root, trustedRoot: f.root, stateRoot: path.join(f.root, "state") });
+  const original = f.file("daily.md", 100);
+  const content = fs.readFileSync(original);
+  const file = { profileId: profile.id, fileId: "a".repeat(64), name: "daily.md", mimeType: "text/markdown",
+    source: { kind: "cron", runId: "run-a-cron", sourceId: "job-a", sessionKey: "a-cron" },
+    sizeBytes: content.length, sha256: sha256(content), createdAt: f.now, updatedAt: f.now, revision: 1, status: "available" };
+  const savedPath = payloadPath(f.backend.paths, profile.id, file.fileId, file.name);
+  fs.mkdirSync(path.dirname(savedPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(savedPath, content, { mode: 0o600 });
+  f.output("a-cron", original);
+  f.events.get("a-cron").push({ kind: "tool_result", runId: file.source.runId, occurredAt: f.now,
+    content: { tool: { name: "shoggoth/artifact_publish", status: "completed",
+      resultSummary: JSON.stringify({ file: { fileId: file.fileId, name: file.name } }) } } });
+  const call = f.backend._call;
+  f.backend._call = (method, params) => {
+    if (method === "agent.files.list") return { items: params.profileId === profile.id ? [file] : [], nextCursor: null };
+    if (method === "agent.files.get" && params.profileId === profile.id && params.fileId === file.fileId) {
+      return { file, path: savedPath };
+    }
+    return call(method, params);
+  };
+  const list = (options) => f.backend.listAgentArtifacts(profile.agentId, options);
+  const result = await list();
+  assert.equal(result.total, 1);
+  assert.deepEqual(result.items.map(item => item.path), [savedPath]);
+  assert.deepEqual((await list({ includeManaged: false })).items, []);
+  assert.ok(fs.existsSync(original));
+
+  fs.writeFileSync(original, Buffer.alloc(content.length, "x"));
+  fs.utimesSync(original, new Date(f.now - 100), new Date(f.now - 100));
+  assert.deepEqual((await list()).items.map(item => item.path), [savedPath, original]);
 });
 
 test("Agent outputs distinguish partial and unavailable histories without a workspace fallback", async t => {

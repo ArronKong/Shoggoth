@@ -141,6 +141,7 @@ import {
   type SessionBoardViewMode,
 } from "./chat-session-board/sessionBoardModel";
 import FusionLoader from "../components/FusionLoader";
+import ChatLiveActivityBubble from "../components/ChatLiveActivityBubble";
 import ChatTypingText from "../components/ChatTypingText";
 import { getTurnProcessStats, TurnProcessSummary } from "../components/TurnTimeline/TurnProcess";
 import TurnTimeline from "../components/TurnTimeline/TurnTimeline";
@@ -8526,8 +8527,16 @@ function ChatPageApp() {
     group.item === liveTurn?.group && liveTurn.id !== undefined
       ? { ...group, key: `group:live-activity:${liveTurn.id}` } : group
   ), [shownGroups, liveTurn?.group, liveTurn?.id]);
-  const livePreview = liveTurn && !liveTurn.pending.finalReplyStreaming
-    ? renderActivityBubble(liveTurn.activity, openTimelineModal) : null;
+  const livePending = liveTurn?.pending;
+  const activeTurnActivity = livePending?.finalReplyStreaming ? undefined : liveTurn?.activity;
+  const livePreview = renderActivityBubble(activeTurnActivity, openTimelineModal);
+  const liveTail = livePending?.parts.at(-1);
+  const liveLoading = !livePending?.finalReplyStreaming && liveTail?.type === "text" && !liveTail.text?.trim()
+    && !livePending?.parts.some(part => part.type === "prompt" && part.promptEntry && chatPromptAttentionOf([part.promptEntry]));
+  const liveBubble = livePreview || liveLoading ? {
+    preview: livePreview,
+    onOpen: livePreview && activeTurnActivity ? () => openTimelineModal(activeTurnActivity) : undefined,
+  } : undefined;
   const footerActivityFor = (group: Group, message: ChatMsg) => {
     const owner = activityOwnerOf(message);
     return activityFooterGroups.get(owner) === group && !pendingActivityOwners.has(owner) ? activityByOwner.get(owner) : undefined;
@@ -8843,7 +8852,7 @@ function ChatPageApp() {
           const preview = renderActivityBubble(standaloneActivityFor(message), openTimelineModal);
           return preview ? [<Fragment key={message.actionId ?? index}>{preview}</Fragment>] : [];
         });
-        const activityBubble = isLiveAnchor && livePreview ? livePreview : standaloneBubbles.length ? standaloneBubbles : null;
+        const activityBubble = standaloneBubbles.length ? standaloneBubbles : null;
         const hasId = g.msgs.some((m) => m.actionId);
         entries.push({
           id: segId,
@@ -8852,6 +8861,7 @@ function ChatPageApp() {
           unreadStart: seg.msgs.some(m => m.actionId === unreadAnchor?.messageId),
           loadingReply,
           hideLiveStatus: (isLiveAnchor && !!livePreview) || liveMessage?.finalReplyStreaming,
+          liveActivity: isLiveAnchor ? liveBubble : undefined,
           activityBubble,
           html: media.text.trim() ? toSanitizedMarkdownHtml(media.text, true, imageContext,
             g.role === "assistant" && seg.cls === "chat" ? activeLegacyHtmlPolicy : "source") : "",
@@ -8895,7 +8905,7 @@ function ChatPageApp() {
       const kept = entries.filter((e) =>
         e.kind !== "chat" && e.kind !== "local"
           ? true
-          : !!e.activityBubble || !!e.loadingReply || !!e.html || !!e.content || e.images.length > 0 || (e.files?.length ?? 0) > 0 || (e.prompts?.length ?? 0) > 0,
+          : !!e.activityBubble || !!e.liveActivity || !!e.loadingReply || !!e.html || !!e.content || e.images.length > 0 || (e.files?.length ?? 0) > 0 || (e.prompts?.length ?? 0) > 0,
       );
       if (kept.length && (footer || footerModel)) kept[kept.length - 1] = { ...kept[kept.length - 1], footer, footerModel };
       out.push(...kept);
@@ -10223,8 +10233,8 @@ function ChatPageApp() {
                           {/* display:contents 包装不产生盒子（stack 的 flex/gap 不受影响），
                               只为右键菜单提供 data-mi 落点定位（R154 按气泡引用） */}
                           {keyedMessages.flatMap(({ item: m, key: messageRenderKey, images: keyedImages, files: keyedFiles, parts: keyedParts }, mi) => [
-                            m === liveTurn?.message && livePreview
-                              ? <div key="live-activity-preview" className="chat-bubble is-activity-loading">{livePreview}</div> : null,
+                            m === liveTurn?.message && liveBubble
+                              ? <ChatLiveActivityBubble key="live-activity-preview" className="chat-bubble" {...liveBubble} /> : null,
                             <div key={messageRenderKey} data-mi={mi} data-message-key={messageRenderKey} data-chat-message-id={m.actionId} style={{ display: "contents" }}>
                               {m.images?.length ? (
                                 <div className="chat-att-row">
@@ -10398,7 +10408,7 @@ function ChatPageApp() {
                               // the cursor trailing the rendered HTML.
                               if (m.pending) {
                                 const isLoading = !p.text?.trim() && pi === m.parts.length - 1;
-                                if (!p.text?.trim() && (!isLoading || waitingForPrompt || (m === liveTurn?.pending && livePreview))) return null;
+                                if (!p.text?.trim() && (!isLoading || waitingForPrompt || (m === livePending && liveBubble))) return null;
                                 return (
                                   <div key={k} className="chat-bubble is-streaming" data-qp={pi}>
                                     {p.text?.trim() ? (

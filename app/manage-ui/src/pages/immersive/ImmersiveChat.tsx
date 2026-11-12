@@ -3,6 +3,7 @@ import AgentAvatarView from "../../components/AgentAvatar";
 import { ChatRunWait } from "../../components/ChatRunWait";
 import ChatFileButton from "../../components/ChatFileButton";
 import FusionLoader from "../../components/FusionLoader";
+import ChatLiveActivityBubble, { type ChatLiveActivityBubbleProps } from "../../components/ChatLiveActivityBubble";
 import { IconTrajectory } from "../../components/TurnTimeline/trajectoryIcons";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, WheelEvent } from "react";
@@ -53,6 +54,7 @@ export interface ImmersiveMessage {
   kind?: "chat" | "injected" | "divider" | "error" | "local";
   content?: ReactNode[];
   loadingReply?: boolean;
+  liveActivity?: Pick<ChatLiveActivityBubbleProps, "preview" | "onOpen">;
   activityBubble?: ReactNode;
   hideLiveStatus?: boolean;
   html: string; // 已 sanitize 的 markdown（injected = 展开后的全文；divider/error 不用）
@@ -863,7 +865,8 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           return (
             <div key={m.id} className={styles.asstRow} data-immersive-message={m.id} data-unread-start={m.unreadStart || undefined} onContextMenu={m.onCtx}>
               {attRow}
-              {(m.loadingReply || m.activityBubble) && <div className={m.activityBubble ? `${styles.asstCard} ${styles.activityBubble}` : styles.asstCard} data-glass-panel>
+              {m.liveActivity && <ChatLiveActivityBubble className={styles.asstCard} glass {...m.liveActivity} />}
+              {((m.loadingReply && !m.liveActivity) || m.activityBubble) && <div className={m.activityBubble ? `${styles.asstCard} ${styles.activityBubble}` : styles.asstCard} data-glass-panel>
                 {m.activityBubble ?? <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
               </div>}
               {m.content?.length ? (

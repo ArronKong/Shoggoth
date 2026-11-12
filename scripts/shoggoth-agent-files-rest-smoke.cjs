@@ -95,14 +95,18 @@ async function run() {
     fs.writeFileSync(work, "Produced by a native Run");
     const nativeRun = await f.send(session.sessionKey, "agent-files-chat-send");
     assert.equal(nativeRun.status, "running", JSON.stringify(nativeRun));
-    const publish = (run, runId = run.id, callId = crypto.randomUUID()) => f.service.workRunCoordinator.invokeRuntimeCapability({
+    const existingFile = { relativePath: "made-by-run.txt", name: "Delivered.txt", kind: "document", mimeType: "text/plain" };
+    const reportInput = { name: "Daily.md", kind: "document", mimeType: "text/markdown" };
+    const publish = (run, runId = run.id, callId = crypto.randomUUID(), input = existingFile) => f.service.workRunCoordinator.invokeRuntimeCapability({
       runId: run.id, runtimeProfileId: run.runtimeSessionRef.runtimeProfileId,
       runtimeAccountId: run.runtimeSessionRef.runtimeAccountId, kind: "artifact",
     }, scope => f.service.mcpProductToolController.handle("artifact_publish", {
-      runId, relativePath: "made-by-run.txt", name: "Delivered.txt", kind: "document", mimeType: "text/plain",
+      runId, ...input,
     }, { profileId: profile.id, callId, confirmation: true }, scope));
     const callId = crypto.randomUUID();
     await assert.rejects(publish(nativeRun, "another-run"), { code: "MCP_TOOL_FORBIDDEN" });
+    await assert.rejects(publish(nativeRun, nativeRun.id, crypto.randomUUID(), { ...reportInput, content: "# Cron only" }),
+      { code: "MCP_TOOL_FORBIDDEN" });
     const published = await publish(nativeRun, nativeRun.id, callId);
     assert.deepEqual(await publish(nativeRun, nativeRun.id, callId), published);
     assert.equal(await (await request(published.file.url)).text(), "Produced by a native Run");
@@ -135,6 +139,48 @@ async function run() {
     const cronReport = await backend.getDashboardRunDetail(cronRun.id);
     assert.deepEqual(cronReport.artifacts.map(item => item.url), [cronFile.url]);
     assert.deepEqual((await backend.listRunArtifacts(profile.agentId, cronRun.id)).map(item => item.fileId), [cronFile.fileId]);
+
+    const directJob = (await backend._call("cron.job.create", { operationId: crypto.randomUUID(), name: "Daily report Cron",
+      enabled: false, profileId: profile.id, prompt: "Deliver a daily Markdown report", workspace: null,
+      schedule: { kind: "at", at: Date.now() + 60_000 }, misfirePolicy: "latest", maxCatchUp: 1,
+      overlapPolicy: "skip", threadPolicy: "new", threadId: null, createdAt: Date.now() })).job;
+    const reports = [];
+    for (const content of ["# 日报\n\n第一期\n", "# 日报\n\n第二期\n"]) {
+      const triggered = (await backend._call("cron.run.trigger", { operationId: crypto.randomUUID(),
+        jobId: directJob.id, createdAt: Date.now() })).run;
+      const run = await waitRunning(f.service, triggered.id);
+      assert.equal(run.workspace, path.join(f.paths.defaultWorkspaceDir, profile.id));
+      assert.match(f.service.workRunCoordinator.runExecutionContracts.get(run.id).turnDeveloperInstructions,
+        /artifact_publish with the complete report as content/u);
+      const input = { ...reportInput, content };
+      await assert.rejects(publish(run, run.id, crypto.randomUUID(), { ...input, relativePath: "Daily.md" }),
+        { code: "MCP_TOOL_INVALID_ARGUMENTS" });
+      await assert.rejects(publish(run, run.id, crypto.randomUUID(), { ...input, content: "报".repeat(8193) }),
+        { code: "MCP_TOOL_INVALID_ARGUMENTS" });
+      const publishId = crypto.randomUUID();
+      const result = await publish(run, run.id, publishId, input);
+      assert.deepEqual(await publish(run, run.id, publishId, input), result);
+      await assert.rejects(publish(run, run.id, publishId, { ...input, content: `${content}changed` }),
+        { code: "MCP_TOOL_STATE_CONFLICT" });
+      const file = result.file;
+      const stored = path.join(f.paths.agentsDir, profile.id, "files", file.fileId, file.name);
+      assert.equal(fs.readFileSync(stored, "utf8"), content);
+      assert.equal(fs.existsSync(path.join(run.workspace, file.name)), false);
+      const sessionKey = f.service.workRunCoordinator.getRunSessionKey(run);
+      await f.complete(run, `[日报](${file.url})`);
+      const detail = await backend.getDashboardRunDetail(run.id);
+      assert.deepEqual(detail.artifacts.map(item => item.url), [file.url]);
+      reports.push({ content, file, sessionKey });
+    }
+    assert.notEqual(reports[0].file.fileId, reports[1].file.fileId);
+    const reportRows = (await backend.listAgentArtifacts(profile.agentId)).items.filter(item => item.name === reportInput.name);
+    assert.deepEqual(reportRows.map(item => item.fileId).sort(), reports.map(({ file }) => file.fileId).sort());
+    for (const { content, file, sessionKey } of reports) {
+      const history = await backend._call("chat.history", { sessionKey, cursor: null, limit: 100 });
+      assert.ok(history.messages.some(message => JSON.stringify(message).includes(file.url)));
+      assert.equal(await (await request(file.url)).text(), content);
+    }
+    console.log("PASS native Cron writes one managed report per run, and same-name history links keep their original bytes");
 
     const store = f.service.nativeKanbanStore;
     const board = store.listBoards().find(item => item.profileId === profile.id);
@@ -193,6 +239,10 @@ async function run() {
       const deleted = restoredStore.get({ profileId: profile.id, fileId: taskFile.fileId });
       assert.equal(deleted.file.status, "deleted");
       assert.equal(deleted.path, null);
+      for (const { content, file } of reports) {
+        const report = restoredStore.get({ profileId: profile.id, fileId: file.fileId });
+        assert.equal(fs.readFileSync(report.path, "utf8"), content);
+      }
     } finally { await restoredStore.close(); }
     console.log("PASS authority backup and restore preserve private bytes, source IDs and deleted receipts without staging");
   } finally {

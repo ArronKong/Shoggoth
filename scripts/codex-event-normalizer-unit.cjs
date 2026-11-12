@@ -179,11 +179,15 @@ function testStatusApprovalPromptCompleteAndError() {
 
   const failed = normalizeCodexEvent({
     method: "error",
-    params: { ...ids, error: { code: "MODEL_FAILED", message: "Bearer secret-value-should-not-leak" } },
+    params: { ...ids, willRetry: false, error: { code: "MODEL_FAILED", message: "Bearer secret-value-should-not-leak" } },
   });
   assertBase(failed, "error");
   assert.equal(failed.errorCode, "MODEL_FAILED");
   assert.equal(JSON.stringify(failed).includes("secret-value-should-not-leak"), false);
+  assert.deepEqual(normalizeCodexEvent({
+    method: "error",
+    params: { ...ids, willRetry: true, error: { message: "Reconnecting... 1/5 private provider details" } },
+  }), { known: false, type: "diagnostic", method: "error", ...ids, toolCallId: ids.itemId });
 }
 
 function testUnknownIsBoundedAndSecretFree() {

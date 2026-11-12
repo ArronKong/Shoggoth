@@ -873,7 +873,10 @@ function createAgentService(options) {
   const modelSecretGateway = options.modelSecretGateway
     || new (require("./model-secret-gateway").ModelSecretGateway)({ projection: modelSecretProjection,
       provenance: new (require("./model-secret-provenance").ModelSecretProvenance)({ paths, secrets: temporarySecrets }),
-      request: options.modelSecretRequest, env: options.parentEnv || process.env });
+      request: options.modelSecretRequest, env: options.parentEnv || process.env,
+      onDiagnostic: ({ reason, elapsedMs, bytes }) => sendLatency.record({
+        stage: `model_secret_${reason}`, outcome: "error", durationMs: elapsedMs, bytes, at: Date.now(),
+      }) });
   const chatSecretService = new (require("./chat-secret-service").ChatSecretService)({
     secrets: temporarySecrets, execution: secretExecution, getOwner: getModelProjectionOwner,
   });

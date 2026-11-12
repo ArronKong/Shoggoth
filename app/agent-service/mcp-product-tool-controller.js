@@ -132,6 +132,7 @@ const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const MIME_PATTERN = /^[\x21-\x7e]+$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
+const MAX_CRON_REPORT_BYTES = 24 * 1024;
 const MAX_RUN_NOTE_BYTES = 4096;
 const MAX_COMMENT_BYTES = 64 * 1024;
 const MAX_NOTIFICATION_TITLE_BYTES = 128;
@@ -742,17 +743,20 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
   },
   {
     name: "artifact_publish",
-    description: "Save a deliverable from the current WorkRun workspace to the Agent's private files.",
+    description: "Publish a deliverable to the Agent's private files.",
     inputSchema: {
       type: "object",
       properties: {
         runId: { type: "string", maxLength: 256 },
         relativePath: { type: "string", maxLength: 4096 },
+        content: { type: "string", minLength: 1, maxLength: MAX_CRON_REPORT_BYTES,
+          description: "Native Cron only. The complete UTF-8 report, up to 24 KiB." },
         name: { type: "string", maxLength: 1024 },
         kind: { type: "string", maxLength: 64 },
         mimeType: nullableString(256),
       },
-      required: ["runId", "relativePath", "name", "kind", "mimeType"],
+      required: ["runId", "name", "kind", "mimeType"],
+      oneOf: [{ type: "object", required: ["relativePath"] }, { type: "object", required: ["content"] }],
       additionalProperties: false,
     },
   },
@@ -1843,8 +1847,10 @@ function validateProductOperationArguments(name, args) {
       && validText(args.body, MAX_RUN_NOTE_BYTES);
   }
   if (name === "artifact_publish") {
-    return exactObject(args, ["runId", "relativePath", "name", "kind", "mimeType"])
-      && validOpaqueId(args.runId) && validText(args.relativePath, 4096)
+    const fields = ["runId", "name", "kind", "mimeType"];
+    const source = (exactObject(args, [...fields, "relativePath"]) && validText(args.relativePath, 4096))
+      || (exactObject(args, [...fields, "content"]) && validText(args.content, MAX_CRON_REPORT_BYTES));
+    return source && validOpaqueId(args.runId)
       && validText(args.name, 1024) && validText(args.kind, 64)
       && OPAQUE_ID_PATTERN.test(args.kind)
       && validText(args.mimeType, 256, { nullable: true })
@@ -3262,6 +3268,7 @@ class McpProductToolController {
     }
     if (name === "artifact_publish") {
       if (this.agentFileStore) return this.#bindManagedArtifact(args, authority);
+      if (args.content !== undefined) throw toolError("MCP_TOOL_UNAVAILABLE");
       const runValue = this.#requireRun(args.runId, authority.profileId);
       const cardValue = this.#requireCard(runValue.sourceId, authority.profileId);
       this.#requireKanbanBinding(cardValue, runValue);
@@ -4340,10 +4347,15 @@ class McpProductToolController {
     return { run, card, scope };
   }
 
-  async #readManagedArtifact(run, relativePath) {
+  async #readManagedArtifact(run, args) {
+    if (args.content !== undefined) {
+      if (run.source !== "cron") throw toolError("MCP_TOOL_FORBIDDEN");
+      this.#assertSecretSafe(args.content);
+      return Buffer.from(args.content, "utf8");
+    }
     try {
       return await readWorkspaceOutput(this.agentFileStore.paths, {
-        profileId: run.profileId, workspace: run.workspace, relativePath,
+        profileId: run.profileId, workspace: run.workspace, relativePath: args.relativePath,
       });
     } catch (error) {
       if (error?.code === "AGENT_FILE_TOO_LARGE") throw toolError("MCP_TOOL_ARTIFACT_TOO_LARGE");
@@ -4358,7 +4370,7 @@ class McpProductToolController {
       name = managedFilename(args.name);
       mimeType = fileMimeType(args.mimeType);
     } catch { throw toolError("MCP_TOOL_INVALID_ARGUMENTS"); }
-    const bytes = await this.#readManagedArtifact(run, args.relativePath);
+    const bytes = await this.#readManagedArtifact(run, args);
     scope.assertCurrent();
     return {
       cardId: card?.id ?? null, runId: run.id, workspace: run.workspace, name, kind: args.kind, mimeType,
@@ -4387,7 +4399,7 @@ class McpProductToolController {
       ({ file } = await this.agentFileStore.save({
         profileId: profile.id, operationId, name: binding.name, mimeType: binding.mimeType,
         source: binding.source, sizeBytes: binding.sizeBytes, sha256: binding.sha256,
-        read: () => this.#readManagedArtifact(run, args.relativePath), assertCurrent: () => scope.assertCurrent(),
+        read: () => this.#readManagedArtifact(run, args), assertCurrent: () => scope.assertCurrent(),
       }));
     } catch (error) {
       if (error?.code === "AGENT_FILE_COMMIT_UNCERTAIN" || error?.code === "AGENT_FILE_CONFLICT") {

@@ -16,6 +16,7 @@ function normalize(input) {
     || !["success", "error", "unknown"].includes(input.outcome)
     || !Number.isFinite(input.durationMs) || input.durationMs < 0) return null;
   const record = { stage: input.stage, outcome: input.outcome, durationMs: Math.round(input.durationMs) };
+  if (Number.isSafeInteger(input.bytes) && input.bytes >= 0) record.bytes = input.bytes;
   for (const key of ["at", "startedAt", "finishedAt", "attempt"]) {
     if (Number.isSafeInteger(input[key]) && input[key] >= 0) record[key] = input[key];
   }

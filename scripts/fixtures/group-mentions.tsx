@@ -37,7 +37,7 @@ const richBody = '@Antigravity、@虾长老 请与 **@Codex** 核对来源。\n\
   '代码 `@Neo`、邮箱 hello@codex.test、链接 [@default](/fixture-link/@default) 保持原样。\n\n' +
   '```js\nconst literal = "@Neo";\n```\n\n- [x] 核对完成\n\n<span onclick="window.fixtureInjection=true">raw HTML</span>';
 const history = [message(1, { kind: 'user' }, '请 @Codex 安排三路采集。'),
-  message(2, { kind: 'member', memberId: 'a' }, '@Antigravity 负责国际模型，@虾长老 负责国内模型，@default 负责产品与应用。'),
+  message(2, { kind: 'member', memberId: 'a' }, '@Antigravity 负责国际模型。\n@虾长老 负责国内模型。\n@default 负责产品与应用。'),
   message(3, { kind: 'member', memberId: 'e' }, richBody),
   message(4, { kind: 'user' }, '@Codex 请核对最终附件。'),
   message(5, { kind: 'user' }, '请把对比结果整理成一张表。', { mentions: { memberIds: ['e'], broadcast: false, unresolved: [] } })];
@@ -106,8 +106,9 @@ state.verifyTimeline = async () => {
   check(prefill && mention(5, 'e'), 'the structured mention appears in both the composer and its sent bubble');
   for (const chip of [prefill!, mention(5, 'e'), mention(2, 'b')]) {
     const style = getComputedStyle(chip);
+    const padding = chip === prefill ? '2px 6px 2px 4px' : '4px 6px 4px 4px';
     equal([style.backgroundColor, style.borderRadius, style.fontSize, style.padding, style.borderTopColor],
-      ['rgb(0, 0, 0)', '12px', '11px', '2px 6px 2px 4px', 'rgba(255, 255, 255, 0)'], 'composer, sent and received mentions share the exact pill');
+      ['rgb(0, 0, 0)', '12px', '11px', padding, 'rgba(255, 255, 255, 0)'], 'composer and message mentions have the expected styling');
     equal(getComputedStyle(chip.lastElementChild!).color, 'rgb(255, 255, 255)', 'the mention name stays white');
   }
   prefill!.focus();
@@ -116,10 +117,17 @@ state.verifyTimeline = async () => {
   for (const chip of timeline().querySelectorAll('[data-group-mention]')) check(!chip.textContent?.includes('@'), 'avatar mentions display only the member name');
   const centerOffset = Math.max(mentionCenterOffset(mention(2, 'b')), mentionCenterOffset(mention(4, 'a')));
   check(centerOffset <= 0.5, 'the mention pill is centered on adjacent body text: offset=' + centerOffset);
+  row(2).scrollIntoView({ block: 'center' });
+  await pause();
+  const first = mention(2, 'b').getBoundingClientRect();
+  const second = mention(2, 'c').getBoundingClientRect();
+  const third = mention(2, 'd').getBoundingClientRect();
+  const lineGap = Math.min(second.top - first.bottom, third.top - second.bottom);
+  check(lineGap >= 4, 'mentions on consecutive lines leave a visible gap: gap=' + lineGap);
   equal(writes, 0, 'rendering does not send group actions');
   equal(JSON.stringify(history), originalHistory, 'source messages are unchanged');
-  timeline().scrollTop = timeline().scrollHeight; await pause(); layout();
-  return { mentions: 3, literalCodeAndLinks: true, centerOffset };
+  layout();
+  return { mentions: 3, literalCodeAndLinks: true, centerOffset, lineGap };
 };
 state.verifyReadOnlyMentions = async () => {
   const author = row(2).querySelector<HTMLElement>('[data-group-author]')!;

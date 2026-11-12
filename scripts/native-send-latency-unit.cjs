@@ -49,13 +49,18 @@ test("durable timing records correlate spans while omitting input, errors and ra
   try {
     log.record({ stage: "admission_context", outcome: "success", durationMs: 12.4,
       startedAt: 100, finishedAt: 112, operationId: "private-operation", runId: "private-run", prompt: "PRIVATE USER TEXT" });
+    log.record({ stage: "model_secret_local_rejection", outcome: "error", at: 120, durationMs: 15.4, bytes: 256,
+      error: "PRIVATE UPSTREAM ERROR", response: "PRIVATE MODEL RESPONSE" });
     await log.close();
     const body = fs.readFileSync(path.join(runtimeDir, "send-latency.json"), "utf8");
-    assert.ok(!body.includes("private-operation") && !body.includes("private-run") && !body.includes("PRIVATE USER TEXT"));
-    const [row] = JSON.parse(body).records;
+    assert.doesNotMatch(body, /private-operation|private-run|PRIVATE USER TEXT|PRIVATE UPSTREAM ERROR|PRIVATE MODEL RESPONSE/u);
+    const [row, { generation, version, ...modelFailure }] = JSON.parse(body).records;
     assert.match(row.operationIdHash, /^[a-f0-9]{64}$/); assert.equal(row.startedAt, 100); assert.equal(row.durationMs, 12);
+    assert.deepEqual(modelFailure, { stage: "model_secret_local_rejection", outcome: "error", at: 120, durationMs: 15, bytes: 256 });
     log.open(); log.record({ stage: "second", outcome: "success", durationMs: 1 }); await log.close();
-    assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeDir, "send-latency.json"))).records.length, 2);
+    const restarted = JSON.parse(fs.readFileSync(path.join(runtimeDir, "send-latency.json"))).records;
+    assert.equal(restarted.length, 3);
+    assert.deepEqual(restarted[1], { ...modelFailure, generation, version });
   } finally { await log.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 test("preparation coalesces, never starts a session/turn and avoids retaining per-Run hosts", async () => {

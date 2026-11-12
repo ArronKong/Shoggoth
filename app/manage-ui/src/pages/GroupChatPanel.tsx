@@ -10,6 +10,7 @@ import GroupChatComposerInput, { type GroupComposerInputHandle, type GroupCompos
 import ChatFileButton, { ChatFileLabel } from "../components/ChatFileButton";
 import GroupChatMarkdown, { groupAttachmentsOutsideMarkdown } from "./GroupChatMarkdown";
 import FusionLoader from "../components/FusionLoader";
+import ChatLiveActivityBubble from "../components/ChatLiveActivityBubble";
 import TurnTimeline from "../components/TurnTimeline/TurnTimeline";
 import Modal from "../components/Modal";
 import { useConfirm, usePrompt, useToast } from "../components/ui";
@@ -525,17 +526,29 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
     const measure = () => {
       if (!list.clientHeight) return;
       const clearance = Math.max(0, Math.ceil(list.getBoundingClientRect().bottom - composer.getBoundingClientRect().top));
-      list.style.setProperty("--chat-fade-bottom", `${clearance}px`);
-      list.style.setProperty("--chat-thread-bottom", `${clearance + 44}px`);
+      const fade = `${clearance}px`;
+      if (list.style.getPropertyValue("--chat-fade-bottom") !== fade) {
+        list.style.setProperty("--chat-fade-bottom", fade);
+        list.style.setProperty("--chat-thread-bottom", `${clearance + 44}px`);
+      }
       if (stickToBottomRef.current) list.scrollTop = list.scrollHeight;
       setShowJump(list.scrollHeight - list.scrollTop - list.clientHeight >= 80);
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => { frame = 0; measure(); });
+    });
     observer.observe(list);
     observer.observe(composer);
-    return () => observer.disconnect();
+    const content = list.querySelector(".chat-thread__inner");
+    if (content) observer.observe(content);
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
   }, [view?.group.id, expandedPanel]);
 
   const jumpToLatest = () => {
@@ -1430,6 +1443,8 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
               && !turn.recovery && !stopping && turn.queueReason !== "execution_unconfirmed"
               && !groupActivityEnded(phase);
             const steps = loading && activity ? groupActivitySteps(activity) : [];
+            const openActivity = activityKey && steps.length > 0
+              ? () => { if (currentScope()) setSelectedActivityKey(activityKey); } : undefined;
             const notice = !quietRecovery && (turn.recovery?.type === "result" || turn.queueReason === "execution_unconfirmed");
             if (!replyMessages.length && !loading && !notice) return null;
             return (
@@ -1442,11 +1457,9 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
                 <GroupChatMarkdown text={item.text} className="chat-md" members={view.members}
                   streamingCursor={item.pending && canAnswer} />
               </div>)}
-              {activityKey && steps.length > 0 ? <div className="chat-bubble is-activity-loading" data-activity-phase={phase}>
-                <TurnTimeline key={activityKey} steps={steps} status="running"
-                  onOpenPreview={() => { if (currentScope()) setSelectedActivityKey(activityKey); }} />
-              </div> : (loading || notice) && <div className={`chat-bubble${loading ? " is-streaming" : ""}`} data-activity-phase={phase}>
-                {loading && <FusionLoader size="sm" ariaLabel={t("chat.liveStatus.running")} />}
+              {loading && <ChatLiveActivityBubble className="chat-bubble" activityPhase={phase} onOpen={openActivity}
+                preview={openActivity && <TurnTimeline key={activityKey} steps={steps} status="running" onOpenPreview={openActivity} />} />}
+              {notice && <div className="chat-bubble" data-activity-phase={phase}>
                 {turn.queueReason === "execution_unconfirmed" && <p className={styles.muted}>{t("groupChat.queueBlocked")}</p>}
                 {turn.recovery && <GroupChatRecovery recovery={turn.recovery} />}
               </div>}

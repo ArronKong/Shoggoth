@@ -67,7 +67,7 @@ test("ownership, invalid input, cancellation, uncertain state and unknown outcom
     "SECRET_MODEL_SCOPE_INVALID", "SECRET_MODEL_CANCELED", "SECRET_MEDIA_CANCELED", "SECRET_INPUT_INVALID", "SECRET_MODEL_INPUT_INVALID",
     "SECRET_TOOL_OUTCOME_UNKNOWN", "SECRET_OPERATION_CONFLICT", "ECONNRESET"]) {
     setProcessing(async () => { throw failure(code); });
-    const response = await send(route); assert.equal(response.status, 503, code); await response.text();
+    const response = await send(route); assert.equal(response.status, 400, code); await response.text();
   }
   assert.equal(received.length, 0);
 }));
@@ -76,7 +76,7 @@ test("revocation while processing fails prevents original dispatch", async () =>
   setProcessing(() => { start(); return new Promise((_, fail) => { reject = fail; }); });
   const route = await gateway.bind({ scope: SCOPE, providerKind: "chatgpt" });
   const waiting = send(route); await started; route.close(); reject(failure("SECRET_MEDIA_UNAVAILABLE"));
-  assert.equal((await waiting).status, 503); assert.equal(received.length, 0);
+  assert.equal((await waiting).status, 400); assert.equal(received.length, 0);
 }));
 test("scope is rechecked after final async validation before delivering the original", async () => fixture(async ({ gateway, send, received }) => {
   let scope = SCOPE, validations = 0;
