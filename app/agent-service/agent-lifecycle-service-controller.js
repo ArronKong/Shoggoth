@@ -2,14 +2,18 @@
 
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { createBuiltinCliAgentProfile, planBuiltinCliAgentProfiles } = require("./builtin-cli-profiles");
-const { DEFAULT_AGENT_PROFILE_ID } = require("./product-store");
+const { MAX_FRAME_BYTES } = require("./chat-service-protocol");
+const { atomicWritePrivateFile, fsyncPrivateParent, preparePrivateParent, readPrivateFile } = require("./private-file");
+const { DEFAULT_AGENT_PROFILE_ID, assertNoSensitiveFields } = require("./product-store");
 const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 const { runtimeBinding } = require("./runtime-adapter");
-const { serviceError } = require("./security");
+const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 const {
   PUBLIC_MESSAGES,
+  initialDefinitionPayload,
   mapAgentLifecycleError,
   validateAgentLifecycleParams,
   validateAgentLifecycleResult,
@@ -17,6 +21,9 @@ const {
 
 const MAX_OPERATION_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+const CREATED_PROFILE_ID = /^[a-f0-9-]{36}$/u;
+const SHA256 = /^[a-f0-9]{64}$/u;
+const INITIAL_DEFINITION_FILE = /^[a-f0-9-]{36}-[a-f0-9]{64}\.json(?:\.tmp)?$/u;
 const NON_TERMINAL_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
 ]);
@@ -136,7 +143,7 @@ function operationIdentity(method, params) {
 function durableBinding(method, params) {
   if (method === "agent.create") {
     const identity = createIdentity(params);
-    return {
+    const binding = {
       method,
       operationId: params.operationId,
       targetProfileId: identity.id,
@@ -146,8 +153,13 @@ function durableBinding(method, params) {
       expectedUpdatedAt: null,
       createdAt: params.createdAt,
       identity,
-      ...(params.initialIdentity !== undefined ? { initialIdentity: params.initialIdentity } : {}),
     };
+    if (params.initialSoul !== undefined) {
+      binding.initialDefinitionHash = crypto.createHash("sha256").update(initialDefinitionPayload(params)).digest("hex");
+    } else if (params.initialIdentity !== undefined) {
+      binding.initialIdentity = params.initialIdentity;
+    }
+    return binding;
   }
   return {
     method,
@@ -168,6 +180,14 @@ function validateDurableBinding(method, value) {
     "expectedUpdatedAt", "createdAt", "identity",
   ];
   if (method === "agent.create" && value && Object.hasOwn(value, "initialIdentity")) fields.push("initialIdentity");
+  if (method === "agent.create" && value && Object.hasOwn(value, "initialDefinitionHash")) {
+    if (Object.hasOwn(value, "initialIdentity")
+      || typeof value.targetProfileId !== "string" || !CREATED_PROFILE_ID.test(value.targetProfileId)
+      || typeof value.initialDefinitionHash !== "string" || !SHA256.test(value.initialDefinitionHash)) {
+      throw lifecycleError("AGENT_COMMIT_UNCERTAIN");
+    }
+    fields.push("initialDefinitionHash");
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.getPrototypeOf(value) !== Object.prototype
     || Object.keys(value).length !== fields.length || fields.some((field) => !Object.hasOwn(value, field))
@@ -192,6 +212,8 @@ function createAgentLifecycleServiceController(options = {}) {
   // Optional: { state, installedAccountIds(), beforeCreate(profile), afterEnsure({createdProfileIds, locale}) }.
   const builtinAgents = options.builtinAgents || null;
   const productStore = options.productStore;
+  const definitionDirectory = options.paths && path.join(options.paths.stateDir, "agent-create-definitions");
+  const privateFileOptions = { trustedRoot: options.paths?.trustedRoot };
   const now = options.now || Date.now;
   let state = "closed";
   let generation = 0;
@@ -281,9 +303,65 @@ function createAgentLifecycleServiceController(options = {}) {
     }
   }
 
-  async function initialize(profile, expectedGeneration, initialIdentity) {
+  function initialDefinitionPath(binding) {
+    if (!definitionDirectory) throw lifecycleError("AGENT_SERVICE_CLOSED");
+    return path.join(definitionDirectory, `${binding.targetProfileId}-${binding.initialDefinitionHash}.json`);
+  }
+
+  function readInitialDefinition(binding) {
+    if (binding.initialDefinitionHash === undefined) return { initialIdentity: binding.initialIdentity };
+    try {
+      const file = initialDefinitionPath(binding);
+      preparePrivateParent(file, privateFileOptions.trustedRoot);
+      const payload = readPrivateFile(file, { maxBytes: MAX_FRAME_BYTES });
+      if (crypto.createHash("sha256").update(payload).digest("hex") !== binding.initialDefinitionHash) {
+        throw lifecycleError("AGENT_INITIALIZATION_FAILED");
+      }
+      return JSON.parse(payload.toString("utf8"));
+    } catch {
+      throw lifecycleError("AGENT_INITIALIZATION_FAILED");
+    }
+  }
+
+  function stageInitialDefinition(binding, params) {
+    if (binding.initialDefinitionHash === undefined) return;
+    assertNoSensitiveFields({ initialIdentity: params.initialIdentity, initialSoul: params.initialSoul },
+      "agent.create", new Set(), options.isSensitiveValue);
+    const file = initialDefinitionPath(binding);
+    try {
+      preparePrivateParent(file, privateFileOptions.trustedRoot);
+      if (lstatIfExists(file)) readInitialDefinition(binding);
+      else atomicWritePrivateFile(file, initialDefinitionPayload(params), privateFileOptions);
+      fsyncPrivateParent(path.dirname(definitionDirectory));
+    } catch {
+      throw lifecycleError("AGENT_INITIALIZATION_FAILED");
+    }
+  }
+
+  function discardInitialDefinition(binding) {
+    if (binding?.initialDefinitionHash === undefined) return;
+    try {
+      const file = initialDefinitionPath(binding);
+      preparePrivateParent(file, privateFileOptions.trustedRoot);
+      fs.unlinkSync(file);
+    } catch { /* The next Service start can remove an unreferenced payload. */ }
+  }
+
+  function pruneInitialDefinitions(pending) {
+    if (!definitionDirectory || !lstatIfExists(definitionDirectory)) return;
+    const retained = new Set(pending.filter(call => call.binding?.initialDefinitionHash)
+      .map(call => path.basename(initialDefinitionPath(call.binding))));
+    ensurePrivateDirectoryTree(definitionDirectory, privateFileOptions.trustedRoot);
+    for (const entry of fs.readdirSync(definitionDirectory, { withFileTypes: true })) {
+      if (entry.isFile() && INITIAL_DEFINITION_FILE.test(entry.name) && !retained.has(entry.name)) {
+        fs.unlinkSync(path.join(definitionDirectory, entry.name));
+      }
+    }
+  }
+
+  async function initialize(profile, expectedGeneration, definitions = {}) {
     assertOpen(expectedGeneration);
-    try { await options.initializeProfile(structuredClone(profile), { initialIdentity }); }
+    try { await options.initializeProfile(structuredClone(profile), definitions); }
     catch (error) {
       throw lifecycleError("AGENT_INITIALIZATION_FAILED", error?.message);
     }
@@ -301,6 +379,7 @@ function createAgentLifecycleServiceController(options = {}) {
 
   async function create(binding, expectedGeneration) {
     const { identity } = binding;
+    const definitions = readInitialDefinition(binding);
     let profile = productStore.getAgentProfile(identity.id);
     if (!profile) {
       assertNameAvailable(binding.name);
@@ -331,7 +410,7 @@ function createAgentLifecycleServiceController(options = {}) {
       || profile.isDefault !== false) {
       throw lifecycleError("AGENT_OPERATION_CONFLICT");
     }
-    await initialize(profile, expectedGeneration, binding.initialIdentity);
+    await initialize(profile, expectedGeneration, definitions);
     await activate(profile, expectedGeneration);
     profile = loadProfile(identity.id);
     if (!profile.enabled) profile = putProfile({ ...profile, enabled: true });
@@ -474,8 +553,11 @@ function createAgentLifecycleServiceController(options = {}) {
   }
 
   function complete(durable, outcome) {
-    try { return productStore.completeMcpToolCall({ id: durable.id, outcome }); }
+    let completed;
+    try { completed = productStore.completeMcpToolCall({ id: durable.id, outcome }); }
     catch (error) { throw poison(error); }
+    discardInitialDefinition(durable.binding);
+    return completed;
   }
 
   function executeDurable(durable) {
@@ -569,6 +651,9 @@ function createAgentLifecycleServiceController(options = {}) {
     }
     if (durable) return durable;
     assertNoOtherPending(binding.targetProfileId, identity.callId);
+    // A durable create may be recovered without its caller. Save the bounded
+    // payload before recording its digest in the lifecycle ledger.
+    stageInitialDefinition(binding, params);
     try {
       return productStore.beginMcpToolCall({
         ...lookup,
@@ -577,8 +662,9 @@ function createAgentLifecycleServiceController(options = {}) {
       });
     } catch (error) {
       const code = dataErrorCode(error);
-      if (code === "MCP_TOOL_CALL_CONFLICT") throw lifecycleError("AGENT_OPERATION_CONFLICT");
       if (code === "STORE_COMMIT_UNCERTAIN" || code?.endsWith("COMMIT_UNCERTAIN")) throw poison(error);
+      discardInitialDefinition(binding);
+      if (code === "MCP_TOOL_CALL_CONFLICT") throw lifecycleError("AGENT_OPERATION_CONFLICT");
       throw error;
     }
   }
@@ -593,14 +679,12 @@ function createAgentLifecycleServiceController(options = {}) {
     open() {
       if (state === "open") return controller;
       if (poisonError) throw poisonError;
+      const pending = productStore.listMcpToolCalls().filter(call => call.status === "pending"
+        && typeof call.name === "string" && call.name.startsWith("agent."));
+      try { pruneInitialDefinitions(pending); } catch { /* Only pending creates depend on their verified payload. */ }
       generation += 1;
       state = "open";
-      for (const durable of productStore.listMcpToolCalls()) {
-        if (durable.status === "pending" && typeof durable.name === "string"
-          && durable.name.startsWith("agent.")) {
-          void executeDurable(durable).catch(() => {});
-        }
-      }
+      for (const durable of pending) void executeDurable(durable).catch(() => {});
       return controller;
     },
 

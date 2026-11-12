@@ -5,14 +5,17 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { contextFixture } = require("./fixtures/shoggoth-context-fixture.cjs");
-const { TranscriptStore } = require("../app/agent-service/transcript-store");
+const { TranscriptStore, transcriptEventId } = require("../app/agent-service/transcript-store");
+const { createChatServiceController, transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
 const { ConversationRecallService } = require("../app/agent-service/conversation-recall-service");
 const { ConversationCheckpointStore, SUMMARY_FIELDS, coveredTranscript } = require("../app/agent-service/conversation-checkpoint-store");
 const { ProductMemorySessions } = require("../app/agent-service/shoggoth-memory/session-source.cjs");
 const { planConversationCompaction } = require("../app/agent-service/conversation-compaction");
 const { MemoryDatabase } = require("../app/agent-service/shoggoth-memory/database.cjs");
 const { ShoggothMemoryHost, core } = require("../app/agent-service/shoggoth-memory/host.cjs");
-const { normalizeBorrowedMemoryRefs, mergeBorrowedMemoryRefs, isBorrowedMemoryDerived, isReferentialMemoryRequest, assertNoBorrowedMemoryWrite } = require("../app/agent-service/shoggoth-memory/borrowed-memory-provenance.cjs");
+const { normalizeBorrowedMemoryRefs, mergeBorrowedMemoryRefs, isBorrowedMemoryDerived, isReferentialMemoryRequest, assertNoBorrowedMemoryWrite,
+  sanitizeBorrowedToolContent } = require("../app/agent-service/shoggoth-memory/borrowed-memory-provenance.cjs");
 const MARKER = "BORROWED_OWNER_TEXT_725954";
 function refs() {
   const sourceHash = crypto.createHash("sha256").update(MARKER).digest("hex");
@@ -75,6 +78,93 @@ test("Product tool journal and context objects retain metadata without borrowed 
     assert.doesNotMatch(disk, new RegExp(MARKER)); assert.doesNotMatch(disk, /access-secret/u);
     assert.deepEqual(event.content.borrowedMemoryRefs, refs());
   } finally { f.cleanup(); }
+});
+
+test("borrowed tool display keeps namespaced identity, pairing, and outcome through transcript reload", () => {
+  const f = contextFixture();
+  try {
+    const name = "shoggoth/native_agent_create";
+    const toolCallId = "exec-1";
+    const start = { transcriptType: "tool.start", toolCallId, tool: { kind: "mcpToolCall", name, status: "inProgress",
+      displayArgs: { activityTitle: MARKER } } };
+    const result = { transcriptType: "tool.result", toolCallId, tool: { kind: "mcpToolCall", name, status: "failed", durationMs: 350,
+      displayArgs: { activityTitle: MARKER }, resultSummary: MARKER, output: { text: MARKER } } };
+    const live = sanitizeBorrowedToolContent(result, refs());
+    assert.equal(live.tool.name, name);
+    assert.equal(live.tool.status, "failed");
+    assert.equal(live.tool.durationMs, 350);
+    assert.equal(live.toolCallId, toolCallId);
+    assert.doesNotMatch(JSON.stringify(live), new RegExp(MARKER));
+    f.append({ id: "borrowed-start", kind: "tool_call", content: sanitizeBorrowedToolContent(start, refs()) });
+    f.append({ id: "borrowed-result", kind: "tool_result", content: live, contextContent: result });
+    f.transcripts.close(); f.transcripts.open();
+    const parts = f.transcripts.listEvents(f.profile.id, f.transcriptSessionId)
+      .map(event => transcriptHistoryItem(event).payload.message.content[0]);
+    assert.deepEqual(parts, [
+      { type: "toolCall", toolName: name, toolCallId },
+      { type: "toolResult", name, content: "", is_error: true, toolCallId, durationS: 0.35 },
+    ]);
+    assert.doesNotMatch(contents(path.join(f.paths.agentsDir, f.profile.id, "transcripts")), new RegExp(MARKER));
+    for (const invalid of ["../private", "/private/token", "mcp/path/file", "mcp/private text", "mcp/" + "a".repeat(256)]) {
+      assert.equal(sanitizeBorrowedToolContent({ tool: { kind: "mcpToolCall", name: invalid } }, refs()).tool.name, "tool");
+    }
+    assert.equal(sanitizeBorrowedToolContent({ tool: { kind: "read", name: "memory/private.md" } }, refs()).tool.name, "tool");
+    assert.equal(sanitizeBorrowedToolContent({ tool: { kind: "mcpToolCall", name: "shoggoth/memory_get" } }, refs()).tool.name, "shoggoth/memory_get");
+  } finally { f.cleanup(); }
+});
+
+test("legacy history uses exact Codex item receipts and falls back to a neutral tool label", async () => {
+  const f = contextFixture();
+  let chat;
+  try {
+    const ref = { runtime: "codex", runtimeProfileId: "codex-profile", runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
+      sessionId: "native-thread", turnId: "native-turn" };
+    const home = path.join(f.paths.runtimeAccountsDir, "codex", ref.runtimeAccountId, "home");
+    fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+    const file = path.join(home, "thread_history_1.sqlite");
+    const db = new (require("node:sqlite").DatabaseSync)(file);
+    try {
+      db.exec("CREATE TABLE thread_items (thread_id, turn_id, item_id, item_type, item_json, rollout_ordinal, started_at_ms, completed_at_ms)");
+      const insert = db.prepare("INSERT INTO thread_items VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+      insert.run(ref.sessionId, ref.turnId, "exec-other", "mcpToolCall",
+        JSON.stringify({ server: "shoggoth", tool: "app_help_search", status: "completed" }), 2, 200, 250);
+      insert.run(ref.sessionId, ref.turnId, "exec-create", "mcpToolCall",
+        JSON.stringify({ server: "shoggoth", tool: "native_agent_create", status: "completed",
+          arguments: { soul: MARKER }, result: { isError: true, content: MARKER } }), 1, 100, 450);
+    } finally { db.close(); }
+    const content = sanitizeBorrowedToolContent({ tool: { name: "memory_read" } }, refs());
+    const id = "exec-create";
+    for (const [kind, type, method] of [["tool_call", "tool.start", "item/started"], ["tool_result", "tool.result", "item/completed"]]) {
+      const receipt = { method, itemId: id, toolCallId: id, ...content };
+      f.append({ id: transcriptEventId("runtime-event", f.run.id, type, id, id, receipt), kind, content, runtimeRef: ref });
+    }
+    f.append({ id: "legacy-without-proof", kind: "tool_result", content, runtimeRef: ref });
+    const session = { id: f.transcriptSessionId, profileId: f.profile.id, status: "ready",
+      sessionKey: "22222222-2222-4222-8222-222222222222", runtimeSessionId: ref.sessionId };
+    const unexpected = () => assert.fail("history must never start a runtime or write a session");
+    chat = createChatServiceController({ paths: f.paths, transcriptStore: f.transcripts, cursorSecret: Buffer.alloc(32, 1),
+      productStore: { listAgentProfiles: () => [], getAgentProfile: () => f.profile },
+      chatSessionStore: { listSessions: () => [session], getSession: () => session,
+        listPendingRemoteOperations: () => [], createSession: unexpected },
+      coordinator: { listRuns: () => [], getRun: () => null, send: unexpected, subscribeRun: unexpected },
+      runtimeManager: { acquire: unexpected } });
+    await chat.open();
+    const params = { sessionKey: session.sessionKey, limit: 2, cursor: null };
+    const recent = await chat.handle("chat.history", params);
+    const parts = (page) => page.messages.map(item => item.payload.message.content[0]);
+    assert.deepEqual(parts(recent), [
+      { type: "toolResult", name: "shoggoth/native_agent_create", content: "", is_error: true, toolCallId: id, durationS: 0.35 },
+      { type: "toolResult", name: "tool", content: "", is_error: false },
+    ]);
+    const older = await chat.handle("chat.history", { ...params, cursor: recent.nextCursor });
+    assert.deepEqual(parts(older), [{ type: "toolCall", toolName: "shoggoth/native_agent_create", toolCallId: id }]);
+    assert.doesNotMatch(JSON.stringify([recent, older]), new RegExp(MARKER));
+    assert(f.transcripts.listEvents(f.profile.id, f.transcriptSessionId).every(event => event.content.tool.name === "memory_read"));
+    fs.renameSync(file, file + ".unavailable");
+    const offline = await chat.handle("chat.history", params);
+    assert.deepEqual(parts(offline).map(part => part.name), ["tool", "tool"]);
+    assert.equal(offline.nextCursor, recent.nextCursor);
+  } finally { await chat?.close(); f.cleanup(); }
 });
 
 test("rewriting, translating and summarizing across turns stay excluded from memory inputs after restart", () => {

@@ -544,6 +544,22 @@ export default function SettingsPage() {
   // The host applies connection changes after responding to the config write.
   // Reconcile reconnecting rows without refreshing the form or its UI state.
   useEffect(() => {
+    if (!cfg.gatewayAutoDiscover || managedModes.openclaw || cfg.disabledBackends.includes("openclaw")) return;
+    const backend = backends.find(row => row.id === "openclaw");
+    if (!backend || backend.disabled) return;
+    if (!backend.connected) setReconnectingBackends(ids => ids.includes(backend.id) ? ids : [...ids, backend.id]);
+    const gatewayUrl = backend.info.gatewayUrl;
+    // Background discovery may finish after the form loaded. Mirror its saved
+    // endpoint only while this field has never been edited in this page.
+    if (backend.connected && gatewayUrl && gatewayUrl !== cfg.gatewayUrl && !editVersionsRef.current.gatewayUrl) {
+      const next = { ...cfgRef.current, gatewayUrl };
+      cfgRef.current = next;
+      setCfg(next);
+      if (savedConfigRef.current) savedConfigRef.current = { ...savedConfigRef.current, gatewayUrl };
+    }
+  }, [backends, cfg.gatewayAutoDiscover, cfg.gatewayUrl, cfg.disabledBackends, managedModes.openclaw]);
+
+  useEffect(() => {
     if (reconnectingBackends.length === 0) return;
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
@@ -742,7 +758,7 @@ export default function SettingsPage() {
             invalidateTest("openclaw");
             changeSettings({ gatewayUrl: e.target.value }, true);
           }}
-          placeholder="ws://127.0.0.1:18792"
+          placeholder="ws://127.0.0.1:18789"
         />
       </Field>
       <Field label={t("settings.copy.gatewayToken")} hint={t("settings.tokenHint")}>
@@ -787,9 +803,9 @@ export default function SettingsPage() {
         ))}
       {REMOTE_CONNECTIONS_ENABLED && <p className="ui-hint">
         {t("settings.tunnelNote1")}
-        <span className="mono"> ssh -L 18792:127.0.0.1:18792 user@host</span>
+        <span className="mono"> ssh -L 18789:127.0.0.1:18789 user@host</span>
         {t("settings.tunnelNote2")}
-        <span className="mono"> ws://127.0.0.1:18792</span>
+        <span className="mono"> ws://127.0.0.1:18789</span>
         {t("settings.tunnelNote3")}
       </p>}
     </div>

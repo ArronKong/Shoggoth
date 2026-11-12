@@ -968,6 +968,9 @@ export function mergeNativeTurnSteps(saved: TurnStep[], observed: TurnStep[]): T
       if (matched.has(i) || step.kind !== candidate.kind) return false;
       if (step.kind === "tool") return !!step.toolCallId && step.toolCallId === candidate.toolCallId;
       if (step.kind === "status") return step.statusKind === candidate.statusKind;
+      if (step.activity && candidate.activity && step.id.startsWith("progress:") && candidate.id.startsWith("progress:")) {
+        return step.id === candidate.id;
+      }
       return !!step.text?.trim() && step.text.trim() === candidate.text?.trim();
     });
     if (index < 0) { unobserved.push(step); continue; }
@@ -1010,9 +1013,18 @@ function activityTarget(name: string | undefined, args: unknown, depth = 0): { t
     }
     return;
   }
-  const tool = activityToolName(productActivityTool(name) || name, a);
+  const product = productActivityTool(name);
+  const tool = activityToolName(product || name, a);
   let kind = "", value = "", label = "";
-  if (["web_search", "x_search", "x_semantic_search", "x_keyword_search"].includes(tool)) {
+  if (product === "agent_definition_read" || product === "agent_definition_update") {
+    const definition = first("kind");
+    if (!definition || !["IDENTITY", "SOUL", "AGENTS"].includes(definition)) return;
+    kind = "definition"; value = definition;
+  } else if (product === "native_agent_get" || product === "native_agent_update") {
+    const backend = first("backendId"), agent = first("agentId");
+    if (!backend || !agent) return;
+    kind = "agent"; value = JSON.stringify([backend, agent]);
+  } else if (["web_search", "x_search", "x_semantic_search", "x_keyword_search"].includes(tool)) {
     kind = "query"; value = first("query", "Query") || ""; label = value;
   } else if (["web_fetch", "browser_navigate", "read_url"].includes(tool)) {
     const url = first("url", "Url", "URL");
@@ -1078,4 +1090,43 @@ export function deriveRelations(steps: TurnStep[]): Map<string, StepRelation> {
     latest.set(target.key, { step: cur, tool: target.tool });
   }
   return rel;
+}
+
+// Some runtimes cannot identify a milestone or retain tool arguments in
+// history. Bound ordinary notes per turn and keep user decisions in context.
+const INLINE_PROGRESS_LIMIT = 2;
+
+export function activityOnlyProgress(steps: TurnStep[], interactionProgress: ReadonlySet<string>): Set<string> {
+  const notes: { id: string; text: string; nextTool?: string; interaction: boolean }[] = [];
+  let nextTool: string | undefined;
+  let beforePrompt = false;
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const step = steps[i];
+    if (step.kind === "tool") {
+      nextTool = step.id;
+    } else if (step.kind === "prompt") {
+      beforePrompt = true;
+      nextTool = undefined;
+    } else if (step.kind === "text" && step.activity && step.id.startsWith("progress:") && step.text?.trim()) {
+      notes.push({ id: step.id, text: step.text.trim(), nextTool,
+        interaction: beforePrompt || interactionProgress.has(step.id) });
+      beforePrompt = false;
+    }
+  }
+  const folded = new Set<string>();
+  if (notes.length < 2) return folded;
+  const retries = deriveRelations(steps);
+  const inline = new Set<string>();
+  const seen = new Set<string>();
+  for (const note of notes.reverse()) {
+    if (seen.has(note.id)) continue;
+    seen.add(note.id);
+    if (note.interaction) continue;
+    const retry = note.nextTool !== undefined && retries.has(note.nextTool);
+    if (inline.size && (retry || inline.has(note.text) || inline.size >= INLINE_PROGRESS_LIMIT)) {
+      folded.add(note.id);
+    }
+    else inline.add(note.text);
+  }
+  return folded;
 }

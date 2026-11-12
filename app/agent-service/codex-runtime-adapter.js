@@ -295,7 +295,7 @@ class CodexRuntimeHandle {
 
   _assertNamedProvider(input) {
     if (this._namesProviderRequired() && input?.modelProvider === undefined) {
-      throw adapterError("RUNTIME_MODEL_PROVIDER_REQUIRED", "Model work on the built-in Codex Harness must name its source");
+      throw adapterError("RUNTIME_MODEL_PROVIDER_REQUIRED", "Shoggoth model requests must specify a source");
     }
   }
 
@@ -564,7 +564,7 @@ class CodexRuntimeHandle {
 
   async turnStart(input) {
     if (this._namesProviderRequired() && !this.threadProviderKinds.has(input.sessionId)) {
-      throw adapterError("RUNTIME_MODEL_PROVIDER_REQUIRED", "Model work on the built-in Codex Harness must name its source");
+      throw adapterError("RUNTIME_MODEL_PROVIDER_REQUIRED", "Shoggoth model requests must specify a source");
     }
     const delivery = require("./native-instruction-delivery");
     const turn = delivery.splitTurnInstructions(delivery.turnInstructions(input));

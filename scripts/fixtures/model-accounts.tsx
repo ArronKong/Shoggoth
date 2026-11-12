@@ -27,9 +27,10 @@ export function installModelAccountsFixture(state: any) {
           source: "fixture", sourceLabel: "预览账号", tokenPreview: null, expiresAt: null,
           hasRefreshToken: false, error: null } };
       return reply({ profiles: ["default"], providers: backend === "shoggoth" ? [
-        ["antigravity", "Antigravity"], ["codex", "Codex CLI"], ["codex-harness", "Codex Harness"],
+        ["antigravity", "Antigravity"], ["codex", "Codex CLI"], ["codex-harness", "Shoggoth"],
         ["deepseek-harness", "DeepSeek"], ["grok-build", "Grok"], ["opencode", "OpenCode"], ["pi", "Pi"],
-      ].map(([runtime, name]) => ({ ...account, id: `native-${runtime}-default-v1`, name,
+      ].map(([runtime, name]) => ({ ...account, name,
+        id: runtime === "codex-harness" ? "shoggoth-internal-codex-default-v1" : `native-${runtime}-default-v1`,
         ...(runtime === "codex-harness" ? {} : { connection: { id: runtime,
           enabled: !state.fixtureConfig().disabledBackends.includes(runtime) } }) })) : [account] });
     }
@@ -137,6 +138,8 @@ export async function runModelAccountsFixture(state: any) {
   const grid = document.querySelector("#models-runtime-accounts [class*='oauthGrid']")!;
   check(getComputedStyle(grid).gridTemplateColumns.split(" ").length === 2, "native accounts use the shared two-column grid");
   check(grid.children.length === 7, "local CLI accounts are aggregated in the OAuth card");
+  check(buttons("#models-runtime-accounts button").some(button => button.title === "Shoggoth (内置codex)"),
+    "the Models page identifies the bundled Codex account");
   const removeButton = buttons("#models-runtime-accounts button").find(button => button.title === "删除")!;
   check(removeButton.querySelector("svg") && !removeButton.textContent?.trim()
     && removeButton.getAttribute("aria-label")?.includes("Fixture endpoint"), "custom model delete is an accessible icon action");

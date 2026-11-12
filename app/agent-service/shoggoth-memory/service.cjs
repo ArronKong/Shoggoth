@@ -337,11 +337,11 @@ class ShoggothMemoryService {
     const content = this.store.readFile(profileId, `${kind}.md`);
     return { kind, content, revision: sha256(content), readOnly: false, localDirectory: this.store.workspace(profileId) };
   }
-  async writeDocument({ profileId, kind, content, expectedRevision }) {
+  async writeDocument({ profileId, kind, content, expectedRevision, assertCurrent }) {
     this.assertProfile(profileId); this.recallPolicy.assertReady(profileId);
     if (!["MEMORY", "USER"].includes(kind)) fail("MEMORY_PATH_NOT_ALLOWED", "不是核心记忆文件");
     if (hasSecret(content)) fail("MEMORY_SECRET_REJECTED", "记忆文件不能包含凭据");
-    const written = await this.store.writeDocument(profileId, `${kind}.md`, content, expectedRevision);
+    const written = await this.store.writeDocument(profileId, `${kind}.md`, content, expectedRevision, assertCurrent);
     // Borrowed reads of the old text in other Agents' running turns are stale now.
     this.sharing.withdraw(profileId, written.previous);
     await this.sharing.reconcileConfig();

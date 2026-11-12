@@ -34,6 +34,7 @@ const PRE_HANDOFF_SESSION_FIELDS = Object.freeze([
 ]);
 const SESSION_FIELDS = Object.freeze([...PRE_HANDOFF_SESSION_FIELDS, "runtimeBindingId", "retiredRuntimeSessions", "revision"]);
 const SESSION_STATUSES = new Set(["draft", "binding", "ready", "archived", "delete_pending"]);
+const INHERITED_MODEL_SETTINGS = Object.freeze({ thinkingLevel: null, serviceTier: null });
 // Optional per-session model source: "@chatgpt" or a source provider id
 // (codex-session-provider). Absent means the Profile default source.
 const MODEL_PROVIDER_SELECTION = /^(?:@chatgpt|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$/u;
@@ -874,7 +875,7 @@ class ChatSessionStore {
     return binding;
   }
 
-  queueRuntimeSelection(sessionKey, { bindingId, model, permissionMode, modelSettings = { thinkingLevel: null, serviceTier: null },
+  queueRuntimeSelection(sessionKey, { bindingId, model, permissionMode, modelSettings = INHERITED_MODEL_SETTINGS,
     modelProviderRef = null, revision }) {
     this.#assertOpen();
     const session = this.container.sessions[sessionKey];
@@ -893,10 +894,11 @@ class ChatSessionStore {
     this.#assertOpen();
     if (!UUID_PATTERN.test(sessionKey) || !input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some((key) => !["bindingId", "revision", "clearModelOverride", "permissionMode", "model", "renewSession",
-        "modelProviderRef"].includes(key))
+        "modelProviderRef", "modelSettings"].includes(key))
       || (input.modelProviderRef !== undefined && input.modelProviderRef !== null
         && !validModelProviderSelection(input.modelProviderRef))
       || (input.modelProviderRef !== undefined && input.model === undefined)
+      || (input.modelSettings !== undefined && (input.model === undefined || !validModelSettings(input.modelSettings)))
       || !validOpaqueId(input.bindingId) || !Number.isSafeInteger(input.revision)
       || (input.clearModelOverride !== undefined && typeof input.clearModelOverride !== "boolean")
       || (input.renewSession !== undefined && typeof input.renewSession !== "boolean")
@@ -915,6 +917,7 @@ class ChatSessionStore {
     }
     const target = this.#resolveBinding(session.profileId, input.bindingId);
     const { nextRuntimeSelection: _next, ...settled } = session;
+    const modelSettings = clone(input.modelSettings ?? INHERITED_MODEL_SETTINGS);
     if (require("./codex-desktop-session-store").isDesktopBinding(this.container.bindingOperations[sessionKey])
       && !(input.model !== undefined && target.id === session.runtimeBindingId && input.renewSession !== true)) {
       throw chatSessionError("CODEX_DESKTOP_RUNTIME_PINNED", "Codex Desktop 原对话需要使用原生 Codex CLI");
@@ -927,7 +930,7 @@ class ChatSessionStore {
       }
       const updated = normalizeSession({ ...withModelProvider(settled, input.modelProviderRef), modelOverride: input.model,
         revision: session.revision + 1,
-        modelSettings: { thinkingLevel: null, serviceTier: null },
+        modelSettings,
         ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
         updatedAt: Math.max(this.#currentTime(), session.updatedAt) });
       this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
@@ -949,9 +952,8 @@ class ChatSessionStore {
     const updated = normalizeSession({ ...sourced, runtimeBindingId: target.id, runtimeSessionId: null, revision: session.revision + 1,
       retiredRuntimeSessions: retired, status: "draft", updatedAt: Math.max(switchedAt, session.updatedAt),
       ...(input.clearModelOverride ? { modelOverride: null,
-        ...(session.modelSettings ? { modelSettings: { thinkingLevel: null, serviceTier: null } } : {}) } : {}),
-      ...(input.model !== undefined ? { modelOverride: input.model,
-        modelSettings: { thinkingLevel: null, serviceTier: null } } : {}),
+        ...(session.modelSettings ? { modelSettings: INHERITED_MODEL_SETTINGS } : {}) } : {}),
+      ...(input.model !== undefined ? { modelOverride: input.model, modelSettings } : {}),
       ...(input.permissionMode !== undefined ? {permissionMode: input.permissionMode} : {}),
     });
     const bindingOperations = { ...this.container.bindingOperations }; delete bindingOperations[sessionKey];
@@ -977,9 +979,10 @@ class ChatSessionStore {
     return structuredClone(this.container.runtimeSwitches[sessionKey]);
   }
 
-  setModelOverride(sessionKey, model) {
+  setModelOverride(sessionKey, model, modelSettings = INHERITED_MODEL_SETTINGS) {
     this.#assertOpen();
-    if (!UUID_PATTERN.test(sessionKey) || !validNullableText(model, 512) || (model === null && this.container.sessions[sessionKey]?.nextRuntimeSelection)) {
+    if (!UUID_PATTERN.test(sessionKey) || !validNullableText(model, 512) || !validModelSettings(modelSettings)
+      || (model === null && this.container.sessions[sessionKey]?.nextRuntimeSelection)) {
       throw chatSessionError("CHAT_SESSION_INVALID", "session model 输入无效");
     }
     const session = this.container.sessions[sessionKey];
@@ -988,7 +991,7 @@ class ChatSessionStore {
       throw chatSessionError("CHAT_SESSION_NOT_READY", "ChatSession 当前不允许切换模型");
     }
     if (session.nextRuntimeSelection) return this.queueRuntimeSelection(sessionKey, {
-      ...session.nextRuntimeSelection, model, modelSettings: { thinkingLevel: null, serviceTier: null },
+      ...session.nextRuntimeSelection, model, modelSettings,
       modelProviderRef: null, revision: session.revision });
     if (session.modelOverride === model && session.modelProviderRef === undefined) return clone(session);
     const time = this.#currentTime();
@@ -997,7 +1000,7 @@ class ChatSessionStore {
       ...withModelProvider(session, null),
       modelOverride: model,
       revision: session.revision + 1,
-      modelSettings: { thinkingLevel: null, serviceTier: null },
+      modelSettings: clone(modelSettings),
       updatedAt: Math.max(time, session.updatedAt),
     });
     const candidate = {

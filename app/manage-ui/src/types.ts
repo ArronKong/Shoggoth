@@ -2479,6 +2479,8 @@ export interface AppConfig {
   nativeMemorySharing?: NativeMemorySharingProjection | null;
   runtimeFrameworkFlags?: RuntimeFrameworkFlags;
   gatewayUrl: string;
+  /** Host-owned automatic discovery; editing the gateway address disables it. */
+  gatewayAutoDiscover?: boolean;
   token: string;
   locale: string;
   theme: "system" | "light" | "dark";

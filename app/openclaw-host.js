@@ -10,8 +10,9 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
-const { resolveOpenclawBin } = require("./core/openclaw-backend");
+const { resolveOpenclawBin } = require("./cli-runtime/openclaw");
 const { readLocalGatewayTokenAsync } = require("./core/device-auth");
+const { DEFAULT_GATEWAY_URL } = require("./core/config-store");
 
 const DETECT_CACHE_MS = 3000;   // SetupOverlay ~1.5s 轮询;探测别放大成风暴
 const VERSION_CACHE_MS = 60000; // 版本几乎不变
@@ -21,7 +22,7 @@ const OUTPUT_TAIL = 2000;
 
 let detectCache = null; // { key, at, value }
 let versionCache = null; // { bin, at, value }
-let statusCache = null; // { bin, at, value: {url, running}|null }
+let statusCache = null; // { key, at, value: url|null }
 
 function fileExists(p) {
   try { return fs.statSync(p).isFile(); } catch { return false; }
@@ -81,13 +82,13 @@ function resolveExistingBin(injected) {
 
 function probeTcp(url) {
   return new Promise((resolve) => {
-    let host = "127.0.0.1";
-    let port = 18792;
+    let host, port;
     try {
       const u = new URL(String(url));
-      host = u.hostname || host;
-      port = Number(u.port) || port;
-    } catch { /* 用默认 */ }
+      if (!["ws:", "wss:"].includes(u.protocol)) return resolve(false);
+      host = u.hostname.replace(/^\[|\]$/g, "");
+      port = Number(u.port) || (u.protocol === "wss:" ? 443 : 80);
+    } catch { return resolve(false); }
     const sock = net.connect({ host, port });
     const done = (up) => { try { sock.destroy(); } catch { /* ignore */ } resolve(up); };
     sock.once("connect", () => done(true));
@@ -110,22 +111,61 @@ function readVersion(bin) {
   });
 }
 
-// 问本机 openclaw 要网关**真实**监听地址与运行态(`gateway status` 的
-// "Probe target: ws://…" + "Runtime: running" 行,新老版本都有)。端口随版本/
-// 配置漂移(2026.5.x 默认 18789,6.x 默认 18792)——绝不能猜默认值,R125 真机踩过。
-function readLocalGatewayStatus(bin) {
-  if (statusCache && statusCache.bin === bin && Date.now() - statusCache.at < DETECT_CACHE_MS) {
+// Discovery only adopts bare loopback addresses; never project credentials or
+// silently switch a local connection to a remote URL reported by a CLI wrapper.
+function localGatewayUrl(raw) {
+  try {
+    const url = new URL(raw);
+    if (!["ws:", "wss:"].includes(url.protocol)
+      || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+      || url.username || url.password || url.search || url.hash || url.pathname !== "/") return null;
+    return url.origin;
+  } catch { return null; }
+}
+
+function configuredLocalGatewayUrl(configPath) {
+  try {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (!config || typeof config !== "object" || Array.isArray(config) || config.gateway?.mode === "remote") return null;
+    const port = config.gateway?.port ?? Number(new URL(DEFAULT_GATEWAY_URL).port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    if (["tailnet", "custom"].includes(config.gateway?.bind)) {
+      return config.gateway.bind === "custom"
+        ? localGatewayUrl(`${config.gateway?.tls?.enabled ? "wss" : "ws"}://${config.gateway.customBindHost}:${port}`) : null;
+    }
+    return `${config.gateway?.tls?.enabled ? "wss" : "ws"}://127.0.0.1:${port}`;
+  } catch { return null; }
+}
+
+function statusGatewayUrl(stdout) {
+  const text = stripAnsi(stdout).trim();
+  try {
+    // Some wrappers prepend a banner even with --json.
+    const json = JSON.parse(text.slice(text.indexOf("{")));
+    return localGatewayUrl(json?.gateway?.probeUrl);
+  } catch {
+    // Older CLIs / wrappers may still emit the human-readable status.
+    return localGatewayUrl(text.match(/Probe target:\s*(wss?:\/\/\S+)/i)?.[1]);
+  }
+}
+
+// Ask the CLI for its service/config-derived endpoint, without an RPC probe
+// (probing can rotate the CLI's device token). Runtime/launchd labels are not
+// connectivity proof, particularly with shell wrappers and foreground servers.
+function readLocalGatewayStatus(bin, configPath) {
+  const key = JSON.stringify([bin, configPath]);
+  if (statusCache && statusCache.key === key && Date.now() - statusCache.at < DETECT_CACHE_MS) {
     return Promise.resolve(statusCache.value);
   }
   return new Promise((resolve) => {
     // --no-probe:免 RPC 连接(Probe target/Runtime 行来自服务配置与 launchd,照常输出)。
     // 带探测的 status 会以只读 scope 连网关触发令牌轮换,把 CLI 的 operator token
     // 收窄成 read-only(R125 实测把本机写权限打没了)——检测绝不能有副作用。
-    execFile(bin, ["--no-color", "gateway", "status", "--no-probe"], { timeout: 20000, env: childEnv(bin) }, (err, stdout, stderr) => {
-      const text = stripAnsi(`${stdout || ""}\n${stderr || ""}`);
-      const m = text.match(/Probe target:\s*(wss?:\/\/\S+)/i);
-      const value = m ? { url: m[1], running: /Runtime:\s*running/i.test(text) } : null;
-      statusCache = { bin, at: Date.now(), value };
+    execFile(bin, ["--no-color", "gateway", "status", "--no-probe", "--json"], {
+      timeout: 8000, env: childEnv(bin, configPath ? { OPENCLAW_CONFIG_PATH: configPath } : {}),
+    }, (err, stdout) => {
+      const value = !err?.killed ? statusGatewayUrl(stdout || "") : null;
+      statusCache = { key, at: Date.now(), value };
       resolve(value);
     });
   });
@@ -147,15 +187,19 @@ async function detectOpenclawHost({ gatewayUrl, paths } = {}) {
   const [version, gatewayRunning, localStatus] = await Promise.all([
     binPath ? readVersion(binPath) : Promise.resolve(null),
     probeTcp(gatewayUrl),
-    binPath ? readLocalGatewayStatus(binPath) : Promise.resolve(null),
+    binPath ? readLocalGatewayStatus(binPath, paths?.configPath) : Promise.resolve(null),
   ]);
+  const candidates = [...new Set([localStatus, configuredLocalGatewayUrl(configPath)].filter(Boolean))];
+  const reachable = await Promise.all(candidates.map(probeTcp));
+  const reachableIndex = reachable.findIndex(Boolean);
   const value = {
     binPath,
     version,
     gatewayRunning,
-    // 本机网关真实地址/运行态(status 探出);configured 端口不对时向导据此自动采用。
-    localGatewayUrl: localStatus?.url ?? null,
-    localGatewayRunning: localStatus?.running ?? false,
+    // CLI/config-derived endpoint plus an actual TCP check; the Backend still
+    // owns authentication and the final connected status.
+    localGatewayUrl: candidates[reachableIndex < 0 ? 0 : reachableIndex] ?? null,
+    localGatewayRunning: reachableIndex >= 0,
     configExists: fileExists(configPath),
     localTokenReadable: (await readLocalGatewayTokenAsync(configPath)) !== undefined,
     identityExists: fileExists(identityPath),

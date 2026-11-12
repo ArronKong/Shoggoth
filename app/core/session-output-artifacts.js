@@ -209,7 +209,9 @@ async function collectSessionOutputArtifacts(options) {
       for (const file of pathsIn(event.content)) rememberInput(inputs, file, event);
       for (const file of pathsIn(event.content?.attachments)) rememberInput(attachments, file, event);
     }
-    if (event.kind === "tool_call" && toolKey(event)) calls.set(toolKey(event), event);
+    if (event.kind === "tool_call" && event.content?.persistPolicy !== "reference_only" && toolKey(event)) {
+      calls.set(toolKey(event), event);
+    }
   }
   const outputs = [];
   const publications = [];
@@ -224,7 +226,9 @@ async function collectSessionOutputArtifacts(options) {
   };
   for (const event of events) {
     if (event.kind === "artifact") emit(event, pathsIn(event.content));
-    if (event.kind !== "tool_result") continue;
+    // A borrowed-memory receipt retains status for the timeline. Its
+    // arguments and result were redacted, so it cannot prove a file output.
+    if (event.kind !== "tool_result" || event.content?.persistPolicy === "reference_only") continue;
     const call = calls.get(toolKey(event));
     const tool = { ...call?.content?.tool, ...event.content?.tool,
       name: event.content?.tool?.name || call?.content?.tool?.name,

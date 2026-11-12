@@ -62,9 +62,10 @@ const row = () => ({ key: sessionKey, backendId: "shoggoth", agentId, agentName:
 let session = { sessionKey, revision: 1, bindingId: first, runtime: "codex", model: preview ? "gpt-5.4" : "shared-model", canSwitch: true, contextUsage: null };
 const third = "33333333-3333-8333-8333-333333333333";
 const bindings = [
-  { id: first, runtime: "codex", name: "Codex" }, { id: second, runtime: "pi", name: "Pi" },
+  { id: first, runtime: "codex", name: "Shoggoth" }, { id: second, runtime: "pi", name: "Pi" },
   { id: third, runtime: "deepseek-harness", name: "DeepSeek" },
-].map(binding => ({ ...binding, runtimeAccountId: `native-${binding.runtime}-default-v1`, label: binding.name, enabled: true }));
+].map(binding => ({ ...binding, runtimeAccountId: binding.id === first ? "shoggoth-internal-codex-default-v1"
+  : `native-${binding.runtime}-default-v1`, label: binding.name, enabled: true }));
 const expectedRuntimeRows = 5;
 const capabilities = { attachments: { image: {} }, slash: false, steer: false };
 const candidates = () => bindings.map(binding => ({ bindingId: binding.id, support: { supported: true },
@@ -99,7 +100,7 @@ const defaultCatalog = () => {
   const duplicate = choices.find(item => item.bindingId === first && item.id === (preview ? "gpt-5.4" : "shared-model"))!;
   return { selection: agentDefault(),
     models: [...choices, { ...duplicate, name: `${duplicate.id} · Fixture Endpoint`, modelProviderRef: "fixture-endpoint" }],
-    runtimes: runtimes.map(group => ({ ...group, name: group.runtime === "codex" ? "Codex Harness" : group.name })) };
+    runtimes };
 };
 let writes: string[] = [];
 const cfg = { disabledBackends: [] as string[], theme: "light", locale: "zh-CN", notifications: { chat: true, cron: true, task: true },
@@ -278,7 +279,7 @@ scope.runRuntimeEntryFixture = async () => {
   await openModels();
   check(!document.querySelector('button[aria-label="切换 Runtime"]'), "no separate Runtime button");
   check(!button("添加绑定") && !button("添加或管理运行环境"), "no binding workflow in Chat");
-  check(!!button("全部") && !!button("Codex") && !!button("DeepSeek"), "CLI tabs reuse existing menu");
+  check(!!button("全部") && !!button("Shoggoth") && !!button("DeepSeek"), "Runtime tabs reuse existing menu");
   check(!button("Claude Code") && !button("Grok Build"), "disconnected or unavailable CLIs absent");
   check(document.querySelectorAll('.model-menu [role="option"][aria-selected="true"]').length === 1, "same model ID selects only current CLI");
   await choose("pi"); await wait(() => session.runtime === "pi" && !document.querySelector(".model-menu"), "select model switches Runtime");
@@ -318,7 +319,7 @@ scope.checkRuntimeEntryGeometry = async (theme: string) => {
   check(document.querySelectorAll('.model-menu [role="option"]').length === 3, "search across CLI models");
   search.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await pause(50);
   check(!document.querySelector('.model-menu') && document.activeElement === picker(), "Escape closes menu and restores focus");
-  await openModels(); button("Codex").click(); await pause(50);
+  await openModels(); button("Shoggoth").click(); await pause(50);
   const list = document.querySelector<HTMLElement>(".model-menu__list")!;
   list.scrollTop = list.scrollHeight; check(list.scrollTop > 0, "model list scrolls");
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await pause(50);

@@ -169,8 +169,9 @@ jobs:
         run: |
           node --test scripts/dependency-audit-policy-unit.cjs
           npm run audit:release
-      - name: Product help and Browser Use regressions
+      - name: Product help, web tools, and Browser Use regressions
         run: |
+          node --test scripts/web-tools-unit.cjs
           node --test scripts/shoggoth-browser-use-controller-unit.cjs
           node scripts/shoggoth-mcp-product-tool-controller-unit.cjs
           node scripts/shoggoth-native-skill-engine-unit.cjs

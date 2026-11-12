@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { DEFAULT_AGENT_PROFILE_ID } = require("./product-store");
+const { DEFAULT_AGENT_PROFILE_ID, blocksArchivedProfilePurge } = require("./product-store");
 const { atomicWritePrivateFile, readPrivateFile, recoverInterruptedPrivateFile } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 const { validateCanonicalOwnedDirectory, sameIdentity } = require("./runtime-storage-inspector");
@@ -146,9 +146,7 @@ class AgentArchiveRetention {
 
   _busy(profileId) {
     return this.productStore.listWorkRuns({ profileId }).some((run) => BUSY.has(run.status))
-      || this.productStore.listMcpToolCalls().some((call) => call.status === "pending"
-        && (call.profileId === profileId || call.binding?.profileId === profileId
-          || call.binding?.targetProfileId === profileId));
+      || this.productStore.listMcpToolCalls().some((call) => blocksArchivedProfilePurge(call, profileId));
   }
 
   async sweep({ resumeOnly = false } = {}) {

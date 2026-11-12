@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 const { collectSessionOutputArtifacts, sessionArtifactHistory } = require("../app/core/session-output-artifacts");
+const { collectTranscriptReferencedArtifacts } = require("../app/core/session-artifact-references");
 
 function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "session-outputs-")));
@@ -48,6 +49,22 @@ test("only successful writes survive uploads, reads, directory listings and shar
     ...f.event("user", { text: `Quoted previous reply: \`${output}\`` }, "later-run"),
     occurredAt: Date.now() + 1000,
   }])).map(item => item.path), [output], "Later user quotations must not reclassify earlier AI outputs");
+});
+
+test("redacted tool activity status does not authorize an artifact reference or output", async t => {
+  const f = fixture(t);
+  const file = f.file("borrowed-reference.md");
+  const receipt = { persistPolicy: "reference_only", toolCallId: "redacted-write" };
+  const calls = [
+    f.event("tool_call", { ...receipt, tool: { name: "fileChange" }, resultSummary: "Reference only: " + file }),
+    f.event("tool_result", { ...receipt, tool: { name: "fileChange", status: "completed" },
+      resultSummary: "Reference only: " + file }),
+  ];
+  assert.deepEqual(await f.collect([...calls, f.event("assistant", { text: "Mentioned " + file })]), []);
+  const unrelatedResult = f.event("tool_result", { toolCallId: receipt.toolCallId, tool: { status: "completed" } }, "run-2");
+  assert.deepEqual(await collectTranscriptReferencedArtifacts({ events: [...calls, unrelatedResult],
+    runs: [{ id: "run-1", startedAt: f.start, finishedAt: Date.now() }],
+    workspace: f.root, runtimeHome: f.root, sessionCreatedAt: f.start, agentId: "agent" }), []);
 });
 
 test("opaque historical writes recover delivered files but never inputs, plain mentions or directory children", async t => {

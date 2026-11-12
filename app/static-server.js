@@ -1090,6 +1090,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     managedOpenClawHost,
     managedHermesHost,
     onConfigChanged,
+    refreshHostConnections,
     modelChangeCoordinator,
     workAdmissionGate,
     cliExecutionGate,
@@ -3936,6 +3937,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     }
     if (segs[0] === "status" && segs.length === 1) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      // Host discovery runs independently: a slow local CLI must not delay
+      // status for every other backend. The next poll observes any correction.
+      if (refreshHostConnections) void Promise.resolve().then(refreshHostConnections).catch(() => {});
       return sendJson(res, 200, { backends: await registry.getStatus() });
     }
     // Dashboard 总览：registry 聚合（fail-soft，绝不 throw）。生产 UI 无参调用
@@ -4242,6 +4246,7 @@ function startStaticServer(
     managedHermesHost,
     onConfigChanged,
     onSystemIssue,
+    refreshHostConnections,
     authResolver,
     modelChangeCoordinator,
     workAdmissionGate,
@@ -4285,6 +4290,7 @@ function startStaticServer(
     modelChangeCoordinator,
     workAdmissionGate,
     cliExecutionGate,
+    refreshHostConnections,
     avatarPool,
     nativeRuntimeConfigController: configStore && typeof configStore.writeNativeRuntimeConfig === "function"
       ? createNativeRuntimeConfigController({ configStore, registry }) : null,

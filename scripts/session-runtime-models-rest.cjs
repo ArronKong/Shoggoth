@@ -65,8 +65,8 @@ async function run() {
     const otherCatalog = await request(undefined, server.url, otherRoute);
     assert.equal(otherCatalog.status, 200, JSON.stringify(otherCatalog.body));
     assert.deepEqual(otherCatalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
-      .map(runtime => runtime.name).sort(), ["Codex CLI", "Codex Harness"],
-    "an Agent with a native CLI default must also offer the bundled Codex Harness");
+      .map(runtime => runtime.name).sort(), ["Codex CLI", "Shoggoth"],
+    "an Agent with a native CLI default must also offer Shoggoth");
     const otherBindings = f.service.productStore.getAgentRuntimeBindings(otherProfile.id);
     const otherHarness = otherBindings.bindings.find(binding =>
       binding.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID);
@@ -97,7 +97,7 @@ async function run() {
     assert.equal(catalog.body.selection.canSwitch, true, "fresh App must allow cross-Runtime selection");
     assert.deepEqual(new Set(catalog.body.runtimes.map(runtime => runtime.runtime)), new Set(["codex", "pi", "opencode", "deepseek-harness"]));
     assert.deepEqual(catalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
-      .map(runtime => runtime.name), ["Codex Harness", "Codex CLI"]);
+      .map(runtime => runtime.name), ["Shoggoth", "Codex CLI"]);
     assert.equal(catalog.body.models.length, 10, JSON.stringify(catalog.body));
     assert.equal(catalog.body.models.filter(model => model.id === "fixture-model").length, 5);
     assert.equal(new Set(catalog.body.models.map(model => `${model.bindingId}:${model.id}`)).size, 10);
@@ -151,7 +151,7 @@ async function run() {
     catalog = await request();
     assert.equal(catalog.status, 200, JSON.stringify(catalog.body));
     assert.deepEqual(catalog.body.runtimes.filter(runtime => runtime.runtime === "codex")
-      .map(runtime => runtime.name), ["Codex Harness"],
+      .map(runtime => runtime.name), ["Shoggoth"],
     "Shoggoth's bundled Codex remains available without the system Codex CLI");
     const nativeCodex = initialBindings.bindings.find(binding => binding.runtimeAccountId === "native-codex-default-v1");
     assert.equal((await request({ bindingId: nativeCodex.id, model: "codex-only",
@@ -169,7 +169,7 @@ async function run() {
       `agent:${fallbackProfile.agentId}:${fallbackSession.sessionKey}`)}`;
     const fallbackCatalog = await request(undefined, server.url, fallbackRoute);
     assert.equal(fallbackCatalog.status, 200, JSON.stringify(fallbackCatalog.body));
-    assert.deepEqual(fallbackCatalog.body.runtimes.map(runtime => runtime.name), ["Codex Harness"],
+    assert.deepEqual(fallbackCatalog.body.runtimes.map(runtime => runtime.name), ["Shoggoth"],
       "an Agent without a Harness binding can discover it with no native CLI installed");
     const fallbackState = f.service.productStore.getAgentRuntimeBindings(fallbackProfile.id);
     const restoredHarness = fallbackState.bindings.find(binding =>
@@ -190,7 +190,7 @@ async function run() {
     assert.equal(fallbackChanged.status, 200, JSON.stringify(fallbackChanged.body));
     assert.equal(f.service.productStore.getAgentProfile(fallbackProfile.id).defaultBindingId, fallbackProfile.defaultBindingId);
     assert.equal(f.service.chatSessionStore.getSession(fallbackSession.sessionKey).runtimeBindingId, restoredHarness.id);
-    console.log("PASS Runtime model REST: other Agents discover and execute through Codex Harness; account separation, no-CLI binding, explicit disable, atomic selection, history and Agent defaults preserved.");
+    console.log("PASS Runtime model REST: other Agents discover and execute through Shoggoth; account separation, no-CLI binding, explicit disable, atomic selection, history and Agent defaults preserved.");
   } finally { if (server) await server.close(); await f.close(); }
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

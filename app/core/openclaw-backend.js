@@ -105,7 +105,7 @@ const {
   readDefaultModelPolicyAllow,
 } = require("./openclaw-agent-config");
 
-const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
+const { DEFAULT_GATEWAY_URL } = require("./config-store");
 // OpenClaw 的 files.list 会省略 IDENTITY.md，但 files.get/set 仍支持它。
 // 核心档案始终可选（不存在时由 get 返回 missing），其余条目保留网关清单。
 const CORE_AGENT_FILE_NAMES = ["AGENTS.md", "IDENTITY.md", "SOUL.md", "USER.md", "MEMORY.md"];

@@ -9,6 +9,7 @@
 //
 // Schema:
 //   gatewayUrl     ws:// URL of the OpenClaw gateway (may be remote)
+//   gatewayAutoDiscover host-owned flag; false after an explicit URL edit
 //   token          operator token for the gateway (re-seeded into the UI)
 //   locale         "" follow-system | "zh-CN" | "en"
 //   theme          "light" (default) | "dark" | "system" follow-OS
@@ -62,7 +63,20 @@ function normalizeNativeChatUiConfig(value) {
 const SUPPORTED_LOCALES = new Set(["", "zh-CN", "en"]);
 const APP_ICON_IDS = Object.freeze(["shoggoth-ip", "shoggoth-logo"]);
 const DEFAULT_APP_ICON = "shoggoth-ip";
-const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
+const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18789";
+const LEGACY_GATEWAY_URL = "ws://127.0.0.1:18792";
+
+// Older installs persisted the development machine's port without recording
+// whether it was chosen by the user. Only those bare defaults are migratable.
+function defaultGatewayAddress(value) {
+  if (!value) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "ws:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+      && [DEFAULT_GATEWAY_URL, LEGACY_GATEWAY_URL].some(value => new URL(value).port === url.port) && url.pathname === "/"
+      && !url.username && !url.password && !url.search && !url.hash;
+  } catch { return false; }
+}
 // 窗口尺寸：默认值与下限都住在这里（schema 唯一源），main.js 直接消费这两个常量。
 const DEFAULT_WINDOW_BOUNDS = { width: 1728, height: 1117 };
 const MIN_WINDOW_BOUNDS = { width: 720, height: 560 };
@@ -278,6 +292,8 @@ function normalizeConfig(parsed) {
   const native = normalizeNativeRuntimeConfig(p);
   return {
     gatewayUrl: typeof p.gatewayUrl === "string" ? p.gatewayUrl : "",
+    gatewayAutoDiscover: typeof p.gatewayAutoDiscover === "boolean" ? p.gatewayAutoDiscover
+      : defaultGatewayAddress(p.gatewayUrl) && !p.token,
     token: typeof p.token === "string" ? p.token : "",
     openclawPluginHostMode: p.openclawPluginHostMode === "managed" ? "managed" : "existing",
     hermesPluginHostMode: p.hermesPluginHostMode === "managed" ? "managed" : "existing",
@@ -397,7 +413,7 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
   }
 
   // Partial update: provided fields override current, everything else persists.
-  function write(patch) {
+  function write(patch, { discoveredGateway = false } = {}) {
     if (patch && Object.hasOwn(patch, "groupRuntimeHosts")) require("../group-runtime-host-protocol").normalizePeers(patch.groupRuntimeHosts);
     const { config: current, telemetry: storedTelemetry, corrupt } = readParsed();
     if (corrupt) {
@@ -414,6 +430,10 @@ function createConfigStore(configPath, { defaultGatewayUrl = DEFAULT_GATEWAY_URL
     const telemetry = corrupt ? { enabled: false, detailedEnabled: false, policyVersion: TELEMETRY_POLICY_VERSION } : storedTelemetry;
     const next = normalizeConfig({ ...current, ...(patch || {}), telemetry });
     next.gatewayUrl = next.gatewayUrl.trim();
+    // The host discovery writer preserves automatic tracking. Any ordinary URL
+    // save is an explicit choice, including a user-entered default port.
+    next.gatewayAutoDiscover = Object.hasOwn(patch || {}, "gatewayUrl")
+      ? discoveredGateway : current.gatewayAutoDiscover;
     persist(telemetry === undefined ? next : { ...next, telemetry });
     return next;
   }
@@ -516,6 +536,7 @@ module.exports = {
   APP_ICON_IDS,
   DEFAULT_APP_ICON,
   DEFAULT_GATEWAY_URL,
+  LEGACY_GATEWAY_URL,
   DEFAULT_WINDOW_BOUNDS,
   MIN_WINDOW_BOUNDS,
   DEFAULT_NATIVE_CONCURRENCY,

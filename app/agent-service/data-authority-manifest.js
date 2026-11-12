@@ -287,7 +287,8 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
       owner: "shoggoth",
       schemaVersion: 17,
       identity: "Agent id/agentId remain stable; backendId is always shoggoth; selected runtimes belong to Agent bindings",
-      pathRules: Object.freeze(["stateSnapshotPath", "eventLogPath", "stateDir/product-schema-migrations/15-to-16/<digest>/*",
+      pathRules: Object.freeze(["stateSnapshotPath", "eventLogPath", "stateDir/agent-create-definitions/<profileId>-<digest>.json",
+        "stateDir/product-schema-migrations/15-to-16/<digest>/*",
         "stateDir/product-schema-migrations/15-to-17/<digest>/*", "stateDir/product-schema-migrations/16-to-17/<digest>/*"]),
       records: Object.freeze({
         RuntimeAccount: recordAuthority({ authority: [...RUNTIME_ACCOUNT_FIELDS, "maxActive"] }),

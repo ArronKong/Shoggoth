@@ -147,7 +147,7 @@ import { getTurnProcessStats, TurnProcessSummary } from "../components/TurnTimel
 import TurnTimeline from "../components/TurnTimeline/TurnTimeline";
 import { IconTrajectory } from "../components/TurnTimeline/trajectoryIcons";
 import {
-  createTimeline, reduceTimeline, stepsFromParts, mergeNativeTurnSteps as mergeObservedTurnSteps,
+  createTimeline, reduceTimeline, stepsFromParts, mergeNativeTurnSteps as mergeObservedTurnSteps, activityOnlyProgress,
   mergeToolArgs, toolActivityTitle, toolResultFailed, turnElapsedMs,
   type TurnTiming, type TimelinePartLike, type TurnEvent, type TurnStep, type TurnTimelineState,
 } from "../lib/turnTimeline";
@@ -938,9 +938,8 @@ function isNoiseForPreview(m: ChatMsg): boolean {
     || isInterruptMarker(m);
 }
 
-// Count the same body messages shown by the thread, after native display-run
-// grouping. Transport/tool/thinking rows do not consume the product page size.
-// Keep the process immediately before the first answer with that answer.
+// Count conversation messages after native display-run grouping. Public progress
+// and tool rows travel with the reply so a long Run doesn't consume a page.
 export function chatHistoryWindow(raw: unknown[], size: number, key: string) {
   const hidden = readIdSet(HIDDEN_PREFIX, key);
   const projected = groupNativeUiHistory(raw.map((row, index) => ({
@@ -950,21 +949,23 @@ export function chatHistoryWindow(raw: unknown[], size: number, key: string) {
   const visible = projected.filter(({ message: m }, index) =>
     (m.role === "user" || m.role === "assistant") && !m.notice && !isNoiseForPreview(m)
     && !hidden.has(actionIds[index])
-    && (m.parts.some(part => (part.type === "text" && !!part.text?.trim()) || part.type === "ui_artifact" || part.type === "canvas")
+    && (m.parts.some(part => (part.type === "text" && !part.activity && !!part.text?.trim()) || part.type === "ui_artifact" || part.type === "canvas")
       || !!m.images?.length || !!m.files?.length || !!m.errorMessage));
   const first = visible[Math.max(0, visible.length - size)];
   if (!first) return { start: 0, count: 0, needsEarlier: true };
   let at = projected.indexOf(first);
   const priorVisible = new Set(visible.slice(0, -size).map(item => item.index));
-  if (first.message.role !== "user") {
-    while (at > 0) {
-      const previous = projected[at - 1];
-      if (priorVisible.has(previous.index) || previous.message.role === "user" || previous.message.notice) break;
-      at--;
-    }
+  const runId = first.message.nativeRunId;
+  while (at > 0) {
+    const previous = projected[at - 1];
+    const sameRun = runId && previous.message.nativeRunId === runId;
+    if (!sameRun && (first.message.role === "user" || priorVisible.has(previous.index)
+      || previous.message.role === "user" || previous.message.notice)) break;
+    at--;
   }
+  const boundary = projected[at].message;
   return { start: projected[at].index, count: visible.length,
-    needsEarlier: at === 0 && first.message.role !== "user" };
+    needsEarlier: at === 0 && (boundary.role !== "user" || boundary.promptResponse === true) };
 }
 
 function rawHistoryId(raw: unknown): string {
@@ -1715,8 +1716,9 @@ function finalizeAssistant(prev: ChatMsg[], finalMsg: any, streamedTextOverride?
           }
         }
         const nextText = mergeLiveText(lastText(parts), streamedTextOverride);
-        if (textIndex >= 0) parts[textIndex] = { ...parts[textIndex], text: nextText };
-        else parts.push({ type: "text", text: nextText });
+        const progress = !terminal ? norm.parts.find(part => part.type === "text" && part.activity) : undefined;
+        if (textIndex >= 0) parts[textIndex] = { ...parts[textIndex], ...progress, text: nextText };
+        else parts.push({ type: "text", ...progress, text: nextText });
         out[i] = {
           ...streamed,
           ...norm,
@@ -1946,7 +1948,21 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], native
     const live = !!snapshot && snapshot.status !== "done" && snapshot.status !== "error" && seg.some(nativePending);
     // 带上「这个 part 属于哪条消息」的时间戳,供下面推算耗时(R350)。
     const partSeq: (TimelinePartLike & { ts?: number })[] = [];
+    const interactionProgress = new Set<string>();
+    let latestProgressId: string | undefined;
+    let followsInput = false;
     for (const sm of seg) {
+      if (sm.role === "user") {
+        if (sm.promptResponse && latestProgressId) interactionProgress.add(latestProgressId);
+        latestProgressId = undefined;
+        followsInput = true;
+      }
+      for (const part of sm.parts) {
+        if (part.type !== "text" || !part.activity || !part.segmentId) continue;
+        latestProgressId = `progress:${part.segmentId}`;
+        if (followsInput) interactionProgress.add(latestProgressId);
+        followsInput = false;
+      }
       if (inlineCompaction(sm)) {
         partSeq.push({ type: "contextCompacted", segmentId: sm.id, ts: sm.ts });
       } else if (!snapshot || (!sm.pending && (!sm.keepLiveLayout || sm.id || sm.canonicalSourceEventId))) {
@@ -1956,7 +1972,7 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], native
     // A stopped turn can have both older history and a retained live snapshot.
     const settledSnapshot = seg.flatMap((message) => message.parts).find((part) => part.type === "timeline" && part.steps?.length);
     const observed = (snapshot?.steps ?? settledSnapshot?.steps ?? []).filter(step => !["user", "final", "plan"].includes(step.kind)
-      && (step.kind !== "text" || (!snapshot && step.activity)))
+      && (step.kind !== "text" || step.activity))
       .map(step => !live && ["running", "pending"].includes(step.status) ? { ...step, status: "aborted" as const } : step);
     if ((!partSeq.length && !observed.length) || !seg.some(sm => sm.role === "assistant" && !sm.notice)) {
       out.push(...seg);
@@ -1982,6 +1998,14 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], native
     const recoveredSteps = snapshot || settledSnapshot ? stepsFromParts(partSeq, { live }) : undefined;
     const steps = recoveredSteps ? mergeObservedTurnSteps(recoveredSteps, observed)
       : stepsFromParts(partSeq);
+    const foldedProgress = activityOnlyProgress(steps, interactionProgress);
+    const processSteps = (items: TurnStep[]) => items.filter(step => step.kind !== "text" || foldedProgress.has(step.id));
+    const isFoldedProgress = (part: Part) => part.type === "text" && part.activity && part.segmentId
+      && foldedProgress.has(`progress:${part.segmentId}`);
+    const foldedSourceIds = foldedProgress.size ? seg.flatMap(message => message.parts.flatMap(part => {
+      const id = part.sourceEventId ?? message.id;
+      return id && isFoldedProgress(part) ? [id] : [];
+    })) : [];
     // Legacy transports may only have message times. Use the input and reply
     // at the boundaries of this same turn, never the first and last tool.
     const reply = seg.at(-1);
@@ -1998,11 +2022,13 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], native
     let attached = false;
     for (const sm of seg) {
       if (sm.role === "toolResult" || inlineCompaction(sm)) continue; // 内容已进 steps
-      // Public commentary is both a process record and a durable chat message.
-      const rest = sm.parts.filter((p) => (p.type === "text" || !isProcessPart(p)) && (!(snapshot || settledSnapshot) || p.type !== "timeline"));
+      const rest = sm.parts.filter(p => p.type === "text" ? !isFoldedProgress(p)
+        : !isProcessPart(p) && (!(snapshot || settledSnapshot) || p.type !== "timeline"));
       if (!attached && sm.role === "assistant") {
-        out.push({ ...sm, turnStartId, parts: [{ type: "timeline", steps, liveTimeline: live, turnTiming: timing,
-          recoveredSteps: live ? recoveredSteps : undefined,
+        out.push({ ...sm, turnStartId,
+          ...(foldedSourceIds.length ? { sourceEventIds: [...new Set([...(sm.sourceEventIds ?? []), ...foldedSourceIds])] } : {}),
+          parts: [{ type: "timeline", steps: processSteps(steps), liveTimeline: live, turnTiming: timing,
+          recoveredSteps: live && recoveredSteps ? processSteps(recoveredSteps) : undefined,
           ...(sm.nativeRunId ? { segmentId: `native-activity:${sm.nativeRunId}` } : {}) }, ...rest] });
         attached = true;
       } else if (rest.length || sm.images?.length || sm.files?.length) {
@@ -2015,7 +2041,7 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], native
   // 内存里 → 工具数吻合时,把线程里最后一条 timeline 换成富数据版(user/final/text
   // 步滤掉,与吸收版口径一致)。数目不吻合(转录截断/口径漂移)就保持降级,不硬贴。
   if (lastLiveSteps?.length) {
-    const rich = withoutPlanSteps(lastLiveSteps).filter((s) => s.kind !== "user" && s.kind !== "final" && (s.kind !== "text" || s.activity));
+    const rich = withoutPlanSteps(lastLiveSteps).filter((s) => s.kind !== "user" && s.kind !== "final" && s.kind !== "text");
     const richTools = rich.filter((s) => s.kind === "tool").length;
     if (richTools > 0) {
       for (let j = out.length - 1; j >= 0; j--) {
@@ -2023,6 +2049,7 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], native
         if (ti < 0) continue;
         if (out[j].nativeRunId) break; // Native activity is reconciled only with its exact Run.
         const absorbed = out[j].parts[ti].steps ?? [];
+        if (absorbed.some(step => step.activity)) break;
         if (absorbed.filter((s) => s.kind === "tool").length === richTools) {
           const parts = out[j].parts.slice();
           parts[ti] = { ...parts[ti], steps: rich };
@@ -2617,18 +2644,18 @@ function ChatPageApp() {
   // event. A new turn may reuse step IDs, but must not replace the selected turn.
   const [timelineModal, setTimelineModal] = useState<(ChatTurnActivity & { sessionKey: string; timeline?: NativeTurnTimeline;
     noticeState?: "loading" | "unavailable" | "empty" }) | null>(null);
-  const openTimelineModal = ({ steps, live, runId, timing, recoveredSteps }: ChatTurnActivity) => {
+  const openTimelineModal = useCallback(({ steps, live, runId, timing, recoveredSteps }: ChatTurnActivity) => {
     const sessionKey = activeKeyRef.current;
     if (!sessionKey) return;
     setTimelineModal({ sessionKey, steps, timing, recoveredSteps,
       runId: runId ?? (live ? observedRunBySessionRef.current.get(sessionKey) : undefined),
       timeline: live ? liveTimelinesRef.current.get(sessionKey) : undefined });
-  };
+  }, []);
   useEffect(() => { setTimelineModal(null); }, [activeKey, activeGroupId]);
-  // Chat already renders public progress as bubbles. Filter only this page's
-  // timeline projection; shared timelines (Cron, dashboard, etc.) keep it.
-  const visibleTimelineSteps = (steps: TurnStep[]) => withoutPlanSteps(steps).filter((s) =>
-    s.kind !== "user" && s.kind !== "final" && s.kind !== "text" && (s.kind !== "thinking" || !!s.text?.trim()));
+  // Absorbed timelines contain only the progress omitted from the thread.
+  const visibleTimelineSteps = (steps: TurnStep[], projected = false) => withoutPlanSteps(steps).filter((s) =>
+    s.kind !== "user" && s.kind !== "final" && (s.kind !== "text" || projected && s.activity)
+    && (s.kind !== "thinking" || !!s.text?.trim()));
   // A native Run already has a single projection across its user/assistant bubbles.
   const liveStepsFor = (m: ChatMsg): TurnStep[] => {
     if (!m.pending) return [];
@@ -8467,18 +8494,11 @@ function ChatPageApp() {
     const timeline = activeKey ? liveTimelinesRef.current.get(activeKey) : undefined;
     const nativeRun = timeline?.nativeRunId ?? pending?.nativeRunId;
     const observedRun = activeKey ? observedRunBySessionRef.current.get(activeKey) : undefined;
-    const liveRun = nativeRun ?? observedRun;
     const liveSteps = pending ? liveStepsFor(pending) : [];
     const liveToolIds = new Set(liveSteps.map(step => step.toolCallId).filter(Boolean));
     const recoveredSteps: TurnStep[] = [];
-    let anchor: { group: Group; message: ChatMsg } | undefined;
     for (const group of groups) {
-      if (group.role !== "assistant") {
-        // A card reply starts a new visible segment of the same live turn.
-        if (liveRun && group.role === "user" && group.msgs.some(message =>
-          message.promptResponse && message.nativeRunId === liveRun)) anchor = undefined;
-        continue;
-      }
+      if (group.role !== "assistant") continue;
       const last = group.msgs[group.msgs.length - 1];
       if (!last.pending && group.msgs.some(message => message.ts) && group.msgs.some(message => message.actionId)
         && group.msgs.some(message => message.parts.some(part => part.type === "text" && part.text?.trim()))) {
@@ -8495,13 +8515,10 @@ function ChatPageApp() {
           || (observedRun && message.activityRunId === observedRun)
           || (!runId && group === pendingGroup && liveToolIds.size > 0 && message.parts.some(part =>
             part.type === "timeline" && part.steps?.some(step => step.toolCallId && liveToolIds.has(step.toolCallId)))));
-        if (ownsLiveActivity) {
-          pendingActivityOwners.add(owner);
-          anchor ??= { group, message };
-        }
+        if (ownsLiveActivity) pendingActivityOwners.add(owner);
         for (const part of message.parts) {
           if (part.type !== "timeline" || !part.steps?.length) continue;
-          const visibleSteps = visibleTimelineSteps(part.steps);
+          const visibleSteps = visibleTimelineSteps(part.steps, true);
           if (!visibleSteps.length) continue;
           // The reducer already has process data carried by local interim bubbles.
           if (ownsLiveActivity && !nativeRun && (!message.keepLiveLayout || message.id || message.canonicalSourceEventId)) {
@@ -8511,7 +8528,7 @@ function ChatPageApp() {
           const steps = subagentActivity.project(activeKey || "", visibleSteps, runId);
           // A native turn's process can precede a steering user bubble.
           if (!activityByOwner.has(owner) || part.liveTimeline) activityByOwner.set(owner, { steps, live: part.liveTimeline,
-            runId, timing: part.turnTiming, recoveredSteps: part.recoveredSteps && visibleTimelineSteps(part.recoveredSteps) });
+            runId, timing: part.turnTiming, recoveredSteps: part.recoveredSteps && visibleTimelineSteps(part.recoveredSteps, true) });
         }
       }
     }
@@ -8519,10 +8536,10 @@ function ChatPageApp() {
       ? { steps: subagentActivity.project(activeKey || "", mergeObservedTurnSteps(recoveredSteps, liveSteps), observedRun),
         live: true, runId: observedRun, recoveredSteps }
       : pending ? activityByOwner.get(activityOwnerOf(pending)) : undefined;
-    const liveTurn = pending && anchor ? { ...anchor, pending, activity, id: timeline?.activityId } : undefined;
+    const liveTurn = pendingGroup && pending ? { group: pendingGroup, pending, activity, id: timeline?.activityId } : undefined;
     return { activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn };
   }, [groups, activeKey, subagentActivity, subagentRevision]);
-  // Keep the preview's React parent when the first pending message gets a canonical id.
+  // Keep the preview mounted as commentary is sealed or the reply resumes after user input.
   const keyedShownGroups = useMemo(() => keyedChatGroups(shownGroups).map(group =>
     group.item === liveTurn?.group && liveTurn.id !== undefined
       ? { ...group, key: `group:live-activity:${liveTurn.id}` } : group
@@ -8550,10 +8567,16 @@ function ChatPageApp() {
   const modalTimeline = timelineModal?.sessionKey === activeKey ? timelineModal : null;
   const modalRecoveredSteps = modalTimeline?.timeline?.activityId !== undefined && modalTimeline.timeline.activityId === liveTurn?.id
     ? liveTurn.activity?.recoveredSteps ?? modalTimeline.recoveredSteps : modalTimeline?.recoveredSteps;
+  const modalNativeRunId = modalTimeline?.timeline?.nativeRunId;
+  const modalNativeActivity = modalNativeRunId ? [...activityByOwner.values()].find(activity => activity.runId === modalNativeRunId) : undefined;
+  const modalProgressIds = new Set((modalNativeActivity?.steps ?? modalTimeline?.steps ?? [])
+    .filter(step => step.activity).map(step => step.id));
+  const showModalStep = (step: TurnStep) => !step.activity || modalProgressIds.has(step.id);
   const modalSteps = modalTimeline ? subagentActivity.project(modalTimeline.sessionKey,
-    modalTimeline.timeline ? withStartupWait(mergeObservedTurnSteps(modalRecoveredSteps ?? [], visibleTimelineSteps(modalTimeline.timeline.steps)),
+    modalTimeline.timeline ? withStartupWait(mergeObservedTurnSteps(
+      (modalRecoveredSteps ?? []).filter(showModalStep), visibleTimelineSteps(modalTimeline.timeline.steps, true).filter(showModalStep)),
       modalTimeline.timeline === liveTimelinesRef.current.get(modalTimeline.sessionKey)
-        ? runWaitBySession[modalTimeline.sessionKey] : undefined) : visibleTimelineSteps(modalTimeline.steps), modalTimeline.runId) : [];
+        ? runWaitBySession[modalTimeline.sessionKey] : undefined) : visibleTimelineSteps(modalTimeline.steps, true), modalTimeline.runId) : [];
   const modalStatus = modalTimeline?.timeline?.status ?? "done";
   const modalTiming = modalTimeline?.timeline?.timing ?? modalTimeline?.timing;
   const modalStats = modalTimeline ? getTurnProcessStats(modalSteps) : null;
@@ -8624,12 +8647,18 @@ function ChatPageApp() {
     if (searchTargetClearTimerRef.current) clearTimeout(searchTargetClearTimerRef.current);
     setSearchTargetGroupKey(matchedSearchTargetGroupKey);
     target.scrollIntoView({ block: "center", behavior: "auto" });
+    const targetId = pendingSearchJump.messageId;
+    const foldedOwner = targetId && keyedShownGroups.find(group => group.key === matchedSearchTargetGroupKey)?.item.msgs
+      .find(message => message.id !== targetId && message.sourceEventIds?.includes(targetId)
+        && message.parts.some(part => part.type === "timeline"));
+    const activity = foldedOwner && activityByOwner.get(activityOwnerOf(foldedOwner));
+    if (activity) openTimelineModal(activity);
     atBottomRef.current = false;
     pendingSearchJumpKeyRef.current = null;
     searchJumpRequestTokenRef.current = null;
     setPendingSearchJump(null);
     searchTargetClearTimerRef.current = setTimeout(() => setSearchTargetGroupKey(null), 1600);
-  }, [activeKey, historyLoaded, matchedSearchTargetGroupKey, pendingSearchJump]);
+  }, [activeKey, activityByOwner, historyLoaded, keyedShownGroups, matchedSearchTargetGroupKey, openTimelineModal, pendingSearchJump]);
 
   useLayoutEffect(() => {
     const thread = threadRef.current;
@@ -8771,7 +8800,7 @@ function ChatPageApp() {
                 : "chat";
         const lastSeg = segs[segs.length - 1];
         if (lastSeg && lastSeg.cls === "chat" && cls === "chat" && m.actionId !== unreadAnchor?.messageId
-          && m !== liveTurn?.message && !m.parts.some(part => part.type === "timeline")) lastSeg.msgs.push(m);
+          && !m.parts.some(part => part.type === "timeline")) lastSeg.msgs.push(m);
         else segs.push({ cls, msgs: [m] });
       }
       // 时间常显，模型随消息操作显隐；挂在组的最后一个保留段上。
@@ -8785,8 +8814,8 @@ function ChatPageApp() {
 
       const entries: ImmersiveMessage[] = [];
       segs.forEach((seg, si) => {
-        const isLiveAnchor = liveTurn?.group === g && seg.msgs.includes(liveTurn.message);
-        const segId = isLiveAnchor ? `${groupRenderKey}:activity`
+        const isLiveSegment = liveTurn?.group === g && seg.msgs.includes(liveTurn.pending);
+        const segId = isLiveSegment ? `${groupRenderKey}:activity`
           : segs.length === 1 ? groupRenderKey : `${groupRenderKey}:s${si}`;
         const m0 = seg.msgs[0];
         const segText = seg.msgs
@@ -8848,7 +8877,7 @@ function ChatPageApp() {
         const awaitingPrompt = chatPromptAttentionOf(prompts);
         const pendingTail = liveMessage?.parts.at(-1);
         const loadingReply = !livePreview && !awaitingPrompt && pendingTail?.type === "text" && !pendingTail.text?.trim();
-        const standaloneBubbles = isLiveAnchor && livePreview ? [] : seg.msgs.flatMap((message, index) => {
+        const standaloneBubbles = isLiveSegment && livePreview ? [] : seg.msgs.flatMap((message, index) => {
           const preview = renderActivityBubble(standaloneActivityFor(message), openTimelineModal);
           return preview ? [<Fragment key={message.actionId ?? index}>{preview}</Fragment>] : [];
         });
@@ -8860,8 +8889,8 @@ function ChatPageApp() {
           kind: seg.cls === "local" ? "local" : "chat",
           unreadStart: seg.msgs.some(m => m.actionId === unreadAnchor?.messageId),
           loadingReply,
-          hideLiveStatus: (isLiveAnchor && !!livePreview) || liveMessage?.finalReplyStreaming,
-          liveActivity: isLiveAnchor ? liveBubble : undefined,
+          hideLiveStatus: (isLiveSegment && !!livePreview) || liveMessage?.finalReplyStreaming,
+          liveActivity: isLiveSegment ? liveBubble : undefined,
           activityBubble,
           html: media.text.trim() ? toSanitizedMarkdownHtml(media.text, true, imageContext,
             g.role === "assistant" && seg.cls === "chat" ? activeLegacyHtmlPolicy : "source") : "",
@@ -10198,8 +10227,7 @@ function ChatPageApp() {
                             ? !!standaloneActivityFor(m)
                             : !!p.text?.trim(),
                     );
-                  const hasVisible = g.msgs.some(isMsgVisible);
-                  if (!hasVisible && !(liveTurn?.group === g && livePreview)) return null;
+                  if (!g.msgs.some(isMsgVisible)) return null;
                   // Footer 时间 = 组内最后一条可见消息的时间（不是组首 g.ts）：footer 渲染在组尾，
                   // 必须与用户看到的末条内容、以及列表/头部 badge 的 updatedAt 对齐。组首兜底仅在
                   // 全组消息都无 ts 时生效。
@@ -10232,9 +10260,7 @@ function ChatPageApp() {
                         <div className="chat-group__stack">
                           {/* display:contents 包装不产生盒子（stack 的 flex/gap 不受影响），
                               只为右键菜单提供 data-mi 落点定位（R154 按气泡引用） */}
-                          {keyedMessages.flatMap(({ item: m, key: messageRenderKey, images: keyedImages, files: keyedFiles, parts: keyedParts }, mi) => [
-                            m === liveTurn?.message && liveBubble
-                              ? <ChatLiveActivityBubble key="live-activity-preview" className="chat-bubble" {...liveBubble} /> : null,
+                          {keyedMessages.map(({ item: m, key: messageRenderKey, images: keyedImages, files: keyedFiles, parts: keyedParts }, mi) => (
                             <div key={messageRenderKey} data-mi={mi} data-message-key={messageRenderKey} data-chat-message-id={m.actionId} style={{ display: "contents" }}>
                               {m.images?.length ? (
                                 <div className="chat-att-row">
@@ -10518,8 +10544,9 @@ function ChatPageApp() {
                                 </Fragment>
                               );
                               })}
-                            </div>,
-                          ])}
+                            </div>
+                          ))}
+                          {g === liveTurn?.group && liveBubble && <ChatLiveActivityBubble className="chat-bubble" {...liveBubble} />}
                         </div>
                         {g.role !== "toolResult" && (
                         <div className="chat-group__footer">

@@ -57,16 +57,19 @@ const wait = async (predicate: () => unknown, label: string) => {
 const check = (value: unknown, label: string) => { if (!value) throw Error(label); };
 function Fixture() {
   const [version, setVersion] = useState(0); state.reload = () => setVersion((value) => value + 1);
+  const [bundledAvailable, setBundledAvailable] = useState(true);
+  state.failBundledCatalog = () => setBundledAvailable(false);
+  const bundledModel = { id: "gpt-fixture", name: "GPT Fixture", runtime: "codex", runtimeName: "Shoggoth", bindingId: first };
   return <UiProvider><main className="page management-page" style={{ maxWidth: 1000, margin: "auto" }}>
     <AgentRuntimeBindings key={version} backend="fixture-native" agentId={`agent-${version}`} />
     <AgentDefaultRuntime backend="fixture-native" agentId="default-agent" onChanged={() => {}} />
     <RuntimeStatusList runtimes={runtimeStatuses} loading={false} error={false} busy={false} onToggle={() => {}} />
     <ChatModelMenu models={[
-      { id: "gpt-fixture", name: "GPT Fixture", runtime: "codex", runtimeName: "Codex Harness", bindingId: first },
+      ...(bundledAvailable ? [bundledModel] : []),
       { id: "gpt-fixture", name: "GPT Fixture", runtime: "codex", runtimeName: "Codex CLI", bindingId: second },
     ]} activeModel="gpt-fixture" activeBindingId={first} onSelect={(_id, _provider, bindingId) => { state.modelBinding = bindingId; }}
     runtimeGroups={[
-      { runtime: "codex", bindingId: first, name: "Codex Harness", available: true },
+      { runtime: "codex", bindingId: first, name: "Shoggoth", available: bundledAvailable },
       { runtime: "codex", bindingId: second, name: "Codex CLI", available: true },
     ]} />
   </main></UiProvider>;
@@ -116,21 +119,24 @@ state.checkOnboardingRuntime = async () => {
   await wait(() => !!document.querySelector('[data-runtime="pi"]')
     && !!document.querySelector('button[title="默认 Runtime"]'), "runtime UI load");
   const missing = document.querySelector<HTMLElement>('[data-runtime="pi"]')!;
-  check(missing.textContent?.includes("未安装 CLI"), "missing CLI must show installation hint");
+  check(missing.textContent?.includes("工具未安装或不可用"), "missing CLI must show installation hint");
   check(!missing.querySelector("button"), "missing CLI cannot reconnect");
   const trigger = document.querySelector<HTMLButtonElement>('button[title="默认 Runtime"]')!;
-  check(trigger.textContent?.includes("Codex Harness"), "bundled default is labeled Codex Harness");
+  check(trigger.textContent?.includes("Shoggoth"), "bundled default is labeled Shoggoth");
   trigger.click();
   await wait(() => [...document.querySelectorAll('[role="option"]')].some(option =>
     option.textContent?.includes("Codex CLI（本机安装）")), "separate native Codex option");
-  const names = [...document.querySelectorAll('[role="option"]')].map(option => option.textContent?.trim());
-  check(names.some(name => name?.includes("Codex Harness（Shoggoth 内置）")), "bundled option stays distinct");
+  const names = [...document.querySelectorAll('[role="option"]')].map(option => option.firstElementChild?.textContent?.trim());
+  check(names.includes("Shoggoth"), "bundled option stays distinct");
   check(names.some(name => name?.includes("Codex CLI（本机安装）")), "native CLI option stays distinct");
   document.querySelector<HTMLButtonElement>(".chat-pill--model")!.click();
   await wait(() => document.querySelectorAll(".model-menu__label").length === 2, "separate Codex model groups");
   const groups = [...document.querySelectorAll(".model-menu__label")].map(entry => entry.textContent?.trim());
-  check(groups.join("|") === "Codex Harness|Codex CLI", "model menu groups are account-scoped");
-  document.querySelectorAll<HTMLButtonElement>(".model-menu__item")[1].click();
+  check(groups.join("|") === "Shoggoth|Codex CLI", "model menu groups are account-scoped");
+  state.failBundledCatalog();
+  await wait(() => document.querySelector(".model-menu__error")?.textContent?.includes("Shoggoth 模型加载失败")
+    && document.querySelectorAll(".model-menu__item").length === 1, "Shoggoth catalog failure leaves the CLI model available");
+  document.querySelector<HTMLButtonElement>(".model-menu__item")!.click();
   check(state.modelBinding === second, "native Codex model retains its own binding ID");
   return { missingCliBlocked: true, harnessAndCliDistinct: true, modelGroupsDistinct: true };
 };

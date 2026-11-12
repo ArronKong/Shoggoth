@@ -148,10 +148,9 @@ const MANAGE_UI_DIR = path.join(__dirname, "manage-ui", "dist");
 const UI_PORT = 18799;
 // Default gateway for first-run config. Editable by the user afterwards via
 // the Gateway settings menu or directly in userData/config.json.
-const DEFAULT_GATEWAY_URL = "ws://127.0.0.1:18792";
 const CONFIG_PATH = path.join(app.getPath("userData"), "config.json");
 // Single source of truth for config.json (schema incl. hermesMode/hermesRemotes).
-const configStore = createConfigStore(CONFIG_PATH, { defaultGatewayUrl: "ws://127.0.0.1:18792" });
+const configStore = createConfigStore(CONFIG_PATH);
 const chatReadStateStore = createChatReadStateStore({ trustedRoot: app.getPath("userData") });
 
 // Local federating gateway proxy. The Control UI connects here instead of
@@ -1326,6 +1325,10 @@ if (!gotLock) {
     // chat's /__chatws broker to the federating proxy (started just below); the
     // broker connects lazily per browser session, so the proxy is listening by
     // the time chat opens.
+    const refreshHostConnections = require("./openclaw-gateway-discovery").createOpenclawGatewayDiscovery({
+      configStore, onConfigChanged: applyConfigChange,
+    });
+    void refreshHostConnections().catch(() => {});
     staticServer = await startStaticServer(UI_PORT, {
       packaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
@@ -1339,6 +1342,7 @@ if (!gotLock) {
       managedOpenClawHost: managedOpenClawProductHost,
       managedHermesHost: managedHermesProductHost,
       onConfigChanged: applyConfigChange,
+      refreshHostConnections,
       onSystemIssue: (error, fallbackCode) => systemIssues.report(error, fallbackCode),
       authResolver,
       modelChangeCoordinator,

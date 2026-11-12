@@ -3,6 +3,12 @@
 const crypto = require("node:crypto");
 const { serviceError } = require("../security");
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,256}$/u;
+const SCOPED_TOOL_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_][A-Za-z0-9_.:-]*$/u;
+const SCOPED_TOOL_KINDS = new Set(["mcpToolCall", "dynamicToolCall"]);
+const TOOL_STATUS = new Set(["pending", "inProgress", "in_progress", "running", "completed", "failed",
+  "declined", "canceled", "cancelled", "interrupted"]);
+const TOOL_EVENTS = new Set(["tool.start", "tool.update", "tool.result"]);
 const HASH = /^[a-f0-9]{64}$/u;
 const KINDS = new Set(["user", "long_term", "daily", "reflection_report"]);
 const MAX_REFS = 256;
@@ -79,14 +85,37 @@ function borrowedMemoryPlaceholder(refs, state = "reference_only") {
   const normalized = normalizeBorrowedMemoryRefs(refs);
   return `[借阅记忆${state === "invalid" ? "来源已变化或撤回，请重新检索" : "仅保留来源引用；需要正文时请重新检索"}: ${normalized.map(citation).join("；")}]`;
 }
+function isLegacyBorrowedToolContent(content) {
+  return content?.persistPolicy === "reference_only" && content.borrowedMemoryDerived === true
+    && Array.isArray(content.borrowedMemoryRefs) && content.borrowedMemoryRefs.length > 0
+    && typeof content.tool?.name === "string" && content.transcriptType === undefined && content.toolCallId === undefined;
+}
 function sanitizeBorrowedToolContent(content, refs = extractBorrowedMemoryRefs(content)) {
   const normalized = normalizeBorrowedMemoryRefs(refs);
   if (!normalized.length) return structuredClone(content);
-  const toolName = content?.tool?.name || content?.toolName || content?.name;
-  const name = typeof toolName === "string" && /^[A-Za-z0-9_.:-]{1,256}$/u.test(toolName) ? toolName : "memory_read";
-  return { borrowedMemoryRefs: normalized, borrowedMemoryDerived: true, persistPolicy: "reference_only",
+  const tool = content?.tool;
+  const toolName = tool?.name || content?.toolName || content?.name;
+  // ACP can put free-form titles in name. Only protocol tool identities
+  // carry a server or namespace, so do not admit path-like titles.
+  const scoped = SCOPED_TOOL_KINDS.has(tool?.kind);
+  const name = typeof toolName === "string" && toolName.length <= 256
+    && (TOOL_NAME.test(toolName) || (scoped && SCOPED_TOOL_NAME.test(toolName))) ? toolName : "tool";
+  const toolCallId = content?.toolCallId ?? content?.itemId;
+  const status = tool?.status;
+  const durationMs = tool?.durationMs;
+  return {
+    ...(TOOL_EVENTS.has(content?.transcriptType) ? { transcriptType: content.transcriptType } : {}),
+    ...(typeof toolCallId === "string" && ID.test(toolCallId) ? { toolCallId } : {}),
+    borrowedMemoryRefs: normalized, borrowedMemoryDerived: true, persistPolicy: "reference_only",
     resultSummary: borrowedMemoryPlaceholder(normalized),
-    tool: { name, output: { borrowedMemoryRefs: normalized, persistPolicy: "reference_only" } } };
+    tool: {
+      name,
+      ...(scoped ? { kind: tool.kind } : {}),
+      ...(TOOL_STATUS.has(status) ? { status } : {}),
+      ...(Number.isSafeInteger(durationMs) && durationMs >= 0 ? { durationMs } : {}),
+      output: { borrowedMemoryRefs: normalized, persistPolicy: "reference_only" },
+    },
+  };
 }
 function assertNoBorrowedMemoryWrite(...values) {
   for (const value of values) {
@@ -104,5 +133,5 @@ function borrowedMemoryFingerprint(refs) {
   return crypto.createHash("sha256").update(JSON.stringify(normalizeBorrowedMemoryRefs(refs))).digest("hex");
 }
 module.exports = { normalizeBorrowedMemoryRefs, mergeBorrowedMemoryRefs, extractBorrowedMemoryRefs,
-  refsFromEvents, isBorrowedMemoryDerived, isReferentialMemoryRequest, borrowedMemoryPlaceholder,
+  refsFromEvents, isBorrowedMemoryDerived, isReferentialMemoryRequest, borrowedMemoryPlaceholder, isLegacyBorrowedToolContent,
   sanitizeBorrowedToolContent, assertNoBorrowedMemoryWrite, borrowedMemoryFingerprint };

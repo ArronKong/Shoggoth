@@ -24,7 +24,7 @@ function isRecord(value) {
 }
 
 function isSuccessfulToolResult(event) {
-  if (event?.kind !== "tool_result" || !isRecord(event.content)) return false;
+  if (event?.kind !== "tool_result" || !isRecord(event.content) || event.content.persistPolicy === "reference_only") return false;
   const tool = isRecord(event.content.tool) ? event.content.tool : null;
   const historyItem = isRecord(event.content.historyItem) ? event.content.historyItem : null;
   if (typeof tool?.success === "boolean") return tool.success;
@@ -55,7 +55,7 @@ function collectStrings(value, output, seen = new Set()) {
 }
 
 function relevantEvent(event, successfulToolIds) {
-  if (!isRecord(event)) return false;
+  if (!isRecord(event) || event.content?.persistPolicy === "reference_only") return false;
   if (["assistant", "artifact"].includes(event.kind)) return true;
   const ids = eventToolIds(event);
   if (event.kind === "tool_result") return isSuccessfulToolResult(event);

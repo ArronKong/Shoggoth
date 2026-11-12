@@ -39,7 +39,7 @@ thought(2, "正在定位官方案例页。"); note("note2", "已找到候选页�
 add("steer", "user", { transcriptType: "steer", text: "你不用核实，找到链接我看看就行" });
 compact(2); thought(3, "正在整理已经找到的链接。");
 note("note3", "已收到补充，接下来只整理案例链接。"); tool(2, "official showcase links");
-note("partial", "已经找到一条案例链接，正在整理其余链接。");
+add("partial", "assistant", { transcriptType: "text", text: "已经找到一条案例链接，正在整理其余链接。", segmentId: "partial" });
 try {
   await build({ entryPoints: [path.join(repo, "scripts/fixtures/chat-steering-activity.tsx")], bundle: true, format: "esm",
     define: { "process.env.NODE_ENV": '"production"', __STEERING_HISTORY__: JSON.stringify(history) },

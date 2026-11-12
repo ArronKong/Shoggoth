@@ -24,6 +24,7 @@ assert.equal(helpers.length, functions.size + constants.size);
 // Media, cards and approval payloads are absent from these transcript fixtures.
 // Exercise the actual history normalizer and folding code, including run identity.
 const context = { ...preambles, turnElapsedMs: exports.turnElapsedMs, stepsFromParts: exports.stepsFromParts,
+  activityOnlyProgress: exports.activityOnlyProgress,
   mergeObservedTurnSteps: exports.mergeNativeTurnSteps, withoutPlanSteps: steps => steps.filter(s => s.kind !== "plan"),
   normalizeOpenClawMediaFacts: () => [], nativeChatMedia: () => ({ attachments: [], images: [], files: [] }),
   normalizeNativeUiPart: () => null, interruptedApprovalEntry: () => null, validPluginAppCallId: exports.validPluginAppCallId };
@@ -213,4 +214,27 @@ console.log("PASS linked legacy tool results and process ownership for unread na
   assert.deepEqual(Array.from(conversation), ["Show me examples", "Public note 1", "Public note 2", "Links only", "Public note 3"]);
   assert.equal(JSON.stringify(events), original);
   console.log("PASS stopped native turn retains three public reasoning steps, two tools, compactions and steering input");
+}
+
+// Older Antigravity history can retain note ids but omit tool arguments and status.
+// The chat projection still bounds progress, preserves the input boundary and
+// keeps every moved note reachable by its original message id.
+{
+  const runId = "rename-legacy";
+  const notes = Array.from({ length: 53 }, (_, i) => ({ role: "assistant", id: `event-${i}`, nativeRunId: runId,
+    parts: [{ type: "text", activity: true, segmentId: `note-${i}`, text: `进度 ${i}` }] }));
+  const raw = [...notes.slice(0, 51), { role: "user", nativeRunId: runId, promptResponse: true,
+    parts: [{ type: "text", text: "确认" }] }, ...notes.slice(51),
+  { role: "assistant", nativeRunId: runId, parts: [{ type: "text", text: "已更名" }] }];
+  const saved = JSON.stringify(raw);
+  const projected = absorbTurnTimelines(raw);
+  const messages = projected.flatMap(message => message.parts.filter(part => part.type === "text").map(part => part.text));
+  assert.deepEqual(Array.from(messages), ["进度 0", "进度 1", "进度 50", "确认", "进度 51", "已更名"]);
+  const detail = projected[0].parts.find(part => part.type === "timeline").steps;
+  assert.equal(detail.length, 49);
+  assert.equal(detail.at(-1).text, "进度 52");
+  assert.equal(projected[0].sourceEventIds.length, detail.length);
+  assert.ok(projected[0].sourceEventIds.includes("event-52"));
+  assert.equal(JSON.stringify(raw), saved);
+  console.log("PASS long rename history folds 49 notes into the activity and retains the interaction and reply");
 }

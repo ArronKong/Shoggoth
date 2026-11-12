@@ -11,6 +11,7 @@ const { createAgentLifecycleServiceController } = require("../app/agent-service/
 const { AgentHarnessServiceController } = require("../app/agent-service/agent-harness-service-controller");
 const { ConversationDefinitionService } = require("../app/agent-service/conversation-definition-service");
 const { McpProductToolController, validateMcpProductToolArguments } = require("../app/agent-service/mcp-product-tool-controller");
+const { createMcpStdioHandler, MCP_STDIO_PROTOCOL_VERSION } = require("../app/shoggoth-mcp-helper");
 const { HeartbeatDocumentStore } = require("../app/agent-service/heartbeat-document");
 
 async function fixture(t) {
@@ -129,6 +130,46 @@ test("rename synchronizes Profile, IDENTITY and next context without changing ru
   assert.equal(f.products.getAgentProfile("profile-1").name, "小墨");
 });
 
+test("rename parameter errors reach the model and a corrected call saves both names", async (t) => {
+  const f = await fixture(t);
+  const dispatched = [];
+  const helper = createMcpStdioHandler({
+    runtimeProfileId: "definition-fixture", runtimeAccountId: "definition-account",
+    sessionToken: Buffer.alloc(32, 1).toString("base64url"),
+    requestService: async (_paths, { params }) => {
+      dispatched.push(params.name);
+      return f.call(params.name, params.arguments, { profileId: "profile-1", callId: params.callId });
+    },
+  });
+  t.after(() => helper.close());
+  await helper({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: MCP_STDIO_PROTOCOL_VERSION,
+    capabilities: {}, clientInfo: { name: "fixture", version: "1" } } });
+  const call = async (id, name, args) => (await helper({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name, arguments: args } })).result;
+
+  const update = await call(2, "native_agent_update", { backendId: "shoggoth", agentId: "definition-fixture", name: "小墨" });
+  assert.equal(update.isError, true);
+  assert.deepEqual(update.structuredContent.error.problems, ["缺少 source", "缺少 sourceId", "缺少 expectedUpdatedAt"]);
+  assert.match(update.content[0].text, /native_agent_get.*updatedAt/u);
+  const noTarget = await call(3, "native_agent_update", {});
+  assert.equal(noTarget.isError, true);
+  assert.match(noTarget.content[0].text, /缺少 name 或 workspace/u);
+  assert.equal(dispatched.length, 0);
+
+  const args = { ...f.source, ...f.prepare("IDENTITY", "- Name: 小墨\n", { sourceQuote: "以后你叫小墨" }) };
+  const missing = await call(4, "agent_definition_update", args);
+  assert.equal(missing.isError, true);
+  assert.equal(missing.structuredContent.error.code, "MCP_TOOL_DEFINITION_NEW_NAME_REQUIRED");
+  assert.match(missing.content[0].text, /缺少 newName.*- Name:/u);
+  assert.equal(f.revision(), args.expectedRevision);
+  assert.equal(f.products.listMcpToolCalls({ profileId: "profile-1", name: "agent_definition_update" }).length, 0);
+  const saved = await call(5, "agent_definition_update", { ...args, newName: "小墨" });
+  assert.equal(saved.isError, false);
+  assert.equal(saved.structuredContent.profileRenamed, true);
+  assert.equal(f.products.getAgentProfile("profile-1").name, "小墨");
+  assert.equal(f.definitions.get("profile-1").documents.IDENTITY, "- Name: 小墨\n");
+});
+
 test("source, permission, revision, exact patch and input boundaries reject unsafe writes", async (t) => {
   const f = await fixture(t);
   const args = f.prepare("SOUL", "温和。");
@@ -155,7 +196,7 @@ test("source, permission, revision, exact patch and input boundaries reject unsa
   const getter = { ...f.source, kind: "SOUL" };
   Object.defineProperty(getter, "offset", { get() { throw new Error("must not invoke getter"); } });
   assert.equal(validateMcpProductToolArguments("agent_definition_read", getter), false);
-  await rejects(() => f.call("agent_definition_update", f.prepare("IDENTITY", "- Name: 小墨\n")), "MCP_TOOL_INVALID_ARGUMENTS");
+  await rejects(() => f.call("agent_definition_update", f.prepare("IDENTITY", "- Name: 小墨\n")), "MCP_TOOL_DEFINITION_NEW_NAME_REQUIRED");
   await rejects(() => f.call("agent_definition_update", f.prepare("IDENTITY", "- Name: 其他\n", { newName: "小墨" })), "MCP_TOOL_INVALID_ARGUMENTS");
   assert.equal(f.revision(), 1);
 });
