@@ -676,6 +676,7 @@
 .footer > :global(.chat-response-model):first-child > :global(.dot) { display: none; }
 /* markdown 内容基本排版（沉浸不在 .chat-shell，需自带） */
 .md {
+  user-select: text;
   font-size: 15px;
   line-height: 1.6;
   word-break: break-word;
@@ -977,6 +978,7 @@
   word-break: break-word;
 }
 .errText {
+  user-select: text;
   white-space: pre-wrap;
 }
 .errRepeat {

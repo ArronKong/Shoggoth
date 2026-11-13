@@ -72,6 +72,7 @@
 /* The note keeps the seed's height in every stage; editing happens on the text in place. */
 .notePaper { --note-ink: light-dark(rgb(0 0 0 / 90%), rgb(240 243 232 / 90%)); display: flex; flex-direction: column; gap: 16px; min-height: 200px; padding: 18px 24px; border-radius: 24px; box-shadow: inset 1px 0 0 var(--note-edge-light), 0 6px 14px -8px light-dark(rgb(72 75 64 / 26%), rgb(8 12 6 / 45%)); }
 .noteBody { display: flex; flex: 1; flex-direction: column; gap: 12px; min-width: 0; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+.original, .markdown, .runFailureText { user-select: text; }
 .original { margin: 0; font-size: var(--note-font-size); line-height: var(--note-line-height); white-space: pre-wrap; overflow-wrap: anywhere; }
 .noteInline { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .noteInline :global(.field-textarea), .noteInline :global(.field-textarea):focus, .noteInline :global(.field-textarea):focus-visible, .noteInline :global(.field-textarea):hover {

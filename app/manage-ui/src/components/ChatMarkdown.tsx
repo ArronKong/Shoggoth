@@ -58,7 +58,7 @@ const ChatMarkdown = memo(function ChatMarkdown({ text, className, htmlArtifactP
       parent?.normalize();
     };
   }, [html, streamingCursor]);
-  return <div ref={rootRef} className={className} data-qp={quotePart} onClick={event => {
+  return <div ref={rootRef} className={className} data-qp={quotePart} data-selectable-text onClick={event => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>(".code-block-copy");
     if (!button || !event.currentTarget.contains(button)) return;
     // Own the interaction here so Markdown also works outside the Chat page.

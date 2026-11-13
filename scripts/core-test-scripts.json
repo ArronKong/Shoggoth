@@ -7,6 +7,7 @@
   "conversation-checkpoint-unit.cjs",
   "conversation-compaction-unit.cjs",
   "shoggoth-memory-checkpoint-freshness-unit.cjs",
+  "shoggoth-memory-removal-continuity-unit.cjs",
   "shoggoth-recall-policy-unit.cjs",
   "native-service-memory-hot-path-unit.cjs",
   "native-send-latency-unit.cjs",

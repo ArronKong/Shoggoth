@@ -917,7 +917,7 @@ test("upgrade backup classifies journal, seal and independent install marker as 
   } finally { value.cleanup(); }
 });
 
-test("restoring a pre-forget backup overlays the newer same-machine recall ledger", () => {
+for (const reason of ["forgotten", "memory_removed"]) test(`restoring a pre-${reason} backup overlays the newer same-machine recall ledger`, () => {
   const value = memoryFixture();
   try {
     const item = note(value);
@@ -930,7 +930,7 @@ test("restoring a pre-forget backup overlays the newer same-machine recall ledge
     fs.mkdirSync(path.dirname(sourceAnchor), { recursive: true, mode: 0o700 });
     fs.writeFileSync(sourceAnchor, '{"fixture":"old-native-session"}\n', { mode: 0o600 });
     const snapshot = createUpgradeSnapshot({ paths: value.paths, generationId: "before-forget-restore" });
-    value.engine.delete({ profileId, id: item.id, reason: "forgotten", operationId: "after-backup-forget" });
+    value.engine.delete({ profileId, id: item.id, reason, operationId: "after-backup-forget" });
     assert.equal(value.store.get(profileId, sibling.id).status, "active");
     assert.equal(value.engine.recallPolicy.isMemoryVisible(profileId, sibling), false);
     const sourceJournal = path.join(value.paths.agentsDir, profileId, "memory", "events.jsonl");
@@ -961,6 +961,8 @@ test("restoring a pre-forget backup overlays the newer same-machine recall ledge
     try {
       restoredEngine.open([profileId]);
       assert.equal(restoredStore.get(profileId, item.id).status, "deleted");
+      // Restoring also deletes a sibling claim without its own removal intent;
+      // that legacy source stays conservatively hidden in either mode.
       assert.equal(restoredEngine.recallPolicy.isEventVisible(profileId, event()), false);
       assert.equal(restoredEngine.search({ profileId, query: "蓝色番茄" }).items.length, 0);
     } finally { restoredEngine.close(); restoredStore.close(); }

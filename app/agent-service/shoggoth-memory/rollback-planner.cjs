@@ -373,7 +373,7 @@ class StoppedMemoryRollbackPlanner {
 
   legacyCompatibility(capture, policyState, target, operations) {
     const blockers = [], changes = new Map(operations.map(operation => [operation.id, operation]));
-    const suppresses = record => ["forgotten", "user_deleted", "legacy_unknown"].includes(record.reason);
+    const suppresses = record => ["forgotten", "memory_removed", "user_deleted", "legacy_unknown"].includes(record.reason);
     const covers = (record, item) => record.memoryId === item.id && record.contentHash === contentHash(item.content)
       || record.related?.some(related => related.memoryId === item.id && related.contentHash === contentHash(item.content));
     // A read-only mapping can preserve an unfinished legacy deletion. A writer

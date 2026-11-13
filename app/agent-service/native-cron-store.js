@@ -227,7 +227,8 @@ function nextRunError(corrupt = false) {
 }
 
 function normalizeJob(value, corrupt = false) {
-  if (!exactObject(value, JOB_FIELDS) || !UUID_PATTERN.test(value.id)
+  const hasGroupDelivery = value && own(value, "groupDelivery");
+  if (!exactObject(value, hasGroupDelivery ? [...JOB_FIELDS, "groupDelivery"] : JOB_FIELDS) || !UUID_PATTERN.test(value.id)
     || !validText(value.name, 512) || typeof value.enabled !== "boolean"
     || !validOpaqueId(value.profileId) || !validText(value.prompt, 1024 * 1024)
     || !validWorkspace(value.workspace) || !MISFIRE_POLICIES.has(value.misfirePolicy)
@@ -235,6 +236,8 @@ function normalizeJob(value, corrupt = false) {
     || !OVERLAP_POLICIES.has(value.overlapPolicy) || !THREAD_POLICIES.has(value.threadPolicy)
     || !(value.threadId === null || validOpaqueId(value.threadId, 256))
     || (value.threadPolicy === "new" && value.threadId !== null)
+    || (hasGroupDelivery && (!validGroupDelivery(value.groupDelivery) || value.threadId !== null))
+    || (hasGroupDelivery && value.groupDelivery.watch && Buffer.byteLength(value.prompt) > 48 * 1024)
     || !(value.nextRunAt === null || validTimestamp(value.nextRunAt))
     || !validTimestamp(value.createdAt) || !validTimestamp(value.updatedAt)
     || value.updatedAt < value.createdAt) throw jobError(corrupt);
@@ -248,6 +251,7 @@ function normalizeJob(value, corrupt = false) {
   const result = {
     ...Object.fromEntries(JOB_FIELDS.map((field) => [field, value[field]])),
     schedule,
+    ...(hasGroupDelivery ? { groupDelivery: clone(value.groupDelivery) } : {}),
   };
   if (!result.enabled) {
     if (result.nextRunAt !== null) throw nextRunError(corrupt);
@@ -259,6 +263,22 @@ function normalizeJob(value, corrupt = false) {
   }
   if (expected === null || result.nextRunAt !== expected) throw nextRunError(corrupt);
   return result;
+}
+
+function validGroupDelivery(value) {
+  return exactObject(value, ["ownerScope", "groupId", "memberId", "messageId", "watch"])
+    && validOpaqueId(value.ownerScope) && value.ownerScope.startsWith("ga1:")
+    && [value.groupId, value.memberId, value.messageId].every(id => validOpaqueId(id))
+    && typeof value.watch === "boolean";
+}
+
+function groupJobId(profileId, target) {
+  const bytes = crypto.createHash("sha256")
+    .update(JSON.stringify(["shoggoth-group-cron", profileId, target.ownerScope, target.groupId, target.messageId]))
+    .digest();
+  bytes[6] = (bytes[6] & 0x0f) | 0x80;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return bytes.toString("hex", 0, 16).replace(/^(........)(....)(....)(....)(............)$/u, "$1-$2-$3-$4-$5");
 }
 
 function normalizeOperationShape(value, corrupt = false, resultTypes = OPERATION_RESULT_TYPES) {
@@ -516,7 +536,7 @@ class NativeCronStore {
   }
 
   createJob(input) {
-    input = this.#assertMutationBase(input, CREATE_FIELDS);
+    input = this.#assertMutationBase(input, CREATE_FIELDS, ["groupDelivery"]);
     const schedule = normalizeScheduleData(input.schedule);
     const jobInput = { ...input, schedule };
     if (!validOpaqueId(input.profileId)) throw cronError("CRON_JOB_INVALID", "createJob 输入无效");
@@ -525,9 +545,19 @@ class NativeCronStore {
       if (!this.#profileExists(input.profileId)) {
         throw cronError("CRON_REFERENCE_INVALID", "Cron Job.profileId 不存在");
       }
+      const id = input.groupDelivery?.watch ? groupJobId(input.profileId, input.groupDelivery)
+        : this.#newId({ ...candidate.jobs, ...candidate.tombstones });
+      if (candidate.jobs[id]) {
+        const existing = candidate.jobs[id];
+        if (existing.profileId !== input.profileId || canonicalJson(existing.groupDelivery) !== canonicalJson(input.groupDelivery)) {
+          throw cronError("CRON_ID_CONFLICT", "Cron Job 与群消息归属冲突");
+        }
+        return existing;
+      }
+      if (candidate.tombstones[id]) throw cronError("CRON_JOB_NOT_FOUND", "该群消息的 Cron Job 已删除");
       this.#assertCapacity(candidate, "jobs");
       const job = normalizeJob({
-        id: this.#newId({ ...candidate.jobs, ...candidate.tombstones }),
+        id,
         name: input.name,
         enabled: input.enabled,
         profileId: input.profileId,
@@ -542,6 +572,7 @@ class NativeCronStore {
         nextRunAt: input.nextRunAt,
         createdAt: input.createdAt,
         updatedAt: input.createdAt,
+        ...(own(input, "groupDelivery") ? { groupDelivery: input.groupDelivery } : {}),
       });
       candidate.jobs[job.id] = job;
       return job;
@@ -737,14 +768,15 @@ class NativeCronStore {
       .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
   }
 
-  #assertMutationBase(input, fields) {
+  #assertMutationBase(input, fields, optionalFields = []) {
     this.#assertOpen();
     let snapshot;
     try { snapshot = snapshotOwnJson(input); } catch {
       throw cronError("CRON_OPERATION_INVALID", "Cron operation 输入无效");
     }
     assertNoSensitive(snapshot, this.isSensitiveValue);
-    if (!exactObject(snapshot, fields) || !validOpaqueId(snapshot.operationId)
+    if (!exactObject(snapshot, [...fields, ...optionalFields.filter(field => own(snapshot ?? {}, field))])
+      || !validOpaqueId(snapshot.operationId)
       || !validTimestamp(snapshot.createdAt)) {
       throw cronError("CRON_OPERATION_INVALID", "Cron operation 输入无效");
     }
@@ -759,6 +791,7 @@ class NativeCronStore {
           field,
           field === "updatedAt" ? input.createdAt : input[field],
         ])),
+        ...(own(input, "groupDelivery") ? { groupDelivery: input.groupDelivery } : {}),
       });
     } catch (error) {
       if (["CRON_SCHEDULE_INVALID", "CRON_NEXT_RUN_INVALID"]

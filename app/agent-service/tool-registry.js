@@ -115,4 +115,4 @@ class ToolRegistry {
     throw new RangeError("Tool Registry capability index exceeds its document limit");
   }}
 
-module.exports = { ToolRegistry, canonicalJson, MAX_TOOLS_MARKDOWN_BYTES };
+module.exports = { ToolRegistry, canonicalJson, descriptionExcerpt, MAX_TOOLS_MARKDOWN_BYTES };

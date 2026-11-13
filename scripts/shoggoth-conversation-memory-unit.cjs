@@ -91,7 +91,7 @@ const { McpProductToolController, validateMcpProductToolArguments } = require(".
     const next = compile();
     assert.match(next.dynamicContext, /用户希望被称呼为阿棠/u, "称呼在无关键词匹配的新一轮仍可见");
     assert.equal(next.blocks.some((block) => block.id === "first-conversation"), false);
-    assert.equal(next.blocks.find((block) => block.id === "user").trust, "user-data");
+    assert.equal(next.blocks.find((block) => block.id === "user").trust, "user-preferences");
     const beforeDuplicate = revision();
     assert.equal((await save("用户希望被称呼为阿棠", { sourceQuote: "叫我阿棠" })).item.id, name.item.id);
     assert.equal(revision(), beforeDuplicate);

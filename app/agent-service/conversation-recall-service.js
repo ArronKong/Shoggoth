@@ -225,6 +225,11 @@ class ConversationRecallService {
     const session = event?.sessionId && findProfileSession(this.sessions, profileId, event.sessionId);
     const raw = session && this.transcripts.getEvent(profileId, session.id, event.eventId);
     if (isUiActionSubmission(event) || isUiActionSubmission(raw)) throw recallError("MEMORY_CANDIDATE_SOURCE_OUTDATED", "交互界面的自动提交不是用户独立陈述的事实");
+    const resolved = raw && (this.transcripts.contextEvent?.(profileId, session.id, raw) || raw);
+    if (!resolved || !(this.policy.isMemorySourceEventVisible?.(profileId, resolved)
+      ?? this.policy.isEventVisible(profileId, resolved))) {
+      throw recallError("MEMORY_CANDIDATE_SOURCE_OUTDATED", "候选来源已被用户从记忆中移除");
+    }
     if (!this.historicalMemory || typeof event?.eventId !== "string"
       || typeof event?.runId !== "string") {
       throw recallError("MEMORY_CANDIDATE_SOURCE_UNAVAILABLE", "候选来源无法核实");
@@ -321,11 +326,13 @@ class ConversationRecallService {
   assertCaller({ profileId, run }) { return this._caller(profileId,
     { source: run?.source, sourceId: run?.sourceId }, run); }
 
-  _policyView(profileId) {
-    return this.policy.snapshot?.(profileId) || {
+  _policyView(profileId, memorySource = false) {
+    const view = this.policy.snapshot?.(profileId) || {
       revision: this.policy.getRevision(profileId),
       isEventVisible: (event) => this.policy.isEventVisible(profileId, event),
     };
+    return memorySource && view.isMemorySourceEventVisible
+      ? { ...view, isEventVisible: view.isMemorySourceEventVisible } : view;
   }
 
   _caller(profileId, args, run) {
@@ -386,7 +393,7 @@ class ConversationRecallService {
   scanEligibleSession({ profileId, sessionId, afterSeq = 0, limit = 100,
     completedOnly = false }) {
     this.policy.assertReady(profileId);
-    const policyView = this._policyView(profileId);
+    const policyView = this._policyView(profileId, true);
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0
       || !Number.isSafeInteger(limit) || limit < 1 || limit > 100
       || typeof completedOnly !== "boolean") {
@@ -415,7 +422,7 @@ class ConversationRecallService {
     if (!session || session.profileId !== profileId || !["draft", "ready"].includes(session.status)
       || !this._isRecallableSession(profileId, session) || this.sessions.getCronSessionOrigin?.(sessionKey)) return null;
     const lastSeq = this.transcripts.getLastEventSeq(profileId, session.id);
-    const scoped = { ...session, lastSeq }, policy = this._policyView(profileId), runs = new Map();
+    const scoped = { ...session, lastSeq }, policy = this._policyView(profileId, true), runs = new Map();
     const view = this._outdatedView(profileId), rows = [], unfinishedRunIds = new Set();
     let cursor = Math.max(0, lastSeq - 200);
     while (cursor < lastSeq) {
@@ -455,7 +462,7 @@ class ConversationRecallService {
         || session.workspace !== source.workspace || !["draft", "ready"].includes(session.status)
         || !this._isRecallableSession(profileId, session) || this.sessions.getCronSessionOrigin?.(session.sessionKey)
         || !Array.isArray(source.events) || source.events.length > 24) return false;
-      const policy = this._policyView(profileId), view = this._outdatedView(profileId);
+      const policy = this._policyView(profileId, true), view = this._outdatedView(profileId);
       const sourcesVisible = source.events.every(row => {
         const value = this._event(profileId, session, row.eventId, {
           seq: row.seq, run_id: row.runId, content_hash: row.contentHash,

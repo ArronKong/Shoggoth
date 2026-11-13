@@ -1323,7 +1323,7 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
             .slice(Math.min(sendRecordPage, Math.floor((sendRecords.length - 1) / 20)) * 20, (Math.min(sendRecordPage, Math.floor((sendRecords.length - 1) / 20)) + 1) * 20)
             .map(record => <details key={record.key} data-send-id={record.clientMessageId}>
             <summary>{t(`groupChat.sendJournal.${record.phase}`)} · {excerptOf(record.inputSnapshot.body || record.inputSnapshot.attachments?.map(file => file.name).join("、") || "", 70)}</summary>
-            <p>{record.inputSnapshot.body}</p>
+            <p data-selectable-text>{record.inputSnapshot.body}</p>
             {record.inputSnapshot.attachments?.map(file => <p key={file.id}>{file.name}</p>)}
             {record.lastError && <p>{t("groupChat.sendJournal.detail", { code: record.lastError })}</p>}
             {archived && <p>{t("groupChat.sendJournal.archived")}</p>}

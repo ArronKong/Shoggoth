@@ -229,7 +229,7 @@ class NativeDomainServiceController {
     this.poisoned = { kanban: null, cron: null };
   }
 
-  async handle(method, rawParams) {
+  async handle(method, rawParams, { groupDelivery = null } = {}) {
     let params;
     try {
       // 不可信参数必须在 availability、Store、Scheduler 或 Dispatcher 前完成 canonical validation。
@@ -243,7 +243,7 @@ class NativeDomainServiceController {
       this.#assertAvailable(domain);
       if (["cron.job.update", "cron.job.delete", "cron.job.enabled.set", "cron.run.trigger", "cron.run.retry"].includes(method)
         && this.isSystemCronJob(params.jobId)) throw internalError("CRON_SYSTEM_MANAGED");
-      const rawResult = await this.#route(method, params);
+      const rawResult = await this.#route(method, params, groupDelivery);
       return validateDomainServiceResult(method, rawResult, params);
     } catch (error) {
       const fatal = this.#isFatal(domain, error);
@@ -404,7 +404,7 @@ class NativeDomainServiceController {
     return this.#page("cron.run.list", params, entries);
   }
 
-  async #route(method, params) {
+  async #route(method, params, groupDelivery) {
     if (method === "kanban.board.list") {
       const values = this.kanbanStore.listBoards()
         .filter((value) => value.profileId === params.profileId);
@@ -539,7 +539,7 @@ class NativeDomainServiceController {
     if (method === "cron.job.create") {
       const nextRunAt = this.#nextRunAt(params.schedule, params.enabled, params.createdAt);
       const value = await this.#mutateCronAndTick(
-        () => this.cronStore.createJob({ ...params, nextRunAt }),
+        () => this.cronStore.createJob({ ...params, nextRunAt, ...(groupDelivery ? { groupDelivery } : {}) }),
         true,
       );
       return { job: cronJobDto(value) };

@@ -337,6 +337,14 @@ test("real Service → authenticated helper → Controller: all 12 headless tool
   assert.equal(catalog.result.tools.filter(tool => tool.name.startsWith("hook_")).length, 12);
   const ui = await f.ipc("harness.tools.list", { profileId: f.profile.id });
   assert.equal(ui.tools.some(tool => tool.name.startsWith("hook_")), false);
+  const registry = f.service.mcpProductToolController.toolRegistry;
+  const visible = registry.list().filter(tool => tool.modelVisible !== false && tool.uiVisible !== false);
+  assert.deepEqual(ui.tools.map(tool => tool.name), visible.map(tool => tool.tool));
+  const documented = registry.get("memory_search");
+  const displayDescription = ui.tools.find(tool => tool.name === "memory_search").description;
+  assert.ok(displayDescription.endsWith("…") && documented.description.startsWith(displayDescription.slice(0, -1)));
+  assert.equal(catalog.result.tools.find(tool => tool.name === "memory_search").description,
+    documented.definition.description);
   // The workflow can be delivered inline or with the model-visible tool catalog.
   const hookGuidance = [f.host.startInputs[0].developerInstructions,
     catalog.result.tools.find(tool => tool.name === "hook_register").description].join("\n\n");
@@ -379,6 +387,11 @@ test("real Service → authenticated helper → Controller: all 12 headless tool
   await f.service.stop({ notify: false }); await f.service.start();
   assert.equal(f.service.hookStore.list(f.profile.id).items.length, 0);
   assert.equal(f.service.hookRunner.closed, false);
+  const policy = await f.ipc("harness.tools.permission.set", {
+    profileId: f.profile.id, toolName: "memory_search", effect: "deny", expectedRevision: ui.revision,
+  });
+  assert.deepEqual(policy.tools.map(tool => tool.name), ui.tools.map(tool => tool.name));
+  assert.equal(policy.tools.find(tool => tool.name === "memory_search").effect, "deny");
 });
 
 test("real approval card uses transformed final arguments; deny and revoke send nothing", async t => {

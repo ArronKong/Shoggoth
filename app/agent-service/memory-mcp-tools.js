@@ -36,7 +36,10 @@ const DEFINITIONS = [
   // sourceQuote is required for classification=explicit, and expectedRevision
   // for a correction (supersedes); both checked below.
   ["source", "sourceId", "content", "scope", "classification"])],
-  ["memory_forget", object({ ...source, id, expectedRevision: revision, sourceQuote: text(2048) })],
+  ["memory_forget", object({ ...source, id, expectedRevision: revision, sourceQuote: text(2048),
+    mode: { type: "string", enum: ["everywhere", "memory_only"],
+      description: "Default everywhere forgets the fact and excludes its related conversation from future context. Use memory_only when the user removes a saved entry (e.g. from USER.md) but continues the current task: delete saved memory, preserve dialogue and pending choices, and block automatic resaving." } },
+  ["source", "sourceId", "id", "expectedRevision", "sourceQuote"])],
 ];
 const BY_NAME = new Map(DEFINITIONS);
 const MEMORY_MCP_TOOL_DEFINITIONS = DEFINITIONS.map(([name, inputSchema]) => ({ name, inputSchema }));

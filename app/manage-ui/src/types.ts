@@ -3791,7 +3791,7 @@ export interface GroupChatMessage {
   replyTo?: { seq: number; messageId: string; author: GroupChatAuthor; excerpt: string; attachments?: InspirationAttachment[] };
   // partial：成员让出发言位时已经写出的那段话；late：它在后台做完后交回的结果。
   origin?: { opportunityId?: string; runId?: string | null; discussionId?: string; partial?: boolean; late?: boolean;
-    textItemId?: string; streaming?: boolean };
+    textItemId?: string; streaming?: boolean; cronJobId?: string };
   createdAt: number;
   revision?: number;
   responseMetadata?: ChatResponseMetadata;

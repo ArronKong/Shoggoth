@@ -176,7 +176,7 @@ function targetRecords(profileId, plan, expectedRecords) {
 // These are the exact conditions under which the original _reconcile would
 // need a durable repair. Reject that intent rather than invoking the writer.
 function assertSettled(reader, profileId, records) {
-  const suppresses = record => ["forgotten", "user_deleted", "legacy_unknown"].includes(record.reason);
+  const suppresses = record => ["forgotten", "memory_removed", "user_deleted", "legacy_unknown"].includes(record.reason);
   for (const item of records) {
     const reasons = reader.state.byMemory.get(item.id) || [];
     const covers = record => record.memoryId === item.id && record.contentHash === contentHash(item.content)

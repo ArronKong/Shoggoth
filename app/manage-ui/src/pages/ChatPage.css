@@ -1135,6 +1135,7 @@
 /* ×N count badge: shown when consecutive identical failed turns fold into one bubble */
 .chat-bubble__repeat {
   display: inline-block;
+  user-select: none;
   margin-left: 8px;
   padding: 0 8px;
   border-radius: 999px;

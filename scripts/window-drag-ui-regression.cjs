@@ -102,7 +102,7 @@ if (!process.versions.electron) {
       if (route === "cli") {
         assert.equal(await style(".page-head-actions"), mac ? "no-drag" : "none");
         assert.equal(await style(".page-head-actions input"), mac ? "no-drag" : "none");
-        assert.equal(await evaluate("getComputedStyle(document.querySelector('.page-head-actions input')).userSelect"), mac ? "text" : "auto");
+        assert.equal(await evaluate("getComputedStyle(document.querySelector('.page-head-actions input')).userSelect"), "text");
       }
       if (route === "dashboard") {
         const geometry = await evaluate("JSON.stringify([...document.querySelectorAll('.sidebar, .page-head, .content')].map(e => e.getBoundingClientRect().toJSON()))");

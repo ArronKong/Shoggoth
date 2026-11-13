@@ -94,6 +94,21 @@ body {
   font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
   color: var(--fg);
   background: var(--bg);
+  user-select: none;
+}
+
+/* Editors and content users may want to copy opt back into text selection. */
+:where(
+  input, textarea, [contenteditable]:not([contenteditable="false"]),
+  pre, code, .chat-md, .md-body, .comment-body, .chat-prompt__q, .chat-diff__path,
+  [data-selectable-text]
+) {
+  user-select: text;
+}
+
+/* These controls also appear inside selectable Markdown and report content. */
+:where(button, summary, .code-block-header, .chat-html-bar) {
+  user-select: none;
 }
 
 .app {
@@ -129,10 +144,6 @@ body {
   .page-head-actions, .chat-header__tools
 ) {
   -webkit-app-region: no-drag;
-}
-:root.electron-macos-hidden-inset :is(.page-head, .chat-aside__title-row, .chat-header__row)
-  :is(input, textarea, [contenteditable]:not([contenteditable="false"])) {
-  user-select: text;
 }
 
 .sidebar {

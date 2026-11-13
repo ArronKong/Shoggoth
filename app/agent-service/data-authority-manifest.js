@@ -126,7 +126,10 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
     cron: Object.freeze({
       owner: "shoggoth", schemaVersion: 3,
       pathRules: Object.freeze(["stateDir/native-cron.json", "stateDir/native-cron.json.pre-v3"]),
-      records: Object.freeze({ CronTombstone: recordAuthority({ authority: ["id", "profileId", "name", "deletedAt", "operationId"] }) }),
+      records: Object.freeze({
+        CronGroupDelivery: recordAuthority({ authority: ["ownerScope", "groupId", "memberId", "messageId", "watch"] }),
+        CronTombstone: recordAuthority({ authority: ["id", "profileId", "name", "deletedAt", "operationId"] }),
+      }),
       recovery: "Deleted job IDs remain reserved and historical WorkRuns remain attributable",
     }),
     cronAuthorization: Object.freeze({

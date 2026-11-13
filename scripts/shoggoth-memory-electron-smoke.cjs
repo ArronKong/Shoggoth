@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const option = name => process.argv[process.argv.indexOf(name) + 1];
 const note = "Memory core Electron fixture: violet telescope calibration.";
+const userNote = "User memory Electron fixture: prefers concise answers.";
 const prompt = "Memory core isolated chat roundtrip.";
 const memorySettings = process.argv.includes("--memory-settings");
 const memoryStatus = process.argv.includes("--memory-status");
@@ -44,6 +45,8 @@ async function parent() {
     }
     await f.service.memoryEngine.propose({ profileId: DEFAULT_AGENT_PROFILE_ID, scope: "agent", type: "semantic", classification: "explicit",
       content: note, sourceRefs: ["user-edit:electron-fixture"] });
+    await f.service.memoryEngine.propose({ profileId: DEFAULT_AGENT_PROFILE_ID, scope: "user", type: "semantic", classification: "explicit",
+      content: userNote, sourceRefs: ["user-edit:electron-user-fixture"] });
     const profile = f.service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
     const publicSessionKey = await f.backend.createSession(profile.agentId);
     const sessionKey = f.backend.getSessionRows().find(row => row.key === publicSessionKey).sessionId;
@@ -113,6 +116,7 @@ async function parent() {
     }
     const child = spawn(require("electron"), [__filename, "--renderer", "--url", f.url, "--session", publicSessionKey,
       "--profile", path.join(f.root, "electron"), "--output", output, "--service-node", process.versions.node,
+      "--memory-agent", profile.agentId,
       ...(legacyMemoryList ? ["--legacy-memory-list", "--legacy-agent", profile.agentId] : []),
       ...(memorySettings ? ["--memory-settings", "--memory-profile", DEFAULT_AGENT_PROFILE_ID] : []),
       ...(memoryStatus ? ["--memory-status"] : [])], { env, stdio: "inherit" });
@@ -314,12 +318,19 @@ async function renderer() {
     await window.loadURL(`${option("--url")}#/agents`);
     await until(() => evaluate("!!document.querySelector('button[data-agent-id]')"), "Agent card");
     await evaluate("document.querySelector('button[data-agent-id]').click()");
-    await until(() => evaluate("[...document.querySelectorAll('button')].find(button => /^(设定|Settings|Setup)$/.test(button.textContent.trim()))?.click() || !!document.querySelector('button[title=\"MEMORY.md\"]')"), "settings tab");
-    await until(() => evaluate("!!document.querySelector('button[title=\"MEMORY.md\"]')"), "memory file");
-    const files = await evaluate("[...document.querySelector('button[title=\"MEMORY.md\"]').parentElement.querySelectorAll('button')].map(button => button.title)");
-    assert.deepEqual(files, ["IDENTITY.md", "SOUL.md", "USER.md", "AGENTS.md", "HEARTBEAT.md", "MEMORY.md"]);
-    await evaluate("document.querySelector('button[title=\"MEMORY.md\"]').click()");
-    await until(() => evaluate(`document.querySelector('main')?.innerText.includes(${JSON.stringify(note)})`), "canonical memory contents");
+    await until(() => evaluate("[...document.querySelectorAll('[role=tab]')].find(button => /^(设定|Settings|Setup)$/.test(button.textContent.trim()))?.click() || !!document.querySelector('button[title=\"USER.md\"]')"), "settings tab");
+    await until(() => evaluate("!!document.querySelector('button[title=\"USER.md\"]')"), "user memory file");
+    const files = await evaluate("[...document.querySelector('button[title=\"USER.md\"]').parentElement.querySelectorAll('button')].map(button => button.title)");
+    // Current product policy shows these three setup files. MEMORY.md remains
+    // canonical and readable through the same API; its setup button is hidden.
+    assert.deepEqual(files, ["SOUL.md", "USER.md", "HEARTBEAT.md"]);
+    await evaluate("document.querySelector('button[title=\"USER.md\"]').click()");
+    await until(() => evaluate(`document.querySelector('main')?.innerText.includes(${JSON.stringify(userNote)})`), "user memory contents");
+    const memoryUrl = `/__api/agents/${encodeURIComponent(option("--memory-agent"))}/file?backend=shoggoth&file=MEMORY.md`;
+    const canonicalMemory = await evaluate(`(async () => { const response = await fetch(${JSON.stringify(memoryUrl)});
+      return { status: response.status, value: await response.json() }; })()`);
+    assert.equal(canonicalMemory.status, 200);
+    assert.ok(canonicalMemory.value.file.content.includes(note), "canonical MEMORY.md remains readable");
     await until(() => evaluate("!document.querySelector('[class*=panelMorphing]')"), "Agent panel animation");
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
     fs.writeFileSync(path.join(output, "memory-page.png"), (await window.webContents.capturePage()).toPNG());
@@ -361,7 +372,8 @@ async function renderer() {
     }
     assert.deepEqual(errors, []);
     fs.writeFileSync(path.join(output, "electron-evidence.json"), JSON.stringify({ verified: true, electron: process.versions.electron,
-      node: process.versions.node, routes: evidence, files, memoryRendered: true, chatHistoryRendered: true,
+      node: process.versions.node, routes: evidence, files, memoryRendered: true,
+      canonicalMemoryRead: true, chatHistoryRendered: true,
       legacyMemoryList: legacyMemoryList ? { verified: true, contentBytes: Buffer.byteLength(legacyExcerpt), truncated: false } : null,
       memorySettings: memorySettings ? { saved: true, conflictPreserved: true, profileOverride: true, narrowLayout: true,
         modelAliases: { global: true, agent: true, duplicateRejected: true, clearAndRemove: true },
@@ -370,7 +382,7 @@ async function renderer() {
         narrowUnmounted: true, statusRequests: memoryStatusRequests.length, retainedImmersiveView: true } : null,
       serviceNode: option("--service-node"),
       modelProcess: "isolated Codex fake", liveProvider: false, installedApp: false }, null, 2) + "\n");
-    console.log("PASS nine production pages, canonical MEMORY.md order/content, actual chat history in sandboxed Electron");
+    console.log("PASS nine production pages, visible USER.md and canonical MEMORY.md, actual chat history in sandboxed Electron");
   } catch (error) {
     fs.writeFileSync(path.join(output, "renderer-failure.png"), (await window.webContents.capturePage()).toPNG());
     console.error("Renderer controls", await evaluate("[...document.querySelectorAll('[aria-expanded=true],[role=option]')].map(element => ({ role: element.getAttribute('role'), title: element.title, text: element.textContent.slice(0, 80), visible: element.checkVisibility(), expanded: element.getAttribute('aria-expanded') }))"));

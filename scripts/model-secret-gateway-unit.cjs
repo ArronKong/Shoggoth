@@ -137,6 +137,56 @@ test("sessions have separate routes and known-value matching does not cross scop
   assert.equal(received[1].body.input, "123456"); assert.equal(received[0].path, "/backend-api/codex/responses");
   a.close(); assert.equal((await send(a, { input: "public" })).status, 400); assert.equal(received.length, 2);
 }));
+test("Codex standalone search protects commands and recent input and preserves the search response", async () => fixture(async ({ gateway, received, respond, secrets }) => {
+  await secrets.prepare({ scope: SCOPE, operationId: "search-secret", text: "password: 123456" });
+  const route = await gateway.bind({ scope: SCOPE, providerKind: "chatgpt" });
+  const response = JSON.stringify({ output: "Public result", results: [{ type: "text_result", url: "https://example.com/docs" }] });
+  respond((_req, res) => res.writeHead(200, { "Content-Type": "application/json" }).end(response));
+  const request = {
+    id: "fixture-session", model: "fixture",
+    commands: { search_query: [{ q: "documentation 123456", recency: 1 }], response_length: "short" },
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "123456" }] }],
+    settings: { external_web_access: true },
+  };
+  const result = await send(route, request, { cookie: "must-not-forward" }, "/alpha/search");
+  assert.equal(result.status, 200);
+  assert.equal(result.text, response);
+  assert.equal(received.length, 1);
+  const [upstream] = received;
+  assert.equal(upstream.path, "/backend-api/codex/alpha/search");
+  assert.equal(upstream.headers.authorization, SYNTHETIC_AUTH);
+  assert.equal(upstream.headers.cookie, undefined);
+  assert.match(upstream.body.commands.search_query[0].q, /^documentation \{\{SHOGGOTH_SECRET_/u);
+  assert.match(upstream.body.input[0].content[0].text, /^\{\{SHOGGOTH_SECRET_/u);
+  assert.equal(upstream.body.commands.search_query[0].recency, 1);
+  assert.equal(upstream.body.commands.response_length, "short");
+  assert.deepEqual(upstream.body.settings, request.settings);
+}));
+test("standalone search rejects other routes, failed projection, redirects and invalid responses", async () => fixture(async ({ gateway, received, projection, respond }) => {
+  const chatgpt = await gateway.bind({ scope: SCOPE, providerKind: "chatgpt" });
+  const apiKey = await gateway.bind({ scope: SCOPE, providerKind: "openai-api-key" });
+  const local = await gateway.bindLocal({ scope: SCOPE });
+  const input = { commands: { search_query: [{ q: "public documentation" }] } };
+  for (const route of [apiKey, local]) {
+    assert((await send(route, input, {}, "/alpha/search")).status >= 400);
+  }
+  const project = projection.project.bind(projection);
+  projection.project = async () => { throw Object.assign(Error("fixture"), { code: "SECRET_PROCESSING_UNAVAILABLE" }); };
+  assert.equal((await send(chatgpt, input, {}, "/alpha/search")).status, 400);
+  assert.equal(received.length, 0);
+  projection.project = project;
+  respond((_req, res) => res.writeHead(307, { location: "https://untrusted.invalid/", "set-cookie": "private" }).end(SYNTHETIC_AUTH));
+  const redirected = await send(chatgpt, input, {}, "/alpha/search");
+  assert.equal(redirected.status, 502);
+  assert.equal(redirected.headers.get("location"), null);
+  assert.equal(redirected.headers.get("set-cookie"), null);
+  assert(!redirected.text.includes(SYNTHETIC_AUTH));
+  respond((_req, res) => res.writeHead(200).end("{}"));
+  const invalid = await send(chatgpt, input, {}, "/alpha/search");
+  assert.equal(invalid.status, 502);
+  assert.equal(JSON.parse(invalid.text).error.code, "CODEX_WEB_SEARCH_UNAVAILABLE");
+  assert.equal(received.length, 2);
+}));
 test("browser requests, arbitrary destinations and unverified remote history never dispatch", async () => fixture(async ({ gateway, received }) => {
   const route = await gateway.bind({ scope: SCOPE, providerKind: "chatgpt" });
   for (const [body, headers, suffix] of [

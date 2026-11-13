@@ -25,6 +25,8 @@ function newFactWithoutRevision(name, args) {
   return name === "memory_save" && args.expectedRevision === undefined && args.supersedes == null;
 }
 
+function removalReason(args) { return args.mode === "memory_only" ? "memory_removed" : "forgotten"; }
+
 class ConversationMemoryService {
   constructor({ memoryEngine, memoryStore, transcriptStore, chatSessionStore, getRunSessionKey,
     getInspirationOrigin = null, memoryProvenanceService = null, semanticSearch = null }) {
@@ -156,7 +158,7 @@ class ConversationMemoryService {
       // A prior expiry and an explicit forget have different recall effects.
       // Record the user's request even when the primary item is already deleted.
       return this.result(profileId, this.engine.forgetEverywhere({ profileId, id: args.id,
-        reason: "forgotten", operationId: `forget-${id}`,
+        reason: removalReason(args), operationId: `forget-${id}`,
         revocationSourceRefs: binding.sourceRefs }));
     }
     if (name === "memory_save" && args.placement === "daily") throw serviceError("MEMORY_INVALID", "每日笔记需要 Shoggoth Memory");
@@ -167,7 +169,7 @@ class ConversationMemoryService {
     const shared = name === "memory_forget" && !item ? this.engine.findSharedItem?.(profileId, args.id) : null;
     if (shared) {
       return this.result(profileId, this.engine.forgetEverywhere({ profileId: shared.home, id: args.id,
-        reason: "forgotten", operationId: `forget-${id}` }));
+        reason: removalReason(args), operationId: `forget-${id}` }));
     }
     if (name === "memory_save") {
       const workspaceRefs = ["project", "workspace"].includes(args.scope)
@@ -188,7 +190,7 @@ class ConversationMemoryService {
       this._recordSource(profileId, id, item, binding);
     } else {
       item = this.engine.forgetEverywhere({ profileId, id: args.id,
-        reason: "forgotten", operationId: `forget-${id}`,
+        reason: removalReason(args), operationId: `forget-${id}`,
         revocationSourceRefs: binding.sourceRefs });
     }
     if (!item) throw serviceError("MEMORY_NOT_FOUND", "记忆不存在");
@@ -263,7 +265,7 @@ class ConversationMemoryService {
         sourceRefs: [...binding.sourceRefs, ...(["project", "workspace"].includes(scope) ? workspaceMemoryRefs(binding.workspace, scope) : []),
           ...(unsupported ? [`${UNTRUSTED_REF_PREFIX}quote-unsupported`] : [])] });
       this._recordSource(profileId, id, item, binding);
-    } else item = await this.engine.forgetEverywhere({ profileId, id: args.id, assertCurrent: call.assertCurrent, reason: "forgotten",
+    } else item = await this.engine.forgetEverywhere({ profileId, id: args.id, assertCurrent: call.assertCurrent, reason: removalReason(args),
       operationId: `forget-${id}`, revocationSourceRefs: binding.sourceRefs });
     if (!item) throw serviceError("MEMORY_NOT_FOUND", "记忆不存在");
     if (name === "memory_save") this.engine.ownMemory?.read({ profileId, run: { id: binding.runId } }, { items: [item] });

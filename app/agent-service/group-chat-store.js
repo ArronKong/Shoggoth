@@ -28,6 +28,7 @@ const { ROUND_LIMITS, currentOwner, defaultOwner, insertCalls, openingSpeakers }
 const MAIN_THREAD = "main";
 const DISCUSSION_PURPOSE = "group_discussion";
 const MAX_MEMBER_REPLY_BYTES = 64 * 1024;
+const CRON_REPORT_HISTORY_LIMIT = 12;
 const MAX_REPLY_EXCERPT_BYTES = 600;
 
 function replySnapshot(quoted) {
@@ -787,6 +788,57 @@ class GroupChatStore {
       AND json_extract(data,'$.author.kind')='user' ORDER BY seq DESC LIMIT 1`).get(groupId, throughSeq));
   }
 
+  cronDeliveryGroup(target, profileId) {
+    this.#ready();
+    if (target.ownerScope !== this.getOwnerScope()) return null;
+    const group = this.#group(target.groupId);
+    const member = this.#member(target.memberId);
+    return group?.status === "active" && member?.groupId === group.id && member.state === "active"
+      && member.backendId === "shoggoth" && member.profileId === profileId
+      ? { id: group.id, name: group.name } : null;
+  }
+
+  hasCronDelivery({ groupId, jobId, runId }) {
+    this.#ready();
+    return Boolean(this.db.prepare("SELECT 1 FROM meta WHERE key=?")
+      .get(`cron-delivery:${groupId}:${jobId}:${runId}`)
+      || this.db.prepare("SELECT 1 FROM messages WHERE group_id=? AND origin_key=?")
+        .get(groupId, `cron:${jobId}:${runId}`));
+  }
+
+  recentCronReports({ groupId, jobId }) {
+    this.#ready();
+    return this.db.prepare(`SELECT data FROM messages WHERE group_id=? AND origin_key BETWEEN ? AND ?
+      ORDER BY seq DESC LIMIT ?`)
+      .all(groupId, `cron:${jobId}:`, `cron:${jobId}:~`, CRON_REPORT_HISTORY_LIMIT).map(parse);
+  }
+
+  publishCronReply({ target, profileId, jobId, runId, text }) {
+    return this.#write(() => {
+      if (!this.cronDeliveryGroup(target, profileId)) return false;
+      const group = this.#requireGroup(target.groupId, { active: true });
+      const originKey = `cron:${jobId}:${runId}`;
+      if (this.hasCronDelivery({ groupId: group.id, jobId, runId })) return false;
+      if (text !== null && (!validText(text) || !text.trim())) fail("GROUP_RESULT_INVALID");
+      if (text === null || (target.watch && this.recentCronReports({ groupId: group.id, jobId }).some(report => report.body === text))) {
+        this.db.prepare("INSERT INTO meta(key,value) VALUES (?,?)")
+          .run(`cron-delivery:${group.id}:${jobId}:${runId}`, JSON.stringify("silent"));
+        return false;
+      }
+      const fullResult = { bytes: Buffer.byteLength(text, "utf8"), digest: sha256(text) };
+      const message = this.#insertMessage(group, {
+        originKey, author: { kind: "member", memberId: target.memberId },
+        body: utf8Prefix(text, MAX_MEMBER_REPLY_BYTES), fullResult,
+        mentions: { memberIds: [], broadcast: false, unresolved: [] },
+        origin: { cronJobId: jobId, runId },
+      });
+      this.db.prepare("INSERT INTO message_results VALUES(?,?,?,?)")
+        .run(message.id, text, fullResult.digest, fullResult.bytes);
+      this.#putGroup(group);
+      return true;
+    });
+  }
+
   getMessage(messageId) {
     this.#ready();
     return parse(this.db.prepare("SELECT data FROM messages WHERE id=?").get(messageId));
@@ -1222,6 +1274,8 @@ class GroupChatStore {
       // Keep the original execution and session bindings for reconciliation after force deletion.
       if (waiting) group.forceDeletePending = true;
       this.db.prepare("DELETE FROM message_results WHERE message_id IN (SELECT id FROM messages WHERE group_id=?)").run(groupId);
+      this.db.prepare("DELETE FROM meta WHERE key BETWEEN ? AND ?")
+        .run(`cron-delivery:${groupId}:`, `cron-delivery:${groupId}:~`);
       if (this.tables.has("invitations")) {
         this.db.prepare("DELETE FROM invitations WHERE cause_message_id IN (SELECT id FROM messages WHERE group_id=?)").run(groupId);
       }
@@ -1462,7 +1516,7 @@ class GroupChatStore {
     const rows = fresh
       ? this.db.prepare("SELECT data FROM messages WHERE group_id=? ORDER BY seq DESC LIMIT ?").all(group.id, FIRST_LOOK).map(parse).reverse()
       : this.db.prepare("SELECT data FROM messages WHERE group_id=? AND seq>? ORDER BY seq").all(group.id, binding.watermark).map(parse)
-        .filter(message => message.author.kind !== "member" || message.author.memberId !== member.id);
+        .filter(message => message.author.kind !== "member" || message.author.memberId !== member.id || message.origin?.cronJobId);
     const unseen = rows.slice(-DELTA_MAX);
     // 新会话只看最近几条：告诉它前面还有多少条没列出（原生成员可以用 group_messages_read 回查）。
     const olderThanFirstLook = fresh && rows.length

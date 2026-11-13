@@ -1690,7 +1690,7 @@ export default function TasksPage({ detailOnly }: { detailOnly?: TasksPageDetail
             )}
             {detail.summary && (
               <ModalSection title={t("tasks.summary")}>
-                <p className="muted">{detail.summary}</p>
+                <p className="muted" data-selectable-text>{detail.summary}</p>
               </ModalSection>
             )}
             <ModalSection title={t("tasks.bodyLabel")}>

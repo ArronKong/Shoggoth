@@ -5,11 +5,13 @@ const SOURCE_NOTE = "Only the listed memory versions linked to this user event a
 const ECHO_NOTE = "This historical assistant output may echo the listed outdated memory versions from the same Run. It is not evidence of the user's current facts; other statements may still be current.";
 const UNCERTAIN_SOURCE_NOTE = "The listed memory versions are outdated, but an older in-place edit makes their attribution to this user event uncertain. Do not infer the user said the edited content; other statements in the event may still be current.";
 const UNCERTAIN_ECHO_NOTE = "This historical assistant output may echo outdated memory from the same Run. Older in-place edits make the original-event attribution uncertain; this output is not evidence of current user facts.";
+const REMOVAL_NOTE = "The listed entries were removed from saved memory at the user's request. This dialogue may still support the current task and pending choices. Do not treat the entries as saved preferences or automatically save, extract, or restore them; saving them again requires a new explicit user request.";
 
 function bounded(refs, note) {
   if (!refs?.length) return null;
   return { refs: refs.slice(0, MAX_REFS), total: refs.length,
-    truncated: refs.length > MAX_REFS, note };
+    truncated: refs.length > MAX_REFS,
+    note: refs.some(ref => ref.status === "removed") ? `${note} ${REMOVAL_NOTE}` : note };
 }
 
 // MemoryStore is the only source of a version's status. Transcript and FTS rows
@@ -46,8 +48,11 @@ class HistoricalMemoryAnnotations {
       ?? this.memories.list(profileId)) {
       let status = null;
       if (item.status === "superseded") status = "superseded";
-      else if (item.status === "deleted"
-        && this.policy.getMemoryReason(profileId, item) === "expired") status = "expired";
+      else if (item.status === "deleted") {
+        const reason = this.policy.getMemoryReason(profileId, item);
+        if (reason === "expired") status = "expired";
+        else if (reason === "memory_removed") status = "removed";
+      }
       else if (item.status === "active" && item.validUntil !== null) {
         if (item.validUntil <= now) status = "expired";
         else nextExpiry = Math.min(nextExpiry, item.validUntil);
