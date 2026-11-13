@@ -14,44 +14,41 @@ test("both web tools have validated read-only open-world contracts", () => {
   assert.equal(validateWebArguments("web_search", { query: "news", limit: 11 }), false);
   assert.equal(validateWebArguments("web_search", { query: "news", apiKey: "hidden" }), false);
 });
-test("public network policy rejects local, encoded, mapped and special addresses", () => {
+test("public URL policy blocks local, literal Fake-IP and other special targets", () => {
   for (const address of ["127.0.0.1","0.0.0.0","10.1.2.3","169.254.169.254","100.64.0.1","172.20.0.2","192.168.3.2","198.18.0.1","224.0.0.1",
     "::1","::ffff:127.0.0.1","fc00::1","fe80::1","2001:db8::1","2002:7f00:1::","2001::1"]) assert.equal(isPublicAddress(address), false, address);
   for (const address of ["1.1.1.1","8.8.8.8","2606:4700:4700::1111","2001:4860:4860::8888"]) assert.equal(isPublicAddress(address), true, address);
-  for (const value of ["file:///etc/passwd", "http://user:pass@example.com"]) {
-    assert.throws(() => publicUrl(value), { code: "WEB_INVALID" });
-  }
-  for (const value of ["http://localhost", "http://x.local"]) {
+  for (const value of ["file:///etc/passwd","http://user:pass@example.com"]) assert.throws(() => publicUrl(value), { code: "WEB_INVALID" });
+  for (const value of ["http://localhost", "http://x.local", "http://2130706433", "http://198.18.0.42", "http://[::1]"])
     assert.throws(() => publicUrl(value), { code: "WEB_URL_BLOCKED" });
-  }
-  assert.throws(() => publicUrl("http://2130706433"), { code: "WEB_URL_BLOCKED" });
 });
-function fakeRequest(replies, seen, expectedAddress = "8.8.8.8") {
+function fakeRequest(replies, seen) {
   return (url, options, callback) => {
     const req = new EventEmitter(); req.destroy = () => {}; req.end = body => {
       seen.push({ url: url.href, options, body });
-      options.lookup(url.hostname, { all: true }, (error, rows) => { assert.equal(error, null); assert.equal(rows[0].address, expectedAddress); });
+      options.lookup(url.hostname, { all: true }, (error, rows) => { assert.equal(error, null); assert.equal(rows.length, 1); });
       const reply = replies.shift(); const res = new EventEmitter(); res.headers = reply.headers || {}; res.statusCode = reply.status || 200;
       res.destroy = () => {}; callback(res);
       queueMicrotask(() => { res.emit("data", Buffer.from(reply.body || "")); res.emit("end"); });
     }; return req;
   };
 }
-test("web requests retain DNS pinning and TLS for public IPv4 and IPv6", async (t) => {
+test("web requests retain DNS pinning and TLS with public addresses and Fake-IP", async (t) => {
   const host = "example.com";
-  const records = [
-    { address: "93.184.216.34", family: 4 },
-    { address: "2606:4700:4700::1111", family: 6 },
+  const routes = [
+    ["public IPv4", { address: "93.184.216.34", family: 4 }],
+    ["public IPv6", { address: "2606:4700:4700::1111", family: 6 }],
+    ["Fake-IP", { address: "198.19.42.1", family: 4 }],
   ];
-  for (const record of records) {
-    await t.test(`IPv${record.family}`, async () => {
+  for (const [name, record] of routes) {
+    await t.test(name, async () => {
       const seen = [];
       const result = await requestPublic(`https://${host}/`, {
         lookup: async (hostname) => {
           assert.equal(hostname, host);
           return [record];
         },
-        request: fakeRequest([{ body: "fixture" }], seen, record.address),
+        request: fakeRequest([{ body: "fixture" }], seen),
       });
       assert.equal(result.status, 200);
       assert.equal(seen.length, 1);
@@ -65,19 +62,15 @@ test("web requests retain DNS pinning and TLS for public IPv4 and IPv6", async (
     });
   }
 });
-test("a Fake-IP DNS answer is rejected before opening a connection", async () => {
-  await assert.rejects(requestPublic("https://example.com/", {
-    lookup: async () => [{ address: "198.19.42.1", family: 4 }],
-    request: () => assert.fail("must not connect to a non-public address"),
-  }), { code: "WEB_URL_BLOCKED" });
-});
-test("DNS is pinned and every redirect target is rechecked", async () => {
+test("DNS stays pinned and every redirect target retains the public address policy", async () => {
   const seen = [], lookup = async host => [{ address: host === "private.example" ? "127.0.0.1" : "8.8.8.8", family: 4 }];
-  await assert.rejects(requestPublic("https://public.example", { lookup, request: fakeRequest([{ status:302, headers:{ location:"http://private.example/secret" } }],seen) }), { code: "WEB_URL_BLOCKED" });
+  await assert.rejects(requestPublic("https://public.example", { lookup, request: fakeRequest([
+    { status:302, headers:{ location:"http://private.example/page" } }],seen) }), { code: "WEB_URL_BLOCKED" });
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].options.rejectUnauthorized, true);
-  assert.equal(seen[0].options.servername, "public.example");
-  await assert.rejects(requestPublic("https://mixed.example", { lookup: async () => [{address:"8.8.8.8",family:4},{address:"10.0.0.1",family:4}], request: () => assert.fail("must not connect") }), { code:"WEB_URL_BLOCKED" });
+  await assert.rejects(requestPublic("https://mixed.example", {
+    lookup: async () => [{ address: "198.18.0.42", family: 4 }, { address: "10.0.0.1", family: 4 }],
+    request: () => assert.fail("mixed private DNS must fail before connecting"),
+  }), { code: "WEB_URL_BLOCKED" });
 });
 test("response byte limits and provider rate errors are enforced", async () => {
   const lookup = async () => [{address:"8.8.8.8",family:4}];

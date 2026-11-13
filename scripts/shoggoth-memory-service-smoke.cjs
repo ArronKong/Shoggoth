@@ -30,6 +30,54 @@ async function serviceFixture(t) {
   return { root, paths, open, close, isStopped: () => !service, profileId: DEFAULT_AGENT_PROFILE_ID };
 }
 
+test("stored-memory removal keeps a pending choice but blocks paraphrased resaving in the production owner", async t => {
+  const f = await serviceFixture(t), profileId = f.profileId;
+  let clock = Date.now();
+  const now = () => ++clock;
+  const options = { now, memoryCoreConfig: { memory: { search: { provider: "none" } } } };
+  let service = await f.open(true, options), owner = service.memoryEngine;
+  const workspace = path.join(f.root, "continuity"); fs.mkdirSync(workspace, { mode: 0o700 });
+  const session = service.chatSessionStore.createSession({ profileId, workspace, operationId: "continuity", createdAt: now() });
+  const run = id => ({ id, profileId, source: "chat", sourceId: session.sessionKey, workspace });
+  const append = (id, runId, kind, content) => service.transcriptStore.appendEvent({ profileId,
+    sessionId: session.id, id, runId, kind, content, occurredAt: now() });
+  const first = append("observatory-user", "observatory-run", "user", { text: "跟进示例观测站的维护公告，发布后提醒我" });
+  const saved = await owner.propose({ profileId, scope: "user", classification: "explicit",
+    content: first.content.text, sourceRefs: [first.id, first.runId] });
+  const remove = append("remove-user", "remove-run", "user", { text: "请从 USER.md 移除该条目。\n我仍想设置定期检查。" });
+  const memory = new ConversationMemoryService({ memoryEngine: owner, memoryStore: service.memoryStore,
+    transcriptStore: service.transcriptStore, chatSessionStore: service.chatSessionStore,
+    getRunSessionKey: () => session.sessionKey });
+  const args = { source: "chat", sourceId: session.sessionKey, id: saved.id,
+    expectedRevision: service.memoryStore.getRevision(profileId), sourceQuote: "请从 USER.md 移除该条目。", mode: "memory_only" };
+  await memory.write("memory_forget", profileId, args, { binding: memory.bind("memory_forget", args, run(remove.runId)),
+    operationId: "remove-observatory-memory" });
+  const answer = append("pending-options", remove.runId, "assistant", { text: "检查示例观测站公告：A 每周，B 高频每 3 或 8 小时。",
+    ownMemoryProvenance: { version: 1, profileId, runId: remove.runId, complete: true,
+      refs: [{ id: saved.id, hash: require("../app/agent-service/recall-policy-store").hashContent(saved.content) }] } });
+  const next = append("choose-user", "choose-run", "user", { text: "B" });
+  owner.ownMemory.begin({ profileId, run: run(next.runId) }, [], [answer]);
+  assert.equal(owner.recallPolicy.isEventVisible(profileId, answer), true);
+  assert.equal(owner.recallPolicy.isMemorySourceEventVisible(profileId, answer), false);
+  assert.doesNotMatch(owner.readCanonical(profileId, "USER").content, /示例观测站/u);
+  const result = await owner.searchMemory({ profileId, workspace, query: "示例观测站", record: false });
+  assert.equal(result.items.length, 0);
+  const paraphrase = { profileId, scope: "agent", classification: "inferred", content: "持续查看示例观测设施公开的检修信息",
+    sourceRefs: [next.id, next.runId] };
+  await assert.rejects(() => owner.propose(paraphrase), { code: "MEMORY_SOURCE_REVOKED" });
+  await assert.rejects(() => owner.propose({ ...paraphrase, classification: "explicit" }), { code: "MEMORY_SOURCE_REVOKED" });
+  const independent = append("new-user", "new-run", "user", { text: "请记住：我的仓鼠叫松子" });
+  owner.ownMemory.begin({ profileId, run: run(independent.runId) }, [], [answer]);
+  const fresh = await owner.propose({ profileId, scope: "user", classification: "explicit", content: "我的仓鼠叫松子",
+    sourceRefs: [independent.id, independent.runId] });
+  assert.equal(fresh.status, "active", "new independent facts are still writable");
+  await f.close(); service = await f.open(true, options); owner = service.memoryEngine;
+  assert.equal(owner.store.get(profileId, saved.id).status, "deleted");
+  assert.equal(owner.recallPolicy.isEventVisible(profileId, answer), true);
+  assert.equal(owner.recallPolicy.isMemorySourceEventVisible(profileId, answer), false);
+  await assert.rejects(() => owner.propose({ ...paraphrase, sourceRefs: [answer.id, answer.runId] }), { code: "MEMORY_SOURCE_REVOKED" });
+});
+
 test("real E5 worker vectors satisfy native file-memory search without lexical fallback", { timeout: 60_000 }, async t => {
   const f = await serviceFixture(t), service = await f.open(true, {
     memoryCoreConfig: { memory: { search: { provider: "shoggoth-e5", rememberAcrossConversations: false } } },

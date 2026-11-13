@@ -758,7 +758,7 @@ function assertRestoredMemoryDoesNotReviveSource(stateRoot, stagingRoot, sourceP
       const matching = (policy?.byMemory.get(id) || []).filter((record) => (
         record.memoryId === id && record.contentHash === sourceHash
         || record.related?.some((related) => related.memoryId === id && related.contentHash === sourceHash)));
-      const suppressed = matching.some((record) => ["forgotten", "user_deleted", "legacy_unknown"].includes(record.reason));
+      const suppressed = matching.some((record) => ["forgotten", "memory_removed", "user_deleted", "legacy_unknown"].includes(record.reason));
       if (suppressed && originalSourceRefs(backupItem).some((ref) => !policy.suppressedRefs.has(ref))) {
         throw backupError("BACKUP_RECALL_POLICY_UNCOVERED_SOURCE",
           "备份含当前撤回账本未覆盖的原话来源，不能恢复旧快照");

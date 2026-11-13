@@ -59,7 +59,7 @@ export default function RunDetailModal({ item, agentName, open, onClose, onClose
       <span>{t(detail ? "dashboardRun.stale" : "dashboard.shoggothRunFailed")}</span>
       <button type="button" className="btn-subtle btn-sm" onClick={refresh}>{t("dashboardRun.retry")}</button>
     </div>}
-    {detail?.error && <p className={styles.failure} role="alert">{detail.error}</p>}
+    {detail?.error && <p className={styles.failure} role="alert" data-selectable-text>{detail.error}</p>}
     {!!detail?.artifacts.length && <section aria-label={t("agents.managedFiles.title")}>
       <h3>{t("agents.managedFiles.title")}</h3>
       <ul>{detail.artifacts.map(file => <li key={file.id}>

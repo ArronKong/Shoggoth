@@ -12,7 +12,7 @@ const FIXED_STRING = new Set(["role", "type", "id", "call_id", "tool_call_id", "
 const JSON_SCHEMA_DIALECT = /^https?:\/\/json-schema\.org\/(?:schema|draft-0[3467]\/schema|draft\/(?:2019-09|2020-12)\/schema)#?$/u;
 const OPAQUE = new Set(["signature", "encrypted_content", "thoughtSignature", "thought_signature"]);
 const CONTENT_FIELDS = new Set(["input", "messages", "contents", "system", "systemInstruction", "instructions",
-  "prompt", "text", "content", "output", "arguments", "args", "parts", "description", "summary", "thinking",
+  "prompt", "text", "content", "output", "arguments", "args", "parts", "description", "summary", "thinking", "commands",
   "function_call", "functionCall", "functionResponse", "tool_calls", "tools", "parameters", "input_schema", "response"]);
 const DATA_FIELDS = new Set(["arguments", "args", "output", "response", "metadata", "extra_body"]);
 for (const key of ["metadata", "extra_body", "response_format"]) CONTENT_FIELDS.add(key);

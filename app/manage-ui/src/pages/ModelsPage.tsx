@@ -1590,7 +1590,7 @@ export default function ModelsPage() {
             <ModalSection title={t("models.specs")}>
               <DetailRow label={t("models.providerField")}>{selected.provider || "—"}</DetailRow>
               <DetailRow label={t("models.modelId")}>
-                <span className="mono">{selected.id}</span>
+                <span className="mono" data-selectable-text>{selected.id}</span>
               </DetailRow>
               {typeof selected.contextWindow === "number" && selected.contextWindow > 0 && (
                 <DetailRow label={t("models.contextWindow")}>
@@ -1699,7 +1699,7 @@ export default function ModelsPage() {
             {(authProfiles || []).map((p) => (
               <div key={p.id} className={styles.authProfileRow}>
                 <div>
-                  <div className="mono">{p.id}</div>
+                  <div className="mono" data-selectable-text>{p.id}</div>
                   <div className="muted">
                     {p.type}
                     {p.keyTail ? ` · ${t("models.authKeyTail", { tail: p.keyTail })}` : ""}

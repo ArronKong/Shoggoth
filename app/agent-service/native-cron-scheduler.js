@@ -107,6 +107,7 @@ function executionFingerprint(execution) {
     execution.prompt,
     execution.threadPolicy,
     execution.threadId,
+    ...(execution.groupDelivery ? [execution.groupDelivery] : []),
   ]));
 }
 
@@ -1206,7 +1207,7 @@ class NativeCronScheduler {
         || (snapshot.threadPolicy === "new" && snapshot.threadId !== null)) {
         throw schedulerError("CRON_RUN_CORRUPT", "Cron Job execution material 损坏");
       }
-      const targetState = this.resolveTargetState(snapshot.profileId);
+      const targetState = this.resolveTargetState(snapshot.profileId, snapshot);
       if (targetState !== "enabled" && targetState !== "disabled") {
         throw schedulerError("CRON_RUN_CORRUPT", "Cron Job target state 解析结果无效");
       }
@@ -1222,6 +1223,7 @@ class NativeCronScheduler {
         prompt: snapshot.prompt,
         threadPolicy: snapshot.threadPolicy,
         threadId: snapshot.threadId,
+        ...(snapshot.groupDelivery ? { groupDelivery: snapshot.groupDelivery } : {}),
       });
       return Object.freeze({
         job: frozenJob,

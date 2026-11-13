@@ -14,8 +14,9 @@ const MAX_LOG_BYTES = 64 * 1024 * 1024;
 const MAX_SOURCE_LITERAL_BYTES = 256 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
-const REASONS = new Set(["forgotten", "user_deleted", "expired", "legacy_unknown"]);
-const SUPPRESSING_REASONS = new Set(["forgotten", "user_deleted", "legacy_unknown"]);
+const REASONS = new Set(["forgotten", "memory_removed", "user_deleted", "expired", "legacy_unknown"]);
+const SUPPRESSING_REASONS = new Set(["forgotten", "memory_removed", "user_deleted", "legacy_unknown"]);
+const COMMAND_REASONS = new Set(["forgotten", "memory_removed"]);
 
 function policyError(code, message) { return serviceError(code, message); }
 function stableJson(value) {
@@ -259,7 +260,7 @@ class RecallPolicyStore {
       // A memory may already have 64 source refs. A direct forget adds the
       // command's verified user event and Run to the same durable intent.
       || !Array.isArray(record.sourceRefs)
-      || record.sourceRefs.length > (record.reason === "forgotten" ? 66 : 64)
+      || record.sourceRefs.length > (COMMAND_REASONS.has(record.reason) ? 66 : 64)
       || record.sourceRefs.some((ref) => typeof ref !== "string" || !ID_PATTERN.test(ref))
       || !Array.isArray(record.related) || record.related.length > 1024
       || new Set(record.related.map((related) => related.memoryId)).size !== record.related.length
@@ -309,6 +310,15 @@ class RecallPolicyStore {
       || checksum(installation) !== installation.checksum) {
       throw policyError("RECALL_POLICY_CORRUPT", "撤回账本独立安装锚无效");
     }
+    const state = this._state(profileId, records);
+    state.identity = fileIdentity(validatePrivateStat(this.fs.lstatSync(targets.log), targets.log));
+    state.sealIdentity = fileIdentity(validatePrivateStat(this.fs.lstatSync(targets.seal), targets.seal));
+    state.markerIdentity = fileIdentity(validatePrivateStat(this.fs.lstatSync(targets.marker), targets.marker));
+    state.installationIdentity = fileIdentity(validatePrivateStat(
+      this.fs.lstatSync(targets.installation), targets.installation));
+    return state;
+  }
+  _state(profileId, records) {
     const state = { profileId, records, byOperation: new Map(), byMemory: new Map(), suppressedRefs: new Set(),
       expiryCommits: new Map(),
       suppressionSources: [], normalizedContents: new Map(), sourceTextCutoffs: new Map(),
@@ -318,17 +328,26 @@ class RecallPolicyStore {
       freshUserEvents: new Map(), freshUserSourceRevision: null,
       reauthorizedContents: new Map(), reauthorizedMemoryRevision: null,
       reauthorizedSourceRevision: null, reauthorizedBuiltAt: 0, reauthorizedNextChange: 0,
-      historicalVisibilityCache: null,
+      historicalVisibilityCache: null, conversationState: null, hasMemoryRemovals: false,
       hasSuppressions: false, revision: records.length };
     for (const record of records.slice(1)) this._addRecord(state, record);
-    state.identity = fileIdentity(validatePrivateStat(this.fs.lstatSync(targets.log), targets.log));
-    state.sealIdentity = fileIdentity(validatePrivateStat(this.fs.lstatSync(targets.seal), targets.seal));
-    state.markerIdentity = fileIdentity(validatePrivateStat(this.fs.lstatSync(targets.marker), targets.marker));
-    state.installationIdentity = fileIdentity(validatePrivateStat(
-      this.fs.lstatSync(targets.installation), targets.installation));
     return state;
   }
+  _conversationState(state) {
+    if (!state.hasMemoryRemovals) return state;
+    if (state.conversationState?.revision === state.revision) return state.conversationState;
+    // Stored-memory removal is still a withdrawal for every memory read/write
+    // and background extractor. Only the conversation projection may retain
+    // its dialogue. Full forgetting remains in this view and always wins.
+    const view = this._state(state.profileId,
+      state.records.filter(record => record.reason !== "memory_removed"));
+    view.revision = state.revision;
+    state.conversationState = view;
+    return view;
+  }
   _addRecord(state, record) {
+    state.conversationState = null;
+    state.hasMemoryRemovals ||= record.reason === "memory_removed";
     if (record.type === "recall.expiry_commit") {
       const reason = state.byOperation.get(record.expiredOperationId);
       if (!reason || reason.reason !== "expired" || reason.memoryId !== record.memoryId
@@ -800,7 +819,12 @@ class RecallPolicyStore {
     }
     return true;
   }
-  isEventVisible(profileId, event) { return this._isEventVisible(this.assertReady(profileId), event); }
+  isEventVisible(profileId, event) {
+    return this._isEventVisible(this._conversationState(this.assertReady(profileId)), event);
+  }
+  isMemorySourceEventVisible(profileId, event) {
+    return this._isEventVisible(this.assertReady(profileId), event);
+  }
   isSourceVisible(profileId, refs) {
     const state = this.assertReady(profileId);
     if (!Array.isArray(refs)) return false;
@@ -827,7 +851,8 @@ class RecallPolicyStore {
       hasRevocations: state.hasSuppressions,
       isMemoryVisible: (item) => this._isMemoryVisible(state, profileId, item),
       isForeignMemoryVisible: (item) => this._isForeignMemoryVisible(state, profileId, item),
-      isEventVisible: (event) => this._isEventVisible(state, event) });
+      isEventVisible: (event) => this._isEventVisible(this._conversationState(state), event),
+      isMemorySourceEventVisible: (event) => this._isEventVisible(state, event) });
   }
   recordReason({ profileId, item, relatedItems = [], reason, operationId = this.randomUUID(),
     revocationSourceRefs = [] }) {
@@ -841,7 +866,7 @@ class RecallPolicyStore {
     }
     if (!Array.isArray(revocationSourceRefs) || revocationSourceRefs.length > 2
       || revocationSourceRefs.some((ref) => typeof ref !== "string" || !ID_PATTERN.test(ref))
-      || (revocationSourceRefs.length > 0 && reason !== "forgotten")) {
+      || (revocationSourceRefs.length > 0 && !COMMAND_REASONS.has(reason))) {
       throw policyError("RECALL_POLICY_INVALID", "撤回请求来源无效");
     }
     assertId(operationId, "operationId");

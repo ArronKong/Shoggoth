@@ -154,6 +154,23 @@ class GroupChatService {
     this.driver.wake(groupId);
   }
 
+  bindCronDelivery(run, profileId, sourceQuote) {
+    const { view, self, opportunity } = this.#toolCaller(run, profileId);
+    const messageId = opportunity.causeMessageIds.at(-1);
+    const message = messageId && this.store.getMessage(messageId);
+    if (view.group.status !== "active" || opportunity.calledBy || !message?.body.includes(sourceQuote.trim())
+      || message.groupId !== view.group.id || message.author.kind !== "user" || message.seq > opportunity.inputThroughSeq
+      || message.originKey.startsWith("user:agent-request:")
+      || this.store.getDiscussionBinding(view.group.id, self.id)?.sessionKey !== run.sourceId) {
+      throw serviceError("MCP_TOOL_FORBIDDEN", "群定时任务需要当前群回合中用户直接授权");
+    }
+    return { ownerScope: view.ownerScope, groupId: view.group.id, memberId: self.id, messageId: message.id };
+  }
+
+  publishCronReply(input) {
+    if (this.store.publishCronReply(input)) this.#changed(input.target.groupId);
+  }
+
   async handle(method, params) {
     if (method === "group.execution.receipt") return this.store.executionTerminalReceipt(params);
     if (method === "group.delete") {
@@ -360,7 +377,7 @@ class GroupChatService {
     fail();
   }
 
-  // ---- 群工具（模型可见，只读）：群与调用成员由宿主按当前运行确定，模型只选择目标 ----
+  // ---- 群工具：群与调用成员由宿主按当前运行确定 ----
 
   #toolCaller(run, profileId) {
     const forbidden = () => serviceError("MCP_TOOL_FORBIDDEN", "该工具只能在群聊回合中使用");

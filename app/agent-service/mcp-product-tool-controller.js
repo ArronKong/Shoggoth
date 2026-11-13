@@ -978,6 +978,10 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
           description: "Defaults to continue: reuse this job's conversation across runs." },
         threadId: { ...nullableString(256), default: null,
           description: "Omit or use JSON null to let the job create and reuse its own conversation. Must be null when threadPolicy is new." },
+        sourceQuote: { type: "string", maxLength: 2048,
+          description: "In a native group turn, quote the current user's exact request to schedule this job. Shoggoth binds the results to the current group automatically. Omit in private chat." },
+        watch: { type: "boolean",
+          description: "Set true for a group watch that should report only new developments. Requires sourceQuote. Omit for regular scheduled work." },
       },
       required: ["name", "prompt", "workspace", "schedule", "enabled", "misfirePolicy", "maxCatchUp", "overlapPolicy"],
       additionalProperties: false,
@@ -1748,6 +1752,8 @@ function validateProductOperationArguments(name, args) {
     return exactObject(args, [
       "name", "prompt", "workspace", "schedule", "enabled", "misfirePolicy",
       "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId",
+      ...(Object.hasOwn(args, "sourceQuote") ? ["sourceQuote"] : []),
+      ...(Object.hasOwn(args, "watch") ? ["watch"] : []),
     ]) && validText(args.name, 512) && validText(args.prompt, MAX_TEXT_BYTES)
       && (args.workspace === null || (validText(args.workspace, 4096) && path.isAbsolute(args.workspace)))
       && validSchedule(args.schedule) && typeof args.enabled === "boolean"
@@ -1755,6 +1761,9 @@ function validateProductOperationArguments(name, args) {
       && Number.isSafeInteger(args.maxCatchUp) && args.maxCatchUp >= 1 && args.maxCatchUp <= 100
       && OVERLAP_POLICIES.has(args.overlapPolicy) && THREAD_POLICIES.has(args.threadPolicy)
       && (args.threadId === null || validOpaqueId(args.threadId))
+      && (!Object.hasOwn(args, "sourceQuote") || (args.threadId === null
+        && validText(args.sourceQuote, 2048) && args.sourceQuote.trim().length > 0))
+      && (!Object.hasOwn(args, "watch") || (typeof args.watch === "boolean" && Object.hasOwn(args, "sourceQuote")))
       && (args.threadPolicy !== "new" || args.threadId === null);
   }
   if (name === "cron_update") {
@@ -2857,6 +2866,10 @@ class McpProductToolController {
     if (call && memoryBinding && canonicalJson(call.binding) !== canonicalJson(memoryBinding)) {
       throw toolError("MCP_TOOL_FORBIDDEN");
     }
+    if (name === "cron_create" && call
+      && canonicalJson(call.binding) !== canonicalJson(this.#cronGroupDelivery(args, authority))) {
+      throw toolError("MCP_TOOL_FORBIDDEN");
+    }
     if (call?.status === "completed") return this.#replayOutcome(call.result);
     if (call === null) {
       this.#requireProfile(authority.profileId);
@@ -3067,6 +3080,18 @@ class McpProductToolController {
     return run;
   }
 
+  #cronGroupDelivery(args, authority) {
+    if (args.sourceQuote === undefined) return null;
+    const scope = this.executionContext.getStore();
+    const run = scope?.runId ? this.workDispatcher.getRun(scope.runId) : null;
+    if (!isGroupChatRun(run) || authority.federationClient || typeof scope?.assertCurrent !== "function"
+      || !ACTIVE_RUN_STATUSES.has(run?.status)) throw toolError("MCP_TOOL_FORBIDDEN");
+    scope.assertCurrent();
+    const group = this.getGroupChatService?.();
+    if (!group) throw toolError("MCP_TOOL_UNAVAILABLE");
+    return { ...group.bindCronDelivery(run, authority.profileId, args.sourceQuote), watch: args.watch === true };
+  }
+
   #requireCronJob(jobId, profileId) {
     const value = this.cronStore.getJob(jobId);
     if (!ownDataObject(value) || value.id !== jobId || value.profileId !== profileId) {
@@ -3250,7 +3275,8 @@ class McpProductToolController {
       if (name === "federation_agent_message") this.#assertSecretSafe(args.message);
       return null;
     }
-    if (name === "kanban_board_create" || name === "cron_create"
+    if (name === "cron_create") return this.#cronGroupDelivery(args, authority);
+    if (name === "kanban_board_create"
       || ["system_application_launch", "system_open_url", "finder_open_folder"].includes(name)) {
       return null;
     }
@@ -4216,7 +4242,9 @@ class McpProductToolController {
       return { job: safeJsonClone(jobResult.job), prompt: safeJsonClone(prompt) };
     }
     if (name === "cron_create") {
-      return safeJsonClone(await this.domainController.handle("cron.job.create", {
+      const groupDelivery = this.#cronGroupDelivery(args, authority);
+      if (canonicalJson(call.binding) !== canonicalJson(groupDelivery)) throw toolError("MCP_TOOL_FORBIDDEN");
+      const result = safeJsonClone(await this.domainController.handle("cron.job.create", {
         operationId: call.operationId,
         name: args.name,
         enabled: args.enabled,
@@ -4230,7 +4258,11 @@ class McpProductToolController {
         threadPolicy: args.threadPolicy ?? "continue",
         threadId: args.threadId ?? null,
         createdAt: call.createdAt,
-      }));
+      }, groupDelivery ? { groupDelivery } : undefined));
+      if (!groupDelivery) return result;
+      const group = this.getGroupChatService().store.cronDeliveryGroup(groupDelivery, authority.profileId);
+      return { ...result, delivery: { kind: "group", groupId: groupDelivery.groupId, groupName: group?.name ?? null,
+        ...(group ? {} : { unavailable: true }) } };
     }
     if (name === "cron_update") {
       return safeJsonClone(await this.domainController.handle("cron.job.update", {

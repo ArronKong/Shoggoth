@@ -131,7 +131,7 @@ export default function CronRunReportModal({
 
 // 正文卡里的提示行：默认灰色说明；error 为红色错误原因。
 export function ReportNote({ children, error }: { children: ReactNode; error?: boolean }) {
-  return <p className={error ? styles.error : styles.note}>{children}</p>;
+  return <p className={error ? styles.error : styles.note} data-selectable-text={error || undefined}>{children}</p>;
 }
 
 // 红色背景只看这次执行本身是否失败。OpenClaw 在「必需投递」失败时也会把

@@ -49,6 +49,49 @@ function embeddingProcessRecords(binary) {
   });
 }
 function mainProcesses(binary) { return mainProcessRecords(binary).map(item => item.pid); }
+
+const WINDOW_PROBE_SOURCE = String.raw`
+#import <CoreGraphics/CoreGraphics.h>
+#import <Foundation/Foundation.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, const char *argv[]) {
+  if (argc != 2) return EXIT_FAILURE;
+  char *end;
+  long pid = strtol(argv[1], &end, 10);
+  if (end == argv[1] || *end || pid <= 0 || pid > INT_MAX) return EXIT_FAILURE;
+
+  @autoreleasepool {
+    NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+    if (!windows) return EXIT_FAILURE;
+
+    NSMutableArray *bounds = [NSMutableArray array];
+    for (NSDictionary *window in windows) {
+      NSNumber *owner = window[(__bridge NSString *)kCGWindowOwnerPID];
+      NSNumber *layer = window[(__bridge NSString *)kCGWindowLayer];
+      if (owner.longValue != pid || !layer || layer.intValue != 0) continue;
+      NSDictionary *rect = window[(__bridge NSString *)kCGWindowBounds];
+      if (rect) [bounds addObject:rect];
+    }
+    NSData *json = [NSJSONSerialization dataWithJSONObject:bounds options:0 error:NULL];
+    if (!json || fwrite(json.bytes, 1, json.length, stdout) != json.length) return EXIT_FAILURE;
+    return EXIT_SUCCESS;
+  }
+}
+`;
+
+function compileWindowProbe(directory) {
+  const source = path.join(directory, "windows.m");
+  const probe = path.join(directory, "window-probe");
+  fs.writeFileSync(source, WINDOW_PROBE_SOURCE, { flag: "wx", mode: 0o600 });
+  command("/usr/bin/xcrun", ["clang", "-fobjc-arc", source,
+    "-framework", "CoreGraphics", "-framework", "Foundation", "-o", probe], 120000);
+  return probe;
+}
+
 const ORDINARY_OPEN_SCRIPT = `tell application "System Events"
   if exists process "CoreServicesUIAgent" then
     tell process "CoreServicesUIAgent"
@@ -177,11 +220,15 @@ async function main() {
     account: "empty disposable GitHub-hosted runner", gatekeeper, installedApp: app,
     downloadProvenance: "exact draft download copied to the disposable runner Applications directory with controlled quarantine",
     browserDownloadVerified: false, quarantineRemoved: false, normalOpenConfirmation: false, verified: false };
-  let launched = false, guiPid;
+  let launched = false, guiPid, probeDirectory;
   const screenshot = () => {
     try { command("/usr/sbin/screencapture", ["-x", path.join(output, "first-launch.png")]); } catch { /* keep the original failure */ }
   };
   try {
+    // Build outside the evidence directory before starting the GUI so the
+    // window check never pays Swift interpreter startup on the hosted Mac.
+    probeDirectory = fs.mkdtempSync(path.join(path.dirname(output), "shoggoth-window-probe-"));
+    const windowProbe = compileWindowProbe(probeDirectory);
     // The product deliberately refuses background-service installation from
     // an unstable folder. Exercise the same /Applications path as a user install.
     command("/usr/bin/sudo", ["/bin/cp", "-cRp", sourceApp, app], 180000);
@@ -208,9 +255,7 @@ async function main() {
     const response = await fetch("http://127.0.0.1:18799/", { signal: AbortSignal.timeout(10000), redirect: "error" });
     assert.equal(response.status, 200);
     assert.match(await response.text(), /<div id="root"><\/div>/u);
-    const swift = path.join(output, "windows.swift");
-    fs.writeFileSync(swift, 'import Foundation\nimport CoreGraphics\nlet pid = Int(CommandLine.arguments[1])!\nlet all = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []\nlet windows = all.filter { ($0[kCGWindowOwnerPID as String] as? Int) == pid && ($0[kCGWindowLayer as String] as? Int) == 0 }.compactMap { $0[kCGWindowBounds as String] as? [String: Any] }\nlet data = try JSONSerialization.data(withJSONObject: windows)\nprint(String(data: data, encoding: .utf8)!)\n');
-    const windows = JSON.parse(command("/usr/bin/swift", [swift, String(pid)], 60000));
+    const windows = JSON.parse(command(windowProbe, [String(pid)], 60000));
     assert.ok(windows.some(window => window.Width >= 600 && window.Height >= 400), "No visible normal App window");
     const { resolveCanonicalServicePaths } = require("../app/agent-service/paths");
     const { readClientToken, requestService } = require("../app/agent-service/client");
@@ -244,9 +289,10 @@ async function main() {
         if (mainProcesses(binary).includes(guiPid)) command("/usr/bin/osascript", ["-e", quitScript(guiPid)]);
       } catch { /* failure remains visible */ }
     }
+    if (probeDirectory) fs.rmSync(probeDirectory, { recursive: true, force: true });
   }
   console.log(JSON.stringify(evidence));
 }
 
-module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords };
+module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords, compileWindowProbe };
 if (require.main === module) main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });

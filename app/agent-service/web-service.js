@@ -4,6 +4,8 @@ const { BlockList, isIP } = require("node:net");
 const { serviceError } = require("./security");
 const { WEB_PUBLIC_MESSAGES, validateWebArguments } = require("./web-tools");
 const EXA_URL = "https://mcp.exa.ai/mcp";
+const proxyFakeIp = new BlockList();
+proxyFakeIp.addSubnet("198.18.0.0", 15, "ipv4");
 const blocked = new BlockList();
 for (const [address, prefix] of [["0.0.0.0",8],["10.0.0.0",8],["100.64.0.0",10],["127.0.0.0",8],["169.254.0.0",16],
   ["172.16.0.0",12],["192.0.0.0",24],["192.0.2.0",24],["192.88.99.0",24],["192.168.0.0",16],["198.18.0.0",15],["198.51.100.0",24],
@@ -23,6 +25,13 @@ function publicUrl(value) {
   if (/(?:^|\.)(?:localhost|local|internal|home|lan|onion)\.*$/iu.test(host)
     || isIP(host) && !isPublicAddress(host)) fail("WEB_URL_BLOCKED");
   url.hash = ""; return url;
+}
+function assertPublicDns(url, host, addresses) {
+  // Fake-IP DNS is usable for HTTPS domain names because the connection still
+  // has to prove the original hostname before receiving an HTTP request.
+  const canUseFakeIp = url.protocol === "https:" && !isIP(host) && host.replace(/\.$/u, "").includes(".");
+  if (addresses.some(({ address }) => !isPublicAddress(address)
+    && !(canUseFakeIp && isIP(address) === 4 && proxyFakeIp.check(address, "ipv4")))) fail("WEB_URL_BLOCKED");
 }
 function abortError(signal) { fail(signal?.reason?.name === "TimeoutError" ? "WEB_TIMEOUT" : "WEB_CANCELED"); }
 function raceAbort(promise, signal) {
@@ -44,7 +53,7 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
     try { addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await raceAbort(lookup(host, { all: true, verbatim: true }), signal); }
     catch (e) { if (signal.aborted) abortError(signal); fail(e.code?.startsWith("WEB_") ? e.code : "WEB_UNAVAILABLE"); }
     if (!addresses.length) fail("WEB_UNAVAILABLE");
-    if (addresses.some(row => !isPublicAddress(row.address))) fail("WEB_URL_BLOCKED");
+    assertPublicDns(url, host, addresses);
     const pinned = addresses[0];
     const response = await new Promise((resolve, reject) => {
       const req = request(url, { method, agent: false, signal,
@@ -224,12 +233,12 @@ class WebService {
     let rows;
     try { rows = isIP(host) ? [{ address: host }] : await raceAbort(this.lookup(host, { all: true, verbatim: true }), signal); }
     catch { if (signal.aborted) abortError(signal); fail("WEB_UNAVAILABLE"); }
-    if (!rows.length || rows.some(row => !isPublicAddress(row.address))) fail("WEB_URL_BLOCKED");
+    if (!rows.length) fail("WEB_UNAVAILABLE");
+    assertPublicDns(url, host, rows);
     return url.href;
   }
   async providerFetch({ provider, apiKey }, { url, maxChars = 12000 }, signal) {
-    // Apply the public target policy before handing off to the extractor.
-    // The provider owns execution, so validate its reported final URL too.
+    // Validate both the requested and the extractor-reported destination.
     if (!apiKey) fail("WEB_API_KEY_REQUIRED");
     const target = await this.publicTarget(url, signal);
     let value;

@@ -2372,6 +2372,12 @@ function createAgentService(options) {
       });
     }
     publishFederationTerminal(run, payload);
+    if (run?.source === "cron" && run.status === "completed") {
+      const generation = lifecycleGeneration;
+      setImmediate(() => {
+        if (isGroupCronDeliveryCurrent(generation)) groupCronDelivery.deliver(run);
+      });
+    }
     if (run?.source === "cron" && codexMemoryImportService?.isSystemJob(run.sourceId)) {
       if (codexMemoryImportTimer) clearTimeout(codexMemoryImportTimer);
       codexMemoryImportTimer = null;
@@ -2757,6 +2763,7 @@ function createAgentService(options) {
   });
   const domainWorkRunExecutor = options.domainWorkRunExecutor || new DomainWorkRunExecutor({
     getCoordinator: () => workRunCoordinator,
+    prepareGroupCronPrompt: payload => groupCronDelivery.promptForRun(payload),
   });
   const inspirationService = new InspirationService({
     localAttachmentProjection: true,
@@ -2922,6 +2929,13 @@ function createAgentService(options) {
     nativeExecutor: groupNativeExecutor, directory: groupMemberDirectory, productStore,
     getFederationClient: () => federationHostClient, getMediaStore: () => inspirationStore.media,
     onChanged: (groupId) => eventBuffer.append("group.changed", { groupId }) });
+  const groupCronDelivery = new (require("./group-cron-delivery").GroupCronDelivery)({
+    cronStore: nativeCronStore, groupChat: groupChatService, dispatcher: workDispatcher,
+    sessions: chatSessionStore, transcripts: transcriptStore, sanitizeSummary,
+    onError: () => console.error("[agent-service] group Cron delivery deferred"),
+  });
+  const isGroupCronDeliveryCurrent = generation => lifecycleGeneration === generation && lifecycleState === "started"
+    && !maintenanceQuiesced && domainAvailability.cron.available && groupChatStoreOpened;
   groupAdapterChannel = new GroupAdapterChannel({ paths, service: groupChatService, now: options.now });
   const kanbanRunService = options.kanbanRunService || new KanbanRunService({
     dispatcher: workDispatcher,
@@ -2978,13 +2992,17 @@ function createAgentService(options) {
     setTimer: options.setCronTimer,
     clearTimer: options.clearCronTimer,
     randomUUID: options.randomUUID,
-    resolveTargetState(profileId) {
+    resolveTargetState(profileId, job) {
       const profile = productStore.getAgentProfile(profileId);
       if (!profile) {
         throw serviceError("CRON_RUN_CORRUPT", "Cron Job 绑定的 AgentProfile 不存在");
       }
-      return profile.enabled && require("../runtime-availability").isRuntimeAvailable(profile.runtime)
-        ? "enabled" : "disabled";
+      if (!profile.enabled || !require("../runtime-availability").isRuntimeAvailable(profile.runtime)) return "disabled";
+      if (job?.groupDelivery) {
+        try { if (!groupChatStore.cronDeliveryGroup(job.groupDelivery, profileId)) return "disabled"; }
+        catch { return "disabled"; }
+      }
+      return "enabled";
     },
     resolveWorkspace(profileId, requested) {
       const profile = productStore.getAgentProfile(profileId);
@@ -5635,6 +5653,13 @@ function createAgentService(options) {
           if (typeof options.onServerReady === "function") options.onServerReady(server);
           assertStartGeneration(generation);
           lifecycleState = "started";
+          if (isGroupCronDeliveryCurrent(generation)) {
+            setImmediate(() => {
+              const current = () => isGroupCronDeliveryCurrent(generation);
+              if (current()) void groupCronDelivery.recover(current)
+                .catch(() => console.error("[agent-service] group Cron delivery recovery deferred"));
+            });
+          }
           stallMonitor.start();
           // Model validation and indexing run off the launch/admission path.
           void nativeMemorySemanticService.start().catch(() => {});

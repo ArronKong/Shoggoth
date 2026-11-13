@@ -666,16 +666,38 @@ class ShoggothMemoryService {
     assertNoBorrowedMemoryWrite(input);
     const refs = new Set(input.sourceRefs || []);
     if ([...refs].some(ref => this.sharing.recognizes(ref)) || this.sharing.recognizes(input.supersedes)) fail("MEMORY_BORROWED_READ_ONLY", "借阅引用不能写入当前助理记忆");
-    const referenced = [], runDerived = [], uiRuns = [];
+    const referenced = [], runDerived = [], uiRuns = [], ownDerived = [];
+    const hasRevocations = this.recallPolicy.hasRevocations(input.profileId);
     for (const session of this.chatSessionStore.listSessions().filter(session => session.profileId === input.profileId)) {
       for (const event of this.transcriptStore.listEvents(input.profileId, session.id)) {
         if (refs.has(event.id)) referenced.push(event);
         if (refs.has(event.runId) && isUiActionSubmission(event)) uiRuns.push(event);
         if (refs.has(event.runId) && isBorrowedMemoryDerived(event)) runDerived.push(event);
+        if (hasRevocations && (refs.has(event.id) || refs.has(event.runId)) && event.kind === "assistant"
+          && !this.recallPolicy.isMemorySourceEventVisible(input.profileId,
+            this.transcriptStore.contextEvent?.(input.profileId, session.id, event) || event)) ownDerived.push(event);
       }
     }
     if (referenced.some(isBorrowedMemoryDerived) || (!referenced.length && runDerived.length)) fail("MEMORY_BORROWED_READ_ONLY", "借阅派生内容不能保存为当前助理记忆");
     if (referenced.some(isUiActionSubmission) || (!referenced.length && uiRuns.length)) fail("MEMORY_SOURCE_REVOKED", "交互界面的自动提交不能作为用户独立事实保存");
+    // A continuing task can still discuss a removed entry. Its next short
+    // answer (e.g. "B") is not independent evidence to save that topic again.
+    // Check the live compiler proof too: memory_save can precede the first
+    // assistant transcript event of this Run.
+    const revokedContext = hasRevocations && (ownDerived.length > 0 || [...refs].some(id => {
+      const proof = this.ownMemory.projection({ id, profileId: input.profileId });
+      return proof && !this.recallPolicy.isMemorySourceEventVisible(input.profileId,
+        { id: `memory-source-${id}`, runId: id, kind: "assistant", content: { ownMemoryProvenance: proof } });
+    }));
+    if (revokedContext) {
+      const normalize = text => typeof text === "string" ? text.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase() : "";
+      const content = normalize(input.content);
+      if (input.classification !== "explicit" || !content || !referenced.some(event => event.kind === "user"
+        && this.recallPolicy.isMemorySourceEventVisible(input.profileId, event)
+        && normalize(event.content?.text).includes(content))) {
+        fail("MEMORY_SOURCE_REVOKED", "本轮上下文包含已移除的记忆；只有用户新消息中明确要求记住的原文事实可以重新保存");
+      }
+    }
     const borrowedRun = runDerived.length > 0 || [...refs].some(ref => this.sharing.borrowedRefsForRun(ref).length > 0);
     if (borrowedRun) {
       // A query mentioning the same topic is not evidence for a borrowed fact.

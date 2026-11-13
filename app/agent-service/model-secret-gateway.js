@@ -28,6 +28,7 @@ const GROK_HEADERS = new Set(["authorization", "accept", "user-agent", "x-grok-c
   "x-grok-req-id", "x-grok-model-override", "x-grok-session-id", "x-grok-agent-id", "x-grok-turn-idx", "traceparent",
   "x-compactions-remaining", "x-compaction-at", "x-grok-doom-loop-check", "x-grok-exact-repetition-check"]);
 const MAX_BODY = 64 * 1024 * 1024;
+const MAX_SEARCH_RESPONSE = 4 * 1024 * 1024;
 const RESPONSE_PRELUDE = new Set(["response.created", "response.in_progress", "response.queued"]);
 const RESPONSE_TERMINAL = new Set(["response.completed", "response.failed", "response.incomplete", "error"]);
 const PROJECTION_UNAVAILABLE = "SECRET_MODEL_PROJECTION_UNAVAILABLE";
@@ -110,11 +111,13 @@ class ModelSecretGateway {
       || req.headers.host !== `127.0.0.1:${this.server.address().port}`
       || req.headers["content-encoding"] && req.headers["content-encoding"] !== "identity"
       || req.method === "POST" && !/^application\/json(?:\s*;|$)/iu.test(req.headers["content-type"] || "")) fail("SECRET_MODEL_REQUEST_INVALID");
-    const match = /^\/([a-f0-9]{64})\/(responses(?:\/(?:compact|input_tokens))?|project|ready|models|api-key)$/u.exec(req.url || "");
+    const match = /^\/([a-f0-9]{64})\/(responses(?:\/(?:compact|input_tokens))?|alpha\/search|project|ready|models|api-key)$/u.exec(req.url || "");
     const route = match && this.routes.get(match[1]);
     const discovery = match && ["models", "api-key"].includes(match[2]);
+    const search = match?.[2] === "alpha/search";
     if (!route || (["project", "ready"].includes(match[2])) !== (route.target === null)
       || match[2] === "ready" && !route.resolveScope
+      || search && route.target !== TARGETS.chatgpt
       || discovery && (!route.grok || req.method !== "GET") || !discovery && req.method !== "POST") fail("SECRET_MODEL_ROUTE_INVALID");
     const controller = new AbortController(); route.requests.add(controller); this.inflight.add(controller);
     const assertCurrent = () => {
@@ -171,10 +174,13 @@ class ModelSecretGateway {
           if (current?.profileId !== requestScope.profileId || current?.sessionId !== requestScope.sessionId) fail("SECRET_MODEL_IDENTITY_UNAVAILABLE");
         }
       };
-      const projected = await processOrOriginal(async () => this.projection.project(requestScope, input,
+      const project = async () => this.projection.project(requestScope, input,
         { signal: controller.signal, assertCurrent: assertScopeCurrent,
-          ...(this.provenance ? { isTrustedOpaque: await this.provenance.verifier(requestScope) } : {}) }), input,
-      { signal: controller.signal, assertCurrent: assertScopeCurrent, onFallback: () => { disclosed = true; } });
+          ...(this.provenance ? { isTrustedOpaque: await this.provenance.verifier(requestScope) } : {}) });
+      // Codex includes recent conversation items in its search request. An
+      // auxiliary endpoint only receives them if local protection succeeds.
+      const projected = search ? await project() : await processOrOriginal(project, input,
+        { signal: controller.signal, assertCurrent: assertScopeCurrent, onFallback: () => { disclosed = true; } });
       assertScopeCurrent();
       assertCurrent();
       await route.validateRequest(); assertScopeCurrent();
@@ -189,7 +195,7 @@ class ModelSecretGateway {
       for (const [name, value] of Object.entries(req.headers)) if ((route.grok ? GROK_HEADERS : HEADERS).has(name) && typeof value === "string") headers[name] = value;
       started = performance.now(); reason = "upstream_unavailable";
       const { statusCode, headers: responseHeaders, body: upstream } = await this.dispatch(new URL(match[2], route.target),
-        { method: "POST", headers, signal: controller.signal }, data, 300_000);
+        { method: "POST", headers, signal: controller.signal }, data, search ? 60_000 : 300_000);
       reason = "local_rejection";
       assertCurrent();
       if (statusCode < 200 || statusCode >= 300) {
@@ -201,6 +207,22 @@ class ModelSecretGateway {
         }
         if (statusCode >= 500) reason = "upstream_unavailable";
         fail("SECRET_MODEL_UPSTREAM_UNAVAILABLE");
+      }
+      if (search) {
+        const chunks = []; let size = 0;
+        for await (const chunk of upstream) {
+          size += chunk.length;
+          if (size > MAX_SEARCH_RESPONSE) fail("SECRET_MODEL_RESPONSE_INVALID");
+          chunks.push(chunk);
+        }
+        const body = Buffer.concat(chunks);
+        const result = JSON.parse(body.toString("utf8"));
+        if (typeof result?.output !== "string"
+          || result.results != null && !Array.isArray(result.results)) fail("SECRET_MODEL_RESPONSE_INVALID");
+        assertScopeCurrent();
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(body);
+        return;
       }
       // No Location, Set-Cookie, auth material or provider diagnostics are
       // reflected. Successful model streams keep their protocol bytes.
@@ -242,7 +264,9 @@ class ModelSecretGateway {
       const upstreamFailed = reason === "upstream_unavailable";
       // The original-content fallback authorizes one send of that request.
       const retryable = upstreamFailed && !disclosed;
-      if (!retryable && sse && !route.grok) {
+      if (search && started !== undefined) {
+        writeError(res, 502, "CODEX_WEB_SEARCH_UNAVAILABLE", "Codex web search is temporarily unavailable.");
+      } else if (!retryable && sse && !route.grok) {
         if (!res.headersSent) res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
         const message = upstreamFailed ? "Model service temporarily unavailable."
           : reason === "canceled" ? "SECRET_MODEL_CANCELED" : "SECRET_MODEL_RESPONSE_INVALID";

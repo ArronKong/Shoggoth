@@ -10457,7 +10457,7 @@ function ChatPageApp() {
                                 const translated = rawErr ? translateGatewayError(rawErr, t) : "";
                                 const shownErr = m.errPrefix ? t(m.errPrefix, { msg: translated || t("chat.unknown") }) : translated;
                                 return (
-                                  <div key={k} className="chat-bubble is-error" data-qp={pi} title={translated !== rawErr && rawErr ? rawErr : undefined}>
+                                  <div key={k} className="chat-bubble is-error" data-qp={pi} data-selectable-text title={translated !== rawErr && rawErr ? rawErr : undefined}>
                                     {shownErr}
                                     {pi === m.parts.length - 1 && (m.repeat ?? 1) > 1 ? (
                                       <span

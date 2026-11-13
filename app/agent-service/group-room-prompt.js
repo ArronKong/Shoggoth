@@ -109,6 +109,7 @@ function renderRoomPrompt({ group, member, members, ownerId, earlier, current, o
     "Reply in the user's language. Write the message without a name prefix; keep discussion brief. If asked to work, use tools now and post the results in this turn before handing off. "
       + "Briefly state your intent, share material findings, then give results; do not promise to work later. With nothing new or nothing addressed to you, reply only (pass). "
       + "To share a file, end with a separate line: Attachment: file path.",
+    readHistory ? "When the user asks you to keep watching a topic and report changes, create a Cron job now with cron_create and watch=true. Quote the current user request in sourceQuote and use the returned next run and group delivery receipt in your reply." : "",
   ];
   if (attachmentPath) {
     const { attachments } = turnAttachments([...earlier, ...current]);

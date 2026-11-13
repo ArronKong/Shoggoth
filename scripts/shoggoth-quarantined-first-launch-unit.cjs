@@ -4,7 +4,18 @@ const { EventEmitter } = require("node:events");
 const { test } = require("node:test");
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
 const { execFileSync } = require("node:child_process");
-const { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords } = require("./shoggoth-quarantined-first-launch.cjs");
+const { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords, compileWindowProbe } = require("./shoggoth-quarantined-first-launch.cjs");
+
+test("the native window probe builds and returns no windows for an absent PID", { skip: process.platform !== "darwin" }, () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-window-probe-test-"));
+  try {
+    const probe = compileWindowProbe(directory);
+    const stdout = execFileSync(probe, ["2147483647"], { encoding: "utf8", timeout: 15000 });
+    assert.deepEqual(JSON.parse(stdout), []);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("the exact ordinary Open script compiles with the macOS System Events dictionary", { skip: process.platform !== "darwin" }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-open-script-"));

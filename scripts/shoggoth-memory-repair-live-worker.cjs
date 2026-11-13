@@ -516,6 +516,11 @@ async function main() {
     check(chosen, "MODEL_CATALOG_EMPTY"); result.model = chosen.id;
     result.modelSelection = chosen.id === config.model ? "requested-model-in-live-catalog" : "live-catalog-default";
     if (config.preflightOnly === true) { result.preflightOnly = true; result.status = "passed"; return; }
+    if (config.suite === "continuity") {
+      await require("./shoggoth-memory-continuity-live-steps.cjs").runContinuity({ service, profile, result, send, scenario,
+        session, check, redact: value => redactDiagnostic(value, secrets) });
+      result.status = "passed"; return;
+    }
     if (config.suite === "parity") {
       await require("./shoggoth-memory-parity-live-steps.cjs").runParity({ service, profile, root, runtime, result, send, scenario,
         productCall, check, redact: value => redactDiagnostic(value, secrets) });

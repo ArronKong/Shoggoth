@@ -803,9 +803,9 @@ export default function SettingsPage() {
         ))}
       {REMOTE_CONNECTIONS_ENABLED && <p className="ui-hint">
         {t("settings.tunnelNote1")}
-        <span className="mono"> ssh -L 18789:127.0.0.1:18789 user@host</span>
+        <span className="mono" data-selectable-text> ssh -L 18789:127.0.0.1:18789 user@host</span>
         {t("settings.tunnelNote2")}
-        <span className="mono"> ws://127.0.0.1:18789</span>
+        <span className="mono" data-selectable-text> ws://127.0.0.1:18789</span>
         {t("settings.tunnelNote3")}
       </p>}
     </div>

@@ -25,9 +25,9 @@ function parse(args) {
   const mode = values.get("--mode") || "plan";
   if (!["plan", "live"].includes(mode)) throw failure("MEMORY_LIVE_ARGS_INVALID");
   const suite = values.get("--suite") || "default";
-  if (!["default", "repair", "parity"].includes(suite)) throw failure("MEMORY_LIVE_ARGS_INVALID");
+  if (!["default", "repair", "parity", "continuity"].includes(suite)) throw failure("MEMORY_LIVE_ARGS_INVALID");
   const runtime = values.get("--runtime") || "codex";
-  if (runtime !== "codex" && (!Object.hasOwn(runtimeAuth.RUNTIMES, runtime) || !["repair", "parity"].includes(suite))) throw failure("MEMORY_LIVE_RUNTIME_UNSUPPORTED");
+  if (runtime !== "codex" && (!Object.hasOwn(runtimeAuth.RUNTIMES, runtime) || !["repair", "parity", "continuity"].includes(suite))) throw failure("MEMORY_LIVE_RUNTIME_UNSUPPORTED");
   const memoryKeys = ["--memory-codex-bin", "--memory-codex-auth", "--memory-model"];
   if (memoryKeys.some(key => values.has(key)) && (memoryKeys.some(key => !values.has(key))
     || suite !== "repair" || runtime === "codex")) throw failure("MEMORY_LIVE_ARGS_INVALID");
@@ -51,7 +51,8 @@ function hashFile(target) { return crypto.createHash("sha256").update(fs.readFil
 async function execute(options) {
   if (options.mode === "plan") return { mode: "plan", credentialFilesRead: false,
     providerCalls: 0, isolation: "Disposable HOME and Profile; source auth copied, not modified.",
-    intendedSteps: options.suite === "parity" ? require("./shoggoth-memory-parity-live-steps.cjs").PARITY_SCENARIOS
+    intendedSteps: options.suite === "continuity" ? require("./shoggoth-memory-continuity-live-steps.cjs").CONTINUITY_SCENARIOS
+      : options.suite === "parity" ? require("./shoggoth-memory-parity-live-steps.cjs").PARITY_SCENARIOS
       : options.suite === "repair" ? ["save-new-session", "chinese-recall", "correct-restart", "borrow-revoke",
       "distinct-question-signals", "forget-no-revival", "diagnostics", "source-downgrade"] : options.suite === "p4" ? ["e5-save", "e5-save-other", "e5-bilingual",
       "e5-forget", "e5-after-forget", "e5-unknown"] : ["chat-save", "chat-new-session-original-search", "chat-correct", "chat-forget",
@@ -81,7 +82,10 @@ async function execute(options) {
     if (runtime === "codex") {
       fs.writeFileSync(path.join(root, ".codex", "auth.json"), JSON.stringify(auth), { flag: "wx", mode: 0o600 });
       fs.writeFileSync(path.join(root, ".codex", "config.toml"),
-        `cli_auth_credentials_store = "file"\nmodel = ${JSON.stringify(options.model)}\n`, { mode: 0o600 });
+        `cli_auth_credentials_store = "file"\nmodel = ${JSON.stringify(options.model)}\n`
+        // This scenario exercises Shoggoth's explicitly configured MCP only.
+        // Avoid downloading unrelated account plugins into each disposable home.
+        + (options.suite === "continuity" ? "[features]\napps = false\nplugins = false\nremote_plugin = false\n" : ""), { mode: 0o600 });
       fs.symlinkSync(fs.realpathSync(binary), path.join(root, "bin", "codex"));
     } else runtimeConfig = await runtimeAuth.prepare(root, options);
     if (independent) {
@@ -102,8 +106,8 @@ async function execute(options) {
       ...(options.preflightOnly === true ? { preflightOnly: true } : {}),
       ...(options.suite === "p4" ? { suite: "p4" } : {}),
       ...(options.suite === "repair" ? { suite: "repair", rollbackSource: options.rollbackSource } : {}),
-      ...(options.suite === "parity" ? { suite: "parity" } : {}) }), { mode: 0o600 });
-    child = spawn(process.execPath, [path.join(__dirname, ["repair", "parity"].includes(options.suite) ? "shoggoth-memory-repair-live-worker.cjs" : "shoggoth-memory-live-worker.cjs"), configPath], {
+      ...(["parity", "continuity"].includes(options.suite) ? { suite: options.suite } : {}) }), { mode: 0o600 });
+    child = spawn(process.execPath, [path.join(__dirname, ["repair", "parity", "continuity"].includes(options.suite) ? "shoggoth-memory-repair-live-worker.cjs" : "shoggoth-memory-live-worker.cjs"), configPath], {
       cwd: root, env: { ...isolatedEnv(root, options.proxy), XDG_DATA_HOME: path.join(root, ".local/share"),
         XDG_CONFIG_HOME: path.join(root, ".config"), GROK_HOME: path.join(root, ".grok"), DSH_HOME: path.join(root, ".dsh") },
       detached: true, stdio: ["ignore", "pipe", "pipe"],
@@ -120,7 +124,7 @@ async function execute(options) {
       outputBytes += Buffer.byteLength(chunk); pending = (pending + chunk).slice(-4096);
       for (let newline; (newline = pending.indexOf("\n")) >= 0;) {
         const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
-        if (stagePattern.test(line) || ["repair", "parity"].includes(options.suite) && /^MEMORY_LIVE_STAGE repair-[a-z0-9-]{1,64}$/u.test(line)) process.stdout.write(`${line}\n`);
+        if (stagePattern.test(line) || ["repair", "parity", "continuity"].includes(options.suite) && /^MEMORY_LIVE_STAGE repair-[a-z0-9-]{1,64}$/u.test(line)) process.stdout.write(`${line}\n`);
       }
       if (outputBytes > 2 * 1024 * 1024) child.kill("SIGTERM");
     });
