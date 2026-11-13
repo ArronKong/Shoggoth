@@ -37,16 +37,40 @@ function inside(root, target) {
 function embeddingWorkerCommand(binary) {
   return `${binary} ${path.join(path.dirname(path.dirname(binary)), "Resources/app.asar/app/agent-service/embedding-worker.cjs")}`;
 }
-function guiProcessRecords(output, binary) {
-  return output.trim().split("\n").flatMap(line => {
-    const match = line.trim().match(/^(\d+)\s+(.+)$/u);
-    if (!match || (match[2] !== binary && !match[2].startsWith(`${binary} `))
-      || match[2].includes("--shoggoth-internal-role=") || match[2] === embeddingWorkerCommand(binary)) return [];
-    return [{ pid: Number(match[1]), command: match[2] }];
+function isHookSandboxProbe(commandLine, binary, hookDirectory) {
+  // Match the packaged HookProcessHost.verify() command and its two files in
+  // the same canonical scratch directory. Keep other -e processes visible.
+  const start = `${binary} -e const fs=require('node:fs');let denied=false;try{fs.readFileSync(`;
+  const scratchPrefix = JSON.stringify(path.join(hookDirectory, "probe-")).slice(0, -1);
+  const prefix = start + scratchPrefix;
+  if (!commandLine.startsWith(prefix)) return false;
+  const suffix = commandLine.slice(prefix.length, prefix.length + 6);
+  if (!/^[A-Za-z0-9]{6}$/u.test(suffix)) return false;
+  const scratch = path.join(hookDirectory, `probe-${suffix}`);
+  return commandLine === start + JSON.stringify(path.join(scratch, "denied.txt"))
+    + ")}catch(e){denied=e.code==='EPERM'||e.code==='EACCES'};fs.writeFileSync("
+    + JSON.stringify(path.join(scratch, "allowed", "ok")) + ",'ok');process.stdout.write(JSON.stringify({denied}));";
+}
+function guiProcessRecords(output, binary, hookDirectory) {
+  const processes = output.trim().split("\n").flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/u);
+    if (!match || (match[3] !== binary && !match[3].startsWith(`${binary} `))) return [];
+    return [{ pid: Number(match[1]), parentPid: Number(match[2]), command: match[3] }];
   });
+  const serviceCommand = `${binary} --shoggoth-internal-role=agent-service`;
+  const servicePids = new Set(processes.filter(item => item.parentPid === 1 && item.command === serviceCommand).map(item => item.pid));
+  const supervisorCommand = `${binary} ${path.join(path.dirname(path.dirname(binary)),
+    "Resources/app.asar.unpacked/app/agent-service/hook-supervisor.js")}`;
+  const supervisors = new Set(processes.filter(item => item.command === supervisorCommand
+    && servicePids.has(item.parentPid)).map(item => item.pid));
+  return processes.filter(item => !/(?:^| )--shoggoth-internal-role=(?:agent-service|mcp|mcp-crypto)(?= |$)/u.test(item.command)
+    && item.command !== embeddingWorkerCommand(binary) && !supervisors.has(item.pid)
+    && !(supervisors.has(item.parentPid) && isHookSandboxProbe(item.command, binary, hookDirectory)))
+    .map(({ pid, command: args }) => ({ pid, command: args }));
 }
 function mainProcessRecords(binary) {
-  return guiProcessRecords(command("/bin/ps", ["-axo", "pid=,args="]), binary);
+  return guiProcessRecords(command("/bin/ps", ["-axww", "-o", "pid=,ppid=,args="]), binary,
+    resolveCanonicalServicePaths().hookEphemeralDir);
 }
 function embeddingProcessRecords(binary) {
   const expected = embeddingWorkerCommand(binary);
