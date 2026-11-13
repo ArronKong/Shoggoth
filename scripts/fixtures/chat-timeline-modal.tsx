@@ -440,6 +440,27 @@ scope.runTimelineModalFixture = async () => {
   const elapsedWhileWorking = dialogElapsed()!;
   await wait(() => (dialogElapsed() ?? 0) >= elapsedWhileWorking + 800, "elapsed keeps running without a tool event");
 
+  const summaryToolHead = (timeline: HTMLElement | undefined, status: string) =>
+    [...(timeline?.querySelectorAll(`[data-st="${status}"]`) ?? [])]
+      .find(chip => chip.parentElement?.textContent?.includes(i18n.t("turnLab.activity.runCommand")))?.parentElement;
+  const checkSummaryTool = async (status: string, duration: string) => {
+    await wait(() => summaryToolHead(dialog(), status) && summaryToolHead(loadingPreview(), status),
+      `summary-only ${status} tool appears in both views`);
+    const detail = summaryToolHead(dialog(), status)!;
+    const preview = summaryToolHead(loadingPreview(), status)!;
+    const opacity = getComputedStyle(detail).opacity;
+    expect(opacity === "1" && getComputedStyle(preview).opacity === opacity,
+      `summary-only ${status} tool uses normal opacity in both views (detail: ${opacity})`);
+    expect(!detail.matches("button, [tabindex]") && detail.textContent?.includes(duration) && detail.textContent === preview.textContent,
+      "summary-only tool displays the same text, duration and status without an expand control");
+  };
+  tool("start", "summary-only-failed");
+  await checkSummaryTool("running", "—");
+  tool("result", "summary-only-failed", { isError: true, durationS: 2.75 });
+  await checkSummaryTool("error", "2.8s");
+  tool("result", "summary-only-completed", { durationS: 0.75 });
+  await checkSummaryTool("ok", "0.8s");
+
   // Exceed the modal viewport and check that new rows scroll its own timeline.
   await Promise.all(dialog()!.getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {})));
   for (let i = 0; i < 18; i++) tool("start", `extra-${i}`, { args: { command: `printf extra-${i}`, activityTitle: `后续步骤 ${i}` } });
@@ -522,7 +543,8 @@ scope.runTimelineModalFixture = async () => {
   expect(scope.fixtureErrors.length === 0, `browser errors: ${scope.fixtureErrors}`);
   return { backendId, immersive, liveUpdates: true, terminalStates: ["done", "error", "aborted"], nextTurnIsolated: true,
     sessionSwitch: true, chatCommentaryHidden: true, commentaryBubblesPreserved: true, sharedCommentaryPreserved: true,
-    bubbleOpensDialog: true, continuousLoader: true, groupedFooterActions: true, loadingPreviewRows: 3, balancedInsets: true, edgeFade: true, noDuplicateCardOrToggle: true };
+    bubbleOpensDialog: true, summaryOnlyRowsReadable: true, continuousLoader: true, groupedFooterActions: true,
+    loadingPreviewRows: 3, balancedInsets: true, edgeFade: true, noDuplicateCardOrToggle: true };
 };
 const sampleProgress = "我先核对需求和模板，再把剩下的安排整理成可执行的步骤。";
 const samplePrompt = "帮我安排周五的团队分享会，给我一份可执行的议程。";

@@ -64,6 +64,18 @@ function adapterError(code, message) {
 const PRESENTATION_FEATURES = Object.freeze(["item_ids", "terminal_resize_reflow",
   "resize_all_images", "tool_search_always_defer_mcp_tools", "tui_app_server"]);
 
+function hasIsolatedFeatures(features) {
+  // Codex 0.167.1 keeps these retired flags enabled despite false overrides.
+  // Its local Responses fixture verifies that neither exposes a model tool.
+  const retired = feature => feature.stage === "removed"
+    && ["worktrees", "realtime_conversation"].includes(feature.name);
+  // unified_exec can also stay enabled in the inventory. With shell_tool
+  // disabled, Codex does not expose the execution tools.
+  return features.some(feature => feature.name === "shell_tool" && feature.enabled === false)
+    && !features.some(feature => feature.enabled && feature.name !== "unified_exec"
+      && !PRESENTATION_FEATURES.includes(feature.name) && !retired(feature));
+}
+
 function definedProperties(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null && item !== undefined));
 }
@@ -451,11 +463,7 @@ class CodexRuntimeHandle {
       throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime did not confirm restricted sandbox and MCP binding policy");
     }
     const threadId = response.thread.id, features = await this._proactiveFeatures(threadId, { allowDottedNames: true });
-    // As with isolated generation, Codex 0.159 reports unified_exec as enabled
-    // even when disabled. shell_tool=false removes the actual execution tools;
-    // the synthetic native provider fixture asserts the model-visible tool set.
-    if (!features.some(feature => feature.name === "shell_tool" && feature.enabled === false)
-      || features.some(feature => feature.enabled && feature.name !== "unified_exec" && !PRESENTATION_FEATURES.includes(feature.name))) {
+    if (!hasIsolatedFeatures(features)) {
       throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime has an enabled feature outside the review scope");
     }
     const result = await this.host.mcpServerStatusList({ threadId, cursor: null, limit: 100, detail: "toolsAndAuthOnly" });
@@ -494,12 +502,7 @@ class CodexRuntimeHandle {
     let features;
     try { features = await this._proactiveFeatures(threadId, { allowDottedNames: true }); }
     catch { throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "Runtime feature inventory is unavailable"); }
-    // Codex 0.159 keeps reporting unified_exec as enabled after it is turned
-    // off. With shell_tool off it adds no model tool: a local Responses fixture
-    // receives only the built-in request_user_input tool for this thread.
-    if (!features.some(feature => feature.name === "shell_tool" && feature.enabled === false)
-      || features.some(feature => feature.enabled && feature.name !== "unified_exec"
-        && !PRESENTATION_FEATURES.includes(feature.name))) {
+    if (!hasIsolatedFeatures(features)) {
       throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "Runtime has an enabled tool feature");
     }
     // Codex 0.149 omits disabled servers; 0.159 lists them as disabled with no tools.

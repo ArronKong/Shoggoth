@@ -246,7 +246,7 @@ function atomicWritePrivateFile(target, value, options = {}) {
     if (backupPath) validateBackup(fileSystem.lstatSync(backupPath), 1);
     try {
       fsyncParent();
-    } catch {
+    } catch (error) {
       try {
         const current = validatePrivateStat(fileSystem.lstatSync(target), target);
         if (current.dev !== createdIdentity.dev || current.ino !== createdIdentity.ino) {
@@ -269,12 +269,12 @@ function atomicWritePrivateFile(target, value, options = {}) {
         const uncertain = new AggregateError([
           serviceError("PRIVATE_FILE_COMMIT_FAILED", "私有文件目录提交失败"),
           serviceError("PRIVATE_FILE_ROLLBACK_FAILED", "私有文件回滚失败"),
-        ], "私有文件提交状态不确定");
+        ], "私有文件提交状态不确定", { cause: error });
         uncertain.code = "PRIVATE_FILE_COMMIT_UNCERTAIN";
         uncertain.committedUncertain = true;
         throw uncertain;
       }
-      throw serviceError("PRIVATE_FILE_COMMIT_FAILED", "私有文件目录提交失败");
+      throw serviceError("PRIVATE_FILE_COMMIT_FAILED", "私有文件目录提交失败", { cause: error });
     }
     if (backupPath) {
       try {
@@ -282,11 +282,11 @@ function atomicWritePrivateFile(target, value, options = {}) {
         fileSystem.unlinkSync(backupPath);
         backupPath = null;
         fsyncParent();
-      } catch {
+      } catch (error) {
         preserveEvidence = true;
         const committed = new AggregateError([
           serviceError("PRIVATE_FILE_BACKUP_CLEANUP_FAILED", "已提交文件的 backup 清理失败"),
-        ], "私有文件已提交但清理不完整");
+        ], "私有文件已提交但清理不完整", { cause: error });
         committed.code = "PRIVATE_FILE_COMMITTED_WITH_CLEANUP_FAILURE";
         committed.committed = true;
         throw committed;

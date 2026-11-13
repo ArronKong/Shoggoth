@@ -12,6 +12,7 @@ import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
 
 declare const __PROCESS_HISTORY__: any[];
+declare const __QUOTA_HISTORY__: { key: string; messages: any[] };
 const state = window as any, options = new URLSearchParams(location.search);
 const language = options.get("language") || "zh-CN", immersive = options.get("mode") === "immersive";
 const now = Date.now(), since = now - 600_000;
@@ -25,6 +26,7 @@ const cases = [
   { backendId: "openclaw", agentId: "claw-legacy", name: "Legacy", key: "agent:claw-legacy:cron:legacy" },
   { backendId: "openclaw", agentId: "claw-prompt-only", name: "Scheduled", key: "agent:claw-prompt-only:cron:pending" },
   { backendId: "hermes", agentId: "hermes-background", name: "Background", key: "agent:hermes-background:main" },
+  { backendId: "hermes", agentId: "hermes-quota", name: "Daily News", key: __QUOTA_HISTORY__.key },
 ];
 const sessions = cases.map(row => ({ ...row, agentName: row.name, kind: row.key.endsWith(":main") ? "main" : "cron", updatedAt: now - 10000 }));
 const histories = new Map<string, any[]>(), requests: any[] = [];
@@ -71,6 +73,7 @@ histories.set(cases[5].key, [message("reader-old", "assistant", "Reader history"
 histories.set(cases[7].key, [message("projected-input-only", "assistant", "HIDDEN_CRON_PROMPT: no output has arrived", since + 5000,
   { provenance: { kind: "internal_system", sourceTool: "cron" }, __openclaw: { turnBoundary: true } })]);
 histories.set(cases[8].key, __PROCESS_HISTORY__);
+histories.set(__QUOTA_HISTORY__.key, __QUOTA_HISTORY__.messages);
 let writes = 0;
 class FixtureSocket {
   static OPEN = 1; readyState = 1; onopen: any; onmessage: any;
@@ -234,8 +237,16 @@ state.runCronDisplayFixture = async () => {
   await runPageRefresh("/chat"); await pause(200); await checkProcessNotice();
   select(cases[5].key); await wait(() => thread()?.textContent?.includes("Reader history"), "leave background session");
   select(cases[8].key); await checkProcessNotice();
+  select(__QUOTA_HISTORY__.key);
+  const quotaText = language === "en" ? "OpenRouter’s daily quota for free models is exhausted" : "OpenRouter 免费模型的当日额度已用完";
+  await wait(() => thread()?.textContent?.includes(quotaText), "localized daily quota in the Cron chat");
+  check(thread().textContent?.includes("HTTP 429"), "the provider status should remain visible");
+  check(!thread().textContent?.includes("Your request was not processed"), "generic failure masked the cause");
+  check(!thread().textContent?.includes("HIDDEN_CRON_PROMPT"), "scheduler prompt leaked into the chat");
+  check(!Array.from(thread().querySelectorAll<HTMLButtonElement>("button")).some(button => button.title === i18n.t("chat.retry")),
+    "a scheduled failure must not offer to resend its scheduler prompt");
   check(writes === 0, "fixture made external mutations");
   return { mode: immersive ? "immersive" : "normal", language, result, projectedInputPreviewHidden: true,
-    projectedInputNoUnread: true, previewRefresh: true, manualFollowup: true, backgroundNotice: true, writes };
+    projectedInputNoUnread: true, previewRefresh: true, manualFollowup: true, backgroundNotice: true, dailyQuota: true, writes };
 };
 state.cronFixture = { cases, select, requests };

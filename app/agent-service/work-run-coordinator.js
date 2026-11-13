@@ -3509,7 +3509,20 @@ class WorkRunCoordinator {
   async send(input) {
     // Lets background memory review yield to a new turn; never affects the send.
     try { this.onSessionSend?.(input?.sessionKey); } catch {}
-    return this.#serializeSessionSend(input?.sessionKey, () => this.#send(input));
+    return this.#serializeSessionSend(input?.sessionKey, async () => {
+      const receipt = { enqueued: false };
+      try {
+        return await this.#send(input, receipt);
+      } catch (error) {
+        if (!receipt.enqueued) throw error;
+        // The command already has durable ownership. Preserve the original
+        // failure for recovery, but require the caller to look up this send.
+        const failure = new Error("已保存聊天请求，执行状态待核实", { cause: error });
+        failure.code = ownDataErrorCode(error) ?? "WORK_RUN_SEND_FAILED";
+        failure.receiptUncertain = true;
+        throw failure;
+      }
+    });
   }
 
   async #serializeSessionSend(key, action) {
@@ -3704,7 +3717,7 @@ class WorkRunCoordinator {
     });
   }
 
-  async #send(input) {
+  async #send(input, receipt) {
     setChatSendDiagnosticPhase("send_validation");
     this.#assertOpen();
     this.#assertInboxAvailable();
@@ -3818,6 +3831,7 @@ class WorkRunCoordinator {
       ...(connectorSelection ? { connectorSelection } : {}),
       createdAt,
     });
+    receipt.enqueued = true;
     setChatSendDiagnosticPhase("run_enqueue");
     if (!run) run = this.dispatcher.enqueue(runInput);
     this.#streamFor(run.id);
@@ -6868,6 +6882,9 @@ class WorkRunCoordinator {
         && !this.conversationCheckpointStore?.hasRevocations?.(session.profileId)
         && !this.conversationCheckpointStore?.hasHistoricalSource?.(session.profileId,
           readEvents(this.transcriptStore, session.profileId, session.id))) {
+        // Recovered inputs still own their Inbox entry. Wait for open before
+        // starting the memory flush and the native compaction it precedes.
+        if (this.state === "opening" && this.beforeMemoryCompaction) return this.#queuedAdmission(run, "CONTEXT_COMPACTING");
         this.#admissionPreparation(run, "CONTEXT_COMPACTING");
         const compact = await this.#prepareNativeConversationCompaction(session, executionContract, run.id);
         if (compact.status === "completed") {

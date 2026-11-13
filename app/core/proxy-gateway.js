@@ -21,6 +21,7 @@ const {
 } = require("../federation-chat-provenance");
 const { normalizeInteractiveRequestV1 } = require("./shoggoth-interaction-contract");
 const { createEndpointGenerationGuard } = require("./upstream-endpoint-generation");
+const { storageIssueCode } = require("../system-issue");
 
 function safeParse(raw) {
   try {
@@ -1699,8 +1700,9 @@ function startProxyGateway({
           } catch (error) {
             const messages = require("./chat-secret-contract").SECRET_MESSAGES;
             const code = Object.hasOwn(messages, error?.code) ? error.code : "SECRET_PROCESSING_UNAVAILABLE";
+            const systemIssue = storageIssueCode(error);
             sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
-              error: { code, message: messages[code], admissionAccepted: false } })); return;
+              error: { code, message: messages[code], admissionAccepted: false, ...(systemIssue ? { systemIssue } : {}) } })); return;
           }
         }
         if (registry?.hasExternalInspirationSessionBridge?.() === true

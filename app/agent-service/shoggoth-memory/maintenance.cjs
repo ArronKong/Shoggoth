@@ -372,10 +372,10 @@ class MemoryMaintenance {
         checkAuthority();
         return { status: "failed", path: plan.relativePath, id, error: code };
       }
-      // Upstream treats a failed preflight model turn as a maintenance outcome,
-      // so optional recall maintenance must not block the user's normal turn.
-      // Authority changes, cancellation and uncertain file commits still stop.
-      if (preflight && !committing && !signal.aborted && !/CANCELED|CANCELLED|ABORT/iu.test(code)) {
+      // Isolation refusal occurs before a model turn. Record the failed save
+      // and let the caller compact after rechecking the transcript authority.
+      if ((preflight || code === "RUNTIME_ISOLATION_UNVERIFIED")
+        && !committing && !signal.aborted && !/CANCELED|CANCELLED|ABORT/iu.test(code)) {
         check();
         if (!/^(?:MEMORY_(?:SOURCE|SCOPE|CONFIG|REVISION)|RECALL_|NATIVE_MEMORY_CONFIG_)/u.test(code)) {
           return { status: "failed", path: plan.relativePath, id, error: code };

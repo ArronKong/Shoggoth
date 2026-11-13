@@ -140,6 +140,7 @@ const BASE = "/__api/cron/jobs";
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly systemIssue?: "STORAGE_FULL";
   readonly stage?: string;
   readonly field?: string;
   readonly details?: unknown;
@@ -156,6 +157,7 @@ export class ApiError extends Error {
   constructor(message: string, options: {
     status: number;
     code?: string;
+    systemIssue?: ApiError["systemIssue"];
     stage?: string;
     field?: string;
     details?: unknown;
@@ -167,6 +169,7 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = options.status;
     this.code = options.code;
+    this.systemIssue = options.systemIssue;
     this.stage = options.stage;
     this.field = options.field;
     this.details = options.details;
@@ -221,6 +224,7 @@ export async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> 
     throw new ApiError(msg, {
       status: res.status,
       ...(typeof source.code === "string" ? { code: source.code } : {}),
+      ...(storageFull ? { systemIssue: "STORAGE_FULL" as const } : {}),
       ...(typeof source.stage === "string" ? { stage: source.stage } : {}),
       ...(typeof source.field === "string" ? { field: source.field } : {}),
       ...(Object.hasOwn(source, "details") ? { details: source.details } : {}),
@@ -2469,7 +2473,8 @@ export function prepareChatInput(sessionKey: string, operationId: string, text: 
 export async function prepareChatInputForSend(sessionKey: string, operationId: string, text: string) {
   try { return await prepareChatInput(sessionKey, operationId, text); }
   catch (error) {
-    if (!(error instanceof ApiError) || !secretFallbackCodes.includes(error.code || "")) throw error;
+    if (!(error instanceof ApiError) || error.systemIssue === "STORAGE_FULL"
+      || !secretFallbackCodes.includes(error.code || "")) throw error;
     return { text, references: [], version: 1 };
   }
 }

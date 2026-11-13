@@ -28,6 +28,9 @@ const observationCases = [["native-active-recovery", "shoggoth"], ["native-activ
   ["legacy-unresolved", "shoggoth"], ["legacy-unavailable", "shoggoth"],
   ["legacy-accepted", "shoggoth"], ["legacy-late-accepted", "shoggoth"]];
 const observationOnly = process.argv.includes("--observation-only");
+const storageOnly = process.argv.includes("--storage-only");
+const storageCases = ["ws", "rest"].flatMap(channel => ["", "-immersive"]
+  .map(suffix => [`storage-rejected-${channel}${suffix}`, "shoggoth"]));
 const inspirationObservationOnly = process.argv.includes("--inspiration-observation-only");
 const inspirationObservationCases = [
   ...["openclaw", "hermes"].flatMap(backend => ["", "-immersive"]
@@ -118,7 +121,7 @@ try {
 app.setPath("userData",${JSON.stringify(path.join(temp, "profile"))});
 app.whenReady().then(async()=>{const window=new BrowserWindow({show:false,width:1080,height:920,webPreferences:{backgroundThrottling:false}});
 window.webContents.on("console-message",event=>{if(event.level==="error") console.error(event.message);});
-const cases=${JSON.stringify(inspirationObservationOnly ? inspirationObservationCases : ordinaryRecoveryOnly ? ordinaryRecoveryCases : slashOnly ? slashCases : upstreamOnly ? upstreamCases : observationOnly ? observationCases : bufferedOnly ? bufferedCases : [["uncertain", "openclaw"], ["uncertain", "hermes"], ["uncertain", "shoggoth"], ["started", "openclaw"], ["restored", "openclaw"], ["restored", "hermes"], ["newer", "openclaw"], ["rejected", "openclaw"], ["rejected", "hermes"], ["ordinary", "hermes"], ["ordinary", "openclaw"], ["ordinary", "shoggoth"], ["accepted-error", "openclaw"], ["accepted-uncertain", "hermes"], ["stale-query", "openclaw"], ["reselect", "shoggoth"], ["terminal-race", "openclaw"], ["terminal-timeout", "hermes"], ["terminal-reload", "openclaw"], ["ordinary-upstream", "openclaw"], ["ordinary-receipt", "openclaw"], ...bufferedCases, ...observationCases, ...inspirationObservationCases, ...upstreamCases, ...slashCases, ...ordinaryRecoveryCases])};
+const cases=${JSON.stringify(storageOnly ? storageCases : inspirationObservationOnly ? inspirationObservationCases : ordinaryRecoveryOnly ? ordinaryRecoveryCases : slashOnly ? slashCases : upstreamOnly ? upstreamCases : observationOnly ? observationCases : bufferedOnly ? bufferedCases : [["uncertain", "openclaw"], ["uncertain", "hermes"], ["uncertain", "shoggoth"], ["started", "openclaw"], ["restored", "openclaw"], ["restored", "hermes"], ["newer", "openclaw"], ["rejected", "openclaw"], ["rejected", "hermes"], ["ordinary", "hermes"], ["ordinary", "openclaw"], ["ordinary", "shoggoth"], ["accepted-error", "openclaw"], ["accepted-uncertain", "hermes"], ["stale-query", "openclaw"], ["reselect", "shoggoth"], ["terminal-race", "openclaw"], ["terminal-timeout", "hermes"], ["terminal-reload", "openclaw"], ["ordinary-upstream", "openclaw"], ["ordinary-receipt", "openclaw"], ...bufferedCases, ...observationCases, ...inspirationObservationCases, ...upstreamCases, ...slashCases, ...ordinaryRecoveryCases, ...storageCases])};
 const rows=[];try{for(const [scenario,backend] of cases) {
   const testUrl=${JSON.stringify(url)}+"?scenario="+scenario+"&backend="+backend+"#/chat";
   await window.loadURL(testUrl);let row;

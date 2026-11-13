@@ -97,6 +97,7 @@ for (const locale of ["zh-CN", "en"]) {
     try { await f.api.updateConfig({ theme: "dark" }); } catch (value) { error = value; }
     assert.ok(error instanceof f.api.ApiError);
     assert.equal(error.message, f.t("common.diskFull"));
+    assert.equal(error.systemIssue, "STORAGE_FULL");
     assert.equal(error.status, 409); assert.equal(error.code, "journal_commit_unknown");
     assert.equal(error.stage, "commit"); assert.equal(error.details.operationId, "safe-operation");
     f.toast.error(`Save failed: ${error.message}`);

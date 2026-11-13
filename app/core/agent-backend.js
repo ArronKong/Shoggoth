@@ -815,6 +815,9 @@ class AgentBackend {
    * means a background command ended, not that its work succeeded. `content`
    * keeps the backend's raw text for hover triage. Without `notice`, a
    * `role:"system"` row renders as a red ERROR bubble.
+   * An assistant failure can carry `stopReason:"error"` and display copy in
+   * `content`. `automation:"cron"` on that row identifies a scheduled run;
+   * its scheduler input is not a chat message to resend.
    * @param {string} sessionKey  e.g. "agent:hermes-default:abc-123"
    * @param {{cursor?: string|null, limit?: number}} [options] Optional backward
    *        pagination. Pages remain chronological; messages precede the page

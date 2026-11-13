@@ -116,6 +116,17 @@
     "ANTIGRAVITY_TURN_TIMEOUT": "Antigravity 本次任务执行超时，未自动重放；请检查原生会话结果后决定是否重试",
     "ANTIGRAVITY_PROCESS_EXIT_INVALID": "Antigravity 进程异常退出，未自动重放；请检查 CLI 状态和原生会话结果"
   },
+  "hermesCron": {
+    "FREE_DAILY_QUOTA": "OpenRouter 免费模型的当日额度已用完（HTTP 429），这次定时任务未完成。额度重置后可在「定时任务」中重新运行。",
+    "QUOTA": "模型额度或余额不足，这次定时任务未完成。",
+    "RATE_LIMIT": "模型服务暂时限流，这次定时任务未完成。",
+    "AUTH": "模型服务未通过身份验证，这次定时任务未完成。",
+    "CONNECTION": "运行时连接失败或超时，这次定时任务未完成。",
+    "MODEL": "所选模型当前不可用，这次定时任务未完成。",
+    "SETTINGS": "模型接口拒绝了请求参数，这次定时任务未完成。",
+    "UNKNOWN": "这次定时任务未完成。请在「定时任务」中查看运行记录。",
+    "PARTIAL": "本次运行可能已执行部分操作。重新运行前请先检查结果。"
+  },
   "productContext": {
     "PRODUCT_CONTEXT_INVALID": "上下文请求或响应无效",
     "PRODUCT_CONTEXT_UNAVAILABLE": "请在 Agent 设置中配置可生成摘要的 Runtime",

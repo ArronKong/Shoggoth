@@ -157,8 +157,8 @@
 .connector .head { padding: 27px 28px 22px; gap: 14px; }
 .connector .titles { position: relative; flex: 1; min-height: 48px; padding-left: 62px; }
 .connector .title { font-size: 20px; font-weight: 600; line-height: 26px; letter-spacing: normal; }
-.connector .title > span { display: inline; }
-.connector .title > span > :first-child { position: absolute; left: 0; top: 0; width: 48px; height: 48px; }
+.connector .title > span { display: inline; user-select: text; }
+.connector .title > span > :first-child { position: absolute; left: 0; top: 0; width: 48px; height: 48px; user-select: none; }
 .connector .subtitle { font-size: 13px; line-height: 1.65; margin: 5px 0 0; color: var(--ui-text-2); word-break: normal; overflow-wrap: anywhere; }
 .connector .close { margin: 0; }
 .connector :is(button, input:not([type="checkbox"]):not([type="radio"]), select):where(:not(:global(.btn-primary), :global(.btn-secondary), :global(.btn-dark), :global(.btn-subtle), :global(.btn-danger))) { border-radius: 999px; }

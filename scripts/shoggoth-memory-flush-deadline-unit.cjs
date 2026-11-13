@@ -46,6 +46,17 @@ test("preflight uses the same bounded deadline and does not retry a failed cycle
   assert.equal(f.modelCalls(), 1);
 });
 
+test("a refused Codex isolation check records the failed flush and lets compaction proceed", async t => {
+  const { f, input } = await source(t);
+  f.model = async () => { throw Object.assign(new Error("unverified tool inventory"), { code: "RUNTIME_ISOLATION_UNVERIFIED" }); };
+  const result = await f.owner.flushBeforeCompaction(input);
+  assert.equal(result.status, "failed");
+  assert.equal(result.error, "RUNTIME_ISOLATION_UNVERIFIED");
+  assert.equal(f.owner.store.list(A).length, 0);
+  assert.deepEqual(await f.owner.flushBeforeCompaction(input), result);
+  assert.equal(f.modelCalls(), 1, "a failed pre-compaction save is attempted once per cycle");
+});
+
 test("default flush budget is sixty seconds and successful publication clears the deadline", async t => {
   const { f, input } = await source(t);
   assert.equal(MEMORY_FLUSH_BUDGET_MS, 60_000);

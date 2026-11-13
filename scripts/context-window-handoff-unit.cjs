@@ -135,6 +135,55 @@ async function nativePressure(f, prefix, completeFirst = true, { used = 211386, 
   return { coordinator, current, host, session, first };
 }
 
+test("a queued send survives a pre-compaction refusal and resumes once after Service restart", async () => {
+  let f = await openHandoffFixture();
+  try {
+    const flush = f.service.workRunCoordinator.beforeMemoryCompaction;
+    const { coordinator, current, host, session } = await nativePressure(f, "native-flush-recovery");
+    const isolationError = () => Object.assign(new Error("Unverified fixture inventory"), { code: "RUNTIME_ISOLATION_UNVERIFIED" });
+    f.service.memoryEngine.complete = async () => { throw isolationError(); };
+    coordinator.beforeMemoryCompaction = async input => {
+      const receipt = await flush(input);
+      assert.equal(receipt.error, "RUNTIME_ISOLATION_UNVERIFIED");
+      throw isolationError(); // Old Service returned a send error after recording the failed flush.
+    };
+    const operationId = "native-flush-recovery-next";
+    const params = { sessionKey: session.sessionKey, operationId, prompt: "Continue this conversation" };
+    await assert.rejects(coordinator.send(params), { code: "RUNTIME_ISOLATION_UNVERIFIED", receiptUncertain: true });
+    const queued = coordinator.getChatRunByOperation(operationId, session.sessionKey);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.runtimeTurnRef, null);
+    assert.equal(host.turnStartCalls, 1);
+    assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" }).length, 0);
+
+    const { root, transport } = f;
+    let compactions = 0;
+    const stubCompact = raw => {
+      raw.threadCompactStart = async ({ threadId }) => {
+        assert.equal(threadId, current.runtimeSessionId);
+        compactions++;
+        raw.emit({ known: true, type: "context_compacted", threadId });
+        return {};
+      };
+    };
+    await f.close({ remove: false });
+    stubCompact(host);
+    const setHandle = transport.handles.set.bind(transport.handles);
+    transport.handles.set = (key, handle) => { stubCompact(handle.host); return setHandle(key, handle); };
+    f = await openHandoffFixture({ root, transport });
+    const after = f.service.workRunCoordinator;
+    await waitUntil(() => ["running", "failed"].includes(after.getRun(queued.id).status), 5000, "restored input admission");
+    const resumed = after.getChatRunByOperation(operationId, session.sessionKey);
+    assert.equal(resumed.id, queued.id);
+    assert.equal(resumed.status, "running", resumed.errorCode);
+    assert.equal(compactions, 1);
+    assert.equal(transport.hosts.get("codex").turnStartCalls, 2);
+    assert.equal(f.service.transcriptStore.listEvents(session.profileId, session.id)
+      .filter(event => event.kind === "user" && event.runId === queued.id).length, 1);
+    await f.complete(resumed);
+  } finally { await f.close(); }
+});
+
 test("a native compact that leaves pressure above budget stops after one attempt", async () => {
   const f = await openHandoffFixture();
   try {

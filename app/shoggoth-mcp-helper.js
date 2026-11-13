@@ -37,7 +37,7 @@ const {
 const {
   resolveCanonicalServicePaths,
 } = require("./agent-service/paths");
-const { serviceError } = require("./agent-service/security");
+const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./agent-service/security");
 const { encodeInputChoicesDescription } = require("./core/shoggoth-interaction-contract");
 const {
   SERVICE_PROTOCOL_VERSION: MCP_SERVICE_PROTOCOL_VERSION,
@@ -1812,14 +1812,14 @@ async function startShoggothMcpHelper(options = {}) {
       electronApp ||= electron.app;
     }
     prohibitBackgroundActivation(electronApp, options.platform);
-    if (typeof electronApp.setPath === "function") {
+    const cryptoCacheDir = typeof electronApp.setPath === "function"
+      ? path.join(paths.cacheDir, "mcp-crypto-worker") : null;
+    if (cryptoCacheDir) {
       const helperProfileDir = path.join(paths.profileDir, "mcp-helper");
       const helperSessionDir = path.join(helperProfileDir, "session");
       const helperCacheDir = path.join(paths.cacheDir, "mcp-helper");
       const cryptoProfileDir = path.join(paths.profileDir, "mcp-crypto-worker");
       const cryptoSessionDir = path.join(cryptoProfileDir, "session");
-      const cryptoCacheDir = path.join(paths.cacheDir, "mcp-crypto-worker");
-      const { ensurePrivateDirectoryTree } = require("./agent-service/security");
       ensurePrivateDirectoryTree(helperProfileDir, defaultPaths.trustedRoot);
       ensurePrivateDirectoryTree(helperSessionDir, defaultPaths.trustedRoot);
       ensurePrivateDirectoryTree(helperCacheDir, defaultPaths.trustedRoot);
@@ -1875,6 +1875,15 @@ async function startShoggothMcpHelper(options = {}) {
       cryptoGeneration: options.cryptoGeneration || 1,
     };
     const loadSession = async () => {
+      // The one-shot crypto worker needs its cache on every authentication. The
+      // running helper can outlive a cache purge, so recreate it before renewal.
+      try {
+        if (cryptoCacheDir && !lstatIfExists(cryptoCacheDir)) {
+          ensurePrivateDirectoryTree(cryptoCacheDir, defaultPaths.trustedRoot);
+        }
+      } catch (error) {
+        throw authenticationError(error);
+      }
       const nextSession = await authenticateSession(authenticationOptions);
       if (!validateSession(nextSession, binding)) {
         throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");

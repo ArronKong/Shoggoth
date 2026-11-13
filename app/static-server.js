@@ -1129,7 +1129,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         return sendJson(res, 200, await registry.chatSecretRequest(segs[2], input));
       } catch (error) {
         const code = Object.hasOwn(messages, error?.code) ? error.code : "SECRET_PROCESSING_UNAVAILABLE";
-        return sendJson(res, 400, { code, error: messages[code], ...(error?.ranges ? { details: { ranges: error.ranges } } : {}) });
+        const systemIssue = storageIssueCode(error);
+        return sendJson(res, 400, { code, error: messages[code], ...(systemIssue ? { systemIssue } : {}),
+          ...(error?.ranges ? { details: { ranges: error.ranges } } : {}) });
       }
     }
     if (segs[0] === "connectors") {

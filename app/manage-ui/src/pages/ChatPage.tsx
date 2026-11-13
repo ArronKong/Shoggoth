@@ -19,6 +19,7 @@ import type { RuntimeContextUsage, RuntimeContextCapabilities, ProductContextSta
 import ChatResponseMetadata from "./ChatResponseMetadata";
 import { compactConversation, runShoggothBackgroundAction, getShoggothProductStatus } from "../api/client";
 import { prepareChatInputForSend, prewarmChatSession } from "../api/client";
+import { publishSystemIssue } from "../lib/system-issues";
 import { setInspirationChatSession } from "../lib/inspiration-navigation";
 import { toSanitizedMarkdownHtml, formatReasoningMarkdown } from "../lib/markdown";
 import ChatMarkdown from "../components/ChatMarkdown";
@@ -2821,21 +2822,25 @@ function ChatPageApp() {
     pendingChatSendStore.accepted(key, idem);
     return true;
   };
+  const restoreSendDraft = (key: string, text: string, atts: ChatAttachment[]) => {
+    if (activeKeyRef.current === key) {
+      if (text) setInput(current => current.trim() ? `${text}\n${current}` : text);
+      if (atts.length) setComposerAttachments(current => [...atts, ...current]);
+    } else {
+      if (text) {
+        const current = draftsRef.current.get(key) || "";
+        draftsRef.current.set(key, current.trim() ? `${text}\n${current}` : text);
+      }
+      if (atts.length) attachmentDraftsRef.current.set(key, [...atts, ...(attachmentDraftsRef.current.get(key) ?? [])]);
+    }
+  };
   const restoreRejectedSend = (runId: string, key: string) => {
     optimisticHistoryRef.current.forget(key, runId);
     const pendingSend = pendingSendDraftRef.current.get(`${key}\0${runId}`);
     if (!pendingSend) return false;
     pendingSendDraftRef.current.delete(`${key}\0${runId}`);
-    if (activeKeyRef.current === key) {
-      setInput(current => current.trim() ? `${pendingSend.text}\n${current}` : pendingSend.text);
-      if (pendingSend.atts.length) setComposerAttachments(current => [...pendingSend.atts, ...current]);
-      setMessages(current => current.filter(message => message.localSendId !== runId));
-    } else {
-      const current = draftsRef.current.get(key) || "";
-      draftsRef.current.set(key, current.trim() ? `${pendingSend.text}\n${current}` : pendingSend.text);
-      if (pendingSend.atts.length) attachmentDraftsRef.current.set(key,
-        [...pendingSend.atts, ...(attachmentDraftsRef.current.get(key) ?? [])]);
-    }
+    restoreSendDraft(key, pendingSend.text, pendingSend.atts);
+    updateSessionMessages(key, current => current.filter(message => message.localSendId !== runId));
     return true;
   };
   // markInFlight 是 useCallback([])，经 ref 转接拿到最新 flushQueue（sendChatMessageRef 同款）。
@@ -4229,13 +4234,16 @@ function ChatPageApp() {
       if (f.type === "res" && f.id != null) {
         const p = takePendingRpc(pending.current, String(f.id), ws);
         if (!p) return;
-        if (f.ok === false) p.reject(Object.assign(new Error(f.error?.message || t("chat.requestFailed")), {
-          ...(typeof f.error?.code === "string" ? { code: f.error.code } : {}),
-          ...(f.error?.admissionAccepted === false ? { admissionAccepted: false } : {}),
-          ...(f.error?.receiptUncertain === true ? { receiptUncertain: true } : {}),
-          ...(f.error?.requestNotSent === true ? { requestNotSent: true } : {}),
-        }));
-        else p.resolve(f);
+        if (f.ok === false) {
+          const storageFull = f.error?.systemIssue === "STORAGE_FULL";
+          if (storageFull) publishSystemIssue("STORAGE_FULL");
+          p.reject(Object.assign(new Error(storageFull ? t("common.diskFull") : f.error?.message || t("chat.requestFailed")), {
+            ...(typeof f.error?.code === "string" ? { code: f.error.code } : {}),
+            ...(f.error?.admissionAccepted === false ? { admissionAccepted: false } : {}),
+            ...(f.error?.receiptUncertain === true ? { receiptUncertain: true } : {}),
+            ...(f.error?.requestNotSent === true ? { requestNotSent: true } : {}),
+          }));
+        } else p.resolve(f);
         return;
       }
       if (f.type === "event" && f.event === "gateway.ready") {
@@ -5945,8 +5953,10 @@ function ChatPageApp() {
       draftsRef.current.delete(key);
     } catch (error) {
       telemetry?.finish("error", error);
-      setError(error instanceof Error ? error.message : "这条消息暂时无法安全发送，请稍后重试。内容已为你保留");
-      if (activeKeyRef.current === key && !inputRef.current) { setInput(text); inputRef.current = text; }
+      restoreSendDraft(key, text, atts);
+      if (activeKeyRef.current === key) {
+        setError(error instanceof Error ? error.message : "这条消息暂时无法安全发送，请稍后重试。内容已为你保留");
+      }
       return;
     } finally { preparingSecretInputRef.current.delete(key); }
 
@@ -6012,7 +6022,7 @@ function ChatPageApp() {
         parts: [{ type: "text", text: displayText }],
         images: imgs.length ? imgs : undefined,
         retryAttachments: atts.length ? atts : undefined,
-        localSendId: originalBackend === "openclaw" ? idem : undefined,
+        localSendId: trackedSend || originalBackend === "openclaw" ? idem : undefined,
         // 非图片附件在气泡里以 chip 呈现（此前完全不显示——发出去后用户看不到
         // 自己附了什么）。
         // 视频带上 dataURL：气泡里渲染可播放的预览窗（点击进 lightbox）。
@@ -6032,6 +6042,7 @@ function ChatPageApp() {
       {
         role: "assistant",
         parts: composePendingParts([], "", "", pendingPlanRef.current.get(key) || []),
+        localSendId: trackedSend ? idem : undefined,
         pending: true,
       },
     ];
@@ -7266,6 +7277,7 @@ function ChatPageApp() {
       const m = messages[i];
       if (m.role === "user") {
         const txt = msgText(m);
+        if (isScheduledCronUserMessage(m, txt)) break;
         const atts = m.retryAttachments?.length ? m.retryAttachments
           : m.nativeAttachments?.length ? m.nativeAttachments : retryChatAttachments(m.images ?? []);
         if (txt || atts.length) {
@@ -8865,7 +8877,7 @@ function ChatPageApp() {
             errorText: m0.errPrefix ? t(m0.errPrefix, { msg: translated || t("chat.unknown") }) : translated,
             errorRaw: translated !== segText && segText ? segText : undefined,
             errorRepeat: m0.repeat,
-            onRetry: () => retryErrorGroup(g),
+            onRetry: m0.automation === "cron" ? undefined : () => retryErrorGroup(g),
             onCopy: segText ? () => copyText(segText) : undefined,
             onQuote: segText ? () => quoteGroup(g) : undefined,
             onOpenActivity: activity && !activity.live ? () => openTimelineModal(activity) : undefined,
@@ -10572,7 +10584,7 @@ function ChatPageApp() {
                             </>
                           ) : null}
                           <ChatResponseMetadata metadata={metadata} fallbackModel={last.model} />
-                          {!last.pending && isErrorTurn(last) && (
+                          {!last.pending && last.automation !== "cron" && isErrorTurn(last) && (
                             <button
                               type="button"
                               className="chat-copybtn chat-retrybtn"

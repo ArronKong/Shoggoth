@@ -12,6 +12,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { storageIssueCode } = require("../system-issue");
 const {
   MCP_CLIENT_REQUEST_TIMEOUT_MS,
   createMcpStdioHandler,
@@ -4611,7 +4612,9 @@ function createAgentService(options) {
       } catch (error) {
         const messages = require("../core/chat-secret-contract").SECRET_MESSAGES;
         const code = Object.hasOwn(messages, error?.code) ? error.code : "SECRET_PROCESSING_UNAVAILABLE";
+        const systemIssue = storageIssueCode(error);
         writeResponse(socket, { id: id ?? null, ok: false, error: { code, message: messages[code],
+          ...(systemIssue ? { systemIssue } : {}),
           ...(code === "SECRET_INPUT_REVIEW_REQUIRED" ? { ranges: error.ranges } : {}) } }); return;
       }
     } else if (request.method === "chat.session.prewarm") {
@@ -4930,17 +4933,17 @@ function createAgentService(options) {
           return validateChatServiceResult(canonical.method, handled);
         });
       } catch (error) {
-        if (error?.code === "UNKNOWN_METHOD") {
+        const isSend = request.method === "chat.send";
+        const receiptUncertain = isSend && error?.receiptUncertain === true;
+        if (error?.code === "UNKNOWN_METHOD" && !receiptUncertain) {
           errorResponse(socket, id, "UNKNOWN_METHOD", "Chat Service 方法尚未接线");
           return;
         }
-        if (["credentials_locked", "pending_commands_locked"].includes(error?.code)) {
-          errorResponse(socket, id, "SERVICE_UNAVAILABLE", "Shoggoth Service 暂时不可用");
-          return;
-        }
-        const mapped = mapChatServiceError(error);
+        const mapped = ["credentials_locked", "pending_commands_locked"].includes(error?.code)
+          ? mapChatServiceError({ code: "SERVICE_UNAVAILABLE" }) : mapChatServiceError(error);
         writeResponse(socket, { id: id ?? null, ok: false, error: { ...mapped,
-          ...(request.method === "chat.send" && error?.admissionAccepted === false ? { admissionAccepted: false } : {}) } });
+          ...(isSend && error?.admissionAccepted === false ? { admissionAccepted: false } : {}),
+          ...(receiptUncertain ? { receiptUncertain: true } : {}) } });
         return;
       }
     } else if (DOMAIN_SERVICE_METHOD_SET.has(request.method)) {

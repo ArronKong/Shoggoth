@@ -104,13 +104,6 @@
   text-align: left;
   color: inherit;
   font: inherit;
-  cursor: pointer;
-}
-.head:disabled {
-  cursor: default;
-}
-.head[data-startup="1"] {
-  opacity: 1;
 }
 .name {
   flex: none;
@@ -450,7 +443,6 @@
 .preview .row { padding-inline: 4px; }
 .preview .row:hover { background: transparent; }
 .preview .gutter { margin-left: 0; }
-.preview .head { cursor: inherit; }
 .preview .name {
   max-width: 35%;
   overflow: hidden;

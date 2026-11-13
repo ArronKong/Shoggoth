@@ -13,6 +13,11 @@ function load(relative, extra = {}) {
   vm.runInNewContext(compiled, { module, exports: module.exports, ...extra }); return module.exports;
 }
 const ui = load("../app/manage-ui/src/lib/mcpConnectorUi.ts", { URL });
+const modalCss = fs.readFileSync(new URL("../app/manage-ui/src/components/Modal.module.css", import.meta.url), "utf8");
+check.ok(/\.connector \.title > span\s*\{[^}]*\buser-select:\s*text\b/.test(modalCss),
+  "connector app names must opt into text selection");
+check.ok(/\.connector \.title > span > :first-child\s*\{[^}]*\buser-select:\s*none\b/.test(modalCss),
+  "the connector icon must stay outside the selectable title");
 const desktopFigma = {source:{kind:"custom"},auth:{kind:"none"},transport:{kind:"remote",protocol:"streamable-http",url:ui.FIGMA_DESKTOP_URL}};
 check.equal(ui.isFigmaDesktopConnector(desktopFigma),true);
 check.equal(ui.isFigmaDesktopConnector({...desktopFigma,transport:{...desktopFigma.transport,url:"http://localhost:3845/mcp/"}}),true);
