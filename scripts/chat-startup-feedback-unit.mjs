@@ -18,7 +18,7 @@ for (const stage of ["context", "compacting", "capabilities"]) {
   assert.equal(fromStatus({ statusKind: "starting", stage }).stage, stage, "pre-admission work has its own startup stage");
 }
 let state = fromStatus({ statusKind: "starting", stage: "preparing" }, 1000);
-for (const stage of ["connecting", "restoring", "waiting"]) {
+for (const stage of ["connecting", "reconnecting", "compacting", "restoring", "waiting"]) {
   state = update(state, { state: "status", statusKind: stage === "waiting" ? "running" : "starting", stage }, false, 5000);
   assert.equal(state.stage, stage);
   assert.equal(state.since, 1000, "phase changes retain the original startup timestamp");

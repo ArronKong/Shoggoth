@@ -30,11 +30,16 @@ assert.deepEqual(release.jobs.build.strategy.matrix.include.map(row => [row.arch
   [["arm64", "macos-latest"], ["x64", "macos-15-intel"]]);
 assert.deepEqual(release.jobs.build.needs, ["validate", "source-ci"]);
 assert.equal(release.jobs["source-ci"].uses, "./.github/workflows/ci.yml");
+assert.equal(release.jobs["source-ci"].if, "needs.validate.outputs.source_ci_run_id == ''");
+assert.equal(release.jobs.validate.permissions.actions, "read");
+assert.equal(release.jobs.validate.outputs.source_ci_run_id, "${{ steps.existing-ci.outputs.run_id }}");
+assert.equal(release.jobs.validate.steps.find(step => step.id === "existing-ci").run, "node scripts/release-source-ci.cjs");
+assert.match(release.jobs.build.if, /needs\.source-ci\.result == 'skipped' && needs\.validate\.outputs\.source_ci_run_id != ''/u);
 assert.equal(release.jobs["native-verification"].uses, "./.github/workflows/verify-signed-draft.yml");
 assert.deepEqual(release.jobs["accepted-draft"].needs, ["validate", "draft", "native-verification"]);
 assert.equal(release.on.workflow_dispatch.inputs.release_mode.default, "draft");
 assert.deepEqual(release.on.workflow_dispatch.inputs.release_mode.options, ["draft", "publish"]);
-assert.equal(release.jobs.publish.if, "inputs.release_mode == 'publish'");
+assert.match(release.jobs.publish.if, /inputs\.release_mode == 'publish'/u);
 assert.deepEqual(release.jobs.publish.needs, ["validate", "draft", "accepted-draft"]);
 assert.deepEqual(release.jobs.publish.concurrency, { group: "shoggoth-release-publication", "cancel-in-progress": false },
   "Serialize publication across versions before checking and updating Latest");
@@ -45,6 +50,22 @@ const publicationSteps = release.jobs.publish.steps.map(step => step.run || "").
 assert.match(publicationSteps, /dependency-audit-policy\.cjs --output publication\/audit-root\.json/u);
 assert.match(publicationSteps, /dependency-audit-policy\.cjs --directory app\/manage-ui --output publication\/audit-ui\.json/u);
 assert.match(publicationSteps, /release-publication\.cjs publish/u);
+assert.equal(release.jobs.publish.outputs.receipt_artifact, "${{ steps.publish.outputs.receipt_artifact }}");
+const verification = release.jobs["verify-public"];
+assert.deepEqual(verification.needs, ["validate", "publish"]);
+assert.deepEqual(verification.permissions, { contents: "read" });
+assert.ok(!verification.environment);
+assert.equal(verification.steps.find(step => step.uses?.startsWith("actions/download-artifact")).with.name,
+  "${{ needs.publish.outputs.receipt_artifact }}");
+assert.equal(verification.steps.find(step => step.name === "Verify anonymous downloads for the published release").run,
+  "node scripts/release-publication.cjs verify-public");
+for (const name of ["build", "draft", "native-verification", "accepted-draft", "publish", "verify-public"]) {
+  const job = release.jobs[name];
+  assert.match(job.if, /^!cancelled\(\)/u);
+  for (const dependency of job.needs) {
+    assert.ok(job.if.includes(`needs.${dependency}.result == 'success'`), `${name} requires ${dependency} success`);
+  }
+}
 assert.equal(release.jobs.build.env.SHOGGOTH_CODESIGN_MODE, "developer-id");
 assert.equal(release.jobs.build.env.SHOGGOTH_EXPECT_NOTARIZED, "1");
 assert.equal(release.jobs.build.environment, "macos-signing");
@@ -101,6 +122,7 @@ for (const steps of [buildSteps, native.jobs.macos.steps]) {
   assert.match(restore.run, /pfctl -X "\$PF_REFERENCE"/u);
 }
 const nativeSteps = native.jobs.macos.steps.map(step => step.run || "").join("\n");
+assert.match(nativeSteps, /node scripts\/release-native-download\.cjs/u);
 for (const gate of ["shoggoth-packaged-runtime-smoke.mjs", "shoggoth-memory-e5-packaged.cjs",
   "shoggoth-quarantined-first-launch.cjs", "release-stapler.cjs validate", "codesign --verify --deep --strict",
   "verify-app-update-release.mjs", "spctl --assess", "hdiutil verify"]) assert.ok(nativeSteps.includes(gate));

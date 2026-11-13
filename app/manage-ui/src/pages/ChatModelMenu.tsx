@@ -12,6 +12,7 @@ export interface ModelMenuChoice {
   id: string;
   name: string;
   provider?: string;
+  providerName?: string;
   bindingId?: string;
   /** Source within one Binding when it offers several (opaque; echoed on selection). */
   modelProviderRef?: string;
@@ -227,7 +228,15 @@ export default function ChatModelMenu({
     for (const m of models) set.add((m.provider || "").trim() || OTHER);
     return [...set].sort((a, b) => (a === OTHER ? 1 : b === OTHER ? -1 : a.localeCompare(b)));
   }, [models, OTHER, runtimeGroups]);
-  const groupName = (id: string) => runtimeGroups?.find(group => (group.bindingId || group.runtime) === id)?.name || providerNames?.[id] || id;
+  const catalogProviderNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const model of models) {
+      if (model.provider && model.providerName && !names.has(model.provider)) names.set(model.provider, model.providerName);
+    }
+    return names;
+  }, [models]);
+  const groupName = (id: string) => runtimeGroups?.find(group => (group.bindingId || group.runtime) === id)?.name
+    || providerNames?.[id] || catalogProviderNames.get(id) || id;
   // 只点名失败的 Runtime：一个分组失败不应让其它已加载的分组看起来也失败了。
   const failedGroups = runtimeGroups?.filter(group => !group.available
     && (!providerFilter || (group.bindingId || group.runtime) === providerFilter)) ?? [];
@@ -237,7 +246,7 @@ export default function ChatModelMenu({
     const q = query.trim().toLowerCase();
     const byProv = new Map<string, ModelMenuChoice[]>();
     for (const m of models) {
-      if (q && !`${m.name} ${m.id} ${m.runtimeName || ""}`.toLowerCase().includes(q)) continue;
+      if (q && !`${m.name} ${m.id} ${m.runtimeName || ""} ${m.provider || ""} ${m.providerName || ""} ${providerNames?.[m.provider || ""] || ""}`.toLowerCase().includes(q)) continue;
       const key = (runtimeGroups ? m.bindingId || m.runtime : m.provider)?.trim() || OTHER;
       // provider Tab 筛选与搜索框叠加：选中某 provider 时只留该组。
       if (providerFilter && key !== providerFilter) continue;
@@ -250,7 +259,7 @@ export default function ChatModelMenu({
       : a === OTHER ? 1 : b === OTHER ? -1 : a.localeCompare(b),
     );
     return entries.map(([provider, items]) => ({ provider, items }));
-  }, [models, query, providerFilter, OTHER, runtimeGroups, providers]);
+  }, [models, query, providerFilter, OTHER, runtimeGroups, providers, providerNames]);
 
   return (
     <div className="chat-model-menu" ref={rootRef}>
@@ -270,7 +279,7 @@ export default function ChatModelMenu({
         aria-haspopup="listbox"
         aria-expanded={open}
         title={active?.runtimeName ? `${active.runtimeName} / ${activeModel}`
-          : activeProvider ? `${activeProvider} / ${activeModel}` : t("chat.switchModel")}
+          : activeProvider ? `${groupName(activeProvider)} / ${activeModel}` : t("chat.switchModel")}
       >
         <span className="chat-pill__icon" aria-hidden="true"><IconModel /></span>
         <span className="chat-pill__label" id={labelledBy ? triggerLabelId : undefined}>{activeLabel}</span>

@@ -28,7 +28,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.22.3"
-      - name: Recover only proven allocation failures and report final failures
+      - name: Recover proven transient failures and report blocked stages
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/release-recovery.cjs

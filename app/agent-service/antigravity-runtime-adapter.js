@@ -88,7 +88,7 @@ class AntigravityRuntimeAdapter {
     }
     this.runtimePool = options.runtimePool;
     this.modelOnly = true;
-    this.modelOnlyPurposes = Object.freeze(["proactive", "memory_review"]);
+    this.modelOnlyPurposes = Object.freeze(["proactive", "memory_review", "condition_watch_review"]);
     this.handles = new Map();
     assertRuntimeAdapter(this);
   }

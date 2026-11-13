@@ -669,7 +669,7 @@ interface ChatMsg {
   // Backend timeline row (not a turn): renders as a quiet one-line divider like
   // `divider`, NOT as the red system/error bubble. For model switches, `model`
   // carries the new model; `parts` keep the backend's raw text for the hover title.
-  notice?: "modelSwitch" | "runInterrupted" | "contextCompacted";
+  notice?: "modelSwitch" | "runInterrupted" | "contextCompacted" | "processComplete";
 }
 
 type ChatTurnActivity = { steps: TurnStep[]; live?: boolean; runId?: string; timing?: TurnTiming; recoveredSteps?: TurnStep[] };
@@ -1295,7 +1295,7 @@ function normalize(raw: any): ChatMsg {
     toolName: raw?.toolName,
     isError: raw?.isError === true,
     provenance: raw?.provenance && typeof raw.provenance === "object" ? raw.provenance : undefined,
-    notice: ["modelSwitch", "runInterrupted", "contextCompacted"].includes(raw?.notice) ? raw.notice : undefined,
+    notice: ["modelSwitch", "runInterrupted", "contextCompacted", "processComplete"].includes(raw?.notice) ? raw.notice : undefined,
   };
   if (raw?.role === "custom" && (raw.display === false || raw.content === "")) return base;
   const media = normalizeOpenClawMediaFacts(raw?.__openclaw?.media);
@@ -3472,10 +3472,17 @@ function ChatPageApp() {
   }, [advanceRealActivity, decorateHistoryWithLiveState, observeReply, subagentActivity]);
 
   const commitOpenedHistory = useCallback((key: string, msgs: ChatMsg[], cacheVisible: boolean) => {
-    if (!isVisibleSession(sessionsRef.current.find(row => row.key === key) || { key })) return;
+    const session = sessionsRef.current.find(row => row.key === key);
+    if (!isVisibleSession(session || { key })) return;
     const prevKey = activeKeyRef.current;
-    unreadLandingRef.current = { key, after: sessionReadAt(unreadStateRef.current, key), pending: true, confirmed: unreadReadyRef.current };
-    setUnreadAnchor({ key, messageId: null, pending: true });
+    // Reselecting the current session is an explicit latest-message request.
+    // Running sessions also need their live tail: a local snapshot deliberately
+    // suppresses canonical commits, so waiting for historyLoaded would never land.
+    const landOnUnread = prevKey !== key && !inFlightRef.current.has(key) && !isSessionReplyPending(session);
+    unreadLandingRef.current = landOnUnread
+      ? { key, after: sessionReadAt(unreadStateRef.current, key), pending: true, confirmed: unreadReadyRef.current }
+      : null;
+    setUnreadAnchor({ key, messageId: null, pending: landOnUnread });
     if (prevKey && prevKey !== key) {
       draftsRef.current.set(prevKey, inputRef.current);
       attachmentDraftsRef.current.set(prevKey, attachmentsRef.current);
@@ -4619,7 +4626,7 @@ function ChatPageApp() {
           // 压缩归入当前会话的实时动态；纯 status 流也要创建/刷新 pending 气泡。
           if (sk && typeof p.statusKind === "string" && p.statusKind !== "idle") {
             timelineFeed(sk, { kind: "status", status: { kind: p.statusKind, text: typeof p.text === "string" ? p.text : undefined } });
-            if (["compacting", "compacted", "recalling", "recalled"].includes(p.statusKind)) renderLiveStateForSession(sk);
+            renderLiveStateForSession(sk);
           }
         } else if (p.state === "prompt") {
           // agent 阻塞等待用户回应（审批/澄清/sudo/密钥）→ pending 气泡上出交互卡。
@@ -5094,12 +5101,10 @@ function ChatPageApp() {
     const viewport = thread.getBoundingClientRect();
     const style = getComputedStyle(thread);
     const header = thread.parentElement?.querySelector(".chat-topdock")?.getBoundingClientRect();
-    const composer = (thread.parentElement?.querySelector("[data-chat-plan-dock]")
-      ?? thread.parentElement?.querySelector(".chat-composer"))?.getBoundingClientRect();
     // The thread extends behind the floating docks. Fully masked/covered
     // content does not count, but even one visible pixel of a long reply does.
     const top = Math.max(viewport.top + (parseFloat(style.getPropertyValue("--chat-fade-top")) || 0), header?.bottom ?? viewport.top);
-    const bottom = Math.min(viewport.bottom - (parseFloat(style.getPropertyValue("--chat-fade-bottom")) || 0), composer?.top ?? viewport.bottom);
+    const bottom = viewport.bottom - (parseFloat(style.getPropertyValue("--chat-fade-bottom")) || 0);
     const visible = parts.some((part) => {
       const rect = part.getBoundingClientRect();
       return rect.width > 0 && rect.height > 0
@@ -8420,22 +8425,24 @@ function ChatPageApp() {
     const headerRow = thread.parentElement?.querySelector<HTMLElement>(".chat-header__row");
     // Exclude the optional jump pill: its visibility must not move its own measurement boundary.
     const measure = () => {
-      const inputTop = dock.querySelector<HTMLElement>(".chat-composer")?.getBoundingClientRect().top;
-      if (inputTop != null) {
-        const headerBottom = headerRow?.getBoundingClientRect().bottom ?? thread.getBoundingClientRect().top + 116;
-        const space = Math.max(0, inputTop - headerBottom);
-        // On a short/narrow conversation, reserve readable message space above the plan.
-        dock.style.setProperty("--chat-plan-body-max", `${Math.max(24, Math.floor(space - 56 - Math.min(220, space * .7)))}px`);
+      const input = dock.querySelector<HTMLElement>(".chat-composer");
+      if (!input) return;
+      const requests = dock.querySelector<HTMLElement>("[data-mcp-connection-requests]");
+      const plan = dock.querySelector<HTMLElement>("[data-chat-plan-dock]");
+      const bounds = thread.getBoundingClientRect();
+      const headerBottom = headerRow?.getBoundingClientRect().bottom ?? bounds.top + 116;
+      const space = Math.max(0, input.getBoundingClientRect().top - headerBottom);
+      if (plan) {
+        const requestsHeight = requests ? plan.getBoundingClientRect().top - requests.getBoundingClientRect().top : 0;
+        dock.style.setProperty("--chat-plan-body-max", `${Math.max(24, Math.floor(space - 56 - requestsHeight - Math.min(220, space * .7)))}px`);
       }
-      const top = (dock.querySelector<HTMLElement>("[data-chat-plan-dock]")
-        ?? dock.querySelector<HTMLElement>(".chat-composer"))?.getBoundingClientRect().top;
-      if (top == null) return;
-      const clearance = Math.max(0, Math.ceil(thread.getBoundingClientRect().bottom - top));
+      const top = (requests ?? plan ?? input).getBoundingClientRect().top;
+      const clearance = Math.max(0, Math.ceil(bounds.bottom - top));
       const value = `${clearance}px`;
       if (thread.style.getPropertyValue("--chat-fade-bottom") === value) return;
       const wasAtBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 32;
       thread.style.setProperty("--chat-fade-bottom", value);
-      thread.style.setProperty("--chat-thread-bottom", `${clearance + 44}px`);
+      thread.style.setProperty("--chat-thread-bottom", `calc(${clearance}px + var(--chat-thread-tail-gap, 44px))`);
       if (wasAtBottom && !sendAnchorRef.current) thread.scrollTop = thread.scrollHeight;
       updateJumpVisibility();
     };
@@ -8545,7 +8552,12 @@ function ChatPageApp() {
       ? { ...group, key: `group:live-activity:${liveTurn.id}` } : group
   ), [shownGroups, liveTurn?.group, liveTurn?.id]);
   const livePending = liveTurn?.pending;
-  const activeTurnActivity = livePending?.finalReplyStreaming ? undefined : liveTurn?.activity;
+  const startupWait = activeKey && activeRunInFlight ? runWaitBySession[activeKey] : undefined;
+  const maintenanceWait = startupWait?.kind === "starting"
+    && (startupWait.stage === "reconnecting" || startupWait.stage === "compacting") ? startupWait : undefined;
+  const activeTurnActivity = livePending?.finalReplyStreaming ? undefined : maintenanceWait
+    ? { ...liveTurn?.activity, live: true, steps: withStartupWait(liveTurn?.activity?.steps ?? [], maintenanceWait) }
+    : liveTurn?.activity;
   const livePreview = renderActivityBubble(activeTurnActivity, openTimelineModal);
   const liveTail = livePending?.parts.at(-1);
   const liveLoading = !livePending?.finalReplyStreaming && liveTail?.type === "text" && !liveTail.text?.trim()
@@ -8781,6 +8793,7 @@ function ChatPageApp() {
             ? `${d.fromReset ? t("chat.archiveResetAt", { time: when }) : t("chat.archiveEarlierAt", { time: when })}${d.truncated ? ` · ${t("chat.archiveTruncated")}` : ""}`
             : n.notice === "contextCompacted" ? t("chat.compactedCtx")
               : n.notice === "runInterrupted" ? t("chat.runInterruptedNotice")
+              : n.notice === "processComplete" ? t("chat.processCompleteNotice")
               : `${t("chat.modelSwitchedNotice")}${n.model ? ` · ${n.model}` : ""}`,
           dividerTitle: d ? undefined : n.parts.find((p) => p.text)?.text || undefined,
         });
@@ -9004,8 +9017,9 @@ function ChatPageApp() {
   // per-model gateway decision with no read RPC, so it's probed + cached at runtime
   // (lib/thinkingCapability). Scoped to OpenClaw — Hermes rejects sessions.patch.
   const activeModelInfo = useMemo(
-    () => usesRuntimeModelPicker ? selectedRuntimeModel : selectableModels.find((m) => m.id === (active?.model ?? inheritedRuntimeDefault?.id)),
-    [usesRuntimeModelPicker, selectedRuntimeModel, active?.model, inheritedRuntimeDefault?.id, selectableModels],
+    () => usesRuntimeModelPicker ? selectedRuntimeModel : selectableModels.find((m) => m.id === (active?.model ?? inheritedRuntimeDefault?.id)
+      && (!active?.modelProvider || m.provider === active.modelProvider || m.acpProviderRef === active.modelProvider)),
+    [usesRuntimeModelPicker, selectedRuntimeModel, active?.model, active?.modelProvider, inheritedRuntimeDefault?.id, selectableModels],
   );
   const activeThinkingOptions = usesRuntimeModelPicker ? activeModelInfo?.thinkingOptions : active?.thinkingOptions ?? activeModelInfo?.thinkingOptions;
   const activeThinkingDefault = usesRuntimeModelPicker ? activeModelInfo?.thinkingDefault : active?.thinkingDefault ?? activeModelInfo?.thinkingDefault;
@@ -10200,7 +10214,8 @@ function ChatPageApp() {
                       <div key={groupRenderKey} className="chat-reset-divider">
                         <span className="chat-reset-divider__label" title={n.parts.find((p) => p.text)?.text || undefined}>
                           {t(n.notice === "contextCompacted" ? "chat.compactedCtx"
-                            : n.notice === "runInterrupted" ? "chat.runInterruptedNotice" : "chat.modelSwitchedNotice")}
+                            : n.notice === "runInterrupted" ? "chat.runInterruptedNotice"
+                            : n.notice === "processComplete" ? "chat.processCompleteNotice" : "chat.modelSwitchedNotice")}
                           {n.notice === "modelSwitch" && n.model ? ` · ${n.model}` : ""}
                         </span>
                       </div>
@@ -10643,7 +10658,7 @@ function ChatPageApp() {
               </div>
             ) : null}
 
-            {/* The plan and input share the bottom dock, outside the scrollable conversation. */}
+            {/* Connector requests, plan and input share the bottom dock outside the transcript. */}
             <div className="chat-botdock" data-native-ui-clip-edge="bottom"
               {...(activeAgentHeaderPanel ? { inert: "", "aria-hidden": true } : {})}>
             {showJump && (
@@ -10663,7 +10678,7 @@ function ChatPageApp() {
               </div>
             )}
 
-            {!immersive && activeKey && <McpConnectionRequests key={activeKey} backendId={activeBackend} agentId={agentOf(activeKey)} sessionKey={activeKey} visible={!immersive && !activeGroupId && routerLocation.pathname === "/chat"} />}
+            {!immersive && activeKey && <McpConnectionRequests key={`mcp-requests:${activeKey}`} backendId={activeBackend} agentId={agentOf(activeKey)} sessionKey={activeKey} visible={!immersive && !activeGroupId && routerLocation.pathname === "/chat"} />}
             {!immersive && planDock}
             <div
               className="chat-composer"

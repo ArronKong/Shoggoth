@@ -3822,6 +3822,7 @@ class ShoggothBackend extends AgentBackend {
       if (APPLE_DEVICE_METHODS.includes(method)) timeoutMs = method === "connector.apple.connect" ? null : 40_000;
       if (RUNTIME_COMMAND_METHODS.has(method)) timeoutMs = RUNTIME_COMMAND_TIMEOUT_MS;
       if (method === "proactive.runtime.verify") timeoutMs = PROACTIVE_VERIFY_TIMEOUT_MS;
+      if (method === "watch.test") timeoutMs = 12_000;
       if (method.startsWith("web.credentials.")) timeoutMs = ENCRYPTED_MUTATION_TIMEOUT_MS;
       if (SESSION_RUNTIME_METHODS.includes(method)) timeoutMs = 12_000;
       // Starting Codex's sign-in spawns its app-server; a cancel waits for the host to stop.
@@ -7784,7 +7785,7 @@ class ShoggothBackend extends AgentBackend {
     const preparationStage = status === "queued"
       ? payload?.reason === "CONTEXT_PREPARING" ? "context"
         : payload?.reason === "RUNTIME_PREPARING" ? "capabilities"
-          : payload?.reason === "CONTEXT_COMPACTING" ? "compacting" : null : null;
+          : payload?.reason === "CONTEXT_COMPACTING" ? payload.stage === "reconnecting" ? "reconnecting" : "compacting" : null : null;
     if (preparationStage) {
       // Durable admission is still pending, but the assistant is being prepared
       // now. Project the same phase for live events and recovered snapshots.
@@ -7796,7 +7797,7 @@ class ShoggothBackend extends AgentBackend {
     const queuedAt = status === "queued" && Number.isSafeInteger(payload?.queuedAt) && payload.queuedAt >= 0
       ? payload.queuedAt : null;
     const stage = ["starting", "running"].includes(status)
-      && ["preparing", "context", "compacting", "capabilities", "connecting", "restoring", "opening", "waiting"].includes(payload?.stage) ? payload.stage : null;
+      && ["preparing", "context", "compacting", "capabilities", "connecting", "reconnecting", "restoring", "opening", "waiting"].includes(payload?.stage) ? payload.stage : null;
     if (state.lastStatus === status && state.lastQueueReason === reason && state.lastQueuedAt === queuedAt
       && state.lastStartupStage === stage) return;
     state.lastStartupStage = stage;

@@ -154,7 +154,7 @@ class GroupChatService {
     this.driver.wake(groupId);
   }
 
-  bindCronDelivery(run, profileId, sourceQuote) {
+  #bindUserDelivery(run, profileId, sourceQuote, kind) {
     const { view, self, opportunity } = this.#toolCaller(run, profileId);
     const messageId = opportunity.causeMessageIds.at(-1);
     const message = messageId && this.store.getMessage(messageId);
@@ -162,13 +162,33 @@ class GroupChatService {
       || message.groupId !== view.group.id || message.author.kind !== "user" || message.seq > opportunity.inputThroughSeq
       || message.originKey.startsWith("user:agent-request:")
       || this.store.getDiscussionBinding(view.group.id, self.id)?.sessionKey !== run.sourceId) {
-      throw serviceError("MCP_TOOL_FORBIDDEN", "群定时任务需要当前群回合中用户直接授权");
+      throw serviceError("MCP_TOOL_FORBIDDEN", kind === "cron"
+        ? "群定时任务需要当前群回合中用户直接授权" : "群守望需要当前群回合中用户直接授权");
     }
     return { ownerScope: view.ownerScope, groupId: view.group.id, memberId: self.id, messageId: message.id };
   }
 
+  bindCronDelivery(run, profileId, sourceQuote) {
+    return this.#bindUserDelivery(run, profileId, sourceQuote, "cron");
+  }
+
+  bindWatchDelivery(run, profileId, sourceQuote) {
+    return this.#bindUserDelivery(run, profileId, sourceQuote, "watch");
+  }
+
+  watchConversation(run, profileId) {
+    const { view, self } = this.#toolCaller(run, profileId);
+    return { ownerScope: view.ownerScope, groupId: view.group.id, memberId: self.id };
+  }
+
   publishCronReply(input) {
     if (this.store.publishCronReply(input)) this.#changed(input.target.groupId);
+  }
+
+  publishWatchReply(input) {
+    const result = this.store.publishWatchReply(input);
+    if (result?.created) this.#changed(input.target.groupId);
+    return result ? { messageId: result.messageId, kind: "group" } : null;
   }
 
   async handle(method, params) {

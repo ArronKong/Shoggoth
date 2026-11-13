@@ -15,8 +15,10 @@ const { build } = createRequire(path.join(uiRoot, "package.json"))("esbuild");
 // CHAT_PERF_SOURCE_REF=<commit> node scripts/chat-rendering-performance-regression.mjs
 // Include the first-group remount case with CHAT_PERF_ARCHIVE_AT_TOP=1.
 // Include structured historical tool payloads with CHAT_PERF_WITH_TOOLS=1.
+// Run just the navigation behavior (also against SOURCE_REF) with CHAT_PERF_NAVIGATION_ONLY=1.
 const sourceRef = process.env.CHAT_PERF_SOURCE_REF;
 const baseline = Boolean(sourceRef) || process.env.CHAT_PERF_BASELINE === "1";
+const navigationOnly = process.env.CHAT_PERF_NAVIGATION_ONLY === "1";
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-chat-rendering-"));
 try {
   const bundle = path.join(temp, "fixture.js");
@@ -64,8 +66,8 @@ app.whenReady().then(async()=>{
   let passed=false;
   try {
     await w.loadFile(${JSON.stringify(page)},{hash:"/chat"});
-    const tailNavigation=${baseline} ? undefined : await w.webContents.executeJavaScript('window.runScrollNavigationFixture()');
-    const result=await w.webContents.executeJavaScript('window.baseline=${baseline};window.archiveAtTop=${process.env.CHAT_PERF_ARCHIVE_AT_TOP === "1"};window.runFixture()');
+    const tailNavigation=${baseline && !navigationOnly} ? undefined : await w.webContents.executeJavaScript('window.runScrollNavigationFixture()');
+    const result=${navigationOnly} ? {navigationOnly:true} : await w.webContents.executeJavaScript('window.baseline=${baseline};window.archiveAtTop=${process.env.CHAT_PERF_ARCHIVE_AT_TOP === "1"};window.runFixture()');
     console.log(JSON.stringify({tailNavigation,...result}));
     passed=true;
   } catch(error) {console.error(error);console.error(await w.webContents.executeJavaScript('JSON.stringify({error:window.fixtureError,text:document.body.innerText.slice(-3000),hash:location.hash})'));}
@@ -78,7 +80,7 @@ app.whenReady().then(async()=>{
   process.stdout.write(result.stdout || "");
   if (result.status !== 0) process.stderr.write(result.stderr || String(result.error || ""));
   assert.equal(result.status, 0, "chat rendering Electron fixture failed");
-  assert.match(result.stdout, /"bubbleReplacements":/, "fixture must report its completed assertions");
+  assert.match(result.stdout, navigationOnly ? /"liveReselections":3/ : /"bubbleReplacements":/, "fixture must report its completed assertions");
   if (process.env.CHAT_PERF_PREVIEW_DIR) {
     const preview = path.resolve(process.env.CHAT_PERF_PREVIEW_DIR);
     fs.mkdirSync(preview, { recursive: true });

@@ -117,6 +117,20 @@ test("pre-admission context and capability work is preparation, while capacity w
   ]);
 });
 
+test("native compaction auth recovery stays in the activity timeline through live and snapshot status", () => {
+  const backend = Object.create(ShoggothBackend.prototype), events = [], state = {};
+  const hooks = { status: data => events.push(data) };
+  for (const stage of [undefined, "reconnecting", "reconnecting", undefined, "private auth failure"]) {
+    backend._emitRunStatus(hooks, state, "queued", { reason: "CONTEXT_COMPACTING", queuedAt: 123, stage });
+  }
+  assert.deepEqual(events, [
+    { kind: "starting", text: "starting", stage: "compacting" },
+    { kind: "starting", text: "starting", stage: "reconnecting" },
+    { kind: "starting", text: "starting", stage: "compacting" },
+  ]);
+  assert.ok(!JSON.stringify(events).includes("private auth failure"));
+});
+
 test("slow admission preparation reports its actual stage without consuming execution capacity", async () => {
   const contextGate = deferred(), hooksGate = deferred(), contextEntered = deferred(), hooksEntered = deferred();
   let prewarmed = false;

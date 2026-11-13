@@ -12,6 +12,7 @@ import McpConnectorDialog from "../pages/McpConnectorDialog";
 import s from "../pages/ConnectorsPage.module.css";
 
 type ConnectionDialog = { item?: McpRegistryItem; recommendation?: McpRecommendation; initialUrl?: string; servers: McpServer[]; serverId?: string };
+type SetupDialog = { serverId: string; completeOnReady: boolean };
 const MAX_DISMISSED_REQUESTS = 512;
 const recommendations = featuredPresets as McpRecommendation[];
 const recommendationForRequest = (request: McpConnectionRequest) => mcpRecommendationForTarget(recommendations, {
@@ -28,6 +29,15 @@ function matchesConnection(request: McpConnectionRequest, server: McpServer): bo
   return url.href === request.url;
 }
 
+function DismissRequestButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return <button type="button" className={s.requestDismiss} aria-label={label} title={label} onClick={onClick}>
+    <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"
+      strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+      <path d="m4 4 8 8M12 4l-8 8" />
+    </svg>
+  </button>;
+}
+
 // Credentials stay in the mounted forms and are never included in chat messages.
 export default function McpConnectionRequests({ backendId, agentId, sessionKey, visible = true, group = false }: {
   backendId: string; agentId: string; sessionKey: string; visible?: boolean; group?: boolean;
@@ -42,7 +52,7 @@ export default function McpConnectionRequests({ backendId, agentId, sessionKey, 
   const [values, setValues] = useState<Record<string, string>>({});
   const [servers, setServers] = useState<McpServer[]>([]);
   const [connection, setConnection] = useState<ConnectionDialog | null>(null);
-  const [setupServer, setSetupServer] = useState<McpServer | null>(null);
+  const [setupDialog, setSetupDialog] = useState<SetupDialog | null>(null);
   const [opening, setOpening] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -52,8 +62,11 @@ export default function McpConnectionRequests({ backendId, agentId, sessionKey, 
   activeScope.current = visible && !group ? scope : null;
   const lookup = useRef<AbortController | null>(null);
   const completing = useRef<object | null>(null);
-  const visibleItems = items.filter(item => item.kind !== "connection" || !dismissedIds.includes(item.requestId));
+  const visibleItems = items.filter(item => !dismissedIds.includes(item.requestId));
   const request = visibleItems.find(item => item.requestId === selectedId);
+  const setupTargets = (item: McpConnectionRequest) => servers.filter(server => item.serverIds?.includes(server.id));
+  const selectedTargets = request?.kind === "setup" && setupDialog ? setupTargets(request) : [];
+  const setupServer = selectedTargets.find(server => server.id === setupDialog?.serverId);
   const activeConnection = connection && request?.kind === "connection" && mcpRequestStatus(request) === "pending" ? connection : null;
   const activeServer = activeConnection?.servers.find(server => server.id === activeConnection.serverId);
   const activeRecommendation = activeServer ? mcpRecommendationForTarget(recommendations, { server: activeServer,
@@ -64,7 +77,7 @@ export default function McpConnectionRequests({ backendId, agentId, sessionKey, 
     setSelectedId(null);
     setValues({});
     setConnection(null);
-    setSetupServer(null);
+    setSetupDialog(null);
     setError("");
   }, []);
   const dismissRequest = (requestId: string) => {
@@ -123,6 +136,11 @@ export default function McpConnectionRequests({ backendId, agentId, sessionKey, 
     setSelectedId(item.requestId);
     setValues({});
     setError("");
+  };
+  const openSetup = (item: McpConnectionRequest, serverId: string, completeOnReady = false) => {
+    if (lookup.current || completing.current || activeScope.current !== scope) return;
+    openRequest(item);
+    setSetupDialog({ serverId, completeOnReady });
   };
   const openConnection = async (value: McpConnectionRequest) => {
     if (lookup.current || completing.current || activeScope.current !== scope) return;
@@ -184,7 +202,7 @@ export default function McpConnectionRequests({ backendId, agentId, sessionKey, 
   if (!visible) return null;
   if (group) return <div className={s.requestList} role="note"><p>{tr("privateOnly")}</p></div>;
   if (!visibleItems.length) return null;
-  return <div className={s.requestList} aria-label={tr("request")}>
+  return <div className={s.requestList} data-mcp-connection-requests aria-label={tr("request")}>
     {visibleItems.map(item => {
       const status = mcpRequestStatus(item);
       const actionable = status === "pending" && item.continuation !== "unknown";
@@ -208,29 +226,57 @@ export default function McpConnectionRequests({ backendId, agentId, sessionKey, 
             {actionable && <button type="button" className="btn-secondary btn-sm" disabled={opening || busy}
               title={t("mcpConnectors.expires", { time: new Date(item.expiresAt).toLocaleString() })}
               onClick={() => void openConnection(item)}>{tr(current && opening ? "loading" : "add")}</button>}
-            <button type="button" className={s.requestDismiss} aria-label={dismissLabel} title={dismissLabel}
-              onClick={() => dismissRequest(item.requestId)}>
-              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"
-                strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
-                <path d="m4 4 8 8M12 4l-8 8" />
-              </svg>
-            </button>
+            <DismissRequestButton label={dismissLabel} onClick={() => dismissRequest(item.requestId)} />
           </div>
           {current && !activeConnection && error && <p className={`${s.error} ${s.requestError}`} role="alert">{error}</p>}
         </section>;
       }
 
-      const setup = item.kind === "setup";
-      const targets = setup ? servers.filter(server => item.serverIds?.includes(server.id)) : [];
-      const ready = setup && targets.length === item.serverIds?.length && targets.every(server => server.status === "ready");
+      if (item.kind === "setup") {
+        const targets = setupTargets(item);
+        const primary = targets.find(server => server.id === item.serverId) ?? targets[0];
+        const ready = targets.length === item.serverIds?.length && targets.every(server => server.status === "ready");
+        const single = item.serverIds?.length === 1 ? targets[0] : undefined;
+        const identity = single?.source?.kind === "registry" ? single.source.registryName : item.title;
+        const name = mcpConnectorName(identity, single?.name || item.title);
+        const detailsLabel = t("mcpConnectors.requestDetails", { name });
+        const description = status === "pending" && item.continuation === "unknown" ? tr("setupUnknown")
+          : !actionable ? statusLabel : ready ? tr("setupResuming")
+          : single ? tr(`statuses.${single.status}`) : tr("setupWaiting");
+        const setupAction = (server: McpServer) => {
+          if (server.status !== "signedOut" && server.status !== "needsSetup") return null;
+          return <button type="button" className="btn-secondary btn-sm" disabled={opening || busy} onClick={() => openSetup(item, server.id, true)}>
+            {tr(server.status === "signedOut" ? "signin" : "requestSecret")}
+          </button>;
+        };
+        return <section className={`${s.requestCard} ${s.requestConnection} ${s.requestSetup}`} key={item.requestId}>
+          {primary && <button type="button" className={s.requestOpen} aria-haspopup="dialog" disabled={opening || busy}
+            aria-label={detailsLabel} title={detailsLabel}
+            onClick={() => openSetup(item, primary.id)} />}
+          <McpConnectorIcon name={name} identity={identity} />
+          <div className={s.requestIdentity}>
+            <h3 title={name}>{name}</h3>
+            <p title={description}>{description}</p>
+          </div>
+          <div className={s.requestActions}>
+            {actionable && single && setupAction(single)}
+            <DismissRequestButton label={t("mcpConnectors.requestDismiss", { name })} onClick={() => dismissRequest(item.requestId)} />
+          </div>
+          {actionable && !ready && !single && targets.length > 0 && <div className={s.requestServices}>
+            {targets.map(server => {
+              const label = `${server.name} · ${tr(`statuses.${server.status}`)}`;
+              return <div key={server.id} className={s.requestService}>
+                <span title={label}>{label}</span>{setupAction(server)}
+              </div>;
+            })}
+          </div>}
+        </section>;
+      }
+
       return <section className={s.requestCard} key={item.requestId}>
         <h3>{item.title}</h3><p>{item.purpose}</p>
-        <p className={s.muted}>{!actionable ? statusLabel : setup ? tr(ready ? "setupResuming" : "setupUserAction")
-          : t("mcpConnectors.expires", { time: new Date(item.expiresAt).toLocaleString() })}</p>
-        {actionable && (setup ? targets.map(server => <div key={server.id} className={s.actions}>
-          <span>{server.name} · {tr(`statuses.${server.status}`)}</span>
-          {["needsSetup", "signedOut"].includes(server.status) && <button type="button" className={s.button} onClick={() => { openRequest(item); setSetupServer(server); }}>{tr(server.status === "signedOut" ? "signin" : "requestSecret")}</button>}
-        </div>) : <button type="button" className={s.button} onClick={() => openRequest(item)}>{tr("requestSecret")}</button>)}
+        <p className={s.muted}>{!actionable ? statusLabel : t("mcpConnectors.expires", { time: new Date(item.expiresAt).toLocaleString() })}</p>
+        {actionable && <button type="button" className={s.button} onClick={() => openRequest(item)}>{tr("requestSecret")}</button>}
       </section>;
     })}
     <Modal open={request?.kind === "secret"} onClose={() => { if (!busy) closeRequest(); }}
@@ -260,7 +306,13 @@ export default function McpConnectionRequests({ backendId, agentId, sessionKey, 
       }}
       onClose={closeRequest} onChanged={() => setReload(value => value + 1)}
       onReady={server => void complete(server.id)} />}
-    {setupServer && <McpConnectorDialog key={setupServer.id} server={setupServer}
-      onClose={closeRequest} onChanged={() => setReload(value => value + 1)} onReady={() => void complete()} />}
+    {setupDialog && setupServer && <McpConnectorDialog key={`${selectedId}:${setupServer.id}`} server={setupServer}
+      serverSelection={!setupDialog.completeOnReady && selectedTargets.length > 1 ? {
+        servers: selectedTargets,
+        onSelect: serverId => setSetupDialog({ ...setupDialog, serverId }),
+      } : undefined}
+      onClose={closeRequest} onChanged={() => setReload(value => value + 1)}
+      onReady={setupDialog.completeOnReady && request && mcpRequestStatus(request) === "pending" && request.continuation !== "unknown"
+        ? () => void complete() : undefined} />}
   </div>;
 }

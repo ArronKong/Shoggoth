@@ -329,6 +329,8 @@ export interface UnifiedModel {
   id: string;
   name: string;
   provider: string;
+  /** Display name from the configured endpoint; never used as a routing id. */
+  providerName?: string;
   backendId: string; // "openclaw" | "hermes"
   available?: boolean;
   unavailableReason?: string;
@@ -363,6 +365,7 @@ export interface AgentModelCatalog {
 // 聊天面能力（GET /__api/chat/capabilities?agent=）：composer 按此渲染附件
 // accept 列表与大小预检。image 是兼容底线；pdf/file 由真实可传输的后端声明。
 export interface ChatCapabilities {
+  observeAfterSend?: boolean;
   prewarm?: boolean;
   runtimeFeatures?: RuntimeFeatures;
   nativeUiArtifactsV1?: boolean;
@@ -3791,7 +3794,7 @@ export interface GroupChatMessage {
   replyTo?: { seq: number; messageId: string; author: GroupChatAuthor; excerpt: string; attachments?: InspirationAttachment[] };
   // partial：成员让出发言位时已经写出的那段话；late：它在后台做完后交回的结果。
   origin?: { opportunityId?: string; runId?: string | null; discussionId?: string; partial?: boolean; late?: boolean;
-    textItemId?: string; streaming?: boolean; cronJobId?: string };
+    textItemId?: string; streaming?: boolean; cronJobId?: string; watchId?: string; watchEventId?: string };
   createdAt: number;
   revision?: number;
   responseMetadata?: ChatResponseMetadata;

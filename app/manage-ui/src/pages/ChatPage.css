@@ -996,7 +996,7 @@
   /* Fade the stream out at BOTH ends so messages dissolve into the backdrop
      instead of hard-cutting at the floating bars (symmetric top + bottom). Alpha
      mask → theme-agnostic (no backdrop colour to match). --chat-fade-top / -bottom
-     are the header-bottom / composer-top edges (measured from the conv top / bottom)
+     are the header-bottom / input dock's content-top edges (measured from the conv top / bottom)
      where content is ~fully gone; --chat-fade = the fade-band height at each end.
      The bottom band tucks inside the last message's clearance gap (the 200px inner
      padding-bottom parks the latest turn above it → it stays crisp at rest; only
@@ -2080,6 +2080,26 @@
   .chat-global-search__identity { grid-column: 1; }
   .chat-global-search__snippet { grid-column: 1 / -1; grid-row: 2; }
   .chat-global-search__time { grid-column: 2; grid-row: 1; }
+}
+
+/* On short desktop windows, keep the session list beside the transcript to save vertical space. */
+@media (min-width: 720px) and (max-width: 900px) and (max-height: 680px) {
+  .chat-shell {
+    --skin-gutter: 12px;
+    grid-template-columns: min(200px, 27vw) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .chat-aside__list {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    padding-right: 8px;
+    overflow: hidden auto;
+    scrollbar-gutter: stable;
+  }
+  .chat-conv:has(.chat-botdock > [data-mcp-connection-requests]) .chat-thread {
+    --chat-fade: 16px;
+    --chat-thread-tail-gap: 8px;
+  }
 }
 
 /* ===================== QA-round additions (R54) ===================== */

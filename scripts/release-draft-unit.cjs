@@ -6,8 +6,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const yaml = require("js-yaml");
-const { packageNames, fileDigest, assertDraft, assertAssetInventory,
+const { packageNames, fileDigest, assertDraft, assertAssetInventory, githubClient,
   recordBuild, assemble, uploadDraft, verifyDraft, confirmDraft } = require("./release-draft.cjs");
+const { downloadNativeDraft } = require("./release-native-download.cjs");
 
 const version = "1.2.3", tag = "v1.2.3", sha = "a".repeat(40), runId = "42";
 const notarization = { id: "12345678-1234-1234-1234-123456789abc", status: "Accepted" };
@@ -61,6 +62,80 @@ function fakeClient() {
   };
   return { client, releases, bytes, failAt: value => { failAt = value; }, uploads: () => uploads };
 }
+
+test("native draft download retries a broken stream and installs only the verified file", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-draft-download-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const bytes = Buffer.from("signed fixture");
+  const expected = path.join(root, "expected");
+  fs.writeFileSync(expected, bytes);
+  const asset = { id: 100, name: "fixture.zip", size: bytes.length, digest: `sha256:${await fileDigest(expected)}` };
+  const destination = path.join(root, asset.name);
+  let calls = 0;
+  const backoffs = [];
+  const client = githubClient("ArronKong/Shoggoth", "test-only", {
+    fetch: async url => {
+      assert.ok(url.endsWith("/releases/assets/100"));
+      calls++;
+      if (calls === 1) return new Response(null, { status: 502 });
+      if (calls === 2) return new Response(new ReadableStream({
+        start(controller) { controller.enqueue(bytes.subarray(0, 3)); },
+        pull(controller) { controller.error(Object.assign(new Error("socket reset"), { code: "ECONNRESET" })); },
+      }));
+      return new Response(bytes);
+    },
+    sleep: async ms => { backoffs.push(ms); assert.deepEqual(fs.readdirSync(root), ["expected"]); },
+  });
+  assert.equal(await client.downloadDigest(asset, destination), asset.digest.slice(7));
+  assert.deepEqual(fs.readFileSync(destination), bytes);
+  assert.deepEqual(backoffs, [1500, 3000]);
+  assert.equal(calls, 3);
+});
+
+test("draft asset size, digest, TLS and access failures do not retry or leave partial bytes", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-draft-download-stop-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const destination = path.join(root, "fixture.zip");
+  const asset = { id: 100, name: "fixture.zip", size: 7, digest: `sha256:${"0".repeat(64)}` };
+  for (const [fetch, match] of [
+    [async () => new Response("small"), /size mismatch/u],
+    [async () => new Response("same sz"), /hash mismatch/u],
+    [async () => new Response(null, { status: 403 }), /HTTP 403/u],
+    [async () => { throw new TypeError("fetch failed", { cause: { code: "CERT_HAS_EXPIRED" } }); }, /transport failed/u],
+  ]) {
+    const client = githubClient("ArronKong/Shoggoth", "test-only", {
+      fetch, sleep: async () => assert.fail("Invalid release bytes or permissions must not retry"),
+    });
+    await assert.rejects(client.downloadDigest(asset, destination), match);
+    assert.deepEqual(fs.readdirSync(root), []);
+  }
+});
+
+test("native draft download is scoped to the expected Release ID, tag and architecture", async t => {
+  const { output } = await fixture(t);
+  const dir = path.join(output, "native");
+  const names = [...packageNames(version, "arm64"), ...packageNames(version, "x64"), "SHA256SUMS.txt", "latest-mac.yml"];
+  const assets = names.map(name => ({ name, state: "uploaded" }));
+  const release = { id: 5, draft: true, tag_name: tag, target_commitish: sha, assets,
+    body: `<!-- shoggoth-draft-pipeline:${sha} -->` };
+  const downloads = [];
+  const client = {
+    assertTag: async (...args) => assert.deepEqual(args, [tag, sha]),
+    request: async route => {
+      assert.equal(route, "/releases/5");
+      return { json: async () => release };
+    },
+    downloadDigest: async (asset, file) => downloads.push([asset.name, file]),
+  };
+  await downloadNativeDraft(client, dir, version, "x64", tag, sha, "5");
+  const expected = [...packageNames(version, "x64"), "SHA256SUMS.txt", "latest-mac.yml"];
+  assert.deepEqual(downloads, expected.map(name => [name, path.join(dir, name)]));
+  for (const patch of [{ id: 6 }, { draft: false }, { target_commitish: "b".repeat(40) }, { assets: assets.slice(1) }]) {
+    Object.assign(release, { id: 5, draft: true, target_commitish: sha, assets }, patch);
+    await assert.rejects(downloadNativeDraft(client, dir, version, "x64", tag, sha, "5"));
+    assert.equal(downloads.length, expected.length);
+  }
+});
 
 test("merge both exact ZIP hashes and retain the Intel fallback", async t => {
   const { output } = await fixture(t);

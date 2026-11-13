@@ -608,7 +608,6 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
           ]}
           ariaLabel={t("cron.viewToggle")}
         />
-
         <CronFiltersBar filters={filters} agents={agents} backends={cronBackends} onChange={setFilters} />
 
         <div className="cron-actions">

@@ -31,8 +31,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # Draft release visibility requires write permission.
+      actions: read # Read the exact public main CI result when available.
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
+      source_ci_run_id: ${{ steps.existing-ci.outputs.run_id }}
+      source_ci_run_attempt: ${{ steps.existing-ci.outputs.run_attempt }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -65,9 +68,17 @@ jobs:
           name: release-intent
           path: release-intent.json
           if-no-files-found: error
+      - name: Look up CI for the exact public main commit
+        id: existing-ci
+        timeout-minutes: 29
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: node scripts/release-source-ci.cjs
 
   source-ci:
     needs: validate
+    if: needs.validate.outputs.source_ci_run_id == ''
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -75,6 +86,10 @@ jobs:
   build:
     name: Sign and notarize ${{ matrix.arch }}
     needs: [validate, source-ci]
+    if: >-
+      !cancelled() && needs.validate.result == 'success' &&
+      (needs.source-ci.result == 'success' ||
+       (needs.source-ci.result == 'skipped' && needs.validate.outputs.source_ci_run_id != ''))
     strategy:
       fail-fast: false
       matrix:
@@ -322,6 +337,7 @@ jobs:
 
   draft:
     needs: [validate, build]
+    if: "!cancelled() && needs.validate.result == 'success' && needs.build.result == 'success'"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -364,6 +380,7 @@ jobs:
 
   native-verification:
     needs: [validate, draft]
+    if: "!cancelled() && needs.validate.result == 'success' && needs.draft.result == 'success'"
     uses: ./.github/workflows/verify-signed-draft.yml
     permissions:
       contents: write
@@ -374,6 +391,9 @@ jobs:
 
   accepted-draft:
     needs: [validate, draft, native-verification]
+    if: >-
+      !cancelled() && needs.validate.result == 'success' && needs.draft.result == 'success' &&
+      needs.native-verification.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -385,6 +405,8 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag }}
       RELEASE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
       RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+      RELEASE_SOURCE_CI_RUN_ID: ${{ needs.validate.outputs.source_ci_run_id }}
+      RELEASE_SOURCE_CI_RUN_ATTEMPT: ${{ needs.validate.outputs.source_ci_run_attempt }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -412,7 +434,9 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: inputs.release_mode == 'publish'
+    if: >-
+      !cancelled() && inputs.release_mode == 'publish' && needs.validate.result == 'success' &&
+      needs.draft.result == 'success' && needs.accepted-draft.result == 'success'
     needs: [validate, draft, accepted-draft]
     concurrency:
       group: shoggoth-release-publication
@@ -423,6 +447,8 @@ jobs:
       contents: write
       actions: read
       pull-requests: read
+    outputs:
+      receipt_artifact: ${{ steps.publish.outputs.receipt_artifact }}
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag }}
@@ -456,8 +482,11 @@ jobs:
           mkdir -p publication
           node scripts/dependency-audit-policy.cjs --output publication/audit-root.json
           node scripts/dependency-audit-policy.cjs --directory app/manage-ui --output publication/audit-ui.json
-      - name: Publish accepted immutable assets and verify anonymous downloads
-        run: node scripts/release-publication.cjs publish
+      - name: Publish accepted immutable assets
+        id: publish
+        run: |
+          node scripts/release-publication.cjs publish
+          echo "receipt_artifact=publication-attempt-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -465,9 +494,46 @@ jobs:
           path: publication/*.json
           if-no-files-found: warn
 
+  verify-public:
+    needs: [validate, publish]
+    if: "!cancelled() && needs.validate.result == 'success' && needs.publish.result == 'success'"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.22.3"
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.publish.outputs.receipt_artifact }}
+          path: publication
+      - name: Verify anonymous downloads for the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+        run: node scripts/release-publication.cjs verify-public
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: public-verification-attempt-${{ github.run_attempt }}
+          path: |
+            publication/public-verification.json
+            publication/public-verification-status.json
+          if-no-files-found: warn
+
   result:
     if: always()
-    needs: [validate, source-ci, build, draft, native-verification, accepted-draft, publish]
+    needs: [validate, source-ci, build, draft, native-verification, accepted-draft, publish, verify-public]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -480,7 +546,12 @@ jobs:
           const fs = require('node:fs');
           const results = JSON.parse(process.env.RESULTS);
           const rows = Object.entries(results).map(([name, job]) => `| ${name} | ${job.result} |`);
+          const ciRun = results.validate.outputs?.source_ci_run_id;
+          const ci = ciRun ? `Source CI reused from [main](https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${ciRun}).\n\n` : '';
+          const state = results.publish.result === 'success' && results['verify-public'].result !== 'success'
+            ? 'Release is public. Public download verification is pending; retry only the verify-public job.\n'
+            : '';
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
             `Requested mode: **${process.env.RELEASE_MODE || 'draft'}**\n\n| Stage | Result |\n| --- | --- |\n${rows.join('\n')}\n\n` +
-            'A publish failure can occur after the release is public. Consult the publication receipt before retrying; never replace signed assets.\n');
+            ci + state + 'For an interrupted publication, consult the existing Release ID and publication receipt before retrying.\n');
           NODE

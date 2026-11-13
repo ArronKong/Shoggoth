@@ -31,7 +31,7 @@ function setup() {
 const scope={runId:RUN_ID,assertCurrent(){}};
 const caller=(n=1,extra={})=>authority({callId:`a0000000-0000-4000-8000-${String(n).padStart(12,"0")}`,confirmation:true,...extra});
 test("new MCP setup tools have strict credential-free schemas and are non-resident",()=>{
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length,168);
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length,178);
   for(const name of RETIRED_CONNECTOR_TOOLS)assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(name),false);
   for(const name of MCP_CONNECTOR_TOOL_NAMES){assert.ok(MCP_PRODUCT_TOOL_NAMES.includes(name));assert.equal(RESIDENT_PRODUCT_TOOLS.has(name),false);}
   assert.ok(searchProductTools(MCP_PRODUCT_TOOL_DEFINITIONS,{query:"registry",limit:10}).tools.some(t=>t.name==="mcp_server_registry_search"));

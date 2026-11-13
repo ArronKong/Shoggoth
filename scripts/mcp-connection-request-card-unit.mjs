@@ -276,7 +276,17 @@ for (const mode of ['normal', 'immersive']) {
     f.setServers([{ id: 'mcp-key', name: 'API connector', status: 'needsSetup' }, { id: 'mcp-login', name: 'OAuth connector', status: 'signedOut' }]);
     f.rows.set('setup-session', [request('setup-batch', { kind: 'setup', serverId: 'mcp-key', serverIds: ['mcp-key', 'mcp-login'], requiredFields: [], continuation: 'waiting' })]);
     await f.mount(mode, 'setup-session');
-    assert.equal(f.root.findAllByType('button').length, 2, 'only credential and sign-in actions remain; no add/import confirmation');
+    assert.equal(f.root.findAllByType('button').length, 4, 'only details, credential, sign-in and dismiss actions are shown');
+    const details = () => f.root.findByProps({ 'aria-label': '查看Fixture setup-batch连接器详情' });
+    await f.event(() => details().props.onClick());
+    const batchDialog = () => f.root.findByProps({ 'data-setup-dialog': true });
+    assert.equal(batchDialog().props.server.id, 'mcp-key');
+    assert.deepEqual(clone(batchDialog().props.serverSelection.servers.map(server => server.id)), ['mcp-key', 'mcp-login']);
+    await f.event(() => batchDialog().props.serverSelection.onSelect('mcp-login'));
+    assert.equal(batchDialog().props.server.id, 'mcp-login');
+    assert.equal(batchDialog().props.onReady, undefined, 'viewing details must not complete a setup request');
+    await f.event(() => batchDialog().props.onClose());
+    assert.deepEqual(f.submissions, []);
     await f.event(() => button(f, resources['zh-CN'].requestSecret).props.onClick());
     const dialog = f.root.findByProps({ 'data-setup-dialog': true });
     assert.equal(dialog.props.credentialsOnly, undefined, 'setup requests use the full shared connector details'); assert.equal(dialog.props.server.id, 'mcp-key');
@@ -284,8 +294,43 @@ for (const mode of ['normal', 'immersive']) {
     assert.deepEqual(f.submissions, [{ requestId: 'setup-batch' }], 'completion carries no credential or alternate server identity');
     assert.equal(f.root.findAllByProps({ 'data-setup-dialog': true }).length, 0);
     f.rows.set('setup-session', [request('uncertain-batch', { kind: 'setup', serverId: 'mcp-key', serverIds: ['mcp-key'], requiredFields: [], continuation: 'unknown' })]);
-    await f.tick(); assert.equal(f.root.findAllByType('button').length, 0, 'uncertain continuation has no replay action');
-    assert.ok(text(f.json).includes(resources['zh-CN'].errors.ackUnknown)); assert.deepEqual(f.storageWrites, []); scenarios++;
+    await f.tick(); assert.equal(f.root.findAllByType('button').length, 2, 'uncertain continuation only offers details and dismiss');
+    assert.ok(text(f.json).includes(resources['zh-CN'].setupUnknown)); assert.deepEqual(f.storageWrites, []); scenarios++;
+  } finally { await f.close(); }
+}
+{
+  const f = fixture(); try {
+    const ready = request('ready-openmotion', {
+      kind: 'setup', title: 'openmotion', purpose: 'Internal continuation instructions '.repeat(20),
+      serverId: 'openmotion', serverIds: ['openmotion'], requiredFields: [], continuation: 'waiting',
+    });
+    f.setServers([{ id: 'openmotion', name: 'openmotion', status: 'ready' }]);
+    f.rows.set('ready-session', [ready]);
+    await f.mount('normal', 'ready-session');
+    assert.ok(text(f.json).includes(resources['zh-CN'].setupResuming));
+    assert.equal(text(f.json).includes('Internal continuation instructions'), false);
+    const details = () => f.root.findByProps({ 'aria-label': '查看openmotion连接器详情' });
+    const dialog = () => f.root.findByProps({ 'data-setup-dialog': true });
+    await f.event(() => details().props.onClick());
+    assert.equal(dialog().props.server.id, 'openmotion');
+    assert.equal(dialog().props.onReady, undefined);
+    await f.event(() => dialog().props.onClose());
+    assert.ok(text(f.json).includes(resources['zh-CN'].setupResuming), 'closing details must keep the card');
+    await f.event(() => f.root.findByProps({ 'aria-label': '关闭openmotion连接请求' }).props.onClick());
+    assert.equal(f.root.findAllByProps({ 'data-setup-dialog': true }).length, 0, 'dismissing the card must not open details');
+    await f.tick();
+    assert.equal(f.root.findAllByType('section').length, 1, 'polling must keep the dismissed request hidden');
+    f.pagehide();
+    assert.deepEqual(JSON.parse(f.storageWrites.at(-1)[1]).values['chat.dismissedMcpConnectionRequests'], [ready.requestId]);
+    f.rows.set('ready-session', [{ ...ready, status: 'completed' }, { ...ready, requestId: 'new-openmotion-request' }]);
+    await f.change('immersive', 'ready-session');
+    assert.equal(f.root.findAllByType('h3').length, 1, 'only the new request is visible after changing layout');
+    await f.event(() => details().props.onClick());
+    assert.equal(dialog().props.server.id, 'openmotion');
+    await f.change('immersive', 'different-session');
+    assert.equal(f.root.findAllByProps({ 'data-setup-dialog': true }).length, 0, 'switching chats must close details');
+    assert.deepEqual(f.submissions, [], 'dismissing a ready setup request only hides it locally');
+    scenarios++;
   } finally { await f.close(); }
 }
 console.log(JSON.stringify({ outcome: 'PASS', scenarios, level: 'real React component events with controlled API; not Service, browser layout, or actual group integration proof', ordinaryAndImmersive: true, localDraftOnly: true, failedRetrySameRequest: true, unknownAckNoReplayGuidance: true }));

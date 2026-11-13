@@ -2,21 +2,25 @@
 const { digest, fail } = require("./proactive-service-protocol");
 const { notificationPolicy } = require("./notification-policy");
 const { initialRuntimePermissionMode } = require("./runtime-permission-modes");
+const { createHash } = require("node:crypto");
+const watchNoticeEventId = (watchId, noticeId) => `watch-notice-${createHash("sha256").update(watchId).update(noticeId).digest("hex")}`;
 function noticeMessage(notice) {
   const label = value => (value || "灵感便签").replace(/\s+/gu, " ").replace(/[\\\[\]()*_`<>]/gu, "\\$&");
   const links = notice.items.map(item => `- [${label(item.title)}](${item.href.startsWith("/") ? `#${item.href}` : item.href})`).join("\n");
   return `${notice.body}\n\n${links}`;
 }
 
-// Only the delivery controller writes this runless publication identity. A
-// background review, imported reply or user-supplied lookalike is not a notice.
+// Runless publications use Service-owned identities. Background output and
+// imported replies never receive this identity from a model.
 function isPublishedNoticeEvent(event) {
   const notice = event?.content?.proactiveNotice;
   return event?.kind === "assistant" && event.runId === null && event.runtimeRef === null
     && typeof notice?.id === "string" && /^notice-[a-f0-9]{64}$/u.test(notice.id)
-    && event.id === `proactive-${notice.id}` && ["heartbeat", "inspiration"].includes(notice.kind)
-    && typeof event.content.text === "string" && event.content.text.trim().length > 0
-    && Array.isArray(notice.items) && notice.items.length > 0;
+    && Array.isArray(notice.items)
+    && ((event.id === `proactive-${notice.id}` && ["heartbeat", "inspiration"].includes(notice.kind) && notice.items.length > 0)
+      || (notice.kind === "condition_watch" && /^watch-[a-f0-9]{64}$/u.test(notice.watchId ?? "")
+        && event.id === watchNoticeEventId(notice.watchId, notice.id)))
+    && typeof event.content.text === "string" && event.content.text.trim().length > 0;
 }
 
 const proactiveTranscriptId = runId => `proactive-run-${digest(runId)}`;
@@ -151,4 +155,4 @@ class NoticeDeliveryController {
   }
   async recover() { for (const notice of this.store.outbox()) await this.deliver(notice.id); }
 }
-module.exports = { NoticeDeliveryController, noticeMessage, isPublishedNoticeEvent, proactiveTranscriptId };
+module.exports = { NoticeDeliveryController, noticeMessage, isPublishedNoticeEvent, proactiveTranscriptId, watchNoticeEventId };
