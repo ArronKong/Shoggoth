@@ -186,10 +186,12 @@ function McpServiceGroupDialog({ recommendation, server, initialUrl, catalogEntr
   </Modal>;
 }
 
+type McpServerSelection = { servers: McpServer[]; onSelect: (serverId: string) => void };
 type McpConnectorDialogProps = {
   embedded?: boolean; catalogEntry?: boolean; pending?: boolean; autoAdd?: boolean; onStage?: () => void; onUnstage?: () => void;
   server?: McpServer; item?: McpRegistryItem; latest?: McpRegistryItem; onLatest?: (item: McpRegistryItem) => void; recommendation?: McpRecommendation; initialUrl?: string; allowFigmaDesktop?: boolean; managed?: boolean; credentialsOnly?: boolean; onClose: () => void; onChanged: () => void; onReady?: (server: McpServer) => void;
-  connectionRequest?: { busy: boolean; error: string; servers: McpServer[]; onSelect: (serverId: string) => void };
+  connectionRequest?: McpServerSelection & { busy: boolean; error: string };
+  serverSelection?: McpServerSelection;
 };
 
 export default function McpConnectorDialog(props: McpConnectorDialogProps) {
@@ -197,14 +199,15 @@ export default function McpConnectorDialog(props: McpConnectorDialogProps) {
   const recommendation = props.recommendation || mcpRecommendationForTarget(featuredPresets as McpRecommendation[], {
     server: props.server, registryName, catalogId: registryName ? mcpBrandId(registryName) : undefined, url: props.initialUrl,
   });
-  return mcpServiceGroupEndpoints(recommendation).length && !props.managed && !props.credentialsOnly && !props.embedded
+  return mcpServiceGroupEndpoints(recommendation).length && !props.managed && !props.credentialsOnly && !props.embedded && !props.serverSelection
     ? <McpServiceGroupDialog key={recommendation!.id} {...props} recommendation={recommendation!} />
     : <McpSingleConnectorDialog {...props} recommendation={recommendation} />;
 }
 
-function McpSingleConnectorDialog({ server: initialServer, item, latest, onLatest, recommendation, initialUrl = "", allowFigmaDesktop = false, managed = false, credentialsOnly = false, embedded = false, catalogEntry = false, pending = false, autoAdd = false, onStage, onUnstage, onClose, onChanged, onReady, connectionRequest }: McpConnectorDialogProps) {
+function McpSingleConnectorDialog({ server: initialServer, item, latest, onLatest, recommendation, initialUrl = "", allowFigmaDesktop = false, managed = false, credentialsOnly = false, embedded = false, catalogEntry = false, pending = false, autoAdd = false, onStage, onUnstage, onClose, onChanged, onReady, connectionRequest, serverSelection }: McpConnectorDialogProps) {
   const confirm = useConfirm();
   const { t, i18n } = useTranslation(); const tr = (key: string) => t(`mcpConnectors.${key}`);
+  const selection = serverSelection ?? connectionRequest;
   const language = i18n?.resolvedLanguage || i18n?.language || "en";
   const flightaware = recommendation?.id === "flightaware";
   const builtinQuery = flightaware || recommendation?.id === "ticketmaster";
@@ -464,10 +467,10 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
       iconId={recommendation?.id || mcpOfficialSkillBrand(server) || server?.recommendationId || registrySummary?.iconId} />{title}</span>}
     width={640} variant="connector" subtitle={description} footer={footer}>
     <div className={s.detail}>
-      {connectionRequest && connectionRequest.servers.length > 1 && <label className={s.field}>
+      {selection && selection.servers.length > 1 && <label className={s.field}>
         <span>{tr("selectInstalled")}</span>
-        <select value={initialServer?.id || ""} disabled={locked} onChange={event => connectionRequest.onSelect(event.target.value)}>
-          {connectionRequest.servers.map(candidate => <option key={candidate.id} value={candidate.id}>
+        <select value={initialServer?.id || ""} disabled={locked} onChange={event => selection.onSelect(event.target.value)}>
+          {selection.servers.map(candidate => <option key={candidate.id} value={candidate.id}>
             {candidate.name} · {tr(`statuses.${candidate.status}`)}
           </option>)}
         </select>

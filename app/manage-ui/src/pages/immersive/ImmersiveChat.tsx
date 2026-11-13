@@ -321,9 +321,12 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     if (!dock || !root || view !== "chat") return;
     const measure = () => {
       const inputTop = dock.querySelector<HTMLElement>("[data-chat-composer]")?.getBoundingClientRect().top;
-      if (inputTop != null && threadRef.current) {
+      const requests = dock.querySelector<HTMLElement>("[data-mcp-connection-requests]");
+      const plan = dock.querySelector<HTMLElement>("[data-chat-plan-dock]");
+      if (inputTop != null && plan && threadRef.current) {
         const space = Math.max(0, inputTop - threadRef.current.getBoundingClientRect().top);
-        dock.style.setProperty("--chat-plan-body-max", `${Math.max(24, Math.floor(space - 54 - Math.min(220, space * .7)))}px`);
+        const requestsHeight = requests ? inputTop - requests.getBoundingClientRect().top : 0;
+        dock.style.setProperty("--chat-plan-body-max", `${Math.max(24, Math.floor(space - 54 - requestsHeight - Math.min(220, space * .7)))}px`);
       }
       const clearance = Math.ceil(root.getBoundingClientRect().bottom - dock.getBoundingClientRect().top + 12);
       const value = `${clearance}px`;
@@ -974,6 +977,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
       {view === "chat" && (
       <div ref={composerDockRef} className={styles.composerDock} data-chat-composer-dock data-native-ui-clip-edge="bottom">
       {planDock}
+      {connectionRequests}
       <div
         className={failed ? `${styles.composer} ${styles.fallback}` : styles.composer}
         data-chat-composer
@@ -1018,7 +1022,6 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
             ))}
           </div>
         )}
-        {connectionRequests}
         <textarea
           ref={inputElRef}
           className={styles.input}

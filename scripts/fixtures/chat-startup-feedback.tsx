@@ -106,12 +106,15 @@ const check=(cond:unknown,label:string)=>{if(!cond)throw Error(label);};
 
 const tick=()=>new Promise(r=>setTimeout(r,60));
 const waitNode=()=>visible<HTMLElement>('[data-testid="chat-run-wait"]');
-const loadingSelector = (immersive ? '[data-testid="immersive-chat"]' : '.chat-thread .chat-bubble.is-streaming')
-  + ` [role="status"][aria-label="${i18n.t("chat.liveStatus.running")}"]`;
-const checkLoadingBubble=()=>{
-  const loader=visible<HTMLElement>(loadingSelector);
+const loadingSelector = (immersive ? '[data-testid="immersive-chat"]' : '.chat-thread')
+  + ` [data-live-activity-bubble="waiting"] [role="status"][aria-label="${i18n.t("chat.liveStatus.running")}"]`;
+const maintenanceScope = immersive ? '[data-testid="immersive-chat"]' : ".chat-thread";
+const maintenanceLoadingSelector = `${maintenanceScope} [data-live-activity-bubble="activity"] [role="status"][aria-label="${i18n.t("chat.liveStatus.running")}"]`;
+const checkLoadingBubble=(maintenance=false)=>{
+  const selector = maintenance ? maintenanceLoadingSelector : loadingSelector;
+  const loader=visible<HTMLElement>(selector);
   check(!!loader,"pending reply must show its loading bubble");
-  check(document.querySelectorAll(loadingSelector).length===1,"only one reply loading animation is shown");
+  check(document.querySelectorAll(selector).length===1,"only one reply loading animation is shown");
   check(loader!.querySelectorAll("circle").length===2,"reply uses the existing two-ball animation");
   check(loader!.getAttribute("aria-label")===i18n.t("chat.liveStatus.running"),"loading animation announces its status");
   check(loader!.getAnimations({subtree:true}).some(animation=>animation.playState==="running"),"reply loading animation is running");
@@ -119,9 +122,15 @@ const checkLoadingBubble=()=>{
 const stage=async(value:string,statusKind="starting")=>{
   emit({state:"status",statusKind,stage:value});
   await tick();
-  check(!waitNode(), "startup stages do not create a separate card");
-  checkLoadingBubble();
-  const bounds = visible<HTMLElement>(loadingSelector)!.getBoundingClientRect();
+  const maintenance = ["reconnecting", "compacting"].includes(value);
+  if (maintenance) {
+    await wait(() => waitNode()?.dataset.stage === value, "maintenance progress appears in live activity");
+    check(waitNode()!.textContent?.includes(i18n.t(`chat.runWait.${value}`)), "maintenance uses its translated status");
+    check(!!waitNode()!.closest('[data-live-activity-bubble="activity"]'), "maintenance belongs to the existing live activity bubble");
+    check(document.querySelectorAll(`${maintenanceScope} [data-testid="chat-run-wait"]`).length === 1, "one live maintenance status is visible");
+  } else check(!waitNode(), "ordinary startup stages do not create a separate card");
+  checkLoadingBubble(maintenance);
+  const bounds = visible<HTMLElement>(maintenance ? maintenanceLoadingSelector : loadingSelector)!.getBoundingClientRect();
   check(bounds.left >= 0 && bounds.right <= innerWidth + 1, "the loader fits the viewport");
   if (!immersive) {
     const thread = document.querySelector<HTMLElement>(".chat-thread")!;
@@ -159,7 +168,7 @@ const finish=async(state="final")=>{
 const preview=async()=>{await send();if(!query.has("all-stages"))await stage("restoring");};
 Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests,preview},runStartupFeedbackFixture:async()=>{
   await send();
-  for(const value of ["context","capabilities","compacting","connecting","restoring","opening"])await stage(value);
+  for(const value of ["context","capabilities","compacting","reconnecting","compacting","connecting","restoring","opening"])await stage(value);
   check(!document.querySelector('.chat-header .chat-status__label')?.textContent?.includes(i18n.t("chat.liveStatus.queued")),"context maintenance must not claim a queue");
   await stage("waiting","running");
   emit({state:"delta",message:{role:"assistant",content:[{type:"text",text:""}]}});await tick();

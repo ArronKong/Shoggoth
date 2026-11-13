@@ -18,10 +18,20 @@ let serving = false, server;
 try {
   const contents = fs.readFileSync(path.join(root, "scripts/fixtures/chat-cron-display.tsx"), "utf8")
     .replaceAll('"../../app/', '"' + sourceRoot + '/app/');
+  const { HermesBackend } = createRequire(import.meta.url)(path.join(sourceRoot, "app/core/hermes-backend.js"));
+  const notification = "[IMPORTANT: Background process proc_fixture completed normally (exit code 0).\n"
+    + "Command: hermes update 2>&1 | tail -25\nOutput:\nOSError: [Errno 28] No space left on device]";
+  const now = Date.now() / 1000;
+  const processHistory = new HermesBackend({})._mapHistoricalMessages([
+    { id: 1, role: "user", content: "Please update Hermes", timestamp: now - 30 },
+    { id: 2, role: "user", content: notification, timestamp: now - 20, display_kind: "process_complete" },
+    { id: 3, role: "assistant", content: "PROCESS_FOLLOWUP: The update hit a disk error.", timestamp: now - 10 },
+    { id: 4, role: "user", content: notification, timestamp: now - 5 },
+  ]);
   await build({ plugins: [viteArtworkFixturePlugin(sourceRoot)],
     stdin: { contents, sourcefile: "chat-cron-display.tsx", resolveDir: path.join(root, "scripts/fixtures"), loader: "tsx" },
     bundle: true, format: "esm", jsx: "automatic", nodePaths: [path.join(ui, "node_modules")],
-    define: { "process.env.NODE_ENV": '"production"' },
+    define: { "process.env.NODE_ENV": '"production"', __PROCESS_HISTORY__: JSON.stringify(processHistory) },
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), logLevel: "silent" });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><title>隔离 Cron 聊天显示验收</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>');

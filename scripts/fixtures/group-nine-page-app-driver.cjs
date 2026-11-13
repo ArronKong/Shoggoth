@@ -282,6 +282,15 @@ async function run() {
     checkpoint(`route ${link.href}: capture`);
     const file = path.join(root, `nine-page-${link.href.replace(/[^a-z0-9]/gi, "")}.png`);
     fs.writeFileSync(file, (await mainWindow.webContents.capturePage()).toPNG(), { mode: 0o600 }); report.screenshots.push(file);
+    if (link.href === "#/cron") {
+      const hasWatchButton = "Array.from(document.querySelectorAll('main.content button')).some(button=>['条件守望','Condition watches'].includes(button.textContent.trim()))";
+      assert.equal(await js(hasWatchButton), false);
+      await js("location.hash='/cron?view=watches';void 0");
+      await js("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))");
+      assert.equal(await js("!!document.querySelector('main.content .cron-toolbar')"), true, "old bookmarks open the normal Cron page");
+      assert.equal(await js(hasWatchButton), false);
+      report.conditionWatchUiRemoved = true;
+    }
   }
   checkpoint("native chat roundtrip");
   // Use one production navigation entry. Sending the notification event as well

@@ -117,6 +117,9 @@ const { InspirationReminderService } = require("./inspiration-reminder-service")
 const { NoticeDeliveryController } = require("./notice-delivery-controller");
 const { PROACTIVE_SERVICE_METHODS, PUBLIC_MESSAGES: PROACTIVE_PUBLIC_MESSAGES, validateParams: validateProactiveParams, validateResult: validateProactiveResult } = require("./proactive-service-protocol");
 const PROACTIVE_SERVICE_METHOD_SET = new Set(PROACTIVE_SERVICE_METHODS);
+const watchProtocol = require("./condition-watch-protocol");
+const { ConditionWatchStore, WATCH_LOCK } = require("./condition-watch-store");
+const { ConditionWatchService } = require("./condition-watch-service");
 const { GroupChatStore } = require("./group-chat-store");
 const { GroupChatService } = require("./group-chat-service");
 const { GroupChatDriver } = require("./group-chat-driver");
@@ -296,6 +299,7 @@ const PERSISTENT_WRITER_LOCK_BASENAMES = Object.freeze([
   "native-cron.writer.lock",
   "native-kanban.writer.lock",
   "pending-commands.writer.lock",
+  WATCH_LOCK,
 ]);
 const CHAT_SERVICE_METHOD_SET = new Set(CHAT_SERVICE_METHODS);
 const { withChatSendDiagnostics, setChatSendDiagnosticPhase } = require("./chat-send-diagnostics");
@@ -2062,6 +2066,8 @@ function createAgentService(options) {
       console.error(`[agent-service] Agent folder links unavailable: ${error?.code || "UNKNOWN"}`);
     }
   };
+  const conditionWatchStore = new ConditionWatchStore({ paths, now: options.now });
+  let conditionWatchStoreOpened = false;
   const retentionStores = [chatSessionStore, nativeCronStore, nativeKanbanStore,
     inspirationStore, proactiveStore, hookStore, permissionEngine, runtimeSessionOwnershipStore, tokenUsageStore, sourceConversationStore];
   const agentArchiveRetention = typeof productStore.purgeArchivedProfile === "function"
@@ -2094,6 +2100,7 @@ function createAgentService(options) {
         revokeConnectorProfileAccess(profile.id);
         learningStore.purgeProfile(profile.id);
         for (const store of retentionStores) store.purgeProfile(profile.id);
+        if (conditionWatchStoreOpened) conditionWatchStore.purgeProfile(profile.id);
         productStore.purgeArchivedProfile(profile.id);
       },
       finalizePurge(profileId) {
@@ -2175,6 +2182,10 @@ function createAgentService(options) {
         onProfileChanged: (payload) => {
           refreshAgentNameLinks();
           chatUiController.profileChanged(payload.profileId);
+          if (conditionWatchStoreOpened && productStore.getAgentProfile(payload.profileId)?.enabled === false) {
+            try { conditionWatchStore.pauseProfile(payload.profileId); conditionWatchService.profilePaused(payload.profileId); }
+            catch (error) { logConditionWatchError(error); }
+          }
           eventBuffer.append("agent.profile.changed", { ...payload, backendId: payload.backendId });
         },
         revokeSharedProfileAccess: profileId => {
@@ -2929,6 +2940,31 @@ function createAgentService(options) {
     nativeExecutor: groupNativeExecutor, directory: groupMemberDirectory, productStore,
     getFederationClient: () => federationHostClient, getMediaStore: () => inspirationStore.media,
     onChanged: (groupId) => eventBuffer.append("group.changed", { groupId }) });
+  function logConditionWatchError(error) {
+    const code = /^[A-Z0-9_]{1,80}$/u.test(error?.code ?? "") ? error.code : "UNKNOWN";
+    console.error(`[agent-service] condition watch unavailable: ${code}`);
+  }
+  const conditionWatchService = new ConditionWatchService({
+    store: conditionWatchStore, products: productStore, sessions: chatSessionStore,
+    transcripts: transcriptStore, groups: groupChatService, sanitize: sanitizeSummary,
+    resolveReview: profileId => workRunCoordinator.resolveConditionWatchReview(profileId),
+    generateReview: request => workRunCoordinator.generateConditionWatchReviewText(request),
+    getRunSessionKey: run => workRunCoordinator.getRunSessionKey(run),
+    protectedRoots: [paths.stateDir, paths.cacheDir, paths.profileDir, paths.runtimeDir, path.join(paths.homeDir, ".ssh"),
+      path.join(paths.homeDir, ".codex"), path.join(paths.homeDir, ".claude"), path.join(paths.homeDir, ".pi"),
+      path.join(paths.homeDir, ".hermes"), path.join(paths.homeDir, ".openclaw"), path.join(paths.homeDir, ".config"),
+      path.join(paths.homeDir, ".gemini"), path.join(paths.homeDir, ".grok"), path.join(paths.homeDir, ".dsh"),
+      path.join(paths.homeDir, ".local", "share", "opencode"), path.join(paths.homeDir, "Library")]
+      .map(root => { try { return fs.realpathSync(root); } catch { return root; } }),
+    managedWorkspaceRoot: paths.defaultWorkspaceDir,
+    allowDirectory: (profile, session) => typeof session.workspace === "string"
+      && session.workspace !== paths.homeDir
+      && ["workspace-write", "danger-full-access", "read-only"].includes(profile.permissionPolicy?.sandbox),
+    onDirectPublished: payload => eventBuffer.append("proactive.notice.published", payload),
+    sendSystemNotice: options.notificationSender,
+    now: options.now, setTimer: options.setConditionWatchTimer, clearTimer: options.clearConditionWatchTimer,
+    readProbe: options.conditionWatchReadProbe, onError: logConditionWatchError,
+  });
   const groupCronDelivery = new (require("./group-cron-delivery").GroupCronDelivery)({
     cronStore: nativeCronStore, groupChat: groupChatService, dispatcher: workDispatcher,
     sessions: chatSessionStore, transcripts: transcriptStore, sanitizeSummary,
@@ -3283,6 +3319,7 @@ function createAgentService(options) {
       }),
       conversationRecallService,
       getGroupChatService: () => groupChatService,
+      conditionWatch: conditionWatchService,
       chatUiController,
       conversationDefinitionService: new ConversationDefinitionService({
         definitionStore: agentDefinitionStore, productStore, transcriptStore, chatSessionStore,
@@ -4833,6 +4870,16 @@ function createAgentService(options) {
         const safe = webSettingsProtocol.publicError(error);
         errorResponse(socket, id, safe.code, safe.message); return;
       }
+    } else if (Object.hasOwn(watchProtocol.METHODS, request.method)) {
+      try {
+        if (!exactObject(request, [...baseFields, "params"])) watchProtocol.fail();
+        const params = watchProtocol.validateParams(request.method, request.params);
+        if (params.definition && !sanitizeSummary(JSON.stringify(params.definition))) watchProtocol.fail("WATCH_SOURCE_DENIED");
+        result = watchProtocol.validateResult(request.method, await conditionWatchService.handle(request.method, params));
+      } catch (error) {
+        const code = Object.hasOwn(watchProtocol.MESSAGES, error?.code) ? error.code : "WATCH_UNAVAILABLE";
+        errorResponse(socket, id, code, watchProtocol.MESSAGES[code]); return;
+      }
     } else if (PROACTIVE_SERVICE_METHOD_SET.has(request.method)) {
       try {
         if (!exactObject(request, ["id", "token", "version", "method", "params"])) throw serviceError("PROACTIVE_INVALID", PROACTIVE_PUBLIC_MESSAGES.PROACTIVE_INVALID);
@@ -4931,6 +4978,7 @@ function createAgentService(options) {
       }
       maintenanceQuiesced = true;
       await learningService.close();
+      await conditionWatchService.close();
       await proactiveScheduler.close();
       await proactiveService.close();
       await proactiveScheduler.waitForIdle();
@@ -5150,6 +5198,7 @@ function createAgentService(options) {
     nativeKanbanStore,
     inspirationStore,
     proactiveStore,
+    conditionWatchStore, conditionWatchService,
     groupChatStore,
     groupChatDriver,
     groupChatService,
@@ -5486,6 +5535,8 @@ function createAgentService(options) {
           inspirationStore.open();
           proactiveStoreOpened = true;
           proactiveStore.open();
+          try { conditionWatchStore.open(); conditionWatchStoreOpened = true; }
+          catch (error) { logConditionWatchError(error); }
           // 群库打不开（损坏，或由更新版本的 App 写出）只让群聊不可用，不拖垮整个 Service：
           // group.* 返回 GROUP_CHAT_UNAVAILABLE，驱动不启动，库文件保持原样。
           try { groupChatStore.open(); groupChatStoreOpened = true; }
@@ -5653,6 +5704,9 @@ function createAgentService(options) {
           if (typeof options.onServerReady === "function") options.onServerReady(server);
           assertStartGeneration(generation);
           lifecycleState = "started";
+          if (conditionWatchStoreOpened) {
+            try { conditionWatchService.open(); } catch (error) { logConditionWatchError(error); }
+          }
           if (isGroupCronDeliveryCurrent(generation)) {
             setImmediate(() => {
               const current = () => isGroupCronDeliveryCurrent(generation);
@@ -5758,7 +5812,7 @@ function createAgentService(options) {
         || accountAuthManagerOpened
         || runtimeAccountServiceControllerOpened || profileServiceControllerOpened
         || agentLifecycleServiceControllerOpened
-        || chatSessionStoreOpened || inspirationStoreOpened || hookStoreOpened || proactiveStoreOpened || proactiveServiceOpened || proactiveSchedulerOpened || learningStoreOpened || agentDefinitionStoreOpened || transcriptStoreOpened
+        || chatSessionStoreOpened || inspirationStoreOpened || hookStoreOpened || proactiveStoreOpened || conditionWatchStoreOpened || proactiveServiceOpened || proactiveSchedulerOpened || learningStoreOpened || agentDefinitionStoreOpened || transcriptStoreOpened
         || memoryStoreOpened || memoryEngineOpened || permissionEngineOpened
         || nativeSkillStoreOpened
         || computerUseControllerOpened
@@ -5851,6 +5905,7 @@ function createAgentService(options) {
     memoryProviderOwnerClosing.catch(() => {});
     // Close publication authority before waiting for network/Runtime shutdown.
     try { await learningService.close(); } catch (error) { errors.push(error); }
+    try { await conditionWatchService.close(); } catch (error) { errors.push(error); }
     if (proactiveSchedulerOpened) { proactiveSchedulerOpened = false; try { await proactiveScheduler.close(); } catch (error) { errors.push(error); } }
     groupChatDriver.stop();
     groupNativeToolPreparation.stop();
@@ -6016,6 +6071,10 @@ function createAgentService(options) {
       } catch (error) { errors.push(error); }
     }
     if (proactiveStoreOpened) { proactiveStoreOpened = false; try { proactiveStore.close(); } catch (error) { errors.push(error); } }
+    if (conditionWatchStoreOpened) {
+      conditionWatchStoreOpened = false;
+      try { conditionWatchStore.close(); } catch (error) { errors.push(error); }
+    }
     unsubscribeLearningUsage?.(); unsubscribeLearningUsage = null;
     if (learningStoreOpened) { learningStoreOpened = false; try { learningStore.close(); } catch (error) { errors.push(error); } }
     if (groupChatStoreOpened) { groupChatStoreOpened = false; try { groupChatStore.close(); } catch (error) { errors.push(error); } }

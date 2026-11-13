@@ -28,6 +28,7 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 | @ubjs/node-darwin-arm64 | 0.31.0-3 | MPL-2.0 | [MPL-2.0.txt](MPL-2.0.txt), [CUA-NOTICE.md](CUA-NOTICE.md), [RUNTIME-LICENSE-SOURCES.md](RUNTIME-LICENSE-SOURCES.md) |
 | @ubjs/node-darwin-x64 | 0.31.0-3 | MPL-2.0 | [MPL-2.0.txt](MPL-2.0.txt), [CUA-NOTICE.md](CUA-NOTICE.md), [RUNTIME-LICENSE-SOURCES.md](RUNTIME-LICENSE-SOURCES.md) |
 | @ubjs/node | 0.31.0-3 | MPL-2.0 | [MPL-2.0.txt](MPL-2.0.txt), [CUA-NOTICE.md](CUA-NOTICE.md), [RUNTIME-LICENSE-SOURCES.md](RUNTIME-LICENSE-SOURCES.md) |
+| @xmldom/xmldom | 0.8.15 | MIT | [LICENSE](licenses/npm/_xmldom_xmldom@0.8.15/LICENSE) |
 | adm-zip | 0.6.1 | MIT | [LICENSE](licenses/npm/adm-zip@0.6.1/LICENSE) |
 | ajv | 8.20.0 | MIT | [LICENSE](licenses/npm/ajv@8.20.0/LICENSE) |
 | animejs | 4.4.1 | MIT | [LICENSE.md](licenses/npm/animejs@4.4.1/LICENSE.md) |

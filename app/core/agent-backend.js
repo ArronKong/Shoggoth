@@ -448,8 +448,9 @@ class AgentBackend {
 
   /**
    * Return this backend's full model catalog as UnifiedModel[]:
-   * { id, name, provider, backendId, contextWindow?, reasoning?, acpProviderRef?,
-   *   modelScopes? }.
+   * { id, name, provider, providerName?, backendId, contextWindow?, reasoning?,
+   *   thinkingOptions?, thinkingDefault?, acpProviderRef?, modelScopes? }.
+   * providerName is display-only; provider remains the exact routing identity.
    * acpProviderRef (Hermes-only): provider ref the chat `/model` command must
    * use when it differs from `provider` — user-defined (config.yaml) providers
    * need the `custom:<name>` form; Hermes only parses built-in provider names.
@@ -802,12 +803,18 @@ class AgentBackend {
    * observes an existing run after this page is queued to the same consumer.
    * `history` is that exact getHistory result, used only to avoid replaying
    * already rendered message identities; it grants no execution authority.
+   * Observers restore current running/activity state even while the runtime is
+   * quiet, and may remain subscribed to runtime-initiated continuation turns.
+   * Those turns must not reopen or settle the original send's receipt. Closing
+   * the observation must not resume, submit, or cancel execution.
    * `id` (when present) is a per-message stable identifier the chat UI keys its
    * client-side pin / local-hide on; omit it only when no stable id exists.
-   * `notice` marks a **timeline row** rather than a real turn (currently only
-   * "modelSwitch"): the UI renders it as a quiet one-line divider — model/provider
-   * carry the new identity, `content` keeps the backend's raw text for hover
-   * triage. Without it a `role:"system"` row renders as a red ERROR bubble.
+   * `notice` marks a **timeline row** rather than a real turn (e.g. "modelSwitch"
+   * or "processComplete"): the UI renders a localized, quiet one-line divider.
+   * Model/provider carry the new identity for model switches; process completion
+   * means a background command ended, not that its work succeeded. `content`
+   * keeps the backend's raw text for hover triage. Without `notice`, a
+   * `role:"system"` row renders as a red ERROR bubble.
    * @param {string} sessionKey  e.g. "agent:hermes-default:abc-123"
    * @param {{cursor?: string|null, limit?: number}} [options] Optional backward
    *        pagination. Pages remain chronological; messages precede the page
@@ -982,7 +989,9 @@ class AgentBackend {
    * this management-plane snapshot is temporarily not ready.
    * `permissions.defaultMode` is the initial selection for a new chat session;
    * saved session choices take precedence and must never be reset on refresh.
-   * @returns {{attachments: {image?: {maxBytes?: number}, pdf?: {maxBytes?: number, maxPages?: number}, file?: {maxBytes?: number}}, maxPayloadBytes?: number, gatewayPolicy?: boolean, slash?: boolean, steer?: boolean, modelProvider?: string, modelScope?: string, permissions?: {scope: "session"|"profile", apply: "next-turn"|"live", defaultMode?: string, options: Array<{id: string, label: string, description?: string, risk?: "safe"|"standard"|"elevated"|"danger", requiresConfirmation?: boolean}>}, notReady?: boolean}}
+   * `observeAfterSend` asks the proxy to attach watchSession after a send settles,
+   * including errors, so autonomous continuations retain a passive consumer.
+   * @returns {{attachments: {image?: {maxBytes?: number}, pdf?: {maxBytes?: number, maxPages?: number}, file?: {maxBytes?: number}}, maxPayloadBytes?: number, gatewayPolicy?: boolean, slash?: boolean, steer?: boolean, observeAfterSend?: boolean, modelProvider?: string, modelScope?: string, permissions?: {scope: "session"|"profile", apply: "next-turn"|"live", defaultMode?: string, options: Array<{id: string, label: string, description?: string, risk?: "safe"|"standard"|"elevated"|"danger", requiresConfirmation?: boolean}>}, notReady?: boolean}}
    */
   getChatCapabilities(agentId) {
     return { attachments: { image: {} } };

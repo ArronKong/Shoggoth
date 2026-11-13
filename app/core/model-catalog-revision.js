@@ -7,6 +7,7 @@ const CATALOG_FIELDS = [
   "id",
   "name",
   "provider",
+  "providerName",
   "backendId",
   "profile",
   "contextWindow",

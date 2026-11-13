@@ -185,9 +185,11 @@ test("strict 双来源快照分别保留配置真值与运行时目录，不泄�
         id: "runtime-only",
         name: "runtime-only",
         provider: "beta",
+        providerName: "beta",
         backendId: "hermes",
         profile: "default",
         reasoning: false,
+        thinkingOptions: [],
         pricing: { input: 1, output: 2 },
         acpProviderRef: undefined,
       },
@@ -197,8 +199,12 @@ test("strict 双来源快照分别保留配置真值与运行时目录，不泄�
         id: "runtime-only",
         name: "runtime-only",
         provider: "beta",
+        providerName: "beta",
         backendId: "hermes",
+        modelScopes: ["default"],
         reasoning: false,
+        thinkingOptions: [],
+        thinkingDefault: undefined,
         pricing: { input: 1, output: 2 },
         acpProviderRef: undefined,
       },
@@ -722,7 +728,8 @@ test("strict 运行时刷新不复用已有普通 in-flight，并返回独立 fr
     assert.deepEqual(backend.modelsByProfile.get("default"), ["fresh-model"]);
     assert.deepEqual(
       backend.modelMeta.get(JSON.stringify(["alpha", "fresh-model"])),
-      { pricing: { input: 222 }, reasoning: true },
+      { pricing: { input: 222 }, reasoning: true,
+        thinkingOptions: [] },
     );
     assert.deepEqual(
       [...backend.modelsByProfileIdentity.get("default")],
@@ -952,6 +959,7 @@ test("多 profile 同模型元数据按稳定 profile 顺序折叠且不受 HTTP
     assert.deepEqual(first.meta.get(identity), {
       pricing: { input: 1, output: 2 },
       reasoning: true,
+      thinkingOptions: [],
     });
     assert.deepEqual(second.meta.get(identity), first.meta.get(identity));
     assert.deepEqual(secondModels, firstModels);

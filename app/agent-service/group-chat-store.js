@@ -813,6 +813,32 @@ class GroupChatStore {
       .all(groupId, `cron:${jobId}:`, `cron:${jobId}:~`, CRON_REPORT_HISTORY_LIMIT).map(parse);
   }
 
+  getWatchReceipt(groupId, watchId, eventId) {
+    this.#ready();
+    const row = this.db.prepare("SELECT id FROM messages WHERE group_id=? AND origin_key=?")
+      .get(groupId, `watch:${watchId}:${eventId}`);
+    return row ? { messageId: row.id, kind: "group" } : null;
+  }
+
+  publishWatchReply({ target, watchId, eventId, text }) {
+    return this.#write(() => {
+      const existing = this.getWatchReceipt(target.groupId, watchId, eventId);
+      if (existing) return { ...existing, created: false };
+      if (!this.cronDeliveryGroup(target, target.profileId)) return null;
+      if (!validText(text) || !text.trim()) fail("GROUP_RESULT_INVALID");
+      const group = this.#requireGroup(target.groupId, { active: true });
+      const fullResult = { bytes: Buffer.byteLength(text, "utf8"), digest: sha256(text) };
+      const message = this.#insertMessage(group, {
+        originKey: `watch:${watchId}:${eventId}`, author: { kind: "member", memberId: target.memberId },
+        body: utf8Prefix(text, MAX_MEMBER_REPLY_BYTES), fullResult,
+        mentions: { memberIds: [], broadcast: false, unresolved: [] }, origin: { watchId, watchEventId: eventId },
+      });
+      this.db.prepare("INSERT INTO message_results VALUES(?,?,?,?)").run(message.id, text, fullResult.digest, fullResult.bytes);
+      this.#putGroup(group);
+      return { messageId: message.id, created: true };
+    });
+  }
+
   publishCronReply({ target, profileId, jobId, runId, text }) {
     return this.#write(() => {
       if (!this.cronDeliveryGroup(target, profileId)) return false;
@@ -1516,7 +1542,8 @@ class GroupChatStore {
     const rows = fresh
       ? this.db.prepare("SELECT data FROM messages WHERE group_id=? ORDER BY seq DESC LIMIT ?").all(group.id, FIRST_LOOK).map(parse).reverse()
       : this.db.prepare("SELECT data FROM messages WHERE group_id=? AND seq>? ORDER BY seq").all(group.id, binding.watermark).map(parse)
-        .filter(message => message.author.kind !== "member" || message.author.memberId !== member.id || message.origin?.cronJobId);
+        .filter(message => message.author.kind !== "member" || message.author.memberId !== member.id
+          || message.origin?.cronJobId || message.origin?.watchId);
     const unseen = rows.slice(-DELTA_MAX);
     // 新会话只看最近几条：告诉它前面还有多少条没列出（原生成员可以用 group_messages_read 回查）。
     const olderThanFirstLook = fresh && rows.length

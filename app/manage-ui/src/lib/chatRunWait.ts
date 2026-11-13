@@ -1,8 +1,8 @@
 import type { TurnStep } from "./turnTimeline";
 
-export type ChatStartupStage = "preparing" | "context" | "compacting" | "capabilities" | "connecting" | "restoring" | "opening" | "waiting";
+export type ChatStartupStage = "preparing" | "context" | "compacting" | "capabilities" | "connecting" | "reconnecting" | "restoring" | "opening" | "waiting";
 export type ChatRunWaitState = { kind: "queued" | "retrying" | "starting"; reason: string | null; since: number; stage?: ChatStartupStage };
-const STARTUP_STAGES = new Set(["preparing", "context", "compacting", "capabilities", "connecting", "restoring", "opening", "waiting"]);
+const STARTUP_STAGES = new Set(["preparing", "context", "compacting", "capabilities", "connecting", "reconnecting", "restoring", "opening", "waiting"]);
 
 export const CHAT_WAIT_REASONS: Record<string, string> = {
   RUNTIME_ACCOUNT_ACTIVE_LIMIT: "account",

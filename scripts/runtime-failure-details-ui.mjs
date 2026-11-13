@@ -39,6 +39,17 @@ for (const [group, messages] of Object.entries(catalog)) {
   }
 }
 assert.equal(translate("Shoggoth 请求失败 (UNKNOWN_FIXTURE)", tEn), "The Shoggoth request failed (UNKNOWN_FIXTURE).");
+for (const code of ["RUNTIME_COMPACTION_FAILED", "RUNTIME_COMPACTION_TIMEOUT", "RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN", "RUNTIME_COMPACTION_UNSUPPORTED"]) {
+  for (const kind of ["任务未完成", "请求失败"]) {
+    const legacy = `Shoggoth ${kind} (${code})`;
+    assert.equal(translate(legacy, tZh), catalog.runtime[code], "saved fallback errors gain actionable recovery copy");
+    assert.equal(translate(`错误：${legacy}`, tEn), `Error: ${tEn(`chatErrors:runtime.${code}`)}`);
+    assert.equal(translate(`The agent quoted: ${legacy}`, tZh), `The agent quoted: ${legacy}`, "quoted error codes remain untouched");
+  }
+}
+const oldAuthReadError = "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试";
+assert.equal(translate(oldAuthReadError, tZh), catalog.runtime.RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED);
+assert.equal(translate(oldAuthReadError, tEn), tEn("chatErrors:runtime.RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED"));
 for (const reason of ["Invalid API key for project example; request id abc", "You exceeded your current quota; daily limit 100, reset tomorrow",
   "OAuth session expired for workspace example; request id abc", "LLM idle timeout after 45s during tool execution"]) {
   assert.equal(translate(reason, () => "统一文案"), reason);
@@ -77,6 +88,14 @@ for (const [code, failure, englishSummary, englishDetail] of [
   ["ANTIGRAVITY_REGION_UNSUPPORTED", null, englishRegion],
   ["RUNTIME_QUOTA_EXHAUSTED", null, "The account's quota is exhausted and the request has stopped. Wait for the quota to reset, add quota, or switch accounts before retrying."],
   ["RUNTIME_AUTH_REQUIRED", null, "Agent authentication failed. Check the account under Models or sign in again before retrying."],
+  ["RUNTIME_COMPACTION_FAILED", null,
+    "Conversation context compaction failed. Type and send /compact in this chat, wait for it to succeed, then resend your previous message."],
+  ["RUNTIME_COMPACTION_TIMEOUT", null,
+    "Conversation context compaction timed out. Type and send /compact in this chat, wait for it to succeed, then resend your previous message."],
+  ["RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN", null,
+    "Context compaction has not been confirmed. First check that the compaction task has ended, then send /compact in this chat. Once it succeeds, resend your previous message."],
+  ["RUNTIME_COMPACTION_UNSUPPORTED", null,
+    "This runtime does not support conversation context compaction. Start a new chat or switch to a runtime that supports compaction."],
   ["RUNTIME_WORKSPACE_UNAVAILABLE", { message: "Working directory cannot be read.", upstreamCode: "ENOENT" },
     "This session’s working directory is missing or inaccessible. Restore it or start a new session with the default workspace. The message was not sent."],
   ["PI_TOOL_DESCRIPTION_TOO_LARGE", { message: "Tool description is 200 bytes over its limit." },

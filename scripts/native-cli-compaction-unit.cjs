@@ -141,6 +141,159 @@ for (const terminal of ["completed", "failed"]) {
   });
 }
 
+async function recoveringCodexCompaction() {
+  const state = { armed: false, failures: 0, attempts: 0, commands: 0, error: null };
+  const decorate = handle => {
+    const compactHandle = Object.create(handle);
+    compactHandle.accountRead = async input => {
+      if (state.armed) {
+        state.attempts++;
+        // Codex reports a genuine sign-out as a successful account/read result.
+        if (state.error?.code === "RUNTIME_AUTH_REQUIRED") return { account: null, requiresOpenaiAuth: true };
+        if (state.failures-- > 0) throw state.error;
+      }
+      return handle.accountRead(input);
+    };
+    handle.host.threadCompactStart = async ({ threadId }) => {
+      state.commands++;
+      state.armed = false;
+      const turnId = `auth-recovery-compact-${state.commands}`;
+      setImmediate(() => {
+        handle.host.emit(normalizeCodexEvent({ method: "item/completed", params: { threadId, turnId,
+          item: { id: `item-${turnId}`, type: "contextCompaction" } } }));
+        handle.host.emit(normalizeCodexEvent({ method: "turn/completed", params: { threadId,
+          turn: { id: turnId, status: "completed" } } }));
+      });
+      return {};
+    };
+    return compactHandle;
+  };
+  const install = coordinator => {
+    const manager = coordinator.runtimeManager, acquire = manager.acquire.bind(manager), wrapped = new WeakMap();
+    manager.acquire = async (binding, options) => {
+      const handle = await acquire(binding, options);
+      // Readiness and memory tasks share the Codex host. Fail only the
+      // compaction authentication call, leaving those independent probes real.
+      if (options?.executionContract?.source !== "compaction") return handle;
+      if (!wrapped.has(handle)) wrapped.set(handle, decorate(handle));
+      return wrapped.get(handle);
+    };
+  };
+  const fixture = await openRuntime("codex");
+  const { f, session } = fixture;
+  install(fixture.coordinator);
+  const first = await f.send(session.sessionKey, "auth-recovery-first");
+  assert.equal(first.status, "running", first.errorCode);
+  const host = [...f.transport.handles.values()].find(handle => handle.host.threads
+    .some(thread => thread.id === first.runtimeSessionRef.sessionId)).host;
+  host.emit({ known: true, type: "context_usage", threadId: first.runtimeSessionRef.sessionId,
+    contextUsage: { runtimeSessionId: first.runtimeSessionRef.sessionId, usedTokens: WINDOW,
+      contextWindow: WINDOW, quality: "exact", source: "runtime_event", observedAt: Date.now() } });
+  await f.complete(first);
+  return { ...fixture, host, state, install,
+    arm(failures, code = "RPC_REMOTE_ERROR") {
+      Object.assign(state, { armed: true, failures, attempts: 0,
+        error: Object.assign(new Error("private-auth-recovery-diagnostic"), { code }) });
+    },
+  };
+}
+
+test("Codex auth recovery keeps the same input queued, reports live/snapshot progress and sends it once", async () => {
+  const fixture = await recoveringCodexCompaction();
+  const { f, coordinator, session, state } = fixture;
+  try {
+    fixture.arm(2);
+    const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: "auth-recovery-input", prompt: "Continue" });
+    await waitUntil(() => coordinator.runQueueStates.get(ack.run.id)?.stage === "reconnecting", 5000, "visible auth recovery");
+    assert.equal(coordinator.getRun(ack.run.id).status, "queued");
+    assert.equal(coordinator.getRunSnapshot(ack.run.id).queue?.stage, "reconnecting");
+    assert.equal(state.commands, 0);
+    assert.equal(fixture.host.turnStartCalls, 1);
+    await waitUntil(() => coordinator.getRun(ack.run.id).status === "running", 10000, "automatic recovery and dispatch");
+    assert.equal(state.attempts, 3);
+    assert.equal(state.commands, 1);
+    assert.equal(compactionRuns(coordinator).length, 1, "recovery retains the original compaction run");
+    assert.equal(compactionRuns(coordinator)[0].status, "completed");
+    assert.equal(fixture.host.turnStartCalls, 2);
+    const replay = coordinator.subscribeRun(ack.run.id, { streamId: null, afterSeq: 0 }, () => {});
+    replay.unsubscribe();
+    const statuses = replay.events.filter(event => event.type === "status").map(event => event.payload);
+    assert.ok(statuses.some(status => status.stage === "reconnecting"));
+    assert.ok(statuses.some(status => status.reason === "CONTEXT_COMPACTING" && !status.stage));
+    assert.ok(!replay.events.some(event => event.type === "terminal"), "transient errors never finish the input");
+    assert.ok(!JSON.stringify(replay).includes("private-auth-recovery-diagnostic"));
+    assert.ok(!f.service.transcriptStore.listEvents(session.profileId, session.id).some(event => event.kind === "error"));
+    await f.complete(coordinator.getRun(ack.run.id));
+  } finally { await f.close(); }
+});
+
+test("Codex auth recovery is bounded; a new input after restart retries only undispatched compaction", async () => {
+  const fixture = await recoveringCodexCompaction();
+  let { f, coordinator } = fixture;
+  const { session, state } = fixture;
+  try {
+    fixture.arm(Infinity);
+    const failed = await sendNext(coordinator, session.sessionKey, "auth-exhausted-input");
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.errorCode, "RUNTIME_COMPACTION_FAILED");
+    assert.equal(state.attempts, 4, "three delayed retries exhaust the recovery window");
+    assert.equal(state.commands, 0);
+    const [compact] = compactionRuns(coordinator);
+    assert.equal(compact.errorCode, "RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED");
+    for (const field of ["runtimeSessionRef", "runtimeTurnRef", "runtimeAttemptRef"]) assert.equal(compact[field], null);
+    const root = f.root, transport = f.transport;
+    await f.close({ remove: false });
+    fixture.arm(0);
+    f = await openHandoffFixture({ root, transport, catalogs: { codex: ["fixture-model"] } });
+    coordinator = f.service.workRunCoordinator;
+    coordinator.beforeMemoryCompaction = null;
+    coordinator.getRuntimeModelContextWindow = () => WINDOW;
+    fixture.install(coordinator);
+    const recovered = await sendNext(coordinator, session.sessionKey, "auth-new-input-after-restart");
+    assert.equal(recovered.status, "running", recovered.errorCode);
+    assert.equal(state.commands, 1);
+    assert.equal(compactionRuns(coordinator).length, 2);
+    assert.equal(coordinator.getRun(failed.id).status, "failed", "the old failed input is never replayed");
+    assert.equal(f.transport.hosts.get("codex").turnStartCalls, 2);
+    await f.complete(recovered);
+  } finally { await f.close(); }
+});
+
+for (const code of ["RUNTIME_AUTH_REQUIRED", "CODEX_ACCOUNT_PROTOCOL_INVALID", "RUNTIME_TURN_ACCEPTANCE_UNKNOWN"]) {
+  test(`Codex auth recovery does not retry ${code}`, async () => {
+    const fixture = await recoveringCodexCompaction();
+    const { f, coordinator, session, state } = fixture;
+    try {
+      fixture.arm(Infinity, code);
+      const failed = await sendNext(coordinator, session.sessionKey, `auth-blocked-${code}`);
+      assert.equal(failed.status, "failed");
+      assert.equal(failed.errorCode, code === "RUNTIME_AUTH_REQUIRED" ? "RUNTIME_AUTH_REQUIRED"
+        : code === "CODEX_ACCOUNT_PROTOCOL_INVALID" ? "RUNTIME_INCOMPATIBLE" : "RUNTIME_COMPACTION_FAILED",
+      "the waiting message preserves login/protocol remedies instead of recommending an ineffective /compact");
+      assert.equal(state.attempts, 1);
+      assert.equal(state.commands, 0);
+      assert.equal(fixture.host.turnStartCalls, 1);
+      assert.equal(coordinator.nativeCompactionAuthRecoveries.size, 0);
+    } finally { await f.close(); }
+  });
+}
+
+test("Codex cancel during auth recovery never sends the canceled input", async () => {
+  const fixture = await recoveringCodexCompaction();
+  const { f, coordinator, session, state } = fixture;
+  try {
+    fixture.arm(1);
+    const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: "auth-cancel-input", prompt: "Continue" });
+    await waitUntil(() => coordinator.runQueueStates.get(ack.run.id)?.stage === "reconnecting", 5000, "recovery before cancel");
+    await coordinator.abort({ operationId: "auth-cancel", sessionKey: session.sessionKey, runId: ack.run.id });
+    await waitUntil(() => compactionRuns(coordinator)[0]?.status === "completed", 5000, "maintenance after input cancel");
+    assert.equal(coordinator.getRun(ack.run.id).status, "canceled");
+    assert.equal(state.commands, 1);
+    assert.equal(fixture.host.turnStartCalls, 1);
+    assert.equal(coordinator.nativeCompactionAuthRecoveries.size, 0);
+  } finally { await f.close(); }
+});
+
 test("OpenCode: the waiting input runs once after one native compaction command", async () => {
   let commands = 0;
   const fixture = await openRuntime("opencode", handle => {

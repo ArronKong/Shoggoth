@@ -2,6 +2,7 @@
 
 const { PROACTIVE_RESPONSE_TOOL, validProactiveResponse } = require("./proactive-response-tools");
 const { HEARTBEAT_SETTINGS_TOOL_NAMES, HEARTBEAT_SETTINGS_TOOL_DEFINITIONS, validateHeartbeatSettingsArguments } = require("./heartbeat-settings-tools");
+const conditionWatch = require("./condition-watch-protocol");
 const { PUBLIC_MESSAGES: PROACTIVE_PUBLIC_MESSAGES } = require("./proactive-messages");
 const { WEB_TOOL_NAMES, WEB_TOOL_DEFINITIONS, WEB_PUBLIC_MESSAGES, validateWebArguments } = require("./web-tools");
 const { MCP_CONNECTOR_TOOL_NAMES, MCP_CONNECTOR_TOOL_DEFINITIONS, validateMcpConnectorToolArguments, RETIRED_CONNECTOR_TOOLS } = require("./mcp-connector-tools");
@@ -85,6 +86,7 @@ const MCP_PRODUCT_TOOL_NAME_SET = new Set(INTERNAL_MCP_PRODUCT_TOOL_NAMES);
 function isNativeOnlyMcpTool(name) {
   return name === "workspace_execute" || name === "skill_learn" || name === "artifact_publish"
     || HEARTBEAT_SETTINGS_TOOL_NAMES.has(name) || WEB_PREFERENCE_TOOL_NAMES.has(name) || name === "app_manage"
+    || Object.hasOwn(conditionWatch.toolMethods, name)
     || name.startsWith("computer_") || name.startsWith("browser_") || name.startsWith("native_agent_")
     || isChatUiMcpTool(name) || HOOK_TOOL_NAMES.includes(name) || isMemoryMcpTool(name) || isDefinitionMcpTool(name);
 }
@@ -161,6 +163,7 @@ const COMPUTER_SAFE_KEYS = new Set([
 ]);
 const COMPUTER_MODIFIERS = new Set(["cmd", "shift", "option", "alt", "ctrl", "fn"]);
 const PUBLIC_MESSAGES = Object.freeze({
+  ...conditionWatch.MESSAGES,
   ...APPLE_DEVICE_PUBLIC_MESSAGES,
   ...CONNECTOR_PUBLIC_MESSAGES,
   ...SECRET_PUBLIC_MESSAGES,
@@ -1199,6 +1202,7 @@ const MCP_TOOL_DEFINITION_BY_NAME = new Map([
   WORKSPACE_EXECUTION_TOOL,
   PROACTIVE_RESPONSE_TOOL,
   ...HEARTBEAT_SETTINGS_TOOL_DEFINITIONS,
+  ...conditionWatch.toolDefinitions,
   ...WEB_TOOL_DEFINITIONS,
   ...WEB_PREFERENCE_TOOL_DEFINITIONS,
   ...BASE_MCP_PRODUCT_TOOL_DEFINITIONS,
@@ -1441,6 +1445,9 @@ function validateMcpProductToolArguments(name, value) {
 }
 
 function validateProductOperationArguments(name, args) {
+  if (Object.hasOwn(conditionWatch.toolMethods, name)) {
+    try { conditionWatch.toolArguments(name, args); return true; } catch { return false; }
+  }
   if (isAppleDeviceTool(name)) return validateAppleDeviceArguments(name, args);
   if (MCP_CONNECTOR_TOOL_NAMES.includes(name)) return validateMcpConnectorToolArguments(name, args);
   if (name === "workspace_execute") return validWorkspaceExecutionArguments(args);
@@ -2412,6 +2419,7 @@ class McpProductToolController {
     this.conversationRecallService = options.conversationRecallService || null;
     this.conversationDefinitionService = options.conversationDefinitionService || null;
     this.getGroupChatService = options.getGroupChatService || null;
+    this.conditionWatch = options.conditionWatch || null;
     if (options.onNativeGroupToolExposure !== undefined && typeof options.onNativeGroupToolExposure !== "function") throw new TypeError("onNativeGroupToolExposure must be a function");
     this.onNativeGroupToolExposure = options.onNativeGroupToolExposure || null;
     this.chatUiController = options.chatUiController || null;
@@ -2468,6 +2476,7 @@ class McpProductToolController {
       getBackendStatuses: async () => (await this.#federationRequest("backend.status", {})).backends,
       getServiceStatus: this.getServiceStatus,
       toolAvailable: (name) => {
+        if (Object.hasOwn(conditionWatch.toolMethods, name)) return this.conditionWatch?.running === true;
         if (MCP_CONNECTOR_TOOL_NAMES.includes(name)) return !!this.mcpConnectorController;
         if (name === "workspace_execute") {
           const runId = this.executionContext.getStore()?.runId;
@@ -2580,6 +2589,20 @@ class McpProductToolController {
         // including Ask for callers whose Runtime grants product tools.
         confirmed: isAppleDeviceTool(name) || authority.confirmation === true,
       });
+      if (Object.hasOwn(conditionWatch.toolMethods, name)) {
+        if (!this.conditionWatch || !scopedRun || scopedRun.profileId !== authority.profileId
+          || typeof scope?.assertCurrent !== "function") throw toolError("MCP_TOOL_FORBIDDEN");
+        this.#assertSecretSafe(JSON.stringify(rawArgs));
+        const operationId = `watch-tool:${conditionWatch.digest([name, scopedRun.id, authority.callId])}`;
+        const result = safeJsonClone(await this.conditionWatch.tool(name, rawArgs, {
+          run: scopedRun, assertCurrent: scope.assertCurrent, signal: scope.signal, operationId,
+        }));
+        this.#assertSecretSafe(JSON.stringify(result));
+        if (Buffer.byteLength(JSON.stringify({ id: MAX_RESPONSE_ID_RESERVATION, ok: true, result })) > MAX_FRAME_BYTES) {
+          throw toolError("MCP_TOOL_RESPONSE_TOO_LARGE");
+        }
+        return result;
+      }
       if (isAppleDeviceTool(name)) {
         if (!this.appleDeviceController || !this.getAppleDeviceCaller || typeof scope?.assertCurrent !== "function") {
           throw toolError("APPLE_DEVICE_IDENTITY_REQUIRED");

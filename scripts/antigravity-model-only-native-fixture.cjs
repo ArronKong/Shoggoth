@@ -6,6 +6,12 @@ const { spawn } = require("node:child_process");
 const { AntigravityAcpRuntimeHost } = require("../app/agent-service/antigravity-acp-runtime-host");
 const { verifyAntigravityAcpServer } = require("../app/agent-service/antigravity-acp-distribution");
 const { generateAcpModelOnly } = require("../app/agent-service/acp-model-only");
+const { RuntimeAdapterRegistry } = require("../app/agent-service/runtime-adapter-registry");
+const { createAgentService } = require("../app/agent-service/server");
+const { resolveServicePaths } = require("../app/agent-service/paths");
+const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
+const { NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
+const { normalizeDefinition } = require("../app/agent-service/condition-watch-protocol");
 const root = fs.mkdtempSync("/private/tmp/sg-agy-heartbeat-"), home = path.join(root, "home");
 const paths = { trustedRoot: root, stateDir: path.join(root, "state"), runtimeDir: path.join(root, "run") };
 const sourcePaths = { stateDir: process.argv[2], trustedRoot: path.dirname(process.argv[2]) };
@@ -30,6 +36,88 @@ const provider = http.createServer(async (req, res) => {
   } catch (error) { fixtureError = error; res.writeHead(500); res.end("fixture rejected request"); }
 });
 provider.on("connection", socket => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); });
+
+async function verifyWatch(adapter, setResponse) {
+  const registry = new RuntimeAdapterRegistry();
+  registry.register("antigravity", adapter);
+  const servicePaths = resolveServicePaths({ homeDir: home, trustedRoot: root, stateRoot: path.join(root, "watch-state"),
+    profileRoot: path.join(root, "watch-profiles"), cacheRoot: path.join(root, "watch-cache") });
+  const profileId = DEFAULT_AGENT_PROFILE_ID;
+  const url = "https://fixture.example.com/inventory";
+  const criteria = "Only report a verified transition to in stock.";
+  let clock = Date.UTC(2026, 10, 13, 4);
+  let inStock = false;
+  const service = createAgentService({ paths: servicePaths, runtimeManager: registry, prewarmMcpAuth: false,
+    safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value), decryptString: value => value.toString() },
+    now: () => clock, setCronTimer: () => 1, clearCronTimer() {}, setConditionWatchTimer: () => 1, clearConditionWatchTimer() {},
+    conditionWatchReadProbe: async () => ({ value: inStock, binding: { url }, validator: null }) });
+  const call = (method, params) => service.conditionWatchService.handle(method, params);
+  const until = async fn => {
+    const deadline = Date.now() + 75_000;
+    while (Date.now() < deadline) {
+      const value = fn();
+      if (value) return value;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.fail("Timed out waiting for Antigravity Condition Watch");
+  };
+  try {
+    await service.start();
+    const products = service.productStore;
+    const bindingState = products.getAgentRuntimeBindings(profileId);
+    const binding = products.addAgentRuntimeBinding(profileId, { runtime: "antigravity",
+      runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID }, { operationId: "condition-watch-add-antigravity" });
+    const latest = products.getAgentRuntimeBindings(profileId);
+    const antigravity = latest.bindings.find(entry => entry.runtime === "antigravity");
+    assert(antigravity && latest.revision > bindingState.revision && binding);
+    products.setAgentDefaultBinding(profileId, antigravity.id, { revision: latest.revision });
+    const session = service.chatSessionStore.createSession({ operationId: "condition-watch-native-session", profileId,
+      workspace: null, createdAt: clock, defaultBindingId: antigravity.id });
+    const definition = normalizeDefinition({ name: "Native watch review", source: { kind: "public_json", url, path: ["inStock"] },
+      predicate: { op: "equals", value: true }, intervalMs: 60_000, action: "agent_review", reviewInstruction: criteria });
+    const before = requests.length;
+    const { watch } = call("watch.create", { operationId: "condition-watch-native-create", target: { sessionKey: session.sessionKey }, definition });
+    const { watch: preview } = await call("watch.test", { watchId: watch.id, expectedRevision: watch.revision });
+    assert.equal(preview.preview.ok, true, JSON.stringify(preview.preview));
+    assert.equal(preview.reviewAvailable, true);
+    call("watch.setEnabled", { operationId: "condition-watch-native-enable", watchId: watch.id,
+      expectedRevision: preview.revision, enabled: true });
+    const history = () => service.conditionWatchStore.history(watch.id).checks;
+    const tick = () => service.conditionWatchService.tick();
+    tick();
+    await until(() => history().find(check => check.outcome === "seed"));
+    clock += 60_000;
+    tick();
+    await until(() => history().find(check => check.outcome === "silent"));
+    assert.equal(requests.length, before);
+    inStock = true;
+    clock += 60_000;
+    tick();
+    const hit = await until(() => history().find(check => check.event?.state === "review_queued"));
+    assert.equal(requests.length, before);
+    setResponse(body => {
+      const input = JSON.stringify(body);
+      assert(input.includes(criteria) && input.includes(hit.event.id));
+      return JSON.stringify({ decision: "report", evidenceIds: [hit.event.id], note: "The inventory became available." });
+    });
+    tick();
+    const checked = await until(() => history().find(check => ["published", "review_failed", "review_uncertain"].includes(check.event?.state)));
+    assert.equal(checked.event.state, "published", JSON.stringify(checked.event));
+    assert.deepEqual(checked.event.review.usage, { inputTokens: 12, outputTokens: 8 });
+    assert.equal(requests.length, before + 1);
+    const notices = () => service.transcriptStore.listEvents(profileId, session.id).filter(event => event.content?.proactiveNotice?.watchId === watch.id);
+    assert.equal(notices().length, 1);
+    await service.stop({ notify: false });
+    await service.start();
+    clock += 60_000;
+    tick();
+    await until(() => history().find(check => check.startedAt === clock && check.outcome === "silent"));
+    assert.equal(requests.length, before + 1);
+    assert.deepEqual(notices().map(event => event.id), [checked.event.receipt.messageId]);
+    return { providerRequests: 1, usage: checked.event.review.usage, model: checked.event.review.model, restartNoReplay: true };
+  } finally { setResponse(null); await service.stop({ notify: false }); }
+}
+
 (async () => {
   const server = await verifyAntigravityAcpServer({ paths: sourcePaths });
   for (const dir of [home, paths.stateDir, paths.runtimeDir, path.join(root, "tmp"), path.join(home, ".gemini", "antigravity-acp")])
@@ -68,12 +156,14 @@ provider.on("connection", socket => { sockets.add(socket); socket.once("close", 
   pool = new (require("../app/agent-service/antigravity-runtime-pool").AntigravityRuntimePool)({ paths,
     runtimeAccountResolver: { resolve: () => runtimeEnvironment }, hostOptions });
   const adapter = new (require("../app/agent-service/antigravity-runtime-adapter").AntigravityRuntimeAdapter)({ runtimePool: pool });
-  const closure = await require("./helpers/proactive-native-closure.cjs").verifyProactiveNativeClosure({
-    root, adapter, runtime: "antigravity", model: "gemini-3.1-pro-high", setResponse: value => { response = value; } });
+  const setResponse = value => { response = value; };
+  const closure = process.argv.includes("--watch-only") ? null : await require("./helpers/proactive-native-closure.cjs").verifyProactiveNativeClosure({
+    root, adapter, runtime: "antigravity", model: "gemini-3.1-pro-high", setResponse });
+  const watch = await verifyWatch(adapter, setResponse);
   if (fixtureError) throw fixtureError;
   console.log(JSON.stringify({ verified: true, runtime: "Antigravity", runtimeVersion: server.version, signedNativeHarness: true,
     provider: "synthetic-loopback", actualProviderCalls: 0, nativeTools: 0, modelRequests: requests.length,
-    totalTokens: result.usage.totalTokens, processStopped: true, closure }));
+    totalTokens: result.usage.totalTokens, processStopped: true, closure, watch }));
 })().catch(error => { console.error(JSON.stringify({ verified: false, code: error.code || error.message, stack: error.stack,
   fixtureError: fixtureError?.message, urls, requests: requests.length, diagnostic })); process.exitCode = 1; }).finally(async () => {
   await pool?.stopAll(); await host?.stop(); for (const socket of sockets) socket.destroy();

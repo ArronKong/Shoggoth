@@ -128,6 +128,7 @@ function minimalAuthorityPathDisposition(relativePath) {
   if (root.startsWith("mcp-connection-acks.writer.lock") || root.startsWith(".quarantine-") && root.includes("mcp-connection-acks.writer.lock")) return "exclude";
   if (root === "agents" && parts[2] === "chat-ui" && ["previews", "leases", "ports"].some(part => parts.includes(part))) return "exclude";
   if (root === "hooks" && parts[1]?.startsWith("writer.lock")) return "exclude";
+  if (root === "condition-watches.writer.lock") return "exclude";
   if ((root === "plugins" || root === "skills") && parts[1] === "staging") return "exclude";
   if (root === "connectors" && ![undefined, "legacy-platform-retired-v1.json", "open-connector-retired-v1.json"].includes(parts[1])) return "exclude";
   // Integration Homes and verified binaries are derived. Browser profiles contain
@@ -1128,6 +1129,12 @@ function restoreAuthorityBackup({ paths, backupId, destinationStateDir }) {
       const restoredPaths = { ...paths, stateDir: staging };
       require("./apple-device-restore").quarantineAppleDevicePolicyForRestore({ paths: restoredPaths });
       fsyncFile(path.join(staging, "apple-device-policy.json"));
+    }
+    const { ConditionWatchStore, WATCH_DB } = require("./condition-watch-store");
+    if (verified.manifest.entries.some(entry => entry.type === "file" && entry.path === WATCH_DB)) {
+      const watches = new ConditionWatchStore({ paths: { ...paths, stateDir: staging } }).open();
+      try { watches.recover({ restore: true }); } finally { watches.close(); }
+      fsyncFile(path.join(staging, WATCH_DB));
     }
     fsyncDirectoryTree(staging);
     for (const [target, mode] of directoryModes.reverse()) if (!removedLearningDirectories.has(target)) fs.chmodSync(target, mode);

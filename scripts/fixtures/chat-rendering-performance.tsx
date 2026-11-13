@@ -156,11 +156,58 @@ state.runScrollNavigationFixture = async () => {
   await pause(150);
   check(gap() >= 150, "a latest-message jump must yield to the user's upward scroll");
 
+  const composer = document.querySelector<HTMLTextAreaElement>(".chat-composer__input")!;
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(composer, "Fixture navigation send");
+  composer.dispatchEvent(new Event("input", { bubbles: true }));
+  await frame();
+  document.querySelector<HTMLButtonElement>(".chat-send:not(.chat-stop)")!.click();
+  await wait(() => state.sent?.message === "Fixture navigation send", "navigation fixture send");
+  state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: longKey, state: "delta",
+    message: { role: "assistant", content: "A growing reply.\n\n".repeat(160) } } });
+  await wait(() => thread().textContent?.includes("A growing reply."), "navigation fixture stream");
+  // A locally running turn restores its live snapshot instead of committing
+  // canonical history. Navigation must not wait for that suppressed commit.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt === 1) {
+      state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: longKey, state: "prompt",
+        prompt: { kind: "clarify", requestId: "navigation-question", question: "Continue the fixture?", choices: ["Continue", "Stop"] } } });
+      await wait(() => document.querySelector(".chat-prompt"), "running session waits for input");
+    }
+    browseEarlier();
+    thread().scrollTop = 800;
+    await frame(); await frame();
+    check(gap() > 1000, "live transcript starts above the latest reply");
+    const responses = state.tailHistoryResponses || 0;
+    document.querySelector<HTMLButtonElement>('.chat-agent[title="perf"]')!.click();
+    await wait(() => state.tailHistoryResponses > responses, "live reselect history response");
+    await wait(() => gap() < 2, "reselecting a running session reaches its latest reply");
+    await pause(150);
+    check(gap() < 2, "live reselect remains at the latest reply");
+    check(thread().textContent?.includes("Fixture navigation send") && thread().textContent?.includes("A growing reply."),
+      "live reselect preserves the local user message and streamed reply");
+    if (attempt > 0) check(thread().querySelector(".chat-prompt"), "reselect preserves the pending input card");
+  }
+  document.querySelector<HTMLButtonElement>('.chat-agent[title="short"]')!.click();
+  await wait(() => bubbles().length === 1, "switch away from a running session");
+  document.querySelector<HTMLButtonElement>('.chat-agent[title="perf"]')!.click();
+  await wait(() => thread().textContent?.includes("Fixture navigation send") && gap() < 2,
+    "returning to a running session reaches its latest reply without a canonical commit");
+  await pause(150);
+  check(gap() < 2, "returning to a running session remains at the tail");
+  check(thread().querySelector(".chat-prompt"), "returning to a running session preserves pending input");
+  longHistory.push({ id: "navigation-confirmed", role: "user", timestamp: Date.now(),
+    idempotencyKey: state.sent.idempotencyKey, content: [{ type: "text", text: "Fixture navigation send" }] } as any);
+  state.socket.emit({ type: "event", event: "chat", payload: { sessionKey: longKey, state: "final",
+    message: { role: "assistant", content: "Navigation finished" } } });
+  await wait(() => thread().dataset.historyLoaded === "true" && thread().querySelector('[data-chat-message-id="navigation-confirmed"]'),
+    "navigation fixture reconciles canonical history after completion");
+  longHistory.pop();
+  state.sent = null;
   document.querySelector<HTMLButtonElement>('.chat-agent[title="short"]')!.click();
   await wait(() => bubbles().length === 1, "return to short history after navigation");
   await frame(); await frame();
   check(thread().scrollTop === 0, "tail settling must not affect the next conversation");
-  return { reopenedGap, jumpedGap, userScrollCancels: true };
+  return { reopenedGap, jumpedGap, userScrollCancels: true, liveReselections: 3, waitingInput: true, returnToRunning: true, liveMessagesPreserved: true };
 };
 state.runFixture = async () => {
   await wait(() => bubbles().length === 1 && document.querySelector(".chat-composer__input"), "short history");

@@ -203,6 +203,21 @@ state.runAgentTypingFixture = async () => {
   await ask("An ordinary chat question.");
   check(typing(), "Ordinary chat still shows Agent typing");
   await finish("Ordinary chat completed.");
+  currentRun = { id: "autonomous-followup", key: mainKey, status: "running" };
+  emit(mainKey, { state: "status", statusKind: "running" });
+  await wait(() => typing() && document.querySelector("[data-live-activity-bubble]"), "quiet continuation restores typing and loading bubble");
+  check(!!stop(), "A runtime-initiated direct-chat continuation restores running controls without a new send");
+  socket.emit({ type: "event", event: "session.tool", payload: { sessionKey: mainKey,
+    data: { toolCallId: "continuation-tool", name: "terminal", phase: "start", args: { command: "fixture-read-only" } } } });
+  await wait(() => document.querySelector('[data-live-activity-bubble="activity"]'), "continuation tool appears in live activity");
+  emit(mainKey, { state: "interim", message: { role: "assistant", content: "Checking the background result." } });
+  await pause();
+  check(typing() && !!document.querySelector("[data-live-activity-bubble]"), "Sealing continuation commentary preserves typing and live activity");
+  await select(readerKey); await select(mainKey);
+  await wait(() => typing() && document.querySelector("[data-live-activity-bubble]"), "returning to the continuation restores activity");
+  await finish("Background follow-up complete.");
+  await wait(() => !document.querySelector("[data-live-activity-bubble]"), "continuation completion removes the loading bubble");
+  check(true, "The continuation clears typing and live activity on its own terminal event");
   check(requests.filter(request => request.method === "chat.send").length === 5, "Only the five explicit fixture questions were sent");
   check(requests.filter(request => request.method === "chat.steer").length === 1, "Only the explicit fixture steer was sent");
   return { backend, language, passed: true, checks, liveProvider: false };

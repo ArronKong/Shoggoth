@@ -82,6 +82,9 @@ const HERMES_CHAT_FAILURE_COPY = Object.freeze({
   auth: "模型接口鉴权失败，本轮对话已结束。请检查当前会话使用的模型账号和密钥。",
   billing: "模型额度或余额不足，本轮对话已失败结束。请检查当前会话的模型账号额度。",
   connection: "模型连接失败或超时，本轮对话已结束。请检查连接后重新发送。",
+  reasoning_effort: "当前模型不支持所选思考档位，本轮对话已结束。请选择该模型支持的档位后重新发送。",
+  format_error: "模型接口拒绝了请求参数（HTTP 400）。请检查当前模型的思考档位等参数后重新发送。",
+  model_not_found: "当前端点不支持所选模型。请从该端点已配置的模型中重新选择后发送。",
   empty: "模型没有返回任何内容，本轮对话已结束。请检查当前会话的模型配置后重新发送。",
   error: "Hermes 本轮对话失败，未生成最终回复。请检查模型配置和连接后重新发送。",
 });
@@ -89,10 +92,14 @@ function hermesChatFailureCode(payload) {
   const detail = [payload.error, payload.text, payload.message, payload.failure_reason, payload.error_surface?.code].join(" ");
   if (/\b429\b|rate.?limit|concurrency.limit/iu.test(detail)) return "rate_limit";
   if (/billing|credits?.*(?:exhaust|insufficient)|out of (?:funds|credits)/iu.test(detail)) return "billing";
-  if (/\b40[13]\b|unauthor|authentication|invalid.api.key/iu.test(detail)) return "auth";
+  if (/\b40[13]\b|\bauth\b|unauthor|authentication|invalid.api.key/iu.test(detail)) return "auth";
   if (/timeout|timed.out|connection|network|ECONN/iu.test(detail)) return "connection";
+  if (/reasoning[_ .-]?effort.*(?:must|support|invalid|reject)|(?:invalid|unsupported).*reasoning[_ .-]?effort/iu.test(detail)) return "reasoning_effort";
+  if (/model_not_found|unsupported.model|model.*(?:not.found|does.not.exist)/iu.test(detail)) return "model_not_found";
+  if (/format_error|\b400\b|param incorrect|invalid.request.param/iu.test(detail)) return "format_error";
   return "error";
 }
+const HERMES_TYPED_CHAT_FAILURES = new Set(["rate_limit", "auth", "connection", "reasoning_effort", "format_error", "model_not_found"]);
 
 // ---- gateway chat (S2) constants ----
 // `source` stamps who created/resumed the session; "desktop" keeps our sessions
@@ -115,9 +122,40 @@ const CHAT_HOOK_METHODS = Object.freeze([
   "status", "prompt", "promptExpire", "accepted",
 ]);
 // Hermes reasoning-effort vocabulary (hermes_constants.VALID_REASONING_EFFORTS
-// + the "none" sentinel the Thinking toggle uses). Surfaces as the chat page's
-// thinking-level picker for reasoning-capable models.
+// + the "none" sentinel). This validates the runtime's control vocabulary;
+// it is not a declaration that any particular model supports every level.
 const HERMES_THINKING_LEVELS = Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+// Verified compatibility for these exact model ids only. A future model must
+// not inherit this policy, and an explicit runtime declaration always wins.
+const MIMO_LEGACY_EFFORT_MODELS = new Set(["mimo-v2.6-pro", "mimo-v2.6-flash"]);
+
+function hermesModelThinkingOptions(provider, modelId, capability = {}) {
+  capability ||= {};
+  if (capability.reasoning === false) return [];
+  // A reasoning boolean is not a wire-level vocabulary. Prefer a declared set;
+  // Current Hermes drops supported_efforts, and MiMo's /models returns only
+  // ids. Keep the verified workaround narrow instead of inventing levels for
+  // every present/future model at that endpoint.
+  let levels = Array.isArray(capability.supported_efforts)
+    ? HERMES_THINKING_LEVELS.filter(level => capability.supported_efforts.includes(level)) : null;
+  let host = "";
+  try { host = new URL(provider.api_url || "").hostname.toLowerCase(); } catch { /* no endpoint in builtin rows */ }
+  const directMiMo = host === "xiaomimimo.com" || host.endsWith(".xiaomimimo.com")
+    || provider.slug === "xiaomi" && provider.is_user_defined !== true && provider.source !== "user-config";
+  if (levels === null && directMiMo) levels = MIMO_LEGACY_EFFORT_MODELS.has(modelId) ? ["none", "low", "medium", "high"] : [];
+  // "reasoning: true" alone says nothing about accepted effort values. Keep
+  // the model selectable, but do not manufacture manual effort controls.
+  levels ||= [];
+  return capability.can_disable_reasoning === false ? levels.filter(level => level !== "none") : levels;
+}
+
+function clampHermesThinking(level, options) {
+  if (!level || !options?.length || options.includes(level) || !HERMES_THINKING_LEVELS.includes(level)) return level;
+  // A weak enabled request must not silently turn thinking off.
+  const enabled = options.filter(option => option !== "none");
+  const weaker = enabled.filter(option => HERMES_THINKING_LEVELS.indexOf(option) <= HERMES_THINKING_LEVELS.indexOf(level));
+  return weaker.at(-1) || enabled[0] || level;
+}
 
 /** Hermes strict 模型目录无法形成完整快照时使用的稳定服务错误。 */
 class HermesCatalogUnavailableError extends Error {
@@ -1170,6 +1208,7 @@ class HermesBackend extends AgentBackend {
     this.gwRuntimeByKey = new Map();  // sessionKey -> { profile, runtimeId, storedId, generation }
     this.gwKeyByRuntime = new Map();  // runtimeId -> sessionKey (event routing)
     this.gwTurns = new Map();         // runtimeId -> live turn state (hooks, accumulators)
+    this.gwSessionObservers = new Map(); // sessionKey -> passive browser observers, across continuation turns
     this.gwUsageByKey = new Map();    // sessionKey -> last cumulative usage snapshot (per-turn deltas)
     this.gwChatFailures = new Map(); // typed terminal diagnostics; never model context or execution authority
     this.gwChatDisabledUntil = new Map(); // profile -> ts;网关拨号失败后的 ACP 降级 TTL
@@ -1817,13 +1856,17 @@ class HermesBackend extends AgentBackend {
               const catalogKey = modelCatalogKey(providerSlug, modelId);
               profileIdentities.add(catalogKey);
               const cap = caps[modelId];
+              const providerName = typeof p.name === "string" && p.name.trim() ? p.name.trim() : providerSlug;
+              const thinkingOptions = hermesModelThinkingOptions(p, modelId, cap);
               // 每个 Profile 先独立收集；等待全部 HTTP 后再按稳定 Profile 顺序折叠。
               profileCatalogRows.push({
                 id: modelId,
                 name: modelId,
                 provider: providerSlug,
+                providerName,
                 backendId: "hermes",
                 profile,
+                thinkingOptions,
                 reasoning: typeof cap?.reasoning === "boolean" ? cap.reasoning : undefined,
                 ...(typeof cap?.fast === "boolean" ? { fast: cap.fast } : {}),
                 pricing: pricing[modelId] || undefined,
@@ -1833,12 +1876,14 @@ class HermesBackend extends AgentBackend {
                 id: modelId,
                 name: modelId,
                 provider: providerSlug,
+                providerName,
                 ...(acpProviderRef ? { acpProviderRef } : {}),
               });
               if (!profileMeta.has(catalogKey)) {
                 profileMeta.set(catalogKey, {
                   pricing: pricing[modelId] || undefined,
                   reasoning: typeof cap?.reasoning === "boolean" ? cap.reasoning : undefined,
+                  thinkingOptions,
                   // fast-mode capability (service-tier param 型)：官方 Edit 子菜单的
                   // ⚡ 开关按它门控；我们的聊天页同款。
                   ...(typeof cap?.fast === "boolean" ? { fast: cap.fast } : {}),
@@ -1913,9 +1958,11 @@ class HermesBackend extends AgentBackend {
       && commitHermesModelCatalogState(this, catalogState, modelCatalogEpoch)) {
       this._modelCatalogCommittedGeneration = refreshGeneration;
       this._modelCatalogProfileSnapshots = snapshotsByProfile;
+      for (const row of this.sessionRows) this._applyModelThinkingToRow(row);
     }
     return returnSnapshot
-      ? { choices: catalogState.modelChoices, meta: catalogState.modelMeta, catalogRows: catalogState.catalogRows }
+      ? { choices: catalogState.modelChoices, meta: catalogState.modelMeta, catalogRows: catalogState.catalogRows,
+        identitiesByProfile: catalogState.modelsByProfileIdentity }
       : catalogState.modelChoices;
   }
 
@@ -2356,15 +2403,7 @@ class HermesBackend extends AgentBackend {
     );
     // stop/reconfigure 已经开始时丢弃旧 dashboard 的迟到结果。
     if (generation !== this._lifecycleGeneration) return this.sessionRows;
-    // 思考档能力（S4）：reasoning 能力模型（官方缺省即 true）给出与官方 Edit
-    // 子菜单一致的档位表；UI 复用 OpenClaw 既有 picker（thinkingOptions 驱动，
-    // 零后端特判）。缺省档 = medium（官方语义：空即 medium）。
-    for (const row of aggregated) {
-      if (this._modelSupportsReasoning(row.model)) {
-        row.thinkingOptions = [...HERMES_THINKING_LEVELS];
-        row.thinkingDefault = "medium";
-      }
-    }
+    for (const row of aggregated) this._applyModelThinkingToRow(row);
     this.sessionRows = aggregated;
     // 重建后的行是 REST 快照（无窗口占用/无 live 模型）；把网关 session.info /
     // message.complete 学到的实时元数据重新叠上去。
@@ -2575,14 +2614,18 @@ class HermesBackend extends AgentBackend {
    * @param {Map<string, object>} meta
    * @returns {Array<object>}
    */
-  _runtimeModelsFromChoices(choices, meta) {
+  _runtimeModelsFromChoices(choices, meta, identitiesByProfile = this.modelsByProfileIdentity) {
     return choices.map((choice) => {
       const modelMeta = (meta && meta.get(modelCatalogKey(choice.provider, choice.id))) || {};
       return {
         id: choice.id,
         name: choice.name,
         provider: choice.provider,
+        providerName: choice.providerName,
         backendId: "hermes",
+        modelScopes: [...identitiesByProfile].filter(([, ids]) => ids.has(modelCatalogKey(choice.provider, choice.id))).map(([profile]) => profile),
+        thinkingOptions: modelMeta.thinkingOptions,
+        thinkingDefault: modelMeta.thinkingOptions?.length ? clampHermesThinking("medium", modelMeta.thinkingOptions) : undefined,
         reasoning:
           typeof modelMeta.reasoning === "boolean" ? modelMeta.reasoning : undefined,
         ...(typeof modelMeta.fast === "boolean" ? { fast: modelMeta.fast } : {}),
@@ -2592,21 +2635,28 @@ class HermesBackend extends AgentBackend {
     });
   }
 
-  // Does this model expose reasoning (thinking/effort controls)? Mirrors the
-  // official picker's `caps?.reasoning ?? true` — an uncatalogued model
-  // DEFAULTS to true; only an explicit false hides the controls.
-  _modelSupportsReasoning(modelId) {
-    if (!modelId) return true;
-    let sawExplicit = null;
-    for (const choice of this.modelChoices) {
-      if (choice.id !== modelId) continue;
-      const m = this.modelMeta?.get?.(modelCatalogKey(choice.provider, choice.id));
-      if (m && typeof m.reasoning === "boolean") {
-        if (m.reasoning) return true;
-        sawExplicit = false;
-      }
-    }
-    return sawExplicit === null;
+  _modelThinkingOptions(modelId, provider, profile) {
+    const snapshot = this._modelCatalogProfileSnapshots.get(profile);
+    if (profile && this._modelCatalogProfileSnapshots.size && !snapshot) return undefined;
+    const choices = snapshot?.choices ?? this.modelChoices;
+    const meta = snapshot?.meta ?? this.modelMeta;
+    let matches = choices.filter(choice => choice.id === modelId);
+    if (provider) matches = matches.filter(choice => choice.provider === provider || choice.acpProviderRef === provider
+      || provider === "custom" && !!choice.acpProviderRef);
+    const options = matches.map(choice => {
+      const cap = meta?.get(modelCatalogKey(choice.provider, choice.id));
+      return cap?.reasoning === false ? [] : cap?.thinkingOptions ?? [];
+    });
+    // A legacy bare model/provider may be ambiguous. Never borrow a different
+    // route's policy unless all candidates declare exactly the same levels.
+    return options.length && options.every(value => JSON.stringify(value) === JSON.stringify(options[0])) ? options[0] : undefined;
+  }
+
+  _applyModelThinkingToRow(row) {
+    const agentId = row.agentId || /^agent:([^:]+):/u.exec(row.key || "")?.[1];
+    const options = this._modelThinkingOptions(row.model, row.modelProvider, this.profileById.get(agentId));
+    row.thinkingOptions = options ? [...options] : [];
+    row.thinkingDefault = row.thinkingOptions.length ? clampHermesThinking("medium", row.thinkingOptions) : undefined;
   }
 
   /**
@@ -3041,6 +3091,7 @@ class HermesBackend extends AgentBackend {
     const models = this._runtimeModelsFromChoices(
       runtimeSnapshot.choices,
       runtimeSnapshot.meta,
+      runtimeSnapshot.identitiesByProfile,
     );
     // runtime 摘要使用逐 profile 行；UI models 继续使用已去重的 choice 映射。
     return { models, config, runtime: runtimeSnapshot.catalogRows };
@@ -7333,6 +7384,7 @@ class HermesBackend extends AgentBackend {
           agentBuilt: res?.info?.lazy !== true,
         });
         this.gwKeyByRuntime.set(runtimeId, sessionKey);
+        this._gwApplySessionInfo(sessionKey, { model, provider: runtimeProvider, ...res.info });
         this.freshSessionKeys.add(sessionKey);
         this.freshSessionTransports.set(sessionKey, "gateway");
         if (actualWorkspace && path.isAbsolute(actualWorkspace)) {
@@ -7610,6 +7662,7 @@ class HermesBackend extends AgentBackend {
     if (opts.provider) meta.provider = opts.provider;
     this.sessionLiveMeta.set(sessionKey, meta);
     this._applyLiveMetaToRow(sessionKey);
+    await this._gwNormalizeThinking(sessionKey, m, sock);
     return {
       model: String(result?.value || model),
       scope: "session",
@@ -7690,6 +7743,14 @@ class HermesBackend extends AgentBackend {
     if (!HERMES_THINKING_LEVELS.includes(level)) {
       throw new Error(`hermes: 未知思考档「${level}」`);
     }
+    const { model, provider, profile } = this._sessionThinkingState(sessionKey);
+    const options = this._modelThinkingOptions(model, provider, profile);
+    if (!options?.length) {
+      throw new Error("hermes: 尚无当前模型可用思考档位的明确数据，暂不能手动设置；请刷新模型目录或在 Hermes 中设置");
+    }
+    if (!options.includes(level)) {
+      throw new Error(`hermes: 当前模型不支持思考档「${level}」，可用档位：${options.join(" / ") || "无"}`);
+    }
     const deferred = this._queueNextTurnConfig(sessionKey, "reasoning", level, { reasoningEffort: level });
     const { scope } = deferred ? { scope: "session" } : await this._sessionConfigSet(sessionKey, "reasoning", level);
     const meta = this.sessionLiveMeta.get(sessionKey) || {};
@@ -7697,6 +7758,67 @@ class HermesBackend extends AgentBackend {
     this.sessionLiveMeta.set(sessionKey, meta);
     this._applyLiveMetaToRow(sessionKey);
     return { level, scope };
+  }
+
+  _sessionThinkingState(sessionKey) {
+    const mapping = this.gwRuntimeByKey.get(sessionKey);
+    const live = this.sessionLiveMeta.get(sessionKey) || {};
+    const row = this.sessionRows.find(item => item.key === sessionKey) || {};
+    return {
+      profile: mapping?.profile || this.profileById.get(/^agent:([^:]+):/u.exec(sessionKey)?.[1]),
+      model: live.model || mapping?.resumeInfo?.model || row.model,
+      provider: live.provider || mapping?.resumeInfo?.provider || row.modelProvider,
+      level: live.reasoningEffort || mapping?.resumeInfo?.reasoning_effort || row.thinkingLevel,
+    };
+  }
+
+  async _gwNormalizeThinking(sessionKey, mapping, sock) {
+    const state = this._sessionThinkingState(sessionKey);
+    const options = this._modelThinkingOptions(state.model, state.provider, state.profile);
+    if (!options?.length || options.length === HERMES_THINKING_LEVELS.length) return;
+    const generation = this._lifecycleGeneration;
+    const { dash } = this._sessionTarget(sessionKey);
+    const lease = this._captureGatewayDashboard(dash);
+    const assertCurrent = (confirmedLevel = state.level) => {
+      lease.assertCurrent?.();
+      const current = this._sessionThinkingState(sessionKey);
+      if (generation !== this._lifecycleGeneration || this.gwRuntimeByKey.get(sessionKey) !== mapping
+        || mapping.generation !== sock.generation || this.gwTurns.has(mapping.runtimeId)
+        || current.model !== state.model || current.provider !== state.provider
+        || current.level !== state.level && current.level !== confirmedLevel) {
+        throw new Error("Hermes 模型设置已变化，请重新发送");
+      }
+    };
+    assertCurrent();
+    await this._gwRequireAgent(mapping, sock);
+    // A lazy resume has no effort until the build announces session.info.
+    // Adopt that authoritative value before guarding the subsequent read/write.
+    const builtLevel = this._sessionThinkingState(sessionKey).level;
+    assertCurrent(builtLevel);
+    state.level = builtLevel;
+    let level = state.level;
+    try {
+      // Read this session's effective effort, including a profile default or a
+      // persisted override. Do not guess medium when reopening an old chat.
+      const result = await sock.request("config.get", { session_id: mapping.runtimeId, key: "reasoning" });
+      if (typeof result?.value === "string") level = result.value;
+    } catch (error) {
+      if (error?.code !== -32601 && error?.code !== 4002) throw error;
+    }
+    assertCurrent();
+    const effective = clampHermesThinking(level, options);
+    if (!effective) return;
+    if (effective !== level) {
+      const result = await sock.request("config.set", { session_id: mapping.runtimeId, key: "reasoning", value: effective });
+      // Hermes emits session.info before acknowledging its config.set result.
+      // Accept our own confirmed effort while still rejecting a different edit.
+      assertCurrent(effective);
+      if (result?.confirm_required || typeof result?.value === "string" && result.value !== effective) {
+        throw new Error("Hermes 未确认当前模型的思考档位，消息未发送");
+      }
+    }
+    this.sessionLiveMeta.set(sessionKey, { ...this.sessionLiveMeta.get(sessionKey), reasoningEffort: effective });
+    this._applyLiveMetaToRow(sessionKey);
   }
 
   // Toggle fast mode (the service-tier request param — 官方 ⚡ 的 param 型；
@@ -7770,6 +7892,8 @@ class HermesBackend extends AgentBackend {
       this.gwKeyByRuntime.delete(gw.runtimeId);
       this.gwRuntimeByKey.delete(sessionKey);
     }
+    for (const observer of this.gwSessionObservers.get(sessionKey) || []) observer.finish();
+    this.gwSessionObservers.delete(sessionKey);
     this.sessionLiveMeta.delete(sessionKey);
     this.nextTurnConfigs.delete(sessionKey);
     this.gwUsageByKey.delete(sessionKey);
@@ -8159,6 +8283,19 @@ class HermesBackend extends AgentBackend {
       // keyed by message id — work for Hermes like OpenClaw.
       const id = msg.id != null ? `hermes-msg-${msg.id}` : undefined;
       const ts = tsOf(msg.timestamp);
+      // Hermes persists background completion notifications as model-facing
+      // user input. Only the producer's explicit display kind identifies them;
+      // a human pasting the same text must remain a regular user message.
+      if (msg.display_kind === "process_complete") {
+        out.push({
+          role: "system",
+          id,
+          notice: "processComplete",
+          content: [{ type: "text", text: textOf(msg.content) }],
+          ...(ts != null ? { timestamp: ts } : {}),
+        });
+        continue;
+      }
       // Timeline rows (model switches etc.) render as quiet system lines; their
       // role varies, so branch on display_kind before role.
       //
@@ -8538,9 +8675,10 @@ class HermesBackend extends AgentBackend {
       return { attachments: { image: {} }, notReady: this.claimsAgentId(agentId) };
     }
     if (!this._gatewayChatEnabled(profile)) {
-      return { attachments: { image: {} } };
+      return { attachments: { image: {} }, modelScope: profile };
     }
     return {
+      modelScope: profile,
       attachments: {
         image: { maxBytes: 25 * 1024 * 1024 },
         pdf: { maxBytes: 50 * 1024 * 1024, maxPages: 25 },
@@ -8550,6 +8688,7 @@ class HermesBackend extends AgentBackend {
       // 处理的 / 命令交给它执行，而不是当聊天消息发出。
       slash: true,
       steer: true,
+      observeAfterSend: true,
       permissions: {
         scope: "session",
         apply: "next-turn",
@@ -8803,6 +8942,13 @@ class HermesBackend extends AgentBackend {
     for (const [runtimeId, turn] of this.gwTurns) {
       const m = this.gwRuntimeByKey.get(turn.sessionKey);
       if (!m || m.profile !== profile) continue;
+      if (turn.observationOnly) {
+        // A passive continuation has no send to recover. In particular, resume
+        // could start a crash continuation; observing cannot authorize that.
+        turn.hooks.status?.({ kind: "needs_verification" });
+        this._gwEndTurn(runtimeId, turn);
+        continue;
+      }
       if (turn.requiredTransport === "gateway") {
         // Reconnection cannot prove what happened to an inspiration turn, and
         // resume may execute a crash-recovery continuation without user input.
@@ -8849,20 +8995,67 @@ class HermesBackend extends AgentBackend {
     if (signal?.aborted) return;
     const mapping = this.gwRuntimeByKey.get(sessionKey);
     const turn = mapping && this.gwTurns.get(mapping.runtimeId);
-    if (!turn || turn.ended || turn.sessionKey !== sessionKey || turn.requiredTransport === "gateway") return;
-    if (turn.observers.size >= 64) throw new Error("Hermes session has too many observers");
+    if (!mapping || turn?.requiredTransport === "gateway"
+      || (!turn && mapping.observeContinuations !== true)) return;
+    const observers = this._gwObserversFor(sessionKey);
+    if (observers.size >= 64) throw new Error("Hermes session has too many observers");
     let finish;
     const done = new Promise(resolve => { finish = resolve; });
     const observer = { hooks, finish };
-    turn.observers.add(observer);
+    observers.add(observer);
     signal?.addEventListener("abort", finish, { once: true });
     try {
+      if (turn && !turn.ended && turn.sessionKey === sessionKey) {
+        hooks.status?.({ kind: "running" });
+        for (const tool of turn.toolSnapshot?.values() || []) hooks.tool?.(tool);
+        if (turn.planSnapshot) hooks.plan?.(turn.planSnapshot);
+        if (turn.thought) hooks.thinking?.(turn.thought);
+        if (turn.accumulated) hooks.delta?.(turn.accumulated, turn.deltaMeta);
+        if (turn.statusSnapshot) hooks.status?.(turn.statusSnapshot);
+      }
       for (const { prompt } of this.getPendingChatPrompts(sessionKey)) hooks.prompt?.(prompt);
       await done;
     } finally {
       signal?.removeEventListener("abort", finish);
-      turn.observers.delete(observer);
+      observers.delete(observer);
+      if (!observers.size && !this.gwTurns.has(mapping.runtimeId)
+        && this.gwSessionObservers.get(sessionKey) === observers) this.gwSessionObservers.delete(sessionKey);
     }
+  }
+
+  _gwObserversFor(sessionKey) {
+    let observers = this.gwSessionObservers.get(sessionKey);
+    if (!observers) this.gwSessionObservers.set(sessionKey, observers = new Set());
+    return observers;
+  }
+
+  _gwCreateTurn(sessionKey, hooks = {}, fields = {}) {
+    const turn = { sessionKey, accumulated: "", thought: "", sealed: 0, resolve: null, timer: null,
+      usageBefore: this.gwUsageByKey.get(sessionKey) || null, toolSnapshot: new Map(),
+      observers: this._gwObserversFor(sessionKey), ...fields };
+    turn.hooks = Object.fromEntries(CHAT_HOOK_METHODS.map(name => [name, (...args) => {
+      if (name === "tool" && args[0]?.toolCallId) {
+        const tool = args[0], previous = turn.toolSnapshot.get(tool.toolCallId);
+        if (previous?.phase !== "result" || tool.phase === "result") {
+          turn.toolSnapshot.set(tool.toolCallId, { ...previous,
+            ...Object.fromEntries(Object.entries(tool).filter(([, value]) => value !== undefined)) });
+          // Only the recent activity snapshot is retained; canonical history
+          // owns the complete trace, including long-running sessions.
+          if (turn.toolSnapshot.size > 128) {
+            const oldest = [...turn.toolSnapshot].find(([, item]) => item.phase === "result")?.[0]
+              ?? turn.toolSnapshot.keys().next().value;
+            turn.toolSnapshot.delete(oldest);
+          }
+        }
+      } else if (name === "plan") turn.planSnapshot = args[0];
+      else if (name === "status") turn.statusSnapshot = args[0];
+      else if (name === "delta") turn.deltaMeta = args[1];
+      hooks[name]?.(...args);
+      for (const observer of turn.observers) {
+        try { observer.hooks[name]?.(...args); } catch { /* a detached UI cannot interrupt execution */ }
+      }
+    }]));
+    return turn;
   }
 
   _onGwServerRequest(profile, frame) {
@@ -8923,10 +9116,24 @@ class HermesBackend extends AgentBackend {
       }
       return;
     }
-    const turn = this.gwTurns.get(sid);
-    if (!turn) return;
+    let turn = this.gwTurns.get(sid);
+    if (!turn && type === "message.start") {
+      const mapping = this.gwRuntimeByKey.get(sessionKey), socket = this.gwSockets.get(profile);
+      // Hermes may wake itself after message.complete (e.g. process_complete).
+      // Keep the real runtime's new turn observable without borrowing the old
+      // operation's hooks/receipt or creating another prompt.submit.
+      if (mapping?.runtimeId === sid && mapping.observeContinuations === true
+        && mapping.generation === socket?.generation) {
+        turn = this._gwCreateTurn(sessionKey, {}, { observationOnly: true });
+        this.gwTurns.set(sid, turn);
+      }
+    }
+    if (!turn || turn.sessionKey !== sessionKey) return;
     const hooks = turn.hooks;
     switch (type) {
+      case "message.start":
+        hooks.status?.({ kind: "running" });
+        break;
       case "message.delta":
         turn.accumulated += String(payload.text ?? "");
         hooks.delta?.(turn.accumulated, ["commentary", "final_answer"].includes(payload.phase)
@@ -8938,7 +9145,7 @@ class HermesBackend extends AgentBackend {
         // message.complete only carries the LAST segment.
         const text = String(payload.text ?? "");
         if (!text.trim()) break;
-        this.transcripts.get(turn.sessionKey)?.push({ role: "assistant", content: [{ type: "text", text }], timestamp: Date.now() });
+        if (!turn.observationOnly) this.transcripts.get(turn.sessionKey)?.push({ role: "assistant", content: [{ type: "text", text }], timestamp: Date.now() });
         hooks.interim?.(text);
         turn.sealed += 1;
         turn.accumulated = "";
@@ -9086,6 +9293,7 @@ class HermesBackend extends AgentBackend {
     }
     if (typeof meta.reasoningEffort === "string" && meta.reasoningEffort) row.thinkingLevel = meta.reasoningEffort;
     if (typeof meta.permissionMode === "string") row.permissionMode = meta.permissionMode;
+    this._applyModelThinkingToRow(row);
   }
 
   // Cumulative→per-turn usage: the gateway reports session-cumulative counters;
@@ -9150,8 +9358,9 @@ class HermesBackend extends AgentBackend {
     if (turn.timer) clearTimeout(turn.timer);
     turn.timer = null;
     if (this.gwTurns.get(runtimeId) === turn) this.gwTurns.delete(runtimeId);
-    for (const observer of turn.observers || []) observer.finish();
-    turn.observers?.clear();
+    // A terminal settles this turn's send, not the browser's session
+    // subscription. A following message.start can be an autonomous continuation.
+    if (!turn.observers?.size) this.gwSessionObservers.delete(turn.sessionKey);
     turn.resolve?.();
     turn.resolve = null;
   }
@@ -9206,16 +9415,16 @@ class HermesBackend extends AgentBackend {
     const text = String(payload.text ?? "");
     const usage = payload.usage && typeof payload.usage === "object" ? payload.usage : null;
     const meta = usage ? this._gwTurnUsageMeta(sessionKey, turn, usage) : undefined;
-    const transcript = this.transcripts.get(sessionKey);
+    const transcript = turn.observationOnly ? null : this.transcripts.get(sessionKey);
     const stamp = meta ? { usage: meta.usage, ...(meta.model ? { model: meta.model } : {}) } : {};
     if (status === "error") {
-      const code = this._rememberChatFailure(sessionKey, turn, payload);
+      const code = turn.observationOnly ? hermesChatFailureCode(payload) : this._rememberChatFailure(sessionKey, turn, payload);
       // 按信息量排序，不按字段名排：text 是网关拼好的全文（额度墙时含 provider
       // 原话 + 充值链接），billing.message 是同一段文案的结构化副本，
       // failure_reason 只是裸枚举（"billing" / "rate_limit"…）且只在额度墙时才有
       // ——它排第一会把唯一数据最全的一类错误压成一个单词。
       const reason = String(
-        ["rate_limit", "auth", "connection"].includes(code) ? `${payload.partial === true && text.trim() ? `${text.trim()}\n\n` : ""}${HERMES_CHAT_FAILURE_COPY[code]}`
+        HERMES_TYPED_CHAT_FAILURES.has(code) ? `${payload.partial === true && text.trim() ? `${text.trim()}\n\n` : ""}${HERMES_CHAT_FAILURE_COPY[code]}`
           : text.trim() || payload.error || payload?.billing?.message || payload.failure_reason || HERMES_CHAT_FAILURE_COPY.error,
       );
       // stopReason:"error" 让重载后的历史行仍按红色错误气泡渲染——error hook 的
@@ -9237,7 +9446,7 @@ class HermesBackend extends AgentBackend {
       // Empty successful turn → surface as error (an empty chat:final would
       // loop the UI's reload-on-final; same policy as the ACP path).
       const reason = String(payload.warning || "模型没有返回任何内容（可能是模型配置或额度问题）。");
-      this._rememberChatFailure(sessionKey, turn, payload, "empty");
+      if (!turn.observationOnly) this._rememberChatFailure(sessionKey, turn, payload, "empty");
       transcript?.push({ role: "assistant", content: [{ type: "text", text: `[${reason}]` }], timestamp: Date.now(), stopReason: "error" });
       turn.hooks.error?.(reason);
       this._gwEndTurn(runtimeId, turn);
@@ -9256,9 +9465,9 @@ class HermesBackend extends AgentBackend {
   }
 
   _gwTurnError(sessionKey, runtimeId, turn, message) {
-    const code = this._rememberChatFailure(sessionKey, turn, { message });
-    if (["rate_limit", "auth", "connection"].includes(code)) message = HERMES_CHAT_FAILURE_COPY[code];
-    this.transcripts.get(sessionKey)?.push({ role: "assistant", content: [{ type: "text", text: `[${message}]` }], timestamp: Date.now(), stopReason: "error" });
+    const code = turn.observationOnly ? hermesChatFailureCode({ message }) : this._rememberChatFailure(sessionKey, turn, { message });
+    if (HERMES_TYPED_CHAT_FAILURES.has(code)) message = HERMES_CHAT_FAILURE_COPY[code];
+    if (!turn.observationOnly) this.transcripts.get(sessionKey)?.push({ role: "assistant", content: [{ type: "text", text: `[${message}]` }], timestamp: Date.now(), stopReason: "error" });
     turn.hooks.error?.(message);
     this._gwEndTurn(runtimeId, turn);
   }
@@ -9374,6 +9583,7 @@ class HermesBackend extends AgentBackend {
     };
     this.gwRuntimeByKey.set(sessionKey, m);
     this.gwKeyByRuntime.set(runtimeId, sessionKey);
+    if (res?.info) this._gwApplySessionInfo(sessionKey, res.info);
     return { m, sock };
   }
 
@@ -9521,6 +9731,7 @@ class HermesBackend extends AgentBackend {
       };
       this.gwRuntimeByKey.set(sessionKey, m);
       this.gwKeyByRuntime.set(runtimeId, sessionKey);
+      if (res?.info) this._gwApplySessionInfo(sessionKey, res.info);
     }
     if (this._gwLegacyCustomRoute(m)) {
       await this._gwRequireAgent(m, sock);
@@ -9530,7 +9741,10 @@ class HermesBackend extends AgentBackend {
     // queue into this turn server-side; files stage under the workspace and
     // return an @file: ref that must ride the prompt TEXT.
     let fileRefs = "";
-    try { await this._applyNextTurnConfigs(sessionKey, m, sock); }
+    try {
+      await this._applyNextTurnConfigs(sessionKey, m, sock);
+      await this._gwNormalizeThinking(sessionKey, m, sock);
+    }
     catch (error) {
       hooks.error?.(`Hermes 下一轮设置未应用，消息未发送：${error.message}`);
       return;
@@ -9587,27 +9801,12 @@ class HermesBackend extends AgentBackend {
     assertCurrentGeneration();
     // —— register the turn BEFORE submitting (events may start before the ack),
     // then wait for message.complete/error via the turn promise.
-    const turn = {
-      sessionKey,
+    m.observeContinuations = requiredTransport !== "gateway";
+    const turn = this._gwCreateTurn(sessionKey, hooks, {
       userTimestamp: transcript.findLast(row => row.role === "user")?.timestamp,
       operationId,
       requiredTransport,
-      hooks,
-      observers: new Set(),
-      accumulated: "",
-      thought: "",
-      sealed: 0,
-      usageBefore: this.gwUsageByKey.get(sessionKey) || null,
-      resolve: null,
-      timer: null,
-    };
-    const originalHooks = turn.hooks;
-    turn.hooks = Object.fromEntries(CHAT_HOOK_METHODS.map(name => [name, (...args) => {
-      originalHooks[name]?.(...args);
-      for (const observer of turn.observers) {
-        try { observer.hooks[name]?.(...args); } catch { /* a detached UI cannot interrupt execution */ }
-      }
-    }]));
+    });
     const pendingHooks = [];
     if (requiredTransport === "gateway") {
       // Events may precede the submit acknowledgement. Hermes can queue or
@@ -10764,6 +10963,8 @@ class HermesBackend extends AgentBackend {
     this._idempotentSends.clear();
     this.acpSessionByKey.clear();
     for (const [runtimeId, turn] of [...this.gwTurns]) this._gwEndTurn(runtimeId, turn);
+    for (const observers of this.gwSessionObservers.values()) for (const observer of observers) observer.finish();
+    this.gwSessionObservers.clear();
     for (const sock of this.gwSockets.values()) {
       try { sock.close(); } catch { /* already closed */ }
     }

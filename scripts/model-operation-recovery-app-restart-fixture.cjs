@@ -202,6 +202,7 @@ async function run() {
       assert.equal(first.chat.userMessages, 1); assert.equal(first.chat.nativeResponses, 1); assert.equal(first.externalModelCalls, 0);
       assert.deepEqual(first.prewarm, { rest: true, runtimeReady: true, workRunsBeforeSend: 0 });
       if (dailyReview) assert.deepEqual(first.dailyReview, { hidden: true, backendRulesPreserved: true, heartbeatVisible: true, narrow: true });
+      assert.equal(first.conditionWatchUiRemoved, true);
       if (connectorPages) {
         assert(first.pages.length >= 12); assert.equal(first.connectors.catalogTotal, 1667);
         assert.equal(first.connectors.grantsExplicit, true); assert.equal(first.connectors.childClosed, true);

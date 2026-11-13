@@ -11,6 +11,7 @@ import i18n from "../../app/manage-ui/src/i18n";
 import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
 
+declare const __PROCESS_HISTORY__: any[];
 const state = window as any, options = new URLSearchParams(location.search);
 const language = options.get("language") || "zh-CN", immersive = options.get("mode") === "immersive";
 const now = Date.now(), since = now - 600_000;
@@ -23,6 +24,7 @@ const cases = [
   { backendId: "hermes", agentId: "hermes-reader", name: "Reader", key: "agent:hermes-reader:main" },
   { backendId: "openclaw", agentId: "claw-legacy", name: "Legacy", key: "agent:claw-legacy:cron:legacy" },
   { backendId: "openclaw", agentId: "claw-prompt-only", name: "Scheduled", key: "agent:claw-prompt-only:cron:pending" },
+  { backendId: "hermes", agentId: "hermes-background", name: "Background", key: "agent:hermes-background:main" },
 ];
 const sessions = cases.map(row => ({ ...row, agentName: row.name, kind: row.key.endsWith(":main") ? "main" : "cron", updatedAt: now - 10000 }));
 const histories = new Map<string, any[]>(), requests: any[] = [];
@@ -68,6 +70,7 @@ histories.set(cases[4].key, [message("late-input", "user",
 histories.set(cases[5].key, [message("reader-old", "assistant", "Reader history", since - 1000, hermesSource)]);
 histories.set(cases[7].key, [message("projected-input-only", "assistant", "HIDDEN_CRON_PROMPT: no output has arrived", since + 5000,
   { provenance: { kind: "internal_system", sourceTool: "cron" }, __openclaw: { turnBoundary: true } })]);
+histories.set(cases[8].key, __PROCESS_HISTORY__);
 let writes = 0;
 class FixtureSocket {
   static OPEN = 1; readyState = 1; onopen: any; onmessage: any;
@@ -105,6 +108,7 @@ state.fetch = async (input: unknown, init: RequestInit = {}) => {
   })) };
   else if (url.pathname === "/__api/backends") payload = { backends: FALLBACK_BACKEND_DESCRIPTORS };
   else if (url.pathname === "/__api/models") payload = { catalogRevision: "a".repeat(64), models: [] };
+  else if (/^\/__api\/agents\/[^/]+\/models$/.test(url.pathname)) payload = { models: [], defaultModel: null };
   else if (url.pathname === "/__api/agents") payload = { agents: cases.map(row => ({ id: row.agentId, name: row.name, backendId: row.backendId })) };
   else if (url.pathname === "/__api/chat/capabilities") payload = { attachments: {}, slash: false, steer: false };
   else if (url.pathname === "/__api/chat/cache-scope") payload = { backendId: url.searchParams.get("backend"), cacheScope: "cron-display-fixture" };
@@ -199,6 +203,10 @@ state.runCronDisplayFixture = async () => {
   await runPageRefresh("/chat");
   await wait(() => rowFor(cases[4].agentId)?.textContent?.includes("LATEFINISHEDREPORT"), "finished Cron did not refresh preview");
   select(cases[0].key); await wait(() => thread()?.textContent?.includes("Owl_LATEST_CONTINUATION"), "already-read reopen");
+  // The cached transcript can appear before the delayed canonical response.
+  // Check the landing after that response commits, as on the first open above.
+  await wait(() => document.querySelector<HTMLElement>(".chat-thread")?.dataset.historyLoaded === "true",
+    "already-read canonical history committed");
   await pause(180);
   check(thread().scrollHeight - thread().scrollTop - thread().clientHeight < 8, "already-read history should open at its tail");
   histories.get(cases[0].key)!.push(message("human-followup", "user", "HUMAN_FOLLOWUP: explain this Cron report", now + 2000, hermesSource));
@@ -209,8 +217,25 @@ state.runCronDisplayFixture = async () => {
   histories.get(cases[1].key)!.push(message("openclaw-human-followup", "user", "OPENCLAW_HUMAN_FOLLOWUP: explain this Cron report", now + 3000));
   sessions[1].updatedAt = now + 3000; await runPageRefresh("/chat");
   await wait(() => thread().textContent?.includes("OPENCLAW_HUMAN_FOLLOWUP"), "manual OpenClaw follow-up hidden after projected Cron input");
+  const processLabel = language === "en" ? "Background command ended" : "后台命令已结束";
+  const checkProcessNotice = async () => {
+    await wait(() => thread()?.textContent?.includes("PROCESS_FOLLOWUP"), "background follow-up visible");
+    await wait(() => thread()?.textContent?.includes(processLabel), "localized background notification");
+    const notice = Array.from(thread().querySelectorAll<HTMLElement>("[title]"))
+      .filter(node => node.textContent === processLabel);
+    check(notice.length === 1, "one system notice, without duplicates");
+    check(notice[0].title === __PROCESS_HISTORY__[1].content[0].text, "original notification is available on hover");
+    check(!notice[0].closest(".is-user, .is-error"), "notification is neither a user bubble nor an error bubble");
+    check((thread().textContent?.match(/IMPORTANT: Background process/g) || []).length === 1,
+      "only the identical human message renders its text as a chat bubble");
+    check(!thread().textContent?.includes(i18n.t("chat.modelSwitchedNotice")), "completion is not labeled as a model switch");
+  };
+  select(cases[8].key); await checkProcessNotice();
+  await runPageRefresh("/chat"); await pause(200); await checkProcessNotice();
+  select(cases[5].key); await wait(() => thread()?.textContent?.includes("Reader history"), "leave background session");
+  select(cases[8].key); await checkProcessNotice();
   check(writes === 0, "fixture made external mutations");
   return { mode: immersive ? "immersive" : "normal", language, result, projectedInputPreviewHidden: true,
-    projectedInputNoUnread: true, previewRefresh: true, manualFollowup: true, writes };
+    projectedInputNoUnread: true, previewRefresh: true, manualFollowup: true, backgroundNotice: true, writes };
 };
 state.cronFixture = { cases, select, requests };

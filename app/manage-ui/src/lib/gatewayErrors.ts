@@ -16,12 +16,21 @@ type TFn = (key: string, opts?: Record<string, unknown>) => string;
 // string. Match the complete message against the shared public catalog.
 const publicErrorKeys = new Map(Object.entries(publicErrors).flatMap(([group, messages]) =>
   Object.entries(messages).map(([code, message]) => [message, `chatErrors:${group}.${code}`] as const)));
+publicErrorKeys.set(
+  "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试",
+  "chatErrors:runtime.RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED",
+);
 
 function productErrorMessage(raw: string, t: TFn): string | null {
   const key = publicErrorKeys.get(raw);
   if (key) return t(key, { defaultValue: raw });
   const fallback = /^Shoggoth (任务未完成|请求失败) \(([A-Z][A-Z0-9_]{0,127})\)$/u.exec(raw);
   if (!fallback) return null;
+  // Older live events and cached errors carried only this fallback envelope.
+  // Present the recovery action without rewriting the saved transcript.
+  if (fallback[2].startsWith("RUNTIME_COMPACTION_") && Object.hasOwn(publicErrors.runtime, fallback[2])) {
+    return t(`chatErrors:runtime.${fallback[2]}`);
+  }
   return t(fallback[1] === "任务未完成" ? "chat.gwErrors.taskFailedCode" : "chat.gwErrors.requestFailedCode", { code: fallback[2] });
 }
 

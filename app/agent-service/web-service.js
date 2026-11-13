@@ -26,10 +26,10 @@ function publicUrl(value) {
     || isIP(host) && !isPublicAddress(host)) fail("WEB_URL_BLOCKED");
   url.hash = ""; return url;
 }
-function assertPublicDns(url, host, addresses) {
+function assertPublicDns(url, host, addresses, allowProxyFakeIp = true) {
   // Fake-IP DNS is usable for HTTPS domain names because the connection still
   // has to prove the original hostname before receiving an HTTP request.
-  const canUseFakeIp = url.protocol === "https:" && !isIP(host) && host.replace(/\.$/u, "").includes(".");
+  const canUseFakeIp = allowProxyFakeIp && url.protocol === "https:" && !isIP(host) && host.replace(/\.$/u, "").includes(".");
   if (addresses.some(({ address }) => !isPublicAddress(address)
     && !(canUseFakeIp && isIP(address) === 4 && proxyFakeIp.check(address, "ipv4")))) fail("WEB_URL_BLOCKED");
 }
@@ -43,7 +43,8 @@ function raceAbort(promise, signal) {
   });
 }
 async function requestPublic(value, { method = "GET", headers = {}, body, signal, maxBytes = 1024 * 1024,
-  allowRedirects = true, providerRequest = false, lookup = dns.lookup, request = (url, options, callback) => (url.protocol === "https:" ? https : http).request(url, options, callback) } = {}) {
+  allowRedirects = true, redirectTarget, allowProxyFakeIp = true, acceptNotModified = false, captureRetryAfter = false, beforeRequest,
+  providerRequest = false, lookup = dns.lookup, request = (url, options, callback) => (url.protocol === "https:" ? https : http).request(url, options, callback) } = {}) {
   let url = publicUrl(value);
   signal ??= AbortSignal.timeout(60000);
   for (let hop = 0; hop <= 5; hop++) {
@@ -53,8 +54,9 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
     try { addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await raceAbort(lookup(host, { all: true, verbatim: true }), signal); }
     catch (e) { if (signal.aborted) abortError(signal); fail(e.code?.startsWith("WEB_") ? e.code : "WEB_UNAVAILABLE"); }
     if (!addresses.length) fail("WEB_UNAVAILABLE");
-    assertPublicDns(url, host, addresses);
+    assertPublicDns(url, host, addresses, allowProxyFakeIp);
     const pinned = addresses[0];
+    beforeRequest?.();
     const response = await new Promise((resolve, reject) => {
       const req = request(url, { method, agent: false, signal,
         // Authenticate the original HTTPS hostname even over a fake-IP route.
@@ -64,7 +66,9 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
           Accept: "text/html, text/plain, application/json;q=0.9, text/markdown;q=0.9", ...headers } }, res => {
         const chunks = []; let size = 0;
         const declared = Number(res.headers["content-length"]);
-        if (declared > maxBytes) { res.destroy(); req.destroy(); reject(serviceError("WEB_TOO_LARGE", WEB_PUBLIC_MESSAGES.WEB_TOO_LARGE)); return; }
+        if (!(acceptNotModified && res.statusCode === 304) && declared > maxBytes) {
+          res.destroy(); req.destroy(); reject(serviceError("WEB_TOO_LARGE", WEB_PUBLIC_MESSAGES.WEB_TOO_LARGE)); return;
+        }
         res.on("data", chunk => {
           size += chunk.length;
           if (size > maxBytes) { res.destroy(); req.destroy(); reject(serviceError("WEB_TOO_LARGE", WEB_PUBLIC_MESSAGES.WEB_TOO_LARGE)); }
@@ -81,8 +85,11 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
       // Credential forwarding is independent of the public-network target policy.
       if (providerRequest || !allowRedirects || method !== "GET") fail("WEB_REDIRECT_BLOCKED");
       if (!response.headers.location || hop === 5) fail("WEB_REDIRECT_FAILED");
-      url = publicUrl(new URL(response.headers.location, url).href); continue;
+      const next = publicUrl(new URL(response.headers.location, url).href);
+      url = redirectTarget ? redirectTarget(url, next) : next;
+      continue;
     }
+    if (captureRetryAfter && response.status === 429 || acceptNotModified && response.status === 304) return response;
     if (response.status === 429) fail("WEB_RATE_LIMITED");
     if (providerRequest && [401,403].includes(response.status)) fail("WEB_AUTH_FAILED");
     if (providerRequest && [402,432,433].includes(response.status)) fail("WEB_QUOTA_EXCEEDED");

@@ -267,6 +267,17 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
         InspirationOperation: recordAuthority({ authority: OPERATION_FIELDS }),
       }),
     }),
+    conditionWatch: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/condition-watches.sqlite", "stateDir/condition-watches.sqlite-wal"]),
+      records: Object.freeze({
+        Watch: recordAuthority({ authority: ["id", "target", "definition", "version", "revision", "epoch", "state",
+          "nextDueAt", "anchorAt", "test", "binding", "checkpoint", "failure"] }),
+        WatchCheck: recordAuthority({ authority: ["id", "watchId", "epoch", "version", "scheduledAt", "outcome", "eventId"] }),
+        WatchEvent: recordAuthority({ authority: ["id", "watchId", "epoch", "version", "target", "evidence", "state", "receipt"] }),
+      }),
+      recovery: "Single Service writer. Ordinary restart reconciles pending events by destination receipt; restore pauses and revokes read and delivery authority.",
+    }),
     groupChat: Object.freeze({
       owner: "shoggoth",
       pathRules: Object.freeze(["stateDir/group-chats.sqlite", "stateDir/group-chats.sqlite-wal"]),

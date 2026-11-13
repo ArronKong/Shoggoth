@@ -1064,6 +1064,21 @@ function startProxyGateway({
         if (historyWatchGenerations.get(sessionKey) === nextGeneration) {
           historyWatchGenerations.delete(sessionKey);
         }
+        // The terminal belongs to the submitted operation. Some runtimes can
+        // then wake the same session themselves (background command results,
+        // queued notifications). Keep those observations on a separate stream
+        // with no inherited runId, even if an error did not trigger a history read.
+        let observeAfterSend = false;
+        try { observeAfterSend = backend.getChatCapabilities?.(agentIdFromSessionKey(sessionKey))?.observeAfterSend === true; }
+        catch { /* capability failure cannot reopen the settled send */ }
+        if (!clientWatchersClosed && !controller.signal.aborted && entries.size === 0
+          && !sessionSendObservers.has(sessionKey) && !historyWatchGenerations.has(sessionKey)
+          && historyWatchGenerations.size < MAX_CLIENT_HISTORY_WATCHES
+          && typeof backend.watchSession === "function" && observeAfterSend) {
+          const generation = ++historyWatchSequence;
+          historyWatchGenerations.set(sessionKey, generation);
+          queueSessionWatcher(backend, sessionKey, generation);
+        }
       });
       return entry.promise;
     };

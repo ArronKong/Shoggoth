@@ -134,11 +134,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           VERSION="$(node -p 'require("./package.json").version')"
           test "$RELEASE_TAG" = "v$VERSION"
           mkdir -p "dist/$SHOGGOTH_DRAFT_APP_SUBDIR"
+          if [[ -f scripts/release-native-download.cjs ]]; then
+            node scripts/release-native-download.cjs
+          else
+            # Keep the original downloader for manual verification of an older tag.
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import { createHash } from 'node:crypto';
@@ -191,6 +196,7 @@ jobs:
             console.log(`Verified draft asset: ${name}`);
           }
           NODE
+          fi
           (
             cd dist
             awk -v name="Shoggoth-${VERSION}-${SHOGGOTH_DRAFT_ZIP_SUFFIX}.zip" '$2 == name {print; matches++} END {if (matches != 1) exit 1}' SHA256SUMS.txt | shasum -a 256 -c -

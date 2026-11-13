@@ -1,7 +1,7 @@
 {
   "name": "shoggoth-desktop",
   "productName": "Shoggoth",
-  "version": "0.8.316",
+  "version": "0.8.318",
   "description": "Local macOS desktop workspace for AI agents, chat and inspiration",
   "private": true,
   "license": "Apache-2.0",
@@ -119,6 +119,7 @@
     "@modelcontextprotocol/client": "2.3.1",
     "@playwright/mcp": "0.0.82",
     "@trycua/cua-driver": "0.22.0",
+    "@xmldom/xmldom": "0.8.15",
     "ajv": "8.20.0",
     "better-sqlite3": "13.0.3",
     "cron-parser": "5.4.0",

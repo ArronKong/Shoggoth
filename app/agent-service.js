@@ -137,7 +137,10 @@ async function startAgentService(options, paths, detachFailureHandler) {
   const notificationSender = options.notificationSender || (ElectronNotification ? createNativeNotificationSender({
     Notification: ElectronNotification, readConfig: () => notificationConfig.read(),
     isFocused: async () => { try { return (await notificationHost.request("notification.context", {})).focused; } catch { return false; } },
-    openTarget: async input => { if (input.noticeId) await openUiApp?.(input.noticeId); },
+    openTarget: async input => {
+      if (input.noticeId?.startsWith("condition-watch-")) await openUiApp?.();
+      else if (input.noticeId) await openUiApp?.(input.noticeId);
+    },
   }) : undefined);
   const systemHostAdapter = options.systemHostAdapter || (ElectronShell
     && typeof ElectronShell.openPath === "function"

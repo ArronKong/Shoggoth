@@ -6023,7 +6023,7 @@ test("Runtime 启动阶段错误显示可操作信息而不是通用失败", asy
     ["RUNTIME_TURN_FAILED", "Agent 本次任务执行失败，请查看原生会话的错误原因后决定是否重试"],
     ["RUNTIME_START_FAILED", "启动 Agent Runtime 失败，请重试；若持续失败，请检查 CLI 安装与登录状态"],
     ["RUNTIME_START_RUNTIME_ACQUIRE_FAILED", "获取 Agent Runtime 失败，请重试"],
-    ["RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED", "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试"],
+    ["RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED", "暂时无法读取 Agent 登录状态，本次任务尚未发送。请稍后重试；若仍失败，请前往「模型」检查账号状态或重新登录。"],
     ["RUNTIME_START_PROCESS_SPAWN_FAILED", "启动 Agent Runtime 进程失败，请重试或检查 CLI 安装"],
     ["RUNTIME_START_BOOTSTRAP_ROLE_FAILED", "启动 Shoggoth Helper 失败，请重试或重启 App"],
     ["RUNTIME_START_RPC_INITIALIZE_FAILED", "初始化 Agent Runtime 通信失败，请重试"],

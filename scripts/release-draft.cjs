@@ -3,11 +3,13 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { Writable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { createHash } = require("node:crypto");
 const { execFileSync } = require("node:child_process");
 const yaml = require("js-yaml");
 const { assertAcceptedReceipt } = require("./notarize.cjs");
-const { releaseApi, releaseRequest, sleep } = require("./release-http.cjs");
+const { releaseApi, releaseRequest, sleep, isTransientReadError } = require("./release-http.cjs");
 
 function packageNames(version, arch) {
   assert.match(version, /^\d+\.\d+\.\d+$/u);
@@ -91,8 +93,10 @@ async function assemble(input, output, version, sha, runId) {
   return [...names, "SHA256SUMS.txt"];
 }
 
-function githubClient(repository, token) {
-  const api = releaseApi(repository, token);
+function githubClient(repository, token, runtime = {}) {
+  const api = releaseApi(repository, token, runtime);
+  const singleRead = releaseApi(repository, token, { ...runtime, singleAttempt: true });
+  const pause = runtime.sleep || sleep;
   const request = (route, options = {}) => api.request(route, {
     ...(route.startsWith("/releases/assets/") ? { signal: AbortSignal.timeout(15 * 60_000) } : {}), ...options,
   });
@@ -108,16 +112,48 @@ function githubClient(repository, token) {
     const commit = await (await request(`/commits/${encodeURIComponent(tag)}`)).json();
     assert.equal(commit.sha, sha, "Version tag moved away from the frozen source");
   }
-  async function downloadDigest(asset) {
-    const response = await request(`/releases/assets/${asset.id}`, { headers: { Accept: "application/octet-stream" } });
-    assert.ok(!response.headers.get("content-type")?.includes("json"), "Asset endpoint returned metadata");
-    const hash = createHash("sha256");
-    let size = 0;
-    for await (const chunk of response.body) { hash.update(chunk); size += chunk.length; }
-    assert.equal(size, asset.size, `Remote download size mismatch: ${asset.name}`);
-    const digest = hash.digest("hex");
-    if (asset.digest) assert.equal(asset.digest, `sha256:${digest}`);
-    return digest;
+  async function downloadDigest(asset, destination) {
+    assert.ok(Number.isSafeInteger(asset.id) && asset.id > 0 && Number.isSafeInteger(asset.size) && asset.size > 0);
+    if (destination) assert.ok(!fs.existsSync(destination), "Download destination must be empty");
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      let temporary;
+      let backoffMs;
+      try {
+        if (destination) temporary = fs.mkdtempSync(`${destination}.part-`);
+        const response = await singleRead.request(`/releases/assets/${asset.id}`, {
+          headers: { Accept: "application/octet-stream" }, signal: AbortSignal.timeout(15 * 60_000),
+        });
+        if (!response.body || response.headers.get("content-type")?.includes("json")) {
+          await response.body?.cancel();
+          throw new Error("Asset endpoint returned metadata or an empty response");
+        }
+        const hash = createHash("sha256");
+        let size = 0;
+        const measure = async function* (stream) {
+          for await (const chunk of stream) {
+            size += chunk.length;
+            assert.ok(size <= asset.size, `Remote download size mismatch: ${asset.name}`);
+            hash.update(chunk);
+            yield chunk;
+          }
+        };
+        const partial = temporary && path.join(temporary, "download");
+        const sink = partial ? fs.createWriteStream(partial, { flags: "wx", mode: 0o600 })
+          : new Writable({ write(_chunk, _encoding, done) { done(); } });
+        await pipeline(response.body, measure, sink);
+        assert.equal(size, asset.size, `Remote download size mismatch: ${asset.name}`);
+        const digest = hash.digest("hex");
+        if (asset.digest) assert.equal(asset.digest, `sha256:${digest}`, `Remote download hash mismatch: ${asset.name}`);
+        if (partial) fs.linkSync(partial, destination);
+        return digest;
+      } catch (error) {
+        if (attempt === 3 || !(error.retryable || isTransientReadError(error))) throw error;
+        backoffMs = Math.max(attempt * 1500, error.retryAfterMs ?? 0);
+      } finally {
+        if (temporary) fs.rmSync(temporary, { recursive: true, force: true });
+      }
+      await pause(backoffMs);
+    }
   }
   async function upload(release, name, file) {
     const url = new URL(release.upload_url.split("{")[0]);
@@ -167,7 +203,7 @@ async function uploadDraft(client, directory, version, tag, sha, pause = sleep) 
         catch (error) {
           if (!error.retryable || attempt === 3) throw error;
           // Re-read the inventory before retrying: the previous upload may exist.
-          await pause(attempt * 1500);
+          await pause(Math.max(attempt * 1500, error.retryAfterMs ?? 0));
         }
       }
     }
@@ -239,9 +275,18 @@ async function main() {
   if (command === "confirm") {
     const receipt = JSON.parse(fs.readFileSync("draft-upload.json", "utf8"));
     await confirmDraft(client, receipt, version, tag, sha, process.env.RELEASE_ID);
+    const ciRunId = process.env.RELEASE_SOURCE_CI_RUN_ID || "";
+    const ciRunAttempt = process.env.RELEASE_SOURCE_CI_RUN_ATTEMPT || "";
+    assert.equal(Boolean(ciRunId), Boolean(ciRunAttempt), "Incomplete main CI proof");
+    const sourceCi = ciRunId
+      ? { runId: Number(ciRunId), runAttempt: Number(ciRunAttempt) }
+      : "passed";
+    if (ciRunId) {
+      for (const id of [sourceCi.runId, sourceCi.runAttempt]) assert.ok(Number.isSafeInteger(id) && id > 0);
+    }
     fs.writeFileSync("accepted-draft.json", JSON.stringify({ ...receipt,
       runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
-      sourceCi: "passed", nativeArchitectures: ["arm64", "x64"],
+      sourceCi, nativeArchitectures: ["arm64", "x64"],
     }, null, 2) + "\n");
     return;
   }
@@ -252,4 +297,5 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { packageNames, fileDigest, assertDraft, assertAssetInventory, recordBuild, assemble, githubClient, uploadDraft, verifyDraft, confirmDraft };
+module.exports = { packageNames, fileDigest, assertDraft, assertAssetInventory, recordBuild, assemble, githubClient,
+  uploadDraft, verifyDraft, confirmDraft };

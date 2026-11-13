@@ -27,7 +27,7 @@ function sanitizeReason(reason) {
 }
 
 const MAX_KANBAN_EVENTS_PER_KEY = 2000;
-const CHAT_FAILURE_CODES = new Set(["rate_limit", "auth", "billing", "connection", "empty", "error"]);
+const CHAT_FAILURE_CODES = new Set(["rate_limit", "auth", "billing", "connection", "reasoning_effort", "format_error", "model_not_found", "empty", "error"]);
 const validChatFailure = row => row && CHAT_FAILURE_CODES.has(row.code)
   && Number.isSafeInteger(row.at) && row.at > 0 && Number.isSafeInteger(row.userAt) && row.userAt >= 0
   && (row.userRowId === null || Number.isSafeInteger(row.userRowId) && row.userRowId > 0);

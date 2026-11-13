@@ -16,7 +16,8 @@ export function ChatRunWait({ state, compact = false }: { state: ChatRunWaitStat
   if (state.kind === "queued") return null;
   const elapsed = Math.max(0, Math.floor((now - state.since) / 1000));
   const duration = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
-  const label = t(`chat.runWait.${state.kind === "starting" ? "thinking" : state.kind}`);
+  const startupLabel = state.stage === "reconnecting" || state.stage === "compacting" ? state.stage : "thinking";
+  const label = t(`chat.runWait.${state.kind === "starting" ? startupLabel : state.kind}`);
   const reason = state.kind === "starting" ? ""
     : t(`chat.runWait.${state.reason === "RUNTIME_RATE_LIMITED" ? "rateLimited" : state.reason === "RUNTIME_UPSTREAM_UNAVAILABLE" ? "upstreamUnavailable" : "upstreamRetry"}`);
   const description = [label, reason].filter(Boolean).join(" · ");

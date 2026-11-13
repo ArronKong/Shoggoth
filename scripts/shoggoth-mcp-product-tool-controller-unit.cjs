@@ -626,9 +626,9 @@ test("外部管理的未知结果冻结在原调用回执，后续同 callId 不
   assert.equal(writes, 1); assert.equal(f.controller.poisonError, null);
 });
 
-test("固定 168 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 168);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 168);
+test("固定 178 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 178);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, MCP_PRODUCT_TOOL_NAMES.length);
   for (const name of ["group_task", "group_collaborate"]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(name), false);
   for (const required of [
     "workspace_execute",
@@ -637,6 +637,8 @@ test("固定 168 个模型可见产品工具及 strict object schemas，不暴�
     "app_capabilities", "app_help_search", "app_help_get", "app_state_get", "app_manage", "runtime_context_get", "usage_get", "kanban_board_create", "kanban_run_dispatch",
     "cron_create", "cron_delete", "backend_status", "external_cron_list", "web_search", "web_fetch", "web_settings_get", "web_settings_set", "web_defaults_set",
     "heartbeat_settings_get", "heartbeat_settings_set", "heartbeat_rules_read", "heartbeat_rules_update", "memory_file_read", "memory_file_update",
+    "watch_create", "watch_list", "watch_get", "watch_test", "watch_set_enabled", "watch_update",
+    "watch_check_now", "watch_history", "watch_delete", "watch_retry_event",
     "federation_agent_list", "federation_agent_get", "federation_agent_run",
     "federation_agent_message", "federation_task_get", "federation_task_cancel",
     "skill_catalog", "skill_read", "skill_file_read", "skill_learn", "skill_install_global",
@@ -863,11 +865,12 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     },
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.capabilities.length, 155);
+  assert.equal(capabilities.capabilities.length, 165);
   for (const name of ["group_task", "group_collaborate"]) {
     assert.equal(capabilities.capabilities.some((item) => item.tool === name), false);
   }
   assert.equal(capabilities.capabilities.some((item) => item.tool === "cron_create"), true);
+  assert.equal(capabilities.capabilities.some((item) => item.tool === "watch_create"), true);
   assert.equal(capabilities.capabilities.some((item) => item.domain === "browser"), true);
   assert.equal(capabilities.lifecycle.nativeWhenAppQuit, true);
   assert.equal(capabilities.lifecycle.federationRequiresAppProcess, true);

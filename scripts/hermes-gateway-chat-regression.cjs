@@ -113,6 +113,16 @@ function makeBackend(port) {
   return be;
 }
 
+// This transport fixture explicitly declares its synthetic model's controls;
+// a real catalog that only says reasoning:true must not imply this vocabulary.
+function declareThinkingModel(be, key, model = "fixture-reasoner", provider = "fixture") {
+  be.modelChoices.push({ id: model, provider });
+  be.modelMeta ||= new Map();
+  be.modelMeta.set(JSON.stringify([provider, model]), { reasoning: true,
+    thinkingOptions: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] });
+  if (key) be._gwApplySessionInfo(key, { model, provider });
+}
+
 function collectHooks() {
   const log = { deltas: [], finals: [], errors: [], interims: [], thinking: [], tools: [], plans: [], statuses: [], prompts: [] };
   return {
@@ -530,6 +540,53 @@ async function main() {
     await be.stop();
   }
 
+  // — 恢复 MiMo 旧会话时先修正不支持的 xhigh；设置失败不得提交 prompt。
+  {
+    const be = makeBackend(gw.port);
+    const key = "agent:hermes-t:old-mimo";
+    const originalGet = be._dashGet;
+    be._dashGet = async () => ({ status: 200, body: JSON.stringify({ providers: [{
+      slug: "custom:xiaomi", name: "xiaomi1", is_user_defined: true,
+      api_url: "https://token-plan-cn.xiaomimimo.com/v1", models: ["mimo-v2.6-pro"],
+    }] }) });
+    await be.refreshModelChoices();
+    be._dashGet = originalGet;
+    state.frames.length = 0;
+    state.behavior.set("session.resume", (params, reply) => reply({ session_id: "rt-mimo", resumed: params.session_id,
+      info: { lazy: true, model: "mimo-v2.6-pro", provider: "custom:xiaomi" } }));
+    state.behavior.set("process.list", (params, reply, emit) => {
+      emit("session.info", "rt-mimo", { model: "mimo-v2.6-pro", provider: "custom:xiaomi", reasoning_effort: "xhigh" });
+      reply({ processes: [] });
+    });
+    state.behavior.set("config.get", (params, reply) => reply({ value: "xhigh" }));
+    state.behavior.set("config.set", (params, reply, emit) => {
+      emit("session.info", "rt-mimo", { model: "mimo-v2.6-pro", provider: "custom:xiaomi", reasoning_effort: params.value });
+      reply({ value: params.value });
+    });
+    state.behavior.set("prompt.submit", (params, reply, emit) => {
+      reply({ status: "streaming" });
+      setTimeout(() => emit("message.complete", "rt-mimo", { text: "OK", status: "complete", usage: {} }), 5);
+    });
+    const first = collectHooks();
+    await be.sendMessage(key, "hello", "mimo-recovered", first.hooks, {});
+    const correction = state.frames.findIndex(frame => frame.method === "config.set" && frame.params.value === "high");
+    check("S2a: 旧会话先读实际档位、修正为 high，再发首条消息", correction > 0
+      && state.frames[correction - 1].method === "config.get"
+      && state.frames.findIndex(frame => frame.method === "prompt.submit") > correction);
+    check("S2a: 档位只写原 live 会话且正常完成", state.frames[correction]?.params.session_id === "rt-mimo"
+      && first.log.finals[0]?.t === "OK" && first.log.errors.length === 0);
+    state.frames.length = 0;
+    state.behavior.set("config.set", (params, reply, emit, reject) => reject(4002, "fixture rejected effort"));
+    const second = collectHooks();
+    await be.sendMessage(key, "hello", "mimo-rejected", second.hooks, {});
+    check("S2a: 档位设置未成功时零 prompt、无自动重发", !state.frames.some(frame => frame.method === "prompt.submit")
+      && second.log.errors.length === 1 && second.log.finals.length === 0);
+    state.behavior.delete("config.get");
+    state.behavior.delete("config.set");
+    state.behavior.delete("process.list");
+    await be.stop();
+  }
+
   // — 场景 3：审批阻塞 → prompt hook → respondChatPrompt 往返
   {
     const be = makeBackend(gw.port);
@@ -703,6 +760,7 @@ async function main() {
 
     // 思考档/fast 同款（create_*_override 被同一个分支丢掉）
     state.frames.length = 0;
+    declareThinkingModel(be, "agent:hermes-t:20260531_x");
     state.behavior.set("session.resume", (params, reply) => reply({ session_id: "rt8c", resumed: params.session_id }));
     await be.setSessionThinking("agent:hermes-t:20260531_x", { level: "high" });
     check("S8: 思考档同样 eager_build", state.frames.find((f) => f.method === "session.resume")?.params?.eager_build === true);
@@ -812,6 +870,7 @@ async function main() {
       reply({ session_id: "rt9c", resumed: params.session_id });
     });
     let err9c = null;
+    declareThinkingModel(be, "agent:hermes-t:20260613_dangling");
     await be.setSessionThinking("agent:hermes-t:20260613_dangling", { level: "high" }).catch((e) => { err9c = e; });
     check("S9: 思考档同样报真实原因", /custom:xm/.test(err9c?.message || ""), err9c?.message);
     await be.stop();
@@ -832,7 +891,7 @@ async function main() {
     await be.stop();
   }
 
-  // — 场景 9d：即使绕过 Proxy 直接调 HermesBackend，未绑定的手选也
+  // — 场景 9d：即使绕过 Proxy 直接调 HermesBackend，旧插件手选也
   // 必须在排队和保留幂等键之前失败；同 key 仍可发送普通消息。
   {
     const be = makeBackend(gw.port);
@@ -849,7 +908,7 @@ async function main() {
         await be.sendMessage(sessionKey, "hello", rejectedKey, collectHooks().hooks,
           { pluginSelection: selection });
       } catch (caught) { error = caught; }
-      check("S9d: backend 直接手选在执行前拒绝", error?.code === "PLUGIN_SELECTION_UNAVAILABLE"
+      check("S9d: backend 直接手选在执行前拒绝", error?.code === "PLUGIN_PLATFORM_RETIRED"
         && dispatched === 0 && be.sendQueues.size === 0 && be._idempotentSends.size === 0,
       JSON.stringify({ code: error?.code, dispatched, queues: be.sendQueues.size,
         idempotent: be._idempotentSends.size }));
@@ -997,6 +1056,7 @@ async function main() {
     const receipt = await be.steerChat(key, "focus on the result");
     check("S12: gateway steering advertised and queued by exact native RPC", be.getChatCapabilities("hermes-t").steer && receipt.accepted
       && state.frames.at(-1)?.method === "session.steer" && state.frames.at(-1)?.params.session_id === "rt-steer");
+    declareThinkingModel(be, null, "custom-next", "xiaomi");
     await be.setSessionModel(key, { model: "custom-next", provider: "xiaomi", acpProviderRef: "custom:xiaomi" });
     await be.setSessionThinking(key, { level: "high" });
     await be.setSessionFast(key, { fast: true });
