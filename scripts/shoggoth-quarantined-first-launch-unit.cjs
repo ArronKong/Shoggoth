@@ -4,7 +4,9 @@ const { EventEmitter } = require("node:events");
 const { test } = require("node:test");
 const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
 const { execFileSync } = require("node:child_process");
-const { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords, compileWindowProbe } = require("./shoggoth-quarantined-first-launch.cjs");
+const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-protocol-version");
+const { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords, compileWindowProbe,
+  waitForServiceHealthy } = require("./shoggoth-quarantined-first-launch.cjs");
 
 test("the native window probe builds and returns no windows for an absent PID", { skip: process.platform !== "darwin" }, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-window-probe-test-"));
@@ -198,4 +200,72 @@ test("process-query time counts toward the same hard startup deadline", async ()
     onTick: (state, child) => child.emit("close", 0, null) });
   await assert.rejects(f.run(), /did not launch within 60 seconds/u);
   assert.equal(f.evidence.launcherNaturalExit, undefined);
+});
+
+test("waits for authenticated Service health after the GUI appears before its token", async () => {
+  const paths = {}, version = "0.8.316";
+  let elapsed = 0, probes = 0, processChecks = 0;
+  await waitForServiceHealthy(paths, version, () => { processChecks++; }, {
+    readStatus: async (observedPaths, timeout) => {
+      assert.equal(observedPaths, paths);
+      assert.ok(timeout > 0 && timeout <= 10000);
+      probes++;
+      if (probes === 1) return null;
+      if (probes < 4) throw Object.assign(new Error("Service starting"), {
+        code: probes === 2 ? "ENOENT" : "SERVICE_UNAVAILABLE",
+      });
+      return { healthy: true, serviceVersion: version, protocolVersion: SERVICE_PROTOCOL_VERSION };
+    },
+    wait: async ms => { elapsed += ms; },
+    now: () => elapsed,
+  });
+  assert.equal(probes, 4);
+  assert.equal(elapsed, 1500);
+  assert.equal(processChecks, 5);
+});
+
+test("absent Service remains a failure with a bounded total and per-request timeout", async () => {
+  let elapsed = 0;
+  const budgets = [];
+  await assert.rejects(waitForServiceHealthy({}, "0.8.316", () => {}, {
+    readStatus: async (_paths, timeout) => {
+      budgets.push(timeout);
+      elapsed += timeout;
+      throw Object.assign(new Error("Probe elapsed"), { code: "REQUEST_TIMEOUT" });
+    },
+    wait: async ms => { elapsed += ms; },
+    now: () => elapsed,
+  }), /Product Service did not become healthy within 45 seconds \(REQUEST_TIMEOUT\)/u);
+  assert.equal(elapsed, 45000);
+  assert.deepEqual(budgets, [10000, 10000, 10000, 10000, 3000]);
+});
+
+test("security failures and a healthy response from the wrong Service fail immediately", async () => {
+  const version = "0.8.316";
+  const securityError = Object.assign(new Error("Unsafe socket permissions"), { code: "UNSAFE_PERMISSIONS" });
+  for (const [status, expected] of [
+    [null, securityError],
+    [{ healthy: false }, /Product Service is unhealthy/u],
+    [{ healthy: true, protocolVersion: SERVICE_PROTOCOL_VERSION + 1 }, /Product Service protocol differs/u],
+    [{ healthy: true, protocolVersion: SERVICE_PROTOCOL_VERSION, serviceVersion: "0.8.314" }, /Product Service version differs/u],
+  ]) {
+    let probes = 0;
+    await assert.rejects(waitForServiceHealthy({}, version, () => {}, {
+      readStatus: async () => { probes++; if (status === null) throw securityError; return status; },
+      wait: async () => { assert.fail("Permanent failure must not retry"); },
+    }), expected);
+    assert.equal(probes, 1);
+  }
+});
+
+test("a replaced GUI cannot pass a delayed Service check", async () => {
+  let elapsed = 0, probes = 0;
+  await assert.rejects(waitForServiceHealthy({}, "0.8.316", () => {
+    assert.equal(elapsed, 0, "Original GUI process is gone");
+  }, {
+    readStatus: async () => { probes++; return null; },
+    wait: async ms => { elapsed += ms; },
+    now: () => elapsed,
+  }), /Original GUI process is gone/u);
+  assert.equal(probes, 1);
 });

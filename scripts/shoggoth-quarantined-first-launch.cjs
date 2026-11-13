@@ -10,7 +10,14 @@ const { execFileSync, spawn } = require("node:child_process");
 const { randomUUID, createHash } = require("node:crypto");
 const { performance } = require("node:perf_hooks");
 const { setTimeout: delay } = require("node:timers/promises");
+const { readClientToken, requestService } = require("../app/agent-service/client");
+const { resolveCanonicalServicePaths } = require("../app/agent-service/paths");
+const { lstatIfExists } = require("../app/agent-service/security");
+const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-protocol-version");
 const { runStapler } = require("./release-stapler.cjs");
+
+const SERVICE_READY_TIMEOUT_MS = 45000;
+const SERVICE_STARTING_ERRORS = new Set(["ENOENT", "ECONNREFUSED", "SERVICE_UNAVAILABLE", "REQUEST_TIMEOUT"]);
 
 function command(executable, args, timeout = 15000) {
   try {
@@ -177,6 +184,64 @@ async function launchAndWait(app, binary, evidence, dependencies = {}) {
   }
 }
 
+function readServiceStatus(paths, timeoutMs) {
+  if (!lstatIfExists(paths.runtimeDir)) return null;
+  return requestService(paths, { token: readClientToken(paths), version: SERVICE_PROTOCOL_VERSION,
+    method: "service.status", params: {} }, { timeoutMs });
+}
+
+async function waitForServiceHealthy(paths, version, assertGuiRunning, dependencies = {}) {
+  const readStatus = dependencies.readStatus || readServiceStatus;
+  const wait = dependencies.wait || delay;
+  const now = dependencies.now || (() => performance.now());
+  const deadline = now() + SERVICE_READY_TIMEOUT_MS;
+  let lastCode = "SERVICE_UNAVAILABLE";
+  // The normal window can appear before the product's LaunchAgent finishes
+  // initializing. Poll only the authenticated read within a bounded budget.
+  for (;;) {
+    assertGuiRunning();
+    const remaining = Math.ceil(deadline - now());
+    if (remaining <= 0) break;
+    let status;
+    try {
+      status = await readStatus(paths, Math.min(10000, remaining));
+    } catch (error) {
+      if (!SERVICE_STARTING_ERRORS.has(error.code)) throw error;
+      lastCode = error.code;
+    }
+    if (status !== null && status !== undefined) {
+      assert.equal(status?.healthy, true, "Product Service is unhealthy");
+      assert.equal(status.protocolVersion, SERVICE_PROTOCOL_VERSION, "Product Service protocol differs");
+      assert.equal(status.serviceVersion, version, "Product Service version differs");
+      assertGuiRunning();
+      if (now() <= deadline) return;
+      break;
+    }
+    const interval = Math.min(500, deadline - now());
+    if (interval > 0) await wait(interval);
+  }
+  throw new Error(`Product Service did not become healthy within ${SERVICE_READY_TIMEOUT_MS / 1000} seconds (${lastCode})`);
+}
+
+function serviceStartupEvidence(home) {
+  const label = "com.shoggoth.agent-service";
+  const target = `gui/${os.userInfo().uid}/${label}`;
+  const diagnostics = { plistPresent: fs.existsSync(path.join(home, "Library", "LaunchAgents", `${label}.plist`)) };
+  try {
+    // Only retain bounded state fields. launchctl also prints environment values.
+    const output = execFileSync("/bin/launchctl", ["print", target], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000,
+    });
+    diagnostics.state = /^\s*state = ([a-z][a-z ]{0,40})$/mu.exec(output)?.[1] || null;
+    diagnostics.pid = Number(/^\s*pid = (\d+)$/mu.exec(output)?.[1]) || null;
+    diagnostics.lastExitCode = /^\s*last exit code = (-?\d+)$/mu.exec(output)?.[1] ?? null;
+  } catch (error) {
+    diagnostics.launchctlExitCode = error.status ?? null;
+    diagnostics.launchctlTimedOut = error.code === "ETIMEDOUT";
+  }
+  return diagnostics;
+}
+
 async function main() {
   if (process.argv.includes("--help")) {
     console.log("Usage: node scripts/shoggoth-quarantined-first-launch.cjs --app /absolute/Shoggoth.app --output /absolute/new-directory (disposable GitHub-hosted runner only)");
@@ -257,19 +322,23 @@ async function main() {
     assert.match(await response.text(), /<div id="root"><\/div>/u);
     const windows = JSON.parse(command(windowProbe, [String(pid)], 60000));
     assert.ok(windows.some(window => window.Width >= 600 && window.Height >= 400), "No visible normal App window");
-    const { resolveCanonicalServicePaths } = require("../app/agent-service/paths");
-    const { readClientToken, requestService } = require("../app/agent-service/client");
-    const { PROTOCOL_VERSION } = require("../app/agent-service/server");
-    const paths = resolveCanonicalServicePaths();
-    const status = await requestService(paths, { token: readClientToken(paths), version: PROTOCOL_VERSION, method: "service.status", params: {} }, { timeoutMs: 10000 });
-    assert.equal(status.healthy, true);
-    assert.equal(status.serviceVersion, marker.version);
-    screenshot();
-    assert.equal(fs.existsSync(path.join(output, "first-launch.png")), true);
     evidence.windowBounds = windows;
     evidence.guiPid = pid;
     evidence.rendererPresent = true;
+    const serviceWaitStarted = performance.now();
+    try {
+      await waitForServiceHealthy(resolveCanonicalServicePaths(), marker.version, () => {
+        assert.deepEqual(mainProcesses(binary), [pid], "GUI process changed while waiting for Product Service");
+      });
+    } catch (error) {
+      evidence.productServiceStartup = serviceStartupEvidence(home);
+      throw error;
+    } finally {
+      evidence.productServiceWaitMs = Math.round(performance.now() - serviceWaitStarted);
+    }
     evidence.productServiceHealthy = true;
+    screenshot();
+    assert.equal(fs.existsSync(path.join(output, "first-launch.png")), true);
     evidence.quarantineAfter = command("/usr/bin/xattr", ["-p", "com.apple.quarantine", app]).trim();
     evidence.processesBeforeQuit = mainProcessRecords(binary);
     evidence.backgroundEmbeddingWorkersBeforeQuit = embeddingProcessRecords(binary);
@@ -294,5 +363,5 @@ async function main() {
   console.log(JSON.stringify(evidence));
 }
 
-module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords, compileWindowProbe };
+module.exports = { launchAndWait, ORDINARY_OPEN_SCRIPT, quitScript, quitAndWait, guiProcessRecords, compileWindowProbe, waitForServiceHealthy };
 if (require.main === module) main().catch(error => { console.error("QUARANTINED_FIRST_LAUNCH_FAILED: " + String(error.message).slice(0,1000)); process.exitCode = 1; });
