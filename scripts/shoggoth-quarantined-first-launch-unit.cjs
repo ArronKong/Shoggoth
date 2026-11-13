@@ -174,16 +174,51 @@ test("a GUI that ignores normal Quit retains the original 60 second failure budg
 test("actual packaged embedding worker and explicit Service role are distinct from the GUI", () => {
   const binary = "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth";
   const worker = `${binary} /Applications/Shoggoth.app/Contents/Resources/app.asar/app/agent-service/embedding-worker.cjs`;
-  const rows = `8918 ${binary}\n9811 ${worker}\n9910 ${binary} --shoggoth-internal-role=agent-service`;
+  const rows = `8918 1 ${binary}\n9811 9910 ${worker}\n9910 1 ${binary} --shoggoth-internal-role=agent-service`;
   assert.deepEqual(guiProcessRecords(rows, binary), [{ pid: 8918, command: binary }]);
-  assert.deepEqual(guiProcessRecords(`9811 ${worker}`, binary), []);
+  assert.deepEqual(guiProcessRecords(`9811 9910 ${worker}`, binary), []);
 });
 
 test("other script paths, extra Worker arguments and duplicate bare GUI processes remain visible", () => {
   const binary = "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth";
-  for (const second of [binary, `${binary} --unexpected`, `${binary} /tmp/embedding-worker.cjs`,
+  for (const second of [binary, `${binary} --unexpected`, `${binary} --shoggoth-internal-role=ui`,
+    `${binary} --shoggoth-internal-role=unknown`, `${binary} /tmp/embedding-worker.cjs`,
     `${binary} /Applications/Shoggoth.app/Contents/Resources/app.asar/app/agent-service/embedding-worker.cjs --unexpected`]) {
-    assert.deepEqual(guiProcessRecords(`8918 ${binary}\n9811 ${second}`, binary), [{ pid: 8918, command: binary }, { pid: 9811, command: second }]);
+    assert.deepEqual(guiProcessRecords(`8918 1 ${binary}\n9811 8918 ${second}`, binary),
+      [{ pid: 8918, command: binary }, { pid: 9811, command: second }]);
+  }
+});
+
+const fixtureBinary = "/Applications/Shoggoth.app/Contents/MacOS/Shoggoth";
+const hookDirectory = "/Users/fixture/Library/Caches/com.shoggoth.agent-service/hooks";
+const probeScratch = `${hookDirectory}/probe-Ab12cD`;
+const supervisorCommand = `${fixtureBinary} /Applications/Shoggoth.app/Contents/Resources/app.asar.unpacked/app/agent-service/hook-supervisor.js`;
+const probeCommand = `${fixtureBinary} -e const fs=require('node:fs');let denied=false;try{fs.readFileSync("${probeScratch}/denied.txt")}catch(e){denied=e.code==='EPERM'||e.code==='EACCES'};fs.writeFileSync("${probeScratch}/allowed/ok",'ok');process.stdout.write(JSON.stringify({denied}));`;
+const serviceRow = `300 1 ${fixtureBinary} --shoggoth-internal-role=agent-service`;
+const supervisorRow = `400 300 ${supervisorCommand}`;
+
+test("the launchd Service's packaged Hook supervisor and sandbox probe do not change the GUI PID", () => {
+  const rows = [serviceRow, supervisorRow, `500 400 ${probeCommand}`];
+  const read = (...extra) => guiProcessRecords([...rows, ...extra].join("\n"), fixtureBinary, hookDirectory).map(item => item.pid);
+  assert.deepEqual(read(`200 1 ${fixtureBinary}`), [200]);
+  assert.deepEqual(read(`200 1 ${fixtureBinary}`, `600 1 ${fixtureBinary}`), [200, 600]);
+  assert.deepEqual(read(), []);
+});
+
+test("Hook lookalikes, unexpected scripts and processes with the wrong parent remain visible", () => {
+  for (const [rows, expected] of [
+    [[serviceRow, `400 200 ${supervisorCommand}`, `500 400 ${probeCommand}`], [400, 500]],
+    [[serviceRow.replace("300 1 ", "300 200 "), supervisorRow, `500 400 ${probeCommand}`], [400, 500]],
+    [[serviceRow, supervisorRow + " --extra", `500 400 ${probeCommand}`], [400, 500]],
+    [[serviceRow, `400 300 ${fixtureBinary} /tmp/hook-supervisor.js`, `500 400 ${probeCommand}`], [400, 500]],
+    [[serviceRow, supervisorRow, `500 300 ${probeCommand}`], [500]],
+    [[serviceRow, supervisorRow, `500 400 ${fixtureBinary} -e 0`], [500]],
+    [[serviceRow, supervisorRow, `500 400 ${probeCommand.replace(hookDirectory, "/tmp/hooks")}`], [500]],
+    [[serviceRow, supervisorRow, `500 400 ${probeCommand.replace("probe-Ab12cD/allowed", "probe-Other1/allowed")}`], [500]],
+    [[serviceRow, supervisorRow, `500 400 ${probeCommand} extra`], [500]],
+  ]) {
+    const output = [`200 1 ${fixtureBinary}`, ...rows].join("\n");
+    assert.deepEqual(guiProcessRecords(output, fixtureBinary, hookDirectory).map(item => item.pid), [200, ...expected]);
   }
 });
 
