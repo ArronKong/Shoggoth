@@ -17,10 +17,11 @@ const observerLoop = scenario.startsWith("legacy-observer-loop");
 const ordinaryRecovery = scenario.startsWith("ordinary-recovery-");
 const nativeActiveRecovery = scenario.startsWith("native-active-");
 const nativeRejection = ["native-rejected", "native-rejected-immersive"].includes(scenario);
+const storageRejection = scenario.startsWith("storage-rejected-");
 const inspirationBuffered = ["inspiration-buffered", "inspiration-buffered-immersive"].includes(scenario);
 if (!["slash-order", "slash-order-error", "slash-order-uncertain", "slash-order-immersive", "slash-order-uncertain-immersive", "upstream-error", "upstream-error-immersive", "uncertain", "restored", "rejected", "ordinary", "newer", "started", "accepted-error", "accepted-uncertain", "stale-query", "reselect", "terminal-race", "terminal-timeout", "terminal-reload", "ordinary-upstream", "ordinary-receipt", "ordinary-buffered", "ordinary-buffered-immersive", "observer-idle", "observer-idle-pending", "native-approval", "native-approval-immersive", "observer-idle-terminal", "runtime-abort", "runtime-abort-immersive", "runtime-snapshot", "runtime-abort-pending", "silent-queue", "silent-queue-immersive"].includes(scenario)
   && !["observer-idle-immersive", "observer-idle-failed", "observer-idle-failed-immersive"].includes(scenario)
-  && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !ordinaryRecovery && !inspirationBuffered
+  && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !ordinaryRecovery && !inspirationBuffered && !storageRejection
   || !["shoggoth", "openclaw", "hermes"].includes(backend)) throw Error("invalid fixture scope");
 const key = `agent:${backend}-recovery-fixture:${inspirationBuffered ? "dashboard:inspiration-fixture" : "11111111-1111-4111-8111-111111111111"}`;
 const agentId = key.split(":")[1];
@@ -46,7 +47,10 @@ const nativeApproval = scenario.startsWith("native-approval");
 const runtimeTerminal = scenario.startsWith("runtime-");
 const silentQueue = scenario.startsWith("silent-queue");
 const slashOrder = scenario.startsWith("slash-order");
-const fixtureHasSelection = !scenario.startsWith("ordinary") && !inspirationBuffered && !silentQueue && !upstreamFailure && !slashOrder && !nativeRejection && !legacyRecovery;
+const fixtureHasSelection = !scenario.startsWith("ordinary") && !inspirationBuffered && !silentQueue && !upstreamFailure && !slashOrder && !nativeRejection && !legacyRecovery && !storageRejection;
+const storageError = { code: "SECRET_PROCESSING_UNAVAILABLE", message: "Private fixture error",
+  systemIssue: "STORAGE_FULL", admissionAccepted: false };
+let failStorage = storageRejection;
 const slashRequests: Array<{ body: any; reply: (response: Response) => void }> = [];
 if (scenario === "runtime-abort-pending") lookup = { status: "found", run: { status: "running" } };
 if (nativeApproval) {
@@ -147,6 +151,9 @@ class FixtureSocket {
     }
     if (frame.method === "chat.send") {
       sent.push(frame.params);
+      if (failStorage && scenario.startsWith("storage-rejected-ws")) {
+        setTimeout(() => this.emit({ type: "res", id: frame.id, ok: false, error: storageError }), 0); return;
+      }
       if (ordinaryRecovery && sent.length === 1 && !scenario.startsWith("ordinary-recovery-reload")) {
         setTimeout(() => this.emit({ type: "res", id: frame.id, ok: false, error: {
           code: "UPSTREAM_NEEDS_VERIFICATION", message: "Fixture lost original ACK", receiptUncertain: true,
@@ -179,6 +186,9 @@ Object.assign(window, { WebSocket: FixtureSocket });
 window.fetch = async (input, init) => {
   const url = new URL(String(input), location.href); let payload: unknown = {};
   if (url.pathname === "/__api/chat/secrets/prepare") {
+    if (failStorage && scenario.startsWith("storage-rejected-rest")) {
+      return Response.json({ ...storageError, error: storageError.message }, { status: 400 });
+    }
     payload = { text: JSON.parse(String(init?.body)).text, references: [], version: 1 };
   }
   if (slashOrder && url.pathname === "/__api/chat/slash/exec") {
@@ -223,6 +233,23 @@ const clickVerify = () => document.querySelector<HTMLButtonElement>(".chat-verif
 Object.assign(window, { runChatSendRecoveryFixture: async () => {
   await wait(() => input() && sockets.size > 0, "actual ChatPage composer");
   await new Promise(resolve => setTimeout(resolve, 120));
+  if (storageRejection) {
+    await setInput(originalText); enter();
+    const beforeRetry = scenario.startsWith("storage-rejected-ws") ? 1 : 0;
+    await wait(() => input().value === originalText && document.body.innerText.includes(i18n.t("common.diskFull")),
+      "localized storage error and restored draft");
+    check(pending().length === 0 && !banner() && observed.length === 0 && sent.length === beforeRetry,
+      "definite storage rejection left tracking active or replayed the input");
+    const messageRows = [...document.querySelectorAll(immersive ? "[data-user-row]" : ".chat-thread .chat-bubble")];
+    check(!messageRows.some(row => row.textContent?.includes(originalText)) && !document.body.innerText.includes(storageError.message),
+      "rejected input remained in history or exposed a private error");
+    failStorage = false;
+    enter();
+    await wait(() => sent.length === beforeRetry + 1, "manual retry after storage recovers");
+    check(sent.at(-1).message === originalText && (beforeRetry === 0 || sent[0].idempotencyKey !== sent[1].idempotencyKey),
+      "manual retry did not send the restored text with a fresh identity");
+    return { scenario, backend, localizedDiskFull: true, restoredDraft: true, noAutomaticRetry: true };
+  }
   if (ordinaryRecovery) {
     if (reloaded) {
       check(pending().length === 0 && !banner() && sent.length === 0, "resolved ordinary operation returned or replayed on reload");

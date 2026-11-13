@@ -142,3 +142,125 @@ test("real Service captures the original preparation cause and does not admit or
   assert.equal(storage.errors[0].code, "ENOSPC");
   assert.equal(storage.admissionAccepted, undefined, "an enqueue failure must not invent proof of non-admission");
 });
+
+test("recovering a queued send over IPC lets two Codex Agents on the same account run concurrently", async t => {
+  const f = fixture(t);
+  const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
+  const handoff = await openHandoffFixture({ root: f.root });
+  f.cleanups.push(() => handoff.close());
+  const { service, paths } = handoff;
+  const coordinator = service.workRunCoordinator;
+  const rpc = (method, params) => requestService(paths, { id: randomUUID(), token: readClientToken(paths),
+    version: PROTOCOL_VERSION, method, params }, { timeoutMs: 5000 });
+  const config = service.nativeRuntimeConfig.read();
+  service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
+    flags: { ...config.flags, runtimeAdmissionV1: true } });
+  const { profile } = await rpc("agent.create", { operationId: randomUUID(), backendId: "shoggoth",
+    name: "Concurrent Codex", defaultCwd: null, createdAt: Date.now() });
+  service.productStore.putAgentProfile({ ...profile, defaultModel: "fixture-model",
+    permissionPolicy: { approvalPolicy: "on-request", sandbox: "workspace-write" } });
+  const workspace = path.join(f.root, "second-workspace");
+  fs.mkdirSync(workspace, { mode: 0o700 });
+  const { session } = await rpc("chat.session.create", { operationId: randomUUID(), profileId: profile.id,
+    workspace, createdAt: Date.now() });
+  service.chatSessionStore.setPermissionMode(session.sessionKey, "request-approval");
+  const first = await handoff.send(handoff.createSession().sessionKey, "other-codex-chat");
+  assert.equal(first.status, "running", first.errorCode);
+  const params = { ...input(), sessionKey: session.sessionKey, createdAt: Date.now() };
+  const original = coordinator.hookService.prepareRun;
+  coordinator.hookService.prepareRun = async () => {
+    throw Object.assign(new Error("PRIVATE_PREPARATION_FAILURE"), { code: "RUNTIME_ISOLATION_UNVERIFIED" });
+  };
+  try {
+    await assert.rejects(rpc("chat.send", params), error => error.code === "INTERNAL_ERROR"
+      && error.receiptUncertain === true && error.admissionAccepted === undefined);
+  } finally {
+    coordinator.hookService.prepareRun = original;
+  }
+  const query = { operationId: params.operationId, sessionKey: params.sessionKey };
+  const queued = await rpc("chat.operation.get", query);
+  assert.equal(queued.status, "found");
+  assert.equal(queued.run.status, "queued");
+  assert.equal(service.pendingCommandInbox.get(params.operationId).state, "pending");
+  const target = path.join(paths.runtimeDir, "chat-send-diagnostics.json");
+  const record = JSON.parse(fs.readFileSync(target, "utf8")).records.at(-1);
+  assert.equal(record.phase, "runtime_admission");
+  assert.equal(record.errors.at(-1).code, "RUNTIME_ISOLATION_UNVERIFIED");
+
+  await coordinator.capacityChanged();
+  await coordinator.waitForIdle(queued.run.id);
+  const running = (await rpc("chat.operation.get", query)).run;
+  assert.equal(running.id, queued.run.id);
+  assert.equal(running.status, "running", running.errorCode);
+  assert.equal(coordinator.getRun(first.id).status, "running", "the first Agent has not finished");
+  assert.equal(running.runtimeSessionRef.runtime, "codex");
+  assert.equal(running.runtimeSessionRef.runtimeAccountId, first.runtimeSessionRef.runtimeAccountId);
+  assert.notEqual(running.runtimeSessionRef.sessionId, first.runtimeSessionRef.sessionId);
+  assert.deepEqual([...handoff.transport.handles.values()].map(handle => handle.host.turnStartCalls), [1, 1]);
+  await handoff.complete(running, "Recovered once");
+  assert.equal((await rpc("chat.operation.get", query)).run.status, "completed");
+  assert.equal(service.transcriptStore.listEvents(session.profileId, session.id)
+    .filter(event => event.kind === "user" && event.runId === running.id).length, 1);
+  await handoff.complete(first);
+});
+
+test("a full disk during input protection reports the cause and leaves the message unqueued", async t => {
+  const { startInspirationFixture } = require("./fixtures/inspiration-service-fixture.cjs");
+  const f = await startInspirationFixture({ isolatedHome: true, serviceOptions: { prewarmMcpAuth: false } });
+  t.after(() => f.close());
+  const { session } = await f.ipc("chat.session.create", { operationId: randomUUID(),
+    profileId: DEFAULT_AGENT_PROFILE_ID, workspace: f.paths.defaultWorkspaceDir, createdAt: Date.now() });
+  await f.backend._refreshManagedProfiles();
+  const agent = f.service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
+  const sessionKey = `agent:${agent.agentId}:${session.sessionKey}`;
+  const post = input => fetch(`${f.url}/__api/chat/secrets/prepare`, {
+    method: "POST", headers: { Origin: f.url, "Content-Type": "application/json" }, body: JSON.stringify(input),
+  });
+  const params = { sessionKey, operationId: randomUUID(), text: "PRIVATE_FIXTURE_TEXT" };
+  const seed = await post({ ...params, operationId: randomUUID() });
+  assert.equal(seed.status, 200);
+  await seed.json();
+  const directory = path.join(f.paths.stateDir, "temporary-secrets");
+  const diskFull = () => Object.assign(new Error("PRIVATE_DISK_PATH"), { code: "ENOSPC" });
+  const assertFailure = async expectedCodes => {
+    const response = await post(params);
+    const result = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(result.code, "SECRET_PROCESSING_UNAVAILABLE");
+    assert.equal(result.systemIssue, "STORAGE_FULL");
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_/u);
+    assert.equal(f.service.productStore.listWorkRuns().length, 0);
+    const diagnostics = fs.readFileSync(path.join(f.paths.runtimeDir, "chat-send-diagnostics.json"), "utf8");
+    const record = JSON.parse(diagnostics).records.at(-1);
+    assert.equal(record.method, "chat.secret.prepare");
+    assert.equal(record.phase, "secret_preparation");
+    assert.deepEqual(record.errors.map(error => error.code), ["SECRET_PROCESSING_UNAVAILABLE", ...expectedCodes]);
+    assert.doesNotMatch(diagnostics, /PRIVATE_DISK_PATH|PRIVATE_FIXTURE_TEXT/u);
+  };
+
+  const open = fs.openSync;
+  const fault = t.mock.method(fs, "openSync", (file, ...args) => {
+    if (file === path.join(directory, "state-v1.json.tmp")) throw diskFull();
+    return open(file, ...args);
+  });
+  try { await assertFailure(["ENOSPC"]); } finally { fault.mock.restore(); }
+
+  const state = path.join(directory, "state-v1.json");
+  const before = fs.readFileSync(state, "utf8");
+  const directoryStat = fs.statSync(directory), fsync = fs.fsyncSync;
+  let injected = false;
+  const syncFault = t.mock.method(fs, "fsyncSync", fd => {
+    const stat = fs.fstatSync(fd);
+    if (!injected && stat.dev === directoryStat.dev && stat.ino === directoryStat.ino) {
+      injected = true;
+      throw diskFull();
+    }
+    return fsync(fd);
+  });
+  try { await assertFailure(["PRIVATE_FILE_COMMIT_FAILED", "ENOSPC"]); } finally { syncFault.mock.restore(); }
+  assert.equal(fs.readFileSync(state, "utf8"), before, "failed directory commit rolls back to the previous state");
+  const retry = await post(params);
+  assert.equal(retry.status, 200);
+  assert.equal((await retry.json()).text, params.text);
+  assert.equal(f.service.productStore.listWorkRuns().length, 0, "preparing input cannot start a turn");
+});

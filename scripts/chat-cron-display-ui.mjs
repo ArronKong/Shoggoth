@@ -28,10 +28,27 @@ try {
     { id: 3, role: "assistant", content: "PROCESS_FOLLOWUP: The update hit a disk error.", timestamp: now - 10 },
     { id: 4, role: "user", content: notification, timestamp: now - 5 },
   ]);
+  const backend = new HermesBackend({ getConfig: () => ({ hermesMode: "local" }) });
+  const jobId = "6555a9917ab8", sessionId = `cron_${jobId}_20261113_233030`;
+  backend.profileById.set("hermes-quota", "quota");
+  backend.dashboards.set("quota", { baseUrl: "http://fixture.invalid" });
+  backend._readCronExecutionHistory = async () => ({ items: [
+    { jobId, startedAt: (now - 21) * 1000, finishedAt: (now - 5) * 1000, status: "error",
+      error: "RuntimeError: HTTP 429: Rate limit exceeded: free-models-per-day." },
+  ] });
+  backend._httpGet = async () => ({ status: 200, body: JSON.stringify({ session_id: sessionId, profile: "quota", messages: [
+    { id: 1, role: "user", timestamp: now - 20,
+      content: "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: Fixture.] HIDDEN_CRON_PROMPT" },
+    { id: 2, role: "assistant", display_kind: "failed_turn", timestamp: now - 7,
+      content: "Your request was not processed. Send it again if you still want me to carry it out." },
+  ] }) });
+  const quota = { key: `agent:hermes-quota:${sessionId}` };
+  quota.messages = (await backend.getHistory(quota.key)).messages;
   await build({ plugins: [viteArtworkFixturePlugin(sourceRoot)],
     stdin: { contents, sourcefile: "chat-cron-display.tsx", resolveDir: path.join(root, "scripts/fixtures"), loader: "tsx" },
     bundle: true, format: "esm", jsx: "automatic", nodePaths: [path.join(ui, "node_modules")],
-    define: { "process.env.NODE_ENV": '"production"', __PROCESS_HISTORY__: JSON.stringify(processHistory) },
+    define: { "process.env.NODE_ENV": '"production"', __PROCESS_HISTORY__: JSON.stringify(processHistory),
+      __QUOTA_HISTORY__: JSON.stringify(quota) },
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), logLevel: "silent" });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><title>隔离 Cron 聊天显示验收</title><link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column}</style><div id="root"></div><script type="module" src="fixture.js"></script>');

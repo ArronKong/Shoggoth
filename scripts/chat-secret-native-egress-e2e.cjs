@@ -28,6 +28,7 @@ const auth = chatgpt ? encode({ alg: "RS256" }) + "." + encode({ exp: Math.floor
 const requests = [], failures = [], hosts = [];
 const useProxy = process.argv.includes("--proxy"), proxyRequests = [];
 const missingResponseType = process.argv.includes("--missing-response-type");
+const isolatedMemory = process.argv.includes("--isolated-memory");
 // This proxy never forwards traffic. A protected loopback request must bypass it.
 const proxy = http.createServer((req, res) => {
   proxyRequests.push({ method: req.method, loopback: /^http:\/\/127\.0\.0\.1:/u.test(req.url || "") });
@@ -184,6 +185,30 @@ async function main() {
   const sessionOptions = { model: "gpt-4.1", modelProvider, cwd: workspace, permissionPolicy: { approvalPolicy: "never", sandbox: "danger-full-access" },
     developerInstructions: "Use the synthetic local fixture only. Do not repeat a completed command. Answer in the user's language." };
   let { handle, host } = await makeHandle();
+  if (isolatedMemory) {
+    const model = "gpt-6.1-sol";
+    const isolated = await handle.sessionStart({ ...sessionOptions, model, persistent: false, isolatedGeneration: true,
+      permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" }, modelSecretScope: scope });
+    try {
+      const features = await handle._proactiveFeatures(isolated.session.id, { allowDottedNames: true });
+      const retired = features.filter(feature => ["worktrees", "realtime_conversation"].includes(feature.name))
+        .map(({ name, enabled, stage }) => ({ name, enabled, stage })).sort((a, b) => a.name.localeCompare(b.name));
+      assert.deepEqual(retired, [
+        { name: "realtime_conversation", enabled: true, stage: "removed" },
+        { name: "worktrees", enabled: true, stage: "removed" },
+      ]);
+      stage = { noTool: true, protected: true };
+      await turn(handle, isolated.session.id, "Write a short synthetic note before compaction.");
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].model, model);
+      const tools = (requests[0].tools ?? []).map(({ type, name }) => ({ type, name }));
+      assert.deepEqual(tools, [], "the pre-compaction model request must not expose tools");
+      console.log(JSON.stringify({ runtime: host.runtimeVersion, providerKind, retired, tools, completed: true }));
+    } finally {
+      await handle.releaseModelOnlySession({ sessionId: isolated.session.id });
+    }
+    return;
+  }
   const first = await handle.sessionStart({ ...sessionOptions, modelSecretScope: scope });
   stage = { protected: true, disconnectToolResponse: true, disconnectFollowup: true };
   const recovered = await turn(handle, first.session.id, "Run the local fixture once and report the completion marker.");

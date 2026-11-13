@@ -16,6 +16,7 @@ type TFn = (key: string, opts?: Record<string, unknown>) => string;
 // string. Match the complete message against the shared public catalog.
 const publicErrorKeys = new Map(Object.entries(publicErrors).flatMap(([group, messages]) =>
   Object.entries(messages).map(([code, message]) => [message, `chatErrors:${group}.${code}`] as const)));
+const cronPartial = `\n${publicErrors.hermesCron.PARTIAL}`;
 publicErrorKeys.set(
   "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试",
   "chatErrors:runtime.RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED",
@@ -111,6 +112,12 @@ const PATTERNS: Array<[RegExp, string]> = [
 ];
 
 export function translateGatewayError(raw: string, t: TFn): string {
+  if (raw.endsWith(cronPartial)) {
+    const summary = raw.slice(0, -cronPartial.length);
+    if (publicErrorKeys.get(summary)?.startsWith("chatErrors:hermesCron.")) {
+      return `${translateProductError(summary, t)}\n${translateProductError(publicErrors.hermesCron.PARTIAL, t)}`;
+    }
+  }
   const detailed = detailedFailure(raw, t);
   if (detailed !== null) return detailed;
   // OpenClaw uses the same bounded copy for live failures and saved history.

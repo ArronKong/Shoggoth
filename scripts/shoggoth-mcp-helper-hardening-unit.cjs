@@ -2,8 +2,12 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { PassThrough, Readable } = require("node:stream");
+const { mock } = require("node:test");
 const {
   MCP_CLIENT_REQUEST_TIMEOUT_MS,
   MCP_MAX_FRAME_BYTES,
@@ -19,6 +23,8 @@ const {
   DEFAULT_MCP_TOOL_TIMEOUT_MS,
 } = require("../app/agent-service/interactive-timeouts");
 const { MCP_PRODUCT_TOOL_NAMES, MCP_PRODUCT_TOOL_DEFINITIONS } = require("../app/agent-service/mcp-product-tool-controller");
+const { resolveServicePaths } = require("../app/agent-service/paths");
+const { assertPrivateDirectory } = require("../app/agent-service/security");
 
 const tests = [];
 function test(name, fn) {
@@ -1176,12 +1182,18 @@ test("refresh preserves Service recovery errors and allows a valid exchange taki
   assert.equal(response.result.isError, false);
 });
 
-test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () => {
+test("helper 在同一 stdio 会话续期时安全重建加密进程缓存", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-mcp-refresh-"));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
+  const cryptoCacheDir = path.join(paths.cacheDir, "mcp-crypto-worker");
   let authCalls = 0;
+  let now = 9_500;
   const profileTokens = [];
   const output = new EventEmitter();
   const input = new PassThrough();
   let written = "";
+  const callProfile = (id) => input.write(rawJsonLine({ jsonrpc: "2.0", id, method: "tools/call",
+    params: { name: "profile_get", arguments: {} } }));
   output.write = (frame, callback) => {
     written += frame;
     const message = JSON.parse(String(frame));
@@ -1189,19 +1201,40 @@ test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () 
       assert.equal(message.params.message, "Shoggoth internal Runtime call binding v1");
       assert.equal(message.params._meta["shoggoth/runtime-call-binding"].name, "profile_get");
       input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { action: "accept", content: {} } })}\n`);
-    } else if (message.id === 2) input.end();
+    } else if (message.id === 1) {
+      fs.rmSync(paths.cacheDir, { recursive: true });
+      fs.symlinkSync(path.join(root, "missing-cache"), paths.cacheDir, "dir");
+      callProfile(2);
+    } else if (message.id === 2) {
+      assert.equal(fs.lstatSync(paths.cacheDir).isSymbolicLink(), true);
+      assert.equal(fs.existsSync(path.join(root, "missing-cache")), false);
+      fs.unlinkSync(paths.cacheDir);
+      callProfile(3);
+    } else if (message.id === 3) {
+      now = 20_000;
+      fs.rmdirSync(cryptoCacheDir);
+      const mkdirSync = fs.mkdirSync;
+      mock.method(fs, "mkdirSync", (target, options) => {
+        // Another helper creates the directory just before this helper's mkdir.
+        if (target === cryptoCacheDir) mkdirSync(target, options);
+        return mkdirSync(target, options);
+      });
+      callProfile(4);
+    } else if (message.id === 4) input.end();
     callback();
     return true;
   };
   const running = startShoggothMcpHelper({
+    paths,
     runtimeProfileId: "runtime-a",
     runtimeAccountId: "runtime-a-account",
     serviceVersion: "0.0.test",
-    now: () => 9_500,
+    now: () => now,
     sessionRefreshSkewMs: 1_000,
     authenticateSession: async () => {
+      assertPrivateDirectory(cryptoCacheDir);
       authCalls += 1;
-      return session(authCalls === 1 ? 0x61 : 0x62, authCalls === 1 ? 10_000 : 20_000);
+      return session(0x60 + authCalls, 10_000 * authCalls);
     },
     requestService: async (_paths, request) => {
       assert.equal(request.method, "mcp.tool.call");
@@ -1212,19 +1245,25 @@ test("helper 入口把 expiresAt 与重新认证接入 stdio handler", async () 
       return profile();
     },
     safeStorage: {},
-    electronApp: { whenReady: async () => {}, quit: () => {} },
+    electronApp: { setPath: () => {}, whenReady: async () => {}, quit: () => {} },
     input,
     output,
   });
-  input.write(`${JSON.stringify(initialize(1, { capabilities: { elicitation: {} } }))}\n`);
-  input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "profile_get", arguments: {} } })}\n`);
-  await running;
-  const responses = written.trim().split("\n").map((line) => JSON.parse(line)).filter(value => !value.method);
-  assert.equal(responses[1].result.isError, false);
-  assert.equal(authCalls, 2);
-  assert.deepEqual(profileTokens, [token(0x62)]);
-  assert.equal(written.includes(token(0x61)), false);
-  assert.equal(written.includes(token(0x62)), false);
+  try {
+    input.write(rawJsonLine(initialize(1, { capabilities: { elicitation: {} } })));
+    await running;
+    const responses = written.trim().split("\n").map((line) => JSON.parse(line)).filter(value => !value.method);
+    assert.equal(responses[1].result.structuredContent.error.code, "MCP_HELPER_AUTH_FAILED");
+    assert.equal(responses[2].result.isError, false);
+    assert.equal(responses[3].result.isError, false);
+    assertPrivateDirectory(cryptoCacheDir);
+    assert.equal(authCalls, 3);
+    assert.deepEqual(profileTokens, [token(0x62), token(0x63)]);
+    for (const byte of [0x61, 0x62, 0x63]) assert.equal(written.includes(token(byte)), false);
+  } finally {
+    mock.restoreAll();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function backpressuredOutput() {

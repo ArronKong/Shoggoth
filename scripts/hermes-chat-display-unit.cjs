@@ -1,8 +1,10 @@
 "use strict";
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
+const { DatabaseSync } = require("node:sqlite");
 const { HermesBackend } = require("../app/core/hermes-backend");
 const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+const { hermesCron: cronCopy } = require("../app/agent-service/chat-error-messages.json");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const { createDashboardJournal } = require("../app/core/dashboard-journal");
 
@@ -111,6 +113,97 @@ test("external Hermes reads refresh without replacing pending local transcripts"
   backend.sendQueues.clear();
   backend._fetchHistoricalMessages = async () => { throw Error("fixture unavailable"); };
   await assert.rejects(backend.getHistory(key), /fixture unavailable/, "failure must not silently return a stale report");
+});
+
+test("a Hermes Cron chat displays the failed attempt's own cause in full and paged history", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-cron-chat-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cron = path.join(root, "cron");
+  fs.mkdirSync(cron);
+  const database = path.join(cron, "executions.db");
+  const db = new DatabaseSync(database);
+  db.exec(`PRAGMA journal_mode=WAL;
+  CREATE TABLE executions (
+    id TEXT PRIMARY KEY, job_id TEXT, status TEXT, claimed_at TEXT, started_at TEXT, finished_at TEXT, error TEXT
+  )`);
+  const jobId = "6555a9917ab8", sessionId = `cron_${jobId}_20261113_233030`;
+  const agentId = "hermes-owl", key = `agent:${agentId}:${sessionId}`, profile = "owl";
+  const start = Date.parse("2026-11-13T23:30:30+08:00");
+  const add = (connection, id, job, status, offset, error) => {
+    const began = new Date(start + offset).toISOString();
+    const ended = new Date(start + offset + 18_000).toISOString();
+    connection.prepare("INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?)").run(id, job, status, began, began, ended, error);
+  };
+  add(db, "scheduled", jobId, "failed", 0, "RuntimeError: HTTP 429: Rate limit exceeded: free-models-per-day. API key: fixture-only");
+  add(db, "later", jobId, "failed", 60_000, "HTTP 401: Invalid API key");
+  add(db, "other-job", "0123456789ab", "failed", 0, "HTTP 401: Invalid API key");
+  db.close();
+  assert(!fs.existsSync(database + "-wal"), "the initial history must work after Hermes closes its WAL");
+  const generic = "Your request was not processed. Send it again if you still want me to carry it out.";
+  const row = (id, role, content, offset, extra) => ({
+    id, role, session_id: sessionId, content, timestamp: (start + offset) / 1000, ...extra,
+  });
+  const input = row(1, "user", "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: Fixture.] News", 1000);
+  const failure = row(2, "assistant", generic, 14_000, { display_kind: "failed_turn" });
+  const followup = row(3, "user", "Can you explain the result?", 15_000);
+  const unrelated = row(4, "assistant", generic, 16_000, { display_kind: "failed_turn" });
+  let rows = [input, failure], responseProfile = profile, mode = "local";
+  const make = () => {
+    const backend = new HermesBackend({});
+    backend._getConfig = () => ({ hermesMode: mode });
+    backend.profileById.set(agentId, profile);
+    backend.dashboards.set(profile, { baseUrl: "http://fixture.invalid" });
+    backend._hermesHomeForProfile = value => {
+      assert.equal(value, profile);
+      assert.equal(mode, "local", "a remote session cannot read a local profile's ledger");
+      return root;
+    };
+    backend._gwSocket = () => assert.fail("reading a Cron failure cannot start or replay a run");
+    backend._httpGet = async address => {
+      const url = new URL(address);
+      assert.equal(url.pathname, `/api/sessions/${sessionId}/messages`);
+      const limit = Number(url.searchParams.get("limit")), offset = Number(url.searchParams.get("offset"));
+      const end = rows.length - offset;
+      const messages = limit ? rows.slice(Math.max(0, end - limit), end) : rows;
+      return { status: 200, body: JSON.stringify({ session_id: sessionId, profile: responseProfile, messages,
+        pagination: { limit, offset, order: "latest", returned: messages.length } }) };
+    };
+    return backend;
+  };
+  const reason = result => result.messages.find(item => item.id === "hermes-msg-2")?.content[0].text;
+  const backend = make(), initial = await backend.getHistory(key);
+  assert.equal(reason(initial), cronCopy.FREE_DAILY_QUOTA);
+  assert.equal(initial.messages[1].stopReason, "error");
+  assert.equal(initial.messages[1].automation, "cron");
+  assert.equal(initial.messages[1].timestamp, start + 14_000);
+  assert(!JSON.stringify(initial).includes("fixture-only"));
+  assert.equal(reason(await make().getHistoryPage(key, { limit: 1 })), cronCopy.FREE_DAILY_QUOTA,
+    "the older lookahead row identifies the scheduled input without displaying it");
+
+  rows = [input, failure, followup, unrelated];
+  const latest = await backend.getHistoryPage(key, { limit: 2 });
+  assert.equal(latest.messages.at(-1).content[0].text, generic, "a manual follow-up must not inherit the Cron cause");
+  const older = await backend.getHistoryPage(key, { limit: 2, cursor: latest.nextCursor });
+  assert.equal(reason(older), cronCopy.FREE_DAILY_QUOTA);
+  rows = [input, { ...failure, display_kind: undefined }];
+  assert.equal(reason(await backend.getHistory(key)), generic, "identical assistant text is not a failure marker");
+
+  rows = [input, { ...failure,
+    content: "This turn did not complete. Some actions may already have run; verify their effects before resending." }];
+  const writer = new DatabaseSync(database);
+  t.after(() => writer.close());
+  writer.prepare("UPDATE executions SET error=? WHERE id='scheduled'").run("HTTP 429: model_concurrency_rate_limit_exceeded");
+  assert.equal(reason(await backend.getHistory(key)), `${cronCopy.RATE_LIMIT}\n${cronCopy.PARTIAL}`);
+  rows = [input, failure];
+  responseProfile = "default";
+  assert.equal(reason(await backend.getHistory(key)), cronCopy.UNKNOWN);
+  responseProfile = profile;
+  mode = "remote";
+  assert.equal(reason(await backend.getHistory(key)), cronCopy.UNKNOWN);
+  mode = "local";
+  add(writer, "overlap", jobId, "completed", 500, null);
+  assert.equal(reason(await backend.getHistory(key)), cronCopy.UNKNOWN, "ambiguous attempts must not lend their error to the chat");
+  assert.equal(failure.content, generic);
 });
 
 test("Hermes history identifies producer continuations and preserves exact contents", () => {

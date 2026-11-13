@@ -6,7 +6,7 @@ const { CodexSchemaContract } = require("../app/agent-service/codex-schema-contr
 
 async function fixture({ transports = { shoggoth: { command: "fixture" }, configured: { url: "https://fixture.invalid" } },
   inventory = ["shoggoth", "configured", "code-review", "codex_app", "cua_repl", "codex_apps"],
-  configResponse, configError, threadInventory = [] } = {}) {
+  configResponse, configError, threadInventory = [], extraThreadFeatures = [] } = {}) {
   const starts = [], unloaded = [], reads = [];
   const host = {
     async configRead(params) {
@@ -14,7 +14,9 @@ async function fixture({ transports = { shoggoth: { command: "fixture" }, config
       return configResponse ?? { config: { mcp_servers: transports }, origins: {} };
     },
     async experimentalFeatureList({ threadId }) {
-      return { data: ["shell_tool", "unified_exec", "plugins", "apps"].map(name => ({ name, enabled: !threadId })), nextCursor: null };
+      const data = ["shell_tool", "unified_exec", "plugins", "apps"].map(name => ({ name, enabled: !threadId }));
+      if (threadId) data.push(...extraThreadFeatures);
+      return { data, nextCursor: null };
     },
     async mcpServerStatusList({ threadId }) {
       return { data: (threadId ? threadInventory : inventory).map(name => ({ name,
@@ -101,6 +103,25 @@ test("isolated model discovery never waits on global MCP startup and still verif
   await f.handle.resolveModelOnly({ operationId: "discover-with-offline-global-mcp" });
   assert.deepEqual(checked, ["isolated-thread"]);
   assert.deepEqual(f.unloaded, ["isolated-thread"]);
+});
+
+test("Codex retired worktrees and realtime markers do not block isolated generation", async () => {
+  const f = await fixture({ extraThreadFeatures: ["worktrees", "realtime_conversation"]
+    .map(name => ({ name, enabled: true, stage: "removed" })) });
+  const started = await f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
+    permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
+  await f.handle.releaseModelOnlySession({ sessionId: started.session.id });
+  assert.deepEqual(f.unloaded, ["isolated-thread"]);
+});
+
+test("an enabled active feature or an unverified removed feature still blocks generation", async () => {
+  for (const [name, stage] of [["worktrees", "stable"], ["realtime_conversation", "deprecated"],
+    ["unknown_tool", "removed"]]) {
+    const f = await fixture({ extraThreadFeatures: [{ name, stage, enabled: true }] });
+    await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
+      permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } }), { code: "RUNTIME_ISOLATION_UNVERIFIED" });
+    assert.deepEqual(f.unloaded, ["isolated-thread"]);
+  }
 });
 
 test("isolated generation releases only its owned ephemeral thread and confirms the native acknowledgement", async () => {

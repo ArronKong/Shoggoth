@@ -123,6 +123,17 @@ export default {
     ANTIGRAVITY_TURN_TIMEOUT: "The Antigravity task timed out. It was not retried automatically. Check the native session before retrying.",
     ANTIGRAVITY_PROCESS_EXIT_INVALID: "Antigravity exited unexpectedly. The task was not retried automatically. Check the CLI and the native session for results.",
   },
+  hermesCron: {
+    FREE_DAILY_QUOTA: "OpenRouter’s daily quota for free models is exhausted (HTTP 429). This scheduled task could not finish. Run it again from Scheduled Tasks after the quota resets.",
+    QUOTA: "The model account is out of quota or credits. This scheduled task could not finish.",
+    RATE_LIMIT: "The model service temporarily rate-limited the request. This scheduled task could not finish.",
+    AUTH: "The model service could not authenticate the request. This scheduled task could not finish.",
+    CONNECTION: "A connection failed or timed out while running this scheduled task.",
+    MODEL: "The selected model is unavailable. This scheduled task could not finish.",
+    SETTINGS: "The model service rejected the request settings. This scheduled task could not finish.",
+    UNKNOWN: "This scheduled task did not finish. Check its run history in Scheduled Tasks.",
+    PARTIAL: "Some actions may have already run. Check the results before running the task again.",
+  },
   productContext: {
     PRODUCT_CONTEXT_INVALID: "The context request or response was invalid.",
     PRODUCT_CONTEXT_UNAVAILABLE: "Choose a runtime that can generate summaries in Agent settings.",

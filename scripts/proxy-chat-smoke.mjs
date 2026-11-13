@@ -342,6 +342,9 @@ const registry = new BackendRegistry();
 registry.setChatSecretOwner({ async chatSecretRequest(action, input) {
   if (action !== "prepare") throw new Error("Unexpected secret action");
   if (input.text === "fixture mediation unavailable") throw Object.assign(new Error("Local processing unavailable"), { code: "SECRET_PROCESSING_UNAVAILABLE" });
+  if (input.text === "fixture disk full") throw Object.assign(new Error("Private storage path"), {
+    code: "SECRET_PROCESSING_UNAVAILABLE", systemIssue: "STORAGE_FULL",
+  });
   return { text: input.text, references: [], version: 1 };
 } });
 const mockBackend = new MockChatBackend();
@@ -946,6 +949,14 @@ try {
   const unavailable = await waitFor(f => f.type === "res" && f.id === "secret-unavailable", "secret processing unavailable");
   check("credential processing failure states non-admission", unavailable.error?.code === "SECRET_PROCESSING_UNAVAILABLE" && unavailable.error?.admissionAccepted === false);
   check("credential processing failure never dispatches to backend", sendCalls.length === unavailableBefore);
+  send({ type: "req", id: "secret-disk-full", method: "chat.send", params: {
+    sessionKey: "agent:hermes-default:main", message: "fixture disk full", idempotencyKey: "not-admitted-disk",
+  } });
+  const diskFull = await waitFor(f => f.type === "res" && f.id === "secret-disk-full", "secret processing disk full");
+  check("credential processing reports full storage without dispatch or exposing the path",
+    diskFull.error?.code === "SECRET_PROCESSING_UNAVAILABLE" && diskFull.error?.systemIssue === "STORAGE_FULL"
+    && diskFull.error?.admissionAccepted === false && !JSON.stringify(diskFull).includes("Private storage path")
+    && sendCalls.length === unavailableBefore);
   // UI sends `idempotencyKey` in the real chat.send params (not `runId`).
   send({
     type: "req",

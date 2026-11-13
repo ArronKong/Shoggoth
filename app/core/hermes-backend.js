@@ -59,6 +59,8 @@ const {
 const { readHermesUsageHistory } = require("./hermes-usage-history");
 const { estimateUsageCost } = require("./usage-cost");
 const { readHermesCronHistory } = require("./hermes-cron-history");
+const { classifyProviderLimit } = require("../agent-service/runtime-provider-errors");
+const { hermesCron: HERMES_CRON_FAILURE_COPY } = require("../agent-service/chat-error-messages.json");
 const { syncHermesSharedAdapter } = require("./hermes-shared-adapter-sync");
 
 const execFileAsync = promisify(execFile);
@@ -100,6 +102,30 @@ function hermesChatFailureCode(payload) {
   return "error";
 }
 const HERMES_TYPED_CHAT_FAILURES = new Set(["rate_limit", "auth", "connection", "reasoning_effort", "format_error", "model_not_found"]);
+const HERMES_CRON_CHAT_SESSION = /^cron_([a-f0-9]{12})_\d{8}_\d{6}$/u;
+const HERMES_CRON_PROMPT_START = "[IMPORTANT: You are running as a scheduled cron job.";
+const HERMES_CONTINUATION = /^\[System: (?:The previous response was cut off by a network error mid-stream|Your previous response was truncated by the output length limit|Your previous tool call \()/u;
+const HERMES_PARTIAL_FAILURE = "This turn did not complete. Some actions may already have run; verify their effects before resending.";
+const HERMES_CRON_ERROR_CODES = {
+  rate_limit: "RATE_LIMIT", auth: "AUTH", billing: "QUOTA", connection: "CONNECTION",
+  reasoning_effort: "SETTINGS", format_error: "SETTINGS", model_not_found: "MODEL",
+};
+
+function hermesCronFailureCopy(error) {
+  if (typeof error !== "string") return HERMES_CRON_FAILURE_COPY.UNKNOWN;
+  if (/\bHTTP 429:\s*Rate limit exceeded:\s*free-models-per-day\b/iu.test(error)) {
+    return HERMES_CRON_FAILURE_COPY.FREE_DAILY_QUOTA;
+  }
+  const code = classifyProviderLimit(error) === "RUNTIME_QUOTA_EXHAUSTED"
+    ? "QUOTA" : HERMES_CRON_ERROR_CODES[hermesChatFailureCode({ error })];
+  return HERMES_CRON_FAILURE_COPY[code] ?? HERMES_CRON_FAILURE_COPY.UNKNOWN;
+}
+
+function hermesMessageTimestamp(value) {
+  // Hermes stores SQLite epoch seconds; chat history uses milliseconds.
+  const time = Number(value);
+  return Number.isFinite(time) && time > 0 ? Math.round(time < 1e12 ? time * 1000 : time) : undefined;
+}
 
 // ---- gateway chat (S2) constants ----
 // `source` stamps who created/resumed the session; "desktop" keeps our sessions
@@ -7476,9 +7502,11 @@ class HermesBackend extends AgentBackend {
       rows.pop();
     }
     const hasMore = rows.length > limit;
-    if (hasMore) rows.shift();
+    const lookbehind = hasMore ? rows.shift() : undefined;
     const nextOffset = (position?.offset ?? 0) + rows.length;
-    const messages = this._mapHistoricalMessages(rows);
+    const messages = await this._projectHistoricalMessages(sessionKey, serverId, parsed, rows, lookbehind);
+    if (generation !== this._lifecycleGeneration
+      || scope !== historySource(sessionKey, this._serverSessionId(sessionKey, tail), this.getChatCacheScope(), generation)) throw historyError();
     return historyPage(position ? messages : this._stitchChatFailure(sessionKey, this._stitchLastFinalMeta(sessionKey, messages)), hasMore,
       hasMore ? encodeHistoryCursor(this, scope, { offset: nextOffset, anchor: historyRowId(rows[0]), sessionId: parsed.session_id }) : null,
       historySource(sessionKey, parsed.session_id || serverId, this.getChatCacheScope()));
@@ -8218,7 +8246,9 @@ class HermesBackend extends AgentBackend {
   }
 
   async _fetchHistoricalMessages(sessionKey, overrideTail) {
-    return this._mapHistoricalMessages((await this._readHistoricalMessageResponse(sessionKey, overrideTail)).messages);
+    const serverId = overrideTail || this._sessionTarget(sessionKey).tail;
+    const parsed = await this._readHistoricalMessageResponse(sessionKey, serverId);
+    return this._projectHistoricalMessages(sessionKey, serverId, parsed);
   }
 
   async _readHistoricalMessageResponse(sessionKey, overrideTail, page) {
@@ -8253,7 +8283,56 @@ class HermesBackend extends AgentBackend {
     return parsed;
   }
 
-  _mapHistoricalMessages(raw) {
+  async _projectHistoricalMessages(sessionKey, serverId, parsed, rows = parsed.messages, lookbehind) {
+    const jobId = parsed.session_id === serverId ? HERMES_CRON_CHAT_SESSION.exec(serverId)?.[1] : undefined;
+    if (!jobId || !rows.some(row => row?.role === "assistant" && row.display_kind === "failed_turn")) {
+      return this._mapHistoricalMessages(rows);
+    }
+    // Cron sessions can also be used for manual follow-ups. Only attach a
+    // scheduler error to the failed turn that follows the scheduler's input.
+    let input;
+    const failures = [];
+    for (const row of lookbehind ? [lookbehind, ...rows] : rows) {
+      if (!row || row.display_kind === "hidden" || row.session_id && row.session_id !== serverId) continue;
+      if (row.role === "user") {
+        const text = typeof row.content === "string" ? row.content : "";
+        if (!HERMES_CONTINUATION.test(text)) input = text.startsWith(HERMES_CRON_PROMPT_START) ? row : undefined;
+      }
+      if (input && row.role === "assistant" && row.display_kind === "failed_turn") {
+        if (row !== lookbehind) failures.push({ row, inputAt: hermesMessageTimestamp(input.timestamp) });
+        input = undefined;
+      }
+    }
+    if (!failures.length) return this._mapHistoricalMessages(rows);
+
+    let executions = [];
+    try {
+      const { profile, dash } = this._sessionTarget(sessionKey);
+      if (this._getConfig().hermesMode !== "remote" && (!parsed.profile || parsed.profile === profile)) {
+        this._localRuntime.assertDashboard(dash);
+        executions = (await this._readCronExecutionHistory(profile, 0, { jobId })).items;
+        this._localRuntime.assertDashboard(dash);
+        if (this.dashboards.get(profile) !== dash || this._getConfig().hermesMode === "remote") executions = [];
+      }
+    } catch {
+      // Older Hermes or unavailable ledger: still render the failure.
+      executions = [];
+    }
+    const cronFailures = new Map(failures.map(({ row, inputAt }) => {
+      const failedAt = hermesMessageTimestamp(row.timestamp);
+      // Require both timestamps inside one attempt. A newer last_error or
+      // overlapping attempts cannot explain this historical message.
+      const matching = executions.filter(run => run.jobId === jobId && inputAt <= failedAt
+        && run.startedAt <= inputAt && failedAt <= (run.finishedAt ?? Infinity));
+      const run = matching.length === 1 ? matching[0] : null;
+      const summary = hermesCronFailureCopy(run?.status === "error" ? run.error : undefined);
+      const text = row.content === HERMES_PARTIAL_FAILURE ? `${summary}\n${HERMES_CRON_FAILURE_COPY.PARTIAL}` : summary;
+      return [row, text];
+    }));
+    return this._mapHistoricalMessages(rows, cronFailures);
+  }
+
+  _mapHistoricalMessages(raw, cronFailures) {
     // The endpoint returns RAW `messages` table rows (hermes_state.get_messages):
     // role user/assistant/system/tool, `tool_calls` (parsed JSON on assistant
     // rows), `tool_name` (on tool-result rows), `reasoning`/`reasoning_content`,
@@ -8264,16 +8343,6 @@ class HermesBackend extends AgentBackend {
     // mirroring what OpenClaw history already ships.
     const textOf = (content) =>
       typeof content === "string" ? content : content == null ? "" : JSON.stringify(content);
-    // The dashboard returns each message's `timestamp` (SQLite REAL, epoch
-    // SECONDS). The chat UI's ts convention is epoch MS (Date.now / OpenClaw
-    // transcript ms), so scale seconds→ms; a magnitude guard leaves a value that
-    // is already ms untouched, in case a Hermes version returns ms.
-    const tsOf = (v) => {
-      const rawTs = Number(v);
-      return Number.isFinite(rawTs) && rawTs > 0
-        ? Math.round(rawTs < 1e12 ? rawTs * 1000 : rawTs)
-        : undefined;
-    };
     const out = [];
     for (const msg of raw) {
       if (!msg || typeof msg !== "object") continue;
@@ -8282,7 +8351,13 @@ class HermesBackend extends AgentBackend {
       // server returns `ORDER BY id`) so the chat UI's pin / local-hide — both
       // keyed by message id — work for Hermes like OpenClaw.
       const id = msg.id != null ? `hermes-msg-${msg.id}` : undefined;
-      const ts = tsOf(msg.timestamp);
+      const ts = hermesMessageTimestamp(msg.timestamp);
+      const cronFailure = cronFailures?.get(msg);
+      if (cronFailure) {
+        out.push({ role: "assistant", id, timestamp: ts, automation: "cron", stopReason: "error",
+          content: [{ type: "text", text: cronFailure }] });
+        continue;
+      }
       // Hermes persists background completion notifications as model-facing
       // user input. Only the producer's explicit display kind identifies them;
       // a human pasting the same text must remain a regular user message.
@@ -8386,10 +8461,10 @@ class HermesBackend extends AgentBackend {
     return out.map(message => {
       const text = message.role === "user" ? message.content[0]?.text || "" : "";
       // These are Hermes's persisted continuation envelopes, not human turns.
-      const continuation = /^\[System: (?:The previous response was cut off by a network error mid-stream|Your previous response was truncated by the output length limit|Your previous tool call \()/u.test(text);
+      const continuation = HERMES_CONTINUATION.test(text);
       return { ...message, historySource: "hermes",
         ...(continuation ? { automation: "continuation" }
-          : text.startsWith("[IMPORTANT: You are running as a scheduled cron job.") ? { automation: "cron" } : {}) };
+          : text.startsWith(HERMES_CRON_PROMPT_START) ? { automation: "cron" } : {}) };
     });
   }
 
@@ -10377,8 +10452,8 @@ class HermesBackend extends AgentBackend {
   // 本地执行账本提供完整次数和结果；HTTP 会话仅补充转录入口。
   // 旧版或远端无账本时兼容 /runs（最多 100 条）及 job 的 last-run，
   // 并明确标记截断、仅最新执行或未知结果。
-  _readCronExecutionHistory(profile, sinceMs) {
-    return readHermesCronHistory(path.join(this._hermesHomeForProfile(profile), "cron", "executions.db"), sinceMs);
+  _readCronExecutionHistory(profile, sinceMs, filter) {
+    return readHermesCronHistory(path.join(this._hermesHomeForProfile(profile), "cron", "executions.db"), sinceMs, filter);
   }
 
   async getRecentCronRuns({ sinceMs = 0, limit = 50 } = {}) {

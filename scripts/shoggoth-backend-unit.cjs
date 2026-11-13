@@ -5052,6 +5052,48 @@ test("native operation reads carry durable Service authority only after exact id
   await assert.rejects(backend.getChatOperation(key, "original-client"), { code: "WORK_RUN_CONTROL_MISMATCH" });
 });
 
+test("an internal send error can recover the original queued Run and deliver its terminal once", async () => {
+  let operationId;
+  const { backend, calls } = await readyBackend(request => {
+    if (request.method === "chat.send") {
+      operationId = request.params.operationId;
+      throw Object.assign(new Error("send acknowledgement failed"), { code: "INTERNAL_ERROR" });
+    }
+    if (request.method === "chat.operation.get") {
+      assert.deepEqual(request.params, { operationId, sessionKey: SESSION_A });
+      return { status: "found", run: run("queued", { idempotencyKey: `shoggoth:chat-send:${operationId}` }) };
+    }
+    if (request.method === "run.subscribe") return subscription([
+      event(1, "text", { text: "recovered answer" }),
+      event(2, "terminal", { status: "completed", resultSummary: "recovered answer", errorCode: null }),
+    ], { latestSeq: 2, nextCursor: 2 });
+    if (request.method === "chat.history") return page("messages", []);
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const seen = { accepted: 0, final: [], errors: [] };
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", "original-client", {
+    final: text => seen.final.push(text),
+    error: message => seen.errors.push(message),
+  }, { onAccepted: () => { seen.accepted += 1; } });
+  assert.deepEqual(seen, { accepted: 1, final: ["recovered answer"], errors: [] });
+  assert.equal(calls.filter(({ request }) => request.method === "chat.send").length, 1);
+});
+
+test("an explicit internal send rejection stays a failure and needs no receipt lookup", async () => {
+  const { backend, calls } = await readyBackend(request => {
+    if (request.method === "chat.send") {
+      throw Object.assign(new Error("preflight failed"), { code: "INTERNAL_ERROR", admissionAccepted: false });
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const errors = [];
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", "rejected-client", {
+    error: (_text, metadata) => errors.push(metadata),
+  });
+  assert.deepEqual(errors, [{ code: "INTERNAL_ERROR", admissionAccepted: false }]);
+  assert.equal(calls.some(({ request }) => request.method === "chat.operation.get"), false);
+});
+
 test("legacy recovery pins the original native identity and never resends the prompt", async () => {
   const calls = [];
   const { backend } = await readyBackend(request => {

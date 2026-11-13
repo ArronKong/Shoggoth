@@ -17,7 +17,9 @@ const HASH = /^[a-f0-9]{64}$/u;
 const plain = value => value && Object.getPrototypeOf(value) === Object.prototype;
 const MCP_KEYS = new Set(["content", "isError", "structuredContent"]);
 const MCP_TEXT_KEYS = new Set(["type", "text", "annotations"]);
-const fail = code => { throw serviceError(code, SECRET_MESSAGES[code] || SECRET_MESSAGES.SECRET_PROCESSING_UNAVAILABLE); };
+const fail = (code, cause) => {
+  throw serviceError(code, SECRET_MESSAGES[code] || SECRET_MESSAGES.SECRET_PROCESSING_UNAVAILABLE, { cause });
+};
 function scopeOf(scope) {
   if (!plain(scope) || Object.keys(scope).length !== 2 || ![scope.profileId, scope.sessionId]
     .every(value => textValue(value, 1024) && value.length > 0)) fail("SECRET_REFERENCE_FORBIDDEN");
@@ -179,7 +181,11 @@ class TemporarySecretStore {
     const encoded = `${JSON.stringify(next)}\n`;
     if (Buffer.byteLength(encoded) > MAX_FILE_BYTES) fail("SECRET_PROCESSING_UNAVAILABLE");
     try { atomicWritePrivateFile(this.file, encoded, { trustedRoot: this.paths.trustedRoot }); }
-    catch (error) { if (error?.committedUncertain || error?.code === "PRIVATE_FILE_COMMIT_UNCERTAIN") this.uncertain = true; fail(this.uncertain ? "SECRET_STORE_UNCERTAIN" : "SECRET_PROCESSING_UNAVAILABLE"); }
+    catch (error) {
+      if (error?.committed === true) this.state = next;
+      if (error?.committed === true || error?.committedUncertain || error?.code === "PRIVATE_FILE_COMMIT_UNCERTAIN") this.uncertain = true;
+      fail(this.uncertain ? "SECRET_STORE_UNCERTAIN" : "SECRET_PROCESSING_UNAVAILABLE", error);
+    }
     this.state = next;
   }
   _expire() {
@@ -210,7 +216,7 @@ class TemporarySecretStore {
       this.identity = base64(raw.toString("utf8"), 32);
       if (this.identity.length !== 32) fail("SECRET_PROCESSING_UNAVAILABLE");
       return this.identity;
-    } catch (error) { fail(error?.code === "SECRET_STORE_UNCERTAIN" ? error.code : "SECRET_PROCESSING_UNAVAILABLE"); }
+    } catch (error) { fail(error?.code === "SECRET_STORE_UNCERTAIN" ? error.code : "SECRET_PROCESSING_UNAVAILABLE", error); }
     finally { raw?.fill(0); }
   }
   async _seal(value, scope, kind) {
@@ -223,7 +229,7 @@ class TemporarySecretStore {
       const encrypted = Buffer.concat([cipher.update(bytes), cipher.final()]);
       return { ...row, key: (await this.cryptoBroker.encrypt(keyText)).toString("base64"),
         iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ciphertext: encrypted.toString("base64") };
-    } catch { fail("SECRET_PROCESSING_UNAVAILABLE"); }
+    } catch (error) { fail("SECRET_PROCESSING_UNAVAILABLE", error); }
     finally { key.fill(0); keyText.fill(0); bytes.fill(0); }
   }
   async _decrypt(row) {
@@ -261,7 +267,7 @@ class TemporarySecretStore {
   async _redact(text, scope, pending, selections, review, extraKnown = [], ordinary = [], ordinaryHashes = []) {
     const known = this._known(scope, pending);
     let supplied;
-    try { supplied = await this.getKnownSecrets(scope); } catch { fail("SECRET_PROCESSING_UNAVAILABLE"); }
+    try { supplied = await this.getKnownSecrets(scope); } catch (error) { fail("SECRET_PROCESSING_UNAVAILABLE", error); }
     if (!Array.isArray(supplied) || !Array.isArray(extraKnown)) fail("SECRET_PROCESSING_UNAVAILABLE");
     const external = [...supplied, ...extraKnown];
     const detection = detectSecrets(text, { selections, known: [...known, ...external], autoDetect: this.autoDetect });
@@ -386,7 +392,7 @@ class TemporarySecretStore {
   projectText(scopeInput, text) {
     this._assert(); const scope = scopeOf(scopeInput);
     let external;
-    try { external = this.getKnownSecrets(scope); } catch { fail("SECRET_PROCESSING_UNAVAILABLE"); }
+    try { external = this.getKnownSecrets(scope); } catch (error) { fail("SECRET_PROCESSING_UNAVAILABLE", error); }
     if (!Array.isArray(external)) fail("SECRET_PROCESSING_UNAVAILABLE");
     const known = [...this._known(scope), ...external];
     const detection = detectSecrets(text, { known, autoDetect: this.autoDetect });

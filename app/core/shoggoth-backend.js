@@ -456,6 +456,7 @@ const SEND_RECEIPT_UNCERTAIN_ERROR_CODES = new Set([
   "SERVICE_UNAVAILABLE", "REQUEST_TIMEOUT", "SERVICE_DISCONNECTED",
   "INCOMPLETE_RESPONSE", "MULTIPLE_RESPONSE_FRAMES", "RESPONSE_TRAILING_DATA",
   "MALFORMED_RESPONSE", "RESPONSE_ID_MISMATCH", "RESPONSE_TOO_LARGE",
+  "CHAT_SESSION_COMMIT_UNCERTAIN", "CHAT_RESPONSE_INVALID", "INTERNAL_ERROR",
 ]);
 const MAX_OBSERVER_RECOVERY_CYCLES = 8;
 
@@ -715,6 +716,7 @@ function safeError(error, fallback = "SERVICE_UNAVAILABLE") {
   output.code = code;
   try {
     if (Object.getOwnPropertyDescriptor(error, "admissionAccepted")?.value === false) output.admissionAccepted = false;
+    if (Object.getOwnPropertyDescriptor(error, "receiptUncertain")?.value === true) output.receiptUncertain = true;
     if (Object.getOwnPropertyDescriptor(error, "systemIssue")?.value === "STORAGE_FULL") output.systemIssue = "STORAGE_FULL";
     // Connected but no reply before the deadline: the Service loop is busy, not gone.
     if (code === "REQUEST_TIMEOUT" && (Object.getOwnPropertyDescriptor(error, "serviceBusy")?.value === true
@@ -7268,7 +7270,9 @@ class ShoggothBackend extends AgentBackend {
           createdAt: this.now(),
         });
       } catch (error) {
-        if (error?.admissionAccepted === false || !SEND_RECEIPT_UNCERTAIN_ERROR_CODES.has(safeError(error).code)) throw error;
+        const failure = safeError(error);
+        if (failure.admissionAccepted === false
+          || (failure.receiptUncertain !== true && !SEND_RECEIPT_UNCERTAIN_ERROR_CODES.has(failure.code))) throw failure;
         acceptedOrUncertain = true;
         const recovered = await this._confirmChatSend(target, operationId, poll);
         if (!recovered) {

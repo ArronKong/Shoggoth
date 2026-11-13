@@ -92,6 +92,9 @@ test("automatic input/context fallback is once-only; manual review and cancellat
   assert.deepEqual(await prepareForSend(secrets, input), { text: input.text, references: [], version: 1 });
   assert.equal(calls, 1); assert.throws(() => secrets.prepare(input), { code: "SECRET_INPUT_REVIEW_REQUIRED" });
   assert.equal(projectTextOrOriginal(secrets, SCOPE, input.text), input.text);
+  const diskFull = Object.assign(new Error("local storage failed", { cause: failure("ENOSPC") }),
+    { code: "SECRET_PROCESSING_UNAVAILABLE" });
+  await assert.rejects(processOrOriginal(async () => { throw diskFull; }, input), error => error === diskFull);
   const controller = new AbortController();
   await assert.rejects(processOrOriginal(async () => { controller.abort(); throw failure("SECRET_MEDIA_UNAVAILABLE"); }, input,
     { signal: controller.signal }), { name: "AbortError" });

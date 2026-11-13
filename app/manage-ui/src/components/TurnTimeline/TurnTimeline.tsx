@@ -344,7 +344,6 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
 
   if (!hasSteps) return <div ref={wrapRef} className={`${styles.wrap} ${className ?? ""}`}>{emptyHint ?? null}</div>;
 
-  const StepHead = preview ? "div" : "button";
   const timelineClassName = [styles.wrap, preview && styles.preview, detail && styles.detailTimeline, className].filter(Boolean).join(" ");
   return (
     <div ref={wrapRef} className={timelineClassName} data-status={status}
@@ -359,7 +358,8 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
       <ol ref={detail ? listRef : undefined} className={styles.list}>
         {steps.map((s, i) => {
           const expandable = !preview && hasBody(s);
-          const isOpen = open.has(s.id);
+          const StepHead = expandable ? "button" : "div";
+          const isOpen = expandable && open.has(s.id);
           const rel = relations?.get(s.id);
           const running = s.status === "running" || s.status === "pending";
           const actionTitle = s.kind === "tool" || s.statusKind === "proactive" ? titleFor(s) : "";
@@ -388,10 +388,10 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                     {rel.type === "retry" ? t("turnLab.retryBadge") : t("turnLab.switchBadge")}
                   </span>
                 ) : null}
-                <StepHead className={styles.head} data-startup={s.startupWait ? "1" : undefined}
-                  {...(!preview && {
-                    type: "button" as const, disabled: !expandable, "aria-expanded": expandable ? isOpen : undefined,
-                    onClick: expandable ? () => setOpen((prev) => { const n = new Set(prev); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); return n; }) : undefined,
+                <StepHead className={styles.head}
+                  {...(expandable && {
+                    type: "button" as const, "aria-expanded": isOpen,
+                    onClick: () => setOpen((prev) => { const n = new Set(prev); if (n.has(s.id)) n.delete(s.id); else n.add(s.id); return n; }),
                   })}>
                   {!s.startupWait && !actionTitle && !isTextStep ? <span
                     className={styles.name}

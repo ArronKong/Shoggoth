@@ -3,8 +3,8 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-function serviceError(code, message) {
-  const error = new Error(message);
+function serviceError(code, message, options) {
+  const error = new Error(message, options);
   error.code = code;
   return error;
 }
@@ -106,18 +106,18 @@ function ensurePrivateDirectoryTree(target, trustedRoot) {
   for (const segment of relative.split(path.sep)) {
     cursor = path.join(cursor, segment);
     let existing = rejectSymlink(cursor);
-    if (existing && !existing.isDirectory()) {
+    if (!existing) {
+      try {
+        fs.mkdirSync(cursor, { mode: 0o700 });
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+      existing = rejectSymlink(cursor);
+    }
+    if (!existing?.isDirectory()) {
       throw serviceError("UNSAFE_PATH", `安全路径中间项不是目录: ${cursor}`);
     }
-    if (existing) {
-      assertOwned(existing, cursor);
-    } else {
-      fs.mkdirSync(cursor, { mode: 0o700 });
-      existing = rejectSymlink(cursor);
-      if (!existing?.isDirectory()) {
-        throw serviceError("UNSAFE_PATH", `安全路径中间项不是目录: ${cursor}`);
-      }
-    }
+    assertOwned(existing, cursor);
     tightenPrivateDirectory(cursor, existing);
   }
   assertPrivateDirectory(resolvedTarget);
