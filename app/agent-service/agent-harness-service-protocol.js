@@ -623,6 +623,7 @@ function mapAgentHarnessError(error) {
 
 module.exports = {
   AGENT_HARNESS_METHODS,
+  MAX_RESULT_BYTES,
   PUBLIC_MESSAGES,
   mapAgentHarnessError,
   validateAgentHarnessParams,

@@ -7,6 +7,8 @@ const { assertValidDownstreamMcpTools } = require("./mcp-product-tool-controller
 const { hasSecret } = require("./memory-engine");
 const { serviceError } = require("./security");
 const { querySkillManagementCatalog } = require("./skill-management-query");
+const { MAX_RESULT_BYTES } = require("./agent-harness-service-protocol");
+const { descriptionExcerpt } = require("./tool-registry");
 
 const GENERATED = new Set(["TOOLS", "MEMORY"]);
 const IMPORT_TTL_MS = 15 * 60 * 1000;
@@ -634,7 +636,19 @@ class AgentHarnessServiceController {
     const publicTools = () => {
       const view = this.permissionEngine.profileProjection(params.profileId);
       const visible = new Set(this.toolRegistry.list().filter(tool => tool.uiVisible !== false).map(tool => tool.tool));
-      return { ...view, tools: view.tools.filter(tool => visible.has(tool.name)) };
+      const tools = view.tools.filter(tool => visible.has(tool.name));
+      const fits = (result) => Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_RESULT_BYTES;
+      const full = { ...view, tools };
+      if (fits(full)) return full;
+      // Keep every tool and permission in the management view. Only the
+      // display descriptions need to fit the local response budget.
+      for (const bytes of [512, 256, 128, 64, 0]) {
+        const result = { ...view, tools: tools.map(tool => ({
+          ...tool, description: descriptionExcerpt(tool.description, bytes),
+        })) };
+        if (fits(result)) return result;
+      }
+      throw harnessError("HARNESS_RESPONSE_TOO_LARGE", "工具目录超过响应预算");
     };
     if (method === "harness.tools.list") return publicTools();
     if (method === "harness.tools.permission.set") {
