@@ -253,7 +253,18 @@ state.runHistoryFixture = async () => {
     const observed: number[] = [];
     const observer = new MutationObserver(() => { if (thread()) observed.push(count(row.id)); });
     observer.observe(document.getElementById("root")!, { subtree: true, childList: true, characterData: true });
-    select(row.key);
+    if (row.id === "native") {
+      await control(row.key, "hold-native-history");
+      try {
+        // The Agent may currently point to its newly created sibling session.
+        select(row.key);
+        await wait(() => count(row.id) === 50 && thread().dataset.historyLoaded === "false", "native snapshot before Service returns");
+        checkQuiet("native snapshot during background refresh");
+        check(!!visibleAnchor(thread(), ".chat-bubble"), "native snapshot paints in the viewport while the Service waits");
+      } finally {
+        await control(row.key, "release-native-history");
+      }
+    } else select(row.key);
     await wait(() => count(row.id) === 50 && thread().dataset.historyLoaded === "true", `${row.id}: reopen 50`);
     checkQuiet(`${row.id}: reopening`);
     await pause(400); observer.disconnect();

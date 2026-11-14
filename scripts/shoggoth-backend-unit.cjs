@@ -6023,6 +6023,32 @@ test("real failure detail is identical in live errors, history and terminal snap
   assert.equal(history.messages[0].content[0].text, `错误：${errors[0]}`);
 });
 
+test("a saved Codex gateway outage is redacted and presented as a service failure", async () => {
+  const code = "RUNTIME_MODEL_UNAVAILABLE";
+  const routeToken = "a1".repeat(32);
+  const failure = { httpStatus: 502,
+    message: `unexpected status 502 Bad Gateway: Model service temporarily unavailable., url: http://127.0.0.1:12345/${routeToken}/responses` };
+  const legacy = historyItem({ id: "error-1", role: "system", errorCode: code, failure,
+    content: [{ type: "text", text: code }] }, { type: "error" });
+  const original = structuredClone(legacy);
+  const { backend } = await readyBackend(() => page("messages", [legacy]));
+  const errors = [];
+  const key = `agent:shoggoth-default:${SESSION_A}`;
+  const context = () => ({ key, sessionKey: SESSION_A, run: run(), hooks: { error: value => errors.push(value) },
+    poll: { cancelled: false }, generation: backend._generation });
+  await backend._consumeEvent(context(), { text: "", settled: false },
+    event(1, "terminal", { status: "failed", errorCode: code, failure }));
+  await backend._settleTerminal(context(), { text: "", settled: false }, run("failed", { errorCode: code }));
+  const { messages: [message] } = await backend.getHistory(key);
+  assert.deepEqual(errors, [errors[0], errors[0]]);
+  assert.equal(message.content[0].text, `错误：${errors[0]}`);
+  assert.equal(message.errorCode, "RUNTIME_UPSTREAM_UNAVAILABLE");
+  assert.match(message.content[0].text, /^错误：上游模型服务不可用[^\n]*\n[\s\S]+\nHTTP 502\n错误码：RUNTIME_UPSTREAM_UNAVAILABLE$/u);
+  assert.doesNotMatch(JSON.stringify({ message, errors }), /127\.0\.0\.1|\/responses|账号或登录方式不支持/u);
+  assert.ok(!JSON.stringify({ message, errors }).includes(routeToken));
+  assert.deepEqual(legacy, original);
+});
+
 test("unknown provider causes are shown without invented login advice, and canceled turns stay non-errors", async () => {
   const { backend } = await readyBackend(() => { throw new Error("no history needed"); });
   const errors = [], finals = [];

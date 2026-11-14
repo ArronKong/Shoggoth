@@ -2,6 +2,7 @@ const CRON_CHAT_HANDOFF_KEY = "shoggoth.chat.handoff";
 let suppressedHandoffKey: string | null = null;
 
 interface CronRunHandoffInput {
+  deliveryTarget?: "group";
   agentId?: string;
   startedAt?: number | null;
   sessionKey?: string;
@@ -9,6 +10,7 @@ interface CronRunHandoffInput {
 }
 
 interface CronDeliveryHandoffInput {
+  deliveryTarget?: "group";
   startedAt?: number | null;
   sessionKey?: string;
   summary?: string;
@@ -156,8 +158,9 @@ export function selectCronRunHandoffSource(
       ? delivery
       : null;
   const fullText = firstNonBlankText(exactDelivery?.fullText);
+  const groupBound = openRun.deliveryTarget === "group" || exactDelivery?.deliveryTarget === "group";
   return {
-    sessionKey: canonicalCronSessionKey(
+    sessionKey: groupBound ? null : canonicalCronSessionKey(
       openRun.agentId,
       exactDelivery?.sessionKey || openRun.sessionKey,
     ),

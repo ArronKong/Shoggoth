@@ -1,4 +1,7 @@
 "use strict";
+
+const { createCustomResponseReasoningReader } = require("../app/agent-service/custom-response-models");
+const { knownEndpointReasoningOptions } = require("../app/agent-service/model-reasoning-catalog");
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const fs = require("node:fs");
@@ -59,6 +62,40 @@ test("legacy single-model providers remain readable before upgrading to selected
     f.productStore.open();
     assert.deepEqual(f.service.list().endpoints[0].models, input.models);
   } finally { await f.close(); }
+});
+
+test("Responses capability reads stay bound to the configured endpoint and discard ambiguous metadata", async () => {
+  let now = 0, calls = 0;
+  const request = async (url, options) => {
+    calls += 1;
+    assert.equal(options.method, "GET");
+    assert.equal(options.redirect, "manual");
+    assert.equal(url, "https://endpoint.invalid/v1/models");
+    assert.equal(options.headers.authorization, calls === 1 ? "Bearer fixture-key" : "Bearer next-key");
+    return Response.json({ data: [
+      { id: "actual", reasoning: { supported_efforts: ["low", "max", "none"], mandatory: true } },
+      { id: "unknown", reasoning: true }, { id: "fixed", supported_efforts: [] },
+      { id: "duplicate", supported_efforts: ["low"] }, { id: "duplicate", supported_efforts: ["max"] },
+    ] });
+  };
+  const read = createCustomResponseReasoningReader({ readCredential: async ref => ref, now: () => now, request });
+  const provider = { id: "fixture", kind: "custom-responses", baseUrl: "https://endpoint.invalid/v1",
+    credentialRef: "fixture-key", models: ["actual", "unknown", "fixed", "duplicate"] };
+  const [a, b] = await Promise.all([read(provider), read(provider)]);
+  assert.deepEqual(a, new Map([["actual", ["low", "max"]], ["unknown", null], ["fixed", []], ["duplicate", []]]));
+  assert.strictEqual(a, b);
+  assert.equal(calls, 1);
+  await read({ ...provider, credentialRef: "next-key" });
+  assert.equal(calls, 2);
+  now += 5 * 60_000 + 1;
+  await read({ ...provider, credentialRef: "next-key" });
+  assert.equal(calls, 3);
+  assert.deepEqual(knownEndpointReasoningOptions("https://token-plan-cn.xiaomimimo.com/v1", "mimo-v2.6-flash"), ["none", "high"]);
+  assert.equal(knownEndpointReasoningOptions("https://token-plan-cn.xiaomimimo.com/v1", "mimo-v2.6-flash", "chat-completions"), null);
+  assert.deepEqual(knownEndpointReasoningOptions("https://developer.amd.com.cn/radeon/api/v1", "GLM-5.3-Flash", "chat-completions"), ["low", "medium", "high"]);
+  assert.deepEqual(knownEndpointReasoningOptions("https://developer.amd.com.cn/radeon/api/v1", "MiMo-V2.6-Flash", "chat-completions"), []);
+  assert.equal(knownEndpointReasoningOptions("https://developer.amd.com.cn/radeon/api/v1", "GLM-5.3-Flash"), null);
+  assert.equal(knownEndpointReasoningOptions("https://developer.amd.com.cn.other.invalid/radeon/api/v1", "DeepSeek-V4.1-Flash", "chat-completions"), null);
 });
 
 // Anything older than Product 15 (e.g. the schema 9/10 era) is refused.

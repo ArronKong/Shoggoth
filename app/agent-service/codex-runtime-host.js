@@ -291,6 +291,8 @@ class CodexRuntimeHost {
     // would route a native custom provider through Shoggoth's OpenAI gateway.
     this.modelProviderKind = this.runtimeEnvironment.kind === "native-user"
       ? "native" : prepared?.runtimeConfig?.provider?.kind ?? "chatgpt";
+    this.requiresUserApproval = this.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
+      && prepared?.requiresUserApproval === true;
     if (prepared?.runtimeConfig?.provider
       && prepared.runtimeConfig.provider.kind !== "chatgpt") this.nativeAuthEligible = false;
     const explicitSpawnEnv = this.options.spawnEnv || {};

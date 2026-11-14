@@ -147,6 +147,8 @@ export interface UnifiedCronJob {
   provider?: string;
   baseUrl?: string;
   deliver?: string;
+  deliveryTarget?: "group";
+  watch?: boolean;
   deleteAfterRun?: boolean;
   sessionTarget?: OpenClawCronSessionTarget;
   wakeMode?: OpenClawCronWakeMode;
@@ -181,6 +183,7 @@ export interface CronFailureNotificationDelivery {
 
 // One historical run of a cron job (see backend getCronRuns()).
 export interface CronRun {
+  deliveryTarget?: "group";
   outputDisposition?: "pending" | "deliver" | "silent";
   executionOrigin?: "codex-desktop" | "shoggoth";
   executionStatus?: string;
@@ -231,6 +234,7 @@ export interface CronRunTrajectory {
 }
 
 export interface CronDelivery {
+  deliveryTarget?: "group";
   outputDisposition?: "pending" | "deliver" | "silent";
   deliverySuppressionReason?: string;
   runId?: string;
@@ -454,6 +458,7 @@ export interface ChatCanvasWidgetPart {
 export interface ChatCacheScope {
   backendId: string;
   cacheScope: string;
+  memoryOnly?: true;
 }
 
 /** App-owned read acknowledgements; history remains owned by its backend. */
@@ -2878,6 +2883,7 @@ export interface DashboardBackendSection<T> {
 
 export interface DashboardRunEntry {
   systemManaged?: boolean;
+  deliveryTarget?: "group";
   outputDisposition?: "pending" | "deliver" | "silent";
   backendId: string;
   /** 统一 id "<prefix>:<localId>"，可直接深链 /cron?job=。 */

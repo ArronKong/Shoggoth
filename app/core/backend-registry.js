@@ -711,15 +711,18 @@ class BackendRegistry extends EventEmitter {
    * 快速读取某后端的聊天历史缓存隔离摘要。只允许 active backend，且只转发
    * 固定长度 SHA-256；后端异常或未声明能力都 fail closed。
    * @param {string} backendId
-   * @returns {{backendId: string, cacheScope: string}|null}
+   * @param {string} [sessionKey]
+   * @returns {{backendId: string, cacheScope: string, memoryOnly?: true}|null}
    */
-  getChatCacheScope(backendId) {
+  getChatCacheScope(backendId, sessionKey) {
     const backend = this._activeGet(backendId);
     if (!backend || typeof backend.getChatCacheScope !== "function") return null;
     try {
-      const cacheScope = backend.getChatCacheScope();
+      const binding = backend.getChatCacheScope(sessionKey);
+      const memoryOnly = binding?.memoryOnly === true;
+      const cacheScope = memoryOnly ? binding.scope : binding;
       if (typeof cacheScope !== "string" || !/^[0-9a-f]{64}$/.test(cacheScope)) return null;
-      return { backendId: backend.id, cacheScope };
+      return { backendId: backend.id, cacheScope, ...(memoryOnly ? { memoryOnly } : {}) };
     } catch (err) {
       console.error(`[registry] ${backendId} getChatCacheScope failed:`, err?.message || err);
       return null;

@@ -167,6 +167,9 @@ function cronJobDto(value, systemManaged = false) {
     promptMeta: dtoContentMeta(prompt),
     connectorMigrationRequired: requiresConnectorMigration(value),
     ...(systemManaged ? { systemManaged: true } : {}),
+    ...(value.groupDelivery ? { deliveryTarget: "group" } : {}),
+    ...(value.watch !== undefined || value.groupDelivery?.watch
+      ? { watch: value.watch ?? value.groupDelivery.watch } : {}),
     workspace,
     schedule,
     misfirePolicy,
@@ -382,6 +385,7 @@ class NativeDomainServiceController {
   #listCronRuns(params) {
     if (!this.describeCronRun) throw internalError("CRON_UNAVAILABLE");
     const job = requireEntity(this.cronStore.getJob(params.jobId) || this.cronStore.getJobTombstone?.(params.jobId), "CRON_JOB_NOT_FOUND");
+    const groupBound = this.cronStore.isGroupBoundJob?.(job.id) === true;
     const runs = this.workDispatcher.listRuns({ source: "cron", sourceId: params.jobId })
       .filter((value) => value.source === "cron" && value.sourceId === params.jobId)
       .filter((value) => value.profileId === job.profileId)
@@ -397,6 +401,7 @@ class NativeDomainServiceController {
       return {
         key: stableTimestampKey(description.createdAt, runValue.id),
         item: { run: runValue, kind: description.kind, createdAt: description.createdAt,
+          ...(groupBound ? { deliveryTarget: "group" } : {}),
           ...(cronOutput ? { cronOutput } : {}),
           ...(this.getRunSessionKey(runValue) ? { sessionKey: this.getRunSessionKey(runValue) } : {}) },
       };

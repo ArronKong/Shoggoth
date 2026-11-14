@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.319",
+      "version": "0.8.320",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.319",
-      "purl": "pkg:generic/shoggoth@0.8.319",
+      "bom-ref": "pkg:generic/shoggoth@0.8.320",
+      "purl": "pkg:generic/shoggoth@0.8.320",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -13455,7 +13455,7 @@
       "properties": [
         {
           "name": "shoggoth:local-files",
-          "value": "schemas/codex-app-server/0.167.1,build/codex-runtime-manifest.json"
+          "value": "schemas/codex-app-server/0.167.1,build/codex-runtime-manifest.json,app/agent-service/prompts/codex-0.167.1-model-fallback.md"
         }
       ]
     },
@@ -13589,7 +13589,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.319",
+      "ref": "pkg:generic/shoggoth@0.8.320",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",

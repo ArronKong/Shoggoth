@@ -6,5 +6,5 @@ export function consumeCronNotification(lastRuns: Map<string, number>, job: Unif
   if (job.outputDisposition === "pending" || job.lastStatus === "running") return false;
   const last = job.lastRunAt ?? 0, previous = lastRuns.get(job.id);
   lastRuns.set(job.id, last);
-  return seeded && previous !== undefined && last > previous && job.outputDisposition !== "silent";
+  return seeded && previous !== undefined && last > previous && job.outputDisposition !== "silent" && job.deliveryTarget !== "group";
 }

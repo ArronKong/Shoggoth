@@ -168,6 +168,54 @@ test("custom Responses inherits provider reasoning settings without looking up t
   assert.ok(calls.every(params => params.model === CUSTOM_MODEL));
 });
 
+test("same-named GPT and custom models validate and execute the selected source's own effort", async () => {
+  const model = "DeepSeek-V4.1-Flash";
+  const f = await openHandoffFixture({ catalogs: { codex: [model] } });
+  try {
+    const session = f.createSession();
+    await request(f, "profile.binding.models.list", { profileId: f.profile.id,
+      bindingId: f.binding("codex").id, cursor: null, limit: 100 });
+    const raw = f.transport.hosts.get("codex");
+    raw.modelList = async () => ({ data: [{ model, displayName: model, description: "", isDefault: true, hidden: false,
+      supportedReasoningEfforts: [{ reasoningEffort: "ultra" }], defaultReasoningEffort: "ultra" }], nextCursor: null });
+    f.service.providerService.protocolValidator = async () => ({ parsedBy: "fixture" });
+    // A saved endpoint without credentials is valid; the mocked runtime
+    // receives the turn. This test's Service uses a synthetic /models response.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (String(url) !== "https://developer.amd.com.cn/radeon/api/v1/models") throw new Error("Unexpected network request");
+      assert.equal(init.method, "GET");
+      return Response.json({ data: [{ id: model, reasoning: { supported_efforts: ["low", "max"] } }] });
+    };
+    try {
+      const endpoints = new CustomEndpointService({ productStore: f.service.productStore,
+        secretStore: f.service.secretStore, providerService: f.service.providerService,
+        profileServiceController: f.service.profileServiceController });
+      await endpoints.save(f.profile.id, { id: "fixture-amd", name: "Fixture AMD",
+        baseUrl: "https://developer.amd.com.cn/radeon/api/v1", models: [model] });
+      const bindingId = f.binding("codex").id;
+      const page = await request(f, "profile.binding.models.list", { profileId: f.profile.id, bindingId, cursor: null, limit: 100 });
+      assert.deepEqual(page.models.filter(entry => entry.id === model).map(entry => [entry.sourceProviderRef,
+        entry.capabilities?.thinkingOptions]), [["@chatgpt", ["ultra"]], ["fixture-amd", ["low", "max"]]]);
+      const set = thinkingLevel => request(f, "chat.session.settings.set", { sessionKey: session.sessionKey, patch: { thinkingLevel } });
+      const selectSource = modelProviderRef => request(f, "chat.session.runtime.model.set", { profileId: f.profile.id,
+        sessionKey: session.sessionKey, bindingId, model, modelProviderRef,
+        revision: f.service.chatSessionStore.getSession(session.sessionKey).revision, acceptAdjustments: true });
+      await selectSource("@chatgpt");
+      await set("ultra");
+      await selectSource("fixture-amd");
+      assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).modelSettings.thinkingLevel, "max");
+      await assert.rejects(set("ultra"), { code: "CHAT_SESSION_MODEL_SETTINGS_INVALID" });
+      await set("low");
+      const run = await f.send(session.sessionKey, "verified-thinking");
+      assert.equal(run.status, "running", run.errorCode);
+      assert.equal(raw.lastTurnStartParams.model, model);
+      assert.equal(raw.lastTurnStartParams.effort, "low");
+      await f.complete(run);
+    } finally { globalThis.fetch = originalFetch; }
+  } finally { await f.close(); }
+});
+
 test("a model change during pending binding observation invalidates selection CAS", async () => {
   const { f, session, raw } = await openFailedTurnFixture({ legacy: true });
   try {

@@ -29,6 +29,7 @@ let shortArchiveKey = null;
 let archiveRequests = 0;
 let serviceReady = true;
 let unavailableHistoryReads = 0;
+let releaseNativeHistory = null;
 fixture.registry.setInspirationOwner({
   async getExternalInspirationSessionRoute({ sessionKey }) {
     if (!serviceReady && sessionKey === fixture.cases[0].key) {
@@ -63,6 +64,14 @@ const server = createServer(async (request, response) => {
     if (action === "append") fixture.append(key);
     if (action === "slow") fixture.controls.delay = 160;
     if (action === "fast") fixture.controls.delay = 20;
+    if (action === "hold-native-history" && !releaseNativeHistory) {
+      fixture.controls.historyGate = new Promise(resolve => { releaseNativeHistory = resolve; });
+    }
+    if (action === "release-native-history") {
+      releaseNativeHistory?.();
+      releaseNativeHistory = null;
+      fixture.controls.historyGate = null;
+    }
     if (action === "fail-archive-once") { archiveRetryKey = key; archiveRetryAttempts = 0; }
     if (action === "short-archive") shortArchiveKey = key;
     return json(response, { ok: true });
@@ -85,7 +94,10 @@ const server = createServer(async (request, response) => {
         : [{ sealedAt: 1700000000000, fromReset: true, messages: transcript("archive", 123) }];
       return json(response, { archive: { supported: true, segments } });
     }
-    const value = p.includes("cache-scope") ? { backendId: url.searchParams.get("backend"), cacheScope: "isolated-history" }
+    const backend = url.searchParams.get("backend");
+    const value = p.includes("cache-scope") ? (backend === "shoggoth"
+      ? fixture.registry.getChatCacheScope(backend, url.searchParams.get("sessionKey"))
+      : { backendId: backend, cacheScope: "isolated-history" })
       : p.includes("runtime-models") ? { selection: { bindingId: "fixture-binding", runtime: "codex", model: null, canSwitch: false, candidates: [] },
         capabilities: { nativeUiArtifactsV1: true, attachments: {}, slash: false, steer: false }, models: [], runtimes: [] }
       : p === "/__api/status" ? { backends: ["openclaw", "hermes", "shoggoth"].map(id => ({ id, connected: true,
@@ -93,7 +105,7 @@ const server = createServer(async (request, response) => {
       : p === "/__api/backends" ? { backends: [] }
       : p === "/__api/connectors/mcp/requests" ? { items: [] }
       : p.includes("/groups") ? { groups: [] } : {};
-    return json(response, value);
+    return json(response, value, value == null ? 404 : 200);
   }
   const filename = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
   if (!["index.html", "fixture.js", "fixture.css"].includes(filename)) { response.writeHead(404); response.end(); return; }
@@ -172,6 +184,7 @@ console.log(JSON.stringify({cold,fresh,...result}));ok=true;}catch(error){consol
     assert.equal(status, 0, "production history UI acceptance failed");
   }
 } finally {
+  releaseNativeHistory?.();
   for (const client of broker.clients) client.terminate();
   await close(broker); await close(server); await proxy.close();
   for (const client of upstream.clients) client.terminate();

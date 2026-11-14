@@ -1,6 +1,8 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { SUMMARY_FIELDS } = require("../app/agent-service/conversation-checkpoint-store");
 const { estimateContextTokens } = require("../app/agent-service/conversation-context-budget");
@@ -322,6 +324,163 @@ test("a smaller Codex model cannot implicitly use Pi and preserves its source se
     assert.equal(calls(), 0);
     assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" }).length, 0);
     assert.equal(f.transport.acquisitions.some(entry => entry.binding.runtime === "pi"), false);
+  } finally { await f.close(); }
+});
+
+test("a detached direct chat without a summary runtime resumes once with recent original messages", async () => {
+  const f = await openHandoffFixture();
+  try {
+    enable(f);
+    const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore } = f.service;
+    coordinator.getRuntimeModelContextWindow = () => SMALL_WINDOW;
+    const session = f.createSession();
+    const first = await f.send(session.sessionKey, "recent-history-first");
+    await f.complete(first);
+    const before = chatSessionStore.getSession(session.sessionKey);
+    const olderUser = transcriptStore.listEvents(session.profileId, session.id)
+      .find(event => event.kind === "user" && event.runId === first.id);
+    appendHistory(f, session, 8);
+    const append = (id, kind, text, contextExcluded = false) => transcriptStore.appendEvent({
+      profileId: session.profileId, sessionId: session.id, id, kind, contextExcluded, content: { text },
+    });
+    append("recent-request", "user", "Please inspect the invoice before sending anything.");
+    append("excluded-history", "assistant", "EXCLUDED_HISTORY_BODY", true);
+    append("old-tool-output", "tool_result", "DO_NOT_REPLAY_TOOL_PAYLOAD");
+    append("recent-result", "assistant", "The invoice is ready to inspect. No payment has been made.");
+    chatSessionStore.switchRuntime(session.sessionKey, { bindingId: before.runtimeBindingId,
+      revision: before.revision, clearModelOverride: false });
+
+    const operationId = "recent-history-continue";
+    const run = await f.send(session.sessionKey, operationId, "Continue from there.");
+    assert.equal(run.status, "running", run.errorCode);
+    const contract = f.transport.acquisitions.at(-1).options.executionContract;
+    assert.equal(contract.contextRequest.recentHistoryOnly, true);
+    assert.equal(contract.contextRequest.historyTruncated, true);
+    assert.equal(contract.contextRequest.completeness, "partial");
+    assert.match(contract.dynamicContext, /Partial history from conversation/u);
+    assert.match(contract.dynamicContext, /\[eventId=recent-request\] USER: Please inspect the invoice/u);
+    assert.match(contract.dynamicContext, /\[eventId=recent-result\] ASSISTANT: The invoice is ready/u);
+    assert.match(contract.turnDeveloperInstructions, /conversation_search.*conversation_get/u);
+    assert.doesNotMatch(contract.dynamicContext, /SOURCE_0|EXCLUDED_HISTORY_BODY|DO_NOT_REPLAY_TOOL_PAYLOAD|Continue from there/u);
+    assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" }).length, 0);
+    assert.ok(f.transport.acquisitions.every(entry => entry.binding.runtime === "codex"));
+    const after = chatSessionStore.getSession(session.sessionKey);
+    assert.equal(after.id, before.id);
+    assert.equal(after.runtimeBindingId, before.runtimeBindingId);
+    assert.notEqual(after.runtimeSessionId, before.runtimeSessionId);
+    const replay = await f.send(session.sessionKey, operationId, "Continue from there.");
+    assert.equal(replay.id, run.id);
+    const host = f.transport.hosts.get("codex");
+    assert.equal(host.turnStartCalls, 2);
+    const events = transcriptStore.listEvents(session.profileId, session.id);
+    assert.equal(events.filter(event => event.kind === "user" && event.content.operationId === operationId).length, 1);
+    assert.equal(events.filter(event => event.content?.transcriptType === "context.native.seeded").length, 1);
+    assert.equal(coordinator.getRuntimeContext(after).productContext.transfer.mode, "partial");
+    assert.equal(coordinator.getRuntimeContext(after).productContext.transfer.state, "accepted");
+    const recovered = await f.callTool(run, "conversation_get", { sessionId: session.id, eventId: olderUser.id });
+    assert.ok(recovered.events.some(event => event.eventId === olderUser.id && event.text === olderUser.content.text));
+    await f.complete(run);
+
+    const ready = chatSessionStore.getSession(session.sessionKey);
+    chatSessionStore.switchRuntime(session.sessionKey, { bindingId: ready.runtimeBindingId,
+      revision: ready.revision, clearModelOverride: false });
+    coordinator.validateUiAction = () => ({ origin: "ui_action_submission" });
+    const card = await f.send(session.sessionKey, "ui-operation-fixture", "Submit the current card.");
+    assert.equal(card.status, "failed");
+    assert.equal(card.errorCode, "CONTEXT_COMPACTION_REQUIRED");
+    assert.equal(host.turnStartCalls, 2);
+  } finally { await f.close(); }
+});
+
+test("recent history is rechecked after a detached chat has been admitted", async () => {
+  const f = await openHandoffFixture();
+  try {
+    enable(f);
+    const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore } = f.service;
+    coordinator.getRuntimeModelContextWindow = () => SMALL_WINDOW;
+    const session = f.createSession();
+    await f.complete(await f.send(session.sessionKey, "recent-history-before-exclusion"));
+    const before = chatSessionStore.getSession(session.sessionKey);
+    appendHistory(f, session, 8);
+    transcriptStore.appendEvent({ profileId: session.profileId, sessionId: session.id,
+      id: "recent-excluded-after-admission", kind: "user", content: { text: "This source will be excluded." } });
+    chatSessionStore.switchRuntime(session.sessionKey, { bindingId: before.runtimeBindingId,
+      revision: before.revision, clearModelOverride: false });
+    const acquire = coordinator.runtimeManager.acquire.bind(coordinator.runtimeManager);
+    let exclusionApplied = false;
+    coordinator.runtimeManager.acquire = async (binding, options) => {
+      if (options.executionContract.contextRequest?.recentHistoryOnly && !exclusionApplied) {
+        exclusionApplied = true;
+        transcriptStore.setContextExcluded({ profileId: session.profileId, sessionId: session.id,
+          eventId: "recent-excluded-after-admission", contextExcluded: true });
+      }
+      return acquire(binding, options);
+    };
+    const run = await f.send(session.sessionKey, "recent-history-race");
+    assert.equal(exclusionApplied, true);
+    assert.equal(run.status, "failed");
+    assert.equal(run.errorCode, "CONTEXT_SOURCE_STALE");
+    assert.equal(run.runtimeTurnRef, null);
+    assert.equal(f.transport.hosts.get("codex").turnStartCalls, 1);
+  } finally { await f.close(); }
+});
+
+test("ordinary DREAMS.md updates retain the native thread, while corrections and forgetting renew it", async () => {
+  const f = await openHandoffFixture({ serviceOptions: { memoryCoreConfig: { memory: { search: { provider: "none" } } } } });
+  try {
+    enable(f);
+    const { memoryEngine: owner, memoryStore, conversationCheckpointStore } = f.service;
+    const profileId = f.profile.id;
+    const file = path.join(memoryStore.workspace(profileId), "DREAMS.md");
+    const previousEntry = "\n---\n\n*November 13, 2026 at 3:00 AM GMT+8*\n\nReviewed the previous day's notes.\n\n";
+    const newEntry = "\n---\n\n*November 14, 2026 at 3:00 AM GMT+8*\n\nReviewed new notes from today.\n\n";
+    const diary = body => `# Dream Diary\n\n<!-- openclaw:dreaming:diary:start -->\n${body}<!-- openclaw:dreaming:diary:end -->\n`;
+    const deep = body => `## Deep Sleep\n<!-- openclaw:dreaming:deep:start -->\n${body}\n<!-- openclaw:dreaming:deep:end -->\n`;
+    const initialStatus = deep("- Repaired recall artifacts: removed stale promotion lock.\n- Ranked 0 candidate(s) for durable promotion.\n- Promoted 0 candidate(s) into MEMORY.md.");
+    const updatedStatus = deep("- Ranked 2 candidate(s) for durable promotion.\n- Promoted 1 candidate(s) into MEMORY.md.\n- Not promoted: 1 candidate(s) (source rehydration: 1).");
+    fs.writeFileSync(file, diary(previousEntry) + "\n" + initialStatus, { mode: 0o600 });
+    const fact = await owner.propose({ profileId, scope: "user", classification: "explicit",
+      content: "The observatory report uses the amber reference.", sourceRefs: ["user-edit:observatory-reference"] });
+    const session = f.createSession();
+    const send = async id => {
+      const run = await f.send(session.sessionKey, id);
+      assert.equal(run.status, "running", run.errorCode);
+      await f.complete(run);
+      return run.runtimeSessionRef.sessionId;
+    };
+    const first = await send("before-diary-update");
+    const versionBefore = conversationCheckpointStore.nativeMemoryVersion(profileId);
+
+    // Upgrade an existing database row before the first scheduled rewrite.
+    const database = owner.database.db;
+    const readFiles = () => JSON.parse(database.prepare("SELECT files FROM memory_file_invalidation WHERE profile_id=?").get(profileId).files);
+    database.prepare("UPDATE memory_file_invalidation SET files=? WHERE profile_id=?").run(JSON.stringify(readFiles().map(entry => {
+      const { dreams, ...legacy } = entry;
+      return legacy;
+    })), profileId);
+    assert.deepEqual(conversationCheckpointStore.nativeMemoryVersion(profileId), versionBefore);
+    assert.ok(readFiles().find(entry => entry.path === "DREAMS.md").dreams.statusFree);
+
+    fs.writeFileSync(file, diary(previousEntry + newEntry) + "\n" + updatedStatus);
+    const afterDreaming = conversationCheckpointStore.nativeMemoryVersion(profileId);
+    assert.ok(afterDreaming.memoryRevision > versionBefore.memoryRevision);
+    assert.equal(afterDreaming.memoryInvalidationRevision, versionBefore.memoryInvalidationRevision);
+    assert.equal(await send("after-diary-update"), first);
+
+    fs.writeFileSync(file, diary(previousEntry.replace("previous day's notes", "calibration record") + newEntry) + "\n" + updatedStatus);
+    const afterDiaryCorrection = await send("after-diary-correction");
+    assert.notEqual(afterDiaryCorrection, first, "editing an existing diary entry still invalidates old context");
+
+    const corrected = await owner.propose({ profileId, scope: "user", classification: "explicit", supersedes: fact.id,
+      content: "The observatory report uses the violet reference.", sourceRefs: ["user-edit:observatory-correction"] });
+    const afterCorrection = await send("after-memory-correction");
+    assert.notEqual(afterCorrection, afterDiaryCorrection);
+    await owner.delete({ profileId, id: corrected.id, reason: "forgotten", operationId: "forget-observatory-reference" });
+    assert.ok(conversationCheckpointStore.nativeMemoryVersion(profileId).policyRevision > afterDreaming.policyRevision);
+    assert.notEqual(await send("after-memory-forget"), afterCorrection);
+    const final = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(final.id, session.id);
+    assert.equal(final.runtimeBindingId, session.runtimeBindingId);
   } finally { await f.close(); }
 });
 

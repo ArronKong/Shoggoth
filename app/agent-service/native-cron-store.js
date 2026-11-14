@@ -26,6 +26,7 @@ const MISFIRE_POLICIES = new Set(["skip", "latest", "all-bounded"]);
 const OVERLAP_POLICIES = new Set(["skip", "queue"]);
 const THREAD_POLICIES = new Set(["new", "continue"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const GROUP_WATCH_JOB_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const OPAQUE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const JOB_FIELDS = Object.freeze([
@@ -44,9 +45,10 @@ const CREATE_FIELDS = Object.freeze([
   "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId",
   "nextRunAt", "createdAt",
 ]);
+const JOB_OPTIONALS = Object.freeze(["groupDelivery", "watch"]);
 const UPDATE_FIELDS = Object.freeze([
   "name", "prompt", "workspace", "schedule", "misfirePolicy", "maxCatchUp",
-  "overlapPolicy", "threadPolicy", "threadId", "nextRunAt",
+  "overlapPolicy", "threadPolicy", "threadId", "nextRunAt", "watch",
 ]);
 const DERIVED_UPDATE_FIELDS = Object.freeze(UPDATE_FIELDS.filter((field) => field !== "nextRunAt"));
 const OPERATION_RESULT_TYPES = Object.freeze({
@@ -228,7 +230,8 @@ function nextRunError(corrupt = false) {
 
 function normalizeJob(value, corrupt = false) {
   const hasGroupDelivery = value && own(value, "groupDelivery");
-  if (!exactObject(value, hasGroupDelivery ? [...JOB_FIELDS, "groupDelivery"] : JOB_FIELDS) || !UUID_PATTERN.test(value.id)
+  const optional = JOB_OPTIONALS.filter(field => own(value ?? {}, field));
+  if (!exactObject(value, [...JOB_FIELDS, ...optional]) || !UUID_PATTERN.test(value.id)
     || !validText(value.name, 512) || typeof value.enabled !== "boolean"
     || !validOpaqueId(value.profileId) || !validText(value.prompt, 1024 * 1024)
     || !validWorkspace(value.workspace) || !MISFIRE_POLICIES.has(value.misfirePolicy)
@@ -237,7 +240,7 @@ function normalizeJob(value, corrupt = false) {
     || !(value.threadId === null || validOpaqueId(value.threadId, 256))
     || (value.threadPolicy === "new" && value.threadId !== null)
     || (hasGroupDelivery && (!validGroupDelivery(value.groupDelivery) || value.threadId !== null))
-    || (hasGroupDelivery && value.groupDelivery.watch && Buffer.byteLength(value.prompt) > 48 * 1024)
+    || (optional.includes("watch") && typeof value.watch !== "boolean")
     || !(value.nextRunAt === null || validTimestamp(value.nextRunAt))
     || !validTimestamp(value.createdAt) || !validTimestamp(value.updatedAt)
     || value.updatedAt < value.createdAt) throw jobError(corrupt);
@@ -252,6 +255,7 @@ function normalizeJob(value, corrupt = false) {
     ...Object.fromEntries(JOB_FIELDS.map((field) => [field, value[field]])),
     schedule,
     ...(hasGroupDelivery ? { groupDelivery: clone(value.groupDelivery) } : {}),
+    ...(own(value, "watch") ? { watch: value.watch } : {}),
   };
   if (!result.enabled) {
     if (result.nextRunAt !== null) throw nextRunError(corrupt);
@@ -344,13 +348,20 @@ function validateContainerShape(value, version, operationNormalizer) {
     operation.createdAt < value.idempotencyFloorMs
   ))) throw cronError("CRON_STORE_CORRUPT", "Cron Operation 超出幂等窗口");
   const tombstones = normalizeMap(value.tombstones, DEFAULT_CAPACITIES.operations, item => {
-    if (!exactObject(item, ["id", "profileId", "name", "deletedAt", "operationId"])
+    const optional = own(item ?? {}, "groupBound") ? ["groupBound"] : [];
+    if (!exactObject(item, ["id", "profileId", "name", "deletedAt", "operationId", ...optional])
       || !UUID_PATTERN.test(item.id) || !validOpaqueId(item.profileId) || !validOpaqueId(item.operationId)
+      || (item.groupBound !== undefined && item.groupBound !== true)
       || typeof item.name !== "string" || item.name.length > 512 || !validTimestamp(item.deletedAt) || jobs[item.id]) {
       throw cronError("CRON_STORE_CORRUPT", "Cron 删除记录损坏");
     }
     return clone(item);
   }, "Cron tombstone", "id");
+  // Preserve the route of older deleted jobs while their operation receipts are still available.
+  for (const { result } of Object.values(operations)) {
+    const tombstone = result?.groupDelivery && tombstones[result.id];
+    if (tombstone) tombstone.groupBound = true;
+  }
   return {
     version,
     revision: value.revision,
@@ -536,7 +547,7 @@ class NativeCronStore {
   }
 
   createJob(input) {
-    input = this.#assertMutationBase(input, CREATE_FIELDS, ["groupDelivery"]);
+    input = this.#assertMutationBase(input, CREATE_FIELDS, JOB_OPTIONALS);
     const schedule = normalizeScheduleData(input.schedule);
     const jobInput = { ...input, schedule };
     if (!validOpaqueId(input.profileId)) throw cronError("CRON_JOB_INVALID", "createJob 输入无效");
@@ -573,6 +584,7 @@ class NativeCronStore {
         createdAt: input.createdAt,
         updatedAt: input.createdAt,
         ...(own(input, "groupDelivery") ? { groupDelivery: input.groupDelivery } : {}),
+        ...(own(input, "watch") ? { watch: input.watch } : {}),
       });
       candidate.jobs[job.id] = job;
       return job;
@@ -701,7 +713,8 @@ class NativeCronStore {
       if (!job) throw cronError("CRON_JOB_NOT_FOUND", "Cron Job 不存在");
       if (Object.keys(candidate.tombstones).length >= DEFAULT_CAPACITIES.operations) throw cronError("CRON_CAPACITY", "Cron 删除记录已满");
       candidate.tombstones = { ...candidate.tombstones, [job.id]: { id: job.id, profileId: job.profileId,
-        name: job.name, deletedAt: input.createdAt, operationId: input.operationId } };
+        name: job.name, deletedAt: input.createdAt, operationId: input.operationId,
+        ...(job.groupDelivery ? { groupBound: true } : {}) } };
       delete candidate.jobs[input.jobId];
       return null;
     });
@@ -725,6 +738,14 @@ class NativeCronStore {
     return clone(this.container.jobs[jobId] || null);
   }
   getJobTombstone(jobId) { this.#assertOpen(); return clone(this.container.tombstones[jobId] || null); }
+
+  isGroupBoundJob(jobId) {
+    this.#assertOpen();
+    const job = this.container.jobs[jobId];
+    if (job) return Boolean(job.groupDelivery);
+    // Group watches have reserved deterministic v8 IDs, including older tombstones.
+    return this.container.tombstones[jobId]?.groupBound === true || GROUP_WATCH_JOB_ID_PATTERN.test(jobId);
+  }
 
   authorizationScope(jobId, profileId, prompt) {
     this.#assertOpen();
@@ -792,6 +813,7 @@ class NativeCronStore {
           field === "updatedAt" ? input.createdAt : input[field],
         ])),
         ...(own(input, "groupDelivery") ? { groupDelivery: input.groupDelivery } : {}),
+        ...(own(input, "watch") ? { watch: input.watch } : {}),
       });
     } catch (error) {
       if (["CRON_SCHEDULE_INVALID", "CRON_NEXT_RUN_INVALID"]
@@ -805,6 +827,7 @@ class NativeCronStore {
       || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).length === 0
       || Object.keys(value).some((key) => !allowedFields.includes(key))) return false;
     if (own(value, "name") && !validText(value.name, 512)) return false;
+    if (own(value, "watch") && typeof value.watch !== "boolean") return false;
     if (own(value, "prompt") && !validText(value.prompt, 1024 * 1024)) return false;
     if (own(value, "workspace") && !validWorkspace(value.workspace)) return false;
     if (own(value, "misfirePolicy") && !MISFIRE_POLICIES.has(value.misfirePolicy)) return false;

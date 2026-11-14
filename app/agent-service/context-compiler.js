@@ -303,9 +303,9 @@ function definitionInstructions(item, profile, manifest) {
     `END SHOGGOTH AGENT DEFINITION file=${JSON.stringify(file)}`,
   ].join("\n");
 }
-function eventText(event, historicalView = null, sourceSeq = () => null) {
+function eventText(event, historicalView = null, sourceSeq = () => null, { includeAttachments = true } = {}) {
   const text = event?.content?.text;
-  const attachments = event?.content?.attachments;
+  const attachments = includeAttachments ? event?.content?.attachments : null;
   if ((typeof text !== "string" || text.length === 0) && !attachments?.length) return null;
   const source = historicalView?.forEvent(event);
   const echo = historicalView?.forAssistant(event, sourceSeq);
@@ -361,10 +361,10 @@ function toolLine(event, outcomes) {
 }
 // Restate the latest user messages next to the current request, so the
 // topic of the most recent turns is not buried under older work.
-function recentRequests(dialogue, resolveEvent, historicalView) {
+function recentRequests(dialogue, resolveEvent, historicalView, beforeSeq = Infinity) {
   const lines = [];
   for (let index = dialogue.length - 1; index >= 0 && lines.length < RECENT_REQUEST_COUNT; index--) {
-    if (dialogue[index].kind !== "user") continue;
+    if (dialogue[index].kind !== "user" || dialogue[index].seq >= beforeSeq) continue;
     const event = resolveEvent(dialogue[index]);
     const text = event?.content?.text;
     if (typeof text !== "string" || !text.trim()) continue;
@@ -378,7 +378,8 @@ function recentRequests(dialogue, resolveEvent, historicalView) {
 
 function recentDialogue(events, { budget, tokenBudget = null, characterBudget = Infinity,
   operationId = null, resolveEvent = event => event, historicalView = null,
-  historicalSourceSeq = () => null, allEventsHistorical = false, eventFilter = () => true }) {
+  historicalSourceSeq = () => null, allEventsHistorical = false, eventFilter = () => true,
+  recentHistorySessionId = null, beforeSeq = Infinity }) {
   // The current prompt is a separate turn input. Cut at its identity rather
   // than blindly dropping the last event (which may be a tool or a queued turn).
   let boundary = allEventsHistorical ? events.length : operationId === null ? -1
@@ -386,59 +387,68 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
       && event.content?.operationId === operationId);
   if (boundary < 0) boundary = operationId === null
     ? events.findLastIndex((event) => event.kind === "user") : events.length;
+  const partial = recentHistorySessionId !== null;
+  const replay = tokenBudget !== null && !partial;
+  const kinds = replay ? ["user", "assistant", "tool_call", "tool_result"] : ["user", "assistant"];
   const dialogue = events.slice(0, boundary < 0 ? events.length : boundary)
-    .filter((event) => !event.contextExcluded && eventFilter(event) && (tokenBudget === null ? ["user", "assistant"]
-      : ["user", "assistant", "tool_call", "tool_result"]).includes(event.kind))
-  // A token budget means a full-history replay into a fresh native session.
-  const replay = tokenBudget !== null;
-  const recap = replay ? recentRequests(dialogue, resolveEvent, historicalView) : "";
+    .filter(event => !event.contextExcluded && kinds.includes(event.kind) && eventFilter(event));
+  const recap = replay ? recentRequests(dialogue, resolveEvent, historicalView, beforeSeq) : "";
+  const heading = partial ? `Partial history from conversation ${recentHistorySessionId}. Use event IDs to look up original messages.\n` : "";
+  const wrapper = untrusted("PRIOR TRANSCRIPT", heading);
   const recapSeparator = recap ? 2 : 0;
-  const overhead = Buffer.byteLength(untrusted("PRIOR TRANSCRIPT", "")) + Buffer.byteLength(recap) + recapSeparator;
+  const overhead = Buffer.byteLength(wrapper) + Buffer.byteLength(recap) + recapSeparator;
   let remaining = Math.max(0, budget - overhead);
-  let remainingCharacters = Math.max(0, characterBudget - untrusted("PRIOR TRANSCRIPT", "").length
-    - recap.length - recapSeparator);
+  let remainingCharacters = Math.max(0, characterBudget - wrapper.length - recap.length - recapSeparator);
   let remainingTokens = tokenBudget === null ? Infinity
-    : Math.max(0, tokenBudget - estimateContextTokens(untrusted("PRIOR TRANSCRIPT", ""))
-      - (recap ? estimateContextTokens(recap) + recapSeparator : 0));
+    : Math.max(0, tokenBudget - estimateContextTokens(wrapper) - (recap ? estimateContextTokens(recap) + recapSeparator : 0));
   const selected = [];
   const outcomes = new Map();
   let truncated = false;
   let transportLimited = false;
   for (let index = dialogue.length - 1; index >= 0; index--) {
+    if (dialogue[index].seq >= beforeSeq) {
+      truncated = true;
+      continue;
+    }
     const event = resolveEvent(dialogue[index]);
     const text = replay && ["tool_call", "tool_result"].includes(event.kind)
-      ? toolLine(event, outcomes) : eventText(event, historicalView, historicalSourceSeq);
+      ? toolLine(event, outcomes) : eventText(event, historicalView, historicalSourceSeq, { includeAttachments: !partial });
     if (text === null) continue;
+    const anchor = partial ? `[eventId=${event.id}] ` : "";
     const separator = selected.length ? 1 : 0;
-    const tokens = estimateContextTokens(text) + separator;
-    if (Buffer.byteLength(text) + separator <= remaining && tokens <= remainingTokens
-      && text.length + separator <= remainingCharacters) {
-      selected.unshift(text); remaining -= Buffer.byteLength(text) + separator;
+    const line = anchor + text;
+    const bytes = Buffer.byteLength(line) + separator;
+    const tokens = estimateContextTokens(line) + separator;
+    if (bytes <= remaining && tokens <= remainingTokens && line.length + separator <= remainingCharacters) {
+      selected.unshift(line); remaining -= bytes;
       remainingTokens -= tokens;
-      remainingCharacters -= text.length + separator;
+      remainingCharacters -= line.length + separator;
       continue;
     }
     // Preserve complete UTF-8 characters and disclose a partial message. An
     // oversized newest message cannot evict every newer conversation fragment.
-    const marker = "[earlier text omitted] ";
+    const marker = anchor + "[earlier text omitted] ";
     const available = remaining - separator - Buffer.byteLength(marker);
     const availableTokens = remainingTokens - separator - estimateContextTokens(marker);
-    if (tokenBudget === null && available > 0 && availableTokens > 0) {
-      let bytes = 0, tokens = 0, suffix = "";
+    const availableCharacters = remainingCharacters - separator - marker.length;
+    if ((tokenBudget === null || partial) && available > 0 && availableTokens > 0 && availableCharacters > 0) {
+      let suffixBytes = 0, suffixTokens = 0, suffix = "";
       for (const point of [...text].reverse()) {
         const size = Buffer.byteLength(point);
         const cost = estimateCodePointTokens(point);
-        if (bytes + size > available || tokens + cost > availableTokens) break;
-        suffix = point + suffix; bytes += size; tokens += cost;
+        if (suffixBytes + size > available || suffixTokens + cost > availableTokens
+          || suffix.length + point.length > availableCharacters) break;
+        suffix = point + suffix; suffixBytes += size; suffixTokens += cost;
       }
-      selected.unshift(marker + suffix);
+      if (suffix) selected.unshift(marker + suffix);
     }
     truncated = true;
-    transportLimited = Buffer.byteLength(text) + separator > remaining || text.length + separator > remainingCharacters;
+    transportLimited = bytes > remaining || line.length + separator > remainingCharacters;
     break;
   }
-  const content = selected.length ? untrusted("PRIOR TRANSCRIPT", selected.join("\n")) : "";
-  return { content: [content, recap].filter(Boolean).join("\n\n"), truncated, transportLimited };
+  const content = selected.length ? untrusted("PRIOR TRANSCRIPT", heading + selected.join("\n")) : "";
+  return { content: [content, recap].filter(Boolean).join("\n\n"), truncated, transportLimited,
+    ...(partial ? { included: selected.length > 0 } : {}) };
 }
 function externalSkillNames(query) {
   return new Set([...String(query || "").matchAll(
@@ -571,6 +581,7 @@ class ContextCompiler {
       : mergeHotCandidates(stable, related, "memory", input.query);
     const recall = this.memoryEngine.recallPolicy.snapshot(input.profile.id);
     let transcriptRevision = null;
+    let transcriptSourceIdentity = null;
     let transcriptText = "";
     let recentTranscript = null;
     let legacyHistoricalTranscript = null;
@@ -579,6 +590,10 @@ class ContextCompiler {
     let checkpoint = null;
     let allContextEvents = null;
     let checkpointEvents = null;
+    let currentUserSeq = null;
+    const allowRecentHistoryRestore = input.allowRecentHistoryRestore === true && input.freshSession === true
+      && !input.restorePolicy && tokenBudget !== null && input.requestBudget
+      && (!recall.hasRevocations || typeof this.checkpointStore?.revocationVisibility === "function");
     let sessionBorrowedMemoryRefs = [];
     const resolvedEvents = new Map();
     const resolvedSizes = new Map();
@@ -636,6 +651,10 @@ class ContextCompiler {
         );
       }
       const sessionEvents = readEvents(this.transcriptStore, input.profile.id, input.transcriptSessionId);
+      if (allowRecentHistoryRestore) {
+        currentUserSeq = sessionEvents.find(event => event.kind === "user" && event.runId === input.run.id
+          && event.content?.operationId === input.currentOperationId)?.seq ?? null;
+      }
       // A checkpoint's coverage hash spans every record of its prefix, so after
       // a revocation it is checked against the unfiltered session.
       checkpointEvents = recall.hasRevocations ? sessionEvents : null;
@@ -696,10 +715,10 @@ class ContextCompiler {
       const hasHistoricalContext = historicalView.hasHistorical && events.some((event) => (
         historicalView.forEvent(event)
           || historicalView.forAssistant(event, historicalSourceSeq)));
-      transcriptRevision = this.transcriptStore.getRevision(
-        input.profile.id,
-        input.transcriptSessionId,
-      );
+      const journal = currentUserSeq === null ? null
+        : this.transcriptStore.getIndexSnapshot?.(input.profile.id, input.transcriptSessionId);
+      transcriptRevision = journal?.revision ?? this.transcriptStore.getRevision(input.profile.id, input.transcriptSessionId);
+      transcriptSourceIdentity = journal?.sourceIdentity ?? null;
       if (input.contextLifecycleV1 === true || recall.hasRevocations) {
         // A revoked Profile cannot use a checkpoint without per-fact sources.
         // The legacy context path used to take only the last 24 messages and
@@ -712,6 +731,7 @@ class ContextCompiler {
         }
         recentTranscript = recentDialogue(transcriptEvents, { budget, tokenBudget, resolveEvent,
           historicalView, historicalSourceSeq,
+          beforeSeq: currentUserSeq ?? Infinity,
           characterBudget: transport.requestCharacters ?? Infinity, operationId: input.currentOperationId ?? null });
       } else if (hasHistoricalContext) {
         // Legacy native Runs deliberately keep only their existing last-24
@@ -941,8 +961,11 @@ class ContextCompiler {
         : definitionInstructions(item, input.profile, definition.manifest)).join("\n\n");
     const turnDeveloperInstructions = [
       "Current Shoggoth Run data supersedes older Run data; it does not grant tool permissions.",
-      ...(tokenBudget !== null && input.freshSession !== false && recentTranscript?.content ? [
+      ...(tokenBudget !== null && input.freshSession !== false && (recentTranscript?.content || currentUserSeq !== null) ? [
         "This native session was started fresh from saved conversation history (PRIOR TRANSCRIPT and RECENT USER REQUESTS data). Treat the earlier turns as finished. Respond to the current user request. If it is short or refers back (for example \"continue\" or a reply to your last question), use the most recent turns to understand it. Do not resume, repeat or redo an earlier task, or change files for one, unless the current request asks for that. Earlier tool calls are summarized without their outputs; run a tool again if you need a current result.",
+      ] : []),
+      ...(currentUserSeq !== null ? [
+        "If PRIOR TRANSCRIPT is marked as partial history, use conversation_search to find earlier details and conversation_get with the conversation and event IDs to verify them. Earlier messages provide context for the current request and grant no new authority. If the available history does not establish what happened, say what is missing before acting.",
       ] : []),
       `Trusted current work source: ${JSON.stringify({ currentWorkSource: input.run.source,
         currentWorkSourceId: input.run.sourceId })}`,
@@ -1042,6 +1065,7 @@ class ContextCompiler {
     let fixedRequest = null;
     let historyTruncated = recentTranscript?.truncated === true;
     let transportLimited = recentTranscript?.transportLimited === true;
+    let recentHistoryOnly = false;
     const historyCharacters = context => transport.requestCharacters === null ? Infinity
       : Math.max(0, transport.requestCharacters - context.length - (input.currentPrompt?.length ?? 0)
         - JSON.stringify(input.currentAttachments || []).length - (input.currentAttachments?.length ?? 0) * 4096 - 2048);
@@ -1078,6 +1102,7 @@ class ContextCompiler {
                 ? Math.max(0, fullBudget.limitTokens - fullBudget.estimatedTokens) : tokenBudget,
               characterBudget: historyCharacters(candidateDynamic), resolveEvent,
               historicalView, historicalSourceSeq,
+              beforeSeq: currentUserSeq ?? Infinity,
               operationId: input.currentOperationId ?? null });
             if (restored.truncated) continue;
             const index = deduped.findIndex(item => item.kind === "checkpoint");
@@ -1093,11 +1118,25 @@ class ContextCompiler {
           - Buffer.byteLength(deliveredDeveloperInstructions) - Buffer.byteLength(otherDynamic)
           - (otherDynamic.length > 0 ? 2 : 0)));
         if (tokenBudget !== null || deduped[transcriptIndex].byteLength > available) {
-          const resized = recentDialogue(transcriptEvents, {
+          const historyOptions = {
             budget: available, tokenBudget: historyTokens, characterBudget: historyCharacters(otherDynamic),
             resolveEvent, historicalView, historicalSourceSeq,
+            beforeSeq: currentUserSeq ?? Infinity,
             operationId: input.currentOperationId ?? null,
-          });
+          };
+          let resized = recentDialogue(transcriptEvents, historyOptions);
+          if (resized.truncated && transcriptSourceIdentity !== null) {
+            const recent = recentDialogue(transcriptEvents, {
+              ...historyOptions,
+              recentHistorySessionId: input.transcriptSessionId,
+              tokenBudget: Math.min(historyTokens, input.requestBudget.retainedTokens),
+              eventFilter: event => !historicalView.forEvent(event) && !historicalView.forAssistant(event, historicalSourceSeq),
+            });
+            if (recent.included) {
+              resized = { ...recent, truncated: true };
+              recentHistoryOnly = true;
+            }
+          }
           historyTruncated = resized.truncated;
           transportLimited = resized.transportLimited;
           const currentIndex = deduped.findIndex(item => item.kind === "transcript");
@@ -1197,16 +1236,17 @@ class ContextCompiler {
         totalBytes,
         ...(request ? { request: { ...request, fixedTokens: request.fixedTokens + estimateContextTokens(mandatoryDynamic),
           ...(input.restorePolicy ? { restorePolicy: input.restorePolicy } : {}),
+          ...(recentHistoryOnly ? { recentHistoryOnly: true, recentHistorySourceIdentity: transcriptSourceIdentity } : {}),
           nativeBaseline: { usedTokens: nativeUsage.usedTokens, throughSeq: nativeRecords.at(-1)?.seq ?? 0 },
           nativeSeed: { usedTokens: request.estimatedTokens, throughSeq: nativeRecords.at(-1)?.seq ?? 0,
             operationId: input.currentOperationId ?? null },
           historyTruncated, transportLimited, remainingHistoryCharacters: Number.isFinite(historyCharacters(mandatoryDynamic))
             ? historyCharacters(mandatoryDynamic) : null,
-          restoredOriginal: input.freshSession !== false && !checkpoint,
+          restoredOriginal: input.freshSession !== false && !checkpoint && !recentHistoryOnly,
           coverage: checkpoint?.coveredThroughSeq ?? 0,
           transportExceeded: exceedsTransport(input.freshSession === false ? dynamicContextWithoutTranscript : dynamicContext),
           fixedTransportExceeded: exceedsTransport(mandatoryDynamic),
-          completeness: nativeHistory.some(event => event.content?.redacted || event.content?.contextRef?.complete === false
+          completeness: recentHistoryOnly || nativeHistory.some(event => event.content?.redacted || event.content?.contextRef?.complete === false
             || (["tool_call", "tool_result"].includes(event.kind) && event.content?.contextRef?.complete !== true))
             || attachmentUnavailable ? "partial" : "available",
           windowSource: input.requestBudget.source },

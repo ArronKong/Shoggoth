@@ -6,7 +6,7 @@ import FusionLoader from "../../components/FusionLoader";
 import ChatLiveActivityBubble, { type ChatLiveActivityBubbleProps } from "../../components/ChatLiveActivityBubble";
 import { IconTrajectory } from "../../components/TurnTimeline/trajectoryIcons";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, WheelEvent } from "react";
+import type { ComponentProps, CSSProperties, ClipboardEvent, DragEvent, KeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject, WheelEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useGlassRenderer } from "./useGlassRenderer";
 import FilterTabs from "../../components/FilterTabs";
@@ -14,6 +14,7 @@ import { SESSION_CATEGORY_ORDER, isVisibleSession, sessionCategoryOf, type Sessi
 import ChatModelMenu, { type ModelMenuChoice } from "../ChatModelMenu";
 import { IconQuote, MESSAGE_DELETION_ENABLED } from "../ChatMessageActions";
 import ChatPermissionMenu from "../ChatPermissionMenu";
+import ChatThinkFastMenu from "../ChatThinkFastMenu";
 import type { ChatPermissionModeOption } from "../../types";
 import ChatPromptCard, { type ChatPromptEntry, type ChatPromptResponse } from "../ChatPromptCard";
 import ImmersiveBackdrop from "./ImmersiveBackdrop";
@@ -143,7 +144,7 @@ export interface ImmersiveBundle {
   changePermissionMode?: (option: ChatPermissionModeOption) => void;
   permissionSelectionDisabled?: boolean;
   listLive: boolean;
-  thinkingLevel: string; // 已经过 thinkLabel 的显示文案（如 "Think hard"），空串 = 不显示
+  thinkingControl?: { key: string; props: ComponentProps<typeof ChatThinkFastMenu> };
   ctxSummary: string; // 会话上下文用量摘要（"34% · 12k/200k"），空串 = 不显示
   listening: boolean;
   toggleTalk: () => void;
@@ -186,7 +187,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
     onExit, phase, live, sendSeq, onHistoryInput, onLeaveHistoryTop, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
     submit, sending, abortActive, abortDisabled, hasActiveSession, canSend, writerHint, slashMenu, slashOpen, connectionRequests, planDock,
-    models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingLevel, ctxSummary,
+    models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingControl, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
     attachments, removeAttachment, quoteText, quoteImages, clearQuote,
@@ -382,7 +383,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
     previousFirstRef.current = messages[0]?.id;
     clearAnchor();
     const el = threadRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+    if (el && (stickRef.current || unreadAnchor?.pending)) el.scrollTop = el.scrollHeight;
     lastScrollHeightRef.current = el?.scrollHeight ?? 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessKey]);
@@ -1062,7 +1063,9 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
               triggerClassName={styles.pill}
               appearance="dark"
             />
-            {thinkingLevel && <span className={styles.pillStatic}>{thinkingLevel}</span>}
+            {thinkingControl && (
+              <ChatThinkFastMenu key={thinkingControl.key} {...thinkingControl.props} triggerClassName={styles.pill} appearance="dark" />
+            )}
             {ctxSummary && <span className={`${styles.pillStatic} ${styles.pillCtx}`} title={t("chat.ctxUsage")}>{ctxSummary}</span>}
           </div>
           <div className={styles.barRight}>

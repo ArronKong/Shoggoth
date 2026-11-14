@@ -419,6 +419,7 @@ const CARD_PATCH_VALIDATORS = Object.freeze({
 });
 const CRON_PATCH_VALIDATORS = Object.freeze({
   name: (value) => validString(value, 512),
+  watch: (value) => typeof value === "boolean",
   prompt: (value) => validString(value, MAX_TEXT_BYTES),
   workspace: validCronWorkspace,
   schedule: validSchedule,
@@ -541,8 +542,10 @@ function validateDomainServiceParams(method, params) {
     valid = validOperationBase(params, [
       "operationId", "name", "enabled", "profileId", "prompt", "workspace", "schedule",
       "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "createdAt",
+      ...(Object.hasOwn(params ?? {}, "watch") ? ["watch"] : []),
     ]) && validString(params.name, 512) && typeof params.enabled === "boolean"
       && validUuid(params.profileId) && validString(params.prompt, MAX_TEXT_BYTES)
+      && (!Object.hasOwn(params, "watch") || typeof params.watch === "boolean")
       && validCronWorkspace(params.workspace) && validSchedule(params.schedule)
       && MISFIRE_POLICIES.has(params.misfirePolicy)
       && Number.isSafeInteger(params.maxCatchUp) && params.maxCatchUp >= 1 && params.maxCatchUp <= 100
@@ -737,6 +740,11 @@ function validateKanbanRunItem(value, params) {
 }
 
 function validateCronRunItem(value, params) {
+  if (Object.hasOwn(value || {}, "deliveryTarget")) {
+    const { deliveryTarget, ...item } = value;
+    if (deliveryTarget !== "group") failResponse();
+    return { ...validateCronRunItem(item, params), deliveryTarget };
+  }
   if (Object.hasOwn(value || {}, "cronOutput")) {
     const { cronOutput, ...item } = value;
     if (!require("./cron-output-policy").validCronOutput(cronOutput)) failResponse();
@@ -762,8 +770,10 @@ function validateCronRunItem(value, params) {
 }
 
 function validateCronJob(value) {
-  const optional = ["systemManaged", "connectorMigrationRequired"].filter(key => Object.hasOwn(value || {}, key));
+  const optional = ["systemManaged", "connectorMigrationRequired", "deliveryTarget", "watch"].filter(key => Object.hasOwn(value || {}, key));
   if (!exactObject(value, [...CRON_JOB_FIELDS, ...optional])
+    || (optional.includes("deliveryTarget") && value.deliveryTarget !== "group")
+    || (optional.includes("watch") && typeof value.watch !== "boolean")
     || (value.connectorMigrationRequired !== undefined && typeof value.connectorMigrationRequired !== "boolean")
     || (value.systemManaged !== undefined && typeof value.systemManaged !== "boolean") || !validUuid(value.id)
     || !validString(value.name, 512) || typeof value.enabled !== "boolean"

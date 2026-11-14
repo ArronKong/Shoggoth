@@ -3,17 +3,31 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { assertRuntimeProfileId, prepareCodexHome, runtimeError } = require("./codex-runtime-paths");
+const {
+  assertRuntimeProfileId,
+  prepareCodexHome,
+  prepareCodexRuntimeAccountHome,
+  runtimeError,
+} = require("./codex-runtime-paths");
 const { validateModelProvider } = require("./product-store");
-const { atomicWritePrivateFile } = require("./private-file");
+const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
 const { DEFAULT_MCP_TOOL_TIMEOUT_SEC } = require("./interactive-timeouts");
 const { CODEX_MCP_STARTUP_TIMEOUT_SEC } = require("./codex-startup-timeouts");
 const { validRuntimeAccountId } = require("./runtime-adapter");
-const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
+const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 
 const PROVIDER_ENV_PATTERN = /^SHOGGOTH_PROVIDER_[A-F0-9]{16}_API_KEY$/;
 const OPENAI_API_KEY_ENV = "OPENAI_API_KEY";
 const OPENAI_RESPONSES_BASE_URL = "https://api.openai.com/v1";
+const MIMO_RESPONSES_HOSTS = new Set([
+  "api.xiaomimimo.com", "token-plan-cn.xiaomimimo.com", "token-plan-sgp.xiaomimimo.com", "token-plan-ams.xiaomimimo.com",
+]);
+// Xiaomi's Codex integration documents a 1,048,576-token context for these models.
+// https://mimo.mi.com/docs/en-US/tokenplan/integration/codex-configuration
+// Keep Codex's direct tools and apply only local metadata on the provider's own host.
+const MIMO_MODELS = [
+  "mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.6-pro-ultraspeed",
+];
 const CUSTOM_PROVIDER_KINDS = new Set([
   "openai-api-key", "openrouter", "ollama", "lmstudio", "custom-responses",
 ]);
@@ -81,6 +95,40 @@ function providerConfigAlias(provider) {
 
 function runtimeProviderBaseUrl(provider) {
   return provider.kind === "openai-api-key" ? OPENAI_RESPONSES_BASE_URL : provider.baseUrl;
+}
+
+function usesMiMoResponses(provider) {
+  if (provider?.kind !== "custom-responses") return false;
+  let url;
+  try { url = new URL(provider.baseUrl); } catch { return false; }
+  return url.protocol === "https:" && !url.port && !url.username && !url.password
+    && !url.search && !url.hash && url.pathname.replace(/\/+$/u, "") === "/v1"
+    && MIMO_RESPONSES_HOSTS.has(url.hostname);
+}
+
+function mimoModelCatalog() {
+  // This is the Apache-licensed fallback prompt from the bundled Codex tag
+  // (codex-rs/models-manager/prompt.md). An explicit catalog requires it.
+  const baseInstructions = fs.readFileSync(path.join(__dirname, "prompts", "codex-0.167.1-model-fallback.md"), "utf8");
+  return JSON.stringify({
+    models: MIMO_MODELS.map(slug => ({
+      slug,
+      display_name: slug,
+      base_instructions: baseInstructions,
+      context_window: 1_048_576,
+      max_context_window: 1_048_576,
+      shell_type: "unified_exec",
+      supported_reasoning_levels: [],
+      default_reasoning_summary: "auto",
+      supported_in_api: true,
+      visibility: "none",
+      priority: 99,
+      support_verbosity: false,
+      include_apps_usage_instructions: false,
+      truncation_policy: { mode: "bytes", limit: 10_000 },
+      experimental_supported_tools: [],
+    })),
+  }) + "\n";
 }
 
 function modelSecretProviderConfig(providerKind, baseUrl) {
@@ -648,14 +696,38 @@ class CodexRuntimeConfigWriter {
       throw runtimeError("CODEX_RUNTIME_CONFIG_INVALID", "Codex MCP runtime account is invalid");
     }
     const normalized = validateRuntimeConfig(runtimeConfig);
-    const overrides = configOverridesFor(normalized, {
+    const overrides = [...configOverridesFor(normalized, {
       runtimeProfileId,
       runtimeAccountId,
       launch: this.mcpHelperLaunch,
-    });
+    })];
+    // This Responses API rejects Guardian's JSON Schema output. The adapter
+    // sends approval requests to the user with the same sandbox and policy.
+    const requiresUserApproval = runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
+      && usesMiMoResponses(normalized?.provider);
+    if (requiresUserApproval) {
+      // Codex reads model_catalog_json on app-server startup. A thread override
+      // cannot replace the synthetic descriptor, which caps window overrides at 272K.
+      const home = prepareCodexRuntimeAccountHome(this.paths, runtimeAccountId);
+      const catalog = mimoModelCatalog();
+      const digest = crypto.createHash("sha256").update(catalog).digest("hex");
+      // A changed catalog gets its own path so active processes can still read
+      // the startup file they were given, including during app updates.
+      const catalogPath = path.join(home, `shoggoth-mimo-model-catalog-${digest}.json`);
+      try {
+        if (readPrivateFile(catalogPath, { fs: this.fs, maxBytes: 256 * 1024 }).toString("utf8") !== catalog) {
+          throw runtimeError("CODEX_RUNTIME_CONFIG_INVALID", "Generated MiMo model catalog does not match its expected contents");
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        atomicWritePrivateFile(catalogPath, catalog, { fs: this.fs, trustedRoot: this.paths.trustedRoot });
+      }
+      overrides.push(`model_catalog_json=${tomlString(catalogPath)}`);
+    }
     return Object.freeze({
       args: Object.freeze(overrides.flatMap((value) => ["-c", value])),
       runtimeConfig: normalized,
+      ...(requiresUserApproval ? { requiresUserApproval } : {}),
       mcpBootstrap: mcpBootstrapReceipt({ runtimeProfileId, runtimeAccountId, launch: this.mcpHelperLaunch }),
     });
   }

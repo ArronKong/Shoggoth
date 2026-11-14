@@ -5,6 +5,8 @@ const DEFAULT_MAX_STDERR_BYTES = 32 * 1024;
 const DEFAULT_MAX_REGISTERED_SECRETS = 256;
 const DEFAULT_MAX_REGISTERED_SECRET_BYTES = 1024 * 1024;
 const SECRET_PATTERNS = Object.freeze([
+  // The local model gateway authenticates its routes with a token in the URL path.
+  /\bhttp:\/\/127\.0\.0\.1:\d{1,5}\/[a-f0-9]{64}[^\s<>"']*/gi,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi,
   /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/g,
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,

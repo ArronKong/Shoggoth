@@ -451,6 +451,8 @@ class AgentBackend {
    * { id, name, provider, providerName?, backendId, contextWindow?, reasoning?,
    *   thinkingOptions?, thinkingDefault?, acpProviderRef?, modelScopes? }.
    * providerName is display-only; provider remains the exact routing identity.
+   * thinkingOptions contains only the verified values accepted by the selected
+   * model route. An explicitly empty list advertises no manual effort control.
    * acpProviderRef (Hermes-only): provider ref the chat `/model` command must
    * use when it differs from `provider` — user-defined (config.yaml) providers
    * need the `custom:<name>` form; Hermes only parses built-in provider names.
@@ -1037,9 +1039,10 @@ class AgentBackend {
    * opt in only when they can bind a digest to the exact underlying history
    * source without doing network I/O. Raw paths, URLs and credentials must
    * never leave the backend through this capability.
-   * @returns {string|null} lowercase SHA-256 hex, or null when unsupported
+   * @param {string} [sessionKey] exact session for a session-scoped cache
+   * @returns {string|{scope: string, memoryOnly: true}|null} lowercase SHA-256 identity
    */
-  getChatCacheScope() { return null; }
+  getChatCacheScope(sessionKey) { return null; }
 
   /**
    * Slash-command catalog for one agent (composer palette). Backends without a
@@ -1331,6 +1334,7 @@ class AgentBackend {
 
   /**
    * Create a cron job from a unified spec (includes agentId to target a scope).
+   * Native Cron accepts optional watch=true for changes-only delivery.
    * @param {object} spec
    * @returns {Promise<object>} created job, normalized
    */
@@ -1338,6 +1342,7 @@ class AgentBackend {
 
   /**
    * Update a cron job by full unified id.
+   * Native Cron accepts a watch boolean to change repeated-result delivery.
    * @param {string} id
    * @param {object} patch
    * @returns {Promise<object>} updated job, normalized

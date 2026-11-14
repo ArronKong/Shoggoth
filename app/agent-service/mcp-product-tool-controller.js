@@ -984,7 +984,7 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
         sourceQuote: { type: "string", maxLength: 2048,
           description: "In a native group turn, quote the current user's exact request to schedule this job. Shoggoth binds the results to the current group automatically. Omit in private chat." },
         watch: { type: "boolean",
-          description: "Set true for a group watch that should report only new developments. Requires sourceQuote. Omit for regular scheduled work." },
+          description: "Set true when the user wants updates only on change. Cron suppresses a final reply identical to the previous report. Omit for regular scheduled work." },
       },
       required: ["name", "prompt", "workspace", "schedule", "enabled", "misfirePolicy", "maxCatchUp", "overlapPolicy"],
       additionalProperties: false,
@@ -1000,6 +1000,7 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
           type: "object", minProperties: 1,
           properties: {
             name: { type: "string", maxLength: 512 }, prompt: { type: "string", maxLength: MAX_TEXT_BYTES },
+            watch: { type: "boolean" },
             workspace: nullableString(4096), schedule: scheduleSchema,
             misfirePolicy: { type: "string", enum: [...MISFIRE_POLICIES] },
             maxCatchUp: { type: "integer", minimum: 1, maximum: 100 },
@@ -1389,6 +1390,7 @@ const CARD_PATCH_VALIDATORS = Object.freeze({
 });
 const CRON_PATCH_VALIDATORS = Object.freeze({
   name: (value) => validText(value, 512),
+  watch: (value) => typeof value === "boolean",
   prompt: (value) => validText(value, MAX_TEXT_BYTES),
   workspace: (value) => value === null || (validText(value, 4096) && path.isAbsolute(value)),
   schedule: validSchedule,
@@ -1770,7 +1772,7 @@ function validateProductOperationArguments(name, args) {
       && (args.threadId === null || validOpaqueId(args.threadId))
       && (!Object.hasOwn(args, "sourceQuote") || (args.threadId === null
         && validText(args.sourceQuote, 2048) && args.sourceQuote.trim().length > 0))
-      && (!Object.hasOwn(args, "watch") || (typeof args.watch === "boolean" && Object.hasOwn(args, "sourceQuote")))
+      && (!Object.hasOwn(args, "watch") || typeof args.watch === "boolean")
       && (args.threadPolicy !== "new" || args.threadId === null);
   }
   if (name === "cron_update") {
@@ -4273,6 +4275,7 @@ class McpProductToolController {
         enabled: args.enabled,
         profileId: authority.profileId,
         prompt: args.prompt,
+        ...(!groupDelivery && args.watch !== undefined ? { watch: args.watch } : {}),
         workspace: args.workspace,
         schedule: args.schedule,
         misfirePolicy: args.misfirePolicy,

@@ -10,6 +10,8 @@ const { createRequire } = require("node:module");
 const { OpenClawBackend } = require("../app/core/openclaw-backend");
 const { HermesBackend } = require("../app/core/hermes-backend");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { createChatServiceController } = require("../app/agent-service/chat-service-controller");
+const { MAX_FRAME_BYTES, mapChatServiceError } = require("../app/agent-service/chat-service-protocol");
 const uiRequire = createRequire(path.resolve(__dirname, "../app/manage-ui/package.json"));
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "chat-history-pagination-"));
 uiRequire("esbuild").buildSync({
@@ -67,6 +69,8 @@ test("expanded history survives refresh/new arrivals; replaced transcript return
   const refreshed = await f.refresh();
   assert.equal(refreshed.length, 107);
   assert.deepEqual(refreshed.slice(0, 100), expanded);
+  assert.equal(f.pager.latestWindow(refreshed).length, 50, "reopening must not restore the expanded prefix");
+  assert.equal(f.pager.latestWindow(refreshed).at(-1).id, "new-6");
   f.state.rows = rows(220, "replacement-"); f.state.version++;
   const replacement = await f.refresh();
   assert.equal(replacement.length, 50);
@@ -301,8 +305,71 @@ test("native ordinary/Desktop reader completes long-message fragments across tra
     } while (cursor);
     assert.deepEqual(all, messages);
     assert.ok(f.calls.every(call => call.method === (desktop ? "codex.desktop.history" : "chat.history")));
-    assert.ok(f.calls.every(call => call.params.limit <= 20));
+    if (desktop) assert.ok(f.calls.every(call => call.params.limit <= 20));
+    else assert.ok(f.calls.every(call => call.params.limit === 100), "the Service cursor keeps the requested limit");
   }
+});
+
+test("native history resolves a bounded page from the verified journal view", async () => {
+  const f = nativeFixture([]);
+  const profileId = "fixture-profile", sessionKey = "22222222-2222-4222-8222-222222222222";
+  const session = { id: "fixture-session", profileId, sessionKey, status: "draft", runtimeBindingId: "fixture-binding" };
+  const profile = { id: profileId };
+  const events = Object.freeze(Array.from({ length: 2_613 }, (_, index) => Object.freeze({
+    id: `history-${index}`, seq: index + 1, occurredAt: index + 1, kind: "user", runId: null, contextExcluded: false,
+    content: Object.freeze(index === 2_590 ? { displayRef: true } : { text: `History ${index}` }),
+  })));
+  const longText = "跨页长消息🙂\n".repeat(16_000);
+  const resolved = [];
+  const unexpected = () => assert.fail("history must stay read-only and use the verified event view");
+  const controller = createChatServiceController({
+    paths: { trustedRoot: temp, defaultWorkspaceDir: temp }, cursorSecret: Buffer.alloc(32, 1),
+    productStore: { listAgentProfiles: () => [], getAgentProfile: () => profile },
+    chatSessionStore: { listSessions: () => [session], listPendingRemoteOperations: () => [], getSession: () => session,
+      createSession: unexpected },
+    coordinator: { listRuns: () => [], getRun: () => null, send: unexpected, subscribeRun: unexpected },
+    transcriptStore: { ensureSession() {}, listEvents: unexpected, eventsView: () => events,
+      importHistoryItems: unexpected, getSessionDerivedTitle: unexpected, displayEvent(_profile, _session, event) {
+        resolved.push(event.seq);
+        return event.content.displayRef ? { ...event, content: { text: longText } } : event;
+      } },
+  });
+  await controller.open();
+  const calls = [];
+  f.backend._sessionTarget = () => ({ profile, sessionKey, session });
+  f.backend._call = async (method, params) => {
+    calls.push(params);
+    const result = await controller.handle(method, params, "test-history");
+    assert.ok(Buffer.byteLength(`${JSON.stringify({ id: "test-history", ok: true, result })}\n`) <= MAX_FRAME_BYTES);
+    return result;
+  };
+  try {
+    const tail = await f.backend.getHistoryPage(key, { limit: 20 });
+    assert.deepEqual(tail.messages.map(row => row.id), events.slice(-20).map(row => row.id));
+    assert.equal(calls.length, 1);
+    assert.ok(resolved.length <= 21, `short tail resolved ${resolved.length} bodies from the whole journal`);
+    assert.ok(tail.hasMore);
+
+    resolved.length = 0;
+    const older = await f.backend.getHistoryPage(key, { limit: 20, cursor: tail.nextCursor });
+    assert.equal(older.messages.find(row => row.id === "history-2590")?.content[0].text, longText);
+    assert.equal(older.messages.at(-1).id, "history-2592");
+    assert.ok(older.hasMore);
+    assert.ok(calls.length > 2, "the long message really crossed Service frames");
+    assert.ok(calls.every(call => call.limit === 20));
+    assert.ok(resolved.every(seq => seq <= events.at(-21).seq && seq > 2_500), "no full-body reads outside the requested window");
+    const next = await f.backend.getHistoryPage(key, { limit: 20, cursor: older.nextCursor });
+    assert.deepEqual([...next.messages, ...older.messages, ...tail.messages].map(row => row.id),
+      events.slice(-(next.messages.length + older.messages.length + tail.messages.length)).map(row => row.id));
+  } finally {
+    await controller.close();
+  }
+});
+
+test("a changed journal is visible to the cache reader as a safe fixed error", () => {
+  const error = mapChatServiceError(Object.assign(new Error("private path in underlying error"), { code: "TRANSCRIPT_SOURCE_CHANGED" }));
+  assert.equal(error.code, "TRANSCRIPT_SOURCE_CHANGED");
+  assert.doesNotMatch(error.message, /private path/);
 });
 test("native rejects source changes, malformed pages and fragment corruption", async () => {
   const f = nativeFixture(rows(240));

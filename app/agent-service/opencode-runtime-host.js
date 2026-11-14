@@ -13,6 +13,7 @@ const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { openRuntimeLedger, settledRuntimeSession } = require("./runtime-shared-ledger");
 const { OpenCodeRuntimeLedger } = require("./opencode-runtime-ledger");
 const { OpenCodeHttpClient } = require("./opencode-http-client");
+const { openCodeThinkingOptions } = require("./opencode-model-only");
 const { IMAGE_TYPES, nativeAttachmentParts, legacyAttachmentText } = require("./opencode-attachments");
 const { validateRegisteredSecrets } = require("./codex-rpc-safety");
 const { contextToolContent } = require("./context-tool-content");
@@ -99,6 +100,7 @@ function fingerprint(input) {
   return crypto.createHash("sha256").update(JSON.stringify({
     prompt: input.prompt, context: input.context ?? null, model: input.model ?? null,
     ...require("./native-instruction-delivery").turnInstructionFingerprint(input),
+    ...(input.thinkingLevel != null ? { thinkingLevel: input.thinkingLevel } : {}),
     cwd: input.cwd ?? null, permissionPolicy: input.permissionPolicy ?? null,
     permissionMode: input.permissionMode ?? null,
     attachments: input.attachments?.map(item => ({ id: item.id, name: item.name,
@@ -521,7 +523,7 @@ class OpenCodeRuntimeHost {
           description: provider.name || provider.id, isDefault: false,
           hidden: false, contextWindow: Number.isSafeInteger(model?.limit?.context)
             ? model.limit.context : null,
-          capabilities: { thinkingOptions: [], thinkingDefault: null, fastTier: null },
+          capabilities: { thinkingOptions: openCodeThinkingOptions(model), thinkingDefault: null, fastTier: null },
         });
       }
     }
@@ -632,6 +634,7 @@ class OpenCodeRuntimeHost {
       || !entry || !Object.hasOwn(entry.models || {}, reference.id)) {
       throw error("RUNTIME_MODEL_UNAVAILABLE", "OpenCode model is not available from a connected provider");
     }
+    return entry.models[reference.id];
   }
 
   async #ensureNativeSession(session, observation) {
@@ -899,7 +902,9 @@ class OpenCodeRuntimeHost {
       throw error("RUNTIME_SESSION_BUSY", "OpenCode session is active");
     }
     const model = input.model ?? this.sessionConfigs.get(session.id)?.model ?? null;
-    await this.#assertModelAvailable(model);
+    const variant = input.thinkingLevel;
+    const nativeModel = await this.#assertModelAvailable(model);
+    const defaultRow = variant != null && model === null ? (await this.modelsList({ limit: 1 })).data[0] : null;
     const hash = fingerprint({ ...input, model });
     await this.#reconcileSession(session.id);
     const currentSession = this.#requireSession(session.id);
@@ -923,6 +928,13 @@ class OpenCodeRuntimeHost {
     if (currentSession.turns.some(turn => turn.status === "inProgress")) {
       throw error("RUNTIME_SESSION_BUSY", "A prior OpenCode turn is still running");
     }
+    // An inherited selection uses the same default as the model picker when
+    // choosing an effort. An ordinary turn still lets OpenCode resolve it.
+    if (variant != null && !(defaultRow?.capabilities.thinkingOptions ?? openCodeThinkingOptions(nativeModel)).includes(variant)) {
+      throw error("RUNTIME_MODEL_SETTINGS_INVALID", "OpenCode model does not support this variant");
+    }
+    const selectedModel = model ?? defaultRow?.model ?? null;
+    const reference = modelRef(selectedModel);
     for (const item of input.attachments || []) {
       if (!safe(item.path, 4096) || !path.isAbsolute(item.path) || !safe(item.name, 1024) || !safe(item.mimeType, 256)) {
         throw error("RUNTIME_ATTACHMENT_INVALID", "OpenCode attachment is invalid");
@@ -941,7 +953,7 @@ class OpenCodeRuntimeHost {
         createdAt: now, updatedAt: now }); current.updatedAt = Math.max(current.updatedAt, now); });
     const active = { sessionId: session.id, turnId: id, messageId, accepted: false,
       done: false, idle: false, cursor: 0, pending: new Set(), responded: new Set(), usage: null,
-      model, abort: new AbortController() };
+      model: selectedModel, abort: new AbortController() };
     this.activeTurns.set(session.id, active);
     try {
       // The per-turn Run ID goes with the user message so the system prompt
@@ -954,8 +966,8 @@ class OpenCodeRuntimeHost {
       this.#markLive(id);
       const response = await this.client.request("POST", this.#sessionRoute(session.id, "/prompt_async"), {
         messageID: messageId,
-        ...(model ? { model: { providerID: modelRef(model).providerID,
-          modelID: modelRef(model).id } } : {}),
+        ...(reference ? { model: { providerID: reference.providerID, modelID: reference.id } } : {}),
+        ...(variant != null ? { variant } : {}),
         ...(system ? { system } : {}),
         parts: [{ type: "text", text: input.prompt }, ...(turn.run ? [{ type: "text", text: turn.run }] : []), ...files],
       }, { timeoutMs: 30_000 });

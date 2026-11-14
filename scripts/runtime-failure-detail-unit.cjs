@@ -3,6 +3,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { runtimeFailureDetail, runtimeFailureFromError, failureDetailText } = require("../app/agent-service/runtime-failure-detail");
+const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
 
 test("extracts the actual English API reason, HTTP status and upstream code", () => {
   const reason = "User location is not supported for the API use.";
@@ -28,6 +29,29 @@ test("redacts credentials and private identifiers before limiting diagnostic len
   for (const secret of ["password", "alice", "short", "tiny", "sid=123", "abc", "fixture-secret-value", "private/file"]) assert.ok(!output.includes(secret), secret);
   assert.equal(detail.httpStatus, 503);
   assert.equal(runtimeFailureDetail({ message: "-----BEGIN PRIVATE KEY-----\nprivate bytes\n-----END PRIVATE KEY-----\nFailure" }).message.includes("private bytes"), false);
+});
+
+test("Codex gateway errors preserve HTTP status without publishing the local route", () => {
+  const routeToken = "a1".repeat(32);
+  const route = `http://127.0.0.1:12345/${routeToken}/responses`;
+  const error = { message: `unexpected status 502 Bad Gateway: Model service temporarily unavailable., url: ${route}` };
+  const detail = runtimeFailureDetail(error);
+  assert.equal(detail.httpStatus, 502);
+  assert.match(detail.message, /Model service temporarily unavailable/u);
+  assert.doesNotMatch(failureDetailText(detail), /127\.0\.0\.1|\/responses/u);
+  assert.ok(!detail.message.includes(routeToken));
+  const event = normalizeCodexEvent({ method: "error", params: { willRetry: false, error } });
+  assert.doesNotMatch(JSON.stringify(event), /127\.0\.0\.1|\/responses/u);
+  assert.ok(!JSON.stringify(event).includes(routeToken));
+  assert.equal(runtimeFailureDetail("Provider error at https://example.com/models").message,
+    "Provider error at https://example.com/models");
+});
+
+test("a structured Codex transport status survives a completion with no HTTP status in its text", () => {
+  const message = "The selected model is unavailable.";
+  const error = { message, codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } };
+  const event = normalizeCodexEvent({ method: "turn/completed", params: { turn: { id: "turn-1", status: "failed", error } } });
+  assert.deepEqual(event.failure, { message, httpStatus: 502 });
 });
 
 test("DeepSeek private bridge diagnostics are redacted by the Host before publication", () => {

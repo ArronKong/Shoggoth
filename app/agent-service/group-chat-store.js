@@ -28,7 +28,6 @@ const { ROUND_LIMITS, currentOwner, defaultOwner, insertCalls, openingSpeakers }
 const MAIN_THREAD = "main";
 const DISCUSSION_PURPOSE = "group_discussion";
 const MAX_MEMBER_REPLY_BYTES = 64 * 1024;
-const CRON_REPORT_HISTORY_LIMIT = 12;
 const MAX_REPLY_EXCERPT_BYTES = 600;
 
 function replySnapshot(quoted) {
@@ -798,19 +797,17 @@ class GroupChatStore {
       ? { id: group.id, name: group.name } : null;
   }
 
+  hasPublishedCronReply({ groupId, jobId, runId }) {
+    this.#ready();
+    return Boolean(this.db.prepare("SELECT 1 FROM messages WHERE group_id=? AND origin_key=?")
+      .get(groupId, `cron:${jobId}:${runId}`));
+  }
+
   hasCronDelivery({ groupId, jobId, runId }) {
     this.#ready();
     return Boolean(this.db.prepare("SELECT 1 FROM meta WHERE key=?")
       .get(`cron-delivery:${groupId}:${jobId}:${runId}`)
-      || this.db.prepare("SELECT 1 FROM messages WHERE group_id=? AND origin_key=?")
-        .get(groupId, `cron:${jobId}:${runId}`));
-  }
-
-  recentCronReports({ groupId, jobId }) {
-    this.#ready();
-    return this.db.prepare(`SELECT data FROM messages WHERE group_id=? AND origin_key BETWEEN ? AND ?
-      ORDER BY seq DESC LIMIT ?`)
-      .all(groupId, `cron:${jobId}:`, `cron:${jobId}:~`, CRON_REPORT_HISTORY_LIMIT).map(parse);
+      || this.hasPublishedCronReply({ groupId, jobId, runId }));
   }
 
   getWatchReceipt(groupId, watchId, eventId) {
@@ -846,7 +843,7 @@ class GroupChatStore {
       const originKey = `cron:${jobId}:${runId}`;
       if (this.hasCronDelivery({ groupId: group.id, jobId, runId })) return false;
       if (text !== null && (!validText(text) || !text.trim())) fail("GROUP_RESULT_INVALID");
-      if (text === null || (target.watch && this.recentCronReports({ groupId: group.id, jobId }).some(report => report.body === text))) {
+      if (text === null) {
         this.db.prepare("INSERT INTO meta(key,value) VALUES (?,?)")
           .run(`cron-delivery:${group.id}:${jobId}:${runId}`, JSON.stringify("silent"));
         return false;

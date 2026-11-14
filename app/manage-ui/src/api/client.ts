@@ -2458,9 +2458,11 @@ export async function getChatCapabilities(agentId: string, backendId?: string): 
 
 // 主进程快速生成的数据源摘要；调用方只把摘要用于 IndexedDB key，接口不会探测
 // dashboard，因此可以在 Hermes 冷启动完成前读取。
-export async function getChatCacheScope(backendId: string): Promise<ChatCacheScope> {
+export async function getChatCacheScope(backendId: string, sessionKey?: string): Promise<ChatCacheScope> {
+  const query = new URLSearchParams({ backend: backendId });
+  if (sessionKey) query.set("sessionKey", sessionKey);
   return jsonFetch<ChatCacheScope>(
-    `/__api/chat/cache-scope?backend=${encodeURIComponent(backendId)}`,
+    `/__api/chat/cache-scope?${query}`,
   );
 }
 

@@ -102,6 +102,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   CHAT_ATTACHMENT_INVALID: "附件无效或超过限制，请重新添加（最多 8 个，总计 50 MB，单张图片 10 MB）",
   CHAT_HISTORY_CURSOR_INVALID: "聊天历史游标无效",
   CHAT_HISTORY_ITEM_TOO_LARGE: "单条聊天历史超过本地协议上限",
+  TRANSCRIPT_SOURCE_CHANGED: "聊天记录来源已变化，请重新读取",
   CHAT_COMMAND_NOT_FOUND: "当前 Agent 不支持该命令",
   CHAT_COMMAND_SESSION_REQUIRED: "请先开始一次对话后再使用该命令",
   CHAT_COMMAND_UNAVAILABLE: "当前 Agent 的命令目录暂不可用",

@@ -1433,6 +1433,9 @@ function createAgentService(options) {
           throw serviceError("PROFILE_SERVICE_CLOSED", "Provider bootstrap is unavailable");
         },
       },
+      readProviderReasoning: require("./custom-response-models").createCustomResponseReasoningReader({
+        readCredential: ref => secretStore.get(ref),
+      }),
       now: options.now,
     }) : unavailableProfileServiceController);
   const customEndpointService = new CustomEndpointService({
@@ -2290,9 +2293,14 @@ function createAgentService(options) {
       try { memoryEngine.consolidate(run.profileId); } catch {}
     });
   };
+  function isGroupCronJob(jobId) {
+    try { return nativeCronStore.isGroupBoundJob(jobId); }
+    catch { return true; }
+  }
+  const cronRunSessionKey = run => isGroupCronJob(run.sourceId) ? null : workRunCoordinator.getRunSessionKey(run);
   const synchronizedSessionKey = (run) => run?.source === "inspiration"
     ? inspirationStore.executionForRun(run.id)?.sessionKey ?? null
-    : run?.source === "cron" ? workRunCoordinator.getRunSessionKey(run)
+    : run?.source === "cron" ? cronRunSessionKey(run)
     : isNativeFederationChatRun(run) ? run.sourceId : null;
   const handleRunInteraction = (run, interaction) => {
     if (run?.source === "inspiration") inspirationService.onInteraction(run, interaction);
@@ -2468,11 +2476,13 @@ function createAgentService(options) {
     productStore,
     usageStore: tokenUsageStore,
     cronStore: nativeCronStore,
+    hasPublishedCronReply: input => groupChatStore.hasPublishedCronReply(input),
     chatSessionStore,
     getMediaStore: () => inspirationStore.media,
     transcriptStore,
     contextCompiler,
     conversationCheckpointStore,
+    isInternalChatSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey),
     sourceConversationStore,
     queueClock: new (require("./runtime-telemetry").RuntimeQueueClock)({ paths, now: options.now }),
     telemetry: runtimeTelemetry,
@@ -2593,6 +2603,10 @@ function createAgentService(options) {
     ensureMainSession: profileId => noticeDelivery.ensureMainSession(profileId),
     getProactiveSessionOrigin: sessionKey => proactiveStore.sessionOrigin(sessionKey),
     isInternalSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey),
+    isGroupCronSession: sessionKey => {
+      const origin = chatSessionStore.getCronSessionOrigin(sessionKey);
+      return Boolean(origin && isGroupCronJob(origin.cronJobId));
+    },
     onSessionCreated: session => { void shoggothMemory?.sessionCapture.onSessionCreated(session.profileId, session.id); },
     getCodexDesktopSessionOrigin: sessionKey => codexDesktopSessionController?.origin(sessionKey),
     getCronJobName: (jobId) => nativeCronStore.getJob(jobId)?.name,
@@ -2775,7 +2789,7 @@ function createAgentService(options) {
   });
   const domainWorkRunExecutor = options.domainWorkRunExecutor || new DomainWorkRunExecutor({
     getCoordinator: () => workRunCoordinator,
-    prepareGroupCronPrompt: payload => groupCronDelivery.promptForRun(payload),
+    recoverGroupCronPrompt: payload => groupCronDelivery.recoverPrompt(payload),
   });
   const inspirationService = new InspirationService({
     localAttachmentProjection: true,
@@ -2968,7 +2982,9 @@ function createAgentService(options) {
   });
   const groupCronDelivery = new (require("./group-cron-delivery").GroupCronDelivery)({
     cronStore: nativeCronStore, groupChat: groupChatService, dispatcher: workDispatcher,
-    sessions: chatSessionStore, transcripts: transcriptStore, sanitizeSummary,
+    sessions: chatSessionStore, transcripts: transcriptStore,
+    getCronOutput: (run, events) => workRunCoordinator.getCronOutput?.(run, events),
+    assertSecretSafe,
     onError: () => console.error("[agent-service] group Cron delivery deferred"),
   });
   const isGroupCronDeliveryCurrent = generation => lifecycleGeneration === generation && lifecycleState === "started"

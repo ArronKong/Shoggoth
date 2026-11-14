@@ -1,10 +1,11 @@
 "use strict";
 
+const { effortId: level } = require("./model-reasoning-catalog");
+
 const own = (value, key) => Object.getOwnPropertyDescriptor(value || {}, key)?.value;
 const plain = value => value && Object.getPrototypeOf(value) === Object.prototype;
-const level = value => typeof value === "string" && /^[a-z][a-z0-9_-]{0,31}$/u.test(value);
 const tier = value => value === null || ["fast", "priority"].includes(value);
-const ORDERED_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const ORDERED_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 function validModelSettings(value) {
   return plain(value) && Object.keys(value).length === 2

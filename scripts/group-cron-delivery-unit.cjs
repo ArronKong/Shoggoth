@@ -9,6 +9,7 @@ const path = require("node:path");
 const { createAgentService, PROTOCOL_VERSION } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { readClientToken, requestService } = require("../app/agent-service/client");
+const { ShoggothBackend } = require("../app/core/shoggoth-backend");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
 const { parseBindingElicitation } = require("../app/agent-service/runtime-mcp-call-binding");
 const { authenticateMcpSession, createMcpStdioHandler } = require("../app/shoggoth-mcp-helper");
@@ -29,7 +30,7 @@ async function until(read, label) {
   assert.fail(`Timed out: ${label}`);
 }
 
-test("a native group request creates one recurring Cron and delivers only new replies to that group", async t => {
+test("group Cron uses shared silence and duplicate rules and delivers only to its originating group", async t => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sg-group-cron-")));
   const paths = resolveServicePaths({ homeDir: root, trustedRoot: root, stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
@@ -42,7 +43,15 @@ test("a native group request creates one recurring Cron and delivers only new re
     safeStorage,
     runtimePool: { async get() { return host; }, async stopAll() {} },
   });
+  const activities = [];
+  const backend = new ShoggothBackend({ paths, serviceEventPollMs: 25,
+    async requestService(servicePaths, request, options) {
+      const result = await requestService(servicePaths, request, options);
+      return request.method === "service.status" ? { ...result, mcpCredentialsLocked: false } : result;
+    },
+  });
   t.after(async () => {
+    await backend.stop();
     await service.stop({ notify: false });
     fs.rmSync(root, { recursive: true, force: true });
   });
@@ -131,6 +140,7 @@ test("a native group request creates one recurring Cron and delivers only new re
   assert.deepEqual(receipt.delivery, { kind: "group", groupId: newsroom.id, groupName: "观测站测试群" });
   host.complete(run, "已保存定时任务，每半小时检查。");
   await until(() => service.workDispatcher.getRun(run.id).status === "completed", "group reply");
+  assert.equal(await backend.start({ onSessionActivity: event => activities.push(event) }), true);
 
   const jobId = receipt.job.id;
   const startCron = async () => {
@@ -145,45 +155,82 @@ test("a native group request creates one recurring Cron and delivers only new re
     await service.nativeCronScheduler.waitForIdle(run.id);
     await new Promise(resolve => setImmediate(resolve));
   };
-  await completeCron(await startCron(), "NO_REPLY");
+  const quiet = await startCron();
+  const sessionKey = service.workRunCoordinator.getRunSessionKey(quiet);
+  const session = service.chatSessionStore.getSession(sessionKey);
+  const savedPromptFor = run => service.transcriptStore.listEvents(profile.id, session.id, { runId: run.id })
+    .find(item => item.kind === "user").content.text;
+  assert.equal(savedPromptFor(quiet), args.prompt);
+  await completeCron(quiet, "NO_REPLY");
   assert.deepEqual(updates(), []);
-  await completeCron(await startCron(), "有变化，但没有核实原文。");
+  const homepageReport = "例行核对完成。[示例媒体](https://example.com/)";
+  const previouslyWithheld = await startCron();
+  const publish = service.groupChatService.publishCronReply;
+  service.groupChatService.publishCronReply = input => publish.call(service.groupChatService, { ...input, text: null });
+  try { await completeCron(previouslyWithheld, homepageReport); }
+  finally { service.groupChatService.publishCronReply = publish; }
+  assert.equal(service.workRunCoordinator.getCronOutput(previouslyWithheld.id).disposition, "deliver");
   assert.deepEqual(updates(), []);
+  const homepageRun = await startCron();
+  const beforeHomepage = (await ipc("events.subscribe", { afterSeq: 0 })).latestSeq;
+  await completeCron(homepageRun, homepageReport);
+  const homepageMessage = await until(() => updates().find(item => item.origin.runId === homepageRun.id), "homepage report");
+  assert.equal(homepageMessage.body, homepageReport);
+  const sessionList = () => ipc("chat.session.list", { profileId: profile.id, includeArchived: false, cursor: null, limit: 100 });
+  assert.ok((await sessionList()).sessions.every(item => item.sessionKey !== sessionKey));
+  await assert.rejects(ipc("chat.history", { sessionKey, cursor: null, limit: 30 }),
+    { code: "CHAT_SESSION_NOT_FOUND" });
+  const search = await ipc("chat.search", { profileId: profile.id, query: "例行核对完成", limit: 20 });
+  assert.deepEqual(search.results, []);
+  const audit = await ipc("chat.history", { sessionKey, auditRunId: homepageRun.id, cursor: null, limit: 30 });
+  assert.ok(audit.messages.some(item => JSON.stringify(item).includes(homepageReport)), "retain the exact Cron audit");
+  const homepageEvents = (await ipc("events.subscribe", { afterSeq: beforeHomepage })).events;
+  assert.ok(!homepageEvents.some(event => event.type === "federation.chat.terminal" && event.payload.runId === homepageRun.id));
+  assert.equal((await ipc("cron.job.get", { jobId })).job.deliveryTarget, "group");
+  const backendJobId = `shoggoth:${jobId}`;
+  assert.equal((await backend.getCronJob(backendJobId)).deliver, "group");
+  const review = await backend.getCronLatestDelivery(backendJobId);
+  assert.equal(review.fullText, homepageReport);
+  assert.equal(review.sessionKey, undefined);
+  assert.equal((await backend.getCronRuns(backendJobId)).runs[0].deliveryTarget, "group");
   const firstReport = await startCron();
   const beforeReport = (await ipc("events.subscribe", { afterSeq: 0 })).latestSeq;
   await completeCron(firstReport, REPORT);
-  const message = await until(() => updates()[0], "group publication");
+  const message = await until(() => updates().find(item => item.origin.runId === firstReport.id), "group publication");
   assert.equal(message.author.memberId, member.id);
   assert.equal(message.body, REPORT);
   assert.equal(message.origin.runId, firstReport.id);
   assert.equal((await history(other.id)).messages.length, 0);
   assert.ok((await history(newsroom.id)).messages.some(item => item.id === message.id));
-  assert.ok((await ipc("events.subscribe", { afterSeq: beforeReport })).events.some(
-    event => event.type === "group.changed" && event.payload.groupId === newsroom.id));
+  const reportEvents = (await ipc("events.subscribe", { afterSeq: beforeReport })).events;
+  assert.ok(reportEvents.some(event => event.type === "group.changed" && event.payload.groupId === newsroom.id));
+  assert.ok(!reportEvents.some(event => event.type === "federation.chat.terminal" && event.payload.runId === firstReport.id));
+  await until(() => activities.some(event => event.kind === "group.changed" && event.groupId === newsroom.id), "group observer");
+  assert.ok(backend.getSessionRows().every(item => item.sessionId !== sessionKey));
+  assert.ok(!activities.some(event => event.kind === "federation.chat.terminal"
+    && [homepageRun.id, firstReport.id].includes(event.runId)));
 
+  await backend.stop();
   await service.stop({ notify: false });
   await service.start();
   const repeat = await startCron();
-  const key = service.workRunCoordinator.getRunSessionKey(repeat);
-  const session = service.chatSessionStore.getSession(key);
-  assert.ok(service.transcriptStore.listEvents(profile.id, session.id, { runId: repeat.id })
-    .find(item => item.kind === "user").content.text.includes(REPORT));
+  assert.equal(savedPromptFor(repeat), args.prompt);
   await completeCron(repeat, REPORT);
-  assert.deepEqual(updates().map(item => item.id), [message.id]);
+  assert.equal(service.workRunCoordinator.getCronOutput(repeat.id).reason, "duplicate");
+  assert.deepEqual(updates().map(item => item.id), [homepageMessage.id, message.id]);
 
-  const recoveredReport = "另一项官方披露。[示例公告](https://example.com/news/observatory-next-update)";
+  const recoveredReport = `另一项官方披露。没有链接也可以发送。\n${"完整长报告。".repeat(3300)}`;
   const missedDelivery = await startCron();
-  const publish = service.groupChatService.publishCronReply;
   service.groupChatService.publishCronReply = () => {};
   try { await completeCron(missedDelivery, recoveredReport); }
   finally { service.groupChatService.publishCronReply = publish; }
-  assert.deepEqual(updates().map(item => item.id), [message.id]);
+  assert.deepEqual(updates().map(item => item.id), [homepageMessage.id, message.id]);
   await service.stop({ notify: false });
   await service.start();
   const recovered = await until(() => updates().find(item => item.origin.runId === missedDelivery.id), "recovered publication");
   assert.equal(recovered.body, recoveredReport);
   const published = updates().map(item => item.id);
-  assert.deepEqual(published, [message.id, recovered.id]);
+  assert.deepEqual(published, [homepageMessage.id, message.id, recovered.id]);
 
   const inFlight = await startCron();
   const latest = await ipc("group.get", { groupId: newsroom.id });
@@ -196,4 +243,12 @@ test("a native group request creates one recurring Cron and delivers only new re
   const skipped = service.workDispatcher.listRuns({ source: "cron", sourceId: jobId, status: "skipped" });
   assert.equal(skipped.length, 1);
   assert.equal(skipped[0].resultSummary, "CRON_TARGET_DISABLED");
+
+  await ipc("cron.job.delete", { jobId, operationId: id(), createdAt: now });
+  await service.stop({ notify: false });
+  await service.start();
+  assert.ok((await sessionList()).sessions.every(item => item.sessionKey !== sessionKey),
+    "deleting a group Cron must not expose its run session as a private chat after restart");
+  const deletedRuns = await ipc("cron.run.list", { jobId, status: null, cursor: null, limit: 20 });
+  assert.ok(deletedRuns.runs.length > 0 && deletedRuns.runs.every(item => item.deliveryTarget === "group"));
 });

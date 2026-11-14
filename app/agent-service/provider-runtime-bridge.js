@@ -220,6 +220,7 @@ class ProviderRuntimeBridge {
         registeredSecrets: Object.freeze(registeredSecrets),
         runtimeConfig,
         configArgs: configured.args || Object.freeze([]),
+        ...(configured.requiresUserApproval ? { requiresUserApproval: true } : {}),
         mcpBootstrap: configured.mcpBootstrap ?? null,
         assertCurrent,
         executionProviderRoute,

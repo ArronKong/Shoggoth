@@ -139,11 +139,20 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     const candidates = await Promise.all(bindings.bindings.map(binding => preflight ? candidate(profile, session, binding)
       : { bindingId: binding.id, support: { supported: false, code: "RUNTIME_FACTS_UNKNOWN" },
         adjustments: { clearModelOverride: false, permissionMode: permissionAdjustment(profile, session, binding) } }));
-    const modelProviderRef = displaySelection(profile, current, currentProviderSelection(session, current));
     const runtimeProfile = productStore.resolveAgentRuntimeProfile(profile.id, current.id);
+    const source = currentProviderSelection(session, current);
+    const modelProviderRef = displaySelection(profile, current, source);
+    let defaultModel = runtimeProfile.defaultModel;
+    if (source && codexSessionProvider.supportsSessionProviders(runtimeProfile)) {
+      try {
+        const providerRef = codexSessionProvider.resolveProviderSelection(productStore, runtimeProfile, source);
+        defaultModel = codexSessionProvider.applyProviderRef(productStore, runtimeProfile, providerRef).defaultModel;
+      } catch { defaultModel = null; }
+    }
     return validateSessionRuntimeResult({ sessionKey: session.sessionKey, revision: session.revision,
       ...(modelProviderRef ? { modelProviderRef } : {}),
-      bindingId: current.id, runtime: current.runtime, model: session.nextRuntimeSelection?.model ?? session.modelOverride ?? runtimeProfile.defaultModel,
+      bindingId: current.id, runtime: current.runtime,
+      model: (session.nextRuntimeSelection ? session.nextRuntimeSelection.model : session.modelOverride) ?? defaultModel,
       contextUsage: currentCoordinator().getRuntimeContext(session)?.contextUsage ?? null, candidates,
       canSwitch: !isDesktop(session) && getNativeRuntimeConfig().flags.runtimeConversationHandoff === true }, params);
   }

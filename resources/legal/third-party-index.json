@@ -1848,13 +1848,14 @@
       "revision": "0.167.1",
       "localFiles": [
         "schemas/codex-app-server/0.167.1",
-        "build/codex-runtime-manifest.json"
+        "build/codex-runtime-manifest.json",
+        "app/agent-service/prompts/codex-0.167.1-model-fallback.md"
       ],
       "licenseFiles": [
         "CODEX-LICENSE.txt",
         "CODEX-NOTICE.txt"
       ],
-      "notes": "Pinned unmodified runtime; generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately."
+      "notes": "Pinned unmodified runtime and fallback model prompt (codex-rs/models-manager/prompt.md from the same tag); generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately."
     },
     {
       "name": "Codex native voice libraries",

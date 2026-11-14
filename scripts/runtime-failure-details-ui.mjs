@@ -82,6 +82,8 @@ const cases = [];
 for (const [code, failure, englishSummary, englishDetail] of [
   ["ANTIGRAVITY_REGION_UNSUPPORTED", { message: "User location is not supported for the API use.", httpStatus: 400, upstreamCode: "FAILED_PRECONDITION" }, englishRegion],
   ["RUNTIME_QUOTA_EXHAUSTED", { message: "You exceeded your current quota; daily limit 100. Contact the project administrator.", httpStatus: 429, upstreamCode: "insufficient_quota" }, "The account's quota is exhausted and the request has stopped. Wait for the quota to reset, add quota, or switch accounts before retrying."],
+  ["RUNTIME_UPSTREAM_UNAVAILABLE", { message: "Model service temporarily unavailable.", httpStatus: 502 },
+    "The model provider is unavailable. Try again later or choose another available model."],
   ["ANTIGRAVITY_TURN_FAILED", { message: "Project verification required. Invalid API key for this project.", httpStatus: 403, upstreamCode: "project_verification_required" }, "The task failed and was not replayed automatically. See the provider details below."],
   ["ANTIGRAVITY_TURN_FAILED", null, englishMissing],
   ["RUNTIME_AUTH_REQUIRED", { message: "Invalid credentials.\nAuthorization: Bearer fixture-secret\nContact user@example.com\nConfig /Users/alice/private.json\nURL http://[bad]", httpStatus: 401 }, "Agent authentication failed. Check the account under Models or sign in again before retrying.", "Invalid credentials.\n[REDACTED]\nContact [EMAIL REDACTED]\nConfig [PATH REDACTED]\nURL [URL REDACTED]"],

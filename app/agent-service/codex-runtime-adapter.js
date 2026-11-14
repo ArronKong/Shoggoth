@@ -84,21 +84,23 @@ function codexApprovalPolicy(policy) {
   return policy === "on-failure" ? "on-request" : policy;
 }
 
-function approvalsReviewer(mode) {
+function approvalsReviewer(mode, requiresUserApproval) {
+  if (requiresUserApproval) return "user";
   return mode == null ? undefined : mode === "auto-review" ? "auto_review" : "user";
 }
 
-function assertApprovalsReviewer(input, response) {
-  if (input.permissionMode === "auto-review" && response?.approvalsReviewer !== "auto_review") {
-    throw adapterError("RUNTIME_APPROVAL_UNAVAILABLE", "Codex did not confirm automatic approval review");
+function assertApprovalsReviewer(mode, requiresUserApproval, permission, response) {
+  if ((requiresUserApproval || mode === "auto-review")
+    && response?.approvalsReviewer !== permission.approvalsReviewer) {
+    throw adapterError("RUNTIME_APPROVAL_UNAVAILABLE", "Codex did not confirm the requested approval reviewer");
   }
 }
 
-function permissionParams(policy, mode) {
+function permissionParams(policy, mode, requiresUserApproval) {
   return definedProperties({
     approvalPolicy: codexApprovalPolicy(policy?.approvalPolicy),
     sandbox: policy?.sandbox,
-    approvalsReviewer: approvalsReviewer(mode),
+    approvalsReviewer: approvalsReviewer(mode, requiresUserApproval),
   });
 }
 
@@ -235,6 +237,7 @@ class CodexRuntimeHandle {
       : input.isolatedGeneration ? await this._isolatedGenerationConfig() : undefined;
     const secretConfig = await this._modelSecretConfig(input);
     const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
+    const permission = permissionParams(input.permissionPolicy, input.permissionMode, this.host.requiresUserApproval);
     const response = await this._sessionStartOrResumeRequest(() => this.host.threadStart(definedProperties({
       threadSource: input.source,
       ephemeral: input.persistent === undefined ? undefined : !input.persistent,
@@ -243,10 +246,10 @@ class CodexRuntimeHandle {
       cwd: input.cwd,
       ...(reviewConfig || secretConfig || providerConfig
         ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig } } : {}),
-      ...permissionParams(input.permissionPolicy, input.permissionMode),
+      ...permission,
     })));
     this._rememberThreadProvider(response?.thread?.id, input);
-    assertApprovalsReviewer(input, response);
+    assertApprovalsReviewer(input.permissionMode, this.host.requiresUserApproval, permission, response);
     if (typeof input.developerInstructions === "string") {
       this.sessionInstructions.set(response.thread.id, {
         current: input.developerInstructions, applied: input.developerInstructions,
@@ -278,6 +281,7 @@ class CodexRuntimeHandle {
     const reviewConfig = input.proactiveReview ? await this._proactiveReviewConfig() : undefined;
     const secretConfig = await this._modelSecretConfig(input);
     const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
+    const permission = permissionParams(input.permissionPolicy, input.permissionMode, this.host.requiresUserApproval);
     const response = await this._sessionStartOrResumeRequest(() => this.host.threadResume(definedProperties({
       threadId: input.sessionId,
       excludeTurns: true,
@@ -286,10 +290,10 @@ class CodexRuntimeHandle {
       cwd: input.cwd,
       ...(reviewConfig || secretConfig || providerConfig
         ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig } } : {}),
-      ...permissionParams(input.permissionPolicy, input.permissionMode),
+      ...permission,
     })));
     this._rememberThreadProvider(input.sessionId, input);
-    assertApprovalsReviewer(input, response);
+    assertApprovalsReviewer(input.permissionMode, this.host.requiresUserApproval, permission, response);
     if (typeof input.developerInstructions === "string") {
       const previous = this.sessionInstructions.get(response.thread.id);
       this.sessionInstructions.set(response.thread.id, {
@@ -643,7 +647,7 @@ class CodexRuntimeHandle {
       effort,
       cwd: input.cwd,
       approvalPolicy: codexApprovalPolicy(input.permissionPolicy?.approvalPolicy),
-      approvalsReviewer: approvalsReviewer(input.permissionMode),
+      approvalsReviewer: approvalsReviewer(input.permissionMode, this.host.requiresUserApproval),
     }), ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}) });
     plan.commit();
     return started;

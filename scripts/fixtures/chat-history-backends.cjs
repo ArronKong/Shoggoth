@@ -37,7 +37,7 @@ function transcript(label, count = 181) {
 function createHistoryBackends() {
   const registry = new BackendRegistry(), histories = new Map(cases.map(row => [row.key, transcript(row.id)]));
   const revisions = new Map(cases.map(row => [row.key, 1]));
-  const controls = { fail: new Set(), delay: 20, requests: [], watches: [], hooks: new Map(), created: [] };
+  const controls = { fail: new Set(), delay: 20, requests: [], watches: [], hooks: new Map(), created: [], historyGate: null };
   const createEmpty = agentId => {
     const row = cases.find(item => item.agentId === agentId);
     const key = `agent:${agentId}:fresh-${controls.created.length + 1}`;
@@ -46,6 +46,7 @@ function createHistoryBackends() {
   };
   const waitRead = async (kind, key, cursor) => {
     controls.requests.push({ kind, key, cursor });
+    if (kind === "chat.history" && controls.historyGate) await controls.historyGate;
     await new Promise(resolve => setTimeout(resolve, controls.delay));
     if (cursor && controls.fail.has(key)) throw Object.assign(Error("isolated history failure"), { code: "FIXTURE_OFFLINE" });
   };
@@ -92,6 +93,8 @@ function createHistoryBackends() {
       pagination: { limit, offset, order: "latest", returned: messages.length } }) };
   };
   const native = new ShoggothBackend({ requestService: async () => { throw Error("real Service forbidden"); } });
+  native._state = "started";
+  native._codexAutomationOwnerId = cases[3].agentId;
   native.createSession = async agentId => createEmpty(agentId);
   native._nativeUiAvailable = true;
   native._codexDesktopEntries.set(cases[3].key, { threadId: cases[3].key, homeIdentity: "isolated-desktop" });
