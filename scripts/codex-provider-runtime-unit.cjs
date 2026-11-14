@@ -651,6 +651,42 @@ test("无 Provider 配置默认返回进程 overlay，且不创建逐 Profile CO
   }
 });
 
+test("官方 MiMo 的冻结执行来源加载本地目录并将审批交给用户", async () => {
+  const resources = openResources();
+  try {
+    const model = "mimo-v2.6-flash";
+    const endpoint = (id, baseUrl) => provider(id, { kind: "custom-responses", name: id, baseUrl,
+      model, credentialRef: null, headers: null });
+    resources.productStore.putModelProvider(endpoint("mimo", "https://token-plan-cn.xiaomimimo.com/v1"));
+    resources.productStore.putModelProvider(endpoint("mimo-mirror", "https://token-plan-cn.xiaomimimo.com.example.test/v1"));
+    putProfile(resources.productStore, "runtime-mimo");
+    const profile = resources.productStore.getAgentProfile("runtime-mimo");
+    const binding = { runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId };
+    const { captureExecutionProviderRoute } = require("../app/agent-service/execution-provider-route");
+    const prepare = (providerRef) => resources.bridge.prepareRuntime({ ...binding, executionContract: {
+      ...captureExecutionProviderRoute({ productStore: resources.productStore, secretStore: resources.secretStore,
+        profile, providerRef, modelRef: model }), ...binding,
+    } });
+    const mimo = await prepare("mimo");
+    assert.equal(mimo.requiresUserApproval, true);
+    const prefix = "model_catalog_json=";
+    const catalogPath = JSON.parse(mimo.configArgs.find(value => value.startsWith(prefix)).slice(prefix.length));
+    assert.equal(fs.statSync(catalogPath).mode & 0o777, 0o600);
+    const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
+    assert.equal(catalog.models.find(entry => entry.slug === model).max_context_window, 1_048_576);
+    const originalInode = fs.statSync(catalogPath).ino;
+    assert.deepEqual((await prepare("mimo")).configArgs, mimo.configArgs);
+    assert.equal(fs.statSync(catalogPath).ino, originalInode, "an identical catalog is reused");
+    for (const other of [await prepare("mimo-mirror"), await resources.bridge.prepareRuntime(binding)]) {
+      assert.equal(other.requiresUserApproval, undefined);
+      assert.equal(other.configArgs.some(value => value.startsWith(prefix)), false);
+    }
+  } finally {
+    await closeResources(resources);
+    fs.rmSync(resources.root, { recursive: true, force: true });
+  }
+});
+
 test("只在对应 runtimeProfile 解密，返回确定性专用 env/registered secret 且不改 process.env", async () => {
   const resources = openResources();
   const canary = "runtime-provider-secret-canary-000001";

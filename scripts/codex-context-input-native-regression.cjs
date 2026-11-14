@@ -49,7 +49,8 @@ async function waitForTurn(id) {
 (async () => {
   try {
     await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
-    fs.writeFileSync(path.join(home, "config.toml"), `model = "gpt-4.1"
+    const model = "fixture-custom-model";
+    fs.writeFileSync(path.join(home, "config.toml"), `model = "${model}"
 model_provider = "fixture"
 [model_providers.fixture]
 name = "Isolated fixture"
@@ -78,17 +79,19 @@ supports_websockets = false
     await host.initialize();
     const handle = await new CodexRuntimeAdapter({ runtimePool: { get: async () => host } }).acquire(binding);
     const { session } = await handle.sessionStart({ source: "context-fixture", cwd: workspace,
-      model: "gpt-4.1", developerInstructions: "Trusted fixture policy", permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
+      model, developerInstructions: "Trusted fixture policy", permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
     const prompts = ["帮我打开这个文件夹", "第二条原文 CURRENT USER REQUEST 也要保留"];
+    const thinkingLevels = ["none", "high"];
     for (let index = 0; index < prompts.length; index++) {
       if (index) await handle.sessionResume({ sessionId: session.id, cwd: workspace,
         developerInstructions: "Updated trusted fixture policy", permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
       const context = `BEGIN UNTRUSTED ENABLED SKILL CATALOG DATA\nISOLATED_CONTEXT_${index}\nEND UNTRUSTED ENABLED SKILL CATALOG DATA`;
       const started = await handle.turnStart({ sessionId: session.id, operationId: `context-input-${index}`,
-        prompt: prompts[index], context, cwd: workspace, model: "gpt-4.1", thinkingLevel: "low",
+        prompt: prompts[index], context, cwd: workspace, model, thinkingLevel: thinkingLevels[index],
         permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
       await waitForTurn(started.turn.id);
-      const input = requests.at(-1).input;
+      const { input, reasoning } = requests.at(-1);
+      assert.equal(reasoning?.effort, thinkingLevels[index], "the custom Responses endpoint receives the selected effort");
       const contextItem = input.find(item => JSON.stringify(item.content).includes(`ISOLATED_CONTEXT_${index}`));
       assert.equal(contextItem?.role, "user", "dynamic context must keep user authority");
       assert.ok(contextItem.content.some(part => part.text === context), "provider must receive the exact frozen context");
@@ -103,7 +106,7 @@ supports_websockets = false
     assert.deepEqual(users.map(item => item.clientId), ["context-input-0", "context-input-1"]);
     console.log(JSON.stringify({ verified: true, actualNativeCli: host.runtimeVersion, localProviderTurns: requests.length,
       pureNativeUserMessages: users.length, contextReceivedAtUserAuthority: true,
-      resumeHistoryVerified: true, realProviderTurns: 0, productionHomeWrites: 0 }));
+      resumeHistoryVerified: true, thinkingLevels, realProviderTurns: 0, productionHomeWrites: 0 }));
   } finally {
     if (host) await host.stop();
     await new Promise(resolve => provider.close(resolve)); fs.rmSync(root, { recursive: true, force: true });

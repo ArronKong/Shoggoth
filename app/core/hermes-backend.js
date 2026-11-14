@@ -38,6 +38,7 @@ const {
   buildHermesModelCatalogState,
   commitHermesModelCatalogState,
 } = require("./hermes-model-catalog-state");
+const { HERMES_THINKING_LEVELS, hermesModelThinkingOptions, readHermesReasoningCatalog } = require("./hermes-reasoning-catalog");
 
 // Hermes tool names whose argument carries a host shell command (vs. code
 // sandbox / web / file tools). `terminal` is the shell tool; the rest future-proof.
@@ -147,34 +148,6 @@ const CHAT_HOOK_METHODS = Object.freeze([
   "delta", "final", "error", "interim", "thinking", "tool", "plan",
   "status", "prompt", "promptExpire", "accepted",
 ]);
-// Hermes reasoning-effort vocabulary (hermes_constants.VALID_REASONING_EFFORTS
-// + the "none" sentinel). This validates the runtime's control vocabulary;
-// it is not a declaration that any particular model supports every level.
-const HERMES_THINKING_LEVELS = Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
-// Verified compatibility for these exact model ids only. A future model must
-// not inherit this policy, and an explicit runtime declaration always wins.
-const MIMO_LEGACY_EFFORT_MODELS = new Set(["mimo-v2.6-pro", "mimo-v2.6-flash"]);
-
-function hermesModelThinkingOptions(provider, modelId, capability = {}) {
-  capability ||= {};
-  if (capability.reasoning === false) return [];
-  // A reasoning boolean is not a wire-level vocabulary. Prefer a declared set;
-  // Current Hermes drops supported_efforts, and MiMo's /models returns only
-  // ids. Keep the verified workaround narrow instead of inventing levels for
-  // every present/future model at that endpoint.
-  let levels = Array.isArray(capability.supported_efforts)
-    ? HERMES_THINKING_LEVELS.filter(level => capability.supported_efforts.includes(level)) : null;
-  let host = "";
-  try { host = new URL(provider.api_url || "").hostname.toLowerCase(); } catch { /* no endpoint in builtin rows */ }
-  const directMiMo = host === "xiaomimimo.com" || host.endsWith(".xiaomimimo.com")
-    || provider.slug === "xiaomi" && provider.is_user_defined !== true && provider.source !== "user-config";
-  if (levels === null && directMiMo) levels = MIMO_LEGACY_EFFORT_MODELS.has(modelId) ? ["none", "low", "medium", "high"] : [];
-  // "reasoning: true" alone says nothing about accepted effort values. Keep
-  // the model selectable, but do not manufacture manual effort controls.
-  levels ||= [];
-  return capability.can_disable_reasoning === false ? levels.filter(level => level !== "none") : levels;
-}
-
 function clampHermesThinking(level, options) {
   if (!level || !options?.length || options.includes(level) || !HERMES_THINKING_LEVELS.includes(level)) return level;
   // A weak enabled request must not silently turn thinking off.
@@ -1855,6 +1828,11 @@ class HermesBackend extends AgentBackend {
           const parsed = JSON.parse(body);
           okDashboards += 1;
           const providers = Array.isArray(parsed.providers) ? parsed.providers : [];
+          let reasoningCatalog = {};
+          if (dash.managed || this._getConfig().hermesMode !== "remote") {
+            try { reasoningCatalog = readHermesReasoningCatalog(this._hermesHomeForProfile(profile)); }
+            catch { /* Optional catalog metadata must not invalidate dashboard model rows. */ }
+          }
           const profileModels = new Set();
           const profileIdentities = new Set();
           const profileChoices = [];
@@ -1883,7 +1861,7 @@ class HermesBackend extends AgentBackend {
               profileIdentities.add(catalogKey);
               const cap = caps[modelId];
               const providerName = typeof p.name === "string" && p.name.trim() ? p.name.trim() : providerSlug;
-              const thinkingOptions = hermesModelThinkingOptions(p, modelId, cap);
+              const thinkingOptions = hermesModelThinkingOptions(p, modelId, cap, reasoningCatalog);
               // 每个 Profile 先独立收集；等待全部 HTTP 后再按稳定 Profile 顺序折叠。
               profileCatalogRows.push({
                 id: modelId,
@@ -2415,13 +2393,15 @@ class HermesBackend extends AgentBackend {
         // main 聚合占位行兜底：main 键的空历史种子（getMessages）、首条消息开新
         // ACP 会话（sendMessage）、rename/delete 拒绝，均是既有语义。
         if (rows.length === 0) {
+          const agent = this.agents.find((a) => a.id === agentId);
           rows.push({
             key: `agent:${agentId}:main`,
             backendId: "hermes",
             agentId,
             kind: "direct",
             updatedAt: null,
-            model: this.agents.find((a) => a.id === agentId)?.model,
+            model: agent?.model,
+            modelProvider: agent?.provider,
           });
         }
         aggregated.push(...rows);

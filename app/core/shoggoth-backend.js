@@ -1,5 +1,6 @@
 "use strict";
 const { runtimeFailureDetail, failureDetailText } = require("../agent-service/runtime-failure-detail");
+const { classifyProviderFailureDetail } = require("../agent-service/runtime-provider-errors");
 const { CodexAutomationBackend, isCodexAutomationId, isCodexAutomationOwner } = require("./codex-automation-backend");
 const codexAutomationProtocol = require("../agent-service/codex-automation-protocol");
 const codexDesktopProtocol = require("../agent-service/codex-desktop-session-protocol");
@@ -1171,6 +1172,12 @@ function assertGatewayMessage(value) {
   return structuredClone(value);
 }
 
+// Older terminal records classified gateway outages as a model rejection.
+function displayedRuntimeErrorCode(code, failure) {
+  return code === "RUNTIME_MODEL_UNAVAILABLE" && classifyProviderFailureDetail(failure) === "RUNTIME_UPSTREAM_UNAVAILABLE"
+    ? "RUNTIME_UPSTREAM_UNAVAILABLE" : code;
+}
+
 function runtimeErrorMessage(code, failure) {
   const detail = failureDetailText(failure, ["PI_TOOL_DESCRIPTION_TOO_LARGE", "PI_TOOL_CATALOG_TOO_LARGE"].includes(code) ? "启动详情" : undefined);
   const generic = /(?:^RUN_FAILED$|_TURN_FAILED$|_START_FAILED$|_RUNTIME_FAILED$)/u.test(code);
@@ -1184,9 +1191,11 @@ function displayHistoryMessage(message, item) {
     || message.content.length !== 1 || message.content[0]?.type !== "text") return message;
   const code = message.content[0].text;
   if (typeof code === "string" && SAFE_CODE_PATTERN.test(code) && (RUNTIME_START_MESSAGES[code] || message.failure)) {
-    // Only project canonical error records. Keep the durable code untouched,
-    // and never rewrite an error code quoted by the user or the model.
-    message.content[0].text = `错误：${runtimeErrorMessage(code, message.failure)}`;
+    // The durable error code remains the identity for terminal recovery.
+    if (message.failure) message.failure = runtimeFailureDetail(message.failure);
+    const displayCode = displayedRuntimeErrorCode(code, message.failure);
+    message.content[0].text = `错误：${runtimeErrorMessage(displayCode, message.failure)}`;
+    if (message.errorCode === code) message.errorCode = displayCode;
   }
   return message;
 }
@@ -5524,7 +5533,9 @@ class ShoggothBackend extends AgentBackend {
       stateLabel: value.enabled ? "scheduled" : "disabled",
       ...(value.connectorMigrationRequired ? { connectorMigrationRequired: true,
         state: "migration-required", stateLabel: "migration-required", actions: { run: false } } : {}),
-      deliver: "chat",
+      deliver: value.deliveryTarget === "group" ? "group" : "chat",
+      ...(value.deliveryTarget === "group" ? { deliveryTarget: "group" } : {}),
+      ...(value.watch === undefined ? {} : { watch: value.watch }),
       ...(value.systemManaged ? { actions: { edit: false, toggle: false, delete: false,
         run: false, reason: "system-managed" } } : {}),
       createdAt: value.createdAt,
@@ -6012,7 +6023,7 @@ class ShoggothBackend extends AgentBackend {
     if (spec.origin === "codex-desktop") return this._codexAutomations().create(spec);
     this._rejectUnsupportedTaskFields(spec, new Set([
       "agentId", "profileId", "name", "prompt", "enabled", "workspace", "schedule",
-      "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId",
+      "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "watch",
       "backendId",
     ]), "CRON_CREATE_UNSUPPORTED");
     if (spec.backendId !== undefined && spec.backendId !== this.id) {
@@ -6039,6 +6050,7 @@ class ShoggothBackend extends AgentBackend {
       overlapPolicy: spec.overlapPolicy || "skip",
       threadPolicy,
       threadId: threadId === undefined ? null : threadId,
+      ...(spec.watch === undefined ? {} : { watch: spec.watch }),
       createdAt,
     };
     const result = await this._call("cron.job.create", mutation);
@@ -6055,6 +6067,7 @@ class ShoggothBackend extends AgentBackend {
       overlapPolicy: mutation.overlapPolicy,
       threadPolicy: mutation.threadPolicy,
       threadId: mutation.threadId,
+      ...(mutation.watch === undefined ? {} : { watch: mutation.watch }),
       createdAt,
       updatedAt: createdAt,
     })) throw safeError(null, "CRON_MUTATION_BINDING_INVALID");
@@ -6066,7 +6079,7 @@ class ShoggothBackend extends AgentBackend {
     const target = await this._loadCronTarget(id);
     this._rejectUnsupportedTaskFields(patch, new Set([
       "name", "prompt", "enabled", "workspace", "schedule", "misfirePolicy",
-      "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId",
+      "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "watch",
     ]), "CRON_PATCH_UNSUPPORTED");
     const keys = Object.keys(patch).filter((key) => patch[key] !== undefined);
     if (keys.length === 0) throw safeError(null, "CRON_PATCH_INVALID");
@@ -6157,6 +6170,7 @@ class ShoggothBackend extends AgentBackend {
       ...(value.sessionKey ? { sessionKey: gatewaySessionKey(
         this._assertKnownProfileId(run.profileId).agentId, value.sessionKey,
       ) } : {}),
+      ...(value.deliveryTarget === "group" ? { deliveryTarget: "group" } : {}),
       durationMs: run.finishedAt === null ? undefined : Math.max(0, run.finishedAt - startedAt),
     };
     return output;
@@ -6712,6 +6726,7 @@ class ShoggothBackend extends AgentBackend {
 
   async _readCronDelivery(target, selected) {
     if (!selected) return { source: "none" };
+    const groupBound = target.job.deliveryTarget === "group";
     const output = {
       status: selected.status,
       startedAt: selected.startedAt,
@@ -6721,7 +6736,8 @@ class ShoggothBackend extends AgentBackend {
       fullText: null,
       source: selected.summary ? "summary" : "none",
       ...(selected.error ? { error: selected.error } : {}),
-      ...(selected.sessionKey ? { sessionKey: selected.sessionKey } : {}),
+      ...(!groupBound && selected.sessionKey ? { sessionKey: selected.sessionKey } : {}),
+      ...(groupBound ? { deliveryTarget: "group" } : {}),
       runId: selected.id,
     };
     if (selected.outputDisposition) output.outputDisposition = selected.outputDisposition;
@@ -6733,7 +6749,7 @@ class ShoggothBackend extends AgentBackend {
       return output;
     }
     if (selected.sessionKey && selected.status === "ok") {
-      const messages = await this._cronRunMessages(target, selected);
+      const messages = await this._cronRunMessages(target, selected, { audit: groupBound });
       const final = messages.filter((message) => message.role === "assistant")
         .map((message) => message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"))
         .filter((text) => text.trim()).at(-1);
@@ -7005,6 +7021,24 @@ class ShoggothBackend extends AgentBackend {
     return result;
   }
 
+  getChatCacheScope(key) {
+    if (!key || this._state !== "started" || this._serviceRecoveryCode) return null;
+    let target;
+    try { target = this._sessionTarget(key); }
+    catch (error) {
+      if (error?.code === "CHAT_SESSION_INVALID") return null;
+      throw error;
+    }
+    const { profile, sessionKey, session } = target;
+    if (session.status === "delete_pending") return null;
+    const desktop = this._codexDesktopEntries.get(sessionKey);
+    if (desktop && (this._codexDesktopSourceError || profile.id !== this._codexAutomationOwnerId)) return null;
+    const { historySource } = require("./chat-history-page");
+    return { memoryOnly: true, scope: historySource(this.paths.stateDir, this._generation,
+      this._serviceInstanceNonce, profile.id, key, session.runtimeBindingId, this._nativeUiAvailable,
+      desktop?.threadId, desktop?.homeIdentity) };
+  }
+
   async getHistoryPage(key, options = {}) {
     const { historyError, historySource, historyPageOptions, encodeHistoryCursor,
       decodeHistoryCursor, historyPage } = require("./chat-history-page");
@@ -7014,20 +7048,25 @@ class ShoggothBackend extends AgentBackend {
     const desktop = this._codexDesktopEntries.get(sessionKey);
     const sourceId = historySource(this.id, key, profile.id, session.runtimeBindingId,
       desktop?.threadId, desktop?.homeIdentity);
-    const position = decodeHistoryCursor(this, sourceId, wireCursor);
+    const cursorScope = desktop ? sourceId : historySource(sourceId, limit);
+    const position = decodeHistoryCursor(this, cursorScope, wireCursor);
     let cursor = position?.cursor ?? null, bytes = 0;
     const items = [], seen = new Set();
+    // Service cursors bind the limit. After a byte-limited page, keep asking
+    // for the same number until any split message is complete.
+    const serviceLimit = desktop ? Math.min(20, limit) : limit;
     try {
       for (let pageIndex = 0; pageIndex < this.maxPages; pageIndex++) {
         const result = await this._call(desktop ? "codex.desktop.history" : "chat.history", {
           ...(desktop ? { profileId: profile.id, threadId: desktop.threadId, homeIdentity: desktop.homeIdentity } : { sessionKey }),
-          cursor, limit: items.length >= limit || bytes >= 128 * 1024 ? 1 : Math.min(20, limit),
+          cursor, limit: desktop && (items.length >= limit || bytes >= 128 * 1024) ? 1 : serviceLimit,
         });
         if (generation !== this._generation) throw historyError();
         const current = this._sessionTarget(key), currentDesktop = this._codexDesktopEntries.get(sessionKey);
         if (sourceId !== historySource(this.id, key, current.profile.id, current.session.runtimeBindingId,
           currentDesktop?.threadId, currentDesktop?.homeIdentity)) throw historyError();
         if (!Array.isArray(result?.messages) || typeof result.hasMore !== "boolean"
+          || (!desktop && result.messages.length > serviceLimit)
           || (result.hasMore && (typeof result.nextCursor !== "string" || !result.nextCursor
             || result.nextCursor === cursor || seen.has(result.nextCursor)))) throw historyError("CHAT_HISTORY_INVALID");
         items.unshift(...result.messages);
@@ -7036,7 +7075,7 @@ class ShoggothBackend extends AgentBackend {
         const complete = !items[0]?.fragment || items[0].fragment.index === 0;
         if (!result.hasMore || (complete && (items.length >= limit || bytes >= 128 * 1024))) {
           return historyPage(projectNativeHistory(reassembleHistory(items), this._nativeUiAvailable), result.hasMore,
-            result.hasMore ? encodeHistoryCursor(this, sourceId, { cursor: result.nextCursor }) : null, sourceId);
+            result.hasMore ? encodeHistoryCursor(this, cursorScope, { cursor: result.nextCursor }) : null, sourceId);
         }
         if (!result.nextCursor || seen.has(result.nextCursor) || result.nextCursor === cursor) throw historyError("CURSOR_NOT_ADVANCING");
         seen.add(result.nextCursor); cursor = result.nextCursor;
@@ -7965,14 +8004,14 @@ class ShoggothBackend extends AgentBackend {
       try {
         const items = await this._getHistoryItems(context.key);
         const messages = reassembleHistory(items.filter(item => item.runId === terminal.id && item.type === "error"));
-        failure = runtimeFailureDetail(messages.find(message => message.role === "system"
-          && message.errorCode === terminal.errorCode)?.failure);
+        failure = messages.find(message => message.role === "system"
+          && message.errorCode === displayedRuntimeErrorCode(terminal.errorCode, message.failure))?.failure;
       } catch { /* Missing diagnostics never change the proven terminal status. */ }
     }
     if (context.poll?.consumerCancelled) return;
     if (state.nativeContent?.hasUi && typeof context.hooks.nativeContent === "function") {
       if (context.poll.consumerCancelled) return;
-      const code = terminal.errorCode || (terminal.status === "canceled" ? "RUN_CANCELED" : "RUN_FAILED");
+      const code = displayedRuntimeErrorCode(terminal.errorCode || (terminal.status === "canceled" ? "RUN_CANCELED" : "RUN_FAILED"), failure);
       const errorMessage = terminal.status === "completed" ? null
         : code === "SERVICE_RESTARTED" ? "Agent Service 已重启，本次任务已中断，请重试" : runtimeErrorMessage(code, failure);
       this._emitNativeContent(context, state, "final", { runId: terminal.id,
@@ -8001,8 +8040,8 @@ class ShoggothBackend extends AgentBackend {
         ...(["cron", "inspiration"].includes(context.run.source) ? { notificationCategory: context.run.source } : {}) });
       return;
     }
-    const code = typeof terminal.errorCode === "string" && SAFE_CODE_PATTERN.test(terminal.errorCode)
-      ? terminal.errorCode : terminal.status === "canceled" ? "RUN_CANCELED" : "RUN_FAILED";
+    const code = displayedRuntimeErrorCode(typeof terminal.errorCode === "string" && SAFE_CODE_PATTERN.test(terminal.errorCode)
+      ? terminal.errorCode : terminal.status === "canceled" ? "RUN_CANCELED" : "RUN_FAILED", failure);
     if (code === "CODEX_PROMPT_TIMEOUT") {
       if (pendingRequestId) {
         this._invokeHook(context.hooks, "promptExpire", { requestId: pendingRequestId });

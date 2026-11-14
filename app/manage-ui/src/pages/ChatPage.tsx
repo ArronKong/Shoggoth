@@ -3544,9 +3544,10 @@ function ChatPageApp() {
   const chatHistoryController = useMemo(() => createHistoryController<ChatMsg>({
     backendOfSession,
     agentOfSession: agentOf,
-    getCacheScope: async (backendId) => {
-      const value = await getChatCacheScope(backendId);
-      return value.backendId === backendId ? value.cacheScope : undefined;
+    getCacheScope: async (backendId, key) => {
+      const value = await getChatCacheScope(backendId, key);
+      if (value.backendId !== backendId || !value.cacheScope) return undefined;
+      return value.memoryOnly ? { scope: value.cacheScope, memoryOnly: true } : value.cacheScope;
     },
     getCached: async (scope, key) => {
       const cached = await getCachedChatHistory(scope, key);
@@ -3557,6 +3558,7 @@ function ChatPageApp() {
     clearCachedExcept: clearCachedChatHistoryExcept,
     prepare: prepareHistoryMessages,
     requestCanonical: key => historyPager.refresh(key),
+    latestWindow: historyPager.latestWindow,
     releaseCanonical: raw => historyPager.release(raw),
     isInFlight: (key) => inFlightRef.current.has(key),
     commitOpen: commitOpenedHistory,
@@ -5234,9 +5236,14 @@ function ChatPageApp() {
     const el = threadRef.current;
     const landing = unreadLandingRef.current;
     if (landing?.key === activeKey && landing.pending) {
-      // Cached paint is provisional. Wait for canonical history and, when needed,
-      // page back to the read boundary before choosing the first unread reply.
-      if (!historyLoaded || unreadLoading) return;
+      // Show the recent messages while the authoritative unread position loads.
+      if (!historyLoaded || unreadLoading) {
+        if (settledKeyRef.current !== activeKey && historyVisible && messages.length) {
+          settledKeyRef.current = activeKey;
+          scrollThreadToBottom();
+        }
+        return;
+      }
       if (!landing.confirmed) {
         landing.after = sessionReadAt(unreadState, activeKey);
         landing.confirmed = true;
@@ -5362,7 +5369,7 @@ function ChatPageApp() {
       else if (initialScrollFrameRef.current == null) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
       atBottomRef.current = true;
     }
-  }, [messages, activeKey, historyLoaded, unreadReady, unreadLoading, unreadState.installationId, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, scrollThreadToBottom, runWaitBySession]);
+  }, [messages, activeKey, historyLoaded, historyVisible, unreadReady, unreadLoading, unreadState.installationId, earlierHistory, hiddenIds, loadEarlierHistory, cancelInitialScroll, scrollThreadToBottom, runWaitBySession]);
 
   const maybeLoadArchive = () => {
     const key = activeKeyRef.current;
@@ -9024,28 +9031,51 @@ function ChatPageApp() {
     [groups, pinnedIds],
   );
 
-  // Thinking dropdown is model-aware. `reasoning` rides on the model catalog
-  // (UnifiedModel) → only reasoning models get a thinking selector. xhigh is a
-  // per-model gateway decision with no read RPC, so it's probed + cached at runtime
-  // (lib/thinkingCapability). Scoped to OpenClaw — Hermes rejects sessions.patch.
+  // Session/runtime catalogs carry the supported levels. Only OpenClaw's
+  // legacy defaults use its gateway vocabulary and cached xhigh probe.
   const activeModelInfo = useMemo(
     () => usesRuntimeModelPicker ? selectedRuntimeModel : selectableModels.find((m) => m.id === (active?.model ?? inheritedRuntimeDefault?.id)
       && (!active?.modelProvider || m.provider === active.modelProvider || m.acpProviderRef === active.modelProvider)),
     [usesRuntimeModelPicker, selectedRuntimeModel, active?.model, active?.modelProvider, inheritedRuntimeDefault?.id, selectableModels],
   );
+  const activeIsOpenClaw = !!activeKey && backendOfSession(activeKey) === "openclaw";
   const activeThinkingOptions = usesRuntimeModelPicker ? activeModelInfo?.thinkingOptions : active?.thinkingOptions ?? activeModelInfo?.thinkingOptions;
   const activeThinkingDefault = usesRuntimeModelPicker ? activeModelInfo?.thinkingDefault : active?.thinkingDefault ?? activeModelInfo?.thinkingDefault;
   const activeIsReasoning = activeModelInfo?.reasoning === true;
-  // ⚡ 显示门槛（能力驱动，无后端特判）：目录声明 fast 能力（Hermes capabilities.fast）
-  // 直接开；能力未知（OpenClaw 不带该字段）沿用旧口径 reasoning 模型才显示；
-  // 显式 false（Hermes 非 fast 模型）隐藏。
-  const activeFastCapable =
-    activeModelInfo?.fast === true || (activeModelInfo?.fast === undefined && activeIsReasoning);
-  const activeIsOpenClaw = !!activeKey && backendOfSession(activeKey) === "openclaw";
+  const activeFastCapable = activeModelInfo?.fast === true
+    || (activeIsOpenClaw && activeModelInfo?.fast === undefined && activeIsReasoning);
   const xhighKey = active?.model
     ? `${active.modelProvider || activeModelInfo?.provider || ""}:${active.model}`
     : "";
   const xhighSupported = xhighKey ? xhighOk[xhighKey] === true : false;
+  const thinkingLevels = activeThinkingOptions ?? (activeIsOpenClaw && activeThinkingDefault
+    ? ["off", "minimal", "low", "medium", "high", ...(xhighSupported ? ["xhigh"] : []), "adaptive"] : []);
+  const effortControl = active && (thinkingLevels.length > 0 || activeFastCapable) ? {
+    levels: thinkingLevels,
+    value: active.thinkingLevel && thinkingLevels.includes(active.thinkingLevel) ? active.thinkingLevel : "",
+    defaultValue: activeThinkingDefault,
+    defaultLabel: t("chat.defaultLevel"),
+    levelLabel: thinkLabel,
+    fastCapable: !!activeFastCapable,
+    fastOn: !!(active.fastMode ?? fastByKey[active.key]),
+    disabled: !connected || runtimeModels.pending,
+    onChangeThinking: (level: string) => patchSession({ thinkingLevel: level || null }, t("chat.labelThinking")),
+    onChangeFast: (next: boolean) => {
+      const key = activeKeyRef.current;
+      if (!key) return;
+      const previous = sessionsRef.current.find((row) => row.key === key)?.fastMode ?? fastByKey[key] ?? false;
+      if (next !== previous) {
+        void (async () => {
+          if (await patchSession({ fastMode: next }, "fast")) {
+            setFastByKey((values) => ({ ...values, [key]: next }));
+          }
+        })();
+      }
+    },
+  } : null;
+  const effortControlKey = JSON.stringify([active?.key, runtimeModels.data?.selection.bindingId,
+    activeModelInfo?.id ?? active?.model, runtimeModels.data?.selection.modelProviderRef ?? active?.modelProvider,
+    thinkingLevels]);
 
   // Learn xhigh support for the active OpenClaw reasoning model once, then cache it.
   useEffect(() => {
@@ -10821,45 +10851,7 @@ function ChatPageApp() {
                       />
                     </span>
                   </div>
-                  {(activeThinkingOptions?.length || activeThinkingDefault || activeFastCapable) && (
-                    <ChatThinkFastMenu
-                      key={active.key}
-                      levels={
-                        (activeThinkingOptions?.length || activeThinkingDefault)
-                          ? (activeThinkingOptions ?? [
-                              "off",
-                              "minimal",
-                              "low",
-                              "medium",
-                              "high",
-                              ...(xhighSupported ? ["xhigh"] : []),
-                              "adaptive",
-                            ])
-                          : []
-                      }
-                      value={active.thinkingLevel ?? ""}
-                      defaultValue={activeThinkingDefault}
-                      defaultLabel={t("chat.defaultLevel")}
-                      levelLabel={thinkLabel}
-                      fastCapable={!!activeFastCapable}
-                      fastOn={!!(active.fastMode ?? (activeKey ? fastByKey[activeKey] : false))}
-                      disabled={!connected}
-                      onChangeThinking={(level) => {
-                        return patchSession({ thinkingLevel: level || null }, t("chat.labelThinking"));
-                      }}
-                      onChangeFast={(next) => {
-                        const key = activeKeyRef.current;
-                        if (!key) return;
-                        const previous = sessionsRef.current.find((row) => row.key === key)?.fastMode ?? fastByKey[key] ?? false;
-                        if (next === previous) return;
-                        void (async () => {
-                          if (await patchSession({ fastMode: next }, "fast")) {
-                            setFastByKey((m) => ({ ...m, [key]: next }));
-                          }
-                        })();
-                      }}
-                    />
-                  )}
+                  {effortControl && <ChatThinkFastMenu key={effortControlKey} {...effortControl} />}
                   <ChatPermissionMenu
                     options={permissionOptions}
                     activeMode={activePermissionMode}
@@ -11019,7 +11011,7 @@ function ChatPageApp() {
           changePermissionMode={(option) => { void changePermissionMode(option); }}
           permissionSelectionDisabled={!connected}
           listLive={listLive}
-          thinkingLevel={active?.thinkingLevel ? thinkLabel(active.thinkingLevel) : ""}
+          thinkingControl={effortControl ? { key: effortControlKey, props: effortControl } : undefined}
           ctxSummary={ctxPct != null ? `${ctxPct}% · ${fmtTokens(active?.totalTokens)}/${fmtTokens(ctxLimit)}` : ""}
           listening={listening}
           toggleTalk={toggleTalk}
@@ -11124,7 +11116,6 @@ function ChatPageHistoryFixture({ deps }: { deps: ChatPageTestDeps }) {
           changeModel={() => {}}
           modelSelectionDisabled={false}
           listLive
-          thinkingLevel=""
           ctxSummary=""
           listening={false}
           toggleTalk={() => {}}

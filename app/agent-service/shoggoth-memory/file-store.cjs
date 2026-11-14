@@ -24,20 +24,77 @@ CREATE TABLE IF NOT EXISTS memory_report_evidence (profile_id TEXT NOT NULL,path
 CREATE TABLE IF NOT EXISTS memory_file_invalidation (profile_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,revision INTEGER NOT NULL,files TEXT NOT NULL CHECK(json_valid(files))) STRICT;
 `;
 
+const DREAMS_PATH = /^(?:DREAMS|dreams)\.md$/u;
+const DIARY = /^# Dream Diary\n\n<!-- openclaw:dreaming:diary:start -->\n([\s\S]*?)(?<=\n)<!-- openclaw:dreaming:diary:end -->(?:\n|$)/u;
+const DEEP_REPORT = /^(## Deep Sleep\n<!-- openclaw:dreaming:deep:start -->\n)([\s\S]*?)\n<!-- openclaw:dreaming:deep:end -->$/mu;
+const REPAIR_DETAILS = /^- Repaired recall artifacts: (?:rewrote recall store(?: \(-\d+ (?:invalid|dangling|overflow)(?:, -\d+ (?:invalid|dangling|overflow))*\))?(?:, removed stale promotion lock)?|removed stale promotion lock)\.$/u;
+const REJECTION_CATEGORIES = new Set(["age threshold", "already promoted", "candidate changed", "consolidation origin/session",
+  "contamination", "memory budget", "origin", "query threshold", "score threshold", "selection limit", "signal threshold",
+  "source changed", "source rehydration"]);
+
+function isDeepStatusReport(body) {
+  // These lines contain counters from the pinned Dreaming writer. A Deep
+  // block with arbitrary prose still has the full invalidation semantics.
+  const lines = body.split("\n");
+  if (REPAIR_DETAILS.test(lines[0])) lines.shift();
+  const rejected = /^- Not promoted: \d+ candidate\(s\) \((.+)\)\.$/u.exec(lines.at(-1));
+  if (rejected?.[1].split(", ").every(row => {
+    const match = /^([a-z /]+): \d+$/u.exec(row);
+    return REJECTION_CATEGORIES.has(match?.[1]);
+  })) lines.pop();
+  return lines.length === 2 && /^- Ranked \d+ candidate\(s\) for durable promotion\.$/u.test(lines[0])
+    && /^- Promoted \d+ candidate\(s\) into MEMORY\.md\.$/u.test(lines[1]);
+}
+
+function dreamSource(text) {
+  const diary = DIARY.exec(text);
+  // Accept the pinned writer's layout. Ambiguous or broken markers leave the
+  // complete file subject to the ordinary prefix check.
+  const diaryMarkers = text.match(/<!-- openclaw:dreaming:diary:(?:start|end) -->/gu)?.length ?? 0;
+  if (diaryMarkers !== (diary ? 2 : 0)) return null;
+  const retained = diary ? text.slice(diary[0].length) : text;
+  const deep = DEEP_REPORT.exec(retained);
+  const sections = { retained: retained.trimEnd(), diary: diary?.[1] ?? null };
+  if (deep && isDeepStatusReport(deep[2])) {
+    const deepMarkers = text.match(/<!-- openclaw:dreaming:deep:(?:start|end) -->/gu)?.length ?? 0;
+    if (deepMarkers !== 2) return null;
+    const body = deep.index + deep[1].length;
+    sections.statusFree = (retained.slice(0, body) + retained.slice(body + deep[2].length)).trimEnd();
+  }
+  return sections;
+}
+
+const digest = text => ({ length: text.length, hash: sha256(text) });
+function matchesPrefix(entry, text) {
+  return typeof text === "string" && Number.isSafeInteger(entry?.length) && entry.length >= 0
+    && text.length >= entry.length && sha256(text.slice(0, entry.length)) === entry.hash;
+}
+
 function sourceDigests(files) {
-  return files.map(file => {
-    const text = file.content.trimEnd();
-    return { path: file.path, length: text.length, hash: sha256(text) };
+  return files.map(({ path: relative, text, dreams }) => {
+    const entry = { path: relative, ...digest(text) };
+    if (DREAMS_PATH.test(relative)) entry.dreams = dreams && {
+      retained: digest(dreams.retained),
+      diary: dreams.diary === null ? null : digest(dreams.diary),
+      ...(dreams.statusFree === undefined ? {} : { statusFree: digest(dreams.statusFree) }),
+    };
+    return entry;
   });
 }
 // True when every earlier source still exists and only had text appended.
 // Any edit, removal or deleted file may withdraw a fact a native session holds.
 function sourcesOnlyAppended(previous, files) {
-  const current = new Map(files.map(file => [file.path, file.content.trimEnd()]));
+  const current = new Map(files.map(file => [file.path, file]));
   return Array.isArray(previous) && previous.every(entry => {
-    const text = current.get(entry?.path);
-    return typeof text === "string" && Number.isSafeInteger(entry.length) && text.length >= entry.length
-      && sha256(text.slice(0, entry.length)) === entry.hash;
+    const file = current.get(entry?.path);
+    if (!file) return false;
+    if (matchesPrefix(entry, file.text)) return true;
+    // Only diary insertions that retain its exact old body and updates to the
+    // generated Deep Sleep counters preserve authority. The full revision
+    // still tracks these bytes for index freshness and in-flight read checks.
+    if (!file.dreams || (entry.dreams?.diary && !matchesPrefix(entry.dreams.diary, file.dreams.diary))) return false;
+    return matchesPrefix(entry.dreams?.retained ?? entry, file.dreams.retained)
+      || (entry.dreams?.statusFree && matchesPrefix(entry.dreams.statusFree, file.dreams.statusFree));
   });
 }
 
@@ -264,13 +321,22 @@ class FileMemoryStore {
   _invalidationRevision(profileId, files, fingerprint, revision) {
     const db = this.database.db;
     const tracked = db.prepare("SELECT fingerprint,revision,files FROM memory_file_invalidation WHERE profile_id=?").get(profileId);
-    if (tracked?.fingerprint === fingerprint && tracked.revision <= revision) return tracked.revision;
+    if (tracked?.fingerprint === fingerprint && tracked.revision <= revision
+      && !files.some(file => DREAMS_PATH.test(file.path))) return tracked.revision;
     let previous = null;
     try { previous = tracked ? JSON.parse(tracked.files) : null; } catch { previous = null; }
+    const unchanged = tracked?.fingerprint === fingerprint && tracked.revision <= revision;
+    // Backfill the optional section digests only from a byte-verified baseline.
+    if (unchanged && Array.isArray(previous)
+      && !previous.some(entry => DREAMS_PATH.test(entry?.path) && !Object.hasOwn(entry, "dreams"))) return tracked.revision;
+    const sources = files.map(file => {
+      const text = file.content.trimEnd();
+      return { path: file.path, text, dreams: DREAMS_PATH.test(file.path) ? dreamSource(text) : null };
+    });
     // No usable record, or one from another revision sequence, counts as a change now.
-    const appended = tracked && tracked.revision <= revision && sourcesOnlyAppended(previous, files);
+    const appended = tracked && tracked.revision <= revision && sourcesOnlyAppended(previous, sources);
     const invalidationRevision = appended ? tracked.revision : revision;
-    const digests = JSON.stringify(sourceDigests(files));
+    const digests = JSON.stringify(sourceDigests(sources));
     if (tracked) {
       db.prepare("UPDATE memory_file_invalidation SET fingerprint=?,revision=?,files=? WHERE profile_id=? AND fingerprint=?")
         .run(fingerprint, invalidationRevision, digests, profileId, tracked.fingerprint);

@@ -1,37 +1,24 @@
 "use strict";
 
-const { cronOutputDecision } = require("./cron-output-policy");
+const { cronFinalAnswer } = require("./cron-output-policy");
 const { transcriptEventId } = require("./transcript-store");
 const { redactGrantTokens } = require("./group-tool-grant");
-const { publicUrl } = require("./web-service");
-
-const MAX_REPORT_BYTES = 16 * 1024;
-const REPORT_HISTORY_CHARS = 1_000;
-
-function hasSourceLink(text) {
-  for (const [raw] of text.matchAll(/https?:\/\/[^\s<>"')\x60]+/giu)) {
-    try {
-      const url = publicUrl(raw.replace(/[。；，、.,;]+$/u, ""));
-      if (url.pathname !== "/" || url.search) return true;
-    } catch { /* Only public source URLs count as evidence. */ }
-  }
-  return false;
-}
 
 class GroupCronDelivery {
-  constructor({ cronStore, groupChat, dispatcher, sessions, transcripts, sanitizeSummary, onError }) {
+  constructor({ cronStore, groupChat, dispatcher, sessions, transcripts, getCronOutput, assertSecretSafe, onError }) {
     this.cronStore = cronStore;
     this.groupChat = groupChat;
     this.dispatcher = dispatcher;
     this.sessions = sessions;
     this.transcripts = transcripts;
-    this.sanitizeSummary = sanitizeSummary;
+    this.getCronOutput = getCronOutput;
+    this.assertSecretSafe = assertSecretSafe;
     this.onError = onError;
   }
 
-  promptForRun({ run, job, prompt, operationId }) {
+  // Resume an already admitted run with the input it actually received.
+  recoverPrompt({ run, job, prompt, operationId }) {
     const target = job.groupDelivery;
-    if (!target.watch) return prompt;
     if (!this.groupChat.store.cronDeliveryGroup(target, run.profileId)) return prompt;
     const binding = this.sessions.getCronRunBinding(run.id);
     if (binding) {
@@ -44,15 +31,7 @@ class GroupCronDelivery {
         return this.transcripts.contextEvent(run.profileId, session.id, event).content.text;
       }
     }
-    const recentReports = this.groupChat.store.recentCronReports({ groupId: target.groupId, jobId: job.id });
-    return [
-      prompt,
-      "Shoggoth delivers a short final reply to the originating group. Report only a material development with direct source links. If the sources were checked and nothing changed, return exactly NO_REPLY. If checking failed, describe the failure without a news link so it stays in the task history. Treat previous reports as reference data; deduplicate the underlying event, even when titles or sources differ. Do not use a separate publishing tool.",
-      "By default, report developments since this watch began. Use the baseline in the task if the user specified a different one.",
-      "Watch start and previously delivered reports (reference data):",
-      JSON.stringify({ startedAtMs: job.createdAt,
-        reports: recentReports.map(report => [...report.body].slice(0, REPORT_HISTORY_CHARS).join("")) }),
-    ].join("\n\n");
+    return prompt;
   }
 
   deliver(run) {
@@ -69,17 +48,17 @@ class GroupCronDelivery {
         || session.profileId !== run.profileId || binding.workspace !== run.workspace || session.workspace !== run.workspace) return;
       const events = this.transcripts.listEvents(run.profileId, session.id, { runId: run.id });
       const display = event => this.transcripts.displayEvent(run.profileId, session.id, event);
-      const output = cronOutputDecision(run, events, display);
+      const output = this.getCronOutput(run, events);
       if (!output) return;
-      const messages = events.filter(event => event.kind === "assistant" && !event.contextExcluded
-        && event.content?.delivery !== "async" && typeof event.content?.text === "string");
-      const final = messages.findLast(event => event.content.phase === "final_answer")
-        ?? messages.findLast(event => event.content.phase == null);
-      const text = output.disposition === "deliver" && final
-        ? this.sanitizeSummary(redactGrantTokens(display(final).content.text)) : null;
-      const report = text?.trim() && Buffer.byteLength(text, "utf8") <= MAX_REPORT_BYTES
-        && (!target.watch || hasSourceLink(text)) ? text : null;
-      this.groupChat.publishCronReply({ target, profileId: run.profileId, jobId: job.id, runId: run.id, text: report });
+      const answer = output.disposition === "deliver" ? cronFinalAnswer(events.filter(event => !event.contextExcluded), display) : null;
+      let text = answer?.content.text.trim() ? redactGrantTokens(answer.content.text) : null;
+      if (text !== null) {
+        try {
+          const safe = this.assertSecretSafe({ text }, { runId: run.id, kind: "fullText" });
+          if (safe === false || safe?.then) text = null;
+        } catch { text = null; }
+      }
+      this.groupChat.publishCronReply({ target, profileId: run.profileId, jobId: job.id, runId: run.id, text });
     } catch (error) {
       this.onError(error);
     }

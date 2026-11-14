@@ -1,6 +1,7 @@
 "use strict";
 
 const { modelCapabilities } = require("./chat-model-settings");
+const { knownEndpointReasoningOptions } = require("./model-reasoning-catalog");
 const { isRuntimeIncompatible } = require("./runtime-compatibility");
 
 const crypto = require("node:crypto");
@@ -312,6 +313,12 @@ function createProfileServiceController(options = {}) {
       .filter((provider) => READY_PROVIDER_STATUSES.has(provider.validationStatus));
   }
 
+  function providerModelRow(provider, id, isDefault, catalog) {
+    const thinkingOptions = catalog?.get(id) ?? knownEndpointReasoningOptions(provider.baseUrl, id);
+    return { id, displayName: id, description: "", isDefault,
+      ...(thinkingOptions?.length ? { capabilities: { thinkingOptions, thinkingDefault: null, fastTier: null } } : {}) };
+  }
+
   // Built-in Codex with several sources: the ChatGPT catalog (when signed in)
   // followed by every ready preset's and endpoint's models. Each row names its
   // source; rows without one belong to the Profile default source.
@@ -342,10 +349,16 @@ function createProfileServiceController(options = {}) {
       rows.length = 0;
     }
     assertProfileStillCurrent(profile, generation);
-    for (const provider of readySourceProviders(profile)) {
+    const providers = readySourceProviders(profile);
+    const catalogs = await Promise.all(providers.map(provider => options.readProviderReasoning?.(provider)));
+    assertProfileStillCurrent(profile, generation);
+    if (!sameSnapshot(providers, readySourceProviders(profile))) {
+      throw profileError("PROFILE_OPERATION_CONFLICT", "Model sources changed during catalog read");
+    }
+    for (const [index, provider] of providers.entries()) {
       for (const id of provider.models ?? [provider.model]) {
-        row({ id, displayName: id, description: "",
-          isDefault: provider.id === profile.providerRef && id === profile.defaultModel }, provider.id, provider.name);
+        row(providerModelRow(provider, id, provider.id === profile.providerRef && id === profile.defaultModel,
+          catalogs[index]), provider.id, provider.name);
       }
     }
     if (rows.length === 0 && baseError) throw baseError;
@@ -382,7 +395,12 @@ function createProfileServiceController(options = {}) {
       const provider = productStore.getModelProvider(profile.providerRef);
       if (provider?.kind === "custom-responses") {
         loadReadyProvider(provider.id, profile.defaultModel);
-        const models = provider.models ?? [provider.model];
+        const catalog = await options.readProviderReasoning?.(provider);
+        assertProfileStillCurrent(profile, generation);
+        if (!sameSnapshot(provider, productStore.getModelProvider(provider.id))) {
+          throw profileError("PROFILE_OPERATION_CONFLICT", "Model source changed during catalog read");
+        }
+        const models = (provider.models ?? [provider.model]).map(id => providerModelRow(provider, id, id === profile.defaultModel, catalog));
         const fingerprint = crypto.createHash("sha256").update(JSON.stringify(models)).digest("hex").slice(0, 16);
         const prefix = `custom-${fingerprint}-`;
         const cursor = pageParams.cursor;
@@ -393,8 +411,7 @@ function createProfileServiceController(options = {}) {
         }
         const page = models.slice(offset, offset + pageParams.limit);
         const nextCursor = offset + page.length < models.length ? `${prefix}${offset + page.length}` : null;
-        return { models: page.map((id) => ({ id, displayName: id, description: "", isDefault: id === profile.defaultModel })),
-          nextCursor, hasMore: nextCursor !== null };
+        return { models: page, nextCursor, hasMore: nextCursor !== null };
       }
     }
     if (profile.runtime === "codex" && !nativeCodex) {

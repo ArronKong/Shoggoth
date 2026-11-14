@@ -226,9 +226,9 @@ Electron's original LICENSE and LICENSES.chromium.html must also remain in the a
 - License: Apache-2.0.
 - Source: https://github.com/openai/codex/tree/rust-v0.167.1
 - Revision / evidence: 0.167.1.
-- Local files: `schemas/codex-app-server/0.167.1`, `build/codex-runtime-manifest.json`.
+- Local files: `schemas/codex-app-server/0.167.1`, `build/codex-runtime-manifest.json`, `app/agent-service/prompts/codex-0.167.1-model-fallback.md`.
 - Full text: [CODEX-LICENSE.txt](CODEX-LICENSE.txt), [CODEX-NOTICE.txt](CODEX-NOTICE.txt).
-- Changes / provenance: Pinned unmodified runtime; generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately.
+- Changes / provenance: Pinned unmodified runtime and fallback model prompt (codex-rs/models-manager/prompt.md from the same tag); generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately.
 
 ### Codex native voice libraries
 

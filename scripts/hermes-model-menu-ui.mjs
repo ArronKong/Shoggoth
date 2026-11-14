@@ -14,7 +14,8 @@ const require = createRequire(path.join(root, "package.json"));
 const { HermesBackend } = require("./app/core/hermes-backend");
 const { build } = createRequire(path.join(root, "app/manage-ui/package.json"))("esbuild");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-hermes-model-menu-"));
-const screenshots = path.join(root, ".artifacts/hermes-model-20261113");
+const screenshotArg = process.argv.find(arg => arg.startsWith("--screenshots="));
+const screenshots = screenshotArg ? path.resolve(screenshotArg.slice("--screenshots=".length)) : null;
 try {
   const backend = new HermesBackend();
   backend.profileById.set("hermes-default", "default");
@@ -22,7 +23,7 @@ try {
   backend._dashGet = async () => ({ status: 200, body: JSON.stringify({ providers: [
     { slug: "xiaomi", name: "Xiaomi MiMo", models: ["mimo-v2.6-pro"] },
     { slug: "custom:xiaomi", name: "xiaomi1", is_user_defined: true,
-      api_url: "https://token-plan-cn.xiaomimimo.com/v1", models: ["mimo-v2.6-pro", "mimo-v2.6-flash"] },
+      api_url: "https://token-plan-cn.xiaomimimo.com/v1", api_mode: "codex_responses", models: ["mimo-v2.6-pro", "mimo-v2.6-flash"] },
     { slug: "declared", name: "Declared fixture", models: ["reasoning-fixture"],
       capabilities: { "reasoning-fixture": { reasoning: true, supported_efforts: ["low", "high", "max"] } } },
     { slug: "unknown", name: "Unknown fixture", models: ["unknown-fixture"],
@@ -75,14 +76,14 @@ window.runHermesMenu = async () => {
   check(writes[0].provider==='custom:xiaomi' && writes[0].id==='mimo-v2.6-flash','selection preserves routing identity');
   document.querySelector('.chat-pill--think').click(); await pause();
   const slider = document.querySelector('[role="slider"]');
-  check(slider.getAttribute('aria-valuemax')==='3','four supported reasoning levels');
+  check(slider.getAttribute('aria-valuemax')==='1','two distinct thinking modes');
   check(slider.getAttribute('aria-valuetext')==='high','supported high effort displayed');
   slider.dispatchEvent(new KeyboardEvent('keydown',{key:'Home',bubbles:true})); await pause();
   check(writes.at(-1).level==='none','keyboard selects supported disabled effort');
   slider.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true})); await pause();
   slider.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true})); await pause();
-  check(writes.every(row=>!row.level || ['none','low','medium','high'].includes(row.level)),'keyboard cannot select unsupported effort');
-  check(!document.querySelector('.think-fast-menu')?.textContent?.match(/xhigh|max|ultra|minimal/),'unsupported effort labels absent');
+  check(writes.every(row=>!row.level || ['none','high'].includes(row.level)),'keyboard cannot select unsupported effort');
+  check(!document.querySelector('.think-fast-menu')?.textContent?.match(/xhigh|max|ultra|minimal|medium|low/),'unsupported effort labels absent');
   const selectModel = async id => {
     document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); await pause();
     trigger().click(); await pause(); options().find(el=>el.title===id).click(); await pause();
@@ -120,10 +121,13 @@ const w=new BrowserWindow({show:false,width:1100,height:800,webPreferences:{back
 try {
 await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))});
 const result=await w.webContents.executeJavaScript('window.runHermesMenu()',true);
-fs.mkdirSync(${JSON.stringify(screenshots)},{recursive:true});
-fs.writeFileSync(path.join(${JSON.stringify(screenshots)},'hermes-thinking.png'),(await w.webContents.capturePage()).toPNG());
-await w.webContents.executeJavaScript('window.openHermesModels()',true);
-fs.writeFileSync(path.join(${JSON.stringify(screenshots)},'hermes-models.png'),(await w.webContents.capturePage()).toPNG());
+const screenshots=${JSON.stringify(screenshots)};
+if(screenshots){
+  fs.mkdirSync(screenshots,{recursive:true});
+  fs.writeFileSync(path.join(screenshots,'hermes-thinking.png'),(await w.webContents.capturePage()).toPNG());
+  await w.webContents.executeJavaScript('window.openHermesModels()',true);
+  fs.writeFileSync(path.join(screenshots,'hermes-models.png'),(await w.webContents.capturePage()).toPNG());
+}
 console.log(JSON.stringify({passed:true,...result}));w.destroy();app.exit(0);
 }catch(e){console.error(e);console.error(await w.webContents.executeJavaScript('document.body.innerText'));w.destroy();app.exit(1);}
 });`);

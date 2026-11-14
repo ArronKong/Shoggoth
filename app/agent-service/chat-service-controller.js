@@ -8,6 +8,7 @@ const { publicCronTranscript } = require("./cron-output-policy");
 const { runtimeFailureDetail } = require("./runtime-failure-detail");
 const { managedChatWorkspace } = require("./chat-workspace");
 const { settingsForModelSwitch } = require("./chat-model-settings");
+const codexSessionProvider = require("./codex-session-provider");
 const {
   federationInputProvenanceForOperationId,
 } = require("../federation-chat-provenance");
@@ -381,64 +382,77 @@ function paginateTranscriptEvents(options) {
       throw controllerError("CHAT_HISTORY_CURSOR_INVALID", "Transcript history cursor 无效");
     }
   }
-  const available = options.events
-    .filter((event) => event.seq <= beforeSeq && !superseded.has(event.id))
-    .filter(event => !event.runId || options.getRunSource?.(event.runId) !== "proactive")
-    .filter((event) => !isApproval(event)
-      && !(event.content?.transcriptType === "interaction.response" && approvalRequests.has(requestKey(event))))
-    .flatMap((event) => {
-      let display = options.resolveDisplay?.(event) || event;
-      const request = inputRequests.get(requestKey(event));
-      // Older replies only stored the technical envelope. Strip it only when
-      // its exact Run/request proves a single field; ordinary user prose and
-      // ambiguous multi-field legacy answers retain their original text.
-      if (event.kind === "user" && event.content?.transcriptType === "interaction.response" && request
-        && event.content.displayText === undefined && typeof event.content.text === "string") {
-        try {
-          const normalized = normalizeInteractiveRequestV1({ runId: event.runId, eventType: "prompt", payload: request.content });
-          const field = normalized.fields.length === 1 ? normalized.fields[0] : null;
-          const prefix = field ? `补充：${field.id}: ` : null;
-          const value = prefix && event.content.text.startsWith(prefix) ? event.content.text.slice(prefix.length) : null;
-          const text = event.content.text === "补充：取消补充" ? "取消补充" : value === null ? null
-            : field.secret ? "[隐藏]" : field.options.find(option => option.value === value)?.label ?? value;
-          if (text !== null) display = { ...display, content: { ...display.content, displayText: text } };
-        } catch { /* A missing/redacted schema never authorizes text rewriting. */ }
-      }
-      const item = transcriptHistoryItem(display, options.getRunSource?.(event.runId));
-      if (item && finalTextByRun.get(event.runId)?.id === event.id) {
-        const metadata = savedMetadata.get(event.runId) ?? options.getResponseMetadata?.(event.runId);
-        if (metadata) item.payload.message.responseMetadata = metadata;
-        const timing = options.getTurnTiming?.(event.runId);
-        if (timing) item.payload.message.shoggoth.turnTiming = timing;
-      }
-      const legacyTool = ["tool_call", "tool_result"].includes(display.kind)
-        && isLegacyBorrowedToolContent(display.content) ? display : null;
-      return item ? fragmentHistoryItem(item).map((part, index) => ({ seq: event.seq, index, item: part, legacyTool })) : [];
-    }).filter(entry => entry.seq < beforeSeq || entry.index < beforeIndex);
-  let selected = available.slice(Math.max(0, available.length - params.limit));
+  const selected = [];
+  let hasMore = false;
+  let bytes = Buffer.byteLength(`${JSON.stringify({ id: responseId, ok: true,
+    result: { messages: [], nextCursor: null, hasMore: false } })}\n`, "utf8");
+  // Cross-page relationships above use journal metadata. Resolve full message
+  // bodies and fragments only as far back as this page and its lookahead.
+  scan: for (let offset = options.events.length - 1; offset >= 0; offset--) {
+    const event = options.events[offset];
+    if (event.seq > beforeSeq || (event.seq === beforeSeq && beforeIndex === 0)
+      || superseded.has(event.id) || isApproval(event)
+      || (event.content?.transcriptType === "interaction.response" && approvalRequests.has(requestKey(event)))) continue;
+    const runSource = event.runId ? options.getRunSource?.(event.runId) : undefined;
+    if (runSource === "proactive") continue;
+
+    let display = options.resolveDisplay?.(event) || event;
+    const request = event.kind === "user" && event.content?.transcriptType === "interaction.response"
+      ? inputRequests.get(requestKey(event)) : undefined;
+    // Rewrite the technical envelope of a legacy reply only when its exact
+    // Run/request identifies a single field.
+    if (request && event.content.displayText === undefined && typeof event.content.text === "string") {
+      try {
+        const normalized = normalizeInteractiveRequestV1({ runId: event.runId, eventType: "prompt", payload: request.content });
+        const field = normalized.fields.length === 1 ? normalized.fields[0] : null;
+        const prefix = field ? `补充：${field.id}: ` : null;
+        const value = prefix && event.content.text.startsWith(prefix) ? event.content.text.slice(prefix.length) : null;
+        const text = event.content.text === "补充：取消补充" ? "取消补充" : value === null ? null
+          : field.secret ? "[隐藏]" : field.options.find(option => option.value === value)?.label ?? value;
+        if (text !== null) display = { ...display, content: { ...display.content, displayText: text } };
+      } catch { /* A missing/redacted schema never authorizes text rewriting. */ }
+    }
+    const item = transcriptHistoryItem(display, runSource);
+    if (!item) continue;
+    if (finalTextByRun.get(event.runId)?.id === event.id) {
+      const metadata = savedMetadata.get(event.runId) ?? options.getResponseMetadata?.(event.runId);
+      if (metadata) item.payload.message.responseMetadata = metadata;
+      const timing = options.getTurnTiming?.(event.runId);
+      if (timing) item.payload.message.shoggoth.turnTiming = timing;
+    }
+    const legacyTool = ["tool_call", "tool_result"].includes(display.kind)
+      && isLegacyBorrowedToolContent(display.content) ? display : null;
+    const parts = fragmentHistoryItem(item);
+    const end = event.seq === beforeSeq ? Math.min(parts.length, beforeIndex) : parts.length;
+    for (let index = end - 1; index >= 0; index--) {
+      if (selected.length === params.limit) { hasMore = true; break scan; }
+      const part = parts[index];
+      const nextBytes = bytes + Buffer.byteLength(JSON.stringify(part), "utf8") + (selected.length ? 1 : 0);
+      if (nextBytes > MAX_FRAME_BYTES) { hasMore = true; break scan; }
+      selected.push({ seq: event.seq, index, item: part, legacyTool, runSource });
+      bytes = nextBytes;
+    }
+  }
+  selected.reverse();
   // Legacy tool receipts contain no body. Restore only the selected page and
   // keep the original sequence and cursor even when the native store is gone.
   for (const entry of selected) {
     if (!entry.legacyTool || entry.item.fragment !== null) continue;
     const display = options.projectLegacyTool(entry.legacyTool);
-    if (display !== entry.legacyTool) entry.item = transcriptHistoryItem(display, options.getRunSource?.(display.runId));
+    if (display !== entry.legacyTool) entry.item = transcriptHistoryItem(display, entry.runSource);
   }
   while (selected.length > 0) {
-    const hasMore = available.length > selected.length;
     const nextCursor = hasMore ? cursorCodec.encode({
       query,
       position: `${selected[0].seq}:${selected[0].index}`,
     }) : null;
-    const result = validateChatServiceResult("chat.history", {
-      messages: selected.map((entry) => entry.item),
-      nextCursor,
-      hasMore,
-    });
+    const result = { messages: selected.map((entry) => entry.item), nextCursor, hasMore };
     if (Buffer.byteLength(`${JSON.stringify({ id: responseId, ok: true, result })}\n`, "utf8")
-      <= MAX_FRAME_BYTES) return result;
-    selected = selected.slice(1);
+      <= MAX_FRAME_BYTES) return validateChatServiceResult("chat.history", result);
+    selected.shift();
+    hasMore = true;
   }
-  if (available.length > 0) {
+  if (hasMore) {
     throw controllerError("CHAT_HISTORY_ITEM_TOO_LARGE", "Transcript history item 超过协议限制");
   }
   return validateChatServiceResult("chat.history", {
@@ -479,7 +493,8 @@ function resolveProfileWorkspace(options = {}) {
 
 function createChatServiceController(options = {}) {
   const inspiration = () => options.getInspirationService?.() || null;
-  const isInternalSession = (sessionKey) => options.isInternalSession?.(sessionKey) === true;
+  const isGroupCronSession = sessionKey => options.isGroupCronSession?.(sessionKey) === true;
+  const isInternalSession = sessionKey => options.isInternalSession?.(sessionKey) === true || isGroupCronSession(sessionKey);
   const sessionRuns = (key, query = {}) => typeof options.coordinator?.listSessionRuns === "function"
     ? options.coordinator.listSessionRuns(key, query)
     : options.coordinator.listRuns({ ...query, source: "chat", sourceId: key });
@@ -869,15 +884,20 @@ function createChatServiceController(options = {}) {
     requireMethods(chatSessionStore, ["getSession"], "ChatSessionStore getSession");
     const session = chatSessionStore.getSession(params.sessionKey);
     if (!session) throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
+    if (!params.auditRunId && isGroupCronSession(session.sessionKey)) {
+      throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
+    }
     transcriptStore.ensureSession({ profileId: session.profileId, sessionId: session.id });
-    let events = transcriptStore.listEvents(session.profileId, session.id);
+    const readEvents = () => transcriptStore.eventsView?.(session.profileId, session.id)
+      ?? transcriptStore.listEvents(session.profileId, session.id);
+    let events = readEvents();
     if (events.length === 0 && ["ready", "archived"].includes(session.status)
       && runtimeSessionIdOf(session) !== null) {
       const profile = profileForSession(session);
       if (profile.runtime === "codex") {
         await importCodexHistory(session, generation);
         fence(generation);
-        events = transcriptStore.listEvents(session.profileId, session.id);
+        events = readEvents();
       }
     }
     return paginateTranscriptEvents({
@@ -972,7 +992,12 @@ function createChatServiceController(options = {}) {
     // Mutable conversation defaults apply when the next run captures its
     // execution contract, including while the current run awaits approval.
     if (typeof options.listProfileModels !== "function") throw controllerError("BACKEND_NOT_READY", "模型目录不可用");
-    const selected = initialDefaults?.model || initial.modelOverride || profile.defaultModel;
+    const providerSelection = initialDefaults ? initialDefaults.modelProviderRef : initial.modelProviderRef;
+    const providerRef = codexSessionProvider.resolveProviderSelection(productStore, profile, providerSelection);
+    const route = codexSessionProvider.applyProviderRef(productStore, profile, providerRef);
+    const catalogSource = codexSessionProvider.selectionForProviderRef(productStore, profile, providerRef);
+    const sourceRevision = providerRef === null ? null : productStore.getModelProviderRevision?.(providerRef);
+    const selected = (initialDefaults ? initialDefaults.model : initial.modelOverride) ?? route.defaultModel;
     let model, cursor = null;
     const cursors = new Set();
     for (let pageIndex = 0; pageIndex < 32; pageIndex++) {
@@ -980,17 +1005,20 @@ function createChatServiceController(options = {}) {
       const page = await listModels({ profileId: profile.id, cursor, limit: 100,
         ...(settingsBindingId && options.listBindingModels ? { bindingId: settingsBindingId } : {}) });
       fence(generation);
-      model = page.models.find(item => selected ? item.id === selected : item.isDefault);
+      model = page.models.find(item => (item.modelProviderRef ?? null) === catalogSource
+        && (selected ? item.id === selected : item.isDefault || catalogSource === codexSessionProvider.CHATGPT_SELECTION));
       if (model || !page.hasMore) break;
       if (!page.nextCursor || cursors.has(page.nextCursor)) throw controllerError("BACKEND_NOT_READY", "模型目录游标无效");
       cursors.add(page.nextCursor); cursor = page.nextCursor;
     }
     if (!model) throw controllerError("CHAT_SESSION_MODEL_NOT_AVAILABLE", "当前模型不在目录中");
     const current = chatSessionStore.getSession(params.sessionKey);
-    const currentProfile = enabledProfile(initial.profileId);
+    const currentProfile = profileForSession({ ...initial, runtimeBindingId: settingsBindingId });
     if (!current || current.runtimeBindingId !== initial.runtimeBindingId
       || current.revision !== initial.revision || current.modelOverride !== initial.modelOverride
-      || currentProfile.defaultModel !== profile.defaultModel) {
+      || currentProfile.defaultModel !== profile.defaultModel || currentProfile.providerRef !== profile.providerRef
+      || currentProfile.selectedBindingId !== profile.selectedBindingId
+      || (providerRef !== null && productStore.getModelProviderRevision?.(providerRef) !== sourceRevision)) {
       throw controllerError("CHAT_SESSION_NOT_READY", "模型已变化，请重试");
     }
     const settings = { thinkingLevel: null, serviceTier: null, ...(current.nextRuntimeSelection?.modelSettings ?? current.modelSettings) };

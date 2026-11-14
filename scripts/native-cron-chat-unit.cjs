@@ -47,7 +47,7 @@ async function until(check) {
 }
 
 async function fixture(t, configure = () => {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sg-cron-chat-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sg-cron-chat-")));
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
   const clock = { value: Date.now() };
@@ -340,6 +340,48 @@ test("default recurring cron keeps one conversation across scheduled runs, manua
   await ctx.complete(await ctx.trigger(other), "another job");
   assert.equal((await ctx.sessions()).length, 2);
   assert.equal(ctx.host.threads.length, 2);
+});
+
+test("direct Cron watches suppress only a whole repeated report across isolated sessions and restarts", async t => {
+  const ctx = await fixture(t);
+  const created = await ctx.backend.createCronJob({ agentId: ctx.backend.getAgents()[0].id,
+    name: "Changes-only check", prompt: "Report only changes", enabled: false, watch: true,
+    threadPolicy: "new", schedule: { kind: "at", at: new Date(ctx.clock.value + 1000).toISOString() } });
+  assert.equal(created.watch, true);
+  const jobId = created.id;
+  const orig = { id: jobId.slice("shoggoth:".length) };
+  const firstText = "检查完毕。";
+  const first = await ctx.complete(await ctx.trigger(orig), firstText);
+  await ctx.service.nativeCronScheduler.waitForIdle(first.id);
+  assert.equal((await ctx.backend.getCronRunResult(jobId, first.id)).fullText, firstText);
+
+  await ctx.backend.stop();
+  await ctx.service.stop({ notify: false });
+  await ctx.service.start();
+  await ctx.backend.start({ onSessionActivity: event => ctx.activities.push(event) });
+  const repeat = await ctx.complete(await ctx.trigger(orig), firstText);
+  await ctx.service.nativeCronScheduler.waitForIdle(repeat.id);
+  assert.notEqual(ctx.service.workRunCoordinator.getRunSessionKey(repeat), ctx.service.workRunCoordinator.getRunSessionKey(first));
+  const silent = await ctx.backend.getCronRunResult(jobId, repeat.id);
+  assert.equal(silent.outputDisposition, "silent");
+  assert.equal(silent.deliverySuppressionReason, "duplicate");
+  assert.equal(silent.source, "none");
+  await until(() => ctx.activities.some(event => event.runId === repeat.id
+    && event.outputDisposition === "silent" && event.result === null));
+  const audit = await ctx.backend.getCronRunTrajectory(jobId, { runId: repeat.id });
+  assert.ok(audit.parts.some(part => part.text === firstText));
+
+  const changed = await ctx.complete(await ctx.trigger(orig), firstText + "新增一条进展。");
+  await ctx.service.nativeCronScheduler.waitForIdle(changed.id);
+  assert.equal((await ctx.backend.getCronRunResult(jobId, changed.id)).fullText, firstText + "新增一条进展。");
+  const quiet = await ctx.complete(await ctx.trigger(orig), "NO_REPLY");
+  await ctx.service.nativeCronScheduler.waitForIdle(quiet.id);
+  const repeatedChange = await ctx.complete(await ctx.trigger(orig), firstText + "新增一条进展。");
+  await ctx.service.nativeCronScheduler.waitForIdle(repeatedChange.id);
+  assert.equal((await ctx.backend.getCronRunResult(jobId, repeatedChange.id)).deliverySuppressionReason, "duplicate");
+  await ctx.backend.updateCronJob(jobId, { watch: false });
+  const regular = await ctx.complete(await ctx.trigger(orig), firstText + "新增一条进展。");
+  assert.equal((await ctx.backend.getCronRunResult(jobId, regular.id)).outputDisposition, "deliver");
 });
 
 test("continue reuses its conversation and exact occurrence delivery excludes other turns", async (t) => {

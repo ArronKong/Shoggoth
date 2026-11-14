@@ -146,7 +146,7 @@ for (const dreamingStorageMode of ["separate", "both"]) test(`real Product cross
     assert.doesNotMatch(allText(path.join(paths.agentsDir, A, "context-snapshots")), new RegExp(`${MARKER}|${DERIVED}`));
     const checkpointStore = service.conversationCheckpointStore, memory = checkpointStore.memoryState(A), events = service.transcriptStore.listEvents(A, a.session.id);
     const summary = { ...Object.fromEntries(SUMMARY_FIELDS.map(field => [field, []])), state: ["A source-dependent dialogue summary"] };
-    let checkpoint = checkpointStore.commit({ profileId: A, sessionId: a.session.id, expectedRevision: service.transcriptStore.getRevision(A, a.session.id),
+    const checkpoint = checkpointStore.commit({ profileId: A, sessionId: a.session.id, expectedRevision: service.transcriptStore.getRevision(A, a.session.id),
       expectedMemoryRevision: memory.revision, expectedMemoryFreshUntil: memory.freshUntil, throughSeq: events.at(-1).seq, coveredHash: coveredTranscript(events, events.at(-1).seq).hash,
       summary, provenance: { runId: "compact", bindingId: "binding", runtime: "codex", model: "literal", method: "model" } });
     assert.ok(checkpoint.borrowedMemoryRefs.length); assert.doesNotMatch(allText(path.join(paths.agentsDir, A, "conversation-checkpoints")), new RegExp(MARKER));
@@ -179,14 +179,11 @@ for (const dreamingStorageMode of ["separate", "both"]) test(`real Product cross
     }
     const dep = borrowed.borrowedMemoryRefs;
     assert.equal(dep[0].policyRevision, 0);
-    // The reader's own flush/Dreaming changes its memory revision. Establish
-    // a current own-memory anchor before testing foreign fragment invalidation.
+    // Routine flush and Dreaming writes keep the existing checkpoint valid.
     const currentMemory = checkpointStore.memoryState(A);
-    checkpoint = checkpointStore.commit({ profileId: A, sessionId: a.session.id,
-      expectedRevision: service.transcriptStore.getRevision(A, a.session.id),
-      expectedMemoryRevision: currentMemory.revision, expectedMemoryFreshUntil: currentMemory.freshUntil,
-      throughSeq: checkpoint.coveredThroughSeq, coveredHash: checkpoint.coveredHash, summary,
-      provenance: { runId: "compact-current", bindingId: "binding", runtime: "codex", model: "literal", method: "model" } });
+    assert.ok(currentMemory.revision > memory.revision);
+    assert.equal(currentMemory.invalidationRevision, memory.invalidationRevision);
+    assert.equal(checkpointStore.compatible(A, a.session.id)?.id, checkpoint.id);
     const unrelated = path.join(owner.store.workspace(B), "memory/2026-10-08.md"); fs.writeFileSync(unrelated, "unrelated source fragment\n", { mode: 0o600 });
     assert.equal(owner.borrowedMemoryDependenciesCurrent(A, a.session.id, dep), true);
     assert.equal(checkpointStore.compatible(A, a.session.id)?.id, checkpoint.id);

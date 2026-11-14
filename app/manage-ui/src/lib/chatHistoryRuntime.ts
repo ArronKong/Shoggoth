@@ -2,6 +2,10 @@ import type { ChatBackendId } from "./chatBackend";
 
 const INITIAL_HISTORY_RETRY_WINDOW_MS = 30_000;
 const INITIAL_HISTORY_RETRY_INTERVAL_MS = 2_000;
+const MAX_MEMORY_HISTORY_SESSIONS = 8;
+const MAX_MEMORY_HISTORY_BYTES = 1024 * 1024;
+const HISTORY_SOURCE_ERRORS = new Set(["CHAT_SESSION_NOT_FOUND", "CHAT_SESSION_DELETED", "CHAT_SESSION_INVALID", "TRANSCRIPT_SOURCE_CHANGED",
+  "CODEX_DESKTOP_OWNER_UNAVAILABLE", "CODEX_DESKTOP_NOT_FOUND"]);
 
 export interface ChatHistoryTicket {
   key: string;
@@ -78,7 +82,7 @@ export function createChatSendController(canSend: (key: string | null | undefine
 export interface ChatHistoryControllerDeps<TMessage> {
   backendOfSession(key: string): ChatBackendId;
   agentOfSession(key: string): string;
-  getCacheScope?(backendId: ChatBackendId): Promise<string | undefined>;
+  getCacheScope?(backendId: ChatBackendId, key: string): Promise<string | { scope: string; memoryOnly: true } | undefined>;
   /** @deprecated Compatibility for older controller fixtures. */
   getHermesScope?(): Promise<string | undefined>;
   getCached(scope: string, key: string): Promise<unknown[] | undefined>;
@@ -87,6 +91,7 @@ export interface ChatHistoryControllerDeps<TMessage> {
   clearCachedExcept(scope: string): Promise<void>;
   prepare(key: string, messages: unknown[]): Promise<TMessage[]>;
   requestCanonical(key: string): Promise<unknown>;
+  latestWindow?(raw: unknown[]): unknown[];
   /** Release a prepared reader candidate even when ownership/send fences discard it. */
   releaseCanonical?(raw: unknown[]): void;
   isInFlight(key: string): boolean;
@@ -126,6 +131,7 @@ export function createChatHistoryController<TMessage>(
   const deleteVersions = new Map<string, number>();
   const deletedKeys = new Set<string>();
   const liveSnapshots = new Map<string, TMessage[]>();
+  const memorySnapshots = new Map<string, { scope: string; messages: TMessage[] }>();
   const pendingWrites = new Map<string, Set<Promise<void>>>();
   const cacheVisible = new Set<string>();
   const needsRevalidate = new Set<string>();
@@ -141,15 +147,15 @@ export function createChatHistoryController<TMessage>(
     clearRetryTimer();
   };
 
-  type ScopeBinding = { scope: string; version: number };
+  type ScopeBinding = { scope: string; version: number; memoryOnly?: true };
 
   // 每张 open/canonical ticket 都要通过一次真实 scope 读取绑定数据源；旧摘要只能用于
   // 比较变化，不能作为请求失败时的 fallback，否则配置切换期间会把 B 的历史写进 A。
-  const bindScope = async (backendId: ChatBackendId): Promise<ScopeBinding | undefined> => {
-    let rawScope: string | undefined;
+  const bindScope = async (backendId: ChatBackendId, key: string): Promise<ScopeBinding | undefined> => {
+    let rawScope: Awaited<ReturnType<NonNullable<typeof deps.getCacheScope>>>;
     try {
       rawScope = deps.getCacheScope
-        ? await deps.getCacheScope(backendId)
+        ? await deps.getCacheScope(backendId, key)
         : backendId === "hermes"
           ? await deps.getHermesScope?.()
           : undefined;
@@ -159,6 +165,7 @@ export function createChatHistoryController<TMessage>(
     if (!rawScope) return undefined;
     // The server scope describes a runtime/config source. Prefix it with the
     // registry owner so two facades sharing one service can never share cache.
+    if (typeof rawScope !== "string") return { scope: `${backendId}:${rawScope.scope}`, version: 0, memoryOnly: true };
     const next = deps.getCacheScope ? `${backendId}:${rawScope}` : rawScope;
     const current = scopes.get(backendId);
     if (!current) {
@@ -178,7 +185,25 @@ export function createChatHistoryController<TMessage>(
   };
 
   const sameScope = (left: ScopeBinding | undefined, right: ScopeBinding | undefined): boolean =>
-    !!left && !!right && left.scope === right.scope && left.version === right.version;
+    !!left && !!right && left.scope === right.scope && left.version === right.version && left.memoryOnly === right.memoryOnly;
+
+  const rememberMemoryHistory = (key: string, scope: string, prepared: TMessage[]) => {
+    memorySnapshots.delete(key);
+    const messages: TMessage[] = [];
+    const encoder = new TextEncoder();
+    let bytes = 2;
+    for (let index = prepared.length - 1; index >= 0; index--) {
+      const message = prepared[index];
+      bytes += encoder.encode(JSON.stringify(message)).byteLength + (messages.length ? 1 : 0);
+      if (bytes > MAX_MEMORY_HISTORY_BYTES) break;
+      messages.push(message);
+    }
+    if (!messages.length) return;
+    memorySnapshots.set(key, { scope, messages: messages.reverse() });
+    while (memorySnapshots.size > MAX_MEMORY_HISTORY_SESSIONS) {
+      memorySnapshots.delete(memorySnapshots.keys().next().value!);
+    }
+  };
 
   const ticketCurrent = (ticket: ChatHistoryTicket): boolean =>
     currentKey === ticket.key
@@ -186,6 +211,14 @@ export function createChatHistoryController<TMessage>(
     && requestSequences.get(ticket.key) === ticket.requestSequence
     && (deleteVersions.get(ticket.key) ?? 0) === ticket.deleteVersion
     && !deletedKeys.has(ticket.key);
+
+  const discardMemoryHistory = (ticket: ChatHistoryTicket) => {
+    const { key, sendEpoch } = ticket;
+    memorySnapshots.delete(key);
+    if (cacheVisible.delete(key) && (sendEpochs.get(key) ?? 0) === sendEpoch && !deps.isInFlight(key)) {
+      deps.commitOpen(key, [], false);
+    }
+  };
 
   const removeUnverifiedWrite = async (scope: string, key: string): Promise<void> => {
     try {
@@ -195,12 +228,12 @@ export function createChatHistoryController<TMessage>(
     }
   };
 
-  const canonical = async (key: string, openGeneration = generation): Promise<void> => {
+  const canonical = async (key: string, openGeneration = generation, openedScope?: ScopeBinding, retryScopeChange = true): Promise<void> => {
     if (requestedKey !== key || currentKey !== key || generation !== openGeneration || deletedKeys.has(key)) return;
     clearRetryTimer();
     const deleteVersion = deleteVersions.get(key) ?? 0;
     const backendId = deps.backendOfSession(key);
-    const scopeBinding = await bindScope(backendId);
+    const scopeBinding = openedScope ?? await bindScope(backendId, key);
     if (
       currentKey !== key
       || generation !== openGeneration
@@ -228,15 +261,28 @@ export function createChatHistoryController<TMessage>(
       const prepared = await deps.prepare(key, raw);
       if (!ticketCurrent(ticket)) return;
 
+      let memorySnapshot: { scope: string; messages: TMessage[] } | undefined;
       if (scopeBinding) {
+        const latest = scopeBinding.memoryOnly ? deps.latestWindow?.(raw) ?? raw : raw;
+        const snapshot = latest === raw ? prepared : await deps.prepare(key, latest);
+        if (!ticketCurrent(ticket)) return;
         // 写前必须再次成功解析并确认仍是这张 ticket 绑定的数据源。
-        const beforeWrite = await bindScope(backendId);
+        const beforeWrite = await bindScope(backendId, key);
+        if (!ticketCurrent(ticket)) return;
         if (beforeWrite && !sameScope(scopeBinding, beforeWrite)) {
+          if (scopeBinding.memoryOnly) discardMemoryHistory(ticket);
           needsRevalidate.add(key);
+          if (scopeBinding.memoryOnly && retryScopeChange) {
+            deps.releaseCanonical?.(raw);
+            candidate = undefined;
+            await canonical(key, openGeneration, beforeWrite, false);
+          }
           return;
         }
         // 临时拿不到 scope 只跳过缓存；它不是 realtime 权威响应失败。
-        if (beforeWrite && ticketCurrent(ticket)) {
+        if (beforeWrite?.memoryOnly) {
+          memorySnapshot = { scope: beforeWrite.scope, messages: snapshot };
+        } else if (beforeWrite) {
           const write = deps.putCached(beforeWrite.scope, key, raw);
           const writes = pendingWrites.get(key) ?? new Set<Promise<void>>();
           writes.add(write);
@@ -253,7 +299,7 @@ export function createChatHistoryController<TMessage>(
           }
           // put 期间配置也可能切换；明确变化时 clearExcept 已清旧 scope 并使响应失效。
           // 临时不可用时删掉本次未经复验的写入，但 realtime 消息仍可提交。
-          const afterWrite = await bindScope(backendId);
+          const afterWrite = await bindScope(backendId, key);
           if (!afterWrite) {
             await removeUnverifiedWrite(beforeWrite.scope, key);
           } else if (!sameScope(scopeBinding, afterWrite)) {
@@ -273,6 +319,7 @@ export function createChatHistoryController<TMessage>(
         || (deps.isInFlight(key) && liveSnapshots.has(key))
       ) return;
 
+      if (memorySnapshot) rememberMemoryHistory(key, memorySnapshot.scope, memorySnapshot.messages);
       cacheVisible.delete(key);
       needsRevalidate.delete(key);
       liveSnapshots.delete(key);
@@ -280,12 +327,14 @@ export function createChatHistoryController<TMessage>(
       deps.commitCanonical(key, prepared, raw);
     } catch (error) {
       if (!ticketCurrent(ticket)) return;
+      const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+      if (scopeBinding?.memoryOnly && typeof code === "string" && HISTORY_SOURCE_ERRORS.has(code)) discardMemoryHistory(ticket);
       const remaining = initialReadDeadline - performance.now();
       // The restored view can precede socket open or Service readiness. Keep
       // retrying the same read through the normal ownership check.
-      const temporarilyUnavailable = typeof error === "object" && error !== null && ("code" in error
-        ? error.code === "SERVICE_UNAVAILABLE"
-        : "requestNotSent" in error && error.requestNotSent === true);
+      const temporarilyUnavailable = code === "SERVICE_UNAVAILABLE"
+        || (code === undefined && typeof error === "object" && error !== null
+          && "requestNotSent" in error && error.requestNotSent === true);
       if (readingHistory && remaining > 0 && temporarilyUnavailable) {
         needsRevalidate.delete(key);
         clearRetryTimer();
@@ -324,22 +373,27 @@ export function createChatHistoryController<TMessage>(
     }
 
     const backendId = deps.backendOfSession(key);
-    {
-      const binding = await bindScope(backendId);
-      if (generation !== openGeneration || deletedKeys.has(key)) return;
-      if (binding) {
-        const cached = await deps.getCached(binding.scope, key);
-        if (generation !== openGeneration) return;
-        const verified = await bindScope(backendId);
-        if (!sameScope(binding, verified)) {
-          if (generation === openGeneration && !deletedKeys.has(key)) await open(key);
-          return;
-        }
-        if (Array.isArray(cached)) {
-          prepared = await deps.prepare(key, cached);
-          if (generation !== openGeneration) return;
-          visible = prepared.length > 0;
-        }
+    const binding = await bindScope(backendId, key);
+    if (generation !== openGeneration || deletedKeys.has(key)) return;
+    if (binding?.memoryOnly) {
+      const snapshot = memorySnapshots.get(key);
+      memorySnapshots.delete(key);
+      if (snapshot?.scope === binding.scope) {
+        memorySnapshots.set(key, snapshot);
+        prepared = snapshot.messages;
+        visible = true;
+      }
+    } else if (binding) {
+      const cached = await deps.getCached(binding.scope, key);
+      if (generation !== openGeneration) return;
+      const verified = await bindScope(backendId, key);
+      if (!sameScope(binding, verified)) {
+        if (generation === openGeneration && !deletedKeys.has(key)) await open(key);
+        return;
+      }
+      if (Array.isArray(cached)) {
+        prepared = await deps.prepare(key, cached);
+        visible = prepared.length > 0;
       }
     }
 
@@ -348,7 +402,7 @@ export function createChatHistoryController<TMessage>(
     if (visible) cacheVisible.add(key);
     else cacheVisible.delete(key);
     deps.commitOpen(key, prepared, visible);
-    void canonical(key, openGeneration);
+    void canonical(key, openGeneration, binding?.memoryOnly ? binding : undefined);
   };
 
   return {
@@ -361,6 +415,7 @@ export function createChatHistoryController<TMessage>(
     cancelInitialReadRetry,
     markSend: (key, messages) => {
       sendEpochs.set(key, (sendEpochs.get(key) ?? 0) + 1);
+      memorySnapshots.delete(key);
       if (Array.isArray(messages)) liveSnapshots.set(key, messages);
     },
     updateLive: (key, update) => {
@@ -404,13 +459,14 @@ export function createChatHistoryController<TMessage>(
       needsRevalidate.delete(key);
       cacheVisible.delete(key);
       liveSnapshots.delete(key);
+      memorySnapshots.delete(key);
       const backendId = deps.backendOfSession(key);
       // 已经开始的 put 无法取消；先让它结束，再做最后一次删除，保证 delete 返回后不会复活。
       const writes = pendingWrites.get(key);
       if (writes?.size) await Promise.allSettled([...writes]);
       const knownSafeScope = scopes.get(backendId)?.scope;
-      const binding = await bindScope(backendId);
-      const scope = binding?.scope ?? knownSafeScope;
+      const binding = await bindScope(backendId, key);
+      const scope = binding?.memoryOnly ? undefined : binding?.scope ?? knownSafeScope;
       if (scope) {
         try {
           await deps.deleteCached(scope, key);

@@ -64,6 +64,7 @@ window.fetch=async (input,init) => {
   if(url.pathname==="/__api/status") payload={backends:FALLBACK_BACKEND_DESCRIPTORS.map(b=>({id:b.id,connected:true,info:{readyAgentIds:[agentId]}}))};
   if(url.pathname==="/__api/chat/capabilities") payload=caps;
   if(url.pathname==="/__api/models") payload={models,catalogRevision:"a".repeat(64)};
+  if(url.pathname===`/__api/agents/${agentId}/models`) payload={models,defaultModel:"current-model"};
   if(url.pathname==="/__api/chat/cache-scope") payload={backendId:backend,cacheScope:`next-turn-${runtime}-${immersive}`};
   if(url.pathname==="/__api/chat/slash") payload={supported:false,commands:[]};
   if(url.pathname==="/__api/plugins/selection-readiness") payload={version:1,supported:false};
@@ -113,7 +114,8 @@ Object.assign(window,{ nextTurnFixture:{runtime,backend,immersive,requests,runni
   visible<HTMLButtonElement>(".permission-menu__item[data-risk=standard]")!.click();
   await wait(()=>permission.textContent?.includes(i18n.t("chat.permissionModes.ask")),"switch back to ask reflected");
   check(permissionPatches().length===3 && !document.querySelector('[role="alertdialog"], [role="dialog"]'),"switching back saves once without a dialog");
-  if(!immersive) {
+  {
+    await wait(()=>visible(".chat-pill--think-fast"),"effort control for the selected model");
     const thinking=visible<HTMLButtonElement>(".chat-pill--think-fast")!;check(!thinking.disabled,"streaming disables effort/fast");thinking.click();
     await wait(()=>visible('.think-fast-menu__slider'),"effort slider");
     const effort=visible('.think-fast-menu__slider')!;

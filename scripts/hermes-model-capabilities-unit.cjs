@@ -4,17 +4,21 @@
 // native session, credential, or provider request is read or written.
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { HermesBackend } = require("../app/core/hermes-backend");
 const { computeCatalogRevision } = require("../app/core/model-catalog-revision");
 
 const model = "mimo-v2.6-pro";
-const levels = ["none", "low", "medium", "high"];
+const levels = ["none", "high"];
 const custom = { slug: "custom:xiaomi", name: "xiaomi1", source: "user-config", is_user_defined: true,
-  api_url: "https://token-plan-cn.xiaomimimo.com/v1", models: [model], capabilities: { [model]: { reasoning: true } } };
+  api_url: "https://token-plan-cn.xiaomimimo.com/v1", api_mode: "codex_responses", models: [model], capabilities: { [model]: { reasoning: true } } };
 const builtin = { slug: "xiaomi", name: "Xiaomi MiMo", models: [model, "mimo-v2-flash"] };
 
 async function fixture(providers = [builtin, custom]) {
   const backend = new HermesBackend({ getConfig: () => ({ hermesMode: "local" }) });
+  backend._hermesHomeForProfile = profile => path.join(os.tmpdir(), `absent-hermes-fixture-${process.pid}`, profile);
   const key = "agent:hermes-default:stored";
   const dash = { baseUrl: "http://fixture.invalid", token: "fixture" };
   backend.profileById.set("hermes-default", "default");
@@ -50,6 +54,7 @@ test("catalog keeps builtin/custom identity, configured name, profile and suppor
   assert.deepEqual(row.thinkingOptions, levels);
   assert.deepEqual(row.modelScopes, ["default"]);
   assert.equal(models.filter(row => row.id === model).length, 2);
+  assert.deepEqual(models.find(row => row.id === model && row.provider === "xiaomi").thinkingOptions, []);
   assert.equal(backend.getChatCapabilities("hermes-default").modelScope, "default");
   assert.equal(computeCatalogRevision({ runtime: [row] }) === computeCatalogRevision({ runtime: [{ ...row, providerName: "Renamed" }] }), false);
   assert.equal(JSON.stringify(models).includes("xiaomimimo.com"), false, "endpoint URL is not a public model field");
@@ -57,6 +62,7 @@ test("catalog keeps builtin/custom identity, configured name, profile and suppor
 
 test("same model on another route keeps its own declared effort and non-reasoning policy", async () => {
   const { backend } = await fixture([custom,
+    { ...custom, slug: "custom:xiaomi-chat", api_mode: "chat_completions" },
     { slug: "other", models: [model], capabilities: { [model]: { reasoning: true, supported_efforts: ["low", "high", "max"] } } },
     { slug: "plain", models: [model], capabilities: { [model]: { reasoning: false } } },
     { ...custom, slug: "lookalike", api_url: "https://xiaomimimo.com.example.invalid/v1" },
@@ -64,6 +70,7 @@ test("same model on another route keeps its own declared effort and non-reasonin
   const rows = await backend.getModels();
   assert.deepEqual(rows.find(row => row.provider === "other").thinkingOptions, ["low", "high", "max"]);
   assert.deepEqual(rows.find(row => row.provider === "plain").thinkingOptions, []);
+  assert.deepEqual(rows.find(row => row.provider === "custom:xiaomi-chat").thinkingOptions, []);
   assert.deepEqual(rows.find(row => row.provider === "lookalike").thinkingOptions, [], "a lookalike endpoint inherits no vendor policy");
   assert.equal(backend._modelThinkingOptions(model, undefined, "default"), undefined, "ambiguous routes are not guessed");
 });
@@ -77,7 +84,7 @@ test("new MiMo models stay discoverable without inheriting a guessed effort list
   assert.equal(models.find(row => row.id === future).thinkingDefault, undefined);
 });
 
-test("refreshed runtime capabilities can expand existing and new MiMo models beyond four efforts", async () => {
+test("explicit runtime capabilities can expand both existing and new MiMo models", async () => {
   const future = "mimo-future-fixture";
   const f = await fixture();
   const expanded = ["none", "low", "medium", "high", "xhigh", "max"];
@@ -94,6 +101,55 @@ test("refreshed runtime capabilities can expand existing and new MiMo models bey
   assert.deepEqual(models.find(row => row.id === future).thinkingOptions, ["low", "high", "max"]);
   await f.backend.setSessionThinking(f.key, { level: "max" });
   assert.equal(f.effort, "max", "explicit capability overrides the legacy fallback and allows selection");
+});
+
+test("a Hermes Profile reads its exact aggregator's efforts and ignores stale, remote, or differently routed declarations", async t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-effort-catalog-"));
+  t.after(() => fs.rmSync(home, { force: true, recursive: true }));
+  fs.mkdirSync(path.join(home, "cache"));
+  const cache = path.join(home, "cache", "reasoning_caps.json");
+  const routerModel = "deepseek/deepseek-v4.1-flash";
+  const entry = (efforts, secondsAgo = 0) => ({ ts: Date.now() / 1000 - secondsAgo,
+    caps: { [routerModel]: { supports_reasoning: true, supported_efforts: efforts, mandatory: true } } });
+  const data = (age = 0) => ({
+    "https://openrouter.ai/api/v1/models": entry(["max", "low", "none", "high"], age),
+    "https://inference-api.nousresearch.com/v1/models": entry(["medium", "none"]),
+  });
+  fs.writeFileSync(cache, JSON.stringify(data()), { mode: 0o644 });
+  const f = await fixture([]);
+  f.backend._hermesHomeForProfile = profile => profile === "default" ? home : path.join(home, "other");
+  f.backend._dashGet = async () => ({ status: 200, body: JSON.stringify({ providers: [
+    { slug: "openrouter", models: [routerModel] },
+    { slug: "nous", models: [routerModel] },
+    { slug: "custom:relay", api_url: "https://relay.invalid/api/v1", models: [routerModel] },
+    { slug: "zai", models: ["glm-5.3", "glm-5.2"] },
+    { slug: "deepseek", models: ["deepseek-v4-flash"] },
+    { slug: "openai-codex", models: ["gpt-6.1-sol", "gpt-unlisted"] },
+  ] }) });
+  f.backend.dashboards.set("other", { baseUrl: "http://other.fixture.invalid", token: "other" });
+  f.backend._gwApplySessionInfo(f.key, { model: routerModel, provider: "openrouter" });
+  await f.backend.refreshModelChoices();
+  assert.deepEqual(f.backend.sessionRows[0].thinkingOptions, ["low", "high", "max"]);
+  assert.deepEqual(f.backend._modelThinkingOptions(routerModel, "nous", "default"), ["medium"]);
+  assert.deepEqual(f.backend._modelThinkingOptions(routerModel, "openrouter", "other"), []);
+  assert.deepEqual(f.backend._modelThinkingOptions(routerModel, "custom:relay", "default"), []);
+  assert.deepEqual(f.backend._modelThinkingOptions("glm-5.3", "zai", "default"), ["none", "low", "medium", "high", "max"]);
+  assert.deepEqual(f.backend._modelThinkingOptions("deepseek-v4-flash", "deepseek", "default"), ["none", "low", "high", "max"]);
+  assert.deepEqual(f.backend._modelThinkingOptions("gpt-6.1-sol", "openai-codex", "default"), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(f.backend._modelThinkingOptions("gpt-unlisted", "openai-codex", "default"), []);
+  await f.backend.setSessionThinking(f.key, { level: "max" });
+  assert.equal(f.calls.at(-1).value, "max");
+  fs.chmodSync(cache, 0o666);
+  await f.backend.refreshModelChoices();
+  assert.deepEqual(f.backend.sessionRows[0].thinkingOptions, [], "other users cannot write the catalog");
+  fs.chmodSync(cache, 0o644);
+  fs.writeFileSync(cache, JSON.stringify(data(86_401)));
+  await f.backend.refreshModelChoices();
+  assert.deepEqual(f.backend.sessionRows[0].thinkingOptions, []);
+  fs.writeFileSync(cache, JSON.stringify(data()));
+  f.backend._getConfig = () => ({ hermesMode: "remote" });
+  await f.backend.refreshModelChoices();
+  assert.deepEqual(f.backend.sessionRows[0].thinkingOptions, []);
 });
 
 test("an explicit empty capability is never replaced with the legacy MiMo fallback", async () => {
@@ -130,7 +186,7 @@ test("switching from a high-effort model preserves the selected custom provider 
   assert(f.calls.every(row => row.session_id === "runtime"), "no profile/global setting writes");
 });
 
-for (const [requested, effective] of [["xhigh", "high"], ["max", "high"], ["ultra", "high"], ["minimal", "low"], ["none", "none"], ["low", "low"]]) {
+for (const [requested, effective] of [["xhigh", "high"], ["max", "high"], ["ultra", "high"], ["minimal", "high"], ["none", "none"], ["low", "high"]]) {
   test(`resumed session reads actual ${requested} and uses ${effective}`, async () => {
     const f = await fixture(); f.effort = requested;
     await f.backend._gwNormalizeThinking(f.key, f.mapping, f.sock);
@@ -144,8 +200,8 @@ test("explicit unsupported effort is rejected before a configuration write", asy
   const f = await fixture();
   await assert.rejects(f.backend.setSessionThinking(f.key, { level: "xhigh" }), /不支持思考档/u);
   assert.deepEqual(f.calls, []);
-  await f.backend.setSessionThinking(f.key, { level: "low" });
-  assert.equal(f.effort, "low");
+  await f.backend.setSessionThinking(f.key, { level: "none" });
+  assert.equal(f.effort, "none");
 });
 
 test("legacy generic custom identity uses only unambiguous policy", async () => {
@@ -165,9 +221,9 @@ test("a connection, model or effort change while reading effort prevents a write
 });
 
 test("effective supported effort replaces a stale session display without a write", async () => {
-  const f = await fixture(); f.effort = "low";
+  const f = await fixture(); f.effort = "high";
   await f.backend._gwNormalizeThinking(f.key, f.mapping, f.sock);
-  assert.equal(f.backend.sessionRows[0].thinkingLevel, "low");
+  assert.equal(f.backend.sessionRows[0].thinkingLevel, "high");
   assert.equal(f.calls.filter(row => row.method === "config.set").length, 0);
 });
 

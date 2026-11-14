@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { cronOutputDecision, publicCronTranscript, cronUnattendedCompletionError } = require("../app/agent-service/cron-output-policy");
+const { cronOutputDecision, isCronWatch, publicCronTranscript, cronUnattendedCompletionError } = require("../app/agent-service/cron-output-policy");
 
 const start = { id: "start", runId: "run", kind: "user", content: { cronOutputVersion: 1, text: "check" } };
 const run = { id: "run", source: "cron", status: "completed", resultSummary: "NO_REPLY" };
@@ -42,6 +42,23 @@ test("successful empty output is silent only when no real assistant or artifact 
   assert.equal(cronOutputDecision(empty, [start]).reason, "empty");
   assert.equal(cronOutputDecision(empty, [start, { runId: "run", kind: "assistant", content: { text: "done" } }]).disposition, "deliver");
   assert.equal(cronOutputDecision(empty, [start, { runId: "run", kind: "artifact", content: {} }]).disposition, "deliver");
+});
+
+test("watch deduplication compares the full final and keeps artifacts and saved decisions", () => {
+  const watch = { ...start, content: { ...start.content, cronWatch: true } };
+  const answer = { runId: "run", kind: "assistant", content: { phase: "final_answer", text: "Report" } };
+  const compare = text => text === "Report";
+  assert.equal(cronOutputDecision(run, [watch, answer], undefined, compare).reason, "duplicate");
+  assert.equal(cronOutputDecision(run, [start, answer], undefined, compare).disposition, "deliver");
+  assert.equal(cronOutputDecision(run, [watch, answer, { runId: "run", kind: "artifact" }], undefined, compare).disposition, "deliver");
+  assert.equal(cronOutputDecision(run, [watch, answer, { runId: "run", kind: "status",
+    content: { transcriptType: "terminal", cronOutput: { version: 1, disposition: "deliver", reason: null } } }],
+  undefined, compare).disposition, "deliver");
+  const resolved = event => ({ ...event, content: { ...event.content, text: "Report. New finding." } });
+  assert.equal(cronOutputDecision(run, [watch, answer], resolved, compare).disposition, "deliver");
+  assert.equal(isCronWatch({ watch: true }), true);
+  assert.equal(isCronWatch({ groupDelivery: { watch: true } }), true);
+  assert.equal(isCronWatch({ watch: false, groupDelivery: { watch: true } }), false);
 });
 
 test("public history suppresses pending and silent runs before pagination while retaining interactive failures and other runs", () => {

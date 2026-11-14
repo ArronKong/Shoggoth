@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { serviceError } = require("./security");
 const { runBoundedModelOnly } = require("./runtime-model-only");
+const { effortId } = require("./model-reasoning-catalog");
 
 const AGENT = "shoggoth-model-only";
 const PERMISSION = Object.freeze([{ permission: "*", pattern: "*", action: "deny" }]);
@@ -36,16 +37,37 @@ function assertOpenCodeModelConfiguration(config, protectionPlugin = null) {
   }
 }
 
+function openCodeVariants(model) {
+  return Object.entries(model?.variants || {}).filter(([, options]) =>
+    options && typeof options === "object" && !Array.isArray(options) && options.disabled !== true);
+}
+
+const REASONING_VARIANT_FIELDS = ["reasoningEffort", "reasoning_effort", "effort", "reasoning", "reasoningConfig",
+  "reasoningMode", "thinking", "thinkingConfig", "thinkingLevel", "thinkingBudget", "enableThinking", "enable_thinking"];
+
+function hasReasoningOptions(fields) {
+  return fields && (REASONING_VARIANT_FIELDS.some(key => fields[key] != null)
+    || fields.output_config?.effort != null || fields.chat_template_kwargs?.thinking_mode != null
+    || fields.chat_template_kwargs?.enable_thinking != null || fields.chat_template_args?.enable_thinking != null);
+}
+
+function openCodeThinkingOptions(model) {
+  // OpenCode can also define variants for unrelated model options. Its V1
+  // catalog supplies the provider options behind each variant alongside its ID.
+  return openCodeVariants(model).filter(([id, options]) => effortId(id) && id !== "default"
+    && (hasReasoningOptions(options) || hasReasoningOptions(options.modelParams)))
+    .slice(0, 16).map(([id]) => id);
+}
+
 function resolveOpenCodeModelSettings(execution, model) {
   const core = require("./shoggoth-memory/core.cjs");
-  const variants = Object.entries(model?.variants || {}).filter(([id, options]) =>
-    options && typeof options === "object" && !Array.isArray(options) && options.disabled !== true
-    && Object.hasOwn(core.MEMORY_THINKING_LEVEL_RANKS, core.normalizeMemoryThinkingLevel(id)));
+  const variants = openCodeVariants(model).map(([id]) => id).filter(id =>
+    Object.hasOwn(core.MEMORY_THINKING_LEVEL_RANKS, core.normalizeMemoryThinkingLevel(id)));
   // An explicit non-reasoning capability has only the off level. Unknown or
   // fixed reasoning cannot be represented as an adjustable native setting.
   if (!variants.length && model?.capabilities?.reasoning !== false) throw fail("MODEL_ONLY_SETTINGS_UNAVAILABLE");
   const settings = require("./memory-model-settings").resolveMemoryModelExecution(execution, {
-    thinkingOptions: variants.length ? variants.map(([id]) => id) : ["off"],
+    thinkingOptions: variants.length ? variants : ["off"],
     thinkingDefault: null, fastTier: null,
   });
   return variants.length ? { variant: settings.thinkingLevel } : {};
@@ -169,4 +191,4 @@ async function generateOpenCodeModelOnly(host, input) {
 }
 
 module.exports = { isolateOpenCodeModelEnvironment, assertOpenCodeModelConfiguration, generateOpenCodeModelOnly,
-  resolveOpenCodeModelSettings };
+  openCodeThinkingOptions, resolveOpenCodeModelSettings };

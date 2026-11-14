@@ -13,6 +13,7 @@ const { ModelSecretProjection } = require("../app/agent-service/model-secret-pro
 const { ModelSecretGateway, TARGETS } = require("../app/agent-service/model-secret-gateway");
 const { ModelSecretProvenance } = require("../app/agent-service/model-secret-provenance");
 const { ModelSecretDisclosures } = require("../app/agent-service/model-secret-disclosures");
+const { classifyProviderFailureDetail } = require("../app/agent-service/runtime-provider-errors");
 const repo = path.resolve(__dirname, ".."), root = fs.realpathSync(fs.mkdtempSync("/private/tmp/sg-native-egress-"));
 const home = path.join(root, "codex"), workspace = path.join(root, "workspace");
 fs.mkdirSync(home, { mode: 0o700 }); fs.mkdirSync(workspace, { mode: 0o700 });
@@ -67,6 +68,10 @@ const provider = http.createServer(async (req, res) => {
     }
     if (stage.protected) assert(!data.includes("654321"), "native file output leaked to the actual model request");
     else assert(data.includes("654321"), "another session must not borrow this session's credential scope");
+    if (stage.unavailable) {
+      res.writeHead(503).end("synthetic provider unavailable");
+      return;
+    }
     if (stage.disconnectBeforeHeaders && !stage.disconnected) {
       stage.disconnected = true;
       res.destroy();
@@ -243,6 +248,15 @@ async function main() {
   assert.equal(requests.length, beforeExhausted + 6, "one initial attempt plus five native retries");
   assert.equal(exhausted.reconnects, 5);
   assert.match(exhausted.event.failure?.message, /stream disconnected|error decoding response body/iu);
+  const beforeOutage = requests.length;
+  stage = { noTool: true, protected: true, unavailable: true };
+  const outage = await turn(handle, first.session.id, "Report the result when the provider is unavailable.", "failed");
+  assert.equal(requests.length, beforeOutage + 6, "a sustained 502 exhausts the native retry budget");
+  assert.equal(outage.reconnects, 5);
+  assert.equal(outage.event.failure?.httpStatus, 502);
+  assert.match(outage.event.failure?.message, /Model service temporarily unavailable/u);
+  assert.doesNotMatch(outage.event.failure?.message, /127\.0\.0\.1|[a-f0-9]{64}/iu);
+  assert.equal(classifyProviderFailureDetail(outage.event.failure), "RUNTIME_UPSTREAM_UNAVAILABLE");
   const beforeInvalid = requests.length;
   stage = { noTool: true, protected: true, invalidStream: true };
   const rejected = await turn(handle, first.session.id, "Reject an invalid response without retrying or repeating the command.", "failed");
@@ -276,6 +290,7 @@ async function main() {
   console.log(JSON.stringify({ pass: true, runtime: "real pinned Codex", providerKind, requests: requests.length,
     nativeCommandExecutions: 1, protectedNativeFollowup: true, disconnectedFollowupRecovered: true, twoSessionsIsolated: true,
     disconnectedToolResponseNoReplay: true, recoveredBeforeHeaders: true, exhaustedAttempts: 6, reconnectNoticesAreDiagnostic: true,
+    gatewayOutageClassified: true,
     resumedTwiceWithoutReplay: true, opaqueHistoryVerifiedAcrossRestart: true,
     invalidResponseNoRetry: true, silentOriginalFallbackOnce: true, disconnectedOriginalFallbackNoRetry: true, newInputAfterFallback: true,
     missingResponseType, realAccountUsed: false, proxyConfigured: useProxy }));

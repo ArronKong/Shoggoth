@@ -20,4 +20,8 @@ assert.equal(consume(state, { ...job, lastRunAt: 300, outputDisposition: "delive
 assert.equal(consume(state, { ...job, lastRunAt: 400, lastStatus: "error", outputDisposition: "deliver" }, true), true);
 assert.equal(consume(state, { ...job, lastRunAt: 500 }, true), true, "legacy backends retain notifications");
 assert.equal(consume(state, { ...job, id: "new-job" }, true), false);
-console.log("cron notifications: PASS (pending, silence, delivery, failure, dedup, legacy)");
+assert.equal(consume(state, { ...job, lastRunAt: 600, deliveryTarget: "group", outputDisposition: "deliver" }, true), false);
+assert.equal(consume(state, { ...job, lastRunAt: 700, deliveryTarget: "group", lastStatus: "error" }, true), false);
+assert.equal(state.get("a"), 700, "group delivery consumes the occurrence without a second notification");
+assert.equal(consume(state, { ...job, lastRunAt: 800, deliver: "group" }, true), true, "external modes retain notifications");
+console.log("cron notifications: PASS (pending, silence, delivery, failure, dedup, legacy, group)");

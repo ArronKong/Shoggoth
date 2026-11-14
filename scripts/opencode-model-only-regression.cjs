@@ -44,7 +44,10 @@ test("model worker denies all tools and refuses effective config contamination",
   assert.equal(adapter.modelOnly, true);
 });
 
-for (const protectedModel of [false, true]) test(`actual OpenCode CLI${protectedModel ? " protected model" : ""}: no tools, original account config preserved, errors and cancellation settle`, { timeout: 120_000 }, async () => {
+for (const scenario of ["chat", "model-only", "protected"]) test(scenario === "chat"
+  ? "actual OpenCode CLI applies native thinking variants in chat"
+  : `actual OpenCode CLI${scenario === "protected" ? " protected model" : ""}: no tools, original account config preserved, errors and cancellation settle`, { timeout: 120_000 }, async () => {
+  const protectedModel = scenario === "protected";
   const root = fs.mkdtempSync("/private/tmp/sg-opencode-model-only-");
   const paths = { trustedRoot: root, stateDir: path.join(root, "state") };
   for (const name of ["home", "data", "state", "workspace", "config", "config/opencode"]) {
@@ -95,7 +98,8 @@ for (const protectedModel of [false, true]) test(`actual OpenCode CLI${protected
       provider: { "model-fixture": { npm: "@ai-sdk/openai-compatible",
         options: { apiKey: "synthetic-model-key", baseURL: `http://127.0.0.1:${server.address().port}/v1` },
         models: { "fixture-model": { name: "Fixture", reasoning: true,
-          variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" } },
+          variants: { low: { reasoningEffort: "low" }, high: { reasoningEffort: "high" },
+            ...(scenario === "chat" ? { medium: { disabled: true } } : {}) },
           limit: { context: 32000, output: 2048 } } } } } });
     fs.writeFileSync(configFile, config, { mode: 0o600 });
     fs.writeFileSync(path.join(root, "home/AGENTS.md"), "PRIVATE_HOME_RULE_CANARY");
@@ -116,6 +120,26 @@ for (const protectedModel of [false, true]) test(`actual OpenCode CLI${protected
         return require("node:child_process").spawn(binary, args, options);
       } });
     await host.initialize();
+    if (scenario === "chat") {
+      const catalog = await host.modelsList();
+      assert.deepEqual(catalog.data.find(row => row.model === model).capabilities.thinkingOptions, ["low", "high"]);
+      const { session } = await host.sessionStart({ source: "thinking-chat-fixture",
+        model, cwd: path.join(root, "workspace"), permissionPolicy: host.permissionPolicy });
+      const finished = new Promise(resolve => {
+        const unsubscribe = host.subscribe(event => {
+          if (event.type === "complete" && event.sessionId === session.id) { unsubscribe(); resolve(event); }
+        });
+      });
+      const prompt = "SHOGGOTH_VARIANT_CHAT_CANARY";
+      await host.turnStart({ sessionId: session.id, operationId: "chat-effort", prompt,
+        model, thinkingLevel: "high", cwd: path.join(root, "workspace"), permissionPolicy: host.permissionPolicy });
+      assert.equal((await finished).status, "completed");
+      const chatRequests = requests.filter(body => body.messages?.some(message =>
+        message.role === "user" && JSON.stringify(message.content).includes(prompt)));
+      assert.ok(chatRequests.some(body => body.reasoning_effort === "high"), "normal chat applies the selected variant");
+      await host.sessionDelete({ sessionId: session.id });
+      return;
+    }
     // Settings discovered after the ordinary host started must not leak into
     // the model worker or launch any native MCP/plugin before its deny rule.
     const contaminated = JSON.stringify({ ...JSON.parse(config),
@@ -222,6 +246,7 @@ for (const protectedModel of [false, true]) test(`actual OpenCode CLI${protected
     }
   } finally {
     await host?.stop(); await gateway?.close(); await secrets?.close(); for (const socket of sockets) socket.destroy();
-    await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true });
+    await new Promise(resolve => server.close(resolve));
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });

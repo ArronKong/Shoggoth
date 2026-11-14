@@ -1920,7 +1920,8 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
       const url = new URL(req.url, "http://127.0.0.1");
       const backendId = url.searchParams.get("backend") || "";
-      const scope = backendId ? registry.getChatCacheScope(backendId) : null;
+      const sessionKey = url.searchParams.get("sessionKey") || undefined;
+      const scope = backendId ? registry.getChatCacheScope(backendId, sessionKey) : null;
       if (!scope) return sendJson(res, 404, { error: `unknown or unsupported backend: ${backendId}` });
       return sendJson(res, 200, scope);
     }

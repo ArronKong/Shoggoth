@@ -55,10 +55,17 @@ class RunExecutionStore {
     }
     const c = value.contract;
     const command = value.command;
-    if (c?.contextRequest?.restorePolicy && (!require("./context-transfer").validRestorePolicy(c.contextRequest.restorePolicy)
-      || !Number.isSafeInteger(c.contextRequest.nativeSeed?.usedTokens) || c.contextRequest.nativeSeed.usedTokens < 0
-      || !Number.isSafeInteger(c.contextRequest.nativeSeed?.throughSeq) || c.contextRequest.nativeSeed.throughSeq < 0
-      || c.contextRequest.nativeSeed.operationId !== command?.operationId)) throw invalid();
+    const request = c?.contextRequest;
+    if (request?.restorePolicy && !require("./context-transfer").validRestorePolicy(request.restorePolicy)) throw invalid();
+    if (request?.recentHistoryOnly !== undefined && (request.recentHistoryOnly !== true || request.restorePolicy
+      || run.source !== "chat" || c.contextFresh !== true || request.historyTruncated !== true
+      || request.completeness !== "partial" || request.exceedsBudget || request.transportExceeded
+      || !/^[a-f0-9]{64}$/u.test(request.recentHistorySourceIdentity || "")
+      || typeof c.transcriptSessionId !== "string" || !Number.isSafeInteger(c.contextRevisions?.transcript))) throw invalid();
+    if ((request?.restorePolicy || request?.recentHistoryOnly)
+      && (!Number.isSafeInteger(request.nativeSeed?.usedTokens) || request.nativeSeed.usedTokens < 0
+        || !Number.isSafeInteger(request.nativeSeed?.throughSeq) || request.nativeSeed.throughSeq < 0
+        || request.nativeSeed.operationId !== command?.operationId)) throw invalid();
     if (!c || c.runId !== run.id || c.profileId !== run.profileId || c.source !== run.source
       || c.sourceId !== run.sourceId || c.workspace !== run.workspace
       || typeof c.runtime !== "string" || typeof c.runtimeProfileId !== "string"

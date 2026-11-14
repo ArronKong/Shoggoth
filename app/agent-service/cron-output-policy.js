@@ -9,7 +9,18 @@ const SILENT_FINALS = new Set(["NO_REPLY", "[SILENT]", "NO_RESET"]);
 function validCronOutput(value) {
   return value && value.version === VERSION && Object.keys(value).length === 3
     && ["pending", "deliver", "silent"].includes(value.disposition)
-    && (value.disposition === "silent" ? ["token", "empty"].includes(value.reason) : value.reason === null);
+    && (value.disposition === "silent" ? ["token", "empty", "duplicate"].includes(value.reason) : value.reason === null);
+}
+
+function isCronWatch(job) {
+  return (job?.watch ?? job?.groupDelivery?.watch) === true;
+}
+
+function cronFinalAnswer(events, resolveDisplay) {
+  const messages = events.filter(event => event.kind === "assistant").map(resolveDisplay)
+    .filter(event => event.content?.delivery !== "async" && typeof event.content?.text === "string");
+  return messages.findLast(event => event.content.phase === "final_answer")
+    ?? messages.findLast(event => event.content.phase == null);
 }
 
 function cronUnattendedCompletionError(run, events, resultSummary, resolveDisplay = event => event) {
@@ -17,29 +28,24 @@ function cronUnattendedCompletionError(run, events, resultSummary, resolveDispla
   const own = events.filter(event => event.runId === run.id);
   if (!own.some(event => event.content?.transcriptType === "cron.authorization" && event.content.decision === "deny")) return null;
   if (own.some(event => event.kind === "artifact")) return null;
-  const messages = own.filter(event => event.kind === "assistant").map(resolveDisplay)
-    .filter(event => event.content?.delivery !== "async" && typeof event.content?.text === "string");
-  const final = (messages.findLast(event => event.content?.phase === "final_answer")
-    || messages.findLast(event => event.content?.phase == null))?.content?.text ?? resultSummary ?? "";
+  const final = cronFinalAnswer(own, resolveDisplay)?.content.text ?? resultSummary ?? "";
   // An allowed alternative with a real result remains successful. If the
   // model stops silently after a denial, expose failure and release the Run.
   return !final.trim() || SILENT_FINALS.has(final.trim()) ? "CRON_AUTHORIZATION_DENIED" : null;
 }
 
-function cronOutputDecision(run, events, resolveDisplay = event => event) {
+function cronOutputDecision(run, events, resolveDisplay = event => event, isDuplicate = () => false) {
   if (run?.source !== "cron") return null;
   const own = events.filter(event => event.runId === run.id);
   // Opt in at admission. Existing transcripts and ordinary user turns in the
   // same recurring conversation keep their original history semantics.
-  if (!own.some(event => event.kind === "user" && event.content?.cronOutputVersion === VERSION)) return null;
+  const admission = own.find(event => event.kind === "user" && event.content?.cronOutputVersion === VERSION);
+  if (!admission) return null;
   if (!TERMINAL.has(run.status)) return { version: VERSION, disposition: "pending", reason: null };
   if (run.status !== "completed") return { version: VERSION, disposition: "deliver", reason: null };
   const saved = own.findLast(event => event.content?.transcriptType === "terminal")?.content?.cronOutput;
   if (validCronOutput(saved) && saved.disposition !== "pending") return structuredClone(saved);
-  const messages = own.filter(event => event.kind === "assistant").map(resolveDisplay)
-    .filter(event => event.content?.delivery !== "async" && typeof event.content?.text === "string");
-  const selected = messages.findLast(event => event.content.phase === "final_answer")
-    || messages.findLast(event => event.content.phase == null);
+  const selected = cronFinalAnswer(own, resolveDisplay);
   // A run summary is bounded. Prefer the full canonical final, so a marker
   // followed by a long report cannot become silence through truncation.
   const text = selected?.content.text ?? run.resultSummary ?? "";
@@ -51,6 +57,10 @@ function cronOutputDecision(run, events, resolveDisplay = event => event) {
   const hasContent = own.some(event => event.kind === "artifact"
     || event.kind === "assistant" && typeof event.content?.text === "string" && event.content.text.trim());
   if (!final && !hasContent) return { version: VERSION, disposition: "silent", reason: "empty" };
+  if (admission.content.cronWatch === true && !artifact && selected && !selected.contextExcluded
+    && final && isDuplicate(text)) {
+    return { version: VERSION, disposition: "silent", reason: "duplicate" };
+  }
   return { version: VERSION, disposition: "deliver", reason: null };
 }
 
@@ -65,4 +75,5 @@ function publicCronTranscript(events, getDecision) {
   });
 }
 
-module.exports = { CRON_OUTPUT_VERSION: VERSION, cronOutputDecision, publicCronTranscript, validCronOutput, cronUnattendedCompletionError };
+module.exports = { CRON_OUTPUT_VERSION: VERSION, cronOutputDecision, cronFinalAnswer, isCronWatch,
+  publicCronTranscript, validCronOutput, cronUnattendedCompletionError };

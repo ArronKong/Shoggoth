@@ -111,7 +111,7 @@ class DomainWorkRunExecutor {
     }
     this.coordinator = options.coordinator || null;
     this.getCoordinator = options.getCoordinator || (() => this.coordinator);
-    this.prepareGroupCronPrompt = options.prepareGroupCronPrompt || null;
+    this.recoverGroupCronPrompt = options.recoverGroupCronPrompt || null;
   }
 
   schedule(payload) {
@@ -189,8 +189,8 @@ class DomainWorkRunExecutor {
       await coordinator.executeDomainRun({
         runId: run.id,
         operationId,
-        prompt: run.source === "cron" && payload.job.groupDelivery && this.prepareGroupCronPrompt
-          ? this.prepareGroupCronPrompt({ run, job: payload.job, prompt: payload.prompt, operationId }) : payload.prompt,
+        prompt: run.source === "cron" && payload.recovered && payload.job.groupDelivery && this.recoverGroupCronPrompt
+          ? this.recoverGroupCronPrompt({ run, job: payload.job, prompt: payload.prompt, operationId }) : payload.prompt,
         threadSource: domainThreadSource(run, run.source === "cron" ? payload.threadPolicy : "new"),
         threadId: run.source === "cron" && payload.threadPolicy === "continue"
           ? payload.threadId : null,

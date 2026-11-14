@@ -11,6 +11,11 @@ function runtimeFailureDetail(value, registeredSecrets = []) {
     const own = (object, key) => Object.getOwnPropertyDescriptor(object || {}, key)?.value;
     let message = own(value, "message");
     let status = own(value, "httpStatus") ?? own(value, "statusCode") ?? own(value, "status");
+    const codexErrorInfo = own(value, "codexErrorInfo");
+    for (const variant of ["httpConnectionFailed", "responseStreamConnectionFailed",
+      "responseStreamDisconnected", "responseTooManyFailedAttempts"]) {
+      status ??= own(own(codexErrorInfo, variant), "httpStatusCode");
+    }
     let code = own(value, "upstreamCode") ?? own(value, "code");
     const nested = own(value, "error");
     if (nested && typeof nested === "object") {

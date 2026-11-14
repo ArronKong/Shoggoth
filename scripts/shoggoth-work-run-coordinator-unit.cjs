@@ -2323,28 +2323,35 @@ test("默认 terminal 观察窗口容纳超过两秒的原生历史滞后且不�
 });
 
 test("显式原生终态在历史读失败后保留真实结果、原回答和 exactly-once", async () => {
-  for (const status of ["completed", "failed", "interrupted", "canceled"]) {
+  for (const [scenario, status, expectedCode, error] of [
+    ["completed", "completed", null],
+    ["unauthorized", "failed", "RUNTIME_AUTH_REQUIRED", { codexErrorInfo: "unauthorized", message: "Invalid credential." }],
+    ["gateway", "failed", "RUNTIME_UPSTREAM_UNAVAILABLE", { codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } },
+      message: "The selected model is unavailable." }],
+    ["interrupted", "interrupted", "RUNTIME_TURN_INTERRUPTED"],
+    ["canceled", "canceled", null],
+  ]) {
     const value = await openFixture({
       sessionStatus: "ready", threadId: "thread-terminal-proof",
       threads: [{ id: "thread-terminal-proof", threadSource: null, turns: [] }],
       terminalRetryDelaysMs: [0, 0],
     });
-    const { ack } = await sendAndDrain(value, { operationId: `terminal-proof-${status}` });
+    const operationId = `terminal-proof-${scenario}`;
+    const { ack } = await sendAndDrain(value, { operationId });
     const running = value.coordinator.getRun(ack.run.id);
     let reads = 0;
     value.host.threadRead = async () => { reads += 1; throw codedError("TRANSIENT_READ_FAILURE"); };
     const identity = { known: true, threadId: running.runtimeSessionRef.sessionId, turnId: running.runtimeTurnRef.turnId };
     value.host.emit({ ...identity, type: "text", text: "original native answer", phase: "final_answer" });
-    const event = { ...identity, type: "complete", method: "turn/completed", status,
-      terminalEvidence: { id: identity.turnId, status,
-        ...(status === "failed" ? { error: { codexErrorInfo: "unauthorized" } } : {}) } };
+    const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
+    const event = normalizeCodexEvent({ method: "turn/completed", params: { threadId: identity.threadId,
+      turn: { id: identity.turnId, status, error } } });
     value.host.emit(event);
     value.host.emit(event);
     const terminal = await value.coordinator.waitForIdle(running.id);
     assert.equal(terminal.status, status);
-    assert.equal(terminal.errorCode, status === "failed" ? "RUNTIME_AUTH_REQUIRED"
-      : status === "interrupted" ? "RUNTIME_TURN_INTERRUPTED" : null);
-    assert.equal(value.inbox.get(`terminal-proof-${status}`).state, "completed");
+    assert.equal(terminal.errorCode, expectedCode);
+    assert.equal(value.inbox.get(operationId).state, "completed");
     assert.equal(reads, 3);
     assert.equal(value.host.turnStartCalls, 1);
     const replay = value.coordinator.subscribeRun(running.id, { streamId: null, afterSeq: 0 }, () => {});
@@ -3134,6 +3141,8 @@ test("terminal failed turn 映射已知服务错误而不泄露 Runtime message"
       message: "private upstream details" } }, "RUNTIME_QUOTA_EXHAUSTED"],
     ["codex-busy", { error: { codexErrorInfo: "serverOverloaded",
       message: "private upstream details" } }, "RUNTIME_UPSTREAM_UNAVAILABLE"],
+    ["codex-gateway", { error: { codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } },
+      message: "The selected model is unavailable." } }, "RUNTIME_UPSTREAM_UNAVAILABLE"],
     ["codex-model", { error: { codexErrorInfo: "other",
       message: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account. private upstream details" } }, "RUNTIME_MODEL_UNAVAILABLE"],
     ["codex-effort", { error: { codexErrorInfo: "other",

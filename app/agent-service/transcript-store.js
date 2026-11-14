@@ -762,7 +762,7 @@ class TranscriptStore {
       content = {
         ...(typeof displayContent?.text === "string" ? { text: Buffer.from(displayContent.text).subarray(0, 20 * 1024)
           .toString("utf8").toWellFormed() } : {}),
-        ...Object.fromEntries(["operationId", "cronOutputVersion", "attachments", "pluginSelection", "pluginSelectionSnapshot",
+        ...Object.fromEntries(["operationId", "cronOutputVersion", "cronWatch", "attachments", "pluginSelection", "pluginSelectionSnapshot",
           "transcriptType", "segmentId", "origin", "uiAction", "importedFrom", "ownMemoryProvenance"].filter(key => displayContent?.[key] !== undefined)
           .map(key => [key, displayContent[key]])),
         ...(borrowedMemoryRefs.length ? { borrowedMemoryRefs } : {}),

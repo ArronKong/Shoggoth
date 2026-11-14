@@ -151,6 +151,57 @@ function completion(host, timeoutMs = 5000) {
   return { events, settled };
 }
 
+test("OpenCode chat advertises the exact model's variants and sends the selected one once", async () => {
+  const f = openCodeFixture("shoggoth-opencode-variants-");
+  const sessionId = "ses_reasoningfixture12345", model = "fixture/nested/model";
+  const ledger = new OpenCodeRuntimeLedger(f.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "fixture", cwd: f.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+  const payloads = [];
+  const variants = { none: { reasoningEffort: "none" }, max: { reasoningEffort: "max" },
+    high: { disabled: true, reasoningEffort: "high" }, default: {}, concise: { temperature: 0.2 },
+    custom_think: { modelParams: { thinkingConfig: { thinkingBudget: 2048 } } } };
+  const host = f.host(ledger, async (method, route, body) => {
+    if (route === "/provider") return { data: { connected: ["fixture"], all: [{ id: "fixture",
+      models: { "nested/model": { name: "Fixture", variants }, fixed: { name: "Fixed", capabilities: { reasoning: true } } } }] } };
+    if (route === "/config") return { data: { model } };
+    if (route.endsWith("/prompt_async")) { payloads.push(body); return { status: 204 }; }
+    if (route.startsWith(`/session/${sessionId}/message?`)) {
+      const message = payloads.at(-1);
+      return { data: [
+        { info: { id: message.messageID, sessionID: sessionId, role: "user" }, parts: [] },
+        { info: { id: "msg_fixture12345", sessionID: sessionId, role: "assistant", parentID: message.messageID,
+          time: { completed: Date.now() }, finish: "stop" }, parts: [] },
+      ] };
+    }
+    if (route === "/session/status") return { data: {} };
+    if (route === "/permission" || route === "/question") return { data: [] };
+    throw new Error(`Unexpected ${method} ${route}`);
+  });
+  try {
+    const catalog = (await host.modelsList()).data;
+    assert.deepEqual(catalog.map(row => row.capabilities.thinkingOptions), [["none", "max", "custom_think"], []]);
+    const input = { sessionId, operationId: "select-variant", prompt: "fixture", cwd: f.workspace, permissionPolicy: POLICY };
+    for (const thinkingLevel of ["high", "concise"]) {
+      await assert.rejects(host.turnStart({ ...input, model, thinkingLevel }), { code: "RUNTIME_MODEL_SETTINGS_INVALID" });
+    }
+    assert.equal(payloads.length, 0, "disabled variant is rejected before native submission");
+    const applied = completion(host);
+    const selected = { ...input, thinkingLevel: "max" };
+    await host.turnStart(selected);
+    assert.equal((await applied.settled).status, "completed");
+    assert.equal(payloads[0].variant, "max");
+    assert.deepEqual(payloads[0].model, { providerID: "fixture", modelID: "nested/model" });
+    await host.turnStart(selected);
+    await assert.rejects(host.turnStart({ ...selected, thinkingLevel: "none" }), { code: "RUNTIME_OPERATION_CONFLICT" });
+    assert.equal(payloads.length, 1, "a completed operation cannot replay at another effort");
+    const inherited = completion(host);
+    await host.turnStart({ ...input, model, operationId: "inherit-variant", thinkingLevel: null });
+    assert.equal((await inherited.settled).status, "completed");
+    assert.equal(Object.hasOwn(payloads[1], "variant"), false);
+  } finally { host.state = "stopped"; f.cleanup(); }
+});
+
 test("managed OpenCode resumes history with verified tool rules and restores the next selected mode", async () => {
   const f = openCodeFixture("shoggoth-opencode-managed-");
   const sessionId = "ses_managedfixture12345";

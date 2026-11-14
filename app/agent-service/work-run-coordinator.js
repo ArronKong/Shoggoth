@@ -1,7 +1,7 @@
 "use strict";
 
 const { nativeResponseMetadata, validResponseMetadata } = require("../chat-response-metadata");
-const { CRON_OUTPUT_VERSION, cronOutputDecision, cronUnattendedCompletionError } = require("./cron-output-policy");
+const { CRON_OUTPUT_VERSION, cronOutputDecision, cronFinalAnswer, isCronWatch, cronUnattendedCompletionError } = require("./cron-output-policy");
 
 const crypto = require("node:crypto");
 const { extractBorrowedMemoryRefs, mergeBorrowedMemoryRefs, refsFromEvents, sanitizeBorrowedToolContent } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
@@ -29,7 +29,7 @@ const { CodexRuntimeAdapter } = require("./codex-runtime-adapter");
 const { isDesktopBinding } = require("./codex-desktop-session-store");
 const { RuntimeMcpCallBindings, parseBindingElicitation } = require("./runtime-mcp-call-binding");
 const { runtimeCommandUsesReservedHostCapability } = require("./runtime-host-command-policy");
-const { classifyProviderFailure } = require("./runtime-provider-errors");
+const { classifyProviderFailureDetail } = require("./runtime-provider-errors");
 const { runtimeFailureDetail, runtimeFailureFromError } = require("./runtime-failure-detail");
 const { startManualCompaction } = require("./runtime-manual-compaction");
 const {
@@ -349,7 +349,8 @@ function failedTurnErrorCode(turn, fallback = "RUNTIME_TURN_FAILED") {
   if (turn?.error?.codexErrorInfo === "serverOverloaded") return "RUNTIME_UPSTREAM_UNAVAILABLE";
   if (PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES.has(turn?.errorCode)) return turn.errorCode;
   if (SAFE_RUNTIME_CAUSE_CODES.has(turn?.errorCode)) return SAFE_RUNTIME_CAUSE_CODES.get(turn.errorCode);
-  const providerFailure = classifyProviderFailure(turn?.error?.message, turn?.error?.additionalDetails);
+  const providerFailure = classifyProviderFailureDetail(runtimeFailureDetail(turn?.error),
+    turn?.error?.message, turn?.error?.additionalDetails);
   if (providerFailure) return providerFailure;
   return fallback;
 }
@@ -1013,6 +1014,7 @@ class WorkRunCoordinator {
     this.dispatcher = options.dispatcher;
     this.productStore = options.productStore;
     this.cronStore = options.cronStore || null;
+    this.hasPublishedCronReply = options.hasPublishedCronReply || (() => false);
     this.usageStore = options.usageStore || null;
     this.transcriptStore = options.transcriptStore || null;
     this.verifyMemoryExtractionSource = options.verifyMemoryExtractionSource || null;
@@ -1021,6 +1023,7 @@ class WorkRunCoordinator {
     this.hookService = options.hookService || null;
     this.hookWorkspaceWriters = options.hookWorkspaceWriters || null;
     this.conversationCheckpointStore = options.conversationCheckpointStore || null;
+    this.isInternalChatSession = options.isInternalChatSession || (() => false);
     this.sourceConversationStore = options.sourceConversationStore || null;
     this.runtimeSelectionPolicyStore = options.runtimeSelectionPolicyStore || null;
     this.getCapabilityPolicyRevision = options.getCapabilityPolicyRevision || (() => null);
@@ -2329,6 +2332,7 @@ class WorkRunCoordinator {
         this.conversationCheckpointStore?.nativeMemoryVersion?.(contract.profileId))) {
         throw coordinatorError("CONTEXT_SOURCE_STALE", "记忆或撤回状态在准备后变化");
       }
+      this.#assertRecentHistoryCurrent(contract);
       const memory = this.contextCompiler?.memoryEngine;
       memory?.sharing?.assertRunCurrent(token.runId);
       if (contract.borrowedMemoryRefs?.length
@@ -4472,11 +4476,41 @@ class WorkRunCoordinator {
 
   getCronOutput(runOrId, transcriptEvents = null) {
     const run = typeof runOrId === "string" ? this.dispatcher.getRun(runOrId) : runOrId;
-    if (run?.source !== "cron") return null;
+    if (run?.source !== "cron" || !this.transcriptStore) return null;
     const key = this.getRunSessionKey(run), session = key && this.chatSessionStore.getSession(key);
     if (!session) return null;
-    return cronOutputDecision(run, transcriptEvents ?? this.transcriptStore?.listEvents(run.profileId, session.id) ?? [],
-      event => this.transcriptStore.displayEvent(run.profileId, session.id, event));
+    return cronOutputDecision(run, transcriptEvents ?? readEvents(this.transcriptStore, run.profileId, session.id),
+      event => this.transcriptStore.displayEvent(run.profileId, session.id, event),
+      text => this.#matchesPreviousCronReport(run, text));
+  }
+
+  #matchesPreviousCronReport(run, text) {
+    const groupId = this.cronStore?.getJob?.(run.sourceId)?.groupDelivery?.groupId;
+    const previousRuns = this.dispatcher.listRuns({ source: "cron", sourceId: run.sourceId,
+      profileId: run.profileId, workspace: run.workspace, status: "completed" })
+      .filter(previous => previous.id !== run.id && previous.finishedAt <= run.finishedAt)
+      .reverse()
+      .sort((left, right) => right.finishedAt - left.finishedAt);
+    for (const previous of previousRuns) {
+      try {
+        const key = this.getRunSessionKey(previous);
+        const session = key && this.chatSessionStore.getSession(key);
+        if (!session) continue;
+        const terminalId = transcriptEventId("chat-terminal", previous.id, previous.status);
+        const terminal = this.transcriptStore.getEvent(previous.profileId, session.id, terminalId);
+        if (terminal?.contextExcluded || terminal?.content.cronOutput?.disposition !== "deliver") continue;
+        if (groupId && !this.hasPublishedCronReply({ groupId, jobId: run.sourceId, runId: previous.id })) continue;
+        const events = readEvents(this.transcriptStore, previous.profileId, session.id)
+          .filter(event => event.runId === previous.id && !event.contextExcluded);
+        const answer = cronFinalAnswer(events,
+          event => this.transcriptStore.displayEvent(previous.profileId, session.id, event));
+        if (answer?.content.text.trim()) return answer.content.text === text;
+      } catch {
+        // An unreadable prior report is not evidence that the current one is a duplicate.
+        return false;
+      }
+    }
+    return false;
   }
 
   recoverCronChatSessions() {
@@ -4524,7 +4558,8 @@ class WorkRunCoordinator {
     // Re-admission/recovery must not upgrade an older run or change its input.
     if (this.transcriptStore && readEvents(this.transcriptStore, run.profileId, session.id).some(item => item.id === eventId)) return session;
     const event = { id: eventId, kind: "user",
-      content: { text: command.prompt, operationId: command.operationId, cronOutputVersion: CRON_OUTPUT_VERSION },
+      content: { text: command.prompt, operationId: command.operationId, cronOutputVersion: CRON_OUTPUT_VERSION,
+        ...(isCronWatch(this.cronStore?.getJob?.(run.sourceId)) ? { cronWatch: true } : {}) },
       // TranscriptStore preserves the first timestamp on an idempotent append;
       // admission can happen later than the initial queued conversation write.
       runtimeRef: null, contextExcluded: false };
@@ -4761,10 +4796,11 @@ class WorkRunCoordinator {
           if (saved) {
             const content = (this.transcriptStore.displayEvent?.(run.profileId, session.id, saved) || saved).content;
             if (content.recovered === true) terminalPayload.recovered = true;
-            if (runtimeFailureDetail(content.failure)) {
+            const savedFailure = runtimeFailureDetail(content.failure);
+            if (savedFailure) {
               // The original terminal is immutable, including its diagnosis.
               terminalPayload.failure = content.failure;
-              payload.failure = content.failure;
+              payload.failure = savedFailure;
             }
             if (validResponseMetadata(content.responseMetadata)) responseMetadata = content.responseMetadata;
             contextExcluded = saved.contextExcluded;
@@ -6867,7 +6903,8 @@ class WorkRunCoordinator {
     // a fresh session that cannot carry its history still are.
     const selfManaged = run.source !== "compaction" && selfManagedCompaction(executionContract.runtime)
       && requestPlan && !requestPlan.transportExceeded && !(executionContract.contextFresh && requestPlan.historyTruncated);
-    if (!manualNativeCompact && !selfManaged && requestPlan && (requestPlan.exceedsBudget || requestPlan.transportExceeded || (executionContract.contextFresh && requestPlan.historyTruncated))) {
+    if (!manualNativeCompact && !selfManaged && requestPlan && (requestPlan.exceedsBudget || requestPlan.transportExceeded
+      || (executionContract.contextFresh && requestPlan.historyTruncated && !requestPlan.recentHistoryOnly))) {
       const session = sessionKey && this.chatSessionStore.getSession(sessionKey);
       const early = session && automaticNative ? this.#maintenanceState(session, executionContract, "native_compaction").latest : null;
       if (early?.waitingRunId === run.id && this.dispatcher.getRun(early.id)?.status === "completed") {
@@ -7066,6 +7103,16 @@ class WorkRunCoordinator {
     const handoffSeed = handoff ? require("./runtime-handoff-seed").runtimeHandoffSeed(boundSession, profile) : null;
     const restorePolicy = handoff && this.transcriptStore
       ? require("./context-transfer").workingRestorePolicy(this.transcriptStore, boundSession, profile) : null;
+    const previousRuntime = handoff ? boundSession.retiredRuntimeSessions.at(-1) : null;
+    // Only continue a detached direct chat on its existing binding. Runtime
+    // migrations still go through their explicit handoff checks.
+    const allowRecentHistoryRestore = previousRuntime !== null && previousRuntime.bindingId === boundSession.runtimeBindingId
+      && previousRuntime.runtime === profile.runtime && previousRuntime.runtimeAccountId === profile.runtimeAccountId
+      && run.source === "chat" && command && command.prompt !== "/compact" && !command.operationId.startsWith("ui-operation-")
+      && !this.isInternalChatSession(boundSession.sessionKey)
+      && !/^shoggoth:chat-send:(?:federation-(?:send|message)|group-(?:turn|task))-/u.test(run.idempotencyKey || "")
+      && this.getNativeRuntimeConfig()?.flags?.runtimeContextLifecycleV1 === true && !restorePolicy
+      && typeof this.transcriptStore?.getIndexSnapshot === "function" && !this.#summaryProfile(boundSession);
     const budgetSession = boundSession ?? { id: run.id, profileId: profile.id, runtimeSessionId: null,
       runtimeBindingId: profile.selectedBindingId ?? profile.defaultBindingId ?? null, modelOverride: defaultModel,
       modelSettings };
@@ -7098,6 +7145,7 @@ class WorkRunCoordinator {
       query: command?.prompt || run.sourceId,
       contextLifecycleV1,
       restorePolicy,
+      allowRecentHistoryRestore,
       currentOperationId: command?.operationId ?? null,
       mcpConnectors,
       nativeSessionId: runtimeSessionIdOf(boundSession),
@@ -8271,7 +8319,7 @@ class WorkRunCoordinator {
         this.#fenceRuntimeAccount(token);
         this.#assertRuntimeSessionOwned(token, context.threadId);
       }
-      turn = context.nativeTerminal;
+      turn = { ...context.nativeTerminal, error: { ...context.failure, ...context.nativeTerminal.error } };
     } else {
       const thread = await this.#readThread(context.host, context.threadId, token, { turnId: context.turnId });
       const turns = thread?.turns;
@@ -8985,10 +9033,19 @@ class WorkRunCoordinator {
     const run = this.dispatcher.getRun(runId), contract = this.runExecutionContracts.get(runId);
     const key = run && this.getRunSessionKey(run), session = key && this.chatSessionStore.getSession(key);
     if (!session || !contract?.contextFresh || run.source === "compaction") return;
-    if (state === "accepted" && contract.contextRequest?.restorePolicy) {
+    if (state === "accepted" && (contract.contextRequest?.restorePolicy || contract.contextRequest?.recentHistoryOnly)) {
       this.#appendTranscript(runId, { id: transcriptEventId("native-context-seeded", runId), kind: "status", contextExcluded: true,
         content: { transcriptType: "context.native.seeded",
           scope: require("./context-transfer").maintenanceScope(session, contract), baseline: contract.contextRequest.nativeSeed } });
+    }
+    if (contract.contextRequest?.recentHistoryOnly) {
+      require("./context-transfer").recordContextTransfer(this.transcriptStore, session, {
+        state, errorCode, targetBindingId: contract.bindingId, model: contract.effectiveModel ?? null,
+        sourceRevision: contract.contextRevisions.transcript, sourceSessionRevision: session.revision,
+        snapshotId: contract.contextSnapshotId, mode: "partial", updatedAt: this.now(),
+      });
+      this.onRuntimeContextChanged({ profileId: session.profileId, sessionKey: key });
+      return;
     }
     const receipt = require("./context-transfer").readContextTransfer(this.transcriptStore, session);
     if (!receipt || !["ready", "unknown"].includes(receipt.state) || receipt.targetBindingId !== contract.bindingId) return;
@@ -9143,6 +9200,14 @@ class WorkRunCoordinator {
     );
   }
 
+  #assertRecentHistoryCurrent(contract) {
+    if (!contract.contextRequest?.recentHistoryOnly) return;
+    const current = this.transcriptStore.getIndexSnapshot(contract.profileId, contract.transcriptSessionId);
+    if (current.sourceIdentity !== contract.contextRequest.recentHistorySourceIdentity) {
+      throw coordinatorError("CONTEXT_SOURCE_STALE", "会话历史在接续准备后变化");
+    }
+  }
+
   async #ensureTurn(host, threadId, profile, session, command, token, fresh = false) {
     token.contextAttemptSessionId = threadId;
     let thread;
@@ -9184,6 +9249,7 @@ class WorkRunCoordinator {
         "turn_start",
         token,
         () => {
+          this.#assertRecentHistoryCurrent(profile);
           const expected = profile.nativeMemoryVersion;
           const sharing = this.contextCompiler?.memoryEngine?.sharing;
           if (profile.borrowedMemoryRefs?.length) {

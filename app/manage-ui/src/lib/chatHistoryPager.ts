@@ -37,6 +37,7 @@ export function createChatHistoryPager<T>(deps: {
   let generation = 0, queue = Promise.resolve();
   let committed: HistoryState<T> | null = null;
   const candidates = new WeakMap<T[], HistoryState<T>>();
+  const latestWindows = new WeakMap<T[], T[]>();
   const releases = new WeakMap<T[], () => void>();
   const pending = new Set<() => void>();
   // Hold the reader through prepare/cache/owner checks, until commit or explicit
@@ -137,10 +138,12 @@ export function createChatHistoryPager<T>(deps: {
     },
     get current() { return committed; },
     sourceOf(messages: T[]) { return candidates.get(messages)?.sourceId; },
+    latestWindow(messages: T[]) { return latestWindows.get(messages) ?? messages; },
     get hasMore() { return !!committed && (committed.buffer.length > 0 || !committed.exhausted); },
     refresh(key: string) { return serial(key, async () => {
       const token = ++operation, old = committed?.key === key ? committed : null, read = context();
       const state = await first(key, read);
+      const latest = state.messages;
       if (old?.expanded && state.sourceId === old.sourceId && state.messages.length) {
         const oldIds = new Map(old.messages.map((message, index) => [deps.id(message), index]));
         while (true) {
@@ -164,6 +167,9 @@ export function createChatHistoryPager<T>(deps: {
           await take(state, read);
         }
       }
+      // A refresh may retain expanded pages in the active thread. The next
+      // visit still starts at the latest window from this same read.
+      if (state.expanded && state.messages !== latest) latestWindows.set(state.messages, latest);
       return candidate(state, token);
     }); },
     earlier(key: string) { return serial(key, async () => {

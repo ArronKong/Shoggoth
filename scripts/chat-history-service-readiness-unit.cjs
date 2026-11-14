@@ -9,6 +9,11 @@ const { createChatHistoryController } = require("../app/manage-ui/src/lib/chatHi
 const key = "agent:fixture:existing";
 const otherKey = "agent:fixture:another";
 const flush = () => new Promise(resolve => setImmediate(resolve));
+const defer = () => {
+  let resolve, reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+};
 function mockClock(t) {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
   t.mock.method(performance, "now", () => Date.now());
@@ -55,6 +60,90 @@ function fixture({ readyAt = Infinity, unavailableCode = "SERVICE_UNAVAILABLE" }
   });
   return { controller, serviceReads, gatewayReads, commits, failures, transport };
 }
+
+test("native first paint reuses only the verified session snapshot while history refreshes", async () => {
+  const registry = new BackendRegistry();
+  const backend = new ShoggothBackend({ paths: { stateDir: "/isolated/state" } });
+  registry.register(backend);
+  backend._state = "started";
+  const profile = { id: "native-profile" };
+  const a = "11111111-1111-4111-8111-111111111111", b = "22222222-2222-4222-8222-222222222222";
+  const first = `agent:fixture:${a}`, second = `agent:fixture:${b}`;
+  backend._profilesByAgent.set("fixture", profile);
+  for (const id of [a, b]) backend._sessionsByKey.set(id, { profileId: profile.id, runtimeBindingId: "binding-a" });
+  const identity = registry.getChatCacheScope("shoggoth", first);
+  assert.match(identity?.cacheScope ?? "", /^[0-9a-f]{64}$/);
+  assert.equal(identity.memoryOnly, true);
+  assert.notDeepEqual(registry.getChatCacheScope("shoggoth", second), identity);
+  assert.equal(registry.getChatCacheScope("shoggoth", `agent:another:${a}`), null);
+
+  const calls = [], opens = [], commits = [], failures = [];
+  const unexpected = () => assert.fail("native history never uses the persistent cache");
+  const controller = createChatHistoryController({
+    backendOfSession: () => "shoggoth", agentOfSession: () => "fixture",
+    getCacheScope: async (owner, session) => {
+      const value = registry.getChatCacheScope(owner, session);
+      return value && { scope: value.cacheScope, memoryOnly: value.memoryOnly };
+    },
+    getCached: unexpected, putCached: unexpected, deleteCached: unexpected, clearCachedExcept: unexpected,
+    prepare: async (_key, messages) => messages.map(message => ({ ...message, prepared: true })),
+    requestCanonical: key => { const gate = defer(); calls.push({ key, gate }); return gate.promise; },
+    isInFlight: () => false, commitOpen: (key, messages, visible) => opens.push({ key, messages, visible }),
+    commitCanonical: (key, messages) => commits.push({ key, messages }),
+    commitFailure: (_key, error) => failures.push(error.code),
+  });
+  const switchTo = async key => {
+    await controller.open(key);
+    assert.equal(calls.at(-1).key, key);
+    return calls.at(-1).gate;
+  };
+  const opened = (key, id) => assert.deepEqual(opens.at(-1), {
+    key, visible: !!id, messages: id ? [{ id, prepared: true }] : [],
+  });
+
+  const initial = await switchTo(first);
+  opened(first);
+  initial.resolve([{ id: "old" }]); await flush();
+  const secondRead = await switchTo(second);
+  opened(second);
+  const refreshing = await switchTo(first);
+  opened(first, "old");
+  secondRead.resolve([{ id: "late second" }]); await flush();
+  assert.deepEqual(commits.map(row => row.key), [first]);
+  refreshing.resolve([{ id: "latest" }]); await flush();
+  assert.equal(commits.at(-1).messages[0].id, "latest");
+
+  const previousGeneration = await switchTo(first);
+  opened(first, "latest");
+  backend._sessionsByKey.get(a).runtimeBindingId = "binding-b";
+  const beforeScopeRetry = calls.length;
+  previousGeneration.resolve([{ id: "wrong binding" }]); await flush();
+  opened(first);
+  assert.equal(commits.at(-1).messages[0].id, "latest");
+  assert.notDeepEqual(registry.getChatCacheScope("shoggoth", first), identity);
+
+  assert.equal(calls.length, beforeScopeRetry + 1, "a changed source revalidates the same selection");
+  calls.at(-1).gate.resolve([{ id: "new source" }]); await flush();
+  const removedSource = await switchTo(first);
+  opened(first, "new source");
+  removedSource.reject(Object.assign(new Error("source changed"), { code: "TRANSCRIPT_SOURCE_CHANGED" }));
+  await flush();
+  opened(first);
+  assert.deepEqual(failures, ["TRANSCRIPT_SOURCE_CHANGED"]);
+  const recovered = await switchTo(first);
+  opened(first);
+  recovered.resolve([{ id: "new source" }]); await flush();
+  const beforeDelete = await switchTo(first);
+  opened(first, "new source");
+  await controller.delete(first);
+  beforeDelete.resolve([{ id: "late deleted" }]); await flush();
+  const reopened = await switchTo(first);
+  opened(first);
+  reopened.resolve([]); await flush();
+  assert.deepEqual(commits.at(-1).messages, []);
+  backend._state = "stopped";
+  assert.equal(registry.getChatCacheScope("shoggoth", first), null);
+});
 
 test("existing gateway history waits for cold local Service and then loads through its verified route", async (t) => {
   const advance = mockClock(t);
