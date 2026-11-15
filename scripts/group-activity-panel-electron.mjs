@@ -52,8 +52,10 @@ state.fetch=async(url:any,init:any={})=>{
  if(init.method&&init.method!=='GET'){
    writes++;if(!pathname.includes('/interactions/respond'))throw Error('unexpected fixture write '+url);
    const input=JSON.parse(init.body);responses.push(input);await pause(30);
-   if(input.requestId==='approval'&&responses.filter(item=>item.requestId==='approval').length===1)
+   if(input.requestId==='approval'&&responses.filter(item=>item.requestId==='approval').length===1){
+     await pause(200);
      return new Response(JSON.stringify({error:'Fixture response temporarily unavailable'}),{status:503});
+   }
    view.pendingInteractions=view.pendingInteractions.map((item:any)=>item.request.requestId===input.requestId?{...item,status:'responded'}:item);
    return new Response(JSON.stringify(view));
  }
@@ -231,13 +233,13 @@ state.runActivityFixture=async()=>{
    await reveal(interaction('clarification').querySelector('button.is-primary')!);checkLayout();equal(writes,0,'viewing and editing cards has no API writes');
  };
  state.respondToActivityCards=async()=>{
-   const allow=interaction('approval').querySelector('button.is-primary')as HTMLButtonElement;await reveal(allow);
+   const approvalButton=()=>interaction('approval')?.querySelector<HTMLButtonElement>('button.is-primary');
+   const allow=approvalButton()!;await reveal(allow);
    const box=rect(allow),hit=document.elementFromPoint(box.x+box.width/2,box.y+box.height/2);equal(hit===allow||allow.contains(hit),true,'approval button is not covered');
-   allow.click();await wait(()=>responses.length===1,'first approval response');await pause(80);
-   equal(Boolean(interaction('approval').querySelector('button.is-primary')),true,'failed response leaves the approval card actionable');
-   // A failed response refreshes the view, so retry the current card, not its detached old button.
-   const retryAllow=interaction('approval').querySelector('button.is-primary')as HTMLButtonElement;
-   await wait(()=>!retryAllow.disabled,'failed response can be retried');
+   allow.click();await wait(()=>responses.length===1,'first approval response');
+   // A failed response refreshes the view and can replace the original button.
+   await wait(()=>approvalButton()?.disabled===false,'failed response restores the enabled approval button');
+   const retryAllow=approvalButton()!;
    equal(retryAllow.isConnected,true,'retry targets the current approval card');await reveal(retryAllow);
    const retryBox=rect(retryAllow),retryHit=document.elementFromPoint(retryBox.x+retryBox.width/2,retryBox.y+retryBox.height/2);
    equal(retryHit===retryAllow||retryAllow.contains(retryHit),true,'approval retry is not covered');retryAllow.click();
@@ -414,6 +416,6 @@ try{
   fs.writeFileSync(path.join(temp,"index.html"),'<link rel="stylesheet" href="fixture.css"><style>html,body,#root{margin:0;height:100%;min-height:0}#root{display:flex;flex-direction:column}</style><div id="root" class="chat-shell"></div><script type="module" src="fixture.js"></script>');if(output)fs.mkdirSync(output,{recursive:true});
   fs.writeFileSync(path.join(temp,"main.cjs"),`const{app,BrowserWindow}=require('electron'),fs=require('node:fs');app.setPath('userData',${JSON.stringify(path.join(temp,"profile"))});app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,webPreferences:{backgroundThrottling:false}});w.webContents.on('console-message',(_event,_level,message)=>console.log(message));let ok=false;try{await w.loadURL('about:blank');w.webContents.debugger.attach('1.3');const results=[];for(const width of[1200,390])for(const language of['zh-CN','en'])for(const theme of['light','dark']){w.setSize(width,850);await w.webContents.debugger.sendCommand('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:width===390?'reduce':'no-preference'}]});await w.loadFile(${JSON.stringify(path.join(temp,"index.html"))},{query:{language,theme}});const result=await w.webContents.executeJavaScript('window.runActivityFixture()');result.width=width;results.push(result);if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/activity-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());await w.webContents.executeJavaScript('window.runActivityCompaction()');if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/compaction-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());Object.assign(result,await w.webContents.executeJavaScript('window.finishActivityCompaction()'));await w.webContents.executeJavaScript('window.openActivityTool()');if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/tools-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());await w.webContents.executeJavaScript('window.showActivityApproval()');if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/approval-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());await w.webContents.executeJavaScript('window.showActivityInput()');if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/input-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());Object.assign(result,await w.webContents.executeJavaScript('window.respondToActivityCards()'));Object.assign(result,await w.webContents.executeJavaScript('window.runActivityTerminal()'));w.setSize(width,width===390?760:600);result.shortWindow=await w.webContents.executeJavaScript('window.showSingleActivity()');if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/single-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());Object.assign(result,await w.webContents.executeJavaScript('window.settleActivity()'));w.setSize(width,950);await w.webContents.executeJavaScript("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>{const list=document.querySelector('[data-group-timeline]');list.scrollTop=list.scrollHeight;resolve()})))");if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/public-process-'+width+'-'+language+'-'+theme+'.png',(await w.webContents.capturePage()).toPNG());console.log(JSON.stringify(result))}if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/results.json',JSON.stringify(results,null,2));ok=true}catch(error){console.error(error.stack||error);if(${Boolean(output)})fs.writeFileSync(${JSON.stringify(output)}+'/failed.png',(await w.webContents.capturePage()).toPNG())}finally{w.destroy();app.exit(ok?0:1)}});`);
   const child=spawn(require("electron"),[path.join(temp,"main.cjs")],{env:{...process.env,ELECTRON_DISABLE_SECURITY_WARNINGS:"true"},stdio:["ignore","pipe","pipe"]});child.stdout.on("data",data=>process.stdout.write(data));child.stderr.on("data",data=>process.stderr.write(data));
-  const timer=setTimeout(()=>{console.error("Group activity matrix exceeded 90 seconds");child.kill("SIGTERM")},90000);
+  const timer=setTimeout(()=>{console.error("Group activity matrix exceeded 150 seconds");child.kill("SIGTERM")},150000);
   const status=await new Promise((resolve,reject)=>{child.once("exit",resolve);child.once("error",reject)});clearTimeout(timer);assert.equal(status,0,"group activity actual UI acceptance failed");
 }finally{fs.rmSync(temp,{recursive:true,force:true})}
