@@ -17,6 +17,7 @@ const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-
 const { piRuntimeContextUsage, unknownRuntimeContextUsage } = require("./runtime-context-usage");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { PiRpcProcess } = require("./pi-rpc-process");
+const { guardRuntimeTurnSubmission } = require("./runtime-turn-send-guard");
 const { executionTimeoutMs, isExecutionTimeoutMs } = require("../execution-timeout");
 const { PiRuntimeLedger, emptyPiUsage } = require("./pi-runtime-ledger");
 const { normalizeRuntimeCommands, parseRuntimeCommand } = require("./runtime-commands");
@@ -759,6 +760,8 @@ class PiRuntimeHost {
       images: imageAttachments(input.attachments).map(image => ({ type: "image", ...image })),
       thinkingLevel: input.thinkingLevel,
       nativeCommand: command,
+      withTurnSendGuard: input.withTurnSendGuard,
+      signal: input.signal,
       // The Run ID rides with the user message so this system addendum stays
       // identical across turns; a bare command has no user message to carry it.
       commandContext: [this.sessionConfigs.get(session.id)?.developerInstructions, turn.rules,
@@ -786,7 +789,19 @@ class PiRuntimeHost {
       promptTimeoutPaused: false,
     };
     this.activeTurns.set(session.id, active);
-    try { this._spawnTurn(active); } catch (error) {
+    try {
+      const spawn = () => {
+        if (active.settled || active.interruptRequested || active.signal?.aborted) {
+          throw hostError("WORK_RUN_COORDINATOR_STALE_RUN", "Pi turn canceled before launch");
+        }
+        this._assertExecutionInstance();
+        this._spawnTurn(active);
+      };
+      // A native slash command supplies dynamic context in the child startup
+      // file. Plain prompts carry dynamic context only on the final RPC.
+      if (command && active.withTurnSendGuard) await guardRuntimeTurnSubmission(active, "context", spawn);
+      else spawn();
+    } catch (error) {
       this._failActive(active, error, { definitelyRejected: true });
       return active.acceptance.promise;
     }
@@ -827,6 +842,10 @@ class PiRuntimeHost {
     }
     if (active.turnId !== input.turnId) throw hostError("RUNTIME_TURN_STALE", "Pi turn is stale");
     active.interruptRequested = true;
+    if (!active.promptDispatched && active.withTurnSendGuard) {
+      this._failActive(active, hostError("WORK_RUN_COORDINATOR_STALE_RUN", "Pi turn canceled before submission"), { definitelyRejected: true });
+      return {};
+    }
     await active.process.request("clear_queue", {}, { timeoutMs: this.requestTimeoutMs }).catch(() => {});
     await active.process.request("abort", {}, { timeoutMs: this.requestTimeoutMs });
     const terminal = await Promise.race([
@@ -1099,21 +1118,32 @@ class PiRuntimeHost {
       await active.process.request("set_thinking_level", { level });
     }
     if (active.settled) return;
-    active.promptDispatched = true;
+    const submit = action => guardRuntimeTurnSubmission(active, "turn", () => {
+      if (active.settled || active.interruptRequested || active.signal?.aborted || active.process.closed) {
+        throw hostError("WORK_RUN_COORDINATOR_STALE_RUN", "Pi turn canceled before submission");
+      }
+      this._assertExecutionInstance();
+      active.promptDispatched = true;
+      return action();
+    });
     const command = active.nativeCommand;
     if (command && PI_RPC_COMMANDS.some((entry) => entry.name === command.command.name)) {
       active.commandRpc = true;
-      this._acceptActive(active);
       let text;
       if (command.command.name === "compact") {
-        const result = await active.process.request("compact", {
-          ...(command.args ? { customInstructions: command.args } : {}),
-        }, { timeoutMs: this.promptTimeoutMs });
+        const result = await submit(() => {
+          this._acceptActive(active);
+          return active.process.request("compact", {
+            ...(command.args ? { customInstructions: command.args } : {}),
+          }, { timeoutMs: this.promptTimeoutMs });
+        });
         text = `Pi context compacted${Number.isSafeInteger(result?.tokensBefore) ? ` (${result.tokensBefore} tokens before)` : ""}.`;
         this._publish({ known: true, type: "context_compacted", sessionId: active.sessionId, turnId: active.turnId,
           contextUsage: unknownRuntimeContextUsage(active.sessionId, { contextWindow: active.contextWindow,
             observedAt: this.now(), source: "session_stats" }) });
       } else if (command.command.name === "thinking") {
+        active.promptDispatched = true;
+        this._acceptActive(active);
         if (command.args) {
           const available = await active.process.request("get_available_thinking_levels", {});
           if (!Array.isArray(available?.levels) || !available.levels.includes(command.args)) {
@@ -1124,6 +1154,8 @@ class PiRuntimeHost {
         const current = await active.process.request("get_state", {});
         text = `Pi thinking level: ${current.thinkingLevel}`;
       } else {
+        active.promptDispatched = true;
+        this._acceptActive(active);
         if (command.args) throw hostError("RUNTIME_COMMAND_PARAMS_INVALID", "Usage: /session");
         const stats = await active.process.request("get_session_stats", {});
         text = JSON.stringify(stats, null, 2);
@@ -1138,10 +1170,10 @@ class PiRuntimeHost {
       });
       return;
     }
-    await active.process.request("prompt", { message: active.prompt,
+    await submit(() => active.process.request("prompt", { message: active.prompt,
       ...(active.images?.length ? { images: active.images } : {}) }, {
       timeoutMs: this.acceptanceTimeoutMs,
-    });
+    }));
     this._acceptActive(active);
     if (active.agentSettled) void this._finishSettled(active);
   }

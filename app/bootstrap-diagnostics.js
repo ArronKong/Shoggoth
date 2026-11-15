@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { resolveCanonicalServicePaths } = require("./agent-service/paths");
 const { atomicWritePrivateFile, readPrivateFile } = require("./agent-service/private-file");
+const { MCP_HELPER_STARTUP_CODES } = require("./agent-service/mcp-helper-diagnostics");
 
 const MAX_BYTES = 16 * 1024;
 const ROLES = new Set(["ui", "agent-service", "mcp", "mcp-crypto"]);
@@ -16,8 +17,7 @@ const CODES = new Set([
   "STORE_CORRUPT_SNAPSHOT", "STORE_CORRUPT_EVENT_LOG", "STORE_COMMIT_UNCERTAIN",
   "MEMORY_NATIVE_OWNER_INVALID", "MEMORY_FRESH_HOME_REQUIRED", "MEMORY_TRANSACTION_UNSETTLED",
   "BOOTSTRAP_ROLE_REJECTED", "BOOTSTRAP_CODE_IDENTITY_TIMEOUT", "BOOTSTRAP_CODE_IDENTITY_INVALID",
-  "BOOTSTRAP_MCP_START_FAILED", "MCP_HELPER_ARGUMENTS_INVALID", "MCP_HELPER_AUTH_FAILED", "MCP_HELPER_FAILED",
-  "MCP_HELPER_SERVICE_UNAVAILABLE", "MCP_HELPER_SERVICE_RECOVERY_REQUIRED",
+  "BOOTSTRAP_MCP_START_FAILED", ...MCP_HELPER_STARTUP_CODES,
   // Why a runtime MCP gate or its Service bridge refused a helper (the cause of BOOTSTRAP_ROLE_REJECTED).
   "RUNTIME_MCP_GATE_ARGUMENTS_INVALID", "RUNTIME_MCP_GATE_PATHS_INVALID", "RUNTIME_MCP_GATE_MISSING",
   "RUNTIME_MCP_GATE_UNSAFE", "RUNTIME_MCP_GATE_INVALID", "RUNTIME_MCP_GATE_EXPIRED",

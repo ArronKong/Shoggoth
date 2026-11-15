@@ -23,6 +23,10 @@ function runtimeCapabilityEvidence(raw, bindingValue, instanceId) {
   const host = raw.host;
   const scope = Object.freeze({ ...binding, instanceId,
     executableIdentity: host?.runtimeIdentity?.digest ?? null,
+    ...(binding.runtime === "codex" ? {
+      runtimeVersion: host?.runtimeVersion ?? null,
+      providerConfigurationRevision: host?.providerConfigurationRevision ?? null,
+    } : {}),
     permissionPolicy: host?.permissionPolicy ? Object.freeze({
       approvalPolicy: host.permissionPolicy.approvalPolicy, sandbox: host.permissionPolicy.sandbox,
     }) : null });
@@ -89,7 +93,14 @@ function runtimeCapabilityEvidence(raw, bindingValue, instanceId) {
         resolveRuntimePermissionMode(binding.runtime, option.id).permissionPolicy),
     ) } : {}),
   });
+  const codex = binding.runtime === "codex" ? Object.freeze({
+    modelCatalog: host?.modelCatalog ?? null,
+    toolIsolation: Object.freeze({ state: "unverified", source: "thread-feature-and-mcp-inventory" }),
+    structuredOutput: host?.providerCapabilities?.structuredOutput ?? "unverified",
+    approvalReviewer: host?.providerCapabilities?.approvalReviewer ?? null,
+  }) : null;
   return Object.freeze({ version: EVIDENCE_VERSION, contractVersion: 1, scope,
+    ...(codex ? { codex } : {}),
     observations: Object.freeze(observations) });
 }
 

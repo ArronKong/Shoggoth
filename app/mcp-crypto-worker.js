@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { McpAuthSecretStore } = require("./agent-service/mcp-auth-secret-store");
+const { mcpAuthStorageFailure } = require("./agent-service/mcp-helper-diagnostics");
 const {
   MAX_MCP_CRYPTO_REQUEST_BYTES,
   cryptoError,
@@ -373,8 +374,8 @@ async function performWorkerOperation({ gate, request, payload = Buffer.alloc(0)
     await store.open();
     secret = access === "service" ? store.loadOrCreateForService() : store.readForHelper();
     return encodeWorkerResponse({ gate, secret, ok: true });
-  } catch {
-    return encodeWorkerResponse({ gate, ok: false });
+  } catch (error) {
+    return encodeWorkerResponse({ gate, ok: false, storageFailure: mcpAuthStorageFailure(error, { missingIsStorage: true }) });
   } finally {
     payload.fill(0);
     if (secret) secret.fill(0);
@@ -419,6 +420,7 @@ async function startMcpCryptoWorker(options = {}) {
     ? { request: validateWorkerRequest(options.request, gate), payload: options.payload || Buffer.alloc(0) }
     : await readWorkerRequest(options.input || process.stdin, gate);
   const { request, payload } = decodedRequest;
+  const authStoreOperation = request.operation === "helper.read" || request.operation === "service.loadOrCreate";
   const rewrapLegacy = request.operation === "service.rewrapLegacyMcpAuth";
   if (rewrapLegacy && (!usesLocalFileCrypto || gate.callerRole !== "agent-service")) {
     payload.fill(0);
@@ -427,20 +429,28 @@ async function startMcpCryptoWorker(options = {}) {
   const cryptoProfileDir = path.join(request.paths.profileDir, "mcp-crypto-worker");
   const cryptoSessionDir = path.join(cryptoProfileDir, "session");
   const cryptoCacheDir = path.join(request.paths.cacheDir, "mcp-crypto-worker");
-  if (request.operation === "helper.read") {
-    // Runtime sandbox 只允许写受管 HOME。Helper 已在进入 worker 前创建这些目录；
-    // worker 只验证，不能沿真实 Service trustedRoot 逐级 fchmod。
-    assertPrivateDirectory(cryptoProfileDir);
-    assertPrivateDirectory(cryptoSessionDir);
-    assertPrivateDirectory(cryptoCacheDir);
-  } else {
-    ensurePrivateDirectoryTree(cryptoProfileDir, request.paths.trustedRoot);
-    ensurePrivateDirectoryTree(cryptoSessionDir, request.paths.trustedRoot);
-    ensurePrivateDirectoryTree(cryptoCacheDir, request.paths.trustedRoot);
+  const prepareDirectory = request.operation === "helper.read" ? assertPrivateDirectory : ensurePrivateDirectoryTree;
+  // Runtime sandbox 只允许写受管 HOME。Helper 已创建这些目录，worker 只验证。
+  let preparingCache = false;
+  try {
+    prepareDirectory(cryptoProfileDir, request.paths.trustedRoot);
+    prepareDirectory(cryptoSessionDir, request.paths.trustedRoot);
+    electronApp.setPath("userData", cryptoProfileDir);
+    electronApp.setPath("sessionData", cryptoSessionDir);
+    preparingCache = true;
+    prepareDirectory(cryptoCacheDir, request.paths.trustedRoot);
+    electronApp.setPath("cache", cryptoCacheDir);
+  } catch (error) {
+    if (!authStoreOperation) throw error;
+    const storageFailure = mcpAuthStorageFailure(error, { missingIsStorage: true });
+    const code = storageFailure === "MCP_HELPER_STORAGE_FULL" ? storageFailure
+      : preparingCache ? "MCP_HELPER_CACHE_UNAVAILABLE" : "MCP_HELPER_STORAGE_UNAVAILABLE";
+    payload.fill(0);
+    await writeFrame(options.output || process.stdout, encodeWorkerResponse({ gate, ok: false, storageFailure: code }));
+    if (typeof electronApp.exit === "function") electronApp.exit(1);
+    else electronApp.quit();
+    return;
   }
-  electronApp.setPath("userData", cryptoProfileDir);
-  electronApp.setPath("sessionData", cryptoSessionDir);
-  electronApp.setPath("cache", cryptoCacheDir);
   await electronApp.whenReady();
   // 普通本地 crypto 永不接触 Keychain。只有 Developer ID 包与显式、仅一次
   // 的旧凭据迁移可以触发系统授权；迁移完成后本地启动仍只读私有文件主密钥。
@@ -460,35 +470,42 @@ async function startMcpCryptoWorker(options = {}) {
   let safeStorage = null;
   let localSafeStorage = null;
   try {
-    if (rewrapLegacy) {
-      // This explicit service-only recovery is the sole local-build exception:
-      // never create a replacement key and never choose Keychain at startup.
-      localSafeStorage = (options.createLocalFileSafeStorage || createLocalFileSafeStorage)({
-        paths: request.paths, fs: options.mcpAuthFs, readOnly: true,
+    let frame;
+    try {
+      if (rewrapLegacy) {
+        // This explicit service-only recovery is the sole local-build exception:
+        // never create a replacement key and never choose Keychain at startup.
+        localSafeStorage = (options.createLocalFileSafeStorage || createLocalFileSafeStorage)({
+          paths: request.paths, fs: options.mcpAuthFs, readOnly: true,
+        });
+        const source = readMcpAuthMigrationSource(request.paths, options.mcpAuthFs);
+        try { if (source.format !== "legacy-v10") throw cryptoError(); }
+        finally { clearSource(source); }
+        safeStorage = options.safeStorage || electron.safeStorage;
+      } else {
+        safeStorage = cryptoStorageForIdentity(identity, {
+          paths: request.paths,
+          electron,
+          safeStorage: options.safeStorage,
+          createLocalFileSafeStorage: options.createLocalFileSafeStorage,
+          fs: options.mcpAuthFs,
+          randomBytes: options.localCryptoRandomBytes,
+          readOnly: request.operation === "helper.read",
+        });
+      }
+      frame = await performWorkerOperation({
+        gate, request, payload, safeStorage, localSafeStorage, fs: options.mcpAuthFs,
       });
-      const source = readMcpAuthMigrationSource(request.paths, options.mcpAuthFs);
-      try { if (source.format !== "legacy-v10") throw cryptoError(); }
-      finally { clearSource(source); }
-      safeStorage = options.safeStorage || electron.safeStorage;
-    } else {
-      safeStorage = cryptoStorageForIdentity(identity, {
-        paths: request.paths,
-        electron,
-        safeStorage: options.safeStorage,
-        createLocalFileSafeStorage: options.createLocalFileSafeStorage,
-        fs: options.mcpAuthFs,
-        randomBytes: options.localCryptoRandomBytes,
-        readOnly: request.operation === "helper.read",
-      });
+    } catch (error) {
+      if (!authStoreOperation) throw error;
+      frame = encodeWorkerResponse({ gate, ok: false, storageFailure: mcpAuthStorageFailure(error, { missingIsStorage: true }) });
     }
-    const frame = await performWorkerOperation({
-      gate, request, payload, safeStorage, localSafeStorage, fs: options.mcpAuthFs,
-    });
     const exitCode = frame[0] === 0 ? 0 : 1;
     await writeFrame(options.output || process.stdout, frame);
     if (typeof electronApp.exit === "function") electronApp.exit(exitCode);
     else electronApp.quit();
   } finally {
+    payload.fill(0);
     localSafeStorage?.close();
     if (typeof safeStorage?.close === "function") safeStorage.close();
   }

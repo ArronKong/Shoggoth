@@ -146,6 +146,7 @@ class MockChatBackend extends AgentBackend {
 // synchronously. The proxy contract must support both without backend branches.
 class AsyncChatBackend extends AgentBackend {
   get id() { return "shoggoth"; }
+  getBackendDescriptor() { return { id: this.id, surfaces: { chat: true, durableChatStop: true } }; }
   ownsAgentId(id) { return shoggothOnline && id === "shoggoth-default"; }
   claimsAgentId(id) { return typeof id === "string" && id.startsWith("shoggoth-"); }
   getAgents() { return [{ id: "shoggoth-default", name: "Shoggoth", model: "openai/gpt-5" }]; }
@@ -181,7 +182,10 @@ class AsyncChatBackend extends AgentBackend {
     createdPermissionRow = { key, permissionMode: "request-approval" };
     return key;
   }
-  async abortChat(sessionKey) {
+  async abortChat(sessionKey, runId, options = {}) {
+    if (options.observeOnly && options.idempotencyKey === "original-stop") {
+      return { stateAuthority: "native-service", status: "terminal", runId: "service-stop", runStatus: "canceled" };
+    }
     shoggothAbortCalls.push(sessionKey);
   }
   async steerChat(sessionKey, message) {
@@ -1385,12 +1389,29 @@ try {
     send({ type: "req", id: "abort-foreign", method: "chat.abort", params: { sessionKey: "agent:hermes-default:hist-1" } });
     send({ type: "req", id: "rename-foreign", method: "sessions.patch", params: { key: "agent:hermes-default:hist-1", label: "Renamed" } });
     send({ type: "req", id: "delete-foreign", method: "sessions.delete", params: { key: "agent:hermes-default:hist-1" } });
-    const [steerNative, abortForeign, renameForeign, deleteForeign] = await Promise.all([
+    send({ type: "req", id: "observe-stop-native", method: "chat.abort", params: {
+      sessionKey: "agent:shoggoth-default:real-default", idempotencyKey: "original-stop", observeOnly: true, expectedBackendId: "shoggoth",
+    } });
+    send({ type: "req", id: "observe-stop-changed-owner", method: "chat.abort", params: {
+      sessionKey: "agent:shoggoth-default:real-default", idempotencyKey: "original-stop", observeOnly: true, expectedBackendId: "old-backend",
+    } });
+    send2({ type: "req", id: "observe-stop-foreign", method: "chat.abort", params: {
+      sessionKey: "agent:main:main", idempotencyKey: "original-stop", observeOnly: true,
+    } });
+    const [steerNative, abortForeign, renameForeign, deleteForeign, nativeStop, changedStop, foreignStop] = await Promise.all([
       waitFor((f) => f.type === "res" && f.id === "steer-native", "native steer res"),
       waitFor((f) => f.type === "res" && f.id === "abort-foreign", "foreign abort res"),
       waitFor((f) => f.type === "res" && f.id === "rename-foreign", "foreign rename res"),
       waitFor((f) => f.type === "res" && f.id === "delete-foreign", "foreign delete res"),
+      waitFor((f) => f.type === "res" && f.id === "observe-stop-native", "native stop observation"),
+      waitFor((f) => f.type === "res" && f.id === "observe-stop-changed-owner", "native stop owner changed"),
+      waitFor2((f) => f.type === "res" && f.id === "observe-stop-foreign", "foreign stop rejected"),
     ]);
+    check("native Stop verifies original identity and keeps the Service terminal result",
+      nativeStop.ok && nativeStop.payload?.stateAuthority === "native-service"
+      && nativeStop.payload?.runStatus === "canceled" && nativeStop.payload?.runId === "service-stop"
+      && !changedStop.ok && changedStop.error?.code === "WORK_RUN_CONTROL_MISMATCH"
+      && !foreignStop.ok && foreignStop.error?.code === "WORK_RUN_CONTROL_MISMATCH");
     check(
       "native chat.steer routes through the owning backend",
       steerNative.ok === true

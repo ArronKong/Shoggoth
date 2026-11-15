@@ -191,6 +191,33 @@ async function main() {
         if (path.relative(upstream, args.importer) !== "src/auto-reply/reply/memory-flush.ts") return;
         return { path: path.join(port, "flush-timing-runtime.ts") };
       });
+      build.onLoad({ filter: /\/extensions\/memory-core\/src\/memory\/manager-session-sync-ops\.ts$/ }, args => {
+        let contents = fs.readFileSync(args.path, "utf8");
+        const replace = (before, after) => {
+          if (contents.split(before).length !== 2) throw new Error(`Pinned session startup capture seam changed: ${before}`);
+          contents = contents.replace(before, () => after);
+        };
+        // The Product host may supply exact startup state from one projection.
+        // Native eligibility and dirty/stale handling remain with this manager.
+        replace("const transcriptStats = await readMemoryTranscriptStatsInWorker(",
+          "const capture = await readMemoryTranscriptStatsInWorker(");
+        replace(`    );\n    if (this.closed) {\n      return [];\n    }\n    const statsByEntry = new Map(`,
+          `      {\n        indexedPaths,\n        isIndexable: isMemorySessionIndexable,\n        assertCurrent: () => this.assertMemoryStartupCaptureCurrent?.(),\n      },\n    );\n    if (this.closed) {\n      return [];\n    }\n    this.assertMemoryStartupCaptureCurrent?.();\n    const capturedStates = !Array.isArray(capture);\n    const sqliteStateByEntry = new Map(`);
+        replace("[entry, transcriptStats[index]] as const", "[entry, (capturedStates ? capture.startupStates : capture)[index]] as const");
+        replace("const stats = statsByEntry.get(corpusEntry);", "const stats = sqliteStateByEntry.get(corpusEntry);");
+        replace("            // Missing rows can be intentional:",
+          `            if (capturedStates && corpusEntry.transcriptSource === "sqlite") {\n              return sqliteStateByEntry.get(corpusEntry) ?? null;\n            }\n            // Missing rows can be intentional:`);
+        replace("    const { dirtyFiles, hasStaleIndexedPaths } = resolveMemorySessionStartupState({",
+          `    if (!this.closed) this.assertMemoryStartupCaptureCurrent?.();\n    const { dirtyFiles, hasStaleIndexedPaths } = resolveMemorySessionStartupState({`);
+        return { contents, loader: "ts" };
+      });
+      build.onLoad({ filter: /\/extensions\/memory-core\/src\/session-ingestion\.ts$/ }, args => {
+        const contents = fs.readFileSync(args.path, "utf8");
+        const original = "const stat = statSessionEntrySync(source.absolutePath, source.buildOptions);";
+        if (contents.split(original).length !== 2) throw new Error("Pinned Dreaming session fingerprint seam changed");
+        return { loader: "ts", contents: contents.replace(original,
+          "const stat = await statSessionEntrySync(source.absolutePath, source.buildOptions, { asyncSessionView: true });") };
+      });
       build.onLoad({ filter: /\/extensions\/memory-core\/src\/short-term-promotion-apply\.ts$/ }, args => {
         let contents = fs.readFileSync(args.path, "utf8");
         const replace = (before, after) => {

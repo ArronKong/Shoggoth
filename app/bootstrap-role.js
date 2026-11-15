@@ -12,6 +12,7 @@ const {
   assertCodeIdentity,
 } = require("./agent-service/code-identity");
 const { resolveCanonicalServicePaths, resolveServicePaths } = require("./agent-service/paths");
+const { MCP_AUTH_STORAGE_CODES, MCP_HELPER_STARTUP_CODES } = require("./agent-service/mcp-helper-diagnostics");
 const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID } = require("./agent-service/runtime-account");
 const { resolveCodexMcpParentBinaries } = require("./agent-service/codex-runtime-paths");
 const { CODEX_PARENT_VERIFY_TIMEOUT_MS } = require("./agent-service/codex-startup-timeouts");
@@ -29,11 +30,7 @@ const PUBLIC_BOOTSTRAP_FAILURE_CODES = new Set([
   "BOOTSTRAP_CODE_IDENTITY_TIMEOUT",
   "BOOTSTRAP_CODE_IDENTITY_INVALID",
   "BOOTSTRAP_MCP_START_FAILED",
-  "MCP_HELPER_ARGUMENTS_INVALID",
-  "MCP_HELPER_AUTH_FAILED",
-  "MCP_HELPER_SERVICE_UNAVAILABLE",
-  "MCP_HELPER_SERVICE_RECOVERY_REQUIRED",
-  "MCP_HELPER_FAILED",
+  ...MCP_HELPER_STARTUP_CODES,
 ]);
 
 // `cause` keeps the specific refusal; diagnostics persist only its code and
@@ -529,7 +526,11 @@ function main(argv, env, runtime, loaders) {
       || require("./runtime-mcp-relay").openRuntimeMcpBridge;
     return Promise.resolve()
       .then(() => openBridge(context, runtime?.runtimeMcpBridgeOptions))
-      .catch((error) => { throw bootstrapFailure("BOOTSTRAP_ROLE_REJECTED", error); })
+      .catch((error) => {
+        const code = bootstrapFailureCode(error);
+        if (MCP_AUTH_STORAGE_CODES.includes(code)) throw bootstrapFailure(code);
+        throw bootstrapFailure("BOOTSTRAP_ROLE_REJECTED", error);
+      })
       .then((bridge) => {
         delete actualEnv.SHOGGOTH_RUNTIME_MCP_GATE_FILE;
         delete actualEnv.SHOGGOTH_RUNTIME_MCP_GATE_NONCE;

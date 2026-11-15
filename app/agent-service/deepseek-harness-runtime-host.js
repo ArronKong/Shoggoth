@@ -14,6 +14,7 @@ const { runtimeBinding } = require("./runtime-adapter");
 const { validateResolvedEnvironment } = require("./runtime-account-resolver");
 const { getModelCatalogCache, modelCatalogIdentity } = require("./model-catalog-cache");
 const { DeepSeekHarnessProcess } = require("./deepseek-harness-process");
+const { guardRuntimeTurnSubmission } = require("./runtime-turn-send-guard");
 const { DEFAULT_MCP_TOOL_TIMEOUT_MS, DEFAULT_SERVER_REQUEST_TIMEOUT_MS } = require("./interactive-timeouts");
 const {
   DeepSeekHarnessRuntimeLedger,
@@ -719,13 +720,14 @@ class DeepSeekHarnessRuntimeHost {
       terminal: makeDeferred(),
       accepted: false,
       settled: false,
+      promptDispatched: false,
       interruptRequested: false,
       bufferedEvents: [],
     };
     this.activeTurns.set(session.id, active);
     void this._beginTurn(active, input).catch((error) => {
       this._failActive(active, error, {
-        definitelyRejected: !["DEEPSEEK_HARNESS_REQUEST_TIMEOUT", "DEEPSEEK_HARNESS_PROCESS_CLOSED"]
+        definitelyRejected: !active.promptDispatched || !["DEEPSEEK_HARNESS_REQUEST_TIMEOUT", "DEEPSEEK_HARNESS_PROCESS_CLOSED"]
           .includes(error?.code),
       });
     });
@@ -774,6 +776,11 @@ class DeepSeekHarnessRuntimeHost {
       throw hostError("RUNTIME_TURN_STALE", "DeepSeek turn is stale");
     }
     active.interruptRequested = true;
+    if (!active.promptDispatched) {
+      this._failActive(active, hostError("WORK_RUN_COORDINATOR_STALE_RUN", "DeepSeek turn canceled before submission"),
+        { definitelyRejected: true });
+      return {};
+    }
     await this.process.request("turn/interrupt", {
       remoteSessionId: active.remoteSessionId,
       turnId: active.turnId,
@@ -984,15 +991,22 @@ class DeepSeekHarnessRuntimeHost {
     const context = command ? { blocks: [input.context || "", turn.run].filter(Boolean), commit() {} }
       : delivery.promptBlocks(this.promptLedger, active.sessionId, { context: input.context || "", run: turn.run });
     active.promptCommit = context.commit;
-    await this.process.request("turn/start", {
-      remoteSessionId: active.remoteSessionId,
-      sessionId: active.sessionId,
-      turnId: active.turnId,
-      operationId: active.operationId,
-      prompt: input.prompt,
-      context: context.blocks.join("\n\n"),
-      turnDeveloperInstructions: turn.rules,
-    }, { timeoutMs: this.startupTimeoutMs });
+    await guardRuntimeTurnSubmission(input, "turn", () => {
+      if (active.settled || active.interruptRequested || input.signal?.aborted) {
+        throw hostError("WORK_RUN_COORDINATOR_STALE_RUN", "DeepSeek turn canceled before submission");
+      }
+      this._assertExecutionInstance();
+      active.promptDispatched = true;
+      return this.process.request("turn/start", {
+        remoteSessionId: active.remoteSessionId,
+        sessionId: active.sessionId,
+        turnId: active.turnId,
+        operationId: active.operationId,
+        prompt: input.prompt,
+        context: context.blocks.join("\n\n"),
+        turnDeveloperInstructions: turn.rules,
+      }, { timeoutMs: this.startupTimeoutMs });
+    });
     this._acceptActive(active);
   }
 

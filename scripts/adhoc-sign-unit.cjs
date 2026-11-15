@@ -3,11 +3,13 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const {
   buildCodesignArgs,
   buildNestedCodesignArgs,
+  electronHelperBundles,
   isMachOFile,
   listNativeNodeModules,
   nestedHostOptionalDependencyPaths,
@@ -55,6 +57,33 @@ assert.deepEqual(buildNestedCodesignArgs({
   "--keychain", "/tmp/release.keychain-db",
   "--sign", "Developer ID Application: Shoggoth (TEAMID)", "/tmp/addon.node",
 ]);
+
+const electronRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-sign-electron-"));
+try {
+  const appPath = path.join(electronRoot, "Shoggoth.app");
+  const frameworks = path.join(appPath, "Contents", "Frameworks");
+  const renderer = path.join(frameworks, "Shoggoth Helper (Renderer).app");
+  const gpu = path.join(frameworks, "Shoggoth Helper (GPU).app");
+  fs.mkdirSync(gpu, { recursive: true });
+  assert.throws(() => electronHelperBundles(appPath), /Renderer Helper bundle missing/);
+  fs.mkdirSync(renderer);
+  fs.mkdirSync(path.join(frameworks, "Vendor Helper (Renderer).app"));
+  assert.deepEqual(electronHelperBundles(appPath), [gpu, renderer]);
+  assert.deepEqual(buildNestedCodesignArgs({
+    targetPath: renderer,
+    identity: "Developer ID Application: Shoggoth (TEAMID)",
+    entitlementsPath: "/repo/build/entitlements.mac.plist",
+    keychainPath: "/tmp/release.keychain-db",
+    timestamp: true,
+  }), [
+    "--force", "--options", "runtime", "--timestamp",
+    "--entitlements", "/repo/build/entitlements.mac.plist",
+    "--keychain", "/tmp/release.keychain-db",
+    "--sign", "Developer ID Application: Shoggoth (TEAMID)", renderer,
+  ]);
+} finally {
+  fs.rmSync(electronRoot, { recursive: true, force: true });
+}
 
 const nativeRoot = path.join(__dirname, ".adhoc-sign-native-fixture");
 try {

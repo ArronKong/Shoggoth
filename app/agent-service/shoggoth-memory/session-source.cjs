@@ -34,7 +34,7 @@ class ProductMemorySessions {
     this.assertProfile(profileId);
     const session = findProfileSession(this.sessions, profileId, sessionId);
     if (!session || !isHistoricalChatSession(session) || this.sessions.getCronSessionOrigin?.(session.sessionKey)
-      || this.database.tombstones(profileId).some(row => row.sessionId === sessionId)) {
+      || this.database.hasSessionTombstone(profileId, sessionId)) {
       throw serviceError("MEMORY_SESSION_REVOKED", "会话已撤回或不属于当前助理");
     }
     return { ...session, interactive: true, updatedAt: session.updatedAt || 0 };
@@ -44,14 +44,16 @@ class ProductMemorySessions {
     return JSON.stringify([session, this.transcripts.getRevision(profileId, sessionId),
       this.recall.getVisibilityRevision(profileId), this.recall.policy.getRevision(profileId)]);
   }
+  sourceEpoch(profileId) { return this.recall.candidateSourceEpoch?.(profileId) ?? null; }
   read(profileId, sessionId) {
     const session = this.current(profileId, sessionId), stamp = this.stamp(profileId, sessionId);
-    const epoch = this.recall.candidateSourceEpoch?.(profileId) ?? null, key = `${profileId}\0${sessionId}`;
+    const epoch = this.sourceEpoch(profileId), key = `${profileId}\0${sessionId}`;
     const cached = this.projections.get(key);
     if (cached?.stamp === stamp && cached.epoch === epoch) return structuredClone(cached.value);
     const lines = [], lineMap = [], timestamps = [], provenance = [];
-    let afterSeq = 0, size = 0, pendingRun = false;
+    let throughSeq = 0, size = 0, pendingRun = false;
     for (;;) {
+      const afterSeq = throughSeq;
       const page = this.recall.scanEligibleSession({ profileId, sessionId, afterSeq, limit: 100, completedOnly: true });
       for (const event of page.events) {
         if (isBorrowedMemoryDerived(event) || isUiActionSubmission(event)) continue;
@@ -66,8 +68,8 @@ class ProductMemorySessions {
       }
       // A turn whose Run has not completed ends the page early. It may complete
       // without a transcript write, so that projection is never reused.
-      if (!page.hasMore || page.throughSeq <= afterSeq) { pendingRun = page.hasMore; break; }
-      afterSeq = page.throughSeq;
+      throughSeq = page.throughSeq;
+      if (!page.hasMore || throughSeq <= afterSeq) { pendingRun = page.hasMore; break; }
     }
     if (stamp !== this.stamp(profileId, sessionId)) throw serviceError("MEMORY_SESSION_CHANGED", "会话在读取期间发生变化");
     const content = lines.join("\n"), mtimeMs = timestamps.reduce((latest, time) => Math.max(latest, time), session.updatedAt || 0);
@@ -75,7 +77,7 @@ class ProductMemorySessions {
     // upstream snapshot identity so citations cannot survive a sequence change.
     const hash = core.hashSessionEntrySnapshot({ content, lineMap, messageTimestampsMs: timestamps,
       lineProvenance: provenance, resetRecallCutoff: null });
-    const value = { content, hash, authorityStamp: stamp, lineMap, messageTimestampsMs: timestamps, lineProvenance: provenance,
+    const value = { content, hash, authorityStamp: stamp, throughSeq, lineMap, messageTimestampsMs: timestamps, lineProvenance: provenance,
       // Native SQLite transcript stats use maxSeq when mutation wall time is
       // unavailable. Product's durable journal revision includes context edits.
       mtimeMs, revisionMs: this.transcripts.getRevision(profileId, sessionId), size: Buffer.byteLength(content), sessionKind: "interactive" };

@@ -4,6 +4,22 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const yaml = require("js-yaml");
+const { hasEnabledEntitlement } = require("./packaged-renderer-signature.cjs");
+
+const jitEntitlement = "com.apple.security.cs.allow-jit";
+const displayEntry = `[Dict]\n\t[Key] ${jitEntitlement}\n\t[Value]\n\t\t`;
+assert.equal(hasEnabledEntitlement(`${displayEntry}[Bool] true\n`, jitEntitlement), true);
+assert.equal(hasEnabledEntitlement(`${displayEntry}[Bool] false\n`, jitEntitlement), false);
+assert.equal(hasEnabledEntitlement(`${displayEntry}[String] true\n`, jitEntitlement), false);
+if (process.platform === "darwin") {
+  const legacyEntitlements = value => `<?xml version="1.0"?>\n<plist version="1.0"><dict>
+    <key>${jitEntitlement}</key>${value}<key>unrelated</key><data>YQ==</data>
+    </dict></plist>`;
+  assert.equal(hasEnabledEntitlement(legacyEntitlements("<true/>"), jitEntitlement), true);
+  assert.equal(hasEnabledEntitlement(legacyEntitlements("<false/>"), jitEntitlement), false);
+  assert.equal(hasEnabledEntitlement(legacyEntitlements("<string>true</string>"), jitEntitlement), false);
+  assert.equal(hasEnabledEntitlement(legacyEntitlements("<true/>"), `${jitEntitlement}-unknown`), false);
+}
 
 const root = path.resolve(__dirname, "..");
 const builder = yaml.load(fs.readFileSync(path.join(root, "electron-builder.yml"), "utf8"));

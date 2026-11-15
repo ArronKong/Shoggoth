@@ -13,6 +13,48 @@ export function chatVerificationNoticeKey(pending?: PendingChatSend) {
     : pending ? "chat.sendNeedsVerification" : "chat.observeNeedsVerification";
 }
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const PENDING_CHAT_STOPS_KEY = "shoggoth.chat.pending-native-stops.v1";
+const TERMINAL_RUN_STATES = new Set(["completed", "failed", "canceled", "interrupted", "skipped"]);
+export type PendingNativeChatStop = { key: string; backendId: string } & ({ idempotencyKey: string; runId?: never }
+  | { runId: string; idempotencyKey?: never });
+
+export function createPendingNativeChatStopStore(storage: () => StorageLike) {
+  const valid = (entry: any): entry is PendingNativeChatStop => entry && typeof entry.key === "string"
+    && entry.key.length > 0 && entry.key.length <= 256 && Object.keys(entry).length === 3
+    && typeof entry.backendId === "string" && ID.test(entry.backendId)
+    && (typeof entry.idempotencyKey === "string" && ID.test(entry.idempotencyKey)
+      || typeof entry.runId === "string" && ID.test(entry.runId));
+  const read = (): PendingNativeChatStop[] => {
+    try {
+      const entries = JSON.parse(storage().getItem(PENDING_CHAT_STOPS_KEY) || "[]");
+      // The first format only existed for Shoggoth stops. Never infer backend
+      // from the current session when recovering one of those records.
+      return Array.isArray(entries) && entries.length <= 256 ? entries.map(entry =>
+        entry && typeof entry === "object" && !Object.hasOwn(entry, "backendId")
+          ? { ...entry, backendId: "shoggoth" } : entry).filter(valid) : [];
+    } catch { return []; }
+  };
+  const save = (entries: PendingNativeChatStop[]) => {
+    if (entries.length > 256) return false;
+    try { storage().setItem(PENDING_CHAT_STOPS_KEY, JSON.stringify(entries)); return true; }
+    catch { return false; }
+  };
+  return {
+    read,
+    remember(entry: PendingNativeChatStop) {
+      return valid(entry) && save([...read().filter(candidate => candidate.key !== entry.key), entry]);
+    },
+    forget(key: string) {
+      return save(read().filter(entry => entry.key !== key));
+    },
+  };
+}
+
+export function nativeChatStopIsTerminal(payload: any, target: PendingNativeChatStop) {
+  return payload?.stateAuthority === "native-service" && payload.status === "terminal"
+    && typeof payload.runId === "string" && ID.test(payload.runId) && TERMINAL_RUN_STATES.has(payload.runStatus)
+    && (target.runId === undefined || target.runId === payload.runId);
+}
 const legacySelectionValid = (value: unknown): value is RecoveryLegacyPluginSelection[] => Array.isArray(value)
   && value.length > 0 && value.length <= 4 && value.every(item => item && typeof item === "object"
     && Object.keys(item).sort().join(",") === "installationId,revision"
@@ -98,12 +140,15 @@ export function classifyChatSendObservation(result: any, wasAccepted = false, te
   if (reconciled && result?.status === "not_admitted" && result.run === null && !wasAccepted) {
     return { state: "terminal", accepted: false } as const;
   }
+  if (result?.status === "accepted" && result.run === null && result.admissionAccepted === true) {
+    return { state: "verification", accepted: true } as const;
+  }
   if (result?.status !== "found" || !result.run) return { state: "verification", accepted: wasAccepted } as const;
   const status = result.run.status;
   const accepted = wasAccepted || result.admissionAccepted === true || result.run.admissionAccepted === true
     || ["accepted", "queued", "running", "completed"].includes(status);
   if (status === "needs_verification") return { state: "verification", accepted } as const;
-  if (["completed", "failed", "canceled", "interrupted", "skipped"].includes(status)) {
+  if (TERMINAL_RUN_STATES.has(status)) {
     return { state: "terminal", accepted } as const;
   }
   // External Host receipts can lag their terminal event. Native Service writes

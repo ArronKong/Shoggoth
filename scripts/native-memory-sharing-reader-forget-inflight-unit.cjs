@@ -67,12 +67,30 @@ test("reader memory_forget fences the borrowed in-flight turn without copying or
     const host = f.transport.hosts.get("codex"), events = [], beforeInterrupts = host.turnInterruptCalls;
     subscription = coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));
     host.interruptGate = { promise: new Promise(resolve => { release = resolve; }) };
+    const expectedRevision = f.owner.store.getRevision(f.profile.id);
+    const readView = f.owner.withAsyncMemoryReadView, readSnapshot = f.owner.store._snapshot;
+    const scanned = new Set(), synchronousScans = [];
+    f.owner.withAsyncMemoryReadView = function (profileId, ...args) {
+      scanned.add(profileId);
+      return readView.call(this, profileId, ...args);
+    };
+    f.owner.store._snapshot = function (profileId) {
+      synchronousScans.push(profileId);
+      return readSnapshot.call(this, profileId);
+    };
     // Capture either safe receipt or safe terminal rejection without allowing an
     // unhandled rejection while the physical native interrupt is held pending.
     forgetting = call(run, "memory_forget", { id: borrowed.sourceRef,
-      expectedRevision: f.owner.store.getRevision(f.profile.id), sourceQuote: prompt })
+      expectedRevision, sourceQuote: prompt })
       .then(result => ({ result }), error => ({ error }));
-    await waitUntil(() => suppressionRows(f).source.length > 0, 5000, "reader suppression commits");
+    try {
+      await waitUntil(() => suppressionRows(f).source.length > 0, 5000, "reader suppression commits");
+      assert.deepEqual([...scanned].sort(), [f.profile.id, f.B].sort());
+      assert.deepEqual(synchronousScans, [], "borrowed forget and its revocation do not synchronously traverse memory");
+    } finally {
+      f.owner.withAsyncMemoryReadView = readView;
+      f.owner.store._snapshot = readSnapshot;
+    }
     await new Promise(resolve => setImmediate(resolve));
     emitLate(host, run);
     await new Promise(resolve => setImmediate(resolve));

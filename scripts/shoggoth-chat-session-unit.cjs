@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { createLocalFileSafeStorage } = require("../app/agent-service/local-file-safe-storage");
 
 const ROOT = path.resolve(__dirname, "..");
 const { resolveServicePaths } = require(path.join(ROOT, "app", "agent-service", "paths.js"));
@@ -14,6 +15,8 @@ const { atomicWritePrivateFile } = require(path.join(ROOT, "app", "agent-service
 let ChatSessionStore;
 let validateChatContainer;
 let PendingCommandInbox;
+let validateInboxEnvelope;
+let maxInboxBytes;
 let moduleLoadError = null;
 try {
   ({
@@ -22,7 +25,7 @@ try {
   } = require(path.join(
     ROOT, "app", "agent-service", "chat-session-store.js",
   )));
-  ({ PendingCommandInbox } = require(path.join(
+  ({ PendingCommandInbox, validateEnvelope: validateInboxEnvelope, MAX_PENDING_COMMAND_FILE_BYTES: maxInboxBytes } = require(path.join(
     ROOT, "app", "agent-service", "pending-command-inbox.js",
   )));
 } catch (error) {
@@ -1273,6 +1276,175 @@ test("PendingCommand 30天边界保留、容量拒绝、过窗回收及旧 repla
   await inbox.close();
 });
 
+test("a fresh Inbox receipt commits the new command and clock floor in one write", async () => {
+  const windowMs = 30 * 24 * 60 * 60 * 1000;
+  const paths = fixturePaths("shoggoth-inbox-batched-floor-");
+  let now = windowMs + 1_000, writes = 0;
+  const inbox = new PendingCommandInbox({ paths, now: () => now, safeStorage: fakeSafeStorage(),
+    atomicWrite(...args) { writes++; return atomicWritePrivateFile(...args); },
+  });
+  const command = (suffix, createdAt) => ({ operationId: `operation-${suffix}`, runId: `run-${suffix}`,
+    sessionKey: "22222222-2222-4222-8222-222222222222", prompt: "fixture", createdAt });
+  try {
+    await inbox.open();
+    now++;
+    const before = writes;
+    const result = await inbox.enqueue(command("fresh", now));
+    assert.equal(writes, before + 1);
+    assert.equal(readInboxPlaintext(paths).idempotencyFloorMs, now - windowMs);
+    now += 100;
+    const rejectionBefore = writes;
+    await assert.rejects(inbox.enqueue(command("expired", 1_050)), { code: "OPERATION_EXPIRED" });
+    assert.equal(writes, rejectionBefore + 1);
+    await inbox.close();
+    now -= 100;
+    await inbox.open();
+    assert.deepEqual(inbox.get(result.operationId), result);
+    assert.equal(readInboxPlaintext(paths).idempotencyFloorMs, 1_101);
+    await assert.rejects(inbox.enqueue(command("expired", 1_050)), { code: "OPERATION_EXPIRED" });
+  } finally {
+    if (inbox.opened) await inbox.close();
+  }
+});
+
+function groupCommitInput(id, now = 1_000) {
+  return { operationId: `operation-${id}`, runId: `run-${id}`,
+    sessionKey: "22222222-2222-4222-8222-222222222222", prompt: "fixture", createdAt: now,
+    acceptance: { profileId: "profile-test", sessionId: "33333333-3333-4333-8333-333333333333",
+      workspace: "/tmp/group-commit-test", selectionFingerprint: "a".repeat(64) } };
+}
+
+test("Inbox writer delivers durable receipts and fences a worker lost during the write", async () => {
+  const paths = fixturePaths("shoggoth-inbox-write-worker-");
+  const options = { paths, now: () => 1_000, safeStorage: fakeSafeStorage(), workerWrites: true };
+  const inbox = await new PendingCommandInbox(options).open();
+  try {
+    const original = groupCommitInput("durable");
+    assert.equal(inbox.get("constructor"), null);
+    assert.equal((await inbox.enqueue(original, { groupCommit: true })).runId, original.runId);
+    assert.equal(readInboxPlaintext(paths).activeCommands[original.operationId].runId, original.runId);
+    const worker = inbox.fileWriter.worker;
+    const post = worker.postMessage;
+    worker.postMessage = function (...args) {
+      // Stop with no completion receipt, independent of the worker's progress.
+      this.postMessage = post;
+      void this.terminate();
+    };
+    await assert.rejects(inbox.enqueue(groupCommitInput("lost-reply"), { groupCommit: true }),
+      { code: "PENDING_COMMAND_COMMIT_UNCERTAIN" });
+    assert.equal(inbox.commitUncertain, true);
+    assert.throws(() => inbox.get(original.operationId), { code: "PENDING_COMMAND_COMMIT_UNCERTAIN" });
+    await inbox.close();
+    await inbox.open();
+    assert.equal(inbox.get(original.operationId).runId, original.runId);
+    assert.equal(inbox.get(groupCommitInput("lost-reply").operationId), null);
+  } finally {
+    await inbox.close();
+  }
+});
+
+test("Inbox group commit produces no early ACK and retains FIFO validation and cancellation", async () => {
+  const paths = fixturePaths("shoggoth-inbox-group-");
+  const entered = Promise.withResolvers(), unblock = Promise.withResolvers();
+  let writes = 0, encryptions = 0;
+  const inbox = new PendingCommandInbox({ paths, now: () => 1_000,
+    cryptoBroker: {
+      async decrypt(value) { return Buffer.from(value); },
+      async encrypt(value) {
+        if (++encryptions === 1) { entered.resolve(); await unblock.promise; }
+        return Buffer.from(value);
+      },
+    },
+    atomicWrite(...args) { writes++; return atomicWritePrivateFile(...args); },
+  });
+  try {
+    await inbox.open();
+    const options = { groupCommit: true };
+    const first = groupCommitInput("first"), second = groupCommitInput("second");
+    let firstAck = false;
+    const accepted = inbox.enqueue(first, options).then(record => { firstAck = true; return record; });
+    const replay = inbox.enqueue(first, options);
+    const conflict = assert.rejects(inbox.enqueue({ ...first, prompt: "different" }, options),
+      { code: "PENDING_COMMAND_IDEMPOTENCY_CONFLICT" });
+    const acceptedSecond = inbox.enqueue(second, options);
+    // A different mutation closes the batching window at its exact FIFO slot.
+    const canceled = inbox.requestAcceptedCancellation(first.operationId, {
+      sessionKey: first.sessionKey, sessionId: first.acceptance.sessionId,
+      profileId: first.acceptance.profileId, runId: first.runId,
+    });
+    const third = groupCommitInput("third");
+    const later = inbox.enqueue(third, options);
+    await entered.promise;
+    assert.equal(firstAck, false);
+    assert.equal(writes, 0);
+    assert.equal(inbox.get(first.operationId), null);
+    assert.equal(inbox.get(second.operationId), null);
+    unblock.resolve();
+    assert.deepEqual(await accepted, await replay);
+    assert.equal((await acceptedSecond).runId, second.runId);
+    await conflict;
+    assert.equal(await canceled, true);
+    assert.equal((await later).runId, third.runId);
+    assert.equal(writes, 3, "first group, separate cancellation, then following group");
+    assert.equal(inbox.get(first.operationId).cancelRequested, true);
+    const envelope = JSON.parse(fs.readFileSync(inbox.filePath, "utf8"));
+    assert.equal(Object.keys(JSON.parse(Buffer.from(envelope.ciphertext, "base64")).activeCommands).length, 3);
+    await inbox.close();
+    await inbox.open();
+    assert.equal(inbox.get(first.operationId).cancelRequested, true);
+    assert.equal(inbox.get(second.operationId).runId, second.runId);
+    assert.equal(inbox.get(third.operationId).runId, third.runId);
+  } finally {
+    unblock.resolve();
+    if (inbox.opened) await inbox.close();
+  }
+});
+
+test("Inbox group commit rejects every waiter when durability is uncertain and recovers exact records on reopen", async () => {
+  for (const failure of ["before-commit", "unknown-after-commit"]) {
+    const paths = fixturePaths("shoggoth-inbox-group-fault-");
+    let writes = 0, inject = true;
+    const inbox = new PendingCommandInbox({ paths, now: () => 1_000, safeStorage: fakeSafeStorage(),
+      atomicWrite(...args) {
+        writes++;
+        if (!inject || failure === "unknown-after-commit") atomicWritePrivateFile(...args);
+        if (inject) throw Object.assign(new Error("fixture write error"),
+          failure === "unknown-after-commit" ? { committedUncertain: true } : {});
+      },
+    });
+    try {
+      await inbox.open();
+      const options = { groupCommit: true };
+      const first = groupCommitInput("failure-first"), second = groupCommitInput("failure-second");
+      const code = failure === "before-commit" ? "PENDING_COMMAND_WRITE_FAILED" : "PENDING_COMMAND_COMMIT_UNCERTAIN";
+      const firstWrite = inbox.enqueue(first, options), secondWrite = inbox.enqueue(second, options);
+      const late = failure === "unknown-after-commit" ? assert.rejects(inbox.rejectUnadmitted({
+        operationId: first.operationId, sessionKey: first.sessionKey, createdAt: first.createdAt,
+      }), { code }) : null;
+      const results = await Promise.allSettled([firstWrite, secondWrite]);
+      await late;
+      assert.ok(results.every(result => result.status === "rejected" && result.reason.code === code));
+      assert.equal(writes, 1);
+      if (failure === "unknown-after-commit") {
+        assert.throws(() => inbox.get(first.operationId), { code });
+        assert.throws(() => inbox.enqueue(groupCommitInput("late"), options), { code });
+      } else {
+        assert.equal(inbox.get(first.operationId), null);
+        assert.equal(inbox.get(second.operationId), null);
+      }
+      await inbox.close();
+      inject = false;
+      await inbox.open();
+      for (const record of [first, second]) {
+        assert.equal(inbox.get(record.operationId)?.runId,
+          failure === "unknown-after-commit" ? record.runId : undefined);
+      }
+    } finally {
+      if (inbox.opened) await inbox.close();
+    }
+  }
+});
+
 test("PendingCommand 整包 safeStorage 加密、operationId 幂等并跨重启保持状态", async () => {
   const paths = fixturePaths("shoggoth-pending-command-");
   const inbox = new PendingCommandInbox({
@@ -1328,6 +1500,51 @@ test("PendingCommand 整包 safeStorage 加密、operationId 幂等并跨重启�
   assert.deepEqual(Object.keys(plaintext.activeCommands), []);
   assert.equal(JSON.stringify(plaintext).includes(input.prompt), false);
   await restarted.close();
+});
+
+test("PendingCommand 兼容读取 v1，v2 密文提交后可按原身份恢复并取消", async () => {
+  const paths = fixturePaths("shoggoth-pending-v2-");
+  const options = { paths, safeStorage: fakeSafeStorage(), now: () => 1_000 };
+  const old = {
+    operationId: "v1-operation", runId: "v1-run",
+    sessionKey: "22222222-2222-4222-8222-222222222222", prompt: "legacy input", createdAt: 1_000,
+  };
+  const snapshot = {
+    profileId: "profile-one", sessionId: "33333333-3333-4333-8333-333333333333",
+    workspace: "/tmp/original-chat-workspace", selectionFingerprint: "b".repeat(64),
+  };
+  const current = { ...old, operationId: "v2-operation", runId: "v2-run", prompt: "recoverable input", acceptance: snapshot };
+  const filePath = path.join(paths.stateDir, "pending-commands.json");
+  const envelope = () => JSON.parse(fs.readFileSync(filePath, "utf8"));
+  let inbox = await new PendingCommandInbox(options).open();
+  try {
+    await inbox.enqueue(old);
+    assert.equal(envelope().version, 1);
+    await inbox.close();
+    inbox = await new PendingCommandInbox(options).open();
+    assert.deepEqual(inbox.get(old.operationId), { ...old, state: "pending" });
+
+    await inbox.enqueue(current);
+    assert.equal(envelope().version, 2);
+    assert.equal(fs.readFileSync(filePath, "utf8").includes(snapshot.workspace), false);
+    await inbox.close();
+    inbox = await new PendingCommandInbox(options).open();
+    assert.deepEqual(inbox.get(current.operationId), { ...current, state: "pending" });
+    await assert.rejects(inbox.enqueue({ ...current, acceptance: { ...snapshot, workspace: "/tmp/changed" } }),
+      { code: "PENDING_COMMAND_IDEMPOTENCY_CONFLICT" });
+    assert.equal(await inbox.rejectUnadmitted(current), false);
+
+    const canceled = await inbox.transition(current.operationId, "canceled");
+    assert.deepEqual(canceled.receipt, { profileId: snapshot.profileId, sessionId: snapshot.sessionId,
+      sessionKey: current.sessionKey, runId: current.runId });
+    await inbox.close();
+    inbox = await new PendingCommandInbox(options).open();
+    assert.equal(envelope().version, 2);
+    assert.deepEqual(await inbox.enqueue(current), canceled);
+    assert.equal(inbox.isUnadmittedRejection(current.operationId, current.sessionKey), false);
+    assert.equal(readInboxPlaintext(paths).activeCommands[current.operationId], undefined);
+    assert.equal(JSON.stringify(readInboxPlaintext(paths)).includes(current.prompt), false);
+  } finally { await inbox.close(); }
 });
 
 test("PendingCommand active 与 tombstone 独立有界，窗口内满载拒绝且过窗回收", async () => {
@@ -1410,6 +1627,82 @@ test("PendingCommand 坏文件、symlink 与 hardlink 均 fail closed 并保留�
       (error) => ["UNSAFE_SYMLINK", "UNSAFE_HARDLINK"].includes(error.code),
     );
     assert.equal(fs.readFileSync(victim, "utf8"), "pending-command-victim");
+  }
+});
+
+test("Inbox validates canonical ciphertext near the persisted size limit", () => {
+  const ciphertext = Buffer.alloc(Math.floor((maxInboxBytes - 256) * 3 / 4), 0xff).toString("base64");
+  const envelope = { version: 2, revision: 1, ciphertext };
+  assert.ok(Buffer.byteLength(JSON.stringify(envelope)) <= maxInboxBytes);
+  assert.deepEqual(validateInboxEnvelope(envelope), envelope);
+  for (const malformed of ["", "Zg", "Zg==\n", "Zg====", "Zh==", "_w==", "Zg==AAAA"]) {
+    assert.throws(() => validateInboxEnvelope({ ...envelope, ciphertext: malformed }),
+      { code: "PENDING_COMMAND_INBOX_CORRUPT" });
+  }
+  assert.throws(() => validateInboxEnvelope({ ...envelope, extra: true }),
+    { code: "PENDING_COMMAND_INBOX_CORRUPT" });
+});
+
+test("Inbox capacity rejects an oversized item while a later smaller item still fits", async () => {
+  for (const exactSize of [true, false]) {
+    const paths = fixturePaths("shoggoth-inbox-byte-limit-");
+    const safeStorage = createLocalFileSafeStorage({ paths });
+    let encryptions = 0, writes = 0;
+    const cryptoBroker = {
+      async encrypt(value) {
+        encryptions++;
+        return safeStorage.encryptString(value.toString("utf8"));
+      },
+      async decrypt(value) { return Buffer.from(safeStorage.decryptString(value), "utf8"); },
+      ...(exactSize ? { encryptedBytes: bytes => safeStorage.encryptedBytes(bytes) } : {}),
+    };
+    const inbox = new PendingCommandInbox({ paths, now: () => 1_000, cryptoBroker,
+      atomicWrite(...args) {
+        writes++;
+        return atomicWritePrivateFile(...args);
+      },
+    });
+    try {
+      const base = groupCommitInput("base");
+      delete base.acceptance;
+      const activeCommands = Object.fromEntries(Array.from({ length: 12 }, (_, index) => {
+        const operationId = `seed-${index}`;
+        return [operationId, { ...base, operationId, prompt: "x".repeat(1024 * 1024 - 2048), state: "pending" }];
+      }));
+      const plaintext = JSON.stringify({ idempotencyFloorMs: 0, activeCommands, tombstones: {} });
+      const encrypted = safeStorage.encryptString(plaintext);
+      assert.equal(safeStorage.encryptedBytes(Buffer.byteLength(plaintext)), encrypted.length);
+      const envelope = { version: 2, revision: 1, ciphertext: encrypted.toString("base64") };
+      const seeded = `${JSON.stringify(envelope)}\n`;
+      assert.ok(Buffer.byteLength(seeded) < maxInboxBytes);
+      assert.ok(maxInboxBytes - Buffer.byteLength(seeded) < 64 * 1024);
+      fs.writeFileSync(inbox.filePath, seeded, { mode: 0o600 });
+      await inbox.open();
+      // Every admission in this group uses one real writer path. The encrypted
+      // persisted result proves the optional size arithmetic did not admit an
+      // out-of-capacity ciphertext.
+      const larger = { ...groupCommitInput("larger"), prompt: "x".repeat(64 * 1024) };
+      const smaller = { ...groupCommitInput("smaller"), prompt: '小 " \\ \n' };
+      const enqueued = await Promise.allSettled([
+        inbox.enqueue(larger, { groupCommit: true }),
+        inbox.enqueue(smaller, { groupCommit: true }),
+        inbox.enqueue(smaller, { groupCommit: true }),
+      ]);
+      assert.equal(enqueued[0].reason?.code, "PENDING_COMMAND_CAPACITY");
+      assert.equal(enqueued[1].value?.runId, smaller.runId);
+      assert.deepEqual(enqueued[2].value, enqueued[1].value);
+      assert.equal(writes, 1);
+      assert.equal(encryptions, exactSize ? 1 : 3);
+      assert.equal(inbox.get(larger.operationId), null);
+      assert.deepEqual(inbox.get(smaller.operationId), { ...smaller, state: "pending" });
+      await inbox.close();
+      await inbox.open();
+      assert.equal(inbox.get(larger.operationId), null);
+      assert.equal(inbox.get(smaller.operationId)?.runId, smaller.runId);
+    } finally {
+      if (inbox.opened) await inbox.close();
+      safeStorage.close();
+    }
   }
 });
 

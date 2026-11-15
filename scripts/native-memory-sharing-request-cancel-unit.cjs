@@ -166,7 +166,11 @@ test("Active Memory self-trigger candidate jobs receive run cancellation and fin
   let resolveStarted, settled;
   const started = new Promise(resolve => { resolveStarted = resolve; });
   host.searchIndex.sync = options => {
-    if (!f.owner.activeMemory.runtimes.size) return originalSync.call(host.searchIndex, options);
+    // A scheduled Profile-wide index warm has its own lifecycle; the Run
+    // must cancel only the two syncs it opened for native lane-one recall.
+    if (!f.owner.activeMemory.runtimes.size || options?.signal === f.owner.profileSignal(f.profile.id)) {
+      return originalSync.call(host.searchIndex, options);
+    }
     const entry = options || {}; observed.push(entry);
     if (observed.length >= 2) resolveStarted();
     return new Promise((_, reject) => {
@@ -211,6 +215,7 @@ test("Active Memory preflight synchronization observes endRun before creating a 
   let resolveStarted, observed, release, settled;
   const started = new Promise(resolve => { resolveStarted = resolve; });
   host.searchIndex.sync = options => {
+    if (options?.signal === f.owner.profileSignal(f.profile.id)) return originalSync.call(host.searchIndex, options);
     observed = options || {}; resolveStarted();
     return new Promise((_, reject) => {
       release = () => reject(new Error("Controlled Active preflight synchronization released"));

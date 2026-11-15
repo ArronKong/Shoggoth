@@ -49,7 +49,7 @@ function recallFixture(f) {
     workDispatcher: { getRun: id => ({ ...f.run, id, status: "completed" }) }, getRunSessionKey: () => f.run.sourceId,
     recallPolicy: f.memoryEngine.recallPolicy, memoryStore: f.memoryStore });
   const source = new ProductMemorySessions({ sessions, transcripts: f.transcripts, recall,
-    database: { tombstones: () => [] }, assertProfile: () => {} });
+    database: { tombstones: () => [], hasSessionTombstone: () => false }, assertProfile: () => {} });
   return { recall, source };
 }
 

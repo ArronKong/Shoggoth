@@ -8,9 +8,11 @@ async function fixture() {
   const calls = [];
   let injectionFails = false, turnFails = false, catalogFails = false;
   const host = {
+    usesRpcSendGuard: true,
     terminated: new Promise(() => {}),
     threadResume: async input => ({ thread: { id: input.threadId } }),
-    threadInjectItems: async input => {
+    threadInjectItems: async (input, options) => {
+      if (options) await options.withSendGuard(options.beforeSend);
       calls.push(["inject", structuredClone(input)]);
       if (injectionFails) throw new Error("fixture injection failed");
       return {};
@@ -20,7 +22,8 @@ async function fixture() {
       if (catalogFails) throw new Error("fixture catalog failed");
       return { data: [{ model: "fixture", isDefault: true, defaultReasoningEffort: "medium" }], nextCursor: null };
     },
-    turnStart: async input => {
+    turnStart: async (input, options) => {
+      if (options) await options.withSendGuard(options.beforeSend);
       calls.push(["turn", structuredClone(input)]);
       if (turnFails) throw new Error("fixture turn failed");
       return { turn: { id: "turn-1" } };
@@ -92,4 +95,20 @@ test("Codex resolves inherited effort before mutating model history", async () =
   failed.failCatalog();
   await assert.rejects(failed.turn({ thinkingLevel: null }), /catalog failed/u);
   assert.deepEqual(failed.calls.map(([kind]) => kind), ["models"]);
+});
+
+test("Codex separately checks context injection and prompt after model discovery", async () => {
+  const f = await fixture();
+  const phases = [];
+  await assert.rejects(f.turn({ thinkingLevel: null, withTurnSendGuard: async (phase, submit) => {
+    phases.push(phase);
+    if (phase === "context") {
+      assert.deepEqual(f.calls.map(([kind]) => kind), ["models"]);
+      submit();
+      return;
+    }
+    throw Object.assign(new Error("source no longer visible"), { code: "CONTEXT_SOURCE_STALE" });
+  } }), { code: "CONTEXT_SOURCE_STALE" });
+  assert.deepEqual(phases, ["context", "turn"]);
+  assert.deepEqual(f.calls.map(([kind]) => kind), ["models", "inject"]);
 });

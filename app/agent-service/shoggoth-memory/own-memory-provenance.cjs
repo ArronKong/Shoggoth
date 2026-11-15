@@ -64,7 +64,7 @@ class OwnMemoryProvenance {
     const profileId = state.profileId;
     this.add(state, items.filter(item => item.profileId === profileId)
       .map(item => ({ id: item.id, hash: hashContent(item.content) })));
-    let active;
+    const byPath = new Map();
     for (const result of results) {
       if (result.borrowed === true) continue;
       if (result.source === "sessions") {
@@ -74,9 +74,9 @@ class OwnMemoryProvenance {
             && this.owner.recallPolicy.isEventVisible(profileId, event));
         this.inherit(state, events);
       } else {
-        active ??= this.owner.store.list(profileId, { status: "active" });
-        const overlaps = active.filter(item => item.memoryPath === result.path
-          && item.startLine <= (result.endLine ?? Infinity) && item.endLine >= (result.startLine ?? 1));
+        if (!byPath.has(result.path)) byPath.set(result.path, this.owner.activeFileEntries(profileId, result.path));
+        const overlaps = byPath.get(result.path).filter(item => item.startLine <= (result.endLine ?? Infinity)
+          && item.endLine >= (result.startLine ?? 1));
         if (!overlaps.length) state.complete = false;
         this.add(state, overlaps.map(item => ({ id: item.id, hash: hashContent(item.content) })));
       }

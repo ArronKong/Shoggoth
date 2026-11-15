@@ -628,7 +628,7 @@ test("外部管理的未知结果冻结在原调用回执，后续同 callId 不
 
 test("固定 178 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
   assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 178);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, MCP_PRODUCT_TOOL_NAMES.length);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 178);
   for (const name of ["group_task", "group_collaborate"]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(name), false);
   for (const required of [
     "workspace_execute",
@@ -866,6 +866,9 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
   assert.equal(capabilities.capabilities.length, 165);
+  for (const { tool } of PRODUCT_CAPABILITIES.filter(item => item.uiVisible === false)) {
+    assert.equal(capabilities.capabilities.some(item => item.tool === tool), false, tool);
+  }
   for (const name of ["group_task", "group_collaborate"]) {
     assert.equal(capabilities.capabilities.some((item) => item.tool === name), false);
   }
@@ -2653,11 +2656,13 @@ test("skill_learn only signals its active native owner and replays no second wri
   await expectCode(() => f.controller.handle("skill_learn", {}, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
 });
 test("心跳设置仅当前活跃原生 Run 可改，受限心跳、外部会话和撤权不能改", async () => {
-  const calls = [], checkedProactiveRuns = [];
-  const f = makeFixture({ proactiveService: {
-    assertRunCurrent(run) { checkedProactiveRuns.push(run.id); },
+  const currentProactiveRuns = [];
+  const calls = [], f = makeFixture({ proactiveService: {
+    assertRunCurrent(run) { currentProactiveRuns.push(run.id); },
     async handleSettingsTool(name, profileId, args, context) {
-      context.assertCurrent(); calls.push({ name, profileId, args, operationId: context.operationId }); return { revision: calls.length };
+      context.assertCurrent();
+      calls.push({ name, profileId, args, operationId: context.operationId });
+      return { revision: calls.length };
     },
   } });
   const scope = { runId: RUN_ID, assertCurrent() {} }, args = { expectedRevision: 1, config: { intervalMinutes: 15 } };
@@ -2673,7 +2678,7 @@ test("心跳设置仅当前活跃原生 Run 可改，受限心跳、外部会话
   assert.match(calls.at(-1).operationId, /^heartbeat-mcp-[a-f0-9]{64}$/u);
   f.runs.set(RUN_ID, run({ source: "proactive" }));
   await expectCode(() => f.controller.handle("heartbeat_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
-  assert.deepEqual(checkedProactiveRuns, [RUN_ID]);
+  assert.deepEqual(currentProactiveRuns, [RUN_ID]);
   f.runs.set(RUN_ID, run({ status: "completed" }));
   await expectCode(() => f.controller.handle("heartbeat_settings_set", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
   f.runs.set(RUN_ID, run());
@@ -2718,8 +2723,11 @@ test("统一联网默认要求单次确认，偏好读取重放读取现值，�
 test("workspace execution uses only the four runtimes' frozen auto contract and current lease", async () => {
   let contract = null, executions = 0;
   const f = makeFixture({ workspaceExecutionService: { async execute(input) {
+    assert.equal(input.contract.source, input.run.source);
     input.scope.assertCurrent(); executions++; return { exitCode: 0, stdout: "done", stderr: "" };
-  } }, getExecutionContract: () => contract });
+  } }, getExecutionContract: () => contract, proactiveService: {
+    assertRunCurrent(run) { assert.equal(run.id, RUN_ID); assert.equal(run.profileId, PROFILE_ID); },
+  } });
   const current = f.runs.get(RUN_ID);
   current.source = "chat"; current.workspace = f.artifactRoot;
   const scope = { runId: RUN_ID, assertCurrent() {} };
@@ -2732,17 +2740,28 @@ test("workspace execution uses only the four runtimes' frozen auto contract and 
   }
   const original = contract;
   for (const change of [{ permissionMode: "full-access" }, { permissionMode: "request-approval" },
-    { workspaceExecutionVersion: undefined }, { runtime: "codex" }, { source: "proactive" },
-    { permissionPolicy: { sandbox: "read-only" } }, { workspace: "/foreign" }, { profileId: OTHER_PROFILE_ID }]) {
+    { workspaceExecutionVersion: undefined }, { runtime: "codex" },
+    { permissionPolicy: { sandbox: "read-only" } }, { workspace: "/foreign" }, { profileId: OTHER_PROFILE_ID },
+    { source: "proactive" }]) {
     contract = { ...original, ...change };
     await expectCode(() => f.controller.handle("workspace_execute", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
   }
   contract = original;
   await expectCode(() => f.controller.handle("workspace_execute", args, authority({ federationClient: "hermes" }), scope), "MCP_TOOL_FORBIDDEN");
   await expectCode(() => f.controller.handle("workspace_execute", args, authority()), "MCP_TOOL_FORBIDDEN");
+  // The coordinator freezes the Run's source into its contract. Compaction
+  // is excluded by workspace policy; a verified proactive run may execute.
+  current.source = "compaction";
+  contract = { ...original, source: current.source };
+  await expectCode(() => f.controller.handle("workspace_execute", args, authority({ callId: crypto.randomUUID() }), scope), "MCP_TOOL_FORBIDDEN");
+  current.source = "proactive";
+  contract = { ...original, source: current.source };
+  assert.equal((await f.controller.handle("workspace_execute", args, authority({ callId: crypto.randomUUID() }), scope)).exitCode, 0);
+  current.source = "chat";
+  contract = original;
   f.controller.permissionEngine.setProfileOverride(PROFILE_ID, "workspace_execute", "deny");
   await expectCode(() => f.controller.handle("workspace_execute", args, authority(), scope), "MCP_TOOL_FORBIDDEN");
-  assert.equal(executions, 4);
+  assert.equal(executions, 5);
 });
 
 test("workspace commands share concurrent calls and never replay a pending command after restart", async () => {

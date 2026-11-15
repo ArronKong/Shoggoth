@@ -440,6 +440,58 @@ async function waitFor(predicate, label, timeoutMs = 1_000) {
   assert.fail(`timed out waiting for ${label}`);
 }
 
+for (const mode of ["dispatch", "cancel", "refuse command launch"]) {
+  test(`Pi verifies the published turn immediately before its RPC write: ${mode}`, async () => {
+    const value = rpcFixture();
+    try {
+      const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+      const raw = await value.adapter.acquire(PI_BINDING, { workspace: value.workspace, permissionPolicy });
+      const runtime = require("../app/agent-service/runtime-handle-v1").runtimeHandleV1(raw, PI_BINDING);
+      assert.equal(runtime.usesTurnSendGuard, true);
+      const { session } = await runtime.sessionStart({ source: "chat:guarded", cwd: value.workspace,
+        model: "openai/gpt-5.6", permissionPolicy });
+      const controller = new AbortController();
+      const count = () => value.spawns.flatMap(entry => entry.child.input.trim().split("\n").filter(Boolean)
+        .map(JSON.parse)).filter(row => ["prompt", "compact"].includes(row.type)).length;
+      const launched = value.spawns.filter(row => row.command === "/bin/sh").length;
+      let guard, phase;
+      const response = runtime.turnStart({ sessionId: session.id, operationId: "guarded-turn", cwd: value.workspace,
+        prompt: mode === "refuse command launch" ? "/compact updated" : "Verify this turn", context: "Guarded context",
+        model: "openai/gpt-5.6", permissionPolicy, signal: controller.signal,
+        withTurnSendGuard: (name, submit) => new Promise((resolve, reject) => {
+          phase = name;
+          guard = allow => {
+            if (!allow) { reject(Object.assign(new Error("fixture stale source"), { code: "CONTEXT_SOURCE_STALE" })); return; }
+            submit(); resolve();
+          };
+        }) });
+      response.catch(() => {});
+      await waitFor(() => guard, "Pi physical guard");
+      assert.equal(count(), 0);
+      if (mode === "dispatch") {
+        assert.equal(phase, "turn");
+        guard(true);
+        const receipt = await response;
+        assert.equal(count(), 1);
+        await waitFor(() => raw.host.turnProcesses.size === 0, "Pi child close");
+        assert.ok(receipt.turn.id);
+      } else if (mode === "cancel") {
+        controller.abort();
+        await assert.rejects(response, { code: "WORK_RUN_COORDINATOR_STALE_RUN" });
+        assert.throws(() => guard(true), { code: "RUNTIME_HANDLE_TERMINATED" });
+        guard(false);
+        assert.equal(count(), 0);
+      } else {
+        assert.equal(phase, "context");
+        assert.equal(value.spawns.filter(row => row.command === "/bin/sh").length, launched);
+        guard(false);
+        await assert.rejects(response, { code: "CONTEXT_SOURCE_STALE" });
+        assert.equal(count(), 0);
+      }
+    } finally { await value.adapter.stopAll().catch(() => {}); value.cleanup(); }
+  });
+}
+
 for (const interrupted of [false, true]) test(`Pi settles progress messages live without terminal replay (${interrupted ? "stop" : "complete"})`, async () => {
   const progressTexts = ["准备检查页面。", "已完成第一阶段。", "继续核对第二阶段。"];
   // A tool-only assistant still consumes a native message identity.

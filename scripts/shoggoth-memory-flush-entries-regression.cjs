@@ -40,10 +40,48 @@ test("an old nested entry stays readable, searchable and safe for Dreaming", { t
   // Rewrite the file as the old renderer did: "- - " on the first line.
   const file = path.join(f.owner.store.workspace(A), result.path);
   const old = fs.readFileSync(file, "utf8").replace(`- ${FACT}`, `- - ${FACT}\n  - Violet ink dries overnight.`);
-  fs.writeFileSync(file, old, { mode: 0o600 });
   const input = f.turn("amber telescope");
-  const found = await f.search("amber telescope calibrated", input, { minScore: 0 });
-  assert.ok(found.results.some(row => row.path === result.path));
+  const store = f.owner.store;
+  const tryReadScan = store._tryReadScan.bind(store);
+  const completed = Promise.withResolvers();
+  let oldScan, searchStarted = false, joinedOldScan = false;
+  const admission = t.mock.method(store, "_tryReadScan", (profileId, joinOnly) => {
+    const admitted = tryReadScan(profileId, joinOnly);
+    if (profileId !== A || !admitted) return admitted;
+    if (searchStarted) {
+      joinedOldScan = admitted.scan === oldScan;
+      admission.mock.restore();
+    } else if (!oldScan) {
+      oldScan = admitted.scan;
+      const { worker, jobId } = oldScan.slot;
+      const emit = worker.emit.bind(worker);
+      const hold = t.mock.method(worker, "emit", (event, ...args) => {
+        const response = args[0];
+        if (event !== "message" || response?.id !== jobId || !response.identities?.some(([relative]) => relative === result.path)) {
+          return emit(event, ...args);
+        }
+        hold.mock.restore();
+        completed.resolve(() => emit(event, ...args));
+        return true;
+      });
+    }
+    return admitted;
+  });
+  // Pause delivery of an actual pre-edit worker result while it can still be joined.
+  const oldRead = f.owner.withAsyncMemoryReadView(A, undefined, view => {
+    assert.throws(() => view.assertFilesCurrent(), { code: "MEMORY_REVISION_CONFLICT" });
+  });
+  const release = await Promise.race([completed.promise, oldRead]);
+  assert.equal(typeof release, "function", "the pre-edit worker response is held before admission");
+  let pending;
+  try {
+    fs.writeFileSync(file, old, { mode: 0o600 });
+    searchStarted = true;
+    pending = f.search("amber telescope calibrated", input, { minScore: 0 });
+  } finally { release(); }
+  const [found] = await Promise.all([pending, oldRead]);
+  assert.ok(joinedOldScan, "the initial search joined the pre-edit scan");
+  assert.ok(found.results.some(row => row.path === result.path && row.snippet.includes("Violet ink dries overnight.")));
   await f.finish(input);
   f.model = async () => ({ text: "NONE" });
   assert.equal((await f.owner.dream(A)).handled, true);

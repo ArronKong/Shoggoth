@@ -62,7 +62,26 @@ class RunExecutionStore {
       || request.completeness !== "partial" || request.exceedsBudget || request.transportExceeded
       || !/^[a-f0-9]{64}$/u.test(request.recentHistorySourceIdentity || "")
       || typeof c.transcriptSessionId !== "string" || !Number.isSafeInteger(c.contextRevisions?.transcript))) throw invalid();
-    if ((request?.restorePolicy || request?.recentHistoryOnly)
+    if (request?.partialContinuation !== undefined) {
+      const review = request.partialContinuation;
+      const actionable = review?.version === 1;
+      if (run.source !== "chat" || typeof c.transcriptSessionId !== "string" || !Number.isSafeInteger(c.contextRevisions?.transcript)) throw invalid();
+      if (actionable) {
+        const { validContinuationProof, parseActionableContinuation, MAX_EVIDENCE_BYTES, sha256 } = require("./actionable-continuation");
+        const evidence = c.continuationEvidence;
+        if (!validContinuationProof(review) || c.contextFresh !== true || request.completeness !== "partial"
+          || request.historyTruncated || request.exceedsBudget || request.transportExceeded
+          || typeof evidence !== "string" || Buffer.byteLength(evidence) > MAX_EVIDENCE_BYTES || sha256(evidence) !== review.digest
+          || !parseActionableContinuation(command?.prompt)) throw invalid();
+      } else if (!review || Object.keys(review).sort().join(",") !== "eventIds,sourceIdentity"
+        || !/^[a-f0-9]{64}$/u.test(review.sourceIdentity || "")
+        || (request.recentHistoryOnly && review.sourceIdentity !== request.recentHistorySourceIdentity)
+        || !Array.isArray(review.eventIds) || review.eventIds.length > 8
+        || new Set(review.eventIds).size !== review.eventIds.length
+        || review.eventIds.some(id => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(id))) throw invalid();
+    }
+    if (c?.continuationEvidence !== undefined && request?.partialContinuation?.version !== 1) throw invalid();
+    if ((request?.restorePolicy || request?.recentHistoryOnly || request?.partialContinuation?.version === 1)
       && (!Number.isSafeInteger(request.nativeSeed?.usedTokens) || request.nativeSeed.usedTokens < 0
         || !Number.isSafeInteger(request.nativeSeed?.throughSeq) || request.nativeSeed.throughSeq < 0
         || request.nativeSeed.operationId !== command?.operationId)) throw invalid();

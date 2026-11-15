@@ -123,6 +123,7 @@ async function fixture({ enabledSkill = false } = {}) {
       accountHome: home, processHome: root, homeEnv: "CODEX_HOME", accountKind: "native-user", credentialProbe: "runtime",
       credentialFile: null, loginArgs: [], logoutArgs: [], docsUrl: "https://developers.openai.com/codex/" }] });
   if (!await backend.start()) { await backend.stop(); await service.stop(); db.close(); fs.rmSync(root, { recursive: true, force: true }); throw Error("fixture backend failed to start"); }
+  await backend._refreshCodexDesktopSessions();
   return { root, home, workspace, db, dbFile, host, native, second, add, paths, service, ipc, backend,
     async close() { await backend.stop(); await service.stop(); db.close(); fs.rmSync(root, { recursive: true, force: true }); } };
 }
@@ -222,6 +223,7 @@ async function run() {
     assert.equal(service.workDispatcher.getRun(run.id).status, "completed");
     assert.equal((await backend.getHistory(row.key)).messages.at(-1).content[0].text, "在原线程完成 Shoggoth 回复");
     await backend.stop(); await service.stop(); await service.start(); assert.equal(await backend.start(), true);
+    await backend._refreshCodexDesktopSessions();
     assert.equal(service.chatSessionStore.getSession(row.sessionId).runtimeSessionId, native.id);
     assert.equal(isDesktopBinding(service.chatSessionStore.getBinding(row.sessionId)), true);
     assert.equal(backend.getSessionRows().filter(r => r.source === "codex-desktop").length, 2);
@@ -269,5 +271,44 @@ async function run() {
     console.log("PASS Codex Desktop: sole renamed owner, clone exclusion, native filtering and deduplication, stable paging, bounded full live history, atomic/idempotent attach, original thread/cwd continuation and restart, busy and context guards, no resume fallback, archive and source failure");
   } finally { await f.close(); }
 }
+
+async function runDiscovery() {
+  const f = await fixture();
+  try {
+    const { backend, service, db, host, native, ipc } = f;
+    assert.equal(backend.getSessionRows().filter(row => row.source === "codex-desktop").length, 2);
+    const expected = backend.getSessionRows().find(row => row.source === "codex-desktop" && row.label === "桌面对话：保留原上下文");
+    const entry = backend._codexDesktopEntries.get(expected.sessionId);
+    const params = { profileId: OWNER.id, threadId: native.id, homeIdentity: entry.homeIdentity };
+    const status = () => ipc("service.status", {});
+    await ipc("codex.desktop.session.attach", params);
+    await service.codexDesktopSessionController.closeDiscovery();
+    await backend._refreshCodexDesktopSessions();
+    await status();
+    assert.equal(backend._complete, true);
+    assert.equal(backend._codexDesktopSourceError, "CODEX_DESKTOP_STORAGE_UNAVAILABLE");
+    assert.equal(backend.getSessionRows().filter(row => row.source === "codex-desktop").length, 2);
+    // Bound history and send preflight each perform their own fresh identity
+    // checks. A lost discovery worker cannot confer authority or revoke it.
+    await ipc("codex.desktop.history", { ...params, cursor: null, limit: 5 });
+    await service.codexDesktopSessionController.assertSendable(expected.sessionId);
+    assert.equal(host.turnStarts, 0);
+    service.codexDesktopSessionController.openDiscovery();
+    await backend._refreshCodexDesktopSessions();
+    assert.equal(backend._codexDesktopSourceError, null);
+    db.exec("ALTER TABLE threads RENAME COLUMN originator TO unsupported_originator");
+    await backend._refreshCodexDesktopSessions();
+    assert.equal(backend._codexDesktopSourceError, "CODEX_DESKTOP_FORMAT_UNSUPPORTED");
+    await status();
+    db.exec("ALTER TABLE threads RENAME COLUMN unsupported_originator TO originator");
+    await backend.stop(); await service.stop();
+    await service.start(); assert.equal(await backend.start(), true);
+    await backend._refreshCodexDesktopSessions();
+    assert.equal(backend._codexDesktopSourceError, null);
+    assert.equal(service.chatSessionStore.getSession(expected.sessionId).runtimeSessionId, native.id);
+    console.log("PASS isolated Desktop discovery, nonblocking Service readiness, bound-history and preflight isolation, and worker restart");
+  } finally { await f.close(); }
+}
 module.exports = { fixture, DesktopHost, turn };
-if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) (process.argv.includes("--discovery-only") ? runDiscovery() : run())
+  .catch(error => { console.error(error); process.exitCode = 1; });

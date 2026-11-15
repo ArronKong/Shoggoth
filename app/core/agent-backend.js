@@ -316,6 +316,8 @@ class AgentBackend {
    *   surfaces: {chat: boolean, agents: boolean, models: boolean, skills: boolean,
    *     usage: boolean, oauth: boolean, dashboardRuns: boolean, agentHarness: boolean,
    *     nativeCapacity?: boolean, nativeMemoryConfig?: boolean, nativeMemorySharingConfig?: boolean, runtimeBindings?: boolean, runtimeStatus?: boolean,
+   *     durableChatStop?: boolean,
+   *     structuredChatContinuation?: boolean,
    *     cron: null|{kind: "openclaw"|"hermes"|"native"},
    *     kanban: null|{kind: "workboard"|"hermes"|"native"}}}}
    */
@@ -962,7 +964,8 @@ class AgentBackend {
   /**
    * Observe an original send without replaying it. A backend may advertise
    * canReconcile only if it can durably prove and fence non-admission.
-   * @returns {Promise<{status:string, run:object|null, canReconcile?:boolean}>}
+   * accepted with a null Run records durable receipt before execution projection.
+   * @returns {Promise<{status:string, run:object|null, canReconcile?:boolean, admissionAccepted?:boolean}>}
    */
   async getChatOperation(sessionKey, idempotencyKey) {
     return { status: "unresolved", run: null };

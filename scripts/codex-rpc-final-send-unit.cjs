@@ -161,6 +161,51 @@ async function testOnlyPrivateAdmissionErrorsAreNonfatal() {
     return { forgedAdmissionAccepted: false, transportFailureFatal: true, replayedFrames: 0 };
   } finally { await rpc.terminate(); }
 }
+async function testWaitingAuthorityCannotDispatchAfterCancellation() {
+  const { child, rpc } = client();
+  const controller = new AbortController();
+  let release, entered;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  try {
+    const skipped = caught(rpc.request("thread/inject_items", {}, { signal: controller.signal,
+      withSendGuard: async submit => { entered(); await gate; submit(); } }));
+    await waiting;
+    assert.equal(child.stdin.calls.length, 0);
+    const survivor = rpc.request("healthy-after-scan", {});
+    controller.abort();
+    await expectCode(skipped, "RPC_REQUEST_ABORTED");
+    child.stdin.backpressure = false;
+    release();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(child.stdin.calls.map(call => JSON.parse(call.frame).method), ["healthy-after-scan"]);
+    child.stdin.finish();
+    child.send({ id: 2, result: "healthy" });
+    assert.equal(await survivor, "healthy");
+    assert.equal(rpc.fatalError, null);
+    return { delayedFramesWritten: 0, healthyFrames: 1 };
+  } finally { release(); await rpc.terminate(); }
+}
+
+async function testAuthorityTimeoutRetiresOnlyUnsentFrame() {
+  const child = new Child();
+  child.stdin.backpressure = false;
+  const rpc = new CodexJsonlRpcClient(child, { requestTimeoutMs: 1_000, writeTimeoutMs: 15 });
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  try {
+    const expired = caught(rpc.request("turn/start", {}, { withSendGuard: async submit => { await gate; submit(); } }));
+    await expectCode(expired, "RPC_SEND_GUARD_TIMEOUT", true);
+    const healthy = rpc.request("healthy-after-timeout", {});
+    release();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(child.stdin.calls.map(call => JSON.parse(call.frame).method), ["healthy-after-timeout"]);
+    child.stdin.finish();
+    child.send({ id: 2, result: "healthy" });
+    assert.equal(await healthy, "healthy");
+    return { lateWrites: 0, hostFatal: Boolean(rpc.fatalError) };
+  } finally { release(); await rpc.terminate(); }
+}
 async function main() {
   const output = process.argv[2];
   if (output && fs.existsSync(output)) throw new Error("evidence output already exists");
@@ -169,7 +214,8 @@ async function main() {
   const before = source();
   const tests = [testRevokedQueuedCallDoesNotSendOrRetireOtherRequests, testQueuedAbortAndDeadlineExpireBeforeAdmission,
     testGuardSeesImmutableOriginalFrameExactlyOnce, testAsynchronousOrInvalidGuardsNeverWrite,
-    testAbortInsideGuardNeverWrites, testOnlyPrivateAdmissionErrorsAreNonfatal];
+    testAbortInsideGuardNeverWrites, testOnlyPrivateAdmissionErrorsAreNonfatal,
+    testWaitingAuthorityCannotDispatchAfterCancellation, testAuthorityTimeoutRetiresOnlyUnsentFrame];
   const results = [];
   for (const test of tests) { results.push({ name: test.name, passed: true, detail: await test() }); process.stdout.write("PASS " + test.name + "\n"); }
   const after = source();

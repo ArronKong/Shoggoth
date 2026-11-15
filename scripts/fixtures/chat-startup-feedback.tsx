@@ -122,7 +122,7 @@ const checkLoadingBubble=(maintenance=false)=>{
 const stage=async(value:string,statusKind="starting")=>{
   emit({state:"status",statusKind,stage:value});
   await tick();
-  const maintenance = ["reconnecting", "compacting"].includes(value);
+  const maintenance = ["context", "reconnecting", "compacting"].includes(value);
   if (maintenance) {
     await wait(() => waitNode()?.dataset.stage === value, "maintenance progress appears in live activity");
     check(waitNode()!.textContent?.includes(i18n.t(`chat.runWait.${value}`)), "maintenance uses its translated status");
@@ -210,17 +210,18 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
   await send();
   const sendsBeforeQueue = requests.filter(r=>r.method==="chat.send").length;
   emit({state:"status",statusKind:"queued",reason:"RUNTIME_ACCOUNT_ACTIVE_LIMIT",queuedAt:Date.now()});
-  await wait(()=>!waitNode(),"queue keeps its state internal");
+  await wait(()=>waitNode()?.dataset.kind === "queued", "account capacity wait is visible");
   await tick();
+  check(waitNode()?.textContent?.includes(i18n.t("chat.runWait.account")), "account capacity has a specific translated explanation");
   check(!document.querySelector('[data-testid="chat-queue-status"]'),"queued status must not leave an empty message row");
   for(const label of [i18n.t("chat.liveStatus.queued"),i18n.t("chat.runWait.queued")]) {
     check(!document.body.innerText.includes(label),"chat must not show a queued status");
     check(!Array.from(document.querySelectorAll<HTMLElement>('[title],[aria-label]')).some(node=>node.title.includes(label)||node.getAttribute("aria-label")?.includes(label)),"queued status must not remain in tooltips or accessible labels");
   }
-  check(requests.filter(r=>r.method==="chat.send").length===sendsBeforeQueue,"hiding the queue must not resend the message");
+  check(requests.filter(r=>r.method==="chat.send").length===sendsBeforeQueue,"account wait does not resend the message");
   const stopWhileQueued=visible<HTMLButtonElement>('button[title="'+i18n.t("chat.stopGenerating")+'"]');
   check(stopWhileQueued&&!stopWhileQueued.disabled,"a queued run remains stoppable");
-  checkLoadingBubble();
+  checkLoadingBubble(true);
   emit({state:"status",statusKind:"retrying",reason:"RUNTIME_RATE_LIMITED"});
   await wait(()=>waitNode()?.dataset.kind==="retrying","retry shown");
   checkLoadingBubble();
@@ -245,7 +246,7 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
   visible<HTMLButtonElement>('button[title="'+i18n.t("chat.stopGenerating")+'"]')!.click();
   await wait(()=>requests.some(r=>r.method==="chat.abort"),"stop request");await finish("aborted");
   await send();await finish("error");
-  return {runtime,immersive,lang:i18n.language,width:innerWidth,immediate:true,replyLoadingBubble:true,activityReplacesLoader:true,manualScrollPreserved:!immersive,stages:true,emptyEvents:true,firstOutput:true,lateStatus:true,queueHidden:true,retry:true,blockingPrompts:true,stopQueued:true,error:true};
+  return {runtime,immersive,lang:i18n.language,width:innerWidth,immediate:true,replyLoadingBubble:true,activityReplacesLoader:true,manualScrollPreserved:!immersive,stages:true,emptyEvents:true,firstOutput:true,lateStatus:true,accountWaitVisible:true,sessionQueueHidden:true,retry:true,blockingPrompts:true,stopQueued:true,error:true};
 }});
 // Preview-only comparison: reuse the real activity renderer without inventing
 // completed phases in the product's live event stream.

@@ -7,7 +7,7 @@ const exports = {};
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL("../app/manage-ui/src/lib/chatRunWait.ts", import.meta.url), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText, { exports });
-const { updateChatRunWait: update, chatRunWaitState: fromStatus, withStartupWait, CHAT_WAIT_REASONS } = exports;
+const { updateChatRunWait: update, chatRunWaitState: fromStatus, withStartupWait, chatRunWaitActivity, CHAT_WAIT_REASONS } = exports;
 for (const [reason, label] of Object.entries({ GLOBAL_CAPACITY: "global", STARTUP_BACKPRESSURE: "startup",
   HOST_CAPACITY: "host", RUNTIME_HOST_CAPACITY: "host", SERVICE_QUIESCED: "service",
   PROFILE_WORKSPACE_WRITE_LIMIT: "agentWorkspace" })) {
@@ -46,4 +46,10 @@ const nextStage = { ...state, stage: "restoring" };
 assert.equal(withStartupWait(steps, nextStage)[0].id, projected[0].id, "a phase update must keep its row identity");
 assert.equal(withStartupWait(steps), steps, "real output removes the transient row");
 assert.equal(withStartupWait(steps, queued), steps, "queue feedback keeps its existing presentation");
+const accountWait = fromStatus({ statusKind: "queued", reason: "RUNTIME_ACCOUNT_ACTIVE_LIMIT" }, 200);
+assert.equal(chatRunWaitActivity(accountWait), accountWait, "account capacity is distinguishable from short session queueing");
+assert.equal(withStartupWait(steps, accountWait)[0].startupWait, accountWait);
+const contextWait = fromStatus({ statusKind: "starting", stage: "context" }, 200);
+assert.equal(chatRunWaitActivity(contextWait), contextWait, "context preparation has a visible phase");
+assert.equal(chatRunWaitActivity(queued), undefined);
 console.log("PASS startup feedback: phases, elapsed clock, empty events, first content, terminal, queue, retry and unknown fields");

@@ -40,10 +40,13 @@ test("UI submissions stay in model context but not actual recall, Product memory
 test("borrowed UI publication, queued input, source withdrawal and Service restart preserve the real dependency chain", { timeout: 30000 }, async () => {
   const options = { ...OPTIONS, memoryCoreConfig: { ...OPTIONS.memoryCoreConfig,
     agents: { defaults: { compaction: { memoryFlush: { enabled: false } } } } } };
-  let f = await openHandoffFixture({ serviceOptions: options }), host, authority;
+  let f = await openHandoffFixture({ serviceOptions: options }), host, authority, releaseSourceScan;
   const FACT = "Borrowed UI telescope calibration marker is aquamarine.";
   try {
     const service = f.service, reader = f.profile.id, sourceId = "ui-borrowed-source";
+    const runtimeConfig = service.nativeRuntimeConfig.read();
+    service.nativeRuntimeConfig.apply({ ...runtimeConfig, revision: runtimeConfig.revision + 1,
+      flags: { ...runtimeConfig.flags, runtimeContextLifecycleV1: false } });
     service.chatUiConfig.apply({ revision: 1, config: { nativeChatUiV1: true } });
     service.productStore.putAgentProfile({ ...f.profile, id: sourceId, agentId: sourceId, runtimeProfileId: sourceId, name: sourceId, isDefault: false });
     service.agentDefinitionStore.ensureProfile({ profileId: sourceId });
@@ -52,14 +55,17 @@ test("borrowed UI publication, queued input, source withdrawal and Service resta
     const item = await service.memoryEngine.propose({ profileId: sourceId, content: FACT, scope: "agent", classification: "explicit", sourceRefs: ["user-edit:ui-source"] });
     const session = f.createSession(), run = await f.send(session.sessionKey, "ui-borrowed-creator", "Find telescope calibration");
     assert.equal(run.status, "running", run.errorCode);
-    const call = (name, args) => service.mcpProductToolController.handle(name, { source: "chat", sourceId: session.sessionKey, ...args }, { profileId: reader, callId: crypto.randomUUID() });
+    const call = (name, args) => f.callTool(run, name, args);
     const found = await call("memory_search", { query: "telescope", minScore: 0, maxResults: 20, ownerProfileId: sourceId });
+    assert.ok(found.results, JSON.stringify(found));
     const hit = found.results.find(value => value.ownerProfileId === sourceId); assert.ok(hit);
     const read = await call("memory_get", { id: hit.sourceRef }); assert.equal(read.text.includes("aquamarine"), true);
     fs.writeFileSync(path.join(f.workspace, "card.html"), `<html><h1>${FACT}</h1></html>`);
-    const lease = service.workRunCoordinator.runCapabilityLeases.get(run.id), scope = { runId: run.id,
-      assertCurrent: () => service.workRunCoordinator.hostCapabilityIssuer.assert(lease, { kind: "mcp", identity: { runId: run.id } }) };
-    const first = await service.mcpProductToolController.handle("render_ui", declaration(), { profileId: reader, callId: crypto.randomUUID() }, scope);
+    const { runtimeProfileId, runtimeAccountId } = run.runtimeSessionRef;
+    const first = await service.workRunCoordinator.invokeRuntimeCapability({ runId: run.id, runtimeProfileId, runtimeAccountId,
+      kind: "mcp" }, scope => service.mcpProductToolController.handle("render_ui", declaration(),
+      { profileId: reader, callId: crypto.randomUUID() }, scope));
+    assert.ok(first.part, JSON.stringify(first));
     const owner = { profileId: reader, transcriptSessionId: session.id, sessionKey: session.sessionKey }, ref = { profileId: reader, sessionKey: session.sessionKey,
       artifactId: first.part.artifactId, revision: 1, sourceEventId: first.part.sourceEventId };
     const rev = service.chatUiStore.revision(owner, ref.artifactId, 1); assert.equal(rev.provenance.borrowedMemoryDerived, true); assert.ok(rev.provenance.borrowedMemoryRefs.length);
@@ -74,6 +80,122 @@ test("borrowed UI publication, queued input, source withdrawal and Service resta
     const input = service.transcriptStore.listEvents(reader, session.id).find(value => value.runId === receipt.runId && value.kind === "user");
     assert.deepEqual(input.content.borrowedMemoryRefs, rev.provenance.borrowedMemoryRefs); assert.equal(input.content.borrowedMemoryDerived, true);
     assert.equal(input.content.origin, "ui_action_submission");
+
+    const ui = service.chatUiController, sharing = service.memoryEngine.sharing;
+    await ui.sourceFlight;
+    const readViews = sharing.withDependencyReadViews;
+    const { promise: scanEntered, resolve: enterScan } = Promise.withResolvers();
+    const { promise: scanHeld, resolve: releaseScan } = Promise.withResolvers();
+    releaseSourceScan = releaseScan;
+    let scans = 0, asyncDependencyReads = 0, synchronousScan = false;
+    const dependencyChecks = ui._dependencies;
+    ui._dependencies = function (owner, provenance) {
+      if (provenance.borrowedMemoryRefs?.length > 0 && service.memoryEngine.memoryViewFor(sourceId)) asyncDependencyReads++;
+      return dependencyChecks.call(this, owner, provenance);
+    };
+    const syncStoreRead = service.memoryEngine.store._snapshot;
+    service.memoryEngine.store._snapshot = function (...args) {
+      synchronousScan = true;
+      return syncStoreRead.apply(this, args);
+    };
+    sharing.withDependencyReadViews = async function (profileId, owners, ...args) {
+      assert.equal(profileId, reader);
+      assert.deepEqual(owners, [sourceId]);
+      if (++scans === 1) {
+        enterScan(); await scanHeld;
+        throw Object.assign(new Error("controlled worker outage"), { code: "MEMORY_SCAN_UNAVAILABLE" });
+      }
+      return readViews.call(this, profileId, owners, ...args);
+    };
+    try {
+      const probing = ui.reconcileSources();
+      assert.ok(probing instanceof Promise, "borrowed reconciliation waits on a worker asynchronously");
+      await scanEntered;
+      assert.equal(service.chatUiStore.revision(owner, ref.artifactId, 1).status, "ready");
+      releaseSourceScan(); await probing;
+      assert.equal(service.chatUiStore.revision(owner, ref.artifactId, 1).status, "ready", "worker outage is not a source withdrawal");
+      await ui.reconcileSources();
+      assert.ok(asyncDependencyReads > 0, "healthy artifact proof is checked in the owner view");
+      assert.equal(synchronousScan, false, "background reconciliation did not traverse a memory tree on the Service thread");
+
+      const prepare = () => service.chatUiStore.preparePublication({ owner, callId: crypto.randomUUID(),
+        fingerprint: crypto.randomBytes(32).toString("hex"), tool: "render_ui", declaration: declaration(),
+        html: `<html><h1>${FACT}</h1></html>`, creatorRunId: run.id, creatorAttemptId: rev.creatorAttemptId,
+        provenance: rev.provenance });
+      const interrupted = prepare();
+      const { promise: recoveryEntered, resolve: enterRecovery } = Promise.withResolvers();
+      const { promise: recoveryHeld, resolve: releaseRecovery } = Promise.withResolvers();
+      releaseSourceScan = releaseRecovery;
+      sharing.withDependencyReadViews = async function () {
+        enterRecovery(); await recoveryHeld;
+        throw Object.assign(new Error("controlled recovery worker outage"), { code: "MEMORY_SCAN_UNAVAILABLE" });
+      };
+      const recovering = ui.recover();
+      await recoveryEntered;
+      assert.equal(service.chatUiStore.revision(owner, interrupted.artifactId, 1).status, "preparing");
+      assert.equal(service.transcriptStore.getEvent(reader, session.id, interrupted.sourceEventId), null);
+      releaseRecovery(); await recovering;
+      assert.equal(service.chatUiStore.revision(owner, interrupted.artifactId, 1).status, "preparing",
+        "temporary worker outage preserves the durable prepare");
+      const live = prepare();
+      sharing.withDependencyReadViews = readViews;
+      await ui.reconcileSources();
+      assert.equal(service.chatUiStore.revision(owner, interrupted.artifactId, 1).status, "ready");
+      assert.equal(service.transcriptStore.getEvent(reader, session.id, interrupted.sourceEventId)?.kind, "artifact");
+      assert.equal(service.chatUiStore.revision(owner, live.artifactId, 1).status, "preparing",
+        "a normal live prepare is not published by a source sweep");
+      assert.equal(service.transcriptStore.getEvent(reader, session.id, live.sourceEventId), null);
+      assert.equal(synchronousScan, false, "startup recovery does not synchronously scan borrowed memory");
+      service.chatUiStore.revokeRevision(owner, live.artifactId, 1);
+    } finally {
+      sharing.withDependencyReadViews = readViews;
+      service.memoryEngine.store._snapshot = syncStoreRead;
+      ui._dependencies = dependencyChecks;
+    }
+
+    // A delayed denial from a retired Service monitor must not revoke an
+    // artifact in the new monitor generation.
+    const { promise: previousEntered, resolve: enterPrevious } = Promise.withResolvers();
+    const { promise: previousHeld, resolve: releasePrevious } = Promise.withResolvers();
+    releaseSourceScan = releasePrevious;
+    let oldSignal;
+    sharing.withDependencyReadViews = async function (...args) {
+      if (!oldSignal) {
+        oldSignal = args[2]; enterPrevious(); await previousHeld;
+        throw Object.assign(new Error("retired traversal result"), { code: "MEMORY_SHARED_SOURCE_REVOKED" });
+      }
+      return readViews.apply(this, args);
+    };
+    const retired = ui.reconcileSources();
+    await previousEntered;
+    ui.attachLifecycle();
+    assert.equal(oldSignal.aborted, true);
+    await ui.reconcileSources();
+    releaseSourceScan(); await retired;
+    assert.equal(service.chatUiStore.revision(owner, ref.artifactId, 1).status, "ready");
+    assert.ok(ui.leases.has(opened.leaseId));
+    sharing.withDependencyReadViews = readViews;
+
+    // Hold the next notification's async proof. A direct write still has to
+    // reject expired authority before its state transaction can be committed.
+    const { promise: staleScan, resolve: enterStaleScan } = Promise.withResolvers();
+    const { promise: staleHeld, resolve: releaseStaleScan } = Promise.withResolvers();
+    releaseSourceScan = releaseStaleScan;
+    sharing.withDependencyReadViews = async function (...args) {
+      enterStaleScan(); await staleHeld;
+      return readViews.apply(this, args);
+    };
+    const backgroundCheck = ui.reconcileSources();
+    await staleScan;
+    const ownerFile = path.join(service.memoryEngine.store.workspace(sourceId), hit.canonicalRelativePath);
+    const originalSource = fs.readFileSync(ownerFile, "utf8");
+    fs.writeFileSync(ownerFile, originalSource.replace("aquamarine", "amber"));
+    await assert.rejects(ui.handle("chat.ui.state.save", { profileId: reader, sessionKey: session.sessionKey,
+      leaseId: opened.leaseId, baseStateRevision: 0, patch: { selected: "C" } }), { code: "UI_SOURCE_EXPIRED" });
+    assert.notEqual(service.chatUiStore.revision(owner, ref.artifactId, 1).state.selected, "C");
+    fs.writeFileSync(ownerFile, originalSource);
+    releaseSourceScan(); await backgroundCheck;
+    sharing.withDependencyReadViews = readViews; releaseSourceScan = null;
     await service.memoryEngine.delete({ profileId: sourceId, id: item.id, reason: "forgotten", operationId: "borrowed-ui-source-delete" });
     await waitUntil(() => service.chatUiStore.revision(owner, ref.artifactId, 1).status === "revoked", 5000, "UI dependency revoked");
     await Promise.allSettled([...service.chatUiController.pendingLifecycle]);
@@ -89,5 +211,5 @@ test("borrowed UI publication, queued input, source withdrawal and Service resta
     const observed = f.service.chatUiController.handle("chat.ui.operation.get", { profileId: reader, sessionKey: session.sessionKey, actionRequestId: params.actionRequestId });
     assert.equal(observed.runId, receipt.runId); assert.equal(observed.status, "cancelled"); assert.equal(f.service.productStore.listWorkRuns().length, totalRuns);
     assert.throws(()=>f.service.chatUiController.assertOperationCurrent({ operationId: receipt.operationId, sessionKey: session.sessionKey, prompt: "forged reassembly" }), { code: "UI_SOURCE_EXPIRED" });
-  } finally { authority?.close(); await host?.stop(); await f.close(); }
+  } finally { releaseSourceScan?.(); authority?.close(); await host?.stop(); await f.close(); }
 });

@@ -254,6 +254,24 @@ test("browsing keeps page parameters ordinary while an actual user credential ec
   assert.equal(connected.url, "https://example.invalid/?xsec_token=[CONNECTED_CREDENTIAL_REDACTED]&source=feed");
   assert.equal(store.list(SCOPE).length, 1, "connector authentication must not be copied into the chat vault");
 }));
+test("Inbox acceptance can omit unchanged text receipts while retaining masking decisions and references", async () => fixture(async ({ store, paths }) => {
+  const options = { persistUnchanged: false };
+  const input = { scope: SCOPE, operationId: "ordinary-accepted-text", text: "What time is the meeting?" };
+  assert.equal((await store.prepare(input, options)).text, input.text);
+  assert.equal(store.hasPreparation(SCOPE, input.operationId), false);
+  assert.equal(fs.existsSync(path.join(paths.stateDir, "temporary-secrets/state-v1.json")), false);
+  const maskedInput = { ...input, operationId: "masked-accepted-text", text: 'password: "fixture-vault-value"' };
+  const masked = await store.prepare(maskedInput, options);
+  assert.equal(masked.references.length, 1);
+  assert.equal(store.hasPreparation(SCOPE, maskedInput.operationId), true);
+  assert.deepEqual(await store.prepare(maskedInput, options), masked);
+  const referenceInput = { ...input, operationId: "pasted-reference", text: masked.references[0].reference };
+  assert.equal((await store.prepare(referenceInput, options)).references.length, 1);
+  assert.equal(store.hasPreparation(SCOPE, referenceInput.operationId), true);
+  const manualInput = { ...input, operationId: "manual-decision", ordinary: [{ start: 0, end: 4 }] };
+  await store.prepare(manualInput, options);
+  assert.equal(store.hasPreparation(SCOPE, manualInput.operationId), true);
+}));
 test("temporary values are encrypted, stable within one session and absent from plaintext files", async () => fixture(async ({ store, paths }) => {
   const prepared = await store.prepare({ scope: SCOPE, operationId: "message-a", text: "密码是 123456" });
   assert(!prepared.text.includes("123456")); assert.equal(prepared.references.length, 1);

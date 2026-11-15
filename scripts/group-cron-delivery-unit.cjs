@@ -35,7 +35,8 @@ test("group Cron uses shared silence and duplicate rules and delivers only to it
   const paths = resolveServicePaths({ homeDir: root, trustedRoot: root, stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
   const host = new InspirationRuntime();
-  let now = Date.now();
+  // Advancing the Cron clock must not also trigger the unrelated nightly sweep.
+  let now = new Date(2026, 10, 14, 12).getTime();
   const safeStorage = { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value),
     decryptString: value => value.toString() };
   const service = createAgentService({
@@ -213,6 +214,7 @@ test("group Cron uses shared silence and duplicate rules and delivers only to it
   await backend.stop();
   await service.stop({ notify: false });
   await service.start();
+  await service.cronReportIndex.rebuild();
   const repeat = await startCron();
   assert.equal(savedPromptFor(repeat), args.prompt);
   await completeCron(repeat, REPORT);

@@ -5,7 +5,8 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { serviceError } = require("./security");
 const { canonicalWorkspace } = require("./work-run");
-const { CodexDesktopSessionStore, desktopSessionKey, isDesktopBinding } = require("./codex-desktop-session-store");
+const { CodexDesktopSessionStore, desktopSessionKey, isDesktopBinding, UUID } = require("./codex-desktop-session-store");
+const { CodexDesktopDiscovery } = require("./codex-desktop-discovery-worker");
 const { createCodexChatHistoryMapper, fragmentCodexChatHistoryMessage } = require("./codex-chat-history");
 const { transcriptHistoryItem } = require("./chat-service-controller");
 const { adaptCodexChatHistoryPage } = require("./chat-history-adapter");
@@ -31,9 +32,12 @@ class CodexDesktopSessionController {
   constructor({ automations, productStore, sessions, transcripts, contextSnapshots, checkpoints, ownership, adapter, schemaContract, cursorSecret = crypto.randomBytes(32), databaseFactory, now = Date.now, writerObserver = new CodexDesktopWriterObserver({ now }) }) {
     Object.assign(this, { automations, productStore, sessions, transcripts, contextSnapshots, checkpoints, ownership, adapter, schemaContract, cursorSecret, databaseFactory, now });
     this.writerObserver = writerObserver;
+    this.discovery = new CodexDesktopDiscovery();
     this.stores = new Map();
     this.historySnapshots = new Map();
   }
+  openDiscovery() { this.discovery.open(); }
+  closeDiscovery() { this.historySnapshots.clear(); return this.discovery.close(); }
   owner(profileId = null, homeIdentity = null) {
     let owner;
     try { owner = this.automations.owner(profileId); } catch { fail("CODEX_DESKTOP_OWNER_UNAVAILABLE"); }
@@ -58,8 +62,8 @@ class CodexDesktopSessionController {
     createdAt: row.createdAt, updatedAt: row.updatedAt, source: "codex-desktop",
     ...(writer ? { codexDesktopWriter: writer } : {}) }, threadId: row.id, homeIdentity: owner.store.homeIdentity };
   }
-  cursor(owner, row) {
-    const body = Buffer.from(JSON.stringify([owner.store.homeIdentity, owner.profile.id, row.updatedAt, row.id])).toString("base64url");
+  cursor(owner, row, snapshotId) {
+    const body = Buffer.from(JSON.stringify([owner.store.homeIdentity, owner.profile.id, row.updatedAt, row.id, snapshotId])).toString("base64url");
     return `${body}.${crypto.createHmac("sha256", this.cursorSecret).update(body).digest("base64url")}`;
   }
   after(cursor, owner) {
@@ -67,23 +71,29 @@ class CodexDesktopSessionController {
     try {
       const [body, mac, extra] = cursor.split(".");
       if (extra || !mac || crypto.createHmac("sha256", this.cursorSecret).update(body).digest("base64url") !== mac) throw new Error();
-      const [home, profileId, updatedAt, id] = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-      if (home !== owner.store.homeIdentity || profileId !== owner.profile.id || !Number.isSafeInteger(updatedAt) || updatedAt < 0 || !require("./codex-desktop-session-store").UUID.test(id)) throw new Error();
-      return { updatedAt, id };
+      const [home, profileId, updatedAt, id, snapshotId] = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+      if (home !== owner.store.homeIdentity || profileId !== owner.profile.id || !Number.isSafeInteger(updatedAt)
+        || updatedAt < 0 || !UUID.test(id) || !UUID.test(snapshotId)) throw new Error();
+      return { updatedAt, id, snapshotId };
     } catch { fail("CODEX_DESKTOP_PARAMS_INVALID"); }
   }
   async list(params) {
     try {
       const owner = this.owner();
       if (params.backendId !== owner.profile.backendId) return { sessions: [], available: true, reason: null, nextCursor: null, hasMore: false };
-      const rows = owner.store.readRows({ after: this.after(params.cursor, owner), limit: params.limit + 1 });
+      const { rows, snapshotId } = await this.discovery.read({
+        home: owner.store.home, after: this.after(params.cursor, owner), limit: params.limit + 1,
+      });
       const writers = await this.writerObserver.observe(owner.store.home, rows.slice(0, params.limit).map(row => row.id));
-      const known = this.sessions.listSessions().filter(session => !isDesktopBinding(this.sessions.getBinding(session.sessionKey)));
+      const current = this.owner(owner.profile.id, owner.store.homeIdentity);
+      if (this.discovery.closed || current.bindingId !== owner.bindingId) fail("CODEX_DESKTOP_OWNER_UNAVAILABLE");
+      const known = new Set(this.sessions.listSessions().filter(session => !isDesktopBinding(this.sessions.getBinding(session.sessionKey)))
+        .map(session => session.runtimeSessionId));
       const output = [];
       let last = null, index = 0;
       for (; index < Math.min(rows.length, params.limit); index++) {
         const row = rows[index];
-        if (!known.some(session => session.runtimeSessionId === row.id)) {
+        if (!known.has(row.id)) {
           const entry = this.project(row, owner, writers.get(row.id));
           if (Buffer.byteLength(JSON.stringify([...output, entry])) > 48 * 1024) break;
           output.push(entry);
@@ -91,7 +101,9 @@ class CodexDesktopSessionController {
         last = row;
       }
       const hasMore = index < rows.length;
-      return { sessions: output, available: true, reason: null, nextCursor: hasMore && last ? this.cursor(owner, last) : null, hasMore: hasMore && !!last };
+      if (!hasMore || !last) this.discovery.release(snapshotId);
+      return { sessions: output, available: true, reason: null,
+        nextCursor: hasMore && last ? this.cursor(owner, last, snapshotId) : null, hasMore: hasMore && !!last };
     } catch (error) {
       if (error.code === "CODEX_DESKTOP_PARAMS_INVALID") throw error;
       return { sessions: [], available: false, reason: Object.hasOwn(MESSAGES, error?.code) ? error.code : "CODEX_DESKTOP_UNAVAILABLE", nextCursor: null, hasMore: false };
@@ -101,10 +113,13 @@ class CodexDesktopSessionController {
     const owner = this.owner(params.profileId, params.homeIdentity), row = owner.store.get(params.threadId);
     return { ...owner, row, sessionKey: desktopSessionKey(owner.store.homeIdentity, owner.profile.id, row.id) };
   }
-  async readNative(target) {
+  async readNative(target, signal) {
+    signal?.throwIfAborted();
     const handle = await this.adapter.acquire(target.binding);
+    signal?.throwIfAborted();
     const host = handle.host || handle;
-    const response = await host.threadRead({ threadId: target.row.id, includeTurns: false });
+    const response = await host.threadRead({ threadId: target.row.id, includeTurns: false }, signal ? { signal } : undefined);
+    signal?.throwIfAborted();
     if (response?.thread?.id !== target.row.id || response.thread.threadSource?.startsWith("shoggoth:")) fail("CODEX_DESKTOP_NOT_FOUND");
     if (typeof response.thread.cwd !== "string" || path.resolve(response.thread.cwd) !== path.resolve(target.row.cwd)) fail("CODEX_DESKTOP_UNAVAILABLE");
     const current = this.owner(target.profile.id, target.store.homeIdentity);
@@ -305,13 +320,15 @@ class CodexDesktopSessionController {
     if (this.owner(target.profile.id, target.store.homeIdentity).bindingId !== target.bindingId) fail("CODEX_DESKTOP_OWNER_UNAVAILABLE");
     return result;
   }
-  async assertSendable(sessionKey, ownedActiveTurnIds = []) {
+  async assertSendable(sessionKey, ownedActiveTurnIds = [], signal) {
+    signal?.throwIfAborted();
     const session = this.sessions.getSession(sessionKey);
     if (!session || !isDesktopBinding(this.sessions.getBinding(sessionKey))) return;
     const owner = this.owner(session.profileId), target = this.target({ profileId: session.profileId,
       threadId: session.runtimeSessionId, homeIdentity: owner.store.homeIdentity });
-    const native = await this.readNative(target);
-    const turns = await readCodexHistoryTurns(native.host, target.row.id);
+    const native = await this.readNative(target, signal);
+    const turns = await readCodexHistoryTurns(native.host, target.row.id, signal ? { signal } : undefined);
+    signal?.throwIfAborted();
     const active = [...turns.values()].filter(turn => turn.status === "inProgress");
     const owned = new Set(ownedActiveTurnIds);
     // Ordinary send passes no exceptions. UI operations may share the current

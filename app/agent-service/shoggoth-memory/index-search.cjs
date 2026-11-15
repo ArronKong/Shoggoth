@@ -166,16 +166,24 @@ class MemoryIndexSearch extends core.MemorySearchOrchestration {
   }
   async markSessionStartupCatchupDirtyFiles(inspectSources = false) {
     const files = await super.markSessionStartupCatchupDirtyFiles(inspectSources);
+    if (this.closing || this.closed) return files;
+    this.assertCurrent();
     if (this.index.host.sessions.requiresStartupContentRecheck && !this.startupContentRechecked) {
       // Product's durable journal sequence is not a mutation wall clock.
       // Admit each source once at startup; native content hashes suppress
       // unchanged publication and detect same-sequence backup/policy restores.
       const entries = await this.listSessionCorpusEntries();
+      if (this.closing || this.closed) return files;
+      this.assertCurrent();
       for (const entry of entries) this.sessionsDirtyFiles.add(entry.sessionFile);
       this.sessionsDirty ||= this.sessionsDirtyFiles.size > 0;
       this.startupContentRechecked = true;
     }
     return files;
+  }
+  assertMemoryStartupCaptureCurrent() {
+    if (this.closing) throw Object.assign(new Error("Memory search owner is retiring"), { code: "MEMORY_SCOPE_REVOKED" });
+    this.assertCurrent();
   }
   async sync(params) {
     if (this.closing || this.closed) return;

@@ -64,7 +64,7 @@ export const FALLBACK_BACKEND_DESCRIPTORS: readonly BackendDescriptor[] = ([
     connectionMode: "builtin-service",
     disconnectable: true,
     agentLifecycle: agentLifecycle("builtin-service"),
-    surfaces: { ...allSurfaces("builtin-service", { kind: "native" }, { kind: "native" }), nativeCapacity: true, runtimeBindings: true, runtimeStatus: true, sessionRuntimeSwitch: true, runtimeUsage: true },
+    surfaces: { ...allSurfaces("builtin-service", { kind: "native" }, { kind: "native" }), durableChatStop: true, nativeCapacity: true, runtimeBindings: true, runtimeStatus: true, sessionRuntimeSwitch: true, runtimeUsage: true },
   },
 ] as const).filter(isAvailableBackend);
 

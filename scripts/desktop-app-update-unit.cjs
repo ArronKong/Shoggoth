@@ -7,6 +7,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { createConfigStore } = require("../app/core/config-store");
 const { createDesktopAppInstallPreparation } = require("../app/desktop-app-install-preparation");
+const { INSTALL_SPACE_RESERVE_BYTES, checkDesktopAppInstallSpace, installFailureReason,
+  recordAppUpdateFailure } = require("../app/desktop-app-update-install-check");
 const {
   CHANNELS,
   CHECK_INTERVAL_MS,
@@ -32,6 +34,8 @@ class FakeUpdater extends EventEmitter {
 
 function fixture({ packaged = true, marker = "official", config = true,
   automaticUpdates = true, saveAutomaticUpdates, quit,
+  nativeUpdater = null, updaterInstance,
+  checkInstallSpace = async () => null,
   prepareInstall = async () => null, restoreAfterInstallFailure = async () => {} } = {}) {
   const handlers = new Map();
   const ipcMain = {
@@ -41,11 +45,12 @@ function fixture({ packaged = true, marker = "official", config = true,
   const sends = [];
   const webContents = { mainFrame: {}, send: (...args) => sends.push(args), isDestroyed: () => false };
   const window = { webContents, isDestroyed: () => false };
-  const updater = new FakeUpdater();
+  const updater = updaterInstance || new FakeUpdater();
   const timeouts = [];
   const intervals = [];
   const deferred = [];
   const notifications = [];
+  const failures = [];
   const markerValue = marker === "official"
     ? { schemaVersion: 1, distribution: "official", signingMode: "developer-id", updateChannel: "stable" }
     : { schemaVersion: 1, distribution: "internal", signingMode: "adhoc", updateChannel: null };
@@ -61,6 +66,7 @@ function fixture({ packaged = true, marker = "official", config = true,
       return JSON.stringify(markerValue);
     },
     loadUpdater: () => updater,
+    loadNativeUpdater: () => nativeUpdater,
     setTimeoutFn: (callback, ms) => { const timer = { callback, ms, unref() {} }; timeouts.push(timer); return timer; },
     clearTimeoutFn: (timer) => { timer.cleared = true; },
     setIntervalFn: (callback, ms) => { const timer = { callback, ms, unref() {} }; intervals.push(timer); return timer; },
@@ -71,12 +77,195 @@ function fixture({ packaged = true, marker = "official", config = true,
     saveAutomaticUpdates,
     prepareInstall,
     restoreAfterInstallFailure,
+    checkInstallSpace,
+    recordFailure: (record) => failures.push(record),
   });
   const event = { sender: webContents, senderFrame: webContents.mainFrame };
-  return { controller, handlers, sends, updater, timeouts, intervals, deferred, notifications, event, webContents };
+  return { controller, handlers, sends, updater, timeouts, intervals, deferred, notifications, failures, event, webContents };
 }
 
 async function main() {
+  {
+    // Exercise the installed electron-updater implementation, with only the
+    // Electron native boundary replaced. No real update or application is used.
+    const { MacUpdater } = require("electron-updater/out/MacUpdater");
+    const native = new EventEmitter();
+    let checks = 0;
+    let quits = 0;
+    native.checkForUpdates = () => { checks += 1; };
+    native.quitAndInstall = () => { quits += 1; };
+    const updater = Object.create(MacUpdater.prototype);
+    Object.assign(updater, { nativeUpdater: native, squirrelDownloadedUpdate: false });
+    native.on("error", error => updater.emit("error", error));
+    native.on("update-downloaded", () => { updater.squirrelDownloadedUpdate = true; });
+    const item = fixture({ nativeUpdater: native, updaterInstance: updater });
+    updater.emit("update-downloaded", { version: "0.8.126", downloadedFile: "/cache/update.zip" });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      assert.equal(await item.handlers.get(CHANNELS.install)(item.event), true);
+      item.deferred.shift()();
+      native.emit("error", new Error("ditto: No space left on device"));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(item.controller.getState().installBlockReason, "disk-space");
+      assert.equal(native.listenerCount("update-downloaded"), 2, "failed retries cannot add native quit callbacks");
+    }
+    assert.equal(checks, 3);
+    assert.equal(quits, 0);
+    // A late native completion after failure must not install while restored
+    // background work is running. A fresh explicit request may use that stage.
+    native.emit("update-downloaded");
+    assert.equal(quits, 0);
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), true);
+    item.deferred.shift()();
+    assert.equal(quits, 1, "successful retry quits exactly once with the real MacUpdater");
+    assert.equal(checks, 3, "a completed native stage does not need another download");
+    item.controller.dispose();
+    assert.equal(native.listenerCount("update-downloaded"), 1, "dispose preserves only the library's own listener");
+    native.emit("update-downloaded");
+    assert.equal(quits, 1, "no install action survives disposal");
+  }
+
+  {
+    const native = new EventEmitter();
+    native.checkForUpdates = () => { throw new Error("native check failed to start"); };
+    const item = fixture({ nativeUpdater: native });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    await item.handlers.get(CHANNELS.install)(item.event);
+    item.deferred.shift()();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(item.controller.getState().installBlockReason, "install-failed");
+    native.emit("update-downloaded");
+    assert.equal(item.updater.installs, 0, "synchronous staging failure cancels the install intent");
+    item.controller.dispose();
+  }
+
+  {
+    const archiveBytes = 667686989;
+    const unpackedBytes = 1404115136;
+    const requiredBytes = archiveBytes + unpackedBytes + INSTALL_SPACE_RESERVE_BYTES;
+    let availableBytes = Math.floor(1.4 * 1024 ** 3);
+    let applicationAvailableBytes = 10 * 1024 ** 3;
+    let output = `1677 files, ${unpackedBytes} bytes uncompressed, 667163535 bytes compressed: 52.5%\n`;
+    const input = {
+      downloadedFile: "/cache/update.zip", applicationPath: "/Applications/Shoggoth.app", stagingPath: "/cache",
+      fileSystem: {
+        stat: async () => ({ isFile: () => true, size: archiveBytes }),
+        statfs: async (target) => ({ bsize: 1, bavail: target === "/cache" ? availableBytes : applicationAvailableBytes }),
+      },
+      run: async (file, args, options) => {
+        assert.equal(file, "/usr/bin/zipinfo");
+        assert.deepEqual(args, ["-t", "/cache/update.zip"]);
+        assert.equal(options.env.LC_ALL, "C");
+        assert.equal(options.timeout, 10_000);
+        return { stdout: output };
+      },
+    };
+    assert.deepEqual(await checkDesktopAppInstallSpace(input), { blockReason: "disk-space", availableBytes, requiredBytes },
+      "a completed download still needs space for Squirrel's ZIP copy and extracted app");
+    availableBytes = requiredBytes;
+    assert.equal((await checkDesktopAppInstallSpace(input)).blockReason, null, "exactly enough space passes");
+    applicationAvailableBytes = unpackedBytes;
+    assert.deepEqual(await checkDesktopAppInstallSpace(input), {
+      blockReason: "disk-space", availableBytes: unpackedBytes, requiredBytes: unpackedBytes + INSTALL_SPACE_RESERVE_BYTES,
+    }, "also check the application volume when it differs from the download volume");
+    applicationAvailableBytes = 10 * 1024 ** 3;
+    await assert.rejects(checkDesktopAppInstallSpace({ ...input, downloadedFile: null }), /PACKAGE_UNAVAILABLE/u);
+    output = "invalid archive";
+    await assert.rejects(checkDesktopAppInstallSpace(input), /PACKAGE_SIZE_UNKNOWN/u);
+    output = "1 file, 9007199254740992 bytes uncompressed, 1 bytes compressed:";
+    await assert.rejects(checkDesktopAppInstallSpace(input), /PACKAGE_SIZE_UNKNOWN/u);
+    output = "1 file, 100 bytes uncompressed, 50 bytes compressed:";
+    availableBytes = NaN;
+    await assert.rejects(checkDesktopAppInstallSpace(input), /SPACE_UNKNOWN/u);
+  }
+
+  {
+    for (const error of [Object.assign(new Error("private"), { code: "ENOSPC" }),
+      new Error("ditto: /private/path: No space left on device"),
+      new Error("The volume is full", { cause: { code: "EDQUOT" } })]) {
+      assert.equal(installFailureReason(error), "disk-space");
+    }
+    assert.equal(installFailureReason(new Error("Code signature at URL /private/path did not pass validation")), "signature-invalid");
+    assert.equal(installFailureReason(new Error("Cannot update on a read-only volume")), "install-permission");
+    assert.equal(installFailureReason({ domain: "NSCocoaErrorDomain", code: 640, message: "localized" }), "disk-space");
+    assert.equal(installFailureReason({ domain: "NSPOSIXErrorDomain", code: 28 }), "disk-space");
+    assert.equal(installFailureReason({ domain: "SQRLCodeSignatureErrorDomain", code: -1 }), "signature-invalid");
+    assert.equal(installFailureReason({ domain: "SQRLUpdaterErrorDomain", code: 8 }), "install-permission");
+    assert.equal(installFailureReason(new Error("unknown")), "install-failed");
+    const cycle = new Error("unknown"); cycle.cause = cycle;
+    assert.equal(installFailureReason(cycle), "install-failed");
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-update-diagnostics-"));
+    try {
+      const app = { getPath: () => dir, getVersion: () => "0.8.319" };
+      assert.equal(recordAppUpdateFailure(app, { phase: "preflight", reason: "disk-space", availableVersion: "0.8.320",
+        storage: { availableBytes: 100, requiredBytes: 200, privatePath: "/private/path" },
+        error: Object.assign(new Error("https://example.invalid?secret=hidden"), { code: 640, domain: "NSCocoaErrorDomain" }) }), true);
+      const file = path.join(dir, "run", "app-update-diagnostics.json");
+      const record = JSON.parse(fs.readFileSync(file, "utf8"));
+      assert.equal(record.reason, "disk-space");
+      assert.deepEqual(record.error, { domain: "NSCocoaErrorDomain", code: 640 });
+      assert.deepEqual(record.storage, { availableBytes: 100, requiredBytes: 200 });
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+      assert.doesNotMatch(JSON.stringify(record), /private|secret|hidden/u);
+      assert.equal(recordAppUpdateFailure(app, { phase: "install", reason: "install-failed", availableVersion: "/private/path" }), true);
+      const replaced = JSON.parse(fs.readFileSync(file, "utf8"));
+      assert.equal(replaced.availableVersion, null);
+      assert.equal(replaced.reason, "install-failed");
+      assert.equal(recordAppUpdateFailure(app, { phase: "install", reason: "/private/path" }), false);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+    assert.equal(recordAppUpdateFailure({ getPath: () => { throw new Error("disk full"); }, getVersion: () => "0.8.319" },
+      { phase: "install", reason: "disk-space" }), false, "diagnostic failure cannot replace the install failure");
+  }
+
+  {
+    let blockReason = "disk-space";
+    let stops = 0;
+    const item = fixture({ checkInstallSpace: async (file) => {
+      assert.equal(file, "/cache/update.zip");
+      return { blockReason, availableBytes: 100, requiredBytes: 200 };
+    }, prepareInstall: async () => { stops += 1; return null; } });
+    item.updater.emit("update-downloaded", { version: "0.8.126", downloadedFile: "/cache/update.zip" });
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
+    assert.equal(stops, 0, "insufficient space must not stop background tasks");
+    assert.equal(item.deferred.length, 0);
+    assert.equal(item.controller.getState().installBlockReason, "disk-space");
+    assert.equal(item.controller.getState().canInstall, true, "freeing space permits retry without downloading again");
+    assert.equal(item.failures[0].phase, "preflight");
+    blockReason = null;
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), true);
+    assert.equal(stops, 1);
+    item.deferred.shift()();
+    assert.equal(item.updater.installs, 1);
+    item.updater.emit("error", new Error("ditto: No space left on device"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(item.controller.getState().installBlockReason, "disk-space", "space exhausted after preflight must stay actionable");
+    assert.equal(item.failures.at(-1).reason, "disk-space");
+    item.controller.dispose();
+  }
+
+  {
+    const item = fixture({ checkInstallSpace: async () => { throw new Error("cannot read package"); },
+      prepareInstall: async () => assert.fail("an unreadable update must not stop the service") });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
+    assert.equal(item.controller.getState().installBlockReason, "install-check-failed");
+    item.controller.dispose();
+  }
+
+  {
+    let finishCheck;
+    const checked = new Promise(resolve => { finishCheck = resolve; });
+    const item = fixture({ checkInstallSpace: () => checked,
+      prepareInstall: async () => assert.fail("closing during preflight must not stop the service"),
+      restoreAfterInstallFailure: async () => assert.fail("preflight never stopped the service") });
+    item.updater.emit("update-downloaded", { version: "0.8.126" });
+    const pending = item.handlers.get(CHANNELS.install)(item.event);
+    assert.equal(await item.handlers.get(CHANNELS.install)(item.event), false);
+    item.controller.dispose();
+    finishCheck(null);
+    assert.equal(await pending, false);
+  }
+
   assert.deepEqual(supportStatus({
     platform: "linux", isPackaged: true, resourcesPath: "/app",
   }), { supported: false, reason: "platform" });
@@ -464,6 +653,7 @@ async function main() {
       restoreAfterInstallFailure: async () => { restores += 1; } });
     item.updater.emit("update-downloaded", { version: "0.8.126" });
     const install = item.handlers.get(CHANNELS.install)(item.event);
+    await Promise.resolve(); // complete preflight and enter background preparation
     item.controller.dispose();
     finishPreparation(null);
     assert.equal(await install, false);

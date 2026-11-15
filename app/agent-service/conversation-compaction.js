@@ -25,8 +25,15 @@ function planConversationCompaction({ profileId, sessionId, transcriptStore, che
   const events = readEvents(transcriptStore, profileId, sessionId);
   const memory = checkpointStore.memoryState?.(profileId) ?? { revision: null, freshUntil: null };
   const previous = checkpointStore.compatible(profileId, sessionId, events);
-  const pending = events.filter(event => event.seq > (previous?.coveredThroughSeq ?? 0)
-    && !(event.kind === "user" && currentOperationId && event.content?.operationId === currentOperationId));
+  const currentUser = currentOperationId && events.find(event => event.kind === "user"
+    && event.content?.operationId === currentOperationId);
+  // An acknowledged user event is on disk before its turn runs. A checkpoint
+  // covers a contiguous physical prefix, even when earlier Runs write their
+  // final replies after that event. Leave such replies to the replay view.
+  const boundary = currentUser ? currentUser.seq - 1 : Infinity;
+  if (previous && (previous.partial?.seq ?? previous.coveredThroughSeq) > boundary) return null;
+  const pending = events.filter(event => event.seq > (previous?.coveredThroughSeq ?? 0) && event.seq <= boundary);
+  if (Number.isSafeInteger(targetThroughSeq)) targetThroughSeq = Math.min(targetThroughSeq, boundary);
   const projected = new Map();
   const project = event => {
     if (!projected.has(event.seq)) projected.set(event.seq, checkpointStore.projectCompactionEvent?.(profileId, sessionId, event)

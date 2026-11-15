@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const { atomicWritePrivateFile, readPrivateFile } = require("../private-file");
 const { serviceError } = require("../security");
 const { transaction } = require("../inspiration-database");
@@ -15,6 +16,23 @@ const { databaseChangeStamp } = require("../turn-memo");
 const ENTRY = /<!-- shoggoth-memory-entry:([A-Za-z0-9][A-Za-z0-9._:-]{0,255}) -->\n((?:(?!<!-- shoggoth-memory-entry:)[\s\S])*?)\n<!-- \/shoggoth-memory-entry -->/g;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const MAX_DOCUMENT_BYTES = 1024 * 1024;
+const MAX_SCAN_ENTRIES = 20_000;
+const MAX_SCAN_BYTES = 32 * 1024 * 1024;
+const MAX_SCAN_ROWS = 20_000;
+const MAX_SCAN_PROFILES = 2;
+const MAX_SCAN_WAITERS = 64;
+const SCAN_DEADLINE_MS = 5_000;
+const MAX_CACHED_PROFILES = 16;
+function memoryPathIdentity(target) {
+  try {
+    const value = fs.lstatSync(target, { bigint: true });
+    return `${value.dev}:${value.ino}:${value.mode}:${value.size}:${value.mtimeNs}:${value.ctimeNs}`;
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return "-";
+    throw error;
+  }
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_file_profiles (profile_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,fingerprint TEXT NOT NULL) STRICT;
 CREATE TABLE IF NOT EXISTS memory_file_records (profile_id TEXT NOT NULL,id TEXT NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)),PRIMARY KEY(profile_id,id)) STRICT;
@@ -98,6 +116,22 @@ function sourcesOnlyAppended(previous, files) {
   });
 }
 
+function projectInvalidation(tracked, files, fingerprint, revision) {
+  const unchanged = tracked?.fingerprint === fingerprint && tracked.revision <= revision;
+  if (unchanged && !files.some(file => DREAMS_PATH.test(file.path))) return null;
+  let previous = null;
+  try { previous = tracked ? JSON.parse(tracked.files) : null; } catch { previous = null; }
+  // Older snapshots lacked section digests. Backfill only a byte-verified baseline.
+  if (unchanged && Array.isArray(previous)
+    && !previous.some(entry => DREAMS_PATH.test(entry?.path) && !Object.hasOwn(entry, "dreams"))) return null;
+  const sources = files.map(file => {
+    const text = file.content.trimEnd();
+    return { path: file.path, text, dreams: DREAMS_PATH.test(file.path) ? dreamSource(text) : null };
+  });
+  const appended = tracked && tracked.revision <= revision && sourcesOnlyAppended(previous, sources);
+  return { revision: appended ? tracked.revision : revision, files: JSON.stringify(sourceDigests(sources)) };
+}
+
 function projectionChunks(relative, content, sourceContent) {
   const options = { tokens: 400, overlap: 80, perEntry: /^(MEMORY|USER|DREAMS|dreams)\.md$/u.test(relative) };
   if (!/^memory\/\d{4}-\d{2}-\d{2}\.md$/u.test(relative)
@@ -140,25 +174,87 @@ function unmarkEntries(text, id) {
   return text;
 }
 
+function snapshotRows(snapshot) {
+  if (snapshot.rows) return snapshot.rows;
+  const byId = new Map(), byPath = new Map(), historical = [];
+  for (const item of snapshot.items) {
+    if (!byId.has(item.id)) byId.set(item.id, item);
+    const rows = byPath.get(item.memoryPath);
+    if (rows) rows.push(item);
+    else byPath.set(item.memoryPath, [item]);
+  }
+  for (const item of snapshot.metadata.values()) {
+    if (byId.has(item.id)) continue;
+    const row = { ...item, status: item.status === "active" ? "deleted" : item.status };
+    historical.push(row);
+    byId.set(item.id, row);
+  }
+  snapshot.rows = { byId, byPath, historical };
+  return snapshot.rows;
+}
+
+function matchesFilter(item, filter) {
+  return (!filter.status || item.status === filter.status) && (!filter.scope || item.scope === filter.scope)
+    && (!filter.type || item.type === filter.type);
+}
+
 // Metadata carries provenance, revocation and compatibility IDs. Every active
 // fact's content is read from the Markdown source, never from the metadata row.
 class FileMemoryStore {
   constructor({ paths, database, migration, initialization = null, getHost, now = Date.now, onChanged = () => {} }) {
     this.paths = paths; this.database = database; this.migration = migration; this.initialization = initialization; this.getHost = getHost; this.now = now;
     this.opened = false; this.ready = new Set(); this.snapshots = new Map();
+    this.scans = new Map();
+    this.scanWorkers = new Set();
+    this.scanQueue = new Set();
+    this.scanClosing = null;
+    this.retiringScanProfiles = new Map();
+    this.fileOwnerStatements = new WeakMap();
     this.onChanged = onChanged;
   }
   open() { if (this.opened) return; this.database.open(); this.database.db.exec(SCHEMA); this.opened = true; }
-  close() { this.opened = false; this.ready.clear(); this.snapshots.clear(); }
+  close() {
+    this.opened = false; this.ready.clear(); this.snapshots.clear();
+    void this.stopScans();
+  }
+  stopScans(profileId = null) {
+    if (this.scanClosing) return this.scanClosing;
+    if (profileId !== null && this.retiringScanProfiles.has(profileId)) return this.retiringScanProfiles.get(profileId);
+    const stopping = this._stopScans(profileId).finally(() => {
+      if (profileId === null) this.scanClosing = null;
+      else this.retiringScanProfiles.delete(profileId);
+    });
+    if (profileId === null) this.scanClosing = stopping;
+    else this.retiringScanProfiles.set(profileId, stopping);
+    return stopping;
+  }
+
+  async _stopScans(profileId) {
+    for (const waiter of this.scanQueue) {
+      if (profileId === null || waiter.profileId === profileId) {
+        waiter.fail(serviceError("MEMORY_SCOPE_REVOKED", "记忆文件扫描已停止"));
+      }
+    }
+    const scans = [...this.scans].filter(([id]) => profileId === null || id === profileId).map(([, scan]) => scan);
+    for (const scan of scans) scan.retired = true;
+    const workers = profileId === null ? [...this.scanWorkers] : scans.map(scan => scan.slot);
+    await Promise.allSettled(workers.map(slot => this._retireScanWorker(slot)));
+    await Promise.allSettled(scans.map(scan => scan.promise));
+  }
   assertOpen() { if (!this.opened) throw serviceError("MEMORY_STORE_CLOSED", "记忆存储未打开"); }
   workspace(profileId) { if (!ID.test(profileId)) throw new Error("Invalid memory Profile"); return (this.initialization || this.migration).locations(profileId).workspace; }
 
   ensureProfile(profileId) {
+    this.prepareProfile(profileId);
+    return this.getRevision(profileId);
+  }
+
+  prepareProfile(profileId) {
     this.assertOpen();
     if (!this.ready.has(profileId)) {
       if (this.initialization) {
         this.initialization.run(profileId); this.recover(profileId); this.ready.add(profileId);
-        return this.getRevision(profileId);
+        return;
       }
       const receipt = this.migration.run(profileId);
       const db = this.database.db;
@@ -180,7 +276,6 @@ class FileMemoryStore {
       this.recover(profileId);
       this.ready.add(profileId);
     }
-    return this.getRevision(profileId);
   }
 
   _check(profileId) {
@@ -191,17 +286,18 @@ class FileMemoryStore {
       throw serviceError("MEMORY_TRANSACTION_UNSETTLED", "记忆写入等待恢复");
     }
   }
-  _read(profileId, relative) {
+  _read(profileId, relative, maxBytes = 256 * 1024 * 1024) {
     if (relative !== "USER.md" && !core.isMemoryPath(relative)) throw serviceError("MEMORY_PATH_NOT_ALLOWED", "不是记忆文件");
     const root = this.workspace(profileId), target = path.resolve(root, relative);
     if (!target.startsWith(root + path.sep) || fs.realpathSync.native(root) !== root) throw new Error("Memory workspace alias is unsafe");
     try {
       if (fs.realpathSync.native(target) !== target) throw new Error("Memory source symlink is unsafe");
-      return readPrivateFile(target, { maxBytes: 256 * 1024 * 1024 }).toString("utf8");
+      return readPrivateFile(target, { maxBytes }).toString("utf8");
     } catch (error) { if (error.code === "ENOENT") return ""; throw error; }
   }
-  _files(profileId) {
+  _files(profileId, bounded = false) {
     const files = ["USER.md", "MEMORY.md"], root = this.workspace(profileId);
+    let visited = 0, bytes = 0;
     for (const name of ["DREAMS.md", "dreams.md"]) {
       const target = path.join(root, name);
       try {
@@ -217,6 +313,7 @@ class FileMemoryStore {
       try { children = fs.readdirSync(path.join(root, relative), { withFileTypes: true }); }
       catch (error) { if (error.code === "ENOENT") return; throw error; }
       for (const child of children) {
+        if (bounded && ++visited > MAX_SCAN_ENTRIES) throw serviceError("MEMORY_SCAN_TOO_LARGE", "记忆文件数超过前台扫描上限");
         if (child.isSymbolicLink()) throw new Error("Memory source symlink is unsafe");
         const name = path.posix.join(relative, child.name);
         if (child.isDirectory() && !child.name.startsWith(".")) walk(name);
@@ -224,7 +321,19 @@ class FileMemoryStore {
       }
     };
     walk("memory");
-    return files.sort().map(relative => ({ path: relative, content: this._read(profileId, relative) }));
+    return files.sort().map(relative => {
+      if (!bounded) return { path: relative, content: this._read(profileId, relative) };
+      let content;
+      try {
+        content = this._read(profileId, relative, MAX_SCAN_BYTES - bytes);
+      } catch (error) {
+        if (error.code === "PRIVATE_FILE_TOO_LARGE") throw serviceError("MEMORY_SCAN_TOO_LARGE", "记忆文件超过前台扫描容量");
+        throw error;
+      }
+      bytes += Buffer.byteLength(content);
+      if (bytes > MAX_SCAN_BYTES) throw serviceError("MEMORY_SCAN_TOO_LARGE", "记忆文件超过前台扫描容量");
+      return { path: relative, content };
+    });
   }
   _metadata(profileId) {
     return new Map(this.database.db.prepare("SELECT id,data FROM memory_file_records WHERE profile_id=?").all(profileId)
@@ -233,45 +342,80 @@ class FileMemoryStore {
   // Every recall check reads the revision. Reuse the projection while every
   // source file and directory entry has the same identity, size and times and
   // the database is unchanged; any writer, in this process or not, changes one.
-  _sourceStamp(profileId) {
-    const root = this.workspace(profileId), parts = [databaseChangeStamp(this.database.db)];
-    const stat = target => {
-      try {
-        const value = fs.lstatSync(target, { bigint: true });
-        return `${value.dev}:${value.ino}:${value.mode}:${value.size}:${value.mtimeNs}:${value.ctimeNs}`;
-      } catch (error) { if (error.code === "ENOENT") return "-"; throw error; }
+  _filesystemStamp(profileId, bounded = false, identities = null) {
+    const root = this.workspace(profileId), parts = [];
+    let visited = 0;
+    const stat = relative => {
+      const identity = memoryPathIdentity(path.join(root, relative));
+      identities?.push([relative, identity]);
+      return identity;
     };
-    parts.push(stat(root));
-    for (const name of ["USER.md", "MEMORY.md", "DREAMS.md", "dreams.md"]) parts.push(name, stat(path.join(root, name)));
+    parts.push(stat(""));
+    for (const name of ["USER.md", "MEMORY.md", "DREAMS.md", "dreams.md"]) parts.push(name, stat(name));
     const walk = relative => {
       const directory = path.join(root, relative);
-      parts.push(relative, stat(directory));
+      parts.push(relative, stat(relative));
       let children;
       try { children = fs.readdirSync(directory, { withFileTypes: true }); }
       catch (error) { if (error.code === "ENOENT" || error.code === "ENOTDIR") return; throw error; }
       for (const child of children.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))) {
+        if (bounded && ++visited > MAX_SCAN_ENTRIES) throw serviceError("MEMORY_SCAN_TOO_LARGE", "记忆文件数超过前台扫描上限");
         const name = path.posix.join(relative, child.name);
         if (child.isDirectory() && !child.name.startsWith(".")) walk(name);
-        else if (child.isSymbolicLink() || (child.isFile() && child.name.endsWith(".md"))) parts.push(name, stat(path.join(root, name)));
+        else if (child.isSymbolicLink() || (child.isFile() && child.name.endsWith(".md"))) parts.push(name, stat(name));
       }
     };
     walk("memory");
     return parts.join("|");
   }
+  _fileOwnerStamp(profileId, db = this.database.db) {
+    // The file-owner transaction changes the profile row whenever it commits
+    // metadata; a pending row also fences an uncommitted file transaction.
+    // Index connections can also write to the same SQLite file; their commits
+    // do not own these tables. File-store writers always advance the Profile
+    // revision transactionally, and the owner revalidates filesystem identity.
+    let statement = this.fileOwnerStatements.get(db);
+    if (!statement) {
+      statement = db.prepare(`SELECT p.revision,p.fingerprint,
+        coalesce(i.revision, p.revision) AS invalidation_revision,
+        EXISTS(SELECT 1 FROM memory_file_pending w WHERE w.profile_id=p.profile_id) AS pending
+        FROM memory_file_profiles p LEFT JOIN memory_file_invalidation i USING (profile_id) WHERE p.profile_id=?`);
+      this.fileOwnerStatements.set(db, statement);
+    }
+    return JSON.stringify(statement.get(profileId) ?? null);
+  }
+  _sourceStamp(profileId) { return `${databaseChangeStamp(this.database.db)}|${this._filesystemStamp(profileId)}`; }
+  _cacheSnapshot(profileId, snapshot) {
+    this.snapshots.delete(profileId);
+    this.snapshots.set(profileId, snapshot);
+    if (this.snapshots.size > MAX_CACHED_PROFILES) this.snapshots.delete(this.snapshots.keys().next().value);
+  }
   _snapshot(profileId) {
     this._check(profileId);
     const stamp = this._sourceStamp(profileId), cached = this.snapshots.get(profileId);
-    if (cached?.stamp === stamp) return cached.value;
+    if (cached?.stamp === stamp) {
+      this._cacheSnapshot(profileId, cached);
+      return cached.value;
+    }
     const value = this._readSnapshot(profileId);
     // Reuse only a read that saw a stable source. Publishing a new fingerprint
     // or a concurrent change is simply read again on the next call.
-    if (this._sourceStamp(profileId) === stamp) this.snapshots.set(profileId, { stamp, value });
+    if (this._sourceStamp(profileId) === stamp) this._cacheSnapshot(profileId, { stamp, value });
     else this.snapshots.delete(profileId);
     return value;
   }
-  _readSnapshot(profileId) {
-    const files = this._files(profileId), metadata = this._metadata(profileId), items = [], ids = new Set(), copies = new Map();
+  _projectSnapshot(profileId, files, metadata, bounded = false) {
+    const items = [], ids = new Set(), copies = new Map(), fileHashes = new Map();
+    let totalBytes = 0;
+    const add = item => {
+      if (bounded && (items.length >= MAX_SCAN_ROWS || (totalBytes += Buffer.byteLength(JSON.stringify(item))) > MAX_SCAN_BYTES)) {
+        throw serviceError("MEMORY_SCAN_TOO_LARGE", "投影后的记忆超过前台扫描容量");
+      }
+      items.push(item);
+    };
     for (const file of files) {
+      const fileHash = sha256(file.content);
+      fileHashes.set(file.path, fileHash);
       // Files are edited by hand. Only the first block with an ID is that
       // memory; a copied block stays readable as hand-written text below.
       const entries = splitEntries(file.content).filter(entry => {
@@ -281,9 +425,9 @@ class FileMemoryStore {
       });
       for (const entry of entries) {
         const previous = metadata.get(entry.id), unchanged = previous?.contentHash === sha256(entry.content);
-        items.push({ ...(unchanged ? previous : this._newItem(profileId, entry.id, entry.content, file.path)),
+        add({ ...(unchanged ? previous : this._newItem(profileId, entry.id, entry.content, file.path)),
           id: entry.id, content: entry.content, status: "active", memoryPath: file.path,
-          startLine: entry.startLine, endLine: entry.endLine, fileHash: sha256(file.content),
+          startLine: entry.startLine, endLine: entry.endLine, fileHash,
           documentKind: documentKind(file.path, file.content, entry.startLine, entry.endLine) });
       }
       // Upstream promotions and hand-authored sections have no Shoggoth ID.
@@ -303,47 +447,342 @@ class FileMemoryStore {
         const prefix = sourceLines[entryStart - 2] || "";
         const authorityText = [promotionLine.test(prefix) ? prefix : "",
           ...sourceLines.slice(entryStart - 1, entryEnd).filter(line => !promotionLine.test(line))].join("\n");
-        items.push({ ...this._newItem(profileId, id, chunk.text, file.path), authorityText,
-          startLine: chunk.startLine, endLine: chunk.endLine, fileHash: sha256(file.content), projection: true,
+        add({ ...this._newItem(profileId, id, chunk.text, file.path), authorityText,
+          startLine: chunk.startLine, endLine: chunk.endLine, fileHash, projection: true,
           documentKind: documentKind(file.path, file.content, chunk.startLine, chunk.endLine) });
       }
     }
+    return { items, copies, fileHashes };
+  }
+
+  _readSnapshot(profileId) {
+    const files = this._files(profileId), metadata = this._metadata(profileId);
+    const projection = this._projectSnapshot(profileId, files, metadata);
     const fingerprint = sha256(JSON.stringify(files));
-    const current = this.database.db.prepare("SELECT * FROM memory_file_profiles WHERE profile_id=?").get(profileId);
+    const current = this._snapshotRevision(profileId), tracked = this._trackedInvalidation(profileId);
+    const revision = current.revision + Number(current.fingerprint !== fingerprint);
+    const revisions = this._commitSnapshotRevision(profileId, current, tracked, fingerprint,
+      projectInvalidation(tracked, files, fingerprint, revision));
+    return { ...projection, metadata, ...revisions };
+  }
+
+  _scanMetadata(profileId, db, collect = false, include = null) {
+    const statement = db.prepare("SELECT id,data FROM memory_file_records WHERE profile_id=? ORDER BY id LIMIT ?");
+    const hash = createHash("sha256"), rows = [];
+    let count = 0, bytes = 0;
+    for (const row of statement.iterate(profileId, MAX_SCAN_ROWS + 1)) {
+      if (++count > MAX_SCAN_ROWS || (bytes += Buffer.byteLength(row.data)) > MAX_SCAN_BYTES) {
+        throw serviceError("MEMORY_SCAN_TOO_LARGE", "记忆元数据超过前台扫描容量");
+      }
+      if (include && !include.has(row.id)) continue;
+      hash.update(row.id).update("\0").update(row.data).update("\0");
+      if (collect) rows.push(row);
+    }
+    return { rows, hash: hash.digest("hex"), stamp: databaseChangeStamp(db) };
+  }
+
+  // Scan workers are bounded by total live threads, including any thread
+  // still terminating. An idle worker carries no active Profile request.
+  _idleScanWorker() {
+    for (const slot of this.scanWorkers) {
+      if (!slot.active && !slot.termination) return slot;
+    }
+    if (this.scanWorkers.size >= MAX_SCAN_PROFILES) return null;
+    const { Worker } = require("node:worker_threads");
+    const worker = new Worker(path.join(__dirname, "file-scan-worker.cjs"), {
+      resourceLimits: { maxOldGenerationSizeMb: 144 },
+    });
+    const slot = { worker, active: false, fail: null, termination: null, jobId: 0 };
+    this.scanWorkers.add(slot);
+    worker.on("error", () => slot.fail?.());
+    worker.once("exit", () => {
+      this.scanWorkers.delete(slot);
+      slot.fail?.();
+    });
+    return slot;
+  }
+
+  _retireScanWorker(slot) {
+    slot.termination ??= slot.worker.terminate();
+    return slot.termination;
+  }
+
+  _scanSnapshot(profileId, root, snapshotStamp, ownerStamp, slot) {
+    const db = this.database.db;
+    const { worker } = slot;
+    const id = ++slot.jobId;
+    const scan = { slot, workRoot: root, snapshotStamp, ownerStamp, metadata: null, promise: null, retired: false };
+    slot.active = true;
+    worker.ref();
+    scan.promise = new Promise((resolve, reject) => {
+      const stopped = () => serviceError("MEMORY_SCAN_UNAVAILABLE", "无法完成记忆文件扫描");
+      const rejectScan = error => { scan.completed = true; reject(error); };
+      slot.fail = () => rejectScan(stopped());
+      const timer = setTimeout(slot.fail, SCAN_DEADLINE_MS);
+      timer.unref();
+      const receive = response => {
+        if (response?.id !== id || scan.completed) return;
+        if (response?.needsMetadata === true) {
+          try {
+            if (scan.retired || this.database.db !== db || this._fileOwnerStamp(profileId, db) !== ownerStamp) {
+              throw serviceError("MEMORY_REVISION_CONFLICT", "扫描期间记忆或授权已经变化");
+            }
+            const { rows, ...metadata } = this._scanMetadata(profileId, db, true);
+            scan.metadata = metadata;
+            scan.current = this._snapshotRevision(profileId);
+            scan.tracked = this._trackedInvalidation(profileId);
+            worker.postMessage({ id, metadata: { rows, current: scan.current, tracked: scan.tracked } });
+          } catch (error) { rejectScan(error); }
+        } else {
+          scan.completed = true;
+          const validError = ["MEMORY_REVISION_CONFLICT", "MEMORY_SCAN_TOO_LARGE", "MEMORY_SCAN_UNAVAILABLE"].includes(response.errorCode);
+          const validData = response.errorCode === undefined && typeof response.fileStamp === "string"
+            && Array.isArray(response.identities) && (response.unchanged === true || (
+              typeof response.fingerprint === "string" && Array.isArray(response.items) && response.metadata instanceof Map
+              && response.copies instanceof Map && response.fileHashes instanceof Map && response.sharedDocuments instanceof Map));
+          scan.finished = validError || validData;
+          if (validError) reject(serviceError(response.errorCode, "记忆文件扫描未能验证来源"));
+          else if (scan.finished) resolve(response);
+          else reject(stopped());
+        }
+      };
+      scan.detach = () => {
+        clearTimeout(timer);
+        worker.off("message", receive);
+        slot.fail = null;
+      };
+      worker.on("message", receive);
+      try { worker.postMessage({ id, scan: { profileId, root, snapshotStamp } }); }
+      catch (error) { rejectScan(error); }
+    }).finally(async () => {
+      scan.detach();
+      try {
+        if (scan.retired || !scan.finished) await this._retireScanWorker(slot);
+        else worker.unref();
+      }
+      finally {
+        slot.active = false;
+        if (this.scans.get(profileId) === scan) this.scans.delete(profileId);
+        // Existing readers publish their owner revision before a waiting scan
+        // captures the next view. A retired worker keeps its slot until exit.
+        if (this.scanQueue.size) setImmediate(() => this._drainScanQueue());
+      }
+    });
+    this.scans.set(profileId, scan);
+    return scan;
+  }
+
+  _tryReadScan(profileId, joinOnly = false) {
+    this._assertScanOpen(profileId);
+    this._check(profileId);
+    const db = this.database.db, root = this.workspace(profileId), stamp = this._fileOwnerStamp(profileId, db);
+    const cached = this.snapshots.get(profileId);
+    // A direct metadata edit can leave both the Profile row and filesystem
+    // unchanged. Use the worker's unchanged shortcut only when its metadata
+    // is also current, including commits from another SQLite connection.
+    let cacheStamp = null;
+    if (cached?.ownerStamp === stamp) {
+      const currentDbStamp = databaseChangeStamp(db);
+      if (cached.metadata.stamp === currentDbStamp || cached.metadata.hash === this._scanMetadata(profileId, db).hash) {
+        cached.metadata.stamp = currentDbStamp;
+        cacheStamp = cached.fileStamp;
+      }
+    }
+    let scan = this.scans.get(profileId);
+    if (scan) {
+      if (scan.retired || scan.completed || scan.workRoot !== root || scan.snapshotStamp !== cacheStamp || scan.ownerStamp !== stamp) return null;
+    } else {
+      if (joinOnly || this.scans.size >= MAX_SCAN_PROFILES) return null;
+      const slot = this._idleScanWorker();
+      if (!slot) return null;
+      scan = this._scanSnapshot(profileId, root, cacheStamp, stamp, slot);
+    }
+    return { db, root, stamp, cached, cacheStamp, scan };
+  }
+
+  _assertScanOpen(profileId) {
+    if (this.scanClosing || this.retiringScanProfiles.has(profileId)) {
+      throw serviceError("MEMORY_SCOPE_REVOKED", "记忆文件扫描已停止");
+    }
+  }
+
+  _drainScanQueue() {
+    for (const waiter of this.scanQueue) {
+      try {
+        waiter.signal?.throwIfAborted();
+        const admission = this._tryReadScan(waiter.profileId);
+        if (admission) waiter.admit(admission);
+      } catch (error) { waiter.fail(error); }
+    }
+  }
+
+  _waitForReadScan(profileId, signal) {
+    const busy = () => serviceError("MEMORY_SCAN_BUSY", "记忆读取扫描等待已满或超时");
+    if (this.scanQueue.size >= MAX_SCAN_WAITERS) throw busy();
+    return new Promise((resolve, reject) => {
+      const done = () => {
+        this.scanQueue.delete(waiter);
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+      };
+      const waiter = { profileId, signal,
+        admit: admission => { done(); resolve(admission); },
+        fail: error => { done(); reject(error); } };
+      const abort = () => waiter.fail(signal.reason);
+      const timer = setTimeout(() => waiter.fail(busy()), SCAN_DEADLINE_MS);
+      timer.unref();
+      this.scanQueue.add(waiter);
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+  }
+
+  async withAsyncReadView(profileId, signal, read, scanSignal = signal) {
+    const waiting = scanSignal && signal && scanSignal !== signal ? AbortSignal.any([scanSignal, signal]) : scanSignal;
+    waiting?.throwIfAborted();
+    const { db, root, stamp, cached, cacheStamp, scan } = this._tryReadScan(profileId, this.scanQueue.size > 0)
+      ?? await this._waitForReadScan(profileId, waiting);
+    waiting?.throwIfAborted();
+    let onAbort;
+    const canceled = waiting && new Promise((_, reject) => {
+      onAbort = () => reject(waiting.reason);
+      waiting.addEventListener("abort", onAbort, { once: true });
+    });
+    let result;
+    try { result = await (canceled ? Promise.race([scan.promise, canceled]) : scan.promise); }
+    finally { if (onAbort) waiting.removeEventListener("abort", onAbort); }
+    waiting?.throwIfAborted();
+    this._assertScanOpen(profileId);
+    this._check(profileId);
+    if (scan.retired || db !== this.database.db || this.workspace(profileId) !== root
+      || (scan.publishedOwnerStamp ?? stamp) !== this._fileOwnerStamp(profileId, db)) {
+      throw serviceError("MEMORY_REVISION_CONFLICT", "扫描期间记忆或授权已经变化");
+    }
+    let snapshot;
+    const currentDbStamp = databaseChangeStamp(db);
+    const metadata = result.unchanged ? cached.metadata : scan.metadata;
+    // Independent index writers can advance the shared DB stamp while this
+    // worker runs. When it changes, compare only this Profile's bounded raw
+    // metadata, including direct edits that skipped the public revision.
+    if (!metadata || (metadata.stamp !== currentDbStamp && this._scanMetadata(profileId, db).hash !== metadata.hash)) {
+      throw serviceError("MEMORY_REVISION_CONFLICT", "扫描期间记忆元数据已经变化");
+    }
+    if (result.unchanged) {
+      if (result.fileStamp !== cacheStamp) {
+        throw serviceError("MEMORY_REVISION_CONFLICT", "读取的记忆快照已经变化");
+      }
+      snapshot = cached.value;
+    } else {
+      const revisions = scan.revisions ||= transaction(db, () => {
+        const tracked = this._trackedInvalidation(profileId);
+        if (stamp !== this._fileOwnerStamp(profileId, db) || tracked?.fingerprint !== scan.tracked?.fingerprint
+          || tracked?.revision !== scan.tracked?.revision || tracked?.files !== scan.tracked?.files) {
+          throw serviceError("MEMORY_REVISION_CONFLICT", "扫描期间记忆失效证据已经变化");
+        }
+        return this._commitSnapshotRevision(profileId, scan.current, tracked, result.fingerprint, result.invalidation);
+      });
+      scan.publishedOwnerStamp = this._fileOwnerStamp(profileId, db);
+      snapshot = { items: result.items, metadata: result.metadata, copies: result.copies, fileHashes: result.fileHashes,
+        sharedDocuments: result.sharedDocuments, ...revisions };
+    }
+    const publishedDbStamp = databaseChangeStamp(db);
+    const publishedOwnerStamp = this._fileOwnerStamp(profileId, db);
+    this._cacheSnapshot(profileId, { stamp: `${publishedDbStamp}|${result.fileStamp}`, ownerStamp: publishedOwnerStamp,
+      fileStamp: result.fileStamp, metadata: { hash: metadata.hash, stamp: publishedDbStamp }, value: snapshot });
+    const fileIdentities = new Map(result.identities);
+    const assertSharedDocumentCurrent = relative => {
+      const expected = fileIdentities.get(relative);
+      if (!expected || this.workspace(profileId) !== root || memoryPathIdentity(path.join(root, relative)) !== expected) {
+        throw serviceError("MEMORY_REVISION_CONFLICT", "扫描后借阅文档路径发生变化");
+      }
+      return expected !== "-";
+    };
+    const assertFilesCurrent = () => {
+      signal?.throwIfAborted();
+      if (this.workspace(profileId) !== root || !Array.isArray(result.identities)
+        || result.identities.some(([relative, identity]) => memoryPathIdentity(path.join(root, relative)) !== identity)) {
+        throw serviceError("MEMORY_REVISION_CONFLICT", "扫描后记忆路径发生变化");
+      }
+    };
+    const retainProof = this._retainReadProof({ profileId, db, snapshot, metadataHash: metadata.hash,
+      publishedDbStamp, publishedOwnerStamp, signal, assertFilesCurrent, assertSharedDocumentCurrent });
+    return this._useSnapshot(profileId, snapshot, read, assertFilesCurrent, retainProof, assertSharedDocumentCurrent);
+  }
+
+  _retainReadProof({ profileId, db, snapshot, metadataHash, publishedDbStamp, publishedOwnerStamp, signal, assertFilesCurrent,
+    assertSharedDocumentCurrent }) {
+    let proof;
+    const retainProof = () => {
+      if (proof) return proof;
+      let verifiedDbStamp = publishedDbStamp, additiveDbStamp = publishedDbStamp;
+      let knownIds;
+      const invalidation = this._trackedInvalidation(profileId);
+      const assertMetadataCurrent = (allowAdditions = false) => {
+        this._check(profileId);
+        if (this.database.db !== db) {
+          throw serviceError("MEMORY_REVISION_CONFLICT", "记忆扫描版本已变化");
+        }
+        signal?.throwIfAborted();
+        const currentDbStamp = databaseChangeStamp(db);
+        if (currentDbStamp !== (allowAdditions ? additiveDbStamp : verifiedDbStamp)) {
+          // Additive recall still rejects direct edits to metadata for any
+          // old entry, including a handwritten projection that had no row.
+          if (allowAdditions) knownIds ||= new Set([...snapshot.metadata.keys(), ...snapshot.items.map(item => item.id)]);
+          if (metadataHash !== this._scanMetadata(profileId, db, false, allowAdditions ? knownIds : null).hash) {
+            throw serviceError("MEMORY_REVISION_CONFLICT", "记忆扫描元数据已变化");
+          }
+          additiveDbStamp = currentDbStamp;
+          if (!allowAdditions) verifiedDbStamp = currentDbStamp;
+        }
+      };
+      const assertCurrent = () => {
+        assertMetadataCurrent();
+        const tracked = this._trackedInvalidation(profileId);
+        if (this._fileOwnerStamp(profileId, db) !== publishedOwnerStamp || tracked?.revision !== invalidation?.revision
+          || tracked?.fingerprint !== invalidation?.fingerprint || tracked?.files !== invalidation?.files) {
+          throw serviceError("MEMORY_REVISION_CONFLICT", "记忆扫描版本已变化");
+        }
+        assertFilesCurrent();
+      };
+      proof = Object.freeze({
+        current() { try { assertCurrent(); return true; } catch { return false; } },
+        metadataCurrent({ allowAdditions = false } = {}) {
+          try { assertMetadataCurrent(allowAdditions); return true; } catch { return false; }
+        },
+        read: next => {
+          assertCurrent();
+          return this._useSnapshot(profileId, snapshot, next, assertFilesCurrent, retainProof, assertSharedDocumentCurrent);
+        },
+      });
+      return proof;
+    };
+    return retainProof;
+  }
+
+  _snapshotRevision(profileId) {
+    return this.database.db.prepare("SELECT revision,fingerprint FROM memory_file_profiles WHERE profile_id=?").get(profileId);
+  }
+  _trackedInvalidation(profileId) {
+    return this.database.db.prepare("SELECT fingerprint,revision,files FROM memory_file_invalidation WHERE profile_id=?").get(profileId);
+  }
+  _commitSnapshotRevision(profileId, current, tracked, fingerprint, invalidation) {
     if (current.fingerprint !== fingerprint) {
       this.database.db.prepare("UPDATE memory_file_profiles SET fingerprint=?,revision=revision+1 WHERE profile_id=?").run(fingerprint, profileId);
     }
     const revision = current.revision + Number(current.fingerprint !== fingerprint);
-    return { items, metadata, copies, revision, invalidationRevision: this._invalidationRevision(profileId, files, fingerprint, revision) };
+    if (invalidation) this._publishInvalidation(profileId, tracked, fingerprint, invalidation);
+    return { revision, invalidationRevision: invalidation?.revision ?? tracked.revision };
   }
   // The last revision that changed or removed existing memory text. This row
   // tracks its own fingerprint, so an interrupted update is evaluated again.
-  _invalidationRevision(profileId, files, fingerprint, revision) {
+  _publishInvalidation(profileId, tracked, fingerprint, invalidation) {
     const db = this.database.db;
-    const tracked = db.prepare("SELECT fingerprint,revision,files FROM memory_file_invalidation WHERE profile_id=?").get(profileId);
-    if (tracked?.fingerprint === fingerprint && tracked.revision <= revision
-      && !files.some(file => DREAMS_PATH.test(file.path))) return tracked.revision;
-    let previous = null;
-    try { previous = tracked ? JSON.parse(tracked.files) : null; } catch { previous = null; }
-    const unchanged = tracked?.fingerprint === fingerprint && tracked.revision <= revision;
-    // Backfill the optional section digests only from a byte-verified baseline.
-    if (unchanged && Array.isArray(previous)
-      && !previous.some(entry => DREAMS_PATH.test(entry?.path) && !Object.hasOwn(entry, "dreams"))) return tracked.revision;
-    const sources = files.map(file => {
-      const text = file.content.trimEnd();
-      return { path: file.path, text, dreams: DREAMS_PATH.test(file.path) ? dreamSource(text) : null };
-    });
-    // No usable record, or one from another revision sequence, counts as a change now.
-    const appended = tracked && tracked.revision <= revision && sourcesOnlyAppended(previous, sources);
-    const invalidationRevision = appended ? tracked.revision : revision;
-    const digests = JSON.stringify(sourceDigests(sources));
     if (tracked) {
       db.prepare("UPDATE memory_file_invalidation SET fingerprint=?,revision=?,files=? WHERE profile_id=? AND fingerprint=?")
-        .run(fingerprint, invalidationRevision, digests, profileId, tracked.fingerprint);
+        .run(fingerprint, invalidation.revision, invalidation.files, profileId, tracked.fingerprint);
     } else {
-      db.prepare("INSERT OR IGNORE INTO memory_file_invalidation VALUES (?,?,?,?)").run(profileId, fingerprint, invalidationRevision, digests);
+      db.prepare("INSERT OR IGNORE INTO memory_file_invalidation VALUES (?,?,?,?)")
+        .run(profileId, fingerprint, invalidation.revision, invalidation.files);
     }
-    return invalidationRevision;
   }
   _newItem(profileId, id, content, memoryPath) {
     return { id, profileId, scope: memoryPath === "USER.md" ? "user" : "agent", type: "semantic", content,
@@ -351,29 +790,141 @@ class FileMemoryStore {
       validFrom: 0, validUntil: null, supersedes: null, createdAt: 0, updatedAt: 0,
       contentHash: sha256(content), memoryPath };
   }
-  getRevision(profileId) { return this._snapshot(profileId).revision; }
+  _readProjection(profileId) {
+    for (let current = this.readScope; current; current = current.previous) {
+      if (current.profileId === profileId) { current.check(); return current.snapshot; }
+    }
+    return this._snapshot(profileId);
+  }
+  getRevision(profileId) { return this._readProjection(profileId).revision; }
   getRevisions(profileId) {
-    const { revision, invalidationRevision } = this._snapshot(profileId);
+    const { revision, invalidationRevision } = this._readProjection(profileId);
     return { revision, invalidationRevision };
   }
   list(profileId, filter = {}) {
-    const { items, metadata } = this._snapshot(profileId);
-    const activeIds = new Set(items.map(item => item.id));
-    const rows = [...items, ...[...metadata.values()].filter(item => !activeIds.has(item.id)).map(item => ({ ...item, status: item.status === "active" ? "deleted" : item.status }))];
-    return rows.filter(item => (!filter.status || item.status === filter.status) && (!filter.scope || item.scope === filter.scope) && (!filter.type || item.type === filter.type)).map(item => structuredClone(item));
+    const snapshot = this._readProjection(profileId);
+    // Legacy duplicate projection IDs retain their ordering in list(). The ID
+    // accessor, like the old list().find(), resolves the first effective row.
+    return this._listSnapshot(snapshot, filter);
   }
-  get(profileId, id) { return this.list(profileId).find(item => item.id === id) || null; }
+  _listSnapshot(snapshot, filter) {
+    const rows = filter.status === "active" ? snapshot.items : [...snapshot.items, ...snapshotRows(snapshot).historical];
+    return rows.filter(item => matchesFilter(item, filter)).map(item => structuredClone(item));
+  }
+  listPage(profileId, filter, { cursor, limit, maxBytes, isVisible }) {
+    const snapshot = this._readProjection(profileId);
+    const groups = filter.status === "active" ? [snapshot.items]
+      : [snapshot.items, snapshotRows(snapshot).historical];
+    const items = [];
+    let skipped = 0, bytes = 0;
+    for (const rows of groups) {
+      for (const item of rows) {
+        if (!matchesFilter(item, filter) || !isVisible(item)) continue;
+        if (skipped < cursor) { skipped += 1; continue; }
+        if (items.length === limit) return { items, nextCursor: cursor + items.length, hasMore: true };
+        const size = Buffer.byteLength(JSON.stringify(item), "utf8");
+        if (items.length && bytes + size > maxBytes) return { items, nextCursor: cursor + items.length, hasMore: true };
+        if (size > maxBytes) throw serviceError("HARNESS_RESPONSE_TOO_LARGE", "单条记录超过响应预算");
+        items.push(structuredClone(item));
+        bytes += size;
+      }
+    }
+    return { items, nextCursor: cursor + items.length, hasMore: false };
+  }
+  listActiveFile(profileId, relative) {
+    const rows = snapshotRows(this._readProjection(profileId)).byPath.get(relative) || [];
+    return rows.map(item => structuredClone(item));
+  }
+  _getSnapshotItem(snapshot, id) {
+    const item = snapshotRows(snapshot).byId.get(id);
+    return item ? structuredClone(item) : null;
+  }
+  get(profileId, id) { return this._getSnapshotItem(this._readProjection(profileId), id); }
   getContentRevision(profileId, id, expectedHash) {
-    const item = this.get(profileId, id);
-    return item && (expectedHash == null || sha256(item.content) === expectedHash) ? item.contentRevision ?? this.getRevision(profileId) : null;
+    const snapshot = this._readProjection(profileId), item = snapshotRows(snapshot).byId.get(id);
+    return item && (expectedHash == null || sha256(item.content) === expectedHash) ? item.contentRevision ?? snapshot.revision : null;
   }
-  getItemWriteProof(profileId, id) { const item = this.get(profileId, id); return item ? { contentHash: sha256(item.content), revision: this.getRevision(profileId) } : null; }
+  getItemWriteProof(profileId, id) {
+    const snapshot = this._readProjection(profileId), item = snapshotRows(snapshot).byId.get(id);
+    return item ? { contentHash: sha256(item.content), revision: snapshot.revision } : null;
+  }
+  // A view belongs to one synchronous read-only batch. A new public read
+  // checks filesystem identity again, even in the same event-loop turn.
+  withReadView(profileId, read) {
+    return this._useSnapshot(profileId, this._readProjection(profileId), read);
+  }
+  async withCommittedReadView(profileId, read, signal) {
+    let started = false;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.withAsyncReadView(profileId, signal, view => {
+          view.assertFilesCurrent();
+          started = true;
+          return read(view);
+        });
+      } catch (error) {
+        if (started) throw error;
+        signal?.throwIfAborted();
+        // A recall-policy subscriber can advance the projection revision
+        // during the scan. Retry the read once before using the fallback.
+        if (attempt === 0 && ["MEMORY_REVISION_CONFLICT", "MEMORY_READ_VIEW_STALE"].includes(error?.code)) continue;
+        // The write committed. If its worker view is unavailable, keep the
+        // authoritative synchronous readback used by existing write receipts.
+        return this.withReadView(profileId, read);
+      }
+    }
+  }
+  _useSnapshot(profileId, snapshot, read, assertFilesCurrent, retainProof, assertSharedDocumentCurrent) {
+    const db = this.database.db, stamp = databaseChangeStamp(db);
+    let current = true;
+    const check = () => {
+      if (!current || !this.opened || !this.ready.has(profileId) || this.database.db !== db
+        || databaseChangeStamp(db) !== stamp) throw serviceError("MEMORY_READ_VIEW_STALE", "记忆读取快照已失效");
+    };
+    const view = Object.freeze({
+      ...(assertFilesCurrent ? { assertFilesCurrent() { check(); assertFilesCurrent(); } } : {}),
+      ...(retainProof ? { retainProof() { check(); return retainProof(); } } : {}),
+      ...(assertSharedDocumentCurrent && snapshot.sharedDocuments ? { sharedDocument(relative) {
+        check();
+        if (!snapshot.sharedDocuments.has(relative)) return undefined;
+        if (!assertSharedDocumentCurrent(relative)) throw serviceError("ENOENT", "借阅文档已删除");
+        return snapshot.sharedDocuments.get(relative);
+      } } : {}),
+      get: id => { check(); return this._getSnapshotItem(snapshot, id); },
+      list: (filter = {}) => { check(); return this._listSnapshot(snapshot, filter); },
+      listActiveFile: relative => {
+        check();
+        return (snapshotRows(snapshot).byPath.get(relative) || []).map(item => structuredClone(item));
+      },
+      getRevisions: () => {
+        check();
+        return { revision: snapshot.revision, invalidationRevision: snapshot.invalidationRevision };
+      },
+      matchesFile: (relative, contents) => {
+        check();
+        return snapshot.fileHashes?.get(relative) === sha256(contents)
+          || (contents === "" && !snapshot.fileHashes?.has(relative));
+      },
+    });
+    const previous = this.readScope;
+    this.readScope = { profileId, snapshot, check, previous };
+    try {
+      const result = read(view);
+      if (result && typeof result.then === "function") {
+        Promise.resolve(result).catch(() => {});
+        throw new TypeError("Memory read view requires a synchronous callback");
+      }
+      check();
+      return result;
+    } finally { current = false; this.readScope = previous; }
+  }
   listHistoricalSourceItems(profileId) {
     const row = this.database.db.prepare("SELECT data FROM memory_file_history WHERE profile_id=?").get(profileId);
     return [...(row ? JSON.parse(row.data) : []), ...this.list(profileId).filter(item => item.status !== "active" || item.validUntil !== null)
       .map(item => ({ ...item, sourceBindingVerified: true }))];
   }
   forgetProfile(profileId) {
+    void this.stopScans(profileId);
     this.ready.delete(profileId); this.snapshots.delete(profileId);
     this.database.db.prepare("DELETE FROM memory_report_evidence WHERE profile_id=?").run(profileId);
     for (const table of ["memory_file_profiles", "memory_file_records", "memory_file_pending", "memory_file_history", "memory_file_invalidation"]) {
@@ -408,9 +959,10 @@ class FileMemoryStore {
       }
     });
   }
-  reportEvidence(profileId, relative, startLine, endLine) {
+  reportEvidence(profileId, relative, startLine, endLine, memoryView) {
     this._check(profileId);
-    const text = this.getHost(profileId).searchIndex.sourceFiles.read(relative).text, lines = text.split("\n"), sources = new Map(), proofs = [];
+    const text = this.getHost(profileId).searchIndex.sourceFiles.read(relative, memoryView).text;
+    const lines = text.split("\n"), sources = new Map(), proofs = [];
     const read = this.database.db.prepare("SELECT source_hash,data FROM memory_report_evidence WHERE profile_id=? AND path=? AND line=?");
     let substantive = 0;
     for (let index = startLine - 1; index < Math.min(endLine, lines.length); index++) {
@@ -469,25 +1021,42 @@ class FileMemoryStore {
     this._commitPending(profileId, plan);
   }
 
+  async _readWriteSnapshot(profileId, signal) {
+    try {
+      return await this.withAsyncReadView(profileId, signal, view => {
+        view.assertFilesCurrent();
+        return { snapshot: this._readProjection(profileId), proof: view.retainProof() };
+      });
+    } catch (error) {
+      // Existing oversized workspaces can still be edited under the writer
+      // lock. A busy, canceled, or uncertain worker never permits a write.
+      if (error.code !== "MEMORY_SCAN_TOO_LARGE") throw error;
+      signal?.throwIfAborted();
+      return { snapshot: this._snapshot(profileId), proof: null };
+    }
+  }
+
   async upsertMany(records, options = {}) {
-    const { expectedRevision = null, assertCurrent = () => {} } = options;
+    const { expectedRevision = null, assertCurrent = () => {}, beforeIntent, signal } = options;
     const { assertNoBorrowedMemoryWrite } = require("./borrowed-memory-provenance.cjs");
     for (const record of records) assertNoBorrowedMemoryWrite(record, options);
     if (!records.length) return [];
     const profileId = records[0].profileId, host = this.getHost(profileId);
     return host.run(() => core.withMemoryWorkspaceLock(this.workspace(profileId), async () => {
-      this._check(profileId); assertCurrent();
-      const snapshot = this._snapshot(profileId);
-      if (expectedRevision !== null && snapshot.revision !== expectedRevision) throw serviceError("MEMORY_REVISION_CONFLICT", "Memory revision 已变化");
+      host.assertCurrent();
       if (new Set(records.map(item => item.id)).size !== records.length || records.some(item => item.profileId !== profileId || !ID.test(item.id))) throw new Error("Invalid memory transaction records");
+      const { snapshot, proof } = await this._readWriteSnapshot(profileId, signal);
+      if (expectedRevision !== null && snapshot.revision !== expectedRevision) throw serviceError("MEMORY_REVISION_CONFLICT", "Memory revision 已变化");
       const writes = new Map(), newRecords = [];
+      const activeById = snapshotRows(snapshot).byId;
       let invalidating = false;
       const contentFor = relative => {
         if (!writes.has(relative)) { const before = this._read(profileId, relative); writes.set(relative, { path: relative, beforeHash: sha256(before), after: before }); }
         return writes.get(relative);
       };
       for (const input of records) {
-        const old = snapshot.items.find(item => item.id === input.id) || snapshot.metadata.get(input.id);
+        const current = activeById.get(input.id);
+        const old = current?.status === "active" ? current : snapshot.metadata.get(input.id);
         // Rewriting an active item can change metadata (expiry, scope) even
         // when its rendered text is identical.
         if (old?.status === "active") invalidating = true;
@@ -523,7 +1092,17 @@ class FileMemoryStore {
         newRecords.push(entry);
       }
       const plan = { schemaVersion: 1, profileId, files: [...writes.values()], records: newRecords, invalidating };
-      assertCurrent(); host.assertCurrent();
+      const check = view => {
+        signal?.throwIfAborted();
+        assertCurrent(); host.assertCurrent();
+        view?.assertFilesCurrent();
+        for (const file of plan.files) {
+          if (sha256(this._read(profileId, file.path)) !== file.beforeHash) throw serviceError("MEMORY_REVISION_CONFLICT", "记忆文件已变化");
+        }
+        beforeIntent?.();
+      };
+      if (proof) proof.read(check);
+      else check();
       this.database.db.prepare("INSERT INTO memory_file_pending VALUES (?,?)").run(profileId, JSON.stringify(plan));
       // Failure leaves a durable intent and closes reads until recovery settles it.
       for (const file of plan.files) {
@@ -534,7 +1113,7 @@ class FileMemoryStore {
         atomicWritePrivateFile(path.join(this.workspace(profileId), file.path), file.after, { trustedRoot: this.paths.trustedRoot });
       }
       this._commitPending(profileId, plan);
-      return records.map(item => this.get(profileId, item.id));
+      return this.withCommittedReadView(profileId, view => records.map(item => view.get(item.id)));
     }));
   }
   async upsert(item, options) { return (await this.upsertMany([item], options))[0]; }
@@ -550,9 +1129,15 @@ class FileMemoryStore {
     return host.run(() => core.withMemoryWorkspaceLock(this.workspace(profileId), async () => {
       this._check(profileId); host.assertCurrent();
       if (sha256(this._read(profileId, relative)) !== expectedHash) throw serviceError("MEMORY_REVISION_CONFLICT", "记忆文件已变化，请重新读取");
-      const previous = this._snapshot(profileId).items.filter(item => item.memoryPath === relative);
-      assertCurrent?.();
-      host.assertCurrent();
+      const { snapshot, proof } = await this._readWriteSnapshot(profileId);
+      const previous = snapshot.items.filter(item => item.memoryPath === relative);
+      const check = view => {
+        assertCurrent?.(); host.assertCurrent();
+        view?.assertFilesCurrent();
+        if (sha256(this._read(profileId, relative)) !== expectedHash) throw serviceError("MEMORY_REVISION_CONFLICT", "记忆文件已变化");
+      };
+      if (proof) proof.read(check);
+      else check();
       atomicWritePrivateFile(path.join(this.workspace(profileId), relative), content, { trustedRoot: this.paths.trustedRoot });
       this.snapshots.delete(profileId);
       try { this.onChanged(profileId); } catch {}
@@ -561,4 +1146,4 @@ class FileMemoryStore {
   }
 }
 
-module.exports = { FileMemoryStore, splitEntries };
+module.exports = { FileMemoryStore, projectInvalidation, splitEntries };

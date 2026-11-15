@@ -181,6 +181,14 @@ class AgentHarnessServiceController {
     };
   }
   handle(method, params) {
+    if (["harness.memory.list", "harness.memory.explain"].includes(method) && this.memoryEngine.withAsyncMemoryReadView) {
+      this._profile(params.profileId);
+      return this.memoryEngine.withAsyncMemoryReadView(params.profileId, undefined, view => {
+        const result = publicMemoryResult(this._handle(method, params));
+        view.assertFilesCurrent();
+        return result;
+      });
+    }
     const result = this._handle(method, params);
     if (this.memoryEngine.owner !== "shoggoth-memory-core" || !method.startsWith("harness.memory.")) return result;
     return result?.then ? result.then(publicMemoryResult) : publicMemoryResult(result);
@@ -364,17 +372,23 @@ class AgentHarnessServiceController {
         recallPolicy = { ready: false, revision: null, indexPending: true,
           code: error.code || "RECALL_POLICY_UNAVAILABLE" };
       }
-      const all = this.memoryStore.list(params.profileId, {
+      const filter = {
         ...(params.status ? { status: params.status } : {}),
         ...(params.scope ? { scope: params.scope } : {}),
-      }).filter((item) => {
+      };
+      const isVisible = (item) => {
         if (!reviewItemVisible(this.memoryEngine, params.profileId, item)) return false;
         if (item.status !== "active") return true;
         // A live sibling may share a forgotten source or fact even though its
         // primary MemoryStore status is still active. Do not show it as current.
         try { return this.memoryEngine.recallPolicy.isMemoryVisible(params.profileId, item); }
         catch { return false; }
-      });
+      };
+      const memoryPage = this.memoryStore.listPage
+        ? this.memoryStore.listPage(params.profileId, filter, {
+          cursor: params.cursor, limit: params.limit, maxBytes: PAGE_BYTES, isVisible,
+        })
+        : page(this.memoryStore.list(params.profileId, filter).filter(isVisible), params.cursor, params.limit);
       // Other Agents' shared facts are listed beside this Agent's own memory;
       // the editor changes one through its home Agent at homeRevision.
       let shared = { items: [], truncated: false };
@@ -383,7 +397,7 @@ class AgentHarnessServiceController {
         if (params.scope) shared = { ...shared, items: shared.items.filter((row) => row.item.scope === params.scope) };
       }
       return { revision: this.memoryStore.getRevision(params.profileId), recallPolicy,
-        ...page(all, params.cursor, params.limit), shared };
+        ...memoryPage, shared };
     }
     if (method === "harness.memory.explain") {
       const current = this.memoryStore.get(params.profileId, params.id);
@@ -664,7 +678,10 @@ class AgentHarnessServiceController {
     throw harnessError("HARNESS_SERVICE_CLOSED", "Agent Harness method 未接线");
   }
   async _writeFileMemory(method, params) {
-    this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
+    const previous = await this.memoryEngine.withMemoryWritePreparation(params.profileId, undefined, () => {
+      this._assertRevision(this.memoryStore.getRevision(params.profileId), params.expectedRevision, "MEMORY_REVISION_CONFLICT");
+      return method === "harness.memory.update" ? this.memoryStore.get(params.profileId, params.id) : null;
+    });
     if (method === "harness.memory.forgetSession") {
       const session = this.chatSessionStore.listSessions().find(entry => entry.profileId === params.profileId && entry.id === params.sessionId);
       if (!session) throw harnessError("MEMORY_SOURCE_SESSION_NOT_FOUND", "来源对话不存在");
@@ -672,17 +689,20 @@ class AgentHarnessServiceController {
       const refs = new Set(this.transcriptStore.listEvents(params.profileId, session.id).flatMap(event => [event.id, event.runId].filter(Boolean)));
       const forgotten = await this.memoryEngine.forgetSources({ profileId: params.profileId, sourceRefs: refs,
         reason: "user_deleted", operationId: `forget-session-${crypto.randomUUID()}` });
-      return { revision: this.memoryStore.getRevision(params.profileId), forgotten: forgotten + report.artifacts.memoryEntries };
+      return this.memoryEngine.withCommittedMemoryReadView(params.profileId, view => ({
+        revision: view.getRevisions().revision, forgotten: forgotten + report.artifacts.memoryEntries,
+      }));
     }
     if (method === "harness.memory.undo") {
       const value = await this.memoryEngine.undoConsolidation({ ...params, operationId: `undo-${crypto.randomUUID()}` });
-      return { revision: this.memoryStore.getRevision(params.profileId), ...value };
+      return this.memoryEngine.withCommittedMemoryReadView(params.profileId, view => ({
+        revision: view.getRevisions().revision, ...value,
+      }));
     }
     if (method === "harness.memory.delete") {
       const item = await this.memoryEngine.forgetEverywhere({ ...params, reason: "user_deleted" });
-      return { revision: this.memoryStore.getRevision(params.profileId), item };
+      return this.memoryEngine.withCommittedMemoryReadView(params.profileId, view => ({ revision: view.getRevisions().revision, item }));
     }
-    const previous = method === "harness.memory.update" ? this.memoryStore.get(params.profileId, params.id) : null;
     if (method.endsWith("update") && previous?.status !== "active") throw harnessError("MEMORY_NOT_FOUND", "记忆不存在");
     const sourceRef = `user-edit:${crypto.randomUUID()}`;
     const item = await this.memoryEngine.propose({ profileId: params.profileId, expectedRevision: params.expectedRevision,
@@ -690,11 +710,13 @@ class AgentHarnessServiceController {
       sourceRefs: [sourceRef, ...(previous?.sourceRefs.filter(ref => ref.startsWith("workspace:")) || [])],
       classification: "explicit", sensitivity: previous?.sensitivity, confidence: params.confidence,
       validUntil: params.validUntil, supersedes: previous?.id ?? null });
-    if (item.sourceRefs.includes(sourceRef)) {
-      try { this.memoryProvenanceService?.recordUiWrite({ profileId: params.profileId, item,
-        operationId: `ui-${item.id}`, origin: previous ? "ui_edit" : "ui_create" }); } catch {}
-    }
-    return { revision: this.memoryStore.getRevision(params.profileId), item };
+    return this.memoryEngine.withCommittedMemoryReadView(params.profileId, view => {
+      if (item.sourceRefs.includes(sourceRef)) {
+        try { this.memoryProvenanceService?.recordUiWrite({ profileId: params.profileId, item,
+          operationId: `ui-${item.id}`, origin: previous ? "ui_edit" : "ui_create" }); } catch {}
+      }
+      return { revision: view.getRevisions().revision, item };
+    });
   }
 }
 

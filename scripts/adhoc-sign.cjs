@@ -84,13 +84,27 @@ function buildCodesignArgs({ appPath, entitlementsPath, identity, keychainPath, 
   return args;
 }
 
-function buildNestedCodesignArgs({ targetPath, identity, keychainPath, timestamp = false }) {
+function buildNestedCodesignArgs({ targetPath, identity, keychainPath, entitlementsPath, timestamp = false }) {
   const args = [
     "--force", "--options", "runtime", timestamp ? "--timestamp" : "--timestamp=none",
   ];
+  if (entitlementsPath) args.push("--entitlements", entitlementsPath);
   appendSigningScope(args, keychainPath);
   args.push("--sign", identity, targetPath);
   return args;
+}
+
+function electronHelperBundles(appPath) {
+  const frameworks = path.join(appPath, "Contents", "Frameworks");
+  const helperName = `${path.basename(appPath, ".app")} Helper`;
+  const helperNames = new Set(["", " (GPU)", " (Plugin)", " (Renderer)"]
+    .map(suffix => `${helperName}${suffix}.app`));
+  const bundles = fs.readdirSync(frameworks, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && helperNames.has(entry.name));
+  if (!bundles.some(entry => entry.name === `${helperName} (Renderer).app`)) {
+    throw new Error("Electron Renderer Helper bundle missing");
+  }
+  return bundles.map(entry => path.join(frameworks, entry.name)).sort();
 }
 
 function listNativeNodeModules(root) {
@@ -277,6 +291,13 @@ exports.default = async function adhocSign(context) {
     keychainPath,
     timestamp,
   }), { stdio: "inherit" });
+  // A Hardened Runtime helper needs its own JIT entitlements even after the
+  // enclosing bundle has been signed with those entitlements.
+  for (const targetPath of electronHelperBundles(appPath)) {
+    execFileSync("codesign", buildNestedCodesignArgs({
+      targetPath, identity, keychainPath, entitlementsPath, timestamp,
+    }), { stdio: "inherit" });
+  }
   // --deep may sign an embedded-plist executable (local media) only while
   // sealing the outer App. Refresh every final helper digest after that pass,
   // then reseal only the outer bundle so nested bytes cannot change again.
@@ -299,6 +320,7 @@ exports.default = async function adhocSign(context) {
 
 exports.buildCodesignArgs = buildCodesignArgs;
 exports.buildNestedCodesignArgs = buildNestedCodesignArgs;
+exports.electronHelperBundles = electronHelperBundles;
 exports.listNativeNodeModules = listNativeNodeModules;
 exports.isMachOFile = isMachOFile;
 exports.listMachOFiles = listMachOFiles;

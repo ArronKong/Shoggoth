@@ -1170,7 +1170,8 @@ test("refreshSession 超时有界失败并保持脱敏", async () => {
 });
 
 test("refresh preserves Service recovery errors and allows a valid exchange taking more than five seconds", async () => {
-  for (const code of ["MCP_HELPER_SERVICE_UNAVAILABLE", "MCP_HELPER_SERVICE_RECOVERY_REQUIRED", "MCP_HELPER_AUTH_FAILED"]) {
+  for (const code of ["MCP_HELPER_SERVICE_UNAVAILABLE", "MCP_HELPER_SERVICE_RECOVERY_REQUIRED", "MCP_HELPER_AUTH_FAILED",
+    "MCP_HELPER_CACHE_UNAVAILABLE", "MCP_HELPER_STORAGE_FULL", "MCP_HELPER_STORAGE_UNAVAILABLE", "MCP_HELPER_CRYPTO_UNAVAILABLE"]) {
     const handler = await initializedHandler({ sessionExpiresAt: 1, now: () => 2,
       refreshSession: async () => { throw Object.assign(new Error("private-value"), { code }); } });
     const response = await callProfile(handler); handler.close();
@@ -1182,7 +1183,7 @@ test("refresh preserves Service recovery errors and allows a valid exchange taki
   assert.equal(response.result.isError, false);
 });
 
-test("helper 在同一 stdio 会话续期时安全重建加密进程缓存", async () => {
+test("helper 在同一 stdio 会话续期时区分缓存及磁盘错误，并安全重建缓存", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-mcp-refresh-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   const cryptoCacheDir = path.join(paths.cacheDir, "mcp-crypto-worker");
@@ -1209,8 +1210,16 @@ test("helper 在同一 stdio 会话续期时安全重建加密进程缓存", asy
       assert.equal(fs.lstatSync(paths.cacheDir).isSymbolicLink(), true);
       assert.equal(fs.existsSync(path.join(root, "missing-cache")), false);
       fs.unlinkSync(paths.cacheDir);
+      const mkdirSync = fs.mkdirSync;
+      mock.method(fs, "mkdirSync", (target, options) => {
+        if (target === paths.cacheDir) throw Object.assign(new Error("PRIVATE_DISK_PATH"), { code: "ENOSPC" });
+        return mkdirSync(target, options);
+      });
       callProfile(3);
     } else if (message.id === 3) {
+      mock.restoreAll();
+      callProfile(4);
+    } else if (message.id === 4) {
       now = 20_000;
       fs.rmdirSync(cryptoCacheDir);
       const mkdirSync = fs.mkdirSync;
@@ -1219,8 +1228,8 @@ test("helper 在同一 stdio 会话续期时安全重建加密进程缓存", asy
         if (target === cryptoCacheDir) mkdirSync(target, options);
         return mkdirSync(target, options);
       });
-      callProfile(4);
-    } else if (message.id === 4) input.end();
+      callProfile(5);
+    } else if (message.id === 5) input.end();
     callback();
     return true;
   };
@@ -1253,9 +1262,11 @@ test("helper 在同一 stdio 会话续期时安全重建加密进程缓存", asy
     input.write(rawJsonLine(initialize(1, { capabilities: { elicitation: {} } })));
     await running;
     const responses = written.trim().split("\n").map((line) => JSON.parse(line)).filter(value => !value.method);
-    assert.equal(responses[1].result.structuredContent.error.code, "MCP_HELPER_AUTH_FAILED");
-    assert.equal(responses[2].result.isError, false);
+    assert.equal(responses[1].result.structuredContent.error.code, "MCP_HELPER_CACHE_UNAVAILABLE");
+    assert.equal(responses[2].result.structuredContent.error.code, "MCP_HELPER_STORAGE_FULL");
     assert.equal(responses[3].result.isError, false);
+    assert.equal(responses[4].result.isError, false);
+    assert.doesNotMatch(written, /PRIVATE_DISK_PATH/u);
     assertPrivateDirectory(cryptoCacheDir);
     assert.equal(authCalls, 3);
     assert.deepEqual(profileTokens, [token(0x62), token(0x63)]);

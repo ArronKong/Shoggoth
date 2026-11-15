@@ -184,6 +184,17 @@ class SlowCollector extends Writable {
       await failedAck.close();
     }
 
+    const storageAck = await createBridgeFixture(
+      '{"id":null,"ok":false,"error":{"code":"MCP_HELPER_STORAGE_FULL","message":"PRIVATE_STORAGE_PATH"}}\n',
+    );
+    try {
+      await assert.rejects(openRuntimeMcpBridge(storageAck.context, { timeoutMs: 500 }),
+        { code: "MCP_HELPER_STORAGE_FULL", message: "MCP_HELPER_STORAGE_FULL" });
+      await storageAck.handshake;
+    } finally {
+      await storageAck.close();
+    }
+
     const reorderedAck = await createBridgeFixture(
       '{"result":{"bridged":true},"ok":true}\n',
     );

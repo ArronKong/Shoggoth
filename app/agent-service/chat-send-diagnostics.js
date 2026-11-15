@@ -10,6 +10,7 @@ const { PUBLIC_MESSAGES } = require("./chat-service-protocol");
 const context = new AsyncLocalStorage();
 const APP_ROOT = path.resolve(__dirname, "..");
 const MAX_BYTES = 64 * 1024, MAX_RECORDS = 32;
+const SEND_METHODS = new Set(["chat.send", "chat.send.accept", "chat.secret.prepare"]);
 const PHASES = new Set(["request_validation", "controller", "response_validation", "secret_preparation",
   "send_validation", "ui_validation", "desktop_preflight", "runtime_selection", "memory_context",
   "memory_preflight", "run_input", "command_enqueue", "run_enqueue", "transcript_append", "runtime_admission",
@@ -18,7 +19,7 @@ const CODES = new Set([...Object.keys(PUBLIC_MESSAGES), "UNKNOWN_LOCAL_ERROR", "
   "ENOSPC", "EDQUOT", "EIO", "EROFS", "EACCES", "EPERM", "ENOENT", "EMFILE", "ENFILE", "ENOMEM",
   "ERR_INVALID_ARG_TYPE", "ERR_INVALID_ARG_VALUE", "ERR_OUT_OF_RANGE", "ERR_SQLITE_ERROR", "SQLITE_FULL",
   "SQLITE_BUSY", "SQLITE_READONLY", "SQLITE_IOERR", "PRIVATE_FILE_COMMIT_UNCERTAIN",
-  "PENDING_COMMAND_COMMIT_UNCERTAIN", "PENDING_COMMAND_CAPACITY", "PENDING_COMMAND_INVALID",
+  "PENDING_COMMAND_COMMIT_UNCERTAIN", "PENDING_COMMAND_CAPACITY", "PENDING_COMMAND_INVALID", "PENDING_COMMAND_WRITE_FAILED",
   "WORK_RUN_SEND_INVALID", "WORK_RUN_SEND_CANCELED", "WORK_RUN_STORE_CLOSED", "WORK_RUN_IDEMPOTENCY_RECORD_MISSING",
   "WORK_RUN_COMMAND_ID_CONFLICT", "WORK_RUN_COMMAND_SOURCE_CONFLICT", "WORK_RUN_OPERATION_CONFLICT",
   "WORKSPACE_REQUIRED_FOR_WRITABLE_RUN", "MEMORY_SCOPE_REVOKED", "MEMORY_SOURCE_REVOKED", "RUNTIME_ISOLATION_UNVERIFIED",
@@ -58,7 +59,7 @@ function errorRecord(error) {
   return { name: NAMES.has(name) ? name : "Error", code: CODES.has(data(error, "code")) ? data(error, "code") : "UNKNOWN_LOCAL_ERROR", frames };
 }
 function normalize(value) {
-  if (!value || !["chat.send", "chat.secret.prepare"].includes(value.method) || !PHASES.has(value.phase)
+  if (!value || !SEND_METHODS.has(value.method) || !PHASES.has(value.phase)
     || !Number.isSafeInteger(value.timeMs) || value.timeMs < 0
     || !Number.isSafeInteger(value.elapsedMs) || value.elapsedMs < 0
     || !Array.isArray(value.errors) || value.errors.length === 0) return null;
@@ -70,6 +71,8 @@ function normalize(value) {
     if (typeof value[field] === "string" && /^[a-f0-9]{64}$/u.test(value[field])) record[field] = value[field];
   }
   if (value.admissionAccepted === false) record.admissionAccepted = false;
+  if (value.receiptUncertain === true) record.receiptUncertain = true;
+  if (value.systemIssue === "STORAGE_FULL") record.systemIssue = value.systemIssue;
   return record;
 }
 
@@ -87,7 +90,8 @@ function recordChatSendFailure({ paths, method, phase, input, error, startedAt =
     const timeMs = Date.now();
     const record = normalize({ timeMs, elapsedMs: Math.max(0, timeMs - startedAt), method, phase, errors,
       operationHash: hash(input?.operationId), sessionHash: hash(input?.sessionKey),
-      admissionAccepted: data(error, "admissionAccepted") });
+      admissionAccepted: data(error, "admissionAccepted"), receiptUncertain: data(error, "receiptUncertain"),
+      systemIssue: require("../system-issue").storageIssueCode(error) });
     if (!record) return false;
     const target = path.join(paths.runtimeDir, client ? "chat-send-client-diagnostics.json" : "chat-send-diagnostics.json");
     let records = [];
@@ -119,7 +123,7 @@ function finishPhase(current, outcome) {
     durationMs: performance.now() - current.phaseMono }); } catch {}
 }
 function withChatSendDiagnostics({ paths, method, input, latency }, action) {
-  if (!["chat.send", "chat.secret.prepare"].includes(method)) return action();
+  if (!SEND_METHODS.has(method)) return action();
   const current = { paths, method, input, latency, phase: "request_validation", startedAt: Date.now(),
     phaseAt: Date.now(), phaseMono: performance.now() };
   return context.run(current, async () => {

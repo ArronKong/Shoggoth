@@ -88,6 +88,7 @@ function run(overrides = {}) {
       runtime: "codex", runtimeProfileId: "shoggoth-profile-1",
       runtimeAccountId: "shoggoth-internal-codex-default-v1", sessionId: "thread-1", turnId: "turn-1",
     },
+    runtimeAttemptRef: null,
     eventSeq: 3,
     waitingRequestId: null,
     startedAt: 101,
@@ -145,8 +146,8 @@ test("注册完整 Chat Service 方法集", () => {
   assert.deepEqual([...CHAT_SERVICE_METHODS], [
     "profile.list",
     "chat.session.list", "chat.session.create", "chat.session.model.set", "chat.session.settings.set", "chat.session.permission.set", "chat.session.rename",
-    "chat.session.archive", "chat.session.delete", "chat.history", "chat.search",
-    "chat.command.list", "chat.command.exec", "chat.send", "chat.operation.get", "chat.operation.reconcile",
+    "chat.session.archive", "chat.session.delete", "chat.history", "chat.continuation.group.get", "chat.search",
+    "chat.command.list", "chat.command.exec", "chat.send", "chat.send.accept", "chat.send.cancel", "chat.operation.get", "chat.operation.reconcile",
     "chat.steer", "chat.abort", "run.list", "run.get", "run.subscribe",
     "run.approval.respond", "run.input.respond",
   ]);
@@ -177,6 +178,38 @@ test("恢复旧发送有独立严格契约，查询缺失不能伪造拒绝凭�
   expectCode(() => validateChatServiceResult("chat.operation.reconcile", { ...rejected, run: currentRun() }, params), "CHAT_RESPONSE_INVALID");
 });
 
+test("接收与取消返回精确回执，查询区分已接收与待核对", () => {
+  const operation = { operationId: "send-1", sessionKey: SESSION_KEY };
+  const send = { ...operation, prompt: "hello", createdAt: 100 };
+  assert.deepEqual(validateChatServiceParams("chat.send.accept", send), send);
+  assert.deepEqual(validateChatServiceParams("chat.send.cancel", operation), operation);
+  expectCode(() => validateChatServiceParams("chat.send.cancel",
+    { ...operation, includeAcceptance: true }), "INVALID_PARAMS");
+
+  const receipt = { version: 1, ...operation, runId: "run-1", acceptedAt: 101 };
+  for (const method of ["chat.send.accept", "chat.send.cancel"]) {
+    assert.deepEqual(validateChatServiceResult(method, receipt), receipt);
+    expectCode(() => validateChatServiceResult(method, { ...receipt, run: null }), "CHAT_RESPONSE_INVALID");
+    expectCode(() => validateChatServiceResult(method, { ...receipt, acceptedAt: -1 }), "CHAT_RESPONSE_INVALID");
+  }
+
+  const accepted = { status: "accepted", run: null, receipt };
+  const unresolved = { status: "unresolved", run: null };
+  for (const [method, params] of [
+    ["chat.operation.get", operation],
+    ["chat.operation.reconcile", { ...operation, createdAt: 100 }],
+  ]) {
+    const optedIn = { ...params, includeAcceptance: true };
+    assert.deepEqual(validateChatServiceParams(method, optedIn), optedIn);
+    expectCode(() => validateChatServiceParams(method, { ...params, includeAcceptance: false }), "INVALID_PARAMS");
+    assert.deepEqual(validateChatServiceResult(method, accepted), accepted);
+    assert.deepEqual(validateChatServiceResult(method, unresolved), unresolved);
+    expectCode(() => validateChatServiceResult(method, { status: "accepted", run: null }), "CHAT_RESPONSE_INVALID");
+    expectCode(() => validateChatServiceResult(method, { ...accepted, run: currentRun() }), "CHAT_RESPONSE_INVALID");
+    expectCode(() => validateChatServiceResult(method, { ...unresolved, receipt }), "CHAT_RESPONSE_INVALID");
+  }
+});
+
 test("params validator 接受 exact DTO 并拒绝未知字段、非法 limit/cursor 与 attachments", () => {
   const valid = new Map([
     ["profile.list", { backendId: "shoggoth", cursor: null, limit: 25, enabledOnly: true }],
@@ -198,6 +231,7 @@ test("params validator 接受 exact DTO 并拒绝未知字段、非法 limit/cur
       operationId: "delete-1", sessionKey: SESSION_KEY, createdAt: 101,
     }],
     ["chat.history", { sessionKey: SESSION_KEY, cursor: null, limit: 100 }],
+    ["chat.continuation.group.get", { sessionKey: SESSION_KEY, answerEventId: "answer-1" }],
     ["chat.command.list", { sessionKey: SESSION_KEY }],
     ["chat.command.exec", { sessionKey: SESSION_KEY, text: "/compact" }],
     ["chat.send", {
@@ -515,6 +549,7 @@ test("result validator 覆盖 profile/session/history/run 与预注册的 steer/
       session: { ...readySession, status: "delete_pending" }, operation: remoteOperation("delete"),
     }],
     ["chat.history", { messages: [historyItem(1)], nextCursor: null, hasMore: false }],
+    ["chat.continuation.group.get", { target: null }],
     ["chat.command.list", {
       supported: true,
       reason: "CLI-only entries are explicitly marked",
@@ -675,6 +710,16 @@ test("当前 WorkRun DTO 保留 contextSnapshotId 与 Runtime 引用", () => {
     { run: run() },
     "null contextSnapshotId 的当前 Run 仍可读",
   );
+  const legacyRun = currentRun();
+  delete legacyRun.runtimeAttemptRef;
+  assert.deepEqual(validateChatServiceResult("run.get", { run: legacyRun }), { run: expected });
+  const runtimeAttemptRef = { ...expected.runtimeTurnRef, attemptId: "attempt-1", operationId: "send-1",
+    fingerprint: "a".repeat(64), dispatchState: "write_attempted" };
+  const attempted = currentRun({ runtimeAttemptRef });
+  assert.deepEqual(validateChatServiceResult("run.get", { run: attempted }), { run: attempted });
+  expectCode(() => validateChatServiceResult("run.get", {
+    run: currentRun({ runtimeAttemptRef: { ...runtimeAttemptRef, turnId: "different-turn" } }),
+  }), "CHAT_RESPONSE_INVALID");
   expectCode(() => validateChatServiceResult("run.get", {
     run: currentRun({ contextSnapshotId: "ctx-invalid" }),
   }), "CHAT_RESPONSE_INVALID");

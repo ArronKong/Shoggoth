@@ -109,6 +109,12 @@ class LocalFileSafeStorage {
     return Buffer.isBuffer(this.key) && this.key.length === LOCAL_CRYPTO_KEY_BYTES;
   }
 
+  encryptedBytes(plaintextBytes) {
+    if (!this.isEncryptionAvailable() || !Number.isSafeInteger(plaintextBytes)
+      || plaintextBytes <= 0 || plaintextBytes > MAX_LOCAL_CRYPTO_PLAINTEXT_BYTES) return null;
+    return LOCAL_CRYPTO_HEADER_BYTES + plaintextBytes;
+  }
+
   encryptString(value) {
     let plaintext = null;
     let nonce = null;

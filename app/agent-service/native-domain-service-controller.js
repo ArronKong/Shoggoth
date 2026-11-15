@@ -227,6 +227,7 @@ class NativeDomainServiceController {
     this.describeCronRun = options.describeCronRun || null;
     this.getRunSessionKey = options.getRunSessionKey || (() => null);
     this.getCronOutput = options.getCronOutput || (() => null);
+    this.getCronFailure = options.getCronFailure || (() => null);
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.poisoned = { kanban: null, cron: null };
@@ -398,12 +399,18 @@ class NativeDomainServiceController {
         || !Number.isSafeInteger(description.createdAt) || description.createdAt < 0) {
         throw internalError("DOMAIN_RESPONSE_INVALID");
       }
+      const sessionKey = this.getRunSessionKey(runValue);
+      const failure = sessionKey && params.failureSinceMs !== undefined && runValue.errorCode
+        && ["failed", "interrupted", "canceled"].includes(runValue.status)
+        && (runValue.finishedAt ?? runValue.startedAt ?? description.createdAt) >= params.failureSinceMs
+        ? this.getCronFailure(runValue, sessionKey) : null;
       return {
         key: stableTimestampKey(description.createdAt, runValue.id),
         item: { run: runValue, kind: description.kind, createdAt: description.createdAt,
           ...(groupBound ? { deliveryTarget: "group" } : {}),
           ...(cronOutput ? { cronOutput } : {}),
-          ...(this.getRunSessionKey(runValue) ? { sessionKey: this.getRunSessionKey(runValue) } : {}) },
+          ...(sessionKey ? { sessionKey } : {}),
+          ...(failure ? { failure } : {}) },
       };
     });
     return this.#page("cron.run.list", params, entries);

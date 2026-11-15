@@ -102,8 +102,17 @@ class LocalEmbeddingService {
     });
   }
 
-  async request(method, args, { timeoutMs = 1000 } = {}) {
-    return bounded((async () => { await this.start(); return this._send(method, args, timeoutMs); })(), timeoutMs);
+  async request(method, args, { timeoutMs = 1000, beforeSend } = {}) {
+    const deadline = performance.now() + timeoutMs;
+    return bounded((async () => {
+      await this.start();
+      if (performance.now() >= deadline) throw embeddingError("E5_TIMEOUT");
+      if (beforeSend) {
+        beforeSend();
+        if (performance.now() >= deadline) throw embeddingError("E5_TIMEOUT");
+      }
+      return this._send(method, args, timeoutMs);
+    })(), timeoutMs);
   }
 
   async close() {

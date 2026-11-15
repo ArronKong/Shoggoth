@@ -13,6 +13,7 @@ import BackendBadge from "../../components/BackendBadge";
 import BackendTabIcon, { sortBackendTabs } from "../../components/BackendTabIcon";
 import FilterTabs from "../../components/FilterTabs";
 import FusionLoader from "../../components/FusionLoader";
+import { translateGatewayError } from "../../lib/gatewayErrors";
 import { useStickyState } from "../../lib/useStickyState";
 import ApprovalRow from "./ApprovalRow";
 import { activityStatusRows } from "./activityStatusRows";
@@ -260,6 +261,9 @@ export default function ActivityFeed({
     t(`dashboard.activityAction.${action}`, { defaultValue: action });
 
   const rowSubtitle = (e: DashboardActivityEntry): string => {
+    if (e.kind === "cron" && e.backendId === "shoggoth" && e.severity === "error" && e.run.error) {
+      return translateGatewayError(e.run.error, t);
+    }
     if (e.kind === "inspiration") {
       const state = t(`inspiration.status.${e.inspiration.status}`);
       return e.summary ? `${state} · ${stripMdMarks(e.summary)}` : state;
@@ -373,7 +377,8 @@ export default function ActivityFeed({
                     <span className="dash-run-meta">{fmtClock(e.occurredAt)}</span>
                   </span>
                   {rowSubtitle(e) && (
-                    <span className={`dash-run-summary${e.severity === "error" ? " is-error" : ""}`}>
+                    <span className={`dash-run-summary${e.severity === "error" ? " is-error" : ""}`}
+                      title={e.severity === "error" ? rowSubtitle(e) : undefined}>
                       {rowSubtitle(e)}
                     </span>
                   )}

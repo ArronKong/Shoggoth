@@ -135,6 +135,26 @@ class ConversationCheckpointStore {
   }
   open() { ensurePrivateDirectoryTree(this.paths.agentsDir, this.paths.trustedRoot); this.opened = true; }
   close() { this.opened = false; this.memoryStates.clear(); this.historicalMemory?.clear(); }
+  get supportsAsyncMemoryView() { return typeof this.memoryStore?.withAsyncReadView === "function"; }
+  withFreshMemory(profileId, read, signal) {
+    let readStarted = false;
+    const complete = view => {
+      signal?.throwIfAborted();
+      view?.assertFilesCurrent?.();
+      readStarted = true;
+      return read(view);
+    };
+    if (!this.supportsAsyncMemoryView) return complete();
+    const acquire = async () => {
+      signal?.throwIfAborted();
+      return this.memoryStore.withAsyncReadView(profileId, signal, complete);
+    };
+    return acquire().catch(error => {
+      // The caller can publish checkpoint changes once its callback starts.
+      if (readStarted || error?.code !== "MEMORY_REVISION_CONFLICT") throw error;
+      return acquire();
+    });
+  }
   hasRevocations(profileId) { return this.recallPolicy?.hasRevocations(profileId) === true; }
   // A summary has no per-fact provenance, so it is tied to the recall policy's
   // complete visibility state instead: made from the messages visible in one
@@ -446,7 +466,7 @@ class ConversationCheckpointStore {
   portable(profileId, sessionId, events) {
     return this.generations(profileId, sessionId, events).find(record => !record.partial) ?? null;
   }
-  invalidation(profileId, sessionId, nativeSessionId, bindingId) {
+  invalidation(profileId, sessionId, nativeSessionId, bindingId, assertFilesCurrent) {
     const checkpoint = this.get(profileId, sessionId);
     if (!checkpoint || this.compatible(profileId, sessionId)) return null;
     const events = readEvents(this.transcriptStore, profileId, sessionId);
@@ -475,6 +495,7 @@ class ConversationCheckpointStore {
       nativeSessionId, bindingId,
       ...(guarded ? { memoryRevision: memory.revision, memoryInvalidationRevision: memory.invalidationRevision,
         memoryFreshUntil: memory.freshUntil, policyRevision } : {}) };
+    assertFilesCurrent?.();
     atomicWritePrivateFile(file, `${JSON.stringify(record)}\n`, { trustedRoot: this.paths.trustedRoot });
     return record;
   }

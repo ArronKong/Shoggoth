@@ -8,7 +8,7 @@ const module = { exports: {} };
 vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
   target: ts.ScriptTarget.ES2022 } }).outputText, { module, exports: module.exports });
 const { createPendingChatSendStore, shouldTrackChatSend, classifyChatSendObservation, isExplicitChatSendRejection, isUncertainChatSendReceipt,
-  PENDING_CHAT_SENDS_KEY, chatVerificationNoticeKey } = module.exports;
+  PENDING_CHAT_SENDS_KEY, chatVerificationNoticeKey, createPendingNativeChatStopStore, nativeChatStopIsTerminal } = module.exports;
 assert.equal(chatVerificationNoticeKey({ accepted: true }), "chat.executionNeedsVerification");
 assert.equal(chatVerificationNoticeKey({}), "chat.sendNeedsVerification");
 assert.equal(chatVerificationNoticeKey(), "chat.observeNeedsVerification");
@@ -16,6 +16,22 @@ const values = new Map(), storage = { getItem: key => values.get(key) ?? null,
   setItem: (key, value) => values.set(key, value) };
 const store = createPendingChatSendStore(() => storage, () => 10);
 const key = "agent:openclaw-fixture:session", idem = "operation-original";
+const stopStore = createPendingNativeChatStopStore(() => storage);
+const nativeStop = { key, backendId: "native-test", runId: "run-original" };
+assert.equal(stopStore.remember(nativeStop), true);
+assert.equal(createPendingNativeChatStopStore(() => storage).read()[0].runId, nativeStop.runId);
+assert.equal(stopStore.read()[0].backendId, "native-test");
+assert.equal(stopStore.remember({ ...nativeStop, idempotencyKey: idem }), false);
+assert.equal(nativeChatStopIsTerminal({}, nativeStop), false);
+assert.equal(nativeChatStopIsTerminal({ stateAuthority: "native-service", status: "verification", runId: nativeStop.runId }, nativeStop), false);
+const canceled = { stateAuthority: "native-service", status: "terminal", runId: nativeStop.runId, runStatus: "canceled" };
+assert.equal(nativeChatStopIsTerminal({ ...canceled, runId: "other-run" }, nativeStop), false);
+assert.equal(nativeChatStopIsTerminal(canceled, nativeStop), true);
+assert.equal(nativeChatStopIsTerminal({ ...canceled, runStatus: "completed" }, nativeStop), true);
+assert.equal(stopStore.forget(key), true);
+assert.equal(stopStore.read().length, 0);
+values.set("shoggoth.chat.pending-native-stops.v1", JSON.stringify([{ key, runId: "earlier-stop" }]));
+assert.equal(stopStore.read()[0].backendId, "shoggoth", "the old format remains pinned to its original backend");
 for (const backend of ["openclaw", "hermes"]) {
   assert.equal(shouldTrackChatSend(backend, ["connection-one"]), false);
   assert.equal(shouldTrackChatSend(backend, []), false);

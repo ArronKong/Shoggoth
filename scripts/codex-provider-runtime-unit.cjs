@@ -663,12 +663,18 @@ test("官方 MiMo 的冻结执行来源加载本地目录并将审批交给用�
     const profile = resources.productStore.getAgentProfile("runtime-mimo");
     const binding = { runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId };
     const { captureExecutionProviderRoute } = require("../app/agent-service/execution-provider-route");
-    const prepare = (providerRef) => resources.bridge.prepareRuntime({ ...binding, executionContract: {
+    const prepare = (providerRef, runtimeVersion = "0.167.1") => resources.bridge.prepareRuntime({ ...binding, runtimeVersion, executionContract: {
       ...captureExecutionProviderRoute({ productStore: resources.productStore, secretStore: resources.secretStore,
         profile, providerRef, modelRef: model }), ...binding,
     } });
     const mimo = await prepare("mimo");
-    assert.equal(mimo.requiresUserApproval, true);
+    assert.deepEqual(mimo.providerCapabilities, {
+      providerConfigId: require("../app/agent-service/codex-runtime-config").providerConfigAlias(endpoint("mimo", "")),
+      structuredOutput: "unsupported",
+      approvalReviewer: "user",
+    });
+    assert.equal(mimo.modelCatalog.runtimeVersion, "0.167.1");
+    assert.match(mimo.modelCatalog.digest, /^[a-f0-9]{64}$/u);
     const prefix = "model_catalog_json=";
     const catalogPath = JSON.parse(mimo.configArgs.find(value => value.startsWith(prefix)).slice(prefix.length));
     assert.equal(fs.statSync(catalogPath).mode & 0o777, 0o600);
@@ -677,8 +683,13 @@ test("官方 MiMo 的冻结执行来源加载本地目录并将审批交给用�
     const originalInode = fs.statSync(catalogPath).ino;
     assert.deepEqual((await prepare("mimo")).configArgs, mimo.configArgs);
     assert.equal(fs.statSync(catalogPath).ino, originalInode, "an identical catalog is reused");
+    const prior = await prepare("mimo", "0.159.2");
+    assert.deepEqual(prior.providerCapabilities, mimo.providerCapabilities);
+    assert.equal(prior.modelCatalog, undefined);
+    assert.equal(prior.configArgs.some(value => value.startsWith(prefix)), false);
     for (const other of [await prepare("mimo-mirror"), await resources.bridge.prepareRuntime(binding)]) {
-      assert.equal(other.requiresUserApproval, undefined);
+      assert.equal(other.providerCapabilities, undefined);
+      assert.equal(other.modelCatalog, undefined);
       assert.equal(other.configArgs.some(value => value.startsWith(prefix)), false);
     }
   } finally {

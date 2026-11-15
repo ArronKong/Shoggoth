@@ -2127,6 +2127,18 @@
   color: var(--muted-strong);
   border-style: dashed;
 }
+.chat-continuation-action {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--skin-hairline);
+  border-radius: 8px;
+  background: var(--skin-glass-pill);
+  color: var(--chat-text);
+  cursor: pointer;
+}
+.chat-continuation-action:hover { background: var(--bg-hover); }
+.chat-continuation-action:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 
 /* collapsed system-injected prompt row (cron/heartbeat envelopes) */
 .chat-sysline {

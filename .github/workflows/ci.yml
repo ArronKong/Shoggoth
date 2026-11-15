@@ -34,6 +34,16 @@ jobs:
         run: node --test scripts/static-ui-assets-regression.cjs scripts/system-issue-unit.cjs
       - name: Borrowed-memory Hook isolation in the real macOS sandbox
         run: node --test scripts/native-memory-sharing-hook-no-copy-unit.cjs
+      - name: Native chat recovery and group re-entry in Electron
+        run: |
+          node --test scripts/runtime-upgrade-compatible-service-unit.cjs
+          node --test scripts/runtime-install-inbox-compatibility-unit.cjs
+          chat_dist="$RUNNER_TEMP/shoggoth-chat-recovery-dist"
+          npm --prefix app/manage-ui run build -- --outDir "$chat_dist" --emptyOutDir
+          node scripts/manage-bundle-budget-regression.mjs --dist="$chat_dist"
+          node scripts/chat-acceptance-recovery-electron.cjs "$chat_dist"
+          node scripts/chat-acceptance-recovery-electron.cjs "$chat_dist" --group-continuation
+          node scripts/group-activity-panel-electron.mjs
       - name: Install the version-pinned Pi test SDK without lifecycle scripts
         run: npm install --prefix "$RUNNER_TEMP/shoggoth-hooks-pi" --ignore-scripts --no-audit --no-fund --save-exact @earendil-works/pi-coding-agent@0.84.4
       - name: Actual Pi tool loop with controlled model input
@@ -134,6 +144,13 @@ jobs:
           npm run check:memory-core
       - name: Native Service, transcript, context and memory core gate
         run: npm run test:core
+      - name: Active Memory direct chat stall regression
+        run: node --test scripts/native-service-active-memory-stall-unit.cjs
+      - name: Native context handoff and lifecycle recovery
+        run: |
+          node --test --test-concurrency=1 scripts/context-window-handoff-unit.cjs scripts/native-cli-compaction-unit.cjs
+          node scripts/shoggoth-agent-lifecycle-integration.mjs --rounds 50 --crash-points all
+          node scripts/shoggoth-agent-isolation-soak.mjs --interactions 1000 --agents 2
       - name: Native CLI capability and upgrade contracts
         run: |
           node --test scripts/runtime-capability-evidence-unit.cjs scripts/runtime-executable-identity-unit.cjs scripts/runtime-pool-upgrade-unit.cjs scripts/runtime-compatibility-unit.cjs scripts/runtime-support-unit.cjs

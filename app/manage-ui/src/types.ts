@@ -2758,6 +2758,8 @@ export interface BackendDescriptor {
   };
   surfaces: {
     chat: boolean;
+    durableChatStop?: boolean;
+    structuredChatContinuation?: boolean;
     agents: boolean;
     models: boolean;
     skills: boolean;

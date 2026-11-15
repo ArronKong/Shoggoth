@@ -3058,6 +3058,11 @@ export function testGroupChatHost(peer: import('../types').GroupRuntimeHostConne
 export function getGroupChat(id: string) {
   return jsonFetch<import('../types').GroupChatView>(groupChatUrl("/detail", id));
 }
+export function getGroupContinuation(agentId: string, sessionKey: string, answerEventId: string) {
+  const query = new URLSearchParams({ sessionKey, answerEventId });
+  return jsonFetch<{ target: { groupId: string; ownerScope: string; sourceEventId: string } | null }>(
+    `${agentUrl("shoggoth", agentId, "/group-continuation")}&${query}`, { cache: "no-store" });
+}
 export function deleteGroupChat(id: string, expectedMetadataRevision: number, options?: { force: true; ownerScope: string }) {
   return jsonFetch<{ groupId: string; status: "deleting" | "deleted" }>(groupChatUrl("/detail", id), {
     method: "DELETE", body: JSON.stringify({ expectedMetadataRevision, ...options }),

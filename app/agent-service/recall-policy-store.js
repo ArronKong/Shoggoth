@@ -6,12 +6,14 @@ const path = require("node:path");
 const { atomicWritePrivateFile, readPrivateFile, validatePrivateStat, writeFully } = require("./private-file");
 const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./security");
 const { validateCanonicalOwnedDirectory, sameIdentity } = require("./runtime-storage-inspector");
+const { listProfileSessions } = require("./chat-session-lookup");
 
 const SCHEMA_VERSION = 1;
 const MAX_LOG_BYTES = 64 * 1024 * 1024;
 // Larger full bodies cannot enter the conversation recall index. Keep their
 // exact hash protection while bounding the cached literals used for wrappers.
 const MAX_SOURCE_LITERAL_BYTES = 256 * 1024;
+const MAX_FRESH_SOURCE_LOOKUPS = 2048;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const REASONS = new Set(["forgotten", "memory_removed", "user_deleted", "expired", "legacy_unknown"]);
@@ -37,6 +39,12 @@ function earliestContentCutoff(state) {
   let earliest = Infinity;
   for (const cutoff of state.contentCutoffs.values()) earliest = Math.min(earliest, cutoff.createdAt);
   return earliest;
+}
+function rememberFreshUserEvent(events, event, earliest) {
+  if (event.kind !== "user" || !event.runId || !Number.isSafeInteger(event.occurredAt) || event.occurredAt <= earliest) return;
+  if (!events.has(event.id)) events.set(event.id, new Map());
+  const runs = events.get(event.id);
+  runs.set(event.runId, Math.max(runs.get(event.runId) ?? 0, event.occurredAt));
 }
 function exactKeys(value, keys) {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -326,6 +334,7 @@ class RecallPolicyStore {
       contentCutoffs: new Map(),
       derivedRuns: new Set(), derivedRevision: 0, derivedSourceRevision: null,
       freshUserEvents: new Map(), freshUserSourceRevision: null,
+      freshSourceLookups: new Map(), freshLookupRevision: null,
       reauthorizedContents: new Map(), reauthorizedMemoryRevision: null,
       reauthorizedSourceRevision: null, reauthorizedBuiltAt: 0, reauthorizedNextChange: 0,
       historicalVisibilityCache: null, conversationState: null, hasMemoryRemovals: false,
@@ -436,8 +445,9 @@ class RecallPolicyStore {
     const runs = new Set();
     const resolvedRefs = new Set();
     const resolvedTextRefs = new Set();
+    const indexed = typeof this.transcriptStore.matchRecallSourceRefs === "function";
     const freshUserEvents = new Map();
-    const earliestRenewal = earliestContentCutoff(state);
+    const earliestRenewal = indexed ? Infinity : earliestContentCutoff(state);
     const sourceTextCutoffs = new Map();
     const sourceLiteralCutoffs = new Map();
     const sourceRefSources = new Map();
@@ -446,15 +456,14 @@ class RecallPolicyStore {
       sourceRefSources.get(ref).push(source);
     }
     try {
-      for (const session of this.chatSessionStore.listSessions()) {
-        if (session.profileId !== state.profileId) continue;
-        for (const event of this.transcriptStore.listEvents(state.profileId, session.id)) {
-          if (event.kind === "user" && event.runId
-            && Number.isSafeInteger(event.occurredAt) && event.occurredAt > earliestRenewal) {
-            if (!freshUserEvents.has(event.id)) freshUserEvents.set(event.id, new Map());
-            const seen = freshUserEvents.get(event.id);
-            seen.set(event.runId, Math.max(seen.get(event.runId) ?? 0, event.occurredAt));
-          }
+      for (const session of listProfileSessions(this.chatSessionStore, state.profileId)) {
+        const matched = indexed ? this.transcriptStore.matchRecallSourceRefs(state.profileId, session.id, state.suppressedRefs) : null;
+        for (const runId of matched?.runIds || []) {
+          resolvedRefs.add(runId);
+          runs.add(runId);
+        }
+        for (const event of matched?.events ?? this.transcriptStore.listEvents(state.profileId, session.id)) {
+          if (!indexed) rememberFreshUserEvent(freshUserEvents, event, earliestRenewal);
           if (state.suppressedRefs.has(event.id)) {
             resolvedRefs.add(event.id);
             if (event.runId) runs.add(event.runId);
@@ -505,8 +514,10 @@ class RecallPolicyStore {
     state.normalizedContents = unresolved;
     state.sourceTextCutoffs = sourceTextCutoffs;
     state.sourceLiteralCutoffs = sourceLiteralCutoffs;
-    state.freshUserEvents = freshUserEvents;
-    state.freshUserSourceRevision = sourceRevision;
+    if (!indexed) {
+      state.freshUserEvents = freshUserEvents;
+      state.freshUserSourceRevision = sourceRevision;
+    }
     state.derivedRevision = state.revision;
     state.derivedSourceRevision = sourceRevision;
   }
@@ -671,15 +682,9 @@ class RecallPolicyStore {
     const events = new Map();
     const earliestRenewal = earliestContentCutoff(state);
     try {
-      for (const session of this.chatSessionStore.listSessions()) {
-        if (session.profileId !== state.profileId) continue;
+      for (const session of listProfileSessions(this.chatSessionStore, state.profileId)) {
         for (const event of this.transcriptStore.listEvents(state.profileId, session.id)) {
-          if (event.kind !== "user" || !event.runId
-            || !Number.isSafeInteger(event.occurredAt)
-            || event.occurredAt <= earliestRenewal) continue;
-          if (!events.has(event.id)) events.set(event.id, new Map());
-          const runs = events.get(event.id);
-          runs.set(event.runId, Math.max(runs.get(event.runId) ?? 0, event.occurredAt));
+          rememberFreshUserEvent(events, event, earliestRenewal);
         }
       }
     } catch (cause) { throw this._unavailable(cause); }
@@ -687,11 +692,38 @@ class RecallPolicyStore {
     state.freshUserSourceRevision = sourceRevision;
     return events;
   }
+  _latestPairedUserSource(state, refs) {
+    const sourceRevision = this._sourceRevision(state);
+    if (sourceRevision === null || sourceRevision !== state.freshLookupRevision) {
+      state.freshSourceLookups.clear();
+      state.freshLookupRevision = sourceRevision;
+    }
+    const cache = state.freshSourceLookups;
+    const key = crypto.createHash("sha256").update(JSON.stringify([...refs].sort())).digest("hex");
+    if (cache.has(key)) return cache.get(key);
+    let latest = -Infinity;
+    try {
+      for (const session of listProfileSessions(this.chatSessionStore, state.profileId)) {
+        const { events } = this.transcriptStore.matchRecallSourceRefs(state.profileId, session.id, refs);
+        for (const event of events) {
+          if (event.kind === "user" && event.runId && refs.has(event.runId) && Number.isSafeInteger(event.occurredAt)) {
+            latest = Math.max(latest, event.occurredAt);
+          }
+        }
+      }
+    } catch (cause) { throw this._unavailable(cause); }
+    if (cache.size >= MAX_FRESH_SOURCE_LOOKUPS) cache.delete(cache.keys().next().value);
+    cache.set(key, latest);
+    return latest;
+  }
   _hasFreshExplicitSource(state, refs, since) {
     if (refs.some((ref) => ref.startsWith("user-edit:"))) return true;
     const eventRefs = new Set(refs.filter((ref) => !/^(?:workspace:|codex-memory:)/u.test(ref)));
     if (eventRefs.size === 0) return false;
     if (!this.chatSessionStore || !this.transcriptStore) return !this.strictSourceResolution;
+    if (typeof this.transcriptStore.matchRecallSourceRefs === "function") {
+      return this._latestPairedUserSource(state, eventRefs) > since;
+    }
     const sources = this._freshUserEvents(state);
     for (const eventId of eventRefs) {
       for (const [runId, occurredAt] of sources.get(eventId) || []) {

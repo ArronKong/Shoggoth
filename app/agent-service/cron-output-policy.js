@@ -34,7 +34,7 @@ function cronUnattendedCompletionError(run, events, resultSummary, resolveDispla
   return !final.trim() || SILENT_FINALS.has(final.trim()) ? "CRON_AUTHORIZATION_DENIED" : null;
 }
 
-function cronOutputDecision(run, events, resolveDisplay = event => event, isDuplicate = () => false) {
+function cronOutputDecision(run, events, resolveDisplay = event => event, isDuplicate = () => false, onAnswer) {
   if (run?.source !== "cron") return null;
   const own = events.filter(event => event.runId === run.id);
   // Opt in at admission. Existing transcripts and ordinary user turns in the
@@ -46,6 +46,7 @@ function cronOutputDecision(run, events, resolveDisplay = event => event, isDupl
   const saved = own.findLast(event => event.content?.transcriptType === "terminal")?.content?.cronOutput;
   if (validCronOutput(saved) && saved.disposition !== "pending") return structuredClone(saved);
   const selected = cronFinalAnswer(own, resolveDisplay);
+  onAnswer?.(selected);
   // A run summary is bounded. Prefer the full canonical final, so a marker
   // followed by a long report cannot become silence through truncation.
   const text = selected?.content.text ?? run.resultSummary ?? "";

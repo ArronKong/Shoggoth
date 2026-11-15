@@ -12,6 +12,7 @@ const path = require("node:path");
 const { createAgentService } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
+const { MemoryIndexRebuild } = require("../app/agent-service/shoggoth-memory/index-rebuild.cjs");
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(read, label, timeoutMs = 15_000) {
@@ -24,7 +25,7 @@ async function until(read, label, timeoutMs = 15_000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-async function fixture(t) {
+async function fixture(t, { provider = "none" } = {}) {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sg-memory-events-"));
   fs.chmodSync(root, 0o700);
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
@@ -34,7 +35,7 @@ async function fixture(t) {
   const service = createAgentService({ paths, safeStorage, memoryCore: true,
     version: "shoggoth-memory-durable-events-fixture", prewarmMcpAuth: false,
     memoryCoreConfig: {
-      memory: { search: { provider: "none", sources: ["sessions"],
+      memory: { search: { provider, sources: ["sessions"],
         sync: { watch: false, intervalMinutes: 0 }, query: { minScore: 0 } } },
       plugins: { entries: { "memory-core": { config: { dreaming: { enabled: false } } } } },
     },
@@ -48,7 +49,7 @@ async function fixture(t) {
   const sourceStores = [["TranscriptStore", service.transcriptStore],
     ["ChatSessionStore", service.chatSessionStore], ["RecallPolicy", service.memoryEngine.recallPolicy]]
     .map(([name, store]) => ({ name, store, serviceSubscriptions: new Set(store.changeSubscriptions) }));
-  service.memoryEngine.embedding = null;
+  if (provider === "none") service.memoryEngine.embedding = null;
   service.memoryEngine.complete = async () => { calls++; assert.fail("durable source sync must not invoke a model"); };
   return { root, paths, service, sourceStores, get stopped() { return stopped; }, profileId: DEFAULT_AGENT_PROFILE_ID,
     assertNoModels: () => assert.equal(calls, 0),
@@ -104,6 +105,222 @@ function assertNativeListeners(f, count) {
   }
 }
 function assertUnsubscribed(f) { assertNativeListeners(f, 0); }
+
+test("Product archive capture leaves failed worker reads dirty and retries from current source", { timeout: 30_000 }, async t => {
+  const f = await fixture(t);
+  const initial = session(f, "archive-worker", "Synthetic violet calibration remains visible.");
+  const { host, index } = await openIndex(f);
+  const old = chunks(index, initial.session.id);
+  const archive = path.join(host.workspaceDir, ".session-source", initial.session.id);
+  const work = () => index.sync({ nativeParams: { sessions: [{ agentId: f.profileId,
+    sessionId: initial.session.id, sessionKey: initial.session.sessionKey }] } });
+  const capture = new AsyncLocalStorage();
+  const build = host.buildSessionEntry.bind(host), store = f.service.memoryStore;
+  const scan = store.withAsyncReadView.bind(store), stamp = store._filesystemStamp.bind(store);
+  let workerReads = 0, synchronousWalks = 0, failNext = true;
+  const buildSpy = t.mock.method(host, "buildSessionEntry", (...args) =>
+    args[0] === archive ? capture.run(true, () => build(...args)) : build(...args));
+  const walker = t.mock.method(store, "_filesystemStamp", (...args) => {
+    if (capture.getStore()) synchronousWalks++;
+    return stamp(...args);
+  });
+  const scans = t.mock.method(store, "withAsyncReadView", (profileId, signal, read, scanSignal) => {
+    if (capture.getStore()) {
+      workerReads++;
+      if (failNext) {
+        failNext = false;
+        throw Object.assign(new Error("archive worker unavailable"), { code: "MEMORY_SCAN_UNAVAILABLE" });
+      }
+    }
+    return scan(profileId, signal, read, scanSignal);
+  });
+  try {
+    completedTurn(f, initial.session, "archive-failed", "Synthetic stale candidate must not reach the index.");
+    await assert.rejects(work(), { code: "MEMORY_SCAN_UNAVAILABLE" });
+    assert.equal(chunks(index, initial.session.id), old, "failed capture preserves the previous complete index rows");
+    assert.equal(index.embeddingExecutor.sessionsDirtyFiles.has(archive), true);
+    f.service.transcriptStore.setContextExcluded({ profileId: f.profileId, sessionId: initial.session.id,
+      eventId: "archive-failed-event", contextExcluded: true });
+    completedTurn(f, initial.session, "archive-retry", "Synthetic current emerald candidate is admitted.");
+    await work();
+    const indexed = chunks(index, initial.session.id);
+    assert.match(indexed, /current emerald candidate/u);
+    assert.doesNotMatch(indexed, /stale candidate/u);
+    assert.ok(workerReads >= 2);
+    assert.equal(synchronousWalks, 0, "archive capture uses a worker projection on both attempts");
+    assert.equal(index.embeddingExecutor.sessionsDirtyFiles.has(archive), false);
+  } finally { scans.mock.restore(); walker.mock.restore(); buildSpy.mock.restore(); }
+});
+
+for (const phase of ["worker proof", "physical send", "stale file proof", "cache publication", "row publication"]) {
+  test(`Product index rejects withdrawn session source at ${phase}`, { timeout: 30_000 }, async t => {
+    const f = await fixture(t, { provider: "shoggoth-e5" });
+    const embedding = f.service.nativeMemorySemanticService.embedding;
+    t.mock.method(embedding, "start", async () => {});
+    const marker = "New violet freighter source remains private.";
+    const initial = session(f, "embedding-proof", "Earlier amber telescope source remains visible.");
+    let dispatched = 0, armed = false, reached = false, withdrawn;
+    const revoke = () => {
+      reached = true;
+      f.service.transcriptStore.setContextExcluded({ profileId: f.profileId,
+        sessionId: initial.session.id, eventId: withdrawn.id, contextExcluded: true });
+    };
+    t.mock.method(embedding, "_send", async (method, args) => {
+      if (method !== "encode-passage") throw Object.assign(new Error("Fixture indexes Product sessions only"), { code: "E5_WORKER_UNAVAILABLE" });
+      if (args.text.includes(marker)) {
+        dispatched++;
+        if (phase === "cache publication") revoke();
+      }
+      return Float32Array.of(1, 0);
+    });
+    const { host, index } = await openIndex(f), executor = index.embeddingExecutor;
+    const archive = path.join(host.workspaceDir, ".session-source", initial.session.id);
+    const work = () => index.sync({ nativeParams: { sessions: [{ agentId: f.profileId,
+      sessionId: initial.session.id, sessionKey: initial.session.sessionKey }] } });
+    const oldRows = chunks(index, initial.session.id);
+    const cacheRows = () => index.db.prepare("SELECT hash FROM memory_embedding_cache ORDER BY hash").all();
+    const oldCache = cacheRows();
+    assert.match(oldRows, /amber telescope/u);
+    assert.ok(oldCache.length > 0);
+    const guarded = new AsyncLocalStorage();
+    const store = f.service.memoryStore, scan = store.withAsyncReadView.bind(store), stamp = store._filesystemStamp;
+    let walks = 0;
+    t.mock.method(f.service.memoryStore, "_filesystemStamp", function(...args) {
+      if (guarded.getStore()) walks++;
+      return stamp.apply(this, args);
+    });
+    t.mock.method(store, "withAsyncReadView", (...args) => {
+      const caller = new Error().stack;
+      if (armed && phase === "worker proof" && !reached && caller.includes("MemoryIndexEmbedding.retainSessionProof")) {
+        reached = true;
+        throw Object.assign(new Error("index worker unavailable"), { code: "MEMORY_SCAN_UNAVAILABLE" });
+      }
+      return scan(...args);
+    });
+    const request = embedding.request.bind(embedding);
+    t.mock.method(embedding, "request", (method, args, options) => {
+      if (armed && ["physical send", "stale file proof"].includes(phase)
+        && method === "encode-passage" && args.text.includes(marker) && !reached) {
+        if (phase === "physical send") revoke();
+        else {
+          reached = true;
+          fs.appendFileSync(path.join(host.workspaceDir, "MEMORY.md"), "\nFresh source edit during encoder wait.\n", { mode: 0o600 });
+        }
+      }
+      return guarded.run(true, () => request(method, args, options));
+    });
+    const mutate = executor.publishedDatabase.withMutation;
+    t.mock.method(executor.publishedDatabase, "withMutation", action => mutate(() => {
+      if (armed && phase === "row publication" && !reached) revoke();
+      return guarded.run(true, action);
+    }));
+    armed = true;
+    ({ event: withdrawn } = completedTurn(f, initial.session, "embedding-new", marker));
+    const code = { "worker proof": "MEMORY_SCAN_UNAVAILABLE", "stale file proof": "MEMORY_REVISION_CONFLICT" }[phase] ?? "MEMORY_SESSION_CHANGED";
+    await assert.rejects(work(), { code });
+    assert.ok(reached);
+    assert.equal(dispatched, ["worker proof", "physical send", "stale file proof"].includes(phase) ? 0 : 1);
+    assert.equal(chunks(index, initial.session.id), oldRows);
+    assert.equal(executor.sessionsDirtyFiles.has(archive), true);
+    if (phase !== "row publication") assert.deepEqual(cacheRows(), oldCache);
+    assert.equal(walks, 0);
+    armed = false;
+    if (["worker proof", "stale file proof"].includes(phase)) revoke();
+    completedTurn(f, initial.session, "embedding-retry", "Current magenta coastal marker is public.");
+    await work();
+    assert.match(chunks(index, initial.session.id), /magenta coastal marker/u);
+    assert.doesNotMatch(chunks(index, initial.session.id), /violet freighter/u);
+    assert.equal(executor.sessionsDirtyFiles.has(archive), false);
+  });
+}
+
+for (const phase of ["worker unavailable", "session revoked during worker wait", "file edited before commit", "oversized workspace"]) {
+  test(`Product shadow publication validates ${phase} without replacing the old index prematurely`, { timeout: 30_000 }, async t => {
+    const f = await fixture(t);
+    const initial = session(f, "shadow-proof", "Earlier amber telescope remains visible.");
+    const { host, index } = await openIndex(f);
+    const currentRows = () => index.db.prepare("SELECT id,hash,text FROM memory_index_chunks ORDER BY id").all();
+    const currentRevision = () => index.db.prepare("SELECT revision FROM memory_index_state WHERE id=1").get().revision;
+    const shadows = () => fs.readdirSync(path.dirname(index.databasePath))
+      .filter(name => name.startsWith(`${path.basename(index.databasePath)}.memory-reindex-`));
+    const oldRows = currentRows(), oldRevision = currentRevision();
+    assert.match(chunks(index, initial.session.id), /amber telescope/u);
+    const marker = "New violet freighter is awaiting index publication.";
+    const { event } = completedTurn(f, initial.session, "shadow-changed", marker);
+    const scope = new AsyncLocalStorage(), store = f.service.memoryStore;
+    const scan = store.withAsyncReadView.bind(store), stamp = store._filesystemStamp;
+    const publish = MemoryIndexRebuild.prototype.publishShadow;
+    const validate = MemoryIndexRebuild.prototype.assertSources;
+    let reached = false, armed = true, publicationViews = 0, synchronousWalks = 0;
+    const revoke = () => f.service.transcriptStore.setContextExcluded({ profileId: f.profileId,
+      sessionId: initial.session.id, eventId: event.id, contextExcluded: true });
+    t.mock.method(MemoryIndexRebuild.prototype, "assertSources", function(...args) {
+      return scope.run(scope.getStore() || "row validation", () => validate.apply(this, args));
+    });
+    t.mock.method(MemoryIndexRebuild.prototype, "publishShadow", function(...args) {
+      return scope.run("publication", () => publish.apply(this, args));
+    });
+    t.mock.method(store, "_filesystemStamp", function(...args) {
+      if (scope.getStore()) synchronousWalks++;
+      return stamp.apply(this, args);
+    });
+    t.mock.method(store, "withAsyncReadView", async (...args) => {
+      if (scope.getStore() === "publication") {
+        publicationViews++;
+        if (armed && !reached && phase !== "file edited before commit") {
+          reached = true;
+          if (phase === "worker unavailable" || phase === "oversized workspace") {
+            throw Object.assign(new Error(phase), { code: phase === "worker unavailable" ? "MEMORY_SCAN_UNAVAILABLE" : "MEMORY_SCAN_TOO_LARGE" });
+          }
+          await new Promise(resolve => setImmediate(resolve));
+          assert.deepEqual(currentRows(), oldRows, "old rows remain available during the proof wait");
+          revoke();
+        }
+      }
+      return scan(...args);
+    });
+    const execute = index.db.exec.bind(index.db);
+    t.mock.method(index.db, "exec", sql => {
+      const result = execute(sql);
+      if (armed && !reached && phase === "file edited before commit"
+        && scope.getStore() === "publication" && sql.includes("DELETE FROM main.memory_index_sources")) {
+        reached = true;
+        fs.appendFileSync(path.join(host.workspaceDir, "MEMORY.md"), "\nSynthetic edit during shadow transaction.\n", { mode: 0o600 });
+      }
+      return result;
+    });
+
+    const code = { "worker unavailable": "MEMORY_SCAN_UNAVAILABLE",
+      "session revoked during worker wait": "MEMORY_SESSION_CHANGED", "file edited before commit": "MEMORY_REVISION_CONFLICT" }[phase];
+    if (code) {
+      await assert.rejects(index.sync({ force: true }), { code });
+      assert.deepEqual(currentRows(), oldRows);
+      assert.equal(currentRevision(), oldRevision);
+      assert.equal(index.rebuildRetryState.sessionsFullRetryDirty, true);
+      assert.equal(synchronousWalks, 0, "authority failure never falls back to a synchronous tree walk");
+      if (phase !== "session revoked during worker wait") revoke();
+    } else {
+      await index.sync({ force: true });
+      assert.ok(synchronousWalks > 0, "legacy oversized workspaces use an authoritative synchronous view");
+      assert.match(chunks(index, initial.session.id), /violet freighter/u);
+      revoke();
+    }
+    assert.ok(reached);
+    assert.equal(publicationViews, 1);
+    assert.deepEqual(shadows(), []);
+
+    armed = false; synchronousWalks = 0; publicationViews = 0;
+    completedTurn(f, initial.session, "shadow-retry", "Current magenta beacon is ready.");
+    await index.sync({ force: true });
+    const text = chunks(index, initial.session.id);
+    assert.match(text, /magenta beacon/u);
+    assert.doesNotMatch(text, /violet freighter/u);
+    assert.equal(publicationViews, 1);
+    assert.equal(synchronousWalks, 0, "the normal shadow validation and publication use a worker proof");
+    assert.equal(index.rebuildRetryState.sessionsFullRetryDirty, false);
+    assert.deepEqual(shadows(), []);
+  });
+}
 
 test("completed transcript commits and context exclusion update native index after the real five-second batch", { timeout: 40_000 }, async t => {
   const f = await fixture(t), initial = session(f, "initial", "Violet calibration remains visible.");

@@ -131,6 +131,26 @@ function chatAttachmentPath(stateDir, sessionKey, attachment) {
   return path.join(stateDir, "chat-attachments", sessionKey, attachment.id, attachmentName(attachment.name));
 }
 
+// A continuation reads the original session's prepared copy. It must still
+// match every saved media chunk. Preparation and rechecks never rewrite it.
+function readContinuationAttachment(media, attachment, sessionKey, maxBytes) {
+  if (!media || !mediaId(sessionKey) || !validAttachments([attachment]) || attachment.size > maxBytes
+    || !isText(attachment.name, attachment.mimeType)) return null;
+  media.assertAvailable([attachment]);
+  const file = chatAttachmentPath(media.paths.stateDir, sessionKey, attachment);
+  if (fs.realpathSync(file) !== file) return null;
+  const bytes = readPrivateFile(file, { maxBytes });
+  if (bytes.length !== attachment.size) return null;
+  for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
+    const { content, nextOffset } = media.read({ id: attachment.id, offset });
+    const end = Math.min(offset + CHUNK_BYTES, bytes.length);
+    if (nextOffset !== end || !bytes.subarray(offset, end).equals(Buffer.from(content, "base64"))) return null;
+  }
+  const text = utf8(bytes);
+  if (text === null) return null;
+  return { ...attachment, path: file, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), text };
+}
+
 function prepareChatAttachments(media, attachments, sessionKey) {
   // Inspiration follow-ups can carry both the note's and this turn's attachments.
   if (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS * 2
@@ -205,4 +225,4 @@ function imageAttachments(attachments) {
 
 module.exports = { CHAT_MAX_PROMPT_BYTES, CHAT_ATTACHMENT_CAPABILITIES, explicitPathAttachment,
   uploadChatAttachments, prepareChatAttachments, chatAttachmentDirectory, attachmentPrompt, imageAttachments,
-  mimeForFileName, verifiedAttachmentTextRanges };
+  mimeForFileName, verifiedAttachmentTextRanges, readContinuationAttachment };

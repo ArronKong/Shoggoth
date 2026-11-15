@@ -120,10 +120,27 @@ for (const dreamingStorageMode of ["separate", "both"]) test(`real Product cross
     const a = seed(service, A, workspace, "reader-first", "Find telescope information");
     const found = await call(a.run, "memory_search", { query: "telescope", memoryScope: "all", minScore: 0, maxResults: 20 });
     const borrowed = found.results.find(row => row.ownerProfileId === B && row.snippet.includes(MARKER)); assert.ok(borrowed, JSON.stringify(found));
-    assert.equal(found.coverage, "complete"); assert.equal(modelCalls, 0); assert.ok(found.results.some(row => row.ownerProfileId === C));
+    assert.equal(found.coverage, "complete", JSON.stringify(found.unavailableSources));
+    assert.equal(modelCalls, 0); assert.ok(found.results.some(row => row.ownerProfileId === C));
     assert.deepEqual(owner.listShared(A).items, []);
-    const read = await call(a.run, "memory_get", { id: borrowed.sourceRef }); assert.match(read.text, new RegExp(MARKER));
-    assert.equal((await call(a.run, "memory_explain", { id: borrowed.sourceRef })).evidence.status, "verified");
+    const readSnapshot = owner.store._snapshot, scanned = new Set(), asyncRead = owner.withAsyncMemoryReadView;
+    owner.store._snapshot = function (profileId) {
+      assert.equal(profileId, A, "MCP cannot synchronously enumerate a lender workspace");
+      return readSnapshot.call(this, profileId);
+    };
+    owner.withAsyncMemoryReadView = function (profileId, ...args) {
+      scanned.add(profileId);
+      return asyncRead.call(this, profileId, ...args);
+    };
+    let read;
+    try {
+      read = await call(a.run, "memory_get", { id: borrowed.sourceRef }); assert.match(read.text, new RegExp(MARKER));
+      assert.equal((await call(a.run, "memory_explain", { id: borrowed.sourceRef })).evidence.status, "verified");
+      assert.deepEqual([...scanned].sort(), [A, B, C].sort(), "worker views cover the requested lender and existing run dependencies");
+    } finally {
+      owner.store._snapshot = readSnapshot;
+      owner.withAsyncMemoryReadView = asyncRead;
+    }
     await assert.rejects(call(a.run, "memory_get", { path: "../source-b/MEMORY.md" }));
     service.transcriptStore.appendEvent({ profileId: A, sessionId: a.session.id, id: "reader-tool", runId: a.run.id, kind: "tool_result",
       borrowedMemoryRefs: read.borrowedMemoryRefs, content: { resultSummary: read.text, tool: { name: "memory_get", output: read } }, contextContent: { tool: { name: "memory_get", output: read } } });
@@ -179,7 +196,8 @@ for (const dreamingStorageMode of ["separate", "both"]) test(`real Product cross
     }
     const dep = borrowed.borrowedMemoryRefs;
     assert.equal(dep[0].policyRevision, 0);
-    // Routine flush and Dreaming writes keep the existing checkpoint valid.
+    // Appending own memory preserves the checkpoint's invalidation anchor.
+    // Withdrawals below must still invalidate its separate borrowed evidence.
     const currentMemory = checkpointStore.memoryState(A);
     assert.ok(currentMemory.revision > memory.revision);
     assert.equal(currentMemory.invalidationRevision, memory.invalidationRevision);
@@ -334,7 +352,19 @@ for (const dreamingStorageMode of ["separate", "both"]) test(`real Product cross
       service.workDispatcher.transition(other.run.id, "completed"); await owner.finishActiveMemoryRun(other.run);
     }
     const dailySourceFile = path.join(owner.store.workspace(B), flushed.path), originalDaily = fs.readFileSync(dailySourceFile, "utf8");
-    fs.writeFileSync(dailySourceFile, originalDaily.replaceAll(DAILY, "withdrawn_owner_daily_origin"), { mode: 0o600 });
+    const readPublication = owner.withMemoryOwnerReadViews;
+    let changedDuringPublication = false;
+    owner.withMemoryOwnerReadViews = function (profileId, owners, signal, publish) {
+      return readPublication.call(this, profileId, owners, signal, view => {
+        fs.writeFileSync(dailySourceFile, originalDaily.replaceAll(DAILY, "withdrawn_owner_daily_origin"), { mode: 0o600 });
+        changedDuringPublication = true;
+        return publish(view);
+      });
+    };
+    try {
+      await assert.rejects(call(reportRun, "memory_get", { id: reportReads[0].report.sourceRef }), { code: "MEMORY_SHARED_SOURCE_REVOKED" });
+      assert.equal(changedDuringPublication, true, "the original GET reached its independent publication proof");
+    } finally { owner.withMemoryOwnerReadViews = readPublication; }
     for (const { report, reportRead } of reportReads) {
       assert.equal(owner.borrowedMemoryDependenciesCurrent(A, a.session.id, reportRead.borrowedMemoryRefs), false, "changing real report origins must invalidate cached report dependencies");
       await assert.rejects(call(reportRun, "memory_get", { id: report.sourceRef }));

@@ -11,10 +11,35 @@ function fixture() {
   const run = { id: "read-run", source: "chat", sourceId: "session-key", profileId: "a", workspace: "/project" };
   const input = { profileId: "a", run, workspace: run.workspace, maxSensitivity: "private", query: "telescope", minScore: 0, maxResults: 10 };
   const own = { items: [], results: [{ path: "MEMORY.md", snippet: "Own telescope", score: 0.01, startLine: 1, endLine: 1 }], revision: 4 };
+  const scanCounts = new Map(), invalidated = new Set(), suppliedViews = new Map();
   const service = { now: () => now, profiles: () => profiles,
     chatSessionStore: { listSessions: () => [{ id: "session-id", sessionKey: "session-key", profileId: "a", workspace: "/project" }] },
     database: { open() {}, db: { exec() {}, prepare() { return { get: () => null, all: () => [] }; } } },
-    store: { list: () => [], getRevision: () => 4 }, viewStatus: () => ({ owner: "shoggoth-memory-core" }) };
+    store: { getRevision: () => 4 }, activeFileEntries: () => [],
+    withMemoryReadView(_profileId, read) { return read(); },
+    memoryViewFor(profileId) { return suppliedViews.get(profileId); },
+    withSuppliedReadView(profileId, view, read) {
+      const prior = suppliedViews.get(profileId);
+      suppliedViews.set(profileId, view);
+      try { return read(); }
+      finally {
+        if (prior) suppliedViews.set(profileId, prior);
+        else suppliedViews.delete(profileId);
+      }
+    },
+    async withAsyncMemoryReadView(profileId, signal, read, scanSignal = signal) {
+      scanSignal?.throwIfAborted();
+      scanCounts.set(profileId, (scanCounts.get(profileId) || 0) + 1);
+      const view = {
+        assertFilesCurrent() {
+          signal?.throwIfAborted();
+          if (invalidated.has(profileId)) throw Object.assign(new Error("source proof changed"), { code: "MEMORY_REVISION_CONFLICT" });
+        },
+        retainProof: () => ({ read: callback => { view.assertFilesCurrent(); return callback(view); } }),
+      };
+      return read(view);
+    },
+    viewStatus: () => ({ owner: "shoggoth-memory-core" }) };
   const evidence = (ownerProfileId, text, relative = "MEMORY.md", line = 1) => ({ ownerProfileId, canonicalRelativePath: relative, path: relative,
     documentKind: "long_term", sourceHash: hash(text), sourceRevision: `sha256:${hash(text)}`, startLine: line, endLine: line,
     source: "memory", snippet: text, score: ownerProfileId === "b" ? 999 : 0.001, citation: `${relative}#L${line}-L${line}` });
@@ -28,7 +53,7 @@ function fixture() {
       if (old.sourceHash !== current.sourceHash) throw Object.assign(new Error("edit"), { code: "MEMORY_SOURCE_CHANGED" });
       return current; } };
   const broker = new SharedReadService(service, { config, reader });
-  return { broker, input, own, reader, active, profiles, data, evidence, excluded,
+  return { broker, input, own, reader, active, profiles, data, evidence, excluded, scanCounts, invalidated,
     tick: duration => { now += duration; }, disable: () => { enabled = false; revision++; } };
 }
 
@@ -47,6 +72,95 @@ test("automatic source fan-out uses reciprocal ranks, source metadata and run-bo
   assert.ok(!JSON.stringify([...f.broker.access.values()]).includes("Borrowed telescope amber"), "broker state contains no body");
   assert.ok(!JSON.stringify(f.broker.borrowedRefsForRun(f.input.run.id)).includes(borrowed.sourceRef), "durable dependency never grants read access");
   f.tick(600001); assert.throws(() => f.broker.get({ ...f.input, id: borrowed.sourceRef }), { code: "MEMORY_SHARED_REFERENCE_INVALID" });
+});
+
+test("optional trigger index preparation honors its deadline and retains physical owner capacity", async t => {
+  const f = fixture(); t.after(() => f.broker.close());
+  const deadline = new AbortController(), caller = new AbortController(), owners = [];
+  let finish;
+  const settled = new Promise(resolve => { finish = resolve; });
+  const expiration = t.mock.method(AbortSignal, "timeout", ms => {
+    assert.equal(ms, 5000);
+    return deadline.signal;
+  });
+  f.reader.prepareTriggers = source => {
+    source.assertCurrent();
+    owners.push(source.ownerProfileId);
+    const ready = new Promise((_, reject) => {
+      source.signal.addEventListener("abort", () => reject(source.signal.reason), { once: true });
+    });
+    return { ready, settled };
+  };
+  try {
+    const preparing = f.broker.prepareTriggerOwners({ ...f.input, signal: caller.signal });
+    assert.deepEqual(owners, ["b", "c"]);
+    deadline.abort(new DOMException("Synthetic trigger deadline", "TimeoutError"));
+    await preparing;
+    assert.equal(caller.signal.aborted, false);
+    assert.deepEqual([...f.broker.triggerIndexPreparations], ["b", "c"]);
+    await f.broker.prepareTriggerOwners({ ...f.input, signal: caller.signal });
+    assert.deepEqual(owners, ["b", "c"], "other turns cannot take a cold owner's slot during physical drain");
+  } finally {
+    finish();
+    expiration.mock.restore();
+  }
+  await settled;
+  assert.equal(f.broker.triggerIndexPreparations.size, 0);
+  assert.equal((await f.broker.search({ ...f.input, signal: caller.signal }, f.own)).results.length, 3);
+});
+
+test("final shared search uses one worker view per owner and rechecks after requester preparation", async t => {
+  const f = fixture(); t.after(() => f.broker.close());
+  const search = f.reader.search.bind(f.reader), revalidate = f.reader.revalidate.bind(f.reader);
+  const second = f.evidence("c", "Borrowed telescope second", "MEMORY.md", 2);
+  f.reader.search = async input => {
+    const result = await search(input);
+    return input.ownerProfileId === "c" ? { ...result, results: [...result.results, second] } : result;
+  };
+  f.reader.revalidate = (input, old) => {
+    if (old === second) { input.assertCurrent(); return second; }
+    return revalidate(input, old);
+  };
+  f.broker.service.withMemoryReadView = () => assert.fail("borrowed search returned to synchronous tree scanning");
+  const result = await f.broker.search(f.input, f.own, {
+    async withPublicationView(publish) {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(f.broker.access.size, 0, "capabilities are not issued across the last asynchronous boundary");
+      f.invalidated.add("b");
+      return publish();
+    },
+  });
+  assert.deepEqual([...f.scanCounts].sort(), [["b", 1], ["c", 1]]);
+  assert.equal(result.coverage, "partial");
+  assert.deepEqual(result.unavailableSources, [{ ownerProfileId: "b", code: "MEMORY_REVISION_CONFLICT" }]);
+  assert.deepEqual(result.results.map(hit => hit.snippet), ["Own telescope", "Borrowed telescope violet", second.snippet]);
+  assert.ok([...f.broker.access.values()].every(entry => entry.dependency.ownerProfileId === "c"));
+});
+
+test("an unsuccessful requester publication leaves no shared capabilities or dependencies", async t => {
+  const f = fixture(); t.after(() => f.broker.close());
+  await assert.rejects(f.broker.search(f.input, f.own, {
+    publish() { throw Object.assign(new Error("requester became stale"), { code: "MEMORY_REVISION_CONFLICT" }); },
+  }), { code: "MEMORY_REVISION_CONFLICT" });
+  assert.equal(f.broker.access.size, 0);
+  assert.equal(f.broker.runs.size, 0);
+});
+
+test("a sibling timeout does not invalidate a finished source proof", async t => {
+  const f = fixture(); t.after(() => f.broker.close());
+  const read = f.broker.service.withAsyncMemoryReadView.bind(f.broker.service);
+  f.broker.service.withAsyncMemoryReadView = async (owner, lifetime, callback, waiting) => {
+    if (owner === "c") {
+      // Hold one owner past the shared deadline while another completes.
+      await new Promise(resolve => setTimeout(resolve, 40));
+      waiting.throwIfAborted();
+    }
+    return read(owner, lifetime, callback, waiting);
+  };
+  const result = await f.broker.search({ ...f.input, deadlineAt: performance.now() + 25 }, f.own);
+  assert.deepEqual(result.results.map(hit => hit.snippet), ["Own telescope", "Borrowed telescope amber"]);
+  assert.deepEqual(result.unavailableSources, [{ ownerProfileId: "c", code: "MEMORY_SHARED_SOURCE_TIMEOUT" }]);
+  assert.equal(result.coverage, "partial");
 });
 
 test("source failure is partial and preserves own results; explicit source filter is only a filter", async t => {
@@ -99,6 +213,23 @@ test("content edits invalidate next-turn dependencies without canceling a curren
   assert.throws(() => f.broker.assertRunCurrent(f.input.run.id), { code: "MEMORY_SHARED_SOURCE_REVOKED" });
 });
 
+test("foreground broker admission verifies existing lenders without synchronous scans", async t => {
+  const f = fixture(); t.after(() => f.broker.close());
+  await f.broker.search(f.input, f.own);
+  f.scanCounts.clear();
+  f.broker.service.withMemoryReadView = (owner, read) => {
+    assert.ok(f.broker.service.memoryViewFor(owner), "prior Run dependencies must use a supplied worker view");
+    return read();
+  };
+  f.data.set("b", f.evidence("b", "Edited telescope teal"));
+  assert.equal(await f.broker.search({ ...f.input, memoryScope: "own" }, f.own), f.own);
+  assert.deepEqual([...f.scanCounts].sort(), [["b", 1], ["c", 1]]);
+  assert.equal(f.broker.runs.get(f.input.run.id).revoked, false);
+  f.excluded.add("b");
+  await assert.rejects(f.broker.search({ ...f.input, memoryScope: "own" }, f.own), { code: "MEMORY_SHARED_SOURCE_REVOKED" });
+  assert.equal(f.broker.runs.get(f.input.run.id).revoked, true);
+});
+
 test("global close and run end destroy access capabilities and join bounded monitor state", async t => {
   const f = fixture(); t.after(() => f.broker.close());
   const result = await f.broker.search(f.input, f.own), ref = result.results.find(value => value.borrowed).sourceRef;
@@ -107,6 +238,104 @@ test("global close and run end destroy access capabilities and join bounded moni
   await f.broker.search(f.input, f.own); f.disable(); await f.broker.reconcileConfig();
   assert.throws(() => f.broker.assertRunCurrent(f.input.run.id), { code: "MEMORY_SHARED_SOURCE_REVOKED" });
   f.broker.close(); assert.equal(f.broker.access.size, 0); assert.equal(f.broker.timer, null);
+});
+
+test("background monitor shares one worker view per owner and never treats a busy scan as revocation", async t => {
+  const f = fixture();
+  t.after(() => f.broker.close());
+  const second = { ...f.input, run: { ...f.input.run, id: "second-run" } };
+  await f.broker.search(f.input, f.own);
+  await f.broker.search(second, f.own);
+  const views = [], revoked = [];
+  f.broker.onRevoked = runId => revoked.push(runId);
+  f.broker.service.withAsyncMemoryReadView = async (profileId, signal, read) => {
+    signal.throwIfAborted();
+    views.push(profileId);
+    if (profileId === "b") throw Object.assign(new Error("busy"), { code: "MEMORY_SCAN_BUSY" });
+    return read({ assertFilesCurrent: () => signal.throwIfAborted() });
+  };
+  await Promise.all([f.broker.monitorSources(), f.broker.monitorSources()]);
+  assert.deepEqual(views, ["b", "c"]);
+  assert.deepEqual(revoked, []);
+  f.excluded.add("c");
+  await f.broker.monitorSources();
+  assert.deepEqual(revoked, [f.input.run.id, second.run.id]);
+  await f.broker.reconcileConfig();
+  assert.equal(revoked.length, 2, "explicit and periodic paths share exactly one interruption");
+});
+
+test("config reconciliation fences excluded borrowers before a held worker scan finishes", async t => {
+  const f = fixture();
+  const { promise: scanned, resolve: entered } = Promise.withResolvers();
+  const { promise: hold, resolve: release } = Promise.withResolvers();
+  const { promise: stopping, resolve: interrupt } = Promise.withResolvers();
+  const { promise: interruptHeld, resolve: finishInterrupt } = Promise.withResolvers();
+  await f.broker.search(f.input, f.own);
+  t.after(async () => { release(); finishInterrupt(); await f.broker.close(); });
+  const read = f.broker.service.withAsyncMemoryReadView.bind(f.broker.service);
+  f.broker.service.withMemoryReadView = () => assert.fail("config reconciliation scanned the tree on the Service thread");
+  f.broker.service.withAsyncMemoryReadView = async (...args) => {
+    entered(); await hold; return read(...args);
+  };
+  let interrupts = 0, acknowledged = false;
+  f.broker.onRevoked = () => { interrupts++; interrupt(); return interruptHeld; };
+  const periodic = f.broker.monitorSources();
+  await scanned;
+  f.excluded.add("b");
+  const updates = Promise.all([f.broker.reconcileConfig(), f.broker.reconcileConfig()])
+    .then(() => { acknowledged = true; });
+  assert.throws(() => f.broker.assertRunCurrent(f.input.run.id), { code: "MEMORY_SHARED_SOURCE_REVOKED" });
+  await assert.rejects(f.broker.withRunReadProof(f.input.run.id, undefined, () => assert.fail("a revoked run published")),
+    { code: "MEMORY_SHARED_SOURCE_REVOKED" });
+  await stopping;
+  assert.equal(interrupts, 1);
+  assert.equal(acknowledged, false, "both config calls join the pending interrupt");
+  finishInterrupt(); await updates;
+  release(); await periodic;
+});
+
+test("config reconciliation requests a new owner pass after an in-flight periodic scan", async t => {
+  const f = fixture();
+  const { promise: scanned, resolve: entered } = Promise.withResolvers();
+  const { promise: hold, resolve: release } = Promise.withResolvers();
+  t.after(async () => { release(); await f.broker.close(); });
+  const second = { ...f.input, run: { ...f.input.run, id: "second-run" } };
+  await f.broker.search(f.input, f.own); await f.broker.search(second, f.own);
+  f.scanCounts.clear();
+  f.broker.service.withMemoryReadView = () => assert.fail("explicit reconciliation must use a worker view");
+  const read = f.broker.service.withAsyncMemoryReadView.bind(f.broker.service);
+  f.broker.service.withAsyncMemoryReadView = async (id, ...args) => {
+    if (id === "c") { entered(); await hold; }
+    return read(id, ...args);
+  };
+  const interrupted = [];
+  f.broker.onRevoked = runId => interrupted.push(runId);
+  const periodic = f.broker.monitorSources();
+  await scanned;
+  assert.equal(f.scanCounts.get("b"), 1, "the periodic pass already validated the owner once for both Runs");
+  f.data.delete("b");
+  const mutation = f.broker.reconcileConfig();
+  release(); await Promise.all([periodic, mutation]);
+  assert.equal(f.scanCounts.get("b"), 2, "the explicit pass must rescan the changed owner once");
+  assert.deepEqual(interrupted, [f.input.run.id, second.run.id]);
+});
+
+test("uncertain config revalidation cannot revoke or authorize publication", async t => {
+  const f = fixture(); t.after(() => f.broker.close());
+  await f.broker.search(f.input, f.own);
+  const interrupted = [];
+  f.broker.onRevoked = runId => interrupted.push(runId);
+  f.data.delete("b");
+  f.invalidated.add("b");
+  await f.broker.reconcileConfig();
+  assert.deepEqual(interrupted, []);
+  assert.equal(f.broker.runs.get(f.input.run.id).revoked, false);
+  await assert.rejects(f.broker.withRunReadProof(f.input.run.id, undefined, () => assert.fail("unverified output published")),
+    { code: "CONTEXT_MEMORY_READ_UNAVAILABLE" });
+  f.invalidated.delete("b");
+  // The next valid worker pass is allowed to turn a proved withdrawal into an interruption.
+  await f.broker.reconcileConfig();
+  assert.deepEqual(interrupted, [f.input.run.id]);
 });
 
 test("fan-out never exceeds three source readers and total result bytes stay bounded", async t => {

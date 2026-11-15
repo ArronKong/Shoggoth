@@ -236,11 +236,11 @@ class ConversationRecallIndex {
     return this.builds.get(profileId)?.promise || Promise.resolve();
   }
 
-  _startBuild(profileId, sessions, policyRevision, loadPage, validateBuild) {
+  _startBuild(profileId, sessions, policyRevision, loadPage, validateBuild, readBuild = read => read()) {
     if (this.builds.has(profileId)) return "rebuilding";
     const file = this._file(profileId);
     const temp = `${file}.building-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
-    const job = { cancelled: false, promise: null, temp };
+    const job = { cancelled: false, promise: null, temp, policyRevision, sessions };
     this.builds.set(profileId, job);
     job.promise = (async () => {
       let db;
@@ -260,7 +260,13 @@ class ConversationRecallIndex {
           let afterSeq = 0;
           while (afterSeq < session.lastSeq) {
             if (job.cancelled) return;
-            const page = loadPage(session, afterSeq, 256);
+            const page = await readBuild(view => {
+              if (job.cancelled) return null;
+              const result = loadPage(session, afterSeq, 256);
+              view?.assertFilesCurrent();
+              return result;
+            });
+            if (job.cancelled) return;
             if (!Number.isSafeInteger(page.throughSeq) || page.throughSeq <= afterSeq
               || page.throughSeq > session.lastSeq || !Array.isArray(page.rows)) {
               throw new Error("conversation index page cursor invalid");
@@ -270,29 +276,39 @@ class ConversationRecallIndex {
             await nextTick();
           }
         }
-        if (job.cancelled || !validateBuild()) return;
+        if (job.cancelled) return;
+        const valid = await readBuild(view => {
+          if (job.cancelled || !validateBuild()) return false;
+          view?.assertFilesCurrent();
+          return true;
+        });
+        if (job.cancelled || !valid) return;
         if (db.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok") {
           throw new Error("new conversation index integrity check failed");
         }
         db.prepare("INSERT INTO events_fts(events_fts,rank) VALUES('integrity-check',1)").run();
         db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
         db.close(); db = null;
-        if (job.cancelled || !validateBuild()) return;
-        const previous = this.connections.get(profileId);
-        if (previous) { previous.close(); this.connections.delete(profileId); }
-        for (const suffix of ["-wal", "-shm", "-journal"]) {
-          try {
-            validatePrivateFileStat(fs.lstatSync(file + suffix), file + suffix);
-            fs.unlinkSync(file + suffix);
-          } catch (error) { if (error.code !== "ENOENT") throw error; }
-        }
-        fs.renameSync(temp, file);
-        const dirFd = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
-        try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
-        this.connections.set(profileId, this._openExisting(profileId));
+        await readBuild(view => {
+          if (job.cancelled || !validateBuild()) return;
+          view?.assertFilesCurrent();
+          const previous = this.connections.get(profileId);
+          if (previous) { previous.close(); this.connections.delete(profileId); }
+          for (const suffix of ["-wal", "-shm", "-journal"]) {
+            try {
+              validatePrivateFileStat(fs.lstatSync(file + suffix), file + suffix);
+              fs.unlinkSync(file + suffix);
+            } catch (error) { if (error.code !== "ENOENT") throw error; }
+          }
+          fs.renameSync(temp, file);
+          const dirFd = fs.openSync(path.dirname(file), fs.constants.O_RDONLY);
+          try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+          this.connections.set(profileId, this._openExisting(profileId));
+        });
       } catch (error) {
         const unavailable = indexError(error);
-        if (this.builds.get(profileId) === job && !job.cancelled) {
+        if (job.cancelled) return;
+        if (this.builds.get(profileId) === job) {
           this.failures.set(profileId, { error: unavailable, retryAfter: Date.now() + 5_000 });
         }
         throw unavailable;
@@ -309,7 +325,7 @@ class ConversationRecallIndex {
     return "rebuilding";
   }
 
-  ensure(profileId, sessions, policyRevision, loadPage, validateBuild, prefixDigest = null) {
+  ensure(profileId, sessions, policyRevision, loadPage, validateBuild, prefixDigest = null, readBuild = undefined) {
     const validRevision = (Number.isSafeInteger(policyRevision) && policyRevision >= 0)
       || (typeof policyRevision === "string" && /^\d+:[a-f0-9]{64}$/u.test(policyRevision));
     if (!validRevision || !Array.isArray(sessions)
@@ -318,13 +334,23 @@ class ConversationRecallIndex {
           || !/^[a-f0-9]{64}$/u.test(session.sourceIdentity)))) {
       throw serviceError("CONVERSATION_INDEX_INVALID", "会话索引输入无效");
     }
-    if (this.builds.has(profileId)) return "rebuilding";
+    const building = this.builds.get(profileId);
+    if (building) {
+      if (building.policyRevision === policyRevision
+        && JSON.stringify(building.sessions) === JSON.stringify(sessions)) return "rebuilding";
+      // A worker-backed build can still be reading a previous transcript.
+      // Give the newer source snapshot its own build and publication fence.
+      building.cancelled = true;
+      this.builds.delete(profileId);
+      this._clearOrphanBuilds(profileId, building.temp);
+    }
     if (!this.cleanedProfiles.has(profileId)) this._clearOrphanBuilds(profileId);
     const failure = this.failures.get(profileId);
     if (failure) {
       if (Date.now() < failure.retryAfter) throw failure.error;
       this.failures.delete(profileId);
     }
+    const rebuild = () => this._startBuild(profileId, sessions, policyRevision, loadPage, validateBuild, readBuild);
     try {
       let db = this.connections.get(profileId);
       if (!db) {
@@ -337,10 +363,10 @@ class ConversationRecallIndex {
         // A second SQLite connection changed the derived index, or an atomic
         // replacement moved the path away from this open handle. Rebuild.
         this.forgetProfile(profileId);
-        return this._startBuild(profileId, sessions, policyRevision, loadPage, validateBuild);
+        return rebuild();
       }
       if (!db || this._meta(db, "policy_revision") !== String(policyRevision)) {
-        return this._startBuild(profileId, sessions, policyRevision, loadPage, validateBuild);
+        return rebuild();
       }
       const known = new Map(db.prepare("SELECT session_id,session_key,revision,last_seq,source_identity,workspace,status FROM sessions")
         .all().map((row) => [row.session_id, row]));
@@ -375,7 +401,7 @@ class ConversationRecallIndex {
           previous: known.get(session.id), page: loadPage(session,
             known.get(session.id)?.last_seq || 0, 64) }));
         if (pages.some(({ session, page }) => page.throughSeq !== session.lastSeq)) {
-          return this._startBuild(profileId, sessions, policyRevision, loadPage, validateBuild);
+          return rebuild();
         }
         transaction(db, () => {
           for (const session of changed) {
@@ -388,7 +414,7 @@ class ConversationRecallIndex {
         });
         return "ready";
       }
-      return this._startBuild(profileId, sessions, policyRevision, loadPage, validateBuild);
+      return rebuild();
     } catch (error) {
       if (error.code === "CONVERSATION_INDEX_UNAVAILABLE") throw error;
       this.forgetProfile(profileId);

@@ -112,49 +112,75 @@ class SessionCapture {
   async captureLocked(profileId, sessionId, { reason, idleMs, signal }) {
     const service = this.service, host = service.host(profileId);
     signal?.throwIfAborted();
-    let session, source;
+    let session;
     try {
       session = host.sessions.current(profileId, sessionId);
       if (this.isInternalSession(session.sessionKey)) return { written: 0, reason: "ineligible" };
-      source = host.sessions.read(profileId, sessionId);
     } catch (error) {
-      if (["MEMORY_SESSION_REVOKED", "MEMORY_SESSION_CHANGED"].includes(error.code)) return { written: 0, reason: "ineligible" };
+      if (error.code === "MEMORY_SESSION_REVOKED") return { written: 0, reason: "ineligible" };
       throw error;
     }
     const [progress, since] = await Promise.all([this.progress(profileId, sessionId), this.baseline(profileId)]);
+    const selection = await service.withAsyncMemoryReadView(profileId, signal, view => {
+      const epoch = host.sessions.sourceEpoch(profileId);
+      let source;
+      try { source = host.sessions.read(profileId, sessionId); }
+      catch (error) {
+        if (["MEMORY_SESSION_REVOKED", "MEMORY_SESSION_CHANGED"].includes(error.code)) return null;
+        throw error;
+      }
+      view.assertFilesCurrent();
+      return { ...this.selectExcerpt(profileId, sessionId, source, progress, since, reason, idleMs, view),
+        stamp: source.authorityStamp, epoch, proof: view.retainProof() };
+    });
+    if (!selection) return { written: 0, reason: "ineligible" };
+    const check = () => {
+      signal?.throwIfAborted(); host.assertCurrent();
+      selection.proof.read(view => service.withSuppliedReadView(profileId, view, () => {
+        if (host.sessions.stamp(profileId, sessionId) !== selection.stamp
+          || host.sessions.sourceEpoch(profileId) !== selection.epoch || this.isInternalSession(session.sessionKey)) {
+          throw serviceError("MEMORY_SOURCE_REVOKED", "会话摘录的来源已经变化");
+        }
+        view.assertFilesCurrent();
+      }));
+    };
+    check();
+    if (selection.item) {
+      await service.store.upsertMany([selection.item], { expectedRevision: selection.revision, assertCurrent: check, signal });
+    }
+    if (selection.progress) await this.advance(profileId, sessionId, selection.progress);
+    return selection.result;
+  }
+
+  selectExcerpt(profileId, sessionId, source, progress, since, reason, idleMs, view) {
     const lines = source.content ? source.content.split("\n") : [];
     const fresh = lines.map((line, index) => ({ line, seq: source.lineMap[index], at: source.messageTimestampsMs[index] }))
       .filter(row => row.seq > progress.capturedSeq && row.at >= since);
-    const observed = { observedSeq: this.lastSeq(profileId, sessionId) };
-    if (!fresh.length) { await this.advance(profileId, sessionId, observed); return { written: 0, reason: "nothing-new" }; }
-    const now = service.now();
-    if (idleMs > 0 && now - fresh.at(-1).at < idleMs) return { written: 0, reason: "active" };
+    // An unfinished native turn can complete without another transcript write.
+    // Only mark the prefix the Product scan actually considered.
+    const observed = { observedSeq: source.throughSeq };
+    if (!fresh.length) return { progress: observed, result: { written: 0, reason: "nothing-new" } };
+    const now = this.service.now();
+    if (idleMs > 0 && now - fresh.at(-1).at < idleMs) return { result: { written: 0, reason: "active" } };
     const lastSeq = fresh.at(-1).seq;
+    const nextProgress = { capturedSeq: lastSeq, ...observed };
     // A credential line would block the whole note from entering context.
     const kept = fresh.slice(-MAX_MESSAGES).filter(row => !hasSecret(row.line) && !ENTRY_MARKER.test(row.line));
     if (!kept.some(row => row.line.startsWith("User: "))) {
-      await this.advance(profileId, sessionId, { capturedSeq: lastSeq, ...observed });
-      return { written: 0, reason: "no-user-message" };
+      return { progress: nextProgress, result: { written: 0, reason: "no-user-message" } };
     }
+    const id = `session-excerpt-${sha256(`${profileId}:${sessionId}:${lastSeq}`).slice(0, 40)}`;
+    const result = { written: 1, reason: "captured", id };
+    if (view.get(id)) return { progress: nextProgress, result };
     const { day, clock } = this.day(profileId, now);
     const header = `Session excerpt (${reason}) ${day} ${clock} · session ${sessionId.slice(0, 8)}`;
     const lineBytes = Math.floor((MAX_CONTENT_BYTES - Buffer.byteLength(header) - kept.length * 3) / kept.length);
     const content = [header, ...kept.map(row => `- ${clip(row.line, lineBytes)}`)].join("\n");
-    const id = `session-excerpt-${sha256(`${profileId}:${sessionId}:${lastSeq}`).slice(0, 40)}`;
-    if (!service.store.get(profileId, id)) {
-      const stamp = host.sessions.stamp(profileId, sessionId);
-      const check = () => {
-        signal?.throwIfAborted(); host.assertCurrent();
-        if (host.sessions.stamp(profileId, sessionId) !== stamp) throw serviceError("MEMORY_SOURCE_REVOKED", "会话摘录的来源已经变化");
-      };
-      await service.store.upsertMany([{ id, profileId, scope: "agent", type: "episodic", content,
+    return { progress: nextProgress, result, revision: view.getRevisions().revision,
+      item: { id, profileId, scope: "agent", type: "episodic", content,
         sourceRefs: [`session-excerpt:${sessionId}`], confidence: 0.5, sensitivity: hasPii(content) ? "private" : "normal",
         status: "active", validFrom: now, validUntil: null, supersedes: null, createdAt: now, updatedAt: now,
-        memoryPath: `memory/${day}.md`, sourceEvidence: kept.map(row => ({ sessionId, seq: row.seq, hash: sha256(row.line) })) }],
-      { assertCurrent: check });
-    }
-    await this.advance(profileId, sessionId, { capturedSeq: lastSeq, ...observed });
-    return { written: 1, reason: "captured", id };
+        memoryPath: `memory/${day}.md`, sourceEvidence: kept.map(row => ({ sessionId, seq: row.seq, hash: sha256(row.line) })) } };
   }
 
   // Session updatedAt follows settings, not messages: the transcript's last

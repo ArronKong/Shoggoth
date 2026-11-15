@@ -42,6 +42,7 @@ const mediaRefs = [
 const nativeMedia = chatRuntime.nativeChatMedia(mediaRefs);
 assert.equal(nativeMedia.images.length, 1);
 assert.equal(nativeMedia.files[0].name, "报告.pdf");
+assert.deepEqual(JSON.parse(JSON.stringify(nativeMedia.files[0].nativeRef)), mediaRefs[1]);
 assert.deepEqual(JSON.parse(JSON.stringify(nativeMedia.attachments.map(chatRuntime.buildOpenClawAttachment))), mediaRefs.map(nativeRef => ({ nativeRef })));
 assert.equal(chatRuntime.nativeChatMedia([{ ...mediaRefs[0], id: "../../private" }]).attachments.length, 0);
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -153,6 +154,7 @@ const environment = {
   setMessages: (value) => { state.messages = typeof value === "function" ? value(state.messages) : value; },
   markInFlight() {}, setSending() {}, setToast() {}, setTimeout() {},
   optimisticHistoryRef: { current: { forget: key => calls.push(["forget-optimistic", key]) } },
+  openclawPreamblesRef: { current: { forget() {} } },
   active: { model: "gpt-5.6", modelProvider: "codex" }, models: [], modelsBackendRef: { current: "codex" },
   inheritedModelChoice: () => undefined, ensureSessionRow() {}, openSession: (key) => calls.push(["open", key]),
 };

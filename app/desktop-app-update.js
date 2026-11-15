@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { checkDesktopAppInstallSpace, installFailureReason, recordAppUpdateFailure } = require("./desktop-app-update-install-check");
 
 const CHANNELS = Object.freeze({
   getState: "shoggoth:app-update:get-state",
@@ -59,6 +60,7 @@ function createDesktopAppUpdateController(options = {}) {
     resourcesPath = process.resourcesPath,
     platform = process.platform,
     loadUpdater = () => require("electron-updater").autoUpdater,
+    loadNativeUpdater = () => require("electron").autoUpdater,
     existsSync,
     readFileSync,
     setTimeoutFn = setTimeout,
@@ -71,6 +73,10 @@ function createDesktopAppUpdateController(options = {}) {
     saveAutomaticUpdates = () => {},
     prepareInstall = async () => null,
     restoreAfterInstallFailure = async () => {},
+    checkInstallSpace = (downloadedFile) => checkDesktopAppInstallSpace({ downloadedFile,
+      applicationPath: path.dirname(path.dirname(resourcesPath)),
+      stagingPath: path.join(app.getPath("home"), "Library", "Caches") }),
+    recordFailure = (record) => recordAppUpdateFailure(app, record),
   } = options;
   if (!app || typeof app.getVersion !== "function" || !ipcMain?.handle
     || !ipcMain?.removeHandler || typeof getMainWindow !== "function") {
@@ -99,8 +105,12 @@ function createDesktopAppUpdateController(options = {}) {
     installBlockReason: null,
   };
   let updater = null;
+  let nativeUpdater = null;
+  let nativeUpdateReady = false;
+  let nativeInstallPending = false;
   let checkPromise = null;
   let manualCheckRequested = false;
+  let downloadedFile = null;
   let installRecoveryPromise = null;
   let initialTimer = null;
   let intervalTimer = null;
@@ -127,21 +137,28 @@ function createDesktopAppUpdateController(options = {}) {
     try { app.quit(); }
     finally { skipQuitInstall = false; }
   };
-  const recoverInstall = () => {
+  const reportFailure = (phase, reason, storage, error) => {
+    try { recordFailure({ phase, reason, availableVersion: state.availableVersion, storage, error }); } catch {}
+  };
+  const recoverInstall = (error) => {
+    nativeInstallPending = false;
     if (installRecoveryPromise) return installRecoveryPromise;
+    const reason = installFailureReason(error);
+    reportFailure("install", reason, null, error);
     updateState({ status: "recovering", canCheck: false, canInstall: false });
     installRecoveryPromise = Promise.resolve().then(restoreAfterInstallFailure)
-      .then(() => "install-failed", () => "background-restore-failed")
+      .then(() => reason, () => "background-restore-failed")
       .then((installBlockReason) => {
+        if (installBlockReason === "background-restore-failed") reportFailure("recover", installBlockReason);
         updateState({ status: "downloaded", canCheck: false, canInstall: true, installBlockReason });
         if (installingOnQuit) resumeQuit();
       })
       .finally(() => { installRecoveryPromise = null; });
     return installRecoveryPromise;
   };
-  const bind = (name, handler) => {
-    updater.on(name, handler);
-    updaterListeners.push([name, handler]);
+  const bind = (name, handler, target = updater) => {
+    target.on(name, handler);
+    updaterListeners.push([target, name, handler]);
   };
 
   const check = ({ manual = true } = {}) => {
@@ -203,8 +220,22 @@ function createDesktopAppUpdateController(options = {}) {
     return publicState();
   });
   const install = async ({ automatic = false } = {}) => {
-    if (!updater || !state.canInstall) return false;
+    if (disposed || !updater || !state.canInstall) return false;
     updateState({ status: "preparing", canCheck: false, canInstall: false, installBlockReason: null });
+    let storage;
+    let preflightError;
+    try { storage = await checkInstallSpace(downloadedFile); }
+    catch (error) {
+      preflightError = error;
+      const reason = installFailureReason(error);
+      storage = { blockReason: reason === "install-failed" ? "install-check-failed" : reason };
+    }
+    if (disposed) return false;
+    if (storage?.blockReason) {
+      reportFailure("preflight", storage.blockReason, storage, preflightError);
+      updateState({ status: "downloaded", canCheck: false, canInstall: true, installBlockReason: storage.blockReason });
+      return false;
+    }
     let blockReason;
     try { blockReason = await prepareInstall({ automatic }); }
     catch { blockReason = "background-stop-failed"; }
@@ -213,6 +244,7 @@ function createDesktopAppUpdateController(options = {}) {
       return false;
     }
     if (blockReason) {
+      reportFailure("prepare", blockReason);
       updateState({ status: "downloaded", canCheck: false, canInstall: true,
         installBlockReason: blockReason });
       return false;
@@ -226,9 +258,16 @@ function createDesktopAppUpdateController(options = {}) {
       try {
         // On a normal quit, let the macOS installer apply the update without relaunching.
         updater.autoRunAppAfterInstall = !automatic;
-        updater.quitAndInstall();
+        if (nativeUpdater && !nativeUpdateReady) {
+          // MacUpdater.quitAndInstall adds a native update-downloaded listener
+          // each time it is called before Squirrel is ready, including retries
+          // after an error. Stage first so failed attempts cannot accumulate
+          // callbacks that later quit or install more than once.
+          nativeInstallPending = true;
+          nativeUpdater.checkForUpdates();
+        } else updater.quitAndInstall();
       }
-      catch { void recoverInstall(); }
+      catch (error) { void recoverInstall(error); }
     });
     return true;
   };
@@ -237,6 +276,14 @@ function createDesktopAppUpdateController(options = {}) {
   if (support.supported) {
     try {
       updater = loadUpdater();
+      nativeUpdater = loadNativeUpdater();
+      if (nativeUpdater) bind("update-downloaded", () => {
+        nativeUpdateReady = true;
+        if (!nativeInstallPending || disposed) return;
+        nativeInstallPending = false;
+        try { updater.quitAndInstall(); }
+        catch (error) { void recoverInstall(error); }
+      }, nativeUpdater);
       updater.autoDownload = state.automaticUpdates;
       updater.autoInstallOnAppQuit = false;
       updater.allowPrerelease = false;
@@ -268,6 +315,8 @@ function createDesktopAppUpdateController(options = {}) {
       }));
       bind("update-downloaded", (info = {}) => {
         if (["preparing", "installing", "recovering"].includes(state.status)) return;
+        nativeUpdateReady = false;
+        downloadedFile = typeof info.downloadedFile === "string" ? info.downloadedFile : null;
         updateState({
           status: "downloaded",
           availableVersion: typeof info.version === "string" ? info.version : state.availableVersion,
@@ -283,9 +332,9 @@ function createDesktopAppUpdateController(options = {}) {
       bind("update-cancelled", () => updateState({
         status: "idle", progress: null, canCheck: true, canInstall: false,
       }));
-      bind("error", () => {
+      bind("error", (error) => {
         if (state.status === "installing" || installRecoveryPromise) {
-          void recoverInstall();
+          void recoverInstall(error);
           return;
         }
         updateState({ status: "error", progress: null, canCheck: true, canInstall: false });
@@ -317,8 +366,9 @@ function createDesktopAppUpdateController(options = {}) {
     dispose() {
       if (disposed) return;
       disposed = true;
+      nativeInstallPending = false;
       clearSchedule();
-      for (const [name, handler] of updaterListeners) updater?.removeListener?.(name, handler);
+      for (const [target, name, handler] of updaterListeners) target.removeListener?.(name, handler);
       ipcMain.removeHandler(CHANNELS.getState);
       ipcMain.removeHandler(CHANNELS.check);
       ipcMain.removeHandler(CHANNELS.setAutomatic);

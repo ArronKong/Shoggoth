@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { storageIssueCode } = require("../system-issue");
 const {
   atomicWritePrivateFile,
   preparePrivateParent,
@@ -276,7 +277,10 @@ class McpAuthSecretStore {
         throw uncertain;
       }
       if (String(error?.code || "").startsWith("UNSAFE_")) throw error;
-      throw mcpAuthError("MCP_AUTH_WRITE_FAILED", "mcp_auth_write_failed");
+      const failure = mcpAuthError("MCP_AUTH_WRITE_FAILED", "mcp_auth_write_failed");
+      const systemIssue = storageIssueCode(error);
+      if (systemIssue) failure.systemIssue = systemIssue;
+      throw failure;
     }
   }
 

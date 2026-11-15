@@ -24,6 +24,12 @@ export const CHAT_WAIT_REASONS: Record<string, string> = {
   BACKGROUND_ACTIVE_LIMIT: "background",
 };
 
+export function chatRunWaitActivity(state?: ChatRunWaitState): ChatRunWaitState | undefined {
+  if (state?.kind === "starting" && ["context", "compacting", "reconnecting"].includes(state.stage ?? "")) return state;
+  if (state?.kind === "queued" && ["RUNTIME_ACCOUNT_ACTIVE_LIMIT", "RUNTIME_ACCOUNT_BACKOFF", "RUNTIME_ACCOUNT_MUTATION_BUSY"].includes(state.reason ?? "")) return state;
+  return undefined;
+}
+
 export function chatRunWaitState(payload: { statusKind?: unknown; reason?: unknown; queuedAt?: unknown; stage?: unknown }, now = Date.now(), previous?: ChatRunWaitState): ChatRunWaitState | null {
   if (payload.statusKind === "retrying") {
     return { kind: "retrying", reason: payload.reason === "RUNTIME_RATE_LIMITED" || payload.reason === "RUNTIME_UPSTREAM_UNAVAILABLE" ? payload.reason : null, since: now };
@@ -62,7 +68,7 @@ export function updateChatRunWait(previous: ChatRunWaitState | undefined,
 // One live row changes with the confirmed phase. It does not manufacture
 // completed steps or enter the saved transcript.
 export function withStartupWait(steps: TurnStep[], wait?: ChatRunWaitState): TurnStep[] {
-  if (wait?.kind !== "starting") return steps;
+  if (!wait || (wait.kind !== "starting" && !chatRunWaitActivity(wait))) return steps;
   return [{ id: `startup:${wait.since}`, kind: "status", status: "running",
     startTs: wait.since, statusKind: "starting", startupWait: wait }, ...steps];
 }

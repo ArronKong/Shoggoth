@@ -194,6 +194,11 @@ class MemoryDatabase {
       .filter(row => !allowed || allowed.has(row.session_id))
       .map(row => ({ agentId: row.agent_id, sessionId: row.session_id, reason: row.reason, createdAt: row.created_at }));
   }
+
+  hasSessionTombstone(agentId, sessionId) {
+    this.assertOpen();
+    return Boolean(this.db.prepare("SELECT 1 FROM memory_session_tombstones WHERE agent_id=? AND session_id=?").get(agentId, sessionId));
+  }
 }
 
 module.exports = { MemoryDatabase };

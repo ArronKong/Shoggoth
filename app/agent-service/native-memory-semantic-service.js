@@ -1,7 +1,7 @@
 "use strict";
 
 const { LocalEmbeddingService, bounded } = require("./local-embedding-service");
-const { hashText } = require("./e5-encoder");
+const { hashText, embeddingError } = require("./e5-encoder");
 const { hasSecret, workspaceMemoryRefs } = require("./memory-engine");
 const { SEMANTIC_MIN_COSINE } = require("./memory-semantic-ranking");
 
@@ -30,7 +30,7 @@ class NativeMemorySemanticService {
     return { ...model, coverage: job?.state ?? "unindexed",
       ...(job?.counts ? job.counts : {}), ...(job?.reason ? { indexReason: job.reason } : {}) };
   }
-  ensure({ profileId, domain, stamp, documents, isCurrent }) {
+  ensure({ profileId, domain, stamp, documents, isCurrent, prepareCurrent }) {
     if (this.closed || this.blockedProfiles.has(profileId)) return null;
     const key = this._key(profileId, domain);
     const prior = this.jobs.get(key);
@@ -39,28 +39,45 @@ class NativeMemorySemanticService {
       epoch: this.epochs.get(profileId) ?? 0, cancelled: false };
     if (prior) prior.cancelled = true;
     this.jobs.set(key, job);
-    const current = () => !this.closed && !job.cancelled && !this.blockedProfiles.has(profileId)
-      && job.epoch === (this.epochs.get(profileId) ?? 0) && this.jobs.get(key) === job && isCurrent();
+    const ownsJob = () => !this.closed && !job.cancelled && !this.blockedProfiles.has(profileId)
+      && job.epoch === (this.epochs.get(profileId) ?? 0) && this.jobs.get(key) === job;
+    const current = () => ownsJob() && isCurrent();
+    const checkCurrent = async () => {
+      if (!ownsJob()) throw embeddingError("E5_INDEX_CANCELLED");
+      if (prepareCurrent) await prepareCurrent();
+      if (!current()) throw embeddingError("E5_INDEX_CANCELLED");
+    };
+    const beforeSend = prepareCurrent ? () => {
+      if (!current()) throw embeddingError("E5_INDEX_CANCELLED");
+    } : undefined;
     job.promise = (async () => {
       await this.embedding.start();
-      if (!current()) return;
+      await checkCurrent();
       if (prior?.state === "rebuilding") await this.embedding.request("cancel", { profileId, domain });
-      if (!current()) return;
+      await checkCurrent();
       const ready = await this.embedding.request("ready", { profileId, domain, stamp });
-      if (!current()) return;
+      await checkCurrent();
       if (!ready.ready) {
-        const { epoch } = await this.embedding.request("begin", { profileId, domain, stamp });
+        const { epoch } = await this.embedding.request("begin", { profileId, domain, stamp }, { beforeSend });
         for await (const document of documents()) {
-          if (!current()) return;
+          if (beforeSend ? !ownsJob() : !current()) throw embeddingError("E5_INDEX_CANCELLED");
           if (hasSecret(document.text)) continue;
-          await this.embedding.request("upsert", { profileId, domain, stamp, epoch, document }, { timeoutMs: 120_000 });
+          await this.embedding.request("upsert", { profileId, domain, stamp, epoch, document },
+            { timeoutMs: 120_000, beforeSend });
         }
-        if (!current()) return;
-        job.counts = await this.embedding.request("commit", { profileId, domain, stamp, epoch });
+        await checkCurrent();
+        job.counts = await this.embedding.request("commit", { profileId, domain, stamp, epoch }, { beforeSend });
       }
-      if (current()) job.state = "ready";
+      await checkCurrent();
+      job.state = "ready";
     })().catch(error => {
-      if (!current()) return;
+      if (!ownsJob()) return;
+      if (["E5_INDEX_CANCELLED", "MEMORY_READ_VIEW_STALE", "MEMORY_REVISION_CONFLICT"].includes(error.code)) {
+        // Revalidate on the next search or warmup. The child still needs a new
+        // begin before it can publish anything from an interrupted build.
+        this.jobs.delete(key);
+        return;
+      }
       job.state = "unavailable"; job.reason = error.code || "E5_INDEX_UNAVAILABLE";
       job.retryAt = Date.now() + 30_000;
       if (error.code === "E5_INDEX_CORRUPT") this.invalidateProfile(profileId);

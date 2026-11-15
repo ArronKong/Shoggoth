@@ -7,6 +7,65 @@ const path = require("node:path");
 const { contextFixture } = require("./fixtures/shoggoth-context-fixture.cjs");
 const { estimateContextTokens } = require("../app/agent-service/conversation-context-budget");
 
+{
+  const f = contextFixture();
+  const { ConversationCheckpointStore, SUMMARY_FIELDS, coveredTranscript } = require("../app/agent-service/conversation-checkpoint-store");
+  const checkpoints = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts });
+  checkpoints.open();
+  try {
+    const user = (runId, text) => f.append({ id: `user-${runId}`, runId, kind: "user", content: { text, operationId: runId } });
+    const answer = (runId, text) => f.append({ id: `answer-${runId}`, runId, kind: "assistant", content: { text } });
+    user("previous", "Previous question");
+    const first = user("first", "First accepted prompt");
+    user("second", "Second accepted prompt");
+    user("third", "Third accepted prompt");
+    answer("previous", "Previous completed answer");
+    answer("first", "First completed answer");
+    answer("second", "Second completed answer");
+    const compile = (id, contextLifecycleV1, extra = {}) => f.compiler.compile({
+      profile: f.profile, run: { ...f.run, id }, transcriptSessionId: f.transcriptSessionId,
+      currentOperationId: id, contextLifecycleV1, ...extra,
+    }).dynamicContext;
+    for (const lifecycle of [false, true]) {
+      const priorToFirst = compile("first", lifecycle);
+      assert.match(priorToFirst, /Previous question[\s\S]*Previous completed answer/u);
+      assert.doesNotMatch(priorToFirst, /(?:First|Second|Third) (?:accepted prompt|completed answer)/u);
+      const priorToThird = compile("third", lifecycle);
+      assert.match(priorToThird,
+        /Previous question[\s\S]*Previous completed answer[\s\S]*First accepted prompt[\s\S]*First completed answer[\s\S]*Second accepted prompt[\s\S]*Second completed answer/u,
+        "accepted order determines history, even when a reply is appended after a later user event");
+      assert.doesNotMatch(priorToThird, /Third accepted prompt/u);
+    }
+
+    const { planConversationCompaction } = require("../app/agent-service/conversation-compaction");
+    const plan = planConversationCompaction({ profileId: f.profile.id, sessionId: f.transcriptSessionId,
+      transcriptStore: f.transcripts, checkpointStore: checkpoints,
+      currentOperationId: "first", targetThroughSeq: 10_000, force: true });
+    assert.ok(plan);
+    assert.ok(plan.throughSeq < first.seq, "a checkpoint must cover a contiguous prefix before the current user");
+    assert.match(plan.prompt, /Previous question/u);
+    assert.doesNotMatch(plan.prompt, /(?:First|Second|Third) (?:accepted prompt|completed answer)|Previous completed answer/u,
+      "the previous answer cannot enter a checkpoint through an interleaved pending message and remains available for replay");
+    const events = f.transcripts.listEvents(f.profile.id, f.transcriptSessionId);
+    const summary = Object.fromEntries(SUMMARY_FIELDS.map(field => [field, []]));
+    summary.goal = ["Summary from a newer turn"];
+    const throughSeq = events.at(-1).seq;
+    checkpoints.commit({ profileId: f.profile.id, sessionId: f.transcriptSessionId,
+      expectedRevision: f.transcripts.getRevision(f.profile.id, f.transcriptSessionId),
+      throughSeq, coveredHash: coveredTranscript(events, throughSeq).hash, summary,
+      provenance: { runId: "future-summary", bindingId: "binding", runtime: "pi", model: "fixture-model", method: "model" } });
+    f.compiler.checkpointStore = checkpoints;
+    const replay = compile("first", true);
+    assert.doesNotMatch(replay, /Summary from a newer turn/u, "a valid newer checkpoint cannot enter an older turn");
+    assert.match(replay, /Previous completed answer/u);
+    f.transcripts.setContextExcluded({ profileId: f.profile.id, sessionId: f.transcriptSessionId,
+      eventId: "answer-previous", contextExcluded: true });
+    assert.doesNotMatch(compile("first", true), /Previous completed answer/u,
+      "logical ordering does not restore an excluded event");
+    console.log("PASS compiler replays completed replies across pending user events and compaction keeps its physical prefix");
+  } finally { checkpoints.close(); f.cleanup(); }
+}
+
 // Exercise the real compile path, not just the store's cache methods.
 {
   const cached = contextFixture();

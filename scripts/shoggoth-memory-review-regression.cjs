@@ -202,8 +202,101 @@ test("the nightly review reads every unreviewed direct chat in one call, leaves 
   assert.equal(active(f, "agent").some(item => item.content === "北极星的预发环境叫 staging-polaris。"), false);
 });
 
+test("nightly review checks transcript visibility in worker views before generation and preserves its cursor on read failure", async t => {
+  const f = await fixture(t, { memorySearch: { enabled: false } });
+  const session = boundSession(f), { transcriptStore } = f.service;
+  const first = chatTurn(f, session, "The nightly telescope uses the amber filter.");
+  transcriptStore.appendEvent({ profileId: A, sessionId: session.id, id: `assistant-${crypto.randomUUID()}`,
+    runId: first.run().id, kind: "assistant", content: { text: "The amber filter has been configured." },
+    ownMemoryProvenance: { version: 1, profileId: A, runId: first.run().id, complete: true, refs: [] }, occurredAt: f.now() });
+  first.complete();
+  const next = chatTurn(f, session, "The dome opens only after the safety check.");
+  next.complete();
+  const removeSource = () => transcriptStore.setContextExcluded({ profileId: A, sessionId: session.id,
+    eventId: first.event.id, contextExcluded: true });
+  const { AsyncLocalStorage } = require("node:async_hooks");
+  const reviewScope = new AsyncLocalStorage(), store = f.owner.store, read = store.withAsyncReadView.bind(store);
+  let phase = "withdraw-before-send", views = 0, prompts = 0;
+  const scan = t.mock.method(store, "withAsyncReadView", (profileId, signal, callback, scanSignal) => {
+    if (!reviewScope.getStore()) return read(profileId, signal, callback, scanSignal);
+    if (phase === "worker-unavailable") return Promise.reject(Object.assign(new Error("scan unavailable"), { code: "MEMORY_SCAN_UNAVAILABLE" }));
+    const viewNumber = ++views;
+    return read(profileId, signal, view => {
+      if (phase === "withdraw-before-send" && viewNumber === 2) removeSource();
+      return callback(view);
+    }, scanSignal);
+  });
+  const walk = store._filesystemStamp.bind(store);
+  const walkSpy = t.mock.method(store, "_filesystemStamp", (...args) => {
+    assert.ok(!reviewScope.getStore(), "nightly review synchronously walked the memory tree");
+    return walk(...args);
+  });
+  const review = reviewer(f, async ({ prompt, assertCurrent }) => {
+    prompts++;
+    assertCurrent();
+    assert.match(prompt, /dome opens/u);
+    assert.doesNotMatch(prompt, /amber filter/u);
+    return { text: '{"operations":[]}' };
+  });
+  const run = () => reviewScope.run(true, () => review.reviewProfile(A));
+  try {
+    assert.deepEqual(await run(), { chunks: 0, applied: 0, reason: "error" });
+    assert.equal(views, 2);
+    assert.equal(prompts, 0);
+    assert.equal((await f.owner.sessionCapture.progress(A, session.id)).reviewedSeq, 0);
+    phase = "worker-unavailable";
+    assert.equal((await run()).reason, "error");
+    assert.equal(prompts, 0);
+    assert.equal((await f.owner.sessionCapture.progress(A, session.id)).reviewedSeq, 0);
+    phase = "current";
+    assert.deepEqual(await run(), { chunks: 1, applied: 0, reason: "nothing-saved" });
+    assert.equal(prompts, 1);
+    assert.equal((await f.owner.sessionCapture.progress(A, session.id)).reviewedSeq, next.event.seq);
+  } finally { walkSpy.mock.restore(); scan.mock.restore(); }
+});
+
+test("nightly review rechecks a cited transcript before writing after model generation", async t => {
+  const f = await fixture(t, { memorySearch: { enabled: false } });
+  const session = boundSession(f);
+  const source = chatTurn(f, session, "The observatory uses the violet calibration fixture.");
+  source.complete();
+  const { transcriptStore } = f.service, store = f.owner.store, read = store.withAsyncReadView.bind(store);
+  let modelReturned = false, revoked = false;
+  const changeDuringWritePreparation = t.mock.method(store, "withAsyncReadView", (id, signal, callback, scanSignal) =>
+    read(id, signal, view => {
+      if (modelReturned && !revoked) {
+        revoked = true;
+        transcriptStore.setContextExcluded({ profileId: A, sessionId: session.id, eventId: source.event.id, contextExcluded: true });
+      }
+      return callback(view);
+    }, scanSignal));
+  const content = "The workspace uses the violet calibration fixture.";
+  const review = reviewer(f, async ({ assertCurrent }) => {
+    assertCurrent();
+    modelReturned = true;
+    return { text: JSON.stringify({ operations: [{ action: "add", store: "agent", content, sourceEventId: source.event.id }] }) };
+  });
+  try {
+    assert.deepEqual(await review.reviewProfile(A), { chunks: 0, applied: 0, reason: "error" });
+    assert.equal(revoked, true);
+    assert.equal((await f.owner.sessionCapture.progress(A, session.id)).reviewedSeq, 0);
+    assert.ok(active(f, "agent").every(item => item.content !== content));
+  } finally { changeDuringWritePreparation.mock.restore(); }
+});
+
 test("a failed night keeps its messages, a night reviews at most the chunk cap, and a new message cancels", async (t) => {
   const f = await fixture(t);
+  // This case exercises the review worker and model failure with 125 fixture
+  // messages. Independent index warmups have their own coverage and can queue
+  // scans whose deadlines expire while the fixture writes those messages.
+  const { owner, service: { conversationRecallService: recall } } = f;
+  for (const timers of [recall.warmTimers, owner.indexWarmTimers]) {
+    for (const timer of timers.values()) clearTimeout(timer);
+    timers.clear();
+  }
+  t.mock.method(recall, "scheduleWarm", () => {});
+  t.mock.method(owner, "scheduleIndexWarm", () => {});
+  await Promise.all([recall.whenIndexReady(A), ...owner.indexWarmFlights.values()]);
   const session = boundSession(f);
   const total = MEMORY_REVIEW_CHUNK_MESSAGES * MEMORY_REVIEW_MAX_CHUNKS + 5;
   for (let index = 0; index < total; index++) chatTurn(f, session, `第 ${index} 条约定。`).complete();

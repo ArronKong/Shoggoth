@@ -21,8 +21,8 @@ async function processOrOriginal(process, original, { signal, assertCurrent = ()
   }
   current(); return value;
 }
-function prepareForSend(secrets, input) {
-  return processOrOriginal(() => secrets.prepare(input), { text: input.text, references: [], version: 1 });
+function prepareForSend(secrets, input, options) {
+  return processOrOriginal(() => secrets.prepare(input, options), { text: input.text, references: [], version: 1 });
 }
 function projectTextOrOriginal(secrets, scope, text) {
   try { return secrets.projectText(scope, text); }

@@ -9,6 +9,139 @@ const { conversationContextBudget } = require("../app/agent-service/conversation
 const { planConversationCompaction } = require("../app/agent-service/conversation-compaction");
 const { ConversationCheckpointStore, SUMMARY_FIELDS, coveredTranscript } = require("../app/agent-service/conversation-checkpoint-store");
 
+test("checkpoint reads and Cron compilation revalidate a new worker view once after a filesystem conflict", async t => {
+  const { DatabaseSync } = require("node:sqlite");
+  const { FileMemoryStore } = require("../app/agent-service/shoggoth-memory/file-store.cjs");
+  const f = contextFixture();
+  const workspace = fs.realpathSync(f.root);
+  const memoryDir = path.join(workspace, "memory");
+  const target = path.join(workspace, "MEMORY.md");
+  const initial = "The original observation.\n";
+  const corrected = "The latest correction also supersedes that observation.\n";
+  fs.mkdirSync(memoryDir, { mode: 0o700 });
+  fs.writeFileSync(target, initial, { mode: 0o600 });
+  const db = new DatabaseSync(":memory:");
+  const memoryStore = new FileMemoryStore({ paths: f.paths, database: { db, open() {} },
+    migration: { locations: () => ({ workspace }) }, getHost: () => null });
+  const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts, memoryStore });
+  t.after(() => { store.close(); memoryStore.close(); db.close(); f.cleanup(); });
+  memoryStore.open();
+  memoryStore.ready.add(f.profile.id);
+  db.prepare("INSERT INTO memory_file_profiles VALUES (?,0,'')").run(f.profile.id);
+  store.open();
+
+  const original = memoryStore.withAsyncReadView.bind(memoryStore);
+  let scans = 0, reads = 0;
+  let beforeRead = () => {
+    if (scans === 1) fs.mkdirSync(path.join(memoryDir, ".dreams"), { mode: 0o700 });
+  };
+  const observedConflicts = [];
+  t.mock.method(memoryStore, "withAsyncReadView", (id, signal, complete) => original(id, signal, view => {
+    scans++;
+    beforeRead();
+    try { return complete(view); }
+    catch (error) { observedConflicts.push(error); throw error; }
+  }));
+  const read = view => { reads++; return view.listActiveFile("MEMORY.md")[0].content; };
+  assert.equal(await store.withFreshMemory(f.profile.id, read), initial);
+  assert.deepEqual(observedConflicts.map(error => error.code), ["MEMORY_REVISION_CONFLICT"]);
+  assert.equal(scans, 2);
+  assert.equal(reads, 1);
+
+  beforeRead = () => {
+    if (scans === 3) fs.writeFileSync(target, "The corrected observation is current.\n");
+    if (scans === 4) fs.writeFileSync(target, corrected);
+  };
+  await assert.rejects(store.withFreshMemory(f.profile.id, read),
+    error => error === observedConflicts[2] && error.code === "MEMORY_REVISION_CONFLICT");
+  assert.equal(scans, 4);
+  assert.equal(reads, 1, "neither stale view reached the callback");
+  assert.equal(await store.withFreshMemory(f.profile.id, read), corrected);
+
+  f.memoryEngine.withAsyncMemoryReadView = memoryStore.withAsyncReadView.bind(memoryStore);
+  const input = { profile: f.profile, run: { ...f.run, source: "cron" } };
+  const reportDir = path.join(memoryDir, "dreaming", "light");
+  const report = path.join(reportDir, "2026-11-15.md");
+  const firstReport = "# Light Sleep\n\nFirst reflection.\n";
+  const editedReport = "# Light Sleep\n\nCorrected reflection.\n";
+  const compileMaterial = (input, beforeSnapshot) => {
+    const current = memoryStore.listActiveFile(f.profile.id, "memory/dreaming/light/2026-11-15.md");
+    beforeSnapshot();
+    return current[0].content;
+  };
+  const compile = t.mock.method(f.compiler, "compile", compileMaterial);
+  const finish = t.mock.fn(snapshot => snapshot);
+  beforeRead = () => {
+    if (scans !== 6) return;
+    fs.mkdirSync(reportDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(report, firstReport, { mode: 0o600 });
+  };
+  assert.equal(await f.compiler.compileAsync(input, finish), firstReport);
+  assert.equal(scans, 7);
+  assert.equal(compile.mock.callCount(), 1);
+  assert.equal(finish.mock.callCount(), 1);
+
+  beforeRead = () => {
+    if (scans === 8) fs.writeFileSync(report, editedReport);
+    if (scans === 9) fs.writeFileSync(report, firstReport);
+  };
+  await assert.rejects(f.compiler.compileAsync(input, finish), { code: "CONTEXT_SOURCE_STALE" });
+  assert.equal(scans, 9);
+  assert.equal(compile.mock.callCount(), 1);
+  assert.equal(finish.mock.callCount(), 1);
+
+  beforeRead = () => {};
+  compile.mock.mockImplementation((input, beforeSnapshot) => {
+    if (scans === 10) fs.writeFileSync(report, editedReport);
+    return compileMaterial(input, beforeSnapshot);
+  });
+  assert.equal(await f.compiler.compileAsync(input, finish), editedReport);
+  assert.equal(scans, 11);
+  assert.equal(compile.mock.callCount(), 3);
+  assert.equal(finish.mock.callCount(), 2);
+
+  compile.mock.mockImplementation((input, beforeSnapshot) => {
+    const material = compileMaterial(input, beforeSnapshot);
+    fs.writeFileSync(report, firstReport);
+    return material;
+  });
+  await assert.rejects(f.compiler.compileAsync(input, finish), { code: "CONTEXT_SOURCE_STALE" });
+  assert.equal(scans, 12, "a change after snapshot publication starts cannot repeat its effects");
+  assert.equal(compile.mock.callCount(), 4);
+  assert.equal(finish.mock.callCount(), 2);
+});
+
+test("checkpoint freshness retry respects cancellation and the callback boundary", async t => {
+  const f = contextFixture();
+  const store = new ConversationCheckpointStore({ paths: f.paths, transcriptStore: f.transcripts, memoryStore: f.memoryStore });
+  t.after(() => { store.close(); f.cleanup(); });
+  store.open();
+  const neverRead = () => assert.fail("checkpoint callback ran");
+  const conflict = Object.assign(new Error("changed revision"), { code: "MEMORY_REVISION_CONFLICT" });
+  const controller = new AbortController();
+  const reason = new Error("canceled after first conflict");
+  let acquisitions = 0, reads = 0;
+  f.memoryStore.withAsyncReadView = async () => {
+    acquisitions++;
+    controller.abort(reason);
+    throw conflict;
+  };
+  await assert.rejects(store.withFreshMemory(f.profile.id, neverRead, controller.signal), error => error === reason);
+  await assert.rejects(store.withFreshMemory(f.profile.id, neverRead, controller.signal), error => error === reason);
+  assert.equal(acquisitions, 1);
+
+  for (const code of ["MEMORY_SCOPE_REVOKED", "MEMORY_SCAN_UNAVAILABLE"]) {
+    const rejection = Object.assign(new Error("memory view unavailable"), { code });
+    f.memoryStore.withAsyncReadView = async () => { acquisitions++; throw rejection; };
+    await assert.rejects(store.withFreshMemory(f.profile.id, neverRead), error => error === rejection);
+  }
+  assert.equal(acquisitions, 3);
+  f.memoryStore.withAsyncReadView = async (_id, _signal, complete) => { acquisitions++; return complete({}); };
+  await assert.rejects(store.withFreshMemory(f.profile.id, () => { reads++; throw conflict; }), error => error === conflict);
+  assert.equal(acquisitions, 4);
+  assert.equal(reads, 1);
+});
+
 function summary(state) {
   return { ...Object.fromEntries(SUMMARY_FIELDS.map((field) => [field, []])), state: [state] };
 }

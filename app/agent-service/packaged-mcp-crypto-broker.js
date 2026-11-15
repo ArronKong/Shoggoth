@@ -11,6 +11,8 @@ const { createLocalFileSafeStorage } = require("./local-file-safe-storage");
 const { migrateLegacyMcpAuth } = require("./mcp-auth-legacy-migration");
 const { InProcessMcpCryptoBroker, McpCryptoBroker } = require("./mcp-crypto-broker");
 const { cryptoError } = require("./mcp-crypto-protocol");
+const { MCP_AUTH_STORAGE_CODES, mcpAuthStorageFailure } = require("./mcp-helper-diagnostics");
+const { serviceError } = require("./security");
 
 const REQUIRED_PATH_FIELDS = Object.freeze([
   "trustedRoot", "stateDir", "mcpAuthPath", "profileDir", "cacheDir",
@@ -127,6 +129,11 @@ class PackagedMcpCryptoBroker {
 
   readForHelper(options) {
     return this.#invoke("readForHelper", options);
+  }
+
+  encryptedBytes(plaintextBytes) {
+    if (!this.opened || !this.localIdentity) return null;
+    return this.delegate?.encryptedBytes?.(plaintextBytes) ?? null;
   }
 
   encrypt(payload, options) {
@@ -335,7 +342,7 @@ class PackagedMcpCryptoBroker {
       this.localIdentity = localIdentity;
       localStorage = null;
       return delegate;
-    } catch {
+    } catch (error) {
       let cleanupFailed = false;
       if (delegate) {
         try { await delegate.close(); } catch { cleanupFailed = true; }
@@ -343,6 +350,8 @@ class PackagedMcpCryptoBroker {
         try { await localStorage.close(); } catch { cleanupFailed = true; }
       }
       if (cleanupFailed) this.cleanupFailed = true;
+      const code = mcpAuthStorageFailure(error, { missingIsStorage: true });
+      if (code && this.#isCurrent(generation, epoch)) throw serviceError(code, code.toLowerCase());
       throw cryptoError();
     }
   }
@@ -381,9 +390,9 @@ class PackagedMcpCryptoBroker {
       try {
         if (error && typeof error === "object") code = Object.getOwnPropertyDescriptor(error, "code")?.value;
       } catch { /* hostile diagnostics must not escape the fixed error boundary */ }
-      if (this.#isCurrent(generation, epoch)
-        && ["MCP_CRYPTO_BACKPRESSURE", "MCP_CRYPTO_CANCELED"].includes(code)) {
-        throw cryptoError(code);
+      if (this.#isCurrent(generation, epoch)) {
+        if (MCP_AUTH_STORAGE_CODES.includes(code)) throw serviceError(code, code.toLowerCase());
+        if (["MCP_CRYPTO_BACKPRESSURE", "MCP_CRYPTO_CANCELED"].includes(code)) throw cryptoError(code);
       }
       throw cryptoError();
     }

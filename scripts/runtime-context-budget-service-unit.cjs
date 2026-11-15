@@ -1,6 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { AsyncLocalStorage } = require("node:async_hooks");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { UNKNOWN_WINDOW_BUDGET } = require("../app/agent-service/conversation-context-budget");
 
@@ -109,5 +110,90 @@ test("native compaction after a turn persists a boundary for unknown occupancy",
     const boundary = events.find(e => e.content?.transcriptType === "context.native.compacted");
     assert.equal(boundary?.content.runtimeSessionId, native);
     assert.equal(boundary.contextExcluded, true);
+  } finally { await f.close(); }
+});
+
+test("session runtime state reads the current meter without validating unrelated checkpoints", async () => {
+  const f = await openHandoffFixture();
+  try {
+    const config = f.service.nativeRuntimeConfig.read();
+    f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
+      flags: { ...config.flags, runtimeContextLifecycleV1: true } });
+    const session = f.createSession();
+    const run = await f.send(session.sessionKey, "runtime-state-without-checkpoint");
+    const native = run.runtimeSessionRef.sessionId;
+    f.transport.hosts.get("codex").emit({ known: true, type: "context_usage", threadId: native,
+      turnId: run.runtimeTurnRef.turnId, contextUsage: { runtimeSessionId: native,
+        usedTokens: 21337, contextWindow: 64000, quality: "exact", source: "runtime_event", observedAt: Date.now() } });
+    const coordinator = f.service.workRunCoordinator;
+    const store = coordinator.conversationCheckpointStore;
+    const original = store.compatible;
+    try {
+      store.compatible = () => assert.fail("meter-only requests must not synchronously check the checkpoint");
+      const state = await f.controller.handle("chat.session.runtime.state",
+        { profileId: session.profileId, sessionKey: session.sessionKey });
+      assert.equal(state.contextUsage.runtimeSessionId, native);
+      assert.equal(state.contextUsage.usedTokens, 21337);
+      const current = f.service.chatSessionStore.getSession(session.sessionKey);
+      assert.equal(coordinator.getRuntimeContext(current, { measurementOnly: true }).budget.tokens, 64000);
+    } finally { store.compatible = original; }
+    await f.complete(run);
+  } finally { await f.close(); }
+});
+
+test("session list verifies selected checkpoints inside one owner view per page", async () => {
+  const f = await openHandoffFixture({ serviceOptions: { memoryCore: true } });
+  try {
+    const config = f.service.nativeRuntimeConfig.read();
+    f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
+      flags: { ...config.flags, runtimeContextLifecycleV1: true } });
+    f.createSession(); f.createSession(); f.createSession();
+    const sessions = f.service.chatSessionStore.listProfileSessions(f.profile.id)
+      .filter(session => session.status !== "archived")
+      .map(session => session.sessionKey).sort();
+    const checkpoints = f.service.workRunCoordinator.conversationCheckpointStore;
+    const compatible = checkpoints.compatible.bind(checkpoints);
+    const memory = f.service.memoryEngine;
+    const originalStore = memory.store.withAsyncReadView.bind(memory.store);
+    const pageScope = new AsyncLocalStorage();
+    const visits = [];
+    let views = 0, inside = false, unavailableWorker = false;
+    memory.store.withAsyncReadView = (profileId, signal, read, scanSignal) => {
+      if (!pageScope.getStore()) return originalStore(profileId, signal, read, scanSignal);
+      if (unavailableWorker) {
+        return Promise.reject(Object.assign(new Error("fixture scanner unavailable"), { code: "MEMORY_SCAN_UNAVAILABLE" }));
+      }
+      return originalStore(profileId, signal, view => {
+        assert.equal(profileId, f.profile.id);
+        assert.ok(view, "the file-memory implementation supplies a worker-validated view");
+        views++;
+        inside = true;
+        try { return read(view); } finally { inside = false; }
+      }, scanSignal);
+    };
+    checkpoints.compatible = (profileId, sessionId) => {
+      if (!pageScope.getStore()) return compatible(profileId, sessionId);
+      assert.equal(inside, true, "the page must never synchronously open a memory snapshot per session");
+      visits.push(f.service.chatSessionStore.findSessionById(sessionId).sessionKey);
+      return compatible(profileId, sessionId);
+    };
+    try {
+      const read = cursor => pageScope.run(true, () => f.service.chatServiceController.handle("chat.session.list",
+        { profileId: f.profile.id, includeArchived: false, cursor, limit: 1 }));
+      const first = await read(null), second = await read(first.nextCursor);
+      assert.equal(first.sessions[0].sessionKey, sessions[0]);
+      assert.equal(second.sessions[0].sessionKey, sessions[1]);
+      assert.ok(first.sessions[0].productContext);
+      assert.deepEqual(visits, sessions.slice(0, 2));
+      assert.equal(views, 2);
+      unavailableWorker = true;
+      const unavailable = await read(null);
+      assert.equal(unavailable.sessions[0].sessionKey, sessions[0]);
+      assert.equal(unavailable.sessions[0].productContext.checkpointId, null);
+      assert.deepEqual(visits, sessions.slice(0, 2), "unavailable workers never trigger a synchronous fallback");
+    } finally {
+      memory.store.withAsyncReadView = originalStore;
+      checkpoints.compatible = compatible;
+    }
   } finally { await f.close(); }
 });

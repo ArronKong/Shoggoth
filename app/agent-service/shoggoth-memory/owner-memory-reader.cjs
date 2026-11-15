@@ -12,8 +12,8 @@ class OwnerMemoryReader {
       evidence.canonicalRelativePath || evidence.path, evidence.startLine, evidence.endLine, evidence.sourceHash, evidence.sourceOriginHash]));
   }
   authoritySnapshot(input, evidence) {
-    return this.service.store.list(input.ownerProfileId, { status: "active" }).filter(item => item.memoryPath === (evidence.canonicalRelativePath || evidence.path)
-      && item.startLine <= evidence.endLine && item.endLine >= evidence.startLine).map(item => ({
+    return this.service.activeFileEntries(input.ownerProfileId, evidence.canonicalRelativePath || evidence.path)
+      .filter(item => item.startLine <= evidence.endLine && item.endLine >= evidence.startLine).map(item => ({
         kind: item.projection ? "projection" : "entry", ...(item.projection ? {} : { id: item.id }),
         authorityHash: sha256(item.authorityText || item.content), startOffset: evidence.startLine - item.startLine,
       }));
@@ -45,7 +45,7 @@ class OwnerMemoryReader {
     const authorities = proof.entries;
     try {
       const relative = previous.canonicalRelativePath || previous.path;
-      const current = this.service.store.list(input.ownerProfileId, { status: "active" }).filter(item => item.memoryPath === relative);
+      const current = this.service.activeFileEntries(input.ownerProfileId, relative);
       const starts = new Set();
       for (const authority of authorities) for (const item of current) {
         if ((item.projection ? "projection" : "entry") !== authority.kind
@@ -79,7 +79,8 @@ class OwnerMemoryReader {
   }
   evidence(input, result) {
     const scope = this.policy.scope(input), host = this.service.host(input.ownerProfileId);
-    const source = host.searchIndex.sourceFiles.read(result.path), text = source.text.split("\n").slice(result.startLine - 1, result.endLine).join("\n");
+    const source = host.searchIndex.sourceFiles.read(result.path, this.service.memoryViewFor(input.ownerProfileId));
+    const text = source.text.split("\n").slice(result.startLine - 1, result.endLine).join("\n");
     const candidate = { ...result, source: "memory", snippet: text };
     if (!text.trim() || !this.policy.allowResult(input, candidate)) throw serviceError("MEMORY_SHARED_SOURCE_REVOKED", "借阅记忆的来源或权限已失效");
     host.assertWorkspace(host.workspaceDir);
@@ -91,7 +92,8 @@ class OwnerMemoryReader {
       citation: `${result.path}#L${result.startLine}-L${result.endLine}` };
     const key = this.evidenceKey(input, evidence);
     const entries = this.authoritySnapshot(input, evidence);
-    const sourceRefs = this.service.store.list(input.ownerProfileId, { status: "active" }).filter(item => entries.some(authority => authority.id === item.id)).flatMap(item => item.sourceRefs || []);
+    const sourceRefs = this.service.activeFileEntries(input.ownerProfileId, result.path)
+      .filter(item => entries.some(authority => authority.id === item.id)).flatMap(item => item.sourceRefs || []);
     this.authorities.set(key, { entries, sourceRefs, recallRevisions: this.recallRevisions(input) });
     if (this.authorities.size > 8192) this.authorities.delete(this.authorities.keys().next().value);
     return evidence;
@@ -104,8 +106,22 @@ class OwnerMemoryReader {
         maxResults: input.maxResults ?? 10, minScore: input.minScore, lexicalOnly: input.lexicalOnly === true,
         signal: input.signal, record: false, sources: ["memory"] })));
     this.policy.scope(input);
-    const results = value.results.map(result => this.evidence(input, result));
+    const results = value.results.length ? await this.service.withAsyncMemoryReadView(input.ownerProfileId, input.signal,
+      () => value.results.map(result => this.evidence(input, result))) : [];
     return { status: "ready", results, semantic: value.semantic };
+  }
+  prepareTriggers(input) {
+    input = this.scopedRequest(input);
+    const scope = this.policy.scope(input), host = this.service.host(input.ownerProfileId);
+    const index = host.searchIndex;
+    return this.service.searchScope.run(scope, () => {
+      // Explicit semantic providers keep their ordinary recall path. An
+      // optional lexical preflight must not cause extra embedding traffic.
+      const { resolved, stamp } = index.resolveSettings();
+      if (resolved?.provider !== "none") return null;
+      const ready = index.sync({ signal: input.signal, expectedConfigStamp: stamp }).then(() => this.policy.scope(input));
+      return { ready, settled: index.tail };
+    });
   }
   async triggerCandidates(input, options = {}) {
     input = this.scopedRequest(input);
@@ -113,7 +129,9 @@ class OwnerMemoryReader {
     const results = await this.service.searchScope.run(scope, () => host.searchIndex.withCandidateFilter(
       result => this.policy.allowResult(input, result), () => host.run(() => host.searchIndex.listTriggerCandidates({ ...options, signal: input.signal }))));
     this.policy.scope(input);
-    return { status: "ready", results: results.map(result => this.evidence(input, result)), semantic: { status: "ready", modelId: "lexical" } };
+    const projected = results.length ? await this.service.withAsyncMemoryReadView(input.ownerProfileId, input.signal,
+      () => results.map(result => this.evidence(input, result))) : [];
+    return { status: "ready", results: projected, semantic: { status: "ready", modelId: "lexical" } };
   }
   revalidate(input, evidence) {
     this.policy.scope(input);

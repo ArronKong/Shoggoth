@@ -43,6 +43,7 @@ class PiRuntimeHandle {
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
     this.capabilities = PI_CAPABILITIES;
+    this.usesTurnSendGuard = true;
     this.host = host;
     this.secretGateway = secretGateway;
     this.secretRoutes = new Map();

@@ -7,6 +7,7 @@ const { normalizeBorrowedMemoryRefs } = require("./borrowed-memory-provenance.cj
 const { validEvidence } = require("./active-memory-evidence.cjs");
 const PROOF_NAMESPACE = "active-memory-status-proof";
 const MAX_SOURCES = 2048, MAX_BYTES = 256 * 1024;
+const STATUS_SCAN_DEADLINE_MS = 5_000;
 
 // The upstream lines may include a recalled summary. A separate bounded host
 // receipt ties those exact bytes to their source hashes and Product scope;
@@ -71,16 +72,31 @@ class ActiveMemoryStatus {
       const borrowedMemoryRefs = normalizeBorrowedMemoryRefs(proof.borrowedMemoryRefs || []);
       if (proof.profileId !== input.profileId || proof.sessionId !== scope.session.id || proof.sessionKey !== scope.canonical
         || record.sessionId !== scope.session.id || record.sessionKey !== scope.canonical
-        || proof.statusVersion !== row.version || proof.statusHash !== sha256(row.value) || proof.guard !== this.guard(scope)
+        || proof.statusVersion !== row.version || proof.statusHash !== sha256(row.value)
         || !Array.isArray(proof.evidence) || proof.evidence.length > MAX_SOURCES
         || proof.evidence.some(item => !validEvidence(item))
-        || !active.evidenceCurrent(input.profileId, proof.evidence, borrowedMemoryRefs, scope.session.id)) return empty("stale");
-      const statusLines = core.resolveSessionPluginStatusLines(record.entry);
-      const traceLines = input.includeTrace ? core.resolveSessionPluginTraceLines(record.entry) : [];
-      scope.assertCurrent(); policy.assertCurrent();
-      return protocol.validateResult({ supported: true, phase: statusLines.length || traceLines.length ? "complete" : "idle",
-        outcome: statusLines.length || traceLines.length ? proof.outcome : null,
-        updatedAt: statusLines.length || traceLines.length ? record.updatedAt : null, statusLines, traceLines }, input);
+        || borrowedMemoryRefs.some(ref => ref.requesterProfileId !== input.profileId)) return empty("stale");
+      const unchanged = (namespace, expected) => {
+        const current = this.row(scope.database, namespace, key);
+        return current?.version === expected.version && current.expires_at === expected.expires_at && current.value === expected.value;
+      };
+      const publish = view => {
+        scope.assertCurrent(); policy.assertCurrent();
+        if (!unchanged(STATUS_NAMESPACE, row) || !unchanged(PROOF_NAMESPACE, proofRow) || proof.guard !== this.guard(scope)
+          || !active.evidenceCurrent(input.profileId, proof.evidence, borrowedMemoryRefs, scope.session.id)) return empty("stale");
+        const statusLines = core.resolveSessionPluginStatusLines(record.entry);
+        const traceLines = input.includeTrace ? core.resolveSessionPluginTraceLines(record.entry) : [];
+        scope.assertCurrent(); policy.assertCurrent();
+        view.assertFilesCurrent();
+        return protocol.validateResult({ supported: true, phase: statusLines.length || traceLines.length ? "complete" : "idle",
+          outcome: statusLines.length || traceLines.length ? proof.outcome : null,
+          updatedAt: statusLines.length || traceLines.length ? record.updatedAt : null, statusLines, traceLines }, input);
+      };
+      const signal = AbortSignal.any([service.profileSignal(input.profileId), AbortSignal.timeout(STATUS_SCAN_DEADLINE_MS)]);
+      const owners = new Set(borrowedMemoryRefs.map(ref => ref.ownerProfileId));
+      return owners.size
+        ? await service.withMemoryOwnerReadViews(input.profileId, owners, signal, publish)
+        : await service.withAsyncMemoryReadView(input.profileId, signal, publish);
     } catch { return empty("stale"); }
   }
 }

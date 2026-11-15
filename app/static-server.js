@@ -3496,6 +3496,19 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           return sendJson(res, code === "INVALID_PARAMS" ? 400 : 409, { code, error: messages[code] });
         }
       }
+      if (segs[2] === "group-continuation" && segs.length === 3) {
+        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        if (typeof backend.getGroupContinuation !== "function") return sendJson(res, 501, { error: "Group continuation unavailable" });
+        try {
+          const key = url.searchParams.get("sessionKey"), answerEventId = url.searchParams.get("answerEventId");
+          if (typeof key !== "string" || !key || key.length > 1024) return sendJson(res, 400, { error: "Invalid session" });
+          const { validateChatServiceParams } = require("./agent-service/chat-service-protocol");
+          validateChatServiceParams("chat.continuation.group.get", { sessionKey: key.split(":").at(-1), answerEventId });
+          return sendJson(res, 200, await backend.getGroupContinuation(id, key, answerEventId));
+        } catch (error) {
+          return sendJson(res, error?.code === "INVALID_PARAMS" ? 400 : 409, { error: "Group continuation unavailable" });
+        }
+      }
       if (segs[2] === "context" && segs.length === 3) {
         if (backend.getBackendDescriptor?.().surfaces?.runtimeBindings !== true) return sendJson(res, 501, { error: "Product context unavailable" });
         if (method === "GET") {

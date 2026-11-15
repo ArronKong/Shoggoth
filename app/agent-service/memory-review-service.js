@@ -21,6 +21,7 @@ const { memoryThreatPattern } = require("./memory-threat-scan");
 const { isBorrowedMemoryDerived, extractBorrowedMemoryRefs } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 const { recallDiagnostics, diagnosticCode } = require("./shoggoth-memory/active-memory-diagnostics.cjs");
 const { readEvents } = require("./transcript-read");
+const { serviceError } = require("./security");
 
 const MAX_CHUNK_MESSAGES = 40;
 const MAX_CHUNKS_PER_NIGHT = 3;
@@ -33,6 +34,8 @@ const MAX_OPERATIONS = 4;
 const MAX_CONTENT_BYTES = 2048;
 const MAX_OUTPUT_BYTES = 8192;
 const TIMEOUT_MS = 120_000;
+const REVIEW_REJECTED_OPERATIONS = new Set(["MEMORY_INVALID", "MEMORY_SECRET_REJECTED", "MEMORY_RESTRICTED",
+  "MEMORY_CONFLICT_INVALID", "MEMORY_BORROWED_READ_ONLY"]);
 
 const sha256 = value => crypto.createHash("sha256").update(value, "utf8").digest("hex");
 
@@ -96,7 +99,9 @@ class MemoryReviewService {
         () => combined.throwIfAborted());
       const day = this.memory.sessionCapture.day(profileId, this.now()).day;
       const dayNumber = Date.parse(`${day}T00:00:00Z`) / 86_400_000;
-      for (const chunk of await this.pendingChunks(profileId)) {
+      const pending = await this.pendingChunks(profileId, combined);
+      sessionKeys.clear();
+      for (const chunk of pending) {
         if (chunks >= MAX_CHUNKS_PER_NIGHT) break;
         combined.throwIfAborted();
         for (const row of chunk.rows) sessionKeys.add(row.sessionKey);
@@ -105,6 +110,7 @@ class MemoryReviewService {
         const key = sha256(JSON.stringify([chunk.workspace, chunk.rows.map(row => [row.sessionId, row.eventId, row.seq, row.text])]));
         const previous = await failures.lookup("chunk");
         let skip = previous?.key === key && previous.count >= MAX_INVALID_NIGHTS;
+        if (skip) await this.withReviewReadView(profileId, combined, () => this.assertReviewRowsCurrent(profileId, chunk.workspace, chunk.rows));
         const result = skip ? { applied: 0, reason: "invalid-output" }
           : await this.reviewRows({ profileId, workspace: chunk.workspace, rows: chunk.rows, signal: combined });
         combined.throwIfAborted();
@@ -142,21 +148,34 @@ class MemoryReviewService {
 
   // Unreviewed messages of the Agent's direct chats, oldest first, grouped by
   // workspace (known memories are workspace-bound) into model-sized chunks.
-  async pendingChunks(profileId) {
+  async pendingChunks(profileId, signal) {
     const capture = this.memory.sessionCapture, since = await capture.baseline(profileId);
-    const groups = new Map();
+    const pending = [];
     for (const session of capture.sessions(profileId)) {
+      signal?.throwIfAborted();
       const { reviewedSeq } = await capture.progress(profileId, session.id);
-      if (reviewedSeq >= capture.lastSeq(profileId, session.id)) continue;
-      let rows;
-      try { rows = this.rowsAfter(profileId, session.id, reviewedSeq); }
-      catch { continue; }
-      rows = rows.filter(row => row.occurredAt >= since);
-      if (!rows.some(row => row.kind === "user")) continue;
-      const key = JSON.stringify(session.workspace ?? null);
-      if (!groups.has(key)) groups.set(key, { workspace: session.workspace ?? null, rows: [] });
-      groups.get(key).rows.push(...rows.map(row => ({ ...row, sessionKey: session.sessionKey })));
+      if (reviewedSeq < capture.lastSeq(profileId, session.id)) {
+        pending.push({ session, reviewedSeq });
+        this.inFlight.get(profileId)?.sessionKeys.add(session.sessionKey);
+      }
     }
+    if (!pending.length) return [];
+    const groups = new Map();
+    await this.withReviewReadView(profileId, signal, () => {
+      for (const { session, reviewedSeq } of pending) {
+        let rows;
+        try { rows = this.rowsAfter(profileId, session.id, reviewedSeq); }
+        catch (error) {
+          if (error?.code === "CONVERSATION_EVENT_NOT_FOUND") continue;
+          throw error;
+        }
+        rows = rows.filter(row => row.occurredAt >= since);
+        if (!rows.some(row => row.kind === "user")) continue;
+        const key = JSON.stringify(session.workspace ?? null);
+        if (!groups.has(key)) groups.set(key, { workspace: session.workspace ?? null, rows: [] });
+        groups.get(key).rows.push(...rows.map(row => ({ ...row, sessionKey: session.sessionKey })));
+      }
+    });
     const chunks = [];
     for (const group of groups.values()) {
       group.rows.sort((a, b) => a.occurredAt - b.occurredAt || a.seq - b.seq);
@@ -209,27 +228,68 @@ class MemoryReviewService {
   async review({ profileId, sessionKey, signal }) {
     const session = this.sessions.getSession(sessionKey);
     if (!session || session.profileId !== profileId) return { applied: 0, reason: "no-session" };
-    const rows = this.rowsAfter(profileId, session.id, Math.max(0, this.lastSeq(profileId, session.id) - SCAN_SEQ_WINDOW));
-    return this.reviewRows({ profileId, workspace: session.workspace, rows: rows.slice(-TAIL_MESSAGES), signal });
+    const rows = await this.withReviewReadView(profileId, signal, () => this.rowsAfter(profileId, session.id,
+      Math.max(0, this.lastSeq(profileId, session.id) - SCAN_SEQ_WINDOW)));
+    return this.reviewRows({ profileId, workspace: session.workspace,
+      rows: rows.slice(-TAIL_MESSAGES).map(row => ({ ...row, sessionKey })), signal });
+  }
+
+  withReviewReadView(profileId, signal, read) {
+    signal?.throwIfAborted();
+    if (!this.memory.withAsyncMemoryReadView) return read();
+    return this.memory.withAsyncMemoryReadView(profileId, signal, view => {
+      const result = read(view);
+      view.assertFilesCurrent();
+      return result;
+    });
+  }
+
+  assertReviewRowsCurrent(profileId, workspace, rows) {
+    const sessions = new Map(), host = this.memory.host(profileId);
+    for (const row of rows) {
+      if (!sessions.has(row.sessionId)) sessions.set(row.sessionId, host.sessions.current(profileId, row.sessionId));
+      const session = sessions.get(row.sessionId);
+      const raw = this.transcripts.getEvent(profileId, row.sessionId, row.eventId);
+      const current = this.recall.scanEligibleSession({ profileId, sessionId: row.sessionId, afterSeq: row.seq - 1,
+        limit: 1, completedOnly: true }).events[0];
+      if (session.sessionKey !== row.sessionKey || session.workspace !== workspace || !raw
+        || isBorrowedMemoryDerived(raw) || extractBorrowedMemoryRefs(raw.content).length
+        || current?.eventId !== row.eventId || current.seq !== row.seq || current.runId !== row.runId
+        || current.kind !== row.kind || current.text !== row.text || current.occurredAt !== row.occurredAt) {
+        throw serviceError("MEMORY_SOURCE_REVOKED", "复盘的会话来源已经变化");
+      }
+    }
   }
 
   async reviewRows({ profileId, workspace, rows, signal }) {
     if (!rows.some(row => row.kind === "user")) return { applied: 0, reason: "no-user-message" };
-    const known = this.knownMemories(profileId, workspace, rows);
+    const checkRows = () => this.assertReviewRowsCurrent(profileId, workspace, rows);
+    const { known, proof } = await this.withReviewReadView(profileId, signal, view => {
+      if (view) checkRows();
+      return { known: this.knownMemories(profileId, workspace, rows), proof: view?.retainProof() };
+    });
+    const assertCurrent = () => {
+      signal?.throwIfAborted();
+      proof?.read(view => this.memory.withSuppliedReadView(profileId, view, checkRows));
+    };
     const messages = rows.map(row => ({ role: row.kind, eventId: row.eventId,
       text: row.text.length > MAX_PROMPT_MESSAGE_CHARS ? `${row.text.slice(0, MAX_PROMPT_MESSAGE_CHARS)}…` : row.text }));
-    signal?.throwIfAborted();
+    assertCurrent();
     const output = await this.generate({ profileId, operationId: `memory-review-${this.randomUUID()}`,
       prompt: reviewPrompt(messages, known.map(item => ({ id: item.id, store: item.scope, content: item.content.slice(0, 300) }))),
-      maxOutputBytes: MAX_OUTPUT_BYTES, timeoutMs: TIMEOUT_MS, ...(signal ? { signal } : {}) });
-    signal?.throwIfAborted();
+      maxOutputBytes: MAX_OUTPUT_BYTES, timeoutMs: TIMEOUT_MS, assertCurrent, ...(signal ? { signal } : {}) });
+    assertCurrent();
     const operations = parseOperations(output?.text ?? "");
     if (!operations) return { applied: 0, reason: "invalid-output" };
     let applied = 0;
     for (const operation of operations) {
       signal?.throwIfAborted();
-      try { if (await this.apply(profileId, operation, rows, known)) applied++; }
-      catch (error) { try { this.onError?.(error); } catch {} }
+      try { if (await this.apply(profileId, workspace, operation, rows, known, signal)) applied++; }
+      catch (error) {
+        signal?.throwIfAborted();
+        if (!REVIEW_REJECTED_OPERATIONS.has(error?.code)) throw error;
+        try { this.onError?.(error); } catch {}
+      }
     }
     return { applied, reason: applied ? "saved" : "nothing-saved" };
   }
@@ -258,7 +318,7 @@ class MemoryReviewService {
   // conversation or message also withdraws the fact. Without a valid citation
   // an Agent note falls back to the latest user message only when all reviewed
   // messages come from one conversation.
-  async apply(profileId, operation, rows, known) {
+  async apply(profileId, workspace, operation, rows, known, signal) {
     if (!operation || typeof operation !== "object" || !["add", "replace"].includes(operation.action)) return false;
     const content = typeof operation.content === "string" ? operation.content.trim() : "";
     if (!content || Buffer.byteLength(content, "utf8") > MAX_CONTENT_BYTES || memoryThreatPattern(content)) return false;
@@ -273,10 +333,28 @@ class MemoryReviewService {
     const oneSession = new Set(rows.map(row => row.sessionId)).size === 1;
     const source = cited || (oneSession ? rows.filter(row => row.kind === "user").at(-1) : null);
     if (!source) return false;
+    let expectedRevision, proof;
+    const checkSource = () => this.assertReviewRowsCurrent(profileId, workspace, [source]);
+    if (this.memory.withAsyncMemoryReadView) {
+      ({ expectedRevision, proof } = await this.withReviewReadView(profileId, signal, view => {
+        checkSource();
+        if (!prior) return { proof: view.retainProof() };
+        const current = view.get(prior.id);
+        if (current?.status !== "active" || current.content !== prior.content || current.scope !== prior.scope
+          || !this.memory.recallPolicy.isMemoryVisible(profileId, current)) return { expectedRevision: null };
+        return { expectedRevision: view.getRevisions().revision, proof: view.retainProof() };
+      }));
+      if (expectedRevision === null) return false;
+    }
     const id = `memory-review-${this.randomUUID()}`;
     const item = await this.memory.propose({ profileId, id, content, scope: store, type: "semantic",
       classification: store === "user" ? "explicit" : "inferred",
-      sourceRefs: [source.eventId, source.runId].filter(Boolean), supersedes: prior?.id ?? null, validUntil: null });
+      sourceRefs: [source.eventId, source.runId].filter(Boolean), supersedes: prior?.id ?? null, validUntil: null,
+      ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+      ...(signal ? { signal } : {}), assertCurrent: () => {
+        signal?.throwIfAborted();
+        proof?.read(view => this.memory.withSuppliedReadView(profileId, view, checkSource));
+      } });
     // An unchanged fact returns the existing record; nothing new was saved.
     if (!item || item.id !== id || item.status !== "active") return false;
     const quoteStart = store === "user" ? source.text.indexOf(quote) : null;

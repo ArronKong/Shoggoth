@@ -28,6 +28,7 @@ const { isLegacyBorrowedToolContent } = require("./shoggoth-memory/borrowed-memo
 const { resolveRuntimePermissionMode } = require("./runtime-permission-modes");
 const activeMemoryCommand = require("./active-memory-command-protocol");
 const { normalizeInteractiveRequestV1, mcpElicitationUsesApprovalWait } = require("../core/shoggoth-interaction-contract");
+const { groupContinuationFromAnswer } = require("./continuation-interaction-evidence");
 
 const RESTART_INTERRUPTION_CODES = new Set([
   "SERVICE_RESTARTED", "EXECUTION_CONTRACT_LOST", "RUNTIME_HOST_RESTARTED",
@@ -48,10 +49,13 @@ const IMPLEMENTED_METHODS = new Set([
   "chat.session.archive",
   "chat.session.delete",
   "chat.history",
+  "chat.continuation.group.get",
   "chat.search",
   "chat.command.list",
   "chat.command.exec",
   "chat.send",
+  "chat.send.accept",
+  "chat.send.cancel",
   "chat.operation.get",
   "chat.operation.reconcile",
   "chat.steer",
@@ -177,6 +181,7 @@ function transcriptHistoryItem(event, runSource) {
     message.shoggoth = { ...message.shoggoth, sourceEventId: event.id, transcriptSeq: event.seq,
       contextExcluded: event.contextExcluded,
       ...(runSource ? { source: runSource } : {}) };
+    delete message.shoggoth.groupContinuation;
     return item;
   }
   const transcriptType = event.content?.transcriptType;
@@ -191,6 +196,8 @@ function transcriptHistoryItem(event, runSource) {
     message = transcriptMessage(event, role, [{ type: "text", text,
       ...(role === "assistant" && event.content?.phase === "commentary" ? { activity: true } : {}),
       ...(event.content?.segmentId ? { segmentId: event.content.segmentId, sourceEventId: event.id } : {}) }]);
+    const groupContinuation = groupContinuationFromAnswer(event);
+    if (groupContinuation) message.shoggoth.groupContinuation = groupContinuation;
   } else if (event.kind === "error") {
     const text = transcriptMessageText(event);
     if (!text) return null;
@@ -1176,7 +1183,7 @@ function createChatServiceController(options = {}) {
   }
 
   async function handleImpl(method, rawParams, responseId, generation) {
-    if (method === "chat.send" && rawParams && Object.hasOwn(rawParams, "pluginSelection")) {
+    if (["chat.send", "chat.send.accept"].includes(method) && rawParams && Object.hasOwn(rawParams, "pluginSelection")) {
       throw controllerError("PLUGIN_PLATFORM_RETIRED", "旧插件选择已停用，请重新选择连接器账号");
     }
     if (!IMPLEMENTED_METHODS.has(method)) {
@@ -1197,29 +1204,36 @@ function createChatServiceController(options = {}) {
       });
     }
     if (method === "chat.session.list") {
-      const sessions = chatSessionStore.listSessions()
-        .filter((session) => session.profileId === params.profileId)
-        .filter((session) => params.includeArchived || session.status !== "archived")
-        .filter((session) => !isInternalSession(session.sessionKey))
-        .map((session) => {
-          const origin = chatSessionStore.getCronSessionOrigin?.(session.sessionKey);
-          const title = transcriptStore?.getSessionDerivedTitle(session.profileId, session.id) ?? null;
-          let cronTitle = null;
-          if (origin) {
-            try { cronTitle = options.getCronJobName?.(origin.cronJobId) || null; } catch {}
-          }
-          return { ...session, ...(options.getRuntimeContext?.(session) || {}),
-            ...(options.getCodexDesktopSessionOrigin?.(session.sessionKey) || {}),
-            ...(inspiration()?.sessionOrigin(session.sessionKey) || {}), ...(origin || {}),
-            ...(options.getProactiveSessionOrigin?.(session.sessionKey) || {}),
-            derivedTitle: origin ? `Cron · ${cronTitle || title || origin.cronJobId.slice(0, 8)}` : title };
-        });
+      const sessions = (chatSessionStore.listProfileSessions?.(params.profileId) ?? chatSessionStore.listSessions()
+        .filter((session) => session.profileId === params.profileId))
+        .filter((session) => (params.includeArchived || session.status !== "archived") && !isInternalSession(session.sessionKey));
+      const project = (selected, contextOptions) => selected.map(before => {
+        const session = chatSessionStore.getSession(before.sessionKey);
+        if (!session || session.id !== before.id || session.profileId !== params.profileId
+          || session.revision !== before.revision || isInternalSession(session.sessionKey)) {
+          throw controllerError("CHAT_SESSION_REVISION_CONFLICT", "读取期间会话列表已变化");
+        }
+        const origin = chatSessionStore.getCronSessionOrigin?.(session.sessionKey);
+        const title = transcriptStore?.getSessionDerivedTitle(session.profileId, session.id) ?? null;
+        let cronTitle = null;
+        if (origin) {
+          try { cronTitle = options.getCronJobName?.(origin.cronJobId) || null; } catch {}
+        }
+        return { ...session, ...(options.getRuntimeContext?.(session, contextOptions) || {}),
+          ...(options.getCodexDesktopSessionOrigin?.(session.sessionKey) || {}),
+          ...(inspiration()?.sessionOrigin(session.sessionKey) || {}), ...(origin || {}),
+          ...(options.getProactiveSessionOrigin?.(session.sessionKey) || {}),
+          derivedTitle: origin ? `Cron · ${cronTitle || title || origin.cronJobId.slice(0, 8)}` : title };
+      });
       return paginateChatServiceItems({
         method,
         params,
         responseId,
         cursorCodec,
         entries: stableEntries(sessions, (session) => session.sessionKey),
+        projectPage: selected => options.withRuntimeContextReadView
+          ? options.withRuntimeContextReadView(params.profileId, selected, contextOptions => project(selected, contextOptions))
+          : project(selected),
       });
     }
     if (method === "chat.session.create") {
@@ -1251,9 +1265,14 @@ function createChatServiceController(options = {}) {
     } else if ([
       "chat.session.rename", "chat.session.archive", "chat.session.delete",
     ].includes(method)) {
-      return runRemoteOperation(method, params, generation);
+      return method !== "chat.session.rename" && typeof coordinator.withChatSessionRemoval === "function"
+        ? coordinator.withChatSessionRemoval(params.sessionKey, () => runRemoteOperation(method, params, generation))
+        : runRemoteOperation(method, params, generation);
     } else if (method === "chat.history") {
       return readHistory(params, responseId, generation);
+    } else if (method === "chat.continuation.group.get") {
+      const session = chatSessionStore.getSession(params.sessionKey);
+      result = { target: session ? options.getGroupContinuation?.(session, params.answerEventId) ?? null : null };
     } else if (method === "chat.command.list") {
       result = await listRuntimeCommands(params, generation);
     } else if (method === "chat.command.exec") {
@@ -1267,10 +1286,16 @@ function createChatServiceController(options = {}) {
       if (result.status === "found") {
         const session = chatSessionStore.getSession(params.sessionKey), run = result.run;
         if (!session || !run || run.source !== "chat" || run.sourceId !== params.sessionKey
-          || run.profileId !== session.profileId || run.workspace !== session.workspace
+          || run.profileId !== session.profileId
           || run.idempotencyKey !== `shoggoth:chat-send:${params.operationId}`) {
           throw controllerError("CHAT_RESPONSE_INVALID", "Chat operation Run identity 不匹配");
         }
+      }
+      if (result.status === "accepted") {
+        if (result.receipt.operationId !== params.operationId || result.receipt.sessionKey !== params.sessionKey) {
+          throw controllerError("CHAT_RESPONSE_INVALID", "Chat acceptance identity 不匹配");
+        }
+        if (!params.includeAcceptance) result = { status: "unresolved", run: null };
       }
     } else if (method === "chat.operation.get") {
       requireMethods(chatSessionStore, ["getSession"], "ChatSessionStore getSession");
@@ -1279,16 +1304,25 @@ function createChatServiceController(options = {}) {
       const origin = inspiration()?.sessionOrigin(params.sessionKey);
       const run = origin
         ? inspiration().getSessionRunByOperation(params.operationId, params.sessionKey)
-        : coordinator.getChatRunByOperation(params.operationId, params.sessionKey);
+        : coordinator.getChatRunByOperation(params.operationId, params.sessionKey, { requireUserProjection: true });
       if (run && (run.source !== (origin ? "inspiration" : "chat")
         || run.sourceId !== (origin ? origin.inspirationId : params.sessionKey)
-        || run.profileId !== session.profileId || run.workspace !== session.workspace
+        || run.profileId !== session.profileId || (origin && run.workspace !== session.workspace)
         || run.idempotencyKey !== (origin
           ? `inspiration:${params.operationId}` : `shoggoth:chat-send:${params.operationId}`))) {
         throw controllerError("CHAT_RESPONSE_INVALID", "Chat operation Run identity 不匹配");
       }
-      result = { status: run ? "found" : "unresolved", run: run || null };
-    } else if (method === "chat.send") {
+      const acceptance = !run && !origin && params.includeAcceptance
+        ? coordinator.getChatAcceptance?.(params.operationId, params.sessionKey) : null;
+      result = acceptance ? { status: "accepted", run: null, receipt: acceptance }
+        : { status: run ? "found" : "unresolved", run: run || null };
+    } else if (method === "chat.send.cancel") {
+      result = await coordinator.cancelChatAcceptance(params);
+      fence(generation);
+      if (result.operationId !== params.operationId || result.sessionKey !== params.sessionKey) {
+        throw controllerError("CHAT_RESPONSE_INVALID", "Coordinator receipt identity 不匹配");
+      }
+    } else if (method === "chat.send" || method === "chat.send.accept") {
       requireMethods(chatSessionStore, ["getSession"], "ChatSessionStore getSession");
       const session = chatSessionStore.getSession(params.sessionKey);
       if (!session) throw controllerError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
@@ -1300,6 +1334,15 @@ function createChatServiceController(options = {}) {
         ...(params.attachments?.length ? { attachments: params.attachments } : {}),
         ...(params.connectorSelection !== undefined ? { connectorSelection: params.connectorSelection } : {}),
       };
+      if (method === "chat.send.accept") {
+        if (origin) throw controllerError("CHAT_SESSION_NOT_READY", "此会话使用领域任务接收协议");
+        result = validateChatServiceResult(method, await coordinator.send(sendInput, { acceptanceOnly: true }));
+        fence(generation);
+        if (result.operationId !== params.operationId || result.sessionKey !== params.sessionKey) {
+          throw controllerError("CHAT_RESPONSE_INVALID", "Coordinator receipt identity 不匹配");
+        }
+        return result;
+      }
       result = validateChatServiceResult(method, await (origin
         ? inspiration().sendFromSession(sendInput) : coordinator.send(sendInput)));
       fence(generation);

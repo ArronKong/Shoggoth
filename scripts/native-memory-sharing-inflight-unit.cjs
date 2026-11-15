@@ -40,7 +40,203 @@ function emitLate(host, run) {
   host.emit({ ...common, type: "complete", method: "turn/completed", status: "completed" });
 }
 
-for (const action of ["exclude source", "delete source memory"]) {
+for (const mode of ["available", "withdrawn", "worker unavailable", "edited during handoff"]) {
+  test(`handoff validates historical borrowed memory using worker proofs: ${mode}`, { timeout: 30000 }, async () => {
+    const f = await fixture();
+    try {
+      const session = f.createSession();
+      const run = await f.send(session.sessionKey, "borrowed-before-handoff", "Find telescope memory");
+      const found = await f.callTool(run, "memory_search", { query: "telescope", minScore: 0, ownerProfileId: f.B });
+      assert.ok(found.results.some(item => item.ownerProfileId === f.B));
+      const answer = "HISTORICAL_BORROWED_ANSWER_50931";
+      await f.complete(run, answer);
+      const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore } = f.service;
+      const old = chatSessionStore.getSession(session.sessionKey);
+      assert.ok(transcriptStore.listEvents(old.profileId, old.id).some(event => event.content?.borrowedMemoryRefs?.length));
+      if (mode === "withdrawn") f.service.nativeMemorySharingConfig.apply({ revision: 1,
+        config: { enabled: true, excludedProfiles: [f.B] } });
+      let scans = 0, synchronous = 0, compiled = null, edited = false;
+      const readAsync = f.owner.withAsyncMemoryReadView.bind(f.owner);
+      f.owner.withAsyncMemoryReadView = (id, ...args) => {
+        if (id === f.B) {
+          scans++;
+          if (mode === "worker unavailable") return Promise.reject(Object.assign(new Error("controlled worker outage"),
+            { code: "MEMORY_SCAN_UNAVAILABLE" }));
+        }
+        return readAsync(id, ...args);
+      };
+      const readSync = f.owner.withMemoryReadView.bind(f.owner);
+      f.owner.withMemoryReadView = (id, read) => {
+        if (id === f.B && !f.owner.memoryViewFor(id)) synchronous++;
+        return readSync(id, read);
+      };
+      const compiler = coordinator.contextCompiler, compile = compiler.compile.bind(compiler);
+      compiler.compile = input => {
+        const snapshot = compile(input);
+        if (input.run.id === `handoff-preview-${old.revision}`) {
+          compiled = snapshot.dynamicContext;
+          if (mode === "edited during handoff") {
+            const file = path.join(f.owner.store.workspace(f.B), "MEMORY.md");
+            fs.appendFileSync(file, "\nNew owner input invalidates the retained view.\n");
+            edited = true;
+          }
+        }
+        return snapshot;
+      };
+      if (mode === "edited during handoff") {
+        await assert.rejects(f.switch(old.sessionKey, "pi"), { code: "CONTEXT_SOURCE_STALE" });
+        assert.equal(edited, true);
+        assert.deepEqual(chatSessionStore.getSession(old.sessionKey), old);
+      } else {
+        await f.switch(old.sessionKey, "pi");
+        const switched = chatSessionStore.getSession(old.sessionKey);
+        assert.equal(switched.runtimeSessionId, null);
+        assert.notEqual(switched.runtimeBindingId, old.runtimeBindingId);
+        if (mode === "available") assert.match(compiled, new RegExp(answer));
+        else assert.doesNotMatch(compiled, new RegExp(answer));
+      }
+      assert.equal(synchronous, 0);
+      assert.equal(scans > 0, mode !== "withdrawn");
+    } finally { await f.close(); }
+  });
+}
+
+test("model-only handoff cannot send a summary after the retained foreign proof changes", { timeout: 30000 }, async () => {
+  const f = await fixture();
+  try {
+    const session = f.createSession();
+    const run = await f.send(session.sessionKey, "borrowed-before-summary", "Find telescope memory");
+    const found = await f.callTool(run, "memory_search", { query: "telescope", minScore: 0, ownerProfileId: f.B });
+    assert.ok(found.results.some(item => item.ownerProfileId === f.B));
+    await f.complete(run, "A foreign source informed this answer.");
+    const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore, nativeRuntimeConfig } = f.service;
+    const old = chatSessionStore.getSession(session.sessionKey);
+    const config = nativeRuntimeConfig.read();
+    nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
+      flags: { ...config.flags, runtimeContextLifecycleV1: true } });
+    coordinator.beforeMemoryCompaction = null;
+    coordinator.getRuntimeModelContextWindow = (_selected, profile) => profile.runtime === "pi" ? 96_000 : 1_000_000;
+    for (let index = 0; index < 10; index++) transcriptStore.appendEvent({ profileId: old.profileId, sessionId: old.id,
+      id: `foreign-summary-${index}`, kind: index % 2 ? "assistant" : "user",
+      content: { text: `Input ${index} ${"ordinary words ".repeat(3400)}` } });
+    let guards = 0, sent = 0, synchronous = 0;
+    const readSync = f.owner.withMemoryReadView.bind(f.owner);
+    f.owner.withMemoryReadView = (id, read) => {
+      if (id === f.B && !f.owner.memoryViewFor(id)) synchronous++;
+      return readSync(id, read);
+    };
+    const manager = coordinator.runtimeManager, acquire = manager.acquire.bind(manager);
+    manager.canGenerateModelOnly = runtime => runtime === "pi";
+    manager.acquire = async (...args) => {
+      const handle = await acquire(...args);
+      if (args[0].runtime !== "pi") return handle;
+      const facade = Object.create(handle);
+      Object.defineProperties(facade, {
+        capabilities: { value: { ...handle.capabilities, "model.generate.toolFree": true } },
+        generateModelOnly: { value: async input => {
+          guards++;
+          const file = path.join(f.owner.store.workspace(f.B), "MEMORY.md");
+          fs.appendFileSync(file, "\nThe underlying foreign memory changed before dispatch.\n");
+          input.assertCurrent();
+          sent++;
+          throw new Error("stale summary must never be sent");
+        } },
+      });
+      return facade;
+    };
+    await assert.rejects(f.switch(old.sessionKey, "pi"), { code: "CHECKPOINT_STALE" });
+    assert.equal(guards, 1);
+    assert.equal(sent, 0);
+    assert.equal(synchronous, 0);
+    assert.deepEqual(chatSessionStore.getSession(old.sessionKey), old);
+    assert.equal(f.service.conversationCheckpointStore.get(old.profileId, old.id), null);
+  } finally { await f.close(); }
+});
+
+for (const withdraw of [false, true]) {
+  test(`queued chat verifies historical borrowing in admission and compilation: ${withdraw ? "withdrawn" : "current"}`,
+    { timeout: 30000 }, async () => {
+      const f = await fixture();
+      let release, firstSend, secondSend;
+      try {
+        const session = f.createSession(), coordinator = f.service.workRunCoordinator;
+        const previous = await f.send(session.sessionKey, "borrowed-before-queued", "Find telescope memory");
+        const found = await f.callTool(previous, "memory_search", { query: "telescope", minScore: 0, ownerProfileId: f.B });
+        assert.ok(found.results.some(item => item.ownerProfileId === f.B));
+        const historical = "BORROWED_HISTORICAL_ANSWER_90631";
+        await f.complete(previous, historical);
+        const old = f.service.chatSessionStore.getSession(session.sessionKey);
+        const foreignRead = f.owner.withAsyncMemoryReadView.bind(f.owner);
+        let entered = false;
+        f.owner.withAsyncMemoryReadView = async (id, ...args) => {
+          if (id === f.B && !entered) {
+            entered = true;
+            await new Promise(resolve => { release = resolve; });
+          }
+          return foreignRead(id, ...args);
+        };
+        const dependenciesCurrent = f.owner.sharing.dependenciesCurrent.bind(f.owner.sharing);
+        let phase = null;
+        const checks = { admit: [], compile: [] };
+        f.owner.sharing.dependenciesCurrent = (profileId, sessionId, refs) => {
+          const valid = dependenciesCurrent(profileId, sessionId, refs);
+          if (phase && refs.some(ref => ref.ownerProfileId === f.B)) {
+            checks[phase].push({ valid, view: Boolean(f.owner.memoryViewFor(f.B)) });
+          }
+          return valid;
+        };
+        const checkpoints = f.service.conversationCheckpointStore;
+        const nativeSessionStale = checkpoints.nativeSessionStale.bind(checkpoints);
+        checkpoints.nativeSessionStale = (...args) => {
+          phase = "admit";
+          try { return nativeSessionStale(...args); } finally { phase = null; }
+        };
+        const compiler = coordinator.contextCompiler, compile = compiler.compile.bind(compiler);
+        let projected;
+        compiler.compile = input => {
+          phase = "compile";
+          try {
+            const value = compile(input);
+            if (input.currentOperationId === "borrowed-queued-first") projected = value.dynamicContext;
+            return value;
+          } finally { phase = null; }
+        };
+        firstSend = coordinator.send({ sessionKey: old.sessionKey, operationId: "borrowed-queued-first", prompt: "Continue the project" });
+        firstSend.catch(() => {});
+        await waitUntil(() => entered, 5000, "foreign admission worker wait");
+        secondSend = coordinator.send({ sessionKey: old.sessionKey, operationId: "borrowed-queued-second", prompt: "Continue further" });
+        secondSend.catch(() => {});
+        if (withdraw) f.service.nativeMemorySharingConfig.apply({ revision: 1,
+          config: { enabled: true, excludedProfiles: [f.B] } });
+        release(); release = null;
+        const firstAck = await firstSend;
+        await coordinator.waitForIdle(firstAck.run.id);
+        await waitUntil(() => coordinator.getRun(firstAck.run.id).status === "running", 5000, "first queued input running");
+        const secondAck = await secondSend;
+        assert.equal(coordinator.getRun(secondAck.run.id).status, "queued");
+        if (withdraw) {
+          assert.notEqual(coordinator.getRun(firstAck.run.id).runtimeSessionRef.sessionId, old.runtimeSessionId);
+          assert.doesNotMatch(projected, new RegExp(historical));
+          assert.ok(checks.admit.every(check => !check.valid && check.view), "the acquired view cannot override exclusion");
+          assert.ok(checks.compile.every(check => !check.valid && !check.view), "excluded proof is not acquired for compilation");
+        } else {
+          assert.equal(coordinator.getRun(firstAck.run.id).runtimeSessionRef.sessionId, old.runtimeSessionId);
+          assert.match(projected, new RegExp(historical));
+          assert.ok(checks.admit.length > 0 && checks.admit.every(check => check.valid && check.view));
+          assert.ok(checks.compile.length > 0 && checks.compile.every(check => check.valid && check.view));
+        }
+        await f.complete(coordinator.getRun(firstAck.run.id));
+        await waitUntil(() => coordinator.getRun(secondAck.run.id).status === "running", 5000, "second queued input running");
+        await f.complete(coordinator.getRun(secondAck.run.id));
+      } finally {
+        release?.();
+        await Promise.allSettled([firstSend, secondSend]);
+        await f.close();
+      }
+    });
+}
+
+for (const action of ["exclude source", "delete source memory", "remove source file externally"]) {
   test(`in-flight borrowed source withdrawal interrupts real Coordinator and renews native session: ${action}`, { timeout: 30000 }, async () => {
     const f = await fixture(); let subscription;
     try {
@@ -67,7 +263,11 @@ for (const action of ["exclude source", "delete source memory"]) {
       if (action === "exclude source") {
         f.service.nativeMemorySharingConfig.apply({ revision: 1, config: { enabled: true, excludedProfiles: [f.B] } });
         await f.owner.sharing.reconcileConfig();
-      } else await f.owner.delete({ profileId: f.B, id: f.item.id, reason: "forgotten", operationId: "source-delete-inflight" });
+      } else if (action === "delete source memory") {
+        await f.owner.delete({ profileId: f.B, id: f.item.id, reason: "forgotten", operationId: "source-delete-inflight" });
+      } else {
+        fs.unlinkSync(path.join(f.owner.store.workspace(f.B), borrowed.canonicalRelativePath));
+      }
       await waitUntil(() => coordinator.getRun(run.id).status === "interrupted", 5000, "borrowed source interruption");
       await coordinator.waitForIdle(run.id);
       assert.equal(host.turnInterruptCalls, interruptsBefore + 1, "the assigned actual Runtime handle receives turnInterrupt");
@@ -129,6 +329,93 @@ test("a pending source-withdrawal interrupt filters late events and joins one na
   }
 });
 
+for (const outcome of ["publish", "withdraw", "unavailable"]) {
+  test(`runtime output batches use asynchronous source proof: ${outcome}`, { timeout: 30000 }, async () => {
+    const f = await fixture(); let release, subscription, pending;
+    try {
+      const session = f.createSession(), coordinator = f.service.workRunCoordinator, events = [];
+      const run = await f.send(session.sessionKey, "borrowed-output-batch", "Find telescope memory");
+      const found = await f.callTool(run, "memory_search", { query: "telescope", ownerProfileId: f.B, minScore: 0 });
+      assert.ok(found.results.some(value => value.ownerProfileId === f.B && value.borrowed));
+      const host = f.transport.hosts.get("codex");
+      subscription = coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));
+      const sharing = f.owner.sharing, original = sharing.withRunReadProof.bind(sharing);
+      const gate = new Promise(resolve => { release = resolve; });
+      const batches = [];
+      sharing.withRunReadProof = async (id, signal, publish) => {
+        batches.push(id);
+        await gate;
+        return original(id, signal, publish);
+      };
+      let failedScans = 0;
+      if (outcome === "unavailable") {
+        const read = f.owner.withAsyncMemoryReadView.bind(f.owner);
+        f.owner.withAsyncMemoryReadView = (id, signal, callback, scanSignal) => {
+          if (id === f.B) {
+            failedScans++;
+            return Promise.reject(Object.assign(new Error("controlled worker outage"), { code: "MEMORY_SCAN_UNAVAILABLE" }));
+          }
+          return read(id, signal, callback, scanSignal);
+        };
+      }
+      const proofRead = f.owner.withMemoryReadView.bind(f.owner);
+      let synchronousOwnerViews = 0;
+      f.owner.withMemoryReadView = (id, read) => {
+        if (id === f.B && !f.owner.memoryViewFor(id)) synchronousOwnerViews++;
+        return proofRead(id, read);
+      };
+      const sourceFiles = f.owner.host(f.B).searchIndex.sourceFiles;
+      const readBytes = sourceFiles.readBytes.bind(sourceFiles);
+      let synchronousBodies = 0;
+      const originalEvidence = sharing.assertDependencyCurrent.bind(sharing);
+      sharing.assertDependencyCurrent = (...args) => {
+        const previous = sourceFiles.readBytes;
+        sourceFiles.readBytes = (...input) => {
+          synchronousBodies++;
+          return readBytes(...input);
+        };
+        try { return originalEvidence(...args); } finally { sourceFiles.readBytes = previous; }
+      };
+      const label = "BORROWED_BATCH_VISIBLE_8571";
+      const thread = host.threads.find(value => value.id === run.runtimeSessionRef.sessionId);
+      const turn = thread.turns.find(value => value.id === run.runtimeTurnRef.turnId);
+      for (let index = 0; index < 6; index++) {
+        host.emit({ known: true, type: "text", threadId: thread.id, turnId: turn.id,
+          itemId: `batch-${index}`, text: `${label}_${index}`, phase: "final_answer" });
+      }
+      if (outcome !== "publish") {
+        turn.status = "completed";
+        turn.items.push({ type: "agentMessage", id: "revoked-answer", text: label, phase: "final_answer" });
+        host.emit({ known: true, type: "complete", threadId: thread.id, turnId: turn.id });
+      }
+      pending = coordinator.waitForIdle(run.id);
+      await waitUntil(() => batches.length > 0, 2000, "worker source proof starts");
+      assert.equal(coordinator.getRun(run.id).status, "running");
+      assert.doesNotMatch(JSON.stringify(events), new RegExp(label));
+      if (outcome === "withdraw") {
+        fs.unlinkSync(path.join(f.owner.store.workspace(f.B), found.results.find(value => value.borrowed).canonicalRelativePath));
+      }
+      release(); await pending;
+      if (outcome !== "publish") {
+        await waitUntil(() => coordinator.getRun(run.id).status === "interrupted", 5000, "unavailable source interrupts output");
+        assert.equal(coordinator.getRun(run.id).errorCode, outcome === "withdraw" ? "CONTEXT_SOURCE_STALE" : "CONTEXT_MEMORY_READ_UNAVAILABLE");
+        if (outcome === "unavailable") assert.ok(failedScans >= 3, "the worker outage is checked with bounded retries");
+        assert.doesNotMatch(JSON.stringify(events), new RegExp(label));
+        assert.doesNotMatch(JSON.stringify(f.service.transcriptStore.listEvents(f.profile.id, session.id)), new RegExp(label));
+      } else {
+        const messages = f.service.transcriptStore.listEvents(f.profile.id, session.id).filter(event => event.content?.text?.startsWith(label));
+        assert.deepEqual(messages.map(event => event.content.text), Array.from({ length: 6 }, (_, i) => `${label}_${i}`));
+      }
+      assert.deepEqual(batches, [run.id]);
+      assert.equal(synchronousOwnerViews, 0, "output must never fall back to a synchronous owner scan");
+      assert.equal(synchronousBodies, 0, "output uses markdown already read and hashed by the worker");
+      if (outcome === "publish") await f.complete(run);
+    } finally {
+      release?.(); await pending?.catch(() => {});
+      subscription?.unsubscribe(); await f.close();
+    }
+  });
+}
 
 test("automatic recall anchors a resumed native session before acceptance and survives restart before withdrawal", { timeout: 60000 }, async () => {
   let f = await fixture(true);

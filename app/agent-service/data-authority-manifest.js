@@ -88,6 +88,18 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
       }),
       recovery: "Private single Service writer; immutable objects and confirmed facts survive restart; authority restore advances UI epochs before Inbox recovery; stale operations never replay; writer locks, mounts, ports and previews are excluded from backup",
     }),
+    pendingCommands: Object.freeze({
+      owner: "shoggoth", schemaVersion: 2, backupRequired: true,
+      pathRules: Object.freeze(["stateDir/pending-commands.json"]),
+      records: Object.freeze({
+        PendingCommand: recordAuthority({ authority: ["operationId", "runId", "sessionKey", "prompt", "createdAt", "state",
+          "attachments", "acceptance", "cancelRequested"] }),
+        PendingCommandTombstone: recordAuthority({ authority: ["operationId", "fingerprint", "state", "createdAt", "finishedAt", "receipt"] }),
+        PendingCommandEnvelope: recordAuthority({ authority: ["version", "revision", "ciphertext"] }),
+        PendingCommandContainer: recordAuthority({ authority: ["idempotencyFloorMs", "activeCommands", "tombstones"] }),
+      }),
+      recovery: "The private Inbox acknowledges only after durable encrypted commit. Keep the v1/v2 reader for rollback. An orphaned v1 command or unknown dispatch does not authorize replay. WorkRun, transcript and delivery recovery use their corresponding authorities.",
+    }),
     agentFiles: Object.freeze({
       owner: "shoggoth", schemaVersion: 1, backupRequired: true,
       pathRules: Object.freeze(["agents/<profileId>/files/<fileId>/.shoggoth-file.json",

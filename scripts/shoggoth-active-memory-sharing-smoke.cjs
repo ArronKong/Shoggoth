@@ -134,8 +134,51 @@ test("real Product Active Memory keeps borrowed scratch, status, reuse and optio
   assert.ok(recalled.borrowedMemoryRefs.some(ref => ref.ownerProfileId === f.B)); assert.equal(f.modelCalls(), 2); f.assertNoBodies();
   const diagnostics = allText(path.join(f.paths.stateDir, "plugins", "active-memory", "transcripts", "agents", A));
   assert.match(diagnostics, /borrowedMemoryRefs/u); assert.match(diagnostics, /reference_only/u);
-  const status = await f.owner.activeMemory.status.read({ profileId: A, sessionKey: input.session.sessionKey, includeTrace: true });
-  assert.equal(status.phase, "complete"); assert.doesNotMatch(JSON.stringify(status), new RegExp(`${BODY}|${SUMMARY}`));
+  const params = { profileId: A, sessionKey: input.session.sessionKey, includeTrace: true };
+  const owner = f.owner;
+  const readViews = owner.withMemoryOwnerReadViews.bind(owner);
+  let entered, resume;
+  const staleDuringRead = async change => {
+    entered = deferred(); resume = deferred();
+    const pending = owner.activeMemory.status.read(params);
+    try {
+      const signal = await Promise.race([entered.promise, pending.then(() => assert.fail("status skipped its lender worker"))]);
+      await change(signal);
+    } finally { resume.resolve(); }
+    const stale = await pending;
+    assert.equal(stale.phase, "stale");
+    assert.deepEqual(stale.statusLines, []);
+    assert.deepEqual(stale.traceLines, []);
+  };
+  const delayRead = () => t.mock.method(owner, "withMemoryOwnerReadViews", async (profileId, owners, signal, publish) => {
+    assert.deepEqual([...owners], [f.B]);
+    entered.resolve(signal);
+    await resume.promise;
+    return readViews(profileId, owners, signal, publish);
+  });
+  const guard = f.owner.activeMemory.status.guard.bind(f.owner.activeMemory.status);
+  const observedViews = t.mock.method(f.owner.activeMemory.status, "guard", scope => {
+    assert.ok(owner.memoryViewFor(A), "status memory revision uses the reader's worker view");
+    assert.ok(owner.memoryViewFor(f.B), "status evidence uses the lender's worker view");
+    return guard(scope);
+  });
+  try {
+    const status = await f.owner.activeMemory.status.read(params);
+    assert.equal(status.phase, "complete"); assert.doesNotMatch(JSON.stringify(status), new RegExp(`${BODY}|${SUMMARY}`));
+    assert.equal(observedViews.mock.callCount(), 1);
+
+    const namespace = "active-memory-status-proof", key = sha256(input.session.sessionKey), db = owner.host(A).database.db;
+    const proof = db.prepare("SELECT value FROM memory_state WHERE namespace=? AND key=?").get(namespace, key).value;
+    const writeProof = db.prepare("UPDATE memory_state SET value=? WHERE namespace=? AND key=?");
+    const delayed = delayRead();
+    try {
+      await staleDuringRead(() => writeProof.run(JSON.stringify({ ...JSON.parse(proof), outcome: "failed" }), namespace, key));
+      assert.equal(observedViews.mock.callCount(), 1, "a same-version changed proof cannot publish");
+    } finally {
+      delayed.mock.restore();
+      writeProof.run(proof, namespace, key);
+    }
+  } finally { observedViews.mock.restore(); }
   // Native same-run reuse skips tool callbacks: the stored dependency proof
   // must still initialize its new host runtime before status persistence.
   f.model = async () => assert.fail("same Product run must reuse the original native recall");
@@ -143,6 +186,16 @@ test("real Product Active Memory keeps borrowed scratch, status, reuse and optio
   assert.match(reused.content, new RegExp(SUMMARY)); assert.ok(reused.borrowedMemoryRefs.length); f.assertNoBodies();
   assert.equal(f.owner.activeMemory.cacheProofs.size, 0, "borrowed positive content cannot seed a cross-run cache");
   await f.finish(input); assert.equal(f.acquisitions(), 0);
+
+  const delayed = delayRead();
+  try {
+    const file = path.join(owner.store.workspace(f.B), "MEMORY.md");
+    await staleDuringRead(() => fs.writeFileSync(file, "A later source correction no longer supports the recall."));
+    await staleDuringRead(async signal => {
+      await owner.stopProfile(A);
+      assert.equal(signal.aborted, true);
+    });
+  } finally { delayed.mock.restore(); }
 });
 
 test("borrowed Active Memory dependencies preserve unrelated edits and reject source edits before injection and next-run reuse", { timeout: 60000 }, async t => {

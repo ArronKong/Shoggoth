@@ -379,6 +379,7 @@ async function verifyPackagedService(appPath) {
         assert.equal(DATA_AUTHORITY_MANIFEST.stores.chatSession.schemaVersion, CHAT_SESSION_STORE_VERSION);
         assert.equal(DATA_AUTHORITY_MANIFEST.stores.tokenUsage.schemaVersion, TOKEN_USAGE_STORE_VERSION);
         let session;
+        let chatAcceptance;
         let idea;
         let mcpConnectorId;
         let nativeMemoryOwnerId;
@@ -434,6 +435,7 @@ async function verifyPackagedService(appPath) {
             assert.equal(status.healthy, true);
             assert.equal(status.productSchemaVersion, STORE_SCHEMA_VERSION);
             assert.equal(status.pendingCommandsLocked, false);
+            assert.equal(status.chatAcceptanceV1, true);
             assert.equal(status.mcpCredentialsLocked, false);
             assert.equal(Object.hasOwn(service, "pluginStore"), false);
             assert.equal(fs.existsSync(paths.pluginCatalogPath), false, "a fresh connector App never creates a retired catalog");
@@ -527,6 +529,35 @@ async function verifyPackagedService(appPath) {
             const transcript = await ipc("harness.transcript.events", {
               profileId, sessionId: session.id, cursor: 0, limit: 10 });
             assert.ok(JSON.stringify(transcript).includes("Packaged chat history survives restart"));
+            if (generation === 0) {
+              // Hold projection so this can exercise the actual packaged Inbox
+              // worker and cancellation without acquiring a real Runtime.
+              const coordinator = service.workRunCoordinator;
+              const original = service.transcriptStore.appendEvent.bind(service.transcriptStore);
+              const operationId = "packaged-chat-acceptance";
+              let hold = true;
+              service.transcriptStore.appendEvent = event => {
+                if (hold && event.content?.operationId === operationId) {
+                  throw Object.assign(new Error("fixture projection withheld"), { code: "ENOSPC" });
+                }
+                return original(event);
+              };
+              try {
+                chatAcceptance = await ipc("chat.send.accept", { operationId, sessionKey: session.sessionKey,
+                  prompt: "Packaged durable acceptance fixture", createdAt: Date.now() });
+                assert.equal(chatAcceptance.operationId, operationId);
+                assert.equal(service.pendingCommandInbox.get(operationId).runId, chatAcceptance.runId);
+                assert.deepEqual(await ipc("chat.send.cancel", { operationId, sessionKey: session.sessionKey }), chatAcceptance);
+              } finally { hold = false; }
+              for (let attempt = 0; attempt < 100; attempt++) {
+                if (service.pendingCommandInbox.get(operationId)?.state === "canceled") break;
+                await new Promise(resolve => setTimeout(resolve, 25));
+              }
+              assert.equal(coordinator.getRun(chatAcceptance.runId)?.status, "canceled");
+            }
+            const receipt = service.pendingCommandInbox.get(chatAcceptance.operationId);
+            assert.equal(receipt?.receipt?.runId, chatAcceptance.runId);
+            assert.equal(receipt.state, "canceled");
             const history = await ipc("chat.history", { sessionKey: session.sessionKey, cursor: null, limit: 10 });
             assert.ok(JSON.stringify(history.messages).includes("Packaged chat history survives restart"));
             if (generation === 1) {
@@ -695,7 +726,20 @@ async function verifyPackagedService(appPath) {
           process.stdout.write("PACKAGED_CONNECTOR_UPGRADE_CLOSED " + upgradeGeneration + "\\n");
         }
         process.stdout.write("PACKAGED_SERVICE_PERSISTENCE_OK");
-      })().catch(error => { process.stderr.write(String(error?.stack || error)); process.exitCode = 1; }).finally(()=>mcpProbe?.close());
+      })().catch(error => {
+        const describe = (failure, depth = 0) => ({
+          name: failure?.name,
+          code: failure?.code,
+          errno: failure?.errno,
+          syscall: failure?.syscall,
+          stack: String(failure?.stack || failure),
+          ...(depth < 4 && failure?.cause ? { cause: describe(failure.cause, depth + 1) } : {}),
+          ...(depth < 4 && Array.isArray(failure?.errors)
+            ? { errors: failure.errors.map(child => describe(child, depth + 1)) } : {}),
+        });
+        process.stderr.write(JSON.stringify(describe(error)) + "\\n");
+        process.exitCode = 1;
+      }).finally(()=>mcpProbe?.close());
     `], {
       cwd: scratchPath,
       env: { ELECTRON_RUN_AS_NODE: "1", HOME: scratchPath, PATH: "/usr/bin:/bin", TMPDIR: scratchPath },
@@ -1356,11 +1400,15 @@ async function verifyApp(appPath, expected, runLaunchAgent) {
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: package`);
   const appStat = await lstat(appPath);
   assert.equal(appStat.isDirectory(), true, `${appPath} must exist`);
+  require("./packaged-renderer-signature.cjs").verifyPackagedRendererSignature(appPath, expected.binaryArch);
   assert.deepEqual(JSON.parse(require("node:child_process").execFileSync("/usr/bin/plutil", ["-extract",
     "CFBundleLocalizations", "json", "-o", "-", path.join(appPath, "Contents", "Info.plist")], { encoding: "utf8" })),
   ["en", "zh_CN"], "the packaged App declares its UI languages");
   await require("./connector-package-checks.cjs").checkPackagedConnector(appPath, { arch: expected.arch });
   console.log(`[shoggoth-packaged-runtime-smoke] ${expected.arch}: retired-connector-absence`);
+  const adapterResources = path.join(appPath, "Contents", "Resources", "external-plugin-adapters");
+  const { checkAdapterProtocols } = require("../app/external-plugin-adapter-protocol");
+  assert.deepEqual(checkAdapterProtocols(adapterResources), [], "packaged adapter contracts match Service tools");
   const electronExecutable = path.join(appPath, "Contents", "MacOS", "Shoggoth");
   require("./adhoc-sign.cjs").verifyPackagedSqlite(appPath);
   await verifyPackagedRunAsNode(appPath, electronExecutable);

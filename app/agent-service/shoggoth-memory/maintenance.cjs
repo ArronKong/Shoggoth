@@ -17,6 +17,15 @@ const DREAM_RETRY_DELAYS = [60_000, 5 * 60_000];
 // The nightly review is optional maintenance; it never holds Dreaming longer.
 const NIGHTLY_REVIEW_BUDGET_MS = 10 * 60_000;
 const MEMORY_FLUSH_BUDGET_MS = 60_000;
+const OPTIONAL_FLUSH_MODEL_ERRORS = new Set([
+  "MEMORY_TEXT_MODEL_DISABLED", "MEMORY_TEXT_MODEL_UNAVAILABLE", "MODEL_NOT_FOUND", "RUNTIME_MODEL_UNAVAILABLE",
+  "RUNTIME_MODEL_CATALOG_UNAVAILABLE", "MEMORY_EXTRACTION_BUSY", "MEMORY_IMPORT_ACCOUNT_BUSY",
+  "RUNTIME_ACCOUNT_ACTIVE_LIMIT", "RUNTIME_ACCOUNT_BACKOFF", "RUNTIME_QUOTA_EXHAUSTED", "RUNTIME_SPENDING_LIMIT_REACHED",
+  "RUNTIME_RATE_LIMITED", "RUNTIME_UPSTREAM_UNAVAILABLE", "MODEL_ONLY_UNSUPPORTED", "RUNTIME_ISOLATION_UNVERIFIED",
+  "MODEL_ONLY_POLICY_UNVERIFIED", "MEMORY_IMPORT_MODEL_FAILED", "MEMORY_IMPORT_TIMEOUT",
+  "MEMORY_IMPORT_OUTPUT_INVALID", "MODEL_ONLY_OUTPUT_INVALID",
+]);
+const FLUSH_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,95}$/u;
 const RETRYABLE_DREAM_ERRORS = new Set(["EAGAIN", "EBUSY", "SQLITE_BUSY", "SQLITE_LOCKED",
   "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "TIMEOUT"]);
 
@@ -61,6 +70,42 @@ function flushTranscript(source, profileId, sessionId) {
   }
   selected.reverse();
   return { content: selected.map(row => row.text).join("\n"), evidence: selected.map(row => row.evidence), truncated };
+}
+
+function flushOutput(response) {
+  const invalid = () => serviceError("MEMORY_FLUSH_OUTPUT_INVALID", "压缩前记忆输出无效");
+  if (typeof response?.text !== "string" || Buffer.byteLength(response.text) > 64 * 1024) throw invalid();
+  const raw = response.text.trim();
+  if (raw === "NO_REPLY") return "";
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (error) { if (error instanceof SyntaxError) throw invalid(); throw error; }
+  if (!parsed || Object.keys(parsed).length !== 1 || typeof parsed.append !== "string"
+    || !parsed.append.isWellFormed() || parsed.append.includes("\0")
+    || Buffer.byteLength(parsed.append) > 8 * 1024 || hasSecret(parsed.append)
+    || /<!--\s*(?:shoggoth|openclaw)-memory/iu.test(parsed.append)) throw invalid();
+  return parsed.append.trim();
+}
+
+function flushReceipt(row, profileId, sessionId) {
+  if (!row || row.profile_id !== profileId || row.session_id !== sessionId || !["completed", "failed"].includes(row.state)) {
+    throw serviceError("MEMORY_FLUSH_RECOVERY_REQUIRED", "压缩前保存结果未确认，需先核对原操作");
+  }
+  const receipt = row.receipt ? JSON.parse(row.receipt) : {};
+  if (row.state === "failed") {
+    // The old deadline branch persisted before checking source authority, so
+    // its receipt cannot prove the failure was optional. The new outcome can.
+    const modelError = OPTIONAL_FLUSH_MODEL_ERRORS.has(receipt?.error)
+      || receipt?.error === "MEMORY_FLUSH_OUTPUT_INVALID";
+    const optional = receipt?.outcome === undefined ? modelError
+      : receipt.outcome === "failed-optional" && (modelError || receipt.error === "MEMORY_FLUSH_DEADLINE");
+    if (!optional) {
+      const code = typeof receipt?.error === "string" && FLUSH_ERROR_CODE.test(receipt.error)
+        ? receipt.error : "MEMORY_FLUSH_RECOVERY_REQUIRED";
+      throw serviceError(code, "压缩前保存未能安全完成，需先核对原操作");
+    }
+  }
+  return { status: row.state, path: row.target, id: row.id, ...receipt };
 }
 
 // Product lifecycle/receipts only. Cron policy and flush plans are upstream.
@@ -263,6 +308,8 @@ class MemoryMaintenance {
     const service = this.service, host = service.host(profileId);
     const lifecycle = AbortSignal.any([this.controller.signal, service.profileSignal(profileId)]);
     const budget = new AbortController(), signal = AbortSignal.any([lifecycle, budget.signal]);
+    lifecycle.throwIfAborted();
+    host.assertCurrent();
     if (!Number.isSafeInteger(deadlineAt)) throw serviceError("MEMORY_FLUSH_DEADLINE_INVALID", "Invalid memory flush deadline");
     deadlineAt = Math.min(deadlineAt, service.now() + MEMORY_FLUSH_BUDGET_MS);
     const deadlineError = serviceError("MEMORY_FLUSH_DEADLINE", "Pre-compaction memory wait expired");
@@ -272,10 +319,65 @@ class MemoryMaintenance {
     // as indexing. Cron and forgotten sessions can still accept chat turns or
     // compact without becoming memory sources. In-flight authority checks below
     // still reject a source revoked after a flush has started.
-    if (!host.sessions.list(profileId).some(session => session.id === sessionId)) return { status: "ineligible" };
-    const source = host.sessions.read(profileId, sessionId);
+    try { host.sessions.current(profileId, sessionId); }
+    catch (error) {
+      if (error.code === "MEMORY_SESSION_REVOKED") return { status: "ineligible" };
+      throw error;
+    }
+    const sourceAuthority = service.sourceAuthorityStamp(profileId);
+    const assertOriginalSource = () => {
+      lifecycle.throwIfAborted(); budget.signal.throwIfAborted(); host.assertCurrent();
+      if (service.sourceAuthorityStamp(profileId) !== sourceAuthority) {
+        throw serviceError("MEMORY_SOURCE_REVOKED", "压缩前保存的来源已经变化");
+      }
+    };
+    const checkSource = ({ source, epoch, proof }) => {
+      lifecycle.throwIfAborted(); host.assertCurrent();
+      proof.read(view => service.withSuppliedReadView(profileId, view, () => {
+        if (host.sessions.stamp(profileId, sessionId) !== source.authorityStamp
+          || host.sessions.sourceEpoch(profileId) !== epoch) {
+          throw serviceError("MEMORY_SOURCE_REVOKED", "压缩前保存的来源已经变化");
+        }
+        view.assertFilesCurrent();
+      }));
+      if (JSON.stringify(service.config(profileId)) !== JSON.stringify(cfg)) {
+        throw serviceError("MEMORY_SOURCE_REVOKED", "压缩前保存的配置已经变化");
+      }
+    };
+    const scanTimer = setTimeout(() => budget.abort(deadlineError), Math.max(0, deadlineAt - service.now()));
+    let selection;
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const proof = await service.withAsyncMemoryReadView(profileId, lifecycle, view => {
+            view.assertFilesCurrent();
+            return view.retainProof();
+          }, budget.signal);
+          assertOriginalSource();
+          // The live tape can gain events while the worker reply is pending.
+          // Read it under the verified file view in the turn that uses it.
+          selection = proof.read(view => service.withSuppliedReadView(profileId, view, () => {
+            const epoch = host.sessions.sourceEpoch(profileId);
+            const source = host.sessions.read(profileId, sessionId);
+            view.assertFilesCurrent();
+            return { source, epoch, proof };
+          }));
+          break;
+        } catch (error) {
+          if (attempt !== 0 || error?.code !== "MEMORY_REVISION_CONFLICT") throw error;
+          assertOriginalSource();
+        }
+      }
+    } finally { clearTimeout(scanTimer); }
+    const { source } = selection;
     if (!source.content.trim()) return { status: "empty" };
     const cycle = this.cycle(profileId, sessionId);
+    const db = service.database.db;
+    const loadReceipt = db.prepare("SELECT * FROM memory_flush_runs WHERE id=?");
+    const attempted = core.hasAlreadyFlushedForCurrentCompaction(cycle.entry);
+    // Resolve an earlier failure before the threshold fast path. New text must
+    // not turn a blocked receipt into a successful `already-flushed` result.
+    const previous = attempted ? flushReceipt(loadReceipt.get(cycle.row.run_id), profileId, sessionId) : null;
     if (preflight) {
       const fresh = contextUsage && ["exact", "estimated"].includes(contextUsage.quality)
         && Number.isSafeInteger(contextUsage.usedTokens) && contextUsage.usedTokens >= 0
@@ -294,16 +396,15 @@ class MemoryMaintenance {
       if (!byTokens && !byBytes) return { status: core.hasAlreadyFlushedForCurrentCompaction(cycle.entry) ? "already-flushed" : "below-threshold",
         tokenCount: tokens, tokenSource: fresh ? contextUsage.quality : "product-estimate", threshold, transcriptBytes: source.size };
     }
-    const stamp = host.sessions.stamp(profileId, sessionId), id = sha256(`${profileId}:${sessionId}:${source.hash}`);
-    const db = service.database.db, saved = db.prepare("SELECT * FROM memory_flush_runs WHERE id=?").get(id);
-    if (saved) return { status: saved.state, path: saved.target, id, ...(saved.receipt ? JSON.parse(saved.receipt) : {}) };
-    if (core.hasAlreadyFlushedForCurrentCompaction(cycle.entry)) return { status: "already-flushed", id: cycle.row.run_id };
+    const id = sha256(`${profileId}:${sessionId}:${source.hash}`);
+    if (previous) return previous.id === id ? previous : { status: "already-flushed", id: previous.id };
+    const saved = loadReceipt.get(id);
+    if (saved) return flushReceipt(saved, profileId, sessionId);
     if (!service.complete) return { status: "unavailable" };
     const checkAuthority = () => {
-      lifecycle.throwIfAborted(); host.assertCurrent();
-      if (host.sessions.stamp(profileId, sessionId) !== stamp || this.cycleKey(profileId, sessionId) !== cycle.row.cycle_key
-        || JSON.stringify(service.config(profileId)) !== JSON.stringify(cfg)) {
-        throw serviceError("MEMORY_SOURCE_REVOKED", "压缩前保存的来源或配置已经变化");
+      checkSource(selection);
+      if (this.cycleKey(profileId, sessionId) !== cycle.row.cycle_key) {
+        throw serviceError("MEMORY_SOURCE_REVOKED", "压缩前保存的周期已经变化");
       }
     };
     const check = () => {
@@ -321,7 +422,7 @@ class MemoryMaintenance {
       db.prepare("INSERT INTO memory_flush_runs VALUES (?,?,?,'running',?,NULL)").run(id, profileId, sessionId, plan.relativePath);
       db.prepare("UPDATE memory_flush_cycles SET attempted=cycle,run_id=? WHERE profile_id=? AND session_id=?").run(id, profileId, sessionId);
     }, checkAuthority);
-    let committing = false, timer, onAbort;
+    let stage = "model", timer, onAbort;
     try {
       check();
       const remainingMs = Math.max(1, deadlineAt - service.now());
@@ -338,15 +439,11 @@ class MemoryMaintenance {
         interrupted,
       ]);
       check();
-      const raw = (response.text || "").trim();
-      const parsed = raw === "NO_REPLY" ? { append: "" } : JSON.parse(raw);
-      if (!parsed || Object.keys(parsed).length !== 1 || typeof parsed.append !== "string"
-        || Buffer.byteLength(parsed.append) > 8 * 1024 || hasSecret(parsed.append) || /<!--\s*(?:shoggoth|openclaw)-memory/iu.test(parsed.append)) {
-        throw serviceError("MEMORY_FLUSH_OUTPUT_INVALID", "压缩前记忆输出无效");
-      }
+      stage = "output";
+      const content = flushOutput(response);
       let receipt = { appended: false, contextTruncated: context.truncated };
-      if (parsed.append.trim()) {
-        const now = service.now(), content = parsed.append.trim();
+      if (content) {
+        const now = service.now();
         if (hasSecret(content)) throw serviceError("MEMORY_SECRET_REJECTED", "压缩前记忆不能保存凭据");
         const parts = splitFlushEntries(content);
         const items = parts.map((part, index) => ({ id: parts.length === 1 ? `flush-${id}` : `flush-${id}-${index + 1}`,
@@ -354,33 +451,35 @@ class MemoryMaintenance {
           sourceRefs: [`compaction-flush:${id}`], confidence: 0.5, sensitivity: hasPii(part) ? "private" : "normal",
           status: "active", validFrom: now, validUntil: null, supersedes: null, createdAt: now, updatedAt: now, memoryPath: plan.relativePath,
           sourceEvidence: context.evidence }));
-        committing = true;
+        stage = "publication";
         // One atomic write for all entries of this flush. The answer arrived
         // within the budget (checked above), so only source and lifecycle
         // authority gate the write: a deadline passing while it waits for the
         // memory lock must not turn saved notes into a failed compaction.
-        await service.store.upsertMany(items, { assertCurrent: checkAuthority });
+        await service.store.upsertMany(items, { assertCurrent: checkAuthority, signal: lifecycle });
         receipt = { ...receipt, appended: true, itemId: items[0].id, itemIds: items.map(item => item.id) };
       }
+      stage = "receipt";
       db.prepare("UPDATE memory_flush_runs SET state='completed',receipt=? WHERE id=?").run(JSON.stringify(receipt), id);
       return { status: "completed", path: plan.relativePath, id, ...receipt };
     } catch (error) {
-      const code = typeof error.code === "string" && /^[A-Z][A-Z0-9_]{0,95}$/u.test(error.code) ? error.code : "MEMORY_FLUSH_FAILED";
-      if (service.opened) db.prepare("UPDATE memory_flush_runs SET state='failed',receipt=? WHERE id=?")
-        .run(JSON.stringify({ error: code }), id);
-      if (budget.signal.aborted && code === "MEMORY_FLUSH_DEADLINE" && !committing) {
-        checkAuthority();
-        return { status: "failed", path: plan.relativePath, id, error: code };
-      }
-      // Isolation refusal occurs before a model turn. Record the failed save
-      // and let the caller compact after rechecking the transcript authority.
-      if ((preflight || code === "RUNTIME_ISOLATION_UNVERIFIED")
-        && !committing && !signal.aborted && !/CANCELED|CANCELLED|ABORT/iu.test(code)) {
-        check();
-        if (!/^(?:MEMORY_(?:SOURCE|SCOPE|CONFIG|REVISION)|RECALL_|NATIVE_MEMORY_CONFIG_)/u.test(code)) {
-          return { status: "failed", path: plan.relativePath, id, error: code };
+      let code = diagnosticCode(error);
+      let optional = (stage === "model" && error === deadlineError)
+        || (!signal.aborted && (stage === "model" && OPTIONAL_FLUSH_MODEL_ERRORS.has(code)
+          || stage === "output" && code === "MEMORY_FLUSH_OUTPUT_INVALID"));
+      if (optional) {
+        try { checkAuthority(); }
+        catch (authorityError) {
+          error = authorityError;
+          code = diagnosticCode(error);
+          optional = false;
         }
       }
+      const receipt = { error: code === "UNCLASSIFIED" ? "MEMORY_FLUSH_FAILED" : code,
+        outcome: optional ? "failed-optional" : "blocked" };
+      if (service.opened) db.prepare("UPDATE memory_flush_runs SET state='failed',receipt=? WHERE id=?")
+        .run(JSON.stringify(receipt), id);
+      if (optional) return { status: "failed", path: plan.relativePath, id, ...receipt };
       throw error;
     } finally {
       clearTimeout(timer);

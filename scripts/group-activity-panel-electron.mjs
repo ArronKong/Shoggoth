@@ -46,6 +46,7 @@ const member=(id:string,name:string)=>({id,groupId:'g',backendId:'shoggoth',agen
 let view:any={ownerScope:'fixture-owner',group:{id:'g',name:'Collaboration group',status:'active',purpose:'',createdAt:1,updatedAt:1,metadataRevision:1,rosterRevision:1,directoryRevision:1,controlEpoch:0,lastSeq:history.length,ownerMemberId:'a'},members:[member('a','Alpha'),member('b','Beta')],
  currentOwnerId:'a',round:{id:'d',causeMessageId:'history-39',order:[]},
  activeTurns:[{opportunityId:'alpha',memberId:'a',discussionId:'d',startedAt:data.initial.alpha.recentTools[0].startedAt,floor:true,released:false,activity:null},{opportunityId:'beta',memberId:'b',discussionId:'d',startedAt:1,floor:false,released:true,releasedReason:'approval',activity:data.initial.beta}],queuedMemberIds:[],internalSessionKeys:[],pendingInteractions:[{opportunityId:'beta',memberId:'b',status:'pending',occurredAt:1,context:{command:'echo verified',cwd:'/work'},request:{version:1,requestId:'approval',runId:'run-beta',kind:'runtime_approval',title:'Approval',message:'Allow fixture command',fields:[],approvalChoices:['once','deny'],approvalDetails:{kind:'command',toolName:'exec_command',command:'echo verified',cwd:'/work'},expiresAt:null}}]};
+let disconnected=false,failedReads=0,staleDetail:any=null,staleReads=0;
 state.fetch=async(url:any,init:any={})=>{
  const pathname=String(url);
  if(init.method&&init.method!=='GET'){
@@ -57,6 +58,7 @@ state.fetch=async(url:any,init:any={})=>{
    return new Response(JSON.stringify(view));
  }
  reads++;
+ if(disconnected){failedReads++;return new Response('{}',{status:503});}
  const params=new URL(pathname,location.href).searchParams;
  if(params.get('part')==='activity'){
    activityReads++;
@@ -66,11 +68,14 @@ state.fetch=async(url:any,init:any={})=>{
    return new Response(JSON.stringify({activity:savedActivityResponse==='empty'?null:data.completed,
      startedAt:data.initial.alpha.recentTools[0].startedAt,finishedAt:data.completed.lastProgressAt}));
  }
+ if(pathname.includes('/detail')&&staleDetail){staleReads++;return new Response(JSON.stringify(staleDetail));}
  const result=pathname.includes('/detail')?view:pathname.includes('/messages')?{messages:history,hasMore:false}:{};
  return new Response(JSON.stringify(result));
 };
 await i18n.changeLanguage(language);document.documentElement.setAttribute('data-theme',theme);
-createRoot(document.getElementById('root')!).render(<UiProvider><GroupChatPanel groupId='g' onArchived={()=>{}}/></UiProvider>);
+const renderer=createRoot(document.getElementById('root')!);
+const showPanel=()=>renderer.render(<UiProvider><GroupChatPanel groupId='g' onArchived={()=>{}}/></UiProvider>);
+showPanel();
 const timeline=()=>document.querySelector('[data-group-timeline]')as HTMLElement;
 const activity=(id:string)=>timeline()?.querySelector('[data-group-execution="'+id+'"] .chat-bubble')as HTMLElement;
 const preview=(id:string)=>activity(id)?.querySelector<HTMLElement>('[data-chat-activity-preview]');
@@ -349,7 +354,60 @@ state.settleActivity=async()=>{
  timeline().querySelector('[data-seq="41"]')!.scrollIntoView({block:'center'});await pause();
  await wait(()=>!document.body.textContent?.includes('Fixture response temporarily unavailable'),'previous fixture error notice expires');
  await pause(80); // Give the compositor a frame after the notice is removed before capture.
- equal(writes,3,'settlement and reading saved activity do not send additional responses');return{settled:true,savedActivity:true};
+ equal(writes,3,'settlement and reading saved activity do not send additional responses');
+
+ const betaTurn={opportunityId:'beta',memberId:'b',discussionId:'d',startedAt:Date.now(),floor:false,released:false,
+   activity:{...data.initial.beta,phase:'running'}};
+ view.activeTurns=[betaTurn];emitGroupChanged('g');
+ await wait(()=>activity('beta')?.getAttribute('data-activity-phase')==='running','Beta starts next to the saved Alpha reply');
+ const savedCount=()=>timeline()?.querySelectorAll('[data-seq="41"]').length;
+ const betaFailureText=i18n.t('groupChat.event.attachmentRecoveryRequired',{name:'Beta'});
+ const betaFailure=()=>Array.from(timeline()?.querySelectorAll('div')??[]).find(row=>
+   Array.from(row.childNodes).some(node=>node.nodeType===Node.TEXT_NODE&&node.textContent?.trim()===betaFailureText));
+ const assertSettledMembers=()=>{
+   equal(savedCount(),1,'Alpha final appears once after Beta fails');
+   equal(Boolean(timeline().querySelector('[data-seq="41"]')?.textContent?.includes('Final saved answer')),true,'Alpha final text is preserved');
+   equal(Boolean(betaFailure()),true,'Beta failure has its own localized row');
+   equal(Boolean(betaFailure()?.querySelector('button')),true,'only the failed member offers retry');
+   equal(Boolean(activity('alpha')||activity('beta')),false,'no settled member retains a live bubble');
+   equal(document.documentElement.scrollWidth<=innerWidth+1,true,'mixed final and failure fit the available width');
+ };
+ disconnected=true;const beforeFailedReads=failedReads;emitGroupChanged('g');
+ const syncStatus=()=>document.querySelector<HTMLElement>('.chat-header [data-group-sync-status][role="status"]');
+ await wait(()=>failedReads>beforeFailedReads&&syncStatus()?.textContent?.includes(i18n.t('groupChat.sync.recovering')),
+   'interrupted group reads show localized recovery in the main panel');
+ const checkStatus=syncStatus()!.querySelector('button')!;
+ equal(checkStatus.textContent,i18n.t('groupChat.sync.check'),'recovery check is localized');
+ equal(checkStatus.getClientRects().length>0,true,'recovery check is accessible from the main panel');
+ equal(document.documentElement.scrollWidth<=innerWidth+1,true,'the recovery notice fits the available width');
+ const beforeManualCheck=failedReads;
+ checkStatus.click();
+ await wait(()=>failedReads>beforeManualCheck,'the recovery check refreshes the group');
+ equal(Boolean(syncStatus()),true,'a failed manual check keeps the recovery notice');
+ equal(savedCount(),1,'an interrupted read keeps the published Alpha reply');
+ const previousDetail=structuredClone(view);
+ history.push({...reply,id:'failed-beta',seq:42,author:{kind:'system'},body:'',origin:undefined,
+   createdAt:Date.now(),system:{eventType:'turn_failed',memberId:'b',errorCode:'RUNTIME_ATTACHMENT_RECOVERY_REQUIRED'}});
+ view.group.lastSeq=42;view.activeTurns=[];view.round=null;view.pendingInteractions=[];
+ disconnected=false;window.dispatchEvent(new Event('online'));
+ await wait(()=>betaFailure()&&!activity('beta')&&!syncStatus(),'reconnect restores the durable failure and clears live activity and recovery status');
+ assertSettledMembers();
+ staleDetail=previousDetail;const attemptedStaleReads=staleReads;emitGroupChanged('g');
+ await wait(()=>staleReads>attemptedStaleReads,'receive the older active-detail response');
+ await pause(100);
+ assertSettledMembers();
+ staleDetail=null;
+ renderer.render(null);await wait(()=>!timeline(),'leave the group');showPanel();
+ await wait(()=>betaFailure()&&savedCount()===1,'re-enter the group from authoritative saved rows');
+ assertSettledMembers();
+ savedActivityResponse='ready';const reopened=activityButton(41)!;
+ await reveal(reopened);reopened.click();
+ await wait(()=>activityDialog()?.textContent?.includes(i18n.t('turnLab.processLabel')+' · Alpha')
+   &&activityDialog()?.textContent?.includes('Verify collaboration'),'Alpha saved activity still opens after Beta fails and group re-entry');
+ equal(activityDialog()?.textContent?.includes(betaFailureText),false,'saved activity does not borrow another member’s failure');
+ closeActivity();await wait(()=>!activityDialog(),'close the reopened saved activity');
+ equal(writes,3,'group reconnect, re-entry and saved activity do not write or retry');
+ return{settled:true,savedActivity:true,memberFailureIsolation:true,disconnectRecovery:true,recoveryNoticeResolved:true,staleDetailIgnored:true,groupReentry:true};
 };`;
 try{
   await build({stdin:{contents:fixture.replace("FIXTUREDATA",JSON.stringify({initial,retrying,compacting,compacted,toolCompleted,completed,late})),loader:"tsx",resolveDir:root},bundle:true,format:"esm",jsx:"automatic",nodePaths:[path.join(root,"app/manage-ui/node_modules")],loader:{".woff2":"dataurl",".svg":"dataurl",".webp":"dataurl",".png":"dataurl"},define:{"process.env.NODE_ENV":'"production"'},outfile:path.join(temp,"fixture.js"),logLevel:"silent"});

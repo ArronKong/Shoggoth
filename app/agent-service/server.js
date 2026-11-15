@@ -13,6 +13,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { storageIssueCode } = require("../system-issue");
+const { mcpAuthStorageFailure } = require("./mcp-helper-diagnostics");
 const {
   MCP_CLIENT_REQUEST_TIMEOUT_MS,
   createMcpStdioHandler,
@@ -137,7 +138,8 @@ const { ExternalInspirationExecutor } = require("./external-inspiration-executor
 const { INSPIRATION_SERVICE_METHODS, PUBLIC_MESSAGES: INSPIRATION_PUBLIC_MESSAGES,
   validateInspirationServiceParams, validateInspirationServiceResult } = require("./inspiration-service-protocol");
 const { AgentDefinitionStore } = require("./agent-definition-store");
-const { TranscriptStore } = require("./transcript-store");
+const { TranscriptStore, transcriptEventId } = require("./transcript-store");
+const { runtimeFailureDetail } = require("./runtime-failure-detail");
 const { MemoryStore } = require("./memory-store");
 const { MemoryEngine } = require("./memory-engine");
 const { MemoryProvenanceStore } = require("./memory-provenance-store");
@@ -1463,6 +1465,7 @@ function createAgentService(options) {
   const pendingCommandInbox = options.pendingCommandInbox || new PendingCommandInbox({
     paths,
     fs: options.pendingCommandFs,
+    workerWrites: options.pendingCommandWorkerWrites !== false,
     cryptoBroker: mcpCryptoBroker,
     now: options.now,
     decryptStartupBudgetMs: options.pendingCommandDecryptStartupBudgetMs,
@@ -1974,6 +1977,34 @@ function createAgentService(options) {
     projectText: (input, text) => require("../core/chat-secret-fallback").projectTextOrOriginal(temporarySecrets, { profileId: input.profile.id,
       sessionId: workRunCoordinator?.getRunSessionKey(input.run) || input.transcriptSessionId
         || (input.run.source === "proactive" ? input.run.sourceId : `${input.run.source}:${input.run.sourceId}`) }, text),
+    readCreatedGroupReceipt: (run, event) => {
+      if (typeof event.runId !== "string") return null;
+      const prior = workDispatcher.getRun(event.runId);
+      const runtimeRef = event.runtimeRef;
+      const tool = event.content?.tool;
+      const args = tool?.arguments;
+      if (run.source !== "chat" || !prior || prior.id === run.id || prior.source !== "chat"
+        || prior.profileId !== run.profileId || prior.sourceId !== run.sourceId
+        || isGroupChatRun(prior) || isNativeFederationChatRun(prior)
+        || !["completed", "failed", "canceled", "interrupted"].includes(prior.status)
+        || runtimeRef?.runtime !== "codex" || !runtimeRef.turnId || !prior.runtimeTurnRef
+        || ["runtime", "runtimeProfileId", "runtimeAccountId", "sessionId", "turnId"]
+          .some(key => runtimeRef[key] !== prior.runtimeTurnRef[key])
+        || event.content?.method !== "item/started" || event.content?.transcriptType !== "tool.start"
+        || tool?.kind !== "mcpToolCall" || tool.name !== "shoggoth/group_chat_create"
+        || args?.source !== "chat" || args?.sourceId !== prior.sourceId) return null;
+      try {
+        authorizePartialContinuation(run);
+        const profile = productStore.getAgentProfile(run.profileId);
+        for (const name of ["group_chat_prepare", "group_chat_get"]) {
+          permissionEngine.authorize({ name, profileId: run.profileId, profile, run, workspace: run.workspace });
+        }
+        return groupChatService.agentAccess.readCreatedGroupReceipt(args, { profileId: run.profileId });
+      } catch (error) {
+        if (error?.code === "MCP_TOOL_FORBIDDEN") return null;
+        throw error;
+      }
+    },
     proactiveConversation: { read: profileId => {
       const target = proactiveStore.getTarget(profileId);
       return target?.sessionKey && !target.deleted
@@ -2169,8 +2200,11 @@ function createAgentService(options) {
               content: toolRegistry.toolsMarkdown(),
             });
           }
-          memoryStore.ensureProfile(profile.id);
-          memoryEngine.rebuildViews(profile.id);
+          if (shoggothMemory) await shoggothMemory.ensureProfile(profile.id);
+          else {
+            memoryStore.ensureProfile(profile.id);
+            memoryEngine.rebuildViews(profile.id);
+          }
         },
         async activateProfile(profile) {
           if (proactiveStoreOpened) {
@@ -2460,8 +2494,23 @@ function createAgentService(options) {
           executionContract: Object.freeze({ ...route, ...binding, profileId: profile.id }) } };
     },
   });
+  const cronReportIndex = new (require("./cron-report-index").CronReportIndex)({
+    paths, products: productStore, transcripts: transcriptStore, jobs: nativeCronStore,
+    sessionForRun(run) {
+      const key = workRunCoordinator.getRunSessionKey(run);
+      return key ? chatSessionStore.getSession(key)?.id ?? null : null;
+    },
+    hasPublished: input => groupChatStore.hasPublishedCronReply(input),
+  });
+  const authorizePartialContinuation = (run) => {
+    const profile = productStore.getAgentProfile(run.profileId);
+    for (const name of ["conversation_search", "conversation_get"]) {
+      permissionEngine.authorize({ name, profileId: run.profileId, profile, run, workspace: run.workspace });
+    }
+  };
   const createDefaultWorkRunCoordinator = () => createWorkRunCoordinator({
     prepareChatRuntime: input => chatPreparation.prepare(input),
+    chatPreparationConcurrency: options.chatPreparationConcurrency,
     temporarySecrets,
     ...(shoggothMemory ? { beforeMemoryCompaction: input => shoggothMemory.flushBeforeCompaction(input) } : {}),
     hookService, hookWorkspaceWriters,
@@ -2476,11 +2525,17 @@ function createAgentService(options) {
     productStore,
     usageStore: tokenUsageStore,
     cronStore: nativeCronStore,
-    hasPublishedCronReply: input => groupChatStore.hasPublishedCronReply(input),
+    cronReportIndex,
     chatSessionStore,
     getMediaStore: () => inspirationStore.media,
     transcriptStore,
     contextCompiler,
+    authorizePartialContinuation,
+    readPartialContinuation: (request) => {
+      authorizePartialContinuation(request.run);
+      return request.eventIds ? conversationRecallService.readContinuation(request)
+        : conversationRecallService.findContinuation(request);
+    },
     conversationCheckpointStore,
     isInternalChatSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey),
     sourceConversationStore,
@@ -2542,28 +2597,34 @@ function createAgentService(options) {
       return crypto.createHash("sha256").update(JSON.stringify([projection.registryRevision, projection.tools])).digest("hex");
     },
     beforeSessionSend: async input => {
+      input.assertCurrent?.();
       setChatSendDiagnosticPhase("desktop_preflight");
       const ownActive = workRunCoordinator.listSessionRuns(input.sessionKey).some(run =>
         ["starting", "running", "waiting_approval", "waiting_input"].includes(run.status));
-      if (!ownActive) await codexDesktopSessionController?.assertSendable(input.sessionKey);
+      if (!ownActive) await codexDesktopSessionController?.assertSendable(input.sessionKey, [], input.signal);
+      input.assertCurrent?.();
       setChatSendDiagnosticPhase("runtime_selection");
       const selected = await sessionRuntimeController.selectForSend(input);
+      input.assertCurrent?.();
       void chatPreparation.prepare(input).catch(() => {});
       if (shoggothMemory && !workRunCoordinator.listSessionRuns(input.sessionKey).some(run =>
         ["starting", "running", "waiting_approval", "waiting_input"].includes(run.status))) {
         const session = chatSessionStore.getSession(input.sessionKey);
         if (require("./historical-chat-session").isHistoricalChatSession(session)) {
           setChatSendDiagnosticPhase("memory_context");
-          const context = workRunCoordinator.getRuntimeContext(session);
-          const budget = context?.productContext?.budget;
+          const context = workRunCoordinator.getRuntimeContext(session, { measurementOnly: true });
+          const budget = context?.budget;
           setChatSendDiagnosticPhase("memory_preflight");
           await shoggothMemory.observeBeforeSend({ profileId: session.profileId, sessionId: session.id,
             prompt: input.prompt, contextUsage: context?.contextUsage,
             ...(budget && budget.source !== "fallback" ? { contextWindowTokens: budget.tokens } : {}) });
+          input.assertCurrent?.();
         }
       }
       return selected;
     },
+    durableChatAcceptance: options.durableChatAcceptance === true,
+    acceptsChatReceipts: options.durableChatAcceptance !== false,
     validateUiAction: input => chatUiController.assertOperationCurrent(input),
     onRuntimeMcpRequest: async (profileId, request, scope) => cloneMcpToolResult(await mcpProductToolController.handle(
       request.name, request.arguments, Object.freeze({ profileId, callId: request.callId,
@@ -2594,6 +2655,33 @@ function createAgentService(options) {
     chatSessionStore,
     transcriptStore,
     coordinator,
+    getGroupContinuation(session, answerEventId) {
+      if (!["ready", "draft"].includes(session.status) || groupChatStore.isInternalSessionKey(session.sessionKey)) return null;
+      const { groupContinuationFromAnswer } = require("./continuation-interaction-evidence");
+      const answer = transcriptStore.getEvent(session.profileId, session.id, answerEventId);
+      const target = groupContinuationFromAnswer(answer);
+      if (!target) return null;
+      const run = workDispatcher.getRun(answer.runId);
+      const prefix = "shoggoth:chat-send:";
+      if (run?.status !== "completed" || run.source !== "chat" || run.profileId !== session.profileId
+        || run.sourceId !== session.sessionKey || run.runtimeTurnRef !== null || !run.idempotencyKey.startsWith(prefix)) return null;
+      const operationId = run.idempotencyKey.slice(prefix.length);
+      const user = transcriptStore.getEvent(session.profileId, session.id, transcriptEventId("chat-user", operationId));
+      if (user?.kind !== "user" || user.runId !== run.id || user.contextExcluded || user.seq >= answer.seq
+        || user.content?.operationId !== operationId || typeof user.content.text !== "string") return null;
+      try {
+        const { groupContinuation } = contextCompiler.readPartialContinuation({
+          run, profile: { id: session.profileId }, transcriptSessionId: session.id, currentOperationId: operationId,
+          query: user.content.text,
+        });
+        if (groupContinuation?.sourceEventId !== target.sourceEventId || groupContinuation.groupId !== target.groupId
+          || groupContinuation.ownerScope !== target.ownerScope || groupChatStore.groupLifecycle(target.groupId) !== "active") return null;
+        return target;
+      } catch (error) {
+        if (error?.code?.startsWith("CONTEXT_") || error?.code === "MCP_TOOL_FORBIDDEN") return null;
+        throw error;
+      }
+    },
     revokeSessionSecrets: async session => {
       const scope = { profileId: session.profileId, sessionId: session.sessionKey };
       for (const item of temporarySecrets.list(scope)) await secretExecution.revokeReference(scope, item.reference);
@@ -2618,7 +2706,9 @@ function createAgentService(options) {
     randomUUID: options.randomUUID,
     listProfileModels: (params) => profileServiceController.handle("profile.models.list", params),
     listBindingModels: (params) => profileServiceController.handle("profile.binding.models.list", params),
-    getRuntimeContext: (session) => coordinator.getRuntimeContext?.(session),
+    getRuntimeContext: (session, contextOptions) => coordinator.getRuntimeContext?.(session, contextOptions),
+    withRuntimeContextReadView: (profileId, sessions, read) => coordinator.withRuntimeContextReadView
+      ? coordinator.withRuntimeContextReadView(profileId, sessions, read) : read(),
   });
   let workRunCoordinator = options.workRunCoordinator || createDefaultWorkRunCoordinator();
   const chatUiController = new ChatUiController({ store: chatUiStore, productStore, chatSessionStore,
@@ -2673,6 +2763,8 @@ function createAgentService(options) {
     getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
     recallPolicy: memoryEngine.recallPolicy,
     semanticSearch: nativeMemorySemanticService,
+    withBackgroundReadView: shoggothMemory ? (profileId, read) =>
+      shoggothMemory.withAsyncMemoryReadView(profileId, undefined, read) : null,
     getInspirationOrigin: (run) => inspirationStore.executionForRun(run.id),
   });
   learningSources = new LearningSources({ products: productStore, sessions: chatSessionStore,
@@ -2984,6 +3076,7 @@ function createAgentService(options) {
     cronStore: nativeCronStore, groupChat: groupChatService, dispatcher: workDispatcher,
     sessions: chatSessionStore, transcripts: transcriptStore,
     getCronOutput: (run, events) => workRunCoordinator.getCronOutput?.(run, events),
+    onPublished: (run, committed) => cronReportIndex.record(run, committed),
     assertSecretSafe,
     onError: () => console.error("[agent-service] group Cron delivery deferred"),
   });
@@ -3111,6 +3204,7 @@ function createAgentService(options) {
   let mcpSessionManager = null;
   let mcpAuthInitAttempt = null;
   let mcpAuthFailureGeneration = null;
+  let mcpAuthStorageFailureCode = null;
   let mcpAuthMigration = null;
   let storeOpened = false;
   let tokenUsageStoreOpened = false;
@@ -3186,6 +3280,16 @@ function createAgentService(options) {
       describeCronRun,
       getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey?.(run) ?? null,
       getCronOutput: (run) => workRunCoordinator.getCronOutput?.(run) ?? null,
+      getCronFailure(run, sessionKey) {
+        try {
+          const session = chatSessionStore.getSession(sessionKey);
+          if (!session || session.profileId !== run.profileId || session.workspace !== run.workspace) return null;
+          const event = transcriptStore.getEvent(run.profileId, session.id, transcriptEventId("chat-terminal", run.id, run.status));
+          if (event?.runId !== run.id || event.kind !== "error" || event.content?.transcriptType !== "terminal"
+            || event.content.status !== run.status || event.content.errorCode !== run.errorCode) return null;
+          return runtimeFailureDetail(event.content.failure);
+        } catch { return null; } // Optional diagnostics cannot invalidate the run list.
+      },
       cursorSecret: options.domainCursorSecret || crypto.randomBytes(32),
       now: options.now,
       randomUUID: options.randomUUID,
@@ -3518,6 +3622,7 @@ function createAgentService(options) {
     // challenge 都会再启动一次 Electron crypto worker，反复弹系统钥匙串窗口。
     // 用户解锁后通过重启 Service 进入新 generation，再允许一次受控重试。
     if (mcpAuthFailureGeneration === generation) {
+      if (mcpAuthStorageFailureCode) throw serviceError(mcpAuthStorageFailureCode, mcpAuthStorageFailureCode.toLowerCase());
       throw serviceError("SERVICE_UNAVAILABLE", "mcp_auth_unavailable");
     }
     if (mcpAuthInitAttempt?.generation === generation) return mcpAuthInitAttempt.result;
@@ -3590,7 +3695,10 @@ function createAgentService(options) {
         if (Buffer.isBuffer(handshakeSecret)) handshakeSecret.fill(0);
       }
     }).catch((error) => {
-      if (lifecycleGeneration === generation) mcpAuthFailureGeneration = generation;
+      if (lifecycleGeneration === generation) {
+        mcpAuthFailureGeneration = generation;
+        mcpAuthStorageFailureCode = mcpAuthStorageFailure(error, { missingIsStorage: true });
+      }
       throw error;
     }).finally(() => {
       resultSettled = true;
@@ -3709,6 +3817,7 @@ function createAgentService(options) {
   async function quarantineNativeDomain(domain) {
     const errors = [];
     if (domain === "cron") {
+      await cronReportIndex.close();
       if (nativeCronSchedulerOpened) {
         nativeCronSchedulerOpened = false;
         try { await nativeCronScheduler.close(); } catch (error) { errors.push(error); }
@@ -3818,10 +3927,17 @@ function createAgentService(options) {
     }
   }
 
-  function handleMcpError(socket, id, error) {
+  function handleMcpError(socket, id, error, method) {
     const codeProbe = probeDataProperty(error, "code");
     const rawCode = codeProbe.ok && codeProbe.found && typeof codeProbe.value === "string"
       ? codeProbe.value : "";
+    if (["mcp.auth.challenge", "mcp.auth.exchange", "mcp.federation.open", "mcp.runtime.bridge.open"].includes(method)) {
+      const storageCode = mcpAuthStorageFailure(error, { missingIsStorage: true });
+      if (storageCode) {
+        errorResponse(socket, id, storageCode, storageCode.toLowerCase());
+        return;
+      }
+    }
     if (["credentials_locked", "MCP_AUTH_NOT_INITIALIZED", "MCP_CRYPTO_UNAVAILABLE", "SERVICE_UNAVAILABLE"]
       .includes(rawCode)) {
       errorResponse(socket, id, "SERVICE_UNAVAILABLE", "mcp_auth_unavailable");
@@ -4031,7 +4147,7 @@ function createAgentService(options) {
         } else result = await executeAuthorizedMcpRequest(request.method, request.params);
       }
     } catch (error) {
-      handleMcpError(socket, id, error);
+      handleMcpError(socket, id, error, request.method);
       return;
     }
     writeResponse(socket, { id, ok: true, result });
@@ -4432,6 +4548,7 @@ function createAgentService(options) {
         // MCP authority is lazily unlocked on the first authenticated helper handshake.
         mcpCredentialsLocked: mcpSessionManager === null,
         activeMemoryCommands: Boolean(shoggothMemory),
+        chatAcceptanceV1: workRunCoordinator.acceptsChatReceipts === true,
       };
     } else if (request.method === "service.mcpAuth.migrateKeychain") {
       if (!exactObject(request, [...baseFields, "params"])
@@ -4949,7 +5066,7 @@ function createAgentService(options) {
           return validateChatServiceResult(canonical.method, handled);
         });
       } catch (error) {
-        const isSend = request.method === "chat.send";
+        const isSend = ["chat.send", "chat.send.accept"].includes(request.method);
         const receiptUncertain = isSend && error?.receiptUncertain === true;
         if (error?.code === "UNKNOWN_METHOD" && !receiptUncertain) {
           errorResponse(socket, id, "UNKNOWN_METHOD", "Chat Service 方法尚未接线");
@@ -4957,8 +5074,10 @@ function createAgentService(options) {
         }
         const mapped = ["credentials_locked", "pending_commands_locked"].includes(error?.code)
           ? mapChatServiceError({ code: "SERVICE_UNAVAILABLE" }) : mapChatServiceError(error);
+        const systemIssue = isSend ? storageIssueCode(error) : null;
         writeResponse(socket, { id: id ?? null, ok: false, error: { ...mapped,
           ...(isSend && error?.admissionAccepted === false ? { admissionAccepted: false } : {}),
+          ...(systemIssue ? { systemIssue } : {}),
           ...(receiptUncertain ? { receiptUncertain: true } : {}) } });
         return;
       }
@@ -5113,7 +5232,7 @@ function createAgentService(options) {
           socket.off("end", onEnd);
           void Promise.resolve()
             .then(() => openMcpRuntimeBridge(socket, request))
-            .catch((error) => handleMcpError(socket, null, error));
+            .catch((error) => handleMcpError(socket, null, error, request.method));
           return;
         }
         activeRuntimeRequests += 1;
@@ -5230,6 +5349,7 @@ function createAgentService(options) {
     nativeCronStore,
     codexAutomationController,
     codexDesktopSessionController,
+    cronReportIndex,
     nativeCronScheduler,
     domainWorkRunExecutor,
     get nativeDomainServiceController() { return nativeDomainServiceController; },
@@ -5254,6 +5374,7 @@ function createAgentService(options) {
       if (lifecycleState === "stop_failed") return stopping;
 
       lifecycleState = "starting";
+      codexDesktopSessionController.openDiscovery?.();
       chatPreparation.open();
       sendLatency.open?.();
       recoveryDiagnosticWritten = false;
@@ -5571,8 +5692,9 @@ function createAgentService(options) {
           await transcriptStore.open();
           // UI recovery completes canonical references before queued native work
           // can resume. Card storage failure is isolated from ordinary chat.
-          try { chatUiStore.open(); chatUiStoreOpened = true; chatUiController.storageError = null; chatUiController.recover(); }
+          try { chatUiStore.open(); chatUiStoreOpened = true; chatUiController.storageError = null; await chatUiController.recover(); }
           catch (error) { chatUiController.storageError = error; chatUiController.revokeAll(); }
+          assertStartGeneration(generation);
           conversationCheckpointStoreOpened = true;
           await conversationCheckpointStore.open();
           sessionRuntimeController.auditPending();
@@ -5611,7 +5733,8 @@ function createAgentService(options) {
           // with a previously forgotten and then reauthorized fact may have
           // deferred generated-view rebuilding until this point.
           for (const profile of productStore.listAgentProfiles()) {
-            if (!memoryEngine.viewStatus(profile.id).stale) continue;
+            const status = shoggothMemory ? await shoggothMemory.viewStatusAsync(profile.id) : memoryEngine.viewStatus(profile.id);
+            if (!status.stale) continue;
             try { memoryEngine.rebuildViews(profile.id); }
             catch (error) {
               if (error?.code !== "RECALL_POLICY_UNAVAILABLE") throw error;
@@ -5640,7 +5763,8 @@ function createAgentService(options) {
             if (run.source === "chat" && run.status === "starting") continue;
             if (run.source === "chat" && options.workRunCoordinator === undefined
               && recoverableCommandRuns.has(run.id)
-              && (runExecutionStore.has?.(run) === true || workRunCoordinator.hasHostMemoryTransaction?.(run) === true)) continue;
+              && (runExecutionStore.has?.(run) === true || workRunCoordinator.hasHostMemoryTransaction?.(run) === true
+                || workRunCoordinator.hasCompletedPartialReview?.(run) === true)) continue;
             const recovered = workDispatcher.recoverActiveRunAfterServiceRestart(run.id);
             publishFederationTerminal(recovered, {
               status: recovered.status,
@@ -5723,6 +5847,7 @@ function createAgentService(options) {
           if (typeof options.onServerReady === "function") options.onServerReady(server);
           assertStartGeneration(generation);
           lifecycleState = "started";
+          if (domainAvailability.cron.available) void cronReportIndex.rebuild();
           if (conditionWatchStoreOpened) {
             try { conditionWatchService.open(); } catch (error) { logConditionWatchError(error); }
           }
@@ -5846,6 +5971,7 @@ function createAgentService(options) {
       lifecycleGeneration += 1;
       activeDomainControllerOwnerToken = null;
       activeMcpProductToolControllerOwnerToken = null;
+      if (pendingStart) chatUiController.stopLifecycle();
       const currentStop = (async () => {
         if (pendingStart) await pendingStart.catch(() => {});
         await cleanupService(stopOptions);
@@ -5874,7 +6000,6 @@ function createAgentService(options) {
 
   async function cleanupService(stopOptions = {}) {
     stallMonitor.stop();
-    await chatPreparation.close();
     chatUiController.stopLifecycle();
     const errors = [];
     // Admission is already fenced by stop(). Revoke long-lived MCP channels
@@ -5907,7 +6032,10 @@ function createAgentService(options) {
       if (inFlightSockets.has(socket)) continue;
       try { socket.destroy(); } catch (error) { errors.push(error); }
     }
+    try { await cronReportIndex.close(); } catch (error) { errors.push(error); }
+    try { await chatPreparation.close(); } catch (error) { errors.push(error); }
     mcpExternalToolService?.close(); mcpExternalToolService = null; mcpExternalApprovalBroker = null;
+    try { await codexDesktopSessionController.closeDiscovery?.(); } catch (error) { errors.push(error); }
     larkCliConnectorController.stopAdmission();
     officialSkillConnectorController.stopAdmission();
     try { await officialSkillConnectorController.close(); } catch (error) { errors.push(error); }
@@ -6041,6 +6169,7 @@ function createAgentService(options) {
     // 中等待它，避免 MCP 密钥库卡住拖死普通 Service 关闭/重启。
     mcpAuthInitAttempt = null;
     mcpAuthFailureGeneration = null;
+    mcpAuthStorageFailureCode = null;
     if (mcpCryptoBrokerOpened) {
       externalModelProjection.close();
       try { await modelSecretGateway.close(); } catch (error) { errors.push(error); }
