@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
+import uiFixture from './fixtures/load-ui-typescript.cjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const require = createRequire(path.join(root, 'app/manage-ui/package.json'));
@@ -14,14 +15,15 @@ const statusModule = { exports: {} };
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'app/manage-ui/src/pages/dashboard/activityStatusRows.ts'), 'utf8'),
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
   { exports: statusModule.exports });
-const source = fs.readFileSync(path.join(root, 'app/manage-ui/src/pages/dashboard/ActivityFeed.tsx'), 'utf8');
 const requests = [], opened = [];
 const empty = { items: [], hasMore: false, degradedSources: [] };
 let fetchPage = async () => empty;
 let savedKindFilter;
+let translate = key => key;
 const host = type => props => React.createElement(type, props, props.children);
 const stubs = {
-  'react-i18next': { useTranslation: () => ({ t: key => key }) },
+  'react-i18next': { useTranslation: () => ({ t: translate }) },
+  '../../lib/gatewayErrors': uiFixture.load('lib/gatewayErrors.ts'),
   '../../api/client': { getDashboardActivities: async params => { requests.push(params); return fetchPage(params); } },
   '../../components/BackendBadge': host('badge'),
   '../../components/BackendTabIcon': { __esModule: true, default: host('backend-icon'), sortBackendTabs: items => [...items] },
@@ -34,12 +36,16 @@ const stubs = {
   '../../lib/useStickyState': { useStickyState: (key, initial) => React.useState(key === 'dashboard.kindFilter' ? savedKindFilter ?? initial : initial) },
   '../usage/charts': { fmtMs: String },
 };
-const compiled = ts.transpileModule(source, { compilerOptions: { esModuleInterop: true,
-  module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-const mod = { exports: {} };
-vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})(require, module, module.exports);`,
-  { module: mod, require: name => stubs[name] || require(name) });
-const Feed = mod.exports.default;
+function loadView(relative, dependencies = {}, globals = {}) {
+  const source = fs.readFileSync(path.join(root, 'app/manage-ui/src/pages', relative), 'utf8');
+  const compiled = ts.transpileModule(source, { compilerOptions: { esModuleInterop: true,
+    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const mod = { exports: {} };
+  vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})(require, module, module.exports);`,
+    { ...globals, module: mod, require: name => dependencies[name] || stubs[name] || require(name) });
+  return mod.exports.default;
+}
+const Feed = loadView('dashboard/ActivityFeed.tsx');
 const inspiration = { id: 'inspiration:run', backendId: 'native', kind: 'inspiration', agentId: 'agent',
   occurredAt: 200, title: '灵感动态', severity: 'info', inspiration: { ideaId: 'idea', runId: 'run', status: 'running' } };
 const cron = { id: 'cron:run', backendId: 'native', kind: 'cron', occurredAt: 100,
@@ -382,4 +388,39 @@ await settle(() => renderer.update(React.createElement(Feed, { ...props, firstPa
 await settle(() => resolveStalePage({ ...empty, items: [provisional] }));
 assert.equal(rows(renderer).length, 1, 'Late pagination cannot restore a row removed by a newer complete snapshot');
 await settle(() => renderer.unmount());
-console.log('PASS Dashboard activity identity, authoritative refresh, pagination races, filters, scope and failure retention');
+
+const providerReason = 'User location is not supported for the API use.';
+const regionCode = 'ANTIGRAVITY_REGION_UNSUPPORTED';
+const regionFailure = { ...cron, id: 'failed-cron', backendId: 'shoggoth', severity: 'error', summary: regionCode,
+  run: { backendId: 'shoggoth', jobId: 'shoggoth:fixture-job', status: 'error',
+    error: `Google 模型接口不支持当前请求所在地区\n上游原因：${providerReason}\nHTTP 400 · FAILED_PRECONDITION\n错误码：${regionCode}` } };
+const legacyError = { ...regionFailure, id: 'failed-cron-legacy', run: { ...regionFailure.run, error: regionCode } };
+const failurePage = { ...empty, items: [regionFailure, legacyError] };
+const ImmersiveActivity = loadView('immersive/ImmersiveActivityView.tsx', {
+  '../../lib/usePageCache': { usePageCache: () => ({ data: failurePage.items }) },
+  './ImmersiveActivityView.module.css': { rowSub: 'immersive-run-summary' },
+}, { setInterval: () => 1, clearInterval() {}, document: { addEventListener() {}, removeEventListener() {} } });
+const i18n = require('i18next').createInstance();
+await i18n.init({ fallbackLng: false, interpolation: { escapeValue: false }, resources: {
+  'zh-CN': { translation: uiFixture.load('i18n/locales/zh-CN.ts').default },
+  en: { translation: uiFixture.load('i18n/locales/en.ts').default },
+} });
+
+for (const [language, localizedReason] of [['zh-CN', /Google 模型接口不支持当前请求所在地区/],
+  ['en', /Google's model API does not support the region of this request/]]) {
+  translate = i18n.getFixedT(language);
+  for (const element of [React.createElement(Feed, { ...props, firstPage: failurePage,
+    status: [...props.status, { id: 'shoggoth', connected: true }] }), React.createElement(ImmersiveActivity)]) {
+    await settle(() => { renderer = create(element); });
+    const entries = renderer.root.findAll(node => typeof node.type === 'string'
+      && /dash-run-summary|immersive-run-summary/.test(node.props.className || ''));
+    assert.equal(entries.length, 2);
+    const detailed = entries.find(node => textOf(node).includes(providerReason));
+    assert.match(textOf(detailed), localizedReason);
+    assert.match(textOf(detailed), /HTTP 400 · FAILED_PRECONDITION/);
+    assert.ok(detailed.props.title.includes(regionCode));
+    assert.match(textOf(entries.find(node => node !== detailed)), localizedReason);
+    await settle(() => renderer.unmount());
+  }
+}
+console.log('PASS Dashboard activity identity, authoritative refresh, pagination races, filters and bilingual Cron failures in both views');

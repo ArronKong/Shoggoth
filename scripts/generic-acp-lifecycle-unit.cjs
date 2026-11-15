@@ -34,7 +34,8 @@ async function fixture(options = {}) {
       if (method === "session/prompt") {
         if (options.beforeWrite) await options.beforeWrite(params);
         if (options.notSent) throw Object.assign(new Error("fixture not written"), { dispatchState: "not_sent", code: "FIXTURE_NOT_SENT" });
-        hooks.onWriteAttempt?.();
+        if (hooks.withSendGuard) await hooks.withSendGuard(() => hooks.onWriteAttempt?.());
+        else hooks.onWriteAttempt?.();
         if (options.writeFailure) throw Object.assign(new Error("fixture write failed"), { dispatchState: "write_attempted" });
         hooks.onWritten?.();
         return options.prompt ? options.prompt(params, emit, handlers) : { stopReason: "end_turn" };
@@ -55,6 +56,29 @@ async function fixture(options = {}) {
 const session = async (f, source = "source", extra = {}) => (await f.handle.sessionStart({ cwd: f.root, source, ...extra })).session.id;
 const turn = (f, sessionId, extra = {}, obs = observer()) => f.handle.turnStart({ cwd: f.root, sessionId, operationId: "operation", prompt: "USER", ...extra }, obs);
 const chunk = text => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+
+test("a late run authority denial leaves the prepared ACP prompt definitely unsent", async () => {
+  let accepted = 0;
+  const f = await fixture({ prompt() { accepted++; return { stopReason: "end_turn" }; } });
+  try {
+    const id = await session(f);
+    let prepared = false, attempted = false;
+    await assert.rejects(turn(f, id, { withTurnSendGuard: async (phase) => {
+      assert.equal(phase, "turn");
+      assert.equal(prepared, true);
+      assert.equal(read(f).sessions[0].turns[0].facts.writeAttempted, false);
+      throw Object.assign(Error("revoked during preparation"), { code: "CONTEXT_SOURCE_STALE" });
+    } }, observer("stale-authority", { async onPrepared() { prepared = true; },
+      onDispatchAttempt() { attempted = true; } })), { code: "CONTEXT_SOURCE_STALE", dispatchState: "not_sent" });
+    assert.equal(attempted, false);
+    assert.equal(accepted, 0);
+    assert.equal(read(f).sessions[0].turns[0].facts.notSent, true);
+    const settled = await turn(f, id, { withTurnSendGuard: async (_, submit) => submit() }, observer("fresh-authority"));
+    assert.equal(settled.execution.attemptId, "fresh-authority");
+    assert.equal(accepted, 1);
+    assert.equal(read(f).sessions[0].turns.length, 1);
+  } finally { await f.close(); }
+});
 
 test("durable prepared identity is routed before write and more than 256 early events retain attribution", async () => {
   let f, prepared, attempted;

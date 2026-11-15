@@ -2,7 +2,6 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const net = require("node:net");
 const { test } = require("node:test");
@@ -17,13 +16,19 @@ const { ensureFederationMcpCredential, federationMcpAuthPath } = require(path.jo
 const { CodexJsonlRpcClient } = require(path.join(root, "app/agent-service/codex-jsonl-rpc"));
 const { recordCodexSessionFailure } = require(path.join(root, "app/agent-service/codex-session-diagnostics"));
 const { SERVICE_PROTOCOL_VERSION } = require(path.join(root, "app/agent-service/service-protocol-version"));
+const { createAgentService } = require(path.join(root, "app/agent-service/server"));
 
 const binding = { runtimeProfileId: "fixture-runtime", runtimeAccountId: "fixture-account" };
 const unavailable = "MCP_HELPER_SERVICE_UNAVAILABLE";
 const recovery = "MCP_HELPER_SERVICE_RECOVERY_REQUIRED";
 const auth = "MCP_HELPER_AUTH_FAILED";
+const storage = "MCP_HELPER_STORAGE_UNAVAILABLE";
+const storageFull = "MCP_HELPER_STORAGE_FULL";
+const cache = "MCP_HELPER_CACHE_UNAVAILABLE";
+const cryptoUnavailable = "MCP_HELPER_CRYPTO_UNAVAILABLE";
+const invalidResponse = "MCP_HELPER_RESPONSE_INVALID";
 function fixture(t) {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-mcp-service-error-")));
+  const home = fs.realpathSync(fs.mkdtempSync("/tmp/sg-mcp-error-"));
   fs.chmodSync(home, 0o700);
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const paths = resolveServicePaths({ homeDir: home });
@@ -45,7 +50,8 @@ test("native and federated startup distinguish unavailable/recovery/auth without
     ["ENOENT", unavailable], ["ECONNREFUSED", unavailable],
     ["ECONNRESET", unavailable], ["EPIPE", unavailable],
     ["SERVICE_RECOVERY_REQUIRED", recovery], ["MCP_AUTH_FAILED", auth],
-    ["UNSAFE_OWNER", auth], ["PROTOCOL_VERSION_MISMATCH", auth], ["PRIVATE_CODE", auth],
+    ["UNSAFE_OWNER", storage], ["ENOSPC", storageFull], ["PROTOCOL_VERSION_MISMATCH", invalidResponse],
+    ["PRIVATE_CODE", auth],
   ]) {
     for (const kind of ["native", "federated"]) {
       let calls = 0;
@@ -61,20 +67,27 @@ test("native and federated startup distinguish unavailable/recovery/auth without
   }
 });
 
-test("missing federation credential stays auth failure and never contacts Service", async (t) => {
+test("missing, corrupt, or insecure local federation files never contact Service", async (t) => {
   const paths = fixture(t);
-  fs.unlinkSync(federationMcpAuthPath(paths));
-  await assert.rejects(authenticateFederationMcpSession({ paths, ...binding,
-    client: "hermes", authFile: federationMcpAuthPath(paths),
-    requestService: async () => assert.fail("credential failure cannot call Service"),
-  }), error => assertPublic(error, auth));
+  const authFile = federationMcpAuthPath(paths);
+  const authenticate = () => authenticateFederationMcpSession({ paths, ...binding,
+    client: "hermes", authFile, requestService: async () => assert.fail("local file failure cannot call Service"),
+  });
+  fs.chmodSync(authFile, 0o644);
+  await assert.rejects(authenticate(), error => assertPublic(error, storage));
+  fs.chmodSync(authFile, 0o600);
+  fs.writeFileSync(authFile, "PRIVATE_CREDENTIAL_FILE_CORRUPT");
+  await assert.rejects(authenticate(), error => assertPublic(error, storage));
+  fs.unlinkSync(authFile);
+  await assert.rejects(authenticate(), error => assertPublic(error, storage));
 });
 
-test("exchange transport errors keep their cause and clear the secret; local credential errors stay auth failures", async (t) => {
+test("exchange errors and local worker failures are distinct and clear the secret", async (t) => {
   const paths = fixture(t);
   for (const [cause, expected, localFailure] of [
     ["ECONNRESET", unavailable, false], ["SERVICE_RECOVERY_REQUIRED", recovery, false],
-    ["MCP_AUTH_FAILED", auth, false], ["ENOENT", auth, true],
+    ["MCP_AUTH_FAILED", auth, false], ["EACCES", storage, true], ["ENOSPC", storageFull, true],
+    ["ENOENT", cryptoUnavailable, true], ["MCP_CRYPTO_UNAVAILABLE", cryptoUnavailable, true],
   ]) {
     const secret = Buffer.alloc(32, 0x5a), methods = [];
     const failure = Object.assign(new Error("PRIVATE_MESSAGE"), { code: cause });
@@ -118,14 +131,36 @@ test("actual absent socket is service unavailable and a recovering IPC stays rec
     });
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(paths.socketPath, resolve); });
-  fs.chmodSync(paths.socketPath, 0o600);
   try {
+    fs.chmodSync(paths.socketPath, 0o600);
     await assert.rejects(authenticateMcpSession({ paths, ...binding }), error => assertPublic(error, recovery));
     assert.equal(requests, 1);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
-for (const code of [unavailable, recovery]) test(`${code} survives bootstrap and Codex diagnostics without private messages`, async (t) => {
+test("Service preserves auth preparation storage errors across IPC and does not reload a failed generation", async (t) => {
+  const paths = fixture(t);
+  let loads = 0;
+  const service = createAgentService({ paths, version: "mcp-auth-storage-fixture", mcpAuthSecretStore: {
+    open() { return this; }, close() {},
+    loadOrCreateForService() {
+      loads++;
+      throw Object.assign(new Error("PRIVATE_STORAGE_PATH"), { code: "ENOSPC" });
+    },
+  } });
+  await service.start();
+  try {
+    const [profile] = service.productStore.listAgentProfiles();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(authenticateMcpSession({ paths,
+        runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId }),
+      error => assertPublic(error, storageFull));
+    }
+    assert.equal(loads, 1);
+  } finally { await service.stop({ notify: false }); }
+});
+
+for (const code of [unavailable, recovery, auth, storage, storageFull, cache, cryptoUnavailable, invalidResponse]) test(`${code} survives bootstrap and Codex diagnostics without private messages`, async (t) => {
   const paths = fixture(t);
   let startupError;
   await assert.rejects(bootstrap.main(["--shoggoth-internal-role=mcp"], { NODE_ENV: "test" },

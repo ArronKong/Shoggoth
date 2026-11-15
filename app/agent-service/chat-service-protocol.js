@@ -47,10 +47,13 @@ const CHAT_SERVICE_METHODS = Object.freeze([
   "chat.session.archive",
   "chat.session.delete",
   "chat.history",
+  "chat.continuation.group.get",
   "chat.search",
   "chat.command.list",
   "chat.command.exec",
   "chat.send",
+  "chat.send.accept",
+  "chat.send.cancel",
   "chat.operation.get",
   "chat.operation.reconcile",
   "chat.steer",
@@ -87,6 +90,8 @@ const PUBLIC_MESSAGES = Object.freeze({
   CHAT_SESSION_DELETED: "ChatSession 已删除",
   CHAT_SESSION_CAPACITY: "ChatSession 幂等窗口容量已满",
   CHAT_SESSION_COMMIT_UNCERTAIN: "ChatSession 提交结果不确定",
+  CHAT_ACCEPTANCE_UNAVAILABLE: "当前 Service 未开启独立聊天回执",
+  CHAT_OPERATION_VERIFICATION_REQUIRED: "原发送需要核对，请查看同一会话的操作记录",
   CHAT_SESSION_MODEL_CONFLICT: "请求模型与 Shoggoth Profile 默认模型不一致",
   CHAT_SESSION_MODEL_NOT_AVAILABLE: "该模型当前不可用",
   CHAT_SESSION_MODEL_SETTINGS_INVALID: "当前模型不支持该思考强度或快速模式",
@@ -357,6 +362,9 @@ function validateChatServiceParams(method, params) {
   } else if (method === "chat.history") {
     validatePageParams(params, ["sessionKey", "cursor", "limit", ...(Object.hasOwn(params || {}, "auditRunId") ? ["auditRunId"] : [])],
       (value) => validUuid(value.sessionKey) && (value.auditRunId === undefined || validOpaqueId(value.auditRunId)));
+  } else if (method === "chat.continuation.group.get") {
+    if (!exactObject(params, ["sessionKey", "answerEventId"]) || !validUuid(params.sessionKey)
+      || !validOpaqueId(params.answerEventId)) failParams();
   } else if (method === "chat.search") {
     if (!exactObject(params, ["profileId", "query", "limit"]) || !validOpaqueId(params.profileId)
       || !validString(params.query, 4096) || !params.query.trim()
@@ -367,7 +375,7 @@ function validateChatServiceParams(method, params) {
     if (!exactObject(params, ["sessionKey", "text"])
       || !validUuid(params.sessionKey) || !validString(params.text, MAX_FRAME_BYTES)
       || !params.text.trimStart().startsWith("/")) failParams();
-  } else if (method === "chat.send") {
+  } else if (method === "chat.send" || method === "chat.send.accept") {
     const fields = attachmentFields(params, ["operationId", "sessionKey", "prompt", "createdAt"]);
     if (Object.hasOwn(params||{},"connectorSelection")) throw Object.assign(new Error("OpenConnector account selection is retired"),{code:"OPEN_CONNECTOR_RETIRED"});
     if (!validateOperationBase(params, fields)
@@ -375,10 +383,13 @@ function validateChatServiceParams(method, params) {
       || (params.attachments !== undefined && !validAttachments(params.attachments))
       || !(validString(params.prompt, MAX_FRAME_BYTES) || (params.prompt === "" && params.attachments?.length))) failParams();
   } else if (method === "chat.operation.reconcile") {
-    if (!validateOperationBase(params, ["operationId", "sessionKey", "createdAt"])
-      || !validUuid(params.sessionKey) || params.createdAt <= 0) failParams();
-  } else if (method === "chat.operation.get") {
-    if (!exactObject(params, ["operationId", "sessionKey"])
+    const fields = ["operationId", "sessionKey", "createdAt", ...(Object.hasOwn(params || {}, "includeAcceptance") ? ["includeAcceptance"] : [])];
+    if (!validateOperationBase(params, fields) || !validUuid(params.sessionKey) || params.createdAt <= 0
+      || (Object.hasOwn(params, "includeAcceptance") && params.includeAcceptance !== true)) failParams();
+  } else if (method === "chat.operation.get" || method === "chat.send.cancel") {
+    const includeAcceptance = method === "chat.operation.get" && Object.hasOwn(params || {}, "includeAcceptance");
+    if (!exactObject(params, ["operationId", "sessionKey", ...(includeAcceptance ? ["includeAcceptance"] : [])])
+      || (includeAcceptance && params.includeAcceptance !== true)
       || !validOpaqueId(params.operationId) || !validUuid(params.sessionKey)) failParams();
   } else if (method === "chat.steer") {
     if (!validateOperationBase(
@@ -444,7 +455,7 @@ function validateChatServiceRequest(request) {
     params,
   };
   if (jsonlBytes(canonical) > MAX_FRAME_BYTES) {
-    throw protocolError(request.method === "chat.send" ? "CHAT_SEND_TOO_LARGE" : "INVALID_PARAMS");
+    throw protocolError(["chat.send", "chat.send.accept"].includes(request.method) ? "CHAT_SEND_TOO_LARGE" : "INVALID_PARAMS");
   }
   return canonical;
 }
@@ -830,6 +841,11 @@ function validateChatServiceResult(method, result) {
     return { session, operation };
   }
   if (method === "chat.history") return validatePageResult(result, "messages", validateHistoryItem);
+  if (method === "chat.continuation.group.get") {
+    if (!exactObject(result, ["target"]) || (result.target !== null
+      && !require("./continuation-interaction-evidence").validGroupContinuationTarget(result.target))) failResponse();
+    return cloneCanonical(result);
+  }
   if (method === "chat.search") {
     if (!exactObject(result, ["results", "truncated"]) || !Array.isArray(result.results)
       || result.results.length > 50 || typeof result.truncated !== "boolean") failResponse();
@@ -860,6 +876,13 @@ function validateChatServiceResult(method, result) {
       || !validString(result.warning, 16 * 1024, true)) failResponse();
     return cloneCanonical(result);
   }
+  if (method === "chat.send.accept" || method === "chat.send.cancel") {
+    const fields = ["version", "operationId", "sessionKey", "runId", "acceptedAt"];
+    if (!exactObject(result, fields) || result.version !== 1
+      || !validOpaqueId(result.operationId) || !validUuid(result.sessionKey)
+      || !validOpaqueId(result.runId) || !Number.isSafeInteger(result.acceptedAt) || result.acceptedAt < 0) failResponse();
+    return cloneCanonical(result);
+  }
   if (method === "chat.send") {
     if (!exactObject(result, ["disposition", "reason", "run"])
       || !["started", "queued", "completed"].includes(result.disposition)
@@ -876,6 +899,10 @@ function validateChatServiceResult(method, result) {
     return { disposition: result.disposition, reason: result.reason, run };
   }
   if (method === "chat.operation.get" || method === "chat.operation.reconcile") {
+    if (result?.status === "accepted") {
+      if (!exactObject(result, ["status", "run", "receipt"]) || result.run !== null) failResponse();
+      return { status: "accepted", run: null, receipt: validateChatServiceResult("chat.send.accept", result.receipt) };
+    }
     if (!exactObject(result, ["status", "run"])
       || !(method === "chat.operation.reconcile" ? ["found", "unresolved", "not_admitted"] : ["found", "unresolved"]).includes(result.status)
       || (result.status !== "found" && result.run !== null)
@@ -1029,31 +1056,36 @@ function paginateChatServiceItems(options = {}) {
     }
   }
   const available = position === null ? entries : entries.filter((entry) => entry.key > position);
-  const selected = [];
-  for (let index = 0; index < available.length && selected.length < params.limit; index += 1) {
-    const candidateItems = [...selected, available[index].item];
-    const hasMore = index + 1 < available.length;
+  const candidates = available.slice(0, params.limit).map(entry => entry.item);
+  const render = current => {
+    if (!Array.isArray(current) || current.length !== candidates.length) failResponse();
+    const selected = [];
+    for (let index = 0; index < current.length; index += 1) {
+      const item = options.projectPage ? validateListItem(options.method, current[index]) : current[index];
+      const candidateItems = [...selected, item];
+      const hasMore = index + 1 < available.length;
+      const nextCursor = hasMore
+        ? options.cursorCodec.encode({ query, position: available[index].key }) : null;
+      const candidate = pageResult(field, candidateItems, nextCursor, hasMore);
+      if (responseFrameBytes(options.responseId, candidate) > MAX_FRAME_BYTES) break;
+      selected.push(item);
+    }
+    if (selected.length === 0 && available.length > 0) {
+      if (options.method === "chat.history") failResponse("CHAT_HISTORY_ITEM_TOO_LARGE");
+      failResponse();
+    }
+    const hasMore = selected.length < available.length;
     const nextCursor = hasMore
-      ? options.cursorCodec.encode({ query, position: available[index].key }) : null;
-    const candidate = pageResult(field, candidateItems, nextCursor, hasMore);
-    if (responseFrameBytes(options.responseId, candidate) > MAX_FRAME_BYTES) break;
-    selected.push(available[index].item);
-  }
-  if (selected.length === 0 && available.length > 0) {
-    if (options.method === "chat.history") failResponse("CHAT_HISTORY_ITEM_TOO_LARGE");
-    failResponse();
-  }
-  const hasMore = selected.length < available.length;
-  const nextCursor = hasMore
-    ? options.cursorCodec.encode({ query, position: available[selected.length - 1].key }) : null;
-  const result = validateChatServiceResult(
-    options.method,
-    pageResult(field, selected, nextCursor, hasMore),
-  );
-  if (responseFrameBytes(options.responseId, result) > MAX_FRAME_BYTES) {
-    throw protocolError("RESPONSE_TOO_LARGE");
-  }
-  return result;
+      ? options.cursorCodec.encode({ query, position: available[selected.length - 1].key }) : null;
+    const result = validateChatServiceResult(options.method, pageResult(field, selected, nextCursor, hasMore));
+    if (responseFrameBytes(options.responseId, result) > MAX_FRAME_BYTES) {
+      throw protocolError("RESPONSE_TOO_LARGE");
+    }
+    return result;
+  };
+  if (!options.projectPage || !candidates.length) return render(candidates);
+  const projected = options.projectPage(candidates);
+  return projected?.then ? projected.then(render) : render(projected);
 }
 
 function validateRawSubscription(subscription) {

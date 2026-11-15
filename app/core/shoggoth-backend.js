@@ -155,6 +155,8 @@ const DEFAULT_READINESS_MAX_ATTEMPTS = 140;
 const ENCRYPTED_MUTATION_METHODS = new Set([
   "provider.endpoints.save", "provider.endpoints.delete", "provider.endpoints.discover",
   "chat.send",
+  "chat.send.accept",
+  "chat.send.cancel",
   "chat.abort",
   "chat.steer",
   "run.approval.respond",
@@ -460,6 +462,24 @@ const SEND_RECEIPT_UNCERTAIN_ERROR_CODES = new Set([
   "CHAT_SESSION_COMMIT_UNCERTAIN", "CHAT_RESPONSE_INVALID", "INTERNAL_ERROR",
 ]);
 const MAX_OBSERVER_RECOVERY_CYCLES = 8;
+const RUN_PROGRESS_SAMPLE_INTERVAL_MS = 45_000;
+const RUN_OBSERVER_RESUME_GAP_MS = 120_000;
+
+function observeRunProgress(state, run, now, madeProgress) {
+  const previous = state.progress;
+  if (!previous || madeProgress || now - previous.pollAt >= RUN_OBSERVER_RESUME_GAP_MS) {
+    state.progress = { since: now, pollAt: now, recorded: false };
+    return previous && now - previous.pollAt >= RUN_OBSERVER_RESUME_GAP_MS
+      ? { stage: "client_observer_resumed", durationMs: now - previous.pollAt } : null;
+  }
+  previous.pollAt = now;
+  if (previous.recorded || now - previous.since < RUN_PROGRESS_SAMPLE_INTERVAL_MS) return null;
+  previous.recorded = true;
+  const stage = state.lastStatus === "waiting_approval" || state.lastStatus === "waiting_input" ? "user_input"
+    : state.progressTools?.size ? "tool" : state.lastStartupStage === "compacting" ? "compaction"
+      : ["queued", "starting"].includes(state.lastStatus ?? run.status) ? "preparation" : "runtime";
+  return { stage: `client_observer_quiet_${stage}`, durationMs: now - previous.since };
+}
 
 function ownDataObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)
@@ -767,10 +787,14 @@ function runFromSnapshot(snapshot, runId) {
   } catch {
     return null;
   }
-  if (Object.hasOwn(snapshot, "queue") && (result.run.status !== "queued"
-    || !exactObject(snapshot.queue, ["status", "reason", "queuedAt"])
-    || snapshot.queue.status !== "queued" || !safeString(snapshot.queue.reason, 128)
-    || !Number.isSafeInteger(snapshot.queue.queuedAt) || snapshot.queue.queuedAt < 0)) return null;
+  if (Object.hasOwn(snapshot, "queue")) {
+    const queue = snapshot.queue;
+    const hasStage = ownDataObject(queue) && Object.hasOwn(queue, "stage");
+    if (result.run.status !== "queued" || !exactObject(queue, ["status", "reason", "queuedAt", ...(hasStage ? ["stage"] : [])])
+      || queue.status !== "queued" || !safeString(queue.reason, 128)
+      || !Number.isSafeInteger(queue.queuedAt) || queue.queuedAt < 0
+      || (hasStage && (queue.reason !== "CONTEXT_COMPACTING" || queue.stage !== "reconnecting"))) return null;
+  }
   return result.run.id === runId ? result.run : null;
 }
 
@@ -1001,6 +1025,7 @@ function validateServiceResult(method, value, params) {
       if (!ownDataObject(value) || value.healthy !== true
         || typeof value.pendingCommandsLocked !== "boolean"
         || typeof value.mcpCredentialsLocked !== "boolean"
+        || (value.chatAcceptanceV1 !== undefined && typeof value.chatAcceptanceV1 !== "boolean")
         || (value.activeMemoryCommands !== undefined && typeof value.activeMemoryCommands !== "boolean")
         || (value.instanceNonce !== undefined
           && (typeof value.instanceNonce !== "string" || !/^[a-f0-9]{48}$/u.test(value.instanceNonce)))) {
@@ -1011,6 +1036,7 @@ function validateServiceResult(method, value, params) {
         pendingCommandsLocked: value.pendingCommandsLocked,
         mcpCredentialsLocked: value.mcpCredentialsLocked,
         activeMemoryCommands: value.activeMemoryCommands === true,
+        chatAcceptanceV1: value.chatAcceptanceV1 === true,
         ...(value.instanceNonce === undefined ? {} : { instanceNonce: value.instanceNonce }),
       });
     }
@@ -1420,6 +1446,8 @@ class ShoggothBackend extends AgentBackend {
     this._serviceInstanceNonce = null;
     this._serviceRecoveryCode = null;
     this._activeMemoryCommands = false;
+    this._chatAcceptanceV1 = false;
+    this._acceptedChatOperations = new Map();
     this._readyNotifier = null;
     this._sessionActivityNotifier = null;
     this._serviceEventCursor = 0;
@@ -1433,10 +1461,12 @@ class ShoggothBackend extends AgentBackend {
     // Elected by the Service; undefined until asked (see codex-automation-backend).
     this._codexAutomationOwnerId = undefined;
     this._codexDesktopEntries = new Map();
+    this._codexDesktopEntryBytes = 0;
     this._codexDesktopAttached = new Set();
     this._codexDesktopAttaching = new Map();
     this._codexDesktopRefresh = null;
     this._codexDesktopRefreshedAt = 0;
+    this._codexDesktopReconcileAt = 0;
     this._codexDesktopSourceError = null;
     this._builtinAgentsSignature = null;
   }
@@ -1462,6 +1492,8 @@ class ShoggothBackend extends AgentBackend {
       },
       surfaces: {
         chat: true,
+        durableChatStop: true,
+        structuredChatContinuation: true,
         agents: true,
         models: true,
         skills: true,
@@ -1618,38 +1650,67 @@ class ShoggothBackend extends AgentBackend {
     });
   }
 
-  async _refreshCodexDesktopSessions() {
+  async _refreshCodexDesktopSessions({ recentOnly = false } = {}) {
     if (this._codexDesktopRefresh) return this._codexDesktopRefresh;
+    const previous = this._codexDesktopEntries;
     const generation = this._generation;
+    const ownerId = this._codexAutomationOwnerId;
     this._codexDesktopRefreshedAt = this.now();
     const refresh = (async () => {
-      const entries = new Map(); let cursor = null, bytes = 0, reason = null;
+      const entries = new Map(); let cursor = null, bytes = 0, reason = null, partial = false;
       try {
-        if (this._codexAutomationOwnerId) {
+        if (ownerId) {
           const cursors = new Set();
           for (let index = 0; index < 1000; index++) {
             const page = await this._call("codex.desktop.sessions.list", { backendId: this.id, cursor, limit: 100 });
             if (!page.available) { reason = page.reason; break; }
             for (const entry of page.sessions) {
-              if (entry.session.profileId !== this._codexAutomationOwnerId || entries.has(entry.session.sessionKey)) throw safeError(null, "CODEX_DESKTOP_RESPONSE_INVALID");
+              if (entry.session.profileId !== ownerId || entries.has(entry.session.sessionKey)) throw safeError(null, "CODEX_DESKTOP_RESPONSE_INVALID");
               bytes += encodedBytes(entry);
               if (entries.size >= MAX_HISTORY_ITEMS || bytes > MAX_HISTORY_BYTES) throw safeError(null, "RESPONSE_TOO_LARGE");
               entries.set(entry.session.sessionKey, entry);
             }
             if (!page.hasMore) break;
+            if (recentOnly) { partial = true; break; }
             if (index === 999 || cursors.has(page.nextCursor)) throw safeError(null, "CODEX_DESKTOP_RESPONSE_INVALID");
             cursors.add(page.nextCursor); cursor = page.nextCursor;
           }
         }
       } catch (error) { reason = Object.hasOwn(codexDesktopProtocol.MESSAGES, error?.code) ? error.code : "CODEX_DESKTOP_UNAVAILABLE"; }
-      if (generation !== this._generation || this._state !== "started") return;
-      const before = JSON.stringify([this._codexDesktopSourceError, [...this._codexDesktopEntries]]);
+      if (generation !== this._generation || this._state !== "started" || ownerId !== this._codexAutomationOwnerId) return;
+      let changed = reason !== this._codexDesktopSourceError;
       // An unavailable source preserves the last snapshot and exposes its error.
       // Every send independently revalidates the native thread before admission.
-      if (!reason) this._codexDesktopEntries = entries;
+      if (!reason) {
+        if (partial) {
+          // A first-page refresh cannot prove a missing older thread is gone.
+          let mergedBytes = this._codexDesktopEntryBytes, size = previous.size;
+          let recentChanged = false;
+          for (const [key, entry] of entries) {
+            const old = previous.get(key);
+            if (old) mergedBytes -= encodedBytes(old);
+            else size++;
+            mergedBytes += encodedBytes(entry);
+            recentChanged ||= JSON.stringify(old) !== JSON.stringify(entry);
+          }
+          if (size <= MAX_HISTORY_ITEMS && mergedBytes <= MAX_HISTORY_BYTES) {
+            for (const [key, entry] of entries) previous.set(key, entry);
+            this._codexDesktopEntryBytes = mergedBytes;
+            changed ||= recentChanged;
+          } else {
+            this._codexDesktopReconcileAt = 0;
+          }
+        } else {
+          changed ||= previous.size !== entries.size
+            || [...entries].some(([key, entry]) => JSON.stringify(previous.get(key)) !== JSON.stringify(entry));
+          this._codexDesktopEntries = entries;
+          this._codexDesktopEntryBytes = bytes;
+          this._codexDesktopReconcileAt = this.now() + 30_000;
+        }
+      }
       this._codexDesktopSourceError = reason;
-      this._mergeCodexDesktopSessions();
-      if (before !== JSON.stringify([reason, [...this._codexDesktopEntries]])) {
+      if (changed) {
+        this._mergeCodexDesktopSessions();
         try { this._readyNotifier?.(); } catch {}
       }
     })().finally(() => { if (this._codexDesktopRefresh === refresh) this._codexDesktopRefresh = null; });
@@ -1666,8 +1727,7 @@ class ShoggothBackend extends AgentBackend {
       .then(result => {
         if (generation !== this._generation || this._state !== "started") throw safeError(null, "SERVICE_UNAVAILABLE");
         if (result.session.sessionKey !== target.sessionKey || result.session.runtimeSessionId !== entry.threadId) throw safeError(null, "CODEX_DESKTOP_RESPONSE_INVALID");
-        entry.session = { ...entry.session, ...result.session, source: "codex-desktop" };
-        this._upsertSession(target.profile, entry.session);
+        this._upsertSession(target.profile, { ...entry.session, ...result.session, source: "codex-desktop" });
         this._codexDesktopAttached.add(target.sessionKey);
       }).finally(() => this._codexDesktopAttaching.delete(target.sessionKey));
     this._codexDesktopAttaching.set(target.sessionKey, pending);
@@ -1869,6 +1929,7 @@ class ShoggothBackend extends AgentBackend {
           && this._serviceInstanceNonce !== status.instanceNonce) return "instance-changed";
         if (status.instanceNonce) this._serviceInstanceNonce = status.instanceNonce;
         this._activeMemoryCommands = status.activeMemoryCommands === true;
+        this._chatAcceptanceV1 = status.chatAcceptanceV1 === true;
         this._statusUncertain = !this._isServiceReady(status);
         return this._statusUncertain ? "not-ready" : "ready";
       } catch (error) {
@@ -2448,7 +2509,7 @@ class ShoggothBackend extends AgentBackend {
       ));
       this._rows = rows;
       this._mergeCodexDesktopSessions();
-      await this._refreshCodexDesktopSessions();
+      void this._refreshCodexDesktopSessions();
       try { this._readyNotifier?.(); } catch {}
       return true;
     })().finally(() => {
@@ -2920,6 +2981,11 @@ class ShoggothBackend extends AgentBackend {
     if (target.profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
     return this._call(protocol.BREAKDOWN_METHOD, protocol.validateParams(protocol.BREAKDOWN_METHOD,
       { profileId: profile.id, sessionKey: target.sessionKey, runId }));
+  }
+  async getGroupContinuation(id, key, answerEventId) {
+    const profile = this._profileForManagedAgent(id), target = this._sessionTarget(key);
+    if (target.profile.id !== profile.id) throw safeError(null, "CHAT_SESSION_INVALID");
+    return this._call("chat.continuation.group.get", { sessionKey: target.sessionKey, answerEventId });
   }
   async setAgentRuntimePolicy(id, policy) {
     const params = require("../agent-service/runtime-selection-policy").validateRuntimePolicyParams("agent.runtimePolicy.set",
@@ -3678,7 +3744,9 @@ class ShoggothBackend extends AgentBackend {
   getSessionRows() { return [...this._rows]; }
 
   getSessionRowsSnapshot() {
-    if (this._state === "started" && this.now() - this._codexDesktopRefreshedAt >= 5_000) void this._refreshCodexDesktopSessions();
+    if (this._state === "started" && this.now() - this._codexDesktopRefreshedAt >= 5_000) {
+      void this._refreshCodexDesktopSessions({ recentOnly: this.now() < this._codexDesktopReconcileAt });
+    }
     return { rows: this.getSessionRows(), complete: this._complete };
   }
 
@@ -4495,7 +4563,10 @@ class ShoggothBackend extends AgentBackend {
         ready = this._isServiceReady(status);
         if (this._startGenerationActive(generation)) this._serviceRecoveryCode = null;
         if (ready && status.instanceNonce) this._serviceInstanceNonce = status.instanceNonce;
-        if (ready && this._startGenerationActive(generation)) this._activeMemoryCommands = status.activeMemoryCommands === true;
+        if (ready && this._startGenerationActive(generation)) {
+          this._activeMemoryCommands = status.activeMemoryCommands === true;
+          this._chatAcceptanceV1 = status.chatAcceptanceV1 === true;
+        }
       } catch (error) {
         this._observeServiceRecovery(error, generation);
         // This process cannot reconcile poisoned durable state by reconnecting.
@@ -4528,6 +4599,7 @@ class ShoggothBackend extends AgentBackend {
     const generation = ++this._generation;
     this._state = recovering ? "recovering" : "starting";
     this._activeMemoryCommands = false;
+    this._chatAcceptanceV1 = false;
     this._modelChoices = [];
     try {
       const ready = await this._waitForServiceReady(generation);
@@ -4622,8 +4694,7 @@ class ShoggothBackend extends AgentBackend {
       this._rows = rows;
       this._complete = true;
       this._state = "started";
-      await this._refreshCodexDesktopSessions();
-      if (generation !== this._generation || this._state !== "started") return false;
+      void this._refreshCodexDesktopSessions();
       this._consecutiveStatusTimeouts = 0;
       this._serviceBusy = false;
       this._lastStatusSuccessAt = this.readinessNow();
@@ -4687,6 +4758,7 @@ class ShoggothBackend extends AgentBackend {
   stop() {
     if (this._stopPromise) return this._stopPromise;
     ++this._generation;
+    this._codexDesktopRefresh = null;
     this._stopServiceEventPolling();
     this._serviceEventStreamId = null;
     try {
@@ -4696,6 +4768,8 @@ class ShoggothBackend extends AgentBackend {
     }
     this._state = "stopping";
     this._activeMemoryCommands = false;
+    this._chatAcceptanceV1 = false;
+    this._acceptedChatOperations.clear();
     this._consecutiveStatusTimeouts = 0;
     this._serviceBusy = false;
     this._statusUncertain = false;
@@ -6176,10 +6250,18 @@ class ShoggothBackend extends AgentBackend {
     return output;
   }
 
-  async _cronRunsForJob(jobId, profile) {
-    const values = await this._domainPage(
-      "cron.run.list", { jobId, status: null }, "runs",
-    );
+  async _cronRunsForJob(jobId, profile, failureSinceMs) {
+    const params = { jobId, status: null };
+    let values;
+    if (Number.isSafeInteger(failureSinceMs) && failureSinceMs >= 0) {
+      try {
+        values = await this._domainPage("cron.run.list", { ...params, failureSinceMs }, "runs");
+      } catch (error) {
+        // Keep the list available on older Services and when optional details exceed its budget.
+        if (!["INVALID_PARAMS", "RESPONSE_TOO_LARGE"].includes(error?.code)) throw error;
+      }
+    }
+    values ??= await this._domainPage("cron.run.list", params, "runs");
     for (const value of values) {
       if (value.run.profileId !== profile.id || value.run.sourceId !== jobId) {
         throw safeError(null, "CRON_PROFILE_MISMATCH");
@@ -6276,15 +6358,18 @@ class ShoggothBackend extends AgentBackend {
       if (runs.some(run => run.profileId !== profile.id)) throw safeError(null, "CRON_PROFILE_MISMATCH");
       const recent = scopedRuns ? runs : runs.filter(isRecentCron);
       if (!recent.length) return [];
+      const failedJobs = new Set(recent.filter(run => run.errorCode).map(run => run.sourceId));
       const [jobs, descriptionsByJob] = await Promise.all([
         this._domainPage("cron.job.list", { profileId: profile.id, enabled: null }, "jobs"),
         mapBounded([...new Set(recent.map(run => run.sourceId))], MAX_PROFILE_SESSION_CONCURRENCY,
-          jobId => this._cronRunsForJob(jobId, profile)),
+          jobId => this._cronRunsForJob(jobId, profile, failedJobs.has(jobId) ? sinceMs : undefined)),
       ]);
       const byId = new Map(jobs.map(job => [job.id, job]));
       const descriptions = new Map(descriptionsByJob.flat().map(value => [value.run.id, value]));
       return recent.map(value => {
-        const run = this._mapCronRun(descriptions.get(value.id) || { run: value, createdAt: value.createdAt });
+        const description = descriptions.get(value.id) || { run: value, createdAt: value.createdAt };
+        const run = this._mapCronRun(description);
+        if (run.error) run.error = runtimeErrorMessage(displayedRuntimeErrorCode(run.error, description.failure), description.failure);
         return { backendId: this.id, jobId: `${this.id}:${value.sourceId}`,
           jobName: byId.get(value.sourceId)?.name, agentId: profile.agentId, runId: value.id, ...run };
       });
@@ -6831,7 +6916,11 @@ class ShoggothBackend extends AgentBackend {
     };
     this._sessionsByKey.set(session.sessionKey, session);
     const desktop = this._codexDesktopEntries.get(session.sessionKey);
-    if (desktop) desktop.session = session;
+    if (desktop) {
+      const oldBytes = encodedBytes(desktop);
+      desktop.session = session;
+      this._codexDesktopEntryBytes += encodedBytes(desktop) - oldBytes;
+    }
     const row = sessionToRow(this._profileForSession(profile, session), session, this.id);
     const index = this._rows.findIndex((candidate) => candidate.sessionId === value.sessionKey);
     if (index < 0) this._rows = [...this._rows, row];
@@ -7126,7 +7215,9 @@ class ShoggothBackend extends AgentBackend {
     const result = await this._readChatOperation(target, operationId);
     // Unlike external Host receipts, Service commits the WorkRun before its
     // terminal event. A fresh exact-operation read can supersede an old UI hint.
-    return { ...result, ...(result.status === "found" ? { stateAuthority: "native-service" } : {}),
+    const { receipt, ...observation } = result;
+    return { ...observation, ...(result.status === "accepted" ? { admissionAccepted: true } : {}),
+      ...(result.status === "found" ? { stateAuthority: "native-service" } : {}),
       ...(result.status === "unresolved" && !target.session.inspirationId ? { canReconcile: true } : {}) };
   }
 
@@ -7151,16 +7242,25 @@ class ShoggothBackend extends AgentBackend {
     const target = this._sessionTarget(key);
     const operationId = sendOperationId(target.sessionKey, clientKey, this.randomUUID);
     const result = await this._call("chat.operation.reconcile", { operationId,
-      sessionKey: target.sessionKey, createdAt });
+      sessionKey: target.sessionKey, createdAt, ...(this._chatAcceptanceV1 ? { includeAcceptance: true } : {}) });
     if (result.status === "found") {
       this._assertRunBinding(target, result.run);
       if (result.run.idempotencyKey !== `shoggoth:chat-send:${operationId}`) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+    }
+    if (result.status === "accepted") {
+      if (result.receipt.operationId !== operationId || result.receipt.sessionKey !== target.sessionKey) {
+        throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+      }
+      return { status: "accepted", run: null, admissionAccepted: true };
     }
     return result;
   }
 
   async _readChatOperation(target, operationId) {
-    const result = await this._call("chat.operation.get", { operationId, sessionKey: target.sessionKey });
+    const result = await this._call("chat.operation.get", { operationId, sessionKey: target.sessionKey,
+      ...(this._chatAcceptanceV1 ? { includeAcceptance: true } : {}) });
+    if (result.status === "accepted" && (result.receipt.operationId !== operationId
+      || result.receipt.sessionKey !== target.sessionKey)) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
     if (result.status === "found") {
       this._assertRunBinding(target, result.run);
       const expected = target.session.inspirationId
@@ -7170,13 +7270,21 @@ class ShoggothBackend extends AgentBackend {
     return result;
   }
 
-  async _confirmChatSend(target, operationId, poll) {
+  async _confirmChatSend(target, operationId, poll, receipt = null, onAccepted = () => {}) {
     const busy = {};
     for (let attempt = 0; attempt < this.maxPollErrors; attempt += 1) {
       if (poll.consumerCancelled) return null;
       try {
         const result = await this._readChatOperation(target, operationId);
-        if (result.status === "found") return result.run;
+        if (result.status === "found") {
+          if (receipt && result.run.id !== receipt.runId) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+          return result.run;
+        }
+        if (result.status === "accepted") {
+          if (receipt && receipt.runId !== result.receipt.runId) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+          receipt = result.receipt;
+          onAccepted(receipt);
+        }
         busy.since = undefined;
       } catch (error) {
         const failure = safeError(error);
@@ -7250,6 +7358,15 @@ class ShoggothBackend extends AgentBackend {
     };
     let terminalObserved = false;
     let acceptedOrUncertain = false;
+    let acceptedReceipt = null;
+    const reportAccepted = receipt => {
+      if (acceptedReceipt) return;
+      acceptedReceipt = receipt;
+      acceptedOrUncertain = true;
+      this._acceptedChatOperations.set(sessionKey, receipt);
+      this._invokeHook(opts, "onAccepted");
+      this._emitRunStatus(observerHooks, state, "queued", { reason: "RUNTIME_PREPARING", queuedAt: receipt.acceptedAt });
+    };
     let recall = null;
     const observerHooks = {
       ...hooks,
@@ -7301,19 +7418,33 @@ class ShoggothBackend extends AgentBackend {
       recall = this._watchAdmissionRecall(target, observerHooks, poll);
       try {
         phase("service_request");
-        sent = await this._call("chat.send", {
+        const params = {
           operationId,
           sessionKey,
           prompt: String(message),
           ...(attachments.length ? { attachments } : {}),
           createdAt: this.now(),
-        });
+        };
+        if (this._chatAcceptanceV1 && !target.session.inspirationId) {
+          const receipt = await this._call("chat.send.accept", params);
+          if (receipt.operationId !== operationId || receipt.sessionKey !== sessionKey) {
+            throw safeError(null, "CHAT_RESPONSE_INVALID");
+          }
+          reportAccepted(receipt);
+          const run = await this._confirmChatSend(target, operationId, poll, receipt);
+          if (!run) {
+            if (!poll.consumerCancelled) this._invokeHook(observerHooks, "status",
+              { kind: "needs_verification", text: "needs_verification" });
+            return;
+          }
+          sent = { run, reason: run.status === "queued" ? "RUNTIME_PREPARING" : null };
+        } else sent = await this._call("chat.send", params);
       } catch (error) {
         const failure = safeError(error);
         if (failure.admissionAccepted === false
           || (failure.receiptUncertain !== true && !SEND_RECEIPT_UNCERTAIN_ERROR_CODES.has(failure.code))) throw failure;
         acceptedOrUncertain = true;
-        const recovered = await this._confirmChatSend(target, operationId, poll);
+        const recovered = await this._confirmChatSend(target, operationId, poll, acceptedReceipt, reportAccepted);
         if (!recovered) {
           if (!poll.consumerCancelled) this._invokeHook(observerHooks, "status",
             { kind: "needs_verification", text: "needs_verification" });
@@ -7325,7 +7456,7 @@ class ShoggothBackend extends AgentBackend {
       recall.stop(true);
       phase("receipt_validation");
       this._assertRunBinding(target, sent.run);
-      opts.onAccepted?.();
+      if (!acceptedReceipt) this._invokeHook(opts, "onAccepted");
       const currentSession = this._sessionsByKey.get(sessionKey);
       const derivedTitle = deriveSessionTitle(String(message));
       if (currentSession && currentSession.derivedTitle === null && derivedTitle !== null) {
@@ -7338,6 +7469,7 @@ class ShoggothBackend extends AgentBackend {
         run: sent.run,
       };
       this._activeBySession.set(sessionKey, active);
+      if (this._acceptedChatOperations.get(sessionKey)?.operationId === operationId) this._acceptedChatOperations.delete(sessionKey);
       this._emitRunStatus(observerHooks, state, sent.run.status, {
         reason: sent.reason, queuedAt: this.now(),
       });
@@ -7467,6 +7599,7 @@ class ShoggothBackend extends AgentBackend {
     };
     while (!context.poll.cancelled && context.generation === this._generation) {
       let result;
+      const pollStartedAt = this.readinessNow();
       try {
         result = await this._call("run.subscribe", {
           runId: context.run.id,
@@ -7476,11 +7609,19 @@ class ShoggothBackend extends AgentBackend {
         });
         consecutiveErrors = 0;
         busy.since = undefined;
+        busy.recorded = false;
       } catch (error) {
-        if (this._serviceBusyRetry(safeError(error), busy)) continue;
+        const failure = safeError(error);
+        const waitingOnService = this._serviceBusyRetry(failure, busy);
+        if (failure.serviceBusy === true && !busy.recorded
+          && context.reconcileAccepted === true && context.run.source === "chat") {
+          busy.recorded = true;
+          this._sendLatency.record({ stage: "client_observer_response_backpressure", outcome: "unknown",
+            durationMs: Math.max(0, this.readinessNow() - pollStartedAt), runId: context.run.id, sessionKey: context.sessionKey });
+        }
+        if (waitingOnService) continue;
         consecutiveErrors += 1;
         if (consecutiveErrors >= this.maxPollErrors) {
-          const failure = safeError(error);
           if (context.reconcileAccepted === true
             && RUN_OBSERVER_TRANSIENT_ERROR_CODES.has(failure.code)) {
             state.observerRecoveryAttempts = Math.min(
@@ -7533,6 +7674,7 @@ class ShoggothBackend extends AgentBackend {
       }
       if (result.gap !== null) {
         state.textFragment = null;
+        state.progressTools?.clear();
         state.replayThroughSeq = null;
         state.historyRequired = true;
         const snapshotRun = runFromSnapshot(result.snapshot, context.run.id);
@@ -7562,6 +7704,10 @@ class ShoggothBackend extends AgentBackend {
       streamId = nextStreamId;
       afterSeq = nextSeq;
       if (result.hasMore) continue;
+      if (context.reconcileAccepted === true && context.run.source === "chat") {
+        const sample = observeRunProgress(state, context.run, this.readinessNow(), result.gap !== null || result.events.length > 0);
+        if (sample) this._sendLatency.record({ ...sample, outcome: "unknown", runId: context.run.id, sessionKey: context.sessionKey });
+      }
       await this.delay(this.pollIntervalMs);
     }
     return {
@@ -7756,6 +7902,12 @@ class ShoggothBackend extends AgentBackend {
       if (delta) entries.push({ content: delta, status: "in_progress" });
       this._invokeHook(context.hooks, "plan", entries);
     } else if (["tool.start", "tool.update", "tool.result"].includes(event.type)) {
+      const toolId = payload.toolCallId || payload.itemId;
+      if (safeString(toolId, 512)) {
+        const open = state.progressTools ||= new Set();
+        if (event.type === "tool.result") open.delete(toolId);
+        else if (open.size < 64) open.add(toolId);
+      }
       const tool = ownDataObject(payload.tool) ? payload.tool : {};
       const failureMeta = {
         ...(Number.isSafeInteger(tool.exitCode) && tool.exitCode !== 0
@@ -8196,34 +8348,61 @@ class ShoggothBackend extends AgentBackend {
     return run;
   }
 
-  async abortChat(key, runId) {
+  async abortChat(key, runId, { idempotencyKey, observeOnly = false } = {}) {
     const target = this._sessionTarget(key);
     const { sessionKey } = target;
-    let active = null;
-    try {
-      if (runId === undefined) active = await this._findActiveRun(target);
-      else {
-        // A card can own a queued Run beside the generation that published it.
-        // Never turn a stale or foreign explicit target into session-wide Stop.
-        if (!safeString(runId, 128)) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
-        const result = await this._call("run.get", { runId });
-        if (result.run?.id !== runId) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
-        active = this._assertRunBinding(target, result.run);
-      }
-      if (!active || !ACTIVE_RUN_STATUSES.has(active.status)) return;
-      const result = await this._call("chat.abort", {
-        operationId: `abort-${this.randomUUID()}`,
-        sessionKey,
-        runId: active.id,
-        createdAt: this.now(),
-      });
-      if (result.run) {
-        this._assertRunBinding(target, result.run);
-        if (result.run.id !== active.id) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
-      }
-    } finally {
-      if (active) this._clearSessionRuntime(sessionKey, active.id);
+    if ((idempotencyKey !== undefined && (idempotencyKey === null || runId !== undefined))
+      || (observeOnly && idempotencyKey === undefined && runId === undefined)) {
+      throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
     }
+    const observation = run => {
+      if (!run || !TERMINAL_RUN_STATUSES.has(run.status)) {
+        return { stateAuthority: "native-service", status: "verification", runId: run?.id ?? null };
+      }
+      this._clearSessionRuntime(sessionKey, run.id);
+      return { stateAuthority: "native-service", status: "terminal", runId: run.id, runStatus: run.status };
+    };
+    const cached = runId === undefined ? this._acceptedChatOperations.get(sessionKey) : null;
+    const operationId = idempotencyKey === undefined ? cached?.operationId
+      : sendOperationId(sessionKey, idempotencyKey, this.randomUUID);
+    let active;
+    if (operationId) {
+      const original = cached?.operationId === operationId && !observeOnly
+        ? { status: "accepted", receipt: cached } : await this._readChatOperation(target, operationId);
+      if (original.status === "unresolved") return observation(null);
+      if (original.status === "accepted") {
+        if (observeOnly) return { ...observation(null), runId: original.receipt.runId };
+        const canceled = await this._call("chat.send.cancel", { operationId, sessionKey });
+        if (canceled.operationId !== operationId || canceled.sessionKey !== sessionKey
+          || canceled.runId !== original.receipt.runId) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+        // The receipt binds the request. A queued run may still await
+        // projection, so only a second exact read can prove its terminal state.
+        const latest = await this._readChatOperation(target, operationId);
+        if (latest.status === "found" && latest.run.id !== canceled.runId) {
+          throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+        }
+        return latest.status === "found" ? observation(latest.run) : { ...observation(null), runId: canceled.runId };
+      }
+      active = original.run;
+    } else if (runId !== undefined) {
+      if (!safeString(runId, 128)) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+      const result = await this._call("run.get", { runId });
+      if (result.run?.id !== runId) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+      active = this._assertRunBinding(target, result.run);
+    } else {
+      active = await this._findActiveRun(target);
+    }
+    if (observeOnly || !active || !ACTIVE_RUN_STATUSES.has(active.status)) return observation(active);
+    const result = await this._call("chat.abort", {
+      operationId: `abort-${this.randomUUID()}`,
+      sessionKey,
+      runId: active.id,
+      createdAt: this.now(),
+    });
+    if (!result.run) return observation(active);
+    this._assertRunBinding(target, result.run);
+    if (result.run.id !== active.id) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
+    return observation(result.run);
   }
 
   async steerChat(key, message) {
@@ -8271,7 +8450,7 @@ class ShoggothBackend extends AgentBackend {
     }
     try {
       if (poll.cancelled) return;
-      this._invokeHook(hooks, "status", { kind: active.status, text: active.status });
+      this._invokeHook(hooks, "status", { kind: active.status, text: active.status, nativeRunId: active.id });
       if (poll.cancelled) return;
       // Seed only this consumer's displayed canonical sources from this Run.
       // Preserve their native-content projection so a later UI publication can

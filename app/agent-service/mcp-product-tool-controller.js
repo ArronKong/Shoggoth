@@ -2635,18 +2635,11 @@ class McpProductToolController {
       if (REVOCABLE_READ_TOOL_NAMES.has(name) && typeof readPolicy?.getRevision !== "function") {
         throw toolError("MCP_TOOL_UNAVAILABLE");
       }
-      const readPolicyRevision = readPolicy?.getRevision(authority.profileId);
       const readMemoryStore = MEMORY_READ_TOOL_NAMES.has(name)
         ? this.conversationMemoryService?.store : null;
       if (MEMORY_READ_TOOL_NAMES.has(name) && typeof readMemoryStore?.getRevision !== "function") {
         throw toolError("MCP_TOOL_UNAVAILABLE");
       }
-      const readMemoryAuthorityRevision = readMemoryStore
-        ? this.conversationMemoryService.readAuthorityRevision?.(authority.profileId) ?? null : null;
-      if (readMemoryAuthorityRevision !== null && (typeof readMemoryAuthorityRevision !== "string"
-        || !readMemoryAuthorityRevision)) throw toolError("MCP_TOOL_UNAVAILABLE");
-      const readMemoryRevision = readMemoryAuthorityRevision === null
-        ? readMemoryStore?.getRevision(authority.profileId) : null;
       // memory_explain may include a verified transcript quote, so its result
       // also depends on the source session and event remaining visible.
       // The native memory authority includes context exclusion, source removal,
@@ -2656,17 +2649,31 @@ class McpProductToolController {
         && typeof this.conversationRecallService?.getReadAuthorityRevision === "function"
         ? this.conversationRecallService.getReadAuthorityRevision(authority.profileId)
         : this.conversationRecallService?.getVisibilityRevision?.(authority.profileId) ?? null;
-      const readConversationRevision = (CONVERSATION_READ_TOOL_NAMES.has(name)
-        || MEMORY_READ_TOOL_NAMES.has(name) && readMemoryAuthorityRevision === null)
-        ? conversationReadRevision()
-        : null;
       const provenance = name === "memory_explain" && !this.conversationMemoryService?.engine?.sharing?.recognizes(rawArgs.id)
         ? this.conversationMemoryService?.provenance : null;
       if (provenance && typeof provenance.getEvidenceRevision !== "function") {
         throw toolError("MCP_TOOL_UNAVAILABLE");
       }
-      const readEvidenceRevision = provenance?.getEvidenceRevision?.(
-        authority.profileId, rawArgs.id) ?? null;
+      const captureRead = () => {
+        const readMemoryAuthorityRevision = readMemoryStore
+          ? this.conversationMemoryService.readAuthorityRevision?.(authority.profileId) ?? null : null;
+        return {
+          readPolicyRevision: readPolicy?.getRevision(authority.profileId),
+          readMemoryAuthorityRevision,
+          readMemoryRevision: readMemoryAuthorityRevision === null ? readMemoryStore?.getRevision(authority.profileId) : null,
+          readConversationRevision: (CONVERSATION_READ_TOOL_NAMES.has(name) || readMemoryStore && readMemoryAuthorityRevision === null)
+            ? conversationReadRevision() : null,
+          readEvidenceRevision: provenance?.getEvidenceRevision?.(authority.profileId, rawArgs.id) ?? null,
+        };
+      };
+      const conversationRead = CONVERSATION_READ_TOOL_NAMES.has(name);
+      const withMemoryRead = read => readMemoryStore && this.conversationMemoryService.withOwnReadView
+        ? this.conversationMemoryService.withOwnReadView(authority.profileId, scope?.signal, read) : read();
+      const { readPolicyRevision, readMemoryAuthorityRevision, readMemoryRevision, readConversationRevision, readEvidenceRevision }
+        = conversationRead ? await this.#withConversationToolRead(authority.profileId, captureRead)
+          : readMemoryStore ? await withMemoryRead(captureRead) : captureRead();
+      if (readMemoryAuthorityRevision !== null && (typeof readMemoryAuthorityRevision !== "string"
+        || !readMemoryAuthorityRevision)) throw toolError("MCP_TOOL_UNAVAILABLE");
       if (provenance && (typeof readEvidenceRevision !== "string" || !readEvidenceRevision)) {
         throw toolError("MCP_TOOL_UNAVAILABLE");
       }
@@ -2695,8 +2702,8 @@ class McpProductToolController {
           if (typeof this.conversationMemoryService?.revalidateWriteResult !== "function") {
             throw toolError("MCP_TOOL_UNAVAILABLE");
           }
-          result = this.conversationMemoryService.revalidateWriteResult(
-            authority.profileId, result, memoryWorkspace);
+          result = await this.conversationMemoryService.revalidateWriteResult(
+            authority.profileId, result, memoryWorkspace, scope?.signal);
         }
       } else {
         this.#requireProfile(authority.profileId);
@@ -2704,43 +2711,28 @@ class McpProductToolController {
         result = name === "native_agent_file_read" ? await this.#route(name, rawArgs, authority, null)
           : await this.#handleEphemeral(name, rawArgs, authority, fingerprint, readVisibilityKey);
       }
-      if (readPolicy && readPolicy.getRevision(authority.profileId) !== readPolicyRevision) {
-        throw toolError("MCP_TOOL_STATE_CONFLICT");
-      }
-      if (readMemoryAuthorityRevision !== null && this.conversationMemoryService
-        .readAuthorityRevision(authority.profileId) !== readMemoryAuthorityRevision) {
-        throw toolError("MCP_TOOL_STATE_CONFLICT");
-      }
-      if (readMemoryStore && readMemoryAuthorityRevision === null
-        && readMemoryStore.getRevision(authority.profileId) !== readMemoryRevision) {
-        throw toolError("MCP_TOOL_STATE_CONFLICT");
-      }
-      if (readConversationRevision !== null && conversationReadRevision() !== readConversationRevision) {
-        throw toolError("MCP_TOOL_STATE_CONFLICT");
-      }
-      if (readEvidenceRevision !== null && provenance.getEvidenceRevision(
-        authority.profileId, rawArgs.id) !== readEvidenceRevision) {
-        throw toolError("MCP_TOOL_STATE_CONFLICT");
-      }
-      if (readMemoryStore) {
-        const items = Array.isArray(result?.items) ? result.items : [result?.item];
-        const engine = this.conversationMemoryService?.engine;
-        const now = engine?.now?.() ?? this.now();
-        if (typeof engine?.isRecallCommitted !== "function"
-          || !Array.isArray(items) || !Number.isSafeInteger(now)
-          || items.some((item) => !item || item.status !== "active"
-            || (item.validFrom !== undefined && item.validFrom > now)
-            || (item.validUntil !== undefined && item.validUntil !== null
-              && item.validUntil <= now)
-            || !engine.isRecallCommitted(authority.profileId, item))) {
+      const assertReadCurrent = () => {
+        if ((readPolicy && readPolicy.getRevision(authority.profileId) !== readPolicyRevision)
+          || (readMemoryAuthorityRevision !== null && this.conversationMemoryService.readAuthorityRevision(authority.profileId) !== readMemoryAuthorityRevision)
+          || (readMemoryStore && readMemoryAuthorityRevision === null && readMemoryStore.getRevision(authority.profileId) !== readMemoryRevision)
+          || (readConversationRevision !== null && conversationReadRevision() !== readConversationRevision)
+          || (readEvidenceRevision !== null && provenance.getEvidenceRevision(authority.profileId, rawArgs.id) !== readEvidenceRevision)) {
           throw toolError("MCP_TOOL_STATE_CONFLICT");
         }
-      }
-      if (MEMORY_READ_TOOL_NAMES.has(name) && this.conversationMemoryService?.revalidateReadResult) {
-        const run = await this.#currentInteractiveRun(rawArgs, authority);
-        result = this.conversationMemoryService.revalidateReadResult(authority.profileId, result, run);
-      }
+        if (readMemoryStore) {
+          const items = Array.isArray(result?.items) ? result.items : [result?.item];
+          const engine = this.conversationMemoryService.engine;
+          const now = engine?.now?.() ?? this.now();
+          if (typeof engine?.isRecallCommitted !== "function" || !Number.isSafeInteger(now)
+            || items.some(item => !item || item.status !== "active" || item.validFrom > now
+              || (item.validUntil != null && item.validUntil <= now) || !engine.isRecallCommitted(authority.profileId, item))) {
+            throw toolError("MCP_TOOL_STATE_CONFLICT");
+          }
+        }
+      };
+      if (!readMemoryStore && !conversationRead) assertReadCurrent();
       let safe = safeJsonClone(result);
+      let projectedRead = true;
       if (LIVE_HELP_TOOL_NAMES.has(name)) this.permissionEngine.authorize({
         name, profileId: authority.profileId, confirmed: false,
       });
@@ -2755,6 +2747,7 @@ class McpProductToolController {
           // The domain already committed its result. Transformation failure
           // cannot turn a completed write into an invitation to dispatch again.
           safe = require("./secret-execution-broker").completedNotice;
+          projectedRead = false;
         }
       } else if (this.secretExecution) {
         try {
@@ -2764,6 +2757,7 @@ class McpProductToolController {
           // The route already returned. A model-copy failure never changes
           // the product's durable outcome or asks the agent to repeat it.
           safe = require("./secret-execution-broker").completedNotice;
+          projectedRead = false;
         }
       }
       if (name === "computer_snapshot") safe = compactComputerSnapshotForFrame(safe);
@@ -2771,14 +2765,38 @@ class McpProductToolController {
       if (Buffer.byteLength(frame, "utf8") > MAX_FRAME_BYTES) {
         throw toolError("MCP_TOOL_RESPONSE_TOO_LARGE");
       }
-      if (CONVERSATION_READ_TOOL_NAMES.has(name) && !authority.federationClient) {
-        const engine = this.conversationMemoryService?.engine;
-        if (engine?.stageConversationRecall) {
-          const run = await this.#currentInteractiveRun(rawArgs, authority);
-          if (conversationReadRevision() !== readConversationRevision) throw toolError("MCP_TOOL_STATE_CONFLICT");
+      if (readMemoryStore) {
+        const run = await this.#currentInteractiveRun(rawArgs, authority);
+        const publish = view => {
           this.executionContext.getStore()?.assertCurrent();
-          engine.stageConversationRecall(run, name, safe);
-        }
+          this.#requireProfile(authority.profileId);
+          const current = this.#requireRun(run.id, authority.profileId);
+          if (!ACTIVE_RUN_STATUSES.has(current.status) || current.source !== run.source || current.sourceId !== run.sourceId
+            || current.workspace !== run.workspace) throw toolError("MCP_TOOL_STATE_CONFLICT");
+          assertReadCurrent();
+          this.conversationMemoryService.revalidateReadResult?.(authority.profileId, result, current, name, rawArgs);
+          view?.assertFilesCurrent();
+          if (projectedRead && name === "memory_search") this.conversationMemoryService.stagePublishedSearch?.(authority.profileId, result, current);
+          return safe;
+        };
+        return await (this.conversationMemoryService.withPublicationReadViews
+          ? this.conversationMemoryService.withPublicationReadViews(authority.profileId, result, run, scope?.signal, publish)
+          : withMemoryRead(publish));
+      }
+      if (conversationRead) {
+        const run = await this.#currentInteractiveRun(rawArgs, authority);
+        return await this.#withConversationToolRead(authority.profileId, view => {
+          this.#requireProfile(authority.profileId);
+          const current = this.#requireRun(run.id, authority.profileId);
+          if (!ACTIVE_RUN_STATUSES.has(current.status) || current.source !== run.source || current.sourceId !== run.sourceId
+            || current.workspace !== run.workspace) throw toolError("MCP_TOOL_STATE_CONFLICT");
+          assertReadCurrent();
+          this.conversationRecallService?.assertResultCurrent?.({ name, profileId: authority.profileId,
+            args: rawArgs, run: current, result });
+          view?.assertFilesCurrent?.();
+          if (!authority.federationClient && projectedRead) this.conversationMemoryService?.engine?.stageConversationRecall?.(current, name, safe);
+          return safe;
+        });
       }
       return safe;
     } catch (error) {
@@ -2801,13 +2819,26 @@ class McpProductToolController {
     return {profileId:authority.profileId,runId:scope?.runId};
   }
 
+  #withConversationToolRead(profileId, read) {
+    const scope = this.executionContext.getStore();
+    const project = view => {
+      scope?.assertCurrent();
+      this.#requireProfile(profileId);
+      const result = read(view);
+      view?.assertFilesCurrent?.();
+      return result;
+    };
+    return this.conversationMemoryService?.withOwnReadView
+      ? this.conversationMemoryService.withOwnReadView(profileId, scope?.signal, project) : project();
+  }
+
   async #routeEphemeral(name, args, authority) {
     const result = await this.#route(name, args, authority, null);
     if (CONVERSATION_READ_TOOL_NAMES.has(name)) {
       if (typeof this.conversationRecallService?.assertResultCurrent === "function") {
         const run = await this.#currentInteractiveRun(args, authority);
-        this.conversationRecallService.assertResultCurrent({ name, profileId: authority.profileId,
-          args, run, result });
+        await this.#withConversationToolRead(authority.profileId, () => this.conversationRecallService.assertResultCurrent({
+          name, profileId: authority.profileId, args, run, result }));
       } else {
         // Legacy/test service adapters still need a current read before an
         // in-flight result is shared by callers with the same callId.
@@ -3601,11 +3632,12 @@ class McpProductToolController {
         if (!this.conversationRecallService) throw toolError("MCP_TOOL_UNAVAILABLE");
         this.#assertSecretSafe(JSON.stringify(args));
         const run = await this.#currentInteractiveRun(args, authority);
-        const result = name === "conversation_search"
-          ? await (this.conversationRecallService.searchWithSemantic
-            ? this.conversationRecallService.searchWithSemantic({ profileId: authority.profileId, args, run })
-            : this.conversationRecallService.search({ profileId: authority.profileId, args, run }))
-          : this.conversationRecallService.get({ profileId: authority.profileId, args, run });
+        const input = { profileId: authority.profileId, args, run };
+        const withReadView = read => this.#withConversationToolRead(input.profileId, read);
+        const recall = this.conversationRecallService;
+        const result = name === "conversation_search" && recall.searchWithSemantic
+          ? await recall.searchWithSemantic(input, withReadView)
+          : await withReadView(() => name === "conversation_search" ? recall.search(input) : recall.get(input));
         this.#assertSecretSafe(JSON.stringify(result));
         return result;
       }
@@ -3614,11 +3646,20 @@ class McpProductToolController {
       if (name === "memory_get" || name === "memory_explain") {
         if (!this.conversationRecallService) throw toolError("MCP_TOOL_UNAVAILABLE");
         const run = await this.#currentInteractiveRun(args, authority);
-        this.conversationRecallService.assertCaller({ profileId: authority.profileId, run });
-        const result = name === "memory_get"
-          ? (args.path ? this.conversationMemoryService.getFile(authority.profileId, args, run)
-            : this.conversationMemoryService.get(authority.profileId, args.id, run))
-          : this.conversationMemoryService.explain(authority.profileId, args.id, run);
+        const memory = this.conversationMemoryService, profileId = authority.profileId;
+        const read = () => {
+          this.executionContext.getStore()?.assertCurrent();
+          const current = this.#requireRun(run.id, profileId);
+          if (!ACTIVE_RUN_STATUSES.has(current.status) || current.source !== run.source || current.sourceId !== run.sourceId
+            || current.workspace !== run.workspace) throw toolError("MCP_TOOL_STATE_CONFLICT");
+          this.conversationRecallService.assertCaller({ profileId, run: current });
+          return name === "memory_explain" ? memory.explain(profileId, args.id, current)
+            : args.path ? memory.getFile(profileId, args, current) : memory.get(profileId, args.id, current);
+        };
+        const id = name === "memory_explain" ? args.id : args.path || args.id;
+        const signal = this.executionContext.getStore()?.signal;
+        const result = await (memory.withToolReadViews ? memory.withToolReadViews(profileId, id, run, signal, read)
+          : memory.withOwnReadView ? memory.withOwnReadView(profileId, signal, read) : read());
         this.#assertSecretSafe(JSON.stringify(result));
         return result;
       }
@@ -3626,10 +3667,13 @@ class McpProductToolController {
         const run = await this.#currentInteractiveRun(args, authority);
         this.conversationMemoryService.bind(name, args, run);
         return this.conversationMemoryService.searchWithSemantic
-          ? this.conversationMemoryService.searchWithSemantic(authority.profileId, args, run)
+          ? this.conversationMemoryService.searchWithSemantic(authority.profileId, args, run, this.executionContext.getStore()?.signal)
           : this.conversationMemoryService.search(authority.profileId, args, run);
       }
-      return this.conversationMemoryService.write(name, authority.profileId, args, call);
+      const scope = this.executionContext.getStore();
+      const borrowedForget = name === "memory_forget" && this.conversationMemoryService.engine?.sharing?.recognizes(args.id);
+      return this.conversationMemoryService.write(name, authority.profileId, args, borrowedForget && scope
+        ? { ...call, signal: scope.signal, assertCurrent: () => scope.assertCurrent() } : call);
     }
     if (inspirationMcpMethod(name)) {
       if (!this.inspirationService) throw toolError("MCP_TOOL_UNAVAILABLE");

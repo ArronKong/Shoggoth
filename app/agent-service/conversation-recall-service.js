@@ -107,7 +107,7 @@ function semanticSnippet(text, range) {
 class ConversationRecallService {
   constructor({ paths, transcriptStore, chatSessionStore, workDispatcher, getRunSessionKey,
     getInspirationOrigin = null, recallPolicy, memoryStore = null, index = null, now = Date.now,
-    semanticSearch = null, isProactiveRunCurrent = () => false }) {
+    semanticSearch = null, isProactiveRunCurrent = () => false, withBackgroundReadView = null }) {
     if (!transcriptStore?.listEvents || !transcriptStore?.getRevision || !chatSessionStore?.listSessions
       || !chatSessionStore?.getSession || !workDispatcher?.getRun
       || typeof getRunSessionKey !== "function" || !recallPolicy?.assertReady
@@ -127,6 +127,7 @@ class ConversationRecallService {
     this.now = now;
     this.index = index || new ConversationRecallIndex({ paths });
     this.semanticSearch = semanticSearch;
+    this.withBackgroundReadView = withBackgroundReadView;
     this.warmTimers = new Map();
     this.historicalMemory = memoryStore ? new HistoricalMemoryAnnotations({ memoryStore,
       recallPolicy, now }) : null;
@@ -254,9 +255,18 @@ class ConversationRecallService {
 
   scheduleWarm(profileId) {
     if (this.warmTimers.has(profileId)) return;
-    const timer = setTimeout(() => {
-      this.warmTimers.delete(profileId);
-      try { this.prebuildProfile(profileId); } catch { /* search reports the safe unavailable state */ }
+    const timer = setTimeout(async () => {
+      const warm = view => {
+        if (this.warmTimers.get(profileId) !== timer) return;
+        view?.assertFilesCurrent();
+        this.warmTimers.delete(profileId);
+        this.prebuildProfile(profileId);
+      };
+      try {
+        if (this.withBackgroundReadView) await this.withBackgroundReadView(profileId, warm);
+        else warm();
+      } catch { /* search reports the safe unavailable state */ }
+      finally { if (this.warmTimers.get(profileId) === timer) this.warmTimers.delete(profileId); }
     }, 250);
     timer.unref?.();
     this.warmTimers.set(profileId, timer);
@@ -277,15 +287,33 @@ class ConversationRecallService {
     const stamp = hashText(sourceStamp);
     const runCache = new Map();
     const service = this;
+    const currentSources = () => this.policy.getRevision(profileId) === policyView.revision
+      && (this.policy.getHistoricalVisibilityRevision?.(profileId) ?? this.policy.getRevision(profileId)) === visibility
+      && JSON.stringify([this._targetSessions(profileId), policyView.revision, visibility]) === sourceStamp;
+    let proof;
+    const withFreshView = this.withBackgroundReadView ? read => this.withBackgroundReadView(profileId, view => {
+      view.assertFilesCurrent();
+      const value = read();
+      view.assertFilesCurrent();
+      proof = view.retainProof();
+      return value;
+    }) : null;
+    const prepareCurrent = withFreshView ? async () => {
+      if (!proof?.current()) await withFreshView(() => null);
+    } : undefined;
     return this.semanticSearch.ensure({ profileId, domain: "conversation", stamp,
-      isCurrent: () => this.policy.getRevision(profileId) === policyView.revision
-        && (this.policy.getHistoricalVisibilityRevision?.(profileId) ?? this.policy.getRevision(profileId)) === visibility
-        && JSON.stringify([this._targetSessions(profileId), policyView.revision, visibility]) === sourceStamp,
+      isCurrent: prepareCurrent ? () => proof.read(view => {
+        const current = currentSources();
+        if (current) view.assertFilesCurrent();
+        return current;
+      }) : currentSources,
+      prepareCurrent,
       documents: async function* () {
         for (const session of sessions) {
           let after = 0;
           while (after < session.lastSeq) {
-            const page = service._loadPage(profileId, session, after, 100, policyView, runCache);
+            const read = () => service._loadPage(profileId, session, after, 100, policyView, runCache);
+            const page = withFreshView ? await withFreshView(read) : read();
             for (const row of page.rows) yield {
               id: hashText(`conversation\0${session.id}\0${row.eventId}`), text: row.text, contentHash: row.contentHash,
               source: { sourceId: row.eventId, language: sourceLanguage(row.text), sessionId: session.id, eventId: row.eventId,
@@ -318,7 +346,8 @@ class ConversationRecallService {
         && JSON.stringify(this._targetSessions(profileId)) === JSON.stringify(sessions),
       (session, indexedRevision) => this.transcripts.getIndexPrefixDigest
         ? this.transcripts.getIndexPrefixDigest(profileId, session.id, indexedRevision)
-        : null);
+        : null,
+      this.withBackgroundReadView ? read => this.withBackgroundReadView(profileId, read) : undefined);
   }
 
   // Shared with memory_get/explain. System checks require a current Main
@@ -335,7 +364,7 @@ class ConversationRecallService {
       ? { ...view, isEventVisible: view.isMemorySourceEventVisible } : view;
   }
 
-  _caller(profileId, args, run) {
+  _caller(profileId, args, run, continuation = false) {
     this.policy.assertReady(profileId);
     if (!run || run.profileId !== profileId || args.source !== run.source
       || args.sourceId !== run.sourceId || !["chat", "inspiration", "proactive"].includes(run.source)
@@ -346,7 +375,8 @@ class ConversationRecallService {
     }
     const sessionKey = this.getRunSessionKey(run);
     const session = sessionKey ? this.sessions.getSession(sessionKey) : null;
-    if (!session || !["ready", "archived"].includes(session.status)
+    if (!session || (!["ready", "archived"].includes(session.status)
+        && !(continuation && session.status === "draft" && isHistoricalChatSession(session)))
       || session.profileId !== profileId || session.workspace !== run.workspace
       || this.sessions.getCronSessionOrigin?.(session.sessionKey)
       || (run.source === "chat" && run.sourceId !== session.sessionKey)) {
@@ -618,8 +648,55 @@ class ConversationRecallService {
     return { event, text, events: context?.events || null, context };
   }
 
+  async findContinuation({ run, query, sessionId }) {
+    const { profileId, source, sourceId } = run;
+    const args = { source, sourceId, sessionId, query, limit: 4 };
+    if (this._caller(profileId, args, run, true).id !== sessionId) {
+      throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件不可检索");
+    }
+    let matches = this._search({ profileId, args, run });
+    if (matches.status === "rebuilding") {
+      let timer;
+      try {
+        await Promise.race([this.whenIndexReady(profileId), new Promise(resolve => {
+          timer = setTimeout(resolve, 1_000);
+          timer.unref?.();
+        })]);
+      } finally { clearTimeout(timer); }
+      this._caller(profileId, args, run, true);
+      matches = this._search({ profileId, args, run });
+    }
+    return this.readContinuation({ run, sessionId, eventIds: matches.results.map(row => row.eventId) });
+  }
+
+  readContinuation({ run, sessionId, eventIds }) {
+    const { profileId, source, sourceId } = run;
+    const args = { source, sourceId, sessionId };
+    const session = this._caller(profileId, args, run, true);
+    if (session.id !== sessionId || !isHistoricalChatSession(session)) {
+      throw recallError("CONVERSATION_EVENT_NOT_FOUND", "会话事件不可检索");
+    }
+    const policy = this._policyView(profileId, true);
+    const view = this._outdatedView(profileId);
+    const events = [];
+    for (const eventId of eventIds) {
+      const value = this._event(profileId, session, eventId, null, policy);
+      if (!value || value.event.runId === run.id
+        || this.runs.getRun(value.event.runId)?.status !== "completed"
+        || this._outdatedForEvent(view, value.event)
+        || this._historicalRunNotice(view, profileId, session, value.event)
+        || Buffer.byteLength(value.text, "utf8") > 4096) continue;
+      events.push({ eventId, kind: value.event.kind, text: value.text });
+    }
+    return events;
+  }
+
   search({ profileId, args, run }) {
     this._caller(profileId, args, run);
+    return this._search({ profileId, args, run });
+  }
+
+  _search({ profileId, args, run }) {
     const query = args.query.trim();
     if (!query || hasSecret(query)) throw recallError("CONVERSATION_SEARCH_INVALID", "检索词无效");
     const limit = args.limit ?? 5;
@@ -670,13 +747,18 @@ class ConversationRecallService {
     return { results, count: results.length, query, status: "ready", indexRevision: policyRevision };
   }
 
-  async searchWithSemantic({ profileId, args, run }) {
-    const lexical = this.search({ profileId, args, run });
+  async searchWithSemantic(input, withReadView = read => read()) {
+    const { profileId, args, run } = input;
+    const prepared = withReadView(() => ({ lexical: this.search(input), job: this._ensureSemantic(profileId) }));
+    const { lexical, job } = prepared?.then ? await prepared : prepared;
     if (!this.semanticSearch) return lexical;
-    const job = this._ensureSemantic(profileId);
     const semantic = await this.semanticSearch.query({ profileId, domain: "conversation", job,
       query: lexical.query, filter: { workspace: run.workspace, sessionId: args.sessionId,
         excludeRunId: run.id }, limit: 100 });
+    return withReadView(() => this._mergeSemanticSearch(input, job, lexical, semantic));
+  }
+
+  _mergeSemanticSearch({ profileId, args, run }, job, lexical, semantic) {
     this._caller(profileId, args, run);
     if (this._ensureSemantic(profileId)?.stamp !== job?.stamp) {
       return { ...lexical, semantic: { status: "rebuilding" } };

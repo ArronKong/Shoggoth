@@ -64,10 +64,10 @@ function adapterError(code, message) {
 const PRESENTATION_FEATURES = Object.freeze(["item_ids", "terminal_resize_reflow",
   "resize_all_images", "tool_search_always_defer_mcp_tools", "tui_app_server"]);
 
-function hasIsolatedFeatures(features) {
+function hasIsolatedFeatures(features, runtimeVersion) {
   // Codex 0.167.1 keeps these retired flags enabled despite false overrides.
   // Its local Responses fixture verifies that neither exposes a model tool.
-  const retired = feature => feature.stage === "removed"
+  const retired = feature => runtimeVersion === "0.167.1" && feature.stage === "removed"
     && ["worktrees", "realtime_conversation"].includes(feature.name);
   // unified_exec can also stay enabled in the inventory. With shell_tool
   // disabled, Codex does not expose the execution tools.
@@ -84,23 +84,23 @@ function codexApprovalPolicy(policy) {
   return policy === "on-failure" ? "on-request" : policy;
 }
 
-function approvalsReviewer(mode, requiresUserApproval) {
-  if (requiresUserApproval) return "user";
+function approvalsReviewer(mode, fixedReviewer) {
+  if (fixedReviewer) return fixedReviewer;
   return mode == null ? undefined : mode === "auto-review" ? "auto_review" : "user";
 }
 
-function assertApprovalsReviewer(mode, requiresUserApproval, permission, response) {
-  if ((requiresUserApproval || mode === "auto-review")
+function assertApprovalsReviewer(mode, fixedReviewer, permission, response) {
+  if ((fixedReviewer || mode === "auto-review")
     && response?.approvalsReviewer !== permission.approvalsReviewer) {
     throw adapterError("RUNTIME_APPROVAL_UNAVAILABLE", "Codex did not confirm the requested approval reviewer");
   }
 }
 
-function permissionParams(policy, mode, requiresUserApproval) {
+function permissionParams(policy, mode, fixedReviewer) {
   return definedProperties({
     approvalPolicy: codexApprovalPolicy(policy?.approvalPolicy),
     sandbox: policy?.sandbox,
-    approvalsReviewer: approvalsReviewer(mode, requiresUserApproval),
+    approvalsReviewer: approvalsReviewer(mode, fixedReviewer),
   });
 }
 
@@ -131,6 +131,7 @@ class CodexRuntimeHandle {
     this.runtimeAccountId = binding.runtimeAccountId;
     this.capabilities = CODEX_CAPABILITIES;
     this.host = host;
+    this.usesTurnSendGuard = host.usesRpcSendGuard === true;
     this.secretGateway = secretGateway;
     this.secretRoutes = new Map();
     Promise.resolve(host.terminated).finally(() => {
@@ -139,7 +140,7 @@ class CodexRuntimeHandle {
     }).catch(() => {});
     this.sessionInstructions = new Map();
     // Provider kind each native thread was started or resumed on.
-    this.threadProviderKinds = new Map();
+    this.threadProviders = new Map();
     this.modelOnlySessions = new Set();
     this.compactionCycles = new Map();
     this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
@@ -230,14 +231,21 @@ class CodexRuntimeHandle {
   }
 
   async sessionStart(input) {
-    if (input.isolatedGeneration && input.persistent !== false) {
-      throw adapterError("MODEL_ONLY_SESSION_INVALID", "Isolated generation requires an ephemeral thread");
+    if (input.isolatedGeneration && (input.persistent !== false || input.proactiveReview)) {
+      throw adapterError("MODEL_ONLY_SESSION_INVALID", "Isolated generation requires a dedicated ephemeral thread");
+    }
+    // Codex 0.159.2 advertises its native request_user_input tool even when
+    // the feature and MCP inventories pass the isolated generation checks.
+    if (input.isolatedGeneration && this.host.runtimeVersion === "0.159.2") {
+      throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "This Codex version exposes a native tool during isolated generation");
     }
     const reviewConfig = input.proactiveReview ? await this._proactiveReviewConfig()
       : input.isolatedGeneration ? await this._isolatedGenerationConfig() : undefined;
     const secretConfig = await this._modelSecretConfig(input);
     const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
-    const permission = permissionParams(input.permissionPolicy, input.permissionMode, this.host.requiresUserApproval);
+    const fixedReviewer = this._providerApprovalReviewer(input.modelProvider?.configId);
+    const permission = permissionParams(input.permissionPolicy, input.permissionMode, fixedReviewer);
+    this.assertExecutionProviderCurrent();
     const response = await this._sessionStartOrResumeRequest(() => this.host.threadStart(definedProperties({
       threadSource: input.source,
       ephemeral: input.persistent === undefined ? undefined : !input.persistent,
@@ -248,8 +256,8 @@ class CodexRuntimeHandle {
         ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig } } : {}),
       ...permission,
     })));
+    assertApprovalsReviewer(input.permissionMode, fixedReviewer, permission, response);
     this._rememberThreadProvider(response?.thread?.id, input);
-    assertApprovalsReviewer(input.permissionMode, this.host.requiresUserApproval, permission, response);
     if (typeof input.developerInstructions === "string") {
       this.sessionInstructions.set(response.thread.id, {
         current: input.developerInstructions, applied: input.developerInstructions,
@@ -278,10 +286,15 @@ class CodexRuntimeHandle {
   }
 
   async sessionResume(input) {
+    if (input.isolatedGeneration) {
+      throw adapterError("MODEL_ONLY_SESSION_INVALID", "Isolated generation cannot resume an existing thread");
+    }
     const reviewConfig = input.proactiveReview ? await this._proactiveReviewConfig() : undefined;
     const secretConfig = await this._modelSecretConfig(input);
     const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
-    const permission = permissionParams(input.permissionPolicy, input.permissionMode, this.host.requiresUserApproval);
+    const fixedReviewer = this._providerApprovalReviewer(input.modelProvider?.configId);
+    const permission = permissionParams(input.permissionPolicy, input.permissionMode, fixedReviewer);
+    this.assertExecutionProviderCurrent();
     const response = await this._sessionStartOrResumeRequest(() => this.host.threadResume(definedProperties({
       threadId: input.sessionId,
       excludeTurns: true,
@@ -292,8 +305,8 @@ class CodexRuntimeHandle {
         ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig } } : {}),
       ...permission,
     })));
+    assertApprovalsReviewer(input.permissionMode, fixedReviewer, permission, response);
     this._rememberThreadProvider(input.sessionId, input);
-    assertApprovalsReviewer(input.permissionMode, this.host.requiresUserApproval, permission, response);
     if (typeof input.developerInstructions === "string") {
       const previous = this.sessionInstructions.get(response.thread.id);
       this.sessionInstructions.set(response.thread.id, {
@@ -329,6 +342,9 @@ class CodexRuntimeHandle {
       || !/^(?:openai|amazon-bedrock|shoggoth_[0-9a-f]{16})$/u.test(selected.configId)) {
       throw adapterError("RUNTIME_PROTOCOL_INVALID", "Model provider selection is invalid");
     }
+    if (this.host.modelCatalog && this.host.providerCapabilities?.providerConfigId !== selected.configId) {
+      throw adapterError("EXECUTION_CONTRACT_STALE", "The model catalog belongs to a different execution provider");
+    }
     return selected.kind;
   }
 
@@ -344,9 +360,17 @@ class CodexRuntimeHandle {
 
   _rememberThreadProvider(threadId, input) {
     if (typeof threadId !== "string" || input?.modelProvider === undefined) return;
-    this.threadProviderKinds.delete(threadId);
-    this.threadProviderKinds.set(threadId, input.modelProvider.kind);
-    while (this.threadProviderKinds.size > 4096) this.threadProviderKinds.delete(this.threadProviderKinds.keys().next().value);
+    this.threadProviders.delete(threadId);
+    this.threadProviders.set(threadId, Object.freeze({ ...input.modelProvider }));
+    while (this.threadProviders.size > 4096) this.threadProviders.delete(this.threadProviders.keys().next().value);
+  }
+
+  _providerApprovalReviewer(configId) {
+    const capabilities = this.host.providerCapabilities;
+    if (this._namesProviderRequired() && this.host.runtimeEnvironment?.installationKind === "bundled"
+      && capabilities?.approvalReviewer === "user"
+      && (configId === undefined || capabilities.providerConfigId === configId)) return "user";
+    return undefined;
   }
 
   async _modelSecretConfig(input) {
@@ -467,7 +491,8 @@ class CodexRuntimeHandle {
       throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime did not confirm restricted sandbox and MCP binding policy");
     }
     const threadId = response.thread.id, features = await this._proactiveFeatures(threadId, { allowDottedNames: true });
-    if (!hasIsolatedFeatures(features)) {
+    this.host.assertRuntimeIdentityCurrent?.();
+    if (!hasIsolatedFeatures(features, this.host.runtimeVersion)) {
       throw adapterError("PROACTIVE_RUNTIME_UNVERIFIED", "Runtime has an enabled feature outside the review scope");
     }
     const result = await this.host.mcpServerStatusList({ threadId, cursor: null, limit: 100, detail: "toolsAndAuthOnly" });
@@ -506,7 +531,8 @@ class CodexRuntimeHandle {
     let features;
     try { features = await this._proactiveFeatures(threadId, { allowDottedNames: true }); }
     catch { throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "Runtime feature inventory is unavailable"); }
-    if (!hasIsolatedFeatures(features)) {
+    this.host.assertRuntimeIdentityCurrent?.();
+    if (!hasIsolatedFeatures(features, this.host.runtimeVersion)) {
       throw adapterError("RUNTIME_ISOLATION_UNVERIFIED", "Runtime has an enabled tool feature");
     }
     // Codex 0.149 omits disabled servers; 0.159 lists them as disabled with no tools.
@@ -570,7 +596,8 @@ class CodexRuntimeHandle {
   sessionDelete(input) { return this.host.threadDelete({ threadId: input.sessionId }); }
 
   async turnStart(input) {
-    if (this._namesProviderRequired() && !this.threadProviderKinds.has(input.sessionId)) {
+    const provider = this.threadProviders.get(input.sessionId);
+    if (this._namesProviderRequired() && !provider) {
       throw adapterError("RUNTIME_MODEL_PROVIDER_REQUIRED", "Shoggoth model requests must specify a source");
     }
     const delivery = require("./native-instruction-delivery");
@@ -585,6 +612,9 @@ class CodexRuntimeHandle {
     const instructions = this.sessionInstructions.get(input.sessionId);
     const policyUpdate = instructions && instructions.current !== instructions.applied ? instructions.current : undefined;
     const items = [];
+    const sendOptions = phase => input.withTurnSendGuard ? { signal: input.signal,
+      withSendGuard: (submit, signal) => input.withTurnSendGuard(phase, submit, signal),
+      beforeSend: () => this.assertExecutionProviderCurrent() } : undefined;
     if (policyUpdate !== undefined) {
       // 0.149.0 accepts developerInstructions on resume but leaves model-visible
       // history unchanged. Append the current trusted policy before the next turn,
@@ -607,7 +637,7 @@ class CodexRuntimeHandle {
     // endpoints, OpenRouter, local servers, Bedrock) use their own settings;
     // their inherited effort carries no native override.
     if (effort === null && !["chatgpt", "openai-api-key"]
-      .includes(this.threadProviderKinds.get(input.sessionId) ?? this.host.modelProviderKind ?? "chatgpt")) {
+      .includes(provider?.kind ?? this.host.modelProviderKind ?? "chatgpt")) {
       effort = undefined;
     }
     if (effort === null) {
@@ -631,12 +661,14 @@ class CodexRuntimeHandle {
         type: "message", role: "user", content: [{ type: "input_text", text: plan.send.context }],
       });
     }
+    this.assertExecutionProviderCurrent();
     if (items.length) {
       // One ordered request preserves the separate authority of policy, Run
       // rules and untrusted context without a round trip for each block.
-      await this.host.threadInjectItems({ threadId: input.sessionId, items });
+      await this.host.threadInjectItems({ threadId: input.sessionId, items }, sendOptions("context"));
       if (policyUpdate !== undefined) instructions.applied = policyUpdate;
     }
+    this.assertExecutionProviderCurrent();
     const started = await this.host.turnStart({ ...definedProperties({
       threadId: input.sessionId,
       clientUserMessageId: input.operationId,
@@ -647,8 +679,8 @@ class CodexRuntimeHandle {
       effort,
       cwd: input.cwd,
       approvalPolicy: codexApprovalPolicy(input.permissionPolicy?.approvalPolicy),
-      approvalsReviewer: approvalsReviewer(input.permissionMode, this.host.requiresUserApproval),
-    }), ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}) });
+      approvalsReviewer: approvalsReviewer(input.permissionMode, this._providerApprovalReviewer(provider?.configId)),
+    }), ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}) }, sendOptions("turn"));
     plan.commit();
     return started;
   }

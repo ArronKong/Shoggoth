@@ -324,7 +324,7 @@ class TemporarySecretStore {
     this._commit(next);
     for (const item of pending) this.cache.set(item.row.id, Buffer.from(item.value));
   }
-  prepare({ scope: inputScope, operationId, text, selections = [], ordinary = [] }) {
+  prepare({ scope: inputScope, operationId, text, selections = [], ordinary = [] }, { persistUnchanged = true } = {}) {
     const scope = scopeOf(inputScope);
     if (!textValue(operationId, 2048) || !operationId || !textValue(text)) fail("SECRET_INPUT_INVALID");
     if (!Array.isArray(ordinary) || ordinary.length > 64 || ordinary.some(range => !plain(range)
@@ -339,13 +339,18 @@ class TemporarySecretStore {
         if (existing.fingerprint !== fingerprint && (text !== existing.text || selections.length || ordinary.length)) fail("SECRET_OPERATION_CONFLICT");
         return this._prepared(existing);
       }
-      if (Object.keys(this.state.operations).length >= MAX_OPERATIONS) fail("SECRET_PROCESSING_UNAVAILABLE");
       const pending = [];
       const ordinaryHashes = [];
       const safeText = await this._redact(text, scope, pending, selections, true, [], ordinary, ordinaryHashes);
       const operation = { scope, operationId, fingerprint, text: safeText, createdAt: this._time(),
         references: [...new Set(secretReferences(safeText).map(ref => ref.id))],
         ...(ordinaryHashes.length ? { ordinary: [...new Set(ordinaryHashes)], ordinaryExpiresAt: this.endOfDay(this._time()) } : {}) };
+      // The durable chat Inbox fingerprints unchanged input itself. Retain
+      // a vault receipt whenever preparation creates or depends on a reference,
+      // changes the text, or carries an explicit masking decision.
+      if (!persistUnchanged && safeText === text && !pending.length && !operation.references.length
+        && !selections.length && !ordinary.length) return this._prepared(operation);
+      if (Object.keys(this.state.operations).length >= MAX_OPERATIONS) fail("SECRET_PROCESSING_UNAVAILABLE");
       // A reference pasted from a different chat must not silently gain a new
       // owner during admission. An expired reference may remain in history.
       for (const id of operation.references) {

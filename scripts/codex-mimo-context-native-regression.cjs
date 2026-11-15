@@ -102,13 +102,15 @@ async function main() {
     const runtimeConfig = { provider };
     const startHost = async () => {
       host = new CodexRuntimeHost({ paths, repoRoot, runtimeBinding: binding, runtimeEnvironment, parentEnv,
-        prepareRuntime: async () => {
-          const configured = writer.overlay({ ...binding, runtimeConfig });
+        prepareRuntime: async ({ runtimeVersion }) => {
+          const configured = writer.overlay({ ...binding, runtimeConfig, runtimeVersion });
           return { ...configured, runtimeConfig, spawnEnv: {}, registeredSecrets: [],
             configArgs: [...configured.args.map(value => value.replace(provider.baseUrl, baseUrl)),
               "-c", "mcp_servers.shoggoth.enabled=false"] };
         } });
       await host.start();
+      assert.equal(host.modelCatalog?.runtimeVersion, host.runtimeVersion);
+      assert.equal(host.providerCapabilities?.approvalReviewer, "user");
       return new CodexRuntimeAdapter({ runtimePool: { get: async () => host } }).acquire(binding);
     };
     const params = { cwd: workspace, persistent: true, model: provider.model,

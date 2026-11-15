@@ -71,7 +71,7 @@ function fixture(t, { profiles = 8, sessionsPerProfile = 25, turns = 60 } = {}) 
     getRunSessionKey: run => run.sourceId, recallPolicy: policy, memoryStore, now: () => now });
   closers.push(() => recall.close());
   const memory = new ProductMemorySessions({ sessions, transcripts, recall,
-    database: { tombstones: () => [] }, assertProfile() {} });
+    database: { tombstones: () => [], hasSessionTombstone: () => false }, assertProfile() {} });
   const counters = { listSessions: 0, pages: 0 };
   const listSessions = sessions.listSessions.bind(sessions);
   sessions.listSessions = () => { counters.listSessions += 1; return listSessions(); };

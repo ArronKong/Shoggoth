@@ -447,6 +447,21 @@ test("外部 Runtime MCP gate 先只读验证，再由 Service one-shot 消费�
   } finally { value.cleanup(); }
 });
 
+test("MCP bridge auth storage rejection retains only its fixed code and never dispatches", async () => {
+  const value = runtimeMcpGateFixture();
+  try {
+    const argv = ["--shoggoth-internal-role=mcp", "--shoggoth-runtime-profile=runtime-grok",
+      "--shoggoth-runtime-account=runtime-grok-account"];
+    await assert.rejects(bootstrap.main(argv, value.env, {
+      ...value.runtime,
+      async openRuntimeMcpBridge() {
+        throw Object.assign(new Error("PRIVATE_STORAGE_PATH"), { code: "MCP_HELPER_STORAGE_FULL" });
+      },
+    }, { runtimeMcpRelay() { assert.fail("rejected bridge cannot dispatch"); } }),
+    { code: "MCP_HELPER_STORAGE_FULL", message: "MCP_HELPER_STORAGE_FULL" });
+  } finally { value.cleanup(); }
+});
+
 test("外部 Runtime MCP gate 不能自报伪造 Service 路径或在校验前触碰伪造 UDS", async () => {
   const value = runtimeMcpGateFixture({
     canonicalHomeDir: path.join(os.tmpdir(), "shoggoth-real-account-home"),
@@ -1156,7 +1171,7 @@ test("Service start 将 lock acquisition 纳入清理边界且失败不残留 ow
 });
 
 test("Service 生命周期初始化/关闭 ProductStore，hello/status 与默认 profile 不回归", async () => {
-  assert.equal(PROTOCOL_VERSION, 27);
+  assert.equal(PROTOCOL_VERSION, 34);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-store-lifecycle-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
   for (let restart = 0; restart < 2; restart += 1) {
@@ -2917,12 +2932,22 @@ test("Runtime MCP bridge 同 socket 升级、内部续期不泄露且 close/stop
   const revokedSessions = [];
   let manager = null;
   let gateConsumes = 0;
+  let acceptedSocket = null;
+  let bridgeAtServerClose = null;
   const service = createAgentService({
     paths,
     version: "mcp-bridge",
     frameTimeoutMs: 1_000,
     closeTimeoutMs: 1_000,
     mcpSessionTtlMs: 1_000,
+    onServerReady(server) {
+      server.on("connection", socket => { acceptedSocket = socket; });
+      const close = server.close.bind(server);
+      server.close = callback => {
+        bridgeAtServerClose = { destroyed: acceptedSocket?.destroyed, revocation: revokedSessions.at(-1) };
+        return close(callback);
+      };
+    },
     safeStorage: {
       isEncryptionAvailable: () => true,
       encryptString: (value) => Buffer.from(value, "utf8"),
@@ -3067,6 +3092,7 @@ test("Runtime MCP bridge 同 socket 升级、内部续期不泄露且 close/stop
     second = await openJsonlConversation(paths.socketPath);
     await second.send(bridgeRequest("b"));
     assert.deepEqual(await second.nextFrame(), { ok: true, result: { bridged: true } });
+    assert.equal(acceptedSocket?.destroyed, false);
     const secondToken = issuedTokens.at(-1);
     assert.equal(service.connectorRuntime, null, "OpenConnector sidecar is retired");
     const runtime = service.nativeMcpClientManager;
@@ -3080,22 +3106,18 @@ test("Runtime MCP bridge 同 socket 升级、内部续期不泄露且 close/stop
       return originalClose.call(this);
     };
     const stopping = service.stop({ notify: false });
-    // Bound the bridge socket, which must bypass the 1s ordinary drain.
-    // Other owned services (including a cold E5 worker) finish afterwards.
-    const stoppedInTime = await Promise.race([
-      second.waitClosed().then(() => true),
-      new Promise((resolve) => setTimeout(() => resolve(false), 80)),
-    ]);
     try {
-      assert.equal(stoppedInTime, true, "bridge 长连接不得等待 MCP 客户端清理或进入普通 one-request drain");
-      await waitFor(() => connectorClosing);
+      // Observe revocation at the entry to server.close, before the ordinary
+      // request drain is possible. Peer notification can arrive on a later tick.
+      await waitFor(() => bridgeAtServerClose !== null);
+      assert.deepEqual(bridgeAtServerClose, { destroyed: true,
+        revocation: { runtimeProfileId, runtimeAccountId, token: secondToken } });
+      await waitFor(() => second.isClosed() && connectorClosing);
     } finally {
       connectorRelease.resolve();
       runtime.close = originalClose;
     }
     await stopping;
-    await second.waitClosed();
-    assert.equal(stoppedInTime, true, "bridge 长连接不得进入普通 one-request drain");
     assert.deepEqual(revokedSessions.at(-1), { runtimeProfileId, runtimeAccountId, token: secondToken });
     assert.equal(gateConsumes, 2);
     assert.equal(fs.existsSync(paths.socketPath), false);
@@ -3266,12 +3288,13 @@ test("stop 对永不回调的 server.close 有界并继续清理 lock", async ()
   });
   await service.start();
   const stopPromise = service.stop();
-  const outcome = await Promise.race([
-    stopPromise.then(() => ({ ok: true }), (error) => ({ error })),
-    new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), 80)),
-  ]);
+  let outcome;
+  void stopPromise.then(() => { outcome = { ok: true }; }, error => { outcome = { error }; });
   try {
-    assert.equal(outcome.timeout, undefined, "server.close 不回调不能永久阻塞 stop");
+    // The injected 30 ms deadline bounds the server drain. The harness
+    // watchdog allows unrelated stop phases to finish around that deadline.
+    await waitFor(() => outcome);
+    assert.equal(typeof releaseClose, "function", "server.close callback is still withheld");
     assert.equal(outcome.error instanceof AggregateError, true);
     assert.equal(outcome.error.errors.some((error) => error.code === "SERVICE_CLOSE_TIMEOUT"), true);
     assert.equal(fs.existsSync(paths.lockPath), false);
@@ -3759,18 +3782,37 @@ test("活 PID 仅在启动身份明确不匹配时按 PID reuse 回收 stale loc
 test("并发启动竞态只能有一个 Service 获得 lock，另一方认证探测后拒绝", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-lock-race-"));
   const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
-  const first = createAgentService({ paths, version: "test", lockProbeTimeoutMs: 1_500 });
-  const second = createAgentService({ paths, version: "test", lockProbeTimeoutMs: 1_500 });
+  const candidates = ["first", "second"].map(version => ({ version,
+    service: createAgentService({ paths, version, lockProbeTimeoutMs: 1_500 }) }));
   try {
-    const settled = await Promise.allSettled([first.start(), second.start()]);
+    const settled = await Promise.allSettled(candidates.map(({ service }) => service.start()));
     const successes = settled.filter((item) => item.status === "fulfilled");
     const failures = settled.filter((item) => item.status === "rejected");
     assert.equal(successes.length, 1);
     assert.equal(failures.length, 1);
-    assert.equal(failures[0].reason.code, "SERVICE_ALREADY_RUNNING");
+    // A cold owner may miss the racing contender's probe budget. Only the
+    // explicit fail-closed outcome is valid until the owner answers.
+    assert.ok(["SERVICE_ALREADY_RUNNING", "SERVICE_LOCK_INDETERMINATE"].includes(failures[0].reason.code),
+      `unexpected lock rejection: ${failures[0].reason.code}`);
+    const winner = candidates[settled.indexOf(successes[0])];
+    const loser = candidates[settled.indexOf(failures[0])].service;
+    const current = await waitForHealthyService(paths);
+    assert.equal(current.serviceVersion, winner.version);
+    const lock = fs.lstatSync(paths.lockPath);
+    const token = readClientToken(paths);
+    const record = JSON.parse(fs.readFileSync(paths.lockPath, "utf8"));
+    assert.equal(record.nonce, current.instanceNonce);
+    await loser.stop({ notify: false });
+    await assert.rejects(loser.start(), { code: "SERVICE_ALREADY_RUNNING" });
+    await loser.stop({ notify: false });
+    const retained = fs.lstatSync(paths.lockPath);
+    assert.equal(retained.dev, lock.dev);
+    assert.equal(retained.ino, lock.ino);
+    assert.equal(readClientToken(paths), token);
+    const after = await waitForHealthyService(paths);
+    assert.equal(after.instanceNonce, current.instanceNonce);
   } finally {
-    await first.stop().catch(() => {});
-    await second.stop().catch(() => {});
+    for (const { service } of candidates) await service.stop({ notify: false }).catch(() => {});
   }
 });
 

@@ -413,6 +413,7 @@ test("Service 仅在真实 packaged 四条件成立时选择共享 selector 并�
       requestTimeoutMs: 60_000,
       termGraceMs: 123,
       killConfirmMs: 456,
+      persistent: true,
     });
     assert.equal(serviceOptions[0].cryptoBroker instanceof FakePackagedBroker, true);
     assert.equal(serviceOptions[0].mcpCryptoBroker, serviceOptions[0].cryptoBroker);

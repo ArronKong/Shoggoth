@@ -11,6 +11,7 @@ const { resolveServicePaths } = require("../app/agent-service/paths");
 const { readClientToken, requestService } = require("../app/agent-service/client");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { cronRunToActivity } = require("../app/core/dashboard-activity");
 const { validateContainer } = require("../app/agent-service/chat-session-store");
 const { WorkRunCoordinator } = require("../app/agent-service/work-run-coordinator");
 const { InspirationRuntime } = require("./fixtures/inspiration-runtime.cjs");
@@ -171,6 +172,50 @@ test("Dashboard reads the full report by run ID even when a scheduled run starts
   assert.equal((await ctx.backend.getCronRunResult(jobId, manual.id)).fullText, "随后手动运行的报告");
   const other = await ctx.create();
   assert.deepEqual(await ctx.backend.getCronRunResult(`shoggoth:${other.id}`, row.runId), { source: "none" });
+});
+
+test("Dashboard shows the saved provider reason for the exact failed cron occurrence", async (t) => {
+  const ctx = await fixture(t);
+  const job = await ctx.create("continue");
+  const code = "ANTIGRAVITY_REGION_UNSUPPORTED";
+  const reason = "User location is not supported for the API use.";
+  const fail = async (message) => {
+    const run = await ctx.running(await ctx.trigger(job));
+    const thread = ctx.host.threads.find(item => item.id === run.runtimeSessionRef.sessionId);
+    const turn = thread.turns.find(item => item.id === run.runtimeTurnRef.turnId);
+    turn.status = "failed";
+    turn.errorCode = code;
+    ctx.clock.value += 100;
+    ctx.host.emit({ known: true, type: "complete", method: "turn/completed", status: "failed",
+      threadId: thread.id, turnId: turn.id, failure: { message, httpStatus: 400, upstreamCode: "FAILED_PRECONDITION" } });
+    await until(() => ctx.service.workDispatcher.getRun(run.id).status === "failed");
+    ctx.clock.value += 100;
+    return run.id;
+  };
+  const earlier = await fail("An earlier request was blocked.");
+  const blocked = await fail(`${reason}\nAuthorization: Bearer unused-fixture-token`);
+  const legacy = await ctx.ipc("cron.run.list", { jobId: job.id, status: null, cursor: null, limit: 100 });
+  assert.ok(legacy.runs.every(item => item.failure === undefined));
+
+  const { runs } = await ctx.backend.getRecentCronRuns();
+  const activity = cronRunToActivity(runs.find(row => row.runId === blocked));
+  assert.equal(activity.severity, "error");
+  assert.ok(activity.summary.includes(reason), activity.summary);
+  assert.match(activity.summary, /HTTP 400 · FAILED_PRECONDITION/);
+  assert.match(activity.summary, /ANTIGRAVITY_REGION_UNSUPPORTED/);
+  assert.doesNotMatch(activity.summary, /unused-fixture-token|An earlier request/);
+  assert.match(runs.find(row => row.runId === earlier).error, /An earlier request was blocked/);
+
+  const requestPage = ctx.backend._domainPage.bind(ctx.backend);
+  ctx.backend._domainPage = async (method, params, ...args) => {
+    if (method === "cron.run.list" && Object.hasOwn(params, "failureSinceMs")) {
+      throw Object.assign(new Error("Legacy Service"), { code: "INVALID_PARAMS" });
+    }
+    return requestPage(method, params, ...args);
+  };
+  const fallback = (await ctx.backend.getRecentCronRuns()).runs.find(row => row.runId === blocked);
+  assert.match(fallback.error, /Google 模型接口不支持当前请求所在地区/);
+  assert.ok(!fallback.error.includes(reason));
 });
 
 test("silent cron keeps its audit but emits no chat history, delivery or terminal text", async (t) => {
@@ -359,6 +404,7 @@ test("direct Cron watches suppress only a whole repeated report across isolated 
   await ctx.service.stop({ notify: false });
   await ctx.service.start();
   await ctx.backend.start({ onSessionActivity: event => ctx.activities.push(event) });
+  await ctx.service.cronReportIndex.rebuild();
   const repeat = await ctx.complete(await ctx.trigger(orig), firstText);
   await ctx.service.nativeCronScheduler.waitForIdle(repeat.id);
   assert.notEqual(ctx.service.workRunCoordinator.getRunSessionKey(repeat), ctx.service.workRunCoordinator.getRunSessionKey(first));

@@ -144,6 +144,7 @@ function normalizeAccountLoginResponse(response) {
 
 class CodexRuntimeHost {
   constructor(options) {
+    this.usesRpcSendGuard = true;
     const ownedSpawnEnv = options.spawnEnv && typeof options.spawnEnv === "object"
       && !Array.isArray(options.spawnEnv) ? { ...options.spawnEnv } : options.spawnEnv;
     const ownedRegisteredSecrets = Array.isArray(options.registeredSecrets)
@@ -274,6 +275,7 @@ class CodexRuntimeHost {
         codexHome,
         configurationMode: this.runtimeEnvironment.configurationMode,
         executionContract: this.options.executionContract,
+        runtimeVersion: this.runtimeVersion,
       })
       : null;
     this._assertStartupCurrent(generation);
@@ -291,8 +293,12 @@ class CodexRuntimeHost {
     // would route a native custom provider through Shoggoth's OpenAI gateway.
     this.modelProviderKind = this.runtimeEnvironment.kind === "native-user"
       ? "native" : prepared?.runtimeConfig?.provider?.kind ?? "chatgpt";
-    this.requiresUserApproval = this.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
-      && prepared?.requiresUserApproval === true;
+    const bundledCodex = this.runtimeEnvironment.installationKind === "bundled"
+      && this.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID;
+    this.providerCapabilities = bundledCodex ? prepared?.providerCapabilities ?? null : null;
+    this.modelCatalog = bundledCodex && prepared?.modelCatalog?.runtimeVersion === this.runtimeVersion
+      ? prepared.modelCatalog : null;
+    this.providerConfigurationRevision = prepared?.executionProviderRoute?.provider?.providerRevision ?? null;
     if (prepared?.runtimeConfig?.provider
       && prepared.runtimeConfig.provider.kind !== "chatgpt") this.nativeAuthEligible = false;
     const explicitSpawnEnv = this.options.spawnEnv || {};
@@ -335,6 +341,7 @@ class CodexRuntimeHost {
       binding: this.binding, configArgs: prepared?.configArgs ?? [],
     }) ? prepared.mcpBootstrap : null;
     prepared?.assertCurrent?.();
+    this.assertRuntimeIdentityCurrent?.();
     this.assertExecutionProviderCurrent = prepared?.assertCurrent || (() => {});
     const child = this.spawnProcess(this.runtimeEnvironment.binaryPath, launchArgs, {
       cwd: runtimeCwd,

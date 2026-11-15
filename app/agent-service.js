@@ -20,6 +20,10 @@ const {
   prohibitBackgroundActivation,
 } = require("./background-role-activation");
 
+// The rollback package keeps the current durable formats and receipt API.
+// Its frozen source sets this mode before signing.
+const CHAT_RELIABILITY_COMPATIBILITY_BUILD = false;
+
 function createComputerImageTransformer(nativeImage) {
   if (!nativeImage || typeof nativeImage.createFromBuffer !== "function") return null;
   return async ({ data }) => {
@@ -247,6 +251,9 @@ async function startAgentService(options, paths, detachFailureHandler) {
   const service = createAgentService({
     paths,
     version: packageVersion,
+    ...(CHAT_RELIABILITY_COMPATIBILITY_BUILD
+      ? { pendingCommandWorkerWrites: false, chatPreparationConcurrency: 1 }
+      : {}),
     builtinCliProfiles: options.builtinCliProfiles ?? true,
     codexMemoryImport: options.codexMemoryImport ?? false,
     runtimePool: options.runtimePool,

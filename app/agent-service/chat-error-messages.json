@@ -128,6 +128,12 @@
     "PARTIAL": "本次运行可能已执行部分操作。重新运行前请先检查结果。"
   },
   "productContext": {
+    "CONTEXT_CONTINUATION_DETAILS_REQUIRED": "当前会话的原生历史只恢复了一部分。查看原文可发送「查看 [eventId=事件ID]」。继续执行可恢复完整历史，或发送结构化接续请求（首行 /continue-task，下一行填写本轮目标、限制、已选决定和依赖引用的 JSON）。",
+    "CONTEXT_CONTINUATION_SOURCE_UNAVAILABLE": "无法核验所引用的历史原文、附件或执行结果，请在本轮重新提供所需材料。",
+    "CONTEXT_CONTINUATION_SOURCE_TOO_LARGE": "引用的历史原文超过本轮接续容量，请缩小引用范围或在本轮提供相关片段。",
+    "CONTEXT_CONTINUATION_REVIEW_INTERRUPTED": "这次只读接续没有确认完成。请核对记录后重新提交需要回答的问题。",
+    "CONTEXT_SOURCE_STALE": "会话原文、记忆或引用的附件在执行前发生变化。请确认当前材料后重新提交。",
+    "CONTEXT_MEMORY_READ_UNAVAILABLE": "暂时无法验证本轮所需的记忆文件，请稍后重试。",
     "PRODUCT_CONTEXT_INVALID": "上下文请求或响应无效",
     "PRODUCT_CONTEXT_UNAVAILABLE": "请在 Agent 设置中配置可生成摘要的 Runtime",
     "PRODUCT_CONTEXT_DISABLED": "产品级上下文管理未启用",

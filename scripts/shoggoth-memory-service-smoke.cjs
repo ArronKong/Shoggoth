@@ -30,6 +30,64 @@ async function serviceFixture(t) {
   return { root, paths, open, close, isStopped: () => !service, profileId: DEFAULT_AGENT_PROFILE_ID };
 }
 
+test("foreground own-memory ranking and publication use the worker, including after an external edit", async t => {
+  const fixture = await serviceFixture(t), profileId = fixture.profileId;
+  const service = await fixture.open(true, { memoryCoreConfig: { memory: { search: { provider: "none" } } } });
+  const owner = service.memoryEngine, workspace = owner.store.workspace(profileId);
+  const memoryPath = path.join(workspace, "MEMORY.md");
+  const query = text => owner.searchOwnMemory({ profileId, workspace, query: text, record: false });
+  fs.writeFileSync(memoryPath, "# Memory\n\n- Scarlet sextant calibration marker.\n");
+  assert.ok((await query("scarlet sextant")).results.some(row => row.snippet.includes("Scarlet sextant")));
+  const hostStamp = owner.store._filesystemStamp;
+  owner.store._filesystemStamp = () => assert.fail("foreground ranking synchronously walked the memory file tree");
+  try {
+    assert.ok((await query("scarlet sextant")).results.some(row => row.snippet.includes("Scarlet sextant")));
+    fs.writeFileSync(memoryPath, "# Memory\n\n- Indigo prism calibration marker.\n");
+    const current = await query("indigo prism");
+    assert.ok(current.results.some(row => row.snippet.includes("Indigo prism")));
+    assert.ok(current.results.every(row => !row.snippet.includes("Scarlet sextant")));
+  } finally { owner.store._filesystemStamp = hostStamp; }
+});
+
+test("Service restart and context bootstrap verify fresh files without walking the memory tree on the owner thread", async t => {
+  const f = await serviceFixture(t), profileId = f.profileId;
+  const options = { memoryCoreConfig: { memory: { search: { provider: "none" } } } };
+  let service = await f.open(true, options);
+  const memoryPath = path.join(service.memoryStore.workspace(profileId), "MEMORY.md");
+  fs.writeFileSync(memoryPath, "# Memory\n\n- Initial amber calibration.\n");
+  await f.close();
+  const { FileMemoryStore } = require("../app/agent-service/shoggoth-memory/file-store.cjs");
+  const ownerWalk = t.mock.method(FileMemoryStore.prototype, "_filesystemStamp", () => {
+    assert.fail("Service startup or context compile walked the memory tree on the owner thread");
+  });
+  try {
+    service = await f.open(true, options);
+    const profile = service.productStore.resolveAgentRuntimeProfile(profileId);
+    const session = service.chatSessionStore.createSession({ profileId, workspace: f.root,
+      operationId: "worker-bootstrap-session", createdAt: Date.now() });
+    service.transcriptStore.ensureSession({ profileId, sessionId: session.id });
+    const input = { profile, run: { id: "worker-bootstrap", profileId, source: "chat", sourceId: session.sessionKey, workspace: f.root },
+      transcriptSessionId: session.id, query: "hello", preview: true };
+    const first = await service.contextCompiler.compileAsync(input);
+    assert.match(first.dynamicContext, /Initial amber calibration/u);
+    fs.writeFileSync(memoryPath, "# Memory\n\n- Corrected indigo calibration.\n");
+    const [firstRead, joinedRead] = await Promise.all([
+      service.contextCompiler.compileAsync(input), service.contextCompiler.compileAsync(input),
+    ]);
+    assert.match(firstRead.dynamicContext, /Corrected indigo calibration/u);
+    assert.doesNotMatch(firstRead.dynamicContext, /Initial amber/u);
+    assert.equal(joinedRead.dynamicContext, firstRead.dynamicContext);
+    const owner = service.memoryEngine, readFile = owner.store.readFile.bind(owner.store);
+    const lateEdit = t.mock.method(owner.store, "readFile", (id, relative) => {
+      if (relative === "MEMORY.md") fs.writeFileSync(memoryPath, "# Memory\n\n- Later scarlet calibration.\n");
+      return readFile(id, relative);
+    });
+    try { await assert.rejects(service.contextCompiler.compileAsync(input), { code: "CONTEXT_SOURCE_STALE" }); }
+    finally { lateEdit.mock.restore(); }
+    assert.match((await service.contextCompiler.compileAsync(input)).dynamicContext, /Later scarlet calibration/u);
+  } finally { ownerWalk.mock.restore(); }
+});
+
 test("stored-memory removal keeps a pending choice but blocks paraphrased resaving in the production owner", async t => {
   const f = await serviceFixture(t), profileId = f.profileId;
   let clock = Date.now();
@@ -313,6 +371,154 @@ function seedSession(f, service, { tag = "flush", workspace = path.join(f.root, 
   return { session, event, workspace };
 }
 
+test("Product startup transcript stats use one worker view for more than 64 sessions", async t => {
+  const f = await serviceFixture(t), profileId = f.profileId;
+  const service = await f.open(true, { memoryCoreConfig: { memory: { search: { enabled: false } } } });
+  const host = service.memoryEngine.host(profileId), store = service.memoryStore;
+  const workspace = path.join(f.root, "stats-chats");
+  const sessionsById = new Map(), runsById = new Map();
+  t.mock.method(service.chatSessionStore, "findSessionById", id => structuredClone(sessionsById.get(id) ?? null));
+  t.mock.property(host.sessions.recall, "runs", { getRun: id => runsById.get(id) ?? null });
+  const sessions = Array.from({ length: 65 }, (_, i) => {
+    const id = require("node:crypto").randomUUID(), runId = `startup-stats-${i}`;
+    const session = { id, profileId, sessionKey: id, workspace, status: "ready" };
+    const text = `Violet telescope calibration ${i}.`;
+    sessionsById.set(id, session);
+    runsById.set(runId, { id: runId, profileId, source: "chat", sourceId: id, workspace, status: "completed" });
+    const event = service.transcriptStore.appendEvent({ profileId, sessionId: id, id: `${runId}-user`, runId,
+      kind: "user", content: { text } });
+    return { session, event, text };
+  });
+  const targets = sessions.map(({ session }) => ({ agentId: profileId, sessionId: session.id, storePath: host.database.path }));
+  const last = sessions.at(-1), append = "The observation is complete.";
+  const startScan = store._scanSnapshot.bind(store), readView = store.withAsyncReadView.bind(store);
+  const { AsyncLocalStorage } = require("node:async_hooks");
+  const statsScope = new AsyncLocalStorage();
+  let scans = 0;
+  const scanSpy = t.mock.method(store, "_scanSnapshot", (...args) => {
+    if (statsScope.getStore()) scans++;
+    return startScan(...args);
+  });
+  const walk = store._filesystemStamp.bind(store);
+  const walkSpy = t.mock.method(store, "_filesystemStamp", (...args) => {
+    assert.ok(!statsScope.getStore(), "startup stats walked the memory tree on the Service thread");
+    return walk(...args);
+  });
+  const viewSpy = t.mock.method(store, "withAsyncReadView", (id, signal, read, scanSignal) => {
+    if (!statsScope.getStore()) return readView(id, signal, read, scanSignal);
+    return readView(id, signal, view => {
+      service.transcriptStore.appendEvent({ profileId, sessionId: last.session.id, id: "startup-stats-later",
+        runId: last.event.runId, kind: "assistant", content: { text: append } });
+      return read(view);
+    }, scanSignal);
+  });
+  try {
+    const capture = entries => statsScope.run(true, () => host.run(() => host.readMemoryTranscriptStatsInWorker(entries)));
+    assert.deepEqual(await capture([]), []);
+    await assert.rejects(capture([...targets, { ...targets[0], agentId: "foreign" }]), { code: "MEMORY_SCOPE_REVOKED" });
+    assert.equal(scans, 0);
+    const stats = await capture(targets);
+    assert.equal(scans, 1);
+    assert.deepEqual(stats, sessions.map(({ text }, i) => ({ eventCount: i === 64 ? 2 : 1,
+      maxSeq: i === 64 ? 2 : 1, sizeBytes: Buffer.byteLength(`User: ${text}${i === 64 ? `\nAssistant: ${append}` : ""}`) })));
+  } finally { viewSpy.mock.restore(); walkSpy.mock.restore(); scanSpy.mock.restore(); }
+});
+
+test("Product startup transcript stats reject withdrawn or changed sources and preserve the capacity fallback", async t => {
+  const f = await serviceFixture(t), profileId = f.profileId;
+  const service = await f.open(true, { memoryCoreConfig: { memory: { search: { enabled: false } } } });
+  const { session } = seedSession(f, service);
+  const host = service.memoryEngine.host(profileId), store = service.memoryStore;
+  const targets = [{ agentId: profileId, sessionId: session.id, storePath: host.database.path }];
+  const capture = () => host.run(() => host.readMemoryTranscriptStatsInWorker(targets));
+  const readView = store.withAsyncReadView.bind(store);
+  const expected = [{ eventCount: 1, maxSeq: 1, sizeBytes: Buffer.byteLength("User: I prefer amber telescope calibration every evening.") }];
+  assert.deepEqual(await capture(), expected);
+  let failure = "MEMORY_SCAN_TOO_LARGE";
+  const unavailable = t.mock.method(store, "withAsyncReadView", async () => {
+    throw Object.assign(new Error(failure), { code: failure });
+  });
+  const syncView = store.withReadView.bind(store);
+  const syncSpy = t.mock.method(store, "withReadView", (...args) => syncView(...args));
+  try {
+    assert.deepEqual(await capture(), expected);
+    assert.equal(syncSpy.mock.callCount(), 1);
+    failure = "MEMORY_SCAN_UNAVAILABLE";
+    await assert.rejects(capture(), { code: failure });
+    assert.equal(syncSpy.mock.callCount(), 1);
+  } finally { unavailable.mock.restore(); syncSpy.mock.restore(); }
+  const memoryPath = path.join(store.workspace(profileId), "MEMORY.md");
+  const edit = t.mock.method(store, "withAsyncReadView", (id, signal, read, scanSignal) => readView(id, signal, view => {
+    fs.writeFileSync(memoryPath, "# Memory\n\n- Edited after the worker scan.\n", { mode: 0o600 });
+    return read(view);
+  }, scanSignal));
+  try { await assert.rejects(capture(), { code: "MEMORY_REVISION_CONFLICT" }); }
+  finally { edit.mock.restore(); }
+  const withdraw = t.mock.method(store, "withAsyncReadView", (id, signal, read, scanSignal) => readView(id, signal, view => {
+    host.database.db.prepare("INSERT INTO memory_session_tombstones (session_id, agent_id, reason, created_at) VALUES (?, ?, ?, ?)")
+      .run(session.id, profileId, "test-withdrawal", Date.now());
+    return read(view);
+  }, scanSignal));
+  try { await assert.rejects(capture(), { code: "MEMORY_SESSION_REVOKED" }); }
+  finally { withdraw.mock.restore(); }
+});
+
+test("native startup observer consumes one Product projection after a recall authority change", async t => {
+  const f = await serviceFixture(t), profileId = f.profileId;
+  const memoryCoreConfig = { memory: { search: { provider: "none", sources: ["sessions"] } } };
+  const service = await f.open(true, { memoryCoreConfig });
+  const { session, event } = seedSession(f, service);
+  const host = service.memoryEngine.host(profileId), store = service.memoryStore, index = host.searchIndex;
+  // Prepare the real native observer without doing the normal initial index
+  // pass. Hold its eventual sync so only the startup acquisition is measured.
+  index.open();
+  const { resolved, stamp } = index.resolveSettings();
+  index.settings = { ...index.settings, ...resolved };
+  await host.run(() => index.configureIndex(resolved, stamp));
+  const owner = index.searchOwner, built = host.buildSessionEntry.bind(host), stat = host.statSessionEntrySync.bind(host);
+  const buildSpy = t.mock.method(host, "buildSessionEntry", (...args) => built(...args));
+  const statSpy = t.mock.method(host, "statSessionEntrySync", (...args) => stat(...args));
+  const read = host.sessions.read.bind(host.sessions);
+  const readSpy = t.mock.method(host.sessions, "read", (...args) => read(...args));
+  const readView = store.withAsyncReadView.bind(store);
+  const captureView = t.mock.method(store, "withAsyncReadView", (id, signal, callback, scanSignal) => {
+    return readView(id, signal, view => {
+      service.transcriptStore.setContextExcluded({ profileId, sessionId: session.id, eventId: event.id, contextExcluded: true });
+      return callback(view);
+    }, scanSignal);
+  });
+  const capture = host.readMemoryTranscriptStatsInWorker.bind(host);
+  const syncReasons = [];
+  let states, finishStartup;
+  const started = new Promise(resolve => { finishStartup = resolve; });
+  const captureSpy = t.mock.method(host, "readMemoryTranscriptStatsInWorker", async (...args) => {
+    states = await capture(...args);
+    return states;
+  });
+  const runStartup = owner.runSessionStartupCatchup.bind(owner);
+  const startupSpy = t.mock.method(owner, "runSessionStartupCatchup", async () => {
+    try { return await runStartup(); }
+    finally { finishStartup(); }
+  });
+  const syncSpy = t.mock.method(owner, "sync", async ({ reason }) => { syncReasons.push(reason); });
+  try {
+    owner.startBackground();
+    await started;
+    const absPath = path.join(host.workspaceDir, ".session-source", session.id);
+    assert.equal(buildSpy.mock.callCount(), 0);
+    assert.equal(statSpy.mock.callCount(), 0);
+    assert.equal(readSpy.mock.callCount(), 1);
+    assert.deepEqual(states, { startupStates: [{ absPath, path: index.sessionPath(session.id), mtimeMs: service.chatSessionStore.getSession(session.sessionKey).updatedAt,
+      size: 0, revisionMs: service.transcriptStore.getRevision(profileId, session.id) }] });
+    assert.equal(owner.startupContentRechecked, true);
+    assert.ok(owner.sessionsDirtyFiles.has(absPath));
+    assert.deepEqual(syncReasons, ["session-startup-catchup"]);
+  } finally {
+    syncSpy.mock.restore(); startupSpy.mock.restore(); captureSpy.mock.restore(); captureView.mock.restore();
+    readSpy.mock.restore(); statSpy.mock.restore(); buildSpy.mock.restore();
+  }
+});
+
 test("upstream source policy indexes private sessions without adding them to ordinary default searches", async t => {
   const f = await serviceFixture(t), profileId = f.profileId, memoryCoreConfig = {};
   const service = await f.open(true, { memoryCoreConfig }), owner = service.memoryEngine;
@@ -399,6 +605,29 @@ test("configuration or session revocation during embedding never publishes the s
   await assert.rejects(owner.searchMemory(input), { code: "MEMORY_REVISION_CONFLICT" });
   assert.equal(index.db.prepare("SELECT count(*) AS n FROM memory_index_chunks WHERE source='sessions'").get().n, 0);
   assert.equal(index.db.prepare("SELECT count(*) AS n FROM memory_embedding_cache").get().n, 0);
+});
+
+test("own memory search drops a ranked result when its source is reindexed during the final scan", async t => {
+  const f = await serviceFixture(t), profileId = f.profileId;
+  const library = path.join(f.root, "reference.md"), workspace = path.join(f.root, "working");
+  fs.mkdirSync(workspace, { mode: 0o700 });
+  fs.writeFileSync(library, "The quartz telescope is stored by the old observatory.\n", { mode: 0o600 });
+  const service = await f.open(true, { memoryCoreConfig: { memory: { search: { provider: "none", extraPaths: [library] } } } });
+  const owner = service.memoryEngine, input = { profileId, workspace, query: "quartz telescope", minScore: 0, record: false };
+  const index = owner.host(profileId).searchIndex;
+  const previous = await owner.searchOwnMemory(input);
+  assert.ok(previous.results.some(result => result.snippet.includes("old observatory")), "source is ranked before the scan");
+  const original = owner.store.withAsyncReadView.bind(owner.store);
+  const ranked = index.search.bind(index);
+  const replace = t.mock.method(index, "search", async (...args) => {
+    const originalCandidates = await ranked(...args);
+    replace.mock.restore();
+    fs.writeFileSync(library, "The quartz telescope is stored by the new observatory.\n");
+    await index.sync();
+    return originalCandidates;
+  });
+  assert.deepEqual((await owner.searchOwnMemory(input)).results, [], "the newly indexed hash cannot authorize an old snippet");
+  assert.ok((await owner.searchOwnMemory(input)).results.some(result => result.snippet.includes("new observatory")));
 });
 
 test("pre-compaction flush appends only a daily file, survives restart, and stops exposing revoked source", async t => {
@@ -585,8 +814,11 @@ test("failed flush is not replayed and a model cannot overwrite core files", asy
   const before = service.memoryEngine.readCanonical(profileId, "MEMORY").content;
   service.memoryEngine.complete = async () => { calls++; return { text: JSON.stringify({ path: "MEMORY.md", append: "replace everything" }) }; };
   const input = { profileId, sessionId: session.id };
-  await assert.rejects(service.memoryEngine.flushBeforeCompaction(input), { code: "MEMORY_FLUSH_OUTPUT_INVALID" });
-  assert.equal((await service.memoryEngine.flushBeforeCompaction(input)).status, "failed"); assert.equal(calls, 1);
+  const result = await service.memoryEngine.flushBeforeCompaction(input);
+  assert.equal(result.error, "MEMORY_FLUSH_OUTPUT_INVALID");
+  assert.equal(result.outcome, "failed-optional");
+  assert.deepEqual(await service.memoryEngine.flushBeforeCompaction(input), result);
+  assert.equal(calls, 1);
   assert.equal(service.memoryEngine.readCanonical(profileId, "MEMORY").content, before);
 });
 
@@ -724,6 +956,36 @@ test("Active Memory strong triggers avoid a model call, and malformed project an
   const result = service.memoryEngine.takeActiveMemory(input);
   assert.match(result.content, /concise commit descriptions/);
   assert.ok(service.memoryEngine.bootstrap({ profileId, workspace: null, mainSession: true, maxSensitivity: "private" }).memory.every(file => !file.text.includes("secret project note")));
+});
+
+test("Active Memory cancels an initial worker wait at the setup deadline", async t => {
+  const f = await serviceFixture(t), profileId = f.profileId;
+  const config = { plugins: { entries: { "active-memory": { enabled: true,
+    config: { agents: [profileId], mode: "always", timeoutMs: 1000, setupGraceTimeoutMs: 0 } } } } };
+  const service = await f.open(true, { memoryCoreConfig: config }), owner = service.memoryEngine;
+  const input = { profile: { id: profileId }, run: { id: "setup-worker-deadline", profileId, source: "chat",
+    sourceId: createRecallSession(service), workspace: null }, query: "Recall the telescope" };
+  let acquired = false;
+  const model = t.mock.method(owner, "complete", async () => assert.fail("expired setup started a model call"));
+  const blocked = t.mock.method(owner, "withAsyncMemoryReadView", async (id, signal, _read, scanSignal) => {
+    assert.equal(id, profileId);
+    assert.equal(signal.aborted, false);
+    assert.ok(scanSignal instanceof AbortSignal);
+    await new Promise(resolve => {
+      const keepAlive = setTimeout(resolve, 2500);
+      scanSignal.addEventListener("abort", () => { clearTimeout(keepAlive); resolve(); }, { once: true });
+    });
+    assert.equal(scanSignal.reason.name, "TimeoutError");
+    acquired = true;
+    scanSignal.throwIfAborted();
+  });
+  try {
+    await owner.prepareActiveMemory(input);
+    assert.equal(acquired, true);
+    assert.equal(owner.takeActiveMemory(input), null);
+    assert.equal(model.mock.callCount(), 0);
+    await owner.finishActiveMemoryRun(input.run);
+  } finally { blocked.mock.restore(); model.mock.restore(); }
 });
 
 test("native hook treats an empty Agent allowlist separately from private transcript recall and never caches private summaries across turns", async t => {
@@ -1075,9 +1337,33 @@ test("new owner works through REST file view, MCP file/search/save, and actual C
   assert.match(read.file.content, /Nightly amber telescope/); assert.equal(read.file.readOnly, false);
   // The settings page saves the file memory source through the same REST route.
   const editedText = read.file.content + "\nThe dome motor needs oil every spring.\n";
-  const put = await fetch(`${url}/file?file=MEMORY.md&backend=shoggoth`, { method: "PUT", headers: { "Content-Type": "application/json", Origin: new URL(f.url).origin },
-    body: JSON.stringify({ content: editedText, expectedRevision: read.file.revision }) });
+  const blockWalk = ({ allowIndexCapture = false } = {}) => {
+    const store = service.memoryStore, read = store._filesystemStamp.bind(store);
+    const violations = [];
+    const spy = t.mock.method(store, "_filesystemStamp", (...args) => {
+      const limit = Error.stackTraceLimit;
+      Error.stackTraceLimit = 30;
+      const { stack } = new Error("ordinary memory write synchronously walked the profile tree");
+      Error.stackTraceLimit = limit;
+      // Recall-policy notifications also wake the independent index owner.
+      // Let its existing transcript capture finish while checking this response.
+      const productIndexSource = /ProductMemorySessions\.(?:stamp|read|sourceEpoch)\b/u.test(stack)
+        && /MemorySearchIndex\.readIndexedSource\b|ShoggothMemoryHost\.(?:buildSessionEntry|statSessionEntrySync|readMemoryTranscriptStatsInWorker)\b/u.test(stack);
+      const conversationWarmup = /RecallPolicyStore\.getHistoricalVisibilityRevision\b/u.test(stack)
+        && /ConversationRecallService\.prebuildProfile\b|conversation-recall-index\.js|native-memory-semantic-service\.js/u.test(stack);
+      if (!allowIndexCapture || (!productIndexSource && !conversationWarmup)) violations.push(stack);
+      return read(...args);
+    });
+    return { restore: () => spy.mock.restore(), violations };
+  };
+  let put;
+  const documentWalk = blockWalk();
+  try {
+    put = await fetch(`${url}/file?file=MEMORY.md&backend=shoggoth`, { method: "PUT", headers: { "Content-Type": "application/json", Origin: new URL(f.url).origin },
+      body: JSON.stringify({ content: editedText, expectedRevision: read.file.revision }) });
+  } finally { documentWalk.restore(); }
   assert.equal(put.status, 200, await put.clone().text());
+  assert.deepEqual(documentWalk.violations, []);
   const reread = await (await fetch(`${url}/file?file=MEMORY.md&backend=shoggoth`)).json();
   assert.equal(reread.file.content, editedText); assert.equal((await put.json()).result.fileRevision, reread.file.revision);
   const stale = await fetch(`${url}/file?file=MEMORY.md&backend=shoggoth`, { method: "PUT", headers: { "Content-Type": "application/json", Origin: new URL(f.url).origin },
@@ -1095,13 +1381,61 @@ test("new owner works through REST file view, MCP file/search/save, and actual C
     kanbanRunService: { requestCompletionFromAgent: noop }, cronStore: { getJob: noop }, workDispatcher: { getRun: id => id === run.id ? run : null },
     getRuntimeContext: () => ({ source: run.source, sourceId: run.sourceId, profileId, runId: run.id }),
     notificationSender: noop, isSensitiveValue: () => false, artifactRoot: f.root });
-  const call = (name, args) => controller.handle(name, { source: "chat", sourceId: session.sessionKey, ...args }, { profileId, callId: require("node:crypto").randomUUID() });
+  const call = (name, args, callId = require("node:crypto").randomUUID()) =>
+    controller.handle(name, { source: "chat", sourceId: session.sessionKey, ...args }, { profileId, callId });
   const file = await call("memory_get", { path: "MEMORY.md", from: 1, lines: 100 });
   assert.match(file.text, /Nightly amber telescope/);
   const found = await call("memory_search", { query: "amber telescope", minScore: 0 });
   assert.ok(found.results.some(result => result.path === "MEMORY.md"));
   assert.ok(found.items.every(item => !Object.hasOwn(item, "sourceEvidence") && !Object.hasOwn(item, "memoryPath")));
   assert.ok(found.results.every(item => Object.values(item).every(value => value !== undefined)));
+  const memoryPath = path.join(service.memoryStore.workspace(profileId), "MEMORY.md");
+  const originalProject = controller.secretExecution, originalScope = controller.getSecretScope;
+  const replaceDuringProjection = (target, replacement, afterWrite) => {
+    controller.getSecretScope = () => null;
+    controller.secretExecution = { async projectForModel(_scope, value) {
+      await Promise.resolve();
+      fs.writeFileSync(target, replacement);
+      await afterWrite?.();
+      return value;
+    } };
+  };
+  try {
+    replaceDuringProjection(memoryPath, editedText.replace("amber telescope", "indigo telescope"));
+    await assert.rejects(call("memory_get", { path: "MEMORY.md", from: 1, lines: 100 }), { code: "MCP_TOOL_STATE_CONFLICT" });
+  } finally {
+    fs.writeFileSync(memoryPath, editedText);
+    controller.secretExecution = originalProject;
+    controller.getSecretScope = originalScope;
+  }
+  const expectedList = await service.agentHarnessServiceController.handle("harness.memory.list", {
+    profileId, status: "active", scope: null, cursor: 0, limit: 20,
+  });
+  const noted = expectedList.items.find(item => item.content.includes("amber telescope"));
+  assert.ok(noted);
+  assert.ok(expectedList.items.length > 1);
+  const copyAll = t.mock.method(service.memoryStore, "_listSnapshot", () => assert.fail("memory page cloned the full projection"));
+  try {
+    for (const cursor of [0, 1, expectedList.items.length]) {
+      const page = await service.agentHarnessServiceController.handle("harness.memory.list", {
+        profileId, status: "active", scope: null, cursor, limit: 1,
+      });
+      const items = expectedList.items.slice(cursor, cursor + 1);
+      assert.deepEqual(page.items, items);
+      assert.equal(page.nextCursor, cursor + items.length);
+      assert.equal(page.hasMore, page.nextCursor < expectedList.items.length);
+    }
+  } finally { copyAll.mock.restore(); }
+  const walk = t.mock.method(service.memoryStore, "_filesystemStamp", () => assert.fail("read walked the memory tree on the Service thread"));
+  try {
+    assert.equal((await service.agentHarnessServiceController.handle("harness.memory.explain", { profileId, id: noted.id })).item.id, noted.id);
+    assert.ok((await service.agentHarnessServiceController.handle("harness.memory.list", {
+      profileId, status: "active", scope: null, cursor: 0, limit: 20,
+    })).items.some(item => item.id === noted.id));
+    assert.match((await call("memory_get", { path: "MEMORY.md", from: 1, lines: 100 })).text, /Nightly amber telescope/);
+    assert.equal((await call("memory_get", { id: noted.id })).item.id, noted.id);
+    assert.equal((await call("memory_explain", { id: noted.id })).item.id, noted.id);
+  } finally { walk.mock.restore(); }
   memoryCoreConfig.memory = { search: { sources: ["sessions"] } };
   const transcript = await call("memory_search", { query: "amber telescope", minScore: 0 });
   assert.ok(transcript.results.some(result => result.source === "sessions" && result.path === `sessions/${profileId}/${session.id}.jsonl`));
@@ -1114,8 +1448,21 @@ test("new owner works through REST file view, MCP file/search/save, and actual C
   const relative = service.memoryEngine.host(profileId).searchIndex.sourceFiles.relative(appendix);
   const appendixRead = await call("memory_get", { path: relative, from: 2, lines: 1 });
   assert.equal(appendixRead.text, "Violet nebula library appendix."); assert.deepEqual(appendixRead.items, []);
-  const appendixSearch = await call("memory_search", { query: "violet nebula", minScore: 0 });
-  assert.ok(appendixSearch.results.some(result => result.path === relative)); assert.deepEqual(appendixSearch.items, []);
+  const stage = t.mock.method(memory, "stagePublishedSearch");
+  try {
+    const appendixSearch = await call("memory_search", { query: "violet nebula", minScore: 0 });
+    assert.ok(appendixSearch.results.some(result => result.path === relative)); assert.deepEqual(appendixSearch.items, []);
+    assert.equal(stage.mock.callCount(), 1);
+    replaceDuringProjection(appendix, libraryText.replace("Violet", "Indigo"),
+      () => service.memoryEngine.host(profileId).searchIndex.sync());
+    await assert.rejects(call("memory_search", { query: "violet nebula", minScore: 0 }), { code: "MCP_TOOL_STATE_CONFLICT" });
+    assert.equal(stage.mock.callCount(), 1, "a rejected search must not stage recall signals");
+  } finally {
+    stage.mock.restore();
+    fs.writeFileSync(appendix, libraryText);
+    controller.secretExecution = originalProject;
+    controller.getSecretScope = originalScope;
+  }
   const scoped = path.join(library, "scoped.md");
   fs.writeFileSync(scoped, "Scoped violet note. <!-- project: -->\nPrivate continuation must keep its project boundary.", { mode: 0o600 });
   await assert.rejects(call("memory_get", { path: service.memoryEngine.host(profileId).searchIndex.sourceFiles.relative(scoped), from: 2, lines: 1 }), { code: "MCP_TOOL_NOT_FOUND" });
@@ -1128,9 +1475,47 @@ test("new owner works through REST file view, MCP file/search/save, and actual C
   assert.ok(afterRemoval.results.every(result => result.path !== relative && !result.snippet.includes("Violet nebula library appendix")));
   assert.ok(!JSON.stringify(afterRemoval.items).includes("Violet nebula library appendix"));
   assert.equal(fs.readFileSync(appendix, "utf8"), libraryText);
-  const saved = await call("memory_save", { expectedRevision: service.memoryStore.getRevision(profileId), scope: "user", classification: "explicit",
-    sourceQuote: "I prefer amber telescope calibration every evening.", content: "I prefer amber telescope calibration every evening." });
+  const args = { expectedRevision: service.memoryStore.getRevision(profileId), scope: "user", classification: "explicit",
+    sourceQuote: "I prefer amber telescope calibration every evening.", content: "I prefer amber telescope calibration every evening." };
+  const callId = require("node:crypto").randomUUID();
+  const memoryWalk = blockWalk();
+  let saved;
+  try {
+    saved = await call("memory_save", args, callId);
+    assert.deepEqual(await call("memory_save", args, callId), saved, "exact replay preserves the durable receipt");
+  } finally { memoryWalk.restore(); }
   assert.equal(saved.saved, true);
+  assert.deepEqual(memoryWalk.violations, [], "provenance capture also runs under the view");
+
+  const store = service.memoryStore, scan = store.withAsyncReadView.bind(store);
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const hold = new Promise(resolve => { release = resolve; });
+  let firstReplayScan = true;
+  const slowScan = t.mock.method(store, "withAsyncReadView", async (...params) => {
+    if (firstReplayScan) {
+      firstReplayScan = false;
+      enter();
+      await hold;
+      throw Object.assign(new Error("projection changed while waiting"), { code: "MEMORY_REVISION_CONFLICT" });
+    }
+    return scan(...params);
+  });
+  const replayWalk = blockWalk();
+  try {
+    const waiting = call("memory_save", args, callId);
+    let delivered = false;
+    waiting.then(() => { delivered = true; enter(); }, () => { delivered = true; enter(); });
+    try {
+      await entered;
+      assert.ok(await f.ipc("service.status", {}));
+      assert.equal(delivered, false, "receipt delivery waits for the worker without blocking Service IPC");
+    } finally { release(); }
+    assert.deepEqual(await waiting, saved);
+    assert.ok(slowScan.mock.callCount() >= 2, "a stale worker projection is retried before a fallback");
+    assert.deepEqual(replayWalk.violations, []);
+  } finally { replayWalk.restore(); slowScan.mock.restore(); }
+
   const input = { profile: service.productStore.resolveAgentRuntimeProfile(profileId), run: { ...run, workspace }, transcriptSessionId: session.id, query: "hello" };
   await service.contextCompiler.prepareRelated(input);
   const snapshot = service.contextCompiler.compile(input);
@@ -1138,6 +1523,39 @@ test("new owner works through REST file view, MCP file/search/save, and actual C
   const other = service.productStore.listAgentProfiles().find(value => value.id !== profileId);
   assert.ok(!service.memoryEngine.readCanonical(other.id, "MEMORY").content.includes("Nightly amber"));
   await assert.rejects(call("memory_get", { path: "../USER.md" }), { code: "MCP_TOOL_PATH_INVALID" });
+
+  const forgetEvent = service.transcriptStore.appendEvent({ profileId, sessionId: session.id, id: "worker-write-forget",
+    runId: run.id, kind: "user", content: { text: "Forget the evening calibration preference." } });
+  const forgetArgs = { expectedRevision: service.memoryStore.getRevision(profileId), id: saved.item.id,
+    sourceQuote: forgetEvent.content.text };
+  const forgetCallId = require("node:crypto").randomUUID();
+  const forgetWalk = blockWalk({ allowIndexCapture: true });
+  try {
+    const forgotten = await call("memory_forget", forgetArgs, forgetCallId);
+    assert.deepEqual(forgotten.item, { id: saved.item.id, status: "deleted" });
+    assert.deepEqual(await call("memory_forget", forgetArgs, forgetCallId), forgotten);
+  } finally { forgetWalk.restore(); }
+  assert.deepEqual(forgetWalk.violations, []);
+
+  const outage = t.mock.method(store, "withAsyncReadView", async () => {
+    throw Object.assign(new Error("worker unavailable"), { code: "MEMORY_SCAN_UNAVAILABLE" });
+  });
+  try {
+    const replay = await call("memory_save", args, callId);
+    assert.equal(replay.saved, false);
+    assert.deepEqual(replay.item, { id: saved.item.id, status: "deleted" });
+  } finally { outage.mock.restore(); }
+
+  const list = { profileId, status: "active", scope: "agent", cursor: 0, limit: 10 };
+  const revision = (await f.ipc("harness.memory.list", list)).revision;
+  const editorWalk = blockWalk({ allowIndexCapture: true });
+  try {
+    const created = await f.ipc("harness.memory.create", { profileId, content: "Fixture observatory uses red safety lamps.", scope: "agent", expectedRevision: revision });
+    assert.ok(created.revision > revision);
+    const removed = await f.ipc("harness.memory.delete", { profileId, id: created.item.id, expectedRevision: created.revision });
+    assert.equal(removed.item.status, "deleted");
+  } finally { editorWalk.restore(); }
+  assert.deepEqual(editorWalk.violations, []);
 });
 
 test("a damaged recall ledger blocks only its Profile and leaves its legacy data intact", async t => {
@@ -1218,8 +1636,23 @@ test("Product sessions feed upstream Dreaming, and excluded source events cannot
   service.workDispatcher.transition(run.id, "completed");
   const host = service.memoryEngine.host(profileId), entry = host.sessions.read(profileId, session.id);
   assert.equal(entry.lineProvenance[0].originClass, "owner"); assert.match(entry.content, /^User:/);
+  const { AsyncLocalStorage } = require("node:async_hooks");
+  const fingerprintRead = new AsyncLocalStorage();
+  const stat = host.statSessionEntrySync.bind(host);
+  let fingerprints = 0, fingerprintWalks = 0;
+  t.mock.method(host, "statSessionEntrySync", (...args) => fingerprintRead.run(true, () => {
+    fingerprints++;
+    return stat(...args);
+  }));
+  const stamp = service.memoryEngine.store._filesystemStamp.bind(service.memoryEngine.store);
+  t.mock.method(service.memoryEngine.store, "_filesystemStamp", (...args) => {
+    if (fingerprintRead.getStore()) fingerprintWalks++;
+    return stamp(...args);
+  });
   service.memoryEngine.complete = async () => ({ text: "The observatory notes were reviewed." });
   const result = await service.memoryEngine.dream(profileId); assert.equal(result.handled, true);
+  assert.ok(fingerprints > 0, "Dreaming went through Product's fingerprint reader");
+  assert.equal(fingerprintWalks, 0, "fingerprint preparation did not walk the memory tree on Service");
   const corpus = path.join(host.workspaceDir, "memory/.dreams/session-corpus");
   const files = fs.readdirSync(corpus);
   assert.ok(files.some(file => fs.readFileSync(path.join(corpus, file), "utf8").includes("amber telescope")));

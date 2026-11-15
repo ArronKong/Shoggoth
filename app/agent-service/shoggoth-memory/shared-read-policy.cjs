@@ -128,7 +128,7 @@ class SharedReadPolicy {
         localSources.push(retained); localReceipts.push({ kind: "promotion", profileId: input.ownerProfileId, key, ...retained });
       }
       const evidence = this.service.store.reportEvidence?.(input.ownerProfileId, relative,
-        Math.max(segment.startLine, startLine), Math.min(segment.endLine, endLine));
+        Math.max(segment.startLine, startLine), Math.min(segment.endLine, endLine), this.service.memoryViewFor(input.ownerProfileId));
       if (evidence?.sources?.length) localSources.push(...evidence.sources);
       if (!localSources.length && !localSessions.length) return null;
       sources.push(...localSources); sessions.push(...localSessions); receipts.push(...localReceipts);
@@ -141,7 +141,7 @@ class SharedReadPolicy {
     const relative = canonicalSharedPath(previous.canonicalRelativePath || previous.path);
     if (!relative || previous.documentKind !== "reflection_report" || !previous.sourceOriginHash) return false;
     try {
-      const source = this.service.host(input.ownerProfileId).searchIndex.sourceFiles.read(relative);
+      const source = this.service.host(input.ownerProfileId).searchIndex.sourceFiles.read(relative, this.service.memoryViewFor(input.ownerProfileId));
       const text = source.text.split("\n").slice(previous.startLine - 1, previous.endLine).join("\n");
       if (sha256(text) !== previous.sourceHash) return false;
       const evidence = [];
@@ -165,11 +165,11 @@ class SharedReadPolicy {
     // Classification-only is used after a previously trusted report fails
     // revalidation. It can distinguish content edits from withdrawal, never
     // admit a new query or return any body with stale origin hashes.
-    const source = this.service.host(input.ownerProfileId).searchIndex.sourceFiles.read(relative);
+    const source = this.service.host(input.ownerProfileId).searchIndex.sourceFiles.read(relative, this.service.memoryViewFor(input.ownerProfileId));
     const reflection = documentKind(relative, source.text, result.startLine, result.endLine) === "reflection_report";
     if ((!classificationOnly || !reflection) && !this.service.allowResult(input.ownerProfileId, { ...result, source: "memory" }, scope)) return false;
-    const active = this.service.store.list(input.ownerProfileId, { status: "active" }).filter(item => item.memoryPath === relative
-      && item.startLine <= result.endLine && item.endLine >= result.startLine);
+    const active = this.service.activeFileEntries(input.ownerProfileId, relative)
+      .filter(item => item.startLine <= result.endLine && item.endLine >= result.startLine);
     const permissionItem = item => {
       if (!classificationOnly || !reflection) return item;
       const text = (item.authorityText || item.content).replace(/<!--\s*openclaw-memory-promotion:[^\n]*?-->/giu, "")
@@ -195,7 +195,8 @@ class SharedReadPolicy {
           return true;
         }
         if (!canonicalSharedPath(origin.path)) return false;
-        const current = this.service.host(input.ownerProfileId).searchIndex.sourceFiles.read(origin.path), lines = current.text.split("\n");
+        const current = this.service.host(input.ownerProfileId).searchIndex.sourceFiles.read(origin.path, this.service.memoryViewFor(input.ownerProfileId));
+        const lines = current.text.split("\n");
         if (origin.endLine > lines.length) return false;
         const text = lines.slice(origin.startLine - 1, origin.endLine).join("\n");
         if (!classificationOnly && origin.sourceHash && sha256(text) !== origin.sourceHash) return false;

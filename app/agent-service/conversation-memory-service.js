@@ -38,6 +38,7 @@ class ConversationMemoryService {
     this.getInspirationOrigin = getInspirationOrigin;
     this.provenance = memoryProvenanceService;
     this.semanticSearch = semanticSearch;
+    this.searchEvidence = new WeakMap();
   }
   _recordSource(profileId, id, item, binding) {
     if (!this.provenance || item?.id !== id) return;
@@ -80,20 +81,44 @@ class ConversationMemoryService {
     // MCP publication must use the same boundary as the underlying read.
     return this.engine.owner === "shoggoth-memory-core" ? this.engine.authorityStamp(profileId) : null;
   }
-  async searchWithSemantic(profileId, args, run) {
+  withOwnReadView(profileId, signal, read) {
+    return this.engine.withAsyncMemoryReadView ? this.engine.withAsyncMemoryReadView(profileId, signal, read) : read();
+  }
+  withToolReadViews(profileId, id, run, signal, read) {
+    const sharing = this.engine.sharing;
+    return sharing?.recognizes(id)
+      ? sharing.withReferenceReadViews({ profileId, run, workspace: run.workspace, maxSensitivity: "private", signal }, id, read)
+      : this.withOwnReadView(profileId, signal, read);
+  }
+  withPublicationReadViews(profileId, result, run, signal, read) {
+    const input = { profileId, run, workspace: run.workspace, maxSensitivity: "private" };
+    const owners = this.engine.sharing?.ownersForResult?.(input, result) || [];
+    if (!owners.length || !this.engine.withMemoryOwnerReadViews) return this.withOwnReadView(profileId, signal, read);
+    return this.engine.withMemoryOwnerReadViews(profileId, owners, signal, view => {
+      if (this.engine.sharing.ownersForResult(input, result).some(owner => !owners.includes(owner))) {
+        throw serviceError("MEMORY_REVISION_CONFLICT", "借阅来源在返回前已变化");
+      }
+      return read(view);
+    });
+  }
+  async searchWithSemantic(profileId, args, run, signal) {
     if (this.engine.owner === "shoggoth-memory-core") {
       this.bind("memory_search", args, run);
+      let searchEvidence;
       const result = await this.engine.searchMemory({ profileId, query: args.query, workspace: run.workspace,
-        maxSensitivity: "private", maxResults: args.maxResults, minScore: args.minScore, run,
+        maxSensitivity: "private", maxResults: args.maxResults, minScore: args.minScore, run, signal, record: false,
         // Like OpenClaw, a search reads only this Agent's memory unless the
         // model asks for other Agents (memoryScope=all or a named source).
-        memoryScope: args.memoryScope ?? (args.ownerProfileId === undefined ? "own" : "all"), ownerProfileId: args.ownerProfileId });
+        memoryScope: args.memoryScope ?? (args.ownerProfileId === undefined ? "own" : "all"), ownerProfileId: args.ownerProfileId },
+        (delivered, sourceIdentities) => { searchEvidence = { delivered, sourceIdentities }; });
       this.bind("memory_search", args, run);
       // Upstream ranking records include optional undefined fields. Project the
       // public tool shape; the strict MCP serializer must remain fail-closed.
-      return { ...result, items: result.items.map(item => this._publicItem(item)),
+      const projected = { ...result, items: result.items.map(item => this._publicItem(item)),
         results: result.results.map(item => projectFields(item, PUBLIC_SEARCH_FIELDS)),
-        viewStatus: this.engine.viewStatus(profileId) };
+        viewStatus: this.engine.viewStatus(profileId, result.revision) };
+      if (searchEvidence) this.searchEvidence.set(projected, searchEvidence);
+      return projected;
     }
     // Validate before starting inference and again before projecting sources.
     const lexical = this.search(profileId, args, run);
@@ -223,7 +248,8 @@ class ConversationMemoryService {
     if (name === "memory_save" && sharing?.recognizes(args.supersedes)) throw serviceError("MEMORY_BORROWED_READ_ONLY", "借阅记忆不能在当前助理中替代");
     if (name === "memory_forget" && sharing?.recognizes(args.id)) {
       const run = sharing.runs.get(binding.runId)?.input.run;
-      return sharing.forget({ ...args, profileId, run, workspace: binding.workspace, maxSensitivity: "private" }, id);
+      return sharing.forget({ ...args, profileId, run, workspace: binding.workspace, maxSensitivity: "private",
+        signal: call.signal, assertCurrent: call.assertCurrent }, id);
     }
     if (name === "memory_save" && args.classification === "observed") {
       // The Agent's own note has no user quote behind it, so it is held to
@@ -232,25 +258,32 @@ class ConversationMemoryService {
       if (sharing?.borrowedRefsForRun(binding.runId).length) throw serviceError("MEMORY_BORROWED_READ_ONLY", "借阅内容不能回存为当前助理记忆");
       if (memoryThreatPattern(args.content)) throw serviceError("MEMORY_INJECTION_REJECTED", "记忆内容疑似注入或外泄指令");
     }
-    if (name === "memory_save") {
-      const sourceEvent = this.transcripts.listEvents(profileId, binding.source.sessionId).find(event => event.id === binding.source.eventId);
-      if (isBorrowedMemoryDerived(sourceEvent) || (sharing?.borrowedRefsForRun(binding.runId).length
-        && isReferentialMemoryRequest(sourceEvent?.content?.text))) throw serviceError("MEMORY_BORROWED_READ_ONLY", "借阅内容不能回存为当前助理记忆");
-      this.engine.assertOwnedMemorySources({ ...args, profileId, sourceRefs: binding.sourceRefs });
-    }
-    const previous = this.store.get(profileId, name === "memory_save" ? id : args.id);
-    const superseded = args.supersedes && this.store.get(profileId, args.supersedes);
-    if (superseded && ["project", "workspace"].includes(superseded.scope) && !this.engine.matchesMemoryWorkspace(superseded, binding.workspace)) {
-      throw serviceError("MCP_TOOL_FORBIDDEN", "不能替代其他工作区的记忆");
-    }
-    if (previous && ["project", "workspace"].includes(previous.scope) && !this.engine.matchesMemoryWorkspace(previous, binding.workspace)) {
-      throw serviceError("MCP_TOOL_FORBIDDEN", "项目记忆不属于当前工作区");
-    }
-    if (name === "memory_save" && previous) return this.result(profileId, previous);
-    if (this.store.getRevision(profileId) !== args.expectedRevision && previous?.status !== "deleted"
-      && !newFactWithoutRevision(name, args)) {
-      throw serviceError("MEMORY_REVISION_CONFLICT", "记忆已经变化，请重新读取");
-    }
+    const prepared = await this.engine.withMemoryWritePreparation(profileId, call.signal, () => {
+      call.assertCurrent?.();
+      if (name === "memory_save") {
+        const sourceEvent = this.transcripts.listEvents(profileId, binding.source.sessionId).find(event => event.id === binding.source.eventId);
+        if (isBorrowedMemoryDerived(sourceEvent) || (sharing?.borrowedRefsForRun(binding.runId).length
+          && isReferentialMemoryRequest(sourceEvent?.content?.text))) throw serviceError("MEMORY_BORROWED_READ_ONLY", "借阅内容不能回存为当前助理记忆");
+        this.engine.assertOwnedMemorySources({ ...args, profileId, sourceRefs: binding.sourceRefs });
+      }
+      const previous = this.store.get(profileId, name === "memory_save" ? id : args.id);
+      const superseded = args.supersedes && this.store.get(profileId, args.supersedes);
+      if (superseded && ["project", "workspace"].includes(superseded.scope) && !this.engine.matchesMemoryWorkspace(superseded, binding.workspace)) {
+        throw serviceError("MCP_TOOL_FORBIDDEN", "不能替代其他工作区的记忆");
+      }
+      if (previous && ["project", "workspace"].includes(previous.scope) && !this.engine.matchesMemoryWorkspace(previous, binding.workspace)) {
+        throw serviceError("MCP_TOOL_FORBIDDEN", "项目记忆不属于当前工作区");
+      }
+      if (name === "memory_save" && previous) return { replay: this.result(profileId, previous) };
+      const revision = this.store.getRevision(profileId);
+      if (revision !== args.expectedRevision && previous?.status !== "deleted"
+        && !newFactWithoutRevision(name, args)) {
+        throw serviceError("MEMORY_REVISION_CONFLICT", "记忆已经变化，请重新读取");
+      }
+      return { revision };
+    });
+    call.signal?.throwIfAborted(); call.assertCurrent?.();
+    if (prepared.replay) return prepared.replay;
     let item;
     if (name === "memory_save") {
       const observed = args.classification === "observed";
@@ -260,39 +293,55 @@ class ConversationMemoryService {
       // with today's and tomorrow's conversations and searchable afterwards.
       const daily = args.placement === "daily" ? `memory/${this.engine.sessionCapture.day(profileId, this.engine.now()).day}.md` : undefined;
       item = await this.engine.propose({ ...args, scope, workspace: binding.workspace, classification: observed ? "inferred" : args.classification,
-        profileId, id, assertCurrent: call.assertCurrent, dailyNotePath: daily,
+        profileId, id, expectedRevision: prepared.revision, assertCurrent: call.assertCurrent, signal: call.signal, dailyNotePath: daily,
         type: daily ? "episodic" : args.validUntil == null ? "semantic" : "temporary",
         sourceRefs: [...binding.sourceRefs, ...(["project", "workspace"].includes(scope) ? workspaceMemoryRefs(binding.workspace, scope) : []),
           ...(unsupported ? [`${UNTRUSTED_REF_PREFIX}quote-unsupported`] : [])] });
-      this._recordSource(profileId, id, item, binding);
-    } else item = await this.engine.forgetEverywhere({ profileId, id: args.id, assertCurrent: call.assertCurrent, reason: removalReason(args),
+    } else item = await this.engine.forgetEverywhere({ profileId, id: args.id, expectedRevision: prepared.revision,
+      assertCurrent: call.assertCurrent, signal: call.signal, reason: removalReason(args),
       operationId: `forget-${id}`, revocationSourceRefs: binding.sourceRefs });
     if (!item) throw serviceError("MEMORY_NOT_FOUND", "记忆不存在");
-    if (name === "memory_save") this.engine.ownMemory?.read({ profileId, run: { id: binding.runId } }, { items: [item] });
-    return this.result(profileId, item);
+    return this.engine.withCommittedMemoryReadView(profileId, () => {
+      const result = this.result(profileId, item);
+      if (name === "memory_save") {
+        this._recordSource(profileId, id, item, binding);
+        this.engine.ownMemory?.read({ profileId, run: { id: binding.runId } }, { items: [item] });
+      }
+      return result;
+    });
   }
   getFile(profileId, args, run) {
     const result = this.engine.getFile({ profileId, path: args.path, from: args.from, lines: args.lines,
       workspace: run.workspace, maxSensitivity: "private", run });
     return { ...result, items: result.items.map(item => this._publicItem(item)) };
   }
-  revalidateReadResult(profileId, result, run) {
-    return this.engine.sharing?.validateResult({ profileId, run, workspace: run.workspace, maxSensitivity: "private" }, result) || result;
+  revalidateReadResult(profileId, result, run, name, args) {
+    const input = { profileId, run, workspace: run.workspace, maxSensitivity: "private" };
+    this.engine.assertOwnToolReadCurrent?.(input, result, name, args, this.searchEvidence.get(result)?.sourceIdentities);
+    return this.engine.sharing?.validateResult(input, result) || result;
   }
-  revalidateWriteResult(profileId, result, workspace) {
+  stagePublishedSearch(profileId, result, run) {
+    const evidence = this.searchEvidence.get(result);
+    if (evidence) this.engine.recallSignals.stage({ profileId, run, workspace: run.workspace, maxSensitivity: "private" }, evidence.delivered);
+  }
+  revalidateWriteResult(profileId, result, workspace, signal) {
     if (result?.suppressed === true && this.engine.sharing?.suppressionCurrent(profileId, result.item?.id)) return result;
-    this.engine.recallPolicy.assertReady(profileId);
-    const id = result?.item?.id;
-    const current = typeof id === "string" ? this.store.get(profileId, id)
-      ?? this.engine.findSharedItem?.(profileId, id)?.item ?? this.engine.findPeerItem?.(profileId, id) ?? null : null;
-    if (!current) throw serviceError("MEMORY_NOT_FOUND", "记忆不可读取");
-    if (["project", "workspace"].includes(current.scope) && !matchesWorkspace(current, workspace)) {
-      throw serviceError("MCP_TOOL_FORBIDDEN", "项目记忆不属于当前工作区");
-    }
-    const fresh = this.result(profileId, current);
-    // Preserve an unchanged durable receipt byte for byte. Revoked, deleted,
-    // or superseded items are projected from the current primary store.
-    return isDeepStrictEqual(result.item, fresh.item) ? result : fresh;
+    const revalidate = () => {
+      this.engine.recallPolicy.assertReady(profileId);
+      const id = result?.item?.id;
+      const current = typeof id === "string" ? this.store.get(profileId, id)
+        ?? this.engine.findSharedItem?.(profileId, id)?.item ?? this.engine.findPeerItem?.(profileId, id) ?? null : null;
+      if (!current) throw serviceError("MEMORY_NOT_FOUND", "记忆不可读取");
+      if (["project", "workspace"].includes(current.scope) && !matchesWorkspace(current, workspace)) {
+        throw serviceError("MCP_TOOL_FORBIDDEN", "项目记忆不属于当前工作区");
+      }
+      const fresh = this.result(profileId, current);
+      // Preserve an unchanged durable receipt byte for byte. Revoked, deleted,
+      // or superseded items are projected from the current primary store.
+      return isDeepStrictEqual(result.item, fresh.item) ? result : fresh;
+    };
+    return this.engine.withCommittedMemoryReadView
+      ? this.engine.withCommittedMemoryReadView(profileId, revalidate, signal) : revalidate();
   }
 }
 

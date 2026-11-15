@@ -45,6 +45,24 @@ test("unchanged audit compares exact without exposing transcript content", t => 
   assert.equal(comparison.matches, true); assert.equal(comparison.originalRecordsPreserved, true);
   assert.equal(JSON.stringify(after).includes("private fixture"), false);
 });
+test("upgrade dry-run identifies supported Inbox versions without changing or returning ciphertext", t => {
+  const f = fixture(t);
+  const file = path.join(f.paths.stateDir, "pending-commands.json");
+  const ciphertext = Buffer.from("synthetic secret envelope for migration").toString("base64");
+  for (const version of [1, 2]) {
+    const bytes = JSON.stringify({ version, revision: 10, ciphertext });
+    fs.writeFileSync(file, bytes, { mode: 0o600 });
+    const receipt = audit(f.paths);
+    assert.deepEqual(receipt.pendingCommands, { version, revision: 10 });
+    assert.equal(receipt.privateFiles["pending-commands.json"].sha256, sha(bytes));
+    assert.equal(JSON.stringify(receipt).includes(ciphertext), false);
+    assert.equal(fs.readFileSync(file, "utf8"), bytes);
+  }
+  const future = JSON.stringify({ version: 3, revision: 10, ciphertext });
+  fs.writeFileSync(file, future, { mode: 0o600 });
+  assert.throws(() => audit(f.paths), /PendingCommand envelope is invalid or unsupported/);
+  assert.equal(fs.readFileSync(file, "utf8"), future);
+});
 test("real TranscriptStore append preserves old bytes and attributes tail plus derived manifest", t => {
   const f = fixture(t); f.grow(); const { after, comparison } = f.result();
   assert.equal(comparison.comparable, true); assert.equal(comparison.matches, false);

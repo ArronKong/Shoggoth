@@ -130,12 +130,14 @@ async function fixture(t, { withdraw = false, stageFirst = false, addCount = 1, 
     database.db.prepare("UPDATE memory_file_records SET data=? WHERE profile_id=? AND id=?").run(JSON.stringify(row),profileId,current.id);
   }
   if (deleteReviewed) {
-    await ShoggothMemoryService.prototype.delete.call({ assertProfile: id => assert.equal(id, profileId),
+    const deleteOwner = Object.assign(Object.create(ShoggothMemoryService.prototype), {
+      assertProfile: id => assert.equal(id, profileId), profileControllers: new Map(),
       recallPolicy: engine.recallPolicy, store: fileStore, now: () => 19000,
       // This delete transaction fixture has no running reader or definition
       // documents. Full Service definition cleanup has its own regression.
-      sharing: { withdraw() {}, async reconcileConfig() {} }, definitionLinks: { async retract() {} } },
-    { profileId, id: sources[0].item.id, operationId: "actual-native-delete" });
+      sharing: { withdraw() {}, async reconcileConfig() {} }, definitionLinks: { async retract() {} },
+    });
+    await deleteOwner.delete({ profileId, id: sources[0].item.id, operationId: "actual-native-delete" });
   }
   if (changeReviewed) await fileStore.upsert({ ...fileStore.get(profileId, sources[0].item.id), ...changeReviewed, updatedAt: 19000 });
   if (addPending || originalAcceptedDelta) {

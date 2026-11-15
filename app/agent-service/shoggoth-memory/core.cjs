@@ -105454,7 +105454,7 @@ function hashSessionMessageId(value) {
 async function statSessionSource(source) {
   if (source.buildOptions.agentId && source.buildOptions.storePath) {
     try {
-      const stat2 = statSessionEntrySync(source.absolutePath, source.buildOptions);
+      const stat2 = await statSessionEntrySync(source.absolutePath, source.buildOptions, { asyncSessionView: true });
       return stat2 ? {
         mtimeMs: Math.floor(Math.max(0, stat2.revisionMs ?? stat2.mtimeMs)),
         size: Math.floor(stat2.size)
@@ -115688,23 +115688,33 @@ var MemoryManagerSessionSyncOps = class extends MemoryManagerWatchOps {
     const sqliteCorpusEntries = corpusEntries.filter(
       (entry) => entry.transcriptSource === "sqlite"
     );
-    const transcriptStats = await readMemoryTranscriptStatsInWorker(
+    const capture = await readMemoryTranscriptStatsInWorker(
       sqliteCorpusEntries.map((entry) => ({
         agentId: entry.agentId,
         sessionId: entry.sessionId,
         ...entry.sessionKey ? { sessionKey: entry.sessionKey } : {},
         ...entry.storePath ? { storePath: entry.storePath } : {}
-      }))
+      })),
+      {
+        indexedPaths,
+        isIndexable: isMemorySessionIndexable,
+        assertCurrent: () => this.assertMemoryStartupCaptureCurrent?.()
+      }
     );
     if (this.closed) {
       return [];
     }
-    const statsByEntry = new Map(
-      sqliteCorpusEntries.map((entry, index) => [entry, transcriptStats[index]])
+    this.assertMemoryStartupCaptureCurrent?.();
+    const capturedStates = !Array.isArray(capture);
+    const sqliteStateByEntry = new Map(
+      sqliteCorpusEntries.map((entry, index) => [entry, (capturedStates ? capture.startupStates : capture)[index]])
     );
     const fileStates = (await runWithConcurrency(
       corpusEntries.map(
         (corpusEntry) => async () => {
+          if (capturedStates && corpusEntry.transcriptSource === "sqlite") {
+            return sqliteStateByEntry.get(corpusEntry) ?? null;
+          }
           if (!indexedPaths.has(this.sessionPathForCorpusEntry(corpusEntry))) {
             const entry = await buildSessionEntry(
               corpusEntry.sessionFile,
@@ -115715,7 +115725,7 @@ var MemoryManagerSessionSyncOps = class extends MemoryManagerWatchOps {
             }
           }
           if (corpusEntry.transcriptSource === "sqlite") {
-            const stats = statsByEntry.get(corpusEntry);
+            const stats = sqliteStateByEntry.get(corpusEntry);
             return stats ? statSessionEntrySync(
               corpusEntry.sessionFile,
               this.buildSessionEntryOptions(corpusEntry),
@@ -115744,6 +115754,7 @@ var MemoryManagerSessionSyncOps = class extends MemoryManagerWatchOps {
       ),
       this.getIndexConcurrency()
     )).filter((file) => file !== null);
+    if (!this.closed) this.assertMemoryStartupCaptureCurrent?.();
     const { dirtyFiles, hasStaleIndexedPaths } = resolveMemorySessionStartupState({
       files: fileStates,
       existingRows

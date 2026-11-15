@@ -98,7 +98,13 @@ async function fixture(t, { separateHosts = false } = {}) {
       } });
     return result.result;
   };
-  const complete = async run => { host.complete(run, "完成"); await until(() => service.workDispatcher.getRun(run.id).status === "completed"); await service.hookRunner.drain(); };
+  const complete = async run => {
+    host.complete(run, "完成");
+    await until(() => service.workDispatcher.getRun(run.id).status === "completed");
+    // The coordinator writes the command receipt before it queues terminal Hooks.
+    await service.workRunCoordinator.waitForIdle(run.id);
+    await service.hookRunner.drain();
+  };
   const value = { root, paths, service, host, hosts, safeStorage, sent, profile, ipc, helper, send, call, complete, setRun: run => { currentRun = run; } };
   value.restart = async () => {
     await helper.close(); await service.stop({ notify: false });

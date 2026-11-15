@@ -8,6 +8,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { resolveCanonicalServicePaths, resolveServicePaths } = require("../app/agent-service/paths");
 const { eventChecksum, snapshotChecksum } = require("../app/agent-service/product-store");
+const { validateEnvelope, MAX_PENDING_COMMAND_FILE_BYTES } = require("../app/agent-service/pending-command-inbox");
 
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 const canonical = value => JSON.stringify(value, (_key, entry) => entry && typeof entry === "object"
@@ -17,7 +18,7 @@ const stableJson = value => Array.isArray(value) ? `[${value.map(stableJson).joi
   : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`
     : JSON.stringify(value);
 const values = value => Array.isArray(value) ? value : Object.values(value || {});
-function fileInfo(target, parse = false) {
+function fileInfo(target, parse = false, maxBytes = 256 * 1024 * 1024) {
   let fd;
   try {
     fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -33,7 +34,7 @@ function fileInfo(target, parse = false) {
       const count = fs.readSync(fd, buffer, 0, buffer.length, null);
       if (!count) break;
       bytes += count;
-      if (parse && bytes > 256 * 1024 * 1024) throw new Error("Audit JSON exceeds its bound");
+      if (parse && bytes > maxBytes) throw new Error("Audit JSON exceeds its bound");
       digest.update(buffer.subarray(0, count));
       if (parse) chunks.push(Buffer.from(buffer.subarray(0, count)));
     }
@@ -220,6 +221,15 @@ function audit(paths, options = {}) {
   const privateFiles = Object.fromEntries(["local-crypto-master-key.v1", "mcp-auth.json", "pending-commands.json",
     "encrypted-secrets.json", "federation-mcp-auth.json", "inspirations.sqlite", "native-cron.json", "native-kanban.json"]
     .map(name => [name, fileInfo(path.join(paths.stateDir, name))]));
+  let pendingCommands = null;
+  if (privateFiles["pending-commands.json"]) {
+    const info = fileInfo(path.join(paths.stateDir, "pending-commands.json"), true, MAX_PENDING_COMMAND_FILE_BYTES);
+    if (info?.sha256 !== privateFiles["pending-commands.json"].sha256) throw new Error("PendingCommand changed during audit");
+    let envelope;
+    try { envelope = validateEnvelope(JSON.parse(info.text)); }
+    catch { throw new Error("PendingCommand envelope is invalid or unsupported"); }
+    pendingCommands = { version: envelope.version, revision: envelope.revision };
+  }
   const secretContainer = jsonAt(paths.encryptedSecretsPath);
   const concurrencyJournal = jsonAt(path.join(paths.stateDir, "profile-concurrency-migration-v11.json"));
   if (concurrencyJournal) {
@@ -290,7 +300,7 @@ function audit(paths, options = {}) {
     credentials: { count: Object.keys(secretContainer?.credentials || {}).length },
     cron: { jobs: values(cron?.jobs).length, enabled: values(cron?.jobs).filter(job => job.enabled).length,
       currentlyDue: values(cron?.jobs).filter(job => job.enabled && job.nextRunAt !== null && job.nextRunAt <= Date.now()).length },
-    privateFiles, config: fileInfo(path.join(paths.userDataRoot, "config.json")),
+    privateFiles, pendingCommands, config: fileInfo(path.join(paths.userDataRoot, "config.json")),
     inventory, definitions: { files: definitions, digest: digestRows(definitions) },
     concurrencyJournal: concurrencyJournal && { sha256: fileInfo(path.join(paths.stateDir, "profile-concurrency-migration-v11.json")).sha256,
       profiles: concurrencyJournal.profiles }, creationReceipts, eventEvidence: evidenceInfo,

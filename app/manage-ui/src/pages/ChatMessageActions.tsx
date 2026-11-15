@@ -34,14 +34,14 @@ export function IconQuote({ className }: { className?: string }) {
 }
 
 /** The same bubble actions and keyboard behavior in direct and group chats. */
-export function ChatMessageContextMenu({ x, y, onClose, onCopy, onQuote, quoteDisabled, onPin, pinned, onDelete, extra }: {
+export function ChatMessageContextMenu({ x, y, onClose, onCopy, onCopyContinuation, onQuote, quoteDisabled, onPin, pinned, onDelete, extra }: {
   x: number; y: number; onClose(): void;
-  onCopy?: () => void; onQuote?: () => void; quoteDisabled?: boolean;
+  onCopy?: () => void; onCopyContinuation?: () => void; onQuote?: () => void; quoteDisabled?: boolean;
   onPin?: () => void; pinned?: boolean; onDelete?: () => void; extra?: ReactNode;
 }) {
   const { t } = useTranslation();
   const deleteMessage = MESSAGE_DELETION_ENABLED ? onDelete : undefined;
-  const hasActions = !!(onCopy || onQuote || extra || (MESSAGE_PINNING_ENABLED && onPin) || deleteMessage);
+  const hasActions = !!(onCopy || onCopyContinuation || onQuote || extra || (MESSAGE_PINNING_ENABLED && onPin) || deleteMessage);
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose); closeRef.current = onClose;
   const [position, setPosition] = useState({ left: x, top: y });
@@ -79,6 +79,7 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onQuote, quoteDi
     }}>
       {onCopy && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onCopy)}><IconCopy /><span>{t("chat.copy")}</span></button>}
       {onQuote && <button type="button" role="menuitem" className="chat-ctxmenu__item" disabled={quoteDisabled} onClick={() => select(onQuote)}><IconQuote /><span>{t("chat.quote")}</span></button>}
+      {onCopyContinuation && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onCopyContinuation)}><IconCopy /><span>{t("chat.copyContinuationReference")}</span></button>}
       {extra}
       {MESSAGE_PINNING_ENABLED && onPin && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onPin)}><IconPin /><span>{t(pinned ? "chat.unpin" : "chat.pin")}</span></button>}
       {deleteMessage && <button type="button" role="menuitem" className="chat-ctxmenu__item is-danger" onClick={() => select(deleteMessage)}><IconTrash /><span>{t("chat.deleteLocal")}</span></button>}

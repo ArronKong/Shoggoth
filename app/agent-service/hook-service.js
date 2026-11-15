@@ -178,18 +178,23 @@ class HookService {
     const { definitionSchema, handlers, limits, grantRequirements, activation, ...frozen } = capabilities;
     return this.store.freeze(run, frozen, definition => assertHookSupported(definition, capabilities, this.processHost), options);
   }
-  async prepareRun(run, profile, assertCurrent, permissionPolicy) {
+  async prepareRun(run, profile, assertCurrent, permissionPolicy, signal) {
+    assertCurrent();
     if (this.prepareNativeCapabilities) {
-      this.preparedNative.set(run.id, await this.prepareNativeCapabilities(profile, run, permissionPolicy)); assertCurrent();
+      const prepared = await this.prepareNativeCapabilities(profile, run, permissionPolicy);
+      assertCurrent();
+      this.preparedNative.set(run.id, prepared);
     }
     const snapshot = this.freezeRun(run, profile);
-    const context = { assertCurrent };
+    const context = { assertCurrent, signal };
     const base = this.event(snapshot, run, "run.before", "run-before:" + run.id, {});
     const guards = await this.runner.dispatch(snapshot, base, "guard", context);
+    assertCurrent();
     if (guards.some(item => item.output.decision === "block")) fail("HOOK_BLOCKED");
     this.observe(snapshot, base);
     const contributions = await this.runner.dispatch(snapshot, this.event(snapshot, run, "context.prepare",
       "context-prepare:" + run.id, {}), "transform", context);
+    assertCurrent();
     if (contributions.reduce((sum, item) => sum + Buffer.byteLength(item.output.text), 0) > HOOK_LIMITS.contextRunBytes) fail("HOOK_CAPACITY");
     return { snapshot, contributions: contributions.map(item => ({ hookId: item.hookId, version: item.version, text: item.output.text })),
       summary: this.summary(snapshot) };

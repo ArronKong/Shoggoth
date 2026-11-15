@@ -307,6 +307,7 @@ function fakeBackend(handler, options = {}) {
     runtimeCliAuth: options.runtimeCliAuth,
     getNativeMemoryConfig: options.getNativeMemoryConfig,
     updateNativeMemoryConfig: options.updateNativeMemoryConfig,
+    sendLatencyDiagnostics: options.sendLatencyDiagnostics,
   });
   backend._serviceEventStreamId = Object.prototype.hasOwnProperty.call(
     options,
@@ -5094,6 +5095,40 @@ test("an explicit internal send rejection stays a failure and needs no receipt l
   assert.equal(calls.some(({ request }) => request.method === "chat.operation.get"), false);
 });
 
+test("negotiated chat receipt confirms acceptance before the WorkRun exists", async () => {
+  let receipt;
+  let observations = 0;
+  const { backend, calls } = await readyBackend(request => {
+    if (request.method === "chat.send.accept") {
+      receipt = { version: 1, operationId: request.params.operationId, sessionKey: SESSION_A,
+        runId: run().id, acceptedAt: 123 };
+      return receipt;
+    }
+    if (request.method === "chat.operation.get") {
+      assert.deepEqual(request.params, { operationId: receipt.operationId, sessionKey: SESSION_A, includeAcceptance: true });
+      assert.equal(seen.accepted, 1);
+      observations += 1;
+      if (observations === 1) return { status: "accepted", run: null, receipt };
+      return { status: "found", run: run("queued", { idempotencyKey: `shoggoth:chat-send:${receipt.operationId}` }) };
+    }
+    if (request.method === "run.subscribe") return subscription([
+      event(1, "text", { text: "projected answer" }),
+      event(2, "terminal", { status: "completed", resultSummary: "projected answer", errorCode: null }),
+    ], { latestSeq: 2, nextCursor: 2 });
+    if (request.method === "chat.history") return page("messages", []);
+    throw new Error(`unexpected ${request.method}`);
+  });
+  backend._chatAcceptanceV1 = true;
+  const seen = { accepted: 0, final: [], errors: [] };
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hello", "accepted-client", {
+    final: text => seen.final.push(text), error: message => seen.errors.push(message),
+  }, { onAccepted: () => { seen.accepted += 1; } });
+  assert.deepEqual(seen, { accepted: 1, final: ["projected answer"], errors: [] });
+  assert.equal(observations, 2);
+  assert.deepEqual(calls.filter(entry => entry.request.method.startsWith("chat.send")).map(entry => entry.request.method),
+    ["chat.send.accept"]);
+});
+
 test("legacy recovery pins the original native identity and never resends the prompt", async () => {
   const calls = [];
   const { backend } = await readyBackend(request => {
@@ -5679,6 +5714,10 @@ test("queued ack and stream reset expose the durable reason and elapsed start be
       ...cursorGapSnapshot(queued),
       snapshot: { run: queued, queue: { status: "queued", reason: "BACKEND_ACTIVE_LIMIT", queuedAt: 123 } },
     };
+    if (request.method === "run.subscribe" && polls === 2) return {
+      ...cursorGapSnapshot(queued),
+      snapshot: { run: queued, queue: { status: "queued", reason: "CONTEXT_COMPACTING", queuedAt: 123, stage: "reconnecting" } },
+    };
     if (request.method === "run.subscribe") return subscription([
       event(4, "status", { status: "starting" }),
       event(5, "status", { status: "running" }),
@@ -5695,7 +5734,57 @@ test("queued ack and stream reset expose the durable reason and elapsed start be
   assert.equal(statuses[1].kind, "queued");
   assert.equal(statuses[1].reason, "RUNTIME_ACCOUNT_ACTIVE_LIMIT");
   assert.deepEqual(statuses[2], { kind: "queued", text: "queued", reason: "BACKEND_ACTIVE_LIMIT", queuedAt: 123 });
-  assert.deepEqual(statuses.slice(3).map(status => status.kind), ["starting", "running"]);
+  assert.deepEqual(statuses[3], { kind: "starting", text: "starting", stage: "reconnecting" });
+  assert.deepEqual(statuses.slice(4).map(status => status.kind), ["starting", "running"]);
+});
+
+test("a quiet accepted tool reports one diagnostic per interval and continues normally after a polling gap", async () => {
+  const active = run("running");
+  const samples = [];
+  let clock = 0, polls = 0;
+  const { backend, calls } = await readyBackend(request => {
+    if (request.method === "chat.send") return { disposition: "started", reason: null, run: active };
+    if (request.method === "chat.history") return page("messages", []);
+    assert.equal(request.method, "run.subscribe");
+    polls++;
+    if (polls === 1) return subscription([event(1, "tool.start", { toolCallId: "tool-1", tool: { name: "fixture" } })]);
+    if (polls === 5) return subscription([event(2, "terminal", { status: "completed", resultSummary: "finished", errorCode: null })],
+      { cursor: 1, nextCursor: 2, latestSeq: 2 });
+    clock = [0, 0, 46_000, 55_000, 200_000][polls];
+    return subscription([], { cursor: 1, nextCursor: 1, latestSeq: 1 });
+  }, { readinessNow: () => clock, sendLatencyDiagnostics: { record: sample => samples.push(sample), async close() {} } });
+  const finals = [];
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "quiet tool fixture", null,
+    { final: text => finals.push(text) });
+  assert.deepEqual(finals, ["finished"]);
+  assert.deepEqual(samples.filter(sample => sample.stage.startsWith("client_observer_")).map(sample => sample.stage),
+    ["client_observer_quiet_tool", "client_observer_resumed"]);
+  assert.equal(calls.filter(call => call.request.method === "chat.send").length, 1);
+  assert.ok(!calls.some(call => call.request.method === "run.abort"));
+});
+
+test("a response timeout records one backpressure diagnostic per streak without replay", async () => {
+  const samples = [];
+  let clock = 0, polls = 0;
+  const { backend, calls } = await readyBackend(request => {
+    if (request.method === "chat.send") return { disposition: "started", reason: null, run: run("running") };
+    if (request.method === "chat.history") return page("messages", []);
+    assert.equal(request.method, "run.subscribe");
+    polls++;
+    if (polls <= 2) {
+      clock += 6000;
+      throw Object.assign(new Error("Fixture response timeout"), { code: "REQUEST_TIMEOUT", serviceBusy: true });
+    }
+    return subscription([event(1, "terminal", { status: "completed", resultSummary: "finished", errorCode: null })]);
+  }, { readinessNow: () => clock, sendLatencyDiagnostics: { record: sample => samples.push(sample), async close() {} } });
+  const finals = [];
+  await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "observer pressure fixture", null,
+    { final: text => finals.push(text) });
+  assert.deepEqual(finals, ["finished"]);
+  assert.deepEqual(samples.filter(sample => sample.stage.startsWith("client_observer_")).map(sample => [sample.stage, sample.durationMs]),
+    [["client_observer_response_backpressure", 6000]]);
+  assert.equal(calls.filter(call => call.request.method === "chat.send").length, 1);
+  assert.ok(!calls.some(call => call.request.method === "run.abort"));
 });
 
 test("STREAM_RESET consumes its snapshot without duplicating live events and terminal history can fill missing text", async () => {
@@ -6434,10 +6523,63 @@ test("abortChat finds a queued run and sends its exact id to chat.abort", async 
     }
     throw new Error(`unexpected ${request.method}`);
   });
-  await backend.abortChat(`agent:shoggoth-default:${SESSION_A}`);
+  assert.deepEqual(await backend.abortChat(`agent:shoggoth-default:${SESSION_A}`),
+    { stateAuthority: "native-service", status: "terminal", runId: queued.id, runStatus: "canceled" });
   assert.equal(aborts.length, 1);
   assert.equal(aborts[0].runId, "run-queued");
   assert.equal(aborts[0].sessionKey, SESSION_A);
+});
+
+test("native Stop resolves the original receipt after reload and observes projection without a second stop", async () => {
+  let receipt, projected = false, missing = false, cancellations = 0;
+  const { backend, calls } = await readyBackend(request => {
+    if (request.method === "chat.operation.get") {
+      assert.equal(request.params.sessionKey, SESSION_A);
+      assert.equal(request.params.includeAcceptance, true);
+      receipt ||= { version: 1, operationId: request.params.operationId, sessionKey: SESSION_A,
+        runId: "run-original", acceptedAt: 123 };
+      if (missing || request.params.operationId !== receipt.operationId) return { status: "unresolved", run: null };
+      return projected ? { status: "found", run: run("canceled", { id: receipt.runId,
+        idempotencyKey: `shoggoth:chat-send:${receipt.operationId}` }) }
+        : { status: "accepted", run: null, receipt };
+    }
+    if (request.method === "chat.send.cancel") {
+      cancellations += 1;
+      assert.deepEqual(request.params, { operationId: receipt.operationId, sessionKey: SESSION_A });
+      return receipt;
+    }
+    if (request.method === "run.get") return { run: run("completed", { id: "run-already-finished" }) };
+    assert.fail(`unexpected ${request.method}`);
+  });
+  backend._chatAcceptanceV1 = true;
+  const key = `agent:shoggoth-default:${SESSION_A}`, idempotencyKey = "original-client-operation";
+  assert.deepEqual(await backend.abortChat(key, undefined, { idempotencyKey }),
+    { stateAuthority: "native-service", status: "verification", runId: "run-original" });
+  missing = true;
+  assert.deepEqual(await backend.abortChat(key, undefined, { idempotencyKey, observeOnly: true }),
+    { stateAuthority: "native-service", status: "verification", runId: null });
+  missing = false; projected = true;
+  assert.deepEqual(await backend.abortChat(key, undefined, { idempotencyKey, observeOnly: true }),
+    { stateAuthority: "native-service", status: "terminal", runId: "run-original", runStatus: "canceled" });
+  assert.deepEqual(await backend.abortChat(key, "run-already-finished", { observeOnly: true }),
+    { stateAuthority: "native-service", status: "terminal", runId: "run-already-finished", runStatus: "completed" });
+  assert.equal(cancellations, 1);
+  assert.equal(calls.some(({ request }) => ["chat.send", "chat.send.accept", "chat.abort", "run.list"].includes(request.method)), false);
+});
+
+test("an unconfirmed active native Stop retains the original run and approval observation", async () => {
+  const waiting = run("waiting_approval", { waitingRequestId: "waiting-approval" });
+  const { backend } = await readyBackend(request => {
+    if (request.method === "run.get") return { run: waiting };
+    if (request.method === "chat.abort") throw Object.assign(new Error("Lost Stop response"), { code: "REQUEST_TIMEOUT" });
+    assert.fail(`unexpected ${request.method}`);
+  });
+  backend._activeBySession.set(SESSION_A, { runId: waiting.id, run: waiting, status: waiting.status });
+  backend._promptByRequest.set(waiting.waitingRequestId, { runId: waiting.id, sessionKey: SESSION_A });
+  const key = `agent:shoggoth-default:${SESSION_A}`;
+  await assert.rejects(backend.abortChat(key, waiting.id), { code: "REQUEST_TIMEOUT" });
+  assert.equal(backend._activeBySession.get(SESSION_A).runId, waiting.id);
+  assert.equal(backend._promptByRequest.get(waiting.waitingRequestId).runId, waiting.id);
 });
 
 test("targeted abort cancels the queued UI Run and preserves the producer's observer and prompt", async () => {

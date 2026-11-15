@@ -178,8 +178,9 @@ for (const phase of ["handle_request", "handle_response"]) {
     const { paths, file } = fixture(t);
     const { runtimeHandleV1 } = require("../app/agent-service/runtime-handle-v1");
     let calls = 0;
-    const raw = { ...binding, host: { paths }, capabilities: { "session.resume": true },
+    const raw = { ...binding, host: { paths }, capabilities: { "session.resume": true, "session.read": true },
       subscribe() { return () => {}; }, terminated: new Promise(() => {}),
+      async sessionRead() { assert.fail("schema diagnostics should never read the session"); },
       async sessionResume() { calls++; return { session: { id: "unexpected-session" }, secret: "private-response-secret" }; },
     };
     const handle = runtimeHandleV1(raw, binding);

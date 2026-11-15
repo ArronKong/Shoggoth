@@ -48,11 +48,29 @@ class MemoryIndexRebuild extends core.MemoryIndexRebuildPolicy {
     this.index.assertConfig(this.stamp);
     if (this.closed || this.index.rebuildOwner !== this || this.index.db !== this.publishedDatabase.db) throw failed("MEMORY_SCOPE_REVOKED");
   }
-  assertSources() {
+  async captureShadowSources(shadow) {
     this.assertCurrent();
+    const descriptors = [...shadow?.publishedSources.values() || []];
+    const proof = descriptors.some(descriptor => descriptor.kind === "sessions")
+      ? await this.executor.retainSessionProof(descriptors) : null;
+    return { descriptors, proof };
+  }
+
+  assertSources(shadow, { descriptors, proof }) {
+    this.assertCurrent();
+    if (this.shadow !== shadow || (shadow?.publishedSources.size ?? 0) !== descriptors.length) {
+      throw failed("MEMORY_SCOPE_REVOKED");
+    }
     // Upstream skips files changed before their source publication. Only rows
     // actually admitted to this shadow must stay current through final commit.
-    for (const descriptor of this.shadow?.publishedSources.values() || []) this.executor.assertSnapshot(descriptor);
+    this.executor.withSessionProof(proof, descriptors, () => {
+      for (const descriptor of descriptors) {
+        if (shadow.publishedSources.get(`${descriptor.kind}:${descriptor.relative}`) !== descriptor) {
+          throw failed("MEMORY_SCOPE_REVOKED");
+        }
+        this.executor.assertSnapshot(descriptor);
+      }
+    });
   }
   resolveProviderIndexIdentities() {
     return core.resolveMemoryIndexProviderIdentities({ provider: this.provider, cacheKeyData: this.providerRuntime?.cacheKeyData,
@@ -112,7 +130,11 @@ class MemoryIndexRebuild extends core.MemoryIndexRebuildPolicy {
     await this.executor.syncSources(this.signal, { database: this.database, forceFtsOnly: this.forceFtsOnly,
       shouldSyncMemory, shouldSyncSessions, needsFullReindex, needsFullSessionReindex, progress, freshness: this.freshness,
       ...(targetArchiveFiles ? { params: { archiveFiles: targetArchiveFiles } } : {}) });
-    this.assertSources();
+    const shadow = this.shadow;
+    if (shadow) {
+      const sources = await this.captureShadowSources(shadow);
+      this.assertSources(shadow, sources);
+    } else this.assertCurrent();
     this.clearMemoryRetryState(); this.clearSessionRetryState();
   }
   async pruneEmbeddingCacheIfNeeded() { await this.executor.pruneEmbeddingCacheIfNeeded(); }
@@ -157,12 +179,18 @@ class MemoryIndexRebuild extends core.MemoryIndexRebuildPolicy {
     }
   }
 
-  publishShadow(publication, assertNativeCurrent) {
-    this.assertSources(); assertNativeCurrent();
+  async publishShadow(publication, assertNativeCurrent) {
+    this.assertCurrent(); assertNativeCurrent();
     const shadow = this.shadow;
     if (!shadow?.shadowReleased || publication.sourcePath !== shadow.shadowPath) throw failed("MEMORY_SCOPE_REVOKED");
     shadow.assertShadowPath();
-    const check = () => { this.assertSources(); assertNativeCurrent(); shadow.assertShadowPath(); };
+    const sources = await this.captureShadowSources(shadow);
+    const check = () => {
+      this.assertSources(shadow, sources);
+      assertNativeCurrent();
+      shadow.assertShadowPath();
+    };
+    check();
     core.publishMemoryDatabaseTables({ ...publication, targetDb: this.index.db,
       onBegin: check,
       withCommit: commit => {

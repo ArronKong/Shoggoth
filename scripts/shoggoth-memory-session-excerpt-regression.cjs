@@ -9,6 +9,7 @@ const test = require("node:test");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { AsyncLocalStorage } = require("node:async_hooks");
 const { A, fixture } = require("./fixtures/memory-repair-fixture.cjs");
 const { SESSION_CAPTURE_IDLE_MS, SESSION_CAPTURE_MAX_MESSAGES } = require("../app/agent-service/shoggoth-memory/session-capture.cjs");
 
@@ -42,6 +43,180 @@ const dailyNotes = f => {
 const excerpts = f => f.owner.store.list(A, { status: "active" }).filter(item => item.id.startsWith("session-excerpt-"));
 const bootstrapText = f => f.owner.bootstrap({ profileId: A, workspace: f.workspace, mainSession: true, maxSensitivity: "private" })
   .memory.map(file => file.text).join("\n");
+
+test("excerpt lookup uses a fresh worker view and keeps deleted duplicates deleted", async (t) => {
+  const f = await fixture(t);
+  const { store, sessionCapture: capture } = f.owner;
+  const session = boundSession(f);
+  for (let index = 0; index < SESSION_CAPTURE_MAX_MESSAGES + 1; index++) {
+    chatTurn(f, session, `保留每日笔记的例行检查 ${index}。`);
+  }
+  const captureScope = new AsyncLocalStorage();
+  const captureExcerpt = () => captureScope.run(true, () => capture.capture(A, session.id, { reason: "nightly" }));
+  const readView = f.owner.withAsyncMemoryReadView.bind(f.owner);
+  let releaseBackground, reads = 0, gets = 0, walks = 0;
+  const startBackground = new Promise(resolve => { releaseBackground = resolve; });
+  t.mock.method(f.owner, "withAsyncMemoryReadView", (...args) => {
+    if (captureScope.getStore()) {
+      reads++;
+      releaseBackground();
+    }
+    return readView(...args);
+  });
+  const syncGet = store.get.bind(store), syncWalk = store._filesystemStamp.bind(store);
+  t.mock.method(store, "get", (...args) => {
+    if (captureScope.getStore()) gets++;
+    return syncGet(...args);
+  });
+  t.mock.method(store, "_filesystemStamp", (...args) => {
+    if (captureScope.getStore()) walks++;
+    return syncWalk(...args);
+  });
+  const sessions = f.owner.host(A).sessions;
+  const originalRead = sessions.read.bind(sessions);
+  const expectedSource = originalRead(A, session.id);
+  let captures = 0;
+  t.mock.method(sessions, "read", (...args) => {
+    const scoped = captureScope.getStore() === true;
+    if (scoped) {
+      captures++;
+      assert.ok(f.owner.memoryViewFor(A), "tape selection must use the worker view");
+    }
+    const source = originalRead(...args);
+    if (scoped) assert.deepEqual(source, expectedSource);
+    return source;
+  });
+  const originalStamp = sessions.stamp.bind(sessions);
+  t.mock.method(sessions, "stamp", (...args) => {
+    if (captureScope.getStore()) {
+      assert.ok(f.owner.memoryViewFor(A), "session revision must never rewalk the tree at the writer fence");
+    }
+    return originalStamp(...args);
+  });
+  const background = startBackground.then(() => f.owner.withAsyncMemoryReadView(f.B, undefined, view => {
+    assert.equal(captureScope.getStore(), undefined);
+    return view.getRevisions();
+  }));
+  const excerpt = captureExcerpt().finally(releaseBackground);
+  const [result, backgroundRevision] = await Promise.all([excerpt, background]);
+  assert.ok(Number.isSafeInteger(backgroundRevision.revision), "the other Profile completed its own worker read");
+  assert.equal(reads, 1);
+  assert.equal(gets, 0);
+  assert.equal(walks, 0);
+  assert.equal(captures, 1);
+  assert.equal(excerpts(f).length, 1);
+  const item = excerpts(f)[0];
+  assert.equal(result.id, item.id);
+  await store.upsertMany([{ ...item, status: "deleted" }]);
+  // Reproduce a write that survived before its progress receipt was advanced.
+  await capture.store(A).update(`session:${session.id}`, () => ({ capturedSeq: 0, reviewedSeq: 0 }));
+  const upsert = t.mock.method(store, "upsertMany");
+  sessions.read.mock.restore();
+  assert.equal((await captureExcerpt()).id, result.id);
+  assert.equal(upsert.mock.callCount(), 0, "deleted entries remain duplicates");
+  assert.equal(excerpts(f).length, 0);
+  assert.equal((await capture.progress(A, session.id)).capturedSeq, capture.lastSeq(A, session.id));
+});
+
+test("an abort or source change during the excerpt lookup cannot write or advance capture progress", async (t) => {
+  const f = await fixture(t);
+  const { store, sessionCapture: capture } = f.owner;
+  const session = boundSession(f);
+  const hidden = chatTurn(f, session, "验证并发摘录不会保留已撤回内容。");
+  const originalRead = store.withAsyncReadView.bind(store);
+  const upsert = t.mock.method(store, "upsertMany");
+  let change;
+  t.mock.method(store, "withAsyncReadView", async (...args) => {
+    const result = await originalRead(...args);
+    // Explicitly cross the worker boundary before returning its lookup to capture.
+    change();
+    return result;
+  });
+  const stop = new AbortController();
+  const aborted = new Error("stop the isolated capture");
+  change = () => stop.abort(aborted);
+  await assert.rejects(capture.capture(A, session.id, { reason: "nightly", signal: stop.signal }),
+    error => error === aborted);
+  assert.equal((await capture.progress(A, session.id)).capturedSeq, 0);
+
+  change = () => chatTurn(f, session, "读取期间会话来源发生了变化。");
+  await assert.rejects(capture.capture(A, session.id, { reason: "nightly" }), { code: "MEMORY_SOURCE_REVOKED" });
+  assert.equal((await capture.progress(A, session.id)).capturedSeq, 0);
+  assert.equal(upsert.mock.callCount(), 0);
+  assert.equal(excerpts(f).length, 0);
+  assert.equal((await capture.progress(A, session.id)).observedSeq ?? 0, 0);
+
+  change = () => f.service.transcriptStore.setContextExcluded({ profileId: A, sessionId: session.id,
+    eventId: hidden.id, contextExcluded: true });
+  await assert.rejects(capture.capture(A, session.id, { reason: "nightly" }), { code: "MEMORY_SOURCE_REVOKED" });
+  assert.equal((await capture.progress(A, session.id)).observedSeq ?? 0, 0);
+  assert.equal(upsert.mock.callCount(), 0);
+});
+
+test("an unfinished turn can be captured after completion without another transcript append", async t => {
+  const f = await fixture(t);
+  const capture = f.owner.sessionCapture;
+  const session = boundSession(f);
+  const finished = chatTurn(f, session, "已完成的第一条。");
+  const pending = f.turn("稍后完成的第二条。", session);
+  const first = await capture.capture(A, session.id, { reason: "nightly" });
+  assert.equal(first.written, 1);
+  assert.equal((await capture.progress(A, session.id)).observedSeq, finished.seq);
+  assert.doesNotMatch(dailyNotes(f), /稍后完成/u);
+
+  await f.finish(pending);
+  assert.equal(capture.lastSeq(A, session.id), pending.event.seq);
+  assert.deepEqual(await capture.captureProfile(A, { reason: "nightly", idleMs: 0 }), { written: 1 });
+  assert.equal((await capture.progress(A, session.id)).observedSeq, pending.event.seq);
+  assert.match(dailyNotes(f), /稍后完成/u);
+});
+
+test("a memory expiry during excerpt selection fences the old tape without advancing progress", async t => {
+  const f = await fixture(t);
+  const capture = f.owner.sessionCapture;
+  const session = boundSession(f);
+  const pending = f.turn("山顶的灯塔今天开放。", session);
+  await f.finish(pending);
+  t.mock.method(f.service.conversationRecallService.historicalMemory, "now", f.now);
+  await f.owner.propose({ profileId: A, scope: "agent", content: "山顶的灯塔今天开放。", classification: "explicit",
+    sourceRefs: [pending.event.id, pending.run.id], validUntil: f.now() + 1000, type: "temporary" });
+  const originalRead = f.owner.withAsyncMemoryReadView.bind(f.owner);
+  const scan = t.mock.method(f.owner, "withAsyncMemoryReadView", async (...args) => {
+    const value = await originalRead(...args);
+    f.advance(1001);
+    return value;
+  });
+  await assert.rejects(capture.capture(A, session.id, { reason: "nightly" }), { code: "MEMORY_SOURCE_REVOKED" });
+  assert.equal((await capture.progress(A, session.id)).observedSeq ?? 0, 0);
+  assert.equal(excerpts(f).length, 0);
+  scan.mock.restore();
+  assert.equal((await capture.capture(A, session.id, { reason: "nightly" })).written, 0);
+  assert.equal((await capture.progress(A, session.id)).observedSeq, pending.event.seq);
+});
+
+test("a concurrent excerpt writer cannot be overwritten after a fresh lookup", async (t) => {
+  const f = await fixture(t);
+  const { store, sessionCapture: capture } = f.owner;
+  const session = boundSession(f);
+  chatTurn(f, session, "这是会话摘录的测试消息。");
+  // Test the writer CAS independently from the session fence, which normally
+  // also sees this competing memory write through the recall revision.
+  const sessions = f.owner.host(A).sessions;
+  t.mock.method(sessions, "stamp", () => "unchanged-session-authority");
+  const upsert = store.upsertMany.bind(store);
+  const concurrentContent = "另一位写入者已经保存了相同来源的摘录。";
+  const intercept = t.mock.method(store, "upsertMany", async (items, options) => {
+    await upsert(items.map(item => ({ ...item, content: concurrentContent })));
+    return upsert(items, options);
+  });
+  await assert.rejects(capture.capture(A, session.id, { reason: "nightly" }), { code: "MEMORY_REVISION_CONFLICT" });
+  assert.equal((await capture.progress(A, session.id)).capturedSeq, 0);
+  assert.equal(excerpts(f)[0].content, concurrentContent);
+  intercept.mock.restore();
+  await capture.capture(A, session.id, { reason: "nightly" });
+  assert.equal(excerpts(f)[0].content, concurrentContent);
+  assert.equal((await capture.progress(A, session.id)).capturedSeq, capture.lastSeq(A, session.id));
+});
 
 test("opening a new conversation keeps the previous one as an excerpt the next conversation loads", async (t) => {
   const f = await fixture(t);

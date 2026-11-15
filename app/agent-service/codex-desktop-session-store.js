@@ -7,6 +7,7 @@ const { serviceError } = require("./security");
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const ORIGINATORS = ["Codex Desktop", "codex_work_desktop", "codex_desktop"];
+const MAX_DISCOVERY_ROWS = 101;
 const fail = code => { throw serviceError(code, code); };
 const digest = value => crypto.createHash("sha256").update(value).digest("hex");
 
@@ -32,67 +33,88 @@ class CodexDesktopSessionStore {
     if (!fs.lstatSync(file).isFile() || fs.lstatSync(file).isSymbolicLink() || fs.realpathSync(file) !== file) fail("CODEX_DESKTOP_STORAGE_UNAVAILABLE");
     return file;
   }
-  query(callback, file = this.stateFile()) {
+  openDatabase(file = this.stateFile()) {
     let db;
     try {
       db = this.databaseFactory(file);
-      db.exec("PRAGMA query_only=ON");
+      db.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=100");
       const columns = new Set(db.prepare("PRAGMA table_info(threads)").all().map(row => row.name));
       if (!["id", "originator", "source", "thread_source", "archived", "title", "cwd", "created_at", "updated_at", "rollout_path"].every(key => columns.has(key))) fail("CODEX_DESKTOP_FORMAT_UNSUPPORTED");
-      return callback(db, columns);
+      const indexes = new Set(db.prepare("PRAGMA index_list(threads)").all()
+        .filter(index => index.partial === 0).map(index => index.name));
+      return { db, columns, indexes };
     } catch (error) {
-      if (String(error?.code).startsWith("CODEX_DESKTOP_")) throw error;
-      fail("CODEX_DESKTOP_STORAGE_UNAVAILABLE");
-    } finally { db?.close(); }
-  }
-  // Discovery pages are read every few seconds while the App lists sessions. A
-  // full scan of the client database blocks the Service loop for up to a second
-  // when its pages are not cached, so all pages come from one snapshot reused
-  // while the database and its WAL file are unchanged.
-  readRows({ threadId = null, after = null, limit = 100 } = {}) {
-    if (threadId) return this.selectRows({ threadId, after, limit });
-    let file;
-    try { file = this.stateFile(); } catch (error) {
+      db?.close();
       if (String(error?.code).startsWith("CODEX_DESKTOP_")) throw error;
       fail("CODEX_DESKTOP_STORAGE_UNAVAILABLE");
     }
-    const stamp = this.fileStamp(file);
-    if (this.snapshot?.stamp !== stamp) this.snapshot = { stamp, rows: this.selectRows({ limit: -1 }, file) };
-    const rows = this.snapshot.rows;
-    const start = after ? rows.findIndex(row => row.updatedAt < after.updatedAt
-      || (row.updatedAt === after.updatedAt && row.id < after.id)) : 0;
-    return start < 0 ? [] : structuredClone(rows.slice(start, start + limit));
   }
-  fileStamp(file) {
-    const stat = target => {
-      try {
-        const value = fs.lstatSync(target, { bigint: true });
-        return `${value.dev}:${value.ino}:${value.size}:${value.mtimeNs}:${value.ctimeNs}`;
-      } catch (error) { if (error.code === "ENOENT") return "-"; throw error; }
-    };
-    return `${file}|${stat(file)}|${stat(`${file}-wal`)}`;
+
+  readRows({ threadId = null, after = null, limit = 100 } = {}) {
+    let connection;
+    try {
+      connection = this.openDatabase();
+      return this.selectRows(connection, { threadId, after, limit });
+    } catch (error) {
+      if (String(error?.code).startsWith("CODEX_DESKTOP_")) throw error;
+      fail("CODEX_DESKTOP_STORAGE_UNAVAILABLE");
+    } finally { connection?.db.close(); }
   }
-  selectRows({ threadId = null, after = null, limit = 100 } = {}, file) {
-    return this.query((db, columns) => {
-      const created = columns.has("created_at_ms") ? "COALESCE(created_at_ms,created_at*1000)" : "created_at*1000";
-      const updated = columns.has("updated_at_ms") ? "COALESCE(updated_at_ms,updated_at*1000)" : "updated_at*1000";
-      const optional = name => columns.has(name) ? name : `NULL AS ${name}`;
+
+  selectRows({ db, columns, indexes }, { threadId = null, after = null, limit = 100 } = {}) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_DISCOVERY_ROWS) fail("CODEX_DESKTOP_PARAMS_INVALID");
+    const created = columns.has("created_at_ms") ? "COALESCE(created_at_ms,created_at*1000)" : "created_at*1000";
+    const hasMillis = columns.has("updated_at_ms");
+    const optional = (name, size) => columns.has(name) ? `substr(${name},1,${size}) AS ${name}` : `NULL AS ${name}`;
+    const select = (updated, timestamp, condition = "", cursorScale = 1) => {
       const values = [...ORIGINATORS];
       let where = `originator IN (${ORIGINATORS.map(() => "?").join(",")}) AND source IN ('vscode','appServer')
-        AND archived=0 AND (thread_source IS NULL OR thread_source NOT LIKE 'shoggoth:%')`;
+        AND archived=0 AND (thread_source IS NULL OR thread_source NOT LIKE 'shoggoth:%')${condition}`;
       if (threadId) { where += " AND id=?"; values.push(threadId); }
-      if (after) { where += ` AND (${updated}<? OR (${updated}=? AND id<?))`; values.push(after.updatedAt, after.updatedAt, after.id); }
-      values.push(limit);
-      return db.prepare(`SELECT id,title,cwd,rollout_path,thread_source,${created} AS createdAt,${updated} AS updatedAt,
-        ${optional("model")},${optional("reasoning_effort")},${optional("name")} FROM threads
-        WHERE ${where} ORDER BY ${updated} DESC,id DESC LIMIT ?`).all(...values).map(row => {
-        if (!UUID.test(row.id) || !Number.isSafeInteger(row.createdAt) || row.createdAt < 0
-          || !Number.isSafeInteger(row.updatedAt) || row.updatedAt < row.createdAt
-          || typeof row.cwd !== "string" || !path.isAbsolute(row.cwd) || row.cwd.includes("\0")
-          || Buffer.byteLength(row.cwd) > 4096) fail("CODEX_DESKTOP_FORMAT_UNSUPPORTED");
-        return row;
-      });
-    }, file);
+      if (after) {
+        const time = Math.floor(after.updatedAt / cursorScale);
+        if (time * cursorScale === after.updatedAt) {
+          where += ` AND (${timestamp},id)<(?,?)`;
+          values.push(time, after.id);
+        } else {
+          where += ` AND ${timestamp}<=?`;
+          values.push(time);
+        }
+      }
+      // Prefer shipped Codex indexes for this order; the optimizer can otherwise
+      // choose the archived index and sort every row despite the page's LIMIT.
+      const index = `idx_threads_${timestamp}`;
+      const hint = !threadId && indexes.has(index) ? ` INDEXED BY ${index}` : "";
+      return db.prepare(`SELECT id,substr(title,1,512) AS title,
+        CASE WHEN length(CAST(cwd AS BLOB))<=4096 THEN cwd END AS cwd,
+        ${threadId ? "rollout_path,thread_source," : ""}${created} AS createdAt,${updated} AS updatedAt,
+        ${optional("model", 512)},${optional("reasoning_effort", 32)},${optional("name", 512)} FROM threads${hint}
+        WHERE ${where}${threadId ? "" : ` ORDER BY ${timestamp} DESC,id DESC`} LIMIT ?`).all(...values, limit);
+    };
+    let rows;
+    if (threadId) {
+      const updated = hasMillis ? "COALESCE(updated_at_ms,updated_at*1000)" : "updated_at*1000";
+      rows = select(updated, "updated_at");
+    } else if (!hasMillis) {
+      rows = select("updated_at*1000", "updated_at", "", 1000);
+    } else {
+      // Keep both native index orders usable while retaining the legacy
+      // seconds fallback for databases still containing NULL milliseconds.
+      rows = select("updated_at_ms", "updated_at_ms", " AND updated_at_ms IS NOT NULL");
+      if (!indexes.has("idx_threads_updated_at_ms") || db.prepare(
+        "SELECT 1 FROM threads INDEXED BY idx_threads_updated_at_ms WHERE updated_at_ms IS NULL LIMIT 1",
+      ).get()) {
+        rows.push(...select("updated_at*1000", "updated_at", " AND updated_at_ms IS NULL", 1000));
+        rows.sort((left, right) => right.updatedAt - left.updatedAt || (left.id < right.id ? 1 : -1));
+        rows.length = Math.min(rows.length, limit);
+      }
+    }
+    for (const row of rows) {
+      if (typeof row.id !== "string" || !UUID.test(row.id) || !Number.isSafeInteger(row.createdAt) || row.createdAt < 0
+        || !Number.isSafeInteger(row.updatedAt) || row.updatedAt < row.createdAt
+        || typeof row.cwd !== "string" || !path.isAbsolute(row.cwd) || row.cwd.includes("\0")) fail("CODEX_DESKTOP_FORMAT_UNSUPPORTED");
+    }
+    return rows;
   }
   get(threadId) {
     if (!UUID.test(threadId)) fail("CODEX_DESKTOP_NOT_FOUND");

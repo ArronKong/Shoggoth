@@ -93,3 +93,33 @@ for (const [name, changed] of [
     f.finish(later);
   });
 }
+
+for (const gap of ["owner edit", "requester revision", "capability withdrawal"]) {
+  test(`borrowed forget rejects ${gap} after worker preflight without committing suppression`, { timeout: 30000 }, async t => {
+    const f = await fixture(t);
+    const target = f.write(SOURCE, `${FACT}\n`), run = f.run();
+    const found = await f.owner.searchMemory(f.input(run));
+    const borrowed = found.results.find(result => result.borrowed && result.ownerProfileId === f.B && result.snippet.includes(FACT));
+    assert.ok(borrowed);
+    const broker = f.owner.sharing, read = broker.withDependencyReadViews;
+    const revision = f.owner.store.getRevision(f.A);
+    let revoked = false;
+    const assertCurrent = () => {
+      if (revoked) throw Object.assign(new Error("test capability withdrawn"), { code: "HOST_CAPABILITY_REVOKED" });
+    };
+    broker.withDependencyReadViews = async function (...args) {
+      const proof = await read.apply(this, args);
+      if (gap === "owner edit") fs.appendFileSync(target, "The real lender input has changed.\n");
+      else if (gap === "requester revision") fs.appendFileSync(path.join(f.owner.store.workspace(f.A), "MEMORY.md"), "A new requester fact.\n");
+      else revoked = true;
+      return proof;
+    };
+    try {
+      await assert.rejects(broker.forget({ ...f.input(run), id: borrowed.sourceRef, expectedRevision: revision, assertCurrent }, "forget-preflight-gap"),
+        { code: gap === "capability withdrawal" ? "HOST_CAPABILITY_REVOKED" : "MEMORY_REVISION_CONFLICT" });
+    } finally { broker.withDependencyReadViews = read; }
+    assert.equal(broker.suppressionCurrent(f.A, "forget-preflight-gap"), false);
+    assert.equal(broker.runs.get(run.id).revoked, false);
+    f.finish(run);
+  });
+}

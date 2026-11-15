@@ -6,6 +6,7 @@ const { transaction } = require("../inspiration-database");
 const { core } = require("./host.cjs");
 
 const failed = code => Object.assign(new Error(code), { code });
+const OVERSIZED_SESSION_PROOF = Symbol("oversized session read");
 
 function safeEmbeddingError(error) {
   for (let current = error, depth = 0; current && depth < 4; current = current.cause, depth++) {
@@ -176,7 +177,10 @@ class MemoryIndexEmbedding extends core.MemoryManagerEmbeddingOps {
         if (request.type === "session.current") {
           if (request.input.agentId !== this.agentId) throw failed("MEMORY_SCOPE_REVOKED");
           const descriptor = this.sourceJobs.getStore()?.get(`sessions:${index.sessionPath(request.input.sessionId)}`);
-          this.assertSnapshot(descriptor);
+          if (!descriptor) throw failed("MEMORY_SCOPE_REVOKED");
+          const proof = await this.retainSessionProof([descriptor]);
+          assertResourceCurrent(); assertCurrent();
+          this.withSessionProof(proof, [descriptor], () => this.assertSnapshot(descriptor));
           return "current";
         }
         if (request.type !== "cache.read") throw new Error("Unsupported memory embedding cache read");
@@ -214,21 +218,40 @@ class MemoryIndexEmbedding extends core.MemoryManagerEmbeddingOps {
         this.assertCurrent(); assertCurrent();
         const revision = expectedRevision();
         if (revision === undefined) return;
+        const candidates = mutation.kind === "upsert" ? this.candidateScopes.getStore() : null;
+        if (mutation.kind === "upsert" && !candidates) throw failed("MEMORY_SCOPE_REVOKED");
+        const sessionDescriptors = new Set();
+        for (const entry of mutation.kind === "upsert" ? mutation.entries : []) {
+          if (entry.sessionId === undefined) continue;
+          for (const candidate of candidates.get(entry.hash) || []) {
+            if (candidate.kind === "sessions" && entry.sessionId === index.sessionIdForPath(candidate.relative)) {
+              sessionDescriptors.add(candidate);
+            }
+          }
+        }
+        const proof = sessionDescriptors.size ? await this.retainSessionProof(sessionDescriptors) : null;
+        this.assertCurrent(); assertCurrent();
         // Upstream cache transactions do not take the source-mutation lease:
         // cache work can continue while a fused reader owns published rows.
         transaction(db, () => {
           this.assertCurrent(); assertCurrent();
+          const currentRevision = expectedRevision();
+          if (currentRevision === undefined) return;
+          if (currentRevision !== revision) { invalidate(); return; }
           if (db.prepare("SELECT revision FROM memory_index_state WHERE id=1").get().revision !== revision) { invalidate(); return; }
           if (mutation.kind === "clear") core.clearMemoryEmbeddingCacheIdentities(db, mutation.identities);
           else if (mutation.kind === "upsert") {
-            const candidates = this.candidateScopes.getStore();
-            if (!candidates) throw failed("MEMORY_SCOPE_REVOKED");
             const valid = new Map();
-            const entries = mutation.entries.filter(entry => (candidates.get(entry.hash) || []).some(candidate => {
-              if (entry.sessionId !== (candidate.kind === "sessions" ? index.sessionIdForPath(candidate.relative) : undefined)) return false;
-              if (!valid.has(candidate)) valid.set(candidate, this.snapshotCurrent(candidate));
-              return valid.get(candidate);
-            }));
+            const entries = this.withSessionProof(proof, sessionDescriptors,
+              () => mutation.entries.filter(entry => (candidates.get(entry.hash) || []).some(candidate => {
+                if (entry.sessionId !== (candidate.kind === "sessions" ? index.sessionIdForPath(candidate.relative) : undefined)) return false;
+                if (!valid.has(candidate)) {
+                  const current = this.snapshotCurrent(candidate);
+                  if (!current && candidate.kind === "sessions") this.markSessionsForRetry([candidate]);
+                  valid.set(candidate, current);
+                }
+                return valid.get(candidate);
+              })));
             core.upsertMemoryEmbeddingCache({ db, ...mutation.header, now: index.host.database.now(), entries: () => entries });
           }
           else throw new Error("Unsupported memory embedding cache mutation");
@@ -239,17 +262,19 @@ class MemoryIndexEmbedding extends core.MemoryManagerEmbeddingOps {
         const descriptor = this.sourceJobs.getStore()?.get(`${replacement.source}:${replacement.entry.path}`);
         if (!descriptor || replacement.entry.hash !== descriptor.snapshot.hash) throw failed("MEMORY_SOURCE_CHANGED");
         if (!await prepare()) return null;
+        const descriptors = [descriptor];
+        const proof = descriptor.kind === "sessions" ? await this.retainSessionProof(descriptors) : null;
         this.assertCurrent(); assertCurrent();
-        if (!this.snapshotCurrent(descriptor)) {
-          if (descriptor.kind === "sessions") throw failed("MEMORY_SESSION_CHANGED");
-          this.dirty = true; return null;
-        }
+        const current = () => this.withSessionProof(proof, descriptors, () => {
+          if (descriptor.kind === "sessions") { this.assertSnapshot(descriptor); return true; }
+          if (this.snapshotCurrent(descriptor)) return true;
+          this.dirty = true;
+          return false;
+        });
+        if (!current()) return null;
         const result = await resource.withMutation(() => transaction(db, () => {
           this.assertCurrent(); assertCurrent();
-          if (!this.snapshotCurrent(descriptor)) {
-            if (descriptor.kind === "sessions") throw failed("MEMORY_SESSION_CHANGED");
-            this.dirty = true; return null;
-          }
+          if (!current()) return null;
           const beforeRevision = db.prepare("SELECT revision FROM memory_index_state WHERE id=1").get().revision;
           resource.publication.replaceRows(replacement, replacement.chunks.map((chunk, position) => ({ chunk, embedding: replacement.embeddings[position] || [] })));
           if (resource.embeddingDimensions) db.prepare("INSERT OR REPLACE INTO memory_index_meta VALUES ('shoggoth-vector-dimensions',?)").run(String(resource.embeddingDimensions));
@@ -365,6 +390,44 @@ class MemoryIndexEmbedding extends core.MemoryManagerEmbeddingOps {
     if (!descriptor) throw failed("MEMORY_SCOPE_REVOKED");
     if (!this.snapshotCurrent(descriptor)) throw failed(descriptor.kind === "sessions" ? "MEMORY_SESSION_CHANGED" : "MEMORY_SOURCE_CHANGED");
   }
+  markSessionsForRetry(descriptors) {
+    for (const descriptor of descriptors) {
+      if (descriptor?.kind !== "sessions") continue;
+      this.sessionsDirty = true;
+      this.sessionsDirtyFiles.add(path.join(this.workspaceDir, ".session-source", this.index.sessionIdForPath(descriptor.relative)));
+    }
+  }
+  async retainSessionProof(descriptors) {
+    const signal = core.memoryEmbeddingExecutionSignal(this.lifetime.signal);
+    try {
+      return await this.index.withAsyncCandidateReadView(signal, view => {
+        this.assertCurrent();
+        if (!view && this.index.host.withSessionReadView) throw failed("MEMORY_SCAN_UNAVAILABLE");
+        view?.assertFilesCurrent();
+        return view?.retainProof();
+      });
+    } catch (error) {
+      this.assertCurrent();
+      signal?.throwIfAborted();
+      if (error?.code === "MEMORY_SCAN_TOO_LARGE") return OVERSIZED_SESSION_PROOF;
+      if (["MEMORY_SCAN_BUSY", "MEMORY_SCAN_UNAVAILABLE", "MEMORY_REVISION_CONFLICT",
+        "MEMORY_READ_VIEW_STALE"].includes(error?.code)) this.markSessionsForRetry(descriptors);
+      throw error;
+    }
+  }
+  withSessionProof(proof, descriptors, read) {
+    try {
+      // Pre-existing workspaces above the worker bound keep one authoritative
+      // synchronous view at the use boundary; every other scan error fails closed.
+      if (proof === OVERSIZED_SESSION_PROOF) return this.index.withCandidateReadView(read);
+      return proof ? proof.read(read) : read();
+    } catch (error) {
+      if (["MEMORY_REVISION_CONFLICT", "MEMORY_READ_VIEW_STALE", "MEMORY_SESSION_CHANGED"].includes(error?.code)) {
+        this.markSessionsForRetry(descriptors);
+      }
+      throw error;
+    }
+  }
   beginSyncProviderGeneration(options) {
     const previous = this.syncProviderGeneration;
     super.beginSyncProviderGeneration(options);
@@ -389,7 +452,7 @@ class MemoryIndexEmbedding extends core.MemoryManagerEmbeddingOps {
     }
     return prepared;
   }
-  withCandidates(candidates, generation, action) {
+  async withCandidates(candidates, generation, action) {
     const descriptors = new Set(), hashes = new Map();
     for (const candidate of candidates) {
       const descriptor = this.sourceJobs.getStore()?.get(`${candidate.source}:${candidate.entry.path}`);
@@ -399,9 +462,13 @@ class MemoryIndexEmbedding extends core.MemoryManagerEmbeddingOps {
       if (!entries.includes(descriptor)) entries.push(descriptor);
       hashes.set(candidate.chunk.hash, entries);
     }
+    const proof = [...descriptors].some(descriptor => descriptor.kind === "sessions")
+      ? await this.retainSessionProof(descriptors) : null;
     return this.candidateScopes.run(hashes, () => core.withMemoryEmbeddingExecution({
       signal: core.memoryEmbeddingExecutionSignal(), assertCurrent: () => this.index.assertConfig(this.stamp),
-      assertRequestCurrent: () => { for (const descriptor of descriptors) this.assertSnapshot(descriptor); },
+      assertRequestCurrent: () => this.withSessionProof(proof, descriptors, () => {
+        for (const descriptor of descriptors) this.assertSnapshot(descriptor);
+      }),
     }, async () => {
       const vectors = await action(); this.assertCurrent();
       const dimensions = generation.embeddingDimensions ?? vectors[0]?.length;

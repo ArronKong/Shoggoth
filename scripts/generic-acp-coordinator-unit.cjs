@@ -75,8 +75,8 @@ function cleanupPeers(root, peer) {
 function serviceFor(f) {
   const service = createAgentService({ paths: f.paths, runtimeStorageHomedir: f.root,
     parentEnv: { HOME: f.root, PATH: "/usr/bin:/bin" }, safeStorage });
-  const acquire = service.runtimeManager.acquire.bind(service.runtimeManager); service.fixtureAcquireErrors = [];
-  service.runtimeManager.acquire = async (...args) => { try { return await acquire(...args); }
+  const acquire = service.runtimeManager.acquireObserved.bind(service.runtimeManager); service.fixtureAcquireErrors = [];
+  service.runtimeManager.acquireObserved = async (...args) => { try { return await acquire(...args); }
     catch (error) { service.fixtureAcquireErrors.push(error.code || "UNCLASSIFIED"); throw error; } };
   return service;
 }
@@ -149,16 +149,18 @@ function observe(service, runId) {
   events.push(...subscription.events); return { events, close: subscription.unsubscribe };
 }
 async function childWorker(root, stage) {
-  const f = { root, paths: pathsFor(root) }, service = serviceFor(f), acquire = service.runtimeManager.acquire.bind(service.runtimeManager), wrappers = new WeakMap();
+  const f = { root, paths: pathsFor(root) }, service = serviceFor(f);
+  const acquire = service.runtimeManager.acquireObserved.bind(service.runtimeManager), wrappers = new WeakMap();
   let profile, session;
   const checkpoint = phase => {
     const run = service.productStore.listWorkRuns({ profileId: profile.id })[0];
     write(path.join(root, "checkpoint.json"), { phase, runId: run.id, profile, sessionKey: session.sessionKey, sessionId: session.id,
       runtimeAttemptRef: run.runtimeAttemptRef, runtimeSessionRef: run.runtimeSessionRef, runtimeTurnRef: run.runtimeTurnRef });
   };
-  service.runtimeManager.acquire = async (...args) => {
-    const handle = await acquire(...args); if (!handle.capabilities["turn.start.prepare"]) return handle;
-    if (wrappers.has(handle)) return wrappers.get(handle);
+  service.runtimeManager.acquireObserved = async (...args) => {
+    const observed = await acquire(...args), { handle } = observed;
+    if (!handle.capabilities["turn.start.prepare"]) return observed;
+    if (wrappers.has(handle)) return { ...observed, handle: wrappers.get(handle) };
     const wrapped = { ...handle, async turnStart(input, observer) {
       const controlled = { ...observer,
         async onPrepared(dto) { await observer.onPrepared(dto); if (stage === "prepared") { checkpoint("prepared"); await new Promise(() => {}); } },
@@ -169,7 +171,7 @@ async function childWorker(root, stage) {
       if (stage === "terminal") { checkpoint("terminal_durable"); await new Promise(() => {}); }
       return result;
     } };
-    wrappers.set(handle, wrapped); return wrapped;
+    wrappers.set(handle, wrapped); return { ...observed, handle: wrapped };
   };
   await service.start(); profile = profileFor(service, f); session = sessionFor(service, f, profile);
   await service.workRunCoordinator.send({ sessionKey: session.sessionKey, operationId: "coordinator-send", prompt: "Controlled coordinator task" });
@@ -410,14 +412,14 @@ if (process.argv[2] === "--worker") {
         const executions = coordinator.runExecutionStore, putAttempt = executions.putAttempt.bind(executions);
         executions.putAttempt = async (...args) => { await putAttempt(...args); enteredResolve(); await held; };
       } else {
-        const acquire = service.runtimeManager.acquire.bind(service.runtimeManager), wrapped = new WeakSet();
-        service.runtimeManager.acquire = async (...args) => {
-          const handle = await acquire(...args), bridge = handle.host?.acpBridge;
+        const acquire = service.runtimeManager.acquireObserved.bind(service.runtimeManager), wrapped = new WeakSet();
+        service.runtimeManager.acquireObserved = async (...args) => {
+          const observed = await acquire(...args), { handle } = observed, bridge = handle.host?.acpBridge;
           if (handle.capabilities["turn.start.prepare"] && bridge && !wrapped.has(bridge)) {
             wrapped.add(bridge); const prepareTurn = bridge.prepareTurn.bind(bridge);
             bridge.prepareTurn = async (...params) => { await prepareTurn(...params); enteredResolve(); await held; };
           }
-          return handle;
+          return observed;
         };
       }
       const ack = await coordinator.send({ sessionKey: session.sessionKey, operationId: "coordinator-send", prompt: "Controlled suspended preparation" });
@@ -521,12 +523,12 @@ if (process.argv[2] === "--worker") {
       const closed = new Promise(resolve => worker.once("close", resolve)); worker.kill("SIGKILL"); await closed; worker = null;
       cleanupPeers(f.root, f.peer);
       const rawBefore = rawLedgerEvidence(); assert(rawBefore.some(value => value.file.endsWith(".json")));
-      service = serviceFor(f); const acquire = service.runtimeManager.acquire.bind(service.runtimeManager);
+      service = serviceFor(f); const acquire = service.runtimeManager.acquireObserved.bind(service.runtimeManager);
       const ledgerUncertainty = Object.assign(Error("Controlled uncertain private-file recovery evidence"), { code: "RUNTIME_LEDGER_UNCERTAIN" });
       const controlled = recoveryFailure === "ledger" ? ledgerUncertainty
         : Object.assign(Error("Controlled process stop remains unconfirmed"), { code: "RUNTIME_STOP_UNCONFIRMED", cause: ledgerUncertainty });
       let acquireFailures = 0;
-      service.runtimeManager.acquire = async (...args) => {
+      service.runtimeManager.acquireObserved = async (...args) => {
         if (args[0]?.runtime === runtime) { acquireFailures++; throw controlled; }
         return acquire(...args);
       };

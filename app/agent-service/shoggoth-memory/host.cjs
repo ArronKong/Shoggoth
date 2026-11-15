@@ -12,7 +12,8 @@ const { assertNoBorrowedMemoryWrite } = require("./borrowed-memory-provenance.cj
 const sha256 = value => crypto.createHash("sha256").update(value).digest("hex");
 
 class ShoggothMemoryHost {
-  constructor({ database, paths, profileId, workspaceDir, roster, sessions, sourceSessionsVisible, assertCurrent = () => {} }) {
+  constructor({ database, paths, profileId, workspaceDir, roster, sessions, sourceSessionsVisible,
+    withSessionReadView, assertCurrent = () => {} }) {
     this.database = database;
     this.paths = paths;
     this.profileId = profileId;
@@ -20,6 +21,7 @@ class ShoggothMemoryHost {
     this.roster = roster;
     this.sessions = sessions;
     this.sourceSessionsVisible = sourceSessionsVisible;
+    this.withSessionReadView = withSessionReadView;
     this.assertAuthority = assertCurrent;
     this.fileEvidence = new AsyncLocalStorage();
   }
@@ -460,25 +462,72 @@ class ShoggothMemoryHost {
   }
   buildSessionEntry(absolutePath, options) {
     const relative = this.assertSessionSource(absolutePath, options);
-    const value = this.sessions.read(options.agentId, options.sessionId);
-    this.rememberActualRead(relative, value?.content, "sessions");
-    return { ...value, absPath: absolutePath, path: relative, sessionId: options.sessionId };
+    const signal = this.withSessionReadView
+      ? core.memoryEmbeddingExecutionSignal(this.searchIndex.lifetime.signal) : undefined;
+    const read = () => {
+      signal?.throwIfAborted();
+      if (signal) core.assertMemoryEmbeddingExecutionCurrent();
+      this.assertSessionSource(absolutePath, options);
+      const value = this.sessions.read(options.agentId, options.sessionId);
+      this.rememberActualRead(relative, value?.content, "sessions");
+      return { ...value, absPath: absolutePath, path: relative, sessionId: options.sessionId };
+    };
+    return this.withSessionReadView ? this.withSessionReadView(signal, read) : read();
   }
-  statSessionEntrySync(absolutePath, options) {
+  statSessionEntrySync(absolutePath, options, capture) {
     const relative = this.assertSessionSource(absolutePath, options);
-    return { ...this.sessions.stat(options.agentId, options.sessionId), absPath: absolutePath, path: relative, sessionId: options.sessionId };
-  }
-  async readMemoryTranscriptStatsInWorker(targets) {
-    this.assertCurrent();
-    const stats = targets.map(target => {
-      this.assertSessionSource(path.join(this.workspaceDir, ".session-source", target.sessionId), target);
-      if (this.sessions.transcriptStats) return this.sessions.transcriptStats(target.agentId, target.sessionId);
-      const value = this.sessions.stat(target.agentId, target.sessionId);
-      return { eventCount: value.lineMap?.length || 0, sizeBytes: value.size,
-        ...(value.revisionMs === undefined ? {} : { maxSeq: value.revisionMs }) };
+    const read = () => {
+      this.assertSessionSource(absolutePath, options);
+      return { ...this.sessions.stat(options.agentId, options.sessionId), absPath: absolutePath, path: relative, sessionId: options.sessionId };
+    };
+    if (!capture?.asyncSessionView || !this.withSessionReadView) return read();
+    const signal = core.memoryEmbeddingExecutionSignal(this.searchIndex.lifetime.signal);
+    return this.withSessionReadView(signal, () => {
+      signal.throwIfAborted();
+      core.assertMemoryEmbeddingExecutionCurrent();
+      return read();
     });
+  }
+  async readMemoryTranscriptStatsInWorker(targets, startup) {
     this.assertCurrent();
-    return stats;
+    const sessionIds = targets.map(target => {
+      this.assertSessionSource(path.join(this.workspaceDir, ".session-source", target.sessionId), target);
+      return target.sessionId;
+    });
+    if (!sessionIds.length) return [];
+    const captureStartup = startup && this.withSessionReadView;
+    const signal = this.withSessionReadView
+      ? core.memoryEmbeddingExecutionSignal(this.searchIndex.lifetime.signal) : undefined;
+    const read = () => {
+      if (signal) {
+        signal.throwIfAborted();
+        core.assertMemoryEmbeddingExecutionCurrent();
+      }
+      this.assertCurrent();
+      if (captureStartup) startup.assertCurrent();
+      // Product transcript authority stays on the Service. Every session can
+      // use the same worker-verified file memory projection for recall policy.
+      const stats = sessionIds.map(sessionId => {
+        if (captureStartup) {
+          const pathName = this.searchIndex.sessionPath(sessionId);
+          const absPath = path.join(this.workspaceDir, ".session-source", sessionId);
+          const entry = this.sessions.read(this.profileId, sessionId);
+          if (!startup.indexedPaths.has(pathName)) {
+            this.rememberActualRead(pathName, entry?.content, "sessions");
+            if (entry && !startup.isIndexable(entry)) return null;
+          }
+          return { absPath, path: pathName, mtimeMs: entry?.mtimeMs, size: entry?.size, revisionMs: entry?.revisionMs };
+        }
+        if (this.sessions.transcriptStats) return this.sessions.transcriptStats(this.profileId, sessionId);
+        const value = this.sessions.stat(this.profileId, sessionId);
+        return { eventCount: value.lineMap?.length || 0, sizeBytes: value.size,
+          ...(value.revisionMs === undefined ? {} : { maxSeq: value.revisionMs }) };
+      });
+      this.assertCurrent();
+      if (captureStartup) startup.assertCurrent();
+      return captureStartup ? { startupStates: stats } : stats;
+    };
+    return this.withSessionReadView ? this.withSessionReadView(signal, read) : read();
   }
   onInternalSessionTranscriptUpdate(listener) {
     this.assertCurrent();
@@ -615,16 +664,16 @@ class ShoggothMemoryHost {
     this.assertIndexTarget(target); signal?.throwIfAborted();
     const candidates = await core.searchChunksByEmbedding({ db: this.searchIndex.db, ...query,
       sourceFilter: this.searchIndex.constrainSourceFilter?.(query.sourceFilter, undefined, "chunk") ?? query.sourceFilter, signal });
-    return this.searchIndex.admitCandidates(candidates);
+    return this.searchIndex.admitCandidates(candidates, signal);
   }
   runMemoryRecallMetadata(target, query, signal) { this.assertIndexTarget(target); signal?.throwIfAborted(); return this.searchIndex.recallMetadata(query); }
-  runMemoryCuratedCandidates(target, query) {
+  async runMemoryCuratedCandidates(target, query, signal) {
     this.assertIndexTarget(target);
     const read = query.projectsOnly ? core.readCuratedProjectMemoryCandidates : core.readCuratedMemoryTriggerCandidates;
     const rows = this.searchIndex.readCuratedCandidates(read, 512, query.activeProjectKeys);
-    const admitted = new Set(this.searchIndex.admitCandidates(rows.map(row => ({ ...row,
+    const admitted = new Set((await this.searchIndex.admitCandidates(rows.map(row => ({ ...row,
       source: "memory", startLine: row.start_line, endLine: row.end_line, snippet: row.text,
-    }))).map(result => result.id));
+    })), signal)).map(result => result.id));
     return { rows: rows.filter(row => admitted.has(row.id)).slice(0, query.limit), provenanceRepairPending: false };
   }
   log(level, subsystem, message) { this.assertCurrent(); this.searchIndex?.logger?.[level]?.(`[${subsystem}] ${message}`); }

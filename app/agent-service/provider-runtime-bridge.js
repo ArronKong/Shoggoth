@@ -108,6 +108,7 @@ class ProviderRuntimeBridge {
     runtimeAccountId,
     configurationMode = "overlay",
     executionContract = null,
+    runtimeVersion,
   }) {
     assertRuntimeProfileId(runtimeProfileId);
     if (!validRuntimeAccountId(runtimeAccountId)) {
@@ -208,7 +209,7 @@ class ProviderRuntimeBridge {
           credentialEnv,
         },
       };
-      const configured = this.configWriter.overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig });
+      const configured = this.configWriter.overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig, runtimeVersion });
       let spawnEnv = plaintext === null ? {} : { [credentialEnv]: plaintext };
       let registeredSecrets = plaintext === null ? [] : [plaintext];
       if (provider.kind === "amazon-bedrock") {
@@ -220,7 +221,8 @@ class ProviderRuntimeBridge {
         registeredSecrets: Object.freeze(registeredSecrets),
         runtimeConfig,
         configArgs: configured.args || Object.freeze([]),
-        ...(configured.requiresUserApproval ? { requiresUserApproval: true } : {}),
+        ...(configured.providerCapabilities ? { providerCapabilities: configured.providerCapabilities } : {}),
+        ...(configured.modelCatalog ? { modelCatalog: configured.modelCatalog } : {}),
         mcpBootstrap: configured.mcpBootstrap ?? null,
         assertCurrent,
         executionProviderRoute,

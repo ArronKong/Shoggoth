@@ -2,6 +2,7 @@
 
 const path = require("node:path");
 const { serviceError } = require("./security");
+const { MCP_AUTH_STORAGE_CODES } = require("./mcp-helper-diagnostics");
 
 const MCP_CRYPTO_PROTOCOL_VERSION = 1;
 const MCP_CRYPTO_GATE_BYTES = 32;
@@ -130,7 +131,7 @@ function decodeWorkerRequestFrame(frame, gate) {
   return Object.freeze({ request, payload: Buffer.from(frame.subarray(newline + 1)) });
 }
 
-function encodeWorkerResponse({ gate, secret = null, payload = null, ok }) {
+function encodeWorkerResponse({ gate, secret = null, payload = null, ok, storageFailure = null }) {
   const validated = validateWorkerGate(gate);
   const nonce = decodeBase64Url(validated.nonce, MCP_CRYPTO_GATE_BYTES);
   const responsePayload = payload || secret;
@@ -139,7 +140,7 @@ function encodeWorkerResponse({ gate, secret = null, payload = null, ok }) {
     ? MCP_CRYPTO_RESPONSE_HEADER_BYTES + payloadLength
     : MCP_CRYPTO_ERROR_FRAME_BYTES);
   try {
-    frame[0] = ok ? 0 : 1;
+    frame[0] = ok ? 0 : 2 + MCP_AUTH_STORAGE_CODES.indexOf(storageFailure);
     frame.writeBigUInt64BE(BigInt(validated.generation), 1);
     nonce.copy(frame, 9);
     if (ok) {
@@ -180,9 +181,14 @@ function decodeWorkerResponse(frame, gate, options = {}) {
       throw cryptoError("MCP_CRYPTO_RESPONSE_INVALID");
     }
     if (frame[0] !== 0) {
-      if (frame[0] !== 1 || frame.length !== MCP_CRYPTO_ERROR_FRAME_BYTES) {
+      if (frame.length !== MCP_CRYPTO_ERROR_FRAME_BYTES) {
         throw cryptoError("MCP_CRYPTO_RESPONSE_INVALID");
       }
+      if (options.allowAuthStorageFailure && MCP_AUTH_STORAGE_CODES[frame[0] - 2]) {
+        const code = MCP_AUTH_STORAGE_CODES[frame[0] - 2];
+        throw serviceError(code, code.toLowerCase());
+      }
+      if (frame[0] !== 1) throw cryptoError("MCP_CRYPTO_RESPONSE_INVALID");
       throw cryptoError();
     }
     const payloadBytes = frame.length - MCP_CRYPTO_RESPONSE_HEADER_BYTES;

@@ -43,9 +43,13 @@ export interface ChatMediaFact {
 }
 
 /** Durable native attachment references use the app's authenticated media route. */
-export function nativeChatMedia(raw: unknown): { images: string[]; files: Array<ChatMediaFact & { src: string }>; attachments: ChatAttachment[] } {
+export function nativeChatMedia(raw: unknown): {
+  images: string[];
+  files: Array<ChatMediaFact & { src: string; nativeRef: NonNullable<ChatAttachment["nativeRef"]> }>;
+  attachments: ChatAttachment[];
+} {
   const images: string[] = [];
-  const files: Array<ChatMediaFact & { src: string }> = [];
+  const files: ReturnType<typeof nativeChatMedia>["files"] = [];
   const attachments: ChatAttachment[] = [];
   for (const item of Array.isArray(raw) ? raw : []) {
     if (!item || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(item.id)
@@ -54,10 +58,11 @@ export function nativeChatMedia(raw: unknown): { images: string[]; files: Array<
     const src = `/__api/inspirations/media?id=${encodeURIComponent(item.id)}`;
     const kind = item.mimeType.startsWith("image/") ? "image" : item.mimeType.startsWith("video/") ? "video"
       : item.mimeType.startsWith("audio/") ? "audio" : item.mimeType === "application/pdf" ? "pdf" : "file";
+    const nativeRef = { id: item.id, name: item.name, mimeType: item.mimeType, size: item.size };
     attachments.push({ id: item.id, name: item.name, mimeType: item.mimeType, sizeBytes: item.size, kind,
-      dataUrl: src, nativeRef: { id: item.id, name: item.name, mimeType: item.mimeType, size: item.size } });
+      dataUrl: src, nativeRef });
     if (item.mimeType.startsWith("image/")) images.push(src + (/^image\/hei[cf]$/.test(item.mimeType) ? "&preview=1" : ""));
-    else files.push({ name: item.name, mimeType: item.mimeType, sizeBytes: item.size, src,
+    else files.push({ name: item.name, mimeType: item.mimeType, sizeBytes: item.size, src, nativeRef,
       kind: item.mimeType.startsWith("video/") ? "video" : item.mimeType.startsWith("audio/") ? "audio" : "file" });
   }
   return { images, files, attachments };

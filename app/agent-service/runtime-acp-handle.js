@@ -195,6 +195,7 @@ async function createAcpHandle({ binding, rpc, home, workspace, stateDir, truste
     return { bridge, params: { cwd: workspace, mcpServers, ...(sessionId ? { sessionId } : {}) } };
   };
   const handle = { ...binding, host, homeIdentity: home, workspace, capabilities: caps, terminated, stop,
+    usesTurnSendGuard: true,
     authenticationState: () => { host.assertRuntimeIdentityCurrent?.(); return authentication; },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     registerServerRequestHandler(method, handler) {
@@ -324,7 +325,7 @@ async function createAcpHandle({ binding, rpc, home, workspace, stateDir, truste
       if (session.archived || input.cwd !== workspace || input.attachments?.length || !boundedId(input.operationId)) throw fail("RUNTIME_REQUIREMENT_UNSUPPORTED");
       if (observer && (!plain(observer) || observer.version !== 1 || !boundedId(observer.attemptId)
         || ["onPrepared", "onDispatchAttempt", "assertCurrent"].some(k => typeof observer[k] !== "function"))) throw fail("RUNTIME_OBSERVER_INVALID");
-      const { signal, ...payload } = input;
+      const { signal, withTurnSendGuard, ...payload } = input;
       if (signal?.aborted) throw fail("RUNTIME_TURN_CANCELED");
       let turn = session.turns.find(t => t.operationId === input.operationId);
       const prepared = promptText(input, configured.get(session.id));
@@ -398,6 +399,7 @@ async function createAcpHandle({ binding, rpc, home, workspace, stateDir, truste
           flush();
         }
         const result = await authenticatedRequest("session/prompt", params, { timeoutMs: DEFAULT_EXECUTION_TIMEOUT_MS,
+          ...(withTurnSendGuard ? { withSendGuard: (submit, guardSignal) => withTurnSendGuard("turn", submit, guardSignal) } : {}),
           onWriteAttempt() {
             assertCurrent(a); turn.facts.writeAttempted = true; flush();
             syncCall(observer?.onDispatchAttempt, a.dto); assertCurrent(a);

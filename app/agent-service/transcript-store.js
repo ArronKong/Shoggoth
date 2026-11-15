@@ -424,6 +424,7 @@ class TranscriptStore {
       lastEventSeq: 0,
       events: [],
       byId: new Map(),
+      eventIdsByRun: new Map(),
       visibleUserEventsByRun: new Map(),
       visibleNoticeCount: 0,
       indexDigests: [INDEX_CHAIN_SEED],
@@ -473,6 +474,10 @@ class TranscriptStore {
       deepFreeze(event);
       state.events.push(event);
       state.byId.set(event.id, event);
+      if (event.runId) {
+        if (!state.eventIdsByRun.has(event.runId)) state.eventIdsByRun.set(event.runId, []);
+        state.eventIdsByRun.get(event.runId).push(event.id);
+      }
       state.lastEventSeq = event.seq;
       this._updateVisibleUserRun(state, event, 1);
       if (isPublishedNoticeEvent(event)) state.visibleNoticeCount++;
@@ -824,12 +829,21 @@ class TranscriptStore {
     this._assertOpen();
     const state = this._load(profileId, sessionId);
     const includeExcluded = options.includeContextExcluded !== false;
-    return state.events
+    return this._eventsForRun(state, options.runId)
       .filter((event) => (includeExcluded || !event.contextExcluded)
-        && (options.runId === undefined || event.runId === options.runId)
         && (options.afterSeq === undefined || event.seq > options.afterSeq)
         && (options.throughSeq === undefined || event.seq <= options.throughSeq))
       .map((event) => structuredClone(event));
+  }
+
+  _eventsForRun(state, runId) {
+    if (runId === undefined) return state.events;
+    if (runId === null) return state.events.filter(event => event.runId === null);
+    return (state.eventIdsByRun.get(runId) || []).map(id => state.byId.get(id));
+  }
+
+  runEventsView(profileId, sessionId, runId) {
+    return this._eventsForRun(this._load(profileId, sessionId), runId);
   }
 
   // Read-only snapshot of the whole session for hot paths (context compile,
@@ -861,6 +875,41 @@ class TranscriptStore {
     assertId(eventId, "eventId");
     const event = this._load(profileId, sessionId).byId.get(eventId);
     return event ? structuredClone(event) : null;
+  }
+
+  // Policy refs may identify an event, a Run, both, or neither. The journal
+  // remains authoritative, including a full validated load on a cache miss.
+  matchRecallSourceRefs(profileId, sessionId, refs) {
+    const { byId, eventIdsByRun } = this._load(profileId, sessionId);
+    const events = [], runIds = [];
+    for (const ref of refs) {
+      const event = byId.get(ref);
+      if (event) events.push(event);
+      if (eventIdsByRun.has(ref)) runIds.push(ref);
+    }
+    return { events: events.sort((left, right) => left.seq - right.seq), runIds };
+  }
+
+  getCachedEvent(profileId, sessionId, eventId) {
+    this._assertOpen();
+    const state = this.sessions.get(this._sessionKey(profileId, sessionId));
+    if (!state) return undefined;
+    const source = this.cachedJournalIdentity(profileId, sessionId);
+    if (!source) return undefined;
+    return state.byId.get(assertId(eventId, "eventId")) ?? null;
+  }
+
+  cachedJournalIdentity(profileId, sessionId) {
+    const state = this.sessions.get(this._sessionKey(profileId, sessionId));
+    if (!state) return null;
+    const expected = { journal: state.journalIdentity, manifest: state.manifestIdentity };
+    return this.hasJournalIdentity(profileId, sessionId, expected) ? expected : null;
+  }
+
+  hasJournalIdentity(profileId, sessionId, expected) {
+    const targets = this._paths(profileId, sessionId);
+    return !!expected && typeof expected.journal === "string" && typeof expected.manifest === "string"
+      && this._fileIdentity(targets.log) === expected.journal && this._fileIdentity(targets.manifest) === expected.manifest;
   }
 
   hasUserEventForRun(profileId, sessionId, runId) {

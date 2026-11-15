@@ -132,6 +132,6 @@ function assertNoBorrowedMemoryWrite(...values) {
 function borrowedMemoryFingerprint(refs) {
   return crypto.createHash("sha256").update(JSON.stringify(normalizeBorrowedMemoryRefs(refs))).digest("hex");
 }
-module.exports = { normalizeBorrowedMemoryRefs, mergeBorrowedMemoryRefs, extractBorrowedMemoryRefs,
+module.exports = { MAX_REFS, normalizeBorrowedMemoryRefs, mergeBorrowedMemoryRefs, extractBorrowedMemoryRefs,
   refsFromEvents, isBorrowedMemoryDerived, isReferentialMemoryRequest, borrowedMemoryPlaceholder, isLegacyBorrowedToolContent,
   sanitizeBorrowedToolContent, assertNoBorrowedMemoryWrite, borrowedMemoryFingerprint };

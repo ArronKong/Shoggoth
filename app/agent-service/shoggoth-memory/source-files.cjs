@@ -5,6 +5,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { core } = require("./host.cjs");
 const { withMemoryObserverCleanup } = require("./host-bridge.cjs");
+const { canonicalSharedPath } = require("./shared-document.cjs");
 
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
 const inside = (root, target) => target === root || target.startsWith(root + path.sep);
@@ -332,11 +333,21 @@ class MemorySourceFiles {
       return { buffer: buffer.subarray(0, bytes), identity: byteIdentity(after), selected };
     } finally { fs.closeSync(fd); }
   }
-  read(relative) {
+  read(relative, memoryView) {
     // Product getFile, maintenance and Dreaming remain text-only even when the
     // same configured library also supplies media for semantic indexing.
     if (typeof relative !== "string" || !relative.endsWith(".md")) throw denied();
     const settings = this.settings(), stamp = this.captureSettings(settings);
+    if (memoryView?.sharedDocument && canonicalSharedPath(relative)) {
+      const selected = this.classify(relative, settings);
+      if (selected?.kind !== "memory" || fs.realpathSync.native(selected.target) !== selected.target) throw denied();
+      const stat = fs.lstatSync(selected.target);
+      if (!stat.isFile() || !owned(stat) || stat.nlink !== 1 || stat.size > MAX_SOURCE_BYTES) throw denied();
+      const text = memoryView.sharedDocument(relative);
+      if (text === undefined) throw changed();
+      this.assertSettings(stamp);
+      return { text, mtime: stat.mtimeMs, size: stat.size, mode: stat.mode, kind: selected.kind };
+    }
     const { buffer, identity, selected } = this.readBytes(relative, settings, MAX_SOURCE_BYTES, stamp);
     return { text: buffer.toString("utf8"), mtime: identity.mtimeMs,
       size: buffer.length, mode: identity.mode, kind: selected.kind };

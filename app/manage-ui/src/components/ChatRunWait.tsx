@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import "./ChatRunWait.css";
 
-import type { ChatRunWaitState } from "../lib/chatRunWait";
+import { CHAT_WAIT_REASONS, chatRunWaitActivity, type ChatRunWaitState } from "../lib/chatRunWait";
 export { chatRunWaitState, updateChatRunWait, type ChatRunWaitState } from "../lib/chatRunWait";
 
 export function ChatRunWait({ state, compact = false }: { state: ChatRunWaitState; compact?: boolean }) {
@@ -13,10 +13,15 @@ export function ChatRunWait({ state, compact = false }: { state: ChatRunWaitStat
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [state.kind]);
-  if (state.kind === "queued") return null;
+  if (state.kind === "queued") {
+    if (!chatRunWaitActivity(state)) return null;
+    const label = t(`chat.runWait.${CHAT_WAIT_REASONS[state.reason ?? ""] ?? "queued"}`);
+    return <span className={`chat-run-wait${compact ? " is-compact" : ""}`} data-testid="chat-run-wait" role="status"
+      data-kind={state.kind} title={label}>{label}</span>;
+  }
   const elapsed = Math.max(0, Math.floor((now - state.since) / 1000));
   const duration = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
-  const startupLabel = state.stage === "reconnecting" || state.stage === "compacting" ? state.stage : "thinking";
+  const startupLabel = chatRunWaitActivity(state) ? state.stage : "thinking";
   const label = t(`chat.runWait.${state.kind === "starting" ? startupLabel : state.kind}`);
   const reason = state.kind === "starting" ? ""
     : t(`chat.runWait.${state.reason === "RUNTIME_RATE_LIMITED" ? "rateLimited" : state.reason === "RUNTIME_UPSTREAM_UNAVAILABLE" ? "upstreamUnavailable" : "upstreamRetry"}`);

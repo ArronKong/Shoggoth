@@ -165,6 +165,7 @@ function workRun(overrides = {}) {
     contextSnapshotId: null,
     runtimeSessionRef: null,
     runtimeTurnRef: null,
+    runtimeAttemptRef: null,
     eventSeq: 1,
     waitingRequestId: null,
     startedAt: null,
@@ -722,6 +723,33 @@ test("cron.run.list 使用 exact run/kind/createdAt item 并锁定 retry lineage
     expectCode(() => validateDomainServiceResult("cron.run.list", {
       runs: [item], nextCursor: null, hasMore: false,
     }, params), "DOMAIN_RESPONSE_INVALID");
+  }
+});
+
+test("cron.run.list returns bounded provider detail only for a requested failed occurrence", () => {
+  const method = "cron.run.list";
+  const legacy = { ...VALID_PARAMS.get(method), status: null };
+  const params = { ...legacy, failureSinceMs: 114 };
+  const item = {
+    ...cronRunListItem({
+      run: workRun({ source: "cron", sourceId: JOB_ID, status: "failed", startedAt: 113, finishedAt: 114,
+        errorCode: "ANTIGRAVITY_REGION_UNSUPPORTED" }),
+    }),
+    sessionKey: "00000000-0000-4000-8000-000000000001",
+    failure: { message: "User location is not supported for the API use.", httpStatus: 400, upstreamCode: "FAILED_PRECONDITION" },
+  };
+  const page = value => ({ runs: [value], nextCursor: null, hasMore: false });
+  assert.deepEqual(validateDomainServiceResult(method, page(item), params), page(item));
+  expectCode(() => validateDomainServiceParams(method, { ...params, failureSinceMs: -1 }), "INVALID_PARAMS");
+  expectCode(() => validateDomainServiceResult(method, page(item), legacy), "DOMAIN_RESPONSE_INVALID");
+  expectCode(() => validateDomainServiceResult(method, page(item), { ...params, failureSinceMs: 115 }), "DOMAIN_RESPONSE_INVALID");
+  for (const failure of [
+    { ...item.failure, stack: "private" },
+    { ...item.failure, message: "例".repeat(401) },
+    { ...item.failure, httpStatus: 200 },
+    { ...item.failure, upstreamCode: "denied response" },
+  ]) {
+    expectCode(() => validateDomainServiceResult(method, page({ ...item, failure }), params), "DOMAIN_RESPONSE_INVALID");
   }
 });
 

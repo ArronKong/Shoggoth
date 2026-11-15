@@ -5,6 +5,9 @@ const { TextDecoder } = require("node:util");
 const c = require("./chat-ui-contract");
 const { createChatUiDiagnostics, diagnosticMetadata } = require("./chat-ui-diagnostics");
 const { normalizeBorrowedMemoryRefs } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
+const SOURCE_SCAN_TIMEOUT_MS = 5000;
+const DEFER_SOURCE_SCAN_CODES = new Set(["MEMORY_SCAN_BUSY", "MEMORY_SCAN_UNAVAILABLE", "MEMORY_SCAN_TOO_LARGE",
+  "MEMORY_REVISION_CONFLICT", "MEMORY_READ_VIEW_STALE", "MEMORY_TRANSACTION_UNSETTLED", "MEMORY_SHARED_SOURCE_TIMEOUT"]);
 // The existing Chat Inbox accepts these states. A Runtime handoff leaves the
 // same canonical conversation in draft until its new native session is bound.
 const sendableSession = session => ["draft", "binding", "ready"].includes(session?.status);
@@ -18,6 +21,8 @@ class ChatUiController {
       memoryEngine, getConfig, getOrigins, verifyClick, assertPublishAllowed, now });
     this.diagnostics = createChatUiDiagnostics({ sink: diagnosticSink });
     this.lifecycleSubscriptions = []; this.pendingLifecycle = new Set(); this.sourceTimer = null;
+    this.sourceController = null; this.sourceFlight = null; this.pendingSourceGroups = null;
+    this.recoveryPublications = new Set();
     this.leases = new Map(); this.listeners = new Set(); this.publicationTails = new Map(); this.deliveries = new Map();
   }
   enabled() { return !this.storageError && this.store.opened && this.getConfig()?.config?.nativeChatUiV1 === true; }
@@ -43,7 +48,7 @@ class ChatUiController {
       throw c.uiError("UI_SOURCE_EXPIRED");
     }
   }
-  _current(owner, rev, { execution = false } = {}) {
+  _assertSourceEvent(owner, rev) {
     if (rev.status !== "ready") throw c.uiError("UI_SOURCE_EXPIRED");
     const event = this.transcriptStore.getEvent(owner.profileId, owner.transcriptSessionId, rev.sourceEventId);
     if (rev.legacy) {
@@ -53,8 +58,11 @@ class ChatUiController {
       if (!event || event.contextExcluded || event.kind !== "artifact" || event.runId !== rev.creatorRunId
         || c.canonical(part) !== c.canonical(this.store.part(rev))) throw c.uiError("UI_SOURCE_EXPIRED");
     }
+  }
+  _current(owner, rev, { execution = false } = {}) {
+    this._assertSourceEvent(owner, rev);
     try { this._dependencies(owner, rev.provenance); }
-    catch (error) { this.store.revokeRevision(owner, rev.artifactId, rev.revision); this.revoke(owner, rev.artifactId, rev.revision); throw error; }
+    catch (error) { this._revokePublication(owner, rev); throw error; }
     if (execution) {
       this._enabled(); const session = this.chatSessionStore.getSession(owner.sessionKey);
       if (rev.currentEpoch !== rev.conversationEpoch || !sendableSession(session)
@@ -421,7 +429,7 @@ class ChatUiController {
     } catch (error) { this.storageError = error; this.revokeAll(); }
   }
   attachLifecycle() {
-    for (const stop of this.lifecycleSubscriptions.splice(0)) stop(); clearInterval(this.sourceTimer);
+    this.stopLifecycle(); this.sourceController = new AbortController();
     const onSession = change => {
       const identity = change.current || change.previous; if (!identity) return;
       const session = this.chatSessionStore.getSession(identity.sessionKey);
@@ -438,7 +446,7 @@ class ChatUiController {
     // Historical dependencies can change after their generating Run is gone.
     // This bounded sweep supplements durable policy notifications and lease
     // checks, and never opens or reruns a model.
-    this.sourceTimer = setInterval(() => this.reconcileSources(), 2000); this.sourceTimer.unref();
+    this.sourceTimer = setInterval(() => { if (!this.sourceFlight) this.reconcileSources(); }, 2000); this.sourceTimer.unref();
   }
   _lifecycleTask(task) {
     this.pendingLifecycle.add(task); void task.finally(() => this.pendingLifecycle.delete(task)).catch(() => {});
@@ -473,36 +481,153 @@ class ChatUiController {
       { profileId, sessionKey: pub.sessionKey, transcriptSessionId: pub.transcriptSessionId });
     for (const owner of owners.values()) this.invalidateSession(owner);
   }
-  reconcileSources() {
-    if (!this.store.opened || this.storageError) return;
+  _revokePublication(owner, pub) {
+    this.recoveryPublications.delete(pub.publicationId);
+    if (this.store.revision(owner, pub.artifactId, pub.revision).status === "revoked") return;
+    this.store.revokeRevision(owner, pub.artifactId, pub.revision);
+    this.revoke(owner, pub.artifactId, pub.revision);
+    this._cancelQueued(owner, pub.artifactId, pub.revision);
+  }
+  _pendingSourceRevision(owner, pub) {
+    const session = this.chatSessionStore.getSession(owner.sessionKey);
+    if (session?.profileId !== owner.profileId || session.id !== owner.transcriptSessionId) return null;
     try {
+      const current = this.store.revision(owner, pub.artifactId, pub.revision, pub.sourceEventId);
+      const recoverable = current.status === "preparing" && this.recoveryPublications.has(pub.publicationId);
+      return (current.status === "ready" || recoverable) && current.publicationId === pub.publicationId
+        && current.conversationEpoch === pub.conversationEpoch ? current : null;
+    } catch (error) {
+      if (!["UI_ARTIFACT_NOT_FOUND", "UI_SCOPE_MISMATCH"].includes(error.code)) throw error;
+      return null;
+    }
+  }
+  reconcileSources(startupBudget) {
+    if (!this.store.opened || this.storageError || !this.sourceController) return;
+    try {
+      const groups = new Map();
       for (const pub of this.store.publicationsForRecovery()) {
-        if (pub.status !== "ready") continue;
+        const recoverable = pub.status === "preparing" && this.recoveryPublications.has(pub.publicationId);
+        if (!recoverable && pub.status !== "ready") continue;
         const session = this.chatSessionStore.getSession(pub.sessionKey);
         const owner = { profileId: pub.profileId, transcriptSessionId: pub.transcriptSessionId, sessionKey: pub.sessionKey };
         if (!session || session.profileId !== pub.profileId || session.id !== pub.transcriptSessionId) { this.invalidateSession(owner); continue; }
-        try { this._current(owner, this.store.revision(owner, pub.artifactId, pub.revision, pub.sourceEventId)); }
-        catch (error) {
+        try {
+          const rev = this.store.revision(owner, pub.artifactId, pub.revision, pub.sourceEventId);
+          if (!recoverable) this._assertSourceEvent(owner, rev);
+          const refs = normalizeBorrowedMemoryRefs(rev.provenance.borrowedMemoryRefs || []);
+          if (!refs.length) { this._dependencies(owner, rev.provenance); continue; }
+          const owners = [...new Set(refs.map(ref => ref.ownerProfileId))].sort();
+          const key = JSON.stringify([owner.profileId, owners]);
+          if (!groups.has(key)) groups.set(key, { profileId: owner.profileId, owners, publications: [] });
+          groups.get(key).publications.push({ owner, pub });
+        } catch (error) {
           if (error.code !== "UI_SOURCE_EXPIRED") throw error;
-          if (this.store.revision(owner, pub.artifactId, pub.revision).status !== "revoked") this.store.revokeRevision(owner, pub.artifactId, pub.revision);
-          this.revoke(owner, pub.artifactId, pub.revision); this._cancelQueued(owner, pub.artifactId, pub.revision);
+          this._revokePublication(owner, pub);
         }
       }
+      if (!groups.size) return this.sourceFlight;
+      this.pendingSourceGroups = groups.values();
+      if (!this.sourceFlight) {
+        const signal = this.sourceController.signal;
+        const scanLifecycle = startupBudget ? AbortSignal.any([signal, startupBudget]) : signal;
+        const flight = this._reconcileBorrowedSources(scanLifecycle).catch(error => {
+          if (!signal.aborted) { this.storageError = error; this.revokeAll(); }
+        }).finally(() => {
+          if (this.sourceFlight !== flight) return;
+          this.sourceFlight = null;
+          if (this.pendingSourceGroups && !signal.aborted && !this.storageError) this.reconcileSources();
+        });
+        this.sourceFlight = flight;
+        this._lifecycleTask(flight);
+      }
+      return this.sourceFlight;
     } catch (error) { this.storageError = error; this.revokeAll(); }
   }
-  recover() {
+  async _reconcileBorrowedSources(signal) {
+    const sharing = this.memoryEngine?.sharing;
+    while (this.pendingSourceGroups && !signal.aborted && !this.storageError) {
+      const groups = this.pendingSourceGroups;
+      this.pendingSourceGroups = null;
+      for (const { profileId, owners, publications } of groups) {
+        if (signal.aborted || this.storageError) return;
+        let expired;
+        try {
+          if (!sharing?.withDependencyReadViews) throw c.uiError("UI_SOURCE_EXPIRED");
+          const scanSignal = AbortSignal.any([signal, AbortSignal.timeout(SOURCE_SCAN_TIMEOUT_MS)]);
+          const proof = await sharing.withDependencyReadViews(profileId, owners, scanSignal,
+            view => view.retainProof(), { requireOwners: true });
+          if (signal.aborted || this.storageError) return;
+          const recovering = [];
+          expired = proof.read(view => {
+            const revoked = publications.filter(({ owner, pub }) => {
+              const current = this._pendingSourceRevision(owner, pub);
+              if (!current) return false;
+              try {
+                if (current.status === "ready") this._assertSourceEvent(owner, current);
+                else if (current.currentEpoch !== current.conversationEpoch) throw c.uiError("UI_SOURCE_EXPIRED");
+                this._dependencies(owner, current.provenance);
+              }
+              catch (error) { if (error.code === "UI_SOURCE_EXPIRED") return true; throw error; }
+              if (current.status === "preparing") recovering.push({ owner, pub });
+              return false;
+            });
+            view.assertFilesCurrent();
+            return revoked;
+          });
+          for (const { owner, pub } of recovering) {
+            try {
+              proof.read(view => {
+                if (signal.aborted || this.storageError) return;
+                const current = this._pendingSourceRevision(owner, pub);
+                if (current?.status === "preparing") {
+                  view.assertFilesCurrent();
+                  this._publish(current, owner, false);
+                }
+              });
+              this.recoveryPublications.delete(pub.publicationId);
+            } catch (error) {
+              if (error.code !== "UI_SOURCE_EXPIRED") throw error;
+              expired.push({ owner, pub });
+            }
+          }
+        } catch (error) {
+          if (signal.aborted || this.storageError) return;
+          const stopped = [profileId, ...owners].some(id => this.memoryEngine?.profileControllers?.get(id)?.signal.aborted);
+          if (!stopped && (DEFER_SOURCE_SCAN_CODES.has(error.code) || ["AbortError", "TimeoutError"].includes(error.name))) continue;
+          if (!stopped && !["MEMORY_SHARED_SOURCE_REVOKED", "MEMORY_SCOPE_REVOKED", "UI_SOURCE_EXPIRED"].includes(error.code)) throw error;
+          expired = publications;
+        }
+        // Commit outside the read view after the current proof and artifact
+        // identity have been checked, without yielding to another request.
+        for (const { owner, pub } of expired) {
+          if (signal.aborted || this.storageError) return;
+          if (this._pendingSourceRevision(owner, pub)) this._revokePublication(owner, pub);
+        }
+      }
+    }
+  }
+  async recover() {
     this.attachLifecycle();
     for (const pub of this.store.publicationsForRecovery()) {
       if (pub.status === "revoked") continue;
       const owner = { profileId: pub.profileId, transcriptSessionId: pub.transcriptSessionId, sessionKey: pub.sessionKey };
       const session = this.chatSessionStore.getSession(pub.sessionKey);
       if (!session || session.profileId !== pub.profileId || session.id !== pub.transcriptSessionId) continue;
+      if (normalizeBorrowedMemoryRefs(pub.provenance.borrowedMemoryRefs || []).length) {
+        // Only prepares recovered from the durable journal may be completed
+        // by a later source sweep after a temporary worker failure.
+        if (pub.status === "preparing") this.recoveryPublications.add(pub.publicationId);
+        continue;
+      }
       try { this._publish(pub, owner, false); }
       catch (error) {
         if (error.code !== "UI_SOURCE_EXPIRED") throw error;
         this.store.revokeRevision(owner, pub.artifactId, pub.revision);
       }
     }
+    // Historical owner groups share one startup wait. The ordinary source
+    // sweep can resume deferred groups without delaying Service readiness.
+    await this.reconcileSources(AbortSignal.timeout(SOURCE_SCAN_TIMEOUT_MS));
   }
   revoke(owner, artifactId = null, revision = null, reason = "UI_SOURCE_EXPIRED") {
     for (const [key, lease] of this.leases) if (lease.owner.profileId === owner.profileId
@@ -515,7 +640,13 @@ class ChatUiController {
       profileId: pub.profileId, transcriptSessionId: pub.transcriptSessionId, sessionKey: pub.sessionKey }); } catch {}
     for (const owner of owners.values()) this.revoke(owner, null, null, reason); this.leases.clear();
   }
-  stopLifecycle() { clearInterval(this.sourceTimer); this.sourceTimer = null; for (const stop of this.lifecycleSubscriptions.splice(0)) stop(); }
+  stopLifecycle() {
+    clearInterval(this.sourceTimer); this.sourceTimer = null;
+    this.sourceController?.abort(); this.sourceController = null;
+    this.pendingSourceGroups = null; this.sourceFlight = null;
+    this.recoveryPublications.clear();
+    for (const stop of this.lifecycleSubscriptions.splice(0)) stop();
+  }
   async close() {
     this.stopLifecycle(); this.revokeAll();
     await Promise.allSettled([...this.pendingLifecycle, ...this.deliveries.values(), ...this.publicationTails.values()]);

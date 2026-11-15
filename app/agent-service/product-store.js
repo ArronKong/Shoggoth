@@ -752,6 +752,7 @@ class ProductStore {
   putModelProvider() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.putModelProvider 未实现"); }
   deleteModelProvider() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.deleteModelProvider 未实现"); }
   listWorkRuns() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.listWorkRuns 未实现"); }
+  iterateWorkRuns() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.iterateWorkRuns 未实现"); }
   getWorkRun() { throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.getWorkRun 未实现"); }
   getWorkRunByIdempotencyKey() {
     throw storeError("STORE_NOT_IMPLEMENTED", "ProductStore.getWorkRunByIdempotencyKey 未实现");
@@ -1345,6 +1346,19 @@ class JsonlProductStore extends ProductStore {
   getWorkRun(id) {
     this.#assertOpen();
     return workRunView(this.workRuns.get(id) || null);
+  }
+
+  *iterateWorkRuns() {
+    this.#assertOpen();
+    const existingCount = this.workRuns.size;
+    let visited = 0;
+    for (const [id, run] of this.workRuns) {
+      if (visited++ === existingCount) break;
+      // A consumer rebuilding a derived index can yield between records
+      // without copying the WorkRun collection, including non-Cron rows.
+      yield { id, source: run.source, sourceId: run.sourceId, status: run.status, finishedAt: run.finishedAt,
+        profileId: run.profileId, workspace: run.workspace };
+    }
   }
 
   getWorkRunByIdempotencyKey(idempotencyKey) {

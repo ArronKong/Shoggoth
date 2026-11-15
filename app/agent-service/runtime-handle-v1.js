@@ -177,6 +177,7 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {}, onCapab
   terminated.catch(() => {});
   const facade = { kind: "shoggoth-runtime-handle", version: 1, ...binding, identity, capabilities, capabilityEvidence, terminated,
     host: raw.host, workspace: raw.workspace, controlInstance: raw.controlInstance === true,
+    usesTurnSendGuard: raw.usesTurnSendGuard === true,
     get registeredSecrets() { return raw.registeredSecrets || []; },
     assertExecutionProviderCurrent() { assertAlive(); raw.assertExecutionProviderCurrent?.(); },
     // Service-owned managed tools can wait for a user or run a bounded command.
@@ -260,9 +261,11 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {}, onCapab
     if (IDENTITY_FENCED_METHODS.has(method)) raw.host?.assertRuntimeIdentityCurrent?.();
     // Model-only observers and dispatch fences stay local to this call; they
     // must never be serialized into a Runtime or provider RPC.
-    const { signal, onText, assertCurrent, ...payload } = input || {};
+    const { signal, onText, assertCurrent, withTurnSendGuard, ...payload } = input || {};
     if (onText !== undefined && (method !== "generateModelOnly" || typeof onText !== "function")) throw fail("RUNTIME_PROTOCOL_INVALID");
     if (assertCurrent !== undefined && (method !== "generateModelOnly" || typeof assertCurrent !== "function")) throw fail("RUNTIME_PROTOCOL_INVALID");
+    if (withTurnSendGuard !== undefined && (method !== "turnStart" || !facade.usesTurnSendGuard
+      || typeof withTurnSendGuard !== "function")) throw fail("RUNTIME_PROTOCOL_INVALID");
     let checked;
     try { checked = data(payload); }
     catch (error) { recordSessionHandleFailure(method, payload, "handle_request", error); throw error; }
@@ -289,10 +292,17 @@ function runtimeHandleV1(raw, expectedBinding, { onViolation = () => {}, onCapab
       if (typeof text !== "string") throw fail("RUNTIME_PROTOCOL_INVALID");
       onText(data(text, 64 * 1024));
     });
+    const guard = withTurnSendGuard && ((phase, submit, guardSignal) => withTurnSendGuard(phase, () => {
+      assertAlive();
+      if (!observing || signal?.aborted) throw fail("RUNTIME_HANDLE_TERMINATED");
+      raw.host?.assertRuntimeIdentityCurrent?.();
+      submit();
+    }, guardSignal));
     try {
       if (ACCOUNT_STATE_WRITES.has(method)) invalidateReads();
       const invoke = () => raw[nativeMethod(method)]({ ...checked, ...(signal ? { signal } : {}),
-        ...(observer ? { onText: observer } : {}), ...(fence ? { assertCurrent: fence } : {}) }, preparedObserver);
+        ...(observer ? { onText: observer } : {}), ...(fence ? { assertCurrent: fence } : {}),
+        ...(guard ? { withTurnSendGuard: guard } : {}) }, preparedObserver);
       const result = await (PREPARATION_READS.has(method)
         ? preparationRead(method, checked, invoke, !signal && checked.refreshToken !== true) : invoke());
       try {

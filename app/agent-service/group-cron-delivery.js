@@ -5,7 +5,7 @@ const { transcriptEventId } = require("./transcript-store");
 const { redactGrantTokens } = require("./group-tool-grant");
 
 class GroupCronDelivery {
-  constructor({ cronStore, groupChat, dispatcher, sessions, transcripts, getCronOutput, assertSecretSafe, onError }) {
+  constructor({ cronStore, groupChat, dispatcher, sessions, transcripts, getCronOutput, assertSecretSafe, onPublished, onError }) {
     this.cronStore = cronStore;
     this.groupChat = groupChat;
     this.dispatcher = dispatcher;
@@ -13,6 +13,7 @@ class GroupCronDelivery {
     this.transcripts = transcripts;
     this.getCronOutput = getCronOutput;
     this.assertSecretSafe = assertSecretSafe;
+    this.onPublished = onPublished;
     this.onError = onError;
   }
 
@@ -59,6 +60,10 @@ class GroupCronDelivery {
         } catch { text = null; }
       }
       this.groupChat.publishCronReply({ target, profileId: run.profileId, jobId: job.id, runId: run.id, text });
+      if (text !== null && this.groupChat.store.hasPublishedCronReply({ groupId: target.groupId, jobId: job.id, runId: run.id })) {
+        const terminal = this.transcripts.getEvent(run.profileId, session.id, transcriptEventId("chat-terminal", run.id, "completed"));
+        this.onPublished?.(run, { terminal, answer });
+      }
     } catch (error) {
       this.onError(error);
     }

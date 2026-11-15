@@ -135,6 +135,12 @@ export default {
     PARTIAL: "Some actions may have already run. Check the results before running the task again.",
   },
   productContext: {
+    CONTEXT_CONTINUATION_DETAILS_REQUIRED: "This session restored part of its native history. To look up a source, enter ‘Show [eventId=EVENT_ID]’. To continue, restore the full history or send /continue-task on its own line followed by JSON that states your goal, limits, decisions, and evidence references.",
+    CONTEXT_CONTINUATION_SOURCE_UNAVAILABLE: "Could not verify the referenced message, attachment, or result. Provide the needed material in this turn.",
+    CONTEXT_CONTINUATION_SOURCE_TOO_LARGE: "The referenced source is too large for this turn. Narrow the reference or provide the relevant excerpt.",
+    CONTEXT_CONTINUATION_REVIEW_INTERRUPTED: "The read-only continuation could not be confirmed. Review the history before resubmitting the question.",
+    CONTEXT_SOURCE_STALE: "The conversation, memory, or referenced attachment changed before execution. Review the current material and submit again.",
+    CONTEXT_MEMORY_READ_UNAVAILABLE: "Could not verify the memory files needed for this turn. Try again in a moment.",
     PRODUCT_CONTEXT_INVALID: "The context request or response was invalid.",
     PRODUCT_CONTEXT_UNAVAILABLE: "Choose a runtime that can generate summaries in Agent settings.",
     PRODUCT_CONTEXT_DISABLED: "Shoggoth context management is turned off.",

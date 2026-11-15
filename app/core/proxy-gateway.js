@@ -933,6 +933,7 @@ function startProxyGateway({
         thinking: (text) => chatEvent("thinking", { thinking: text }),
         plan: (entries) => chatEvent("plan", { plan: entries }),
         status: (data) => chatEvent("status", { statusKind: data?.kind, text: data?.text,
+          ...(typeof data?.nativeRunId === "string" ? { nativeRunId: data.nativeRunId } : {}),
           ...(typeof data?.reason === "string" ? { reason: data.reason } : {}),
           ...(Number.isSafeInteger(data?.queuedAt) ? { queuedAt: data.queuedAt } : {}),
           ...(["preparing", "context", "capabilities", "connecting", "restoring", "opening", "waiting"].includes(data?.stage) ? { stage: data.stage } : {}) }),
@@ -1899,6 +1900,22 @@ function startProxyGateway({
           // anything the backend can't do comes back as a clean error frame.
           const key = frame.params?.sessionKey ?? frame.params?.key;
           const agentId = agentIdFromSessionKey(key);
+          const owner = owns(agentId) ? registry?.route(agentId) : null;
+          let durableChatStop = false;
+          if (frame.method === "chat.abort") {
+            try { durableChatStop = owner?.getBackendDescriptor?.()?.surfaces?.durableChatStop === true; }
+            catch { /* Adapters without a descriptor retain their existing stop contract. */ }
+          }
+          if (frame.method === "chat.abort"
+            && (Object.hasOwn(frame.params || {}, "idempotencyKey") || Object.hasOwn(frame.params || {}, "observeOnly")
+              || Object.hasOwn(frame.params || {}, "expectedBackendId"))
+            && (!durableChatStop
+              || (Object.hasOwn(frame.params, "expectedBackendId") && frame.params.expectedBackendId !== owner?.id)
+              || (Object.hasOwn(frame.params, "observeOnly") && frame.params.observeOnly !== true))) {
+            sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+              error: { code: "WORK_RUN_CONTROL_MISMATCH", message: "原停止请求不属于当前后端" } }));
+            return;
+          }
           if (frame.method === "chat.steer" && !owns(agentId) && !claims(agentId)) {
             const owner = registry?.getBackend?.("openclaw");
             if (!authed || !currentUpstream() || upstreamDown || !upstreamReady
@@ -1939,14 +1956,20 @@ function startProxyGateway({
             }
             return;
           }
-          if (owns(agentId)) {
-            const backend = registry?.route(agentId);
+          if (owner) {
+            const backend = owner;
             const run = async () => {
               if (frame.method === "chat.steer") {
                 if (!backend?.steerChat) throw new Error("该后端不支持追加当前回合");
                 return (await backend.steerChat(key, String(frame.params?.message ?? ""))) ?? {};
               }
               if (frame.method === "chat.abort") {
+                if (durableChatStop) {
+                  return (await backend.abortChat(key, frame.params?.runId, {
+                    idempotencyKey: frame.params?.idempotencyKey,
+                    observeOnly: frame.params?.observeOnly === true,
+                  })) ?? {};
+                }
                 await backend?.abortChat?.(key, frame.params?.runId);
                 return {};
               }

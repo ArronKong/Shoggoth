@@ -10,6 +10,8 @@ const { resolveCanonicalServicePaths } = require("../app/agent-service/paths");
 const { audit } = require("./runtime-upgrade-audit.cjs");
 const { manifestTree } = require("./runtime-upgrade-backup.cjs");
 const { assertInstallProcesses, PERMIT_ENV } = require("./runtime-install-process-guard.cjs");
+const { assertInboxReaderCompatibility } = require("./runtime-install-inbox-compatibility.cjs");
+const { verifyPackagedRendererSignature } = require("./packaged-renderer-signature.cjs");
 const repo = path.resolve(__dirname, "..");
 const args = process.argv.slice(2);
 const options = new Map();
@@ -40,7 +42,7 @@ function stopped(paths) {
     execFileSync("/bin/launchctl", ["print", `gui/${process.getuid()}/com.shoggoth.agent-service`], { stdio: "pipe" });
     throw new Error("LaunchAgent must be stopped");
   } catch (error) { if (error.status !== 113) throw error; }
-  return processGuard;
+  return { processGuard, pendingCommands: snapshot.pendingCommands };
 }
 function main() {
   const paths = resolveCanonicalServicePaths();
@@ -48,13 +50,20 @@ function main() {
   const receipt = JSON.parse(fs.readFileSync(path.join(packageRoot, "package-receipt.json")));
   assert.ok(backup.verified && receipt.packageSmoke.passed && receipt.packageSmoke.naturalExit === 0);
   assert.equal(receipt.version, expectedVersion);
-  assert.ok(!fs.existsSync(previous) && !fs.existsSync(staged) && !fs.existsSync(path.join(root, "install-receipt.json")));
-  const processGuard = stopped(paths);
+  const rendererHash = hash(verifyPackagedRendererSignature(source, "arm64"));
+  if (receipt.rendererAcceptance) {
+    assert.equal(rendererHash, receipt.rendererAcceptance.rendererExecutableSha256,
+      "Renderer Helper must match its runtime acceptance receipt");
+  }
+  assert.ok(!fs.existsSync(previous) && !fs.existsSync(staged) && !fs.existsSync(path.join(root, "install-receipt.json")),
+    "An install staging path or receipt already exists");
+  const { processGuard, pendingCommands } = stopped(paths);
   assert.deepEqual(backup.processGuard || { permittedExternalMcpPids: [], permitSha256: null }, processGuard,
     "process exception must match the verified backup");
   assert.equal(manifestTree(paths.stateDir).digest, backup.manifestDigest, "state must still match verified backup");
   const expectedHash = receipt.files.find(row => row.file.endsWith("app.asar")).sha256;
   assert.equal(hash(asar(source)), expectedHash);
+  assertInboxReaderCompatibility(asar(source), pendingCommands);
   assert.equal(execFileSync("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleShortVersionString",
     path.join(source, "Contents/Info.plist")], { encoding: "utf8" }).trim(), expectedVersion);
   const previousHash = hash(asar(installed));
@@ -63,7 +72,9 @@ function main() {
   execFileSync("/usr/bin/ditto", [source, staged], { stdio: "pipe", timeout: 180000 });
   execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", staged], { stdio: "pipe", timeout: 60000 });
   assert.equal(hash(asar(staged)), expectedHash);
-  stopped(paths);
+  assert.equal(hash(verifyPackagedRendererSignature(staged, "arm64")), rendererHash);
+  const stagedState = stopped(paths);
+  assert.deepEqual(stagedState.pendingCommands, pendingCommands, "Inbox changed during staging");
   assert.equal(manifestTree(paths.stateDir).digest, backup.manifestDigest, "state changed during staging");
   fs.mkdirSync(path.dirname(previous), { recursive: true, mode: 0o700 });
   fs.renameSync(installed, previous);
@@ -72,7 +83,8 @@ function main() {
   assert.equal(hash(asar(installed)), expectedHash);
   const result = { installedAt: new Date().toISOString(), installedPath: installed, version: receipt.version,
     architecture: "arm64", previousApp: previous, previousVersion: oldVersion, previousAsarSha256: previousHash,
-    asarSha256: expectedHash, backupReceipt: path.join(root, "pre-upgrade/receipt.json"),
+    asarSha256: expectedHash, rendererExecutableSha256: rendererHash,
+    backupReceipt: path.join(root, "pre-upgrade/receipt.json"),
     signatureVerified: true, distribution: "internal", launched: false, processGuard,
     // These clients may predate the immediately previous App replacement.
     // Their startup version is not inferred from the on-disk App version.
@@ -80,4 +92,9 @@ function main() {
   fs.writeFileSync(path.join(root, "install-receipt.json"), JSON.stringify(result, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   console.log(JSON.stringify(result));
 }
-try { main(); } catch (error) { console.error(error.code || error.message); process.exitCode = 1; }
+try { main(); } catch (error) {
+  const detail = error.code === "ERR_ASSERTION" || error.code?.startsWith("INSTALL_INBOX_")
+    ? `${error.code}: ${error.message}` : error.code || error.message;
+  console.error(detail);
+  process.exitCode = 1;
+}

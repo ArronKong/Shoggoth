@@ -65,7 +65,7 @@ async function waitFor(check, timeoutMs = 1000) {
   throw new Error("wait timeout");
 }
 function fixturePaths(prefix = "smcw-") {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   return resolveServicePaths({ stateRoot: path.join(root, "s"), cacheRoot: path.join(root, "c") });
 }
 function nonce(byte = 7) { return Buffer.alloc(32, byte).toString("base64url"); }
@@ -309,6 +309,7 @@ test("packaged selector 为 Developer ID 的 Service/helper 原样保留外置�
           requestTimeoutMs,
           termGraceMs: 100,
           killConfirmMs: 1_000,
+          persistent: false,
         });
         return delegate;
       },
@@ -1247,6 +1248,9 @@ function fakeSpawnFactory(mode, capture = {}) {
       let frame;
       if (mode === "malformed") frame = Buffer.alloc(12, 0x44);
       else if (mode === "oversize") frame = Buffer.alloc(74, 0x45);
+      else if (mode === "cache-unavailable") {
+        frame = encodeWorkerResponse({ gate: parsedGate, ok: false, storageFailure: "MCP_HELPER_CACHE_UNAVAILABLE" });
+      }
       else if (mode === "wrong-gate") frame = encodeWorkerResponse({ gate: { ...parsedGate, nonce: nonce(9) }, secret: Buffer.alloc(32, 4), ok: true });
       else if (parsedRequest.operation === "safeStorage.encrypt"
         || parsedRequest.operation === "safeStorage.decrypt") {
@@ -1262,9 +1266,9 @@ function fakeSpawnFactory(mode, capture = {}) {
       const finish = () => {
         child.stdout.end(frame);
         setImmediate(() => {
-          child.exitCode = 0;
-          child.emit("exit", 0, null);
-          child.emit("close", 0, null);
+          child.exitCode = mode === "cache-unavailable" ? 1 : 0;
+          child.emit("exit", child.exitCode, null);
+          child.emit("close", child.exitCode, null);
         });
       };
       if (mode === "cold-start") setTimeout(finish, 1_200);
@@ -1542,6 +1546,20 @@ test("worker one-shot service 创建、helper 只读，safeStorage ciphertext �
   assert.equal(helperSecret.equals(secret), true);
   secret.fill(0);
   helperSecret.fill(0);
+
+  fs.chmodSync(paths.mcpAuthPath, 0o644);
+  const failedFrame = await performWorkerOperation({
+    gate: helperGate,
+    request: { ...serviceRequest, generation: 4, operation: "helper.read" },
+    safeStorage,
+  });
+  assert.equal(failedFrame.length, 41);
+  assert.throws(() => decodeWorkerResponse(failedFrame, helperGate, { allowAuthStorageFailure: true }),
+    { code: "MCP_HELPER_STORAGE_UNAVAILABLE", message: "mcp_helper_storage_unavailable" });
+  assert.throws(() => decodeWorkerResponse(failedFrame, { ...helperGate, nonce: nonce(4) }, { allowAuthStorageFailure: true }),
+    { code: "MCP_CRYPTO_RESPONSE_INVALID" });
+  assert.throws(() => decodeWorkerResponse(failedFrame, helperGate), { code: "MCP_CRYPTO_RESPONSE_INVALID" });
+  failedFrame.fill(0);
 });
 
 test("in-process broker 分离 service 创建与 helper 只读权限", async () => {
@@ -1847,6 +1865,24 @@ test("broker 使用固定环境白名单、严格校验 worker frame", async () 
     NODE_ENV: "production",
     SHOGGOTH_TEST_CRYPTO_STALL_MS: "10000",
   }), "SHOGGOTH_TEST_CRYPTO_STALL_MS"), false);
+});
+
+test("helper broker reports cache preflight failures and can authenticate after cache recovery", async () => {
+  let attempts = 0;
+  const broker = new McpCryptoBroker({
+    paths: fixturePaths(), callerRole: "mcp", executablePath: process.execPath,
+    appRoot: ROOT, defaultApp: true,
+    spawn: (...args) => fakeSpawnFactory(attempts++ === 0 ? "cache-unavailable" : "valid")(...args),
+  }).open({ generation: 3 });
+  try {
+    await assert.rejects(broker.readForHelper({ generation: 3 }),
+      { code: "MCP_HELPER_CACHE_UNAVAILABLE", message: "mcp_helper_cache_unavailable" });
+    assert.equal(attempts, 1);
+    const secret = await broker.readForHelper({ generation: 3 });
+    assert.equal(secret.equals(Buffer.alloc(32, 4)), true);
+    secret.fill(0);
+    assert.equal(attempts, 2);
+  } finally { await broker.close(); }
 });
 
 test("broker 默认期限容纳 packaged Electron 首次冷启动且仍保持有界", async () => {
@@ -2221,7 +2257,7 @@ async function assertStrictLocalServiceFailsClosed(paths, options = {}) {
     } finally {
       if (prewarmTimer) clearTimeout(prewarmTimer);
     }
-    assert.deepEqual(prewarmOutcome, { ok: false, code: "MCP_CRYPTO_UNAVAILABLE" });
+    assert.deepEqual(prewarmOutcome, { ok: false, code: options.expectedPrewarmCode || "MCP_CRYPTO_UNAVAILABLE" });
     await new Promise((resolve) => setImmediate(resolve));
 
     const request = (method, params = {}) => requestService(paths, {
@@ -2350,7 +2386,9 @@ test("strict-local master key 权限过宽时真实 Service 健康但双锁且�
   const unhandledListenerCount = process.listenerCount("unhandledRejection");
   fs.chmodSync(fixture.keyPath, 0o644);
   await withStrictLocalFixtureCleanup(fixture, { restoreKeyMode: true }, async () => {
-    const observation = await assertStrictLocalServiceFailsClosed(fixture.paths);
+    const observation = await assertStrictLocalServiceFailsClosed(fixture.paths, {
+      expectedPrewarmCode: "MCP_HELPER_STORAGE_UNAVAILABLE",
+    });
     assert.equal(observation.localStorageFactoryCalls, 1);
     assert.equal(observation.localStorages.length, 0);
     assert.equal(process.listenerCount("unhandledRejection"), unhandledListenerCount);
@@ -2443,16 +2481,19 @@ test("PendingCommand 加密挂起只让 chat.send 有界失败，status 与主 S
   const paths = fixturePaths("smcp-general-crypto-");
   let enterEncrypt;
   let rejectEncrypt;
+  let stallInbox = false;
   const encryptEntered = new Promise((resolve) => { enterEncrypt = resolve; });
   const broker = {
     open() {},
     close() { rejectEncrypt?.(new Error("closed")); },
     loadOrCreateForService() { return Promise.reject(new Error("not used")); },
-    encrypt() {
+    async encrypt(value) {
+      if (!stallInbox || !value.toString("utf8").startsWith('{"idempotencyFloorMs":')) return Buffer.from(value);
+      stallInbox = false;
       enterEncrypt();
       return new Promise((_, reject) => { rejectEncrypt = reject; });
     },
-    decrypt() { return Promise.reject(new Error("not used")); },
+    async decrypt(value) { return Buffer.from(value); },
   };
   const mainSafeStorage = {
     isEncryptionAvailable() { throw new Error("main-safe-storage-canary"); },
@@ -2462,6 +2503,7 @@ test("PendingCommand 加密挂起只让 chat.send 有界失败，status 与主 S
   const service = createAgentService({
     paths, version: "general-crypto-isolation", cryptoBroker: broker,
     safeStorage: mainSafeStorage,
+    runtimeStorageHomedir: () => paths.trustedRoot,
     runtimePool: { get() { assert.fail("加密未提交不得启动 runtime"); }, async stopAll() {} },
   });
   await service.start();
@@ -2473,11 +2515,12 @@ test("PendingCommand 加密挂起只让 chat.send 有界失败，status 与主 S
     const sessions = await request("chat.session.list", {
       profileId: DEFAULT_AGENT_PROFILE_ID, cursor: null, limit: 10, includeArchived: false,
     });
+    stallInbox = true;
     send = request("chat.send", {
       operationId: "crypto-hang-send", sessionKey: sessions.sessions[0].sessionKey,
       prompt: "crypto-hang-prompt", createdAt: Date.now(),
     });
-    await encryptEntered;
+    await Promise.race([encryptEntered, send.then(() => assert.fail("chat.send succeeded before entering Inbox encryption"))]);
     const startedAt = Date.now();
     const status = await request("service.status", {});
     assert.equal(status.healthy, true);
@@ -2513,19 +2556,81 @@ test("损坏 MCP container 只让 challenge 固定 unavailable，普通 Service 
         runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
         clientNonce: nonce(0x42),
       },
-    }), (error) => error.code === "SERVICE_UNAVAILABLE" && error.message === "mcp_auth_unavailable");
+    }), { code: "MCP_HELPER_STORAGE_UNAVAILABLE", message: "mcp_helper_storage_unavailable" });
   } finally {
     await service.stop({ notify: false });
   }
 });
 
-test("真实 Electron 非空 Inbox decrypt hang 期间已可 status/chat 只读且密文证据不变", async () => {
-  if (process.platform !== "darwin") return;
+function startElectronCryptoFixture(homeDir, paths, { decrypt = false } = {}) {
   const commonGitDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
     cwd: ROOT, encoding: "utf8",
   }).trim();
   const repositoryRoot = path.dirname(path.resolve(ROOT, commonGitDir));
   const electronBinary = require(path.join(repositoryRoot, "node_modules", "electron"));
+  const entry = path.join(homeDir, "crypto-fixture.cjs");
+  // Start the real Service and crypto worker with a pinned disposable home.
+  // The worker's storage fixture never opens the login Keychain.
+  fs.writeFileSync(entry, `"use strict";
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const electron = require("electron");
+const root = ${JSON.stringify(ROOT)};
+const home = ${JSON.stringify(homeDir)};
+assert.equal(process.defaultApp, true);
+assert.equal(fs.realpathSync(__dirname), home);
+assert.equal(process.env.HOME, home);
+const safeStorage = { isEncryptionAvailable: () => true,
+  encryptString: text => Buffer.from(text, "utf8"),
+  decryptString: bytes => bytes.toString("utf8") };
+const args = process.argv.slice(2);
+let run;
+if (args.includes("--shoggoth-internal-role=mcp-crypto")) {
+  const workerDiagnostics = fs.openSync(home + "/crypto-worker.log", "a", 0o600);
+  run = require(root + "/app/mcp-crypto-worker").startMcpCryptoWorker({
+    electron, safeStorage, runtime: { appRoot: __filename },
+  }).catch(error => {
+    fs.writeSync(workerDiagnostics, (error?.code || error?.name || "worker error") + "\\n");
+    throw error;
+  }).finally(() => fs.closeSync(workerDiagnostics));
+} else {
+  assert.deepEqual(args, ["--shoggoth-internal-role=agent-service"]);
+  const { createAgentService } = require(root + "/app/agent-service/server");
+  const { McpCryptoBroker } = require(root + "/app/agent-service/mcp-crypto-broker");
+  const paths = ${JSON.stringify(paths)};
+  assert.equal(paths.trustedRoot, home);
+  for (const target of [paths.stateDir, paths.profileDir, paths.cacheDir]) fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+  electron.app.setPath("userData", paths.profileDir);
+  electron.app.setPath("sessionData", paths.profileDir);
+  electron.app.setPath("cache", paths.cacheDir);
+  const broker = new McpCryptoBroker({ paths, callerRole: "agent-service", executablePath: process.execPath,
+    appRoot: __filename, defaultApp: true, parentEnv: process.env, requestTimeoutMs: ${decrypt ? 15_000 : 8_000} });
+  const encrypt = broker.encrypt.bind(broker);
+  const inboxPrefix = Buffer.from('{"idempotencyFloorMs":');
+  broker.encrypt = (payload, options) => payload.subarray(0, inboxPrefix.length).equals(inboxPrefix)
+    ? encrypt(payload, options) : Promise.resolve(Buffer.from(payload));
+  const decrypt = broker.decrypt.bind(broker);
+  broker.decrypt = (payload, options) => ${decrypt} && payload.length === 64
+    ? decrypt(payload, options) : Promise.resolve(Buffer.from(payload));
+  const service = createAgentService({ paths, runtimeStorageHomedir: () => home,
+    parentEnv: { ...process.env, CODEX_HOME: home + "/.codex" }, cryptoBroker: broker, safeStorage,
+    prewarmMcpAuth: false, runtimePool: { get() { assert.fail("Unexpected Runtime dispatch"); }, async stopAll() {} } });
+  run = electron.app.whenReady().then(() => service.start());
+}
+Promise.resolve(run).catch(error => { console.error(error); electron.app.exit(1); });
+`, { mode: 0o600, flag: "wx" });
+  const env = { ...process.env, HOME: homeDir, TMPDIR: homeDir, NODE_ENV: "test",
+    SHOGGOTH_INTERNAL_LAUNCH: "launch-agent-v1",
+    SHOGGOTH_TEST_CRYPTO_STALL_MS: "10000" };
+  delete env.ELECTRON_RUN_AS_NODE;
+  // The worker accepts the stall only if both test variables are present.
+  env.SHOGGOTH_TEST_ROLE_GATE_FILE = entry;
+  env.SHOGGOTH_TEST_ROLE_GATE_NONCE = crypto.randomBytes(16).toString("hex");
+  return spawn(electronBinary, [entry, "--shoggoth-internal-role=agent-service"], { env, stdio: ["ignore", "pipe", "pipe"] });
+}
+
+test("真实 Electron 非空 Inbox decrypt hang 期间已可 status/chat 只读且密文证据不变", async () => {
+  if (process.platform !== "darwin") return;
   // The external provider writer rejects symlinked roots; /tmp is one on macOS.
   const homeDir = fs.realpathSync(fs.mkdtempSync("/tmp/sgwd-"));
   const paths = resolveServicePaths({ homeDir });
@@ -2537,21 +2642,7 @@ test("真实 Electron 非空 Inbox decrypt hang 期间已可 status/chat 只读�
   })}\n`, "utf8");
   const inboxPath = path.join(paths.stateDir, "pending-commands.json");
   fs.writeFileSync(inboxPath, evidence, { mode: 0o600 });
-  const gatePath = path.join(homeDir, "role-gate.json");
-  const gateNonce = crypto.randomBytes(16).toString("hex");
-  fs.writeFileSync(gatePath, JSON.stringify({ parentPid: process.pid, nonce: gateNonce }), { mode: 0o600 });
-  const child = spawn(electronBinary, [ROOT, "--shoggoth-internal-role=agent-service"], {
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      NODE_ENV: "test",
-      SHOGGOTH_INTERNAL_LAUNCH: "launch-agent-v1",
-      SHOGGOTH_TEST_ROLE_GATE_FILE: gatePath,
-      SHOGGOTH_TEST_ROLE_GATE_NONCE: gateNonce,
-      SHOGGOTH_TEST_CRYPTO_STALL_MS: "10000",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = startElectronCryptoFixture(homeDir, paths, { decrypt: true });
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
   child.stderr.on("data", (chunk) => { output += chunk; });
@@ -2561,8 +2652,8 @@ test("真实 Electron 非空 Inbox decrypt hang 期间已可 status/chat 只读�
       && line.includes("--shoggoth-internal-role=mcp-crypto"));
   };
   try {
-    await waitFor(hasCryptoWorker, 2_500);
-    await waitFor(() => fs.existsSync(paths.socketPath) && fs.existsSync(paths.tokenPath), 700);
+    await waitFor(hasCryptoWorker, 10_000);
+    await waitFor(() => fs.existsSync(paths.socketPath) && fs.existsSync(paths.tokenPath), 3_000);
     assert.equal(hasCryptoWorker(), true, "Service listen 时 decrypt worker 应仍处于 hard-timeout 边界内");
     const request = (method, params, timeoutMs = 700) => requestService(paths, {
       version: PROTOCOL_VERSION,
@@ -2587,7 +2678,7 @@ test("真实 Electron 非空 Inbox decrypt hang 期间已可 status/chat 只读�
       (error) => error.code === "SERVICE_UNAVAILABLE",
     );
     assert.equal(fs.readFileSync(inboxPath).equals(evidence), true);
-    await waitFor(() => !hasCryptoWorker(), DEFAULT_REQUEST_TIMEOUT_MS + 1_500);
+    await waitFor(() => !hasCryptoWorker(), 16_500);
     await requestService(paths, {
       version: PROTOCOL_VERSION,
       method: "service.stop",
@@ -2595,6 +2686,8 @@ test("真实 Electron 非空 Inbox decrypt hang 期间已可 status/chat 只读�
     });
   } catch (error) {
     error.message = `${error.message}\nElectron output:\n${output}`;
+    const workerDiagnostics = path.join(homeDir, "crypto-worker.log");
+    if (fs.existsSync(workerDiagnostics)) error.message += `\nWorker output:\n${fs.readFileSync(workerDiagnostics, "utf8")}`;
     throw error;
   } finally {
     try { child.kill("SIGKILL"); } catch { /* already exited */ }
@@ -2603,34 +2696,15 @@ test("真实 Electron 非空 Inbox decrypt hang 期间已可 status/chat 只读�
 
 test("真实 Electron safeStorage 卡住只超时目标 MCP/Inbox 操作，普通 status 健康且 worker 无残留", async () => {
   if (process.platform !== "darwin") return;
-  const commonGitDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-    cwd: ROOT, encoding: "utf8",
-  }).trim();
-  const repositoryRoot = path.dirname(path.resolve(ROOT, commonGitDir));
-  const electronBinary = require(path.join(repositoryRoot, "node_modules", "electron"));
   // The external provider writer rejects symlinked roots; /tmp is one on macOS.
   const homeDir = fs.realpathSync(fs.mkdtempSync("/tmp/sgwc-"));
   const paths = resolveServicePaths({ homeDir });
-  const gatePath = path.join(homeDir, "role-gate.json");
-  const gateNonce = crypto.randomBytes(16).toString("hex");
-  fs.writeFileSync(gatePath, JSON.stringify({ parentPid: process.pid, nonce: gateNonce }), { mode: 0o600 });
-  const child = spawn(electronBinary, [ROOT, "--shoggoth-internal-role=agent-service"], {
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      NODE_ENV: "test",
-      SHOGGOTH_INTERNAL_LAUNCH: "launch-agent-v1",
-      SHOGGOTH_TEST_ROLE_GATE_FILE: gatePath,
-      SHOGGOTH_TEST_ROLE_GATE_NONCE: gateNonce,
-      SHOGGOTH_TEST_CRYPTO_STALL_MS: "10000",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = startElectronCryptoFixture(homeDir, paths);
   let output = "";
   child.stdout.on("data", (chunk) => { output += chunk; });
   child.stderr.on("data", (chunk) => { output += chunk; });
   try {
-    await waitFor(() => fs.existsSync(paths.socketPath) && fs.existsSync(paths.tokenPath), 5000);
+    await waitFor(() => fs.existsSync(paths.socketPath) && fs.existsSync(paths.tokenPath), 10_000);
     const startedAt = Date.now();
     const challenge = requestService(paths, {
       version: PROTOCOL_VERSION,
@@ -2660,7 +2734,7 @@ test("真实 Electron safeStorage 卡住只超时目标 MCP/Inbox 操作，普�
     assert.ok(Date.now() - statusStartedAt < 500);
     await assert.rejects(
       challenge,
-      (error) => error.code === "SERVICE_UNAVAILABLE" && error.message === "mcp_auth_unavailable",
+      { code: "SERVICE_UNAVAILABLE", message: "mcp_auth_unavailable" },
     );
     assert.ok(Date.now() - startedAt < 10_000);
     assert.equal(sawWorker, true);

@@ -486,7 +486,56 @@ async function verifyModelOnlyWithoutMcp() {
   console.log("PASS DeepSeek model-only text: no MCP authority, no sessions, chat gate preserved");
 }
 
+async function verifyTurnSubmissionGuard() {
+  const value = runtimeFixture();
+  const adapter = new DeepSeekHarnessRuntimeAdapter({ runtimePool: value.pool });
+  const binding = { runtime: "deepseek-harness", runtimeProfileId: "dsh-send-guard",
+    runtimeAccountId: NATIVE_DEEPSEEK_HARNESS_RUNTIME_ACCOUNT_ID };
+  try {
+    const raw = await adapter.acquire(binding, { workspace: value.workspace, permissionPolicy: POLICY });
+    const runtime = require("../app/agent-service/runtime-handle-v1").runtimeHandleV1(raw, binding);
+    assert.equal(runtime.usesTurnSendGuard, true);
+    const { session } = await runtime.sessionStart({ source: "chat:guarded", cwd: value.workspace,
+      model: MODEL, permissionPolicy: POLICY });
+    const frames = () => value.bridgeMessages.filter(row => row.command === "turn/start");
+    for (const mode of ["refuse", "cancel", "dispatch"]) {
+      let guard;
+      const controller = new AbortController();
+      const response = runtime.turnStart({ sessionId: session.id, operationId: `guarded-${mode}`, cwd: value.workspace,
+        prompt: "Verify this turn", context: "Guarded context", model: MODEL, permissionPolicy: POLICY,
+        signal: controller.signal, withTurnSendGuard: (phase, submit) => new Promise((resolve, reject) => {
+          assert.equal(phase, "turn");
+          guard = allow => {
+            if (!allow) { reject(Object.assign(new Error("fixture stale source"), { code: "CONTEXT_SOURCE_STALE" })); return; }
+            submit(); resolve();
+          };
+        }) });
+      response.catch(() => {});
+      await waitFor(() => guard, "DeepSeek physical guard");
+      assert.equal(frames().length, 0);
+      if (mode === "refuse") {
+        guard(false);
+        await assert.rejects(response, { code: "CONTEXT_SOURCE_STALE" });
+      } else if (mode === "cancel") {
+        controller.abort();
+        await assert.rejects(response, { code: "WORK_RUN_COORDINATOR_STALE_RUN" });
+        assert.throws(() => guard(true), { code: "RUNTIME_HANDLE_TERMINATED" });
+        guard(false);
+        assert.equal(frames().length, 0);
+      } else {
+        guard(true);
+        const receipt = await response;
+        assert.ok(receipt.turn.id);
+        assert.equal(frames().length, 1);
+        assert.equal(frames()[0].params.context, "Guarded context");
+        assert.equal(Object.hasOwn(frames()[0].params, "withTurnSendGuard"), false);
+      }
+    }
+  } finally { await adapter.stopAll().catch(() => {}); value.cleanup(); }
+}
+
 async function main() {
+  await verifyTurnSubmissionGuard();
   for (const version of ["0.1.0", "2.0.0", "nightly"]) {
     let bindings = 0;
     const value = runtimeFixture({ version, secretGateway: { bindLocalSessions: async () => {

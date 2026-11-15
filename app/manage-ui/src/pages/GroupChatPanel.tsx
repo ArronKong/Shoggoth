@@ -1287,6 +1287,10 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
     setMessageMenu(null);
     setExpandedPanel(panel);
   };
+  const syncStatus = syncError && <p className={styles.scopeHint} role="status" data-group-sync-status>
+    {t("groupChat.sync.recovering")}{lastSyncAt ? ` · ${t("groupChat.sync.last", { time: new Date(lastSyncAt).toLocaleTimeString() })}` : ""}
+    <button type="button" className="btn-sm" onClick={() => void pull()}>{t("groupChat.sync.check")}</button>
+  </p>;
 
   return (
     <div className={styles.panel}>
@@ -1300,10 +1304,7 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
       {sendRecordsOpen && <Modal open width={680} title={t("groupChat.sendJournal.open")} onClose={() => setSendRecordsOpen(false)}>
         <div data-group-send-records>
         {!ownerScope && <p className={styles.scopeHint} role="status">{t("groupChat.sendJournal.scopeUnavailable")}</p>}
-        {syncError && <p className={styles.scopeHint} role="status">
-          {t("groupChat.sync.recovering")}{lastSyncAt ? ` · ${t("groupChat.sync.last", { time: new Date(lastSyncAt).toLocaleTimeString() })}` : ""}
-          <button type="button" className="btn-sm" onClick={() => void pull()}>{t("groupChat.sync.check")}</button>
-        </p>}
+        {syncStatus}
         {journalError && <div className={styles.scopeHint} role="alert">
           {t("groupChat.sendJournal.storageError", { code: journalError })}
           <button type="button" className="btn-sm" disabled={!ownerScope} onClick={() => setJournalRecoveryOpen(true)}>{t("groupChat.sendJournal.recoveryOpen")}</button>
@@ -1381,6 +1382,7 @@ export default function GroupChatPanel({ groupId, agents = [], backends = [], on
         {unavailableMembers.length > 0 && <div className={styles.availability} role="status">
           {t("groupChat.owner.offline", { names: unavailableMembers.map(member => member.displayName).join("、") })}
         </div>}
+        {!sendRecordsOpen && syncStatus}
       </header>
       <ChatPinnedMessages items={pins} index={pinIndex} onIndex={setPinIndex} onJump={id => void jumpToPin(id)}
         onUnpin={id => { if (currentScope()) presentation.unpin(id); }} pinnedOnly={pinnedOnly} onToggle={() => setPinnedOnly(value => !value)} />

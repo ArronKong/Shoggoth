@@ -562,9 +562,12 @@ function validateDomainServiceParams(method, params) {
     valid = validOperationBase(params, ["operationId", "jobId", "enabled", "createdAt"])
       && validUuid(params.jobId) && typeof params.enabled === "boolean";
   } else if (method === "cron.run.list") {
-    valid = validPage(params, ["jobId", "status", "cursor", "limit"],
+    valid = validPage(params, ["jobId", "status", "cursor", "limit",
+      ...(Object.hasOwn(params ?? {}, "failureSinceMs") ? ["failureSinceMs"] : []),
+    ],
       (value) => validUuid(value.jobId)
-        && (value.status === null || WORK_RUN_STATUSES.includes(value.status)));
+        && (value.status === null || WORK_RUN_STATUSES.includes(value.status))
+        && (!Object.hasOwn(value, "failureSinceMs") || validTimestamp(value.failureSinceMs)));
   } else if (method === "cron.run.trigger") {
     valid = validOperationBase(params, ["operationId", "jobId", "createdAt"])
       && validUuid(params.jobId);
@@ -740,6 +743,19 @@ function validateKanbanRunItem(value, params) {
 }
 
 function validateCronRunItem(value, params) {
+  if (Object.hasOwn(value || {}, "failure")) {
+    if (!ownDataObject(value)) failResponse();
+    const { failure, ...item } = value;
+    const validated = validateCronRunItem(item, params);
+    const { run, createdAt } = validated;
+    const fields = ["message", ...["httpStatus", "upstreamCode"].filter(key => Object.hasOwn(failure ?? {}, key))];
+    if (params.failureSinceMs === undefined || (run.finishedAt ?? run.startedAt ?? createdAt) < params.failureSinceMs
+      || !validated.sessionKey || !run.errorCode || !["failed", "interrupted", "canceled"].includes(run.status)
+      || !exactObject(failure, fields) || !validString(failure.message, 1200)
+      || (fields.includes("httpStatus") && (!Number.isInteger(failure.httpStatus) || failure.httpStatus < 400 || failure.httpStatus > 599))
+      || (fields.includes("upstreamCode") && (!validString(failure.upstreamCode, 80) || !/^[A-Za-z][A-Za-z0-9_.-]*$/u.test(failure.upstreamCode)))) failResponse();
+    return { ...validated, failure: cloneCanonical(failure) };
+  }
   if (Object.hasOwn(value || {}, "deliveryTarget")) {
     const { deliveryTarget, ...item } = value;
     if (deliveryTarget !== "group") failResponse();

@@ -12,7 +12,7 @@ const {
   validRequestId,
 } = require("./codex-rpc-safety");
 const { CodexRpcWriteQueue, isCodexRpcSendRejection } = require("./codex-rpc-write-queue");
-const { classifyCodexSessionRemoteError } = require("./codex-session-diagnostics");
+const { classifyCodexSessionRemoteError, classifyCodexStartupFailure } = require("./codex-session-diagnostics");
 
 class CodexJsonlRpcClient {
   constructor(child, options = {}) {
@@ -147,7 +147,9 @@ class CodexJsonlRpcClient {
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
     const signal = options.signal;
     const beforeSend = options.beforeSend;
-    if (beforeSend !== undefined && typeof beforeSend !== "function") {
+    const withSendGuard = options.withSendGuard;
+    if ((beforeSend !== undefined && typeof beforeSend !== "function")
+      || (withSendGuard !== undefined && typeof withSendGuard !== "function")) {
       this._retireRequestId(id);
       throw rpcError("RPC_INVALID_SEND_GUARD", "Invalid final send guard");
     }
@@ -185,7 +187,7 @@ class CodexJsonlRpcClient {
       }
     };
     const message = params === undefined ? { id, method } : { id, method, params };
-    this._write(message, { beforeSend: (frame) => {
+    this._write(message, { ...(withSendGuard ? { withSendGuard } : {}), beforeSend: (frame) => {
       assertPending();
       const checked = beforeSend?.(frame);
       assertPending();
@@ -398,11 +400,8 @@ class CodexJsonlRpcClient {
       if ((pending.method === "thread/start" || pending.method === "thread/resume")
         && typeof message.error?.message === "string") {
         error.remoteClassification = classifyCodexSessionRemoteError(message.error.message);
-        const diagnostic = message.error.message.match(/\b(?:BOOTSTRAP_ROLE_REJECTED|BOOTSTRAP_CODE_IDENTITY_(?:TIMEOUT|INVALID)|BOOTSTRAP_MCP_START_FAILED|MCP_HELPER_(?:ARGUMENTS_INVALID|AUTH_FAILED|SERVICE_UNAVAILABLE|SERVICE_RECOVERY_REQUIRED|FAILED))\b/u)?.[0];
+        const diagnostic = classifyCodexStartupFailure(message.error.message);
         if (diagnostic) error.startupDiagnostic = diagnostic;
-        else if (/(?:required MCP servers failed to initialize|handshaking with MCP server failed)/iu.test(message.error.message)) {
-          error.startupDiagnostic = "MCP_INITIALIZE_FAILED";
-        }
       }
       pending.reject(error);
     } else {

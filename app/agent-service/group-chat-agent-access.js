@@ -134,6 +134,23 @@ class GroupChatAgentAccess {
   managementOperationId(request, authority) {
     return `agent-management:${sha256(JSON.stringify([callerKey(authority), request.clientRequestId]))}`;
   }
+  // A historical read uses the committed transaction and never prepares a new mutation.
+  readCreatedGroupReceipt(args, authority) {
+    if (!validateGroupChatAgentArguments("group_chat_create", args)) return null;
+    this.currentAgent(authority);
+    if (this.store.getOwnerScope() !== args.ownerScope) return null;
+    const request = groupManagementRequest("group_chat_create", args);
+    let receipt;
+    try { receipt = this.store.lookupAgentManagement(this.managementOperationId(request, authority), request); }
+    catch (error) {
+      if (error?.code === "GROUP_CHAT_OPERATION_CONFLICT") return null;
+      throw error;
+    }
+    if (receipt?.status !== "created" || receipt.clientRequestId !== request.clientRequestId
+      || receipt.ownerScope !== args.ownerScope || receipt.previewDigest !== args.previewDigest
+      || !["active", "archived"].includes(this.store.groupLifecycle(receipt.groupId))) return null;
+    return { kind: "group_creation_receipt", status: "created", groupId: receipt.groupId, ownerScope: receipt.ownerScope };
+  }
   async managementPreview(args, authority) {
     if (!validateGroupChatAgentArguments("group_chat_prepare", args)) throw serviceError("MCP_TOOL_INVALID_ARGUMENTS", "群管理参数无效");
     this.currentAgent(authority);

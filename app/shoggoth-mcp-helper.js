@@ -37,7 +37,8 @@ const {
 const {
   resolveCanonicalServicePaths,
 } = require("./agent-service/paths");
-const { ensurePrivateDirectoryTree, lstatIfExists, serviceError } = require("./agent-service/security");
+const { ensurePrivateDirectoryTree, serviceError } = require("./agent-service/security");
+const { AUTHENTICATION_MESSAGES, mcpAuthStorageFailure } = require("./agent-service/mcp-helper-diagnostics");
 const { encodeInputChoicesDescription } = require("./core/shoggoth-interaction-contract");
 const {
   SERVICE_PROTOCOL_VERSION: MCP_SERVICE_PROTOCOL_VERSION,
@@ -101,28 +102,38 @@ function helperError(code, message) {
   return serviceError(code, message);
 }
 
-// A stopped/recovering Service cannot authenticate a helper. Keep that distinct
-// from rejected credentials, without carrying transport messages or private paths.
-function authenticationError(error, fromService = false) {
+// Map the error at the stage that owns the failure. ENOENT at the socket
+// and ENOENT when reading a local credential are different diagnoses.
+function authenticationError(error, stage = null) {
   let code;
   try { code = Object.getOwnPropertyDescriptor(error, "code")?.value; } catch {}
-  if (code === "MCP_HELPER_SERVICE_RECOVERY_REQUIRED" || fromService && code === "SERVICE_RECOVERY_REQUIRED") {
-    return helperError("MCP_HELPER_SERVICE_RECOVERY_REQUIRED", "mcp_helper_service_recovery_required");
+  const storage = mcpAuthStorageFailure(error, { missingIsStorage: stage === "credential" });
+  let publicCode = "MCP_HELPER_AUTH_FAILED";
+  if (typeof code === "string" && Object.hasOwn(AUTHENTICATION_MESSAGES, code)) publicCode = code;
+  else if (storage === "MCP_HELPER_STORAGE_FULL") publicCode = storage;
+  else if (stage === "cache") publicCode = "MCP_HELPER_CACHE_UNAVAILABLE";
+  else if (storage || stage === "storage") {
+    publicCode = storage || "MCP_HELPER_STORAGE_UNAVAILABLE";
+  } else if (stage === "crypto" || code === "credentials_locked" || code === "LOCAL_CRYPTO_UNAVAILABLE"
+    || code === "MCP_CRYPTO_UNAVAILABLE") publicCode = "MCP_HELPER_CRYPTO_UNAVAILABLE";
+  else if (stage === "service") {
+    if (code === "SERVICE_RECOVERY_REQUIRED") publicCode = "MCP_HELPER_SERVICE_RECOVERY_REQUIRED";
+    else if (["SERVICE_UNAVAILABLE", "SERVICE_QUIESCED", "SERVICE_DISCONNECTED", "REQUEST_TIMEOUT",
+      "INCOMPLETE_RESPONSE", "ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE", "MCP_AUTH_BUSY"].includes(code)) {
+      publicCode = "MCP_HELPER_SERVICE_UNAVAILABLE";
+    } else if (["MALFORMED_RESPONSE", "RESPONSE_TOO_LARGE", "RESPONSE_ID_MISMATCH",
+      "MULTIPLE_RESPONSE_FRAMES", "RESPONSE_TRAILING_DATA", "PROTOCOL_VERSION_MISMATCH"].includes(code)) {
+      publicCode = "MCP_HELPER_RESPONSE_INVALID";
+    }
   }
-  if (code === "MCP_HELPER_SERVICE_UNAVAILABLE" || fromService && [
-    "SERVICE_UNAVAILABLE", "SERVICE_QUIESCED", "SERVICE_DISCONNECTED", "REQUEST_TIMEOUT",
-    "ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE",
-  ].includes(code)) {
-    return helperError("MCP_HELPER_SERVICE_UNAVAILABLE", "mcp_helper_service_unavailable");
-  }
-  return helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
+  return helperError(publicCode, publicCode.toLowerCase());
 }
 
 async function requestAuthentication(requestService, paths, request) {
   try {
     return await requestService(paths, request, { timeoutMs: MCP_AUTH_SERVICE_TIMEOUT_MS });
   } catch (error) {
-    throw authenticationError(error, true);
+    throw authenticationError(error, "service");
   }
 }
 
@@ -272,10 +283,10 @@ async function authenticateMcpSession(options = {}) {
     try {
       clientNonceBytes = randomBytes(32);
     } catch {
-      throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
+      throw helperError("MCP_HELPER_CRYPTO_UNAVAILABLE", "mcp_helper_crypto_unavailable");
     }
     if (!Buffer.isBuffer(clientNonceBytes) || clientNonceBytes.length !== 32) {
-      throw helperError("MCP_HELPER_AUTH_FAILED", "mcp_helper_auth_failed");
+      throw helperError("MCP_HELPER_CRYPTO_UNAVAILABLE", "mcp_helper_crypto_unavailable");
     }
     const clientNonce = clientNonceBytes.toString("base64url");
     clientNonceBytes.fill(0);
@@ -295,13 +306,19 @@ async function authenticateMcpSession(options = {}) {
     }
     // 首次 challenge 允许 Service 惰性创建长期 secret；Helper 随后只读打开，
     // 始终不承担目录、容器或 secret 的创建权。
-    if (cryptoBroker) {
-      secret = await cryptoBroker.readForHelper({ generation: options.cryptoGeneration || 1 });
-    } else {
-      authStore.open();
-      secret = authStore.readForHelper();
+    let proof;
+    try {
+      if (cryptoBroker) {
+        secret = await cryptoBroker.readForHelper({ generation: options.cryptoGeneration || 1 });
+      } else {
+        authStore.open();
+        secret = authStore.readForHelper();
+      }
+      if (!Buffer.isBuffer(secret) || secret.length !== 32) throw authenticationError(null, "crypto");
+      proof = createMcpChallengeProof(secret, challenge);
+    } catch (error) {
+      throw authenticationError(error, cryptoBroker ? "crypto" : "credential");
     }
-    const proof = createMcpChallengeProof(secret, challenge);
     const session = await requestAuthentication(requestService, paths, {
       version: MCP_SERVICE_PROTOCOL_VERSION,
       method: "mcp.auth.exchange",
@@ -322,8 +339,8 @@ async function authenticateMcpSession(options = {}) {
   } catch (error) {
     throw authenticationError(error);
   } finally {
-    if (clientNonceBytes) clientNonceBytes.fill(0);
-    if (secret) secret.fill(0);
+    if (Buffer.isBuffer(clientNonceBytes)) clientNonceBytes.fill(0);
+    if (Buffer.isBuffer(secret)) secret.fill(0);
     try { authStore?.close(); } catch {}
   }
 }
@@ -341,7 +358,8 @@ async function authenticateFederationMcpSession(options = {}) {
   const requestService = options.requestService || defaultRequestService;
   let credential;
   try {
-    credential = loadFederationMcpCredential(paths);
+    try { credential = loadFederationMcpCredential(paths); }
+    catch (error) { throw authenticationError(error, "credential"); }
     const session = await requestAuthentication(requestService, paths, {
       version: MCP_SERVICE_PROTOCOL_VERSION,
       method: "mcp.federation.open",
@@ -440,7 +458,8 @@ const MEMORY_WRITE_CONFLICT_HINT = "Memory changed since your last memory_search
 
 function toolFailureResponse(id, error, name = null) {
   const code = publicServiceErrorCode(error);
-  const message = MCP_PRODUCT_PUBLIC_MESSAGES[code] || SECRET_PUBLIC_MESSAGES[code] || "Shoggoth Service request failed";
+  const message = MCP_PRODUCT_PUBLIC_MESSAGES[code] || SECRET_PUBLIC_MESSAGES[code]
+    || AUTHENTICATION_MESSAGES[code] || "Shoggoth Service request failed";
   const hint = code === "MCP_TOOL_STATE_CONFLICT" && ["memory_save", "memory_forget"].includes(name)
     ? MEMORY_WRITE_CONFLICT_HINT : null;
   return jsonRpcResult(id, {
@@ -1820,15 +1839,23 @@ async function startShoggothMcpHelper(options = {}) {
       const helperCacheDir = path.join(paths.cacheDir, "mcp-helper");
       const cryptoProfileDir = path.join(paths.profileDir, "mcp-crypto-worker");
       const cryptoSessionDir = path.join(cryptoProfileDir, "session");
-      ensurePrivateDirectoryTree(helperProfileDir, defaultPaths.trustedRoot);
-      ensurePrivateDirectoryTree(helperSessionDir, defaultPaths.trustedRoot);
-      ensurePrivateDirectoryTree(helperCacheDir, defaultPaths.trustedRoot);
-      ensurePrivateDirectoryTree(cryptoProfileDir, defaultPaths.trustedRoot);
-      ensurePrivateDirectoryTree(cryptoSessionDir, defaultPaths.trustedRoot);
-      ensurePrivateDirectoryTree(cryptoCacheDir, defaultPaths.trustedRoot);
-      electronApp.setPath("userData", helperProfileDir);
-      electronApp.setPath("sessionData", helperSessionDir);
-      electronApp.setPath("cache", helperCacheDir);
+      try {
+        ensurePrivateDirectoryTree(helperProfileDir, defaultPaths.trustedRoot);
+        ensurePrivateDirectoryTree(helperSessionDir, defaultPaths.trustedRoot);
+        ensurePrivateDirectoryTree(cryptoProfileDir, defaultPaths.trustedRoot);
+        ensurePrivateDirectoryTree(cryptoSessionDir, defaultPaths.trustedRoot);
+        electronApp.setPath("userData", helperProfileDir);
+        electronApp.setPath("sessionData", helperSessionDir);
+      } catch (error) {
+        throw authenticationError(error, "storage");
+      }
+      try {
+        ensurePrivateDirectoryTree(helperCacheDir, defaultPaths.trustedRoot);
+        ensurePrivateDirectoryTree(cryptoCacheDir, defaultPaths.trustedRoot);
+        electronApp.setPath("cache", helperCacheDir);
+      } catch (error) {
+        throw authenticationError(error, "cache");
+      }
     }
     await electronApp.whenReady();
     hideBackgroundDock(electronApp, options.platform);
@@ -1861,7 +1888,10 @@ async function startShoggothMcpHelper(options = {}) {
         })
         : new McpCryptoBroker(cryptoOptions);
     }
-    if (mcpCryptoBroker) await mcpCryptoBroker.open({ generation: options.cryptoGeneration || 1 });
+    if (mcpCryptoBroker) {
+      try { await mcpCryptoBroker.open({ generation: options.cryptoGeneration || 1 }); }
+      catch (error) { throw authenticationError(error, "crypto"); }
+    }
     const authenticateSession = options.authenticateSession || authenticateMcpSession;
     const authenticationOptions = {
       paths,
@@ -1877,12 +1907,12 @@ async function startShoggothMcpHelper(options = {}) {
     const loadSession = async () => {
       // The one-shot crypto worker needs its cache on every authentication. The
       // running helper can outlive a cache purge, so recreate it before renewal.
-      try {
-        if (cryptoCacheDir && !lstatIfExists(cryptoCacheDir)) {
+      if (cryptoCacheDir) {
+        try {
           ensurePrivateDirectoryTree(cryptoCacheDir, defaultPaths.trustedRoot);
+        } catch (error) {
+          throw authenticationError(error, "cache");
         }
-      } catch (error) {
-        throw authenticationError(error);
       }
       const nextSession = await authenticateSession(authenticationOptions);
       if (!validateSession(nextSession, binding)) {

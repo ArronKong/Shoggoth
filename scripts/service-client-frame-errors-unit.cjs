@@ -56,3 +56,19 @@ test("only the closed storage issue survives an IPC failure; code and admission 
     });
   }
 });
+
+test("only chat send methods preserve literal admission dispositions", async t => {
+  function errorReply(metadata) {
+    return req => ({ id: req.id, ok: false, error: { code: "INTERNAL_ERROR", ...metadata } });
+  }
+  for (const method of ["chat.send", "chat.send.accept"]) {
+    await assert.rejects(reply(t, errorReply({ admissionAccepted: false }), { method }),
+      error => error.admissionAccepted === false && error.receiptUncertain === undefined);
+    await assert.rejects(reply(t, errorReply({ receiptUncertain: true }), { method }),
+      error => error.receiptUncertain === true && error.admissionAccepted === undefined);
+    await assert.rejects(reply(t, errorReply({ admissionAccepted: "false", receiptUncertain: "true" }), { method }),
+      error => error.admissionAccepted === undefined && error.receiptUncertain === undefined);
+  }
+  await assert.rejects(reply(t, errorReply({ admissionAccepted: false, receiptUncertain: true })),
+    error => error.admissionAccepted === undefined && error.receiptUncertain === undefined);
+});

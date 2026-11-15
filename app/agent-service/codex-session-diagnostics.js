@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { atomicWritePrivateFile, readPrivateFile } = require("./private-file");
+const { MCP_HELPER_STARTUP_CODES } = require("./mcp-helper-diagnostics");
 
 const MAX_RECORDS = 32;
 const MAX_BYTES = 64 * 1024;
@@ -24,12 +25,11 @@ const REMOTE_CODES = new Set([
   "STORAGE_FULL", "STORAGE_READ_ONLY", "STORAGE_PERMISSION_DENIED", "HISTORY_READ_FAILED",
   "AUTHENTICATION_FAILED", "CONFIGURATION_INVALID", "REQUEST_INVALID", "UNKNOWN_REMOTE_ERROR",
 ]);
-const STARTUP_CODES = new Set([
+const STARTUP_FAILURE_CODES = new Set([
   "BOOTSTRAP_ROLE_REJECTED", "BOOTSTRAP_CODE_IDENTITY_TIMEOUT", "BOOTSTRAP_CODE_IDENTITY_INVALID",
-  "BOOTSTRAP_MCP_START_FAILED", "MCP_HELPER_ARGUMENTS_INVALID", "MCP_HELPER_AUTH_FAILED",
-  "MCP_HELPER_SERVICE_UNAVAILABLE", "MCP_HELPER_SERVICE_RECOVERY_REQUIRED",
-  "MCP_HELPER_FAILED", "MCP_INITIALIZE_FAILED",
+  "BOOTSTRAP_MCP_START_FAILED", ...MCP_HELPER_STARTUP_CODES,
 ]);
+const STARTUP_CODES = new Set([...STARTUP_FAILURE_CODES, "MCP_INITIALIZE_FAILED"]);
 const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 // Remote errors may include context, paths or credentials. Retain only a closed
@@ -104,4 +104,14 @@ function recordCodexSessionFailure({ paths, binding, operationName, params, phas
   }
 }
 
-module.exports = { classifyCodexSessionRemoteError, recordCodexSessionFailure };
+function classifyCodexStartupFailure(value) {
+  if (typeof value !== "string") return null;
+  const text = value.slice(0, 8192);
+  for (const token of text.matchAll(/\b(?:BOOTSTRAP|MCP_HELPER)_[A-Z_]+\b/gu)) {
+    if (STARTUP_FAILURE_CODES.has(token[0])) return token[0];
+  }
+  return /required MCP servers failed to initialize|handshaking with MCP server failed/iu.test(text)
+    ? "MCP_INITIALIZE_FAILED" : null;
+}
+
+module.exports = { classifyCodexSessionRemoteError, classifyCodexStartupFailure, recordCodexSessionFailure };

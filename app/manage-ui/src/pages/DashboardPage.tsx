@@ -28,6 +28,7 @@ import {
   writeDashboardCache,
 } from "../lib/dashboardCache";
 import { usePageCache } from "../lib/usePageCache";
+import { translateGatewayError } from "../lib/gatewayErrors";
 import { useRegisterPageRefresh, useRegisterPageLoading } from "../lib/page-refresh";
 import { PageHead } from "../components/PageHead";
 import Modal from "../components/Modal";
@@ -702,7 +703,8 @@ export default function DashboardPage() {
           if (openRun) navigate(`/cron?job=${encodeURIComponent(openRun.jobId)}&edit=1`);
         }}
       >
-        {openRunExecution?.detail && <ReportNote error>{openRunExecution.detail}</ReportNote>}
+        {openRunExecution?.detail && <ReportNote error>{openRun?.backendId === "shoggoth"
+          ? translateGatewayError(openRunExecution.detail, t) : openRunExecution.detail}</ReportNote>}
         {openRunDelivery && openRunDelivery.tone !== "success" && (
           <ReportNote>
             {t("cronForm.runDeliveryResult")} · {openRunDelivery.value === "silent" ? t("cron.silentComplete") : openRunDelivery.value}

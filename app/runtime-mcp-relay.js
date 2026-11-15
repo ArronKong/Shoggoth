@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { SERVICE_PROTOCOL_VERSION } = require("./agent-service/service-protocol-version");
+const { MCP_AUTH_STORAGE_CODES } = require("./agent-service/mcp-helper-diagnostics");
 
 const RUNTIME_MCP_BRIDGE_TIMEOUT_MS = 10_000;
 const RUNTIME_MCP_BRIDGE_ACK_MAX_BYTES = 4 * 1024;
@@ -125,7 +126,7 @@ function openRuntimeMcpBridge(context, options = {}) {
         if (socket && typeof socket.destroy === "function") socket.destroy();
         buffered.fill(0);
         requestFrame.fill(0);
-        reject(error?.code?.startsWith("MCP_RELAY_")
+        reject(error?.code?.startsWith("MCP_RELAY_") || MCP_AUTH_STORAGE_CODES.includes(error?.code)
           ? error : relayError("MCP_RELAY_BRIDGE_FAILED"));
         return;
       }
@@ -195,6 +196,11 @@ function openRuntimeMcpBridge(context, options = {}) {
       let ack;
       try { ack = JSON.parse(buffered.subarray(0, newline).toString("utf8")); } catch {
         finish(relayError("MCP_RELAY_ACK_INVALID"));
+        return;
+      }
+      if (exactObject(ack, ["id", "ok", "error"]) && ack.id === null && ack.ok === false
+        && exactObject(ack.error, ["code", "message"]) && MCP_AUTH_STORAGE_CODES.includes(ack.error.code)) {
+        finish(relayError(ack.error.code));
         return;
       }
       if (buffered.toString("utf8") !== RUNTIME_MCP_BRIDGE_ACK_FRAME

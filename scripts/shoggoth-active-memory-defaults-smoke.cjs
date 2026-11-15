@@ -39,7 +39,10 @@ async function fixture(t, offlineConfig = lexicalPolicy({})) {
           async stop() {}, async stopAll() {} } });
       await service.start(); installLiteralMemoryModelControl(service.memoryEngine);
       const owner = service.memoryEngine, search = owner.searchMemory.bind(owner), get = owner.getFile.bind(owner);
-      owner.searchMemory = async input => { f.counts.search.push({ profileId: input.profileId, sources: input.sources }); return search(input); };
+      owner.searchMemory = async (input, onDeliveredOwnResults) => {
+        f.counts.search.push({ profileId: input.profileId, sources: input.sources });
+        return search(input, onDeliveredOwnResults);
+      };
       owner.getFile = input => { f.counts.get++; return get(input); };
       owner.complete = async input => { f.counts.model++; return f.model(input); };
       return service;

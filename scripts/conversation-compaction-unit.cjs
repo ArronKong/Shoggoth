@@ -189,6 +189,32 @@ test("automatic product compaction occupies its own run, queues chat, commits ac
   } finally { await f.cleanup(); }
 });
 
+test("a changed memory view at publication prevents committing the model-only checkpoint", async () => {
+  const f = await compactionFixture();
+  try {
+    const sent = await f.coordinator.send({ operationId: "summary-publish-memory-change", sessionKey: SESSION_KEY, prompt: "continue" });
+    assert.equal(sent.reason, "CONTEXT_COMPACTING");
+    await waitUntil(() => f.calls() === 1, 2000, "model-only request");
+    let verified = false;
+    f.checkpoints.withFreshMemory = async (profileId, publish, signal) => {
+      assert.equal(profileId, PROFILE_ID);
+      assert.ok(signal instanceof AbortSignal);
+      return publish({ assertFilesCurrent() {
+        verified = true;
+        throw Object.assign(new Error("Synthetic memory edit before publication"), { code: "MEMORY_REVISION_CONFLICT" });
+      } });
+    };
+    f.resolve();
+    const run = f.dispatcher.listRuns({ source: "compaction" })[0];
+    await f.coordinator.waitForIdle(run.id);
+    assert.equal(verified, true);
+    assert.equal(f.dispatcher.getRun(run.id).errorCode, "CHECKPOINT_STALE");
+    assert.equal(f.checkpoints.get(PROFILE_ID, f.sessions.session.id), null);
+    assert.equal(f.calls(), 1);
+    assert.equal(f.host.turnStartCalls, 0);
+  } finally { await f.cleanup(); }
+});
+
 test("an uncertain model request cannot be silently retried by another user message", async () => {
   const f = await compactionFixture();
   try {
@@ -204,30 +230,48 @@ test("an uncertain model request cannot be silently retried by another user mess
   } finally { await f.cleanup(); }
 });
 
-test("a timed-out memory flush lets product compaction finish without late notes or another flush attempt", async t => {
-  const { A, fixture } = require("./fixtures/memory-repair-fixture.cjs");
-  const memory = await fixture(t), session = memory.session();
-  memory.service.chatSessionStore.requestBinding(session.sessionKey, `bind-${session.id}`, memory.now());
-  memory.service.chatSessionStore.completeBinding(session.sessionKey, `bind-${session.id}`, `runtime-${session.id}`);
-  const turn = memory.turn("The telescope calibration happens every evening.", session);
-  await memory.finish(turn);
-  const f = await compactionFixture();
-  let request;
-  memory.model = input => { request = input; return new Promise(() => {}); };
-  f.coordinator.beforeMemoryCompaction = input => {
-    assert.ok(input.deadlineAt > f.coordinator.now() && input.deadlineAt <= f.coordinator.now() + 60_000);
-    return memory.owner.flushBeforeCompaction({ profileId: A, sessionId: turn.session.id, deadlineAt: memory.now() + 100 });
-  };
-  try {
-    const sent = await f.coordinator.send({ operationId: "flush-deadline", sessionKey: SESSION_KEY, prompt: "continue" });
-    f.resolve();
-    await waitUntil(() => f.dispatcher.getRun(sent.run.id).status === "running", 8000, "chat after bounded flush and compaction");
-    assert.equal(request.signal.aborted, true);
-    assert.equal(memory.modelCalls(), 1);
-    assert.ok(f.dispatcher.listRuns({ source: "compaction" }).every(run => run.status === "completed"));
-    assert.equal(memory.owner.database.db.prepare("SELECT state FROM memory_flush_runs").get().state, "failed");
-  } finally { await f.cleanup(); }
-});
+for (const [outcome, error] of [["deadline", "MEMORY_FLUSH_DEADLINE"], ["invalid output", "MEMORY_FLUSH_OUTPUT_INVALID"]]) {
+  test(`a memory flush ${outcome} lets required product compaction complete without replay`, async t => {
+    const { A, fixture } = require("./fixtures/memory-repair-fixture.cjs");
+    const { MEMORY_FLUSH_BUDGET_MS } = require("../app/agent-service/shoggoth-memory/maintenance.cjs");
+    const memory = await fixture(t), session = memory.session();
+    memory.service.chatSessionStore.requestBinding(session.sessionKey, `bind-${session.id}`, memory.now());
+    memory.service.chatSessionStore.completeBinding(session.sessionKey, `bind-${session.id}`, `runtime-${session.id}`);
+    const turn = memory.turn("The telescope calibration happens every evening.", session);
+    await memory.finish(turn);
+    const f = await compactionFixture();
+    let request;
+    memory.model = input => {
+      request = input;
+      if (outcome === "deadline") {
+        // Expire the model stage after the real source scan and receipt setup.
+        memory.advance(MEMORY_FLUSH_BUDGET_MS + 1);
+        input.assertCurrent();
+        assert.fail("the model-stage deadline must abort the flush");
+      }
+      return { text: '{"overwrite":"Invalid flush document"}' };
+    };
+    f.coordinator.beforeMemoryCompaction = input => {
+      assert.ok(input.deadlineAt > f.coordinator.now() && input.deadlineAt <= f.coordinator.now() + 60_000);
+      return memory.owner.flushBeforeCompaction({ profileId: A, sessionId: turn.session.id });
+    };
+    try {
+      const sent = await f.coordinator.send({ operationId: "flush-failure", sessionKey: SESSION_KEY, prompt: "continue" });
+      assert.equal(sent.reason, "CONTEXT_COMPACTING");
+      await waitUntil(() => f.calls() > 0, 2000, "required summary dispatch");
+      assert.equal(f.host.turnStartCalls, 0);
+      f.resolve();
+      await waitUntil(() => f.dispatcher.getRun(sent.run.id).status === "running", 8000, "chat after bounded flush and compaction");
+      assert.equal(request.signal.aborted, outcome === "deadline");
+      assert.equal(memory.modelCalls(), 1);
+      assert.ok(f.dispatcher.listRuns({ source: "compaction" }).every(run => run.status === "completed"));
+      const receipt = memory.owner.database.db.prepare("SELECT state,receipt FROM memory_flush_runs").get();
+      assert.equal(receipt.state, "failed");
+      assert.deepEqual(JSON.parse(receipt.receipt), { error, outcome: "failed-optional" });
+      assert.equal(memory.owner.store.list(A).length, 0);
+    } finally { await f.cleanup(); }
+  });
+}
 
 test("multiple bounded summary chunks finish before a queued chat can consume the checkpoint", async () => {
   const f = await compactionFixture({ rounds: 120 });

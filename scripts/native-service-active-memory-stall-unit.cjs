@@ -30,7 +30,7 @@ function loopBlockMonitor() {
   return { stop() { clearInterval(timer); return Math.max(max, performance.now() - last - 5); } };
 }
 
-test("direct chat admission with Active Memory never blocks the Service loop for long", { timeout: 300_000 }, async () => {
+test("direct chat admission keeps both Active Memory paths within the Service loop budget", { timeout: 300_000 }, async t => {
   const memoryCoreConfig = { memory: { search: { provider: "none", rememberAcrossConversations: true } },
     agents: { defaults: { compaction: { memoryFlush: { enabled: false } } } },
     plugins: { entries: { "active-memory": { enabled: true, config: { enabled: true, mode: "escalate", model: "literal" } } } } };
@@ -53,41 +53,77 @@ test("direct chat admission with Active Memory never blocks the Service loop for
     const recall = owner.activeMemory.run;
     owner.activeMemory.run = async () => null;
     for (let i = 0; i < IDLE_SESSIONS; i += 1) f.createSession();
-    let measured;
+    const measuredSessions = [];
+    const historyFact = "The quartz prism registry is assigned to cabinet 42.";
     for (let s = 0; s < HISTORY_SESSIONS; s += 1) {
       const session = f.createSession();
       for (let turn = 0; turn < TURNS; turn += 1) {
         const run = await f.send(session.sessionKey, `history-${s}-${turn}`,
           `Session ${s} turn ${turn}: the amber telescope calibration log for cabinet ${s * TURNS + turn}.`);
         assert.equal(run.status, "running", run.errorCode);
-        await f.complete(run, `Noted: telescope calibration for cabinet ${s * TURNS + turn} is recorded.`);
+        await f.complete(run, s === 7 && turn === 0 ? historyFact
+          : `Noted: telescope calibration for cabinet ${s * TURNS + turn} is recorded.`);
       }
-      measured = session;
+      if (s >= HISTORY_SESSIONS - 2) measuredSessions.push(session);
     }
     owner.activeMemory.run = recall;
 
-    let modelCalls = 0;
-    owner.complete = async () => {
-      modelCalls += 1;
-      return { text: modelCalls === 1
-        ? JSON.stringify({ tool: "memory_search", arguments: { query: "amber telescope calibration" } })
-        : JSON.stringify({ summary: "The amber telescope calibration log is kept per cabinet." }) };
-    };
     const counts = { scans: 0, walks: 0 };
     const recallService = owner.conversationRecall, scan = recallService.scanEligibleSession.bind(recallService);
     recallService.scanEligibleSession = (...args) => { counts.scans += 1; return scan(...args); };
     const walk = owner.store._files.bind(owner.store);
     owner.store._files = (...args) => { counts.walks += 1; return walk(...args); };
-    const monitor = loopBlockMonitor();
-    const started = performance.now();
-    const run = await f.send(measured.sessionKey, "measured-recall", "Do you remember the amber telescope calibration?");
-    const elapsed = performance.now() - started, blocked = monitor.stop();
-    console.log(`admission ${Math.round(elapsed)}ms, longest loop block ${Math.round(blocked)}ms, model calls ${modelCalls}, `
-      + `transcript scans ${counts.scans}, memory-file walks ${counts.walks}`);
-    assert.equal(run.status, "running", run.errorCode);
-    assert.ok(modelCalls > 0, "the real pre-admission Active Memory path ran");
-    assert.ok(counts.scans <= MAX_TRANSCRIPT_SCANS, `${counts.scans} transcript scans for one admission`);
-    assert.ok(counts.walks <= MAX_MEMORY_FILE_WALKS, `${counts.walks} memory-file walks for one admission`);
-    assert.ok(blocked < MAX_LOOP_BLOCK_MS, `Service loop blocked ${Math.round(blocked)}ms during admission`);
+
+    async function measure(session, operationId, question, model) {
+      counts.scans = 0;
+      counts.walks = 0;
+      const modelPrompts = [], debug = [];
+      owner.complete = async ({ prompt }) => {
+        modelPrompts.push(prompt);
+        return model(modelPrompts.length);
+      };
+      const originalLogger = owner.logger;
+      owner.logger = { ...originalLogger, debug: message => debug.push(message) };
+      const monitor = loopBlockMonitor();
+      const started = performance.now();
+      let run, blocked;
+      try { run = await f.send(session.sessionKey, operationId, question); }
+      finally {
+        blocked = monitor.stop();
+        owner.logger = originalLogger;
+      }
+      console.log(`${operationId}: admission ${Math.round(performance.now() - started)}ms, longest loop block ${Math.round(blocked)}ms, `
+        + `model calls ${modelPrompts.length}, transcript scans ${counts.scans}, memory-file walks ${counts.walks}`);
+      assert.equal(run.status, "running", run.errorCode);
+      const acquisitions = f.transport.acquisitions.filter(row => row.options.executionContract?.runId === run.id);
+      assert.equal(acquisitions.length, 1, "the measured chat acquires its native Runtime once");
+      assert.ok(counts.scans <= MAX_TRANSCRIPT_SCANS, `${counts.scans} transcript scans for one admission`);
+      assert.ok(counts.walks <= MAX_MEMORY_FILE_WALKS, `${counts.walks} memory-file walks for one admission`);
+      assert.ok(blocked < MAX_LOOP_BLOCK_MS, `Service loop blocked ${Math.round(blocked)}ms during admission`);
+      const { dynamicContext } = acquisitions[0].options.executionContract;
+      await f.complete(run);
+      return { modelPrompts, debug, dynamicContext };
+    }
+
+    await t.test("a strong file-memory hit skips the auxiliary model and reaches the main turn", async () => {
+      const result = await measure(measuredSessions[0], "measured-strong-hit",
+        "Do you remember the amber telescope calibration?", () => ({ text: '{"summary":"NONE"}' }));
+      assert.ok(result.debug.includes("active-memory: recall skipped reason=strong-lane-one-hit"),
+        `Expected a strong daily-memory hit; Active Memory reported ${JSON.stringify(result.debug)}`);
+      assert.equal(result.modelPrompts.length, 0, "the strong hit does not need the auxiliary model");
+      const recalled = result.dynamicContext.match(/<active_memory_plugin>([\s\S]*?)<\/active_memory_plugin>/u)?.[1] || "";
+      assert.match(recalled, /Telescope maintenance note \d+: lens cleaned, calibration log updated\. \(Source: memory\//u);
+    });
+
+    await t.test("an explicit recall without a strong file hit executes model and transcript retrieval", async () => {
+      const result = await measure(measuredSessions[1], "measured-model-recall",
+        "Which cabinet did we discuss last time?", step => ({ text: step === 1
+          ? JSON.stringify({ tool: "memory_search", arguments: { query: "quartz prism registry" } })
+          : JSON.stringify({ summary: historyFact }) }));
+      assert.equal(result.modelPrompts.length, 2, "the auxiliary model requests a second search then receives its result");
+      assert.ok(result.modelPrompts[1].includes(historyFact), "real cross-session transcript evidence reached the auxiliary model");
+      assert.ok(result.dynamicContext.includes(`<active_memory_plugin>\n${historyFact}\n</active_memory_plugin>`),
+        "the recall summary reached the main turn");
+    });
   } finally { await f.close(); }
 });

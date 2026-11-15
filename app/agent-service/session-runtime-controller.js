@@ -153,7 +153,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       ...(modelProviderRef ? { modelProviderRef } : {}),
       bindingId: current.id, runtime: current.runtime,
       model: (session.nextRuntimeSelection ? session.nextRuntimeSelection.model : session.modelOverride) ?? defaultModel,
-      contextUsage: currentCoordinator().getRuntimeContext(session)?.contextUsage ?? null, candidates,
+      contextUsage: currentCoordinator().getRuntimeContext(session, { measurementOnly: true })?.contextUsage ?? null, candidates,
       canSwitch: !isDesktop(session) && getNativeRuntimeConfig().flags.runtimeConversationHandoff === true }, params);
   }
   function auditPending() {
@@ -304,11 +304,14 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
   const controller = {
     auditPending,
     async selectForSend(input) {
+      input.assertCurrent?.();
       auditPending();
       const found = chatSessionStore.getSession(input.sessionKey);
       if (!found) return;
       if (isDesktop(found)) return;
-      const canSelect = () => input.excludingRunId
+      const canSelect = () => input.queuedRunId
+        ? currentCoordinator().canSelectSessionForQueuedSend(found.sessionKey, input.queuedRunId)
+        : input.excludingRunId
         ? !currentCoordinator().isSessionBusy?.(found.sessionKey, input.excludingRunId)
           && !currentCoordinator().listSessionRuns(found.sessionKey).some(run => run.id !== input.excludingRunId
             && ["queued", "starting", "running", "waiting_approval", "waiting_input"].includes(run.status))
@@ -323,10 +326,14 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
         const generation = facts.generation?.(target);
         const preflight = await candidate(profile, { ...session, permissionMode: next.permissionMode }, target, next.model,
           providerSelectionFor(profile, target, next.modelProviderRef ?? null));
+        input.assertCurrent?.();
         if (!preflight.support.supported) throw serviceError(preflight.support.code, preflight.support.code);
         await ensureTranscript(session);
+        input.assertCurrent?.();
         await currentCoordinator().prepareRuntimeHandoff?.(session, target, { model: next.model,
-          permissionMode: next.permissionMode, excludingRunId: input.excludingRunId ?? null, beforeSend: true });
+          permissionMode: next.permissionMode, excludingRunId: input.excludingRunId ?? input.queuedRunId ?? null, beforeSend: true,
+          pendingOperationId: input.queuedRunId ? input.operationId : null, signal: input.signal });
+        input.assertCurrent?.();
         const latest = sessionFor({ profileId: profile.id, sessionKey: session.sessionKey });
         if (latest.revision !== session.revision || generation !== facts.generation?.(target)
           || !canSelect() || JSON.stringify(productStore.getAgentRuntimeBinding(profile.id, target.id)) !== JSON.stringify(target)
@@ -349,6 +356,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       const allowed = bindings.filter(binding => policy.allowedBindingIds.includes(binding.id));
       const generations = new Map(allowed.map(binding => [binding.id, facts.generation?.(binding)]));
       const observed = Object.fromEntries(await Promise.all(allowed.map(async binding => [binding.id, await facts.read(binding, profile)])));
+      input.assertCurrent?.();
       const selection = require("./runtime-selection-policy").selectRuntimeBinding({ policy, bindings, facts: observed,
         currentBindingId: session.runtimeBindingId, defaultBindingId: profile.defaultBindingId,
         requirements: { model: session.modelOverride ?? profile.defaultModel, permissionMode: session.permissionMode ?? null,
@@ -357,9 +365,12 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       if (!selection.bindingId) throw serviceError("RUNTIME_SELECTION_UNAVAILABLE", "没有满足当前要求的已授权 Runtime");
       const target = allowed.find(binding => binding.id === selection.bindingId);
       await ensureTranscript(session);
+      input.assertCurrent?.();
       if (target.id !== session.runtimeBindingId) await currentCoordinator().prepareRuntimeHandoff?.(session, target, {
-        permissionMode: session.permissionMode ?? null, excludingRunId: input.excludingRunId ?? null, beforeSend: true,
+        permissionMode: session.permissionMode ?? null, excludingRunId: input.excludingRunId ?? input.queuedRunId ?? null, beforeSend: true,
+        pendingOperationId: input.queuedRunId ? input.operationId : null, signal: input.signal,
       });
+      input.assertCurrent?.();
       const latest = chatSessionStore.getSession(session.sessionKey);
       const currentProfile = productStore.getAgentProfile(profile.id);
       if (latest.revision !== session.revision || policyStore.get(profile.id).revision !== policy.revision

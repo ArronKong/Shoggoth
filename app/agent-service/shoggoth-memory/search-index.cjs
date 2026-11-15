@@ -14,7 +14,7 @@ const { planCjkQueryTerms, scoreCjkCandidate, cjkQueryVariants } = require("./cj
 // The SQL schema and all retrieval/ranking policies come from the pinned core.
 // This owner supplies a derived local index and the Product embedding service.
 class MemorySearchIndex {
-  constructor({ host, databasePath, sharedDatabase = false, embedding = null, embeddingRuntime, embeddingAdapterFactory, remoteEmbeddingResources, acquireLocalService, assertLocalEmbeddingConfig, runLocalEmbedding, getConfig = () => ({}), provenance = () => undefined, allow = () => true, logger = console,
+  constructor({ host, databasePath, sharedDatabase = false, embedding = null, embeddingRuntime, embeddingAdapterFactory, remoteEmbeddingResources, acquireLocalService, assertLocalEmbeddingConfig, runLocalEmbedding, getConfig = () => ({}), provenance = () => undefined, allow = () => true, withCandidateReadView = read => read(), withAsyncCandidateReadView, logger = console,
     backgroundSync = typeof host.sessions?.subscribeChanges === "function" }) {
     this.host = host;
     this.agentId = host.profileId;
@@ -39,6 +39,11 @@ class MemorySearchIndex {
     this.sourceFiles = new MemorySourceFiles(host, getConfig);
     this.provenanceFor = provenance;
     this.allow = allow;
+    this.withCandidateReadView = withCandidateReadView;
+    this.withAsyncCandidateReadView = withAsyncCandidateReadView || ((signal, read) => {
+      signal?.throwIfAborted();
+      return withCandidateReadView(read);
+    });
     this.candidateScope = new AsyncLocalStorage();
     this.logger = logger;
     this.backgroundSync = backgroundSync;
@@ -120,18 +125,20 @@ class MemorySearchIndex {
     if (typeof filter !== "function" || typeof action !== "function") throw new TypeError("Invalid memory candidate filter");
     return this.candidateScope.run({ filter, admittedIds: null, admittedPaths: null }, action);
   }
-  prepareCandidateAdmission() {
+  async prepareCandidateAdmission(signal) {
     const scope = this.candidateScope.getStore();
     if (!scope) return;
-    const rows = this.db.prepare("SELECT id,path,source,start_line AS startLine,end_line AS endLine,text AS snippet FROM memory_index_chunks ORDER BY path,source,start_line,end_line,id").all();
     scope.admittedIds = new Set(); scope.admittedPaths = new Set();
     const first = new Set();
-    for (const row of rows) {
-      const key = `${row.source}:${row.path}`, isFirst = !first.has(key); first.add(key);
-      if (!this.isCurrent(row)) continue;
-      scope.admittedIds.add(row.id);
-      if (isFirst) scope.admittedPaths.add(key);
-    }
+    const chunks = this.db.prepare("SELECT id,path,source,start_line AS startLine,end_line AS endLine,text AS snippet FROM memory_index_chunks ORDER BY path,source,start_line,end_line,id");
+    await this.withAsyncCandidateReadView(signal, () => {
+      for (const row of chunks.iterate()) {
+        const key = `${row.source}:${row.path}`, isFirst = !first.has(key); first.add(key);
+        if (!this.isCurrent(row)) continue;
+        scope.admittedIds.add(row.id);
+        if (isFirst) scope.admittedPaths.add(key);
+      }
+    });
   }
   constrainSourceFilter(base, alias, kind = "chunk") {
     if (!this.candidateScope.getStore()) return base;
@@ -329,10 +336,11 @@ class MemorySearchIndex {
     if (this.configStamp() !== stamp) throw Object.assign(new Error("Memory configuration changed during indexing"), { code: "MEMORY_CONFIG_CHANGED" });
   }
 
-  sync({ signal, force = false, nativeParams, owner } = {}) {
+  sync({ signal, force = false, nativeParams, owner, expectedConfigStamp } = {}) {
     signal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
     const next = this.tail.catch(() => {}).then(() => {
       signal.throwIfAborted();
+      if (expectedConfigStamp !== undefined) this.assertConfig(expectedConfigStamp);
       return this.host.run(() => this.syncFiles(signal, force, nativeParams, owner));
     }).then(result => {
       if (this.backgroundSync && !this.closing) this.searchOwner?.startBackground();
@@ -556,7 +564,7 @@ class MemorySearchIndex {
     const body = await this.keywordBody(query.body, signal);
     const paths = await core.searchPathKeyword({ ...query.path, sourceFilter: this.constrainSourceFilter(query.path.sourceFilter, query.path.pathFtsTable, "path"), db: this.db });
     signal?.throwIfAborted(); this.host.assertCurrent();
-    const admitted = new Set(this.admitCandidates([...body, ...paths]).map(result => result.id));
+    const admitted = new Set((await this.admitCandidates([...body, ...paths], signal)).map(result => result.id));
     return { kind: "keyword", body: { rows: body.filter(result => admitted.has(result.id)) }, path: { rows: paths.filter(result => admitted.has(result.id)) },
       ...(includeIndexState ? { indexState: core.readMemoryRetrievalIndexState(this.db) } : {}),
       ...(query.includeRecallMetadata ? { recallData: this.recallMetadata({ candidates: [...body, ...paths] }) } : {}) };
@@ -568,7 +576,8 @@ class MemorySearchIndex {
     if (!questionKey || !results.length) return;
     await this.host.run(async () => {
       await this.host.pruneUnavailableLibraryCandidates();
-      const current = results.filter(isCurrent).map(result => ({ ...result, snippet: normalizeSnippet(result.snippet) }));
+      const current = (await this.withAsyncCandidateReadView(this.lifetime.signal, () => results.filter(isCurrent)))
+        .map(result => ({ ...result, snippet: normalizeSnippet(result.snippet) }));
       if (current.length) await core.recordShortTermRecalls({ workspaceDir: this.workspaceDir, query: questionKey, results: current, nowMs });
     });
   }
@@ -594,12 +603,13 @@ class MemorySearchIndex {
     }).sort((left, right) => right.score - left.score).slice(0, params.limit);
   }
 
-  admitCandidates(candidates) {
+  async admitCandidates(candidates, signal = this.lifetime.signal) {
+    if (!candidates.length) return candidates;
     const metadata = this.recallMetadata({ candidates }).rows;
-    return candidates.filter(result => {
+    return this.withAsyncCandidateReadView(signal, () => candidates.filter(result => {
       const projectKey = metadata.get(result.id)?.project_key;
       return this.isCurrent({ ...result, ...(typeof projectKey === "string" ? { projectKey } : {}) });
-    });
+    }));
   }
 
   recallMetadata({ candidates }) {
@@ -616,13 +626,26 @@ class MemorySearchIndex {
     return { rows, sourceMtimes };
   }
 
-  isCurrent(result) {
+  isCurrent(result, expectedHash) {
     this.host.assertCurrent();
     if (!["memory", "sessions"].includes(result.source) || this.candidateScope.getStore()?.filter(result) === false
       || !this.allow(result)) return false;
     const indexed = this.db.prepare("SELECT hash FROM memory_index_sources WHERE path=? AND source=?").get(result.path, result.source);
+    if (!indexed || expectedHash !== undefined && expectedHash !== indexed.hash) return false;
     try { return indexed?.hash === this.readIndexedSource(result.path, result.source).hash; }
     catch (error) { if (["ENOENT", "ENOTDIR", "MEMORY_PATH_NOT_ALLOWED", "MEMORY_SOURCE_CHANGED", "MEMORY_SESSION_REVOKED", "CONVERSATION_EVENT_NOT_FOUND"].includes(error.code)) return false; throw error; }
+  }
+
+  currentCandidates(results, identities = null) {
+    if (!results.length) return results;
+    return this.withCandidateReadView(() => results.filter(result =>
+      (!identities || identities.has(result)) && this.isCurrent(result, identities?.get(result))));
+  }
+
+  verifyCandidates(results, signal, read) {
+    signal?.throwIfAborted();
+    if (!results.length) return read(results);
+    return this.withAsyncCandidateReadView(signal, () => read(this.currentCandidates(results)));
   }
 
   async listTriggerCandidates(options = {}) {
@@ -630,20 +653,22 @@ class MemorySearchIndex {
     await this.sync({ signal: options.signal });
     options.signal?.throwIfAborted();
     if (!this.settings.enabled || !this.searchOwner) return [];
-    this.prepareCandidateAdmission();
+    await this.prepareCandidateAdmission(options.signal);
     return this.host.run(async () => {
       const results = await this.searchOwner.listTriggerCandidates(options);
       options.signal?.throwIfAborted();
-      return results.filter(result => this.isCurrent(result));
+      return this.verifyCandidates(results, options.signal, current => current);
     });
   }
 
-  async search(query, { maxResults, minScore, activeProjectKeys, signal, record = true, sources, lexicalOnly = false, sessionKey, onDebug, onPartialResults } = {}) {
-    if (!query?.trim()) return [];
+  async search(query, { maxResults, minScore, activeProjectKeys, signal, record = true, sources, lexicalOnly = false, sessionKey, onDebug,
+    onPartialResults, captureIdentities = false } = {}) {
+    const empty = () => captureIdentities ? { results: [], identities: new Map() } : [];
+    if (!query?.trim()) return empty();
     signal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
     signal.throwIfAborted();
     const { resolved, stamp } = this.resolveSettings();
-    if (!resolved) { await this.sync({ signal }); return []; }
+    if (!resolved) { await this.sync({ signal }); return empty(); }
     maxResults ??= resolved.query.maxResults; minScore ??= resolved.query.minScore;
     if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 200 || !Number.isFinite(minScore) || minScore < 0 || minScore > 1) throw new TypeError("Invalid memory search limits");
     // Product source discovery remains a foreground freshness barrier even
@@ -652,12 +677,12 @@ class MemorySearchIndex {
     await this.sync({ signal });
     this.assertConfig(stamp);
     const owner = this.searchOwner;
-    this.prepareCandidateAdmission();
+    await this.prepareCandidateAdmission(signal);
     const operation = this.host.run(async () => {
       let results;
       try {
         results = await owner.search(query, { maxResults, minScore, activeProjectKeys, signal, sources, lexicalOnly, sessionKey, onDebug,
-          onPartialResults: onPartialResults && (partial => onPartialResults(partial?.filter(result => this.isCurrent(result)) ?? null)),
+          onPartialResults: onPartialResults && (partial => onPartialResults(partial ? this.currentCandidates(partial) : null)),
         });
       } catch (error) {
         // Native embedding errors wrap transport failures. Product cancellation
@@ -667,15 +692,24 @@ class MemorySearchIndex {
         throw error;
       }
       this.assertConfig(stamp);
-      results = results.filter(result => this.isCurrent(result)).map(result => ({ ...result, citation: `${result.path}#L${result.startLine}-L${result.endLine}` }));
+      results = results.map(result => ({ ...result, citation: `${result.path}#L${result.startLine}-L${result.endLine}` }));
       // Native search has released its read lease before receipt mutations.
       if (record) {
         await this.host.pruneUnavailableLibraryCandidates();
-        await core.recordShortTermRecalls({ workspaceDir: this.workspaceDir, query,
-          results: results.filter(result => this.isCurrent(result)), nowMs: this.host.database.now() });
+        const current = await this.verifyCandidates(results, signal, filtered => filtered);
+        await core.recordShortTermRecalls({ workspaceDir: this.workspaceDir, query, results: current, nowMs: this.host.database.now() });
       }
-      this.assertConfig(stamp);
-      return results.filter(result => this.isCurrent(result));
+      return this.verifyCandidates(results, signal, current => {
+        this.assertConfig(stamp);
+        if (!captureIdentities) return current;
+        const hash = this.db.prepare("SELECT hash FROM memory_index_sources WHERE path=? AND source=?");
+        const identities = new Map();
+        for (const result of current) {
+          const row = hash.get(result.path, result.source);
+          if (row) identities.set(result, row.hash);
+        }
+        return { results: current, identities };
+      });
     });
     this.searches.add(operation);
     try { return await operation; } finally { this.searches.delete(operation); }

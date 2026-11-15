@@ -598,6 +598,63 @@ test("file authority preserves stable IDs, detects direct edits and serializes C
   assert.equal(fs.readFileSync(f.source, "utf8"), f.data);
 });
 
+test("file writes use worker projections and reject a new duplicate before creating intent", async t => {
+  const f = migrationFixture(t), migration = new ShoggothMemoryMigration(f.options);
+  const workspace = migration.locations("one").workspace;
+  f.roster[0].workspace = workspace;
+  const store = new FileMemoryStore({ paths: f.paths, database: f.database, migration, getHost: f.host, now: f.now });
+  store.open(); store.ensureProfile("one");
+  t.after(() => store.close());
+  const item = store.get("one", "legacy-7");
+  const memoryFile = path.join(workspace, "MEMORY.md");
+  const dailyFile = path.join(workspace, "memory/2026-10-21.md");
+  const original = fs.readFileSync(memoryFile, "utf8");
+  const copied = /<!-- shoggoth-memory-entry:legacy-7 -->\n[\s\S]*?<!-- \/shoggoth-memory-entry -->/u.exec(original)[0];
+  fs.mkdirSync(path.dirname(dailyFile), { recursive: true, mode: 0o700 });
+  const block = t.mock.method(store, "_filesystemStamp", () => assert.fail("write scanned the whole memory tree synchronously"));
+  try {
+    await assert.rejects(store.upsert({ ...item, content: "Updated memory" }, {
+      assertCurrent: () => fs.writeFileSync(dailyFile, copied, { mode: 0o600 }),
+    }), { code: "MEMORY_REVISION_CONFLICT" });
+    assert.equal(f.database.db.prepare("SELECT count(*) AS total FROM memory_file_pending").get().total, 0);
+    assert.equal(fs.readFileSync(memoryFile, "utf8"), original);
+
+    const saved = await store.upsert({ ...item, content: "Updated memory" });
+    assert.equal(saved.content, "Updated memory");
+    assert.equal(saved.memoryPath, "MEMORY.md");
+    assert.ok(saved.startLine > 0 && saved.endLine > saved.startLine);
+    assert.equal(saved.fileHash, sha256(fs.readFileSync(memoryFile, "utf8")));
+    const daily = fs.readFileSync(dailyFile, "utf8");
+    assert.ok(daily.includes(item.content));
+    assert.ok(!daily.includes("shoggoth-memory-entry:legacy-7"));
+  } finally { block.mock.restore(); }
+});
+
+test("memory writer keeps large legacy workspaces and completed receipts usable", async t => {
+  const f = migrationFixture(t), migration = new ShoggothMemoryMigration(f.options);
+  f.roster[0].workspace = migration.locations("one").workspace;
+  const store = new FileMemoryStore({ paths: f.paths, database: f.database, migration, getHost: f.host, now: f.now });
+  store.open(); store.ensureProfile("one");
+  t.after(() => store.close());
+  const item = store.get("one", "legacy-7");
+  let scanCalls = 0;
+  const scan = store.withAsyncReadView.bind(store);
+  const limit = t.mock.method(store, "withAsyncReadView", async (...args) => {
+    scanCalls += 1;
+    if (scanCalls === 1 || scanCalls === 2) throw Object.assign(new Error("scan capacity"), { code: "MEMORY_SCAN_TOO_LARGE" });
+    if (scanCalls === 4) throw Object.assign(new Error("worker closed"), { code: "MEMORY_SCOPE_REVOKED" });
+    return scan(...args);
+  });
+  try {
+    const legacy = await store.upsert({ ...item, content: "Changed within a large workspace" });
+    assert.equal(legacy.content, "Changed within a large workspace");
+    const saved = await store.upsert({ ...legacy, content: "Committed before the worker stopped" });
+    assert.equal(saved.content, "Committed before the worker stopped");
+    assert.equal(store.get("one", item.id).contentRevision, saved.contentRevision);
+    assert.equal(f.database.db.prepare("SELECT count(*) AS total FROM memory_file_pending").get().total, 0);
+  } finally { limit.mock.restore(); }
+});
+
 test("file authority advances the invalidation revision only when existing memory text changes", async t => {
   const f = migrationFixture(t), migration = new ShoggothMemoryMigration(f.options);
   f.roster[0].workspace = migration.locations("one").workspace;
@@ -633,4 +690,204 @@ test("file authority advances the invalidation revision only when existing memor
   fs.rmSync(daily);
   const afterRemove = restarted.getRevisions("one");
   assert.equal(afterRemove.invalidationRevision, afterRemove.revision, "a removed memory file is an invalidation");
+});
+
+test("a verified file-memory view performs 100 lookups without another directory walk and closes on return", t => {
+  const { DatabaseSync } = require("node:sqlite");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "memory-read-view-")));
+  const db = new DatabaseSync(":memory:");
+  t.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  fs.chmodSync(root, 0o700);
+  fs.mkdirSync(path.join(root, "memory"), { mode: 0o700 });
+  for (let index = 0; index < 600; index++) {
+    const relative = `memory/${String(index).padStart(3, "0")}.md`;
+    fs.writeFileSync(path.join(root, relative), `Cabinet ${index} holds its telescope log.\n`, { mode: 0o600 });
+  }
+  const store = new FileMemoryStore({ paths: {}, database: { db, open() {} },
+    migration: { locations: () => ({ workspace: root }) }, getHost: () => null });
+  store.open(); store.ready.add("view-profile");
+  db.prepare("INSERT INTO memory_file_profiles VALUES ('view-profile',0,'')").run();
+  const all = store.list("view-profile"), { id, content, memoryPath } = all[0];
+  assert.equal(all.length, 600);
+  let reads = 0, retained;
+  const original = fs.readdirSync;
+  const enumeration = t.mock.method(fs, "readdirSync", (...args) => { reads++; return original(...args); });
+  try {
+    store.withReadView("view-profile", view => {
+      const boundary = reads;
+      assert.ok(boundary > 0, "view creation revalidates the directory");
+      retained = view;
+      for (let index = 0; index < 100; index++) {
+        const item = view.get(id);
+        assert.equal(item.content, content);
+        item.sourceRefs.length = 0;
+      }
+      assert.ok(view.get(id).sourceRefs.length);
+      assert.deepEqual(view.listActiveFile(memoryPath).map(item => item.id), [id]);
+      assert.equal(reads, boundary, "lookups within the verified read view do not rescan");
+    });
+  } finally { enumeration.mock.restore(); }
+  assert.throws(() => retained.get(id), { code: "MEMORY_READ_VIEW_STALE" });
+  assert.throws(() => store.withReadView("view-profile", async () => {}), /requires a synchronous callback/);
+  assert.throws(() => store.withReadView("view-profile", view => {
+    db.prepare("UPDATE memory_file_profiles SET revision=revision+1 WHERE profile_id=?").run("view-profile");
+    view.get(id);
+  }), { code: "MEMORY_READ_VIEW_STALE" });
+  fs.writeFileSync(path.join(root, memoryPath), "The existing log moved to the northern room.\n");
+  assert.equal(store.get("view-profile", id), null);
+  assert.equal(store.withReadView("view-profile", view => view.listActiveFile(memoryPath)[0].content),
+    "The existing log moved to the northern room.\n");
+});
+
+test("an asynchronous memory scan projects external edits away from the owner and rejects stale or canceled publication", async t => {
+  const { DatabaseSync } = require("node:sqlite");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "memory-async-view-")));
+  const db = new DatabaseSync(":memory:");
+  const store = new FileMemoryStore({ paths: {}, database: { db, open() {} },
+    migration: { locations: () => ({ workspace: root }) }, getHost: () => null });
+  t.after(() => { store.close(); db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  fs.chmodSync(root, 0o700);
+  fs.mkdirSync(path.join(root, "memory"), { mode: 0o700 });
+  const target = path.join(root, "memory/log.md");
+  fs.writeFileSync(target, "The original observation.\n", { mode: 0o600 });
+  store.open(); store.ready.add("async-profile");
+  db.prepare("INSERT INTO memory_file_profiles VALUES ('async-profile',0,'')").run();
+  db.prepare("INSERT INTO memory_file_profiles VALUES ('independent-profile',0,'')").run();
+  const read = view => ({ items: view.listActiveFile("memory/log.md"), ...view.getRevisions() });
+  const previous = store.withReadView("async-profile", read);
+  fs.writeFileSync(target, "The corrected observation.\n");
+  const blockedStamp = t.mock.method(store, "_filesystemStamp", () => assert.fail("file scan crossed back to owner thread"));
+  try {
+    const current = await store.withAsyncReadView("async-profile", null, read);
+    assert.match(current.items[0].content, /corrected observation/u);
+    assert.ok(current.invalidationRevision > previous.invalidationRevision);
+    assert.deepEqual(await store.withAsyncReadView("async-profile", null, read), current);
+    const edited = current.items[0];
+    db.prepare("INSERT INTO memory_file_records VALUES (?,?,?)").run("async-profile", edited.id,
+      JSON.stringify({ ...edited, sensitivity: "restricted" }));
+    assert.equal((await store.withAsyncReadView("async-profile", null, read)).items[0].sensitivity, "normal",
+      "handwritten projection identity does not take authorization from an arbitrary metadata row");
+    db.prepare("DELETE FROM memory_file_records WHERE profile_id=? AND id=?").run("async-profile", edited.id);
+    const independent = store.withAsyncReadView("async-profile", null, read);
+    db.prepare("UPDATE memory_file_profiles SET revision=revision+1 WHERE profile_id=?").run("independent-profile");
+    assert.deepEqual(await independent, current, "another Profile's update does not invalidate this read");
+    const changedMetadata = store.withAsyncReadView("async-profile", null, () => assert.fail("old metadata published"));
+    db.prepare("INSERT INTO memory_file_records VALUES ('async-profile','fixture','{}')").run();
+    await assert.rejects(changedMetadata, { code: "MEMORY_REVISION_CONFLICT" });
+    db.prepare("DELETE FROM memory_file_records WHERE profile_id='async-profile'").run();
+    const rejected = store.withAsyncReadView("async-profile", null, () => assert.fail("stale scan published"));
+    db.prepare("UPDATE memory_file_profiles SET revision=revision+1 WHERE profile_id=?").run("async-profile");
+    await assert.rejects(rejected, { code: "MEMORY_REVISION_CONFLICT" });
+    const controller = new AbortController();
+    const canceled = store.withAsyncReadView("async-profile", controller.signal, () => assert.fail("canceled scan published"));
+    controller.abort();
+    await assert.rejects(canceled, { name: "AbortError" });
+    await Promise.allSettled([...store.scans.values()].map(scan => scan.promise));
+    assert.equal(store.scans.size, 0);
+  } finally { blockedStamp.mock.restore(); }
+});
+
+test("a saturated memory scan queue reacquires current authority and cancels retired reads", async t => {
+  const { DatabaseSync } = require("node:sqlite");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "memory-scan-queue-")));
+  fs.chmodSync(root, 0o700);
+  const db = new DatabaseSync(":memory:");
+  const store = new FileMemoryStore({ paths: {}, database: { db, open() {} },
+    migration: { locations: id => ({ workspace: path.join(root, id) }) }, getHost: () => null });
+  t.after(async () => { await store.stopScans(); store.close(); db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  store.open();
+  for (const id of ["first", "second", "waiting", "canceled", "retired", "timed"]) {
+    const workspace = store.workspace(id);
+    fs.mkdirSync(workspace, { mode: 0o700 });
+    fs.writeFileSync(path.join(workspace, "MEMORY.md"), "Initial text.\n", { mode: 0o600 });
+    store.ready.add(id);
+    db.prepare("INSERT INTO memory_file_profiles VALUES (?,0,'')").run(id);
+  }
+  const read = id => store.withAsyncReadView(id, undefined, view => view.listActiveFile("MEMORY.md")[0].content);
+  const running = [read("first"), read("second")];
+  const waiting = read("waiting");
+  const controller = new AbortController();
+  const canceled = store.withAsyncReadView("canceled", controller.signal, () => assert.fail("canceled scan published"));
+  const retired = store.withAsyncReadView("retired", undefined, () => assert.fail("retired scan published"));
+  const timedOut = store.withAsyncReadView("timed", AbortSignal.timeout(0), () => assert.fail("timed-out scan published"));
+  assert.equal(store.scans.size, 2);
+  assert.equal(store.scanQueue.size, 4);
+  fs.writeFileSync(path.join(store.workspace("waiting"), "MEMORY.md"), "Current text before admission.\n");
+  controller.abort();
+  const checked = Promise.all([
+    assert.rejects(canceled, { name: "AbortError" }),
+    assert.rejects(retired, { code: "MEMORY_SCOPE_REVOKED" }),
+    assert.rejects(timedOut, { name: "TimeoutError" }),
+  ]);
+  await store.stopScans("retired");
+  await checked;
+  assert.deepEqual(await Promise.all(running), ["Initial text.\n", "Initial text.\n"]);
+  assert.equal(await waiting, "Current text before admission.\n");
+  assert.equal(store.scans.size + store.scanQueue.size, 0);
+  const idleWorkers = [...store.scanWorkers];
+  assert.equal(idleWorkers.length, 2);
+  const otherOwner = read("waiting");
+  const foreignSlot = store.scans.get("waiting").slot;
+  assert.match(await otherOwner, /^Current text before admission\.\s*$/u);
+  const readerController = new AbortController();
+  const sharedRead = read("first");
+  const sharedScan = store.scans.get("first");
+  assert.equal(sharedScan.slot, foreignSlot, "the same idle worker can serve a different Profile");
+  const stoppedReader = store.withAsyncReadView("first", readerController.signal,
+    () => assert.fail("canceled reader received a shared result"));
+  assert.equal(store.scans.get("first"), sharedScan);
+  readerController.abort();
+  await assert.rejects(stoppedReader, { name: "AbortError" });
+  assert.equal(await sharedRead, "Initial text.\n");
+  const anotherOwner = store.withAsyncReadView("first", undefined,
+    () => assert.fail("a scan retired during shutdown must never publish"));
+  const scan = store.scans.get("first");
+  assert.ok(idleWorkers.includes(scan.slot), "repeat reads use an existing scan worker");
+  assert.ok(scan.slot.jobId > 1, "the reused worker owns a fresh request");
+  // Shutdown can retire the worker before it replies or fence its result
+  // after a reply was already sent. Both leave the read unpublished.
+  const canceledRead = assert.rejects(anotherOwner, error =>
+    ["MEMORY_SCAN_UNAVAILABLE", "MEMORY_SCOPE_REVOKED"].includes(error.code));
+  const closing = store.stopScans();
+  await Promise.all([canceledRead, closing, assert.rejects(read("second"), { code: "MEMORY_SCOPE_REVOKED" })]);
+  assert.equal(store.scans.size + store.scanWorkers.size + store.scanQueue.size, 0);
+});
+
+test("retained worker proofs compose reader and owner scopes and reject later drift", async t => {
+  const { DatabaseSync } = require("node:sqlite");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "memory-proof-scopes-")));
+  fs.chmodSync(root, 0o700);
+  const db = new DatabaseSync(":memory:");
+  const store = new FileMemoryStore({ paths: {}, database: { db, open() {} },
+    migration: { locations: id => ({ workspace: path.join(root, id) }) }, getHost: () => null });
+  t.after(async () => { await store.stopScans(); store.close(); db.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  store.open();
+  for (const id of ["reader", "owner"]) {
+    const workspace = store.workspace(id);
+    fs.mkdirSync(workspace, { mode: 0o700 });
+    fs.writeFileSync(path.join(workspace, "MEMORY.md"), `Fact for ${id}.\n`, { mode: 0o600 });
+    store.ready.add(id);
+    db.prepare("INSERT INTO memory_file_profiles VALUES (?,0,'')").run(id);
+  }
+  const controller = new AbortController();
+  const capture = id => store.withAsyncReadView(id, controller.signal, view => view.retainProof());
+  const owner = await capture("owner"), reader = await capture("reader");
+  const walk = t.mock.method(store, "_filesystemStamp", () => assert.fail("nested proof rewalked an owner tree"));
+  try {
+    reader.read(readerView => owner.read(ownerView => {
+      assert.match(store.list("reader")[0].content, /reader/u);
+      assert.match(store.list("owner")[0].content, /owner/u);
+      readerView.assertFilesCurrent(); ownerView.assertFilesCurrent();
+    }));
+    const item = owner.read(view => view.list()[0]);
+    db.prepare("INSERT INTO memory_file_records VALUES (?, ?, ?)").run("owner", "new-metadata", "{}");
+    assert.equal(owner.current(), false);
+    assert.equal(owner.metadataCurrent({ allowAdditions: true }), true);
+    db.prepare("INSERT INTO memory_file_records VALUES (?, ?, ?)").run("owner", item.id, "{}");
+    assert.equal(owner.metadataCurrent({ allowAdditions: true }), false);
+    fs.writeFileSync(path.join(store.workspace("reader"), "MEMORY.md"), "Changed.\n");
+    assert.throws(() => reader.read(() => assert.fail("old source published")), { code: "MEMORY_REVISION_CONFLICT" });
+    controller.abort();
+    assert.equal(reader.metadataCurrent(), false);
+  } finally { walk.mock.restore(); }
 });

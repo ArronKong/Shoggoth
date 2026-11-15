@@ -25,7 +25,7 @@ function measureComposition({ stableInstructions, turnInstructions, definitionTe
   const instructionDefinitionTokens = estimateContextTokens(definitionText);
   const definitionTokens = instructionDefinitionTokens + blockTokens(blocks, ["user-profile"]);
   const skillBodyTokens = blockTokens(blocks, ["skill"]);
-  const noticeTokens = blockTokens(blocks, ["notice", "proactive-history"]);
+  const noticeTokens = blockTokens(blocks, ["notice", "proactive-history", "continuation"]);
   return {
     version: COMPOSITION_VERSION,
     historyDelivered: historyDelivered || noticeTokens > 0,

@@ -95,16 +95,22 @@ class ShoggothMemoryService {
   }
   setSharingConfig(config) { this.sharing.setConfig(config); }
   borrowedMemoryDependenciesCurrent(profileId, sessionId, refs) { return this.sharing.dependenciesCurrent(profileId, sessionId, refs); }
-  sharedTriggers(input, options, own) { return this.sharing.search({ ...input, query: options.query || input.query, lexicalOnly: true, candidateMode: "trigger", triggerOptions: options },
-    { items: [], results: own || [], revision: this.store.getRevision(input.profileId), truncated: false }); }
+  sharedTriggers(input, options, own, revision = this.store.getRevision(input.profileId)) { return this.sharing.search({ ...input, query: options.query || input.query, lexicalOnly: true, candidateMode: "trigger", triggerOptions: options },
+    { items: [], results: own || [], revision, truncated: false }); }
   setReviewReceiptStore() {} // Only the immutable migration reader consumes old receipts.
   setProvenanceService(service) { this.provenance = service; }
   setSemanticSearchService(service) {
     this.semanticService = service;
     const { e5Identity } = require("../e5-model-contract"), { E5_RUNTIME } = require("../e5-encoder");
-    this.embedding = { identity: `intfloat/multilingual-e5-small:${e5Identity(E5_RUNTIME.onnx, E5_RUNTIME.tokenizer)}`, encode: async (text, mode) => {
+    this.embedding = { identity: `intfloat/multilingual-e5-small:${e5Identity(E5_RUNTIME.onnx, E5_RUNTIME.tokenizer)}`, encode: async (text, mode, options) => {
       await service.embedding.start();
-      const vector = await service.embedding.request(mode === "query" ? "encode-query" : "encode-passage", { text }, { timeoutMs: mode === "query" ? 30_000 : 120_000 });
+      const vector = await service.embedding.request(mode === "query" ? "encode-query" : "encode-passage", { text }, {
+        timeoutMs: mode === "query" ? 30_000 : 120_000,
+        beforeSend: () => {
+          options?.signal?.throwIfAborted();
+          core.assertMemoryEmbeddingRequestCurrent();
+        },
+      });
       // Worker IPC preserves Float32Array; the native memory provider contract
       // requires number[]. Leave dimension/finite-coordinate checks to the core.
       return vector instanceof Float32Array ? Array.from(vector) : vector;
@@ -166,7 +172,7 @@ class ShoggothMemoryService {
     const authority = this.sourceAuthority.getStore();
     if (authority?.profileId === id && authority.stamp !== this.sourceAuthorityStamp(id)) fail("MEMORY_SOURCE_REVOKED", "整理期间原始会话或撤回策略已经变化");
   }
-  open(profileIds = []) {
+  async open(profileIds = []) {
     if (this.remoteEmbeddingResources.closed) this.remoteEmbeddingResources = this.createRemoteProviderResources();
     if (this.localEmbeddingHost.closed) this.localEmbeddingHost = new MemoryLocalEmbeddingHost({
       getConfig: id => this.config(id), assertCurrent: id => this.assertProfile(id) });
@@ -175,18 +181,25 @@ class ShoggothMemoryService {
     try {
       this.blockedProfiles.clear();
       for (const id of profileIds) {
-        try { this.store.ensureProfile(id); }
+        try { await this.ensureProfile(id); }
         catch (error) { if (error.code !== "RECALL_POLICY_UNAVAILABLE") throw error; this.blockedProfiles.add(id); }
       }
       this.recallPolicy.memoryStore = this.store;
-      for (const id of profileIds) if (!this.blockedProfiles.has(id)) this.recallPolicy.assertReady(id);
+      for (const id of profileIds) if (!this.blockedProfiles.has(id)) {
+        await this.withAsyncMemoryReadView(id, undefined, () => this.recallPolicy.assertReady(id));
+      }
       this.maintenance.open();
     } catch (error) { this.opened = false; throw error; }
+  }
+  ensureProfile(profileId) {
+    this.store.prepareProfile(profileId);
+    const signal = this.profileSignal(profileId);
+    return this.store.withAsyncReadView(profileId, signal, view => view.getRevisions().revision);
   }
   async close() {
     for (const timer of this.indexWarmTimers.values()) clearTimeout(timer);
     this.indexWarmTimers.clear();
-    this.sharing.close();
+    const sharingClosing = this.sharing.close();
     this.ownMemory.close();
     this.opened = false;
     for (const controller of this.profileControllers.values()) controller.abort();
@@ -197,6 +210,8 @@ class ShoggothMemoryService {
     // failed retirement can still be retried with its original evidence.
     const outcomes = await Promise.allSettled([
       ...[...this.hosts.values()].map(async host => host.searchIndex.close()),
+      this.store.stopScans(),
+      sharingClosing,
       Promise.resolve().then(() => this.maintenance.close()),
       Promise.resolve().then(() => this.activeMemory.close()),
       Promise.allSettled([...this.jobs.values()]),
@@ -241,6 +256,7 @@ class ShoggothMemoryService {
     this.ownMemory.stopProfile(profileId);
     await this.sharing.reconcileConfig();
     await Promise.allSettled([this.jobs.get(profileId), this.indexWarmFlights.get(profileId),
+      this.store.stopScans(profileId),
       this.activeMemory.stopProfile(profileId),
       ...[...this.maintenance.pending].filter(([key]) => key === `dream:${profileId}` || key.startsWith(`flush:${profileId}:`)).map(([, task]) => task),
       ...[...this.activeMemory.pending].filter(([key]) => JSON.parse(key)[0] === profileId).map(([, task]) => task)].filter(Boolean));
@@ -308,6 +324,7 @@ class ShoggothMemoryService {
     const host = new ShoggothMemoryHost({ database, paths: this.paths, profileId, workspaceDir,
       roster: () => this.rosterView(),
       sessions, sourceSessionsVisible: (text, workspace) => this.sourceSessionsVisible(profileId, text, workspace),
+      withSessionReadView: (signal, read) => this.withMemoryWritePreparation(profileId, signal, read),
       assertCurrent: () => this.assertProfile(profileId) });
     host.activeMemoryRecovery = activeMemoryRecovery;
     if (activeMemoryRecovery.unresolved) this.logger.warn?.(`active-memory: Profile ${profileId} has ${activeMemoryRecovery.unresolved} unverified scratch records; recall paused`);
@@ -317,7 +334,9 @@ class ShoggothMemoryService {
       assertLocalEmbeddingConfig: this.localEmbeddingHost.assertLocalEmbeddingConfig,
       runLocalEmbedding: this.localEmbeddingHost.runLocalEmbedding,
       remoteEmbeddingResources: this.remoteEmbeddingResources,
-      allow: result => this.allowResult(profileId, result, this.searchScope.getStore()), logger: this.logger });
+      allow: result => this.allowResult(profileId, result, this.searchScope.getStore()),
+      withCandidateReadView: read => this.withMemoryReadView(profileId, read),
+      withAsyncCandidateReadView: (signal, read) => this.withAsyncMemoryReadView(profileId, signal, read), logger: this.logger });
     this.hosts.set(profileId, host);
     return host;
   }
@@ -325,10 +344,15 @@ class ShoggothMemoryService {
     const host = this.hosts.get(profileId); this.hosts.delete(profileId);
     if (host) { host.searchIndex.db = null; host.database.close(); }
   }
-  viewStatus(profileId) { if (this.blockedProfiles.has(profileId)) return { stale: true, revision: null, code: "RECALL_POLICY_UNAVAILABLE" };
-    return { stale: false, revision: this.store.getRevision(profileId), owner: this.owner,
+  viewStatus(profileId, knownRevision) { if (this.blockedProfiles.has(profileId)) return { stale: true, revision: null, code: "RECALL_POLICY_UNAVAILABLE" };
+    const revision = knownRevision ?? (this.memoryViewFor(profileId)?.getRevisions().revision ?? this.store.getRevision(profileId));
+    return { stale: false, revision, owner: this.owner,
     workspace: this.store.workspace(profileId), upstreamRevision: "c10679395819ede78bb073f979f95c157e165bfa" }; }
   rebuildViews(profileId) { this.assertProfile(profileId); return this.viewStatus(profileId); }
+  async viewStatusAsync(profileId) {
+    if (this.blockedProfiles.has(profileId)) return this.viewStatus(profileId);
+    return this.withAsyncMemoryReadView(profileId, undefined, () => this.viewStatus(profileId));
+  }
   // USER.md and MEMORY.md are the file authority. Their editable revision is
   // the file's content hash, so unrelated memory writes do not conflict.
   readCanonical(profileId, kind) {
@@ -346,7 +370,9 @@ class ShoggothMemoryService {
     this.sharing.withdraw(profileId, written.previous);
     await this.sharing.reconcileConfig();
     this.onLearningSourcesChanged?.(profileId);
-    return { kind, name: `${kind}.md`, revision: written.revision, memoryRevision: this.store.getRevision(profileId) };
+    return this.withCommittedMemoryReadView(profileId, view => ({
+      kind, name: `${kind}.md`, revision: written.revision, memoryRevision: view.getRevisions().revision,
+    }));
   }
   isReviewCommitted(profileId, item) { return item?.profileId === profileId && this.isRecallCommitted(profileId, item); }
   isReviewReceipted(profileId, item) { return this.isReviewCommitted(profileId, item)
@@ -446,7 +472,7 @@ class ShoggothMemoryService {
           // A file published before its promotion receipt failed must stay
           // invisible; an uncommitted short-term candidate is not proof.
           if (!source.sourceHash) return false;
-          const file = host.searchIndex.sourceFiles.read(relative);
+          const file = host.searchIndex.sourceFiles.read(relative, this.memoryViewFor(profileId));
           const projectKeys = host.searchIndex.prepareSourceChunks(relative, "memory", file)
             .filter(chunk => chunk.startLine <= source.endLine && chunk.endLine >= source.startLine)
             .flatMap(chunk => chunk.projectKey?.split("; ") || []);
@@ -476,8 +502,8 @@ class ShoggothMemoryService {
         }
         const fragment = content.split("\n").slice(source.startLine - 1, source.endLine).join("\n");
         if (source.sourceHash && sha256(fragment) !== source.sourceHash) return false;
-        const bound = this.store.list(profileId, { status: "active" }).filter(item => item.memoryPath === relative
-          && item.startLine <= source.endLine && item.endLine >= source.startLine);
+        const bound = this.activeFileEntries(profileId, relative)
+          .filter(item => item.startLine <= source.endLine && item.endLine >= source.startLine);
         if (bound.some(item => item.sourceEvidence && !this.sourceEvidenceVisible(profileId, item.sourceEvidence, workspace))) return false;
         if (!fragment.trim() || !this.sourceSessionsVisible(profileId, fragment, workspace, { visited: nextVisited })) return false;
       } catch { return false; }
@@ -508,8 +534,8 @@ class ShoggothMemoryService {
       const projectKey = result.projectKey || metadata.projectKey;
       return !projectKey || projectKey.split("; ").every(key => workspaceMemoryRefs(input.workspace, "project").includes(key));
     }
-    const overlaps = this.store.list(profileId, { status: "active" }).filter(item => item.memoryPath === result.path
-      && item.startLine <= result.endLine && item.endLine >= result.startLine);
+    const overlaps = this.activeFileEntries(profileId, result.path)
+      .filter(item => item.startLine <= result.endLine && item.endLine >= result.startLine);
     // Internal corpus lines carry original session identity; they are checked
     // above, and never become bootstrap memory merely by being indexed.
     if (!overlaps.length) return result.path.startsWith("memory/.dreams/session-corpus/")
@@ -526,29 +552,129 @@ class ShoggothMemoryService {
     const items = all.filter(item => { const size = Buffer.byteLength(item.content); if (bytes + size > maxBytes) return false; bytes += size; return true; }).slice(0, limit);
     return { items, revision: this.store.getRevision(input.profileId), truncated: items.length < all.length };
   }
+  withMemoryReadView(profileId, read) {
+    // This owner-only stack is synchronous. An async index/embedding step
+    // obtains a fresh view when it resumes rather than keeping an old view.
+    if (this.memoryViewFor(profileId)) return read();
+    return this.store.withReadView(profileId, view => this.withSuppliedReadView(profileId, view, read));
+  }
+  memoryViewFor(profileId) {
+    for (let scope = this.memoryReadView; scope; scope = scope.previous) {
+      if (scope.profileId === profileId) return scope.view;
+    }
+    return null;
+  }
+  withSuppliedReadView(profileId, view, read) {
+    const existing = this.memoryReadView;
+    this.memoryReadView = { profileId, view, previous: existing };
+    try { return read(); } finally { this.memoryReadView = existing; }
+  }
+  withAsyncMemoryReadView(profileId, signal, read, scanSignal) {
+    const lifecycle = this.profileSignal(profileId);
+    return this.store.withAsyncReadView(profileId, signal ? AbortSignal.any([signal, lifecycle]) : lifecycle,
+      view => this.withSuppliedReadView(profileId, view, () => read(view)), scanSignal);
+  }
+  async withMemoryWritePreparation(profileId, signal, read) {
+    let started = false;
+    try {
+      return await this.withAsyncMemoryReadView(profileId, signal, view => {
+        started = true;
+        const result = read();
+        view.assertFilesCurrent();
+        return result;
+      });
+    } catch (error) {
+      if (started || error.code !== "MEMORY_SCAN_TOO_LARGE") throw error;
+      signal?.throwIfAborted();
+      this.profileSignal(profileId).throwIfAborted();
+      return this.withMemoryReadView(profileId, read);
+    }
+  }
+  withCommittedMemoryReadView(profileId, read, signal) {
+    return this.store.withCommittedReadView(profileId, view => this.withSuppliedReadView(profileId, view, () => read(view)), signal);
+  }
+  async withMemoryOwnerReadViews(profileId, owners, signal, read) {
+    const proofs = [];
+    for (const owner of new Set(owners)) {
+      if (owner === profileId) continue;
+      const proof = await this.withAsyncMemoryReadView(owner, signal, view => view.retainProof());
+      proofs.push({ owner, proof });
+    }
+    return this.withAsyncMemoryReadView(profileId, signal, ownView => {
+      const enter = index => {
+        if (index === proofs.length) {
+          return read({ assertFilesCurrent: () => {
+            ownView.assertFilesCurrent();
+            for (const { owner } of proofs) this.memoryViewFor(owner).assertFilesCurrent();
+          } });
+        }
+        const { owner, proof } = proofs[index];
+        return proof.read(view => this.withSuppliedReadView(owner, view, () => enter(index + 1)));
+      };
+      return enter(0);
+    });
+  }
+  activeFileEntries(profileId, relative) {
+    const view = this.memoryViewFor(profileId);
+    return view ? view.listActiveFile(relative)
+      : this.store.listActiveFile(profileId, relative);
+  }
   searchMemory(input, onDeliveredOwnResults) {
     const deadlineAt = performance.now() + 30_000;
     return this.sharing.withRequest(input, async scoped => {
-      const policy = this.sharing.policy(scoped);
       // Searches never count recalls themselves. The completed user turn
       // commits the own results it actually delivered (RecallSignals).
-      const own = await this.searchOwnMemory({ ...scoped, record: false });
-      const result = await this.sharing.search({ ...scoped, deadlineAt }, own);
-      const delivered = deliveredOwnResults(own.results, result.results);
-      this.ownMemory.read(scoped, { results: delivered });
-      if (scoped.record !== false) this.recallSignals.stage(scoped, delivered);
-      onDeliveredOwnResults?.(delivered);
-      return result;
+      let sourceIdentities;
+      const own = await this.searchOwnMemory({ ...scoped, record: false }, scoped.run || onDeliveredOwnResults
+        ? proof => { sourceIdentities = proof; } : undefined);
+      return this.sharing.search({ ...scoped, deadlineAt }, own, {
+        ...(scoped.run && own.results.length ? {
+          withPublicationView: publish => this.withAsyncMemoryReadView(scoped.profileId, scoped.signal, publish),
+        } : {}),
+        publish: result => {
+          const delivered = deliveredOwnResults(own.results, result.results);
+          if (delivered.length && scoped.run) {
+            this.assertOwnToolReadCurrent(scoped, { results: delivered }, "memory_search", undefined, sourceIdentities);
+            this.memoryViewFor(scoped.profileId).assertFilesCurrent();
+            this.ownMemory.read(scoped, { results: delivered });
+          }
+          if (scoped.record !== false) this.recallSignals.stage(scoped, delivered);
+          onDeliveredOwnResults?.(delivered, sourceIdentities);
+          return result;
+        },
+      });
     });
   }
-  async searchOwnMemory(input) {
+  async searchOwnMemory(input, onSourceIdentities) {
     this.assertProfile(input.profileId); this.recallPolicy.assertReady(input.profileId);
-    const host = this.host(input.profileId), stamp = this.authorityStamp(input.profileId);
-    let results;
+    const host = this.host(input.profileId);
+    const signal = input.signal ? AbortSignal.any([input.signal, host.searchIndex.lifetime.signal])
+      : host.searchIndex.lifetime.signal;
+    const sourceAuthority = this.sourceAuthorityStamp(input.profileId);
+    let stamp;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        stamp = await this.withAsyncMemoryReadView(input.profileId, signal, view => {
+          view.assertFilesCurrent();
+          return this.authorityStamp(input.profileId, view.getRevisions().invalidationRevision);
+        });
+        break;
+      } catch (error) {
+        // A shared scan may have started before a file or owner change. No
+        // source has been published, so reacquire authority once before ranking.
+        signal.throwIfAborted();
+        if (attempt !== 0 || error?.code !== "MEMORY_REVISION_CONFLICT") throw error;
+      }
+    }
+    if (sourceAuthority !== this.sourceAuthorityStamp(input.profileId)) {
+      fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
+    }
+    let results, identities;
     try {
-      results = await this.searchScope.run(input, () => host.searchIndex.search(input.query, {
+      ({ results, identities } = await this.searchScope.run(input, () => host.searchIndex.search(input.query, {
         maxResults: input.maxResults ?? input.limit, minScore: input.minScore, sources: input.sources, lexicalOnly: input.lexicalOnly === true,
-        activeProjectKeys: workspaceMemoryRefs(input.workspace, "project"), signal: input.signal, record: input.record !== false && !this.sharing.borrowedRefsForRun(input.run?.id).length }));
+        activeProjectKeys: workspaceMemoryRefs(input.workspace, "project"), signal: input.signal, captureIdentities: true,
+        record: input.record !== false && !this.sharing.borrowedRefsForRun(input.run?.id).length })));
     } catch (error) {
       input.signal?.throwIfAborted();
       // Native cache admission now notices source withdrawal before publication.
@@ -557,22 +683,89 @@ class ShoggothMemoryService {
         && stamp !== this.authorityStamp(input.profileId)) fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
       throw error;
     }
-    if (stamp !== this.authorityStamp(input.profileId)) fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
-    const active = this.store.list(input.profileId, { status: "active" }), items = [], seen = new Set();
-    let bytes = 0;
-    for (const result of results) for (const item of active) {
-      if (seen.has(item.id) || item.memoryPath !== result.path || item.startLine > result.endLine || item.endLine < result.startLine || !this.visible(item, input)) continue;
-      bytes += Buffer.byteLength(item.content); if (bytes > (input.maxBytes ?? 24 * 1024)) break;
-      seen.add(item.id); items.push({ ...item, score: result.score, citation: result.citation });
-    }
-    return { items, results, revision: this.store.getRevision(input.profileId), truncated: false,
-      semantic: { status: host.searchIndex.embeddingFailure ? "fallback" : "ready", modelId: host.searchIndex.model } };
+    const publish = view => {
+      const { revision, invalidationRevision } = view.getRevisions();
+      if (stamp !== this.authorityStamp(input.profileId, invalidationRevision)) fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
+      // The scan runs asynchronously after native ranking. Validate the final
+      // source files/settings again at the owning Service before disclosure.
+      results = this.searchScope.run(input, () => host.searchIndex.currentCandidates(results, identities));
+      const byPath = new Map(), items = [], seen = new Set();
+      let bytes = 0;
+      for (const result of results) {
+        if (!byPath.has(result.path)) byPath.set(result.path, view.listActiveFile(result.path));
+        for (const item of byPath.get(result.path)) {
+          if (seen.has(item.id) || item.startLine > result.endLine || item.endLine < result.startLine || !this.visible(item, input)) continue;
+          bytes += Buffer.byteLength(item.content);
+          if (bytes > (input.maxBytes ?? 24 * 1024)) break;
+          seen.add(item.id); items.push({ ...item, score: result.score, citation: result.citation });
+        }
+      }
+      if (stamp !== this.authorityStamp(input.profileId, invalidationRevision)) fail("MEMORY_REVISION_CONFLICT", "检索期间记忆或权限已变化");
+      if (onSourceIdentities) {
+        const proofs = new Map();
+        for (const result of results) {
+          const key = `${result.source}\0${result.path}`;
+          if (proofs.has(key)) continue;
+          const hash = identities.get(result);
+          const source = result.source === "memory" && !host.searchIndex.sourceFiles.isExtra(result.path)
+            ? host.searchIndex.readIndexedSource(result.path, result.source) : null;
+          const length = source?.kind === "memory" && source.hash === hash && view.matchesFile(result.path, source.text)
+            ? source.text.length : null;
+          proofs.set(key, { hash, length });
+        }
+        view.assertFilesCurrent();
+        onSourceIdentities(proofs);
+      }
+      return { items, results, revision, truncated: false,
+        semantic: { status: host.searchIndex.embeddingFailure ? "fallback" : "ready", modelId: host.searchIndex.model } };
+    };
+    return this.withAsyncMemoryReadView(input.profileId, signal, publish);
   }
   getFile(input) {
     if (this.sharing.recognizes(input.path)) return this.sharing.get(input);
     this.assertProfile(input.profileId); this.recallPolicy.assertReady(input.profileId);
+    return this.withMemoryReadView(input.profileId, () => this.readOwnFile(input));
+  }
+  assertOwnToolReadCurrent(input, result, name, args, sourceIdentities) {
+    if (result?.borrowed === true) return;
+    const changed = () => fail("MEMORY_REVISION_CONFLICT", "记忆来源在返回前已变化");
+    if (name === "memory_get" && args?.path) {
+      const latest = this.readOwnFile({ ...input, path: args.path, from: args.from, lines: args.lines }, false);
+      if (latest.text !== result.text || latest.from !== result.from || latest.lines !== result.lines
+        || latest.totalLines !== result.totalLines) changed();
+    }
+    if (name === "memory_search") {
+      const own = result.results.filter(row => !row.borrowed);
+      const host = this.host(input.profileId);
+      const identities = new Map(own.flatMap(row => {
+        const proof = sourceIdentities?.get(`${row.source}\0${row.path}`);
+        return proof?.hash === undefined ? [] : [[row, proof.hash]];
+      }));
+      const current = new Set(this.searchScope.run(input, () => host.searchIndex.currentCandidates(own, identities)));
+      const view = this.memoryViewFor(input.profileId);
+      const checkedAppends = new Map();
+      for (const row of own) {
+        if (current.has(row)) continue;
+        const proof = sourceIdentities?.get(`${row.source}\0${row.path}`);
+        if (!view || !Number.isSafeInteger(proof?.length) || !this.allowResult(input.profileId, row, input)) changed();
+        if (!checkedAppends.has(row.path)) {
+          const source = host.searchIndex.readIndexedSource(row.path, row.source);
+          const prefix = source.text.slice(0, proof.length);
+          checkedAppends.set(row.path, source.kind === "memory" && source.text.length > proof.length
+            && (prefix.endsWith("\n") || source.text[proof.length] === "\n")
+            && core.hashText(prefix) === proof.hash && view.matchesFile(row.path, source.text));
+        }
+        if (!checkedAppends.get(row.path)) changed();
+      }
+    }
+  }
+  readOwnFile(input, record = true) {
     const relative = input.path;
     const host = this.host(input.profileId), source = host.searchIndex.readSource(relative), content = source.text;
+    const view = this.memoryViewFor(input.profileId);
+    if (source.kind === "memory" && view && !view.matchesFile(relative, content)) {
+      fail("MEMORY_REVISION_CONFLICT", "读取期间记忆文件已变化");
+    }
     const from = input.from ?? 1, count = input.lines ?? 200, lines = content.split("\n");
     if (!Number.isSafeInteger(from) || from < 1 || !Number.isSafeInteger(count) || count < 1 || count > 200) fail("MEMORY_INVALID", "行范围无效");
     const endLine = Math.min(from + count - 1, lines.length), text = lines.slice(from - 1, endLine).join("\n");
@@ -586,11 +779,12 @@ class ShoggothMemoryService {
     }
     if (text && !this.allowResult(input.profileId, result, input)) fail("MEMORY_NOT_FOUND", "记忆文件的内容不再可见");
     if (Buffer.byteLength(text) > 24 * 1024) fail("MEMORY_RANGE_TOO_LARGE", "请缩小记忆读取行数");
-    const items = this.store.list(input.profileId, { status: "active" }).filter(item => item.memoryPath === relative
-      && item.startLine <= endLine && item.endLine >= from && this.visible(item, input));
-    this.ownMemory.read(input, { items, results: [{ ...result, source: "memory" }] });
+    const items = this.activeFileEntries(input.profileId, relative)
+      .filter(item => item.startLine <= endLine && item.endLine >= from && this.visible(item, input));
+    if (record) this.ownMemory.read(input, { items, results: [{ ...result, source: "memory" }] });
+    const viewStatus = this.viewStatus(input.profileId);
     return { path: relative, text, from, lines: Math.max(0, endLine - from + 1), totalLines: lines.length,
-      items, revision: this.store.getRevision(input.profileId), viewStatus: this.viewStatus(input.profileId) };
+      items, revision: viewStatus.revision, viewStatus };
   }
   bootstrap(input) {
     this.assertProfile(input.profileId); this.recallPolicy.assertReady(input.profileId);
@@ -600,18 +794,24 @@ class ShoggothMemoryService {
       pluginConfig: core.resolveMemoryDreamingPluginConfig(this.config(input.profileId)) });
     const days = [this.now(), this.now() - 86400_000].map(time => core.formatMemoryDreamingDay(time, config.timezone));
     const files = ["USER.md", ...(input.mainSession ? ["MEMORY.md"] : []), ...[...new Set(days)].map(day => `memory/${day}.md`)];
-    const all = this.store.list(input.profileId, { status: "active" }), source = [];
-    for (const relative of files) {
-      const contents = this.store.readFile(input.profileId, relative);
-      const entries = all.filter(item => item.memoryPath === relative), allowed = entries.filter(item => this.visible(item, input));
-      const allowedIds = new Set(allowed.map(item => item.id));
-      const text = contents.split("\n").filter((_line, index) => entries.filter(item => item.startLine <= index + 1 && item.endLine >= index + 1)
-        .every(item => allowedIds.has(item.id))).join("\n");
-      if (hasSecret(text)) fail("MEMORY_SECRET_REJECTED", "核心记忆文件含有凭据，无法进入模型上下文");
-      if (text.trim()) source.push({ path: relative, text, items: allowed });
-    }
-    return { user: source.filter(file => file.path === "USER.md"), memory: source.filter(file => file.path !== "USER.md"),
-      revision: this.store.getRevision(input.profileId) };
+    return this.withMemoryReadView(input.profileId, () => {
+      const view = this.memoryViewFor(input.profileId);
+      const source = [];
+      for (const relative of files) {
+        const contents = this.store.readFile(input.profileId, relative);
+        if (!view.matchesFile(relative, contents)) {
+          fail("MEMORY_REVISION_CONFLICT", "读取期间核心记忆文件已变化");
+        }
+        const entries = this.activeFileEntries(input.profileId, relative), allowed = entries.filter(item => this.visible(item, input));
+        const allowedIds = new Set(allowed.map(item => item.id));
+        const text = contents.split("\n").filter((_line, index) => entries.filter(item => item.startLine <= index + 1 && item.endLine >= index + 1)
+          .every(item => allowedIds.has(item.id))).join("\n");
+        if (hasSecret(text)) fail("MEMORY_SECRET_REJECTED", "核心记忆文件含有凭据，无法进入模型上下文");
+        if (text.trim()) source.push({ path: relative, text, items: allowed });
+      }
+      return { user: source.filter(file => file.path === "USER.md"), memory: source.filter(file => file.path !== "USER.md"),
+        revision: view.getRevisions().revision };
+    });
   }
   // Every host and source check reads the roster. A workspace is fixed per
   // Profile id, so reuse the view while the shared read-only roster is unchanged.
@@ -641,8 +841,8 @@ class ShoggothMemoryService {
   // or workspace, Profile settings and configuration. Additive writes (new
   // memories, ordinary transcript appends, session timestamps) keep them
   // valid. Caches keyed by semanticStamp still refresh on every change.
-  authorityStamp(profileId) {
-    return JSON.stringify([this.store.getRevisions(profileId).invalidationRevision, this.sourceAuthorityStamp(profileId)]);
+  authorityStamp(profileId, invalidationRevision = this.store.getRevisions(profileId).invalidationRevision) {
+    return JSON.stringify([invalidationRevision, this.sourceAuthorityStamp(profileId)]);
   }
   // The source part alone. Dreaming checks this one, because its own report
   // and promotion writes must not revoke the run that produces them.
@@ -712,18 +912,21 @@ class ShoggothMemoryService {
     }
   }
   async propose(input) {
-    this.assertOwnedMemorySources(input);
     this.assertProfile(input.profileId); this.recallPolicy.assertReady(input.profileId);
-    const revision = input.expectedRevision ?? this.store.getRevision(input.profileId), now = this.now();
+    const now = this.now();
     if (!["explicit", "imported", "inferred"].includes(input.classification) || typeof input.content !== "string" || !input.content.trim()) fail("MEMORY_INVALID", "记忆内容无效");
     if (hasSecret(input.content)) fail("MEMORY_SECRET_REJECTED", "记忆不能保存凭据");
+    let priorToReplace;
     const check = () => {
       input.assertCurrent?.();
       this.assertProfile(input.profileId);
       this.assertOwnedMemorySources(input);
       if (!this.recallPolicy.isSourceVisible(input.profileId, input.sourceRefs || [])
         || input.classification !== "explicit" && this.recallPolicy.hasRevokedContent(input.profileId, input.content)) fail("MEMORY_SOURCE_REVOKED", "来源已撤回");
-    }; check();
+      if (priorToReplace && !this.recallPolicy.isMemoryVisible(input.profileId, priorToReplace)) {
+        fail("MEMORY_CONFLICT_INVALID", "替代的记忆已变化");
+      }
+    };
     const item = validate({ id: input.id || this.randomUUID(), profileId: input.profileId, scope: input.scope,
       type: input.type || "semantic", content: input.content.trim(), sourceRefs: [...new Set(input.sourceRefs || [])],
       confidence: input.confidence ?? (input.classification === "explicit" ? 1 : 0.5),
@@ -732,19 +935,27 @@ class ShoggothMemoryService {
       validFrom: input.validFrom ?? now, validUntil: input.validUntil ?? null, supersedes: input.supersedes ?? null,
       createdAt: now, updatedAt: now });
     if (item.sensitivity === "restricted") fail("MEMORY_RESTRICTED", "不可保存受限记忆");
-    const all = this.store.list(input.profileId);
-    const duplicate = all.find(old => old.status === "active" && old.scope === item.scope && old.type === item.type
-      && old.sensitivity === item.sensitivity && old.validUntil === item.validUntil
-      && contentHash(old.content) === contentHash(item.content)
-      && JSON.stringify(old.sourceRefs.filter(ref => ref.startsWith("workspace:"))) === JSON.stringify(item.sourceRefs.filter(ref => ref.startsWith("workspace:")))
-      && this.recallPolicy.isMemoryVisible(input.profileId, old));
+    const { revision, duplicate, prior } = await this.withMemoryWritePreparation(input.profileId, input.signal, () => {
+      check();
+      const revision = input.expectedRevision ?? this.store.getRevision(input.profileId);
+      const hash = contentHash(item.content);
+      const duplicate = item.supersedes ? null : this.store.list(input.profileId, { status: "active", scope: item.scope, type: item.type })
+        .find(old => old.sensitivity === item.sensitivity && old.validUntil === item.validUntil
+          && contentHash(old.content) === hash
+          && JSON.stringify(old.sourceRefs.filter(ref => ref.startsWith("workspace:"))) === JSON.stringify(item.sourceRefs.filter(ref => ref.startsWith("workspace:")))
+          && this.recallPolicy.isMemoryVisible(input.profileId, old));
+      const previous = item.supersedes ? this.store.get(input.profileId, item.supersedes) : null;
+      const prior = previous && this.recallPolicy.isMemoryVisible(input.profileId, previous) ? previous : null;
+      return { revision, duplicate, prior };
+    });
+    input.signal?.throwIfAborted(); input.assertCurrent?.();
     if (duplicate && !item.supersedes) return duplicate;
-    const prior = item.supersedes ? all.find(old => old.id === item.supersedes) : null;
     if (item.supersedes) {
       const homeCorrection = prior && ["workspace", "project"].includes(prior.scope) && item.scope === "agent"
         && isAgentHomeWorkspace(this.paths, input.profileId, input.workspace) && this.matchesMemoryWorkspace(prior, input.workspace);
-      if (!prior || prior.status !== "active" || prior.scope !== item.scope && !homeCorrection
-        || !this.recallPolicy.isMemoryVisible(input.profileId, prior)) fail("MEMORY_CONFLICT_INVALID", "替代的记忆已变化");
+      if (!prior || prior.status !== "active" || prior.scope !== item.scope && !homeCorrection) {
+        fail("MEMORY_CONFLICT_INVALID", "替代的记忆已变化");
+      }
       // An unconfirmed replacement must never withdraw the confirmed fact.
       if (item.status !== "active") fail("MEMORY_CONFLICT_INVALID", "更正内容尚未得到当前原话支持，原记忆保持有效");
     }
@@ -756,52 +967,74 @@ class ShoggothMemoryService {
     // same durable transaction; no forget/source revocation precedes the save.
     const memoryPath = daily(prior?.memoryPath) ? prior.memoryPath : input.dailyNotePath;
     const records = [memoryPath === undefined ? item : { ...item, type: "episodic", memoryPath }];
-    if (prior) records.push({ ...prior, status: "superseded", updatedAt: now });
-    return (await this.store.upsertMany(records, { expectedRevision: revision, assertCurrent: check }))[0];
+    if (prior) {
+      priorToReplace = prior;
+      records.push({ ...prior, status: "superseded", updatedAt: now });
+    }
+    return (await this.store.upsertMany(records, { expectedRevision: revision, assertCurrent: check, signal: input.signal }))[0];
   }
   async update(input) {
-    const item = this.store.get(input.profileId, input.id);
+    const item = await this.withMemoryWritePreparation(input.profileId, input.signal, () => this.store.get(input.profileId, input.id));
     if (!item || item.status !== "active") fail("MEMORY_NOT_FOUND", "记忆不存在");
     return this.propose({ ...item, ...input, id: this.randomUUID(), classification: "explicit", supersedes: item.id,
       sourceRefs: input.sourceRef ? [input.sourceRef, ...item.sourceRefs.filter(ref => ref.startsWith("workspace:"))] : item.sourceRefs });
   }
-  async importBatch({ profileId, items, expectedRevision }) {
+  async importBatch({ profileId, items, expectedRevision, signal }) {
     this.assertProfile(profileId);
     if (!Array.isArray(items) || items.length > 128) fail("MEMORY_INVALID", "导入批次无效");
-    for (const item of items) this.assertOwnedMemorySources({ ...item, profileId });
     const now = this.now(), records = items.map(item => validate({ ...item, profileId, content: item.content.trim(),
       confidence: 0.5, sensitivity: hasPii(item.content) ? "private" : "normal", status: "active",
       validFrom: now, validUntil: null, supersedes: null, createdAt: now, updatedAt: now }));
-    const check = () => { for (const item of records) if (hasSecret(item.content) || this.recallPolicy.hasRevokedContent(profileId, item.content)
-      || !this.recallPolicy.isSourceVisible(profileId, item.sourceRefs)) fail("MEMORY_SOURCE_REVOKED", "导入内容不再可用"); };
-    check(); return this.store.upsertMany(records, { expectedRevision, assertCurrent: check });
+    const check = () => {
+      for (const item of records) {
+        this.assertOwnedMemorySources(item);
+        if (hasSecret(item.content) || this.recallPolicy.hasRevokedContent(profileId, item.content)
+          || !this.recallPolicy.isSourceVisible(profileId, item.sourceRefs)) fail("MEMORY_SOURCE_REVOKED", "导入内容不再可用");
+      }
+    };
+    return this.store.upsertMany(records, { expectedRevision, assertCurrent: check, signal });
   }
   async delete(input) {
-    input.assertCurrent?.();
     this.assertProfile(input.profileId); this.recallPolicy.assertReady(input.profileId);
-    const item = this.store.get(input.profileId, input.id); if (!item) return null;
-    const all = this.store.list(input.profileId), ids = new Set([item.id]);
-    for (let changed = true; changed;) {
-      changed = false;
-      for (const record of all) if (ids.has(record.id) && record.supersedes && !ids.has(record.supersedes)
-        || record.supersedes && ids.has(record.supersedes) && !ids.has(record.id)) {
-        ids.add(record.id); if (record.supersedes) ids.add(record.supersedes); changed = true;
+    const prepared = await this.withMemoryWritePreparation(input.profileId, input.signal, () => {
+      input.assertCurrent?.();
+      const item = this.store.get(input.profileId, input.id);
+      if (!item) return null;
+      const revision = this.store.getRevision(input.profileId);
+      if (input.expectedRevision != null && input.expectedRevision !== revision) {
+        fail("MEMORY_REVISION_CONFLICT", "记忆已经变化，请重新读取");
       }
-    }
-    const lineage = all.filter(record => ids.has(record.id));
-    this.recallPolicy.recordReason({ profileId: input.profileId, item, relatedItems: lineage.filter(record => record.id !== item.id),
+      const all = this.store.list(input.profileId), ids = new Set([item.id]);
+      for (let changed = true; changed;) {
+        changed = false;
+        for (const record of all) if (ids.has(record.id) && record.supersedes && !ids.has(record.supersedes)
+          || record.supersedes && ids.has(record.supersedes) && !ids.has(record.id)) {
+          ids.add(record.id); if (record.supersedes) ids.add(record.supersedes); changed = true;
+        }
+      }
+      const lineage = all.filter(record => ids.has(record.id));
+      return { item, lineage, revision };
+    });
+    if (!prepared) return null;
+    const { item, lineage, revision } = prepared;
+    // The recall block is durable before the file intent. Both are issued
+    // on the same stack after the writer has acquired and verified the CAS.
+    const recordReason = () => this.recallPolicy.recordReason({ profileId: input.profileId, item,
+      relatedItems: lineage.filter(record => record.id !== item.id),
       reason: input.reason || "user_deleted", revocationSourceRefs: input.revocationSourceRefs || [],
       ...(input.operationId ? { operationId: input.operationId } : {}) });
-    await this.store.upsertMany(lineage.map(record => ({ ...record, status: "deleted", updatedAt: Math.max(record.updatedAt, this.now()) })),
-      { assertCurrent: input.assertCurrent });
+    const deleted = await this.store.upsertMany(lineage.map(record => ({ ...record, status: "deleted", updatedAt: Math.max(record.updatedAt, this.now()) })),
+      { assertCurrent: input.assertCurrent, expectedRevision: revision, beforeIntent: recordReason, signal: input.signal });
     this.sharing.withdraw(input.profileId, lineage);
     await this.sharing.reconcileConfig();
     await this.definitionLinks.retract(input.profileId, lineage, input);
-    return this.store.get(input.profileId, item.id);
+    return deleted.find(record => record?.id === item.id) ?? null;
   }
   forgetEverywhere(input) { return this.delete(input); }
   async forgetSources({ profileId, sourceRefs, reason, operationId }) {
-    const refs = new Set(sourceRefs), matches = this.store.list(profileId).filter(item => item.sourceRefs.some(ref => refs.has(ref)));
+    const refs = new Set(sourceRefs);
+    const matches = await this.withMemoryWritePreparation(profileId, undefined,
+      () => this.store.list(profileId).filter(item => item.sourceRefs.some(ref => refs.has(ref))));
     for (const item of matches) await this.delete({ profileId, id: item.id, reason, operationId: `${operationId}-${sha256(item.id).slice(0, 12)}` });
     return matches.length;
   }
@@ -809,8 +1042,9 @@ class ShoggothMemoryService {
     const host = this.host(profileId); host.searchIndex.open();
     const report = await host.run(() => core.forgetMemoryEntries({ cfg: this.config(profileId), agentId: profileId, sessionIds: [sessionId] }));
     const refs = new Set(this.transcriptStore.listEvents(profileId, sessionId).flatMap(event => [event.id, event.runId]));
-    const related = this.store.list(profileId, { status: "active" }).filter(item => item.sourceRefs.some(ref => refs.has(ref))
-      || item.sourceEvidence?.some(source => source.sessionId === sessionId));
+    const related = await this.withMemoryWritePreparation(profileId, undefined,
+      () => this.store.list(profileId, { status: "active" }).filter(item => item.sourceRefs.some(ref => refs.has(ref))
+        || item.sourceEvidence?.some(source => source.sessionId === sessionId)));
     for (const item of related) await this.delete({ profileId, id: item.id, reason: "forgotten", operationId: `session-forget-${sha256(`${sessionId}:${item.id}`)}` });
     await this.sharing.reconcileConfig();
     this.onLearningSourcesChanged?.(profileId);
@@ -818,7 +1052,10 @@ class ShoggothMemoryService {
   }
   async undoConsolidation({ profileId, id, operationId }) {
     // A user-authored edit creates a new source; never resurrect the revoked source.
-    const current = this.store.get(profileId, id), prior = current?.supersedes && this.store.get(profileId, current.supersedes);
+    const prior = await this.withMemoryWritePreparation(profileId, undefined, () => {
+      const current = this.store.get(profileId, id);
+      return current?.supersedes && this.store.get(profileId, current.supersedes);
+    });
     const item = await this.delete({ profileId, id, operationId });
     const restored = prior ? await this.propose({ ...prior, id: this.randomUUID(), supersedes: null,
       classification: "explicit", sourceRefs: [`user-edit:${this.randomUUID()}`] }) : null;
@@ -828,6 +1065,7 @@ class ShoggothMemoryService {
   flushBeforeCompaction(input) { return this.maintenance.flush(input); }
   observeBeforeSend(input) { return this.maintenance.flush({ ...input, preflight: true }); }
   prepareActiveMemory(input) { return this.activeMemory.prepare(input); }
+  preparedBorrowedMemoryRefs(input) { return this.activeMemory.preparedBorrowedMemoryRefs(input); }
   takeActiveMemory(input) {
     const result = this.activeMemory.take(input);
     if (result?.content) this.ownMemory.read({ profileId: input.profile.id, run: input.run }, { results: result.evidence || [] });

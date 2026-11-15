@@ -4,6 +4,8 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { McpAuthSecretStore } = require("./mcp-auth-secret-store");
+const { MCP_AUTH_STORAGE_CODES, mcpAuthStorageFailure } = require("./mcp-helper-diagnostics");
+const { serviceError } = require("./security");
 const {
   MCP_CRYPTO_PROTOCOL_VERSION,
   MCP_CRYPTO_RESPONSE_HEADER_BYTES,
@@ -115,6 +117,11 @@ class InProcessMcpCryptoBroker {
     return this.#runStoreOperation(generation, "readForHelper");
   }
 
+  encryptedBytes(plaintextBytes) {
+    if (!this.#isCurrentGeneration(this.generation)) return null;
+    return this.safeStorage?.encryptedBytes?.(plaintextBytes) ?? null;
+  }
+
   async encrypt(payload, options = {}) {
     let plaintext = null;
     try {
@@ -218,7 +225,11 @@ class InProcessMcpCryptoBroker {
         }
         operationResult = this.store[operation]();
       });
-    } catch {
+    } catch (error) {
+      const code = mcpAuthStorageFailure(error, { missingIsStorage: true });
+      if (code && this.#isCurrentGeneration(generation) && this.storeFlight === flight) {
+        throw serviceError(code, code.toLowerCase());
+      }
       throw cryptoError();
     }
     let result;
@@ -399,11 +410,16 @@ class McpCryptoBroker {
       }
       return this.#requestWorker(operation, generation, queuedPayload, responseOptions);
     };
-    const result = this.requestQueue.then(execute, execute).catch(() => {
+    const result = this.requestQueue.then(execute, execute).catch(error => {
       // macOS 的钥匙串失败可能伴随系统级授权对话框。同一 Service generation
       // 只允许一次真实尝试；后续请求固定降级，避免刷新/MCP 重连反复弹窗。
-      if (this.opened && this.generation === generation) this.generationUnavailable = true;
-      this.#rejectCapacityWaiters();
+      // Helper cache preflight runs before opening any credential storage.
+      const cachePreflightFailed = operation === "helper.read" && error?.code === "MCP_HELPER_CACHE_UNAVAILABLE";
+      if (!cachePreflightFailed) {
+        if (this.opened && this.generation === generation) this.generationUnavailable = true;
+        this.#rejectCapacityWaiters();
+      }
+      if (MCP_AUTH_STORAGE_CODES.includes(error?.code)) throw error;
       throw cryptoError();
     });
     this.requestQueue = result.then(() => undefined, () => undefined);
@@ -569,7 +585,7 @@ class McpCryptoBroker {
       stdout.fill(0);
       stdout = Buffer.alloc(0);
       requestFrame.fill(0);
-      if (error) rejectPromise(cryptoError());
+      if (error) rejectPromise(MCP_AUTH_STORAGE_CODES.includes(error.code) ? error : cryptoError());
       else resolvePromise(secret);
     };
     const wait = (delay) => new Promise((resolve) => { setTimeout(resolve, delay); });
@@ -624,15 +640,20 @@ class McpCryptoBroker {
     const finishWorkerResponse = () => {
       if (!exitOutcome || !stdoutEnded || settled || terminating) return;
       const { code, signal } = exitOutcome;
-      if (timedOut || code !== 0 || signal !== null) {
+      const authStoreOperation = request.operation === "helper.read" || request.operation === "service.loadOrCreate";
+      const storageFailureExit = authStoreOperation && code === 1;
+      if (timedOut || code !== 0 && !storageFailureExit || signal !== null) {
         finish(new Error("worker-exit"));
         return;
       }
       try {
-        const secret = decodeWorkerResponse(stdout, gate, responseOptions);
-        finish(null, secret);
-      } catch {
-        finish(new Error("invalid"));
+        const secret = decodeWorkerResponse(stdout, gate, { ...responseOptions, allowAuthStorageFailure: storageFailureExit });
+        if (storageFailureExit) {
+          secret.fill(0);
+          finish(cryptoError());
+        } else finish(null, secret);
+      } catch (error) {
+        finish(error);
       }
     };
 

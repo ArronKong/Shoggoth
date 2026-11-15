@@ -9,7 +9,7 @@ import { observedChatTerminal } from "../lib/chatTerminalObservation";
 import { acknowledgeDashboardPrompt } from "../lib/dashboardPromptResponses";
 import { codexDesktopWriterHintKey, type CodexDesktopWriterState } from "../lib/codexDesktopWriter";
 import { ChatRunWait, updateChatRunWait, type ChatRunWaitState } from "../components/ChatRunWait";
-import { withStartupWait } from "../lib/chatRunWait";
+import { chatRunWaitActivity, withStartupWait } from "../lib/chatRunWait";
 import ChatContextUsage from "../components/ChatContextUsage";
 import ChatServiceRecoveryNotice from "../components/ChatServiceRecoveryNotice";
 import ChatStatusNotice from "../components/ChatStatusNotice";
@@ -108,7 +108,8 @@ import headerCronIcon from "../assets/figma/chat-header/cron.svg";
 import headerNoteIcon from "../assets/figma/chat-header/note.svg";
 import McpConnectionRequests from "../components/McpConnectionRequests";
 type ChatConnectorSelection = string; // Read-only historical account selection.
-import { createPendingChatSendStore, shouldTrackChatSend, classifyChatSendObservation,
+import { createPendingChatSendStore, createPendingNativeChatStopStore, nativeChatStopIsTerminal,
+  type PendingNativeChatStop, shouldTrackChatSend, classifyChatSendObservation,
   isExplicitChatSendRejection, isUncertainChatSendReceipt, chatVerificationNoticeKey } from "../lib/chatSendRecovery";
 import { createOptimisticChatHistory, openClawInspirationSendOperationId } from "../lib/chatOptimisticHistory";
 import { createChatSlashHistory } from "../lib/chatSlashHistory";
@@ -219,6 +220,8 @@ import {
   forkSessionAtEntry,
   getChatCacheScope,
   getChatCapabilities,
+  getGroupChat,
+  getGroupContinuation,
   getModelCatalog,
   listAgentArtifacts,
   getSessionBoard,
@@ -613,7 +616,10 @@ interface ChatFile extends Omit<Partial<ChatMediaFact>, "kind"> {
   kind: string;
   src?: string;
   path?: string;
+  nativeRef?: ChatAttachment["nativeRef"];
 }
+type ContinuationReference = { kind: "user_message" | "assistant_message"; eventId: string }
+  | { kind: "attachment"; eventId: string; attachmentId: string };
 interface ChatMsg {
   role: "user" | "assistant" | "toolResult" | "system";
   parts: Part[];
@@ -629,6 +635,8 @@ interface ChatMsg {
   proactiveNoticeId?: string;
   sourceEventIds?: string[];
   canonicalSourceEventId?: string;
+  continuationSource?: { eventId: string; hasAttachments: boolean };
+  groupContinuation?: { groupId: string; ownerScope: string; sourceEventId: string };
   id?: string; // canonical gateway identity — kept separate from local UI actions
   actionId?: string; // per-session hide/pin identity, including messages without a gateway id
   ts?: number;
@@ -710,6 +718,7 @@ function inheritedModelChoice(
 // 取 15s 覆盖已观测到的 ~13s 重连间隔；代价仅是 15s 内故意重发的同一句会被并成一条。
 const DUP_SEND_WINDOW_MS = 15_000;
 const pendingChatSendStore = createPendingChatSendStore(() => localStorage);
+const pendingNativeChatStopStore = createPendingNativeChatStopStore(() => localStorage);
 const readPendingTrackedSends = pendingChatSendStore.read;
 const rememberPendingTrackedSend = pendingChatSendStore.remember;
 const hasPendingTrackedSend = pendingChatSendStore.has;
@@ -1264,6 +1273,15 @@ function normalize(raw: any): ChatMsg {
     role = "toolResult";
   }
   const preambleIds = openClawPreambleIds(raw);
+  const sourceEventId = raw?.shoggoth?.sourceEventId;
+  const continuationSource = (raw?.role === "user" || raw?.role === "assistant") && raw.role === role
+    && raw.shoggoth?.nativeUiVersion === 1 && raw.shoggoth.source === "chat"
+    && raw.shoggoth.uiDisplayRunId === undefined
+    && raw.shoggoth.contextExcluded === false && raw.shoggoth.promptResponse !== true && !raw.provenance
+    && typeof raw.shoggoth.runId === "string" && typeof sourceEventId === "string" && raw.id === sourceEventId
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(sourceEventId)
+    ? { eventId: sourceEventId, hasAttachments: Array.isArray(raw.shoggoth.attachments) && raw.shoggoth.attachments.length > 0 }
+    : undefined;
   const base: ChatMsg = {
     role,
     openclawPreambleIds: preambleIds.length ? preambleIds : undefined,
@@ -1278,6 +1296,11 @@ function normalize(raw: any): ChatMsg {
     promptResponse: role === "user" && raw?.shoggoth?.promptResponse === true ? true : undefined,
     activityRunId: typeof raw?.__openclaw?.runId === "string" && raw.__openclaw.runId.trim() ? raw.__openclaw.runId : undefined,
     canonicalSourceEventId: raw?.shoggoth?.contextExcluded !== true && typeof raw?.shoggoth?.sourceEventId === "string" ? raw.shoggoth.sourceEventId : undefined,
+    continuationSource,
+    groupContinuation: role === "assistant" && raw?.shoggoth?.contextExcluded === true
+      && typeof raw.shoggoth.groupContinuation?.groupId === "string"
+      && typeof raw.shoggoth.groupContinuation.ownerScope === "string"
+      && typeof raw.shoggoth.groupContinuation.sourceEventId === "string" ? raw.shoggoth.groupContinuation : undefined,
     sourceEventIds: Array.isArray(raw?.shoggoth?.sourceEventIds) ? raw.shoggoth.sourceEventIds.filter((id: unknown) => typeof id === "string") : undefined,
     id: raw?.__openclaw?.id ?? (typeof raw?.id === "string" ? raw.id : undefined),
     idempotencyKey: typeof raw?.idempotencyKey === "string" ? raw.idempotencyKey
@@ -2149,7 +2172,15 @@ function groupCopyText(g: Group, msgIndex?: number, partIndex?: number): string 
   return parts.map((p) => p.text || "").join("\n").trim();
 }
 
-type MessageAttachment = ChatClipboardAttachment & { original?: ChatAttachment };
+type MessageAttachment = ChatClipboardAttachment & { original?: ChatAttachment; continuationReference?: ContinuationReference };
+
+function continuationMessageReference(message: ChatMsg | undefined, partIndex?: number): ContinuationReference | undefined {
+  if (!message?.continuationSource || message.pending || message.continuationSource.hasAttachments
+    || (message.role !== "user" && message.role !== "assistant")) return;
+  const parts = partIndex === undefined ? message.parts : [message.parts[partIndex]];
+  if (!parts.some(part => part?.type === "text" && part.text?.trim())) return;
+  return { kind: message.role === "user" ? "user_message" : "assistant_message", eventId: message.continuationSource.eventId };
+}
 
 function messageImage(message: ChatMsg, preview: string, index: number): MessageAttachment {
   const item = (message.nativeAttachments ?? message.retryAttachments)?.filter(item => !item.kind || item.kind === "image")[index];
@@ -2161,7 +2192,12 @@ function messageImage(message: ChatMsg, preview: string, index: number): Message
 function messageFile(message: ChatMsg, file: ChatFile): MessageAttachment {
   const original = file.src ? (message.nativeAttachments ?? message.retryAttachments)?.find(item =>
     item.dataUrl === file.src && item.name === file.name) : undefined;
-  return { kind: file.kind === "image" ? "image" : "file", name: file.name, src: file.src, path: file.path, original };
+  const ref = file.nativeRef;
+  // The Server checks the saved bytes and authority when the reference is used.
+  const continuationReference = message.role === "user" && !message.pending && message.continuationSource?.hasAttachments
+    && ref && ref.size <= 24 * 1024 && (ref.mimeType.startsWith("text/") || ["application/json", "application/xml"].includes(ref.mimeType))
+    ? { kind: "attachment" as const, eventId: message.continuationSource.eventId, attachmentId: ref.id } : undefined;
+  return { kind: file.kind === "image" ? "image" : "file", name: file.name, src: file.src, path: file.path, original, continuationReference };
 }
 
 function messageMedia(message: ChatMsg): MessageAttachment[] {
@@ -2486,7 +2522,15 @@ function ChatPageApp() {
   // Session keys with an in-flight generation. Per-session so switching away
   // doesn't freeze other sessions' composers, and switching back can restore
   // the streaming placeholder. `sending` mirrors this for the ACTIVE session.
-  const inFlightRef = useRef<Set<string>>(new Set(readPendingTrackedSends().filter(entry => entry.terminalObserved !== true).map(entry => entry.key)));
+  const [pendingNativeStops, setPendingNativeStops] = useState(() => new Map(
+    pendingNativeChatStopStore.read().map(entry => [entry.key, entry])));
+  const nativeStopsRef = useRef(pendingNativeStops);
+  const stopRequestsRef = useRef(new Set<string>());
+  const observedNativeRunBySessionRef = useRef(new Map<string, string>());
+  const inFlightRef = useRef<Set<string>>(new Set([
+    ...readPendingTrackedSends().filter(entry => entry.terminalObserved !== true).map(entry => entry.key),
+    ...pendingNativeStops.keys(),
+  ]));
   // A user can continue a report in its original Cron session. Track this turn's
   // origin separately from the session kind, including retained local sends.
   const interactiveRunsRef = useRef<Set<string>>(new Set(inFlightRef.current));
@@ -2529,6 +2573,10 @@ function ChatPageApp() {
     (key: string) => backendOfSessionRows(sessionsRef.current, key, agentOf(key)),
     [],
   );
+  const chatBackendDescriptorsRef = useRef(chatBackendDescriptors);
+  chatBackendDescriptorsRef.current = chatBackendDescriptors;
+  const sessionSupportsDurableStop = useCallback((key: string) =>
+    chatBackendDescriptorsRef.current.get(backendOfSession(key))?.surfaces.durableChatStop === true, [backendOfSession]);
   const backendOfKnownAgent = useCallback(
     (agentId: string) => backendOfAgentRows(sessionsRef.current, agentId),
     [],
@@ -2623,6 +2671,7 @@ function ChatPageApp() {
   // 记下打开群时的 activeKey——任何入口切换到别的会话都会自动回到普通聊天。
   const [openGroup, setOpenGroup] = useState<{
     groupId: string; activeKey: string | null; searchTarget?: { ownerScope: string; message?: GroupChatMessage };
+    continuationOwnerScope?: string;
   } | null>(null);
   const [agentMenu, setAgentMenu] = useState<{ x: number; y: number; agent: GroupCandidateAgent } | null>(null);
   const [createGroupFor, setCreateGroupFor] = useState<GroupCandidateAgent | null>(null);
@@ -2632,11 +2681,13 @@ function ChatPageApp() {
   const groupChats = useMemo(() => (groupChatEnabled ? allGroupChats : []), [groupChatEnabled, allGroupChats]);
   const currentGroup = openGroup?.activeKey === activeKey ? openGroup : null;
   const groupRow = groupChats.find(group => group.group.id === currentGroup?.groupId);
-  const activeGroupId = currentGroup && groupChatEnabled && (groupRow || currentGroup.searchTarget)
+  const activeGroupId = currentGroup && groupChatEnabled
+    && (currentGroup.continuationOwnerScope ? groupRow?.ownerScope === currentGroup.continuationOwnerScope
+      && groupRow.group.status === "active" : groupRow || currentGroup.searchTarget)
     ? currentGroup.groupId : null;
   const activeGroupIdRef = useRef(activeGroupId);
   activeGroupIdRef.current = activeGroupId;
-  const groupCacheScope = groupRow?.ownerScope ?? currentGroup?.searchTarget?.ownerScope;
+  const groupCacheScope = currentGroup?.continuationOwnerScope ?? groupRow?.ownerScope ?? currentGroup?.searchTarget?.ownerScope;
   // Click-to-zoom overlay for chat media (agent MEDIA: images + user-sent images
   // and videos). Holds what to show full-size, null = closed. Videos play with
   // native controls; images render as before.
@@ -2884,7 +2935,7 @@ function ChatPageApp() {
     // neither proves completion nor permits a send; the pending record remains.
     const keepVerification = sameTerminal || pending?.terminalObserved === true
       || (!!pending?.backendId && pending.backendId !== backendOfSession(key));
-    on = !keepVerification && (on || hasPendingTrackedSend(key));
+    on = !keepVerification && (on || hasPendingTrackedSend(key) || nativeStopsRef.current.has(key));
     if (!on) setRunWaitBySession((previous) => {
       if (!previous[key]) return previous;
       const next = { ...previous }; delete next[key]; return next;
@@ -2909,6 +2960,15 @@ function ChatPageApp() {
       setTimeout(() => flushQueueRef.current?.(key), QUEUE_FLUSH_DELAY_MS);
     }
     setRunningKeys(new Set(inFlightRef.current));
+  }, []);
+  const clearNativeStop = useCallback((target: PendingNativeChatStop) => {
+    if (nativeStopsRef.current.get(target.key) !== target) return false;
+    pendingNativeChatStopStore.forget(target.key);
+    const next = new Map(nativeStopsRef.current);
+    next.delete(target.key);
+    nativeStopsRef.current = next;
+    setPendingNativeStops(next);
+    return true;
   }, []);
   // Last real (non-heartbeat) message preview per NON-active agent's rep session key
   // (left-list sub-line). Captured by the deep heartbeat-filtering scan that also seeds
@@ -3245,7 +3305,8 @@ function ChatPageApp() {
   // QA round saw once — the bar already clears on switch, this closes the gap).
   const [quote, setQuote] = useState<{ key: string; text: string; media?: MessageAttachment[] } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; group: Group; copyText: string; media: MessageAttachment[];
-    attachmentTarget?: MessageAttachment; msgIndex?: number; partIndex?: number } | null>(null);
+    attachmentTarget?: MessageAttachment; msgIndex?: number; partIndex?: number;
+    continuation?: { sessionKey: string; reference: ContinuationReference } } | null>(null);
   const [advancedProbe, setAdvancedProbe] = useState<{
     key: string;
     backendId: string;
@@ -3642,12 +3703,15 @@ function ChatPageApp() {
         if (observation.state === "terminal" && !forgetPendingTrackedSend(entry.key, entry.idem)) {
           throw new Error("operation tracking unavailable");
         }
+        const pendingStop = nativeStopsRef.current.get(entry.key);
+        const stoppingOriginal = pendingStop?.idempotencyKey === entry.idem && pendingStop.backendId === backendOfSession(entry.key);
+        if (observation.state === "terminal" && stoppingOriginal) clearNativeStop(pendingStop);
         if (response?.payload?.status === "not_admitted" && !observation.accepted) {
           const draftId = `${entry.key}\0${entry.idem}`;
           const draft = pendingSendDraftRef.current.get(draftId);
           const telemetry = telemetrySends.get(draftId);
           telemetrySends.delete(draftId);
-          const resend = draft && (!draft.recoveryRetry || userRequestedCheck);
+          const resend = !stoppingOriginal && draft && (!draft.recoveryRetry || userRequestedCheck);
           let restored = false;
           if (resend) {
             pendingSendDraftRef.current.delete(draftId);
@@ -3750,8 +3814,49 @@ function ChatPageApp() {
         }
       }
     }));
-  }, [send, markInFlight, loadHistory, backendOfSession, t, timelineFeed, updateSessionMessages, replacePendingPrompts]);
+  }, [send, markInFlight, loadHistory, backendOfSession, t, timelineFeed, updateSessionMessages, replacePendingPrompts, clearNativeStop]);
   verifyTrackedSendRef.current = verifyPendingTrackedSends;
+
+  const requestNativeStop = useCallback(async function checkStop(target: PendingNativeChatStop, observeOnly: boolean): Promise<void> {
+    const { key, backendId, ...identity } = target;
+    if (nativeStopsRef.current.get(key) !== target || stopRequestsRef.current.has(key)
+      || backendOfSession(key) !== backendId || !sessionSupportsDurableStop(key)) return;
+    stopRequestsRef.current.add(key);
+    try {
+      const { payload } = await send("chat.abort", { sessionKey: key, expectedBackendId: backendId,
+        ...identity, ...(observeOnly ? { observeOnly: true } : {}) });
+      if (backendOfSession(key) !== backendId || !sessionSupportsDurableStop(key) || nativeStopsRef.current.get(key) !== target
+        || !nativeChatStopIsTerminal(payload, target)) return;
+      const tracked = readPendingTrackedSends().find(entry => entry.key === key);
+      if (tracked?.idem === target.idempotencyKey) {
+        void verifyPendingTrackedSends(key);
+        return;
+      }
+      clearNativeStop(target);
+      const observedRun = observedNativeRunBySessionRef.current.get(key);
+      if (!tracked && (!observedRun || observedRun === payload.runId)) {
+        observedNativeRunBySessionRef.current.delete(key);
+        markInFlight(key, false);
+        const timeline = liveTimelinesRef.current.get(key);
+        if (timeline && timeline.nativeRunId === payload.runId && !["done", "error"].includes(timeline.status)) {
+          timelineFeed(key, payload.runStatus === "completed" ? { kind: "final", text: "" }
+            : payload.runStatus === "failed" ? { kind: "error", message: "" } : { kind: "aborted" }, payload.runId);
+        }
+        updateSessionMessages(key, previous => settlePendingAssistant(previous,
+          liveTimelinesRef.current.get(key)?.steps, payload.runId));
+        replacePendingPrompts(key, []);
+        if (activeKeyRef.current === key) setSending(false);
+      }
+      if (activeKeyRef.current === key) void loadHistory(key, { refresh: true });
+    } catch {
+      // A failed transport response does not prove the original turn stopped.
+      // Keep its identity for a live terminal event, reconnect or manual check.
+    } finally {
+      stopRequestsRef.current.delete(key);
+      if (!observeOnly && nativeStopsRef.current.get(key) === target) void checkStop(target, true);
+    }
+  }, [send, backendOfSession, sessionSupportsDurableStop, clearNativeStop, verifyPendingTrackedSends, markInFlight, timelineFeed,
+    updateSessionMessages, replacePendingPrompts, loadHistory]);
 
   // sessions.list is paginated (the gateway caps each page at 200; totalCount can
   // be 1000+). Page through with offset so each agent's session list is complete.
@@ -4154,10 +4259,14 @@ function ChatPageApp() {
         // gateway killed the run). Without this the composer shows "生成中"
         // forever. A still-running gateway turn's outcome re-arrives via
         // session.message / the loadHistory below regardless.
-        inFlightRef.current = new Set(readPendingTrackedSends().filter(entry => entry.terminalObserved !== true).map(entry => entry.key));
+        inFlightRef.current = new Set([
+          ...readPendingTrackedSends().filter(entry => entry.terminalObserved !== true).map(entry => entry.key),
+          ...nativeStopsRef.current.keys(),
+        ]);
         interactiveRunsRef.current = new Set(inFlightRef.current);
         runStatusBySessionRef.current.clear();
         observedRunBySessionRef.current.clear();
+        observedNativeRunBySessionRef.current.clear();
         setRunningKeys(new Set(inFlightRef.current));
         setSending(inFlightRef.current.has(activeKeyRef.current || ""));
       }
@@ -4175,6 +4284,7 @@ function ChatPageApp() {
         // Also reloads the active session's history on any reconnect.
         if (activeKeyRef.current) void loadHistory(activeKeyRef.current);
         void verifyPendingTrackedSends();
+        for (const target of nativeStopsRef.current.values()) void requestNativeStop(target, true);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -4419,8 +4529,21 @@ function ChatPageApp() {
         const p = f.payload || {};
         const sk: string | undefined = p.sessionKey;
         const nativeRunId = p.message?.shoggoth?.nativeUiVersion === 1
-          && typeof p.message.shoggoth.runId === "string" ? p.message.shoggoth.runId : undefined;
+          && typeof p.message.shoggoth.runId === "string" ? p.message.shoggoth.runId
+          : sk && p.state === "status" && typeof p.nativeRunId === "string" && sessionSupportsDurableStop(sk)
+            ? p.nativeRunId : undefined;
         const isActive = sk === activeKeyRef.current;
+        if (sk && nativeRunId && ["status", "delta", "interim"].includes(p.state)) {
+          observedNativeRunBySessionRef.current.set(sk, nativeRunId);
+        }
+        if (sk && ["final", "error", "aborted"].includes(p.state) && p.receiptUncertain !== true) {
+          const target = nativeStopsRef.current.get(sk);
+          if (target && (target.runId ? target.runId === nativeRunId || !nativeRunId
+            : target.idempotencyKey === p.runId || !p.runId)) void requestNativeStop(target, true);
+          if (nativeRunId && observedNativeRunBySessionRef.current.get(sk) === nativeRunId) {
+            observedNativeRunBySessionRef.current.delete(sk);
+          }
+        }
         if (sk && typeof p.runId === "string"
           && ["accepted", "delta", "interim", "thinking", "plan", "prompt"].includes(p.state)) {
           observedRunBySessionRef.current.set(sk, p.runId);
@@ -4483,6 +4606,8 @@ function ChatPageApp() {
             sendObservationEpochRef.current.set(sk, (sendObservationEpochRef.current.get(sk) ?? 0) + 1);
           }
           if (tracked && rejected && !tracked.accepted) {
+            const pendingStop = nativeStopsRef.current.get(sk);
+            if (pendingStop?.idempotencyKey === tracked.idem && pendingStop.backendId === backendOfSession(sk)) clearNativeStop(pendingStop);
             forgetPendingTrackedSend(sk, tracked.idem);
             restoreRejectedSend(tracked.idem, sk);
           } // Accepted execution errors still require the original durable operation lookup.
@@ -5068,6 +5193,9 @@ function ChatPageApp() {
     execApprovals,
     replacePendingPrompts,
     verifyPendingTrackedSends,
+    requestNativeStop,
+    sessionSupportsDurableStop,
+    clearNativeStop,
     updateSessionMessages,
   ]);
 
@@ -6012,6 +6140,7 @@ function ChatPageApp() {
     else pendingPlanRef.current.delete(key);
     // R339:新回合的直播时间线从零开始(上一轮若悬空未终结,这里硬切)。
     observedRunBySessionRef.current.delete(key);
+    observedNativeRunBySessionRef.current.delete(key);
     liveTimelinesRef.current.delete(key);
     timelineFeed(key, { kind: "user", text: displayText }, undefined, nowTs);
     setSending(true);
@@ -6106,6 +6235,9 @@ function ChatPageApp() {
       }
       telemetrySends.delete(statsKey);
       telemetry?.finish("error", e);
+      const pendingStop = nativeStopsRef.current.get(key);
+      if (pendingStop?.idempotencyKey === idem && pendingStop.backendId === originalBackend
+        && isExplicitChatSendRejection(e)) clearNativeStop(pendingStop);
       if (trackedSend) forgetPendingTrackedSend(key, idem);
       restoreRejectedSend(idem, key);
       markInFlight(key, false);
@@ -6807,6 +6939,8 @@ function ChatPageApp() {
     // 其余 slash 仍在当前轮次结束前拦截。
     const visibleSlashPool = slashPool();
     const backendId = backendOfSession(key);
+    const isContinuation = chatBackendDescriptors.get(backendId)?.surfaces.structuredChatContinuation === true
+      && /^\/continue-task(?:\s|$)/u.test(text);
     const hasServerSlashSurface = supportsBackendSlash(
       backendId,
       capabilitiesForSession(key),
@@ -6815,7 +6949,7 @@ function ChatPageApp() {
       hasServerSlashSurface,
       SLASH_COMMANDS,
     ).filter((command) => !visibleSlashPool.some((visible) => visible.name === command.name));
-    const parsedSlash = !attachments.length && text.startsWith("/")
+    const parsedSlash = !isContinuation && !attachments.length && text.startsWith("/")
       ? parseSlashInput(text, [...visibleSlashPool, ...recoverySlashPool])
       : null;
     const concurrentServerSlash = !!parsedSlash && canRunServerSlashDuringTurn(parsedSlash.command);
@@ -6826,7 +6960,7 @@ function ChatPageApp() {
     const inFlight = inFlightRef.current.has(key);
     // R357：生成中仅拦 slash 形态（识别与否都维持原「静默忽略」，run-control 照旧放行）；
     // 普通消息放行 → 走下方统一入队路径（排队，回合终结后链式补发）。
-    const looksSlash = !attachments.length && (parsedSlash !== null || isSlashCommandInput(text));
+    const looksSlash = !isContinuation && !attachments.length && (parsedSlash !== null || isSlashCommandInput(text));
     if (inFlight && looksSlash && !isRunControl) return;
 
     // record the sent input for ↑/↓ recall (per session, dedup consecutive, cap 50)
@@ -6867,7 +7001,7 @@ function ChatPageApp() {
     }
     // 未识别的 / 输入：有服务端执行面就交给它（覆盖官方全量命令与 skills 命令），
     // 否则按普通消息发出。
-    if (isSlashCommandInput(text) && !attachments.length && hasServerSlashSurface) {
+    if (!isContinuation && isSlashCommandInput(text) && !attachments.length && hasServerSlashSurface) {
       setInput("");
       setSlashOpen(false);
       setQuote(null);
@@ -6886,7 +7020,7 @@ function ChatPageApp() {
     // Skipped when the draft already opens with this exact quote block — pasting
     // a sent quote-carrying message back in while the quote bar is armed would
     // otherwise stack a second `> ` prefix (R115).
-    const q = quote && quote.key === key ? quote : null;
+    const q = !isContinuation && quote && quote.key === key ? quote : null;
     const prefix = q ? `${q.text.split("\n").map((l) => `> ${l}`).join("\n")}\n\n` : "";
     const outgoing = prefix && !text.startsWith(prefix) ? `${prefix}${text}` : text;
     const caps = capabilitiesForSession(key);
@@ -6905,7 +7039,7 @@ function ChatPageApp() {
       setTimeout(() => setToast(current => current === notice ? null : current), 2600);
       return;
     }
-    const shouldSteer = inFlight && canSteerActiveChat(
+    const shouldSteer = !isContinuation && inFlight && canSteerActiveChat(
       capabilitiesForSession(key),
       runStatusBySessionRef.current.get(key),
       atts.length,
@@ -6915,6 +7049,10 @@ function ChatPageApp() {
       : inspectChatSendPayload(key, outgoing, atts);
     if (!payloadBudget.allowed) {
       showPayloadLimit("chat.sendPayloadTooLarge", payloadBudget.payloadBytes, payloadBudget.maxPayload);
+      return;
+    }
+    if (nativeStopsRef.current.has(key)) {
+      setToast({ text: t("chat.stopVerificationNoticeTitle"), kind: "error" });
       return;
     }
     if (hasPendingTrackedSend(key) && (verificationKeys.has(key)
@@ -7125,6 +7263,30 @@ function ChatPageApp() {
   const abortActive = async () => {
     const key = activeKeyRef.current;
     if (!key || serviceRecoveryBusyRef.current || recoveryBackends.has(backendOfSession(key))) return;
+    if (sessionSupportsDurableStop(key)) {
+      if (nativeStopsRef.current.has(key)) return;
+      const backendId = backendOfSession(key);
+      const tracked = readPendingTrackedSends().find(entry => entry.key === key && (!entry.backendId || entry.backendId === backendId));
+      const runId = observedNativeRunBySessionRef.current.get(key);
+      const target: PendingNativeChatStop | null = tracked ? { key, backendId, idempotencyKey: tracked.idem }
+        : runId ? { key, backendId, runId } : null;
+      if (!target) {
+        if (!inFlightRef.current.has(key)) return;
+        void loadHistory(key, { refresh: true });
+        setError(t("chat.stopTargetUnavailable"));
+        return;
+      }
+      if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+      const next = new Map(nativeStopsRef.current).set(key, target);
+      nativeStopsRef.current = next;
+      setPendingNativeStops(next);
+      pendingNativeChatStopStore.remember(target);
+      stoppedScrollKeyRef.current = key;
+      const thread = threadRef.current;
+      thread?.scrollTo({ top: thread.scrollTop, behavior: "instant" });
+      await requestNativeStop(target, false);
+      return;
+    }
     const previousScrollKey = stoppedScrollKeyRef.current;
     stoppedScrollKeyRef.current = key;
     // Stop keeps the reading position even if a terminal notice grows the tail.
@@ -7377,7 +7539,7 @@ function ChatPageApp() {
   };
   // Right-click context menu (复制/引用/置顶/删除) on a message group.
   const openMenu = (e: ReactMouseEvent, g: Group, copyTextOverride?: string, attachmentTarget?: MessageAttachment,
-    segmentMedia?: MessageAttachment[]) => {
+    segmentMedia?: MessageAttachment[], singleSegmentMessage?: ChatMsg) => {
     e.preventDefault();
     if (attachmentTarget) e.stopPropagation();
     // R154：从事件目标向上找 data-mi（消息序号）/ data-qp（文本气泡的 part 序号），
@@ -7386,6 +7548,9 @@ function ChatPageApp() {
     const el = e.target instanceof Element ? e.target : null;
     const mi = Number(el?.closest("[data-mi]")?.getAttribute("data-mi") ?? NaN);
     const pi = Number(el?.closest("[data-qp]")?.getAttribute("data-qp") ?? NaN);
+    const reference = attachmentTarget ? attachmentTarget.continuationReference : Number.isNaN(pi)
+      ? continuationMessageReference(singleSegmentMessage) : continuationMessageReference(g.msgs[mi], pi);
+    const sessionKey = activeKeyRef.current;
     setMenu({
       x: e.clientX,
       y: e.clientY,
@@ -7396,6 +7561,9 @@ function ChatPageApp() {
       attachmentTarget,
       msgIndex: Number.isNaN(mi) ? undefined : mi,
       partIndex: Number.isNaN(pi) ? undefined : pi,
+      continuation: reference && sessionKey && backendOfSession(sessionKey) === "shoggoth" && !activeGroupIdRef.current
+        && active?.kind === "direct" && !active.inspirationId && active.source !== "codex-desktop"
+        && !groupInternalKeys.has(sessionKey) ? { sessionKey, reference } : undefined,
     });
   };
   const closeMenu = () => setMenu(null);
@@ -8327,7 +8495,15 @@ function ChatPageApp() {
     ) : null;
   const recoveryCard = recoveryNotice ? <ChatServiceRecoveryNotice action={recoveryAction} /> : null;
   const activePendingSend = activeKey ? readPendingTrackedSends().find(entry => entry.key === activeKey) : undefined;
-  const verificationNotice = activeKey && verificationKeys.has(activeKey) && !activeRecoveryRequired ? (
+  const activePendingStop = activeKey ? pendingNativeStops.get(activeKey) : undefined;
+  const stopNotice = activePendingStop && !activeRecoveryRequired ? (
+    <ChatStatusNotice title={t("chat.stopVerificationNoticeTitle")} tone="warning" className="chat-banner chat-verification-banner"
+      testId="chat-stop-verification-notice" action={<button type="button" disabled={!connected || serviceRecoveryBusy}
+        onClick={() => void requestNativeStop(activePendingStop, true)}>{t("chat.verifyOriginalSend")}</button>}>
+      {t("chat.stopNeedsVerification")}
+    </ChatStatusNotice>
+  ) : null;
+  const verificationNotice = activeKey && verificationKeys.has(activeKey) && !activeRecoveryRequired && !activePendingStop ? (
     <ChatStatusNotice title={t(activePendingSend && !activePendingSend.accepted ? "chat.sendVerificationNoticeTitle" : "chat.verificationNoticeTitle")} tone="warning" className="chat-banner chat-verification-banner"
       testId="chat-verification-notice" action={<button type="button" disabled={!connected || serviceRecoveryBusy}
         onClick={() => void verifyPendingTrackedSends(activeKey, true)}>
@@ -8343,7 +8519,8 @@ function ChatPageApp() {
   ) : !connected ? (
     <ChatStatusNotice title={t(everConnected ? "chat.reconnectingBanner" : "chat.connecting")} className="chat-banner" testId="chat-connection-notice" />
   ) : null;
-  const statusNotices = recoveryCard || ((connectionNotice || verificationNotice) ? <>{connectionNotice}{verificationNotice}</> : null);
+  const statusNotices = recoveryCard || ((connectionNotice || verificationNotice || stopNotice)
+    ? <>{connectionNotice}{verificationNotice}{stopNotice}</> : null);
   useEffect(() => {
     if (!connected || active?.source !== "codex-desktop") return;
     const timer = window.setInterval(() => { void refreshSessions().catch(() => {}); }, 5000);
@@ -8572,8 +8749,7 @@ function ChatPageApp() {
   ), [shownGroups, liveTurn?.group, liveTurn?.id]);
   const livePending = liveTurn?.pending;
   const startupWait = activeKey && activeRunInFlight ? runWaitBySession[activeKey] : undefined;
-  const maintenanceWait = startupWait?.kind === "starting"
-    && (startupWait.stage === "reconnecting" || startupWait.stage === "compacting") ? startupWait : undefined;
+  const maintenanceWait = chatRunWaitActivity(startupWait);
   const activeTurnActivity = livePending?.finalReplyStreaming ? undefined : maintenanceWait
     ? { ...liveTurn?.activity, live: true, steps: withStartupWait(liveTurn?.activity?.steps ?? [], maintenanceWait) }
     : liveTurn?.activity;
@@ -8792,6 +8968,30 @@ function ChatPageApp() {
   // 审批卡、流式光标、回合动态和加载内容随判别字段带过去。
   // 交互用无参闭包（onRetry），Group 本体不出 ChatPage；闭包不进 deps——memo 随 keyedShownGroups
   // （即 messages）重算，捕获的总是当轮的新函数。
+  const openContinuationGroup = useCallback(async (sessionKey: string, message: ChatMsg) => {
+    const target = message.groupContinuation;
+    if (!groupChatEnabled || activeKeyRef.current !== sessionKey || !message.id || !target) return;
+    try {
+      const { target: verified } = await getGroupContinuation(agentOf(sessionKey), sessionKey, message.id);
+      if (verified?.groupId !== target.groupId || verified.ownerScope !== target.ownerScope
+        || verified.sourceEventId !== target.sourceEventId) throw new Error();
+      const group = await getGroupChat(target.groupId);
+      await refreshGroupChats();
+      if (activeKeyRef.current !== sessionKey || activeGroupIdRef.current) return;
+      if (group.group.id !== target.groupId || group.ownerScope !== target.ownerScope || group.group.status !== "active") throw new Error();
+      setImmersive(false);
+      setOpenGroup({ groupId: target.groupId, activeKey: sessionKey, continuationOwnerScope: target.ownerScope });
+    } catch {
+      if (activeKeyRef.current === sessionKey) setToast({ kind: "error", text: t("chat.originalGroupUnavailable") });
+    }
+  }, [groupChatEnabled, refreshGroupChats, t]);
+  const renderGroupContinuation = useCallback((message: ChatMsg) => (
+    groupChatEnabled && activeKey && message.groupContinuation && message.id
+      ? <button key={`continuation:${message.id}`} type="button" className="chat-continuation-action"
+          onClick={() => void openContinuationGroup(activeKey, message)}>{t("chat.openOriginalGroup")}</button>
+      : null
+  ), [groupChatEnabled, activeKey, openContinuationGroup, t]);
+
   const immersiveMessages = useMemo(() => {
     if (!immersive) return [];
     const out: ImmersiveMessage[] = [];
@@ -8945,6 +9145,7 @@ function ChatPageApp() {
               ...(activeBackendDescriptor?.surfaces.agentHarness === true
                 ? nativeUiLegacySources(m).map(({ text, sourceEventId }) => <LegacyChatUi key={`legacy:${sourceEventId}`} text={text}
                   sourceEventId={sourceEventId} backend={activeBackend} agentId={agentOf(activeKey || "")} sessionKey={activeKey || ""} visible />) : []),
+              renderGroupContinuation(m),
             ]) : undefined,
           pending: (!!liveMessage && !awaitingPrompt && !loadingReply) || undefined,
           prompts: prompts.length ? prompts : undefined,
@@ -8955,7 +9156,7 @@ function ChatPageApp() {
           onPin: MESSAGE_PINNING_ENABLED && hasId ? () => pinGroup(g) : undefined,
           pinned: MESSAGE_PINNING_ENABLED && hasId ? g.msgs.some((m) => m.actionId && pinnedIds.has(m.actionId)) : undefined,
           onDelete: hasId ? () => deleteGroup(g) : undefined,
-          onCtx: (e) => openMenu(e, g, segText, undefined, segmentMedia),
+          onCtx: (e) => openMenu(e, g, segText, undefined, segmentMedia, seg.msgs.length === 1 ? seg.msgs[0] : undefined),
           onAttachmentContextMenu: (e, kind, index) => {
             const item = (kind === "image" ? imageMedia : fileMedia)[index];
             if (item) openMenu(e, g, segText, item);
@@ -8972,7 +9173,7 @@ function ChatPageApp() {
       out.push(...kept);
     }
     return out;
-  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn, subagentRevision, subagentActivity, runWaitBySession]);
+  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn, subagentRevision, subagentActivity, runWaitBySession, renderGroupContinuation]);
   // 沉浸模式的 agent 状态相位（背景媒体层 + 轻量状态行共用）。判据全部是「事件到没到」，
   // 零后端特判（铁律 1）：OpenClaw 不发 thinking/prompt 事件 → 对应相位自然不出现，由
   // 素材回退链兜退化。这是未滞回的原始相位——防抖/最短展示在 ImmersiveBackdrop 内做
@@ -9002,8 +9203,9 @@ function ChatPageApp() {
   // 零新订阅。没有过程信息（OpenClaw 首包前）返回 null。
   const immersiveLive = useMemo((): ImmersiveLiveStatus | null => {
     if (activeKey && activeRunInFlight && runWaitBySession[activeKey]) {
-      if (runWaitBySession[activeKey].kind === "queued") return null;
-      return { tools: [], wait: runWaitBySession[activeKey] };
+      const wait = runWaitBySession[activeKey];
+      if (wait.kind === "queued" && !chatRunWaitActivity(wait)) return null;
+      return { tools: [], wait };
     }
     const last = messages[messages.length - 1];
     if (!last?.pending) return null;
@@ -10601,6 +10803,7 @@ function ChatPageApp() {
                                 </Fragment>
                               );
                               })}
+                              {renderGroupContinuation(m)}
                             </div>
                           ))}
                           {g === liveTurn?.group && liveBubble && <ChatLiveActivityBubble className="chat-bubble" {...liveBubble} />}
@@ -10874,7 +11077,7 @@ function ChatPageApp() {
                       type="button"
                       className="chat-iconbtn chat-send chat-stop"
                       onClick={abortActive}
-                      disabled={activeRecoveryRequired || serviceRecoveryBusy}
+                      disabled={activeRecoveryRequired || serviceRecoveryBusy || !!activePendingStop || (activeBackendDescriptor?.surfaces.durableChatStop === true && !connected)}
                       title={t("chat.stopGenerating")}
                     >
                       <IconStop />
@@ -10930,6 +11133,10 @@ function ChatPageApp() {
     )}
     {menu && <ChatMessageContextMenu x={menu.x} y={menu.y} onClose={closeMenu}
       onCopy={menu.copyText || menu.media.length ? () => copyText(menu.copyText, menu.media) : undefined}
+      onCopyContinuation={menu.continuation && menu.continuation.sessionKey === activeKey && !activeGroupId ? () => {
+        const source = menu.continuation;
+        if (source && source.sessionKey === activeKeyRef.current && !activeGroupIdRef.current) copyText(JSON.stringify(source.reference));
+      } : undefined}
       onQuote={menu.media.length || groupSnippet(menu.group) ? () => quoteGroup(menu.group, menu.msgIndex, menu.partIndex, menu.attachmentTarget) : undefined}
       onPin={menu.group.msgs.some(message => message.actionId) ? () => pinGroup(menu.group) : undefined}
       pinned={menu.group.msgs.some(message => message.actionId && pinnedIds.has(message.actionId))}
@@ -10966,7 +11173,7 @@ function ChatPageApp() {
           writerHint={activeWriterHint}
           recoveryNotice={recoveryNotice}
           statusNotices={statusNotices}
-          abortDisabled={activeRecoveryRequired || serviceRecoveryBusy}
+          abortDisabled={activeRecoveryRequired || serviceRecoveryBusy || !!activePendingStop || (activeBackendDescriptor?.surfaces.durableChatStop === true && !connected)}
           slashMenu={slashMenuNode}
           planDock={planDock}
           slashOpen={slashOpen}

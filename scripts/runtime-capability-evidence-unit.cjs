@@ -24,6 +24,32 @@ test("capability booleans derive from scoped immutable adapter evidence", () => 
   assert.equal(Object.isFrozen(evidence.scope.permissionPolicy), true);
 });
 
+test("Codex catalog, tool isolation, output format and reviewer evidence retain distinct scopes", () => {
+  const target = { ...binding, runtime: "codex" };
+  const catalog = Object.freeze({ runtimeVersion: "0.167.1", digest: "a".repeat(64) });
+  const host = {
+    runtimeIdentity: { digest: "bundled-image" }, runtimeVersion: "0.167.1", providerConfigurationRevision: 4,
+    modelCatalog: catalog, providerCapabilities: { structuredOutput: "unsupported", approvalReviewer: "user" },
+  };
+  const evidence = runtimeCapabilityEvidence({ capabilities, host }, target, "process-1");
+  assert.equal(evidence.scope.executableIdentity, "bundled-image");
+  assert.equal(evidence.scope.runtimeVersion, "0.167.1");
+  assert.equal(evidence.scope.providerConfigurationRevision, 4);
+  assert.deepEqual(evidence.codex, {
+    modelCatalog: catalog, toolIsolation: { state: "unverified", source: "thread-feature-and-mcp-inventory" },
+    structuredOutput: "unsupported", approvalReviewer: "user",
+  });
+  const replaced = runtimeCapabilityEvidence({ capabilities, host: {
+    runtimeIdentity: { digest: "system-image" }, runtimeVersion: "0.159.2", providerConfigurationRevision: 5,
+  } }, { ...target, runtimeAccountId: "different-account" }, "process-2");
+  assert.notDeepEqual(replaced.scope, evidence.scope);
+  assert.equal(replaced.codex.modelCatalog, null);
+  assert.equal(replaced.codex.structuredOutput, "unverified");
+  assert.equal(replaced.codex.approvalReviewer, null);
+  assert.equal(runtimeOperationSupport(evidence, "chat").supported, true);
+  assert.equal(runtimeOperationSupport(replaced, "chat").supported, true);
+});
+
 test("missing optional ACP images does not disable text execution", () => {
   const evidence = runtimeCapabilityEvidence(raw(false), binding, "process-1");
   assert.deepEqual(evidence.observations["attachment.image"], { state: "unsupported", source: "handshake" });

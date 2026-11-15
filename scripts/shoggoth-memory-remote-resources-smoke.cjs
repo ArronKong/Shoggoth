@@ -405,7 +405,7 @@ test("actual Product Service injects private resources into its index and Profil
   await owner.stopProfile(id); assert.throws(() => created.provider.embed(text), { code: "MEMORY_SCOPE_REVOKED" });
   const afterStop = lookups.length; await owner.reconcileConfig(); assert.equal(lookups.length, afterStop, "config apply does not acquire a stopped Profile owner");
   await owner.close(); assert.equal(bridge.closed, true); assert.equal(bridge.handles.size, 0);
-  owner.open([]); assert.notEqual(owner.remoteEmbeddingResources, bridge);
+  await owner.open([]); assert.notEqual(owner.remoteEmbeddingResources, bridge);
   assert.throws(() => bridge.capture(id), { code: "MEMORY_SCOPE_REVOKED" });
   const fresh = owner.remoteEmbeddingResources;
   const restarted = await fresh.resolveAdapter({ agentId: id, providerId: "openai", adapter: fakeAdapter() }).create(options({ agentId: id }));

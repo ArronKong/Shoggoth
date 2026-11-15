@@ -16,12 +16,14 @@ const legacyRecovery = scenario.startsWith("legacy-");
 const observerLoop = scenario.startsWith("legacy-observer-loop");
 const ordinaryRecovery = scenario.startsWith("ordinary-recovery-");
 const nativeActiveRecovery = scenario.startsWith("native-active-");
+const nativeStop = scenario.startsWith("native-stop-");
+const groupContinuation = scenario.startsWith("group-continuation");
 const nativeRejection = ["native-rejected", "native-rejected-immersive"].includes(scenario);
 const storageRejection = scenario.startsWith("storage-rejected-");
 const inspirationBuffered = ["inspiration-buffered", "inspiration-buffered-immersive"].includes(scenario);
 if (!["slash-order", "slash-order-error", "slash-order-uncertain", "slash-order-immersive", "slash-order-uncertain-immersive", "upstream-error", "upstream-error-immersive", "uncertain", "restored", "rejected", "ordinary", "newer", "started", "accepted-error", "accepted-uncertain", "stale-query", "reselect", "terminal-race", "terminal-timeout", "terminal-reload", "ordinary-upstream", "ordinary-receipt", "ordinary-buffered", "ordinary-buffered-immersive", "observer-idle", "observer-idle-pending", "native-approval", "native-approval-immersive", "observer-idle-terminal", "runtime-abort", "runtime-abort-immersive", "runtime-snapshot", "runtime-abort-pending", "silent-queue", "silent-queue-immersive"].includes(scenario)
   && !["observer-idle-immersive", "observer-idle-failed", "observer-idle-failed-immersive"].includes(scenario)
-  && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !ordinaryRecovery && !inspirationBuffered && !storageRejection
+  && !nativeRejection && !legacyRecovery && !nativeActiveRecovery && !nativeStop && !groupContinuation && !ordinaryRecovery && !inspirationBuffered && !storageRejection
   || !["shoggoth", "openclaw", "hermes"].includes(backend)) throw Error("invalid fixture scope");
 const key = `agent:${backend}-recovery-fixture:${inspirationBuffered ? "dashboard:inspiration-fixture" : "11111111-1111-4111-8111-111111111111"}`;
 const agentId = key.split(":")[1];
@@ -29,6 +31,8 @@ const originalOperation = "original-operation-fixture", originalText = "Use this
 const captured = ["connection-selected-one"], selection = scenario === "newer"
   ? ["connection-selected-two"] : captured;
 const storageKey = "shoggoth.chat.pending-native-sends.v1", selectedKey = "shoggoth.chat.connector-selection.v1";
+const stopKey = "shoggoth.chat.pending-native-stops.v1", stopRunId = "native-stop-exact-run";
+const stops: any[] = [];
 const sessions = [{ key, agentId, agentName: `${backend} recovery fixture`, backendId: backend, model: "fixture-model", updatedAt: Date.now(),
   ...(nativeRejection || legacyRecovery ? { kind: "cron" } : inspirationBuffered ? { kind: "inspiration" } : {}) }];
 const sent: Array<any> = [], observed: Array<any> = [], sockets = new Set<FixtureSocket>();
@@ -41,6 +45,28 @@ if (legacyRecovery) lookup = { status: "unresolved", run: null, canReconcile: tr
 if (scenario.startsWith("ordinary-recovery-reload")) lookup = { status: "found", stateAuthority: "openclaw",
   admissionAccepted: true, run: { id: originalOperation, sessionKey: key, status: "completed" } };
 let history: Array<any> = [], releaseLookup: (() => void) | null = null, historyReads = 0, lookupUnavailable = false;
+const continuationTarget = { groupId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerScope: "ga1:aaaaaaaa-aaaa-4aaa-8aaa-bbbbbbbbbbbb",
+  sourceEventId: "original-group-evidence" };
+const groupAnswerId = "group-continuation-answer";
+const groupRequests: string[] = [];
+const groupSends: any[] = [];
+const groupView = {
+  ownerScope: continuationTarget.ownerScope,
+  group: { id: continuationTarget.groupId, name: "Recovered exact group", status: "active", policyVersion: 2,
+    rosterRevision: 3, metadataRevision: 1, createdAt: 1, updatedAt: 1, purpose: "" },
+  members: [{ id: "first-member", backendId: "shoggoth", agentId, handle: "first", displayName: "First member", state: "active" }],
+  currentOwnerId: "first-member", round: null, activeTurns: [], queuedMemberIds: [], internalSessionKeys: [],
+};
+if (groupContinuation) history = [
+  { id: "group-source-ref-user", role: "user", content: "Read [eventId=original-group-evidence]", timestamp: Date.now() - 60_000 },
+  { id: groupAnswerId, role: "assistant", content: [{ type: "text", text: "Verified group creation receipt" }], timestamp: Date.now() - 50_000,
+    shoggoth: { contextExcluded: true, sourceEventId: groupAnswerId, groupContinuation: continuationTarget } },
+  { id: "plain-model-text", role: "assistant", content: [{ type: "text", text: `group_creation_receipt ${continuationTarget.groupId}` }], timestamp: Date.now() - 40_000 },
+];
+if (nativeStop) {
+  lookup = { status: "found", stateAuthority: "native-service", run: { id: stopRunId, status: reloaded ? "canceled" : "running" } };
+  history = [{ role: "user", content: "原任务的消息", timestamp: Date.now() - 5000 }];
+}
 const buffered = scenario.startsWith("ordinary-buffered") || inspirationBuffered, immersive = scenario.endsWith("-immersive");
 const upstreamFailure = scenario.startsWith("upstream-error");
 const nativeApproval = scenario.startsWith("native-approval");
@@ -87,6 +113,9 @@ if (!reloaded) {
   if (legacyRecovery || nativeActiveRecovery) localStorage.setItem(storageKey, JSON.stringify([{ key, idem: originalOperation,
     at: Date.now() - 3600000, backendId: backend, terminalObserved: true,
     ...(scenario === "legacy-accepted" || nativeActiveRecovery ? { accepted: true } : {}) }]));
+  if (nativeStop) localStorage.setItem(storageKey, JSON.stringify([
+    { key, idem: originalOperation, at: Date.now(), backendId: "shoggoth", accepted: true },
+  ]));
   if (scenario === "restored" || scenario === "newer" || scenario === "stale-query" || scenario === "observer-idle-pending"
     || nativeApproval || scenario === "observer-idle-terminal" || scenario === "runtime-abort-pending") localStorage.setItem(storageKey,
     JSON.stringify([{ key, idem: originalOperation, at: Date.now(), selection: captured,
@@ -138,6 +167,16 @@ class FixtureSocket {
         return;
       }
     }
+    if (nativeStop && frame.method === "chat.abort") {
+      stops.push(frame.params);
+      if (scenario.startsWith("native-stop-lost") && !frame.params.observeOnly) {
+        setTimeout(() => this.emit({ type: "res", id: frame.id, ok: false,
+          error: { code: "SERVICE_UNAVAILABLE", message: "Fixture lost stop response", receiptUncertain: true } }), 0);
+        return;
+      }
+      payload = { stateAuthority: "native-service", runId: stopRunId, ...(lookup.run.status === "canceled"
+        ? { status: "terminal", runStatus: "canceled" } : { status: "verification" }) };
+    }
     if (frame.method === "chat.operation.reconcile") {
       reconciliations.push(frame.params);
       if (observerLoop) {
@@ -185,6 +224,29 @@ class FixtureSocket {
 Object.assign(window, { WebSocket: FixtureSocket });
 window.fetch = async (input, init) => {
   const url = new URL(String(input), location.href); let payload: unknown = {};
+  if (groupContinuation && url.pathname.endsWith("/group-continuation")) {
+    groupRequests.push("verify");
+    check(url.searchParams.get("sessionKey") === key && url.searchParams.get("answerEventId") === groupAnswerId,
+      "continuation must reverify the exact answer in its original session");
+    return Response.json({ target: scenario.endsWith("-revoked") ? null : continuationTarget });
+  }
+  if (groupContinuation && url.pathname.startsWith("/__api/group-chats")) {
+    if (url.pathname === "/__api/group-chats") return Response.json({ groups: [groupView] });
+    check(url.searchParams.get("id") === continuationTarget.groupId, "group reads must use the verified exact ID");
+    if (url.pathname.endsWith("/messages") && init?.method === "POST") {
+      const input = JSON.parse(String(init.body));
+      groupSends.push(input);
+      return Response.json({ message: { id: "group-new-message", groupId: continuationTarget.groupId, seq: 1,
+        revision: 1, body: input.body, author: { kind: "user" }, createdAt: Date.now(), attachments: [],
+        mentions: { memberIds: input.mentions, broadcast: false, unresolved: [] } }, discussionId: null, duplicate: false });
+    }
+    check(!init?.method || init.method === "GET", "only the existing group send may write");
+    if (url.pathname.endsWith("/detail")) {
+      groupRequests.push("detail");
+      return Response.json(scenario.endsWith("-other-owner") ? { ...groupView, ownerScope: "foreign-owner" } : groupView);
+    }
+    return Response.json({ messages: [], hasMore: false });
+  }
   if (url.pathname === "/__api/chat/secrets/prepare") {
     if (failStorage && scenario.startsWith("storage-rejected-rest")) {
       return Response.json({ ...storageError, error: storageError.message }, { status: 400 });
@@ -204,7 +266,7 @@ window.fetch = async (input, init) => {
   if (url.pathname === "/__api/status") payload = { backends: ["shoggoth", "openclaw", "hermes"].map(id =>
     ({ id, connected: true, info: { readyAgentIds: [agentId] } })) };
   if (url.pathname === "/__api/backends") payload = { backends: ["shoggoth", "openclaw", "hermes"].map(id =>
-    ({ id, surfaces: { agentHarness: true, chat: true } })) };
+    ({ id, surfaces: { agentHarness: true, chat: true, durableChatStop: id === "shoggoth" } })) };
   if (url.pathname === "/__api/models") payload = { models: [{ id: "fixture-model", name: "Fixture", provider: "fixture", backendId: backend }] };
   if (url.pathname === "/__api/chat/capabilities") payload = { attachments: {}, slash: slashOrder, maxPromptBytes: 61440 };
   if (url.pathname === "/__api/chat/slash") payload = { supported: slashOrder, commands: slashOrder
@@ -233,6 +295,61 @@ const clickVerify = () => document.querySelector<HTMLButtonElement>(".chat-verif
 Object.assign(window, { runChatSendRecoveryFixture: async () => {
   await wait(() => input() && sockets.size > 0, "actual ChatPage composer");
   await new Promise(resolve => setTimeout(resolve, 120));
+  if (groupContinuation) {
+    const buttons = () => document.querySelectorAll<HTMLButtonElement>(".chat-continuation-action");
+    const composer = () => document.querySelector<HTMLElement>(`[aria-label="${i18n.t("groupChat.composer.message")}"]`);
+    const send = () => document.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("groupChat.send")}"]`);
+    await wait(() => buttons().length > 0, "group continuation on native Chat history");
+    check(buttons().length === 1, "ordinary assistant text cannot mint a group action");
+    buttons()[0].click();
+    if (scenario === "group-continuation") {
+      await wait(() => groupRequests.filter(request => request === "detail").length >= 2
+        && composer()?.isContentEditable, "opened existing original group composer");
+      check(groupSends.length === 0 && send()?.disabled, "opening the group must never submit or prefill a message");
+      const text = "New message written by the user";
+      composer()!.textContent = text;
+      composer()!.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      await wait(() => send() && !send()!.disabled, "user-authored group message ready to send");
+      send()!.click();
+      await wait(() => groupSends.length === 1, "existing composer submits the user's new message");
+      check(groupSends[0].body === text && groupSends[0].ownerScope === continuationTarget.ownerScope
+        && groupSends[0].expectedPolicyVersion === groupView.group.policyVersion
+        && typeof groupSends[0].clientMessageId === "string", "new message keeps current destination and operation identity");
+    } else {
+      await wait(() => document.body.innerText.includes(i18n.t("chat.originalGroupUnavailable")), "unverified original group remains closed");
+      check(!composer() && groupSends.length === 0, "unverified group composer opened or sent a message");
+    }
+    check(groupRequests.filter(request => request === "verify").length === 1 && sent.length === 0,
+      "group navigation must never resend the original direct-chat request");
+    return { scenario, sameSessionVerified: true, groupSends: groupSends.length };
+  }
+  if (nativeStop) {
+    const stopBanner = () => document.querySelector('[data-testid="chat-stop-verification-notice"]');
+    const stopButton = () => document.querySelector<HTMLButtonElement>(immersive
+      ? `button[title="${i18n.t("chat.stopGenerating")}"]` : ".chat-stop");
+    if (reloaded) {
+      await wait(() => stops.length > 0 && !stopBanner() && pending().length === 0, "read-only restored Stop check");
+      check(stops.every(stop => stop.observeOnly === true && stop.idempotencyKey === originalOperation && stop.expectedBackendId === backend)
+        && sent.length === 0 && reconciliations.length === 0, "reload replayed a Stop or original send");
+      return { scenario, backend, immersive, reloaded, originalStopChecked: true };
+    }
+    await wait(() => observed.length > 0 && stopButton() && !stopButton()!.disabled, "active original Stop button");
+    stopButton()!.click();
+    await wait(() => stopBanner() && stops.some(stop => stop.observeOnly === true), "unconfirmed Stop retains its original pending action");
+    check(stops.filter(stop => !stop.observeOnly).length === 1
+      && stops.every(stop => stop.sessionKey === key && stop.idempotencyKey === originalOperation && stop.expectedBackendId === backend)
+      && pending()[0]?.idem === originalOperation && document.body.innerText.includes("原任务的消息")
+      && stopButton()?.disabled && sent.length === 0, "Stop lost its original state, history or controls");
+    if (scenario.startsWith("native-stop-lost")) {
+      check(JSON.parse(localStorage.getItem(stopKey) || "[]")[0]?.idempotencyKey === originalOperation, "Stop was not retained on lost response");
+    } else {
+      lookup = { ...lookup, run: { id: stopRunId, status: "canceled" } };
+      stopBanner()!.querySelector("button")!.click();
+      await wait(() => !stopBanner() && pending().length === 0, "exact durable Stop completion settles the original");
+      check(stops.filter(stop => !stop.observeOnly).length === 1 && sent.length === 0, "Stop confirmation replayed an action");
+    }
+    return { scenario, backend, immersive, pendingUntilTerminal: true, exactOriginalStop: true };
+  }
   if (storageRejection) {
     await setInput(originalText); enter();
     const beforeRetry = scenario.startsWith("storage-rejected-ws") ? 1 : 0;

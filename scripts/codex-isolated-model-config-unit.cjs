@@ -3,12 +3,14 @@
 const test = require("node:test"), assert = require("node:assert/strict");
 const { CodexRuntimeAdapter } = require("../app/agent-service/codex-runtime-adapter");
 const { CodexSchemaContract } = require("../app/agent-service/codex-schema-contract");
+const { SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
 
 async function fixture({ transports = { shoggoth: { command: "fixture" }, configured: { url: "https://fixture.invalid" } },
   inventory = ["shoggoth", "configured", "code-review", "codex_app", "cua_repl", "codex_apps"],
-  configResponse, configError, threadInventory = [], extraThreadFeatures = [] } = {}) {
+  configResponse, configError, threadInventory = [], extraThreadFeatures = [], runtimeVersion } = {}) {
   const starts = [], unloaded = [], reads = [];
   const host = {
+    runtimeVersion,
     async configRead(params) {
       reads.push(params); if (configError) throw configError;
       return configResponse ?? { config: { mcp_servers: transports }, origins: {} };
@@ -106,7 +108,7 @@ test("isolated model discovery never waits on global MCP startup and still verif
 });
 
 test("Codex retired worktrees and realtime markers do not block isolated generation", async () => {
-  const f = await fixture({ extraThreadFeatures: ["worktrees", "realtime_conversation"]
+  const f = await fixture({ runtimeVersion: "0.167.1", extraThreadFeatures: ["worktrees", "realtime_conversation"]
     .map(name => ({ name, enabled: true, stage: "removed" })) });
   const started = await f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
     permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
@@ -117,16 +119,43 @@ test("Codex retired worktrees and realtime markers do not block isolated generat
 test("an enabled active feature or an unverified removed feature still blocks generation", async () => {
   for (const [name, stage] of [["worktrees", "stable"], ["realtime_conversation", "deprecated"],
     ["unknown_tool", "removed"]]) {
-    const f = await fixture({ extraThreadFeatures: [{ name, stage, enabled: true }] });
+    const f = await fixture({ runtimeVersion: "0.167.1", extraThreadFeatures: [{ name, stage, enabled: true }] });
     await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
       permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } }), { code: "RUNTIME_ISOLATION_UNVERIFIED" });
     assert.deepEqual(f.unloaded, ["isolated-thread"]);
   }
 });
 
+test("a supported prior app-server can resolve the model, but cannot borrow another version's feature exception", async () => {
+  const prior = await fixture({ runtimeVersion: "0.159.2" });
+  assert.deepEqual(await prior.handle.resolveModelOnly({ operationId: "discover" }), { model: "fixture-model", provider: "fixture" });
+  for (const runtimeVersion of ["0.159.2", "0.168.0", undefined]) {
+    const f = await fixture({ runtimeVersion, extraThreadFeatures: [{ name: "worktrees", stage: "removed", enabled: true }] });
+    await assert.rejects(f.handle.resolveModelOnly({ operationId: "discover" }), { code: "RUNTIME_ISOLATION_UNVERIFIED" });
+    assert.deepEqual(f.unloaded, ["isolated-thread"]);
+  }
+});
+
+test("Codex 0.159.2 rejects isolated generation before starting a native thread", async () => {
+  const f = await fixture({ runtimeVersion: "0.159.2" });
+  await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
+    permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } }), { code: "RUNTIME_ISOLATION_UNVERIFIED" });
+  assert.equal(f.starts.length, 0);
+  assert.equal(f.reads.length, 0);
+  assert.equal(f.unloaded.length, 0);
+  const ordinary = await f.handle.sessionStart({ persistent: true,
+    permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
+  assert.equal(ordinary.session.id, "isolated-thread");
+  assert.equal(f.starts.length, 1);
+});
+
 test("isolated generation releases only its owned ephemeral thread and confirms the native acknowledgement", async () => {
   const f = await fixture();
   await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: true }), { code: "MODEL_ONLY_SESSION_INVALID" });
+  await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: false, proactiveReview: true }),
+    { code: "MODEL_ONLY_SESSION_INVALID" });
+  await assert.rejects(f.handle.sessionResume({ isolatedGeneration: true, sessionId: "ordinary-thread" }),
+    { code: "MODEL_ONLY_SESSION_INVALID" });
   await assert.rejects(f.handle.releaseModelOnlySession({ sessionId: "ordinary-thread" }), { code: "MODEL_ONLY_SESSION_UNAVAILABLE" });
   assert.equal(f.starts.length, 0); assert.equal(f.unloaded.length, 0);
   const started = await f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
@@ -146,4 +175,38 @@ test("failed generation isolation also unloads the owned thread before returning
     permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } }), { code: "RUNTIME_ISOLATION_UNVERIFIED" });
   assert.deepEqual(f.unloaded, ["isolated-thread"]);
   await assert.rejects(f.handle.releaseModelOnlySession({ sessionId: "isolated-thread" }), { code: "MODEL_ONLY_SESSION_UNAVAILABLE" });
+});
+
+test("the user fallback is scoped to its provider on new and resumed threads", async () => {
+  const profile = { runtime: "codex", runtimeProfileId: "fixture", runtimeAccountId: SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID };
+  const calls = [];
+  const request = async params => {
+    calls.push(params);
+    return { thread: { id: "fixture-thread" }, approvalsReviewer: params.approvalsReviewer };
+  };
+  let retired = false;
+  const host = { runtimeVersion: "0.167.1", runtimeEnvironment: { installationKind: "bundled" },
+    providerCapabilities: { providerConfigId: "shoggoth_0123456789abcdef", structuredOutput: "unsupported", approvalReviewer: "user" },
+    assertExecutionProviderCurrent() { if (retired) throw Object.assign(new Error("configuration retired"), { code: "EXECUTION_CONTRACT_STALE" }); },
+    threadStart: request, threadResume: request,
+    async turnStart(params) { calls.push(params); return { turn: { id: "fixture-turn" } }; },
+  };
+  const handle = await new CodexRuntimeAdapter({ runtimePool: { get: async () => host } }).acquire(profile);
+  const modelProvider = { kind: "custom-responses", configId: "shoggoth_0123456789abcdef" };
+  const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+  const permissionMode = "auto-review";
+  await handle.sessionStart({ modelProvider, permissionMode, permissionPolicy });
+  await handle.sessionResume({ sessionId: "fixture-thread", modelProvider, permissionMode, permissionPolicy });
+  await handle.turnStart({ sessionId: "fixture-thread", prompt: "fixture turn", permissionMode, permissionPolicy });
+  assert.deepEqual(calls.map(params => params.approvalsReviewer), ["user", "user", "user"]);
+  assert.ok(calls.slice(0, 2).every(params => params.sandbox === "workspace-write" && params.approvalPolicy === "on-request"));
+  const other = { ...modelProvider, configId: "shoggoth_fedcba9876543210" };
+  await handle.sessionStart({ modelProvider: other, permissionMode, permissionPolicy });
+  assert.equal(calls.at(-1).approvalsReviewer, "auto_review");
+  host.modelCatalog = { runtimeVersion: "0.167.1", digest: "fixture" };
+  await assert.rejects(handle.sessionStart({ modelProvider: other, permissionMode, permissionPolicy }), { code: "EXECUTION_CONTRACT_STALE" });
+  retired = true;
+  await assert.rejects(handle.sessionResume({ sessionId: "fixture-thread", modelProvider, permissionMode, permissionPolicy }),
+    { code: "EXECUTION_CONTRACT_STALE" });
+  assert.equal(calls.length, 4);
 });

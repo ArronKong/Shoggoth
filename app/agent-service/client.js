@@ -166,7 +166,7 @@ function requestService(paths, request, options = {}) {
       if (!response.ok) {
         const error = serviceError(response.error?.code || "SERVICE_ERROR", response.error?.message || "Service 请求失败");
         if (response.error?.systemIssue === "STORAGE_FULL") error.systemIssue = "STORAGE_FULL";
-        if (payload.method === "chat.send") {
+        if (["chat.send", "chat.send.accept"].includes(payload.method)) {
           if (response.error?.admissionAccepted === false) error.admissionAccepted = false;
           if (response.error?.receiptUncertain === true) error.receiptUncertain = true;
         }

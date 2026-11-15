@@ -78,6 +78,16 @@ const writeJson = (file, value) => {
     fs.mkdirSync(path.join(inputs,"resources"),{recursive:true});
     fs.cpSync(path.join(__dirname,"../resources/external-plugin-adapters"),path.join(inputs,"resources/external-plugin-adapters"),{recursive:true});
     assert.deepEqual(checkPackagingInputs(inputs),[]);
+    const staleContracts = ["hermes/mcp-tools.json", "openclaw/mcp-tools.json", "hermes/__init__.py", "openclaw/index.mjs"];
+    for (const relative of staleContracts) {
+      const target = path.join(inputs, "resources/external-plugin-adapters", relative);
+      const original = fs.readFileSync(target, "utf8");
+      const stale = original.replace(/(serviceProtocolVersion(?:\\?"\s*:\s*|!==))\d+/u, (_, prefix) => `${prefix}999`);
+      assert.notEqual(stale, original, `fixture must change ${relative}`);
+      fs.writeFileSync(target, stale);
+      assert.ok(checkPackagingInputs(inputs).includes(`${relative}: MCP connector contract stale`));
+      fs.writeFileSync(target, original);
+    }
     for(const retired of ["open-connector","open-connector-runtime","shoggoth-skills/shoggoth-plugin-authoring"]){
       const target=path.join(inputs,"resources",retired);fs.mkdirSync(target,{recursive:true});
       assert.match(checkPackagingInputs(inputs).join("\n"),/retired platform resource shipped/u);

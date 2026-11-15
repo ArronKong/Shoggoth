@@ -226,6 +226,13 @@ class RuntimeAccountAdmission {
     return true;
   }
 
+  quotaRejection(runtimeAccountId) {
+    const account = this.#account(runtimeAccountId);
+    const state = this.#state(account.id);
+    return state.rateLimitBackoffUntil === null || state.rateLimitBackoffUntil > this.#timestamp(this.now())
+      ? state.rateLimitErrorCode : null;
+  }
+
   read(runtimeAccountId) {
     const account = this.#account(runtimeAccountId);
     const state = this.#state(account.id);

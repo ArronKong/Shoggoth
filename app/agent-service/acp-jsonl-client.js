@@ -288,6 +288,9 @@ class AcpJsonlClient {
       // This is repeated even if the caller preflighted before writing its ledger.
       frame = this._requestFrame(method, params);
       timeoutMs = validTimeout(options.timeoutMs, this.requestTimeoutMs, this.naming);
+      if (options.withSendGuard !== undefined && typeof options.withSendGuard !== "function") {
+        throw acpError(`${this.naming.codePrefix}_SEND_GUARD_INVALID`, "Invalid local send guard");
+      }
     } catch (error) {
       return Promise.reject(requestError(error, "not_sent", this.naming));
     }
@@ -314,6 +317,7 @@ class AcpJsonlClient {
     this._armRequestTimeout(id, pending, timeoutMs);
     this._writeFrame(frame, {
       shouldWrite: () => this.pending.get(id) === pending,
+      withSendGuard: options.withSendGuard,
       beforeWrite: () => {
         // The observer must durably record this conservative boundary before
         // stdin.write can possibly deliver bytes, including on synchronous throw.
@@ -571,21 +575,45 @@ class AcpJsonlClient {
 
   _writeFrame(frame, options = {}) {
     const write = this.writeTail.then(() => new Promise((resolve, reject) => {
-      // Timed-out/terminated queued requests must never be sent later.
       if (options.shouldWrite && !options.shouldWrite()) { resolve(false); return; }
-      if (this.ended || !this.child.stdin.writable) {
-        reject(acpError(`${this.naming.codePrefix}_STDIN_CLOSED`, `${this.naming.protocolLabel} stdin is closed`));
+      let settled = false, timer;
+      const submit = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        // A request may retire while it waits for an authority proof.
+        if (options.shouldWrite && !options.shouldWrite()) { resolve(false); return; }
+        if (this.ended || !this.child.stdin.writable) {
+          reject(acpError(`${this.naming.codePrefix}_STDIN_CLOSED`, `${this.naming.protocolLabel} stdin is closed`));
+          return;
+        }
+        try { options.beforeWrite?.(); } catch (error) { reject(error); return; }
+        try {
+          this.child.stdin.write(frame, (error) => {
+            if (error) reject(acpError(`${this.naming.codePrefix}_WRITE_FAILED`, `${this.naming.protocolLabel} write failed`));
+            else resolve(true);
+          });
+        } catch {
+          reject(acpError(`${this.naming.codePrefix}_WRITE_FAILED`, `${this.naming.protocolLabel} write failed`));
+        }
+      };
+      if (!options.withSendGuard) {
+        submit();
         return;
       }
-      try { options.beforeWrite?.(); } catch (error) { reject(error); return; }
-      try {
-        this.child.stdin.write(frame, (error) => {
-          if (error) reject(acpError(`${this.naming.codePrefix}_WRITE_FAILED`, `${this.naming.protocolLabel} write failed`));
-          else resolve(true);
-        });
-      } catch {
-        reject(acpError(`${this.naming.codePrefix}_WRITE_FAILED`, `${this.naming.protocolLabel} write failed`));
-      }
+      const controller = new AbortController();
+      const failGuard = error => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        controller.abort(error);
+        reject(error);
+      };
+      timer = setTimeout(() => failGuard(acpError(`${this.naming.codePrefix}_SEND_GUARD_TIMEOUT`,
+        "Local send guard timed out")), 5_000);
+      Promise.resolve().then(() => options.withSendGuard(submit, controller.signal))
+        .then(() => failGuard(acpError(`${this.naming.codePrefix}_SEND_GUARD_INVALID`,
+          "Local send guard did not submit")), failGuard);
     }));
     this.writeTail = write.catch((error) => {
       // Fence the connection before allowing the next queued writer to run.

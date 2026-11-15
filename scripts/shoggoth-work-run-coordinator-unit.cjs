@@ -836,6 +836,7 @@ function fixture(options = {}) {
     manualCompactionTimeoutMs: options.manualCompactionTimeoutMs,
     promptScheduler: options.promptScheduler,
     recoverOrphanedDomainRuns: options.recoverOrphanedDomainRuns,
+    durableChatAcceptance: options.durableChatAcceptance,
     ...(options.productMcpApprovalPolicy
       ? { productMcpApprovalPolicy: options.productMcpApprovalPolicy } : {}),
     ...(options.contextCompiler ? { contextCompiler: options.contextCompiler } : {}),
@@ -3333,8 +3334,11 @@ test("并发 open 共享同一恢复过程，恢复 settle 前 send 固定拒绝
   const gate = deferred();
   const value = fixture({ inbox, runtimeGate: gate });
   value.inbox.log = value.log;
+  value.dispatcher.enqueue({ id: "00000000-0000-4000-8000-000000000055", source: "chat", sourceId: SESSION_KEY,
+    idempotencyKey: "shoggoth:chat-send:opening-recovery", profileId: PROFILE_ID,
+    workspace: value.sessions.session.workspace, retryOf: null });
   const firstOpen = value.coordinator.open();
-  while (!value.log.includes("runtimePool.get")) await new Promise((resolve) => setImmediate(resolve));
+  await waitUntil(() => value.log.includes("runtimePool.get"), 2_000, "opening Run to acquire Runtime");
   let secondSettled = false;
   const secondOpen = value.coordinator.open().then((result) => {
     secondSettled = true;
@@ -5145,7 +5149,7 @@ test("非 full history 无法证明缺少 clientId 时 fail closed，不发送 t
   await value.coordinator.close();
 });
 
-test("重启恢复 pending command 缺失 run 的 crash cut，重建并且只执行一次", async () => {
+test("legacy Inbox without a WorkRun remains unresolved and cannot reuse current defaults", async () => {
   const log = [];
   const inbox = new FakeInbox(log);
   inbox.enqueue({
@@ -5159,13 +5163,55 @@ test("重启恢复 pending command 缺失 run 的 crash cut，重建并且只执
   value.inbox.log = value.log;
   const runId = inbox.get("crash-after-inbox").runId;
   await value.coordinator.open();
-  assert.equal(value.dispatcher.getRun(runId).status, "running");
-  await value.coordinator.waitForIdle(runId);
-  assert.equal(value.dispatcher.getRun(runId).status, "running");
-  assert.equal(inbox.get("crash-after-inbox").state, "dispatching");
-  assert.equal(value.host.threadStartCalls, 1);
-  assert.equal(value.host.turnStartCalls, 1);
-  await value.coordinator.close();
+  try {
+    assert.equal(value.dispatcher.getRun(runId), null);
+    assert.equal(inbox.get("crash-after-inbox").state, "pending");
+    assert.equal(value.coordinator.getChatAcceptance("crash-after-inbox", SESSION_KEY), null);
+    assert.deepEqual(await value.coordinator.reconcileChatOperation({ operationId: "crash-after-inbox",
+      sessionKey: SESSION_KEY, createdAt: 1_000, includeAcceptance: true }), { status: "unresolved", run: null });
+    await assert.rejects(value.coordinator.send({ operationId: "crash-after-inbox", sessionKey: SESSION_KEY,
+      prompt: "survives restart" }), { code: "CHAT_OPERATION_VERIFICATION_REQUIRED", receiptUncertain: true });
+    assert.equal(value.host.threadStartCalls, 0);
+    assert.equal(value.host.turnStartCalls, 0);
+  } finally { await value.coordinator.close(); }
+});
+
+test("Inbox v2-only crash recovery preserves the original workspace and projects the user before dispatch", async () => {
+  const inbox = new FakeInbox([]);
+  const runId = "00000000-0000-4000-8000-000000000101";
+  const operationId = "recover-accepted-chat";
+  const events = [];
+  const value = fixture({ inbox, sessionWorkspace: null, defaultCwd: "/private/tmp/new-default",
+    durableChatAcceptance: true, transcriptStore: {
+      getEvent: (_profile, _session, id) => events.find(event => event.id === id) || null,
+      appendEvent(event) { events.push(clone(event)); return clone(event); },
+    } });
+  const session = value.sessions.session;
+  const selectionFingerprint = require("node:crypto").createHash("sha256")
+    .update(JSON.stringify(["chat-selection", { bindingId: null, model: null,
+      modelProvider: null, permissionMode: null, settings: null }])).digest("hex");
+  inbox.enqueue({
+    operationId, runId, sessionKey: SESSION_KEY, prompt: "recover me once", createdAt: 930,
+    acceptance: { profileId: PROFILE_ID, sessionId: session.id, workspace: "/private/tmp/original-default",
+      selectionFingerprint },
+  });
+
+  await value.coordinator.open();
+  try {
+    assert.equal(value.dispatcher.getRun(runId).workspace, "/private/tmp/original-default");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, "user");
+    assert.equal(events[0].runId, runId);
+    assert.equal(events[0].content.operationId, operationId);
+    assert.equal(events[0].occurredAt, 930);
+    assert.equal(value.host.turnStartCalls, 0);
+    await waitUntil(() => value.host.turnStartCalls === 1, 2_000, "recovered native dispatch");
+    await value.coordinator.waitForIdle(runId);
+    const replay = await value.coordinator.send({ operationId, sessionKey: SESSION_KEY, prompt: "recover me once" });
+    assert.equal(replay.run.id, runId);
+    assert.equal(events.filter(event => event.kind === "user").length, 1);
+    assert.equal(value.host.turnStartCalls, 1);
+  } finally { await value.coordinator.close(); }
 });
 
 test("open recovery 期间的精确 Host 事件不会因 lifecycle=opening 丢失", async () => {
@@ -5182,6 +5228,9 @@ test("open recovery 期间的精确 Host 事件不会因 lifecycle=opening 丢�
     prompt: "recover with live event",
     createdAt: 1_000,
   });
+  value.dispatcher.enqueue({ id: runId, source: "chat", sourceId: SESSION_KEY,
+    idempotencyKey: "shoggoth:chat-send:opening-event", profileId: PROFILE_ID,
+    workspace: value.sessions.session.workspace, retryOf: null });
   const originalTurnStart = value.host.turnStart.bind(value.host);
   value.host.turnStart = async (params) => {
     const response = await originalTurnStart(params);

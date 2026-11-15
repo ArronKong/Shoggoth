@@ -675,6 +675,94 @@ test("restoring a legacy event-only source invalidates derived same-Run suppress
   } finally { value.cleanup(); }
 });
 
+test("warm recall policy resolves exact refs across journals without traversing unrelated transcript tails", t => {
+  const value = memoryFixture();
+  const transcripts = new TranscriptStore({ paths: value.paths, assertSecretSafe: () => true });
+  try {
+    transcripts.open();
+    const sessions = [{ profileId, id: "ref-first" }, { profileId, id: "ref-second" }];
+    const policy = value.engine.recallPolicy;
+    policy.strictSourceResolution = true;
+    policy.chatSessionStore = { getRevision: () => 1, listProfileSessions: id => id === profileId ? sessions : [],
+      listSessions: () => { throw new Error("Profile lookup must not clone all sessions"); } };
+    policy.transcriptStore = transcripts;
+    const append = (session, id, runId, text, occurredAt) => transcripts.appendEvent({ profileId, sessionId: session.id,
+      id, runId, kind: "user", content: { text }, occurredAt });
+    for (const session of sessions) {
+      for (let i = 0; i < 72; i++) append(session, `irrelevant-${i}`, `unrelated-run-${i}`, "Unrelated transcript tail.", 1_000 + i);
+    }
+    append(sessions[0], "run-ref-existing", "legacy-run-ref", "A legacy Run-only reference.", 2_000);
+    append(sessions[0], "legacy-run-ref", "event-and-run-collision", "A previous exact source phrase.", 2_001);
+    const item = note(value, ["legacy-event-only", "legacy-run-ref"]);
+    value.setNow(5_000);
+    value.engine.delete({ profileId, id: item.id, reason: "forgotten", operationId: "forget-indexed-refs" });
+    const listEvents = transcripts.listEvents.bind(transcripts), lookup = transcripts.matchRecallSourceRefs.bind(transcripts);
+    const fullList = t.mock.method(transcripts, "listEvents", () => assert.fail("warm policy scanned the whole journal"));
+    const matched = [];
+    const spy = t.mock.method(transcripts, "matchRecallSourceRefs", (...args) => {
+      const result = lookup(...args);
+      matched.push({ sessionId: args[1], refs: [...args[2]], events: result.events.map(row => row.id), runIds: result.runIds });
+      return result;
+    });
+    const echo = { ...event("legacy-echo", "resolved-later", "回滚前的安排已收到"), kind: "assistant" };
+    assert.equal(policy.isEventVisible(profileId, echo), true);
+    assert.equal(policy.isEventVisible(profileId, event("collision-echo", "event-and-run-collision", "已有来源")), false);
+    assert.equal(matched.length, 2);
+    assert.deepEqual(matched[0], { sessionId: sessions[0].id, refs: ["legacy-event-only", "legacy-run-ref"],
+      events: ["legacy-run-ref"], runIds: ["legacy-run-ref"] });
+    assert.deepEqual(matched[1].events, []);
+    const before = policy.getHistoricalVisibilityRevision(profileId);
+    assert.equal(policy.getHistoricalVisibilityRevision(profileId), before);
+    assert.equal(matched.length, 2, "unchanged revisions reuse the exact lookup");
+
+    const referencedText = "A newly resolved original source stored outside the transcript journal.";
+    const referenced = transcripts.appendEvent({ profileId, sessionId: sessions[1].id, id: "legacy-event-only",
+      runId: "resolved-later", kind: "user", content: { text: "Short transcript preview." },
+      contextContent: { text: referencedText }, contextExcluded: true, occurredAt: 3_000 });
+    assert.ok(referenced.content.contextRef);
+    append(sessions[0], "legacy-event-only", "duplicate-source-run", "Another journal has this same event ID.", 3_001);
+    assert.equal(policy.isEventVisible(profileId, echo), false);
+    assert.equal(policy.isEventVisible(profileId, event("duplicate-echo", "duplicate-source-run", "收到")), false);
+    assert.equal(policy.isEventVisible(profileId, event("referenced-copy", "external-echo", `Verbatim: ${referencedText}`)), false);
+    assert.equal(policy.isEventVisible(profileId, event("preview-copy", "external-echo", "Short transcript preview.")), true);
+    assert.notEqual(policy.getHistoricalVisibilityRevision(profileId), before);
+    assert.deepEqual(matched.slice(2).map(row => row.events), [["legacy-run-ref", "legacy-event-only"], ["legacy-event-only"]]);
+
+    const renewedSource = append(sessions[1], "new-user-source", "new-paired-run", item.content, 6_000);
+    append(sessions[0], "new-user-source", "unpaired-run", "A different event with the same ID.", 6_001);
+    value.setNow(6_002);
+    const renewed = note(value, [renewedSource.id, renewedSource.runId]);
+    assert.equal(policy.isMemoryVisible(profileId, renewed), true);
+    assert.equal(policy.isEventVisible(profileId, renewedSource), true);
+    assert.equal(policy.isMemoryVisible(profileId, { ...renewed, sourceRefs: [renewedSource.id, "not-its-run"] }), false);
+    const previousLookups = matched.length;
+    assert.equal(policy.isMemoryVisible(profileId, { ...renewed, sourceRefs: renewed.sourceRefs.toReversed() }), true);
+    assert.equal(matched.length, previousLookups);
+    assert.equal(fullList.mock.callCount(), 0);
+    const expected = policy.getHistoricalVisibilityRevision(profileId);
+    spy.mock.restore(); fullList.mock.restore();
+    policy.transcriptStore = { getChangeRevision: id => transcripts.getChangeRevision(id) + 1, listEvents,
+      contextEvent: transcripts.contextEvent.bind(transcripts) };
+    assert.equal(policy.getHistoricalVisibilityRevision(profileId), expected,
+      "exact and legacy ordered derivation must produce the same visibility digest");
+
+    const unreferenced = { profileId, id: "unreferenced-cold-journal" };
+    append(unreferenced, "unrelated-id", "unrelated-run", "Unrelated cold journal.", 6_003);
+    sessions.push(unreferenced);
+    const log = path.join(value.paths.agentsDir, profileId, "transcripts", unreferenced.id, "events.jsonl");
+    fs.writeFileSync(log, "corrupt journal\n");
+    const cold = new TranscriptStore({ paths: value.paths, readOnly: true });
+    cold.openReadOnly();
+    try {
+      policy.transcriptStore = cold;
+      assert.throws(() => policy.getHistoricalVisibilityRevision(profileId), error => (
+        error.code === "RECALL_POLICY_UNAVAILABLE" && error.cause?.code === "TRANSCRIPT_LOG_CORRUPT"
+      ));
+      assert.equal(fs.readFileSync(log, "utf8"), "corrupt journal\n");
+    } finally { cold.close(); }
+  } finally { transcripts.close(); value.cleanup(); }
+});
+
 test("forget resolves an excluded long source before suppressing an older full-body copy", () => {
   const value = memoryFixture();
   try {

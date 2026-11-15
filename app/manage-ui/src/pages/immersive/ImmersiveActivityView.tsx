@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { getDashboardActivities } from "../../api/client";
 import type { DashboardActivityEntry } from "../../types";
+import { translateGatewayError } from "../../lib/gatewayErrors";
 import { usePageCache } from "../../lib/usePageCache";
 import styles from "./ImmersiveActivityView.module.css";
 
@@ -74,6 +75,9 @@ export default function ImmersiveActivityView() {
     e.kind === "cron" ? t("dashboard.filterCron") : e.kind === "kanban" ? t("dashboard.filterKanban") : t("dashboard.filterSystem");
 
   const rowSubtitle = (e: DashboardActivityEntry): string => {
+    if (e.kind === "cron" && e.backendId === "shoggoth" && e.severity === "error" && e.run.error) {
+      return translateGatewayError(e.run.error, t);
+    }
     if (e.kind === "kanban") {
       const move = e.kanban.fromStatus && e.kanban.toStatus ? ` ${e.kanban.fromStatus} → ${e.kanban.toStatus}` : "";
       return `${t(`dashboard.activityAction.${e.kanban.action}`, { defaultValue: e.kanban.action })}${move}`;
@@ -122,7 +126,8 @@ export default function ImmersiveActivityView() {
                     <div className={e.severity === "error" ? `${styles.rowTitle} ${styles.rowTitleError}` : styles.rowTitle}>
                       {e.title || e.id}
                     </div>
-                    {rowSubtitle(e) && <div className={styles.rowSub}>{rowSubtitle(e)}</div>}
+                    {rowSubtitle(e) && <div className={styles.rowSub}
+                      title={e.severity === "error" ? rowSubtitle(e) : undefined}>{rowSubtitle(e)}</div>}
                   </div>
                 </div>
               ))}

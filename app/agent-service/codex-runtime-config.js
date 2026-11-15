@@ -15,6 +15,7 @@ const { DEFAULT_MCP_TOOL_TIMEOUT_SEC } = require("./interactive-timeouts");
 const { CODEX_MCP_STARTUP_TIMEOUT_SEC } = require("./codex-startup-timeouts");
 const { validRuntimeAccountId } = require("./runtime-adapter");
 const { NATIVE_CODEX_RUNTIME_ACCOUNT_ID, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
+const { CODEX_VERSION } = require("./codex-schema-contract");
 
 const PROVIDER_ENV_PATTERN = /^SHOGGOTH_PROVIDER_[A-F0-9]{16}_API_KEY$/;
 const OPENAI_API_KEY_ENV = "OPENAI_API_KEY";
@@ -28,6 +29,7 @@ const MIMO_RESPONSES_HOSTS = new Set([
 const MIMO_MODELS = [
   "mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.6-pro-ultraspeed",
 ];
+const MIMO_CATALOG_RUNTIME_VERSION = "0.167.1";
 const CUSTOM_PROVIDER_KINDS = new Set([
   "openai-api-key", "openrouter", "ollama", "lmstudio", "custom-responses",
 ]);
@@ -690,7 +692,7 @@ class CodexRuntimeConfigWriter {
     return Object.freeze({ configPath, runtimeConfig: normalized });
   }
 
-  overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig }) {
+  overlay({ runtimeProfileId, runtimeAccountId, runtimeConfig, runtimeVersion = CODEX_VERSION }) {
     assertRuntimeProfileId(runtimeProfileId);
     if (!validRuntimeAccountId(runtimeAccountId)) {
       throw runtimeError("CODEX_RUNTIME_CONFIG_INVALID", "Codex MCP runtime account is invalid");
@@ -701,11 +703,17 @@ class CodexRuntimeConfigWriter {
       runtimeAccountId,
       launch: this.mcpHelperLaunch,
     })];
-    // This Responses API rejects Guardian's JSON Schema output. The adapter
-    // sends approval requests to the user with the same sandbox and policy.
-    const requiresUserApproval = runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
+    const officialMiMoProvider = runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID
       && usesMiMoResponses(normalized?.provider);
-    if (requiresUserApproval) {
+    // Guardian needs JSON Schema output; this endpoint requires the user reviewer.
+    // The model catalog has its own compatibility and version evidence.
+    const providerCapabilities = officialMiMoProvider ? Object.freeze({
+      providerConfigId: providerConfigAlias(normalized.provider),
+      structuredOutput: "unsupported",
+      approvalReviewer: "user",
+    }) : null;
+    let modelCatalog = null;
+    if (officialMiMoProvider && runtimeVersion === MIMO_CATALOG_RUNTIME_VERSION) {
       // Codex reads model_catalog_json on app-server startup. A thread override
       // cannot replace the synthetic descriptor, which caps window overrides at 272K.
       const home = prepareCodexRuntimeAccountHome(this.paths, runtimeAccountId);
@@ -723,11 +731,13 @@ class CodexRuntimeConfigWriter {
         atomicWritePrivateFile(catalogPath, catalog, { fs: this.fs, trustedRoot: this.paths.trustedRoot });
       }
       overrides.push(`model_catalog_json=${tomlString(catalogPath)}`);
+      modelCatalog = Object.freeze({ runtimeVersion, digest });
     }
     return Object.freeze({
       args: Object.freeze(overrides.flatMap((value) => ["-c", value])),
       runtimeConfig: normalized,
-      ...(requiresUserApproval ? { requiresUserApproval } : {}),
+      ...(providerCapabilities ? { providerCapabilities } : {}),
+      ...(modelCatalog ? { modelCatalog } : {}),
       mcpBootstrap: mcpBootstrapReceipt({ runtimeProfileId, runtimeAccountId, launch: this.mcpHelperLaunch }),
     });
   }

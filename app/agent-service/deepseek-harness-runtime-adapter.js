@@ -42,6 +42,7 @@ class DeepSeekHarnessRuntimeHandle {
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
     this.capabilities = DEEPSEEK_HARNESS_CAPABILITIES;
+    this.usesTurnSendGuard = true;
     this.host = host;
     this.workspace = host.workspace;
     this.controlInstance = host.controlInstance === true;

@@ -23,6 +23,7 @@ function withAlwaysMode(base) {
     "active-memory": { ...entry, config: { ...entry.config, mode: "always" } } } } };
 }
 const { extractBorrowedMemoryRefs, mergeBorrowedMemoryRefs, isBorrowedMemoryDerived, borrowedMemoryPlaceholder } = require("./borrowed-memory-provenance.cjs");
+const KEEP_ADDITIONS = { allowAdditions: true };
 
 // Upstream policies and recall-session lifecycle, with Product-owned source
 // authority and model transport. The scratch session has no general tools.
@@ -32,7 +33,7 @@ class ActiveMemory {
     this.cacheProofs = new Map(); this.runs = new Map(); this.runtimes = new Set(); this.instance = crypto.randomUUID();
     this.status = new ActiveMemoryStatus(this);
   }
-  key(input) { return JSON.stringify([input.profile.id, input.run.id, input.run.workspace, input.query, sha256(this.authority(input.profile.id))]); }
+  key(input) { return JSON.stringify([input.profile.id, input.run.id, input.run.workspace, input.query]); }
   sharingPolicy(profileId) { return this.service.sharing?.config?.resolve(profileId, this.service.profiles()) || null; }
   // Content version: any memory or source change. Only the cross-turn result
   // cache uses it, so a later turn never reuses a recall made before a change.
@@ -40,7 +41,9 @@ class ActiveMemory {
   // Authority version: only changes that can withdraw returned content. A
   // running recall and its prepare→take hand-off within one turn survive
   // ordinary appends; cited evidence is still rechecked before use.
-  authority(profileId) { return JSON.stringify([this.service.authorityStamp(profileId), this.sharingPolicy(profileId)]); }
+  authority(profileId, invalidationRevision) {
+    return JSON.stringify([this.service.authorityStamp(profileId, invalidationRevision), this.sharingPolicy(profileId)]);
+  }
   sessionId(input) { return input.session?.id || this.service.chatSessionStore.getSession(input.run.sourceId)?.id; }
   runEntry(input) {
     const key = JSON.stringify([input.profile.id, input.run.id]);
@@ -92,7 +95,11 @@ class ActiveMemory {
     }
     // Draft sessions have no completed history yet. Forgotten sessions remain
     // valid parent identities but cannot supply recalled conversation text.
-    if (!host.sessions.list(input.profile.id).some(row => row.id === session.id)) return { session, messages: [], recentTurns: [] };
+    try { host.sessions.current(input.profile.id, session.id); }
+    catch (error) {
+      if (error.code === "MEMORY_SESSION_REVOKED") return { session, messages: [], recentTurns: [] };
+      throw error;
+    }
     const transcript = host.sessions.read(input.profile.id, session.id);
     const messages = transcript.content.split("\n").flatMap(line => {
       const match = /^(User|Assistant): (.*)$/u.exec(line);
@@ -132,6 +139,9 @@ class ActiveMemory {
     const key = this.key(input), result = this.prepared.get(key); this.prepared.delete(key);
     return this.valid(input, result) ? result : null;
   }
+  preparedBorrowedMemoryRefs(input) {
+    return this.prepared.get(this.key(input))?.borrowedMemoryRefs ?? [];
+  }
   bindDelivery(input, snapshotId, content, result) {
     const entry = this.runs.get(JSON.stringify([input.profile.id, input.run.id]));
     if (entry) entry.delivery = { input, snapshotId, content, result };
@@ -147,7 +157,9 @@ class ActiveMemory {
     if (!result || result.expiresAt <= this.service.now()
       || result.parentSignal?.aborted
       || this.service.profileSignal(input.profile.id).aborted
-      || result.stamp !== this.authority(input.profile.id)
+      || !result.fileProof?.metadataCurrent(KEEP_ADDITIONS)
+      || result.stamp !== this.authority(input.profile.id,
+        result.fileProof?.current() ? result.invalidationRevision : undefined)
       || result.config !== JSON.stringify(this.configuration(input.profile.id))
       || !this.evidenceCurrent(input.profile.id, result.evidence, result.borrowedMemoryRefs, this.sessionId(input))) return false;
     try { result.assertParentCurrent?.(); } catch { return false; }
@@ -184,7 +196,7 @@ class ActiveMemory {
     const service = this.service, profileId = input.profile.id, config = this.configuration(profileId);
     if (!config || input.run.profileId !== profileId || input.run.source !== "chat" || !input.query?.trim()
       || /^shoggoth:chat-send:(?:federation-(?:send|message)|group-(?:turn|task))-/u.test(input.run.idempotencyKey || "")) return null;
-    const host = service.host(profileId), stamp = this.authority(profileId), cacheStamp = this.cacheStamp(profileId);
+    const host = service.host(profileId);
     const serialized = JSON.stringify(config), runEntry = this.runEntry(input);
     runEntry.statusPhase = "preparing";
     runEntry.policy = JSON.stringify([service.config(profileId), this.sharingPolicy(profileId)]);
@@ -197,17 +209,31 @@ class ActiveMemory {
     const signal = AbortSignal.any([service.maintenance.controller.signal, service.profileSignal(profileId), runEntry.controller.signal,
       ...(input.signal ? [input.signal] : [])]);
     const preflightDeadline = AbortSignal.timeout(config.timeoutMs + config.setupGraceTimeoutMs);
+    let stamp, cacheStamp, fileProof, invalidationRevision;
     let phase = "preflight", modelContext, sessionPolicy;
-    // The host calls check() on nearly every operation. Re-reading each cited
-    // source repeats once per event-loop turn for the same evidence; the stamp
-    // above still runs every time, and take()/valid() re-verify before use.
+    const captureAuthority = ({ initial = false } = {}) => service.withAsyncMemoryReadView(profileId, signal, view => {
+      if (initial) preflightDeadline.throwIfAborted();
+      const revision = view.getRevisions().invalidationRevision, current = this.authority(profileId, revision);
+      view.assertFilesCurrent();
+      if (!initial && (current !== stamp || !fileProof?.metadataCurrent(KEEP_ADDITIONS))) {
+        throw serviceError("MEMORY_SCOPE_REVOKED", "自动召回期间记忆、来源或设置已经变化");
+      }
+      if (initial) cacheStamp = this.cacheStamp(profileId);
+      stamp = current;
+      invalidationRevision = revision;
+      fileProof = view.retainProof();
+    }, initial ? preflightDeadline : undefined);
+    // The native runtime calls this synchronously throughout its protocol.
+    // Check ownership, policy and cited bytes here. Changes elsewhere in the
+    // file manifest are classified at the next model or result boundary.
     const evidenceChecks = new TurnMemo();
     const check = () => {
       signal.throwIfAborted(); service.assertProfile(profileId); input.assertCurrent?.();
       modelContext?.assertCurrent();
       sessionPolicy?.assertCurrent();
       if (phase === "preflight") preflightDeadline.throwIfAborted();
-      if (stamp !== this.authority(profileId) || serialized !== JSON.stringify(this.configuration(profileId))) {
+      if (!fileProof?.metadataCurrent(KEEP_ADDITIONS) || stamp !== this.authority(profileId, invalidationRevision)
+        || serialized !== JSON.stringify(this.configuration(profileId))) {
         throw serviceError("MEMORY_SCOPE_REVOKED", "自动召回期间记忆、来源或设置已经变化");
       }
       const sessionId = this.sessionId(input);
@@ -247,20 +273,47 @@ class ActiveMemory {
       check();
     };
     const receipt = content => ({ content, stamp, config: serialized, evidence: [...evidence.values()], borrowedMemoryRefs,
+      fileProof, invalidationRevision,
       ...(borrowedMemoryDerived ? { borrowedMemoryDerived: true, persistPolicy: "reference_only" } : {}), parentSignal: signal,
       assertParentCurrent: () => { input.assertCurrent?.(); modelContext?.assertCurrent(); sessionPolicy?.assertCurrent(); }, expiresAt: service.now() + config.cacheTtlMs,
       revision: sha256(`${stamp}:${JSON.stringify([...evidence.values()])}:${content}`) });
     try {
+      // The deadline bounds acquisition and does not invalidate the proof
+      // after the run has already left preflight.
+      const beforeScan = this.authority(profileId, null);
+      for (let attempt = 0; ; attempt++) {
+        try { await captureAuthority({ initial: true }); break; }
+        catch (error) {
+          // Config/index startup can publish a same-Profile fingerprint before
+          // the first worker reads metadata. No recall has been prepared yet.
+          signal.throwIfAborted(); preflightDeadline.throwIfAborted();
+          if (attempt !== 0 || stamp !== undefined || error.code !== "MEMORY_REVISION_CONFLICT"
+            || beforeScan !== this.authority(profileId, null)) throw error;
+        }
+      }
+      if (beforeScan !== this.authority(profileId, null)) return null;
       check();
-      const { session, messages, recentTurns } = this.conversationContext(input, host); searchInput.sessionId = session.id;
-      const queryProvenance = this.queryProvenance(input, session);
+      const { session, messages, recentTurns, queryProvenance } = fileProof.read(view => {
+        const context = this.conversationContext(input, host);
+        view.assertFilesCurrent();
+        return { ...context, queryProvenance: this.queryProvenance(input, context.session) };
+      });
+      searchInput.sessionId = session.id;
       borrowedMemoryDerived = queryProvenance.derived; borrowedMemoryRefs = queryProvenance.refs; check();
       if (borrowedMemoryRefs.length) service.sharing.registerDependencies(searchInput, borrowedMemoryRefs);
       const effectiveInput = { ...input, query: queryProvenance.query };
       sessionPolicy = await service.activeMemoryCommands.policy(session.sessionKey); check();
       if (sessionPolicy.disabled) return null;
       const sessionScope = service.activeMemoryCommands.scope(session.sessionKey, check);
-      await host.searchIndex.sync({ signal: AbortSignal.any([signal, preflightDeadline]) }); check();
+      const indexSignal = AbortSignal.any([signal, preflightDeadline]);
+      const prepareLenders = config.enabled && config.agents.includes(profileId)
+        && config.toolsAllow.includes("memory_search") && config.toolsAllow.includes("memory_get")
+        && !config.allowedChatIds.length;
+      await Promise.all([
+        host.searchIndex.sync({ signal: indexSignal }),
+        prepareLenders ? service.sharing?.prepareTriggerOwners({ ...searchInput, signal: indexSignal, assertCurrent: check }) : null,
+      ]);
+      check();
       modelContext = service.resolveModelContext?.({ profileId, ...(session ? { sessionKey: session.sessionKey } : {}) }); check();
       const query = core.buildActiveMemoryQuery({ latestUserMessage: effectiveInput.query, recentTurns, config });
       const searchQuery = core.buildActiveMemorySearchQuery({ latestUserMessage: effectiveInput.query, recentTurns });
@@ -292,7 +345,11 @@ class ActiveMemory {
       const authorityFingerprint = selectProof();
       check(); phase = "recall";
       const createRuntime = (passConfig, passRuntimeConfig) => new ActiveMemoryRuntime({ host, input: { ...effectiveInput, session }, config: passConfig, runtimeConfig: passRuntimeConfig,
-        modelContext, initialSearchQuery: searchQuery, complete: request => service.complete(request), signal, check, logger: service.logger, borrowedMemoryRefs, borrowedMemoryDerived,
+        modelContext, initialSearchQuery: searchQuery, complete: async request => {
+          if (!fileProof?.current()) await captureAuthority();
+          check();
+          return service.complete(request);
+        }, signal, check, logger: service.logger, borrowedMemoryRefs, borrowedMemoryDerived,
         // Retention is a private diagnostic copy, not new recall authority. A
         // cancelled model may finish its original cleanup while its Profile and
         // retention setting still exist; no fresh source/model read is granted.
@@ -357,14 +414,17 @@ class ActiveMemory {
             if (conversationRecall?.corpus === "sessions") throw serviceError("MEMORY_ACTIVE_SCOPE_INVALID", "跨会话回忆不能读取文件记忆");
             if (tool !== "memory_get" || Object.keys(args).some(key => !["path", "from", "lines"].includes(key))) throw serviceError("MEMORY_ACTIVE_TOOL_INVALID", "自动召回文件请求无效");
             if (service.sharing?.recognizes(args.path)) {
-              const found = service.getFile({ ...searchInput, ...args });
+              const request = { ...searchInput, ...args, signal: toolSignal };
+              const found = await service.sharing.withReferenceReadViews(request, args.path, () => service.getFile(request));
               borrowedMemoryRefs = mergeBorrowedMemoryRefs(borrowedMemoryRefs, extractBorrowedMemoryRefs(found));
               result = found;
             } else {
-              const before = host.searchIndex.readIndexedSource(args.path, "memory");
-              const found = service.getFile({ ...searchInput, ...args });
-              remember(found.path, "memory", before.hash);
-              result = { path: found.path, text: found.text, from: found.from, lines: found.lines };
+              result = await service.withAsyncMemoryReadView(profileId, toolSignal, () => {
+                const before = host.searchIndex.readIndexedSource(args.path, "memory");
+                const found = service.getFile({ ...searchInput, ...args });
+                remember(found.path, "memory", before.hash);
+                return { path: found.path, text: found.text, from: found.from, lines: found.lines };
+              });
             }
           }
           toolSignal.throwIfAborted(); check(); return result;
@@ -411,8 +471,12 @@ class ActiveMemory {
           if (JSON.stringify(options.activeProjectKeys) !== JSON.stringify(projectKeys)) throw serviceError("MEMORY_ACTIVE_SCOPE_INVALID", "自动召回检索范围无效");
           const candidates = await service.searchScope.run(searchInput,
             () => host.run(() => host.searchIndex.listTriggerCandidates({ ...options, limit: 24, signal: AbortSignal.any([signal, ...(options.signal ? [options.signal] : [])]) })));
-          const allowed = candidates.filter(item => service.allowResult(profileId, item, searchInput));
-          const shared = service.sharedTriggers ? await service.sharedTriggers(searchInput, { ...options, query: searchQuery, maxResults: 24 }, allowed) : { results: allowed };
+          const { allowed, revision } = await service.withAsyncMemoryReadView(profileId, signal, view => ({
+            allowed: candidates.filter(item => service.allowResult(profileId, item, searchInput)),
+            revision: view.getRevisions().revision,
+          }));
+          const shared = service.sharedTriggers ? await service.sharedTriggers(searchInput,
+            { ...options, query: searchQuery, maxResults: 24 }, allowed, revision) : { results: allowed };
           rememberIndexed(shared.results); return presentTriggerCandidates(shared.results, effectiveInput.query);
         } };
       const runPass = runtime => {
@@ -437,6 +501,7 @@ class ActiveMemory {
       const nativeStatus = runtime.nativeResult?.status;
       if (["failed", "timeout", "unavailable"].includes(nativeStatus)) diagnose({ stage: "recall-result", outcome: nativeStatus });
       stage = "evidence";
+      if (!fileProof?.current()) await captureAuthority();
       check();
       try { await this.status.capture({ input: { ...input, session }, runtime, evidence: [...evidence.values()], borrowedMemoryRefs, check }); }
       catch { service.logger.warn?.("active-memory: status display receipt unavailable"); }
@@ -477,7 +542,12 @@ class ActiveMemory {
       if (signal.aborted) return discarded("CANCELED");
       if (["MEMORY_ACTIVE_SESSION_INVALID", "CHAT_SESSION_INVALID", "MEMORY_COMMAND_SESSION_UNAVAILABLE",
         "MEMORY_COMMAND_STATE_INVALID", "MEMORY_COMMAND_STALE"].includes(error.code)) return discarded(error.code);
-      if (stamp !== this.authority(profileId)) return discarded("AUTHORITY_CHANGED");
+      if (stamp === undefined) return discarded(diagnosticCode(error));
+      if (!fileProof?.metadataCurrent(KEEP_ADDITIONS)) return discarded("AUTHORITY_CHANGED");
+      if (!fileProof.current()) {
+        try { await captureAuthority(); } catch { return discarded("AUTHORITY_CHANGED"); }
+      }
+      if (stamp !== this.authority(profileId, invalidationRevision)) return discarded("AUTHORITY_CHANGED");
       if (!this.evidenceCurrent(profileId, [...evidence.values()], borrowedMemoryRefs, this.sessionId(input))) return discarded("EVIDENCE_CHANGED");
       try { input.assertCurrent?.(); modelContext?.assertCurrent(); sessionPolicy?.assertCurrent(); } catch { return discarded("PARENT_CHANGED"); }
       diagnose({ stage, outcome: "error", code: diagnosticCode(error) });
