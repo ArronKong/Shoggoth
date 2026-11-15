@@ -93,12 +93,14 @@ test("flush reads the tape after an additive journal event at the worker boundar
   const { f, input, turn } = await source(t);
   const original = f.owner.withAsyncMemoryReadView.bind(f.owner);
   const text = "The violet calibration lens is ready for the next observation.";
-  let serial = 0;
-  const read = t.mock.method(f.owner, "withAsyncMemoryReadView", async (...args) => {
-    const proof = await original(...args);
-    serial += 1;
+  let flushReads = 0;
+  t.mock.method(f.owner, "withAsyncMemoryReadView", async (profileId, lifecycle, read, scanDeadline) => {
+    const proof = await original(profileId, lifecycle, read, scanDeadline);
+    // Only the flush passes a separate scan deadline in this fixture.
+    if (profileId !== A || !scanDeadline) return proof;
+    flushReads += 1;
     f.service.transcriptStore.appendEvent({ profileId: A, sessionId: turn.session.id,
-      runId: turn.run.id, id: `worker-boundary-${serial}`, kind: "assistant", content: { text } });
+      runId: turn.run.id, id: `worker-boundary-${flushReads}`, kind: "assistant", content: { text } });
     return proof;
   });
   f.model = async request => {
@@ -106,7 +108,7 @@ test("flush reads the tape after an additive journal event at the worker boundar
     return { text: "NO_REPLY" };
   };
   assert.equal((await f.owner.flushBeforeCompaction(input)).status, "completed");
-  assert.equal(read.mock.callCount(), 1);
+  assert.equal(flushReads, 1);
   assert.equal(f.modelCalls(), 1);
 });
 
