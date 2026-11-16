@@ -18,6 +18,7 @@ const interruptibleJobs = new Map([
 const shutdownError = "The runner has received a shutdown signal. This can happen when the runner service is stopped, or a manually started runner is canceled.";
 const cancelledError = "The operation was canceled.";
 const publicReadError = "Transient public verification read exhausted";
+const intelHarnessTimeout = "Intel first-launch harness self-test subprocess timed out before draft verification.";
 
 function assertTrustedRun(run) {
   assert.equal(run.repository?.full_name, repository, "Unexpected run repository");
@@ -91,6 +92,16 @@ async function retryReason(client, job, jobs) {
   if (failed.length === 0 && cancelled.length === 1) {
     const errors = await jobErrors(client, job);
     if (errors.length === 2 && errors.includes(shutdownError) && errors.includes(cancelledError)) return "hosted-runner-shutdown";
+  }
+  if (job.name === "native-verification / Native x64 draft verification" && cancelled.length === 0 && failed.length === 1
+    && failed[0].name === "Verify first-launch harness and preserve tagged product source"
+    && ["Download exact draft assets", "Normal quarantined first launch on the empty hosted account"].every(name =>
+      job.steps.some(step => step.name === name && step.status === "completed" && step.conclusion === "skipped"))
+    && jobs.some(item => item.name === "draft" && item.status === "completed" && item.conclusion === "success")
+    && !publishedInThisRun(jobs)) {
+    const errors = (await checkAnnotations(client, job)).filter(item => item.annotation_level === "failure");
+    if (errors.length === 2 && errors.some(item => item.message === intelHarnessTimeout)
+      && errors.some(item => item.message === "Process completed with exit code 1.")) return "intel-harness-self-test-timeout";
   }
   if (job.name === "verify-public" && cancelled.length === 0 && failed.length === 1
     && failed[0].name === "Verify anonymous downloads for the published release") {

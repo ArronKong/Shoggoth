@@ -57,7 +57,7 @@ async function fixture(t, { separateHosts = false } = {}) {
   t.after(async () => { await helper?.close(); await service.stop({ notify: false }); fs.rmSync(root, { recursive: true, force: true }); });
   await service.start();
   const ipc = (method, params) => requestService(paths, { id: uuid(), token: readClientToken(paths),
-    version: PROTOCOL_VERSION, method, params });
+    version: PROTOCOL_VERSION, method, params }, { timeoutMs: 8_000 });
   const sessions = await ipc("chat.session.list", { profileId: DEFAULT_AGENT_PROFILE_ID, includeArchived: false, cursor: null, limit: 20 });
   const sessionKey = sessions.sessions[0].sessionKey;
   const send = async prompt => {

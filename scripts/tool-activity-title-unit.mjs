@@ -65,6 +65,10 @@ const fixtures = [
   ["OpenClaw product tool", "shoggoth__cron_list", {}, "查看定时任务"],
   ["Native web search", "mcp__shoggoth__web_search", { query: "runtime design" }, "搜索网页 · runtime design"],
   ["Native web fetch", "shoggoth/web_fetch", { url: "https://user:password@example.com/path?token=secret" }, "读取网页 · example.com"],
+  ["Antigravity tool ID as title", "mcp__shoggoth__web_search", { nativeActivityTitle: "shoggoth_web_search", query: "daily headlines" }, "搜索网页 · daily headlines"],
+  ["Antigravity descriptive title", "mcp__shoggoth__web_search", { nativeActivityTitle: "核对今日新闻" }, "核对今日新闻"],
+  ["Antigravity result read", "mcp__shoggoth__product_result_read", { nativeActivityTitle: "shoggoth_product_result_read" }, "继续读取工具结果"],
+  ["Antigravity resource read", "read_resource", { server: "shoggoth" }, "读取资源"],
 ];
 for (const [label, name, args, expected] of fixtures) {
   const original = JSON.stringify(args);
@@ -104,8 +108,16 @@ assert.equal(toolActivityTitle("app_manage", { operation: "cron_delete" }, t), "
 assert.equal(toolActivityTitle("app_manage", { operation: "unknown" }, t), "管理应用任务");
 assert.equal(toolActivityTitle("cron_set_enabled", { enabled: false }, t), "暂停定时任务");
 
+const en = i18next.getFixedT("en");
+assert.equal(toolActivityTitle("mcp__shoggoth__web_search", { activityTitle: "mcp__shoggoth__web_search", query: "runtime" }, en), "Search the web · runtime");
+assert.equal(toolActivityTitle("mcp__shoggoth__product_result_read", { nativeActivityTitle: "shoggoth_product_result_read" }, en), "Read more of the tool result");
+assert.equal(toolActivityTitle("list_resources", {}, en), "List resources");
+assert.equal(toolActivityTitle("read_resource", {}, en), "Read a resource");
+
 const { PRODUCT_CAPABILITIES } = require(new URL("../app/agent-service/product-capability-manifest.js", import.meta.url).pathname);
+const { PRODUCT_RESULT_READ } = require(new URL("../app/agent-service/product-tool-results.js", import.meta.url).pathname);
 const { APP_STATE_SECTIONS } = require(new URL("../app/agent-service/app-state-contract.js", import.meta.url).pathname);
+const productTools = [PRODUCT_RESULT_READ, ...PRODUCT_CAPABILITIES.map(({ tool }) => tool)];
 for (const language of ["zh-CN", "en"]) {
   await i18next.changeLanguage(language);
   for (const [name, key] of [["x_semantic_search", "xSemanticSearch"], ["x_keyword_search", "xKeywordSearch"], ["x_thread_fetch", "xThread"]]) {
@@ -114,12 +126,13 @@ for (const language of ["zh-CN", "en"]) {
     assert.equal(toolActivityTitle("X search:", { ...args, operation: name }, t), `${t(`turnLab.activity.${key}`)} · ${target}`);
     assert.equal(toolActivityTitle(name, args, t), toolActivityTitle("X search:", { ...args, operation: name }, t));
   }
-  for (const { tool } of PRODUCT_CAPABILITIES) {
+  for (const tool of productTools) {
     const standardWebAction = { web_search: "webSearch", web_fetch: "openPage" }[tool];
     const expected = t(standardWebAction ? `turnLab.activity.${standardWebAction}` : `turnLab.productTools.${tool}`);
     assert.ok(expected && expected !== tool && !expected.startsWith("turnLab."), `${tool} ${language} has a curated action`);
     for (const name of [tool, `shoggoth/${tool}`, `shoggoth__${tool}`, `mcp__shoggoth__${tool}`]) {
       assert.equal(toolActivityTitle(name, undefined, t), expected, `${name} ${language}`);
+      assert.equal(toolActivityTitle(name, { nativeActivityTitle: `shoggoth_${tool}` }, t), expected, `${name} ${language} with a runtime tool ID as title`);
     }
   }
   for (const section of APP_STATE_SECTIONS) {
@@ -226,4 +239,4 @@ assert.equal(toolActivityTitle("web_search", { query: "runtime" }, t), "Search t
 assert.equal(toolActivityTitle("unknown_tool", {}, t), "Run tool");
 assert.equal(toolActivityTitle("tool", { command: "python3 report.py" }, t), "Run Python script");
 assert.equal(toolActivityTitle("ls -la /tmp/report", { command: "ls -la /tmp/report" }, t), "List directory");
-console.log(`tool-activity-title: ${fixtures.length} adapter shapes, ${PRODUCT_CAPABILITIES.length} product tools across 4 identities, ${catalog.openclaw.tools.length} OpenClaw and ${catalog.hermes.tools.length} Hermes names, wrappers, late arguments, exact outcomes, live/history parity and zh/en PASS`);
+console.log(`tool-activity-title: ${fixtures.length} adapter shapes, ${productTools.length} product tools across 4 identities, ${catalog.openclaw.tools.length} OpenClaw and ${catalog.hermes.tools.length} Hermes names, wrappers, late arguments, exact outcomes, live/history parity and zh/en PASS`);

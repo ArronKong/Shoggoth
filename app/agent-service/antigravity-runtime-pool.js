@@ -1,4 +1,6 @@
 "use strict";
+const fs = require("node:fs");
+const path = require("node:path");
 const { poolLedgerSlot } = require("./runtime-shared-ledger");
 const { preparePoolHostIdentity, reusePoolHost, poolRuntimeIdentityKey, cleanupFailedPoolHost } = require("./runtime-pool-upgrade");
 
@@ -14,8 +16,11 @@ const { NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID } = require("./runtime-account");
 const {
   RuntimeAccountResolver,
   defaultRuntimeAccountLookup,
+  runtimeAccountIntegrationRoot,
   validateResolvedEnvironment,
 } = require("./runtime-account-resolver");
+const { resolveAntigravityAcpServer } = require("./antigravity-acp-distribution");
+const { AntigravityNativeToolResults } = require("./antigravity-native-tool-results");
 const { serviceError } = require("./security");
 const { configurePoolCapacity, poolHostLimit, retirePoolHost, trackPoolHost, executionRunIdForPool } = require("./runtime-pool-capacity");
 
@@ -84,6 +89,19 @@ class AntigravityRuntimePool {
   }
 
   runtimeIdentityKey(binding) { return poolRuntimeIdentityKey(this, binding); }
+
+  hasFailedContextCheckpoint(value, sessionId) {
+    try {
+      const binding = poolBinding(value);
+      const paths = this.options.paths ?? this.hostOptions.paths;
+      const fileSystem = this.options.fs ?? this.hostOptions.fs ?? fs;
+      const server = resolveAntigravityAcpServer({ paths, fs: fileSystem });
+      if (server.contracts?.nativeToolResults !== 1) return false;
+      const home = path.join(runtimeAccountIntegrationRoot(paths, binding.runtime, binding.runtimeAccountId), "home");
+      if (fileSystem.realpathSync(home) !== home) return false;
+      return new AntigravityNativeToolResults({ home }).hasFailedContextCheckpoint(sessionId);
+    } catch { return false; }
+  }
 
   get(value, options = {}) {
     let binding;

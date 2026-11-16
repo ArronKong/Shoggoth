@@ -171,6 +171,7 @@ const PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES = new Set([
   "RUNTIME_PERMISSION_REQUIRED",
   "RUNTIME_APPROVAL_UNAVAILABLE",
   "ANTIGRAVITY_NETWORK_UNAVAILABLE", "ANTIGRAVITY_REGION_UNSUPPORTED",
+  "ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED",
   "ANTIGRAVITY_ACP_NOT_INSTALLED", "ANTIGRAVITY_ACP_INTEGRITY_FAILED", "ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED",
   "ANTIGRAVITY_MCP_UNAVAILABLE", "ANTIGRAVITY_TURN_FAILED", "ANTIGRAVITY_ACP_REMOTE_ERROR",
   "ANTIGRAVITY_ACP_OUTBOUND_FRAME_TOO_LARGE", "ANTIGRAVITY_ACP_REQUEST_TIMEOUT",
@@ -258,6 +259,7 @@ const START_OPERATIONAL_ERROR_CODES = new Set([
   RUNTIME_AUTH_REQUIRED_CODE,
   "RUNTIME_SESSION_RECOVERY_HISTORY_REQUIRED",
   "RUNTIME_SESSION_WRITER_BUSY",
+  "ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED",
   "CODEX_RUNTIME_START_FAILED",
   "RPC_PROCESS_ERROR",
   "RPC_PROCESS_EXITED",
@@ -7937,7 +7939,8 @@ class WorkRunCoordinator {
     const selfManaged = run.source !== "compaction" && selfManagedCompaction(executionContract.runtime)
       && requestPlan && !requestPlan.transportExceeded && !(executionContract.contextFresh && requestPlan.historyTruncated);
     if (!manualNativeCompact && !selfManaged && requestPlan && (requestPlan.exceedsBudget || requestPlan.transportExceeded
-      || (executionContract.contextFresh && requestPlan.historyTruncated && !requestPlan.recentHistoryOnly))) {
+      || (executionContract.contextFresh && requestPlan.historyTruncated && !requestPlan.recentHistoryOnly
+        && !requestPlan.cronCheckpointRecovery))) {
       const session = sessionKey && this.chatSessionStore.getSession(sessionKey);
       const early = session && automaticNative ? this.#maintenanceState(session, executionContract, "native_compaction").latest : null;
       if (early?.waitingRunId === run.id && this.dispatcher.getRun(early.id)?.status === "completed") {
@@ -8066,6 +8069,37 @@ class WorkRunCoordinator {
     return admission.disposition === "queued" ? this.#queuedAdmission(run, admission.reason) : admission;
   }
 
+  #recoverFailedNativeCheckpoint(run, profile, session) {
+    if (profile.runtime !== "antigravity" || !["chat", "cron"].includes(run.source)
+      || session?.status !== "ready" || !session.runtimeSessionId || !session.runtimeBindingId
+      || session.nextRuntimeSelection || !this.transcriptStore
+      || this.contextHandoffs.has(session.sessionKey) || !this.runtimeManager.hasFailedContextCheckpoint) return session;
+    const sessionId = session.runtimeSessionId;
+    const binding = runtimeBinding({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
+      runtimeAccountId: profile.runtimeAccountId });
+    let owner;
+    try { owner = this.runtimeSessionOwnershipStore?.readRecord({ binding, profileId: run.profileId, sessionId, workspace: run.workspace }); }
+    catch (error) { if (isRuntimeSessionOwnershipError(error)) return session; throw error; }
+    if (owner?.status !== "active" || !this.runtimeManager.hasFailedContextCheckpoint(binding, sessionId)) return session;
+
+    // Admission has no active writer for this conversation. Persist the
+    // recovery reason before detaching, so a restart can prepare the same
+    // fresh context. Leave the old native session and its run receipts intact.
+    const { maintenanceScope } = require("./context-transfer");
+    this.transcriptStore.appendEvent({ profileId: session.profileId, sessionId: session.id,
+      id: transcriptEventId("native-checkpoint-failed", session.id, sessionId), kind: "status", contextExcluded: true,
+      content: { transcriptType: "context.native.checkpoint_failed", scope: maintenanceScope(session, profile) } });
+    try {
+      session = this.chatSessionStore.switchRuntime(session.sessionKey, { bindingId: session.runtimeBindingId,
+        revision: session.revision, renewSession: true, clearModelOverride: false });
+    } catch (error) {
+      if (!["CHAT_RUNTIME_SWITCH_PENDING", "CHAT_RUNTIME_HISTORY_CAPACITY"].includes(ownDataErrorCode(error))) throw error;
+      throw coordinatorError("ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED", "Antigravity failed checkpoint could not be renewed");
+    }
+    this.onConversationRenewed({ profileId: session.profileId, sessionKey: session.sessionKey });
+    return session;
+  }
+
   async #executionContract(profile, run, signal) {
     signal?.throwIfAborted();
     const lifecycle = this.lifecycleGeneration;
@@ -8075,6 +8109,7 @@ class WorkRunCoordinator {
       const summaryBindingId = run.source === "compaction" ? this.domainCommands.get(run.id)?.bindingId : null;
       profile = this.productStore.resolveAgentRuntimeProfile(profile.id, summaryBindingId ?? boundSession?.runtimeBindingId ?? undefined);
     }
+    boundSession = this.#recoverFailedNativeCheckpoint(run, profile, boundSession);
     let defaultModel = profile.defaultModel;
     let sessionModelOverride = null;
     let sessionProviderRef;
@@ -8118,14 +8153,15 @@ class WorkRunCoordinator {
       modelSettings = { thinkingLevel: config.reasoningEffort, serviceTier: null };
     }
     if (run.source === "proactive") this.assertProactiveRunCurrent(run);
+    const runtime = profile.runtime || "codex";
+    // Scheduled runs have their own permission default. Editing the permission
+    // for a manual reply in the task conversation does not edit the job.
+    const requestedMode = run.source === "cron"
+      ? (runtimePermissionModeOptions(runtime).some(option => option.id === "full-access") ? "full-access" : null)
+      : sessionPermissionMode;
     const resolvedPermission = run.source === "compaction"
       ? { mode: null, nativeMode: null, permissionPolicy: Object.freeze({ approvalPolicy: "never", sandbox: "read-only" }) }
-      : resolveRuntimePermissionMode(
-      profile.runtime || "codex",
-      run.source === "cron" ? (runtimePermissionModeOptions(profile.runtime || "codex")
-        .some(option => option.id === "full-access") ? "full-access" : null) : sessionPermissionMode,
-      profile.permissionPolicy,
-    );
+      : resolveRuntimePermissionMode(runtime, requestedMode, profile.permissionPolicy);
     if (run.workspace === null && resolvedPermission.permissionPolicy.sandbox !== "read-only") {
       throw coordinatorError(
         "WORKSPACE_REQUIRED_FOR_WRITABLE_RUN",
@@ -8162,6 +8198,14 @@ class WorkRunCoordinator {
     const restorePolicy = handoff && this.transcriptStore
       ? require("./context-transfer").workingRestorePolicy(this.transcriptStore, boundSession, profile) : null;
     const previousRuntime = handoff ? boundSession.retiredRuntimeSessions.at(-1) : null;
+    const recoveryMark = run.source === "cron" && previousRuntime && this.transcriptStore?.getEvent?.(
+      boundSession.profileId, boundSession.id,
+      transcriptEventId("native-checkpoint-failed", boundSession.id, previousRuntime.runtimeSessionId));
+    const cronCheckpointRecovery = recoveryMark?.kind === "status" && recoveryMark.contextExcluded
+      && recoveryMark.content?.transcriptType === "context.native.checkpoint_failed"
+      && previousRuntime.bindingId === boundSession.runtimeBindingId
+      && require("./context-transfer").sameMaintenanceScope(recoveryMark.content.scope,
+        require("./context-transfer").maintenanceScope({ ...boundSession, runtimeSessionId: previousRuntime.runtimeSessionId }, profile));
     // Only continue a detached direct chat on its existing binding. Runtime
     // migrations still go through their explicit handoff checks.
     const allowRecentHistoryRestore = previousRuntime !== null && previousRuntime.bindingId === boundSession.runtimeBindingId
@@ -8210,11 +8254,13 @@ class WorkRunCoordinator {
       const compileInput = {
         profile,
         run,
+        permissionPolicy: resolvedPermission.permissionPolicy,
         signal,
         transcriptSessionId,
         query: command?.prompt || run.sourceId,
         contextLifecycleV1,
         restorePolicy,
+        cronCheckpointRecovery,
         allowRecentHistoryRestore,
         nativePartialHistory: nativePartialHistory && run.source !== "compaction",
         verifiedContinuation,
@@ -9057,7 +9103,10 @@ class WorkRunCoordinator {
       throw coordinatorError("WORK_RUN_NOT_STARTABLE", `WorkRun ${run.id} 当前不可发送: ${run.status}`);
     }
     let executionSession;
-    let productSessionKey = this.getRunSessionKey(run);
+    const productSessionKey = this.getRunSessionKey(run);
+    if (run.source === "cron" && !productSessionKey) {
+      throw coordinatorError("CHAT_SESSION_NOT_FOUND", "Cron run is missing its conversation");
+    }
     if (productSessionKey) {
       if (run.source === "inspiration") {
         const execution = this.resolveRunSession(run);
@@ -9208,15 +9257,8 @@ class WorkRunCoordinator {
       return;
     }
 
-    // A feature rollback cannot replace an existing native session or resume a
-    // retired one through the legacy Cron threadSource. Fresh, untouched Cron
-    // conversations still retain the original domain thread discovery path.
-    const cronHasSessionAuthority = executionSession.runtimeBindingId
-      && (runtimeSessionIdOf(executionSession) !== null || executionSession.status === "binding"
-        || executionSession.retiredRuntimeSessions?.length > 0
-        || this.getNativeRuntimeConfig()?.flags?.runtimeConversationHandoff);
     const threadBinding = await this.#timedPerformanceStage(runId, "session_prepare", () =>
-      productSessionKey && (run.source !== "cron" || cronHasSessionAuthority)
+      productSessionKey
       ? this.#ensureThread(
         host,
         executionSession,
@@ -9279,13 +9321,6 @@ class WorkRunCoordinator {
     }
     if (commandRecord.kind === "domain") {
       this.#assertDomainPromptSecretSafe(run, command);
-    }
-    if (run.source === "cron") {
-      const session = this.#ensureCronTranscript(run, command, threadId);
-      if (session) {
-        productSessionKey = session.sessionKey;
-        executionSession = { ...session, workspace: run.workspace };
-      }
     }
     const turnId = await this.#ensureTurn(
       host,
@@ -10281,7 +10316,12 @@ class WorkRunCoordinator {
       }
     }
 
-    let matches = await this.#findThreadsBySource(host, binding.threadSource, token);
+    // Older Cron runs could create a native session before recording their
+    // product binding. Adopt it for a pristine conversation only. All new
+    // sessions use the same durable binding and source as interactive sends.
+    const legacySource = profile.source === "cron" && !detached && session.revision === 1
+      && !session.retiredRuntimeSessions?.length ? command.threadSource : null;
+    let matches = await this.#findThreadsBySource(host, binding.threadSource, token, { legacySource });
     this.#fence(token);
     if (matches.length === 1) {
       this.#assertThreadMatchActive(matches[0]);
@@ -10291,7 +10331,7 @@ class WorkRunCoordinator {
         profile,
         session,
         token,
-        binding.threadSource,
+        matches[0].source,
       );
       return { threadId: resumedThreadId, fresh: false };
     }
@@ -10420,7 +10460,7 @@ class WorkRunCoordinator {
     if (!session || !contract?.contextFresh || run.source === "compaction") return;
     const actionable = contract.contextRequest?.partialContinuation?.version === 1;
     const partial = contract.contextRequest?.recentHistoryOnly || actionable;
-    if (state === "accepted" && (contract.contextRequest?.restorePolicy || partial)) {
+    if (state === "accepted" && (contract.contextRequest?.restorePolicy || contract.contextRequest?.cronCheckpointRecovery || partial)) {
       this.#appendTranscript(runId, { id: transcriptEventId("native-context-seeded", runId), kind: "status", contextExcluded: true,
         content: { transcriptType: "context.native.seeded",
           scope: require("./context-transfer").maintenanceScope(session, contract), baseline: contract.contextRequest.nativeSeed,
@@ -10521,6 +10561,7 @@ class WorkRunCoordinator {
     const list = observation?.list ?? (params => this.#retryablePreTurnCall(
       "session_start_or_resume", token, () => host.sessionList(params)));
     const fence = observation?.fence ?? (() => this.#fence(token));
+    const legacySource = observation?.legacySource;
     const scan = async (archived) => {
       const matches = new Map();
       const seenCursors = new Set();
@@ -10538,11 +10579,12 @@ class WorkRunCoordinator {
           throw coordinatorError("CODEX_THREAD_LIST_INVALID_RESPONSE", "thread/list 返回无效 data");
         }
         for (const runtimeSession of response.data) {
-          if (runtimeSession?.source !== threadSource) continue;
+          const source = runtimeSession?.source;
+          if (source !== threadSource && (!legacySource || source !== legacySource)) continue;
           if (typeof runtimeSession.id !== "string" || runtimeSession.id.length === 0) {
             throw coordinatorError("CODEX_THREAD_LIST_INVALID_RESPONSE", "thread/list 返回无 id thread");
           }
-          matches.set(runtimeSession.id, { id: runtimeSession.id, archived });
+          matches.set(runtimeSession.id, { id: runtimeSession.id, archived, source });
         }
         const nextCursor = response.nextCursor;
         if (nextCursor === null || nextCursor === undefined) {
@@ -10572,7 +10614,8 @@ class WorkRunCoordinator {
       seen.add(match.id);
       matches.push(match);
     }
-    return matches;
+    const exact = legacySource ? matches.filter(match => match.source === threadSource) : matches;
+    return exact.length ? exact : matches;
   }
 
   #assertThreadMatchActive(match) {

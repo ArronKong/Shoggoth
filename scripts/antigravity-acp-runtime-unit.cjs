@@ -869,6 +869,49 @@ test("native current-turn failure survives the SDK generic error and reaches ter
   assert.equal(next.complete.failure, undefined);
 });
 
+test("native context recovery requires a failed checkpoint referenced by the latest terminal error", async t => {
+  const ctx = await startedSession(t);
+  const { id: sessionId } = ctx.session;
+  const detail = "Error 400, Message: User location is not supported for the API use., Status: FAILED_PRECONDITION";
+  const message = `agent executor error: context summarization: checkpoint step 1 failed: error executing cascade step: CORTEX_STEP_TYPE_CHECKPOINT: ${detail}`;
+  const finish = ctx.host._finishPrompt.bind(ctx.host);
+  let file;
+  ctx.host._finishPrompt = (active, response) => {
+    if (!file) {
+      const now = Date.now();
+      const metadata = proto([[1, proto([[1, Math.floor(now / 1000)], [2, (now % 1000) * 1e6]])],
+        [20, proto([[1, sessionId], [2, 1], [4, sessionId]])]]);
+      file = nativeStore(ctx, [
+        { type: 14, status: 3, payload: proto([[1, 14], [4, 3]]) },
+        { type: 23, status: 7, payload: proto([[1, 23], [4, 7], [5, metadata], [31, proto([[2, detail]])]]) },
+        nativeTurnError(sessionId, 2, now, message),
+      ]);
+    }
+    return finish(active, response);
+  };
+  const { complete } = await runTurn(ctx, "DIRECTIVE:INBAND_UNKNOWN_ERROR");
+  assert.equal(complete.status, "failed");
+  assert.equal(complete.errorCode, "ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED");
+  assert.equal(complete.failure, undefined, "a prior provider error is not evidence of a new rejection");
+  const reader = ctx.host.nativeToolResults;
+  const before = fs.readFileSync(file);
+  assert.equal(reader.hasFailedContextCheckpoint(sessionId), true);
+  assert.deepEqual(fs.readFileSync(file), before);
+  const db = new DatabaseSync(file);
+  try {
+    const nativeError = db.prepare("SELECT step_payload FROM steps WHERE idx = 2").get().step_payload;
+    db.prepare("UPDATE steps SET step_payload = ? WHERE idx = 2")
+      .run(nativeTurnError(sessionId, 2, Date.now(), detail).payload);
+    assert.equal(reader.hasFailedContextCheckpoint(sessionId), false, "a plain provider error is not a checkpoint failure");
+    db.prepare("UPDATE steps SET step_payload = ? WHERE idx = 2").run(nativeError);
+    db.exec("UPDATE steps SET status = 3 WHERE idx = 1");
+    assert.equal(reader.hasFailedContextCheckpoint(sessionId), false, "the referenced checkpoint must still be failed");
+    db.exec("UPDATE steps SET status = 7 WHERE idx = 1");
+    db.prepare("INSERT INTO steps VALUES (3, 14, 3, ?, NULL)").run(proto([[1, 14], [4, 3]]));
+    assert.equal(reader.hasFailedContextCheckpoint(sessionId), false, "a later native turn prevents retirement based on stale evidence");
+  } finally { db.close(); }
+});
+
 test("native turn diagnosis rejects stale, foreign, tool and ambiguous error records", async t => {
   const ctx = await startedSession(t);
   const reader = ctx.host.nativeToolResults;

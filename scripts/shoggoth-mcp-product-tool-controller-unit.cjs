@@ -9,10 +9,12 @@ const os = require("node:os");
 const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
+const { canonicalJson } = require("../app/agent-service/tool-registry");
 const {
   MCP_PRODUCT_TOOL_DEFINITIONS,
   MCP_PRODUCT_TOOL_NAMES,
   McpProductToolController,
+  explainMcpProductToolArguments,
   fingerprintMcpToolCall,
   validateMcpProductToolArguments,
 } = require(path.join(ROOT, "app", "agent-service", "mcp-product-tool-controller.js"));
@@ -1504,6 +1506,101 @@ test("Computer snapshot 在 Service 边界先省略重复 tree 并保留图像�
     originalElementCount: elements.length,
     returnedElementCount: elements.length,
   });
+});
+
+test("Cron minimal arguments work through validation and routing without mutating the caller", async () => {
+  const f = makeFixture();
+  const listArgs = Object.freeze({});
+  await f.controller.handle("cron_list", listArgs, authority());
+  assert.deepEqual(f.calls.find(entry => entry[1] === "cron.job.list")[2], {
+    profileId: PROFILE_ID, enabled: null, cursor: null, limit: 20,
+  });
+  const getArgs = Object.freeze({ jobId: JOB_ID });
+  const result = await f.controller.handle("cron_get", getArgs, authorityFor("a"));
+  assert.equal(result.prompt.chunk, "cron prompt");
+  assert.deepEqual(f.calls.find(entry => entry[1] === "cron.job.prompt.read")[2], {
+    jobId: JOB_ID, cursor: null, maxBytes: 4096,
+  });
+  await f.controller.handle("cron_list", { enabled: false, cursor: "page-two", limit: 1 }, authorityFor("b"));
+  assert.deepEqual(f.calls.filter(entry => entry[1] === "cron.job.list").at(-1)[2], {
+    profileId: PROFILE_ID, enabled: false, cursor: "page-two", limit: 1,
+  });
+  f.jobs.set(JOB_ID, job({ profileId: OTHER_PROFILE_ID }));
+  await expectCode(() => f.controller.handle("cron_get", getArgs, authorityFor("c")), "MCP_TOOL_NOT_FOUND");
+  assert.deepEqual(listArgs, {});
+  assert.deepEqual(getArgs, { jobId: JOB_ID });
+});
+
+test("Cron creation supplies defaults, preserves explicit policies and replays original receipts", async () => {
+  const saved = [];
+  const domainController = { async handle(method, params) {
+    assert.equal(method, "cron.job.create");
+    saved.push(structuredClone(params));
+    await Promise.resolve();
+    return { job: jobDto(job(params)) };
+  } };
+  const f = makeFixture({ domainController });
+  const minimal = Object.freeze({ name: "Daily briefing", prompt: "Report the news.",
+    schedule: Object.freeze({ kind: "cron", expr: "0 7 * * *", tz: "Asia/Shanghai" }) });
+  const first = await f.controller.handle("cron_create", minimal, authority());
+  assert.deepEqual(await f.controller.handle("cron_create", minimal, authority()), first);
+  assert.equal(saved.length, 1);
+  assert.deepEqual(saved[0], { ...minimal, profileId: PROFILE_ID,
+    workspace: null, enabled: true, misfirePolicy: "latest", maxCatchUp: 1,
+    overlapPolicy: "skip", threadPolicy: "continue", threadId: null,
+    operationId: ledgerOperationId("cron_create", minimal), createdAt: 5000 });
+  assert.deepEqual(Object.keys(minimal), ["name", "prompt", "schedule"]);
+
+  const explicit = { ...minimal, workspace: "/private/briefing", enabled: false,
+    misfirePolicy: "all-bounded", maxCatchUp: 3, overlapPolicy: "queue", threadPolicy: "new", threadId: null };
+  const legacyArgs = { ...minimal, workspace: null, enabled: false,
+    misfirePolicy: "skip", maxCatchUp: 1, overlapPolicy: "skip" };
+  const legacyAuth = authorityFor("a");
+  const fingerprint = crypto.createHash("sha256").update(canonicalJson({ name: "cron_create", args: legacyArgs })).digest("hex");
+  const original = f.dependencies.productStore.beginMcpToolCall({ profileId: PROFILE_ID, callId: legacyAuth.callId,
+    name: "cron_create", fingerprint, binding: null, createdAt: 4000 });
+  const legacyReceipt = { job: jobDto(job({ ...legacyArgs, id: JOB_ID, threadPolicy: "continue" })) };
+  f.dependencies.productStore.completeMcpToolCall({ id: original.id, outcome: { ok: true, result: legacyReceipt } });
+  const reopened = makeFixture({ productStore: f.dependencies.productStore, domainController });
+  assert.deepEqual(await reopened.controller.handle("cron_create", legacyArgs, legacyAuth), legacyReceipt);
+  assert.equal(saved.length, 1, "a pre-existing receipt returns without creating another job");
+  await f.controller.handle("cron_create", explicit, authorityFor("b"));
+  assert.deepEqual(saved[1], { ...explicit, profileId: PROFILE_ID,
+    operationId: ledgerOperationId("cron_create", explicit, authorityFor("b").callId), createdAt: 5000 });
+  await expectCode(() => f.controller.handle("cron_create", { ...minimal, enabled: false }, authority()),
+    "MCP_TOOL_STATE_CONFLICT");
+  assert.equal(saved.length, 2);
+});
+
+test("Cron defaults apply only to omitted fields and errors include valid examples", async () => {
+  const minimal = { name: "Briefing", prompt: "Report", schedule: { kind: "cron", expr: "0 7 * * *", tz: "Asia/Shanghai" } };
+  const invalid = [
+    ["cron_list", { cursor: 0 }], ["cron_list", { limit: null }], ["cron_list", { limit: 101 }],
+    ["cron_get", { id: JOB_ID }], ["cron_get", { jobId: JOB_ID, cursor: 0 }],
+    ["cron_get", { jobId: JOB_ID, maxBytes: 32769 }],
+    ...[{ enabled: null }, { enabled: undefined }, { workspace: "test" }, { maxCatchUp: 0 },
+      { misfirePolicy: null }, { overlapPolicy: "parallel" }, { deliveryTarget: "current" },
+      { threadPolicy: "new", threadId: "existing-thread" }, { schedule: { type: "cron" } },
+      { schedule: JSON.stringify(minimal.schedule) }].map(patch => ["cron_create", { ...minimal, ...patch }]),
+  ];
+  let getterCalls = 0;
+  invalid.push(["cron_create", Object.defineProperty({ ...minimal }, "enabled", {
+    enumerable: true, get() { getterCalls += 1; return true; },
+  })]);
+  const f = makeFixture();
+  for (const [name, args] of invalid) {
+    assert.equal(validateMcpProductToolArguments(name, args), false, name);
+    await expectCode(() => f.controller.handle(name, args, authority()), "MCP_TOOL_INVALID_ARGUMENTS");
+  }
+  assert.equal(getterCalls, 0);
+  assert.equal(f.calls.length, 0, "invalid inputs never reach stores or domain execution");
+  for (const name of ["cron_list", "cron_get", "cron_create"]) {
+    const schema = MCP_PRODUCT_TOOL_DEFINITIONS.find(tool => tool.name === name).inputSchema;
+    assert.deepEqual(schema.required, name === "cron_list" ? [] : name === "cron_get" ? ["jobId"] : ["name", "prompt", "schedule"]);
+    assert.equal(validateMcpProductToolArguments(name, schema.examples[0]), true);
+    const error = explainMcpProductToolArguments(name, { unsupported: true });
+    assert.ok(error.hints.some(hint => hint.includes(JSON.stringify(schema.examples[0]))));
+  }
 });
 
 test("新增 Kanban/Cron 路由使用 Service 生成的 operation/time 并 exact replay", async () => {

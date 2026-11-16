@@ -9,6 +9,9 @@ const { parseArgs } = require("node:util");
 const { setTimeout: delay } = require("node:timers/promises");
 const { packageNames, fileDigest, assemble, githubClient, uploadDraft, verifyDraft, confirmDraft } = require("./release-draft.cjs");
 const { assertAcceptedReceipt } = require("./notarize.cjs");
+const { selectPullRequestSourceCi, verifySourceCiProof } = require("./release-source-ci.cjs");
+
+const repository = "ArronKong/Shoggoth";
 
 function localOptions(args) {
   const { values } = parseArgs({ args, options: {
@@ -26,12 +29,20 @@ function localOptions(args) {
 }
 
 async function waitForSourceCi(client, sha, { attempts = 240, pause = delay } = {}) {
+  const api = { get: async route => (await client.request(route)).json() };
+  const pullRequestProof = () => selectPullRequestSourceCi(api, repository, sha).catch(() => null);
+  const reviewed = await pullRequestProof();
+  if (reviewed) return reviewed.runId;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const runs = await (await client.request(`/actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&per_page=100`)).json();
-    // pull_request runs check out a synthetic merge commit, not this source SHA.
-    const exact = runs.workflow_runs.filter(run => run.head_sha === sha && run.event === "push");
+    const runs = await api.get(`/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=${sha}&per_page=10`);
+    const exact = runs.workflow_runs.filter(run => run.head_sha === sha && run.event === "push" && run.head_branch === "main");
     const success = exact.find(run => run.status === "completed" && run.conclusion === "success");
-    if (success) return success.id;
+    if (success) {
+      const proof = await verifySourceCiProof(api, repository, sha, { runId: success.id, runAttempt: success.run_attempt })
+        || await pullRequestProof();
+      assert.ok(proof, "The exact public source requires successful Linux and macOS CI before signing");
+      return proof.runId;
+    }
     assert.ok(!exact.length || exact.some(run => run.status !== "completed"),
       "The exact public source requires successful CI before signing; inspect its failed CI run");
     console.log("Waiting for the exact public source CI...");
@@ -101,7 +112,6 @@ async function main() {
     return;
   }
   assert.equal(process.platform, "darwin", "Local signing requires macOS");
-  const repository = "ArronKong/Shoggoth";
   const token = execFileSync("gh", ["auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   const client = githubClient(repository, token);
   const commit = await (await client.request(`/commits/${options.tag}`)).json();

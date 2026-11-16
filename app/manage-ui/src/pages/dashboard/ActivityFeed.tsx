@@ -29,11 +29,12 @@ import { DashboardActivitySkeleton } from "./DashboardSkeleton";
 
 const KIND_FILTERS = ["", "cron", "inspiration"] as const;
 
-// 服务端已过滤静默输出和 heartbeat；旧缓存和尚未升级的服务端也要遵循同一显示规则。
+// 旧缓存和尚未升级的服务端也要过滤执行中、静默输出及 heartbeat。
 // 与 core/dashboard-activity.js 保持一致，仅匹配系统结果，不按任务名过滤。
 export function isVisibleDashboardActivity(entry: DashboardActivityEntry): entry is Exclude<DashboardActivityEntry, { kind: "health" }> {
   if (entry.kind === "health") return false;
-  if (entry.kind === "cron" && entry.run.outputDisposition === "silent") return false;
+  if (entry.kind === "cron" && (entry.run.status === "running"
+    || entry.run.outputDisposition === "pending" || entry.run.outputDisposition === "silent")) return false;
   if (entry.kind === "cron" && entry.backendId === "openclaw" && entry.run.systemManaged === true) return false;
   return !(entry.kind === "cron" && entry.backendId === "openclaw"
     && [entry.summary, entry.run.summary, entry.run.error].some((message) =>
@@ -352,7 +353,7 @@ export default function ActivityFeed({
 
         {visibleEntries.length === 0 ? (
           loading || busy ? <DashboardActivitySkeleton />
-            : !unavailable && <div className="dash-empty">{t("dashboard.feedEmpty")}</div>
+            : !unavailable && liveRows.length === 0 && <div className="dash-empty">{t("dashboard.feedEmpty")}</div>
         ) : (
           <div className="dash-feed">
             {visibleEntries.map((e) => (

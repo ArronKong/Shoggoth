@@ -194,12 +194,16 @@ const statusRow = () => renderer.root.findByProps({ 'data-dashboard-status': tru
 const statusHeader = () => renderer.root.findByProps({ 'data-dashboard-status-header': true });
 for (const source of ['cron', 'kanban', 'inspiration']) {
   const running = { id: 'shoggoth:owner-run', backendId: 'shoggoth', runId: 'owner-run', agentId: 'stable-agent',
-    kind: source, status: 'running', startedAt: 100 };
+    kind: source, status: 'running', startedAt: 100,
+    ...(source === 'cron' ? { title: '每日示例摘要', progressSummary: '正在收集数据' } : {}) };
   const approval = { ...item, source };
   await mount({ item: undefined, running });
   const originalHeader = statusHeader();
   const update = (overrides) => settle(() => renderer.update(React.createElement(Row, { ...props, item: approval, running, ...overrides })));
   assert.equal(statusRow().props['data-tone'], 'running');
+  if (source === 'cron') {
+    assert.equal(text(originalHeader.findAllByProps({ 'data-status-copy': 'running' })[0]), '每日示例摘要');
+  }
   const waiting = { ...running, status: 'waiting_approval', waitingRequestId: request.requestId };
   await update({ running: waiting });
   assert.equal(statusHeader(), originalHeader);

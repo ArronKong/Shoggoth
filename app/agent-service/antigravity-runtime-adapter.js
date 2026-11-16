@@ -99,6 +99,10 @@ class AntigravityRuntimeAdapter {
 
   runtimeIdentityKey(value) { return this.runtimePool.runtimeIdentityKey?.(runtimeBinding(value)) ?? null; }
 
+  hasFailedContextCheckpoint(binding, sessionId) {
+    return this.runtimePool.hasFailedContextCheckpoint?.(binding, sessionId) === true;
+  }
+
   async acquire(value, options = {}) {
     const binding = runtimeBinding(value);
     if (binding.runtime !== ANTIGRAVITY_RUNTIME) {

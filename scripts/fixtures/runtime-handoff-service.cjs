@@ -13,7 +13,8 @@ const { DEFAULT_RUNTIME_ACCOUNTS } = require("../../app/agent-service/runtime-ac
 const { CodexRuntimeAdapter } = require("../../app/agent-service/codex-runtime-adapter");
 const { FakeHost } = require("../shoggoth-work-run-coordinator-unit.cjs");
 
-async function openHandoffFixture({ root: existingRoot, transport: existingTransport, catalogs, builtinCliProfiles = false, validateHandles = false, serviceOptions = {} } = {}) {
+async function openHandoffFixture({ root: existingRoot, transport: existingTransport, catalogs, builtinCliProfiles = false,
+  validateHandles = false, retryWriterIdentity = false, serviceOptions = {} } = {}) {
   const root = fs.realpathSync(existingRoot || fs.mkdtempSync("/tmp/sghandoff-"));
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(workspace, { recursive: true });
@@ -102,7 +103,13 @@ async function openHandoffFixture({ root: existingRoot, transport: existingTrans
     safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value),
       decryptString: value => value.toString() },
   });
-  await service.start();
+  try { await service.start(); }
+  catch (error) {
+    if (!retryWriterIdentity || error?.code !== "WRITER_LEASE_IDENTITY_UNAVAILABLE") throw error;
+    // start() reports this code after cleaning up the failed startup.
+    console.warn("Retrying isolated Service startup after unavailable writer process identity");
+    await service.start();
+  }
   let profile = service.productStore.listAgentProfiles()[0];
   const config = service.nativeRuntimeConfig.read();
   if (!config.flags.runtimeConversationHandoff) service.nativeRuntimeConfig.apply({ ...config,

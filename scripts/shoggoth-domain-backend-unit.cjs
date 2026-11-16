@@ -1409,19 +1409,35 @@ test("dashboard running work includes active Cron, Kanban and Inspiration, exclu
     workRun({ id: inspirationRunId, source: "inspiration", sourceId: CARD_ID, status: "waiting_approval", startedAt: 1_000, waitingRequestId: "inspiration-request" }),
     workRun({ id: finishedRunId, source: "cron", sourceId: JOB_ID, status: "completed" }),
   ];
+  let job = cronJob({ name: "每日示例摘要" });
   const fixture = await readyBackend((request) => {
-    if (request.method === "run.list") return page("runs", runs);
+    if (request.method === "run.list") {
+      assert.equal(request.params.scope.activeOnly, true);
+      return page("runs", runs.filter(run => run.id !== finishedRunId));
+    }
+    if (request.method === "cron.job.get") {
+      assert.equal(request.params.jobId, JOB_ID);
+      if (!job) throw Object.assign(new Error("Deleted job"), { code: "CRON_JOB_NOT_FOUND" });
+      return { job };
+    }
     throw new Error(`unexpected ${request.method}`);
   });
 
   const result = await fixture.backend.getRunningWork();
   assert.deepEqual(result.items.map(({ id, title, kind }) => ({ id, title, kind })), [
-    { id: `shoggoth:${cronRunId}`, title: "Cron", kind: "cron" },
+    { id: `shoggoth:${cronRunId}`, title: job.name, kind: "cron" },
     { id: `shoggoth:${kanbanRunId}`, title: "Kanban", kind: "kanban" },
     { id: `shoggoth:${inspirationRunId}`, title: "Inspiration", kind: "inspiration" },
   ]);
   assert.equal(result.items[2].status, "waiting_approval");
   assert.equal(result.items[2].waitingRequestId, "inspiration-request");
+
+  for (const unavailableJob of [cronJob({ profileId: OTHER_PROFILE_ID }), null]) {
+    job = unavailableJob;
+    const fallback = await fixture.backend.getRunningWork();
+    assert.equal(fallback.items[0].runId, cronRunId);
+    assert.equal(fallback.items[0].title, undefined, "Unowned or unavailable metadata cannot replace the localized fallback");
+  }
 });
 
 test("stop disconnects only the adapter and all domain methods fail closed afterward", async () => {

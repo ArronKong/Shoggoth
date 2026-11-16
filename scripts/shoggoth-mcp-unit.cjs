@@ -1917,7 +1917,7 @@ test("常驻工具模式只列核心工具，入口工具按被调用工具自�
     assert.equal(found.result.structuredContent.tools[0].inputSchema.additionalProperties, false);
     const index = await call(4, "product_tool_search", { query: "" });
     assert.equal(index.result.structuredContent.index.cron.includes("cron_create"), true);
-    const cronArgs = { enabled: null, cursor: null, limit: 10 };
+    const cronArgs = {};
     const direct = await call(5, "cron_list", cronArgs);
     const routed = await call(6, "product_tool_call", { name: "cron_list", arguments: cronArgs });
     assert.equal(direct.result.isError, false, JSON.stringify(direct));
@@ -1930,6 +1930,83 @@ test("常驻工具模式只列核心工具，入口工具按被调用工具自�
     }
     assert.equal((await call(11, "product_tool_search", { query: 1 })).result.isError, true);
   } finally { handler?.close(); await service.stop({ notify: false }); }
+});
+
+test("minimal Cron calls cross the authenticated MCP helper and Service with bounded prompt pagination", async () => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sm-cron-defaults-"));
+  const paths = resolveServicePaths({ stateRoot: path.join(root, "state"), cacheRoot: path.join(root, "cache") });
+  const safeStorage = fakeSafeStorage();
+  const service = createAgentService({ paths, safeStorage, version: "mcp-cron-defaults" });
+  await service.start();
+  let handler;
+  try {
+    const profile = service.productStore.listAgentProfiles()[0];
+    const session = await authenticateServiceSession(paths, safeStorage, profile.runtimeProfileId, profile.runtimeAccountId);
+    const trustedRun = trustedRunFixture(service, profile);
+    handler = createMcpStdioHandler({ paths, runtimeProfileId: profile.runtimeProfileId,
+      runtimeAccountId: profile.runtimeAccountId, sessionToken: session.token, requestService, bindRuntimeCalls: true });
+    await handler({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: MCP_STDIO_PROTOCOL_VERSION, capabilities: { elicitation: {} },
+      clientInfo: { name: "cron-defaults", version: "1" },
+    } });
+    const call = (id, name, args) => handler({ jsonrpc: "2.0", id, method: "tools/call",
+      params: { name, ...(args === undefined ? {} : { arguments: args }) } }, {
+      async requestClient(_, params) { trustedRun.register(params); return { action: "accept", content: {} }; },
+    });
+    const help = await call("help", "app_help_get", { featureId: "cron" });
+    assert.equal(help.result.isError, false, JSON.stringify(help));
+    const createHelp = help.result.structuredContent.actions.find(item => item.tool === "cron_create");
+    assert.deepEqual(Object.keys(createHelp.inputExamples[0]), ["name", "prompt", "schedule"]);
+    assert.match(createHelp.inputDescription, /Only name, prompt and schedule are required/);
+    const prompt = "中文报告😀\n".repeat(1000);
+    const created = await call(2, "cron_create", {
+      name: "Default policies", prompt, schedule: { kind: "at", at: Date.now() + 24 * 60 * 60 * 1000 },
+    });
+    assert.equal(created.result.isError, false, JSON.stringify(created));
+    const { job } = created.result.structuredContent;
+    const stored = service.nativeCronStore.getJob(job.id);
+    assert.equal(stored.enabled, true);
+    assert.equal(stored.misfirePolicy, "latest");
+    assert.equal(stored.maxCatchUp, 1);
+    assert.equal(stored.overlapPolicy, "skip");
+    assert.equal(stored.threadPolicy, "continue");
+    assert.equal(stored.threadId, null);
+    const listed = await call(3, "cron_list");
+    assert.equal(listed.result.isError, false, JSON.stringify(listed));
+    assert.deepEqual(listed.result.structuredContent.jobs.map(item => item.id), [job.id]);
+    const fetched = await call(4, "cron_get", { jobId: job.id });
+    assert.equal(fetched.result.isError, false, JSON.stringify(fetched));
+    const first = fetched.result.structuredContent.prompt;
+    assert.ok(Buffer.byteLength(first.text) <= 4096);
+    assert.ok(first.nextCursor);
+    const next = await call(5, "cron_get", { jobId: job.id, cursor: first.nextCursor });
+    assert.equal(next.result.isError, false, JSON.stringify(next));
+    const combined = first.text + next.result.structuredContent.prompt.text;
+    assert.ok(prompt.startsWith(combined));
+    assert.ok(combined.length > first.text.length);
+    const wide = await call("wide", "cron_get", { jobId: job.id, maxBytes: 8192 });
+    assert.equal(wide.result.isError, false, JSON.stringify(wide));
+    assert.ok(Buffer.byteLength(wide.result.structuredContent.prompt.text) <= 8192);
+    assert.ok(wide.result.structuredContent.prompt.text.length > first.text.length);
+    const bad = await call(6, "cron_create", { name: "Invalid", prompt: "Report",
+      schedule: stored.schedule, deliveryTarget: "current" });
+    assert.equal(bad.result.isError, true);
+    assert.match(bad.result.content[0].text, /deliveryTarget/);
+    assert.match(bad.result.content[0].text, /Example arguments/);
+    assert.equal(service.nativeCronStore.listJobs({ profileId: profile.id }).length, 1);
+    const retryArgs = { name: "Concurrent retry", prompt: "Report", schedule: stored.schedule };
+    const authority = { profileId: profile.id, callId: "11111111-1111-4111-8111-111111111111" };
+    const [firstRetry, secondRetry] = await Promise.all([
+      service.mcpProductToolController.handle("cron_create", retryArgs, authority, trustedRun.scope),
+      service.mcpProductToolController.handle("cron_create", retryArgs, authority, trustedRun.scope),
+    ]);
+    assert.equal(firstRetry.job.id, secondRetry.job.id);
+    assert.equal(service.nativeCronStore.listJobs({ profileId: profile.id }).length, 2);
+  } finally {
+    handler?.close();
+    await service.stop({ notify: false });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("完整 MCP helper 经认证 Service 操作灵感，确认删除并保留正常读写权限边界", async () => {

@@ -330,22 +330,26 @@ function activityToolName(name?: string, args?: unknown): string {
 // for document/task content, so only command tools promote that older field.
 // Keep the original args for expanded details.
 export function toolActionTitle(name?: string, args?: unknown): string {
-  if (args && typeof args === "object" && !Array.isArray(args)) {
-    const activity = (args as Record<string, unknown>).activityTitle;
-    if (typeof activity === "string" && activity.trim() && activity.length <= 120
-      && !/[\u0000-\u001f\u007f]/u.test(activity)) return activity.trim();
-  }
-  const tool = activityToolName(name, args);
   if (!args || typeof args !== "object" || Array.isArray(args)) return "";
   const a = args as Record<string, unknown>;
+  const toolId = productActivityTool(name);
+  const actionTitle = (value: unknown) => {
+    if (typeof value !== "string" || value.length > 120 || /[\u0000-\u001f\u007f]/u.test(value)) return "";
+    const title = value.trim();
+    const titleId = productActivityTool(title);
+    // Antigravity can pass the flattened MCP identifier as its title. Check at
+    // display time so tool events already saved in history get the same label.
+    if (toolId && (titleId === toolId || titleId === `shoggoth_${toolId}`)) return "";
+    return title;
+  };
+  const explicit = actionTitle(a.activityTitle);
+  if (explicit) return explicit;
+  const tool = activityToolName(name, a);
   for (const key of tool === "exec" || tool === "terminal" ? ["title", "description"] : []) {
     const value = a[key];
     if (typeof value === "string" && value.trim()) return value.replace(/\s+/g, " ").trim();
   }
-  const native = a.nativeActivityTitle;
-  if (typeof native === "string" && native.trim() && native.length <= 120
-    && !/[\u0000-\u001f\u007f]/u.test(native)) return native.trim();
-  return "";
+  return actionTitle(a.nativeActivityTitle);
 }
 
 export function summarizeArgs(name?: string, args?: unknown): string {

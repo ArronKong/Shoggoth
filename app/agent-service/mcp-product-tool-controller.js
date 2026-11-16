@@ -74,6 +74,12 @@ const MAX_CURSOR_BYTES = 512;
 const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_PAGE_LIMIT = 100;
 const MAX_TEXT_BYTES = 1024 * 1024;
+const CRON_ARGUMENT_DEFAULTS = Object.freeze({
+  cron_list: Object.freeze({ enabled: null, cursor: null, limit: 20 }),
+  cron_get: Object.freeze({ cursor: null, maxBytes: 4096 }),
+  cron_create: Object.freeze({ workspace: null, enabled: true, misfirePolicy: "latest",
+    maxCatchUp: 1, overlapPolicy: "skip", threadPolicy: "continue", threadId: null }),
+});
 const MCP_SERVER_REFERENCE_PATTERN = "^[a-z0-9][a-z0-9-]{0,63}$";
 const MCP_SERVER_REFERENCE = new RegExp(MCP_SERVER_REFERENCE_PATTERN, "u");
 
@@ -706,11 +712,14 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        enabled: { anyOf: [{ type: "boolean" }, { type: "null" }] },
-        cursor: nullableString(MAX_CURSOR_BYTES),
-        limit: { type: "integer", minimum: 1, maximum: MAX_PAGE_LIMIT },
+        enabled: { anyOf: [{ type: "boolean" }, { type: "null" }], default: CRON_ARGUMENT_DEFAULTS.cron_list.enabled,
+          description: "Omit or use null to include enabled and disabled jobs." },
+        cursor: { ...nullableString(MAX_CURSOR_BYTES), default: CRON_ARGUMENT_DEFAULTS.cron_list.cursor,
+          description: "Omit on the first page. For later pages, pass the returned nextCursor string and keep enabled and limit unchanged." },
+        limit: { type: "integer", minimum: 1, maximum: MAX_PAGE_LIMIT, default: CRON_ARGUMENT_DEFAULTS.cron_list.limit },
       },
-      required: ["enabled", "cursor", "limit"],
+      required: [],
+      examples: [{}],
       additionalProperties: false,
     },
   },
@@ -720,11 +729,13 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        jobId: { type: "string", maxLength: 36 },
-        cursor: nullableString(MAX_CURSOR_BYTES),
-        maxBytes: { type: "integer", minimum: 1, maximum: MAX_CONTENT_READ_BYTES },
+        jobId: { type: "string", maxLength: 36, description: "Use jobs[].id from cron_list or job.id from cron_create." },
+        cursor: { ...nullableString(MAX_CURSOR_BYTES), default: CRON_ARGUMENT_DEFAULTS.cron_get.cursor,
+          description: "Omit on the first read. Continue with prompt.nextCursor from the previous result and keep maxBytes unchanged." },
+        maxBytes: { type: "integer", minimum: 1, maximum: MAX_CONTENT_READ_BYTES, default: CRON_ARGUMENT_DEFAULTS.cron_get.maxBytes },
       },
-      required: ["jobId", "cursor", "maxBytes"],
+      required: ["jobId"],
+      examples: [{ jobId: "11111111-1111-4111-8111-111111111111" }],
       additionalProperties: false,
     },
   },
@@ -972,21 +983,24 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
       type: "object",
       properties: {
         name: { type: "string", maxLength: 512 }, prompt: { type: "string", maxLength: MAX_TEXT_BYTES },
-        workspace: { ...nullableString(4096), description: "Absolute path or JSON null for the default workspace." },
-        schedule: scheduleSchema, enabled: { type: "boolean" },
-        misfirePolicy: { type: "string", enum: [...MISFIRE_POLICIES] },
-        maxCatchUp: { type: "integer", minimum: 1, maximum: 100 },
-        overlapPolicy: { type: "string", enum: [...OVERLAP_POLICIES] },
-        threadPolicy: { type: "string", enum: [...THREAD_POLICIES], default: "continue",
+        workspace: { ...nullableString(4096), default: CRON_ARGUMENT_DEFAULTS.cron_create.workspace,
+          description: "Omit or use JSON null for the default workspace, or supply an absolute path." },
+        schedule: scheduleSchema, enabled: { type: "boolean", default: CRON_ARGUMENT_DEFAULTS.cron_create.enabled },
+        misfirePolicy: { type: "string", enum: [...MISFIRE_POLICIES], default: CRON_ARGUMENT_DEFAULTS.cron_create.misfirePolicy },
+        maxCatchUp: { type: "integer", minimum: 1, maximum: 100, default: CRON_ARGUMENT_DEFAULTS.cron_create.maxCatchUp },
+        overlapPolicy: { type: "string", enum: [...OVERLAP_POLICIES], default: CRON_ARGUMENT_DEFAULTS.cron_create.overlapPolicy },
+        threadPolicy: { type: "string", enum: [...THREAD_POLICIES], default: CRON_ARGUMENT_DEFAULTS.cron_create.threadPolicy,
           description: "Defaults to continue: reuse this job's conversation across runs." },
-        threadId: { ...nullableString(256), default: null,
+        threadId: { ...nullableString(256), default: CRON_ARGUMENT_DEFAULTS.cron_create.threadId,
           description: "Omit or use JSON null to let the job create and reuse its own conversation. Must be null when threadPolicy is new." },
         sourceQuote: { type: "string", maxLength: 2048,
           description: "In a native group turn, quote the current user's exact request to schedule this job. Shoggoth binds the results to the current group automatically. Omit in private chat." },
         watch: { type: "boolean",
           description: "Set true when the user wants updates only on change. Cron suppresses a final reply identical to the previous report. Omit for regular scheduled work." },
       },
-      required: ["name", "prompt", "workspace", "schedule", "enabled", "misfirePolicy", "maxCatchUp", "overlapPolicy"],
+      required: ["name", "prompt", "schedule"],
+      examples: [{ name: "Daily briefing", prompt: "Summarize the latest news in Chinese.",
+        schedule: { kind: "cron", expr: "0 7 * * *", tz: "Asia/Shanghai" } }],
       additionalProperties: false,
     },
   },
@@ -1443,7 +1457,12 @@ function validateQuestions(value) {
 
 function validateMcpProductToolArguments(name, value) {
   const activity = splitActivityArguments(value);
-  return activity.valid && validateProductOperationArguments(name, activity.arguments);
+  return activity.valid && validateProductOperationArguments(name, cronArgumentsWithDefaults(name, activity.arguments));
+}
+
+function cronArgumentsWithDefaults(name, args) {
+  return Object.hasOwn(CRON_ARGUMENT_DEFAULTS, name) && ownDataObject(args)
+    ? { ...CRON_ARGUMENT_DEFAULTS[name], ...args } : args;
 }
 
 function validateProductOperationArguments(name, args) {
@@ -2007,6 +2026,7 @@ function explainMcpProductToolArguments(name, args) {
     if (args.placement === "daily" && args.scope !== "agent") problems.push("placement=daily is only for scope=agent.");
   }
   const hints = [
+    ...(definition?.inputSchema.examples ? [`Example arguments: ${JSON.stringify(definition.inputSchema.examples[0])}`] : []),
     ...(name === "memory_get" ? [MEMORY_GET_ARGUMENT_HINT] : []),
     ...(name === "native_agent_update" && ownDataObject(args) && !Object.hasOwn(args, "expectedUpdatedAt")
       ? ["先调用 native_agent_get，将返回的 updatedAt 作为 expectedUpdatedAt。"] : []),
@@ -3451,6 +3471,9 @@ class McpProductToolController {
 
   async #route(name, args, authority, call) {
     this.executionContext.getStore()?.assertCurrent();
+    // Defaults affect execution only. Keep the original arguments in call
+    // fingerprints so receipts created by earlier versions still replay.
+    args = cronArgumentsWithDefaults(name, args);
     if (name === "workspace_execute") {
       this.#workspaceExecutionBinding(authority);
       let execution = this.workspaceExecutionCalls.get(call.id);

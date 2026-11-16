@@ -8,7 +8,7 @@ const { execFileSync } = require("node:child_process");
 const yaml = require("js-yaml");
 const { releaseApi, releaseRequest, isTransientReadError } = require("./release-http.cjs");
 const { packageNames, assertDraft, assertAssetInventory } = require("./release-draft.cjs");
-const { selectMainSourceCi, sourceCiJobs } = require("./release-source-ci.cjs");
+const { verifySourceCiProof, sourceCiJobs } = require("./release-source-ci.cjs");
 
 const repository = "ArronKong/Shoggoth";
 const webBase = `https://github.com/${repository}`;
@@ -47,7 +47,7 @@ function assertAccepted(intent, receipt) {
     [intent.sha, intent.tag, intent.runId, true]);
   if (receipt.sourceCi !== "passed") {
     const { runId, runAttempt } = receipt.sourceCi ?? {};
-    assert.ok([runId, runAttempt].every(id => Number.isSafeInteger(id) && id > 0), "Invalid main CI proof");
+    assert.ok([runId, runAttempt].every(id => Number.isSafeInteger(id) && id > 0), "Invalid source CI proof");
   }
   assert.deepEqual(receipt.nativeArchitectures, ["arm64", "x64"]);
   assert.ok(Number.isSafeInteger(receipt.releaseId) && receipt.releaseId > 0);
@@ -94,8 +94,8 @@ async function assertLiveGates(client, intent, receipt) {
   if (receipt.sourceCi !== "passed") {
     assert.ok(inventory.jobs.filter(job => releaseCiJobNames.includes(job.name) || job.name === "source-ci")
       .every(job => job.status === "completed" && job.conclusion === "skipped"), "Unexpected release CI result");
-    const proof = await selectMainSourceCi(client, repository, intent.sha);
-    assert.deepEqual(proof, receipt.sourceCi, "Exact main CI proof changed");
+    const proof = await verifySourceCiProof(client, repository, intent.sha, receipt.sourceCi);
+    assert.deepEqual(proof, receipt.sourceCi, "Exact source CI proof changed");
   }
   const prs = await client.get(`/commits/${intent.sha}/pulls?per_page=100`);
   assert.ok(prs.some(pr => pr.merged_at && pr.merge_commit_sha === intent.sha
