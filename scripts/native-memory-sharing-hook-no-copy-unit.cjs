@@ -33,7 +33,7 @@ function install(f, { event, kind, source }) {
   return item;
 }
 async function fixture() {
-  const f = await openHandoffFixture({ serviceOptions: { memoryCore: true, memorySharingFeatureReady: true,
+  const f = await openHandoffFixture({ retryWriterIdentity: true, serviceOptions: { memoryCore: true, memorySharingFeatureReady: true,
     memoryCoreConfig: { memory: { search: { provider: "none", rememberAcrossConversations: false } },
       agents: { defaults: { compaction: { memoryFlush: { enabled: false } } } },
       plugins: { entries: { "active-memory": { config: { enabled: false } } } } } } });
