@@ -163,6 +163,12 @@ class RuntimeAdapterRegistry {
     return typeof adapter?.isRetiredSessionId === "function" && adapter.isRetiredSessionId(sessionId) === true;
   }
 
+  hasFailedContextCheckpoint(value, sessionId) {
+    const binding = runtimeBinding(value);
+    return isRuntimeAvailable(binding.runtime)
+      && this.#adapters.get(binding.runtime)?.hasFailedContextCheckpoint?.(binding, sessionId) === true;
+  }
+
   stop(value) {
     const binding = runtimeBinding(value);
     const adapter = this.#adapter(binding.runtime);

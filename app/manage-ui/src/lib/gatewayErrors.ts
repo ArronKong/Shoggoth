@@ -46,6 +46,7 @@ export function translateProductError(raw: string, t: TFn): string {
 // Provider text and codes retain their original language; only App copy changes.
 const FAILURE_SUMMARIES: Record<string, string> = {
   ANTIGRAVITY_REGION_UNSUPPORTED: "regionUnsupported",
+  ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED: "checkpointFailed",
   ANTIGRAVITY_NETWORK_UNAVAILABLE: "providerNetworkUnavailable",
   ANTIGRAVITY_MCP_UNAVAILABLE: "runtimeToolsUnavailable",
   AUTH_REQUIRED: "runtimeAuthRequired",
@@ -78,6 +79,7 @@ function detailedFailure(raw: string, t: TFn): string | null {
 }
 
 const PATTERNS: Array<[RegExp, string]> = [
+  [/^(?:错误：)?ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED$/u, "checkpointFailed"],
   [/^(?:错误：)?(?:ANTIGRAVITY_REGION_UNSUPPORTED|Google 模型接口不支持当前请求所在地区，本次任务未完成；请检查服务的地区支持范围和当前网络出口)$/, "regionUnsupported"],
   [/^(?:错误：)?(?:ANTIGRAVITY_TURN_FAILED|Antigravity 本次任务执行失败，上游未提供可展示的具体原因；未自动重放，请查看原生会话后决定是否重试|Antigravity 本次任务执行失败，未自动重放；请重试，若持续失败请在「模型」中检查登录状态)$/, "runtimeFailureNoDetails"],
   [/^(?:错误：)?(?:ANTIGRAVITY_NETWORK_UNAVAILABLE|Antigravity 无法连接 Google 服务，本次任务未完成；请检查代理与网络后重试)$/, "providerNetworkUnavailable"],

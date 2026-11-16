@@ -6452,13 +6452,13 @@ class ShoggothBackend extends AgentBackend {
     return tracked.promise;
   }
 
-  _dashboardRunningItem(run) {
+  _dashboardRunningItem(run, taskTitle) {
     const profile = this._assertKnownProfileId(run.profileId);
-    const kindLabel = { cron: "Cron", kanban: "Kanban", inspiration: "Inspiration" }[run.source];
+    const title = taskTitle || { kanban: "Kanban", inspiration: "Inspiration" }[run.source];
     return {
       id: `${this.id}:${run.id}`,
       backendId: this.id,
-      title: kindLabel,
+      ...(title ? { title } : {}),
       kind: run.source,
       waitingRequestId: run.waitingRequestId,
       runtime: profile.runtime,
@@ -6472,13 +6472,14 @@ class ShoggothBackend extends AgentBackend {
   }
 
   async getRunningWork() {
-    const runs = await this._dashboardRuns();
-    const items = runs
-      .filter((run) => ["cron", "kanban", "inspiration"].includes(run.source))
-      .map((run) => this._dashboardRunningItem(run))
-      .sort((left, right) => (
-        (right.startedAt || 0) - (left.startedAt || 0) || left.id.localeCompare(right.id)
-      ));
+    const generation = this._generation;
+    const runs = (await this._dashboardRuns()).filter(run => ["cron", "kanban", "inspiration"].includes(run.source));
+    const items = await mapBounded(runs, MAX_PROFILE_SESSION_CONCURRENCY, async run => {
+      const title = run.source === "cron" ? await this._dashboardRunTitle(run) : undefined;
+      return this._dashboardRunningItem(run, title);
+    });
+    if (this._generation !== generation) throw safeError(null, "BACKEND_NOT_READY");
+    items.sort((left, right) => (right.startedAt || 0) - (left.startedAt || 0) || left.id.localeCompare(right.id));
     return { supported: true, items };
   }
 

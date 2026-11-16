@@ -398,8 +398,8 @@ function precedingChatEvents(events, currentUser, journal) {
   });
 }
 
-function currentChatUserEvent(input, events) {
-  return input.run.source === "chat" && typeof input.currentOperationId === "string"
+function currentConversationUserEvent(input, events) {
+  return ["chat", "cron"].includes(input.run.source) && typeof input.currentOperationId === "string"
     ? events.find(event => event.kind === "user" && event.runId === input.run.id
       && event.content?.operationId === input.currentOperationId) : null;
 }
@@ -667,7 +667,7 @@ class ContextCompiler {
           .map(ref => ref.ownerProfileId));
         if (transcriptSessionId && !input.verifiedContinuation) {
           const events = readEvents(this.transcriptStore, profile.id, transcriptSessionId);
-          const current = currentChatUserEvent(input, events);
+          const current = currentConversationUserEvent(input, events);
           const history = current ? [...precedingChatEvents(events, current, events), current] : events;
           for (const ref of refsFromEvents(history)) owners.add(ref.ownerProfileId);
           if (input.contextLifecycleV1 === true) {
@@ -821,7 +821,9 @@ class ContextCompiler {
     if (input.restorePolicy != null && !require("./context-transfer").validRestorePolicy(input.restorePolicy)) {
       throw contextError("CONTEXT_BUDGET_INVALID", "Invalid working-context restore policy");
     }
-    const retainedLimit = input.restorePolicy?.retainedTokens ?? Infinity;
+    const cronCheckpointRecovery = input.cronCheckpointRecovery === true;
+    const retainedLimit = input.restorePolicy?.retainedTokens ?? (cronCheckpointRecovery
+      ? require("./conversation-context-budget").RETAINED_TAIL_TOKENS : Infinity);
     const tokenBudget = input.contextLifecycleV1 === true ? input.transcriptTokenBudget ?? null : null;
     if (tokenBudget !== null && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) {
       throw contextError("CONTEXT_BUDGET_INVALID", "最近对话 Token 预算无效");
@@ -954,7 +956,7 @@ class ContextCompiler {
         );
       }
       const sessionEvents = readEvents(this.transcriptStore, input.profile.id, input.transcriptSessionId);
-      const currentUser = currentChatUserEvent(input, sessionEvents);
+      const currentUser = currentConversationUserEvent(input, sessionEvents);
       if (allowRecentHistoryRestore || input.nativePartialHistory || continuation) currentUserSeq = currentUser?.seq ?? null;
       // A checkpoint's coverage hash spans every record of its prefix, so after
       // a revocation it is checked against the unfiltered session.
@@ -986,11 +988,20 @@ class ContextCompiler {
       scopedChatHistory = Boolean(currentUser);
       historicalEvents = currentUser ? precedingChatEvents(allEvents, currentUser, sessionEvents) : allEvents;
       const visibleCurrent = currentUser && allEvents.find(event => event.id === currentUser.id);
-      sessionBorrowedMemoryRefs = refsFromEvents(visibleCurrent ? [...historicalEvents, visibleCurrent] : historicalEvents);
       orderedHistory = currentUser ? orderChatHistory(historicalEvents) : historicalEvents;
       transcriptEvents = orderedHistory;
+      if (cronCheckpointRecovery) {
+        // The saved job prompt is the new input. Recover prior completed
+        // reports as reference data, excluding failed prompts and tool state.
+        const completed = new Set(transcriptEvents.filter(event => event.kind === "status"
+          && event.content?.transcriptType === "terminal" && event.content.status === "completed"
+          && event.content.cronOutput?.disposition !== "silent").map(event => event.runId));
+        transcriptEvents = transcriptEvents.filter(event => event.kind === "assistant" && completed.has(event.runId)
+          && event.content?.phase === "final_answer");
+      }
+      sessionBorrowedMemoryRefs = refsFromEvents(visibleCurrent ? [...transcriptEvents, visibleCurrent] : transcriptEvents);
       historicalView = this.historicalMemory.view(input.profile.id);
-      const eventSeqs = new Map(transcriptEvents.filter((event) => event.kind === "user")
+      const eventSeqs = new Map(orderedHistory.filter((event) => event.kind === "user")
         .map((event) => [event.id, { runId: event.runId, seq: event.seq }]));
       historicalSourceSeq = (sourceEventId, runId) => {
         const source = eventSeqs.get(sourceEventId);
@@ -1010,7 +1021,7 @@ class ContextCompiler {
       // revocation only a store that binds each summary to the recall policy's
       // visibility state may supply one; otherwise verified source events alone
       // form history.
-      if (!continuation && (!recall.hasRevocations || typeof this.checkpointStore?.revocationVisibility === "function")
+      if (!continuation && !cronCheckpointRecovery && (!recall.hasRevocations || typeof this.checkpointStore?.revocationVisibility === "function")
         && input.contextLifecycleV1 === true && this.checkpointStore) {
         checkpoint = (this.checkpointStore.portable ?? this.checkpointStore.compatible).call(this.checkpointStore,
           input.profile.id, input.transcriptSessionId, checkpointEvents ?? allEvents);
@@ -1119,7 +1130,7 @@ class ContextCompiler {
       source: input.run.source,
       sourceId: input.run.sourceId,
       workspace: input.run.workspace,
-      permissionPolicy: input.profile.permissionPolicy,
+      permissionPolicy: input.permissionPolicy ?? input.profile.permissionPolicy,
       toolPermissionRevision: permissionRevision,
     });
     // Delivered turn rules keep the per-turn Run ID in its own paragraph; see
@@ -1403,7 +1414,7 @@ class ContextCompiler {
         fixedRequest = measure(otherDynamic);
         let historyTokens = tokenBudget;
         if (fixedRequest) historyTokens = Math.max(0, fixedRequest.limitTokens - fixedRequest.estimatedTokens);
-        if (input.restorePolicy) historyTokens = Math.min(historyTokens ?? Infinity, retainedLimit);
+        if (input.restorePolicy || cronCheckpointRecovery) historyTokens = Math.min(historyTokens ?? Infinity, retainedLimit);
         // Earlier immutable generations can represent the older prefix while
         // restoring more originals. A selected generation and its exact tail
         // always form one continuous range, with no duplicated coverage.
@@ -1551,6 +1562,7 @@ class ContextCompiler {
         totalBytes,
         ...(request ? { request: { ...request, fixedTokens: request.fixedTokens + estimateContextTokens(mandatoryDynamic),
           ...(input.restorePolicy ? { restorePolicy: input.restorePolicy } : {}),
+          ...(cronCheckpointRecovery ? { cronCheckpointRecovery: true } : {}),
           ...(continuation ? { partialContinuation: continuation.proof } : {}),
           nativeBaseline: { usedTokens: nativeUsage.usedTokens, throughSeq: nativeRecords.at(-1)?.seq ?? 0 },
           nativeSeed: { usedTokens: request.estimatedTokens, throughSeq: nativeRecords.at(-1)?.seq ?? 0,

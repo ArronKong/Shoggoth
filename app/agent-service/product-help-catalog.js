@@ -113,6 +113,7 @@ const PRODUCT_HELP_CATALOG = [
       guide: "Create a one-time, interval or Cron schedule with an explicit prompt and timezone. Request creation, edits, enable/disable, immediate runs or deletion. In a group, ask a native member to watch for external developments and post updates there. After saving, the member should report the interval, next run and destination. Native current-Agent tasks use cron tools; cross-Agent and OpenClaw/Hermes management uses confirmed global management. Hermes intervals use whole minutes; external retry operations are unsupported. Read back unknown outcomes instead of resending. Native scheduling is owned by the persistent Service; closing the App window does not stop it.",
       examples: ["Summarize my tasks every Monday at 9 AM.", "Pause this scheduled task."] },
     [action("list", "查看定时任务", "List schedules", "cron_list", { externalTool: "external_cron_list" }),
+      action("get", "读取任务详情", "Read schedule details", "cron_get", { nativeTarget: true }),
       ...[["create", "创建", "Create", "cron_create"], ["update", "修改", "Edit", "cron_update"],
         ["enable", "启停", "Enable or disable", "cron_set_enabled"], ["run", "立即运行", "Run now", "cron_run_now"],
         ["delete", "删除", "Delete", "cron_delete"]].map(([id, zh, en, tool]) => action(id, zh, en, tool, { externalTool: "app_manage", operation: tool })),

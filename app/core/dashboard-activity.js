@@ -367,9 +367,10 @@ async function collectActivities({ backends, sinceMs, healthEvents = [], inspira
           let truncated = r.truncated || items.length > maxPerSource;
           if (items.length > maxPerSource) items = items.slice(0, maxPerSource);
           allRuns.push(...items);
-          // The output policy also accounts for attachments and failures. A
-          // missing summary alone cannot prove there was nothing to show.
-          entries.push(...items.filter((run) => run.outputDisposition !== "silent" && !isHeartbeatCronNoise(run)).map(cronRunToActivity));
+          // Running Cron belongs in live work. Finished runs may have only an
+          // attachment or error, so use the output decision even without a summary.
+          entries.push(...items.filter(run => run.status !== "running" && run.outputDisposition !== "pending"
+            && run.outputDisposition !== "silent" && !isHeartbeatCronNoise(run)).map(cronRunToActivity));
           const latestOnly = r.latestOnly || (items.length > 0 && items.every((x) => x.synthesized));
           if (latestOnly) degradedSources.push({ backend: backend.id, source: "cron", reason: "latest-only" });
           if (truncated) degradedSources.push({ backend: backend.id, source: "cron", reason: "truncated" });

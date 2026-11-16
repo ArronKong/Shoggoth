@@ -8749,7 +8749,9 @@ function ChatPageApp() {
   ), [shownGroups, liveTurn?.group, liveTurn?.id]);
   const livePending = liveTurn?.pending;
   const startupWait = activeKey && activeRunInFlight ? runWaitBySession[activeKey] : undefined;
-  const maintenanceWait = chatRunWaitActivity(startupWait);
+  // Routine startup phases keep the loader compact until live activity arrives.
+  const maintenanceWait = startupWait?.kind === "queued" || startupWait?.stage === "reconnecting"
+    ? chatRunWaitActivity(startupWait) : undefined;
   const activeTurnActivity = livePending?.finalReplyStreaming ? undefined : maintenanceWait
     ? { ...liveTurn?.activity, live: true, steps: withStartupWait(liveTurn?.activity?.steps ?? [], maintenanceWait) }
     : liveTurn?.activity;

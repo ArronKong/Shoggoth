@@ -95,6 +95,33 @@ test("权限禁用不隐藏功能说明，确认级操作和 UI-only 边界由�
   assert.equal(result.sampledAt, 1234);
 });
 
+test("Cron help returns current schema examples for allowed tools and the selected backend", async () => {
+  const f = fixture();
+  for (const locale of ["zh-CN", "en"]) {
+    const result = await f.service.get({ featureId: "cron", locale }, f.authority);
+    for (const id of ["list", "get", "create"]) {
+      const item = action(result, id);
+      assert.equal(item.availability, "available");
+      const definition = DEFAULT_TOOL_REGISTRY.get(item.tool).definition;
+      assert.deepEqual(item.inputExamples, definition.inputSchema.examples);
+      assert.equal(item.inputDescription, definition.description);
+      assert.ok(item.inputExamples.every(args => validateMcpProductToolArguments(item.tool, args)));
+    }
+    action(result, "create").inputExamples[0].schedule.expr = "invalid";
+    assert.equal(DEFAULT_TOOL_REGISTRY.get("cron_create").definition.inputSchema.examples[0].schedule.expr, "0 7 * * *");
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) < 16 * 1024);
+  }
+  f.setStatuses([{ id: "hermes", connected: true, disabled: false }]);
+  const external = await f.service.get({ featureId: "cron", backendId: "hermes" }, f.authority);
+  assert.equal(action(external, "create").tool, "app_manage");
+  assert.equal(action(external, "create").inputExamples, undefined);
+  assert.equal(action(external, "get").reason.code, "NATIVE_TARGET_REQUIRED");
+  f.permissions.setProfileOverride("profile-1", "cron_create", "deny");
+  const denied = action(await f.service.get({ featureId: "cron" }, f.authority), "create");
+  assert.equal(denied.reason.code, "TOOL_FORBIDDEN");
+  assert.equal(denied.inputExamples, undefined);
+});
+
 test("外部身份读取同一说明，但不能继承原生记忆、设定或跨 Profile 管理", async () => {
   const f = fixture();
   const external = { ...f.authority, federationClient: "hermes" };

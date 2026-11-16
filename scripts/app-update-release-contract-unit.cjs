@@ -47,7 +47,9 @@ assert.deepEqual(release.jobs.build.strategy.matrix.include.map(row => [row.arch
 assert.deepEqual(release.jobs.build.needs, ["validate", "source-ci"]);
 assert.equal(release.jobs["source-ci"].uses, "./.github/workflows/ci.yml");
 assert.equal(release.jobs["source-ci"].if, "needs.validate.outputs.source_ci_run_id == ''");
+assert.deepEqual(release.jobs["source-ci"].permissions, { contents: "read", actions: "read", "pull-requests": "read" });
 assert.equal(release.jobs.validate.permissions.actions, "read");
+assert.equal(release.jobs.validate.permissions["pull-requests"], "read");
 assert.equal(release.jobs.validate.outputs.source_ci_run_id, "${{ steps.existing-ci.outputs.run_id }}");
 assert.equal(release.jobs.validate.steps.find(step => step.id === "existing-ci").run, "node scripts/release-source-ci.cjs");
 assert.match(release.jobs.build.if, /needs\.source-ci\.result == 'skipped' && needs\.validate\.outputs\.source_ci_run_id != ''/u);
@@ -114,7 +116,18 @@ assert.ok(!JSON.stringify(recovery).includes("secrets."));
 assert.ok(recovery.jobs.recover.steps.at(-1).with.name.includes("observer-${{ github.run_attempt }}"),
   "A controller rerun must preserve earlier recovery receipts without an artifact-name collision");
 const ci = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"));
-assert.deepEqual(ci.on.push.branches, ["**"], "Release tags must not start a duplicate source CI");
+assert.deepEqual(ci.on.push, { "branches-ignore": ["codex/release-v*"] }, "Release branches use the PR CI and tags use release.yml");
+const prReuse = ci.jobs["reviewed-pr-ci"];
+assert.equal(prReuse.if, "github.event_name == 'push' && github.ref == 'refs/heads/main'");
+assert.deepEqual(prReuse.permissions, release.jobs["source-ci"].permissions);
+assert.equal(prReuse.steps.at(-1).run, "node scripts/release-source-ci.cjs --pull-request-only");
+for (const name of ["isolated-checks", "macos-hook-checks"]) {
+  const job = ci.jobs[name];
+  assert.equal(job.needs, "reviewed-pr-ci");
+  assert.match(job.if, /needs\.reviewed-pr-ci\.result != 'success' \|\| needs\.reviewed-pr-ci\.outputs\.run_id == ''/u);
+  assert.match(job.steps.find(step => step.id === "pr-tree").run, /git rev-parse HEAD.*GITHUB_SHA/u);
+  assert.equal(job.steps.find(step => step.name?.startsWith("Tested PR #")).if, "github.event_name == 'pull_request'");
+}
 assert.ok(ci.on.workflow_call !== undefined && ci.on.pull_request !== undefined);
 assert.match(workflow, /node scripts\/release-build\.cjs/u);
 const build = fs.readFileSync(path.join(root, "scripts/release-build.cjs"), "utf8");
@@ -138,6 +151,11 @@ for (const steps of [buildSteps, native.jobs.macos.steps]) {
   assert.match(restore.run, /pfctl -X "\$PF_REFERENCE"/u);
 }
 const nativeSteps = native.jobs.macos.steps.map(step => step.run || "").join("\n");
+const harness = native.jobs.macos.steps.find(step => step.name === "Verify first-launch harness and preserve tagged product source");
+assert.equal(harness["timeout-minutes"], 6);
+assert.match(harness.run, /timeout: 210000/u);
+assert.match(harness.run, /unitTestsPassed: false.*first-launch-self-test-timeout/u);
+assert.equal(native.jobs.macos.steps.find(step => step.name === "Preserve first-launch evidence").with["if-no-files-found"], "error");
 assert.match(nativeSteps, /node scripts\/release-native-download\.cjs/u);
 for (const gate of ["shoggoth-packaged-runtime-smoke.mjs", "shoggoth-memory-e5-packaged.cjs",
   "shoggoth-quarantined-first-launch.cjs", "release-stapler.cjs validate", "codesign --verify --deep --strict",

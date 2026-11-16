@@ -57,6 +57,9 @@ class RunExecutionStore {
     const command = value.command;
     const request = c?.contextRequest;
     if (request?.restorePolicy && !require("./context-transfer").validRestorePolicy(request.restorePolicy)) throw invalid();
+    if (request?.cronCheckpointRecovery !== undefined && (request.cronCheckpointRecovery !== true
+      || run.source !== "cron" || c.runtime !== "antigravity" || c.contextFresh !== true
+      || typeof c.transcriptSessionId !== "string" || !Number.isSafeInteger(c.contextRevisions?.transcript))) throw invalid();
     if (request?.recentHistoryOnly !== undefined && (request.recentHistoryOnly !== true || request.restorePolicy
       || run.source !== "chat" || c.contextFresh !== true || request.historyTruncated !== true
       || request.completeness !== "partial" || request.exceedsBudget || request.transportExceeded
@@ -81,7 +84,7 @@ class RunExecutionStore {
         || review.eventIds.some(id => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(id))) throw invalid();
     }
     if (c?.continuationEvidence !== undefined && request?.partialContinuation?.version !== 1) throw invalid();
-    if ((request?.restorePolicy || request?.recentHistoryOnly || request?.partialContinuation?.version === 1)
+    if ((request?.restorePolicy || request?.cronCheckpointRecovery || request?.recentHistoryOnly || request?.partialContinuation?.version === 1)
       && (!Number.isSafeInteger(request.nativeSeed?.usedTokens) || request.nativeSeed.usedTokens < 0
         || !Number.isSafeInteger(request.nativeSeed?.throughSeq) || request.nativeSeed.throughSeq < 0
         || request.nativeSeed.operationId !== command?.operationId)) throw invalid();

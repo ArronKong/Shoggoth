@@ -101,7 +101,9 @@ class ProductHelpService {
       if (!backend) return state("unknown", "BACKEND_STATE_UNKNOWN");
       if (!backend.connected || backend.disabled) return state("unavailable", "BACKEND_DISCONNECTED");
     }
-    return { ...result, ...permission };
+    return { ...result, ...permission,
+      ...(tool?.definition.inputSchema.examples ? { inputExamples: structuredClone(tool.definition.inputSchema.examples),
+        inputDescription: tool.definition.description } : {}) };
   }
 
   async get({ featureId, backendId = "shoggoth", locale = "zh-CN" }, authority, scope) {

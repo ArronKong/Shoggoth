@@ -105,7 +105,9 @@ export default function ApprovalRow({ item, running, agentName, canRespond, onRe
   const attentionSummary = ((pending && (prompt?.message || command)) || attentionStatus).replace(/\s+/gu, " ").trim();
   const kind = t(source === "cron" ? "dashboard.kindCron" : source === "kanban" ? "dashboard.kindKanban"
     : source === "inspiration" ? "dashboard.kindInspiration" : "dashboard.kindTask");
-  const runningSummary = running?.progressSummary || (running?.title && !["Cron", "Kanban", "Inspiration"].includes(running.title) ? running.title : kind);
+  const title = typeof running?.title === "string" ? running.title.trim() : undefined;
+  const runningSummary = (source === "cron" && title) || running?.progressSummary
+    || (title && !["Cron", "Kanban", "Inspiration"].includes(title) ? title : kind);
   const elapsed = turnElapsedMs(running?.createdAt ?? running?.startedAt, Date.now());
   const runningStatus = t("dashboard.runningNow", { kind, time: elapsed === undefined ? "" : formatTurnElapsed(elapsed) });
   const status = waiting ? attentionStatus : runningStatus;

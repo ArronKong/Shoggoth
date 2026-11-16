@@ -32,7 +32,7 @@ const {
 const { verifyAntigravityAcpServer } = require("./antigravity-acp-distribution");
 const { antigravityAcpAuthType, prepareAntigravityAcpHome } = require("./antigravity-runtime-config");
 const { AntigravityAcpRuntimeLedger } = require("./antigravity-acp-runtime-ledger");
-const { AntigravityNativeToolResults, nativeToolCall } = require("./antigravity-native-tool-results");
+const { AntigravityNativeToolResults, checkpointFailureStep, nativeToolCall } = require("./antigravity-native-tool-results");
 const { prepareAntigravityWorkspaceExecution, antigravityWorkspaceSessionMeta } = require("./antigravity-workspace-execution");
 
 const ACP_NAMING = Object.freeze({
@@ -1671,8 +1671,14 @@ class AntigravityAcpRuntimeHost {
     if (response.stopReason !== "cancelled") {
       const nativeFailure = this.nativeToolResults?.turnFailure(active.sessionId, active.nativeToolCursor, active.createdAt, this.now());
       if (nativeFailure) {
-        active.failureCode = classifyAntigravityFailure(nativeFailure.message) || active.failureCode || "ANTIGRAVITY_TURN_FAILED";
-        active.failure = runtimeFailureDetail(nativeFailure, this.registeredSecrets);
+        if (checkpointFailureStep(nativeFailure.message) !== null) {
+          active.failureCode = "ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED";
+          // The nested provider error can come from an earlier turn.
+          active.failure = null;
+        } else {
+          active.failureCode = classifyAntigravityFailure(nativeFailure.message) || active.failureCode || "ANTIGRAVITY_TURN_FAILED";
+          active.failure = runtimeFailureDetail(nativeFailure, this.registeredSecrets);
+        }
       }
     }
     const failureCode = active.failureCode;

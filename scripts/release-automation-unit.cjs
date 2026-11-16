@@ -9,7 +9,7 @@ const { createHash } = require("node:crypto");
 const yaml = require("js-yaml");
 const { releaseRequest } = require("./release-http.cjs");
 const { recoverRelease } = require("./release-recovery.cjs");
-const { selectMainSourceCi, sourceCiJobs } = require("./release-source-ci.cjs");
+const { selectMainSourceCi, selectPullRequestSourceCi, verifySourceCiProof, sourceCiJobs } = require("./release-source-ci.cjs");
 const { createIntent, assertAccepted, assertAudits, publishAccepted, verifyPublishedReceipt,
   gateNames, releaseCiJobNames } = require("./release-publication.cjs");
 const { packageNames } = require("./release-draft.cjs");
@@ -161,6 +161,35 @@ test("a temporary public download error can retry the read-only job after publis
   }
 });
 
+test("only the Intel harness timeout before asset verification retries the existing draft job", async () => {
+  const marker = "Intel first-launch harness self-test subprocess timed out before draft verification.";
+  for (const scenario of ["timeout", "assertion", "multiple-errors", "other-step", "launched", "missing-draft", "published", "other-arch"]) {
+    const f = recoveryFixture();
+    Object.assign(f.job, {
+      name: `native-verification / Native ${scenario === "other-arch" ? "arm64" : "x64"} draft verification`,
+      labels: [scenario === "other-arch" ? "macos-latest" : "macos-15-intel"],
+      runner_group_name: "GitHub Actions", runner_id: 42, status: "completed", conclusion: "failure",
+      steps: [
+        { name: "Verify first-launch harness and preserve tagged product source", status: "completed", conclusion: "failure" },
+        { name: "Download exact draft assets", status: "completed", conclusion: "skipped" },
+        { name: "Normal quarantined first launch on the empty hosted account", status: "completed", conclusion: "skipped" },
+      ],
+    });
+    if (scenario === "other-step") f.job.steps.push({ name: "Preserve first-launch evidence", conclusion: "failure" });
+    if (scenario === "launched") f.job.steps[2].conclusion = "success";
+    if (scenario !== "missing-draft") f.jobs.push({ id: 15, name: "draft", status: "completed", conclusion: "success" });
+    if (scenario === "published") f.jobs.push({ id: 16, name: "publish", status: "completed", conclusion: "success" });
+    f.annotations.splice(0, f.annotations.length,
+      { annotation_level: "failure", message: scenario === "assertion" ? "First-launch harness self-test failed" : marker },
+      { annotation_level: "failure", message: "Process completed with exit code 1." });
+    if (scenario === "multiple-errors") f.annotations.push({ annotation_level: "failure", message: "Unexpected runner error" });
+    const result = await recoverRelease(f.client, clone(f.run), f.runtime);
+    assert.equal(result.decision, scenario === "timeout" ? "retried" : "needs-attention", scenario);
+    assert.deepEqual(f.writes, scenario === "timeout" ? [{ route: "/actions/jobs/9/rerun", method: "POST" }] : [], scenario);
+    if (scenario === "timeout") assert.deepEqual(result.candidates, [{ id: 9, reason: "intel-harness-self-test-timeout" }]);
+  }
+});
+
 test("two automatic recoveries exhaust the three-attempt budget", async () => {
   const f = recoveryFixture();
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -253,8 +282,57 @@ function mainCiFixture() {
   return { workflow, run, jobs, list, ancestry, get, routes };
 }
 
+function prCiFixture() {
+  const f = mainCiFixture();
+  const head = "b".repeat(40), tree = "c".repeat(40);
+  const pr = { number: 38, merged_at: "2026-11-15T12:07:20Z", merge_commit_sha: sha,
+    base: { ref: "main", repo: { full_name: repo } }, head: { ref: "codex/release-v1.2.3", sha: head, repo: { full_name: repo } } };
+  const commit = { sha, tree: { sha: tree }, author: { email: "user@users.noreply.github.com" },
+    committer: { email: "noreply@github.com" } };
+  Object.assign(f.run, { event: "pull_request", head_branch: pr.head.ref, head_sha: head, pull_requests: [] });
+  for (const job of f.jobs) {
+    job.head_sha = head;
+    job.steps = [{ name: `Tested PR #38 tree ${tree}`, status: "completed", conclusion: "success" }];
+  }
+  f.routes.set(`/commits/${sha}/pulls?per_page=100`, [pr]);
+  f.routes.set(`/git/commits/${sha}`, commit);
+  f.routes.set(`/actions/workflows/ci.yml/runs?branch=codex%2Frelease-v1.2.3&event=pull_request&head_sha=${head}&per_page=10`, f.list);
+  return { ...f, pr, commit };
+}
+
+test("both jobs must attest the merged PR's exact tree before its CI can be reused", async () => {
+  const f = prCiFixture(), proof = { runId: 7, runAttempt: 1 };
+  assert.deepEqual(await selectPullRequestSourceCi(f, repo, sha), proof);
+  assert.deepEqual(await verifySourceCiProof(f, repo, sha, proof), proof);
+  for (const mutate of [
+    f => { f.pr.merged_at = null; },
+    f => { f.pr.base.ref = "other"; },
+    f => { f.pr.head.repo.full_name = "fork/Shoggoth"; },
+    f => { f.run.head_repository.full_name = "fork/Shoggoth"; },
+    f => { f.commit.tree.sha = "d".repeat(40); },
+    f => { f.ancestry.status = "diverged"; },
+    f => { f.jobs[0].steps = []; },
+    f => { f.jobs[0].steps[0].name = f.jobs[0].steps[0].name.replace("#38", "#39"); },
+    f => { f.jobs[1].steps[0].conclusion = "skipped"; },
+    f => { f.jobs[1].conclusion = "failure"; },
+    f => { f.jobs[1].run_attempt = 2; },
+  ]) {
+    const f = prCiFixture();
+    mutate(f);
+    assert.equal(await selectPullRequestSourceCi(f, repo, sha), null);
+    assert.equal(await verifySourceCiProof(f, repo, sha, proof), null);
+  }
+  const rerun = prCiFixture();
+  rerun.run.run_attempt++;
+  rerun.jobs.forEach(job => { job.run_attempt++; });
+  assert.equal(await verifySourceCiProof(rerun, repo, sha, proof), null);
+});
+
 test("only both successful jobs of the exact same-repo main push CI may be reused", async () => {
   const f = mainCiFixture();
+  assert.deepEqual(await selectMainSourceCi(f, repo, sha), { runId: 7, runAttempt: 1 });
+  f.jobs.push({ ...f.jobs[0], name: "reviewed-pr-ci" });
+  f.routes.get("/actions/runs/7/jobs?filter=latest&per_page=100").total_count++;
   assert.deepEqual(await selectMainSourceCi(f, repo, sha), { runId: 7, runAttempt: 1 });
   const mismatches = [
     f => { f.workflow.state = "disabled_manually"; },
@@ -293,7 +371,7 @@ test("release can wait for pending exact main CI with a deadline and fall back o
 
   f.run.status = "in_progress";
   f.run.conclusion = null;
-  clock = start + 25 * 60_000 - 1000;
+  clock = start + 40 * 60_000 - 1000;
   const expired = await selectMainSourceCi(f, repo, sha, { wait: true, now: () => clock, pause: async ms => {
     assert.equal(ms, 1000);
     clock += ms;
@@ -309,7 +387,7 @@ test("draft is the default; publishing needs committed bilingual notes in the re
     assert.throws(() => createIntent({ ...intentSettings, ...patch }));
 });
 
-function publicationFixture() {
+function publicationFixture(ci = mainCiFixture()) {
   const intent = createIntent(intentSettings), blobs = new Map();
   const names = [...packageNames(version, "arm64"), ...packageNames(version, "x64")];
   for (const name of names) blobs.set(name, Buffer.from(`signed fixture ${name}`));
@@ -325,7 +403,6 @@ function publicationFixture() {
     name: `Shoggoth ${version} — draft validation`, body: `<!-- shoggoth-draft-pipeline:${sha} -->`, assets,
     html_url: `https://github.com/${repo}/releases/tag/${tag}` };
   const jobs = [...gateNames, ...releaseCiJobNames].map((name, i) => ({ id: i + 20, name, status: "completed", conclusion: "success" }));
-  const ci = mainCiFixture();
   const patches = [], records = [];
   const reads = [];
   const client = {
@@ -333,6 +410,7 @@ function publicationFixture() {
     get: async route => {
       reads.push(route);
       if (route === "/actions/runs/42") return { id: 42, head_sha: sha, head_branch: tag, event: "workflow_dispatch", path: ".github/workflows/release.yml", repository: { full_name: repo }, run_attempt: 1 };
+      if (route === "/actions/runs/9") return { ...ci.run, id: 9, head_sha: "f".repeat(40) };
       if (ci.routes.has(route)) return ci.get(route);
       if (route.includes("/jobs?")) return clone({ total_count: jobs.length, jobs });
       if (route === "") return { full_name: repo, visibility: "public", default_branch: "main" };
@@ -383,6 +461,18 @@ test("publication rechecks the recorded main CI attempt when in-run CI was skipp
     if (kind === "valid") await publishAccepted(f.client, f.intent, f.receipt);
     else await assert.rejects(publishAccepted(f.client, f.intent, f.receipt), /CI proof changed|Unexpected release CI result/u);
     assert.equal(f.patches.length, kind === "valid" ? 1 : 0);
+  }
+});
+
+test("publication accepts an unchanged PR proof and stops when its tested tree differs", async () => {
+  for (const changed of [false, true]) {
+    const ci = prCiFixture(), f = publicationFixture(ci);
+    f.receipt.sourceCi = { runId: ci.run.id, runAttempt: ci.run.run_attempt };
+    for (const job of f.jobs.filter(item => releaseCiJobNames.includes(item.name))) job.conclusion = "skipped";
+    if (changed) ci.commit.tree.sha = "e".repeat(40);
+    if (changed) await assert.rejects(publishAccepted(f.client, f.intent, f.receipt), /CI proof changed/u);
+    else await publishAccepted(f.client, f.intent, f.receipt);
+    assert.equal(f.patches.length, changed ? 0 : 1);
   }
 });
 

@@ -538,7 +538,7 @@ function nativeLongToolHistory(runId = "activity-run", start = now): any[] {
     ["ls -la /tmp/report", { command: "ls -la /tmp/report", cwd: "/tmp/report" }, 125000],
     ["tool", { command: "python3 report.py", cwd: "/tmp/report" }, 194000],
     ["view_file", { path: "/tmp/report.md" }, 115000],
-    ["mcp__shoggoth__app_state_get", { section: "agents" }, 600000],
+    ["mcp__shoggoth__app_state_get", { section: "agents", nativeActivityTitle: "shoggoth_app_state_get" }, 600000],
     ["mcp__other__execute", { command: "python3 other.py" }, 1000],
   ] as const;
   const messages: any[] = [{ id: `${runId}-user`, role: "user", content: "Check the report.", timestamp: start }];

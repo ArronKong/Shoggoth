@@ -2,9 +2,125 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const test = require("node:test");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { waitUntil } = require("./shoggoth-work-run-coordinator-unit.cjs");
+const { readClientToken, requestService } = require("../app/agent-service/client");
+const { NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID } = require("../app/agent-service/runtime-account");
+const { PROTOCOL_VERSION } = require("../app/agent-service/server");
+
+test("Cron and chat renew the same Antigravity conversation after failed checkpoints", async () => {
+  const f = await openHandoffFixture();
+  try {
+    const { productStore, chatSessionStore, transcriptStore, workRunCoordinator: coordinator } = f.service;
+    const { binding } = productStore.addAgentRuntimeBinding(f.profile.id, { runtime: "antigravity",
+      runtimeAccountId: NATIVE_ANTIGRAVITY_RUNTIME_ACCOUNT_ID }, { operationId: "fixture-antigravity-cron" });
+    productStore.setAgentDefaultBinding(f.profile.id, binding.id,
+      { revision: productStore.getAgentRuntimeBindings(f.profile.id).revision });
+    const config = f.service.nativeRuntimeConfig.read();
+    f.service.nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1,
+      flags: { ...config.flags, runtimeConversationHandoff: false } });
+
+    const id = crypto.randomUUID;
+    const ipc = (method, params) => requestService(f.paths, { id: id(), token: readClientToken(f.paths),
+      version: PROTOCOL_VERSION, method, params });
+    const { job } = await ipc("cron.job.create", { operationId: id(), createdAt: Date.now(), enabled: false,
+      name: "Antigravity checkpoint recovery", profileId: f.profile.id, workspace: f.workspace,
+      prompt: "Produce the first report", schedule: { kind: "at", at: Date.now() + 60_000 },
+      overlapPolicy: "skip", misfirePolicy: "latest", maxCatchUp: 1 });
+    const trigger = async (operationId = id(), createdAt = Date.now()) => (await ipc("cron.run.trigger",
+      { operationId, createdAt, jobId: job.id })).run;
+    const running = async run => {
+      await waitUntil(() => {
+        const current = coordinator.getRun(run.id);
+        return current && !["queued", "starting"].includes(current.status);
+      }, 5000, "Run admission");
+      const current = coordinator.getRun(run.id);
+      assert.equal(current.status, "running", current.errorCode);
+      return current;
+    };
+    const setPrompt = prompt => ipc("cron.job.update", { operationId: id(), jobId: job.id,
+      patch: { prompt }, createdAt: Date.now() });
+    const first = await running(await trigger());
+    const key = coordinator.getRunSessionKey(first);
+    const session = chatSessionStore.getSession(key);
+    const host = f.transport.hosts.get("antigravity");
+    const failCheckpoint = async (run, errorCode) => {
+      const nativeSessionId = run.runtimeSessionRef.sessionId;
+      const thread = host.threads.find(item => item.id === nativeSessionId);
+      const turn = thread.turns.find(item => item.id === run.runtimeTurnRef.turnId);
+      turn.status = "failed";
+      turn.errorCode = errorCode;
+      host.emit({ known: true, type: "complete", threadId: nativeSessionId, turnId: turn.id, status: "failed", errorCode });
+      await coordinator.waitForIdle(run.id);
+      assert.equal(coordinator.getRun(run.id).errorCode, errorCode);
+      coordinator.runtimeManager.hasFailedContextCheckpoint = (owner, candidateId) => (
+        owner.runtime === binding.runtime && owner.runtimeAccountId === binding.runtimeAccountId && candidateId === nativeSessionId);
+    };
+    const oldNativeId = first.runtimeSessionRef.sessionId;
+    const oldThread = host.threads.find(thread => thread.id === oldNativeId);
+    assert.equal(oldThread.threadSource, chatSessionStore.getBinding(key).threadSource,
+      "Cron uses the normal durable conversation binding even with handoff disabled");
+    await f.complete(first, "LAST KNOWN GOOD REPORT");
+    await f.complete(await running(await trigger()), "NO_REPLY");
+
+    await setPrompt("OLD FAILED PROMPT");
+    const failedOperation = id(), failedAt = Date.now();
+    const failed = await running(await trigger(failedOperation, failedAt));
+    // Simulate a terminal saved by older builds when nested checkpoint errors
+    // were still classified as region errors.
+    await failCheckpoint(failed, "ANTIGRAVITY_REGION_UNSUPPORTED");
+    assert.equal((await trigger(failedOperation, failedAt)).id, failed.id);
+    assert.equal(host.turnStartCalls, 3, "a terminal occurrence is never replayed");
+
+    await setPrompt("RUN ONLY THIS NEW PROMPT");
+    chatSessionStore.setPermissionMode(key, "request-approval");
+    const recovered = await running(await trigger());
+    const contract = coordinator.runExecutionContracts.get(recovered.id);
+    assert.equal(coordinator.getRunSessionKey(recovered), key);
+    assert.notEqual(recovered.runtimeSessionRef.sessionId, oldNativeId);
+    assert.equal(recovered.runtimeSessionRef.runtimeAccountId, first.runtimeSessionRef.runtimeAccountId);
+    assert.equal(contract.permissionMode, "full-access");
+    assert.equal(host.lastTurnStartParams.permissionMode, "full");
+    assert.equal(host.lastTurnStartParams.model, contract.effectiveModel);
+    assert.match(contract.turnDeveloperInstructions, /Frozen permission context:.*danger-full-access/u);
+    assert.equal(host.lastTurnStartParams.prompt, "RUN ONLY THIS NEW PROMPT");
+    assert.match(host.lastTurnStartParams.context, /LAST KNOWN GOOD REPORT/u);
+    assert.doesNotMatch(host.lastTurnStartParams.context, /OLD FAILED PROMPT|NO_REPLY/u);
+    assert.equal(host.turnStartCalls, 4);
+    assert.deepEqual(chatSessionStore.getSession(key).retiredRuntimeSessions.map(entry => entry.runtimeSessionId), [oldNativeId]);
+    assert.equal(chatSessionStore.getSession(key).id, session.id);
+    assert.equal(coordinator.getRun(failed.id).runtimeSessionRef.sessionId, oldNativeId);
+    await f.complete(recovered, "RECOVERED REPORT");
+    assert.ok(transcriptStore.listEvents(f.profile.id, session.id)
+      .some(event => event.runId === recovered.id && event.content?.transcriptType === "context.native.seeded"));
+
+    const sendChat = async prompt => {
+      const receipt = await ipc("chat.send.accept", { operationId: id(), sessionKey: key, prompt, createdAt: Date.now() });
+      return running({ id: receipt.runId });
+    };
+    const reply = await sendChat("Follow up on the recovered report");
+    assert.equal(reply.runtimeSessionRef.sessionId, recovered.runtimeSessionRef.sessionId);
+    const chatContract = coordinator.runExecutionContracts.get(reply.id);
+    for (const field of ["bindingId", "runtime", "runtimeAccountId", "runtimeProfileId", "effectiveModel", "workspace",
+      "toolRegistryRevision", "toolPermissionRevision"]) {
+      assert.equal(chatContract[field], contract[field], field);
+    }
+    assert.equal(chatContract.permissionMode, "request-approval");
+    await failCheckpoint(reply, "ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED");
+
+    const recoveredChat = await sendChat("Continue after the checkpoint failure");
+    assert.notEqual(recoveredChat.runtimeSessionRef.sessionId, reply.runtimeSessionRef.sessionId);
+    assert.equal(recoveredChat.runtimeSessionRef.runtimeAccountId, reply.runtimeSessionRef.runtimeAccountId);
+    assert.equal(recoveredChat.sourceId, key);
+    assert.equal(chatSessionStore.getSession(key).id, session.id);
+    assert.equal(coordinator.runExecutionContracts.get(recoveredChat.id).permissionMode, "request-approval");
+    assert.match(host.lastTurnStartParams.context, /RECOVERED REPORT/u);
+    assert.equal(host.turnStartCalls, 6);
+    await f.complete(recoveredChat);
+  } finally { await f.close(); }
+});
 
 test("real stores preserve one conversation across Codex → Pi → DSH → Codex and same-Binding fresh session", async () => {
   const f = await openHandoffFixture();
@@ -166,6 +282,7 @@ for (const boundary of ["inbox", "execution", "binding-pending", "binding-comple
       }
       await coordinator.close();
       assert.equal(cut, true);
+      const savedCommand = f.service.pendingCommandInbox.get(operationId);
       const old = f;
       await old.close({ remove: false });
       f = await openHandoffFixture({ root: old.root, transport: old.transport });
@@ -180,9 +297,20 @@ for (const boundary of ["inbox", "execution", "binding-pending", "binding-comple
       assert.ok(f.service.workRunCoordinator.listSessionRuns(session.sessionKey)
         .filter(run => ["starting", "running", "waiting_approval", "waiting_input"].includes(run.status)).length <= 1);
       if (actual?.status === "running") await f.complete(actual);
-      // Repeat the durable operation after recovery; it must stay idempotent.
-      try { await f.send(session.sessionKey, operationId); } catch (error) {
-        assert.equal(error.code, "PENDING_COMMAND_IDEMPOTENCY_CONFLICT");
+      if (boundary === "inbox") {
+        // A legacy Inbox-only command has no frozen execution ownership.
+        assert.equal(savedCommand.state, "pending");
+        assert.equal(savedCommand.acceptance, undefined);
+        assert.equal(run, undefined);
+        assert.equal(nativeCount, 0);
+        await assert.rejects(f.send(session.sessionKey, operationId), {
+          code: "CHAT_OPERATION_VERIFICATION_REQUIRED", receiptUncertain: true,
+        });
+        assert.deepEqual(f.service.pendingCommandInbox.get(operationId), savedCommand);
+        assert.equal(f.service.workRunCoordinator.getChatRunByOperation(operationId, session.sessionKey), null);
+      } else {
+        const replay = await f.send(session.sessionKey, operationId);
+        assert.equal(replay.id, run.id);
       }
       assert.equal(f.transport.hosts.get("pi")?.turnStartCalls ?? 0, nativeCount);
     } finally { await f.close(); }

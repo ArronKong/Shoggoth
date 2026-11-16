@@ -34,7 +34,7 @@ test("compatible Service preserves v2 receipts, Stop, serial chat preparation an
     return { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
   };
   const start = async workerWrites => {
-    fixture = await openHandoffFixture({ root, transport, serviceOptions: { memoryCore: false, prewarmMcpAuth: false,
+    fixture = await openHandoffFixture({ root, transport, retryWriterIdentity: true, serviceOptions: { memoryCore: false, prewarmMcpAuth: false,
       now: () => now, setCronTimer: () => 1, clearCronTimer() {}, pendingCommandWorkerWrites: workerWrites,
       ...(workerWrites ? {} : { chatPreparationConcurrency: 1 }) } });
     transport = fixture.transport;

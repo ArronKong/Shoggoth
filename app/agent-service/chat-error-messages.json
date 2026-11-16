@@ -30,6 +30,7 @@
     "RUNTIME_APPROVAL_UNAVAILABLE": "Antigravity 的非交互模式无法弹出原生工具授权，本次操作已被拒绝；请检查权限设置，调整后可在当前会话重新发送",
     "ANTIGRAVITY_NETWORK_UNAVAILABLE": "Antigravity 无法连接 Google 服务，本次任务未完成；请检查代理与网络后重试",
     "ANTIGRAVITY_REGION_UNSUPPORTED": "Google 模型接口不支持当前请求所在地区，本次任务未完成；请检查服务的地区支持范围和当前网络出口",
+    "ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED": "Antigravity 的上下文压缩检查点失败，本次运行已停止。下一次运行将尝试在新的原生会话中继续。",
     "ANTIGRAVITY_ACP_NOT_INSTALLED": "Antigravity 官方运行组件尚未安装；请前往「模型」登录 Antigravity，登录时会自动安装",
     "ANTIGRAVITY_ACP_INTEGRITY_FAILED": "Antigravity 运行组件校验未通过（文件可能被修改或损坏），已拒绝启动；请前往「模型」重新登录 Antigravity，会自动重新安装",
     "ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED": "当前设备平台暂不支持 Antigravity 官方运行组件",

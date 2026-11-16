@@ -17,6 +17,13 @@ const MAX_SCAN_BYTES = 32 * 1024 * 1024;
 const MAX_INPUT_BYTES = 64 * 1024;
 const CALL_TYPE = "type.googleapis.com/antigravity.localharness.ToolCall";
 const RESPONSE_TYPE = "type.googleapis.com/antigravity.localharness.ToolResponse";
+const CHECKPOINT_STEP = 23;
+
+function checkpointFailureStep(message) {
+  const match = /^(?:agent executor error: )?context summarization: checkpoint step (\d{1,9}) failed: error executing cascade step: CORTEX_STEP_TYPE_CHECKPOINT:/u
+    .exec(message);
+  return match ? Number(match[1]) : null;
+}
 
 function plain(value) {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -108,6 +115,24 @@ function nativeTiming(payload) {
   return startedAt !== null && completedAt !== null && completedAt >= startedAt
     && completedAt - startedAt <= 24 * 60 * 60 * 1000
     ? { source: "antigravity-native", startedAt, completedAt } : undefined;
+}
+
+function stepMetadata(payload, row, sessionId) {
+  if (field(payload, 1) !== row.step_type || field(payload, 4) !== row.status) return null;
+  const metadata = field(payload, 5), source = field(metadata, 20);
+  return source && text(field(source, 1)) === sessionId && text(field(source, 4)) === sessionId
+    && (field(source, 2) ?? 0) === row.idx ? metadata : null;
+}
+
+function terminalFailure(db, row, sessionId) {
+  if (row?.step_type !== 17 || row.status !== 3 || row.bytes < 1 || row.bytes > MAX_BLOB_BYTES) return null;
+  const payload = db.prepare("SELECT step_payload FROM steps WHERE idx = ?").get(row.idx).step_payload;
+  const metadata = stepMetadata(payload, row, sessionId);
+  if (!metadata || field(metadata, 4) !== undefined) return null;
+  const error = field(field(payload, 24), 3);
+  const message = text(field(error, 2) ?? field(error, 1));
+  return message.length && Buffer.byteLength(message) <= MAX_INPUT_BYTES
+    ? { message, timestamp: nativeTimestamp(field(metadata, 1)) } : null;
 }
 
 function decodeDeniedRow(row, sessionId) {
@@ -236,6 +261,26 @@ class AntigravityNativeToolResults {
 
   recover(sessionId, cursor, calls) { return this.reconcile(sessionId, cursor, calls).results; }
 
+  hasFailedContextCheckpoint(sessionId) {
+    try {
+      return this._read(sessionId, db => {
+        if (!this._session(db, sessionId)) return false;
+        const latest = db.prepare("SELECT idx, step_type, status, length(step_payload) AS bytes FROM steps ORDER BY idx DESC LIMIT 1").get();
+        const failure = terminalFailure(db, latest, sessionId);
+        if (!failure || failure.timestamp === null) return false;
+        const idx = checkpointFailureStep(failure.message);
+        if (idx === null || idx >= latest.idx) return false;
+        const checkpoint = db.prepare("SELECT idx, step_type, status, step_payload FROM steps WHERE idx = ? AND step_type = ? AND status = 7 AND length(step_payload) BETWEEN 1 AND ?")
+          .get(idx, CHECKPOINT_STEP, MAX_BLOB_BYTES);
+        // The stored error must point at an actually failed step in this
+        // trajectory. A provider error or a failed tool does not retire it.
+        const metadata = checkpoint && stepMetadata(checkpoint.step_payload, checkpoint, sessionId);
+        const failedAt = metadata ? nativeTimestamp(field(metadata, 1)) : null;
+        return failedAt !== null && failedAt <= failure.timestamp && Boolean(field(checkpoint.step_payload, 31)?.length);
+      });
+    } catch { return false; }
+  }
+
   turnFailure(sessionId, cursor, startedAt, endedAt) {
     if (!Number.isSafeInteger(cursor) || cursor < -1 || !Number.isSafeInteger(startedAt)
       || !Number.isSafeInteger(endedAt) || endedAt < startedAt) return null;
@@ -245,20 +290,11 @@ class AntigravityNativeToolResults {
         const rows = db.prepare("SELECT idx, step_type, status, length(step_payload) AS bytes FROM steps WHERE idx > ? ORDER BY idx LIMIT ?").all(cursor, MAX_ROWS + 1);
         // One new native input and a final error prove this prompt's failure.
         // Errors followed by a response/tool/input may have been recovered.
-        const row = rows.at(-1);
         if (rows.length > MAX_ROWS || rows[0]?.step_type !== 14
-          || rows.filter(item => item.step_type === 14).length !== 1
-          || row?.step_type !== 17 || row.status !== 3 || row.bytes < 1 || row.bytes > MAX_BLOB_BYTES) return null;
-        const payload = db.prepare("SELECT step_payload FROM steps WHERE idx = ?").get(row.idx).step_payload;
-        if (field(payload, 1) !== 17 || field(payload, 4) !== 3) return null;
-        const metadata = field(payload, 5), source = field(metadata, 20);
-        const timestamp = nativeTimestamp(field(metadata, 1));
-        if (!source || text(field(source, 1)) !== sessionId || text(field(source, 4)) !== sessionId
-          || (field(source, 2) ?? 0) !== row.idx || field(metadata, 4) !== undefined
-          || timestamp === null || timestamp < startedAt || timestamp > endedAt) return null;
-        const error = field(field(payload, 24), 3);
-        const message = text(field(error, 2) ?? field(error, 1));
-        return message.length && Buffer.byteLength(message) <= MAX_INPUT_BYTES ? { message } : null;
+          || rows.filter(item => item.step_type === 14).length !== 1) return null;
+        const failure = terminalFailure(db, rows.at(-1), sessionId);
+        return failure && failure.timestamp !== null && failure.timestamp >= startedAt && failure.timestamp <= endedAt
+          ? { message: failure.message } : null;
       });
     } catch { return null; }
   }
@@ -306,4 +342,4 @@ class AntigravityNativeToolResults {
   }
 }
 
-module.exports = { AntigravityNativeToolResults, nativeToolCall };
+module.exports = { AntigravityNativeToolResults, checkpointFailureStep, nativeToolCall };

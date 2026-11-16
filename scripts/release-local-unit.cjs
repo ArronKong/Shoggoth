@@ -23,14 +23,30 @@ test("local input requires an exact version and keeps default notarization in Ap
 });
 
 test("source signing waits for exact-source CI and rejects failed or unrelated success", async () => {
+  const repository = { full_name: "ArronKong/Shoggoth" };
+  const workflowPath = ".github/workflows/ci.yml";
+  const run = { id: 12, head_sha: sha, event: "push", head_branch: "main", repository, head_repository: repository,
+    workflow_id: 2, path: workflowPath, run_attempt: 1, status: "completed", conclusion: "success" };
+  const jobs = ["isolated-checks", "macos-hook-checks"].map(name => ({ name, run_id: 12, head_sha: sha, run_attempt: 1,
+    status: "completed", conclusion: "success" }));
   let count = 0;
-  const client = { request: async () => response({ workflow_runs: [{ id: 12, head_sha: sha, event: "push",
-    status: ++count === 1 ? "in_progress" : "completed", conclusion: count === 1 ? null : "success" }] }) };
+  const client = { request: async route => {
+    if (route === `/commits/${sha}/pulls?per_page=100`) return response([]);
+    if (route.includes(`/runs?branch=main&event=push&head_sha=${sha}`)) return response({ workflow_runs: [++count === 1
+      ? { ...run, status: "in_progress", conclusion: null } : run] });
+    if (route === "/actions/runs/12") return response(run);
+    if (route === "/actions/workflows/ci.yml") return response({ id: 2, path: workflowPath, state: "active" });
+    if (route === `/compare/${sha}...main`) return response({ status: "identical" });
+    if (route.includes("/actions/runs/12/jobs?")) return response({ total_count: jobs.length, jobs });
+    assert.fail(`Unexpected test read ${route}`);
+  } };
   assert.equal(await waitForSourceCi(client, sha, immediate), 12);
+  jobs[0].conclusion = "skipped";
+  await assert.rejects(waitForSourceCi(client, sha, immediate), /requires successful Linux and macOS CI/u);
   await assert.rejects(waitForSourceCi({ request: async () => response({ workflow_runs: [
-    { head_sha: "b".repeat(40), event: "push", status: "completed", conclusion: "success" },
-    { head_sha: sha, event: "pull_request", status: "completed", conclusion: "success" },
-    { head_sha: sha, event: "push", status: "completed", conclusion: "failure" },
+    { ...run, head_sha: "b".repeat(40) },
+    { ...run, event: "pull_request" },
+    { ...run, conclusion: "failure" },
   ] }) }, sha, immediate), /requires successful CI/u);
 });
 

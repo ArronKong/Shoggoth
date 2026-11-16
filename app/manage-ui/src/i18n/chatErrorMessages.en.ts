@@ -37,6 +37,7 @@ export default {
     RUNTIME_APPROVAL_UNAVAILABLE: "The action was denied because Antigravity’s non-interactive mode cannot prompt for tool approval. Check the permission settings before resending in this session.",
     ANTIGRAVITY_NETWORK_UNAVAILABLE: gwErrors.providerNetworkUnavailable,
     ANTIGRAVITY_REGION_UNSUPPORTED: gwErrors.regionUnsupported,
+    ANTIGRAVITY_CONTEXT_CHECKPOINT_FAILED: "An Antigravity context checkpoint failed. The next run will try a new native session.",
     ANTIGRAVITY_ACP_NOT_INSTALLED: "The official Antigravity runtime is missing. Sign in to Antigravity under Models to install it automatically.",
     ANTIGRAVITY_ACP_INTEGRITY_FAILED: "Antigravity did not start because its runtime files failed verification. Sign in again under Models to reinstall the runtime automatically.",
     ANTIGRAVITY_ACP_PLATFORM_UNSUPPORTED: "The official Antigravity runtime is unavailable on this device platform.",

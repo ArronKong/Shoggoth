@@ -120,15 +120,19 @@ const checkLoadingBubble=(maintenance=false)=>{
   check(loader!.getAnimations({subtree:true}).some(animation=>animation.playState==="running"),"reply loading animation is running");
 };
 const stage=async(value:string,statusKind="starting")=>{
+  const waitingLoader = document.querySelector(loadingSelector);
   emit({state:"status",statusKind,stage:value});
   await tick();
-  const maintenance = ["context", "reconnecting", "compacting"].includes(value);
+  const maintenance = value === "reconnecting";
   if (maintenance) {
     await wait(() => waitNode()?.dataset.stage === value, "maintenance progress appears in live activity");
     check(waitNode()!.textContent?.includes(i18n.t(`chat.runWait.${value}`)), "maintenance uses its translated status");
     check(!!waitNode()!.closest('[data-live-activity-bubble="activity"]'), "maintenance belongs to the existing live activity bubble");
     check(document.querySelectorAll(`${maintenanceScope} [data-testid="chat-run-wait"]`).length === 1, "one live maintenance status is visible");
-  } else check(!waitNode(), "ordinary startup stages do not create a separate card");
+  } else {
+    check(!document.querySelector(`${maintenanceScope} [data-testid="chat-run-wait"]`), `${value} stays out of the waiting bubble`);
+    if (waitingLoader) check(document.querySelector(loadingSelector) === waitingLoader, `${value} keeps the same loader`);
+  }
   checkLoadingBubble(maintenance);
   const bounds = visible<HTMLElement>(maintenance ? maintenanceLoadingSelector : loadingSelector)!.getBoundingClientRect();
   check(bounds.left >= 0 && bounds.right <= innerWidth + 1, "the loader fits the viewport");
@@ -207,6 +211,13 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
   }
   emit({state:"status",statusKind:"running",stage:"waiting"});await tick();check(!waitNode() && !document.querySelector(loadingSelector), "late running cannot revive the loader");
   await finish();
+  const activity = () => visible('[data-chat-activity-preview]');
+  await send();
+  await stage("context");
+  await stage("waiting", "running");
+  emit({state:"thinking",thinking:"Checking the project structure."});
+  await wait(() => activity() && !document.querySelector(loadingSelector), "first thinking expands the waiting bubble");
+  await finish();
   await send();
   const sendsBeforeQueue = requests.filter(r=>r.method==="chat.send").length;
   emit({state:"status",statusKind:"queued",reason:"RUNTIME_ACCOUNT_ACTIVE_LIMIT",queuedAt:Date.now()});
@@ -225,9 +236,9 @@ Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests
   emit({state:"status",statusKind:"retrying",reason:"RUNTIME_RATE_LIMITED"});
   await wait(()=>waitNode()?.dataset.kind==="retrying","retry shown");
   checkLoadingBubble();
-  await stage("connecting");
+  await stage("compacting");
+  await stage("waiting", "running");
   sockets.forEach(s=>s.emit({type:"event",event:"session.tool",payload:{sessionKey:key,runId:currentRunId,data:{toolCallId:"fixture-tool",name:"read_file",phase:"start",args:{path:"README.md"}}}}));
-  const activity = () => visible('[data-chat-activity-preview]');
   await wait(() => activity() && !document.querySelector(loadingSelector), "tool activity replaces waiting");
   emit({state:"status",statusKind:"running",stage:"waiting"}); await tick();
   check(activity() && !waitNode() && !document.querySelector(loadingSelector), "late status cannot hide the activity bubble");

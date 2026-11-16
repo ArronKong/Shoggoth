@@ -263,23 +263,38 @@ assert.equal(rows(renderer).length, 1, 'Disconnecting the selected backend reset
 assert.ok(requests.slice(requestsBeforeDisconnect).every(request => request.backend !== 'openclaw'));
 await settle(() => renderer.unmount());
 
-// A queued execution initially uses its admission timestamp. Starting it fills
-// startedAt, so older servers/caches supply a different activity id for the same run.
-const pendingCron = { ...cron, id: 'cron:native:daily:100:execution', occurredAt: 100,
+// Older snapshots can contain a result row for the execution that is still live.
+const pendingCron = { ...cron, id: 'cron:native:daily:100:execution', occurredAt: 100, title: '每日示例摘要',
   run: { backendId: 'native', jobId: 'daily', runId: 'execution', startedAt: 100, status: 'running' } };
 const startedCron = { ...pendingCron, id: 'cron:native:daily:150:execution', occurredAt: 150,
-  run: { ...pendingCron.run, startedAt: 150 } };
+  run: { ...pendingCron.run, startedAt: 150, status: undefined, outputDisposition: 'pending' } };
 const completedCron = { ...startedCron, id: 'cron:native:daily:run:execution', occurredAt: 200,
-  summary: 'current result', severity: 'success', run: { ...startedCron.run, finishedAt: 200, status: 'ok' } };
-fetchPage = async () => empty;
-await settle(() => { renderer = create(React.createElement(Feed, { ...props, firstPage: { ...empty, items: [pendingCron] } })); });
+  summary: 'current result', severity: 'success',
+  run: { ...startedCron.run, finishedAt: 200, status: 'ok', outputDisposition: 'deliver' } };
+const liveCron = { id: 'native:execution', backendId: 'native', runId: 'execution', kind: 'cron',
+  title: pendingCron.title, status: 'running', agentId: 'agent' };
+fetchPage = async () => ({ ...empty, items: [startedCron] });
+await settle(() => { renderer = create(React.createElement(Feed, { ...props,
+  firstPage: { ...empty, items: [pendingCron] }, running: [liveCron],
+})); });
+assert.equal(rows(renderer).length, 0, 'A legacy active Cron row must not appear in the result list');
+assert.equal(renderer.root.findByType('approval-row').props.running, liveCron);
+assert.doesNotMatch(textOf(renderer.toJSON()), /dashboard.feedEmpty/);
+await settle(() => tabs(renderer).props.onChange('cron'));
+assert.equal(rows(renderer).length, 0, 'Filtered results also hide pending output');
+await settle(() => tabs(renderer).props.onChange(''));
+const olderCron = { ...completedCron, id: 'previous', occurredAt: 90, summary: 'previous result',
+  run: { ...completedCron.run, startedAt: 50, finishedAt: 90, runId: 'previous' } };
 await settle(() => renderer.update(React.createElement(Feed, { ...props,
-  firstPage: { ...empty, items: [startedCron], degradedSources: [{ backend: 'other', source: 'cron', reason: 'error' }] },
+  firstPage: { ...empty, items: [startedCron, olderCron], degradedSources: [{ backend: 'other', source: 'cron', reason: 'error' }] },
+  running: [liveCron],
 })));
-assert.equal(rows(renderer).length, 1, 'A changed start timestamp must update the same execution even in a partial snapshot');
+assert.equal(rows(renderer).length, 1, 'A pending execution does not hide an older result from the same task');
+assert.match(textOf(rows(renderer)[0]), /previous result/);
 await settle(() => renderer.update(React.createElement(Feed, { ...props,
   firstPage: { ...empty, items: [completedCron] },
 })));
+assert.equal(renderer.root.findAllByType('approval-row').length, 0);
 assert.equal(rows(renderer).length, 1, 'A current canonical id replaces legacy cached ids');
 assert.match(textOf(rows(renderer)[0]), /current result/);
 const secondExecution = { ...completedCron, id: 'second', run: { ...completedCron.run, runId: 'execution-2' } };

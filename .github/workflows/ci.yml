@@ -2,15 +2,58 @@ name: CI
 on:
   workflow_call:
   push:
-    branches: ["**"] # Version tags are fully checked by release.yml; avoid a duplicate Mac allocation.
+    branches-ignore: ["codex/release-v*"] # Release branches get their full checks on the PR merge tree.
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: shoggoth-ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  reviewed-pr-ci:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      run_id: ${{ steps.reuse.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.22.3'
+      - name: Look up CI for this merged source tree
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SOURCE_SHA: ${{ github.sha }}
+        run: node scripts/release-source-ci.cjs --pull-request-only
+
   macos-hook-checks:
+    needs: reviewed-pr-ci
+    if: ${{ !cancelled() && (needs.reviewed-pr-ci.result != 'success' || needs.reviewed-pr-ci.outputs.run_id == '') }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify PR merge checkout
+        id: pr-tree
+        if: github.event_name == 'pull_request'
+        run: |
+          test "$GITHUB_REF" = "refs/pull/$PR_NUMBER/merge"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+      - name: 'Tested PR #${{ github.event.pull_request.number }} tree ${{ steps.pr-tree.outputs.tree }}'
+        if: github.event_name == 'pull_request'
+        env:
+          TESTED_TREE: ${{ steps.pr-tree.outputs.tree }}
+        run: test -n "$TESTED_TREE"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.3'
@@ -57,9 +100,25 @@ jobs:
           node --test scripts/pi-catalog-unit.mjs scripts/pi-runtime-adapter-unit.cjs
           node scripts/pi-runtime-live-contract.cjs
   isolated-checks:
+    needs: reviewed-pr-ci
+    if: ${{ !cancelled() && (needs.reviewed-pr-ci.result != 'success' || needs.reviewed-pr-ci.outputs.run_id == '') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify PR merge checkout
+        id: pr-tree
+        if: github.event_name == 'pull_request'
+        run: |
+          test "$GITHUB_REF" = "refs/pull/$PR_NUMBER/merge"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+      - name: 'Tested PR #${{ github.event.pull_request.number }} tree ${{ steps.pr-tree.outputs.tree }}'
+        if: github.event_name == 'pull_request'
+        env:
+          TESTED_TREE: ${{ steps.pr-tree.outputs.tree }}
+        run: test -n "$TESTED_TREE"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22.22.3'

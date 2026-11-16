@@ -11,6 +11,7 @@ const { resolveServicePaths } = require("../app/agent-service/paths");
 const { readClientToken, requestService } = require("../app/agent-service/client");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
 const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { BackendRegistry } = require("../app/core/backend-registry");
 const { cronRunToActivity } = require("../app/core/dashboard-activity");
 const { validateContainer } = require("../app/agent-service/chat-session-store");
 const { WorkRunCoordinator } = require("../app/agent-service/work-run-coordinator");
@@ -47,7 +48,7 @@ async function until(check) {
   assert.fail("Cron condition timed out");
 }
 
-async function fixture(t, configure = () => {}) {
+async function fixture(t, configure = () => {}, serviceOptions = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sg-cron-chat-")));
   const paths = resolveServicePaths({ trustedRoot: root, stateRoot: path.join(root, "state"),
     profileRoot: path.join(root, "profile"), cacheRoot: path.join(root, "cache") });
@@ -59,6 +60,7 @@ async function fixture(t, configure = () => {}) {
       decryptString: (value) => value.toString() },
     runtimePool: { async get() { return host; }, async stopAll() {} },
     setCronTimer: () => 1, clearCronTimer() {},
+    ...serviceOptions,
   });
   const backend = new ShoggothBackend({ paths, now: () => clock.value,
     readinessTimeoutMs: 2000, serviceEventPollMs: 25,
@@ -145,6 +147,43 @@ test("scheduled cron persists a typed conversation, full reply, trajectory and a
       jobs: await ctx.backend.getCronJobs(), runs: await ctx.backend.getCronRuns(`shoggoth:${job.id}`),
       jobDetail: await ctx.backend.getCronJob(`shoggoth:${job.id}`),
       delivery, trajectory, activity: ctx.activities.find((event) => event.runId === run.id) }));
+});
+
+test("Dashboard shows the scheduled task name in live work and lists its report after completion", async (t) => {
+  const ctx = await fixture(t);
+  const job = await ctx.create();
+  await ctx.ipc("cron.job.enabled.set", { operationId: id(), jobId: job.id,
+    enabled: true, createdAt: ctx.clock.value });
+  ctx.clock.value = job.schedule.at;
+  await ctx.service.nativeCronScheduler.tick();
+  const [run] = ctx.service.workDispatcher.listRuns({ source: "cron", sourceId: job.id });
+  await ctx.running(run);
+
+  const registry = new BackendRegistry();
+  registry.register(ctx.backend);
+  const scope = { sinceMs: 0 };
+  const cronFilter = { ...scope, backend: "shoggoth", kind: "cron" };
+  const live = await registry.getDashboardLiveWork();
+  const before = await registry.getDashboardSection("activity", scope);
+  const beforeFiltered = await registry.getDashboardActivityPage(cronFilter);
+  assert.deepEqual({
+    running: live.running[0].items.map(item => ({ runId: item.runId, title: item.title })),
+    feed: before.activityPage.items.filter(entry => entry.kind === "cron").map(entry => entry.run.runId),
+    filtered: beforeFiltered.items.map(entry => entry.run.runId),
+  }, { running: [{ runId: run.id, title: job.name }], feed: [], filtered: [] });
+  assert.equal((await ctx.backend.getCronRuns(`shoggoth:${job.id}`)).runs[0].status, "running");
+
+  const report = "定时任务报告已完成";
+  await ctx.complete(run, report);
+  const done = await registry.getDashboardLiveWork();
+  assert.equal(done.running[0].items.length, 0);
+  const after = await registry.getDashboardSection("activity", scope);
+  const result = after.activityPage.items.filter(entry => entry.kind === "cron");
+  assert.equal(result.length, 1);
+  assert.equal(result[0].run.runId, run.id);
+  assert.equal(result[0].title, job.name);
+  assert.equal(result[0].summary, report);
+  assert.deepEqual((await registry.getDashboardActivityPage(cronFilter)).items, result);
 });
 
 test("Dashboard reads the full report by run ID even when a scheduled run starts late", async (t) => {
@@ -387,6 +426,19 @@ test("default recurring cron keeps one conversation across scheduled runs, manua
   assert.equal(ctx.host.threads.length, 2);
 });
 
+test("a legacy Cron thread is adopted into the shared conversation binding", async (t) => {
+  const ctx = await fixture(t);
+  const job = await ctx.create("continue");
+  const legacySource = `shoggoth:cron:${crypto.createHash("sha256").update(job.id).digest("hex")}`;
+  const { thread } = await ctx.host.threadStart({ threadSource: legacySource });
+  const run = await ctx.running(await ctx.trigger(job));
+  const [session] = await ctx.sessions();
+  assert.equal(run.runtimeSessionRef.sessionId, thread.id);
+  assert.equal(ctx.service.chatSessionStore.getBinding(session.sessionKey).runtimeSessionId, thread.id);
+  assert.equal(ctx.host.threads.length, 1);
+  await ctx.complete(run);
+});
+
 test("direct Cron watches suppress only a whole repeated report across isolated sessions and restarts", async t => {
   const ctx = await fixture(t);
   const created = await ctx.backend.createCronJob({ agentId: ctx.backend.getAgents()[0].id,
@@ -602,11 +654,12 @@ test("declined unattended work cannot silently complete and releases its executi
   await ctx.complete(await ctx.trigger(job), "下一轮正常运行。");
 });
 
-test("plugin and Hook approvals are remembered only for the same task and current authority", async (t) => {
+test("Hook approvals are remembered only for the same Cron task and Hook revision", async (t) => {
   const ctx = await fixture(t), job = await ctx.create("new");
-  const approve = (run, revision = 1) => ctx.service.workRunCoordinator.requestPluginToolApproval({
-    runId: run.id, profileId: run.profileId, packageName: "Fixture", toolName: "send_report",
-    arguments: { destination: "team", report: "daily" }, authorizationIdentity: { authRevision: revision, hookDigest: "fixture" },
+  const approve = (run, revision = 1) => ctx.service.workRunCoordinator.requestHookApproval({
+    runId: run.id, profileId: run.profileId, toolName: "notification_send",
+    arguments: { title: "Daily report", body: "Fixture report" },
+    authorizationIdentity: { hookDigest: `fixture-hook-${revision}` },
     assertCurrent() { assert.ok(["running", "waiting_approval"].includes(ctx.service.workDispatcher.getRun(run.id).status)); },
   });
   const respond = async (run, choice) => {
@@ -624,6 +677,11 @@ test("plugin and Hook approvals are remembered only for the same task and curren
   assert.equal(ctx.service.workRunCoordinator.pendingRequests.size, 0);
   const changed = approve(next, 2); await respond(next, "once"); assert.equal((await changed).approved, true);
   await ctx.complete(next);
+  const other = await ctx.running(await ctx.trigger(await ctx.create("new")));
+  const unrelated = approve(other);
+  await respond(other, "deny");
+  assert.equal((await unrelated).approved, false);
+  await ctx.complete(other, "The Hook approval was denied.");
 });
 
 test("a completed cron conversation accepts a manual chat follow-up without changing cron delivery", async (t) => {
@@ -668,31 +726,93 @@ test("a completed cron conversation accepts a manual chat follow-up without chan
   assert.equal(ctx.host.turnStarts, 3);
 });
 
-test("pre-send rejection survives real Service IPC and the backend without an ambiguous send receipt", async (t) => {
-  const ctx = await fixture(t);
+test("legacy synchronous preflight rejection survives Service IPC and the backend without a receipt", async (t) => {
+  const ctx = await fixture(t, undefined, { durableChatAcceptance: false });
   const job = await ctx.create();
   await ctx.complete(await ctx.trigger(job));
   const [session] = await ctx.sessions();
   const delivery = await ctx.backend.getCronLatestDelivery(`shoggoth:${job.id}`);
-  for (const [internalCode, publicCode] of [["MEMORY_SESSION_REVOKED", "INTERNAL_ERROR"],
-    ["PENDING_COMMAND_WRITE_FAILED", "SERVICE_UNAVAILABLE"]]) {
-    ctx.service.memoryEngine.observeBeforeSend = async () => {
-      throw Object.assign(new Error("private preparation details"), { code: internalCode });
-    };
-    const operationId = id();
-    await assert.rejects(ctx.ipc("chat.send", { operationId, sessionKey: session.sessionKey,
-      prompt: "Retry this rejected follow-up", createdAt: ctx.clock.value }), error =>
-      error.code === publicCode && error.admissionAccepted === false && !error.message.includes("private"));
-    assert.equal(ctx.service.workRunCoordinator.getChatRunByOperation(operationId, session.sessionKey), null);
-    const failures = [], statuses = [];
-    await ctx.backend.sendMessage(delivery.sessionKey, "Retry this rejected follow-up", id(), {
-      error: (...args) => failures.push(args), status: value => statuses.push(value),
-    }, { onAccepted: () => assert.fail("rejected preparation cannot acknowledge a turn") });
-    assert.equal(failures.length, 1);
-    assert.deepEqual(failures[0][1], { code: publicCode, admissionAccepted: false });
-    assert.ok(!failures[0][0].includes("private"));
-    assert.deepEqual(statuses, []);
+  await until(() => ctx.backend.getSessionRows().some(row => row.key === delivery.sessionKey));
+  t.mock.method(ctx.service.memoryEngine, "observeBeforeSend", async () => {
+    throw Object.assign(new Error("private preparation details"), { code: "MEMORY_SESSION_REVOKED" });
+  });
+  const operationId = id(), prompt = "Retry this rejected follow-up";
+  await assert.rejects(ctx.ipc("chat.send", { operationId, sessionKey: session.sessionKey,
+    prompt, createdAt: ctx.clock.value }), error =>
+    error.code === "INTERNAL_ERROR" && error.admissionAccepted === false && !error.message.includes("private"));
+  assert.equal(ctx.service.workRunCoordinator.getChatRunByOperation(operationId, session.sessionKey), null);
+  const failures = [], statuses = [];
+  let accepted = 0;
+  await ctx.backend.sendMessage(delivery.sessionKey, prompt, id(), {
+    error: (...args) => failures.push(args), status: value => statuses.push(value),
+  }, { onAccepted: () => { accepted += 1; } });
+  assert.equal(accepted, 0);
+  assert.equal(failures.length, 1);
+  assert.deepEqual(failures[0][1], { code: "INTERNAL_ERROR", admissionAccepted: false });
+  assert.doesNotMatch(failures[0][0], /private/);
+  assert.deepEqual(statuses, [{ kind: "starting", text: "starting", stage: "preparing" }]);
+  assert.deepEqual(ctx.service.workDispatcher.listRuns({ source: "chat", sourceId: session.sessionKey }), []);
+  assert.equal(ctx.host.turnStarts, 1);
+});
+
+test("Cron chat follow-up distinguishes an Inbox write rejection from a preparation failure after acceptance", async (t) => {
+  let failInboxWrite = false;
+  const pendingCommandFs = Object.create(fs, {
+    openSync: { value(target, ...args) {
+      if (failInboxWrite && target.endsWith("/pending-commands.json.tmp")) {
+        throw Object.assign(new Error("fixture disk full"), { code: "ENOSPC" });
+      }
+      return fs.openSync(target, ...args);
+    } },
+  });
+  const ctx = await fixture(t, undefined, { durableChatAcceptance: true, pendingCommandFs });
+  const job = await ctx.create();
+  await ctx.complete(await ctx.trigger(job), "scheduled result");
+  const [session] = await ctx.sessions();
+  const { sessionKey } = await ctx.backend.getCronLatestDelivery(`shoggoth:${job.id}`);
+  await until(() => ctx.backend.getSessionRows().some(row => row.key === sessionKey));
+  const clientKey = id(), prompt = "Follow up on the scheduled result";
+  const failures = [], statuses = [];
+  let accepted = 0;
+  const send = () => ctx.backend.sendMessage(sessionKey, prompt, clientKey, {
+    error: (...args) => failures.push(args), status: value => statuses.push(value),
+  }, { onAccepted: () => { accepted += 1; } });
+
+  failInboxWrite = true;
+  await send();
+  failInboxWrite = false;
+  assert.equal(accepted, 0);
+  assert.equal(failures.length, 1);
+  assert.deepEqual(failures[0][1], { code: "SERVICE_UNAVAILABLE", admissionAccepted: false });
+  assert.equal((await ctx.backend.getChatOperation(sessionKey, clientKey)).status, "unresolved");
+  assert.deepEqual(ctx.service.workDispatcher.listRuns({ source: "chat", sourceId: session.sessionKey }), []);
+
+  const preparation = Promise.withResolvers();
+  t.mock.method(ctx.service.memoryEngine, "observeBeforeSend", async () => {
+    await preparation.promise;
+    throw Object.assign(new Error("private preparation details"), { code: "MEMORY_SESSION_REVOKED" });
+  });
+  failures.length = 0;
+  const sending = send();
+  try {
+    await until(() => accepted === 1);
+    assert.equal(failures.length, 0);
+  } finally {
+    preparation.resolve();
+    await sending;
   }
+  const outcome = await ctx.backend.getChatOperation(sessionKey, clientKey);
+  assert.equal(accepted, 1);
+  assert.equal(outcome.status, "found");
+  assert.equal(outcome.run.status, "failed");
+  assert.equal(outcome.run.errorCode, "MEMORY_SESSION_REVOKED");
+  assert.equal(failures.length, 1);
+  assert.notEqual(failures[0][1]?.admissionAccepted, false);
+  assert.doesNotMatch(failures[0][0], /private/);
+  assert.ok(statuses.every(value => value.kind !== "needs_verification"));
+  assert.equal(ctx.service.transcriptStore.listEvents(session.profileId, session.id, { runId: outcome.run.id })
+    .filter(event => event.kind === "user" && event.content.text === prompt).length, 1);
+  assert.equal((await ctx.backend.getCronLatestDelivery(`shoggoth:${job.id}`)).fullText, "scheduled result");
   assert.equal(ctx.host.turnStarts, 1);
 });
 

@@ -31,7 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # Draft release visibility requires write permission.
-      actions: read # Read the exact public main CI result when available.
+      actions: read # Read the exact PR or main CI result when available.
+      pull-requests: read
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
       source_ci_run_id: ${{ steps.existing-ci.outputs.run_id }}
@@ -68,9 +69,9 @@ jobs:
           name: release-intent
           path: release-intent.json
           if-no-files-found: error
-      - name: Look up CI for the exact public main commit
+      - name: Look up CI for the reviewed source tree
         id: existing-ci
-        timeout-minutes: 29
+        timeout-minutes: 45
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SOURCE_SHA: ${{ steps.source.outputs.sha }}
@@ -82,6 +83,8 @@ jobs:
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
+      actions: read
+      pull-requests: read
 
   build:
     name: Sign and notarize ${{ matrix.arch }}
@@ -547,7 +550,7 @@ jobs:
           const results = JSON.parse(process.env.RESULTS);
           const rows = Object.entries(results).map(([name, job]) => `| ${name} | ${job.result} |`);
           const ciRun = results.validate.outputs?.source_ci_run_id;
-          const ci = ciRun ? `Source CI reused from [main](https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${ciRun}).\n\n` : '';
+          const ci = ciRun ? `Source CI reused from [verified run](https://github.com/${process.env.GITHUB_REPOSITORY}/actions/runs/${ciRun}).\n\n` : '';
           const state = results.publish.result === 'success' && results['verify-public'].result !== 'success'
             ? 'Release is public. Public download verification is pending; retry only the verify-public job.\n'
             : '';
