@@ -61,6 +61,7 @@ jobs:
       - name: Install locked Hooks test runtime
         run: |
           npm ci --ignore-scripts
+          node scripts/picomatch-security.cjs apply
           node scripts/ci-install-electron.cjs
       - name: Headless Hooks source, real Service and Electron ASAR boundaries
         env:
@@ -69,6 +70,7 @@ jobs:
       - name: Native CLI identity and bilingual capability UI
         run: |
           npm --prefix app/manage-ui ci --ignore-scripts
+          node scripts/picomatch-security.cjs apply app/manage-ui
           node --test scripts/runtime-executable-identity-unit.cjs
           node scripts/runtime-compatibility-ui-regression.mjs
       - name: MCP connector storage, transport and OAuth fixtures
@@ -129,7 +131,9 @@ jobs:
       - name: Install locked dependencies without desktop download
         run: |
           npm ci --ignore-scripts
+          node scripts/picomatch-security.cjs apply
           npm --prefix app/manage-ui ci --ignore-scripts
+          node scripts/picomatch-security.cjs apply app/manage-ui
       - name: Prepare sandboxed Linux desktop fixtures
         shell: bash
         run: |
@@ -243,7 +247,7 @@ jobs:
           node scripts/computer-use-settings-ui-unit.mjs
       - name: Dependency vulnerability audit
         run: |
-          node --test scripts/dependency-audit-policy-unit.cjs
+          node --test scripts/dependency-audit-policy-unit.cjs scripts/picomatch-security-unit.cjs
           npm run audit:release
       - name: Product help, web tools, and Browser Use regressions
         run: |

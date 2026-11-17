@@ -1,6 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict"), { EventEmitter } = require("node:events");
 const { WebService, requestPublic, isPublicAddress, publicUrl, extractHtml, rpcPayload } = require("../app/agent-service/web-service");
+const { recordWebSearchFailure } = require("../app/agent-service/web-search-diagnostics");
 const { validateWebArguments } = require("../app/agent-service/web-tools");
 const { DEFAULT_TOOL_REGISTRY, validateMcpProductToolArguments } = require("../app/agent-service/mcp-product-tool-controller");
 test("both web tools have validated read-only open-world contracts", () => {
@@ -27,7 +28,17 @@ function fakeRequest(replies, seen) {
     const req = new EventEmitter(); req.destroy = () => {}; req.end = body => {
       seen.push({ url: url.href, options, body });
       options.lookup(url.hostname, { all: true }, (error, rows) => { assert.equal(error, null); assert.equal(rows.length, 1); });
-      const reply = replies.shift(); const res = new EventEmitter(); res.headers = reply.headers || {}; res.statusCode = reply.status || 200;
+      const reply = replies.shift();
+      if (reply.failure) {
+        const socket = new EventEmitter();
+        socket.encrypted = url.protocol === "https:";
+        req.emit("socket", socket);
+        socket.emit("connect");
+        if (reply.afterTls) socket.emit("secureConnect");
+        queueMicrotask(() => req.emit("error", Object.assign(Error("fixture private error"), { code: reply.failure })));
+        return;
+      }
+      const res = new EventEmitter(); res.headers = reply.headers || {}; res.statusCode = reply.status || 200;
       res.destroy = () => {}; callback(res);
       queueMicrotask(() => { res.emit("data", Buffer.from(reply.body || "")); res.emit("end"); });
     }; return req;
@@ -96,6 +107,123 @@ test("MCP initialization, SSE, source URLs and cancellation", async () => {
   assert.equal(seen[2].params.name,"web_search_exa"); assert.equal(seen[2].params.arguments.numResults,2); assert.equal(result.sources[0].url,"https://example.com/docs");
   const controller=new AbortController(); controller.abort(); await assert.rejects(web.call("web_search",{query:"docs"},{signal:controller.signal}),{code:"WEB_CANCELED"});
   assert.throws(()=>rpcPayload({headers:{},body:Buffer.from('{"id":2,"error":{"message":"oops"}}')},2),{code:"WEB_RESPONSE_INVALID"});
+});
+
+function keylessSearchReplies() {
+  return [
+    { headers: { "mcp-session-id": "fixture-private-session" }, body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, result: { protocolVersion: "2025-03-26" },
+    }) },
+    { status: 202 },
+    { body: JSON.stringify({ jsonrpc: "2.0", id: 2, result: { content: [
+      { type: "text", text: "Title: Documentation\nURL: https://example.com/docs\nPublic documentation" },
+    ] } }) },
+  ];
+}
+
+function searchNetwork(replies, options = {}) {
+  const requests = [], failures = [];
+  const transport = fakeRequest(replies, requests);
+  const { lookup = async () => [{ address: "198.18.0.42", family: 4 }], ...serviceOptions } = options;
+  const service = new WebService({ ...serviceOptions,
+    request: (url, input) => requestPublic(url, { ...input, lookup, request: transport }),
+    onSearchFailure: failure => { failures.push(failure); serviceOptions.onSearchFailure?.(failure); },
+  });
+  return { service, requests, failures };
+}
+
+test("Exa keyless search recovers from a TLS reset before sending the query", async () => {
+  const [init, notify, result] = keylessSearchReplies();
+  let lookups = 0;
+  const { service, requests, failures } = searchNetwork([init, notify, { failure: "ECONNRESET" }, result], {
+    lookup: async () => [{ address: lookups++ === 2 ? "198.18.0.42" : "198.18.0.43", family: 4 }],
+  });
+  assert.equal((await service.call("web_search", { query: "Base UI docs" })).sources[0].url, "https://example.com/docs");
+  assert.deepEqual(requests.map(request => JSON.parse(request.body).method), [
+    "initialize", "notifications/initialized", "tools/call", "tools/call",
+  ]);
+  assert.equal(lookups, 4);
+  assert.equal(requests[2].options.signal, requests[3].options.signal);
+  assert.equal(requests[3].options.headers["Mcp-Session-Id"], "fixture-private-session");
+  assert.equal(requests[3].options.rejectUnauthorized, true);
+  requests[3].options.lookup("mcp.exa.ai", {}, (error, address) => {
+    assert.ifError(error);
+    assert.equal(address, "198.18.0.43");
+  });
+  assert.deepEqual(failures, [{ provider: "exa", phase: "tls", code: "ECONNRESET", retry: true }]);
+});
+
+test("Exa initialization can recover from HTTP 503 within the single search retry budget", async () => {
+  const [init, notify, result] = keylessSearchReplies();
+  const recovered = searchNetwork([{ status: 503 }, init, notify, result]);
+  assert.equal((await recovered.service.call("web_search", { query: "Base UI docs" })).sources.length, 1);
+  assert.deepEqual(recovered.failures, [{ provider: "exa", phase: "http", code: "HTTP_STATUS", status: 503, retry: true }]);
+  const exhausted = searchNetwork([{ status: 503 }, init, { failure: "ECONNRESET" }]);
+  await assert.rejects(exhausted.service.call("web_search", { query: "Base UI docs" }), { code: "WEB_UNAVAILABLE" });
+  assert.equal(exhausted.requests.length, 3);
+  assert.deepEqual(exhausted.failures.map(failure => failure.retry), [true, false]);
+});
+
+test("search does not replay a submitted query, failed certificate, or rate-limited request", async () => {
+  const [init, notify] = keylessSearchReplies();
+  for (const [failure, code] of [
+    [{ failure: "ECONNRESET", afterTls: true }, "WEB_UNAVAILABLE"],
+    [{ failure: "ERR_TLS_CERT_ALTNAME_INVALID" }, "WEB_UNAVAILABLE"],
+    [{ status: 429 }, "WEB_RATE_LIMITED"],
+  ]) {
+    const { service, requests } = searchNetwork([init, notify, failure]);
+    await assert.rejects(service.call("web_search", { query: "Base UI docs" }), { code });
+    assert.equal(requests.length, 3);
+  }
+});
+
+test("authenticated search retries temporary DNS failures and still checks every resolved address", async () => {
+  const settings = { resolve: async () => ({ provider: "exa", apiKey: "fixture-private-key" }), assertSafe() {} };
+  for (const blocked of [false, true]) {
+    let lookups = 0;
+    const { service, requests, failures } = searchNetwork([{ body: '{"results":[]}' }], {
+      settings,
+      lookup: async () => {
+        if (++lookups === 1) throw Object.assign(Error("fixture private error"), { code: "EAI_AGAIN" });
+        return [{ address: blocked ? "127.0.0.1" : "8.8.8.8", family: 4 }];
+      },
+    });
+    const operation = service.call("web_search", { query: "Base UI docs" });
+    if (blocked) await assert.rejects(operation, { code: "WEB_URL_BLOCKED" });
+    else assert.deepEqual((await operation).sources, []);
+    assert.equal(lookups, 2);
+    assert.equal(requests.length, blocked ? 0 : 1);
+    assert.deepEqual(failures, [{ provider: "exa", phase: "dns", code: "EAI_AGAIN", retry: true }]);
+  }
+});
+
+test("search cancellation during retry backoff prevents another request", async () => {
+  const controller = new AbortController();
+  const { service, requests } = searchNetwork([{ failure: "ECONNRESET" }], {
+    onSearchFailure: () => setImmediate(() => controller.abort()),
+  });
+  await assert.rejects(service.call("web_search", { query: "Base UI docs" }, { signal: controller.signal }), { code: "WEB_CANCELED" });
+  assert.equal(requests.length, 1);
+  assert.equal(service.active, 0);
+});
+
+test("search diagnostics retain 32 private, allowlisted failure records", t => {
+  const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sg-web-diagnostics-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const paths = { runtimeDir: path.join(root, "run"), trustedRoot: root };
+  const file = path.join(paths.runtimeDir, "web-search-diagnostics.json");
+  const failure = { provider: "exa", phase: "http", code: "HTTP_STATUS", status: 503,
+    query: "private query", url: "https://private.example", headers: { Authorization: "fixture-private-key" }, retry: true };
+  for (let i = 0; i < 34; i++) assert.equal(recordWebSearchFailure(paths, { ...failure, status: 500 + i }), true);
+  assert.equal(recordWebSearchFailure(paths, { ...failure, phase: "tls", code: "FIXTURE_PRIVATE_CODE", retry: false }), true);
+  const serialized = fs.readFileSync(file, "utf8");
+  const { records } = JSON.parse(serialized);
+  assert.equal(records.length, 32);
+  assert.equal(records[0].status, 503);
+  assert.deepEqual({ ...records.at(-1), timeMs: 0 }, { timeMs: 0, provider: "exa", phase: "tls", code: "OTHER", retry: false });
+  assert.doesNotMatch(serialized, /private|FIXTURE/);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
 
 test("malformed HTML and escaped text stay bounded without retaining executable content", async () => {

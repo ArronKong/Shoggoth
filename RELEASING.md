@@ -40,11 +40,26 @@ GitHub 托管 Intel runner 的 HTTP/3 网络路径故障已由 [runner-images #1
 
 原生验收先初始化固定 Xcode 的二进制检查工具，再准备依赖和下载草稿；网络兼容规则在随后票据与首次启动验收期间生效。原有依赖架构读取的 10 秒限制保持不变，工具初始化与实际资产检查分别失败即停止。
 
-## 依赖审计范围复核（2026-11-02，复核到期 2026-11-16 UTC）
+## 依赖审计与安全补丁
 
 正式发布执行 `npm run audit:release`，根目录和 UI 仍各自调用 `npm audit --audit-level=moderate --json`。完整原始报告与实际 npm 退出码应随验收记录保存；未解释的中危及以上结果、网络错误、无效报告和未知依赖链均阻止发布。
 
-当前仅复核 [GHSA-g3hv-75wg-m249](https://github.com/isaacs/minimatch/security/advisories/GHSA-g3hv-75wg-m249) 在旧构建依赖中的适用范围。维护者公告指向 minimatch 10.2.6 的 `optimizationLevel >= 2` 和 `firstPhasePreProcess` / `secondPhasePreProcess`；数据库的 `<11.0.1` 范围还涵盖没有该优化器的 3.1.5 与 5.1.9，[范围澄清问题](https://github.com/github/advisory-database/issues/10811) 尚未结案。这是根据维护者公告和固定源码所作的项目级范围复核。
+### picomatch，2026-11-18
+
+根目录和前端的构建工具各安装一份 picomatch 4.0.7。随 App 分发的 Playwright 还在 `lib/matchers/expect.js` 中内嵌了一份解析器。Shoggoth 对这三处应用同一项源码修复。含星号的单分支重复组若无法按上游已有规则安全处理，会在编译匹配规则时抛出语法错误。普通路径通配符和字面量重复仍可使用。[GitHub 安全公告](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+
+常规 npm 安装通过 `postinstall` 应用补丁。使用 `--ignore-scripts` 安装时，随后在仓库根目录执行以下命令。每条命令都核对锁定的原包和文件字节，重复执行时验证已有补丁。
+
+```sh
+node scripts/picomatch-security.cjs apply
+node scripts/picomatch-security.cjs apply app/manage-ui
+```
+
+两份实时审计会保留 npm 的原始高危记录和退出码。至 2026-12-02 00:00 UTC，仅在补丁哈希、完整公告标识、开发依赖版本和传递关系均与复核结果一致时，才将这一项记作已修补。新增公告、额外安装位置或补丁缺失会使门禁失败。双架构 App 在签名前分别核对 ASAR 索引与实际分发的 Playwright 文件。源码 SBOM 记录原包完整性及修改后文件的 SHA-256。上游发布修复版后应复核升级，同时单独核对 Playwright 的内嵌副本。
+
+### minimatch，2026-11-02，范围复核已于 2026-11-16 UTC 到期
+
+此前复核了 [GHSA-g3hv-75wg-m249](https://github.com/isaacs/minimatch/security/advisories/GHSA-g3hv-75wg-m249) 在旧构建依赖中的适用范围。维护者公告指向 minimatch 10.2.6 的 `optimizationLevel >= 2` 和 `firstPhasePreProcess` / `secondPhasePreProcess`；数据库的 `<11.0.1` 范围还涵盖没有该优化器的 3.1.5 与 5.1.9，[范围澄清问题](https://github.com/github/advisory-database/issues/10811) 尚未结案。这是根据维护者公告和固定源码所作的项目级范围复核。
 
 `dependency-audit-policy.cjs` 只接受上述两份源码的精确 SHA-256、锁文件版本与 dev-only 用途，逐个核对全部安装位置及优化器缺席，并只传播这一个已复核条目的传递标记。任何其它公告、版本、源码变化、生产用途、较高严重级别或复核到期都会阻止验收。原始报告可能仍列出 15 个受该条目传播的构建依赖记录，交付时应报告该事实。现代 glob/minimatch 分支使用修复版 14.0.3/11.0.3；旧构建工具保留其 callable API。
 

@@ -225,10 +225,8 @@ class GroupNativeExecutor {
       const fact = { seq: event.seq, runId: event.runId, occurredAt: event.occurredAt };
       if (event.kind === "tool_call" || event.kind === "tool_result") {
         let payload = event.content;
-        if (payload.displayRef) {
-          try { payload = this.transcriptStore.displayEvent(session.profileId, session.id, event).content; }
-          catch { return []; }
-        }
+        try { payload = (this.transcriptStore.displayEvent?.(session.profileId, session.id, event) ?? event).content; }
+        catch { return []; }
         return [{ ...fact, type: event.kind === "tool_call" ? "tool.start" : "tool.result", payload }];
       }
       if (event.kind !== "status") return [];

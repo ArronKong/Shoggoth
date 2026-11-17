@@ -377,8 +377,17 @@ for (const outcome of ["publish", "withdraw", "unavailable"]) {
         try { return originalEvidence(...args); } finally { sourceFiles.readBytes = previous; }
       };
       const label = "BORROWED_BATCH_VISIBLE_8571";
+      const fragment = `${label} 中文🙂\n`.repeat(2);
       const thread = host.threads.find(value => value.id === run.runtimeSessionRef.sessionId);
       const turn = thread.turns.find(value => value.id === run.runtimeTurnRef.turnId);
+      // A native pipe can deliver hundreds of small deltas before the source
+      // worker responds. No part of this burst may bypass the same proof.
+      for (const type of ["reasoning_delta", "text_delta"]) {
+        for (let index = 0; index < 1024; index++) {
+          host.emit({ known: true, type, threadId: thread.id, turnId: turn.id,
+            itemId: `batch-${type}`, delta: fragment, ...(type === "text_delta" ? { phase: "commentary" } : {}) });
+        }
+      }
       for (let index = 0; index < 6; index++) {
         host.emit({ known: true, type: "text", threadId: thread.id, turnId: turn.id,
           itemId: `batch-${index}`, text: `${label}_${index}`, phase: "final_answer" });
@@ -405,6 +414,11 @@ for (const outcome of ["publish", "withdraw", "unavailable"]) {
       } else {
         const messages = f.service.transcriptStore.listEvents(f.profile.id, session.id).filter(event => event.content?.text?.startsWith(label));
         assert.deepEqual(messages.map(event => event.content.text), Array.from({ length: 6 }, (_, i) => `${label}_${i}`));
+        for (const type of ["reasoning.delta", "text.delta"]) {
+          const deltas = events.filter(event => event.type === type && event.payload.itemId === `batch-${type.replace(".", "_")}`);
+          assert.equal(deltas.map(event => event.payload.delta).join(""), fragment.repeat(1024), "every UTF-8 fragment is delivered in order");
+          assert.ok(deltas.every(event => Buffer.byteLength(JSON.stringify(event)) < 48 * 1024), "coalescing stays within the existing public event limit");
+        }
       }
       assert.deepEqual(batches, [run.id]);
       assert.equal(synchronousOwnerViews, 0, "output must never fall back to a synchronous owner scan");
@@ -414,6 +428,74 @@ for (const outcome of ["publish", "withdraw", "unavailable"]) {
       release?.(); await pending?.catch(() => {});
       subscription?.unsubscribe(); await f.close();
     }
+  });
+}
+
+test("borrowed output preserves message, phase, reasoning-part and status boundaries", { timeout: 30000 }, async () => {
+  const f = await fixture(); let release, subscription;
+  try {
+    const session = f.createSession(), coordinator = f.service.workRunCoordinator, events = [];
+    const run = await f.send(session.sessionKey, "borrowed-output-boundaries", "Find telescope memory");
+    await f.callTool(run, "memory_search", { query: "telescope", ownerProfileId: f.B, minScore: 0 });
+    const host = f.transport.hosts.get("codex"), sharing = f.owner.sharing;
+    const original = sharing.withRunReadProof.bind(sharing), gate = new Promise(resolve => { release = resolve; });
+    sharing.withRunReadProof = async (...args) => { await gate; return original(...args); };
+    subscription = coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));
+    const common = { known: true, threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId };
+    const fragments = [
+      { type: "text_delta", itemId: "message-a", phase: "commentary", delta: "one " },
+      { type: "text_delta", itemId: "message-a", phase: "commentary", delta: "two" },
+      { type: "text_delta", itemId: "message-a", phase: "final_answer", delta: "final" },
+      { type: "text_delta", itemId: "message-b", phase: "final_answer", delta: "other" },
+      { type: "reasoning_delta", itemId: "reasoning", summaryIndex: 0, delta: "part zero" },
+      { type: "reasoning_delta", itemId: "reasoning", summaryIndex: 1, delta: "part one" },
+      { type: "reasoning_delta", itemId: "reasoning", summaryIndex: 1, contentIndex: 0, delta: "content zero" },
+      { type: "reasoning_delta", itemId: "reasoning", summaryIndex: 1, contentIndex: 1, delta: "before status" },
+      { type: "status", method: "diagnostic/status", status: "inProgress" },
+      { type: "reasoning_delta", itemId: "reasoning", summaryIndex: 1, contentIndex: 1, delta: "after status" },
+    ];
+    for (const event of fragments) host.emit(Object.freeze({ ...common, ...event }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.doesNotMatch(JSON.stringify(events), /part zero|one two|after status/, "unverified deltas stay private");
+    release();
+    await waitUntil(() => !coordinator.borrowedOutput.has(run.id), 5000, "borrowed output drains");
+    const delivered = events.filter(event => ["text.delta", "reasoning.delta"].includes(event.type)
+      || event.type === "status" && event.payload.method === "diagnostic/status");
+    assert.deepEqual(delivered.map(event => Object.fromEntries(Object.entries({
+      type: event.type.replace(".", "_"), itemId: event.payload.itemId, phase: event.payload.phase,
+      summaryIndex: event.payload.summaryIndex, contentIndex: event.payload.contentIndex,
+      delta: event.payload.delta, method: event.type === "status" ? event.payload.method : undefined,
+      status: event.type === "status" ? event.payload.status : undefined,
+    }).filter(([, value]) => value !== undefined))), [
+      { type: "text_delta", itemId: "message-a", phase: "commentary", delta: "one two" },
+      ...fragments.slice(2),
+    ]);
+    assert.equal(fragments[0].delta, "one ", "source events are not mutated");
+    assert.equal(coordinator.borrowedOutputBytes, 0);
+    await f.complete(run);
+  } finally { release?.(); subscription?.unsubscribe(); await f.close(); }
+});
+
+for (const limit of ["events", "bytes"]) {
+  test(`borrowed output retains the ${limit} limit and reports output capacity`, { timeout: 30000 }, async () => {
+    const f = await fixture(); let release;
+    try {
+      const session = f.createSession(), coordinator = f.service.workRunCoordinator;
+      const run = await f.send(session.sessionKey, `borrowed-output-limit-${limit}`, "Find telescope memory");
+      await f.callTool(run, "memory_search", { query: "telescope", ownerProfileId: f.B, minScore: 0 });
+      const host = f.transport.hosts.get("codex"), sharing = f.owner.sharing;
+      const original = sharing.withRunReadProof.bind(sharing), gate = new Promise(resolve => { release = resolve; });
+      sharing.withRunReadProof = async (...args) => { await gate; return original(...args); };
+      const common = { known: true, threadId: run.runtimeSessionRef.sessionId, turnId: run.runtimeTurnRef.turnId };
+      if (limit === "events") {
+        for (let index = 0; index < 257; index++) host.emit({ ...common, type: "status", status: `distinct-${index}` });
+      } else host.emit({ ...common, type: "text_delta", itemId: "oversized", delta: "x".repeat(16 * 1024 * 1024) });
+      release();
+      await waitUntil(() => coordinator.getRun(run.id).status === "interrupted", 5000, "buffer capacity interrupts output");
+      assert.equal(coordinator.getRun(run.id).errorCode, "RUNTIME_OUTPUT_LIMIT_EXCEEDED");
+      await waitUntil(() => !coordinator.borrowedOutput.has(run.id), 5000, "stopped output is released");
+      assert.equal(coordinator.borrowedOutputBytes, 0);
+    } finally { release?.(); await f.close(); }
   });
 }
 

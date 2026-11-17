@@ -1,9 +1,13 @@
 "use strict";
 const http = require("node:http"), https = require("node:https"), dns = require("node:dns/promises");
 const { BlockList, isIP } = require("node:net");
+const { setTimeout: delay } = require("node:timers/promises");
 const { serviceError } = require("./security");
 const { WEB_PUBLIC_MESSAGES, validateWebArguments } = require("./web-tools");
+const { TRANSIENT_DNS_CODES, TRANSIENT_CONNECTION_CODES, webNetworkFailure } = require("./web-search-diagnostics");
 const EXA_URL = "https://mcp.exa.ai/mcp";
+const SEARCH_RETRY_DELAY_MS = 250;
+const TRANSIENT_GATEWAY_STATUSES = new Set([502, 503, 504]);
 const proxyFakeIp = new BlockList();
 proxyFakeIp.addSubnet("198.18.0.0", 15, "ipv4");
 const blocked = new BlockList();
@@ -33,7 +37,24 @@ function assertPublicDns(url, host, addresses, allowProxyFakeIp = true) {
   if (addresses.some(({ address }) => !isPublicAddress(address)
     && !(canUseFakeIp && isIP(address) === 4 && proxyFakeIp.check(address, "ipv4")))) fail("WEB_URL_BLOCKED");
 }
-function abortError(signal) { fail(signal?.reason?.name === "TimeoutError" ? "WEB_TIMEOUT" : "WEB_CANCELED"); }
+function interruption(signal) {
+  const code = signal?.reason?.name === "TimeoutError" ? "WEB_TIMEOUT" : "WEB_CANCELED";
+  return serviceError(code, WEB_PUBLIC_MESSAGES[code]);
+}
+function abortError(signal) { throw interruption(signal); }
+function networkError(phase, code, status) {
+  return serviceError("WEB_UNAVAILABLE", WEB_PUBLIC_MESSAGES.WEB_UNAVAILABLE, {
+    cause: webNetworkFailure(phase, code, status),
+  });
+}
+function canRetrySearch({ phase, code, status }, initializing) {
+  if (phase === "dns") return TRANSIENT_DNS_CODES.has(code);
+  if (phase === "connect" || phase === "tls") return TRANSIENT_CONNECTION_CODES.has(code);
+  // Initialization is query-free. Once the TLS session can carry a search
+  // request, we cannot tell whether the provider processed it.
+  if (!initializing) return false;
+  return phase === "http" ? TRANSIENT_GATEWAY_STATUSES.has(status) : TRANSIENT_CONNECTION_CODES.has(code);
+}
 function raceAbort(promise, signal) {
   if (signal.aborted) { promise.catch(() => {}); abortError(signal); }
   return new Promise((resolve, reject) => {
@@ -52,18 +73,24 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
     const host = url.hostname.replace(/^\[|\]$/gu, "");
     let addresses;
     try { addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await raceAbort(lookup(host, { all: true, verbatim: true }), signal); }
-    catch (e) { if (signal.aborted) abortError(signal); fail(e.code?.startsWith("WEB_") ? e.code : "WEB_UNAVAILABLE"); }
-    if (!addresses.length) fail("WEB_UNAVAILABLE");
+    catch (error) {
+      if (signal.aborted) abortError(signal);
+      if (typeof error?.code === "string" && error.code.startsWith("WEB_")) fail(error.code);
+      throw networkError("dns", error?.code);
+    }
+    if (!addresses.length) throw networkError("dns", "DNS_EMPTY");
     assertPublicDns(url, host, addresses, allowProxyFakeIp);
     const pinned = addresses[0];
     beforeRequest?.();
     const response = await new Promise((resolve, reject) => {
+      let phase = "connect";
       const req = request(url, { method, agent: false, signal,
         // Authenticate the original HTTPS hostname even over a fake-IP route.
         ...(url.protocol === "https:" ? { rejectUnauthorized: true, ...(!isIP(host) ? { servername: host } : {}) } : {}),
         lookup: (_hostname, options, callback) => callback(null, options?.all ? [pinned] : pinned.address, pinned.family),
         headers: { "User-Agent": "Shoggoth/1.0 (+public-web-reader)", "Accept-Encoding": "identity",
           Accept: "text/html, text/plain, application/json;q=0.9, text/markdown;q=0.9", ...headers } }, res => {
+        phase = "body";
         const chunks = []; let size = 0;
         const declared = Number(res.headers["content-length"]);
         if (!(acceptNotModified && res.statusCode === 304) && declared > maxBytes) {
@@ -75,10 +102,17 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
           else chunks.push(chunk);
         });
         res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks), url: url.href }));
-        res.on("error", () => reject(serviceError("WEB_UNAVAILABLE", WEB_PUBLIC_MESSAGES.WEB_UNAVAILABLE)));
+        res.on("error", error => reject(signal.aborted ? interruption(signal) : networkError("body", error.code)));
       });
-      req.on("error", () => reject(serviceError(signal.aborted ? signal.reason?.name === "TimeoutError" ? "WEB_TIMEOUT" : "WEB_CANCELED" : "WEB_UNAVAILABLE",
-        WEB_PUBLIC_MESSAGES[signal.aborted ? signal.reason?.name === "TimeoutError" ? "WEB_TIMEOUT" : "WEB_CANCELED" : "WEB_UNAVAILABLE"])));
+      req.on("socket", socket => {
+        if (!socket.encrypted || socket.authorized) {
+          phase = "response";
+          return;
+        }
+        socket.once("connect", () => { phase = "tls"; });
+        socket.once("secureConnect", () => { phase = "response"; });
+      });
+      req.on("error", error => reject(signal.aborted ? interruption(signal) : networkError(phase, error.code)));
       req.end(body);
     });
     if ([301,302,303,307,308].includes(response.status)) {
@@ -93,7 +127,7 @@ async function requestPublic(value, { method = "GET", headers = {}, body, signal
     if (response.status === 429) fail("WEB_RATE_LIMITED");
     if (providerRequest && [401,403].includes(response.status)) fail("WEB_AUTH_FAILED");
     if (providerRequest && [402,432,433].includes(response.status)) fail("WEB_QUOTA_EXCEEDED");
-    if (response.status < 200 || response.status >= 300) fail("WEB_UNAVAILABLE");
+    if (response.status < 200 || response.status >= 300) throw networkError("http", null, response.status);
     return response;
   }
   fail("WEB_UNAVAILABLE");
@@ -141,8 +175,10 @@ function rpcPayload(response, id) {
   fail("WEB_RESPONSE_INVALID");
 }
 class WebService {
-  constructor({ request = requestPublic, now = Date.now, timeoutMs = 60000, settings = null, lookup = dns.lookup } = {}) {
+  constructor({ request = requestPublic, now = Date.now, timeoutMs = 60000, settings = null,
+    lookup = dns.lookup, onSearchFailure } = {}) {
     this.request = request; this.now = now; this.timeoutMs = timeoutMs; this.active = 0; this.settings = settings; this.lookup = lookup;
+    this.onSearchFailure = onSearchFailure;
   }
   async call(name, args, { signal, profileId = null } = {}) {
     if (!validateWebArguments(name, args)) fail("WEB_INVALID");
@@ -155,9 +191,15 @@ class WebService {
       try { route = this.settings ? await raceAbort(this.settings.resolve(name, profileId), boundedSignal) : { provider: name === "web_search" ? "exa" : "direct", apiKey: null }; }
       catch { if (boundedSignal.aborted) abortError(boundedSignal); fail("WEB_CONFIG_UNAVAILABLE"); }
       if (boundedSignal.aborted) abortError(boundedSignal);
-      const value = name === "web_search"
-        ? route.provider === "exa" && !route.apiKey ? await this.search(args, boundedSignal) : await this.providerSearch(route, args, boundedSignal)
-        : route.provider === "direct" ? await this.fetch(args, boundedSignal) : await this.providerFetch(route, args, boundedSignal);
+      let value;
+      if (name === "web_search") {
+        const request = this.searchRequest(route.provider, boundedSignal);
+        value = route.provider === "exa" && !route.apiKey
+          ? await this.search(args, boundedSignal, request)
+          : await this.providerSearch(route, args, boundedSignal, request);
+      } else {
+        value = route.provider === "direct" ? await this.fetch(args, boundedSignal) : await this.providerFetch(route, args, boundedSignal);
+      }
       if (boundedSignal.aborted) abortError(boundedSignal);
       const result = { ...value, retrievedAt: new Date(this.now()).toISOString(), untrusted: true };
       // MCP may carry both text and structured content. Bound the whole result,
@@ -179,6 +221,26 @@ class WebService {
       return result;
     } finally { this.active--; }
   }
+  searchRequest(provider, signal) {
+    let retryAvailable = true;
+    return async (url, options, initializing = false) => {
+      for (;;) {
+        if (signal.aborted) abortError(signal);
+        try { return await this.request(url, options); }
+        catch (error) {
+          if (signal.aborted) abortError(signal);
+          const failure = error?.code === "WEB_UNAVAILABLE" && error.cause;
+          if (!failure) throw error;
+          const retry = retryAvailable && canRetrySearch(failure, initializing);
+          try { this.onSearchFailure?.({ provider, ...failure, retry }); } catch {}
+          if (!retry) throw error;
+          retryAvailable = false;
+          try { await delay(SEARCH_RETRY_DELAY_MS, undefined, { signal }); }
+          catch { abortError(signal); }
+        }
+      }
+    };
+  }
   async fetch({ url, maxChars = 12000 }, signal) {
     const response = await this.request(url, { signal });
     if (response.headers["content-encoding"] && response.headers["content-encoding"].toLowerCase() !== "identity") fail("WEB_CONTENT_UNSUPPORTED");
@@ -189,9 +251,9 @@ class WebService {
     const page = type.includes("html") ? extractHtml(content) : { title: "", text: content };
     return { provider: "direct", url, finalUrl: response.url, title: page.title, contentType: type, ...truncate(page.text, maxChars) };
   }
-  async json(url, apiKey, { signal, body, header = "X-API-Key", method = "POST" }) {
+  async json(url, apiKey, { signal, body, header = "X-API-Key", method = "POST", request = this.request.bind(this) }) {
     if (!apiKey) fail("WEB_API_KEY_REQUIRED");
-    const response = await this.request(url, { method, signal, allowRedirects: false, providerRequest: true,
+    const response = await request(url, { method, signal, allowRedirects: false, providerRequest: true,
       maxBytes: 1024 * 1024, headers: { Accept: "application/json", "Content-Type": "application/json",
         [header]: header === "Authorization" ? `Bearer ${apiKey}` : apiKey },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -200,25 +262,25 @@ class WebService {
     if (!value || Object.getPrototypeOf(value) !== Object.prototype || value.error) fail("WEB_RESPONSE_INVALID");
     return value;
   }
-  async providerSearch({ provider, apiKey }, { query, limit = 5, maxChars = 12000 }, signal) {
+  async providerSearch({ provider, apiKey }, { query, limit = 5, maxChars = 12000 }, signal, request) {
     let value, rows;
     if (provider === "exa") {
-      value = await this.json("https://api.exa.ai/search", apiKey, { signal,
+      value = await this.json("https://api.exa.ai/search", apiKey, { signal, request,
         body: { query, type: "auto", numResults: limit, contents: { highlights: true } } }); rows = value.results;
     } else if (provider === "brave") {
       if (query.length > 600 || query.trim().split(/\s+/u).length > 75) fail("WEB_QUERY_TOO_LONG");
       const url = new URL("https://api.search.brave.com/res/v1/web/search");
       url.searchParams.set("q", query); url.searchParams.set("count", String(limit)); url.searchParams.set("text_decorations", "false");
-      value = await this.json(url.href, apiKey, { signal, method: "GET", header: "X-Subscription-Token" });
+      value = await this.json(url.href, apiKey, { signal, request, method: "GET", header: "X-Subscription-Token" });
       rows = value.web?.results;
       // Brave omits web entirely for a valid search with no web results.
       if (value.web === undefined && value.type === "search") rows = [];
     } else if (provider === "tavily") {
-      value = await this.json("https://api.tavily.com/search", apiKey, { signal, header: "Authorization",
+      value = await this.json("https://api.tavily.com/search", apiKey, { signal, request, header: "Authorization",
         body: { query, max_results: limit, search_depth: "basic", include_answer: false, include_raw_content: false } }); rows = value.results;
     } else if (provider === "tinyfish") {
       const url = new URL("https://api.search.tinyfish.ai"); url.searchParams.set("query", query);
-      value = await this.json(url.href, apiKey, { signal, method: "GET" }); rows = value.results;
+      value = await this.json(url.href, apiKey, { signal, request, method: "GET" }); rows = value.results;
     } else fail("WEB_CONFIG_UNAVAILABLE");
     if (!Array.isArray(rows)) fail("WEB_RESPONSE_INVALID");
     const sources = [], excerpts = [];
@@ -266,10 +328,10 @@ class WebService {
     return { provider, url, finalUrl, title: typeof page.title === "string" ? page.title.slice(0, 500).toWellFormed() : "",
       contentType: provider === "exa" ? "text/plain" : "text/markdown", ...truncate(text, maxChars) };
   }
-  async search({ query, limit = 5, maxChars = 12000 }, signal) {
+  async search({ query, limit = 5, maxChars = 12000 }, signal, request = this.request.bind(this)) {
     const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
-    const rpc = (method, params, id) => this.request(EXA_URL, { method: "POST", headers, signal, maxBytes: 512 * 1024, allowRedirects: false, providerRequest: true,
-      body: JSON.stringify({ jsonrpc: "2.0", ...(id === undefined ? {} : { id }), method, ...(params ? { params } : {}) }) });
+    const rpc = (method, params, id) => request(EXA_URL, { method: "POST", headers, signal, maxBytes: 512 * 1024, allowRedirects: false, providerRequest: true,
+      body: JSON.stringify({ jsonrpc: "2.0", ...(id === undefined ? {} : { id }), method, ...(params ? { params } : {}) }) }, method === "initialize");
     const init = await rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "shoggoth-web", version: "1.0.0" } }, 1);
     const initialized = rpcPayload(init, 1);
     if (!["2025-03-26", "2025-06-18", "2025-11-25"].includes(initialized.protocolVersion)) fail("WEB_RESPONSE_INVALID");

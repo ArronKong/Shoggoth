@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ApiError, getSessionRuntimeModels, selectSessionRuntimeModel } from "../api/client";
 import { useToast } from "../components/ui";
-import type { SessionRuntimeModels } from "../types";
+import type { SessionRuntimeModel, SessionRuntimeModels } from "../types";
 import { sessionRuntimeSupportKey } from "./sessionRuntimeSupport";
 
 /** A conversation owns its Runtime and model selection, independently of the Agent default. */
@@ -15,11 +15,11 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
   currentKey.current = key;
   const generation = useRef(0);
   const mounted = useRef(false);
-  const selecting = useRef(false);
+  const selecting = useRef<string | null>(null);
   const flight = useRef<{ key: string; request: number; promise: Promise<void>; controller: AbortController } | null>(null);
   const [state, setState] = useState<{ key: string; data?: SessionRuntimeModels; error?: boolean }>({ key: "" });
   const [loading, setLoading] = useState(false);
-  const [pending, setPending] = useState(false);
+  const [pendingSelection, setPendingSelection] = useState<{ key: string; choice: SessionRuntimeModel } | null>(null);
   const data = state.key === key ? state.data : undefined;
 
   const cancelRead = useCallback(() => {
@@ -31,8 +31,9 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; generation.current++; }; }, []);
   const refresh = useCallback(async () => {
+    if (currentKey.current !== key) return;
     if (!key || !sessionKey || !connected) { setLoading(false); return; }
-    if (selecting.current) return;
+    if (selecting.current === key) return;
     if (flight.current?.key === key) return flight.current.promise;
     const request = ++generation.current;
     const controller = new AbortController();
@@ -67,7 +68,10 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
       && item.modelProviderRef === modelProviderRef);
     if (!choice || (!data.selection.canSwitch && bindingId !== data.selection.bindingId)) return false;
     const candidate = data.selection.candidates.find(item => item.bindingId === bindingId);
-    selecting.current = true; setPending(true); cancelRead();
+    selecting.current = key;
+    setPendingSelection({ key, choice });
+    cancelRead();
+    setLoading(false);
     // Selecting a model also selects its Runtime. Apply that Runtime's compatible
     // permission mode as part of the same explicit action, without a second prompt.
     const acceptAdjustments = bindingId !== data.selection.bindingId
@@ -77,8 +81,10 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
       const selection = await selectSessionRuntimeModel(backend, agentId, sessionKey,
         { model, bindingId, revision: data.selection.revision, acceptAdjustments, ...(modelProviderRef ? { modelProviderRef } : {}) });
       if (!mounted.current || currentKey.current !== key) return false;
+      const runtime = data.runtimes.find(group => group.bindingId === selection.bindingId)
+        ?? data.runtimes.find(group => !group.bindingId && group.runtime === selection.runtime);
       setState({ key, data: { ...data, selection,
-        capabilities: data.runtimes.find(group => group.runtime === choice.runtime)?.capabilities || data.capabilities } });
+        capabilities: runtime?.capabilities ?? data.capabilities } });
       return true;
     } catch (error) {
       // Support codes arrive untranslated; everything else already has a public message.
@@ -86,14 +92,14 @@ export function useSessionRuntimeModels(backend: string, agentId: string, sessio
       if (mounted.current && currentKey.current === key && !quiet) {
         toast.error(supportKey ? t(supportKey) : error instanceof Error ? error.message : String(error));
       }
-      // CAS/busy/auth failures never leave a speculative model or Runtime in the UI.
-      selecting.current = false; flight.current = null;
-      await refresh();
-      return false;
     } finally {
-      selecting.current = false;
-      if (mounted.current) { setPending(false); setLoading(false); }
+      selecting.current = null;
+      if (mounted.current) setPendingSelection(null);
     }
+    // Restore the previous choice while re-reading a potentially changed revision.
+    if (mounted.current && currentKey.current === key) await refresh();
+    return false;
   };
-  return { data, loading: !!key && connected && (loading || (!data && !state.error)), error: state.key === key && state.error === true, pending, refresh, select };
+  return { data, loading: !!key && connected && (loading || (!data && !state.error)), error: state.key === key && state.error === true,
+    pending: pendingSelection !== null, pendingModel: pendingSelection?.key === key ? pendingSelection.choice : undefined, refresh, select };
 }

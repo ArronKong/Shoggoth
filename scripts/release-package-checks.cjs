@@ -120,6 +120,7 @@ if (require.main === module) {
     console.error("Usage: node scripts/release-package-checks.cjs <preflight|inputs>");
     process.exitCode = 2;
   } else {
+    if (mode === "preflight") require("./picomatch-security.cjs").secureInstall(REPO);
     const problems = mode === "preflight"
       ? [...checkInstalledDependencies(), ...checkPackagingInputs()]
       : checkPackagingInputs();

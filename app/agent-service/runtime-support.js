@@ -61,8 +61,11 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
       runtimeProfileId: binding.runtimeProfileId, runtimeAccountId: binding.runtimeAccountId }) ?? null; }
     catch { return "unavailable"; }
   };
-  const cacheKey = (binding, profile, generation) => JSON.stringify([epoch, binding.id, binding.revision, generation,
-    profile.permissionPolicy, profile.runtimeProfileId ?? null, contextIdentity(binding, profile), executableIdentity(binding)]);
+  const cacheKey = (binding, profile, generation, executionContract) => JSON.stringify([epoch, binding.id, binding.revision, generation,
+    profile.permissionPolicy, profile.runtimeProfileId ?? null,
+    executionContract ? [executionContract.providerFence, executionContract.provider.providerRef,
+      executionContract.provider.providerRevision, executionContract.provider.credentialRevision] : contextIdentity(binding, profile),
+    executableIdentity(binding)]);
   async function collectCachedExtension(binding, profile) {
     const host = runtimeManager?.peek?.({ runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
       runtimeAccountId: binding.runtimeAccountId }, { permissionPolicy: profile.permissionPolicy });
@@ -87,10 +90,23 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
         evidence.observations[`attachment.${kind}`]?.state === "supported") : [],
       permissionEnforcementProven: evidence?.observations["permission.enforcement"]?.state === "supported" };
   }
-  async function collect(binding, profile) {
+  async function collect(binding, profile, executionContract) {
     if (discover) return discover(binding, profile);
     const host = await runtimeManager.acquire({ runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
-      runtimeAccountId: binding.runtimeAccountId }, { permissionPolicy: profile.permissionPolicy });
+      runtimeAccountId: binding.runtimeAccountId }, { permissionPolicy: profile.permissionPolicy,
+      ...(executionContract ? { executionContract } : {}) });
+    const evidence = host.capabilityEvidence;
+    const runtimeFacts = { installed: true,
+      ...(evidence ? { capabilityEvidence: evidence } : {}),
+      attachmentKinds: evidence ? ["image", "pdf", "file"].filter(kind =>
+        evidence.observations[`attachment.${kind}`]?.state === "supported") : binding.runtime.startsWith("ext-") ? []
+        : binding.runtime === "opencode" ? ["image", "file"] : ["image", "pdf", "file"],
+      permissionEnforcementProven: evidence
+        ? evidence.observations["permission.enforcement"]?.state === "supported"
+        : !binding.runtime.startsWith("ext-") };
+    // The configured source has its own credentials and saved catalog. Acquiring
+    // its host proves runtime support; a real turn verifies its credentials.
+    if (executionContract) return { ...runtimeFacts, authenticated: "unverified" };
     // Authentication/catalog failures cannot erase the independent protocol and
     // permission proof. Each component retains its own verification state.
     let auth = { status: "unknown" };
@@ -124,17 +140,9 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
       if (isRuntimeIncompatible(error)) throw error;
       catalogState = "unverified";
     }
-    const evidence = host.capabilityEvidence;
-    return { installed: true, authenticated: auth.status === "authenticated" ? true
+    return { ...runtimeFacts, authenticated: auth.status === "authenticated" ? true
       : auth.status === "unauthenticated" ? false : auth.status === "unverified" ? "unverified" : "unknown",
-      models, modelWindows, modelLimits, defaultModel, catalogState,
-      ...(evidence ? { capabilityEvidence: evidence } : {}),
-      attachmentKinds: evidence ? ["image", "pdf", "file"].filter(kind =>
-        evidence.observations[`attachment.${kind}`]?.state === "supported") : binding.runtime.startsWith("ext-") ? []
-        : binding.runtime === "opencode" ? ["image", "file"] : ["image", "pdf", "file"],
-      permissionEnforcementProven: evidence
-        ? evidence.observations["permission.enforcement"]?.state === "supported"
-        : !binding.runtime.startsWith("ext-") };
+      models, modelWindows, modelLimits, defaultModel, catalogState };
   }
   return {
     contextWindow(binding, profile, model) {
@@ -153,9 +161,9 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
       if (!cached || now() < cached.observedAt || now() - cached.observedAt >= 7 * 24 * 60 * 60_000) return {};
       return structuredClone(cached.facts.modelLimits?.[model ?? cached.facts.defaultModel] ?? {});
     },
-    async read(binding, profile) {
+    async read(binding, profile, { executionContract } = {}) {
       const generation = runtimeAccountAdmission?.read(binding.runtimeAccountId)?.generation ?? 0;
-      const key = cacheKey(binding, profile, generation);
+      const key = cacheKey(binding, profile, generation, executionContract);
       const base = { installed: "unknown", authenticated: "unknown", generation,
         releaseEnabled: isRuntimeAvailable(binding.runtime), models: [], attachmentKinds: [],
         permissionEnforcementProven: false };
@@ -174,13 +182,13 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
       if (!pending.has(key)) {
         if (pending.size >= maxPending) return base;
         const startedEpoch = epoch;
-        const task = Promise.resolve().then(() => collect(binding, profile)).then(result => ({ ...base, ...result }), error => ({
+        const task = Promise.resolve().then(() => collect(binding, profile, executionContract)).then(result => ({ ...base, ...result }), error => ({
           ...base, ...(isRuntimeIncompatible(error) ? { compatible: false } : {}),
           installed: /(?:BINARY|NOT_INSTALLED|RUNTIME_INVALID)/u.test(error?.code || "")
             ? false : "unknown",
         })).then(facts => {
           const currentGeneration = runtimeAccountAdmission?.read(binding.runtimeAccountId)?.generation ?? 0;
-          if (startedEpoch !== epoch || key !== cacheKey(binding, profile, currentGeneration)) return base;
+          if (startedEpoch !== epoch || key !== cacheKey(binding, profile, currentGeneration, executionContract)) return base;
           cache.delete(key);
           cache.set(key, { facts, observedAt: now() });
           while (cache.size > 512) cache.delete(cache.keys().next().value);

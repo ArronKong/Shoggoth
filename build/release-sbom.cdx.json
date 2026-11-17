@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.330",
+      "version": "0.8.339",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.330",
-      "purl": "pkg:generic/shoggoth@0.8.330",
+      "bom-ref": "pkg:generic/shoggoth@0.8.339",
+      "purl": "pkg:generic/shoggoth@0.8.339",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -10020,6 +10020,18 @@
       ],
       "properties": [
         {
+          "name": "shoggoth:security-backport",
+          "value": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf"
+        },
+        {
+          "name": "shoggoth:patched-file",
+          "value": "lib/parse.js"
+        },
+        {
+          "name": "shoggoth:patched-sha256",
+          "value": "fa04f0a8087d1114276651a824c1467c4d81b000d24b89741b5c3ec361ab6666"
+        },
+        {
           "name": "shoggoth:dependency-scopes",
           "value": "desktop,frontend"
         },
@@ -10169,6 +10181,18 @@
         }
       ],
       "properties": [
+        {
+          "name": "shoggoth:security-backport",
+          "value": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf"
+        },
+        {
+          "name": "shoggoth:patched-file",
+          "value": "lib/matchers/expect.js"
+        },
+        {
+          "name": "shoggoth:patched-sha256",
+          "value": "77a294b2ba8f6cbe1ecdec63eaa00cf71e6afec93af9428db51750e81702dcb5"
+        },
         {
           "name": "shoggoth:dependency-scopes",
           "value": "desktop"
@@ -13589,7 +13613,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.330",
+      "ref": "pkg:generic/shoggoth@0.8.339",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",

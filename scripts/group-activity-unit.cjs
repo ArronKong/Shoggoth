@@ -22,6 +22,23 @@ function projection() {
   return { p, advance: time => { now += time; } };
 }
 
+test("partial tool arguments retain earlier labels within the existing field and byte budgets", () => {
+  const { p } = projection();
+  p.observeEvents([event(1, "tool.start", { toolCallId: "command", tool: { name: "tool",
+    displayArgs: { nativeToolKind: "execute", nativeCommandKind: "python" } } })], "s1");
+  p.observeEvents([event(2, "tool.update", { toolCallId: "command", tool: {
+    displayArgs: { activityTitle: "核对运行记录" } } })], "s1");
+  assert.deepEqual(p.snapshot().tool.input, { nativeToolKind: "execute", nativeCommandKind: "python", activityTitle: "核对运行记录" });
+  for (let seq = 3; seq < 20; seq++) p.observeEvents([event(seq, "tool.update", { toolCallId: "command", tool: {
+    displayArgs: Object.fromEntries(Array.from({ length: 24 }, (_, index) => [`field-${seq}-${index}`, "bounded"])) } })], "s1");
+  assert.ok(Object.keys(p.snapshot().tool.input).length <= 24);
+  p.observeEvents([event(20, "tool.result", { toolCallId: "command", tool: { displayArgs: { nativeToolKind: "execute" } } })], "s1");
+  const saved = p.snapshot().recentTools[0];
+  assert.equal(saved.input.nativeCommandKind, "python");
+  assert.equal(saved.input.activityTitle, "核对运行记录");
+  assert.equal(saved.status, "completed");
+});
+
 test("provider retry activity survives running snapshots and clears only on new work or an explicit transition", () => {
   const { p, advance } = projection();
   p.observeStatus("running");

@@ -53,6 +53,14 @@ const fixtures = [
   // ACP execute titles can be the command itself, or "tool" after a long title.
   ["Antigravity command title", "ls -la /tmp/report", { command: "ls -la /tmp/report", cwd: "/tmp/report" }, "查看目录"],
   ["Antigravity long title", "tool", { command: "python3 report.py", cwd: "/tmp/report" }, "运行 Python 脚本"],
+  ["Antigravity snake case command", "tool", { command_line: "python3 -c \"\nimport json\nprint('report')\n\"", working_dir: "/tmp/report" }, "运行 Python 脚本"],
+  ["ACP camel case command", "run_command", { commandLine: "node report.js" }, "运行 Node.js 脚本"],
+  ["ACP command as native title", "python3 report.py", { command_line: "python3 report.py", nativeActivityTitle: "python3 report.py" }, "运行 Python 脚本"],
+  ["Legacy native Python command", "tool", { nativeToolKind: "execute", nativeCommandKind: "python" }, "运行 Python 脚本"],
+  ["Legacy native shell command", "date", { nativeToolKind: "execute" }, "运行命令"],
+  ["OpenCode product command", "shoggoth_workspace_execute", {}, "运行工作区命令"],
+  ["OpenCode product search", "shoggoth_web_search", { query: "runtime design" }, "搜索网页 · runtime design"],
+  ["Grok tool discovery", "search_tool", { query: "skill_catalog skill_read" }, "查找可用工具 · skill_catalog skill_read"],
   ["Antigravity read command", 'cat "/tmp/report.md"', { command: 'cat "/tmp/report.md"' }, "读取文件"],
   ["Antigravity read tool", "view_file", { path: "/tmp/report.md" }, "读取文件 · report.md"],
   ["DeepSeek", "web_search", { queries: ["agent runtime", "tool activity"] }, "搜索网页 · agent runtime · tool activity"],
@@ -99,6 +107,9 @@ assert.equal(toolActivityTitle("exec", { title: "检".repeat(200) }, t), "检".r
 assert.equal(toolActivityTitle("mcp__other__federation_agent_run", {}, t), "调用外部工具");
 assert.equal(toolActivityTitle("mcp__other__execute", { command: "python3 report.py" }, t), "调用外部工具", "external tools keep their identity");
 assert.equal(toolActivityTitle("unknown_internal_tool", { command: "python3 report.py" }, t), "运行工具", "a command argument cannot rename an unknown tool");
+assert.equal(toolActivityTitle("mcp__other__execute", { nativeToolKind: "execute", nativeCommandKind: "python" }, t), "调用外部工具");
+assert.equal(toolActivityTitle("tool", { nativeToolKind: "execute", nativeCommandKind: "unsupported" }, t), "运行命令");
+assert.equal(toolActivityTitle("run_command", { command_line: "python3 report.py", nativeActivityTitle: "核对运行记录" }, t), "核对运行记录");
 assert.equal(toolActivityTitle("tool", { command: "curl https://example.com | python3" }, t), "运行命令", "complex commands get a truthful generic action");
 assert.equal(toolActivityTitle("tool", { command: "npm test", description: "核对结果" }, t), "核对结果");
 assert.equal(toolActivityTitle("other/federation_agent_run", {}, t), "调用外部工具");
@@ -107,6 +118,8 @@ assert.equal(toolActivityTitle("shoggoth/app_state_get", { section: "unrecognize
 assert.equal(toolActivityTitle("app_manage", { operation: "cron_delete" }, t), "删除定时任务");
 assert.equal(toolActivityTitle("app_manage", { operation: "unknown" }, t), "管理应用任务");
 assert.equal(toolActivityTitle("cron_set_enabled", { enabled: false }, t), "暂停定时任务");
+assert.equal(toolActivityTitle("shoggoth/dashboard_page_context", {}, t), "读取页面上下文");
+assert.equal(toolActivityTitle("shoggoth/dashboard_page_save", {}, t), "保存页面");
 
 const en = i18next.getFixedT("en");
 assert.equal(toolActivityTitle("mcp__shoggoth__web_search", { activityTitle: "mcp__shoggoth__web_search", query: "runtime" }, en), "Search the web · runtime");
@@ -130,7 +143,7 @@ for (const language of ["zh-CN", "en"]) {
     const standardWebAction = { web_search: "webSearch", web_fetch: "openPage" }[tool];
     const expected = t(standardWebAction ? `turnLab.activity.${standardWebAction}` : `turnLab.productTools.${tool}`);
     assert.ok(expected && expected !== tool && !expected.startsWith("turnLab."), `${tool} ${language} has a curated action`);
-    for (const name of [tool, `shoggoth/${tool}`, `shoggoth__${tool}`, `mcp__shoggoth__${tool}`]) {
+    for (const name of [tool, `shoggoth/${tool}`, `shoggoth_${tool}`, `shoggoth__${tool}`, `mcp__shoggoth__${tool}`]) {
       assert.equal(toolActivityTitle(name, undefined, t), expected, `${name} ${language}`);
       assert.equal(toolActivityTitle(name, { nativeActivityTitle: `shoggoth_${tool}` }, t), expected, `${name} ${language} with a runtime tool ID as title`);
     }
@@ -239,4 +252,4 @@ assert.equal(toolActivityTitle("web_search", { query: "runtime" }, t), "Search t
 assert.equal(toolActivityTitle("unknown_tool", {}, t), "Run tool");
 assert.equal(toolActivityTitle("tool", { command: "python3 report.py" }, t), "Run Python script");
 assert.equal(toolActivityTitle("ls -la /tmp/report", { command: "ls -la /tmp/report" }, t), "List directory");
-console.log(`tool-activity-title: ${fixtures.length} adapter shapes, ${productTools.length} product tools across 4 identities, ${catalog.openclaw.tools.length} OpenClaw and ${catalog.hermes.tools.length} Hermes names, wrappers, late arguments, exact outcomes, live/history parity and zh/en PASS`);
+console.log(`tool-activity-title: ${fixtures.length} adapter shapes, ${productTools.length} product tools across 5 identities, ${catalog.openclaw.tools.length} OpenClaw and ${catalog.hermes.tools.length} Hermes names, wrappers, late arguments, exact outcomes, live/history parity and zh/en PASS`);

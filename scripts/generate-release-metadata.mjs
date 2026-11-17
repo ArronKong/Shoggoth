@@ -154,9 +154,11 @@ const codexRefs = Object.entries(codex.platforms).map(([platform, entry]) => {
 
 const check = process.argv.includes("--check");
 const inventory = collectThirdPartyLicenses(repoRoot, { check });
+const { pico, playwright, advisory } = createRequire(import.meta.url)("./picomatch-security.cjs");
 const inventoryRefs = inventory.npm.map((entry) => {
   const purl = `pkg:npm/${purlName(entry.name)}@${entry.version}`;
   const existing = components.get(purl);
+  const patch = [pico, playwright].find(item => item.name === entry.name && item.version === entry.version);
   components.set(purl, {
     type: "library", name: entry.name, version: entry.version, "bom-ref": purl, purl,
     hashes: [hashFromIntegrity(entry.integrity)],
@@ -164,6 +166,11 @@ const inventoryRefs = inventory.npm.map((entry) => {
     ...existing,
     properties: [
       ...(existing?.properties || []),
+      ...(patch ? [
+        { name: "shoggoth:security-backport", value: advisory },
+        { name: "shoggoth:patched-file", value: patch.file },
+        { name: "shoggoth:patched-sha256", value: patch.patched },
+      ] : []),
       { name: "shoggoth:dependency-scopes", value: entry.scopes.join(",") },
       { name: "shoggoth:distribution", value: entry.distributed ? "macos-production-input" : "development-or-other-platform" },
     ],

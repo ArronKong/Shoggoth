@@ -32,5 +32,24 @@ function splitActivityArguments(value) {
   return { valid: true, arguments: args, activityTitle: title.trim() };
 }
 
+// Old ACP transcripts kept the execution kind and full arguments privately,
+// but omitted their command_line display alias. Recover a fixed classification
+// only: no command, path, script body or output becomes public through this path.
+function legacyCommandActivity(tool) {
+  if (!["execute", "commandExecution"].includes(tool?.kind)
+    || /^(?:mcp__|shoggoth[\/_])/u.test(tool.name || "")) return undefined;
+  const args = tool.arguments ?? tool.input;
+  let command = typeof args === "string" ? args : args && typeof args === "object" && !Array.isArray(args)
+    ? [args.command, args.cmd, args.CommandLine, args.command_line, args.commandLine, args.Command]
+      .find(value => typeof value === "string" && value.trim()) : undefined;
+  const result = { nativeToolKind: "execute" };
+  if (typeof command !== "string") return result;
+  command = command.slice(0, 256).trimStart();
+  const program = /^(?:[\w./~-]*\/)?([\w.+-]+)(?=\s|$)/u.exec(command)?.[1];
+  if (program && /^python(?:\d+(?:\.\d+)*)?$/u.test(program)) result.nativeCommandKind = "python";
+  else if (program === "node" || program === "nodejs") result.nativeCommandKind = "node";
+  return result;
+}
+
 module.exports = { ACTIVITY_TITLE_KEY, ACTIVITY_TITLE_SCHEMA, MAX_ACTIVITY_TITLE_LENGTH,
-  NATIVE_ACTIVITY_INSTRUCTION, withActivityTitle, splitActivityArguments };
+  NATIVE_ACTIVITY_INSTRUCTION, withActivityTitle, splitActivityArguments, legacyCommandActivity };

@@ -319,6 +319,23 @@ function createProfileServiceController(options = {}) {
       ...(thinkingOptions?.length ? { capabilities: { thinkingOptions, thinkingDefault: null, fastTier: null } } : {}) };
   }
 
+  function readConfiguredModel(profile, providerRef, model) {
+    const generation = lifecycleGeneration;
+    assertProfileStillCurrent(profile, generation);
+    const provider = readySourceProviders(profile).find(entry => entry.id === providerRef);
+    if (!provider || !(provider.models ?? [provider.model]).includes(model)) {
+      throw profileError("MODEL_ROUTE_UNSUPPORTED", "模型不在所选来源的目录中");
+    }
+    return Promise.resolve(options.readProviderReasoning?.(provider)).then(catalog => {
+      assertProfileStillCurrent(profile, generation);
+      if (!sameSnapshot(provider, productStore.getModelProvider(providerRef))
+        || !codexSessionProvider.isSourceProvider(productStore, profile, providerRef)) {
+        throw profileError("SESSION_MODEL_PROVIDER_UNAVAILABLE", "此会话选择的模型来源已不可用");
+      }
+      return providerModelRow(provider, model, providerRef === profile.providerRef && model === profile.defaultModel, catalog);
+    });
+  }
+
   // Built-in Codex with several sources: the ChatGPT catalog (when signed in)
   // followed by every ready preset's and endpoint's models. Each row names its
   // source; rows without one belong to the Profile default source.
@@ -771,6 +788,7 @@ function createProfileServiceController(options = {}) {
     },
 
     selectAgentDefaultModel,
+    readConfiguredModel,
 
     handle(method, rawParams) {
       let params;

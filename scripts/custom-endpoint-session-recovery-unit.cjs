@@ -168,6 +168,40 @@ test("custom Responses inherits provider reasoning settings without looking up t
   assert.ok(calls.every(params => params.model === CUSTOM_MODEL));
 });
 
+test("selecting a configured model only reads that source and rejects models from another source", async () => {
+  const f = await openHandoffFixture({ catalogs: { codex: [GPT_MODEL] } });
+  const originalFetch = globalThis.fetch;
+  try {
+    const session = f.createSession();
+    const binding = f.binding("codex");
+    const handle = await f.service.runtimeManager.acquire({ runtime: binding.runtime,
+      runtimeProfileId: binding.runtimeProfileId, runtimeAccountId: binding.runtimeAccountId });
+    const chatGptReads = [];
+    for (const method of ["accountRead", "modelList"]) handle.host[method] = async () => {
+      chatGptReads.push(method);
+      throw new Error("ChatGPT is unavailable");
+    };
+    await addEndpoint(f);
+    await f.endpoints.save(f.profile.id, { id: "other-endpoint", name: "Another endpoint",
+      baseUrl: "https://other.example.invalid/v1", models: [GPT_MODEL] });
+    const requests = [];
+    globalThis.fetch = async url => {
+      requests.push(String(url));
+      return Response.json({ data: [{ id: CUSTOM_MODEL }] });
+    };
+    const selected = await select(f, session.sessionKey, CUSTOM_MODEL);
+    assert.equal(selected.model, CUSTOM_MODEL);
+    assert.equal(selected.modelProviderRef, "fixture-endpoint");
+    const saved = f.service.chatSessionStore.getSession(session.sessionKey);
+    await assert.rejects(request(f, "chat.session.runtime.model.set", { profileId: f.profile.id, sessionKey: session.sessionKey,
+      bindingId: binding.id, model: GPT_MODEL, modelProviderRef: "fixture-endpoint",
+      revision: saved.revision, acceptAdjustments: true }), { code: "MODEL_ROUTE_UNSUPPORTED" });
+    assert.deepEqual(f.service.chatSessionStore.getSession(session.sessionKey), saved);
+    assert.deepEqual(chatGptReads, []);
+    assert.deepEqual(requests, ["https://endpoint.example.invalid/v1/models"]);
+  } finally { globalThis.fetch = originalFetch; await f.close(); }
+});
+
 test("same-named GPT and custom models validate and execute the selected source's own effort", async () => {
   const model = "DeepSeek-V4.1-Flash";
   const f = await openHandoffFixture({ catalogs: { codex: [model] } });

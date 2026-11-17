@@ -1254,10 +1254,10 @@ function createChatServiceController(options = {}) {
       // Opening a new conversation ends the Agent's others (memory excerpts).
       try { options.onSessionCreated?.(session); } catch {}
       result = { session };
-    } else if (method === "chat.session.model.set") {
-      result = await setSessionModel(params, generation);
-    } else if (method === "chat.session.settings.set") {
-      result = await setSessionSettings(params, generation);
+    } else if (method === "chat.session.model.set" || method === "chat.session.settings.set") {
+      const update = method === "chat.session.model.set" ? setSessionModel : setSessionSettings;
+      const change = () => update(params, generation);
+      result = await (coordinator.trackSessionSelectionWrite?.(params.sessionKey, change) ?? change());
     } else if (method === "chat.search") {
       result = searchChat(params, generation);
     } else if (method === "chat.session.permission.set") {

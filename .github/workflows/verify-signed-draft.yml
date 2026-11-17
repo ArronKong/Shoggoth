@@ -139,6 +139,7 @@ jobs:
         run: |
           node -e 'require("node:assert/strict").equal(process.arch, process.env.SHOGGOTH_DRAFT_ARCH, "Draft verification requires native hardware")'
           npm ci --ignore-scripts
+          node scripts/picomatch-security.cjs apply
           npm run prepare:runtimes
 
       - name: Download exact draft assets

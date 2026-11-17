@@ -961,7 +961,32 @@ class TranscriptStore {
   }
 
   displayEvent(profileId, sessionId, event) {
-    return this._contentEvent(profileId, sessionId, event, event.content?.displayRef);
+    const display = this._contentEvent(profileId, sessionId, event, event.content?.displayRef);
+    const tool = display.content?.tool;
+    if (!["tool_call", "tool_result"].includes(display.kind) || display.contextExcluded
+      || !["execute", "commandExecution"].includes(tool?.kind)
+      || extractBorrowedMemoryRefs(display.content).length) return display;
+    const args = tool.displayArgs;
+    if (args && ["command", "cmd", "CommandLine", "command_line", "commandLine", "Command",
+      "activityTitle", "nativeActivityTitle", "title", "description", "nativeToolKind"]
+      .some(key => typeof args[key] === "string" && args[key].trim())) return display;
+    const { legacyCommandActivity } = require("./tool-activity");
+    let metadata = legacyCommandActivity(tool);
+    if (!metadata) return display;
+    // Resolve only a small, integrity-checked body belonging to this exact
+    // event/call. Optional legacy metadata cannot make chat history unavailable.
+    if (typeof display.content.toolCallId === "string" && display.content.toolCallId
+      && display.content.contextRef?.bytes <= 64 * 1024) {
+      try {
+        const content = this.contextEventView(profileId, sessionId, display).content;
+        if (content.toolCallId === display.content.toolCallId && content.tool?.name === tool.name
+          && content.tool?.kind === tool.kind && !extractBorrowedMemoryRefs(content).length) {
+          metadata = legacyCommandActivity(content.tool) || metadata;
+        }
+      } catch { /* Missing/corrupt context keeps only the known execution kind. */ }
+    }
+    return { ...display, content: { ...display.content,
+      tool: { ...tool, displayArgs: { ...args, ...metadata } } } };
   }
 
   contextEvent(profileId, sessionId, event) {

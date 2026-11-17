@@ -3963,7 +3963,9 @@ function ChatPageApp() {
     async (patch: Record<string, unknown>, label: string) => {
       const key = activeKeyRef.current;
       if (!key) return false;
-      setToast({ text: t("chat.switchingLabel", { label }), kind: "pending" });
+      const changesModel = "model" in patch;
+      const quietModelSwitch = changesModel && backendOfSession(key) === "hermes";
+      if (!quietModelSwitch) setToast({ text: t("chat.switchingLabel", { label }), kind: "pending" });
       try {
         const res = await send("sessions.patch", { key, ...patch });
         // patch just the active row from the response (cheaper than re-paging 1000+ sessions)
@@ -3974,7 +3976,7 @@ function ChatPageApp() {
             s.key === key
               ? {
                   ...s,
-                  ...("model" in patch
+                  ...(changesModel
                     ? { model: resolved.model ?? (patch.model as string) ?? s.model, modelProvider: resolved.modelProvider ?? s.modelProvider }
                     : {}),
                   ...("thinkingLevel" in patch
@@ -3992,7 +3994,7 @@ function ChatPageApp() {
         // ship via sessions.list (the patch response's raw entry has neither), so a model
         // switch leaves the thinking-level list stale (e.g. gpt-5.5 missing "Extra high").
         // Re-fetch the active row's thinking fields for the new model.
-        if ("model" in patch) {
+        if (changesModel) {
           try {
             const lr = await send("sessions.list", { limit: 200 });
             const fresh = ((lr?.payload?.sessions || lr?.payload?.rows || []) as SessionRow[]).find((r) => r.key === key);
@@ -4010,6 +4012,7 @@ function ChatPageApp() {
             /* leave stale until the next full refresh */
           }
         }
+        if (quietModelSwitch) return true;
         // R279 缺口补齐（D3.5）：如实转述后端实际落点——scope "persist" 表示当时
         // 没有活会话、写进了全局配置；warning 是网关给的补充说明（如昂贵模型提示）。
         const scope = res?.payload?.scope;
@@ -4028,7 +4031,7 @@ function ChatPageApp() {
         return false;
       }
     },
-    [send],
+    [backendOfSession, send, t],
   );
 
   const renderLiveStateForSession = useCallback((sessionKey: string) => {
@@ -8450,7 +8453,7 @@ function ChatPageApp() {
     if (!activeKey) return;
     await patchSession({ permissionMode: option.id }, t("chat.labelPermission"));
   };
-  const activeSendReady = canSendActiveSession(active?.key);
+  const activeSendReady = sendController.canSend(active?.key);
   const writerHintKey = active?.source === "codex-desktop" ? codexDesktopWriterHintKey(active.codexDesktopWriter) : null;
   const activeWriterHint = writerHintKey ? t(writerHintKey) : null;
   const activeRecoveryRequired = activeGroupId ? recoveryBackends.has(GROUP_NATIVE_BACKEND_ID)
@@ -8526,7 +8529,7 @@ function ChatPageApp() {
     const timer = window.setInterval(() => { void refreshSessions().catch(() => {}); }, 5000);
     return () => window.clearInterval(timer);
   }, [connected, active?.key, active?.source, refreshSessions]);
-  const activeRecoveryHint = !active || activeSendReady
+  const activeRecoveryHint = !active || canSendActiveSession(active.key)
     ? null
     : activeBackendDescriptor?.connectionMode === "managed-service"
       ? t("chat.hermesConnecting")
@@ -8554,10 +8557,14 @@ function ChatPageApp() {
   const selectedRuntimeModel = runtimeModels.data?.models.find(model => model.bindingId === runtimeModels.data?.selection.bindingId
     && model.modelProviderRef === runtimeModels.data.selection.modelProviderRef
     && (runtimeModels.data.selection.model ? model.id === runtimeModels.data.selection.model : model.isDefault));
+  const displayedRuntimeModel = runtimeModels.pendingModel ?? selectedRuntimeModel;
   const displayModel = usesRuntimeModelPicker
-    ? runtimeModels.data?.selection.model ?? selectedRuntimeModel?.id ?? active?.model ?? ""
+    ? displayedRuntimeModel?.id ?? runtimeModels.data?.selection.model ?? active?.model ?? ""
     : pickedModel ?? lastAssistantModel ?? active?.model ?? inheritedRuntimeDefault?.id ?? "";
   const displayModelProvider = active?.modelProvider ?? inheritedRuntimeDefault?.provider;
+  const displayBindingId = displayedRuntimeModel?.bindingId ?? runtimeModels.data?.selection.bindingId;
+  const displayModelProviderRef = displayedRuntimeModel
+    ? displayedRuntimeModel.modelProviderRef : runtimeModels.data?.selection.modelProviderRef;
   // 新回答回来后让位给实际模型；切换会话时重置手动选择。
   useEffect(() => {
     setPickedModel(null);
@@ -11045,8 +11052,8 @@ function ChatPageApp() {
                           && (model as import("../types").SessionRuntimeModel).bindingId !== runtimeModels.data?.selection.bindingId })) : selectableModels}
                         activeModel={displayModel}
                         activeProvider={displayModelProvider}
-                        activeBindingId={runtimeModels.data?.selection.bindingId}
-                        activeModelProviderRef={runtimeModels.data?.selection.modelProviderRef}
+                        activeBindingId={displayBindingId}
+                        activeModelProviderRef={displayModelProviderRef}
                         runtimeGroups={usesRuntimeModelPicker ? runtimeModels.data?.runtimes ?? [] : undefined}
                         onSelect={selectComposerModel}
                         loading={usesRuntimeModelPicker ? runtimeModels.loading : modelsLoading}
@@ -11207,8 +11214,8 @@ function ChatPageApp() {
                         && (model as import("../types").SessionRuntimeModel).bindingId !== runtimeModels.data?.selection.bindingId })) : selectableModels}
           displayModel={displayModel}
           changeModel={selectComposerModel}
-          activeBindingId={runtimeModels.data?.selection.bindingId}
-          activeModelProviderRef={runtimeModels.data?.selection.modelProviderRef}
+          activeBindingId={displayBindingId}
+          activeModelProviderRef={displayModelProviderRef}
           runtimeGroups={usesRuntimeModelPicker ? runtimeModels.data?.runtimes ?? [] : undefined}
           activeModelProvider={displayModelProvider}
           modelsLoading={usesRuntimeModelPicker ? runtimeModels.loading : modelsLoading}
