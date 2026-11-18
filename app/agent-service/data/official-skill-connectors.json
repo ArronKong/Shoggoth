@@ -165,5 +165,20 @@
       "zh-CN": "使用百度地图官方 baidu-ai-map Skill。前往 Agent Plan 页面申请自己的 token，无需申请开发者 AK；凭据在本机加密保存。支持地点检索、驾车/步行/骑行/公交、地址解析、天气与地图链接；同名地点需先澄清。不提供批量距离矩阵、IP 定位或独立区域路况查询，额度与可用性以当前账号和服务为准。",
       "en": "Uses the official baidu-ai-map Skill. Get your own token on the Agent Plan page without applying for a developer AK; credentials are encrypted locally. Supports place search, driving/walking/cycling/transit, address lookup, weather and map links. Resolve ambiguous places before planning. No distance matrix, IP location or independent regional traffic query. Quotas and availability depend on the account and service."
     }
+  },
+  {
+    "id": "agently-mail",
+    "name": "Agent Mail",
+    "description": {
+      "zh-CN": "使用腾讯 Agent 专属邮箱，搜索和读取邮件、收发邮件并下载普通附件。",
+      "en": "Search, read and send mail, and download standard attachments from your dedicated Tencent Agent mailbox."
+    },
+    "docsUrl": "https://agent.qq.com/doc/cli-setup.md",
+    "version": "1.0.18",
+    "fields": [],
+    "note": {
+      "zh-CN": "Agent 邮箱与个人 QQ 邮箱分开。发信、回复、转发和移到已删除前需要确认。",
+      "en": "The dedicated Agent mailbox is separate from your personal QQ Mail. Sending, replying, forwarding and moving mail to Trash require confirmation."
+    }
   }
 ]

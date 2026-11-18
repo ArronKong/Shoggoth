@@ -172,6 +172,12 @@ const shared = {
   "../components/ui": { useConfirm: () => async () => true },
   "../lib/mcpConnectorUi": helper,
   "../lib/mcpRecommendationCatalog": load("../app/manage-ui/src/lib/mcpRecommendationCatalog.ts"),
+  "../lib/productTelemetry": {
+    measureTelemetry: (_feature, _backend, run) => run(),
+    startTelemetryOperation: () => undefined,
+    useTelemetryOperations: () => new Map(),
+    retainTelemetryOperation() {},
+  },
   "../lib/usePageCache": {},
   "../api/mcpConnectors": {
     listMcpSubjects: async () => ({ items: [], unavailableBackends: [] }),

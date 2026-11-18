@@ -934,6 +934,7 @@ function startProxyGateway({
         plan: (entries) => chatEvent("plan", { plan: entries }),
         status: (data) => chatEvent("status", { statusKind: data?.kind, text: data?.text,
           ...(typeof data?.nativeRunId === "string" ? { nativeRunId: data.nativeRunId } : {}),
+          ...(typeof data?.steer === "boolean" && data?.nativeRunId ? { steer: data.steer } : {}),
           ...(typeof data?.reason === "string" ? { reason: data.reason } : {}),
           ...(Number.isSafeInteger(data?.queuedAt) ? { queuedAt: data.queuedAt } : {}),
           ...(["preparing", "context", "capabilities", "connecting", "restoring", "opening", "waiting"].includes(data?.stage) ? { stage: data.stage } : {}) }),
@@ -1901,6 +1902,15 @@ function startProxyGateway({
           const key = frame.params?.sessionKey ?? frame.params?.key;
           const agentId = agentIdFromSessionKey(key);
           const owner = owns(agentId) ? registry?.route(agentId) : null;
+          if (frame.method === "chat.steer" && frame.params?.expectedRunId !== undefined) {
+            const expected = frame.params.expectedRunId;
+            if (typeof expected !== "string" || !expected.length || expected.length > 128
+              || owner?.getBackendDescriptor?.()?.surfaces?.agentHarness !== true) {
+              sendToClient(JSON.stringify({ type: "res", id: frame.id, ok: false,
+                error: { code: "WORK_RUN_CONTROL_MISMATCH", message: "无法确认这次插话对应的回合" } }));
+              return;
+            }
+          }
           let durableChatStop = false;
           if (frame.method === "chat.abort") {
             try { durableChatStop = owner?.getBackendDescriptor?.()?.surfaces?.durableChatStop === true; }
@@ -1961,7 +1971,7 @@ function startProxyGateway({
             const run = async () => {
               if (frame.method === "chat.steer") {
                 if (!backend?.steerChat) throw new Error("该后端不支持追加当前回合");
-                return (await backend.steerChat(key, String(frame.params?.message ?? ""))) ?? {};
+                return (await backend.steerChat(key, String(frame.params?.message ?? ""), frame.params?.expectedRunId)) ?? {};
               }
               if (frame.method === "chat.abort") {
                 if (durableChatStop) {

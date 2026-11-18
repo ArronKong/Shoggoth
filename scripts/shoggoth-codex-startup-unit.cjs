@@ -2,6 +2,10 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { constants } = fs;
 const { EventEmitter } = require("node:events");
 const { PassThrough } = require("node:stream");
 const bootstrap = require("../app/bootstrap-role");
@@ -40,6 +44,89 @@ async function main() {
     verifyCodeIdentity: () => identity,
   };
   const argv = ["--shoggoth-internal-role=mcp"];
+  let bundledVerifyOptions;
+  assert.equal(bootstrap.resolveRole(argv, {}, {
+    ...runtime, verifyCodeIdentity(target, expected, options) {
+      assert.equal(target, executable);
+      assert.deepEqual(expected, identity);
+      bundledVerifyOptions = options;
+      return identity;
+    },
+  }), "mcp");
+  assert.equal(bundledVerifyOptions.readAhead, true);
+  // The user's own Codex CLI is just as large and gets the same cold page reads.
+  const nativeRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-native-codex-startup-")));
+  try {
+    const nativeBinary = path.join(nativeRoot, "bin", "codex");
+    fs.mkdirSync(path.dirname(nativeBinary));
+    fs.writeFileSync(nativeBinary, "native codex fixture", { mode: 0o755 });
+    let nativeVerifyOptions;
+    assert.equal(bootstrap.resolveRole([...argv, "--shoggoth-runtime-profile=native-codex",
+      "--shoggoth-runtime-account=native-codex-default-v1"], { PATH: path.dirname(nativeBinary) }, {
+      ...runtime, userInfo: () => ({ homedir: nativeRoot }),
+      parent: { executable: nativeBinary, command: `${nativeBinary} app-server` },
+      verifyCodeIdentity(target, expected, options) {
+        assert.equal(target, nativeBinary);
+        assert.deepEqual(expected, identity);
+        nativeVerifyOptions = options;
+        return identity;
+      },
+    }), "mcp");
+    assert.deepEqual(nativeVerifyOptions, bundledVerifyOptions);
+    const nativeCalls = [];
+    assert.deepEqual(readCodeIdentity(nativeBinary, { ...nativeVerifyOptions,
+      spawnSync(command, args, options) { nativeCalls.push(args); return slowCodesign(command, args, options); },
+    }), identity);
+    assert.deepEqual(nativeCalls, [["--verify", "--strict", nativeBinary], ["-d", "--verbose=4", "-r-", nativeBinary]]);
+  } finally {
+    fs.rmSync(nativeRoot, { recursive: true, force: true });
+  }
+  const size = 2 * 1024 * 1024 + 17;
+  let remaining = size, buffer, closed = false, reads = 0;
+  const files = {
+    openSync(file, flags) {
+      assert.equal(file, executable);
+      assert.equal(flags, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      return 3;
+    },
+    fstatSync() { return { isFile: () => true, size }; },
+    readSync(fd, chunk, offset, length, position) {
+      assert.equal(fd, 3);
+      assert.equal(position, null, "sequential kernel reads");
+      assert.equal(offset, 0);
+      assert.ok(length > 0 && length <= remaining && length <= 1024 * 1024);
+      buffer ??= chunk;
+      assert.equal(chunk, buffer, "reuse one bounded buffer");
+      const bytes = Math.min(length, 200_000); // A short read is not EOF.
+      remaining -= bytes; reads++;
+      return bytes;
+    },
+    closeSync() { closed = true; },
+  };
+  assert.deepEqual(readCodeIdentity(executable, { ...bundledVerifyOptions, fs: files,
+    spawnSync(command, args, options) {
+      assert.equal(remaining, 0);
+      assert.ok(closed && reads > 1);
+      return slowCodesign(command, args, options);
+    },
+  }), identity);
+  assert.deepEqual(calls.at(-2).args, ["--verify", "--strict", executable]);
+  assert.deepEqual(calls.at(-1).args, ["-d", "--verbose=4", "-r-", executable]);
+  // Even if the read-ahead fails, the real verdict must come from strict verification.
+  closed = false;
+  let strictCalls = 0;
+  assert.throws(() => readCodeIdentity(executable, { ...bundledVerifyOptions,
+    fs: { ...files, readSync() { throw new Error("read interrupted"); } },
+    spawnSync(command, args, options) {
+      assert.ok(closed);
+      assert.equal(command, "/usr/bin/codesign");
+      assert.deepEqual(args, ["--verify", "--strict", executable]);
+      assert.equal(options.timeout, 60_000);
+      strictCalls++;
+      return { status: 1 };
+    },
+  }), { code: "CODE_IDENTITY_INVALID" });
+  assert.equal(strictCalls, 1);
   for (const [code, expected] of [
     ["CODE_IDENTITY_TIMEOUT", "BOOTSTRAP_CODE_IDENTITY_TIMEOUT"],
     ["CODE_IDENTITY_INVALID", "BOOTSTRAP_CODE_IDENTITY_INVALID"],

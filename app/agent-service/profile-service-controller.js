@@ -272,7 +272,8 @@ function createProfileServiceController(options = {}) {
     });
   }
 
-  async function readAuthorityModelPage(profile, pageParams, generation) {
+  async function openAuthorityModelCatalog(profile, generation) {
+    assertProfileStillCurrent(profile, generation);
     let auth;
     try {
       auth = await accountAuthManager.read({ runtimeProfileId: profile.runtimeProfileId });
@@ -284,26 +285,38 @@ function createProfileServiceController(options = {}) {
       throw profileError("PROFILE_AUTH_REQUIRED", "ChatGPT authority is not authenticated");
     }
     let host;
-    let raw;
     try {
       host = await runtimeManager.acquire(runtimeBinding({
         runtime: profile.runtime,
         runtimeProfileId: profile.runtimeProfileId,
         runtimeAccountId: profile.runtimeAccountId,
       }), { permissionPolicy: profile.permissionPolicy });
-      const listModels = typeof host.modelsList === "function"
-        ? host.modelsList.bind(host) : host.modelList?.bind(host);
-      if (!listModels) throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog is unavailable");
-      raw = await listModels({
-        cursor: pageParams.cursor,
-        limit: pageParams.limit,
-        includeHidden: false,
-      });
     } catch (error) {
       throw runtimeReadError(error, "PROFILE_MODEL_CATALOG_UNAVAILABLE", "Codex model catalog is unavailable");
     }
-    assertProfileStillCurrent(profile, generation);
-    return normalizeModelPage(raw);
+    const assertCurrent = () => {
+      assertProfileStillCurrent(profile, generation);
+      host.host?.assertRuntimeIdentityCurrent?.();
+    };
+    async function readPage({ cursor, limit }) {
+      let raw;
+      try {
+        const listModels = typeof host.modelsList === "function"
+          ? host.modelsList.bind(host) : host.modelList?.bind(host);
+        if (!listModels) throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog is unavailable");
+        raw = await listModels({ cursor, limit, includeHidden: false });
+      } catch (error) {
+        throw runtimeReadError(error, "PROFILE_MODEL_CATALOG_UNAVAILABLE", "Codex model catalog is unavailable");
+      }
+      assertCurrent();
+      return normalizeModelPage(raw);
+    }
+    return { host, readPage, assertCurrent };
+  }
+
+  async function readAuthorityModelPage(profile, pageParams, generation) {
+    const catalog = await openAuthorityModelCatalog(profile, generation);
+    return catalog.readPage(pageParams);
   }
 
   // Ready non-ChatGPT sources of a built-in Codex Profile (presets that
@@ -515,7 +528,7 @@ function createProfileServiceController(options = {}) {
     return validateProfileServiceResult("profile.auth.read", { status: auth.status });
   }
 
-  async function assertCatalogModelAvailable(modelId, readPage) {
+  async function requireCatalogModel(modelId, readPage) {
     let cursor = null;
     let items = 0;
     let bytes = 0;
@@ -528,7 +541,7 @@ function createProfileServiceController(options = {}) {
         if (items > MAX_MODEL_ITEMS || bytes > MAX_MODEL_BYTES) {
           throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "Runtime model catalog exceeds safety limits");
         }
-        if (model.id === modelId) return;
+        if (model.id === modelId) return model;
       }
       if (!page.hasMore) break;
       if (page.nextCursor === null || page.nextCursor === cursor || cursors.has(page.nextCursor)) {
@@ -540,8 +553,10 @@ function createProfileServiceController(options = {}) {
     throw profileError("PROFILE_MODEL_NOT_AVAILABLE", "Selected model is not in the Runtime catalog");
   }
 
-  function assertAuthorityModelAvailable(profile, modelId, generation) {
-    return assertCatalogModelAvailable(modelId, page => readAuthorityModelPage(profile, page, generation));
+  async function readChatGptModel(profile, modelId, generation = lifecycleGeneration) {
+    const { host, readPage, assertCurrent } = await openAuthorityModelCatalog(profile, generation);
+    const model = await requireCatalogModel(modelId, readPage);
+    return { host, model, assertCurrent };
   }
 
   async function selectAgentDefaultModel({ profileId, bindingId, revision, model, modelProviderRef }, assertAvailable) {
@@ -559,13 +574,13 @@ function createProfileServiceController(options = {}) {
       if (harness) {
         providerRef = codexSessionProvider.resolveProviderSelection(productStore, target, modelProviderRef);
         if (providerRef === null) {
-          await assertAuthorityModelAvailable(target, model, generation);
+          await readChatGptModel(target, model, generation);
         } else {
           const provider = loadReadyProvider(providerRef, model);
           assertOpenAiProviderIsExclusive(profileId, provider);
         }
       } else {
-        await assertCatalogModelAvailable(model, page => readRuntimeModelPage(target, page, generation));
+        await requireCatalogModel(model, page => readRuntimeModelPage(target, page, generation));
       }
       assertProfileStillCurrent(target, generation);
     } catch (error) {
@@ -625,7 +640,7 @@ function createProfileServiceController(options = {}) {
       return validateProfileServiceResult("profile.bind", { profile });
     }
     if (params.providerRef === null) {
-      await assertAuthorityModelAvailable(profile, params.defaultModel, generation);
+      await readChatGptModel(profile, params.defaultModel, generation);
     } else {
       const provider = loadReadyProvider(params.providerRef, params.defaultModel);
       assertOpenAiProviderIsExclusive(profile.id, provider);
@@ -795,6 +810,7 @@ function createProfileServiceController(options = {}) {
 
     selectAgentDefaultModel,
     readConfiguredModel,
+    readChatGptModel,
 
     handle(method, rawParams) {
       let params;

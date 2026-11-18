@@ -2166,6 +2166,11 @@ function createAgentService(options) {
         paths,
         isSensitiveValue,
         archiveRetention: agentArchiveRetention,
+        hasPendingChatWork: profileId => {
+          if (pendingCommandInbox.isLocked?.() === true || pendingCommandInbox.commitUncertain) return null;
+          return workRunCoordinator.hasPendingProfileSend?.(profileId) === true
+            || pendingCommandInbox.hasAcceptedChatForProfile(profileId);
+        },
         hasActiveExternalRuns: (profileId) => automationWorkRunStore.listWorkRuns({ profileId })
           .some((run) => run.status === "queued" || ACTIVE_WORK_RUN_STATUSES.has(run.status)),
         builtinAgents: {
@@ -2468,16 +2473,19 @@ function createAgentService(options) {
       if (lifecycleState !== "started") return null;
       const session = chatSessionStore.getSession(sessionKey);
       if (!session || profileId && session.profileId !== profileId || !["draft", "ready"].includes(session.status)) return null;
-      const profile = productStore.resolveAgentRuntimeProfile(session.profileId, session.runtimeBindingId ?? undefined);
+      // The next send runs on a queued pick, so that is the Runtime to warm.
+      const next = session.nextRuntimeSelection;
+      const profile = productStore.resolveAgentRuntimeProfile(session.profileId, (next?.bindingId ?? session.runtimeBindingId) ?? undefined);
       if (!profile.enabled) return null;
       const binding = runtimeBinding({ runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
         runtimeAccountId: profile.runtimeAccountId });
       const account = runtimeAccountAdmission.read(binding.runtimeAccountId);
       if (account.mutationActive || account.backoffUntil > (options.now || Date.now)() || runtimeLoginActive(binding.runtimeAccountId)) return null;
-      const providerRef = session.modelProviderRef
-        ? require("./codex-session-provider").resolveProviderSelection(productStore, profile, session.modelProviderRef) : undefined;
+      const source = next ? next.modelProviderRef : session.modelProviderRef;
+      const providerRef = source
+        ? require("./codex-session-provider").resolveProviderSelection(productStore, profile, source) : undefined;
       const route = captureExecutionProviderRoute({ productStore, secretStore, profile,
-        modelRef: session.modelOverride ?? profile.defaultModel, providerRef });
+        modelRef: (next ? next.model : session.modelOverride) ?? profile.defaultModel, providerRef });
       const generation = lifecycleGeneration;
       const assertCurrent = () => {
         if (lifecycleState !== "started" || lifecycleGeneration !== generation
@@ -2632,6 +2640,8 @@ function createAgentService(options) {
         ...(request.confirmation === true ? { confirmation: true } : {}) }), scope)),
     onConversationRenewed: payload => { sessionRuntimeController.auditPending(); eventBuffer.append("runtime.context.updated", payload); },
     followDefaultSessionBinding: (sessionKey, runId) => sessionRuntimeController.followDefault(sessionKey, runId),
+    applyQueuedSessionSelection: (sessionKey, runId) => sessionRuntimeController.selectForSend({ sessionKey,
+      excludingRunId: runId, operationId: `inspiration-select-${runId}` }),
     inbox: pendingCommandInbox,
     runtimeManager,
     runtimeAccountAdmission,
@@ -2863,6 +2873,7 @@ function createAgentService(options) {
     ensureTranscript: session => chatServiceController.handle("chat.history", { sessionKey: session.sessionKey, cursor: null, limit: 1 }, null),
     listBindingModels: params => profileServiceController.handle("profile.binding.models.list", params),
     readConfiguredModel: profileServiceController.readConfiguredModel,
+    readChatGptModel: profileServiceController.readChatGptModel,
     onChanged: payload => eventBuffer.append("runtime.context.updated", payload),
     isRetiredRuntimeSession: (runtime, sessionId) => runtimeManager.isRetiredSessionId?.(runtime, sessionId) === true,
   });
@@ -5662,6 +5673,10 @@ function createAgentService(options) {
           profileServiceControllerOpened = true;
           await profileServiceController.open();
           assertStartGeneration(generation);
+          // Replayed archive operations need the Inbox before they can disable a Profile.
+          pendingCommandInboxOpened = true;
+          await pendingCommandInbox.open();
+          assertStartGeneration(generation);
           agentArchiveRetention?.open();
           agentLifecycleServiceControllerOpened = true;
           await agentLifecycleServiceController.open();
@@ -5743,9 +5758,6 @@ function createAgentService(options) {
               if (error?.code !== "RECALL_POLICY_UNAVAILABLE") throw error;
             }
           }
-          assertStartGeneration(generation);
-          pendingCommandInboxOpened = true;
-          await pendingCommandInbox.open();
           assertStartGeneration(generation);
           // Only an unlocked, matching command plus a private execution record
           // can enter native reconciliation. Legacy/locked active runs retain

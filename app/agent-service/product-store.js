@@ -1599,10 +1599,14 @@ class JsonlProductStore extends ProductStore {
     if (runProfile) {
       this.#assertWorkRunRuntimeBinding(run, runProfile, "WORK_RUN_BINDING_INVALID");
     }
-    const disabledTargetAudit = runProfile && runProfile.enabled !== true
-      && run.status === "skipped"
+    const skippedDisabledTarget = run.status === "skipped"
       && ((run.source === "cron" && run.resultSummary === "CRON_TARGET_DISABLED")
         || (run.source === "kanban" && run.resultSummary === "KANBAN_TARGET_DISABLED"));
+    const canceledBeforeDispatch = run.source === "chat" && run.status === "canceled" && run.startedAt === null
+      && run.runtimeSessionRef === null && run.runtimeTurnRef === null && run.runtimeAttemptRef === null
+      && run.contextSnapshotId === null && run.resultSummary === null && run.retryOf === null
+      && run.idempotencyKey.startsWith("shoggoth:chat-send:");
+    const disabledTargetAudit = skippedDisabledTarget || canceledBeforeDispatch;
     if (!existing && (!runProfile || (runProfile.enabled !== true && !disabledTargetAudit))) {
       throw storeError(
         runProfile ? "AGENT_PROFILE_DISABLED" : "UNKNOWN_AGENT_PROFILE",

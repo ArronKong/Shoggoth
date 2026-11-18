@@ -743,6 +743,11 @@ class PendingCommandInbox {
     return Object.values(this.activeCommands).some(command => command.sessionKey === sessionKey);
   }
 
+  hasAcceptedChatForProfile(profileId) {
+    this.#assertOpen();
+    return Object.values(this.activeCommands).some(command => command.acceptance?.profileId === profileId);
+  }
+
   hasPendingAcceptance() {
     return (this.groupPending ?? 0) > 0;
   }

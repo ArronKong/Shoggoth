@@ -74,8 +74,11 @@ async function serve({ input = process.stdin, output = process.stdout, argv = pr
         if (message.method === "ping") return {};
         if (message.method === "tools/list") return { tools: runtime.tools };
         if (message.method === "tools/call") {
-          const result = await runtime.call(message.params?.name, message.params?.arguments || {},
-            { signal: abort.signal, officialSessionId: message.params?._meta?.["shoggoth/official-session-id"] });
+          const result = await runtime.call(message.params?.name, message.params?.arguments || {}, {
+            signal: abort.signal,
+            officialSessionId: message.params?._meta?.["shoggoth/official-session-id"],
+            officialAccountAction: message.params?._meta?.["shoggoth/official-account-action"] === true,
+          });
           return { content: [{ type: "text", text: JSON.stringify(result) }] };
         }
         throw Object.assign(new Error("Unknown method"), { rpcCode: -32601 });

@@ -14,7 +14,7 @@ import hljs from "highlight.js/lib/common";
 import "highlight.js/styles/github.css";
 import "./markdown.css";
 import i18n from "../i18n";
-import { internalAppHashFromHref } from "./appLinks";
+import { internalAppHashFromHref, managedAgentFileFromHref } from "./appLinks";
 import { findLocalFileLinks, localFilePathFromHref } from "./sessionArtifacts";
 import { mediaRefToSrc, type AgentMediaContext } from "./agentMedia";
 import notionLogo from "../assets/mcp-logos/notion.png?inline";
@@ -97,6 +97,12 @@ function installHooks() {
     }
     const href = node.getAttribute("href");
     if (!href) return;
+    if (managedAgentFileFromHref(href, window.location.href)) {
+      node.setAttribute("title", i18n.t("chat.artifactsRevealInFolder"));
+      node.removeAttribute("rel");
+      node.removeAttribute("target");
+      return;
+    }
     const appRoute = internalAppHashFromHref(href, window.location.href);
     if (appRoute) {
       node.setAttribute("href", appRoute);

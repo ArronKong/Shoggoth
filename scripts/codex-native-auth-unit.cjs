@@ -286,7 +286,8 @@ test("transient native auth read failure preserves an active native turn and blo
   let acceptRequest;
   const requestAccepted = new Promise(resolve => { acceptRequest = resolve; });
   let requestCount = 0;
-  const f = await fixture(t, {
+  // Every check consults the source here, as it does once a recent read is no longer reusable.
+  const f = await fixture(t, { reuseMs: 0,
     hostFactory: () => ({
       async initialize() {
         if (sourceFailure) throw Object.assign(new Error("private source failure details"), { code: "RPC_REQUEST_TIMEOUT" });
@@ -371,7 +372,7 @@ test("explicit logout wins over a failing borrowed auth lookup", async (t) => {
   const entered = new Promise(resolve => { enteredRead = resolve; });
   const pending = new Promise((resolve, reject) => { failRead = reject; });
   const borrowed = tokens();
-  const f = await fixture(t, { hostFactory: () => ({
+  const f = await fixture(t, { reuseMs: 0, hostFactory: () => ({
     async initialize() { if (failLookup) { enteredRead(); await pending; } },
     async readNativeChatGptTokens() { return borrowed; },
     async stop() {},
@@ -404,6 +405,71 @@ test("source read coalesces Profiles and delegates expiry refresh to Codex", asy
   assert.deepEqual(a, b);
   assert.equal(starts, 1);
   assert.deepEqual(reads, [false, true]);
+});
+
+test("a recent source read is reused until it ages, nears expiry, the source changes or Codex asks to refresh", async (t) => {
+  let now = Date.now();
+  const reads = [];
+  let issued = tokens(undefined, now + 3_600_000);
+  const f = await fixture(t, { now: () => now, hostFactory: () => ({
+    async initialize() {},
+    async readNativeChatGptTokens(refresh) { reads.push(refresh); return issued; },
+    async stop() {},
+  }) });
+  writeAuth(f.nativeHome, token());
+  assert.deepEqual(await f.auth.read(), issued);
+  assert.deepEqual(await f.auth.read(), issued);
+  const host = await f.makeHost();
+  assert.equal((await host.accountRead()).authSource, "native-codex");
+  assert.deepEqual(reads, [false], "menus, model checks and turns reuse one source read");
+  now += 5 * 60_000;
+  await f.auth.read();
+  assert.deepEqual(reads, [false, false], "an aged read goes to the source again");
+  writeAuth(f.nativeHome, token("fixture-account", now + 7_200_000));
+  await f.auth.read();
+  assert.deepEqual(reads, [false, false, false], "a rewritten source auth.json is read again at once");
+  await f.auth.read({ refreshToken: true });
+  assert.deepEqual(reads.slice(3), [false, true], "a forced refresh never comes from reuse");
+  await f.auth.read();
+  assert.equal(reads.length, 5, "the refreshed token is reused");
+  issued = tokens(undefined, now + 90_000);
+  await f.auth.read({ refreshToken: true });
+  assert.equal(reads.length, 7);
+  now += 31_000;
+  await f.auth.read();
+  assert.deepEqual(reads.slice(7), [false, true], "a token near expiry is read again and refreshed by Codex");
+  fs.unlinkSync(path.join(f.nativeHome, "auth.json"));
+  issued = null;
+  assert.equal(await f.auth.read(), null, "a removed source is never answered from reuse");
+  assert.equal(await f.auth.read(), null);
+  assert.equal(reads.length, 11, "a signed-out source is not reused");
+  issued = tokens(undefined, now + 3_600_000);
+  writeAuth(f.nativeHome, token());
+  await f.auth.read();
+  f.auth.disable(f.home);
+  await f.auth.read();
+  assert.equal(reads.length, 13, "Shoggoth logout drops the reusable token");
+});
+
+test("a logout during a source read is not undone by the late result", async (t) => {
+  let release;
+  const reads = [];
+  const f = await fixture(t, { hostFactory: () => ({
+    async initialize() {},
+    async readNativeChatGptTokens(refresh) {
+      reads.push(refresh);
+      if (reads.length === 1) await new Promise(resolve => { release = resolve; });
+      return tokens();
+    },
+    async stop() {},
+  }) });
+  const late = f.auth.read();
+  while (!release) await new Promise(setImmediate);
+  f.auth.disable(f.home);
+  release();
+  await late;
+  await f.auth.read();
+  assert.equal(reads.length, 2, "the read that raced a logout is not reused");
 });
 
 test("refresh callback keeps JWTs in memory and rejects account changes", async (t) => {

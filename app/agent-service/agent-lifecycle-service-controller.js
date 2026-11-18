@@ -206,6 +206,7 @@ function createAgentLifecycleServiceController(options = {}) {
     || (options.onProfileChanged !== undefined && typeof options.onProfileChanged !== "function")
     || (options.revokeSharedProfileAccess !== undefined
       && typeof options.revokeSharedProfileAccess !== "function")
+    || (options.hasPendingChatWork !== undefined && typeof options.hasPendingChatWork !== "function")
     || (options.hasActiveExternalRuns !== undefined && typeof options.hasActiveExternalRuns !== "function")) {
     throw lifecycleError("AGENT_SERVICE_CLOSED", "Profile lifecycle callbacks are invalid");
   }
@@ -434,7 +435,9 @@ function createAgentLifecycleServiceController(options = {}) {
     if (PROTECTED_PROFILE_IDS.has(profile.id) || profile.isDefault) throw lifecycleError("AGENT_PROTECTED");
     if (profile.enabled) {
       assertCas(profile, binding.expectedUpdatedAt);
-      if (productStore.listWorkRuns({ profileId: profile.id })
+      const pendingChat = options.hasPendingChatWork?.(profile.id);
+      if (pendingChat === null) throw lifecycleError("AGENT_CHAT_STATE_UNAVAILABLE");
+      if (pendingChat === true || productStore.listWorkRuns({ profileId: profile.id })
         .some((run) => NON_TERMINAL_RUN_STATUSES.has(run.status))
         || options.hasActiveExternalRuns?.(profile.id) === true) {
         throw lifecycleError("AGENT_ACTIVE_RUNS");

@@ -35,6 +35,9 @@ const paths = [
 ];
 const authError = `This turn ended before a reply: No API key found for provider "xiaomi-token-plan". Auth store: ${paths[9]} (agentDir: ${paths[10]}). Configure an API key. | missing-provider-auth`;
 const chatAttachmentPath = "/tmp/single-chat-attachment.txt";
+const publishedId = "a".repeat(64);
+const publishedHref = `/__api/agents/files/managed-files/${publishedId}/content?backend=shoggoth`;
+const downloadedPdf = "/Users/example/Downloads/作品集.pdf";
 const sessions = [{ key, agentId: "files", agentName: "文件助手", updatedAt: Date.now() }];
 const messages = [
   { id: "user-files", role: "user", content: `请整理 ${paths[0]}，完成后把报告和数据文件发给我。` },
@@ -48,6 +51,7 @@ const messages = [
     `- 文件：${paths[6]} 已生成。`,
     `- 含空格的目录和文件名：${paths[7]} saved successfully`,
     `- 原成果入口：[reminder-plan.md](<${paths[8]}>)`,
+    `- [下载作品集](${publishedHref})`,
     "\n[查看说明](https://example.com/guide)",
   ].join("\n") },
   { id: "assistant-auth-error", role: "assistant", content: authError },
@@ -118,6 +122,12 @@ class FixtureSocket {
 state.WebSocket = FixtureSocket;
 state.fetch = async (url: unknown, init?: RequestInit) => {
   const pathname = String(url);
+  if (pathname.includes(`/managed-files/${publishedId}/locate?`)) {
+    check(init?.method === "POST", "published file lookup uses the protected route");
+    return json({ path: downloadedPdf });
+  }
+  if (pathname.startsWith("/__api/agents/files/artifacts?")) return json({ artifacts: { supported: true, total: 1,
+    items: [{ fileId: publishedId, path: "/tmp/original/作品集.pdf", name: "作品集.pdf", missing: true, kind: "doc", mtimeMs: completedAt }] } });
   if (/\/__api\/host\/open-(path|attachment)/.test(pathname)) {
     state.directOpens.push(pathname);
     throw Error("Direct file opening is forbidden in this fixture");
@@ -195,6 +205,10 @@ state.runFixture = async () => {
     await wait(() => state.revealCalls.length === index + 1, "host reveal request");
     check(state.revealCalls[index] === paths[index], "click sends the exact path to the host");
   }
+  const publishedLink = document.querySelector<HTMLAnchorElement>(`.chat-thread a[href="${publishedHref}"]`)!;
+  check(publishedLink && !publishedLink.target, "published PDF is handled in the App");
+  publishedLink.click();
+  await wait(() => state.revealCalls.includes(downloadedPdf), "published link selects the exact PDF in Downloads");
   check(window.location.hash === initialHash, "revealing files must not navigate the chat");
   const beforeChatAttachment = state.revealCalls.length;
   attachments()[0].click();
@@ -244,7 +258,7 @@ state.runFixture = async () => {
   const beforeArtifact = state.revealCalls.length;
   document.querySelector<HTMLButtonElement>(".chat-artifact-open")!.click();
   await wait(() => state.revealCalls.length === beforeArtifact + 1, "artifact row reveals");
-  check(state.revealCalls.at(-1) === detailPath, "artifact row reveals exact file");
+  check(state.revealCalls.at(-1) === downloadedPdf, "moved Agent artifact reveals the same verified copy");
 
   const checkDetailLinks = async (scope: string, label: string) => {
     await wait(() => links(scope).length >= 2, `${label} links`);
@@ -267,8 +281,8 @@ state.runFixture = async () => {
   await checkDetailLinks(".codex-run-output", "Codex Cron result");
   render(<IdeaDetail id={idea.id} onClose={() => {}} onChange={async () => {}} />);
   await checkDetailLinks('[role="dialog"]', "Inspiration result");
-  await wait(() => document.querySelector(`[data-inspiration-run="${execution.runId}"] button`), "Inspiration artifact");
-  const artifact = document.querySelector<HTMLButtonElement>(`[data-inspiration-run="${execution.runId}"] button`)!;
+  await wait(() => document.querySelector(`[data-inspiration-round="${execution.runId}"] button[title="${detailPath}"]`), "Inspiration artifact");
+  const artifact = document.querySelector<HTMLButtonElement>(`[data-inspiration-round="${execution.runId}"] button[title="${detailPath}"]`)!;
   const beforeInspiration = state.revealCalls.length;
   artifact.click();
   await wait(() => state.revealCalls.length === beforeInspiration + 1, "Inspiration artifact reveals");

@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("node:path");
+const fs = require("node:fs");
 const { execFile, spawnSync } = require("node:child_process");
 const { serviceError } = require("./security");
 const { CODEX_PARENT_VERIFY_TIMEOUT_MS } = require("./codex-startup-timeouts");
@@ -100,6 +101,32 @@ function parseCodeIdentityDetails(details, options = {}) {
   });
 }
 
+// When a Codex executable (bundled or the user's own CLI) is not in the file
+// cache, such as after install or once its pages were evicted, codesign's
+// per-page reads of it can take seconds. Prime the cache with sequential reads;
+// the verifier still opens the executable itself and is solely responsible for trust.
+function readAheadForVerification(executable, io) {
+  const deadline = performance.now() + 1_000;
+  try {
+    const fd = io.openSync(executable, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    try {
+      const stat = io.fstatSync(fd);
+      if (!stat.isFile() || !stat.size) return;
+      let remaining = Math.min(stat.size, 512 * 1024 * 1024);
+      const chunk = Buffer.allocUnsafe(256 * 1024);
+      while (remaining > 0 && performance.now() < deadline) {
+        const bytes = io.readSync(fd, chunk, 0, Math.min(chunk.length, remaining), null);
+        if (bytes === 0) break;
+        remaining -= bytes;
+      }
+    } finally {
+      io.closeSync(fd);
+    }
+  } catch {
+    // A short-lived or unreadable file must still reach strict verification.
+  }
+}
+
 function readCodeIdentity(executablePath, options = {}) {
   const executable = path.resolve(executablePath || "");
   if (!path.isAbsolute(executablePath || "") || executable.includes("\0")) throw identityError();
@@ -107,6 +134,7 @@ function readCodeIdentity(executablePath, options = {}) {
   const verifyTimeoutMs = options.verifyTimeoutMs === undefined ? CODE_IDENTITY_TIMEOUT_MS : options.verifyTimeoutMs;
   if (!Number.isSafeInteger(verifyTimeoutMs) || verifyTimeoutMs <= 0
     || verifyTimeoutMs > CODEX_PARENT_VERIFY_TIMEOUT_MS) throw identityError();
+  if (options.readAhead === true) readAheadForVerification(executable, options.fs || fs);
   try {
     const verified = run("/usr/bin/codesign", ["--verify", "--strict", executable], {
       encoding: "utf8", timeout: verifyTimeoutMs, maxBuffer: 64 * 1024,

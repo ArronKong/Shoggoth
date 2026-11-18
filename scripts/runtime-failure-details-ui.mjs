@@ -82,9 +82,12 @@ for (const [code, expectedKey] of Object.entries({
   assert.equal(translate(`${message}; provider request id fixture`, () => "lost"), `${message}; provider request id fixture`);
 }
 const cases = [];
-for (const [code, failure, englishSummary, englishDetail] of [
+for (const [code, failure, englishSummary, englishDetail, chineseSummary] of [
   ["ANTIGRAVITY_REGION_UNSUPPORTED", { message: "User location is not supported for the API use.", httpStatus: 400, upstreamCode: "FAILED_PRECONDITION" }, englishRegion],
   ["RUNTIME_QUOTA_EXHAUSTED", { message: "You exceeded your current quota; daily limit 100. Contact the project administrator.", httpStatus: 429, upstreamCode: "insufficient_quota" }, "The account's quota is exhausted and the request has stopped. Wait for the quota to reset, add quota, or switch accounts before retrying."],
+  ["RUNTIME_QUOTA_EXHAUSTED", { message: "Free usage limit reached", upstreamCode: "FreeUsageLimitError" },
+    "The free usage limit has been reached. Switch models or wait for the limit to reset before retrying.",
+    undefined, "免费用量已达上限。请更换模型，或等额度恢复后重试。"],
   ["RUNTIME_UPSTREAM_UNAVAILABLE", { message: "Model service temporarily unavailable.", httpStatus: 502 },
     "The model provider is unavailable. Try again later or choose another available model."],
   ["ANTIGRAVITY_TURN_FAILED", { message: "Project verification required. Invalid API key for this project.", httpStatus: 403, upstreamCode: "project_verification_required" }, "The task failed and was not replayed automatically. See the provider details below."],
@@ -120,8 +123,10 @@ for (const [code, failure, englishSummary, englishDetail] of [
   const status = failure ? [failure.httpStatus ? `HTTP ${failure.httpStatus}` : null, failure.upstreamCode].filter(Boolean).join(" · ") : "";
   const detailLabel = code === "PI_TOOL_DESCRIPTION_TOO_LARGE" ? "Startup details" : "Provider error";
   const expectedEnglish = `Error: ${englishSummary}${failure ? `\n${detailLabel}: ${englishDetail || failure.message}${status ? `\n${status}` : ""}\nError code: ${code}` : ""}`;
+  const expectedChinese = chineseSummary
+    ? history.content[0].text.replace(catalog.runtime[code], chineseSummary) : history.content[0].text;
   assert.equal(translate(history.content[0].text, tEn), expectedEnglish);
-  assert.equal(translate(history.content[0].text, tZh), history.content[0].text);
+  assert.equal(translate(history.content[0].text, tZh), expectedChinese);
   const execution = { id: runId, ideaId: 'error-idea', runId, profileId: 'fixture', agentId: 'shoggoth-default',
     backendId: 'shoggoth', workspace: '/fixture', sessionKey: 'failure-fixture', status: 'failed',
     createdAt: 100, finishedAt: 200, errorCode: code, resultSummary: null, attention: null };
@@ -132,7 +137,7 @@ for (const [code, failure, englishSummary, englishDetail] of [
     _activeGet: () => backend,
   }, execution.ideaId, execution.runId);
   assert.equal(activity.errorMessage, history.content[0].text);
-  cases.push({ frame: frames[0], history, execution, activity, expected: { "zh-CN": history.content[0].text, en: expectedEnglish } });
+  cases.push({ frame: frames[0], history, execution, activity, expected: { "zh-CN": expectedChinese, en: expectedEnglish } });
 }
 console.log(`PASS: ${catalogCount} fixed errors and ${cases.length} live/history cases in both languages`);
 if (process.argv.includes("--unit-only")) process.exit(0);

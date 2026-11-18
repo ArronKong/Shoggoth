@@ -841,6 +841,10 @@ async function handleManagedAgentFiles(req, res, backend, agentId, segments, que
       res.setHeader("Cache-Control", "no-store");
       return sendJson(res, 200, await backend.agentFiles(agentId, "get", { fileId }));
     }
+    if (fileId && subresource === "locate" && method === "POST") {
+      res.setHeader("Cache-Control", "no-store");
+      return sendJson(res, 200, await backend.agentFiles(agentId, "locate", { fileId }));
+    }
     if (fileId && !subresource && ["PUT", "DELETE"].includes(method)) {
       const body = await readJsonBody(req);
       const fields = method === "PUT" ? ["expectedRevision", "name"] : ["expectedRevision"];
@@ -4125,6 +4129,12 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       return sendJson(res, 409, {
         code: "AGENT_NAME_CONFLICT", field: "name", error: AGENT_LIFECYCLE_PUBLIC_MESSAGES.AGENT_NAME_CONFLICT,
       });
+    }
+    if (segs[0] === "agents" && segs.length === 2 && method === "DELETE"
+      && (err?.code === "AGENT_ACTIVE_RUNS" || err?.code === "AGENT_CHAT_STATE_UNAVAILABLE")) {
+      // Archiving was definitively refused. The UI can make a new attempt after
+      // the pending chat settles or the Inbox can be checked.
+      return sendJson(res, 409, { code: err.code, error: AGENT_LIFECYCLE_PUBLIC_MESSAGES[err.code] });
     }
     // 参数/路径边界错误保持客户端 400；请求体溢出用 413，其余运行时故障保持 500。
     const trusted = trustedApiError(err);

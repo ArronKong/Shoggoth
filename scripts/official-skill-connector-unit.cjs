@@ -159,11 +159,30 @@ test("public DTO rejects extra input and never exposes raw provider errors", () 
   assert.equal(JSON.stringify(dto.officialSkillPublicError(Error("private-canary"))).includes("private-canary"), false);
 });
 
+test("the previous catalog gains Agent Mail without rewriting existing ownership", async t => {
+  const f = fixture(t);
+  const installed = await f.change("install");
+  await f.controller.close();
+  const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
+  stored.items = stored.items.filter(item => item.id !== "agently-mail");
+  for (const retired of [[], [retiredRecord()]]) {
+    const original = JSON.stringify({ ...stored, items: [...stored.items, ...retired] });
+    fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
+    const restarted = f.make();
+    try {
+      restarted.open();
+      assert.deepEqual(restarted.status("weread"), installed);
+      assert.equal(restarted.status("agently-mail").state, "notInstalled");
+      assert.equal(fs.readFileSync(f.controller.recordPath, "utf8"), original);
+    } finally { await restarted.close(); }
+  }
+});
+
 test("existing five-provider records gain uninstalled Shop, DoorDash and Quark without changing ownership or reconnecting", async t => {
   const f = fixture(t); const installed = await f.change("install"); await f.controller.close();
   const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
   stored.items.push(retiredRecord());
-  stored.items = stored.items.filter(item => !["shop", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id));
+  stored.items = stored.items.filter(item => !["shop", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps", "agently-mail"].includes(item.id));
   assert.equal(stored.items.length, 5);
   const original = JSON.stringify(stored); fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
   const restarted = f.make(); restarted.open(); t.after(() => restarted.close());
@@ -175,14 +194,14 @@ test("existing five-provider records gain uninstalled Shop, DoorDash and Quark w
   assert.equal(fs.readFileSync(f.controller.recordPath, "utf8"), original, "reading legacy records never rewrites them");
   await restarted.handle("connector.official.install", { id: "shop", expectedRevision: 0 });
   const expanded = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
-  assert.deepEqual(expanded.items.filter(item => !["shop", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
+  assert.deepEqual(expanded.items.filter(item => !["shop", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps", "agently-mail"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
 });
 
 test("the six-provider catalog gains DoorDash and Quark without rewriting existing account or ownership records", async t => {
   const f = fixture(t); const installed = await f.change("install"); await f.controller.close();
   const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
   stored.items.push(retiredRecord());
-  stored.items = stored.items.filter(item => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id));
+  stored.items = stored.items.filter(item => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps", "agently-mail"].includes(item.id));
   assert.equal(stored.items.length, 6);
   const original = JSON.stringify(stored); fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
   const restarted = f.make(); restarted.open(); t.after(() => restarted.close());
@@ -193,7 +212,7 @@ test("the six-provider catalog gains DoorDash and Quark without rewriting existi
   assert.equal(fs.readFileSync(f.controller.recordPath, "utf8"), original);
   await restarted.handle("connector.official.install", { id: "doordash", expectedRevision: 0 });
   const expanded = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
-  assert.deepEqual(expanded.items.filter(item => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
+  assert.deepEqual(expanded.items.filter(item => !["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps", "agently-mail"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
 });
 
 test("the seven-provider catalog preserves Alipay installation, private home, credentials and access while adding uninstalled Quark", async t => {
@@ -206,7 +225,7 @@ test("the seven-provider catalog preserves Alipay installation, private home, cr
   await f.controller.close();
   const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
   stored.items.push(retiredRecord());
-  stored.items = stored.items.filter(item => !["quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id));
+  stored.items = stored.items.filter(item => !["quark-drive", "rollinggo-hotel", "baidu-maps", "agently-mail"].includes(item.id));
   assert.equal(stored.items.length, 7);
   const original = JSON.stringify(stored); fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
   let probes = 0, accountCalls = 0;
@@ -222,7 +241,7 @@ test("the seven-provider catalog preserves Alipay installation, private home, cr
   await restarted.handle("connector.official.install", { id: "quark-drive", expectedRevision: 0 });
   const expanded = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
   assert.deepEqual(expanded.items.map(item => item.id), dto.OFFICIAL_SKILL_IDS);
-  assert.deepEqual(expanded.items.filter(item => !["quark-drive", "rollinggo-hotel", "baidu-maps"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
+  assert.deepEqual(expanded.items.filter(item => !["quark-drive", "rollinggo-hotel", "baidu-maps", "agently-mail"].includes(item.id)), stored.items.filter(item => item.id !== "netease-music"));
   assert.equal(fs.readFileSync(accountPath, "utf8"), "private-account-canary");
   assert.equal(server.secretRef, `mcp-connector:${installed.serverId}`);
   assert.deepEqual(server.disabledProfileIds, ["profile-a"]);
@@ -233,7 +252,7 @@ for (const omitted of [["shop", "doordash"], ["doordash"], []]) test(`previously
   const f = fixture(t); const installed = await f.change("install"); await f.controller.close();
   const stored = JSON.parse(fs.readFileSync(f.controller.recordPath, "utf8"));
   stored.items.push(retiredRecord());
-  stored.items = stored.items.filter(item => ![...omitted, "rollinggo-hotel", "baidu-maps"].includes(item.id));
+  stored.items = stored.items.filter(item => ![...omitted, "rollinggo-hotel", "baidu-maps", "agently-mail"].includes(item.id));
   const original = JSON.stringify(stored); fs.writeFileSync(f.controller.recordPath, original, { mode: 0o600 });
   const restarted = f.make(); restarted.open(); t.after(() => restarted.close());
   assert.deepEqual(restarted.status("weread"), installed);

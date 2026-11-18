@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-// Usage: node scripts/chat-acceptance-recovery-electron.cjs /absolute/path/to/fresh/manage-dist [--group-continuation|--model-selection]
+// Usage: node scripts/chat-acceptance-recovery-electron.cjs /absolute/path/to/fresh/manage-dist [--group-continuation|--model-selection|--account-model-switch]
 // Real production React and Electron, broker, proxy, Backend and Service.
 // The Runtime and the transport fault are controlled inside a temporary profile.
 const assert = require("node:assert/strict");
@@ -49,6 +49,7 @@ if (!process.versions.electron) {
   const stoppedPrompt = "Stop before the accepted message is projected";
   const acceptedFailurePrompt = "Accepted message remains in history when preparation fails";
   const rejectedPrompt = "Rejection fixture restores the exact draft";
+  const modelSelectionPrompt = "Send once while saving the model";
   const continuationText = "Exact continuation evidence from saved attachment";
   const continuationFile = { id: "9f90b9a4-3fae-45e9-9abb-333a28821fc3", name: "receipt.txt", mimeType: "text/plain",
     size: Buffer.byteLength(continuationText) };
@@ -83,9 +84,11 @@ if (!process.versions.electron) {
 
   async function run() {
     const verifyModelSelection = flags.includes("--model-selection");
+    const verifyAccountModelSwitch = flags.includes("--account-model-switch");
     const nextModel = "fixture-model-next";
-    const f = await openHandoffFixture({ serviceOptions: { memoryCore: false, durableChatAcceptance: true },
-      ...(verifyModelSelection ? { catalogs: { codex: ["fixture-model", nextModel, "other-session-model"], pi: ["fixture-model"],
+    const f = await openHandoffFixture({ serviceOptions: { memoryCore: false, durableChatAcceptance: true,
+      ...(verifyAccountModelSwitch ? { runtimeSupportDiscover: undefined } : {}) },
+      ...(verifyModelSelection || verifyAccountModelSwitch ? { catalogs: { codex: ["fixture-model", nextModel, "other-session-model"], pi: ["fixture-model"],
         "deepseek-harness": ["fixture-model"] } } : {}),
     });
     const { service } = f;
@@ -120,6 +123,7 @@ if (!process.versions.electron) {
       };
       const beforeSessionSend = service.workRunCoordinator.beforeSessionSend;
       service.workRunCoordinator.beforeSessionSend = async input => {
+        if (input.prompt === modelSelectionPrompt) await waitForGate(input.prompt);
         if (input.prompt === acceptedFailurePrompt) {
           await waitForGate(input.prompt);
           throw Object.assign(new Error("Fixture preparation denied"), { code: "EXECUTION_CONTRACT_STALE" });
@@ -134,6 +138,10 @@ if (!process.versions.electron) {
 
       const backend = new ShoggothBackend({ paths: f.paths, serviceEventPollMs: 30,
         getLocale: () => "en", requestService: async (paths, request, options) => {
+          // Prewarming also reads 64 models. Keep that background read out of the selection probe.
+          if (verifyAccountModelSwitch && request.method === "chat.session.prewarm") {
+            return { supported: true, state: "unavailable" };
+          }
           if (["chat.send.cancel", "chat.abort"].includes(request.method)) stops.push(request);
           if (request.method === "chat.operation.get") {
             lookups.push(request.params.operationId);
@@ -158,7 +166,8 @@ if (!process.versions.electron) {
       if (flags.includes("--group-continuation")) registry.setInspirationOwner(backend);
       assert.equal((await registry.start()).get("shoggoth"), true);
       proxy = await startProxyGateway({ port: 0, getUpstreamUrl: () => "", registry, workAdmissionGate: createWorkAdmissionGate() });
-      const config = { locale: "en", effectiveLocale: "en", setupCompletedAt: Date.now(), gatewayUrl: "", token: "", disabledBackends: ["openclaw", "hermes"] };
+      const locale = verifyAccountModelSwitch ? "zh-CN" : "en";
+      const config = { locale, effectiveLocale: locale, setupCompletedAt: Date.now(), gatewayUrl: "", token: "", disabledBackends: ["openclaw", "hermes"] };
       const identity = generateIdentity();
       server = await staticServerForDist()(0, { registry, chatUpstreamUrl: proxy.url, chatOrigin: "http://127.0.0.1",
         homeDir: f.root, userDataRoot: path.join(f.root, "desktop-assets"), configStore: { read: () => config },
@@ -192,28 +201,18 @@ if (!process.versions.electron) {
           || !!document.querySelector(${JSON.stringify(stopNotice)})
           || (${waiting} && !!document.querySelector(${JSON.stringify(waitingBubble)})))`), `${mode} chat and current turn state`);
       }
-      async function copyContinuationReference(selector, text, index = 0) {
-        await js(`(() => {
-          // Keep the fixture's clipboard private, while calling the same renderer API as production.
-          const clipboard = [];
-          window.__fixtureClipboard = clipboard;
-          Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true,
-            value: async text => { clipboard.push(text); } });
-        })()`);
+      async function assertContinuationReferenceHidden(selector, text, index = 0) {
         const target = `Array.from(document.querySelectorAll(${JSON.stringify(selector)}))
           .filter(node => node.textContent.trim() === ${JSON.stringify(text)} && node.getClientRects().length)[${index}]`;
         await until(() => js(`!!(${target})`), `reference target ${text}`);
         await js(`(${target}).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }))`);
         const menuItems = "Array.from(document.querySelectorAll('[data-message-menu] [role=menuitem]'))";
-        const action = `${menuItems}.find(button => button.textContent.includes('Copy continuation reference'))`;
         const labels = await js(`${menuItems}.map(button => button.textContent.trim())`);
         assert.ok(labels.includes("Copy"), text);
         assert.ok(labels.includes("Quote"), text);
-        assert.ok(labels.includes("Copy continuation reference"), text);
-        await js(`(${action}).click()`);
-        const value = await until(() => js("window.__fixtureClipboard[0] || null"), "continuation clipboard contents");
-        assert.deepEqual(await js("window.__fixtureClipboard"), [value]);
-        return JSON.parse(value);
+        assert.equal(labels.includes("Copy continuation reference"), false, text);
+        await js("document.querySelector('.chat-ctxmenu__backdrop').click()");
+        await until(() => js("!document.querySelector('[data-message-menu]')"), "message menu closes");
       }
       const textarea = mode => mode === "normal" ? "textarea.chat-composer__input" : "[data-chat-composer-dock] textarea";
       async function send(mode, prompt, expectPending = true) {
@@ -248,9 +247,96 @@ if (!process.versions.electron) {
         assert.equal(attempts.filter(attempt => attempt.prompt === prompt).length, 1);
       }
 
+      if (verifyAccountModelSwitch) {
+        const endpoint = service.productStore.putModelProvider({ id: "fixture-endpoint", kind: "custom-responses",
+          name: "Fixture endpoint", baseUrl: `${server.url}/fixture-endpoint/v1`, model: "endpoint-only", models: ["endpoint-only"],
+          credentialRef: null, headers: null, awsRegion: null, awsProfile: null, validationStatus: "protocol_valid" });
+        service.productStore.putAgentProfile({ ...service.productStore.getAgentProfile(f.profile.id),
+          providerRef: endpoint.id, defaultModel: endpoint.model });
+        backend.onConnectionsChanged();
+        const first = await f.send(session.sessionKey, "endpoint-turn", "Keep this conversation");
+        assert.equal(first.status, "running", first.errorCode);
+        await f.complete(first, "Answer from the endpoint");
+        const current = () => service.chatSessionStore.getSession(session.sessionKey);
+        assert.equal(current().runtimeModelSource.source, endpoint.id);
+
+        const binding = f.binding("codex");
+        const handle = [...f.transport.handles.values()].find(entry => entry.runtimeProfileId === binding.runtimeProfileId);
+        const models = handle.host.modelList.bind(handle.host);
+        let duplicateReads = 0;
+        handle.host.modelList = async params => {
+          if (params.limit === 64) {
+            duplicateReads++;
+            // A support probe can outlast its deadline while the selected source's catalog is available.
+            await waitForGate("duplicate model probe");
+          }
+          return models(params);
+        };
+        await open("normal");
+        const picker = ".chat-pill--model:not(:disabled)";
+        const model = `.model-menu__list [title="${nextModel}"]:not(:disabled)`;
+        await until(() => js(`!!document.querySelector(${JSON.stringify(picker)})`), "account model picker ready");
+        await js(`document.querySelector(${JSON.stringify(picker)}).click()`);
+        await until(() => js(`!!document.querySelector(${JSON.stringify(model)})`), "ChatGPT model offered next to the endpoint");
+        await js(`document.querySelector(${JSON.stringify(model)}).click()`);
+        const outcome = await until(async () => {
+          if (current().nextRuntimeSelection?.modelProviderRef === "@chatgpt") return "saved";
+          const hasUnknownToast = await js(`document.body.textContent.includes('暂时无法确认此运行环境是否可用。')`);
+          return hasUnknownToast && "RUNTIME_FACTS_UNKNOWN";
+        }, "ChatGPT selection result");
+        assert.equal(outcome, "saved");
+        assert.equal(duplicateReads, 0);
+        assert.equal(current().nextRuntimeSelection.model, nextModel);
+        assert.equal(current().runtimeModelSource.source, endpoint.id);
+        assert.equal(current().runtimeSessionId, first.runtimeSessionRef.sessionId);
+        const prompt = "Continue with ChatGPT";
+        const idem = await send("normal", prompt);
+        const next = await until(() => {
+          const receipt = receipts.get(prompt);
+          const run = receipt && service.workRunCoordinator.getRun(receipt.runId);
+          if (run?.errorCode) throw new Error(`ChatGPT turn failed: ${run.errorCode}`);
+          return run?.status === "running" && run;
+        }, "ChatGPT turn starts through the composer");
+        const contract = service.workRunCoordinator.runExecutionContracts.get(next.id);
+        assert.equal(contract.provider.providerRef, null);
+        assert.equal(contract.defaultModel, nextModel);
+        assert.equal(current().nextRuntimeSelection, undefined);
+        assert.equal(current().modelOverride, nextModel);
+        assert.notEqual(current().runtimeSessionId, first.runtimeSessionRef.sessionId);
+        assert.equal(current().retiredRuntimeSessions.at(-1).runtimeSessionId, first.runtimeSessionRef.sessionId);
+        assert.equal(service.productStore.getAgentProfile(f.profile.id).providerRef, endpoint.id);
+        await f.complete(next, "Answer from ChatGPT");
+        await until(async () => (await threadText()).includes("Answer from the endpoint")
+          && (await threadText()).includes("Answer from ChatGPT"), "both answers in the same chat");
+        await until(async () => !(await stateFor(idem)), "ChatGPT send receipt settles");
+        assert.equal(countEvents(receipts.get(prompt).operationId), 1);
+
+        const beforeRejectedPick = current();
+        const pickAccountModel = async modelId => {
+          const query = new URLSearchParams({ backend: "shoggoth", sessionKey: key });
+          const response = await fetch(`${server.url}/__api/agents/${f.profile.agentId}/runtime-models?${query}`, {
+            method: "PUT", headers: { "Content-Type": "application/json", Origin: server.url },
+            body: JSON.stringify({ bindingId: binding.id, model: modelId, modelProviderRef: "@chatgpt",
+              revision: beforeRejectedPick.revision, acceptAdjustments: true }),
+          });
+          return (await response.json()).code;
+        };
+        assert.equal(await pickAccountModel(endpoint.model), "MODEL_ROUTE_UNSUPPORTED");
+        const auth = service.accountAuthManager, readAuth = auth.read;
+        try {
+          auth.read = async () => ({ account: null, requiresOpenaiAuth: true });
+          assert.equal(await pickAccountModel(nextModel), "ACCOUNT_NOT_AUTHENTICATED");
+        } finally { auth.read = readAuth; }
+        assert.deepEqual(current(), beforeRejectedPick);
+        console.log("PASS production React/Electron: switch from a custom endpoint to a ChatGPT account model and continue the conversation without a duplicate catalog probe");
+        return;
+      }
+
       if (verifyModelSelection) {
         await open("normal");
         const modelButton = ".chat-pill--model";
+        const nextModelVisible = () => js(`Array.from(document.querySelectorAll('${modelButton}:not(:disabled)'))
+          .some(button => button.getClientRects().length && button.textContent.includes(${JSON.stringify(nextModel)}))`);
         const modelOption = `Array.from(document.querySelectorAll('.model-menu__list [role=option]'))
           .find(button => button.querySelector('.model-menu__name')?.textContent.trim() === ${JSON.stringify(nextModel)})`;
         await until(() => js(`!!document.querySelector('${modelButton}:not(:disabled)')`), "model picker ready");
@@ -266,8 +352,7 @@ if (!process.versions.electron) {
         });
         await js(`(${modelOption}).click()`);
         await until(() => gates.has("model selection"), "model write waiting at the Service");
-        await until(() => js(`Array.from(document.querySelectorAll('${modelButton}')).some(button =>
-          button.disabled && button.getClientRects().length)`), "model picker pending in React");
+        await until(nextModelVisible, "chosen model displayed on the enabled picker during the write");
 
         service.productStore.putModelProvider({ id: "fixture-endpoint", kind: "custom-responses", name: "Endpoint",
           baseUrl: "https://example.invalid/v1", model: "endpoint-only", models: ["endpoint-only"],
@@ -288,10 +373,16 @@ if (!process.versions.electron) {
         await until(() => service.chatSessionStore.getSession(otherSession.sessionKey).modelOverride === "other-session-model",
           "second session saves its own model before the first write completes");
         await js(`location.hash=${JSON.stringify(chatHash)}`);
-        await until(() => js(`!!document.querySelector('${modelButton}:disabled')`), "first session still owns its pending selection");
-        const prompt = "Send once while saving the model";
-        const idem = await send("normal", prompt);
-        await until(() => stateFor(idem).then(entry => entry?.accepted), "one durable acceptance during model save");
+        await until(nextModelVisible, "first session still shows its pending selection");
+        const prompt = modelSelectionPrompt;
+        await send("normal", prompt, false);
+        assert.equal(await js(`document.querySelector(${JSON.stringify(textarea("normal"))}).value`), prompt);
+        assert.equal((await state()).some(entry => entry.key === key), false);
+        assert.equal(attempts.some(attempt => attempt.prompt === prompt), false);
+        assert.equal(nativeTurns(), 0);
+        gates.get("model selection")();
+        const { idem } = await until(() => state().then(entries => entries.find(entry => entry.key === key && entry.accepted)),
+          "one durable acceptance after model save");
         const receipt = receipts.get(prompt);
         await until(() => js(`!!document.querySelector(${JSON.stringify(waitingBubble)})?.getClientRects().length`),
           "normal loading animation during model save");
@@ -303,7 +394,8 @@ if (!process.versions.electron) {
         await open("normal", true);
         await until(() => lookups.slice(beforeReconnect).includes(receipt.operationId), "renderer reconnects to the same queued operation");
         await until(() => js(`!!document.querySelector(${JSON.stringify(waitingBubble)})?.getClientRects().length`), "normal loading after reconnect");
-        gates.get("model selection")();
+        await until(() => gates.has(prompt), "accepted message waiting for preparation");
+        gates.get(prompt)();
         const run = await until(() => {
           const candidate = coordinator.getRun(receipt.runId);
           return candidate?.status === "running" && candidate;
@@ -525,13 +617,15 @@ if (!process.versions.electron) {
       await f.complete(fileRun, "Original attachment answer");
       const attachedUser = service.transcriptStore.listEvents(f.profile.id, session.id, { runId: fileRun.id })
         .find(event => event.kind === "user");
-      await open("normal");
-      const userReference = await copyContinuationReference("[data-qp]", normalPrompt);
-      const answerReference = await copyContinuationReference("[data-qp]", "Normal accepted run completed");
-      const attachmentReference = await copyContinuationReference(".chat-file-button", continuationFile.name, 1);
-      assert.deepEqual(userReference, { kind: "user_message", eventId: originalUser.id });
-      assert.deepEqual(answerReference, { kind: "assistant_message", eventId: originalAnswer.id });
-      assert.deepEqual(attachmentReference, { kind: "attachment", eventId: attachedUser.id, attachmentId: secondContinuationFile.id });
+      for (const mode of ["immersive", "normal"]) {
+        await open(mode);
+        await assertContinuationReferenceHidden("[data-qp]", normalPrompt);
+        await assertContinuationReferenceHidden("[data-qp]", "Normal accepted run completed");
+        await assertContinuationReferenceHidden(".chat-file-button", continuationFile.name, 1);
+      }
+      const userReference = { kind: "user_message", eventId: originalUser.id };
+      const answerReference = { kind: "assistant_message", eventId: originalAnswer.id };
+      const attachmentReference = { kind: "attachment", eventId: attachedUser.id, attachmentId: secondContinuationFile.id };
       const continuationPrompt = `/continue-task\n${JSON.stringify({ version: 1, mode: "referenced",
         goal: "Draft the requested status in this turn", limits: [], decisions: [], pendingDecisions: [],
         evidence: [userReference, answerReference, attachmentReference] })}`;
@@ -555,7 +649,7 @@ if (!process.versions.electron) {
       await f.complete(continued, "Structured continuation returned its status");
       await until(async () => (await threadText()).includes("Structured continuation returned its status"), "continued answer in React");
       assert.doesNotMatch(await threadText(), /BEGIN UNTRUSTED VERIFIED CONTINUATION EVIDENCE/u);
-      console.log("PASS production React/Electron: early receipt, immersive recovery after ACK loss and reload, terminal before ACK across session switch, accepted preparation failure, exact draft restoration on rejection, original Stop verification after reload, and structured continuation with clipboard references (7/7)");
+      console.log("PASS production React/Electron: early receipt, immersive recovery after ACK loss and reload, terminal before ACK across session switch, accepted preparation failure, exact draft restoration on rejection, original Stop verification after reload, hidden continuation copy menus in both layouts, and structured continuation with transcript references (7/7)");
     } catch (error) {
       if (win && !win.isDestroyed()) console.error("fixture renderer state", await win.webContents.executeJavaScript(`({
         hash: location.hash, pending: localStorage.getItem(${JSON.stringify(pendingKey)}),

@@ -46,7 +46,8 @@ async function main() {
     getSubjects: async () => ({ items: [{ profileId: "profile-a", agentId: "profile-a", backendId: "shoggoth", label: "Isolated acceptance profile", enabled: true }], unavailableBackends: [] }) });
   const urlFiles = new Map();
   for (const [id, release] of Object.entries(RELEASES)) {
-    if (!release.mcp && !release.native && !release.quark && !release.baidu) urlFiles.set(`https://codeload.github.com/${release.repo}/zip/${release.ref}`, `${id}-repository.zip`);
+    if (!release.mcp && !release.native && !release.quark && !release.baidu && !release.platformArchives) urlFiles.set(`https://codeload.github.com/${release.repo}/zip/${release.ref}`, `${id}-repository.zip`);
+    for (const archive of Object.values(release.platformArchives || {})) urlFiles.set(archive.url, path.basename(new URL(archive.url).pathname));
     if (release.runtime) urlFiles.set(release.runtime.url, { fliggy: "flyai-cli-1.0.16.tgz", alipay: "alipay-runtime-darwin-0.4.8.tgz" }[id]);
   }
   for (const archive of Object.values(require("../app/agent-service/data/doordash-cli-release.json").archives)) urlFiles.set(archive.url, path.basename(new URL(archive.url).pathname));
@@ -83,7 +84,7 @@ async function main() {
       try { return await prepareOfficialSkill({ ...options, fetch }); }
       catch (error) { console.error(JSON.stringify({ stage: "prepare", provider: options.providerId, lastPublicDownload: downloads.at(-1) || null })); throw error; }
     } });
-  const expectedBusiness = { doordash: "search_stores", shop: "search_catalog", "quark-drive": "search_files", "rollinggo-hotel": "search_hotels", "baidu-maps": "place", fliggy: "travel_search", weread: "bookshelf", "meituan-paotui": "delivery_preview", alipay: "submit_payment" };
+  const expectedBusiness = { doordash: "search_stores", shop: "search_catalog", "quark-drive": "search_files", "rollinggo-hotel": "search_hotels", "baidu-maps": "place", "agently-mail": "search_mail", fliggy: "travel_search", weread: "bookshelf", "meituan-paotui": "delivery_preview", alipay: "submit_payment" };
   const receipts = [];
   try {
     skills.open(["profile-a"]); store.open(); manager.open(); mcp.open(); controller.open();
@@ -99,7 +100,14 @@ async function main() {
       // handshake. Listing tools itself neither signs in nor invokes a CLI.
       const tools = await manager.listTools(installed.serverId);
       assert.ok(tools.some(tool => tool.name === expectedBusiness[id]));
-      assert.ok(tools.some(tool => tool.name === "account_status"));
+      assert.equal(tools.some(tool => tool.name === "account_status"), id !== "agently-mail");
+      if (id === "agently-mail") {
+        assert.ok(tools.every(tool => !tool.name.startsWith("account_")));
+        await assert.rejects(manager.callTool(installed.serverId, "account_start", {}), { code: "OFFICIAL_SKILL_ACCESS_DENIED" });
+        const status = await controller.handle("connector.official.account", { id, expectedRevision: installed.revision, action: "status" });
+        assert.equal(status.state, "signedOut");
+        assert.equal(status.userName, null);
+      }
       assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
       if (id === "quark-drive") {
         mcp.captureRun({ id: "quark-permission-run", profileId: "profile-a" });

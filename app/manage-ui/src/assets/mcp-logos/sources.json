@@ -14,6 +14,18 @@
       "sha256": "c9a75df301da2392e05b7b7514a94d3e2c26de031530d93e5a6b62d91d5003cf"
     },
     {
+      "id": "agently-mail",
+      "page": "https://agent.qq.com/",
+      "asset": "agently-mail.png",
+      "assetUrl": "https://res.wx.qq.com/t/webmail/webmail/res/images/favicon_96h.997b2e3.png",
+      "originalType": "image/png",
+      "originalWidth": 96,
+      "originalHeight": 96,
+      "bytes": 7366,
+      "sha256": "e964b9918fad8b3b42bb8be86d19733660852e5cc2652c40ebafccaaccfeaf0c",
+      "retrievedAt": "2026-11-18"
+    },
+    {
       "id": "airtable",
       "page": "https://www.airtable.com/",
       "asset": "airtable.png",

@@ -199,6 +199,9 @@ function transcriptHistoryItem(event, runSource) {
     const groupContinuation = groupContinuationFromAnswer(event);
     if (groupContinuation) message.shoggoth.groupContinuation = groupContinuation;
   } else if (event.kind === "error") {
+    // Stale summaries are recorded on the compaction Run. A blocked chat turn reports its own failure.
+    if (runSource === "compaction" && transcriptType === "terminal"
+      && event.content.errorCode === "CHECKPOINT_STALE") return null;
     const text = transcriptMessageText(event);
     if (!text) return null;
     role = "system";

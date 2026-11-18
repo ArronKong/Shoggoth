@@ -92,6 +92,10 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
    assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === 'https://lbsyun.baidu.com/products/agentplan'));
    assert.equal(rendered.root.findAllByType('input').length, 0, 'no token is prefilled before installation');
   }
+  if (definition.id === 'agently-mail') {
+   assert.equal(definition.version, '1.0.18'); assert.equal(definition.fields.length, 0);
+   assert.ok(JSON.stringify(rendered.toJSON()).includes(definition.note[language]));
+  }
   if (definition.id === 'doordash') {
    assert.ok(JSON.stringify(rendered.toJSON()).includes(definition.note[language]), 'approval and platform limits visible before installation');
    assert.ok(rendered.root.findAllByType('a').some(link => link.props.href === definition.accessUrl), 'official waitlist remains available before installation');
@@ -185,7 +189,8 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
   if (button('login')) {
    const login = button('login');
    const verificationUrl = alipay ? 'https://u.alipay.cn/fixtureAuth'
-    : definition.id === 'meituan-paotui' ? 'https://dpurl.cn/official-auth-fixture' : 'https://provider.example/authorize';
+    : definition.id === 'meituan-paotui' ? 'https://dpurl.cn/official-auth-fixture'
+    : definition.id === 'agently-mail' ? 'https://agent.qq.com/page/oauth?user_code=TEST%2B123&oauth_type=fixture' : 'https://provider.example/authorize';
    account = { ...account, state: 'authorizing', userName: null, verificationUrl, userCode: opensAuthorizationPage ? null : 'ABC123' };
    if (opensAuthorizationPage) {
     const callsBeforeLogin = accountCalls.length;
@@ -213,6 +218,23 @@ for (const language of ['zh-CN', 'en']) for (const definition of catalog) {
     assert.ok(!JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.errors.auth')));
    } else if (!opensAuthorizationPage) assert.equal(openedUrls.length, 0, 'other provider authorization behavior is preserved');
    if (definition.id === 'rollinggo-hotel') assert.equal(authorizationTimers.size, 1, 'RollingGo schedules status checks only during explicit authorization');
+   if (definition.id === 'agently-mail') {
+    assert.equal(rendered.root.findAllByType('input').length, 0);
+    assert.ok(JSON.stringify(rendered.toJSON()).includes(t('officialConnectors.agentMailAuthorizationHint')));
+    const callsBeforeReopen = accountCalls.length;
+    await click(button('login'));
+    assert.equal(accountCalls.length, callsBeforeReopen);
+    assert.deepEqual(openedUrls, [[verificationUrl, '_blank', 'noopener,noreferrer']]);
+    assert.equal(authorizationTimers.size, 1);
+    const [timer, poll] = authorizationTimers.entries().next().value;
+    authorizationTimers.delete(timer);
+    account = { ...account, state: 'ready', userName: 'agent@example.invalid', verificationUrl: null, userCode: null };
+    await Renderer.act(async () => { poll(); await flush(); });
+    assert.equal(accountCalls.at(-1).action, 'status');
+    assert.ok(JSON.stringify(rendered.toJSON()).includes('agent@example.invalid'));
+    assert.equal(authorizationTimers.size, 0);
+    assert.ok(button('done'));
+   }
    if (alipay) {
     const authorization = { ...account };
     const reopen = async (target = button('login'), url = authorization.verificationUrl) => {

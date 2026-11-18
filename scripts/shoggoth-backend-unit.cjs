@@ -5670,7 +5670,7 @@ test("native execution status clears queue UI while unknown lifecycle noise stay
   });
   assert.deepEqual(statuses, [
     { kind: "starting", text: "starting", stage: "preparing" },
-    { kind: "running", text: "running" },
+    { kind: "running", text: "running", nativeRunId: "run-1", steer: true },
     { kind: "compacting", text: "compacting" },
     { kind: "compacted", text: "compacted" },
   ]);
@@ -6326,6 +6326,23 @@ test("all session operations fail closed when gateway agent and Service session 
   assert.equal(calls.length, before);
 });
 
+test("a steering request for a finished run cannot be redirected into its successor", async () => {
+  const active = run("running");
+  const steered = [];
+  const { backend } = await readyBackend(request => {
+    if (request.method === "run.list") return page("runs", [active]);
+    if (request.method === "chat.steer") {
+      steered.push(request.params.runId);
+      return { accepted: true, runId: active.id, turnId: active.runtimeTurnRef.turnId };
+    }
+    throw new Error(`unexpected ${request.method}`);
+  });
+  const key = `agent:shoggoth-default:${SESSION_A}`;
+  await assert.rejects(backend.steerChat(key, "older turn", "finished-run"), { code: "WORK_RUN_CONTROL_MISMATCH" });
+  await backend.steerChat(key, "current turn", active.id);
+  assert.deepEqual(steered, [active.id]);
+});
+
 test("watchSession reconnects to an active run and local cancellation never aborts it", async () => {
   const methods = [];
   const controller = new AbortController();
@@ -6415,7 +6432,7 @@ test("watchSession emits immediate inFlight status even when the active stream i
   await backend.watchSession(`agent:shoggoth-default:${SESSION_A}`, {
     status: (value) => statuses.push(value),
   }, { signal: controller.signal });
-  assert.deepEqual(statuses, [{ kind: "running", text: "running" }]);
+  assert.deepEqual(statuses, [{ kind: "running", text: "running", nativeRunId: "run-1", steer: true }]);
   assert.equal(subscriptions, 1);
 });
 
@@ -6430,7 +6447,7 @@ test("a running CURSOR_GAP snapshot restores inFlight status for send observers"
   await backend.sendMessage(`agent:shoggoth-default:${SESSION_A}`, "hi", null, {
     status: (value) => statuses.push(value),
   }, { signal: controller.signal });
-  assert.deepEqual(statuses, [{ kind: "starting", text: "starting", stage: "preparing" }, { kind: "running", text: "running" }]);
+  assert.deepEqual(statuses, [{ kind: "starting", text: "starting", stage: "preparing" }, { kind: "running", text: "running", nativeRunId: "run-1", steer: true }]);
 });
 
 test("watchSession treats queued as controllable and keeps polling until its terminal event", async () => {
@@ -6455,7 +6472,7 @@ test("watchSession treats queued as controllable and keeps polling until its ter
     status: (value) => statuses.push(value),
   });
   assert.equal(subscriptions, 2);
-  assert.deepEqual(statuses, [{ kind: "queued", text: "queued" }]);
+  assert.deepEqual(statuses, [{ kind: "queued", text: "queued", nativeRunId: "run-1" }]);
   assert.deepEqual(finals, ["queued finished"]);
 });
 

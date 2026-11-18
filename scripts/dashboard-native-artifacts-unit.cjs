@@ -28,6 +28,7 @@ function fixture(t) {
   backend._call = async (method, params) => {
     calls.push({ method, params });
     if (method === "profile.list") return { profiles, hasMore: false, nextCursor: null };
+    if (method === "agent.files.list") return { items: [], nextCursor: null };
     if (method === "chat.session.list") {
       // Exercise real pagination instead of depending on the first sidebar page.
       const all = sessions.filter(session => session.profileId === params.profileId && (params.includeArchived || session.status !== "archived"));
@@ -192,6 +193,13 @@ test("Agent outputs distinguish partial and unavailable histories without a work
   const result = await f.backend.listAgentArtifacts("agent-a");
   assert.equal(result.supported, true); assert.equal(result.partial, true);
   assert.deepEqual(result.items.map(item => item.path), [good]);
+  f.backend._call = (method, params) => {
+    if (method === "agent.files.list") throw Error("catalog unavailable");
+    return call(method, params);
+  };
+  const partialCatalog = await f.backend.listAgentArtifacts("agent-a");
+  assert.equal(partialCatalog.partial, true);
+  assert.deepEqual(partialCatalog.items.map(item => item.path), [good]);
   f.backend._call = (method, params) => {
     if (method === "harness.transcript.events") throw Error("unavailable transcript");
     return call(method, params);

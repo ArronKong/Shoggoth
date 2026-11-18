@@ -145,7 +145,7 @@ try {
   assert.match(chatSource, /onClick=\{event => toggleAgentHeaderPanel\("artifacts", event.currentTarget, event.detail === 0\)\}/);
   assert.match(chatSource, /const agentArtifactItems = activeAgentArtifactResult\?\.items \?\? \[\]/);
   assert.doesNotMatch(chatSource, /extractLocalFilePaths|mergeSessionArtifacts|messageReferenced/);
-  assert.match(chatSource, /<ChatFileCard[\s\S]*?revealLocalFile\(artifact\.path\)/);
+  assert.match(chatSource, /<ChatFileCard[\s\S]*?revealLocalFile\(artifact\.path, artifact\.fileId\)/);
   assert.match(clientSource, /export async function revealPath[\s\S]*\/__api\/host\/reveal-path/);
 
   const revealCalls = [];

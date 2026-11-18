@@ -1,7 +1,7 @@
 import { jsonFetch } from "./client";
 import { MCP_CHANGE_EVENT } from "./mcpConnectors";
 
-export type OfficialConnectorId = "doordash" | "shop" | "quark-drive" | "rollinggo-hotel" | "fliggy" | "meituan-paotui" | "weread" | "alipay" | "baidu-maps";
+export type OfficialConnectorId = "doordash" | "shop" | "quark-drive" | "rollinggo-hotel" | "fliggy" | "meituan-paotui" | "weread" | "alipay" | "baidu-maps" | "agently-mail";
 export interface OfficialConnectorStatus {
   id: OfficialConnectorId; revision: number;
   state: "notInstalled" | "installing" | "installed" | "removing" | "failed";

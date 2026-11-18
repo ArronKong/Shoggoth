@@ -1147,6 +1147,7 @@ class WorkRunCoordinator {
 
     this.onRuntimeMcpRequest = options.onRuntimeMcpRequest || null;
     this.followDefaultSessionBinding = options.followDefaultSessionBinding || null;
+    this.applyQueuedSessionSelection = options.applyQueuedSessionSelection || null;
     this.manualCompactions = new Map();
     this.manualCompactionTimeoutMs = options.manualCompactionTimeoutMs ?? 60 * 60_000;
     if (!Number.isSafeInteger(this.manualCompactionTimeoutMs)
@@ -3308,6 +3309,17 @@ class WorkRunCoordinator {
     }
     const terminalizingAtEntry = this.terminalizingRuns.size > 0;
     let commands = this.inbox.list().filter((command) => ACTIVE_COMMAND_STATES.has(command.state));
+    // Older versions could archive the owner after Inbox acceptance and before
+    // WorkRun projection. Settle those receipts without granting any execution.
+    // Materialize the terminal Run before yielding, including on late Inbox unlock.
+    for (const command of commands) {
+      if (!command.acceptance || command.state !== "pending" || this.dispatcher.getRun(command.runId)
+        || this.#findRunByIdempotencyKey(runIdempotencyKey(command.operationId))) continue;
+      const session = this.chatSessionStore.getSession(command.sessionKey);
+      if (session && this.productStore.getAgentProfile(session.profileId)?.enabled === false) {
+        this.dispatcher.recordArchivedChatCancellation(this.#chatRunInput(command, session));
+      }
+    }
     // Source checks are installed before open(). A revoked UI operation may
     // not regain native execution authority during encrypted Inbox recovery.
     for (const command of commands) {
@@ -3619,6 +3631,13 @@ class WorkRunCoordinator {
     return (this.pendingSessionSends.get(sessionKey) || 0) > 0
       || this.listSessionRuns(sessionKey).some(run => run.id !== excludingRunId
         && (run.status === "queued" || ACTIVE_RUN_STATES.has(run.status)));
+  }
+
+  hasPendingProfileSend(profileId) {
+    for (const sessionKey of this.pendingSessionSends.keys()) {
+      if (this.chatSessionStore.getSession(sessionKey)?.profileId === profileId) return true;
+    }
+    return false;
   }
 
   trackSessionSelectionWrite(sessionKey, action) {
@@ -4266,6 +4285,11 @@ class WorkRunCoordinator {
       error.admissionAccepted = false;
       throw error;
     }
+    if (!existingCommand && !run && !this.productStore.getAgentProfile(session.profileId)?.enabled) {
+      const error = coordinatorError("CHAT_SESSION_NOT_READY", "Agent 已归档，无法接收新的消息");
+      error.admissionAccepted = false;
+      throw error;
+    }
     // Terminal tombstones keep the full command fingerprint, not the selection
     // rows. enqueue() verifies that fingerprint without restoring old authority.
     if (existingCommand && ACTIVE_COMMAND_STATES.has(existingCommand.state)
@@ -4560,6 +4584,15 @@ class WorkRunCoordinator {
       const inspirationSession = run.source === "inspiration" && sessionKey ? this.chatSessionStore.getSession(sessionKey) : null;
       if (sessionKey && !inspirationSession?.modelOverride && !inspirationSession?.nextRuntimeSelection) {
         await this.followDefaultSessionBinding(sessionKey, run.id);
+      }
+    }
+    // An Inspiration continued from Chat runs on its conversation's model pick, which
+    // waits as the next turn's choice; apply it before this run starts, as a Chat send does.
+    if (run.status === "queued" && run.source === "inspiration" && this.applyQueuedSessionSelection
+      && this.resolveRunSession(run)?.inputSource === "chat") {
+      const sessionKey = this.getRunSessionKey(run);
+      if (sessionKey && this.chatSessionStore.getSession(sessionKey)?.nextRuntimeSelection) {
+        await this.applyQueuedSessionSelection(sessionKey, run.id);
       }
     }
     const fingerprint = controlFingerprint("domain-execution", input);
@@ -9466,7 +9499,7 @@ class WorkRunCoordinator {
       this.#armNativeCompactionTimeout(runId, token, host, productSessionKey);
     }
     this.#flushPendingHostEvents(host, this.#executionContext(runId));
-    this.#streamFor(runId).append("status", { status: "running",
+    this.#streamFor(runId).append("status", { status: "running", steer: host.capabilities?.["turn.steer"] === true,
       ...(!this.#performanceFor(runId).firstRuntimeEventSeen ? { stage: "waiting" } : {}) });
     this.hookService?.observeRun(this.dispatcher.getRun(runId), "run.started", {});
     await this.#reconcileTerminal(runId, this.#executionContext(runId));

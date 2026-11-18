@@ -261,7 +261,7 @@ class StdioMcpClient {
     } while (cursor !== null);
     return boundedJson(tools);
   }
-  async callTool(name, args, { assertCurrent, signal, officialSessionId } = {}) {
+  async callTool(name, args, { assertCurrent, signal, officialSessionId, officialAccountAction } = {}) {
     await this.start();
     assertCurrent?.();
     const params = { name, arguments: args };
@@ -269,6 +269,9 @@ class StdioMcpClient {
     // Keep it private to the validated official bridge; other peers do not get it.
     if (this.trustedOfficialBridge && typeof officialSessionId === "string" && OFFICIAL_SESSION_UUID.test(officialSessionId)) {
       params._meta = { "shoggoth/official-session-id": officialSessionId };
+    }
+    if (this.trustedOfficialBridge && officialAccountAction === true) {
+      params._meta = { ...params._meta, "shoggoth/official-account-action": true };
     }
     try { return boundedJson(await this.request("tools/call", params, null, false, signal)); }
     catch (error) { if (["MCP_SERVER_TIMEOUT", "MCP_SERVER_EXITED"].includes(error?.code)) throw clientError("MCP_SERVER_RESULT_UNKNOWN", "MCP 调用结果未知，未自动重发"); throw error; }

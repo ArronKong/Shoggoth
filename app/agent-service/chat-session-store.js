@@ -890,6 +890,21 @@ class ChatSessionStore {
     return this.getSession(sessionKey);
   }
 
+  // Forgets a queued next-turn choice; the conversation stays on its current Runtime and model.
+  dropRuntimeSelection(sessionKey, { revision }) {
+    this.#assertOpen();
+    const session = this.container.sessions[sessionKey];
+    if (!session) throw chatSessionError("CHAT_SESSION_NOT_FOUND", "ChatSession 不存在");
+    if (session.revision !== revision) throw chatSessionError("CHAT_SESSION_REVISION_CONFLICT", "会话已更新");
+    if (!session.nextRuntimeSelection) return this.getSession(sessionKey);
+    const { nextRuntimeSelection: _next, ...settled } = session;
+    const updated = normalizeSession({ ...settled, revision: session.revision + 1,
+      updatedAt: Math.max(this.#currentTime(), session.updatedAt) });
+    this.container = this.#write({ ...this.container, revision: this.container.revision + 1,
+      sessions: { ...this.container.sessions, [sessionKey]: updated } });
+    return this.getSession(sessionKey);
+  }
+
   switchRuntime(sessionKey, input) {
     this.#assertOpen();
     if (!UUID_PATTERN.test(sessionKey) || !input || typeof input !== "object" || Array.isArray(input)

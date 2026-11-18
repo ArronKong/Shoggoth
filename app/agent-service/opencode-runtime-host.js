@@ -84,6 +84,7 @@ const OUTCOME_UNKNOWN = "RUNTIME_TURN_OUTCOME_UNKNOWN";
 // OpenCode honors provider retry-after for up to days; a retry this far away
 // is a limit, not a hiccup, so the turn is stopped instead of held.
 const LONG_RETRY_MS = 2 * 60_000;
+const EVENT_SETTLE_MS = 500;
 const STOP_CODES = new Set(["RUNTIME_RATE_LIMITED", "RUNTIME_QUOTA_EXHAUSTED",
   "RUNTIME_UPSTREAM_UNAVAILABLE", "OPENCODE_TURN_TIMEOUT"]);
 // Only the private server that accepted a turn can still execute it. The shared
@@ -94,6 +95,19 @@ const LIVE_TURNS = new WeakMap();
 function completedAssistant(message) {
   return Number.isSafeInteger(message?.info?.time?.completed)
     && (message.info.error || message.info.finish !== "tool-calls");
+}
+
+function missingAssistantResult(message) {
+  const { error, finish } = message.info;
+  if (error) return false;
+  if (finish === "error") return true;
+  if (finish && finish !== "unknown") return false;
+  return !message.parts.some(part => part?.type === "tool" || part?.type === "file"
+    || (part?.type === "text" && typeof part.text === "string" && part.text.trim()));
+}
+
+function unresolvedTurn(turn) {
+  return turn.status === "inProgress" || turn.acceptance === "unknown" || turn.errorCode === OUTCOME_UNKNOWN;
 }
 
 function fingerprint(input) {
@@ -168,6 +182,14 @@ function openCodeRetryLimit(status, now, deadline) {
   const next = Number.isSafeInteger(status?.next) ? status.next : null;
   return { code, giveUp: code === "RUNTIME_QUOTA_EXHAUSTED"
     || (next !== null && (next - now > LONG_RETRY_MS || next >= deadline)) };
+}
+
+function openCodeRetryDetail(status, secrets) {
+  // The V1 retry event uses an upsell as its message when the free tier
+  // returns FreeUsageLimitError. Keep the reason without the promotion.
+  return runtimeFailureDetail(status.action?.reason === "free_tier_limit"
+    ? { message: "Free usage limit reached", upstreamCode: "FreeUsageLimitError" }
+    : status.message, secrets);
 }
 
 function aborted(nativeError) { return nativeError?.name === "MessageAbortedError"; }
@@ -955,6 +977,7 @@ class OpenCodeRuntimeHost {
       done: false, idle: false, cursor: 0, pending: new Set(), responded: new Set(), usage: null,
       model: selectedModel, abort: new AbortController() };
     this.activeTurns.set(session.id, active);
+    this.#markLive(id);
     try {
       // The per-turn Run ID goes with the user message so the system prompt
       // stays identical across turns unless rules or memory actually change.
@@ -962,8 +985,21 @@ class OpenCodeRuntimeHost {
         require("./native-instruction-delivery").turnInstructions(input));
       const system = [this.sessionConfigs.get(session.id)?.developerInstructions,
         turn.rules, input.context].filter(Boolean).join("\n\n");
+      if (this.protocolFeatures?.sessionEvents) {
+        const nativeId = this.#nativeSessionId(session.id);
+        active.observesEvents = await this.client.observeEvents(event => {
+          if (!active.dispatched || active.done || event?.type !== "session.status"
+            || event.properties?.sessionID !== nativeId) return;
+          const status = event.properties.status;
+          if (status?.type === "idle") active.observedIdle = true;
+          if (status?.type !== "retry") return;
+          const { code } = openCodeRetryLimit(status, this.now(), Infinity);
+          active.retryFailure = code ? { code, detail: openCodeRetryDetail(status, this.registeredSecrets) } : null;
+        }, active.abort.signal);
+        this.#assertExecution();
+        if (active.done) throw error("RUNTIME_TURN_NOT_ACTIVE", "OpenCode turn was stopped before submission");
+      }
       active.dispatched = true;
-      this.#markLive(id);
       const response = await this.client.request("POST", this.#sessionRoute(session.id, "/prompt_async"), {
         messageID: messageId,
         ...(reference ? { model: { providerID: reference.providerID, modelID: reference.id } } : {}),
@@ -981,19 +1017,21 @@ class OpenCodeRuntimeHost {
       return { turn: { id, status: "inProgress", items: [] } };
     } catch (cause) {
       if (active.accepted) throw cause;
-      const accepted = await this.#reconcileAcceptance(active).catch(() => false);
+      const accepted = active.dispatched && await this.#reconcileAcceptance(active).catch(() => false);
       if (accepted) {
         active.accepted = true;
         void this.#pump(active).catch(failure => this.#failActive(active, failure));
         return { turn: { id, status: "inProgress", items: [] } };
       }
+      active.abort.abort();
       this.activeTurns.delete(session.id);
-      const definitelyRejected = ["RUNTIME_ATTACHMENT_INVALID", "RUNTIME_ATTACHMENT_UNSUPPORTED",
+      const definitelyRejected = !active.dispatched || ["RUNTIME_ATTACHMENT_INVALID", "RUNTIME_ATTACHMENT_UNSUPPORTED",
         "RUNTIME_MODEL_UNAVAILABLE"].includes(cause?.code);
       if (definitelyRejected) this.#markStopped(id);
       this.ledger.update(data => { const turn = turnById(sessionById(data, session.id), id);
         turn.acceptance = definitelyRejected ? "failed" : "unknown";
-        turn.status = "failed"; turn.errorCode = definitelyRejected ? cause.code : "RUNTIME_TURN_ACCEPTANCE_UNKNOWN";
+        turn.status = "failed"; turn.errorCode = definitelyRejected
+          ? cause.code || "OPENCODE_TURN_FAILED" : "RUNTIME_TURN_ACCEPTANCE_UNKNOWN";
         turn.updatedAt = Math.max(turn.updatedAt, this.now()); });
       throw definitelyRejected ? cause : error("RUNTIME_TURN_ACCEPTANCE_UNKNOWN", "OpenCode prompt receipt could not be confirmed");
     }
@@ -1028,10 +1066,12 @@ class OpenCodeRuntimeHost {
         // OpenCode can retry a provider error for a long time without writing
         // a completed assistant message. A short retry keeps the turn with a
         // safe reason; a quota or a far-away retry stops and settles it.
-        // Provider text never leaves the host.
+        // Terminal diagnostics leave the host only after projection.
         const limit = openCodeRetryLimit(nativeStatus, this.now(), currentDeadline);
         if (limit.giveUp) {
-          throw error(limit.code || "RUNTIME_UPSTREAM_UNAVAILABLE", "OpenCode provider retry cannot settle this turn");
+          const code = limit.code || "RUNTIME_UPSTREAM_UNAVAILABLE";
+          active.retryFailure = { code, detail: openCodeRetryDetail(nativeStatus, this.registeredSecrets) };
+          throw error(code, "OpenCode provider retry cannot settle this turn");
         }
         const reason = limit.code === "RUNTIME_RATE_LIMITED" ? limit.code : null;
         if (active.retryReason !== (reason || "retry")) {
@@ -1215,18 +1255,28 @@ class OpenCodeRuntimeHost {
       && message.info.parentID === active.messageId);
     const last = subsequent.at(-1);
     if (!completedAssistant(last)) return;
+    const missingResult = missingAssistantResult(last);
+    // V1 can publish retry -> idle between polls and persist an empty
+    // assistant without its error. Let the event stream catch up to history.
+    if (missingResult && !active.done && active.observesEvents && !active.observedIdle && !active.retryFailure
+      && this.now() - (active.idleSince ?? this.now()) < EVENT_SETTLE_MS) return;
     const texts = subsequent.flatMap(message => (message.parts || []).filter(item => item.type === "text"
       && typeof item.text === "string").map(item => ({ id: item.id || message.info.id, text: item.text })));
-    const status = aborted(last.info.error) ? "interrupted" : last.info.error ? "failed" : "completed";
+    const status = aborted(last.info.error) ? "interrupted" : last.info.error || missingResult ? "failed" : "completed";
+    const errorCode = status !== "failed" ? null : missingResult
+      ? active.retryFailure?.code ?? "OPENCODE_TURN_FAILED" : openCodeFailureCode(last.info.error);
+    const failure = missingResult ? active.retryFailure?.detail ?? runtimeFailureDetail("OpenCode did not return a reply.")
+      : openCodeFailureDetail(last.info.error, this.registeredSecrets);
     const timestamp = this.now();
     this.ledger.update(data => { const session = sessionById(data, active.sessionId);
       const turn = turnById(session, active.turnId);
       turn.acceptance = "accepted"; turn.status = status;
-      turn.errorCode = status === "failed" ? openCodeFailureCode(last.info.error) : null;
+      turn.errorCode = errorCode;
       turn.assistantMessages = texts;
       turn.updatedAt = Math.max(turn.updatedAt, timestamp);
       session.updatedAt = Math.max(session.updatedAt, timestamp); });
     active.done = true;
+    active.abort.abort();
     this.#markStopped(active.turnId);
     this.activeTurns.delete(active.sessionId);
     for (const message of texts) this.#publish({ known: true, method: "opencode/session.message",
@@ -1239,18 +1289,17 @@ class OpenCodeRuntimeHost {
       usage, ...(typeof last.info.cost === "number" ? { costUsd: last.info.cost } : {}) });
     this.#publish({ known: true, method: "opencode/session.message", type: "complete",
       sessionId: active.sessionId, turnId: active.turnId, status,
-      ...(status === "failed" ? { failure: openCodeFailureDetail(last.info.error, this.registeredSecrets) } : {}) });
+      ...(errorCode ? { errorCode, failure } : {}) });
   }
 
   async #reconcileSession(sessionId) {
-    const session = this.#requireSession(sessionId);
-    if (!session.turns.some(turn => turn.status === "inProgress" || turn.acceptance === "unknown"
-      || turn.errorCode === "RUNTIME_TURN_OUTCOME_UNKNOWN")) return;
-    const unresolved = session.turns.find(turn => turn.status === "inProgress" || turn.acceptance === "unknown"
-      || turn.errorCode === "RUNTIME_TURN_OUTCOME_UNKNOWN");
-    const messages = await this.#messages(sessionId, unresolved.messageId);
-    for (const turn of session.turns.filter(item => item.status === "inProgress" || item.acceptance === "unknown"
-      || item.errorCode === "RUNTIME_TURN_OUTCOME_UNKNOWN")) {
+    const pending = this.#requireSession(sessionId).turns.filter(unresolvedTurn);
+    if (!pending.length) return;
+    const messages = await this.#messages(sessionId, pending[0].messageId);
+    const pendingIds = new Set(pending.map(turn => turn.id));
+    // A live observer can settle the receipt while the history read is in flight.
+    for (const turn of this.#requireSession(sessionId).turns) {
+      if (!pendingIds.has(turn.id) || !unresolvedTurn(turn)) continue;
       const index = messages.findIndex(message => message.info.id === turn.messageId && message.info.role === "user");
       if (index < 0) {
         // Reopening a workspace ledger proves its previous server generation
@@ -1270,12 +1319,16 @@ class OpenCodeRuntimeHost {
         && message.info.parentID === turn.messageId);
       const last = assistants.at(-1);
       const completed = completedAssistant(last);
+      const missingResult = completed && missingAssistantResult(last);
+      // The accepting host can still have a matching retry event in flight.
+      if (missingResult && this.#mayStillRun(turn)) continue;
       if (completed) this.#markStopped(turn.id);
       this.ledger.update(data => { const current = turnById(sessionById(data, sessionId), turn.id);
         current.acceptance = "accepted";
         if (completed) {
-          current.status = aborted(last.info.error) ? "interrupted" : last.info.error ? "failed" : "completed";
-          current.errorCode = current.status === "failed" ? openCodeFailureCode(last.info.error) : null;
+          current.status = aborted(last.info.error) ? "interrupted" : last.info.error || missingResult ? "failed" : "completed";
+          current.errorCode = current.status === "failed"
+            ? missingResult ? "OPENCODE_TURN_FAILED" : openCodeFailureCode(last.info.error) : null;
           current.assistantMessages = assistants.flatMap(message => (message.parts || [])
             .filter(item => item.type === "text" && typeof item.text === "string")
             .map(item => ({ id: item.id || message.info.id, text: item.text })));
@@ -1322,8 +1375,8 @@ class OpenCodeRuntimeHost {
       if (response.data === true && await this.#waitIdle(active.sessionId)) {
         // Execution liveness and durable outcome are separate facts. ENOSPC
         // while saving the terminal must not erase this confirmed native stop.
-        this.#markStopped(active.turnId);
-        if (await this.#settleStopped(active, cause)) return;
+        try { if (await this.#settleStopped(active, cause)) return; }
+        finally { this.#markStopped(active.turnId); }
       }
     } catch {}
     this.#settleUnknown(active);
@@ -1349,7 +1402,7 @@ class OpenCodeRuntimeHost {
       && message.info.parentID === active.messageId);
     const last = subsequent.at(-1);
     const nativeError = last?.info.error ?? null;
-    if (completedAssistant(last) && !nativeError) {
+    if (completedAssistant(last) && !nativeError && (!missingAssistantResult(last) || !STOP_CODES.has(cause?.code))) {
       await this.#finishFromMessages(active, messages);
       return true;
     }
@@ -1377,7 +1430,8 @@ class OpenCodeRuntimeHost {
       usage, ...(typeof last.info.cost === "number" ? { costUsd: last.info.cost } : {}) });
     this.#publish({ known: true, method: "opencode/session.message", type: "complete",
       sessionId: active.sessionId, turnId: active.turnId, status, ...(errorCode ? { errorCode,
-        failure: openCodeFailureDetail(nativeError, this.registeredSecrets) } : {}) });
+        failure: active.retryFailure?.code === errorCode ? active.retryFailure.detail
+          : openCodeFailureDetail(nativeError, this.registeredSecrets) } : {}) });
     return true;
   }
 
@@ -1597,7 +1651,8 @@ class OpenCodeRuntimeHost {
         this.answersShoggothToolPrompts = answersShoggothToolPrompts(configuration);
         const summarize = doc.data.paths["/session/{sessionID}/summarize"]?.post;
         this.protocolFeatures = Object.freeze({ nativeCompact: !!summarize
-          && typeof summarize === "object" && !Array.isArray(summarize) });
+          && typeof summarize === "object" && !Array.isArray(summarize),
+        sessionEvents: Boolean(doc.data.paths["/event"]?.get) });
         this.effectivePermissionsVerified = true;
         this.client = client;
         return;

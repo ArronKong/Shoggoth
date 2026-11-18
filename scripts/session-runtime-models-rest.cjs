@@ -78,13 +78,20 @@ async function run() {
     const otherChanged = await request({ bindingId: otherHarness.id, model: "codex-only",
       revision: otherCatalog.body.selection.revision, acceptAdjustments: true }, server.url, otherRoute);
     assert.equal(otherChanged.status, 200, JSON.stringify(otherChanged.body));
-    const otherSaved = f.service.chatSessionStore.getSession(otherSession.sessionKey);
-    assert.equal(otherSaved.runtimeBindingId, otherHarness.id);
-    assert.equal(otherSaved.modelOverride, "codex-only");
-    assert.equal(otherSaved.retiredRuntimeSessions.at(-1).runtimeSessionId, otherOriginal.runtimeSessionId);
+    // A pick is the next turn's choice: the conversation keeps its native session until it sends.
+    const otherQueued = f.service.chatSessionStore.getSession(otherSession.sessionKey);
+    assert.equal(otherQueued.nextRuntimeSelection.bindingId, otherHarness.id);
+    assert.equal(otherQueued.nextRuntimeSelection.model, "codex-only");
+    assert.equal(otherQueued.runtimeSessionId, otherOriginal.runtimeSessionId);
+    assert.equal(otherChanged.body.bindingId, otherHarness.id, "the menu shows the pick at once");
     assert.equal(f.service.productStore.getAgentProfile(otherProfile.id).defaultBindingId, otherProfile.defaultBindingId);
     const harnessRun = await f.send(otherSession.sessionKey, "other-agent-harness-run");
     assert.equal(harnessRun.status, "running", harnessRun.errorCode);
+    const otherSaved = f.service.chatSessionStore.getSession(otherSession.sessionKey);
+    assert.equal(otherSaved.runtimeBindingId, otherHarness.id);
+    assert.equal(otherSaved.modelOverride, "codex-only");
+    assert.equal(otherSaved.nextRuntimeSelection, undefined);
+    assert.equal(otherSaved.retiredRuntimeSessions.at(-1).runtimeSessionId, otherOriginal.runtimeSessionId);
     const harnessAcquisition = f.transport.acquisitions.at(-1);
     assert.equal(harnessAcquisition.binding.runtimeAccountId, SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID,
       "the selected Harness model executes through the managed account");
@@ -113,12 +120,16 @@ async function run() {
     const changed = await request(input("pi", "pi-only"));
     assert.equal(changed.status, 200, JSON.stringify(changed.body)); selection = changed.body;
     let saved = f.service.chatSessionStore.getSession(session.sessionKey);
-    assert.equal(saved.modelOverride, "pi-only"); assert.equal(saved.runtimeBindingId, f.binding("pi").id);
-    assert.equal(saved.runtimeSessionId, null); assert.equal(saved.retiredRuntimeSessions.length, 1);
-    assert.equal(saved.retiredRuntimeSessions[0].runtimeSessionId, original.runtimeSessionId);
+    assert.equal(saved.nextRuntimeSelection.model, "pi-only"); assert.equal(saved.nextRuntimeSelection.bindingId, f.binding("pi").id);
+    assert.equal(saved.runtimeSessionId, original.runtimeSessionId, "the pick keeps the native session until the next send");
+    assert.equal(saved.retiredRuntimeSessions.length, 0);
     assert.equal(f.service.productStore.getAgentProfile(f.profile.id).defaultBindingId, initialDefault);
     const active = await f.send(session.sessionKey, "model-menu-run");
     assert.equal(active.status, "running", active.errorCode);
+    saved = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(saved.modelOverride, "pi-only"); assert.equal(saved.runtimeBindingId, f.binding("pi").id);
+    assert.equal(saved.retiredRuntimeSessions.length, 1);
+    assert.equal(saved.retiredRuntimeSessions[0].runtimeSessionId, original.runtimeSessionId);
     assert.equal(active.runtimeSessionRef.runtime, "pi");
     assert.equal(f.transport.hosts.get("pi").lastTurnStartParams.model, "pi-only");
     assert.equal(f.transport.acquisitions.at(-1).options.executionContract.provider.modelRef, "pi-only");
@@ -136,10 +147,17 @@ async function run() {
     const stale = input("pi", "fixture-model");
     const same = await request(stale); assert.equal(same.status, 200, JSON.stringify(same.body)); selection = same.body;
     saved = f.service.chatSessionStore.getSession(session.sessionKey);
-    assert.equal(saved.runtimeSessionId, null, "same CLI model change starts a new native session");
+    assert.equal(saved.nextRuntimeSelection.model, "fixture-model");
+    assert.equal(saved.runtimeSessionId, beforeSame.runtimeSessionId, "the pick waits for the next send");
+    assert.equal((await request(stale)).body.code, "CHAT_SESSION_REVISION_CONFLICT");
+    const sameRun = await f.send(session.sessionKey, "same-cli-model-run");
+    assert.equal(sameRun.status, "running", sameRun.errorCode);
+    saved = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.notEqual(saved.runtimeSessionId, beforeSame.runtimeSessionId, "same CLI model change starts a new native session");
     assert.equal(saved.retiredRuntimeSessions.length, beforeSame.retiredRuntimeSessions.length + 1);
     assert.equal(saved.retiredRuntimeSessions.at(-1).runtimeSessionId, beforeSame.runtimeSessionId);
-    assert.equal((await request(stale)).body.code, "CHAT_SESSION_REVISION_CONFLICT");
+    assert.equal(f.transport.hosts.get("pi").lastTurnStartParams.model, "fixture-model");
+    await f.complete(sameRun, "Answer on the same CLI's other model");
     disabled = [...disabled, "deepseek-harness"];
     assert.equal((await request()).body.models.some(model => model.runtime === "deepseek-harness"), false);
     assert.equal((await request(input("deepseek-harness", "dsh-only"))).body.code, "NATIVE_RUNTIME_DISABLED");
@@ -189,8 +207,9 @@ async function run() {
       revision: fallbackCatalog.body.selection.revision, acceptAdjustments: true }, server.url, fallbackRoute);
     assert.equal(fallbackChanged.status, 200, JSON.stringify(fallbackChanged.body));
     assert.equal(f.service.productStore.getAgentProfile(fallbackProfile.id).defaultBindingId, fallbackProfile.defaultBindingId);
-    assert.equal(f.service.chatSessionStore.getSession(fallbackSession.sessionKey).runtimeBindingId, restoredHarness.id);
-    console.log("PASS Runtime model REST: other Agents discover and execute through Shoggoth; account separation, no-CLI binding, explicit disable, atomic selection, history and Agent defaults preserved.");
+    assert.equal(f.service.chatSessionStore.getSession(fallbackSession.sessionKey).runtimeBindingId, restoredHarness.id,
+      "a conversation with no native session yet switches at once");
+    console.log("PASS Runtime model REST: other Agents discover and execute through Shoggoth; account separation, no-CLI binding, explicit disable, next-turn selection applied on send, history and Agent defaults preserved.");
   } finally { if (server) await server.close(); await f.close(); }
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

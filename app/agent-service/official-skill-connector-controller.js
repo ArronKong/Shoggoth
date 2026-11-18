@@ -76,13 +76,18 @@ class OfficialSkillConnectorController {
       if (recoverInterruptedPrivateFile(this.recordPath, { trustedRoot: this.paths.trustedRoot }) === "uncertain") throw new Error();
       if (lstatIfExists(this.recordPath)) {
         const stored = JSON.parse(readPrivateFile(this.recordPath, { maxBytes: 2 * 1024 * 1024 }));
-        const previousIds = STORED_SKILL_IDS.filter(id => !["rollinggo-hotel", "baidu-maps"].includes(id));
+        const previousIds = STORED_SKILL_IDS.filter(id => !["rollinggo-hotel", "baidu-maps", "agently-mail"].includes(id));
         const baseIds = previousIds.filter(id => !["shop", "doordash"].includes(id));
         // Quark was added after Shop and DoorDash. Preserve the accepted catalogs
         // and also recognize each release's complete pre-Quark ownership record.
         const acceptedCatalogs = [baseIds, [...baseIds, "shop"], previousIds]
           .flatMap(ids => [ids, ids.filter(id => id !== "quark-drive")]);
-        acceptedCatalogs.push(STORED_SKILL_IDS.filter(id => id !== "baidu-maps"), STORED_SKILL_IDS, OFFICIAL_SKILL_IDS);
+        acceptedCatalogs.push(
+          STORED_SKILL_IDS.filter(id => !["baidu-maps", "agently-mail"].includes(id)),
+          STORED_SKILL_IDS.filter(id => id !== "agently-mail"),
+          OFFICIAL_SKILL_IDS.filter(id => id !== "agently-mail"),
+          STORED_SKILL_IDS, OFFICIAL_SKILL_IDS,
+        );
         if (stored?.schemaVersion !== 1 || !Array.isArray(stored.items)
           || new Set(stored.items.map(item => item.id)).size !== stored.items.length || !stored.items.every(validRecord)
           || !acceptedCatalogs.some(ids => ids.length === stored.items.length && ids.every(id => stored.items.some(item => item.id === id)))) throw new Error();
@@ -214,7 +219,7 @@ class OfficialSkillConnectorController {
     try {
       const response = await this.mcp.manager.callTool(item.serverId, `account_${params.action}`,
         params.action === "bind" && params.code !== undefined ? { code: params.code } : {},
-        { signal, assertCurrent: () => { if (this.closed || signal.aborted) fail("OFFICIAL_SKILL_AUTH_CANCELLED"); this._ownedServer(params.id, item); } });
+        { signal, officialAccountAction: params.id === "agently-mail", assertCurrent: () => { if (this.closed || signal.aborted) fail("OFFICIAL_SKILL_AUTH_CANCELLED"); this._ownedServer(params.id, item); } });
       if (response?.isError || !Array.isArray(response?.content) || response.content.length !== 1
         || response.content[0]?.type !== "text" || typeof response.content[0].text !== "string" || response.content[0].text.length > 160 * 1024) fail("OFFICIAL_SKILL_AUTH_FAILED");
       const parsed = JSON.parse(response.content[0].text);

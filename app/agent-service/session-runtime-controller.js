@@ -1,6 +1,6 @@
 "use strict";
 
-const { supports } = require("./runtime-support");
+const { supports, runtimeSupportFactsForHandle } = require("./runtime-support");
 const { resolveRuntimePermissionMode } = require("./runtime-permission-modes");
 const { serviceError } = require("./security");
 const { validateSessionRuntimeParams, validateSessionRuntimeResult } = require("./session-runtime-protocol");
@@ -10,8 +10,14 @@ const { settingsForModelSwitch } = require("./chat-model-settings");
 const codexSessionProvider = require("./codex-session-provider");
 const { captureExecutionProviderRoute, assertExecutionProviderRouteCurrent } = require("./execution-provider-route");
 
+const CATALOG_MODEL_REUSE_MS = 60_000;
+// Failures that say the queued pick itself cannot run; anything else may succeed on retry.
+const QUEUED_PICK_REJECTIONS = new Set(["BINDING_DISABLED", "RUNTIME_NOT_INSTALLED", "RUNTIME_INCOMPATIBLE",
+  "RUNTIME_CAPABILITY_UNSUPPORTED", "RUNTIME_RELEASE_DISABLED", "ACCOUNT_NOT_AUTHENTICATED", "MODEL_ROUTE_UNSUPPORTED",
+  "PERMISSION_ENFORCEMENT_UNPROVEN", "POLICY_REJECTED", "SESSION_MODEL_PROVIDER_UNAVAILABLE", "CONTEXT_COMPACTION_REQUIRED"]);
+
 function createSessionRuntimeController({ productStore, chatSessionStore, transcriptStore, coordinator, getCoordinator,
-  facts, getNativeRuntimeConfig, ensureTranscript = async () => {}, listBindingModels, readConfiguredModel, secretStore,
+  facts, getNativeRuntimeConfig, ensureTranscript = async () => {}, listBindingModels, readConfiguredModel, readChatGptModel, secretStore,
   policyStore, onChanged = () => {},
   isRetiredRuntimeSession = () => false }) {
   const currentCoordinator = () => getCoordinator ? getCoordinator() : coordinator;
@@ -69,13 +75,17 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
   function displaySelection(profile, binding, selection) {
     try { return providerSelectionFor(profile, binding, selection); } catch { return selection; }
   }
-  // A thread on a source with its own credential does not need ChatGPT sign-in.
-  function configuredSource(runtimeProfile, selection) {
-    if (!codexSessionProvider.supportsSessionProviders(runtimeProfile)) return null;
+  // Built-in Codex uses null for ChatGPT and a provider ID for other sources.
+  // An unresolvable source may be displayed, but cannot be used for a model pick.
+  function modelSource(runtimeProfile, selection, selectingModel) {
+    if (!codexSessionProvider.supportsSessionProviders(runtimeProfile)) return undefined;
     try {
       const providerRef = codexSessionProvider.resolveProviderSelection(productStore, runtimeProfile, selection ?? null);
       return codexSessionProvider.providerRequiresOpenaiAuth(productStore, providerRef) ? null : providerRef;
-    } catch { return null; }
+    } catch (error) {
+      if (selectingModel) throw error;
+      return undefined;
+    }
   }
   function currentProviderSelection(session, binding) {
     const next = session.nextRuntimeSelection;
@@ -111,13 +121,30 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     }
     throw serviceError("MODEL_ROUTE_UNSUPPORTED", "模型不在所选运行环境目录中");
   }
+  // A model pick re-reads the CLI catalog (OpenCode about 0.4 s each time). A model
+  // found recently on the same Binding revision and account generation is reused;
+  // a missing model is always read again, and execution still validates the route.
+  const catalogModels = new Map();
+  async function recentCatalogModel(profileId, binding, selectedModel, selectedProvider) {
+    if (selectedModel === undefined || !listBindingModels) return;
+    const key = JSON.stringify([profileId, binding.id, binding.revision, facts.generation?.(binding) ?? null,
+      selectedModel, selectedProvider ?? null]);
+    const recent = catalogModels.get(key);
+    if (recent && Date.now() - recent.at < CATALOG_MODEL_REUSE_MS) return recent.model;
+    const model = await readCatalogModel(profileId, binding.id, selectedModel, selectedProvider);
+    catalogModels.delete(key);
+    catalogModels.set(key, { model, at: Date.now() });
+    while (catalogModels.size > 256) catalogModels.delete(catalogModels.keys().next().value);
+    return model;
+  }
 
   async function candidate(profile, session, binding, selectedModel, selectedProvider = undefined) {
     const runtimeProfile = productStore.resolveAgentRuntimeProfile(profile.id, binding.id);
-    const providerSelection = selectedModel === undefined ? currentProviderSelection(session, binding) : selectedProvider;
-    const providerRef = configuredSource(runtimeProfile, providerSelection);
+    const selectingModel = selectedModel !== undefined;
+    const providerSelection = selectingModel ? selectedProvider : currentProviderSelection(session, binding);
+    const providerRef = modelSource(runtimeProfile, providerSelection, selectingModel);
     let observed, model, assertCurrent;
-    if (providerRef && selectedModel !== undefined && readConfiguredModel) {
+    if (providerRef && selectingModel && readConfiguredModel) {
       const routeError = () => serviceError("SESSION_MODEL_PROVIDER_UNAVAILABLE", "此会话选择的模型来源已不可用");
       let route;
       try {
@@ -132,9 +159,23 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       const configuredModel = readConfiguredModel(runtimeProfile, providerRef, selectedModel);
       [observed, model] = await Promise.all([facts.read(binding, profile, { executionContract }), configuredModel]);
       assertCurrent();
+    } else if (providerRef === null && selectingModel && readChatGptModel) {
+      // The authenticated catalog read also proves runtime availability. Use
+      // its handle's capabilities instead of probing the same account and catalog again.
+      let match;
+      try { match = await readChatGptModel(runtimeProfile, selectedModel); }
+      catch (error) {
+        if (error?.code === "PROFILE_AUTH_REQUIRED") throw serviceError("ACCOUNT_NOT_AUTHENTICATED", "ACCOUNT_NOT_AUTHENTICATED");
+        if (error?.code === "PROFILE_MODEL_NOT_AVAILABLE") throw serviceError("MODEL_ROUTE_UNSUPPORTED", "MODEL_ROUTE_UNSUPPORTED");
+        throw error;
+      }
+      observed = { ...runtimeSupportFactsForHandle(binding, match.host), authenticated: true };
+      model = match.model;
+      assertCurrent = match.assertCurrent;
     } else {
+      const catalogProvider = selectingModel ? providerSelectionFor(profile, binding, selectedProvider) : undefined;
       [observed, model] = await Promise.all([facts.read(binding, profile),
-        readCatalogModel(profile.id, binding.id, selectedModel, selectedProvider)]);
+        recentCatalogModel(profile.id, binding, selectedModel, catalogProvider)]);
       if (observed.authenticated === false && providerRef) observed = { ...observed, authenticated: true };
     }
     const mode = permissionAdjustment(profile, session, binding);
@@ -224,7 +265,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     await ensureTranscript(before);
     const preferences = before.nextRuntimeSelection
       ? { ...before, permissionMode: before.nextRuntimeSelection.permissionMode } : before;
-    const preflight = await candidate(profile, preferences, target, params.model, modelProviderRef);
+    const preflight = await candidate(profile, preferences, target, params.model, pinnedProviderRef);
     if (!preflight.support.supported) throw serviceError(preflight.support.code, preflight.support.code);
     const { clearModelOverride, permissionMode } = preflight.adjustments;
     if ((clearModelOverride || permissionMode !== (preferences.permissionMode ?? null)) && !params.acceptAdjustments) {
@@ -269,8 +310,32 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     const modelChanging = params.model !== undefined && params.model !== (before.modelOverride ?? profile.defaultModel);
     // A kept native session needs no fresh-session context (or summary) for the target.
     const keepsNativeSession = modelChanging && !providerChanging && reconciled.status === before.status
-      && keepsNativeSessionOnModelChange(profile, target, before, modelProviderRef);
-    if (!freshSession && !isDesktop(before) && !keepsNativeSession) await currentCoordinator().prepareRuntimeHandoff?.(reconciled, target, {
+      && keepsNativeSessionOnModelChange(profile, target, before, pinnedProviderRef);
+    // Picking the model already in use on the same Binding and source renews nothing, so it prepares no hand-off.
+    const unchangedPick = selectingCurrentModel && !modelChanging && !providerChanging && reconciled.status === before.status;
+    if (params.model !== undefined && !freshSession && !isDesktop(before) && !keepsNativeSession && !unchangedPick
+      && reconciled.status === "ready" && reconciled.runtimeSessionId) {
+      // A pick that would retire a native session becomes the next turn's choice, as a
+      // pick during a turn does: the checks above already ran, and only the send hands off
+      // to the last pick and renews the native session (selectForSend), so trying several
+      // models never hands off once per pick. A conversation with no native session yet
+      // switches at once; it has nothing to hand off.
+      const current = sessionFor(params);
+      if (current.revision !== reconciled.revision) throw serviceError("CHAT_SESSION_REVISION_CONFLICT", "会话已更新");
+      if (accountGeneration !== facts.generation?.(target)) throw serviceError("ACCOUNT_AUTH_UNKNOWN", "账号认证状态已变化");
+      assertIdle(current, excludingRunId);
+      const latestProfile = productStore.getAgentProfile(profile.id);
+      const latest = productStore.getAgentRuntimeBinding(profile.id, target.id);
+      if (!latestProfile.enabled || !latest?.enabled || latest.revision !== target.revision
+        || JSON.stringify(latestProfile.permissionPolicy) !== JSON.stringify(profile.permissionPolicy)
+        || latestProfile.defaultModel !== profile.defaultModel) throw serviceError("POLICY_REJECTED", "Binding 已变化");
+      preflight.assertCurrent?.();
+      const saved = chatSessionStore.queueRuntimeSelection(params.sessionKey, { bindingId: target.id,
+        model: params.model, modelProviderRef: pinnedProviderRef, permissionMode, modelSettings, revision: current.revision });
+      try { onChanged({ profileId: profile.id, sessionKey: saved.sessionKey }); } catch {}
+      return saved;
+    }
+    if (!freshSession && !isDesktop(before) && !keepsNativeSession && !unchangedPick) await currentCoordinator().prepareRuntimeHandoff?.(reconciled, target, {
       model: params.model, clearModelOverride, permissionMode, excludingRunId,
     });
     // Nothing may yield between the last busy check and the CAS. A concurrent
@@ -325,6 +390,14 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     try { onChanged({ profileId: session.profileId, sessionKey: session.sessionKey }); } catch {}
     return renewed;
   }
+  function dropQueuedPick(sessionKey, next) {
+    try {
+      const latest = chatSessionStore.getSession(sessionKey);
+      if (!latest?.nextRuntimeSelection || JSON.stringify(latest.nextRuntimeSelection) !== JSON.stringify(next)) return;
+      const dropped = chatSessionStore.dropRuntimeSelection(sessionKey, { revision: latest.revision });
+      try { onChanged({ profileId: dropped.profileId, sessionKey }); } catch {}
+    } catch { /* a newer pick or change already replaced it */ }
+  }
   const controller = {
     auditPending,
     async selectForSend(input) {
@@ -344,32 +417,39 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
         : canSelect() ? retireSourceChangedSession(retireUnresumableSession(found)) : found;
       if (session.nextRuntimeSelection && canSelect()) {
         const next = session.nextRuntimeSelection;
-        const profile = productStore.getAgentProfile(session.profileId);
-        const target = productStore.getAgentRuntimeBinding(profile.id, next.bindingId);
-        if (!target?.enabled) throw serviceError("POLICY_REJECTED", "下一轮 Binding 已不可用");
-        const generation = facts.generation?.(target);
-        const preflight = await candidate(profile, { ...session, permissionMode: next.permissionMode }, target, next.model,
-          providerSelectionFor(profile, target, next.modelProviderRef ?? null));
-        input.assertCurrent?.();
-        if (!preflight.support.supported) throw serviceError(preflight.support.code, preflight.support.code);
-        await ensureTranscript(session);
-        input.assertCurrent?.();
-        await currentCoordinator().prepareRuntimeHandoff?.(session, target, { model: next.model,
-          permissionMode: next.permissionMode, excludingRunId: input.excludingRunId ?? input.queuedRunId ?? null, beforeSend: true,
-          pendingOperationId: input.queuedRunId ? input.operationId : null, signal: input.signal });
-        input.assertCurrent?.();
-        const latest = sessionFor({ profileId: profile.id, sessionKey: session.sessionKey });
-        if (latest.revision !== session.revision || generation !== facts.generation?.(target)
-          || !canSelect() || JSON.stringify(productStore.getAgentRuntimeBinding(profile.id, target.id)) !== JSON.stringify(target)
-          || JSON.stringify(productStore.getAgentProfile(profile.id)) !== JSON.stringify(profile)) {
-          throw serviceError("CHAT_SESSION_REVISION_CONFLICT", "下一轮选择依据已变化");
+        try {
+          const profile = productStore.getAgentProfile(session.profileId);
+          const target = productStore.getAgentRuntimeBinding(profile.id, next.bindingId);
+          if (!target?.enabled) throw serviceError("POLICY_REJECTED", "下一轮 Binding 已不可用");
+          const generation = facts.generation?.(target);
+          const preflight = await candidate(profile, { ...session, permissionMode: next.permissionMode }, target, next.model,
+            next.modelProviderRef ?? null);
+          input.assertCurrent?.();
+          if (!preflight.support.supported) throw serviceError(preflight.support.code, preflight.support.code);
+          await ensureTranscript(session);
+          input.assertCurrent?.();
+          await currentCoordinator().prepareRuntimeHandoff?.(session, target, { model: next.model,
+            permissionMode: next.permissionMode, excludingRunId: input.excludingRunId ?? input.queuedRunId ?? null, beforeSend: true,
+            pendingOperationId: input.queuedRunId ? input.operationId : null, signal: input.signal });
+          input.assertCurrent?.();
+          const latest = sessionFor({ profileId: profile.id, sessionKey: session.sessionKey });
+          if (latest.revision !== session.revision || generation !== facts.generation?.(target)
+            || !canSelect() || JSON.stringify(productStore.getAgentRuntimeBinding(profile.id, target.id)) !== JSON.stringify(target)
+            || JSON.stringify(productStore.getAgentProfile(profile.id)) !== JSON.stringify(profile)) {
+            throw serviceError("CHAT_SESSION_REVISION_CONFLICT", "下一轮选择依据已变化");
+          }
+          preflight.assertCurrent?.();
+          session = chatSessionStore.switchRuntime(session.sessionKey, { bindingId: target.id, revision: session.revision,
+            model: next.model, modelProviderRef: next.modelProviderRef ?? null, permissionMode: next.permissionMode,
+            modelSettings: next.modelSettings, renewSession: true });
+          auditPending();
+          onChanged({ profileId: profile.id, sessionKey: session.sessionKey });
+        } catch (error) {
+          // A queued pick this conversation cannot run on is dropped, so it stays on its
+          // current model instead of failing every later send. Transient failures keep it.
+          if (QUEUED_PICK_REJECTIONS.has(error?.code)) dropQueuedPick(session.sessionKey, next);
+          throw error;
         }
-        preflight.assertCurrent?.();
-        session = chatSessionStore.switchRuntime(session.sessionKey, { bindingId: target.id, revision: session.revision,
-          model: next.model, modelProviderRef: next.modelProviderRef ?? null, permissionMode: next.permissionMode,
-          modelSettings: next.modelSettings, renewSession: true });
-        auditPending();
-        onChanged({ profileId: profile.id, sessionKey: session.sessionKey });
         return; // Respect this explicit next-turn choice before automatic selection.
       }
       if (!policyStore) return;

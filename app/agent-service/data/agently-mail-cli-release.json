@@ -1,0 +1,18 @@
+{
+  "darwin-arm64": {
+    "url": "https://registry.npmjs.org/@tencent-qqmail/agently-cli-darwin-arm64/-/agently-cli-darwin-arm64-1.0.18.tgz",
+    "integrity": "sha512-E0ZbTUNj6d28yA+bWQmQSOi5AWjDrP9jPmEDtQBnAzMaNwyl8Hc5oIS+Oczx/1Z7941XVwLBvs8pi7N/9D1Veg=="
+  },
+  "darwin-x64": {
+    "url": "https://registry.npmjs.org/@tencent-qqmail/agently-cli-darwin-x64/-/agently-cli-darwin-x64-1.0.18.tgz",
+    "integrity": "sha512-Z/SWqEUGy6in3zXl8VKckLy+MvsK0D9JhmBvQOkkGMw7lcw4lMxxmKuSXeH1A3ILhxlWaIBvuJ8Y70XLssZGMw=="
+  },
+  "linux-arm64": {
+    "url": "https://registry.npmjs.org/@tencent-qqmail/agently-cli-linux-arm64/-/agently-cli-linux-arm64-1.0.18.tgz",
+    "integrity": "sha512-RFc3un1wk4S2e64mqniAeNxBNnnFNW1+JnFntw3sEdxE5l2Uj8lbbi5kuunnZ9aEPj+tfdsshdb5Rl8qfTBvog=="
+  },
+  "linux-x64": {
+    "url": "https://registry.npmjs.org/@tencent-qqmail/agently-cli-linux-x64/-/agently-cli-linux-x64-1.0.18.tgz",
+    "integrity": "sha512-6+5aBFFoPtscK3jafN1jZ/OK3f4HK0dAKdmHnja71O7BiTGRAGIUe6Ygd/ysiqouPXkvedZpVbLlHxoykNgpgA=="
+  }
+}

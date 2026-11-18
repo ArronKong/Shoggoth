@@ -6,6 +6,8 @@ import { useTranslation } from "react-i18next";
 export const MESSAGE_PINNING_ENABLED = false;
 // Hide local message deletion controls while preserving existing hidden messages.
 export const MESSAGE_DELETION_ENABLED = false;
+// Hide continuation reference copying in every message and attachment menu.
+export const MESSAGE_CONTINUATION_COPY_ENABLED = false;
 
 export function IconCopy() {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -41,7 +43,8 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onCopyContinuati
 }) {
   const { t } = useTranslation();
   const deleteMessage = MESSAGE_DELETION_ENABLED ? onDelete : undefined;
-  const hasActions = !!(onCopy || onCopyContinuation || onQuote || extra || (MESSAGE_PINNING_ENABLED && onPin) || deleteMessage);
+  const copyContinuation = MESSAGE_CONTINUATION_COPY_ENABLED ? onCopyContinuation : undefined;
+  const hasActions = !!(onCopy || copyContinuation || onQuote || extra || (MESSAGE_PINNING_ENABLED && onPin) || deleteMessage);
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose); closeRef.current = onClose;
   const [position, setPosition] = useState({ left: x, top: y });
@@ -79,7 +82,7 @@ export function ChatMessageContextMenu({ x, y, onClose, onCopy, onCopyContinuati
     }}>
       {onCopy && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onCopy)}><IconCopy /><span>{t("chat.copy")}</span></button>}
       {onQuote && <button type="button" role="menuitem" className="chat-ctxmenu__item" disabled={quoteDisabled} onClick={() => select(onQuote)}><IconQuote /><span>{t("chat.quote")}</span></button>}
-      {onCopyContinuation && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onCopyContinuation)}><IconCopy /><span>{t("chat.copyContinuationReference")}</span></button>}
+      {copyContinuation && <button type="button" role="menuitem" className="chat-ctxmenu__item" title={t("chat.copyContinuationReferenceHint")} onClick={() => select(copyContinuation)}><IconCopy /><span>{t("chat.copyContinuationReference")}</span></button>}
       {extra}
       {MESSAGE_PINNING_ENABLED && onPin && <button type="button" role="menuitem" className="chat-ctxmenu__item" onClick={() => select(onPin)}><IconPin /><span>{t(pinned ? "chat.unpin" : "chat.pin")}</span></button>}
       {deleteMessage && <button type="button" role="menuitem" className="chat-ctxmenu__item is-danger" onClick={() => select(deleteMessage)}><IconTrash /><span>{t("chat.deleteLocal")}</span></button>}

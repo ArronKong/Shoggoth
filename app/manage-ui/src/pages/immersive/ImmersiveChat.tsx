@@ -121,8 +121,10 @@ export interface ImmersiveBundle {
   hasActiveSession: boolean;
   canSend: boolean;
   writerHint?: string | null;
+  turnPlaceholder?: string | null;
   // slash 命令菜单：节点由 ChatPage 构建（与普通模式同一份 JSX），渲染进沉浸 composer。
   slashMenu: ReactNode;
+  queuedMessages?: ReactNode;
   slashOpen: boolean;
   connectionRequests?: ReactNode;
   /** Shared session plan, anchored above the input in both chat layouts. */
@@ -186,7 +188,7 @@ export interface ImmersiveBundle {
 export default function ImmersiveChat(props: ImmersiveBundle) {
   const {
     onExit, phase, live, sendSeq, onHistoryInput, onLeaveHistoryTop, historyControl, unreadAnchor, onDropFiles, messages, input, setInput, inputElRef, onInputKeyDown, onInputPaste,
-    submit, sending, abortActive, abortDisabled, hasActiveSession, canSend, writerHint, slashMenu, slashOpen, connectionRequests, planDock,
+    submit, sending, abortActive, abortDisabled, hasActiveSession, canSend, writerHint, turnPlaceholder, queuedMessages, slashMenu, slashOpen, connectionRequests, planDock,
     models, displayModel, changeModel, activeBindingId, activeModelProviderRef, runtimeGroups, activeModelProvider, modelsLoading, modelsError, refreshModels, modelSelectionDisabled, listLive, thinkingControl, ctxSummary,
     permissionOptions = [], permissionMode = "", changePermissionMode, permissionSelectionDisabled = false,
     listening, toggleTalk, sttSupported, onAttachClick, supportsAttachments,
@@ -987,6 +989,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
         onDragOver={supportsAttachments ? (e) => e.preventDefault() : undefined}
       >
         {slashMenu}
+        {queuedMessages}
         {writerHint && <div role="status" className={input ? styles.writerHint : styles.writerHintEmpty}>{writerHint}</div>}
         {quoteText != null && (
           <div className={styles.quoteBar}>
@@ -1030,7 +1033,7 @@ export default function ImmersiveChat(props: ImmersiveBundle) {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onInputKeyDown}
           onPaste={supportsAttachments ? onInputPaste : undefined}
-          placeholder={writerHint || t("chat.immersivePlaceholder")}
+          placeholder={writerHint || turnPlaceholder || t("chat.immersivePlaceholder")}
           rows={2}
           disabled={!hasActiveSession}
         />
