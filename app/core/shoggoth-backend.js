@@ -3043,12 +3043,28 @@ class ShoggothBackend extends AgentBackend {
   // One candidate's capabilities and catalog. Never rejects: a failed catalog
   // is `models: null`, shown as that Runtime's failed group.
   async _loadRuntimeModelGroup(profile, binding) {
+    const params = { profileId: profile.id, bindingId: binding.id };
     let features;
-    try { features = await this._call("profile.binding.capabilities.read", { profileId: profile.id, bindingId: binding.id }); }
+    try { features = await this._call("profile.binding.capabilities.read", params); }
     catch { features = require("../agent-service/runtime-capability-evidence").runtimeFeatureSupport(null); }
+    let unavailableSource;
+    const read = input => this._page("profile.binding.models.list", input, "models", {
+      maxBytes: MAX_HISTORY_BYTES, maxItems: 512,
+      onPage: page => { if (page.unavailableSource) unavailableSource = page.unavailableSource; },
+    });
     try {
-      return { features, models: await this._page("profile.binding.models.list", { profileId: profile.id, bindingId: binding.id }, "models",
-        { maxBytes: MAX_HISTORY_BYTES, maxItems: 512 }) };
+      if (!supportsSessionProviders(binding)) return { features, models: await read(params) };
+      let models;
+      try { models = await read({ ...params, includeSourceStatus: true }); }
+      catch (error) {
+        if (error.code !== "INVALID_PARAMS") throw error;
+        // Older Services return endpoint rows for both sign-out and a failed ChatGPT read.
+        models = await read(params);
+        if (models.length && models.every(row => row.sourceProviderRef && row.sourceProviderRef !== "@chatgpt")) {
+          unavailableSource = "ChatGPT";
+        }
+      }
+      return { features, models, ...(unavailableSource ? { unavailableSource } : {}) };
     } catch { return { features, models: null }; }
   }
 
@@ -3061,9 +3077,8 @@ class ShoggothBackend extends AgentBackend {
   async _runtimeModelGroup(profile, binding) {
     const nativeAccount = DEFAULT_RUNTIME_ACCOUNTS.some(account => account.id === binding.runtimeAccountId
       && account.kind === "native-user");
-    // Old Harness snapshots lack the absolute provider identity needed when
-    // the Agent changes its default source; CLI catalogs can still be reused.
-    const prefix = binding.runtimeAccountId === SHOGGOTH_INTERNAL_CODEX_RUNTIME_ACCOUNT_ID ? "binding-sources" : "binding";
+    // Previous Harness snapshots could contain only endpoint rows after a failed ChatGPT read.
+    const prefix = supportsSessionProviders(binding) ? "binding-source-status" : "binding";
     const key = nativeAccount ? `account:${binding.runtimeAccountId}` : `${prefix}:${profile.id}:${binding.id}`;
     const generation = this._generation, epoch = this._runtimeModelsEpoch;
     let entry = this._runtimeModelGroups.get(key);
@@ -3077,8 +3092,9 @@ class ShoggothBackend extends AgentBackend {
         const current = this._runtimeModelGroups.get(key) === entry
           && `${this._generation}:${this._runtimeModelsEpoch}` === stamp;
         if (current) {
-          Object.assign(entry, snapshot.models ? { snapshot, at: this.now(), stamp } : { snapshot: null });
-          this._persistRuntimeModelGroup(key, snapshot.models ? snapshot : null);
+          const complete = snapshot.models && !snapshot.unavailableSource;
+          Object.assign(entry, complete ? { snapshot, at: this.now(), stamp } : { snapshot: null });
+          this._persistRuntimeModelGroup(key, complete ? snapshot : null);
         }
         return snapshot;
       }).finally(() => { if (entry.refresh === refresh) entry.refresh = null; });
@@ -3166,11 +3182,12 @@ class ShoggothBackend extends AgentBackend {
     // All candidates load together: a cold CLI must not queue behind another.
     return mapBounded(unique, Math.max(1, unique.length), async binding => {
       const runtimeName = names.get(binding.runtimeAccountId) || binding.runtime;
-      const { features, models } = await this._runtimeModelGroup(profile, binding);
+      const { features, models, unavailableSource } = await this._runtimeModelGroup(profile, binding);
       const runtimeProfile = { ...profile, runtime: binding.runtime, runtimeAccountId: binding.runtimeAccountId };
       const capabilities = this._chatCapabilitiesForProfile({ ...profile, ...binding, id: profile.id }, features);
       if (!models) return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: false, capabilities, models: [] };
-      return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: true, capabilities, models: models.map(model => ({
+      return { runtime: binding.runtime, bindingId: binding.id, name: runtimeName, available: !unavailableSource || models.length > 0,
+        ...(unavailableSource ? { unavailableSource } : {}), capabilities, models: models.map(model => ({
         id: model.id, name: model.sourceName ? `${model.displayName} · ${model.sourceName}` : model.displayName,
         backendId: this.id, provider: binding.runtime === "codex"
           ? modelRowProvider(runtimeProfile, model) : binding.runtime,
@@ -3983,6 +4000,7 @@ class ShoggothBackend extends AgentBackend {
       }
       if (newestFirst) values.unshift(...result[field]);
       else values.push(...result[field]);
+      options.onPage?.(result);
       if (!result.hasMore) return values;
       if (result.nextCursor === null || result.nextCursor === cursor
         || seenCursors.has(result.nextCursor)) {

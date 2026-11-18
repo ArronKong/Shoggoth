@@ -351,12 +351,15 @@ function createProfileServiceController(options = {}) {
     try {
       let cursor = null;
       const seen = new Set();
-      for (let index = 0; index < 16; index++) {
+      for (let index = 0; index < MAX_MODEL_PAGES; index++) {
         const page = await readAuthorityModelPage(profile, { cursor, limit: 100 }, generation);
         for (const model of page.models) {
           row({ ...model, isDefault: profile.providerRef === null && model.isDefault }, null, "ChatGPT");
         }
-        if (!page.nextCursor || seen.has(page.nextCursor)) break;
+        if (page.nextCursor === null) break;
+        if (seen.has(page.nextCursor) || index + 1 === MAX_MODEL_PAGES) {
+          throw profileError("PROFILE_MODEL_CATALOG_UNAVAILABLE", "ChatGPT model catalog pagination did not finish");
+        }
         seen.add(page.nextCursor); cursor = page.nextCursor;
       }
     } catch (error) {
@@ -378,7 +381,10 @@ function createProfileServiceController(options = {}) {
           catalogs[index]), provider.id, provider.name);
       }
     }
-    if (rows.length === 0 && baseError) throw baseError;
+    // Signed out is a known source state. A failed read leaves the other rows usable
+    // but cannot establish the complete catalog or its default.
+    const partial = pageParams.includeSourceStatus && baseError && baseError.code !== "PROFILE_AUTH_REQUIRED";
+    if (rows.length === 0 && baseError && !partial) throw baseError;
     const fingerprint = crypto.createHash("sha256").update(JSON.stringify(rows)).digest("hex").slice(0, 16);
     const prefix = `sources-${fingerprint}-`;
     const cursor = pageParams.cursor;
@@ -389,7 +395,7 @@ function createProfileServiceController(options = {}) {
     }
     const page = rows.slice(offset, offset + pageParams.limit);
     const nextCursor = offset + page.length < rows.length ? `${prefix}${offset + page.length}` : null;
-    return { models: page, nextCursor, hasMore: nextCursor !== null };
+    return { models: page, nextCursor, hasMore: nextCursor !== null, ...(partial ? { unavailableSource: "ChatGPT" } : {}) };
   }
 
   async function readRuntimeModelPage(profile, pageParams, generation) {

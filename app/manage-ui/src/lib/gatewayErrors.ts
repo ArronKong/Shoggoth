@@ -21,6 +21,10 @@ publicErrorKeys.set(
   "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试",
   "chatErrors:runtime.RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED",
 );
+publicErrorKeys.set(
+  "当前会话的原生历史只恢复了一部分。查看原文可发送「查看 [eventId=事件ID]」。继续执行可恢复完整历史，或发送结构化接续请求（首行 /continue-task，下一行填写本轮目标、限制、已选决定和依赖引用的 JSON）。",
+  "chatErrors:productContext.CONTEXT_CONTINUATION_DETAILS_REQUIRED",
+);
 
 function productErrorMessage(raw: string, t: TFn): string | null {
   const key = publicErrorKeys.get(raw);

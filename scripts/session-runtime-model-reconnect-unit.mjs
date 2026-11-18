@@ -112,12 +112,45 @@ await update({ session: "session-c" });
 assert.equal(view.pendingModel, undefined, "a pending choice cannot carry over to another conversation");
 const otherCatalog = requests.at(-1);
 assert.equal(otherCatalog.args[2], "session-c");
+assert.equal(view.pending, false, "a pending write in session B must not disable session C");
+await settle(() => otherCatalog.resolve(catalog));
+let selectedC;
+await settle(() => { selectedC = view.select(newModel.id, newModel.bindingId, null, { modelProviderRef: newModel.modelProviderRef }); });
+const writeC = writes.at(-1);
+assert.equal(writeC.args[2], "session-c");
 await settle(() => oldSelection.reject(new Error("late rejection")));
 assert.equal(await selected, false);
 assert.deepEqual(errors, ["selection failed"], "the old conversation cannot show an error in the new one");
-assert.equal(otherCatalog.args[3].aborted, false);
-await settle(() => otherCatalog.resolve(result("session-c")));
-assert.equal(view.data.models[0].id, "session-c");
+assert.equal(view.pendingModel, newModel, "settling the old write cannot unlock the new conversation's write");
+await settle(() => writeC.resolve(savedSelection));
+assert.equal(await selectedC, true);
+assert.equal(view.data.selection, savedSelection);
+
+// Return to a conversation while its write is pending and after a different catalog was loaded.
+await settle(() => { selectedC = view.select(currentModel.id, currentModel.bindingId, null); });
+await update({ session: "session-d" });
+await settle(() => requests.at(-1).resolve(result("session-d")));
+await update({ session: "session-c" });
+assert.equal(view.pendingModel, currentModel);
+const beforeReturn = requests.length;
+await settle(() => writes.at(-1).resolve(currentSelection));
+assert.equal(requests.length, beforeReturn + 1, "the revisited session reads its current catalog after the write settles");
+assert.equal(requests.at(-1).args[2], "session-c");
+await settle(() => requests.at(-1).resolve(catalog));
+await selectedC;
+assert.equal(view.data, catalog);
+
+// A partial source gets one automatic retry. Verified endpoint rows remain available meanwhile.
+const partialCatalog = { ...catalog, runtimes: [{ ...catalog.runtimes[0], unavailableSource: "ChatGPT" }] };
+await settle(() => { void view.refresh(); });
+await settle(() => requests.at(-1).resolve(partialCatalog));
+const retry = [...timers].find(([, timer]) => timer.ms < 60_000);
+assert.ok(retry, "a partial ChatGPT source schedules recovery");
+timers.delete(retry[0]);
+await settle(() => retry[1].fn());
+await settle(() => requests.at(-1).resolve({ ...partialCatalog }));
+assert.equal(view.data.models.length, 2);
+assert.equal(timers.size, 0, "a persistent outage does not poll indefinitely");
 
 await settle(() => { void view.refresh(); });
 const stalled = requests.at(-1);

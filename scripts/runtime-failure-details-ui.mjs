@@ -39,6 +39,9 @@ for (const [group, messages] of Object.entries(catalog)) {
   }
 }
 assert.equal(translate("Shoggoth 请求失败 (UNKNOWN_FIXTURE)", tEn), "The Shoggoth request failed (UNKNOWN_FIXTURE).");
+const oldPartialHistory = "当前会话的原生历史只恢复了一部分。查看原文可发送「查看 [eventId=事件ID]」。继续执行可恢复完整历史，或发送结构化接续请求（首行 /continue-task，下一行填写本轮目标、限制、已选决定和依赖引用的 JSON）。";
+assert.equal(translate(oldPartialHistory, tZh), catalog.productContext.CONTEXT_CONTINUATION_DETAILS_REQUIRED);
+assert.match(translate(`错误：${oldPartialHistory}`, tEn), /start a new session/i);
 for (const code of ["RUNTIME_COMPACTION_FAILED", "RUNTIME_COMPACTION_TIMEOUT", "RUNTIME_COMPACTION_ACCEPTANCE_UNKNOWN", "RUNTIME_COMPACTION_UNSUPPORTED"]) {
   for (const kind of ["任务未完成", "请求失败"]) {
     const legacy = `Shoggoth ${kind} (${code})`;

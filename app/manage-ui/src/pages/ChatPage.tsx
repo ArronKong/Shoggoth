@@ -8432,8 +8432,9 @@ function ChatPageApp() {
   const autoModelSessionsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const data = runtimeModels.data;
-    if (!usesRuntimeModelPicker || !active || !data || data.selection.model || nativeModelSelectionDisabled
+    if (!usesRuntimeModelPicker || !active || !data || runtimeModels.error || data.selection.model || nativeModelSelectionDisabled
       || autoModelSessionsRef.current.has(active.key)) return;
+    if (data.runtimes.some(group => group.bindingId === data.selection.bindingId && group.unavailableSource)) return;
     const choices = data.models.filter((model) => model.bindingId === data.selection.bindingId);
     if (choices.length === 0 || choices.some((model) => model.isDefault)) return;
     autoModelSessionsRef.current.add(active.key);

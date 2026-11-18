@@ -3204,7 +3204,7 @@ export interface SessionRuntimeModel extends UnifiedModel {
 export interface SessionRuntimeModels {
   selection: SessionRuntimeSnapshot;
   models: SessionRuntimeModel[];
-  runtimes: Array<{ runtime: string; bindingId?: string; name: string; available: boolean; capabilities: ChatCapabilities }>;
+  runtimes: Array<{ runtime: string; bindingId?: string; name: string; available: boolean; unavailableSource?: string; capabilities: ChatCapabilities }>;
   capabilities: ChatCapabilities;
 }
 
