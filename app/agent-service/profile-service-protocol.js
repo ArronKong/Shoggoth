@@ -91,9 +91,10 @@ function validateProfileServiceParams(method, params) {
     // `source: "chatgpt"` reads only the ChatGPT catalog of a Profile that
     // offers several model sources (codex-session-provider).
     const sourced = method === "profile.models.list" && Object.hasOwn(params || {}, "source");
+    const withStatus = method === "profile.binding.models.list" && Object.hasOwn(params || {}, "includeSourceStatus");
     if (!exactObject(params, ["profileId", "cursor", "limit", ...(method === "profile.binding.models.list" ? ["bindingId"] : []),
-      ...(sourced ? ["source"] : [])])
-      || (sourced && params.source !== "chatgpt")
+      ...(sourced ? ["source"] : []), ...(withStatus ? ["includeSourceStatus"] : [])])
+      || (sourced && params.source !== "chatgpt") || (withStatus && params.includeSourceStatus !== true)
       || !validOpaqueId(params.profileId) || !validString(params.cursor, 1024, true)
       || (method === "profile.binding.models.list" && !validOpaqueId(params.bindingId))
       || !Number.isSafeInteger(params.limit) || params.limit < 1 || params.limit > 100) {
@@ -146,7 +147,9 @@ function validateProfileServiceResult(method, result) {
     return { status: result.status };
   }
   if (method === "profile.models.list" || method === "profile.binding.models.list") {
-    if (!exactObject(result, ["models", "nextCursor", "hasMore"])
+    const partial = method === "profile.binding.models.list" && Object.hasOwn(result || {}, "unavailableSource");
+    if (!exactObject(result, ["models", "nextCursor", "hasMore", ...(partial ? ["unavailableSource"] : [])])
+      || (partial && result.unavailableSource !== "ChatGPT")
       || !Array.isArray(result.models) || result.models.length > 100
       || !validString(result.nextCursor, 1024, true)
       || typeof result.hasMore !== "boolean"
@@ -188,7 +191,7 @@ function validateProfileServiceResult(method, result) {
         ...(absoluteSource ? { sourceProviderRef: model.sourceProviderRef } : {}),
       };
     });
-    return { models, nextCursor: result.nextCursor, hasMore: result.hasMore };
+    return { models, nextCursor: result.nextCursor, hasMore: result.hasMore, ...(partial ? { unavailableSource: "ChatGPT" } : {}) };
   }
   if (!PROFILE_SERVICE_METHOD_SET.has(method) || !exactObject(result, ["profile"])) {
     throw protocolError("PROFILE_RESPONSE_INVALID");

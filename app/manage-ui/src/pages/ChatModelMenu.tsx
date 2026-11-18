@@ -60,7 +60,7 @@ export default function ChatModelMenu({
   activeBindingId?: string;
   /** Display names only; Provider identities are preserved in selections. */
   providerNames?: Record<string, string>;
-  runtimeGroups?: Array<{ runtime: string; bindingId?: string; name: string; available: boolean }>;
+  runtimeGroups?: Array<{ runtime: string; bindingId?: string; name: string; available: boolean; unavailableSource?: string }>;
   onSelect: (id: string, provider?: string, bindingId?: string, modelProviderRef?: string) => void;
   /** Source of the active choice on activeBindingId (absent = the Binding's default source). */
   activeModelProviderRef?: string;
@@ -238,7 +238,7 @@ export default function ChatModelMenu({
   const groupName = (id: string) => runtimeGroups?.find(group => (group.bindingId || group.runtime) === id)?.name
     || providerNames?.[id] || catalogProviderNames.get(id) || id;
   // 只点名失败的 Runtime：一个分组失败不应让其它已加载的分组看起来也失败了。
-  const failedGroups = runtimeGroups?.filter(group => !group.available
+  const failedGroups = runtimeGroups?.filter(group => (!group.available || group.unavailableSource)
     && (!providerFilter || (group.bindingId || group.runtime) === providerFilter)) ?? [];
   const catalogFailed = loadError || failedGroups.length > 0;
 
@@ -346,7 +346,7 @@ export default function ChatModelMenu({
             {!loading && catalogFailed && (
               <div className="model-menu__error" role="alert">
                 <span>{loadError || failedGroups.length === 0 ? t("chat.modelLoadFailed")
-                  : t("chat.runtimeModelLoadFailed", { names: failedGroups.map(group => group.name).join(" / ") })}</span>
+                  : t("chat.runtimeModelLoadFailed", { names: failedGroups.map(group => group.unavailableSource ?? group.name).join(" / ") })}</span>
                 {onRefresh && <button type="button" onClick={onRefresh}>{t("chat.reloadModels")}</button>}
               </div>
             )}

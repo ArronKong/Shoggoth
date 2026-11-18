@@ -199,8 +199,11 @@ class GroupActivityProjection {
       const next = { ...(prior ?? { id, name: null, title: "工具执行", input: null, output: null, error: null,
         status: "running", startedAt: at, finishedAt: null, durationMs: null }),
         name: descriptor.name ?? prior?.name ?? null, updatedAt: at };
-      if (descriptor.arguments !== undefined || descriptor.input !== undefined || descriptor.displayArgs !== undefined)
-        next.input = descriptor.arguments ?? descriptor.input ?? descriptor.displayArgs;
+      if (descriptor.arguments !== undefined || descriptor.input !== undefined || descriptor.displayArgs !== undefined) {
+        const input = descriptor.arguments ?? descriptor.input ?? descriptor.displayArgs;
+        const record = value => value && Object.getPrototypeOf(value) === Object.prototype;
+        next.input = record(next.input) && record(input) ? safeValue({ ...next.input, ...input }) : input;
+      }
       if (descriptor.output !== undefined || descriptor.resultSummary !== undefined) next.output = descriptor.output ?? descriptor.resultSummary;
       if (descriptor.error !== undefined || descriptor.errorCode !== undefined) next.error = descriptor.error ?? descriptor.errorCode;
       if (descriptor.durationMs !== undefined) next.durationMs = descriptor.durationMs;

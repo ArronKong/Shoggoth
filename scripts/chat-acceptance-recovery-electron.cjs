@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-// Usage: node scripts/chat-acceptance-recovery-electron.cjs /absolute/path/to/fresh/manage-dist [--group-continuation]
+// Usage: node scripts/chat-acceptance-recovery-electron.cjs /absolute/path/to/fresh/manage-dist [--group-continuation|--model-selection]
 // Real production React and Electron, broker, proxy, Backend and Service.
 // The Runtime and the transport fault are controlled inside a temporary profile.
 const assert = require("node:assert/strict");
@@ -55,6 +55,7 @@ if (!process.versions.electron) {
   const secondContinuationFile = { ...continuationFile, id: "9f90b9a4-3fae-45e9-9abb-333a28821fc4" };
   const lookupNotice = '[data-testid="chat-verification-notice"]';
   const stopNotice = '[data-testid="chat-stop-verification-notice"]';
+  const waitingBubble = '.chat-thread [data-live-activity-bubble="waiting"]';
   const sendSelector = mode => `[data-send-entry="${mode === "normal" ? "composerButton" : "immersiveButton"}"]`;
 
   async function until(check, label, timeoutMs = 12_000) {
@@ -81,7 +82,12 @@ if (!process.versions.electron) {
   }
 
   async function run() {
-    const f = await openHandoffFixture({ serviceOptions: { memoryCore: false, durableChatAcceptance: true } });
+    const verifyModelSelection = flags.includes("--model-selection");
+    const nextModel = "fixture-model-next";
+    const f = await openHandoffFixture({ serviceOptions: { memoryCore: false, durableChatAcceptance: true },
+      ...(verifyModelSelection ? { catalogs: { codex: ["fixture-model", nextModel, "other-session-model"], pi: ["fixture-model"],
+        "deepseek-harness": ["fixture-model"] } } : {}),
+    });
     const { service } = f;
     const registry = new BackendRegistry();
     const gates = new Map(), preparing = new Set(), attempts = [], lookups = [], receipts = new Map(), stops = [];
@@ -90,6 +96,9 @@ if (!process.versions.electron) {
     const waitForGate = prompt => new Promise(resolve => gates.set(prompt, resolve));
     const nativeTurns = () => [...f.transport.handles.values()].reduce((total, handle) => total + handle.host.turnStartCalls, 0);
     try {
+      if (verifyModelSelection) {
+        service.productStore.putAgentProfile({ ...service.productStore.getAgentProfile(f.profile.id), defaultModel: null });
+      }
       const session = f.createSession();
       const key = `agent:${f.profile.agentId}:${session.sessionKey}`;
       const otherSession = f.createSession();
@@ -173,14 +182,15 @@ if (!process.versions.electron) {
       await win.loadURL(server.url);
       await js(`localStorage.setItem('shoggoth.chat.sessions.v1',${JSON.stringify(JSON.stringify(seed))});
         localStorage.setItem('shoggoth.chat.lastActive.v1',${JSON.stringify(key)});`);
-      async function open(mode) {
+      async function open(mode, waiting = false) {
         await js(`localStorage.setItem('shoggoth.chat.immersive.v1',${JSON.stringify(mode === "normal" ? "0" : "1")});
           location.hash=${JSON.stringify(chatHash)};`);
         await new Promise(resolve => { win.webContents.once("did-finish-load", resolve); win.webContents.reload(); });
         await until(() => js(`document.querySelector('.chat-thread')?.dataset.historyLoaded === 'true'
           && (!!document.querySelector(${JSON.stringify(sendSelector(mode))})
           || !!document.querySelector(${JSON.stringify(lookupNotice)})
-          || !!document.querySelector(${JSON.stringify(stopNotice)}))`), `${mode} chat history and composer or recovery banner`);
+          || !!document.querySelector(${JSON.stringify(stopNotice)})
+          || (${waiting} && !!document.querySelector(${JSON.stringify(waitingBubble)})))`), `${mode} chat and current turn state`);
       }
       async function copyContinuationReference(selector, text, index = 0) {
         await js(`(() => {
@@ -236,6 +246,83 @@ if (!process.versions.electron) {
         await until(async () => !(await stateFor(idem)), "terminal receipt settles pending send");
         assert.equal(countEvents(receipt.operationId), 1);
         assert.equal(attempts.filter(attempt => attempt.prompt === prompt).length, 1);
+      }
+
+      if (verifyModelSelection) {
+        await open("normal");
+        const modelButton = ".chat-pill--model";
+        const modelOption = `Array.from(document.querySelectorAll('.model-menu__list [role=option]'))
+          .find(button => button.querySelector('.model-menu__name')?.textContent.trim() === ${JSON.stringify(nextModel)})`;
+        await until(() => js(`!!document.querySelector('${modelButton}:not(:disabled)')`), "model picker ready");
+        await js(`document.querySelector('${modelButton}').click()`);
+        await until(() => js(`!!(${modelOption}) && !(${modelOption}).disabled`), "second model available");
+        const coordinator = service.workRunCoordinator;
+        const track = coordinator.trackSessionSelectionWrite.bind(coordinator);
+        const writes = [];
+        coordinator.trackSessionSelectionWrite = (sessionKey, change) => track(sessionKey, async () => {
+          writes.push(sessionKey);
+          if (sessionKey === session.sessionKey) await waitForGate("model selection");
+          return change();
+        });
+        await js(`(${modelOption}).click()`);
+        await until(() => gates.has("model selection"), "model write waiting at the Service");
+        await until(() => js(`Array.from(document.querySelectorAll('${modelButton}')).some(button =>
+          button.disabled && button.getClientRects().length)`), "model picker pending in React");
+
+        service.productStore.putModelProvider({ id: "fixture-endpoint", kind: "custom-responses", name: "Endpoint",
+          baseUrl: "https://example.invalid/v1", model: "endpoint-only", models: ["endpoint-only"],
+          credentialRef: null, headers: null, awsRegion: null, awsProfile: null, validationStatus: "protocol_valid" });
+        const auth = service.accountAuthManager, readAuth = auth.read.bind(auth);
+        auth.read = async () => { throw new Error("fixture ChatGPT source temporarily unavailable"); };
+        backend.onConnectionsChanged();
+        await js(`location.hash=${JSON.stringify(`#/chat?session=${encodeURIComponent(otherKey)}`)}`);
+        await until(() => js(`!!document.querySelector('${modelButton}:not(:disabled)')`), "second session has its own model picker");
+        await js(`document.querySelector('${modelButton}').click()`);
+        await until(() => js(`document.querySelector('.model-menu__error')?.textContent.includes('ChatGPT')
+          && !!document.querySelector('.model-menu__list [title="endpoint-only"]:not(:disabled)')`), "partial source and usable endpoint");
+        assert.equal(service.chatSessionStore.getSession(otherSession.sessionKey).modelOverride, null);
+        auth.read = readAuth;
+        await until(() => js(`!!document.querySelector('.model-menu__list [title="other-session-model"]:not(:disabled)')
+          && !document.querySelector('.model-menu__error')`), "ChatGPT models recover in the open menu");
+        await js(`document.querySelector('.model-menu__list [title="other-session-model"]').click()`);
+        await until(() => service.chatSessionStore.getSession(otherSession.sessionKey).modelOverride === "other-session-model",
+          "second session saves its own model before the first write completes");
+        await js(`location.hash=${JSON.stringify(chatHash)}`);
+        await until(() => js(`!!document.querySelector('${modelButton}:disabled')`), "first session still owns its pending selection");
+        const prompt = "Send once while saving the model";
+        const idem = await send("normal", prompt);
+        await until(() => stateFor(idem).then(entry => entry?.accepted), "one durable acceptance during model save");
+        const receipt = receipts.get(prompt);
+        await until(() => js(`!!document.querySelector(${JSON.stringify(waitingBubble)})?.getClientRects().length`),
+          "normal loading animation during model save");
+        await until(() => countEvents(receipt.operationId) === 1, "original user projection");
+        assert.equal(await notice(), false);
+        assert.equal(nativeTurns(), 0);
+        assert.equal(countEvents(receipt.operationId), 1);
+        const beforeReconnect = lookups.length;
+        await open("normal", true);
+        await until(() => lookups.slice(beforeReconnect).includes(receipt.operationId), "renderer reconnects to the same queued operation");
+        await until(() => js(`!!document.querySelector(${JSON.stringify(waitingBubble)})?.getClientRects().length`), "normal loading after reconnect");
+        gates.get("model selection")();
+        const run = await until(() => {
+          const candidate = coordinator.getRun(receipt.runId);
+          return candidate?.status === "running" && candidate;
+        }, "original message starts once when model save completes");
+        const host = [...f.transport.handles.values()].find(handle => handle.runtime === run.runtimeTurnRef.runtime
+          && handle.runtimeProfileId === run.runtimeTurnRef.runtimeProfileId
+          && handle.runtimeAccountId === run.runtimeTurnRef.runtimeAccountId)?.host;
+        assert.equal(host?.lastTurnStartParams.model, nextModel);
+        assert.equal(service.chatSessionStore.getSession(otherSession.sessionKey).modelOverride, "other-session-model");
+        assert.deepEqual(writes, [session.sessionKey, otherSession.sessionKey], "a partial catalog never writes an automatic fallback");
+        await f.complete(run, "Model change reply");
+        await until(async () => (await threadText()).includes("Model change reply") && !(await stateFor(idem)), "reply and settled receipt");
+        assert.equal(nativeTurns(), 1);
+        assert.equal(attempts.filter(attempt => attempt.prompt === prompt).length, 1);
+        assert.equal(countEvents(receipt.operationId), 1);
+        assert.equal(await js(`Array.from(document.querySelectorAll('.chat-thread .chat-bubble[data-qp]'))
+          .filter(bubble => bubble.textContent.trim() === ${JSON.stringify(prompt)}).length`), 1);
+        console.log("PASS production React/Electron: switch sessions during a model write, recover ChatGPT alongside a usable endpoint, save independent models and send once on the first session's choice");
+        return;
       }
 
       if (flags.includes("--group-continuation")) {

@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "postinstall": "node ../../scripts/picomatch-security.cjs install",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

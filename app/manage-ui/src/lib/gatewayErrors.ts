@@ -21,6 +21,10 @@ publicErrorKeys.set(
   "读取 Agent 登录状态失败，本次任务尚未发送；请检查 CLI 与 App 的版本兼容性和账号状态后重试",
   "chatErrors:runtime.RUNTIME_START_RUNTIME_AUTHENTICATION_FAILED",
 );
+publicErrorKeys.set(
+  "当前会话的原生历史只恢复了一部分。查看原文可发送「查看 [eventId=事件ID]」。继续执行可恢复完整历史，或发送结构化接续请求（首行 /continue-task，下一行填写本轮目标、限制、已选决定和依赖引用的 JSON）。",
+  "chatErrors:productContext.CONTEXT_CONTINUATION_DETAILS_REQUIRED",
+);
 
 function productErrorMessage(raw: string, t: TFn): string | null {
   const key = publicErrorKeys.get(raw);
@@ -32,6 +36,7 @@ function productErrorMessage(raw: string, t: TFn): string | null {
   if (fallback[2].startsWith("RUNTIME_COMPACTION_") && Object.hasOwn(publicErrors.runtime, fallback[2])) {
     return t(`chatErrors:runtime.${fallback[2]}`);
   }
+  if (fallback[2] === "EXECUTION_CONTRACT_STALE") return t("chat.gwErrors.runtimeSettingsChanged");
   return t(fallback[1] === "任务未完成" ? "chat.gwErrors.taskFailedCode" : "chat.gwErrors.requestFailedCode", { code: fallback[2] });
 }
 
@@ -58,6 +63,7 @@ const FAILURE_SUMMARIES: Record<string, string> = {
   RUNTIME_UPSTREAM_UNAVAILABLE: "runtimeUpstreamUnavailable",
   RUNTIME_MODEL_UNAVAILABLE: "runtimeModelUnavailable",
   RUNTIME_MODEL_SETTINGS_INVALID: "runtimeSettingsInvalid",
+  EXECUTION_CONTRACT_STALE: "runtimeSettingsChanged",
   RUNTIME_MAX_TOKENS: "runtimeMaxTokens",
   RUNTIME_MAX_TURN_REQUESTS: "runtimeMaxTurnRequests",
   RUNTIME_REFUSED: "runtimeRefused",
@@ -92,6 +98,7 @@ const PATTERNS: Array<[RegExp, string]> = [
   [/^(?:错误：)?(?:RUNTIME_UPSTREAM_UNAVAILABLE|上游模型服务不可用，请稍后重试，或选择其他可用模型)$/, "runtimeUpstreamUnavailable"],
   [/^(?:错误：)?(?:RUNTIME_MODEL_UNAVAILABLE|当前账号或登录方式不支持所选模型，请选择其他可用模型)$/, "runtimeModelUnavailable"],
   [/^(?:错误：)?(?:RUNTIME_MODEL_SETTINGS_INVALID|所选模型不支持当前推理档位或服务档位，请调整会话模型设置后重试)$/, "runtimeSettingsInvalid"],
+  [/^(?:错误：)?EXECUTION_CONTRACT_STALE$/, "runtimeSettingsChanged"],
   // Shoggoth durable transcript 会保留稳定错误码；历史重载时仍需显示可操作说明。
   [/^CODEX_PROMPT_TIMEOUT$/, "inputTimeout"],
   [/^(?:错误：)?(?:RUNTIME_MAX_TOKENS|Agent 已达到本轮输出长度限制，本轮未完成；请缩小任务范围后继续)$/, "runtimeMaxTokens"],

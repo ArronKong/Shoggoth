@@ -97,13 +97,21 @@ test("sources resolve to the Profile default, ChatGPT, or one of its sources onl
 });
 
 test("models.list may ask for the ChatGPT catalog only", () => {
-  const { validateProfileServiceParams } = require("../app/agent-service/profile-service-protocol");
+  const { validateProfileServiceParams, validateProfileServiceResult } = require("../app/agent-service/profile-service-protocol");
   const base = { profileId: "profile-1", cursor: null, limit: 100 };
   assert.deepEqual(validateProfileServiceParams("profile.models.list", { ...base, source: "chatgpt" }), { ...base, source: "chatgpt" });
   assert.deepEqual(validateProfileServiceParams("profile.models.list", base), base);
   assert.throws(() => validateProfileServiceParams("profile.models.list", { ...base, source: "custom-one" }));
   assert.throws(() => validateProfileServiceParams("profile.binding.models.list",
     { ...base, bindingId: "binding-1", source: "chatgpt" }));
+  const method = "profile.binding.models.list";
+  const bound = { ...base, bindingId: "binding-1", includeSourceStatus: true };
+  assert.deepEqual(validateProfileServiceParams(method, bound), bound);
+  assert.throws(() => validateProfileServiceParams(method, { ...bound, includeSourceStatus: "yes" }), { code: "INVALID_PARAMS" });
+  const page = { models: [], hasMore: false, nextCursor: null, unavailableSource: "ChatGPT" };
+  assert.deepEqual(validateProfileServiceResult(method, page), page);
+  assert.throws(() => validateProfileServiceResult(method, { ...page, unavailableSource: "unknown" }), { code: "PROFILE_RESPONSE_INVALID" });
+  assert.throws(() => validateProfileServiceResult("profile.models.list", page), { code: "PROFILE_RESPONSE_INVALID" });
 });
 
 test("an execution route freezes the conversation source and stays current only while it exists", () => {

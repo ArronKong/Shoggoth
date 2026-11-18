@@ -310,6 +310,11 @@ const ACTIVITY_ALIASES: Record<string, string> = {
   spawnagent: "spawn_agent", sendinput: "send_input", resumeagent: "resume_agent", closeagent: "close_agent",
 };
 
+function activityCommand(args: Record<string, unknown>): string | undefined {
+  return [args.command, args.cmd, args.CommandLine, args.command_line, args.commandLine, args.Command]
+    .find((value): value is string => typeof value === "string" && !!value.trim())?.trim();
+}
+
 function activityToolName(name?: string, args?: unknown): string {
   const rawName = (name ?? "").trim();
   const tool = canonicalToolName(rawName);
@@ -318,7 +323,8 @@ function activityToolName(name?: string, args?: unknown): string {
   // command field only for those shapes; other tool identities stay unchanged.
   if (args && typeof args === "object" && !Array.isArray(args)) {
     const a = args as Record<string, unknown>;
-    const command = [a.command, a.cmd, a.CommandLine].find((value): value is string => typeof value === "string" && !!value.trim());
+    const command = activityCommand(a);
+    if (!tool.startsWith("mcp__") && !tool.includes("/") && a.nativeToolKind === "execute") return "exec";
     if (command && !tool.startsWith("mcp__") && (tool === "tool"
       || rawName.replace(/\s+/gu, " ") === command.replace(/\s+/gu, " ").trim())) return "exec";
   }
@@ -349,7 +355,13 @@ export function toolActionTitle(name?: string, args?: unknown): string {
     const value = a[key];
     if (typeof value === "string" && value.trim()) return value.replace(/\s+/g, " ").trim();
   }
-  return actionTitle(a.nativeActivityTitle);
+  const native = actionTitle(a.nativeActivityTitle);
+  const command = activityCommand(a)?.replace(/\s+/gu, " ");
+  // ACP may title an execution with the command itself. That belongs in the
+  // expanded arguments, while the headline uses its localized action type.
+  if (native && command && name?.replace(/\s+/gu, " ").trim() === command
+    && command.startsWith(native.replace(/\s+/gu, " "))) return "";
+  return native;
 }
 
 export function summarizeArgs(name?: string, args?: unknown): string {
@@ -377,7 +389,10 @@ type ActivityTranslate = (key: string, values?: Record<string, unknown>) => stri
 // permission, dispatch, or result ownership checks.
 function productActivityTool(name: string | undefined): string | undefined {
   const raw = name?.trim().toLowerCase() || "";
-  const bare = raw.replace(/^(?:mcp__shoggoth__|shoggoth__|shoggoth\/)/u, "");
+  let bare = raw.replace(/^(?:mcp__shoggoth__|shoggoth__|shoggoth\/)/u, "");
+  // OpenCode flattens the server prefix with one underscore. These two names
+  // already contain Shoggoth as part of the product tool's own identity.
+  if (!["shoggoth_capability_search", "shoggoth_plugin_call"].includes(bare)) bare = bare.replace(/^shoggoth_/u, "");
   return /^[a-z][a-z0-9_]*$/u.test(bare) ? bare : undefined;
 }
 
@@ -421,6 +436,7 @@ const ACTIVITY_ACTIONS: Record<string, string> = {
   search: "searchContent",
   browser_navigate: "navigatePage",
   process: "process", update_plan: "plan", todo: "plan", todowrite: "plan",
+  search_tool: "findTools",
   message: "message", sessions_send: "message", delegate_task: "delegate", task: "delegate",
 };
 
@@ -499,7 +515,11 @@ export function toolActivityTitle(name: string | undefined, args: unknown, t: Ac
   }
 
   if (tool === "exec" || tool === "terminal") {
-    const command = unwrapShellCommand(first("command", "cmd", "CommandLine") || (typeof input === "string" ? input : "")).trim();
+    const command = unwrapShellCommand(activityCommand(a) || (typeof input === "string" ? input : "")).trim();
+    if (!command && a.nativeToolKind === "execute") {
+      if (a.nativeCommandKind === "python") return action("runScript", { language: "Python" });
+      if (a.nativeCommandKind === "node") return action("runScript", { language: "Node.js" });
+    }
     const program = /^(?:[\w./~-]*\/)?([\w.+-]+)(?=\s|$)/u.exec(command)?.[1];
     if (program && /^python(?:\d+(?:\.\d+)*)?$/u.test(program)) return action("runScript", { language: "Python" });
     if (program === "node" || program === "nodejs") return action("runScript", { language: "Node.js" });
@@ -538,7 +558,7 @@ export function toolActivityTitle(name: string | undefined, args: unknown, t: Ac
     const host = url && /^https?:\/\/(?:[^@/?#]*@)?([^/?#]+)/iu.exec(url)?.[1];
     return withTarget(key, host || undefined);
   }
-  if (key === "webSearch" || key === "searchFiles" || key === "findFiles") return withTarget(key, query || file);
+  if (key === "webSearch" || key === "searchFiles" || key === "findFiles" || key === "findTools") return withTarget(key, query || file);
   if (["readFile", "writeFile", "editFile", "listDirectory", "viewImage"].includes(key)) {
     const count = typeof a.changeCount === "number" ? a.changeCount : Array.isArray(a.changes) ? a.changes.length : 0;
     if (key === "editFile" && count > 1) return action("editFiles", { count });
@@ -1040,7 +1060,7 @@ function activityTarget(name: string | undefined, args: unknown, depth = 0): { t
       label = `${parsed.host}${parsed.pathname === "/" ? "" : parsed.pathname}`;
     } catch { return; }
   } else if (["exec", "terminal"].includes(tool)) {
-    kind = "command"; value = unwrapShellCommand(first("command", "cmd", "CommandLine") || (typeof input === "string" ? input : ""));
+    kind = "command"; value = unwrapShellCommand(activityCommand(a) || (typeof input === "string" ? input : ""));
   } else if (["read", "read_file", "write", "write_file", "edit", "ls", "list_directory", "image_view"].includes(tool)) {
     kind = "path"; value = first("path", "file_path", "filePath", "file", "TargetFile", "AbsolutePath", "DirectoryPath") || "";
   }

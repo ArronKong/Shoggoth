@@ -4,6 +4,50 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
+const picomatchFix = require("./picomatch-security.cjs");
+
+const PICOMATCH_REVIEW_EXPIRES = Date.parse("2026-12-02T00:00:00Z");
+// Each row is a locked dev-only npm meta-vulnerability and its complete list
+// of causes. Accept this graph as a unit, including the builder dependency cycle.
+const globConsumers = {
+  fdir: ["6.5.0", "picomatch"],
+  tinyglobby: ["0.2.17", "fdir", "picomatch"],
+};
+const desktopConsumers = {
+  ...globConsumers,
+  "node-gyp": ["12.4.0", "tinyglobby"],
+  "@electron/rebuild": ["4.2.0", "node-gyp"],
+  "app-builder-lib": ["26.15.3", "@electron/rebuild", "dmg-builder", "electron-builder-squirrel-windows"],
+  "dmg-builder": ["26.15.3", "app-builder-lib"],
+  "electron-builder-squirrel-windows": ["26.15.3", "app-builder-lib"],
+  "electron-builder": ["26.15.3", "app-builder-lib", "dmg-builder"],
+};
+const uiConsumers = {
+  ...globConsumers,
+  vite: ["8.3.5", "picomatch", "tinyglobby"],
+  "@vitejs/plugin-react": ["6.1.1", "vite"],
+};
+
+function verifiedPicomatchFindings(records, root, now) {
+  const leaf = records.picomatch;
+  const finding = leaf?.via?.[0];
+  if (now >= PICOMATCH_REVIEW_EXPIRES || leaf?.severity !== "high" || leaf.via?.length !== 1
+    || leaf.nodes?.length !== 1 || leaf.nodes[0] !== "node_modules/picomatch"
+    || finding?.url !== picomatchFix.advisory || finding.source !== 1247710 || finding.name !== "picomatch"
+    || finding.dependency !== "picomatch" || finding.severity !== "high" || finding.range !== "<=4.0.7") return [];
+  let installed;
+  try { installed = picomatchFix.secureInstall(root); } catch { return []; }
+  const consumers = installed.desktop ? desktopConsumers : uiConsumers;
+  for (const [name, [version, ...causes]] of Object.entries(consumers)) {
+    const location = "node_modules/" + name;
+    const entry = installed.packages[location];
+    const record = records[name];
+    if (entry?.version !== version || entry.dev !== true || record?.severity !== "high"
+      || record.nodes?.length !== 1 || record.nodes[0] !== location || !Array.isArray(record.via)
+      || record.via.length !== causes.length || !causes.every(cause => record.via.includes(cause))) return [];
+  }
+  return ["picomatch", ...Object.keys(consumers)];
+}
 
 const ADVISORY = "https://github.com/advisories/GHSA-g3hv-75wg-m249";
 const REVIEW_EXPIRES = Date.parse("2026-11-16T00:00:00Z");
@@ -49,7 +93,10 @@ function evaluateAudit(report, { root, now = Date.now() }) {
     || typeof report.vulnerabilities !== "object" || Array.isArray(report.vulnerabilities)) {
     throw new Error("DEPENDENCY_AUDIT_REPORT_INVALID");
   }
-  const records = report.vulnerabilities;
+  const patchedBuildRecords = verifiedPicomatchFindings(report.vulnerabilities, root, now);
+  // Unknown dependents still see a missing cause and are rejected by the
+  // normal policy. In particular a second advisory cannot ride this patch.
+  const records = Object.fromEntries(Object.entries(report.vulnerabilities).filter(([name]) => !patchedBuildRecords.includes(name)));
   const blocked = new Set();
   const reviewed = new Set();
   const low = new Set();
@@ -83,6 +130,9 @@ function evaluateAudit(report, { root, now = Date.now() }) {
   const unresolved = Object.keys(records).filter(name => !low.has(name)
     && (blocked.has(name) || !reviewed.has(name)));
   return { passed: unresolved.length === 0, unresolved,
+    patchedBuildRecords,
+    ...(patchedBuildRecords.length ? { patchedAdvisory: picomatchFix.advisory,
+      patchReviewExpires: new Date(PICOMATCH_REVIEW_EXPIRES).toISOString() } : {}),
     reviewedBuildRecords: [...reviewed].filter(name => !blocked.has(name)),
     reviewedAdvisory: reviewed.size ? ADVISORY : null,
     reviewExpires: reviewed.size ? new Date(REVIEW_EXPIRES).toISOString() : null };
@@ -117,4 +167,4 @@ if (require.main === module) {
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
 
-module.exports = { evaluateAudit, ADVISORY, LEGACY_SOURCES, REVIEW_EXPIRES };
+module.exports = { evaluateAudit, ADVISORY, LEGACY_SOURCES, REVIEW_EXPIRES, PICOMATCH_REVIEW_EXPIRES };

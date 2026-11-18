@@ -160,6 +160,8 @@ async function main() {
     if (!state.prepared) {
       run("npm", ["ci", "--ignore-scripts"]);
       run("npm", ["--prefix", "app/manage-ui", "ci", "--ignore-scripts"]);
+      run(process.execPath, ["scripts/picomatch-security.cjs", "apply"]);
+      run(process.execPath, ["scripts/picomatch-security.cjs", "apply", "app/manage-ui"]);
       const reviewed = path.join(options.workDir, `reviewed-source-${Date.now()}`);
       run("npm", ["run", "export:source", "--", reviewed]);
       run(process.execPath, ["scripts/check-release-private-keys.cjs", reviewed]);

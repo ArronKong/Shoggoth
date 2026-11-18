@@ -1557,6 +1557,9 @@ test("命令操作说明经过脱敏与大小限制，同步进入事件流和�
       { kind: "mcpToolCall", name: "shoggoth/web_search", input: { query: "Oracle limits", activityTitle: "核对免费资源上限" } },
       { kind: "other", name: "CallMcpTool", input: { server_name: "shoggoth", tool_name: "web_fetch",
         arguments: { activityTitle: "读取 private-token 的说明", body: "private source" } } },
+      { kind: "execute", name: "tool", input: { command_line: "python3 report.py", working_dir: "/tmp/report", body: "private source" } },
+      { kind: "execute", name: "run_command", input: { commandLine: "node report.js", workingDirectory: "/tmp/report" } },
+      { kind: "execute", name: "tool", input: { command: "npm test", command_line: "npm run build", cwd: "/tmp/first", working_dir: "/tmp/second" } },
     ];
     samples.forEach((tool, index) => value.host.emit({
       known: true, type: "tool_start", method: "item/started",
@@ -1576,6 +1579,11 @@ test("命令操作说明经过脱敏与大小限制，同步进入事件流和�
     assert.deepEqual(tools[8].displayArgs, { section: "agents", tool_name: "app_state_get", server_name: "shoggoth" });
     assert.deepEqual(tools[9].displayArgs, { activityTitle: "核对免费资源上限", query: "Oracle limits" });
     assert.deepEqual(tools[10].displayArgs, { activityTitle: "读取 [redacted] 的说明", tool_name: "web_fetch", server_name: "shoggoth" });
+    assert.deepEqual(tools[11].displayArgs, { command: "python3 report.py", cwd: "/tmp/report" });
+    assert.deepEqual(tools[12].displayArgs, { command: "node report.js", cwd: "/tmp/report" });
+    assert.deepEqual(tools[13].displayArgs, { command: "npm test", cwd: "/tmp/first" });
+    assert.deepEqual(samples[11].input, { command_line: "python3 report.py", working_dir: "/tmp/report", body: "private source" },
+      "normalization must not change execution arguments");
     const stored = transcript.filter(event => event.kind === "tool_call").map(event => event.content.tool);
     assert.deepEqual(stored, tools, "history must persist the same safe descriptions as the live stream");
     assert.ok(!JSON.stringify(tools).includes("registered-secret"));
@@ -5213,6 +5221,66 @@ test("Inbox v2-only crash recovery preserves the original workspace and projects
     assert.equal(value.host.turnStartCalls, 1);
   } finally { await value.coordinator.close(); }
 });
+
+for (const scenario of ["live", "restart", "permission"]) {
+  test(`accepted chat waits for model settings and retains its original receipt (${scenario})`, async () => {
+    const events = [];
+    const options = { durableChatAcceptance: true, modelOverride: "gpt-test",
+      sessionStatus: "ready", threadId: "existing-thread",
+      threads: [{ id: "existing-thread", threadSource: null, turns: [] }],
+      transcriptStore: {
+        getEvent: (_profile, _session, id) => events.find(event => event.id === id) || null,
+        listEvents: () => clone(events),
+        appendEvent(event) { events.push(clone(event)); return clone(event); },
+      } };
+    let value = fixture(options);
+    const release = deferred();
+    const modelList = async () => ({ data: [{ model: "gpt-new", isDefault: true, defaultReasoningEffort: "medium" }], nextCursor: null });
+    value.host.modelList = modelList;
+    await value.coordinator.open();
+    const { sessions } = value;
+    const changing = value.coordinator.trackSessionSelectionWrite(SESSION_KEY, async () => {
+      await release.promise;
+      sessions.session.modelOverride = "gpt-new";
+      if (scenario === "permission") sessions.session.permissionMode = "full-access";
+    });
+    try {
+      const input = { operationId: "send-during-model-selection", sessionKey: SESSION_KEY, prompt: "Send once" };
+      const send = () => value.coordinator.send(input, { acceptanceOnly: true });
+      const receipt = await send();
+      await waitUntil(() => value.coordinator.chatPreparations.has(receipt.runId), 2_000, "chat waiting for the setting write");
+      assert.equal(value.coordinator.getRun(receipt.runId).status, "queued");
+      assert.equal(value.host.turnStartCalls, 0);
+      assert.equal(events.filter(event => event.kind === "user").length, 1);
+      assert.deepEqual(await send(), receipt);
+
+      if (scenario === "restart") await value.coordinator.close();
+      release.resolve();
+      await changing;
+      if (scenario === "restart") {
+        value = fixture({ ...options, dispatcher: value.dispatcher, inbox: value.inbox, sessions });
+        value.host.modelList = modelList;
+        await value.coordinator.open();
+      }
+      const { coordinator, host } = value;
+      assert.deepEqual(await send(), receipt);
+      if (scenario === "permission") {
+        await waitUntil(() => coordinator.getRun(receipt.runId)?.status === "failed", 2_000, "changed permission to reject");
+        assert.equal(coordinator.getRun(receipt.runId).errorCode, "EXECUTION_CONTRACT_STALE");
+        assert.equal(host.turnStartCalls, 0);
+      } else {
+        await waitUntil(() => coordinator.getRun(receipt.runId)?.status === "running", 2_000, "original input to run on the saved model");
+        assert.equal(host.turnStartCalls, 1);
+        assert.equal(host.lastTurnStartParams.model, "gpt-new");
+      }
+      assert.equal(events.filter(event => event.kind === "user").length, 1);
+    } finally {
+      release.resolve();
+      await changing;
+      await value.coordinator.close();
+    }
+  });
+}
 
 test("open recovery 期间的精确 Host 事件不会因 lifecycle=opening 丢失", async () => {
   const value = fixture({

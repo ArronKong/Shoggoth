@@ -41,6 +41,7 @@ async function run() {
     const transport = async (paths, request, options) => {
       if (request.method === "profile.binding.models.list") {
         const rule = rules.get(accountOf(request.params.bindingId));
+        if (rule?.legacy && request.params.includeSourceStatus) throw Object.assign(new Error("older Service"), { code: "INVALID_PARAMS" });
         if (rule?.delayMs) await delay(rule.delayMs);
         if (rule?.fail) throw Object.assign(new Error("fixture catalog failure"), { code: "PROFILE_MODEL_CATALOG_UNAVAILABLE" });
       }
@@ -212,6 +213,40 @@ async function run() {
     ({ ms } = await read(latestAgent, latest.sessionKey, warm));
     assert.ok(ms < SLOW - 100, `a prewarmed menu opens from cache (${ms}ms)`);
     await settle(); rules.clear();
+    // A failed ChatGPT source can coexist with verified endpoint models on one Binding.
+    f.service.productStore.putModelProvider({ id: "fixture-endpoint", kind: "custom-responses", name: "Endpoint",
+      baseUrl: "https://example.invalid/v1", model: "endpoint-only", models: ["endpoint-only"],
+      credentialRef: null, headers: null, awsRegion: null, awsProfile: null, validationStatus: "protocol_valid" });
+    const auth = f.service.accountAuthManager;
+    const readAuth = auth.read.bind(auth);
+    auth.read = async () => { throw new Error("temporary catalog authority timeout"); };
+    facade = await restarted();
+    facade.onConnectionsChanged();
+    ({ result } = await own(facade));
+    const partial = group(result, HARNESS);
+    assert.deepEqual(partial.ids, ["endpoint-only"], "verified endpoint rows remain selectable");
+    assert.equal(partial.unavailableSource, "ChatGPT", "a transient source failure must not look like a complete catalog");
+    const cachedHarness = () => Object.entries(cache.read()).find(([key]) => key.endsWith(":" + partial.bindingId));
+    assert.equal(cachedHarness(), undefined, "a partial result cannot become the persisted catalog");
+    auth.read = readAuth;
+    ({ result } = await own(facade));
+    assert.deepEqual(group(result, HARNESS).ids, [...catalogs.codex, "endpoint-only"]);
+    assert.equal(group(result, HARNESS).unavailableSource, undefined);
+    assert.ok(cachedHarness());
+    auth.read = async () => ({ account: null, requiresOpenaiAuth: true, login: null });
+    ({ result } = await own(facade));
+    assert.deepEqual(group(result, HARNESS).ids, ["endpoint-only"]);
+    assert.equal(group(result, HARNESS).unavailableSource, undefined, "a confirmed sign-out is a complete read");
+    assert.deepEqual(cachedHarness()[1].snapshot.models.map(row => row.id), ["endpoint-only"]);
+    rules.set(HARNESS, { legacy: true });
+    ({ result } = await own(facade));
+    assert.deepEqual(group(result, HARNESS).ids, ["endpoint-only"], "a compatible read preserves older Service endpoints");
+    assert.equal(group(result, HARNESS).unavailableSource, "ChatGPT", "a legacy endpoint-only response has unconfirmed source coverage");
+    assert.equal(cachedHarness(), undefined, "a known partial refresh also invalidates an earlier complete result");
+    auth.read = readAuth;
+    ({ result } = await own(facade));
+    assert.deepEqual(group(result, HARNESS).ids, [...catalogs.codex, "endpoint-only"]);
+    assert.equal(group(result, HARNESS).unavailableSource, undefined);
     console.log("PASS Runtime model menu cache: concurrent cold load, cached slow refresh, fresh budget, failures never hidden, write/connection/generation invalidation, account-shared native catalogs, per-Agent Harness, persisted catalogs across restarts and start prewarm.");
   } finally { await f.close(); }
 }

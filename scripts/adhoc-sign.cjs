@@ -239,6 +239,7 @@ exports.default = async function adhocSign(context) {
   // example behind a symlinked node_modules) or a dotfile a bundled plugin's
   // frozen digest covers. Either leaves an App that fails at runtime.
   const { checkPackagedDependencies } = require("./release-package-checks.cjs");
+  require("./picomatch-security.cjs").verifyPackagedMatcher(appPath);
   const incomplete = [
     ...require("../app/external-plugin-adapter-protocol").checkAdapterProtocols(
       path.join(appPath, "Contents", "Resources", "external-plugin-adapters")),

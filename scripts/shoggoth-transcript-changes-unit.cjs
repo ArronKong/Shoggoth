@@ -36,6 +36,55 @@ function append(store, id = "event-1", overrides = {}) {
     runtimeRef: null, contextExcluded: false, occurredAt: 1234, ...overrides });
 }
 
+test("legacy command history recovers only fixed display metadata from the matching context body", () => {
+  const f = fixture();
+  try {
+    const store = f.create();
+    const command = "python3 -c \"\nprint('private-body-canary')\n\"";
+    const event = append(store, "legacy-command", { kind: "tool_call",
+      content: { toolCallId: "native-call", tool: { name: "tool", kind: "execute", status: "in_progress" } },
+      contextContent: { toolCallId: "native-call", tool: { name: "tool", kind: "execute",
+        arguments: { command_line: command, working_dir: "/private/workspace" } } } });
+    const journal = path.join(f.paths.agentsDir, "profile-1", "transcripts", "session-1", "events.jsonl");
+    const before = fs.readFileSync(journal);
+    const display = store.displayEvent("profile-1", "session-1", event);
+    assert.deepEqual(display.content.tool.displayArgs, { nativeToolKind: "execute", nativeCommandKind: "python" });
+    assert.equal(display.content.tool.name, "tool", "display metadata never replaces execution identity");
+    assert.equal(JSON.stringify(display).includes("private-body-canary"), false);
+    assert.equal(JSON.stringify(display).includes("/private/workspace"), false);
+    const { transcriptHistoryItem } = require("../app/agent-service/chat-service-controller");
+    assert.deepEqual(transcriptHistoryItem(display).payload.message.content[0].arguments,
+      { nativeToolKind: "execute", nativeCommandKind: "python" });
+    assert.deepEqual(fs.readFileSync(journal), before, "history reads never rewrite the transcript");
+    assert.equal(event.content.tool.displayArgs, undefined);
+
+    append(store, "legacy-command-result", { kind: "tool_result", occurredAt: 1306,
+      content: { toolCallId: "native-call", tool: { name: "tool", kind: "execute",
+        status: "completed", durationMs: 72 } } });
+    const { GroupNativeExecutor } = require("../app/agent-service/group-native-executor");
+    const group = new GroupNativeExecutor({ transcriptStore: store, now: () => 1400,
+      chatSessionStore: { getSession: () => ({ id: "session-1", profileId: "profile-1" }) } });
+    const activity = group.readCompletedActivity({ id: "opportunity-1", groupId: "group-1",
+      memberId: "member-1", discussionId: "discussion-1", sessionKey: "session-key", runId: "run-1",
+      finishedAt: 1400 }, { profileId: "profile-1" });
+    assert.deepEqual(activity.recentTools[0].input, { nativeToolKind: "execute", nativeCommandKind: "python" });
+    assert.equal(activity.recentTools[0].durationMs, 72);
+    assert.equal(activity.recentTools[0].status, "completed");
+
+    const missing = store.displayEvent("profile-1", "session-1", { ...event,
+      content: { ...event.content, contextRef: { ...event.content.contextRef, hash: "f".repeat(64) } } });
+    assert.deepEqual(missing.content.tool.displayArgs, { nativeToolKind: "execute" });
+    const mismatch = store.displayEvent("profile-1", "session-1", { ...event,
+      content: { ...event.content, toolCallId: "different-call" } });
+    assert.deepEqual(mismatch.content.tool.displayArgs, { nativeToolKind: "execute" });
+    const excluded = { ...event, contextExcluded: true };
+    assert.equal(store.displayEvent("profile-1", "session-1", excluded), excluded);
+    const publicArgs = { ...event, content: { ...event.content, tool: { ...event.content.tool,
+      displayArgs: { command: "node check.js" } } } };
+    assert.equal(store.displayEvent("profile-1", "session-1", publicArgs), publicArgs);
+  } finally { f.cleanup(); }
+});
+
 test("notification follows journal fsync, manifest commit and current file identities", async () => {
   const trace = [], descriptors = new Map();
   const injectedFs = new Proxy(fs, { get(target, key) {

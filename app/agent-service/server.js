@@ -109,6 +109,7 @@ const { LearningService } = require("./self-improvement/service");
 const { LearningSources } = require("./self-improvement/sources");
 const { LearnedSkillFacade } = require("./self-improvement/skill-facade");
 const { WebService } = require("./web-service");
+const { recordWebSearchFailure } = require("./web-search-diagnostics");
 const { WebSettings } = require("./web-settings");
 const webSettingsProtocol = require("./web-settings-protocol");
 const { HeartbeatDocumentStore } = require("./heartbeat-document");
@@ -2856,11 +2857,12 @@ function createAgentService(options) {
     conversationRecallService.scheduleWarm(profileId);
   });
   const sessionRuntimeController = require("./session-runtime-controller").createSessionRuntimeController({
-    productStore, chatSessionStore, transcriptStore, getCoordinator: () => workRunCoordinator, facts: runtimeSupportFacts,
+    productStore, secretStore, chatSessionStore, transcriptStore, getCoordinator: () => workRunCoordinator, facts: runtimeSupportFacts,
     policyStore: runtimeSelectionPolicyStore,
     getNativeRuntimeConfig,
     ensureTranscript: session => chatServiceController.handle("chat.history", { sessionKey: session.sessionKey, cursor: null, limit: 1 }, null),
     listBindingModels: params => profileServiceController.handle("profile.binding.models.list", params),
+    readConfiguredModel: profileServiceController.readConfiguredModel,
     onChanged: payload => eventBuffer.append("runtime.context.updated", payload),
     isRetiredRuntimeSession: (runtime, sessionId) => runtimeManager.isRetiredSessionId?.(runtime, sessionId) === true,
   });
@@ -2925,7 +2927,8 @@ function createAgentService(options) {
     onPublished: notice => eventBuffer.append("proactive.notice.published", { noticeId: notice.id,
       profileId: notice.profileId, sessionKey: notice.sessionKey }), now: options.now });
   const webSettings = new WebSettings({ paths, secretStore });
-  const webService = options.webService || new WebService({ settings: webSettings });
+  const webService = options.webService || new WebService({ settings: webSettings,
+    onSearchFailure: failure => recordWebSearchFailure(paths, failure) });
   const heartbeatDocuments = new HeartbeatDocumentStore({ paths, productStore });
   const dailyReviewDocuments = new DailyReviewDocumentStore({ paths, productStore });
   const proactiveService = new ProactiveService({ store: proactiveStore, productStore, dispatcher: workDispatcher,

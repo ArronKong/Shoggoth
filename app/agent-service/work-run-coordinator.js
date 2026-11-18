@@ -16,6 +16,7 @@ const { parseActionableContinuation, continuationPrompt, unavailable: continuati
 const { prepareForSend, projectTextOrOriginal } = require("../core/chat-secret-fallback");
 const CHAT_PROJECTION_POLL_MS = 10;
 const BORROWED_OUTPUT_MAX_EVENTS = 256;
+const BORROWED_OUTPUT_MAX_COALESCED_BYTES = 32 * 1024;
 const BORROWED_OUTPUT_MAX_RUN_BYTES = 16 * 1024 * 1024;
 const BORROWED_OUTPUT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const BORROWED_OUTPUT_PROOF_TIMEOUT_MS = 5_000;
@@ -646,7 +647,14 @@ function projectToolDisplayArgs(tool, options) {
   const selectors = isMcpWrapper && plainRecord(input.arguments)
     ? input.arguments : null;
   for (const key of displayKeys) {
-    const value = input[key] ?? (["section", "operation", "enabled", "activityTitle"].includes(key) ? selectors?.[key] : undefined);
+    // Native ACP commands also use snake/camel case inputs. Normalize only
+    // their display projection; execution and approval arguments stay intact.
+    const commandAlias = isCommand && key === "command"
+      ? input.command_line ?? input.commandLine ?? input.Command : undefined;
+    const cwdAlias = isCommand && key === "cwd"
+      ? input.working_dir ?? input.workingDirectory ?? input.workingDir : undefined;
+    const value = input[key] ?? commandAlias ?? cwdAlias
+      ?? (["section", "operation", "enabled", "activityTitle"].includes(key) ? selectors?.[key] : undefined);
     if (typeof value === "string") {
       const text = safeToolDisplayText(value, options, MAX_TOOL_DISPLAY_ARGUMENT_BYTES, true);
       if (text) projected[key] = text;
@@ -1123,6 +1131,7 @@ class WorkRunCoordinator {
     this.pendingSessionSends = new Map();
     this.sessionBindingReconciliations = new Set();
     this.beforeSessionSend = options.beforeSessionSend || (() => {});
+    this.sessionSelectionWrites = new Map();
     this.durableChatAcceptance = options.durableChatAcceptance === true;
     this.acceptsChatReceipts = this.durableChatAcceptance || options.acceptsChatReceipts === true;
     if (this.durableChatAcceptance) requireMethods(this.transcriptStore, ["getEvent"], "TranscriptStore");
@@ -3612,6 +3621,34 @@ class WorkRunCoordinator {
         && (run.status === "queued" || ACTIVE_RUN_STATES.has(run.status)));
   }
 
+  trackSessionSelectionWrite(sessionKey, action) {
+    const writes = this.sessionSelectionWrites.get(sessionKey) ?? new Set();
+    const write = Promise.resolve().then(action);
+    writes.add(write);
+    this.sessionSelectionWrites.set(sessionKey, writes);
+    return write.finally(() => {
+      writes.delete(write);
+      if (!writes.size) this.sessionSelectionWrites.delete(sessionKey);
+    });
+  }
+
+  #waitForSessionSelection(sessionKey, signal) {
+    if (!this.sessionSelectionWrites.has(sessionKey) || signal.aborted) return;
+    return new Promise(resolve => {
+      const finish = () => {
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const wait = () => {
+        const writes = this.sessionSelectionWrites.get(sessionKey);
+        if (signal.aborted || !writes) return finish();
+        void Promise.allSettled(writes).then(wait);
+      };
+      signal.addEventListener("abort", finish, { once: true });
+      wait();
+    });
+  }
+
   async withChatSessionRemoval(sessionKey, action) {
     return this.#serializeSessionSend(sessionKey, async () => {
       if (this.inbox.isLocked?.() === true || this.inbox.hasPendingSession?.(sessionKey) === true) {
@@ -4312,7 +4349,9 @@ class WorkRunCoordinator {
       acceptance: existingCommand?.acceptance }, session);
     const acceptance = useReceipt && !existingCommand && !run ? {
       profileId: session.profileId, sessionId: session.id, workspace: canonicalWorkspace(runInput.workspace),
-      selectionFingerprint: chatSelectionFingerprint(session),
+      selectionFingerprint: (!uiSource && !input.operationId.startsWith("ui-operation-")
+        && !this.isInternalChatSession(session.sessionKey) && this.#chatRouteFingerprint(session))
+        || chatSelectionFingerprint(session),
     } : undefined;
     setChatSendDiagnosticPhase("command_enqueue");
     let command;
@@ -4807,6 +4846,42 @@ class WorkRunCoordinator {
       || canonicalWorkspace(command.acceptance.workspace) !== command.acceptance.workspace) {
       throw coordinatorError("WORK_RUN_COMMAND_SOURCE_CONFLICT", "PendingCommand 接收归属已变化");
     }
+  }
+
+  #chatRouteFingerprint(session) {
+    const selection = session.nextRuntimeSelection;
+    const bindingId = selection?.bindingId ?? session.runtimeBindingId ?? null;
+    try {
+      const profile = this.productStore.resolveAgentRuntimeProfile
+        ? this.productStore.resolveAgentRuntimeProfile(session.profileId, bindingId ?? undefined)
+        : this.productStore.getAgentProfile(session.profileId);
+      if (!profile?.enabled) return null;
+      const source = selection ? selection.modelProviderRef : session.modelProviderRef;
+      const providerRef = codexSessionProvider.resolveProviderSelection(this.productStore, profile, source) ?? null;
+      const route = this.captureExecutionProviderRoute?.(profile, null, providerRef);
+      return controlFingerprint("chat-acceptance-route", {
+        bindingId, runtime: profile.runtime, runtimeAccountId: profile.runtimeAccountId,
+        providerRef, permissionMode: (selection ? selection.permissionMode : session.permissionMode) ?? null,
+        permissionPolicy: profile.permissionPolicy, workspace: session.workspace ?? null,
+        ...(route ? { accountFingerprint: route.providerFence.accountFingerprint,
+          providerFingerprint: route.providerFence.providerFingerprint,
+          providerRevision: route.provider.providerRevision, credentialRevision: route.provider.credentialRevision } : {}),
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  #chatSelectionMatchesAcceptance(command, session) {
+    const accepted = command.acceptance.selectionFingerprint;
+    if (chatSelectionFingerprint(session) === accepted) return true;
+    if (command.operationId.startsWith("ui-operation-") || this.isInternalChatSession(session.sessionKey)) return false;
+    if (this.#chatRouteFingerprint(session) === accepted) return true;
+    // The settings RPC can explicitly stage a different binding or provider
+    // for the next turn while this input is queued. The existing selection
+    // preflight validates that staged choice before applying it.
+    return Boolean(session.nextRuntimeSelection
+      && this.#chatRouteFingerprint({ ...session, nextRuntimeSelection: undefined }) === accepted);
   }
 
   #assertAcceptedChatRun(run, command, session) {
@@ -6843,15 +6918,33 @@ class WorkRunCoordinator {
     let size;
     try { size = Buffer.byteLength(JSON.stringify(event)); }
     catch { void this.stopBorrowedMemoryRun(runId).catch(() => {}); return; }
-    if ((prior?.retainedEvents ?? 0) >= BORROWED_OUTPUT_MAX_EVENTS
+    const tail = prior?.events.at(-1);
+    // Keep one message's adjacent increments together while the worker checks
+    // its sources. Different items, phases, reasoning parts and intervening
+    // events remain separate; each merged event stays below the public limit.
+    const coalesce = tail && ["text_delta", "reasoning_delta"].includes(event.type)
+      && typeof event.itemId === "string" && event.itemId.length > 0
+      && typeof event.delta === "string" && typeof tail.event.delta === "string"
+      && tail.size + size <= BORROWED_OUTPUT_MAX_COALESCED_BYTES
+      && Object.keys(event).length === Object.keys(tail.event).length
+      && Object.keys(event).every(key => Object.hasOwn(tail.event, key)
+        && (key === "delta" || tail.event[key] === event[key]));
+    if ((!coalesce && (prior?.retainedEvents ?? 0) >= BORROWED_OUTPUT_MAX_EVENTS)
       || (prior?.retainedBytes ?? 0) + size > BORROWED_OUTPUT_MAX_RUN_BYTES
       || this.borrowedOutputBytes + size > BORROWED_OUTPUT_MAX_TOTAL_BYTES) {
-      void this.stopBorrowedMemoryRun(runId, "CONTEXT_MEMORY_READ_UNAVAILABLE").catch(() => {});
+      void this.stopBorrowedMemoryRun(runId, "RUNTIME_OUTPUT_LIMIT_EXCEEDED").catch(() => {});
       return;
     }
     const output = prior ?? { controller: new AbortController(), events: [], retainedEvents: 0, retainedBytes: 0 };
-    output.events.push({ event, size });
-    output.retainedEvents++;
+    if (coalesce) {
+      tail.event = { ...tail.event, delta: tail.event.delta + event.delta };
+      tail.size += size;
+    } else {
+      output.events.push({ event, size });
+      output.retainedEvents++;
+    }
+    // Charge every original frame, including its metadata, so coalescing does
+    // not increase either byte budget or require re-encoding a growing string.
     output.retainedBytes += size;
     this.borrowedOutputBytes += size;
     if (prior) return;
@@ -9956,8 +10049,18 @@ class WorkRunCoordinator {
       this.#assertChatAcceptanceScope(command, this.chatSessionStore.getSession(run.sourceId));
       if (!this.preflightedChatRuns.has(run.id)) {
         try {
+          const pendingSelection = this.#waitForSessionSelection(run.sourceId, signal);
+          if (pendingSelection) {
+            await pendingSelection;
+            this.#fenceLifecycle(lifecycle);
+            if (signal.aborted || this.dispatcher.getRun(run.id)?.status !== "queued" || this.#chatCancellationPending(run)) return;
+          }
           const session = this.chatSessionStore.getSession(run.sourceId);
-          if (chatSelectionFingerprint(session) !== command.acceptance.selectionFingerprint) {
+          this.#assertChatAcceptanceScope(command, session);
+          // A direct chat may use the latest model on its accepted route until
+          // admission freezes the execution contract. Older receipts and card
+          // actions retain their original, exact selection check.
+          if (!this.#chatSelectionMatchesAcceptance(command, session)) {
             throw coordinatorError("EXECUTION_CONTRACT_STALE", "排队期间会话的运行时选择已变化");
           }
           await this.beforeSessionSend({ operationId: command.operationId, sessionKey: command.sessionKey,

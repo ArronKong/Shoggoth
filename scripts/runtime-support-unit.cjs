@@ -86,6 +86,27 @@ test("auth and catalog observations do not erase each other's independent proof"
   assert.equal(supports({ binding, facts: result, requirements }).code, "ACCOUNT_AUTH_UNKNOWN");
 });
 
+test("a configured source acquires its own runtime without reading an account or catalog", async () => {
+  const calls = [];
+  const cache = createRuntimeSupportFacts({ runtimeManager: { async acquire(_binding, { executionContract } = {}) {
+    calls.push(executionContract?.provider.providerRef ?? "management");
+    return {
+      accountRead: async () => { calls.push("account/read"); return { account: null, requiresOpenaiAuth: true }; },
+      modelsList: async () => { calls.push("model/list"); return { data: [{ model: "known" }] }; },
+    };
+  } } });
+  const profile = { permissionPolicy: requirements.permissionPolicy };
+  const executionContract = { provider: { providerRef: "custom", providerRevision: 1, credentialRevision: 1 }, providerFence: {} };
+  const selected = await cache.read(binding, profile, { executionContract });
+  assert.equal(selected.authenticated, "unverified");
+  assert.deepEqual(supports({ binding, facts: selected, requirements: { ...requirements, model: null } }), { supported: true });
+  assert.equal((await cache.read(binding, profile)).authenticated, false);
+  assert.deepEqual(await cache.read(binding, profile, { executionContract }), selected);
+  await cache.read(binding, profile, { executionContract: { ...executionContract,
+    provider: { ...executionContract.provider, credentialRevision: 2 } } });
+  assert.deepEqual(calls, ["custom", "management", "account/read", "model/list", "custom"]);
+});
+
 test("a late discovery cannot publish facts after account or context identity changes", async () => {
   for (const change of ["account", "context", "clear"]) {
     let generation = 1, identity = "first", finish;

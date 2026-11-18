@@ -110,6 +110,12 @@ test("borrowed tool display keeps namespaced identity, pairing, and outcome thro
     }
     assert.equal(sanitizeBorrowedToolContent({ tool: { kind: "read", name: "memory/private.md" } }, refs()).tool.name, "tool");
     assert.equal(sanitizeBorrowedToolContent({ tool: { kind: "mcpToolCall", name: "shoggoth/memory_get" } }, refs()).tool.name, "shoggoth/memory_get");
+    const command = f.append({ id: "borrowed-command", kind: "tool_call",
+      content: sanitizeBorrowedToolContent({ toolCallId: "borrowed-command-call",
+        tool: { name: "tool", kind: "execute", arguments: { command_line: `python3 -c '${MARKER}'` } } }, refs()) });
+    const display = f.transcripts.displayEvent(f.profile.id, f.transcriptSessionId, command);
+    assert.equal(display.content.tool.displayArgs, undefined, "legacy command labels cannot restore borrowed arguments");
+    assert.doesNotMatch(JSON.stringify(display), new RegExp(MARKER));
   } finally { f.cleanup(); }
 });
 
