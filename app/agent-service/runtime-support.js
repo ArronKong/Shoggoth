@@ -51,6 +51,18 @@ function supports({ binding, facts, requirements = {} }) {
   return Object.freeze({ supported: true });
 }
 
+function runtimeSupportFactsForHandle(binding, host) {
+  const evidence = host.capabilityEvidence;
+  return { installed: true, releaseEnabled: isRuntimeAvailable(binding.runtime),
+    ...(evidence ? { capabilityEvidence: evidence } : {}),
+    attachmentKinds: evidence ? ["image", "pdf", "file"].filter(kind =>
+      evidence.observations[`attachment.${kind}`]?.state === "supported") : binding.runtime.startsWith("ext-") ? []
+      : binding.runtime === "opencode" ? ["image", "file"] : ["image", "pdf", "file"],
+    permissionEnforcementProven: evidence
+      ? evidence.observations["permission.enforcement"]?.state === "supported"
+      : !binding.runtime.startsWith("ext-") };
+}
+
 function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, now = Date.now,
   timeoutMs = 5000, maxPending = 8, ttlMs = 30_000, discover, contextIdentity = () => null }) {
   const cache = new Map();
@@ -95,15 +107,7 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
     const host = await runtimeManager.acquire({ runtime: binding.runtime, runtimeProfileId: binding.runtimeProfileId,
       runtimeAccountId: binding.runtimeAccountId }, { permissionPolicy: profile.permissionPolicy,
       ...(executionContract ? { executionContract } : {}) });
-    const evidence = host.capabilityEvidence;
-    const runtimeFacts = { installed: true,
-      ...(evidence ? { capabilityEvidence: evidence } : {}),
-      attachmentKinds: evidence ? ["image", "pdf", "file"].filter(kind =>
-        evidence.observations[`attachment.${kind}`]?.state === "supported") : binding.runtime.startsWith("ext-") ? []
-        : binding.runtime === "opencode" ? ["image", "file"] : ["image", "pdf", "file"],
-      permissionEnforcementProven: evidence
-        ? evidence.observations["permission.enforcement"]?.state === "supported"
-        : !binding.runtime.startsWith("ext-") };
+    const runtimeFacts = runtimeSupportFactsForHandle(binding, host);
     // The configured source has its own credentials and saved catalog. Acquiring
     // its host proves runtime support; a real turn verifies its credentials.
     if (executionContract) return { ...runtimeFacts, authenticated: "unverified" };
@@ -208,4 +212,4 @@ function createRuntimeSupportFacts({ runtimeManager, runtimeAccountAdmission, no
   };
 }
 
-module.exports = { RUNTIME_SUPPORT_CODES, supports, createRuntimeSupportFacts };
+module.exports = { RUNTIME_SUPPORT_CODES, supports, createRuntimeSupportFacts, runtimeSupportFactsForHandle };

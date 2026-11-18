@@ -23,6 +23,7 @@ const now = Date.now();
 const sessions = [{ key, agentId, agentName: `${backend} · ${runtime}`, backendId: backend, updatedAt: now }];
 const intro = { id: "activity-user", role: "user", content: language === "en" ? "Check Agents and scheduled tasks." : "核对助理与定时任务。", timestamp: now - 1000 };
 let history: any[] = options.get("scenario") === "openclaw-long" ? openClawLongToolHistory()
+  : options.get("scenario") === "failed-turn" ? failedTurnHistory()
   : options.get("scenario") === "native-progress-cold" ? nativeProgressHistory()
   : options.get("scenario") === "native-long" ? nativeLongToolHistory()
   : options.get("scenario") === "nested" ? nestedToolHistory()
@@ -131,6 +132,65 @@ const closeDetails = async () => {
   details()?.querySelector<HTMLButtonElement>(`button[aria-label="${i18n.t("common.close")}"]`)?.click();
   await wait(() => !details(), "close activity dialog");
 };
+
+function failedTurnHistory(): any[] {
+  const runId = "failed-cron-run";
+  const shoggoth = { nativeUiVersion: 1, runId, displayId: `native-run:${runId}`, source: "cron" };
+  const message = (id: string, role: string, content: any, offset: number) => ({ id, role, content, shoggoth, timestamp: now + offset });
+  return [
+    { id: "previous-report", role: "assistant", content: "Previous report", timestamp: now - 1000 },
+    message("cron-input", "user", "Prepare the daily report", 0),
+    ...[88, 2572].flatMap((durationMs, index) => [
+      message(`failed-call-${index}`, "assistant", [{ type: "toolCall", toolCallId: `failed-tool-${index}`,
+        toolName: "command", arguments: { command: "date", activityTitle: `Failed run tool ${index + 1}` } }], index * 3000 + 1),
+      message(`failed-result-${index}`, "toolResult", [{ type: "toolResult", toolCallId: `failed-tool-${index}`,
+        name: "command", content: `Saved result ${index + 1}`, is_error: false, durationS: durationMs / 1000 }], index * 3000 + 1 + durationMs),
+    ]),
+    message("failed-terminal", "system", "RUNTIME_RATE_LIMITED", 9000),
+  ];
+}
+
+state.runFailedTurnFixture = async () => {
+  const immersive = options.get("immersive") === "1";
+  const surface = () => document.querySelector<HTMLElement>('[data-testid="immersive-chat"]') ?? thread();
+  const verify = async () => {
+    await wait(() => surface()?.querySelector('.is-error, [class*="errCard"]'), "saved rate limit error");
+    check(!surface().querySelector('[data-chat-activity-preview], [data-live-activity-bubble]'),
+      "a failed turn must not leave a standalone activity bubble");
+    check(activityEntries().length === (history.at(-1).id === "next-answer" ? 2 : 1), "each completed run keeps its own activity entry");
+    if (immersive) check(surface().querySelectorAll("[data-immersive-message]").length === (history.at(-1).id === "next-answer" ? 3 : 2),
+      "folded tool activity must not leave an empty message or timestamp");
+    check(!surface().innerText.includes("Failed run tool"), "tool steps belong in the activity dialog");
+    activityEntries()[0].click();
+    await wait(() => details()?.querySelector("li"), "failed run activity rows");
+    check(titles().filter(title => title?.startsWith("Failed run tool")).length === 2, "the failed run keeps both tool steps");
+    check(!titles().includes("Next run tool"), "the error activity must not borrow another run's steps");
+    await closeDetails();
+  };
+  await wait(() => state.socket && surface()?.innerText.includes("Previous report"), "failed turn history");
+  check(Boolean(document.querySelector('[data-testid="immersive-chat"]')) === immersive, "wrong failed turn presentation");
+  await verify();
+  const before = state.requests.filter((request: any) => request.method === "chat.history").length;
+  history = [...history,
+    { id: "next-input", role: "user", content: "Next scheduled task", timestamp: now + 10000,
+      shoggoth: { nativeUiVersion: 1, runId: "next-run", displayId: "native-run:next-run", source: "cron" } },
+    { id: "next-tool-call", role: "assistant", timestamp: now + 10001,
+      shoggoth: { nativeUiVersion: 1, runId: "next-run", displayId: "native-run:next-run" },
+      content: [{ type: "toolCall", toolCallId: "next-tool", toolName: "command", arguments: { command: "date", activityTitle: "Next run tool" } }] },
+    { id: "next-tool-result", role: "toolResult", timestamp: now + 10101,
+      shoggoth: { nativeUiVersion: 1, runId: "next-run", displayId: "native-run:next-run" },
+      content: [{ type: "toolResult", toolCallId: "next-tool", name: "command", content: "next result", is_error: false, durationS: 0.1 }] },
+    { id: "next-answer", role: "assistant", content: "Next report", timestamp: now + 11000,
+      shoggoth: { nativeUiVersion: 1, runId: "next-run", displayId: "native-run:next-run" } },
+  ];
+  state.socket.emit({ type: "event", event: "session.message", payload: { sessionKey: key } });
+  await wait(() => state.requests.filter((request: any) => request.method === "chat.history").length > before
+    && surface()?.innerText.includes("Next report"), "failed history refresh with the next run");
+  await verify();
+  check(state.requests.every((request: any) => request.method !== "chat.send"), "viewing failed activity must never replay the task");
+  return { language, immersive, width: innerWidth, standaloneBubbles: 0, toolSteps: 2, refreshed: true, providerCalls: 0 };
+};
+
 state.proactiveRequests = [];
 state.runProactiveActivityFixture = async () => {
   await wait(() => activityEntries().length === 2, "one activity button on each proactive notice");

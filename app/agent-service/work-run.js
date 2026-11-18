@@ -140,7 +140,7 @@ function createWorkDispatcher(options = {}) {
     return canonicalWorkspace(run.workspace);
   }
 
-  function enqueueInitial(input, skippedSummary = null) {
+  function enqueueInitial(input, { status = "queued", resultSummary = null } = {}) {
     assertNoSensitiveFields(input, "WorkRun input");
     if (input && typeof input.idempotencyKey === "string") {
       const existing = store.getWorkRunByIdempotencyKey(input.idempotencyKey);
@@ -177,7 +177,6 @@ function createWorkDispatcher(options = {}) {
     if (unknown.length > 0) {
       throw workRunError("INVALID_WORK_RUN", `WorkRun input 含未知字段: ${unknown.join(", ")}`);
     }
-    const skippedAt = skippedSummary === null ? null : now();
     const saved = store.putWorkRun({
       id: input.id,
       source: input.source,
@@ -185,7 +184,7 @@ function createWorkDispatcher(options = {}) {
       idempotencyKey: input.idempotencyKey,
       profileId: input.profileId,
       workspace,
-      status: skippedSummary === null ? "queued" : "skipped",
+      status,
       contextSnapshotId: null,
       runtimeSessionRef: null,
       runtimeTurnRef: null,
@@ -193,8 +192,8 @@ function createWorkDispatcher(options = {}) {
       eventSeq: 1,
       waitingRequestId: null,
       startedAt: null,
-      finishedAt: skippedAt,
-      resultSummary: skippedSummary,
+      finishedAt: status === "queued" ? null : now(),
+      resultSummary,
       errorCode: null,
       retryOf: input.retryOf ?? null,
     });
@@ -218,7 +217,14 @@ function createWorkDispatcher(options = {}) {
         "仅允许持久化已停用 Cron/Kanban target 的审计跳过记录",
       );
     }
-    return enqueueInitial(input, resultSummary);
+    return enqueueInitial(input, { status: "skipped", resultSummary });
+  }
+
+  function recordArchivedChatCancellation(input) {
+    if (input?.source !== "chat" || store.getAgentProfile(input.profileId)?.enabled !== false) {
+      throw workRunError("INVALID_WORK_RUN", "归档接收记录必须属于已停用的聊天 Agent");
+    }
+    return enqueueInitial(input, { status: "canceled" });
   }
 
   function assertThreadAdmission(candidate) {
@@ -447,6 +453,7 @@ function createWorkDispatcher(options = {}) {
     admit,
     enqueue,
     enqueueSkipped,
+    recordArchivedChatCancellation,
     getRun,
     listRuns,
     subscribeChanges,

@@ -73,7 +73,23 @@ async function run() {
     assert.equal(await preview.text(), upload.body.toString());
     assert.match(preview.headers.get("content-disposition"), new RegExp(encodeURIComponent(renamed.name)));
     const renamedPath = path.join(path.dirname(entry), renamed.name);
-    fs.writeFileSync(renamedPath, Buffer.alloc(upload.body.length));
+    const locate = (owner = profile) => request(route(owner, `/${file.fileId}/locate`), { method: "POST", headers: { Origin: server.url } });
+    assert.deepEqual(await (await locate()).json(), { path: renamedPath });
+    assert.equal((await request(route(profile, `/${file.fileId}/locate`), { method: "POST" })).status, 403);
+    const download = path.join(f.paths.homeDir, "Downloads", renamed.name);
+    fs.mkdirSync(path.dirname(download), { recursive: true });
+    fs.renameSync(renamedPath, download);
+    assert.deepEqual(await (await locate()).json(), { path: download });
+    assert.equal((await locate(other)).status, 404);
+    assert.equal((await request(payload)).status, 404);
+    assert.ok((await backend.listAgentArtifacts(profile.agentId)).items.some(item => item.fileId === file.fileId && item.missing));
+    fs.writeFileSync(download, Buffer.alloc(upload.body.length));
+    assert.equal((await (await locate()).json()).code, "AGENT_FILE_MISSING");
+    fs.writeFileSync(download, upload.body);
+    fs.linkSync(download, renamedPath);
+    assert.equal((await (await locate()).json()).code, "AGENT_FILE_MISSING");
+    fs.unlinkSync(renamedPath);
+    fs.writeFileSync(renamedPath, Buffer.alloc(upload.body.length), { mode: 0o600 });
     assert.equal((await request(payload)).status, 404);
     assert.equal((await (await request(meta)).json()).file.status, "missing");
     fs.writeFileSync(renamedPath, upload.body);
@@ -88,6 +104,7 @@ async function run() {
     const gone = await request(payload);
     assert.equal(gone.status, 410);
     assert.equal((await gone.json()).code, "AGENT_FILE_DELETED");
+    assert.equal((await (await locate()).json()).code, "AGENT_FILE_DELETED");
     assert.deepEqual((await (await request(route())).json()).items, []);
 
     const session = f.createSession();

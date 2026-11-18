@@ -13,6 +13,7 @@ const { serviceError } = require("./security");
 
 const NATIVE_AUTH_PREFERENCE_FILE = ".shoggoth-native-auth.json";
 const REFRESH_MARGIN_MS = 60_000;
+const SOURCE_REUSE_MS = 5 * 60_000;
 
 function authUnavailable() {
   return serviceError("RUNTIME_AUTH_REQUIRED", "Local Codex sign-in is unavailable");
@@ -53,6 +54,9 @@ class NativeCodexAuth {
     this.closed = false;
     this.cleanupIncomplete = false;
     this.accountId = null;
+    this.reuseMs = options.reuseMs ?? SOURCE_REUSE_MS;
+    this.reusable = null;
+    this.reuseEpoch = 0;
   }
 
   open() { this.closed = false; }
@@ -68,6 +72,8 @@ class NativeCodexAuth {
   }
 
   disable(codexHome) {
+    this.reusable = null;
+    this.reuseEpoch += 1;
     atomicWritePrivateFile(path.join(codexHome, NATIVE_AUTH_PREFERENCE_FILE),
       JSON.stringify({ version: 1, disabled: true }) + "\n", {
         fs: this.fs, trustedRoot: this.paths.trustedRoot,
@@ -93,6 +99,16 @@ class NativeCodexAuth {
       if (this.cleanupIncomplete) throw serviceError("CODEX_RUNTIME_CLEANUP_INCOMPLETE", "Codex auth process cleanup failed");
       if (this.closed) throw serviceError("CODEX_NATIVE_AUTH_READ_FAILED", "Codex auth reader is stopped");
     }
+    // Each source read starts a Codex process (1-3 s), and every menu, model
+    // check and turn of the bundled Harness reads auth. Reuse a recent read while
+    // the source auth.json is unchanged and the token is not near expiry. A forced
+    // refresh (Codex rejected the token) always reads the source again.
+    if (refreshToken) this.reusable = null;
+    else if (this.reusable && this.now() - this.reusable.at < this.reuseMs
+      && this.reusable.tokens.expiresAt > this.now() + REFRESH_MARGIN_MS
+      && this.reusable.stamp !== null && this.reusable.stamp === this._sourceStamp()) {
+      return this._matching(this.reusable.tokens, previousAccountId);
+    }
     // Share an in-flight read across Profiles. A forced refresh must not be
     // satisfied by a concurrent metadata read that still has the rejected JWT.
     if (this.pending) {
@@ -100,15 +116,29 @@ class NativeCodexAuth {
       if (!refreshToken) return this._matching(result, previousAccountId);
       return this.read({ refreshToken, previousAccountId });
     }
+    // Taken before the read: a source changed during the read is read again next time.
+    const stamp = this._sourceStamp(), epoch = this.reuseEpoch;
     const pending = this._read(refreshToken, previousAccountId);
     this.pending = pending;
     try {
       const result = this._matching(await pending, previousAccountId);
       if (result) this.accountId ||= result.chatgptAccountId;
+      // A logout or close during the read is never undone by its late result.
+      if (epoch === this.reuseEpoch) this.reusable = result ? { tokens: result, stamp, at: this.now() } : null;
       return result;
     } finally {
       if (this.pending === pending) this.pending = null;
     }
+  }
+
+  // The source credential file's identity; null when it cannot be read, which disables reuse.
+  _sourceStamp() {
+    try {
+      const userHome = resolveUserHome(this.fs, this.options.homedir || os.homedir());
+      const home = resolveNativeHome(this.fs, this.options.parentEnv || process.env, userHome, "codex");
+      const stat = statIfExists(this.fs, path.join(home, "auth.json"));
+      return stat ? [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":") : "missing";
+    } catch { return null; }
   }
 
   _matching(tokens, previousAccountId) {
@@ -184,6 +214,8 @@ class NativeCodexAuth {
 
   async close() {
     this.closed = true;
+    this.reusable = null;
+    this.reuseEpoch += 1;
     const results = await Promise.allSettled([this.host?.stop(), this.pending]);
     this.accountId = null;
     if (this.cleanupIncomplete || results[0].status === "rejected") {

@@ -773,6 +773,43 @@ test("confirmed native compaction keeps one durable history notice across pagina
   }
 });
 
+test("stale compaction stays in run diagnostics and out of paginated chat history", async () => {
+  const summary = run({ id: "stale-summary", source: "compaction", idempotencyKey: "stale-summary",
+    status: "failed", errorCode: "CHECKPOINT_STALE", startedAt: 100, finishedAt: 102 });
+  const draft = run({ id: "draft-chat", status: "completed", startedAt: 102, finishedAt: 103 });
+  const blocked = run({ id: "blocked-chat", idempotencyKey: "shoggoth:chat-send:blocked", status: "failed",
+    errorCode: "PRODUCT_COMPACTION_FAILED", startedAt: 104, finishedAt: 105 });
+  const events = [
+    { id: "draft-request", runId: draft.id, kind: "user", content: { text: "Prepare a draft" } },
+    { id: "stale-checkpoint", runId: summary.id, kind: "error",
+      content: { transcriptType: "terminal", status: summary.status, errorCode: summary.errorCode } },
+    { id: "draft-reply", runId: draft.id, kind: "assistant", content: { text: "Draft ready" } },
+    { id: "blocked-send", runId: blocked.id, kind: "error",
+      content: { transcriptType: "terminal", status: blocked.status, errorCode: blocked.errorCode } },
+  ].map((event, index) => ({ ...event, seq: index + 1, occurredAt: 101 + index, contextExcluded: false }));
+  const transcriptStore = { ensureSession() {}, importHistoryItems() {}, getSessionDerivedTitle() { return null; },
+    listEvents: () => structuredClone(events) };
+  const { controller, root } = fixture({ transcriptStore, runs: [summary, draft, blocked] });
+  await controller.open();
+  try {
+    const messages = [];
+    let cursor = null;
+    do {
+      const page = await controller.handle("chat.history", { sessionKey: SESSION_KEY, cursor, limit: 1 }, "stale-summary-history");
+      messages.unshift(...page.messages);
+      cursor = page.nextCursor;
+    } while (cursor);
+    assert.deepEqual(messages.map(item => [item.id, item.type]), [
+      ["draft-request", "text"], ["draft-reply", "text"], ["blocked-send", "error"],
+    ]);
+    const diagnostic = await controller.handle("run.get", { runId: summary.id });
+    assert.equal(diagnostic.run.errorCode, "CHECKPOINT_STALE");
+  } finally {
+    await controller.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy duplicate command receipts fold across history pages without hiding distinct cycles", async () => {
   const { transcriptEventId } = require("../app/agent-service/transcript-store");
   const compact = (id, runId, seq, extra = {}) => ({ id, runId, seq, kind: "status", contextExcluded: true,

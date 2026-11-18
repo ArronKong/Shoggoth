@@ -2668,6 +2668,22 @@ class ShoggothBackend extends AgentBackend {
     if (!profile) agentFileProtocol.fail("AGENT_FILE_NOT_FOUND");
     const profileId = profile.id;
     const request = (method, params) => this._call(method, agentFileProtocol.validateParams(method, { ...params, profileId }));
+    if (action === "locate") {
+      const { file, path: stored } = await this.agentFiles(agentId, "get", input);
+      if (stored) return { path: stored };
+      if (file.status === "deleted") agentFileProtocol.fail("AGENT_FILE_DELETED");
+      // A Finder move can leave the catalog record intact. Only a byte-for-byte
+      // match at this exact download name can stand in for the published file.
+      const downloaded = path.join(this.paths.homeDir, "Downloads", file.name);
+      const stat = await fs.promises.lstat(downloaded).catch(() => null);
+      const bytes = stat?.isFile() && stat.size === file.sizeBytes
+        ? await readBoundedFile(downloaded).catch(() => null) : null;
+      if (!bytes || sha256(bytes) !== file.sha256) agentFileProtocol.fail("AGENT_FILE_MISSING");
+      const current = await request("agent.files.get", { fileId: file.fileId });
+      if (current.file.status === "deleted") agentFileProtocol.fail("AGENT_FILE_DELETED");
+      if (current.file.revision !== file.revision) agentFileProtocol.fail("AGENT_FILE_CONFLICT");
+      return { path: downloaded };
+    }
     if (action === "content" || action === "get") {
       const get = async () => {
         const result = await request("agent.files.get", { fileId: input.fileId });
@@ -2722,16 +2738,17 @@ class ShoggothBackend extends AgentBackend {
   _managedArtifact(profile, file) {
     const ext = path.extname(file.name).toLowerCase();
     return { fileId: file.fileId, path: payloadPath(this.paths, profile.id, file.fileId, file.name),
+      ...(file.status === "missing" ? { missing: true } : {}),
       name: file.name, area: "agent-files", size: file.sizeBytes, mtimeMs: file.updatedAt, ext, kind: artifactKind(ext),
       agentId: profile.agentId, agentName: profile.name };
   }
 
-  async _managedArtifacts(profile, { limit, sessionKey = null, runId = null }) {
+  async _managedArtifacts(profile, { limit, sessionKey = null, runId = null, includeMissing = false }) {
     let cursor = 0;
     const files = [];
     do {
       const pageLimit = Math.min(agentFileProtocol.FILE_PAGE_SIZE, limit - files.length);
-      const params = { profileId: profile.id, cursor, limit: pageLimit, sessionKey, runId, includeMissing: false };
+      const params = { profileId: profile.id, cursor, limit: pageLimit, sessionKey, runId, includeMissing };
       const page = await this._call("agent.files.list", params);
       files.push(...page.items.map(file => this._managedArtifact(profile, file)));
       cursor = page.nextCursor;
@@ -2750,11 +2767,19 @@ class ShoggothBackend extends AgentBackend {
     const profile = (await this._dashboardProfiles()).find(value => value.agentId === agentId && value.enabled);
     if (!profile) throw safeError(null, "AGENT_NOT_FOUND");
     const take = Math.min(100, Math.max(1, Math.floor(Number(limit) || 100)));
-    const managed = includeManaged ? this._managedArtifacts(profile, { limit: take }).catch(() => []) : [];
+    let catalogUnavailable = false;
+    const managed = includeManaged ? this._managedArtifacts(profile, { limit: take, includeMissing: true }).catch(() => {
+      catalogUnavailable = true;
+      return [];
+    }) : [];
     const current = () => this._generation === generation && this._state === "started";
+    let sessionListUnavailable = false;
     const sessions = await this._page("chat.session.list", {
       profileId: profile.id, includeArchived: true,
-    }, "sessions", { maxBytes: MAX_HISTORY_BYTES, maxItems: MAX_HISTORY_ITEMS });
+    }, "sessions", { maxBytes: MAX_HISTORY_BYTES, maxItems: MAX_HISTORY_ITEMS }).catch(() => {
+      sessionListUnavailable = true;
+      return [];
+    });
     if (sessions.some(session => session.profileId !== profile.id)) throw safeError(null, "CHAT_RESPONSE_INVALID");
     let failed = 0;
     let aggregate = { bytes: 0, items: 0 };
@@ -2772,7 +2797,7 @@ class ShoggothBackend extends AgentBackend {
     if (!current()) throw safeError(null, "BACKEND_NOT_READY");
     const saved = await managed;
     if (!current()) throw safeError(null, "BACKEND_NOT_READY");
-    if (sessions.length > 0 && failed === sessions.length && saved.length === 0) {
+    if ((sessions.length > 0 || sessionListUnavailable || catalogUnavailable) && failed === sessions.length && saved.length === 0) {
       return { supported: false, reason: "provenance-unavailable", items: [] };
     }
     const byPath = new Map();
@@ -2780,7 +2805,7 @@ class ShoggothBackend extends AgentBackend {
       if (!byPath.has(item.path)) byPath.set(item.path, item);
     }
     const items = [...byPath.values()].slice(0, take);
-    return { supported: true, partial: failed > 0, total: byPath.size, items };
+    return { supported: true, partial: failed > 0 || sessionListUnavailable || catalogUnavailable, total: byPath.size, items };
   }
 
   async listSessionArtifacts(agentId, key, { limit = 50 } = {}) {
@@ -3213,7 +3238,13 @@ class ShoggothBackend extends AgentBackend {
     const currentCapabilities = groups.find(group => group.bindingId === selection.bindingId)?.capabilities
       ?? this._chatCapabilitiesForProfile(currentBinding ? { ...profile, ...currentBinding, id: profile.id } : profile,
         require("../agent-service/runtime-capability-evidence").runtimeFeatureSupport(null));
-    const activeCapabilities = groups.find(group => group.bindingId === this._sessionTarget(key).session.runtimeBindingId)?.capabilities;
+    const activeId = this._sessionTarget(key).session.runtimeBindingId ?? bindings.defaultBindingId;
+    const activeBinding = bindings.bindings.find(binding => binding.id === activeId);
+    // The menu deduplicates accounts. A staged next-turn choice can hide the
+    // current Binding's row even though the same Runtime/account was checked.
+    const activeCapabilities = groups.find(group => group.bindingId === activeId
+      || (activeBinding && group.runtime === activeBinding.runtime && bindings.bindings.some(binding =>
+        binding.id === group.bindingId && binding.runtimeAccountId === activeBinding.runtimeAccountId)))?.capabilities;
     return { selection, models: groups.flatMap(group => group.models),
       runtimes: groups.map(({ models: _models, ...group }) => group),
       capabilities: { ...currentCapabilities, steer: activeCapabilities?.steer === true } };
@@ -7490,8 +7521,8 @@ class ShoggothBackend extends AgentBackend {
       this._activeBySession.set(sessionKey, active);
       if (this._acceptedChatOperations.get(sessionKey)?.operationId === operationId) this._acceptedChatOperations.delete(sessionKey);
       this._emitRunStatus(observerHooks, state, sent.run.status, {
-        reason: sent.reason, queuedAt: this.now(),
-      });
+        reason: sent.reason, queuedAt: this.now(), steer: this._observedRunSteer(sent.run),
+      }, sent.run.id);
       phase("run_observation");
       await this._observeAcceptedRun({ key, sessionKey, target, run: sent.run,
         hooks: observerHooks, poll, generation, state });
@@ -7593,7 +7624,7 @@ class ShoggothBackend extends AgentBackend {
       generation = recovered.generation;
       snapshotFirst = ["waiting_approval", "waiting_input"].includes(run.status);
       context.state.lastStatus = null;
-      this._emitRunStatus(context.hooks, context.state, run.status);
+      this._emitRunStatus(context.hooks, context.state, run.status, { steer: this._observedRunSteer(run) }, run.id);
       const retry = await Promise.race([
         this.delay(Math.min(1_000, 25 * (2 ** Math.min(5, recoveryCycles - 1)))).then(() => true),
         context.poll.consumerCancellation.then(() => false),
@@ -7956,7 +7987,7 @@ class ShoggothBackend extends AgentBackend {
       if (safeString(payload.requestId, 128)) {
         this._expirePrompt(context, payload.requestId);
       }
-      this._emitRunStatus(context.hooks, state, status, payload);
+      this._emitRunStatus(context.hooks, state, status, payload, context.run.id);
     } else if (event.type === "approval") {
       let request;
       try {
@@ -7994,7 +8025,16 @@ class ShoggothBackend extends AgentBackend {
     return false;
   }
 
-  _emitRunStatus(hooks, state, status, payload = {}) {
+  _observedRunSteer(run) {
+    if (run.status !== "running") return undefined;
+    const ref = run.runtimeTurnRef;
+    if (!ref) return false;
+    const features = this._runtimeProofFor(ref.runtimeAccountId)?.features;
+    if (features) return features.steer === "supported";
+    return ref.runtime.startsWith("ext-") ? undefined : NATIVE_STEER_RUNTIMES.has(ref.runtime);
+  }
+
+  _emitRunStatus(hooks, state, status, payload = {}, nativeRunId) {
     if (!["queued", "starting", "running", "retrying", "waiting_approval", "waiting_input", "compacting", "compacted"].includes(status)) return;
     const preparationStage = status === "queued"
       ? payload?.reason === "CONTEXT_PREPARING" ? "context"
@@ -8012,14 +8052,18 @@ class ShoggothBackend extends AgentBackend {
       ? payload.queuedAt : null;
     const stage = ["starting", "running"].includes(status)
       && ["preparing", "context", "compacting", "capabilities", "connecting", "reconnecting", "restoring", "opening", "waiting"].includes(payload?.stage) ? payload.stage : null;
+    const reportedSteer = status === "running" && typeof payload?.steer === "boolean" && nativeRunId
+      ? payload.steer : undefined;
     if (state.lastStatus === status && state.lastQueueReason === reason && state.lastQueuedAt === queuedAt
-      && state.lastStartupStage === stage) return;
+      && state.lastStartupStage === stage && (reportedSteer === undefined || state.lastSteer === reportedSteer)) return;
+    if (reportedSteer !== undefined) state.lastSteer = reportedSteer;
     state.lastStartupStage = stage;
     state.lastStatus = status;
     state.lastQueueReason = reason;
     state.lastQueuedAt = queuedAt;
     this._invokeHook(hooks, "status", { kind: status, text: status,
-      ...(reason ? { reason } : {}), ...(queuedAt !== null ? { queuedAt } : {}), ...(stage ? { stage } : {}) });
+      ...(reason ? { reason } : {}), ...(queuedAt !== null ? { queuedAt } : {}), ...(stage ? { stage } : {}),
+      ...(reportedSteer !== undefined ? { steer: reportedSteer, nativeRunId } : {}) });
   }
 
   async _consumeActiveSnapshot(context, state, snapshotRun, snapshot = null) {
@@ -8030,7 +8074,8 @@ class ShoggothBackend extends AgentBackend {
       status: snapshotRun.status,
       run: snapshotRun,
     });
-    this._emitRunStatus(context.hooks, state, snapshotRun.status, snapshot?.queue);
+    this._emitRunStatus(context.hooks, state, snapshotRun.status,
+      snapshot?.queue ?? { steer: state.lastSteer ?? this._observedRunSteer(snapshotRun) }, snapshotRun.id);
     if (!["waiting_approval", "waiting_input"].includes(snapshotRun.status)
       || !snapshotRun.waitingRequestId) return;
     const kind = snapshotRun.status === "waiting_approval" ? "approval" : "input";
@@ -8424,11 +8469,12 @@ class ShoggothBackend extends AgentBackend {
     return observation(result.run);
   }
 
-  async steerChat(key, message) {
+  async steerChat(key, message, expectedRunId) {
     const target = this._sessionTarget(key);
     const { sessionKey } = target;
     const active = await this._findActiveRun(target);
     if (!active) throw safeError(null, "WORK_RUN_NOT_FOUND");
+    if (expectedRunId !== undefined && active.id !== expectedRunId) throw safeError(null, "WORK_RUN_CONTROL_MISMATCH");
     const result = await this._call("chat.steer", {
       operationId: `steer-${this.randomUUID()}`,
       sessionKey,
@@ -8469,7 +8515,9 @@ class ShoggothBackend extends AgentBackend {
     }
     try {
       if (poll.cancelled) return;
-      this._invokeHook(hooks, "status", { kind: active.status, text: active.status, nativeRunId: active.id });
+      const steer = this._observedRunSteer(active);
+      this._invokeHook(hooks, "status", { kind: active.status, text: active.status, nativeRunId: active.id,
+        ...(steer !== undefined ? { steer } : {}) });
       if (poll.cancelled) return;
       // Seed only this consumer's displayed canonical sources from this Run.
       // Preserve their native-content projection so a later UI publication can

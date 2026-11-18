@@ -54,7 +54,12 @@ for(const immersive of [0,1])for(const [width,language,theme] of [[1280,"zh-CN",
 w=new BrowserWindow({show:false,width,height:1040,webPreferences:{backgroundThrottling:false}});await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{immersive:String(immersive),language,theme}});
 const live=await w.webContents.executeJavaScript('window.runFixture()');fs.writeFileSync(${JSON.stringify(output)}+'/stopped-'+immersive+'-'+language+'.png',(await w.webContents.capturePage()).toPNG());
 await w.reload();await new Promise(r=>w.webContents.once('did-finish-load',r));const cold=await w.webContents.executeJavaScript('window.inspectStopped()');results.push({live,cold});w.destroy();w=null;
-}fs.writeFileSync(${JSON.stringify(output)}+'/ui-result.json',JSON.stringify({passed:true,results,providerCalls:0},null,2));console.log(JSON.stringify({passed:true,scenes:results.length,providerCalls:0}));app.exit(0);
+}
+const queue=[];
+for(const immersive of [0,1]){
+w=new BrowserWindow({show:false,width:1100,height:950,webPreferences:{backgroundThrottling:false,partition:"question-queue-"+immersive}});await w.loadFile(${JSON.stringify(path.join(temp, "index.html"))},{query:{immersive:String(immersive)}});
+queue.push(await w.webContents.executeJavaScript('window.runQueueFixture()'));w.destroy();w=null;
+}fs.writeFileSync(${JSON.stringify(output)}+'/ui-result.json',JSON.stringify({passed:true,results,queue,providerCalls:0},null,2));console.log(JSON.stringify({passed:true,scenes:results.length,queueScenes:queue.length,providerCalls:0}));app.exit(0);
 }catch(error){console.error(error.stack||error);if(w){console.error(JSON.stringify(await w.webContents.executeJavaScript('({error:window.fixtureError,text:document.body.innerText.slice(-3000),requests:window.requests})')));fs.writeFileSync(${JSON.stringify(output)}+'/ui-failed.png',(await w.webContents.capturePage()).toPNG())}app.exit(1)}});`);
   if (open) {
     const fd = fs.openSync(path.join(output, "preview.log"), "a");

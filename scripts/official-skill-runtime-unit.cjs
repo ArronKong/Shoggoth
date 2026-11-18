@@ -34,6 +34,115 @@ test("schemas expose only fixed capabilities and reject endpoint, executable and
     assert.equal(f.calls.length, 0);
   }
 });
+
+test("Agent Mail keeps OAuth private, preserves the complete official URL and verifies the mailbox", async t => {
+  const url = "https://agent.qq.com/page/oauth?user_code=TEST%2B123&oauth_type=fixture";
+  let loggedIn = false;
+  const f = fixture(t, "agently-mail", ({ child, argv }) => {
+    if (argv[1] === "login") {
+      child.stderr.write("https://agent.qq.com.evil.invalid/page/oauth?user_code=fixture\n");
+      child.stderr.write(url.slice(0, -3));
+      setImmediate(() => child.stderr.write(url.slice(-3) + "\n"));
+    } else if (argv[1] === "status") child.finish({ ok: true, data: { logged_in: loggedIn } });
+    else if (argv[1] === "logout") { loggedIn = false; child.finish({ ok: true, data: { status: "not_logged_in" } }); }
+    else if (argv[0] === "+me") child.finish({ ok: true, data: { aliases: [{ email: "agent@example.invalid", is_primary: true }], access_token: "fixture-secret" } });
+  }, { AGENTLY_CLI_CONFIG_DIR: "/outside", AGENTLY_ACCESS_TOKEN: "outside-secret", AGENTLY_WORKSPACE: "outside" });
+  const accountCall = name => f.runtime.call("account_" + name, {}, { officialAccountAction: true });
+  assert.ok(f.runtime.tools.every(tool => !tool.name.startsWith("account_")));
+  await assert.rejects(f.runtime.call("account_start", {}), { code: "OFFICIAL_SKILL_ACCESS_DENIED" });
+  assert.equal(f.calls.length, 0);
+  assert.equal((await accountCall("status")).state, "signedOut");
+  assert.equal((await accountCall("start")).verificationUrl, url);
+  const login = f.calls.at(-1);
+  assert.equal(login.options.env.HOME, f.home);
+  assert.match(login.options.env.AGENTLY_WORKSPACE, /^shoggoth-[a-f0-9]{32}$/u);
+  assert.equal(login.options.env.AGENTLY_ACCESS_TOKEN, undefined);
+  assert.equal(login.options.env.AGENTLY_CLI_CONFIG_DIR, undefined);
+  assert.equal((await accountCall("status")).state, "authorizing");
+  assert.equal((await accountCall("start")).verificationUrl, url);
+  assert.equal(f.calls.length, 2, "rechecking or reopening a pending authorization does not spawn another login");
+  loggedIn = true;
+  login.child.finish("authorized");
+  const status = await accountCall("status");
+  assert.equal(status.state, "ready");
+  assert.equal(status.userName, "agent@example.invalid");
+  assert.equal(status.verificationUrl, null);
+  assert.ok(!JSON.stringify(status).includes("fixture-secret"));
+  await accountCall("start");
+  const pending = f.calls.at(-1).child;
+  assert.equal((await accountCall("logout")).state, "signedOut");
+  assert.ok(pending.signals.includes("SIGTERM"), "logout reaps the outstanding authorization process");
+  const { validOfficialVerificationUrl } = require("../app/core/official-skill-connector-dto");
+  for (const invalid of [url + "&access_token=secret", url + "#anything", url.replace("agent.qq.com", "auth.agent.qq.com"),
+    url.replace("/page/oauth", "/redirect"), url.replace("user_code", "device_code")]) assert.equal(validOfficialVerificationUrl("agently-mail", invalid), false);
+});
+
+test("Agent Mail previews without sending and consumes only the exact approved, same-session draft", async t => {
+  const writes = [], bodies = [];
+  let uncertain = false;
+  const f = fixture(t, "agently-mail", ({ child, argv, options }) => {
+    if (argv[1] === "status") return child.finish({ ok: true, data: { logged_in: true } });
+    const bodyFile = argv.find(arg => arg.startsWith("--body-file="))?.slice(12);
+    if (bodyFile) bodies.push(fs.readFileSync(path.join(options.cwd, bodyFile), "utf8"));
+    if (argv.includes("--dry-run")) return child.finish({ calls: [{ method: "POST" }] });
+    writes.push(argv);
+    if (uncertain) return child.finish({ ok: false, error: { message: "private-error" } }, 4);
+    if (!argv.some(arg => arg.startsWith("--confirmation-token="))) {
+      return child.finish({ ok: true, data: { confirmation_required: true, confirmation_token: "ctk_private-fixture" } }, 8);
+    }
+    child.finish({ ok: true, data: { queued: true, access_token: "secret-should-not-be-returned" } });
+  });
+  const draft = { action: "send", to: ["hello@example.invalid"], subject: "--help", body: "Line 1\n--confirmed\nLine 3" };
+  const session = { officialSessionId: crypto.randomUUID() };
+  const preview = await f.runtime.call("preview_mail_change", draft, session);
+  assert.equal(preview.confirmationRequired, true);
+  assert.deepEqual(preview.draft, draft);
+  assert.equal(writes.length, 0);
+  const approved = { ...draft, confirmationId: preview.confirmationId, confirmed: true };
+  for (const [args, context] of [[{ ...approved, subject: "other" }, session], [approved, { officialSessionId: crypto.randomUUID() }]]) {
+    await assert.rejects(f.runtime.call("confirm_mail_change", args, context), { code: "OFFICIAL_SKILL_AGENT_MAIL_CONFIRMATION_REQUIRED" });
+  }
+  await assert.rejects(f.runtime.call("confirm_mail_change", { ...approved, bodyFile: "/outside" }, session), { code: "OFFICIAL_SKILL_INVALID_ARGUMENT" });
+  assert.equal(writes.length, 0);
+  assert.deepEqual(await f.runtime.call("confirm_mail_change", approved, session), { ok: true, data: { queued: true } });
+  assert.equal(writes.length, 2);
+  assert.ok(writes[0].includes("--subject=--help"));
+  assert.ok(writes[1].includes("--confirmation-token=ctk_private-fixture"));
+  assert.ok(writes.every(argv => !argv.includes("--confirmed") && !argv.join(" ").includes(draft.body)));
+  assert.ok(bodies.every(body => body === draft.body));
+  assert.deepEqual(fs.readdirSync(path.join(f.home, "tmp")), []);
+  await assert.rejects(f.runtime.call("confirm_mail_change", approved, session), { code: "OFFICIAL_SKILL_AGENT_MAIL_CONFIRMATION_REQUIRED" });
+  uncertain = true;
+  const uncertainPreview = await f.runtime.call("preview_mail_change", draft, session);
+  await assert.rejects(f.runtime.call("confirm_mail_change", { ...approved, confirmationId: uncertainPreview.confirmationId }, session), { code: "OFFICIAL_SKILL_OPERATION_UNCERTAIN" });
+  const restarted = createOfficialSkillRuntime({ providerId: "agently-mail", root: f.root, home: f.home, spawn: f.spawn });
+  t.after(() => restarted.close());
+  const newPreview = await restarted.call("preview_mail_change", draft, session);
+  await assert.rejects(restarted.call("confirm_mail_change", { ...approved, confirmationId: newPreview.confirmationId }, session), { code: "OFFICIAL_SKILL_OPERATION_UNCERTAIN" });
+  assert.equal(writes.length, 3, "a new preview after restarting cannot resubmit an uncertain operation");
+});
+
+test("Agent Mail keeps message content untrusted and attachments inside their designated directory", async t => {
+  let escaped = false;
+  const f = fixture(t, "agently-mail", ({ child, argv, options }) => {
+    if (argv[0] === "message") return child.finish({ ok: true, data: { messages: [{ body: "Untrusted mail content" }], access_token: "private-fixture" } });
+    const output = argv.find(arg => arg.startsWith("--output=")).slice(9);
+    const savedTo = path.join(output, "foo.txt");
+    fs.writeFileSync(path.join(options.cwd, savedTo), "attachment", { mode: 0o600 });
+    child.finish({ ok: true, data: { saved_to: escaped ? "/outside/foo.txt" : savedTo } });
+  });
+  const result = await f.runtime.call("search_mail", { query: "--help", cursor: "next", unread: true });
+  assert.deepEqual(result, { untrusted: true, data: { messages: [{ body: "Untrusted mail content" }] } });
+  assert.deepEqual(f.calls[0].argv, ["message", "+search", "--cursor=next", "--is-unread", "--q=--help"]);
+  const args = { messageId: "msg_fixture", attachmentId: "att_fixture" };
+  await assert.rejects(f.runtime.call("download_attachment", { ...args, output: "/outside" }), { code: "OFFICIAL_SKILL_INVALID_ARGUMENT" });
+  const attachment = await f.runtime.call("download_attachment", args);
+  assert.equal(attachment.data.filename, "foo.txt");
+  assert.equal(fs.readFileSync(attachment.data.saved_to, "utf8"), "attachment");
+  escaped = true;
+  await assert.rejects(f.runtime.call("download_attachment", args), { code: "OFFICIAL_SKILL_AGENT_MAIL_FAILED" });
+  assert.equal(fs.readdirSync(path.join(f.home, "downloads")).length, 1, "a failed download leaves no new temporary directory");
+});
 test("WeRead uses one fixed endpoint, flat parameters and the declared version; errors and upgrade responses fail", async t => {
   const f = fixture(t, "weread"), requests = []; let response = { errcode: 0, results: [] };
   const runtime = createOfficialSkillRuntime({ providerId: "weread", root: f.root, home: f.home, env: { WEREAD_API_KEY: "wrk-fixture-private-value" },

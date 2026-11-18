@@ -64,6 +64,7 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const { t, i18n } = useTranslation(), confirm = useConfirm(); const tr = (key: string) => t(`officialConnectors.${key}`);
   const definition = officialConnectorDefinitions.find(value => value.id === id)!;
   const alipay = id === "alipay";
+  const agentMail = id === "agently-mail";
   const serviceOnly = id === "fliggy" || id === "baidu-maps";
   const data = model.data?.items.find(item => item.id === id), installed = data?.state === "installed";
   const language = i18n.resolvedLanguage || i18n.language;
@@ -130,7 +131,7 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const authorizationTelemetry = useRef<TelemetryOperation>();
   const accountAction = (intent: "status" | "start" | "bind" | "logout" | "reauthorize", background = false) => act(async () => {
     if (!data) return;
-    if (intent === "start" && alipayWaiting && verificationUrl) {
+    if (intent === "start" && (alipayWaiting || agentMail && account?.state === "authorizing") && verificationUrl) {
       window.open(verificationUrl, "_blank", "noopener,noreferrer");
       return;
     }
@@ -138,7 +139,7 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
     const reauthorize = intent === "reauthorize";
     const action = reauthorize ? "logout" : intent;
     const pendingAlipay = alipayWaiting && action === "status";
-    const retainPending = pendingAlipay || id === "quark-drive" && action === "status" && account?.state === "authorizing";
+    const retainPending = pendingAlipay || (id === "quark-drive" || agentMail) && action === "status" && account?.state === "authorizing";
     if (!retainPending && !reauthorize) setAccount(null);
     if (action !== "status") alipayAuthorization.current = null;
     const epoch = ++accountEpoch.current;
@@ -158,7 +159,10 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
         authorizationTelemetry.current = undefined;
       }
       if (serviceOnly && mounted.current && epoch === accountEpoch.current) setServiceCheckFailed(true);
-      if (retainPending && !pendingAlipay && mounted.current && epoch === accountEpoch.current) setAccount(null);
+      if (retainPending && !pendingAlipay && mounted.current && epoch === accountEpoch.current) {
+        setAccount(null);
+        if (agentMail && background) setError(tr(`errors.${officialConnectorErrorKey(error)}`));
+      }
       throw error;
     }).finally(() => { if (mounted.current && epoch === accountEpoch.current) setChecking(false); });
     if (mounted.current && epoch === accountEpoch.current) {
@@ -195,12 +199,12 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   }, background);
   useEffect(() => {
     const pollAlipay = alipayAuthorization.current !== null;
-    if (!(pollAlipay || ["shop", "quark-drive", "rollinggo-hotel"].includes(id)) || account?.state !== "authorizing" || working || model.busy
+    if (!(pollAlipay || ["shop", "quark-drive", "rollinggo-hotel", "agently-mail"].includes(id)) || account?.state !== "authorizing" || working || model.busy
       || id === "quark-drive" && (codeFocused || code.length > 0)) return;
     let current = true, timer: ReturnType<typeof setTimeout>;
     const schedule = () => {
       timer = setTimeout(async () => {
-        await accountAction("status", pollAlipay);
+        await accountAction("status", pollAlipay || agentMail);
         if (current && pollAlipay && alipayAuthorization.current) schedule();
       }, 5000);
     };
@@ -239,7 +243,7 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const recommendation: McpRecommendation = { ...definition, setup: "local", fields: definition.fields.map(field => ({ ...field, location: "env" })) };
   const busy = Boolean(working) || model.busy;
   const installationError = model.actionError?.id === id ? model.actionError.key : data?.errorCode ? officialConnectorErrorKey({ code: data.errorCode }) : null;
-  const supportsLogin = ["doordash", "shop", "quark-drive", "rollinggo-hotel", "meituan-paotui", "alipay"].includes(id);
+  const supportsLogin = ["agently-mail", "doordash", "shop", "quark-drive", "rollinggo-hotel", "meituan-paotui", "alipay"].includes(id);
   const credentialsDirty = Object.values(values).some(value => value.trim());
   const accountReady = account?.state === "ready";
   const credentialsSaved = definition.fields.some(field => server?.setup?.configuredFields.includes(`env:${field.name}`));
@@ -250,11 +254,11 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
   const accountStatus = alipayClosing ? "alipayWaitingRevocation" : `accountStates.${account?.state || "unknown"}`;
   const guide = data?.canRemove || installed ? { url: definition.docsUrl, label: tr("source") } : undefined;
   const setupNotes = <>
-    {(installed || ["doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(id)) && <p className={s.notice}>{mcpRecommendationText(definition.note, language)}</p>}
+    {(installed || ["agently-mail", "doordash", "quark-drive", "rollinggo-hotel", "baidu-maps"].includes(id)) && <p className={s.notice}>{mcpRecommendationText(definition.note, language)}</p>}
     {definition.accessUrl && <p><a className={s.connectionGuide} href={definition.accessUrl} target="_blank" rel="noreferrer">{tr("requestAccess")}</a></p>}
   </>;
   const remove = async () => {
-    if (await confirm({ title: tr("removeTitle"), message: tr("removeConfirm"), confirmLabel: tr("remove"), danger: true })) { await model.change(id, "remove"); setAccount(null); onChanged(); }
+    if (await confirm({ title: tr("removeTitle"), message: tr(agentMail ? "agentMailRemoveConfirm" : "removeConfirm"), confirmLabel: tr("remove"), danger: true })) { await model.change(id, "remove"); setAccount(null); onChanged(); }
   };
   const footer = <ConnectorFooter hint={t(accountReady ? "mcpConnectors.flow.connectedHint" : "mcpConnectors.defaultAccess")} onRemove={data?.canRemove ? () => void remove() : undefined} removeDisabled={busy}>
     {!installed ? <button type="button" className="btn-dark btn-sm" disabled={busy || !data || !!model.error} onClick={() => void model.change(id, "install")}>{data?.canRemove ? tr("repair") : t("mcpConnectors.add")}</button> : <>
@@ -296,6 +300,7 @@ export default function OfficialSkillDialog({ id, model, onClose, onChanged }: {
         {account?.qrCode && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(account.qrCode) && account.qrCode.length < 350000 && <img src={account.qrCode} alt={tr("open")} width={192} height={192} />}
         {id === "meituan-paotui" && account?.state === "authorizing" && authorizationQr && <img src={authorizationQr} alt={tr("meituanScan")} width={192} height={192} />}
         {id === "meituan-paotui" && account?.state === "authorizing" && <p className={s.muted}>{tr("meituanAuthorizationHint")}</p>}
+        {agentMail && account?.state === "authorizing" && <p className={s.muted}>{tr("agentMailAuthorizationHint")}</p>}
         {verificationUrl && !alipayWaiting && <a href={verificationUrl} target="_blank" rel="noreferrer">{tr("open")}</a>}
         {account?.userCode && <p><code>{account.userCode}</code></p>}
         {id === "doordash" && account?.state === "authorizing" && <label className={s.field}><span>{tr("doordashCallback")}</span><input type="password" autoComplete="off" spellCheck={false} value={code} maxLength={8192} disabled={busy} onChange={event => setCode(event.target.value)} /><button type="button" className="btn-secondary btn-sm" disabled={busy || !code.trim()} onClick={() => void accountAction("bind")}>{tr("bind")}</button></label>}

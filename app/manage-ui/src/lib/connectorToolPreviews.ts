@@ -421,6 +421,14 @@ const previews: Record<string, readonly Row[]> = {
     ["Manage tasks", "管理任务", "Use task operations supported by the installed skills.", "使用已安装技能支持的任务操作。"],
   ],
   // Selected actual tool names from official-skill-runtime and its adapters.
+  "agently-mail": [
+    ["list_mail", "list_mail", "List mail in the connected mailbox.", "查看已连接邮箱的邮件列表。"],
+    ["search_mail", "search_mail", "Search by keyword, sender, recipient or folder.", "按关键词、发件人、收件人或文件夹搜索邮件。"],
+    ["read_mail", "read_mail", "Read a message and its attachment details.", "读取邮件正文和附件信息。"],
+    ["download_attachment", "download_attachment", "Download a selected ordinary attachment.", "下载选中的普通附件。"],
+    ["preview_mail_change", "preview_mail_change", "Preview a send, reply, forward or move to Trash.", "预览发信、回复、转发或移到已删除的操作。"],
+    ["confirm_mail_change", "confirm_mail_change", "Apply the previewed action after confirmation.", "确认后执行预览中的操作。"],
+  ],
   doordash: [
     ["search_stores", "search_stores", "Find restaurants for a delivery address.", "查找配送地址附近的餐厅。"],
     ["get_menu", "get_menu", "Read a restaurant's menu.", "读取餐厅菜单。"],

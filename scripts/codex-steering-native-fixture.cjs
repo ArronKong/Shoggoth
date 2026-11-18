@@ -24,7 +24,7 @@ async function scenario(compaction) {
   fs.mkdirSync(home, { mode: 0o700 }); fs.mkdirSync(workspace, { mode: 0o700 });
   const requests = [], events = [], failures = [];
   const marker = "SYNTHETIC_STEER_LINKS_ONLY";
-  let releaseFirst, host;
+  let releaseAfterTool, host;
   const provider = http.createServer(async (request, response) => {
     try {
       if (request.url !== "/v1/responses") { request.resume(); response.writeHead(404).end(); return; }
@@ -53,7 +53,7 @@ async function scenario(compaction) {
           output: [item], usage: { input_tokens: input, output_tokens: 20, total_tokens: input + 20 } } });
         response.end();
       };
-      if (number === 1) releaseFirst = send; else send();
+      if (number === 2) releaseAfterTool = send; else send();
     } catch (error) { failures.push(error.message); response.writeHead(500).end(); }
   });
   try {
@@ -77,12 +77,12 @@ async function scenario(compaction) {
     const { thread } = await host.threadStart({ cwd: workspace, model: "gpt-4.1", approvalPolicy: "never", sandbox: "danger-full-access" });
     const { turn } = await host.turnStart({ threadId: thread.id, input: [{ type: "text", text: "Compare examples.", text_elements: [] }],
       clientUserMessageId: "initial", model: "gpt-4.1", approvalPolicy: "never" });
-    await until(() => releaseFirst, "first provider request");
+    await until(() => releaseAfterTool, "provider request after the synthetic command");
     const accepted = await host.turnSteer({ threadId: thread.id, expectedTurnId: turn.id,
       input: [{ type: "text", text: marker, text_elements: [] }], clientUserMessageId: "steering-operation" });
     assert.equal(accepted.turnId, turn.id);
-    assert(!JSON.stringify(requests[0].input).includes(marker), "an ACK cannot rewrite an inference request already in flight");
-    releaseFirst();
+    assert(!requests.some(body => JSON.stringify(body.input).includes(marker)), "an ACK cannot rewrite an inference request already in flight");
+    releaseAfterTool();
     await until(() => events.some(event => event.type === "complete" && event.turnId === turn.id), "native completion after steering");
     const deliveredAt = requests.findIndex(body => JSON.stringify(body.input).includes(marker));
     assert(deliveredAt > 0, "accepted steering must eventually enter a subsequent model request");

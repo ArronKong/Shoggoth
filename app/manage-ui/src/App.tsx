@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import i18next from "i18next";
 import { useInspirationReturnTarget } from "./lib/inspiration-navigation";
 import agentsIcon from "./assets/nav-icons/agents.svg";
 import inspirationIcon from "./assets/nav-icons/inspiration.svg";
@@ -50,7 +51,16 @@ const ModelsPage = lazy(() => import("./pages/ModelsPage"));
 const UsagePage = lazy(() => import("./pages/UsagePage"));
 const SkillsPage = lazy(() => import("./pages/SkillsPage"));
 const McpApprovalInbox = lazy(() => import("./components/McpApprovalInbox"));
-const ConnectorsPage = lazy(() => import("./pages/ConnectorsPage"));
+const ConnectorsPage = lazy(async () => {
+  const [page, { officialConnectorResources }] = await Promise.all([
+    import("./pages/ConnectorsPage"),
+    import("./i18n/officialConnectorResources"),
+  ]);
+  for (const [language, officialConnectors] of Object.entries(officialConnectorResources)) {
+    i18next.addResourceBundle(language, "translation", { officialConnectors }, true);
+  }
+  return page;
+});
 const CliPage = lazy(() => import("./pages/CliPage"));
 const AgentsPage = lazy(() => import("./pages/AgentsPage"));
 const GlassLab = lazy(() => import("./pages/GlassLab"));

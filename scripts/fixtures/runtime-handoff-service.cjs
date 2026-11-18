@@ -96,10 +96,10 @@ async function openHandoffFixture({ root: existingRoot, transport: existingTrans
   // A fixture's Codex Desktop inventory must never discover the real user's threads.
   const service = createAgentService({ runtimeStorageHomedir: () => root,
     parentEnv: { ...process.env, CODEX_HOME: path.join(root, ".codex") },
+    runtimeSupportDiscover: facts.read,
     ...serviceOptions, paths, runtimeManager: manager, version: "handoff-fixture", builtinCliProfiles,
     builtinCliInstalledAccountIds: builtinCliProfiles ? DEFAULT_RUNTIME_ACCOUNTS
       .filter(account => account.kind === "native-user").map(account => account.id) : [],
-    runtimeSupportDiscover: facts.read,
     safeStorage: { isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value),
       decryptString: value => value.toString() },
   });

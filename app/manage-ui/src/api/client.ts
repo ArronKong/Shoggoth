@@ -2238,12 +2238,20 @@ export function getManagedAgentFile(backend: string, id: string, fileId: string)
   );
 }
 
+export function locateManagedAgentFile(backend: string, id: string, fileId: string) {
+  return jsonFetch<{ path: string }>(agentUrl(backend, id, `/managed-files/${encodeURIComponent(fileId)}/locate`), { method: "POST" });
+}
+
 export async function revealManagedAgentFile(backend: string, id: string, fileId: string, open = false) {
-  const { file, path } = await getManagedAgentFile(backend, id, fileId);
-  if (!path) throw new ApiError("The file is no longer available.", {
-    status: 404, code: file.status === "deleted" ? "AGENT_FILE_DELETED" : "AGENT_FILE_MISSING",
-  });
-  await (open ? openPath(path) : revealPath(path));
+  if (open) {
+    const { file, path } = await getManagedAgentFile(backend, id, fileId);
+    if (!path) throw new ApiError("The file is no longer available.", {
+      status: 404, code: file.status === "deleted" ? "AGENT_FILE_DELETED" : "AGENT_FILE_MISSING",
+    });
+    return openPath(path);
+  }
+  const { path } = await locateManagedAgentFile(backend, id, fileId);
+  await revealPath(path);
 }
 
 export function mutateManagedAgentFile(backend: string, id: string, file: AgentManagedFile, name?: string) {

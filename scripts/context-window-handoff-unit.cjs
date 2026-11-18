@@ -1203,7 +1203,8 @@ test("an explicitly selected summary binding remains supported without falling b
 });
 
 test("a 1M to 272k handoff compacts 520k tokens before switching and records target acceptance", async () => {
-  const f = await openHandoffFixture();
+  // The later pick of "large-model" is checked against Pi's catalog when the send applies it.
+  const f = await openHandoffFixture({ catalogs: { codex: ["fixture-model"], pi: ["fixture-model", "large-model"] } });
   try {
     enable(f);
     const calls = modelOnly(f);
@@ -1238,9 +1239,10 @@ test("a 1M to 272k handoff compacts 520k tokens before switching and records tar
     const small = f.service.chatSessionStore.getSession(session.sessionKey);
     await f.controller.handle("chat.session.runtime.model.set", { profileId: session.profileId, sessionKey: session.sessionKey,
       bindingId: f.binding("pi").id, revision: small.revision, model: "large-model", acceptAdjustments: true });
+    // The pick is the next turn's choice; the send hands off to the larger window.
+    const resumed = await f.send(session.sessionKey, "larger-originals");
     const expanded = read().productContext.transfer;
     assert.equal(expanded.mode, "original");
-    const resumed = await f.send(session.sessionKey, "larger-originals");
     const restored = f.transport.acquisitions.at(-1).options.executionContract;
     assert.match(restored.dynamicContext, /SOURCE_1 /u);
     assert.doesNotMatch(restored.dynamicContext, /CONVERSATION CHECKPOINT/u);

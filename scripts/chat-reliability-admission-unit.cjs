@@ -9,7 +9,11 @@ const path = require("node:path");
 const test = require("node:test");
 const { PROTOCOL_VERSION } = require("../app/agent-service/server");
 const { readClientToken, requestService } = require("../app/agent-service/client");
+const { PUBLIC_MESSAGES: AGENT_LIFECYCLE_PUBLIC_MESSAGES } = require("../app/agent-service/agent-lifecycle-service-protocol");
 const { transcriptEventId } = require("../app/agent-service/transcript-store");
+const { ShoggothBackend } = require("../app/core/shoggoth-backend");
+const { BackendRegistry } = require("../app/core/backend-registry");
+const { startStaticServer } = require("../app/static-server");
 const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs");
 const { waitUntil } = require("./fixtures/runtime-bridge-harness.cjs");
 
@@ -117,6 +121,129 @@ async function assertAccepted(f, request, session, ack) {
   assert.equal(readBack.status, "found");
   assert.equal(readBack.run.id, ack.run.id);
 }
+
+function holdChatProjection(t, f, operationId) {
+  const { productStore } = f.service;
+  const putWorkRun = productStore.putWorkRun.bind(productStore);
+  let held = true;
+  t.mock.method(productStore, "putWorkRun", input => {
+    if (held && input.idempotencyKey === `shoggoth:chat-send:${operationId}`) {
+      throw Object.assign(new Error("fixture holds WorkRun projection"), { code: "EIO" });
+    }
+    return putWorkRun(input);
+  });
+  return () => { held = false; };
+}
+
+test("Agent archive waits for both the in-flight Inbox write and the accepted WorkRun projection",
+  { timeout: 40_000 }, async t => {
+    const f = await fixture(t);
+    const request = f.params("archive-before-projection", f.b, "Keep an acknowledged message across an archive attempt");
+    const { pendingCommandInbox: inbox, productStore } = f.service;
+    const backend = new ShoggothBackend({ paths: f.paths });
+    backend._state = "started";
+    await backend._refreshManagedProfiles();
+    const registry = new BackendRegistry();
+    registry.register(backend);
+    const server = await startStaticServer(0, { registry, homeDir: f.root, userDataRoot: path.join(f.root, "ui") });
+    t.after(() => server.close());
+    const profile = productStore.getAgentProfile(f.b.profileId);
+    const archive = operationId => f.rpc("agent.archive", { operationId, profileId: profile.id,
+      expectedUpdatedAt: profile.updatedAt, createdAt: Date.now() });
+    const archiveViaRest = operationId => {
+      const query = new URLSearchParams({ backend: "shoggoth", operationId,
+        expectedUpdatedAt: String(profile.updatedAt), createdAt: String(Date.now()) });
+      return fetch(`${server.url}/__api/agents/${encodeURIComponent(profile.agentId)}?${query}`,
+        { method: "DELETE", headers: { Origin: server.url } });
+    };
+    let reachedWrite, releaseWrite;
+    const entered = new Promise(resolve => { reachedWrite = resolve; });
+    const block = new Promise(resolve => { releaseWrite = resolve; });
+    const enqueue = inbox.enqueue.bind(inbox);
+    t.mock.method(inbox, "enqueue", async (input, options) => {
+      if (input.operationId === request.operationId) {
+        reachedWrite();
+        await block;
+      }
+      return enqueue(input, options);
+    });
+    const project = holdChatProjection(t, f, request.operationId);
+    const sending = f.rpc("chat.send.accept", request);
+    try {
+      await entered;
+      assert.equal(inbox.get(request.operationId), null);
+      await assert.rejects(archive("archive-with-write-in-flight"), { code: "AGENT_ACTIVE_RUNS" });
+    } finally {
+      releaseWrite();
+    }
+    const receipt = await sending;
+    assert.equal(productStore.getWorkRun(receipt.runId), null);
+    assert.equal(inbox.get(request.operationId).state, "pending");
+    const refused = await archiveViaRest("archive-with-inbox-receipt");
+    assert.equal(refused.status, 409);
+    assert.deepEqual(await refused.json(), {
+      code: "AGENT_ACTIVE_RUNS", error: AGENT_LIFECYCLE_PUBLIC_MESSAGES.AGENT_ACTIVE_RUNS,
+    });
+    assert.equal(productStore.getAgentProfile(profile.id).enabled, true);
+    assert.equal((await f.rpc("service.status", {})).healthy, true);
+
+    project();
+    const run = await f.running(receipt.runId);
+    await f.complete(run);
+    await waitUntil(() => inbox.get(request.operationId)?.state === "completed", "accepted command to settle", RPC_TIMEOUT_MS);
+    assert.equal(f.userEvents(f.b, request.operationId).length, 1);
+    assert.equal(f.nativeTurns(), 1);
+    const locked = t.mock.method(inbox, "isLocked", () => true);
+    try {
+      const unavailable = await archiveViaRest("archive-with-locked-inbox");
+      assert.equal(unavailable.status, 409);
+      assert.deepEqual(await unavailable.json(), {
+        code: "AGENT_CHAT_STATE_UNAVAILABLE", error: AGENT_LIFECYCLE_PUBLIC_MESSAGES.AGENT_CHAT_STATE_UNAVAILABLE,
+      });
+    } finally { locked.mock.restore(); }
+    const archived = await archiveViaRest("archive-after-terminal");
+    assert.equal(archived.status, 200);
+    assert.deepEqual(await archived.json(), { ok: true });
+    assert.equal(productStore.getAgentProfile(profile.id).enabled, false);
+    const late = f.params("send-after-archive", f.b, "This new message must stay unaccepted");
+    await assert.rejects(f.rpc("chat.send.accept", late), { code: "CHAT_SESSION_NOT_READY", admissionAccepted: false });
+    assert.equal(inbox.get(late.operationId), null);
+    assert.deepEqual(await f.rpc("chat.send.accept", request), receipt, "archive preserves the original receipt");
+    assert.equal((await f.rpc("service.status", {})).healthy, true);
+  });
+
+test("Service reopens with an already archived Agent's Inbox-only receipt and records a canceled WorkRun",
+  { timeout: 40_000 }, async t => {
+    const f = await fixture(t);
+    const request = f.params("old-archived-receipt", f.b, "Keep this pre-upgrade accepted message");
+    holdChatProjection(t, f, request.operationId);
+    const receipt = await f.rpc("chat.send.accept", request);
+    const { productStore } = f.service;
+    assert.equal(productStore.getWorkRun(receipt.runId), null);
+    assert.equal(f.userEvents(f.b, request.operationId).length, 0);
+    // Recreate the state left by an older Service after it archived the owner.
+    const archived = Object.fromEntries(PROFILE_FIELDS.map(key => [key, productStore.getAgentProfile(f.b.profileId)[key]]));
+    productStore.putAgentProfile({ ...archived, enabled: false });
+
+    const { service } = await f.reopenWhileBlocked();
+    assert.equal((await f.rpc("service.status", {})).healthy, true);
+    assert.equal(service.productStore.getAgentProfile(f.b.profileId).enabled, false);
+    const run = service.productStore.getWorkRun(receipt.runId);
+    assert.equal(run.status, "canceled");
+    assert.equal(run.startedAt, null);
+    assert.equal(run.runtimeSessionRef, null);
+    assert.equal(run.runtimeTurnRef, null);
+    assert.equal(run.runtimeAttemptRef, null);
+    assert.equal(service.pendingCommandInbox.get(request.operationId).state, "canceled");
+    const events = service.transcriptStore.listEvents(f.b.profileId, f.b.id).filter(event => event.runId === run.id);
+    assert.deepEqual(events.filter(event => event.kind === "user").map(event => event.content.text), [request.prompt]);
+    assert.deepEqual(events.filter(event => event.content?.transcriptType === "terminal").map(event => event.content.status), ["canceled"]);
+    const found = await f.rpc("chat.operation.get", { operationId: request.operationId, sessionKey: f.b.sessionKey, includeAcceptance: true });
+    assert.equal(found.status, "found");
+    assert.equal(found.run.id, receipt.runId);
+    assert.deepEqual(await f.rpc("chat.send.accept", request), receipt);
+    assert.equal(f.nativeTurns(), 0, "recovery never dispatches the archived input");
+  });
 
 test("durable chat receipts precede slow preparation and an independent session dispatches first", { timeout: 40_000 }, async t => {
   const f = await fixture(t);

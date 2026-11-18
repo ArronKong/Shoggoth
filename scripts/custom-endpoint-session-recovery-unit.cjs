@@ -43,10 +43,12 @@ async function openFailedTurnFixture({ legacy = false, unreadable = false } = {}
     await f.complete(await f.send(session.sessionKey, "original-history", "PRESERVE ORIGINAL HISTORY"));
     const raw = f.transport.hosts.get("codex");
     raw.modelList = catalog(["fixture-model", GPT_MODEL, VANISHING_MODEL]);
-    // Two source changes leave a fresh native session for the failing turn
-    // (a ChatGPT-only model change would keep the native session).
+    // Retire the native session so the failing turn starts a fresh one (a pick
+    // on a conversation with a native session waits for the next send).
     await addEndpoint(f);
-    await select(f, session.sessionKey, CUSTOM_MODEL);
+    const bound = f.service.chatSessionStore.getSession(session.sessionKey);
+    f.service.chatSessionStore.switchRuntime(session.sessionKey, { bindingId: bound.runtimeBindingId,
+      revision: bound.revision, clearModelOverride: false });
     await select(f, session.sessionKey, VANISHING_MODEL);
     raw.modelList = catalog(["fixture-model", GPT_MODEL]);
     if (unreadable) raw.unreadableFreshThreadUntilTurnStart = true;
@@ -72,13 +74,14 @@ test("a turn that failed before dispatch retains its completed native session bi
     assert.equal(f.service.chatSessionStore.getSession(session.sessionKey).status, "ready");
     assert.equal(f.service.chatSessionStore.getBinding(session.sessionKey).state, "bound");
     const starts = raw.threadStartCalls, turns = raw.turnStartCalls, resumes = raw.resumeCalls;
+    const failedBinding = f.service.chatSessionStore.getSession(session.sessionKey);
     const selected = await select(f, session.sessionKey, GPT_MODEL);
     assert.equal(selected.model, GPT_MODEL);
-    const saved = f.service.chatSessionStore.getSession(session.sessionKey);
-    assert.equal(saved.status, "draft");
-    assert.equal(saved.runtimeSessionId, null);
-    assert.equal(saved.id, session.id);
-    assert.equal(saved.retiredRuntimeSessions.length, 2);
+    const queued = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(queued.status, "ready", "the pick waits for the next send");
+    assert.equal(queued.runtimeSessionId, failedBinding.runtimeSessionId);
+    assert.equal(queued.nextRuntimeSelection.model, GPT_MODEL);
+    assert.equal(queued.id, session.id);
     assert.equal(raw.threadStartCalls, starts);
     assert.equal(raw.turnStartCalls, turns);
     assert.equal(raw.resumeCalls, resumes, "model selection must not resume or resend the failed request");
@@ -87,6 +90,9 @@ test("a turn that failed before dispatch retains its completed native session bi
     assert.equal(f.service.workRunCoordinator.getRun(failed.id).status, "failed");
     const next = await f.send(session.sessionKey, "explicit-gpt-send");
     assert.equal(next.status, "running", next.errorCode);
+    const saved = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(saved.retiredRuntimeSessions.length, 2, "the send retires the failed turn's native session");
+    assert.equal(saved.retiredRuntimeSessions.at(-1).runtimeSessionId, failedBinding.runtimeSessionId);
     assert.equal(raw.lastTurnStartParams.model, GPT_MODEL);
     assert.equal(raw.lastTurnStartParams.effort, "medium");
     await f.complete(next, "GPT ANSWER");
@@ -107,10 +113,11 @@ for (const unreadable of [false, true]) {
       const counts = [raw.threadStartCalls, raw.turnStartCalls, raw.resumeCalls];
       await select(f, session.sessionKey, GPT_MODEL);
       const saved = f.service.chatSessionStore.getSession(session.sessionKey);
-      assert.equal(saved.status, "draft");
-      assert.equal(saved.modelOverride, GPT_MODEL);
-      assert.equal(saved.retiredRuntimeSessions.at(-1).runtimeSessionId, native.id);
-      assert.equal(f.service.chatSessionStore.getBinding(session.sessionKey), null);
+      // Observation confirms the native session; the pick then waits for the next send.
+      assert.equal(saved.status, "ready");
+      assert.equal(saved.runtimeSessionId, native.id);
+      assert.equal(saved.nextRuntimeSelection.model, GPT_MODEL);
+      assert.notEqual(f.service.chatSessionStore.getBinding(session.sessionKey)?.state, "pending");
       assert.deepEqual([raw.threadStartCalls, raw.turnStartCalls, raw.resumeCalls], counts);
       assert.ok(f.service.transcriptStore.listEvents(session.profileId, session.id)
         .some(event => event.content?.text === "PRESERVE ORIGINAL HISTORY"));
@@ -397,8 +404,14 @@ test("a model change within ChatGPT keeps the native session; another source sta
     assert.equal(raw.lastTurnStartParams.model, GPT_MODEL);
     await f.complete(next);
     await select(f, session.sessionKey, CUSTOM_MODEL);
+    const queued = f.service.chatSessionStore.getSession(session.sessionKey);
+    assert.equal(queued.runtimeSessionId, bound.runtimeSessionId, "the source change waits for the next send");
+    assert.equal(queued.nextRuntimeSelection.model, CUSTOM_MODEL);
+    const onEndpoint = await f.send(session.sessionKey, "on-endpoint");
+    assert.equal(onEndpoint.status, "running", onEndpoint.errorCode);
     const moved = f.service.chatSessionStore.getSession(session.sessionKey);
-    assert.equal(moved.status, "draft", "an endpoint model is another source");
+    assert.notEqual(moved.runtimeSessionId, bound.runtimeSessionId, "an endpoint model is another source");
     assert.equal(moved.retiredRuntimeSessions.at(-1).runtimeSessionId, bound.runtimeSessionId);
+    await f.complete(onEndpoint);
   } finally { await f.close(); }
 });

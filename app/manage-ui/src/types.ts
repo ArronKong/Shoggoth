@@ -3363,6 +3363,7 @@ export interface DashboardArtifactItem {
   /** 绝对路径：Finder reveal（/__api/cli/reveal）与 /__media 缩略图直接用。 */
   path: string;
   fileId?: string;
+  missing?: boolean;
   name: string;
   /** "workspace" | "media/outbound" | "agents/<id>" | "session-reference" */
   area: string;

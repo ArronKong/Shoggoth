@@ -125,12 +125,15 @@ function mapEvent(event) {
 }
 
 class CodexRuntimeHandle {
-  constructor(binding, host, secretGateway = null) {
+  constructor(binding, host, secretGateway = null, catalogHost = null) {
     this.runtime = "codex";
     this.runtimeProfileId = binding.runtimeProfileId;
     this.runtimeAccountId = binding.runtimeAccountId;
     this.capabilities = CODEX_CAPABILITIES;
     this.host = host;
+    // Returns the host whose model/list is this handle's catalog authority
+    // when that is not the execution host itself (see CodexRuntimeAdapter.acquire).
+    this.catalogHost = catalogHost;
     this.usesTurnSendGuard = host.usesRpcSendGuard === true;
     this.secretGateway = secretGateway;
     this.secretRoutes = new Map();
@@ -641,10 +644,11 @@ class CodexRuntimeHandle {
       effort = undefined;
     }
     if (effort === null) {
+      const catalog = await this._modelCatalogHost();
       let cursor = null;
       const seen = new Set();
       for (let index = 0; index < 32; index++) {
-        const page = await this.host.modelList({ cursor, limit: 100 });
+        const page = await catalog.modelList({ cursor, limit: 100 });
         const model = page.data.find(item => input.model ? item.model === input.model : item.isDefault);
         if (model) { effort = model.defaultReasoningEffort ?? undefined; break; }
         if (!page.nextCursor || seen.has(page.nextCursor)) break;
@@ -698,7 +702,9 @@ class CodexRuntimeHandle {
     return this.host.turnInterrupt({ threadId: input.sessionId, turnId: input.turnId });
   }
 
-  modelsList(input) { return this.host.modelList(input); }
+  async _modelCatalogHost() { return this.catalogHost ? this.catalogHost() : this.host; }
+
+  async modelsList(input) { return (await this._modelCatalogHost()).modelList(input); }
 
   commandsList() {
     return Promise.resolve({ supported: true, reason: null, commands: mergeNativeCommands("codex", CODEX_COMMANDS) });
@@ -875,15 +881,22 @@ class CodexRuntimeAdapter {
       throw adapterError("RUNTIME_UNSUPPORTED", `Codex adapter cannot run ${binding.runtime}`);
     }
     const { modelSecretProviderKind, ...acquireOptions } = options;
+    const projected = this.secretGateway && ["chatgpt", "openai-api-key"].includes(modelSecretProviderKind);
     const host = await this.runtimePool.get(binding, {
       ...acquireOptions,
-      ...(this.secretGateway && ["chatgpt", "openai-api-key"].includes(modelSecretProviderKind)
-        ? { modelSecretProviderKind } : {}),
+      ...(projected ? { modelSecretProviderKind } : {}),
     });
     const existing = this.handles.get(host);
     if (existing?.runtimeProfileId === binding.runtimeProfileId
       && existing.runtimeAccountId === binding.runtimeAccountId) return existing;
-    const handle = Object.freeze(new CodexRuntimeHandle(binding, host, this.secretGateway));
+    // A protected ChatGPT host runs on the local projection provider. Codex
+    // there rejects the shared models cache (another provider identity) and
+    // cannot refresh it, so its model/list holds only the bundled models. The
+    // binding's management ChatGPT host serves the catalog that model menus
+    // and selection checks read.
+    const catalogHost = projected && modelSecretProviderKind === "chatgpt"
+      ? () => this.runtimePool.get(binding, {}) : null;
+    const handle = Object.freeze(new CodexRuntimeHandle(binding, host, this.secretGateway, catalogHost));
     this.handles.set(host, handle);
     if (host.terminated && typeof host.terminated.then === "function") {
       Promise.resolve(host.terminated).finally(() => {

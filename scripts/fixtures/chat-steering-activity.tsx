@@ -57,7 +57,7 @@ const note = (index: number) => {
 };
 state.beginRun = async () => {
   if (begun || stopped) return;
-  begun = true; activity("running");
+  begun = true; chat("status", { statusKind: "running", nativeRunId: runId, steer: true });
   await emitThought(1); note(1); emitTool(1);
   activity("compacting"); await pause(40); activity("compacted"); history.push(seed.compact1);
   await emitThought(2); note(2);
@@ -94,7 +94,9 @@ class FixtureSocket {
       setTimeout(() => chat("aborted", { message: nativeText(partial) }), 30); return;
     }
     if (stopped && request.method === "chat.history") state.stoppedHistoryReads = (state.stoppedHistoryReads || 0) + 1;
-    const payload = request.method === "sessions.list" ? { sessions, hasMore: false }
+    const payload = request.method === "chat.operation.get" ? { status: "found", admissionAccepted: true, stateAuthority: "native-service",
+      run: { id: runId, status: state.finishedSend === request.params.idempotencyKey ? "completed" : "running" } }
+      : request.method === "sessions.list" ? { sessions, hasMore: false }
       : request.method === "agents.list" ? { agents: [{ id: "shoggoth-default", name: "Shoggoth", backendId: "shoggoth" }] }
       : request.method === "chat.history" ? { messages: history, hasMore: false, nextCursor: null, sourceId: key }
       : request.method === "chat.session.active" ? { run: stopped ? null : { id: runId, status: "running" } } : {};
@@ -103,13 +105,18 @@ class FixtureSocket {
   close() { this.readyState = 3; }
 }
 state.WebSocket = FixtureSocket;
-state.fetch = async (url: unknown) => {
+state.fetch = async (url: unknown, init?: RequestInit) => {
   const route = String(url);
+  if (route.includes("/__api/chat/secrets/prepare")) {
+    const { text } = JSON.parse(String(init?.body));
+    if (state.delayText === text) await new Promise(resolve => { state.releasePrepare = resolve; });
+    return Response.json({ text, references: [], version: 1 });
+  }
   const payload = route.includes("/__api/status") ? { backends: [{ id: "shoggoth", connected: true, info: { readyAgentIds: ["shoggoth-default"] } }] }
     : route.includes("/__api/backends") ? { backends: [{ id: "shoggoth", surfaces: { agentHarness: true, chat: true } }] }
-    : route.includes("/__api/chat/capabilities") ? { attachments: {}, slash: false, steer: true }
+    : route.includes("/__api/chat/capabilities") ? { attachments: {}, slash: false, steer: false }
     : route.includes("runtime-models") ? { selection: { bindingId: "preview", runtime: "codex", canSwitch: false, candidates: [] },
-      capabilities: { attachments: {}, slash: false, steer: true }, models: [], runtimes: [] }
+      capabilities: { attachments: {}, slash: false, steer: false }, models: [], runtimes: [] }
     : route.includes("/archive") ? { archive: { supported: true, segments: [] } } : { items: [], servers: [], groups: [], internalSessions: [] };
   return new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } });
 };
@@ -138,7 +145,7 @@ const inspectActivity = async (live: boolean) => {
   for (const index of [1, 2, 3]) check(thoughts.includes(seed[`thought${index}`].content[0].thinking), `public thought ${index} survives stop/history`);
   const tools = rows('[data-action="1"]'); check(tools.length === 2, "both completed tools survive once");
   check(!rows('[data-st="running"]').length, "stopped activity cannot keep a running row");
-  const compacted = rows("[data-st]").filter(chip => chip.closest("button")?.textContent?.includes(i18n.t("chat.compactedCtx")));
+  const compacted = rows("[data-st]").filter(chip => chip.parentElement?.textContent?.includes(i18n.t("chat.compactedCtx")));
   check(compacted.length === 2, "both compaction receipts remain in the card");
   // Offscreen bubbles use content-visibility: auto and can be omitted by innerText.
   const thread = document.querySelector(chatSurface)?.textContent || "";
@@ -153,6 +160,60 @@ const inspectActivity = async (live: boolean) => {
   return { cards: triggers.length, steps: 7, thoughts: thoughts.length, tools: tools.length,
     compactions: compacted.length, bubbles: bubbles.length, immersive, width: innerWidth, language };
 };
+const composer = () => visible<HTMLTextAreaElement>("textarea").find(node => immersive
+  ? !!node.closest('[data-testid="immersive-chat"]') && !!node.closest("[data-chat-composer]") : node.classList.contains("chat-composer__input"))!;
+const enterText = async (text: string) => {
+  const input = composer();
+  const panel = input.closest<HTMLElement>("[data-chat-composer]")!;
+  const emptyHeight = panel.offsetHeight;
+  check(input.matches(":placeholder-shown"), "the empty composer shows its hint as a placeholder");
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, text);
+  input.dispatchEvent(new Event("input", { bubbles: true })); await pause(30);
+  check(panel.offsetHeight === emptyHeight, `typing a single line changed the composer height from ${emptyHeight} to ${panel.offsetHeight}`);
+  check(!input.matches(":placeholder-shown") && !panel.innerText.includes(input.placeholder),
+    "the placeholder disappears while typing without a second hint in the composer");
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+};
+state.runQueueFixture = async () => {
+  await wait(() => state.socket && composer() && document.body.textContent?.includes(userText), "ready for question card");
+  await pause(150);
+  chat("status", { statusKind: "running", nativeRunId: runId, steer: true });
+  chat("prompt", { prompt: { version: 1, kind: "mcp_elicitation", requestId: "login-question", runId, title: "登录",
+    message: "完成登录了吗？", fields: [{ id: "login", type: "select", label: "登录状态", description: "", required: true,
+      secret: false, options: [{ value: "yes", label: "已登录" }, { value: "no", label: "未登录" }] }], expiresAt: null } });
+  const cancel = () => visible<HTMLButtonElement>(".chat-prompt button").find(node => node.textContent === i18n.t("common.cancel"));
+  await wait(() => cancel(), "question card with two choices and Cancel");
+  chat("thinking", { thinking: "Checking the page" });
+  await wait(() => composer().placeholder === i18n.t("chat.composerWaitingCard"), "activity cannot bypass the pending card");
+  const first = "不登录可以吗", second = "请保留原图";
+  state.delayText = first;
+  const chips = () => visible<HTMLButtonElement>(".chat-queue__text").map(node => node.textContent);
+  const sends = () => state.requests.filter((request: any) => request.method === "chat.send");
+  await enterText(first);
+  await wait(() => chips().includes(first), "question remains visible in the queue");
+  cancel()!.click();
+  await wait(() => !cancel(), "cancel the question card");
+  check(!sends().length && chips().includes(first), "cancelling the card does not cancel the message");
+  chat("final", { message: { role: "assistant", content: "完成", timestamp: Date.now() } });
+  await wait(() => state.releasePrepare, "next turn starts preparing the queued question");
+  await enterText(second);
+  check(chips().join("|") === [first, second].join("|"), "both messages remain editable during preparation");
+  state.releasePrepare();
+  await wait(() => sends().length === 1 && chips().join("|") === second, "first message enters chat exactly once");
+  const firstOperation = sends()[0].params.idempotencyKey;
+  state.finishedSend = firstOperation;
+  chat("accepted", { runId: firstOperation });
+  chat("final", { runId: firstOperation, message: { role: "assistant", content: "可以", timestamp: Date.now() } });
+  await wait(() => sends().length === 2 && !chips().length, "second message follows the first one");
+  check(sends().map((request: any) => request.params.message).join("|") === [first, second].join("|"), "exact ordered text");
+  check(!state.requests.some((request: any) => request.method === "chat.steer"), "the card never receives a steer");
+  const secondOperation = sends()[1].params.idempotencyKey;
+  state.finishedSend = secondOperation;
+  chat("accepted", { runId: secondOperation });
+  chat("final", { runId: secondOperation, message: { role: "assistant", content: "完成", timestamp: Date.now() } });
+  await wait(() => !stopButton(), "last queued turn settles");
+  return { questionCanceled: true, sentInOrder: true };
+};
 state.inspectStopped = () => inspectActivity(false);
 state.runFixture = async () => {
   await wait(() => document.body.textContent?.includes(userText) && state.socket, "initial conversation");
@@ -160,12 +221,16 @@ state.runFixture = async () => {
   const previews = () => activityNodes("[data-chat-activity-preview]");
   const previewBeforeGuide = previews()[0];
   check(previewBeforeGuide && previews().length === 1, "one activity preview before steering");
-  const input = visible<HTMLTextAreaElement>("textarea").find(node => immersive
-    ? !!node.closest('[data-testid="immersive-chat"]') : node.classList.contains("chat-composer__input"))!;
-  check(input, "visible composer");
-  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, seed.steer.content[0].text);
-  input.dispatchEvent(new Event("input", { bubbles: true })); await pause(30);
-  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+  check(composer().placeholder === i18n.t("chat.composerSteer"), "the live Runtime takes precedence over the model menu");
+  if (language === "en") {
+    chat("status", { statusKind: "running", nativeRunId: runId, steer: false });
+    await wait(() => composer().placeholder === i18n.t("chat.composerQueueRuntime"), "unsupported live Runtime queues text");
+    await enterText(seed.steer.content[0].text);
+    await wait(() => visible(".chat-queue__text").length === 1, "queued message is visible");
+    chat("status", { statusKind: "running", nativeRunId: runId, steer: true });
+    await wait(() => visible(".chat-queue__steer").length === 1, "queued text can be steered explicitly");
+    visible<HTMLButtonElement>(".chat-queue__steer")[0].click();
+  } else await enterText(seed.steer.content[0].text);
   await wait(() => guided, "a running turn must steer during compaction instead of queueing the message");
   await wait(() => document.querySelector(chatSurface)?.textContent?.includes(seed.steer.content[0].text), "accepted steering bubble");
   check(!document.querySelector(".chat-toast--success"), "accepted steering appears without a success toast");
@@ -179,6 +244,7 @@ state.runFixture = async () => {
   document.querySelector<HTMLButtonElement>(`[role="dialog"] button[aria-label="${i18n.t("common.close")}"]`)!.click();
   await wait(() => !document.querySelector('[role="dialog"]'), "close the details before stopping");
   check(state.requests.filter((request: any) => request.method === "chat.steer").length === 1, "one exact steering request");
+  check(state.requests.find((request: any) => request.method === "chat.steer").params.expectedRunId === runId, "steering targets the displayed turn");
   check(!state.requests.some((request: any) => request.method === "chat.send"), "steering never sends a second run");
   stopButton()?.click();
   await wait(() => state.requests.some((request: any) => request.method === "chat.abort"), "actual stop control");

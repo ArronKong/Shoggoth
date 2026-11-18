@@ -146,7 +146,7 @@ class MockChatBackend extends AgentBackend {
 // synchronously. The proxy contract must support both without backend branches.
 class AsyncChatBackend extends AgentBackend {
   get id() { return "shoggoth"; }
-  getBackendDescriptor() { return { id: this.id, surfaces: { chat: true, durableChatStop: true } }; }
+  getBackendDescriptor() { return { id: this.id, surfaces: { chat: true, durableChatStop: true, agentHarness: true } }; }
   ownsAgentId(id) { return shoggothOnline && id === "shoggoth-default"; }
   claimsAgentId(id) { return typeof id === "string" && id.startsWith("shoggoth-"); }
   getAgents() { return [{ id: "shoggoth-default", name: "Shoggoth", model: "openai/gpt-5" }]; }
@@ -188,8 +188,8 @@ class AsyncChatBackend extends AgentBackend {
     }
     shoggothAbortCalls.push(sessionKey);
   }
-  async steerChat(sessionKey, message) {
-    shoggothSteerCalls.push({ sessionKey, message });
+  async steerChat(sessionKey, message, expectedRunId) {
+    shoggothSteerCalls.push({ sessionKey, message, expectedRunId });
     return { accepted: true, runId: "service-run", turnId: "service-turn" };
   }
   async sendMessage(sessionKey, message, runId, hooks = {}, opts = {}) {
@@ -1385,7 +1385,12 @@ try {
     // CRUD routing remains backend-generic; none of these writes may reach
     // OpenClaw merely because this backend is not OpenClaw.
     const mutationsBefore = upstreamReceived.length;
-    send({ type: "req", id: "steer-native", method: "chat.steer", params: { sessionKey: "agent:shoggoth-default:real-default", message: "focus on tests" } });
+    send({ type: "req", id: "steer-native", method: "chat.steer", params: {
+      sessionKey: "agent:shoggoth-default:real-default", message: "focus on tests", expectedRunId: "service-run",
+    } });
+    send2({ type: "req", id: "steer-foreign-bound", method: "chat.steer", params: {
+      sessionKey: "agent:main:main", message: "same turn only", expectedRunId: "service-run",
+    } });
     send({ type: "req", id: "abort-foreign", method: "chat.abort", params: { sessionKey: "agent:hermes-default:hist-1" } });
     send({ type: "req", id: "rename-foreign", method: "sessions.patch", params: { key: "agent:hermes-default:hist-1", label: "Renamed" } });
     send({ type: "req", id: "delete-foreign", method: "sessions.delete", params: { key: "agent:hermes-default:hist-1" } });
@@ -1398,7 +1403,7 @@ try {
     send2({ type: "req", id: "observe-stop-foreign", method: "chat.abort", params: {
       sessionKey: "agent:main:main", idempotencyKey: "original-stop", observeOnly: true,
     } });
-    const [steerNative, abortForeign, renameForeign, deleteForeign, nativeStop, changedStop, foreignStop] = await Promise.all([
+    const [steerNative, abortForeign, renameForeign, deleteForeign, nativeStop, changedStop, foreignStop, foreignSteer] = await Promise.all([
       waitFor((f) => f.type === "res" && f.id === "steer-native", "native steer res"),
       waitFor((f) => f.type === "res" && f.id === "abort-foreign", "foreign abort res"),
       waitFor((f) => f.type === "res" && f.id === "rename-foreign", "foreign rename res"),
@@ -1406,6 +1411,7 @@ try {
       waitFor((f) => f.type === "res" && f.id === "observe-stop-native", "native stop observation"),
       waitFor((f) => f.type === "res" && f.id === "observe-stop-changed-owner", "native stop owner changed"),
       waitFor2((f) => f.type === "res" && f.id === "observe-stop-foreign", "foreign stop rejected"),
+      waitFor2((f) => f.type === "res" && f.id === "steer-foreign-bound", "foreign steered turn rejected"),
     ]);
     check("native Stop verifies original identity and keeps the Service terminal result",
       nativeStop.ok && nativeStop.payload?.stateAuthority === "native-service"
@@ -1417,7 +1423,8 @@ try {
       steerNative.ok === true
         && steerNative.payload?.turnId === "service-turn"
         && shoggothSteerCalls.some((call) => call.sessionKey === "agent:shoggoth-default:real-default"
-          && call.message === "focus on tests"),
+          && call.message === "focus on tests" && call.expectedRunId === "service-run")
+        && !foreignSteer.ok && foreignSteer.error?.code === "WORK_RUN_CONTROL_MISMATCH",
     );
     check(
       "foreign abort/rename/delete route through the backend contract",

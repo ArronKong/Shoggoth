@@ -88,6 +88,7 @@ jobs:
           node scripts/manage-bundle-budget-regression.mjs --dist="$chat_dist"
           node scripts/chat-acceptance-recovery-electron.cjs "$chat_dist"
           node scripts/chat-acceptance-recovery-electron.cjs "$chat_dist" --group-continuation
+          node scripts/chat-acceptance-recovery-electron.cjs "$chat_dist" --account-model-switch
           node scripts/group-activity-panel-electron.mjs
       - name: Install the version-pinned Pi test SDK without lifecycle scripts
         run: npm install --prefix "$RUNNER_TEMP/shoggoth-hooks-pi" --ignore-scripts --no-audit --no-fund --save-exact @earendil-works/pi-coding-agent@0.84.4

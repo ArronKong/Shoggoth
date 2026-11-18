@@ -77,7 +77,9 @@ function detailedFailure(raw: string, t: TFn): string | null {
   const [, prefix, summary, detailLabel, originalDetail, code] = match;
   const detail = originalDetail.replace(/\[(已隐藏|地址已隐藏|邮箱已隐藏|路径已隐藏)\]/gu, (_match, label: string) =>
     t(`chat.gwErrors.${({ 已隐藏: "redacted", 地址已隐藏: "redactedUrl", 邮箱已隐藏: "redactedEmail", 路径已隐藏: "redactedPath" } as Record<string, string>)[label]}`));
-  const title = FAILURE_SUMMARIES[code] ? t(`chat.gwErrors.${FAILURE_SUMMARIES[code]}`)
+  const freeUsageLimit = code === "RUNTIME_QUOTA_EXHAUSTED" && /^Free usage limit reached\b/iu.test(originalDetail);
+  const summaryKey = freeUsageLimit ? "runtimeFreeUsageLimit" : FAILURE_SUMMARIES[code];
+  const title = summaryKey ? t(`chat.gwErrors.${summaryKey}`)
     : productErrorMessage(summary, t) ?? t("chat.gwErrors.runtimeFailureSummary", { summary });
   const detailKey = detailLabel === "启动详情" ? "chat.gwErrors.startupDetail" : "chat.gwErrors.providerReason";
   const message = `${title}\n${t(detailKey, { detail })}\n${t("chat.gwErrors.errorCode", { code })}`;

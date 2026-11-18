@@ -889,12 +889,13 @@ class AgentBackend {
    *   tool({toolCallId, name?, args?, phase, result?, partialResult?, isError?, durationS?,
    *         diff?, diffText?})    — tool lifecycle (phase start|update|result)
    *   plan(entries)               — agent todo list ([{content, status?}])
-   *   status({kind, text, reason?, queuedAt?}) — session progress: queued,
+   *   status({kind, text, reason?, queuedAt?, nativeRunId?, steer?}) — session progress: queued,
    *                                 starting, running, retrying, waiting_approval/input,
    *                                 compacting or compacted. An observer's idle
    *                                 confirms no active chat run; it does not
    *                                 settle an uncertain send receipt. Queue timestamps
-   *                                 use milliseconds since the Unix epoch.
+   *                                 use milliseconds since the Unix epoch. An optional
+   *                                 steer flag describes the identified Run's active host.
    *   prompt(InteractiveRequestV1 | legacyPrompt)
    *                               — the agent BLOCKED on a user answer. Shoggoth
    *                                 emits the versioned canonical request; legacy
@@ -1166,6 +1167,9 @@ class AgentBackend {
    * @returns {Promise<void>}
    */
   async abortChat(sessionKey, runId) { throw new Error(`${this.id}: abortChat() not supported`); }
+
+  /** Add text to the active turn. When supplied, expectedRunId must still own the turn. */
+  async steerChat(_sessionKey, _message, _expectedRunId) { throw new Error(`${this.id}: steerChat() not supported`); }
 
   /**
    * Compress/compact a chat session's context (the UI's /compact →
@@ -2049,15 +2053,16 @@ class AgentBackend {
    * `total` = 扫描到的产出文件总数（items 按 mtime 倒序截到 limit，长度 ≠ 总数）；
    * 与 dashboard 同受 walker 的 stat 硬上限约束。
    * @param {string} _agentId
-   * @param {{limit?: number}} [_opts]
+   * @param {{limit?: number, includeManaged?: boolean}} [_opts]
    * `partial` 表示部分会话无法读取，已确认的文件仍可展示。
    * @returns {Promise<{supported: boolean, reason?: string, partial?: boolean, total?: number, items: Array<{path: string,
-   *   name: string, area: string, size: number, mtimeMs: number, ext?: string, kind: string}>}>}
+   *   fileId?: string, missing?: boolean, name: string, area: string, size: number, mtimeMs: number, ext?: string, kind: string}>}>}
    */
   async listAgentArtifacts(_agentId, _opts) { return { supported: false, reason: "unsupported", items: [] }; }
 
   // Managed files are owned by the backend's Agent. Workspace references
-  // returned by listAgentArtifacts do not grant mutation rights.
+  // returned by listAgentArtifacts do not grant mutation rights. "locate"
+  // resolves a verified local copy for an explicit Finder or copy-path action.
   async agentFiles(_agentId, _action, _input) {
     throw Object.assign(new Error("Agent file library is unavailable"), { code: "AGENT_FILE_UNSUPPORTED" });
   }

@@ -25,6 +25,7 @@ const TOOL_DEFS = {
   shop: [],
   "quark-drive": require("./quark-skill-runtime").TOOL_DEFS,
   "baidu-maps": require("./baidu-map-skill-runtime").TOOL_DEFS,
+  "agently-mail": require("./agently-mail-skill-runtime").TOOL_DEFS,
   "rollinggo-hotel": require("./rollinggo-skill-runtime").TOOL_DEFS,
   fliggy: [["travel_search", "Search official travel products, flights, hotels and attractions. Trial access may return limited results.", object({ query: string(2000) }, ["query"])]],
   weread: [
@@ -142,12 +143,19 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
     name === "account_bind" ? object({ code: string(4096) }, ["code"]) : schema, write]) : providerId === "doordash" ? ACCOUNT_DEFS.map(([name, description, schema, write]) => [name,
     name === "account_bind" ? "Finish DoorDash PKCE authorization using the full callback URL entered in the connector's private window. Never ask the user to paste this URL or a token in chat." : description,
     name === "account_bind" ? object({ code: string(8192) }, ["code"]) : schema, write]) : ACCOUNT_DEFS;
-  const definitions = [...(providerId === "baidu-maps" ? accountDefinitions.filter(([name]) => name === "account_status") : accountDefinitions), ...(providerId === "shop" ? require("./shop-skill-runtime").getShopToolDefs(root) : TOOL_DEFS[providerId])];
+  const isAgentMail = providerId === "agently-mail";
+  const supportedAccounts = providerId === "baidu-maps" ? accountDefinitions.filter(([name]) => name === "account_status")
+    : isAgentMail ? accountDefinitions.filter(([name]) => name !== "account_bind") : accountDefinitions;
+  const definitions = [
+    ...supportedAccounts,
+    ...(providerId === "shop" ? require("./shop-skill-runtime").getShopToolDefs(root) : TOOL_DEFS[providerId]),
+  ];
   const ajv = providerId === "shop" ? require("./shop-skill-runtime").createValidator() : new Ajv({ strict: false, allErrors: false });
   if (providerId === "doordash") ajv.addFormat("uuid", /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
   const validators = new Map(definitions.map(([name, , schema]) => [name, ajv.compile(schema)]));
-  const tools = definitions.map(([name, description, inputSchema, write = false]) => ({ name, description, inputSchema,
-    annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true } }));
+  const tools = definitions.filter(([name]) => !isAgentMail || !name.startsWith("account_"))
+    .map(([name, description, inputSchema, write = false]) => ({ name, description, inputSchema,
+      annotations: { readOnlyHint: !write, destructiveHint: write, idempotentHint: !write, openWorldHint: true } }));
   let authorization = null, chain = Promise.resolve(), poisoned = false, closed = false;
   const account = (state, fields = {}) => validateOfficialAccountResult({ id: providerId, state, verificationUrl: null, qrCode: null, userCode: null, userName: null, errorCode: null, ...fields });
   const stable = value => value && typeof value === "object" ? Array.isArray(value) ? value.map(stable) : Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
@@ -280,6 +288,7 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
 
   const shopAuth = providerId === "shop" ? require("./shop-skill-auth").createShopAuth({ root, home, fetch, now }) : null;
   const baidu = providerId === "baidu-maps" ? require("./baidu-map-skill-runtime").createBaiduMapAdapter({ fetch, env, account, now }) : null;
+  const agentlyMail = isAgentMail ? require("./agently-mail-skill-runtime").createAgentlyMailAdapter({ root, home, run, now, account, guardedWrite, stopActiveChildren, parseJson }) : null;
   const quark = providerId === "quark-drive" ? require("./quark-skill-runtime").createQuarkAdapter({ root, home, run, now, account, guardedWrite }) : null;
   const rollinggo = providerId === "rollinggo-hotel" ? require("./rollinggo-skill-runtime").createRollingGoAdapter({ root, home, run, now, account, guardedWrite, stopActiveChildren, parseJson }) : null;
   const shop = shopAuth ? require("./shop-skill-runtime").createShopAdapter({ now, account, guardedWrite, auth: shopAuth,
@@ -360,10 +369,15 @@ function createOfficialSkillRuntime({ providerId, root, home, env = process.env,
     return Object.entries(args).flatMap(([key, value]) => flags[key] ? [`--${flags[key]}`, typeof value === "object" ? JSON.stringify(value) : String(value)] : []);
   }
   function cashierLink(value) { try { const url = new URL(value); return url.protocol === "https:" && !url.port && !url.username && !url.password && /^(?:cashier[^.]*|[^.]*excashier[^.]*|tbapi[^.]*)\.alipay\.com$/iu.test(url.hostname); } catch { return false; } }
-  async function execute(name, args, { signal, officialSessionId } = {}) {
+  async function execute(name, args, { signal, officialSessionId, officialAccountAction } = {}) {
     if (!validators.get(name)?.(args)) fail("OFFICIAL_SKILL_INVALID_ARGUMENT");
     if (poisoned || closed) fail("OFFICIAL_SKILL_OPERATION_UNCERTAIN");
     validate(); signal?.throwIfAborted();
+    if (agentlyMail) {
+      if (!name.startsWith("account_")) return publicOutput(await agentlyMail.call(name, args, { signal, officialSessionId }), secrets);
+      if (officialAccountAction !== true) fail("OFFICIAL_SKILL_ACCESS_DENIED");
+      return agentlyMail.account(name.slice(8), signal);
+    }
     if (name.startsWith("account_")) return accountAction(name.slice(8), args, signal);
     let result;
     if (baidu) result = await baidu.call(name, args, signal);

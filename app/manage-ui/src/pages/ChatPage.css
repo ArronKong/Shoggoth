@@ -1917,6 +1917,10 @@
 }
 .chat-queue__text:hover { color: var(--fg); }
 .chat-queue__att { margin-left: 6px; color: var(--muted); }
+.chat-queue__steer {
+  flex: 0 0 auto; border: 0; padding: 2px 4px; background: transparent; color: var(--fg); font: inherit; cursor: pointer;
+}
+.chat-queue__steer:hover { text-decoration: underline; }
 .chat-queue__x {
   flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 6px;
   background: transparent; color: var(--muted-strong); font-size: 15px; line-height: 1; cursor: pointer;

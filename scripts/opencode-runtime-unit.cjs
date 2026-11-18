@@ -401,6 +401,84 @@ test("native provider failures keep upstream availability distinct from limits a
   });
 });
 
+test("OpenCode retains a free quota event between polls and can continue with a new turn", async () => {
+  const fixture = openCodeFixture("shoggoth-opencode-fast-quota-");
+  const sessionId = "ses_fastquota12345";
+  const ledger = new OpenCodeRuntimeLedger(fixture.ledgerOptions).open();
+  ledger.update(data => data.sessions.push({ id: sessionId, source: "test", cwd: fixture.workspace,
+    title: null, archived: false, created: true, createdAt: 1, updatedAt: 1, turns: [] }));
+  let stream, userMessageId, prompts = 0, closed = 0;
+  const encoder = new TextEncoder();
+  const event = (id, status) => `data: ${JSON.stringify({ type: "session.status",
+    properties: { sessionID: id, status } })}\r\n\r\n`;
+  const quota = { type: "retry", action: { reason: "free_tier_limit" },
+    message: "Free usage exceeded, subscribe to Go" };
+  const host = fixture.host(ledger, async (method, route, body) => {
+    if (method === "POST" && route.endsWith("/prompt_async")) {
+      assert.ok(stream, "OpenCode can emit the failure as soon as a prompt is sent");
+      userMessageId = body.messageID;
+      prompts++;
+      return { status: 204 };
+    }
+    if (method === "GET" && route.startsWith(`/session/${sessionId}/message?`)) return { data: [
+      { info: { id: userMessageId, sessionID: sessionId, role: "user" }, parts: [] },
+      { info: { id: `msg_fastquota12345-${prompts}`, sessionID: sessionId, role: "assistant",
+        parentID: userMessageId, time: { completed: Date.now() }, ...(prompts === 2 ? { finish: "stop" } : {}) },
+      parts: prompts === 2 ? [{ type: "text", id: "prt_recovered", text: "Recovered" }] : [] },
+    ] };
+    if (method === "GET" && route === "/session/status") return { data: {} };
+    if (method === "GET" && ["/permission", "/question"].includes(route)) return { data: [] };
+    throw new Error(`unexpected ${method} ${route}`);
+  });
+  const password = "a".repeat(64);
+  const client = new OpenCodeHttpClient({ url: "http://127.0.0.1:41234", password, fetch: async (target, options) => {
+    assert.equal(target.href, "http://127.0.0.1:41234/event");
+    assert.equal(options.redirect, "error");
+    assert.equal(options.headers.Authorization, `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`);
+    return new Response(new ReadableStream({ start(controller) {
+      stream = controller;
+      options.signal.addEventListener("abort", () => { closed++; controller.close(); stream = null; }, { once: true });
+    } }), { headers: { "Content-Type": "text/event-stream; charset=utf-8" } });
+  } });
+  host.client.observeEvents = client.observeEvents.bind(client);
+  host.protocolFeatures = { sessionEvents: true };
+  const send = operationId => host.turnStart({ sessionId, operationId, prompt: "hello",
+    cwd: fixture.workspace, permissionPolicy: POLICY });
+  try {
+    const first = completion(host);
+    void first.settled.catch(() => {});
+    await send("quota");
+    // History alone is already empty and idle. Wait for the matching event
+    // from the accepting host before publishing this turn's terminal.
+    assert.equal((await host.sessionRead({ sessionId, includeTurns: true })).session.turns[0].status, "inProgress");
+    const wire = event(sessionId, quota) + event(sessionId, { type: "idle" });
+    stream.enqueue(encoder.encode(wire.slice(0, 37)));
+    stream.enqueue(encoder.encode(wire.slice(37)));
+    const terminal = await first.settled;
+    assert.deepEqual([terminal.status, terminal.errorCode, terminal.failure?.message],
+      ["failed", "RUNTIME_QUOTA_EXHAUSTED", "Free usage limit reached"]);
+    assert.equal(closed, 1);
+    assert.equal(ledger.snapshot().sessions[0].turns[0].errorCode, "RUNTIME_QUOTA_EXHAUSTED");
+
+    const second = completion(host);
+    await send("recovered");
+    assert.equal((await second.settled).status, "completed");
+    assert.equal(closed, 2);
+
+    const third = completion(host);
+    await send("unrelated-quota");
+    stream.enqueue(encoder.encode(event("ses_foreign12345", quota) + event(sessionId, { type: "idle" })));
+    const missing = await third.settled;
+    assert.deepEqual([missing.status, missing.errorCode, missing.failure?.message],
+      ["failed", "OPENCODE_TURN_FAILED", "OpenCode did not return a reply."]);
+    assert.equal(closed, 3);
+    assert.equal(prompts, 3);
+  } finally {
+    await host.stop();
+    fixture.cleanup();
+  }
+});
+
 test("direct and group OpenCode turns use saved files and reserve native file parts for images", async t => {
   for (const source of ["direct-chat", "group-chat"]) await t.test(source, async () => {
     const f = openCodeFixture("shoggoth-opencode-attachments-");
@@ -927,6 +1005,7 @@ test("a free-tier limit retry is stopped natively and settled as a quota failure
       cwd: fixture.workspace, permissionPolicy: POLICY });
     const result = await settled;
     assert.deepEqual([result.status, result.errorCode], ["failed", "RUNTIME_QUOTA_EXHAUSTED"]);
+    assert.equal(result.failure?.message, "Free usage limit reached");
     assert.equal(client.routes.filter(route => route.endsWith("/abort")).length, 1);
     const turn = ledger.snapshot().sessions[0].turns[0];
     assert.deepEqual([turn.status, turn.errorCode], ["failed", "RUNTIME_QUOTA_EXHAUSTED"]);

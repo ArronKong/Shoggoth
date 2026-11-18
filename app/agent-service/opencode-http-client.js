@@ -3,7 +3,29 @@
 const { serviceError } = require("./security");
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const EVENT_CONNECT_TIMEOUT_MS = 1_000;
 const error = (code, message) => serviceError(code, message);
+
+async function readEvents(body, onEvent) {
+  let buffer = "";
+  for await (const chunk of body.pipeThrough(new TextDecoderStream())) {
+    buffer += chunk;
+    let start = 0;
+    for (const boundary of buffer.matchAll(/\r?\n\r?\n/gu)) {
+      const frame = buffer.slice(start, boundary.index);
+      start = boundary.index + boundary[0].length;
+      if (frame.length > MAX_RESPONSE_BYTES) continue;
+      const data = frame.split(/\r?\n/u).filter(line => line.startsWith("data:"))
+        .map(line => line.slice(5).replace(/^ /u, "")).join("\n");
+      if (!data) continue;
+      let event;
+      try { event = JSON.parse(data); } catch { continue; }
+      onEvent(event);
+    }
+    buffer = buffer.slice(start);
+    if (buffer.length > MAX_RESPONSE_BYTES) return;
+  }
+}
 
 class OpenCodeHttpClient {
   constructor(options = {}) {
@@ -16,6 +38,33 @@ class OpenCodeHttpClient {
     this.password = options.password;
     this.fetch = options.fetch || globalThis.fetch;
     this.timeoutMs = options.timeoutMs || 15_000;
+  }
+
+  #authorization() {
+    return `Basic ${Buffer.from(`opencode:${this.password}`).toString("base64")}`;
+  }
+
+  async observeEvents(onEvent, signal) {
+    const connection = new AbortController();
+    const timer = setTimeout(() => connection.abort(), EVENT_CONNECT_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      const response = await this.fetch(new URL("/event", this.url), {
+        method: "GET", redirect: "error", signal: AbortSignal.any([signal, connection.signal]),
+        headers: { Authorization: this.#authorization(), Accept: "text/event-stream" },
+      });
+      if (!response.ok || !response.body
+        || !/^text\/event-stream(?:\s*;|$)/iu.test(response.headers.get("content-type") ?? "")) {
+        connection.abort();
+        return false;
+      }
+      void readEvents(response.body, onEvent).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async request(method, route, body, options = {}) {
@@ -38,7 +87,7 @@ class OpenCodeHttpClient {
       response = await this.fetch(target, {
         method, redirect: "error", signal: controller.signal,
         headers: {
-          Authorization: `Basic ${Buffer.from(`opencode:${this.password}`).toString("base64")}`,
+          Authorization: this.#authorization(),
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),

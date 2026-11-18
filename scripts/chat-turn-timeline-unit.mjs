@@ -16,7 +16,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(new URL("../app/manage-ui/
 const source = fs.readFileSync(new URL("../app/manage-ui/src/pages/ChatPage.tsx", import.meta.url), "utf8");
 const ast = ts.createSourceFile("ChatPage.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const functions = new Set(["absorbTurnTimelines", "normalize", "contentToText", "isToolResultBlock",
-  "toolResultBlockText", "toolResultBlockDuration", "toolResultBlockArgs", "planEntriesFromBlock"]);
+  "toolResultBlockText", "toolResultBlockDuration", "toolResultBlockArgs", "planEntriesFromBlock", "groupMessages", "activityOwnerOf"]);
 const constants = new Set(["TURN_GAP_MS", "STREAM_ERROR_FALLBACK_TEXT"]);
 const helpers = ast.statements.filter(node => (ts.isFunctionDeclaration(node) && functions.has(node.name?.text))
   || (ts.isVariableStatement(node) && node.declarationList.declarations.some(d => constants.has(d.name.getText(ast)))));
@@ -237,4 +237,78 @@ console.log("PASS linked legacy tool results and process ownership for unread na
   assert.ok(projected[0].sourceEventIds.includes("event-52"));
   assert.equal(JSON.stringify(raw), saved);
   console.log("PASS long rename history folds 49 notes into the activity and retains the interaction and reply");
+}
+
+// Execute the actual footer/standalone selection as well as turn folding. A
+// native terminal error is a system message, separate from the assistant tools.
+{
+  let activityMemo, standalone, footer;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node)) {
+      if (ts.isObjectBindingPattern(node.name) && node.name.elements.some(element => element.name.getText(ast) === "activityFooterGroups")) {
+        activityMemo = node.initializer.arguments[0];
+      }
+      if (node.name.getText(ast) === "standaloneActivityFor") standalone = node.initializer;
+      if (node.name.getText(ast) === "footerActivityFor") footer = node.initializer;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert(activityMemo && standalone && footer);
+  const evaluate = messages => {
+    context.groups = context.groupMessages(absorbTurnTimelines(messages));
+    Object.assign(context, { activeKey: "failed-fixture", liveTimelinesRef: { current: new Map() },
+      observedRunBySessionRef: { current: new Map() }, subagentActivity: { project: (_key, steps) => steps },
+      liveStepsFor: () => [], visibleTimelineSteps: steps => steps });
+    vm.runInNewContext(ts.transpileModule(`var activityState = (${activityMemo.getText(ast)})();`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText, context);
+    Object.assign(context, context.activityState);
+    vm.runInNewContext(ts.transpileModule(`var standaloneActivityFor = ${standalone.getText(ast)};
+      var footerActivityFor = ${footer.getText(ast)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+    return context;
+  };
+  const { transcriptHistoryItem } = require(new URL("../app/agent-service/chat-service-controller.js", import.meta.url).pathname);
+  const runId = "failed-cron-run";
+  const events = [
+    { kind: "user", content: { text: "Prepare the daily report" } },
+    ...[88, 2572].flatMap((durationMs, index) => [
+      { kind: "tool_call", content: { transcriptType: "tool.start", toolCallId: `call-${index}`, tool: { name: "command" } } },
+      { kind: "tool_result", content: { transcriptType: "tool.result", toolCallId: `call-${index}`,
+        tool: { name: "command", status: "completed", durationMs, resultSummary: "saved result" } } },
+    ]),
+    { kind: "error", content: { transcriptType: "terminal", status: "failed", errorCode: "RUNTIME_RATE_LIMITED",
+      failure: { httpStatus: 429, message: "exceeded retry limit, last status: 429 Too Many Requests" } } },
+  ].map((event, index) => ({ ...event, id: `failed-${index}`, runId, seq: index + 1, occurredAt: 1000 + index * 3000, contextExcluded: false }));
+  const messages = events.map(event => transcriptHistoryItem(event, "cron")).filter(Boolean).map(item => ({
+    ...normalize(item.payload.message), actionId: item.id,
+  }));
+  const saved = JSON.stringify(messages);
+  let projection = evaluate(messages);
+  let toolMessage = projection.groups.find(group => group.role === "assistant").msgs[0];
+  let errorGroup = projection.groups.find(group => group.role === "system");
+  assert.equal(projection.standaloneActivityFor(toolMessage), undefined, "a failed turn hides its standalone tool bubble");
+  let activity = projection.footerActivityFor(errorGroup, errorGroup.msgs.at(-1));
+  assert(activity, "the terminal error footer owns the same Run's activity");
+  assert.deepEqual(Array.from(activity.steps, step => step.durationS), [0.088, 2.572]);
+  assert.equal(JSON.stringify(messages), saved, "activity placement never rewrites history");
+
+  const next = turn("next-run", 30000, 1000, "next-tool").map((message, index) => ({ ...message, actionId: `next-${index}` }));
+  projection = evaluate([...messages, ...next]);
+  errorGroup = projection.groups.find(group => group.role === "system");
+  activity = projection.footerActivityFor(errorGroup, errorGroup.msgs.at(-1));
+  assert.deepEqual(Array.from(activity.steps, step => step.toolCallId), ["call-0", "call-1"], "refreshing with another Run keeps the exact failed activity");
+  const nextGroup = projection.groups.at(-1);
+  assert.deepEqual(Array.from(projection.footerActivityFor(nextGroup, nextGroup.msgs.at(-1)).steps, step => step.toolCallId), ["next-tool"]);
+
+  projection = evaluate(messages.map(message => message.role === "system" ? { ...message, nativeRunId: "unrelated-error" } : message));
+  toolMessage = projection.groups.find(group => group.role === "assistant").msgs[0];
+  errorGroup = projection.groups.find(group => group.role === "system");
+  assert(projection.standaloneActivityFor(toolMessage), "an unrelated error cannot hide an orphaned tool record");
+  assert.equal(projection.footerActivityFor(errorGroup, errorGroup.msgs.at(-1)), undefined);
+
+  projection = evaluate(messages.map(message => message.role === "system" ? { ...message, notice: "runInterrupted" } : message));
+  toolMessage = projection.groups.find(group => group.role === "assistant").msgs[0];
+  assert(projection.standaloneActivityFor(toolMessage), "a quiet notice without a footer cannot consume tool activity");
+  console.log("PASS failed Cron activity moves into its error footer and stays scoped across refreshes");
 }

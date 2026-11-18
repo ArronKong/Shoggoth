@@ -352,12 +352,11 @@ function validateMcpRoleGate(env, runtime = {}, argv = process.argv.slice(1)) {
   }
   let identity;
   try {
-    identity = typeof runtime.verifyCodeIdentity === "function"
-      ? runtime.verifyCodeIdentity(expectedParent)
-      : assertCodeIdentity(expectedParent, {
-        teamIdentifier: CODEX_TEAM_IDENTIFIER,
-        designatedRequirement: CODEX_DESIGNATED_REQUIREMENT,
-      }, { verifyTimeoutMs: CODEX_PARENT_VERIFY_TIMEOUT_MS });
+    const verify = typeof runtime.verifyCodeIdentity === "function" ? runtime.verifyCodeIdentity : assertCodeIdentity;
+    identity = verify(expectedParent, {
+      teamIdentifier: CODEX_TEAM_IDENTIFIER,
+      designatedRequirement: CODEX_DESIGNATED_REQUIREMENT,
+    }, { verifyTimeoutMs: CODEX_PARENT_VERIFY_TIMEOUT_MS, readAhead: true });
   } catch (error) {
     throw bootstrapFailure(error?.code === "CODE_IDENTITY_TIMEOUT"
       ? "BOOTSTRAP_CODE_IDENTITY_TIMEOUT" : "BOOTSTRAP_CODE_IDENTITY_INVALID");

@@ -5616,6 +5616,10 @@ test("steer 只命中当前 assigned turn，并以 operationId 做同参并发�
   });
   const { ack } = await sendAndDrain(value, { operationId: "steer-source" });
   const running = value.coordinator.getRun(ack.run.id);
+  const subscription = value.coordinator.subscribeRun(running.id, { streamId: null, afterSeq: 0 }, () => {});
+  assert.ok(subscription.events.some(event => event.type === "status"
+    && event.payload.status === "running" && event.payload.steer === true));
+  subscription.unsubscribe();
   value.host.emit({ known: true, type: "text_delta", method: "item/agentMessage/delta", itemId: "pre-steer-text",
     threadId: running.runtimeTurnRef.sessionId, turnId: running.runtimeTurnRef.turnId, delta: "Visible before steering" });
   const input = {
