@@ -421,6 +421,7 @@ if (!process.versions.electron) {
         const { readClientToken } = require("../app/agent-service/client");
         const { PROTOCOL_VERSION } = require("../app/agent-service/server");
         const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
+        const { transcriptEventId } = require("../app/agent-service/transcript-store");
         const { workRunCoordinator: coordinator, groupChatService, groupChatStore, transcriptStore, chatSessionStore } = service;
         coordinator.beforeMemoryCompaction = null;
         coordinator.getRuntimeModelContextWindow = () => 96_000;
@@ -457,10 +458,31 @@ if (!process.versions.electron) {
         const current = chatSessionStore.getSession(session.sessionKey);
         chatSessionStore.switchRuntime(session.sessionKey, { bindingId: current.runtimeBindingId,
           revision: current.revision, clearModelOverride: false });
-        const verified = await f.send(session.sessionKey, "group-continuation-review", `Read [eventId=${original.id}]`);
-        assert.equal(verified.status, "completed", verified.errorCode);
-        assert.equal(verified.runtimeTurnRef, null);
         const groupsBefore = groupChatStore.listGroups();
+        const restored = await f.send(session.sessionKey, "group-continuation-recent-history", "Continue the conversation.");
+        assert.equal(restored.status, "running", restored.errorCode);
+        assert.equal(coordinator.runExecutionContracts.get(restored.id).contextRequest.recentHistoryOnly, true);
+        await f.complete(restored, "Recent history restored for a normal turn.");
+        assert.equal(nativeTurns(), 2);
+        assert.deepEqual(groupChatStore.listGroups(), groupsBefore);
+
+        // Seed the completed read-only response that an older app would have
+        // persisted. The current app must verify it by reading the original
+        // tool event and group receipt before navigating to the group.
+        const operationId = "group-continuation-legacy-review";
+        const legacy = service.workDispatcher.enqueue({ id: operationId, profileId: session.profileId, source: "chat",
+          sourceId: session.sessionKey, idempotencyKey: `shoggoth:chat-send:${operationId}`, workspace: session.workspace });
+        assert.equal(service.workDispatcher.admit(legacy.id, { writable: false }).disposition, "started");
+        service.workDispatcher.transition(legacy.id, "running");
+        const legacyEvent = { profileId: session.profileId, sessionId: session.id, runId: legacy.id, runtimeRef: null };
+        transcriptStore.appendEvent({ ...legacyEvent, id: transcriptEventId("chat-user", operationId), kind: "user",
+          content: { operationId, text: `Read [eventId=${original.id}]` } });
+        const target = { groupId: receipt.groupId, ownerScope: receipt.ownerScope, sourceEventId: original.id };
+        transcriptStore.appendEvent({ ...legacyEvent, id: transcriptEventId("context-partial-answer", legacy.id),
+          kind: "assistant", contextExcluded: true, content: { text: "Verified historical group creation.",
+            transcriptType: "text", phase: "final_answer", partialReview: true, partialReviewEventIds: [original.id], groupContinuation: target } });
+        assert.equal(service.workDispatcher.transition(legacy.id, "completed").runtimeTurnRef, null);
+
         await open("normal");
         const groupButton = ".chat-continuation-action";
         await until(() => js(`!!document.querySelector(${JSON.stringify(groupButton)})`), "original group action on saved direct-chat answer");
@@ -468,8 +490,8 @@ if (!process.versions.electron) {
         await until(() => js(`!!document.querySelector('[data-group-timeline]') && document.querySelector('.chat-header')?.textContent.includes(${JSON.stringify(name)})`), "verified original group panel in React");
         assert.deepEqual(groupChatStore.listGroups(), groupsBefore);
         assert.equal(groupsBefore.filter(row => (row.group?.id ?? row.id) === receipt.groupId).length, 1);
-        assert.equal(nativeTurns(), 1);
-        console.log("PASS production React/Electron: saved continuation opens the verified original group without replaying the tool or starting another Runtime turn (1/1)");
+        assert.equal(nativeTurns(), 2);
+        console.log("PASS production React/Electron: recent history keeps normal turns and the legacy continuation opens the verified original group without replaying the tool or starting another Runtime turn");
         return;
       }
 

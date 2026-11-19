@@ -106,6 +106,7 @@ function testGeneratedMethodMappingAndContracts() {
     turnSteer: "turn/steer",
     turnInterrupt: "turn/interrupt",
     accountRead: "account/read",
+    accountRateLimitsRead: "account/rateLimits/read",
     accountLoginStart: "account/login/start",
     accountLoginCancel: "account/login/cancel",
     accountLogout: "account/logout",

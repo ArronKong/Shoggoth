@@ -8,6 +8,7 @@ const path = require("node:path");
 const test = require("node:test");
 const { createAgentService, PROTOCOL_VERSION } = require("../app/agent-service/server");
 const { resolveServicePaths } = require("../app/agent-service/paths");
+const { readClientToken, requestService } = require("../app/agent-service/client");
 const { MCP_STDIO_PROTOCOL_VERSION } = require("../app/shoggoth-mcp-helper");
 const { FakeHost } = require("./shoggoth-work-run-coordinator-unit.cjs");
 
@@ -62,8 +63,13 @@ test("parallel bridges retain independent tokens and terminal authority never re
   try {
     await service.start();
     const profile = service.productStore.listAgentProfiles()[0];
-    // Writable Runs may not overlap their canonical workspaces. Use siblings
-    // so this fixture tests bridge isolation independently of the writer gate.
+    const created = await requestService(paths, { token: readClientToken(paths), version: PROTOCOL_VERSION, method: "agent.create",
+      params: { operationId: "bridge-second-agent", backendId: "shoggoth", name: "Second bridge Agent",
+        defaultCwd: null, createdAt: Date.now() } });
+    const secondProfile = service.productStore.getAgentProfile(created.profile.id);
+    assert.notEqual(secondProfile.runtimeProfileId, profile.runtimeProfileId);
+    // Each writable Run reserves both its project and its Agent workspace.
+    // Use separate Agents and sibling projects to exercise both bridges at once.
     const firstWorkspace = path.join(root, "first-workspace");
     fs.mkdirSync(firstWorkspace);
     const session = service.chatSessionStore.createSession({ operationId: "bridge-fixture-session",
@@ -71,7 +77,7 @@ test("parallel bridges retain independent tokens and terminal authority never re
     const secondWorkspace = path.join(root, "second-workspace");
     fs.mkdirSync(secondWorkspace);
     const secondSession = service.chatSessionStore.createSession({ operationId: "bridge-second-session",
-      profileId: profile.id, workspace: secondWorkspace, createdAt: Date.now() });
+      profileId: secondProfile.id, workspace: secondWorkspace, createdAt: Date.now() });
     const start = async (operationId, selectedSession = session) => {
       const ack = await service.workRunCoordinator.send({ operationId,
         sessionKey: selectedSession.sessionKey, prompt: "local fixture only" });
@@ -79,11 +85,11 @@ test("parallel bridges retain independent tokens and terminal authority never re
       assert.equal(service.workRunCoordinator.getRun(ack.run.id).status, "running");
       return ack.run.id;
     };
-    const openBridge = async runId => {
+    const openBridge = async (runId, selectedProfile = profile) => {
       bridgeRunId = runId;
       const connection = await conversation(paths.socketPath);
       connection.send({ version: PROTOCOL_VERSION, method: "mcp.runtime.bridge.open", params: {
-        runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId,
+        runtimeProfileId: selectedProfile.runtimeProfileId, runtimeAccountId: selectedProfile.runtimeAccountId,
         gatePath: path.join(paths.runtimeDir, "fixture.gate"), nonce: "a".repeat(64), parentPid: process.pid,
       } });
       assert.deepEqual(await connection.next(), { ok: true, result: { bridged: true } });
@@ -103,7 +109,7 @@ test("parallel bridges retain independent tokens and terminal authority never re
     assert.equal((await call(2)).result.isError, false);
     assert.equal(calls, 1);
     const secondRunId = await start("bridge-run-two", secondSession);
-    secondBridge = await openBridge(secondRunId);
+    secondBridge = await openBridge(secondRunId, secondProfile);
     assert.equal((await call(3)).result.isError, false, "opening another bridge must not revoke the first token");
     assert.equal((await call(2, secondBridge)).result.isError, false);
     assert.equal(calls, 3);
