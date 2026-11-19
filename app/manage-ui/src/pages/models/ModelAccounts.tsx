@@ -14,7 +14,7 @@ export default function ModelAccounts({ backend, refreshKey, onChanged }: {
   const { t } = useTranslation();
   const endpointController = useMemo(() => createShoggothEndpointController(), []);
   return <div className={styles.stack} id="models-runtime-accounts">
-    <OAuthProvidersCard backend={backend.id} refreshKey={refreshKey} onChanged={onChanged} />
+    <OAuthProvidersCard backend={backend.id} showQuota refreshKey={refreshKey} onChanged={onChanged} />
     {backend.id === "shoggoth" && <CustomEndpointsPanel controller={endpointController} active
       refreshKey={refreshKey} description={t("models.shoggothEndpointsSubtitle")} onChanged={onChanged} />}
   </div>;

@@ -43,6 +43,10 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.meta .missedRunTime {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .agent {
   display: flex;
   align-items: center;

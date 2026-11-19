@@ -1014,6 +1014,13 @@
   -webkit-mask-repeat: no-repeat;
           mask-repeat: no-repeat;
 }
+.chat-thread:focus { outline: none; }
+
+.chat-thread[data-thread-keyboard-focus]:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: -2px;
+}
+
 .chat-thread__inner {
   display: flex;
   flex-direction: column;
@@ -1097,6 +1104,12 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-group.is-search-target .chat-group__stack::after { animation: none; opacity: 0.9; }
+}
+
+.chat-thread [data-chat-message-located] > :is(.chat-bubble, .chat-att-row) {
+  outline: 2px solid #000;
+  outline-offset: 3px;
+  border-radius: 14px;
 }
 
 .chat-bubble {

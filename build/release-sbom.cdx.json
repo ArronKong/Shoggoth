@@ -6,7 +6,7 @@
     "component": {
       "type": "application",
       "name": "Shoggoth",
-      "version": "0.8.347",
+      "version": "0.8.352",
       "licenses": [
         {
           "license": {
@@ -14,8 +14,8 @@
           }
         }
       ],
-      "bom-ref": "pkg:generic/shoggoth@0.8.347",
-      "purl": "pkg:generic/shoggoth@0.8.347",
+      "bom-ref": "pkg:generic/shoggoth@0.8.352",
+      "purl": "pkg:generic/shoggoth@0.8.352",
       "properties": [
         {
           "name": "shoggoth:release-metadata",
@@ -13613,7 +13613,7 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:generic/shoggoth@0.8.347",
+      "ref": "pkg:generic/shoggoth@0.8.352",
       "dependsOn": [
         "pkg:generic/cua-driver@0.22.0",
         "pkg:generic/multilingual-e5-small@614241f622f53c4eeff9890bdc4f31cfecc418b3",

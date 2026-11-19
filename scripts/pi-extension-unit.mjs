@@ -236,11 +236,14 @@ try {
   assert.match(cronTool.description, /milliseconds/u);
   assert.match(cronTool.parameters.properties.schedule.description, /milliseconds/u);
   const dueAtSeconds = Math.floor(Date.now() / 1000) + 3 * 3600 + 35 * 60;
+  const modelSelection = { bindingId: "66666666-6666-4666-8666-666666666666", model: "fixture-model",
+    modelProviderRef: "@chatgpt" };
   const malformedCronArgs = {
     name: "提醒：Claude 额度刷新",
     prompt: "提醒用户：Claude 额度已刷新。",
     workspace: "null",
     schedule: JSON.stringify({ kind: "at", at: dueAtSeconds }),
+    modelSelection: JSON.stringify(modelSelection),
     enabled: true,
     misfirePolicy: "latest",
     maxCatchUp: 1,
@@ -256,6 +259,7 @@ try {
     ...malformedCronArgs,
     workspace: null,
     schedule: { kind: "at", at: dueAtSeconds * 1000 },
+    modelSelection,
     threadId: null,
   });
   assert.equal(typeof malformedCronArgs.schedule, "string");
@@ -272,6 +276,7 @@ try {
     jobId: "66666666-6666-4666-8666-666666666666",
     patch: JSON.stringify({
       schedule: JSON.stringify({ kind: "at", at: dueAtSeconds }),
+      modelSelection: "null",
       workspace: "null", threadPolicy: "new", threadId: "null",
     }),
   };
@@ -280,6 +285,7 @@ try {
   assert.equal(validateMcpProductToolArguments("cron_update", preparedUpdateArgs), true);
   assert.deepEqual(preparedUpdateArgs.patch, {
     schedule: { kind: "at", at: dueAtSeconds * 1000 },
+    modelSelection: null,
     workspace: null, threadPolicy: "new", threadId: null,
   });
   const cardArgs = {

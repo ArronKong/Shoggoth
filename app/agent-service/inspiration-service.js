@@ -76,7 +76,7 @@ class InspirationService {
     }
     if (materialize && execution.sessionKey && !execution.external) {
       return inspirationPrompt(execution, prepareChatAttachments(this.store.media,
-        execution.attachments || [], execution.sessionKey).map(item => item.path));
+        execution.attachments || [], execution.sessionKey, execution.profileId).map(item => item.workspacePath));
     }
     return inspirationPrompt(execution, (execution.attachments || []).map(attachment => materialize
       ? this.store.media.materialize(attachment) : this.store.media.filePath(attachment)));

@@ -50,6 +50,11 @@ function variants(value) {
   values.add(Buffer.from(value).toString("base64"));
   return [...values].filter(Boolean);
 }
+function compileKnownSecrets(entries) {
+  return entries.filter(entry => textValue(entry.value, MAX_SECRET_BYTES) && entry.value.length
+    && SECRET_KINDS.includes(entry.kind || "secret"))
+    .map(entry => ({ ...entry, variants: variants(entry.value) }));
+}
 function knownMatchBoundary(text, start, value, original = value) {
   if (original === "/" && value === "/") {
     // Old conversations may already contain a slash registered as a secret.
@@ -116,8 +121,7 @@ function jsonLeaves(source) {
 
 function detectSecrets(text, options = {}) {
   if (!textValue(text)) fail();
-  const known = (options.known || []).filter(entry => textValue(entry.value, MAX_SECRET_BYTES) && entry.value.length
-    && SECRET_KINDS.includes(entry.kind || "secret"));
+  const known = options.compiledKnown ?? compileKnownSecrets(options.known || []);
   const autoDetect = options.autoDetect !== false;
   const selections = options.selections || [];
   if (!Array.isArray(selections) || selections.length > 64) fail();
@@ -146,7 +150,7 @@ function detectSecrets(text, options = {}) {
       const kind = leaf.name && fieldKind(leaf.name);
       if (autoDetect && kind && !isPlaceholder(leaf.value)) add(leaf.start, leaf.end, leaf.value, kind, "field", { json: true });
       else {
-        const nested = detectSecrets(leaf.value, { known, structured: false, autoDetect });
+        const nested = detectSecrets(leaf.value, { compiledKnown: known, structured: false, autoDetect });
         if (nested.matches.length || nested.ambiguous.length) {
           // A JSON value may have multiple references; its original logical
           // string is reconstructed by replaceSecrets and escaped exactly once.
@@ -157,7 +161,7 @@ function detectSecrets(text, options = {}) {
       }
     }
   } else {
-    for (const entry of known) for (const value of variants(entry.value)) {
+    for (const entry of known) for (const value of entry.variants) {
       for (let start = text.indexOf(value); start >= 0; start = text.indexOf(value, start + value.length)) {
         if (!knownMatchBoundary(text, start, value, entry.value)) continue;
         add(start, start + value.length, entry.value, entry.kind || "secret", "known", { reference: entry.reference,
@@ -246,4 +250,4 @@ async function replaceSecrets(text, detection, replace) {
   return result + text.slice(cursor);
 }
 
-module.exports = { detectSecrets, replaceSecrets, fieldKind, variants, knownMatchBoundary, textValue, MAX_INPUT_BYTES, MAX_SECRET_BYTES };
+module.exports = { detectSecrets, compileKnownSecrets, replaceSecrets, fieldKind, variants, knownMatchBoundary, textValue, MAX_INPUT_BYTES, MAX_SECRET_BYTES };

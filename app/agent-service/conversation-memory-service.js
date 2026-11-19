@@ -29,13 +29,14 @@ function removalReason(args) { return args.mode === "memory_only" ? "memory_remo
 
 class ConversationMemoryService {
   constructor({ memoryEngine, memoryStore, transcriptStore, chatSessionStore, getRunSessionKey,
-    getInspirationOrigin = null, memoryProvenanceService = null, semanticSearch = null }) {
+    getInspirationOrigin = null, memoryProvenanceService = null, semanticSearch = null, isBackgroundTaskSession = null }) {
     this.engine = memoryEngine;
     this.store = memoryStore;
     this.transcripts = transcriptStore;
     this.sessions = chatSessionStore;
     this.getRunSessionKey = getRunSessionKey;
     this.getInspirationOrigin = getInspirationOrigin;
+    this.isBackgroundTaskSession = isBackgroundTaskSession;
     this.provenance = memoryProvenanceService;
     this.semanticSearch = semanticSearch;
     this.searchEvidence = new WeakMap();
@@ -51,6 +52,11 @@ class ConversationMemoryService {
   }
   bind(name, args, run) {
     if (hasSecret(JSON.stringify(args))) throw serviceError("MEMORY_SECRET_REJECTED", "记忆不能包含凭据");
+    // A background session's input is a brief the Agent wrote for itself, not
+    // the user's own words; direct-conversation memory writes stay closed.
+    if (run.source === "chat" && this.isBackgroundTaskSession?.(run.sourceId) === true) {
+      throw serviceError("MCP_TOOL_FORBIDDEN", "该记忆操作需要当前用户对话");
+    }
     if (run.source === "inspiration") {
       let origin;
       try { origin = this.getInspirationOrigin?.(run); } catch { origin = null; }

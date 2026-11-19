@@ -371,7 +371,7 @@ test("a smaller Codex model cannot implicitly use Pi and preserves its source se
   } finally { await f.close(); }
 });
 
-test("partial native history gates unresolved work and allows bounded original references and independent questions", async () => {
+test("a detached direct chat without a summary runtime resumes once with recent original messages", async () => {
   let f = await openHandoffFixture();
   try {
     enable(f);
@@ -381,20 +381,12 @@ test("partial native history gates unresolved work and allows bounded original r
     const first = await f.send(session.sessionKey, "recent-history-first");
     await f.complete(first);
     const before = chatSessionStore.getSession(session.sessionKey);
-    transcriptStore.appendEvent({ profileId: session.profileId, sessionId: session.id,
-      id: "early-complete-result", runId: first.id, kind: "tool_result", content: { text: "Receipt recorded." },
-      contextContent: { contextComplete: true, tool: { name: "invoice_status", status: "completed",
-        success: true, output: { receipt: "NOT_PAID", serviceReceipt: "fixture-receipt" } } } });
-    transcriptStore.appendEvent({ profileId: session.profileId, sessionId: session.id,
-      id: "early-missing-attachment", runId: first.id, kind: "user", content: {
-        text: "Use the invoice attachment.", attachments: [{ id: "9f90b9a4-3fae-45e9-9abb-333a28821fc3",
-          name: "invoice.pdf", mimeType: "application/pdf", size: 64 }] } });
+    const olderUser = transcriptStore.listEvents(session.profileId, session.id)
+      .find(event => event.kind === "user" && event.runId === first.id);
     appendHistory(f, session, 8);
     const append = (id, kind, text, contextExcluded = false) => transcriptStore.appendEvent({
       profileId: session.profileId, sessionId: session.id, id, kind, contextExcluded, content: { text },
     });
-    append("early-constraint", "user", "Never pay before confirming the signed invoice.");
-    append("early-incomplete-result", "tool_result", "The original receipt was cut off.");
     append("recent-request", "user", "Please inspect the invoice before sending anything.");
     append("excluded-history", "assistant", "EXCLUDED_HISTORY_BODY", true);
     append("old-tool-output", "tool_result", "DO_NOT_REPLAY_TOOL_PAYLOAD");
@@ -402,73 +394,68 @@ test("partial native history gates unresolved work and allows bounded original r
     chatSessionStore.switchRuntime(session.sessionKey, { bindingId: before.runtimeBindingId,
       revision: before.revision, clearModelOverride: false });
 
-    const host = f.transport.hosts.get("codex");
-    const prepareHooks = coordinator.hookService.prepareRun;
-    let hookCalls = 0;
-    coordinator.hookService.prepareRun = function (...args) {
-      hookCalls++;
-      return prepareHooks.apply(this, args);
-    };
-    for (const [index, prompt] of ["Continue from there.", "Choose B.", "Run it again.", "Send the payment."].entries()) {
-      const blocked = await f.send(session.sessionKey, `partial-blocked-${index}`, prompt);
-      assert.equal(blocked.status, "failed");
-      assert.equal(blocked.errorCode, "CONTEXT_CONTINUATION_DETAILS_REQUIRED");
-      assert.equal(blocked.runtimeTurnRef, null);
-    }
-    const incomplete = await f.send(session.sessionKey, "partial-incomplete", "Read [eventId=early-incomplete-result]");
-    assert.equal(incomplete.errorCode, "CONTEXT_CONTINUATION_SOURCE_UNAVAILABLE");
-    const missingAttachment = await f.send(session.sessionKey, "partial-attachment", "Read [eventId=early-missing-attachment]");
-    assert.equal(missingAttachment.errorCode, "CONTEXT_CONTINUATION_SOURCE_UNAVAILABLE");
-    assert.equal(host.turnStartCalls, 1);
-    const operationId = "recent-history-reference";
-    const prompt = "Read [eventId=early-constraint], [eventId=early-complete-result]";
-    const run = await f.send(session.sessionKey, operationId, prompt);
-    assert.equal(run.status, "completed", run.errorCode);
-    assert.equal(run.runtimeTurnRef, null);
-    const events = transcriptStore.listEvents(session.profileId, session.id);
-    const answer = events.find(event => event.kind === "assistant" && event.runId === run.id);
-    assert.equal(answer.contextExcluded, true);
-    assert.deepEqual(answer.content.partialReviewEventIds, ["early-constraint", "early-complete-result"]);
-    assert.match(answer.content.text, /Never pay before confirming the signed invoice/u);
-    assert.match(answer.content.text, /NOT_PAID.*fixture-receipt/su);
-    assert.doesNotMatch(answer.content.text, /SOURCE_0|EXCLUDED_HISTORY_BODY|DO_NOT_REPLAY_TOOL_PAYLOAD/u);
+    const operationId = "recent-history-continue";
+    const run = await f.send(session.sessionKey, operationId, "Continue from there.");
+    assert.equal(run.status, "running", run.errorCode);
+    const contract = f.transport.acquisitions.at(-1).options.executionContract;
+    assert.equal(contract.contextRequest.recentHistoryOnly, true);
+    assert.equal(contract.contextRequest.historyTruncated, true);
+    assert.equal(contract.contextRequest.completeness, "partial");
+    assert.match(contract.dynamicContext, /Partial history from conversation/u);
+    assert.match(contract.dynamicContext, /\[eventId=recent-request\] USER: Please inspect the invoice/u);
+    assert.match(contract.dynamicContext, /\[eventId=recent-result\] ASSISTANT: The invoice is ready/u);
+    assert.match(contract.turnDeveloperInstructions, /conversation_search.*conversation_get/u);
+    assert.doesNotMatch(contract.dynamicContext, /SOURCE_0|EXCLUDED_HISTORY_BODY|DO_NOT_REPLAY_TOOL_PAYLOAD|Continue from there/u);
     assert.equal(coordinator.dispatcher.listRuns({ source: "compaction" }).length, 0);
     assert.ok(f.transport.acquisitions.every(entry => entry.binding.runtime === "codex"));
     const after = chatSessionStore.getSession(session.sessionKey);
     assert.equal(after.id, before.id);
     assert.equal(after.runtimeBindingId, before.runtimeBindingId);
-    assert.equal(after.runtimeSessionId, null);
-    const replay = await f.send(session.sessionKey, operationId, prompt);
+    assert.notEqual(after.runtimeSessionId, before.runtimeSessionId);
+    const replay = await f.send(session.sessionKey, operationId, "Continue from there.");
     assert.equal(replay.id, run.id);
-    assert.equal(host.turnStartCalls, 1);
+    const host = f.transport.hosts.get("codex");
+    assert.equal(host.turnStartCalls, 2);
+    const events = transcriptStore.listEvents(session.profileId, session.id);
     assert.equal(events.filter(event => event.kind === "user" && event.content.operationId === operationId).length, 1);
-    assert.ok(!events.some(event => event.content?.transcriptType === "context.native.seeded"));
-    assert.equal(hookCalls, 0, "read-only or blocked continuation does not run native hooks");
+    assert.equal(events.filter(event => event.content?.transcriptType === "context.native.seeded").length, 1);
+    assert.equal(coordinator.getRuntimeContext(after).productContext.transfer.mode, "partial");
+    assert.equal(coordinator.getRuntimeContext(after).productContext.transfer.state, "accepted");
+    const recovered = await f.callTool(run, "conversation_get", { sessionId: session.id, eventId: olderUser.id });
+    assert.ok(recovered.events.some(event => event.eventId === olderUser.id && event.text === olderUser.content.text));
+    await f.complete(run);
 
+    // Later messages on the accepted partial thread are ordinary writable
+    // turns, including after a Service restart. None of them is diverted to
+    // a tool-free review or asked for more history.
+    const next = await f.send(session.sessionKey, "partial-thread-next", "Choose B.");
+    assert.equal(next.status, "running", next.errorCode);
+    assert.equal(next.runtimeSessionRef.sessionId, run.runtimeSessionRef.sessionId);
+    assert.equal(host.turnStartCalls, 3);
+    await f.complete(next);
     const { root, transport } = f;
     await f.close({ remove: false });
     f = await openHandoffFixture({ root, transport });
     enable(f);
     f.service.workRunCoordinator.getRuntimeModelContextWindow = () => SMALL_WINDOW;
-    const restartedHost = f.transport.hosts.get("codex");
-    const stillBlocked = await f.send(session.sessionKey, "partial-after-restart", "Choose B.");
-    assert.equal(stillBlocked.errorCode, "CONTEXT_CONTINUATION_DETAILS_REQUIRED");
-    const standalone = await f.send(session.sessionKey, "partial-independent", "What is 8 + 13?");
-    assert.equal(standalone.status, "completed", standalone.errorCode);
-    assert.equal(standalone.runtimeTurnRef, null);
-    assert.ok(f.service.transcriptStore.listEvents(session.profileId, session.id)
-      .some(event => event.runId === standalone.id && event.content.text?.includes("8 + 13 = 21")));
-    assert.equal(restartedHost.turnStartCalls, 1);
+    const restarted = await f.send(session.sessionKey, "partial-thread-after-restart", "Install the connector from the link above.");
+    assert.equal(restarted.status, "running", restarted.errorCode);
+    assert.equal(restarted.runtimeSessionRef.sessionId, run.runtimeSessionRef.sessionId);
+    await f.complete(restarted);
+    assert.ok(!f.service.transcriptStore.listEvents(session.profileId, session.id)
+      .some(event => event.content?.transcriptType === "context.partial.review"));
 
+    const ready = f.service.chatSessionStore.getSession(session.sessionKey);
+    f.service.chatSessionStore.switchRuntime(session.sessionKey, { bindingId: ready.runtimeBindingId,
+      revision: ready.revision, clearModelOverride: false });
     f.service.workRunCoordinator.validateUiAction = () => ({ origin: "ui_action_submission" });
     const card = await f.send(session.sessionKey, "ui-operation-fixture", "Submit the current card.");
     assert.equal(card.status, "failed");
     assert.equal(card.errorCode, "CONTEXT_COMPACTION_REQUIRED");
-    assert.equal(f.transport.hosts.get("codex").turnStartCalls, 1);
   } finally { await f.close(); }
 });
 
-test("recent history is rechecked before an isolated partial answer is published", async () => {
+test("recent history is rechecked after a detached chat has been admitted", async () => {
   const f = await openHandoffFixture();
   try {
     enable(f);
@@ -482,15 +469,17 @@ test("recent history is rechecked before an isolated partial answer is published
       id: "recent-excluded-after-admission", kind: "user", content: { text: "This source will be excluded." } });
     chatSessionStore.switchRuntime(session.sessionKey, { bindingId: before.runtimeBindingId,
       revision: before.revision, clearModelOverride: false });
-    const authorize = coordinator.authorizePartialContinuation;
+    const acquire = coordinator.runtimeManager.acquire.bind(coordinator.runtimeManager);
     let exclusionApplied = false;
-    coordinator.authorizePartialContinuation = run => {
-      authorize(run);
-      exclusionApplied = true;
-      transcriptStore.setContextExcluded({ profileId: session.profileId, sessionId: session.id,
-        eventId: "recent-excluded-after-admission", contextExcluded: true });
+    coordinator.runtimeManager.acquire = async (binding, options) => {
+      if (options.executionContract.contextRequest?.recentHistoryOnly && !exclusionApplied) {
+        exclusionApplied = true;
+        transcriptStore.setContextExcluded({ profileId: session.profileId, sessionId: session.id,
+          eventId: "recent-excluded-after-admission", contextExcluded: true });
+      }
+      return acquire(binding, options);
     };
-    const run = await f.send(session.sessionKey, "recent-history-race", "Read [eventId=recent-excluded-after-admission]");
+    const run = await f.send(session.sessionKey, "recent-history-race");
     assert.equal(exclusionApplied, true);
     assert.equal(run.status, "failed");
     assert.equal(run.errorCode, "CONTEXT_SOURCE_STALE");
@@ -499,167 +488,7 @@ test("recent history is rechecked before an isolated partial answer is published
   } finally { await f.close(); }
 });
 
-test("partial continuation reads recorded options from the original session without responding to them", async () => {
-  const f = await openHandoffFixture();
-  try {
-    enable(f);
-    const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore } = f.service;
-    coordinator.getRuntimeModelContextWindow = () => SMALL_WINDOW;
-    const { transcriptEventId } = require("../app/agent-service/transcript-store");
-    const session = f.createSession();
-    const original = await f.send(session.sessionKey, "partial-original-choice", "Describe the layout options.");
-    await f.complete(original);
-    const owner = { profileId: session.profileId, sessionId: session.id, runId: original.id };
-    const requestId = "original-layout-prompt";
-    const request = transcriptStore.appendEvent({ ...owner, id: transcriptEventId("chat-request", requestId), kind: "input",
-      content: { transcriptType: "prompt", requestId, method: "mcpServer/elicitation/request", kind: "mcp_elicitation",
-        mode: "form", message: "Choose a layout in the original run.", requestedSchema: { type: "object", properties: {
-          layout: { type: "string", title: "Layout", enum: ["draft-layout-left", "draft-layout-right"], enumNames: ["Left", "Right"] },
-          private: { type: "string", title: "Private answer", writeOnly: true, enum: ["private-choice-a", "private-choice-b"] },
-        } } } });
-    const response = transcriptStore.appendEvent({ ...owner, id: transcriptEventId("interactive-response", requestId), kind: "user",
-      content: { transcriptType: "interaction.response", requestId, operationId: "original-layout-response", text: "previous-user-answer" } });
-    appendHistory(f, session, 8);
-    const before = chatSessionStore.getSession(session.sessionKey);
-    chatSessionStore.switchRuntime(session.sessionKey, { bindingId: before.runtimeBindingId,
-      revision: before.revision, clearModelOverride: false });
-    const host = f.transport.hosts.get("codex");
-    const prompt = `Read [eventId=${request.id}]`;
-    const run = await f.send(session.sessionKey, "recover-recorded-layout-options", prompt);
-    assert.equal(run.status, "completed", run.errorCode);
-    assert.equal(run.runtimeSessionRef, null);
-    assert.equal(run.runtimeTurnRef, null);
-    const answer = transcriptStore.listEvents(session.profileId, session.id).find(event => event.runId === run.id && event.kind === "assistant");
-    assert.equal(answer.contextExcluded, true);
-    assert.deepEqual(answer.content.partialReviewEventIds, [request.id, response.id]);
-    assert.match(answer.content.text, /historical_record_only.*Left.*Right.*"response": "recorded"/su);
-    assert.match(answer.content.text, new RegExp(`\\[eventId=${request.id}\\]`, "u"));
-    assert.doesNotMatch(answer.content.text, /draft-layout|private-choice|previous-user-answer|original-layout-prompt/u);
-    assert.equal((await f.send(session.sessionKey, "recover-recorded-layout-options", prompt)).id, run.id);
-
-    transcriptStore.setContextExcluded({ profileId: session.profileId, sessionId: session.id, eventId: response.id, contextExcluded: true });
-    const onlyOptions = await f.send(session.sessionKey, "recover-layout-options-without-response", prompt);
-    assert.equal(onlyOptions.status, "completed", onlyOptions.errorCode);
-    const nextAnswer = transcriptStore.listEvents(session.profileId, session.id)
-      .find(event => event.runId === onlyOptions.id && event.kind === "assistant");
-    assert.deepEqual(nextAnswer.content.partialReviewEventIds, [request.id]);
-    assert.match(nextAnswer.content.text, /"response": null/u);
-    const choice = await f.send(session.sessionKey, "dont-replay-layout-choice", "Choose Right as before.");
-    assert.equal(choice.errorCode, "CONTEXT_CONTINUATION_DETAILS_REQUIRED");
-    assert.equal(choice.runtimeTurnRef, null);
-    assert.equal(host.turnStartCalls, 1);
-    assert.equal(chatSessionStore.getSession(session.sessionKey).runtimeSessionId, null);
-  } finally { await f.close(); }
-});
-
-test("partial continuation verifies a persisted group creation receipt without replaying its tool", async () => {
-  const f = await openHandoffFixture();
-  let web;
-  try {
-    enable(f);
-    const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore, groupChatService, groupChatStore,
-      permissionEngine } = f.service;
-    coordinator.getRuntimeModelContextWindow = () => SMALL_WINDOW;
-    const ipc = (method, params) => requestService(f.paths, { id: require("node:crypto").randomUUID(),
-      token: readClientToken(f.paths), version: PROTOCOL_VERSION, method, params }, { timeoutMs: 8_000 });
-    const peer = (await ipc("agent.create", { operationId: "receipt-peer-create", backendId: "shoggoth",
-      name: "Receipt peer", defaultCwd: null, createdAt: Date.now() })).profile;
-    const session = f.createSession();
-    const prior = await f.send(session.sessionKey, "receipt-original", "Create the receipts group.");
-    const authority = { profileId: prior.profileId };
-    const request = { action: "create", clientRequestId: "original-group-request", name: "Receipts group", purpose: "",
-      members: [f.profile, peer].map(p => ({ backendId: "shoggoth", agentId: p.agentId })) };
-    const preview = await groupChatService.agentAccess.query("group_chat_prepare", request, authority);
-    const args = { clientRequestId: request.clientRequestId, name: request.name, purpose: request.purpose,
-      members: request.members, ownerScope: preview.ownerScope, previewDigest: preview.previewDigest,
-      source: "chat", sourceId: session.sessionKey };
-    const host = f.transport.hosts.get("codex");
-    const { normalizeCodexEvent } = require("../app/agent-service/codex-event-normalizer");
-    const record = (id, input) => host.emit(normalizeCodexEvent({ method: "item/started", params: {
-      threadId: prior.runtimeTurnRef.sessionId, turnId: prior.runtimeTurnRef.turnId,
-      item: { type: "mcpToolCall", id, server: "shoggoth", tool: "group_chat_create", arguments: input },
-    } }));
-    record("runtime-item-original", args);
-    record("runtime-item-uncommitted", { ...args, clientRequestId: "missing-receipt" });
-    record("runtime-item-conflict", { ...args, name: "Different details" });
-    record("runtime-item-incomplete", { ...args, members: args.members.slice(0, 1) });
-    record("runtime-item-owner", { ...args, ownerScope: "ga1:former-owner" });
-    record("runtime-item-preview", { ...args, previewDigest: "a".repeat(64) });
-    const binding = await groupChatService.agentAccess.prepareManagement("group_chat_create", args, authority, prior.id);
-    const receipt = await groupChatService.agentAccess.manage("group_chat_create", args, authority, binding);
-    await f.complete(prior);
-    const history = await ipc("chat.history", { sessionKey: session.sessionKey, cursor: null, limit: 50 });
-    const originals = new Map(history.messages.filter(item => item.type === "tool")
-      .map(({ payload: { message } }) => [message.content[0].toolCallId, message.shoggoth.sourceEventId]));
-    const current = chatSessionStore.getSession(session.sessionKey);
-    assert.equal(originals.size, 6);
-    appendHistory(f, session, 8);
-    chatSessionStore.switchRuntime(session.sessionKey, { bindingId: current.runtimeBindingId,
-      revision: current.revision, clearModelOverride: false });
-    const beforeGroups = groupChatStore.listGroups();
-    const prompt = `Read [eventId=${originals.get("runtime-item-original")}]`;
-    const verified = await f.send(session.sessionKey, "verify-group-receipt", prompt);
-    assert.equal(verified.status, "completed", verified.errorCode);
-    assert.equal(verified.runtimeTurnRef, null);
-    const answer = transcriptStore.listEvents(session.profileId, session.id).find(event => event.runId === verified.id
-      && event.kind === "assistant");
-    assert.deepEqual(answer.content.partialReviewEventIds, [originals.get("runtime-item-original")]);
-    const continuation = { groupId: receipt.groupId, ownerScope: receipt.ownerScope, sourceEventId: originals.get("runtime-item-original") };
-    assert.deepEqual(answer.content.groupContinuation, continuation);
-    assert.match(answer.content.text, /group_creation_receipt/u);
-    assert.ok(answer.content.text.includes(receipt.groupId));
-    assert.doesNotMatch(answer.content.text, /original-group-request|runtime-item-original|Receipt peer|ga1:/u);
-    const page = await ipc("chat.history", { sessionKey: session.sessionKey, cursor: null, limit: 50 });
-    const display = page.messages.find(item => item.id === answer.id);
-    assert.deepEqual(display?.payload.message.shoggoth.groupContinuation, continuation);
-    const resolveTarget = () => ipc("chat.continuation.group.get", { sessionKey: session.sessionKey, answerEventId: answer.id });
-    assert.deepEqual(await resolveTarget(), { target: continuation });
-    assert.deepEqual(await ipc("chat.continuation.group.get", { sessionKey: f.createSession().sessionKey, answerEventId: answer.id }), { target: null });
-    assert.deepEqual(await ipc("chat.continuation.group.get", {
-      sessionKey: session.sessionKey, answerEventId: originals.get("runtime-item-original"),
-    }), { target: null });
-    const { ShoggothBackend } = require("../app/core/shoggoth-backend");
-    const { BackendRegistry } = require("../app/core/backend-registry");
-    const { startStaticServer } = require("../app/static-server");
-    const backend = new ShoggothBackend({ paths: f.paths });
-    backend._state = "started";
-    await backend._refreshManagedProfiles();
-    const registry = new BackendRegistry();
-    registry.register(backend);
-    web = await startStaticServer(0, { registry, homeDir: f.root, userDataRoot: path.join(f.root, "ui") });
-    const rest = (agentId, method = "GET") => {
-      const query = new URLSearchParams({ backend: "shoggoth", sessionKey: `agent:${f.profile.agentId}:${session.sessionKey}`,
-        answerEventId: answer.id });
-      return fetch(`${web.url}/__api/agents/${encodeURIComponent(agentId)}/group-continuation?${query}`, { method });
-    };
-    assert.deepEqual(await (await rest(f.profile.agentId)).json(), { target: continuation });
-    assert.equal((await rest(peer.agentId)).status, 409);
-    assert.equal((await rest(f.profile.agentId, "POST")).status, 405);
-    assert.equal((await f.send(session.sessionKey, "verify-group-receipt", prompt)).id, verified.id);
-    for (const name of ["uncommitted", "conflict", "incomplete", "owner", "preview"]) {
-      const blocked = await f.send(session.sessionKey, `verify-group-${name}`, `Read [eventId=${originals.get(`runtime-item-${name}`)}]`);
-      assert.equal(blocked.errorCode, "CONTEXT_CONTINUATION_SOURCE_UNAVAILABLE", name);
-      assert.equal(blocked.runtimeTurnRef, null);
-    }
-    permissionEngine.setProfileOverride(session.profileId, "group_chat_get", "deny");
-    assert.deepEqual(await resolveTarget(), { target: null });
-    assert.deepEqual(await (await rest(f.profile.agentId)).json(), { target: null });
-    assert.equal((await f.send(session.sessionKey, "verify-group-denied", prompt)).errorCode,
-      "CONTEXT_CONTINUATION_SOURCE_UNAVAILABLE");
-    permissionEngine.setProfileOverride(session.profileId, "group_chat_get", "allow");
-    transcriptStore.setContextExcluded({ profileId: session.profileId, sessionId: session.id,
-      eventId: originals.get("runtime-item-original"), contextExcluded: true });
-    assert.deepEqual(await resolveTarget(), { target: null });
-    assert.equal((await f.send(session.sessionKey, "verify-group-withdrawn", prompt)).errorCode,
-      "CONTEXT_CONTINUATION_SOURCE_UNAVAILABLE");
-    assert.deepEqual(groupChatStore.listGroups(), beforeGroups);
-    assert.equal(host.turnStartCalls, 1);
-  } finally {
-    try { await web?.close(); } finally { await f.close(); }
-  }
-});
-
-test("structured partial continuation dispatches one new turn with exact completed evidence and keeps later vague sends blocked", async () => {
+test("structured partial continuation dispatches one new turn with exact completed evidence and later sends run as normal turns", async () => {
   const f = await openHandoffFixture();
   try {
     enable(f);
@@ -725,17 +554,16 @@ test("structured partial continuation dispatches one new turn with exact complet
       .find(event => event.content?.transcriptType === "context.native.seeded" && event.runId === started.id);
     assert.equal(seeded?.content.partial, true);
     const vague = await f.send(session.sessionKey, "still-vague", "Continue that.");
-    assert.equal(vague.errorCode, "CONTEXT_CONTINUATION_DETAILS_REQUIRED");
-    const oldWrite = await f.send(session.sessionKey, "old-dependent-write", "Overwrite the production receipt using the earlier approval.");
-    assert.equal(oldWrite.errorCode, "CONTEXT_CONTINUATION_DETAILS_REQUIRED");
-    assert.equal(oldWrite.runtimeTurnRef, null);
-    assert.equal(host.turnStartCalls, 2);
+    assert.equal(vague.status, "running", vague.errorCode);
+    assert.equal(vague.runtimeSessionRef.sessionId, started.runtimeSessionRef.sessionId);
+    assert.equal(host.turnStartCalls, 3);
+    await f.complete(vague);
     const self = await f.send(session.sessionKey, "explicit-independent", encode({ ...selected, mode: "self-contained", evidence: [] }));
     assert.equal(self.status, "running", JSON.stringify(self));
     assert.notEqual(self.runtimeSessionRef.sessionId, started.runtimeSessionRef.sessionId);
     assert.doesNotMatch(JSON.stringify(host.lastTurnStartParams), /EXACT_BYTES|EXACT_RESULT/u);
     await f.complete(self);
-    assert.equal(host.turnStartCalls, 3);
+    assert.equal(host.turnStartCalls, 4);
   } finally { await f.close(); }
 });
 
@@ -778,9 +606,9 @@ test("structured continuation rechecks the saved attachment and original event i
     assert(transcriptStore.listEvents(session.profileId, session.id).some(event => event.runId === changed.id
       && event.content?.transcriptType === "context.native.incomplete"));
     const vague = await f.send(session.sessionKey, "wire-vague", "Overwrite the recipient list with what we agreed earlier.");
-    assert.equal(vague.errorCode, "CONTEXT_CONTINUATION_DETAILS_REQUIRED");
-    assert.equal(vague.runtimeTurnRef, null);
-    assert.equal(host.turnStartCalls, 1);
+    assert.equal(vague.status, "running", vague.errorCode);
+    assert.equal(host.turnStartCalls, 2);
+    await f.complete(vague);
     fs.writeFileSync(file, "EXACT_BYTES");
     mutate = () => transcriptStore.setContextExcluded({ profileId: session.profileId, sessionId: session.id,
       eventId: source.id, contextExcluded: true });
@@ -795,181 +623,7 @@ test("structured continuation rechecks the saved attachment and original event i
     const revoked = await f.send(session.sessionKey, "wire-revoked", prompt);
     assert.equal(revoked.errorCode, "CONTEXT_SOURCE_STALE");
     assert.equal(revoked.runtimeTurnRef, null);
-    assert.equal(host.turnStartCalls, 1);
-  } finally { await f.close(); }
-});
-
-test("standalone questions after partial history can only produce a tool-free Product answer", async () => {
-  let f = await openHandoffFixture();
-  try {
-    enable(f);
-    const { workRunCoordinator: coordinator, chatSessionStore, transcriptStore } = f.service;
-    coordinator.getRuntimeModelContextWindow = () => SMALL_WINDOW;
-    const session = f.createSession();
-    const prior = await f.send(session.sessionKey, "partial-answer-before", "What label goes on the observatory receipt?");
-    const receiptText = "The observatory receipt label is Amber.";
-    await f.complete(prior, receiptText);
-    const original = transcriptStore.listEvents(session.profileId, session.id)
-      .find(event => event.runId === prior.id && event.kind === "assistant");
-    const before = chatSessionStore.getSession(session.sessionKey), host = f.transport.hosts.get("codex");
-    appendHistory(f, session, 8);
-    chatSessionStore.switchRuntime(session.sessionKey, { bindingId: before.runtimeBindingId,
-      revision: before.revision, clearModelOverride: false });
-    const modelSessions = new Set(), requests = [];
-    host.configRead = async () => ({ config: { mcp_servers: { shoggoth: { command: "fixture" } } } });
-    host.experimentalFeatureList = async () => ({ data: [{ name: "shell_tool", enabled: false }], nextCursor: null });
-    host.mcpServerStatusList = async () => ({ data: [], nextCursor: null });
-    const threadStart = host.threadStart.bind(host), turnStart = host.turnStart.bind(host);
-    host.threadStart = async params => {
-      assert.equal(params.ephemeral, true);
-      assert.equal(params.approvalPolicy, "never");
-      assert.equal(params.sandbox, "read-only");
-      assert.equal(params.config["mcp_servers.shoggoth.enabled"], false);
-      const result = await threadStart(params);
-      modelSessions.add(result.thread.id);
-      return { ...result, model: "fixture-model", sandbox: { type: "readOnly", networkAccess: false }, approvalPolicy: "never" };
-    };
-    host.threadUnsubscribe = async ({ threadId }) => {
-      assert.equal(modelSessions.delete(threadId), true);
-      return { status: "unsubscribed" };
-    };
-    let result = { kind: "missing_context" };
-    let beforeResult = null;
-    host.turnStart = async params => {
-      assert.ok(modelSessions.has(params.threadId), "only the ephemeral isolated thread can run");
-      assert.equal(params.approvalPolicy, "never");
-      requests.push(JSON.parse(params.input[0].text));
-      const turn = await turnStart(params);
-      beforeResult?.();
-      host.emit({ known: true, type: "usage", threadId: params.threadId, turnId: turn.turn.id, responseId: turn.turn.id,
-        usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 } });
-      host.emit({ known: true, type: "text", threadId: params.threadId, turnId: turn.turn.id,
-        itemId: "reply", text: JSON.stringify(result), phase: "final_answer" });
-      host.emit({ known: true, type: "complete", threadId: params.threadId, turnId: turn.turn.id, status: "completed" });
-      return turn;
-    };
-    const unknown = await f.send(session.sessionKey, "partial-answer-dependent", "Deploy it as we agreed.");
-    assert.equal(unknown.errorCode, "CONTEXT_CONTINUATION_DETAILS_REQUIRED");
-    result = { kind: "answer", text: "A compiler translates source code into another representation." };
-    const operationId = "partial-answer-general-knowledge", prompt = "What does a compiler do?";
-    const run = await f.send(session.sessionKey, operationId, prompt);
-    assert.equal(run.status, "completed", run.errorCode);
-    assert.equal(run.runtimeTurnRef, null);
-    assert.equal(run.runtimeSessionRef, null);
-    assert.equal((await f.send(session.sessionKey, operationId, prompt)).id, run.id);
-    assert.equal(modelSessions.size, 0);
-    assert.deepEqual(requests, [{ request: "Deploy it as we agreed." }, { request: prompt }]);
-    assert.equal(chatSessionStore.getSession(session.sessionKey).runtimeSessionId, null);
-
-    const lookup = { kind: "lookup", query: "observatory receipt" };
-    const recoveredQuestion = "What label did we agree on for the observatory receipt?";
-    const nextModelOutput = () => requests.at(-1).references
-      ? { kind: "supported_answer", text: "The label is Amber.", eventIds: [original.id] } : lookup;
-    beforeResult = () => { result = nextModelOutput(); };
-    const recoveredRead = await f.send(session.sessionKey, "partial-answer-history", recoveredQuestion);
-    assert.equal(recoveredRead.status, "completed", recoveredRead.errorCode);
-    assert.equal(recoveredRead.runtimeTurnRef, null);
-    assert.deepEqual(requests.at(-1).references.find(event => event.eventId === original.id),
-      { eventId: original.id, kind: "assistant", text: receiptText });
-    const recoveredEvent = transcriptStore.listEvents(session.profileId, session.id)
-      .find(event => event.runId === recoveredRead.id && event.kind === "assistant");
-    assert.deepEqual(recoveredEvent.content.partialReviewEventIds, [original.id]);
-    assert.ok(recoveredEvent.content.text.endsWith(`[eventId=${original.id}]`));
-    assert.equal(recoveredEvent.contextExcluded, true);
-    assert.equal(f.service.tokenUsageStore.list({ runId: recoveredRead.id }).length, 2);
-
-    const modelCalls = requests.length;
-    beforeResult = () => {
-      result = { kind: "supported_answer", text: "The recorded label is Amber.", eventIds: [original.id] };
-    };
-    const explained = await f.send(session.sessionKey, "partial-answer-explicit-explanation", `Explain [eventId=${original.id}]`);
-    assert.equal(explained.status, "completed", explained.errorCode);
-    assert.equal(explained.runtimeTurnRef, null);
-    assert.equal(requests.length, modelCalls + 1);
-    assert.equal(requests.at(-1).references[0].content.text, receiptText);
-
-    beforeResult = () => {
-      result = nextModelOutput();
-      if (requests.at(-1).references) transcriptStore.setContextExcluded({
-        profileId: session.profileId, sessionId: session.id, eventId: original.id, contextExcluded: true,
-      });
-    };
-    const revokedRead = await f.send(session.sessionKey, "partial-answer-history-revoked", recoveredQuestion);
-    assert.equal(revokedRead.errorCode, "CONTEXT_SOURCE_STALE");
-    assert.equal(revokedRead.runtimeTurnRef, null);
-    assert.equal(modelSessions.size, 0);
-    assert.ok(!transcriptStore.listEvents(session.profileId, session.id)
-      .some(event => event.runId === revokedRead.id && event.kind === "assistant"));
-    const requestsBeforeInterrupt = requests.length;
-    beforeResult = null;
-    result = { kind: "answer", text: "A compiler translates source code into another representation." };
-
-    const fallbackReceipt = "partial-answer-interrupted";
-    const inbox = coordinator.inbox, enqueue = inbox.enqueue.bind(inbox);
-    inbox.enqueue = async (entry, options) => {
-      if (entry.operationId === fallbackReceipt) {
-        transcriptStore.appendEvent({ profileId: session.profileId, sessionId: session.id,
-          id: require("../app/agent-service/transcript-store").transcriptEventId("context-partial-review", entry.runId, fallbackReceipt),
-          kind: "status", contextExcluded: true,
-          content: { transcriptType: "context.partial.review", phase: "started", operationId: fallbackReceipt } });
-      }
-      return enqueue(entry, options);
-    };
-    const interrupted = await f.send(session.sessionKey, fallbackReceipt, "What does a virtual machine do?");
-    assert.equal(interrupted.errorCode, "CONTEXT_CONTINUATION_REVIEW_INTERRUPTED");
-    assert.equal(requests.length, requestsBeforeInterrupt, "a durable review intent cannot be replayed");
-    beforeResult = () => transcriptStore.setContextExcluded({ profileId: session.profileId, sessionId: session.id,
-      eventId: "large-0", contextExcluded: true });
-    const stale = await f.send(session.sessionKey, "partial-answer-stale", "What causes a solar eclipse?");
-    assert.equal(stale.errorCode, "CONTEXT_SOURCE_STALE");
-    assert.equal(stale.runtimeTurnRef, null);
-    assert.equal(modelSessions.size, 0);
-    const events = transcriptStore.listEvents(session.profileId, session.id);
-    assert.equal(events.filter(event => event.content?.transcriptType === "context.partial.review").length, 7);
-    assert.ok(events.some(event => event.runId === run.id && event.kind === "assistant"
-      && event.content.partialReview === true && event.content.text === `只读答复\n\n${result.text}`));
-    assert.ok(!events.some(event => event.content?.transcriptType === "context.native.seeded"));
-
-    beforeResult = null;
-    const acceptedOperation = "partial-answer-v34-accept";
-    const accepted = await requestService(f.paths, { id: acceptedOperation, token: readClientToken(f.paths),
-      version: PROTOCOL_VERSION, method: "chat.send.accept", params: { sessionKey: session.sessionKey,
-        operationId: acceptedOperation, prompt: "What is a data structure?", createdAt: Date.now() } });
-    await waitUntil(() => coordinator.getRun(accepted.runId)?.status === "completed", 10000, "accepted review to finish");
-    assert.equal(coordinator.getRun(accepted.runId).runtimeTurnRef, null);
-    assert.equal(requests.length, requestsBeforeInterrupt + 2);
-
-    const cut = "partial-answer-terminal-cut", originalDispatcher = coordinator.dispatcher;
-    await new Promise(resolve => setImmediate(resolve));
-    coordinator.dispatcher = { ...originalDispatcher,
-      transition: (id, status, ...args) => {
-        if (status === "completed" && coordinator.getChatRunByOperation(cut, session.sessionKey)?.id === id) {
-          throw Object.assign(new Error("fixture stops before terminal commit"), { code: "FIXTURE_CRASH_CUT" });
-        }
-        return originalDispatcher.transition(id, status, ...args);
-      },
-    };
-    try {
-      await assert.rejects(f.send(session.sessionKey, cut, "What does a parser do?"), error => error.code === "FIXTURE_CRASH_CUT");
-    } finally { coordinator.dispatcher = originalDispatcher; }
-    const cutRun = originalDispatcher.listRuns().find(run => run.idempotencyKey === `shoggoth:chat-send:${cut}`);
-    assert.equal(cutRun.status, "running");
-    assert.ok(transcriptStore.listEvents(session.profileId, session.id)
-      .some(event => event.runId === cutRun.id && event.kind === "assistant" && event.content.partialReview));
-    const { root, transport } = f;
-    await f.close({ remove: false });
-    f = await openHandoffFixture({ root, transport });
-    const restoredCoordinator = f.service.workRunCoordinator;
-    const restored = restoredCoordinator.getChatRunByOperation(cut, session.sessionKey);
-    assert.equal(restored.id, cutRun.id);
-    assert.equal(restored.status, "completed", restored.errorCode);
-    assert.equal(restored.runtimeTurnRef, null);
-    assert.equal(requests.length, requestsBeforeInterrupt + 3, "the already-persisted answer closes the original WorkRun without another call");
-    const usage = f.service.tokenUsageStore.list({ runId: cutRun.id });
-    assert.equal(usage.length, 1);
-    assert.deepEqual([usage[0].inputTokens, usage[0].outputTokens, usage[0].totalTokens], [12, 8, 20]);
-    assert.equal(f.service.transcriptStore.listEvents(session.profileId, session.id)
-      .filter(event => event.runId === cutRun.id && event.kind === "assistant").length, 1);
+    assert.equal(host.turnStartCalls, 2);
   } finally { await f.close(); }
 });
 

@@ -11,10 +11,11 @@ import "../../app/manage-ui/src/styles.css";
 import "../../app/manage-ui/src/manage-skin.css";
 
 declare const __HISTORY_CASES__: Array<{ id: string; key: string; agentId: string; backendId: string; name: string }>;
+declare const __HISTORY_NAVIGATION_PREVIEW__: boolean;
 const state = window as any, cases = __HISTORY_CASES__, now = 1800000000000;
 const sessions = cases.map(row => ({ key: row.key, agentId: row.agentId, agentName: row.name, backendId: row.backendId, updatedAt: now }));
 localStorage.setItem("shoggoth.chat.sessions.v1", JSON.stringify(sessions));
-localStorage.setItem("shoggoth.chat.lastActive.v1", cases[0].key);
+localStorage.setItem("shoggoth.chat.lastActive.v1", cases[__HISTORY_NAVIGATION_PREVIEW__ ? 2 : 0].key);
 localStorage.setItem("shoggoth.chat.immersive.v1", "0");
 // These are already-read conversations: opening unread history intentionally
 // pages to its first unread reply (covered by chat-cron-display-ui instead).
@@ -32,12 +33,14 @@ const control = async (key: string, action: string) => {
   if (!response.ok) throw Error("fixture control failed");
 };
 createRoot(document.getElementById("root")!).render(<HashRouter><UiProvider><ScrollbarProvider />
+  {__HISTORY_NAVIGATION_PREVIEW__ ? <div className="content"><ChatPage /></div> : <>
   <div className="history-fixture-toolbar"><strong>隔离历史分页验收</strong>
     {cases.map(row => <button key={row.key} type="button" onClick={() => select(row.key)}>{row.name}</button>)}
     <button type="button" onClick={() => void runPageRefresh("/chat")}>刷新</button>
     <span>181 条正文 · 工具、思考、心跳及隐藏输入</span>
   </div>
   <ChatPage />
+  </>}
 </UiProvider></HashRouter>);
 
 const pause = (ms = 30) => new Promise(resolve => setTimeout(resolve, ms));

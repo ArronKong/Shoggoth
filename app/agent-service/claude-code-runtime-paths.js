@@ -156,7 +156,7 @@ function claudeCodeWorkspaceShardId({ controlInstance = false, workspace = null 
   ])).digest("hex");
 }
 
-function claudeCodePermissionOptions(value, cwd, requestedMode = null) {
+function claudeCodePermissionOptions(value, cwd, requestedMode = null, agentWorkspace = null) {
   const policy = normalizeClaudeCodePermissionPolicy(value);
   const workspace = normalizeClaudeCodeWorkspace(cwd);
   const mode = requestedMode || (policy.sandbox === "read-only" ? "plan"
@@ -199,7 +199,7 @@ function claudeCodePermissionOptions(value, cwd, requestedMode = null) {
       failIfUnavailable: true,
       autoAllowBashIfSandboxed: requestedMode === null && policy.approvalPolicy === "never",
       allowUnsandboxedCommands: false,
-      filesystem: Object.freeze({ allowWrite: Object.freeze([workspace]) }),
+      filesystem: Object.freeze({ allowWrite: Object.freeze([...new Set([workspace, agentWorkspace].filter(Boolean))]) }),
     }),
     settings: Object.freeze({
       permissions: Object.freeze({ blockReadsOutsideWorkingDirectories: true }),

@@ -87,8 +87,10 @@ try {
     "app/manage-ui/src/pages/cron/HermesCronForm.tsx",
     "app/manage-ui/src/pages/cron/ShoggothCronForm.tsx",
   ].map((file) => fs.readFileSync(path.join(root, file), "utf8"));
-  assert.equal(formSources.every((source) => source.includes("CronExpressionPicker")), true,
-    "三套 Cron 表单都应使用结构化 Cron 选择器");
+  assert.equal(formSources.every((source) => source.includes("<CronScheduleField ")), true,
+    "三个后端都应使用共享的运行时间字段");
+  const layout = fs.readFileSync(path.join(root, "app/manage-ui/src/pages/cron/CronFormLayout.tsx"), "utf8");
+  assert.match(layout, /<CronExpressionPicker /, "共享的运行时间字段使用结构化 Cron 选择器");
   assert.equal(formSources.some((source) => /type="datetime-local"/.test(source)), false,
     "Cron 表单不应继续暴露可手填的 datetime-local");
   assert.equal(/<TextInput[^>]*value=\{draft\.model\}/s.test(formSources[0]), false,

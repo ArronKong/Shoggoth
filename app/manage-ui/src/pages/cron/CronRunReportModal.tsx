@@ -6,8 +6,10 @@ import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import Modal from "../../components/Modal";
 import AgentAvatar from "../../components/AgentAvatar";
+import type { CronRun } from "../../types";
 import { fmtMs } from "../usage/charts";
 import { formatCronTime } from "./cronPresets";
+import { isCronMisfireSkipped } from "./runPresentation";
 import ManagedRunFiles from "../agents/ManagedRunFiles";
 import styles from "./CronRunReportModal.module.css";
 
@@ -46,8 +48,7 @@ export default function CronRunReportModal({
   backendId,
   runId,
   agentName,
-  startedAt,
-  durationMs,
+  run,
   model,
   bodyLabel,
   children,
@@ -64,8 +65,7 @@ export default function CronRunReportModal({
   backendId?: string;
   runId?: string;
   agentName?: string;
-  startedAt?: number | null;
-  durationMs?: number;
+  run?: Pick<CronRun, "status" | "summary" | "startedAt" | "finishedAt" | "durationMs"> | null;
   // 这次运行用的模型；页面负责回退（任务配置 / 默认模型文案），缺省显示「—」。
   model?: string;
   bodyLabel?: ReactNode;
@@ -77,10 +77,15 @@ export default function CronRunReportModal({
 }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage || i18n.language;
+  const missedSchedule = isCronMisfireSkipped(backendId, run);
+  const time = formatCronTime(run?.startedAt, locale);
+  const skippedAt = missedSchedule ? formatCronTime(run?.finishedAt, locale) : undefined;
+  const displayModel = missedSchedule ? undefined : model;
+  const timeClass = missedSchedule ? styles.missedRunTime : undefined;
 
   const actions = (
     <>
-      {onAskInChat && (
+      {!missedSchedule && onAskInChat && (
         <button type="button" className={styles.iconBtn} onClick={onAskInChat}
           aria-label={t("cron.askInChat")} title={t("cron.askInChat")}>
           <ChatGlyph />
@@ -113,17 +118,31 @@ export default function CronRunReportModal({
             </span>
           ) : "—"}
         </dd>
-        <dt>{t("dashboard.timeLabel")}</dt>
-        <dd>{formatCronTime(startedAt, locale)}</dd>
+        <dt>{t(missedSchedule ? "cron.runScheduledAt" : "dashboard.timeLabel")}</dt>
+        <dd className={timeClass} title={missedSchedule ? time : undefined}>{time}</dd>
         <dt>{t("dashboard.modelLabel")}</dt>
-        <dd title={model}>{model || "—"}</dd>
-        <dt>{t("dashboard.durationLabel")}</dt>
-        <dd>{typeof durationMs === "number" ? fmtMs(durationMs) : "—"}</dd>
+        <dd title={displayModel}>{displayModel || "—"}</dd>
+        <dt>{t(missedSchedule ? "cron.runSkippedAt" : "dashboard.durationLabel")}</dt>
+        <dd className={timeClass} title={skippedAt}>
+          {skippedAt ?? (typeof run?.durationMs === "number" ? fmtMs(run.durationMs) : "—")}
+        </dd>
       </dl>
       <section className={styles.card}>
-        {bodyLabel && <h4 className={styles.cardLabel}>{bodyLabel}</h4>}
-        {children}
-        {open && backendId && agentId && runId && <ManagedRunFiles backend={backendId} agentId={agentId} runId={runId} />}
+        {missedSchedule ? (
+          <>
+            <h4 className={styles.cardLabel}>{t("cron.resultSkipped")}</h4>
+            <p data-selectable-text>
+              {time !== "—" && `${t("cron.misfireScheduledFor", { time })} `}
+              {t("cron.misfireSkippedMessage")}
+            </p>
+          </>
+        ) : (
+          <>
+            {bodyLabel && <h4 className={styles.cardLabel}>{bodyLabel}</h4>}
+            {children}
+            {open && backendId && agentId && runId && <ManagedRunFiles backend={backendId} agentId={agentId} runId={runId} />}
+          </>
+        )}
       </section>
     </Modal>
   );

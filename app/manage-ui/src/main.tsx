@@ -48,6 +48,12 @@ async function bootstrap() {
       </HashRouter>
     </React.StrictMode>,
   );
+
+  if (!desktopInspiration) {
+    window.setTimeout(() => {
+      void import("./lib/oauthAccountQuota").then(({ warmOAuthAccountQuotas }) => warmOAuthAccountQuotas()).catch(() => {});
+    }, 1_000);
+  }
 }
 
 void bootstrap();

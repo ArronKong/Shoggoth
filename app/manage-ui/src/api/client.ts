@@ -1,5 +1,6 @@
 import type {
   AgentManagedFile,
+  BackgroundTask, BackgroundTaskControl, BackgroundTaskDetail, BackgroundTaskList,
   AgentManagedFilesPage,
   InteractiveApprovalChoice,
   DesktopProductTelemetryBridge,
@@ -40,6 +41,7 @@ import type {
   ProviderCredential,
   ProviderDirectory,
   EnvVar,
+  OAuthAccountQuota,
   OAuthLoginProviderOption,
   OAuthLoginTarget,
   OAuthProvidersSnapshot,
@@ -305,6 +307,10 @@ export async function listCronJobs(filters: CronListFilters = {}): Promise<Unifi
   );
   return (jobs || []).filter((job) => isVisibleCronJob(job) && (!agentScopes?.length
     || agentScopes.some(({ backendId, agentId }) => job.backendId === backendId && job.agentId === agentId)));
+}
+
+export function getCronModels(backendId: string, agentId: string) {
+  return jsonFetch<import("../types").CronModels>(`/__api/cron/models?${new URLSearchParams({ backendId, agentId })}`);
 }
 
 export async function getCronJobDetail(id: string): Promise<UnifiedCronJob> {
@@ -1088,9 +1094,15 @@ function oauthPost<T>(backend: string, action: string, body: Record<string, unkn
     body: JSON.stringify(body),
   });
 }
-export async function listOAuthProviders(backend: string): Promise<OAuthProvidersSnapshot> {
-  const snap = await jsonFetch<OAuthProvidersSnapshot>(`/__api/oauth?backend=${encodeURIComponent(backend)}`);
+export async function listOAuthProviders(backend: string, { quotaOnly = false } = {}): Promise<OAuthProvidersSnapshot> {
+  const query = new URLSearchParams({ backend });
+  if (quotaOnly) query.set("view", "quota");
+  const snap = await jsonFetch<OAuthProvidersSnapshot>(`/__api/oauth?${query}`);
   return { providers: snap.providers || [], profiles: snap.profiles || [] };
+}
+export function getOAuthProviderQuota(backend: string, provider: string, signal: AbortSignal): Promise<OAuthAccountQuota> {
+  const query = new URLSearchParams({ backend, provider });
+  return jsonFetch<OAuthAccountQuota>(`/__api/oauth/quota?${query}`, { signal });
 }
 export function getProviderDirectory(backend: string): Promise<ProviderDirectory> {
   return jsonFetch<ProviderDirectory>(`/__api/models/provider-directory?backend=${encodeURIComponent(backend)}`);
@@ -2379,6 +2391,25 @@ export async function forkSessionAtEntry(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ backend, agentId, key, entryId }),
+  });
+}
+
+export async function listBackgroundTasks(sessionKey: string, signal?: AbortSignal): Promise<BackgroundTaskList> {
+  const q = new URLSearchParams({ sessionKey });
+  return jsonFetch<BackgroundTaskList>(`/__api/background-tasks?${q.toString()}`, { signal });
+}
+
+export async function getBackgroundTask(sessionKey: string, taskId: string, signal?: AbortSignal): Promise<BackgroundTaskDetail> {
+  const q = new URLSearchParams({ sessionKey, taskId });
+  return jsonFetch<BackgroundTaskDetail>(`/__api/background-tasks/detail?${q.toString()}`, { signal });
+}
+
+export async function controlBackgroundTask(sessionKey: string, taskId: string, operationId: string,
+  control: BackgroundTaskControl): Promise<{ task: BackgroundTask }> {
+  return jsonFetch<{ task: BackgroundTask }>(`/__api/background-tasks/control`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionKey, taskId, operationId, ...control }),
   });
 }
 

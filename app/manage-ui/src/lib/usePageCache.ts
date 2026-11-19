@@ -15,8 +15,8 @@ const inFlight = new Map<string, { generation: number; promise: Promise<unknown>
 const generations = new Map<string, number>();
 let cacheRevision = 0;
 const revisionListeners = new Set<() => void>();
-const readRevision = () => cacheRevision;
-const subscribeRevision = (listener: () => void) => {
+export const readPageCacheRevision = () => cacheRevision;
+export const subscribePageCacheRevision = (listener: () => void) => {
   revisionListeners.add(listener);
   return () => { revisionListeners.delete(listener); };
 };
@@ -33,7 +33,7 @@ export function invalidatePageCache(): void {
 
 // Other scoped UI caches use the same connection generation as page data.
 export function usePageCacheRevision(): number {
-  return useSyncExternalStore(subscribeRevision, readRevision, readRevision);
+  return useSyncExternalStore(subscribePageCacheRevision, readPageCacheRevision, readPageCacheRevision);
 }
 
 // generation 让同 key 的本地 mutation 可以淘汰更早发出的迟到 GET。

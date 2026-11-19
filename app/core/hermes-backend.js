@@ -6683,6 +6683,7 @@ class HermesBackend extends AgentBackend {
   // Reuse the profile-derived agent list, shaped as UnifiedAgent[].
   async listAgents() {
     const local = this._getConfig().hermesMode !== "remote";
+    const onlyRemoteProfile = !local && this.dashboards.size === 1 ? this.dashboards.keys().next().value : null;
     const generation = this._lifecycleGeneration;
     const active = await this.getActiveModel();
     if (generation !== this._lifecycleGeneration) return [];
@@ -6694,6 +6695,7 @@ class HermesBackend extends AgentBackend {
         kanbanAssignee: profile || undefined,
         model: active.byScope[a.id] || undefined,
         provider: active.providerByScope[a.id] || undefined,
+        isDefault: profile === "default" || Boolean(onlyRemoteProfile && profile === onlyRemoteProfile),
         createdAt: local && profile ? dirCreatedAtMs(this._hermesHomeForProfile(profile)) : null,
         backendId: "hermes",
       };
@@ -7256,6 +7258,11 @@ class HermesBackend extends AgentBackend {
   async getInspirationModels(agentId) {
     const { catalog, info } = await this._groupMemberModelState(agentId);
     return typeof info.provider === "string" && info.provider ? { ...catalog, defaultProvider: info.provider } : catalog;
+  }
+  async getCronModels(agentId) {
+    const { catalog, info } = await this._groupMemberModelState(agentId);
+    const provider = typeof info.provider === "string" && info.provider ? info.provider : undefined;
+    return { ...catalog, defaultSelection: { model: catalog.defaultModel, ...(provider ? { provider } : {}) } };
   }
   async getGroupMemberModels(agentId) { return (await this._groupMemberModelState(agentId)).catalog; }
 

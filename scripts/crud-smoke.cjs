@@ -222,6 +222,10 @@ function installSmokeModelAdapter(backend) {
 }
 
 async function main() {
+  if (["all", "isolated", "oauth-account-quota"].includes(WHICH)) {
+    await require("./oauth-account-quota-rest.cjs").run();
+    if (WHICH === "oauth-account-quota") return;
+  }
   if (WHICH === "all" || WHICH === "isolated") {
     await require("./shoggoth-agent-files-rest-smoke.cjs").run();
     await require("./apple-device-service-e2e.cjs").run();
@@ -235,6 +239,7 @@ async function main() {
     await require("./native-chat-prewarm-rest.cjs").run();
     await require("./session-context-breakdown-rest.cjs").run();
     await require("./group-chat-rest-smoke.cjs").run();
+    await require("./background-task-rest-smoke.cjs").run();
   }
   if (WHICH === "group-chat") {
     await require("./group-chat-rest-smoke.cjs").run();

@@ -118,8 +118,7 @@ body {
 
 /* The hiddenInset window only has a narrow native title bar. Extend dragging
    through the existing top gutter and page headers without changing layout.
-   Leave the outer 6px for resizing and the first 80px for macOS window buttons.
-   Pointer events pass through the gutter so scrolled controls remain usable. */
+   Leave the outer 6px for resizing and the first 80px for macOS window buttons. */
 :root.electron-macos-hidden-inset .app::before {
   content: "";
   position: fixed;
@@ -131,18 +130,20 @@ body {
   pointer-events: none;
   -webkit-app-region: drag;
 }
-:root.electron-macos-hidden-inset :is(.page-head, .chat-aside__title-row, .chat-header__row) {
+:root.electron-macos-hidden-inset :is(
+  .page-head, .chat-aside__title-row, .chat-header__row, .chat-header:not([data-agent-panel])
+) {
   -webkit-app-region: drag;
   user-select: none;
 }
-/* Exclude whole action/menu surfaces as well as individual controls. This also
-   protects controls that scroll or open into the fixed top gutter. */
+/* Electron applies these rectangles in layout order. Timelines scroll beneath
+   the title bar. Notices come after the dock so their actions stay clickable. */
 :root.electron-macos-hidden-inset :is(
   button, a, input, textarea, select, summary, [tabindex],
   [contenteditable]:not([contenteditable="false"]),
   [role="button"], [role="combobox"], [role="menu"], [role="listbox"], [role="dialog"],
-  .page-head-actions, .chat-header__tools
-) {
+  .page-head-actions, .chat-header__tools, .chat-status-notices
+):not(:where(.chat-thread, .chat-group-thread, .chat-thread *, .chat-group-thread *)) {
   -webkit-app-region: no-drag;
 }
 
@@ -2361,8 +2362,8 @@ button:disabled {
 }
 .cron-form-schedule-types button[aria-pressed="true"],
 .cron-form-custom-trigger {
-  background: var(--ui-surface-1);
-  color: var(--ui-text-1);
+  background: #000;
+  color: #fff;
 }
 .cron-form-schedule-types button:focus-visible {
   outline: 2px solid var(--ui-focus);
@@ -2391,6 +2392,8 @@ button:disabled {
 .cron-number-select { flex: 0 0 72px; }
 /* The time popups are portaled outside the Cron form. */
 :root .cron-time-select-popup { border: 0; }
+:root .cron-pattern-select-popup { padding-inline: 16px; }
+:root .cron-time-select-popup [role="option"][data-highlighted] { border-radius: 999px; }
 .cron-interval-select { flex: 1 1 180px; min-width: 150px; }
 .cron-seconds-select { flex: 0 0 140px; }
 .cron-timezone-select { flex: 1 1 190px; min-width: 170px; }
@@ -2417,13 +2420,36 @@ button:disabled {
   width: 100%;
   max-width: none;
   height: 40px;
-  justify-content: space-between;
-  padding: 0 34px 0 16px;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 16px;
   border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
   border-radius: 20px;
   background-color: var(--ui-surface-1);
   color: var(--ui-text-1);
+  font-size: 12px;
+  font-weight: 300;
+  line-height: 16px;
   text-align: left;
+}
+.cron-model-picker .chat-pill--model.chat-pill--icon-label {
+  /* Match the 15px icon's vertical inset within the 40px bordered control. */
+  padding-inline-start: 11.5px;
+}
+.cron-model-picker .chat-pill__icon {
+  position: static;
+  flex-shrink: 0;
+  transform: none;
+}
+.cron-model-picker .chat-pill--model::after {
+  content: "";
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  margin-inline-start: auto;
+  border: solid var(--ui-text-3);
+  border-width: 0 1px 1px 0;
+  transform: translateY(-1px) rotate(45deg);
 }
 .cron-fallback-picker {
   display: flex;

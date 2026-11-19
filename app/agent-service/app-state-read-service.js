@@ -180,7 +180,8 @@ class AppStateReadService {
           nextRunAt: timestamp(job.nextRunAt), lastRunAt: timestamp(run?.startedAt ?? run?.createdAt),
           lastStatus: text(run?.status, 128), latestRunId: text(run?.id, 128), hasError: run?.status === "failed",
           createdAt: timestamp(job.createdAt), updatedAt: timestamp(job.updatedAt),
-          overlapPolicy: text(job.overlapPolicy, 128), threadPolicy: text(job.threadPolicy, 128) };
+          overlapPolicy: text(job.overlapPolicy, 128), threadPolicy: text(job.threadPolicy, 128),
+          ...(job.modelSelection === undefined ? {} : { modelSelection: job.modelSelection }) };
       });
     } else if (section === "inspiration") {
       items = rows(this.inspirationStore.list()).map(idea => {

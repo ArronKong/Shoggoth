@@ -314,7 +314,7 @@ class AgentBackend {
    *   agentLifecycle: {create: boolean, update: boolean, remove: boolean,
    *     archive: boolean, restore: boolean, readStates: boolean},
    *   surfaces: {chat: boolean, agents: boolean, models: boolean, skills: boolean,
-   *     usage: boolean, oauth: boolean, dashboardRuns: boolean, agentHarness: boolean,
+   *     usage: boolean, oauth: boolean, oauthAccountQuota?: boolean, dashboardRuns: boolean, agentHarness: boolean,
    *     nativeCapacity?: boolean, nativeMemoryConfig?: boolean, nativeMemorySharingConfig?: boolean, runtimeBindings?: boolean, runtimeStatus?: boolean,
    *     durableChatStop?: boolean,
    *     structuredChatContinuation?: boolean,
@@ -752,6 +752,30 @@ class AgentBackend {
   /** Fork one session immediately before a persisted user-message entry. */
   async forkSessionAtEntry(agentId, sessionKey, entryId) {
     return unsupportedAdvancedSessionResult();
+  }
+
+  /**
+   * Background tasks an Agent dispatched from one exact chat session. A backend
+   * declares support with getChatCapabilities(agentId).backgroundTasks === true;
+   * every call re-checks that the task belongs to this source session.
+   * @returns {Promise<{supported: boolean, tasks: Array<object>}>}
+   */
+  async listBackgroundTasks(sessionKey) {
+    return { supported: false, tasks: [] };
+  }
+
+  /** One task's status, the child's public messages, files and pending request. */
+  async getBackgroundTask(sessionKey, taskId) {
+    throw Object.assign(new Error("此后端不支持后台任务"), { code: "BACKGROUND_TASK_UNSUPPORTED" });
+  }
+
+  /**
+   * User control of one task: { action: "send", message } | { action: "cancel" }
+   * | { action: "approval", requestId, choice } | { action: "input", requestId, inputAction, answers }.
+   * `operationId` makes a repeated click the same operation.
+   */
+  async controlBackgroundTask(sessionKey, taskId, input) {
+    throw Object.assign(new Error("此后端不支持后台任务"), { code: "BACKGROUND_TASK_UNSUPPORTED" });
   }
 
   /** Read one exact session's persistent Board snapshot. */
@@ -1199,6 +1223,9 @@ class AgentBackend {
   // Mutating methods receive the FULL unified id ("<routingPrefix>:<localId>");
   // each backend parses out whatever local id it needs. Default impls make
   // cron optional: a backend that doesn't support it returns [] / throws.
+
+  /** Read the selected Agent's Cron model catalog and its defaultSelection, with absolute source IDs when applicable. */
+  async getCronModels(_agentId) { throw new Error("Cron model catalog unavailable"); }
 
   /**
    * Return this backend's cron jobs, normalized to UnifiedCronJob.
@@ -1979,9 +2006,13 @@ class AgentBackend {
   /**
    * 枚举可 OAuth 登录的 provider + 当前状态。profiles = 可选的目标 profile 列表。
    * 条目形状见 manage-ui types.ts 的 OAuthProvider（cliRunnable 缺省视为 true）。
+   * @param {{quotaOnly?: boolean}} [_options] Optional startup inventory for quota-capable accounts.
    * @returns {Promise<{providers: Array<object>, profiles: string[]}>}
    */
-  async listOAuthProviders() { return { providers: [], profiles: [] }; }
+  async listOAuthProviders(_options) { return { providers: [], profiles: [] }; }
+
+  /** Read the signed-in account's quota for a row advertising canReadQuota. */
+  async getOAuthProviderQuota(providerId) { return { status: "unsupported" }; }
 
   /** 断开一个 OAuth provider（不带 profile = 全部 profile 广播）。@returns {Promise<object>} */
   async disconnectOAuthProvider(providerId, profile) { throw new Error(`${this.id}: disconnectOAuthProvider() not supported`); }

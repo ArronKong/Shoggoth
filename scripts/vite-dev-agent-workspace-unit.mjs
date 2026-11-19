@@ -9,13 +9,9 @@ import { devAgentWorkspace } from "../app/manage-ui/dev-agent-workspace.ts";
 
 test("the Vite preview projects a managed workspace for an older desktop host", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-dev-agent-workspace-"));
-  const agentsDir = path.join(root, "shoggoth-core", "agents");
-  const agentDir = path.join(agentsDir, "profile-fixture");
-  const nameLinks = path.join(root, "agents-by-name");
-  const managedPath = path.join(nameLinks, "Shoggoth");
-  fs.mkdirSync(agentDir, { recursive: true });
-  fs.mkdirSync(nameLinks);
-  fs.symlinkSync(path.relative(nameLinks, agentDir), managedPath, "dir");
+  const defaultWorkspaceDir = path.join(root, "shoggoth-core", "workspaces");
+  const managedPath = path.join(defaultWorkspaceDir, "profile-fixture");
+  fs.mkdirSync(managedPath, { recursive: true });
   const legacy = { id: "shoggoth-legacy", name: "Shoggoth", backendId: "shoggoth", profile: "profile-fixture", workspace: "/project" };
   const notCreated = { ...legacy, id: "shoggoth-new-agent", profile: "profile-new-agent" };
   const current = {
@@ -55,7 +51,7 @@ test("the Vite preview projects a managed workspace for an older desktop host", 
   const target = `http://127.0.0.1:${upstream.address().port}`;
   vite = await createViteServer({
     configFile: false, root, logLevel: "silent",
-    plugins: [devAgentWorkspace(target, { userDataRoot: root, agentsDir })],
+    plugins: [devAgentWorkspace(target, { defaultWorkspaceDir })],
     server: { host: "127.0.0.1", port: 0, strictPort: true, proxy: { "/__api": target } },
   });
   await vite.listen();
@@ -74,7 +70,7 @@ test("the Vite preview projects a managed workspace for an older desktop host", 
   const missing = await request("shoggoth-missing");
   assert.equal(missing.status, 404);
   assert.deepEqual(await missing.json(), { error: "missing" });
-  const absentPath = path.join(agentsDir, notCreated.profile);
+  const absentPath = path.join(defaultWorkspaceDir, notCreated.profile);
   assert.deepEqual((await (await request(notCreated.id)).json()).agent.managedWorkspace, { path: absentPath, exists: false });
   assert.equal(fs.existsSync(absentPath), false);
 });

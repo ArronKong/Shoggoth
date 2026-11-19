@@ -12,7 +12,8 @@ const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-wor
 const workspace = path.join(root, "workspace"), outside = path.join(root, "private");
 fs.mkdirSync(workspace); fs.mkdirSync(outside);
 const cacheDir = path.join(root, "control");
-const service = new WorkspaceExecutionService({ cacheDir, paths: { trustedRoot: root, homeDir: root } });
+const paths = { trustedRoot: root, homeDir: root, stateDir: path.join(root, "state"), defaultWorkspaceDir: path.join(root, "state", "workspaces") };
+const service = new WorkspaceExecutionService({ cacheDir, paths });
 const run = { id: "run-workspace", profileId: "profile-workspace", workspace, source: "chat" };
 const contract = { ...run, runId: run.id, runtime: "antigravity", permissionMode: "auto-review",
   permissionPolicy: { sandbox: "workspace-write", approvalPolicy: "on-request" }, workspaceExecutionVersion: 1 };
@@ -41,6 +42,26 @@ const test = async (name, action) => { await action(); tests.push(name); console
     assert.equal(validWorkspaceExecutionArguments({ command: "true", timeoutMs: 0 }), true);
     assert.equal(validWorkspaceExecutionArguments({ command: "true", timeoutMs: 2147000001 }), false);
     assert.equal(await service.verify(), true, "a real OS sandbox must pass before automatic execution");
+    await test("project runs can read their Agent inbox and write in both roots", async () => {
+      const { ensureAgentWorkspace } = require("../app/agent-service/chat-workspace");
+      const home = ensureAgentWorkspace(paths, run.profileId);
+      const peer = ensureAgentWorkspace(paths, "other-agent");
+      fs.writeFileSync(path.join(peer, "private.txt"), "other");
+      const inbox = path.join(home, "inbound");
+      fs.mkdirSync(inbox); fs.writeFileSync(path.join(inbox, "我的 报告.pdf"), "%PDF-1.7 fixture");
+      for (const runtime of ["antigravity", "pi", "opencode", "deepseek-harness"]) {
+        const result = await service.execute({ contract: { ...contract, agentWorkspace: home, runtime }, run, scope,
+          args: { cwd: inbox, command: `cat '我的 报告.pdf' && printf home > result && printf project > ${shellQuote(path.join(workspace, "result"))}` } });
+        assert.equal(result.exitCode, 0, result.stderr); assert.equal(result.stdout, "%PDF-1.7 fixture");
+        assert.equal(fs.readFileSync(path.join(inbox, "result"), "utf8"), "home");
+        assert.equal(fs.readFileSync(path.join(workspace, "result"), "utf8"), "project");
+      }
+      const denied = await service.execute({ contract: { ...contract, agentWorkspace: home }, run, scope,
+        args: { command: `cat ${shellQuote(path.join(peer, "private.txt"))}` } });
+      assert.notEqual(denied.exitCode, 0); assert.equal(denied.stdout, "");
+      await assert.rejects(service.execute({ contract: { ...contract, agentWorkspace: peer }, run, scope,
+        args: { command: "pwd" } }), { code: "WORKSPACE_EXECUTION_SCOPE_INVALID" });
+    });
     await test("default, unlimited and explicit finite commands pass both Service and standalone supervisor", async () => {
       for (const extra of [{}, { timeoutMs: 0 }, { timeoutMs: 1800000 }, { timeoutMs: 1800001 }]) {
         const result = await execute("printf timeout-budget-ok", extra);

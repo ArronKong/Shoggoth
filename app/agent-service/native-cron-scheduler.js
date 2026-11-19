@@ -11,6 +11,7 @@ const {
   MAX_OPERATION_FUTURE_SKEW_MS,
   computeNextOccurrence,
 } = require("./native-cron-store");
+const { validCronModelSelection, cronModelIdentity } = require("./native-cron-model");
 const {
   ACTIVE_WORK_RUN_STATUSES,
   TERMINAL_WORK_RUN_STATUSES,
@@ -108,6 +109,7 @@ function executionFingerprint(execution) {
     execution.threadPolicy,
     execution.threadId,
     ...(execution.groupDelivery ? [execution.groupDelivery] : []),
+    ...(execution.modelSelection === undefined ? [] : [cronModelIdentity(execution.modelSelection)]),
   ]));
 }
 
@@ -1203,6 +1205,7 @@ class NativeCronScheduler {
         || !validExecutionWorkspace(snapshot.workspace)
         || !OVERLAP_POLICIES.has(snapshot.overlapPolicy)
         || !THREAD_POLICIES.has(snapshot.threadPolicy)
+        || (snapshot.modelSelection !== undefined && !validCronModelSelection(snapshot.modelSelection))
         || !(snapshot.threadId === null || validOpaqueId(snapshot.threadId, 256))
         || (snapshot.threadPolicy === "new" && snapshot.threadId !== null)) {
         throw schedulerError("CRON_RUN_CORRUPT", "Cron Job execution material 损坏");
@@ -1216,6 +1219,7 @@ class NativeCronScheduler {
         throw schedulerError("CRON_RUN_CORRUPT", "Cron Job workspace 解析结果无效");
       }
       const workspace = canonicalWorkspace(resolvedWorkspace);
+      if (snapshot.modelSelection) snapshot.modelSelection = Object.freeze({ ...snapshot.modelSelection });
       const frozenJob = Object.freeze({ ...snapshot, workspace });
       const execution = Object.freeze({
         profileId: snapshot.profileId,
@@ -1224,6 +1228,7 @@ class NativeCronScheduler {
         threadPolicy: snapshot.threadPolicy,
         threadId: snapshot.threadId,
         ...(snapshot.groupDelivery ? { groupDelivery: snapshot.groupDelivery } : {}),
+        ...(snapshot.modelSelection === undefined ? {} : { modelSelection: snapshot.modelSelection }),
       });
       return Object.freeze({
         job: frozenJob,

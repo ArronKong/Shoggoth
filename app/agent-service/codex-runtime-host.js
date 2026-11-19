@@ -3,7 +3,8 @@
 const { spawn } = require("node:child_process");
 const { probeCodexBinaryVersion } = require("./codex-binary-probe");
 const { CodexJsonlRpcClient, rpcError } = require("./codex-jsonl-rpc");
-const { validateRegisteredSecrets } = require("./codex-rpc-safety");
+const { redactDiagnostic, validateRegisteredSecrets } = require("./codex-rpc-safety");
+const { MAX_WINDOWS, quotaSnapshot } = require("../core/oauth-account-quota");
 const { normalizeCodexEvent } = require("./codex-event-normalizer");
 const { CodexSchemaContract } = require("./codex-schema-contract");
 const { runtimeBinding } = require("./runtime-adapter");
@@ -183,6 +184,7 @@ class CodexRuntimeHost {
     this.nativeAuthEligible = true;
     this.nativeAuthPending = null;
     this.nativeAccountId = null;
+    this.accountRevision = 0;
     this.nativeAccessToken = null;
     this.child = null;
     this.rpc = null;
@@ -438,6 +440,7 @@ class CodexRuntimeHost {
   }
 
   _publish(message) {
+    if (message?.method === "account/updated") this.accountRevision += 1;
     if (message?.method === "account/login/completed"
       && wellFormedString(message.params?.loginId, 256)) {
       const event = {
@@ -526,7 +529,8 @@ class CodexRuntimeHost {
           paths: this.paths, binding: this.binding, operationName, params, phase, error,
         });
       }
-      if (phase === "response_schema") await this._markFatal(error);
+      // Optional account display data cannot invalidate a running transport.
+      if (phase === "response_schema" && operationName !== "accountRateLimitsRead") await this._markFatal(error);
       throw error;
     }
     return response;
@@ -585,6 +589,43 @@ class CodexRuntimeHost {
     const result = await this._accountRequest("accountRead", params, options, normalizeAccountReadResponse);
     return this.nativeAccessToken && result.account?.type === "chatgpt"
       ? { ...result, authSource: "native-codex" } : result;
+  }
+
+  async accountQuotaRead() {
+    await this._ensureNativeAuth();
+    const options = { timeoutMs: 7_000 };
+    const account = await this._request("accountRead", { refreshToken: false }, options);
+    if (normalizeAccountReadResponse(account).account?.type !== "chatgpt") return { status: "unsupported" };
+    const expectedId = account.workspaceRouting?.chatgptAccountId ?? this.nativeAccountId;
+    const revision = this.accountRevision;
+    const response = await this._request("accountRateLimitsRead", undefined, options);
+    if (revision !== this.accountRevision || (expectedId && response.accountId && expectedId !== response.accountId)) {
+      return { status: "unavailable" };
+    }
+    const mainId = response.rateLimits.limitId ?? "codex";
+    const buckets = new Map(Object.entries(response.rateLimitsByLimitId ?? {}));
+    const main = buckets.get(mainId) ?? response.rateLimits;
+    buckets.delete(mainId);
+    const windows = [main, ...buckets.values()].slice(0, MAX_WINDOWS).flatMap(bucket => {
+      const name = bucket === main ? bucket.limitName : bucket.limitName ?? bucket.normalModelSlug ?? bucket.limitId;
+      const label = name && redactDiagnostic(name, this.registeredSecrets);
+      return [bucket.primary, bucket.secondary].filter(Boolean).map(window => ({
+        label,
+        durationMinutes: window.windowDurationMins,
+        usedPercent: window.usedPercent,
+        resetsAt: window.resetsAt == null ? null : window.resetsAt * 1_000,
+      }));
+    });
+    const credit = main.credits ?? response.rateLimits.credits;
+    const amount = typeof credit?.balance === "string" && /^\d+(?:\.\d+)?$/u.test(credit.balance)
+      ? Number(credit.balance) : null;
+    const credits = credit?.unlimited === true ? { kind: "unlimited" }
+      : credit?.hasCredits !== true ? undefined
+        : amount > 0 && amount <= Number.MAX_SAFE_INTEGER ? { kind: "balance", amount, unit: "credits" }
+          : amount === 0 ? undefined : { kind: "present" };
+    const resetCredits = response.rateLimitResetCredits?.availableCount;
+    if (!windows.length && !credits && !(resetCredits > 0)) return { status: "unsupported" };
+    return quotaSnapshot(windows, { accountName: account.account.email, credits, resetCredits });
   }
 
   _registerAccountSecret(secret) {

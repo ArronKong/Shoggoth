@@ -253,7 +253,7 @@ async function main() {
       source: "chat", sourceId: session.sessionKey, threadId: "fixture-thread", turnId: "fixture-turn",
       responseId: `response-${++operation}`, model: "fixture-model", provider: "fixture-provider",
       usage: { totalTokens: 3, inputTokens: 1, cachedInputTokens: 0, cacheWriteInputTokens: 0,
-        outputTokens: 2, reasoningOutputTokens: 0 }, createdAt: time });
+        outputTokens: 2, reasoningOutputTokens: 0 }, costUsd: 0.125, createdAt: time });
     const binding = { runtime: profile.runtime, runtimeProfileId: profile.runtimeProfileId,
       runtimeAccountId: profile.runtimeAccountId };
     service.runtimeSessionOwnershipStore.claim({ ...binding, profileId: profile.id, sessionId: `native-${operation}`, workspace: root });
@@ -264,6 +264,22 @@ async function main() {
       fs.writeFileSync(path.join(target, "owned-data"), "private data", { mode: 0o600 });
     }
     return { session, run, job, board, card, computerDir, ledgerDir, artifactFile };
+  };
+  const assertUsage = async (...profiles) => {
+    const params = { range: "all", backendId: "shoggoth" };
+    const series = await backend._call("usage.series", params);
+    const breakdown = await backend._call("usage.breakdown", params);
+    const agentIds = profiles.map(profile => profile.agentId).sort();
+    const totalTokens = 3 * profiles.length;
+    assert.equal(series.totals.totalTokens, totalTokens);
+    assert.equal(series.totals.totalCost, 0.125 * profiles.length);
+    assert.equal(series.daily.reduce((sum, day) => sum + day.totalTokens, 0), totalTokens);
+    assert.equal(breakdown.totals.totalTokens, totalTokens);
+    assert.deepEqual(breakdown.bySource.map(row => row.id).sort(), agentIds);
+    assert.deepEqual(breakdown.topSessions.map(row => row.agentId).sort(), agentIds);
+    assert.equal(breakdown.byModel[0].totalTokens, totalTokens);
+    assert.equal(breakdown.modelDaily.reduce((sum, day) => sum + day.tokens, 0), totalTokens);
+    assert.equal(breakdown.messages.user, profiles.length);
   };
   try {
     await start();
@@ -284,7 +300,10 @@ async function main() {
     const execution = service.inspirationStore.prepareExecution({ operationId: `execute-${++operation}`,
       id: idea.id, expectedRevision: idea.revision, instruction: "Private instruction",
       agentId: a.agentId, backendId: a.backendId, profileId: a.id, workspace: root }, () => true, dataA.session.sessionKey);
+    await assertUsage(a, b);
     await archive(a);
+    await assertUsage(b);
+    assert.equal(service.tokenUsageStore.list({ profileId: a.id }).length, 1);
     await assert.rejects(() => getFile(a, fileA), { code: "AGENT_FILE_NOT_FOUND" });
     assert.equal(fs.readFileSync(privatePayload, "utf8"), "file owned by Expire me");
     assert.ok(service.agentArchiveRetention.timer, "real lifecycle archive schedules the deadline");
@@ -295,6 +314,7 @@ async function main() {
     assert.ok(fs.existsSync(dir(a)));
     assert.equal(fs.realpathSync(finderLink(a)), dir(a));
     await restore(a);
+    await assertUsage(a, b);
     assert.equal((await getFile(a, fileA)).path, privatePayload);
     assert.equal(service.agentArchiveRetention.entries[a.id], undefined);
     assert.equal(service.agentArchiveRetention.timer, null, "real lifecycle restore cancels the last timer");
@@ -333,6 +353,7 @@ async function main() {
     assert.equal(service.inspirationStore.executions(idea.id).some((item) => item.id === execution.id), false);
     assert.equal(service.inspirationStore.get(idea.id).body, "Shared user note");
     assert.equal(service.tokenUsageStore.list({ profileId: a.id }).length, 0);
+    await assertUsage(b);
     assert.equal(fs.readFileSync(outside, "utf8"), "user workspace must survive");
     assert.equal(fs.existsSync(privatePayload), false);
     assert.equal(fs.readFileSync((await getFile(b, fileB)).path, "utf8"), "file owned by Keep me");

@@ -28,6 +28,7 @@ let selection = { sessionKey: key, revision: 1, bindingId, runtime, model: "curr
 const sessions: any[] = [{ key, agentId, backendId: backend, agentName: runtime, model: "current-model", modelProvider: runtime,
   permissionMode: "ask", thinkingLevel: null, fastMode: false, updatedAt: Date.now() }];
 let currentRunId = "fixture-run", currentRunStatus = "running", releaseSend: (() => void) | null = null;
+let releasePreparation: (() => void) | null = null;
 const requests: any[] = [], sockets = new Set<FixtureSocket>();
 const history: any[] = [{ role: "user", content: "帮我整理这个项目的进展", timestamp: Date.now()-10000 },
   { role: "assistant", content: "我正在检查当前的项目进展。", timestamp: Date.now()-5000 }];
@@ -74,6 +75,7 @@ window.fetch=async (input,init) => {
   if(url.pathname==="/__api/chat/secrets/prepare") {
     const body=JSON.parse(String(init?.body));
     if(typeof body.text!=="string" || typeof body.sessionKey!=="string" || typeof body.operationId!=="string") throw Error("invalid ordinary-input preparation fixture");
+    await new Promise<void>(resolve => { releasePreparation = resolve; });
     payload={text:body.text,references:[],version:1};
   }
   if(url.pathname==="/__api/backends") payload={backends:FALLBACK_BACKEND_DESCRIPTORS};
@@ -144,16 +146,24 @@ const stage=async(value:string,statusKind="starting")=>{
     check(bounds.bottom <= visibleBottom + 1, "the loader is visible above the composer fade");
   }
 };
-const send=async()=>{
+const send=async(byButton=false)=>{
   await wait(()=>{const input=visible<HTMLTextAreaElement>("textarea");return input&&!input.disabled&&sockets.size;},"composer ready");
   await tick();const input=visible<HTMLTextAreaElement>("textarea")!;
   Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,"value")!.set!.call(input,`继续检查项目进展 ${requests.filter(r=>r.method==="chat.send").length+1}`);
   input.dispatchEvent(new Event("input",{bubbles:true}));await tick();
   // A visible composer can precede the asynchronous Agent/status readiness.
   // Dispatch Enter only when the same send gate presented to a user is ready.
-  await wait(()=>{const button=visible<HTMLButtonElement>(`[data-send-entry="${immersive?"immersiveButton":"composerButton"}"]`);return button&&!button.disabled;},"send control ready");
+  const sendButton=()=>visible<HTMLButtonElement>(`[data-send-entry="${immersive?"immersiveButton":"composerButton"}"]`);
+  await wait(()=>{const button=sendButton();return button&&!button.disabled;},"send control ready");
   const count=requests.filter(r=>r.method==="chat.send").length;
-  input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+  if (byButton) sendButton()!.click();
+  else input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+  await wait(() => releasePreparation, "idle send starts preparing");
+  await tick();
+  check(!document.querySelector(".chat-queue__chip"), "idle send shows a queue chip during preparation");
+  check(requests.filter(r=>r.method==="chat.send").length === count, "preparation must finish before the request is sent");
+  releasePreparation!();
+  releasePreparation = null;
   await wait(()=>requests.filter(r=>r.method==="chat.send").length>count,"actual send");
   await wait(() => visible(loadingSelector), "immediate loader before receipt");
   check(!document.querySelector('[data-chat-process]') && !waitNode(), "startup only shows the reply loader");
@@ -171,7 +181,7 @@ const finish=async(state="final")=>{
 };
 const preview=async()=>{await send();if(!query.has("all-stages"))await stage("restoring");};
 Object.assign(window,{startupFeedbackFixture:{runtime,backend,immersive,requests,preview},runStartupFeedbackFixture:async()=>{
-  await send();
+  await send(true);
   for(const value of ["context","capabilities","compacting","reconnecting","compacting","connecting","restoring","opening"])await stage(value);
   check(!document.querySelector('.chat-header .chat-status__label')?.textContent?.includes(i18n.t("chat.liveStatus.queued")),"context maintenance must not claim a queue");
   await stage("waiting","running");

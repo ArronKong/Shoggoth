@@ -559,6 +559,16 @@ function startProxyGateway({
         payload: { sessionKey: activity.sessionKey, backendId: event.backendId } }));
       return;
     }
+    if (activity.kind === "background.tasks.changed") {
+      // Only "which conversation" is pushed; cards and reports are re-read
+      // through /__api and chat.history.
+      if (!isPlainRecord(activity) || Object.keys(activity).length !== 2
+        || typeof activity.sessionKey !== "string"
+        || federationActivityAgentIds(event, activity.sessionKey) === null) return;
+      broadcastAuthenticated(JSON.stringify({ type: "event", event: "background.tasks.changed",
+        payload: { sessionKey: activity.sessionKey, backendId: event.backendId } }));
+      return;
+    }
     if (activity.kind === "skills.changed") {
       if (!isPlainRecord(activity) || Object.keys(activity).length !== 5
         || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(activity.agentId)

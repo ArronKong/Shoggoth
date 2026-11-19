@@ -159,6 +159,12 @@ function loadDisabled(): Promise<string[]> {
   return configRequest;
 }
 
+export async function readEnabledOAuthQuotaBackends(): Promise<string[]> {
+  const [descriptors, disabled] = await Promise.all([loadDescriptors(), loadDisabled()]);
+  return descriptors.filter(item => item.surfaces.oauthAccountQuota === true
+    && (!item.disconnectable || !disabled.includes(item.id))).map(item => item.id);
+}
+
 // External, native CLI and Shoggoth connections share the same disabled list.
 export function useEnabledBackends(surface?: BackendSurface): BackendId[] {
   const descriptors = useBackendCatalog(surface);

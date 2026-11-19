@@ -1,4 +1,5 @@
 "use strict";
+const { matchesHistoricalWorkspace } = require("./chat-workspace");
 
 const crypto = require("node:crypto");
 const { hasPii, hasSecret, workspaceMemoryRef } = require("./memory-engine");
@@ -39,7 +40,7 @@ class MemoryProvenanceService {
     try {
       const run = this.getRun(runId);
       if (!run || run.id !== runId || run.profileId !== profileId
-        || run.workspace !== session.workspace || !["chat", "inspiration"].includes(run.source)
+        || !matchesHistoricalWorkspace(this.sessions, session, run.workspace) || !["chat", "inspiration"].includes(run.source)
         || /^shoggoth:chat-send:federation-(?:send|message)-/u.test(run.idempotencyKey || "")
         || this.getRunSessionKey(run) !== session.sessionKey
         || (run.source === "chat" && run.sourceId !== session.sessionKey)) return false;

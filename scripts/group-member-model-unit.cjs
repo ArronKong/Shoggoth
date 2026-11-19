@@ -111,6 +111,7 @@ test("Hermes reads one profile and applies custom/provider identity and fresh de
   const inspirationCatalog = await backend.getInspirationModels("a");
   assert.equal(inspirationCatalog.defaultModel, "default-a");
   assert.equal(inspirationCatalog.defaultProvider, "official");
+  assert.deepEqual((await backend.getCronModels("a")).defaultSelection, { model: "default-a", provider: "official" });
   await assert.rejects(backend.getGroupMemberModels("b"));
   await backend.applyGroupSessionModel("a", "agent:a:group", { model: "model-b", provider: "mine" });
   assert.deepEqual(writes[0], { key: "agent:a:group", model: "model-b", provider: "mine", acpProviderRef: "custom:mine", scope: "session" });
@@ -120,6 +121,18 @@ test("Hermes reads one profile and applies custom/provider identity and fresh de
   await assert.rejects(backend.applyGroupSessionModel("b", "agent:a:group", null));
   await assert.rejects(backend.applyGroupSessionModel("a", "agent:a:group", { model: "model-b", provider: "wrong" }));
   assert.equal(writes.length, 2);
+});
+
+test("Hermes marks the canonical default profile or a sole remote profile as the primary Agent", async () => {
+  const backend = Object.create(HermesBackend.prototype);
+  backend._getConfig = () => ({ hermesMode: "remote" });
+  backend.getActiveModel = async () => ({ byScope: {}, providerByScope: {} });
+  backend.dashboards = new Map([["research", {}], ["default", {}]]);
+  backend._installProfileRows([{ name: "research" }, { name: "default", display_name: "Main" }]);
+  assert.deepEqual((await backend.listAgents()).filter(agent => agent.isDefault).map(agent => agent.name), ["Main"]);
+  backend.dashboards.delete("default");
+  backend._installProfileRows([{ name: "research" }]);
+  assert.deepEqual((await backend.listAgents()).filter(agent => agent.isDefault).map(agent => agent.name), ["research"]);
 });
 test("OpenClaw catalog stays agent scoped; patch sets provider/model or clears the override", async () => {
   const backend = Object.create(OpenClawBackend.prototype), calls = [];

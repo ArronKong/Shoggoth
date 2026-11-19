@@ -577,7 +577,7 @@ class SharedReadService {
         check(0);
       } catch (error) {
         if (signal?.aborted || !DEFER_MONITOR_CODES.has(error?.code)) throw error;
-        if (attempt >= 2) fail("CONTEXT_MEMORY_READ_UNAVAILABLE", "无法核验输出所需的借阅来源");
+        if (attempt >= 2) throw serviceError("CONTEXT_MEMORY_READ_UNAVAILABLE", "无法核验输出所需的借阅来源", { cause: error });
         await wait(20, undefined, { signal });
         continue;
       }

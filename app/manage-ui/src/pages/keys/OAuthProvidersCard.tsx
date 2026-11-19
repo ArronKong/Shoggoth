@@ -5,10 +5,12 @@ import { disconnectOAuthProvider, getConfig, listOAuthProviders, runProviderComm
 import { useConfirm, useToast } from "../../components/ui";
 import BackendTabIcon from "../../components/BackendTabIcon";
 import { applyDisabledBackends } from "../../lib/backends";
+import { canReadOAuthAccountQuota, forgetOAuthQuota, prefetchMissingOAuthQuotas } from "../../lib/oauthAccountQuota";
 import { usePageCache } from "../../lib/usePageCache";
 import { SkeletonShape, SkeletonStatus } from "../../components/Skeleton";
 import { OAuthRowsSkeleton } from "./ProviderSkeleton";
 import { useSlowPending } from "../models/useSlowPending";
+import OAuthAccountQuota from "./OAuthAccountQuota";
 import OAuthLoginModal from "./OAuthLoginModal";
 import ProviderLogo from "./ProviderLogo";
 import styles from "./KeysPanel.module.css";
@@ -101,6 +103,7 @@ function OAuthRow({
   backend,
   busy,
   showActionLabels,
+  showQuota,
   onDisconnect,
   onLogin,
   onToggleConnection,
@@ -110,6 +113,7 @@ function OAuthRow({
   backend: string;
   busy: boolean;
   showActionLabels: boolean;
+  showQuota: boolean;
   onDisconnect: (p: OAuthProvider) => void;
   onLogin: (p: OAuthProvider) => void;
   onToggleConnection: (p: OAuthProvider) => void;
@@ -168,22 +172,27 @@ function OAuthRow({
       ? t("keys.oauthLoginExternal")
       : t("keys.oauthLogin");
 
+  const hasQuota = showQuota && !busy && canReadOAuthAccountQuota(p);
+  const mainButton = (
+    <button className={styles.oauthMain} title={hasQuota ? undefined : tip} disabled={busy} onClick={main}>
+      {runtimeIcon && ["antigravity", "codex", "pi"].includes(runtimeIcon)
+        ? <span className={styles.logo}><BackendTabIcon backend={runtimeIcon} label={title} /></span>
+        : <ProviderLogo name={runtimeIcon ?? (backend === "shoggoth" ? p.name : p.id)} />}
+      <span className={styles.oauthText}>
+        <span className={styles.oauthName}>
+          {title}
+          {p.status.loggedIn && !expired && !off && !incompatible && <span className={styles.oauthDot} aria-hidden="true" />}
+        </span>
+        <span className={`${styles.oauthSub} ${!off && (expired || p.status.error) ? styles.oauthSubErr : ""}`}>
+          {off ? sub : incompatible ? t("settings.runtimeIncompatible") : p.status.error || sub}
+        </span>
+      </span>
+    </button>
+  );
+
   return (
     <div className={`${styles.oauthRow} ${p.status.error && !off ? styles.oauthRowErr : ""}`}>
-      <button className={styles.oauthMain} title={tip} disabled={busy} onClick={main}>
-        {runtimeIcon && ["antigravity", "codex", "pi"].includes(runtimeIcon)
-          ? <span className={styles.logo}><BackendTabIcon backend={runtimeIcon} label={title} /></span>
-          : <ProviderLogo name={runtimeIcon ?? (backend === "shoggoth" ? p.name : p.id)} />}
-        <span className={styles.oauthText}>
-          <span className={styles.oauthName}>
-            {title}
-            {p.status.loggedIn && !expired && !off && !incompatible && <span className={styles.oauthDot} aria-hidden="true" />}
-          </span>
-          <span className={`${styles.oauthSub} ${!off && (expired || p.status.error) ? styles.oauthSubErr : ""}`}>
-            {off ? sub : incompatible ? t("settings.runtimeIncompatible") : p.status.error || sub}
-          </span>
-        </span>
-      </button>
+      {hasQuota ? <OAuthAccountQuota trigger={mainButton} account={p} backend={backend} title={title} /> : mainButton}
 
       <div className={showActionLabels ? styles.oauthActions : styles.oauthIcons}>
         {!off && p.status.verification === "unverified" && (
@@ -224,11 +233,12 @@ function expiresLabel(expiresAt: string | null, fmt: (time: string) => string): 
   return fmt(`${Math.floor(hours / 24)}d`);
 }
 
-export default function OAuthProvidersCard({ id, backend = "hermes", title, showActionLabels = false, refreshKey = 0, onChanged }: {
+export default function OAuthProvidersCard({ id, backend = "hermes", title, showActionLabels = false, showQuota = false, refreshKey = 0, onChanged }: {
   id?: string;
   backend?: string;
   title?: string;
   showActionLabels?: boolean;
+  showQuota?: boolean;
   refreshKey?: number;
   onChanged?: () => void;
 }) {
@@ -236,8 +246,12 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
   const toast = useToast();
   const confirm = useConfirm();
   const { data, loading, error, refresh } = usePageCache(`models:oauth:${backend}`,
-    () => listOAuthProviders(backend), { staleTime: backend === "shoggoth" ? 0 : 30_000, loadingOnEmptyRefresh: true });
+    () => listOAuthProviders(backend),
+    { staleTime: backend === "shoggoth" ? 0 : 30_000, loadingOnEmptyRefresh: true });
   const providers = data?.providers ?? null;
+  useEffect(() => {
+    if (showQuota && providers && !error) void prefetchMissingOAuthQuotas(backend, providers);
+  }, [backend, error, providers, showQuota]);
   const providersLoading = loading && providers === null;
   const [busyId, setBusyId] = useState<string | null>(null);
   const slowDisconnect = useSlowPending(Boolean(busyId && providers?.some(p => p.id === busyId && p.disconnectable && !p.connection)));
@@ -283,6 +297,7 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
     if (!ok) return;
     try {
       await runProviderCommandInTerminal(backend, p.id, "disconnect");
+      forgetOAuthQuota(backend, p.id);
       toast.info(t("keys.oauthTerminalLaunched"));
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
@@ -331,6 +346,7 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
     });
     if (!ok) return;
     setBusyId(p.id);
+    forgetOAuthQuota(backend, p.id);
     try {
       // 不传 profile = 广播全部（只清 default 会让别的 profile 仍然连着）
       const r = await disconnectOAuthProvider(backend, p.id);
@@ -386,6 +402,7 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
                 backend={backend}
                 busy={Boolean(error) || busyId === p.id}
                 showActionLabels={showActionLabels}
+                showQuota={showQuota && loginFor?.id !== p.id}
                 onDisconnect={disconnect}
                 onLogin={setLoginFor}
                 onToggleConnection={toggleConnection}
@@ -401,6 +418,7 @@ export default function OAuthProvidersCard({ id, backend = "hermes", title, show
           provider={loginFor}
           backend={backend}
           onClose={() => {
+            forgetOAuthQuota(backend, loginFor.id);
             setLoginFor(null);
             refresh();
             onChanged?.();

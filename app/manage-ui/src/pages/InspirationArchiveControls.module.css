@@ -15,6 +15,7 @@
   cursor: pointer;
 }
 .ejectButton::before { content: ''; position: absolute; inset: -8px; border-radius: 50%; }
+:global(:root.electron-macos-hidden-inset) .ejectButton::before { -webkit-app-region: no-drag; }
 /* Figma 234:943–944: a 10px face centered in a 24px control. */
 /* A slightly domed key seated in a shallow ring, lit like the housing. */
 .ejectButton::after {

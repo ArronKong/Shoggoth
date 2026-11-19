@@ -3,6 +3,35 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { BridgeRuntime } from "../resources/deepseek-harness/shoggoth-dsh-bridge.mjs";
 
+test("reads only the active DeepSeek account's positive recharge and bonus balances", async () => {
+  let account;
+  const bridge = new BridgeRuntime({ get: name => name === "deepseekAccount" ? account : null });
+  const quota = () => bridge.dispatch("quota/read", { version: "0.1.1-rc.2" });
+  assert.deepEqual(await quota(), { status: "unsupported" });
+  let state = "signed-out";
+  let balance = {
+    status: "ready",
+    value: [{ currency: "CNY", balance: "2.45", grant: "private" }, { currency: "USD", balance: "0E-16" }],
+    bonusWallets: [{ currency: "CNY", balance: "5.0000000" }, { currency: "USD", balance: "0x2" }],
+  };
+  account = {
+    getState: async () => ({ status: state }),
+    getProfile: async () => ({ status: "ready", value: { name: "DeepSeek 示例账号", id: "private-id" } }),
+    getBalance: async client => {
+      assert.equal(client.version, "0.1.1-rc.2");
+      return balance;
+    },
+  };
+  assert.deepEqual(await quota(), { status: "unsupported" });
+  state = "credential-stored";
+  assert.deepEqual(await quota(), { status: "available", accountName: "DeepSeek 示例账号", wallets: [
+    { kind: "recharge", amount: 2.45, unit: "CNY" },
+    { kind: "bonus", amount: 5, unit: "CNY" },
+  ] });
+  balance = null;
+  assert.deepEqual(await quota(), { status: "unavailable" });
+});
+
 // Enforce the native registry's ownership and complete-prompt contracts. A Map
 // that silently overwrites registrations hides both first- and second-turn bugs.
 function promptRegistry() {

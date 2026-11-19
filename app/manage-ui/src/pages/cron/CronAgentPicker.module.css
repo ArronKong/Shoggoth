@@ -29,6 +29,10 @@
   /* Let the 40px field minimum set the height with or without an avatar. */
   padding-block: 0;
 }
+.control:has(> .avatar) {
+  /* Match the 24px avatar's vertical inset in the 40px field with a 1px border. */
+  padding-inline-start: 7px;
+}
 .trigger { cursor: pointer; }
 .trigger > svg { flex: none; color: var(--ui-text-3); }
 .value, .placeholder { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

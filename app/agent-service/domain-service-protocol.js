@@ -23,6 +23,7 @@ const {
   validateWorkRun,
 } = require("./product-store");
 const { WORK_RUN_STATUSES } = require("./work-run");
+const { validCronModelSelection } = require("./native-cron-model");
 
 const MAX_CONTENT_PREVIEW_BYTES = 512;
 const MAX_CONTENT_READ_BYTES = 32 * 1024;
@@ -89,6 +90,8 @@ const PUBLIC_MESSAGES = Object.freeze({
   KANBAN_CARD_NOT_FOUND: "Card 不存在",
   KANBAN_COMMENT_NOT_FOUND: "Comment 不存在",
   CRON_JOB_NOT_FOUND: "Cron Job 不存在",
+  CRON_MODEL_UNAVAILABLE: "所选模型在此助理的运行环境中不可用，请重新选择",
+  CRON_MODEL_UPDATE_BUSY: "此任务还有等待中或正在执行的运行，请在运行结束后更改模型",
   CRON_CONNECTOR_MIGRATION_REQUIRED: "此任务依赖旧插件，请编辑任务并重新选择连接器账号",
   WORK_RUN_NOT_FOUND: "Run 不存在",
   STATE_CONFLICT: "当前状态不允许该操作",
@@ -420,6 +423,7 @@ const CARD_PATCH_VALIDATORS = Object.freeze({
 const CRON_PATCH_VALIDATORS = Object.freeze({
   name: (value) => validString(value, 512),
   watch: (value) => typeof value === "boolean",
+  modelSelection: validCronModelSelection,
   prompt: (value) => validString(value, MAX_TEXT_BYTES),
   workspace: validCronWorkspace,
   schedule: validSchedule,
@@ -543,9 +547,11 @@ function validateDomainServiceParams(method, params) {
       "operationId", "name", "enabled", "profileId", "prompt", "workspace", "schedule",
       "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "createdAt",
       ...(Object.hasOwn(params ?? {}, "watch") ? ["watch"] : []),
+      ...(Object.hasOwn(params ?? {}, "modelSelection") ? ["modelSelection"] : []),
     ]) && validString(params.name, 512) && typeof params.enabled === "boolean"
       && validUuid(params.profileId) && validString(params.prompt, MAX_TEXT_BYTES)
       && (!Object.hasOwn(params, "watch") || typeof params.watch === "boolean")
+      && (!Object.hasOwn(params, "modelSelection") || validCronModelSelection(params.modelSelection))
       && validCronWorkspace(params.workspace) && validSchedule(params.schedule)
       && MISFIRE_POLICIES.has(params.misfirePolicy)
       && Number.isSafeInteger(params.maxCatchUp) && params.maxCatchUp >= 1 && params.maxCatchUp <= 100
@@ -786,10 +792,12 @@ function validateCronRunItem(value, params) {
 }
 
 function validateCronJob(value) {
-  const optional = ["systemManaged", "connectorMigrationRequired", "deliveryTarget", "watch"].filter(key => Object.hasOwn(value || {}, key));
+  const optional = ["systemManaged", "connectorMigrationRequired", "deliveryTarget", "watch", "modelSelection"]
+    .filter(key => Object.hasOwn(value || {}, key));
   if (!exactObject(value, [...CRON_JOB_FIELDS, ...optional])
     || (optional.includes("deliveryTarget") && value.deliveryTarget !== "group")
     || (optional.includes("watch") && typeof value.watch !== "boolean")
+    || (optional.includes("modelSelection") && !validCronModelSelection(value.modelSelection))
     || (value.connectorMigrationRequired !== undefined && typeof value.connectorMigrationRequired !== "boolean")
     || (value.systemManaged !== undefined && typeof value.systemManaged !== "boolean") || !validUuid(value.id)
     || !validString(value.name, 512) || typeof value.enabled !== "boolean"

@@ -5,6 +5,7 @@
   "codex-desktop-discovery-cache-unit.cjs",
   "codex-protected-chatgpt-catalog-unit.cjs",
   "shoggoth-codex-startup-unit.cjs",
+  "mcp-role-isolation-unit.cjs",
   "shoggoth-transcript-store-unit.cjs",
   "shoggoth-context-compiler-unit.cjs",
   "continuation-interaction-evidence-unit.cjs",

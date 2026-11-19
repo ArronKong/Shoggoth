@@ -16,6 +16,7 @@ const { GrokBuildAcpJsonlClient } = require("./grok-build-acp-jsonl");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { GrokBuildRuntimeLedger } = require("./grok-build-runtime-ledger");
 const { readGrokUsage } = require("./grok-build-usage");
+const { quotaSnapshot } = require("../core/oauth-account-quota");
 const {
   GROK_BUILD_RUNTIME,
   buildGrokBuildArgs,
@@ -789,7 +790,7 @@ class GrokBuildRuntimeHost {
     this.binaryPath = binaryPath;
     if (this.modelOnlyInstance) this.modelOnlyHome = await require("./grok-model-only-config").prepareGrokModelOnly(this);
     const args = this.modelOnlyInstance ? ["--sandbox", "read-only", "--tools", "", "--no-subagents", "--disable-web-search",
-      "agent", "--no-leader", "--agent-profile", this.modelOnlyHome.profile, "stdio"] : buildGrokBuildArgs(this.permissionPolicy);
+      "agent", "--no-leader", "--agent-profile", this.modelOnlyHome.profile, "stdio"] : buildGrokBuildArgs(this.permissionPolicy, this.options.agentWorkspace);
     let env = await buildSpawnEnv(this.runtimeEnvironment, this.options);
     if (this.secretGateway) {
       const assertCurrent = () => {
@@ -1089,6 +1090,41 @@ class GrokBuildRuntimeHost {
       methodId: this.authMethodId,
       methods: Object.freeze(this.authMethods.map((method) => Object.freeze({ ...method }))),
     });
+  }
+
+  async accountQuotaRead() {
+    this._assertReady();
+    const credential = this._syncAuthenticationFromProof();
+    if (!credential || this.modelOnlyInstance) return { status: "unsupported" };
+    let response, identity;
+    try {
+      [response, identity] = await Promise.all([
+        this.rpc.request("_x.ai/billing", {}, { timeoutMs: 17_000 }),
+        this.rpc.request("_x.ai/auth/info", {}, { timeoutMs: 1_500 }).catch(() => null),
+      ]);
+    } catch (error) {
+      if (error?.rpcCode === -32601) return { status: "unsupported" };
+      throw error;
+    }
+    if (this._syncAuthenticationFromProof()?.fingerprint !== credential.fingerprint) return { status: "unavailable" };
+    const config = (response?.result ?? response)?.config;
+    if (!config) return { status: "unsupported" };
+    const total = config.monthlyLimit?.val;
+    const used = config.used?.val;
+    const usedPercent = config.creditUsagePercent ?? (Number.isFinite(total) && total > 0 && Number.isFinite(used)
+      ? used / total * 100 : null);
+    const resetsAt = Date.parse(config.currentPeriod?.end ?? config.billingPeriodEnd);
+    const startsAt = Date.parse(config.currentPeriod?.start ?? config.billingPeriodStart);
+    const durationMinutes = config.currentPeriod?.type === "USAGE_PERIOD_TYPE_WEEKLY" ? 10_080
+      : Number.isFinite(resetsAt - startsAt) && resetsAt > startsAt ? Math.round((resetsAt - startsAt) / 60_000) : null;
+    const cents = config.prepaidBalance?.val;
+    const credits = Number.isSafeInteger(cents) && cents > 0 ? { kind: "balance", amount: cents / 100, unit: "USD" } : undefined;
+    if (usedPercent === null && !credits) return { status: "unsupported" };
+    const info = identity?.result ?? identity;
+    const fullName = [info?.firstName, info?.lastName]
+      .filter(part => typeof part === "string" && part.trim()).map(part => part.trim()).join(" ");
+    const accountName = info?.methodId === "xai.api_key" ? undefined : (fullName || info?.email);
+    return quotaSnapshot([{ usedPercent, durationMinutes, resetsAt }], { accountName, credits });
   }
 
   canRetireIdle() {

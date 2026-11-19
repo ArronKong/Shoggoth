@@ -46,6 +46,7 @@ const CODEX_CAPABILITIES = runtimeCapabilities(Object.fromEntries([
   "commands.list",
   "commands.execute",
   "account.read",
+  "account.quota.read",
   "account.login",
   "account.logout",
   "events",
@@ -104,6 +105,19 @@ function permissionParams(policy, mode, fixedReviewer) {
   });
 }
 
+function needsWorkspaceGrant(input) {
+  return input.agentWorkspace && input.agentWorkspace !== input.cwd && input.permissionPolicy?.sandbox === "workspace-write"
+    && !input.proactiveReview && !input.isolatedGeneration;
+}
+
+async function workspacePolicy(host, input) {
+  if (!needsWorkspaceGrant(input)) return undefined;
+  const settings = (await host.configRead?.({ includeLayers: false, cwd: input.cwd }))?.config?.sandbox_workspace_write;
+  return { type: "workspaceWrite", networkAccess: settings?.network_access === true,
+    excludeTmpdirEnvVar: settings?.exclude_tmpdir_env_var === true, excludeSlashTmp: settings?.exclude_slash_tmp === true,
+    writableRoots: [...new Set([...(settings?.writable_roots ?? []), input.agentWorkspace])] };
+}
+
 function mapThread(thread) {
   if (!thread || typeof thread !== "object" || Array.isArray(thread)) return thread;
   const { threadSource, ...rest } = thread;
@@ -144,6 +158,7 @@ class CodexRuntimeHandle {
     this.sessionInstructions = new Map();
     // Provider kind each native thread was started or resumed on.
     this.threadProviders = new Map();
+    this.workspacePolicies = new Map();
     this.modelOnlySessions = new Set();
     this.compactionCycles = new Map();
     this.promptLedger = new (require("./native-instruction-delivery").PromptBlockLedger)();
@@ -152,6 +167,19 @@ class CodexRuntimeHandle {
   get terminated() { return this.host.terminated; }
 
   assertExecutionProviderCurrent() { this.host.assertExecutionProviderCurrent?.(); }
+
+  _rememberWorkspacePolicy(response, input, policy) {
+    const id = response?.thread?.id;
+    if (!id) return;
+    this.workspacePolicies.delete(id);
+    if (!policy) return;
+    const effective = response.sandbox?.type === "workspaceWrite" ? response.sandbox : null;
+    // A loaded thread can acknowledge resume but retain its old sandbox. Apply
+    // the grant again at turn/start, preserving the native host's other limits.
+    const sandbox = { ...policy, ...effective, writableRoots: policy.writableRoots };
+    this.workspacePolicies.set(id, { cwd: input.cwd, owner: input.agentWorkspace, sandbox });
+    if (this.workspacePolicies.size > 4096) this.workspacePolicies.delete(this.workspacePolicies.keys().next().value);
+  }
 
   get registeredSecrets() {
     return Array.isArray(this.host.registeredSecrets) ? [...this.host.registeredSecrets] : [];
@@ -246,6 +274,7 @@ class CodexRuntimeHandle {
       : input.isolatedGeneration ? await this._isolatedGenerationConfig() : undefined;
     const secretConfig = await this._modelSecretConfig(input);
     const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
+    const workspace = await workspacePolicy(this.host, input);
     const fixedReviewer = this._providerApprovalReviewer(input.modelProvider?.configId);
     const permission = permissionParams(input.permissionPolicy, input.permissionMode, fixedReviewer);
     this.assertExecutionProviderCurrent();
@@ -255,11 +284,13 @@ class CodexRuntimeHandle {
       developerInstructions: input.developerInstructions,
       model: input.model,
       cwd: input.cwd,
-      ...(reviewConfig || secretConfig || providerConfig
-        ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig } } : {}),
+      ...(reviewConfig || secretConfig || providerConfig || workspace
+        ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig,
+          ...(workspace ? { "sandbox_workspace_write.writable_roots": workspace.writableRoots } : {}) } } : {}),
       ...permission,
     })));
     assertApprovalsReviewer(input.permissionMode, fixedReviewer, permission, response);
+    this._rememberWorkspacePolicy(response, input, workspace);
     this._rememberThreadProvider(response?.thread?.id, input);
     if (typeof input.developerInstructions === "string") {
       this.sessionInstructions.set(response.thread.id, {
@@ -295,6 +326,7 @@ class CodexRuntimeHandle {
     const reviewConfig = input.proactiveReview ? await this._proactiveReviewConfig() : undefined;
     const secretConfig = await this._modelSecretConfig(input);
     const providerConfig = secretConfig ? undefined : this._threadProviderConfig(input);
+    const workspace = await workspacePolicy(this.host, input);
     const fixedReviewer = this._providerApprovalReviewer(input.modelProvider?.configId);
     const permission = permissionParams(input.permissionPolicy, input.permissionMode, fixedReviewer);
     this.assertExecutionProviderCurrent();
@@ -304,11 +336,13 @@ class CodexRuntimeHandle {
       developerInstructions: input.developerInstructions,
       model: input.model,
       cwd: input.cwd,
-      ...(reviewConfig || secretConfig || providerConfig
-        ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig } } : {}),
+      ...(reviewConfig || secretConfig || providerConfig || workspace
+        ? { config: { ...reviewConfig, ...providerConfig, ...secretConfig,
+          ...(workspace ? { "sandbox_workspace_write.writable_roots": workspace.writableRoots } : {}) } } : {}),
       ...permission,
     })));
     assertApprovalsReviewer(input.permissionMode, fixedReviewer, permission, response);
+    this._rememberWorkspacePolicy(response, input, workspace);
     this._rememberThreadProvider(input.sessionId, input);
     if (typeof input.developerInstructions === "string") {
       const previous = this.sessionInstructions.get(response.thread.id);
@@ -599,6 +633,13 @@ class CodexRuntimeHandle {
   sessionDelete(input) { return this.host.threadDelete({ threadId: input.sessionId }); }
 
   async turnStart(input) {
+    let sandboxPolicy;
+    if (input.readOnlyReview) sandboxPolicy = { type: "readOnly", networkAccess: false };
+    else if (needsWorkspaceGrant(input)) {
+      const saved = this.workspacePolicies.get(input.sessionId);
+      sandboxPolicy = saved?.cwd === input.cwd && saved.owner === input.agentWorkspace
+        ? saved.sandbox : await workspacePolicy(this.host, input);
+    }
     const provider = this.threadProviders.get(input.sessionId);
     if (this._namesProviderRequired() && !provider) {
       throw adapterError("RUNTIME_MODEL_PROVIDER_REQUIRED", "Shoggoth model requests must specify a source");
@@ -682,6 +723,7 @@ class CodexRuntimeHandle {
       model: input.model,
       effort,
       cwd: input.cwd,
+      sandboxPolicy,
       approvalPolicy: codexApprovalPolicy(input.permissionPolicy?.approvalPolicy),
       approvalsReviewer: approvalsReviewer(input.permissionMode, this._providerApprovalReviewer(provider?.configId)),
     }), ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}) }, sendOptions("turn"));
@@ -855,6 +897,7 @@ class CodexRuntimeHandle {
   }
 
   accountRead(input) { return this.host.accountRead(input); }
+  accountQuotaRead() { return this.host.accountQuotaRead(); }
   accountLoginStart(input) { return this.host.accountLoginStart(input); }
   accountLoginApiKey(input) { return this.host.accountLoginApiKey(input); }
   accountLoginCancel(input) { return this.host.accountLoginCancel(input); }

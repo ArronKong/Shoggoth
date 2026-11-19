@@ -8,9 +8,10 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createRequire } = require("node:module");
+const { viteArtworkFixturePlugin } = require("./fixtures/vite-artwork-esbuild.cjs");
 
 const root = path.resolve(__dirname, "..");
-const preview = process.argv.includes("--preview");
+const preview = process.argv.find(arg => arg === "--preview" || arg === "--preview=inspirations");
 const output = process.env.WINDOW_DRAG_REVIEW_DIR || path.join(root, ".artifacts/window-drag-review");
 
 if (!process.versions.electron) {
@@ -22,6 +23,7 @@ if (!process.versions.electron) {
         entryPoints: [path.join(root, "scripts/fixtures/chat-agent-capsule.tsx")],
         bundle: true, format: "esm", jsx: "automatic",
         define: { "process.env.NODE_ENV": '"production"' },
+        plugins: [viteArtworkFixturePlugin(root)],
         loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
         outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(uiRoot, "node_modules")], logLevel: "silent",
       });
@@ -29,7 +31,7 @@ if (!process.versions.electron) {
       const env = { ...process.env };
       delete env.ELECTRON_RUN_AS_NODE;
       const child = require("node:child_process").spawn(require("electron"),
-        [__filename, "--electron-fixture", temp, ...(preview ? ["--preview"] : [])], { env });
+        [__filename, "--electron-fixture", temp, ...(preview ? [preview] : [])], { env });
       let stdout = "", stderr = "";
       child.stdout.on("data", value => { stdout += value; process.stdout.write(value); });
       child.stderr.on("data", value => { stderr += value; });
@@ -72,7 +74,7 @@ if (!process.versions.electron) {
         await new Promise(resolve => setTimeout(resolve, 25));
       }
     };
-    const style = selector => evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).webkitAppRegion`);
+    const style = (selector, pseudo = null) => evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)}), ${JSON.stringify(pseudo)}).webkitAppRegion`);
     const click = async selector => {
       // Electron ignores synthetic input while its window is hidden/unfocused.
       window.show(); window.focus();
@@ -91,10 +93,13 @@ if (!process.versions.electron) {
     const mac = process.platform === "darwin";
     const checks = [];
     await window.loadURL(`${server.url}/#/dashboard`);
-    for (const route of ["dashboard", "settings", "cli", "plugins", "chat"]) {
+    for (const route of ["dashboard", "settings", "cli", "connectors", "chat", "inspirations"]) {
       await evaluate(`window.location.hash = ${JSON.stringify("/" + route)}`);
       const header = route === "chat" ? ".chat-aside__title-row" : ".page-head";
-      await waitFor(`Boolean(document.querySelector(${JSON.stringify(header)})) && document.querySelector('.nav-link.active')?.getAttribute('href') === ${JSON.stringify("#/" + route)}`);
+      const active = route === "cli" ? "document.querySelector('.cli-page .page-head-actions input')"
+        : `document.querySelector('.nav-link.active')?.getAttribute('href') === ${JSON.stringify("#/" + route)}`;
+      const ready = route === "inspirations" ? "[data-inspiration-workbench]" : header;
+      await waitFor(`Boolean(document.querySelector(${JSON.stringify(ready)})) && (${active})`);
       assert.equal(await style(header), mac ? "drag" : "none", `${route} header must be draggable only in the macOS desktop window`);
       const gutter = await evaluate(`(() => { const s = getComputedStyle(document.querySelector('.app'), '::before'); return { region: s.webkitAppRegion, top: s.top, left: s.left, right: s.right, height: s.height, pointer: s.pointerEvents }; })()`);
       if (mac) assert.deepEqual(gutter, { region: "drag", top: "6px", left: "80px", right: "6px", height: "30px", pointer: "none" });
@@ -103,6 +108,20 @@ if (!process.versions.electron) {
         assert.equal(await style(".page-head-actions"), mac ? "no-drag" : "none");
         assert.equal(await style(".page-head-actions input"), mac ? "no-drag" : "none");
         assert.equal(await evaluate("getComputedStyle(document.querySelector('.page-head-actions input')).userSelect"), "text");
+      }
+      if (route === "inspirations") {
+        const workbench = "[data-inspiration-workbench]";
+        const screen = `${workbench} button[aria-label="在纸上输入灵感"]`;
+        const eject = `${workbench} [data-inspiration-storage]`;
+        const draft = `${workbench} textarea`;
+        assert.equal(await style(`.page:has(> ${workbench})`, "::before"), mac ? "drag" : "none");
+        assert.equal(await style("[data-typewriter-housing]", "::before"), mac ? "drag" : "none");
+        assert.equal(await style(eject, "::before"), mac ? "no-drag" : "none");
+        for (const selector of [screen, eject, draft]) {
+          assert.equal(await style(selector), mac ? "no-drag" : "none", `${selector} must remain interactive`);
+        }
+        await click(screen);
+        await waitFor(`document.activeElement.matches(${JSON.stringify(draft)})`);
       }
       if (route === "dashboard") {
         const geometry = await evaluate("JSON.stringify([...document.querySelectorAll('.sidebar, .page-head, .content')].map(e => e.getBoundingClientRect().toJSON()))");
@@ -124,11 +143,15 @@ if (!process.versions.electron) {
     await waitFor("Boolean(document.querySelector('.chat-header__row'))");
     for (const [width, height] of [[1200, 820], [800, 640]]) {
       window.setSize(width, height);
+      assert.equal(await style(".chat-header"), mac ? "drag" : "none");
       assert.equal(await style(".chat-header__row"), mac ? "drag" : "none");
+      assert.equal(await style(".chat-thread"), "none", "the focusable timeline must not subtract from the title bar");
+      assert.equal(await evaluate("document.querySelector('.chat-thread').tabIndex"), 0);
       for (const selector of [".chat-aside__search", ".chat-header__name", ".chat-header__avatar-trigger", ".chat-header__tools", ".chat-composer textarea"])
         assert.equal(await style(selector), mac ? "no-drag" : "none", `${selector} must remain interactive`);
       await click(".chat-header__name");
       await waitFor("document.querySelector('.chat-header__name').getAttribute('aria-expanded') === 'true'");
+      assert.equal(await style(".chat-header"), "none", "dragging must stay within the title row when a panel opens");
       assert.equal(await style("#chat-agent-panel"), "none", "expanded profile content must remain selectable");
       await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))");
       await waitFor("document.querySelector('.chat-header__name').getAttribute('aria-expanded') === 'false'");
@@ -147,6 +170,10 @@ if (!process.versions.electron) {
     console.log(JSON.stringify({ verified: true, checks, chatSizes: [1200, 800], output }));
     if (preview) {
       window.setSize(1200, 820);
+      if (preview === "--preview=inspirations") {
+        await window.loadURL(`${server.url}/#/inspirations`);
+        await waitFor("Boolean(document.querySelector('[data-typewriter-housing]'))");
+      }
       const record = () => fs.writeFileSync(path.join(output, "native-state.json"), JSON.stringify({ bounds: window.getBounds(), url: window.webContents.getURL() }, null, 2));
       window.on("move", record); window.on("resize", record);
       record(); window.show(); window.focus();

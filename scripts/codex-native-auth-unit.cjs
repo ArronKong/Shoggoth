@@ -41,11 +41,12 @@ function writeAuth(home, accessToken) {
   return body;
 }
 
-async function fixture(t, { onModelRequest = null, ...options } = {}) {
+async function fixture(t, { onModelRequest = null, accountUsage = null, ...options } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-native-auth-")));
   const nativeHome = path.join(root, ".codex");
   fs.mkdirSync(nativeHome, { mode: 0o700 });
   const routingRequests = [];
+  const usageRequests = [];
   const unexpectedRequests = [];
   const hosts = [];
   let auth;
@@ -54,6 +55,15 @@ async function fixture(t, { onModelRequest = null, ...options } = {}) {
   // to OpenAI. Optional model replies are scripted; no OAuth endpoint exists.
   const server = http.createServer((request, response) => {
     const pathname = new URL(request.url, "http://127.0.0.1").pathname;
+    if (accountUsage && request.method === "GET" && ["/wham/usage", "/api/codex/usage"].includes(pathname)) {
+      usageRequests.push(pathname);
+      response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(accountUsage));
+      return;
+    }
+    if (accountUsage && request.method === "GET" && pathname === "/api/codex/rate-limit-reset-credits") {
+      response.writeHead(404).end();
+      return;
+    }
     if (onModelRequest && request.method === "POST" && pathname === "/v1/responses") {
       onModelRequest(request, response);
       return;
@@ -122,8 +132,34 @@ async function fixture(t, { onModelRequest = null, ...options } = {}) {
     await host.initialize();
     return host;
   };
-  return { root, paths, nativeHome, home: environment.home, auth, makeHost, routingRequests };
+  return { root, paths, nativeHome, home: environment.home, auth, makeHost, routingRequests, usageRequests };
 }
+
+test("real Codex reads quota for the borrowed account without making a model request", async (t) => {
+  const resetsAt = Math.floor(Date.now() / 1_000) + 3_600;
+  const f = await fixture(t, { accountUsage: {
+    account_id: "fixture-account", plan_type: "plus",
+    credits: { has_credits: true, unlimited: false, balance: "24.50" },
+    rate_limit_reset_credits: { available_count: 2 },
+    rate_limit: {
+      allowed: true, limit_reached: false,
+      primary_window: { used_percent: 28, limit_window_seconds: 18_000, reset_after_seconds: 3_600, reset_at: resetsAt },
+      secondary_window: { used_percent: 64, limit_window_seconds: 604_800, reset_after_seconds: 3_600, reset_at: resetsAt },
+    },
+  } });
+  const authFile = writeAuth(f.nativeHome, token());
+  const host = await f.makeHost();
+  const quota = await host.accountQuotaRead();
+  assert.equal(quota.status, "available");
+  assert.equal(quota.accountName, "fixture@example.test");
+  assert.deepEqual(quota.windows.map(({ durationMinutes, usedPercent, resetsAt: at }) => [durationMinutes, usedPercent, at]),
+    [[300, 28, resetsAt * 1_000], [10_080, 64, resetsAt * 1_000]]);
+  assert.deepEqual(quota.credits, { kind: "balance", amount: 24.5, unit: "credits" });
+  assert.equal(quota.resetCredits, 2, "the reset count survives an unavailable credit details endpoint");
+  assert.equal(f.usageRequests.length, 1);
+  assert.equal(fs.readFileSync(path.join(f.nativeHome, "auth.json"), "utf8"), authFile);
+  assert.equal(fs.existsSync(path.join(f.home, "auth.json")), false);
+});
 
 test("bundled Codex reuses native file auth without copying it or opening OAuth", async (t) => {
   const f = await fixture(t);

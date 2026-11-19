@@ -48,7 +48,10 @@ test("release gate requires packaged build, public project token and fixed regio
     { projectToken: "phc_Token\n" }, { region: "https://attacker.test" }, { revision: 0 },
     { appVersion: "private-workspace" },
   ]) assert.equal(isEligibleBuild({ ...BUILD, ...patch }), false);
-  assert.equal(isEligibleBuild(require("../app/product-telemetry-build-config")), false);
+  const releaseConfig = require("../app/product-telemetry-build-config");
+  const packagedBuild = { ...releaseConfig, appVersion: require("../package.json").version, isPackaged: true };
+  assert.equal(isEligibleBuild(packagedBuild), true);
+  assert.equal(isEligibleBuild({ ...packagedBuild, isPackaged: false }), false);
 });
 
 test("config health distinguishes first-run absence, errors and invalid root without exposing content", () => {

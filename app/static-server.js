@@ -33,6 +33,7 @@ const { attachKanbanBroker, KANBAN_WS_PATH } = require("./core/kanban-broker");
 const { ModelValidationError } = require("./core/model-validation");
 const { ModelChangeError } = require("./core/model-change-validation");
 const { ModelChangeJournalError } = require("./core/model-change-journal");
+const { validQuotaSnapshot } = require("./core/oauth-account-quota");
 const { HermesCatalogUnavailableError } = require("./core/hermes-backend");
 const { WorkAdmissionError } = require("./core/work-admission-gate");
 const { createChatReadStateStore } = require("./core/chat-read-state-store");
@@ -2012,6 +2013,15 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       return sendJson(res, 405, { error: "method not allowed" });
     }
+    if (segs[0] === "cron" && segs[1] === "models" && segs.length === 2) {
+      if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+      const query = new URL(req.url, "http://127.0.0.1").searchParams;
+      try {
+        return sendJson(res, 200, await registry.getCronModels({ backendId: query.get("backendId"), agentId: query.get("agentId") }));
+      } catch {
+        return sendJson(res, 503, { code: "AGENT_MODEL_CATALOG_UNAVAILABLE", error: "Agent model catalog unavailable" });
+      }
+    }
     if (segs[0] === "cron" && segs[1] === "codex") {
       const backend = getActiveBackend(registry, new URL(req.url, "http://127.0.0.1").searchParams.get("backend") || "shoggoth");
       if (!backend || typeof backend.getCodexAutomationSource !== "function") return sendJson(res, 404, { error: "Codex source unavailable" });
@@ -2620,7 +2630,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (!body || !body.key) return sendJson(res, 400, { error: "missing key" });
       return sendJson(res, 200, await backend.validateProviderCredential(body.key, body.value));
     }
-    // OAuth provider 登录：列表是 GET，其余五个动作统一 POST + JSON body
+    // OAuth provider 登录与额度读取走 GET，登录操作走 POST + JSON body
     // （provider id / session id 不进 path 段，同 task/cron id 的规矩）。
     if (segs[0] === "oauth" && (segs.length === 1 || segs.length === 2)) {
       const url = new URL(req.url, "http://127.0.0.1");
@@ -2629,7 +2639,24 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (segs.length === 1) {
         if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
         const backendId = url.searchParams.get("backend") || "hermes";
-        return sendJson(res, 200, rememberOAuthCommands(backendId, await backend.listOAuthProviders()));
+        if (url.searchParams.get("view") === "quota") {
+          // Background inventory must not replace the complete terminal command list.
+          const snapshot = backend.getBackendDescriptor?.()?.surfaces?.oauthAccountQuota === true
+            ? await backend.listOAuthProviders({ quotaOnly: true }) : { providers: [], profiles: [] };
+          return sendJson(res, 200, snapshot);
+        }
+        const snapshot = await backend.listOAuthProviders();
+        return sendJson(res, 200, rememberOAuthCommands(backendId, snapshot));
+      }
+      if (segs[1] === "quota") {
+        if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+        const providerId = url.searchParams.get("provider");
+        if (!providerId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(providerId)) {
+          return sendJson(res, 400, { error: "invalid provider" });
+        }
+        let quota;
+        try { quota = await backend.getOAuthProviderQuota(providerId); } catch { /* optional provider read */ }
+        return sendJson(res, 200, validQuotaSnapshot(quota) ? quota : { status: "unavailable" });
       }
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
       const body = (await readJsonBody(req)) || {};
@@ -3778,6 +3805,49 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
           ...(error.state ? { state: error.state } : {}) });
       }
     }
+    if (segs[0] === "background-tasks" && segs.length <= 2) {
+      // Background tasks of the chat the user has open. The backend re-checks
+      // that every task belongs to this source session.
+      const sendTaskError = error => {
+        const code = typeof error?.code === "string" ? error.code : "BACKGROUND_TASK_UNAVAILABLE";
+        const status = code === "BACKGROUND_TASK_NOT_FOUND" ? 404
+          : ["INVALID_PARAMS", "CHAT_SESSION_INVALID", "INTERACTION_RESPONSE_INVALID"].includes(code) ? 400
+          : ["BACKGROUND_TASK_WAITING", "BACKGROUND_TASK_STOPPING", "BACKGROUND_TASK_CONFLICT"].includes(code) ? 409 : 503;
+        return sendJson(res, status, { error: error?.message || "后台任务暂不可用", code });
+      };
+      const validKey = value => isBoundedApiString(value, 512) && /^agent:[A-Za-z0-9][A-Za-z0-9._:-]*:[0-9a-f-]{36}$/u.test(value);
+      const validTask = value => typeof value === "string" && /^bgt-[a-f0-9]{48}$/u.test(value);
+      const url = new URL(req.url, "http://127.0.0.1");
+      try {
+        if (segs.length === 1) {
+          if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+          const sessionKey = url.searchParams.get("sessionKey") || "";
+          if (!hasExactSearchParams(url.searchParams, ["sessionKey"]) || !validKey(sessionKey)) {
+            return sendJson(res, 400, { error: "invalid sessionKey", code: "INVALID_PARAMS" });
+          }
+          return sendJson(res, 200, await registry.listBackgroundTasks(sessionKey));
+        }
+        if (segs[1] === "detail") {
+          if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
+          const sessionKey = url.searchParams.get("sessionKey") || "", taskId = url.searchParams.get("taskId") || "";
+          if (!hasExactSearchParams(url.searchParams, ["sessionKey", "taskId"]) || !validKey(sessionKey) || !validTask(taskId)) {
+            return sendJson(res, 400, { error: "invalid background task", code: "INVALID_PARAMS" });
+          }
+          return sendJson(res, 200, await registry.getBackgroundTask(sessionKey, taskId));
+        }
+        if (segs[1] === "control") {
+          if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
+          const body = await readJsonBody(req);
+          if (!body || !validKey(body.sessionKey) || !validTask(body.taskId)
+            || !isBoundedApiString(body.operationId, 128) || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(body.operationId)) {
+            return sendJson(res, 400, { error: "invalid background task control", code: "INVALID_PARAMS" });
+          }
+          const { sessionKey, taskId, ...input } = body;
+          return sendJson(res, 200, await registry.controlBackgroundTask(sessionKey, taskId, input));
+        }
+        return sendJson(res, 404, { error: "not found" });
+      } catch (error) { return sendTaskError(error); }
+    }
     if (segs[0] === "session-board" && segs.length === 1) {
       if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
       const url = new URL(req.url, "http://127.0.0.1");
@@ -4135,6 +4205,10 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       // Archiving was definitively refused. The UI can make a new attempt after
       // the pending chat settles or the Inbox can be checked.
       return sendJson(res, 409, { code: err.code, error: AGENT_LIFECYCLE_PUBLIC_MESSAGES[err.code] });
+    }
+    if (segs[0] === "cron" && segs[1] === "jobs" && ["CRON_MODEL_UNAVAILABLE", "CRON_MODEL_UPDATE_BUSY"].includes(err?.code)) {
+      const { PUBLIC_MESSAGES } = require("./agent-service/domain-service-protocol");
+      return sendJson(res, 409, { code: err.code, error: PUBLIC_MESSAGES[err.code] });
     }
     // 参数/路径边界错误保持客户端 400；请求体溢出用 413，其余运行时故障保持 500。
     const trusted = trustedApiError(err);

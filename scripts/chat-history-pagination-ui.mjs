@@ -17,10 +17,13 @@ const { attachChatBroker } = require("../app/core/chat-broker");
 const { generateIdentity } = require("../app/core/device-auth");
 const { createHistoryBackends, transcript } = require("./fixtures/chat-history-backends.cjs");
 const fixture = createHistoryBackends(), temp = fs.mkdtempSync(path.join(os.tmpdir(), "history-ui-"));
+const navigationPreview = process.argv.includes("--preview-message-navigator");
+const serve = process.argv.includes("--serve");
+const previewPort = serve ? Number(process.argv.find(argument => argument.startsWith("--port="))?.slice(7) ?? 0) : 0;
 const hello = { type: "hello-ok", protocol: 4, server: { version: "2026.9.9" },
   features: { methods: [], events: [], capabilities: [] }, auth: { role: "operator", scopes: ["operator.read", "operator.write"] },
   policy: { maxPayload: 16 * 1024 * 1024, maxBufferedBytes: 32 * 1024 * 1024 } };
-const listen = server => new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+const listen = (server, port = 0) => new Promise(resolve => server.listen(port, "127.0.0.1", resolve));
 const close = server => new Promise(resolve => server.close(resolve));
 const json = (response, value, status = 200) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value)); };
 let archiveRetryKey = null;
@@ -150,18 +153,57 @@ async function proxyChecks() {
     console.log("PASS authenticated product history proxy: four readers, cursor isolation, watcher continuity");
   } finally { client.terminate(); }
 }
+
+function useMessageNavigationExamples() {
+  const turns = [
+    ["先回顾这次发布的改动范围。", "本轮重点核对聊天页和后台服务的行为，再确认安装包。"],
+    ["把安装和升级分别列成一组。", "安装走干净环境，升级从上一版本保留的会话和配置开始。"],
+    ["先确认要构建哪些平台版本。", "分别准备 Apple 芯片与 Intel 两套 macOS 包。"],
+    ["把版本号核对到每份产物。", "会核对安装包文件名、App 信息和更新清单。"],
+    ["保留上一版的回退资料。", "把旧包和对应校验值放在一起，方便复查。"],
+    ["看一下这两套包的签名信息。", "分别检查签名身份和完整性，再记录验证结果。"],
+    ["启动检查需要看哪些页面？", "先看窗口、聊天页和设置页，再检查后台 Service 状态。"],
+    ["升级后抽查几个旧会话。", "挑几个有历史和附件的旧会话，看内容能否正常恢复。"],
+    ["空会话也单独开一次。", "会检查空态、输入框和切换会话后的显示。"],
+    ["下载前先核对产物的架构。", "两套包的架构、文件名和对应下载项要一一对上。"],
+    ["把验证时间补进记录。", "每条记录会带上执行时间和对应的版本。"],
+    ["接着检查下载和安装。", "先下载两套包，再分别检查解包和签名。"],
+    ["先列一下这次发布要检查的项目。", "先核对源码版本，再检查两套安装包的签名、下载和启动。"],
+    ["把 Intel 和 arm64 的产物分开核对。", "分别记录两套产物的架构、签名结果和文件校验值。"],
+    ["构建在哪一步失败的？", "检查记录停在打包步骤。我已标出失败阶段和对应日志位置。"],
+    ["再核对一次下载链接。"],
+    ["再核对一次下载链接。", "两个下载项都指向同一版本，各自的安装包架构也对应。"],
+    ["先跑一遍安装后的启动检查。", "从干净目录启动，检查窗口和后台 Service 是否正常就绪。"],
+    ["[file: 启动日志.txt]", "日志里记录了窗口加载完成和本地 Service 就绪的时间。"],
+    ["把验证结果汇总成一段简短说明。", "两套安装包已分别检查签名、架构和启动，也补齐了下载校验结果。"],
+    ["复验结果放到发布说明的最后一段。", "可以接在下载说明下方，方便读者查看对应的验证范围。"],
+  ];
+  const earlierTurns = Array.from({ length: 30 }, (_, index) => [`记一下第 ${index + 1} 项安装检查。`]);
+  const examples = [...earlierTurns, ...turns];
+  for (const [caseIndex, count, name] of [[1, 50, "50 条用户消息"], [2, 51, "发布排查 · 51 条"], [3, 9, "9 条用户消息"]]) {
+    const example = fixture.cases[caseIndex];
+    example.name = name;
+    fixture.histories.set(example.key, examples.slice(-count).flatMap((turn, index) => turn.map((text, part) => ({
+      id: `navigation-${index}-${part}`, role: part === 0 ? "user" : "assistant",
+      content: [{ type: "text", text }], timestamp: Date.UTC(2026, 10, 18, 1, 6 + index * 5, part),
+    }))));
+  }
+}
+
 try {
   await proxyChecks();
+  if (navigationPreview) useMessageNavigationExamples();
   await build({ entryPoints: [path.join(root, "scripts/fixtures/chat-history-pagination.tsx")],
-    bundle: true, format: "esm", define: { "process.env.NODE_ENV": '"production"', __HISTORY_CASES__: JSON.stringify(fixture.cases) },
+    bundle: true, format: "esm", define: { "process.env.NODE_ENV": '"production"', __HISTORY_CASES__: JSON.stringify(fixture.cases),
+      __HISTORY_NAVIGATION_PREVIEW__: JSON.stringify(navigationPreview) },
     loader: { ".woff2": "dataurl", ".svg": "dataurl", ".webp": "dataurl", ".png": "dataurl" },
     outfile: path.join(temp, "fixture.js"), nodePaths: [path.join(root, "app/manage-ui/node_modules")], logLevel: "silent",
     plugins: [viteArtworkFixturePlugin(root)] });
   fs.writeFileSync(path.join(temp, "index.html"), '<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="/fixture.css"><style>html,body,#root{margin:0;width:100%;height:100%}#root{display:flex;flex-direction:column}.history-fixture-toolbar{display:flex;gap:12px;padding:8px 20px;align-items:center;background:#eee;flex-shrink:0;font:13px system-ui}.history-fixture-toolbar button{padding:5px 10px}</style><div id="root"></div><script type="module" src="/fixture.js"></script>');
-  await listen(server);
+  await listen(server, previewPort);
   const url = `http://127.0.0.1:${server.address().port}/#/chat`;
   console.log(`ISOLATED_HISTORY_URL=${url}`);
-  if (process.argv.includes("--serve")) {
+  if (serve) {
     await new Promise(resolve => { process.once("SIGINT", resolve); process.once("SIGTERM", resolve); });
   } else {
     serviceReady = false;

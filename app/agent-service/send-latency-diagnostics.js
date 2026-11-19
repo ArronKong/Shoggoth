@@ -16,6 +16,10 @@ function normalize(input) {
     || !["success", "error", "unknown"].includes(input.outcome)
     || !Number.isFinite(input.durationMs) || input.durationMs < 0) return null;
   const record = { stage: input.stage, outcome: input.outcome, durationMs: Math.round(input.durationMs) };
+  if (input.stage === "borrowed_output_scan_failed"
+    && ["MEMORY_SCAN_BUSY", "MEMORY_SCAN_UNAVAILABLE", "MEMORY_SCAN_TOO_LARGE", "MEMORY_REVISION_CONFLICT", "MEMORY_READ_VIEW_STALE"].includes(input.code)) {
+    record.code = input.code;
+  }
   if (Number.isSafeInteger(input.bytes) && input.bytes >= 0) record.bytes = input.bytes;
   for (const key of ["at", "startedAt", "finishedAt", "attempt"]) {
     if (Number.isSafeInteger(input[key]) && input[key] >= 0) record[key] = input[key];

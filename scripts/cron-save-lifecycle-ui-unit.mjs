@@ -33,16 +33,21 @@ const translations = { useTranslation: () => ({
   i18n: { resolvedLanguage: "zh-CN" },
 }) };
 const scheduleTypes = { exports: {} };
+const formLayoutStubs = {
+  "react-i18next": translations,
+  "../../components/Field": { Field: host("field"), TextInput: host("input"), TextArea: host("textarea") },
+  "./CronSchedulePicker": { CronExpressionPicker: host("cron-expression"), DateTimePicker: host("date-time"), IntervalPicker: host("interval") },
+  "./CronFormLayout.module.css": {},
+};
 vm.runInNewContext(compile("pages/cron/CronFormLayout.tsx"), {
-  exports: scheduleTypes.exports, require: name => name === "react-i18next" ? translations
-    : name === "../../components/Field" ? { Field: host("field"), TextInput: host("input") } : require(name),
+  exports: scheduleTypes.exports, require: name => formLayoutStubs[name] || require(name),
 });
 const openClawForm = { exports: {} };
 const openClawFormStubs = {
   "react-i18next": translations,
   "../../components/Field": { Field: host("field"), TextArea: host("textarea") },
   "./CronFormLayout": scheduleTypes.exports,
-  "./CronSchedulePicker": { CronExpressionPicker: host("cron-expression") },
+  "./CronModelPicker": { CronTaskModelField: host("task-model-picker") },
 };
 vm.runInNewContext(compile("pages/cron/OpenClawCronForm.tsx"), {
   exports: openClawForm.exports, require: name => openClawFormStubs[name] || require(name),
@@ -132,6 +137,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     "./cron/CronCreateForm": { __esModule: true, default: host("create-form") },
     "./cron/cronCreateDraft": {
       emptyCronCreateDraft: () => ({ name: "", prompt: "", backendId: "", agentId: "", enabled: true }),
+      defaultCronAssistant: () => undefined,
       cronAgentAvailable: agent => !agent.archived,
       cronCreateInputFromDraft: draft => ({ ...draft }),
     },
@@ -139,6 +145,7 @@ async function fixture(agentsLoader = async () => [{ id: "fixture-agent", name: 
     "./cron/ShoggothCronForm": { __esModule: true, default: host("native-form"), emptyNativeCronDraft: () => ({}),
       nativeCronDraftFromJob: job => ({ ...job }), nativeCronEditPlan: () => ({}), validateNativeCronDraft: () => null },
     "../api/client": {
+      getStatus: async () => [],
       listAgents: agentsLoader, getCronRuns: async id => { state.runRequests.push(id); return []; },
       listCronJobs: async filters => { state.listRequests.push(filters); await state.gates.get('list')?.promise; return state.allJobs; },
       getCronJobDetail: async id => {
@@ -593,7 +600,8 @@ for (const rejectOld of [false, true]) {
 {
   let calls = 0;
   const f = await fixture(async () => {
-    if (++calls === 1) throw new Error("roster unavailable");
+    // The page preloads the roster. Fail the refresh started by opening Create.
+    if (++calls === 2) throw new Error("roster unavailable");
     return [{ id: "fixture-agent", backendId: "openclaw" }];
   });
   await f.click(f.renderer.root.findByProps({ className: "btn-primary cron-new" }));

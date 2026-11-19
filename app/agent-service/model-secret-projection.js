@@ -1,4 +1,5 @@
 "use strict";
+const { setImmediate: yieldToService } = require("node:timers/promises");
 
 // Local request transformation. This module performs no network IO, reads
 // no provider credential and chooses no endpoint. Runtime integrations keep
@@ -22,12 +23,30 @@ const ATTACHMENT_ROLES = new Set(["user", "assistant", "model"]);
 
 class ModelSecretProjection {
   constructor({ secrets, media, stateDir }) { this.secrets = secrets; this.media = media; this.stateDir = stateDir; }
-  async project(scope, input, { signal, assertCurrent = () => {}, isTrustedOpaque = () => false } = {}) {
+  async project(scope, input, options = {}) {
     if (!plain(input) || Buffer.byteLength(JSON.stringify(input)) > 64 * 1024 * 1024) fail("SECRET_MODEL_INPUT_INVALID");
+    // Restart only the local projection if credentials rotate while the gateway is preparing a request.
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.projectWithCurrentCredentials(scope, input, options); }
+      catch (error) {
+        if (attempt || error.code !== "SECRET_MODEL_PROJECTION_STALE") throw error;
+      }
+    }
+  }
+  async projectWithCurrentCredentials(scope, input, { signal, assertCurrent = () => {}, isTrustedOpaque = () => false, onVerified } = {}) {
+    assertCurrent(); signal?.throwIfAborted();
+    const matcher = await this.secrets.prepareProjectionMatcher?.(scope);
+    let yieldAt = performance.now() + 8;
+    const checkpoint = async () => {
+      if (performance.now() < yieldAt) return;
+      await yieldToService();
+      assertCurrent(); signal?.throwIfAborted(); matcher?.assertCurrent();
+      yieldAt = performance.now() + 8;
+    };
     let nodes = 0;
     const redact = async text => {
       assertCurrent(); if (signal?.aborted) fail("SECRET_MODEL_CANCELED");
-      const result = await this.secrets.project(scope, text);
+      const result = await this.secrets.project(scope, text, { checkpoint }, matcher);
       assertCurrent(); return result;
     };
     const projectText = async (text, attachmentPart = false) => {
@@ -43,6 +62,7 @@ class ModelSecretProjection {
       return result + await redact(text.slice(offset));
     };
     const walk = async (value, depth = 0, business = false, field = null, data = false, attachmentPart = false) => {
+      await checkpoint();
       if (++nodes > 100000 || depth > 48) fail("SECRET_MODEL_INPUT_INVALID");
       data ||= DATA_FIELDS.has(field);
       if (typeof value === "string") return business || data ? projectText(value, attachmentPart) : value;
@@ -76,7 +96,7 @@ class ModelSecretProjection {
         // are detected. Recurse through containers to keep nested images and
         // signed blocks on their own mandatory processing path.
         const scalars = Object.fromEntries(Object.entries(value).filter(([, child]) => child === null || typeof child !== "object"));
-        const result = await this.secrets.project(scope, scalars, { keys: true });
+        const result = await this.secrets.project(scope, scalars, { keys: true, checkpoint }, matcher);
         for (const [key, child] of Object.entries(value)) {
           if (child === null || typeof child !== "object") continue;
           const projectedKey = await projectText(key);
@@ -102,8 +122,15 @@ class ModelSecretProjection {
       return result;
     };
     const first = await walk(input);
+    const revision = this.secrets.projectionRevision?.(scope);
     nodes = 0;
     const result = await walk(first);
+    const verify = () => {
+      matcher?.assertCurrent();
+      if (this.secrets.projectionRevision?.(scope) !== revision) fail("SECRET_MODEL_PROJECTION_STALE");
+    };
+    verify();
+    onVerified?.(verify);
     assertCurrent(); if (signal?.aborted) fail("SECRET_MODEL_CANCELED");
     return result;
   }

@@ -110,8 +110,11 @@ class GrokBuildRuntimePool {
     let executionRunId;
     try { executionRunId = executionRunIdForPool(options); } catch (error) { return Promise.reject(error); }
     const modelOnlyInstance = options.modelOnly === true;
-    const key = JSON.stringify([routeKey(id, accountId, controlInstance, workspace, executionRunId), modelOnlyInstance]);
     const permissionPolicy = normalizeGrokBuildPermissionPolicy(options.permissionPolicy);
+    const agentWorkspace = !controlInstance && !modelOnlyInstance && permissionPolicy.sandbox === "workspace-write"
+      && options.executionContract?.agentWorkspace && options.executionContract.agentWorkspace !== workspace
+      ? normalizeGrokBuildWorkspace(options.executionContract.agentWorkspace) : null;
+    const key = JSON.stringify([routeKey(id, accountId, controlInstance, workspace, executionRunId), modelOnlyInstance, agentWorkspace]);
     if (modelOnlyInstance && (controlInstance || workspace !== null || permissionPolicy.approvalPolicy !== "never"
       || permissionPolicy.sandbox !== "read-only")) return Promise.reject(poolError("MODEL_ONLY_TOOLS_FORBIDDEN", "Model-only policy is invalid"));
     const policyFingerprint = grokBuildPermissionFingerprint(permissionPolicy);
@@ -210,6 +213,7 @@ class GrokBuildRuntimePool {
       permissionPolicy,
       controlInstance,
       workspace,
+      agentWorkspace,
       modelOnlyInstance,
       authProof: Object.freeze({
         read: () => this.authProofs.get(authKey) || null,

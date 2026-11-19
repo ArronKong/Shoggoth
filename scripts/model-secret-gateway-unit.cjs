@@ -50,6 +50,35 @@ test("actual upstream body is protected while original auth stays on the approve
   assert(!received[0].body.input[0].output.includes("123456")); assert(received[0].body.input[0].output.includes("Public receipt"));
   assert.equal(received[0].body.input[0].call_id, "call-123456"); assert(!result.text.includes(SYNTHETIC_AUTH));
 }));
+test("credentials rotated during the last route check are masked before the single upstream send", async () => fixture(async ({ gateway, secrets, received }) => {
+  let revision = 0, reads = 0;
+  const value = "synthetic+rotated/fixture";
+  secrets.autoDetect = false;
+  secrets.getKnownSecretsRevision = () => revision;
+  secrets.getKnownSecrets = () => { reads++; return revision ? [{ value, kind: "token" }] : []; };
+  const route = await gateway.bind({ scope: SCOPE, providerKind: "chatgpt", async validateRequest() {
+    if (reads === 1) { await new Promise(resolve => setImmediate(resolve)); revision = 1; }
+  } });
+  const result = await send(route, { input: "Public receipt containing " + encodeURIComponent(value) });
+  assert.equal(result.status, 200);
+  assert.equal(reads, 2);
+  assert.equal(received.length, 1);
+  assert.match(received[0].body.input, /^Public receipt containing /);
+  assert.ok(!received[0].body.input.includes(encodeURIComponent(value)));
+}));
+test("concurrent credential preparation in another chat does not restart this request", async () => fixture(async ({ gateway, secrets, received, projection }) => {
+  let passes = 0;
+  const project = projection.project.bind(projection);
+  projection.project = (...args) => { passes++; return project(...args); };
+  const route = await gateway.bind({ scope: SCOPE, providerKind: "chatgpt", async validateRequest() {
+    if (passes) await secrets.prepare({ scope: { ...SCOPE, sessionId: "another-session" },
+      operationId: "other-chat-" + passes, text: "password: fixtureValue" + passes });
+  } });
+  const result = await send(route, { input: "Public measurement." });
+  assert.equal(result.status, 200);
+  assert.equal(passes, 1);
+  assert.equal(received.length, 1);
+}));
 test("a response without a media type follows the requested stream mode and still records opaque proof", async () => fixture(async ({ gateway, respond }) => {
   const recorded = [];
   gateway.provenance = { verifier: async () => () => false, record: (_scope, value) => recorded.push(value) };

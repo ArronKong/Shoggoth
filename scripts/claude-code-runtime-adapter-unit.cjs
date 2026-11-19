@@ -609,10 +609,12 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
       { action: "accept", content: {} }
     ));
     const image = require("./fixtures/native-chat-image.cjs")(ctx.workspace);
+    const agentWorkspace = fs.mkdtempSync(path.join(ctx.trustedRoot, "agent-home-"));
     const turn = await runtime.turnStart({
       sessionId: started.session.id,
       operationId: "operation-one",
       prompt: "运行 pwd",
+      agentWorkspace,
       turnDeveloperInstructions: "CURRENT_RUN_ONLY",
       attachments: [image],
       thinkingLevel: "high",
@@ -691,6 +693,8 @@ test("Claude Code Adapter 覆盖会话、审批、流式、Token、模型与物�
     assert.equal(ctx.bindings.length, 2);
     assert.equal(ctx.revocations.length, 2);
     const turnQuery = ctx.sdk.queryCalls.find((call) => !Array.isArray(call.options.tools));
+    assert.deepEqual(turnQuery.options.additionalDirectories, [agentWorkspace]);
+    assert.deepEqual(turnQuery.options.sandbox.filesystem.allowWrite, [ctx.workspace, agentWorkspace]);
     assert.deepEqual(turnQuery.options.systemPrompt, {
       type: "preset",
       preset: "claude_code",

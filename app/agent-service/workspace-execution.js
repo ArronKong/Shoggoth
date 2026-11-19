@@ -6,6 +6,7 @@ const { spawn } = require("node:child_process");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { assertHookWorkspace } = require("./hook-process-host");
+const { agentWorkspaceRoot, ensureAgentWorkspace } = require("./chat-workspace");
 const { workspaceAutoExecution, validWorkspaceExecutionArguments, widerWorkspaceAccess } = require("./workspace-execution-tools");
 const { serviceError, ensurePrivateDirectoryTree } = require("./security");
 const { executionTimeoutMs } = require("../execution-timeout");
@@ -36,7 +37,7 @@ async function assertWorkspaceLinks(workspace, scope) {
   }
 }
 
-function workspaceExecutionProfile({ workspace, scratch, nodeExecutable, access = {}, marker }) {
+function workspaceExecutionProfile({ workspace, agentWorkspace, scratch, nodeExecutable, access = {}, marker }) {
   const reads = ["/System/Library", "/usr/lib", "/usr/share", "/bin", "/sbin", "/usr/bin", "/usr/sbin",
     "/Library/Developer/CommandLineTools", "/Applications/Xcode.app/Contents/Developer",
     "/opt/homebrew/Cellar", "/opt/homebrew/opt", "/opt/homebrew/bin", "/opt/homebrew/lib/node_modules",
@@ -55,7 +56,7 @@ function workspaceExecutionProfile({ workspace, scratch, nodeExecutable, access 
     "(allow file-read-metadata)",
     `(allow file-read* ${reads.map(root => `(subpath ${q(root)})`).join(" ")} (literal ${q(nodeExecutable)}) (literal "/") (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom") (literal "/private/etc/localtime"))`,
     ...(marker ? [`(allow file-read-data (literal ${q(marker)}))`] : []),
-    `(allow file-read* file-write* (subpath ${q(workspace)}) (subpath ${q(scratch)}))`,
+    `(allow file-read* file-write* ${[...new Set([workspace, agentWorkspace, scratch].filter(Boolean))].map(root => `(subpath ${q(root)})`).join(" ")})`,
     ...(access.readPaths || []).map(root => `(allow file-read* (subpath ${q(root)}))`),
     ...(access.writePaths || []).map(root => `(allow file-read* file-write* (subpath ${q(root)}))`),
     ...(access.network ? ['(allow network-outbound (remote ip "*:*"))',
@@ -117,6 +118,7 @@ class WorkspaceExecutionService {
       try {
         const binding = JSON.parse(fs.readFileSync(path.join(control, "binding.json"), "utf8"));
         this.blockedWorkspaces.delete(binding.workspace);
+        if (binding.agentWorkspace) this.blockedWorkspaces.delete(binding.agentWorkspace);
       } catch { /* Old recovery markers need no model-provided binding. */ }
       fs.rmSync(control, { recursive: true, force: true });
     }
@@ -158,7 +160,7 @@ class WorkspaceExecutionService {
     };
     return { readPaths: (raw.readPaths || []).map(normalize), writePaths: (raw.writePaths || []).map(normalize), network: raw.network === true };
   }
-  async #launch(command, workspace, cwd, timeoutMs, scope, access, resolveSecretEnvironment = null) {
+  async #launch(command, workspace, cwd, timeoutMs, scope, access, resolveSecretEnvironment = null, agentWorkspace = null) {
     scope.assertCurrent(); if (scope.signal?.aborted) fail("HOST_CAPABILITY_REVOKED");
     ensurePrivateDirectoryTree(this.cacheDir, this.paths.trustedRoot || path.dirname(this.cacheDir));
     const control = fs.mkdtempSync(path.join(this.cacheDir, "execution-"));
@@ -166,12 +168,12 @@ class WorkspaceExecutionService {
     fs.mkdirSync(scratch, { mode: 0o700 });
     const launcher = path.join(control, "supervisor.cjs");
     fs.writeFileSync(launcher, supervisorSource, { mode: 0o600, flag: "wx" });
-    fs.writeFileSync(path.join(control, "binding.json"), JSON.stringify({ version: 1, workspace }), { mode: 0o600, flag: "wx" });
+    fs.writeFileSync(path.join(control, "binding.json"), JSON.stringify({ version: 1, workspace, agentWorkspace }), { mode: 0o600, flag: "wx" });
     if (!this.processOwnerBytes) fail("WORKSPACE_EXECUTION_UNAVAILABLE");
     const processOwner = path.join(control, "process-owner"), marker = path.join(control, "marker"), guard = path.join(control, "guard");
     fs.writeFileSync(processOwner, this.processOwnerBytes, { mode: 0o700, flag: "wx" });
     for (const file of [marker, guard]) fs.writeFileSync(file, "", { mode: 0o600, flag: "wx" });
-    const profile = workspaceExecutionProfile({ workspace, scratch, nodeExecutable: this.nodeExecutable, access, marker });
+    const profile = workspaceExecutionProfile({ workspace, agentWorkspace, scratch, nodeExecutable: this.nodeExecutable, access, marker });
     this.controls.add(control);
     let cleanupVerified = false;
     const env = { PATH: [path.dirname(this.nodeExecutable), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(":"),
@@ -245,7 +247,11 @@ class WorkspaceExecutionService {
       try {
         if (!cleanupVerified) await this.#clean(control);
         fs.rmSync(control, { recursive: true, force: true });
-      } catch (error) { this.blockedWorkspaces.add(workspace); throw error; }
+      } catch (error) {
+        this.blockedWorkspaces.add(workspace);
+        if (agentWorkspace) this.blockedWorkspaces.add(agentWorkspace);
+        throw error;
+      }
       finally { this.controls.delete(control); }
     }
   }
@@ -300,12 +306,18 @@ class WorkspaceExecutionService {
   }
   async #execute({ contract, run, args, scope, resolveSecretEnvironment }) {
     const workspace = this.#workspace(contract.workspace);
-    if (this.blockedWorkspaces.has(workspace)) fail("WORKSPACE_EXECUTION_CLEANUP_FAILED");
+    let agentWorkspace = null;
+    if (contract.agentWorkspace !== undefined) {
+      if (contract.agentWorkspace !== agentWorkspaceRoot(this.paths, run.profileId)) fail("WORKSPACE_EXECUTION_SCOPE_INVALID");
+      agentWorkspace = this.#workspace(ensureAgentWorkspace(this.paths, run.profileId));
+    }
+    const roots = [...new Set([workspace, agentWorkspace].filter(Boolean))];
+    if (roots.some(root => this.blockedWorkspaces.has(root))) fail("WORKSPACE_EXECUTION_CLEANUP_FAILED");
     const access = this.#access(args.access);
     const requestedCwd = path.resolve(workspace, args.cwd || ".");
     let cwd;
     try { cwd = fs.realpathSync(requestedCwd); } catch { fail("WORKSPACE_EXECUTION_SCOPE_INVALID"); }
-    if (!inside(cwd, workspace) || !fs.statSync(cwd).isDirectory()) fail("WORKSPACE_EXECUTION_SCOPE_INVALID");
+    if (!roots.some(root => inside(cwd, root)) || !fs.statSync(cwd).isDirectory()) fail("WORKSPACE_EXECUTION_SCOPE_INVALID");
     if (widerWorkspaceAccess(args)) {
       if (typeof this.requestApproval !== "function") fail("WORKSPACE_EXECUTION_APPROVAL_REQUIRED");
       const result = await this.requestApproval({ runId: run.id, profileId: run.profileId,
@@ -316,7 +328,7 @@ class WorkspaceExecutionService {
       if (JSON.stringify(this.#access(args.access)) !== JSON.stringify(access)) fail("WORKSPACE_EXECUTION_SCOPE_INVALID");
     }
     try {
-      await assertWorkspaceLinks(workspace, scope);
+      for (const root of roots) if (!roots.some(other => other !== root && inside(root, other))) await assertWorkspaceLinks(root, scope);
       for (const root of access.writePaths) if (fs.existsSync(root)) {
         if (fs.statSync(root).isDirectory()) await assertWorkspaceLinks(root, scope);
         else if (fs.statSync(root).nlink !== 1) fail("WORKSPACE_EXECUTION_SCOPE_INVALID");
@@ -324,7 +336,7 @@ class WorkspaceExecutionService {
     } catch (error) { if (error?.code === "HOST_CAPABILITY_REVOKED") throw error; fail("WORKSPACE_EXECUTION_SCOPE_INVALID"); }
     if (!(await this.verify())) fail("WORKSPACE_EXECUTION_UNAVAILABLE");
     scope.assertCurrent();
-    return this.#launch(args.command, workspace, cwd, executionTimeoutMs(args.timeoutMs), scope, access, resolveSecretEnvironment);
+    return this.#launch(args.command, workspace, cwd, executionTimeoutMs(args.timeoutMs), scope, access, resolveSecretEnvironment, agentWorkspace);
   }
   async close() {
     for (const controller of this.callControllers) controller.abort();

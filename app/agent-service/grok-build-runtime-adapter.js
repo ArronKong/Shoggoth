@@ -24,6 +24,7 @@ const GROK_BUILD_CAPABILITIES = runtimeCapabilities({
   "commands.list": true,
   "commands.execute": true,
   "account.read": false,
+  "account.quota.read": true,
   "account.login": false,
   "account.logout": false,
   events: true,
@@ -55,6 +56,7 @@ class GrokBuildRuntimeHandle {
   }
 
   authenticationState() { return this.host.authenticationState(); }
+  accountQuotaRead() { return this.host.accountQuotaRead(); }
   generateModelOnly(input) { return require("./acp-model-only").generateAcpModelOnly(this.host, input); }
   subscribe(listener) { return this.host.subscribe(listener); }
   registerServerRequestHandler(method, handler) {

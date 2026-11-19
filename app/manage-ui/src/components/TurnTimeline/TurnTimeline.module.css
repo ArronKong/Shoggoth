@@ -131,11 +131,6 @@
   font-weight: 400;
   color: var(--ui-text-1);
 }
-.updates {
-  flex: none;
-  font-size: var(--ui-fs-caption);
-  color: var(--ui-text-3);
-}
 .chip {
   flex: none;
   font-size: 10px;

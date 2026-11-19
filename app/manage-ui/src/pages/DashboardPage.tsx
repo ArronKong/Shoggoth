@@ -689,8 +689,7 @@ export default function DashboardPage() {
         backendId={openRun?.backendId}
         runId={openRun?.runId}
         agentName={openRun?.agentId ? currentAgentName(openRun.agentId, openRun.backendId) : undefined}
-        startedAt={openRun?.startedAt}
-        durationMs={openRun?.durationMs}
+        run={openRun}
         model={openRun?.model}
         bodyLabel={visibleRunText
           ? (runHandoff.isFullText ? t("dashboard.fullTextTitle") : t("dashboard.summaryTitle"))

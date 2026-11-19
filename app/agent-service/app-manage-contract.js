@@ -45,9 +45,13 @@ function validExternalManageArguments(operation, args, backendId) {
   if (requestedSchedule && backendId === "hermes" && (requestedSchedule.kind === "cron" && requestedSchedule.tz !== ""
     || requestedSchedule.kind === "every" && (requestedSchedule.everyMs % 60_000 !== 0 || requestedSchedule.anchorMs !== 0))) return false;
   if (backendId === "openclaw" && args.patch && Object.hasOwn(args.patch, "provider")) return false;
-  if (operation === "cron_create") return exact(args, ["agentId", "name", "prompt", "schedule", "enabled", "model"])
-    && ID.test(args.agentId || "") && string(args.name, 256) && string(args.prompt, 16 * 1024) && schedule(args.schedule)
-    && typeof args.enabled === "boolean" && string(args.model, 512, true);
+  if (operation === "cron_create") {
+    const provider = Object.hasOwn(args, "provider");
+    return exact(args, ["agentId", "name", "prompt", "schedule", "enabled", "model", ...(provider ? ["provider"] : [])])
+      && ID.test(args.agentId || "") && string(args.name, 256) && string(args.prompt, 16 * 1024) && schedule(args.schedule)
+      && typeof args.enabled === "boolean" && string(args.model, 512, true)
+      && (!provider || backendId === "hermes" && string(args.provider, 512, true) && (args.provider === null || !!args.model));
+  }
   if (operation === "cron_update") return exact(args, ["jobId", "patch"]) && ID.test(args.jobId || "")
     && patch(args.patch, ["name", "prompt", "schedule", "model", "provider", "enabled"], backendId);
   if (operation === "cron_set_enabled") return exact(args, ["jobId", "enabled"]) && ID.test(args.jobId || "") && typeof args.enabled === "boolean";

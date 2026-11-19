@@ -992,14 +992,13 @@ test("当前 WorkRun context snapshot 贯通 chat.send/run.list/run.get", async 
   }
 });
 
-test("session.create 验证 enabled profile，null workspace 使用 defaultCwd 或私有 managed workspace", async () => {
+test("session.create 验证 enabled profile，未选择项目时使用 Agent 长期工作区", async () => {
   const managed = fixture();
   await managed.controller.open();
   const created = await managed.controller.handle("chat.session.create", {
     operationId: "create-1", profileId: PROFILE_ID, workspace: null, createdAt: 900,
   }, "create-managed");
-  const expected = path.join(managed.paths.defaultWorkspaceDir, PROFILE_ID, "sessions",
-    crypto.createHash("sha256").update("create-1").digest("hex"));
+  const expected = path.join(managed.paths.defaultWorkspaceDir, PROFILE_ID);
   assert.equal(created.session.workspace, expected);
   assert.equal(fs.statSync(fs.realpathSync(expected)).isDirectory(), true);
   assert.equal(fs.statSync(expected).mode & 0o777, 0o700);
@@ -1013,7 +1012,7 @@ test("session.create 验证 enabled profile，null workspace 使用 defaultCwd �
   const configuredResult = await configured.controller.handle("chat.session.create", {
     operationId: "create-2", profileId: PROFILE_ID, workspace: null, createdAt: 901,
   }, "create-configured");
-  assert.equal(configuredResult.session.workspace, "/tmp/shoggoth-default");
+  assert.equal(configuredResult.session.workspace, path.join(configured.paths.defaultWorkspaceDir, PROFILE_ID));
 
   const disabled = fixture({ profiles: [profile({ enabled: false })] });
   await disabled.controller.open();
@@ -1764,8 +1763,7 @@ test("真实 Socket 在 listen 前创建默认 Session，并接通严格 Chat Se
     });
     assert.equal(listed.sessions.length, 1);
     assert.equal(listed.sessions[0].status, "draft");
-    assert.equal(path.dirname(listed.sessions[0].workspace),
-      path.join(paths.defaultWorkspaceDir, DEFAULT_AGENT_PROFILE_ID, "sessions"));
+    assert.equal(listed.sessions[0].workspace, path.join(paths.defaultWorkspaceDir, DEFAULT_AGENT_PROFILE_ID));
     calls.sessionKey = listed.sessions[0].sessionKey;
 
     const created = await ipc(paths, "chat.session.create", {

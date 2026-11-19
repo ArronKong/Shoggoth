@@ -77,7 +77,7 @@ function snapshot(section, items, unavailableSources = [], summary = {}, now = D
 
 function resourceRevision(kind, value) {
   const keys = kind === "cron" ? ["id", "profileId", "agentId", "name", "description", "enabled", "prompt", "workspace", "workdir",
-    "schedule", "model", "provider", "payload", "delivery", "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "skills", "script"]
+    "schedule", "model", "provider", "modelSelection", "payload", "delivery", "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "skills", "script"]
     : kind === "board" ? ["id", "profileId", "slug", "name", "description"]
       : ["id", "profileId", "boardId", "title", "body", "bodyMeta", "position", "status", "column", "assignee", "agentId", "priority", "priorityLevel", "archived", "archivedAt", "updatedAt"];
   const canonical = item => Array.isArray(item) ? item.map(canonical) : item && typeof item === "object"

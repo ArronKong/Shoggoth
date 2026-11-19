@@ -1,0 +1,4 @@
+.prompt {
+  /* Leave room for scheduling controls in shorter windows. */
+  height: min(259px, 30dvh);
+}

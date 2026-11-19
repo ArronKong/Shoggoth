@@ -35,6 +35,7 @@ const OPERATION_DEFINITIONS = Object.freeze({
   turnSteer: ["TurnSteerParams", "TurnSteerResponse"],
   turnInterrupt: ["TurnInterruptParams", "TurnInterruptResponse"],
   accountRead: ["GetAccountParams", "GetAccountResponse"],
+  accountRateLimitsRead: [null, "GetAccountRateLimitsResponse", "account/rateLimits/read"],
   accountLoginStart: ["LoginAccountParams", "LoginAccountResponse"],
   accountLoginCancel: ["CancelLoginAccountParams", "CancelLoginAccountResponse"],
   accountLogout: [null, "LogoutAccountResponse", "account/logout"],

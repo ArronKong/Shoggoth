@@ -367,10 +367,11 @@ async function collectActivities({ backends, sinceMs, healthEvents = [], inspira
           let truncated = r.truncated || items.length > maxPerSource;
           if (items.length > maxPerSource) items = items.slice(0, maxPerSource);
           allRuns.push(...items);
-          // Running Cron belongs in live work. Finished runs may have only an
-          // attachment or error, so use the output decision even without a summary.
-          entries.push(...items.filter(run => run.status !== "running" && run.outputDisposition !== "pending"
-            && run.outputDisposition !== "silent" && !isHeartbeatCronNoise(run)).map(cronRunToActivity));
+          // Running Cron belongs in live work and skipped runs in Cron history.
+          // Finished runs may have an attachment or error without a summary.
+          entries.push(...items.filter(run => run.status !== "running" && run.status !== "skipped"
+            && run.outputDisposition !== "pending" && run.outputDisposition !== "silent"
+            && !isHeartbeatCronNoise(run)).map(cronRunToActivity));
           const latestOnly = r.latestOnly || (items.length > 0 && items.every((x) => x.synthesized));
           if (latestOnly) degradedSources.push({ backend: backend.id, source: "cron", reason: "latest-only" });
           if (truncated) degradedSources.push({ backend: backend.id, source: "cron", reason: "truncated" });

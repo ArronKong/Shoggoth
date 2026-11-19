@@ -77,15 +77,18 @@ test("flush retries a stale worker read once before recording intent", async t =
   const db = f.owner.database.db;
   const stale = Object.assign(new Error("worker memory files changed"), { code: "MEMORY_REVISION_CONFLICT" });
   let attempts = 0;
-  const read = t.mock.method(f.owner, "withAsyncMemoryReadView", async (...args) => {
-    assert.equal(db.prepare("SELECT count(*) AS n FROM memory_flush_runs").get().n, 0);
-    assert.equal(f.modelCalls(), 0);
-    if (++attempts === 1) throw stale;
-    return original(...args);
+  t.mock.method(f.owner, "withAsyncMemoryReadView", async (profileId, lifecycle, read, scanDeadline) => {
+    // Background reads share this method but do not carry the flush scan deadline.
+    if (profileId === A && scanDeadline instanceof AbortSignal) {
+      assert.equal(db.prepare("SELECT count(*) AS n FROM memory_flush_runs").get().n, 0);
+      assert.equal(f.modelCalls(), 0);
+      if (++attempts === 1) throw stale;
+    }
+    return original(profileId, lifecycle, read, scanDeadline);
   });
   f.model = async () => ({ text: "NO_REPLY" });
   assert.equal((await f.owner.flushBeforeCompaction(input)).status, "completed");
-  assert.equal(read.mock.callCount(), 2);
+  assert.equal(attempts, 2);
   assert.equal(f.modelCalls(), 1);
 });
 

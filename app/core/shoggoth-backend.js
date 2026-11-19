@@ -4,8 +4,7 @@ const { classifyProviderFailureDetail } = require("../agent-service/runtime-prov
 const { CodexAutomationBackend, isCodexAutomationId, isCodexAutomationOwner } = require("./codex-automation-backend");
 const codexAutomationProtocol = require("../agent-service/codex-automation-protocol");
 const codexDesktopProtocol = require("../agent-service/codex-desktop-session-protocol");
-const { isImplicitChatWorkspace } = require("../agent-service/chat-workspace");
-const { describeAgentDirectory } = require("../agent-service/agent-name-links");
+const { describeAgentWorkspace } = require("../agent-service/chat-workspace");
 const { claimsNativeAgentId,
   isNativeBindingDisabled } = require("../agent-service/native-backend-identity");
 const { isRuntimeAvailable } = require("../runtime-availability");
@@ -51,7 +50,7 @@ const { SESSION_RUNTIME_METHODS, SESSION_RUNTIME_PUBLIC_MESSAGES, validateSessio
   validateSessionRuntimeResult } = require("../agent-service/session-runtime-protocol");
 const { MESSAGES: PRODUCT_CONTEXT_PUBLIC_MESSAGES } = require("../agent-service/product-context-protocol");
 const { PUBLIC_MESSAGES: RUNTIME_ACCOUNT_PUBLIC_MESSAGES, RUNTIME_ACCOUNT_LOGIN_RUNTIMES,
-  RUNTIME_ACCOUNT_SERVICE_METHOD_SET, validateRuntimeAccountServiceResult,
+  RUNTIME_ACCOUNT_SERVICE_METHOD_SET, RUNTIME_ACCOUNT_QUOTA_RUNTIMES, validateRuntimeAccountServiceResult,
 } = require("../agent-service/runtime-account-service-protocol");
 const { INSPIRATION_SERVICE_METHODS, PUBLIC_MESSAGES: INSPIRATION_PUBLIC_MESSAGES,
   validateInspirationServiceResult } = require("../agent-service/inspiration-service-protocol");
@@ -296,7 +295,10 @@ const CHAT_REQUEST_MESSAGES = Object.freeze({
   ...OFFICIAL_SKILL_PUBLIC_MESSAGES,
   ...APPLE_DEVICE_PUBLIC_MESSAGES,
   RUNTIME_AUTH_REQUIRED: CHAT_PUBLIC_MESSAGES.RUNTIME_AUTH_REQUIRED,
+  CRON_MODEL_UNAVAILABLE: DOMAIN_PUBLIC_MESSAGES.CRON_MODEL_UNAVAILABLE,
+  CRON_MODEL_UPDATE_BUSY: DOMAIN_PUBLIC_MESSAGES.CRON_MODEL_UPDATE_BUSY,
   CHAT_ATTACHMENT_INVALID: CHAT_PUBLIC_MESSAGES.CHAT_ATTACHMENT_INVALID,
+  CHAT_ATTACHMENT_DELIVERY_FAILED: CHAT_PUBLIC_MESSAGES.CHAT_ATTACHMENT_DELIVERY_FAILED,
   INSPIRATION_ARCHIVED: "此会话关联的灵感已归档，请先在「灵感便签」中恢复它，或切换到普通聊天会话",
   INSPIRATION_NOT_FOUND: "此会话关联的灵感已删除或不存在，历史记录仍可查看；请切换到普通聊天会话继续",
 });
@@ -321,6 +323,7 @@ const PUBLIC_SERVICE_ERROR_CODES = new Set([
   ...Object.keys(require("../agent-service/product-context-protocol").MESSAGES),
   ...Object.keys(require("../agent-service/runtime-selection-policy").RUNTIME_POLICY_MESSAGES),
   ...Object.keys(SESSION_RUNTIME_PUBLIC_MESSAGES),
+  ...Object.keys(require("../agent-service/background-task-protocol").PUBLIC_MESSAGES),
   "NATIVE_RUNTIME_DISABLED",
   "RUNTIME_NOT_INSTALLED",
   ...RUNTIME_ACCOUNT_LOGIN_ERROR_CODES,
@@ -1021,6 +1024,9 @@ function validateServiceResult(method, value, params) {
     if (webSettingsProtocol.METHODS.includes(method)) return webSettingsProtocol.validateResult(value);
     if (learningProtocol.METHODS.has(method)) return learningProtocol.validateResult(method, value);
     if (GROUP_CHAT_SERVICE_METHOD_SET.has(method)) return validateGroupChatServiceResult(method, value);
+    if (require("../agent-service/background-task-rpc").BACKGROUND_TASK_SERVICE_METHODS.has(method)) {
+      return require("../agent-service/background-task-rpc").validateBackgroundTaskResult(method, value);
+    }
     if (method === "service.status") {
       if (!ownDataObject(value) || value.healthy !== true
         || typeof value.pendingCommandsLocked !== "boolean"
@@ -1499,6 +1505,7 @@ class ShoggothBackend extends AgentBackend {
         skills: true,
         usage: true,
         oauth: true,
+        oauthAccountQuota: true,
         dashboardRuns: true,
         agentHarness: true,
         agentFiles: true,
@@ -2143,20 +2150,20 @@ class ShoggothBackend extends AgentBackend {
     }
   }
 
-  async listOAuthProviders() {
+  async listOAuthProviders({ quotaOnly = false } = {}) {
     // Settings inventory and account cards refresh together. Share their proof
     // without caching a failed/incompatible result across an explicit recheck.
     let disabled = [];
     try { disabled = this._getDisabledBackendIds?.() || []; } catch {}
-    const identity = JSON.stringify([this._generation, disabled]);
+    const identity = JSON.stringify([this._generation, disabled, quotaOnly]);
     if (this._runtimeProvidersPending?.identity === identity) return this._runtimeProvidersPending.promise;
-    const pending = this._readOAuthProviders();
+    const pending = this._readOAuthProviders(quotaOnly);
     this._runtimeProvidersPending = { identity, promise: pending };
     try { return await pending; }
     finally { if (this._runtimeProvidersPending?.promise === pending) this._runtimeProvidersPending = null; }
   }
 
-  async _readOAuthProviders() {
+  async _readOAuthProviders(quotaOnly) {
     const generation = this._generation;
     const profiles = [...this._profilesByAgent.values()];
     // Re-resolve so a runtime installed by its own sign-in (Antigravity) is seen
@@ -2171,6 +2178,7 @@ class ShoggothBackend extends AgentBackend {
     // disconnected; deleting a built-in Agent does not remove its CLI's card.
     const accountGroups = [];
     for (const descriptor of descriptors.values()) {
+      if (quotaOnly && !RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has(descriptor.runtime)) continue;
       const switchable = DEFAULT_RUNTIME_ACCOUNTS.find((entry) => entry.id === descriptor.runtimeAccountId)
         ?.kind === "native-user";
       const enabled = !switchable
@@ -2223,15 +2231,17 @@ class ShoggothBackend extends AgentBackend {
             loggedIn = verified.status === "authenticated";
             readiness = loggedIn ? "ready" : verified.status === "unauthenticated" ? "auth-required" : "unverified";
             if (verified.status === "unverified") statusVerification = "unverified";
-            if (switchable && verified.status !== "unauthenticated") {
+            if (!quotaOnly && switchable && verified.status !== "unauthenticated") {
               const catalog = await this._call(authRead[0] === "profile.auth.read" ? "profile.models.list" : "profile.binding.models.list",
                 { ...authRead[1], limit: 1, cursor: null });
               if (!catalog.models?.length) { loggedIn = false; readiness = "unverified"; statusVerification = "unverified"; }
             }
             // Optional features have their own proof. A failed feature read
             // must not turn successful authentication into a sign-out.
-            try { features = await this._call(authRead[0].replace(".auth.read", ".capabilities.read"), authRead[1]); }
-            catch { features = null; }
+            if (!quotaOnly) {
+              try { features = await this._call(authRead[0].replace(".auth.read", ".capabilities.read"), authRead[1]); }
+              catch { features = null; }
+            }
           } catch (error) {
             loggedIn = false;
             readiness = error?.code === "RUNTIME_INCOMPATIBLE" ? "incompatible" : "unverified";
@@ -2252,7 +2262,7 @@ class ShoggothBackend extends AgentBackend {
       }
       if (generation !== this._generation || executableStamp !== this._runtimeExecutableStamp(descriptor.binaryPath)) {
         loggedIn = false; readiness = "unverified"; statusVerification = "unverified"; statusError = null;
-      } else if (switchable) {
+      } else if (switchable && !quotaOnly) {
         this._runtimeReadiness ||= new Map();
         this._runtimeReadiness.set(descriptor.runtimeAccountId, { readiness, generation,
           observedAt: Date.now(), binaryPath: descriptor.binaryPath, executableStamp, features });
@@ -2274,6 +2284,7 @@ class ShoggothBackend extends AgentBackend {
         disconnectCommand: !switchable && descriptor.binaryPath && descriptor.logoutArgs.length > 0
           ? runtimeCliCommand(descriptor, descriptor.logoutArgs) : null,
         disconnectable: false,
+        ...(RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has(descriptor.runtime) ? { canReadQuota: true } : {}),
         ...(switchable && (descriptor.binaryPath || !enabled)
           ? { connection: { id: descriptor.runtime, enabled } } : {}),
         status: {
@@ -2292,6 +2303,17 @@ class ShoggothBackend extends AgentBackend {
     });
     providers.sort((left, right) => left.name.localeCompare(right.name, "en"));
     return { providers, profiles: providers.map((provider) => provider.name) };
+  }
+
+  async getOAuthProviderQuota(providerId) {
+    const account = DEFAULT_RUNTIME_ACCOUNTS.find(entry => entry.id === providerId);
+    if (!account || !RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has(account.runtime) || !isRuntimeAvailable(account.runtime)) return { status: "unsupported" };
+    const enabled = () => !isNativeBindingDisabled("", account.runtime,
+      this._getDisabledBackendIds?.() || [], account.id);
+    if (!enabled()) return { status: "unsupported" };
+    const generation = this._generation;
+    const quota = await this._call("runtime.account.quota.read", { runtimeAccountId: account.id });
+    return generation === this._generation && enabled() ? quota : { status: "unavailable" };
   }
 
   // ---- Settings sign-in inside the Service (flow "browser") ----
@@ -2631,7 +2653,7 @@ class ShoggothBackend extends AgentBackend {
     const sharedAgentCount = [...this._profilesByAgent.values()].filter(
       (candidate) => candidate.runtimeAccountId === profile.runtimeAccountId,
     ).length;
-    const managedWorkspace = describeAgentDirectory(this.paths, profile);
+    const managedWorkspace = describeAgentWorkspace(this.paths, profile.id);
     return {
       id: profile.agentId,
       name: profile.name,
@@ -3821,6 +3843,7 @@ class ShoggothBackend extends AgentBackend {
       ...(features ? { runtimeFeatures: structuredClone(features) } : {}),
       maxPromptBytes: CHAT_MAX_PROMPT_BYTES,
       nativeUiArtifactsV1: this._nativeUiAvailable,
+      backgroundTasks: true,
       prewarm: true,
       maxAttachmentBytes: 50 * 1024 * 1024,
       maxAttachments: 8,
@@ -3897,6 +3920,51 @@ class ShoggothBackend extends AgentBackend {
     return { ...parsed, profile, session };
   }
 
+  async listBackgroundTasks(sessionKey) {
+    const target = this._sessionTarget(sessionKey);
+    try {
+      const result = await this._call("background.task.list", { sessionKey: target.sessionKey });
+      return { supported: true, tasks: result.tasks };
+    } catch (error) { throw safeError(error, "BACKGROUND_TASK_UNAVAILABLE"); }
+  }
+
+  async getBackgroundTask(sessionKey, taskId) {
+    const target = this._sessionTarget(sessionKey);
+    try {
+      const result = await this._call("background.task.get", { sessionKey: target.sessionKey, taskId });
+      const pending = result.interaction;
+      const interaction = pending && { ...pending, payload: normalizeInteractiveRequestV1({
+        runId: pending.runId, eventType: pending.type, payload: pending.payload, expiresAt: pending.payload.expiresAt,
+      }) };
+      // Local file paths are for the Agent's own context; the UI opens files by URL.
+      return { ...result, interaction, files: result.files.map(({ path: _path, ...file }) => file) };
+    } catch (error) { throw safeError(error, "BACKGROUND_TASK_UNAVAILABLE"); }
+  }
+
+  async controlBackgroundTask(sessionKey, taskId, input) {
+    const target = this._sessionTarget(sessionKey);
+    const base = { sessionKey: target.sessionKey, taskId, operationId: input?.operationId };
+    let method, params;
+    if (input?.action === "send") { method = "background.task.send"; params = { ...base, message: input.message }; }
+    else if (input?.action === "cancel") { method = "background.task.cancel"; params = base; }
+    else if (input?.action === "approval" || input?.action === "input") {
+      const { interaction } = await this.getBackgroundTask(sessionKey, taskId);
+      const request = interaction?.payload;
+      if (!request || request.requestId !== input.requestId) throw safeError(null, "BACKGROUND_TASK_NOT_FOUND");
+      const response = validateInteractiveResponseV1(request, input.action === "approval"
+        ? { choice: input.choice } : { action: input.inputAction, answers: input.answers });
+      method = "background.task.respond";
+      params = { ...base, requestId: request.requestId };
+      if (request.kind === "runtime_approval") Object.assign(params, { kind: "approval", choice: response.choice });
+      else if (request.kind === "mcp_permission") Object.assign(params, {
+        kind: "input", action: response.choice === "once" ? "submit" : "cancel", answers: {},
+      });
+      else Object.assign(params, { kind: "input", action: response.action, answers: response.answers });
+    } else throw safeError(null, "INVALID_PARAMS");
+    try { return await this._call(method, params); }
+    catch (error) { throw safeError(error, "BACKGROUND_TASK_UNAVAILABLE"); }
+  }
+
   _assertRunBinding(target, run) {
     const matchesSource = run?.source === "chat" ? run.sourceId === target.sessionKey
       : run?.source === "cron" ? target.session?.cronJobId === run.sourceId
@@ -3955,6 +4023,7 @@ class ShoggothBackend extends AgentBackend {
       // Starting Codex's sign-in spawns its app-server; a cancel waits for the host to stop.
       if (method === "runtime.account.login.start") timeoutMs = 30_000;
       if (method === "runtime.account.login.cancel") timeoutMs = 20_000;
+      if (method === "runtime.account.quota.read") timeoutMs = 30_000;
       // A provider sign-in may first start the runtime's own server.
       if (["runtime.account.login.options", "runtime.account.login.provider.start",
         "runtime.account.login.apikey"].includes(method)) timeoutMs = 30_000;
@@ -3969,7 +4038,9 @@ class ShoggothBackend extends AgentBackend {
         || method === "profile.models.list" || method === "profile.binding.models.list"
         || method === "profile.capabilities.read" || method === "profile.binding.capabilities.read"
         || method === "chat.session.runtime.model.set" || method === "agent.binding.setDefaultModel" || method === "group.member.models"
-        || method === "group.members.model" && params.modelSelection !== null) timeoutMs = MODEL_CATALOG_TIMEOUT_MS;
+        || method === "group.members.model" && params.modelSelection !== null
+        || method === "cron.job.create" && params.modelSelection
+        || method === "cron.job.update" && params.patch?.modelSelection) timeoutMs = MODEL_CATALOG_TIMEOUT_MS;
       if (method === "inspiration.media.read" && params.preview === true) timeoutMs = 610_000;
       if (options.timeoutMs !== undefined) {
         if (method !== "service.status" || !Number.isSafeInteger(options.timeoutMs)
@@ -4543,6 +4614,12 @@ class ShoggothBackend extends AgentBackend {
                 try { this._sessionActivityNotifier?.({ kind: "sessions.changed", sessionKey: target.sessionKey }); }
                 catch { /* UI listeners cannot invalidate a context observation. */ }
               }
+            }
+          } else if (event.type === "background.task.changed") {
+            const profile = this._profilesById.get(event.payload.profileId);
+            if (profile && UUID_PATTERN.test(event.payload.sessionKey || "")) {
+              const key = gatewaySessionKey(profile.agentId, event.payload.sessionKey);
+              try { this._sessionActivityNotifier?.({ kind: "background.tasks.changed", sessionKey: key }); } catch {}
             }
           } else if (event.type === "proactive.notice.published") {
             const target = await this._syncFederationTargetSession(event.payload, generation);
@@ -5659,6 +5736,8 @@ class ShoggothBackend extends AgentBackend {
       deliver: value.deliveryTarget === "group" ? "group" : "chat",
       ...(value.deliveryTarget === "group" ? { deliveryTarget: "group" } : {}),
       ...(value.watch === undefined ? {} : { watch: value.watch }),
+      ...(value.modelSelection === undefined ? {} : { modelSelection: value.modelSelection }),
+      ...(value.modelSelection ? { model: value.modelSelection.model } : {}),
       ...(value.systemManaged ? { actions: { edit: false, toggle: false, delete: false,
         run: false, reason: "system-managed" } } : {}),
       createdAt: value.createdAt,
@@ -6142,12 +6221,20 @@ class ShoggothBackend extends AgentBackend {
     );
   }
 
+  async getCronModels(agentId) {
+    const defaultBindingOnly = this.getNativeRuntimeConfig?.()?.flags?.runtimeConversationHandoff === false;
+    const { models, runtimes, selection } = await this.getAgentDefaultModels(agentId, { defaultBindingOnly });
+    const { model, bindingId, modelProviderRef } = selection;
+    return { models, runtimes, ...(model ? { defaultSelection: { model, bindingId,
+      ...(modelProviderRef ? { modelProviderRef } : {}) } } : {}) };
+  }
+
   async createCronJob(spec = {}) {
     if (spec.origin === "codex-desktop") return this._codexAutomations().create(spec);
     this._rejectUnsupportedTaskFields(spec, new Set([
       "agentId", "profileId", "name", "prompt", "enabled", "workspace", "schedule",
       "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "watch",
-      "backendId",
+      "backendId", "modelSelection",
     ]), "CRON_CREATE_UNSUPPORTED");
     if (spec.backendId !== undefined && spec.backendId !== this.id) {
       throw safeError(null, "PROFILE_NOT_FOUND");
@@ -6174,6 +6261,7 @@ class ShoggothBackend extends AgentBackend {
       threadPolicy,
       threadId: threadId === undefined ? null : threadId,
       ...(spec.watch === undefined ? {} : { watch: spec.watch }),
+      ...(spec.modelSelection === undefined ? {} : { modelSelection: spec.modelSelection }),
       createdAt,
     };
     const result = await this._call("cron.job.create", mutation);
@@ -6191,6 +6279,7 @@ class ShoggothBackend extends AgentBackend {
       threadPolicy: mutation.threadPolicy,
       threadId: mutation.threadId,
       ...(mutation.watch === undefined ? {} : { watch: mutation.watch }),
+      ...(mutation.modelSelection === undefined ? {} : { modelSelection: mutation.modelSelection }),
       createdAt,
       updatedAt: createdAt,
     })) throw safeError(null, "CRON_MUTATION_BINDING_INVALID");
@@ -6202,7 +6291,7 @@ class ShoggothBackend extends AgentBackend {
     const target = await this._loadCronTarget(id);
     this._rejectUnsupportedTaskFields(patch, new Set([
       "name", "prompt", "enabled", "workspace", "schedule", "misfirePolicy",
-      "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "watch",
+      "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId", "watch", "modelSelection",
     ]), "CRON_PATCH_UNSUPPORTED");
     const keys = Object.keys(patch).filter((key) => patch[key] !== undefined);
     if (keys.length === 0) throw safeError(null, "CRON_PATCH_INVALID");
@@ -6931,20 +7020,15 @@ class ShoggothBackend extends AgentBackend {
   async createSession(agentId, options = {}) {
     const profile = this._profilesByAgent.get(agentId);
     if (!profile) throw safeError(null, "BACKEND_NOT_READY");
-    let workspace = options?.workspace;
     let parent = null;
     if (options?.parentSessionKey !== undefined) {
       parent = this._sessionTarget(options.parentSessionKey);
       if (parent.agentId !== agentId) throw safeError(null, "CHAT_SESSION_INVALID");
-      if (workspace === undefined) {
-        workspace = parent.session.workspace;
-        if (isImplicitChatWorkspace(this.paths, profile, workspace)) workspace = null;
-      }
     }
     const result = await this._call("chat.session.create", {
       operationId: `create-${this.randomUUID()}`,
       profileId: profile.id,
-      workspace: workspace ?? null,
+      workspace: options?.workspace ?? null,
       createdAt: this.now(),
       ...(parent ? { parentSessionKey: parent.sessionKey } : {}),
     });

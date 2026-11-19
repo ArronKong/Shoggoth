@@ -123,7 +123,9 @@ class AppManagementHost {
         } else {
           const patch = operation === "cron_set_enabled" ? { enabled: args.enabled } : { ...args.patch };
           if (patch.schedule) patch.schedule = externalSchedule(patch.schedule, backendId);
-          for (const key of ["model", "provider"]) if (patch[key] === null) patch[key] = "";
+          if (backendId === "hermes") {
+            for (const key of ["model", "provider"]) if (patch[key] === null) patch[key] = "";
+          }
           await backend.updateCronJob(targetId, patch);
         }
       }

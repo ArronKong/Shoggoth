@@ -30,6 +30,8 @@ const requests = [], failures = [], hosts = [];
 const useProxy = process.argv.includes("--proxy"), proxyRequests = [];
 const missingResponseType = process.argv.includes("--missing-response-type");
 const isolatedMemory = process.argv.includes("--isolated-memory");
+const longCompaction = process.argv.includes("--long-compaction");
+let compactReceipt, compactInputBytes = 0;
 // This proxy never forwards traffic. A protected loopback request must bypass it.
 const proxy = http.createServer((req, res) => {
   proxyRequests.push({ method: req.method, loopback: /^http:\/\/127\.0\.0\.1:/u.test(req.url || "") });
@@ -58,6 +60,16 @@ const provider = http.createServer(async (req, res) => {
     let data = ""; for await (const chunk of req) data += chunk;
     assert.equal(req.url, "/v1/responses"); assert.equal(req.headers.authorization, `Bearer ${auth}`);
     const body = JSON.parse(data); requests.push(body);
+    if (stage.afterCompaction) {
+      const receipt = body.input.find(item => item.type === "compaction")?.encrypted_content;
+      assert.ok(receipt);
+      assert.equal(receipt, compactReceipt);
+      const { calibration } = JSON.parse(Buffer.from(receipt, "base64url").toString("utf8"));
+      assert.match(calibration, /^[a-f0-9]{32}$/u);
+      assert(!JSON.stringify(body.input).includes(calibration), "the original tool result was compacted");
+      stage.reply = "The calibration receipt was " + calibration + ".";
+      assert.ok(Buffer.byteLength(JSON.stringify(body.input)) < compactInputBytes / 2);
+    }
     assert.equal(body.stream, true, "native Responses requests explicitly declare streaming");
     if (stage.invalidStream) {
       res.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -87,9 +99,10 @@ const provider = http.createServer(async (req, res) => {
     const n = ++serial, responseId = `fixture-response-${n}`;
     let item;
     if (stage.noTool || received) item = { id: `msg-${n}`, type: "message", role: "assistant", status: "completed",
-      content: [{ type: "output_text", text: "The existing operation is complete. No repeated execution.", annotations: [] }] };
+      content: [{ type: "output_text", text: stage.reply ?? "The existing operation is complete. No repeated execution.", annotations: [] }] };
     else {
-      assert(codeMode || direct, "native command tool must be available"); stage.callId = `native-call-${n}`;
+      assert(codeMode || direct, longCompaction ? `Unavailable command tool in fixture catalog: ${tools.map(tool => tool.name ?? tool.type).join(", ")}`
+        : "native command tool must be available"); stage.callId = `native-call-${n}`;
       const args = { cmd: `${JSON.stringify(process.execPath)} fixture.cjs`, workdir: workspace, max_output_tokens: 300 };
       item = codeMode ? { id: `fc-${n}`, type: "custom_tool_call", call_id: stage.callId, name: "exec", namespace: "functions",
         input: `text(await tools.exec_command(${JSON.stringify(args)}));` }
@@ -99,6 +112,22 @@ const provider = http.createServer(async (req, res) => {
     res.writeHead(200, missingResponseType ? {} : { "Content-Type": "text/event-stream" }); let sequence = 0;
     const event = (type, extra) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...extra })}\n\n`);
     event("response.created", { response: { id: responseId, object: "response", status: "in_progress", output: [] } });
+    if (stage.phase === "compact") {
+      const history = JSON.stringify(body.input);
+      compactInputBytes = Buffer.byteLength(history);
+      assert.ok(compactInputBytes > 100000);
+      assert.match(history, /long-session-measurement/);
+      assert.match(history, /Public completion marker/);
+      const calibration = JSON.stringify(outputs).match(/Calibration receipt ([a-f0-9]{32})/u)?.[1];
+      assert.ok(calibration, "compaction has the receipt created by the tool");
+      compactReceipt = encode({ calibration });
+      const compact = { type: "compaction", id: "cmp-fixture", encrypted_content: compactReceipt };
+      event("response.output_item.added", { output_index: 0, item: compact });
+      event("response.output_item.done", { output_index: 0, item: compact });
+      event("response.completed", { response: { id: responseId, object: "response", status: "completed", output: [compact],
+        usage: { input_tokens: 50000, output_tokens: 50, total_tokens: 50050 } } });
+      res.end(); return;
+    }
     if (stage.endWithoutTerminal) { res.end(); return; }
     if (stage.disconnectAlways || (received && stage.disconnectFollowup && !stage.disconnected)) {
       stage.disconnected = true;
@@ -118,7 +147,11 @@ const provider = http.createServer(async (req, res) => {
     }
     event("response.completed", { response: { id: responseId, object: "response", status: "completed", output: [reasoning, item],
       usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } }); res.end();
-  } catch (error) { failures.push(error.message); res.writeHead(500); res.end("fixture assertion failed"); }
+  } catch (error) {
+    failures.push(error.message);
+    if (res.headersSent) res.destroy();
+    else res.writeHead(500).end("fixture assertion failed");
+  }
 });
 async function makeHandle() {
   const runtimeRepo = path.dirname(fs.realpathSync(path.join(repo, ".vendor")));
@@ -152,7 +185,9 @@ async function turn(handle, sessionId, prompt, expectedStatus = "completed") {
   });
   try {
     await handle.turnStart({ sessionId, operationId: crypto.randomUUID(), prompt, cwd: workspace });
-    const event = await completed; assert.equal(event.status, expectedStatus, JSON.stringify({ status: event.status, errorCode: event.errorCode }));
+    const event = await completed; assert.equal(event.status, expectedStatus, JSON.stringify({ status: event.status, errorCode: event.errorCode,
+      ...(longCompaction ? { stage: stage.phase, providerRequests: requests.length, failures, failure: event.failure, error: event.error,
+        notices: notices.map(n => n.error?.message ?? n.message) } : {}) }));
     assert.deepEqual(failures, []);
     assert(!notices.some(notice => notice.type === "error" && /Reconnecting/iu.test(notice.error?.message)),
       "a reconnect notice must not be published as an error");
@@ -190,6 +225,39 @@ async function main() {
   const sessionOptions = { model: "gpt-4.1", modelProvider, cwd: workspace, permissionPolicy: { approvalPolicy: "never", sandbox: "danger-full-access" },
     developerInstructions: "Use the synthetic local fixture only. Do not repeat a completed command. Answer in the user's language." };
   let { handle, host } = await makeHandle();
+  if (longCompaction) {
+    fs.appendFileSync(path.join(workspace, "fixture.cjs"),
+      "const receipt = require('node:crypto').randomBytes(16).toString('hex'); fs.writeFileSync('receipt.txt', receipt); console.log('Calibration receipt ' + receipt);\n");
+    const { session } = await handle.sessionStart({ ...sessionOptions, modelSecretScope: scope });
+    stage = { protected: true, phase: "tool" };
+    await turn(handle, session.id, "Run the local fixture once and retain its result.");
+    stage = { noTool: true, protected: true, phase: "history", reply: "Archived measurement results. ".repeat(1800) };
+    for (let i = 0; i < 8; i++) await turn(handle, session.id,
+      `Batch ${i}. ${"long-session-measurement ".repeat(900)} Record this batch.`);
+    let remove, timer;
+    try {
+      const compacted = new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Native compaction did not complete: ${failures.join(", ")}`)), 45000);
+        remove = handle.subscribe(event => {
+          if (event.sessionId === session.id && event.method === "turn/completed") resolve(event);
+        });
+      });
+      stage.phase = "compact";
+      await handle.commandExecute({ sessionId: session.id, text: "/compact" });
+      const completion = await compacted;
+      assert.equal(completion.status, "completed", JSON.stringify({ phase: "compact", compactInputBytes,
+        requests: requests.length, failures, failure: completion.failure, error: completion.error }));
+    } finally { clearTimeout(timer); remove?.(); }
+    stage = { noTool: true, protected: true, afterCompaction: true };
+    await turn(handle, session.id, "What calibration receipt did the tool return?");
+    const thread = (await host.threadRead({ threadId: session.id, includeTurns: true })).thread;
+    const expected = "The calibration receipt was " + fs.readFileSync(path.join(workspace, "receipt.txt"), "utf8") + ".";
+    assert(thread.turns.at(-1).items.some(item => item.type === "agentMessage" && item.text === expected));
+    assert.equal(fs.readFileSync(path.join(workspace, "count.txt"), "utf8"), "1");
+    console.log(JSON.stringify({ runtime: host.runtimeVersion, provider: "loopback", compactInputBytes,
+      afterCompactionBytes: Buffer.byteLength(JSON.stringify(requests.at(-1).input)), toolExecutions: 1, toolReceiptMatched: true, continued: true }));
+    return;
+  }
   if (isolatedMemory) {
     const model = "gpt-6.1-sol";
     const isolated = await handle.sessionStart({ ...sessionOptions, model, persistent: false, isolatedGeneration: true,

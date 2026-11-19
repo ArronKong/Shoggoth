@@ -679,7 +679,7 @@ export default function OpenClawProvidersPane({
 
   return (
     <div className={styles.panel}>
-      <OAuthProvidersCard backend={backend} refreshKey={recoveryRefreshKey + providerWriteRevision}
+      <OAuthProvidersCard backend={backend} showQuota refreshKey={recoveryRefreshKey + providerWriteRevision}
         onChanged={providerChanged} />
 
       <section className={styles.card}>

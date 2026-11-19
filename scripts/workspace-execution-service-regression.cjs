@@ -13,6 +13,19 @@ const { requestService, readClientToken } = require("../app/agent-service/client
 const { PROTOCOL_VERSION } = require("../app/agent-service/server");
 const { completedNotice } = require("../app/agent-service/secret-execution-broker");
 const q = value => "'" + value.replaceAll("'", "'\\''") + "'";
+function textPdf() {
+  const page = "BT /F1 12 Tf 20 50 Td (Inbound PDF verified) Tj ET\n";
+  const objects = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", `<< /Length ${page.length} >>\nstream\n${page}endstream`];
+  let body = "%PDF-1.4\n";
+  const offsets = ["0000000000 65535 f "];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(String(body.length).padStart(10, "0") + " 00000 n ");
+    body += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  return Buffer.from(`${body}xref\n0 ${offsets.length}\n${offsets.join("\n")}\ntrailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${body.length}\n%%EOF\n`);
+}
 async function until(read, label) {
   const end = Date.now() + 10000;
   while (!read()) { assert.ok(Date.now() < end, label); await new Promise(resolve => setTimeout(resolve, 10)); }
@@ -45,10 +58,18 @@ async function until(read, label) {
       const session = f.createSession();
       f.service.chatSessionStore.setPermissionMode(session.sessionKey, "auto-review");
       await f.switch(session.sessionKey, runtime);
-      const run = await f.send(session.sessionKey, `workspace-${runtime}`, "Use workspace_execute for the requested workspace task.");
+      const attachment = { id: crypto.randomUUID(), name: "用户资料.pdf", mimeType: "application/pdf" };
+      const bytes = textPdf();
+      attachment.size = bytes.length;
+      f.service.inspirationStore.media.write({ attachment, offset: 0, content: bytes.toString("base64") });
+      const accepted = await coordinator.send({ sessionKey: session.sessionKey, operationId: `workspace-${runtime}`,
+        prompt: "Read the attached file and write the result in my project.", attachments: [attachment] });
+      await coordinator.waitForIdle(accepted.run.id);
+      const run = coordinator.getRun(accepted.run.id);
       assert.equal(run.status, "running", run.errorCode);
       const contract = coordinator.runExecutionContracts.get(run.id);
       assert.equal(contract.workspaceExecutionVersion, 1); assert.equal(contract.runtime, runtime);
+      assert.equal(contract.agentWorkspace, path.join(f.paths.defaultWorkspaceDir, f.profile.id));
       assert.match(contract.turnDeveloperInstructions, /workspace_execute/u);
       const frozen = await coordinator.runExecutionStore.get(run);
       assert.equal(frozen.contract.workspaceExecutionVersion, 1, "recovery retains the execution version");
@@ -87,6 +108,13 @@ async function until(read, label) {
       // tools/list is paginated; discovery starts at the current Registry revision.
       assert.ok(Array.isArray(listing.result.tools));
       const target = path.join(f.workspace, runtime + ".txt");
+      const inbound = path.join(contract.agentWorkspace, "inbound", attachment.id, attachment.name);
+      assert.deepEqual(fs.readFileSync(inbound), bytes);
+      const reader = ["/opt/homebrew/bin/pdftotext", "/usr/local/bin/pdftotext"].find(file => fs.existsSync(file));
+      const received = await call({ cwd: path.dirname(inbound),
+        command: reader ? `${q(reader)} ${q(attachment.name)} -` : `cat ${q(attachment.name)}` });
+      assert.equal(received.result.isError, false, JSON.stringify(received));
+      assert.equal(received.result.structuredContent.stdout.trim(), reader ? "Inbound PDF verified" : bytes.toString().trim());
       const write = await call({ command: `${q(process.execPath)} -e ${q(`require('node:fs').writeFileSync(${JSON.stringify(target)},'workspace done')`)}` });
       assert.equal(write.result.isError, false, JSON.stringify(write));
       assert.equal(write.result.structuredContent.exitCode, 0);
@@ -151,7 +179,7 @@ async function until(read, label) {
       assert.equal((await denied).result.isError, true);
       f.service.chatSessionStore.setPermissionMode(session.sessionKey, "request-approval");
       const stillAuto = await call({ command: "printf frozen" });
-      assert.equal(stillAuto.result.isError, false); assert.equal(stillAuto.result.structuredContent.stdout, "frozen");
+      assert.equal(stillAuto.result.isError, false, JSON.stringify(stillAuto)); assert.equal(stillAuto.result.structuredContent.stdout, "frozen");
       assert.ok(holds > 0); assert.equal(holds, releases);
       await f.complete(run);
       const next = await f.send(session.sessionKey, `workspace-next-${runtime}`);

@@ -7,6 +7,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { quotaSnapshot } = require("../core/oauth-account-quota");
 const { statIfExists } = require("./private-file");
 const { serviceError } = require("./security");
 const { mergeNativeCommands, requireRuntimeCommand } = require("./native-cli-commands");
@@ -411,6 +412,19 @@ class DeepSeekHarnessRuntimeHost {
     this.profileState.authIdentity = this._modelCatalogIdentity();
     this.profileState.authExpiresAt = now + 30_000;
     return result;
+  }
+
+  async accountQuotaRead() {
+    this._assertReady();
+    const identity = this._modelCatalogIdentity();
+    const result = await this.process.request("quota/read", { version: this.cliVersion },
+      { timeoutMs: Math.min(this.requestTimeoutMs, 17_000) });
+    this._assertReady();
+    if (identity !== this._modelCatalogIdentity()) return { status: "unavailable" };
+    if (result?.status === "unsupported") return { status: "unsupported" };
+    if (result?.status !== "available") return { status: "unavailable" };
+    return quotaSnapshot([], { accountName: result.accountName,
+      credits: { kind: "wallets", wallets: result.wallets }, checkedAt: this.now() });
   }
 
   subscribe(listener) {

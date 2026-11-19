@@ -174,16 +174,24 @@ class ModelSecretGateway {
           if (current?.profileId !== requestScope.profileId || current?.sessionId !== requestScope.sessionId) fail("SECRET_MODEL_IDENTITY_UNAVAILABLE");
         }
       };
+      let verifyProjection;
       const project = async () => this.projection.project(requestScope, input,
         { signal: controller.signal, assertCurrent: assertScopeCurrent,
+          onVerified: verify => { verifyProjection = verify; },
           ...(this.provenance ? { isTrustedOpaque: await this.provenance.verifier(requestScope) } : {}) });
       // Codex includes recent conversation items in its search request. An
       // auxiliary endpoint only receives them if local protection succeeds.
-      const projected = search ? await project() : await processOrOriginal(project, input,
-        { signal: controller.signal, assertCurrent: assertScopeCurrent, onFallback: () => { disclosed = true; } });
-      assertScopeCurrent();
-      assertCurrent();
-      await route.validateRequest(); assertScopeCurrent();
+      let projected;
+      for (let attempt = 0; ; attempt++) {
+        projected = search ? await project() : await processOrOriginal(project, input,
+          { signal: controller.signal, assertCurrent: assertScopeCurrent, onFallback: () => { disclosed = true; } });
+        assertScopeCurrent();
+        await route.validateRequest(); assertScopeCurrent();
+        try { verifyProjection?.(); break; }
+        catch (error) {
+          if (attempt || error.code !== "SECRET_MODEL_PROJECTION_STALE") throw error;
+        } finally { verifyProjection = undefined; }
+      }
       const data = Buffer.from(JSON.stringify(projected));
       // This endpoint only returns a projection to its bound local Runtime.
       // Provider authentication and HTTP routing remain inside that Runtime.
