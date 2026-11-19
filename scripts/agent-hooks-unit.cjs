@@ -14,6 +14,20 @@ const { resolveServicePaths } = require("../app/agent-service/paths");
 const { DEFAULT_TOOL_REGISTRY } = require("../app/agent-service/mcp-product-tool-controller");
 const { PermissionEngine } = require("../app/agent-service/permission-engine");
 const uuid = () => crypto.randomUUID();
+test("a project writer reserves its project and Agent home together and releases both", t => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sg-hook-homes-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const [project, otherProject, home, otherHome] = ["app", "docs", "agent1", "agent2"].map(name => path.join(root, name));
+  const writers = new HookWorkspaceWriters();
+  writers.acquire("one", project, "workspace-write", home);
+  assert.equal(writers.busy("two", otherProject, "workspace-write", home), true);
+  assert.equal(writers.busy("two", otherProject, "read-only", home), false);
+  assert.throws(() => writers.acquire("two", otherProject, "workspace-write", home), { code: "HOOK_WORKSPACE_BUSY" });
+  assert.equal(writers.busy("three", otherProject, "workspace-write", otherHome), false);
+  assert.throws(() => writers.assert("one", home), { code: "HOOK_WRITE_FORBIDDEN" });
+  writers.release("one");
+  assert.equal(writers.acquire("two", project, "workspace-write", home), true);
+});
 test("workspace writer gate treats aliases as one writer and fences retargeted paths", t => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "sg-hook-writer-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

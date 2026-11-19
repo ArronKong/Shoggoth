@@ -19,7 +19,7 @@ import ApprovalRow from "./ApprovalRow";
 import { activityStatusRows } from "./activityStatusRows";
 import { DashboardActivitySkeleton } from "./DashboardSkeleton";
 
-// 统一活动流（今日动态）：cron / kanban / inspiration，隐藏静默输出、系统健康及 heartbeat 记录。
+// 统一活动流（今日动态）：cron / kanban / inspiration，隐藏跳过的定时任务、静默输出、系统健康及 heartbeat 记录。
 // - 首屏来自 summary.activityPage（默认筛选第一页）；筛选/加载更多走
 //   /__api/dashboard/activities（服务端筛选 + opaque cursor）。
 // - 45s 轮询的新首屏替换其覆盖范围，只保留已加载的更旧记录；来源降级时保留旧数据。
@@ -29,11 +29,11 @@ import { DashboardActivitySkeleton } from "./DashboardSkeleton";
 
 const KIND_FILTERS = ["", "cron", "inspiration"] as const;
 
-// 旧缓存和尚未升级的服务端也要过滤执行中、静默输出及 heartbeat。
+// 旧缓存和尚未升级的服务端也要过滤执行中、已跳过、静默输出及 heartbeat。
 // 与 core/dashboard-activity.js 保持一致，仅匹配系统结果，不按任务名过滤。
 export function isVisibleDashboardActivity(entry: DashboardActivityEntry): entry is Exclude<DashboardActivityEntry, { kind: "health" }> {
   if (entry.kind === "health") return false;
-  if (entry.kind === "cron" && (entry.run.status === "running"
+  if (entry.kind === "cron" && (entry.run.status === "running" || entry.run.status === "skipped"
     || entry.run.outputDisposition === "pending" || entry.run.outputDisposition === "silent")) return false;
   if (entry.kind === "cron" && entry.backendId === "openclaw" && entry.run.systemManaged === true) return false;
   return !(entry.kind === "cron" && entry.backendId === "openclaw"

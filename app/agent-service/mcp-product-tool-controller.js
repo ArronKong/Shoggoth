@@ -45,7 +45,8 @@ const { GROUP_CHAT_AGENT_TOOL_DEFINITIONS, GROUP_CHAT_AGENT_READ_TOOLS, GROUP_CH
   validateGroupChatAgentArguments } = require("./group-chat-agent-tools");
 const { isGroupChatRun } = require("./group-chat-run");
 const { fileIdFor, readWorkspaceOutput, sha256: artifactDigest } = require("./agent-file-store");
-const { RUN_SOURCES: FILE_RUN_SOURCES, filename: managedFilename, fileMimeType, contentUrl: managedFileUrl } = require("./agent-file-protocol");
+const { RUN_SOURCES: FILE_RUN_SOURCES, FILE_ID: MANAGED_FILE_ID, MAX_FILE_BYTES: MANAGED_FILE_MAX_BYTES,
+  filename: managedFilename, fileMimeType, contentUrl: managedFileUrl } = require("./agent-file-protocol");
 const { DEFINITION_MCP_TOOL_DEFINITIONS, isDefinitionMcpTool, isManagedDefinitionMcpTool,
   validateDefinitionMcpArguments } = require("./definition-mcp-tools");
 const { MAX_INITIAL_SOUL_BYTES } = require("./agent-lifecycle-service-protocol");
@@ -59,9 +60,14 @@ const { validateHookToolArguments } = require("./hook-tool-schema");
 const { HOOK_TOOL_NAMES, HOOK_MCP_TOOL_DEFINITIONS, validateHookArguments } = require("./hook-service-protocol");
 const { BROWSER_PUBLIC_MESSAGES } = require("./browser-use-protocol");
 const { FEDERATION_RUN_PUBLIC_MESSAGES } = require("../federation-run-error");
+const {
+  PUBLIC_MESSAGES: BACKGROUND_TASK_PUBLIC_MESSAGES, MAX_BRIEF_BYTES: MAX_BACKGROUND_BRIEF_BYTES,
+  MAX_MESSAGE_BYTES: MAX_BACKGROUND_MESSAGE_BYTES, TASK_ID_PATTERN: BACKGROUND_TASK_ID_PATTERN,
+} = require("./background-task-protocol");
 const { FEDERATION_TASK_MAX_TIMEOUT_MS, validFederationTaskTimeout } = require("../federation-task-timeout");
 const { searchProductHelp } = require("./product-help-catalog");
 const { ProductHelpService } = require("./product-help-service");
+const { validCronModelSelection } = require("./native-cron-model");
 // MCP helper 进程只需要工具 schema 与参数校验，不能因为共享常量而加载
 // Native Store / ProductStore。这里固定的值就是对外 MCP 协议上限；领域
 // Controller 仍在 Service 侧做第二次权威校验。
@@ -90,11 +96,11 @@ const MCP_PRODUCT_TOOL_NAMES = Object.freeze(PRODUCT_CAPABILITIES
 
 const MCP_PRODUCT_TOOL_NAME_SET = new Set(INTERNAL_MCP_PRODUCT_TOOL_NAMES);
 function isNativeOnlyMcpTool(name) {
-  return name === "workspace_execute" || name === "skill_learn" || name === "artifact_publish"
+  return name === "workspace_execute" || name === "skill_learn" || name === "artifact_publish" || name === "cron_models"
     || HEARTBEAT_SETTINGS_TOOL_NAMES.has(name) || WEB_PREFERENCE_TOOL_NAMES.has(name) || name === "app_manage"
     || Object.hasOwn(conditionWatch.toolMethods, name)
     || name.startsWith("computer_") || name.startsWith("browser_") || name.startsWith("native_agent_")
-    || isChatUiMcpTool(name) || HOOK_TOOL_NAMES.includes(name) || isMemoryMcpTool(name) || isDefinitionMcpTool(name);
+    || name.startsWith("background_task_") || isChatUiMcpTool(name) || HOOK_TOOL_NAMES.includes(name) || isMemoryMcpTool(name) || isDefinitionMcpTool(name);
 }
 const DURABLE_WRITE_TOOL_NAMES = new Set([
   "mcp_server_add", "mcp_server_import",
@@ -117,6 +123,7 @@ const DURABLE_WRITE_TOOL_NAMES = new Set([
   "external_agent_create", "external_agent_update", "external_agent_delete",
   "external_agent_file_write", "external_agent_run",
   "federation_agent_run", "federation_agent_message", "federation_task_cancel",
+  "background_task_start", "background_task_send", "background_task_cancel",
 ]);
 const LIVE_HELP_TOOL_NAMES = new Set(["app_help_get", "heartbeat_settings_get", "web_settings_get", "app_capabilities", ...GROUP_CHAT_AGENT_READ_TOOLS]);
 // These reads depend on mutable memory, transcript, and recall-policy state.
@@ -170,6 +177,7 @@ const COMPUTER_SAFE_KEYS = new Set([
 const COMPUTER_MODIFIERS = new Set(["cmd", "shift", "option", "alt", "ctrl", "fn"]);
 const PUBLIC_MESSAGES = Object.freeze({
   ...conditionWatch.MESSAGES,
+  ...BACKGROUND_TASK_PUBLIC_MESSAGES,
   ...APPLE_DEVICE_PUBLIC_MESSAGES,
   ...CONNECTOR_PUBLIC_MESSAGES,
   ...SECRET_PUBLIC_MESSAGES,
@@ -210,6 +218,8 @@ const PUBLIC_MESSAGES = Object.freeze({
   MCP_TOOL_RESPONSE_INVALID: "工具响应无效",
   MCP_TOOL_RESPONSE_TOO_LARGE: "工具响应超过协议上限",
   MCP_TOOL_UNAVAILABLE: "MCP 产品工具暂时不可用",
+  CRON_MODEL_UNAVAILABLE: "所选模型在此助理的运行环境中不可用，请用 cron_models 重新查询",
+  CRON_MODEL_UPDATE_BUSY: "此任务还有等待中或正在执行的运行，请在运行结束后更改模型",
   MCP_TOOL_FORBIDDEN: "当前 Profile 或 Run 无权调用该工具",
   MCP_TOOL_CONFIRMATION_REQUIRED: "该工具需要本次用户确认",
   APP_HOST_UNAVAILABLE: "Shoggoth App 进程未运行，连接状态查询和跨 Agent 派发暂不可用",
@@ -263,6 +273,15 @@ function deepFreeze(value) {
 const nullableString = (maxLength) => ({
   anyOf: [{ type: "string", maxLength }, { type: "null" }],
 });
+
+const cronModelSelectionSchema = {
+  anyOf: [{ type: "object", properties: {
+    bindingId: { type: "string", maxLength: 36 },
+    model: { type: "string", maxLength: 512 },
+    modelProviderRef: { type: "string", maxLength: 128 },
+  }, required: ["bindingId", "model"], additionalProperties: false }, { type: "null" }],
+  description: "For a user-requested task model, copy the exact modelSelection object from cron_models. Omit on creation to inherit the Agent's default. On update, null restores the default.",
+};
 
 const interactiveWorkSourceSchema = () => ({
   source: { type: "string", enum: ["chat", "kanban", "cron", "inspiration", "proactive"] },
@@ -725,6 +744,17 @@ const BASE_MCP_PRODUCT_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "cron_models",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bindingId: { type: "string", maxLength: 36, description: "Use a bindingId from the previous result. Omit for the Agent's default runtime." },
+        cursor: { type: "string", maxLength: MAX_CURSOR_BYTES, description: "Omit on the first page. Use nextCursor with the same bindingId to continue." },
+      },
+      examples: [{}], additionalProperties: false,
+    },
+  },
+  {
     name: "cron_get",
     description: "Read one authorized Cron job and a bounded prompt chunk.",
     inputSchema: {
@@ -984,6 +1014,7 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
       type: "object",
       properties: {
         name: { type: "string", maxLength: 512 }, prompt: { type: "string", maxLength: MAX_TEXT_BYTES },
+        modelSelection: cronModelSelectionSchema,
         workspace: { ...nullableString(4096), default: CRON_ARGUMENT_DEFAULTS.cron_create.workspace,
           description: "Omit or use JSON null for the default workspace, or supply an absolute path." },
         schedule: scheduleSchema, enabled: { type: "boolean", default: CRON_ARGUMENT_DEFAULTS.cron_create.enabled },
@@ -1015,6 +1046,7 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
           type: "object", minProperties: 1,
           properties: {
             name: { type: "string", maxLength: 512 }, prompt: { type: "string", maxLength: MAX_TEXT_BYTES },
+            modelSelection: cronModelSelectionSchema,
             watch: { type: "boolean" },
             workspace: nullableString(4096), schedule: scheduleSchema,
             misfirePolicy: { type: "string", enum: [...MISFIRE_POLICIES] },
@@ -1063,6 +1095,46 @@ const ADDITIONAL_MCP_PRODUCT_TOOL_DEFINITIONS = [
   {
     name: "backend_status",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "background_task_start",
+    inputSchema: {
+      type: "object",
+      properties: {
+        brief: { type: "string", minLength: 1, maxLength: MAX_BACKGROUND_BRIEF_BYTES },
+        bindingRef: { type: "string", minLength: 1, maxLength: 128 },
+      },
+      required: ["brief"], additionalProperties: false,
+    },
+  },
+  {
+    name: "background_task_get",
+    inputSchema: {
+      type: "object",
+      properties: { taskId: { type: "string", pattern: BACKGROUND_TASK_ID_PATTERN.source },
+        fileId: { type: "string", pattern: MANAGED_FILE_ID.source },
+        offset: { type: "integer", minimum: 0, maximum: MANAGED_FILE_MAX_BYTES } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "background_task_send",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", pattern: BACKGROUND_TASK_ID_PATTERN.source },
+        message: { type: "string", minLength: 1, maxLength: MAX_BACKGROUND_MESSAGE_BYTES },
+      },
+      required: ["taskId", "message"], additionalProperties: false,
+    },
+  },
+  {
+    name: "background_task_cancel",
+    inputSchema: {
+      type: "object",
+      properties: { taskId: { type: "string", pattern: BACKGROUND_TASK_ID_PATTERN.source } },
+      required: ["taskId"], additionalProperties: false,
+    },
   },
   {
     name: "federation_agent_list",
@@ -1404,6 +1476,7 @@ const CARD_PATCH_VALIDATORS = Object.freeze({
   position: (value) => Number.isSafeInteger(value) && value >= 0,
 });
 const CRON_PATCH_VALIDATORS = Object.freeze({
+  modelSelection: validCronModelSelection,
   name: (value) => validText(value, 512),
   watch: (value) => typeof value === "boolean",
   prompt: (value) => validText(value, MAX_TEXT_BYTES),
@@ -1771,6 +1844,11 @@ function validateProductOperationArguments(name, args) {
       && (args.enabled === null || typeof args.enabled === "boolean")
       && validCursor(args.cursor) && validPageLimit(args.limit);
   }
+  if (name === "cron_models") {
+    return ownDataObject(args) && Object.keys(args).every(key => key === "bindingId" || key === "cursor")
+      && (!Object.hasOwn(args, "bindingId") || typeof args.bindingId === "string" && UUID_PATTERN.test(args.bindingId))
+      && (!Object.hasOwn(args, "cursor") || validText(args.cursor, MAX_CURSOR_BYTES));
+  }
   if (name === "cron_get") {
     return exactObject(args, ["jobId", "cursor", "maxBytes"])
       && UUID_PATTERN.test(args.jobId) && validCursor(args.cursor) && validMaxBytes(args.maxBytes);
@@ -1783,6 +1861,7 @@ function validateProductOperationArguments(name, args) {
       "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId",
       ...(Object.hasOwn(args, "sourceQuote") ? ["sourceQuote"] : []),
       ...(Object.hasOwn(args, "watch") ? ["watch"] : []),
+      ...(Object.hasOwn(args, "modelSelection") ? ["modelSelection"] : []),
     ]) && validText(args.name, 512) && validText(args.prompt, MAX_TEXT_BYTES)
       && (args.workspace === null || (validText(args.workspace, 4096) && path.isAbsolute(args.workspace)))
       && validSchedule(args.schedule) && typeof args.enabled === "boolean"
@@ -1793,6 +1872,7 @@ function validateProductOperationArguments(name, args) {
       && (!Object.hasOwn(args, "sourceQuote") || (args.threadId === null
         && validText(args.sourceQuote, 2048) && args.sourceQuote.trim().length > 0))
       && (!Object.hasOwn(args, "watch") || typeof args.watch === "boolean")
+      && (!Object.hasOwn(args, "modelSelection") || validCronModelSelection(args.modelSelection))
       && (args.threadPolicy !== "new" || args.threadId === null);
   }
   if (name === "cron_update") {
@@ -1861,6 +1941,25 @@ function validateProductOperationArguments(name, args) {
       || exactObject(args, ["backendId", "agentId", "prompt"]))
       && validExternalTarget(args) && validText(args.prompt, MAX_DELEGATE_PROMPT_BYTES)
       && validFederationTaskTimeout(args.timeoutMs === undefined ? 0 : args.timeoutMs);
+  }
+  if (name === "background_task_start") {
+    return (exactObject(args, ["brief"]) || (exactObject(args, ["brief", "bindingRef"])
+      && validText(args.bindingRef, 128) && OPAQUE_ID_PATTERN.test(args.bindingRef)))
+      && validText(args.brief, MAX_BACKGROUND_BRIEF_BYTES) && args.brief.trim().length > 0;
+  }
+  if (name === "background_task_get") {
+    if (exactObject(args, [])) return true;
+    if (typeof args.taskId !== "string" || !BACKGROUND_TASK_ID_PATTERN.test(args.taskId)) return false;
+    return exactObject(args, ["taskId"]) || (typeof args.fileId === "string" && MANAGED_FILE_ID.test(args.fileId)
+      && (exactObject(args, ["taskId", "fileId"]) || (exactObject(args, ["taskId", "fileId", "offset"])
+        && Number.isSafeInteger(args.offset) && args.offset >= 0 && args.offset <= MANAGED_FILE_MAX_BYTES)));
+  }
+  if (name === "background_task_send") {
+    return exactObject(args, ["taskId", "message"]) && BACKGROUND_TASK_ID_PATTERN.test(args.taskId)
+      && validText(args.message, MAX_BACKGROUND_MESSAGE_BYTES) && args.message.trim().length > 0;
+  }
+  if (name === "background_task_cancel") {
+    return exactObject(args, ["taskId"]) && BACKGROUND_TASK_ID_PATTERN.test(args.taskId);
   }
   if (name === "federation_agent_list") {
     return exactObject(args, []) || (exactObject(args, ["backendId"])
@@ -2425,6 +2524,7 @@ class McpProductToolController {
     this.kanbanStore = options.kanbanStore;
     this.kanbanRunService = options.kanbanRunService;
     this.cronStore = options.cronStore;
+    this.listCronModels = options.listCronModels;
     this.workDispatcher = options.workDispatcher;
     this.workspaceExecutionService = options.workspaceExecutionService || null;
     this.getExecutionContract = options.getExecutionContract || null;
@@ -2432,6 +2532,7 @@ class McpProductToolController {
     this.usageStore = options.usageStore || null;
     this.federationClient = options.federationClient || null;
     this.federationCoordinator = options.federationCoordinator || null;
+    this.backgroundTaskService = options.backgroundTaskService || null;
     this.skillStore = options.skillStore || null;
     this.nativeMcpStore = options.nativeMcpStore || null;
     this.nativeMcpClientManager = options.nativeMcpClientManager || null;
@@ -2510,6 +2611,7 @@ class McpProductToolController {
         if (isChatUiMcpTool(name)) return this.chatUiController?.enabled() === true;
         if (name === "app_state_get") return !!this.appStateService;
         if (name === "runtime_context_get") return !!this.getRuntimeContext;
+        if (name === "cron_models") return !!this.listCronModels;
         if (name.startsWith("inspiration_")) return !!this.inspirationService;
         if (isManagedDefinitionMcpTool(name)) {
           const runId = this.executionContext.getStore()?.runId;
@@ -2526,6 +2628,7 @@ class McpProductToolController {
           && (["mcp_server_tools", "mcp_server_call"].includes(name) ? !!this.nativeMcpClientManager : true);
         if (isAppleDeviceTool(name)) return !!this.appleDeviceController && !!this.getAppleDeviceCaller;
         if (name.startsWith("federation_")) return !!this.federationCoordinator;
+        if (name.startsWith("background_task_")) return !!this.backgroundTaskService;
         if (name === "backend_status" || name === "external_cron_list") return !!this.federationClient;
         if (WEB_PREFERENCE_TOOL_NAMES.has(name)) return !!this.webSettings;
         if (HEARTBEAT_SETTINGS_TOOL_NAMES.has(name)) return !!this.proactiveService;
@@ -2729,7 +2832,8 @@ class McpProductToolController {
       } else {
         this.#requireProfile(authority.profileId);
         // A managed file read must verify the current user source on every call.
-        result = name === "native_agent_file_read" ? await this.#route(name, rawArgs, authority, null)
+        const managedFileRead = name === "native_agent_file_read" || (name === "background_task_get" && rawArgs.fileId !== undefined);
+        result = managedFileRead ? await this.#route(name, rawArgs, authority, null)
           : await this.#handleEphemeral(name, rawArgs, authority, fingerprint, readVisibilityKey);
       }
       const assertReadCurrent = () => {
@@ -3062,6 +3166,16 @@ class McpProductToolController {
     return value;
   }
 
+  // Background tasks belong to the native direct-chat WorkRun that called the
+  // tool. External MCP callers have no such run and are always refused.
+  #backgroundTaskRun(authority) {
+    if (!this.backgroundTaskService) throw toolError("MCP_TOOL_UNAVAILABLE");
+    const scope = this.executionContext.getStore();
+    if (authority.federationClient || !scope?.runId) throw toolError("BACKGROUND_TASK_SOURCE_REQUIRED");
+    scope.assertCurrent?.();
+    return this.#requireRun(scope.runId, authority.profileId);
+  }
+
   #requireRun(runId, profileId) {
     const raw = this.workDispatcher.getRun(runId);
     const value = ownDataObject(raw) ? raw : productRunDataObject(raw);
@@ -3256,6 +3370,7 @@ class McpProductToolController {
   }
 
   async #preflightDurable(name, args, authority) {
+    if (name.startsWith("background_task_")) return { runId: this.#backgroundTaskRun(authority).id };
     if (["mcp_server_add", "mcp_server_import"].includes(name)) {
       if (!this.mcpConnectorController) throw toolError("MCP_TOOL_UNAVAILABLE");
       const scope = this.executionContext.getStore(), subject = this.#mcpSubject(authority, scope);
@@ -4324,6 +4439,10 @@ class McpProductToolController {
         limit: args.limit,
       }));
     }
+    if (name === "cron_models") {
+      if (!this.listCronModels) throw toolError("MCP_TOOL_UNAVAILABLE");
+      return safeJsonClone(await this.listCronModels(authority.profileId, args));
+    }
     if (name === "cron_get") {
       this.#requireCronJob(args.jobId, authority.profileId);
       const [jobResult, prompt] = await Promise.all([
@@ -4344,6 +4463,7 @@ class McpProductToolController {
         profileId: authority.profileId,
         prompt: args.prompt,
         ...(!groupDelivery && args.watch !== undefined ? { watch: args.watch } : {}),
+        ...(args.modelSelection === undefined ? {} : { modelSelection: args.modelSelection }),
         workspace: args.workspace,
         schedule: args.schedule,
         misfirePolicy: args.misfirePolicy,
@@ -4394,6 +4514,20 @@ class McpProductToolController {
     }
     if (name === "backend_status") {
       return this.#federationRequest("backend.status", {});
+    }
+    if (name.startsWith("background_task_")) {
+      const run = this.#backgroundTaskRun(authority);
+      if (call && call.binding?.runId !== run.id) throw toolError("MCP_TOOL_FORBIDDEN");
+      const service = this.backgroundTaskService;
+      if (name === "background_task_start") {
+        return safeJsonClone(await service.start(run, { operationId: call.operationId, brief: args.brief,
+          ...(args.bindingRef !== undefined ? { bindingRef: args.bindingRef } : {}) }));
+      }
+      if (name === "background_task_get") return safeJsonClone(await service.get(run, args));
+      if (name === "background_task_send") {
+        return safeJsonClone(await service.send(run, { taskId: args.taskId, message: args.message, operationId: call.operationId }));
+      }
+      return safeJsonClone(await service.cancel(run, { taskId: args.taskId, operationId: call.operationId }));
     }
     if (name.startsWith("federation_")) {
       if (!this.federationCoordinator) throw toolError("APP_HOST_UNAVAILABLE");

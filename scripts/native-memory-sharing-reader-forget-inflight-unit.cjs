@@ -106,7 +106,7 @@ test("reader memory_forget fences the borrowed in-flight turn without copying or
     await waitUntil(() => coordinator.getRun(run.id).status === "interrupted", 5000, "reader forget reaches safe terminal state");
     await coordinator.waitForIdle(run.id);
     const terminal = coordinator.getRun(run.id);
-    assert.equal(terminal.errorCode, "CONTEXT_SOURCE_STALE"); assert.equal(terminal.resultSummary, null);
+    assert.equal(terminal.errorCode, "CONTEXT_BORROWED_MEMORY_REVOKED"); assert.equal(terminal.resultSummary, null);
     assert.equal(events.filter(event => event.type === "terminal").length, 1);
     assert.equal(coordinator.lastErrors.size, 0);
     const rows = suppressionRows(f);

@@ -14,7 +14,7 @@ const NATIVE_HOOK_TITLE = "[[shoggoth-native-tool-hook-v1]]";
 const RUNTIME_CALL_BINDING_TITLE = "[[shoggoth-runtime-call-binding-v1]]";
 const MUTATING_BUILTINS = new Set(["bash", "powershell", "edit", "write"]);
 const STRUCTURAL_NULL_FIELDS = new Set([
-  "boardId", "cursor", "enabled", "mimeType", "percent", "ref", "status",
+  "boardId", "cursor", "enabled", "mimeType", "modelSelection", "percent", "ref", "status",
   "threadId", "workspace", "x", "y",
 ]);
 const RELAY_ENV_ALLOWLIST = Object.freeze([

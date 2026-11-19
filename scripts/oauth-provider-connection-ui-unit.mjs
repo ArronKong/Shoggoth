@@ -20,6 +20,7 @@ const calls = [];
 let config = { disabledBackends: ['hermes'] };
 let providers = [];
 let disconnectFailure = false;
+const quotaReads = [];
 const windowEvents = new EventTarget();
 const documentEvents = Object.assign(new EventTarget(), { visibilityState: 'visible' });
 const provider = (enabled, loggedIn = true) => ({
@@ -40,6 +41,8 @@ function load(file) {
     if (name === 'react-i18next') return { useTranslation: () => ({ t: (key) => key }) };
     if (name.endsWith('/api/client')) return {
       listOAuthProviders: async () => { calls.push(['list']); return { providers, profiles: [] }; },
+      getOAuthProviderQuota: (backend, id, signal) =>
+        new Promise(resolve => quotaReads.push({ backend, id, signal, resolve })),
       getConfig: async () => { calls.push(['getConfig']); return structuredClone(config); },
       updateConfig: async (patch) => { calls.push(['updateConfig', patch]); config = { ...config, ...patch }; return structuredClone(config); },
       disconnectOAuthProvider: async (backend, provider) => {
@@ -54,7 +57,10 @@ function load(file) {
       useConfirm: () => async (options) => { calls.push(['confirm', options.title]); return true; },
       useToast: () => ({ success: (text) => calls.push(['toast', text]), error: (text) => calls.push(['error', text]), info: () => {} }),
     };
-    if (name.endsWith('/lib/backends')) return { applyDisabledBackends: (ids) => calls.push(['apply', ids]) };
+    if (name.endsWith('/backends')) return {
+      applyDisabledBackends: (ids) => calls.push(['apply', ids]),
+      readEnabledOAuthQuotaBackends: async () => ['shoggoth'],
+    };
     if (name.endsWith('/OAuthLoginModal') || name.endsWith('/ProviderLogo')) return { __esModule: true, default: () => null };
     if (name.endsWith('.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => String(key) }) };
     if (!name.startsWith('.')) return require(name);
@@ -62,7 +68,7 @@ function load(file) {
     return load(['.ts', '.tsx'].map((ext) => base + ext).find((candidate) => fs.existsSync(candidate)));
   };
   vm.runInNewContext(`(function(require, module, exports) { ${source}\n})(require, module, module.exports);`, {
-    require: localRequire, module,
+    require: localRequire, module, AbortController, AbortSignal,
     window: { setTimeout, clearTimeout,
       addEventListener: windowEvents.addEventListener.bind(windowEvents),
       removeEventListener: windowEvents.removeEventListener.bind(windowEvents) },
@@ -186,3 +192,40 @@ for (const fail of [false, true]) {
   await settle(() => renderer.unmount());
 }
 console.log('OAuth provider connection switch UI unit: PASS');
+
+const quotaCache = load(path.join(ui, 'src/lib/oauthAccountQuota.ts'));
+const { invalidatePageCache } = load(path.join(ui, 'src/lib/usePageCache.ts'));
+const account = { ...provider(true), canReadQuota: true };
+const firstQuota = { status: 'available', checkedAt: 100, windows: [] };
+providers = [account, { ...account, id: 'disabled', connection: { id: 'disabled', enabled: false } }];
+const warmup = quotaCache.warmOAuthAccountQuotas();
+await new Promise(setImmediate);
+assert.equal(quotaReads.length, 1, 'startup reads only verified, enabled accounts');
+const warmHover = quotaCache.refreshOAuthQuota('shoggoth', account);
+assert.equal(quotaReads.length, 1, 'hover shares the startup request');
+quotaReads[0].resolve(firstQuota);
+await Promise.all([warmup, warmHover]);
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', account), firstQuota);
+assert.equal(quotaCache.readCachedOAuthQuota('openclaw', account), undefined);
+
+const refresh = quotaCache.refreshOAuthQuota('shoggoth', account);
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', account), firstQuota, 'refresh retains the last reading');
+quotaReads[1].resolve({ status: 'unavailable' });
+await refresh;
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', account), firstQuota);
+
+const oldRead = quotaCache.refreshOAuthQuota('shoggoth', account);
+const nextAccount = { ...account, status: { ...account.status, tokenPreview: 'new-account@example.test' } };
+const replacement = quotaCache.prefetchMissingOAuthQuotas('shoggoth', [nextAccount]);
+assert.ok(quotaReads[2].signal.aborted);
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', nextAccount), undefined);
+quotaReads[2].resolve(firstQuota);
+await oldRead;
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', nextAccount), undefined);
+const latestQuota = { ...firstQuota, checkedAt: 200 };
+quotaReads[3].resolve(latestQuota);
+await replacement;
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', nextAccount), latestQuota);
+invalidatePageCache();
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', nextAccount), undefined);
+console.log('OAuth quota startup, stale reads, and account isolation: PASS');

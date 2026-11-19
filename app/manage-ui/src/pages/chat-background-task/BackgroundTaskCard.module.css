@@ -1,0 +1,52 @@
+.card {
+  --task-accent: light-dark(#607184, #b8c9dd);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  align-self: flex-start;
+  width: 360px;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--skin-hairline);
+  border-radius: 14px;
+  background: light-dark(#fffefd, #242429);
+  /* Paired with the card surface, not inherited: immersive bubbles use light text. */
+  color: light-dark(#2f2b25, #f2eee7);
+  box-shadow: var(--ui-shadow-card);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.card:hover { background: light-dark(#f6f3ee, #2c2c32); }
+.card:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.card[data-tone="active"] { --task-accent: light-dark(#3b6fd8, #8db1ff); }
+.card[data-tone="attention"] { --task-accent: light-dark(#a66a12, #e8b761); }
+.card[data-tone="done"] { --task-accent: light-dark(#2f8a57, #7fd3a2); }
+.card[data-tone="error"] { --task-accent: light-dark(#aa4b48, #efaaa5); }
+
+.indicator {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--task-accent);
+}
+.card[data-tone="active"] .indicator { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .card[data-tone="active"] .indicator { animation: none; } }
+
+.body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.label { color: light-dark(#71695e, #c0b9af); font-size: 12px; line-height: 16px; }
+.title {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex: none; }
+.status { color: var(--task-accent); font-size: 12px; line-height: 16px; font-weight: 600; }
+.report { color: light-dark(#71695e, #c0b9af); font-size: 11px; line-height: 14px; }

@@ -1,9 +1,7 @@
 import type { ReactNode } from "react";
-import { useTranslation } from "react-i18next";
-import { Field, TextArea } from "../../components/Field";
-import type { NativeCronJobInput, UnifiedCronJob } from "../../types";
-import { CronExpressionPicker, DateTimePicker, IntervalPicker } from "./CronSchedulePicker";
-import { CronScheduleType, CronTaskNameRow } from "./CronFormLayout";
+import type { NativeCronJobInput, NativeCronModelSelection, UnifiedCronJob } from "../../types";
+import { CronScheduleField, CronTaskNameRow, CronTaskPromptField } from "./CronFormLayout";
+import { CronTaskModelField } from "./CronModelPicker";
 
 type ScheduleKind = "cron" | "every" | "at";
 
@@ -12,6 +10,7 @@ export interface NativeCronDraft {
   agentId: string;
   name: string;
   prompt: string;
+  modelSelection: NativeCronModelSelection | null;
   workspace: string;
   enabled: boolean;
   schedKind: ScheduleKind;
@@ -40,6 +39,7 @@ export function emptyNativeCronDraft(backendId: string, agentId = ""): NativeCro
     agentId,
     name: "",
     prompt: "",
+    modelSelection: null,
     workspace: "",
     enabled: true,
     schedKind: "cron",
@@ -64,6 +64,7 @@ export function nativeCronDraftFromJob(job: UnifiedCronJob): NativeCronDraft {
     ...base,
     name: job.name || "",
     prompt: job.prompt || "",
+    modelSelection: job.modelSelection ?? null,
     enabled: job.enabled,
     schedKind: schedule.kind === "cron" || schedule.kind === "every" || schedule.kind === "at"
       ? schedule.kind
@@ -114,6 +115,7 @@ export function nativeCronInputFromDraft(draft: NativeCronDraft): NativeCronJobI
     agentId: draft.agentId.trim(),
     name: draft.name.trim(),
     prompt: draft.prompt,
+    ...(draft.modelSelection ? { modelSelection: draft.modelSelection } : {}),
     enabled: draft.enabled,
     workspace: draft.workspace.trim() || null,
     schedule,
@@ -140,9 +142,14 @@ export function nativeCronEditPlan(
   enabled: boolean | null;
 } {
   const input = nativeCronInputFromDraft(draft);
+  const previous = original.modelSelection;
+  const next = draft.modelSelection;
+  const modelChanged = previous?.bindingId !== next?.bindingId || previous?.model !== next?.model
+    || previous?.modelProviderRef !== next?.modelProviderRef;
   const patch = {
     name: input.name,
     prompt: input.prompt,
+    ...(modelChanged ? { modelSelection: next } : {}),
     workspace: input.workspace,
     schedule: input.schedule,
     misfirePolicy: input.misfirePolicy,
@@ -164,27 +171,22 @@ export const shoggothInputFromDraft = nativeCronInputFromDraft;
 export const shoggothDraftWithThreadPolicy = nativeCronDraftWithThreadPolicy;
 export const shoggothEditPlan = nativeCronEditPlan;
 
-export default function NativeCronForm({ draft, setDraft, assistant }: {
+export default function NativeCronForm({ draft, setDraft, assistant, disabled }: {
   draft: NativeCronDraft;
   setDraft: (draft: NativeCronDraft) => void;
   assistant: ReactNode;
+  disabled?: boolean;
 }) {
-  const { t } = useTranslation();
   const set = <K extends keyof NativeCronDraft>(key: K, value: NativeCronDraft[K]) => setDraft({ ...draft, [key]: value });
   // Existing hidden options stay in the draft and continue through the original serializers.
   return <div className="cron-form">
-    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} assistant={assistant} />
-    <Field label={t("cronForm.taskPromptLabel")}>
-      <TextArea value={draft.prompt} onChange={(event) => set("prompt", event.target.value)} rows={4} placeholder={t("cronForm.taskPromptPlaceholder")} />
-    </Field>
-    <div className="field">
-      <span className="field-label">{t("cronForm.scheduleLabel")}</span>
-      <CronScheduleType value={draft.schedKind} onChange={(value) => set("schedKind", value)} />
-      <div className="cron-schedule-row">
-        {draft.schedKind === "cron" && <CronExpressionPicker value={draft.cronExpr} onChange={(value) => set("cronExpr", value)} />}
-        {draft.schedKind === "every" && <IntervalPicker value={draft.everyMin} onChange={(value) => set("everyMin", value)} />}
-        {draft.schedKind === "at" && <DateTimePicker value={draft.atLocal} onChange={(value) => set("atLocal", value)} />}
-      </div>
+    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} />
+    <CronTaskPromptField value={draft.prompt} onChange={(prompt) => set("prompt", prompt)} />
+    <div className="field-row">
+      {assistant}
+      <CronTaskModelField backendId={draft.backendId} agentId={draft.agentId} kind="native" value={draft.modelSelection}
+        onChange={(value) => set("modelSelection", value && "bindingId" in value ? value : null)} disabled={disabled} />
     </div>
+    <CronScheduleField draft={draft} onChange={(patch) => setDraft({ ...draft, ...patch })} />
   </div>;
 }

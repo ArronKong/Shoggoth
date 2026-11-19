@@ -1,12 +1,11 @@
 "use strict";
 
-// Maintainer-owned release gate, NOT a user preference. Keep disabled until the
-// distribution review and native candidate checks are complete.
+// Maintainer-owned default for packaged desktop builds.
 // Only a public phc_ project token may be embedded; never a personal/secret key.
 // No environment variables, config.json, renderer IPC or remote flags override it.
 module.exports = Object.freeze({
-  exportEnabled: false,
-  projectToken: "",
+  exportEnabled: true,
+  projectToken: "phc_qguMYNYWoGfZX8usbqzu8aNwDfuu93wnSmgB6GKDXw3f",
   region: "us",
   revision: 2,
 });

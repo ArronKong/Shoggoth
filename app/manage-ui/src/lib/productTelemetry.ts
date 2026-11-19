@@ -84,8 +84,7 @@ export function installProductActivityListener(): () => void {
     if (!basicEpoch || !event.isTrusted || document.visibilityState !== "visible" || !document.hasFocus()) return;
     const page = productPage();
     if (!page) return;
-    if (document.querySelector(".product-telemetry-privacy[data-open]")) return;
-    if (event.target instanceof Element && event.target.closest("[data-product-telemetry-exclude], .product-telemetry-privacy")) return;
+    if (event.target instanceof Element && event.target.closest("[data-product-telemetry-exclude]")) return;
     const at = performance.now();
     const day = new Date().toISOString().slice(0, 10);
     if (day !== lastDay || basicEpoch !== lastEpoch || at - lastAt >= 60_000) {

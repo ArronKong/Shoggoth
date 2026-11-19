@@ -28,24 +28,26 @@ class HookWorkspaceWriters {
     }
     return false;
   }
-  busy(runId, workspace, sandbox) {
+  busy(runId, workspace, sandbox, agentWorkspace) {
     if (!workspace || sandbox === "read-only") return false;
-    return this.conflict(runId, workspaceIdentity(workspace));
+    return [workspace, agentWorkspace].some(root => root && this.conflict(runId, workspaceIdentity(root)));
   }
-  acquire(runId, workspace, sandbox) {
+  acquire(runId, workspace, sandbox, agentWorkspace) {
     if (!workspace || sandbox === "read-only") return false;
-    const key = workspaceIdentity(workspace);
-    if (this.runs.has(runId) && this.runs.get(runId) !== key) fail("HOOK_WRITE_FORBIDDEN");
-    if (this.conflict(runId, key)) fail("HOOK_WORKSPACE_BUSY");
-    this.owners.set(key, runId); this.runs.set(runId, key); return true;
+    const roots = [...new Set([workspace, agentWorkspace].filter(Boolean).map(workspaceIdentity))];
+    const previous = this.runs.get(runId);
+    if (previous && (previous.length !== roots.length || previous.some((key, index) => key !== roots[index]))) fail("HOOK_WRITE_FORBIDDEN");
+    if (roots.some(key => this.conflict(runId, key))) fail("HOOK_WORKSPACE_BUSY");
+    for (const key of roots) this.owners.set(key, runId);
+    this.runs.set(runId, roots);
+    return true;
   }
   assert(runId, workspace) {
     const key = workspaceIdentity(workspace);
-    if (this.owners.get(key) !== runId || this.runs.get(runId) !== key) fail("HOOK_WRITE_FORBIDDEN");
+    if (this.owners.get(key) !== runId || this.runs.get(runId)?.[0] !== key) fail("HOOK_WRITE_FORBIDDEN");
   }
   release(runId) {
-    const workspace = this.runs.get(runId);
-    if (workspace && this.owners.get(workspace) === runId) this.owners.delete(workspace);
+    for (const root of this.runs.get(runId) || []) if (this.owners.get(root) === runId) this.owners.delete(root);
     this.runs.delete(runId);
   }
   close() { this.owners.clear(); this.runs.clear(); }

@@ -1,0 +1,146 @@
+.region {
+  position: absolute;
+  inset: 116px 0 179px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  pointer-events: none;
+}
+
+.trigger {
+  inline-size: max(0px, calc(var(--page-inset-right) - var(--ui-scrollbar-track-size, 12px)));
+  margin-inline-end: var(--ui-scrollbar-track-size, 12px);
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: light-dark(rgb(0 0 0 / 10%), rgb(255 255 255 / 10%));
+  background: transparent;
+  pointer-events: auto;
+}
+
+.trigger:is(:hover, :focus-visible, [data-chat-nav-focused]) {
+  color: light-dark(rgb(0 0 0 / 20%), rgb(255 255 255 / 20%));
+}
+
+.marks { display: grid; }
+
+.mark, .ellipsis {
+  display: grid;
+  place-items: center end;
+  block-size: var(--chat-nav-mark-pitch);
+}
+
+.mark::before {
+  content: "";
+  inline-size: min(100%, var(--chat-nav-mark-width, 6px));
+  block-size: 2px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.mark[data-focus-distance="3"] { --chat-nav-mark-width: 8px; }
+.mark[data-focus-distance="2"] { --chat-nav-mark-width: 10px; }
+.mark[data-focus-distance="1"] { --chat-nav-mark-width: 13px; }
+.mark[data-focus-distance="0"] {
+  --chat-nav-mark-width: 16px;
+  color: light-dark(#000, #fff);
+}
+
+.mark::before, .ellipsis {
+  position: relative;
+  inset-inline-start: 1.5px;
+  pointer-events: none;
+}
+
+.ellipsis { font-size: 12px; line-height: 1; }
+
+.compactTrigger {
+  align-self: flex-start;
+  min-block-size: 44px;
+  margin-inline-end: var(--page-inset-right);
+  padding: 0 12px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 999px;
+  background: var(--skin-card-fg);
+  color: var(--chat-text);
+  font: inherit;
+  font-size: 12px;
+  pointer-events: auto;
+}
+
+.positioner { z-index: 1; }
+
+.popup {
+  inline-size: min(348px, calc(var(--available-width) - 2px));
+  max-block-size: var(--available-height);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  border: 1px solid var(--ui-hairline);
+  border-radius: 16px;
+  background: var(--skin-card-fg);
+  box-shadow: 0 10px 26px var(--skin-shadow-strong);
+  color: var(--chat-text);
+  pointer-events: auto;
+}
+
+.entries { display: grid; gap: 4px; }
+
+.entry, .more {
+  inline-size: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+}
+
+.entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 8px;
+  min-block-size: 36px;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.more {
+  min-block-size: 30px;
+  margin-block-end: 4px;
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.entry:is(:hover, :focus-visible, [data-chat-nav-row-focus="mark"]),
+.more:not(:disabled):is(:hover, :focus-visible) {
+  background: var(--bg-hover);
+}
+
+.trigger:focus-visible, .compactTrigger:focus-visible, .entry:focus-visible, .more:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 1px;
+}
+
+.text, .reply {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.text { font-weight: 600; }
+
+.time, .reply {
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.time { white-space: nowrap; }
+.reply { grid-column: 1 / -1; }
+
+@media (pointer: coarse) {
+  .entry, .more { min-block-size: 44px; }
+}

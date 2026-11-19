@@ -17,6 +17,21 @@
 .page :global(header.page-head) { position: absolute; top: 0; left: 0; align-items: center; margin: 0; }
 .page :global(.page-head .page-head-title) { color: var(--ui-text-1); font-size: 32px; font-weight: 300; letter-spacing: 0; line-height: 32px; }
 .workbench { --typewriter-width: 680px; --typewriter-height: 228px; --typewriter-paper-width: 71.470588%; padding-right: min(80px, calc(100% * 80 / 760)); }
+/* Extend the native top gutter across the title line and the exposed casing. */
+:global(:root.electron-macos-hidden-inset) .page::before {
+  content: '';
+  position: absolute;
+  inset: 36px 0 auto;
+  height: 40px;
+  pointer-events: none;
+  -webkit-app-region: drag;
+}
+:global(:root.electron-macos-hidden-inset) .workbench :global([data-typewriter-housing])::before {
+  content: '';
+  position: absolute;
+  inset: 50% 0 0;
+  -webkit-app-region: drag;
+}
 .capture { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 210px; max-height: 460px; padding: 32px 32px 64px; }
 .capture[data-inspiration-resizing] { user-select: none; }
 .captureResize { position: absolute; bottom: 0; left: 24px; right: 24px; height: 16px; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; cursor: ns-resize; touch-action: none; user-select: none; }

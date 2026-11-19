@@ -172,6 +172,26 @@ class AccountAuthManager {
     return this.#read(context);
   }
 
+  async readQuota(input) {
+    const { binding, runtimeAccountId } = this.#accountContext(input, ["runtimeAccountId"]);
+    const generation = this.generation;
+    const admission = () => this.runtimeAccountAdmission?.read?.(runtimeAccountId);
+    const before = admission();
+    if (before?.mutationActive) return { status: "unavailable" };
+    const host = await this.runtimeManager.acquire(binding);
+    this.#assertGeneration(generation);
+    const isCurrent = () => {
+      const current = admission();
+      return !current?.mutationActive && before?.generation === current?.generation
+        && this.#resolvedAccountContext(runtimeAccountId).binding.runtimeProfileId === binding.runtimeProfileId;
+    };
+    if (!isCurrent()) return { status: "unavailable" };
+    if (typeof host.accountQuotaRead !== "function") return { status: "unsupported" };
+    const quota = await host.accountQuotaRead();
+    this.#assertGeneration(generation);
+    return isCurrent() ? quota : { status: "unavailable" };
+  }
+
   async #read(context) {
     const generation = this.generation;
     const host = await this.runtimeManager.acquire(context.binding);

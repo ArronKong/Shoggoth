@@ -22,7 +22,6 @@ async function fixture(desktop = true) {
   let at = Date.parse("2026-09-10T23:59:59.999Z");
   let mono = 0;
   let focused = true;
-  let noticeOpen = false;
   let uuidCalls = 0;
   let settings = { available: true, collectionAvailable: true, enabled: true, detailedEnabled: true,
     basicEpoch: randomUUID(), detailedEpoch: randomUUID() };
@@ -36,7 +35,6 @@ async function fixture(desktop = true) {
   }
   const document = {
     visibilityState: "visible", hasFocus: () => focused,
-    querySelector(selector) { assert.equal(selector, ".product-telemetry-privacy[data-open]"); return noticeOpen ? new Element(true) : null; },
     addEventListener(name, listener, options) { assert.equal(options.passive, true); assert.equal(options.capture, true); listeners.set(name, listener); },
     removeEventListener(name, listener) { assert.equal(listeners.get(name), listener); listeners.delete(name); },
   };
@@ -76,7 +74,7 @@ async function fixture(desktop = true) {
     listeners.get(type)?.(event);
   };
   return { document, window, listeners, dispose, emit, Element, calls, helpers, uuidCalls: () => uuidCalls,
-    advance(ms) { at += ms; mono += ms; }, focus(value) { focused = value; }, openNotice(value) { noticeOpen = value; } };
+    advance(ms) { at += ms; mono += ms; }, focus(value) { focused = value; } };
 }
 
 const f = await fixture();
@@ -89,10 +87,6 @@ assert.equal(f.calls.length, 0, "auto-scroll, focus, messages and JS synthetic c
 f.document.visibilityState = "hidden"; f.emit("keydown");
 f.document.visibilityState = "visible"; f.focus(false); f.emit("wheel"); f.focus(true);
 f.emit("pointerdown", { target: new f.Element(true) });
-f.openNotice(true);
-f.emit("pointerdown");
-f.emit("keydown", { target: f.document });
-f.openNotice(false);
 for (const route of ["/glass", "/components", "/turnlab", "/", "/unknown", "/chat/unknown"]) {
   f.window.location.hash = `#${route}`; f.emit("pointerdown");
 }

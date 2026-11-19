@@ -126,11 +126,12 @@ function normalizeGrokBuildPermissionPolicy(value = DEFAULT_GROK_BUILD_PERMISSIO
   });
 }
 
-function buildGrokBuildArgs(value) {
+function buildGrokBuildArgs(value, agentWorkspace = null) {
   const policy = normalizeGrokBuildPermissionPolicy(value);
   return Object.freeze([
     "--sandbox",
     SANDBOX_PROFILES[policy.sandbox],
+    ...(agentWorkspace && policy.sandbox === "workspace-write" ? ["--add-dir", normalizeGrokBuildWorkspace(agentWorkspace)] : []),
     "agent",
     "--no-leader",
     "stdio",

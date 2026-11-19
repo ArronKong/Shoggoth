@@ -13,6 +13,8 @@ const {
   validateDomainServiceResult,
 } = require("./domain-service-protocol");
 const { computeNextOccurrence, normalizeSchedule } = require("./native-cron-store");
+const { sameCronModel } = require("./native-cron-model");
+const { TERMINAL_WORK_RUN_STATUSES } = require("./work-run");
 
 const TRUSTED_LOCAL_ACTOR_ID = "shoggoth-local-user";
 // 合法 request id 最坏可由 256 个 JSON `\uXXXX` 控制字符组成。
@@ -170,6 +172,7 @@ function cronJobDto(value, systemManaged = false) {
     ...(value.groupDelivery ? { deliveryTarget: "group" } : {}),
     ...(value.watch !== undefined || value.groupDelivery?.watch
       ? { watch: value.watch ?? value.groupDelivery.watch } : {}),
+    ...(value.modelSelection === undefined ? {} : { modelSelection: value.modelSelection }),
     workspace,
     schedule,
     misfirePolicy,
@@ -228,6 +231,7 @@ class NativeDomainServiceController {
     this.getRunSessionKey = options.getRunSessionKey || (() => null);
     this.getCronOutput = options.getCronOutput || (() => null);
     this.getCronFailure = options.getCronFailure || (() => null);
+    this.validateCronModel = options.validateCronModel;
     this.now = options.now || Date.now;
     this.randomUUID = options.randomUUID || crypto.randomUUID;
     this.poisoned = { kanban: null, cron: null };
@@ -549,6 +553,10 @@ class NativeDomainServiceController {
       return this.#content(method, params, value.prompt);
     }
     if (method === "cron.job.create") {
+      if (params.modelSelection && !this.cronStore.getOperation?.(params.operationId)) {
+        if (!this.validateCronModel) throw internalError("CRON_MODEL_UNAVAILABLE");
+        await this.validateCronModel(params.profileId, params.modelSelection);
+      }
       const nextRunAt = this.#nextRunAt(params.schedule, params.enabled, params.createdAt);
       const value = await this.#mutateCronAndTick(
         () => this.cronStore.createJob({ ...params, nextRunAt, ...(groupDelivery ? { groupDelivery } : {}) }),
@@ -557,8 +565,25 @@ class NativeDomainServiceController {
       return { job: cronJobDto(value) };
     }
     if (method === "cron.job.update") {
+      const requestedModel = params.patch.modelSelection;
+      if (requestedModel !== undefined && !this.cronStore.getOperation?.(params.operationId)) {
+        const job = requireEntity(this.cronStore.getJob(params.jobId), "CRON_JOB_NOT_FOUND");
+        if (requestedModel && !sameCronModel(requestedModel, job.modelSelection)) {
+          if (!this.validateCronModel) throw internalError("CRON_MODEL_UNAVAILABLE");
+          await this.validateCronModel(job.profileId, requestedModel);
+        }
+      }
       const value = await this.#mutateCronAndTick(
-        () => this.cronStore.updateJobDerived(params),
+        () => {
+          // Cron recovery binds in-flight runs to the saved execution definition.
+          if (requestedModel !== undefined && !this.cronStore.getOperation?.(params.operationId)
+            && !sameCronModel(requestedModel, this.cronStore.getJob(params.jobId)?.modelSelection)
+            && this.workDispatcher.listRuns({ source: "cron", sourceId: params.jobId })
+              .some(run => !TERMINAL_WORK_RUN_STATUSES.has(run.status))) {
+            throw internalError("CRON_MODEL_UPDATE_BUSY");
+          }
+          return this.cronStore.updateJobDerived(params);
+        },
         true,
       );
       return { job: cronJobDto(value) };

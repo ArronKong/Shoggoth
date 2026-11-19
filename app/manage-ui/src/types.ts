@@ -66,7 +66,7 @@ export type OpenClawCronPayload =
   | {
       kind: "agentTurn";
       message: string;
-      model?: string;
+      model?: string | null;
       fallbacks?: string[];
       thinking?: string;
       timeoutSeconds?: number;
@@ -144,6 +144,7 @@ export interface UnifiedCronJob {
   lastError?: string;
   nextRunAt?: number | null;
   model?: string;
+  modelSelection?: NativeCronModelSelection | null;
   provider?: string;
   baseUrl?: string;
   deliver?: string;
@@ -290,8 +291,24 @@ export interface HermesCronJobInput extends CronJobInputBase {
   profile?: string;
 }
 
+export interface NativeCronModelSelection {
+  bindingId: string;
+  model: string;
+  modelProviderRef?: string;
+}
+
+export type CronModelChoice = NativeCronModelSelection | { model: string; provider?: string };
+
+export interface CronModels {
+  models: Array<SessionRuntimeModel | Omit<Pick<UnifiedModel,
+    "id" | "name" | "provider" | "providerName" | "reasoning" | "pricing" | "available">, "provider"> & { provider: string | null }>;
+  runtimes?: SessionRuntimeModels["runtimes"];
+  defaultSelection?: CronModelChoice;
+}
+
 export interface NativeCronJobInput extends CronJobInputBase {
   backendId: string;
+  modelSelection?: NativeCronModelSelection | null;
   workspace?: string | null;
   misfirePolicy?: "skip" | "latest" | "all-bounded";
   maxCatchUp?: number;
@@ -373,6 +390,8 @@ export interface ChatCapabilities {
   prewarm?: boolean;
   runtimeFeatures?: RuntimeFeatures;
   nativeUiArtifactsV1?: boolean;
+  /** Cards and reports for background tasks dispatched from this chat. */
+  backgroundTasks?: boolean;
   attachments: {
     image?: { maxBytes?: number };
     pdf?: { maxBytes?: number; maxPages?: number };
@@ -970,6 +989,20 @@ export interface EnvVar {
   providerLabel?: string;
 }
 
+type OAuthQuotaCredits =
+  | { kind: "present" | "unlimited" }
+  | { kind: "balance"; amount: number; unit: "credits" | "USD" | "CNY" }
+  | { kind: "wallets"; wallets: Array<{ kind: "recharge" | "bonus"; amount: number; unit: "USD" | "CNY" }> };
+
+export type OAuthAccountQuota =
+  | { status: "unavailable" | "unsupported" }
+  | { status: "available"; checkedAt: number; accountName?: string; windows: Array<{
+      label: string | null;
+      durationMinutes: number | null;
+      usedPercent: number;
+      resetsAt: number | null;
+    }>; credits?: OAuthQuotaCredits; resetCredits?: number };
+
 // 可交互登录的 provider（OAuth 或外部 CLI）。原生 Runtime 登录态按
 // RuntimeAccount 共享；connectedProfiles 列出引用该账号的逻辑 Agent。
 export interface OAuthProvider {
@@ -986,6 +1019,7 @@ export interface OAuthProvider {
   disconnectHint: string | null;
   disconnectCommand: string | null;
   disconnectable: boolean;
+  canReadQuota?: boolean;
   /**
    * The app-level switch of a native CLI (an id in `disabledBackends`).
    * Disconnecting hides its agents and entries without signing out; its login
@@ -2093,6 +2127,58 @@ export type SessionBoardOp =
   | { kind: "widget_resize"; name: string; sizeW: number; sizeH: number; heightMode?: SessionBoardWidget["heightMode"] }
   | { kind: "widget_remove"; name: string };
 
+/** A task a native Agent handed to its own background session (native chats). */
+export type BackgroundTaskStatus = "starting" | "queued" | "running" | "waiting_approval" | "waiting_input"
+  | "stopping" | "completed" | "failed" | "canceled" | "interrupted" | "needs_verification";
+export type BackgroundTaskReportState = "none" | "pending" | "delivered" | "held" | "withheld";
+export interface BackgroundTask {
+  taskId: string;
+  title: string;
+  status: BackgroundTaskStatus;
+  runtime: string;
+  generation: number;
+  /** The source conversation's WorkRun that dispatched the task. */
+  sourceRunId: string;
+  report: BackgroundTaskReportState;
+  errorCode: string | null;
+  createdAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+  startedAt: number | null;
+}
+export interface BackgroundTaskList { supported: boolean; tasks: BackgroundTask[] }
+export interface BackgroundTaskMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  at: number;
+  runId: string | null;
+  /** A public progress note rather than a reply. */
+  activity: boolean;
+}
+export interface BackgroundTaskFile { fileId: string; name: string; generation: number; url: string | null }
+export interface BackgroundTaskDetail {
+  task: BackgroundTask;
+  messages: BackgroundTaskMessage[];
+  files: BackgroundTaskFile[];
+  interaction: { runId: string; type: "approval" | "prompt"; payload: InteractiveRequestV1 } | null;
+  queueReason: string | null;
+}
+/** Metadata on the report message the task posted into its source chat. */
+export interface BackgroundTaskReportMeta {
+  taskId: string;
+  generation: number;
+  status: string;
+  title: string;
+  errorCode: string | null;
+  files: { fileId: string; name: string; url: string | null }[];
+}
+export type BackgroundTaskControl =
+  | { action: "send"; message: string }
+  | { action: "cancel" }
+  | { action: "approval"; requestId: string; choice: string }
+  | { action: "input"; requestId: string; inputAction: "submit" | "cancel"; answers: Record<string, string> };
+
 export interface SessionBoardResult {
   supported: boolean;
   reason?: string;
@@ -2765,6 +2851,7 @@ export interface BackendDescriptor {
     skills: boolean;
     usage: boolean;
     oauth: boolean;
+    oauthAccountQuota?: boolean;
     dashboardRuns: boolean;
     agentHarness: boolean;
     agentFiles?: boolean;

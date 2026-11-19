@@ -10,6 +10,58 @@ const { resolveServicePaths } = require("../app/agent-service/paths");
 const { validateChatServiceParams } = require("../app/agent-service/chat-service-protocol");
 const { startInspirationFixture } = require("./fixtures/inspiration-service-fixture.cjs");
 const { DEFAULT_AGENT_PROFILE_ID } = require("../app/agent-service/product-store");
+const { agentWorkspaceRoot, managedChatWorkspace } = require("../app/agent-service/chat-workspace");
+
+test("old default sessions move when idle, keep their history and replay correctly after restart", async () => {
+  const f = await startInspirationFixture({ agentCount: 2 });
+  try {
+    const { service, paths } = f;
+    const store = service.chatSessionStore, coordinator = service.workRunCoordinator;
+    const profile = service.productStore.getAgentProfile(DEFAULT_AGENT_PROFILE_ID);
+    const home = agentWorkspaceRoot(paths, profile.id);
+    const create = { operationId: "old-default-session", profileId: profile.id, createdAt: Date.now() };
+    const oldDir = managedChatWorkspace(home, create.operationId);
+    fs.mkdirSync(oldDir, { recursive: true });
+    const oldFile = path.join(oldDir, "old work.txt");
+    fs.writeFileSync(oldFile, "keep my work");
+    const session = store.createSession({ ...create, workspace: oldDir, defaultBindingId: profile.defaultBindingId });
+    store.requestBinding(session.sessionKey, "old-binding", create.createdAt);
+    store.completeBinding(session.sessionKey, "old-binding", "old-native-thread");
+    const eventId = require("node:crypto").randomUUID();
+    service.transcriptStore.appendEvent({ id: eventId, profileId: profile.id, sessionId: session.id, runId: null,
+      kind: "assistant", occurredAt: create.createdAt, contextExcluded: false, content: { text: "prior answer" } });
+    const run = service.workDispatcher.enqueue({ id: "old-queued-run", source: "chat", sourceId: session.sessionKey,
+      idempotencyKey: "old-workspace-test", profileId: profile.id, workspace: oldDir, retryOf: null });
+    assert.equal(coordinator.adoptIdleChatWorkspace(store.getSession(session.sessionKey)).workspace, oldDir);
+    service.workDispatcher.transition(run.id, "canceled");
+    const moved = coordinator.adoptIdleChatWorkspace(store.getSession(session.sessionKey));
+    assert.equal(moved.workspace, home);
+    assert.equal(moved.id, session.id);
+    assert.equal(moved.runtimeSessionId, null);
+    assert.equal(moved.retiredRuntimeSessions.at(-1).runtimeSessionId, "old-native-thread");
+    assert.equal(fs.readFileSync(oldFile, "utf8"), "keep my work");
+    const project = store.createSession({ ...create, operationId: "explicit-project", workspace: oldDir,
+      defaultBindingId: profile.defaultBindingId });
+    assert.equal(coordinator.adoptIdleChatWorkspace(project).workspace, oldDir);
+    const systemMain = store.createSession({ ...create, operationId: `default-session-${require("node:crypto").randomUUID()}`,
+      workspace: f.root, defaultBindingId: profile.defaultBindingId });
+    assert.equal(coordinator.adoptIdleChatWorkspace(systemMain).workspace, f.root);
+    const target = service.proactiveStore.getTarget(profile.id);
+    service.proactiveStore.setTarget(profile.id, { ...target, sessionKey: systemMain.sessionKey });
+    assert.equal(coordinator.adoptIdleChatWorkspace(systemMain).workspace, home,
+      "an authoritative Main created with a previously configured project also defaults to the Agent home");
+    await service.stop({ notify: false });
+    await service.start();
+    const { requestService, readClientToken } = require("../app/agent-service/client");
+    const replay = await requestService(paths, { token: readClientToken(paths), version: require("../app/agent-service/server").PROTOCOL_VERSION,
+      method: "chat.session.create", params: { ...create, workspace: null } });
+    assert.equal(replay.session?.sessionKey ?? replay.sessionKey, session.sessionKey);
+    assert.equal(service.chatSessionStore.getSession(session.sessionKey).workspace, home);
+    assert.equal(service.chatSessionStore.getCreateOperation(create.operationId).workspace, oldDir);
+    assert.equal(service.chatSessionStore.getSession(systemMain.sessionKey).workspace, home);
+    assert.equal(service.transcriptStore.getEvent(profile.id, session.id, eventId).content.text, "prior answer");
+  } finally { await f.close(); }
+});
 
 test("create protocol accepts a parent identity but rejects raw settings and invalid identities", () => {
   const params = { operationId: "create-child", profileId: "profile-1", workspace: null, createdAt: 100,

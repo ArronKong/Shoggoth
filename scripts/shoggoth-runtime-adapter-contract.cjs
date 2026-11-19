@@ -21,6 +21,30 @@ const {
 const tests = [];
 function test(name, fn) { tests.push({ name, fn }); }
 
+test("Codex retains configured roots and supplies the Agent home on every project turn, including warm resume", async () => {
+  const calls = [];
+  const nativePolicy = { type: "workspaceWrite", writableRoots: ["/existing"], networkAccess: false,
+    excludeTmpdirEnvVar: true, excludeSlashTmp: true };
+  const host = {
+    configRead: async () => ({ config: { sandbox_workspace_write: { writable_roots: ["/existing"] } } }),
+    threadStart: async params => { calls.push(params); return { thread: { id: "thread" }, sandbox: nativePolicy }; },
+    threadResume: async params => { calls.push(params); return { thread: { id: "thread" }, sandbox: nativePolicy }; },
+    turnStart: async params => { calls.push(params); return { turn: { id: "turn" } }; },
+  };
+  const handle = await new CodexRuntimeAdapter({ runtimePool: { get: async () => host } })
+    .acquire({ runtime: "codex", runtimeProfileId: "profile", runtimeAccountId: "account" });
+  const input = { cwd: "/project", agentWorkspace: "/persistent", permissionPolicy: { sandbox: "workspace-write", approvalPolicy: "on-request" } };
+  const roots = ["/existing", "/persistent"];
+  await handle.sessionStart(input);
+  assert.deepEqual(calls.at(-1).config["sandbox_workspace_write.writable_roots"], roots);
+  await handle.sessionResume({ ...input, sessionId: "thread" });
+  assert.deepEqual(calls.at(-1).config["sandbox_workspace_write.writable_roots"], roots);
+  await handle.turnStart({ ...input, sessionId: "thread", operationId: "file-turn", prompt: "read attachment" });
+  assert.deepEqual(calls.at(-1).sandboxPolicy, { ...nativePolicy, writableRoots: roots });
+  await handle.turnStart({ sessionId: "review", operationId: "review-only", prompt: "check state", readOnlyReview: true });
+  assert.deepEqual(calls.at(-1).sandboxPolicy, { type: "readOnly", networkAccess: false });
+});
+
 test("Codex 动态上下文单独进入 model history，用户消息保持原文，失败不派发", async () => {
   const calls = [];
   let fail = false;

@@ -772,7 +772,7 @@ class MemoryCandidateService {
 
   _sourceNow(profileId, candidate, resolvedSession = null) {
     const session = resolvedSession || this._session(profileId, candidate.source.sessionId);
-    if (session.workspace !== candidate.source.workspace) {
+    if (!require("./chat-workspace").matchesHistoricalWorkspace(this.sessions, session, candidate.source.workspace)) {
       throw fail("MEMORY_CANDIDATE_SOURCE_UNAVAILABLE", "候选来源工作区已变化");
     }
     const page = this.recall.scanEligibleSession({ profileId, sessionId: session.id,

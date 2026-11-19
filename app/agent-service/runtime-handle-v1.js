@@ -9,6 +9,7 @@ const METHODS = Object.freeze({
   sessionRename: "session.rename", sessionArchive: "session.archive", sessionUnarchive: "session.unarchive", sessionDelete: "session.delete",
   turnStart: "turn.start", turnSteer: "turn.steer", turnInterrupt: "turn.interrupt", modelsList: "models.list",
   commandsList: "commands.list", commandExecute: "commands.execute", accountRead: "account.read",
+  accountQuotaRead: "account.quota.read",
   accountLogin: "account.login", accountLogout: "account.logout", generateModelOnly: "model.generate.toolFree",
   resolveModelOnly: "model.resolve.toolFree", releaseModelOnlySession: "model.session.release",
 });
@@ -16,8 +17,8 @@ const EVENT_TYPES = new Set(["text", "text_delta", "reasoning", "reasoning_delta
   "complete", "usage", "context_usage", "context_compacted", "error", "warning", "account_backoff", "account_unavailable", "rate_limits"]);
 const IDENTITY_FENCED_METHODS = new Set(["sessionStart", "sessionResume", "turnStart", "turnSteer",
   "sessionRename", "sessionArchive", "sessionUnarchive", "sessionDelete", "commandExecute", "commandsList",
-  "modelsList", "accountRead", "accountLogin", "accountLogout", "generateModelOnly", "resolveModelOnly"]);
-const PREPARATION_READS = new Set(["modelsList", "accountRead"]);
+  "modelsList", "accountRead", "accountQuotaRead", "accountLogin", "accountLogout", "generateModelOnly", "resolveModelOnly"]);
+const PREPARATION_READS = new Set(["modelsList", "accountRead", "accountQuotaRead"]);
 const ACCOUNT_STATE_WRITES = new Set(["accountLogin", "accountLogout", "commandExecute"]);
 const fail = (code = "RUNTIME_HANDLE_INVALID") => serviceError(code, "Runtime V1 contract rejected the operation");
 function data(value, maxBytes = 8 * 1024 * 1024) {

@@ -67,6 +67,7 @@ const { isOpenClawSystemCronJob, cronJobIdFromTask } = require("./openclaw-cron-
 const { normalizeArtifactRoots, walkArtifactRoots, resolveArtifactPreviewPath } = require("./artifact-scan");
 const { collectSessionOutputArtifacts, sessionArtifactHistory } = require("./session-output-artifacts");
 const { scanUsageCube, cubeToSeries, cubeToBreakdown } = require("./usage-file-scan");
+const { MAX_WINDOWS, quotaSnapshot } = require("./oauth-account-quota");
 const {
   buildConnectParams,
   classifyAuthError,
@@ -817,6 +818,7 @@ class OpenClawBackend extends AgentBackend {
         skills: true,
         usage: true,
         oauth: true,
+        oauthAccountQuota: true,
         dashboardRuns: false,
         agentHarness: false,
         cron: { kind: "openclaw" },
@@ -2816,7 +2818,7 @@ class OpenClawBackend extends AgentBackend {
   }
 
   /** 全局 OAuth 卡片覆盖网关的全部 Agent；远程/受管连接不能借本机 roster 选 owner。 */
-  async _oauthAuthSnapshot() {
+  async _oauthAuthSnapshot({ includeQuota = false } = {}) {
     const { parsed } = await this._configSnapshot();
     const binding = this._endpointGuard.capture();
     const generation = this._connectionGeneration;
@@ -2830,7 +2832,13 @@ class OpenClawBackend extends AgentBackend {
     // main 的 saved 行也可能来自共享库，先处理它，随后跳过其它 Agent 的 inherited 行。
     agentIds.sort((a, b) => a === "main" ? -1 : b === "main" ? 1 : 0);
     const views = await Promise.all(agentIds.map(async agentId => {
-      const status = await this.request("models.authStatus", { agentId, refresh: true }, GATEWAY_CREDENTIAL_RPC_TIMEOUT_MS);
+      const params = { agentId, refresh: true };
+      let status = includeQuota
+        ? await this.request("models.authStatus", { ...params, refreshUsage: true }, 8_000).catch(() => null) : null;
+      if (!status || status.unavailable) {
+        assertCurrent();
+        status = await this.request("models.authStatus", params, GATEWAY_CREDENTIAL_RPC_TIMEOUT_MS);
+      }
       if (status?.unavailable || !Array.isArray(status?.providers) || status.providers.some(provider =>
         typeof provider?.provider !== "string" || !provider.provider.trim() || !Array.isArray(provider.profiles)
         || provider.profiles.some(profile => typeof profile?.profileId !== "string" || !profile.profileId.trim()
@@ -2838,13 +2846,36 @@ class OpenClawBackend extends AgentBackend {
             && !["saved", "inherited", "config", "external"].includes(profile.source))))) {
         throw Object.assign(new Error("OpenClaw 授权状态暂不可用，请稍后刷新"), { code: "auth_status_unavailable", status: 503 });
       }
-      const rows = status.providers.flatMap(provider => provider.profiles.map(profile => ({
-        ...profile, provider: provider.provider, expiry: profile.expiry ?? provider.expiry,
-      })));
+      const rows = status.providers.flatMap(provider => {
+        const usage = includeQuota ? provider.usage : null;
+        const owner = usage && provider.profiles.find(profile => profile.type === "oauth"
+          && profile.profileId === usage.authProfileId);
+        const balance = owner && !usage.error && Array.isArray(usage.billing) && usage.billing.find(entry =>
+          entry?.type === "balance" && Number.isFinite(entry.amount) && entry.amount > 0
+          && ["credits", "USD", "CNY"].includes(entry.unit));
+        const windows = owner && !usage.error && Array.isArray(usage.windows) ? usage.windows : [];
+        const quota = owner && (windows.length || balance || usage.error)
+          ? quotaSnapshot(windows.slice(0, MAX_WINDOWS).map(window => ({
+            label: [window?.groupLabel, window?.label].filter(part => typeof part === "string").join(" · "),
+            usedPercent: window?.usedPercent,
+            resetsAt: window?.resetAt,
+          })), { accountName: owner.email,
+            credits: balance ? { kind: "balance", amount: balance.amount, unit: balance.unit } : undefined })
+          : undefined;
+        return provider.profiles.map(profile => ({
+          ...profile, provider: provider.provider, expiry: profile.expiry ?? provider.expiry,
+          quota: profile === owner ? quota : undefined,
+        }));
+      });
       return { agentId, rows };
     }));
     assertCurrent();
     return { views, authProfiles: parsed.auth?.profiles || {}, assertCurrent };
+  }
+
+  _oauthProfileForProvider(rows, id) {
+    const profiles = this._gatewayRowsForProvider(rows, id).filter(profile => profile.type === "oauth");
+    return profiles.find(profile => profile.status === "ok" || profile.status === "expiring") || profiles[0] || null;
   }
 
   /** OAuth 登录卡：目录 + 全部 Agent 的实时状态；不可用不能当作已登出。 */
@@ -2857,8 +2888,7 @@ class OpenClawBackend extends AgentBackend {
     const cliRunnable = this._isLocalGateway();
     const providers = oauthIds.sort().map((id) => {
       const cat = catalog[id];
-      const oauthProfiles = this._gatewayRowsForProvider(statusRows, id).filter(pr => pr.type === "oauth");
-      const best = oauthProfiles.find((pr) => pr.status === "ok" || pr.status === "expiring") || oauthProfiles[0] || null;
+      const best = this._oauthProfileForProvider(statusRows, id);
       // 摘要只取当前选中 profile 的身份，不借用同 provider 另一账号的 email。
       const email = best?.email || authProfiles[best?.profileId]?.email
         || (best?.profileId ? String(best.profileId).split(":").pop() : null);
@@ -2873,6 +2903,7 @@ class OpenClawBackend extends AgentBackend {
         disconnectHint: null,
         disconnectCommand: null,
         disconnectable: true,
+        ...(loggedIn ? { canReadQuota: true } : {}),
         status: {
           loggedIn,
           source: best?.type || null,
@@ -2890,6 +2921,15 @@ class OpenClawBackend extends AgentBackend {
       };
     });
     return { providers, profiles: [] };
+  }
+
+  async getOAuthProviderQuota(providerId) {
+    const catalog = this._providerCatalogSnapshot().providers;
+    if (!Object.hasOwn(catalog, providerId) || !catalog[providerId].oauth.length) return { status: "unsupported" };
+    const { views } = await this._oauthAuthSnapshot({ includeQuota: true });
+    const profile = this._oauthProfileForProvider(views.flatMap(view => view.rows), providerId);
+    if (!profile || !["ok", "expiring"].includes(profile.status)) return { status: "unsupported" };
+    return profile.quota ?? { status: "unsupported" };
   }
 
   /** 仅删除已保存的 OAuth：显式 owner + profileIds，保留 API Key、token 和外部 CLI 凭据。 */
@@ -4811,7 +4851,8 @@ class OpenClawBackend extends AgentBackend {
     } else {
       const turn = {};
       if (typeof patch?.prompt === "string") turn.message = patch.prompt;
-      if (typeof patch?.model === "string") turn.model = patch.model || undefined;
+      if (patch?.model === null) turn.model = null;
+      else if (typeof patch?.model === "string") turn.model = patch.model || undefined;
       if (Object.keys(turn).length) p.payload = { kind: "agentTurn", ...turn };
     }
     if (patch?.delivery && patch.delivery.mode) {
@@ -5841,6 +5882,21 @@ class OpenClawBackend extends AgentBackend {
   }
 
   getInspirationModels(agentId) { return this.getAgentModels(agentId); }
+  async getCronModels(agentId) {
+    const catalog = await this.getAgentModels(agentId);
+    let model = catalog.defaultModel;
+    if (!model) {
+      const generation = this._connectionGeneration;
+      const { parsed } = await this._configSnapshot().catch(() => ({}));
+      if (generation !== this._connectionGeneration) {
+        throw Object.assign(new Error("Agent model catalog unavailable"), { code: "AGENT_MODEL_CATALOG_UNAVAILABLE" });
+      }
+      const inherited = parsed?.agents?.defaults?.model;
+      const reference = typeof inherited === "string" ? inherited : inherited?.primary;
+      if (typeof reference === "string" && reference.trim()) model = reference.trim();
+    }
+    return model ? { ...catalog, defaultModel: model, defaultSelection: { model } } : catalog;
+  }
 
   // Chat, Agent settings and Inspiration use the same Agent-scoped catalog.
   // Keep availability and capability metadata; presentation decides how to

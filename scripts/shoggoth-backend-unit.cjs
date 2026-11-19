@@ -860,6 +860,39 @@ test("managed CLI auth catalog binds fixed commands and credential state to each
   }
 });
 
+test("quota startup inventory only reads auth for quota-capable runtimes", async () => {
+  const account = profile({
+    id: "quota-codex-profile", agentId: "quota-codex", runtimeProfileId: "quota-codex",
+    runtimeAccountId: "native-codex-default-v1", providerRef: null,
+  });
+  const value = fakeBackend(request => {
+    if (request.method === "profile.list") return page("profiles", [account]);
+    if (request.method === "chat.session.list") return page("sessions", []);
+    assert.equal(request.method, "profile.auth.read");
+    assert.equal(request.params.profileId, account.id);
+    return { status: "authenticated" };
+  }, {
+    runtimeCliAuth: ["codex", "pi"].map(runtime => ({
+      runtime, runtimeAccountId: `native-${runtime}-default-v1`, name: runtime,
+      binaryPath: process.execPath, accountHome: os.tmpdir(), processHome: os.tmpdir(),
+      homeEnv: null, accountKind: "native-user", credentialProbe: "runtime", credentialFile: null,
+      loginArgs: [], logoutArgs: [], docsUrl: "https://example.test/",
+    })),
+  });
+  try {
+    assert.equal(await value.backend.start(), true);
+    const snapshot = await value.backend.listOAuthProviders({ quotaOnly: true });
+    assert.equal(snapshot.providers.length, 1);
+    assert.equal(snapshot.providers[0].id, account.runtimeAccountId);
+    assert.equal(snapshot.providers[0].status.loggedIn, true);
+    assert.equal(snapshot.providers[0].canReadQuota, true);
+    assert.deepEqual(value.calls.filter(({ request }) => /^profile\..*(auth|models|capabilities)/u.test(request.method))
+      .map(({ request }) => request.method), ["profile.auth.read"]);
+  } finally {
+    await value.backend.stop();
+  }
+});
+
 test("one RuntimeAccount produces one auth entry for every Agent that shares it", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-account-auth-catalog-"));
   const accountHome = path.join(root, "native-grok");
@@ -1434,8 +1467,8 @@ test("missing managed CLI remains discoverable with docs and no runnable command
 test("management agent list and detail expose enabled Shoggoth profiles", async (t) => {
   const userDataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-agent-workspace-detail-"));
   t.after(() => fs.rmSync(userDataRoot, { recursive: true, force: true }));
-  const agentsDir = path.join(userDataRoot, "shoggoth-core", "agents");
-  const agentDir = path.join(agentsDir, "profile-default");
+  const defaultWorkspaceDir = path.join(userDataRoot, "shoggoth-core", "workspaces");
+  const agentDir = path.join(defaultWorkspaceDir, "profile-default");
   const nameLinks = path.join(userDataRoot, "agents-by-name");
   const { backend } = await readyBackend((request) => {
     assert.equal(request.method, "harness.definition.meta");
@@ -1456,7 +1489,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
         { kind: "USER", name: "USER.md", readOnly: true },
       ],
     };
-  }, { paths: { tokenPath: "/private/client.token", userDataRoot, agentsDir } });
+  }, { paths: { tokenPath: "/private/client.token", userDataRoot, defaultWorkspaceDir } });
   assert.deepEqual(await backend.listAgents(), [{
     id: "shoggoth-default",
     name: "Shoggoth",
@@ -1502,7 +1535,7 @@ test("management agent list and detail expose enabled Shoggoth profiles", async 
   const link = path.join(nameLinks, "Shoggoth");
   fs.symlinkSync(path.relative(nameLinks, agentDir), link, "dir");
   assert.deepEqual((await backend.getAgent("shoggoth-default")).managedWorkspace, {
-    path: link, exists: true,
+    path: agentDir, exists: true,
   });
   await assert.rejects(
     () => backend.getAgent("shoggoth-missing"),
@@ -3952,7 +3985,7 @@ test("session create/rename/delete translate gateway keys and maintain snapshot"
   assert.equal(backend._promptByRequest.size, 0);
 });
 
-test("session create supports inherited, Agent-default and explicit workspaces", async () => {
+test("session create inherits the selection and uses the Agent home unless a project is specified", async () => {
   const calls = [];
   const parent = session(SESSION_A, { workspace: "/tmp/current-project" });
   const { backend } = fakeBackend((request) => {
@@ -3978,7 +4011,7 @@ test("session create supports inherited, Agent-default and explicit workspaces",
   assert.equal(inheritedKey, `agent:shoggoth-default:${SESSION_B}`);
   assert.equal(
     calls.find((call) => call.method === "chat.session.create").params.workspace,
-    "/tmp/current-project",
+    null,
   );
 
   await backend.createSession("shoggoth-default", {
@@ -4000,12 +4033,11 @@ test("session create supports inherited, Agent-default and explicit workspaces",
   );
 });
 
-test("UI new-session inheritance isolates generated directories and preserves explicit overrides", async () => {
+test("new sessions default to the Agent home for legacy and current parents and preserve explicit overrides", async () => {
   const root = "/private/generated-workspaces";
-  // Only a generated session directory is implicit; the retired profile directory is an ordinary folder.
-  for (const [workspace, inherited] of [
-    [root + "/profile-default/sessions/" + "a".repeat(64), null],
-    [root + "/profile-default", root + "/profile-default"],
+  for (const workspace of [
+    root + "/profile-default/sessions/" + "a".repeat(64),
+    root + "/profile-default",
   ]) {
     const requests = [];
     const { backend } = fakeBackend(request => {
@@ -4017,7 +4049,7 @@ test("UI new-session inheritance isolates generated directories and preserves ex
     }, { paths: { tokenPath: "/private/client.token", defaultWorkspaceDir: root } });
     await backend.start();
     await backend.createSession("shoggoth-default", { parentSessionKey: `agent:shoggoth-default:${SESSION_A}` });
-    assert.equal(requests.filter(r => r.method === "chat.session.create").at(-1).params.workspace, inherited);
+    assert.equal(requests.filter(r => r.method === "chat.session.create").at(-1).params.workspace, null);
     await backend.createSession("shoggoth-default", { parentSessionKey: `agent:shoggoth-default:${SESSION_A}`, workspace });
     assert.equal(requests.filter(r => r.method === "chat.session.create").at(-1).params.workspace, workspace);
     await backend.stop();

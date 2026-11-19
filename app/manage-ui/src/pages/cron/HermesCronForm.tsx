@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { CronSchedule, HermesCronJobInput, UnifiedCronJob } from "../../types";
-import { Field, TextArea, TextInput } from "../../components/Field";
+import { Field, TextInput } from "../../components/Field";
 import i18n from "../../i18n";
-import { CronExpressionPicker, DateTimePicker, IntervalPicker } from "./CronSchedulePicker";
-import { CronScheduleType, CronTaskNameRow } from "./CronFormLayout";
+import { CronScheduleField, CronTaskNameRow, CronTaskPromptField } from "./CronFormLayout";
+import { CronTaskModelField } from "./CronModelPicker";
 
 type SchedKind = "cron" | "every" | "at";
 type HermesMode = "agent" | "script";
@@ -162,30 +162,31 @@ export function validateHermesDraft(draft: HermesCronDraft): string | null {
 }
 
 // Hermes 表单突出自动化任务形态，尤其是 script/no-agent 配置。
-export default function HermesCronForm({ draft, setDraft, assistant }: {
+export default function HermesCronForm({ draft, setDraft, assistant, disabled }: {
   draft: HermesCronDraft;
   setDraft: (draft: HermesCronDraft) => void;
   assistant: ReactNode;
+  disabled?: boolean;
 }) {
   const { t } = useTranslation();
   const set = <K extends keyof HermesCronDraft>(key: K, value: HermesCronDraft[K]) => setDraft({ ...draft, [key]: value });
   // Existing hidden options stay in the draft and continue through the original serializers.
   return <div className="cron-form">
-    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} assistant={assistant} />
+    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} />
     {draft.mode === "script" && <Field label={t("common.script")} hint={t("cronForm.hermesScriptHint")}>
       <TextInput value={draft.script} onChange={(event) => set("script", event.target.value)} placeholder="watchdog.sh" />
     </Field>}
-    <Field label={draft.mode === "script" ? t("cronForm.hermesPromptOptionalLabel") : t("cronForm.taskPromptLabel")}>
-      <TextArea value={draft.prompt} onChange={(event) => set("prompt", event.target.value)} rows={4} placeholder={t("cronForm.taskPromptPlaceholder")} />
-    </Field>
-    <div className="field">
-      <span className="field-label">{t("cronForm.scheduleLabel")}</span>
-      <CronScheduleType value={draft.schedKind} onChange={(value) => set("schedKind", value)} />
-      <div className="cron-schedule-row">
-        {draft.schedKind === "cron" && <CronExpressionPicker value={draft.cronExpr} onChange={(value) => set("cronExpr", value)} />}
-        {draft.schedKind === "every" && <IntervalPicker value={draft.everyMin} onChange={(value) => set("everyMin", value)} />}
-        {draft.schedKind === "at" && <DateTimePicker value={draft.atLocal} onChange={(value) => set("atLocal", value)} />}
-      </div>
+    <CronTaskPromptField value={draft.prompt} onChange={(prompt) => set("prompt", prompt)}
+      label={draft.mode === "script" ? t("cronForm.hermesPromptOptionalLabel") : undefined} />
+    <div className="field-row">
+      {assistant}
+      {draft.mode === "agent" && <CronTaskModelField backendId={draft.backendId} agentId={draft.agentId} kind="hermes"
+        value={draft.model ? { model: draft.model, provider: draft.provider } : null} onChange={(value) => {
+          const model = value?.model ?? "";
+          const provider = value && "provider" in value ? value.provider ?? "" : "";
+          if (model !== draft.model || provider !== draft.provider || !value) setDraft({ ...draft, model, provider, baseUrl: "" });
+        }} disabled={disabled} />}
     </div>
+    <CronScheduleField draft={draft} onChange={(patch) => setDraft({ ...draft, ...patch })} />
   </div>;
 }

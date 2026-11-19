@@ -13,8 +13,10 @@ const { SERVICE_PROTOCOL_VERSION } = require("../app/agent-service/service-proto
 const { waitUntil } = require("./shoggoth-work-run-coordinator-unit.cjs");
 
 async function run() {
+  let clockOffset = 0;
   const f = await openHandoffFixture({ builtinCliProfiles: true,
-    catalogs: { codex: ["fixture-model", "codex-only"], pi: ["fixture-model", "pi-only"] } });
+    catalogs: { codex: ["fixture-model", "codex-only"], pi: ["fixture-model", "pi-only"] },
+    serviceOptions: { now: () => Date.now() + clockOffset } });
   let server;
   try {
     const { productStore: store, chatSessionStore: sessions, workRunCoordinator: coordinator } = f.service;
@@ -130,7 +132,116 @@ async function run() {
     const chatgpt = await request({ ...custom, modelProviderRef: "@chatgpt", revision: harnessSelected.body.revision });
     assert.equal(chatgpt.status, 200, JSON.stringify(chatgpt.body));
     assert.equal(store.resolveAgentRuntimeProfile(profileId).providerRef, null);
-    console.log("PASS Agent default model REST: exact source, Runtime/model CAS, chat/Cron/memory inheritance, existing turn and override preserved.");
+
+    const cronModelsResponse = await fetch(`${server.url}/__api/cron/models?${new URLSearchParams({ backendId: "shoggoth", agentId })}`);
+    assert.equal(cronModelsResponse.status, 200);
+    const cronModels = await cronModelsResponse.json();
+    assert.deepEqual(cronModels.defaultSelection, { bindingId: harness.id, model: "fixture-model", modelProviderRef: "@chatgpt" });
+    assert.deepEqual(cronModels.models.filter(row => row.bindingId === harness.id && row.id === "fixture-model")
+      .map(row => row.modelProviderRef).sort(), ["@chatgpt", endpoint.id], "Cron choices pin the source of duplicate model IDs");
+    const piModel = { bindingId: pi.id, model: "pi-only" };
+    assert.ok(cronModels.models.some(row => row.bindingId === pi.id && row.id === piModel.model));
+    const createTask = { backendId: "shoggoth", agentId, name: "Cron model fixture", enabled: false,
+      prompt: "Fixture only", schedule: { kind: "every", everyMs: 60_000 }, workspace: f.workspace };
+    const cronRequest = async (method, body, id = "") => {
+      const response = await fetch(`${server.url}/__api/cron/jobs${id ? `?id=${encodeURIComponent(id)}` : ""}`, {
+        method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      return { status: response.status, body: await response.json() };
+    };
+    const invalid = await cronRequest("POST", { ...createTask, modelSelection: { ...piModel, model: "missing-model" } });
+    assert.equal(invalid.status, 409, JSON.stringify(invalid.body));
+    assert.equal(invalid.body.code, "CRON_MODEL_UNAVAILABLE");
+    assert.ok(!f.service.nativeCronStore.listJobs().some(row => row.name === createTask.name));
+    const saved = await cronRequest("POST", { ...createTask, modelSelection: piModel });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    const task = saved.body.job;
+    assert.deepEqual(task.modelSelection, piModel);
+    assert.equal(task.model, "pi-only");
+    const read = await fetch(`${server.url}/__api/cron/jobs?id=${encodeURIComponent(task.id)}&action=detail`);
+    assert.deepEqual((await read.json()).job.modelSelection, piModel);
+    const waitForTaskTurn = async (runId) => {
+      await waitUntil(() => {
+        const current = coordinator.getRun(runId);
+        return current?.runtimeTurnRef || ["failed", "interrupted"].includes(current?.status);
+      }, 5000, "Cron task model");
+      const current = coordinator.getRun(runId);
+      assert.equal(current.status, "running", current.errorCode);
+      return current;
+    };
+    const triggerTask = async (jobId) => {
+      const { run } = await ipc("cron.run.trigger", { operationId: crypto.randomUUID(), jobId, createdAt: Date.now() });
+      return waitForTaskTurn(run.id);
+    };
+    const jobId = task.id.split(":")[1];
+    const first = await triggerTask(jobId);
+    assert.equal(first.runtimeSessionRef.runtime, "pi");
+    assert.equal(f.transport.hosts.get("pi").lastTurnStartParams.model, "pi-only");
+    const cronSession = coordinator.getRunSessionKey(first);
+    const busy = await cronRequest("PUT", { modelSelection: null }, task.id);
+    assert.equal(busy.body.code, "CRON_MODEL_UPDATE_BUSY");
+    assert.deepEqual(f.service.nativeCronStore.getJob(jobId).modelSelection, piModel);
+    await f.complete(first);
+    await f.service.nativeCronScheduler.waitForIdle(first.id);
+
+    const endpointModel = { bindingId: harness.id, model: "fixture-model", modelProviderRef: endpoint.id };
+    const edited = await cronRequest("PUT", { modelSelection: endpointModel }, task.id);
+    assert.equal(edited.status, 200, JSON.stringify(edited.body));
+    const second = await triggerTask(jobId);
+    assert.equal(second.runtimeSessionRef.runtime, "codex");
+    assert.equal(coordinator.getRunSessionKey(second), cronSession);
+    assert.equal(coordinator.runExecutionContracts.get(second.id).provider.providerRef, endpoint.id);
+    const endpointHost = [...f.transport.handles.values()].find(handle =>
+      handle.host.threads.some(thread => thread.id === second.runtimeSessionRef.sessionId)).host;
+    assert.equal(endpointHost.lastTurnStartParams.model, "fixture-model");
+    await f.complete(second);
+    await f.service.nativeCronScheduler.waitForIdle(second.id);
+
+    const cleared = await cronRequest("PUT", { modelSelection: null }, task.id);
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+    assert.equal(cleared.body.job.modelSelection, null);
+    const inheritedTaskRun = await triggerTask(jobId);
+    assert.equal(coordinator.getRunSessionKey(inheritedTaskRun), cronSession);
+    assert.notEqual(inheritedTaskRun.runtimeSessionRef.sessionId, second.runtimeSessionRef.sessionId);
+    assert.equal(coordinator.runExecutionContracts.get(inheritedTaskRun.id).provider.providerRef, null);
+    assert.equal(store.resolveAgentRuntimeProfile(profileId).providerRef, null);
+    await f.complete(inheritedTaskRun);
+    await f.service.nativeCronScheduler.waitForIdle(inheritedTaskRun.id);
+
+    const assistantChat = f.createSession();
+    const assistantRun = await f.send(assistantChat.sessionKey, "scope-cron-model-tool", "Create a test task with the named model.");
+    assert.equal(assistantRun.status, "running", assistantRun.errorCode);
+    const { runtimeAccountId, runtimeProfileId } = assistantRun.runtimeSessionRef;
+    const call = (tool, args, callId = crypto.randomUUID()) => coordinator.invokeRuntimeCapability({
+      runId: assistantRun.id, runtimeAccountId, runtimeProfileId, kind: "mcp",
+    }, scope => f.service.mcpProductToolController.handle(tool, args, { profileId, callId }, scope));
+    const available = await call("cron_models", {});
+    assert.equal(available.bindingId, harness.id, JSON.stringify(available));
+    assert.ok(available.bindings.some(binding => binding.bindingId === pi.id));
+    const selected = available.models.find(row => row.modelSelection.modelProviderRef === endpoint.id
+      && row.modelSelection.model === "fixture-model");
+    assert.deepEqual(selected.modelSelection, endpointModel);
+    const createFromChat = { name: "Chat Cron model fixture", prompt: "Fixture only",
+      schedule: { kind: "every", everyMs: 60_000, anchorMs: Date.now() }, modelSelection: selected.modelSelection };
+    const callId = crypto.randomUUID();
+    const chatJob = (await call("cron_create", createFromChat, callId)).job;
+    assert.deepEqual((await call("cron_create", createFromChat, callId)).job, chatJob);
+    assert.deepEqual(chatJob.modelSelection, endpointModel);
+    await f.complete(assistantRun);
+    const { nativeCronScheduler: scheduler, nativeCronStore: cronStore, workDispatcher } = f.service;
+    await scheduler.close();
+    cronStore.close();
+    cronStore.open();
+    await scheduler.open();
+    assert.deepEqual(cronStore.getJob(chatJob.id).modelSelection, endpointModel);
+    clockOffset = 60_000;
+    await scheduler.tick();
+    const [scheduled] = workDispatcher.listRuns({ source: "cron", sourceId: chatJob.id });
+    const chatRun = await waitForTaskTurn(scheduled.id);
+    assert.equal(coordinator.runExecutionContracts.get(chatRun.id).provider.providerRef, endpoint.id);
+    assert.equal(sessions.getSession(assistantChat.sessionKey).modelOverride, null);
+    await f.complete(chatRun);
+    console.log("PASS Agent and Cron model REST/MCP: scoped catalogs, exact source, busy edits, default inheritance, manual and scheduled dispatch after reload.");
   } finally { if (server) await server.close(); await f.close(); }
 }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1; });

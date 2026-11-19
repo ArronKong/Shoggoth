@@ -1,11 +1,14 @@
 "use strict";
 
 const { RUNTIME_ACCOUNT_RUNTIMES } = require("./runtime-account");
+const { validQuotaSnapshot } = require("../core/oauth-account-quota");
+const RUNTIME_ACCOUNT_QUOTA_RUNTIMES = new Set(["codex", "grok-build", "deepseek-harness"]);
 
 const RUNTIME_ACCOUNT_SERVICE_METHODS = Object.freeze([
   "runtime.account.list",
   "runtime.account.read",
   "runtime.account.auth.read",
+  "runtime.account.quota.read",
   "runtime.account.login.start",
   "runtime.account.login.cancel",
   "runtime.account.login.read",
@@ -138,7 +141,7 @@ function validateRuntimeAccountServiceParams(method, params) {
   if (!RUNTIME_ACCOUNT_SERVICE_METHOD_SET.has(method)) throw protocolError("INVALID_PARAMS");
   if (method === "runtime.account.list") return validatePageParams(params, false);
   if ([
-    "runtime.account.read", "runtime.account.auth.read", "runtime.account.logout",
+    "runtime.account.read", "runtime.account.auth.read", "runtime.account.quota.read", "runtime.account.logout",
     "runtime.account.storage.read", "runtime.account.login.read", "runtime.account.login.options",
   ].includes(method)) {
     if (!exactObject(params, ["runtimeAccountId"]) || !validId(params.runtimeAccountId)) {
@@ -384,6 +387,10 @@ function validateRuntimeAccountServiceResult(method, result) {
     return { account: validateAccount(result.account) };
   }
   if (method === "runtime.account.auth.read") return validateAuthRead(result);
+  if (method === "runtime.account.quota.read") {
+    if (!validQuotaSnapshot(result)) throw protocolError("RUNTIME_ACCOUNT_RESPONSE_INVALID");
+    return cloneObject(result);
+  }
   if (method === "runtime.account.login.start") return validateLoginStart(result);
   if (method === "runtime.account.login.read") return validateLoginRead(result);
   if (method === "runtime.account.login.options") return validateLoginOptions(result);
@@ -431,6 +438,7 @@ function mapRuntimeAccountServiceError(error) {
 }
 
 module.exports = {
+  RUNTIME_ACCOUNT_QUOTA_RUNTIMES,
   PUBLIC_MESSAGES,
   RUNTIME_ACCOUNT_LOGIN_RUNTIMES,
   RUNTIME_ACCOUNT_SERVICE_METHODS,

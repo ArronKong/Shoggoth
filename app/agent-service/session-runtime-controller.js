@@ -9,6 +9,7 @@ const { isDesktopBinding } = require("./codex-desktop-session-store");
 const { settingsForModelSwitch } = require("./chat-model-settings");
 const codexSessionProvider = require("./codex-session-provider");
 const { captureExecutionProviderRoute, assertExecutionProviderRouteCurrent } = require("./execution-provider-route");
+const { cronSessionHasModel } = require("./native-cron-model");
 
 const CATALOG_MODEL_REUSE_MS = 60_000;
 // Failures that say the queued pick itself cannot run; anything else may succeed on retry.
@@ -235,16 +236,23 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       }
     }
   }
-  async function switchSession(params, { excludingRunId = null, freshSession = false } = {}) {
+  async function switchSession(params, { excludingRunId = null, freshSession = false, cronModel = false } = {}) {
     auditPending();
     const before = sessionFor(params);
+    const resetModel = cronModel && params.model === undefined;
+    const assertCanSwitch = session => {
+      if (!cronModel) return assertIdle(session, excludingRunId);
+      if (!currentCoordinator().canSelectCronModel(session.sessionKey, excludingRunId)) {
+        throw serviceError("SESSION_BUSY", "会话仍有排队或运行中的任务");
+      }
+    };
     if (freshSession && (before.status !== "draft" || before.runtimeSessionId !== null
       || before.runtimeBindingId !== params.bindingId)) throw serviceError("POLICY_REJECTED", "新会话的模型绑定已变化");
     if (isDesktop(before) && params.bindingId !== before.runtimeBindingId) {
       throw serviceError("CODEX_DESKTOP_RUNTIME_PINNED", "Codex Desktop 原对话需要使用原生 Codex CLI");
     }
     if (!getNativeRuntimeConfig().flags.runtimeConversationHandoff
-      && (params.model === undefined || params.bindingId !== before.runtimeBindingId)) {
+      && ((!resetModel && params.model === undefined) || params.bindingId !== before.runtimeBindingId)) {
       throw serviceError("SESSION_RUNTIME_DISABLED", "手动续接尚未启用");
     }
     if (before.revision !== params.revision) throw serviceError("CHAT_SESSION_REVISION_CONFLICT", "会话已更新");
@@ -252,7 +260,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     const target = productStore.getAgentRuntimeBindings(profile.id).bindings.find(binding => binding.id === params.bindingId);
     if (!profile.enabled || !target?.enabled) throw serviceError("POLICY_REJECTED", "Binding 不可用");
     const selectingCurrentModel = params.model !== undefined && target.id === before.runtimeBindingId;
-    if (params.model === undefined) assertIdle(before, excludingRunId);
+    if (params.model === undefined || cronModel) assertCanSwitch(before);
     // The model's source; a different source needs a new native thread.
     const modelProviderRef = params.model === undefined ? undefined
       : providerSelectionFor(profile, target, params.modelProviderRef);
@@ -263,16 +271,19 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
         ? displaySelection(profile, target, before.modelProviderRef ?? null) : null);
     const accountGeneration = facts.generation?.(target);
     await ensureTranscript(before);
-    const preferences = before.nextRuntimeSelection
+    const preferences = resetModel
+      ? { ...before, modelOverride: null, modelProviderRef: null, nextRuntimeSelection: undefined }
+      : before.nextRuntimeSelection
       ? { ...before, permissionMode: before.nextRuntimeSelection.permissionMode } : before;
     const preflight = await candidate(profile, preferences, target, params.model, pinnedProviderRef);
     if (!preflight.support.supported) throw serviceError(preflight.support.code, preflight.support.code);
-    const { clearModelOverride, permissionMode } = preflight.adjustments;
-    if ((clearModelOverride || permissionMode !== (preferences.permissionMode ?? null)) && !params.acceptAdjustments) {
+    const { permissionMode } = preflight.adjustments;
+    const clearModelOverride = resetModel || preflight.adjustments.clearModelOverride;
+    if ((preflight.adjustments.clearModelOverride || permissionMode !== (preferences.permissionMode ?? null)) && !params.acceptAdjustments) {
       throw serviceError("SESSION_RUNTIME_CONFIRMATION_REQUIRED", "需要确认模型或权限设置的变化");
     }
     const modelSettings = params.model === undefined ? undefined : settingsForModelSwitch(before, preflight.modelCapabilities);
-    if (selectingCurrentModel && !providerChanging && !before.nextRuntimeSelection
+    if (!cronModel && selectingCurrentModel && !providerChanging && !before.nextRuntimeSelection
       && (isBusy(before, excludingRunId) || isDesktop(before))) {
       // A model pick is a next-turn default. Keep the current native session and
       // its immutable run contract; never hand off or reset a streaming turn.
@@ -290,7 +301,7 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       try { onChanged({ profileId: profile.id, sessionKey: saved.sessionKey }); } catch {}
       return saved;
     }
-    if (params.model !== undefined && isBusy(before, excludingRunId)) {
+    if (!cronModel && params.model !== undefined && isBusy(before, excludingRunId)) {
       const current = sessionFor(params);
       const latest = productStore.getAgentRuntimeBinding(profile.id, target.id);
       const latestProfile = productStore.getAgentProfile(profile.id);
@@ -304,16 +315,19 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       try { onChanged({ profileId: profile.id, sessionKey: saved.sessionKey }); } catch {}
       return saved;
     }
-    assertIdle(before, excludingRunId);
+    assertCanSwitch(before);
     const reconciled = await currentCoordinator().reconcileSessionBinding?.(before, { excludingRunId }) ?? before;
     if (reconciled.status !== before.status) await ensureTranscript(reconciled);
     const modelChanging = params.model !== undefined && params.model !== (before.modelOverride ?? profile.defaultModel);
     // A kept native session needs no fresh-session context (or summary) for the target.
     const keepsNativeSession = modelChanging && !providerChanging && reconciled.status === before.status
       && keepsNativeSessionOnModelChange(profile, target, before, pinnedProviderRef);
+    const cronSourceChanged = cronModel && Boolean(before.runtimeSessionId && pinnedProviderRef)
+      && before.runtimeModelSource?.source !== pinnedProviderRef;
     // Picking the model already in use on the same Binding and source renews nothing, so it prepares no hand-off.
-    const unchangedPick = selectingCurrentModel && !modelChanging && !providerChanging && reconciled.status === before.status;
-    if (params.model !== undefined && !freshSession && !isDesktop(before) && !keepsNativeSession && !unchangedPick
+    const unchangedPick = selectingCurrentModel && !modelChanging && !providerChanging && !cronSourceChanged
+      && reconciled.status === before.status;
+    if (!cronModel && params.model !== undefined && !freshSession && !isDesktop(before) && !keepsNativeSession && !unchangedPick
       && reconciled.status === "ready" && reconciled.runtimeSessionId) {
       // A pick that would retire a native session becomes the next turn's choice, as a
       // pick during a turn does: the checks above already ran, and only the send hands off
@@ -337,12 +351,13 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     }
     if (!freshSession && !isDesktop(before) && !keepsNativeSession && !unchangedPick) await currentCoordinator().prepareRuntimeHandoff?.(reconciled, target, {
       model: params.model, clearModelOverride, permissionMode, excludingRunId,
+      ...(cronModel ? { beforeSend: true, modelProviderRef: pinnedProviderRef ?? null } : {}),
     });
     // Nothing may yield between the last busy check and the CAS. A concurrent
     // send reserves the session even while its inbox encryption is pending.
     const current = sessionFor(params);
     if (accountGeneration !== facts.generation?.(target)) throw serviceError("ACCOUNT_AUTH_UNKNOWN", "账号认证状态已变化");
-    assertIdle(current, excludingRunId);
+    assertCanSwitch(current);
     const latestProfile = productStore.getAgentProfile(profile.id);
     const latest = productStore.getAgentRuntimeBinding(profile.id, target.id);
     if (!latestProfile.enabled || !latest?.enabled || latest.revision !== target.revision
@@ -351,7 +366,8 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
     preflight.assertCurrent?.();
     const saved = chatSessionStore.switchRuntime(params.sessionKey, { bindingId: target.id, revision: reconciled.revision,
       clearModelOverride, permissionMode, ...(params.model !== undefined ? { model: params.model, modelProviderRef: pinnedProviderRef, modelSettings,
-        renewSession: !freshSession && !isDesktop(before) && (providerChanging || (modelChanging && !keepsNativeSession)) } : {}) });
+        renewSession: !freshSession && !isDesktop(before) && (cronSourceChanged || providerChanging
+          || (modelChanging && !keepsNativeSession)) } : {}) });
     auditPending();
     try { onChanged({ profileId: profile.id, sessionKey: saved.sessionKey }); } catch {}
     return saved;
@@ -512,6 +528,76 @@ function createSessionRuntimeController({ productStore, chatSessionStore, transc
       const session = sessionFor({ profileId, sessionKey });
       return switchSession({ profileId, sessionKey, ...modelSelection, revision: session.revision, acceptAdjustments: false },
         { excludingRunId: runId, freshSession: true });
+    },
+    async listCronModels(profileId, { bindingId, cursor }) {
+      const state = productStore.getAgentRuntimeBindings(profileId);
+      const handoff = getNativeRuntimeConfig().flags.runtimeConversationHandoff;
+      const bindings = state.bindings.filter(binding => binding.enabled && (handoff || binding.id === state.defaultBindingId)).map(binding => ({
+        bindingId: binding.id, runtime: binding.runtime, isDefault: binding.id === state.defaultBindingId,
+      }));
+      const targetId = bindingId ?? state.defaultBindingId;
+      if (!bindings.some(binding => binding.bindingId === targetId)) {
+        throw serviceError("CRON_MODEL_UNAVAILABLE", "This Cron model catalog is unavailable");
+      }
+      const target = productStore.resolveAgentRuntimeProfile(profileId, targetId);
+      const harness = codexSessionProvider.supportsSessionProviders(target);
+      try {
+        const page = await listBindingModels({ profileId, bindingId: targetId, cursor: cursor ?? null, limit: 30,
+          ...(harness ? { includeSourceStatus: true } : {}) });
+        return { bindings, bindingId: targetId, nextCursor: page.nextCursor,
+          ...(page.unavailableSource ? { unavailableSource: page.unavailableSource } : {}),
+          models: page.models.map(row => ({
+            name: row.displayName, ...(row.sourceName ? { source: row.sourceName } : {}),
+            modelSelection: { bindingId: targetId, model: row.id,
+              ...(harness ? { modelProviderRef: row.sourceProviderRef ?? row.modelProviderRef
+                ?? codexSessionProvider.CHATGPT_SELECTION } : {}) },
+          })) };
+      } catch (error) {
+        if (cursor == null && /^(PROFILE_|RUNTIME_|RPC_)/u.test(error?.code ?? "")) {
+          return { bindings, bindingId: targetId, models: [], nextCursor: null, unavailable: true };
+        }
+        throw error;
+      }
+    },
+    async validateCronModel(profileId, selection) {
+      const unavailable = () => serviceError("CRON_MODEL_UNAVAILABLE", "The selected Cron model is unavailable");
+      const profile = productStore.getAgentProfile(profileId);
+      const binding = profile?.enabled && productStore.getAgentRuntimeBinding(profileId, selection.bindingId);
+      if (!binding?.enabled) throw unavailable();
+      const target = productStore.resolveAgentRuntimeProfile(profileId, binding.id);
+      const harness = codexSessionProvider.supportsSessionProviders(target);
+      if (harness !== Boolean(selection.modelProviderRef)) throw unavailable();
+      try {
+        if (harness) {
+          const providerRef = codexSessionProvider.resolveProviderSelection(productStore, target, selection.modelProviderRef);
+          if (codexSessionProvider.providerRequiresOpenaiAuth(productStore, providerRef)) {
+            const match = await readChatGptModel(target, selection.model);
+            match.assertCurrent();
+          } else {
+            await readConfiguredModel(target, providerRef, selection.model);
+          }
+        } else {
+          await readCatalogModel(profileId, binding.id, selection.model, null);
+        }
+        const latest = productStore.getAgentRuntimeBinding(profileId, binding.id);
+        if (!productStore.getAgentProfile(profileId)?.enabled || !latest?.enabled || latest.revision !== binding.revision) throw unavailable();
+      } catch (error) {
+        if (/^(PROFILE_|RUNTIME_|SESSION_MODEL_|MODEL_|AUTH_|RPC_)/u.test(error?.code ?? "")) throw unavailable();
+        throw error;
+      }
+    },
+    async selectCronModel({ profileId, sessionKey, modelSelection }, runId) {
+      const session = sessionFor({ profileId, sessionKey });
+      const bindingId = modelSelection?.bindingId ?? productStore.getAgentProfile(profileId)?.defaultBindingId;
+      if (!productStore.getAgentRuntimeBinding(profileId, bindingId)?.enabled) {
+        throw serviceError("CRON_MODEL_UNAVAILABLE", "The selected Cron binding is unavailable");
+      }
+      if (cronSessionHasModel(session, bindingId, modelSelection)) {
+        if (modelSelection) await controller.validateCronModel(profileId, modelSelection);
+        return session;
+      }
+      return switchSession({ profileId, sessionKey, ...modelSelection, bindingId,
+        revision: session.revision, acceptAdjustments: false }, { excludingRunId: runId, cronModel: true });
     },
     async handle(method, input) {
       const params = validateSessionRuntimeParams(method, input);

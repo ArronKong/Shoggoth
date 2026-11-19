@@ -43,6 +43,40 @@ test("chunked files survive restart, replay exactly, and cannot change a persist
   assert.equal(writes, 0);
 });
 
+test("inbound copies preserve edits, distinguish same-name files and keep original message bytes", async t => {
+  const f = await fixture(t), session = id();
+  const refs = await upload(f, [file("我的 报告.txt", Buffer.from("original")), file("我的 报告.txt", Buffer.from("second"))]);
+  const prepare = () => prepareChatAttachments(f.store.media, refs, session, f.profile.id);
+  const [first, second] = prepare();
+  const home = path.join(f.paths.defaultWorkspaceDir, f.profile.id);
+  assert.equal(first.workspacePath, path.join(fs.realpathSync(home), "inbound", refs[0].id, refs[0].name));
+  assert.notEqual(first.workspacePath, second.workspacePath);
+  assert.equal(fs.readFileSync(second.workspacePath, "utf8"), "second");
+  fs.writeFileSync(first.workspacePath, "edited");
+  const prompt = attachmentPrompt("read", prepare());
+  assert.ok(prompt.includes(first.workspacePath) && !prompt.includes(first.path));
+  assert.ok(prompt.includes("original") && !prompt.includes("edited"));
+  assert.equal(fs.readFileSync(first.workspacePath, "utf8"), "edited");
+  assert.equal(fs.readFileSync(first.path, "utf8"), "original");
+  const other = prepareChatAttachments(f.store.media, [refs[0]], id(), "other-agent")[0];
+  assert.equal(fs.readFileSync(other.workspacePath, "utf8"), "original");
+  fs.unlinkSync(first.workspacePath);
+  const history = prepareChatAttachments(f.store.media, [refs[0]], session, f.profile.id, { history: true });
+  assert.equal(history[0].workspacePath, first.workspacePath);
+  assert.equal(fs.existsSync(first.workspacePath), false);
+  assert.equal(fs.readFileSync(prepare()[0].workspacePath, "utf8"), "original", "explicit delivery can restore a removed copy");
+  const [legacy] = await upload(f, [file("旧报告.pdf", Buffer.from("%PDF-1.4\nhistorical document"), "application/pdf")]);
+  const [original] = prepareChatAttachments(f.store.media, [legacy], session);
+  const [restored] = prepareChatAttachments(f.store.media, [legacy], session, f.profile.id, { history: true });
+  assert.deepEqual(fs.readFileSync(restored.workspacePath), fs.readFileSync(original.path));
+  const dir = path.join(home, "inbound");
+  fs.renameSync(dir, dir + "-moved");
+  const elsewhere = fs.mkdtempSync(path.join(f.root, "outside-"));
+  fs.symlinkSync(elsewhere, dir);
+  assert.throws(prepare, { code: "UNSAFE_PATH" });
+  assert.deepEqual(fs.readdirSync(elsewhere), []);
+});
+
 test("explicit paths preserve spaces and Chinese names; directories and missing files remain text", async t => {
   const f = await fixture(t), target = path.join(f.root, "中文 文件.png");
   fs.writeFileSync(target, PNG);
@@ -157,6 +191,7 @@ test("attachment-only chat reaches Codex image input and the durable transcript 
   const image = runtimeInput.input.find(item => item.type === "localImage");
   assert.deepEqual(fs.readFileSync(image.path), PNG);
   assert.ok(runtimeInput.input[0].text.includes("notes.txt"));
+  assert.ok(runtimeInput.input[0].text.includes(path.join(f.paths.defaultWorkspaceDir, f.profile.id, "inbound")));
   assert.ok(runtimeInput.input[0].text.includes("BEGIN ATTACHMENT CONTENT\nhello\nEND ATTACHMENT CONTENT"),
     "the common Coordinator delivers submitted text as user input");
   const events = f.transcript.listEvents(f.profile.id, session.id).filter(item => item.kind === "user");

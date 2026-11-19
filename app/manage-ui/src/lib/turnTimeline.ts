@@ -85,7 +85,6 @@ export interface TurnStep {
   isError?: boolean;
   diff?: { path: string; oldText: string; newText: string };
   diffText?: string;
-  updateCount?: number;
   // 文本类步(user / thinking 段 / text 段 / final / error)
   text?: string;
   activity?: boolean; // explicit public progress, shown inside the activity timeline
@@ -740,13 +739,10 @@ export function reduceTimeline(state: TurnTimelineState, ev: TurnEvent, ts: numb
       if (cur.diff === undefined && ev.diff) patch.diff = ev.diff;
       if (cur.diffText === undefined && typeof ev.diffText === "string" && ev.diffText) patch.diffText = ev.diffText;
       if (typeof ev.durationS === "number" && ev.durationS > 0) patch.durationS = ev.durationS;
-      if (ev.phase === "update") {
-        patch.updateCount = (cur.updateCount ?? 0) + 1;
-        if (ev.partialResult !== undefined) {
-          const capped = capText(ev.partialResult);
-          patch.output = capped.text;
-          patch.outputTruncated = capped.truncated;
-        }
+      if (ev.phase === "update" && ev.partialResult !== undefined) {
+        const capped = capText(ev.partialResult);
+        patch.output = capped.text;
+        patch.outputTruncated = capped.truncated;
       }
       if (ev.phase === "result") {
         patch.pluginAppCallId = validPluginAppCallId(ev.pluginAppCallId);

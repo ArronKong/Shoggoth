@@ -2,6 +2,7 @@
 
 const { isGroupChatRun } = require("../group-chat-run");
 const { isHistoricalChatSession } = require("../historical-chat-session");
+const { matchesHistoricalWorkspace } = require("../chat-workspace");
 const { isBorrowedMemoryDerived, extractBorrowedMemoryRefs } = require("../shoggoth-memory/borrowed-memory-provenance.cjs");
 const { isUiActionSubmission } = require("../ui-input-provenance");
 const { hasSecret } = require("../memory-engine");
@@ -40,7 +41,7 @@ class LearningSources {
     const sessionKey = this.getCoordinator().getRunSessionKey(run);
     const session = sessionKey && this.sessions.getSession(sessionKey);
     if (!session || session.profileId !== profileId || !isHistoricalChatSession(session)
-      || session.workspace !== run.workspace || this.sessions.getCronSessionOrigin?.(sessionKey)) fail("LEARNING_SOURCE_REVOKED");
+      || !matchesHistoricalWorkspace(this.sessions, session, run.workspace) || this.sessions.getCronSessionOrigin?.(sessionKey)) fail("LEARNING_SOURCE_REVOKED");
     this.assertSessionCurrent(profileId, session.id);
     const revision = this.transcripts.getRevision(profileId, session.id);
     const raw = this.transcripts.listEvents(profileId, session.id).filter(event => event.runId === runId);

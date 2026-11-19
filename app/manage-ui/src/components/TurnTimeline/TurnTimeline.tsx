@@ -403,9 +403,6 @@ export default function TurnTimeline({ steps, status, showDurations = true, auto
                   <span className={styles.title} data-action={actionTitle ? "1" : undefined}
                     data-progress={isTextStep ? "1" : undefined}
                     title={actionTitle && s.kind === "tool" ? `${actionTitle} (${s.toolName})` : isTextStep || actionTitle ? s.text : undefined}>{s.startupWait ? <ChatRunWait state={s.startupWait} /> : titleFor(s)}</span>
-                  {s.kind === "tool" && s.status === "running" && s.updateCount ? (
-                    <span className={styles.updates}>{t("turnLab.updates", { count: s.updateCount })}</span>
-                  ) : null}
                   <span className={styles.dur}>{s.kind === "tool" || s.kind === "status" && !!s.durationS
                     ? (showDurations ? formatDuration(s.durationS) : "—") : ""}</span>
                   {!s.startupWait && <span className={styles.chip} data-st={s.kind === "prompt" && s.promptOutcome === "expired" ? "aborted" : s.status}

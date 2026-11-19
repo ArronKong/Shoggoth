@@ -2,10 +2,12 @@
 
 const { nativeResponseMetadata, validResponseMetadata } = require("../chat-response-metadata");
 const { CRON_OUTPUT_VERSION, cronOutputDecision, isCronWatch, cronUnattendedCompletionError } = require("./cron-output-policy");
+const { validCronModelSelection, cronSessionHasModel } = require("./native-cron-model");
 
 const crypto = require("node:crypto");
 const { extractBorrowedMemoryRefs, mergeBorrowedMemoryRefs, refsFromEvents, sanitizeBorrowedToolContent } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 const { canonicalWorkspace } = require("./work-run");
+const { agentWorkspaceRoot, ensureAgentWorkspace, isAgentHomeWorkspace, matchesHistoricalWorkspace } = require("./chat-workspace");
 const { assertNoSensitiveFields } = require("./product-store");
 const { TextDecoder } = require("node:util");
 const { inspirationUserText, inspirationUserAttachments } = require("../core/inspiration-chat-history");
@@ -20,6 +22,7 @@ const BORROWED_OUTPUT_MAX_COALESCED_BYTES = 32 * 1024;
 const BORROWED_OUTPUT_MAX_RUN_BYTES = 16 * 1024 * 1024;
 const BORROWED_OUTPUT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const BORROWED_OUTPUT_PROOF_TIMEOUT_MS = 5_000;
+const BORROWED_OUTPUT_PROOF_ATTEMPTS = 2;
 const { setChatSendDiagnosticPhase } = require("./chat-send-diagnostics");
 const { createRunEventStream } = require("./run-event-stream");
 const { createMemoryModelTextStream } = require("./memory-model-text-stream");
@@ -166,6 +169,7 @@ const PUBLIC_RUNTIME_OPERATIONAL_ERROR_CODES = new Set([
   "RUNTIME_EXECUTABLE_CHANGED", "RUNTIME_IDENTITY_UNAVAILABLE", "RUNTIME_CAPABILITY_UNSUPPORTED",
   "PROACTIVE_RUNTIME_UNVERIFIED", "PROACTIVE_SCOPE_INVALID",
   "EXECUTION_CONTRACT_STALE", "CONTEXT_SOURCE_STALE", "CONTEXT_MEMORY_READ_UNAVAILABLE", "CONTEXT_CONTINUATION_DETAILS_REQUIRED",
+  "CONTEXT_MEMORY_VERIFICATION_TIMEOUT", "CONTEXT_BORROWED_MEMORY_REVOKED",
   "CONTEXT_CONTINUATION_SOURCE_UNAVAILABLE", "CONTEXT_CONTINUATION_SOURCE_TOO_LARGE",
   "CONTEXT_CONTINUATION_REVIEW_INTERRUPTED",
   "RUNTIME_PROTOCOL_ERROR", "RUNTIME_OUTPUT_LIMIT_EXCEEDED", "RUNTIME_CONNECTION_LOST", "RUNTIME_HOST_RESTARTED",
@@ -1095,6 +1099,8 @@ class WorkRunCoordinator {
     this.hookWorkspaceWriters = options.hookWorkspaceWriters || null;
     this.conversationCheckpointStore = options.conversationCheckpointStore || null;
     this.isInternalChatSession = options.isInternalChatSession || (() => false);
+    this.isBackgroundTaskSession = options.isBackgroundTaskSession || (() => false);
+    this.isMainChatSession = options.isMainChatSession || (() => false);
     this.sourceConversationStore = options.sourceConversationStore || null;
     this.runtimeSelectionPolicyStore = options.runtimeSelectionPolicyStore || null;
     this.getCapabilityPolicyRevision = options.getCapabilityPolicyRevision || (() => null);
@@ -1147,6 +1153,7 @@ class WorkRunCoordinator {
 
     this.onRuntimeMcpRequest = options.onRuntimeMcpRequest || null;
     this.followDefaultSessionBinding = options.followDefaultSessionBinding || null;
+    this.selectCronModel = options.selectCronModel || null;
     this.applyQueuedSessionSelection = options.applyQueuedSessionSelection || null;
     this.manualCompactions = new Map();
     this.manualCompactionTimeoutMs = options.manualCompactionTimeoutMs ?? 60 * 60_000;
@@ -1431,7 +1438,8 @@ class WorkRunCoordinator {
     const run = this.#findRunByIdempotencyKey(runIdempotencyKey(operationId));
     if (!run || run.source !== "chat" || run.sourceId !== sessionKey
       || run.profileId !== session.profileId) return null;
-    if (run.workspace !== session.workspace) {
+    if (run.workspace !== session.workspace && !(TERMINAL_RUN_STATES.has(run.status)
+      && matchesHistoricalWorkspace(this.chatSessionStore, session, run.workspace))) {
       if (this.inbox.isLocked?.() === true) return null;
       const command = this.inbox.get(operationId);
       const accepted = command?.acceptance ?? command?.receipt;
@@ -1595,7 +1603,8 @@ class WorkRunCoordinator {
     return attachments.map(attachment => {
       const media = this.getMediaStore?.();
       if (!media) return { ...attachment, unavailable: true };
-      try { return prepareChatAttachments(media, [attachment], sessionKey)[0]; }
+      try { return prepareChatAttachments(media, [attachment], sessionKey,
+        this.chatSessionStore.getSession(sessionKey)?.profileId, { history: true })[0]; }
       catch (error) {
         if (/^UNSAFE_/u.test(error?.code || "")) throw error;
         return { ...attachment, unavailable: true };
@@ -3583,7 +3592,15 @@ class WorkRunCoordinator {
       }
     } else {
       const input = Object.fromEntries(["runId", "operationId", "prompt", "threadSource", "threadId",
+        ...(run.source === "cron" && Object.hasOwn(command, "modelSelection") ? ["modelSelection"] : []),
         ...(run.source === "automation" ? ["automationConfig"] : [])].map((key) => [key, command[key]]));
+      if (Object.hasOwn(input, "modelSelection") && (!validCronModelSelection(input.modelSelection)
+        || (input.modelSelection && (input.modelSelection.bindingId !== contract.bindingId
+          || input.modelSelection.model !== contract.defaultModel
+          || (input.modelSelection.modelProviderRef !== undefined
+            && input.modelSelection.modelProviderRef !== codexSessionProvider.sourceToken(contract.provider?.providerRef)))))) {
+        throw coordinatorError("EXECUTION_BINDING_INVALID", "Cron frozen model changed during restart");
+      }
       if (run.source === "automation" && (!input.automationConfig
         || input.automationConfig.model !== contract.defaultModel
         || input.automationConfig.reasoningEffort !== contract.modelSettings?.thinkingLevel
@@ -3620,7 +3637,7 @@ class WorkRunCoordinator {
       const hookSnapshot = this.hookService.store.snapshotForRun(run.id);
       if (!hookSnapshot) throw coordinatorError("HOOK_SNAPSHOT_REQUIRED", "恢复执行缺少原始 Hook 快照");
       for (const entry of hookSnapshot.entries) this.hookService.store.assertCurrent(hookSnapshot, entry);
-      this.hookWorkspaceWriters?.acquire(run.id, run.workspace, contract.permissionPolicy.sandbox);
+      this.hookWorkspaceWriters?.acquire(run.id, run.workspace, contract.permissionPolicy.sandbox, contract.agentWorkspace);
     }
     this.runExecutionContracts.set(run.id, Object.freeze({ ...contract, runtimeAccountGeneration: admission?.generation ?? null }));
     this.recoveringRuns.add(run.id);
@@ -3631,6 +3648,24 @@ class WorkRunCoordinator {
     return (this.pendingSessionSends.get(sessionKey) || 0) > 0
       || this.listSessionRuns(sessionKey).some(run => run.id !== excludingRunId
         && (run.status === "queued" || ACTIVE_RUN_STATES.has(run.status)));
+  }
+
+  adoptIdleChatWorkspace(session, sending = false) {
+    const paths = this.chatSessionStore.paths;
+    const key = session.sessionKey;
+    if (this.state !== "open" || this.admissionsQuiesced || this.poisonError || this.inbox.isLocked?.()
+      || !paths?.defaultWorkspaceDir || !this.chatSessionStore.adoptLegacyChatWorkspace
+      || session.workspace === agentWorkspaceRoot(paths, session.profileId)) return session;
+    const main = this.isMainChatSession(session.profileId, key);
+    if ((!main && !isAgentHomeWorkspace(paths, session.profileId, session.workspace))
+      || this.isInternalChatSession(key) || this.isBackgroundTaskSession(key)
+      || this.contextHandoffs.has(key) || this.workingContextBarriers.has(key)
+      || this.sessionBindingReconciliations.has(key) || (this.pendingSessionSends.get(key) || 0) > (sending ? 1 : 0)
+      || this.listSessionRuns(key).some(run => run.status === "queued" || ACTIVE_RUN_STATES.has(run.status))
+      || this.inbox.list().some(command => command.sessionKey === key && ACTIVE_COMMAND_STATES.has(command.state))) return session;
+    const updated = this.chatSessionStore.adoptLegacyChatWorkspace(key, main);
+    if (updated.workspace !== session.workspace) this.onConversationRenewed({ profileId: updated.profileId, sessionKey: key });
+    return updated;
   }
 
   hasPendingProfileSend(profileId) {
@@ -3690,6 +3725,16 @@ class WorkRunCoordinator {
     const sessionRuns = this.listSessionRuns(sessionKey);
     return !sessionRuns.some(candidate => ACTIVE_RUN_STATES.has(candidate.status))
       && sessionRuns.find(candidate => candidate.source === "chat" && candidate.status === "queued")?.id === runId;
+  }
+
+  canSelectCronModel(sessionKey, runId) {
+    const run = this.dispatcher.getRun(runId);
+    if (this.state !== "open" || this.poisonError || this.admissionsQuiesced || this.pendingSessionSends.has(sessionKey)
+      || run?.source !== "cron" || run.status !== "queued" || this.getRunSessionKey(run) !== sessionKey) return false;
+    const runs = this.listSessionRuns(sessionKey);
+    return !runs.some(candidate => ACTIVE_RUN_STATES.has(candidate.status))
+      && !runs.slice(0, runs.findIndex(candidate => candidate.id === runId))
+        .some(candidate => candidate.status === "queued" && this.#commandForRun(candidate));
   }
 
   async reconcileSessionBinding(session, { excludingRunId = null } = {}) {
@@ -3795,7 +3840,7 @@ class WorkRunCoordinator {
     }
   }
 
-  async prepareRuntimeHandoff(session, target, { model, clearModelOverride = false,
+  async prepareRuntimeHandoff(session, target, { model, modelProviderRef, clearModelOverride = false,
     permissionMode = null, excludingRunId = null, beforeSend = false, originalOnly = false, pendingOperationId = null,
     restorePolicy = null, advisory = false, memoryPrepared = false, signal } = {}) {
     signal?.throwIfAborted();
@@ -3819,6 +3864,7 @@ class WorkRunCoordinator {
       record({});
       const shadow = { ...session, runtimeBindingId: target.id, runtimeSessionId: null, codexThreadId: null,
         status: "draft", permissionMode, modelOverride: model ?? (clearModelOverride ? null : session.modelOverride),
+        ...(modelProviderRef === undefined ? {} : { modelProviderRef }),
         retiredRuntimeSessions: [...(session.retiredRuntimeSessions || []), {
           runtime: this.productStore.resolveAgentRuntimeProfile(session.profileId, session.runtimeBindingId).runtime,
           runtimeSessionId: runtimeSessionIdOf(session), bindingId: session.runtimeBindingId,
@@ -3846,7 +3892,7 @@ class WorkRunCoordinator {
       const operationId = pendingOperationId ?? `handoff-preview-${session.revision}`;
       const waitingCommand = restorePolicy && excludingRunId ? this.#commandForRun(this.dispatcher.getRun(excludingRunId))?.command : null;
       const currentAttachments = waitingCommand?.attachments?.length
-        ? prepareChatAttachments(this.getMediaStore(), waitingCommand.attachments, key) : [];
+        ? prepareChatAttachments(this.getMediaStore(), waitingCommand.attachments, key, session.profileId) : [];
       const currentPrompt = attachmentPrompt(waitingCommand?.prompt ?? "", currentAttachments);
       let previousCoverage = null;
       let transportLimited = false;
@@ -4362,7 +4408,10 @@ class WorkRunCoordinator {
       session = this.chatSessionStore.getSession(input.sessionKey);
       if (!session || !sendableSession(session)) throw coordinatorError("CHAT_SESSION_NOT_READY", "发送准备期间会话已不可发送");
       if (this.contextHandoffs.has(input.sessionKey)) throw coordinatorError("SESSION_BUSY", "正在准备会话上下文");
-
+      session = this.adoptIdleChatWorkspace(session, true);
+      if (input.attachments?.length) {
+        prepareChatAttachments(this.getMediaStore(), input.attachments, session.sessionKey, session.profileId);
+      }
     }
     setChatSendDiagnosticPhase("run_input");
     const runId = existingCommand?.runId || run?.id || this.randomUUID();
@@ -4507,7 +4556,9 @@ class WorkRunCoordinator {
   async executeDomainRun(input) {
     this.#assertOpen();
     const automation = Object.hasOwn(input || {}, "automationConfig");
-    if (!exactObject(input, ["runId", "operationId", "prompt", "threadSource", "threadId", ...(automation ? ["automationConfig"] : [])])
+    const cronModel = Object.hasOwn(input || {}, "modelSelection");
+    if (!exactObject(input, ["runId", "operationId", "prompt", "threadSource", "threadId",
+      ...(automation ? ["automationConfig"] : []), ...(cronModel ? ["modelSelection"] : [])])
       || !validOpaqueId(input.runId) || !validOpaqueId(input.operationId)
       || typeof input.prompt !== "string" || input.prompt.length === 0
       || !input.prompt.isWellFormed() || input.prompt.includes("\0")
@@ -4522,6 +4573,9 @@ class WorkRunCoordinator {
     if (!run) throw coordinatorError("WORK_RUN_NOT_FOUND", `WorkRun 不存在: ${input.runId}`);
     if (!new Set(["kanban", "cron", "inspiration", "proactive", "automation"]).has(run.source)) {
       throw coordinatorError("DOMAIN_WORK_RUN_SOURCE_INVALID", "只有领域 WorkRun 可走 domain executor");
+    }
+    if (cronModel && (run.source !== "cron" || !validCronModelSelection(input.modelSelection))) {
+      throw coordinatorError("DOMAIN_WORK_RUN_EXECUTION_INVALID", "Cron model selection is invalid");
     }
     if ((run.source === "automation") !== automation || (automation && (
       !exactObject(input.automationConfig, ["model", "reasoningEffort", "revision"])
@@ -4569,14 +4623,14 @@ class WorkRunCoordinator {
       const session = this.#ensureCronTranscript(run, input);
       // A job's legacy native ID has no Runtime namespace. It may seed only a
       // pristine conversation, never replace the ID selected by a handoff.
-      if (input.threadId !== null && session?.status === "draft" && session.revision === 1
+      if (!cronModel && input.threadId !== null && session?.status === "draft" && session.revision === 1
         && runtimeSessionIdOf(session) === null && session.retiredRuntimeSessions.length === 0) {
         this.#ensureCronTranscript(run, input, input.threadId);
       }
     }
     if (run.status === "queued" && this.followDefaultSessionBinding
       && this.getNativeRuntimeConfig()?.flags?.runtimeConversationHandoff
-      && (run.source === "kanban" || run.source === "cron" || (run.source === "inspiration"
+      && (run.source === "kanban" || (run.source === "cron" && !cronModel) || (run.source === "inspiration"
         && this.resolveRunSession(run)?.inputSource !== "chat"))) {
       // Inspiration keeps its domain ownership when continued from Chat, but
       // a selected model or an explicit Chat send owns its conversation Binding.
@@ -5105,7 +5159,8 @@ class WorkRunCoordinator {
         throw coordinatorError("TRANSCRIPT_SESSION_INVALID", "任务执行与会话的归属不匹配");
       }
       const session = this.chatSessionStore.getSession(binding.sessionKey);
-      if (session && (session.profileId !== run.profileId || session.workspace !== run.workspace)) {
+      if (session && (session.profileId !== run.profileId || (session.workspace !== run.workspace
+        && !(TERMINAL_RUN_STATES.has(run.status) && matchesHistoricalWorkspace(this.chatSessionStore, session, run.workspace))))) {
         throw coordinatorError("TRANSCRIPT_SESSION_INVALID", "任务执行与会话的归属不匹配");
       }
       return session ? binding.sessionKey : null;
@@ -5326,10 +5381,13 @@ class WorkRunCoordinator {
     });
   }
 
-  async stopBorrowedMemoryRun(runId, reason = "CONTEXT_SOURCE_STALE") {
+  async stopBorrowedMemoryRun(runId, reason = "CONTEXT_BORROWED_MEMORY_REVOKED") {
     if (this.borrowedMemoryStops.has(runId)) return this.borrowedMemoryStops.get(runId);
     const run = this.dispatcher.getRun(runId);
     if (!run || TERMINAL_RUN_STATES.has(run.status)) return run;
+    if (reason === "CONTEXT_BORROWED_MEMORY_REVOKED") {
+      this.telemetry.record("runtime.stage", { runId, stage: "borrowed_output_revoked", outcome: "error", durationMs: 0 });
+    }
     // Withdrawal and several late Runtime events may arrive together. Fence
     // all of them immediately, while sharing one physical interrupt and finish.
     this.startupControllers.get(runId)?.abort();
@@ -6950,7 +7008,7 @@ class WorkRunCoordinator {
     const prior = this.borrowedOutput.get(runId);
     let size;
     try { size = Buffer.byteLength(JSON.stringify(event)); }
-    catch { void this.stopBorrowedMemoryRun(runId).catch(() => {}); return; }
+    catch { void this.stopBorrowedMemoryRun(runId, "CONTEXT_SOURCE_STALE").catch(() => {}); return; }
     const tail = prior?.events.at(-1);
     // Keep one message's adjacent increments together while the worker checks
     // its sources. Different items, phases, reasoning parts and intervening
@@ -6999,7 +7057,7 @@ class WorkRunCoordinator {
       try {
         while (output.events.length && !signal.aborted && currentRun()) {
           const sharing = this.contextCompiler.memoryEngine.sharing;
-          await sharing.withRunReadProof(runId, AbortSignal.any([signal, AbortSignal.timeout(BORROWED_OUTPUT_PROOF_TIMEOUT_MS)]), () => {
+          await this.#withBorrowedOutputProof(runId, signal, () => {
             const batch = output.events.splice(0);
             for (const { event, size } of batch) {
               output.retainedEvents--;
@@ -7032,9 +7090,45 @@ class WorkRunCoordinator {
     this.borrowedOutput.set(runId, output);
   }
 
+  async #withBorrowedOutputProof(runId, signal, publish) {
+    const sharing = this.contextCompiler.memoryEngine.sharing;
+    for (let attempt = 1; attempt <= BORROWED_OUTPUT_PROOF_ATTEMPTS; attempt++) {
+      signal.throwIfAborted();
+      const deadline = AbortSignal.timeout(BORROWED_OUTPUT_PROOF_TIMEOUT_MS);
+      const proofSignal = AbortSignal.any([signal, deadline]);
+      const started = performance.now();
+      let entered = false;
+      try {
+        const result = await sharing.withRunReadProof(runId, proofSignal, () => {
+          proofSignal.throwIfAborted();
+          entered = true;
+          return publish();
+        });
+        if (entered && attempt > 1) this.telemetry.record("runtime.stage", { runId, attempt,
+          stage: "borrowed_output_recovered", outcome: "success", durationMs: Math.round(performance.now() - started) });
+        return result;
+      } catch (error) {
+        // Once publication starts, a failing callback may already have committed events.
+        // Only a proof that expired before publication can safely be reacquired.
+        if (entered || signal.aborted) throw signal.reason ?? error;
+        if (error?.code === "MEMORY_SHARED_SOURCE_REVOKED") throw error;
+        const timedOut = deadline.aborted || error?.name === "TimeoutError";
+        if (timedOut || error?.code === "CONTEXT_MEMORY_READ_UNAVAILABLE") {
+          this.telemetry.record("runtime.stage", { runId, attempt, durationMs: Math.round(performance.now() - started),
+            stage: timedOut ? "borrowed_output_timeout" : "borrowed_output_scan_failed", outcome: "error",
+            code: timedOut ? "CONTEXT_MEMORY_VERIFICATION_TIMEOUT" : error.cause?.code });
+        }
+        if (!timedOut) throw error;
+        if (attempt === BORROWED_OUTPUT_PROOF_ATTEMPTS) throw coordinatorError("CONTEXT_MEMORY_VERIFICATION_TIMEOUT", "借阅记忆输出核验超时");
+      }
+    }
+  }
+
   #stopAfterBorrowedOutputProof(runId, error) {
-    const reason = error?.code === "CONTEXT_MEMORY_READ_UNAVAILABLE" || error?.name === "TimeoutError"
-      ? "CONTEXT_MEMORY_READ_UNAVAILABLE" : "CONTEXT_SOURCE_STALE";
+    let reason = "CONTEXT_SOURCE_STALE";
+    if (error?.code === "MEMORY_SHARED_SOURCE_REVOKED") reason = "CONTEXT_BORROWED_MEMORY_REVOKED";
+    else if (error?.code === "CONTEXT_MEMORY_READ_UNAVAILABLE") reason = error.code;
+    else if (error?.name === "TimeoutError" || error?.code === "CONTEXT_MEMORY_VERIFICATION_TIMEOUT") reason = "CONTEXT_MEMORY_VERIFICATION_TIMEOUT";
     void this.stopBorrowedMemoryRun(runId, reason).catch(() => {});
   }
 
@@ -7806,6 +7900,25 @@ class WorkRunCoordinator {
         && ACTIVE_RUN_STATES.has(candidate.status) && candidate.source !== "compaction")
         ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING");
     }
+    const cronModel = run.source === "cron" ? this.domainCommands.get(run.id)?.modelSelection : undefined;
+    if (cronModel !== undefined) {
+      if (!sessionKey || !this.selectCronModel) return { disposition: "rejected", reason: "CRON_MODEL_UNAVAILABLE", run };
+      try {
+        await this.selectCronModel({ profileId, sessionKey, modelSelection: cronModel }, run.id);
+      } catch (error) {
+        const code = ownDataErrorCode(error);
+        if (["SESSION_BUSY", "CHAT_SESSION_REVISION_CONFLICT"].includes(code)) return this.#queuedAdmission(run, "CHAT_SESSION_BUSY");
+        if (code === "CRON_MODEL_UNAVAILABLE" || Object.hasOwn(SESSION_RUNTIME_PUBLIC_MESSAGES, code)
+          || /^(PROFILE_|AGENT_BINDING_)/u.test(code || "")) {
+          return { disposition: "rejected", reason: "CRON_MODEL_UNAVAILABLE", run };
+        }
+        throw error;
+      }
+      signal?.throwIfAborted();
+      if (lifecycle !== null) this.#fenceLifecycle(lifecycle);
+      const existing = this.#existingAdmission(runId);
+      if (existing) return existing;
+    }
     if (run.source !== "compaction" && sessionKey && this.conversationCheckpointStore) {
       const session = this.chatSessionStore.getSession(sessionKey);
       const checkpoint = this.getNativeRuntimeConfig()?.flags?.runtimeContextLifecycleV1 === true;
@@ -7840,6 +7953,10 @@ class WorkRunCoordinator {
       // Durable-store and lifecycle failures must still reach recovery unchanged.
       const code = ownDataErrorCode(error);
       if (code === "RUNTIME_HOST_CAPACITY") return this.#queuedAdmission(run, code);
+      if (cronModel !== undefined && (code === "CRON_MODEL_UNAVAILABLE"
+        || /^(AGENT_BINDING_|SESSION_MODEL_PROVIDER_)/u.test(code || ""))) {
+        return { disposition: "rejected", reason: "CRON_MODEL_UNAVAILABLE", run };
+      }
       if (code === "CONTEXT_CONTINUATION_DETAILS_REQUIRED" && error.partialReview === true) {
         return this.#reviewStandalonePartialRequest(run, lifecycle, error.continuationRead);
       }
@@ -7867,7 +7984,7 @@ class WorkRunCoordinator {
         && ACTIVE_RUN_STATES.has(candidate.status) && candidate.source !== "compaction")
         ? "CHAT_SESSION_BUSY" : "CONTEXT_COMPACTING");
     }
-    if (this.hookWorkspaceWriters?.busy(runId, run.workspace, executionContract.permissionPolicy.sandbox)) {
+    if (this.hookWorkspaceWriters?.busy(runId, run.workspace, executionContract.permissionPolicy.sandbox, executionContract.agentWorkspace)) {
       return this.#queuedAdmission(run, "WORKSPACE_WRITE_BUSY");
     }
     const requestPlan = executionContract.contextRequest;
@@ -8158,7 +8275,7 @@ class WorkRunCoordinator {
       throw error;
     }
     if (admission.disposition === "started") {
-      this.hookWorkspaceWriters?.acquire(runId, run.workspace, executionContract.permissionPolicy.sandbox);
+      this.hookWorkspaceWriters?.acquire(runId, run.workspace, executionContract.permissionPolicy.sandbox, executionContract.agentWorkspace);
       this.telemetry.record("runtime.admission.admitted", { runId, source: run.source });
       this.telemetry.record("runtime.startup.started", { runId });
       this.fairQueue.admitted(run, this.dispatcher.listRuns()
@@ -8231,6 +8348,10 @@ class WorkRunCoordinator {
     const lifecycle = this.lifecycleGeneration;
     const boundSessionKey = this.getRunSessionKey(run);
     let boundSession = boundSessionKey ? this.chatSessionStore.getSession(boundSessionKey) : null;
+    const cronModel = run.source === "cron" ? this.domainCommands.get(run.id)?.modelSelection : undefined;
+    if (cronModel !== undefined && !cronSessionHasModel(boundSession, cronModel?.bindingId ?? profile.defaultBindingId, cronModel)) {
+      throw coordinatorError("CRON_MODEL_UNAVAILABLE", "Cron session model does not match the saved selection");
+    }
     if (this.productStore.resolveAgentRuntimeProfile) {
       const summaryBindingId = run.source === "compaction" ? this.domainCommands.get(run.id)?.bindingId : null;
       profile = this.productStore.resolveAgentRuntimeProfile(profile.id, summaryBindingId ?? boundSession?.runtimeBindingId ?? undefined);
@@ -8278,8 +8399,14 @@ class WorkRunCoordinator {
       defaultModel = config.model;
       modelSettings = { thinkingLevel: config.reasoningEffort, serviceTier: null };
     }
-    if (run.source === "proactive") this.assertProactiveRunCurrent(run);
+    const review = run.source === "proactive" ? this.assertProactiveRunCurrent(run) : null;
     const runtime = profile.runtime || "codex";
+    // A reminder about a suspended task only needs its recorded evidence.
+    // The original task keeps its workspace writer until the user responds.
+    const waitingReview = review?.candidates?.length > 0
+      && review.candidates.every(item => ["waiting_input", "waiting_approval"].includes(item.reason))
+      && ["codex", "claude-code", "pi", "antigravity", "grok-build", "opencode"].includes(runtime)
+      && this.hookWorkspaceWriters?.busy(run.id, run.workspace, "workspace-write");
     // Scheduled runs have their own permission default. Editing the permission
     // for a manual reply in the task conversation does not edit the job.
     const requestedMode = run.source === "cron"
@@ -8287,7 +8414,9 @@ class WorkRunCoordinator {
       : sessionPermissionMode;
     const resolvedPermission = run.source === "compaction"
       ? { mode: null, nativeMode: null, permissionPolicy: Object.freeze({ approvalPolicy: "never", sandbox: "read-only" }) }
-      : resolveRuntimePermissionMode(runtime, requestedMode, profile.permissionPolicy);
+      : waitingReview
+        ? resolveRuntimePermissionMode(runtime, null, { approvalPolicy: "on-request", sandbox: "read-only" })
+        : resolveRuntimePermissionMode(runtime, requestedMode, profile.permissionPolicy);
     if (run.workspace === null && resolvedPermission.permissionPolicy.sandbox !== "read-only") {
       throw coordinatorError(
         "WORKSPACE_REQUIRED_FOR_WRITABLE_RUN",
@@ -8355,7 +8484,7 @@ class WorkRunCoordinator {
         : [...(execution?.attachments || []), ...(execution?.turnAttachments || [])];
     })() : command?.attachments || [];
     const currentAttachments = mediaAttachments.length && boundSessionKey
-      ? prepareChatAttachments(this.getMediaStore(), mediaAttachments, boundSessionKey) : mediaAttachments;
+      ? prepareChatAttachments(this.getMediaStore(), mediaAttachments, boundSessionKey, run.profileId) : mediaAttachments;
     const currentPrompt = attachmentPrompt(continuationPrompt(command?.prompt ?? "", verifiedContinuation?.content), currentAttachments);
     const prepareHooks = async () => this.hookService && !["compaction", "automation"].includes(run.source)
       ? await this.hookService.prepareRun(run, profile, () => {
@@ -8366,9 +8495,16 @@ class WorkRunCoordinator {
           throw coordinatorError("HOOK_REVOKED", "Hook 准入范围已失效");
         }
       }, resolvedPermission.permissionPolicy, signal) : null;
-    if (nativePartialHistory && !directChat && run.source !== "compaction") {
-      throw coordinatorError("CONTEXT_CONTINUATION_DETAILS_REQUIRED", "当前 Runtime 仍依赖不完整的历史");
-    }
+    const workspaceExecution = { runtime: profile.runtime, source: run.source,
+      permissionMode: resolvedPermission.mode, permissionPolicy: resolvedPermission.permissionPolicy, workspaceExecutionVersion: 1 };
+    const agentWorkspace = this.chatSessionStore.paths?.defaultWorkspaceDir && run.workspace
+      && !(run.source === "chat" && this.isBackgroundTaskSession(run.sourceId))
+      && ["chat", "inspiration", "kanban", "cron"].includes(run.source)
+      && runtimePermissionModeOptions(runtime).length && resolvedPermission.permissionPolicy.sandbox !== "read-only"
+      ? ensureAgentWorkspace(this.chatSessionStore.paths, run.profileId) : null;
+    const workspaceInstructions = [workspaceExecutionInstructions(workspaceExecution),
+      agentWorkspace && `Your persistent Agent workspace is ${JSON.stringify(agentWorkspace)}. It remains accessible when the current directory is a project. Chat attachments are delivered under its inbound directory.`,
+    ].filter(Boolean).join("\n");
     let snapshot;
     let nativeMemoryVersion = null;
     const captureMemoryVersion = compiled => {
@@ -8380,6 +8516,7 @@ class WorkRunCoordinator {
       const compileInput = {
         profile,
         run,
+        workspaceInstructions,
         permissionPolicy: resolvedPermission.permissionPolicy,
         signal,
         transcriptSessionId,
@@ -8413,12 +8550,6 @@ class WorkRunCoordinator {
         },
       };
       if (compiler && !["compaction", "automation"].includes(run.source)) {
-        if (this.hookService && (allowRecentHistoryRestore || nativePartialHistory)) {
-          // Give the read-only exit a chance to complete before Hooks run.
-          const preview = { ...compileInput, preview: true, preserveRecallPreparation: true };
-          if (compiler.compileAsync) await compiler.compileAsync(preview);
-          else compiler.compile(preview);
-        }
         const input = { ...compileInput, hookPreparation: await prepareHooks() };
         snapshot = compiler.compileAsync ? await compiler.compileAsync(input, captureMemoryVersion)
           : captureMemoryVersion(compiler.compile(input));
@@ -8433,9 +8564,6 @@ class WorkRunCoordinator {
     }
     signal?.throwIfAborted();
     const partialContinuation = snapshot?.report?.request?.partialContinuation;
-    if (nativePartialHistory && run.source !== "compaction" && !partialContinuation?.sourceIdentity) {
-      throw coordinatorError("CONTEXT_CONTINUATION_DETAILS_REQUIRED", "当前 Runtime 仍依赖不完整的历史");
-    }
     if (partialContinuation) {
       const current = this.chatSessionStore.getSession(boundSessionKey);
       if (current?.revision !== boundSession.revision || current?.runtimeBindingId !== boundSession.runtimeBindingId
@@ -8443,13 +8571,10 @@ class WorkRunCoordinator {
         throw coordinatorError("CONTEXT_SOURCE_STALE", "会话或 Runtime 绑定在接续准备后变化");
       }
     }
-    const workspaceExecution = { runtime: profile.runtime, source: run.source,
-      permissionMode: resolvedPermission.mode, permissionPolicy: resolvedPermission.permissionPolicy, workspaceExecutionVersion: 1 };
-    const workspaceInstructions = workspaceExecutionInstructions(workspaceExecution);
     const cronInstructions = run.source === "cron" ? CRON_INSTRUCTIONS : null;
     return Object.freeze({
       ...(run.source === "cron" ? { cronAuthorization: this.cronStore?.authorizationScope(
-        run.sourceId, run.profileId, this.domainCommands.get(run.id)?.prompt) ?? null } : {}),
+        run.sourceId, run.profileId, this.domainCommands.get(run.id)?.prompt, cronModel) ?? null } : {}),
       ...(workspaceAutoExecution(workspaceExecution) ? { workspaceExecutionVersion: 1 } : {}),
       runId: run.id,
       profileId: run.profileId,
@@ -8467,6 +8592,7 @@ class WorkRunCoordinator {
       bindingId: profile.selectedBindingId ?? profile.defaultBindingId ?? null,
       ...(modelSettings ? { modelSettings: Object.freeze({ ...modelSettings }) } : {}),
       workspace: run.workspace,
+      ...(agentWorkspace ? { agentWorkspace } : {}),
       contextSnapshotId: snapshot?.id ?? null,
       contextRevisions: snapshot?.revisions ? Object.freeze({ ...snapshot.revisions }) : null,
       contextRequest: snapshot?.report?.request ?? null,
@@ -8479,7 +8605,7 @@ class WorkRunCoordinator {
             runtimeSessionIdOf(boundSession), profile.selectedBindingId ?? profile.defaultBindingId) : []) || []),
       toolRegistryRevision: snapshot?.revisions?.tools ?? null,
       toolPermissionRevision: snapshot?.revisions?.permission ?? null,
-      turnDeveloperInstructions: [snapshot?.turnDeveloperInstructions, workspaceInstructions, cronInstructions].filter(Boolean).join("\n\n") || null,
+      turnDeveloperInstructions: [snapshot?.turnDeveloperInstructions ?? workspaceInstructions, cronInstructions].filter(Boolean).join("\n\n") || null,
       developerInstructions: [snapshot?.stableDeveloperInstructions ?? snapshot?.developerInstructions
         ?? (run.source === "proactive" ? require("./proactive-service").proactiveDeveloperInstructions(run)
           : run.source === "compaction" ? "Summarize conversation data without tools or side effects."
@@ -8490,7 +8616,7 @@ class WorkRunCoordinator {
           profileName: profile.name,
           backendId: profile.backendId,
           runtime: profile.runtime || "codex",
-        })), workspaceInstructions, cronInstructions].filter(Boolean).join("\n\n"),
+        })), snapshot?.turnDeveloperInstructions ? null : workspaceInstructions, cronInstructions].filter(Boolean).join("\n\n"),
       dynamicContext: snapshot?.dynamicContext ?? handoffSeed ?? null,
       dynamicContextWithoutTranscript: snapshot?.dynamicContextWithoutTranscript ?? null,
       reviewedMemoryIds: Object.freeze(Array.isArray(snapshot?.report?.memoryMatches)
@@ -9763,11 +9889,11 @@ class WorkRunCoordinator {
     });
     const sharing = this.contextCompiler?.memoryEngine?.sharing;
     if (!sharing?.hasRunDependencies?.(runId)) return commit();
-    const deadline = AbortSignal.timeout(BORROWED_OUTPUT_PROOF_TIMEOUT_MS);
+    const deadline = AbortSignal.timeout(BORROWED_OUTPUT_PROOF_TIMEOUT_MS * BORROWED_OUTPUT_PROOF_ATTEMPTS);
     while (true) {
       let terminalCommit;
       try {
-        await sharing.withRunReadProof(runId, deadline, () => {
+        await this.#withBorrowedOutputProof(runId, deadline, () => {
           const current = this.dispatcher.getRun(runId);
           if (this.borrowedOutput.has(runId) || this.borrowedMemoryStops.has(runId) || !ACTIVE_RUN_STATES.has(current?.status)
             || this.#executionContext(runId) !== context || !contextOwnsRun(current, context)) return;
@@ -11106,6 +11232,7 @@ class WorkRunCoordinator {
 
   #sessionStartParams(threadSource, profile, session) {
     return definedProperties({
+      ...(profile.runtime === "codex" && profile.agentWorkspace ? { agentWorkspace: profile.agentWorkspace } : {}),
       modelProvider: this.#routeModelProvider(profile),
       ...(this.temporarySecrets && ["codex", "pi", "opencode", "deepseek-harness", "grok-build"].includes(profile.runtime)
         ? { modelSecretScope: this.#modelSecretScope(profile, session) } : {}),
@@ -11121,6 +11248,7 @@ class WorkRunCoordinator {
 
   #sessionResumeParams(threadId, profile, session) {
     return definedProperties({
+      ...(profile.runtime === "codex" && profile.agentWorkspace ? { agentWorkspace: profile.agentWorkspace } : {}),
       modelProvider: this.#routeModelProvider(profile),
       ...(this.temporarySecrets && ["codex", "pi", "opencode", "deepseek-harness", "grok-build"].includes(profile.runtime)
         ? { modelSecretScope: this.#modelSecretScope(profile, session) } : {}),
@@ -11135,11 +11263,14 @@ class WorkRunCoordinator {
 
   #turnStartParams(threadId, profile, session, command, fresh = false) {
     const media = this.getMediaStore?.();
-    const attachments = command.attachments?.length ? prepareChatAttachments(media, command.attachments, session.sessionKey) : [];
+    const attachments = command.attachments?.length ? prepareChatAttachments(media, command.attachments, session.sessionKey, session.profileId) : [];
     // Protect the chat text before appending the original file input.
     const prompt = this.temporarySecrets && typeof command.prompt === "string"
       ? projectTextOrOriginal(this.temporarySecrets, this.#modelSecretScope(profile, session), command.prompt) : command.prompt;
     const params = { ...definedProperties({
+      ...(["claude-code", "codex"].includes(profile.runtime) && profile.agentWorkspace ? { agentWorkspace: profile.agentWorkspace } : {}),
+      ...(profile.runtime === "codex" && profile.source === "proactive" && profile.permissionPolicy.sandbox === "read-only"
+        ? { readOnlyReview: true } : {}),
       sessionId: threadId,
       operationId: command.operationId,
       prompt: attachmentPrompt(continuationPrompt(prompt, profile.continuationEvidence), attachments),

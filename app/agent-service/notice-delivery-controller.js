@@ -3,6 +3,7 @@ const { digest, fail } = require("./proactive-service-protocol");
 const { notificationPolicy } = require("./notification-policy");
 const { initialRuntimePermissionMode } = require("./runtime-permission-modes");
 const { createHash } = require("node:crypto");
+const { isBackgroundTaskReportEvent } = require("./background-task-protocol");
 const watchNoticeEventId = (watchId, noticeId) => `watch-notice-${createHash("sha256").update(watchId).update(noticeId).digest("hex")}`;
 function noticeMessage(notice) {
   const label = value => (value || "灵感便签").replace(/\s+/gu, " ").replace(/[\\\[\]()*_`<>]/gu, "\\$&");
@@ -11,8 +12,11 @@ function noticeMessage(notice) {
 }
 
 // Runless publications use Service-owned identities. Background output and
-// imported replies never receive this identity from a model.
+// imported replies never receive this identity from a model. A background
+// task report is the same kind of publication: it arrives outside the native
+// thread and is carried into the next turn as public conversation data.
 function isPublishedNoticeEvent(event) {
+  if (isBackgroundTaskReportEvent(event)) return true;
   const notice = event?.content?.proactiveNotice;
   return event?.kind === "assistant" && event.runId === null && event.runtimeRef === null
     && typeof notice?.id === "string" && /^notice-[a-f0-9]{64}$/u.test(notice.id)

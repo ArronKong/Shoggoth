@@ -73,24 +73,26 @@ const silentCron = { ...cron, id: 'silent-monitor', title: 'Tibo 额度重置监
   run: { backendId: 'native', jobId: 'monitor', runId: 'silent', status: 'ok', outputDisposition: 'silent' } };
 const monitorReport = { ...silentCron, id: 'monitor-report', summary: '额度重置已生效',
   run: { ...silentCron.run, runId: 'report', outputDisposition: 'deliver' } };
-const silentPage = { ...empty, items: [monitorReport, inspiration, silentCron] };
-await settle(() => { renderer = create(React.createElement(Feed, { ...props, firstPage: silentPage })); });
-assert.equal(rows(renderer).length, 2, 'Cached silent executions must be hidden without hiding the same task’s report');
+const skippedCron = { ...cron, id: 'skipped-monitor', title: 'Tibo 额度重置监测', summary: 'CRON_MISFIRE_SKIPPED',
+  run: { backendId: 'native', jobId: 'monitor', runId: 'skipped', status: 'skipped' } };
+const cachedPage = { ...empty, items: [monitorReport, inspiration, silentCron, skippedCron] };
+await settle(() => { renderer = create(React.createElement(Feed, { ...props, firstPage: cachedPage })); });
+assert.equal(rows(renderer).length, 2, 'Cached skipped and silent runs leave the same task’s report visible');
 assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '2', 'Visible rows and activity count agree');
 assert.match(textOf(renderer.toJSON()), /额度重置已生效/);
-fetchPage = async () => ({ ...empty, items: [silentCron, monitorReport] });
+fetchPage = async () => ({ ...empty, items: [silentCron, skippedCron, monitorReport] });
 await settle(() => tabs(renderer).props.onChange('cron'));
-assert.equal(rows(renderer).length, 1, 'Task-filter responses from older servers also hide silent output');
+assert.equal(rows(renderer).length, 1, 'Task-filter responses from older servers also hide skipped and silent runs');
 assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
 await settle(() => renderer.unmount());
-fetchPage = async () => ({ ...empty, items: [silentCron, monitorReport] });
+fetchPage = async () => ({ ...empty, items: [silentCron, skippedCron, monitorReport] });
 await settle(() => { renderer = create(React.createElement(Feed, { ...props,
-  firstPage: { ...empty, items: [silentCron], hasMore: true, nextCursor: 'after-silent' },
+  firstPage: { ...empty, items: [silentCron, skippedCron], hasMore: true, nextCursor: 'after-hidden' },
 })); });
-assert.equal(rows(renderer).length, 1, 'An all-silent page still loads the next page and reaches real output');
+assert.equal(rows(renderer).length, 1, 'An all-hidden page still loads the next page and reaches real output');
 assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '1');
 await settle(() => renderer.update(React.createElement(Feed, { ...props,
-  firstPage: { ...empty, items: [silentCron] },
+  firstPage: { ...empty, items: [silentCron, skippedCron] },
 })));
 assert.equal(rows(renderer).length, 0);
 assert.equal(textOf(renderer.root.findByProps({ className: 'dash-section-count' })), '0');

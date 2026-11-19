@@ -147,7 +147,10 @@ function summary(state) {
 }
 
 function compile(f) {
-  const budget = conversationContextBudget(64000);
+  // Room for the full product tool catalog plus this fixture's history. These
+  // tests check checkpoint freshness, not how a tight window truncates; 64K had
+  // under 1K tokens to spare once the catalog reached 179 tools.
+  const budget = conversationContextBudget(72000);
   return f.compiler.compile({ profile: f.profile, run: f.run,
     transcriptSessionId: f.transcriptSessionId, contextLifecycleV1: true,
     transcriptTokenBudget: budget.triggerTokens, requestBudget: budget,

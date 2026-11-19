@@ -19,6 +19,10 @@ import type { RuntimeContextUsage, RuntimeContextCapabilities, ProductContextSta
 import ChatResponseMetadata from "./ChatResponseMetadata";
 import { compactConversation, runShoggothBackgroundAction, getShoggothProductStatus } from "../api/client";
 import { prepareChatInputForSend, prewarmChatSession } from "../api/client";
+import { listBackgroundTasks } from "../api/client";
+import type { BackgroundTask, BackgroundTaskReportMeta, BackgroundTaskStatus } from "../types";
+import BackgroundTaskCard from "./chat-background-task/BackgroundTaskCard";
+import BackgroundTaskModal from "./chat-background-task/BackgroundTaskModal";
 import { publishSystemIssue } from "../lib/system-issues";
 import { setInspirationChatSession } from "../lib/inspiration-navigation";
 import { toSanitizedMarkdownHtml, formatReasoningMarkdown } from "../lib/markdown";
@@ -96,6 +100,7 @@ import {
 } from "../lib/chatWidget";
 import ChatModelMenu from "./ChatModelMenu";
 import ChatSessionMenu from "./ChatSessionMenu";
+import ChatMessageNavigator, { type ChatMessageNavigationEntry } from "./ChatMessageNavigator";
 import { sessionReadAt, hasUnreadReply,
   observeSessionReply, readSessionThrough, supportsSessionUnread, anchorUnreadMessage } from "../lib/chatUnread";
 import { useChatUnread } from "../lib/useChatUnread";
@@ -634,6 +639,8 @@ interface ChatMsg {
   historySource?: "hermes";
   automation?: "cron" | "continuation";
   proactiveNoticeId?: string;
+  // A report a background task posted into this chat; published like a notice.
+  backgroundReport?: BackgroundTaskReportMeta;
   sourceEventIds?: string[];
   canonicalSourceEventId?: string;
   continuationSource?: { eventId: string; hasAttachments: boolean };
@@ -1292,6 +1299,8 @@ function normalize(raw: any): ChatMsg {
     automation: raw?.automation === "continuation" ? "continuation"
       : raw?.automation === "cron" || role === "user" && raw?.shoggoth?.source === "cron" ? "cron" : undefined,
     proactiveNoticeId: typeof raw?.shoggoth?.proactiveNotice?.id === "string" ? raw.shoggoth.proactiveNotice.id : undefined,
+    backgroundReport: role === "assistant" && typeof raw?.shoggoth?.backgroundTaskReport?.taskId === "string"
+      ? raw.shoggoth.backgroundTaskReport as BackgroundTaskReportMeta : undefined,
     nativeDisplayId: raw?.shoggoth?.nativeUiVersion === 1 && typeof raw.shoggoth.displayId === "string" ? raw.shoggoth.displayId : undefined,
     nativeRunId: raw?.shoggoth?.nativeUiVersion === 1 && typeof raw.shoggoth.runId === "string" ? raw.shoggoth.runId : undefined,
     promptResponse: role === "user" && raw?.shoggoth?.promptResponse === true ? true : undefined,
@@ -1867,7 +1876,7 @@ function collapseErrorRuns(msgs: ChatMsg[]): ChatMsg[] {
 function groupMessages(msgs: ChatMsg[]): Group[] {
   const groups: Group[] = [];
   // Published reminders are assistant bubbles with their own timestamp and actions.
-  const standalone = (m: ChatMsg) => !!(m.divider || m.notice || m.proactiveNoticeId
+  const standalone = (m: ChatMsg) => !!(m.divider || m.notice || m.proactiveNoticeId || m.backgroundReport
     || (m.role === "user" && (m.images?.length || m.files?.length)));
   for (const m of msgs) {
     const last = groups[groups.length - 1];
@@ -1922,7 +1931,7 @@ function absorbTurnTimelines(msgs: ChatMsg[], lastLiveSteps?: TurnStep[], native
     .map(m => m.nativeRunId));
   const inlineCompaction = (m: ChatMsg) => m.notice === "contextCompacted" && !!m.nativeRunId && nativeReplies.has(m.nativeRunId);
   const nativePending = (m: ChatMsg) => !!observedRun && m.nativeRunId === observedRun && m.pending === true;
-  const isBoundary = (x: ChatMsg) => x.role === "user" || !!x.divider || (!!x.notice && !inlineCompaction(x)) || !!x.proactiveNoticeId
+  const isBoundary = (x: ChatMsg) => x.role === "user" || !!x.divider || (!!x.notice && !inlineCompaction(x)) || !!x.proactiveNoticeId || !!x.backgroundReport
     || x.local === true || (x.pending === true && !nativePending(x));
   const isProcessPart = (p: Part) => p.type === "thinking" || p.type === "toolCall" || p.type === "toolResult" || p.type === "plan"
     || (p.type === "text" && p.activity === true);
@@ -3089,6 +3098,11 @@ function ChatPageApp() {
   };
   // 聊天面能力（附件种类/上限）按 agent 缓存；ref 供事件回调读取最新值。
   const [chatCaps, setChatCaps] = useState<Record<string, ChatCapabilities>>({});
+  // Background tasks dispatched from the open chat; reloaded on Service changes.
+  const [backgroundTasks, setBackgroundTasks] = useState<{ key: string; tasks: BackgroundTask[] } | null>(null);
+  const [backgroundRevision, setBackgroundRevision] = useState(0);
+  const [backgroundPoll, setBackgroundPoll] = useState(0);
+  const [openBackgroundTask, setOpenBackgroundTask] = useState<{ key: string; taskId: string } | null>(null);
   const chatCapsRef = useRef(chatCaps);
   chatCapsRef.current = chatCaps;
   const capabilitiesForSession = useCallback((key: string) => runtimeModelsRef.current.key === key && runtimeModelsRef.current.data
@@ -3272,6 +3286,7 @@ function ChatPageApp() {
   const searchHistoryWindowKeyRef = useRef<string | null>(null);
   const [searchTargetGroupKey, setSearchTargetGroupKey] = useState<string | null>(null);
   const searchTargetClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearMessageNavigationTargetRef = useRef<(() => void) | null>(null);
   // Auto-stick depends on proximity to the bottom; the jump pill independently
   // depends on whether any part of the latest rendered message is visible.
   const [showJump, setShowJump] = useState(false);
@@ -4492,6 +4507,15 @@ function ChatPageApp() {
           sessionsRefreshTimerRef.current = null;
           void refreshSessions().catch(() => {});
         }, 150);
+        return;
+      }
+      if (f.type === "event" && f.event === "background.tasks.changed") {
+        const key = f.payload?.sessionKey;
+        if (typeof key === "string" && key === activeKeyRef.current) {
+          setBackgroundRevision(value => value + 1);
+          // A report may have been posted into this chat.
+          void loadHistory(key, { refresh: true });
+        }
         return;
       }
       if (f.type === "event" && f.event === "chat.ui.revoked") {
@@ -6041,6 +6065,11 @@ function ChatPageApp() {
     setTimeout(() => setToast(null), 4200);
   };
 
+  const canStartChatSend = (key: string) => sendControllerRef.current.canSend(key)
+    && !preparingSecretInputRef.current.has(key)
+    && !inFlightRef.current.has(key)
+    && !hasPendingTrackedSend(key);
+
   // Send text (+ optional attachments) as a chat message via chat.send. `isSlash`
   // shows a slow-operation hint after a quiet period. Only a real terminal
   // event, cancellation or reconciliation may release the in-flight operation.
@@ -6056,8 +6085,7 @@ function ChatPageApp() {
     const key = activeKeyRef.current;
     // 防御性门禁：即使某个新入口绕过 submit，也不能在 Hermes profile 尚未 ready
     // 时制造 RPC、乐观气泡或缓存写入。
-    if (!key || preparingSecretInputRef.current.has(key) || !sendController.canSend(key) || inFlightRef.current.has(key)
-      || hasPendingTrackedSend(key)) return;
+    if (!key || !canStartChatSend(key)) return;
     // Keep the chip editable until the prepared message takes its place in
     // chat, or a definite failure returns it to the original draft.
     const ownsInput = () => !queued || sendQueueRef.current.get(key)?.[0] === queued;
@@ -6098,6 +6126,7 @@ function ChatPageApp() {
       }
       recent.at = nowTs;
       if (trackedSend && !rememberPendingTrackedSend(key, recent.idem, undefined, originalBackend)) {
+        if (!queued) restoreSendDraft(key, text, atts);
         setError(t("chat.sendTrackingUnavailable"));
         return;
       }
@@ -6128,7 +6157,8 @@ function ChatPageApp() {
       else displayText = (await prepareChatInputForSend(key, `${idem}:display`, displayText)).text;
       if (!ownsInput()) return;
       if (activeKeyRef.current !== key || !sendControllerRef.current.canSend(key)
-        || backendOfSession(key) !== originalBackend || inFlightRef.current.has(key) || hasPendingTrackedSend(key)) {
+        || wsRef.current?.readyState !== WebSocket.OPEN || backendOfSession(key) !== originalBackend
+        || inFlightRef.current.has(key) || hasPendingTrackedSend(key)) {
         if (!queued) { telemetry?.finish("canceled"); restoreSendDraft(key, text, atts); }
         return;
       }
@@ -6372,7 +6402,13 @@ function ChatPageApp() {
   // 队首消息打进降级面并撞回 UPSTREAM_DOWN。connectedBackends 为 null = 首次探测还没
   // 回来，乐观放行（与 agent 列表的乐观显示同口径）。
   const queueSendable = (key: string): boolean =>
-    connected && (connectedBackends == null || connectedBackends.has(backendOfSession(key)));
+    connected && wsRef.current?.readyState === WebSocket.OPEN
+    && (connectedBackends == null || connectedBackends.has(backendOfSession(key)));
+  // 新消息和队首共用发送门禁。连不上或会话已不在列表时，待发消息仍可取回编辑。
+  const canDispatchComposerMessage = (key: string) => key === activeKeyRef.current
+    && canStartChatSend(key)
+    && queueSendable(key)
+    && sessionsRef.current.some((session) => session.key === key);
   const bumpQueue = () => setQueueTick((t) => t + 1);
   const enqueueMessage = (key: string, text: string, atts: ChatAttachment[]) => {
     const q = sendQueueRef.current.get(key) ?? [];
@@ -6382,22 +6418,10 @@ function ChatPageApp() {
     sendQueueRef.current.set(key, q);
     bumpQueue();
   };
-  // 队首补发。每次触发都重新校验：仅活跃会话（sendChatMessage 写死 activeKey，背景
-  // 会话终结不发、切回时由 effect 补）、无进行中回合、队列非空。回合终结时
-  // recentSendRef 已清（R342），链式补发不会被 DUP_SEND_WINDOW_MS 折叠误伤。
+  // 背景会话切回时由 effect 补发。回合终结时 recentSendRef 已清（R342），
+  // 队首不会被 DUP_SEND_WINDOW_MS 折叠误伤。
   const flushQueue = (key: string) => {
-    if (!key || key !== activeKeyRef.current) return;
-    // 必须早于读取/shift 队首；其他 Hermes profile ready 不能吃掉当前 profile 的消息。
-    if (!sendController.flushQueue(key, () => true)) return;
-    if (inFlightRef.current.has(key)) return;
-    if (hasPendingTrackedSend(key)) return;
-    // 连不上就**不出队**：此时 chat.send 必抛错（WS 断 →「未连接」；网关降级 →
-    // UPSTREAM_DOWN），队首消息会被红错泡吃掉、内容彻底丢失。留在队列里（chip 照常
-    // 显示、可取回编辑、可删），等连接回来再补发——用户在断线那几十秒里打的字不白打。
-    if (!queueSendable(key)) return;
-    // 会话可能在断线期间被删掉 / 被网关自愈重置。别往一个已不存在的 key 上打——留在
-    // 队列里等用户处理（chip 可取回编辑）比静默发进一条野会话好。
-    if (!sessionsRef.current.some((s) => s.key === key)) return;
+    if (!canDispatchComposerMessage(key)) return;
     const q = sendQueueRef.current.get(key);
     if (!q?.length) return;
     const item = q[0]!;
@@ -7036,8 +7060,7 @@ function ChatPageApp() {
       || (parsedSlash.command.name === "clear" && parsedSlash.command.execution === "client"
         && parsedSlash.command.source !== "Shoggoth"));
     const inFlight = inFlightRef.current.has(key);
-    // R357：生成中仅拦 slash 形态（识别与否都维持原「静默忽略」，run-control 照旧放行）；
-    // 普通消息放行 → 走下方统一入队路径（排队，回合终结后链式补发）。
+    // 生成中仅拦截 slash 形态的非回合控制命令。普通消息仍可插话或排队。
     const looksSlash = !isContinuation && !attachments.length && (parsedSlash !== null || isSlashCommandInput(text));
     if (inFlight && looksSlash && !isRunControl) return;
 
@@ -7136,8 +7159,11 @@ function ChatPageApp() {
       await sendSteeringMessage(key, outgoing);
       return;
     }
-    // 空闲时立即新开一轮；Runtime 不支持 steering、Run 尚未 running，
-    // 或消息带附件时继续使用待发队列，保持原有保序与断线恢复语义。
+    if (!sendQueueRef.current.get(key)?.length && canDispatchComposerMessage(key)) {
+      await sendChatMessage(outgoing, atts);
+      return;
+    }
+    // 暂时无法开启新回合，或者已有待发消息时，按队列顺序发送。
     enqueueMessage(key, outgoing, atts);
     flushQueue(key);
   };
@@ -8793,7 +8819,7 @@ function ChatPageApp() {
         const runId = message.activityRunId || message.nativeRunId;
         // Sealing commentary creates a new pending message but keeps the same live turn.
         // Legacy histories may lack a Run ID; use the original tool identity within the pending group.
-        const ownsLiveActivity = pending && !message.notice && !message.divider && !message.local && !message.proactiveNoticeId && (message === pending
+        const ownsLiveActivity = pending && !message.notice && !message.divider && !message.local && !message.proactiveNoticeId && !message.backgroundReport && (message === pending
           || (timeline?.activityId !== undefined && message.interimActivityId === timeline.activityId)
           || (nativeRun && message.nativeRunId === nativeRun)
           || (observedRun && message.activityRunId === observedRun)
@@ -8899,6 +8925,71 @@ function ChatPageApp() {
       parts: keyedChatChildren(message.item, "part", message.item.parts),
     })),
   })), [keyedShownGroups]);
+  const showMessageNavigator = !!(activeKey && historyVisible && !activeGroupId && !immersive && !activeAgentHeaderPanel
+    && (!showSessionBoard || sessionBoardViewMode === "chat"));
+  const messageNavigation = useMemo(() => {
+    const entries: ChatMessageNavigationEntry[] = [];
+    if (!showMessageNavigator) return entries;
+    let awaitingReply: ChatMessageNavigationEntry | undefined;
+    for (const { key: groupKey, messages: groupMessages } of keyedThreadGroups) {
+      for (const { item: message, key: messageKey } of groupMessages) {
+        if (message.divider) awaitingReply = undefined;
+        if (message.role === "user") {
+          awaitingReply = undefined;
+          if (message.local || isNoiseForPreview(message)) continue;
+          const text = stripPreviewMd(msgText(message).slice(0, 512))
+            || message.files?.map(file => file.name).join(", ")
+            || (message.images?.length ? t("chat.messageNavigatorImages", { count: message.images.length }) : "");
+          if (!text) continue;
+          awaitingReply = { groupKey, messageKey, text, ts: message.ts };
+          entries.push(awaitingReply);
+        } else if (awaitingReply && message.role === "assistant" && !message.pending && !message.finalReplyStreaming
+          && !message.interimActivityId && !message.notice && !message.stopReason?.includes("error")
+          && !message.local && !message.automation && !message.proactiveNoticeId && !message.backgroundReport) {
+          const part = message.parts.find(part => part.type === "text" && !part.activity && part.text?.trim());
+          const reply = stripPreviewMd(part?.text?.slice(0, 512) ?? "");
+          if (reply) {
+            awaitingReply.reply = reply;
+            awaitingReply = undefined;
+          }
+        }
+      }
+    }
+    return entries;
+  }, [keyedThreadGroups, showMessageNavigator, t]);
+
+  useEffect(() => () => clearMessageNavigationTargetRef.current?.(), [activeKey]);
+  const jumpFromMessageNavigator = ({ groupKey, messageKey }: ChatMessageNavigationEntry) => {
+    const thread = threadRef.current;
+    const owner = groupRefs.current.get(groupKey)?.querySelector<HTMLElement>(`[data-message-key="${CSS.escape(messageKey)}"]`);
+    const target = owner?.querySelector<HTMLElement>(":scope > :is(.chat-bubble, .chat-att-row)");
+    if (!activeKey || !thread || !owner || !target || !thread.contains(target)) return false;
+    cancelInitialScroll();
+    const landing = unreadLandingRef.current;
+    if (landing?.key === activeKey && landing.pending) {
+      landing.pending = false;
+      setUnreadAnchor({ key: activeKey, messageId: null, pending: false });
+    }
+    sendAnchorRef.current = false;
+    anchoredRef.current = false;
+    anchoredUserOffsetRef.current = null;
+    atBottomRef.current = false;
+    settledKeyRef.current = activeKey;
+    if (streamSpacerRef.current) streamSpacerRef.current.style.height = "0px";
+    unreadScrollCleanupRef.current = anchorUnreadMessage(thread, target);
+    updateJumpVisibility();
+
+    clearMessageNavigationTargetRef.current?.();
+    owner.setAttribute("data-chat-message-located", "");
+    const clear = () => {
+      clearTimeout(timer);
+      owner.removeAttribute("data-chat-message-located");
+      clearMessageNavigationTargetRef.current = null;
+    };
+    const timer = setTimeout(clear, 1600);
+    clearMessageNavigationTargetRef.current = clear;
+    return true;
+  };
   // Keep the previous reply laid out when the loading bubble becomes the newest reply.
   const latestAssistantMessageKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -9075,6 +9166,49 @@ function ChatPageApp() {
       : null
   ), [groupChatEnabled, activeKey, openContinuationGroup, t]);
 
+  const backgroundTasksSupported = !!(activeKey && chatCaps[agentOf(activeKey)]?.backgroundTasks);
+  useEffect(() => {
+    if (!activeKey || !backgroundTasksSupported) { setBackgroundTasks(null); return; }
+    const controller = new AbortController(), key = activeKey;
+    listBackgroundTasks(key, controller.signal).then(result => {
+      if (!controller.signal.aborted) setBackgroundTasks({ key, tasks: result.tasks });
+    }, () => { /* cards are optional; the chat stays usable */ });
+    return () => controller.abort();
+  }, [activeKey, backgroundTasksSupported, backgroundRevision, backgroundPoll]);
+  const liveBackgroundTasks = !!backgroundTasks?.tasks.some(task => (["starting", "queued", "running", "stopping",
+    "waiting_approval", "waiting_input"] as BackgroundTaskStatus[]).includes(task.status));
+  useEffect(() => {
+    // Run-state changes (queued, running, waiting) are not pushed; refresh the card while a task is unfinished.
+    if (!liveBackgroundTasks) return;
+    const timer = setInterval(() => setBackgroundPoll(value => value + 1), 4000);
+    return () => clearInterval(timer);
+  }, [liveBackgroundTasks]);
+  // Each dispatching reply shows its tasks under its last message.
+  const backgroundTaskAnchors = useMemo(() => {
+    const anchors = new Map<string, ChatMsg>();
+    if (!backgroundTasks?.tasks.length) return anchors;
+    const runs = new Set(backgroundTasks.tasks.map(task => task.sourceRunId));
+    for (const { item: group } of keyedShownGroups) for (const message of group.msgs) {
+      if (message.role === "assistant" && message.nativeRunId && runs.has(message.nativeRunId)) anchors.set(message.nativeRunId, message);
+    }
+    return anchors;
+  }, [backgroundTasks, keyedShownGroups]);
+  const renderBackgroundTasks = useCallback((message: ChatMsg) => {
+    if (!activeKey) return null;
+    const report = message.backgroundReport;
+    if (report) {
+      return <button key={`background-report:${report.taskId}:${report.generation}`} type="button" className="chat-continuation-action"
+        onClick={() => setOpenBackgroundTask({ key: activeKey, taskId: report.taskId })}>
+        {t("backgroundTask.reportFrom")} · {report.title} · {t("backgroundTask.openDetails")}
+      </button>;
+    }
+    const runId = message.nativeRunId;
+    if (!runId || backgroundTaskAnchors.get(runId) !== message || backgroundTasks?.key !== activeKey) return null;
+    return backgroundTasks.tasks.filter(task => task.sourceRunId === runId).map(task =>
+      <BackgroundTaskCard key={`background-task:${task.taskId}`} task={task}
+        onOpen={() => setOpenBackgroundTask({ key: activeKey, taskId: task.taskId })} />);
+  }, [activeKey, backgroundTaskAnchors, backgroundTasks, t]);
+
   const immersiveMessages = useMemo(() => {
     if (!immersive) return [];
     const out: ImmersiveMessage[] = [];
@@ -9188,7 +9322,7 @@ function ChatPageApp() {
         );
         const liveMessage = seg.msgs.find(message => message.pending);
         const activity = seg.cls === "chat" ? footerActivityFor(g, seg.msgs[seg.msgs.length - 1]) : undefined;
-        const proactiveNoticeId = seg.cls === "chat" ? seg.msgs[0].proactiveNoticeId : undefined;
+        const proactiveNoticeId = seg.cls === "chat" ? seg.msgs[0].proactiveNoticeId ?? seg.msgs[0].backgroundReport?.taskId : undefined;
         const awaitingPrompt = chatPromptAttentionOf(prompts);
         const pendingTail = liveMessage?.parts.at(-1);
         const loadingReply = !livePreview && !awaitingPrompt && pendingTail?.type === "text" && !pendingTail.text?.trim();
@@ -9229,6 +9363,7 @@ function ChatPageApp() {
                 ? nativeUiLegacySources(m).map(({ text, sourceEventId }) => <LegacyChatUi key={`legacy:${sourceEventId}`} text={text}
                   sourceEventId={sourceEventId} backend={activeBackend} agentId={agentOf(activeKey || "")} sessionKey={activeKey || ""} visible />) : []),
               renderGroupContinuation(m),
+              renderBackgroundTasks(m),
             ]) : undefined,
           pending: (!!liveMessage && !awaitingPrompt && !loadingReply) || undefined,
           prompts: prompts.length ? prompts : undefined,
@@ -9256,7 +9391,7 @@ function ChatPageApp() {
       out.push(...kept);
     }
     return out;
-  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn, subagentRevision, subagentActivity, runWaitBySession, renderGroupContinuation]);
+  }, [immersive, keyedShownGroups, unreadAnchor, latestNativeUiSourceEventId, pinnedIds, t, imageContext, activeLegacyHtmlPolicy, activeBackend, activeKey, activeBackendDescriptor?.surfaces.agentHarness, activityByOwner, activityFooterGroups, pendingActivityOwners, liveTurn, subagentRevision, subagentActivity, runWaitBySession, renderGroupContinuation, renderBackgroundTasks]);
   // 沉浸模式的 agent 状态相位（背景媒体层 + 轻量状态行共用）。判据全部是「事件到没到」，
   // 零后端特判（铁律 1）：OpenClaw 不发 thinking/prompt 事件 → 对应相位自然不出现，由
   // 素材回退链兜退化。这是未滞回的原始相位——防抖/最短展示在 ImmersiveBackdrop 内做
@@ -10063,6 +10198,11 @@ function ChatPageApp() {
 
   return (
     <ChatMediaContext.Provider value={imageContext}>
+    {openBackgroundTask && openBackgroundTask.key === activeKey ? (
+      <BackgroundTaskModal key={openBackgroundTask.taskId} sessionKey={openBackgroundTask.key} taskId={openBackgroundTask.taskId}
+        agentName={chatAgentDisplayName(agentOf(openBackgroundTask.key))} revision={backgroundRevision}
+        onChanged={() => setBackgroundPoll(value => value + 1)} onClose={() => setOpenBackgroundTask(null)} />
+    ) : null}
     {advancedProbe && advancedProbe.key === activeKey ? (
       <SessionAdvancedModal
         key={`${advancedProbe.backendId}:${advancedProbe.key}`}
@@ -10342,7 +10482,6 @@ function ChatPageApp() {
 
       {activeGroupId && (
         <section className="chat-conv">
-          {recoveryCard && <div className="chat-status-notices">{recoveryCard}</div>}
           <GroupChatPanel key={`${groupCacheScope}:${activeGroupId}`} groupId={activeGroupId} cache={groupPanelCache} cacheScope={groupCacheScope}
             backends={chatBackendCatalog}
             onArchived={() => { setOpenGroup(null); void refreshGroupChats(); }}
@@ -10353,11 +10492,11 @@ function ChatPageApp() {
                 : previous)}
             agents={agents.map((g) => ({ backendId: backendOfKnownAgent(g.agentId), agentId: g.agentId,
               name: g.sessions[0].agentName || chatAgentDisplayName(g.agentId) }))} />
+          {recoveryCard && <div className="chat-status-notices">{recoveryCard}</div>}
         </section>
       )}
       <section className={`chat-conv is-board-${showSessionBoard ? sessionBoardViewMode : "chat"}`} data-native-ui-surface
         style={activeGroupId ? { display: "none" } : undefined}>
-        {!immersive && statusNotices && <div className="chat-status-notices">{statusNotices}</div>}
         {toast && (
           <div className={`chat-toast chat-toast--${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"}>
             <span className="chat-toast__text" title={toast.text}>{toast.text}</span>
@@ -10567,7 +10706,16 @@ function ChatPageApp() {
               tabIndex={0} role="region" aria-label={t("chat.historyLabel")}
               {...(activeAgentHeaderPanel ? { inert: "", "aria-hidden": true } : {})}
               onScroll={onThreadScroll} onWheel={onThreadHistoryInput} onKeyDown={onThreadHistoryInput}
-              onPointerDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}
+              onFocus={event => {
+                if (event.target === event.currentTarget) {
+                  event.currentTarget.toggleAttribute("data-thread-keyboard-focus", event.currentTarget.matches(":focus-visible"));
+                }
+              }}
+              onPointerDownCapture={event => {
+                event.currentTarget.removeAttribute("data-thread-keyboard-focus");
+                cancelInitialScroll();
+                stoppedScrollKeyRef.current = null;
+              }}
               onKeyDownCapture={() => { cancelInitialScroll(); stoppedScrollKeyRef.current = null; }}>
               <div className="chat-thread__inner">
                 {historyControl}
@@ -10939,6 +11087,7 @@ function ChatPageApp() {
                               );
                               })}
                               {renderGroupContinuation(m)}
+                              {renderBackgroundTasks(m)}
                             </div>
                           ))}
                           {g === liveTurn?.group && liveBubble && <ChatLiveActivityBubble className="chat-bubble" {...liveBubble} />}
@@ -10963,7 +11112,7 @@ function ChatPageApp() {
                               <IconRetry />
                             </button>
                           )}
-                          {(!last.proactiveNoticeId && footerActivity && !footerActivity.live) && (
+                          {(!last.proactiveNoticeId && !last.backgroundReport && footerActivity && !footerActivity.live) && (
                             <button type="button" className="chat-copybtn" data-chat-footer-icon="" aria-haspopup="dialog"
                               aria-label={t("turnLab.processOpen")} title={t("turnLab.processOpen")}
                               onClick={() => footerActivity && openTimelineModal(footerActivity)}>
@@ -11017,6 +11166,13 @@ function ChatPageApp() {
                 <div ref={bottomRef} />
               </div>
             </div>
+
+            {messageNavigation.length > 0 && <ChatMessageNavigator
+              key={JSON.stringify([activeKey, historyPager.current?.sourceId])} threadRef={threadRef}
+              entries={messageNavigation} onSelect={jumpFromMessageNavigator}
+              loadEarlier={earlierHistory.key === activeKey && earlierHistory.cursor && searchHistoryWindowKeyRef.current !== activeKey
+                ? loadEarlierHistory : undefined}
+              loadingEarlier={earlierHistory.loading} earlierFailed={earlierHistory.error} />}
 
             {showSessionBoard && sessionBoardViewMode !== "chat" ? (
               <div className="chat-board-pane">
@@ -11204,6 +11360,7 @@ function ChatPageApp() {
             </div>
           </>
         )}
+        {!immersive && statusNotices && <div className="chat-status-notices">{statusNotices}</div>}
       </section>
     </div>
     </GroupMemberConnectionContext.Provider>

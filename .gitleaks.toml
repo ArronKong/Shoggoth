@@ -9,3 +9,13 @@ condition = "AND"
 paths = ['''(?:^|/)app/agent-service/data/baidu-ai-map-upstream/SKILL\.md$''']
 regexTarget = "secret"
 regexes = ['''^abc123def456$''']
+
+# PostHog project tokens are public client ingestion identifiers.
+# https://posthog.com/docs/api#authentication
+[[allowlists]]
+description = "Shoggoth public client capture identifier"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(?:^|/)app/product-telemetry-build-config\.js$''']
+regexTarget = "secret"
+regexes = ['''^phc_qguMYNYWoGfZX8usbqzu8aNwDfuu93wnSmgB6GKDXw3f$''']

@@ -273,6 +273,7 @@ export class BridgeRuntime {
       case "models/list": return this.modelsList();
       case "commands/list": return this.commandsList(params);
       case "auth/read": return this.authRead();
+      case "quota/read": return this.quotaRead(params);
       case "model/generate": return this.generateModelOnly(params);
       case "model/describe": return this.describeModel(params);
       case "model/resolve": {
@@ -460,6 +461,36 @@ export class BridgeRuntime {
     const credentialPresent = descriptions.some((description) => description?.configured === true)
       || records.length > 0;
     return { authenticated: credentialPresent, credentialPresent };
+  }
+
+  async quotaRead({ version }) {
+    const account = this.ctx.get("deepseekAccount");
+    if (typeof account?.getBalance !== "function" || typeof account.getState !== "function"
+      || !safeString(version, 128)) return { status: "unsupported" };
+    const state = await account.getState();
+    if (state?.status !== "credential-stored") return { status: "unsupported" };
+    const client = {
+      version, locale: "en", timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60,
+    };
+    const [balance, profile] = await Promise.all([
+      account.getBalance(client),
+      typeof account.getProfile === "function" ? Promise.resolve().then(() => account.getProfile(client)).catch(() => null) : null,
+    ]);
+    if (balance?.status !== "ready") return { status: "unavailable" };
+
+    const wallets = [];
+    for (const [source, kind] of [[balance.value, "recharge"], [balance.bonusWallets, "bonus"]]) {
+      if (!Array.isArray(source)) continue;
+      for (const unit of ["USD", "CNY"]) {
+        const amountText = source.find(wallet => wallet?.currency === unit)?.balance;
+        if (!safeString(amountText, 128) || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/u.test(amountText)) continue;
+        const amount = Number(amountText);
+        if (Number.isFinite(amount) && amount > 0 && amount <= Number.MAX_SAFE_INTEGER) wallets.push({ kind, amount, unit });
+      }
+    }
+    const identity = profile?.status === "ready" ? profile.value : null;
+    const accountName = [identity?.name, identity?.contact].find(value => safeString(value, 254) && value.trim());
+    return wallets.length ? { status: "available", wallets, ...(accountName ? { accountName } : {}) } : { status: "unsupported" };
   }
 
   validateSessionParams(params) {

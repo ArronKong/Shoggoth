@@ -283,6 +283,22 @@ async function run() {
     const file = path.join(root, `nine-page-${link.href.replace(/[^a-z0-9]/gi, "")}.png`);
     fs.writeFileSync(file, (await mainWindow.webContents.capturePage()).toPNG(), { mode: 0o600 }); report.screenshots.push(file);
     if (link.href === "#/cron") {
+      await js("document.querySelector('.cron-new').click();void 0");
+      await until(() => js(`(()=>{
+        const dialog=document.querySelector('.cron-form-modal');
+        const model=dialog?.querySelector('.chat-pill--model');
+        const assistant=model?.closest('.field-row')?.querySelector('button.field-input');
+        const content=dialog?.querySelector('textarea');
+        if (!model||!assistant||!content) return false;
+        const m=model.getBoundingClientRect(),a=assistant.getBoundingClientRect(),p=content.getBoundingClientRect();
+        return assistant.textContent.includes(${JSON.stringify(`${profile.name} · Shoggoth`)})
+          &&model.textContent.includes('Fixture model')&&model.textContent.endsWith('（默认）')
+          &&Math.abs(m.top-a.top)<1&&m.left>a.left&&a.top>=p.bottom;
+      })()`), "Cron prefills the connected primary Agent and its model below the execution content");
+      assert.equal(service.productStore.listWorkRuns().length, 0, "opening the Cron form starts no model run");
+      report.cronCreateDefault = profile.agentId;
+      await js("document.querySelector('.cron-form-modal button.btn-secondary').click();void 0");
+      await until(() => js("!document.querySelector('.cron-form-modal')"), "Cron editor closed without creating a job");
       const hasWatchButton = "Array.from(document.querySelectorAll('main.content button')).some(button=>['条件守望','Condition watches'].includes(button.textContent.trim()))";
       assert.equal(await js(hasWatchButton), false);
       await js("location.hash='/cron?view=watches';void 0");

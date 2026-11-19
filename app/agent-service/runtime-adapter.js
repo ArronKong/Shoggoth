@@ -20,6 +20,7 @@ const RUNTIME_CAPABILITY_KEYS = Object.freeze([
   "commands.list",
   "commands.execute",
   "account.read",
+  "account.quota.read",
   "account.login",
   "account.logout",
   "events",

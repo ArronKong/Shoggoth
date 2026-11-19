@@ -6,6 +6,7 @@ const path = require("node:path");
 const { validateRuntimeAccount } = require("./runtime-account");
 const { resolveNativeHome } = require("./runtime-account-resolver");
 const {
+  RUNTIME_ACCOUNT_QUOTA_RUNTIMES,
   RUNTIME_ACCOUNT_SERVICE_METHOD_SET,
   validateRuntimeAccountServiceParams,
   validateRuntimeAccountServiceResult,
@@ -239,6 +240,11 @@ class RuntimeAccountServiceController {
     } else if (method === "runtime.account.auth.read") {
       this.#authAccount(params.runtimeAccountId, accounts);
       result = await this.accountAuthManager.read({ runtimeAccountId: params.runtimeAccountId });
+    } else if (method === "runtime.account.quota.read") {
+      const account = this.#account(params.runtimeAccountId, accounts);
+      result = RUNTIME_ACCOUNT_QUOTA_RUNTIMES.has(account.runtime)
+        && typeof this.accountAuthManager.readQuota === "function"
+        ? await this.accountAuthManager.readQuota(params) : { status: "unsupported" };
     } else if (method === "runtime.account.login.start") {
       const manager = this.#loginManager(params.runtimeAccountId, accounts);
       // A runtime that signs into a chosen provider starts through provider.start.

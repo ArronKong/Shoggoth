@@ -10,6 +10,7 @@ import {
   deleteCronJob,
   getCronJobDetail,
   getCronLatestDelivery,
+  getStatus,
   listAgents,
   listCronJobs,
   runCronJob,
@@ -41,7 +42,7 @@ import CronFiltersBar from "./cron/CronFiltersBar";
 import CodexCronForm, { codexDraftFromJob, codexPatchFromDraft, emptyCodexCronDraft } from "./cron/CodexCronForm";
 import { CronAssignedAgent } from "./cron/CronAgentPicker";
 import CronCreateForm from "./cron/CronCreateForm";
-import { cronAgentAvailable, cronCreateInputFromDraft, emptyCronCreateDraft } from "./cron/cronCreateDraft";
+import { cronAgentAvailable, cronCreateInputFromDraft, defaultCronAssistant, emptyCronCreateDraft } from "./cron/cronCreateDraft";
 import { CRON_SCHEDULE_TYPES } from "./cron/CronFormLayout";
 import { IconCalendarChevron, IconPlus } from "./cron/cronIcons";
 import CronRunReportModal, { ReportNote, runExecutionFailed } from "./cron/CronRunReportModal";
@@ -451,11 +452,15 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
     : undefined;
 
   const openCreate = () => {
-    detailIntentController.begin("detail", "create");
+    const ticket = detailIntentController.begin("detail", "create");
     setSelected(null);
     setCreateDraft(emptyCronCreateDraft());
     setMode("create");
-    void ensureAgents();
+    void Promise.all([loadAgents(), getStatus().catch(() => [])]).then(([roster, statuses]) => {
+      if (!detailIntentController.isCurrent(ticket, "create")) return;
+      const assistant = defaultCronAssistant(cronBackends, roster, statuses);
+      if (assistant) setCreateDraft(current => current.agentId ? current : { ...current, ...assistant });
+    });
   };
 
   const closeModal = () => {
@@ -490,7 +495,12 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
       closeModal();
       await refresh();
     } catch (err) {
-      if (isCurrentFormOperation(operation)) toast.error(err instanceof Error ? err.message : String(err));
+      if (isCurrentFormOperation(operation)) {
+        const code = err && typeof err === "object" && "code" in err ? err.code : null;
+        toast.error(code === "CRON_MODEL_UNAVAILABLE" ? t("cronForm.taskModelUnavailable")
+          : code === "CRON_MODEL_UPDATE_BUSY" ? t("cronForm.taskModelUpdateBusy")
+          : err instanceof Error ? err.message : String(err));
+      }
     } finally {
       if (formOperationRef.current === operation) formOperationRef.current = null;
       if (isCurrentFormOperation(operation)) setFormOperation(null);
@@ -814,6 +824,7 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
             draft={openClawDraft}
             setDraft={setOpenClawDraft}
             assistant={assignedAgent}
+            disabled={formBusy}
           />
         )}
         {mode === "edit-hermes" && (
@@ -822,6 +833,7 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
             draft={hermesDraft}
             setDraft={setHermesDraft}
             assistant={assignedAgent}
+            disabled={formBusy}
           />
         )}
         {mode === "edit-codex" && selected && <CodexCronForm key={selected.id} draft={codexDraft} setDraft={setCodexDraft} assistant={assignedAgent} backendId={selected.backendId}
@@ -833,6 +845,7 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
             draft={nativeDraft}
             setDraft={setNativeDraft}
             assistant={assignedAgent}
+            disabled={formBusy}
           />
         )}
       </Modal>
@@ -847,8 +860,7 @@ export default function CronPage({ dialog }: { dialog?: CronJobDialogProps } = {
         backendId={deliveryJob?.backendId}
         runId={delivery?.runId}
         agentName={deliveryAgent?.name}
-        startedAt={delivery?.startedAt}
-        durationMs={delivery?.durationMs}
+        run={delivery}
         model={delivery?.model
           ? `${delivery.provider ? `${delivery.provider}/` : ""}${delivery.model}`
           : deliveryJob?.model || t("cronForm.modelDefault")}

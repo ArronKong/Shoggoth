@@ -1,4 +1,5 @@
 "use strict";
+const { matchesHistoricalWorkspace } = require("./chat-workspace");
 
 const { isDeepStrictEqual } = require("node:util");
 const { ConversationRecallIndex, hashText, lexicalTerms } = require("./conversation-recall-index");
@@ -489,7 +490,7 @@ class ConversationRecallService {
       this.policy.assertReady(profileId);
       const session = this.sessions.getSession(source.sessionKey);
       if (!session || session.profileId !== profileId || session.id !== source.sessionId
-        || session.workspace !== source.workspace || !["draft", "ready"].includes(session.status)
+        || !matchesHistoricalWorkspace(this.sessions, session, source.workspace) || !["draft", "ready"].includes(session.status)
         || !this._isRecallableSession(profileId, session) || this.sessions.getCronSessionOrigin?.(session.sessionKey)
         || !Array.isArray(source.events) || source.events.length > 24) return false;
       const policy = this._policyView(profileId, true), view = this._outdatedView(profileId);
@@ -527,7 +528,7 @@ class ConversationRecallService {
     if (!runId) return null;
     const run = this.runs.getRun(runId);
     if (!run || run.id !== runId || run.profileId !== profileId
-      || run.workspace !== session.workspace || !["chat", "inspiration"].includes(run.source)
+      || !matchesHistoricalWorkspace(this.sessions, session, run.workspace) || !["chat", "inspiration"].includes(run.source)
       || FEDERATION_CHAT.test(run.idempotencyKey || "") || !this._directInspiration(run)) return null;
     let linkedKey;
     try { linkedKey = this.getRunSessionKey(run); } catch { return null; }

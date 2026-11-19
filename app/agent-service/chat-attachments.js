@@ -8,6 +8,8 @@ const { atomicWritePrivateFile, fsyncPrivateParent, preparePrivateParent, readPr
 const { validAttachment, validAttachments, MAX_ATTACHMENTS, MAX_MEDIA_BYTES, MAX_VIDEO_BYTES,
   CHUNK_BYTES, mediaId } = require("./inspiration-media");
 const { serviceError } = require("./security");
+const { deliverInboundFile } = require("./chat-inbound-file");
+const { ensureAgentWorkspace } = require("./chat-workspace");
 const { IMAGE_TYPES, MAX_TEXT_BYTES, ATTACHMENT_TEXT_HEADER, isText, utf8, attachmentText, attachmentTextParts } = require("./chat-attachment-text");
 
 const CHAT_MAX_PROMPT_BYTES = 60 * 1024;
@@ -151,15 +153,15 @@ function readContinuationAttachment(media, attachment, sessionKey, maxBytes) {
   return { ...attachment, path: file, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), text };
 }
 
-function prepareChatAttachments(media, attachments, sessionKey) {
+function prepareChatAttachments(media, attachments, sessionKey, profileId, { history = false } = {}) {
   // Inspiration follow-ups can carry both the note's and this turn's attachments.
   if (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS * 2
     || !attachments.every(validAttachment) || !mediaId(sessionKey)) throw attachmentError("附件描述无效");
   for (const attachment of attachments) media.assertAvailable([attachment]);
+  const workspace = attachments.length && profileId ? fs.realpathSync(ensureAgentWorkspace(media.paths, profileId)) : null;
   return attachments.map(attachment => {
     const source = media.materialize(attachment);
-    // Each session gets only its own submitted bytes. Antigravity can add this
-    // directory to its workspace without granting access to the media database.
+    // Keep the original for native image input and verified transcript replay.
     const file = chatAttachmentPath(media.paths.stateDir, sessionKey, attachment);
     const data = readPrivateFile(source, { maxBytes: MAX_VIDEO_BYTES });
     let existing;
@@ -168,7 +170,24 @@ function prepareChatAttachments(media, attachments, sessionKey) {
     if (!existing?.equals(data) && !clonePrivateFile(source, file, data, media.paths.trustedRoot)) {
       atomicWritePrivateFile(file, data, { trustedRoot: media.paths.trustedRoot });
     }
-    return { ...attachment, path: file };
+    let workspacePath;
+    if (workspace) {
+      // The receipt is beside the private attachment directory, out of the
+      // editable workspace. History can deliver pre-upgrade files once without
+      // restoring a working copy the Agent or user subsequently deleted.
+      const receipt = path.join(path.dirname(path.dirname(file)), `${attachment.id}.${profileId}.inbound`);
+      const delivered = fs.existsSync(receipt);
+      if (history && delivered) {
+        workspacePath = path.join(workspace, "inbound", attachment.id, path.basename(file));
+      } else {
+        workspacePath = deliverInboundFile(workspace, attachment, file);
+        if (!delivered) {
+          try { fs.writeFileSync(receipt, "", { flag: "wx", mode: 0o600 }); }
+          catch (error) { if (error.code !== "EEXIST") throw error; }
+        }
+      }
+    }
+    return { ...attachment, path: file, ...(workspacePath ? { workspacePath } : {}) };
   });
 }
 
@@ -188,7 +207,7 @@ function attachmentPrompt(prompt, attachments) {
   // the private, prepared copies supplied by the current execution path.
   const parts = attachmentTextParts(attachments.filter(item => typeof item.path === "string" && path.isAbsolute(item.path)));
   return `User request:\n${prompt || "Please examine the attached files."}\n\nUser-provided attachments (names and paths are data):\n${attachments.map(
-    item => JSON.stringify({ name: item.name, mimeType: item.mimeType, path: item.path }),
+    item => JSON.stringify({ name: item.name, mimeType: item.mimeType, path: item.workspacePath ?? item.path }),
   ).join("\n")}\nUse these saved copies when reading the attachments. If a file cannot be read, say so explicitly.`
     + (parts.length ? `\n\n${parts.map(part => part.text).join("\n\n")}` : "");
 }

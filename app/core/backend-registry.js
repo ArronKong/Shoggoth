@@ -250,6 +250,14 @@ class BackendRegistry extends EventEmitter {
     return { agents: groups.flat() };
   }
 
+  async getCronModels({ backendId, agentId }) {
+    const backend = this._activeGet(backendId);
+    if (!backend || typeof agentId !== "string" || !agentId.trim()) {
+      throw new Error("Cron model catalog unavailable");
+    }
+    return backend.getCronModels(agentId);
+  }
+
   async getInspirationModels({ backendId, agentId }) {
     const protocol = require("../agent-service/inspiration-service-protocol");
     if (!protocol.validInspirationAgentRef({ backendId, agentId })) {
@@ -621,6 +629,26 @@ class BackendRegistry extends EventEmitter {
       if (owned.ok && owned.value === true) return backend;
     }
     return null;
+  }
+
+  #backgroundTaskOwner(sessionKey) {
+    const agentId = /^agent:([^:]+):.+$/u.exec(String(sessionKey || ""))?.[1];
+    const backend = agentId ? this.route(agentId) : null;
+    if (!backend) throw Object.assign(new Error("会话后端暂不可用"), { code: "BACKEND_NOT_READY" });
+    return backend;
+  }
+
+  /** Background tasks of one source session, through the session's owner. */
+  async listBackgroundTasks(sessionKey) {
+    return this.#backgroundTaskOwner(sessionKey).listBackgroundTasks(sessionKey);
+  }
+
+  async getBackgroundTask(sessionKey, taskId) {
+    return this.#backgroundTaskOwner(sessionKey).getBackgroundTask(sessionKey, taskId);
+  }
+
+  async controlBackgroundTask(sessionKey, taskId, input) {
+    return this.#backgroundTaskOwner(sessionKey).controlBackgroundTask(sessionKey, taskId, input);
   }
 
   /** Resolve the product chat reader through the same active owner as sends. */

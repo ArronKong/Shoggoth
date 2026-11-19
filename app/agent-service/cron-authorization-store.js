@@ -5,6 +5,7 @@ const path = require("node:path");
 const { atomicWritePrivateFile, readPrivateFile, recoverInterruptedPrivateFile, statIfExists } = require("./private-file");
 const { serviceError } = require("./security");
 const { cronAuthorizationDigest: digest } = require("./cron-approval-policy");
+const { cronModelIdentity } = require("./native-cron-model");
 
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_JOBS = 4096;
@@ -22,7 +23,8 @@ const fail = code => { throw serviceError(code, "定时任务授权记录不可�
 function cronDefinitionDigest(job) {
   return digest([job.id, job.profileId, job.createdAt, job.prompt, job.workspace,
     job.schedule, job.threadPolicy, job.threadId, job.misfirePolicy, job.maxCatchUp, job.overlapPolicy,
-    ...(job.groupDelivery ? [job.groupDelivery] : [])]);
+    ...(job.groupDelivery ? [job.groupDelivery] : []),
+    ...(job.modelSelection === undefined ? [] : [cronModelIdentity(job.modelSelection)])]);
 }
 function validCronAuthorizationScope(scope) {
   return exact(scope, ["version", "jobId", "profileId", "epoch", "definitionDigest"])

@@ -825,6 +825,8 @@ class ClaudeCodeRuntimeHost {
       acceptanceTimer: null,
       cwd: session.cwd,
       remoteSessionId: session.remoteSessionId,
+      agentWorkspace: permissionPolicy.sandbox === "workspace-write" && input.agentWorkspace
+        ? normalizeClaudeCodeWorkspace(input.agentWorkspace) : null,
       model,
       permissionPolicy,
       permissionMode,
@@ -1014,11 +1016,12 @@ class ClaudeCodeRuntimeHost {
       parentLauncherExecutable: "/bin/sh",
     });
     active.reservationId = reservation.reservationId;
-    const permission = claudeCodePermissionOptions(active.permissionPolicy, active.cwd, active.permissionMode);
+    const permission = claudeCodePermissionOptions(active.permissionPolicy, active.cwd, active.permissionMode, active.agentWorkspace);
     const mcpEnvironment = Object.fromEntries(reservation.env.map((entry) => [entry.name, entry.value]));
     const hasAcceptedTurn = session.turns.some((turn) => turn.acceptance === "accepted");
     const options = {
       cwd: active.cwd,
+      ...(active.agentWorkspace && active.agentWorkspace !== active.cwd ? { additionalDirectories: [active.agentWorkspace] } : {}),
       pathToClaudeCodeExecutable: this.binaryPath,
       env: this._spawnEnvironment(),
       settingSources: this.runtimeEnvironment.configurationMode === "persistent"
@@ -1568,9 +1571,19 @@ class ClaudeCodeRuntimeHost {
     const candidates = [input?.file_path, input?.path, input?.notebook_path]
       .filter((value) => typeof value === "string" && value.length > 0);
     return candidates.some((candidate) => {
-      const resolved = path.resolve(this.workspace, candidate);
-      const relative = path.relative(this.workspace, resolved);
-      return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+      let target = path.resolve(this.workspace, candidate);
+      try {
+        while (!this.fs.lstatSync(target, { throwIfNoEntry: false })) {
+          const parent = path.dirname(target);
+          if (parent === target) return true;
+          target = parent;
+        }
+        const resolved = this.fs.realpathSync(target);
+        return ![this.workspace, active.agentWorkspace].filter(Boolean).some(root => {
+          const canonical = this.fs.realpathSync(root);
+          return resolved === canonical || resolved.startsWith(canonical + path.sep);
+        });
+      } catch { return true; }
     });
   }
 

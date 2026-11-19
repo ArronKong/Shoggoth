@@ -52,7 +52,7 @@ function fileIdFromStorageKey(key) {
   return FILE_ID.test(fileId) ? fileId : null;
 }
 
-async function readBoundedFile(target, { privateFile = false } = {}) {
+async function readBoundedFile(target, { privateFile = false, offset = 0, limit = MAX_FILE_BYTES } = {}) {
   const valid = privateFile ? privateRegular : regular;
   let handle;
   try {
@@ -62,11 +62,13 @@ async function readBoundedFile(target, { privateFile = false } = {}) {
     handle = await fs.promises.open(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     const opened = await handle.stat();
     if (!valid(opened) || !sameFile(before, opened)) fail("AGENT_FILE_SOURCE_CHANGED");
-    const bytes = Buffer.alloc(opened.size);
-    for (let offset = 0; offset < bytes.length;) {
-      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > opened.size
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_FILE_BYTES) fail("AGENT_FILE_INVALID");
+    const bytes = Buffer.alloc(Math.min(opened.size - offset, limit));
+    for (let written = 0; written < bytes.length;) {
+      const { bytesRead } = await handle.read(bytes, written, bytes.length - written, offset + written);
       if (!bytesRead) fail("AGENT_FILE_SOURCE_CHANGED");
-      offset += bytesRead;
+      written += bytesRead;
     }
     const after = await handle.stat();
     const installed = await fs.promises.lstat(target);

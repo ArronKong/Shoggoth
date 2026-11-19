@@ -1,0 +1,139 @@
+.positioner {
+  z-index: 70;
+}
+
+.quota {
+  --quota-text: #1d1d1f;
+  --quota-secondary: #4d5560;
+  --quota-muted: #687382;
+  --quota-rule: #e9ebed;
+  inline-size: min(390px, var(--available-width));
+  max-block-size: min(380px, var(--available-height));
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+  color: var(--quota-text);
+  color-scheme: light;
+  font-size: 0.75rem;
+}
+
+.quota[hidden] {
+  display: none;
+}
+
+.titleRow,
+.windowValues {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.heading {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.titleRow {
+  gap: 12px;
+}
+
+.title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.identity {
+  margin-bottom: 2px;
+  color: var(--quota-secondary);
+  overflow-wrap: anywhere;
+}
+
+.credits {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--quota-rule);
+}
+
+.credit {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.credit strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.checkedAt,
+.reset {
+  color: var(--quota-muted);
+  font-weight: 400;
+  font-size: 0.7rem;
+}
+
+.checkedAt {
+  flex: none;
+  max-inline-size: 52%;
+  text-align: end;
+}
+
+.windows {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.window {
+  display: grid;
+  gap: 3px;
+}
+
+.windowValues {
+  color: var(--quota-secondary);
+  overflow-wrap: anywhere;
+}
+
+.remaining {
+  flex: none;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--quota-text);
+}
+
+.meter {
+  --quota-fill: #00795e;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--quota-rule);
+  overflow: hidden;
+}
+
+.meter[data-low="true"] {
+  --quota-fill: #b63744;
+}
+
+.meter::-webkit-progress-bar {
+  background: transparent;
+}
+
+.meter::-webkit-progress-value {
+  background: var(--quota-fill);
+}
+
+.meter::-moz-progress-bar {
+  background: var(--quota-fill);
+}

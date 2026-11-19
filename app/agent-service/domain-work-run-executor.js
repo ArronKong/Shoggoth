@@ -194,6 +194,8 @@ class DomainWorkRunExecutor {
         threadSource: domainThreadSource(run, run.source === "cron" ? payload.threadPolicy : "new"),
         threadId: run.source === "cron" && payload.threadPolicy === "continue"
           ? payload.threadId : null,
+        ...(run.source === "cron" && payload.job.modelSelection !== undefined
+          ? { modelSelection: payload.job.modelSelection } : {}),
       });
       const lifecycleWaiter = coordinator.waitForTerminal(run.id);
       void lifecycleWaiter.then(

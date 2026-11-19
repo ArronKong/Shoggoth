@@ -414,6 +414,8 @@ scope.runTimelineModalFixture = async () => {
   await wait(() => dialog()?.textContent?.includes("打开弹窗后的实时输出"), "open modal receives partial tool output");
   expect(dialog()!.querySelector('[data-status="running"]'), "modal exposes running status");
   expect(firstRow === dialog()!.querySelector("li"), "updates preserve row identity and expanded details");
+  expect(!firstRow.textContent?.includes("1 次更新") && !trigger.textContent?.includes("1 次更新"),
+    "tool update counts are hidden in the modal and chat preview");
 
   chat("thinking", { thinking: "弹窗打开后追加的思考" });
   await wait(() => dialog()?.textContent?.includes("弹窗打开后追加的思考"), "thinking updates");
@@ -485,8 +487,8 @@ scope.runTimelineModalFixture = async () => {
   const rightInset = bubble.right - row.querySelector("[data-st]")!.getBoundingClientRect().right;
   expect(Math.abs(leftInset - rightInset) <= 3, `balanced insets (left ${leftInset}px, right ${rightInset}px)`);
   preview.scrollTop = 0;
-  tool("update", "extra-0", { partialResult: "已有步骤的新输出" });
-  await wait(() => preview.querySelector("li") !== null && preview.textContent?.includes(i18n.t("turnLab.updates", { count: 1 })), "preview reflects row updates");
+  tool("update", "extra-0", { partialResult: "已有步骤的新输出", durationS: 3.5 });
+  await wait(() => preview.textContent?.includes("3.5s"), "preview reflects updated tool duration");
   expect(loadingPreview() === preview && preview.scrollTop === 0, "an existing row update preserves the preview's reading position");
   tool("start", "extra-next", { args: { command: "printf newest", activityTitle: "最新追加步骤" } });
   await wait(() => preview.textContent?.includes("最新追加步骤") && preview.scrollHeight - preview.scrollTop - preview.clientHeight < 2,

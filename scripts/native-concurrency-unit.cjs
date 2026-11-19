@@ -104,7 +104,8 @@ async function fixture(t, options = {}) {
     return store.putAgentProfile({ ...profile, id, agentId: `agent-${id}`, name: `Test ${id}`,
       backendId: "shoggoth", runtime, runtimeProfileId: `runtime-${id}`, runtimeAccountId: accountId, isDefault: false });
   };
-  const session = async (p = profile, workspace = null) => (await controller.handle("chat.session.create", {
+  // Capacity tests use independent projects so workspace writer contention is explicit.
+  const session = async (p = profile, workspace = fs.mkdtempSync(path.join(root, "project-"))) => (await controller.handle("chat.session.create", {
     operationId: randomUUID(), profileId: p.id, workspace, createdAt: Date.now(),
   })).session;
   const send = async (s, op = randomUUID()) => {
@@ -268,7 +269,7 @@ test("Shoggoth fallback budget reserves two background and two chat slots across
   await f.coordinator.close(); await answer;
 });
 
-test("implicit workspaces isolate new sessions and current create retries are stable", async t => {
+test("implicit workspaces are shared by one Agent and creation retries keep the same session", async t => {
   const f = await fixture(t);
   const operationId = randomUUID(), createdAt = Date.now();
   const first = (await f.controller.handle("chat.session.create", { operationId, profileId: f.profile.id,
@@ -277,9 +278,11 @@ test("implicit workspaces isolate new sessions and current create retries are st
     workspace: null, createdAt });
   assert.equal(replay.session.sessionKey, first.sessionKey);
   assert.equal(replay.session.workspace, first.workspace);
-  const next = await f.session(); assert.notEqual(next.workspace, first.workspace);
+  const next = await f.session(f.profile, null); assert.equal(next.workspace, first.workspace);
+  assert.notEqual(next.sessionKey, first.sessionKey);
   const configured = f.store.putAgentProfile({ ...f.addProfile(), defaultCwd: path.join(f.root, "project") });
-  assert.equal((await f.session(configured)).workspace, configured.defaultCwd);
+  assert.equal((await f.session(configured, null)).workspace, path.join(f.paths.defaultWorkspaceDir, configured.id));
+  assert.notEqual((await f.session(configured, null)).workspace, first.workspace);
   assert.equal(resolveProfileWorkspace({ paths: f.paths, profile: f.profile, requested: null }), path.join(f.paths.defaultWorkspaceDir, f.profile.id),
     "non-chat workspace consumers keep profile workspace semantics");
   const explicitOperation = randomUUID();

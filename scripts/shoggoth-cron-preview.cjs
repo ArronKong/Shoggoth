@@ -5,25 +5,31 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const { createRequire } = require("node:module");
+const { viteArtworkFixturePlugin } = require("./fixtures/vite-artwork-esbuild.cjs");
 const root = path.resolve(__dirname, "..");
 const uiRequire = createRequire(path.join(root, "app/manage-ui/package.json"));
+const multipleTimes = process.argv.includes("--multiple-times");
+const plugins = [viteArtworkFixturePlugin(root)];
+if (multipleTimes) {
+  const formLayout = path.join(root, "app/manage-ui/src/pages/cron/CronFormLayout.tsx");
+  plugins.push({
+    name: "cron-multiple-times-preview",
+    setup(build) {
+      build.onResolve({ filter: /^\.\/CronSchedulePicker$/ }, ({ importer }) => importer === formLayout
+        ? { path: path.join(__dirname, "fixtures/CronMultipleTimesPreview.tsx") }
+        : undefined);
+    },
+  });
+}
 (async () => {
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "shoggoth-cron-preview-"));
   const context = await uiRequire("esbuild").context({
     entryPoints: [path.join(__dirname, "fixtures/cron-create.tsx")],
     bundle: true, format: "esm", platform: "browser", target: "chrome120", outdir: output,
     nodePaths: [path.join(root, "app/manage-ui/node_modules")],
-    entryNames: "preview", define: { "process.env.NODE_ENV": '"development"' },
+    entryNames: "preview", define: { "process.env.NODE_ENV": '"development"', __CRON_PREVIEW_MULTIPLE_TIMES__: String(multipleTimes) },
     loader: { ".woff2": "file", ".woff": "file", ".svg": "file", ".png": "file" },
-    plugins: [{ name: "provider-logo-raw-imports", setup(build) {
-      build.onLoad({ filter: /ProviderLogo\.tsx$/u }, ({ path: file }) => {
-        const directory = path.join(root, "app/manage-ui/src/assets/provider-logos");
-        const logos = Object.fromEntries(fs.readdirSync(directory).filter(name => name.endsWith(".svg"))
-          .map(name => [`../../assets/provider-logos/${name}`, fs.readFileSync(path.join(directory, name), "utf8")]));
-        const contents = fs.readFileSync(file, "utf8").replace(/import\.meta\.glob\([^;]*?\}\)/u, JSON.stringify(logos));
-        return { contents, loader: "tsx", resolveDir: path.dirname(file) };
-      });
-    } }],
+    plugins,
     logLevel: "warning",
   });
   await context.rebuild();

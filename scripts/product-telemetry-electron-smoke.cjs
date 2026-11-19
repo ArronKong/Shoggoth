@@ -22,7 +22,7 @@ if (!process.versions.electron) {
       if (child.stdout) process.stdout.write(child.stdout);
       if (child.status !== 0) throw new Error(`Electron ${phase} failed: ${child.stderr || child.error || child.status}`);
     }
-    console.log("Product telemetry Electron smoke: preferences, bilingual privacy, real feature use, two-level opt-out, restart, UTC and disabled build passed");
+    console.log("Product telemetry Electron smoke: default export, two-row settings, real feature use, two-level opt-out, restart, UTC and disabled build passed");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 } else {
   const http = require("node:http");
@@ -32,6 +32,7 @@ if (!process.versions.electron) {
   const { createProductTelemetry } = require("../app/core/product-telemetry");
   const { createPostHogTransport, ENDPOINTS } = require("../app/core/product-telemetry-posthog");
   const { registerDesktopTelemetryIpc } = require("../app/desktop-telemetry-ipc");
+  const { exportEnabled } = require("../app/product-telemetry-build-config");
   const { BUILD, fakeClock } = require("./helpers/product-telemetry-fixtures.cjs");
   const at = process.argv.indexOf("--fixture");
   const root = process.argv[at + 1];
@@ -130,7 +131,7 @@ if (!process.versions.electron) {
         fs.createReadStream(file).pipe(res);
       });
       telemetry = createProductTelemetry({ statePath, configStore, clock,
-        buildConfig: { ...BUILD, exportEnabled: phase !== "disabled" },
+        buildConfig: { ...BUILD, exportEnabled: phase !== "disabled" && exportEnabled },
         transport: createPostHogTransport({ projectToken: BUILD.projectToken, region: "us", fetchImpl(url, options) {
           assert.equal(url, ENDPOINTS.us);
           // Test dependency injection only. Production has no custom endpoint switch.
@@ -203,21 +204,12 @@ if (!process.versions.electron) {
       await w.loadURL(page); await ready(); await focus();
       const previousId = phase === "restart" ? readState().distinctId : null;
       const before = phase === "restart" ? fs.readFileSync(statePath, "utf8") : null;
-      await waitUntil(async () => await checked(master) === (phase === "restart" ? "false" : "true"), "saved master setting");
+      await waitUntil(() => evalUi(`document.querySelector(${JSON.stringify(master)})?.matches('[aria-checked="${phase === "restart" ? "false" : "true"}"]:not([data-disabled])')`), "saved master setting");
       assert.equal(await checked(detail), phase === "restart" ? "false" : "true");
-      await click(`${settingsSection} button.btn-secondary`);
-      await waitUntil(() => evalUi(`document.querySelector('.product-telemetry-privacy')?.textContent.includes(${JSON.stringify(phase === "restart" ? "采集内容" : "What we collect")})`), "bundled localized privacy notice");
-      assert.equal(await evalUi(`Boolean(document.querySelector('.product-telemetry-privacy a[href^="https://posthog.com/"]'))`), true);
-      assert.equal(await evalUi(`Boolean(document.querySelector('.product-telemetry-privacy .markdown-link-icon'))`), false);
-      if (phase === "first") {
-        const position = await evalUi(`(() => {
-          const modal = document.querySelector('.product-telemetry-privacy');
-          return { x: Math.round(modal.getBoundingClientRect().left / 2), y: Math.round(window.innerHeight / 2) };
-        })()`);
-        w.webContents.sendInputEvent({ type: "mouseDown", button: "left", clickCount: 1, ...position });
-        w.webContents.sendInputEvent({ type: "mouseUp", button: "left", clickCount: 1, ...position });
-      } else press("Escape");
-      await waitUntil(() => evalUi("!document.querySelector('.product-telemetry-privacy[data-open]')"), "notice closed");
+      const rows = await evalUi(`Array.from(document.querySelectorAll('${settingsSection} .settings-list-row'),
+        row => row.querySelector('[role="switch"]')?.getAttribute('aria-labelledby') ?? null)`);
+      assert.deepEqual(rows, ["settings-telemetry-enabled", "settings-telemetry-detailed"]);
+      assert.equal(await evalUi(`Boolean(document.querySelector('${settingsSection} [role="status"], ${settingsSection} button:not([role="switch"])'))`), false);
       await w.webContents.executeJavaScript(`document.dispatchEvent(new KeyboardEvent("keydown", {key:"SECRET_CANARY",bubbles:true}));
         document.dispatchEvent(new Event("scroll", {bubbles:true}));
         window.scrollTo(0,200);`);

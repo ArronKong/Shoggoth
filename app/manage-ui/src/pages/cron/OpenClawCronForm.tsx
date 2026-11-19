@@ -11,8 +11,8 @@ import type {
 } from "../../types";
 import { useTranslation } from "react-i18next";
 import { Field, TextArea } from "../../components/Field";
-import { CronExpressionPicker, DateTimePicker, IntervalPicker } from "./CronSchedulePicker";
-import { CronScheduleType, CronTaskNameRow } from "./CronFormLayout";
+import { CronScheduleField, CronTaskNameRow, CronTaskPromptField } from "./CronFormLayout";
+import { CronTaskModelField } from "./CronModelPicker";
 
 type SchedKind = CronSchedule["kind"];
 
@@ -333,6 +333,9 @@ export function openClawInputFromDraft(draft: OpenClawCronDraft): OpenClawCronJo
 export function openClawPatchFromDraft(draft: OpenClawCronDraft, job: UnifiedCronJob): Partial<OpenClawCronJobInput> {
   const input = openClawInputFromDraft(draft);
   const { payload, schedule } = input;
+  if (payload?.kind === "agentTurn" && !draft.model && (job.model || (job.payload?.kind === "agentTurn" && job.payload.model))) {
+    return { ...input, payload: { ...payload, model: null } };
+  }
   if (payload?.kind !== "command") return input;
 
   // Only patch the edited fields. The gateway merges argv into the command
@@ -372,17 +375,18 @@ export function validateOpenClawDraft(draft: OpenClawCronDraft): string | null {
 }
 
 // OpenClaw 表单只表达 OpenClaw 控制面，避免和 Hermes 字段混在一起。
-export default function OpenClawCronForm({ draft, setDraft, assistant }: {
+export default function OpenClawCronForm({ draft, setDraft, assistant, disabled }: {
   draft: OpenClawCronDraft;
   setDraft: (draft: OpenClawCronDraft) => void;
   assistant: ReactNode;
+  disabled?: boolean;
 }) {
   const { t } = useTranslation();
   const set = <K extends keyof OpenClawCronDraft>(key: K, value: OpenClawCronDraft[K]) => setDraft({ ...draft, [key]: value });
   const editsArgv = draft.commandFormat === "argv";
   // Existing hidden options stay in the draft and continue through the original serializers.
   return <div className="cron-form">
-    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} assistant={assistant} />
+    <CronTaskNameRow name={draft.name} onChange={(name) => set("name", name)} />
     {draft.payloadKind === "command" ? (
       <Field label={t(editsArgv ? "cronForm.openclawCommandArgv" : "cronForm.openclawCommand")}
         hint={editsArgv ? t("cronForm.openclawCommandArgvHint") : undefined}>
@@ -390,18 +394,16 @@ export default function OpenClawCronForm({ draft, setDraft, assistant }: {
           rows={editsArgv ? 5 : 4} spellCheck={false} autoCapitalize="none" autoCorrect="off" />
       </Field>
     ) : (
-      <Field label={draft.payloadKind === "agentTurn" ? t("cronForm.taskPromptLabel") : t("cronForm.openclawSystemEventText")}>
-        <TextArea value={draft.payloadKind === "agentTurn" ? draft.prompt : draft.systemText} onChange={(event) => set(draft.payloadKind === "agentTurn" ? "prompt" : "systemText", event.target.value)} rows={4} placeholder={t("cronForm.taskPromptPlaceholder")} />
-      </Field>
+      <CronTaskPromptField
+        value={draft.payloadKind === "agentTurn" ? draft.prompt : draft.systemText}
+        onChange={(value) => set(draft.payloadKind === "agentTurn" ? "prompt" : "systemText", value)}
+        label={draft.payloadKind === "agentTurn" ? undefined : t("cronForm.openclawSystemEventText")} />
     )}
-    <div className="field">
-      <span className="field-label">{t("cronForm.scheduleLabel")}</span>
-      <CronScheduleType value={draft.schedKind} onChange={(value) => set("schedKind", value)} />
-      <div className="cron-schedule-row">
-        {draft.schedKind === "cron" && <CronExpressionPicker value={draft.cronExpr} onChange={(value) => set("cronExpr", value)} />}
-        {draft.schedKind === "every" && <IntervalPicker value={draft.everyMin} onChange={(value) => set("everyMin", value)} minMinutes={1 / 60} />}
-        {draft.schedKind === "at" && <DateTimePicker value={draft.atLocal} onChange={(value) => set("atLocal", value)} />}
-      </div>
+    <div className="field-row">
+      {assistant}
+      {draft.payloadKind === "agentTurn" && <CronTaskModelField backendId={draft.backendId} agentId={draft.agentId} kind="openclaw"
+        value={draft.model ? { model: draft.model } : null} onChange={(value) => set("model", value?.model ?? "")} disabled={disabled} />}
     </div>
+    <CronScheduleField draft={draft} onChange={(patch) => setDraft({ ...draft, ...patch })} minInterval={1 / 60} />
   </div>;
 }

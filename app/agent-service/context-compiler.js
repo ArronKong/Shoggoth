@@ -304,9 +304,9 @@ function definitionInstructions(item, profile, manifest) {
     `END SHOGGOTH AGENT DEFINITION file=${JSON.stringify(file)}`,
   ].join("\n");
 }
-function eventText(event, historicalView = null, sourceSeq = () => null) {
+function eventText(event, historicalView = null, sourceSeq = () => null, { includeAttachments = true } = {}) {
   const text = event?.content?.text;
-  const attachments = event?.content?.attachments;
+  const attachments = includeAttachments ? event?.content?.attachments : null;
   if ((typeof text !== "string" || text.length === 0) && !attachments?.length) return null;
   const source = historicalView?.forEvent(event);
   const echo = historicalView?.forAssistant(event, sourceSeq);
@@ -425,7 +425,8 @@ function orderChatHistory(events) {
 
 function recentDialogue(events, { budget, tokenBudget = null, characterBudget = Infinity,
   operationId = null, resolveEvent = event => event, historicalView = null,
-  historicalSourceSeq = () => null, allEventsHistorical = false, eventFilter = () => true }) {
+  historicalSourceSeq = () => null, allEventsHistorical = false, eventFilter = () => true,
+  recentHistorySessionId = null }) {
   // The current prompt is a separate turn input. Cut at its identity rather
   // than blindly dropping the last event (which may be a tool or a queued turn).
   let boundary = allEventsHistorical ? events.length : operationId === null ? -1
@@ -433,12 +434,14 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
       && event.content?.operationId === operationId);
   if (boundary < 0) boundary = operationId === null
     ? events.findLastIndex((event) => event.kind === "user") : events.length;
-  const replay = tokenBudget !== null;
+  const partial = recentHistorySessionId !== null;
+  const replay = tokenBudget !== null && !partial;
   const kinds = replay ? ["user", "assistant", "tool_call", "tool_result"] : ["user", "assistant"];
   const dialogue = events.slice(0, boundary < 0 ? events.length : boundary)
     .filter(event => !event.contextExcluded && kinds.includes(event.kind) && eventFilter(event));
   const recap = replay ? recentRequests(dialogue, resolveEvent, historicalView) : "";
-  const wrapper = untrusted("PRIOR TRANSCRIPT", "");
+  const heading = partial ? `Partial history from conversation ${recentHistorySessionId}. Use event IDs to look up original messages.\n` : "";
+  const wrapper = untrusted("PRIOR TRANSCRIPT", heading);
   const recapSeparator = recap ? 2 : 0;
   const overhead = Buffer.byteLength(wrapper) + Buffer.byteLength(recap) + recapSeparator;
   let remaining = Math.max(0, budget - overhead);
@@ -451,9 +454,10 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
   let transportLimited = false;
   for (let index = dialogue.length - 1; index >= 0; index--) {
     const event = resolveEvent(dialogue[index]);
-    const line = replay && ["tool_call", "tool_result"].includes(event.kind)
-      ? toolLine(event, outcomes) : eventText(event, historicalView, historicalSourceSeq);
-    if (line === null) continue;
+    const text = replay && ["tool_call", "tool_result"].includes(event.kind)
+      ? toolLine(event, outcomes) : eventText(event, historicalView, historicalSourceSeq, { includeAttachments: !partial });
+    if (text === null) continue;
+    const line = (partial ? `[eventId=${event.id}] ` : "") + text;
     const separator = selected.length ? 1 : 0;
     const bytes = Buffer.byteLength(line) + separator;
     const tokens = estimateContextTokens(line) + separator;
@@ -484,8 +488,9 @@ function recentDialogue(events, { budget, tokenBudget = null, characterBudget = 
     transportLimited = bytes > remaining || line.length + separator > remainingCharacters;
     break;
   }
-  const content = selected.length ? untrusted("PRIOR TRANSCRIPT", selected.join("\n")) : "";
-  return { content: [content, recap].filter(Boolean).join("\n\n"), truncated, transportLimited };
+  const content = selected.length ? untrusted("PRIOR TRANSCRIPT", heading + selected.join("\n")) : "";
+  return { content: [content, recap].filter(Boolean).join("\n\n"), truncated, transportLimited,
+    ...(partial ? { included: selected.length > 0 } : {}) };
 }
 
 function partialContinuation(prompt, events, resolveEvent, historicalView, historicalSourceSeq, projectText, readCreatedGroupReceipt) {
@@ -663,7 +668,7 @@ class ContextCompiler {
       if (withMemoryView) return await withMemoryView(compile);
       if (memory.sharing?.withDependencyReadViews && projectsTranscript(input)) {
         const { profile, transcriptSessionId } = input;
-        const owners = new Set((input.preserveRecallPreparation ? [] : memory.preparedBorrowedMemoryRefs?.(input) || [])
+        const owners = new Set((memory.preparedBorrowedMemoryRefs?.(input) || [])
           .map(ref => ref.ownerProfileId));
         if (transcriptSessionId && !input.verifiedContinuation) {
           const events = readEvents(this.transcriptStore, profile.id, transcriptSessionId);
@@ -853,12 +858,12 @@ class ContextCompiler {
     const maxMemorySensitivity = mainMemory ? "private" : "normal";
     const fileBootstrap = this.memoryEngine.bootstrap?.({ profileId: input.profile.id, workspace: memoryWorkspace,
       mainSession: mainMemory, maxSensitivity: maxMemorySensitivity });
-    const activeMemory = directUserChat && !input.preserveRecallPreparation ? this.memoryEngine.takeActiveMemory?.(input) : null;
+    const activeMemory = directUserChat ? this.memoryEngine.takeActiveMemory?.(input) : null;
     // Runtimes may elide unchanged dynamic context. A countable fast recall
     // belongs to this particular turn and must travel with its request.
     const activeMemoryLabel = activeMemory?.fastRecalls?.length ? `ACTIVE MEMORY FOR RUN ${input.run.id}` : "ACTIVE MEMORY";
     const prepared = this.preparedRelated.get(this._relatedKey(input));
-    if (!input.preserveRecallPreparation && !beforeCronSnapshot) this.preparedRelated.delete(this._relatedKey(input));
+    if (!beforeCronSnapshot) this.preparedRelated.delete(this._relatedKey(input));
     const semanticCandidates = prepared && prepared.stamp === this.memoryEngine.semanticStamp?.(input.profile.id)
       && directUserChat ? prepared.candidates : undefined;
     const stable = fileBootstrap ? null : this.memoryEngine.search({
@@ -1295,6 +1300,7 @@ class ContextCompiler {
         currentWorkSourceId: input.run.sourceId })}`,
       `Frozen permission context: ${JSON.stringify(frozenPermissionContext)}`,
       runIdInstruction(input.run.id),
+      ...(input.workspaceInstructions ? [input.workspaceInstructions] : []),
       ...(proactive ? [proactiveDeveloperInstructions(input.run)] : []),
       ...(input.run.source === "cron" ? [
         "Scheduled task output contract: your final reply is automatically delivered to the user. Work quietly; do not send progress acknowledgments. When the task's notification condition is not met or there is nothing useful to report, return exactly NO_REPLY as the entire final reply. Do not append it to a report or wrap it in formatting. Report failures, missing access, or required user action clearly; never use NO_REPLY to hide those conditions. This current contract supersedes older silent-output tokens in conversation history.",
@@ -1391,15 +1397,7 @@ class ContextCompiler {
     let fixedRequest = null;
     let historyTruncated = recentTranscript?.truncated === true;
     let transportLimited = recentTranscript?.transportLimited === true;
-    const prepareContinuation = () => {
-      if (input.currentAttachments?.length) throw contextError("CONTEXT_CONTINUATION_DETAILS_REQUIRED",
-        "请在当前消息说明本轮需用到的旧附件及相关上下文");
-      const result = partialContinuation(input.query || "", orderedHistory, resolveEvent, historicalView, historicalSourceSeq, projectText,
-        this.readCreatedGroupReceipt && (event => this.readCreatedGroupReceipt(input.run, event)));
-      const error = contextError("CONTEXT_CONTINUATION_DETAILS_REQUIRED", "部分历史需进行只读接续");
-      Object.defineProperty(error, "continuationRead", { value: { ...result, sourceIdentity: transcriptSourceIdentity } });
-      throw error;
-    };
+    let recentHistoryOnly = false;
     const historyCharacters = context => transport.requestCharacters === null ? Infinity
       : Math.max(0, transport.requestCharacters - context.length - (input.currentPrompt?.length ?? 0)
         - JSON.stringify(input.currentAttachments || []).length - (input.currentAttachments?.length ?? 0) * 4096 - 2048);
@@ -1458,9 +1456,21 @@ class ContextCompiler {
             allEventsHistorical: scopedChatHistory,
             operationId: input.currentOperationId ?? null,
           };
-          const resized = recentDialogue(transcriptEvents, historyOptions);
+          let resized = recentDialogue(transcriptEvents, historyOptions);
+          // Without a summary route, a fresh thread on the same binding keeps
+          // the newest originals that fit the retained target and continues
+          // as a normal turn. The seed receipt records that history as partial.
           if (resized.truncated && transcriptSourceIdentity !== null && allowRecentHistoryRestore) {
-            prepareContinuation();
+            const recent = recentDialogue(transcriptEvents, {
+              ...historyOptions,
+              recentHistorySessionId: input.transcriptSessionId,
+              tokenBudget: Math.min(historyTokens, input.requestBudget.retainedTokens),
+              eventFilter: event => !historicalView.forEvent(event) && !historicalView.forAssistant(event, historicalSourceSeq),
+            });
+            if (recent.included) {
+              resized = { ...recent, truncated: true };
+              recentHistoryOnly = true;
+            }
           }
           historyTruncated = resized.truncated;
           transportLimited = resized.transportLimited;
@@ -1472,7 +1482,6 @@ class ContextCompiler {
         }
       }
     }
-    if (input.nativePartialHistory && !continuation) prepareContinuation();
     // With a request plan and a revocation-aware checkpoint store, admission
     // handles the truncated projection as usual: it summarizes the visible
     // history or rejects the Run. Without either, stop here.
@@ -1564,16 +1573,17 @@ class ContextCompiler {
           ...(input.restorePolicy ? { restorePolicy: input.restorePolicy } : {}),
           ...(cronCheckpointRecovery ? { cronCheckpointRecovery: true } : {}),
           ...(continuation ? { partialContinuation: continuation.proof } : {}),
+          ...(recentHistoryOnly ? { recentHistoryOnly: true, recentHistorySourceIdentity: transcriptSourceIdentity } : {}),
           nativeBaseline: { usedTokens: nativeUsage.usedTokens, throughSeq: nativeRecords.at(-1)?.seq ?? 0 },
           nativeSeed: { usedTokens: request.estimatedTokens, throughSeq: nativeRecords.at(-1)?.seq ?? 0,
             operationId: input.currentOperationId ?? null },
           historyTruncated, transportLimited, remainingHistoryCharacters: Number.isFinite(historyCharacters(mandatoryDynamic))
             ? historyCharacters(mandatoryDynamic) : null,
-          restoredOriginal: input.freshSession !== false && !checkpoint && !continuation,
+          restoredOriginal: input.freshSession !== false && !checkpoint && !continuation && !recentHistoryOnly,
           coverage: continuation ? 0 : checkpoint?.coveredThroughSeq ?? 0,
           transportExceeded: exceedsTransport(input.freshSession === false ? dynamicContextWithoutTranscript : dynamicContext),
           fixedTransportExceeded: exceedsTransport(mandatoryDynamic),
-          completeness: continuation || nativeHistory.some(event => event.content?.redacted || event.content?.contextRef?.complete === false
+          completeness: continuation || recentHistoryOnly || nativeHistory.some(event => event.content?.redacted || event.content?.contextRef?.complete === false
             || (["tool_call", "tool_result"].includes(event.kind) && event.content?.contextRef?.complete !== true))
             || attachmentUnavailable ? "partial" : "available",
           windowSource: input.requestBudget.source },
@@ -1604,7 +1614,7 @@ class ContextCompiler {
     };
     if (beforeCronSnapshot) {
       beforeCronSnapshot();
-      if (!input.preserveRecallPreparation) this.preparedRelated.delete(this._relatedKey(input));
+      this.preparedRelated.delete(this._relatedKey(input));
       if (input.preview !== true) beginOwnMemory();
     }
     if (input.preview === true) return material;

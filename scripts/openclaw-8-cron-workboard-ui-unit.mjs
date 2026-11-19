@@ -46,6 +46,12 @@ try {
     detail: "channel offline",
   }, "送达失败必须作为独立结果展示");
 
+  const missedRun = { status: "skipped", summary: "CRON_MISFIRE_SKIPPED" };
+  assert.equal(cron.mod.isCronMisfireSkipped("shoggoth", missedRun), true);
+  assert.equal(cron.mod.isCronMisfireSkipped("openclaw", missedRun), false);
+  assert.equal(cron.mod.isCronMisfireSkipped("shoggoth", { ...missedRun, status: "ok" }), false);
+  assert.equal(cron.mod.isCronMisfireSkipped("shoggoth", { ...missedRun, summary: "CRON_OVERLAP_SKIPPED" }), false);
+
   for (const schedule of [
     { kind: "on-exit", command: "npm test", cwd: "/tmp/project" },
     {

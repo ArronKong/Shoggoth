@@ -15,6 +15,7 @@ const {
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
 const { CronAuthorizationStore } = require("./cron-authorization-store");
+const { validCronModelSelection, sameCronModel } = require("./native-cron-model");
 
 const NATIVE_CRON_STORE_VERSION = 3;
 const MAX_NATIVE_CRON_STORE_BYTES = 64 * 1024 * 1024;
@@ -45,10 +46,10 @@ const CREATE_FIELDS = Object.freeze([
   "misfirePolicy", "maxCatchUp", "overlapPolicy", "threadPolicy", "threadId",
   "nextRunAt", "createdAt",
 ]);
-const JOB_OPTIONALS = Object.freeze(["groupDelivery", "watch"]);
+const JOB_OPTIONALS = Object.freeze(["groupDelivery", "watch", "modelSelection"]);
 const UPDATE_FIELDS = Object.freeze([
   "name", "prompt", "workspace", "schedule", "misfirePolicy", "maxCatchUp",
-  "overlapPolicy", "threadPolicy", "threadId", "nextRunAt", "watch",
+  "overlapPolicy", "threadPolicy", "threadId", "nextRunAt", "watch", "modelSelection",
 ]);
 const DERIVED_UPDATE_FIELDS = Object.freeze(UPDATE_FIELDS.filter((field) => field !== "nextRunAt"));
 const OPERATION_RESULT_TYPES = Object.freeze({
@@ -241,6 +242,7 @@ function normalizeJob(value, corrupt = false) {
     || (value.threadPolicy === "new" && value.threadId !== null)
     || (hasGroupDelivery && (!validGroupDelivery(value.groupDelivery) || value.threadId !== null))
     || (optional.includes("watch") && typeof value.watch !== "boolean")
+    || (optional.includes("modelSelection") && !validCronModelSelection(value.modelSelection))
     || !(value.nextRunAt === null || validTimestamp(value.nextRunAt))
     || !validTimestamp(value.createdAt) || !validTimestamp(value.updatedAt)
     || value.updatedAt < value.createdAt) throw jobError(corrupt);
@@ -254,8 +256,7 @@ function normalizeJob(value, corrupt = false) {
   const result = {
     ...Object.fromEntries(JOB_FIELDS.map((field) => [field, value[field]])),
     schedule,
-    ...(hasGroupDelivery ? { groupDelivery: clone(value.groupDelivery) } : {}),
-    ...(own(value, "watch") ? { watch: value.watch } : {}),
+    ...Object.fromEntries(optional.map(field => [field, clone(value[field])])),
   };
   if (!result.enabled) {
     if (result.nextRunAt !== null) throw nextRunError(corrupt);
@@ -583,8 +584,7 @@ class NativeCronStore {
         nextRunAt: input.nextRunAt,
         createdAt: input.createdAt,
         updatedAt: input.createdAt,
-        ...(own(input, "groupDelivery") ? { groupDelivery: input.groupDelivery } : {}),
-        ...(own(input, "watch") ? { watch: input.watch } : {}),
+        ...Object.fromEntries(JOB_OPTIONALS.filter(field => own(input, field)).map(field => [field, input[field]])),
       });
       candidate.jobs[job.id] = job;
       return job;
@@ -747,10 +747,11 @@ class NativeCronStore {
     return this.container.tombstones[jobId]?.groupBound === true || GROUP_WATCH_JOB_ID_PATTERN.test(jobId);
   }
 
-  authorizationScope(jobId, profileId, prompt) {
+  authorizationScope(jobId, profileId, prompt, modelSelection) {
     this.#assertOpen();
     const job = this.container.jobs[jobId];
-    if (!job || job.profileId !== profileId || job.prompt !== prompt) return null;
+    if (!job || job.profileId !== profileId || job.prompt !== prompt
+      || !sameCronModel(job.modelSelection, modelSelection)) return null;
     return this.authorizations.scope(job);
   }
 
@@ -812,8 +813,7 @@ class NativeCronStore {
           field,
           field === "updatedAt" ? input.createdAt : input[field],
         ])),
-        ...(own(input, "groupDelivery") ? { groupDelivery: input.groupDelivery } : {}),
-        ...(own(input, "watch") ? { watch: input.watch } : {}),
+        ...Object.fromEntries(JOB_OPTIONALS.filter(field => own(input, field)).map(field => [field, input[field]])),
       });
     } catch (error) {
       if (["CRON_SCHEDULE_INVALID", "CRON_NEXT_RUN_INVALID"]
@@ -828,6 +828,7 @@ class NativeCronStore {
       || Object.keys(value).some((key) => !allowedFields.includes(key))) return false;
     if (own(value, "name") && !validText(value.name, 512)) return false;
     if (own(value, "watch") && typeof value.watch !== "boolean") return false;
+    if (own(value, "modelSelection") && !validCronModelSelection(value.modelSelection)) return false;
     if (own(value, "prompt") && !validText(value.prompt, 1024 * 1024)) return false;
     if (own(value, "workspace") && !validWorkspace(value.workspace)) return false;
     if (own(value, "misfirePolicy") && !MISFIRE_POLICIES.has(value.misfirePolicy)) return false;

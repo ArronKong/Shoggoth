@@ -324,6 +324,7 @@ async function acquire(fixture, options = {}) {
       sandbox: "workspace-write",
     },
     ...workspaceOptions,
+    ...(options.executionContract ? { executionContract: options.executionContract } : {}),
     ...(options.mcpServers === undefined ? {} : { mcpServers: options.mcpServers }),
     ...(options.mcpServersFactory === undefined ? {} : {
       mcpServersFactory: options.mcpServersFactory,
@@ -1881,6 +1882,33 @@ test("native auth state does not fake account DTOs and sessions fail with generi
   }
 });
 
+test("Grok reads billing for the active credential without a session or a model request", async () => {
+  const fixture = fixtureOptions(standardServer(message => {
+    if (message.method === "_x.ai/auth/info") return rpcResult({
+      firstName: "Kai", lastName: "Chen", email: "kai@example.test", principalId: "private-principal",
+    });
+    if (message.method !== "_x.ai/billing") return NO_RESPONSE;
+    return rpcResult({ config: { creditUsagePercent: 42, prepaidBalance: { val: 243 },
+      currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY", end: "2026-11-24T12:00:00Z" } } });
+  }));
+  try {
+    const authPath = path.join(fixture.nativeHome, "auth.json");
+    const runtime = await acquire(fixture, { control: true });
+    assert.deepEqual(await runtime.accountQuotaRead(), { status: "unsupported" });
+    fs.writeFileSync(authPath, "fixture-account", { mode: 0o600 });
+    const result = await runtime.accountQuotaRead();
+    assert.equal(result.status, "available");
+    assert.equal(result.accountName, "Kai Chen");
+    assert.doesNotMatch(JSON.stringify(result), /private-principal|kai@example\.test/u);
+    assert.deepEqual(result.windows, [
+      { label: null, durationMinutes: 10_080, usedPercent: 42, resetsAt: Date.parse("2026-11-24T12:00:00Z") },
+    ]);
+    assert.deepEqual(result.credits, { kind: "balance", amount: 2.43, unit: "USD" });
+    assert.deepEqual(fixture.children[0].messages.map(message => message.method), ["initialize", "_x.ai/billing", "_x.ai/auth/info"]);
+    await fixture.adapter.stopAll();
+  } finally { fixture.cleanup(); }
+});
+
 test("cached grok.com OAuth skips authenticate and account proof survives profile host restart", async () => {
   const authenticate = [];
   const server = (message) => {
@@ -2273,6 +2301,17 @@ test("late prompt success for credential X cannot establish proof for rotated cr
   } finally {
     fixture.cleanup();
   }
+});
+
+test("project processes receive only their Agent's additional directory", async () => {
+  const fixture = fixtureOptions(standardServer());
+  try {
+    for (const agentWorkspace of ["/tmp/agent-one", "/tmp/agent-two"]) {
+      await acquire(fixture, { executionContract: { agentWorkspace } });
+      assert.deepEqual(fixture.spawns.at(-1).args, ["--sandbox", "workspace", "--add-dir", agentWorkspace, "agent", "--no-leader", "stdio"]);
+    }
+    assert.equal(fixture.spawns.length, 2);
+  } finally { await fixture.adapter.stopAll(); fixture.cleanup(); }
 });
 
 test("permission policy controls sandbox args and conflicts require stop before rebuild", async () => {

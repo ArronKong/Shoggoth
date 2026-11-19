@@ -6,6 +6,23 @@ const { TemporarySecretStore } = require("../app/agent-service/temporary-secret-
 const { ModelSecretProjection } = require("../app/agent-service/model-secret-projection");
 const { attachmentPrompt, prepareChatAttachments } = require("../app/agent-service/chat-attachments");
 const SCOPE = { profileId: "fixture-agent", sessionId: "fixture-session" };
+test("a long model request shares credential encodings, yields to Service and rechecks rotation before publishing", async () => fixture(async ({ secrets, projection }) => {
+  secrets.autoDetect = false;
+  let revision = 1, reads = 0;
+  const values = ["first/sample", "second/sample"];
+  secrets.getKnownSecretsRevision = () => revision;
+  secrets.getKnownSecrets = () => { reads++; return [{ value: values[revision - 1], kind: "secret" }]; };
+  const input = { input: Array.from({ length: 1800 }, (_, i) => ({ role: "user",
+    content: i === 0 ? "Compare first/sample and second%2Fsample" : `Public transcript segment ${i}` })) };
+  let yielded = false;
+  setImmediate(() => { yielded = true; revision++; });
+  const safe = await projection.project(SCOPE, input);
+  assert.equal(yielded, true);
+  assert.equal(reads, 2, "one connector lookup for each authority revision");
+  assert.equal(safe.input[0].content, "Compare first/sample and [CONNECTED_CREDENTIAL_REDACTED]");
+  assert.equal(safe.input.at(-1).content, input.input.at(-1).content);
+  assert.equal(secrets.list(SCOPE).length, 0);
+}));
 async function fixture(action) {
   const root = fs.mkdtempSync("/private/tmp/sg-model-project-");
   const secrets = await new TemporarySecretStore({ paths: { stateDir: path.join(root, "state"), trustedRoot: root },

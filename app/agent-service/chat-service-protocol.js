@@ -105,6 +105,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   PLUGIN_SELECTION_STALE: "所选插件已变化，请重新选择后发送",
   PLUGIN_SELECTION_UNAVAILABLE: "所选插件尚不可用于当前 Agent",
   CHAT_ATTACHMENT_INVALID: "附件无效或超过限制，请重新添加（最多 8 个，总计 50 MB，单张图片 10 MB）",
+  CHAT_ATTACHMENT_DELIVERY_FAILED: "附件未能写入 Agent 工作区的 inbound 文件夹，请检查该文件夹是否可写后重试",
   CHAT_HISTORY_CURSOR_INVALID: "聊天历史游标无效",
   CHAT_HISTORY_ITEM_TOO_LARGE: "单条聊天历史超过本地协议上限",
   TRANSCRIPT_SOURCE_CHANGED: "聊天记录来源已变化，请重新读取",

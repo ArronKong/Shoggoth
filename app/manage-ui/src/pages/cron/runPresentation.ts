@@ -8,6 +8,13 @@ export interface CronRunStatusView {
   detail?: string;
 }
 
+export function isCronMisfireSkipped(
+  backendId: string | undefined,
+  run: Pick<CronRun, "status" | "summary"> | null | undefined,
+): boolean {
+  return backendId === "shoggoth" && run?.status === "skipped" && run.summary === "CRON_MISFIRE_SKIPPED";
+}
+
 export function cronExecutionView(run: CronRun): CronRunStatusView {
   const value = run.completionStatus || run.status || "unknown";
   const tone: CronRunTone = value === "succeeded" || value === "ok"

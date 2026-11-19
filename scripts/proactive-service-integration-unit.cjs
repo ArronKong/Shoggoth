@@ -13,7 +13,7 @@ const productRoot = packagedApp === undefined ? path.resolve(__dirname, "../app"
   : path.join(packagedApp, "Contents/Resources/app.asar/app");
 const { createAgentService, PROTOCOL_VERSION } = require(path.join(productRoot, "agent-service/server.js"));
 const { resolveServicePaths } = require(path.join(productRoot, "agent-service/paths.js"));
-const { isImplicitChatWorkspace } = require(path.join(productRoot, "agent-service/chat-workspace.js"));
+const { agentWorkspaceRoot } = require(path.join(productRoot, "agent-service/chat-workspace.js"));
 const { readClientToken, requestService } = require(path.join(productRoot, "agent-service/client.js"));
 const { DEFAULT_AGENT_PROFILE_ID } = require(path.join(productRoot, "agent-service/product-store.js"));
 const { ShoggothBackend } = require(path.join(productRoot, "core/shoggoth-backend.js"));
@@ -161,7 +161,7 @@ test("a legacy reminder keeps its history as Main, and a new Agent sends its fir
   assert.equal(initialSessions.length, 1);
   const [main] = initialSessions;
   assert.equal(main.proactiveTarget, true);
-  assert.ok(isImplicitChatWorkspace(f.paths, profile, main.workspace));
+  assert.equal(main.workspace, agentWorkspaceRoot(f.paths, profile.id));
   const greetings = await f.ipc("agent.builtin.ensure", { runtimeAccountIds: [], locale: "zh-CN" });
   assert.ok(greetings.greetedProfileIds.includes(profile.id));
   assert.deepEqual(f.service.transcriptStore.listEvents(profile.id, main.id).map(event => event.id), ["agent-greeting"]);
@@ -173,7 +173,7 @@ test("a legacy reminder keeps its history as Main, and a new Agent sends its fir
   const { session: other } = await f.ipc("chat.session.create", { operationId: id(), profileId: profile.id,
     workspace: null, parentSessionKey: main.sessionKey, createdAt: f.clock.value });
   assert.notEqual(other.sessionKey, main.sessionKey);
-  assert.notEqual(other.workspace, main.workspace);
+  assert.equal(other.workspace, main.workspace);
   assert.deepEqual((await list()).filter(row => row.proactiveTarget).map(row => row.sessionKey), [main.sessionKey]);
 });
 test("a scoped real WorkRun uses the normal main session, Agent context and one structured reminder", async t => {
@@ -303,6 +303,7 @@ test("SparkNotes reviews another conversation's pending approval from Main witho
       queue: f.service.workRunCoordinator.getRuntimeObservability().queue }));
   const reviewRun = f.service.workDispatcher.listRuns({ source: "proactive" })[0];
   assert.equal(f.service.workDispatcher.getRun(runId).status, "waiting_approval");
+  assert.equal(f.service.workRunCoordinator.runExecutionContracts.get(reviewRun.id).permissionPolicy.sandbox, "read-only");
   assert.notEqual(reviewRun.runtimeSessionRef.sessionId, f.service.workDispatcher.getRun(runId).runtimeSessionRef.sessionId);
   const review = f.service.proactiveStore.occurrenceForRun(reviewRun.id);
   assert.deepEqual(review.candidates.map(item => item.group), ["attention"]);
@@ -339,6 +340,7 @@ test("scoped Chat reminders and saved legacy notices open the authoritative comp
   await until(() => f.service.workDispatcher.listRuns({ source: "proactive" })[0]?.status === "running");
   const reviewRun = f.service.workDispatcher.listRuns({ source: "proactive" })[0];
   const occurrence = f.service.proactiveStore.occurrenceForRun(reviewRun.id);
+  assert.equal(f.service.workRunCoordinator.runExecutionContracts.get(reviewRun.id).permissionPolicy.sandbox, "read-only");
   f.service.proactiveService.respond(reviewRun, { runId: reviewRun.id, outcome: "notice", reason: "Worth reviewing", body: "查看原任务中的有效请求。",
     candidates: occurrence.candidates.map(({ id, evidenceVersion }) => ({ id, evidenceVersion })) });
   f.host.complete(reviewRun, "Review complete"); await f.service.proactiveScheduler.waitForIdle();

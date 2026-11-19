@@ -6,7 +6,7 @@ const crypto = require("node:crypto");
 const { atomicWritePrivateFile, readPrivateFile, preparePrivateParent, recoverInterruptedPrivateFile, statIfExists } = require("./private-file");
 const { serviceError } = require("./security");
 const { SECRET_MESSAGES, SECRET_KINDS, secretReference, secretReferences } = require("../core/chat-secret-contract");
-const { detectSecrets, replaceSecrets, variants, knownMatchBoundary, textValue, fieldKind, MAX_SECRET_BYTES } = require("./secret-detector");
+const { detectSecrets, compileKnownSecrets, replaceSecrets, variants, knownMatchBoundary, textValue, fieldKind, MAX_SECRET_BYTES } = require("./secret-detector");
 
 const VERSION = 1;
 const MAX_ENTRIES = 4096;
@@ -42,11 +42,12 @@ function base64(value, maxBytes = MAX_FILE_BYTES) {
 
 // Structural projection is shared, but a legacy federation helper has no
 // conversation authority. Its redactor must never mint or resolve references.
-async function projectValue(value, { keys = false, model = false }, redact) {
+async function projectValue(value, { keys = false, model = false, checkpoint }, redact) {
   let nodes = 0;
   const mcpEnvelope = model && plain(value) && Array.isArray(value.content)
     && value.content.every(block => plain(block) && ["text", "image", "audio", "resource", "resource_link"].includes(block.type));
   const walk = async (input, depth = 0, protocol = null) => {
+    if (checkpoint) await checkpoint();
     if (++nodes > 32768 || depth > 48) fail("SECRET_INPUT_INVALID");
     if (typeof input === "string") return redact(input);
     if (input === null || typeof input === "boolean" || typeof input === "number" && Number.isFinite(input)) return input;
@@ -97,10 +98,11 @@ async function projectUnscopedResult(value, { autoDetect = false } = {}) {
 
 class TemporarySecretStore {
   constructor({ paths, cryptoBroker, now = Date.now, endOfDay = endOfLocalDay,
-    getKnownSecrets = () => [], autoDetect = true, onError = () => {} } = {}) {
+    getKnownSecrets = () => [], getKnownSecretsRevision, autoDetect = true, onError = () => {} } = {}) {
     if (!paths?.stateDir || !paths?.trustedRoot || !cryptoBroker?.encrypt || !cryptoBroker?.decrypt) throw new TypeError("Temporary secrets need private paths and a crypto broker");
     this.paths = paths; this.cryptoBroker = cryptoBroker; this.now = now; this.endOfDay = endOfDay;
     this.getKnownSecrets = getKnownSecrets; this.onError = onError;
+    this.getKnownSecretsRevision = getKnownSecretsRevision;
     this.autoDetect = autoDetect;
     this.directory = path.join(paths.stateDir, "temporary-secrets");
     this.file = path.join(this.directory, "state-v1.json");
@@ -264,14 +266,59 @@ class TemporarySecretStore {
     return digest && Object.values(this.state.operations).some(operation => sameScope(scope, operation.scope)
       && operation.ordinaryExpiresAt > this._time() && operation.ordinary?.includes(digest));
   }
-  async _redact(text, scope, pending, selections, review, extraKnown = [], ordinary = [], ordinaryHashes = []) {
-    const known = this._known(scope, pending);
+  async _connectorValues(scope) {
     let supplied;
     try { supplied = await this.getKnownSecrets(scope); } catch (error) { fail("SECRET_PROCESSING_UNAVAILABLE", error); }
-    if (!Array.isArray(supplied) || !Array.isArray(extraKnown)) fail("SECRET_PROCESSING_UNAVAILABLE");
-    const external = [...supplied, ...extraKnown];
-    const detection = detectSecrets(text, { selections, known: [...known, ...external], autoDetect: this.autoDetect });
-    const protectedValue = match => [...known, ...external].some(entry => variants(entry.value).includes(match.value));
+    if (!Array.isArray(supplied)) fail("SECRET_PROCESSING_UNAVAILABLE");
+    return compileKnownSecrets(supplied);
+  }
+  async prepareProjectionMatcher(scopeInput) {
+    if (!this.getKnownSecretsRevision) return null;
+    const scope = scopeOf(scopeInput);
+    let revision;
+    try { revision = this.getKnownSecretsRevision(scope); }
+    catch (error) { fail("SECRET_PROCESSING_UNAVAILABLE", error); }
+    if (revision == null) return null;
+    const assertCurrent = () => {
+      let current;
+      try { current = this.getKnownSecretsRevision(scope); }
+      catch (error) { fail("SECRET_MODEL_PROJECTION_STALE", error); }
+      if (current !== revision) fail("SECRET_MODEL_PROJECTION_STALE");
+    };
+    const external = await this._connectorValues(scope);
+    assertCurrent();
+    let state, local, expiresAt;
+    const localEntries = () => {
+      if (this.state !== state || this._time() >= expiresAt) {
+        local = compileKnownSecrets(this._known(scope));
+        state = this.state;
+        expiresAt = Infinity;
+        for (const row of Object.values(state.entries)) if (sameScope(row.scope, scope)) expiresAt = Math.min(expiresAt, row.expiresAt);
+      }
+      return local;
+    };
+    return { external, localEntries, assertCurrent };
+  }
+  projectionRevision(scopeInput) {
+    this._assert();
+    this._expire();
+    const scope = scopeOf(scopeInput), now = this._time();
+    // Both records are immutable once created. A different chat can prepare
+    // or revoke credentials while this request is waiting to leave the gateway.
+    const ids = Object.values(this.state.entries).filter(row => sameScope(row.scope, scope)).map(row => row.id);
+    const ordinary = Object.entries(this.state.operations).filter(([, op]) => sameScope(op.scope, scope)
+      && op.ordinaryExpiresAt > now).map(([key]) => key);
+    return ids.join(",") + ":" + ordinary.join(",");
+  }
+  async _redact(text, scope, pending, selections, review, extraKnown = [], ordinary = [], ordinaryHashes = [], matcher) {
+    if (!Array.isArray(extraKnown)) fail("SECRET_PROCESSING_UNAVAILABLE");
+    const local = () => matcher && !pending.length ? matcher.localEntries() : compileKnownSecrets(this._known(scope, pending));
+    const supplied = matcher?.external ?? await this._connectorValues(scope);
+    const external = extraKnown.length ? [...supplied, ...compileKnownSecrets(extraKnown)] : supplied;
+    const all = [...local(), ...external];
+    const detection = detectSecrets(text, { selections, compiledKnown: all, autoDetect: this.autoDetect });
+    if (!detection.matches.length && !detection.ambiguous.length) return text;
+    const protectedValue = match => all.some(entry => entry.variants.includes(match.value));
     const removeOrdinary = (matches, inherited = false) => matches.filter(match => {
       const explicitlyOrdinary = inherited || ordinary.some(range => range.start <= match.start && range.end >= match.end
         || text.slice(range.start, range.end) === match.value);
@@ -311,7 +358,7 @@ class TemporarySecretStore {
     });
     // A labelled value may be discovered after an earlier, unlabelled echo
     // in this same string. Apply the newly known values before persisting it.
-    const echoes = detectSecrets(result, { known: [...this._known(scope, pending), ...external], autoDetect: this.autoDetect });
+    const echoes = detectSecrets(result, { compiledKnown: [...local(), ...external], autoDetect: this.autoDetect });
     const knownOnly = matches => matches.flatMap(match => {
       if (match.nested) { const nested = knownOnly(match.nested); return nested.length ? [{ ...match, nested }] : []; }
       return match.source === "known" ? [match] : [];
@@ -381,12 +428,12 @@ class TemporarySecretStore {
         available: !!row && row.expiresAt > this._time() && this.cache.has(id) };
     }), version: VERSION };
   }
-  project(scopeInput, value, { keys = false, model = false, known = [] } = {}) {
+  project(scopeInput, value, { keys = false, model = false, known = [], checkpoint } = {}, matcher) {
     const scope = scopeOf(scopeInput);
     return this._enqueue(async () => {
-      this._expire();
+      if (!matcher) this._expire();
       const pending = [];
-      const result = await projectValue(value, { keys, model }, text => this._redact(text, scope, pending, [], false, known));
+      const result = await projectValue(value, { keys, model, checkpoint }, text => this._redact(text, scope, pending, [], false, known, [], [], matcher));
       if (pending.length) this._commitPending(structuredClone(this.state), pending);
       return result;
     });

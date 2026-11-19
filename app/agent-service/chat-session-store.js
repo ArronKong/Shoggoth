@@ -12,6 +12,7 @@ const {
 } = require("./private-file");
 const { acquirePrivateWriterLease } = require("./private-writer-lease");
 const { serviceError } = require("./security");
+const { agentWorkspaceRoot, ensureAgentWorkspace, managedChatWorkspace, isMainCreation, wasChatWorkspaceMigrated } = require("./chat-workspace");
 const { validModelSettings } = require("./chat-model-settings");
 
 const CHAT_SESSION_STORE_VERSION = 8;
@@ -220,7 +221,7 @@ function sessionNamespace(session, getProfileBinding) {
   }
   return JSON.stringify([binding.runtime, binding.runtimeAccountId]);
 }
-function validateContainer(value, { getProfileBinding = null } = {}) {
+function validateContainer(value, { getProfileBinding = null, paths } = {}) {
   if (!exactObject(value, [
     "version", "revision", "idempotencyFloorMs", "sessions",
     "createOperations", "bindingOperations", "remoteOperations",
@@ -277,7 +278,8 @@ function validateContainer(value, { getProfileBinding = null } = {}) {
     if (operation.operationId !== operationId || operationIds.has(operationId)
       || sessionCreateKeys.has(operation.sessionKey)
       || (operation.state === "active" && (!session
-        || session.profileId !== operation.profileId || session.workspace !== operation.workspace))
+        || session.profileId !== operation.profileId || (session.workspace !== operation.workspace
+          && !wasChatWorkspaceMigrated(paths, session, operation))))
       || (operation.state === "deleted" && session)) {
       throw chatSessionError("CHAT_SESSION_STORE_CORRUPT", "ChatSession 容器损坏");
     }
@@ -905,7 +907,35 @@ class ChatSessionStore {
     return this.getSession(sessionKey);
   }
 
+  wasOriginalWorkspace(session, workspace) {
+    this.#assertOpen();
+    const creation = Object.values(this.container.createOperations).find(op => op.sessionKey === session.sessionKey);
+    return creation?.workspace === workspace && wasChatWorkspaceMigrated(this.paths, session, creation);
+  }
+
+  adoptLegacyChatWorkspace(sessionKey, main = false) {
+    const session = this.getSession(sessionKey);
+    if (!session?.runtimeBindingId || session.nextRuntimeSelection || session.cronOrigin
+      || !["draft", "ready"].includes(session.status)) return session;
+    const root = agentWorkspaceRoot(this.paths, session.profileId);
+    const creation = Object.values(this.container.createOperations).find(op => op.sessionKey === sessionKey);
+    if (!creation || creation.state !== "active" || session.workspace !== creation.workspace || session.workspace === root
+      || (session.workspace !== managedChatWorkspace(root, creation.operationId) && !(main && isMainCreation(creation)))
+      || Object.values(this.container.cronRuns).some(run => run.sessionKey === sessionKey)
+      || this.container.runtimeSwitches[sessionKey]?.audited === false
+      || Object.values(this.container.remoteOperations).some(op => op.sessionKey === sessionKey && op.state === "pending")
+      || session.retiredRuntimeSessions.length >= MAX_RETIRED_RUNTIME_SESSIONS) return session;
+    if (!this.getProfileBinding?.(session.profileId, session.runtimeBindingId)?.enabled) return session;
+    const workspace = ensureAgentWorkspace(this.paths, session.profileId);
+    return this.#switchRuntime(sessionKey, { bindingId: session.runtimeBindingId, revision: session.revision,
+      renewSession: true }, workspace);
+  }
+
   switchRuntime(sessionKey, input) {
+    return this.#switchRuntime(sessionKey, input);
+  }
+
+  #switchRuntime(sessionKey, input, migratedWorkspace = null) {
     this.#assertOpen();
     if (!UUID_PATTERN.test(sessionKey) || !input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some((key) => !["bindingId", "revision", "clearModelOverride", "permissionMode", "model", "renewSession",
@@ -965,6 +995,7 @@ class ChatSessionStore {
     const sourced = input.model !== undefined ? withModelProvider(settled, input.modelProviderRef)
       : input.clearModelOverride ? withModelProvider(settled, null) : settled;
     const updated = normalizeSession({ ...sourced, runtimeBindingId: target.id, runtimeSessionId: null, revision: session.revision + 1,
+      ...(migratedWorkspace ? { workspace: migratedWorkspace } : {}),
       retiredRuntimeSessions: retired, status: "draft", updatedAt: Math.max(switchedAt, session.updatedAt),
       ...(input.clearModelOverride ? { modelOverride: null,
         ...(session.modelSettings ? { modelSettings: INHERITED_MODEL_SETTINGS } : {}) } : {}),
@@ -1616,14 +1647,14 @@ class ChatSessionStore {
       bindingOperations,
       remoteOperations,
     };
-    this.container = persist ? this.#write(candidate) : validateContainer(candidate, { getProfileBinding: this.getProfileBinding });
+    this.container = persist ? this.#write(candidate) : validateContainer(candidate, { getProfileBinding: this.getProfileBinding, paths: this.paths });
   }
 
   #parse(bytes) {
     try {
       this.cronOriginIndex = null;
       const raw = JSON.parse(bytes.toString("utf8"));
-      return validateContainer(raw, { getProfileBinding: this.getProfileBinding });
+      return validateContainer(raw, { getProfileBinding: this.getProfileBinding, paths: this.paths });
     } catch (error) {
       if (error?.code === "CHAT_SESSION_STORE_CORRUPT") throw error;
       throw chatSessionError("CHAT_SESSION_STORE_CORRUPT", "ChatSession 容器损坏");
@@ -1641,7 +1672,7 @@ class ChatSessionStore {
     }
     const runtimeSwitches = Object.fromEntries(Object.entries(candidate.runtimeSwitches)
       .filter(([key, receipt]) => sessions[key] || !receipt.audited));
-    const validated = validateContainer({ ...candidate, sessions, runtimeSwitches }, { getProfileBinding: this.getProfileBinding });
+    const validated = validateContainer({ ...candidate, sessions, runtimeSwitches }, { getProfileBinding: this.getProfileBinding, paths: this.paths });
     const serialized = `${JSON.stringify(validated)}\n`;
     if (Buffer.byteLength(serialized, "utf8") > MAX_CHAT_SESSION_STORE_BYTES) {
       throw chatSessionError("CHAT_SESSION_CAPACITY", "ChatSession 容量已满");

@@ -124,7 +124,7 @@ export function CronExpressionPicker({ value, onChange }: { value: string; onCha
       <div className="cron-pattern-select">
         <Select
           value={pattern.mode}
-          popupClassName="cron-time-select-popup"
+          popupClassName="cron-time-select-popup cron-pattern-select-popup"
           onChange={(mode) => {
             if (mode === "custom") return;
             onChange(cronExpressionFromPattern(nextPattern(mode as Exclude<CronPatternMode, "custom">, pattern)));

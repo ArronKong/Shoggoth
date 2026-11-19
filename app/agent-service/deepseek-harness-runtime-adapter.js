@@ -20,6 +20,7 @@ const DEEPSEEK_HARNESS_CAPABILITIES = runtimeCapabilities({
   "commands.list": true,
   "commands.execute": true,
   "account.read": false,
+  "account.quota.read": true,
   "account.login": false,
   "account.logout": false,
   events: true,
@@ -53,6 +54,7 @@ class DeepSeekHarnessRuntimeHandle {
     return Array.isArray(this.host.registeredSecrets) ? [...this.host.registeredSecrets] : [];
   }
   authenticationState() { return this.host.authenticationState(); }
+  accountQuotaRead() { return this.host.accountQuotaRead(); }
   generateModelOnly(input) { return this.host.generateModelOnly(input); }
   resolveModelOnly(input) { return this.host.resolveModelOnly(input); }
   subscribe(listener) { return this.host.subscribe(listener); }

@@ -628,21 +628,22 @@ test("外部管理的未知结果冻结在原调用回执，后续同 callId 不
   assert.equal(writes, 1); assert.equal(f.controller.poisonError, null);
 });
 
-test("固定 178 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
-  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 178);
-  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 178);
+test("固定 183 个模型可见产品工具及 strict object schemas，不暴露 authority 字段", () => {
+  assert.equal(MCP_PRODUCT_TOOL_NAMES.length, 183);
+  assert.equal(new Set(MCP_PRODUCT_TOOL_NAMES).size, 183);
   for (const name of ["group_task", "group_collaborate"]) assert.equal(MCP_PRODUCT_TOOL_NAMES.includes(name), false);
   for (const required of [
     "workspace_execute",
     "apple_calendar_list", "apple_calendar_events", "apple_calendar_get", "apple_calendar_create", "apple_calendar_update", "apple_calendar_delete",
     "apple_reminders_lists", "apple_reminders_search", "apple_reminders_get", "apple_reminders_create", "apple_reminders_update", "apple_reminders_delete",
     "app_capabilities", "app_help_search", "app_help_get", "app_state_get", "app_manage", "runtime_context_get", "usage_get", "kanban_board_create", "kanban_run_dispatch",
-    "cron_create", "cron_delete", "backend_status", "external_cron_list", "web_search", "web_fetch", "web_settings_get", "web_settings_set", "web_defaults_set",
+    "cron_models", "cron_create", "cron_delete", "backend_status", "external_cron_list", "web_search", "web_fetch", "web_settings_get", "web_settings_set", "web_defaults_set",
     "heartbeat_settings_get", "heartbeat_settings_set", "heartbeat_rules_read", "heartbeat_rules_update", "memory_file_read", "memory_file_update",
     "watch_create", "watch_list", "watch_get", "watch_test", "watch_set_enabled", "watch_update",
     "watch_check_now", "watch_history", "watch_delete", "watch_retry_event",
     "federation_agent_list", "federation_agent_get", "federation_agent_run",
     "federation_agent_message", "federation_task_get", "federation_task_cancel",
+    "background_task_start", "background_task_get", "background_task_send", "background_task_cancel",
     "skill_catalog", "skill_read", "skill_file_read", "skill_learn", "skill_install_global",
     "mcp_server_registry_search", "mcp_server_request_connection", "mcp_server_request_secret",
     "mcp_server_add", "mcp_server_import",
@@ -867,7 +868,7 @@ test("App 能力、Service 状态与 Token 用量均来自权威依赖", async (
     },
   });
   const capabilities = await fixture.controller.handle("app_capabilities", {}, authorityFor("a"));
-  assert.equal(capabilities.capabilities.length, 165);
+  assert.equal(capabilities.capabilities.length, 170);
   for (const { tool } of PRODUCT_CAPABILITIES.filter(item => item.uiVisible === false)) {
     assert.equal(capabilities.capabilities.some(item => item.tool === tool), false, tool);
   }

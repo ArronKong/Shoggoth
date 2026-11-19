@@ -196,6 +196,8 @@ const { TokenUsageStore } = require("./token-usage-store");
 const { FederationHostClient } = require("./federation-host-client");
 const { AppStateReadService } = require("./app-state-read-service");
 const { FederationCoordinator } = require("./federation-coordinator");
+const { PUBLIC_MESSAGES: BACKGROUND_TASK_PUBLIC_MESSAGES } = require("./background-task-protocol");
+const { BACKGROUND_TASK_SERVICE_METHODS, validateBackgroundTaskParams } = require("./background-task-rpc");
 const {
   FederationMcpSessionManager,
   ensureFederationMcpCredential,
@@ -768,7 +770,7 @@ function candidateSessionForCompletedRun(run, payload, chatSessionStore, inspira
   }
   let session;
   try { session = sessionKey && chatSessionStore.getSession(sessionKey); } catch { return null; }
-  return session && session.profileId === run.profileId && session.workspace === run.workspace
+  return session && session.profileId === run.profileId && require("./chat-workspace").matchesHistoricalWorkspace(chatSessionStore, session, run.workspace)
     && ["ready", "archived"].includes(session.status) ? session : null;
 }
 
@@ -855,6 +857,11 @@ function createAgentService(options) {
     paths, cryptoBroker: mcpCryptoBroker, now: options.now,
     // Pause heuristic discovery in chat while preserving explicit selections and known values.
     autoDetect: options.autoDetectChatSecrets === true,
+    getKnownSecretsRevision: () => {
+      if (!nativeMcpStoreOpened) return "closed";
+      if (!Number.isSafeInteger(nativeMcpStore.revision) || !secretStore.getMatcherRevision) return null;
+      return `${nativeMcpStore.revision}:${secretStore.getMatcherRevision()}`;
+    },
     getKnownSecrets: scope => {
       if (!nativeMcpStoreOpened || typeof secretStore.sensitiveValues !== "function") return [];
       const refs = nativeMcpStore.list().servers.filter(server => nativeMcpStore.isAvailable(server.id, scope.profileId))
@@ -1971,6 +1978,11 @@ function createAgentService(options) {
     || new (require("./runtime-selection-policy").RuntimeSelectionPolicyStore)({ paths, productStore });
   const sourceConversationStore = options.sourceConversationStore
     || new (require("./source-conversation-policy").SourceConversationStore)({ paths, chatSessionStore, now: options.now });
+  const backgroundTaskStore = options.backgroundTaskStore
+    || new (require("./background-task-store").BackgroundTaskStore)({ paths, now: options.now });
+  // Assigned once the chat controller exists; read lazily by session filters.
+  let backgroundTaskService = null;
+  const isBackgroundTaskSession = sessionKey => backgroundTaskService?.isChildSession(sessionKey) === true;
   const nativeMemorySemanticService = options.nativeMemorySemanticService || new NativeMemorySemanticService({
     paths, memoryEngine });
   memoryEngine.setSemanticSearchService?.(nativeMemorySemanticService);
@@ -2105,7 +2117,8 @@ function createAgentService(options) {
   const conditionWatchStore = new ConditionWatchStore({ paths, now: options.now });
   let conditionWatchStoreOpened = false;
   const retentionStores = [chatSessionStore, nativeCronStore, nativeKanbanStore,
-    inspirationStore, proactiveStore, hookStore, permissionEngine, runtimeSessionOwnershipStore, tokenUsageStore, sourceConversationStore];
+    inspirationStore, proactiveStore, hookStore, permissionEngine, runtimeSessionOwnershipStore, tokenUsageStore, sourceConversationStore,
+    backgroundTaskStore];
   const agentArchiveRetention = typeof productStore.purgeArchivedProfile === "function"
     && retentionStores.every((store) => typeof store.purgeProfile === "function")
     ? new AgentArchiveRetention({
@@ -2547,6 +2560,11 @@ function createAgentService(options) {
     },
     conversationCheckpointStore,
     isInternalChatSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey),
+    isBackgroundTaskSession,
+    isMainChatSession: (profileId, key) => {
+      const main = proactiveStore.getTarget(profileId);
+      return main?.sessionKey === key && !main.deleted;
+    },
     sourceConversationStore,
     queueClock: new (require("./runtime-telemetry").RuntimeQueueClock)({ paths, now: options.now }),
     telemetry: runtimeTelemetry,
@@ -2640,6 +2658,7 @@ function createAgentService(options) {
         ...(request.confirmation === true ? { confirmation: true } : {}) }), scope)),
     onConversationRenewed: payload => { sessionRuntimeController.auditPending(); eventBuffer.append("runtime.context.updated", payload); },
     followDefaultSessionBinding: (sessionKey, runId) => sessionRuntimeController.followDefault(sessionKey, runId),
+    selectCronModel: (target, runId) => sessionRuntimeController.selectCronModel(target, runId),
     applyQueuedSessionSelection: (sessionKey, runId) => sessionRuntimeController.selectForSend({ sessionKey,
       excludingRunId: runId, operationId: `inspiration-select-${runId}` }),
     inbox: pendingCommandInbox,
@@ -2701,7 +2720,7 @@ function createAgentService(options) {
     getInspirationService: () => inspirationService,
     ensureMainSession: profileId => noticeDelivery.ensureMainSession(profileId),
     getProactiveSessionOrigin: sessionKey => proactiveStore.sessionOrigin(sessionKey),
-    isInternalSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey),
+    isInternalSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey) || isBackgroundTaskSession(sessionKey),
     isGroupCronSession: sessionKey => {
       const origin = chatSessionStore.getCronSessionOrigin(sessionKey);
       return Boolean(origin && isGroupCronJob(origin.cronJobId));
@@ -2797,7 +2816,8 @@ function createAgentService(options) {
     if (learningStore.db) learningService.reconcileSources(profileId);
   };
   // Group-chat member sessions are not direct conversations for memory capture.
-  if (shoggothMemory) shoggothMemory.sessionCapture.isInternalSession = sessionKey => groupChatStore.isInternalSessionKey(sessionKey);
+  if (shoggothMemory) shoggothMemory.sessionCapture.isInternalSession = sessionKey => groupChatStore.isInternalSessionKey(sessionKey)
+    || isBackgroundTaskSession(sessionKey);
   if (!memoryCandidateService && shoggothMemory) {
     memoryCandidateService = {
       list: ({ profileId }) => ({ revision: memoryStore.getRevision(profileId), items: [],
@@ -2891,6 +2911,23 @@ function createAgentService(options) {
       .digest(),
     now: options.now,
     randomUUID: options.randomUUID,
+  });
+  backgroundTaskService = options.backgroundTaskService || new (require("./background-task-service").BackgroundTaskService)({
+    store: backgroundTaskStore, paths, productStore, chatSessionStore, transcriptStore, agentFileStore,
+    getChatServiceController: () => chatServiceController,
+    getWorkRunCoordinator: () => workRunCoordinator,
+    workDispatcher,
+    isInternalSession: sessionKey => groupChatStore.isInternalSessionKey(sessionKey),
+    resolveWorkspace: (profile, taskId) => {
+      const { agentWorkspaceRoot, backgroundTaskWorkspace } = require("./chat-workspace");
+      const target = backgroundTaskWorkspace(agentWorkspaceRoot(paths, profile.id), taskId);
+      ensurePrivateDirectoryTree(target, paths.trustedRoot);
+      return target;
+    },
+    fileUrl: require("./agent-file-protocol").contentUrl,
+    publish: payload => eventBuffer.append("background.task.changed", payload),
+    ...(options.backgroundTaskRuntimes ? { runtimes: new Set(options.backgroundTaskRuntimes) } : {}),
+    now: options.now,
   });
   const domainWorkRunExecutor = options.domainWorkRunExecutor || new DomainWorkRunExecutor({
     getCoordinator: () => workRunCoordinator,
@@ -3157,7 +3194,11 @@ function createAgentService(options) {
       if (!profile) {
         throw serviceError("CRON_RUN_CORRUPT", "Cron Job 绑定的 AgentProfile 不存在");
       }
-      if (!profile.enabled || !require("../runtime-availability").isRuntimeAvailable(profile.runtime)) return "disabled";
+      if (!profile.enabled) return "disabled";
+      const runtime = job?.modelSelection
+        ? productStore.getAgentRuntimeBinding(profileId, job.modelSelection.bindingId)?.runtime
+        : profile.runtime;
+      if (runtime && !require("../runtime-availability").isRuntimeAvailable(runtime)) return "disabled";
       if (job?.groupDelivery) {
         try { if (!groupChatStore.cronDeliveryGroup(job.groupDelivery, profileId)) return "disabled"; }
         catch { return "disabled"; }
@@ -3276,6 +3317,7 @@ function createAgentService(options) {
       kanbanRunService,
       cronStore: nativeCronStore,
       cronScheduler: nativeCronScheduler,
+      validateCronModel: (profileId, selection) => sessionRuntimeController.validateCronModel(profileId, selection),
       isSystemCronJob: (jobId) => codexMemoryImportService?.isSystemJob(jobId) === true,
       workDispatcher,
       usageStore: tokenUsageStore,
@@ -3430,6 +3472,7 @@ function createAgentService(options) {
       },
       productStore,
       domainController: nativeDomainServiceController,
+      listCronModels: (profileId, args) => sessionRuntimeController.listCronModels(profileId, args),
       agentLifecycleService: agentLifecycleServiceController,
       kanbanStore: nativeKanbanStore,
       kanbanRunService,
@@ -3442,6 +3485,7 @@ function createAgentService(options) {
       usageStore: tokenUsageStore,
       federationClient: federationHostClient,
       federationCoordinator,
+      backgroundTaskService,
       skillStore: runtimeSkillStore,
       nativeMcpStore,
       nativeMcpClientManager,
@@ -3451,6 +3495,7 @@ function createAgentService(options) {
         semanticSearch: nativeMemorySemanticService,
         getRunSessionKey: (run) => workRunCoordinator.getRunSessionKey(run),
         getInspirationOrigin: (run) => inspirationStore.executionForRun(run.id),
+        isBackgroundTaskSession,
       }),
       conversationRecallService,
       getGroupChatService: () => groupChatService,
@@ -4616,6 +4661,21 @@ function createAgentService(options) {
             ? transcriptStore.getSessionDerivedTitle(session.profileId, session.id) : null);
         },
       });
+    } else if (BACKGROUND_TASK_SERVICE_METHODS.has(request.method)) {
+      try {
+        const params = validateBackgroundTaskParams(request.method, exactObject(request, [...baseFields, "params"]) ? request.params : null);
+        const { sessionKey, ...input } = params;
+        if (request.method === "background.task.list") result = { tasks: backgroundTaskService.list(sessionKey) };
+        else if (request.method === "background.task.get") result = backgroundTaskService.detail(sessionKey, input.taskId);
+        else if (request.method === "background.task.send") result = await backgroundTaskService.uiSend(sessionKey, input);
+        else if (request.method === "background.task.cancel") result = await backgroundTaskService.uiCancel(sessionKey, input);
+        else result = await backgroundTaskService.uiRespond(sessionKey, input);
+      } catch (error) {
+        const code = typeof error?.code === "string" && (error.code.startsWith("BACKGROUND_TASK_") || error.code === "INVALID_PARAMS")
+          ? error.code : "BACKGROUND_TASK_UNAVAILABLE";
+        errorResponse(socket, id, code, BACKGROUND_TASK_PUBLIC_MESSAGES[code] || "background_task_unavailable");
+        return;
+      }
     } else if (request.method === "events.subscribe") {
       const hasCursor = request.params != null
         && Object.prototype.hasOwnProperty.call(request.params, "afterSeq");
@@ -4871,22 +4931,28 @@ function createAgentService(options) {
           throw serviceError("INVALID_PARAMS", "Token usage 参数无效");
         }
         const range = validateUsageRange(request.params.range);
-        const profiles = productStore.listAgentProfiles().filter(profile => profile.backendId === request.params.backendId);
-        const profileIds = new Set(profiles.map(profile => profile.id));
+        const { backendId } = request.params;
+        const activeProfiles = () => productStore.listAgentProfiles()
+          .filter(profile => profile.enabled && profile.backendId === backendId);
+        const profiles = activeProfiles();
+        let profileIds = new Set(profiles.map(profile => profile.id));
         let usageComplete = true;
-        if (workRunCoordinator.listRuns().some(run => profileIds.has(run.profileId)
+        const runs = workRunCoordinator.listRuns();
+        if (runs.some(run => profileIds.has(run.profileId)
           && run.runtimeSessionRef?.runtime === "grok-build") && typeof grokBuildRuntimePool.readUsage === "function") {
           const now = (options.now || Date.now)();
           const start = new Date(now);
           start.setHours(0, 0, 0, 0);
           start.setDate(start.getDate() - ({ today: 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365 }[range] || 1) + 1);
-          usageComplete = await reconcileGrokUsage({ profiles, runs: workRunCoordinator.listRuns(),
+          usageComplete = await reconcileGrokUsage({ profiles, runs,
             usageStore: tokenUsageStore, sinceMs: range === "all" ? 0 : start.getTime(), now,
             readUsage: (profile, query) => grokBuildRuntimePool.readUsage({ runtime: profile.runtime,
               runtimeProfileId: profile.runtimeProfileId, runtimeAccountId: profile.runtimeAccountId }, query) });
+          // An Agent can be archived or restored while Grok usage is being read.
+          profileIds = new Set(activeProfiles().map(profile => profile.id));
         }
         const summary = tokenUsageStore.summarize(range, {
-          backendId: request.params.backendId,
+          backendId,
           profileIds,
         });
         if (!usageComplete) summary.series.availability = "partial";
@@ -5334,6 +5400,8 @@ function createAgentService(options) {
     toolRegistry,
     permissionEngine,
     federationCoordinator,
+    backgroundTaskStore,
+    backgroundTaskService,
     federationMcpSessionManager,
     contextSnapshotStore,
     conversationCheckpointStore,
@@ -5862,6 +5930,8 @@ function createAgentService(options) {
           if (typeof options.onServerReady === "function") options.onServerReady(server);
           assertStartGeneration(generation);
           lifecycleState = "started";
+          backgroundTaskService.open();
+          void backgroundTaskService.recover().catch(() => console.error("[agent-service] background task recovery deferred"));
           if (domainAvailability.cron.available) void cronReportIndex.rebuild();
           if (conditionWatchStoreOpened) {
             try { conditionWatchService.open(); } catch (error) { logConditionWatchError(error); }
@@ -6066,6 +6136,7 @@ function createAgentService(options) {
     const memoryProviderOwnerClosing = memoryProviderOwnerRpc?.close() || Promise.resolve();
     memoryProviderOwnerClosing.catch(() => {});
     // Close publication authority before waiting for network/Runtime shutdown.
+    backgroundTaskService.close();
     try { await learningService.close(); } catch (error) { errors.push(error); }
     try { await conditionWatchService.close(); } catch (error) { errors.push(error); }
     if (proactiveSchedulerOpened) { proactiveSchedulerOpened = false; try { await proactiveScheduler.close(); } catch (error) { errors.push(error); } }

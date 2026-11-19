@@ -6,7 +6,7 @@ const path = require("node:path");
 const { validResponseMetadata } = require("../chat-response-metadata");
 const { publicCronTranscript } = require("./cron-output-policy");
 const { runtimeFailureDetail } = require("./runtime-failure-detail");
-const { managedChatWorkspace } = require("./chat-workspace");
+const { agentWorkspaceRoot, ensureAgentWorkspace, managedChatWorkspace } = require("./chat-workspace");
 const { settingsForModelSwitch } = require("./chat-model-settings");
 const codexSessionProvider = require("./codex-session-provider");
 const {
@@ -23,12 +23,13 @@ const {
 const { createCodexChatHistoryMapper } = require("./codex-chat-history");
 const { createLegacyBorrowedToolProjector } = require("./codex-thread-history-reader");
 const { adaptCodexChatHistoryPage, fragmentHistoryItem } = require("./chat-history-adapter");
-const { ensurePrivateDirectoryTree, serviceError } = require("./security");
+const { serviceError } = require("./security");
 const { isLegacyBorrowedToolContent } = require("./shoggoth-memory/borrowed-memory-provenance.cjs");
 const { resolveRuntimePermissionMode } = require("./runtime-permission-modes");
 const activeMemoryCommand = require("./active-memory-command-protocol");
 const { normalizeInteractiveRequestV1, mcpElicitationUsesApprovalWait } = require("../core/shoggoth-interaction-contract");
 const { groupContinuationFromAnswer } = require("./continuation-interaction-evidence");
+const { isBackgroundTaskReportEvent } = require("./background-task-protocol");
 
 const RESTART_INTERRUPTION_CODES = new Set([
   "SERVICE_RESTARTED", "EXECUTION_CONTRACT_LOST", "RUNTIME_HOST_RESTARTED",
@@ -163,6 +164,8 @@ function transcriptMessage(event, role, content) {
       ...(role === "user" && event.content?.pluginSelectionSnapshot?.length
         ? { pluginSelectionSnapshot: structuredClone(event.content.pluginSelectionSnapshot) } : {}),
       ...(event.content?.proactiveNotice ? { proactiveNotice: structuredClone(event.content.proactiveNotice), notificationCategory: "proactive" } : {}),
+      ...(role === "assistant" && isBackgroundTaskReportEvent(event)
+        ? { backgroundTaskReport: structuredClone(event.content.backgroundTaskReport), notificationCategory: "background_task" } : {}),
     },
   };
 }
@@ -481,24 +484,15 @@ function resolveProfileWorkspace(options = {}) {
     || !options.sessionOperationId.isWellFormed() || options.sessionOperationId.includes("\0"))) {
     throw controllerError(errorCode, "ChatSession workspace 标识无效");
   }
-  const candidate = requested ?? profile.defaultCwd;
-  if (candidate !== null) {
+  const candidate = requested ?? (options.sessionOperationId === undefined ? profile.defaultCwd : null);
+  if (candidate != null) {
     if (!path.isAbsolute(candidate)) {
       throw controllerError(errorCode, "workspace 必须是绝对路径");
     }
     return path.normalize(candidate);
   }
 
-  ensurePrivateDirectoryTree(paths.defaultWorkspaceDir, paths.trustedRoot);
-  const workspaceRoot = path.resolve(paths.defaultWorkspaceDir);
-  const profileRoot = path.resolve(workspaceRoot, profile.id);
-  const target = options.sessionOperationId === undefined ? profileRoot
-    : managedChatWorkspace(profileRoot, options.sessionOperationId);
-  if (path.dirname(profileRoot) !== workspaceRoot) {
-    throw controllerError(errorCode, "AgentProfile workspace 标识无效");
-  }
-  ensurePrivateDirectoryTree(target, paths.trustedRoot);
-  return target;
+  return ensureAgentWorkspace(paths, profile.id);
 }
 
 function createChatServiceController(options = {}) {
@@ -1241,11 +1235,15 @@ function createChatServiceController(options = {}) {
     }
     if (method === "chat.session.create") {
       const profile = enabledProfile(params.profileId);
+      const previous = params.workspace == null && chatSessionStore.getCreateOperation?.(params.operationId);
+      const legacyWorkspace = previous && previous.profileId === profile.id
+        && (previous.workspace === managedChatWorkspace(agentWorkspaceRoot(options.paths, profile.id), params.operationId)
+          || previous.workspace === profile.defaultCwd) ? previous.workspace : null;
       const session = chatSessionStore.createSession({
         operationId: params.operationId,
         profileId: params.profileId,
         permissionMode: require("./runtime-permission-modes").initialRuntimePermissionMode(profile.runtime || "codex"),
-        workspace: resolveProfileWorkspace({ paths: options.paths, profile, requested: params.workspace,
+        workspace: resolveProfileWorkspace({ paths: options.paths, profile, requested: params.workspace ?? legacyWorkspace,
             sessionOperationId: params.operationId }),
         createdAt: params.createdAt,
         ...(params.parentSessionKey ? { parentSessionKey: params.parentSessionKey } : {}),
@@ -1462,6 +1460,7 @@ function createChatServiceController(options = {}) {
       const main = options.ensureMainSession?.(profile.id);
       if (main) {
         transcriptStore?.ensureSession({ profileId: main.profileId, sessionId: main.id });
+        coordinator.adoptIdleChatWorkspace?.(main);
         continue;
       }
       // 群内部会话不算用户可见私聊：先入群的 Agent 仍要有默认私聊（群聊计划 §3.2 第 3 条）。

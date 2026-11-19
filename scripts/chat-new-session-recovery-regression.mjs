@@ -124,8 +124,8 @@ assert.match(
 );
 assert.match(
   backendSource,
-  /async createSession\(agentId, options = \{\}\)[\s\S]{0,500}_sessionTarget\(options\.parentSessionKey\)[\s\S]{0,300}workspace === undefined[\s\S]{0,200}parent\.session\.workspace/,
-  "Shoggoth 后端必须校验来源会话，并保留未指定 workspace 的 API 继承语义",
+  /async createSession\(agentId, options = \{\}\)[\s\S]{0,500}_sessionTarget\(options\.parentSessionKey\)[\s\S]{0,500}workspace: options\?\.workspace \?\? null/,
+  "Shoggoth 后端必须校验来源会话，未指定目录的新会话从 Agent 长期工作区启动",
 );
 assert.match(
   pageSource,

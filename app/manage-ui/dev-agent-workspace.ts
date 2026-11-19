@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { pipeline } from "node:stream/promises";
 import type { Plugin } from "vite";
 
-type AgentDirectoryPaths = { agentsDir: string; userDataRoot: string };
+type AgentDirectoryPaths = { defaultWorkspaceDir: string };
 type ManagedWorkspace = { path: string; exists: boolean };
 type AgentResponse = {
   agent?: { id?: string; name?: string; backendId?: string; profile?: string; managedWorkspace?: ManagedWorkspace };
@@ -13,8 +13,8 @@ const require = createRequire(import.meta.url);
 const { resolveCanonicalServicePaths } = require("../agent-service/paths.js") as {
   resolveCanonicalServicePaths(): AgentDirectoryPaths;
 };
-const { describeAgentDirectory } = require("../agent-service/agent-name-links.js") as {
-  describeAgentDirectory(paths: AgentDirectoryPaths, profile: { id: string; name?: string }): ManagedWorkspace | undefined;
+const { describeAgentWorkspace } = require("../agent-service/chat-workspace.js") as {
+  describeAgentWorkspace(paths: AgentDirectoryPaths, profileId: string): ManagedWorkspace | undefined;
 };
 const AGENT_DETAIL = /^\/__api\/agents\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\?backend=shoggoth$/u;
 const MAX_DETAIL_BYTES = 1024 * 1024;
@@ -32,7 +32,7 @@ function addManagedWorkspace(body: Buffer, id: string, paths: AgentDirectoryPath
     const agent = detail?.agent;
     if (agent?.id !== id || agent.backendId !== "shoggoth" || Object.hasOwn(agent, "managedWorkspace")
       || typeof agent.profile !== "string") return body;
-    const managedWorkspace = describeAgentDirectory(paths, { id: agent.profile, name: agent.name });
+    const managedWorkspace = describeAgentWorkspace(paths, agent.profile);
     if (!managedWorkspace) return body;
     agent.managedWorkspace = managedWorkspace;
     return Buffer.from(JSON.stringify(detail));

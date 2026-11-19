@@ -46,6 +46,14 @@ test("Agent and Inspiration catalogs preserve scope, provider identity, unavaila
   assert.deepEqual(Object.keys(group.models[0]).sort(), ["id", "name", "provider"], "retain the bounded federation DTO");
 });
 
+test("OpenClaw Cron exposes the Agent default and the inherited gateway default", async () => {
+  const { backend } = fixture();
+  assert.deepEqual((await backend.getCronModels("a")).defaultSelection, { model: "p/a" });
+  backend.getAgent = async id => ({ id });
+  backend._configSnapshot = async () => ({ parsed: { agents: { defaults: { model: { primary: "other/a" } } } } });
+  assert.deepEqual((await backend.getCronModels("a")).defaultSelection, { model: "other/a" });
+});
+
 test("malformed or retired catalog reads fail instead of becoming an empty success", async () => {
   const { backend } = fixture();
   backend.request = async () => ({});

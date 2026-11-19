@@ -135,6 +135,14 @@ const DATA_AUTHORITY_MANIFEST = Object.freeze({
         "workspace", "sessionKey", "policy", "createdAt"] }) }),
       recovery: "Kanban associations persist; deleted conversations are not recreated for an old run",
     }),
+    backgroundTask: Object.freeze({
+      owner: "shoggoth", schemaVersion: 1,
+      pathRules: Object.freeze(["stateDir/background-tasks/index-v1.json", "stateDir/background-tasks/prompts/<taskId>-<generation>.txt"]),
+      records: Object.freeze({ BackgroundTask: recordAuthority({ authority: ["id", "profileId", "sourceSessionKey", "sourceRunId",
+        "sourceOperationId", "fingerprint", "bindingId", "runtime", "title", "childSessionKey", "childWorkspace", "generations",
+        "stopRequestedAt", "closedReason", "createdAt", "updatedAt"] }) }),
+      recovery: "Each step repeats its fixed operation; reports are appended once by stable event ID and never redirected",
+    }),
     cron: Object.freeze({
       owner: "shoggoth", schemaVersion: 3,
       pathRules: Object.freeze(["stateDir/native-cron.json", "stateDir/native-cron.json.pre-v3"]),

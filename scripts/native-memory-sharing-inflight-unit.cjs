@@ -274,7 +274,7 @@ for (const action of ["exclude source", "delete source memory", "remove source f
       assert.equal(host.lastTurnInterruptParams.threadId, run.runtimeSessionRef.sessionId);
       assert.equal(host.lastTurnInterruptParams.turnId, run.runtimeTurnRef.turnId);
       const terminal = coordinator.getRun(run.id);
-      assert.equal(terminal.errorCode, "CONTEXT_SOURCE_STALE"); assert.equal(terminal.resultSummary, null);
+      assert.equal(terminal.errorCode, "CONTEXT_BORROWED_MEMORY_REVOKED"); assert.equal(terminal.resultSummary, null);
       emitLate(host, run); await coordinator.waitForIdle(run.id);
       assert.doesNotMatch(JSON.stringify(events), new RegExp(LATE), "late text/tools are never published to subscribers");
       assert.equal(events.filter(event => event.type === "terminal").length, 1, "late complete cannot republish completion");
@@ -321,7 +321,7 @@ test("a pending source-withdrawal interrupt filters late events and joins one na
     await waitUntil(() => coordinator.getRun(run.id).status === "interrupted", 5000, "source withdrawal finishes");
     await coordinator.waitForIdle(run.id);
     assert.equal(events.filter(event => event.type === "terminal").length, 1);
-    assert.equal(coordinator.getRun(run.id).errorCode, "CONTEXT_SOURCE_STALE");
+    assert.equal(coordinator.getRun(run.id).errorCode, "CONTEXT_BORROWED_MEMORY_REVOKED");
     assert.equal(coordinator.lastErrors.size, 0);
   } finally {
     release?.(); await withdrawing?.catch(() => {});
@@ -407,8 +407,11 @@ for (const outcome of ["publish", "withdraw", "unavailable"]) {
       release(); await pending;
       if (outcome !== "publish") {
         await waitUntil(() => coordinator.getRun(run.id).status === "interrupted", 5000, "unavailable source interrupts output");
-        assert.equal(coordinator.getRun(run.id).errorCode, outcome === "withdraw" ? "CONTEXT_SOURCE_STALE" : "CONTEXT_MEMORY_READ_UNAVAILABLE");
-        if (outcome === "unavailable") assert.ok(failedScans >= 3, "the worker outage is checked with bounded retries");
+        assert.equal(coordinator.getRun(run.id).errorCode, outcome === "withdraw" ? "CONTEXT_BORROWED_MEMORY_REVOKED" : "CONTEXT_MEMORY_READ_UNAVAILABLE");
+        if (outcome === "unavailable") {
+          assert.ok(failedScans >= 3, "the worker outage is checked with bounded retries");
+          assert.ok(coordinator.telemetry.events.some(event => event.stage === "borrowed_output_scan_failed" && event.code === "MEMORY_SCAN_UNAVAILABLE"));
+        }
         assert.doesNotMatch(JSON.stringify(events), new RegExp(label));
         assert.doesNotMatch(JSON.stringify(f.service.transcriptStore.listEvents(f.profile.id, session.id)), new RegExp(label));
       } else {
@@ -430,6 +433,133 @@ for (const outcome of ["publish", "withdraw", "unavailable"]) {
     }
   });
 }
+
+for (const outcome of ["continue", "tool follow-up", "withdraw", "timeout"]) {
+  test(`long conversation verifies pending output again: ${outcome}`, { timeout: 45000 }, async () => {
+    const f = await fixture();
+    let release, subscription;
+    try {
+      const { workRunCoordinator: coordinator, nativeRuntimeConfig, transcriptStore, mcpProductToolController } = f.service;
+      const config = nativeRuntimeConfig.read();
+      nativeRuntimeConfig.apply({ ...config, revision: config.revision + 1, flags: { ...config.flags, runtimeContextLifecycleV1: true } });
+      const session = f.createSession();
+      for (let index = 0; index < 48; index++) transcriptStore.appendEvent({ profileId: f.profile.id, sessionId: session.id,
+        id: `long-history-${index}`, kind: index % 2 ? "user" : "assistant", content: { text: `Sample ${index}. ${"ordinary project notes ".repeat(140)}` } });
+      const run = await f.send(session.sessionKey, "borrowed-after-compaction", "Continue checking the telescope calibration.");
+      assert.equal(run.status, "running", run.errorCode);
+      const found = await f.callTool(run, "memory_search", { query: "telescope", ownerProfileId: f.B, minScore: 0 });
+      const ref = found.results.find(item => item.ownerProfileId === f.B && item.borrowed);
+      const host = f.transport.hosts.get("codex"), events = [];
+      const { sessionId: threadId, turnId } = run.runtimeTurnRef;
+      const emit = event => host.emit({ known: true, threadId, turnId, ...event });
+      subscription = coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));
+      const memory = mcpProductToolController.conversationMemoryService;
+      const get = memory.get.bind(memory);
+      let toolCalls = 0;
+      memory.get = (...args) => { toolCalls++; return get(...args); };
+      const read = await f.callTool(run, "memory_get", { id: ref.sourceRef });
+      assert.match(read.text, /aquamarine/u);
+      const launches = host.turnStartCalls;
+      const sharing = f.owner.sharing, check = sharing.withRunReadProof.bind(sharing);
+      const retryGate = new Promise(resolve => { release = resolve; });
+      let checks = 0;
+      sharing.withRunReadProof = async (id, signal, publish, ...args) => {
+        if (id === run.id) {
+          checks++;
+          if (checks === 1 || checks === 2 && outcome === "timeout") {
+            await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }));
+            signal.throwIfAborted();
+          }
+          if (checks === 2) await retryGate;
+        }
+        return check(id, signal, publish, ...args);
+      };
+      if (outcome !== "tool follow-up") emit({ type: "context_compacted", compactionId: "test-compaction", contextUsage: {
+        runtimeSessionId: threadId, usedTokens: 8000, contextWindow: 128000, quality: "exact", source: "runtime_event", observedAt: Date.now() } });
+      const call = { kind: "function", name: "memory_get", status: "completed" };
+      emit({ type: "tool_result", method: "item/completed", itemId: "read", toolCallId: "read", tool: { ...call, output: read } });
+      const answer = `Verified result: ${FACT}`;
+      emit({ type: "text", method: "item/completed", itemId: "result", phase: "final_answer", text: answer });
+      const turn = host.threads.find(thread => thread.id === threadId).turns.find(item => item.id === turnId);
+      turn.status = "completed"; turn.items.push({ type: "agentMessage", id: "result", text: answer, phase: "final_answer" });
+      emit({ type: "complete", method: "turn/completed", status: "completed" });
+      await waitUntil(() => checks === 2, 10000, "same batch begins its second proof");
+      assert.equal(coordinator.getRun(run.id).status, "running");
+      assert.doesNotMatch(JSON.stringify(events), /Verified result/);
+      let withdrawal;
+      if (outcome === "withdraw") {
+        const interrupts = host.turnInterruptCalls;
+        withdrawal = f.owner.delete({ profileId: f.B, id: f.item.id, reason: "forgotten", operationId: "withdraw-during-retry" });
+        await waitUntil(() => host.turnInterruptCalls > interrupts, 5000, "withdrawal fences the outstanding proof");
+      }
+      release();
+      await withdrawal;
+      await waitUntil(() => ["completed", "interrupted"].includes(coordinator.getRun(run.id).status), 10000, "terminal result");
+      await coordinator.waitForIdle(run.id);
+      const history = transcriptStore.listEvents(f.profile.id, session.id).filter(e => e.runId === run.id);
+      assert.equal(history.filter(e => e.content?.transcriptType === "context.native.compacted").length, outcome === "tool follow-up" ? 0 : 1);
+      assert.equal(toolCalls, 1, "memory_get executes once");
+      assert.equal(host.turnStartCalls, launches, "verification never starts another native turn");
+      assert.equal(events.filter(e => e.type === "terminal").length, 1);
+      const result = coordinator.getRun(run.id);
+      const stages = coordinator.telemetry.events.filter(event => event.stage?.startsWith("borrowed_output_")).map(event => event.stage);
+      if (outcome === "continue" || outcome === "tool follow-up") {
+        assert.equal(result.status, "completed", result.errorCode);
+        assert.deepEqual(history.filter(e => e.kind === "assistant").map(e => e.content.text), [answer]);
+        assert.equal(history.filter(e => e.kind === "tool_result").length, 1);
+        assert.deepEqual(stages, ["borrowed_output_timeout", "borrowed_output_recovered"]);
+        if (outcome === "continue") {
+          const next = await f.send(session.sessionKey, "borrowed-next-turn", "Continue the telescope check with its existing source.");
+          assert.equal(next.runtimeTurnRef.sessionId, threadId);
+          assert.notEqual(next.runtimeTurnRef.turnId, turnId);
+          const again = await f.callTool(next, "memory_search", { query: "telescope", ownerProfileId: f.B, minScore: 0 });
+          const nextRef = again.results.find(item => item.ownerProfileId === f.B && item.borrowed);
+          assert.match((await f.callTool(next, "memory_get", { id: nextRef.sourceRef })).text, /aquamarine/u);
+          let nextProofs = 0;
+          sharing.withRunReadProof = (id, ...args) => {
+            if (id === next.id && ++nextProofs === 1) throw new DOMException("controlled second-turn deadline", "TimeoutError");
+            return check(id, ...args);
+          };
+          await f.complete(next, "The second telescope check is complete.");
+          assert.equal(toolCalls, 2, "one tool execution per user turn even with two consecutive proof timeouts");
+          assert.equal(host.turnStartCalls, launches + 1);
+        }
+      } else {
+        assert.equal(result.status, "interrupted");
+        assert.equal(result.errorCode, outcome === "withdraw" ? "CONTEXT_BORROWED_MEMORY_REVOKED" : "CONTEXT_MEMORY_VERIFICATION_TIMEOUT");
+        assert.doesNotMatch(JSON.stringify([events, history]), /Verified result|aquamarine/);
+        assert.equal(checks, 2);
+        assert.deepEqual(stages, ["borrowed_output_timeout", outcome === "withdraw" ? "borrowed_output_revoked" : "borrowed_output_timeout"]);
+      }
+    } finally { release?.(); subscription?.unsubscribe(); await f.close(); }
+  });
+}
+
+test("a timeout while committing the terminal result retries only the source proof", { timeout: 30000 }, async () => {
+  const f = await fixture();
+  let subscription;
+  try {
+    const session = f.createSession(), coordinator = f.service.workRunCoordinator;
+    const run = await f.send(session.sessionKey, "borrowed-terminal-retry", "Find telescope memory");
+    await f.callTool(run, "memory_search", { query: "telescope", ownerProfileId: f.B, minScore: 0 });
+    const sharing = f.owner.sharing, check = sharing.withRunReadProof.bind(sharing);
+    const events = [], signals = [];
+    subscription = coordinator.subscribeRun(run.id, { streamId: null, afterSeq: 0 }, event => events.push(event));
+    sharing.withRunReadProof = async (id, signal, ...args) => {
+      if (id === run.id && !coordinator.borrowedOutput.has(id)) {
+        signals.push(signal);
+        if (signals.length === 1) throw new DOMException("controlled terminal deadline", "TimeoutError");
+      }
+      return check(id, signal, ...args);
+    };
+    await f.complete(run, "Verified terminal result");
+    assert.equal(signals.length, 2);
+    assert.notEqual(signals[0], signals[1]);
+    assert.equal(events.filter(event => event.type === "terminal").length, 1);
+    assert.deepEqual(f.service.transcriptStore.listEvents(f.profile.id, session.id).filter(event => event.kind === "assistant")
+      .map(event => event.content.text), ["Verified terminal result"]);
+  } finally { subscription?.unsubscribe(); await f.close(); }
+});
 
 test("borrowed output preserves message, phase, reasoning-part and status boundaries", { timeout: 30000 }, async () => {
   const f = await fixture(); let release, subscription;

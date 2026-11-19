@@ -1,0 +1,90 @@
+.schedule {
+  --add-size: 40px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--add-size);
+  align-items: center;
+  flex: 1 1 100%;
+  min-width: 0;
+  gap: 8px;
+}
+
+.schedule > :global(.cron-time-controls) {
+  flex-wrap: nowrap;
+}
+
+.extras {
+  display: grid;
+  grid-column: 1 / -1;
+  justify-self: end;
+  gap: 8px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.add,
+.remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ui-text-2);
+  cursor: pointer;
+}
+
+.add {
+  width: var(--add-size);
+  height: var(--add-size);
+  border: 1px solid light-dark(rgba(0, 0, 0, 0.1), rgba(255, 255, 255, 0.14));
+  background: var(--ui-surface-1);
+  color: var(--ui-text-1);
+}
+
+.remove {
+  width: 32px;
+  height: 32px;
+  margin-inline: calc((var(--add-size) - 32px) / 2);
+  font-size: 17px;
+}
+
+.remove:hover {
+  background: color-mix(in srgb, var(--ui-surface-1) 92%, var(--ui-text-1));
+  color: var(--ui-text-1);
+}
+
+.add:focus-visible,
+.remove:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .schedule {
+    column-gap: 6px;
+  }
+
+  .schedule > :global(.cron-time-controls),
+  .row {
+    gap: 6px;
+  }
+
+  .schedule :global(.cron-pattern-select) {
+    min-width: 0;
+  }
+
+  .schedule :global(.cron-weekday-select),
+  .schedule :global(.cron-number-select) {
+    flex-basis: 52px;
+  }
+
+  .schedule :global([role="combobox"]) {
+    gap: 4px;
+    padding-inline: 8px;
+  }
+}

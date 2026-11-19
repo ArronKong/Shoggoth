@@ -92,6 +92,9 @@ class RunExecutionStore {
       || c.sourceId !== run.sourceId || c.workspace !== run.workspace
       || typeof c.runtime !== "string" || typeof c.runtimeProfileId !== "string"
       || typeof c.runtimeAccountId !== "string" || !validPolicy(c.permissionPolicy)
+      || (c.agentWorkspace !== undefined && (!run.workspace || c.permissionPolicy.sandbox === "read-only"
+        || !["chat", "inspiration", "kanban", "cron"].includes(run.source)
+        || c.agentWorkspace !== require("./chat-workspace").agentWorkspaceRoot(this.paths, run.profileId)))
       || !validPolicy(c.runtimeHostPermissionPolicy) || typeof c.developerInstructions !== "string"
       || (c.cronAuthorization != null && (run.source !== "cron"
         || !require("./cron-authorization-store").validCronAuthorizationScope(c.cronAuthorization)

@@ -207,6 +207,12 @@ class EncryptedSecretStore {
       .map(([credentialRef, entry]) => ({ credentialRef, kind: entry.kind }));
   }
 
+  getMatcherRevision() {
+    this.#assertOpen();
+    if (this.matcherCacheLocked) throw lockedError();
+    return this.container.revision;
+  }
+
   getCredentialRevision(credentialRef) {
     this.#assertOpen();
     assertCredentialRef(credentialRef);
