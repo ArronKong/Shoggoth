@@ -292,6 +292,10 @@ process.stdin.on("data", (chunk) => {
         inputModalities: ["text"], supportsPersonality: false, multiAgentVersion: null,
         additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, availableAccessPrograms: null,
       }], nextCursor: null } });
+    } else if (elicitationEnabled && message.method === "config/read"
+      && message.params?.includeLayers === false && typeof message.params.cwd === "string") {
+      // The fixture has no user workspace sandbox overrides.
+      send({ id: message.id, result: { config: {}, origins: {} } });
     } else if (elicitationEnabled && message.method === "thread/resume") {
       send({ id: message.id, result: threadConfigResponse(thread(message.params.threadId), message.params) });
     } else if (elicitationEnabled && message.method === "thread/inject_items") {
