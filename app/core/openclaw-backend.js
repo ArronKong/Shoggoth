@@ -67,7 +67,7 @@ const { isOpenClawSystemCronJob, cronJobIdFromTask } = require("./openclaw-cron-
 const { normalizeArtifactRoots, walkArtifactRoots, resolveArtifactPreviewPath } = require("./artifact-scan");
 const { collectSessionOutputArtifacts, sessionArtifactHistory } = require("./session-output-artifacts");
 const { scanUsageCube, cubeToSeries, cubeToBreakdown } = require("./usage-file-scan");
-const { MAX_WINDOWS, quotaSnapshot } = require("./oauth-account-quota");
+const { MAX_WINDOWS, quotaAccountName, quotaScopeDigest, quotaSnapshot } = require("./oauth-account-quota");
 const {
   buildConnectParams,
   classifyAuthError,
@@ -2847,6 +2847,11 @@ class OpenClawBackend extends AgentBackend {
         throw Object.assign(new Error("OpenClaw 授权状态暂不可用，请稍后刷新"), { code: "auth_status_unavailable", status: 503 });
       }
       const rows = status.providers.flatMap(provider => {
+        const scopeFor = profile => {
+          const email = profile.type === "oauth" ? quotaAccountName(profile.email) : null;
+          if (!email || !binding.url) return undefined;
+          return quotaScopeDigest("openclaw", binding.url, agentId, provider.provider, profile.profileId, email);
+        };
         const usage = includeQuota ? provider.usage : null;
         const owner = usage && provider.profiles.find(profile => profile.type === "oauth"
           && profile.profileId === usage.authProfileId);
@@ -2859,11 +2864,12 @@ class OpenClawBackend extends AgentBackend {
             label: [window?.groupLabel, window?.label].filter(part => typeof part === "string").join(" · "),
             usedPercent: window?.usedPercent,
             resetsAt: window?.resetAt,
-          })), { accountName: owner.email,
+          })), { accountName: owner.email, quotaScope: scopeFor(owner),
             credits: balance ? { kind: "balance", amount: balance.amount, unit: balance.unit } : undefined })
           : undefined;
         return provider.profiles.map(profile => ({
           ...profile, provider: provider.provider, expiry: profile.expiry ?? provider.expiry,
+          quotaScope: scopeFor(profile),
           quota: profile === owner ? quota : undefined,
         }));
       });
@@ -2903,7 +2909,7 @@ class OpenClawBackend extends AgentBackend {
         disconnectHint: null,
         disconnectCommand: null,
         disconnectable: true,
-        ...(loggedIn ? { canReadQuota: true } : {}),
+        ...(loggedIn ? { canReadQuota: true, ...(best.quotaScope ? { quotaScope: best.quotaScope } : {}) } : {}),
         status: {
           loggedIn,
           source: best?.type || null,

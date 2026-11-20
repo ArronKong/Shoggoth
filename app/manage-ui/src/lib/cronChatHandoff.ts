@@ -20,7 +20,6 @@ interface CronDeliveryHandoffInput {
 export interface CronRunHandoffSource {
   sessionKey: string | null;
   report: string | null;
-  isFullText: boolean;
 }
 
 export interface CronChatHandoff {
@@ -150,21 +149,19 @@ export function selectCronRunHandoffSource(
   openRun: CronRunHandoffInput | null,
   delivery: CronDeliveryHandoffInput | null,
 ): CronRunHandoffSource {
-  if (!openRun) return { sessionKey: null, report: null, isFullText: false };
+  if (!openRun) return { sessionKey: null, report: null };
   const exactDelivery =
     typeof openRun.startedAt === "number" &&
     typeof delivery?.startedAt === "number" &&
     openRun.startedAt === delivery.startedAt
       ? delivery
       : null;
-  const fullText = firstNonBlankText(exactDelivery?.fullText);
   const groupBound = openRun.deliveryTarget === "group" || exactDelivery?.deliveryTarget === "group";
   return {
     sessionKey: groupBound ? null : canonicalCronSessionKey(
       openRun.agentId,
       exactDelivery?.sessionKey || openRun.sessionKey,
     ),
-    report: fullText ?? firstNonBlankText(exactDelivery?.summary, openRun.summary),
-    isFullText: fullText !== null,
+    report: firstNonBlankText(exactDelivery?.fullText, exactDelivery?.summary, openRun.summary),
   };
 }

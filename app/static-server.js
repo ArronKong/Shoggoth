@@ -34,6 +34,7 @@ const { ModelValidationError } = require("./core/model-validation");
 const { ModelChangeError } = require("./core/model-change-validation");
 const { ModelChangeJournalError } = require("./core/model-change-journal");
 const { validQuotaSnapshot } = require("./core/oauth-account-quota");
+const { createOAuthAccountQuotaCache } = require("./core/oauth-account-quota-cache");
 const { HermesCatalogUnavailableError } = require("./core/hermes-backend");
 const { WorkAdmissionError } = require("./core/work-admission-gate");
 const { createChatReadStateStore } = require("./core/chat-read-state-store");
@@ -1104,6 +1105,7 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     nativeMemorySharingConfigController,
     avatarPool,
     chatReadStateStore,
+    oauthAccountQuotaCache,
   } = deps;
   const method = req.method || "GET";
   let rawPath = pathname;
@@ -2634,19 +2636,21 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
     // （provider id / session id 不进 path 段，同 task/cron id 的规矩）。
     if (segs[0] === "oauth" && (segs.length === 1 || segs.length === 2)) {
       const url = new URL(req.url, "http://127.0.0.1");
-      const backend = getActiveBackend(registry, url.searchParams.get("backend") || "hermes");
+      const backendId = url.searchParams.get("backend") || "hermes";
+      const backend = getActiveBackend(registry, backendId);
       if (!backend) return sendJson(res, 404, { error: "unknown backend" });
       if (segs.length === 1) {
         if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
-        const backendId = url.searchParams.get("backend") || "hermes";
+        const order = oauthAccountQuotaCache?.begin();
+        let snapshot;
         if (url.searchParams.get("view") === "quota") {
           // Background inventory must not replace the complete terminal command list.
-          const snapshot = backend.getBackendDescriptor?.()?.surfaces?.oauthAccountQuota === true
+          snapshot = backend.getBackendDescriptor?.()?.surfaces?.oauthAccountQuota === true
             ? await backend.listOAuthProviders({ quotaOnly: true }) : { providers: [], profiles: [] };
-          return sendJson(res, 200, snapshot);
+        } else {
+          snapshot = rememberOAuthCommands(backendId, await backend.listOAuthProviders());
         }
-        const snapshot = await backend.listOAuthProviders();
-        return sendJson(res, 200, rememberOAuthCommands(backendId, snapshot));
+        return sendJson(res, 200, oauthAccountQuotaCache ? oauthAccountQuotaCache.attach(backendId, snapshot, order) : snapshot);
       }
       if (segs[1] === "quota") {
         if (method !== "GET") return sendJson(res, 405, { error: "method not allowed" });
@@ -2654,9 +2658,11 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         if (!providerId || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(providerId)) {
           return sendJson(res, 400, { error: "invalid provider" });
         }
+        const order = oauthAccountQuotaCache?.begin();
         let quota;
         try { quota = await backend.getOAuthProviderQuota(providerId); } catch { /* optional provider read */ }
-        return sendJson(res, 200, validQuotaSnapshot(quota) ? quota : { status: "unavailable" });
+        if (!validQuotaSnapshot(quota)) return sendJson(res, 200, { status: "unavailable" });
+        return sendJson(res, 200, oauthAccountQuotaCache ? oauthAccountQuotaCache.complete(backendId, providerId, quota, order) : quota);
       }
       if (method !== "POST") return sendJson(res, 405, { error: "method not allowed" });
       const body = (await readJsonBody(req)) || {};
@@ -2667,7 +2673,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       }
       if (!body.provider) return sendJson(res, 400, { error: "missing provider" });
       if (segs[1] === "disconnect") {
-        return sendJson(res, 200, await backend.disconnectOAuthProvider(body.provider, profile));
+        const result = await backend.disconnectOAuthProvider(body.provider, profile);
+        if (result?.ok) oauthAccountQuotaCache?.forget(backendId, body.provider);
+        return sendJson(res, 200, result);
       }
       // flow "providers": the model providers a runtime signs into, and API keys for them.
       if (segs[1] === "options") {
@@ -2677,7 +2685,9 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
         if (!body.target || typeof body.key !== "string" || !body.key) {
           return sendJson(res, 400, { error: "missing target or key" });
         }
-        return sendJson(res, 200, await backend.saveOAuthApiKey(body.provider, body.target, body.key));
+        const result = await backend.saveOAuthApiKey(body.provider, body.target, body.key);
+        if (result?.ok) oauthAccountQuotaCache?.forget(backendId, body.provider);
+        return sendJson(res, 200, result);
       }
       if (segs[1] === "start") {
         return sendJson(res, 200, await backend.startOAuthLogin(body.provider, profile, body.target));
@@ -2685,10 +2695,14 @@ async function handleApiRequest(req, res, pathname, registry, deps = {}) {
       if (!body.sessionId) return sendJson(res, 400, { error: "missing sessionId" });
       if (segs[1] === "submit") {
         if (!body.code) return sendJson(res, 400, { error: "missing code" });
-        return sendJson(res, 200, await backend.submitOAuthCode(body.provider, body.sessionId, body.code, profile));
+        const result = await backend.submitOAuthCode(body.provider, body.sessionId, body.code, profile);
+        if (result?.status === "approved") oauthAccountQuotaCache?.forget(backendId, body.provider);
+        return sendJson(res, 200, result);
       }
       if (segs[1] === "poll") {
-        return sendJson(res, 200, await backend.pollOAuthSession(body.provider, body.sessionId, profile));
+        const result = await backend.pollOAuthSession(body.provider, body.sessionId, profile);
+        if (result?.status === "approved") oauthAccountQuotaCache?.forget(backendId, body.provider);
+        return sendJson(res, 200, result);
       }
       return sendJson(res, 404, { error: "unknown oauth action" });
     }
@@ -4364,6 +4378,9 @@ function startStaticServer(
       directory: `${path.basename(configStore.path)}.ui-state` });
   }
   try { chatReadStateStore?.ensure(); } catch { /* The API stays unavailable; never reset damaged state. */ }
+  const oauthAccountQuotaCache = userDataRoot ? createOAuthAccountQuotaCache({ trustedRoot: userDataRoot })
+    : configStore?.path ? createOAuthAccountQuotaCache({ trustedRoot: path.dirname(configStore.path),
+      directory: `${path.basename(configStore.path)}.ui-state` }) : null;
   const assetPaths = resolveDesktopAssetPaths({ homeDir, userDataRoot });
   const avatarPool = createDefaultAgentAvatarPool(assetPaths, {
     hasCustomAvatar: (agentId) => Boolean(resolveCustomAgentAvatarFile(agentId, assetPaths)),
@@ -4383,6 +4400,7 @@ function startStaticServer(
     hostOps,
     attachmentRevealer,
     chatReadStateStore,
+    oauthAccountQuotaCache,
     productHost,
     managedOpenClawHost,
     managedHermesHost,

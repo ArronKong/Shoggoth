@@ -1,4 +1,11 @@
-.body { display: flex; flex-direction: column; gap: 16px; min-height: 120px; }
+.panel[role="dialog"] { background: var(--skin-app-bg); max-height: calc(100dvh - 80px); }
+.scrollBody {
+  composes: scrollFade from "../../components/Picker.module.css";
+  --picker-fade-size: min(24px, 20%);
+  scrollbar-gutter: stable;
+  scroll-padding-block: 24px;
+}
+.body { display: flex; flex: none; flex-direction: column; gap: 16px; min-height: 120px; }
 .section { display: flex; flex-direction: column; gap: 10px; }
 .heading { margin: 0; font-size: 13px; line-height: 18px; font-weight: 600; }
 .muted { margin: 0; color: light-dark(#71695e, #c0b9af); font-size: 13px; line-height: 20px; }
@@ -13,7 +20,6 @@
   overflow-wrap: anywhere;
 }
 .message[data-role="user"] { background: light-dark(#f4f1ec, #2c2b30); }
-.message[data-activity] { border-style: dashed; background: transparent; }
 .messageHead {
   display: flex;
   justify-content: space-between;
@@ -24,18 +30,13 @@
   line-height: 16px;
 }
 
-.footer { display: flex; flex-direction: column; gap: 10px; width: 100%; }
-.input {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 56px;
-  padding: 8px 10px;
-  border: 1px solid var(--skin-hairline);
-  border-radius: 10px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  resize: vertical;
+.conversation {
+  font-family: var(--font-body);
 }
-.input:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 1px; }
-.actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.conversation :global(.chat-group__stack) { max-width: min(794px, max(85%, calc(100% - 48px))); }
+.conversation :global(.is-user .chat-group__stack) { max-width: min(560px, max(80%, calc(100% - 80px))); }
+
+.composer:global(.chat-composer) { width: 100%; min-height: 0; margin: 0; }
+.composer :global(.chat-composer__bar) { margin-top: 4px; padding-top: 0; }
+.composer :global(.chat-composer__input) { min-height: 48px; max-height: 100px; }

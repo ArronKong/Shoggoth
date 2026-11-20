@@ -113,6 +113,11 @@ const previews: Record<string, readonly Row[]> = {
     ["Inspect projects", "查看网站项目", "Review sites, projects and team resources.", "查看网站、项目与团队资源。"],
     ["Manage deployments", "管理部署", "Work with site deployments.", "处理网站部署。"],
   ],
+  "product-hunt": [
+    ["Discover products", "发现新产品", "Search recent launches and browse Product Hunt rankings.", "搜索近期发布，查看 Product Hunt 排行榜。"],
+    ["Compare products", "比较产品", "Read product profiles and reviews and find alternatives.", "查看产品资料、评论和替代产品。"],
+    ["Manage launches", "管理产品发布", "Sign in to work on your launch drafts and schedule releases.", "登录后可编辑发布草稿和安排上线时间。"],
+  ],
   posthog: [
     ["Analyze events", "分析产品事件", "Explore product events and user behavior.", "分析产品事件与用户行为。"],
     ["Review experiments", "查看实验", "Inspect product experiment information.", "查看产品实验信息。"],

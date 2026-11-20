@@ -1899,12 +1899,16 @@ test("Grok reads billing for the active credential without a session or a model 
     const result = await runtime.accountQuotaRead();
     assert.equal(result.status, "available");
     assert.equal(result.accountName, "Kai Chen");
+    assert.match(result.quotaScope, /^[a-f0-9]{64}$/u);
+    assert.equal((await runtime.authenticationState({ includeQuotaScope: true })).quotaScope, result.quotaScope);
     assert.doesNotMatch(JSON.stringify(result), /private-principal|kai@example\.test/u);
     assert.deepEqual(result.windows, [
       { label: null, durationMinutes: 10_080, usedPercent: 42, resetsAt: Date.parse("2026-11-24T12:00:00Z") },
     ]);
     assert.deepEqual(result.credits, { kind: "balance", amount: 2.43, unit: "USD" });
     assert.deepEqual(fixture.children[0].messages.map(message => message.method), ["initialize", "_x.ai/billing", "_x.ai/auth/info"]);
+    fs.writeFileSync(authPath, "different-fixture-account", { mode: 0o600 });
+    assert.notEqual((await runtime.authenticationState({ includeQuotaScope: true })).quotaScope, result.quotaScope);
     await fixture.adapter.stopAll();
   } finally { fixture.cleanup(); }
 });
@@ -2661,6 +2665,35 @@ test("product permission modes map to Grok ACP session metadata and mode ids", a
     fixture.cleanup();
   }
 });
+
+for (const method of ["session/resume", "session/load"]) {
+  test(`Grok 1.0.91+ restores the exact requested permissions on ${method}`, async t => {
+    const fallback = standardServer();
+    const fixture = fixtureOptions((message, child) => {
+      if (message.method === "initialize") {
+        const info = initializeResult({ authMethods: [] });
+        info._meta.agentVersion = "1.0.91";
+        if (method === "session/load") delete info.agentCapabilities.sessionCapabilities.resume;
+        return rpcResult(info);
+      }
+      if (message.method === "session/set_mode") return rpcError(-32602, "Invalid params");
+      return fallback(message, child);
+    });
+    t.after(async () => { await fixture.adapter.stopAll(); fixture.cleanup(); });
+    const permissionPolicy = { approvalPolicy: "on-request", sandbox: "workspace-write" };
+    const runtime = await acquire(fixture, { permissionPolicy });
+    const { session } = await runtime.sessionStart({ source: "chat:resume-permissions",
+      persistent: true, cwd: "/tmp/workspace", permissionPolicy });
+    const resume = { sessionId: session.id, cwd: session.cwd, permissionPolicy };
+    for (const permissionMode of ["always-approve", "ask", "auto"]) {
+      await runtime.sessionResume({ ...resume, permissionMode });
+      const call = fixture.children[0].messages.filter(message => message.method === method).at(-1);
+      assert.deepEqual(call.params._meta, { yoloMode: permissionMode === "always-approve", autoMode: permissionMode === "auto" });
+    }
+    await runtime.sessionResume(resume);
+    assert.equal(Object.hasOwn(fixture.children[0].messages.filter(m => m.method === method).at(-1).params, "_meta"), false);
+  });
+}
 
 test("never approval policy rejects ACP permission without invoking UI handlers", async () => {
   let prompt;

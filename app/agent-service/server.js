@@ -2914,6 +2914,8 @@ function createAgentService(options) {
   });
   backgroundTaskService = options.backgroundTaskService || new (require("./background-task-service").BackgroundTaskService)({
     store: backgroundTaskStore, paths, productStore, chatSessionStore, transcriptStore, agentFileStore,
+    projectMessage: (session, text) => require("../core/chat-secret-fallback").projectTextOrOriginal(temporarySecrets,
+      { profileId: session.profileId, sessionId: session.sessionKey }, text),
     getChatServiceController: () => chatServiceController,
     getWorkRunCoordinator: () => workRunCoordinator,
     workDispatcher,
@@ -4667,6 +4669,7 @@ function createAgentService(options) {
         const { sessionKey, ...input } = params;
         if (request.method === "background.task.list") result = { tasks: backgroundTaskService.list(sessionKey) };
         else if (request.method === "background.task.get") result = backgroundTaskService.detail(sessionKey, input.taskId);
+        else if (request.method === "background.task.session") result = backgroundTaskService.conversationSession(sessionKey, input.taskId);
         else if (request.method === "background.task.send") result = await backgroundTaskService.uiSend(sessionKey, input);
         else if (request.method === "background.task.cancel") result = await backgroundTaskService.uiCancel(sessionKey, input);
         else result = await backgroundTaskService.uiRespond(sessionKey, input);

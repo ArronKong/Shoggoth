@@ -16,10 +16,13 @@ const WAITING_RUN_STATUSES = new Set(["waiting_approval", "waiting_input"]);
 const TASK_STATUSES = Object.freeze(["starting", "queued", "running", "waiting_approval", "waiting_input",
   "stopping", "completed", "failed", "canceled", "interrupted", "needs_verification"]);
 const REPORT_STATES = Object.freeze(["none", "pending", "delivered", "held", "withheld"]);
+const BRIEF_MARKER = "\n\nTask brief:\n";
+const FOLLOW_UP_MARKER = "\n\nInstruction:\n";
+const STEER_PREFIX = "Additional instruction from the user for this background task:\n";
 // Runtimes whose separate session, permissions, approval/stop, terminal state
 // and public final answer were verified for background work. Others are
 // rejected before acceptance.
-const BACKGROUND_TASK_RUNTIMES = Object.freeze(new Set(["codex", "pi"]));
+const BACKGROUND_TASK_RUNTIMES = Object.freeze(new Set(["codex", "pi", "opencode", "deepseek-harness", "antigravity"]));
 
 const PUBLIC_MESSAGES = Object.freeze({
   BACKGROUND_TASK_SOURCE_REQUIRED: "Background tasks can be started and managed only from the user's direct chat with this native Agent, in the conversation that started them. Background sessions cannot start further background tasks.",
@@ -54,6 +57,17 @@ function isBackgroundTaskOperation(operationId) {
   return typeof operationId === "string" && (operationId.startsWith("bg-send-bgt-") || operationId.startsWith("bg-steer-bgt-"));
 }
 
+function visibleBackgroundInstruction(text) {
+  if (typeof text !== "string") return "";
+  if (text.startsWith("[Shoggoth background task")) {
+    for (const marker of [BRIEF_MARKER, FOLLOW_UP_MARKER]) {
+      const at = text.indexOf(marker);
+      if (at >= 0) return text.slice(at + marker.length);
+    }
+  }
+  return text.startsWith(STEER_PREFIX) ? text.slice(STEER_PREFIX.length) : text;
+}
+
 // Runless publications are written by the Service only. The report reuses the
 // published-notice context path, so its identity must be derivable from its
 // own task and generation and never from model output.
@@ -82,6 +96,7 @@ function deriveTitle(brief) {
 module.exports = {
   BACKGROUND_TASK_RUNTIMES, MAX_BRIEF_BYTES, MAX_GENERATIONS, MAX_MESSAGE_BYTES, MAX_TITLE_CHARS,
   PUBLIC_MESSAGES, REPORT_STATES, TASK_ID_PATTERN, TASK_STATUSES, TERMINAL_RUN_STATUSES, WAITING_RUN_STATUSES,
+  BRIEF_MARKER, FOLLOW_UP_MARKER, STEER_PREFIX, visibleBackgroundInstruction,
   backgroundReportEventId, backgroundTaskId, backgroundTaskOperations, deriveTitle, isBackgroundTaskOperation,
   isBackgroundTaskReportEvent, validText,
 };

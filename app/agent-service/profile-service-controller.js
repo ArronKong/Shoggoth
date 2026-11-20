@@ -500,7 +500,7 @@ function createProfileServiceController(options = {}) {
     }
   }
 
-  async function readRuntimeAuth(profile, generation) {
+  async function readRuntimeAuth(profile, generation, includeQuotaScope) {
     let host;
     let auth;
     try {
@@ -516,7 +516,7 @@ function createProfileServiceController(options = {}) {
         }
       } else {
         host = await runtimeManager.acquire(binding, { permissionPolicy: profile.permissionPolicy });
-        auth = await readRuntimeAuthenticationState(host);
+        auth = await readRuntimeAuthenticationState(host, { includeQuotaScope });
       }
       if (auth.status === "unsupported") {
         throw profileError("PROFILE_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
@@ -525,7 +525,7 @@ function createProfileServiceController(options = {}) {
       throw runtimeReadError(error, "PROFILE_AUTH_STATUS_UNAVAILABLE", "Runtime auth status is unavailable");
     }
     assertProfileStillCurrent(profile, generation);
-    return validateProfileServiceResult("profile.auth.read", { status: auth.status });
+    return validateProfileServiceResult("profile.auth.read", auth);
   }
 
   async function requireCatalogModel(modelId, readPage) {
@@ -837,7 +837,7 @@ function createProfileServiceController(options = {}) {
         const read = method.endsWith(".models.list")
           ? readRuntimeModelPage(profile, params, generation)
           : method.endsWith(".capabilities.read") ? readRuntimeCapabilities(profile, generation)
-            : readRuntimeAuth(profile, generation);
+            : readRuntimeAuth(profile, generation, params.includeQuotaScope);
         return read
           .then((result) => validateProfileServiceResult(method, result));
       }

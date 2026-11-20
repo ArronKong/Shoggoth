@@ -29,7 +29,7 @@ const MIMO_RESPONSES_HOSTS = new Set([
 const MIMO_MODELS = [
   "mimo-v2.6-flash", "mimo-v2.6-pro", "mimo-v2.6-pro-ultraspeed",
 ];
-const MIMO_CATALOG_RUNTIME_VERSION = "0.167.1";
+const MIMO_CATALOG_RUNTIME_VERSIONS = new Set(["0.167.1", "0.170.0"]);
 const CUSTOM_PROVIDER_KINDS = new Set([
   "openai-api-key", "openrouter", "ollama", "lmstudio", "custom-responses",
 ]);
@@ -109,8 +109,8 @@ function usesMiMoResponses(provider) {
 }
 
 function mimoModelCatalog() {
-  // This is the Apache-licensed fallback prompt from the bundled Codex tag
-  // (codex-rs/models-manager/prompt.md). An explicit catalog requires it.
+  // An explicit catalog requires this Apache-licensed prompt. The supported
+  // Codex tags ship identical codex-rs/models-manager/prompt.md contents.
   const baseInstructions = fs.readFileSync(path.join(__dirname, "prompts", "codex-0.167.1-model-fallback.md"), "utf8");
   return JSON.stringify({
     models: MIMO_MODELS.map(slug => ({
@@ -713,7 +713,7 @@ class CodexRuntimeConfigWriter {
       approvalReviewer: "user",
     }) : null;
     let modelCatalog = null;
-    if (officialMiMoProvider && runtimeVersion === MIMO_CATALOG_RUNTIME_VERSION) {
+    if (officialMiMoProvider && MIMO_CATALOG_RUNTIME_VERSIONS.has(runtimeVersion)) {
       // Codex reads model_catalog_json on app-server startup. A thread override
       // cannot replace the synthetic descriptor, which caps window overrides at 272K.
       const home = prepareCodexRuntimeAccountHome(this.paths, runtimeAccountId);

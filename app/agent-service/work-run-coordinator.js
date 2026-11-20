@@ -3103,6 +3103,9 @@ class WorkRunCoordinator {
           input.sessionKey,
           "running",
         );
+        if (assignment.host.capabilities?.["turn.steer"] === false) {
+          throw coordinatorError("RUNTIME_CAPABILITY_UNSUPPORTED", "当前运行时不支持在运行中追加指令");
+        }
         requireMethods(assignment.host, ["turnSteer"], "RuntimeHandle turn steer");
         if (this.temporarySecrets) input = { ...input, message: (await prepareForSend(this.temporarySecrets, {
           scope: { profileId: run.profileId, sessionId: input.sessionKey }, operationId: input.operationId, text: input.message,

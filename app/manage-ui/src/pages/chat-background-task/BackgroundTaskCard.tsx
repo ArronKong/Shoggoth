@@ -1,4 +1,7 @@
 import { useTranslation } from "react-i18next";
+import completedIcon from "../../assets/figma/background-task/completed.svg";
+import failedIcon from "../../assets/figma/background-task/failed.svg";
+import FusionLoader from "../../components/FusionLoader";
 import type { BackgroundTask, BackgroundTaskStatus } from "../../types";
 import styles from "./BackgroundTaskCard.module.css";
 
@@ -15,17 +18,22 @@ export function backgroundTaskTone(status: BackgroundTaskStatus) {
 export default function BackgroundTaskCard({ task, onOpen }: { task: BackgroundTask; onOpen: () => void }) {
   const { t } = useTranslation();
   const tone = backgroundTaskTone(task.status);
-  const report = task.status === "completed" || task.report === "held" ? t(`backgroundTask.report.${task.report}`) : "";
+  const label = t("backgroundTask.label");
+  const status = t(`backgroundTask.status.${task.status}`);
+  const showReport = task.report === "held" || (task.status === "completed" && task.report !== "none" && task.report !== "delivered");
+  const icon = tone === "done" ? completedIcon : tone === "error" ? failedIcon : null;
   return <button type="button" className={styles.card} data-tone={tone} onClick={onOpen}
-    aria-label={`${t("backgroundTask.label")} · ${task.title} · ${t(`backgroundTask.status.${task.status}`)}`}>
-    <span className={styles.indicator} aria-hidden="true" />
-    <span className={styles.body}>
-      <span className={styles.label}>{t("backgroundTask.label")}</span>
-      <span className={styles.title}>{task.title}</span>
-    </span>
+    aria-label={`${label} · ${task.title} · ${status}`}>
     <span className={styles.meta}>
-      <span className={styles.status}>{t(`backgroundTask.status.${task.status}`)}</span>
-      {report ? <span className={styles.report}>{report}</span> : null}
+      <span className={styles.status}>
+        {tone === "active" || tone === "attention"
+          ? <FusionLoader size="sm" className={styles.loader} preserveBallEdges />
+          : icon ? <img className={styles.icon} src={icon} alt="" /> : <span className={styles.dot} aria-hidden="true" />}
+        <span>{status}</span>
+      </span>
+      <span className={styles.label}>{label}</span>
     </span>
+    <span className={styles.title}>{task.title}</span>
+    {showReport && <span className={styles.report}>{t(`backgroundTask.report.${task.report}`)}</span>}
   </button>;
 }

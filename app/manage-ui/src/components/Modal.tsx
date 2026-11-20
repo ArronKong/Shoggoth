@@ -3,7 +3,7 @@
 // ARCHITECTURE.md §5「UI 组件层」）。Focus-trap / scroll-lock / Escape + backdrop
 // dismiss / ARIA come from base-ui; centered chrome lives in Modal.module.css.
 
-import { type ReactNode, useLayoutEffect, useRef } from "react";
+import { type ReactNode, type Ref, useLayoutEffect, useRef } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { useTranslation } from "react-i18next";
 import styles from "./Modal.module.css";
@@ -14,6 +14,9 @@ export default function Modal({
   subtitle,
   onClose,
   onOpenChangeComplete,
+  initialFocus,
+  bodyRef,
+  bodyClassName,
   children,
   footer,
   // 设计稿 7108:896「内容大弹窗」是 800 宽；已显式传宽的调用方保持自己的取值。
@@ -30,6 +33,9 @@ export default function Modal({
   onClose: () => void;
   // Base UI 在入场/退场过渡结束后调用；页面可据此延后重内容加载或状态清理。
   onOpenChangeComplete?: (open: boolean) => void;
+  initialFocus?: boolean;
+  bodyRef?: Ref<HTMLDivElement>;
+  bodyClassName?: string;
   children?: ReactNode;
   footer?: ReactNode;
   width?: number;
@@ -95,6 +101,7 @@ export default function Modal({
         <Dialog.Backdrop className={styles.overlay} />
         <Dialog.Popup
           {...closingInteractionProps}
+          {...(initialFocus === undefined ? {} : { initialFocus })}
           className={[styles.panel, variant && styles[variant], className].filter(Boolean).join(' ')}
           data-modal-variant={variant}
           data-tone={visibleContent.tone}
@@ -125,7 +132,7 @@ export default function Modal({
               ) : "✕"}
             </Dialog.Close>
           </header>
-          <div className={styles.body}>{visibleContent.children}</div>
+          <div ref={bodyRef} className={bodyClassName ? `${styles.body} ${bodyClassName}` : styles.body}>{visibleContent.children}</div>
           {visibleContent.footer && (
             <footer className={styles.foot}>{visibleContent.footer}</footer>
           )}

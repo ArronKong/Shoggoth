@@ -16,7 +16,7 @@ const { GrokBuildAcpJsonlClient } = require("./grok-build-acp-jsonl");
 const { safeSnapshot } = require("./codex-event-snapshot");
 const { GrokBuildRuntimeLedger } = require("./grok-build-runtime-ledger");
 const { readGrokUsage } = require("./grok-build-usage");
-const { quotaSnapshot } = require("../core/oauth-account-quota");
+const { quotaScopeDigest, quotaSnapshot } = require("../core/oauth-account-quota");
 const {
   GROK_BUILD_RUNTIME,
   buildGrokBuildArgs,
@@ -888,6 +888,10 @@ class GrokBuildRuntimeHost {
     const version = /^(\d+)\.(\d+)\.(\d+)(?:\+[a-zA-Z0-9.-]+)?$/u.exec(response._meta?.agentVersion ?? "");
     this.nativeRulesSupported = !!version && Number(version[1]) === 1
       && (Number(version[2]) > 0 || Number(version[3]) >= 63);
+    // Grok 1.0.91+ applies yoloMode and autoMode on both resume and load.
+    // This ACP dialect rejects the legacy session/set_mode parameter.
+    this.resumePermissionMetaSupported = !!version && Number(version[1]) === 1
+      && (Number(version[2]) > 0 || Number(version[3]) >= 91);
     this.modelCatalog = modelCatalogFromInitialize(response);
   }
 
@@ -1082,13 +1086,16 @@ class GrokBuildRuntimeHost {
     return cached;
   }
 
-  authenticationState() {
+  authenticationState({ includeQuotaScope = false } = {}) {
     const cached = this._syncAuthenticationFromProof();
+    const quotaScope = includeQuotaScope && cached && this.authenticated
+      ? quotaScopeDigest("grok-build", this.runtimeHome, cached.fingerprint) : undefined;
     return Object.freeze({
       authenticated: this.authenticated,
       credentialPresent: cached !== null,
       methodId: this.authMethodId,
       methods: Object.freeze(this.authMethods.map((method) => Object.freeze({ ...method }))),
+      ...(quotaScope ? { quotaScope } : {}),
     });
   }
 
@@ -1124,7 +1131,8 @@ class GrokBuildRuntimeHost {
     const fullName = [info?.firstName, info?.lastName]
       .filter(part => typeof part === "string" && part.trim()).map(part => part.trim()).join(" ");
     const accountName = info?.methodId === "xai.api_key" ? undefined : (fullName || info?.email);
-    return quotaSnapshot([{ usedPercent, durationMinutes, resetsAt }], { accountName, credits });
+    const quotaScope = quotaScopeDigest("grok-build", this.runtimeHome, credential.fingerprint);
+    return quotaSnapshot([{ usedPercent, durationMinutes, resetsAt }], { accountName, credits, quotaScope });
   }
 
   canRetireIdle() {
@@ -1491,20 +1499,14 @@ class GrokBuildRuntimeHost {
       sessionId: input.sessionId,
     });
     const capabilities = this.agentCapabilities?.sessionCapabilities || {};
+    const resumeParams = { sessionId: input.sessionId, cwd, mcpServers,
+      ...(input.permissionMode != null && this.resumePermissionMetaSupported ? { _meta: permissionMeta(permissionMode) } : {}) };
     try {
       let request;
       if (plain(capabilities.resume)) {
-        request = this._startAuthBoundRequest("session/resume", {
-          sessionId: input.sessionId,
-          cwd,
-          mcpServers,
-        }, { timeoutMs: this.requestTimeoutMs });
+        request = this._startAuthBoundRequest("session/resume", resumeParams, { timeoutMs: this.requestTimeoutMs });
       } else if (this.agentCapabilities?.loadSession === true) {
-        request = this._startAuthBoundRequest("session/load", {
-          sessionId: input.sessionId,
-          cwd,
-          mcpServers,
-        }, { timeoutMs: this.requestTimeoutMs });
+        request = this._startAuthBoundRequest("session/load", resumeParams, { timeoutMs: this.requestTimeoutMs });
       } else {
         throw hostError("RUNTIME_CAPABILITY_UNSUPPORTED", "Grok Build cannot resume sessions");
       }
@@ -1518,7 +1520,7 @@ class GrokBuildRuntimeHost {
         await modelRequest.promise;
         this._markRuntimeAuthenticated(modelRequest.authFingerprint);
       }
-      if (input.permissionMode != null) {
+      if (input.permissionMode != null && !this.resumePermissionMetaSupported) {
         const modeRequest = this._startAuthBoundRequest("session/set_mode", {
           sessionId: input.sessionId,
           modeId: permissionMode === "always-approve" ? "bypassPermissions"

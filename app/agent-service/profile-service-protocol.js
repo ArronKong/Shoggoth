@@ -1,6 +1,7 @@
 "use strict";
 
 const { validModelCapabilities } = require("./chat-model-settings");
+const { validQuotaScope } = require("../core/oauth-account-quota");
 
 const {
   validateChatServiceResult,
@@ -104,7 +105,9 @@ function validateProfileServiceParams(method, params) {
   }
   if (["profile.auth.read", "profile.binding.auth.read", "profile.capabilities.read", "profile.binding.capabilities.read"].includes(method)) {
     const bound = method.startsWith("profile.binding.");
-    if (!exactObject(params, ["profileId", ...(bound ? ["bindingId"] : [])])
+    const scoped = method.endsWith(".auth.read") && Object.hasOwn(params || {}, "includeQuotaScope");
+    if (!exactObject(params, ["profileId", ...(bound ? ["bindingId"] : []), ...(scoped ? ["includeQuotaScope"] : [])])
+      || (scoped && params.includeQuotaScope !== true)
       || !validOpaqueId(params.profileId)
       || (bound && !validOpaqueId(params.bindingId))) {
       throw protocolError("INVALID_PARAMS");
@@ -140,11 +143,14 @@ function validateProfileServiceResult(method, result) {
     return { attachments: [...result.attachments], resume: result.resume, compact: result.compact, steer: result.steer };
   }
   if (method === "profile.auth.read" || method === "profile.binding.auth.read") {
-    if (!exactObject(result, ["status"])
-      || !["authenticated", "unverified", "unauthenticated"].includes(result.status)) {
+    const scoped = Object.hasOwn(result || {}, "quotaScope");
+    if (!exactObject(result, ["status", ...(scoped ? ["quotaScope"] : [])])
+      || !["authenticated", "unverified", "unauthenticated"].includes(result.status)
+      || (scoped && (result.status !== "authenticated"
+        || (result.quotaScope !== null && !validQuotaScope(result.quotaScope))))) {
       throw protocolError("PROFILE_RESPONSE_INVALID");
     }
-    return { status: result.status };
+    return { status: result.status, ...(scoped ? { quotaScope: result.quotaScope } : {}) };
   }
   if (method === "profile.models.list" || method === "profile.binding.models.list") {
     const partial = method === "profile.binding.models.list" && Object.hasOwn(result || {}, "unavailableSource");

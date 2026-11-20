@@ -4,10 +4,10 @@
 // UI acts only on the conversation the user has open; ownership is checked
 // again by BackgroundTaskService against the stored source conversation.
 const { serviceError } = require("./security");
-const { MAX_MESSAGE_BYTES, TASK_ID_PATTERN, validText } = require("./background-task-protocol");
+const { MAX_GENERATIONS, MAX_MESSAGE_BYTES, TASK_ID_PATTERN, validText } = require("./background-task-protocol");
 
 const BACKGROUND_TASK_SERVICE_METHODS = new Set([
-  "background.task.list", "background.task.get", "background.task.send", "background.task.cancel", "background.task.respond",
+  "background.task.list", "background.task.get", "background.task.session", "background.task.send", "background.task.cancel", "background.task.respond",
 ]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -28,7 +28,7 @@ function validateBackgroundTaskParams(method, params) {
   const withTask = [...base, "taskId"];
   let ok;
   if (method === "background.task.list") ok = exact(params, base);
-  else if (method === "background.task.get") ok = exact(params, withTask);
+  else if (method === "background.task.get" || method === "background.task.session") ok = exact(params, withTask);
   else if (method === "background.task.send") ok = exact(params, [...withTask, "message", "operationId"])
     && validText(params.message, MAX_MESSAGE_BYTES);
   else if (method === "background.task.cancel") ok = exact(params, [...withTask, "operationId"]);
@@ -63,16 +63,30 @@ function validTask(value) {
     && nullableTime(value.finishedAt) && nullableTime(value.startedAt);
 }
 
+function validMessage(item) {
+  return exact(item, ["id", "role", "text", "at", "runId", "activity"]) && OPAQUE.test(item.id)
+    && ["user", "assistant"].includes(item.role) && text(item.text, 1024 * 1024) && time(item.at)
+    && (item.runId === null || OPAQUE.test(item.runId)) && typeof item.activity === "boolean";
+}
+
 // The App backend accepts only these exact result shapes from the Service.
 function validateBackgroundTaskResult(method, value) {
   let ok;
   if (method === "background.task.list") ok = exact(value, ["tasks"]) && Array.isArray(value.tasks) && value.tasks.length <= 4096
     && value.tasks.every(validTask);
+  else if (method === "background.task.session") {
+    ok = exact(value, ["session", "brief"]) && (value.brief === null || validMessage(value.brief) && value.brief.role === "user")
+      && (value.session === null
+      || (exact(value.session, ["sessionKey", "profileId", "runtimeBindingId", "status"])
+        && UUID.test(value.session.sessionKey) && UUID.test(value.session.profileId) && OPAQUE.test(value.session.runtimeBindingId)
+        && ["draft", "ready", "archived"].includes(value.session.status)));
+  }
   else if (method === "background.task.get") {
-    ok = exact(value, ["task", "messages", "files", "interaction", "queueReason"]) && validTask(value.task)
-      && Array.isArray(value.messages) && value.messages.length <= 200 && value.messages.every(item =>
-        exact(item, ["id", "role", "text", "at", "runId", "activity"]) && OPAQUE.test(item.id) && ["user", "assistant"].includes(item.role)
-        && text(item.text, 1024 * 1024) && time(item.at) && (item.runId === null || OPAQUE.test(item.runId)) && typeof item.activity === "boolean")
+    const hasQueued = Object.hasOwn(value || {}, "queuedFollowUps");
+    ok = exact(value, ["task", "messages", "files", "interaction", "queueReason", ...(hasQueued ? ["queuedFollowUps"] : [])])
+      && (!hasQueued || (Number.isSafeInteger(value.queuedFollowUps) && value.queuedFollowUps > 0 && value.queuedFollowUps < MAX_GENERATIONS))
+      && validTask(value.task)
+      && Array.isArray(value.messages) && value.messages.length <= 200 && value.messages.every(validMessage)
       && Array.isArray(value.files) && value.files.length <= 64 && value.files.every(item =>
         exact(item, ["fileId", "name", "generation", "url", "path"]) && OPAQUE.test(item.fileId) && text(item.name, 1024)
         && Number.isSafeInteger(item.generation) && (item.url === null || text(item.url, 2048))
@@ -82,7 +96,7 @@ function validateBackgroundTaskResult(method, value) {
       && (value.queueReason === null || OPAQUE.test(value.queueReason));
   } else if (["background.task.send", "background.task.cancel", "background.task.respond"].includes(method)) {
     ok = ownObject(value) && validTask(value.task) && Object.keys(value).every(key => ["task", "delivered"].includes(key))
-      && (value.delivered === undefined || ["steered", "new_run"].includes(value.delivered));
+      && (value.delivered === undefined || ["steered", "new_run", "queued", "canceled"].includes(value.delivered));
   } else ok = false;
   if (!ok) throw responseInvalid();
   return structuredClone(value);

@@ -229,3 +229,23 @@ assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', nextAccount), latestQuo
 invalidatePageCache();
 assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', nextAccount), undefined);
 console.log('OAuth quota startup, stale reads, and account isolation: PASS');
+
+const scope = 'a'.repeat(64);
+const cached = { ...firstQuota, quotaScope: scope };
+const restoredAccount = { ...account, quotaScope: scope, cachedQuota: cached };
+const restoreRefresh = quotaCache.prefetchMissingOAuthQuotas('shoggoth', [restoredAccount]);
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', restoredAccount), cached, 'rehydrate before the background request finishes');
+const hover = quotaCache.refreshOAuthQuota('shoggoth', restoredAccount);
+assert.equal(quotaReads.length, 5, 'hover shares the background refresh of a restored snapshot');
+quotaReads[4].resolve({ ...latestQuota, quotaScope: 'b'.repeat(64) });
+assert.equal(await hover, true, 'a different account asks for a new login inventory');
+await restoreRefresh;
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', restoredAccount), undefined);
+const otherAccount = { ...restoredAccount, quotaScope: 'b'.repeat(64) };
+const fetchLatest = quotaCache.prefetchMissingOAuthQuotas('shoggoth', [otherAccount]);
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', otherAccount), undefined, 'an old disk snapshot must not hydrate a new account');
+const currentQuota = { ...latestQuota, quotaScope: otherAccount.quotaScope };
+quotaReads[5].resolve(currentQuota);
+await fetchLatest;
+assert.equal(quotaCache.readCachedOAuthQuota('shoggoth', otherAccount), currentQuota);
+console.log('OAuth persisted quota hydration and verified account changes: PASS');

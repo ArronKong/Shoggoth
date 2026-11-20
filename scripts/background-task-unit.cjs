@@ -13,7 +13,9 @@ const { openHandoffFixture } = require("./fixtures/runtime-handoff-service.cjs")
 const { waitUntil } = require("./fixtures/runtime-bridge-harness.cjs");
 const { readClientToken, requestService } = require("../app/agent-service/client");
 const { PROTOCOL_VERSION } = require("../app/agent-service/server");
-const { isBackgroundTaskReportEvent, isBackgroundTaskOperation } = require("../app/agent-service/background-task-protocol");
+const { BACKGROUND_TASK_RUNTIMES, isBackgroundTaskReportEvent, isBackgroundTaskOperation } = require("../app/agent-service/background-task-protocol");
+const { DEFAULT_NATIVE_RUNTIME_ACCOUNT_ID_BY_RUNTIME: accountIds } = require("../app/agent-service/runtime-account");
+const { isRuntimeAvailable } = require("../app/runtime-availability");
 
 const TIMEOUT = 8_000;
 
@@ -221,6 +223,8 @@ test("controls act only on the chosen task: steer, continue after finishing, sto
   const oneHost = hostFor(f, oneRun);
   assert.equal(oneHost.lastTurnSteerParams.threadId, service.workRunCoordinator.getRun(oneRun.id).runtimeSessionRef.sessionId);
   assert.match(JSON.stringify(oneHost.lastTurnSteerParams.input), /Also count the action items/u);
+  const update = { sessionKey: source.sessionKey, taskId: first.taskId, operationId: "steer-replay", message: "Group by owner." };
+  assert.equal((await rpc(f, "background.task.send", update)).delivered, "steered");
 
   // Stopping the second task stops only that run; a requested stop posts no report.
   const stopping = await callTool(f, parent, "background_task_cancel", { taskId: second.taskId });
@@ -233,6 +237,9 @@ test("controls act only on the chosen task: steer, continue after finishing, sto
 
   await f.complete(oneRun, "Summary done: 3 action items.");
   await delivered(f, source, 1);
+  assert.equal((await rpc(f, "background.task.send", update)).delivered, "steered");
+  await expectCode(rpc(f, "background.task.send", { ...update, message: "Do a different job." }), "BACKGROUND_TASK_CONFLICT");
+  assert.equal(task(f, first.taskId).generations.length, 1);
   // A finished task continues with a new run in the same child session.
   const followUp = await f.send(source.sessionKey, "op-continue", "Ask job one to add owners.");
   const continued = await callTool(f, followUp, "background_task_send", { taskId: first.taskId, message: "Add an owner to each item." });
@@ -250,7 +257,7 @@ test("controls act only on the chosen task: steer, continue after finishing, sto
 });
 
 test("ownership: other conversations, other Agents and background sessions cannot reach a task", { timeout: 60_000 }, async t => {
-  const f = await open(t);
+  const f = await open(t, { serviceOptions: { backgroundTaskRuntimes: ["codex"] } });
   const { service } = f;
   const a = ownSession(f);
   const b = ownSession(f);
@@ -385,36 +392,42 @@ test("an archived source holds the report; a deleted source stops the child and 
   assert.equal(task(f, gone.taskId).generations[0].report.state, "withheld");
 });
 
-test("cross runtime: a Codex chat hands work to the same Agent's Pi binding; others are refused", { timeout: 60_000 }, async t => {
+test("cross runtime: each supported binding reports back to the same Agent's original Codex conversation", { timeout: 90_000 }, async t => {
   const f = await open(t);
   const { service } = f;
+  for (const [runtime, runtimeAccountId] of Object.entries(accountIds)) {
+    if (isRuntimeAvailable(runtime) && !f.binding(runtime)) {
+      service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime, runtimeAccountId }, { operationId: `bind-${runtime}` });
+    }
+  }
+  assert.deepEqual([...BACKGROUND_TASK_RUNTIMES].sort(), ["antigravity", "codex", "deepseek-harness", "opencode", "pi"]);
   const source = ownSession(f);
-  const parent = await f.send(source.sessionKey, "op-cross", "Use Pi for the research.");
-  const pi = f.binding("pi");
-  const listed = await callTool(f, parent, "background_task_get", {});
-  assert.deepEqual(listed.bindings.map(binding => binding.runtime).sort(), ["codex", "pi"]);
-  const started = (await callTool(f, parent, "background_task_start", { brief: "Research on Pi", bindingRef: "pi" })).task;
-  assert.equal(started.runtime, "pi");
-  const record = task(f, started.taskId);
-  const child = service.chatSessionStore.getSession(record.childSessionKey);
-  assert.equal(child.runtimeBindingId, pi.id, "the child uses the chosen binding of the same Profile");
-  assert.equal(child.profileId, source.profileId);
-  assert.equal(service.chatSessionStore.getSession(source.sessionKey).runtimeBindingId, f.binding("codex").id,
-    "the source keeps its own runtime");
-  const piRun = await childRun(f, started.taskId);
-  assert.equal(piRun.runtimeSessionRef.runtime, "pi");
-  assert.equal(parent.runtimeSessionRef.runtime, "codex");
-  await f.complete(piRun, "Pi research finished.");
-  const [report] = await delivered(f, source);
-  assert.match(report.content.text, /Pi research finished/u);
-  // The source conversation continues on Codex and sees the report.
-  await f.complete(parent, "ok");
+  let reportCount = 0;
+  for (const runtime of BACKGROUND_TASK_RUNTIMES) {
+    const parent = await f.send(source.sessionKey, `ask-${runtime}`, `Use ${runtime} for the research.`);
+    const listed = await callTool(f, parent, "background_task_get", {});
+    assert.deepEqual(listed.bindings.map(b => b.runtime).sort(), [...BACKGROUND_TASK_RUNTIMES].sort());
+    const binding = f.binding(runtime);
+    const { task: started } = await callTool(f, parent, "background_task_start", { brief: "Research", bindingRef: binding.id });
+    const child = service.chatSessionStore.getSession(task(f, started.taskId).childSessionKey);
+    assert.equal(child.runtimeBindingId, binding.id);
+    assert.equal(child.profileId, source.profileId);
+    const worker = await childRun(f, started.taskId);
+    assert.equal(worker.runtimeSessionRef.runtime, runtime);
+    assert.equal(parent.runtimeSessionRef.runtime, "codex");
+    await f.complete(parent, "Dispatched.");
+    await f.complete(worker, `Research finished on ${runtime}.`);
+    const deliveredReports = await delivered(f, source, ++reportCount);
+    const report = deliveredReports.find(event => event.content.backgroundTaskReport.taskId === started.taskId);
+    assert.equal(report.content.text, `Research finished on ${runtime}.`);
+  }
+  assert.equal(service.chatSessionStore.getSession(source.sessionKey).runtimeBindingId, f.binding("codex").id);
   const next = await f.send(source.sessionKey, "op-cross-next", "Summarize the Pi result.");
   assert.equal(next.runtimeSessionRef.runtime, "codex");
-  assert.match(JSON.stringify(f.transport.hosts.get("codex").lastInjectedItems), /Pi research finished/u);
+  assert.match(JSON.stringify(f.transport.hosts.get("codex").lastInjectedItems), /Research finished/u);
   await f.complete(next, "done");
 
-  // Another Profile's binding and a disabled binding are refused before acceptance.
+  // A binding must be qualified, enabled, and belong to this Profile.
   const PROFILE_FIELDS = ["id", "backendId", "agentId", "name", "runtime", "runtimeProfileId", "runtimeAccountId",
     "providerRef", "defaultModel", "defaultCwd", "permissionPolicy", "concurrency", "isDefault", "enabled", "createdAt", "updatedAt"];
   const base = Object.fromEntries(PROFILE_FIELDS.map(key => [key, f.profile[key]]));
@@ -425,10 +438,121 @@ test("cross runtime: a Codex chat hands work to the same Agent's Pi binding; oth
   const asker = await f.send(source.sessionKey, "op-cross-refuse", "Try other runtimes.");
   await expectCode(callTool(f, asker, "background_task_start", { brief: "foreign", bindingRef: otherBinding.id }),
     "BACKGROUND_TASK_BINDING_UNAVAILABLE");
+  await expectCode(callTool(f, asker, "background_task_start", { brief: "unqualified", bindingRef: f.binding("grok-build").id }),
+    "BACKGROUND_TASK_BINDING_UNAVAILABLE");
   const { revision } = service.productStore.getAgentRuntimeBindings(f.profile.id);
-  service.productStore.updateAgentRuntimeBinding(f.profile.id, pi.id, { enabled: false }, { revision });
+  service.productStore.updateAgentRuntimeBinding(f.profile.id, f.binding("pi").id, { enabled: false }, { revision });
   await expectCode(callTool(f, asker, "background_task_start", { brief: "disabled pi", bindingRef: "pi" }),
     "BACKGROUND_TASK_BINDING_UNAVAILABLE");
   assert.equal(service.backgroundTaskStore.list({}).length, before, "nothing is accepted");
   await f.complete(asker, "ok");
+});
+
+test("two bindings return distinct same-name files to their source chat on fixture hosts", { timeout: 60_000 }, async t => {
+  const candidates = ["antigravity", "grok-build"];
+  const f = await open(t, { serviceOptions: { backgroundTaskRuntimes: candidates } });
+  const source = ownSession(f);
+  const parent = await f.send(source.sessionKey, "two-binding-files", "Compare both results.");
+  const targets = [];
+  for (const runtime of candidates) {
+    f.service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime, runtimeAccountId: accountIds[runtime] },
+      { operationId: `bind-${runtime}` });
+    const { task: { taskId } } = await callTool(f, parent, "background_task_start", { brief: "Prepare a note.", bindingRef: runtime });
+    const worker = await childRun(f, taskId);
+    assert.equal(worker.runtimeSessionRef.runtime, runtime);
+    targets.push({ taskId, worker, value: `Fixture note from ${runtime}.` });
+  }
+  await f.complete(parent, "Dispatched.");
+  for (const { worker, value } of targets) {
+    fs.writeFileSync(path.join(worker.workspace, "note.txt"), value);
+    await callTool(f, worker, "artifact_publish", { runId: worker.id, relativePath: "note.txt", name: "note.txt",
+      kind: "report", mimeType: "text/plain" });
+    await f.complete(worker, "Note attached.");
+  }
+  const notices = await delivered(f, source, 2);
+  const next = await f.send(source.sessionKey, "read-two-binding-files", "Read both attachments.");
+  for (const { taskId, value } of targets) {
+    const report = notices.find(event => event.content.backgroundTaskReport.taskId === taskId).content.backgroundTaskReport;
+    assert.equal(report.files.length, 1);
+    assert.equal(report.files[0].name, "note.txt");
+    const read = await callTool(f, next, "background_task_get", { taskId, fileId: report.files[0].fileId });
+    assert.equal(read.data, value);
+  }
+  await f.complete(next, "Both files read.");
+});
+
+test("a provider's region rejection reaches the original conversation exactly once", { timeout: 60_000 }, async t => {
+  const f = await open(t);
+  f.service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime: "antigravity", runtimeAccountId: accountIds.antigravity },
+    { operationId: "bind-antigravity" });
+  const source = ownSession(f);
+  const parent = await f.send(source.sessionKey, "op-provider-failure", "Use Antigravity.");
+  const { task: started } = await callTool(f, parent, "background_task_start", { brief: "Research", bindingRef: "antigravity" });
+  await f.complete(parent, "Dispatched.");
+  const worker = await childRun(f, started.taskId);
+  const host = hostFor(f, worker);
+  const thread = host.threads.find(item => item.id === worker.runtimeSessionRef.sessionId);
+  const turn = thread.turns.find(item => item.id === worker.runtimeTurnRef.turnId);
+  turn.status = "failed";
+  turn.errorCode = "ANTIGRAVITY_REGION_UNSUPPORTED";
+  host.emit({ known: true, type: "complete", method: "turn/completed", threadId: thread.id, turnId: turn.id, status: "failed" });
+  const [report] = await delivered(f, source);
+  assert.equal(report.content.backgroundTaskReport.status, "failed");
+  assert.equal(report.content.backgroundTaskReport.errorCode, turn.errorCode);
+  assert.deepEqual(report.content.backgroundTaskReport.files, []);
+  await f.service.backgroundTaskService.deliver(started.taskId);
+  assert.equal(reports(f, source).length, 1);
+});
+
+test("non-steering runtimes queue once across restart and Stop discards unstarted follow-ups", { timeout: 90_000 }, async t => {
+  let f = await open(t, { keep: true });
+  t.after(() => f.close());
+  f.service.productStore.addAgentRuntimeBinding(f.profile.id, { runtime: "opencode", runtimeAccountId: accountIds.opencode },
+    { operationId: "bind-opencode" });
+  const source = f.createSession();
+  const parent = await f.send(source.sessionKey, "op-queue", "Use OpenCode.");
+  const { task: { taskId } } = await callTool(f, parent, "background_task_start", { brief: "Research", bindingRef: "opencode" });
+  await f.complete(parent, "Dispatched.");
+  const first = await childRun(f, taskId);
+  const handle = [...f.transport.handles.values()].find(item => item.runtimeProfileId === first.runtimeSessionRef.runtimeProfileId);
+  const send = (operationId, message) => rpc(f, "background.task.send", { sessionKey: source.sessionKey, taskId, operationId, message });
+  handle.turnSteer = async () => { throw Object.assign(new Error("Unknown receipt"), { code: "WORK_RUN_CONTROL_STALE" }); };
+  await expectCode(send("uncertain", "First attempt"), "BACKGROUND_TASK_UNAVAILABLE");
+  assert.equal(task(f, taskId).generations.length, 1, "uncertain delivery must not enqueue another copy");
+  // RuntimeHandleV1 omits methods the native adapter declares unsupported.
+  handle.capabilities = { ...handle.capabilities, "turn.steer": false };
+  delete handle.turnSteer;
+  const queued = await send("extra-one", "Check the figures.");
+  assert.equal(queued.delivered, "queued");
+  assert.equal(queued.task.generation, 1);
+  assert.equal((await send("extra-one", "Check the figures.")).delivered, "queued");
+  await expectCode(send("extra-one", "Changed instruction."), "BACKGROUND_TASK_CONFLICT");
+  assert.equal((await send("extra-two", "Check the sources.")).delivered, "queued");
+  const detail = () => rpc(f, "background.task.get", { sessionKey: source.sessionKey, taskId });
+  assert.equal((await detail()).queuedFollowUps, 2);
+  assert.deepEqual(task(f, taskId).generations.map(g => g.runId), [first.id, null, null]);
+
+  await f.close({ remove: false });
+  f = await open(t, { root: f.root, transport: f.transport, keep: true });
+  await waitUntil(() => !["starting", "queued"].includes(f.service.workRunCoordinator.getRun(first.id)?.status), "first run recovered", TIMEOUT);
+  const recovered = f.service.workRunCoordinator.getRun(first.id);
+  if (recovered.status === "running") await f.complete(recovered, "First report.");
+  await waitUntil(() => task(f, taskId).generations[1].runId, "first queued instruction starts", TIMEOUT);
+  const second = await running(f, task(f, taskId).generations[1].runId);
+  assert.equal(task(f, taskId).generations[2].runId, null);
+  assert.equal((await detail()).queuedFollowUps, 1);
+  assert.match(f.service.backgroundTaskStore.readPrompt(taskId, 2), /Check the figures/u);
+  assert.equal((await send("extra-one", "Check the figures.")).delivered, "new_run");
+  await rpc(f, "background.task.cancel", { sessionKey: source.sessionKey, taskId, operationId: "stop-pending" });
+  await interrupt(f, second);
+  await f.service.backgroundTaskService.recover();
+  await waitUntil(() => task(f, taskId).generations[1].report.state === "withheld", "active generation canceled", TIMEOUT);
+  const canceled = task(f, taskId).generations[2];
+  assert.equal(canceled.runId, null);
+  assert.equal(canceled.report.state, "withheld");
+  assert.equal((await detail()).queuedFollowUps, undefined);
+  assert.equal((await detail()).task.generation, 2);
+  assert.equal((await send("extra-two", "Check the sources.")).delivered, "canceled");
+  assert.equal(task(f, taskId).generations.length, 3, "replaying a discarded message cannot restart the task");
+  assert.equal(reports(f, source).length, 1);
 });

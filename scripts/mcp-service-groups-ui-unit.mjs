@@ -6,7 +6,7 @@ import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import test from 'node:test';
 import ts from '../app/manage-ui/node_modules/typescript/lib/typescript.js';
-import { bundledBridgeVersions, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
+import { bundledBridgeVersions, connectorTelemetryStub, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 
 const require = createRequire(import.meta.url), uiRequire = createRequire(new URL('../app/manage-ui/package.json', import.meta.url));
 const React = uiRequire('react'), Renderer = uiRequire('react-test-renderer');
@@ -66,6 +66,7 @@ async function fixture(id = 'wind', language = 'en') {
   const Component = load('../app/manage-ui/src/pages/McpConnectorDialog.tsx', name => {
     if (name === 'react' || name === 'react/jsx-runtime') return uiRequire(name);
     if (name === 'react-i18next') return { useTranslation: () => ({ t: translate, i18n: { resolvedLanguage: language } }) };
+    if (name === '../lib/productTelemetry') return connectorTelemetryStub;
     if (name === '../api/mcpConnectors') return api;
     if (name === '../components/Modal') return { __esModule: true, default: ({ children, footer, subtitle, title }) => React.createElement('section', {}, React.createElement('header', {}, title), children, React.createElement("p", {}, subtitle), footer) };
     if (name === '../components/McpConnectorIcon') return { __esModule: true, default: () => null };

@@ -384,6 +384,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
     return label ? mcpRecommendationText(label, language) : field.name;
   };
   const canSignIn = !["none", "token", "api-key", "local", "endpoint"].includes(recommendation?.setup || "");
+  const signInLabel = server?.status === "ready" && server.auth?.kind === "none" ? "flow.authorize" : "flow.reconnect";
   const recommendationMissingSetup = !!recommendation && !server && (
     (isRemote && !item && !url.trim())
     || setupFields.some(field => field.required && !(values[`${field.location}:${field.name}`] ?? field.default ?? "").trim())
@@ -480,7 +481,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
       {ready && !editing && !credentialsOnly && <section className={s.connectionPanel}><ConnectorConnectionHeading title={tr("flow.connectionStatus")} status={connectionState} guide={guide} /><p className={s.muted}>{tr("flow.readyHint")}</p>
         <div className={s.actions}><button type="button" className={s.textButton} disabled={locked} onClick={() => void act(async () => accept(await verifyMcpConnector(server.id)))}>{tr(busy ? figmaDesktop ? "figmaDesktop.checking" : "working" : "verify")}</button>
         {!figmaDesktop && !managed && <button type="button" className={s.textButton} disabled={locked} aria-expanded={editing} onClick={() => setEditing(value => !value)}>{tr("flow.configure")}</button>}
-        {server.transport.kind === "remote" && !figmaDesktop && canSignIn && <button type="button" className={s.textButton} disabled={locked} onClick={() => { setEditing(true); void act(() => signin(server.id)); }}>{tr("flow.reconnect")}</button>}
+        {server.transport.kind === "remote" && !figmaDesktop && canSignIn && <button type="button" className={s.textButton} disabled={locked} onClick={() => { setEditing(true); void act(() => signin(server.id)); }}>{tr(signInLabel)}</button>}
         </div>
         <details className={s.clientSetup}><summary>{tr("flow.advanced")}</summary>
           {figmaDesktop && <details className={s.clientSetup} open={desktopStepsOpen} onToggle={event => setDesktopStepsOpen(event.currentTarget.open)}><summary>{tr("figmaDesktop.setupTitle")}</summary><ol><li>{tr("figmaDesktop.stepOpen")}</li><li>{tr("figmaDesktop.stepEnable")}</li><li>{tr("figmaDesktop.stepCheck")}</li></ol></details>}
@@ -540,7 +541,7 @@ function McpSingleConnectorDialog({ server: initialServer, item, latest, onLates
       {embedded && <p className={s.muted}>{tr("defaultAccess")}</p>}
       <div className={s.actions}>
         {embedded && primaryAction}
-        {!credentialsOnly && server?.transport.kind === "remote" && canSignIn && <button type="button" className={s.textButton} disabled={locked} onClick={() => { setEditing(true); void act(() => signin(server.id)); }}>{tr("flow.reconnect")}</button>}
+        {!credentialsOnly && server?.transport.kind === "remote" && canSignIn && <button type="button" className={s.textButton} disabled={locked} onClick={() => { setEditing(true); void act(() => signin(server.id)); }}>{tr(signInLabel)}</button>}
         {editing && <button type="button" className={s.textButton} disabled={locked} onClick={() => setEditing(false)}>{t("common.cancel")}</button>}
         {clientRequired && server?.auth?.kind !== "oauth-client" && <button className="btn-secondary btn-sm" type="button" disabled={locked} onClick={() => { setCredentialsOpen(true); setOAuthClient(true); }}>{tr("configureOAuth")}</button>}
       </div>

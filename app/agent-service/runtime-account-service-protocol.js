@@ -144,7 +144,9 @@ function validateRuntimeAccountServiceParams(method, params) {
     "runtime.account.read", "runtime.account.auth.read", "runtime.account.quota.read", "runtime.account.logout",
     "runtime.account.storage.read", "runtime.account.login.read", "runtime.account.login.options",
   ].includes(method)) {
-    if (!exactObject(params, ["runtimeAccountId"]) || !validId(params.runtimeAccountId)) {
+    const scoped = method === "runtime.account.quota.read" && Object.hasOwn(params || {}, "includeQuotaScope");
+    if (!exactObject(params, ["runtimeAccountId", ...(scoped ? ["includeQuotaScope"] : [])])
+      || !validId(params.runtimeAccountId) || (scoped && params.includeQuotaScope !== true)) {
       throw protocolError("INVALID_PARAMS");
     }
     return cloneObject(params);

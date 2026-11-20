@@ -152,6 +152,8 @@ test("real Codex reads quota for the borrowed account without making a model req
   const quota = await host.accountQuotaRead();
   assert.equal(quota.status, "available");
   assert.equal(quota.accountName, "fixture@example.test");
+  assert.match(quota.quotaScope, /^[a-f0-9]{64}$/u);
+  assert.equal((await host.accountRead({ refreshToken: false, includeQuotaScope: true })).quotaScope, quota.quotaScope);
   assert.deepEqual(quota.windows.map(({ durationMinutes, usedPercent, resetsAt: at }) => [durationMinutes, usedPercent, at]),
     [[300, 28, resetsAt * 1_000], [10_080, 64, resetsAt * 1_000]]);
   assert.deepEqual(quota.credits, { kind: "balance", amount: 24.5, unit: "credits" });

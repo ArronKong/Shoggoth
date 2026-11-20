@@ -617,6 +617,51 @@ function nativeLongToolHistory(runId = "activity-run", start = now): any[] {
   return messages;
 }
 
+state.runNativeActivityRecoveryFixture = async () => {
+  const immersive = options.get("immersive") === "1";
+  const surface = () => immersive ? document.querySelector('[data-testid="immersive-chat"]') : thread();
+  await wait(() => state.socket && surface()?.textContent?.includes(intro.content), "initial recovery history");
+  const runId = "recovered-run";
+  const sample = nativeLongToolHistory(runId, now - 300_000);
+  history = sample.slice(0, 4);
+  state.socket.emit({ type: "event", event: "session.message", payload: { sessionKey: key } });
+  await wait(() => surface()?.textContent?.includes(sample[0].content), "saved tools for an active Run");
+
+  // A native watcher sends the WorkRun ID on status. Tool frames carry the
+  // session and tool-call ID, including when the renderer joins mid-turn.
+  state.socket.emit({ type: "event", event: "chat", payload: {
+    sessionKey: key, state: "status", statusKind: "running", nativeRunId: runId, steer: false,
+  } });
+  const call = sample[3].content[0];
+  const emitTool = (data: object) => state.socket.emit({ type: "event", event: "session.tool", payload: {
+    sessionKey: key, data: { toolCallId: call.toolCallId, name: call.toolName, args: call.arguments, ...data },
+  } });
+  emitTool({ phase: "update", partialResult: "Still running" });
+  await wait(() => surface()?.querySelector('[data-live-activity-bubble="activity"]'), "live activity after recovery");
+  check(surface()?.querySelectorAll("[data-chat-activity-preview]").length === 1,
+    "one active Run must not render both a history preview and a live preview");
+  await expand();
+  const saved = i18n.t("turnLab.activity.listDirectory");
+  const running = i18n.t("turnLab.activity.runScript", { language: "Python" });
+  check(titles().filter(title => title === saved).length === 1 && outcome(saved) === "ok", "preserve the history-only result");
+  check(titles().filter(title => title === running).length === 1 && outcome(running) === "running", "merge the saved call into its live row");
+
+  emitTool({ phase: "result", result: "Fixture command failed", isError: true, durationS: 1 });
+  await wait(() => outcome(running) === "error", "result updates the existing live row");
+  await closeDetails();
+  history = [...sample.slice(0, 5), sample.at(-1)];
+  state.socket.emit({ type: "event", event: "chat", payload: {
+    sessionKey: key, state: "final", message: history.at(-1),
+  } });
+  await wait(() => surface()?.textContent?.includes(history.at(-1).content), "recovered Run finishes");
+  check(!surface()?.querySelector("[data-live-activity-bubble], [data-chat-activity-preview]")
+    && activityEntries().length === 1, "finished reply has one activity footer");
+  await expand();
+  check(titles().filter(title => title === saved).length === 1 && outcome(saved) === "ok", "saved result survives finalization");
+  check(titles().filter(title => title === running).length === 1 && outcome(running) === "error", "live result survives finalization");
+  return { immersive, language, providerCalls: 0 };
+};
+
 // The Gateway's history owner belongs to __openclaw, not to native UI metadata.
 // Include a custom tool receipt as well as ordinary assistant/toolResult rows.
 function openClawLongToolHistory(runId = "activity-run", start = now): any[] {

@@ -192,7 +192,8 @@ function OAuthRow({
 
   return (
     <div className={`${styles.oauthRow} ${p.status.error && !off ? styles.oauthRowErr : ""}`}>
-      {hasQuota ? <OAuthAccountQuota trigger={mainButton} account={p} backend={backend} title={title} /> : mainButton}
+      {hasQuota ? <OAuthAccountQuota trigger={mainButton} account={p} backend={backend} title={title}
+        onAccountChanged={onRecheck} /> : mainButton}
 
       <div className={showActionLabels ? styles.oauthActions : styles.oauthIcons}>
         {!off && p.status.verification === "unverified" && (

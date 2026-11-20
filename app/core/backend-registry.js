@@ -647,6 +647,10 @@ class BackendRegistry extends EventEmitter {
     return this.#backgroundTaskOwner(sessionKey).getBackgroundTask(sessionKey, taskId);
   }
 
+  async getBackgroundTaskChatPage(sessionKey, taskId, options = {}) {
+    return this.#backgroundTaskOwner(sessionKey).getBackgroundTaskChatPage(sessionKey, taskId, options);
+  }
+
   async controlBackgroundTask(sessionKey, taskId, input) {
     return this.#backgroundTaskOwner(sessionKey).controlBackgroundTask(sessionKey, taskId, input);
   }

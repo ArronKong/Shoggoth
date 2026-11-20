@@ -173,7 +173,9 @@ class AccountAuthManager {
   }
 
   async readQuota(input) {
-    const { binding, runtimeAccountId } = this.#accountContext(input, ["runtimeAccountId"]);
+    const scoped = input?.includeQuotaScope === true;
+    const { binding, runtimeAccountId } = this.#accountContext(input,
+      ["runtimeAccountId", ...(scoped ? ["includeQuotaScope"] : [])]);
     const generation = this.generation;
     const admission = () => this.runtimeAccountAdmission?.read?.(runtimeAccountId);
     const before = admission();
@@ -189,7 +191,10 @@ class AccountAuthManager {
     if (typeof host.accountQuotaRead !== "function") return { status: "unsupported" };
     const quota = await host.accountQuotaRead();
     this.#assertGeneration(generation);
-    return isCurrent() ? quota : { status: "unavailable" };
+    if (!isCurrent()) return { status: "unavailable" };
+    if (scoped || !Object.hasOwn(quota || {}, "quotaScope")) return quota;
+    const { quotaScope, ...snapshot } = quota;
+    return snapshot;
   }
 
   async #read(context) {

@@ -1844,10 +1844,10 @@
     {
       "name": "OpenAI Codex",
       "license": "Apache-2.0",
-      "source": "https://github.com/openai/codex/tree/rust-v0.167.1",
-      "revision": "0.167.1",
+      "source": "https://github.com/openai/codex/tree/rust-v0.170.0",
+      "revision": "0.170.0",
       "localFiles": [
-        "schemas/codex-app-server/0.167.1",
+        "schemas/codex-app-server/0.170.0",
         "build/codex-runtime-manifest.json",
         "app/agent-service/prompts/codex-0.167.1-model-fallback.md"
       ],
@@ -1855,13 +1855,13 @@
         "CODEX-LICENSE.txt",
         "CODEX-NOTICE.txt"
       ],
-      "notes": "Pinned unmodified runtime and fallback model prompt (codex-rs/models-manager/prompt.md from the same tag); generated protocol declarations retain upstream provenance. Additional bundled programs are listed separately."
+      "notes": "Pinned unmodified runtime; generated protocol declarations retain upstream provenance. The fallback prompt is an unmodified copy of codex-rs/models-manager/prompt.md, identical in rust-v0.167.1 and rust-v0.170.0. Additional bundled programs are listed separately."
     },
     {
       "name": "Codex native voice libraries",
       "license": "LGPL-2.1-or-later AND MIT AND BSD-2-Clause AND BSD-3-Clause AND Zlib",
-      "source": "https://github.com/openai/codex/tree/rust-v0.167.1/third_party/voice",
-      "revision": "Codex 0.167.1; library versions and source archive hashes in codex-voice/sources.json",
+      "source": "https://github.com/openai/codex/tree/rust-v0.170.0/third_party/voice",
+      "revision": "Codex 0.170.0; library versions and source archive hashes in codex-voice/sources.json",
       "localFiles": [
         ".vendor/codex/arm64/package/codex-resources/voice",
         ".vendor/codex/x64/package/codex-resources/voice"

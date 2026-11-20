@@ -18,11 +18,12 @@ function formatBalance(amount: number, unit: "credits" | "USD" | "CNY", locale: 
     : { style: "currency", currency: unit, ...precision }).format(amount);
 }
 
-export default function OAuthAccountQuota({ trigger, account, backend, title }: {
+export default function OAuthAccountQuota({ trigger, account, backend, title, onAccountChanged }: {
   trigger: ReactElement;
   account: OAuthProvider;
   backend: string;
   title: string;
+  onAccountChanged: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const triggerId = useId();
@@ -35,7 +36,7 @@ export default function OAuthAccountQuota({ trigger, account, backend, title }: 
 
   const changeOpen = (next: boolean) => {
     if (next === open) return;
-    if (next) void refreshOAuthQuota(backend, account);
+    if (next) void refreshOAuthQuota(backend, account).then(changed => { if (changed) onAccountChanged(); });
     setOpen(next);
   };
 

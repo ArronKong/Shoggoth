@@ -169,7 +169,39 @@ async function smoke() {
       assert.equal(f.provider.state.registrations.length,registrationsBefore);
       await f.rest("mcp/remove",{id:manual.server.id,expectedRevision:recovered.revision});
     }finally{oauth.fetch=upstreamFetch;}
+
+    // Product Hunt's shape: the connection is ready before an optional sign-in.
+    f.provider.state.requireAuth = false;
+    snapshot = await f.rest("mcp/list");
+    const { server: publicServer } = await f.rest("mcp/add", {
+      source: { kind: "custom" }, name: "Public with optional OAuth",
+      option: { kind: "remote", protocol: "streamable-http", url: `${f.provider.origin}/mcp` },
+      expectedRevision: snapshot.revision,
+    });
+    assert.equal(publicServer.status, "ready");
+    assert.equal(publicServer.auth.kind, "none");
+    const rejectedSignIn = await f.rest("mcp/signin", { id: publicServer.id });
+    const deniedCallback = new URL(rejectedSignIn.redirectUri);
+    deniedCallback.searchParams.set("state", new URL(rejectedSignIn.authorizationUrl).searchParams.get("state"));
+    deniedCallback.searchParams.set("error", "access_denied");
+    assert.equal((await fetch(deniedCallback)).status, 400);
+    assert.equal((await f.rest(`mcp/signin-status?signInId=${rejectedSignIn.signInId}`)).status, "failed");
+    assert.deepEqual((await f.rest("mcp/list")).servers.find(server => server.id === publicServer.id), publicServer);
+
+    const optionalSignIn = await f.rest("mcp/signin", { id: publicServer.id });
+    const optionalRedirect = await fetch(optionalSignIn.authorizationUrl, { redirect: "manual" });
+    assert.equal((await fetch(optionalRedirect.headers.get("location"))).status, 200);
+    const authorized = await f.rest("mcp/verify", { id: publicServer.id });
+    assert.equal(authorized.server.status, "ready");
+    assert.equal(authorized.server.id, publicServer.id);
+    assert.deepEqual(authorized.server.auth, { kind: "oauth-dcr" });
+    f.provider.state.requireAuth = true;
+    const accountResult = await manager.callTool(publicServer.id, "echo", { value: "authorized-fixture" });
+    assert.equal(accountResult.content[0].text, "authorized-fixture");
+    await f.rest("mcp/remove", { id: publicServer.id, expectedRevision: authorized.revision });
+
     snapshot=await f.rest("mcp/list"); await f.rest("mcp/remove",{id,expectedRevision:snapshot.revision});
+    console.log("PASS optional OAuth: declining preserves anonymous readiness and authorizing enables account calls on the same connector");
     console.log("PASS Service/IPC/Backend/REST: slow Registry read and real 15-second network abort, CRUD, exact DTOs, origin gate, default access, exclusions, CAS conflict, request projection, encrypted canary, real tool call, context/transcript canary, slow OAuth startup, safe registration rejection, missing-client diagnosis and token recovery, ordinary chat after failure, retirement");
   }finally{await f.close();}
 }

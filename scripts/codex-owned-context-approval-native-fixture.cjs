@@ -16,7 +16,7 @@ const { NativeCodexAuth } = require("../app/agent-service/codex-native-auth");
 const { namedPermissionConfig, ownedShellEnvironmentConfig, ownedContextConfig, boundedLocalFeatureConfig, assertOwnedFeatureInventory,
   permissionConfigArgs, wrapOwnedPermissionHost } = require("./codex-owned-permissions-fixture.cjs");
 const REPO = path.resolve(__dirname, ".."), MAIN = process.env.SHOGGOTH_TEST_RUNTIME_REPO || REPO;
-const BINARY_SHA = "ebabe5f0d79145a9e61274ce9ecf7c02c9021b7b04bfa59b7e61ad4461c32b0b";
+const BINARY_SHA = "9248cfeebec9b4cc3034d5114caab10fbf426cbfa79dba410c5fa1b72762abd6";
 const useContextKernel = !process.argv.includes("--no-context-kernel");
 const serviceName = process.argv.find(arg => arg.startsWith("--service-name="))?.slice("--service-name=".length) ?? null;
 const privateContextFixtures = !process.argv.includes("--without-private-context");

@@ -172,7 +172,7 @@ try {
         summary: "delivery summary",
         fullText: "delivery full text",
       }),
-      { sessionKey: "agent:hermes-worker:delivery-session", report: "delivery full text", isFullText: true },
+      { sessionKey: "agent:hermes-worker:delivery-session", report: "delivery full text" },
     );
   });
   check("Dashboard 空白 fullText 回退 delivery summary", () => {
@@ -183,7 +183,7 @@ try {
         summary: "  delivery summary  ",
         fullText: "   ",
       }),
-      { sessionKey: "agent:hermes-worker:delivery-session", report: "  delivery summary  ", isFullText: false },
+      { sessionKey: "agent:hermes-worker:delivery-session", report: "  delivery summary  " },
     );
   });
   check("Dashboard 空白 delivery summary 回退 openRun summary", () => {
@@ -194,7 +194,7 @@ try {
         summary: " \n ",
         fullText: null,
       }),
-      { sessionKey: "agent:hermes-worker:delivery-session", report: "historical summary", isFullText: false },
+      { sessionKey: "agent:hermes-worker:delivery-session", report: "historical summary" },
     );
   });
   check("Dashboard delivery 时间不匹配时保持历史 run", () => {
@@ -204,7 +204,7 @@ try {
         sessionKey: "latest-session",
         fullText: "latest report",
       }),
-      { sessionKey: "agent:hermes-worker:historical-session", report: "historical summary", isFullText: false },
+      { sessionKey: "agent:hermes-worker:historical-session", report: "historical summary" },
     );
   });
   check("Dashboard delivery 时间无法确认时保持历史 run", () => {
@@ -213,7 +213,7 @@ try {
         sessionKey: "unknown-session",
         fullText: "unknown report",
       }),
-      { sessionKey: "agent:hermes-worker:historical-session", report: "historical summary", isFullText: false },
+      { sessionKey: "agent:hermes-worker:historical-session", report: "historical summary" },
     );
   });
 } finally {
@@ -236,7 +236,6 @@ check("Cron 使用共享正文选择器与 canonical key", () => {
 check("Dashboard 正文与 session 共用同运行 handoff selector", () => {
   assert.match(dashboard, /selectCronRunHandoffSource\(openRun, delivery\)/);
   assert.match(dashboard, /const visibleRunText = runHandoff\.report;/);
-  assert.match(dashboard, /runHandoff\.isFullText \? t\("dashboard\.fullTextTitle"\) : t\("dashboard\.summaryTitle"\)/);
   assert.match(dashboard, /writeCronChatHandoff\(backendId, sessionKey, report\)/);
   assert.match(dashboard, /backend=\$\{encodeURIComponent\(backendId\)\}&session=\$\{encodeURIComponent\(sessionKey\)\}/);
   assert.match(dashboard, /runSessionKey && visibleRunText && visibleRunText\.trim\(\)/);

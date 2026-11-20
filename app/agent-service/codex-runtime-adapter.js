@@ -65,16 +65,20 @@ function adapterError(code, message) {
 const PRESENTATION_FEATURES = Object.freeze(["item_ids", "terminal_resize_reflow",
   "resize_all_images", "tool_search_always_defer_mcp_tools", "tui_app_server"]);
 
-function hasIsolatedFeatures(features, runtimeVersion) {
-  // Codex 0.167.1 keeps these retired flags enabled despite false overrides.
-  // Its local Responses fixture verifies that neither exposes a model tool.
-  const retired = feature => runtimeVersion === "0.167.1" && feature.stage === "removed"
+function isCodexRetiredFeatureMarker(feature, runtimeVersion) {
+  // These versions report removed flags as enabled regardless of overrides.
+  // The local Responses regression verifies the isolated model tool list.
+  return (runtimeVersion === "0.167.1" || runtimeVersion === "0.170.0")
+    && feature.stage === "removed"
     && ["worktrees", "realtime_conversation"].includes(feature.name);
+}
+
+function hasIsolatedFeatures(features, runtimeVersion) {
   // unified_exec can also stay enabled in the inventory. With shell_tool
   // disabled, Codex does not expose the execution tools.
   return features.some(feature => feature.name === "shell_tool" && feature.enabled === false)
     && !features.some(feature => feature.enabled && feature.name !== "unified_exec"
-      && !PRESENTATION_FEATURES.includes(feature.name) && !retired(feature));
+      && !PRESENTATION_FEATURES.includes(feature.name) && !isCodexRetiredFeatureMarker(feature, runtimeVersion));
 }
 
 function definedProperties(value) {
@@ -985,4 +989,5 @@ class CodexRuntimeAdapter {
 module.exports = {
   CODEX_CAPABILITIES,
   CodexRuntimeAdapter,
+  isCodexRetiredFeatureMarker,
 };

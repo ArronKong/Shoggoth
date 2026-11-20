@@ -106,7 +106,10 @@ class McpConnectorController {
   authorizationChanged(event) {
     this.assertOpen();
     if (event.status === "authorized") return this.mutate(() => this.refreshOAuthConfiguredFields(event.id)).then(() => this.verify(event.id, { refresh: true }));
-    if (!["signedOut", "failed"].includes(event.status) || !this.store.get(event.id)) return Promise.resolve();
+    if (!["signedOut", "failed"].includes(event.status)) return Promise.resolve();
+    const record = this.store.get(event.id);
+    // Preserve anonymous readiness or let an in-flight public probe finish.
+    if (!record || event.status === "failed" && record.auth.kind === "none" && ["ready", "checking"].includes(record.status)) return Promise.resolve();
     this.invalidate(event.id); this.revokeRuns(event.id);
     const errorCode = event.status === "signedOut" ? "MCP_SIGN_IN_REQUIRED"
       : Object.hasOwn(CONNECTOR_PUBLIC_MESSAGES, event.errorCode) ? event.errorCode : "MCP_OAUTH_FAILED";

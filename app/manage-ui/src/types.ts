@@ -996,7 +996,7 @@ type OAuthQuotaCredits =
 
 export type OAuthAccountQuota =
   | { status: "unavailable" | "unsupported" }
-  | { status: "available"; checkedAt: number; accountName?: string; windows: Array<{
+  | { status: "available"; checkedAt: number; accountName?: string; quotaScope?: string; windows: Array<{
       label: string | null;
       durationMinutes: number | null;
       usedPercent: number;
@@ -1020,6 +1020,8 @@ export interface OAuthProvider {
   disconnectCommand: string | null;
   disconnectable: boolean;
   canReadQuota?: boolean;
+  quotaScope?: string | null;
+  cachedQuota?: Extract<OAuthAccountQuota, { status: "available" }>;
   /**
    * The app-level switch of a native CLI (an id in `disabledBackends`).
    * Disconnecting hides its agents and entries without signing out; its login
@@ -2159,6 +2161,7 @@ export interface BackgroundTaskMessage {
 export interface BackgroundTaskFile { fileId: string; name: string; generation: number; url: string | null }
 export interface BackgroundTaskDetail {
   task: BackgroundTask;
+  queuedFollowUps?: number;
   messages: BackgroundTaskMessage[];
   files: BackgroundTaskFile[];
   interaction: { runId: string; type: "approval" | "prompt"; payload: InteractiveRequestV1 } | null;

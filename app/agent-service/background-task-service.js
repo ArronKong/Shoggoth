@@ -8,9 +8,12 @@ const crypto = require("node:crypto");
 const { isUtf8 } = require("node:buffer");
 const { readBoundedFile } = require("./agent-file-store");
 const { serviceError } = require("./security");
+const { transcriptEventId } = require("./transcript-store");
+const { isRuntimeAvailable } = require("../runtime-availability");
 const {
   BACKGROUND_TASK_RUNTIMES, MAX_BRIEF_BYTES, MAX_MESSAGE_BYTES, TASK_ID_PATTERN, TERMINAL_RUN_STATUSES,
   WAITING_RUN_STATUSES, backgroundReportEventId, backgroundTaskId, deriveTitle, isBackgroundTaskReportEvent, validText,
+  BRIEF_MARKER, FOLLOW_UP_MARKER, STEER_PREFIX, visibleBackgroundInstruction,
 } = require("./background-task-protocol");
 
 const ACTIVE_SOURCE_RUN = new Set(["starting", "running", "waiting_approval", "waiting_input"]);
@@ -21,13 +24,18 @@ const FILE_PAGE_BYTES = 4096;
 const MAX_DETAIL_MESSAGES = 60;
 const MAX_DETAIL_TEXT_BYTES = 96 * 1024;
 const RETRY_MS = 2_000;
-const BRIEF_MARKER = "\n\nTask brief:\n";
-const FOLLOW_UP_MARKER = "\n\nInstruction:\n";
-const STEER_PREFIX = "Additional instruction from the user for this background task:\n";
 
 const taskError = (code, message = code) => serviceError(code, message);
 const digest = value => crypto.createHash("sha256").update(value).digest("hex");
 const shortOp = value => digest(`shoggoth-background-op-v1\0${value}`).slice(0, 24);
+
+// A supplement can be accepted while an earlier generation owns the session.
+// Unstarted generations discarded by Stop never become the visible run.
+function currentGeneration(record) {
+  return record.generations.find(gen => !gen.terminal)
+    ?? record.generations.findLast(gen => gen.runId || gen.terminal.status !== "skipped")
+    ?? record.generations[0];
+}
 
 function truncateUtf8(text, maxBytes) {
   const bytes = Buffer.from(text, "utf8");
@@ -50,17 +58,6 @@ function followUpPrompt(message) {
   ].join("\n") + FOLLOW_UP_MARKER + message;
 }
 
-// The child's first user record carries the Service-authored wrapper. The UI
-// shows only the user's brief or instruction.
-function visibleInstruction(text) {
-  if (typeof text !== "string") return "";
-  for (const marker of [BRIEF_MARKER, FOLLOW_UP_MARKER]) {
-    const at = text.indexOf(marker);
-    if (at >= 0 && text.startsWith("[Shoggoth background task")) return text.slice(at + marker.length);
-  }
-  return text.startsWith(STEER_PREFIX) ? text.slice(STEER_PREFIX.length) : text;
-}
-
 class BackgroundTaskService {
   constructor(options = {}) {
     const required = ["store", "paths", "productStore", "chatSessionStore", "transcriptStore", "getChatServiceController",
@@ -70,6 +67,7 @@ class BackgroundTaskService {
       store: options.store, paths: options.paths, productStore: options.productStore,
       sessions: options.chatSessionStore, transcripts: options.transcriptStore, files: options.agentFileStore || null,
       getChat: options.getChatServiceController, getCoordinator: options.getWorkRunCoordinator,
+      projectMessage: options.projectMessage ?? ((_session, text) => text),
       dispatcher: options.workDispatcher, isInternalSession: options.isInternalSession || (() => false),
       resolveWorkspace: options.resolveWorkspace, fileUrl: options.fileUrl || null,
       publish: options.publish || (() => {}), now: options.now || Date.now,
@@ -77,7 +75,7 @@ class BackgroundTaskService {
       runtimes: options.runtimes || BACKGROUND_TASK_RUNTIMES,
       setTimer: options.setTimeout || setTimeout, clearTimer: options.clearTimeout || clearTimeout,
     });
-    this.tails = new Map(); this.watched = new Map(); this.timers = new Set(); this.closed = true;
+    this.tails = new Map(); this.watched = new Map(); this.timers = new Map(); this.closed = true;
     this.unsubscribe = null;
   }
 
@@ -92,7 +90,7 @@ class BackgroundTaskService {
     this.closed = true;
     try { this.unsubscribe?.(); } catch {}
     this.unsubscribe = null;
-    for (const timer of this.timers) this.clearTimer(timer);
+    for (const timer of this.timers.values()) this.clearTimer(timer);
     this.timers.clear(); this.watched.clear();
   }
 
@@ -142,7 +140,7 @@ class BackgroundTaskService {
 
   #bindings(profileId) {
     const { bindings } = this.productStore.getAgentRuntimeBindings(profileId);
-    return bindings.filter(binding => binding.enabled && this.runtimes.has(binding.runtime));
+    return bindings.filter(binding => binding.enabled && this.runtimes.has(binding.runtime) && isRuntimeAvailable(binding.runtime));
   }
 
   // The parent's current binding is frozen at acceptance. Another binding is
@@ -266,11 +264,36 @@ class BackgroundTaskService {
     const session = this.#uiSession(sessionKey);
     const record = this.#owned(taskId, session);
     const task = this.#publicTask(record);
-    const gen = record.generations.at(-1);
+    const gen = currentGeneration(record);
     const snapshot = gen.runId ? this.#coordinator()?.getRunSnapshot?.(gen.runId) : null;
+    const queuedFollowUps = record.generations.filter(item => item.n > gen.n && !item.terminal).length;
     return { task, messages: this.#childMessages(record), files: this.#taskFiles(record),
       interaction: snapshot?.interaction ? { runId: gen.runId, ...structuredClone(snapshot.interaction) } : null,
-      queueReason: snapshot?.queue?.reason ?? null };
+      queueReason: snapshot?.queue?.reason ?? null,
+      ...(queuedFollowUps ? { queuedFollowUps } : {}) };
+  }
+
+  conversationSession(sessionKey, taskId) {
+    const source = this.#uiSession(sessionKey);
+    const record = this.#owned(taskId, source);
+    const child = record.childSessionKey && this.sessions.getSession(record.childSessionKey);
+    if (!child || source.status === "delete_pending" || child.status === "delete_pending"
+      || child.profileId !== record.profileId || child.workspace !== record.childWorkspace
+      || child.runtimeBindingId !== record.bindingId) return { session: null, brief: null };
+    const firstId = transcriptEventId("chat-user", record.generations[0].operationId);
+    let first;
+    try {
+      const event = this.transcripts.getEvent(record.profileId, child.id, firstId);
+      if (event) first = this.transcripts.displayEvent(record.profileId, child.id, event);
+    } catch {}
+    const brief = first?.kind === "user" && typeof first.content?.text === "string" ? {
+      id: first.id, role: "user", text: visibleBackgroundInstruction(first.content.text), at: first.occurredAt,
+      runId: first.runId ?? null, activity: false,
+    } : null;
+    return { session: {
+      sessionKey: child.sessionKey, profileId: child.profileId,
+      runtimeBindingId: child.runtimeBindingId, status: child.status,
+    }, brief };
   }
 
   async uiSend(sessionKey, input) { return this.#sendTo(this.#uiSession(sessionKey), input); }
@@ -279,7 +302,7 @@ class BackgroundTaskService {
   async uiRespond(sessionKey, { taskId, operationId, requestId, kind, choice, action, answers }) {
     const session = this.#uiSession(sessionKey);
     const record = this.#owned(taskId, session);
-    const runId = record.generations.at(-1).runId;
+    const runId = currentGeneration(record).runId;
     const run = runId && this.dispatcher.getRun(runId);
     if (!run || !WAITING_RUN_STATUSES.has(run.status) || run.waitingRequestId !== requestId) {
       throw taskError("BACKGROUND_TASK_NOT_FOUND");
@@ -300,28 +323,55 @@ class BackgroundTaskService {
     if (record.closedReason) throw taskError("BACKGROUND_TASK_NOT_FOUND");
     return this.#serial(taskId, async () => {
       record = this.store.get(taskId);
+      if (record.closedReason) throw taskError("BACKGROUND_TASK_NOT_FOUND");
       const followUp = `bg-send-${taskId}-${shortOp(operationId)}`;
-      if (record.generations.some(item => item.operationId === followUp)) {
+      const existing = record.generations.find(item => item.operationId === followUp);
+      if (existing) {
+        if (this.store.readPrompt(taskId, existing.n) !== followUpPrompt(message)) throw taskError("BACKGROUND_TASK_CONFLICT");
+        if (!existing.runId && existing.terminal?.status === "skipped") {
+          return { task: this.#publicTask(record), delivered: "canceled" };
+        }
         await this.#advance(taskId);
-        return { task: this.#publicTask(this.store.get(taskId)), delivered: "new_run" };
+        const task = this.#publicTask(this.store.get(taskId));
+        return { task, delivered: !existing.terminal && existing.n > task.generation ? "queued" : "new_run" };
+      }
+      const steerId = `bg-steer-${taskId}-${shortOp(operationId)}`;
+      const child = record.childSessionKey && this.sessions.getSession(record.childSessionKey);
+      const instruction = STEER_PREFIX + message;
+      const priorSteer = child && this.transcripts.getEvent(record.profileId, child.id, transcriptEventId("chat-steer-user", steerId));
+      if (priorSteer) {
+        const accepted = this.transcripts.displayEvent(record.profileId, child.id, priorSteer).content.text;
+        if (accepted !== instruction && accepted !== this.projectMessage(child, instruction)) throw taskError("BACKGROUND_TASK_CONFLICT");
+        return { task: this.#publicTask(record), delivered: "steered" };
+      }
+      let gen = currentGeneration(record);
+      if (!gen.terminal && gen.runId && TERMINAL_RUN_STATUSES.has(this.dispatcher.getRun(gen.runId)?.status)) {
+        // Settle a requested stop before a new generation clears stopRequestedAt.
+        await this.#deliver(taskId);
+        record = this.store.get(taskId);
+        gen = currentGeneration(record);
       }
       const status = this.#publicTask(record).status;
       if (status === "waiting_approval" || status === "waiting_input") throw taskError("BACKGROUND_TASK_WAITING");
       if (status === "stopping") throw taskError("BACKGROUND_TASK_STOPPING");
-      const gen = record.generations.at(-1);
-      if (["running", "queued", "starting"].includes(status) && gen.runId) {
-        const child = this.sessions.getSession(record.childSessionKey);
+      if (status === "needs_verification") throw taskError("BACKGROUND_TASK_UNAVAILABLE");
+      if (status === "running" && this.dispatcher.getRun(gen.runId)?.status === "running") {
         if (!child) throw taskError("BACKGROUND_TASK_NOT_FOUND");
-        await this.#chat().handle("chat.steer", { operationId: `bg-steer-${taskId}-${shortOp(operationId)}`,
-          sessionKey: child.sessionKey, runId: gen.runId, message: `${STEER_PREFIX}${message}`, createdAt: this.now() });
-        return { task: this.#publicTask(this.store.get(taskId)), delivered: "steered" };
+        try {
+          await this.#chat().handle("chat.steer", { operationId: steerId,
+            sessionKey: child.sessionKey, runId: gen.runId, message: instruction, createdAt: this.now() });
+          return { task: this.#publicTask(this.store.get(taskId)), delivered: "steered" };
+        } catch (error) {
+          // Only a definitive unsupported-operation response permits a second
+          // delivery path. An uncertain steer may already have reached the model.
+          if (error?.receiptUncertain || error?.code !== "RUNTIME_CAPABILITY_UNSUPPORTED") throw error;
+        }
       }
-      // The first run is still being handed over; it accepts instructions once started.
-      if (!gen.runId) throw taskError("BACKGROUND_TASK_UNAVAILABLE");
-      this.store.addGeneration(taskId, followUp, followUpPrompt(message));
-      this.#publish(this.store.get(taskId));
+      record = this.store.addGeneration(taskId, followUp, followUpPrompt(message));
+      this.#publish(record);
       await this.#advance(taskId);
-      return { task: this.#publicTask(this.store.get(taskId)), delivered: "new_run" };
+      const task = this.#publicTask(this.store.get(taskId));
+      return { task, delivered: task.generation < record.generations.length ? "queued" : "new_run" };
     });
   }
 
@@ -329,11 +379,19 @@ class BackgroundTaskService {
     const record = this.#owned(taskId, session);
     return this.#serial(taskId, async () => {
       const current = this.store.get(taskId);
-      const gen = current.generations.at(-1);
+      const gen = currentGeneration(current);
       const run = gen.runId ? this.dispatcher.getRun(gen.runId) : null;
-      if (run && TERMINAL_RUN_STATUSES.has(run.status)) return { task: this.#publicTask(current) };
-      this.store.update(taskId, item => { item.stopRequestedAt ??= this.now(); });
-      if (run && record.childSessionKey) {
+      const ended = run && TERMINAL_RUN_STATUSES.has(run.status);
+      if (gen.terminal || (ended && gen.n === current.generations.length)) return { task: this.#publicTask(current) };
+      this.store.update(taskId, item => {
+        item.stopRequestedAt ??= this.now();
+        for (const pending of item.generations.slice(gen.n)) {
+          if (pending.terminal || pending.runId) continue;
+          pending.terminal = { status: "skipped", errorCode: null, finishedAt: item.stopRequestedAt };
+          pending.report = { state: "withheld", eventId: null, updatedAt: item.stopRequestedAt };
+        }
+      });
+      if (run && !ended && record.childSessionKey) {
         await this.#chat().handle("chat.abort", { operationId: `bg-abort-${taskId}-${shortOp(operationId)}`,
           sessionKey: record.childSessionKey, runId: run.id, createdAt: this.now() });
       }
@@ -363,8 +421,7 @@ class BackgroundTaskService {
 
   #finished(record) {
     if (record.closedReason) return true;
-    const gen = record.generations.at(-1);
-    return gen.terminal !== null && !["none", "pending"].includes(gen.report.state);
+    return record.generations.every(gen => gen.terminal !== null && !["none", "pending"].includes(gen.report.state));
   }
 
   // Each step uses a fixed operation identity, so recovery after a crash at
@@ -375,10 +432,12 @@ class BackgroundTaskService {
     if (!record || record.closedReason) return;
     const profile = this.productStore.getAgentProfile(record.profileId);
     if (!profile?.enabled) return;
-    const gen = record.generations.at(-1);
+    const gen = currentGeneration(record);
+    if (gen.terminal) return;
+    if (gen.runId && TERMINAL_RUN_STATUSES.has(this.dispatcher.getRun(gen.runId)?.status)) return this.#deliver(taskId);
     if (!gen.runId && record.stopRequestedAt !== null) {
       this.store.update(taskId, item => {
-        const last = item.generations.at(-1);
+        const last = item.generations[gen.n - 1];
         last.terminal = { status: "canceled", errorCode: null, finishedAt: this.now() };
         last.report = { state: "withheld", eventId: null, updatedAt: this.now() };
       });
@@ -401,7 +460,7 @@ class BackgroundTaskService {
       } catch (error) {
         if (error?.admissionAccepted === false || ["CHAT_SESSION_NOT_FOUND", "WORK_RUN_SEND_REJECTED"].includes(error?.code)) {
           this.store.update(taskId, item => {
-            const last = item.generations.at(-1);
+            const last = item.generations[gen.n - 1];
             last.terminal = { status: "failed", errorCode: /^[A-Z0-9_]{1,128}$/u.test(error?.code || "") ? error.code : "BACKGROUND_TASK_START_FAILED",
               finishedAt: this.now() };
             last.report = { state: "pending", eventId: null, updatedAt: this.now() };
@@ -415,7 +474,7 @@ class BackgroundTaskService {
         if (error?.receiptUncertain || /VERIFICATION|BUSY|NOT_READY/u.test(error?.code || "")) return;
         throw error;
       }
-      record = this.store.update(taskId, item => { item.generations.at(-1).runId = sent.run.id; });
+      record = this.store.update(taskId, item => { item.generations[gen.n - 1].runId = sent.run.id; });
       this.#publish(record);
     }
     this.#watch(taskId);
@@ -455,39 +514,26 @@ class BackgroundTaskService {
   }
 
   #retryLater(taskId) {
-    if (this.closed) return;
+    if (this.closed || this.timers.has(taskId)) return;
     const timer = this.setTimer(() => {
-      this.timers.delete(timer);
-      void this.#serial(taskId, () => this.#advance(taskId)).catch(() => this.#retryLater(taskId));
+      this.timers.delete(taskId);
+      void this.deliver(taskId).catch(() => this.#retryLater(taskId));
     }, RETRY_MS);
     timer.unref?.();
-    this.timers.add(timer);
+    this.timers.set(taskId, timer);
   }
 
   #watch(taskId) {
     const record = this.store.get(taskId);
-    const runId = record?.generations.at(-1).runId;
+    const runId = record && currentGeneration(record).runId;
     if (!runId || this.closed || this.watched.get(taskId) === runId) return;
     this.watched.set(taskId, runId);
     let waiting;
     try { waiting = this.#coordinator().waitForTerminal(runId); } catch { waiting = Promise.reject(new Error("wait")); }
-    void Promise.resolve(waiting).then(() => this.deliver(taskId), () => {
+    void Promise.resolve(waiting).then(() => this.deliver(taskId)).catch(() => {
       if (this.watched.get(taskId) === runId) this.watched.delete(taskId);
-      if (!this.closed) this.#retryWatch(taskId);
-    }).catch(() => {});
-  }
-
-  #retryWatch(taskId) {
-    const timer = this.setTimer(() => {
-      this.timers.delete(timer);
-      const record = this.store.get(taskId);
-      const runId = record?.generations.at(-1).runId;
-      const run = runId && this.dispatcher.getRun(runId);
-      if (run && TERMINAL_RUN_STATUSES.has(run.status)) void this.deliver(taskId).catch(() => {});
-      else this.#watch(taskId);
-    }, RETRY_MS);
-    timer.unref?.();
-    this.timers.add(timer);
+      this.#retryLater(taskId);
+    });
   }
 
   deliver(taskId) { return this.#serial(taskId, () => this.#deliver(taskId)); }
@@ -496,7 +542,6 @@ class BackgroundTaskService {
     if (this.closed) return;
     let record = this.store.get(taskId);
     if (!record) return;
-    this.watched.delete(taskId);
     for (const gen of record.generations) {
       if (!gen.runId && !gen.terminal) continue;
       if (["delivered", "withheld"].includes(gen.report.state)) continue;
@@ -516,6 +561,10 @@ class BackgroundTaskService {
       }
       record = this.#publishReport(record, gen.n);
     }
+    const next = currentGeneration(record);
+    if (next.terminal) this.watched.delete(taskId);
+    else if (!next.runId) await this.#advance(taskId);
+    else this.#watch(taskId);
   }
 
   #publishReport(record, n) {
@@ -618,7 +667,7 @@ class BackgroundTaskService {
     for (const event of events.slice(-MAX_DETAIL_MESSAGES).reverse()) {
       let text = event.content.text;
       try { text = this.transcripts.displayEvent(record.profileId, child.id, event)?.content?.text ?? text; } catch {}
-      if (event.kind === "user") text = visibleInstruction(text);
+      if (event.kind === "user") text = visibleBackgroundInstruction(text);
       if (!text.trim()) continue;
       bytes += Buffer.byteLength(text);
       if (bytes > MAX_DETAIL_TEXT_BYTES && out.length) break;
@@ -629,7 +678,7 @@ class BackgroundTaskService {
   }
 
   #publicTask(record) {
-    const gen = record.generations.at(-1);
+    const gen = currentGeneration(record);
     const run = gen.runId ? this.dispatcher.getRun(gen.runId) : null;
     let status;
     if (gen.terminal) status = gen.terminal.status === "skipped" ? "canceled" : gen.terminal.status;
@@ -686,7 +735,7 @@ class BackgroundTaskService {
   async #sourceDeleted(taskId) {
     const record = this.store.get(taskId);
     if (!record || record.closedReason) return;
-    const runId = record.generations.at(-1).runId;
+    const runId = currentGeneration(record).runId;
     const run = runId && this.dispatcher.getRun(runId);
     if (run && !TERMINAL_RUN_STATUSES.has(run.status) && record.childSessionKey) {
       try {
@@ -703,14 +752,8 @@ class BackgroundTaskService {
       if (record.closedReason) continue;
       const source = this.sessions.getSession(record.sourceSessionKey);
       if (!source) { await this.#serial(record.id, () => this.#sourceDeleted(record.id)).catch(() => {}); continue; }
-      const gen = record.generations.at(-1);
       try {
-        if (!gen.runId && !gen.terminal) await this.#serial(record.id, () => this.#advance(record.id));
-        else if (record.generations.some(item => ["none", "pending", "held"].includes(item.report.state))) {
-          const run = gen.runId && this.dispatcher.getRun(gen.runId);
-          if (!run || TERMINAL_RUN_STATUSES.has(run.status)) await this.deliver(record.id);
-          else this.#watch(record.id);
-        }
+        if (record.generations.some(item => ["none", "pending", "held"].includes(item.report.state))) await this.deliver(record.id);
       } catch { this.#retryLater(record.id); }
     }
   }
@@ -721,4 +764,4 @@ class BackgroundTaskService {
   }
 }
 
-module.exports = { BackgroundTaskService, initialPrompt, followUpPrompt, visibleInstruction };
+module.exports = { BackgroundTaskService, initialPrompt, followUpPrompt, visibleInstruction: visibleBackgroundInstruction };

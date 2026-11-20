@@ -9,18 +9,19 @@ type Entry = {
   id: string;
   scope: string;
   quota?: AvailableQuota;
-  request?: { controller: AbortController; promise: Promise<void> };
+  requested?: boolean;
+  request?: { controller: AbortController; promise: Promise<boolean> };
 };
 
 const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
 const accountKey = (backend: string, id: string) => JSON.stringify([backend, id]);
-const accountScope = ({ status }: OAuthProvider) => JSON.stringify([status.source, status.tokenPreview]);
+const accountScope = ({ status, quotaScope }: OAuthProvider) => quotaScope ?? JSON.stringify([status.source, status.tokenPreview]);
 
 export function canReadOAuthAccountQuota(provider: OAuthProvider): boolean {
   const { status } = provider;
-  return provider.canReadQuota === true && provider.connection?.enabled !== false
-    && status.loggedIn && !status.error && status.verification !== "incompatible"
+  return provider.canReadQuota === true && provider.quotaScope !== null && provider.connection?.enabled !== false
+    && status.loggedIn && !status.error && !status.verification
     && (!status.expiresAt || Date.parse(status.expiresAt) > Date.now());
 }
 
@@ -56,7 +57,7 @@ export function readCachedOAuthQuota(backend: string, provider: OAuthProvider): 
   return entry?.scope === accountScope(provider) ? entry.quota : undefined;
 }
 
-export function refreshOAuthQuota(backend: string, provider: OAuthProvider): Promise<void> {
+export function refreshOAuthQuota(backend: string, provider: OAuthProvider): Promise<boolean> {
   const { id } = provider;
   const key = accountKey(backend, id);
   const scope = accountScope(provider);
@@ -64,17 +65,26 @@ export function refreshOAuthQuota(backend: string, provider: OAuthProvider): Pro
   if (before?.scope === scope && before.request) return before.request.promise;
   if (before && before.scope !== scope) removeEntry(key, before);
   const entry: Entry = before?.scope === scope ? before : { backend, id, scope };
+  entry.requested = true;
   entries.set(key, entry);
   if (before?.quota && entry !== before) publish();
 
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]);
   const promise = getOAuthProviderQuota(backend, id, signal).then(result => {
-    if (entries.get(key) !== entry || result.status !== "available") return;
+    if (entries.get(key) !== entry) return false;
+    if (result.status !== "available") return result.status === "unsupported" && Boolean(entry.quota);
+    if (provider.quotaScope && result.quotaScope !== provider.quotaScope) {
+      delete entry.quota;
+      publish();
+      return true;
+    }
     entry.quota = result;
     publish();
+    return false;
   }).catch(() => {
     // Keep the last successful read when the provider cannot be reached.
+    return false;
   }).finally(() => { delete entry.request; });
   entry.request = { controller, promise };
   return promise;
@@ -93,6 +103,16 @@ export async function prefetchMissingOAuthQuotas(backend: string, providers: OAu
     removeEntry(key, entry);
     changed = true;
   }
+  for (const provider of eligible.values()) {
+    const { id, quotaScope, cachedQuota } = provider;
+    if (!quotaScope || cachedQuota?.quotaScope !== quotaScope) continue;
+    const key = accountKey(backend, id);
+    const entry = entries.get(key);
+    if (!entry) {
+      entries.set(key, { backend, id, scope: quotaScope, quota: cachedQuota });
+      changed = true;
+    }
+  }
   if (changed) publish();
 
   const revision = readPageCacheRevision();
@@ -101,7 +121,7 @@ export async function prefetchMissingOAuthQuotas(backend: string, providers: OAu
   for (let i = 0; i < accounts.length && revision === readPageCacheRevision(); i += 2) {
     await Promise.all(accounts.slice(i, i + 2).map(provider => {
       const entry = entries.get(accountKey(backend, provider.id));
-      return entry ? entry.request?.promise : refreshOAuthQuota(backend, provider);
+      return entry?.requested ? entry.request?.promise : refreshOAuthQuota(backend, provider);
     }));
   }
 }

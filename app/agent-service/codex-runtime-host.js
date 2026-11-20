@@ -4,7 +4,7 @@ const { spawn } = require("node:child_process");
 const { probeCodexBinaryVersion } = require("./codex-binary-probe");
 const { CodexJsonlRpcClient, rpcError } = require("./codex-jsonl-rpc");
 const { redactDiagnostic, validateRegisteredSecrets } = require("./codex-rpc-safety");
-const { MAX_WINDOWS, quotaSnapshot } = require("../core/oauth-account-quota");
+const { MAX_WINDOWS, quotaAccountName, quotaScopeDigest, quotaSnapshot } = require("../core/oauth-account-quota");
 const { normalizeCodexEvent } = require("./codex-event-normalizer");
 const { CodexSchemaContract } = require("./codex-schema-contract");
 const { runtimeBinding } = require("./runtime-adapter");
@@ -82,8 +82,9 @@ function safeAccountUrl(value) {
 }
 
 function normalizeAccountReadResponse(response) {
-  if (!exactObject(response, ["account", "requiresOpenaiAuth", "workspaceRouting"], ["requiresOpenaiAuth"])
+  if (!exactObject(response, ["account", "requiresOpenaiAuth", "workspaceRouting", "userId"], ["requiresOpenaiAuth"])
     || typeof response.requiresOpenaiAuth !== "boolean") throw accountProtocolError();
+  // The generated response schema validates userId. Keep it Host-private.
   // Codex can emit this experimental field even without experimentalApi.
   // Its generated definition is checked by the contract; keep it Host-private.
   const routing = response.workspaceRouting;
@@ -580,13 +581,27 @@ class CodexRuntimeHost {
     }
   }
 
+  _quotaScope(response) {
+    if (response.account?.type !== "chatgpt") return null;
+    const routing = response.workspaceRouting;
+    const accountId = routing?.chatgptAccountId ?? (this.nativeAccessToken ? this.nativeAccountId : null);
+    const email = quotaAccountName(response.account.email);
+    return accountId && email ? quotaScopeDigest("codex", routing?.backendOrigin ?? null, accountId, email) : undefined;
+  }
+
   async accountRead(params = { refreshToken: false }, options) {
-    if (!exactObject(params, ["refreshToken"], [])
-      || (params.refreshToken !== undefined && typeof params.refreshToken !== "boolean")) {
+    if (!exactObject(params, ["refreshToken", "includeQuotaScope"], [])
+      || (params.refreshToken !== undefined && typeof params.refreshToken !== "boolean")
+      || (Object.hasOwn(params, "includeQuotaScope") && params.includeQuotaScope !== true)) {
       return Promise.reject(runtimeError("CODEX_ACCOUNT_PARAMS_INVALID", "Codex account read params are invalid"));
     }
     await this._ensureNativeAuth();
-    const result = await this._accountRequest("accountRead", params, options, normalizeAccountReadResponse);
+    const { includeQuotaScope, ...request } = params;
+    const result = await this._accountRequest("accountRead", request, options, response => {
+      const normalized = normalizeAccountReadResponse(response);
+      const quotaScope = includeQuotaScope ? this._quotaScope(response) : undefined;
+      return quotaScope === undefined ? normalized : { ...normalized, quotaScope };
+    });
     return this.nativeAccessToken && result.account?.type === "chatgpt"
       ? { ...result, authSource: "native-codex" } : result;
   }
@@ -596,6 +611,7 @@ class CodexRuntimeHost {
     const options = { timeoutMs: 7_000 };
     const account = await this._request("accountRead", { refreshToken: false }, options);
     if (normalizeAccountReadResponse(account).account?.type !== "chatgpt") return { status: "unsupported" };
+    const quotaScope = this._quotaScope(account);
     const expectedId = account.workspaceRouting?.chatgptAccountId ?? this.nativeAccountId;
     const revision = this.accountRevision;
     const response = await this._request("accountRateLimitsRead", undefined, options);
@@ -625,7 +641,7 @@ class CodexRuntimeHost {
           : amount === 0 ? undefined : { kind: "present" };
     const resetCredits = response.rateLimitResetCredits?.availableCount;
     if (!windows.length && !credits && !(resetCredits > 0)) return { status: "unsupported" };
-    return quotaSnapshot(windows, { accountName: account.account.email, credits, resetCredits });
+    return quotaSnapshot(windows, { accountName: account.account.email, credits, resetCredits, quotaScope });
   }
 
   _registerAccountSecret(secret) {

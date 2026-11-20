@@ -108,18 +108,20 @@ test("isolated model discovery never waits on global MCP startup and still verif
 });
 
 test("Codex retired worktrees and realtime markers do not block isolated generation", async () => {
-  const f = await fixture({ runtimeVersion: "0.167.1", extraThreadFeatures: ["worktrees", "realtime_conversation"]
-    .map(name => ({ name, enabled: true, stage: "removed" })) });
-  const started = await f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
-    permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
-  await f.handle.releaseModelOnlySession({ sessionId: started.session.id });
-  assert.deepEqual(f.unloaded, ["isolated-thread"]);
+  for (const runtimeVersion of ["0.167.1", "0.170.0"]) {
+    const f = await fixture({ runtimeVersion, extraThreadFeatures: ["worktrees", "realtime_conversation"]
+      .map(name => ({ name, enabled: true, stage: "removed" })) });
+    const started = await f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
+      permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } });
+    await f.handle.releaseModelOnlySession({ sessionId: started.session.id });
+    assert.deepEqual(f.unloaded, ["isolated-thread"]);
+  }
 });
 
 test("an enabled active feature or an unverified removed feature still blocks generation", async () => {
   for (const [name, stage] of [["worktrees", "stable"], ["realtime_conversation", "deprecated"],
     ["unknown_tool", "removed"]]) {
-    const f = await fixture({ runtimeVersion: "0.167.1", extraThreadFeatures: [{ name, stage, enabled: true }] });
+    const f = await fixture({ runtimeVersion: "0.170.0", extraThreadFeatures: [{ name, stage, enabled: true }] });
     await assert.rejects(f.handle.sessionStart({ isolatedGeneration: true, persistent: false,
       permissionPolicy: { approvalPolicy: "never", sandbox: "read-only" } }), { code: "RUNTIME_ISOLATION_UNVERIFIED" });
     assert.deepEqual(f.unloaded, ["isolated-thread"]);

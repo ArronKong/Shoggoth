@@ -1,7 +1,17 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
+
 const MAX_WINDOWS = 32;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
+
+function validQuotaScope(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+}
+
+function quotaScopeDigest(...identity) {
+  return createHash("sha256").update(JSON.stringify(["shoggoth-oauth-quota", ...identity])).digest("hex");
+}
 
 function quotaLabel(value) {
   if (typeof value !== "string" || value.length > 80) return null;
@@ -26,7 +36,7 @@ function percent(value) {
   return Number.isFinite(value) && value >= 0 ? Math.min(value, 100) : null;
 }
 
-function quotaSnapshot(windows, { accountName, credits, resetCredits, checkedAt = Date.now() } = {}) {
+function quotaSnapshot(windows, { accountName, credits, resetCredits, quotaScope, checkedAt = Date.now() } = {}) {
   const projected = windows.slice(0, MAX_WINDOWS).flatMap(window => {
     const usedPercent = percent(window?.usedPercent);
     if (usedPercent === null) return [];
@@ -42,7 +52,7 @@ function quotaSnapshot(windows, { accountName, credits, resetCredits, checkedAt 
   const resetCount = positiveResetCount(resetCredits) ? resetCredits : null;
   return (projected.length > 0 || creditBalance || resetCount) && timestamp(checkedAt) !== null
     ? { status: "available", checkedAt, windows: projected, ...(name ? { accountName: name } : {}),
-      ...(creditBalance ? { credits: creditBalance } : {}),
+      ...(creditBalance ? { credits: creditBalance } : {}), ...(validQuotaScope(quotaScope) ? { quotaScope } : {}),
       ...(resetCount ? { resetCredits: resetCount } : {}) }
     : { status: "unavailable" };
 }
@@ -83,9 +93,12 @@ function validQuotaSnapshot(snapshot) {
   const hasAccountName = Object.hasOwn(snapshot, "accountName");
   const hasCredits = Object.hasOwn(snapshot, "credits");
   const hasResets = Object.hasOwn(snapshot, "resetCredits");
+  const hasScope = Object.hasOwn(snapshot, "quotaScope");
   const fields = ["status", "checkedAt", "windows",
-    ...(hasAccountName ? ["accountName"] : []), ...(hasCredits ? ["credits"] : []), ...(hasResets ? ["resetCredits"] : [])];
+    ...(hasAccountName ? ["accountName"] : []), ...(hasCredits ? ["credits"] : []),
+    ...(hasResets ? ["resetCredits"] : []), ...(hasScope ? ["quotaScope"] : [])];
   return exactObject(snapshot, fields) && snapshot.status === "available"
+    && (!hasScope || validQuotaScope(snapshot.quotaScope))
     && (!hasAccountName || (typeof snapshot.accountName === "string" && quotaAccountName(snapshot.accountName) === snapshot.accountName))
     && (!hasCredits || validCredits(snapshot.credits)) && (!hasResets || positiveResetCount(snapshot.resetCredits))
     && timestamp(snapshot.checkedAt) !== null && Array.isArray(snapshot.windows)
@@ -95,4 +108,4 @@ function validQuotaSnapshot(snapshot) {
       && percent(window.usedPercent) === window.usedPercent && timestamp(window.resetsAt) === window.resetsAt);
 }
 
-module.exports = { MAX_WINDOWS, quotaSnapshot, validQuotaSnapshot };
+module.exports = { MAX_WINDOWS, quotaAccountName, quotaScopeDigest, quotaSnapshot, validQuotaScope, validQuotaSnapshot };

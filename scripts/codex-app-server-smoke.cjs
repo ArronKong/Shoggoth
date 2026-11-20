@@ -82,8 +82,8 @@ function rejectsCode(action, code) {
 
 function testGeneratedMethodMappingAndContracts() {
   const contract = new CodexSchemaContract({ repoRoot: REPO_ROOT });
-  assert.equal(contract.version, "0.167.1");
-  assert.equal(CODEX_VERSION, "0.167.1");
+  assert.equal(contract.version, "0.170.0");
+  assert.equal(CODEX_VERSION, "0.170.0");
   assert.deepEqual(Object.fromEntries(Object.entries(contract.operations).map(([name, operation]) => [name, operation.method])), {
     initialize: "initialize",
     threadStart: "thread/start",
@@ -990,7 +990,7 @@ async function testBinaryVersionProbeIsStrictBoundedAndSanitized() {
   assert.deepEqual(calls[0].options.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(calls[0].options.windowsHide, true);
 
-  for (const version of [CODEX_VERSION, "0.168.0", "0.168.0-alpha.2", "0.167.1+build.1", "0.159.2", "0.167.1-alpha.1", "nightly", "2.0.0"]) {
+  for (const version of [CODEX_VERSION, "0.171.0", "0.171.0-alpha.2", "0.170.0+build.1", "0.167.1", "0.159.2", "0.170.0-alpha.1", "nightly", "2.0.0"]) {
     const result = await probeCodexBinaryVersion("/safe/system-codex", {
       installationKind: "system",
       env: safeEnv,
@@ -1508,14 +1508,15 @@ async function testAccountAuthHostApiUsesOnlyGeneratedMethods() {
   }
 }
 
-async function testAccountWorkspaceRoutingIsValidatedAndKeptPrivate() {
+async function testAccountRoutingAndUserIdAreValidatedAndKeptPrivate() {
   const routing = { chatgptAccountId: "private-routing-account", backendOrigin: "https://routing.example.test",
     accountRoutingOverride: "us" };
   for (const workspaceRouting of [null, routing]) {
     for (const account of [null, { type: "apiKey" },
       { type: "chatgpt", email: "private@example.test", planType: "plus" },
       { type: "chatgpt", email: "private@example.test", planType: "plus", workspaceName: "private workspace" }]) {
-      const fixture = hostFixture({ childOptions: { accountResponse: { account, requiresOpenaiAuth: true, workspaceRouting } } });
+      const userId = account?.type === "chatgpt" ? "private-user-id" : null;
+      const fixture = hostFixture({ childOptions: { accountResponse: { account, requiresOpenaiAuth: true, workspaceRouting, userId } } });
       try {
         await fixture.host.initialize();
         const result = await fixture.host.accountRead({ refreshToken: false });
@@ -1523,6 +1524,7 @@ async function testAccountWorkspaceRoutingIsValidatedAndKeptPrivate() {
           requiresOpenaiAuth: true });
         assert.equal(JSON.stringify(result).includes("private"), false);
         assert.equal(Object.hasOwn(result, "workspaceRouting"), false);
+        assert.equal(Object.hasOwn(result, "userId"), false);
       } finally { await fixture.host.stop().catch(() => {}); fs.rmSync(fixture.root, { recursive: true, force: true }); }
     }
   }
@@ -1537,6 +1539,14 @@ async function testAccountWorkspaceRoutingIsValidatedAndKeptPrivate() {
         && !error.message.includes("private-routing-canary"));
     } finally { await fixture.host.stop().catch(() => {}); fs.rmSync(fixture.root, { recursive: true, force: true }); }
   }
+  const malformed = hostFixture({ childOptions: { accountResponse: {
+    account: null, requiresOpenaiAuth: true, userId: { id: "private-user-id" },
+  } } });
+  try {
+    await malformed.host.initialize();
+    await assert.rejects(malformed.host.accountRead({ refreshToken: false }), error => error.code === "CODEX_SCHEMA_ERROR"
+      && !error.message.includes("private-user-id"));
+  } finally { await malformed.host.stop().catch(() => {}); fs.rmSync(malformed.root, { recursive: true, force: true }); }
 }
 
 async function testHostDynamicSecretLimitFailsBeforeAccountRpcWrite() {
@@ -2318,6 +2328,8 @@ async function runRealBinarySmoke() {
   });
   try {
     const initialized = await host.initialize();
+    const account = await host.accountRead({ refreshToken: false });
+    assert.deepEqual(account, { account: null, requiresOpenaiAuth: true });
     const started = await host.threadStart({
       cwd: REPO_ROOT,
       approvalPolicy: "never",
@@ -2356,7 +2368,7 @@ async function main() {
     testRealVersionProbeKillsTermIgnoringProcessGroup,
     testRuntimeHostCoreApiEnvironmentAndEvents,
     testAccountAuthHostApiUsesOnlyGeneratedMethods,
-    testAccountWorkspaceRoutingIsValidatedAndKeptPrivate,
+    testAccountRoutingAndUserIdAreValidatedAndKeptPrivate,
     testHostDynamicSecretLimitFailsBeforeAccountRpcWrite,
     testAccountAuthUsesOpaqueLoginIdInternallyAndSanitizesPublicDisplay,
     testPackagedHostUsesPhysicalCodexHomeAsProcessCwd,

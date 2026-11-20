@@ -769,6 +769,11 @@ class AgentBackend {
     throw Object.assign(new Error("此后端不支持后台任务"), { code: "BACKGROUND_TASK_UNSUPPORTED" });
   }
 
+  /** Standard chat history and a scoped live observer for an owned background task. */
+  async getBackgroundTaskChatPage(sessionKey, taskId, options = {}) {
+    throw Object.assign(new Error("此后端不支持后台任务"), { code: "BACKGROUND_TASK_UNSUPPORTED" });
+  }
+
   /**
    * User control of one task: { action: "send", message } | { action: "cancel" }
    * | { action: "approval", requestId, choice } | { action: "input", requestId, inputAction, answers }.

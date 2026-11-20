@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {createRequire} from 'node:module';
 import ts from '../app/manage-ui/node_modules/typescript/lib/typescript.js';
-import { bundledBridgeVersions, connectorTelemetryFixture, loadConnectorAddButton, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
+import { bundledBridgeVersions, connectorTelemetryStub, loadConnectorAddButton, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 const uiRequire=createRequire(new URL('../app/manage-ui/package.json',import.meta.url));
 const React=uiRequire('react'),Renderer=uiRequire('react-test-renderer');
 const recommendations=JSON.parse(fs.readFileSync(new URL('../app/agent-service/data/mcp-featured-presets.json',import.meta.url),'utf8'));
@@ -20,7 +20,7 @@ let currentLanguage='en';
 const authorizations=[];
 const mod=load('../app/manage-ui/src/pages/McpConnectorDialog.tsx',name=>{
 
- if(name==='../lib/productTelemetry')return connectorTelemetryFixture;
+ if(name==='../lib/productTelemetry')return connectorTelemetryStub;
  if(name==='../components/McpConnectorIcon')return {__esModule:true,default:props=>React.createElement('i',{'data-dialog-icon':props.iconId||props.identity})};
  if(name==='../components/ConnectorTools')return {__esModule:true,default:()=>null};
  if(name==='../components/ConnectorDetails')return connectorDetails;
@@ -192,16 +192,24 @@ console.log('PASS installed dialog identities: registry, eight official componen
 // registry does not publish their OAuth configuration. Opening never installs.
 {
  const originalApi={...api},added=[],signedIn=[],cancelled=[];let dialog,current;
+ const productHunt=recommendations.find(value=>value.id==='product-hunt');
+ assert.ok(productHunt);
  Object.assign(api,{
   listMcpConnectors:async()=>({revision:12,servers:[]}),
-  addMcpConnector:async input=>{added.push(input);current={...server,id:'recommended-'+added.length,name:input.name,source:input.source,transport:input.option,status:'signedOut',auth:{kind:'oauth-dcr'}};return {revision:13,server:current};},
+  addMcpConnector:async input=>{
+   added.push(input);
+   const publicConnection=input.option.url===productHunt.url;
+   current={...server,id:'recommended-'+added.length,name:input.name,source:input.source,transport:input.option,
+    status:publicConnection?'ready':'signedOut',auth:{kind:publicConnection?'none':'oauth-dcr'}};
+   return {revision:13,server:current};
+  },
   startMcpSignIn:async id=>{signedIn.push(id);return {signInId:'signin-'+id,status:'pending',authorizationUrl:'https://auth.example.test/authorize'};},
   cancelMcpSignIn:async id=>{cancelled.push(id);return {};}
  });
  const mount=async props=>Renderer.act(async()=>{dialog=Renderer.create(React.createElement(mod.default,{...props,onClose(){},onChanged(){}}));});
  const save=()=>dialog.root.findAllByType('button').find(node=>['flow.saveConnect','flow.authorize','flow.checkConnect'].some(key=>node.props.children==='mcpConnectors.'+key));
  try{
-  for(const recommendation of recommendations.filter(value=>!value.registryName && (!value.setup || value.setup==='oauth'))){
+  for(const recommendation of recommendations.filter(value=>value!==productHunt && !value.registryName && (!value.setup || value.setup==='oauth'))){
    await mount({recommendation});
    assert.equal(added.length,signedIn.length,'opening a recommendation does not add or sign in');
    assert.ok(dialog.root.findAllByType('input').some(node=>node.props.value===recommendation.url));
@@ -215,6 +223,19 @@ console.log('PASS installed dialog identities: registry, eight official componen
    await Renderer.act(async()=>dialog.unmount());dialog=null;
   }
   assert.equal(added.length,25);assert.equal(cancelled.length,25);
+  await mount({recommendation:productHunt,catalogEntry:true});
+  assert.equal(added.length,25,'opening Product Hunt does not add it');
+  const button=label=>dialog.root.findAllByType('button').find(node=>node.props.children==='mcpConnectors.'+label);
+  await Renderer.act(async()=>button('add').props.onClick());
+  assert.deepEqual(JSON.parse(JSON.stringify(added.at(-1))),{
+   source:{kind:'custom'},name:'Product Hunt',expectedRevision:12,
+   option:{kind:'remote',protocol:'streamable-http',url:'https://mcp.producthunt.com/mcp'}
+  });
+  assert.equal(signedIn.length,25,'public Product Hunt setup requires no browser authorization');
+  await Renderer.act(async()=>button('flow.authorize').props.onClick());
+  assert.equal(signedIn.at(-1),current.id,'sign-in authorizes the existing public connector');
+  assert.equal(authorizations.at(-1),'https://auth.example.test/authorize');
+  await Renderer.act(async()=>dialog.unmount());dialog=null;
   const registryPresets=[...recommendations.filter(value=>value.registryName),{...recommendations.find(value=>value.id==='lovable'),registryName:'dev.lovable/fixture'}];
   for(const recommendation of registryPresets){
    const remote={id:'remote:1',transport:{kind:'remote',protocol:'streamable-http',url:new URL(recommendation.url).href},fields:[]};
@@ -416,7 +437,7 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const featured=rootRequire('./app/agent-service/data/mcp-featured-servers.json');
  const hiddenIds=new Set(['gmail','google-calendar','google-contacts','google-docs','google-drive','google-sheets','google-slides','zoom','asana','box','dropbox','quickbooks','outlook-mail','outlook-calendar','strava','vercel','shop-pay','shopify','shopify-ucp','uber','uber-eats']);
  const chinesePresets=new Set(['amap','didi','eastmoney','ifind','luckin','mcdonalds','mijia','variflight','wind']);
- const chineseOfficial=new Set(['alipay','baidu-maps','fliggy','meituan-paotui','quark-drive','rollinggo-hotel','weread']);
+ const chineseOfficial=new Set(['agently-mail','alipay','baidu-maps','fliggy','meituan-paotui','quark-drive','rollinggo-hotel','weread']);
  const officialCatalog=rootRequire('./app/agent-service/data/official-skill-connectors.json');
  const presetVisible=id=>!hiddenIds.has(id)&&(currentLanguage==='zh-CN'||!chinesePresets.has(id));
  const github=parseRegistryEntry(rootRequire('./scripts/fixtures/mcp-registry/io.github.github__github-mcp-server.json'));
@@ -443,8 +464,8 @@ console.log('PASS installed dialog identities: registry, eight official componen
  const connectorAddButton=loadConnectorAddButton();
  const page=load('../app/manage-ui/src/pages/ConnectorsPage.tsx',name=>{
   if(name==='react'||name==='react/jsx-runtime')return uiRequire(name);
-  if(name==='../lib/productTelemetry')return connectorTelemetryFixture;
-  if(name==='../../../core/data/product-telemetry-catalog.json')return {__esModule:true,default:JSON.parse(fs.readFileSync(new URL('../app/core/data/product-telemetry-catalog.json',import.meta.url),'utf8'))};
+  if(name==='../lib/productTelemetry')return connectorTelemetryStub;
+  if(name==='../../../core/data/product-telemetry-catalog.json')return {__esModule:true,default:rootRequire('./app/core/data/product-telemetry-catalog.json')};
   if(name==='../components/ConnectorDetails')return connectorDetails;
   if(name==='../components/ConnectorAddButton')return connectorAddButton;
   if(name==='react-i18next')return {useTranslation:()=>({t:key=>key,i18n:{resolvedLanguage:currentLanguage}})};
@@ -491,10 +512,12 @@ console.log('PASS installed dialog identities: registry, eight official componen
   const cardIds=()=>recommendedCards().map(button=>catalog.mcpBrandId(button.findByType('i').props['data-icon']));
   const expectedPresetIds=()=>[...catalog.mcpRecommendationOrder].filter(id=>id!=='lark-cli'&&!officialCatalog.some(item=>item.id===id)&&presetVisible(id));
   assert.equal(new Set(cardIds()).size, cardIds().length, 'each recommendation appears once');
+  assert.ok(cardIds().includes('product-hunt'),'Product Hunt appears in English recommendations');
   assert.deepEqual(cardIds(),expectedPresetIds(),'English recommendations omit Chinese apps and keep the curated order');
   assert.equal(section('recommended').findAllByType('span').some(span=>span.children.join('').includes('mcpConnectors.officialGuide')),false,'recommendations never expose guide-only actions');
   assert.ok(recommendedCards().every(button=>!/[\u3400-\u9fff]/.test(button.findAllByType('small')[0].children.join(''))),'every English description is English');
   currentLanguage='zh-CN';await Renderer.act(async()=>rendered.update(React.createElement(page.default)));
+  assert.ok(cardIds().includes('product-hunt'),'Product Hunt appears in Chinese recommendations');
   assert.deepEqual(cardIds(),expectedPresetIds(),'changing to Chinese adds the local recommendations in the same order');
   assert.ok(recommendedCards().every(button=>/[\u3400-\u9fff]/.test(button.findAllByType('small')[0].children.join(''))),'every card switches to Chinese on the existing page');
   assert.equal(JSON.stringify(rendered.toJSON()).includes('English-only registry sentinel'),false,'English-only remote metadata must not leak into curated summaries');

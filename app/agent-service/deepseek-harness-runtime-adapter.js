@@ -53,7 +53,7 @@ class DeepSeekHarnessRuntimeHandle {
   get registeredSecrets() {
     return Array.isArray(this.host.registeredSecrets) ? [...this.host.registeredSecrets] : [];
   }
-  authenticationState() { return this.host.authenticationState(); }
+  authenticationState(input) { return this.host.authenticationState(input); }
   accountQuotaRead() { return this.host.accountQuotaRead(); }
   generateModelOnly(input) { return this.host.generateModelOnly(input); }
   resolveModelOnly(input) { return this.host.resolveModelOnly(input); }

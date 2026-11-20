@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
-import { bundledBridgeVersions, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
+import { bundledBridgeVersions, connectorTelemetryStub, loadConnectorDetails } from './fixtures/connector-details-ui.mjs';
 
 const require = createRequire(new URL('../app/manage-ui/package.json', import.meta.url));
 const React = require('react'), Renderer = require('react-test-renderer'), ts = require('typescript');
@@ -64,6 +64,7 @@ async function fixture({ language = 'zh-CN', target = { registryName }, initialS
   }
   const common = {
     'react-i18next': { useTranslation: () => ({ t, i18n: { resolvedLanguage: language } }) },
+    '../lib/productTelemetry': connectorTelemetryStub,
     '../api/mcpConnectors': api, '../lib/mcpConnectorUi': helpers, '../lib/mcpRecommendationCatalog': catalog,
     '../components/Modal': { __esModule: true, default: Modal }, './Modal': { __esModule: true, default: Modal },
     '../components/ConnectorDetails': loadConnectorDetails(t), '../components/ui': { useConfirm: () => async () => false },

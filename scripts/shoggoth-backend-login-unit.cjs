@@ -161,6 +161,10 @@ test("Settings offers each default runtime its own sign-in, and a switch for a n
     [OPENCODE]: ["providers", { id: "opencode", enabled: true }],
     [GROK]: ["external", { id: "grok-build", enabled: false }],
   });
-  assert.deepEqual(f.calls.map((call) => call.params.profileId).sort(), ["profile-codex", "profile-opencode"],
-    "a switched-off CLI is not probed");
+  const authReads = f.calls.filter(call => call.method === "profile.auth.read");
+  assert.deepEqual(authReads.map(call => call.params).sort((a, b) => a.profileId.localeCompare(b.profileId)), [
+    { profileId: "profile-codex", includeQuotaScope: true },
+    { profileId: "profile-opencode" },
+  ]);
+  assert.equal(f.calls.some(call => call.params.profileId === "profile-grok-build"), false, "a switched-off CLI is not probed");
 });
