@@ -145,12 +145,8 @@
     background-color var(--ui-motion-state) ease;
 }
 
-.num:hover:not(:disabled) {
+.num:is(:hover, :focus-visible):not(:disabled) {
   background: var(--ui-surface-2);
-}
-
-.num:focus-visible {
-  border-color: var(--ui-focus);
 }
 
 .range {
@@ -290,16 +286,6 @@
 .presetDel:hover:not(:disabled) {
   color: var(--ui-error);
   background: color-mix(in srgb, var(--ui-error) 10%, var(--ui-surface-1));
-}
-
-.saveBtn:focus-visible,
-.resetBtn:focus-visible,
-.presetLoad:focus-visible,
-.presetDel:focus-visible,
-.num:focus-visible,
-.range:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
 }
 
 .hint {

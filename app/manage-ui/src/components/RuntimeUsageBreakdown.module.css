@@ -13,5 +13,4 @@
 .agentTotals strong { font-variant-numeric: tabular-nums; font-weight: 500; }
 .panel { border: 1px solid var(--border); border-radius: 16px; padding: 16px 20px; margin: 0 0 20px; background: var(--bg-card); }
 .summary { font-size: 13px; cursor: pointer; }
-.summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .panel[open] .summary { margin-bottom: 16px; }

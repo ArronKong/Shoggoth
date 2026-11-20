@@ -203,7 +203,6 @@
 }
 
 .toastAction:hover { background: color-mix(in srgb, currentColor 26%, transparent); }
-.toastAction:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
 .toastPositioner .info .toastAction {
   background: #000000;
@@ -211,7 +210,6 @@
 }
 
 .toastPositioner .info .toastAction:hover { background: var(--toast-ink); }
-.toastPositioner .info .toastAction:focus-visible { outline-color: var(--toast-ink); }
 
 /* 减少动态效果时保留 modal 的居中几何，并清除 toast 的位移状态。 */
 @media (prefers-reduced-motion: reduce) {

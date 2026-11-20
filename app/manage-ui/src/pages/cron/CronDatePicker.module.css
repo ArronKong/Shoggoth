@@ -43,10 +43,6 @@
 .navigation .toggleMonth { width: 32px; padding: 0; }
 .footer .action { width: auto; padding-inline: 12px; }
 .popup button:disabled { cursor: default; opacity: .4; }
-.popup button:focus-visible, .toggle:focus-visible {
-  outline: 2px solid light-dark(#707070, #858585);
-  outline-offset: -2px;
-}
 
 .calendar {
   width: 100%;

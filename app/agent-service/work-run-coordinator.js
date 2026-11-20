@@ -2944,7 +2944,7 @@ class WorkRunCoordinator {
       method: "shoggoth/pluginTool/requestApproval", run, runId: run.id, context, assignment,
       requestContext: { signal: input.signal },
       approvalTimeoutMs: this.approvalTimeoutMs,
-      params: { toolName: ["hook", "workspace", "device"].includes(input.purpose) ? input.toolName
+      params: { toolName: ["hook", "workspace", "device", "connector"].includes(input.purpose) ? input.toolName
         : `插件工具 · ${input.toolName}`, toolInput: structuredClone(input.arguments),
         ...(input.authorizationIdentity ? { authorizationIdentity: input.authorizationIdentity } : {}),
         // Existing approval cards render this preformatted field in full;
@@ -2954,6 +2954,8 @@ class WorkRunCoordinator {
           ? "工作区命令请求扩大访问范围。仅允许以下最终参数执行一次。"
           : input.purpose === "device"
           ? `${input.packageName}：${String(input.reason || "请批准本次设备操作。").slice(0, 1024)}`
+          : input.purpose === "connector"
+          ? `${input.packageName} 请求写入。仅允许以下最终参数执行一次。`
           : input.purpose === "hook"
           ? `持续规则要求确认以下最终参数：${String(input.reason || "执行前确认").slice(0, 1024)}`
           : `${input.packageName} 请求调用插件工具 ${input.toolName}。仅允许以下参数执行一次。${input.reason ? " 持续规则：" + String(input.reason).slice(0, 1024) : ""}`,
@@ -5557,7 +5559,9 @@ class WorkRunCoordinator {
               terminalPayload.failure = content.failure;
               payload.failure = savedFailure;
             }
-            if (validResponseMetadata(content.responseMetadata)) responseMetadata = content.responseMetadata;
+            // The original terminal may predate its usage records. Replaying
+            // it must preserve the absence of metadata as well as its value.
+            responseMetadata = validResponseMetadata(content.responseMetadata) ? content.responseMetadata : null;
             contextExcluded = saved.contextExcluded;
           }
         }

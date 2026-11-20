@@ -41,7 +41,6 @@
 .inspector > summary::-webkit-details-marker { display: none; }
 .inspector > summary::after { content: ""; flex: 0 0 auto; width: 6px; height: 6px; margin: -3px 3px 0 0; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); }
 .inspector[open] > summary::after { margin-top: 3px; transform: rotate(225deg); }
-.inspector > summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; border-radius: 6px; }
 .inspectorBody { display: flex; flex-direction: column; gap: 20px; padding: 4px 0 20px; color: var(--ui-text-2); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .inspectorBody > details > summary { cursor: pointer; padding: 4px 0; }
 .inspectorBody > details > div { margin-top: 12px; }

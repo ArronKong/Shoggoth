@@ -56,10 +56,6 @@
   opacity: 1;
 }
 
-.timeline :global([data-chat-activity-preview]):focus-visible {
-  outline-offset: -2px;
-}
-
 @media (prefers-reduced-motion: reduce) {
   .bubble[data-live-activity-bubble], .indicator, .timeline {
     transition: none;

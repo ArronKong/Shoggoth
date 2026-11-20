@@ -179,13 +179,9 @@
   inset: -4px;
 }
 .chat-aside__search svg { width: 20px; height: 20px; }
-.chat-aside__search:hover {
+.chat-aside__search:is(:hover, :focus-visible) {
   background: rgba(0, 0, 0, 0.05);
   color: var(--chat-text);
-}
-.chat-aside__search:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-focus);
 }
 .chat-aside__search:active { transform: scale(0.96); }
 .chat-aside__count {
@@ -215,10 +211,6 @@
   background: transparent;
   color: #000;
   transition: border-color 140ms ease, box-shadow 140ms ease;
-}
-.chat-global-search__field:focus-within {
-  border-color: #000;
-  box-shadow: none;
 }
 .chat-global-search__field span {
   display: inline-flex;
@@ -277,12 +269,8 @@
   color: var(--ui-text-1);
   cursor: pointer;
 }
-.chat-global-search__sentinel button:hover {
+.chat-global-search__sentinel button:is(:hover, :focus-visible) {
   background: color-mix(in srgb, var(--ui-text-1) 6%, var(--ui-surface-2));
-}
-.chat-global-search__sentinel button:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
 }
 .chat-global-search__item {
   display: grid;
@@ -303,8 +291,6 @@
 }
 .chat-global-search__item:focus-visible {
   background: var(--ui-surface-2);
-  outline: 2px solid var(--ui-focus);
-  outline-offset: -2px;
 }
 .chat-global-search__item:active {
   background: color-mix(in srgb, var(--ui-text-1) 8%, var(--ui-surface-2));
@@ -539,10 +525,6 @@
   background: transparent;
   color: var(--muted-strong);
 }
-.chat-archive-bar.is-retry:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
-}
 .chat-reset-divider {
   display: flex;
   align-items: center;
@@ -675,11 +657,7 @@
   cursor: pointer;
   transition: background 140ms ease;
 }
-.chat-header__avatar-trigger:hover { background: var(--bg-hover); }
-.chat-header__avatar-trigger:focus-visible,
-.chat-header__name:focus-visible,
-.chat-headbtn:focus-visible { outline: 2px solid var(--muted); outline-offset: 3px; }
-.chat-header .chat-header__avatar-trigger:focus-visible { background: var(--bg-hover); }
+.chat-header__avatar-trigger:is(:hover, :focus-visible) { background: var(--bg-hover); }
 
 .chat-header__avatar {
   flex: 0 0 auto;
@@ -773,10 +751,6 @@
   color: var(--accent-fg);
   background: var(--chat-text);
 }
-.chat-board-modes button:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 1px;
-}
 .chat-headbtn {
   display: inline-flex;
   align-items: center;
@@ -800,7 +774,6 @@
 .chat-header .chat-header__tools .chat-headbtn:focus-visible {
   background: var(--bg-hover);
   color: var(--chat-text);
-  outline-color: var(--muted);
 }
 .chat-artifacts-panel { min-width: 0; text-align: left; }
 .chat-artifacts-head { padding-bottom: 24px; }
@@ -838,7 +811,6 @@
 }
 .chat-artifact-copy svg { width: 14px; height: 14px; }
 .chat-artifact-copy:hover { background: var(--bg-hover); color: var(--chat-text); }
-.chat-artifact-copy:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 @media (hover: hover) and (pointer: fine) {
   .chat-artifact-row:not(:hover):not(:focus-within) .chat-artifact-copy { opacity: 0; }
 }
@@ -1017,13 +989,6 @@
   -webkit-mask-repeat: no-repeat;
           mask-repeat: no-repeat;
 }
-.chat-thread:focus { outline: none; }
-
-.chat-thread[data-thread-keyboard-focus]:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: -2px;
-}
-
 .chat-thread__inner {
   display: flex;
   flex-direction: column;
@@ -2158,7 +2123,6 @@
   cursor: pointer;
 }
 .chat-continuation-action:hover { background: var(--bg-hover); }
-.chat-continuation-action:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 
 /* collapsed system-injected prompt row (cron/heartbeat envelopes) */
 .chat-sysline {

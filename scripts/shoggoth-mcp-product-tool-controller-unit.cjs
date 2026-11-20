@@ -989,6 +989,34 @@ test("skill_catalog 只列当前 Profile 合格项，skill_read 按冻结 hash �
   assert.equal(first.nextCursor, 2);
   assert.equal(first.hasMore, true);
   assert.equal(calls.find(([kind]) => kind === "read")[1].recordUsage, true);
+
+  // Reproduce the pagination loop used by Codex in the Feishu turn. Bound
+  // the test so a non-null terminal cursor fails promptly.
+  const readArgs = { name: skill.name, contentHash: skill.contentHash, maxBytes: 30_000 };
+  const pages = [];
+  let cursor = 0;
+  do {
+    const page = await fixture.controller.handle("skill_read", { ...readArgs, cursor },
+      authorityFor(String(pages.length + 1)));
+    pages.push(page.content);
+    cursor = page.nextCursor;
+  } while (cursor && pages.length < 4);
+  assert.deepEqual(pages, ["A😀BC"]);
+  assert.equal(cursor, null);
+  assert.equal(catalog.nextCursor, null);
+  assert.equal(catalog.hasMore, false);
+
+  const remainder = await fixture.controller.handle("skill_read", {
+    ...readArgs, cursor: first.nextCursor,
+  }, authorityFor("5"));
+  assert.equal(remainder.content, "BC");
+  assert.equal(remainder.nextCursor, null);
+  assert.equal(remainder.hasMore, false);
+  const legacyEnd = await fixture.controller.handle("skill_read", { ...readArgs, cursor: 4 }, authorityFor("6"));
+  assert.equal(legacyEnd.content, "");
+  assert.equal(legacyEnd.nextCursor, null);
+  assert.equal(legacyEnd.hasMore, false);
+
   await expectCode(() => fixture.controller.handle("skill_read", {
     name: "careful-review", contentHash: "c".repeat(64), cursor: 0, maxBytes: 32,
   }, authorityFor("f")), "MCP_TOOL_NOT_FOUND");
@@ -1026,6 +1054,7 @@ test("skill_file_read 只读已启用 Skill 的冻结附属文本，按 UTF-8 �
   const last = await fixture.controller.handle("skill_file_read", { ...input, cursor: 2 },
     authorityFor("2"));
   assert.equal(last.content, "B");
+  assert.equal(last.nextCursor, null);
   assert.equal(last.hasMore, false);
   assert.deepEqual(calls.map(call => call.relativePath),
     ["references/guide.md", "references/guide.md"]);

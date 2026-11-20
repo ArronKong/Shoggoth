@@ -28,7 +28,6 @@
 .option img { display: block; width: 40px; height: 40px; }
 .option span { color: var(--ui-text-1); font-size: 11px; line-height: 16px; text-align: center; overflow-wrap: anywhere; }
 .option:has(input:checked) { border-color: var(--ui-text-1); background: var(--ui-surface-1); }
-.option:has(input:focus-visible) { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .option:hover:has(input:not(:disabled)) { border-color: var(--ui-text-1); }
 .options:disabled .option { opacity: .5; cursor: not-allowed; }
 

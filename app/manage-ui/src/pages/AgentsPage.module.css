@@ -126,11 +126,6 @@
   opacity: 0;
 }
 
-.card:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-focus);
-}
-
 /* 卡片正面（首页与 Overview 左卡共用）：320 方图 + 100 名牌 */
 .cardFace {
   display: flex;
@@ -241,11 +236,6 @@
   transform: translateY(-4px);
   border-color: light-dark(rgba(0, 0, 0, 0.35), rgba(255, 255, 255, 0.4));
   color: light-dark(#000000, #ffffff);
-}
-
-.cardNew:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-focus);
 }
 
 .cardNewPlus {
@@ -725,14 +715,7 @@
 }
 
 .ovInput:focus {
-  outline: none;
-  border-color: var(--ui-text-1);
-}
-
-/* 名称已有描边焦点态，覆盖管理页通用的蓝色外圈。 */
-.root:global(.management-page) .ovInput:focus-visible {
-  outline: none;
-  box-shadow: none;
+  background: light-dark(rgba(0, 0, 0, 0.025), rgba(255, 255, 255, 0.04));
 }
 
 .ovInput[aria-invalid="true"] {
@@ -1159,13 +1142,6 @@
   outline: none;
 }
 
-/* 焦点环用黑色描边（深色模式白色），压过 manage-skin.css 的通配蓝色焦点环 (0,3,0) */
-:global(.management-page) .suMain .suEditor:focus-visible {
-  box-shadow:
-    0 0 0 2px var(--ui-surface-1),
-    0 0 0 4px light-dark(#000000, #ffffff);
-}
-
 /* ---------- Cron / Inspiration / Files 列表 ---------- */
 
 .tabPane {
@@ -1352,8 +1328,7 @@
 }
 
 .harnessEditor:focus {
-  border-color: var(--ui-text-1);
-  outline: none;
+  background-color: var(--ui-surface-2);
 }
 
 .harnessCard .harnessActions {

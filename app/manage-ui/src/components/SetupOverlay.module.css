@@ -210,7 +210,6 @@
   transition: background-color 150ms ease;
 }
 .backTitle:hover .backIcon { background: rgba(0, 0, 0, 0.06); }
-.backTitle:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .headline {
   /* 中文一行；英文更长时折行，不压到右侧配图 */
   max-width: 360px;
@@ -286,9 +285,6 @@
   background: #111111;
   color: #ffffff;
 }
-/* 不用浏览器默认焦点框（随系统强调色，会是黄色）；键盘聚焦时给一圈灰色 */
-.chip:focus { outline: none; }
-.chip:focus-visible { outline: 2px solid color-mix(in srgb, var(--ui-text-1) 35%, transparent); outline-offset: 2px; }
 .chipDefault {
   font-size: 10px;
   opacity: 0.72;

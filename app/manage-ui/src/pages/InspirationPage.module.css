@@ -147,7 +147,6 @@
 .error { color: var(--ui-error); font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
 .loadMore { min-height: 1px; text-align: center; }
 .loadMore button { margin-left: 12px; }
-.card button:focus-visible, .link:focus-visible, .sessionButton:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) {
   .card, .cardActions, .cardDate, .status { transition: none; }
   .card:hover { transform: none; }

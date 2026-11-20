@@ -10,9 +10,11 @@ const { RETIRED_PLUGIN_TOOLS } = require("../core/legacy-plugin-dependency");
 const { CONNECTOR_PUBLIC_MESSAGES } = require("../core/connector-errors");
 const { SECRET_MESSAGES: SECRET_PUBLIC_MESSAGES } = require("../core/chat-secret-contract");
 const { OFFICIAL_SKILL_PUBLIC_MESSAGES } = require("../core/official-skill-connector-dto");
+const { LARK_CLI_PUBLIC_MESSAGES } = require("../core/lark-cli-contract");
 const { TOOL_DEFINITIONS: APPLE_DEVICE_TOOL_DEFINITIONS, isAppleDeviceTool,
   validateAppleDeviceArguments } = require("./apple-device-tools");
 const { APPLE_DEVICE_PUBLIC_MESSAGES } = require("../core/apple-device-contract");
+const { LARK_AGENT_SERVER_ID, LARK_AGENT_TOOLS, larkAgentTool, larkAgentWrite } = require("./lark-cli-agent-tools");
 
 const { WEB_PREFERENCE_TOOL_NAMES, WEB_PREFERENCE_TOOL_DEFINITIONS, validateWebPreferenceArguments } = require("./web-preference-tools");
 const { PUBLIC_MESSAGES: WEB_SETTINGS_PUBLIC_MESSAGES } = require("./web-settings-protocol");
@@ -134,6 +136,11 @@ const REVOCABLE_READ_TOOL_NAMES = new Set([
   ...MEMORY_READ_TOOL_NAMES, ...CONVERSATION_READ_TOOL_NAMES, "get_ui_state",
 ]);
 const ACTIVE_RUN_STATUSES = new Set(["starting", "running", "waiting_approval", "waiting_input"]);
+const WORKSPACE_PRE_DISPATCH_ERRORS = new Set([
+  "WORKSPACE_EXECUTION_SCOPE_INVALID", "WORKSPACE_EXECUTION_APPROVAL_REQUIRED",
+  "WORKSPACE_EXECUTION_APPROVAL_DENIED", "WORKSPACE_EXECUTION_UNAVAILABLE",
+  "WORKSPACE_EXECUTION_CLEANUP_FAILED", "HOST_CAPABILITY_REVOKED", "MCP_TOOL_CAPACITY",
+]);
 const WORK_RUN_STATUSES = new Set([
   "queued", "starting", "running", "waiting_approval", "waiting_input",
   "completed", "failed", "canceled", "interrupted", "skipped",
@@ -182,6 +189,7 @@ const PUBLIC_MESSAGES = Object.freeze({
   ...CONNECTOR_PUBLIC_MESSAGES,
   ...SECRET_PUBLIC_MESSAGES,
   ...OFFICIAL_SKILL_PUBLIC_MESSAGES,
+  ...LARK_CLI_PUBLIC_MESSAGES,
   WORKSPACE_EXECUTION_UNAVAILABLE: "工作区执行沙箱不可用，本次没有扩大执行权限",
   WORKSPACE_EXECUTION_SCOPE_INVALID: "工作区命令不属于当前已授权的执行范围",
   WORKSPACE_EXECUTION_TIMEOUT: "工作区命令已超时停止；请检查部分执行结果，不要自动重试",
@@ -2584,6 +2592,8 @@ class McpProductToolController {
     this.secretExecution = options.secretExecution || null;
     this.getSecretScope = options.getSecretScope || null;
     this.mcpConnectorController = options.mcpConnectorController || null;
+    this.larkCliConnectorController = options.larkCliConnectorController || null;
+    this.requestLarkWriteApproval = options.requestLarkWriteApproval || null;
     this.appleDeviceController = options.appleDeviceController || null;
     this.getAppleDeviceCaller = options.getAppleDeviceCaller || null;
     this.resolveMcpSubject = options.resolveMcpSubject || null;
@@ -2704,7 +2714,10 @@ class McpProductToolController {
     // Connector access is checked before the callId cache, so revocation also fences an exact replay.
     if (name.startsWith("mcp_server_") && this.mcpConnectorController) {
       const subject = this.#mcpSubject(authority, scope);
-      if (["mcp_server_tools", "mcp_server_call"].includes(name)) this.mcpConnectorController.assertAvailable(rawArgs.serverId, subject.profileId, subject.runId);
+      if (["mcp_server_tools", "mcp_server_call"].includes(name)) {
+        if (this.#localLarkConnector(rawArgs.serverId, authority, scope)) this.larkCliConnectorController.agentInstallation();
+        else this.mcpConnectorController.assertAvailable(rawArgs.serverId, subject.profileId, subject.runId);
+      }
       if (name === "mcp_server_remove") this.mcpConnectorController.assertAvailable(rawArgs.id, subject.profileId, subject.runId);
     }
     try {
@@ -2942,6 +2955,11 @@ class McpProductToolController {
     if (subject?.profileId && typeof subject.profileId === "string") return subject;
     if (authority.federationClient) throw toolError("MCP_CONNECTOR_ACCESS_DENIED");
     return {profileId:authority.profileId,runId:scope?.runId};
+  }
+
+  #localLarkConnector(id, authority, scope) {
+    return !!this.larkCliConnectorController && !authority.federationClient && !!scope?.runId
+      && id === LARK_AGENT_SERVER_ID && !this.nativeMcpStore.get(id);
   }
 
   #withConversationToolRead(profileId, read) {
@@ -3599,15 +3617,26 @@ class McpProductToolController {
         const contract = this.getExecutionContract(run.id);
         const assertCurrent = () => { scope.assertCurrent(); this.#workspaceExecutionBinding(authority); };
         const secretScope = this.secretExecution ? await this.getSecretScope(authority, scope) : null;
+        let dispatched = false;
         const invoke = () => this.workspaceExecutionService.execute({ contract, run, args,
-          scope: { ...scope, assertCurrent }, ...(this.secretExecution && args.secretEnv ? {
+          scope: { ...scope, assertCurrent }, onDispatch: () => { dispatched = true; },
+          ...(this.secretExecution && args.secretEnv ? {
             resolveSecretEnvironment: () => this.secretExecution.resolveValues(secretScope, args.secretEnv, assertCurrent),
           } : {}) });
         execution = Promise.resolve().then(async () => {
           if (!this.secretExecution) return invoke();
           if (args.secretEnv) this.secretExecution.resolveValues(secretScope, args.secretEnv, assertCurrent);
           const receipt = await this.secretExecution.execute({ scope: secretScope, callId: authority.callId,
-            tool: name, args, resolve: false, assertCurrent, invoke });
+            tool: name, args, resolve: false, assertCurrent, invoke: async () => {
+              try { return await invoke(); }
+              catch (error) {
+                if (dispatched || !WORKSPACE_PRE_DISPATCH_ERRORS.has(error?.code)) throw error;
+                return { operationStatus: "not_started", errorCode: error.code };
+              }
+            } });
+          if (receipt.result.operationStatus === "not_started" && WORKSPACE_PRE_DISPATCH_ERRORS.has(receipt.result.errorCode)) {
+            throw toolError(receipt.result.errorCode);
+          }
           return { ...receipt.result, receiptId: receipt.receiptId, operationStatus: "completed", retryAllowed: false };
         });
         this.workspaceExecutionCalls.set(call.id, execution);
@@ -4047,12 +4076,19 @@ class McpProductToolController {
       if (!this.nativeMcpStore || !this.nativeMcpClientManager) {
         throw toolError("MCP_TOOL_UNAVAILABLE");
       }
-      const subject = this.#mcpSubject(authority, this.executionContext.getStore());
-      const assertAvailable = id => this.mcpConnectorController?.assertAvailable(id, subject.profileId, subject.runId);
+      const scope = this.executionContext.getStore();
+      const subject = this.#mcpSubject(authority, scope);
+      const localLark = this.#localLarkConnector(args.serverId, authority, scope);
+      const assertAvailable = id => localLark ? this.larkCliConnectorController.agentInstallation()
+        : this.mcpConnectorController?.assertAvailable(id, subject.profileId, subject.runId);
+      const listServerTools = () => localLark ? LARK_AGENT_TOOLS : this.nativeMcpClientManager.listTools(args.serverId);
       if (name === "mcp_server_list") {
+        const lark = this.#localLarkConnector(LARK_AGENT_SERVER_ID, authority, scope)
+          ? await this.larkCliConnectorController.agentConnector() : null;
         const native = this.nativeMcpStore.list();
         const servers = this.mcpConnectorController ? this.mcpConnectorController.available(subject.profileId, subject.runId) : native.servers;
-        return safeJsonClone({ revision: native.revision, servers: servers.map(server => ({ id: server.id, name: server.name, enabled: server.enabled,
+        return safeJsonClone({ revision: native.revision, ...(lark ? { localConnectors: [lark] } : {}),
+          servers: servers.map(server => ({ id: server.id, name: server.name, enabled: server.enabled,
           ...(server.status === undefined ? {} : {status: server.status}), ...(server.lastCheck === undefined ? {} : {lastCheck: server.lastCheck}),
           ...(server.createdAt === undefined ? {} : {createdAt: server.createdAt}), ...(server.updatedAt === undefined ? {} : {updatedAt: server.updatedAt}) })) });
       }
@@ -4073,9 +4109,7 @@ class McpProductToolController {
       }
       if (name === "mcp_server_tools") {
         assertAvailable(args.serverId);
-        const tools = assertValidDownstreamMcpTools(
-          await this.nativeMcpClientManager.listTools(args.serverId),
-        );
+        const tools = assertValidDownstreamMcpTools(await listServerTools());
         assertAvailable(args.serverId);
         const items = tools.slice(args.cursor, args.cursor + args.limit).map((tool) => ({
           name: tool.name,
@@ -4087,17 +4121,21 @@ class McpProductToolController {
       }
       if (name === "mcp_server_call") {
         this.#assertSecretSafe(JSON.stringify(args.arguments));
-        const scope = this.executionContext.getStore();
         const run = scope?.mcpRun || (scope?.runId ? this.workDispatcher.getRun(scope.runId) : null);
         assertAvailable(args.serverId);
-        const signature = JSON.stringify(this.nativeMcpStore.get(args.serverId));
+        const serverRevision = () => localLark ? this.larkCliConnectorController.agentRevision()
+          : JSON.stringify(this.nativeMcpStore.get(args.serverId));
+        const signature = serverRevision();
         const nativeScope = scope ? { ...scope, assertCurrent: () => {
           scope.assertCurrent();
           assertAvailable(args.serverId);
-          if (signature !== JSON.stringify(this.nativeMcpStore.get(args.serverId))) throw serviceError("HOOK_TOOL_REVOKED", "MCP 工具所属配置已变化");
+          if ((localLark && !this.#localLarkConnector(args.serverId, authority, scope)) || signature !== serverRevision()) {
+            throw serviceError("HOOK_TOOL_REVOKED", "MCP 工具所属配置已变化");
+          }
         } } : null;
-        const contract = this.secretExecution || this.hookToolExecution && run && (!authority.federationClient || scope?.mcpRun)
-          ? (await this.nativeMcpClientManager.listTools(args.serverId)).find(tool => tool.name === args.toolName) : null;
+        const contract = localLark ? larkAgentTool(args.toolName, args.arguments)
+          : this.secretExecution || this.hookToolExecution && run && (!authority.federationClient || scope?.mcpRun)
+            ? (await listServerTools()).find(tool => tool.name === args.toolName) : null;
         nativeScope?.assertCurrent();
         let completedReceipt = null;
         let resultSecrets = [];
@@ -4105,8 +4143,20 @@ class McpProductToolController {
           if (prepared?.changed && !prepared.requiresApproval && authority.confirmation === true && !scope?.mcpRun) await this.hookToolExecution.approve(prepared.token);
           if (prepared) this.hookToolExecution.assertCurrent(prepared.token);
           const assertCurrent = () => { assertAvailable(args.serverId); nativeScope?.assertCurrent(); if (prepared) this.hookToolExecution.assertCurrent(prepared.token); };
+          if (localLark) {
+            larkAgentTool(args.toolName, callArgs);
+            if (larkAgentWrite(args.toolName)) {
+              if (!this.requestLarkWriteApproval || !run) throw toolError("MCP_TOOL_CONFIRMATION_REQUIRED");
+              const decision = await this.requestLarkWriteApproval({ profileId: authority.profileId, runId: run.id,
+                toolName: args.toolName, arguments: callArgs, signal: scope?.signal, assertCurrent });
+              assertCurrent();
+              if (!decision?.approved) throw toolError("LARK_CLI_ACCESS_DENIED");
+              this.permissionEngine.authorize({ name, profileId: authority.profileId, confirmed: true });
+            }
+          }
           const dispatch = actualArgs => {
             if (this.secretExecution && !validateHookToolArguments(contract?.inputSchema, actualArgs)) throw toolError("MCP_TOOL_INVALID_ARGUMENTS");
+            if (localLark) return this.larkCliConnectorController.callAgentTool(args.toolName, actualArgs, { signal: scope?.signal, assertCurrent });
             return this.nativeMcpClientManager.callTool(args.serverId, args.toolName, safeJsonClone(actualArgs),
             { signal: scope?.signal,
               localResult: !!this.secretExecution,
@@ -4118,7 +4168,7 @@ class McpProductToolController {
           if (!this.secretExecution) return dispatch(callArgs);
           completedReceipt = await this.secretExecution.execute({ scope: await this.getSecretScope(authority, scope),
             callId: authority.callId, tool: `mcp:${args.serverId}:${args.toolName}`, args: callArgs, assertCurrent, invoke: dispatch,
-            resultSecrets: () => resultSecrets });
+            resolve: !localLark, resultSecrets: () => resultSecrets });
           resultSecrets = [];
           return completedReceipt.result;
         };
@@ -4205,13 +4255,14 @@ class McpProductToolController {
           assessment: skill.assessment || "declared_dependencies_only",
         }));
         const nextCursor = args.cursor + items.length;
+        const hasMore = nextCursor < matches.length;
         return {
           registryRevision: catalog.registryRevision,
           ...(Number.isSafeInteger(catalog.registryVersion) ? { registryVersion: catalog.registryVersion } : {}),
           profileRevision: catalog.profileRevision,
           items,
-          nextCursor,
-          hasMore: nextCursor < matches.length,
+          nextCursor: hasMore ? nextCursor : null,
+          hasMore,
         };
       }
       const selected = catalog.items.find((skill) => (
@@ -4240,7 +4291,8 @@ class McpProductToolController {
         bytes += size;
         nextCursor += 1;
       }
-      if (content.length === 0 && nextCursor < points.length) {
+      const hasMore = nextCursor < points.length;
+      if (content.length === 0 && hasMore) {
         throw toolError("MCP_TOOL_INVALID_ARGUMENTS");
       }
       return {
@@ -4252,8 +4304,8 @@ class McpProductToolController {
           relativePath: skill.relativePath, fileHash: skill.fileHash,
         } : {}),
         content,
-        nextCursor,
-        hasMore: nextCursor < points.length,
+        nextCursor: hasMore ? nextCursor : null,
+        hasMore,
       };
     }
     if (name === "runtime_context_get") {

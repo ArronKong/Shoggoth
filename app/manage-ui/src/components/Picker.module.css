@@ -106,11 +106,6 @@
 .agentOption[aria-checked="false"]:hover:not(:disabled) { color: inherit; }
 .agentOption[aria-checked="true"]:hover:not(:disabled) { color: light-dark(#fff, #000); }
 .agentOption:disabled { opacity: var(--picker-disabled-opacity, .35); cursor: not-allowed; }
-.agentOption:focus-visible,
-.backendTab:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: -2px;
-}
 
 .optionDetail {
   max-width: 50%;

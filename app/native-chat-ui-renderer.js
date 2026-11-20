@@ -7,6 +7,22 @@ const WRAPPER_CSP = CHILD_CSP.replace("frame-src 'none'", "frame-src 'self'");
 const PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=(), display-capture=(), clipboard-read=(), clipboard-write=(), payment=(), usb=(), serial=(), bluetooth=()";
 const literal = value => JSON.stringify(value).replace(/[<>&\u2028\u2029]/gu, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
+// Apply the desktop focus styling to the controls supplied by the bundled stylesheet.
+const CONTROL_FOCUS_STYLES = `
+:where(:focus-visible),
+.btn:focus-visible,
+.form-check:not(.form-switch) .form-check-input:focus-visible { outline: none; }
+.form-control:focus-visible, .form-select:focus-visible {
+  border-color: var(--input);
+  box-shadow: none;
+}
+.form-switch .form-check-input:focus-visible { box-shadow: none; }
+.form-range:focus-visible::-webkit-slider-thumb {
+  border-color: var(--border);
+  box-shadow: none;
+}
+`;
+
 // This script lives inside the opaque generated document. Its port can only
 // reach the state/lifecycle bridge; it never carries host action authority.
 function installBridgeSdk() {
@@ -160,7 +176,7 @@ function wrapperHtml(html, { title = "Shoggoth", layout, theme = "light", locale
       const doc=new DOMParser().parseFromString(${literal(html)},'text/html');
       const policy=doc.createElement('meta');policy.httpEquiv='Content-Security-Policy';policy.content=${literal(CHILD_CSP)};doc.head.prepend(policy);
       const sdk=doc.createElement('script');sdk.textContent=${literal(bridgeSdk())};doc.head.insertBefore(sdk,policy.nextSibling);
-      const sharedStyle=doc.createElement('style');sharedStyle.textContent=${literal(stylesheet)};doc.head.insertBefore(sharedStyle,sdk.nextSibling);
+      const sharedStyle=doc.createElement('style');sharedStyle.textContent=${literal(stylesheet + CONTROL_FOCUS_STYLES)};doc.head.insertBefore(sharedStyle,sdk.nextSibling);
       const style=doc.createElement('style');style.textContent=':root{--shoggoth-background:#fff;--shoggoth-text:#202124;--shoggoth-muted:#6b7280;--shoggoth-accent:#4775e9;--shoggoth-border:#dfe3e8;font-family:system-ui,sans-serif;color:var(--shoggoth-text);color-scheme:light dark}html[data-theme="dark"]{--shoggoth-background:#17191e;--shoggoth-text:#e8e9ed;--shoggoth-muted:#a4a9b4;--shoggoth-border:#343944}body{background:var(--shoggoth-background)}';doc.head.append(style);
       doc.documentElement.dataset.theme=${literal(theme)};doc.documentElement.lang=${literal(locale)};
       frame.srcdoc='<!doctype html>'+doc.documentElement.outerHTML;

@@ -82,9 +82,9 @@ class LarkCliSetupController {
     if (installed.state !== "installed" || !installed.cliPath) fail("LARK_CLI_NOT_INSTALLED");
     return installed;
   }
-  async _account(executable, signal, verify = false) {
+  async _account(executable, signal, verify = false, timeoutMs = 120_000) {
     const result = await this.run(executable, ["auth", "status", "--json", ...(verify ? ["--verify"] : [])],
-      { env: this.env, cwd: this.paths.homeDir, signal, timeoutMs: 120_000 });
+      { env: this.env, cwd: this.paths.homeDir, signal, timeoutMs });
     if (result.exitCode !== 0) {
       if (outputError(result)?.subtype === "not_configured") return { configured: false, appId: null, brand: null, userName: null, ready: false };
       fail("LARK_CLI_AUTH_STATUS_FAILED");
@@ -94,7 +94,7 @@ class LarkCliSetupController {
     return { configured: true, appId: value.appId, brand: value.brand, userName: cleanText(user.userName),
       ready: user.available && user.verified !== false };
   }
-  async status() {
+  async status({ timeoutMs } = {}) {
     if (this.active) return this._public();
     const installed = this.getInstallation();
     if (installed.state !== "installed") { this.snapshot = empty(); return this._public(); }
@@ -102,7 +102,7 @@ class LarkCliSetupController {
       this.readAbort = new AbortController();
       this.reading = (async () => {
         try {
-          const { ready, ...account } = await this._account(installed.cliPath, this.readAbort.signal);
+          const { ready, ...account } = await this._account(installed.cliPath, this.readAbort.signal, false, timeoutMs);
           this.snapshot = { ...this.snapshot, ...account };
           if (!this.active && ready) this.snapshot = { ...this.snapshot, state: "ready", errorCode: null };
           else if (!this.active && this.snapshot.state === "ready") this.snapshot.state = "idle";

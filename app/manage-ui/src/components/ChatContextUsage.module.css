@@ -3,6 +3,5 @@
 .quality { margin-left: 6px; opacity: .8; }
 .compact { border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 .compact:hover { color: var(--fg); }
-.compact:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
 .compact:disabled { cursor: default; opacity: .45; }
 .warning { width: 100%; color: var(--warning, #a66b16); }

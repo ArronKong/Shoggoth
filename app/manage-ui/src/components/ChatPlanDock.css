@@ -19,7 +19,6 @@
   background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
 .chat-plan-dock__toggle:hover { background: color-mix(in srgb, currentColor 5%, transparent); }
-.chat-plan-dock__toggle:focus-visible { outline: 2px solid var(--accent, #4b78ba); outline-offset: -3px; }
 .chat-plan-dock__dismiss {
   display: grid; place-items: center; flex: none;
   width: 32px; height: 32px; padding: 0; border: 0; border-radius: 50%;
@@ -28,7 +27,6 @@
 .chat-plan-dock__dismiss:hover:not(:disabled) {
   background: color-mix(in srgb, currentColor 5%, transparent); color: var(--plan-muted);
 }
-.chat-plan-dock__dismiss:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
 .chat-plan-dock__dismiss svg { width: 16px; height: 16px; }
 .chat-plan-dock__icon { width: 18px; height: 18px; flex: none; color: var(--plan-muted); }
 .chat-plan-dock__label { flex: none; font-size: 12px; font-weight: 600; }

@@ -18,7 +18,6 @@
 .tool[data-recording] { color: #000; background: color-mix(in srgb, currentColor 10%, transparent); }
 .stopIcon { width: 9px; height: 9px; border-radius: 2px; background: currentColor; }
 .tool:disabled { opacity: .4; cursor: default; }
-.tool:focus-visible, .remove:focus-visible, .attachment a:focus-visible, .filenameButton:focus-visible, .playbackButton:focus-visible, .videoPlay:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 .hint { flex: 1; min-width: 0; padding: 0 8px; font-size: 11px; line-height: 1.5; opacity: .65; }
 .editor[data-inline-edit] .hint:empty { padding: 0; }
 .editor[data-capture] .hint { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -39,7 +38,6 @@
 .visual a { display: block; width: max-content; color: inherit; }
 .visualOpen { display: block; width: max-content; padding: 0; border: 0; border-radius: 8px; background: transparent; color: inherit; line-height: 0; cursor: pointer; }
 .visualOpen:hover:not(:disabled) { background: transparent; color: inherit; }
-.visualOpen:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 .visualImage, .video { display: block; height: 112px; width: auto; max-width: none; object-fit: contain; border-radius: 8px; }
 .visual[data-live] .video { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
 .visual[data-live][data-playing] .video { opacity: 1; }
@@ -59,7 +57,6 @@
 .spectrum canvas[data-active] { opacity: 1; }
 .spectrum:has(canvas[data-active]) > img { visibility: hidden; }
 .spectrum input { position: absolute; inset: -8px 0; width: 100%; height: 32px; opacity: 0; cursor: pointer; margin: 0; padding: 0; }
-.spectrum:focus-within { outline: 1px solid currentColor; outline-offset: 5px; border-radius: 2px; }
 .duration { flex-shrink: 0; min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .attachments[data-compact] .spectrum { max-width: 160px; }
 .playbackError { max-width: 100%; color: var(--ui-danger, #b33b35); font: 11px/20px var(--font-sans, sans-serif); margin: 8px 0; white-space: normal; }
@@ -86,4 +83,3 @@
 .fileRow > svg { flex: none; translate: 0 -1px; }
 .fileRow .filename { margin: 0; flex: 1; min-width: 0; }
 .fileRow:hover { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
-.fileRow:focus-visible { outline: 1px solid var(--ui-focus); outline-offset: 4px; border-radius: 2px; }

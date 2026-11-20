@@ -160,7 +160,7 @@ class WorkspaceExecutionService {
     };
     return { readPaths: (raw.readPaths || []).map(normalize), writePaths: (raw.writePaths || []).map(normalize), network: raw.network === true };
   }
-  async #launch(command, workspace, cwd, timeoutMs, scope, access, resolveSecretEnvironment = null, agentWorkspace = null) {
+  async #launch(command, workspace, cwd, timeoutMs, scope, access, resolveSecretEnvironment = null, agentWorkspace = null, onDispatch = null) {
     scope.assertCurrent(); if (scope.signal?.aborted) fail("HOST_CAPABILITY_REVOKED");
     ensurePrivateDirectoryTree(this.cacheDir, this.paths.trustedRoot || path.dirname(this.cacheDir));
     const control = fs.mkdtempSync(path.join(this.cacheDir, "execution-"));
@@ -237,8 +237,10 @@ class WorkspaceExecutionService {
         try {
           scope.assertCurrent();
           const secretEnv = resolveSecretEnvironment ? resolveSecretEnvironment() : {};
-          child.stdin.end(JSON.stringify({ parentPid: process.pid, command, cwd, timeoutMs, profile,
-            env: { ...env, ...secretEnv }, processOwner, marker, guard }));
+          const input = JSON.stringify({ parentPid: process.pid, command, cwd, timeoutMs, profile,
+            env: { ...env, ...secretEnv }, processOwner, marker, guard });
+          onDispatch?.();
+          child.stdin.end(input);
         } catch { stop("HOST_CAPABILITY_REVOKED"); }
         if (scope.signal?.aborted) abort();
       });
@@ -258,7 +260,7 @@ class WorkspaceExecutionService {
   async verify() {
     if (process.platform !== "darwin" || !fs.existsSync("/usr/bin/sandbox-exec") || !this.processOwnerBytes) return false;
     if (this.verified) return this.verified;
-    this.verified = (async () => {
+    const probe = (async () => {
       await this.#recover();
       ensurePrivateDirectoryTree(this.cacheDir, this.paths.trustedRoot || path.dirname(this.cacheDir));
       const probe = fs.mkdtempSync(path.join(this.cacheDir, "probe-"));
@@ -273,9 +275,16 @@ class WorkspaceExecutionService {
       } catch { return false; }
       finally { fs.rmSync(probe, { recursive: true, force: true }); }
     })();
-    return this.verified;
+    this.verified = probe;
+    let verified = false;
+    try { verified = await probe; return verified; }
+    finally {
+      // A failed capability probe must not poison subsequent commands for the
+      // lifetime of the Service. Probe again without replaying any command.
+      if (!verified && this.verified === probe) this.verified = null;
+    }
   }
-  async execute({ contract, run, args, scope, resolveSecretEnvironment = null }) {
+  async execute({ contract, run, args, scope, resolveSecretEnvironment = null, onDispatch = null }) {
     if (!workspaceAutoExecution(contract) || contract.runId !== run?.id || contract.profileId !== run.profileId
       || contract.workspace !== run.workspace || typeof scope?.assertCurrent !== "function"
       || scope.runId !== run.id || !validWorkspaceExecutionArguments(args)) fail("WORKSPACE_EXECUTION_SCOPE_INVALID");
@@ -299,12 +308,12 @@ class WorkspaceExecutionService {
       try { assertAuthority(); } catch { controller.abort(); }
     }, 100);
     monitor.unref?.();
-    const execution = this.#execute({ contract, run, args, scope: current, resolveSecretEnvironment });
+    const execution = this.#execute({ contract, run, args, scope: current, resolveSecretEnvironment, onDispatch });
     this.pending.add(execution);
     try { return await execution; }
     finally { clearInterval(monitor); this.callControllers.delete(controller); this.pending.delete(execution); release(); }
   }
-  async #execute({ contract, run, args, scope, resolveSecretEnvironment }) {
+  async #execute({ contract, run, args, scope, resolveSecretEnvironment, onDispatch }) {
     const workspace = this.#workspace(contract.workspace);
     let agentWorkspace = null;
     if (contract.agentWorkspace !== undefined) {
@@ -336,7 +345,8 @@ class WorkspaceExecutionService {
     } catch (error) { if (error?.code === "HOST_CAPABILITY_REVOKED") throw error; fail("WORKSPACE_EXECUTION_SCOPE_INVALID"); }
     if (!(await this.verify())) fail("WORKSPACE_EXECUTION_UNAVAILABLE");
     scope.assertCurrent();
-    return this.#launch(args.command, workspace, cwd, executionTimeoutMs(args.timeoutMs), scope, access, resolveSecretEnvironment, agentWorkspace);
+    return this.#launch(args.command, workspace, cwd, executionTimeoutMs(args.timeoutMs), scope, access,
+      resolveSecretEnvironment, agentWorkspace, onDispatch);
   }
   async close() {
     for (const controller of this.callControllers) controller.abort();

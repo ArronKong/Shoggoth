@@ -230,7 +230,7 @@
   line-height: 1.5;
 }
 
-/* Figma fields: filled, borderless at rest; the border only appears on focus. */
+/* Filled inspector fields use a lighter background while editing. */
 .search {
   font: inherit;
   width: 100%;
@@ -250,7 +250,6 @@
 .search:focus {
   outline: none;
   background: #fff;
-  border-color: var(--si-accent);
 }
 
 .toolbar {
@@ -384,7 +383,6 @@
 }
 .scrub:focus-within {
   background: #fff;
-  border-color: var(--si-accent);
 }
 .scrub .scrubInput,
 .scrub .scrubInput:hover,
@@ -438,7 +436,6 @@
 .scrubInput:focus {
   outline: none;
   background: #fff;
-  border-color: var(--si-accent);
 }
 .color {
   flex: 1;
@@ -581,7 +578,6 @@
 .pickerNum:focus {
   outline: none;
   background: #fff;
-  border-color: var(--si-accent);
 }
 .pickerAlphaNum {
   flex: 0 0 38px;

@@ -110,7 +110,6 @@
 .management-page.settings-page .settings-debug-guide { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 16px; border-top: 1px solid var(--ui-hairline); }
 .management-page.settings-page .settings-debug-guide p { margin: 0; }
 .management-page.settings-page .settings-debug-guide kbd { border: 1px solid var(--ui-hairline); border-radius: 4px; padding: 2px 4px; font: inherit; background: var(--ui-surface-2); }
-.management-page.settings-page :is(.settings-detail-toggle, .settings-connection-editor > summary):focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 4px; }
 @container settings (min-width: 860px) {
   .management-page.settings-page .settings-backend-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }

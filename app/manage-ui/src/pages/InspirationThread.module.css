@@ -231,7 +231,6 @@
 .send.stop { background: #141414; color: #ffef84; }
 .send.stop:hover:not(:disabled) { background: #000; color: #ffe96b; }
 .send.stop svg { width: 12px; height: 12px; }
-.modal button:focus-visible, .modal a:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .growthNow, .lineupAvatar, .lineupAvatar::after { transition: none; }
   .liveDot, .loading > span, .greet { animation: none; }

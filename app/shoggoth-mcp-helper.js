@@ -447,6 +447,7 @@ function publicServiceErrorCode(error) {
       || code.startsWith("WEB_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
       || code.startsWith("PROACTIVE_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
       || code.startsWith("APPLE_DEVICE_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
+      || code.startsWith("LARK_CLI_") && Object.hasOwn(MCP_PRODUCT_PUBLIC_MESSAGES, code)
       || require("./agent-service/hook-contract").HOOK_PUBLIC_ERROR_CODES.includes(code))
     ? code
     : "SERVICE_REQUEST_FAILED";

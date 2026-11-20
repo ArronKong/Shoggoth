@@ -23,7 +23,6 @@
   line-height: 1.7;
   resize: vertical;
 }
-.text:focus { outline: 1px solid var(--ui-text-1); outline-offset: 1px; }
 .actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
 .actions select { margin-right: auto; max-width: 100%; }
 .actions button, .actions select, .more, .error button, .detail button, .candidateHeading button {

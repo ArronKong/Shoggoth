@@ -55,7 +55,7 @@
 /* 选中项不吃 hover 底色——它身下已经是胶囊，再垫一层会把胶囊盖掉。
    :not(:disabled) 提权是为了压过全局 button:hover 的 accent 染色（单类压不过，
    故 hover 规则显式重申 color，同 .chat-iconbtn 的做法）。 */
-.tab:hover:not(:disabled):not(.on) {
+.tab:is(:hover, :focus-visible):not(:disabled):not(.on) {
   background: color-mix(in srgb, var(--ui-text-1) 8%, transparent);
   color: var(--ft-color);
 }
@@ -70,11 +70,6 @@
 
 .on:hover:not(:disabled) {
   color: var(--ui-surface-1);
-}
-
-.tab:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-focus);
 }
 
 .tooltipPositioner { z-index: 1200; }

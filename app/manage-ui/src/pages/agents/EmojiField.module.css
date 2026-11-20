@@ -41,12 +41,6 @@
   background: var(--ui-surface-2);
 }
 
-.cat:focus-visible,
-.cell:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--ui-surface-1), 0 0 0 4px var(--ui-focus);
-}
-
 .scroller {
   max-height: 14.5rem;
   overflow-y: auto;

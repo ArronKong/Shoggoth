@@ -3023,18 +3023,19 @@ function ChatThreadView({
   });
 }
 
-function ChatProcessDialog({ open, steps, status, timing, notice, pluginConversation, onClose }: {
+function ChatProcessDialog({ open, steps, status, timing, notice, pluginConversation, nestedBackdrop, onClose }: {
   open: boolean;
   steps: TurnStep[];
   status: TurnTimelineState["status"];
   timing?: TurnTiming;
   notice?: ReactNode;
   pluginConversation?: Parameters<typeof TurnTimeline>[0]["pluginConversation"];
+  nestedBackdrop?: boolean;
   onClose(): void;
 }) {
   const { t } = useTranslation();
   const stats = open ? getTurnProcessStats(steps) : null;
-  return <Modal open={open} title={t("turnLab.processLabel")} variant="activity" width={640} onClose={onClose}
+  return <Modal open={open} title={t("turnLab.processLabel")} variant="activity" width={640} nestedBackdrop={nestedBackdrop} onClose={onClose}
     subtitle={stats && <TurnProcessSummary stats={stats} timing={timing} live={status === "running"} />}>
     {notice || (open && <TurnTimeline steps={steps} status={status} showDurations={stats?.showDurations}
       autoFollow={status === "running"} detail pluginConversation={pluginConversation} />)}
@@ -3293,7 +3294,7 @@ export function BackgroundTaskConversation({ sessionKey, taskId, detail, briefId
       revealAttachmentFile={async file => { if (file.path) await revealPath(file.path); else if (file.src) await revealAttachment(file.name, file.src); }} />
     {showPlan ? <ChatPlanDock entries={plan} expanded={planExpanded} onToggle={() => setPlanExpanded(value => !value)}
       onDismiss={() => setDismissedPlan(run.id ?? scope)} /> : null}
-    <ChatProcessDialog open={!!openActivity} steps={openActivity?.steps ?? []} timing={openActivity?.timing}
+    <ChatProcessDialog open={!!openActivity} steps={openActivity?.steps ?? []} timing={openActivity?.timing} nestedBackdrop
       status={openActivity?.live && messages.active ? "running" : "done"} onClose={() => setProcess(null)} />
     {lightbox && <div className="chat-lightbox" role="dialog" aria-modal="true" onClick={() => setLightbox(null)}>
       {lightbox.kind === "video" ? <video className="chat-lightbox__video" src={lightbox.src} controls autoPlay />
@@ -11476,13 +11477,7 @@ function ChatPageApp() {
               tabIndex={0} role="region" aria-label={t("chat.historyLabel")}
               {...(activeAgentHeaderPanel ? { inert: "", "aria-hidden": true } : {})}
               onScroll={onThreadScroll} onWheel={onThreadHistoryInput} onKeyDown={onThreadHistoryInput}
-              onFocus={event => {
-                if (event.target === event.currentTarget) {
-                  event.currentTarget.toggleAttribute("data-thread-keyboard-focus", event.currentTarget.matches(":focus-visible"));
-                }
-              }}
-              onPointerDownCapture={event => {
-                event.currentTarget.removeAttribute("data-thread-keyboard-focus");
+              onPointerDownCapture={() => {
                 cancelInitialScroll();
                 stoppedScrollKeyRef.current = null;
               }}
@@ -11515,7 +11510,7 @@ function ChatPageApp() {
               </div>
             </div>
 
-            {messageNavigation.length > 0 && <ChatMessageNavigator
+            {messageNavigation.length >= 7 && <ChatMessageNavigator
               key={JSON.stringify([activeKey, historyPager.current?.sourceId])} threadRef={threadRef}
               entries={messageNavigation} onSelect={jumpFromMessageNavigator}
               loadEarlier={earlierHistory.key === activeKey && earlierHistory.cursor && searchHistoryWindowKeyRef.current !== activeKey

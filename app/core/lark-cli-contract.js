@@ -27,6 +27,8 @@ const LARK_CLI_PUBLIC_MESSAGES = Object.freeze({
   LARK_CLI_AUTH_EXPIRED: "飞书授权已过期，请重新发起",
   LARK_CLI_AUTH_CANCELLED: "飞书连接已取消",
   LARK_CLI_AUTH_STATUS_FAILED: "暂时无法读取飞书账号状态，请重试",
+  LARK_CLI_SCOPE_REQUIRED: "当前飞书账号缺少本次操作所需的权限，请在飞书授权后再核对结果",
+  LARK_CLI_ACTION_FAILED: "暂时无法读取飞书表格",
 });
 const plain = value => value && Object.getPrototypeOf(value) === Object.prototype;
 const exact = (value, keys) => plain(value) && Object.keys(value).length === keys.length

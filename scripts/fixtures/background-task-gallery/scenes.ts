@@ -4,7 +4,9 @@ import type {
 } from "../../../app/manage-ui/src/types";
 
 export const statusTitles = {
-  starting: "准备本周的资料目录", queued: "核对三款方案的成员上限、文件容量和团队版使用限制", running: "整理三款方案的定价",
+  starting: "准备本周的资料目录",
+  queued: "核对三款方案的成员上限、文件容量和团队版使用限制。按基础版、专业版和企业版列出可用功能、协作人数、存储额度和附加费用，标明适用的计费周期和地区。为每项结论附上官方文档、价格说明和核对日期，在表格末尾记录待确认的问题。",
+  running: "整理三款方案的定价",
   waiting_approval: "将对比表写入任务目录", waiting_input: "确认价格的展示口径", stopping: "停止上一轮资料收集",
   completed: "整理三款方案的定价", failed: "读取已失效的报价来源", canceled: "核对旧版套餐",
   interrupted: "汇总第三方资料", needs_verification: "核对上一次运行的结果",

@@ -57,7 +57,6 @@
 }
 .actions button svg { flex: none; }
 .actions button:hover:not(:disabled) { background: var(--notice-action-hover); }
-.actions button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 .actions button:disabled { opacity: .65; cursor: default; }
 .actions button[aria-busy="true"] svg { animation: spin 1.2s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

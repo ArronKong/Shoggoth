@@ -106,7 +106,8 @@ function maskCssCommentsAndStrings(source) {
 function cssPreludeMatches(prelude, selector) {
   const normalize = (value) => value.replace(/\s+/g, " ").trim();
   const expected = normalize(selector);
-  if (selector.startsWith("@")) return normalize(prelude) === expected;
+  if (normalize(prelude) === expected) return true;
+  if (selector.startsWith("@")) return false;
   return prelude.split(",").some((part) => normalize(part) === expected);
 }
 
@@ -277,7 +278,7 @@ for (const [selector, id] of [
   [".pressButton", "press-button"],
   [".pressButtonActive", "press-button-active"],
   [".switchButton", "switch-button"],
-  [".switchButton:focus-visible", "switch-button-focus-visible"],
+  [".switchButton:is(:hover, :focus-visible):not(:disabled)", "switch-button-hover-focus"],
   [".switchThumb", "switch-thumb"],
   ["@media (max-width: 720px)", "responsive-720"],
   ["@media (prefers-reduced-motion: reduce)", "reduced-motion"],
@@ -320,9 +321,10 @@ for (const [property, value, id] of [
   ["overflow", "hidden", "switch-button-clipping"],
 ]) requireCssDeclaration(switchButtonBlock, property, value, id);
 
-const switchFocusBlock = cssBlocks.get(".switchButton:focus-visible");
-requireCssDeclaration(switchFocusBlock, "outline", "2px solid var(--ui-focus)", "switch-button-focus-outline");
-requireCssDeclaration(switchFocusBlock, "outline-offset", "3px", "switch-button-focus-offset");
+const switchFocusBlock = cssBlocks.get(".switchButton:is(:hover, :focus-visible):not(:disabled)");
+requireCssDeclaration(switchFocusBlock, "background", "color-mix(in srgb, var(--ui-text-1) 16%, var(--ui-surface-2))", "switch-button-focus-fill");
+forbidCssDeclaration(switchFocusBlock, "outline", "switch-button-focus-outline");
+forbidCssDeclaration(switchFocusBlock, "box-shadow", "switch-button-focus-shadow");
 
 const switchThumbBlock = cssBlocks.get(".switchThumb");
 for (const [property, value, id] of [

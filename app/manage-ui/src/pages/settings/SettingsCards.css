@@ -51,7 +51,6 @@
     radial-gradient(120% 140% at 0% 0%, color-mix(in srgb, var(--ui-warning) 9%, transparent) 0%, transparent 48%),
     var(--ui-surface-1);
 }
-.management-page.settings-page .settings-service-hero:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 4px; }
 
 .management-page.settings-page .settings-service-hero .settings-service-top { display: flex; align-items: center; gap: 16px; }
 .management-page.settings-page .settings-service-hero .settings-service-icon {
@@ -255,7 +254,6 @@
   cursor: pointer;
 }
 .management-page.settings-page .settings-disclosure-summary::-webkit-details-marker { display: none; }
-.management-page.settings-page .settings-disclosure-summary:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 6px; border-radius: 8px; }
 .management-page.settings-page .settings-disclosure-summary .settings-subsection-head { grid-column: 1; grid-row: 1; }
 .management-page.settings-page .settings-disclosure-summary .settings-disclosure-action { grid-column: 2; grid-row: 1; }
 .management-page.settings-page .settings-disclosure-summary .settings-kv { grid-column: 1 / -1; grid-row: 2; }

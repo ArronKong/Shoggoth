@@ -159,13 +159,6 @@
   color: var(--fg);
 }
 
-.columnAdd:focus-visible,
-.card:focus-visible,
-.emptyColumn:focus-visible {
-  outline: 2px solid var(--ui-focus);
-  outline-offset: 2px;
-}
-
 .cardList {
   display: flex;
   flex-direction: column;

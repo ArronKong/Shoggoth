@@ -21,7 +21,6 @@
 .chatContent[hidden] { display: none; }
 .expandedLoading { display: grid; place-items: center; flex: 1; min-height: 0; }
 .detailsTrigger { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; padding: 0; border: 0; border-radius: 24px; background: transparent; color: inherit; font: inherit; text-align: start; cursor: pointer; }
-.detailsTrigger:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
 .headerIdentity { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 .headerName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; line-height: 22px; }
 .headerMembers { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 300; line-height: 16px; color: light-dark(rgba(0, 0, 0, .4), rgba(255, 255, 255, .5)); }
@@ -87,7 +86,6 @@
 }
 .inlineMention > span:last-child { min-width: 0; overflow-wrap: anywhere; }
 .inlineMentionAvatar { width: 16px; height: 16px; flex: 0 0 auto; }
-.inlineMention:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .mentionAvatarStack { display: inline-flex; flex: 0 0 auto; }
 .mentionAvatarStackItem {
   width: var(--mention-avatar-size, 16px);
@@ -139,7 +137,6 @@
 }
 .composerField .inlineMention:disabled { cursor: default; }
 .composerField .inlineMention > span:last-child { overflow: hidden; text-overflow: ellipsis; }
-.composerField .inlineMention:focus-visible { outline-offset: -2px; }
 
 /* 群成员管理弹窗 */
 .memberRoster { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; max-height: 380px; overflow-y: auto; }
@@ -188,9 +185,6 @@
   padding: 14px 16px;
   white-space: normal;
 }
-
-.member:focus-visible, .tasksToggle:focus-visible, .memoryNote summary:focus-visible,
-.composer button:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 .retry { margin-left: 8px; }
 .system .retry { border-radius: 999px; }
 .addMember { border: 1px dashed var(--skin-hairline); background: transparent; color: var(--muted-fg); }

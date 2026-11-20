@@ -85,7 +85,7 @@ button.quiet:hover:not(:disabled) { background: var(--bg-hover); color: var(--ch
   background: var(--ui-agent-avatar-bg);
 }
 .option:hover .radio:not(:disabled) + .tile { box-shadow: 0 0 0 2px var(--skin-card), 0 0 0 4px var(--ui-control-border); }
-.radio:focus-visible + .tile, .radio:checked + .tile {
+.radio:checked + .tile {
   outline: 2px solid var(--ui-focus);
   outline-offset: 2px;
 }

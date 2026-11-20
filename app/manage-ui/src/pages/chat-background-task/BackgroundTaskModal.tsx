@@ -153,7 +153,7 @@ export default function BackgroundTaskModal({ sessionKey, taskId, agentName, rev
   ].filter(Boolean).join(" · ") : undefined;
   const fileLinks = detail?.files.filter(file => file.url).map(file => `- [${file.name.replace(/[\\[\]]/gu, "\\$&")}](${file.url})`).join("\n");
 
-  return <Modal open title={task?.title || t("backgroundTask.detailTitle")} subtitle={subtitle} width={720} onClose={onClose}
+  return <Modal open title={task?.title || t("backgroundTask.detailTitle")} subtitle={subtitle} width={920} onClose={onClose}
     className={`chat-surface ${styles.panel}`} initialFocus={initialFocus} bodyRef={attachScrollBody} bodyClassName={styles.scrollBody}
     footer={task ? <div className={`chat-surface chat-composer ${styles.composer}`}>
       <textarea ref={inputRef} className="chat-composer__input" rows={2} value={message}

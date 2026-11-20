@@ -3434,6 +3434,10 @@ function createAgentService(options) {
       },
       hookService, hookToolExecution,
       mcpConnectorController,
+      larkCliConnectorController,
+      requestLarkWriteApproval: input => workRunCoordinator.requestToolApproval({
+        ...input, packageName: "飞书 / Lark", purpose: "connector",
+      }),
       appleDeviceController,
       getAppleDeviceCaller: (authority, scope) => {
         scope.assertCurrent();
@@ -3534,6 +3538,7 @@ function createAgentService(options) {
         runtimeAccountController: runtimeAccountServiceController,
         nativeSkillStore, skillStore: runtimeSkillStore, nativeMcpStore, agentDefinitionStore,
         getConnectorStatus: () => ({ state: nativeMcpStoreOpened ? "ready" : "unavailable", version: "mcp" }),
+        getLarkConnector: () => larkCliConnectorController.agentConnector(),
         federationClient: federationHostClient, computerUseController, browserUseController,
         productToolCount: toolRegistry.mcpDefinitions().length,
         getSettings: () => browserConfigStore.read(),

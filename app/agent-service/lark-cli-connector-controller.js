@@ -8,6 +8,7 @@ const { assertPrivateDirectory, ensurePrivateDirectoryTree, lstatIfExists, servi
 const { scanPackage } = require("./native-skill-store");
 const { RELEASE, DEADLINE_MS, prepareLarkCli, sha256 } = require("./lark-cli-installer");
 const { LarkCliSetupController } = require("./lark-cli-setup-controller");
+const { LARK_AGENT_SERVER_ID, runLarkAgentTool } = require("./lark-cli-agent-tools");
 const { LARK_CLI_PUBLIC_MESSAGES, validateLarkCliParams, validateLarkCliResult, larkCliPublicError } = require("../core/lark-cli-contract");
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
@@ -40,10 +41,12 @@ class LarkCliConnectorController {
     this.recordPath = path.join(paths.stateDir, "lark-cli-connector.json");
     this.runtimeRoot = path.join(paths.stateDir, "runtime-bin", "lark-cli");
     this.record = initial(); this.closed = true; this.blocked = false; this.pending = null; this.abort = null;
+    this.agentCalls = new Set();
     this.setup = new LarkCliSetupController({ paths, env, getInstallation: () => this.status(), ...setupOptions });
   }
   open() {
     this.closed = false; this.blocked = false;
+    this.agentAbort = new AbortController();
     this.setup.open();
     try {
       if (recoverInterruptedPrivateFile(this.recordPath, { trustedRoot: this.paths.trustedRoot }) === "uncertain") throw new Error();
@@ -55,8 +58,8 @@ class LarkCliConnectorController {
       }
     } catch { this.blocked = true; }
   }
-  stopAdmission() { this.closed = true; this.abort?.abort(); this.setup.stopAdmission(); }
-  async close() { this.stopAdmission(); await Promise.allSettled([this.pending, this.setup.close()].filter(Boolean)); }
+  stopAdmission() { this.closed = true; this.abort?.abort(); this.agentAbort?.abort(); this.setup.stopAdmission(); }
+  async close() { this.stopAdmission(); await Promise.allSettled([this.pending, this.setup.close(), ...this.agentCalls]); }
   _root(item = this.record.installation) {
     if (!item || !UUID.test(item.id)) fail("LARK_CLI_STATE_UNAVAILABLE");
     return path.join(this.runtimeRoot, item.id);
@@ -101,12 +104,51 @@ class LarkCliConnectorController {
       state, stage, version: this.release.version, installedVersion: item?.version || null, skillCount,
       cliPath, canRemove: Boolean(item), errorCode });
   }
+  async agentConnector() {
+    if (this.closed || !this.record.installation) return null;
+    const installation = this.status();
+    const account = installation.state === "installed" ? await this.setup.status({ timeoutMs: 5000 }) : null;
+    if (this.closed || installation.revision !== this.record.revision) return null;
+    const toolsAvailable = installation.state === "installed" && !this.pending && !this.setup.active;
+    return { id: LARK_AGENT_SERVER_ID, name: "飞书 / Lark", type: "local_cli",
+      state: installation.state, version: installation.installedVersion, toolsAvailable,
+      accountState: account?.state === "ready" ? "authorized" : account?.state === "idle" ? "needsAuthorization"
+        : this.setup.active ? "authorizing" : "unknown",
+      skills: this.record.installation.skills.filter(skill => ["lark-shared", "lark-sheets", "lark-base"].includes(skill.id)
+        && this._matching(skill)?.globalEnabled).map(skill => skill.id),
+      errorCode: installation.errorCode || account?.errorCode || null,
+      toolDiscovery: "mcp_server_tools" };
+  }
+  agentInstallation() {
+    if (this.closed) fail("LARK_CLI_UNAVAILABLE");
+    if (this.pending || this.setup.active) fail("LARK_CLI_BUSY");
+    const installation = this.status();
+    if (installation.state !== "installed") fail(installation.errorCode || "LARK_CLI_NOT_INSTALLED");
+    return installation;
+  }
+  agentRevision() {
+    return `${this.agentInstallation().revision}:${this.setup.snapshot.requestId || ""}`;
+  }
+  async callAgentTool(name, args, { signal, assertCurrent }) {
+    assertCurrent();
+    const { cliPath } = this.agentInstallation();
+    const ownSignal = this.agentAbort.signal;
+    const execution = runLarkAgentTool(name, args, (argv, input) => this.setup.run(cliPath, argv, {
+      env: this.setup.env, cwd: this.paths.homeDir, input,
+      signal: signal ? AbortSignal.any([signal, ownSignal]) : ownSignal,
+      timeoutMs: 60_000,
+    }));
+    this.agentCalls.add(execution);
+    try { return await execution; }
+    finally { this.agentCalls.delete(execution); }
+  }
   handle(method, params) {
     validateLarkCliParams(method, params);
     if (this.closed) fail("LARK_CLI_UNAVAILABLE");
     if (method === "connector.lark.status") return this.status();
     if (this.blocked) fail("LARK_CLI_STATE_UNAVAILABLE");
     if (this.pending) fail("LARK_CLI_BUSY");
+    if (this.agentCalls.size && ["connector.lark.install", "connector.lark.remove", "connector.lark.setup.start"].includes(method)) fail("LARK_CLI_BUSY");
     if (method.startsWith("connector.lark.setup.")) return this.setup.handle(method, params);
     if (this.setup.active) fail("LARK_CLI_BUSY");
     if (params.expectedRevision !== this.record.revision) fail("LARK_CLI_REVISION_CONFLICT");
